@@ -72,6 +72,17 @@ defmodule Arbiter.Agents.Claude do
   @impl true
   def security_enforced?, do: true
 
+  @doc """
+  Claude's own permission layer (`Arbiter.Agents.Claude.Security` + the
+  generated `CLAUDE_CONFIG_DIR` settings) is the confinement mechanism in
+  every mode — there is no OS jail here (bd-1abj7u). Reported as
+  `:permission_layer` regardless of `policy.permissions.mode`: it's the
+  same settings document and deny baseline that make `security_enforced?/0`
+  answer `true`.
+  """
+  @impl true
+  def write_confinement(%SecurityPolicy{}), do: :permission_layer
+
   @impl true
   def done_sentinel, do: @done_regex
 

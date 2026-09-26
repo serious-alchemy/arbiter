@@ -88,6 +88,8 @@ defmodule Arbiter.Agents.Agent do
   produced a usage-bearing event — test echo scripts, premature crashes).
   """
 
+  alias Arbiter.Agents.SecurityPolicy
+
   @typedoc "Adapter-specific per-session state. Opaque to callers."
   @type session_state :: map()
 
@@ -223,6 +225,34 @@ defmodule Arbiter.Agents.Agent do
   """
   @callback async_arm_signature() :: Regex.t()
 
+  @doc """
+  Whether this adapter can confine a spawn's writes to the worktree under
+  the given resolved `Arbiter.Agents.SecurityPolicy` (bd-1abj7u, deciding
+  doc `docs/design/agy-strict-write-isolation.md`).
+
+  Answers:
+
+    * `:os_jail` — an OS-level sandbox (bwrap or similar) wraps the spawn so
+      the kernel refuses writes outside the worktree, the git common dir,
+      and the adapter's own isolated config dir, regardless of what the
+      model or the CLI's own permission layer does.
+    * `:permission_layer` — the adapter's own permission/deny mechanism is
+      the only thing enforcing the boundary, and it has been proven to hold
+      (Claude's generated settings + `--permission-mode`).
+    * `:none` — nothing confines writes; the process can write anywhere the
+      OS user can. This is also the answer when the callback is omitted.
+
+  `Arbiter.Worker.Dispatch` refuses a `:strict`-scoped dispatch to a
+  provider that answers `:none` rather than silently downgrading the mode
+  or accepting the promise it can't be kept. Automatic provider selection
+  (multi-provider pools) skips a `:none` answer for a `:strict` scope and
+  tries another configured provider first.
+
+  Optional — a missing callback means `:none`, so an adapter written before
+  this gate existed is never mistaken for isolation it doesn't have.
+  """
+  @callback write_confinement(SecurityPolicy.t()) :: :os_jail | :permission_layer | :none
+
   @optional_callbacks [
     spawn_env: 1,
     security_enforced?: 0,
@@ -230,6 +260,7 @@ defmodule Arbiter.Agents.Agent do
     resolved_model: 1,
     async_tool_instruction: 0,
     async_tool_instruction: 3,
-    async_arm_signature: 0
+    async_arm_signature: 0,
+    write_confinement: 1
   ]
 end

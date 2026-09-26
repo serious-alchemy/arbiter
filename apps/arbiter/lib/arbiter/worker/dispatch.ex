@@ -2302,8 +2302,6 @@ defmodule Arbiter.Worker.Dispatch do
           |> maybe_escalate_context_window(task.id)
           |> apply_model_override(Keyword.get(opts, :model))
 
-        adapter = Agents.for_type(choice.type)
-
         # Resolve the spawn's security posture from the workspace (per-domain),
         # with an optional per-dispatch override from dispatch opts and the
         # resolved repo name so a multi-repo workspace can scope a different
@@ -2315,90 +2313,109 @@ defmodule Arbiter.Worker.Dispatch do
           |> SecurityPolicy.resolve(security_override(opts), Keyword.get(opts, :repo))
           |> review_security_policy(opts)
 
-        # `workspace:` is carried for the adapter's `spawn_env/1` — it resolves
-        # the worker OAuth token from this workspace's `worker_env` before
-        # falling back to the server env (bd-bw3466).
-        #
-        # `worktree_path:` is carried for the same reason on the agy side: it
-        # keys the per-spawn isolated `$HOME`
-        # (`Arbiter.Agents.Gemini.ConfigDir`, bd-7s29yq). It must be the SAME
-        # value `maybe_write_mcp_config/3` above was given, or the spawn would
-        # read a different HOME than the one the MCP config was written into.
-        agent_opts =
-          agent_opts_from_choice(choice) ++
-            [security: policy, workspace: workspace, worktree_path: worktree_path] ++
-            Keyword.take(opts, [:mcp_config])
+        # bd-1abj7u: fail closed on a `:strict` scope that a chosen provider
+        # cannot keep — never silently downgrade the mode or dispatch anyway.
+        # `agent_type` is non-nil only when the caller named a provider
+        # directly (`arb dispatch --provider`, a resumed/revision provider
+        # pin); that case is refused rather than swapped out from under the
+        # caller. Automatic routing (`agent_type` nil) instead tries the next
+        # configured provider in `Agents.agent_pool/1` and only refuses when
+        # none of them can confine writes.
+        case Agents.strict_eligible_provider(choice.type, policy, Agents.agent_pool(workspace),
+               explicit: not is_nil(agent_type)
+             ) do
+          {:error, :ineligible} ->
+            {:error, strict_write_confinement_error(choice.type, policy, workspace, opts)}
 
-        tracker_context = fetch_tracker_context(task, workspace)
+          {:ok, effective_type} ->
+            choice = apply_agent_type_override(choice, effective_type)
+            adapter = Agents.for_type(choice.type)
 
-        prompt =
-          opts
-          |> Keyword.put(:worktree_path, worktree_path)
-          |> Keyword.put(:tracker_context, tracker_context)
-          |> Keyword.put(:adapter, adapter)
-          |> then(&prompt_for_task(task, &1))
+            # `workspace:` is carried for the adapter's `spawn_env/1` — it resolves
+            # the worker OAuth token from this workspace's `worker_env` before
+            # falling back to the server env (bd-bw3466).
+            #
+            # `worktree_path:` is carried for the same reason on the agy side: it
+            # keys the per-spawn isolated `$HOME`
+            # (`Arbiter.Agents.Gemini.ConfigDir`, bd-7s29yq). It must be the SAME
+            # value `maybe_write_mcp_config/3` above was given, or the spawn would
+            # read a different HOME than the one the MCP config was written into.
+            agent_opts =
+              agent_opts_from_choice(choice) ++
+                [security: policy, workspace: workspace, worktree_path: worktree_path] ++
+                Keyword.take(opts, [:mcp_config])
 
-        provider = Atom.to_string(choice.type)
+            tracker_context = fetch_tracker_context(task, workspace)
 
-        # Concrete model the adapter will dispatch with, if it can name one ahead
-        # of the stream (Gemini, whose CLI emits no `init` event). nil for Claude,
-        # which learns the exact model from its stream-json `init` — we must NOT
-        # thread the routed tier alias ("sonnet") onto a Claude session, or the
-        # ledger would record the alias when the stream is the source of truth.
-        session_model = resolved_model_for(adapter, agent_opts)
+            prompt =
+              opts
+              |> Keyword.put(:worktree_path, worktree_path)
+              |> Keyword.put(:tracker_context, tracker_context)
+              |> Keyword.put(:adapter, adapter)
+              |> then(&prompt_for_task(task, &1))
 
-        routing_config = %{
-          provider: provider,
-          # For live display the routed model is a fine pre-stream stand-in.
-          model: session_model || Keyword.get(agent_opts, :model),
-          model_tier: Keyword.get(agent_opts, :model_tier),
-          thinking: Keyword.get(agent_opts, :thinking)
-        }
+            provider = Atom.to_string(choice.type)
 
-        Worker.report(worker_pid, :routing_config, routing_config)
+            # Concrete model the adapter will dispatch with, if it can name one ahead
+            # of the stream (Gemini, whose CLI emits no `init` event). nil for Claude,
+            # which learns the exact model from its stream-json `init` — we must NOT
+            # thread the routed tier alias ("sonnet") onto a Claude session, or the
+            # ledger would record the alias when the stream is the source of truth.
+            session_model = resolved_model_for(adapter, agent_opts)
 
-        # bd-dzz6ly: everything that GOVERNED this run — the effective
-        # post-layering skill set (already threaded onto opts by
-        # maybe_start_claude), the routing policy that produced `choice`, and
-        # the workspace's standing_orders digest — backfilled onto the Run
-        # row the same way :model's late arrival already is above.
-        Worker.report(worker_pid, :run_provenance, %{
-          resolved_skills: RunProvenance.skills(Keyword.get(opts, :resolved_skills, [])),
-          standing_orders_digest: RunProvenance.standing_orders_digest(workspace),
-          routing_policy: RunProvenance.routing_policy_string(workspace),
-          model_tier: Keyword.get(agent_opts, :model_tier),
-          thinking: Keyword.get(agent_opts, :thinking)
-        })
+            routing_config = %{
+              provider: provider,
+              # For live display the routed model is a fine pre-stream stand-in.
+              model: session_model || Keyword.get(agent_opts, :model),
+              model_tier: Keyword.get(agent_opts, :model_tier),
+              thinking: Keyword.get(agent_opts, :thinking)
+            }
 
-        # Stamp the resolved model onto the worker's meta at dispatch time so
-        # worker_list can show the model before any session output lands.
-        if model = Map.get(routing_config, :model) do
-          Worker.report(worker_pid, :model, model)
-        end
+            Worker.report(worker_pid, :routing_config, routing_config)
 
-        case adapter.default_argv(prompt, agent_opts) do
-          {:ok, argv} ->
-            # Skill guard (bd-d5hy7y, spike findings): a worker carrying
-            # materialized skills must not be spawned with `--bare` (skips skill
-            # discovery) or `--disable-slash-commands` (blocks `/name`
-            # invocation), or the skills silently do nothing. We never add these
-            # flags — this catches a future regression loudly rather than
-            # shipping dead skills.
-            _ = guard_skill_flags(argv, Keyword.get(opts, :resolved_skills, []))
+            # bd-dzz6ly: everything that GOVERNED this run — the effective
+            # post-layering skill set (already threaded onto opts by
+            # maybe_start_claude), the routing policy that produced `choice`, and
+            # the workspace's standing_orders digest — backfilled onto the Run
+            # row the same way :model's late arrival already is above.
+            Worker.report(worker_pid, :run_provenance, %{
+              resolved_skills: RunProvenance.skills(Keyword.get(opts, :resolved_skills, [])),
+              standing_orders_digest: RunProvenance.standing_orders_digest(workspace),
+              routing_policy: RunProvenance.routing_policy_string(workspace),
+              model_tier: Keyword.get(agent_opts, :model_tier),
+              thinking: Keyword.get(agent_opts, :thinking)
+            })
 
-            env = safe_spawn_env(adapter, agent_opts)
-            # Thread provider (+ pre-resolved model, when the adapter has one)
-            # onto the session so the usage ledger and dashboards attribute the
-            # run correctly even when the CLI stream carries no model/provider
-            # (bd-guegdl).
-            session_meta = [provider: provider, model: session_model]
-            # bd-9rdwe4: `prompt:` alongside `command:` plays no role in argv
-            # resolution (that's `command:`'s job) — it's carried purely so
-            # `Arbiter.Worker` can persist what this worker was actually told.
-            {:ok, base ++ [command: argv, prompt: prompt, env: env] ++ session_meta}
+            # Stamp the resolved model onto the worker's meta at dispatch time so
+            # worker_list can show the model before any session output lands.
+            if model = Map.get(routing_config, :model) do
+              Worker.report(worker_pid, :model, model)
+            end
 
-          {:error, reason} ->
-            {:error, reason}
+            case adapter.default_argv(prompt, agent_opts) do
+              {:ok, argv} ->
+                # Skill guard (bd-d5hy7y, spike findings): a worker carrying
+                # materialized skills must not be spawned with `--bare` (skips skill
+                # discovery) or `--disable-slash-commands` (blocks `/name`
+                # invocation), or the skills silently do nothing. We never add these
+                # flags — this catches a future regression loudly rather than
+                # shipping dead skills.
+                _ = guard_skill_flags(argv, Keyword.get(opts, :resolved_skills, []))
+
+                env = safe_spawn_env(adapter, agent_opts)
+                # Thread provider (+ pre-resolved model, when the adapter has one)
+                # onto the session so the usage ledger and dashboards attribute the
+                # run correctly even when the CLI stream carries no model/provider
+                # (bd-guegdl).
+                session_meta = [provider: provider, model: session_model]
+                # bd-9rdwe4: `prompt:` alongside `command:` plays no role in argv
+                # resolution (that's `command:`'s job) — it's carried purely so
+                # `Arbiter.Worker` can persist what this worker was actually told.
+                {:ok, base ++ [command: argv, prompt: prompt, env: env] ++ session_meta}
+
+              {:error, reason} ->
+                {:error, reason}
+            end
         end
     end
   end
@@ -2533,6 +2550,37 @@ defmodule Arbiter.Worker.Dispatch do
         base
     end
   end
+
+  # bd-1abj7u: the fail-closed refusal for a `:strict` dispatch whose chosen
+  # provider can't confine writes to the worktree (`docs/design/agy-strict-write-isolation.md`).
+  # Names the provider, which config layer set `:strict` (so the operator
+  # knows what to change), and the two ways out — switch the workspace/repo
+  # to claude, or wait for the bwrap jail (bd-5gvqgc) to make this provider
+  # eligible.
+  #
+  # Public (not `defp`) so `Arbiter.Worker.ReviewGate`'s own write-confinement
+  # gates (the reviewer and revision-implementer spawn paths) raise the
+  # identical, actionable message rather than inventing a second wording of
+  # the same refusal.
+  @spec strict_write_confinement_error(atom(), SecurityPolicy.t(), map() | nil, keyword()) ::
+          {:strict_write_confinement_unavailable, String.t()}
+  def strict_write_confinement_error(provider_type, %SecurityPolicy{} = policy, workspace, opts) do
+    {_mode, source} =
+      SecurityPolicy.mode_source(workspace, security_override(opts), Keyword.get(opts, :repo))
+
+    {:strict_write_confinement_unavailable,
+     "Refusing to dispatch to #{provider_type} under :strict write isolation " <>
+       "(#{policy.permissions.mode} scoped by #{mode_source_label(source)}): #{provider_type} " <>
+       "cannot confine its writes to the worktree — the model's own tools can still write " <>
+       "anywhere the host user can (see docs/design/agy-strict-write-isolation.md). " <>
+       "Use claude for this dispatch instead, or install bubblewrap once the OS jail " <>
+       "(bd-5gvqgc) ships and makes #{provider_type} :strict-eligible."}
+  end
+
+  defp mode_source_label(:dispatch_override), do: "this dispatch's own override"
+  defp mode_source_label(:repo), do: "a repos.<repo> override"
+  defp mode_source_label(:workspace), do: "the workspace default"
+  defp mode_source_label(:install_default), do: "the install-wide default"
 
   defp safe_spawn_env(adapter, agent_opts) do
     if function_exported?(adapter, :spawn_env, 1) do

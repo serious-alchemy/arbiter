@@ -244,6 +244,40 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       assert out =~ "2 safe-default + 1 custom"
     end
 
+    # bd-1abj7u: an operator needs to see, up front, that a configured
+    # provider (agy/gemini here) is not `:strict`-eligible even though it
+    # enforces its own deny-list contract (`policy_enforced`).
+    test "renders provider/policy_enforced/write_confinement from the security posture" do
+      stub_all(
+        [
+          %{
+            "id" => "ws-1",
+            "name" => "default",
+            "prefix" => "bd",
+            "config" => %{},
+            "security_posture" => %{
+              "mode" => "strict",
+              "allow" => [],
+              "deny" => [],
+              "safe_defaults" => [],
+              "sandbox" => %{"enabled" => true, "filesystem" => "worktree", "network" => true},
+              "provider" => "gemini",
+              "policy_enforced" => false,
+              "write_confinement" => "none"
+            }
+          }
+        ],
+        [],
+        []
+      )
+
+      {out, _err, exit_code} = capture(fn -> Prime.run([]) end)
+      assert exit_code == 0
+
+      assert out =~
+               "provider: gemini (policy_enforced=false, write_confinement=none)"
+    end
+
     # bd-4420va: a workspace whose resolved policy excludes a current default
     # category (vstim's old pinned safe_defaults list missing :no_public_upload
     # after v0.1.78) must show it here instead of staying silent.

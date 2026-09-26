@@ -79,6 +79,34 @@ defmodule ArbiterWeb.Api.WorkspaceControllerTest do
       # Claude adapter enforces the policy; future adapters default to false.
       assert posture["provider"] == "claude"
       assert posture["policy_enforced"] == true
+      # bd-1abj7u: Claude's permission layer is the confinement mechanism —
+      # distinct from `policy_enforced` (whether the deny-list contract holds).
+      assert posture["write_confinement"] == "permission_layer"
+    end
+
+    # bd-1abj7u: agy/gemini enforces its own deny-list contract when config
+    # isolation is on (`policy_enforced` can be true), but nothing today
+    # verifiably confines its writes to the worktree — the posture must say
+    # so plainly rather than let `policy_enforced: true` imply it.
+    test "security_posture.write_confinement is \"none\" for gemini regardless of policy_enforced",
+         %{conn: conn} do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "agy-ws-confinement",
+          prefix: "agycf",
+          config: %{
+            "agent" => %{
+              "type" => "gemini",
+              "security" => %{"permissions" => %{"mode" => "strict"}}
+            }
+          }
+        })
+
+      conn = get(conn, ~p"/api/workspaces/#{ws.id}")
+      posture = json_response(conn, 200)["security_posture"]
+
+      assert posture["provider"] == "gemini"
+      assert posture["write_confinement"] == "none"
     end
 
     # bd-7s29yq AC3: the posture surface must tell the truth for agy too. The

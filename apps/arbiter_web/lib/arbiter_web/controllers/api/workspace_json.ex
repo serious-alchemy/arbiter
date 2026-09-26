@@ -13,6 +13,7 @@ defmodule ArbiterWeb.Api.WorkspaceJSON do
 
   def data(%Workspace{} = ws) do
     adapter = Agents.for_workspace(ws)
+    policy = SecurityPolicy.resolve(ws)
 
     %{
       id: ws.id,
@@ -36,13 +37,20 @@ defmodule ArbiterWeb.Api.WorkspaceJSON do
       # contract (see Arbiter.Agents.Agent.security_enforced?/0). Adapters that
       # don't yet implement the security contract return false so the operator
       # knows the declared posture is not being enforced.
+      # `write_confinement` (bd-1abj7u) names WHAT confines this adapter's
+      # writes to the worktree under the resolved policy — `:os_jail`,
+      # `:permission_layer`, or `:none` when nothing does (see
+      # Arbiter.Agents.Agent.write_confinement/1 and
+      # docs/design/agy-strict-write-isolation.md). Distinct from
+      # `policy_enforced`: an adapter can enforce its own deny-list contract
+      # while still answering `:none` here (agy/Gemini).
       security_posture:
-        ws
-        |> SecurityPolicy.resolve()
+        policy
         |> SecurityPolicy.summary()
         |> Map.merge(%{
           "provider" => adapter.provider(),
-          "policy_enforced" => security_enforced?(adapter)
+          "policy_enforced" => security_enforced?(adapter),
+          "write_confinement" => Agents.write_confinement(adapter, policy)
         }),
       created_at: iso(ws.created_at),
       updated_at: iso(ws.updated_at)

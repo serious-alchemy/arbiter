@@ -3,8 +3,14 @@ defmodule Arbiter.AgentsTest do
 
   alias Arbiter.Agents
   alias Arbiter.Agents.Claude
+  alias Arbiter.Agents.Codex
+  alias Arbiter.Agents.Gemini
+  alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
+
+  defp policy(mode),
+    do: %{SecurityPolicy.base() | permissions: %{SecurityPolicy.base().permissions | mode: mode}}
 
   describe "for_workspace/1 and for_type/1" do
     test "returns Claude for the default workspace (no `agent` key)" do
@@ -53,6 +59,81 @@ defmodule Arbiter.AgentsTest do
     test "uses `review_agent.type` when set" do
       ws = %Workspace{config: %{"review_agent" => %{"type" => "claude"}}}
       assert Agents.reviewer_for_workspace(ws) == Claude
+    end
+  end
+
+  describe "write_confinement/2 + write_confined?/2 (bd-1abj7u)" do
+    test "Claude answers :permission_layer under :strict" do
+      assert Agents.write_confinement(Claude, policy(:strict)) == :permission_layer
+      assert Agents.write_confined?(Claude, policy(:strict))
+    end
+
+    test "Gemini and Codex answer :none regardless of mode" do
+      assert Agents.write_confinement(Gemini, policy(:strict)) == :none
+      refute Agents.write_confined?(Gemini, policy(:strict))
+      assert Agents.write_confinement(Codex, policy(:strict)) == :none
+      refute Agents.write_confined?(Codex, policy(:strict))
+    end
+
+    test "an adapter missing the callback answers :none" do
+      assert Agents.write_confinement(String, policy(:strict)) == :none
+    end
+  end
+
+  describe "agent_pool/1 (bd-1abj7u)" do
+    test "nil workspace is [:claude]" do
+      assert Agents.agent_pool(nil) == [:claude]
+    end
+
+    test "single string agent.type" do
+      ws = %Workspace{config: %{"agent" => %{"type" => "gemini"}}}
+      assert Agents.agent_pool(ws) == [:gemini]
+    end
+
+    test "list agent.type preserves configured order" do
+      ws = %Workspace{config: %{"agent" => %{"type" => ["gemini", "claude"]}}}
+      assert Agents.agent_pool(ws) == [:gemini, :claude]
+    end
+
+    test "unset agent.type is [:claude]" do
+      ws = %Workspace{config: %{}}
+      assert Agents.agent_pool(ws) == [:claude]
+    end
+  end
+
+  describe "strict_eligible_provider/4 (bd-1abj7u)" do
+    test "non-strict mode never constrains, even for an unconfined provider" do
+      assert Agents.strict_eligible_provider(:gemini, policy(:auto), [:gemini]) ==
+               {:ok, :gemini}
+
+      assert Agents.strict_eligible_provider(:codex, policy(:bypass), [:codex]) ==
+               {:ok, :codex}
+    end
+
+    test "under :strict, a preferred provider that can confine writes is used as-is" do
+      assert Agents.strict_eligible_provider(:claude, policy(:strict), [:claude]) ==
+               {:ok, :claude}
+    end
+
+    test "under :strict, an explicit ineligible preference errors rather than substituting" do
+      assert Agents.strict_eligible_provider(:gemini, policy(:strict), [:gemini, :claude],
+               explicit: true
+             ) == {:error, :ineligible}
+    end
+
+    test "under :strict, automatic selection skips an ineligible preferred provider for an eligible pool entry" do
+      assert Agents.strict_eligible_provider(:gemini, policy(:strict), [:gemini, :claude]) ==
+               {:ok, :claude}
+    end
+
+    test "under :strict, automatic selection errors when no pool entry is eligible" do
+      assert Agents.strict_eligible_provider(:gemini, policy(:strict), [:gemini, :codex]) ==
+               {:error, :ineligible}
+    end
+
+    test "under :strict with no pool, an ineligible automatic preference errors" do
+      assert Agents.strict_eligible_provider(:codex, policy(:strict), []) ==
+               {:error, :ineligible}
     end
   end
 

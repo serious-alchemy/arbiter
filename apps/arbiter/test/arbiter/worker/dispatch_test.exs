@@ -1934,6 +1934,154 @@ defmodule Arbiter.Worker.DispatchTest do
     end
   end
 
+  # bd-1abj7u: a `:strict` scope promises writes stay in the worktree.
+  # Neither Gemini/agy nor Codex can keep that promise today
+  # (`write_confinement/1` answers `:none`) — dispatch must refuse rather
+  # than silently spawn an unconfined provider under a `:strict` label.
+  describe "strict write-confinement gate (bd-1abj7u)" do
+    setup do
+      tmp =
+        Path.join(System.tmp_dir!(), "dispatch-strict-#{:erlang.unique_integer([:positive])}")
+
+      File.mkdir_p!(tmp)
+      on_exit(fn -> File.rm_rf!(tmp) end)
+      %{tmp: tmp}
+    end
+
+    defp strict_ws!(ws, agent_type) do
+      Ash.update(ws, %{
+        config: %{
+          "agent" => %{
+            "type" => agent_type,
+            "security" => %{"permissions" => %{"mode" => "strict"}}
+          }
+        }
+      })
+    end
+
+    test "an explicit agent_type: :gemini is refused under :strict, naming the provider and the way out",
+         %{ws: ws, tmp: tmp} do
+      claude_file = Path.join(tmp, "claude-argv.txt")
+      gemini_file = Path.join(tmp, "gemini-argv.txt")
+      :ok = stub_claude_on_path(tmp, claude_file)
+      :ok = stub_named_on_path(tmp, "agy", gemini_file)
+
+      repo = seed_repo!(tmp, "strict-gemini-repo")
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "strict-gemini-wt"))
+      put_app_env(:arbiter, :repo_paths, %{"sg/repo" => repo})
+
+      {:ok, ws} = strict_ws!(ws, "claude")
+      {:ok, task} = Ash.create(Issue, %{title: "strict gemini refusal", workspace_id: ws.id})
+
+      assert {:error, {:claude_start_failed, {:strict_write_confinement_unavailable, message}}} =
+               Dispatch.dispatch(task.id,
+                 repo: "sg/repo",
+                 start_driver: false,
+                 start_claude: true,
+                 agent_type: :gemini,
+                 preflight: false
+               )
+
+      assert message =~ "gemini"
+      assert message =~ "strict"
+      assert message =~ "claude"
+      assert message =~ "bubblewrap"
+
+      refute File.exists?(claude_file)
+      refute File.exists?(gemini_file)
+
+      pid = Worker.whereis(task.id)
+      assert Worker.state(pid).status == :failed
+    end
+
+    test "automatic selection under :strict skips an ineligible preferred provider for an eligible pool entry",
+         %{ws: ws, tmp: tmp} do
+      claude_file = Path.join(tmp, "claude-argv.txt")
+      gemini_file = Path.join(tmp, "gemini-argv.txt")
+      :ok = stub_claude_on_path(tmp, claude_file)
+      :ok = stub_named_on_path(tmp, "agy", gemini_file)
+
+      repo = seed_repo!(tmp, "strict-pool-repo")
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "strict-pool-wt"))
+      put_app_env(:arbiter, :repo_paths, %{"sp/repo" => repo})
+
+      {:ok, ws} = strict_ws!(ws, ["gemini", "claude"])
+      {:ok, task} = Ash.create(Issue, %{title: "strict pool fallback", workspace_id: ws.id})
+
+      {:ok, _result} =
+        Dispatch.dispatch(task.id,
+          repo: "sp/repo",
+          start_driver: false,
+          start_claude: true,
+          preflight: false
+        )
+
+      _ = wait_for_argv!(claude_file)
+      refute File.exists?(gemini_file)
+    end
+
+    test "automatic selection under :strict errors when no configured pool entry is eligible",
+         %{ws: ws, tmp: tmp} do
+      claude_file = Path.join(tmp, "claude-argv.txt")
+      gemini_file = Path.join(tmp, "gemini-argv.txt")
+      :ok = stub_claude_on_path(tmp, claude_file)
+      :ok = stub_named_on_path(tmp, "agy", gemini_file)
+
+      repo = seed_repo!(tmp, "strict-none-repo")
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "strict-none-wt"))
+      put_app_env(:arbiter, :repo_paths, %{"sn/repo" => repo})
+
+      {:ok, ws} = strict_ws!(ws, "gemini")
+      {:ok, task} = Ash.create(Issue, %{title: "strict pool exhausted", workspace_id: ws.id})
+
+      assert {:error, {:claude_start_failed, {:strict_write_confinement_unavailable, _}}} =
+               Dispatch.dispatch(task.id,
+                 repo: "sn/repo",
+                 start_driver: false,
+                 start_claude: true,
+                 preflight: false
+               )
+
+      refute File.exists?(claude_file)
+      refute File.exists?(gemini_file)
+    end
+
+    test "a :bypass dispatch to gemini is unaffected by the strict gate", %{ws: ws, tmp: tmp} do
+      claude_file = Path.join(tmp, "claude-argv.txt")
+      gemini_file = Path.join(tmp, "gemini-argv.txt")
+      :ok = stub_claude_on_path(tmp, claude_file)
+      :ok = stub_named_on_path(tmp, "agy", gemini_file)
+
+      repo = seed_repo!(tmp, "bypass-gemini-repo")
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "bypass-gemini-wt"))
+      put_app_env(:arbiter, :repo_paths, %{"bg/repo" => repo})
+
+      {:ok, ws} =
+        Ash.update(ws, %{
+          config: %{
+            "agent" => %{
+              "type" => "claude",
+              "security" => %{"permissions" => %{"mode" => "bypass"}}
+            }
+          }
+        })
+
+      {:ok, task} = Ash.create(Issue, %{title: "bypass gemini unaffected", workspace_id: ws.id})
+
+      {:ok, _result} =
+        Dispatch.dispatch(task.id,
+          repo: "bg/repo",
+          start_driver: false,
+          start_claude: true,
+          agent_type: :gemini,
+          preflight: false
+        )
+
+      _ = wait_for_argv!(gemini_file)
+      refute File.exists?(claude_file)
+    end
+  end
+
   # Read a stub's captured argv once it has settled. The argv-recording shim
   # appends one line per arg, so a bare `File.exists?` check can race a partial
   # write and return only the first token. Wait until the file's contents stop

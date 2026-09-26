@@ -65,6 +65,19 @@ defmodule Arbiter.Agents.Gemini do
     match?({:ok, {:agy, _}}, resolve_executable()) and ConfigDir.enabled?()
   end
 
+  @doc """
+  `:none` (bd-1abj7u, `docs/design/agy-strict-write-isolation.md`). Neither
+  branch confines writes: the upstream `gemini` CLI has no allow/deny
+  mechanism at all, and agy's native `write_to_file` ignores every
+  `write_file(...)` deny, `disabledTools`, and `--sandbox` (bd-25ivqe,
+  bd-7h2cuk) — `security_enforced?/0` above is about the *deny-list*
+  contract, which is a separate claim from confining writes to the
+  worktree. The bwrap OS jail (bd-5gvqgc) is expected to flip this to
+  `:os_jail` once a host passes its self-test; nothing here does that yet.
+  """
+  @impl true
+  def write_confinement(%SecurityPolicy{}), do: :none
+
   @impl true
   def done_sentinel, do: @done_regex
 

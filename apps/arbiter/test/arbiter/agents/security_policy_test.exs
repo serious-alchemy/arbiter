@@ -526,4 +526,66 @@ defmodule Arbiter.Agents.SecurityPolicyTest do
              ]
     end
   end
+
+  describe "mode_source/3 (bd-1abj7u)" do
+    test "nil workspace, no override: :install_default" do
+      assert SecurityPolicy.mode_source(nil) == {:bypass, :install_default}
+    end
+
+    test "nil workspace, install-wide default sets the mode" do
+      prev = Application.get_env(:arbiter, :worker_security_policy)
+
+      on_exit(fn ->
+        case prev do
+          nil -> Application.delete_env(:arbiter, :worker_security_policy)
+          v -> Application.put_env(:arbiter, :worker_security_policy, v)
+        end
+      end)
+
+      Application.put_env(:arbiter, :worker_security_policy, %{
+        "permissions" => %{"mode" => "strict"}
+      })
+
+      assert SecurityPolicy.mode_source(nil) == {:strict, :install_default}
+    end
+
+    test "workspace with no security block: :install_default" do
+      ws = %Workspace{config: %{}}
+      assert SecurityPolicy.mode_source(ws) == {:bypass, :install_default}
+    end
+
+    test "workspace-level mode: :workspace" do
+      ws = %Workspace{
+        config: %{"agent" => %{"security" => %{"permissions" => %{"mode" => "strict"}}}}
+      }
+
+      assert SecurityPolicy.mode_source(ws) == {:strict, :workspace}
+    end
+
+    test "repo override mode: :repo" do
+      ws = multi_repo_ws()
+
+      assert SecurityPolicy.mode_source(ws, %{}, "device") == {:strict, :repo}
+      assert SecurityPolicy.mode_source(ws, %{}, "server") == {:auto, :workspace}
+    end
+
+    test "per-dispatch override mode: :dispatch_override" do
+      ws = %Workspace{
+        config: %{"agent" => %{"security" => %{"permissions" => %{"mode" => "auto"}}}}
+      }
+
+      assert SecurityPolicy.mode_source(ws, %{"permissions" => %{"mode" => "bypass"}}) ==
+               {:bypass, :dispatch_override}
+    end
+
+    test "always matches the mode resolve/3 would have produced" do
+      ws = multi_repo_ws()
+      override = %{"permissions" => %{"mode" => "bypass"}}
+
+      resolved = SecurityPolicy.resolve(ws, override, "device")
+      {mode, _source} = SecurityPolicy.mode_source(ws, override, "device")
+
+      assert resolved.permissions.mode == mode
+    end
+  end
 end

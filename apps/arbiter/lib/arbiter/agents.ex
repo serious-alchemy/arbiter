@@ -34,6 +34,7 @@ defmodule Arbiter.Agents do
   alias Arbiter.Agents.Codex
   alias Arbiter.Agents.Gemini
   alias Arbiter.Agents.ProviderPool
+  alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
 
@@ -63,12 +64,19 @@ defmodule Arbiter.Agents do
   """
   @spec reviewer_for_workspace(Workspace.t() | nil) :: adapter
   def reviewer_for_workspace(nil), do: Claude
+  def reviewer_for_workspace(%Workspace{} = ws), do: for_type(reviewer_type(ws))
 
-  def reviewer_for_workspace(%Workspace{} = ws) do
-    case agent_type(ws, :review_agent) do
-      nil -> for_workspace(ws)
-      type -> for_type(type)
-    end
+  @doc """
+  The reviewer role's preferred provider type atom — same resolution as
+  `reviewer_for_workspace/1`, but the atom rather than the module, so
+  strict-mode write-confinement re-selection (bd-1abj7u) can compare it
+  against `reviewer_pool/1` without a reverse lookup through `adapters/0`.
+  """
+  @spec reviewer_type(Workspace.t() | nil) :: atom()
+  def reviewer_type(nil), do: :claude
+
+  def reviewer_type(%Workspace{} = ws) do
+    agent_type(ws, :review_agent) || agent_type(ws, :agent) || :claude
   end
 
   @doc """
@@ -99,6 +107,104 @@ defmodule Arbiter.Agents do
         types
     end
   end
+
+  @doc """
+  Returns the worker `:agent` role's configured provider pool, in
+  **configured order**. Mirrors `reviewer_pool/1`'s shape for the worker
+  role: `agent.type` may be a single string or a list; `[:claude]` when
+  unset or with no workspace.
+
+  Used by strict-mode write-confinement re-selection (bd-1abj7u) to name the
+  full set of configured alternatives when the routing policy's first choice
+  can't confine writes to the worktree.
+  """
+  @spec agent_pool(Workspace.t() | nil) :: [atom()]
+  def agent_pool(nil), do: [:claude]
+
+  def agent_pool(%Workspace{config: config}) do
+    case configured_types(config, :agent) do
+      [] -> [:claude]
+      types -> types
+    end
+  end
+
+  @doc """
+  Whether `adapter` can confine writes to the worktree under `policy`
+  (bd-1abj7u). Delegates to the adapter's optional `write_confinement/1`
+  callback; `:none` (never confined) when the adapter omits it.
+  """
+  @spec write_confinement(adapter, SecurityPolicy.t()) :: :os_jail | :permission_layer | :none
+  def write_confinement(adapter, %SecurityPolicy{} = policy) when is_atom(adapter) do
+    # `function_exported?/3` does NOT autoload — an adapter this process
+    # hasn't called into yet reads as "callback missing" even when its BEAM
+    # plainly exports it, misreporting `:none` for a real adapter. The
+    # `Code.ensure_loaded?/1` guard (same idiom as every other optional-callback
+    # check in this codebase — see `Preflight`, `Trackers`, `Worker`) makes this
+    # security-gating check independent of incidental load order elsewhere in
+    # the process.
+    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :write_confinement, 1) do
+      adapter.write_confinement(policy)
+    else
+      :none
+    end
+  end
+
+  @doc "Whether `write_confinement/2` answers anything other than `:none`."
+  @spec write_confined?(adapter, SecurityPolicy.t()) :: boolean()
+  def write_confined?(adapter, %SecurityPolicy{} = policy) do
+    write_confinement(adapter, policy) != :none
+  end
+
+  @doc """
+  Resolve an eligible provider type for a `:strict`-scoped dispatch.
+
+  `preferred` is the type the caller's own routing/reviewer resolution
+  already picked; `pool` is the full configured set of alternatives for that
+  role (`agent_pool/1` or `reviewer_pool/1`).
+
+  - Any mode other than `:strict` is unconstrained: always `{:ok, preferred}`.
+  - Under `:strict`, `preferred` is used when it can confine writes
+    (`write_confined?/2`).
+  - Otherwise, when `opts[:explicit]` is true (the caller named this
+    provider directly — `arb dispatch --provider`, a pinned reviewer
+    rotation), there is no silent substitution: `{:error, :ineligible}`.
+  - Otherwise (automatic selection), the first OTHER pool entry that can
+    confine writes is used instead. `{:error, :ineligible}` only when none
+    of the configured pool can.
+
+  Never silently downgrades the mode and never hands back an ineligible
+  provider under `:strict` — the caller turns `{:error, :ineligible}` into
+  the fail-closed refusal named for the operator (`Arbiter.Worker.Dispatch`).
+  """
+  @spec strict_eligible_provider(atom(), SecurityPolicy.t(), [atom()], keyword()) ::
+          {:ok, atom()} | {:error, :ineligible}
+  def strict_eligible_provider(preferred, policy, pool \\ [], opts \\ [])
+
+  def strict_eligible_provider(
+        preferred,
+        %SecurityPolicy{permissions: %{mode: :strict}} = policy,
+        pool,
+        opts
+      ) do
+    cond do
+      write_confined?(for_type(preferred), policy) ->
+        {:ok, preferred}
+
+      Keyword.get(opts, :explicit, false) ->
+        {:error, :ineligible}
+
+      true ->
+        pool
+        |> Enum.filter(&Map.has_key?(@adapters, &1))
+        |> Enum.find(&(&1 != preferred and write_confined?(for_type(&1), policy)))
+        |> case do
+          nil -> {:error, :ineligible}
+          alt -> {:ok, alt}
+        end
+    end
+  end
+
+  def strict_eligible_provider(preferred, _policy, _pool, _opts), do: {:ok, preferred}
 
   @doc """
   Returns the adapter module for a task.

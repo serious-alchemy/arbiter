@@ -22,6 +22,19 @@ defmodule Arbiter.Agents.GeminiTest do
     end
   end
 
+  describe "write_confinement/1 (bd-1abj7u)" do
+    test "always :none — no verified worktree-write confinement mechanism" do
+      assert Gemini.write_confinement(SecurityPolicy.base()) == :none
+
+      strict = %{
+        SecurityPolicy.base()
+        | permissions: %{SecurityPolicy.base().permissions | mode: :strict}
+      }
+
+      assert Gemini.write_confinement(strict) == :none
+    end
+  end
+
   describe "resolved_model/1" do
     setup do
       Arbiter.Agents.Gemini.Config.clear()

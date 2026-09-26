@@ -26,6 +26,16 @@ defmodule Arbiter.Agents.ClaudeTest do
     end
   end
 
+  describe "write_confinement/1 (bd-1abj7u)" do
+    test "always :permission_layer regardless of mode" do
+      base = Arbiter.Agents.SecurityPolicy.base()
+      assert Claude.write_confinement(base) == :permission_layer
+
+      strict = %{base | permissions: %{base.permissions | mode: :strict}}
+      assert Claude.write_confinement(strict) == :permission_layer
+    end
+  end
+
   describe "default_argv/2 with a stubbed claude binary" do
     setup do
       tmp =

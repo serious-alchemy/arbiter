@@ -48,6 +48,17 @@ defmodule Arbiter.Agents.CodexTest do
       refute Codex.security_enforced?()
     end
 
+    test "write_confinement/1 is :none regardless of mode (bd-1abj7u)" do
+      assert Codex.write_confinement(SecurityPolicy.base()) == :none
+
+      strict = %{
+        SecurityPolicy.base()
+        | permissions: %{SecurityPolicy.base().permissions | mode: :strict}
+      }
+
+      assert Codex.write_confinement(strict) == :none
+    end
+
     test "usage_attrs/1 stamps the provider" do
       attrs = Codex.usage_attrs(%{usage: %{tokens_in: 5}})
       assert attrs[:provider] == "codex"

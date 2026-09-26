@@ -56,6 +56,17 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
        "(moved here from worker_meta/2 when the provider was resolved once per spawn " <>
        "and threaded through worker_meta/adapter_for/build_session_opts instead of " <>
        "re-resolved at each)"},
+    {Arbiter.Worker.ReviewGate, :adapter_for, 4,
+     "bd-1abj7u: a :strict scope whose reviewer/revision provider can't confine writes " <>
+       "(Agents.strict_eligible_provider/4 answers {:error, :ineligible}) returns " <>
+       "Dispatch.strict_write_confinement_error/4 — the same fail-closed spawn " <>
+       "precondition as Arbiter.Worker.Dispatch, surfaced through the spawn-failure " <>
+       "path like start_worker_process/4. A session-security precondition, not a " <>
+       "review/merge guard"},
+    {Arbiter.Worker.ReviewGate, :strict_eligible_reviewer?, 2,
+     "bd-1abj7u: predicate that filters reviewer_pool/1 down to providers able to " <>
+       "confine writes under :strict; {:error, :ineligible} just drops a candidate. " <>
+       "Refuses nothing; escalates nothing"},
 
     # --- watchdog.ex ---
     {Arbiter.Worker.Watchdog, :maybe_notify_awaiting_manual_merge, 2,

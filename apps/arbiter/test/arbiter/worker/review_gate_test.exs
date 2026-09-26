@@ -1434,6 +1434,88 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert String.length(run.standing_orders_digest) == 64
       assert run.resolved_skills == []
     end
+
+    # bd-1abj7u finding 3: a workspace configured `review_agent.type: "gemini"`
+    # under a `:strict` scope can't actually confine that reviewer's writes to
+    # the worktree (`Arbiter.Agents.Gemini.write_confinement/1` is `:none`),
+    # and there is no other configured reviewer to fall back to. Automatic
+    # reviewer selection must refuse and park rather than silently spawning an
+    # unconfigured `:claude` no operator asked for.
+    test "a :strict workspace configured only with review_agent gemini refuses the reviewer spawn instead of substituting an unconfigured claude",
+         %{repo: repo, tmp: tmp} do
+      argv_file = Path.join(tmp, "reviewer-claude-argv.txt")
+      gemini_argv_file = Path.join(tmp, "reviewer-gemini-argv.txt")
+      stub_dir = Path.join(tmp, "stub-bin-strict")
+      File.mkdir_p!(stub_dir)
+
+      File.write!(Path.join(stub_dir, "claude"), """
+      #!/bin/sh
+      for a in "$@"; do echo "$a" >> #{argv_file}; done
+      exit 0
+      """)
+
+      File.write!(Path.join(stub_dir, "agy"), """
+      #!/bin/sh
+      for a in "$@"; do echo "$a" >> #{gemini_argv_file}; done
+      exit 0
+      """)
+
+      File.chmod!(Path.join(stub_dir, "claude"), 0o755)
+      File.chmod!(Path.join(stub_dir, "agy"), 0o755)
+      old_path = System.get_env("PATH") || ""
+      System.put_env("PATH", "#{stub_dir}:#{old_path}")
+      on_exit(fn -> System.put_env("PATH", old_path) end)
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "trib-strict-reviewer-ws-#{System.unique_integer([:positive])}",
+          prefix: "tsr",
+          config: %{
+            "review" => %{"required" => true, "rounds" => 1},
+            "agent" => %{
+              "type" => "claude",
+              "security" => %{"permissions" => %{"mode" => "strict"}}
+            },
+            "review_agent" => %{"type" => "gemini"}
+          }
+        })
+
+      task = new_task(ws)
+      branch = "feature/rev-strict-reviewer"
+      :ok = seed_feature_branch(repo, branch)
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{task.id}",
+        review_required: true,
+        worktree_path: repo,
+        review_verdict_retries: 0,
+        review_timeout_ms: 5_000
+      }
+
+      {:ok, pid} =
+        Worker.start(task_id: task.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 6_000)
+
+      refute File.exists?(argv_file)
+      refute File.exists?(gemini_argv_file)
+
+      parked = Ash.get!(Issue, task.id)
+      assert parked.review_park_reason == "reviewer_failed"
+
+      escalations = Message.inbox("admiral", workspace_id: ws.id)
+      escalation = Enum.find(escalations, &(&1.directive_ref == task.id))
+      assert escalation, "expected an escalation to the coordinator"
+      assert escalation.body =~ "cannot confine its writes to the worktree"
+      assert escalation.body =~ "gemini"
+    end
   end
 
   # ---- reviewer tier routed by task difficulty (bd-3xultf) -----------------

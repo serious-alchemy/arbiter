@@ -9,6 +9,7 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
 
   alias Arbiter.Agents
   alias Arbiter.Agents.CredentialWatchdog
+  alias Arbiter.Messages.Message
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.TestSandbox
   alias Arbiter.Worker
@@ -223,6 +224,113 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
       [impl_run] = runs_for_task(impl_task_id)
       assert impl_run.provider == "gemini", "implementer pass must record provider as gemini"
       assert impl_run.worker_type == :impl
+    end
+  end
+
+  describe "implementer revision spawn respects :strict write confinement (bd-1abj7u finding 2)" do
+    # The revision implementer inherits gemini from the main run (same
+    # inheritance the test above exercises), but this workspace is `:strict` —
+    # gemini/agy cannot confine writes there. The fix-round spawn must refuse,
+    # never actually invoke agy against the worktree.
+    test "a fix round whose inherited provider is gemini under :strict is refused, not spawned",
+         %{repo: repo, stub_dir: stub_dir, log: log} do
+      write_stub(stub_dir, "claude", """
+      echo "claude $@" >> #{log}
+      echo "VERDICT: REQUEST_CHANGES"
+      echo "- [high] feature.txt:1 needs fix"
+      echo "arb done"
+      exit 0
+      """)
+
+      write_stub(stub_dir, "agy", """
+      echo "agy $@" >> #{log}
+      echo "fixed" >> feature.txt
+      git add feature.txt
+      git commit -m "implementer fix"
+      echo "arb done"
+      exit 0
+      """)
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "ws-rev-strict-#{System.unique_integer([:positive])}",
+          prefix: "rs",
+          config: %{
+            "agent" => %{
+              "type" => "claude",
+              "security" => %{"permissions" => %{"mode" => "strict"}}
+            },
+            "review_agent" => %{"type" => "claude"},
+            "review" => %{"required" => true, "rounds" => 2}
+          }
+        })
+
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "implementer strict-refusal task",
+          workspace_id: ws.id,
+          issue_type: :feature
+        })
+
+      {:ok, task} = Ash.update(task, %{status: :in_progress})
+
+      branch = "task-#{task.id}"
+      :ok = seed_feature_branch(repo, branch)
+
+      # The author's main run recorded provider: "gemini" — the revision
+      # implementer would normally inherit this, but under :strict it cannot
+      # confine writes.
+      {:ok, _author_run} =
+        Ash.create(Run, %{
+          task_id: task.id,
+          base_task_id: task.id,
+          repo: "test/repo",
+          workspace_id: ws.id,
+          worker_type: :main,
+          role: "base",
+          provider: "gemini",
+          model: "gemini-3.8-flash-medium",
+          status: :completed,
+          started_at: DateTime.utc_now()
+        })
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{task.id}",
+        review_required: true,
+        review_rounds: 2,
+        worktree_path: repo,
+        review_verdict_retries: 0,
+        review_timeout_ms: 30_000
+      }
+
+      {:ok, worker_pid} =
+        Worker.start(
+          task_id: task.id,
+          repo: "test/repo",
+          workspace_id: ws.id,
+          meta: meta
+        )
+
+      on_exit(fn -> if Process.alive?(worker_pid), do: GenServer.stop(worker_pid, :normal) end)
+      :ok = Worker.advance(worker_pid, :claude)
+      send(worker_pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :failed}, Worker.state(worker_pid)) end, 12_000)
+
+      refute Enum.any?(calls(log), &String.starts_with?(&1, "agy")),
+             "agy cannot confine writes under :strict and must never be spawned as the " <>
+               "revision implementer"
+
+      assert Worker.state(worker_pid).meta.failure_reason == :review_gate_rejected
+
+      escalations = Message.inbox("admiral", workspace_id: ws.id)
+      escalation = Enum.find(escalations, &(&1.directive_ref == task.id))
+      assert escalation, "expected an escalation to the coordinator"
+      assert escalation.body =~ "cannot confine its writes to the worktree"
+      assert escalation.body =~ "gemini"
     end
   end
 

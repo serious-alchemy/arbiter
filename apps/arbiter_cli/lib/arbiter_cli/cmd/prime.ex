@@ -422,6 +422,17 @@ defmodule ArbiterCli.Cmd.Prime do
         ", allow: #{length(allow)}"
     )
 
+    # bd-1abj7u: `write_confinement` names WHAT actually confines this
+    # provider's writes to the worktree under the resolved policy — distinct
+    # from `policy_enforced` (whether the adapter's own deny-list contract is
+    # honoured at all). An operator needs both to know, e.g., that agy is not
+    # `:strict`-eligible even though it enforces its own deny list.
+    IO.puts(
+      "    provider: #{posture["provider"] || "unknown"}" <>
+        " (policy_enforced=#{posture["policy_enforced"] || false}" <>
+        ", write_confinement=#{posture["write_confinement"] || "none"})"
+    )
+
     # bd-4420va: name every current default category this workspace's
     # resolved policy excludes, so an operator sees it here rather than
     # discovering it live in a worker's --settings.

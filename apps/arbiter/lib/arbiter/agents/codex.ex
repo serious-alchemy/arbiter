@@ -70,6 +70,16 @@ defmodule Arbiter.Agents.Codex do
   @impl true
   def security_enforced?, do: false
 
+  @doc """
+  `:none` (bd-1abj7u). Codex's `-s read-only` sandbox is real (see the
+  moduledoc), but it isn't wired through this adapter's `:strict` mapping as
+  a verified worktree-confinement guarantee the way Claude's permission
+  layer or a bwrap jail are, so `:strict` dispatch to Codex is refused at
+  the fail-closed gate (`Arbiter.Worker.Dispatch`) until it is.
+  """
+  @impl true
+  def write_confinement(%SecurityPolicy{}), do: :none
+
   @impl true
   def done_sentinel, do: @done_regex
 

@@ -385,11 +385,100 @@ defmodule Arbiter.Agents.SecurityPolicy do
 
   def resolve(_other, override, _repo), do: merge(default(), override)
 
+  @doc """
+  Like `resolve/3`, but also names which layer set the effective
+  `permissions.mode` — the dispatch-time `override`, a `repos.<repo>`
+  override, the workspace default, or the install-wide default
+  (`Application.get_env(:arbiter, :worker_security_policy)`).
+
+  Used to name "the scope that made it strict" in the write-confinement
+  dispatch refusal (bd-1abj7u) — an operator debugging a refused dispatch
+  needs to know WHICH config layer to change, not just that the resolved
+  mode was `:strict`.
+  """
+  @spec mode_source(map() | nil, map(), String.t() | nil) ::
+          {mode(), :dispatch_override | :repo | :workspace | :install_default}
+  def mode_source(workspace, override \\ %{}, repo \\ nil)
+
+  def mode_source(nil, override, _repo) do
+    mode_and_source([
+      {:install_default, Application.get_env(:arbiter, :worker_security_policy, %{})},
+      {:dispatch_override, override}
+    ])
+  end
+
+  def mode_source(%{__struct__: _, config: config}, override, repo),
+    do: mode_source_from_config(config, override, repo)
+
+  def mode_source(%{"config" => config}, override, repo),
+    do: mode_source_from_config(config, override, repo)
+
+  def mode_source(%{config: config}, override, repo),
+    do: mode_source_from_config(config, override, repo)
+
+  def mode_source(_other, override, _repo) do
+    mode_and_source([
+      {:install_default, Application.get_env(:arbiter, :worker_security_policy, %{})},
+      {:dispatch_override, override}
+    ])
+  end
+
+  defp mode_source_from_config(config, override, repo) do
+    workspace_policy = effective_workspace_policy(config)
+    repo_policy = repo_override(workspace_policy, repo)
+
+    mode_and_source([
+      {:install_default, Application.get_env(:arbiter, :worker_security_policy, %{})},
+      {:workspace, workspace_policy},
+      {:repo, repo_policy},
+      {:dispatch_override, override}
+    ])
+  end
+
+  # Walks the layers in precedence order (same order `merge/2` is folded in
+  # `resolve/3`) and remembers the last one that actually names a mode —
+  # mirrors `parse_mode/2`'s "nil keeps the fallback" rule so the reported
+  # source always matches what `resolve/3` would have resolved to.
+  defp mode_and_source(layers) do
+    Enum.reduce(layers, {base().permissions.mode, :install_default}, fn {source, raw}, acc ->
+      case get(sub_map(raw, :permissions), :mode) do
+        nil ->
+          acc
+
+        value ->
+          case to_atom(value) do
+            m when m in @valid_modes -> {m, source}
+            _ -> acc
+          end
+      end
+    end)
+  end
+
   # Pre-existing complexity 17 — baselined when bd-4x2yhq first
   # wired Credo up. Thresholds stay at the tool's own default so new
   # code is held to it; see the note in .credo.exs.
-  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp resolve_from_config(config, override, repo) do
+    workspace_policy = effective_workspace_policy(config)
+    repo_policy = repo_override(workspace_policy, repo)
+
+    default()
+    |> merge(workspace_policy)
+    |> merge(repo_policy)
+    |> merge(override)
+  end
+
+  # The workspace's own security block, with the deprecated alt-mode paths
+  # folded into the canonical `permissions.mode` slot when the canonical path
+  # is unset. Shared by `resolve/3` and `mode_source/3` so the two can never
+  # disagree about what the workspace layer resolved to.
+  #
+  # Pre-existing complexity 17 — baselined when bd-4x2yhq first wired Credo
+  # up (moved here from `resolve_from_config/3` by bd-1abj7u's mode_source/3
+  # refactor, which is the function that actually carries the complexity now).
+  # Thresholds stay at the tool's own default so new code is held to it; see
+  # the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
+  defp effective_workspace_policy(config) do
     config = config || %{}
     workspace_policy = get_in(config, ["agent", "security"]) || %{}
 
@@ -430,12 +519,7 @@ defmodule Arbiter.Agents.SecurityPolicy do
         workspace_policy
       end
 
-    repo_policy = repo_override(workspace_policy, repo)
-
-    default()
-    |> merge(workspace_policy)
-    |> merge(repo_policy)
-    |> merge(override)
+    workspace_policy
   end
 
   # The per-repo override sub-map nested under the workspace security block:

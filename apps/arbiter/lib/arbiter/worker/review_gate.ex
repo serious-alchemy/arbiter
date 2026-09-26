@@ -2693,13 +2693,31 @@ defmodule Arbiter.Worker.ReviewGate do
   # The reviewer role's configured provider pool for this workspace, in
   # configured order. `[]` without a workspace (an ad-hoc gate) or when the
   # workspace can't be read — both of which fall through to today's park.
+  #
+  # bd-1abj7u finding 1: filtered through `Agents.strict_eligible_provider/4`
+  # so the print-timeout rotation (`next_reviewer_provider/2`, below) can never
+  # land on a provider that can't confine writes under this workspace's
+  # resolved `:strict` scope — the only place `state.reviewer_provider` (the
+  # pin `adapter_for/4`'s reviewer clause trusts outright) is ever set draws
+  # from this pool.
   defp reviewer_pool(state) do
     case load_workspace(state.workspace_id) do
-      %Workspace{} = ws -> Agents.reviewer_pool(ws)
-      _ -> []
+      %Workspace{} = ws ->
+        policy = session_security_policy(ws, state, :reviewer)
+        ws |> Agents.reviewer_pool() |> Enum.filter(&strict_eligible_reviewer?(&1, policy))
+
+      _ ->
+        []
     end
   rescue
     _ -> []
+  end
+
+  defp strict_eligible_reviewer?(type, policy) do
+    case Agents.strict_eligible_provider(type, policy, [], explicit: true) do
+      {:ok, _} -> true
+      {:error, :ineligible} -> false
+    end
   end
 
   # Append the timed-out provider to this round's list. Recorded under the
@@ -4271,13 +4289,23 @@ defmodule Arbiter.Worker.ReviewGate do
 
   defp worker_meta(state, :reviewer, revision) do
     ws = load_workspace(state.workspace_id)
-    {rev_adapter, _} = adapter_for(state, ws, :reviewer, revision)
+
+    # bd-1abj7u: this only stamps *display* metadata on the worker row, ahead
+    # of the real write-confinement gate in `build_session_opts/6` — an
+    # ineligible provider here does not skip that gate, it just means the
+    # meta names the workspace's intended reviewer type rather than an
+    # adapter that will actually be refused a moment later.
+    provider =
+      case adapter_for(state, ws, :reviewer, revision) do
+        {:ok, {rev_adapter, _}} -> rev_adapter.provider()
+        {:error, _reason} -> Atom.to_string(Agents.reviewer_type(ws))
+      end
 
     %{
       role: :reviewer,
       reviews: state.task_id,
       difficulty_at_dispatch: difficulty_at_dispatch_for(state.task_id),
-      provider: rev_adapter.provider()
+      provider: provider
     }
   end
 
@@ -4368,8 +4396,11 @@ defmodule Arbiter.Worker.ReviewGate do
 
             :reviewer ->
               ws = load_workspace(state.workspace_id)
-              {adapter, _} = adapter_for(state, ws, :reviewer, revision)
-              adapter.provider()
+
+              case adapter_for(state, ws, :reviewer, revision) do
+                {:ok, {adapter, _}} -> adapter.provider()
+                {:error, _reason} -> Atom.to_string(Agents.reviewer_type(ws))
+              end
           end
       end
 
@@ -4394,108 +4425,162 @@ defmodule Arbiter.Worker.ReviewGate do
         {:ok, base ++ [prompt: prompt, provider: prov_str]}
 
       %Workspace{} = ws ->
-        {adapter, role_atom} = adapter_for(state, ws, role, revision)
-        :ok = Agents.prepare(ws, role_atom)
-
-        # The reviewer/implementer worker gets the same per-domain security
-        # posture as a worker spawn — resolved from the workspace, never the
-        # operator's ~/.claude (bd-9u10op). Scope it to `state.repo` so a
-        # per-repo override (config["agent"]["security"]["repos"][repo]) reaches
-        # the review/revise workers spawned into that repo's worktree, matching
-        # the dispatch spawn path (bd-3gc18m). `state.repo` defaults to
-        # "unknown", a safe no-op when no override exists. A reviewer standing
-        # in its round's checkout is also write-denied (bd-a22hib) — see
-        # `session_security_policy/3`.
-        # `workspace:` is carried for the adapter's `spawn_env/1` — it resolves
-        # the worker OAuth token from this workspace's `worker_env` before
-        # falling back to the server env (bd-bw3466).
-        # bd-1xss5z: thread this pass's resolved timeout budget (re-resolved
-        # live per pass by `launch_worker/5`, before it calls `spawn_worker/5`
-        # — see `resolve_timeout_ms/2`) onto `agent_opts` so an adapter whose
-        # CLI
-        # has its own shorter internal turn timeout (agy's 5-minute
-        # `--print-timeout`) can raise it to match. Adapters that don't
-        # recognize `:timeout_ms` just ignore it.
-        # `worktree_path:` keys the agy spawn's isolated `$HOME`
-        # (`Arbiter.Agents.Gemini.ConfigDir`, bd-7s29yq) so a reviewer /
-        # revise-round implementer gets the same generated permission posture
-        # and Arbiter-owned `GEMINI.md` as a first-round worker, rather than
-        # the operator's `~/.gemini`. Adapters that don't recognise it ignore
-        # it.
-        agent_opts =
-          agent_opts_for_role(ws, role_atom, state.task_id, adapter) ++
-            [
-              security: session_security_policy(ws, state, role),
-              workspace: ws,
-              worktree_path: session_cwd(state, role),
-              timeout_ms: state.timeout_ms
-            ]
-
-        session_model = resolved_model_for(adapter, agent_opts)
-
-        # bd-dzz6ly: same provenance backfill the main dispatch path reports
-        # (Arbiter.Worker.Dispatch.build_agent_session_opts/4), so a reviewer
-        # or revise-round implementer run answers "what governed it" too.
-        # No `resolved_skills` here — these reviewer/implementer roles don't carry a
-        # materialized skill set today, unlike the main worker.
-        Worker.report(pid, :run_provenance, %{
-          resolved_skills: [],
-          standing_orders_digest: RunProvenance.standing_orders_digest(ws),
-          routing_policy: routing_policy_for_role(role_atom, ws),
-          model_tier: Keyword.get(agent_opts, :model_tier),
-          thinking: Keyword.get(agent_opts, :thinking)
-        })
-
-        if role == :implementer do
-          Worker.report(pid, :routing_config, %{
-            provider: adapter.provider(),
-            model: session_model || Keyword.get(agent_opts, :model),
-            model_tier: Keyword.get(agent_opts, :model_tier),
-            thinking: Keyword.get(agent_opts, :thinking)
-          })
-        end
-
-        case adapter.default_argv(prompt, agent_opts) do
-          {:ok, argv} ->
-            env = safe_spawn_env(adapter, agent_opts)
-
-            # bd-9rdwe4: `prompt:` alongside `command:` plays no role in argv
-            # resolution — it's carried purely so `Arbiter.Worker` can persist
-            # what this reviewer/implementer was actually told.
-            {:ok,
-             base ++
-               [
-                 command: argv,
-                 prompt: prompt,
-                 env: env,
-                 provider: adapter.provider(),
-                 model: session_model
-               ]}
-
+        # bd-1abj7u findings 2 & 3: this is the one place that actually spawns
+        # a reviewer/implementer session (`adapter.default_argv/2` below) — the
+        # `is_list(command)` clause above is the test-fixture escape hatch, and
+        # `worker_meta/3` only stamps display metadata ahead of this. A
+        # `:strict` scope no configured provider for this role can keep must
+        # refuse HERE, before argv is ever built, same as
+        # `Dispatch.build_agent_session_opts/4`'s gate.
+        case adapter_for(state, ws, role, revision) do
           {:error, reason} ->
             {:error, reason}
+
+          {:ok, {adapter, role_atom}} ->
+            build_gated_session_opts(state, pid, role, prompt, ws, adapter, role_atom, base)
         end
     end
   end
 
-  # bd-3hb4ih: a reviewer pass that the print-timeout rotation has pinned to a
-  # specific provider uses THAT adapter, bypassing the workspace's own
-  # first-choice resolution — which would hand back the provider that just
-  # timed out. Every unpinned pass (`reviewer_provider: nil`, the default and
-  # the only state a single-provider workspace ever reaches) resolves exactly
-  # as before.
+  defp build_gated_session_opts(state, pid, role, prompt, ws, adapter, role_atom, base) do
+    :ok = Agents.prepare(ws, role_atom)
+
+    # The reviewer/implementer worker gets the same per-domain security
+    # posture as a worker spawn — resolved from the workspace, never the
+    # operator's ~/.claude (bd-9u10op). Scope it to `state.repo` so a
+    # per-repo override (config["agent"]["security"]["repos"][repo]) reaches
+    # the review/revise workers spawned into that repo's worktree, matching
+    # the dispatch spawn path (bd-3gc18m). `state.repo` defaults to
+    # "unknown", a safe no-op when no override exists. A reviewer standing
+    # in its round's checkout is also write-denied (bd-a22hib) — see
+    # `session_security_policy/3`.
+    # `workspace:` is carried for the adapter's `spawn_env/1` — it resolves
+    # the worker OAuth token from this workspace's `worker_env` before
+    # falling back to the server env (bd-bw3466).
+    # bd-1xss5z: thread this pass's resolved timeout budget (re-resolved
+    # live per pass by `launch_worker/5`, before it calls `spawn_worker/5`
+    # — see `resolve_timeout_ms/2`) onto `agent_opts` so an adapter whose
+    # CLI
+    # has its own shorter internal turn timeout (agy's 5-minute
+    # `--print-timeout`) can raise it to match. Adapters that don't
+    # recognize `:timeout_ms` just ignore it.
+    # `worktree_path:` keys the agy spawn's isolated `$HOME`
+    # (`Arbiter.Agents.Gemini.ConfigDir`, bd-7s29yq) so a reviewer /
+    # revise-round implementer gets the same generated permission posture
+    # and Arbiter-owned `GEMINI.md` as a first-round worker, rather than
+    # the operator's `~/.gemini`. Adapters that don't recognise it ignore
+    # it.
+    agent_opts =
+      agent_opts_for_role(ws, role_atom, state.task_id, adapter) ++
+        [
+          security: session_security_policy(ws, state, role),
+          workspace: ws,
+          worktree_path: session_cwd(state, role),
+          timeout_ms: state.timeout_ms
+        ]
+
+    session_model = resolved_model_for(adapter, agent_opts)
+
+    # bd-dzz6ly: same provenance backfill the main dispatch path reports
+    # (Arbiter.Worker.Dispatch.build_agent_session_opts/4), so a reviewer
+    # or revise-round implementer run answers "what governed it" too.
+    # No `resolved_skills` here — these reviewer/implementer roles don't carry a
+    # materialized skill set today, unlike the main worker.
+    Worker.report(pid, :run_provenance, %{
+      resolved_skills: [],
+      standing_orders_digest: RunProvenance.standing_orders_digest(ws),
+      routing_policy: routing_policy_for_role(role_atom, ws),
+      model_tier: Keyword.get(agent_opts, :model_tier),
+      thinking: Keyword.get(agent_opts, :thinking)
+    })
+
+    if role == :implementer do
+      Worker.report(pid, :routing_config, %{
+        provider: adapter.provider(),
+        model: session_model || Keyword.get(agent_opts, :model),
+        model_tier: Keyword.get(agent_opts, :model_tier),
+        thinking: Keyword.get(agent_opts, :thinking)
+      })
+    end
+
+    case adapter.default_argv(prompt, agent_opts) do
+      {:ok, argv} ->
+        env = safe_spawn_env(adapter, agent_opts)
+
+        # bd-9rdwe4: `prompt:` alongside `command:` plays no role in argv
+        # resolution — it's carried purely so `Arbiter.Worker` can persist
+        # what this reviewer/implementer was actually told.
+        {:ok,
+         base ++
+           [
+             command: argv,
+             prompt: prompt,
+             env: env,
+             provider: adapter.provider(),
+             model: session_model
+           ]}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # bd-3hb4ih / bd-1abj7u finding 1: a reviewer pass that the print-timeout
+  # rotation has pinned to a specific provider uses THAT adapter, bypassing
+  # the workspace's own first-choice resolution — which would hand back the
+  # provider that just timed out. This pin can never itself be an ineligible
+  # provider: `reviewer_provider` is only ever set from `next_reviewer_provider/2`,
+  # which draws from `reviewer_pool/1`, and that pool is pre-filtered through
+  # `Agents.strict_eligible_provider/4` before rotation ever sees it. Wrapped
+  # in `{:ok, ...}` purely to match this function's other clauses, not because
+  # this arm can fail. Every unpinned pass (`reviewer_provider: nil`, the
+  # default and the only state a single-provider workspace ever reaches)
+  # resolves exactly as before.
   defp adapter_for(%{reviewer_provider: provider}, _ws, :reviewer, _revision)
        when is_atom(provider) and not is_nil(provider),
-       do: {Agents.for_type(provider), :review_agent}
+       do: {:ok, {Agents.for_type(provider), :review_agent}}
 
-  defp adapter_for(_state, %Workspace{} = ws, :reviewer, _revision),
-    do: {Agents.reviewer_for_workspace(ws), :review_agent}
+  # bd-1abj7u finding 3: mirror Dispatch's fail-closed write-confinement gate
+  # (`Arbiter.Agents.strict_eligible_provider/4`) for automatic reviewer
+  # selection. Unlike the worker dispatch path, the reviewer slot has no "the
+  # caller explicitly named this provider" case here — resolution always
+  # falls through the configured `review_agent`/`agent` pool — so on a
+  # `:strict` scope where none of the workspace's configured reviewers can
+  # confine writes, this refuses (the same fail-closed error Dispatch returns)
+  # instead of silently substituting an unconfigured `:claude`.
+  defp adapter_for(state, %Workspace{} = ws, :reviewer, _revision) do
+    policy = session_security_policy(ws, state, :reviewer)
+    preferred = Agents.reviewer_type(ws)
+    pool = Agents.reviewer_pool(ws)
+
+    case Agents.strict_eligible_provider(preferred, policy, pool) do
+      {:ok, eligible} ->
+        {:ok, {Agents.for_type(eligible), :review_agent}}
+
+      {:error, :ineligible} ->
+        {:error, Dispatch.strict_write_confinement_error(preferred, policy, ws, repo: state.repo)}
+    end
+  end
 
   defp adapter_for(_state, nil, :reviewer, _revision),
-    do: {Agents.for_type(:claude), :review_agent}
+    do: {:ok, {Agents.for_type(:claude), :review_agent}}
 
-  defp adapter_for(_state, _ws, :implementer, {provider, _fallback_reason}) do
-    {Agents.for_type(provider), :agent}
+  # bd-1abj7u finding 2: the revision implementer spawn goes through this same
+  # gate. `resolve_revision/2` already picked the provider (the original
+  # authoring provider, or `Agents.resolve_revision_provider/2`'s fallback) —
+  # treated as an explicit pin, same as `arb dispatch --provider`, since there
+  # is no pool to fall back into here (the implementer role isn't drawn from a
+  # pool the way the reviewer role is).
+  defp adapter_for(state, %Workspace{} = ws, :implementer, {provider, _fallback_reason}) do
+    policy = session_security_policy(ws, state, :implementer)
+
+    case Agents.strict_eligible_provider(provider, policy, [], explicit: true) do
+      {:ok, _eligible} ->
+        {:ok, {Agents.for_type(provider), :agent}}
+
+      {:error, :ineligible} ->
+        {:error, Dispatch.strict_write_confinement_error(provider, policy, ws, repo: state.repo)}
+    end
   end
 
   # bd-dzz6ly: the reviewer slot is configured directly (`review_agent.config`)

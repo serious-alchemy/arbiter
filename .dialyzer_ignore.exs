@@ -49,7 +49,6 @@
   # workers. The clause stays; the warning does not.
   {"lib/arbiter/agents/gemini.ex", :pattern_match_cov},
   {"lib/arbiter/agents/gemini/stream.ex", :pattern_match_cov},
-  {"lib/arbiter/agents/security_policy.ex", :pattern_match_cov},
   {"lib/arbiter/mcp/tools/task.ex", :pattern_match_cov},
   {"lib/arbiter/skills/selection.ex", :pattern_match_cov},
   {"lib/arbiter/tasks/claim.ex", :pattern_match_cov},

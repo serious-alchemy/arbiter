@@ -166,6 +166,24 @@ defmodule Arbiter.Worker.ReviewGateProviderRotationTest do
     ws
   end
 
+  # bd-1abj7u: same shape as `workspace/1`, but scoped `:strict` — used to
+  # prove the print-timeout rotation never lands on a provider (gemini/agy)
+  # that can't confine writes under that scope.
+  defp strict_workspace(type) do
+    {:ok, ws} =
+      Ash.create(Workspace, %{
+        name: "trib-rotate-strict-ws-#{System.unique_integer([:positive])}",
+        prefix: "trs",
+        config: %{
+          "review" => %{"required" => true, "rounds" => 1},
+          "agent" => %{"security" => %{"permissions" => %{"mode" => "strict"}}},
+          "review_agent" => %{"type" => type}
+        }
+      })
+
+    ws
+  end
+
   defp new_task(ws) do
     {:ok, task} =
       Ash.create(Issue, %{
@@ -393,6 +411,38 @@ defmodule Arbiter.Worker.ReviewGateProviderRotationTest do
 
       task_after = Ash.get!(Issue, task.id)
       assert task_after.review_park_reason == "reviewer_failed"
+    end
+  end
+
+  # bd-1abj7u finding 1: the print-timeout rotation pins `state.reviewer_provider`
+  # to whatever `next_reviewer_provider/2` picks, and `adapter_for/4`'s pinned
+  # clause trusts that pin outright — so under a `:strict` scope the pool the
+  # rotation draws from must already exclude any provider (gemini/agy) that
+  # can't confine writes, or the rotation reproduces the exact `:strict`-to-agy
+  # dispatch the whole feature exists to prevent.
+  describe "strict write confinement is never rotated into (bd-1abj7u)" do
+    test "a :strict workspace's claude reviewer print-timeout parks instead of rotating to gemini",
+         %{repo: repo, stub_dir: stub_dir, log: log} do
+      stub_print_timeout(stub_dir, "claude", log)
+      stub_approve(stub_dir, "agy", log)
+      prepend_path(stub_dir)
+
+      ws = strict_workspace(["claude", "gemini"])
+      task = new_task(ws)
+
+      pid = run_gate(task, repo, "feature/rot-strict")
+
+      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 12_000)
+
+      assert calls(log) == ["claude"],
+             "gemini cannot confine writes under :strict and must never be spawned, " <>
+               "even as a print-timeout rotation target"
+
+      assert merge_commit_count(repo) == 0
+      assert Worker.state(pid).meta.failure_reason == :review_gate_inconclusive
+
+      task_after = Ash.get!(Issue, task.id)
+      assert task_after.review_park_reason == "reviewer_timeout"
     end
   end
 end
