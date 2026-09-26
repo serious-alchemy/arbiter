@@ -3,6 +3,34 @@ defmodule ArbiterWeb.LiveHooksTest do
 
   import Phoenix.LiveViewTest
 
+  defp query_count(fun) do
+    ref = make_ref()
+    parent = self()
+
+    :telemetry.attach(
+      ref,
+      [:arbiter, :repo, :query],
+      fn _event, _measurements, _metadata, _config -> send(parent, {:query, ref}) end,
+      nil
+    )
+
+    fun.()
+
+    count =
+      Stream.repeatedly(fn ->
+        receive do
+          {:query, ^ref} -> :hit
+        after
+          0 -> nil
+        end
+      end)
+      |> Enum.take_while(& &1)
+      |> length()
+
+    :telemetry.detach(ref)
+    count
+  end
+
   describe "on_mount(:quota) filters via production code in live_hooks.ex" do
     test "on_mount invokes production code that filters hidden providers", %{conn: conn} do
       # Create a workspace — on_mount uses default workspace if it exists
@@ -18,6 +46,40 @@ defmodule ArbiterWeb.LiveHooksTest do
       # that on_mount executed successfully and the production code filtered
       # the quotas without errors.
       assert html =~ "Arbiter"
+    end
+
+    # bd-4p6pw7 round 2, finding 1: an uncached `on_mount(:quota, ...)` still
+    # read a `Workspace`, its provider accounts and their workspace links on
+    # every mount even after `SpendCache` covered the ledger scans — 20
+    # queries cold, 18 warm. `QuotaCache` memoizes the whole decorated result
+    # per workspace, so a *repeat* mount within its TTL (criterion 3's "no
+    # spend queries" extended to the whole hook) issues close to none.
+    test "on_mount(:quota) issues far fewer queries on a warm QuotaCache than cold", %{
+      conn: _conn
+    } do
+      ws = Ash.create!(Arbiter.Tasks.Workspace, %{name: "default"})
+
+      {:ok, _} =
+        Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.25"}],
+          provider: "claude"
+        )
+
+      {:ok, _} =
+        Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.50"}],
+          provider: "codex"
+        )
+
+      mount = fn ->
+        query_count(fn ->
+          ArbiterWeb.LiveHooks.on_mount(:quota, %{}, %{}, %Phoenix.LiveView.Socket{})
+        end)
+      end
+
+      cold = mount.()
+      warm = mount.()
+
+      assert cold > warm
+      assert warm <= 3
     end
 
     test "on_mount(:quota) filters hidden providers at mount time", %{conn: conn} do

@@ -79,8 +79,11 @@ defmodule ArbiterWeb.LiveHooks do
 
   require Logger
 
-  # Providers hidden from the UI pending fix; see module docstring for context.
-  @hidden_providers ["codex", "gemini_cli"]
+  # Providers hidden from the UI pending fix; see module docstring for
+  # context. Derived from `Arbiter.Quota.hidden_providers/0` (bd-4p6pw7
+  # round 2, finding 2) rather than duplicated by hand, so the two can't
+  # drift apart.
+  @hidden_providers Arbiter.Quota.hidden_providers()
 
   @coordinator_ref Message.coordinator_ref()
 
@@ -123,7 +126,23 @@ defmodule ArbiterWeb.LiveHooks do
   def on_mount(:quota, _params, _session, socket) do
     case Arbiter.Quota.default_workspace_id() do
       {:ok, ws_id} ->
-        quotas = Arbiter.Quota.list_latest_for_workspace(ws_id) |> filter_hidden_providers()
+        # `:exclude_providers` drops a hidden provider's view before it's
+        # decorated with spend (bd-4p6pw7), rather than filtering the fully
+        # decorated list after the fact.
+        #
+        # The whole decorated result is memoized by `QuotaCache` (bd-4p6pw7
+        # round 2, finding 1): `list_latest_for_workspace/2` still reads a
+        # `Workspace`, its provider accounts and their workspace links even
+        # with `SpendCache` covering the ledger scans, so an uncached mount
+        # was still 18-20 queries. `QuotaCache` is only used here — the
+        # direct callers (`GET /api/quota`, `arb quota`) read immediately
+        # after a write in their own tests and stay uncached so that holds.
+        opts = [exclude_providers: @hidden_providers]
+
+        quotas =
+          Arbiter.Quota.QuotaCache.fetch(ws_id, opts, fn ->
+            Arbiter.Quota.list_latest_for_workspace(ws_id, opts)
+          end)
 
         socket =
           socket
@@ -283,10 +302,5 @@ defmodule ArbiterWeb.LiveHooks do
       nil -> Map.put(incoming, key, Map.get(existing, key))
       _ -> incoming
     end
-  end
-
-  # Filter out providers marked as hidden from the UI.
-  defp filter_hidden_providers(quotas) do
-    Enum.reject(quotas, &(&1.provider in @hidden_providers))
   end
 end
