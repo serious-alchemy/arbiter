@@ -211,8 +211,11 @@ defmodule ArbiterCli.Scripts.BuildLocalReleaseTest do
            "Script must force-recompile arbiter_cli before building the escript in a single subshell"
   end
 
+  @tag :escript_build
   @tag timeout: 120_000
   test "stale version after tagging: mix compile --force ensures the escript picks up new tags (#1943, #1993)" do
+    # This test is excluded from the default suite because it compiles and builds
+    # a real escript (can take minutes in CI). Run it with: mix test --include escript_build
     # When a tag is added to the repo and the CLI is rebuilt without
     # `mix compile --force`, ArbiterCli.Version will report a stale tag
     # because the version module's @app_version is computed at compile time
