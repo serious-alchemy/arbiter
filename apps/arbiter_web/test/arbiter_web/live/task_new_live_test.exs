@@ -13,9 +13,98 @@ defmodule ArbiterWeb.TaskNewLiveTest do
     {:ok, ws: ws}
   end
 
+  defp mock_workspaces do
+    :meck.new(ArbiterWeb.TaskNewLive, [:passthrough, :no_link])
+    on_exit(fn -> :meck.unload(ArbiterWeb.TaskNewLive) end)
+  end
+
+  defp has?(html, selector) do
+    html |> LazyHTML.from_document() |> LazyHTML.query(selector) |> Enum.count() > 0
+  end
+
+  test "the dead render shows the loading state and does not query workspaces", %{conn: conn} do
+    test = self()
+    mock_workspaces()
+
+    :meck.expect(ArbiterWeb.TaskNewLive, :read_workspaces, fn ->
+      send(test, :workspaces_read)
+      :meck.passthrough([])
+    end)
+
+    html = conn |> get(~p"/tasks/new") |> html_response(200)
+
+    assert has?(html, "#task-new-workspaces-loading")
+    refute has?(html, "#task-new-form")
+    refute_received :workspaces_read
+  end
+
+  test "a connected mount renders loading state, then loads workspaces", %{conn: conn, ws: ws} do
+    test = self()
+    mock_workspaces()
+
+    :meck.expect(ArbiterWeb.TaskNewLive, :read_workspaces, fn ->
+      send(test, {:workspaces_loading, self()})
+
+      receive do
+        :release -> :ok
+      after
+        5_000 -> :ok
+      end
+
+      :meck.passthrough([])
+    end)
+
+    {:ok, view, html} = live(conn, ~p"/tasks/new")
+
+    assert_receive {:workspaces_loading, loader}, 2_000
+    assert has?(html, "#task-new-workspaces-loading")
+    assert has_element?(view, "#task-new-workspaces-loading")
+    refute has_element?(view, "#task-new-form")
+
+    send(loader, :release)
+    render_async(view)
+
+    refute has_element?(view, "#task-new-workspaces-loading")
+    assert has_element?(view, "#task-new-form")
+    assert has_element?(view, ~s(option[value="#{ws.id}"]))
+  end
+
+  @tag :capture_log
+  test "a failed workspace load renders an inline error with retry button, and retry recovers", %{
+    conn: conn,
+    ws: ws
+  } do
+    mock_workspaces()
+
+    :meck.expect(ArbiterWeb.TaskNewLive, :read_workspaces, fn ->
+      raise "database is locked"
+    end)
+
+    {:ok, view, _html} = live(conn, ~p"/tasks/new")
+    render_async(view)
+
+    assert has_element?(view, "#task-new-workspaces-error")
+    assert has_element?(view, "#task-new-workspaces-retry")
+    refute has_element?(view, "#task-new-workspaces-loading")
+    refute has_element?(view, "#task-new-form")
+
+    # Unmock and retry
+    :meck.expect(ArbiterWeb.TaskNewLive, :read_workspaces, fn ->
+      :meck.passthrough([])
+    end)
+
+    render_click(element(view, "#task-new-workspaces-retry"))
+    render_async(view)
+
+    refute has_element?(view, "#task-new-workspaces-error")
+    assert has_element?(view, "#task-new-form")
+    assert has_element?(view, ~s(option[value="#{ws.id}"]))
+  end
+
   test "renders the standalone create screen with header, panel, and back link",
        %{conn: conn} do
-    {:ok, _view, html} = live(conn, ~p"/tasks/new")
+    {:ok, view, _html} = live(conn, ~p"/tasks/new")
+    html = render_async(view)
 
     assert html =~ "Create an issue"
     assert html =~ "Writes through the same action the CLI and MCP tools use"
@@ -26,6 +115,7 @@ defmodule ArbiterWeb.TaskNewLiveTest do
   test "creating an issue persists it and navigates to its detail page",
        %{conn: conn, ws: ws} do
     {:ok, view, _html} = live(conn, ~p"/tasks/new")
+    render_async(view)
 
     view
     |> form("#task-new-form", %{
@@ -80,6 +170,7 @@ defmodule ArbiterWeb.TaskNewLiveTest do
       })
 
     {:ok, view, _html} = live(conn, ~p"/tasks/new")
+    render_async(view)
 
     # The repo choices track the workspace select, which starts unset.
     html =
@@ -131,6 +222,7 @@ defmodule ArbiterWeb.TaskNewLiveTest do
       })
 
     {:ok, view, html} = live(conn, ~p"/tasks/new")
+    render_async(view)
 
     # The field no longer advertises itself as optional...
     refute html =~ "Repo (optional)"
@@ -175,6 +267,7 @@ defmodule ArbiterWeb.TaskNewLiveTest do
       })
 
     {:ok, view, _html} = live(conn, ~p"/tasks/new")
+    render_async(view)
 
     view
     |> form("#task-new-form", %{
@@ -194,6 +287,7 @@ defmodule ArbiterWeb.TaskNewLiveTest do
   test "a blank issue_type falls back to the default rather than erroring",
        %{conn: conn, ws: ws} do
     {:ok, view, _html} = live(conn, ~p"/tasks/new")
+    render_async(view)
 
     render_submit(view, "create", %{
       "task" => %{
@@ -211,6 +305,7 @@ defmodule ArbiterWeb.TaskNewLiveTest do
 
   test "a blank title is refused with an inline error under the field", %{conn: conn, ws: ws} do
     {:ok, view, _html} = live(conn, ~p"/tasks/new")
+    render_async(view)
 
     html =
       view
@@ -229,6 +324,7 @@ defmodule ArbiterWeb.TaskNewLiveTest do
   # unattached to a workspace.
   test "a missing workspace is refused with an inline error", %{conn: conn} do
     {:ok, view, _html} = live(conn, ~p"/tasks/new")
+    render_async(view)
 
     html =
       render_submit(view, "create", %{"task" => %{"title" => "orphan", "workspace_id" => ""}})
@@ -241,6 +337,7 @@ defmodule ArbiterWeb.TaskNewLiveTest do
   # typed. The form now re-renders from the submitted params.
   test "a rejected submit re-renders what was typed", %{conn: conn, ws: ws} do
     {:ok, view, _html} = live(conn, ~p"/tasks/new")
+    render_async(view)
 
     html =
       view
@@ -262,7 +359,8 @@ defmodule ArbiterWeb.TaskNewLiveTest do
   describe "CLI preview footer" do
     test "shows the bare arb issue create command before anything is typed",
          %{conn: conn} do
-      {:ok, _view, html} = live(conn, ~p"/tasks/new")
+      {:ok, view, _html} = live(conn, ~p"/tasks/new")
+      html = render_async(view)
 
       assert html =~ ~s(id="task-new-cli-preview")
       assert html =~ "arb issue create &#39;&#39;"
@@ -270,6 +368,7 @@ defmodule ArbiterWeb.TaskNewLiveTest do
 
     test "updates live as the title and other fields are typed", %{conn: conn} do
       {:ok, view, _html} = live(conn, ~p"/tasks/new")
+      render_async(view)
 
       html =
         view
@@ -291,6 +390,7 @@ defmodule ArbiterWeb.TaskNewLiveTest do
     test "defaults (feature type, priority 2, unset difficulty) are omitted from the preview",
          %{conn: conn} do
       {:ok, view, _html} = live(conn, ~p"/tasks/new")
+      render_async(view)
 
       html =
         view
@@ -308,6 +408,7 @@ defmodule ArbiterWeb.TaskNewLiveTest do
 
     test "single quotes in the title are escaped in the preview", %{conn: conn} do
       {:ok, view, _html} = live(conn, ~p"/tasks/new")
+      render_async(view)
 
       html =
         view
@@ -320,6 +421,7 @@ defmodule ArbiterWeb.TaskNewLiveTest do
     test "shell metacharacters in the title stay inert inside single quotes",
          %{conn: conn} do
       {:ok, view, _html} = live(conn, ~p"/tasks/new")
+      render_async(view)
 
       html =
         view
@@ -331,6 +433,7 @@ defmodule ArbiterWeb.TaskNewLiveTest do
 
     test "the selected workspace is appended as --workspace, shell-quoted", %{conn: conn, ws: ws} do
       {:ok, view, _html} = live(conn, ~p"/tasks/new")
+      render_async(view)
 
       html =
         view
@@ -345,6 +448,7 @@ defmodule ArbiterWeb.TaskNewLiveTest do
     test "a non-blank acceptance is flagged as not covered by the CLI command",
          %{conn: conn} do
       {:ok, view, _html} = live(conn, ~p"/tasks/new")
+      render_async(view)
 
       html =
         view
@@ -365,6 +469,7 @@ defmodule ArbiterWeb.TaskNewLiveTest do
         Ash.create(Issue, %{title: "Fix the flaky merge queue test", workspace_id: ws.id})
 
       {:ok, view, _html} = live(conn, ~p"/tasks/new")
+      render_async(view)
 
       view
       |> form("#task-new-form", %{
@@ -386,6 +491,7 @@ defmodule ArbiterWeb.TaskNewLiveTest do
       {:ok, _existing} = Ash.create(Issue, %{title: "dupe-me", workspace_id: ws.id})
 
       {:ok, view, _html} = live(conn, ~p"/tasks/new")
+      render_async(view)
 
       view
       |> form("#task-new-form", %{
@@ -406,6 +512,7 @@ defmodule ArbiterWeb.TaskNewLiveTest do
       {:ok, _existing} = Ash.create(Issue, %{title: "dupe-me-too", workspace_id: ws.id})
 
       {:ok, view, _html} = live(conn, ~p"/tasks/new")
+      render_async(view)
 
       view
       |> form("#task-new-form", %{
@@ -458,6 +565,7 @@ defmodule ArbiterWeb.TaskNewLiveTest do
         })
 
       {:ok, view, _html} = live(conn, ~p"/tasks/new")
+      render_async(view)
 
       view
       |> form("#task-new-form", %{

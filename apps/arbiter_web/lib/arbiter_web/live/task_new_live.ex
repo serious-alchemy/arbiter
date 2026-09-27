@@ -31,22 +31,27 @@ defmodule ArbiterWeb.TaskNewLive do
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker.Dispatch
   alias ArbiterWeb.TaskForm
+  alias Phoenix.LiveView.AsyncResult
   require Ash.Query
+  require Logger
 
   @impl true
   def mount(_params, _session, socket) do
-    {:ok,
-     socket
-     |> assign(:form_params, %{})
-     |> assign(:field_errors, %{})
-     |> assign(:server_error, nil)
-     |> assign(:create_dup, nil)
-     |> assign(:submitting, false)
-     |> assign(:created, false)
-     |> assign(:priority_options, TaskForm.priority_options())
-     |> assign(:difficulty_options, TaskForm.difficulty_options())
-     |> assign(:issue_type_options, TaskForm.issue_type_options())
-     |> load_workspaces()}
+    socket =
+      socket
+      |> assign(:form_params, %{})
+      |> assign(:field_errors, %{})
+      |> assign(:server_error, nil)
+      |> assign(:create_dup, nil)
+      |> assign(:submitting, false)
+      |> assign(:created, false)
+      |> assign(:priority_options, TaskForm.priority_options())
+      |> assign(:difficulty_options, TaskForm.difficulty_options())
+      |> assign(:issue_type_options, TaskForm.issue_type_options())
+      |> assign(:workspaces, AsyncResult.loading())
+      |> maybe_load_workspaces()
+
+    {:ok, socket}
   end
 
   # ---- create ----
@@ -88,6 +93,13 @@ defmodule ArbiterWeb.TaskNewLive do
      else
        socket
      end}
+  end
+
+  def handle_event("retry_workspaces", _params, socket) do
+    {:noreply,
+     socket
+     |> assign(:workspaces, AsyncResult.loading(socket.assigns.workspaces))
+     |> start_async(:workspaces, &load_workspaces_task/0)}
   end
 
   # Validation that needs no I/O runs here, on the LiveView process; everything
@@ -171,6 +183,39 @@ defmodule ArbiterWeb.TaskNewLive do
     {:noreply,
      assign(socket, submitting: false, server_error: "Create crashed: #{inspect(reason)}")}
   end
+
+  def handle_async(:workspaces, {:ok, {:ok, workspaces}}, socket) do
+    {:noreply, assign(socket, :workspaces, AsyncResult.ok(socket.assigns.workspaces, workspaces))}
+  end
+
+  def handle_async(:workspaces, {:ok, {:error, reason}}, socket) do
+    Logger.error("TaskNewLive: loading workspaces failed: #{inspect(reason)}")
+
+    {:noreply,
+     assign(
+       socket,
+       :workspaces,
+       AsyncResult.failed(socket.assigns.workspaces, describe_error(reason))
+     )}
+  end
+
+  def handle_async(:workspaces, {:exit, reason}, socket) do
+    Logger.error("TaskNewLive: loading workspaces crashed: #{inspect(reason)}")
+
+    {:noreply,
+     assign(
+       socket,
+       :workspaces,
+       AsyncResult.failed(socket.assigns.workspaces, describe_exit(reason))
+     )}
+  end
+
+  defp describe_error(%{__exception__: true} = error), do: Exception.message(error)
+  defp describe_error(reason) when is_binary(reason), do: reason
+  defp describe_error(reason), do: inspect(reason)
+
+  defp describe_exit({%{__exception__: true} = error, _stacktrace}), do: describe_error(error)
+  defp describe_exit(reason), do: describe_error(reason)
 
   defp upstream_error_text(%{message: message}) when is_binary(message), do: message
   defp upstream_error_text(err), do: inspect(err)
@@ -329,17 +374,33 @@ defmodule ArbiterWeb.TaskNewLive do
     "'" <> String.replace(value, "'", "'\\''") <> "'"
   end
 
-  defp load_workspaces(socket) do
-    workspaces =
-      Workspace
-      |> Ash.Query.sort(name: :asc)
-      |> Ash.read()
-      |> case do
-        {:ok, list} -> list
-        _ -> []
-      end
+  defp maybe_load_workspaces(socket) do
+    if connected?(socket),
+      do: start_async(socket, :workspaces, &load_workspaces_task/0),
+      else: socket
+  end
 
-    assign(socket, :workspaces, workspaces)
+  # The task is linked to this view, so a tab closed mid-read would kill it
+  # mid-query — and a DB client that dies holding a checkout costs the pool
+  # that connection (under test, the one shared sandbox connection,
+  # bd-5scl0c). Trapping turns the view's exit into a message: the query in
+  # flight finishes, and the task goes before it starts another (bd-6mfl0s).
+  defp load_workspaces_task do
+    Process.flag(:trap_exit, true)
+    result = __MODULE__.read_workspaces()
+
+    receive do
+      {:EXIT, _view, _reason} -> exit(:shutdown)
+    after
+      0 -> result
+    end
+  end
+
+  @doc false
+  def read_workspaces do
+    Workspace
+    |> Ash.Query.sort(name: :asc)
+    |> Ash.read()
   end
 
   # ---- render ----
@@ -366,14 +427,54 @@ defmodule ArbiterWeb.TaskNewLive do
           </p>
         </div>
 
-        <p :if={@workspaces == []} class="text-[12.5px] text-[var(--arb-fail-text)]">
+        <div
+          :if={@workspaces.loading}
+          id="task-new-workspaces-loading"
+          class="flex items-center gap-2 p-4 text-[12.5px] text-[var(--text-secondary)]"
+        >
+          <.icon name="hero-arrow-path-micro" class="size-4 shrink-0 animate-spin" />
+          Loading workspaces…
+        </div>
+
+        <div
+          :if={@workspaces.failed}
+          id="task-new-workspaces-error"
+          role="alert"
+          class="flex items-start gap-3 p-4 rounded-[var(--radius-field)] border border-solid border-[var(--arb-fail-edge)] bg-[var(--arb-fail-wash)] text-[12.5px] text-[var(--arb-fail-text)]"
+        >
+          <.icon
+            name="hero-exclamation-triangle"
+            class="size-5 shrink-0 mt-0.5 text-[var(--arb-fail-text)]"
+          />
+          <div class="grow min-w-0">
+            <p class="font-medium">Could not load workspaces</p>
+            <p class="mt-1 text-[12px] opacity-90">{describe_error(@workspaces.failed)}</p>
+          </div>
+          <button
+            type="button"
+            id="task-new-workspaces-retry"
+            phx-click="retry_workspaces"
+            class={[
+              "shrink-0 px-3 h-[28px] rounded-[var(--radius-field)] cursor-pointer",
+              "border border-solid border-[var(--arb-fail-edge)] bg-[var(--surface-chrome)]",
+              "text-[12px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
+            ]}
+          >
+            Retry
+          </button>
+        </div>
+
+        <p
+          :if={@workspaces.ok? and @workspaces.result == []}
+          class="text-[12.5px] text-[var(--arb-fail-text)]"
+        >
           No workspaces exist yet — create one first at <.link
             navigate={~p"/workspaces"}
             class="text-[var(--text-link)] underline"
           >/workspaces</.link>.
         </p>
 
-        <.panel :if={@workspaces != []}>
+        <.panel :if={@workspaces.ok? and @workspaces.result != []}>
           <.form
             for={%{}}
             as={:task}
@@ -396,8 +497,8 @@ defmodule ArbiterWeb.TaskNewLive do
             <ArbiterWeb.CoreComponents.Forms.select
               name="task[workspace_id]"
               label="Workspace"
-              options={Enum.map(@workspaces, &{"#{&1.name} (#{&1.prefix})", &1.id})}
-              value={TaskForm.value(@form_params, "workspace_id", List.first(@workspaces).id)}
+              options={Enum.map(@workspaces.result, &{"#{&1.name} (#{&1.prefix})", &1.id})}
+              value={TaskForm.value(@form_params, "workspace_id", List.first(@workspaces.result).id)}
               error={@field_errors[:workspace_id]}
             />
             <ArbiterWeb.CoreComponents.Forms.select
@@ -423,7 +524,7 @@ defmodule ArbiterWeb.TaskNewLive do
             <ArbiterWeb.CoreComponents.Forms.select
               name="task[repo]"
               label="Repo"
-              options={repo_options(@form_params, @workspaces)}
+              options={repo_options(@form_params, @workspaces.result)}
               value={TaskForm.value(@form_params, "repo")}
             />
             <div class="sm:col-span-2">
@@ -515,13 +616,15 @@ defmodule ArbiterWeb.TaskNewLive do
              The only cross-reference point between the dashboard and
              `arb` — the flag mapping must match `arb issue create` exactly. --%>
         <div
-          :if={@workspaces != []}
+          :if={@workspaces.ok? and @workspaces.result != []}
           id="task-new-cli-preview"
           class="flex items-center gap-[10px] font-[family-name:var(--font-mono)] text-[11.5px] text-[var(--text-label)]"
         >
           <ArbiterWeb.CoreComponents.Core.icon name="hero-information-circle" size={13} />
           Equivalent CLI:
-          <span class="text-[var(--arb-text-body)]">{cli_preview(@form_params, @workspaces)}</span>
+          <span class="text-[var(--arb-text-body)]">
+            {cli_preview(@form_params, @workspaces.result)}
+          </span>
         </div>
         <p
           :if={TaskForm.trimmed(@form_params["acceptance"])}
