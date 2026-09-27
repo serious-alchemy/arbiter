@@ -10,6 +10,10 @@ defmodule ArbiterWeb.RefineEntryPointTest do
 
   import Phoenix.LiveViewTest
 
+  # The board loads by start_async (bd-15bn6s) and a real Snapshot.load can
+  # outrun render_async's 100ms default under a loaded suite.
+  @async_timeout 5_000
+
   alias Arbiter.Sessions
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
@@ -110,6 +114,7 @@ defmodule ArbiterWeb.RefineEntryPointTest do
   describe "the board card" do
     test "offers Refine on Backlog cards", %{conn: conn, issue: issue} do
       {:ok, view, _html} = live(conn, ~p"/")
+      render_async(view, @async_timeout)
       assert has_element?(view, "#board-refine-#{issue.id}")
     end
 
@@ -118,6 +123,7 @@ defmodule ArbiterWeb.RefineEntryPointTest do
       {:ok, refined} = Ash.update(issue, %{}, action: :promote_to_ready)
 
       {:ok, view, _html} = live(conn, ~p"/")
+      render_async(view, @async_timeout)
       refute has_element?(view, "#board-refine-#{refined.id}")
     end
 
@@ -126,6 +132,7 @@ defmodule ArbiterWeb.RefineEntryPointTest do
       issue: issue
     } do
       {:ok, view, _html} = live(conn, ~p"/")
+      render_async(view, @async_timeout)
       dock = find_live_child(view, "session-dock")
 
       render_click(element(view, "#board-refine-#{issue.id}"))
@@ -139,6 +146,7 @@ defmodule ArbiterWeb.RefineEntryPointTest do
   describe "the dock" do
     test "an open request from another view expands that session's window", %{conn: conn} do
       {:ok, view, _html} = live(conn, ~p"/")
+      render_async(view, @async_timeout)
       dock = find_live_child(view, "session-dock")
 
       {:ok, session} = Sessions.launch(runner: NoopRunner)
@@ -149,6 +157,7 @@ defmodule ArbiterWeb.RefineEntryPointTest do
 
     test "an open request for a session that does not exist is ignored", %{conn: conn} do
       {:ok, view, _html} = live(conn, ~p"/")
+      render_async(view, @async_timeout)
       dock = find_live_child(view, "session-dock")
 
       Sessions.request_open(Ash.UUID.generate())

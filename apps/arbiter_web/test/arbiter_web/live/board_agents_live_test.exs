@@ -7,6 +7,10 @@ defmodule ArbiterWeb.BoardAgentsLiveTest do
 
   import Phoenix.LiveViewTest
 
+  # The board loads by start_async (bd-15bn6s) and a real Snapshot.load can
+  # outrun render_async's 100ms default under a loaded suite.
+  @async_timeout 5_000
+
   alias Arbiter.Board.Autopilot
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
@@ -51,6 +55,7 @@ defmodule ArbiterWeb.BoardAgentsLiveTest do
     on_exit(fn -> if Process.alive?(pid), do: Worker.stop(t.id, :normal) end)
 
     {:ok, view, _html} = live(conn, "/")
+    render_async(view, @async_timeout)
 
     slots = view |> element("#board-slots") |> render()
 
@@ -90,6 +95,7 @@ defmodule ArbiterWeb.BoardAgentsLiveTest do
     assert is_port(port)
 
     {:ok, view, _html} = live(conn, "/")
+    render_async(view, @async_timeout)
 
     slots = view |> element("#board-slots") |> render()
     # One live agent (the busy worker's OS subprocess), but two tasks still
@@ -124,6 +130,7 @@ defmodule ArbiterWeb.BoardAgentsLiveTest do
     on_exit(fn -> if Process.alive?(pid), do: Worker.stop(t.id, :normal) end)
 
     {:ok, view, _html} = live(conn, "/")
+    render_async(view, @async_timeout)
 
     assert has_element?(view, "#card-#{t.id} [data-agent-live='false']")
     assert has_element?(view, "#card-#{t.id} [data-phase]")

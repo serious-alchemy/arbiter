@@ -129,21 +129,34 @@ defmodule ArbiterWeb.BoardLive do
       :timer.send_interval(1000, self(), :tick)
     end
 
-    {:ok,
-     socket
-     |> assign(:page_title, "Board")
-     |> assign(:live, live?)
-     |> assign(:now, DateTime.utc_now())
-     |> assign(:filter, "")
-     |> assign(:workspace, "all")
-     |> assign(:ready_order, [])
-     |> assign(:expanded, MapSet.new())
-     |> assign(:confirm_stop, nil)
-     |> assign(:columns, @columns)
-     |> assign(:issue_label, "issue")
-     |> assign(:worker_label, "worker")
-     |> load_workspaces()
-     |> refresh_board()}
+    now = DateTime.utc_now()
+
+    # The board itself arrives by `start_async/3` on the connected mount only
+    # (bd-15bn6s): the dead render reads nothing and draws a skeleton, and the
+    # empty snapshot is only there so the render never has to ask whether a
+    # board exists yet.
+    socket =
+      socket
+      |> assign(:page_title, "Board")
+      |> assign(:live, live?)
+      |> assign(:now, now)
+      |> assign(:filter, "")
+      |> assign(:workspace, "all")
+      |> assign(:ready_order, [])
+      |> assign(:expanded, MapSet.new())
+      |> assign(:confirm_stop, nil)
+      |> assign(:columns, @columns)
+      |> assign(:issue_label, "issue")
+      |> assign(:worker_label, "worker")
+      |> assign(:workspaces, [])
+      |> assign(:board, Snapshot.empty(now))
+      |> assign(:scheduler_running, false)
+      |> assign(:board_loaded?, false)
+      |> assign(:board_error, nil)
+      |> assign(:board_loading?, false)
+      |> assign(:board_stale?, false)
+
+    {:ok, if(live?, do: refresh_board(socket), else: socket)}
   end
 
   # ---- live updates ---------------------------------------------------------
@@ -165,11 +178,36 @@ defmodule ArbiterWeb.BoardLive do
 
   def handle_info(_msg, socket), do: {:noreply, socket}
 
+  @impl true
+  def handle_async(:board, {:ok, loaded}, socket) do
+    socket
+    |> assign(:board, loaded.board)
+    |> assign(:scheduler_running, loaded.scheduler_running)
+    |> assign(:workspaces, loaded.workspaces)
+    |> assign(:now, loaded.board.now)
+    |> assign(:board_loaded?, true)
+    |> assign(:board_error, nil)
+    |> board_read_done()
+  end
+
+  # A read that fails must not take the page down, and must not pass itself
+  # off as an empty fleet either. Whatever board is on screen stays there —
+  # the skeleton on a first load, the last good read on a refresh — under an
+  # error that says so.
+  def handle_async(:board, {:exit, reason}, socket) do
+    socket
+    |> assign(:board_error, load_error(reason))
+    |> board_read_done()
+  end
+
   # ---- toolbar --------------------------------------------------------------
 
   @impl true
   def handle_event("filter", %{"filter" => filter}, socket),
     do: {:noreply, assign(socket, :filter, filter)}
+
+  def handle_event("retry_board", _params, socket),
+    do: {:noreply, socket |> assign(:board_error, nil) |> refresh_board()}
 
   def handle_event("workspace", %{"workspace" => id}, socket),
     do: {:noreply, assign(socket, :workspace, id)}
@@ -454,7 +492,7 @@ defmodule ArbiterWeb.BoardLive do
   # ---- reads ----------------------------------------------------------------
 
   # The board the *scheduler* sees, so the reasons on screen are the reasons it
-  # is acting on — but derived *here*, in this LiveView, not fetched from the
+  # is acting on — but derived by this LiveView, not fetched from the
   # autopilot. The only thing that process contributes to a board read is the
   # pause flag, and asking it for the whole snapshot would put every open
   # board behind one mailbox: behind each other, and behind whatever the
@@ -464,34 +502,63 @@ defmodule ArbiterWeb.BoardLive do
   #
   # When the autopilot isn't running at all there is nothing to drain the
   # queue, which is exactly what `paused: true` renders.
+  #
+  # Every read runs in `start_async/3` (bd-15bn6s): a snapshot is 280–400ms of
+  # SQL, and this process has to go on answering clicks, ticks and broadcasts
+  # meanwhile. At most one read is out at a time. Whatever asks for a refresh
+  # while one is out marks the board stale, and the stale board gets exactly
+  # one more read when the current one lands — so a burst of lifecycle
+  # broadcasts costs two reads, not one each, and the second read sees
+  # everything the burst changed, `ready_order` included.
+  defp refresh_board(%{assigns: %{board_loading?: true}} = socket),
+    do: assign(socket, :board_stale?, true)
+
   defp refresh_board(socket) do
+    ready_order = socket.assigns.ready_order
+
+    socket
+    |> assign(:board_loading?, true)
+    |> assign(:board_stale?, false)
+    |> start_async(:board, fn -> load_board(ready_order) end)
+  end
+
+  defp board_read_done(socket) do
+    socket = assign(socket, :board_loading?, false)
+
+    {:noreply, if(socket.assigns.board_stale?, do: refresh_board(socket), else: socket)}
+  end
+
+  # Runs in the async task. A raise or exit in here is the task's, and comes
+  # back to `handle_async/3` as `{:exit, reason}`.
+  #
+  # The task is linked to this view, so a tab closed mid-read would kill it
+  # mid-query — and a DB client that dies holding a checkout costs the pool
+  # that connection (under test, the one shared sandbox connection,
+  # bd-5scl0c). Trapping turns the view's exit into a message: the query in
+  # flight finishes, and the task goes before it starts another.
+  defp load_board(ready_order) do
+    Process.flag(:trap_exit, true)
     running? = scheduler_running?()
     paused? = not running? or scheduler_paused?()
 
-    opts = [
-      now: DateTime.utc_now(),
-      ready_order: socket.assigns.ready_order,
-      paused: paused?
-    ]
+    board = Snapshot.load(now: DateTime.utc_now(), ready_order: ready_order, paused: paused?)
+    exit_if_view_gone()
+    workspaces = load_workspaces()
+    exit_if_view_gone()
 
-    board = read_board(opts, socket.assigns.now)
-
-    socket
-    |> assign(:board, board)
-    |> assign(:scheduler_running, running?)
-    |> assign(:now, board.now)
+    %{board: board, scheduler_running: running?, workspaces: workspaces}
   end
 
-  # A read that raises must not take the page down — four empty columns and a
-  # `paused` board say "we cannot see anything right now", which is true and
-  # is the only honest thing to render.
-  defp read_board(opts, now) do
-    Snapshot.load(opts)
-  rescue
-    _ -> Snapshot.empty(now)
-  catch
-    :exit, _ -> Snapshot.empty(now)
+  defp exit_if_view_gone do
+    receive do
+      {:EXIT, _view, _reason} -> exit(:shutdown)
+    after
+      0 -> :ok
+    end
   end
+
+  defp load_error({%{__exception__: true} = error, _stacktrace}), do: Exception.message(error)
+  defp load_error(reason), do: Exception.format_exit(reason)
 
   defp scheduler_running? do
     Autopilot.running?(Autopilot)
@@ -525,15 +592,13 @@ defmodule ArbiterWeb.BoardLive do
     :exit, _ -> true
   end
 
-  defp load_workspaces(socket) do
-    workspaces =
-      try do
-        Arbiter.Tasks.Workspace |> Ash.read!() |> Enum.sort_by(& &1.name)
-      rescue
-        _ -> []
-      end
-
-    assign(socket, :workspaces, workspaces)
+  # The workspace picker rides along with every board read, so a workspace
+  # added since the page opened shows up in it. Its failure is not the
+  # board's: an empty picker still leaves "all workspaces".
+  defp load_workspaces do
+    Arbiter.Tasks.Workspace |> Ash.read!() |> Enum.sort_by(& &1.name)
+  rescue
+    _ -> []
   end
 
   # ---- view-level filtering -------------------------------------------------
@@ -667,6 +732,18 @@ defmodule ArbiterWeb.BoardLive do
   defp quota_note({:hold, reason}), do: reason
   defp quota_note(_), do: nil
 
+  defp board_state(_loaded?, error) when is_binary(error), do: "error"
+  defp board_state(true, nil), do: "loaded"
+  defp board_state(false, nil), do: "loading"
+
+  # A few placeholder cards per skeleton column, uneven so it reads as a
+  # board rather than a grid.
+  defp skeleton_cards("backlog"), do: ["h-[62px]", "h-[62px]"]
+  defp skeleton_cards("ready"), do: ["h-[74px]", "h-[74px]", "h-[74px]"]
+  defp skeleton_cards("running"), do: ["h-[92px]", "h-[92px]"]
+  defp skeleton_cards("waiting"), do: ["h-[74px]"]
+  defp skeleton_cards(_), do: ["h-[62px]", "h-[62px]", "h-[62px]"]
+
   defp scheduler_label(%{paused: true}), do: "paused"
   defp scheduler_label(_), do: "auto"
 
@@ -702,6 +779,8 @@ defmodule ArbiterWeb.BoardLive do
         <div
           id="board"
           class="border border-solid border-[var(--border-default)] rounded-[var(--radius-panel)] overflow-hidden bg-[var(--surface-page)]"
+          data-state={board_state(@board_loaded?, @board_error)}
+          aria-busy={to_string(not @board_loaded? and is_nil(@board_error))}
         >
           <%!-- ── Toolbar ─────────────────────────────────────────────── --%>
           <div class="flex flex-wrap items-center gap-3 py-2 px-4 border-b border-solid border-[var(--border-default)] bg-[var(--arb-canvas-sunken)]">
@@ -733,13 +812,23 @@ defmodule ArbiterWeb.BoardLive do
 
             <span class="ml-auto flex flex-wrap items-center gap-2.5">
               <span
+                :if={@board_loaded?}
                 id="board-slots"
                 class="hidden sm:inline text-[11px] text-[var(--text-label)] font-[family-name:var(--font-mono)]"
               >
                 agents live: {agents_live(@board)} · slots used: {slots_used(@board)} of {@board.slots_total} · {@board.slots_free} slots free
               </span>
+              <span
+                :if={not @board_loaded?}
+                aria-hidden="true"
+                class="hidden sm:inline-block w-[260px] h-[6px] rounded-[var(--radius-pill)] bg-[var(--border-default)] animate-pulse"
+              >
+              </span>
 
+              <%!-- Until the first read lands there is no scheduler state to
+                   show, and a "paused" guess would be a claim. --%>
               <button
+                :if={@board_loaded?}
                 id="board-scheduler-toggle"
                 type="button"
                 phx-click="toggle_scheduler"
@@ -773,8 +862,69 @@ defmodule ArbiterWeb.BoardLive do
             </span>
           </div>
 
+          <%!-- ── Load error ──────────────────────────────────────────
+               A failed read, first or refresh. Whatever board was on
+               screen stays under it (bd-15bn6s). --%>
+          <div
+            :if={@board_error}
+            id="board-error"
+            role="alert"
+            class="flex items-start gap-2 px-4 py-2.5 border-b border-solid border-[var(--arb-fail-edge)] bg-[var(--arb-fail-wash)] text-[12px] text-[var(--arb-fail-text)]"
+          >
+            <.icon name="hero-exclamation-triangle-micro" class="size-4 shrink-0 mt-px" />
+            <span class="grow min-w-0 break-words">
+              Could not load the board: {@board_error}<span :if={@board_loaded?}>
+                — showing the last board that loaded.</span>
+            </span>
+            <button
+              type="button"
+              id="board-retry"
+              phx-click="retry_board"
+              class={[
+                "shrink-0 px-2 h-[22px] rounded-[var(--radius-field)] cursor-pointer",
+                "border border-solid border-[var(--arb-fail-edge)] bg-[var(--surface-chrome)]",
+                "text-[11px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
+              ]}
+            >
+              Retry
+            </button>
+          </div>
+
+          <%!-- ── Skeleton ────────────────────────────────────────────
+               The first read is out: the five columns, with nothing claimed
+               about what is in them. --%>
+          <div
+            :if={not @board_loaded? and is_nil(@board_error)}
+            id="board-loading"
+            aria-label="Loading the board"
+            class="flex overflow-x-auto snap-x snap-mandatory gap-px bg-[var(--arb-line-soft)] min-h-[560px] xl:grid xl:grid-cols-5"
+          >
+            <div
+              :for={column <- @columns}
+              id={"board-loading-#{column.key}"}
+              class="flex-shrink-0 w-[85vw] md:w-72 snap-start bg-[var(--surface-page)] px-3 pt-3 pb-4 flex flex-col gap-[9px] xl:w-auto"
+            >
+              <.column_head label={column.label} count="·" tone={column.tone} />
+              <div
+                :for={height <- skeleton_cards(column.key)}
+                aria-hidden="true"
+                class={[
+                  "rounded-[var(--radius-field)] border border-solid border-[var(--arb-line-soft)]",
+                  "bg-[var(--surface-card)] px-[11px] py-[10px] flex flex-col gap-2 animate-pulse",
+                  height
+                ]}
+              >
+                <span class="w-3/4 h-[6px] rounded-[var(--radius-pill)] bg-[var(--border-default)]">
+                </span>
+                <span class="w-1/2 h-[6px] rounded-[var(--radius-pill)] bg-[var(--border-default)]">
+                </span>
+              </div>
+            </div>
+          </div>
+
           <%!-- ── Columns ─────────────────────────────────────────────── --%>
           <div
+            :if={@board_loaded?}
             id="board-columns"
             phx-hook=".BoardDrag"
             class="flex overflow-x-auto snap-x snap-mandatory gap-px bg-[var(--arb-line-soft)] min-h-[560px] xl:grid xl:grid-cols-5"

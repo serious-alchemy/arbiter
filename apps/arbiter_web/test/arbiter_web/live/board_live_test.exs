@@ -32,7 +32,12 @@ defmodule ArbiterWeb.BoardLiveTest do
 
   import Phoenix.LiveViewTest
 
+  # The board loads by start_async (bd-15bn6s) and a real Snapshot.load can
+  # outrun render_async's 100ms default under a loaded suite.
+  @async_timeout 5_000
+
   alias Arbiter.Board.Autopilot
+  alias Arbiter.Board.Snapshot
   alias Arbiter.Tasks.{Dependency, Issue, Workspace}
   alias Arbiter.Worker
   alias ArbiterWeb.BoardLiveTest.BoardMerger
@@ -87,8 +92,18 @@ defmodule ArbiterWeb.BoardLiveTest do
 
   # The one gesture the client reports: this card, out of that column, into
   # this one. The board decides what — if anything — that means.
-  defp drag(view, id, from, to),
-    do: render_hook(view, "drag", %{"id" => id, "from" => from, "to" => to})
+  # Returns the page as it stands once the refresh the drag asked for lands.
+  defp drag(view, id, from, to) do
+    render_hook(view, "drag", %{"id" => id, "from" => from, "to" => to})
+    render_async(view, @async_timeout)
+  end
+
+  # The board arrives by `start_async/3` after the connected mount (bd-15bn6s);
+  # everything but the async tests themselves wants the page once it has.
+  defp live_board(conn) do
+    {:ok, view, _html} = live(conn, "/")
+    {:ok, view, render_async(view, @async_timeout)}
+  end
 
   # A worker parked at :awaiting — the escalation case that flags in Waiting.
   defp parked_worker(ws, task) do
@@ -119,7 +134,7 @@ defmodule ArbiterWeb.BoardLiveTest do
 
   describe "columns" do
     test "renders the five stage columns", %{conn: conn} do
-      {:ok, view, html} = live(conn, "/")
+      {:ok, view, html} = live_board(conn)
 
       assert html =~ "Backlog"
       assert html =~ "Ready"
@@ -140,14 +155,14 @@ defmodule ArbiterWeb.BoardLiveTest do
     test "an open issue nobody is working shows up in Ready", %{conn: conn, ws: ws} do
       task = issue(ws, "collapse duplicate status helpers")
 
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live_board(conn)
 
       assert html =~ task.id
       assert html =~ "collapse duplicate status helpers"
     end
 
     test "the mine/all toggle is not rendered (Arbiter is single-user)", %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live_board(conn)
 
       refute has_element?(view, ~s(button[phx-click="scope"]))
       refute has_element?(view, ~s(button[phx-value-option="mine"]))
@@ -158,7 +173,7 @@ defmodule ArbiterWeb.BoardLiveTest do
       task = issue(ws, "already landed")
       {:ok, _} = Ash.update(task, %{}, action: :close)
 
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live_board(conn)
 
       assert has_element?(view, ~s(#board-column-closed [id="card-#{task.id}"]))
       refute has_element?(view, ~s(#board-column-ready [id="card-#{task.id}"]))
@@ -173,7 +188,7 @@ defmodule ArbiterWeb.BoardLiveTest do
       {:ok, _} = Ash.update(epic, %{}, action: :close)
       {:ok, _} = Ash.update(task, %{}, action: :close)
 
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live_board(conn)
 
       assert has_element?(view, ~s(#board-column-closed [id="card-#{task.id}"]))
       refute has_element?(view, ~s([id="card-#{epic.id}"]))
@@ -188,7 +203,7 @@ defmodule ArbiterWeb.BoardLiveTest do
       task = issue(ws, "the terminal channel")
       {:ok, _} = Arbiter.Tasks.Dependencies.add(epic.id, task.id, :parent_of)
 
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live_board(conn)
 
       chip = ~s([id="card-#{task.id}"] [data-role="parent-chip"])
 
@@ -201,7 +216,7 @@ defmodule ArbiterWeb.BoardLiveTest do
     test "a card whose issue has no parent shows no chip", %{conn: conn, ws: ws} do
       task = issue(ws, "an orphan of no epic")
 
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live_board(conn)
 
       assert has_element?(view, ~s([id="card-#{task.id}"]))
       refute has_element?(view, ~s([id="card-#{task.id}"] [data-role="parent-chip"]))
@@ -222,7 +237,7 @@ defmodule ArbiterWeb.BoardLiveTest do
     } do
       task = issue(ws, "collapse duplicate status helpers")
 
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live_board(conn)
 
       assert has_element?(
                view,
@@ -257,7 +272,7 @@ defmodule ArbiterWeb.BoardLiveTest do
     test "Backlog card body navigates to the task page", %{conn: conn, ws: ws} do
       task = backlog_issue(ws, "half an idea")
 
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live_board(conn)
 
       assert card_navigates_to?(view, task.id, "/tasks/#{task.id}")
     end
@@ -265,7 +280,7 @@ defmodule ArbiterWeb.BoardLiveTest do
     test "Ready card body navigates to the task page", %{conn: conn, ws: ws} do
       task = issue(ws, "queued work")
 
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live_board(conn)
 
       assert card_navigates_to?(view, task.id, "/tasks/#{task.id}")
     end
@@ -277,7 +292,7 @@ defmodule ArbiterWeb.BoardLiveTest do
       task = issue(ws, "in flight")
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)
 
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live_board(conn)
 
       assert card_navigates_to?(view, task.id, "/tasks/#{task.id}")
       refute card_navigates_to?(view, task.id, "/workers/#{task.id}")
@@ -290,7 +305,7 @@ defmodule ArbiterWeb.BoardLiveTest do
       task = working_issue(ws, "still in review")
       merge_worker(ws, task)
 
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live_board(conn)
 
       assert card_navigates_to?(view, task.id, "/tasks/#{task.id}")
     end
@@ -299,7 +314,7 @@ defmodule ArbiterWeb.BoardLiveTest do
       task = issue(ws, "already landed")
       {:ok, _} = Ash.update(task, %{}, action: :close)
 
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live_board(conn)
 
       assert card_navigates_to?(view, task.id, "/tasks/#{task.id}")
     end
@@ -311,7 +326,7 @@ defmodule ArbiterWeb.BoardLiveTest do
       waiting = working_issue(ws, "waiting card")
       merge_worker(ws, waiting)
 
-      {:ok, view, html} = live(conn, "/")
+      {:ok, view, html} = live_board(conn)
 
       refute Regex.match?(~r/<a\b[^>]*>(?:(?!<\/a>).)*<a\b/s, html)
 
@@ -326,7 +341,7 @@ defmodule ArbiterWeb.BoardLiveTest do
       task = issue(ws, "in flight")
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)
 
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live_board(conn)
 
       assert has_element?(
                view,
@@ -340,7 +355,7 @@ defmodule ArbiterWeb.BoardLiveTest do
       task = working_issue(ws, "doctor probe")
       {:ok, task} = Ash.update(task, %{}, action: :await_verification)
 
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live_board(conn)
 
       assert has_element?(
                view,
@@ -366,7 +381,7 @@ defmodule ArbiterWeb.BoardLiveTest do
           watchdog_start_error: true
         })
 
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live_board(conn)
 
       assert has_element?(view, ~s([id="card-#{dead.id}"] a[href="/workers/#{dead.id}"]))
     end
@@ -375,7 +390,7 @@ defmodule ArbiterWeb.BoardLiveTest do
       task = working_issue(ws, "under review")
       merge_worker(ws, task)
 
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live_board(conn)
 
       assert has_element?(view, ~s([id="card-#{task.id}"] a[href="/merge_queue"]))
     end
@@ -387,7 +402,7 @@ defmodule ArbiterWeb.BoardLiveTest do
       task = issue(ws, "needs an answer")
       parked_worker(ws, task)
 
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live_board(conn)
 
       assert has_element?(view, ~s([id="card-#{task.id}"] a[href="/workers/#{task.id}"]))
     end
@@ -399,7 +414,7 @@ defmodule ArbiterWeb.BoardLiveTest do
     test "a brand-new issue lands in Backlog, not Ready", %{conn: conn, ws: ws} do
       task = backlog_issue(ws, "half an idea")
 
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live_board(conn)
 
       assert has_element?(view, ~s(#board-column-backlog [id="card-#{task.id}"]))
       refute has_element?(view, ~s(#board-column-ready [id="card-#{task.id}"]))
@@ -409,7 +424,7 @@ defmodule ArbiterWeb.BoardLiveTest do
       task = backlog_issue(ws, "now refined")
       {:ok, _} = Ash.update(task, %{}, action: :promote_to_ready)
 
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live_board(conn)
 
       assert has_element?(view, ~s(#board-column-ready [id="card-#{task.id}"]))
       refute has_element?(view, ~s(#board-column-backlog [id="card-#{task.id}"]))
@@ -418,7 +433,7 @@ defmodule ArbiterWeb.BoardLiveTest do
     test "an unrefined card never claims the head of the queue", %{conn: conn, ws: ws} do
       backlog_issue(ws, "unrefined")
 
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live_board(conn)
 
       refute html =~ "next up — dispatching"
     end
@@ -427,7 +442,7 @@ defmodule ArbiterWeb.BoardLiveTest do
       first = backlog_issue(ws, "thought one")
       second = backlog_issue(ws, "thought two")
 
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live_board(conn)
 
       assert board_position(html, second.id) < board_position(html, first.id)
     end
@@ -436,7 +451,7 @@ defmodule ArbiterWeb.BoardLiveTest do
       keep = backlog_issue(ws, "caching strategy")
       drop = backlog_issue(ws, "unrelated")
 
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live_board(conn)
       html = render_change(view, "filter", %{"filter" => "caching"})
 
       assert html =~ keep.id
@@ -448,7 +463,7 @@ defmodule ArbiterWeb.BoardLiveTest do
     test "the head of an idle queue says it is next up", %{conn: conn, ws: ws} do
       issue(ws, "first in line")
 
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live_board(conn)
 
       assert html =~ "next up"
     end
@@ -457,7 +472,7 @@ defmodule ArbiterWeb.BoardLiveTest do
       issue(ws, "leader", %{priority: 1})
       issue(ws, "follower", %{priority: 3})
 
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live_board(conn)
 
       assert html =~ "1 ahead in queue"
     end
@@ -476,7 +491,7 @@ defmodule ArbiterWeb.BoardLiveTest do
           type: :depends_on
         })
 
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live_board(conn)
 
       assert html =~ "blocked"
       assert html =~ blocker.id
@@ -496,7 +511,7 @@ defmodule ArbiterWeb.BoardLiveTest do
           type: :conflicts_with
         })
 
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live_board(conn)
 
       assert html =~ "conflicts with #{first.id}"
       assert html =~ "(dispatching)"
@@ -508,7 +523,7 @@ defmodule ArbiterWeb.BoardLiveTest do
     test "a Ready card offers the demote button", %{conn: conn, ws: ws} do
       task = issue(ws, "ready now")
 
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live_board(conn)
 
       assert has_element?(
                view,
@@ -519,7 +534,7 @@ defmodule ArbiterWeb.BoardLiveTest do
     test "clicking the demote button returns the card to Backlog", %{conn: conn, ws: ws} do
       task = issue(ws, "demote me")
 
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live_board(conn)
 
       _html =
         view
@@ -527,6 +542,8 @@ defmodule ArbiterWeb.BoardLiveTest do
           ~s(#board-column-ready [id="card-#{task.id}"] button[phx-click="return_to_backlog"])
         )
         |> render_click()
+
+      render_async(view, @async_timeout)
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
       refute reloaded.refined
@@ -544,12 +561,12 @@ defmodule ArbiterWeb.BoardLiveTest do
       leader = issue(ws, "machine's pick", %{priority: 1})
       underdog = issue(ws, "operator's pick", %{priority: 4})
 
-      {:ok, view, html} = live(conn, "/")
+      {:ok, view, html} = live_board(conn)
       assert html =~ "next up"
 
       render_hook(view, "reorder_ready", %{"order" => [underdog.id, leader.id]})
 
-      html = render(view)
+      html = render_async(view, @async_timeout)
       # The operator's card now leads: it carries the promotion reason and the
       # machine's pick has fallen in behind it.
       assert html =~ ~s(id="card-#{underdog.id}")
@@ -559,11 +576,11 @@ defmodule ArbiterWeb.BoardLiveTest do
     test "an id that is no longer Ready is ignored rather than fatal", %{conn: conn, ws: ws} do
       task = issue(ws, "still here")
 
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live_board(conn)
 
       render_hook(view, "reorder_ready", %{"order" => ["bd-vanished", task.id]})
 
-      assert render(view) =~ task.id
+      assert render_async(view, @async_timeout) =~ task.id
     end
   end
 
@@ -571,7 +588,7 @@ defmodule ArbiterWeb.BoardLiveTest do
     test "dragging a card INTO Running is refused with an explanation", %{conn: conn, ws: ws} do
       task = issue(ws, "impatient")
 
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live_board(conn)
 
       html = drag(view, task.id, "ready", "running")
 
@@ -588,7 +605,7 @@ defmodule ArbiterWeb.BoardLiveTest do
       task = issue(ws, "in flight")
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)
 
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live_board(conn)
 
       html = drag(view, task.id, "running", "ready")
 
@@ -606,7 +623,7 @@ defmodule ArbiterWeb.BoardLiveTest do
       task = issue(ws, "picked up, thought better of it")
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)
 
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live_board(conn)
 
       html = drag(view, task.id, "running", "running")
 
@@ -621,7 +638,7 @@ defmodule ArbiterWeb.BoardLiveTest do
       task = issue(ws, "leave me be")
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)
 
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live_board(conn)
       drag(view, task.id, "running", "ready")
 
       view |> element(~s(button[phx-click="cancel_stop"])) |> render_click()
@@ -635,7 +652,7 @@ defmodule ArbiterWeb.BoardLiveTest do
       task = issue(ws, "work with difficulty", %{difficulty: 2})
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)
 
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live_board(conn)
 
       assert has_element?(
                view,
@@ -647,7 +664,7 @@ defmodule ArbiterWeb.BoardLiveTest do
       task = issue(ws, "no difficulty set")
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)
 
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live_board(conn)
 
       assert html =~ task.id
     end
@@ -657,7 +674,7 @@ defmodule ArbiterWeb.BoardLiveTest do
       {:ok, pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)
       :ok = Worker.report(pid, :provider, "codex")
 
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live_board(conn)
 
       assert has_element?(
                view,
@@ -691,7 +708,7 @@ defmodule ArbiterWeb.BoardLiveTest do
       dead = working_issue(ws, "nobody is watching this")
       merge_worker_without_watchdog(ws, dead)
 
-      {:ok, view, html} = live(conn, "/")
+      {:ok, view, html} = live_board(conn)
 
       assert has_element?(view, ~s(#board-column-waiting [id="card-#{dead.id}"]))
       assert html =~ "no watchdog"
@@ -706,7 +723,7 @@ defmodule ArbiterWeb.BoardLiveTest do
       polling = working_issue(ws, "still in review")
       merge_worker(ws, polling)
 
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live_board(conn)
 
       refute html =~ "no watchdog"
     end
@@ -730,7 +747,7 @@ defmodule ArbiterWeb.BoardLiveTest do
 
       :ok = Worker.fail(fixpass, "fix pass blew up")
 
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live_board(conn)
 
       assert has_element?(view, ~s(#board-column-waiting [id="card-#{task.id}"]))
 
@@ -747,7 +764,7 @@ defmodule ArbiterWeb.BoardLiveTest do
       merging = working_issue(ws, "land it later")
       merge_worker(ws, merging)
 
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live_board(conn)
 
       assert has_element?(view, ~s(#board-column-waiting [id="card-#{parked.id}"]))
       assert has_element?(view, ~s(#board-column-waiting [id="card-#{merging.id}"]))
@@ -770,7 +787,7 @@ defmodule ArbiterWeb.BoardLiveTest do
           block_reason: :conflict
         })
 
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live_board(conn)
 
       assert has_element?(view, ~s([id="card-#{parked.id}"] [data-needs-you]))
       assert has_element?(view, ~s([id="card-#{stuck.id}"] [data-needs-you]))
@@ -782,7 +799,7 @@ defmodule ArbiterWeb.BoardLiveTest do
       task = working_issue(ws, "answer was: redo it")
       parked_worker(ws, task)
 
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live_board(conn)
       assert has_element?(view, ~s(#board-column-waiting [id="card-#{task.id}"]))
 
       html = drag(view, task.id, "waiting", "ready")
@@ -806,7 +823,7 @@ defmodule ArbiterWeb.BoardLiveTest do
       task = working_issue(ws, "answer was: carry on")
       pid = parked_worker(ws, task)
 
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live_board(conn)
 
       html = drag(view, task.id, "waiting", "closed")
 
@@ -841,7 +858,7 @@ defmodule ArbiterWeb.BoardLiveTest do
       {:ok, holder_pid} = Worker.start(task_id: holder.id, repo: "r", workspace_id: ws.id)
       :ok = Worker.advance(holder_pid, :implement)
 
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live_board(conn)
 
       html = drag(view, parked.id, "waiting", "closed")
 
@@ -859,7 +876,7 @@ defmodule ArbiterWeb.BoardLiveTest do
       pid = parked_worker(ws, task)
       :ok = Worker.fail(pid, :review_rejected)
 
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live_board(conn)
 
       html = drag(view, task.id, "waiting", "closed")
 
@@ -874,7 +891,7 @@ defmodule ArbiterWeb.BoardLiveTest do
       task = working_issue(ws, "land it later")
       merge_worker(ws, task)
 
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live_board(conn)
 
       html = drag(view, task.id, "waiting", "closed")
       Process.sleep(80)
@@ -953,7 +970,7 @@ defmodule ArbiterWeb.BoardLiveTest do
           block_reason: :behind_base
         })
 
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live_board(conn)
 
       # The key assertion: rendering doesn't crash when merger_status is a populated map.
       # All cards appear in the board, proving the render succeeded.
@@ -989,7 +1006,7 @@ defmodule ArbiterWeb.BoardLiveTest do
     test "a parked task renders a Waiting card with its age and needs-you", %{conn: conn, ws: ws} do
       task = awaiting_issue(ws, "doctor probe")
 
-      {:ok, view, html} = live(conn, "/")
+      {:ok, view, html} = live_board(conn)
 
       assert has_element?(view, ~s(#board-column-waiting [id="card-#{task.id}"]))
       assert html =~ "awaiting verification"
@@ -1002,7 +1019,7 @@ defmodule ArbiterWeb.BoardLiveTest do
     test "dragging it out points at the verify verb instead of guessing", %{conn: conn, ws: ws} do
       task = awaiting_issue(ws, "capture path")
 
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live_board(conn)
 
       html = drag(view, task.id, "waiting", "closed")
       assert html =~ "arb issue verify"
@@ -1016,7 +1033,7 @@ defmodule ArbiterWeb.BoardLiveTest do
     test "dropping onto Closed today changes nothing and says nothing", %{conn: conn, ws: ws} do
       task = issue(ws, "not done yet")
 
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live_board(conn)
 
       drag(view, task.id, "ready", "closed")
 
@@ -1029,15 +1046,15 @@ defmodule ArbiterWeb.BoardLiveTest do
     test "pausing is visible on every Ready card", %{conn: conn, ws: ws} do
       issue(ws, "would have gone next")
 
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live_board(conn)
 
-      html = view |> element(~s(button[phx-click="toggle_scheduler"])) |> render_click()
+      view |> element(~s(button[phx-click="toggle_scheduler"])) |> render_click()
 
-      assert html =~ "scheduler paused"
+      assert render_async(view, @async_timeout) =~ "scheduler paused"
     end
 
     test "scheduler toggle button has cursor-pointer class", %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live_board(conn)
 
       assert has_element?(view, ~s(#board-scheduler-toggle.cursor-pointer))
     end
@@ -1045,7 +1062,7 @@ defmodule ArbiterWeb.BoardLiveTest do
 
   describe "toolbar" do
     test "reports the fleet's slot arithmetic", %{conn: conn} do
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live_board(conn)
 
       assert html =~ "slots free"
     end
@@ -1060,7 +1077,7 @@ defmodule ArbiterWeb.BoardLiveTest do
       task = working_issue(ws, "parked on its MR")
       merge_worker(ws, task)
 
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live_board(conn)
 
       assert html =~ "agents live: 0"
       assert html =~ "slots used: 1"
@@ -1070,7 +1087,7 @@ defmodule ArbiterWeb.BoardLiveTest do
       keep = issue(ws, "keep this one")
       drop = issue(ws, "unrelated work")
 
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live_board(conn)
 
       html =
         view
@@ -1093,7 +1110,7 @@ defmodule ArbiterWeb.BoardLiveTest do
 
   describe "mobile horizontal scrolling layout" do
     test "board columns container uses flexbox with horizontal scrolling", %{conn: conn} do
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live_board(conn)
 
       # Verify the board-columns div has flex and overflow-x-auto for horizontal scrolling
       assert html =~ ~s(id="board-columns")
@@ -1102,7 +1119,7 @@ defmodule ArbiterWeb.BoardLiveTest do
 
     test "each column div has fixed width and prevents shrinking", %{conn: conn, ws: ws} do
       issue(ws, "test issue")
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live_board(conn)
 
       # Each column should have flex-shrink-0 to maintain width while scrolling
       # and a responsive width (w-[85vw] on mobile, md:w-72 on desktop)
@@ -1112,7 +1129,7 @@ defmodule ArbiterWeb.BoardLiveTest do
     end
 
     test "toolbar dropdowns are responsive and do not have fixed widths", %{conn: conn} do
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live_board(conn)
 
       # Verify the toolbar form inputs don't have restrictive fixed widths
       assert html =~ ~s(id="board-workspace-form")
@@ -1123,7 +1140,7 @@ defmodule ArbiterWeb.BoardLiveTest do
     end
 
     test "toolbar wraps on narrow viewports instead of overflowing", %{conn: conn} do
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live_board(conn)
 
       # The toolbar outer container must wrap items to multiple rows on mobile
       assert html =~ ~s(id="board" class="border border-solid)
@@ -1140,7 +1157,7 @@ defmodule ArbiterWeb.BoardLiveTest do
 
     test "columns fill the full width on xl breakpoint and above", %{conn: conn, ws: ws} do
       issue(ws, "test issue")
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live_board(conn)
 
       # The board-columns container must switch to grid layout on xl:
       # xl:grid switches display from flex to grid at that breakpoint
@@ -1179,7 +1196,7 @@ defmodule ArbiterWeb.BoardLiveTest do
       spend!(over.id, ws, 40.0)
       spend!(fine.id, ws, 4.0)
 
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live_board(conn)
 
       assert has_element?(view, ~s([id="card-#{over.id}"] [data-over-budget]))
       refute has_element?(view, ~s([id="card-#{fine.id}"] [data-over-budget]))
@@ -1190,10 +1207,193 @@ defmodule ArbiterWeb.BoardLiveTest do
       spend!(task.id, ws, 40.0)
       {:ok, closed} = Ash.update(task, %{close_upstream: false}, action: :close)
 
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live_board(conn)
 
       assert has_element?(view, ~s([id="card-#{closed.id}"]))
       refute has_element?(view, ~s([id="card-#{closed.id}"] [data-over-budget]))
+    end
+  end
+
+  # bd-15bn6s: the snapshot is a 280–400ms read, and this is the landing page.
+  # It runs in `start_async/3` on the connected mount only — the dead render
+  # reads nothing and draws a skeleton board — and every later refresh goes
+  # the same way, so a slow read can never hold the LiveView process.
+  describe "the async load" do
+    setup do
+      :meck.new(Snapshot, [:passthrough, :no_link])
+      on_exit(fn -> :meck.unload(Snapshot) end)
+      :ok
+    end
+
+    # Redirects the board's `Snapshot.load/1` to `fun`. The autopilot reads the
+    # same function from its own (VM-wide) process; that read passes through.
+    defp on_board_load(fun) do
+      autopilot = Process.whereis(Autopilot)
+
+      :meck.expect(Snapshot, :load, fn opts ->
+        if self() == autopilot, do: :meck.passthrough([opts]), else: fun.(opts)
+      end)
+    end
+
+    # Holds each board read in its loader until the test says go, so the
+    # loading state is something to assert on rather than a race. A read no
+    # test released gives up well inside @async_timeout and reports itself,
+    # so the test fails on `refute_held_load/0`, not on a render_async timeout.
+    defp hold_board_load do
+      test = self()
+
+      on_board_load(fn opts ->
+        board = :meck.passthrough([opts])
+        send(test, {:loading_board, self()})
+
+        receive do
+          :release -> :ok
+        after
+          1_000 -> send(test, {:unreleased_board_load, self()})
+        end
+
+        board
+      end)
+    end
+
+    # The LiveView has handled everything sent to it before this returns.
+    defp settle(view), do: :sys.get_state(view.pid)
+
+    defp refute_held_load, do: refute_received({:unreleased_board_load, _})
+
+    test "the dead render shows the loading state and reads nothing", %{conn: conn} do
+      test = self()
+
+      on_board_load(fn opts ->
+        send(test, :board_read)
+        :meck.passthrough([opts])
+      end)
+
+      doc = conn |> get(~p"/") |> html_response(200) |> LazyHTML.from_document()
+
+      assert doc |> LazyHTML.query(~s(#board[data-state="loading"])) |> Enum.count() == 1
+      assert doc |> LazyHTML.query("#board-loading") |> Enum.count() == 1
+      refute_received :board_read
+    end
+
+    test "renders a skeleton board, then the snapshot", %{conn: conn, ws: ws} do
+      task = issue(ws, "arrives with the snapshot")
+      hold_board_load()
+
+      {:ok, view, _html} = live(conn, "/")
+      assert_receive {:loading_board, loader}
+
+      assert has_element?(view, ~s(#board[data-state="loading"]))
+      assert has_element?(view, "#board-loading")
+      refute has_element?(view, "#card-#{task.id}")
+      refute has_element?(view, "#board-backlog-empty")
+
+      send(loader, :release)
+      render_async(view, @async_timeout)
+
+      assert has_element?(view, ~s(#board[data-state="loaded"]))
+      refute has_element?(view, "#board-loading")
+      assert has_element?(view, "#card-#{task.id}")
+      refute_held_load()
+    end
+
+    @tag :capture_log
+    test "a failed load renders an inline error, and Retry recovers", %{conn: conn, ws: ws} do
+      task = issue(ws, "behind the error")
+      on_board_load(fn _opts -> raise "database is locked" end)
+
+      {:ok, view, _html} = live(conn, "/")
+      render_async(view, @async_timeout)
+
+      assert has_element?(view, ~s(#board[data-state="error"]))
+      assert has_element?(view, "#board-error", "database is locked")
+      refute has_element?(view, "#board-loading")
+
+      on_board_load(&:meck.passthrough([&1]))
+      view |> element("#board-retry") |> render_click()
+      render_async(view, @async_timeout)
+
+      refute has_element?(view, "#board-error")
+      assert has_element?(view, ~s(#board[data-state="loaded"]))
+      assert has_element?(view, "#card-#{task.id}")
+    end
+
+    @tag :capture_log
+    test "a refresh that fails keeps the last board on screen and says so", %{
+      conn: conn,
+      ws: ws
+    } do
+      task = issue(ws, "was on the board")
+
+      {:ok, view, _html} = live(conn, "/")
+      render_async(view, @async_timeout)
+      assert has_element?(view, "#card-#{task.id}")
+
+      on_board_load(fn _opts -> raise "database is locked" end)
+      send(view.pid, {:worker_lifecycle, :started, %{}})
+      settle(view)
+      render_async(view, @async_timeout)
+
+      assert has_element?(view, "#board-error", "database is locked")
+      assert has_element?(view, "#card-#{task.id}")
+    end
+
+    test "a lifecycle broadcast still refreshes the board", %{conn: conn, ws: ws} do
+      {:ok, view, _html} = live(conn, "/")
+      render_async(view, @async_timeout)
+
+      task = issue(ws, "created after the mount")
+      Phoenix.PubSub.broadcast(Arbiter.PubSub, "workers", {:worker_lifecycle, :started, %{}})
+      settle(view)
+      render_async(view, @async_timeout)
+
+      assert has_element?(view, "#card-#{task.id}")
+    end
+
+    # A tab closed mid-load must not kill its read mid-query: a DB client that
+    # dies holding a checkout costs the pool that connection (and, under test,
+    # the one shared sandbox connection — bd-5scl0c). The read finishes, and
+    # only then does the task go.
+    test "a board that goes away mid-load lets its read finish", %{conn: conn} do
+      hold_board_load()
+      Process.flag(:trap_exit, true)
+
+      {:ok, view, _html} = live(conn, "/")
+      assert_receive {:loading_board, loader}
+      loader_ref = Process.monitor(loader)
+      view_ref = Process.monitor(view.pid)
+
+      Process.exit(view.pid, :kill)
+      assert_receive {:DOWN, ^view_ref, :process, _pid, :killed}
+      refute_receive {:DOWN, ^loader_ref, :process, _pid, _reason}, 100
+
+      send(loader, :release)
+      assert_receive {:DOWN, ^loader_ref, :process, _pid, :shutdown}, @async_timeout
+      refute_held_load()
+    end
+
+    # bd-81vbzg's concern from the other side: a burst of broadcasts during a
+    # slow read is one more read, not one each — and the LiveView answers
+    # while the read is out.
+    test "broadcasts during a refresh coalesce into one more read", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/")
+      render_async(view, @async_timeout)
+
+      hold_board_load()
+      send(view.pid, {:worker_lifecycle, :started, %{}})
+      assert_receive {:loading_board, first}
+
+      for _ <- 1..5, do: send(view.pid, {:task_lifecycle, :updated, %{}})
+      settle(view)
+      assert has_element?(view, ~s(#board[data-state="loaded"]))
+
+      send(first, :release)
+      assert_receive {:loading_board, second}
+      send(second, :release)
+      render_async(view, @async_timeout)
+
+      refute_receive {:loading_board, _}, 200
+      refute_held_load()
     end
   end
 
