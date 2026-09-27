@@ -236,6 +236,22 @@ defmodule Arbiter.Accounts.ConcurrencyTest do
       assert Concurrency.account_headroom(account, mine) == 0
     end
 
+    test "exclude_task: leaves out the workers that task owns, and only those" do
+      ws = workspace!("hr-exclude")
+      account = account!(:claude, "hr-exclude", %{max_concurrent: 2})
+      link!(ws, :claude, account)
+
+      fake_worker(ws.id, "claude", key: "bd-own")
+      fake_worker(ws.id, "claude", key: "bd-own#review")
+      assert Concurrency.account_headroom(account, ws) == 0
+      assert Concurrency.account_headroom(account, ws, exclude_task: "bd-own") == 2
+
+      # A task whose id merely string-prefixes another is not its owner.
+      fake_worker(ws.id, "claude", key: "bd-own2")
+      assert Concurrency.account_headroom(account, ws, exclude_task: "bd-own") == 1
+      assert Concurrency.live_count(account, exclude_task: "bd-own") == 1
+    end
+
     test "accepts a workspace id as well as a workspace struct" do
       ws = workspace!("hr-by-id")
       account = account!(:claude, "hr-by-id", %{max_concurrent: 3})

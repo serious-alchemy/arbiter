@@ -383,6 +383,14 @@ defmodule Arbiter.Tasks.Issue do
       accept [:pending_merge]
     end
 
+    # bd-40pzpj: the implementer account/family provider routing picked at the
+    # task's first routed dispatch. Written only by
+    # `Arbiter.Agents.ProviderRouting`; no lifecycle broadcast.
+    update :pin_implementer do
+      require_atomic? false
+      accept [:implementer_account_id, :implementer_family]
+    end
+
     update :close do
       require_atomic? false
       argument :reason, :string
@@ -1271,6 +1279,28 @@ defmodule Arbiter.Tasks.Issue do
     end
 
     # ---- pending merge (bd-a370ak / #2002) ----------------------------------
+
+    attribute :implementer_account_id, :uuid do
+      allow_nil? true
+      public? true
+
+      description """
+      The provider account provider routing pinned this task's implementer to
+      (bd-40pzpj), set at the first dispatch routed by
+      `routing.provider_selection: most_quota`. Every implementer role —
+      resumes, ReviewGate implementer rounds, CI fix passes, conflict
+      resolvers — reuses it while it is available and falls back (recorded on
+      the run) when it is not. `nil` when the task was never routed.
+      """
+    end
+
+    attribute :implementer_family, :string do
+      allow_nil? true
+      public? true
+      constraints max_length: 64, trim?: true
+
+      description "Model family of the pinned implementer account (`Arbiter.Agents.ModelFamily`)."
+    end
 
     attribute :pending_merge, :map do
       allow_nil? true

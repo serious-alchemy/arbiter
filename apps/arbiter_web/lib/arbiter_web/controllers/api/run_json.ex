@@ -36,6 +36,11 @@ defmodule ArbiterWeb.Api.RunJSON do
       thinking: r.thinking,
       difficulty_at_dispatch: r.difficulty_at_dispatch,
       provider: r.provider,
+      provider_fallback: r.provider_fallback,
+      # bd-40pzpj: what provider routing chose and why (nil when not routed).
+      provider_account_id: r.provider_account_id,
+      model_family: r.model_family,
+      routing_decision: r.routing_decision,
       session_id: r.session_id,
       resumed_from_run_id: r.resumed_from_run_id
     }

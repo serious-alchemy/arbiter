@@ -1135,6 +1135,118 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
     end
   end
 
+  describe "provider routing on the run roster (bd-40pzpj)" do
+    setup %{ws: ws} do
+      account =
+        Ash.create!(Arbiter.Accounts.ProviderAccount, %{
+          provider: :codex,
+          slug: "work-#{System.unique_integer([:positive])}"
+        })
+
+      {:ok, task} = Ash.create(Issue, %{title: "routed", workspace_id: ws.id})
+
+      {:ok, task} =
+        task
+        |> Ash.Changeset.for_update(:pin_implementer, %{
+          implementer_account_id: account.id,
+          implementer_family: "openai"
+        })
+        |> Ash.update()
+
+      {:ok, routed} =
+        Ash.create(Run, %{
+          task_id: task.id,
+          repo: "test/repo",
+          worker_type: :fix_pass,
+          status: :completed,
+          started_at: ~U[2026-09-26 10:00:00.000000Z],
+          completed_at: ~U[2026-09-26 10:05:00.000000Z],
+          provider: "claude",
+          provider_fallback:
+            "pinned account codex:work unavailable (quota_held); fell back to claude:main",
+          model_family: "anthropic",
+          routing_decision: %{
+            "outcome" => "fallback",
+            "role" => "fix_pass",
+            "account_slug" => "main",
+            "provider" => "claude",
+            "family" => "anthropic",
+            "model" => "opus",
+            "fallback" =>
+              "pinned account codex:work unavailable (quota_held); fell back to claude:main",
+            "candidates" => [
+              %{
+                "account_slug" => "main",
+                "provider" => "claude",
+                "family" => "anthropic",
+                "headroom" => 0.6,
+                "window" => "5h"
+              }
+            ],
+            "dropped" => [
+              %{
+                "account_slug" => "work",
+                "provider" => "codex",
+                "reason" => "quota_held",
+                "detail" => "quota near exhaustion"
+              }
+            ]
+          }
+        })
+
+      {:ok, plain} =
+        Ash.create(Run, %{
+          task_id: task.id,
+          repo: "test/repo",
+          worker_type: :main,
+          status: :completed,
+          started_at: ~U[2026-09-26 09:00:00.000000Z],
+          completed_at: ~U[2026-09-26 09:05:00.000000Z]
+        })
+
+      {:ok, task: task, account: account, routed: routed, plain: plain}
+    end
+
+    test "the task's implementer pin is shown on the runs panel",
+         %{conn: conn, task: task, account: account} do
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+
+      assert has_element?(view, "#task-implementer-pin", account.slug)
+      assert has_element?(view, "#task-implementer-pin", "openai")
+    end
+
+    test "an expanded routed run shows the decision: chosen account, headroom, drops and fallback",
+         %{conn: conn, task: task, routed: routed} do
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+
+      refute has_element?(view, "#run-routing-#{routed.id}")
+      view |> element(~s([phx-value-run="#{routed.id}"])) |> render_click()
+
+      assert has_element?(view, "#run-routing-#{routed.id}", "fallback")
+      assert has_element?(view, "#run-routing-#{routed.id}", "claude:main")
+      assert has_element?(view, "#run-routing-#{routed.id}", "anthropic")
+      assert has_element?(view, "#run-routing-#{routed.id} [data-role=candidate]", "0.60")
+      assert has_element?(view, "#run-routing-#{routed.id} [data-role=dropped]", "quota_held")
+
+      assert has_element?(
+               view,
+               "#run-routing-#{routed.id} [data-role=fallback]",
+               "codex:work unavailable"
+             )
+    end
+
+    test "a run that was not routed shows no routing block", %{
+      conn: conn,
+      task: task,
+      plain: plain
+    } do
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      view |> element(~s([phx-value-run="#{plain.id}"])) |> render_click()
+
+      refute has_element?(view, "#run-routing-#{plain.id}")
+    end
+  end
+
   describe "run roster (absorbs the run index)" do
     setup %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "rostered", workspace_id: ws.id})

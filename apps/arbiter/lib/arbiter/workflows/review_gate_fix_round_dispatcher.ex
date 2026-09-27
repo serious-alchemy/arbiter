@@ -202,7 +202,9 @@ defmodule Arbiter.Workflows.ReviewGateFixRoundDispatcher do
         # (`meta[:slot_handoff]`), so the round re-enters its task uncapped —
         # the #1969/#1995 no-deadlock rule. Only a task that released its slot
         # meanwhile would be deferred, never refused.
-        resume_origin: :automatic
+        resume_origin: :automatic,
+        # bd-40pzpj: named on the routing decision the run records.
+        routing_role: :review_gate_fix_round
       ]
       |> maybe_put(:claude_command, Map.get(args, :claude_command))
 

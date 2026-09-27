@@ -89,7 +89,11 @@ defmodule ArbiterWeb.Api.RunController do
       :difficulty_at_dispatch,
       :provider,
       :session_id,
-      :resumed_from_run_id
+      :resumed_from_run_id,
+      :provider_fallback,
+      :provider_account_id,
+      :model_family,
+      :routing_decision
     ])
   end
 

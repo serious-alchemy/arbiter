@@ -159,6 +159,8 @@ defmodule Arbiter.Workflows.MergeQueue.AutoResumeDispatcher do
       opts
       |> Keyword.put(:awaiting_review_resume_attempts, attempt)
       |> Keyword.put(:resume_origin, :automatic)
+      # bd-40pzpj: named on the routing decision the run records.
+      |> Keyword.put(:routing_role, :auto_resume)
     )
   rescue
     e -> {:error, Exception.message(e)}

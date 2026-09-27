@@ -26,6 +26,9 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     * If `"routing.policy"` is present, it must be one of the values in
       `Arbiter.Agents.Routing.valid_policies/0` (`"static"`, `"by_priority"`,
       `"by_difficulty"`, `"by_budget"`, `"round_robin"`).
+    * If `"routing.provider_selection"` is present, it must be one of
+      `Arbiter.Agents.ProviderRouting.valid_selections/0` (`"failover"`,
+      `"most_quota"`).
     * If `"review_gate"` is present, it must be a map.
     * If `"review_gate.max_rounds"` is present, it must be a positive integer.
     * If `"review_gate.timeout_ms"` is present, it must be a positive integer.
@@ -268,6 +271,35 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
   defp validate_routing(changeset, nil), do: changeset
 
   defp validate_routing(changeset, routing) when is_map(routing) do
+    changeset
+    |> validate_routing_policy(routing)
+    |> validate_provider_selection(Map.get(routing, "provider_selection"))
+  end
+
+  defp validate_routing(changeset, _) do
+    Changeset.add_error(changeset, field: :config, message: "routing must be a map")
+  end
+
+  # bd-40pzpj: `most_quota` routes the implementer to the attached account
+  # with the most quota headroom; `failover` (or unset) is today's behaviour.
+  defp validate_provider_selection(changeset, nil), do: changeset
+
+  defp validate_provider_selection(changeset, selection) do
+    valid = Arbiter.Agents.ProviderRouting.valid_selections()
+
+    if selection in valid do
+      changeset
+    else
+      Changeset.add_error(changeset,
+        field: :config,
+        message:
+          "routing.provider_selection must be one of #{Enum.join(valid, ", ")}; " <>
+            "got: #{inspect(selection)}"
+      )
+    end
+  end
+
+  defp validate_routing_policy(changeset, routing) do
     valid_policies = Arbiter.Agents.Routing.valid_policies()
 
     case Map.get(routing, "policy") do
@@ -285,10 +317,6 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
           )
         end
     end
-  end
-
-  defp validate_routing(changeset, _) do
-    Changeset.add_error(changeset, field: :config, message: "routing must be a map")
   end
 
   defp validate_review_gate(changeset, nil), do: changeset

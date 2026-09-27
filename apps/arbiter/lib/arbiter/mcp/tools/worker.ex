@@ -552,6 +552,10 @@ defmodule Arbiter.MCP.Tools.Worker do
       model: run.model,
       provider: run.provider,
       provider_fallback: run.provider_fallback,
+      # bd-40pzpj: what provider routing chose and why (nil when not routed).
+      provider_account_id: run.provider_account_id,
+      model_family: run.model_family,
+      routing_decision: run.routing_decision,
       session_id: run.session_id,
       resumed_from_run_id: run.resumed_from_run_id,
       started_at: Tools.iso(run.started_at),
@@ -1056,7 +1060,13 @@ defmodule Arbiter.MCP.Tools.Worker do
       failure_reason: stringify_reason(Map.get(meta, :failure_reason)),
       failure_summary: Map.get(meta, :failure_summary),
       resumable: resumable,
-      blocked_reason: blocked_reason
+      blocked_reason: blocked_reason,
+      # bd-40pzpj: the provider, and what provider routing chose and why.
+      provider: Arbiter.Worker.provider(meta),
+      provider_fallback: Map.get(meta, :provider_fallback),
+      provider_account_id: Map.get(meta, :provider_account_id),
+      model_family: Map.get(meta, :model_family),
+      routing_decision: Map.get(meta, :routing_decision)
     }
     |> Map.merge(task_cost_fields(snap.task_id))
   end
@@ -1079,6 +1089,10 @@ defmodule Arbiter.MCP.Tools.Worker do
       model: run.model,
       provider: run.provider,
       provider_fallback: run.provider_fallback,
+      # bd-40pzpj: what provider routing chose and why (nil when not routed).
+      provider_account_id: run.provider_account_id,
+      model_family: run.model_family,
+      routing_decision: run.routing_decision,
       started_at: Tools.iso(run.started_at),
       completed_at: Tools.iso(run.completed_at),
       exit_status: run.exit_code,

@@ -97,6 +97,8 @@ defmodule Arbiter.Workflows.MergeQueue.ReviseDispatcher do
       # its slot, so at a full cap the revise waits for one (deferred to the
       # scheduler, `{:ok, %{deferred: true}}`) instead of going over the cap.
       |> Keyword.put(:resume_origin, :automatic)
+      # bd-40pzpj: named on the routing decision the run records.
+      |> Keyword.put(:routing_role, :revise)
 
     case Dispatch.resume(task_id, resume_opts) do
       {:ok, info} -> {:ok, info}

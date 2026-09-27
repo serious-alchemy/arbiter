@@ -158,6 +158,7 @@ defmodule Arbiter.Worker.ReviewGate do
 
   alias Arbiter.Agents
   alias Arbiter.Agents.ProviderPool
+  alias Arbiter.Agents.ProviderRouting
   alias Arbiter.Agents.Routing
   alias Arbiter.Agents.Routing.ByDifficulty
   alias Arbiter.Agents.SecurityPolicy
@@ -4242,7 +4243,7 @@ defmodule Arbiter.Worker.ReviewGate do
   # its own run row.
   defp spawn_worker(state, id, role, prompt, command) do
     # bd-2exkl0 (finding 6): resolve the implementer's provider ONCE per spawn
-    # and thread the same {provider, fallback_reason} tuple through
+    # and thread the same {provider, fallback_reason, decision} tuple through
     # worker_meta/3, adapter_for/4 and build_session_opts/6 — re-resolving at
     # each call site risked the adapter actually spawned diverging from the
     # provider recorded in the run's meta if availability flipped mid-spawn
@@ -4256,11 +4257,17 @@ defmodule Arbiter.Worker.ReviewGate do
     end
   end
 
+  # bd-40pzpj: under `most_quota` routing the task's implementer pin decides
+  # (with a recorded fallback); otherwise exactly
+  # `Agents.resolve_revision_provider/2`. The decision rides in the tuple's
+  # third element to `worker_meta/3`, which records it on the round's run.
   defp resolve_revision(state, :implementer) do
     ws = load_workspace(state.workspace_id)
-    {provider, fallback_reason} = Agents.resolve_revision_provider(state.task_id, ws)
 
-    if fallback_reason do
+    {provider, fallback_reason, decision} =
+      ProviderRouting.implementer_provider(state.task_id, ws, :review_gate_implementer)
+
+    if fallback_reason && ProviderRouting.escalate_fallback?(decision) do
       CoordinatorNotifier.provider_fallback(
         %{workspace_id: state.workspace_id, task_id: state.task_id},
         Run.latest_authoring_provider(state.task_id),
@@ -4269,7 +4276,7 @@ defmodule Arbiter.Worker.ReviewGate do
       )
     end
 
-    {provider, fallback_reason}
+    {provider, ProviderRouting.truncate_fallback(fallback_reason), decision}
   end
 
   defp resolve_revision(_state, :reviewer), do: nil
@@ -4309,7 +4316,7 @@ defmodule Arbiter.Worker.ReviewGate do
     }
   end
 
-  defp worker_meta(state, :implementer, {provider, fallback_reason}) do
+  defp worker_meta(state, :implementer, {provider, fallback_reason, decision}) do
     %{
       role: :implementer,
       revises: state.task_id,
@@ -4317,6 +4324,7 @@ defmodule Arbiter.Worker.ReviewGate do
       provider: Atom.to_string(provider),
       provider_fallback: fallback_reason
     }
+    |> Map.merge(ProviderRouting.run_meta(decision))
   end
 
   # bd-3xultf: `state.task_id` is the BASE task id (not a synthetic ReviewGate
@@ -4391,7 +4399,7 @@ defmodule Arbiter.Worker.ReviewGate do
         _ ->
           case role do
             :implementer ->
-              {provider, _fallback_reason} = revision
+              {provider, _fallback_reason, _decision} = revision
               Atom.to_string(provider)
 
             :reviewer ->
@@ -4415,7 +4423,7 @@ defmodule Arbiter.Worker.ReviewGate do
         prov_str =
           case role do
             :implementer ->
-              {provider, _fallback_reason} = revision
+              {provider, _fallback_reason, _decision} = revision
               Atom.to_string(provider)
 
             :reviewer ->
@@ -4566,12 +4574,18 @@ defmodule Arbiter.Worker.ReviewGate do
     do: {:ok, {Agents.for_type(:claude), :review_agent}}
 
   # bd-1abj7u finding 2: the revision implementer spawn goes through this same
-  # gate. `resolve_revision/2` already picked the provider (the original
-  # authoring provider, or `Agents.resolve_revision_provider/2`'s fallback) —
+  # gate. `resolve_revision/2` already picked the provider (the task's
+  # bd-40pzpj implementer pin under `most_quota`, else the original authoring
+  # provider or `Agents.resolve_revision_provider/2`'s fallback) —
   # treated as an explicit pin, same as `arb dispatch --provider`, since there
   # is no pool to fall back into here (the implementer role isn't drawn from a
   # pool the way the reviewer role is).
-  defp adapter_for(state, %Workspace{} = ws, :implementer, {provider, _fallback_reason}) do
+  defp adapter_for(
+         state,
+         %Workspace{} = ws,
+         :implementer,
+         {provider, _fallback_reason, _decision}
+       ) do
     policy = session_security_policy(ws, state, :implementer)
 
     case Agents.strict_eligible_provider(provider, policy, [], explicit: true) do

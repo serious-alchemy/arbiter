@@ -67,16 +67,29 @@ defmodule Arbiter.Accounts.Concurrency do
   workspace's dispatches.
   """
   @spec live_count(ProviderAccount.t() | String.t() | nil) :: non_neg_integer()
-  def live_count(%ProviderAccount{id: id, provider: provider}) do
+  def live_count(account), do: live_count(account, [])
+
+  @doc """
+  `live_count/1`, with `exclude_task: task_id` leaving out every worker
+  `task_id` owns (`Arbiter.Worker.Registry.owned_by?/2`) — for a caller
+  routing one of that task's own follow-up roles, which replaces the task's
+  in-flight work on the account rather than adding to it.
+  """
+  @spec live_count(ProviderAccount.t() | String.t() | nil, keyword()) :: non_neg_integer()
+  def live_count(%ProviderAccount{id: id, provider: provider}, opts) do
     case linked_workspace_ids(id) do
       workspace_ids when map_size(workspace_ids) == 0 ->
         0
 
       workspace_ids ->
         code = Atom.to_string(provider)
+        exclude = Keyword.get(opts, :exclude_task)
 
         WorkerRegistry.live_dispatches()
         |> Enum.filter(&Map.has_key?(workspace_ids, &1.workspace_id))
+        |> Enum.reject(
+          &(is_binary(exclude) and WorkerRegistry.owned_by?(&1.registry_key, exclude))
+        )
         |> count_matching(code)
     end
   rescue
@@ -86,10 +99,10 @@ defmodule Arbiter.Accounts.Concurrency do
     _ -> 0
   end
 
-  def live_count(account_id) when is_binary(account_id),
-    do: account_id |> Resolver.get() |> live_count()
+  def live_count(account_id, opts) when is_binary(account_id),
+    do: account_id |> Resolver.get() |> live_count(opts)
 
-  def live_count(_), do: 0
+  def live_count(_, _opts), do: 0
 
   @doc """
   `live_count/1` narrowed to one workspace: the live workers *this* workspace
@@ -122,17 +135,20 @@ defmodule Arbiter.Accounts.Concurrency do
   when there is no account to bound at all.
 
   `workspace` may be a `Arbiter.Tasks.Workspace` or a workspace id.
+  `opts` are `live_count/2`'s (`:exclude_task`).
   """
-  @spec account_headroom(ProviderAccount.t() | nil, Workspace.t() | String.t() | nil) ::
+  @spec account_headroom(ProviderAccount.t() | nil, Workspace.t() | String.t() | nil, keyword()) ::
           headroom()
-  def account_headroom(nil, _workspace), do: :unlimited
+  def account_headroom(account, workspace, opts \\ [])
 
-  def account_headroom(%ProviderAccount{} = account, workspace) do
+  def account_headroom(nil, _workspace, _opts), do: :unlimited
+
+  def account_headroom(%ProviderAccount{} = account, workspace, opts) do
     share = Resolver.share(workspace_id(workspace), account.provider)
 
     case ceiling(account.max_concurrent, share) do
       nil -> :unlimited
-      limit -> max(0, limit - live_count(account))
+      limit -> max(0, limit - live_count(account, opts))
     end
   rescue
     _ -> :unlimited

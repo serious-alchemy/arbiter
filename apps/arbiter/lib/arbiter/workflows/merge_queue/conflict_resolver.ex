@@ -45,6 +45,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   """
 
   alias Arbiter.Agents
+  alias Arbiter.Agents.ProviderRouting
   alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Messages.Message
   alias Arbiter.Tasks.Issue
@@ -173,9 +174,9 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
 
   defp dispatch(task, context, args) do
     with {:ok, worktree_path} <- create_worktree(context),
-         {provider, fallback_reason} <- resolve_pass_provider(task, context),
+         {provider, fallback_reason, decision} <- resolve_pass_provider(task, context),
          {:ok, worker_pid} <-
-           start_worker(task, context, worktree_path, provider, fallback_reason),
+           start_worker(task, context, worktree_path, provider, {fallback_reason, decision}),
          {:ok, _port} <-
            maybe_start_claude(worker_pid, worktree_path, context, args, provider) do
       {:ok,
@@ -189,9 +190,13 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
 
   defp resolve_pass_provider(task, context) do
     workspace = context.workspace || maybe_load_workspace(task.workspace_id)
-    {provider, fallback_reason} = Agents.resolve_revision_provider(task.id, workspace)
 
-    if fallback_reason do
+    # bd-40pzpj: the task's implementer pin under `most_quota` routing;
+    # otherwise exactly `Agents.resolve_revision_provider/2`.
+    {provider, fallback_reason, decision} =
+      ProviderRouting.implementer_provider(task, workspace, :conflict_resolver)
+
+    if fallback_reason && ProviderRouting.escalate_fallback?(decision) do
       CoordinatorNotifier.provider_fallback(
         %{workspace_id: task.workspace_id, task_id: task.id},
         Run.latest_authoring_provider(task.id),
@@ -200,7 +205,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
       )
     end
 
-    {provider, fallback_reason}
+    {provider, ProviderRouting.truncate_fallback(fallback_reason), decision}
   end
 
   # ---- belt-and-braces pre-flight divergence check (bd-1x4r25) -----------
@@ -427,7 +432,13 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
     end
   end
 
-  defp start_worker(%Issue{} = task, context, worktree_path, provider, fallback_reason) do
+  defp start_worker(
+         %Issue{} = task,
+         context,
+         worktree_path,
+         provider,
+         {fallback_reason, decision}
+       ) do
     meta = %{
       role: :conflict_resolver,
       provider: Atom.to_string(provider),
@@ -438,6 +449,8 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
       conflict_resolver_branch: context.branch,
       repo_path: context.repo_path
     }
+
+    meta = Map.merge(meta, ProviderRouting.run_meta(decision))
 
     opts = [
       task_id: task.id,

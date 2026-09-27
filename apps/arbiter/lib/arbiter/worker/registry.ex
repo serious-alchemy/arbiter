@@ -169,11 +169,19 @@ defmodule Arbiter.Worker.Registry do
 
   def exclusive_key?(_registry_key, _task_id), do: false
 
-  defp owned_by?(registry_key, task_id) do
+  @doc """
+  True when `registry_key` is owned by `task_id` — the task's own key or one
+  of its synthetic sub-worker keys (`:` or `#` separated). The predicate
+  behind `all_for/1`.
+  """
+  @spec owned_by?(String.t(), String.t()) :: boolean()
+  def owned_by?(registry_key, task_id) when is_binary(registry_key) and is_binary(task_id) do
     registry_key == task_id or
       String.starts_with?(registry_key, task_id <> ":") or
       String.starts_with?(registry_key, task_id <> "#")
   end
+
+  def owned_by?(_registry_key, _task_id), do: false
 
   @doc """
   Explicitly remove this process's registration. Called from the worker's

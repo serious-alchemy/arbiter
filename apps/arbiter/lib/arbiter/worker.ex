@@ -1360,6 +1360,10 @@ defmodule Arbiter.Worker do
       provider_fallback: provider_fallback
     }
 
+    # bd-40pzpj: what provider routing chose, and why — absent unless the
+    # workspace routes by `most_quota`.
+    attrs = Map.merge(attrs, routing_from_meta(state.meta))
+
     case Ash.create(Arbiter.Workers.Run, attrs) do
       {:ok, run} ->
         %State{state | run_id: run.id}
@@ -1434,6 +1438,11 @@ defmodule Arbiter.Worker do
   end
 
   defp provider_fallback_from_meta(_), do: nil
+
+  defp routing_from_meta(meta) when is_map(meta),
+    do: Map.take(meta, [:routing_decision, :provider_account_id, :model_family])
+
+  defp routing_from_meta(_), do: %{}
 
   defp resumed_from_run_id(meta) when is_map(meta),
     do: Map.get(meta, :resumed_from_run_id) || Map.get(meta, "resumed_from_run_id")

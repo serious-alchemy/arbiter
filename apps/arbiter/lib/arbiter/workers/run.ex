@@ -135,7 +135,10 @@ defmodule Arbiter.Workers.Run do
         :base_task_id,
         :role,
         :provider,
-        :provider_fallback
+        :provider_fallback,
+        :provider_account_id,
+        :model_family,
+        :routing_decision
       ]
     end
 
@@ -169,7 +172,10 @@ defmodule Arbiter.Workers.Run do
         :base_task_id,
         :role,
         :provider,
-        :provider_fallback
+        :provider_fallback,
+        :provider_account_id,
+        :model_family,
+        :routing_decision
       ]
     end
   end
@@ -244,6 +250,29 @@ defmodule Arbiter.Workers.Run do
 
       description "Recorded fallback explanation when the original provider was unavailable; " <>
                     "nil when no fallback occurred."
+    end
+
+    attribute :provider_account_id, :uuid do
+      public? true
+
+      description "The provider account routing chose for this run (bd-40pzpj); " <>
+                    "nil when the workspace does not route by quota."
+    end
+
+    attribute :model_family, :string do
+      public? true
+      constraints max_length: 64, trim?: true
+
+      description "Model family of the routed account and model (anthropic / google / " <>
+                    "openai …, `Arbiter.Agents.ModelFamily`); nil when not routed."
+    end
+
+    attribute :routing_decision, :map do
+      public? true
+
+      description "The provider routing decision this run was spawned under (bd-40pzpj): " <>
+                    "the chosen account, per-candidate headroom, dropped candidates with " <>
+                    "their reasons, and any fallback or override. nil when not routed."
     end
 
     attribute :started_at, :utc_datetime_usec do

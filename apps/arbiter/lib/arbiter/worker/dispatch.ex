@@ -56,6 +56,7 @@ defmodule Arbiter.Worker.Dispatch do
 
   alias Arbiter.Agents
   alias Arbiter.Agents.Gemini.Config, as: GeminiConfig
+  alias Arbiter.Agents.ProviderRouting
   alias Arbiter.Agents.Routing
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Board.Autopilot
@@ -164,6 +165,7 @@ defmodule Arbiter.Worker.Dispatch do
          :ok <- ensure_not_closed(task),
          :ok <- ensure_not_awaiting_review(task_id),
          :ok <- ensure_no_live_agent_session(task_id, opts),
+         opts = route_implementer(task, opts),
          :ok <- maybe_quota_gate(task, opts),
          :ok <- ensure_migrations_up_to_date(),
          {:ok, opts} <- maybe_resolve_repo_for_real_work(task, opts),
@@ -355,12 +357,14 @@ defmodule Arbiter.Worker.Dispatch do
       # the worktree (terminate/2 never cleans up), so the worktree is preserved.
       _ = stop_prior_worker(task_id)
 
-      {provider, fallback_reason} = resolve_resume_provider(task, opts)
+      {provider, fallback_reason, decision} =
+        resolve_resume_provider(task, opts, Keyword.get(opts, :routing_role, :resume))
 
       resume_opts =
         opts
         |> Keyword.put(:agent_type, provider)
         |> put_opt_if_present(:provider_fallback, fallback_reason)
+        |> put_routing_decision(decision)
         |> Keyword.put(:repo, repo)
         |> Keyword.put(:start_claude, true)
         |> Keyword.put(:resume, true)
@@ -448,12 +452,14 @@ defmodule Arbiter.Worker.Dispatch do
       # Stopping it never touches the worktree, so it stays preserved.
       _ = stop_prior_worker(task_id)
 
-      {provider, fallback_reason} = resolve_session_resume_provider(task, opts, session_provider)
+      {provider, fallback_reason, decision} =
+        resolve_session_resume_provider(task, opts, session_provider)
 
       base_opts =
         opts
         |> Keyword.put(:agent_type, provider)
         |> put_opt_if_present(:provider_fallback, fallback_reason)
+        |> put_routing_decision(decision)
         |> Keyword.put(:repo, repo)
         |> Keyword.put(:start_claude, true)
         |> Keyword.put(:resume, true)
@@ -799,28 +805,54 @@ defmodule Arbiter.Worker.Dispatch do
   # bd-2exkl0: resume passes inherit the provider of the authoring run being
   # resumed via Agents.resolve_revision_provider/2, with escalation to the
   # coordinator if an unexpected provider fallback occurs.
-  defp resolve_resume_provider(%Issue{} = task, opts) do
-    case Keyword.get(opts, :agent_type) do
-      p when is_atom(p) and not is_nil(p) ->
-        {p, nil}
+  #
+  # bd-40pzpj: under `routing.provider_selection: most_quota` the task's
+  # implementer pin decides instead (`ProviderRouting.implementer_provider/4`),
+  # and the third element is the routing decision to record. Off, it is
+  # exactly the resolution above, with a `nil` decision. A caller's explicit
+  # `:agent_type` still wins — routed, it is recorded as an override.
+  defp resolve_resume_provider(%Issue{} = task, opts, role) do
+    override = caller_override(opts)
+    workspace = load_workspace(task)
 
-      _ ->
-        workspace = load_workspace(task)
-        {provider, fallback_reason} = Agents.resolve_revision_provider(task.id, workspace)
+    {provider, fallback_reason, decision} =
+      ProviderRouting.implementer_provider(task, workspace, role,
+        override: override,
+        security: routing_security(workspace, opts)
+      )
 
-        if fallback_reason do
-          orig = Run.latest_authoring_provider(task.id)
+    if fallback_reason && is_nil(override) && ProviderRouting.escalate_fallback?(decision) do
+      orig = Run.latest_authoring_provider(task.id)
 
-          CoordinatorNotifier.provider_fallback(
-            %{workspace_id: task.workspace_id, task_id: task.id},
-            orig,
-            provider,
-            fallback_reason
-          )
-        end
-
-        {provider, fallback_reason}
+      CoordinatorNotifier.provider_fallback(
+        %{workspace_id: task.workspace_id, task_id: task.id},
+        orig,
+        provider,
+        fallback_reason
+      )
     end
+
+    {provider, ProviderRouting.truncate_fallback(fallback_reason), decision}
+  end
+
+  defp caller_override(opts) do
+    case Keyword.get(opts, :agent_type) do
+      p when is_atom(p) and not is_nil(p) -> p
+      _ -> nil
+    end
+  end
+
+  # A routed provider is recorded with the decision; `:routed_agent_type`
+  # marks `:agent_type` as routing's own choice rather than a caller's
+  # override, so a held dispatch replays unrouted (`unroute/1`).
+  defp put_routing_decision(opts, nil), do: opts
+
+  defp put_routing_decision(opts, decision) do
+    opts = Keyword.put(opts, :routing_decision, decision)
+
+    if decision["outcome"] == "override",
+      do: opts,
+      else: Keyword.put(opts, :routed_agent_type, Keyword.get(opts, :agent_type))
   end
 
   # bd-b7e33c AC5 post-merge finding: `resolve_resume_provider/2` picks the
@@ -834,17 +866,25 @@ defmodule Arbiter.Worker.Dispatch do
   # general authoring-provider/fallback resolution (with its escalation) when
   # the caller forced a provider, or the session's own provider is unknown or
   # no longer usable.
+  #
+  # bd-40pzpj: a routed workspace resolves through the implementer pin
+  # instead; a session on a different provider then degrades to the
+  # git-derived briefing like any other mismatch (see `do_resume_session/2`).
   defp resolve_session_resume_provider(%Issue{} = task, opts, session_provider) do
-    case Keyword.get(opts, :agent_type) do
-      p when is_atom(p) and not is_nil(p) ->
-        {p, nil}
+    role = Keyword.get(opts, :routing_role, :resume_session)
 
-      _ ->
-        if not is_nil(session_provider) and Agents.provider_available?(session_provider) do
-          {session_provider, nil}
-        else
-          resolve_resume_provider(task, opts)
-        end
+    cond do
+      not is_nil(caller_override(opts)) ->
+        resolve_resume_provider(task, opts, role)
+
+      ProviderRouting.enabled?(load_workspace(task)) ->
+        resolve_resume_provider(task, opts, role)
+
+      not is_nil(session_provider) and Agents.provider_available?(session_provider) ->
+        {session_provider, nil, nil}
+
+      true ->
+        resolve_resume_provider(task, opts, role)
     end
   end
 
@@ -1050,6 +1090,72 @@ defmodule Arbiter.Worker.Dispatch do
   # Fail-open guards: skipped on the drain re-dispatch (`skip_quota_gate: true`)
   # and for a task with no workspace. A nil snapshot (e.g., in test where polling
   # has not run yet) is handled uniformly inside each gate impl.
+  # bd-40pzpj: under `routing.provider_selection: most_quota`, route a fresh
+  # implementer dispatch to the attached account with the most quota
+  # headroom (`Arbiter.Agents.ProviderRouting`) — before the quota gate, so
+  # the gate reads the account the worker will actually run on. A caller's
+  # `:agent_type` is an override: it still wins, and is recorded as one.
+  # Resumes arrive already routed (`:routing_decision` set); a review, a
+  # ReviewGate synthetic id and the `:agent_adapter` test seam are not
+  # implementer dispatches. Off — the default — this is a no-op.
+  defp route_implementer(%Issue{} = task, opts) do
+    cond do
+      Keyword.has_key?(opts, :routing_decision) -> opts
+      Keyword.get(opts, :review, false) == true -> opts
+      not is_nil(Keyword.get(opts, :agent_adapter)) -> opts
+      Arbiter.Worker.ReviewGate.base_task_id(task.id) != task.id -> opts
+      true -> maybe_route(task, load_workspace(task), opts)
+    end
+  rescue
+    e ->
+      require Logger
+      Logger.warning("Dispatch: provider routing crashed for #{task.id}: #{Exception.message(e)}")
+      opts
+  end
+
+  defp maybe_route(task, workspace, opts) do
+    if ProviderRouting.enabled?(workspace) do
+      role = Keyword.get(opts, :routing_role, :main)
+      override = caller_override(opts)
+
+      routing_opts = [override: override, security: routing_security(workspace, opts)]
+
+      case ProviderRouting.select(workspace, task, role, routing_opts) do
+        {:ok, selection} ->
+          opts
+          |> Keyword.put(:agent_type, selection.agent_type)
+          |> put_opt_if_present(
+            :provider_fallback,
+            ProviderRouting.truncate_fallback(selection.decision["fallback"])
+          )
+          |> put_routing_decision(selection.decision)
+
+        {:legacy, decision} ->
+          Keyword.put(opts, :routing_decision, decision)
+      end
+    else
+      opts
+    end
+  end
+
+  # The scope the spawn will run under, for the `:strict` write-confinement
+  # drop — resolved exactly as `build_agent_session_opts/4` resolves it.
+  defp routing_security(nil, _opts), do: nil
+
+  defp routing_security(workspace, opts),
+    do: SecurityPolicy.resolve(workspace, security_override(opts), Keyword.get(opts, :repo))
+
+  # A held dispatch is replayed verbatim on drain; strip routing's own choice
+  # so the replay routes afresh instead of reading it as a caller override.
+  defp unroute(opts) do
+    routed = Keyword.get(opts, :routed_agent_type)
+    opts = Keyword.drop(opts, [:routing_decision, :routed_agent_type])
+
+    if routed && Keyword.get(opts, :agent_type) == routed,
+      do: Keyword.drop(opts, [:agent_type, :provider_fallback]),
+      else: opts
+  end
+
   defp maybe_quota_gate(%Issue{workspace_id: ws_id} = task, opts) do
     cond do
       Keyword.get(opts, :skip_quota_gate, false) == true ->
@@ -1219,7 +1325,7 @@ defmodule Arbiter.Worker.Dispatch do
         :ok
 
       {:hold, reason} ->
-        case Arbiter.Workflows.DispatchQueue.hold(ws_id, task.id, opts, reason, provider) do
+        case Arbiter.Workflows.DispatchQueue.hold(ws_id, task.id, unroute(opts), reason, provider) do
           :ok ->
             {:error, {:quota_held, task.id}}
 
@@ -1337,6 +1443,8 @@ defmodule Arbiter.Worker.Dispatch do
         Keyword.get(opts, :agent_type) && to_string(Keyword.get(opts, :agent_type))
       )
       |> put_if_present(:provider_fallback, Keyword.get(opts, :provider_fallback))
+      # bd-40pzpj: the routing decision, account and family the run records.
+      |> Map.merge(ProviderRouting.run_meta(Keyword.get(opts, :routing_decision)))
       # bd-9fgg04: who asked for this dispatch (the board autopilot stamps
       # "autopilot"), so a drain report can name a board dispatch as one.
       |> put_if_present(:dispatched_by, Keyword.get(opts, :dispatched_by))

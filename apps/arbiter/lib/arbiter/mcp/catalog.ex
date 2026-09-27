@@ -1082,7 +1082,10 @@ defmodule Arbiter.MCP.Catalog do
           "the transcript): id, task_id, task_title, repo, workspace_id, worker_type, status, " <>
           "model, started_at, completed_at, exit_code, failure_reason, failure_summary " <>
           "(a bounded human-readable ReviewGate VERDICT + top finding, when the run failed " <>
-          "via a ReviewGate rejection; nil otherwise). Optional `limit` " <>
+          "via a ReviewGate rejection; nil otherwise), provider, provider_fallback, and — " <>
+          "under `routing.provider_selection: most_quota` — provider_account_id, " <>
+          "model_family and routing_decision (the chosen account, per-candidate quota " <>
+          "headroom, dropped candidates with reasons, any fallback or override). Optional `limit` " <>
           "(default 20, max 200). `task_id` may be a ReviewGate synthetic id " <>
           "(`<base>#review`, `#r<N>`, `#impl<N>`, `#v<N>`, `#t<N>`) — those aren't `issues` " <>
           "rows, but the run lookup still resolves (authorization checks the base task).",

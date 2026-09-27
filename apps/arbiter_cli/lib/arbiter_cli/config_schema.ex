@@ -136,6 +136,13 @@ defmodule ArbiterCli.ConfigSchema do
                           today's spend crosses this ceiling
       adapters            (round_robin only) list of partial agent-config maps,
                           cycled per dispatch
+      provider_selection  "failover" | "most_quota" (default: failover — today's
+                          first-healthy agent.type). most_quota sends the
+                          implementer to the workspace's implementer-allowed
+                          provider account with the most quota headroom against
+                          its pace, pins it on the task for every later
+                          implementer role, and records the decision on each
+                          run. Keep it OFF until the agy write jail lands.
 
     review / review_gate  (map)
       required    bool — whether a review round gates completion

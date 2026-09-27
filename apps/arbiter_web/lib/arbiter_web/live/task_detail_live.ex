@@ -925,7 +925,25 @@ defmodule ArbiterWeb.TaskDetailLive do
     socket
     |> assign(:task, task)
     |> assign(:acceptance_items, acceptance_items(task && task.acceptance))
+    |> assign(:implementer_pin, implementer_pin(task))
   end
+
+  # bd-40pzpj: the provider account `most_quota` routing pinned this task's
+  # implementer to, as `%{label:, family:}` — nil when the task was never
+  # routed. A pin whose account row is gone still shows its id.
+  defp implementer_pin(%Issue{implementer_account_id: id} = task) when is_binary(id) do
+    label =
+      case Arbiter.Accounts.Resolver.get(id) do
+        %{provider: provider, slug: slug} -> "#{provider}:#{slug}"
+        _ -> id
+      end
+
+    %{label: label, family: task.implementer_family}
+  rescue
+    _ -> %{label: id, family: task.implementer_family}
+  end
+
+  defp implementer_pin(_task), do: nil
 
   # bd-cvfjms: the refine session bound to this issue (if it was ever
   # refined), plus whether its phase 9 archive exists and what it cost — the
@@ -2427,6 +2445,18 @@ defmodule ArbiterWeb.TaskDetailLive do
                   </.link>
                 </:actions>
 
+                <div
+                  :if={@implementer_pin}
+                  id="task-implementer-pin"
+                  class="flex items-center gap-2 text-[11px] font-[family-name:var(--font-mono)] text-[var(--text-label)]"
+                  title="provider routing (most_quota) reuses this account for every implementer role while it is available"
+                >
+                  <.icon name="hero-map-pin" class="w-3.5 h-3.5" />
+                  <span>implementer pinned to</span>
+                  <code class="text-[var(--text-secondary)]">{@implementer_pin.label}</code>
+                  <span :if={@implementer_pin.family}>· {@implementer_pin.family}</span>
+                </div>
+
                 <ArbiterWeb.CoreComponents.Navigation.filter_tabs
                   :if={@runs != []}
                   tabs={@run_tabs}
@@ -2506,6 +2536,12 @@ defmodule ArbiterWeb.TaskDetailLive do
                         Full transcript
                       </.link>
                     </div>
+
+                    <.routing_decision
+                      :if={is_map(r.routing_decision)}
+                      id={"run-routing-#{r.id}"}
+                      decision={r.routing_decision}
+                    />
 
                     <ArbiterWeb.CoreComponents.Feedback.empty_state :if={lines == []} icon={nil}>
                       {if r.status == :running,
@@ -4037,6 +4073,63 @@ defmodule ArbiterWeb.TaskDetailLive do
   defp run_failed?(%Run{status: :interrupted}), do: false
   defp run_failed?(%Run{exit_code: code}) when is_integer(code) and code != 0, do: true
   defp run_failed?(_), do: false
+
+  # bd-40pzpj: the provider routing decision a run was spawned under — which
+  # account won and why, every candidate's headroom against its pace, the
+  # dropped ones with their reasons, and any fallback or override.
+  attr :id, :string, required: true
+  attr :decision, :map, required: true
+
+  defp routing_decision(assigns) do
+    ~H"""
+    <div
+      id={@id}
+      class="px-3 py-2 border-b border-[var(--border-default)] text-[10.5px] font-[family-name:var(--font-mono)] text-[var(--text-label)] flex flex-col gap-1"
+    >
+      <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <span class="uppercase tracking-wide text-[var(--text-secondary)]">routing</span>
+        <span class="px-1.5 rounded-[var(--radius-field)] border border-[var(--border-default)] text-[var(--text-title)]">
+          {@decision["outcome"]}
+        </span>
+        <span :if={@decision["role"]}>{@decision["role"]}</span>
+        <span :if={@decision["account_slug"]}>
+          → <code class="text-[var(--text-secondary)]">{routing_account(@decision)}</code>
+        </span>
+        <span :if={@decision["family"]}>· {@decision["family"]}</span>
+        <span :if={@decision["model"]}>· {@decision["model"]}</span>
+        <span :if={@decision["account_slug"]}>
+          · headroom {routing_headroom(@decision["headroom"])}
+        </span>
+      </div>
+      <div :if={@decision["fallback"]} data-role="fallback" class="text-[var(--text-secondary)]">
+        fallback: {@decision["fallback"]}
+      </div>
+      <div :if={@decision["override"]} data-role="override" class="text-[var(--text-secondary)]">
+        {@decision["override"]}
+      </div>
+      <ul :if={(@decision["candidates"] || []) != []} class="flex flex-col">
+        <li :for={c <- @decision["candidates"]} data-role="candidate">
+          {routing_account(c)} · {c["family"] || "?"} · headroom {routing_headroom(c["headroom"])}
+          <span :if={c["window"]}>({c["window"]})</span>
+        </li>
+      </ul>
+      <ul :if={(@decision["dropped"] || []) != []} class="flex flex-col">
+        <li :for={d <- @decision["dropped"]} data-role="dropped" class="opacity-75">
+          ✕ {routing_account(d)} — {d["reason"]}<span :if={d["detail"]}>: {d["detail"]}</span>
+        </li>
+      </ul>
+    </div>
+    """
+  end
+
+  defp routing_account(%{"provider" => provider, "account_slug" => slug}) when is_binary(slug),
+    do: "#{provider}:#{slug}"
+
+  defp routing_account(%{"account_slug" => slug}), do: slug
+  defp routing_account(_), do: "—"
+
+  defp routing_headroom(h) when is_number(h), do: :erlang.float_to_binary(h * 1.0, decimals: 2)
+  defp routing_headroom(_), do: "unknown"
 
   defp run_failure_line(%Run{} = run) do
     [

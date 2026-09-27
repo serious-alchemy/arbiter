@@ -3525,6 +3525,107 @@ defmodule Arbiter.MCP.ToolsTest do
     end
   end
 
+  describe "provider routing on worker_runs / worker_show (bd-40pzpj)" do
+    defp routed_run!(ctx, task) do
+      account_id = Ash.UUID.generate()
+
+      decision = %{
+        "mode" => "most_quota",
+        "role" => "fix_pass",
+        "outcome" => "fallback",
+        "account_id" => account_id,
+        "account_slug" => "work",
+        "provider" => "codex",
+        "family" => "openai",
+        "fallback" =>
+          "pinned account claude:main unavailable (quota_held); fell back to codex:work",
+        "candidates" => [%{"account_slug" => "work", "headroom" => 0.42}],
+        "dropped" => [%{"account_slug" => "main", "reason" => "quota_held"}]
+      }
+
+      {:ok, run} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          status: :completed,
+          started_at: DateTime.utc_now(),
+          provider: "codex",
+          provider_fallback: decision["fallback"],
+          provider_account_id: account_id,
+          model_family: "openai",
+          routing_decision: decision
+        })
+
+      {run, account_id}
+    end
+
+    test "worker_runs carries the account, family, provider and the whole decision", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "routed runs", workspace_id: ctx.ws.id})
+      {_run, account_id} = routed_run!(ctx, task)
+
+      assert {:ok, %{runs: [run]}} = Tools.worker_runs(ctx.coordinator, %{"task_id" => task.id})
+
+      assert run.provider == "codex"
+      assert run.provider_account_id == account_id
+      assert run.model_family == "openai"
+      assert run.provider_fallback =~ "fell back to codex:work"
+      assert run.routing_decision["outcome"] == "fallback"
+      assert [%{"headroom" => 0.42}] = run.routing_decision["candidates"]
+      assert [%{"reason" => "quota_held"}] = run.routing_decision["dropped"]
+    end
+
+    test "worker_show's historical view carries them too", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "routed show", workspace_id: ctx.ws.id})
+      {_run, account_id} = routed_run!(ctx, task)
+
+      assert {:ok, snap} = Tools.worker_show(ctx.coordinator, %{"task_id" => task.id})
+
+      assert snap.source == "history"
+      assert snap.provider_account_id == account_id
+      assert snap.model_family == "openai"
+      assert snap.routing_decision["outcome"] == "fallback"
+    end
+
+    test "worker_show's live view reads them off the worker's meta", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "routed live", workspace_id: ctx.ws.id})
+      account_id = Ash.UUID.generate()
+      decision = %{"outcome" => "selected", "account_id" => account_id, "family" => "google"}
+
+      {:ok, pid} =
+        Worker.start(
+          task_id: task.id,
+          repo: "test/repo",
+          workspace_id: ctx.ws.id,
+          meta: %{
+            provider: "gemini",
+            routing_decision: decision,
+            provider_account_id: account_id,
+            model_family: "google"
+          }
+        )
+
+      on_exit(fn -> Process.alive?(pid) && Worker.stop(task.id, :normal) end)
+
+      assert {:ok, snap} = Tools.worker_show(ctx.coordinator, %{"task_id" => task.id})
+
+      assert snap.source == "live"
+      assert snap.provider == "gemini"
+      assert snap.provider_account_id == account_id
+      assert snap.model_family == "google"
+      assert snap.routing_decision == decision
+
+      # The run row was written too — a malformed account id would have made
+      # the worker drop it whole.
+      _ = :sys.get_state(pid)
+
+      assert [%{provider_account_id: ^account_id, model_family: "google"}] =
+               Arbiter.Workers.Run
+               |> Ash.Query.filter(task_id == ^task.id)
+               |> Ash.read!()
+    end
+  end
+
   describe "worker_log/2" do
     test "reads the full durable transcript for the task's most recent run", ctx do
       {:ok, task} = Ash.create(Issue, %{title: "log target", workspace_id: ctx.ws.id})

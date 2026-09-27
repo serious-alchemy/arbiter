@@ -197,6 +197,31 @@ defmodule ArbiterWeb.Api.RunControllerTest do
     end
   end
 
+  describe "GET /api/workers/history — provider routing (bd-40pzpj)" do
+    test "lists the routed account, family, fallback and decision", %{conn: conn} do
+      account_id = Ash.UUID.generate()
+
+      insert_run!(%{
+        task_id: "bd-routed",
+        provider: "codex",
+        provider_fallback:
+          "pinned account claude:main unavailable (quota_held); fell back to codex:x",
+        provider_account_id: account_id,
+        model_family: "openai",
+        routing_decision: %{"outcome" => "fallback", "candidates" => [%{"headroom" => 0.4}]}
+      })
+
+      conn = get(conn, ~p"/api/workers/history", %{task_id: "bd-routed"})
+      [entry] = json_response(conn, 200)["data"]
+
+      assert entry["provider_account_id"] == account_id
+      assert entry["model_family"] == "openai"
+      assert entry["provider_fallback"] =~ "fell back to codex:x"
+      assert entry["routing_decision"]["outcome"] == "fallback"
+      assert [%{"headroom" => 0.4}] = entry["routing_decision"]["candidates"]
+    end
+  end
+
   describe "GET /api/workers/history/:id" do
     test "returns the run with full output_lines", %{conn: conn} do
       run =

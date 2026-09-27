@@ -447,8 +447,16 @@ defmodule Arbiter.Workers.Reconciler do
   # bd-92mx1m: automatic. A task cut off mid-flight by the restart held its
   # slot and passes `ResumeSlot` uncapped; one that had parked or stopped before
   # the restart released it, and at a full cap is deferred to the scheduler.
-  defp default_resume(%Issue{id: task_id}),
-    do: Dispatch.resume(task_id, resume_origin: :automatic)
+  #
+  # Public (`@doc false`) so the provider-routing tests (bd-40pzpj) can drive
+  # the real resume this module performs; `opts` is merged over it.
+  @doc false
+  def default_resume(%Issue{id: task_id}, opts \\ []) do
+    Dispatch.resume(
+      task_id,
+      Keyword.merge([resume_origin: :automatic, routing_role: :reconciler_resume], opts)
+    )
+  end
 
   defp escalate_stuck_issue(%Issue{} = issue, reason) do
     %Issue{id: task_id, pr_ref: pr_ref, workspace_id: workspace_id} = issue
