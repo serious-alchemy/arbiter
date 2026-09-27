@@ -1842,6 +1842,10 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       assert blocked_by =~ "awaiting verification"
       assert blocked_by =~ "waiting on someone to verify"
       assert blocked_by =~ "arb issue verify #{blocker.id}"
+      # bd-6zapbl: verifying unblocks dependents, so the hint must not say
+      # the edge still holds this ticket back.
+      refute blocked_by =~ "blocks until verified"
+      assert blocked_by =~ "no longer blocks this ticket"
     end
 
     test "edge notes and created_by are reachable from the row when present",

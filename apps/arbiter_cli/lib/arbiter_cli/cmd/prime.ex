@@ -21,7 +21,7 @@ defmodule ArbiterCli.Cmd.Prime do
           empty.
        d. Active workers — task_id, status, current_step, runtime, scoped to
           this workspace.
-       e. Ready tasks — `Issue.ready/0` view, scoped to this workspace.
+       e. Ready tasks — `Issue.ready/1` view (the board's Ready column), scoped to this workspace.
        f. Awaiting verification — merged tasks flagged `verify_after_deploy`
           that are parked until someone restarts the server and observes the
           new path, each with the age of the wait (bd-9so315). Omitted when

@@ -8,10 +8,18 @@ defmodule Arbiter.Tasks.DependencyTest do
 
   setup do
     {:ok, ws} = Ash.create(Workspace, %{name: "dep-ws", prefix: "dep"})
-    {:ok, a} = Ash.create(Issue, %{title: "issue A", workspace_id: ws.id})
-    {:ok, b} = Ash.create(Issue, %{title: "issue B", workspace_id: ws.id})
-    {:ok, c} = Ash.create(Issue, %{title: "issue C", workspace_id: ws.id})
+    # bd-6zapbl: `Issue.ready/1` is the Ready column, so the fixtures are
+    # queued tickets — a Backlog one is never ready.
+    a = queued!(ws, "issue A")
+    b = queued!(ws, "issue B")
+    c = queued!(ws, "issue C")
     {:ok, ws: ws, a: a, b: b, c: c}
+  end
+
+  defp queued!(ws, title) do
+    {:ok, issue} = Ash.create(Issue, %{title: title, workspace_id: ws.id})
+    {:ok, issue} = Ash.update(issue, %{acceptance_waived: "fixture"}, action: :promote_to_ready)
+    issue
   end
 
   describe "create/2" do

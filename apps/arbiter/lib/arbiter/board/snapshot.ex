@@ -10,47 +10,57 @@ defmodule Arbiter.Board.Snapshot do
 
   ## The five columns
 
-    * **Backlog** — open, dispatchable issues nobody is working that nobody has
-      refined yet (`refined == false`). Newest first, deliberately: an
-      unrefined pile is a to-think-about list, not a queue, and ordering it by
-      priority would imply a ranking the refinement hasn't earned.
-    * **Ready** — open, dispatchable issues nobody is working. A real queue,
+  Every ticket's column comes from one projection, `Arbiter.Tasks.Lifecycle.view/2`
+  (bd-6zapbl), mapped onto these five until the seven-column board lands
+  (bd-79w1fs) by `Arbiter.Tasks.Lifecycle.board_column/2`. The same call
+  classifies the epic mini-board (`classify_columns/3`) and the `/epics`
+  rollup (`Arbiter.Tasks.EpicRollup`), so the three cannot disagree. Each card
+  builder below only builds cards for tickets in its own column, so a ticket
+  lands in exactly one.
+
+    * **Backlog** — `:backlog` tickets: filed, not refined. Newest first,
+      deliberately: an unrefined pile is a to-think-about list, not a queue,
+      and ordering it by priority would imply a ranking the refinement hasn't
+      earned.
+    * **Ready** — `:queued` tickets, Blocked and Ready alike. A real queue,
       ordered by priority then age, each card carrying the reason
       `Arbiter.Board.Scheduler` gave it (`next up — dispatching...`,
-      `2 ahead in queue`, `blocked — waiting on bd-9`).
-    * **Running** — workers with a live agent: `:idle`, `:resuming`,
-      `:running`, and `:awaiting_review_gate` (parked while a *reviewer agent*
-      reads the diff — automated, so still the machine's turn). Reviewer
-      workers fold into the author's card rather than occupying one of their
-      own; a review is a phase of the author's work, not a second piece of it.
-    * **Waiting** — the worker is done and the outcome now depends on
-      something outside it: `:awaiting` (it asked a human a question),
-      `:failed` (parked; send it back or close it) and `:awaiting_review` (an
-      MR is open and the Watchdog is polling) — plus an `in_progress` issue
-      with **no live worker at all** (e.g. `arb worker stop` on an
-      `:awaiting_review` worker, the documented pre-flight for `arb server
-      deploy`), which always flags `needs_you` since nothing will retry it on
-      its own. Longest wait first, because a stalled card is the thing worth
-      seeing.
-    * **Closed · last 24h** — issues closed in the last 24 hours (rolling window,
-      keyed on `closed_at`). The day's evidence of progress, and the only column
-      with no action on it. Epics are excluded here as they are everywhere
-      else (bd-38of5i): the evidence of a day's progress is the children that
-      closed, not the container that closed because they did.
+      `2 ahead in queue`, `blocked — waiting on bd-9`). A leftover
+      `:completed` or `:failed` author row does not hide a queued ticket: the
+      column is the ticket's, not the run's.
+    * **Running** — `:in_progress` tickets whose primary author run is live:
+      `:idle`, `:resuming`, `:running`, and `:awaiting_review_gate` (parked
+      while a *reviewer agent* reads the diff — automated, so still the
+      machine's turn). Reviewer workers fold into the author's card rather
+      than occupying one of their own; a review is a phase of the author's
+      work, not a second piece of it. An in-progress ticket whose run has not
+      registered yet (inside the dispatch grace) is a "dispatching" card here.
+    * **Waiting** — `:merging` and `:verifying` tickets, plus an
+      `:in_progress` ticket whose author run is done and whose outcome now
+      depends on something outside it: `:awaiting` (it asked a human a
+      question), `:failed` (parked; send it back or close it) and
+      `:awaiting_review` (an MR is open and the Watchdog is polling) — or that
+      has **no live worker at all** past the dispatch grace (e.g. `arb worker
+      stop` on an `:awaiting_review` worker, the documented pre-flight for
+      `arb server deploy`), which always flags `needs_you` since nothing will
+      retry it on its own. Longest wait first, because a stalled card is the
+      thing worth seeing.
+    * **Closed · last 24h** — `:closed` tickets closed in the last 24 hours
+      (rolling window, keyed on `closed_at`). The day's evidence of progress,
+      and the only column with no action on it.
 
-  ## Backlog, and why refinement is not a status
+  Epics are excluded from every column (bd-38of5i): the evidence of a day's
+  progress is the children that closed, not the container that closed because
+  they did, and an epic reaches the board only as the `↳` chip a child card
+  carries.
 
-  `refined` is a boolean on the issue, not a fourth FSM state: the task
-  lifecycle still only knows `open` / `in_progress` / `closed`. It is a
-  *column input*, exactly like a live worker or an open blocker — which is the
-  whole reason the board can keep deriving itself rather than storing a stage.
+  ## Backlog, and why Blocked is not a separate column (yet)
 
-  Backlog is therefore Ready's filter minus the flag, and nothing else. In
-  particular it is **not** gated on dependency-satisfaction: refinement and
-  dependency-readiness are orthogonal questions, so a refined card whose
-  blocker is still open stays in Ready carrying its own
-  `blocked — waiting on bd-9` reason. Blocked is a scheduling fact; Backlog is
-  a refinement fact, and conflating them would lose both.
+  Refinement and dependency-readiness are orthogonal questions: a refined
+  card whose blocker is still open is `:blocked` in the lifecycle, and on this
+  interim board it stays in Ready carrying its own `blocked — waiting on
+  bd-9` reason. A blocker is satisfied once it is `:verifying` or `:closed` —
+  verifying unblocks dependents (`Arbiter.Tasks.Lifecycle.blocker_satisfied?/1`).
 
   ## Waiting, and the needs-you flag
 
@@ -103,6 +113,7 @@ defmodule Arbiter.Board.Snapshot do
   alias Arbiter.Board.FileScope
   alias Arbiter.Board.Scheduler
   alias Arbiter.Tasks.EdgeGate
+  alias Arbiter.Tasks.Lifecycle
   alias Arbiter.Tasks.SlotGate
   alias Arbiter.Usage.Budget
   alias Arbiter.Worker
@@ -119,9 +130,6 @@ defmodule Arbiter.Board.Snapshot do
 
   # Live agent working; the author is still "running" while a reviewer reads.
   @running_statuses [:idle, :resuming, :running, :awaiting_review_gate]
-
-  # Worker is done; the outcome is somebody else's to produce.
-  @waiting_statuses [:awaiting, :failed, :awaiting_review]
 
   # The only blocks the Watchdog still clears on its own — mirrors its
   # `auto_resolvable?/1`. Everything else needs a person today.
@@ -155,8 +163,9 @@ defmodule Arbiter.Board.Snapshot do
 
   # Dispatch flips an issue to :in_progress before the worker is registered
   # (worktree provisioning, fetch, etc. — seconds on a large repo). Below this
-  # age, treat it as mid-dispatch rather than orphaned.
-  @orphan_grace_seconds 60
+  # age, treat it as mid-dispatch rather than orphaned. The window is the
+  # lifecycle projection's (`Lifecycle.board_column/2`), so the two agree.
+  @orphan_grace_seconds Lifecycle.View.orphan_grace_seconds()
 
   @type t :: %{
           backlog: [map()],
@@ -177,9 +186,9 @@ defmodule Arbiter.Board.Snapshot do
   @doc """
   Derive the board from an already-read picture of the world.
 
-  Expected keys: `:issues`, `:workers`, `:blocked_by` (issue id → open blocker
-  ids), `:conflicts_with` (`{a, b}` pairs from the mutex edges),
-  `:changed_files` (task id → repo-relative paths a worktree has touched),
+  Expected keys: `:issues`, `:workers`, `:blocked_by` (issue id → unsatisfied
+  blocker ids, from `EdgeGate.blockers/2`), `:conflicts_with` (`{a, b}` pairs
+  from the mutex edges), `:changed_files` (task id → repo-relative paths a worktree has touched),
   `:now`, `:slots_total`, `:quota`, `:paused` and `:ready_order`. Every key has
   a sane default, so a caller may pass only what it has.
 
@@ -236,7 +245,19 @@ defmodule Arbiter.Board.Snapshot do
 
     worked = MapSet.new(authors, & &1.task_id)
 
-    running = running_cards(authors, issues_by_id, gate_workers_by_author, workers)
+    # bd-6zapbl: every ticket's column, from `Lifecycle.view/2` through the
+    # interim five-column mapping. Each card builder below only ever builds a
+    # card for a ticket in its own column, so a ticket lands in exactly one.
+    # Epics stay off the board.
+    columns =
+      issues
+      |> ticket_columns(workers, blocked_by, now)
+      |> Map.reject(fn {id, _column} -> epic?(Map.get(issues_by_id, id)) end)
+
+    running =
+      (running_cards(authors, issues_by_id, gate_workers_by_author, workers, columns) ++
+         dispatching_cards(issues, authors, columns))
+      |> Enum.sort_by(& &1.since, {:asc, DateTime})
 
     # bd-aw2cyt: a live agent session in any role — author, reviewer,
     # implementer round, CI fix pass, conflict resolver. Counted over ALL
@@ -257,7 +278,7 @@ defmodule Arbiter.Board.Snapshot do
 
     plan =
       Scheduler.plan(%{
-        ready: ready_cards(issues, worked, blocked_by, conflicts, ready_order),
+        ready: ready_cards(issues, columns, blocked_by, conflicts, ready_order),
         running: in_flight(authors, issues_by_id, changed),
         conflict_claims: conflict_claims(authors, gate_workers, issues, worked, now),
         slots_free: slots_free,
@@ -267,7 +288,7 @@ defmodule Arbiter.Board.Snapshot do
 
     %{
       backlog:
-        backlog_cards(issues, worked) |> with_parents(parents) |> with_over_budget(over_budget),
+        backlog_cards(issues, columns) |> with_parents(parents) |> with_over_budget(over_budget),
       ready:
         plan.entries
         |> with_parents_in_entries(parents)
@@ -275,13 +296,15 @@ defmodule Arbiter.Board.Snapshot do
       running: running |> with_parents(parents) |> with_over_budget(over_budget),
       waiting:
         authors
-        |> waiting(issues, issues_by_id, worked, now, watchdog_live, workers)
+        |> waiting(issues, issues_by_id, columns, watchdog_live, workers)
         |> with_parents(parents)
         |> with_over_budget(over_budget),
       # A closed task that ran over is done — there is nothing left to act on,
       # so the Closed column never flags, whatever the input says.
       closed_today:
-        closed_today_cards(issues, now) |> with_parents(parents) |> with_over_budget(nil),
+        closed_today_cards(issues, columns, now)
+        |> with_parents(parents)
+        |> with_over_budget(nil),
       promote: plan.promote,
       slots_total: slots_total,
       slots_free: slots_free,
@@ -546,53 +569,72 @@ defmodule Arbiter.Board.Snapshot do
 
   Design bd-2s901b §3: an epic detail page groups its children into a
   "Children by status" mini-board using these same five columns, so it needs
-  the same answer the board itself would give — this is that answer,
-  factored out so the two surfaces can't drift apart.
+  the same answer the board itself would give. Since bd-6zapbl both read it
+  from `Arbiter.Tasks.Lifecycle.board_column/2` — the ticket's
+  `Lifecycle.view/2` column through the interim five-column mapping — and
+  so does `Arbiter.Tasks.EpicRollup`.
 
   `workers` need only be the live workers for these issues' ids (a caller
-  scoped to one epic's children has no reason to pass the whole fleet).
-  Only author workers (not a reviewer/implementer gate pass) count here —
-  matching `derive/1`'s own author/gate split. As on the board itself, an
-  author worker's presence, not the issue's own `status`, is what separates
-  Running/Waiting from Backlog/Ready: a worker attached before the issue
-  record catches up still claims the issue.
+  scoped to one epic's children has no reason to pass the whole fleet); they
+  are the runs the projection reads. Unlike the board, an epic child gets a
+  column here too — a sub-epic still belongs on its parent's mini-board.
+
+  Options: `:now` (the dispatch-grace clock, default now) and `:blocked_by`
+  (issue id → unsatisfied blocker ids, which only splits Blocked from Ready
+  and so cannot move a card between these five columns).
 
   Returns `%{issue_id => :backlog | :ready | :running | :waiting | :closed}`.
   """
-  @spec classify_columns([map()], [map()]) :: %{String.t() => atom()}
-  def classify_columns(issues, workers \\ []) do
-    authors = Enum.filter(workers, &(worker_role(&1) not in [:reviewer, :implementer]))
-    worked = MapSet.new(authors, & &1.task_id)
+  @spec classify_columns([map()], [map()], keyword()) :: %{String.t() => atom()}
+  def classify_columns(issues, workers \\ [], opts \\ []) do
+    now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
+    columns = ticket_columns(issues, workers, Keyword.get(opts, :blocked_by, %{}), now)
 
-    running =
-      authors |> Enum.filter(&(&1.status in @running_statuses)) |> MapSet.new(& &1.task_id)
-
-    Map.new(issues, &{&1.id, column_for(&1, worked, running)})
+    Map.new(issues, &{&1.id, Map.get(columns, &1.id) || :backlog})
   end
 
-  defp column_for(%{status: :closed}, _worked, _running), do: :closed
+  # bd-6zapbl: the one place the board asks "which column?". Every issue, plus
+  # a bare `%{id: task_id}` for an author worker whose issue was not read, so
+  # its card still lands somewhere.
+  defp ticket_columns(issues, workers, blocked_by, now) do
+    runs = runs_by_ticket(workers)
+    known = MapSet.new(issues, & &1.id)
 
-  defp column_for(issue, worked, running) do
-    cond do
-      MapSet.member?(running, issue.id) -> :running
-      Map.get(issue, :status) == :awaiting_verification -> :waiting
-      MapSet.member?(worked, issue.id) -> :waiting
-      Map.get(issue, :status) == :in_progress -> :waiting
-      refined?(issue) -> :ready
-      true -> :backlog
-    end
+    unread =
+      for w <- workers,
+          Lifecycle.View.author?(w),
+          not MapSet.member?(known, w.task_id),
+          uniq: true,
+          do: %{id: w.task_id}
+
+    Map.new(issues ++ unread, fn ticket ->
+      ctx = %{
+        runs: Map.get(runs, ticket.id, []),
+        blocked_by: Map.get(blocked_by, ticket.id, []),
+        now: now
+      }
+
+      {ticket.id, Lifecycle.board_column(ticket, ctx)}
+    end)
   end
 
-  # ---- backlog / ready ------------------------------------------------------
-
-  # The one filter both columns share: work that exists, is dispatchable in
-  # principle, and nobody has picked up. `refined` is the only thing that
-  # decides which side of it a card falls on.
-  defp queueable?(issue, worked) do
-    issue.status == :open and
-      not dispatchable_type_excluded?(issue) and
-      not MapSet.member?(worked, issue.id)
+  # Every worker row under each ticket it touches: its own task id, and the
+  # author a reviewer / implementer round points back at.
+  defp runs_by_ticket(workers) do
+    workers
+    |> Enum.flat_map(fn w ->
+      [w.task_id, gate_author(w)]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.uniq()
+      |> Enum.map(&{&1, w})
+    end)
+    |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
   end
+
+  defp in_column?(columns, id, column), do: Map.get(columns, id) == column
+
+  defp epic?(nil), do: false
+  defp epic?(issue), do: dispatchable_type_excluded?(issue)
 
   # Board-level dispatch is per-issue, so containers never queue: an epic is a
   # rollup of children, not something a worker can be handed. bd-38of5i
@@ -605,17 +647,12 @@ defmodule Arbiter.Board.Snapshot do
     Map.get(issue, :issue_type) in Arbiter.Tasks.Issue.non_dispatchable_types()
   end
 
-  # Absent reads as unrefined. A hand-built map that predates the flag, or a
-  # row mid-migration, belongs in the pile a human still has to look at — the
-  # safe direction to be wrong in, since Backlog dispatches nothing.
-  defp refined?(issue), do: Map.get(issue, :refined) == true
-
   # Newest first, and only newest first. This is provisional on purpose: the
   # moment Backlog grows a priority order it starts reading as a second queue,
   # and there is exactly one queue.
-  defp backlog_cards(issues, worked) do
+  defp backlog_cards(issues, columns) do
     issues
-    |> Enum.filter(&(queueable?(&1, worked) and not refined?(&1)))
+    |> Enum.filter(&in_column?(columns, &1.id, :backlog))
     |> Enum.sort_by(&created_at/1, {:desc, DateTime})
     |> Enum.map(fn issue ->
       %{
@@ -630,11 +667,11 @@ defmodule Arbiter.Board.Snapshot do
     end)
   end
 
-  defp ready_cards(issues, worked, blocked_by, conflicts, ready_order) do
+  defp ready_cards(issues, columns, blocked_by, conflicts, ready_order) do
     ranked = ranking(ready_order)
 
     issues
-    |> Enum.filter(&(queueable?(&1, worked) and refined?(&1)))
+    |> Enum.filter(&in_column?(columns, &1.id, :ready))
     |> Enum.sort_by(&{Map.get(ranked, &1.id, :infinity), priority(&1), created_at(&1)}, :asc)
     |> Enum.map(fn issue ->
       %{
@@ -664,10 +701,14 @@ defmodule Arbiter.Board.Snapshot do
 
   # ---- running / waiting ----------------------------------------------------
 
-  defp running_cards(workers, issues_by_id, gate_workers_by_author, all_workers) do
+  defp running_cards(workers, issues_by_id, gate_workers_by_author, all_workers, columns) do
     workers
-    |> Enum.filter(&(&1.status in @running_statuses))
-    |> Enum.map(fn w ->
+    |> Enum.filter(
+      &(&1.status in @running_statuses and in_column?(columns, &1.task_id, :running))
+    )
+    # One ticket, one card: the primary row over a live pass sharing its id.
+    |> one_row_per_task()
+    |> Enum.map(fn {w, _group} ->
       gate_worker = Map.get(gate_workers_by_author, w.task_id)
 
       w
@@ -680,7 +721,33 @@ defmodule Arbiter.Board.Snapshot do
       })
       |> with_phase(w, all_workers)
     end)
-    |> Enum.sort_by(& &1.since, {:asc, DateTime})
+  end
+
+  # bd-6zapbl: an in-progress ticket whose run has not registered yet — inside
+  # the dispatch grace window (worktree provisioning, fetch). It is Running,
+  # not missing: the ticket holds its slot, and the card says it is still
+  # being dispatched.
+  defp dispatching_cards(issues, authors, columns) do
+    live = for w <- authors, w.status in @running_statuses, into: MapSet.new(), do: w.task_id
+
+    issues
+    |> Enum.filter(&(in_column?(columns, &1.id, :running) and not MapSet.member?(live, &1.id)))
+    |> Enum.map(fn issue ->
+      %{
+        id: issue.id,
+        title: Map.get(issue, :title),
+        priority: Map.get(issue, :priority),
+        difficulty: Map.get(issue, :difficulty),
+        workspace_id: Map.get(issue, :workspace_id),
+        status: :in_progress,
+        step: nil,
+        activity: @dispatching_state,
+        provider: nil,
+        since: Map.get(issue, :updated_at) || created_at(issue),
+        phase: :handing_off,
+        agent_live: false
+      }
+    end)
   end
 
   # One column, so one card shape: a parked worker's card still carries the
@@ -688,31 +755,30 @@ defmodule Arbiter.Board.Snapshot do
   # and an orphaned issue (no live worker at all) still carries both, nil.
   # The view reads whichever it has instead of branching on which shape
   # produced the card.
-  defp waiting(workers, issues, issues_by_id, worked, now, watchdog_live, all_workers) do
-    (waiting_cards(workers, issues_by_id, watchdog_live, all_workers) ++
-       orphaned_cards(issues, orphan_worked(workers, worked), now) ++
-       awaiting_verification_cards(issues))
+  #
+  # bd-6zapbl: one card per Waiting ticket. A verifying ticket gets its
+  # verification card whatever worker rows linger; any other gets a card from
+  # its non-completed author rows, or — with none left — the orphan card.
+  defp waiting(workers, issues, issues_by_id, columns, watchdog_live, all_workers) do
+    verifying = for i <- issues, Lifecycle.state_of(i) == :verifying, into: MapSet.new(), do: i.id
+
+    carded =
+      Enum.filter(workers, fn w ->
+        w.status != :completed and in_column?(columns, w.task_id, :waiting) and
+          not MapSet.member?(verifying, w.task_id)
+      end)
+
+    with_rows = MapSet.new(carded, & &1.task_id)
+
+    waiting_issues = Enum.filter(issues, &in_column?(columns, &1.id, :waiting))
+
+    {verifying_issues, others} =
+      Enum.split_with(waiting_issues, &MapSet.member?(verifying, &1.id))
+
+    (waiting_cards(carded, issues_by_id, watchdog_live, all_workers) ++
+       orphaned_cards(Enum.reject(others, &MapSet.member?(with_rows, &1.id))) ++
+       awaiting_verification_cards(verifying_issues))
     |> Enum.sort_by(& &1.since, {:asc, DateTime})
-  end
-
-  # bd-6lvc1r: `worked` counts every author row for a task regardless of
-  # status, but `:completed` sits in neither `@running_statuses` nor
-  # `@waiting_statuses` — it produces no card of its own. A task whose ONLY
-  # author rows are `:completed` (e.g. a finished CI fix pass, with the issue
-  # still `in_progress`) must not count as worked here, or `orphaned_cards`
-  # skips it and the task vanishes from the board entirely, even though
-  # `classify_columns/2` still calls it `:waiting`. A task with at least one
-  # non-`:completed` row keeps its `waiting_cards`/`running_cards` card, so it
-  # stays in `worked` and `orphaned_cards` correctly leaves it alone.
-  defp orphan_worked(workers, worked) do
-    completed_only =
-      workers
-      |> Enum.group_by(& &1.task_id)
-      |> Enum.filter(fn {_task_id, rows} -> Enum.all?(rows, &(&1.status == :completed)) end)
-      |> Enum.map(&elem(&1, 0))
-      |> MapSet.new()
-
-    MapSet.difference(worked, completed_only)
   end
 
   # bd-9so315: a task merged but parked until someone restarts the server and
@@ -721,9 +787,7 @@ defmodule Arbiter.Board.Snapshot do
   # precisely the failure the state exists to fix. It is always `needs_you`:
   # nothing in the fleet can clear it, only a human observation can.
   defp awaiting_verification_cards(issues) do
-    issues
-    |> Enum.filter(&(Map.get(&1, :status) == :awaiting_verification))
-    |> Enum.map(fn issue ->
+    Enum.map(issues, fn issue ->
       %{
         id: issue.id,
         title: Map.get(issue, :title),
@@ -754,7 +818,6 @@ defmodule Arbiter.Board.Snapshot do
 
   defp waiting_cards(workers, issues_by_id, watchdog_live, all_workers) do
     workers
-    |> Enum.filter(&(&1.status in @waiting_statuses))
     |> one_row_per_task()
     |> Enum.map(fn {w, group} ->
       alive = watchdog_alive(w, watchdog_live)
@@ -813,7 +876,7 @@ defmodule Arbiter.Board.Snapshot do
   end
 
   # One task, one card (bd-8jixav). A task's primary row and a subordinate
-  # `:fixpass` / `:conflict` pass's row are both in `@waiting_statuses` — a
+  # `:fixpass` / `:conflict` pass's row can both be parked — a
   # parked `:awaiting_review` primary alongside a `:failed` fix pass is the
   # ordinary shape of a task the merge queue is working on — so the column used
   # to render one task as two cards that read at a glance as two different
@@ -847,16 +910,15 @@ defmodule Arbiter.Board.Snapshot do
 
   defp watchdog_alive(_worker, _live), do: nil
 
-  # bd-2mv3lx: an issue stuck `in_progress` with no live worker — e.g. `arb
-  # worker stop` on an `:awaiting_review` worker, the documented pre-flight
-  # for `arb server deploy` — matches none of the worker-derived or
-  # issue-open filters and used to vanish from the board entirely. It reads
-  # truest as Waiting: the work is out of the machine's hands, and nothing
-  # will retry it on its own, so it always flags `needs_you`.
-  defp orphaned_cards(issues, worked, now) do
-    issues
-    |> Enum.filter(&orphaned?(&1, worked, now))
-    |> Enum.map(fn issue ->
+  # bd-2mv3lx: an in-progress (or merging) ticket with no live worker — e.g.
+  # `arb worker stop` on an `:awaiting_review` worker, the documented
+  # pre-flight for `arb server deploy` — used to vanish from the board
+  # entirely. It reads truest as Waiting: the work is out of the machine's
+  # hands, and nothing will retry it on its own, so it always flags
+  # `needs_you`. Past the dispatch grace only; inside it the ticket is a
+  # Running "dispatching" card (`Lifecycle.board_column/2`).
+  defp orphaned_cards(issues) do
+    Enum.map(issues, fn issue ->
       %{
         id: issue.id,
         title: Map.get(issue, :title),
@@ -893,29 +955,12 @@ defmodule Arbiter.Board.Snapshot do
     end
   end
 
-  @doc """
-  Whether an `:in_progress` issue with no live worker reads as orphaned
-  (worker stopped/gone) rather than mid-dispatch. `worked` is the set of
-  issue ids that currently have a live worker attached; `now` is compared
-  against the issue's `updated_at` under `@orphan_grace_seconds` so a
-  freshly-dispatched issue (worktree still provisioning) doesn't flag before
-  its worker has had a chance to register.
+  # A parked worker says why; any other row on a Waiting card (an open MR, or
+  # a run still live on a merging ticket) has no halt to report.
+  defp waiting_reason(%{status: status} = worker) when status in [:awaiting, :failed],
+    do: halt_reason(worker)
 
-  Public (bd-58z2tu) so `Arbiter.Tasks.EpicRollup` classifies a workerless
-  `:in_progress` child the same way the board's Waiting column does, instead
-  of re-deriving the grace window and the non-dispatchable-type exclusion.
-  """
-  @spec orphaned?(map(), MapSet.t(), DateTime.t()) :: boolean()
-  def orphaned?(issue, worked, now) do
-    issue.status == :in_progress and
-      not dispatchable_type_excluded?(issue) and
-      not MapSet.member?(worked, issue.id) and
-      DateTime.diff(now, Map.get(issue, :updated_at) || created_at(issue)) >=
-        @orphan_grace_seconds
-  end
-
-  defp waiting_reason(%{status: :awaiting_review}), do: nil
-  defp waiting_reason(worker), do: halt_reason(worker)
+  defp waiting_reason(_worker), do: nil
 
   @doc """
   Whether a single live worker row needs the operator: an `:awaiting`
@@ -1065,13 +1110,12 @@ defmodule Arbiter.Board.Snapshot do
     end
   end
 
-  defp closed_today_cards(issues, now) do
+  defp closed_today_cards(issues, columns, now) do
     twenty_four_hours_ago = DateTime.add(now, -24, :hour)
 
     issues
     |> Enum.filter(fn issue ->
-      issue.status == :closed and
-        not dispatchable_type_excluded?(issue) and
+      in_column?(columns, issue.id, :closed) and
         closed_within_24h?(
           Map.get(issue, :closed_at),
           Map.get(issue, :updated_at),

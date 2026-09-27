@@ -31,8 +31,8 @@ defmodule Arbiter.Integration.Phase1SmokeTest do
     end
 
     test "open → blocked → unblocked → closed lifecycle", %{ws: ws} do
-      {:ok, a} = Ash.create(Issue, %{title: "A (gated)", workspace_id: ws.id})
-      {:ok, b} = Ash.create(Issue, %{title: "B (blocker)", workspace_id: ws.id})
+      a = queued!(ws, "A (gated)")
+      b = queued!(ws, "B (blocker)")
 
       # `:blocks` — from_issue blocks to_issue (Dependency's module doc, and
       # Issue.ready/0's blocks_gating: the candidate is `to_issue_id`, the
@@ -72,8 +72,8 @@ defmodule Arbiter.Integration.Phase1SmokeTest do
 
     test "informational dep types (:relates_to, :discovered_from) do NOT gate readiness",
          %{ws: ws} do
-      {:ok, a} = Ash.create(Issue, %{title: "A", workspace_id: ws.id})
-      {:ok, b} = Ash.create(Issue, %{title: "B", workspace_id: ws.id})
+      a = queued!(ws, "A")
+      b = queued!(ws, "B")
 
       {:ok, _rel} =
         Ash.create(Dependency, %{
@@ -167,5 +167,13 @@ defmodule Arbiter.Integration.Phase1SmokeTest do
       assert reloaded.child_total == 2
       assert reloaded.child_closed == 1
     end
+  end
+
+  # bd-6zapbl: `Issue.ready/1` is the Ready column, so the fixtures are queued
+  # tickets — a Backlog one is never ready.
+  defp queued!(ws, title) do
+    {:ok, issue} = Ash.create(Issue, %{title: title, workspace_id: ws.id})
+    {:ok, issue} = Ash.update(issue, %{acceptance_waived: "fixture"}, action: :promote_to_ready)
+    issue
   end
 end

@@ -1667,133 +1667,59 @@ defmodule Arbiter.Tasks.Issue do
   end
 
   @doc """
-  Returns the list of "ready" issues — issues whose `status == :open` and which
-  have no open gating dependencies (`:blocks` or `:depends_on` edges) whose
-  relevant blocker is itself not closed.
+  Returns the "ready" tickets: exactly those whose `Arbiter.Tasks.Lifecycle.view/2`
+  column is `:ready` (bd-6zapbl) — `:queued`, with every gating blocker
+  satisfied (`:verifying` or `:closed`, per `Lifecycle.blocker_satisfied?/1`).
+
+  So a `:backlog` ticket is never ready, whatever its edges: it has not been
+  refined into the queue. And a blocker that has merged and is waiting on its
+  post-merge verification no longer holds its dependents back.
 
   Informational dep types (`:relates_to`, `:discovered_from`, `:parent_of`) do
-  NOT gate readiness — only `:blocks` and `:depends_on` count.
+  NOT gate readiness — only `:blocks` and `:depends_on` count, through
+  `Arbiter.Tasks.EdgeGate.blockers/2`, the same computation the board's
+  Ready/Blocked split reads. Epics (`non_dispatchable_types/0`) are excluded
+  up front: an epic is a rollup of children, never a unit of work.
+
+  This is the read behind the `task_ready` MCP tool, `GET /api/issues/ready`,
+  `arb ready` and `arb prime`'s "Ready issues". It passes no runs to the
+  projection: a `:queued` ticket whose run registered before dispatch's
+  `start` transition landed still reads as ready here, for that window.
 
   ## Options
 
-    * `:workspace_id` — when set, restrict open issues to a single
+    * `:workspace_id` — when set, restrict the result to a single
       workspace. Gating dependencies are still consulted across
       workspaces (a task in workspace A can be blocked by a task in
       workspace B). Default: no filter (all workspaces).
 
-  Done in two passes:
-
-    1. Read all open issues (filtered by workspace if given).
-    2. Read all gating Dependency rows where `from_issue_id` is in that set;
-       join their `to_issue` and check status.
-    3. Reject open issues that have at least one unclosed gating target.
-
-  At our scale (~thousands of issues) this is fine. If the edge set grows, push
-  the filter into Postgres with a `not exists` subquery as a read action.
-
-  > #### Not the board's Ready column {: .info}
-  >
-  > This answers "whose dependencies are satisfied", which is a narrower
-  > question than the board's Ready column asks. Since bd-b5wyjd that column
-  > also requires `refined == true`; this helper deliberately does not, because
-  > its callers (the `task_ready` MCP tool and `GET /api/issues?ready=true`)
-  > are asking about the dependency edges, not about the refinement queue.
-  >
-  > bd-a14qd1 revisited this when the board scheduler became the only
-  > dispatcher, and deliberately left it alone: neither caller dispatches
-  > anything, and both are documented as dependency-readiness reads. If the
-  > two ever need to agree, the change belongs here rather than in
-  > `Arbiter.Board.Snapshot`, and it is a behaviour change for two public
-  > surfaces, not a filter tweak.
-  >
-  > `refined` is the only thing this helper still declines to check. Issue
-  > *type* is different: an epic is a rollup of children, never a unit of work
-  > any caller — board or Autopilot — can hand to a worker. So since bd-cnfwtr
-  > this helper excludes `Issue.non_dispatchable_types/0` (currently just
-  > `epic`) up front, and both callers (`task_ready` and
-  > `GET /api/issues?ready=true`) inherit that exclusion.
+  At our scale (~thousands of issues) reading every issue and edge is fine.
   """
-  # Pre-existing complexity 12 — baselined when bd-4x2yhq first
-  # wired Credo up. Thresholds stay at the tool's own default so new
-  # code is held to it; see the note in .credo.exs.
-  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   def ready(opts \\ []) do
     workspace_id = Keyword.get(opts, :workspace_id)
+    issues = Ash.read!(__MODULE__)
 
-    open_issues =
-      __MODULE__
-      |> Ash.read!()
-      |> Enum.filter(fn i ->
-        i.status == :open and i.issue_type not in @non_dispatchable_types and
+    candidates =
+      Enum.filter(issues, fn i ->
+        i.state == :queued and i.issue_type not in @non_dispatchable_types and
           (is_nil(workspace_id) or i.workspace_id == workspace_id)
       end)
 
-    if open_issues == [] do
+    if candidates == [] do
       []
     else
-      open_ids = MapSet.new(open_issues, & &1.id)
-      all_deps = Ash.read!(Arbiter.Tasks.Dependency)
+      gating = Arbiter.Tasks.DependencyGraph.gating_types()
 
-      # :depends_on — from=blocked_candidate, to=blocker.
-      # Candidate is blocked while the blocker (to_issue) is not closed.
-      depends_on_gating =
-        Enum.filter(all_deps, fn d ->
-          d.type == :depends_on and MapSet.member?(open_ids, d.from_issue_id)
-        end)
+      blockers =
+        Arbiter.Tasks.Dependency
+        |> Ash.Query.filter(type in ^gating)
+        |> Ash.read!()
+        |> Arbiter.Tasks.EdgeGate.blockers(issues)
 
-      # :blocks — from=blocker, to=blocked_candidate.
-      # Candidate (to_issue) is blocked while the blocker (from_issue) is not closed.
-      # We must filter on to_issue_id here — the blocker may be :in_progress (not
-      # in open_ids), which is the shape that caused the false-ready bug.
-      blocks_gating =
-        Enum.filter(all_deps, fn d ->
-          d.type == :blocks and MapSet.member?(open_ids, d.to_issue_id)
-        end)
-
-      if depends_on_gating == [] and blocks_gating == [] do
-        open_issues
-      else
-        issues_to_fetch =
-          (Enum.map(depends_on_gating, & &1.to_issue_id) ++
-             Enum.map(blocks_gating, & &1.from_issue_id))
-          |> Enum.uniq()
-
-        fetched_by_id =
-          issues_to_fetch
-          |> Enum.map(&Ash.get!(__MODULE__, &1))
-          |> Map.new(&{&1.id, &1})
-
-        # :depends_on: blocked if the dependency target (to_issue) is not closed
-        blocked_by_depends_on =
-          depends_on_gating
-          |> Enum.filter(fn d ->
-            case Map.fetch(fetched_by_id, d.to_issue_id) do
-              {:ok, target} -> target.status != :closed
-              :error -> false
-            end
-          end)
-          |> Enum.map(& &1.from_issue_id)
-
-        # :blocks: blocked if the blocker (from_issue) is not closed
-        blocked_by_blocks =
-          blocks_gating
-          |> Enum.filter(fn d ->
-            # Pre-existing nesting 4 — baselined when bd-4x2yhq first
-            # wired Credo up. Thresholds stay at the tool's own default so new
-            # code is held to it; see the note in .credo.exs.
-            # credo:disable-for-next-line Credo.Check.Refactor.Nesting
-            case Map.fetch(fetched_by_id, d.from_issue_id) do
-              {:ok, blocker} -> blocker.status != :closed
-              :error -> false
-            end
-          end)
-          |> Enum.map(& &1.to_issue_id)
-
-        blocked_from_ids =
-          MapSet.new(blocked_by_depends_on ++ blocked_by_blocks)
-
-        Enum.reject(open_issues, fn i -> MapSet.member?(blocked_from_ids, i.id) end)
-      end
+      Enum.filter(candidates, fn i ->
+        Arbiter.Tasks.Lifecycle.view(i, %{blocked_by: Map.get(blockers, i.id, [])}).column ==
+          :ready
+      end)
     end
   end
 

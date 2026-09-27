@@ -7,7 +7,7 @@ defmodule ArbiterWeb.Api.IssueController do
     * `POST   /api/issues`             — :create
     * `GET    /api/issues`             — :index (filters: status, priority,
                                         issue_type, workspace_id)
-    * `GET    /api/issues/ready`       — :ready (Issue.ready/0)
+    * `GET    /api/issues/ready`       — :ready (Issue.ready/1)
     * `GET    /api/issues/:id`         — :show
     * `PATCH  /api/issues/:id`         — :update
     * `POST   /api/issues/:id/close`   — :close (body: optional `reason`)

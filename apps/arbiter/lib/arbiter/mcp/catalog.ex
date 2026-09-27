@@ -177,10 +177,9 @@ defmodule Arbiter.MCP.Catalog do
       name: "task_ready",
       tiers: [:coordinator],
       description:
-        "List ready (open, unblocked) tasks in the workspace — open tasks with no " <>
-          "unsatisfied gating edge. This is a dependency-readiness read and deliberately " <>
-          "ignores `refined`, so it is NOT the board's Ready column: it can list a Backlog " <>
-          "task the board scheduler will not dispatch. Use `task_list` for the board view.",
+        "List ready tasks in the workspace — exactly the board's Ready column: queued " <>
+          "(refined) tasks with no unsatisfied gating edge. A blocker that has merged and " <>
+          "is awaiting verification no longer blocks. Backlog tasks are never listed.",
       input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
       handler: &Tools.task_ready/2
     },

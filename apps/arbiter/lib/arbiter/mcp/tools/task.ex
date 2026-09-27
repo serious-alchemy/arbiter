@@ -98,7 +98,8 @@ defmodule Arbiter.MCP.Tools.Task do
   # ---- task_ready ---------------------------------------------------------
 
   @doc """
-  List ready (unblocked, open) tasks in a workspace. Coordinator only. The
+  List ready tasks in a workspace — the board's Ready column, `Issue.ready/1`
+  (bd-6zapbl). Coordinator only. The
   workspace is resolved from the optional `workspace` arg, else the scope's bound
   workspace, else the installation default.
   """

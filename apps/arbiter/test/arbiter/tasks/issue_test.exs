@@ -519,6 +519,14 @@ defmodule Arbiter.Tasks.IssueTest do
     end
   end
 
+  # bd-6zapbl: `Issue.ready/1` is the Ready column, so its fixtures are queued
+  # tickets — a Backlog one is never ready.
+  defp queued_issue!(attrs) do
+    {:ok, issue} = Ash.create(Issue, attrs)
+    {:ok, issue} = Ash.update(issue, %{acceptance_waived: "fixture"}, action: :promote_to_ready)
+    issue
+  end
+
   describe "ready/1 with :workspace_id" do
     test "filters to a single workspace's open issues" do
       {:ok, ws_a} =
@@ -533,8 +541,8 @@ defmodule Arbiter.Tasks.IssueTest do
           prefix: "wb"
         })
 
-      {:ok, in_a} = Ash.create(Issue, %{title: "a", workspace_id: ws_a.id})
-      {:ok, _in_b} = Ash.create(Issue, %{title: "b", workspace_id: ws_b.id})
+      in_a = queued_issue!(%{title: "a", workspace_id: ws_a.id})
+      _in_b = queued_issue!(%{title: "b", workspace_id: ws_b.id})
 
       ids = Issue.ready(workspace_id: ws_a.id) |> Enum.map(& &1.id)
       assert in_a.id in ids
@@ -548,7 +556,7 @@ defmodule Arbiter.Tasks.IssueTest do
           prefix: "wa0"
         })
 
-      {:ok, task} = Ash.create(Issue, %{title: "z", workspace_id: ws.id})
+      task = queued_issue!(%{title: "z", workspace_id: ws.id})
 
       ids = Issue.ready() |> Enum.map(& &1.id)
       assert task.id in ids
@@ -557,8 +565,8 @@ defmodule Arbiter.Tasks.IssueTest do
 
   describe "ready/1 excludes non-dispatchable issue types" do
     test "an epic with satisfied dependencies is excluded; a non-epic is included", %{ws: ws} do
-      {:ok, epic} = Ash.create(Issue, %{title: "epic", workspace_id: ws.id, issue_type: :epic})
-      {:ok, task} = Ash.create(Issue, %{title: "task", workspace_id: ws.id, issue_type: :task})
+      epic = queued_issue!(%{title: "epic", workspace_id: ws.id, issue_type: :epic})
+      task = queued_issue!(%{title: "task", workspace_id: ws.id, issue_type: :task})
 
       ids = Issue.ready(workspace_id: ws.id) |> Enum.map(& &1.id)
 

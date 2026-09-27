@@ -636,6 +636,84 @@ defmodule Arbiter.Board.SnapshotTest do
     end
   end
 
+  # bd-6zapbl: the board reads each ticket's column from `Lifecycle.view/2`.
+  describe "columns from the lifecycle projection (bd-6zapbl)" do
+    test "a queued ticket with a leftover completed or failed author row stays in Ready" do
+      for status <- [:completed, :failed] do
+        board =
+          derive(
+            issues: [issue("bd-a", %{state: :queued})],
+            workers: [worker("bd-a", status)]
+          )
+
+        assert ids(Enum.map(board.ready, & &1.card)) == ["bd-a"], "#{status} row hid it"
+        assert board.waiting == [] and board.running == [] and board.backlog == []
+      end
+    end
+
+    test "a blocked queued ticket with a leftover author row stays in Ready, keeping its reason" do
+      board =
+        derive(
+          issues: [issue("bd-a", %{state: :queued})],
+          workers: [worker("bd-a", :failed)],
+          blocked_by: %{"bd-a" => ["bd-9"]}
+        )
+
+      assert [%{id: "bd-a", state: :blocked, reason: "blocked — waiting on bd-9"}] = board.ready
+    end
+
+    test "a backlog ticket with a leftover author row stays in Backlog" do
+      board =
+        derive(
+          issues: [issue("bd-a", %{state: :backlog, refined: false})],
+          workers: [worker("bd-a", :completed)]
+        )
+
+      assert ids(board.backlog) == ["bd-a"]
+    end
+
+    test "a merging ticket is Waiting, even with its author row still running" do
+      board =
+        derive(
+          issues: [issue("bd-a", %{state: :merging, status: :in_progress, pr_ref: "!1"})],
+          workers: [worker("bd-a", :running)]
+        )
+
+      assert [%{id: "bd-a", reason: nil}] = board.waiting
+      assert board.running == []
+    end
+
+    test "a verifying ticket gets its one verification card, whatever rows linger" do
+      board =
+        derive(
+          issues: [issue("bd-a", %{state: :verifying, status: :awaiting_verification})],
+          workers: [worker("bd-a", :failed)]
+        )
+
+      assert [%{id: "bd-a", status: :awaiting_verification}] = board.waiting
+    end
+
+    test "an in-progress ticket inside the dispatch grace is a Running dispatching card" do
+      board = derive(issues: [issue("bd-a", %{state: :active, status: :in_progress})])
+
+      assert [%{id: "bd-a", activity: "dispatching", agent_live: false}] = board.running
+      assert board.waiting == []
+    end
+
+    test "a working author and a live fix pass render one Running card" do
+      board =
+        derive(
+          issues: [issue("bd-a", %{state: :active, status: :in_progress})],
+          workers: [
+            worker("bd-a", :running),
+            worker("bd-a", :running, %{role: :fix_pass, registry_key: "bd-a:fix"})
+          ]
+        )
+
+      assert [%{id: "bd-a", status: :running}] = board.running
+    end
+  end
+
   describe "waiting/running column invariant (bd-6lvc1r)" do
     # Whatever `classify_columns/2` says an issue's column is, `derive/1` must
     # produce exactly one card for it in that column — never zero (the bug),

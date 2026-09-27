@@ -116,6 +116,9 @@ defmodule Arbiter.MCP.ToolsTest do
 
   describe "task_ready/2" do
     test "lists open, unblocked tasks in the workspace", ctx do
+      # bd-6zapbl: the Ready column — a Backlog ticket is not ready.
+      {:ok, _} = Ash.update(ctx.task, %{}, action: :promote_to_ready)
+
       assert {:ok, %{tasks: tasks, count: count}} = Tools.task_ready(ctx.coordinator, %{})
       assert count >= 1
       assert Enum.any?(tasks, &(&1.id == ctx.task.id))

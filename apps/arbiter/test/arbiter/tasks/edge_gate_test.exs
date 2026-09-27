@@ -94,11 +94,42 @@ defmodule Arbiter.Tasks.EdgeGateTest do
       assert EdgeGate.blockers(deps, issues) == %{}
     end
 
-    test "an awaiting_verification blocker still blocks its dependents" do
+    # bd-6zapbl: verifying unblocks dependents — the blocker has merged, and
+    # its post-merge check no longer holds the next ticket back.
+    test "a verifying blocker no longer blocks its dependents" do
+      deps = [dep(:depends_on, "bd-1", "bd-2"), dep(:blocks, "bd-3", "bd-4")]
+
+      issues = [
+        issue("bd-1", :open),
+        issue("bd-2", :awaiting_verification),
+        %{id: "bd-3", state: :verifying, status: :awaiting_verification},
+        %{id: "bd-4", state: :queued, status: :open}
+      ]
+
+      assert EdgeGate.blockers(deps, issues) == %{}
+    end
+
+    test "a blocker's stored state wins over its legacy status" do
       deps = [dep(:depends_on, "bd-1", "bd-2")]
-      issues = [issue("bd-1", :open), issue("bd-2", :awaiting_verification)]
+
+      issues = [
+        %{id: "bd-1", state: :queued, status: :open},
+        %{id: "bd-2", state: :merging, status: :in_progress}
+      ]
 
       assert EdgeGate.blockers(deps, issues) == %{"bd-1" => ["bd-2"]}
+    end
+
+    test "only a ticket still waiting to start (backlog or queued) gets an entry" do
+      deps = [dep(:depends_on, "bd-1", "bd-9"), dep(:depends_on, "bd-2", "bd-9")]
+
+      issues = [
+        %{id: "bd-1", state: :backlog, status: :open},
+        %{id: "bd-2", state: :active, status: :in_progress},
+        %{id: "bd-9", state: :active, status: :in_progress}
+      ]
+
+      assert EdgeGate.blockers(deps, issues) == %{"bd-1" => ["bd-9"]}
     end
 
     test "non-gating edge types never block" do

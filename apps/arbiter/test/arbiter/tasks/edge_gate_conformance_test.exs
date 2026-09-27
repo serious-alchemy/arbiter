@@ -54,10 +54,10 @@ defmodule Arbiter.Tasks.EdgeGateConformanceTest do
       gated: []
     },
     %{
-      name: "depends_on a blocker at awaiting_verification — the dependent still waits",
+      name: "depends_on a verifying blocker — verifying unblocks dependents (bd-6zapbl)",
       edges: [{:a, :depends_on, :b}],
       awaiting_verification: [:b],
-      gated: [:a]
+      gated: []
     },
     %{
       name: "conflicts_with — exactly one of the pair goes",

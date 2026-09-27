@@ -3703,7 +3703,7 @@ defmodule ArbiterWeb.TaskDetailLive do
         data-role="awaiting-verification-hint"
         class="pl-6 text-[11px] text-[var(--text-secondary)]"
       >
-        merged; waiting on someone to verify it — it blocks until verified.
+        merged; waiting on someone to verify it — it no longer blocks this ticket.
         <code class="ml-1 text-[10.5px]">arb issue verify {@entry.issue_id}</code>
       </p>
       <details

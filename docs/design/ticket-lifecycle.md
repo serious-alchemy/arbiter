@@ -1,10 +1,11 @@
 # Ticket Lifecycle — Design Document
 
-**Status:** in progress — child 1 of 13 (stored state) implemented
+**Status:** in progress — children 1 (stored state) and 2 (the view) of 13 implemented
 **Last updated:** 2026-09-27
 **Epic:** bd-9yqspm (refined with the operator on 2026-09-27)
 **Code:** `Arbiter.Tasks.Lifecycle` (the table), `Arbiter.Tasks.Issue` (the
-actions), `Arbiter.Tasks.Issue.Changes.Transition` (applies a transition)
+actions), `Arbiter.Tasks.Issue.Changes.Transition` (applies a transition),
+`Arbiter.Tasks.Lifecycle.View` (the projection every surface reads)
 
 ---
 
@@ -270,3 +271,71 @@ it in bd-36ytcl):
 - **After a fix or conflict pass** the ticket stays `active` until it merges.
   Moving it back to `merging` when the pass finishes is bd-741sid's, along
   with the rest of the run model.
+
+---
+
+## Child 2 (bd-6zapbl): one projection
+
+`Lifecycle.view(ticket, ctx)` (implemented in `Arbiter.Tasks.Lifecycle.View`)
+is pure. It returns `%{state, column, step, blocked_by, attention}`, and
+everything it would otherwise have to read arrives in `ctx`: `:blocked_by`
+(the unsatisfied gating blockers), `:runs` (the ticket's worker rows),
+`:merger_status` (the PR's last poll, defaulting to the author run's) and
+`:now`. `attention` is `nil` until bd-8if9zt.
+
+### Who reads it
+
+| surface | before | now |
+|---|---|---|
+| board (`Board.Snapshot.derive/1`) | worker-first card builders, `queueable?` | `Lifecycle.board_column/2` per ticket; each builder only builds for its own column |
+| epic mini-board (`Snapshot.classify_columns/3`) | `column_for/3` | the same `board_column/2` |
+| `/epics` rollup (`EpicRollup`) | `bucket/1`, status only | the same `board_column/2`, given the child's live author workers |
+| `Issue.ready/1` (`task_ready`, `GET /api/issues/ready`, `arb ready`, `arb prime`) | open + no open blocker, ignoring `refined` | exactly the tickets whose column is `:ready` |
+
+`Arbiter.Board.ColumnAgreementTest` runs one ticket per state × {no worker,
+live author, completed author row, failed author row} through the first three
+and asserts they agree.
+
+### Verifying unblocks dependents
+
+A gating blocker is satisfied once it is `verifying` or `closed`
+(`Lifecycle.blocker_satisfied?/1`). `EdgeGate.blockers/2`, `Issue.ready/1` and
+`EpicRollup` all use that one predicate, so a merged blocker waiting on its
+post-merge check no longer holds its dependents — nor counts as a needs-you
+cause on `/epics`.
+
+### Runs never set the column — with one exception
+
+A leftover `completed` or `failed` author row on a `queued` ticket leaves it
+Ready or Blocked; it used to hide the ticket from every column. The one
+exception is a **live** author run on a `backlog` or `queued` ticket: dispatch
+moves the ticket to `active` before its run starts, so that pair means the
+stored write lags a run that is already working, and the ticket reads as in
+progress. `Issue.ready/1` passes no runs, so for that window it still lists
+the ticket.
+
+### Step
+
+- In progress: `implementing | in_review | addressing_review | fixing_ci |
+  resolving_conflict`, from `Arbiter.Worker.Phase` over the runs — a live
+  subordinate round wins, and `implementing` is the default.
+- Merging: `behind_base` for a PR behind its base; `merge_blocked` for a
+  conflict, red CI, a draft, or an approved PR the forge still refuses;
+  `waiting_ci` while CI runs (or a deferred merge on record is `ci_pending`);
+  otherwise `in_merge_queue`.
+
+### The interim board
+
+Until the seven-column board (bd-79w1fs), `Lifecycle.board_column/2` maps the
+columns onto today's five:
+
+| board | lifecycle |
+|---|---|
+| Backlog | `backlog` |
+| Ready | `blocked` + `ready` (blocked cards keep their reason) |
+| Running | `in_progress` whose primary author run is live, or still inside the 60 s dispatch grace |
+| Waiting | `merging`, `verifying`, and `in_progress` whose primary author run is `awaiting`, `failed` or `awaiting_review`, or gone past the grace |
+| Closed | `closed` |
+
+The primary author row decides, not a subordinate fix or conflict pass
+sharing its id; a ticket gets exactly one card.

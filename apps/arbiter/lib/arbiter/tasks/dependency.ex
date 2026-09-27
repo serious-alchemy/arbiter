@@ -6,10 +6,13 @@ defmodule Arbiter.Tasks.Dependency do
 
   ## Semantics by `type`
 
-  * `:blocks` — `from_issue` blocks `to_issue`. To work on `to_issue`, you must
-    first close `from_issue`. (Inverse of `:depends_on`.)
+  * `:blocks` — `from_issue` blocks `to_issue`. To work on `to_issue`,
+    `from_issue` must first merge (`:verifying`) or close. (Inverse of
+    `:depends_on`.)
   * `:depends_on` — `from_issue` depends on `to_issue`. `from_issue` is not
-    "ready" until `to_issue` is closed. Gates readiness in `Issue.ready/0`.
+    "ready" until `to_issue` is `:verifying` or `:closed` — verifying
+    unblocks dependents (`Arbiter.Tasks.Lifecycle.blocker_satisfied?/1`).
+    Gates readiness in `Issue.ready/1`.
   * `:relates_to` — soft relationship. Informational only; does NOT gate
     readiness or block progress.
   * `:discovered_from` — `from_issue` was discovered while working on
@@ -22,7 +25,7 @@ defmodule Arbiter.Tasks.Dependency do
   * `:conflicts_with` — mutual-exclusion edge. Expresses "do not run these two
     issues concurrently". **Symmetric**: A conflicts_with B implies B
     conflicts_with A (both directions carry the same meaning). **Non-gating**:
-    it does NOT affect `Issue.ready/0` — a conflicting peer being open does not
+    it does NOT affect `Issue.ready/1` — a conflicting peer being open does not
     prevent an issue from becoming *ready*. It is consumed one step later, at
     **dispatch** time, by `Arbiter.Tasks.EdgeGate` — the predicate the board
     scheduler (`Arbiter.Board.Scheduler` / Autopilot) asks since bd-6bax7s.
@@ -33,7 +36,7 @@ defmodule Arbiter.Tasks.Dependency do
   ## Gating vs non-gating edges
 
   Only `:blocks` and `:depends_on` gate readiness (i.e. appear in
-  `Issue.ready/0`). All other edge types — `:relates_to`, `:discovered_from`,
+  `Issue.ready/1`). All other edge types — `:relates_to`, `:discovered_from`,
   `:parent_of`, and `:conflicts_with` — are non-gating: they carry semantic
   meaning but do not prevent an issue from becoming ready.
 

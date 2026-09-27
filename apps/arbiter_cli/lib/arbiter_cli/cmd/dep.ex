@@ -19,8 +19,9 @@ defmodule ArbiterCli.Cmd.Dep do
 
   Edge types:
 
-      depends_on       <from> waits until <to> is closed. Gates dispatch.
-      blocks           the mirror image: <to> waits until <from> is closed.
+      depends_on       <from> waits until <to> has merged (verifying) or
+                       closed. Gates dispatch.
+      blocks           the mirror image: <to> waits on <from> the same way.
       conflicts_with   symmetric mutex — never run the two at the same time.
                        Enforced by the board scheduler (Autopilot), in either
                        edge direction. A card held by it says

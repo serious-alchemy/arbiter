@@ -948,10 +948,21 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
   end
 
   describe "GET /api/issues/ready" do
-    test "returns only open issues with no open blockers", %{conn: conn, ws: ws} do
-      {:ok, blocker} = Ash.create(Issue, %{title: "blocker", workspace_id: ws.id})
-      {:ok, blocked} = Ash.create(Issue, %{title: "blocked", workspace_id: ws.id})
-      {:ok, free} = Ash.create(Issue, %{title: "free", workspace_id: ws.id})
+    test "returns only queued issues with no open blockers", %{conn: conn, ws: ws} do
+      # bd-6zapbl: the Ready column — queued tickets, never Backlog ones.
+      queued = fn title ->
+        {:ok, issue} = Ash.create(Issue, %{title: title, workspace_id: ws.id})
+
+        {:ok, issue} =
+          Ash.update(issue, %{acceptance_waived: "fixture"}, action: :promote_to_ready)
+
+        issue
+      end
+
+      blocker = queued.("blocker")
+      blocked = queued.("blocked")
+      free = queued.("free")
+      {:ok, backlog} = Ash.create(Issue, %{title: "backlog", workspace_id: ws.id})
 
       {:ok, _} =
         Ash.create(Dependency, %{
@@ -969,6 +980,7 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
       assert blocker.id in ids
       assert free.id in ids
       refute blocked.id in ids
+      refute backlog.id in ids
     end
   end
 

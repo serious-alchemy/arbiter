@@ -10,18 +10,19 @@ defmodule Arbiter.Tasks.EpicRollup do
 
   ## Buckets
 
-  The five buckets mirror the board's columns, but are derived from the
-  *issue*, not from a worker row: an epic's page is about where its children
-  stand in the ledger, and a child can be `:in_progress` with its worker
-  already gone.
+  The five buckets are the board's own columns, read from the same place
+  (bd-6zapbl): `Arbiter.Tasks.Lifecycle.board_column/2`, the child's
+  `Lifecycle.view/2` column through the interim five-column mapping, given
+  its live author workers and the clock. So a workerless in-progress child
+  past the dispatch grace is `:waiting` here exactly as it is on the board,
+  and `Arbiter.Board.Snapshot.classify_columns/3` (the epic detail page's
+  mini-board) gives the same answer for every child.
 
-      :closed    status == :closed
-      :waiting   status == :awaiting_verification
-      :running   status == :in_progress
-      :ready     status == :open and refined
-      :backlog   status == :open and not refined
-
-  Absent `refined` reads as unrefined, same as `Arbiter.Board.Snapshot`.
+      :backlog   backlog
+      :ready     queued — blocked or ready
+      :running   in progress, with a live author run (or still dispatching)
+      :waiting   merging, verifying, or in progress with its run parked/gone
+      :closed    closed
 
   ## `needs_you`
 
@@ -43,14 +44,17 @@ defmodule Arbiter.Tasks.EpicRollup do
        still inside that window, or of a non-dispatchable type (`:epic`),
        does not flag — `orphaned?/3` is reused rather than re-derived so the
        two surfaces can't drift apart.
-    3. It is blocked by an open gating blocker that itself needs the
-       operator: the blocker is `:awaiting_verification`, needs-you per rule
-       2, or unrefined (`:open` and not `refined` — it will never be
-       dispatched until promoted). Checked one level deep, not as a graph
-       traversal, and the blocker may live outside the epic.
+    3. It is blocked by an unsatisfied gating blocker that itself needs the
+       operator: the blocker needs-you per rule 2, or is unrefined
+       (`:backlog` — it will never be dispatched until promoted). Checked one
+       level deep, not as a graph traversal, and the blocker may live outside
+       the epic.
 
   A blocker that is Ready, running, or mid-review/CI is the machine's turn —
-  it does not flag rule 3. A paused Autopilot is a deliberate operator act,
+  it does not flag rule 3. Nor does a `:verifying` blocker: verifying
+  unblocks dependents (`Arbiter.Tasks.Lifecycle.blocker_satisfied?/1`), so it
+  is not blocking anything. The verifying ticket itself still flags rule 1
+  when it is a child of the epic. A paused Autopilot is a deliberate operator act,
   not a rule here either.
 
   `blocked_children` and `idle_with_ready_work` stay on the rollup as
@@ -76,6 +80,7 @@ defmodule Arbiter.Tasks.EpicRollup do
   alias Arbiter.Tasks.Dependency
   alias Arbiter.Tasks.DependencyGraph
   alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.Lifecycle
 
   @empty_counts %{backlog: 0, ready: 0, running: 0, waiting: 0, closed: 0}
 
@@ -141,20 +146,28 @@ defmodule Arbiter.Tasks.EpicRollup do
 
   @doc """
   Per-child classification for one epic: bucket (see moduledoc) plus whether
-  the child is held by an open gating blocker. The shared basis for
+  the child is held by an unsatisfied gating blocker. The shared basis for
   `for_epics/2`'s counts and `Arbiter.Usage.Estimate.epic_cost_rollup/2`'s
   dispatchable/excluded split (design bd-9jj5lf §4) — one membership +
   blocking read, not two independently-derived ones.
+
+  `opts` takes `:workers` and `:now`, as `for_epics/2` does.
   """
-  @spec children_with_status(Issue.t() | String.t()) :: [
+  @spec children_with_status(Issue.t() | String.t(), keyword()) :: [
           %{issue: Issue.t(), bucket: atom(), blocked?: boolean()}
         ]
-  def children_with_status(epic) do
+  def children_with_status(epic, opts \\ []) do
     children = children_of(epic_id(epic))
     blocked = blocked_ids(children)
 
+    ctx = %{
+      workers_by_task:
+        opts |> live_workers(Enum.map(children, & &1.id)) |> Enum.group_by(& &1.task_id),
+      now: Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
+    }
+
     Enum.map(children, fn child ->
-      %{issue: child, bucket: bucket(child), blocked?: MapSet.member?(blocked, child.id)}
+      %{issue: child, bucket: bucket(child, ctx), blocked?: MapSet.member?(blocked, child.id)}
     end)
   end
 
@@ -172,7 +185,7 @@ defmodule Arbiter.Tasks.EpicRollup do
   defp rollup(epic_id, children, ctx) do
     counts =
       Enum.reduce(children, @empty_counts, fn child, acc ->
-        Map.update!(acc, bucket(child), &(&1 + 1))
+        Map.update!(acc, bucket(child, ctx), &(&1 + 1))
       end)
 
     total = length(children)
@@ -196,10 +209,12 @@ defmodule Arbiter.Tasks.EpicRollup do
     }
   end
 
-  defp bucket(%{status: :closed}), do: :closed
-  defp bucket(%{status: :awaiting_verification}), do: :waiting
-  defp bucket(%{status: :in_progress}), do: :running
-  defp bucket(child), do: if(Map.get(child, :refined) == true, do: :ready, else: :backlog)
+  # The board's column for this child (bd-6zapbl). Blockers only split Blocked
+  # from Ready, which share a bucket, so none are passed.
+  defp bucket(child, ctx) do
+    runs = Map.get(ctx.workers_by_task, child.id, [])
+    Lifecycle.board_column(child, %{runs: runs, now: ctx.now}) || :backlog
+  end
 
   defp percent(_closed, 0), do: 0
   defp percent(closed, total), do: round(closed * 100 / total)
@@ -220,18 +235,17 @@ defmodule Arbiter.Tasks.EpicRollup do
   # workers touching any child or blocker (for rule 2).
   defp build_context(children, opts) do
     child_ids = Enum.map(children, & &1.id)
-    open_children = for c <- children, c.status != :closed, into: MapSet.new(), do: c.id
+    open_children = open_ids(children)
 
     pairs = gating_pairs(MapSet.to_list(open_children), open_children)
     blocker_ids = pairs |> Enum.map(&elem(&1, 1)) |> Enum.uniq()
     blockers_by_id = blocker_issues(blocker_ids)
 
+    # The same predicate `EdgeGate.blockers/2` gates on: a `:verifying` or
+    # `:closed` blocker holds nothing back, and an unknown one still does.
     open_pairs =
-      Enum.filter(pairs, fn {_blocked, blocker_id} ->
-        case Map.get(blockers_by_id, blocker_id) do
-          %{status: status} -> status != :closed
-          _ -> false
-        end
+      Enum.reject(pairs, fn {_blocked, blocker_id} ->
+        Lifecycle.blocker_satisfied?(Map.get(blockers_by_id, blocker_id))
       end)
 
     blocked = open_pairs |> Enum.map(&elem(&1, 0)) |> MapSet.new()
@@ -261,7 +275,7 @@ defmodule Arbiter.Tasks.EpicRollup do
   defp needs_you_signal(children, ctx) do
     Enum.reduce(children, {false, []}, fn child, {flag, reasons} ->
       cond do
-        Map.get(child, :status) == :awaiting_verification ->
+        Lifecycle.state_of(child) == :verifying ->
           {true, reasons ++ ["verify #{child.id}"]}
 
         needs_you_directly?(child, ctx) ->
@@ -277,25 +291,25 @@ defmodule Arbiter.Tasks.EpicRollup do
   end
 
   # Rule 2: does this issue's own live worker (or lack of one) need the
-  # operator, per the board's `Snapshot.child_needs_you?/2`. An
-  # `:awaiting_verification` issue is handled by the caller (rule 1) before
-  # this is ever reached for a child, but a blocker checked under rule 3 can
-  # still be in that state, hence the explicit clause here too.
+  # operator, per the board's `Snapshot.child_needs_you?/2`. A `:verifying`
+  # issue is handled by the caller (rule 1) before this is ever reached for a
+  # child; a blocker checked under rule 3 never is one, since verifying
+  # satisfies its dependents.
   #
-  # A workerless `:in_progress` issue defers to `Snapshot.orphaned?/3` rather
-  # than flagging unconditionally: dispatch flips an issue to `:in_progress`
-  # before its worker registers, so a fresh dispatch must not read as
-  # "parked" (the board's `@orphan_grace_seconds` window), and a non-
-  # dispatchable child (an :epic) never gets a worker at all, so it must
-  # never flag on that basis either.
+  # A workerless in-progress or merging issue flags exactly when the board
+  # gives it the orphan card: `Lifecycle.board_column/2` says `:waiting` with
+  # no run at all. Dispatch moves a ticket to `:active` before its worker
+  # registers, so a fresh dispatch (inside the grace window) is still
+  # `:running` there and does not read as "parked", and a non-dispatchable
+  # child (an :epic) never gets a worker, so it never flags on that basis.
   defp needs_you_directly?(issue, ctx) do
-    case Map.get(issue, :status) do
-      :awaiting_verification ->
+    case Lifecycle.state_of(issue) do
+      :verifying ->
         true
 
-      :in_progress ->
+      state when state in [:active, :merging] ->
         case Map.get(ctx.workers_by_task, issue.id, []) do
-          [] -> Snapshot.orphaned?(issue, ctx.worked, ctx.now)
+          [] -> Lifecycle.board_column(issue, %{runs: [], now: ctx.now}) == :waiting
           workers -> Snapshot.child_needs_you?(workers, ctx.watchdog_live)
         end
 
@@ -304,7 +318,7 @@ defmodule Arbiter.Tasks.EpicRollup do
     end
   end
 
-  # Rule 3: the first open gating blocker (in or out of the epic) that itself
+  # Rule 3: the first unsatisfied gating blocker (in or out of the epic) that itself
   # needs the operator, formatted as the chip's reason. One level deep — a
   # blocker's own blockers are not walked.
   defp blocked_cause(child, ctx) do
@@ -320,11 +334,8 @@ defmodule Arbiter.Tasks.EpicRollup do
 
   defp blocker_cause(blocker, ctx) do
     cond do
-      unrefined?(blocker) ->
+      Lifecycle.state_of(blocker) == :backlog ->
         "blocked by unrefined #{blocker.id}"
-
-      Map.get(blocker, :status) == :awaiting_verification ->
-        "blocked by #{blocker.id} (awaiting verification)"
 
       needs_you_directly?(blocker, ctx) ->
         "blocked by #{blocker.id} (parked)"
@@ -334,15 +345,12 @@ defmodule Arbiter.Tasks.EpicRollup do
     end
   end
 
-  defp unrefined?(issue),
-    do: Map.get(issue, :status) == :open and Map.get(issue, :refined) != true
-
   defp blocker_issues([]), do: %{}
 
   defp blocker_issues(ids) do
     Issue
     |> Ash.Query.filter(id in ^ids)
-    |> Ash.Query.select([:id, :status, :refined, :issue_type, :updated_at, :created_at])
+    |> Ash.Query.select([:id, :state, :status, :refined, :issue_type, :updated_at, :created_at])
     |> Ash.read!()
     |> Map.new(&{&1.id, &1})
   end
@@ -355,18 +363,10 @@ defmodule Arbiter.Tasks.EpicRollup do
     |> Enum.filter(&(author_worker?(&1) and MapSet.member?(ids, Map.get(&1, :task_id))))
   end
 
-  # Only author workers count, matching `Snapshot.classify_columns/2`: a
+  # Only author workers count, matching `Snapshot.classify_columns/3`: a
   # reviewer/implementer gate pass rides on the author's card and is not a
   # second vote on whether the task itself needs the operator.
-  defp author_worker?(worker) do
-    role =
-      case Map.get(worker, :meta) do
-        %{} = meta -> Map.get(meta, :role)
-        _ -> nil
-      end
-
-    role not in [:reviewer, :implementer]
-  end
+  defp author_worker?(worker), do: Lifecycle.View.author?(worker)
 
   defp default_workers do
     Arbiter.Worker.list_children()
@@ -376,27 +376,30 @@ defmodule Arbiter.Tasks.EpicRollup do
     :exit, _ -> []
   end
 
-  # Ids of children held by at least one open gating edge. Standalone from
+  # Ids of children held by at least one unsatisfied gating edge. Standalone from
   # `build_context/2` above — `children_with_status/1` is a single-epic call
   # with no reason to also fetch blocker status/refined or live workers.
   defp blocked_ids([]), do: MapSet.new()
 
   defp blocked_ids(children) do
-    open_children =
-      for child <- children, child.status != :closed, into: MapSet.new(), do: child.id
+    open_children = open_ids(children)
 
     if MapSet.size(open_children) == 0 do
       MapSet.new()
     else
       ids = MapSet.to_list(open_children)
       pairs = gating_pairs(ids, open_children)
-      closed_blockers = closed_ids(Enum.map(pairs, &elem(&1, 1)))
+      satisfied = satisfied_ids(Enum.map(pairs, &elem(&1, 1)))
 
       for {blocked, blocker} <- pairs,
-          not MapSet.member?(closed_blockers, blocker),
+          not MapSet.member?(satisfied, blocker),
           into: MapSet.new(),
           do: blocked
     end
+  end
+
+  defp open_ids(children) do
+    for child <- children, Lifecycle.state_of(child) != :closed, into: MapSet.new(), do: child.id
   end
 
   # `{blocked_id, blocker_id}` for every gating row with a child on the blocked
@@ -415,16 +418,18 @@ defmodule Arbiter.Tasks.EpicRollup do
     |> Enum.filter(fn {blocked, _blocker} -> MapSet.member?(open_children, blocked) end)
   end
 
-  defp closed_ids([]), do: MapSet.new()
+  # Blockers that no longer hold their dependents back: `:verifying` or
+  # `:closed` (`Lifecycle.blocker_satisfied?/1`).
+  defp satisfied_ids([]), do: MapSet.new()
 
-  defp closed_ids(ids) do
+  defp satisfied_ids(ids) do
     ids = Enum.uniq(ids)
-    closed = :closed
 
     Issue
-    |> Ash.Query.filter(id in ^ids and status == ^closed)
-    |> Ash.Query.select([:id])
+    |> Ash.Query.filter(id in ^ids)
+    |> Ash.Query.select([:id, :state, :status])
     |> Ash.read!()
+    |> Enum.filter(&Lifecycle.blocker_satisfied?/1)
     |> MapSet.new(& &1.id)
   end
 end

@@ -16,7 +16,7 @@ defmodule Arbiter.Tasks.EdgeGate do
   ## The edge types, and what each one does here
 
     * `:depends_on` / `:blocks` — **gating**. They order work: the dependent
-      waits until its dependency is `:closed`. Normalised by
+      waits until its dependency is `:verifying` or `:closed`. Normalised by
       `Arbiter.Tasks.DependencyGraph`, and the only types that participate in
       cycle checks.
     * `:conflicts_with` — a **symmetric mutex**. It does not order anything, so
@@ -32,18 +32,20 @@ defmodule Arbiter.Tasks.EdgeGate do
   `Arbiter.Tasks.Dependency.types/0` exactly — a newly-invented edge type
   fails that test rather than silently defaulting to "non-gating".
 
-  ## `:closed`, not "finished"
+  ## Verifying unblocks dependents
 
-  `blockers/2` keeps a blocker until it is `:closed`, which means a task parked
-  at `:awaiting_verification` (merged, waiting on a coordinator's post-deploy
-  check) **still blocks its dependents**. That is deliberate and long-standing:
-  the dependent's premise is that the upstream change is known-good, and
-  `:awaiting_verification` is exactly the state where that is not yet known.
-  `Arbiter.Tasks.Issue.ready/0` applies the same rule, so all three surfaces
-  agree.
+  A gating blocker is satisfied once it is `:verifying` or `:closed`
+  (`Arbiter.Tasks.Lifecycle.blocker_satisfied?/1`). A blocker that has merged
+  and is waiting on its post-merge restart-and-observe no longer holds its
+  dependents back (bd-6zapbl). This reverses the long-standing rule that a
+  ticket parked at `:awaiting_verification` still blocked them: the merge is
+  what the dependent builds on, and holding it for the verification stalled
+  every chain behind one manual check. `Arbiter.Tasks.Issue.ready/1` and
+  `Arbiter.Tasks.EpicRollup` gate on the same predicate, so every surface
+  agrees.
 
-  A `:conflicts_with` counterpart is the opposite question — "is it in flight
-  *right now*" — and `:awaiting_verification` answers no: the work merged, the
+  A `:conflicts_with` counterpart is a different question — "is it in flight
+  *right now*" — and `:verifying` answers no as well: the work merged, the
   worktree is gone, nothing can collide with it. In-flight-ness is the
   caller's to determine (the board reads live workers) and arrives here as
   `:claimed`.
@@ -67,6 +69,7 @@ defmodule Arbiter.Tasks.EdgeGate do
 
   alias Arbiter.Tasks.Dependency
   alias Arbiter.Tasks.DependencyGraph
+  alias Arbiter.Tasks.Lifecycle
 
   @mutex_types [:conflicts_with]
   @non_gating_types [:relates_to, :discovered_from, :parent_of]
@@ -139,26 +142,30 @@ defmodule Arbiter.Tasks.EdgeGate do
   def describe({:conflicts_with, peer}), do: "conflicts with " <> peer
 
   @doc """
-  Open gating blockers per issue: `%{blocked_id => [blocker_id]}`.
+  Unsatisfied gating blockers per ticket: `%{blocked_id => [blocker_id]}`.
 
-  `:depends_on` targets and `:blocks` sources that are not themselves
-  `:closed`, keyed by the issue they hold back. Only issues that are still
-  `:open` get an entry — a blocker on something already in progress is not a
-  dispatch question. Pure: hand it the dependency rows and the issues.
+  `:depends_on` targets and `:blocks` sources that do not yet satisfy
+  `Arbiter.Tasks.Lifecycle.blocker_satisfied?/1` (neither `:verifying` nor
+  `:closed`), keyed by the ticket they hold back. A blocker missing from
+  `issues` is unknown, and still blocks. Only tickets still waiting to start
+  (`:backlog` or `:queued`) get an entry — a blocker on something already in
+  progress is not a dispatch question. Pure: hand it the dependency rows and
+  the issues.
 
-  Mirrors `Arbiter.Tasks.Issue.ready/0`'s gating rule, but keeps the blocked
-  ids instead of dropping them, because the board has to show *why* a card
-  can't go.
+  This is the `:blocked_by` input `Arbiter.Tasks.Lifecycle.view/2` splits a
+  `:queued` ticket into Blocked or Ready with, and it keeps the blocker ids
+  because the board has to show *why* a card can't go.
   """
   @spec blockers([dep()], [map()]) :: %{optional(String.t()) => [String.t()]}
   def blockers(deps, issues) do
-    open_ids = for i <- issues, i.status == :open, into: MapSet.new(), do: i.id
-    closed = for i <- issues, i.status == :closed, into: MapSet.new(), do: i.id
+    states = Map.new(issues, &{&1.id, Lifecycle.state_of(&1)})
+    waiting = for {id, state} <- states, state in [:backlog, :queued], into: MapSet.new(), do: id
 
     deps
     |> Enum.flat_map(&DependencyGraph.normalize_gating/1)
     |> Enum.filter(fn {blocked, blocker} ->
-      MapSet.member?(open_ids, blocked) and not MapSet.member?(closed, blocker)
+      MapSet.member?(waiting, blocked) and
+        not Lifecycle.blocker_satisfied?(Map.get(states, blocker))
     end)
     |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
     |> Map.new(fn {id, blockers} -> {id, blockers |> Enum.uniq() |> Enum.sort()} end)

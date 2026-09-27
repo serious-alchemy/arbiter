@@ -337,7 +337,9 @@ defmodule Arbiter.Tasks.EpicRollupTest do
       assert "blocked by unrefined #{blocker.id}" in r.needs_you_reasons
     end
 
-    test "blocked by an awaiting_verification blocker flags needs_you", ctx do
+    # bd-6zapbl: verifying unblocks dependents, so a verifying blocker outside
+    # the epic is not blocking the child at all, let alone a needs-you cause.
+    test "a verifying blocker is not a needs-you cause — it no longer blocks", ctx do
       blocked = child(ctx.ws, ctx.epic, "blocked-child", as: :ready)
       {:ok, blocker} = Ash.create(Issue, %{title: "waiting blocker", workspace_id: ctx.ws.id})
       blocker = blocker |> Ash.update!(%{status: :in_progress}) |> park()
@@ -345,8 +347,10 @@ defmodule Arbiter.Tasks.EpicRollupTest do
 
       r = rollup(ctx.epic)
 
-      assert r.needs_you
-      assert "blocked by #{blocker.id} (awaiting verification)" in r.needs_you_reasons
+      refute r.needs_you
+      assert r.needs_you_reasons == []
+      assert r.blocked_children == 0
+      assert [%{blocked?: false}] = EpicRollup.children_with_status(ctx.epic)
     end
 
     test "blocked by a parked (needs-you) blocker flags needs_you", ctx do

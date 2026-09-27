@@ -88,6 +88,21 @@ defmodule Arbiter.Tasks.Lifecycle do
           | :close
           | :reopen
 
+  @doc """
+  The ticket's column, step, blockers and attention (bd-6zapbl). See
+  `Arbiter.Tasks.Lifecycle.View` for the rules and `ctx`'s keys.
+  """
+  defdelegate view(ticket, ctx \\ %{}), to: Arbiter.Tasks.Lifecycle.View
+
+  @doc "The interim five-column board mapping. See `Arbiter.Tasks.Lifecycle.View.board_column/2`."
+  defdelegate board_column(ticket, ctx \\ %{}), to: Arbiter.Tasks.Lifecycle.View
+
+  @doc "Whether a gating blocker no longer holds its dependents back: `:verifying` or `:closed`."
+  defdelegate blocker_satisfied?(ticket_or_state), to: Arbiter.Tasks.Lifecycle.View
+
+  @doc "The stored state, or the one a legacy row's columns imply; `nil` when neither."
+  defdelegate state_of(ticket), to: Arbiter.Tasks.Lifecycle.View
+
   @doc "The stored states, in lifecycle order."
   @spec states() :: [state()]
   def states, do: @states
