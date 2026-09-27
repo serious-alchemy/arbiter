@@ -330,8 +330,9 @@ defmodule Arbiter.Worker do
   def start(opts) when is_list(opts) do
     case ensure_single_active_task_worker(opts) do
       :ok ->
-        log_worker_start(opts)
-        DynamicSupervisor.start_child(Arbiter.Worker.Supervisor, {__MODULE__, opts})
+        Arbiter.Worker.Supervisor
+        |> DynamicSupervisor.start_child({__MODULE__, opts})
+        |> tap(&log_worker_start(opts, &1))
 
       {:error, _reason} = refused ->
         refused
@@ -487,14 +488,29 @@ defmodule Arbiter.Worker do
   # started each of the two runs, because nothing recorded the caller. Every
   # worker start now leaves a breadcrumb naming the task, the registry key, the
   # role from `:meta`, and the first stack frame outside this module.
-  defp log_worker_start(opts) do
+  #
+  # Logged from the `start_child` *outcome*, not before it (bd-2l0hzm). A key
+  # squatted by a terminal pass makes `start_or_reap_terminal/1` call `start/1`
+  # twice — once refused `:already_started`, once after the reap — and the
+  # pre-start log read as two spawns 1ms apart for a single fix pass. The
+  # refused attempt started nothing, so it leaves no breadcrumb; the reap has
+  # its own line.
+  defp log_worker_start(_opts, {:error, {:already_started, _pid}}), do: :ok
+
+  defp log_worker_start(opts, outcome) do
     task_id = Keyword.get(opts, :task_id)
     key = if is_binary(task_id), do: resolve_registry_key(opts, task_id), else: nil
     role = opts |> Keyword.get(:meta, %{}) |> role_of()
 
+    detail =
+      case outcome do
+        {:ok, pid} -> "pid=#{inspect(pid)}"
+        other -> "FAILED #{inspect(other)}"
+      end
+
     Logger.info(
       "Worker.start: task=#{inspect(task_id)} registry_key=#{inspect(key)} " <>
-        "role=#{inspect(role)} origin=#{start_origin()}"
+        "role=#{inspect(role)} #{detail} origin=#{start_origin()}"
     )
 
     :ok

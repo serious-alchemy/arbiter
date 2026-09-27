@@ -74,6 +74,7 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
           optional(:repo) => String.t() | nil,
           optional(:pr_ref) => term(),
           optional(:checks) => [failing_check()],
+          optional(:outside_diff_files) => [String.t()],
           optional(:start_claude) => boolean(),
           optional(:claude_command) => [String.t()]
         }
@@ -198,7 +199,8 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
            target_branch: target_branch,
            repo_path: repo_path,
            repo: Map.get(args, :repo) || resolve_repo_name(workspace),
-           checks: Map.get(args, :checks) || []
+           checks: Map.get(args, :checks) || [],
+           outside_diff_files: Map.get(args, :outside_diff_files) || []
          }}
     end
   end
@@ -464,7 +466,7 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
 
     Failing checks:
     #{render_checks(Map.get(context, :checks) || [])}
-
+    #{render_outside_diff(Map.get(context, :outside_diff_files) || [])}
     DO NOT:
       * re-implement the change set,
       * open a new PR,
@@ -521,6 +523,23 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
 
   def prompt_for(_) do
     "You are a CI fix-pass worker. Diagnose the failing checks, fix the root cause, push, exit."
+  end
+
+  # bd-2l0hzm: the Watchdog re-ran CI because every failing test was outside
+  # the diff, and a test that failed before failed again. On #2003 a pass
+  # "fixed" an unrelated flaky test on a docs-only branch; this says not to.
+  defp render_outside_diff([]), do: ""
+
+  defp render_outside_diff(files) do
+    """
+    The failing test file(s) below are NOT in this PR's diff:
+    #{Enum.map_join(files, "\n", &("  * " <> &1))}
+    CI was already re-run once on this head and a test failed again, so the
+    failure reproduces. Do not edit those test files. Work out how THIS PR's
+    changes break them and fix the PR's own code. If nothing in the diff can
+    reach them, it is a flake or a failure repo-wide: record it with
+    `flake_record` or `ci_mark_external` (below), not a code change.
+    """
   end
 
   @doc """

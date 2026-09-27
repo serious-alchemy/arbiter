@@ -103,6 +103,37 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcherTest do
       assert prompt =~ "test_file"
       assert prompt =~ ~r/no\s+code change/i
     end
+
+    # bd-2l0hzm AC4: a failure in tests the PR never touched that reproduced on
+    # a re-run. The pass must fix the PR's own code, not edit those tests (a
+    # #2003 fix pass "fixed" an unrelated flaky test on a docs-only branch).
+    test "briefs a pass whose failing tests are outside the diff not to edit them" do
+      context = %{
+        task: %Issue{id: "bd-fix5"},
+        branch: "feature/bd-fix5",
+        target_branch: "main",
+        checks: [],
+        outside_diff_files: ["apps/arbiter/test/arbiter/board/drain_test.exs"]
+      }
+
+      prompt = FixPassDispatcher.prompt_for(context)
+
+      assert prompt =~ "NOT in this PR's diff"
+      assert prompt =~ "apps/arbiter/test/arbiter/board/drain_test.exs"
+      assert prompt =~ ~r/do not edit/i
+      assert prompt =~ "re-run"
+    end
+
+    test "says nothing about outside-diff tests when there are none" do
+      context = %{
+        task: %Issue{id: "bd-fix6"},
+        branch: "feature/bd-fix6",
+        target_branch: "main",
+        checks: []
+      }
+
+      refute FixPassDispatcher.prompt_for(context) =~ "NOT in this PR's diff"
+    end
   end
 
   describe "registry_suffix/0" do

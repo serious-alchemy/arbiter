@@ -458,6 +458,102 @@ defmodule Arbiter.Mergers.GithubTest do
       assert {:ok, %{pipeline: :running}} = Github.get(@ref)
     end
 
+    # bd-2l0hzm AC5: CI is judged from the CURRENT head's check-runs only. A
+    # previous head's red run must not leak into a head whose own run is still
+    # queued. The stub answers ONLY the current head's check-runs path, so a
+    # read of any other SHA's runs crashes the stub rather than passing quietly.
+    test "a queued run on the current head is pending even though the previous head failed" do
+      stub(fn conn ->
+        case conn.request_path do
+          "/repos/octo/widget/pulls/42" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "state" => "open",
+              "merged" => false,
+              "html_url" => "u",
+              "mergeable_state" => "blocked",
+              "head" => %{"sha" => "newhead"}
+            })
+
+          "/repos/octo/widget/pulls/42/reviews" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          "/repos/octo/widget/commits/newhead/check-runs" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "check_runs" => [
+                %{
+                  "id" => 20,
+                  "name" => "mix test",
+                  "status" => "queued",
+                  "conclusion" => nil,
+                  "head_sha" => "newhead"
+                }
+              ]
+            })
+
+          # The previous head's failed run — present on GitHub, never to be read.
+          "/repos/octo/widget/commits/oldhead/check-runs" ->
+            flunk("read the previous head's check-runs")
+        end
+      end)
+
+      assert {:ok, result} = Github.get(@ref)
+      assert result.head_sha == "newhead"
+      assert result.pipeline == :running
+      refute result.block_reason == :ci_failed
+    end
+
+    # A re-run on the SAME head adds a new check-run under the same name, and
+    # the failed attempt is still listed beside it. The newest run per name is
+    # the verdict: the queued re-run means pending, not failed.
+    test "a queued re-run supersedes the failed attempt of the same check on the same head" do
+      stub(fn conn ->
+        case conn.request_path do
+          "/repos/octo/widget/pulls/42" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "state" => "open",
+              "merged" => false,
+              "html_url" => "u",
+              "mergeable_state" => "blocked",
+              "head" => %{"sha" => "samehead"}
+            })
+
+          "/repos/octo/widget/pulls/42/reviews" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          "/repos/octo/widget/commits/samehead/check-runs" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "check_runs" => [
+                %{"id" => 11, "name" => "mix test", "status" => "queued", "conclusion" => nil},
+                %{
+                  "id" => 7,
+                  "name" => "mix test",
+                  "status" => "completed",
+                  "conclusion" => "failure"
+                },
+                %{
+                  "id" => 8,
+                  "name" => "mix audit",
+                  "status" => "completed",
+                  "conclusion" => "success"
+                }
+              ]
+            })
+        end
+      end)
+
+      assert {:ok, result} = Github.get(@ref)
+      assert result.pipeline == :running
+      refute result.block_reason == :ci_failed
+    end
+
     test "pipeline is :success when all check-runs completed with success+skipped mix (bd-5p32kh)" do
       stub(fn conn ->
         case conn.request_path do
@@ -1841,6 +1937,65 @@ defmodule Arbiter.Mergers.GithubTest do
 
       assert {:ok, checks} = Github.failing_check_logs(@ref)
       assert Enum.map(checks, & &1.name) == ["a", "b", "c"]
+    end
+
+    # bd-2l0hzm AC4: GitHub Actions leaves `output` empty on a failed job, so the
+    # failing test file lives only in the run's annotations. #2003's briefing
+    # carried no log context at all, and the Watchdog cannot tell "a test this
+    # PR never touched" without the path.
+    test "carries the failing files from the run's failure annotations" do
+      stub(fn conn ->
+        case conn.request_path do
+          "/repos/octo/widget/pulls/42" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"state" => "open", "head" => %{"sha" => "sha4"}})
+
+          "/repos/octo/widget/commits/sha4/check-runs" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "check_runs" => [
+                %{
+                  "id" => 77,
+                  "name" => "mix test",
+                  "conclusion" => "failure",
+                  "output" => %{"title" => nil, "summary" => nil, "annotations_count" => 3}
+                }
+              ]
+            })
+
+          "/repos/octo/widget/check-runs/77/annotations" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([
+              %{
+                "path" => ".github",
+                "annotation_level" => "failure",
+                "start_line" => 3649,
+                "message" => "Process completed with exit code 2."
+              },
+              %{
+                "path" => "apps/arbiter/test/arbiter/reviews/coverage_test.exs",
+                "annotation_level" => "failure",
+                "start_line" => 150,
+                "message" => "test mechanical_for_diff/5 derives a :mechanical row"
+              },
+              %{
+                "path" => ".github",
+                "annotation_level" => "warning",
+                "start_line" => 2,
+                "message" => "Node.js 20 is deprecated."
+              }
+            ])
+        end
+      end)
+
+      assert {:ok, [check]} = Github.failing_check_logs(@ref)
+      assert check.files == ["apps/arbiter/test/arbiter/reviews/coverage_test.exs"]
+      assert check.summary =~ "coverage_test.exs:150"
+      assert check.summary =~ "mechanical_for_diff/5"
+      refute check.summary =~ "Node.js 20"
     end
   end
 

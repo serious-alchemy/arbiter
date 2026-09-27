@@ -125,4 +125,56 @@ defmodule Arbiter.SandboxTeardownTest do
     assert recorded != [],
            "settle_sandbox/1 returned before the killed client's disconnect was processed"
   end
+
+  # bd-2l0hzm: `stop_dynamic_supervisor_children/1` and `drain_task_supervisor/1`
+  # look the supervisor up and *then* call it. A supervisor that shuts down in
+  # between (e.g. it just exceeded its restart intensity) made the call exit
+  # `:noproc` inside `on_exit`, failing an otherwise green test. The stand-in
+  # below is registered under the name — so the lookup finds it — and dies the
+  # moment it is called, which is exactly that window.
+  defp register_dying_supervisor do
+    name = :"dying_supervisor_#{System.unique_integer([:positive])}"
+    test_pid = self()
+
+    pid =
+      spawn(fn ->
+        Process.register(self(), name)
+        send(test_pid, :registered)
+
+        receive do
+          {:"$gen_call", _from, _request} -> exit(:shutdown)
+        end
+      end)
+
+    assert_receive :registered
+    {name, pid}
+  end
+
+  test "the dynamic-children sweep tolerates a supervisor that exits when called" do
+    {name, pid} = register_dying_supervisor()
+    ref = Process.monitor(pid)
+
+    assert Arbiter.DataCase.stop_dynamic_supervisor_children(name) == :ok
+    assert_receive {:DOWN, ^ref, :process, ^pid, :shutdown}
+  end
+
+  test "the dynamic-children sweep tolerates a supervisor that has already exited" do
+    {:ok, sup} = DynamicSupervisor.start_link(strategy: :one_for_one)
+    name = :"exited_supervisor_#{System.unique_integer([:positive])}"
+    Process.register(sup, name)
+    Process.unlink(sup)
+    ref = Process.monitor(sup)
+    DynamicSupervisor.stop(sup)
+    assert_receive {:DOWN, ^ref, :process, ^sup, :normal}
+
+    assert Arbiter.DataCase.stop_dynamic_supervisor_children(name) == :ok
+  end
+
+  test "drain_task_supervisor/1 tolerates a supervisor that exits when called" do
+    {name, pid} = register_dying_supervisor()
+    ref = Process.monitor(pid)
+
+    assert Arbiter.DataCase.drain_task_supervisor(name) == :ok
+    assert_receive {:DOWN, ^ref, :process, ^pid, :shutdown}
+  end
 end

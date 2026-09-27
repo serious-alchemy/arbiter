@@ -302,6 +302,45 @@ defmodule Arbiter.Worker.SubordinateStopAttributionTest do
       assert Worker.whereis(task.id <> ":fixpass") == fresh
     end
 
+    # bd-2l0hzm: the journal showed TWO `Worker.start … registry_key="…:fixpass"`
+    # lines 1ms apart for ONE fix-pass run. It was double logging, not a double
+    # spawn: `start/1` logged *before* `start_child`, so the first attempt —
+    # refused `:already_started` by the terminal squatter — logged too, and the
+    # post-reap retry logged again.
+    test "the reap-and-retry logs a single Worker.start breadcrumb", %{
+      ws: ws,
+      task: task,
+      dead_pid: dead_pid
+    } do
+      previous_level = Logger.level()
+      Logger.configure(level: :info)
+      on_exit(fn -> Logger.configure(level: previous_level) end)
+
+      log =
+        ExUnit.CaptureLog.capture_log([level: :info], fn ->
+          assert {:ok, fresh} =
+                   Worker.start_or_reap_terminal(
+                     task_id: task.id,
+                     repo: "test/repo",
+                     workspace_id: ws.id,
+                     registry_key: task.id <> ":fixpass",
+                     meta: %{role: :fix_pass}
+                   )
+
+          send(self(), {:fresh, fresh})
+        end)
+
+      assert_received {:fresh, fresh}
+      on_exit(fn -> if Process.alive?(fresh), do: GenServer.stop(fresh, :normal) end)
+
+      refute Process.alive?(dead_pid)
+      starts = Regex.scan(~r/Worker\.start: task=/, log)
+      assert length(starts) == 1, "expected one Worker.start line, got:\n#{log}"
+      assert log =~ "pid=#{inspect(fresh)}"
+      # The breadcrumb still names the caller, not a frame inside Worker.
+      assert log =~ "origin=#{inspect(__MODULE__)}"
+    end
+
     test "a LIVE pass is never reaped", %{ws: ws, task: task} do
       live =
         start_worker(ws, task,

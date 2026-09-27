@@ -95,6 +95,22 @@ defmodule Arbiter.Worker.Watchdog do
   remaining reasons (`:conflict`, `:needs_approval`, `:draft`, `:blocked_other`)
   keep the Phase 1 behaviour: escalate once and park.
 
+  The per-episode counter alone does not bound `:ci_failed`: a fix pass's push
+  ends the episode (the new head's CI is pending), so a flake recurring on each
+  head restarts it at 1. A separate per-task cap, `max_fix_passes` (default 3),
+  counts every fix pass on the PR across heads and across Watchdogs (from the
+  persisted `worker_runs`), and parks through the same exhausted path once hit
+  (bd-2l0hzm).
+
+  A `:ci_failed` block whose failing tests are all outside the PR's diff (read
+  from the failing checks' files and the PR diff, see
+  `Arbiter.Workflows.MergeQueue.FlakeSuspect`) is re-run once per head instead
+  of getting a fix pass. If the re-run fails again in a test that failed before,
+  the failure reproduces and a fix pass is dispatched, briefed not to edit those
+  tests. If only *different* untouched tests fail, the block is escalated as a
+  suspected flake (`:ci_failed_external`, with the tests in the note) and no fix
+  pass runs.
+
   ## Clearing an indefinite `:ci_failed` park (bd-5mzzww)
 
   A parked `:ci_failed` block used to have exactly one exit: push a code fix.
@@ -272,6 +288,8 @@ defmodule Arbiter.Worker.Watchdog do
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker
   alias Arbiter.Worker.Registry, as: PRegistry
+  alias Arbiter.Workflows.CodeReview.ConsumerTrace
+  alias Arbiter.Workflows.MergeQueue.FlakeSuspect
 
   @default_interval_ms 60_000
   # Watchdog ceiling on consecutive :pending polls before we escalate and stop.
@@ -323,6 +341,22 @@ defmodule Arbiter.Worker.Watchdog do
   # reason + attempt count. Override via opt `:max_auto_resolve_attempts` or
   # workspace config["merge"]["max_auto_resolve_attempts"].
   @default_max_auto_resolve_attempts 2
+
+  # Fix passes per task per PR, across every head and every Watchdog
+  # (bd-2l0hzm). `max_auto_resolve_attempts` is per *episode*, and each fix
+  # pass's push ends the episode (the new head's CI is pending), so on its own
+  # it never bounds a flake that recurs on every head. PR #2003 got four passes,
+  # each logged "attempt 1". Counted from `Arbiter.Workers.Run.fix_pass_count/2`
+  # so a re-dispatched primary's fresh Watchdog inherits the tally. Override
+  # via opt `:max_fix_passes` or workspace config["merge"]["max_fix_passes"].
+  @default_max_fix_passes 3
+
+  # Polls to wait, after re-running CI for a suspected flake, for the head to
+  # read pending before a red read counts as the re-run failing (bd-2l0hzm).
+  # Until the forge creates the re-run's check-run, the failed attempt is still
+  # the newest one on the head. A re-run that never shows up is then treated as
+  # having failed, so this can't wait forever.
+  @flake_rerun_grace_polls 5
 
   # The default dispatcher the Watchdog uses to spawn a fix-pass worker for a
   # :ci_failed block. Swappable via the `:fix_pass_dispatcher` opt (tests stub it).
@@ -423,6 +457,8 @@ defmodule Arbiter.Worker.Watchdog do
           | {:watch_pipeline, boolean()}
           | {:max_auto_resolve_attempts, non_neg_integer()}
           | {:fix_pass_dispatcher, module()}
+          | {:max_fix_passes, non_neg_integer()}
+          | {:fix_pass_history, (String.t(), String.t() | nil -> non_neg_integer())}
           | {:auto_resolve_conflict, boolean()}
           | {:max_conflict_attempts, pos_integer()}
           | {:conflict_resolver, module()}
@@ -786,6 +822,9 @@ defmodule Arbiter.Worker.Watchdog do
   and will notice non-convergence — but it is never called automatically; the
   Watchdog itself only ever re-arms via this explicit external call.
 
+  It lifts the per-task fix-pass cap (`max_fix_passes`, bd-2l0hzm) by one as
+  well, so the re-armed attempt can dispatch a task that parked on that cap.
+
   Only bumps the budget for *this* block episode: the configured ceiling
   (`base_max_auto_resolve_attempts`) is restored once the episode clears, so
   a later, unrelated block on the same lane doesn't inherit the bump.
@@ -971,6 +1010,10 @@ defmodule Arbiter.Worker.Watchdog do
       fix_pass_dispatcher =
         Keyword.get(opts, :fix_pass_dispatcher, @default_fix_pass_dispatcher)
 
+      max_fix_passes =
+        Keyword.get(opts, :max_fix_passes) || max_fix_passes_from_workspace(workspace) ||
+          @default_max_fix_passes
+
       auto_resolve_conflict = resolve_auto_resolve_conflict(opts, workspace)
 
       park_heartbeat_polls =
@@ -1106,6 +1149,25 @@ defmodule Arbiter.Worker.Watchdog do
         # block (bd-bspakl).
         base_max_auto_resolve_attempts: max_auto_resolve_attempts,
         fix_pass_dispatcher: fix_pass_dispatcher,
+        # The per-task fix-pass cap (bd-2l0hzm) — see `@default_max_fix_passes`.
+        # `fix_passes_dispatched` is this Watchdog's own lifetime count (never
+        # reset per episode); `fix_pass_history` reads the durable count, which
+        # also covers passes an earlier Watchdog dispatched. The larger wins, so
+        # a failed DB read cannot switch the cap off. `retry_auto_resolve/1`
+        # lifts `max_fix_passes` by one, like the per-episode budget.
+        max_fix_passes: max_fix_passes,
+        fix_passes_dispatched: 0,
+        fix_pass_history:
+          Keyword.get(opts, :fix_pass_history, &Arbiter.Workers.Run.fix_pass_count/2),
+        # The suspected-flake re-run (bd-2l0hzm, `flake_step/3`): the head it
+        # re-ran, the untouched tests that failed, the poll it ran on, and
+        # whether the head has read pending since. One per head.
+        flake_rerun: nil,
+        # The head parked as a suspected flake, and the head
+        # `retry_auto_resolve/1` has cleared for a fix pass anyway. `:none` never
+        # equals a head, including a nil one.
+        flake_parked_head: :none,
+        flake_bypass: :none,
         # Latches the exhausted-retry escalation so it fires once per block
         # episode rather than on every subsequent poll (#354, Phase 2a). While
         # parked indefinitely (max_polls lifted to :infinity) the latch is
@@ -1302,6 +1364,8 @@ defmodule Arbiter.Worker.Watchdog do
     state = %{
       state
       | max_auto_resolve_attempts: state.auto_resolve_attempts + 1,
+        max_fix_passes: max(state.max_fix_passes, fix_passes_so_far(state) + 1),
+        flake_bypass: state.flake_parked_head,
         unresolved_escalated: false,
         last_escalated_poll: state.poll_count
     }
@@ -1411,6 +1475,7 @@ defmodule Arbiter.Worker.Watchdog do
       {:ok, result} when is_map(result) ->
         record_status(state, result)
         state = track_reviewed_baseline(state, result)
+        state = note_flake_rerun_pending(state, result)
         state = maybe_escalate_pipeline(state, result)
         state = maybe_auto_resolve_conflict(state, result)
         maybe_escalate_merge_block(state, result)
@@ -2659,27 +2724,180 @@ defmodule Arbiter.Worker.Watchdog do
   # logs) to fix the root cause and push, then re-poll. Only one fix pass runs at
   # a time: while a prior one is still working we wait rather than spawning a
   # second, so the attempt counter tracks *completed* fix passes.
+  #
+  # bd-2l0hzm: a failure only in test files the PR never touched is re-run
+  # first rather than handed to a fix pass (`flake_step/3`), and the fix passes
+  # a task gets on one PR are capped across heads (`park_at_fix_pass_cap/2`).
   defp resolve_ci_failed(result, state) do
     if fix_pass_active?(state) do
       reschedule(%{state | last_block_reason: :ci_failed})
     else
-      attempts = state.auto_resolve_attempts + 1
       checks = safe_failing_checks(state)
+      head = Map.get(result, :head_sha)
 
-      Logger.info(
-        "Worker.Watchdog: auto-resolving :ci_failed via fix-pass worker for " <>
-          "task=#{state.task_id} mr=#{state.mr_ref} (attempt #{attempts}, " <>
-          "#{length(checks)} failing check(s))"
-      )
-
-      _ = dispatch_fix_pass(state, checks)
-      _ = result
-
-      # The fix pass AUTHORS commits after the approval; see
-      # `note_authored_push/1` for why that no longer suspends the latch.
-      state = note_authored_push(state)
-      reschedule(%{state | last_block_reason: :ci_failed, auto_resolve_attempts: attempts})
+      case flake_step(state, checks, head) do
+        :await_rerun -> reschedule(%{state | last_block_reason: :ci_failed})
+        {:rerun, files} -> rerun_suspected_flake(state, checks, head, files)
+        {:escalate, files, prev} -> park_as_suspected_flake(state, head, files, prev)
+        {:fix, outside_diff} -> fix_or_cap(state, checks, outside_diff)
+      end
     end
+  end
+
+  # What to do about a red head whose failing tests may all be outside the
+  # diff (bd-2l0hzm, #2003):
+  #
+  #   * first red on this head, only untouched tests failing -> re-run CI;
+  #   * red again on the same head before the re-run was seen pending, within
+  #     `@flake_rerun_grace_polls` -> the forge still lists the old failed
+  #     attempt as newest; wait;
+  #   * red again after the re-run, and a test that failed before failed
+  #     again -> it reproduces, so it is most likely this diff breaking a test
+  #     it didn't edit: fix pass, briefed not to edit those tests;
+  #   * red again with only *different* untouched tests -> flaky tests, not this
+  #     PR: escalate as a suspected flake, no fix pass;
+  #   * a failing test the PR touched, or anything this can't read -> fix pass.
+  #
+  # One re-run per head, so the re-run itself is bounded; heads only move when
+  # someone pushes, and fix passes are capped.
+  defp flake_step(%{flake_bypass: head}, _checks, head), do: {:fix, nil}
+
+  defp flake_step(state, checks, head) do
+    with {:ok, _tests} <- FlakeSuspect.failing_tests(checks),
+         {:outside_diff, files} <- FlakeSuspect.classify(checks, pr_changed_files(state)) do
+      case state.flake_rerun do
+        %{head: ^head, seen_pending: false, poll: poll}
+        when state.poll_count - poll < @flake_rerun_grace_polls ->
+          :await_rerun
+
+        %{head: ^head, files: prev} ->
+          if Enum.any?(files, &(&1 in prev)), do: {:fix, files}, else: {:escalate, files, prev}
+
+        _ ->
+          {:rerun, files}
+      end
+    else
+      _ -> {:fix, nil}
+    end
+  end
+
+  defp rerun_suspected_flake(state, checks, head, files) do
+    case safe_rerun_ci(state) do
+      {:ok, _} ->
+        Logger.warning(
+          "Worker.Watchdog: CI on task=#{state.task_id} mr=#{state.mr_ref} head=#{head} " <>
+            "failed only in tests this PR does not touch (#{Enum.join(files, ", ")}); " <>
+            "re-running CI as a suspected flake instead of dispatching a fix pass"
+        )
+
+        reschedule(%{
+          state
+          | last_block_reason: :ci_failed,
+            flake_rerun: %{head: head, files: files, poll: state.poll_count, seen_pending: false}
+        })
+
+      other ->
+        Logger.warning(
+          "Worker.Watchdog: CI re-run for a suspected flake on task=#{state.task_id} " <>
+            "mr=#{state.mr_ref} failed (#{inspect(other)}); dispatching the fix pass instead"
+        )
+
+        fix_or_cap(state, checks, files)
+    end
+  end
+
+  # The re-run went red in different untouched tests. Park and escalate with
+  # the evidence as the external-CI note, so the page reads "not this branch"
+  # and names the tests. `retry_auto_resolve/1` sets `flake_bypass` to this
+  # head, so a human who wants a fix pass anyway gets one.
+  defp park_as_suspected_flake(state, head, files, prev) do
+    note =
+      "suspected flake: CI on head #{head || "(unknown)"} failed only in tests this PR " <>
+        "does not touch (#{Enum.join(prev, ", ")}), and its re-run failed in different " <>
+        "untouched tests (#{Enum.join(files, ", ")}). No fix pass dispatched; " <>
+        "retry_auto_resolve dispatches one anyway."
+
+    Logger.warning(
+      "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} — #{note} Escalating."
+    )
+
+    park_ci_failed(
+      %{state | ci_external_note: note, flake_parked_head: head},
+      max(state.auto_resolve_attempts, state.max_auto_resolve_attempts)
+    )
+  end
+
+  defp fix_or_cap(state, checks, outside_diff) do
+    so_far = fix_passes_so_far(state)
+
+    if so_far >= state.max_fix_passes,
+      do: park_at_fix_pass_cap(state, so_far),
+      else: dispatch_ci_fix_pass(state, checks, outside_diff, so_far)
+  end
+
+  # bd-2l0hzm: the task has had its fix passes on this PR. Park and escalate
+  # through the same path as an exhausted episode.
+  defp park_at_fix_pass_cap(state, so_far) do
+    Logger.warning(
+      "Worker.Watchdog: fix-pass cap reached for task=#{state.task_id} " <>
+        "mr=#{state.mr_ref} (#{so_far}/#{state.max_fix_passes} fix passes on this PR, " <>
+        "across heads); not dispatching another — escalating"
+    )
+
+    park_ci_failed(state, max(state.auto_resolve_attempts, so_far))
+  end
+
+  # Park a `:ci_failed` block as exhausted. Raising the episode's attempt count
+  # to at least its budget keeps later polls in this episode on the cheap
+  # exhausted branch of `handle_block/3` (no history or diff read per poll), and
+  # makes the escalation report the real number of attempts.
+  defp park_ci_failed(state, attempts) do
+    state = %{state | auto_resolve_attempts: attempts}
+    effective = effective_park_reason(state, :ci_failed)
+    state = maybe_escalate_unresolved(state, effective)
+
+    reschedule(%{
+      state
+      | last_block_reason: :ci_failed,
+        max_polls: :infinity,
+        park_reason: effective
+    })
+  end
+
+  # Fix passes this task has had on this PR: the durable count or this
+  # Watchdog's own, whichever is larger (see the state field comments).
+  defp fix_passes_so_far(state) do
+    durable =
+      case safe(fn -> state.fix_pass_history.(state.task_id, state.mr_ref) end) do
+        n when is_integer(n) and n >= 0 -> n
+        _ -> 0
+      end
+
+    max(durable, state.fix_passes_dispatched)
+  end
+
+  defp dispatch_ci_fix_pass(state, checks, outside_diff, so_far) do
+    attempts = state.auto_resolve_attempts + 1
+
+    Logger.info(
+      "Worker.Watchdog: auto-resolving :ci_failed via fix-pass worker for " <>
+        "task=#{state.task_id} mr=#{state.mr_ref} (attempt #{attempts}, " <>
+        "fix pass #{so_far + 1}/#{state.max_fix_passes} on this PR, " <>
+        "#{length(checks)} failing check(s))"
+    )
+
+    _ = dispatch_fix_pass(state, checks, outside_diff)
+
+    # The fix pass AUTHORS commits after the approval; see
+    # `note_authored_push/1` for why that no longer suspends the latch.
+    state = note_authored_push(state)
+
+    reschedule(%{
+      state
+      | last_block_reason: :ci_failed,
+        auto_resolve_attempts: attempts,
+        fix_passes_dispatched: so_far + 1
+    })
   end
 
   # True when a fix-pass worker for this task is still working (registered under
@@ -2691,7 +2909,7 @@ defmodule Arbiter.Worker.Watchdog do
     end
   end
 
-  defp dispatch_fix_pass(state, checks) do
+  defp dispatch_fix_pass(state, checks, outside_diff) do
     args = %{
       task_id: state.task_id,
       workspace_id: workspace_id(state),
@@ -2699,7 +2917,54 @@ defmodule Arbiter.Worker.Watchdog do
       checks: checks
     }
 
+    # A failure that reproduced on a re-run in tests the PR never edited: the
+    # dispatcher briefs the pass to fix the PR's own code, not those tests.
+    args = if outside_diff, do: Map.put(args, :outside_diff_files, outside_diff), else: args
+
     safe(fn -> state.fix_pass_dispatcher.dispatch(args) end)
+  end
+
+  # A suspected-flake re-run counts as running once its head reads anything
+  # but red. Only then does a later red on that head mean the re-run failed.
+  defp note_flake_rerun_pending(
+         %{flake_rerun: %{head: head, seen_pending: false} = rerun} = state,
+         result
+       ) do
+    if Map.get(result, :head_sha) == head and Map.get(result, :pipeline) != :failed and
+         Map.get(result, :block_reason) != :ci_failed,
+       do: %{state | flake_rerun: %{rerun | seen_pending: true}},
+       else: state
+  end
+
+  defp note_flake_rerun_pending(state, _result), do: state
+
+  # The PR's changed files, or `:unknown` when the adapter can't produce a diff.
+  defp pr_changed_files(%{adapter: adapter, mr_ref: mr_ref}) do
+    if function_exported?(adapter, :get_diff, 2) do
+      case adapter.get_diff(mr_ref, %{}) do
+        {:ok, diff} when is_binary(diff) ->
+          diff |> ConsumerTrace.changed_files() |> MapSet.to_list()
+
+        _ ->
+          :unknown
+      end
+    else
+      :unknown
+    end
+  rescue
+    _ -> :unknown
+  catch
+    :exit, _ -> :unknown
+  end
+
+  defp safe_rerun_ci(%{adapter: adapter, mr_ref: mr_ref}) do
+    if function_exported?(adapter, :rerun_ci, 2),
+      do: adapter.rerun_ci(mr_ref, %{}),
+      else: {:error, :unsupported}
+  rescue
+    e -> {:error, {:exception, Exception.message(e)}}
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
   end
 
   # Re-page periodically while parked instead of latching silent forever: once
@@ -2858,6 +3123,15 @@ defmodule Arbiter.Worker.Watchdog do
   end
 
   defp max_auto_resolve_from_workspace(_), do: nil
+
+  defp max_fix_passes_from_workspace(%Arbiter.Tasks.Workspace{config: %{} = config}) do
+    case get_in(config, ["merge", "max_fix_passes"]) do
+      n when is_integer(n) and n >= 0 -> n
+      _ -> nil
+    end
+  end
+
+  defp max_fix_passes_from_workspace(_), do: nil
   # Auto-resolve an approved-but-conflicting PR (#354, Phase 2b). When the
   # merger reports a `:conflict` block on an *approved* PR — mergeable in
   # isolation but no longer applying cleanly on the moved base — the Watchdog

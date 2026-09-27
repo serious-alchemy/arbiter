@@ -31,6 +31,17 @@ defmodule Arbiter.Quota.GateProviderTest do
 
   defp behind(secs), do: ahead(-secs)
 
+  # `ProcessTeardown.stop_child/2`, never `GenServer.stop/3` (bd-2l0hzm): a
+  # DispatchQueue is a `:permanent` child, so a plain stop is a restart that
+  # counts toward `DispatchQueueSupervisor`'s intensity (3 in 5s). Four such
+  # stops close together shut the supervisor down, and the `DataCase` sweep
+  # that ran next hit `:noproc`.
+  defp stop_dispatch_queue(workspace_id) do
+    if pid = DispatchQueueSupervisor.whereis(workspace_id) do
+      Arbiter.ProcessTeardown.stop_child(DispatchQueueSupervisor, pid)
+    end
+  end
+
   defp codex_quota(attrs) do
     %CodexQuota{provider_account_id: "acct-x", provider: "codex", captured_at: now()}
     |> struct(attrs)
@@ -411,11 +422,7 @@ defmodule Arbiter.Quota.GateProviderTest do
 
       {:ok, task} = Ash.create(Issue, %{title: "codex work", workspace_id: workspace.id})
 
-      on_exit(fn ->
-        if pid = DispatchQueueSupervisor.whereis(workspace.id) do
-          if Process.alive?(pid), do: GenServer.stop(pid, :normal)
-        end
-      end)
+      on_exit(fn -> stop_dispatch_queue(workspace.id) end)
 
       {:ok, workspace: workspace, task: task}
     end
@@ -565,11 +572,7 @@ defmodule Arbiter.Quota.GateProviderTest do
           priority: 0
         })
 
-      on_exit(fn ->
-        if pid = DispatchQueueSupervisor.whereis(workspace.id) do
-          if Process.alive?(pid), do: GenServer.stop(pid, :normal)
-        end
-      end)
+      on_exit(fn -> stop_dispatch_queue(workspace.id) end)
 
       {:ok, workspace: workspace, task: task}
     end
@@ -624,11 +627,7 @@ defmodule Arbiter.Quota.GateProviderTest do
           }
         })
 
-      on_exit(fn ->
-        if pid = DispatchQueueSupervisor.whereis(ws.id) do
-          if Process.alive?(pid), do: GenServer.stop(pid, :normal)
-        end
-      end)
+      on_exit(fn -> stop_dispatch_queue(ws.id) end)
 
       {:ok, task} =
         Ash.create(Issue, %{title: "agy override work", workspace_id: ws.id, priority: 4})
@@ -738,7 +737,7 @@ defmodule Arbiter.Quota.GateProviderTest do
           auto_subscribe: false
         )
 
-      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      on_exit(fn -> Arbiter.ProcessTeardown.stop_child(DispatchQueueSupervisor, pid) end)
 
       {:ok, task} = Ash.create(Issue, %{title: "codex drain", workspace_id: workspace.id})
 

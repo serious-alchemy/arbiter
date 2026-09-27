@@ -590,6 +590,232 @@ defmodule Arbiter.Worker.WatchdogTest do
       assert StubFixPassDispatcher.call_count() == 2
     end
 
+    # bd-2l0hzm: the per-episode counter resets whenever the block clears, and
+    # every fix-pass push clears it (the new head's CI is pending). On PR #2003
+    # a flake on each new head gave four fix passes, every one "attempt 1".
+    test "caps fix passes per task across successive heads, then parks on :ci_failed" do
+      {pid, task_id} = running_worker()
+      red = %{status: :open, approved: true, block_reason: :ci_failed, pipeline: :failed}
+      pending = %{status: :open, approved: true, block_reason: nil, pipeline: :running}
+
+      StubMerger.queue_get("!cfcap", [red, pending, red, pending, red, pending, red, pending, red])
+
+      wpid =
+        start_watchdog(pid, task_id, "!cfcap",
+          auto_merge: true,
+          max_auto_resolve_attempts: 2,
+          max_fix_passes: 2,
+          fix_pass_history: fn _task_id, _mr_ref -> 0 end,
+          fix_pass_dispatcher: StubFixPassDispatcher
+        )
+
+      wait_until(fn -> StubMerger.get_count("!cfcap") >= 10 end)
+      wait_until(fn -> :sys.get_state(wpid).park_reason == :ci_failed end)
+      assert StubFixPassDispatcher.call_count() == 2
+    end
+
+    test "counts fix passes an earlier Watchdog ran on the task toward the cap" do
+      {pid, task_id} = running_worker()
+
+      StubMerger.queue_get("!cfhist", [%{status: :open, approved: true, block_reason: :ci_failed}])
+
+      test_pid = self()
+
+      wpid =
+        start_watchdog(pid, task_id, "!cfhist",
+          auto_merge: true,
+          max_fix_passes: 3,
+          fix_pass_history: fn task, mr_ref ->
+            send(test_pid, {:history, task, mr_ref})
+            3
+          end,
+          fix_pass_dispatcher: StubFixPassDispatcher
+        )
+
+      assert_receive {:history, ^task_id, "!cfhist"}
+      wait_until(fn -> :sys.get_state(wpid).park_reason == :ci_failed end)
+      assert StubFixPassDispatcher.call_count() == 0
+    end
+
+    # bd-2l0hzm AC4: PR #2003 was docs only. It went red on three different flaky
+    # tests it never touched, and a fix pass edited one of them. A failure only
+    # in test files outside the diff is re-run first.
+    @docs_diff "diff --git a/docs/guide.md b/docs/guide.md\n--- a/docs/guide.md\n+++ b/docs/guide.md\n@@ -1 +1 @@\n-a\n+b\n"
+    @drain "apps/arbiter/test/arbiter/board/drain_test.exs"
+    @coverage "apps/arbiter/test/arbiter/reviews/coverage_test.exs"
+
+    defp failing_in(file), do: [%{name: "mix test", summary: "", files: [file]}]
+
+    defp red(head),
+      do: %{
+        status: :open,
+        approved: true,
+        block_reason: :ci_failed,
+        pipeline: :failed,
+        head_sha: head
+      }
+
+    defp pending(head),
+      do: %{status: :open, approved: true, block_reason: nil, pipeline: :running, head_sha: head}
+
+    defp flake_watchdog(ref, opts \\ []) do
+      {pid, task_id} = running_worker()
+      StubMerger.set_diff(ref, nil, @docs_diff)
+
+      wpid =
+        start_watchdog(
+          pid,
+          task_id,
+          ref,
+          Keyword.merge(
+            [
+              auto_merge: true,
+              fix_pass_history: fn _task_id, _mr_ref -> 0 end,
+              fix_pass_dispatcher: StubFixPassDispatcher,
+              workspace: test_workspace()
+            ],
+            opts
+          )
+        )
+
+      {wpid, task_id}
+    end
+
+    defp reruns(ref), do: for({^ref, opts} <- StubMerger.ci_reruns(), do: opts)
+
+    test "a failure only in tests outside the diff re-runs CI instead of dispatching a fix pass" do
+      StubMerger.set_failing_checks("!flk1", failing_in(@drain))
+      StubMerger.queue_get("!flk1", [red("h1"), pending("h1")])
+
+      flake_watchdog("!flk1")
+
+      wait_until(fn -> length(reruns("!flk1")) == 1 end)
+      Process.sleep(100)
+      assert length(reruns("!flk1")) == 1
+      assert StubFixPassDispatcher.call_count() == 0
+    end
+
+    test "the same untouched test failing again on the re-run dispatches a briefed fix pass" do
+      StubMerger.set_failing_checks("!flk2", failing_in(@drain))
+      StubMerger.queue_get("!flk2", [red("h1"), pending("h1")])
+
+      flake_watchdog("!flk2")
+      wait_until(fn -> length(reruns("!flk2")) == 1 end)
+
+      # The re-run reproduced it: same head, same test.
+      StubMerger.queue_get("!flk2", [red("h1")])
+
+      wait_until(fn -> StubFixPassDispatcher.call_count() >= 1 end)
+      assert StubFixPassDispatcher.last_args().outside_diff_files == [@drain]
+      assert length(reruns("!flk2")) == 1
+    end
+
+    test "a different untouched test failing on the re-run escalates as a suspected flake" do
+      StubMerger.set_failing_checks("!flk3", failing_in(@drain))
+      StubMerger.queue_get("!flk3", [red("h1"), pending("h1")])
+
+      {wpid, _task_id} = flake_watchdog("!flk3")
+      wait_until(fn -> length(reruns("!flk3")) == 1 end)
+
+      StubMerger.set_failing_checks("!flk3", failing_in(@coverage))
+      StubMerger.queue_get("!flk3", [red("h1")])
+
+      wait_until(fn -> :sys.get_state(wpid).park_reason == :ci_failed_external end)
+      state = :sys.get_state(wpid)
+      assert state.ci_external_note =~ "suspected flake"
+      assert state.ci_external_note =~ "coverage_test.exs"
+      Process.sleep(100)
+      assert StubFixPassDispatcher.call_count() == 0
+      assert length(reruns("!flk3")) == 1
+    end
+
+    test "retry_auto_resolve/1 after a suspected-flake park dispatches the fix pass" do
+      StubMerger.set_failing_checks("!flk4", failing_in(@drain))
+      StubMerger.queue_get("!flk4", [red("h1"), pending("h1")])
+
+      {wpid, task_id} = flake_watchdog("!flk4")
+      wait_until(fn -> length(reruns("!flk4")) == 1 end)
+      StubMerger.set_failing_checks("!flk4", failing_in(@coverage))
+      StubMerger.queue_get("!flk4", [red("h1")])
+      wait_until(fn -> :sys.get_state(wpid).park_reason == :ci_failed_external end)
+
+      assert Watchdog.retry_auto_resolve(task_id) == :ok
+      wait_until(fn -> StubFixPassDispatcher.call_count() >= 1 end)
+    end
+
+    # Until the forge creates the re-run's check-run, the failed attempt is still
+    # the newest run on the head, so the next polls read red. That is the old
+    # failure, not a reproduction.
+    test "red polls before the re-run shows up are not a reproduction" do
+      StubMerger.set_failing_checks("!flk7", failing_in(@drain))
+      StubMerger.queue_get("!flk7", [red("h1"), red("h1"), red("h1"), pending("h1")])
+
+      flake_watchdog("!flk7")
+
+      wait_until(fn -> StubMerger.get_count("!flk7") >= 6 end)
+      assert length(reruns("!flk7")) == 1
+      assert StubFixPassDispatcher.call_count() == 0
+    end
+
+    test "a new head gets its own re-run" do
+      StubMerger.set_failing_checks("!flk5", failing_in(@drain))
+      StubMerger.queue_get("!flk5", [red("h1"), pending("h1")])
+
+      flake_watchdog("!flk5")
+      wait_until(fn -> length(reruns("!flk5")) == 1 end)
+
+      StubMerger.set_failing_checks("!flk5", failing_in(@coverage))
+      StubMerger.queue_get("!flk5", [red("h2"), pending("h2")])
+
+      wait_until(fn -> length(reruns("!flk5")) == 2 end)
+      assert StubFixPassDispatcher.call_count() == 0
+    end
+
+    test "a failure in a test the PR touched goes straight to the fix pass" do
+      StubMerger.set_failing_checks("!flk6", failing_in(@drain))
+      StubMerger.queue_get("!flk6", [red("h1")])
+
+      {pid, task_id} = running_worker()
+
+      StubMerger.set_diff(
+        "!flk6",
+        nil,
+        "diff --git a/#{@drain} b/#{@drain}\n--- a/#{@drain}\n+++ b/#{@drain}\n@@ -1 +1 @@\n-a\n+b\n"
+      )
+
+      start_watchdog(pid, task_id, "!flk6",
+        auto_merge: true,
+        fix_pass_history: fn _task_id, _mr_ref -> 0 end,
+        fix_pass_dispatcher: StubFixPassDispatcher
+      )
+
+      wait_until(fn -> StubFixPassDispatcher.call_count() >= 1 end)
+      assert reruns("!flk6") == []
+      refute Map.get(StubFixPassDispatcher.last_args(), :outside_diff_files)
+    end
+
+    test "retry_auto_resolve/1 grants one more pass past the per-task cap" do
+      {pid, task_id} = running_worker()
+
+      StubMerger.queue_get("!cfcapr", [%{status: :open, approved: true, block_reason: :ci_failed}])
+
+      wpid =
+        start_watchdog(pid, task_id, "!cfcapr",
+          auto_merge: true,
+          max_fix_passes: 1,
+          fix_pass_history: fn _task_id, _mr_ref -> 1 end,
+          fix_pass_dispatcher: StubFixPassDispatcher
+        )
+
+      wait_until(fn -> :sys.get_state(wpid).park_reason == :ci_failed end)
+      assert StubFixPassDispatcher.call_count() == 0
+
+      assert Watchdog.retry_auto_resolve(task_id) == :ok
+      wait_until(fn -> StubFixPassDispatcher.call_count() >= 1 end)
+      Process.sleep(100)
+      assert StubFixPassDispatcher.call_count() == 1
+    end
+
     test "resumes and merges once a stalled PR goes green after auto-resolve is exhausted (bd-krg7ci)" do
       {pid, task_id} = running_worker()
       # A CI failure that never clears on its own (e.g. an infra flake the fix-pass

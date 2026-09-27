@@ -849,10 +849,13 @@ defmodule Arbiter.Reviews.GuardRegistry do
         {Watchdog, :maybe_escalate_unresolved, 2},
         {Watchdog, :escalate_unresolved_block, 2},
         {Watchdog, :escalate_merge_unresolved, 5},
-        {Watchdog, :resolve_behind_base, 1}
+        {Watchdog, :resolve_behind_base, 1},
+        {Watchdog, :park_at_fix_pass_cap, 2}
       ],
-      anchors: ["@default_max_auto_resolve_attempts"],
-      summary: "bounded behind_base / ci_failed auto-resolve, then watch only"
+      anchors: ["@default_max_auto_resolve_attempts", "@default_max_fix_passes"],
+      summary:
+        "bounded behind_base / ci_failed auto-resolve per episode, plus a per-task " <>
+          "fix-pass cap across heads (bd-2l0hzm), then watch only"
     },
     %{
       id: :conflict_resolution_attempts,
@@ -918,6 +921,31 @@ defmodule Arbiter.Reviews.GuardRegistry do
         "a worker-less retry of an approved merge whose worker exited: waits out transient " <>
           "blockers (red CI included, noticed once), merges through W1–W5, else pages once " <>
           "and latches the stamp escalated"
+    },
+    %{
+      id: :suspected_flake_rerun,
+      doc_ref: "W22",
+      class: :e,
+      class_source: :inferred,
+      class_note:
+        "bd-2l0hzm. Not in §5.3's table. It sits in front of W17's fix-pass dispatch and " <>
+          "has class E's shape: it fails open to the fix pass whenever it can't read the " <>
+          "failing tests or the diff, or the re-run request fails; it re-runs at most once " <>
+          "per head; and a failure that won't clear ends in one escalation.",
+      bound: {:attempts, 1},
+      episode: {:task, :mr_ref, :head_sha},
+      terminal: :escalated_once,
+      sites: [
+        {Watchdog, :flake_step, 3},
+        {Watchdog, :rerun_suspected_flake, 4},
+        {Watchdog, :safe_rerun_ci, 1},
+        {Watchdog, :park_as_suspected_flake, 4}
+      ],
+      anchors: ["@flake_rerun_grace_polls", "flake_rerun"],
+      summary:
+        "a ci_failed block failing only in tests outside the diff is re-run once per head; " <>
+          "the same test failing again gets a briefed fix pass, different ones escalate " <>
+          "as a suspected flake"
     }
   ]
 

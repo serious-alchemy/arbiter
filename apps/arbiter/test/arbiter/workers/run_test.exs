@@ -148,4 +148,60 @@ defmodule Arbiter.Workers.RunTest do
       assert Run.worker_types() == [:main, :review, :impl, :fix_pass, :conflict]
     end
   end
+
+  # bd-2l0hzm: the Watchdog's per-episode auto-resolve counter resets on every
+  # new head and dies with the Watchdog, so PR #2003 got four fix passes that
+  # all logged "attempt 1". The per-task cap reads this durable count instead.
+  describe "fix_pass_count/2" do
+    defp run!(attrs) do
+      {:ok, run} =
+        Ash.create(
+          Run,
+          Map.merge(%{repo: "arbiter", status: :completed, workspace_id: @ws}, attrs)
+        )
+
+      run
+    end
+
+    defp at(minutes), do: DateTime.add(~U[2026-09-23 16:00:00.000000Z], minutes * 60)
+
+    test "counts the task's fix passes since its PR's first run, across heads and primaries" do
+      run!(%{task_id: "bd-fpc", worker_type: :main, mr_ref: "#1", started_at: at(0)})
+      run!(%{task_id: "bd-fpc", worker_type: :fix_pass, started_at: at(10)})
+      # A second primary (a new Watchdog) on the same PR, then two more passes.
+      run!(%{task_id: "bd-fpc", worker_type: :main, mr_ref: "#1", started_at: at(20)})
+      run!(%{task_id: "bd-fpc", worker_type: :fix_pass, started_at: at(30)})
+      run!(%{task_id: "bd-fpc", worker_type: :fix_pass, started_at: at(40)})
+
+      # Noise: other worker types, and another task's fix pass.
+      run!(%{
+        task_id: "bd-fpc#review",
+        base_task_id: "bd-fpc",
+        worker_type: :review,
+        started_at: at(15)
+      })
+
+      run!(%{task_id: "bd-other", worker_type: :fix_pass, started_at: at(35)})
+
+      assert Run.fix_pass_count("bd-fpc", "#1") == 3
+    end
+
+    test "does not count fix passes from before the PR existed" do
+      run!(%{task_id: "bd-fpc2", worker_type: :main, mr_ref: "#1", started_at: at(0)})
+      run!(%{task_id: "bd-fpc2", worker_type: :fix_pass, started_at: at(5)})
+      run!(%{task_id: "bd-fpc2", worker_type: :main, mr_ref: "#2", started_at: at(20)})
+      run!(%{task_id: "bd-fpc2", worker_type: :fix_pass, started_at: at(30)})
+
+      assert Run.fix_pass_count("bd-fpc2", "#2") == 1
+    end
+
+    test "counts every fix pass on the task when no run carries the PR ref" do
+      run!(%{task_id: "bd-fpc3", worker_type: :fix_pass, started_at: at(5)})
+      run!(%{task_id: "bd-fpc3", worker_type: :fix_pass, started_at: at(6)})
+
+      assert Run.fix_pass_count("bd-fpc3", "#9") == 2
+      assert Run.fix_pass_count("bd-fpc3", nil) == 2
+      assert Run.fix_pass_count("bd-none", "#9") == 0
+    end
+  end
 end

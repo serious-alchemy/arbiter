@@ -542,7 +542,12 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
       # Simulate a restart: kill the queue process. The held intent is in-memory
       # and lost, BUT the task was never transitioned, so it is still resolvable
       # and re-dispatchable from its pre-dispatch status — no work is lost.
-      if pid = DispatchQueueSupervisor.whereis(ws.id), do: GenServer.stop(pid, :normal)
+      # `stop_child`, not `GenServer.stop`: the queue is a `:permanent` child,
+      # and a plain stop is a restart that counts toward the supervisor's
+      # intensity — enough of them shut `DispatchQueueSupervisor` down (bd-2l0hzm).
+      if pid = DispatchQueueSupervisor.whereis(ws.id),
+        do: Arbiter.ProcessTeardown.stop_child(DispatchQueueSupervisor, pid)
+
       {:ok, reloaded} = Ash.get(Issue, task.id)
       assert reloaded.status == :open
 

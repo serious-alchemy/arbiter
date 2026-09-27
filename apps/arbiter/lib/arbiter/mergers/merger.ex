@@ -182,11 +182,15 @@ defmodule Arbiter.Mergers.Merger do
     * `:summary` — a tail of the failure output (title/summary/log excerpt),
       truncated to a briefing-sized snippet.
     * `:url` — a human link to the full check run, when the adapter has one.
+    * `:files` — repo-relative source files the failure points at (GitHub:
+      the run's failure annotations), when the adapter can tell. The Watchdog
+      uses them to spot a failure in a file the PR never touched (bd-2l0hzm).
   """
   @type failing_check :: %{
           required(:name) => String.t(),
           required(:summary) => String.t(),
-          optional(:url) => String.t() | nil
+          optional(:url) => String.t() | nil,
+          optional(:files) => [String.t()]
         }
 
   @typedoc """

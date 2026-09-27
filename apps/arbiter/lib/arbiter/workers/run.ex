@@ -549,6 +549,59 @@ defmodule Arbiter.Workers.Run do
   def worker_types, do: @worker_types
 
   @doc """
+  How many CI fix passes (`:fix_pass` runs) `task_id` has had on PR `mr_ref`.
+
+  The Watchdog's per-task fix-pass cap reads this (bd-2l0hzm). Its own
+  auto-resolve counter is per *episode*: every fix-pass push clears the block
+  while the new head's CI runs, and a re-dispatched primary starts a fresh
+  Watchdog. So a flake on each new head never reached the limit. This count
+  survives both.
+
+  Fix-pass rows carry no `mr_ref` of their own, so "on this PR" means started
+  at or after the task's earliest run that does carry `mr_ref`. When no run
+  carries it (or `mr_ref` is nil), every fix pass on the task counts. Returns 0
+  when the read fails. The Watchdog also keeps an in-memory count, so a failed
+  read does not disable the cap.
+  """
+  @spec fix_pass_count(String.t(), String.t() | nil) :: non_neg_integer()
+  def fix_pass_count(task_id, mr_ref) when is_binary(task_id) do
+    require Ash.Query
+
+    query =
+      Ash.Query.filter(
+        __MODULE__,
+        (task_id == ^task_id or base_task_id == ^task_id) and worker_type == :fix_pass
+      )
+
+    query =
+      case pr_first_started_at(task_id, mr_ref) do
+        %DateTime{} = since -> Ash.Query.filter(query, started_at >= ^since)
+        nil -> query
+      end
+
+    Ash.count!(query)
+  rescue
+    _ -> 0
+  end
+
+  defp pr_first_started_at(_task_id, nil), do: nil
+
+  defp pr_first_started_at(task_id, mr_ref) do
+    require Ash.Query
+
+    __MODULE__
+    |> Ash.Query.filter((task_id == ^task_id or base_task_id == ^task_id) and mr_ref == ^mr_ref)
+    |> Ash.Query.sort(started_at: :asc)
+    |> Ash.Query.limit(1)
+    |> Ash.Query.select([:started_at])
+    |> Ash.read!()
+    |> case do
+      [%{started_at: started_at}] -> started_at
+      [] -> nil
+    end
+  end
+
+  @doc """
   Find the provider of the most recent authoring worker run for `task_id`.
 
   Strips synthetic suffixes (`#review`, `#impl<N>`, `:fixpass`, `:conflict`) to

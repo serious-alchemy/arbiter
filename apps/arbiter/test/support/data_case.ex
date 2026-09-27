@@ -153,22 +153,32 @@ defmodule Arbiter.DataCase do
   # from under whoever owned it. `Arbiter.ProcessTeardown.stop_child/2`
   # quiesces the child with `:sys.suspend/2` first; its moduledoc has the
   # full mechanism.
-  defp stop_dynamic_supervisor_children(supervisor) do
-    case Process.whereis(supervisor) do
-      pid when is_pid(pid) ->
-        supervisor
-        |> DynamicSupervisor.which_children()
-        |> Enum.each(fn
-          {_, child_pid, _, _} when is_pid(child_pid) ->
-            Arbiter.ProcessTeardown.stop_child(supervisor, child_pid)
+  #
+  # bd-2l0hzm: the supervisor can shut down between the `whereis` and the
+  # `which_children` call (e.g. it just exceeded its restart intensity and is
+  # being restarted by `Arbiter.Supervisor`), so the call is guarded too — a
+  # supervisor that is not there has nothing to stop.
+  @doc false
+  def stop_dynamic_supervisor_children(supervisor) do
+    supervisor
+    |> children_of(&DynamicSupervisor.which_children/1)
+    |> Enum.each(fn
+      {_, child_pid, _, _} when is_pid(child_pid) ->
+        Arbiter.ProcessTeardown.stop_child(supervisor, child_pid)
 
-          _ ->
-            :ok
-        end)
-
-      nil ->
+      _ ->
         :ok
+    end)
+  end
+
+  # `[]` when `supervisor` is not registered, or exits before it answers.
+  defp children_of(supervisor, list_fun) do
+    case Process.whereis(supervisor) do
+      pid when is_pid(pid) -> list_fun.(pid)
+      nil -> []
     end
+  catch
+    :exit, _ -> []
   end
 
   @doc """
@@ -218,23 +228,17 @@ defmodule Arbiter.DataCase do
 
   @doc false
   def drain_task_supervisor(name) do
-    case Process.whereis(name) do
-      pid when is_pid(pid) ->
-        pid
-        |> Task.Supervisor.children()
-        |> Enum.each(fn child_pid ->
-          ref = Process.monitor(child_pid)
+    name
+    |> children_of(&Task.Supervisor.children/1)
+    |> Enum.each(fn child_pid ->
+      ref = Process.monitor(child_pid)
 
-          receive do
-            {:DOWN, ^ref, :process, ^child_pid, _reason} -> :ok
-          after
-            5_000 -> Process.demonitor(ref, [:flush])
-          end
-        end)
-
-      nil ->
-        :ok
-    end
+      receive do
+        {:DOWN, ^ref, :process, ^child_pid, _reason} -> :ok
+      after
+        5_000 -> Process.demonitor(ref, [:flush])
+      end
+    end)
   end
 
   @doc """

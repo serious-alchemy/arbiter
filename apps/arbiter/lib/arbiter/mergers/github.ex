@@ -1533,7 +1533,7 @@ defmodule Arbiter.Mergers.Github do
     case request(cfg, :get, "/repos/#{owner}/#{repo}/commits/#{sha}/check-runs", [])
          |> handle_json() do
       {:ok, %{"check_runs" => [_ | _] = runs}} ->
-        map_check_run_status(runs)
+        runs |> latest_per_check() |> map_check_run_status()
 
       {:ok, %{"check_runs" => []}} ->
         :not_started
@@ -1554,7 +1554,11 @@ defmodule Arbiter.Mergers.Github do
     case request(cfg, :get, "/repos/#{owner}/#{repo}/commits/#{sha}/check-runs", [])
          |> handle_json() do
       {:ok, %{"check_runs" => runs}} when is_list(runs) ->
-        {:ok, runs |> Enum.filter(&failing_check?/1) |> Enum.map(&summarize_check/1)}
+        {:ok,
+         runs
+         |> latest_per_check()
+         |> Enum.filter(&failing_check?/1)
+         |> Enum.map(&summarize_check(&1, fn id -> fetch_annotations(cfg, owner, repo, id) end))}
 
       {:ok, _} ->
         {:ok, []}
@@ -1566,11 +1570,35 @@ defmodule Arbiter.Mergers.Github do
 
   defp failing_check?(run), do: Map.get(run, "conclusion") in @failing_conclusions
 
-  defp summarize_check(run) do
+  # One check-run per check name: the newest, by id (bd-2l0hzm). Re-running a
+  # job on the same head adds a new check-run under the same name, and the
+  # failed attempt it replaces is still listed. Judging every run would call a
+  # head whose re-run is queued `:failed`. Unnamed runs are kept as they are,
+  # since there is nothing to group them by.
+  defp latest_per_check(runs) do
+    latest =
+      runs
+      |> Enum.filter(&is_binary(Map.get(&1, "name")))
+      |> Enum.group_by(&Map.get(&1, "name"))
+      |> Enum.map(fn {_name, attempts} -> Enum.max_by(attempts, &run_order/1) end)
+
+    Enum.filter(runs, &(not is_binary(Map.get(&1, "name")) or &1 in latest))
+  end
+
+  defp run_order(run) do
+    case Map.get(run, "id") do
+      id when is_integer(id) -> id
+      _ -> -1
+    end
+  end
+
+  defp summarize_check(run, annotations_fun) do
     output = Map.get(run, "output") || %{}
+    annotations = failure_annotations(run, output, annotations_fun)
 
     summary =
-      [Map.get(output, "title"), Map.get(output, "summary"), Map.get(output, "text")]
+      ([Map.get(output, "title"), Map.get(output, "summary"), Map.get(output, "text")] ++
+         Enum.map(annotations, &render_annotation/1))
       |> Enum.reject(&(&1 in [nil, ""]))
       |> Enum.join("\n")
       |> truncate(@log_tail_limit)
@@ -1578,8 +1606,52 @@ defmodule Arbiter.Mergers.Github do
     %{
       name: Map.get(run, "name") || "check",
       summary: summary,
-      url: Map.get(run, "details_url") || Map.get(run, "html_url")
+      url: Map.get(run, "details_url") || Map.get(run, "html_url"),
+      # The source files the run's failure annotations point at. GitHub Actions
+      # leaves `output` empty on a failed job, so these are often the only
+      # pointer to the failing test (bd-2l0hzm). The Watchdog uses them to tell
+      # a failure in a file this PR never touched.
+      files: annotations |> Enum.map(&Map.get(&1, "path")) |> Enum.uniq()
     }
+  end
+
+  # Failure-level annotations with a real source path. The runner's own
+  # annotations (`.github`: "Process completed with exit code 2.", deprecation
+  # warnings) name no file of the repo's.
+  defp failure_annotations(run, output, annotations_fun) do
+    id = Map.get(run, "id")
+    count = Map.get(output, "annotations_count")
+
+    if is_integer(id) and count != 0 do
+      id
+      |> annotations_fun.()
+      |> Enum.filter(fn annotation ->
+        path = Map.get(annotation, "path")
+
+        Map.get(annotation, "annotation_level") == "failure" and is_binary(path) and
+          path != "" and not String.starts_with?(path, ".github")
+      end)
+    else
+      []
+    end
+  end
+
+  defp render_annotation(annotation) do
+    line = Map.get(annotation, "start_line")
+    location = if line, do: "#{annotation["path"]}:#{line}", else: annotation["path"]
+    "#{location} #{Map.get(annotation, "message")}"
+  end
+
+  # Best-effort: an annotations read that fails leaves the check without file
+  # pointers, which only means the Watchdog cannot call it a suspected flake.
+  defp fetch_annotations(cfg, owner, repo, check_run_id) do
+    case request(cfg, :get, "/repos/#{owner}/#{repo}/check-runs/#{check_run_id}/annotations",
+           params: [per_page: 100]
+         )
+         |> handle_json() do
+      {:ok, annotations} when is_list(annotations) -> annotations
+      _ -> []
+    end
   end
 
   defp truncate(str, limit) when is_binary(str) do
