@@ -45,9 +45,11 @@ defmodule Arbiter.Quota do
 
   use Ash.Domain
 
+  alias Arbiter.Accounts
   alias Arbiter.Accounts.Credentials
   alias Arbiter.Accounts.ProviderAccount
   alias Arbiter.Accounts.Resolver
+  alias Arbiter.Agents.Claude.ConfigDir
   alias Arbiter.Quota.AnthropicQuota
   alias Arbiter.Quota.CloudCode
   alias Arbiter.Quota.Gate
@@ -786,8 +788,16 @@ defmodule Arbiter.Quota do
   whichever credential happened to authenticate it — two credentials on one
   account (e.g. mid-rotation) share the one cooldown window the account's
   rate limit actually enforces. An account with no credential row yet (a
-  pre-migration install) falls back to `OAuthUsage.fetch/1`'s own default
-  (the operator's `.credentials.json` on disk).
+  pre-migration install, or one whose only credential is the `:oauth_token`
+  setup token, which this endpoint rejects — bd-4ag0nj) falls back to
+  `OAuthUsage.fetch/1`'s own default (the operator's `.credentials.json` on
+  disk). When workers run on their own token (the account's `:oauth_token`
+  row with provider accounts on; `ConfigDir.oauth_token_configured?/0` with
+  them off), a `:no_credentials` or
+  `{:http_error, 401}` from that fallback is returned as
+  `{:operator_login_lapsed, reason}`: the operator's interactive login
+  lapsed, not a credential workers use. Otherwise workers are seeded that
+  same file, so the bare reason is kept.
   """
   @spec capture_oauth_usage(String.t() | nil, keyword()) ::
           {:ok, AnthropicQuota.t()} | {:error, term()}
@@ -818,11 +828,46 @@ defmodule Arbiter.Quota do
         {:error, {:fetch, reason}}
 
       {:ok, id} ->
-        case Arbiter.Quota.OAuthUsage.fetch(account_oauth_fetch_opts(id, opts)) do
-          {:error, reason} -> {:error, {:fetch, reason}}
+        {fetch_opts, token_source} = account_oauth_fetch_opts(id, opts)
+
+        case Arbiter.Quota.OAuthUsage.fetch(fetch_opts) do
+          {:error, reason} -> {:error, {:fetch, label_fetch_error(id, token_source, reason)}}
           {:ok, usage} -> tag_write_error(record_oauth_usage(id, provider, usage))
         end
     end
+  end
+
+  # bd-4ag0nj: when the fetch fell back to the operator's interactive
+  # `~/.claude/.credentials.json` (the account has no `cli_credentials_file`
+  # row — on the live install its only credential is the `:oauth_token`
+  # setup token workers run on, which `/api/oauth/usage` answers with a 429
+  # and `Retry-After: 3600`), a missing file or a 401 means that interactive
+  # login lapsed: its ~8h access token only refreshes while an interactive
+  # `claude` session runs. Tag it so `CloudProbe` can page with that cause,
+  # instead of a generic poll failure or an account/worker credential expiry.
+  #
+  # Only when workers demonstrably don't use that file, though: with no worker
+  # token anywhere, `Arbiter.Agents.Claude.ConfigDir` seeds workers a copy of
+  # this same `.credentials.json`, so its 401 is a real worker-credential
+  # expiry and keeps the bare reason `CloudProbe`'s 401 streak keys on.
+  defp label_fetch_error(account_id, :operator_credentials_file, reason)
+       when reason == :no_credentials or reason == {:http_error, 401} do
+    if workers_on_own_token?(account_id),
+      do: {:operator_login_lapsed, reason},
+      else: reason
+  end
+
+  defp label_fetch_error(_account_id, _token_source, reason), do: reason
+
+  # With provider accounts on, a workspace's workers read only their own
+  # account's credential (`ConfigDir.oauth_token/1`) and are seeded the file
+  # when it has none — so this account's `:oauth_token` row is the answer, and
+  # another account's token must not vouch for it. With the flag off, workers
+  # take the legacy chain, whose install-wide answer is the zero-arity check.
+  defp workers_on_own_token?(account_id) do
+    if Accounts.enabled?(),
+      do: Credentials.worker_oauth_token?(account_id),
+      else: ConfigDir.oauth_token_configured?()
   end
 
   defp tag_write_error({:error, reason}), do: {:error, {:write, reason}}
@@ -835,9 +880,13 @@ defmodule Arbiter.Quota do
   # token exactly as before P6, so a caller that already knows exactly which
   # credential it wants keeps full control of both the fetch and the
   # cooldown it shares with other calls using that same explicit token.
+  #
+  # Also returns where the token comes from — `:explicit`, `:account`, or
+  # `:operator_credentials_file` (the `OAuthUsage.fetch/1` on-disk default) —
+  # so a failure can be attributed to the credential that actually failed.
   defp account_oauth_fetch_opts(account_id, opts) do
     if Keyword.has_key?(opts, :token) do
-      opts
+      {opts, :explicit}
     else
       case Credentials.account_oauth_usage_token(account_id) do
         # Only tag the fetch with `:provider_account_id` — and so only key
@@ -852,12 +901,15 @@ defmodule Arbiter.Quota do
         # exists to eliminate. Leaving `opts` untouched here keeps the
         # pre-P6 token-keyed cooldown for that shared-fallback case.
         {:ok, token} ->
-          opts
-          |> Keyword.put(:provider_account_id, account_id)
-          |> Keyword.put(:token, token)
+          opts =
+            opts
+            |> Keyword.put(:provider_account_id, account_id)
+            |> Keyword.put(:token, token)
+
+          {opts, :account}
 
         :none ->
-          opts
+          {opts, :operator_credentials_file}
       end
     end
   end

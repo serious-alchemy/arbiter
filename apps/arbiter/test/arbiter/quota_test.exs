@@ -20,6 +20,32 @@ defmodule Arbiter.QuotaTest do
     Ash.create!(Workspace, %{name: name})
   end
 
+  # bd-4ag0nj: an account whose workers run on their own setup token, the way
+  # the live install is after `mix arbiter.accounts.migrate` — the account's
+  # `:oauth_token` row (what workers read with provider accounts on) *and* the
+  # workspace's `worker_env` token (the legacy chain, flag off).
+  defp setup_token_account_id!(name) do
+    alias Arbiter.Accounts.ProviderCredential
+
+    ws =
+      Ash.create!(Workspace, %{
+        name: name,
+        worker_env: %{"CLAUDE_CODE_OAUTH_TOKEN" => %{"value" => "setup-token"}}
+      })
+
+    account_id = quota_account_id!(ws.id)
+
+    Ash.create!(ProviderCredential, %{
+      provider_account_id: account_id,
+      kind: :oauth_token,
+      env_var: "CLAUDE_CODE_OAUTH_TOKEN",
+      fingerprint: "fp-" <> name,
+      secret: "setup-token"
+    })
+
+    account_id
+  end
+
   describe "parse_unified_headers/1" do
     test "extracts the unified rate-limit family, converting types" do
       attrs = Quota.parse_unified_headers(@headers)
@@ -762,6 +788,151 @@ defmodule Arbiter.QuotaTest do
                )
 
       assert quota.utilization_5h == 0.05
+    end
+
+    # bd-4ag0nj: the live `claude:default` account carries only an
+    # `:oauth_token` row (the `claude setup-token` grant workers run on).
+    # `/api/oauth/usage` answers that token with a 429 (`Retry-After: 3600`;
+    # PR #1607 and bd-4ag0nj's re-check), so it must never be sent here — the
+    # poll falls back to the operator's interactive `.credentials.json`, and
+    # when that is gone the failure names the lapsed interactive login rather
+    # than a bare `:no_credentials`.
+    @tag :tmp_dir
+    test "an account with only an :oauth_token row and no credentials file fails as a lapsed operator login",
+         %{tmp_dir: tmp_dir} do
+      account_id = setup_token_account_id!("setup-only")
+
+      test_pid = self()
+
+      Req.Test.stub(Arbiter.Quota.OAuthUsage.HTTP, fn conn ->
+        send(test_pid, {:oauth_usage_call, Plug.Conn.get_req_header(conn, "authorization")})
+        Req.Test.json(conn, %{"five_hour" => %{"utilization" => 5}})
+      end)
+
+      assert {:error, {:operator_login_lapsed, :no_credentials}} =
+               Quota.capture_oauth_usage(account_id,
+                 source_dir: tmp_dir,
+                 plug: {Req.Test, Arbiter.Quota.OAuthUsage.HTTP}
+               )
+
+      refute_received {:oauth_usage_call, _}
+    end
+
+    @tag :tmp_dir
+    test "a 401 on the operator's credentials-file fallback is a lapsed operator login when workers run on a setup token",
+         %{tmp_dir: tmp_dir} do
+      account_id = setup_token_account_id!("setup-only-401")
+
+      File.write!(
+        Path.join(tmp_dir, ".credentials.json"),
+        Jason.encode!(%{"claudeAiOauth" => %{"accessToken" => "lapsed-interactive-token"}})
+      )
+
+      on_exit(fn -> Arbiter.Quota.OAuthUsage.reset_cooldown!("lapsed-interactive-token") end)
+
+      Req.Test.stub(Arbiter.Quota.OAuthUsage.HTTP, fn conn ->
+        Plug.Conn.send_resp(conn, 401, "")
+      end)
+
+      assert {:error, {:operator_login_lapsed, {:http_error, 401}}} =
+               Quota.capture_oauth_usage(account_id,
+                 source_dir: tmp_dir,
+                 plug: {Req.Test, Arbiter.Quota.OAuthUsage.HTTP}
+               )
+    end
+
+    # bd-4ag0nj review finding 1: with no worker token anywhere (no
+    # `:oauth_token` row, none in the server env or any workspace), workers
+    # are seeded a copy of this same `.credentials.json`
+    # (`Arbiter.Agents.Claude.ConfigDir`), so its 401 is a real worker
+    # credential expiry — it must keep the bare reason `CloudProbe`'s 401
+    # streak keys on, not be relabelled as the operator's own login.
+    @tag :tmp_dir
+    test "a 401 on the credentials-file fallback keeps the bare reason when workers use that file",
+         %{tmp_dir: tmp_dir} do
+      saved = System.get_env("CLAUDE_CODE_OAUTH_TOKEN")
+      System.delete_env("CLAUDE_CODE_OAUTH_TOKEN")
+      on_exit(fn -> if saved, do: System.put_env("CLAUDE_CODE_OAUTH_TOKEN", saved) end)
+
+      account_id = quota_account_id!(workspace!().id)
+
+      File.write!(
+        Path.join(tmp_dir, ".credentials.json"),
+        Jason.encode!(%{"claudeAiOauth" => %{"accessToken" => "shared-worker-token"}})
+      )
+
+      on_exit(fn -> Arbiter.Quota.OAuthUsage.reset_cooldown!("shared-worker-token") end)
+
+      Req.Test.stub(Arbiter.Quota.OAuthUsage.HTTP, fn conn ->
+        Plug.Conn.send_resp(conn, 401, "")
+      end)
+
+      assert {:error, {:http_error, 401}} =
+               Quota.capture_oauth_usage(account_id,
+                 source_dir: tmp_dir,
+                 plug: {Req.Test, Arbiter.Quota.OAuthUsage.HTTP}
+               )
+    end
+
+    # With provider accounts on, a workspace's workers read only their own
+    # account's credential, so a *different* account's setup token must not
+    # vouch for this one: its workers are seeded the credentials file.
+    @tag :tmp_dir
+    test "with provider accounts on, another account's setup token doesn't relabel this account's 401",
+         %{tmp_dir: tmp_dir} do
+      saved_flag = Application.get_env(:arbiter, :provider_accounts_enabled)
+      Application.put_env(:arbiter, :provider_accounts_enabled, true)
+      on_exit(fn -> Application.put_env(:arbiter, :provider_accounts_enabled, saved_flag) end)
+
+      _other = setup_token_account_id!("other-account")
+
+      account_id =
+        Ash.create!(Arbiter.Accounts.ProviderAccount, %{provider: :claude, slug: "no-rows"}).id
+
+      File.write!(
+        Path.join(tmp_dir, ".credentials.json"),
+        Jason.encode!(%{"claudeAiOauth" => %{"accessToken" => "seeded-worker-token"}})
+      )
+
+      on_exit(fn -> Arbiter.Quota.OAuthUsage.reset_cooldown!("seeded-worker-token") end)
+
+      Req.Test.stub(Arbiter.Quota.OAuthUsage.HTTP, fn conn ->
+        Plug.Conn.send_resp(conn, 401, "")
+      end)
+
+      assert {:error, {:http_error, 401}} =
+               Quota.capture_oauth_usage(account_id,
+                 source_dir: tmp_dir,
+                 plug: {Req.Test, Arbiter.Quota.OAuthUsage.HTTP}
+               )
+    end
+
+    # The relabel is only for the fallback: an account's own
+    # `cli_credentials_file` credential 401ing is an account-credential
+    # problem, and keeps the bare reason `CloudProbe`'s 401 streak keys on.
+    test "a 401 on the account's own cli_credentials_file credential keeps the bare reason" do
+      alias Arbiter.Accounts.ProviderCredential
+
+      account_id = quota_account_id!(workspace!().id)
+
+      Ash.create!(ProviderCredential, %{
+        provider_account_id: account_id,
+        kind: :cli_credentials_file,
+        env_var: "CLAUDE_CODE_OAUTH_TOKEN",
+        fingerprint: "fp-own-401",
+        secret: "own-401-token"
+      })
+
+      on_exit(fn -> Arbiter.Quota.OAuthUsage.reset_account_cooldown!(account_id) end)
+
+      Req.Test.stub(Arbiter.Quota.OAuthUsage.HTTP, fn conn ->
+        Plug.Conn.send_resp(conn, 401, "")
+      end)
+
+      assert {:error, {:http_error, 401}} =
+               Quota.capture_oauth_usage(account_id,
+                 plug: {Req.Test, Arbiter.Quota.OAuthUsage.HTTP}
+               )
     end
   end
 

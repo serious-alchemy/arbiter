@@ -438,6 +438,224 @@ defmodule Arbiter.Quota.CloudProbeTest do
 
       assert length(Arbiter.Messages.Message.inbox(coordinator)) == 1
     end
+
+    # bd-4ag0nj, the 2026-09-27 incident: the account's only credential is
+    # the `:oauth_token` setup token workers run on, which `/api/oauth/usage`
+    # rejects (429, `Retry-After: 3600`), so the poll authenticates with the
+    # operator's interactive `~/.claude/.credentials.json`. Overnight that
+    # login lapsed: one 401, then the file was gone (`:no_credentials`) every
+    # cycle for 7h. That must page exactly once, naming the lapsed
+    # interactive login and the fix, and must not be reported as the Claude
+    # account/worker credential expiring.
+    @tag :tmp_dir
+    test "a lapsed operator login behind an :oauth_token-only account escalates once, with the real cause",
+         %{tmp_dir: tmp_dir} = context do
+      alias Arbiter.Accounts.{ProviderAccount, ProviderCredential, WorkspaceProviderAccount}
+
+      Req.Test.set_req_test_to_shared(context)
+
+      account = Ash.create!(ProviderAccount, %{provider: :claude, slug: "cp-setup-only"})
+
+      Ash.create!(ProviderCredential, %{
+        provider_account_id: account.id,
+        kind: :oauth_token,
+        env_var: "CLAUDE_CODE_OAUTH_TOKEN",
+        fingerprint: "cp-setup-fp",
+        secret: "cp-setup-token"
+      })
+
+      ws = workspace_with_token!("cp-setup-ws", "cp-setup-token")
+
+      Ash.create!(WorkspaceProviderAccount, %{
+        workspace_id: ws.id,
+        provider: :claude,
+        provider_account_id: account.id
+      })
+
+      credentials_file = Path.join(tmp_dir, ".credentials.json")
+
+      File.write!(
+        credentials_file,
+        Jason.encode!(%{"claudeAiOauth" => %{"accessToken" => "cp-lapsing-token"}})
+      )
+
+      on_exit(fn -> Arbiter.Quota.OAuthUsage.reset_cooldown!("cp-lapsing-token") end)
+
+      test_pid = self()
+
+      Req.Test.stub(Arbiter.Quota.OAuthUsage.HTTP, fn conn ->
+        send(test_pid, {:oauth_usage_call, Plug.Conn.get_req_header(conn, "authorization")})
+        Plug.Conn.send_resp(conn, 401, "")
+      end)
+
+      watchdog = start_watchdog()
+
+      pid =
+        start_probe(
+          enabled: true,
+          interval_ms: 3_600_000,
+          refresh_fun: fn _ws_id -> :ok end,
+          oauth_opts: [source_dir: tmp_dir],
+          credential_watchdog: watchdog,
+          oauth_401_expiry_threshold: 1
+        )
+
+      coordinator = Arbiter.Messages.Message.coordinator_ref()
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        CloudProbe.probe(pid)
+        assert_receive {:oauth_usage_call, ["Bearer cp-lapsing-token"]}, 2_000
+        wait_until(fn -> CloudProbe.state(pid).oauth_consecutive_failures == 1 end)
+
+        File.rm!(credentials_file)
+
+        for n <- 2..4 do
+          CloudProbe.probe(pid)
+          wait_until(fn -> CloudProbe.state(pid).oauth_consecutive_failures == n end)
+        end
+      end)
+
+      # The setup token is never sent to this endpoint.
+      refute_received {:oauth_usage_call, ["Bearer cp-setup-token"]}
+
+      [msg] = Arbiter.Messages.Message.inbox(coordinator)
+      assert msg.kind == :escalation
+      assert msg.subject =~ "interactive Claude login lapsed"
+      assert msg.body =~ "run `claude`"
+      refute msg.subject =~ "quota poll failing"
+
+      _ = :sys.get_state(watchdog)
+      refute CredentialWatchdog.escalated?(Arbiter.Agents.Claude, watchdog)
+    end
+
+    # bd-4ag0nj review finding 1 (AC4): an account with no credential rows
+    # at all, on an install with no worker token anywhere, means workers are
+    # seeded a copy of the operator's `.credentials.json` — so a 401 on that
+    # fallback is a real worker-credential expiry. It must still trip the
+    # bd-1pmf9h watchdog streak and the generic poll-failure page, and must
+    # never claim "workers are not affected".
+    @tag :tmp_dir
+    test "a fallback 401 on an account with no credential rows still marks Claude expired",
+         %{tmp_dir: tmp_dir} = context do
+      Req.Test.set_req_test_to_shared(context)
+
+      saved = System.get_env("CLAUDE_CODE_OAUTH_TOKEN")
+      System.delete_env("CLAUDE_CODE_OAUTH_TOKEN")
+      on_exit(fn -> if saved, do: System.put_env("CLAUDE_CODE_OAUTH_TOKEN", saved) end)
+
+      _ws = workspace!("cp-no-rows-ws")
+
+      File.write!(
+        Path.join(tmp_dir, ".credentials.json"),
+        Jason.encode!(%{"claudeAiOauth" => %{"accessToken" => "cp-shared-worker-token"}})
+      )
+
+      on_exit(fn -> Arbiter.Quota.OAuthUsage.reset_cooldown!("cp-shared-worker-token") end)
+
+      test_pid = self()
+
+      Req.Test.stub(Arbiter.Quota.OAuthUsage.HTTP, fn conn ->
+        send(test_pid, :oauth_call_made)
+        Plug.Conn.send_resp(conn, 401, "")
+      end)
+
+      watchdog = start_watchdog()
+
+      pid =
+        start_probe(
+          enabled: true,
+          interval_ms: 3_600_000,
+          refresh_fun: fn _ws_id -> :ok end,
+          oauth_opts: [source_dir: tmp_dir],
+          credential_watchdog: watchdog
+        )
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        for n <- 1..3 do
+          CloudProbe.probe(pid)
+          await_oauth_cycle(pid, n)
+        end
+      end)
+
+      _ = :sys.get_state(watchdog)
+      assert CredentialWatchdog.escalated?(Arbiter.Agents.Claude, watchdog)
+
+      subjects =
+        Arbiter.Messages.Message.coordinator_ref()
+        |> Arbiter.Messages.Message.inbox()
+        |> Enum.map(& &1.subject)
+
+      assert Enum.any?(subjects, &(&1 =~ "quota poll failing"))
+      refute Enum.any?(subjects, &(&1 =~ "interactive Claude login lapsed"))
+    end
+
+    # bd-4ag0nj review finding 2: the one edge-triggered page is chosen from
+    # the whole streak, not from whichever error happens to land on the
+    # threshold cycle — a live 429 interleaving with a lapsed login must not
+    # turn the page into the generic one.
+    @tag :tmp_dir
+    test "a lapsed-login streak still pages as a lapsed login when the threshold cycle is a 429",
+         %{tmp_dir: tmp_dir} = context do
+      alias Arbiter.Accounts.{ProviderAccount, ProviderCredential, WorkspaceProviderAccount}
+
+      Req.Test.set_req_test_to_shared(context)
+
+      account = Ash.create!(ProviderAccount, %{provider: :claude, slug: "cp-streak-429"})
+
+      Ash.create!(ProviderCredential, %{
+        provider_account_id: account.id,
+        kind: :oauth_token,
+        env_var: "CLAUDE_CODE_OAUTH_TOKEN",
+        fingerprint: "cp-streak-fp",
+        secret: "cp-streak-setup-token"
+      })
+
+      ws = workspace_with_token!("cp-streak-ws", "cp-streak-setup-token")
+
+      Ash.create!(WorkspaceProviderAccount, %{
+        workspace_id: ws.id,
+        provider: :claude,
+        provider_account_id: account.id
+      })
+
+      on_exit(fn -> Arbiter.Quota.OAuthUsage.reset_cooldown!("cp-streak-file-token") end)
+
+      test_pid = self()
+
+      Req.Test.stub(Arbiter.Quota.OAuthUsage.HTTP, fn conn ->
+        send(test_pid, :oauth_call_made)
+        Plug.Conn.send_resp(conn, 429, "")
+      end)
+
+      pid =
+        start_probe(
+          enabled: true,
+          interval_ms: 3_600_000,
+          refresh_fun: fn _ws_id -> :ok end,
+          oauth_opts: [source_dir: tmp_dir],
+          credential_watchdog: start_watchdog()
+        )
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        # Cycles 1-2: the operator's credentials file is gone.
+        for n <- 1..2 do
+          CloudProbe.probe(pid)
+          wait_until(fn -> CloudProbe.state(pid).oauth_consecutive_failures == n end)
+        end
+
+        # Cycle 3 (the threshold): the file is back but the endpoint 429s.
+        File.write!(
+          Path.join(tmp_dir, ".credentials.json"),
+          Jason.encode!(%{"claudeAiOauth" => %{"accessToken" => "cp-streak-file-token"}})
+        )
+
+        CloudProbe.probe(pid)
+        await_oauth_cycle(pid, 3)
+      end)
+
+      [msg] = Arbiter.Messages.Message.inbox(Arbiter.Messages.Message.coordinator_ref())
+      assert msg.subject =~ "interactive Claude login lapsed"
+    end
   end
 
   describe "probe/1 oauth usage 401 streak -> CredentialWatchdog (bd-1pmf9h)" do

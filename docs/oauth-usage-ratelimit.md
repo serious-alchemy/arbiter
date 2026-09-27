@@ -9,6 +9,20 @@ during quota polling integration.
   the same account is rate-limited identically to the first. Workspace-scoped
   tokens are scope/rate-limited and will not work against this endpoint; only
   the operator's credentials-file token succeeds (confirmed in PR #1607).
+  bd-4ag0nj re-checked the `claude setup-token` grant (`sk-ant-oat01`, the
+  account's `:oauth_token` credential) with the account bucket refilled:
+  `429 rate_limit_error` with `Retry-After: 3600` counting down across
+  requests (a per-token lockout), while the credentials-file token on the
+  same account got `200` twelve seconds later.
+
+- **The credentials-file token lapses without an interactive session.** Its
+  access token lasts about 8h and only refreshes while an interactive
+  `claude` session runs. When it expires (401) or the file disappears,
+  `Arbiter.Quota.CloudProbe` escalates once, after 3 failed cycles, naming
+  the lapsed interactive login and the fix (run `claude` on the host) — when
+  workers run on their own token. With no worker token anywhere, workers are
+  seeded that same file, so a 401 is treated as a worker-credential expiry
+  (`CredentialWatchdog`) plus the generic poll-failure escalation instead.
 
 - **Small burst bucket refilling at ~1 request / 5 minutes.** The rate limit
   horizon is account-wide. A second request ~1 second after a success responds

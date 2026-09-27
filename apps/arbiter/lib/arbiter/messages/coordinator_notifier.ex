@@ -766,6 +766,57 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   end
 
   @doc """
+  Escalate a `/api/oauth/usage` polling outage whose cause is the operator's
+  interactive Claude login lapsing (bd-4ag0nj).
+
+  The poll authenticates with the operator's `~/.claude/.credentials.json`
+  whenever the account has no `cli_credentials_file` credential — including
+  an account whose only credential is the `:oauth_token` setup token workers
+  run on, because `/api/oauth/usage` rejects that token (429 with
+  `Retry-After: 3600`; PR #1607, re-checked on bd-4ag0nj). That interactive
+  access token lasts about 8h and only refreshes while an interactive `claude`
+  session runs, so an idle night leaves the file expired (401) or gone
+  (`:no_credentials`). `Arbiter.Quota` only tags a failure this way when
+  workers run on their own token (the account's `:oauth_token` row, or a
+  configured `CLAUDE_CODE_OAUTH_TOKEN`) rather than a seeded copy of that
+  file, so workers are unaffected and this says so rather than reading like
+  an account-credential failure.
+
+  Fired by `Arbiter.Quota.CloudProbe` in place of `quota_poll_failing/3`, the
+  cycle its consecutive-failure count first reaches the threshold — the same
+  edge trigger, so one outage produces one mailbox item — chosen whenever
+  any failure in the current streak was a lapsed login. `reason` is the
+  threshold cycle's fetch error, unwrapped (usually `:no_credentials` or
+  `{:http_error, 401}`; possibly an interleaved `:rate_limited`).
+  Best-effort, returns `:ok`.
+  """
+  @spec operator_login_lapsed(map(), pos_integer(), term()) :: :ok
+  def operator_login_lapsed(snapshot, failures, reason) do
+    escalate_event("operator_login_lapsed/3", snapshot, [task_ref: "system"], fn _task_id ->
+      subject = "Anthropic quota poll blind — operator's interactive Claude login lapsed"
+
+      body =
+        [
+          "`Arbiter.Quota.CloudProbe`'s `/api/oauth/usage` poll has failed " <>
+            "#{failures} consecutive cycles: #{describe_reason(reason)}.",
+          "Cause: the poll authenticates with the operator's interactive Claude login " <>
+            "(`~/.claude/.credentials.json`), and that login has lapsed — its access token " <>
+            "only refreshes while an interactive `claude` session is running. The account's " <>
+            "setup token (`CLAUDE_CODE_OAUTH_TOKEN`) cannot authenticate this endpoint.",
+          "Fix: run `claude` on the Arbiter host (log in if prompted) to refresh " <>
+            "`~/.claude/.credentials.json`; the next poll recovers on its own.",
+          "Workers are not affected — they run on their own setup token, not this file. " <>
+            "Until then the " <>
+            "dispatch gate runs on an aging snapshot: the 5h rule fails open on age, and a 7d " <>
+            "hold cannot lift without a fresh polled snapshot."
+        ]
+        |> Enum.join("\n")
+
+      {subject, body}
+    end)
+  end
+
+  @doc """
   Escalate a card that Autopilot cannot get out of Ready (bd-a40f4q).
 
   Fired by `Arbiter.Board.Autopilot` when a promoted card's dispatch keeps

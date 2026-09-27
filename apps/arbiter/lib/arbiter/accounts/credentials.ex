@@ -90,6 +90,14 @@ defmodule Arbiter.Accounts.Credentials do
   and bd-4fbpto found that shape cannot authenticate this endpoint at all
   (see PR #1607). Only the credentials-file-sourced secret can, so this is
   the one credential kind `Arbiter.Quota.capture_oauth_usage/2` reads.
+  bd-4ag0nj re-checked this before considering a fallback to the
+  `:oauth_token` row (the live `claude:default` account's only
+  credential): that setup token got `429 rate_limit_error` with a per-token
+  `Retry-After` of up to an hour, while the credentials-file token on the
+  same account polled `200` twelve seconds later. So an `:oauth_token`-only
+  account deliberately stays `:none` here, the poll uses the operator's
+  `.credentials.json`, and `Arbiter.Quota.CloudProbe` pages with the lapsed
+  interactive login when that file stops working.
 
   `:none` when the account has no active credential of that kind yet — a
   pre-migration install, or an account minted by `Resolver.ensure_account_id/2`
@@ -125,6 +133,20 @@ defmodule Arbiter.Accounts.Credentials do
   end
 
   def account_oauth_usage_token(_), do: :none
+
+  @doc """
+  Whether the (enabled) account has an active `:oauth_token` credential — the
+  `claude setup-token` grant its workers run on instead of a seeded copy of
+  the operator's `.credentials.json` (bd-4ag0nj). `false` for a parked
+  account, a blank id, or an account with no such row.
+  """
+  @spec worker_oauth_token?(String.t() | nil) :: boolean()
+  def worker_oauth_token?(account_id) when is_binary(account_id) and account_id != "" do
+    enabled_account?(account_id) and
+      [account_id] |> active_credentials() |> Enum.any?(&(&1.kind == :oauth_token))
+  end
+
+  def worker_oauth_token?(_), do: false
 
   defp enabled_account?(account_id) do
     case Ash.get(ProviderAccount, account_id) do

@@ -31,6 +31,9 @@ defmodule Arbiter.Accounts.CredentialsTest do
     assert Credentials.account_oauth_usage_token(account.id) == {:ok, "the-secret-token"}
   end
 
+  # bd-4ag0nj: kept deliberately after re-checking the endpoint — the setup
+  # token is still 429'd with a per-token lockout, so an `:oauth_token`-only
+  # account must stay `:none` and fall back to the operator's credentials file.
   test "ignores an oauth_token-kind credential under the same env_var" do
     account = account!()
 
@@ -60,6 +63,47 @@ defmodule Arbiter.Accounts.CredentialsTest do
     Ash.update!(credential, %{}, action: :retire)
 
     assert Credentials.account_oauth_usage_token(account.id) == :none
+  end
+
+  describe "worker_oauth_token?/1 (bd-4ag0nj)" do
+    test "true only for an enabled account with an active :oauth_token credential" do
+      account = account!("cred-worker-token")
+      refute Credentials.worker_oauth_token?(account.id)
+
+      {:ok, credential} =
+        Ash.create(ProviderCredential, %{
+          provider_account_id: account.id,
+          kind: :oauth_token,
+          env_var: "CLAUDE_CODE_OAUTH_TOKEN",
+          fingerprint: "fp-worker",
+          secret: "worker-token"
+        })
+
+      assert Credentials.worker_oauth_token?(account.id)
+
+      {:ok, _} = Ash.update(account, %{enabled: false}, action: :update)
+      refute Credentials.worker_oauth_token?(account.id)
+
+      {:ok, _} = Ash.update(account, %{enabled: true}, action: :update)
+      Ash.update!(credential, %{}, action: :retire)
+      refute Credentials.worker_oauth_token?(account.id)
+    end
+
+    test "false for a cli_credentials_file-only account and for nil/blank ids" do
+      account = account!("cred-file-only")
+
+      Ash.create!(ProviderCredential, %{
+        provider_account_id: account.id,
+        kind: :cli_credentials_file,
+        env_var: "CLAUDE_CODE_OAUTH_TOKEN",
+        fingerprint: "fp-file-only",
+        secret: "file-token"
+      })
+
+      refute Credentials.worker_oauth_token?(account.id)
+      refute Credentials.worker_oauth_token?(nil)
+      refute Credentials.worker_oauth_token?("")
+    end
   end
 
   test ":none for an account with no credentials at all" do

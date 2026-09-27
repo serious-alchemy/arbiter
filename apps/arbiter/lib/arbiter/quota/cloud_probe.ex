@@ -57,7 +57,18 @@ defmodule Arbiter.Quota.CloudProbe do
       (`Arbiter.Accounts.Credentials.account_oauth_usage_token/1`) — never a
       workspace's `worker_env` token — authenticates its fetch, falling back
       to `Arbiter.Quota.OAuthUsage.fetch/1`'s own default (the operator's
-      `.credentials.json` on disk) for an account with no credential row yet.
+      `.credentials.json` on disk) for an account with no such row — which
+      includes an account whose only credential is the `:oauth_token` setup
+      token workers run on (bd-4ag0nj re-confirmed that token is 429'd here
+      with a per-token `Retry-After` of up to an hour). That fallback is the
+      operator's interactive login, which only refreshes while an interactive
+      `claude` session runs. When it lapses (401, or the file is gone) *and*
+      workers run on their own token rather than a seeded copy of that file,
+      the failure escalation below names that cause and the fix
+      (`Arbiter.Messages.CoordinatorNotifier.operator_login_lapsed/3`)
+      instead of a generic poll failure, and those 401s do not feed the
+      Claude credential-expiry streak. With no worker token anywhere, workers
+      do use that file, so its 401s keep counting exactly as before.
 
   The other three providers each degrade to a no-op (no row written, no
   broadcast) when their CLI isn't authenticated on this host, so a logged-out
@@ -208,6 +219,7 @@ defmodule Arbiter.Quota.CloudProbe do
       probe_count: 0,
       oauth_consecutive_failures: 0,
       oauth_consecutive_401s: 0,
+      oauth_login_lapsed_in_streak: false,
       codex_consecutive_401s: 0,
       antigravity_consecutive_auth_failures: 0,
       codex_result_seen_this_cycle: false,
@@ -399,7 +411,12 @@ defmodule Arbiter.Quota.CloudProbe do
       failed == [] ->
         note_recovered(state, Arbiter.Agents.Claude, state.oauth_consecutive_401s)
 
-        %{state | oauth_consecutive_failures: 0, oauth_consecutive_401s: 0}
+        %{
+          state
+          | oauth_consecutive_failures: 0,
+            oauth_consecutive_401s: 0,
+            oauth_login_lapsed_in_streak: false
+        }
 
       fetch_failed != [] ->
         # At least one account's own fetch failed this cycle, even though
@@ -439,15 +456,21 @@ defmodule Arbiter.Quota.CloudProbe do
           "Arbiter.Quota.CloudProbe: oauth usage fetch succeeded but some writes failed: #{inspect(write_failed)}"
         )
 
-        %{state | oauth_consecutive_failures: 0, oauth_consecutive_401s: 0}
+        %{
+          state
+          | oauth_consecutive_failures: 0,
+            oauth_consecutive_401s: 0,
+            oauth_login_lapsed_in_streak: false
+        }
     end
   end
 
   defp note_oauth_result(%State{} = state, workspace_ids, {:error, reason}) do
     failures = state.oauth_consecutive_failures + 1
+    lapsed? = state.oauth_login_lapsed_in_streak or login_lapsed?(reason)
 
     if failures == @oauth_failure_escalation_threshold do
-      escalate_oauth_failure(workspace_ids, failures, reason)
+      escalate_oauth_failure(workspace_ids, failures, reason, lapsed?)
     end
 
     # `reason` may still carry a `Quota.write_once_per_account/4` stage tag
@@ -457,7 +480,7 @@ defmodule Arbiter.Quota.CloudProbe do
     # detection doesn't care whether it arrived tagged or not.
     state = note_oauth_401(state, workspace_ids, {:error, unwrap_stage(reason)})
 
-    %{state | oauth_consecutive_failures: failures}
+    %{state | oauth_consecutive_failures: failures, oauth_login_lapsed_in_streak: lapsed?}
   end
 
   defp note_oauth_result(%State{} = state, _workspace_ids, _other), do: state
@@ -465,13 +488,33 @@ defmodule Arbiter.Quota.CloudProbe do
   defp unwrap_stage({stage, reason}) when stage in [:fetch, :write], do: reason
   defp unwrap_stage(reason), do: reason
 
-  defp escalate_oauth_failure([ws_id | _], failures, reason) when is_binary(ws_id) do
+  # A lapsed operator login (bd-4ag0nj — `Quota` tags a missing or 401ing
+  # fallback `.credentials.json` as `{:operator_login_lapsed, inner}`, but only
+  # when workers run on their own token) gets its own escalation naming that
+  # cause and the fix, instead of the generic poll-failure one; it is still the
+  # only mailbox item for the outage. The kind is chosen from the whole streak
+  # (`lapsed?`), not just the threshold cycle's error, so a live 429 landing on
+  # that cycle can't turn a lapsed-login outage into the generic page.
+  defp escalate_oauth_failure([ws_id | _], failures, reason, lapsed?) when is_binary(ws_id) do
     safe_escalate(fn ->
-      CoordinatorNotifier.quota_poll_failing(%{workspace_id: ws_id}, failures, reason)
+      if lapsed? do
+        CoordinatorNotifier.operator_login_lapsed(
+          %{workspace_id: ws_id},
+          failures,
+          unwrap_lapsed(unwrap_stage(reason))
+        )
+      else
+        CoordinatorNotifier.quota_poll_failing(%{workspace_id: ws_id}, failures, reason)
+      end
     end)
   end
 
-  defp escalate_oauth_failure(_workspace_ids, _failures, _reason), do: :ok
+  defp escalate_oauth_failure(_workspace_ids, _failures, _reason, _lapsed?), do: :ok
+
+  defp login_lapsed?(reason), do: match?({:operator_login_lapsed, _}, unwrap_stage(reason))
+
+  defp unwrap_lapsed({:operator_login_lapsed, inner}), do: inner
+  defp unwrap_lapsed(reason), do: reason
 
   # Tracks consecutive `{:http_error, 401}` responses from the oauth-usage
   # poll (bd-1pmf9h) — the strongest available expiry signal, independent of
@@ -483,7 +526,12 @@ defmodule Arbiter.Quota.CloudProbe do
   # straight (the account's oauth-usage bucket refills at ~1 req/5min, tight
   # against this poll's own 5-minute cadence, so a live 429 here is expected
   # and unrelated to token validity — see `docs/oauth-usage-ratelimit.md`).
-  # Only a genuine success resets it (see `note_oauth_result/3`).
+  # Only a genuine success resets it (see `note_oauth_result/3`). A 401 from
+  # the operator's fallback `.credentials.json` arrives tagged
+  # `{:operator_login_lapsed, _}` (bd-4ag0nj) — only when workers run on
+  # their own token, not a seeded copy of that file — and is neutral here
+  # too: it must not mark Claude expired; `escalate_oauth_failure/4` pages
+  # for it instead.
   defp note_oauth_401(%State{} = state, workspace_ids, {:error, {:http_error, 401}}) do
     count = state.oauth_consecutive_401s + 1
 
