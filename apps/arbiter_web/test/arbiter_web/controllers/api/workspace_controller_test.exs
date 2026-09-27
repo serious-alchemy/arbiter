@@ -109,6 +109,72 @@ defmodule ArbiterWeb.Api.WorkspaceControllerTest do
       assert posture["write_confinement"] == "none"
     end
 
+    # bd-8xy1mf: a repo can override the workspace's resolved mode via
+    # `agent.security.repos.<repo>` — a repo-level `:strict` while the
+    # workspace default is `:bypass` must still show up somewhere, since
+    # `SecurityPolicy.resolve/2` (no `repo` arg) never sees it and every agy
+    # dispatch against that repo is refused despite the workspace itself
+    # reading "ok".
+    test "security_posture.repos carries a per-repo write_jail_warning distinct from the workspace's",
+         %{conn: conn} do
+      # The warning only exists for agy on a host whose jail can't run, so pin
+      # both rather than depend on the machine: a stub `agy` on PATH (never
+      # executed), the isolated agy HOME on, and the jail forced unavailable.
+      bin =
+        Path.join(
+          System.tmp_dir!(),
+          "ws-jail-warn-#{System.pid()}-#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(bin)
+      File.write!(Path.join(bin, "agy"), "#!/bin/sh\nexit 0\n")
+      File.chmod!(Path.join(bin, "agy"), 0o755)
+
+      keys = ~w(worker_isolate_config worker_jail_available)a
+      prev = Map.new(keys, &{&1, Application.fetch_env(:arbiter, &1)})
+      old_path = System.get_env("PATH")
+
+      Application.put_env(:arbiter, :worker_isolate_config, true)
+      Application.put_env(:arbiter, :worker_jail_available, false)
+      System.put_env("PATH", bin <> ":" <> (old_path || ""))
+
+      on_exit(fn ->
+        System.put_env("PATH", old_path)
+
+        Enum.each(prev, fn
+          {k, :error} -> Application.delete_env(:arbiter, k)
+          {k, {:ok, v}} -> Application.put_env(:arbiter, k, v)
+        end)
+
+        File.rm_rf!(bin)
+      end)
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "agy-ws-repo-override",
+          prefix: "agyro",
+          config: %{
+            "agent" => %{
+              "type" => "gemini",
+              "security" => %{
+                "permissions" => %{"mode" => "bypass"},
+                "repos" => %{"tonic" => %{"permissions" => %{"mode" => "strict"}}}
+              }
+            }
+          }
+        })
+
+      conn = get(conn, ~p"/api/workspaces/#{ws.id}")
+      posture = json_response(conn, 200)["security_posture"]
+
+      assert posture["mode"] == "bypass"
+      assert posture["write_jail_warning"] =~ "writes are not confined"
+
+      repo_posture = posture["repos"]["tonic"]
+      assert repo_posture["mode"] == "strict"
+      assert repo_posture["write_jail_warning"] =~ ":strict dispatches of agy are refused"
+    end
+
     # bd-7s29yq AC3: the posture surface must tell the truth for agy too. The
     # Gemini adapter used to hard-code `policy_enforced: false` because nothing
     # enforced the policy; now it answers from the live seam (agy on PATH +

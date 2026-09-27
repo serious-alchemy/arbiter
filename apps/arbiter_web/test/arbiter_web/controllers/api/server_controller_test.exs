@@ -33,4 +33,42 @@ defmodule ArbiterWeb.Api.ServerControllerTest do
     assert resp["ip"] == "0.0.0.0"
     assert resp["loopback"] == false
   end
+
+  # bd-8xy1mf: `arb server doctor` needs the host's own can-jail-agy answer
+  # even when no workspace currently resolves `:strict` — this endpoint
+  # exposes `Arbiter.Worker.Jail.diagnose/0` for that.
+  describe "GET /api/server/agy_write_jail" do
+    setup do
+      prev = Application.get_env(:arbiter, :worker_jail_available)
+
+      on_exit(fn ->
+        case prev do
+          nil -> Application.delete_env(:arbiter, :worker_jail_available)
+          v -> Application.put_env(:arbiter, :worker_jail_available, v)
+        end
+
+        Arbiter.Worker.Jail.reset()
+      end)
+
+      :ok
+    end
+
+    test "reports available: true when the host can jail agy", %{conn: conn} do
+      Application.put_env(:arbiter, :worker_jail_available, true)
+
+      resp = conn |> get("/api/server/agy_write_jail") |> json_response(200)
+
+      assert resp == %{"available" => true}
+    end
+
+    test "reports available: false with cause/message/fix when it can't", %{conn: conn} do
+      Application.put_env(:arbiter, :worker_jail_available, false)
+
+      resp = conn |> get("/api/server/agy_write_jail") |> json_response(200)
+
+      assert resp["available"] == false
+      assert is_binary(resp["cause"])
+      assert is_binary(resp["message"])
+    end
+  end
 end

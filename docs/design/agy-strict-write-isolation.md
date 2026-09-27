@@ -13,8 +13,14 @@ git command at a fake git dir; `--new-session` is added; toolchain caches are
 per-worker `HEX_HOME`/`MIX_HOME`/`XDG_CACHE_HOME` under the agy `$HOME`.
 Accepted gaps, documented in `docs/worker-security.md`: shared network,
 unrestricted reads, writable main `.git` (sibling refs), `git config --local`
-EBUSY, unprotected submodule git dirs. Still open: bd-8xy1mf (doctor),
-bd-3s82pf (every mode, read-only reviews).
+EBUSY, unprotected submodule git dirs. **bd-8xy1mf landed** (`arb server
+doctor` runs `Jail.status/0`'s real probe and distinguishes bwrap missing,
+`user.max_user_namespaces = 0`, and Ubuntu's
+`kernel.apparmor_restrict_unprivileged_userns = 1` via `Jail.explain/1`, each
+with its fix; surfaced in `arb prime`'s security block too) — the dev EC2's
+own `user.max_user_namespaces` reading is still pending the post-deploy
+two-host verification the task carries. Still open: bd-3s82pf (every mode,
+read-only reviews).
 
 ## Decision
 

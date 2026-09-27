@@ -433,9 +433,16 @@ defmodule ArbiterCli.Cmd.Prime do
         ", write_confinement=#{posture["write_confinement"] || "none"})"
     )
 
-    # bd-4420va: name every current default category this workspace's
-    # resolved policy excludes, so an operator sees it here rather than
-    # discovering it live in a worker's --settings.
+    emit_security_posture_warnings(posture, config, missing)
+  end
+
+  defp emit_security_posture(_, _config), do: :ok
+
+  # bd-4420va: name every current default category this workspace's resolved
+  # policy excludes, so an operator sees it here rather than discovering it
+  # live in a worker's --settings. bd-8xy1mf: the same write-jail gap `arb
+  # server doctor` reports, so a fresh coordinator session sees it here too.
+  defp emit_security_posture_warnings(posture, config, missing) do
     if missing != [] do
       IO.puts("    WARNING: missing safe-default categories: #{Enum.join(missing, ", ")}")
     end
@@ -446,9 +453,11 @@ defmodule ArbiterCli.Cmd.Prime do
           "safe_defaults_exclude"
       )
     end
-  end
 
-  defp emit_security_posture(_, _config), do: :ok
+    if warning = posture["write_jail_warning"] do
+      IO.puts("    WARNING: #{warning}")
+    end
+  end
 
   defp has_legacy_safe_defaults_key?(config) when is_map(config) do
     config

@@ -857,7 +857,10 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       assert out =~ "[ ok ] agy write jail"
     end
 
-    test "names the workspace and the warning when the jail is unavailable" do
+    # bd-8xy1mf: outside :strict the gap is real but never fatal (agy just
+    # runs unconfined), so this is informational — [ ok ], not [fail] — even
+    # though the cause and fix are still named in the detail line.
+    test "names the workspace and the warning, but stays green, outside :strict" do
       workspaces_with_warning = %{
         "data" => [
           %{
@@ -873,7 +876,48 @@ defmodule ArbiterCli.Cmd.DoctorTest do
               "safe_defaults_exclude" => [],
               "sandbox" => %{"enabled" => true, "filesystem" => "worktree", "network" => true},
               "write_jail_warning" =>
-                "agy write jail unavailable ({:jail_probe_failed, :bwrap_not_found}) — " <>
+                "agy write jail unavailable (bwrap (bwrap) not found on PATH — Install " <>
+                  "bubblewrap: `dnf install bubblewrap` (Fedora/RHEL 8+/AL2023) or " <>
+                  "`apt install bubblewrap` (Debian/Ubuntu).) — writes are not confined to " <>
+                  "the worktree outside :strict"
+            }
+          }
+        ]
+      }
+
+      stub_routes([
+        {{"get", "/api/workspaces"}, {workspaces_with_warning, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] agy write jail"
+      assert out =~ "default: agy write jail unavailable"
+      assert out =~ "dnf install bubblewrap"
+    end
+
+    # bd-8xy1mf: a `:strict` workspace can't fall back to running agy
+    # unconfined, so the same gap is fatal here — [fail], non-zero exit.
+    test "fails, and exits non-zero, when a :strict workspace can't jail" do
+      workspaces_with_warning = %{
+        "data" => [
+          %{
+            "id" => "ws-1",
+            "name" => "default",
+            "prefix" => "vs",
+            "config" => %{},
+            "security_posture" => %{
+              "mode" => "strict",
+              "allow" => [],
+              "deny" => [],
+              "safe_defaults" => [],
+              "safe_defaults_exclude" => [],
+              "sandbox" => %{"enabled" => true, "filesystem" => "worktree", "network" => true},
+              "write_jail_warning" =>
+                "agy write jail unavailable (unprivileged user namespaces are disabled) — " <>
                   "writes are not confined to the worktree outside :strict"
             }
           }
@@ -888,10 +932,100 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       ])
 
       {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
-      # Non-fatal: named, but does not block readiness or fail the exit code.
-      assert exit_code == 0
+      assert exit_code == 1
       assert out =~ "[fail] agy write jail"
       assert out =~ "default: agy write jail unavailable"
+      assert out =~ "hint:"
+    end
+
+    # bd-8xy1mf AC1: the host's own can-jail-agy answer must show even when no
+    # workspace/repo currently needs it — that's the whole point of exposing
+    # `Jail.diagnose/0` via `/api/server/agy_write_jail` rather than only
+    # reading it back out of a workspace posture.
+    test "reports the host can jail agy when no workspace has a warning" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/agy_write_jail"}, {%{"available" => true}, 200}}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] agy write jail"
+      assert out =~ "host can jail agy — agy is :strict-eligible"
+    end
+
+    test "reports the host cannot jail agy, informationally, when no workspace needs it" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/agy_write_jail"},
+         {%{
+            "available" => false,
+            "cause" => "user_namespaces_disabled",
+            "message" =>
+              "unprivileged user namespaces are disabled (`user.max_user_namespaces = 0`)",
+            "fix" => "Enable them: `sysctl -w user.max_user_namespaces=<N>`."
+          }, 200}}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] agy write jail"
+      assert out =~ "cannot jail agy: unprivileged user namespaces are disabled"
+      assert out =~ "informational only"
+    end
+
+    # bd-8xy1mf finding: a repo-level `agent.security.repos.<repo>` override
+    # can resolve `:strict` while the workspace default doesn't — the
+    # workspace-level `write_jail_warning` alone never sees that, so this
+    # would previously print `[ ok ]` even though every agy dispatch against
+    # that repo is refused.
+    test "fails when a repo override resolves :strict and the host can't jail" do
+      workspace_with_repo_override = %{
+        "data" => [
+          %{
+            "id" => "ws-1",
+            "name" => "default",
+            "prefix" => "vs",
+            "config" => %{},
+            "security_posture" => %{
+              "mode" => "bypass",
+              "allow" => [],
+              "deny" => [],
+              "safe_defaults" => [],
+              "safe_defaults_exclude" => [],
+              "sandbox" => %{"enabled" => true, "filesystem" => "worktree", "network" => true},
+              "write_jail_warning" => nil,
+              "repos" => %{
+                "tonic" => %{
+                  "mode" => "strict",
+                  "write_jail_warning" =>
+                    "agy write jail unavailable (unprivileged user namespaces are disabled) — " <>
+                      ":strict dispatches of agy are refused"
+                }
+              }
+            }
+          }
+        ]
+      }
+
+      stub_routes([
+        {{"get", "/api/workspaces"}, {workspace_with_repo_override, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 1
+      assert out =~ "[fail] agy write jail"
+      assert out =~ "default (repo tonic): agy write jail unavailable"
+      assert out =~ "hint:"
     end
   end
 end

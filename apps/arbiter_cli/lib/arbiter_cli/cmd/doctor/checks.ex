@@ -578,56 +578,142 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   # refusing (the only fail-closed mode is `:strict`, gated separately by
   # `security_posture.write_confinement`), so this is the one place that gap
   # is visible rather than silent.
+  #
+  # bd-8xy1mf: a `[fail]` here is only warranted when the gap is actually
+  # fatal to some workspace — i.e. that workspace resolves `:strict` (agy is
+  # already the configured/eligible provider by the time `write_jail_warning`
+  # is non-nil at all, see `Arbiter.Agents.Gemini.write_jail_warning/1`).
+  # Outside `:strict` the warning is real but informational: `[ ok ]` with the
+  # cause and fix still named in `detail`, so an operator preparing to switch
+  # a scope to `:strict` sees it ahead of time without doctor crying wolf on
+  # every `:auto`/`:bypass` install that simply doesn't have bwrap yet.
   defp check_agy_write_jail do
+    host = host_jail_status()
+
     case Client.get("/api/workspaces") do
       {:ok, %{"data" => list}} when is_list(list) ->
         offenders =
           list
-          |> Enum.map(fn ws -> {workspace_label(ws), jail_warning(ws)} end)
-          |> Enum.filter(fn {_name, warning} -> warning != nil end)
+          |> Enum.flat_map(fn ws ->
+            Enum.map(jail_warnings(ws), &{workspace_label(ws), &1})
+          end)
 
-        agy_write_jail_result(offenders)
+        agy_write_jail_result(host, offenders)
 
       _ ->
         %Result{
           name: "agy write jail",
           status: :ok,
-          detail: "server unreachable — skipping",
+          detail: "server unreachable — skipping (host jail status: #{host_status_text(host)})",
           fatal: false,
           blocks_readiness: false
         }
     end
   end
 
-  defp jail_warning(ws) do
-    case Map.get(ws, "security_posture") do
-      %{"write_jail_warning" => warning} when is_binary(warning) -> warning
-      _ -> nil
+  # The host's own answer to "can this host jail an agy spawn at all" —
+  # `Arbiter.Worker.Jail.diagnose/0` via `/api/server/agy_write_jail`
+  # (bd-8xy1mf AC1). Distinct from `jail_warnings/1`: a workspace/repo warning
+  # is only non-nil once some policy actually needs the jail, so on an
+  # install where nothing resolves agy yet the workspace scan alone can never
+  # tell an operator whether the host can jail at all.
+  defp host_jail_status do
+    case Client.get("/api/server/agy_write_jail") do
+      {:ok, %{"available" => true}} ->
+        :ok
+
+      {:ok, %{"available" => false, "message" => message, "fix" => fix}} ->
+        {:error, message, fix}
+
+      _ ->
+        :unknown
     end
   end
 
-  defp agy_write_jail_result([]) do
+  defp host_status_text(:ok), do: "can jail agy"
+  defp host_status_text({:error, message, nil}), do: "cannot jail agy: #{message}"
+  defp host_status_text({:error, message, fix}), do: "cannot jail agy: #{message} — #{fix}"
+  defp host_status_text(:unknown), do: "unknown — server may predate this check"
+
+  # Every degraded-jail warning for `ws`: the workspace-level one (as before)
+  # plus one per `agent.security.repos.<repo>` override that resolves its own
+  # policy (bd-8xy1mf finding: a repo can be `:strict` while the workspace
+  # default isn't — see `WorkspaceJSON.repo_security_postures/2`).
+  defp jail_warnings(ws) do
+    posture = Map.get(ws, "security_posture") || %{}
+
+    repo_entries =
+      posture
+      |> Map.get("repos", %{})
+      |> Enum.flat_map(fn {repo, repo_posture} -> warning_entry(repo_posture, repo) end)
+
+    warning_entry(posture, nil) ++ repo_entries
+  end
+
+  defp warning_entry(posture, repo) do
+    case Map.get(posture, "write_jail_warning") do
+      warning when is_binary(warning) ->
+        [%{message: warning, strict?: Map.get(posture, "mode") == "strict", repo: repo}]
+
+      _ ->
+        []
+    end
+  end
+
+  defp agy_write_jail_result(:ok, []) do
     %Result{
       name: "agy write jail",
       status: :ok,
-      detail: "no workspace has a degraded agy write jail",
+      detail: "host can jail agy — agy is :strict-eligible",
       fatal: false,
       blocks_readiness: false
     }
   end
 
-  defp agy_write_jail_result(offenders) do
-    detail = Enum.map_join(offenders, "; ", fn {name, warning} -> "#{name}: #{warning}" end)
+  # `hint` is only ever printed for `:fail` results (see
+  # `ArbiterCli.Cmd.Doctor.Formatter`), so the "why this is still [ ok ]"
+  # explanation has to live in `detail` here, not `hint`.
+  defp agy_write_jail_result({:error, _, _} = host, []) do
+    %Result{
+      name: "agy write jail",
+      status: :ok,
+      detail:
+        "host #{host_status_text(host)} — no workspace or repo currently resolves :strict " <>
+          "for agy, so this is informational only",
+      fatal: false,
+      blocks_readiness: false
+    }
+  end
+
+  defp agy_write_jail_result(:unknown, []) do
+    %Result{
+      name: "agy write jail",
+      status: :ok,
+      detail: "no workspace has a degraded agy write jail (host jail status unknown)",
+      fatal: false,
+      blocks_readiness: false
+    }
+  end
+
+  defp agy_write_jail_result(host, offenders) do
+    detail =
+      Enum.map_join(offenders, "; ", fn {name, %{message: message, repo: repo}} ->
+        label = if repo, do: "#{name} (repo #{repo})", else: name
+        "#{label}: #{message}"
+      end)
+
+    strict? = Enum.any?(offenders, fn {_name, %{strict?: strict?}} -> strict? end)
 
     %Result{
       name: "agy write jail",
-      status: :fail,
-      detail: detail,
+      status: if(strict?, do: :fail, else: :ok),
+      detail: "host #{host_status_text(host)}; " <> detail,
       hint:
-        "Outside :strict this is not fatal — agy runs unconfined instead of refusing. " <>
-          "Install/upgrade bubblewrap and confirm unprivileged user namespaces are enabled " <>
-          "to get the OS write jail back, or set sandbox.enabled: false to opt out explicitly.",
-      fatal: false,
+        if strict? do
+          "A `:strict` workspace/repo can't fall back to running agy unconfined — see the " <>
+            "cause and fix named above, or drop it out of `:strict` until the host can jail."
+        end,
+      fatal: strict?,
       blocks_readiness: false
     }
   end

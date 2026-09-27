@@ -440,6 +440,85 @@ defmodule Arbiter.Worker.JailTest do
     end
   end
 
+  # bd-8xy1mf: `arb server doctor` needs to tell a missing bwrap apart from a
+  # disabled userns sysctl apart from Ubuntu's AppArmor restriction apart from
+  # anything else, each with its own fix. The two sysctl-backed causes are
+  # simulated via fixture files (no root needed, no real sysctl touched).
+  describe "explain/1 and diagnose/0" do
+    setup do
+      prev = %{
+        available: Application.get_env(:arbiter, :worker_jail_available),
+        userns_path: Application.get_env(:arbiter, :worker_jail_max_userns_path),
+        apparmor_path: Application.get_env(:arbiter, :worker_jail_apparmor_restrict_path)
+      }
+
+      on_exit(fn ->
+        restore_env(:worker_jail_available, prev.available)
+        restore_env(:worker_jail_max_userns_path, prev.userns_path)
+        restore_env(:worker_jail_apparmor_restrict_path, prev.apparmor_path)
+        Jail.reset()
+      end)
+
+      :ok
+    end
+
+    test "diagnose/0 is nil when the jail is available" do
+      Application.put_env(:arbiter, :worker_jail_available, true)
+      assert Jail.diagnose() == nil
+    end
+
+    test "bwrap missing" do
+      assert %{cause: :bwrap_missing, fix: fix} = Jail.explain({:bwrap_not_found, "bwrap"})
+      assert fix =~ "dnf install bubblewrap"
+      assert fix =~ "apt install bubblewrap"
+    end
+
+    test "user.max_user_namespaces = 0 is distinguished from the AppArmor restriction", %{
+      base: base
+    } do
+      userns_path = Path.join(base, "max_user_namespaces")
+      apparmor_path = Path.join(base, "apparmor_restrict_unprivileged_userns")
+      File.write!(userns_path, "0\n")
+      File.write!(apparmor_path, "0\n")
+      Application.put_env(:arbiter, :worker_jail_max_userns_path, userns_path)
+      Application.put_env(:arbiter, :worker_jail_apparmor_restrict_path, apparmor_path)
+
+      assert %{cause: :user_namespaces_disabled, fix: fix} =
+               Jail.explain({:bwrap_failed, 1, "bwrap: Creating new namespace failed"})
+
+      assert fix =~ "sysctl -w user.max_user_namespaces"
+    end
+
+    test "the Ubuntu AppArmor restriction is reported when user namespaces are otherwise enabled",
+         %{base: base} do
+      userns_path = Path.join(base, "max_user_namespaces")
+      apparmor_path = Path.join(base, "apparmor_restrict_unprivileged_userns")
+      File.write!(userns_path, "126539\n")
+      File.write!(apparmor_path, "1\n")
+      Application.put_env(:arbiter, :worker_jail_max_userns_path, userns_path)
+      Application.put_env(:arbiter, :worker_jail_apparmor_restrict_path, apparmor_path)
+
+      assert %{cause: :apparmor_restricted, fix: fix} =
+               Jail.explain({:bwrap_failed, 1, "bwrap: Permission denied"})
+
+      assert fix =~ "kernel.apparmor_restrict_unprivileged_userns=0"
+    end
+
+    test "anything else falls back to bwrap's own stderr", %{base: base} do
+      userns_path = Path.join(base, "max_user_namespaces")
+      apparmor_path = Path.join(base, "apparmor_restrict_unprivileged_userns")
+      File.write!(userns_path, "126539\n")
+      File.write!(apparmor_path, "0\n")
+      Application.put_env(:arbiter, :worker_jail_max_userns_path, userns_path)
+      Application.put_env(:arbiter, :worker_jail_apparmor_restrict_path, apparmor_path)
+
+      assert %{cause: :other, message: message, fix: nil} =
+               Jail.explain({:bwrap_failed, 1, "bwrap: some unrelated failure"})
+
+      assert message =~ "bwrap: some unrelated failure"
+    end
+  end
+
   # ---- real bwrap ----------------------------------------------------------
 
   describe "real bwrap with a stub command" do

@@ -91,6 +91,11 @@ defmodule Arbiter.Worker.Jail do
     * `:worker_jail_probe_root` — where the probe makes its scratch dir
       (default `$XDG_CACHE_HOME/arbiter/jail-probe`). Must not be under `/tmp`,
       which is a tmpfs inside the jail.
+    * `:worker_jail_max_userns_path` / `:worker_jail_apparmor_restrict_path` —
+      the sysctl files `explain/1` reads to tell `user.max_user_namespaces = 0`
+      apart from Ubuntu's `kernel.apparmor_restrict_unprivileged_userns = 1`
+      (defaults: the real `/proc/sys/...` paths; the test suite points these
+      at fixtures to simulate each cause without root).
   """
 
   alias Arbiter.Worker.ReleaseEnv
@@ -394,6 +399,130 @@ defmodule Arbiter.Worker.Jail do
   def reset do
     _ = :persistent_term.erase({__MODULE__, :status})
     :ok
+  end
+
+  @type cause :: :bwrap_missing | :user_namespaces_disabled | :apparmor_restricted | :other
+
+  @type diagnosis :: %{cause: cause(), message: String.t(), fix: String.t() | nil}
+
+  @doc """
+  Why `status/0` is `{:error, _}` (`nil` when it's `:ok`) — bd-8xy1mf, for
+  `arb server doctor` and the workspace posture API. Distinguishes the causes
+  that have a known fix (bwrap missing, `user.max_user_namespaces = 0`,
+  Ubuntu's `kernel.apparmor_restrict_unprivileged_userns = 1`) from anything
+  else, which falls back to bwrap's own stderr.
+  """
+  @spec diagnose() :: diagnosis() | nil
+  def diagnose do
+    case status() do
+      :ok -> nil
+      {:error, reason} -> explain(reason)
+    end
+  end
+
+  @doc """
+  Categorize a `status/0`/`probe/0` error `reason` into a cause + fix. Public
+  so a caller that already holds the reason (`Gemini.write_jail_warning/1`
+  gets it from `jail_blocker/1`, which calls `status/0` itself) can explain it
+  without re-probing.
+
+  The two sysctl-backed causes are read directly from `/proc/sys` rather than
+  pattern-matched out of bwrap's stderr, which varies by bwrap version and
+  locale — the sysctls are the ground truth bwrap itself consults.
+  """
+  @spec explain(term()) :: diagnosis()
+  def explain({:bwrap_not_found, path}) do
+    %{
+      cause: :bwrap_missing,
+      message: "bwrap (#{path}) not found on PATH",
+      fix:
+        "Install bubblewrap: `dnf install bubblewrap` (Fedora/RHEL 8+/AL2023) or " <>
+          "`apt install bubblewrap` (Debian/Ubuntu)."
+    }
+  end
+
+  def explain(:disabled_by_config) do
+    %{
+      cause: :other,
+      message: "the jail is disabled by the `:arbiter, :worker_jail_available` override",
+      fix: "Unset that override to let the real probe run."
+    }
+  end
+
+  def explain({:bwrap_failed, _status, _out} = reason) do
+    cond do
+      max_user_namespaces() == 0 ->
+        %{
+          cause: :user_namespaces_disabled,
+          message: "unprivileged user namespaces are disabled (`user.max_user_namespaces = 0`)",
+          fix:
+            "Enable them: `sysctl -w user.max_user_namespaces=<N>` and persist it under " <>
+              "`/etc/sysctl.d/`, or accept that agy stays :strict-ineligible on this host."
+        }
+
+      apparmor_restricts_userns?() ->
+        %{
+          cause: :apparmor_restricted,
+          message:
+            "AppArmor restricts unprivileged user namespaces " <>
+              "(`kernel.apparmor_restrict_unprivileged_userns = 1`)",
+          fix:
+            "Allow bwrap via an AppArmor profile, or " <>
+              "`sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` to permit it " <>
+              "(weakens a hardening default — only do this if you understand the tradeoff)."
+        }
+
+      true ->
+        %{cause: :other, message: reason_message(reason), fix: nil}
+    end
+  end
+
+  def explain(reason), do: %{cause: :other, message: reason_message(reason), fix: nil}
+
+  defp reason_message({:bwrap_failed, status, out}) when is_binary(out) do
+    trimmed = String.trim(out)
+    if trimmed == "", do: "bwrap exited #{status}", else: "bwrap exited #{status}: #{trimmed}"
+  end
+
+  defp reason_message(reason) when is_binary(reason), do: reason
+  defp reason_message(reason), do: inspect(reason)
+
+  defp max_user_namespaces do
+    case read_sysctl(max_user_namespaces_path()) do
+      nil ->
+        nil
+
+      value ->
+        case Integer.parse(value) do
+          {int, _} -> int
+          :error -> nil
+        end
+    end
+  end
+
+  defp apparmor_restricts_userns?, do: read_sysctl(apparmor_restrict_path()) == "1"
+
+  defp read_sysctl(path) do
+    case File.read(path) do
+      {:ok, content} -> String.trim(content)
+      _ -> nil
+    end
+  end
+
+  defp max_user_namespaces_path do
+    Application.get_env(
+      :arbiter,
+      :worker_jail_max_userns_path,
+      "/proc/sys/user/max_user_namespaces"
+    )
+  end
+
+  defp apparmor_restrict_path do
+    Application.get_env(
+      :arbiter,
+      :worker_jail_apparmor_restrict_path,
+      "/proc/sys/kernel/apparmor_restrict_unprivileged_userns"
+    )
   end
 
   @doc """

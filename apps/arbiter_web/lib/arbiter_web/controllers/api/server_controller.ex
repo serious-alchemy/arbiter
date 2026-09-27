@@ -8,9 +8,18 @@ defmodule ArbiterWeb.Api.ServerController do
       actually bound to (bd-1c4pg3). `arb server doctor` uses this to warn
       when a server — possibly remote, via `ARB_HOST` — is reachable
       off-loopback despite the dashboard's no-login auth model.
+    * `GET /api/server/agy_write_jail` — whether *this host* can jail an agy
+      spawn (bd-8xy1mf), i.e. `Arbiter.Worker.Jail.diagnose/0`. The
+      per-workspace `write_jail_warning` in the workspace posture only says
+      whether a given workspace's resolved policy is degraded by this; a CLI
+      running on the server host needs the host's own answer even when no
+      workspace currently resolves `:strict`, so `arb server doctor` has
+      something to show for AC1/AC6's "can this host jail agy at all" check.
   """
 
   use ArbiterWeb, :controller
+
+  alias Arbiter.Worker.Jail
 
   def migrations(conn, _params) do
     case Arbiter.Migrations.count_pending() do
@@ -50,4 +59,14 @@ defmodule ArbiterWeb.Api.ServerController do
 
   defp format_ip(nil), do: nil
   defp format_ip(ip), do: ip |> :inet.ntoa() |> to_string()
+
+  def agy_write_jail(conn, _params) do
+    case Jail.diagnose() do
+      nil ->
+        json(conn, %{available: true})
+
+      %{cause: cause, message: message, fix: fix} ->
+        json(conn, %{available: false, cause: Atom.to_string(cause), message: message, fix: fix})
+    end
+  end
 end

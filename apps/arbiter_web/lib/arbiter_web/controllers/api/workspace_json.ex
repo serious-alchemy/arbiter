@@ -47,6 +47,12 @@ defmodule ArbiterWeb.Api.WorkspaceJSON do
       # `write_jail_warning` (bd-3s82pf) is non-nil exactly when that `:none`
       # is a degraded state rather than "not applicable" — outside `:strict`
       # dispatch never refuses on it, so this is the only place it surfaces.
+      # `repos` (bd-8xy1mf) carries the same shape per `agent.security.repos`
+      # override — a repo can resolve `:strict` while the workspace default
+      # doesn't, and `SecurityPolicy.resolve/3`'s repo layer only kicks in
+      # when a `repo` argument is passed, so the workspace-level `policy`
+      # above never sees it. `arb server doctor`'s AC3 "some workspace/repo
+      # resolves :strict" needs this to catch that case.
       security_posture:
         policy
         |> SecurityPolicy.summary()
@@ -54,7 +60,8 @@ defmodule ArbiterWeb.Api.WorkspaceJSON do
           "provider" => adapter.provider(),
           "policy_enforced" => security_enforced?(adapter),
           "write_confinement" => Agents.write_confinement(adapter, policy),
-          "write_jail_warning" => Agents.write_jail_warning(adapter, policy)
+          "write_jail_warning" => Agents.write_jail_warning(adapter, policy),
+          "repos" => repo_security_postures(ws, adapter)
         }),
       created_at: iso(ws.created_at),
       updated_at: iso(ws.updated_at)
@@ -73,6 +80,32 @@ defmodule ArbiterWeb.Api.WorkspaceJSON do
     ws
     |> Workspace.worker_env_keys()
     |> Enum.map(fn %{name: name, secret?: secret?} -> %{name: name, secret: secret?} end)
+  end
+
+  # `%{repo_name => %{"mode" => ..., "write_jail_warning" => ...}}` for every
+  # repo with an explicit `agent.security.repos.<repo>` override — a repo not
+  # listed there resolves identically to the workspace-level `policy` already
+  # covered above (`SecurityPolicy.repo_override/2` is a no-op merge when the
+  # key is absent), so there's nothing new to report for it.
+  defp repo_security_postures(%Workspace{} = ws, adapter) do
+    ws.config
+    |> Kernel.||(%{})
+    |> get_in(["agent", "security", "repos"])
+    |> case do
+      repos when is_map(repos) ->
+        Map.new(repos, fn {repo, _override} ->
+          repo_policy = SecurityPolicy.resolve(ws, %{}, repo)
+
+          {repo,
+           %{
+             "mode" => Atom.to_string(repo_policy.permissions.mode),
+             "write_jail_warning" => Agents.write_jail_warning(adapter, repo_policy)
+           }}
+        end)
+
+      _ ->
+        %{}
+    end
   end
 
   defp security_enforced?(adapter) do

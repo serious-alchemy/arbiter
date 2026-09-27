@@ -111,12 +111,36 @@ defmodule Arbiter.Agents.Gemini do
     with {:ok, {:agy, _}} <- resolve_executable(),
          true <- jail_eligible?(policy),
          {:error, reason} <- jail_blocker(policy) do
-      "agy write jail unavailable (#{inspect(reason)}) — writes are not confined to the " <>
-        "worktree outside :strict"
+      "agy write jail unavailable (#{jail_blocker_message(reason)}) — " <>
+        jail_unavailable_effect(policy)
     else
       _ -> nil
     end
   end
+
+  # `:strict` fails dispatch closed rather than falling back to unconfined
+  # (`jail_blocker/1` refuses it, see `default_argv/2`'s `maybe_jail/4`), so
+  # the warning text must not claim writes just run unconfined there — that's
+  # only true outside `:strict` (bd-8xy1mf).
+  defp jail_unavailable_effect(%SecurityPolicy{permissions: %{mode: :strict}}),
+    do: ":strict dispatches of agy are refused"
+
+  defp jail_unavailable_effect(_policy),
+    do: "writes are not confined to the worktree outside :strict"
+
+  # `jail_blocker/1`'s own reasons (sandbox off, isolated HOME off) are already
+  # human strings; `{:jail_probe_failed, reason}` wraps a raw `Jail.status/0`
+  # reason, which `Jail.explain/1` turns into the same cause + fix `arb server
+  # doctor` shows (bd-8xy1mf) instead of an opaque `inspect/1`.
+  defp jail_blocker_message({:jail_probe_failed, reason}) do
+    case Jail.explain(reason) do
+      %{message: message, fix: nil} -> message
+      %{message: message, fix: fix} -> "#{message} — #{fix}"
+    end
+  end
+
+  defp jail_blocker_message(reason) when is_binary(reason), do: reason
+  defp jail_blocker_message(reason), do: inspect(reason)
 
   @impl true
   def done_sentinel, do: @done_regex

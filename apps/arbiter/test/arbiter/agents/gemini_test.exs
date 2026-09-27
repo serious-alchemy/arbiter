@@ -139,6 +139,23 @@ defmodule Arbiter.Agents.GeminiTest do
       end
     end
 
+    # bd-8xy1mf finding: the warning text must not claim writes run
+    # unconfined for a `:strict` policy — `:strict` refuses the dispatch
+    # instead (`jail_blocker/1`), it never falls back to unconfined.
+    test "write_jail_warning/1 names refusal for :strict, unconfined writes otherwise" do
+      Application.put_env(:arbiter, :worker_jail_available, false)
+
+      assert Gemini.write_jail_warning(policy(:strict)) =~ ":strict dispatches of agy are refused"
+      refute Gemini.write_jail_warning(policy(:strict)) =~ "writes are not confined"
+
+      for mode <- [:bypass, :auto] do
+        assert Gemini.write_jail_warning(policy(mode)) =~
+                 "writes are not confined to the worktree outside :strict"
+
+        refute Gemini.write_jail_warning(policy(mode)) =~ "dispatches of agy are refused"
+      end
+    end
+
     test "write_jail_warning/1 is nil when the policy opts the sandbox off (nothing to warn about)" do
       Application.put_env(:arbiter, :worker_jail_available, false)
       assert Gemini.write_jail_warning(policy(:bypass, %{enabled: false})) == nil
