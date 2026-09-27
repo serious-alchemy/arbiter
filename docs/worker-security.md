@@ -41,7 +41,8 @@ syntax.
   sandbox: %{
     enabled: true,
     filesystem: :worktree | :none,
-    network: true | false
+    network: true | false,
+    writable_paths: []          # extra writable paths inside the OS write jail
   }
 }
 ```
@@ -170,6 +171,85 @@ sandbox. The badge and surface show `net=tools-off` to make this scope explicit.
 > empty deny. Genuine OS-level isolation (network namespaces, a real fs jail)
 > is a documented follow-up; the `sandbox.enabled` field is the seam for it.
 
+#### The OS write jail (`Arbiter.Worker.Jail`, bd-5gvqgc)
+
+The first real kernel-level fence, used today for **agy under `:strict`**
+(see the agy section below for why agy needs it). The worker runs under
+bubblewrap:
+
+    bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp --tmpfs /dev/shm \
+      [--bind-try <each sandbox.writable_paths entry>] \
+      --bind <worktree> --bind <agy HOME> --setenv HOME <agy HOME> \
+      --bind <git common dir> \
+      --ro-bind <common>/hooks --ro-bind <common>/config --ro-bind <common>/worktrees \
+      --bind <own gitdir> --ro-bind-try <own gitdir>/commondir --ro-bind <worktree>/.git \
+      --setenv HEX_HOME|MIX_HOME|XDG_CACHE_HOME <per-worker dirs under the agy HOME> \
+      --unshare-pid --die-with-parent --new-session --chdir <worktree> -- agy -p ...
+
+* **Writable:** the worktree, the git common dir (commits need its objects and
+  refs), the worker's own agy `$HOME`, and any `sandbox.writable_paths`.
+  Everything else, including the rest of the operator's `$HOME`, `~/.arbiter`
+  and the main checkout, is read-only: a write fails with `EROFS`
+  (`read-only file system`), whichever tool makes it.
+* **Read-only on top**, after every writable bind so no `writable_paths` entry
+  can re-open them: `hooks/` and `config` in the common dir, the sibling
+  worktrees' gitdirs (`<common>/worktrees`, with the worker's own gitdir
+  re-opened on top), the own gitdir's `commondir` and the worktree's `.git`
+  file. Each would otherwise let a jailed process get code run *unjailed* by
+  the host's next git command (a hook, `core.fsmonitor`, or a `commondir` /
+  `.git` pointer at a fake git dir with its own config).
+* **Private `/tmp` and `/dev/shm`**, gone with the jail. That also ends the
+  shared-`/tmp` collisions between workers (the verify DB under
+  `System.tmp_dir!/0`, test scratch dirs).
+* **Toolchain caches are per-worker.** `HEX_HOME`, `MIX_HOME` and
+  `XDG_CACHE_HOME` point under `<agy HOME>/.arbiter-jail/`. The per-worker
+  `MIX_HOME` links the operator's Hex archive and rebar3 through read-only, so
+  `mix deps.get` works while `mix archive.install` / `local.hex` cannot plant
+  code the operator's later mix runs would load. The Hex package cache starts
+  cold per worktree. `sandbox.writable_paths` (absolute or `~/…`, unioned
+  across layers like `allow`) is the escape hatch for anything else; every
+  shared writable path is a way to leave something behind that runs outside
+  the jail later, so keep it short. `/` and the operator's `$HOME` itself are
+  refused, and a missing path is skipped (`--bind-try`).
+* **Teardown.** `--unshare-pid` makes the jail its own pid namespace and
+  `--die-with-parent` ties it to the outer `bwrap` the worker port spawned.
+  The existing stop path (`OsProcess.kill_tree/1` on the port's `os_pid`)
+  kills that outer process, which kills the namespace's pid 1, and the kernel
+  then kills everything in the namespace, however deep or detached. That is
+  tighter than before, when the depth-bounded descendant walk could miss a
+  process agy backgrounded. The jailed command's exit status is passed through
+  unchanged.
+* **Availability is probed, not assumed.** `Jail.available?/0` runs the jail
+  once per VM on a scratch dir (under `$XDG_CACHE_HOME/arbiter/jail-probe`,
+  not `/tmp`) and requires the write inside to land and the write outside to
+  fail with `EROFS`. The userns sysctls, AppArmor's
+  `apparmor_restrict_unprivileged_userns` and a setuid bwrap all change the
+  answer, so the binary alone proves nothing. The result is cached until
+  restart. A host that fails keeps agy out of `:strict` (the fail-closed gate,
+  bd-1abj7u); `arb server doctor` explaining why is bd-8xy1mf.
+
+**Known, accepted gaps** (the threat model is a misdirected same-user agent,
+not a hostile kernel exploit):
+
+* The network is shared: `arb`, MCP and `git push` need it.
+  `sandbox.network: false` is still only the tool-level deny.
+* Reads are not restricted.
+* The main `.git` stays writable, so a jailed worker can still write sibling
+  worktrees' refs (the same as without the jail).
+* `git config --local` fails with `EBUSY`: git renames a lockfile over the
+  read-only bind of `config`.
+* Submodule git dirs (`<common>/modules/*`) are not protected.
+* Tools that hard-code `$HOME/.cache` instead of honouring `XDG_CACHE_HOME`
+  reach the operator's cache entries through the agy HOME's passthrough
+  symlinks, which are read-only in the jail (for example Arbiter's own test
+  config, which puts its scratch root under `$HOME/.cache/arbiter/scratch`).
+  Use `sandbox.writable_paths` for those.
+* Nothing can be handed between the host and the worker through `/tmp`.
+* The agy HOME is writable from inside the jail and Arbiter writes into it on
+  the host at the next spawn. `ConfigDir` removes a symlink planted where one
+  of its own directories or files goes rather than follow it, and the
+  toolchain dirs get the same treatment.
+
 ## Configuring it
 
 ### Per-domain (the common case)
@@ -263,8 +343,8 @@ The hardcoded safe baseline lives in `Arbiter.Agents.SecurityPolicy.base/0`.
 `base/0` → `:worker_security_policy` app env → `workspace.config["agent"]["security"]`
 → `workspace.config["agent"]["security"]["repos"][repo]` (only when a repo name
 is passed) → per-dispatch override. `allow`/`deny`/`safe_defaults_exclude`
-**union** across layers; `mode` and `sandbox` fields are **replaced** by the
-highest layer that sets them. `safe_defaults` itself is never set directly —
+and `sandbox.writable_paths` **union** across layers; `mode` and the other
+`sandbox` fields are **replaced** by the highest layer that sets them. `safe_defaults` itself is never set directly —
 it is always recomputed as `safe_default_categories() -- safe_defaults_exclude`
 after every layer is applied, so it always reflects the current default set
 minus whatever any layer has excluded by name. The legacy `safe_defaults`
@@ -412,8 +492,17 @@ throwaway `$HOME`:
   refuse `:strict` dispatch to agy until agy runs under a bubblewrap jail
   that makes the worktree the only writable project path (probed live: a
   jailed `write_to_file` outside it fails with `read-only file system`).
-  Until those follow-ups land, **an agy worker in any mode can write
-  wherever the operator's user can.**
+  **Landed in bd-5gvqgc:** under `:strict`, `Gemini.default_argv/2` runs
+  agy inside the OS write jail (see [The OS write jail](#the-os-write-jail-arbiterworkerjail-bd-5gvqgc))
+  and `Gemini.write_confinement/1` answers `:os_jail`, so the gate admits
+  agy, on a host that passes `Jail.available?/0` with worker config
+  isolation and `sandbox.enabled` on. Where it can't jail, `write_confinement`
+  stays `:none` and the adapter itself refuses a `:strict` spawn
+  (`{:write_jail_unavailable, reason}`) rather than run agy unconfined, for a
+  caller that reaches it without the gate. **In `:bypass` and `:auto` an agy
+  worker is not jailed yet and can still write wherever the operator's user
+  can** (bd-3s82pf extends the jail to every mode and makes agy reviews
+  read-only at the OS level).
 * **`--sandbox` disables the allowlist gate under `"proceed-in-sandbox"`
   (bd-25ivqe).** With `--sandbox` on argv, agy runs the command inside a real
   `bwrap` jail and *auto-proceeds* there regardless of `permissions.allow` —
@@ -422,8 +511,9 @@ throwaway `$HOME`:
   therefore omitted from `:strict`'s argv entirely; the original mapping
   (`--sandbox` + `toolPermission: "strict"`) predates this finding.
 
-As on the Claude side these are *permission-layer* guards inside the agent, not
-OS isolation.
+As on the Claude side these are *permission-layer* guards inside the agent.
+The one exception is the `:strict` write jail above, which is OS isolation
+for writes only.
 
 ### Credentials are untouched by the `$HOME` redirect
 

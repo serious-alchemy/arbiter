@@ -167,6 +167,14 @@ scratch_root =
 config :arbiter, :scratch_root, scratch_root
 config :arbiter, :worktree_root, Path.join(scratch_root, "worktrees-test")
 
+# bd-5gvqgc: never let the bwrap write-jail probe decide dispatch outcomes
+# under test — whether the host can jail must not flip the :strict gate's
+# answer for agy. Tests that exercise the jail call `Jail.probe/0` directly
+# (it ignores this override) or put_env `true` themselves. The probe's scratch
+# dir must be disk-backed and off /tmp, which is a tmpfs inside the jail.
+config :arbiter, :worker_jail_available, false
+config :arbiter, :worker_jail_probe_root, Path.join(scratch_root, "jail-probe-test")
+
 # Stalled-worker detection (bd-awi4nw): shorten the post-exit grace so the
 # deferred classify+escalate check fires fast under test. Still > 0 so a normal
 # completion's in-flight `arb done` wins the race before the check runs.

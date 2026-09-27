@@ -32,7 +32,8 @@ defmodule Arbiter.Agents.SecurityPolicy do
         sandbox: %{
           enabled: boolean(),
           filesystem: :worktree | :none,
-          network: boolean()
+          network: boolean(),
+          writable_paths: [String.t()]  # extra paths writable inside the OS jail
         }
       }
 
@@ -125,6 +126,16 @@ defmodule Arbiter.Agents.SecurityPolicy do
   documented follow-up). The field is also surfaced verbatim so the operator
   can see the declared posture.
 
+  `writable_paths` (bd-5gvqgc) only matters where a worker runs inside the
+  OS write jail (`Arbiter.Worker.Jail`, agy under `:strict` today): each entry
+  (absolute, or `~/…`) is bound writable on top of the otherwise read-only
+  filesystem. It is the operator's escape hatch for a toolchain cache the
+  per-worker `HEX_HOME`/`MIX_HOME`/`XDG_CACHE_HOME` do not cover. Every
+  writable shared path is also a way for a jailed worker to leave something
+  behind that runs later outside the jail (a shared `~/.mix/archives` runs in
+  the operator's own mix commands), so keep the list short. It **unions**
+  across layers like `allow`/`deny`.
+
   ## Resolution
 
   `resolve/3` layers, lowest precedence first:
@@ -150,10 +161,10 @@ defmodule Arbiter.Agents.SecurityPolicy do
     5. an explicit per-dispatch / per-task `override` map.
 
   For `permissions.allow` / `permissions.deny` / `permissions.safe_defaults_exclude`
-  each layer **unions** onto the previous (a domain adds to the baseline
+  / `sandbox.writable_paths` each layer **unions** onto the previous (a domain adds to the baseline
   rather than dropping it) — so a repo override *adds* allow/deny rules, or
   further exclusions, on top of the workspace posture. `mode` and every
-  `sandbox` field are **replaced** by the highest layer that sets them. The
+  other `sandbox` field are **replaced** by the highest layer that sets them. The
   legacy `permissions.safe_defaults` key is inert (see above) — it is parsed
   but never changes the resolved set. Unknown / malformed values are ignored
   (the codebase reads JSON config leniently), so a typo degrades to the safer
@@ -179,7 +190,8 @@ defmodule Arbiter.Agents.SecurityPolicy do
           sandbox: %{
             enabled: boolean(),
             filesystem: filesystem(),
-            network: boolean()
+            network: boolean(),
+            writable_paths: [String.t()]
           }
         }
 
@@ -273,7 +285,8 @@ defmodule Arbiter.Agents.SecurityPolicy do
       sandbox: %{
         enabled: true,
         filesystem: :worktree,
-        network: true
+        network: true,
+        writable_paths: []
       }
     }
   end
@@ -575,7 +588,9 @@ defmodule Arbiter.Agents.SecurityPolicy do
     %{
       enabled: parse_bool(get(raw, :enabled), base.enabled),
       filesystem: parse_filesystem(get(raw, :filesystem), base.filesystem),
-      network: parse_bool(get(raw, :network), base.network)
+      network: parse_bool(get(raw, :network), base.network),
+      writable_paths:
+        union(Map.get(base, :writable_paths, []), list_of_strings(get(raw, :writable_paths)))
     }
   end
 
@@ -596,7 +611,8 @@ defmodule Arbiter.Agents.SecurityPolicy do
       "sandbox" => %{
         "enabled" => p.sandbox.enabled,
         "filesystem" => Atom.to_string(p.sandbox.filesystem),
-        "network" => p.sandbox.network
+        "network" => p.sandbox.network,
+        "writable_paths" => Map.get(p.sandbox, :writable_paths, [])
       }
     }
   end

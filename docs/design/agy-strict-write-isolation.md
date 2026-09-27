@@ -3,7 +3,18 @@
 **Task:** bd-ca7xko (decision) · **Epic:** bd-3sa0y9 (agy provider parity) ·
 **Builds on:** bd-25ivqe (PR #2070), bd-7h2cuk (live probe) ·
 **Status:** decided 2026-09-26. Follow-ups filed: bd-1abj7u, bd-5gvqgc,
-bd-8xy1mf, bd-3s82pf.
+bd-8xy1mf, bd-3s82pf. **bd-1abj7u landed** (fail-closed gate). **bd-5gvqgc
+landed** (the jail, `Arbiter.Worker.Jail`, for agy under `:strict`):
+`write_confinement` answers `:os_jail` on a host that passes the probe. It
+goes a little past the recipe below: `<common>/worktrees` (with the own gitdir
+re-opened on top), the own gitdir's `commondir` and the worktree's `.git` file
+are also read-only, since each is a pointer that could aim the host's next
+git command at a fake git dir; `--new-session` is added; toolchain caches are
+per-worker `HEX_HOME`/`MIX_HOME`/`XDG_CACHE_HOME` under the agy `$HOME`.
+Accepted gaps, documented in `docs/worker-security.md`: shared network,
+unrestricted reads, writable main `.git` (sibling refs), `git config --local`
+EBUSY, unprotected submodule git dirs. Still open: bd-8xy1mf (doctor),
+bd-3s82pf (every mode, read-only reviews).
 
 ## Decision
 

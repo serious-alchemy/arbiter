@@ -209,6 +209,49 @@ defmodule Arbiter.Agents.Gemini.ConfigDirTest do
     end
   end
 
+  # bd-5gvqgc: inside the write jail the agy HOME is the one writable place
+  # outside the worktree, and ensure/1 + write_mcp_config/2 run on the HOST,
+  # unjailed, on the next spawn. A symlink the jailed worker planted there
+  # must be replaced, never followed, or it steers a host-side write anywhere.
+  describe "symlinks planted in the isolated HOME (bd-5gvqgc)" do
+    setup %{base: base} do
+      target = Path.join(base, "victim")
+      File.mkdir_p!(target)
+      {:ok, target: target}
+    end
+
+    for rel <- [".gemini", ".gemini/antigravity-cli", ".gemini/config"] do
+      test "a symlinked #{rel} is replaced by a real directory", %{worktree: wt, target: target} do
+        home = ConfigDir.path(worktree: wt)
+        link = Path.join(home, unquote(rel))
+        File.mkdir_p!(Path.dirname(link))
+        File.ln_s!(target, link)
+
+        assert {:ok, ^home} = ConfigDir.ensure(worktree: wt)
+        assert {:ok, _} = ConfigDir.write_mcp_config(%{"mcpServers" => %{}}, worktree: wt)
+
+        assert {:ok, %File.Stat{type: :directory}} = File.lstat(link)
+        assert File.ls!(target) == []
+      end
+    end
+
+    test "a symlinked mcp_config.json is replaced, not written through", %{
+      worktree: wt,
+      target: target
+    } do
+      {:ok, home} = ConfigDir.ensure(worktree: wt)
+      victim = Path.join(target, "precious")
+      File.write!(victim, "keep me")
+      link = Path.join(home, ".gemini/config/mcp_config.json")
+      File.mkdir_p!(Path.dirname(link))
+      File.ln_s!(victim, link)
+
+      assert {:ok, ^link} = ConfigDir.write_mcp_config(%{"mcpServers" => %{}}, worktree: wt)
+      assert File.read!(victim) == "keep me"
+      assert {:ok, %File.Stat{type: :regular}} = File.lstat(link)
+    end
+  end
+
   describe "env/1" do
     test "injects HOME so agy reads our config dir and not the operator's", %{worktree: wt} do
       assert [{"HOME", home}] = ConfigDir.env(worktree: wt)

@@ -14,7 +14,13 @@ defmodule Arbiter.Agents.SecurityPolicyTest do
       assert p.permissions.deny == []
       refute Enum.empty?(p.permissions.safe_defaults)
       assert :no_destructive_fs in p.permissions.safe_defaults
-      assert p.sandbox == %{enabled: true, filesystem: :worktree, network: true}
+
+      assert p.sandbox == %{
+               enabled: true,
+               filesystem: :worktree,
+               network: true,
+               writable_paths: []
+             }
     end
 
     test "default/0 overlays the :worker_security_policy app env" do
@@ -138,6 +144,62 @@ defmodule Arbiter.Agents.SecurityPolicyTest do
       p = SecurityPolicy.resolve(ws)
       # Canonical path should win over the alt paths
       assert p.permissions.mode == :auto
+    end
+  end
+
+  describe "sandbox.writable_paths (bd-5gvqgc)" do
+    test "unions across the install, workspace, repo and override layers like allow/deny" do
+      prev = Application.get_env(:arbiter, :worker_security_policy)
+
+      Application.put_env(:arbiter, :worker_security_policy, %{
+        sandbox: %{writable_paths: ["/opt/install"]}
+      })
+
+      on_exit(fn ->
+        if is_nil(prev),
+          do: Application.delete_env(:arbiter, :worker_security_policy),
+          else: Application.put_env(:arbiter, :worker_security_policy, prev)
+      end)
+
+      ws = %Workspace{
+        config: %{
+          "agent" => %{
+            "security" => %{
+              "sandbox" => %{"writable_paths" => ["~/.cache/rebar3"]},
+              "repos" => %{
+                "device" => %{"sandbox" => %{"writable_paths" => ["/opt/device", "/opt/install"]}}
+              }
+            }
+          }
+        }
+      }
+
+      p =
+        SecurityPolicy.resolve(ws, %{"sandbox" => %{"writable_paths" => ["/opt/task"]}}, "device")
+
+      assert p.sandbox.writable_paths == [
+               "/opt/install",
+               "~/.cache/rebar3",
+               "/opt/device",
+               "/opt/task"
+             ]
+    end
+
+    test "non-list and non-string entries are ignored" do
+      p =
+        SecurityPolicy.merge(SecurityPolicy.base(), %{
+          "sandbox" => %{"writable_paths" => ["/ok", 3, "", nil]}
+        })
+
+      assert p.sandbox.writable_paths == ["/ok"]
+
+      assert SecurityPolicy.merge(p, %{"sandbox" => %{"writable_paths" => "/nope"}}).sandbox.writable_paths ==
+               ["/ok"]
+    end
+
+    test "summary/1 surfaces it" do
+      p = SecurityPolicy.merge(SecurityPolicy.base(), %{sandbox: %{writable_paths: ["/opt/x"]}})
+      assert SecurityPolicy.summary(p)["sandbox"]["writable_paths"] == ["/opt/x"]
     end
   end
 

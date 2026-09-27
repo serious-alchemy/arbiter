@@ -152,6 +152,8 @@ defmodule Arbiter.Agents.Gemini.ConfigDir do
     if enabled?() do
       dir = path(opts)
 
+      unlink_planted_links(dir)
+
       with :ok <- File.mkdir_p(Path.join(dir, Path.dirname(@settings_path))),
            :ok <- write_settings(dir, opts),
            :ok <- write_memory(dir) do
@@ -196,6 +198,8 @@ defmodule Arbiter.Agents.Gemini.ConfigDir do
     case ensure(opts) do
       {:ok, dir} ->
         path = Path.join(dir, @mcp_config_path)
+
+        _ = File.rm(path)
 
         with :ok <- File.mkdir_p(Path.dirname(path)),
              :ok <- File.write(path, Jason.encode!(config, pretty: true)) do
@@ -330,6 +334,24 @@ defmodule Arbiter.Agents.Gemini.ConfigDir do
       |> String.slice(0, 48)
 
     if slug == "", do: digest, else: slug <> "-" <> digest
+  end
+
+  # bd-5gvqgc: a jailed agy worker can write anywhere in this HOME, and every
+  # write here runs on the host, unjailed, at the next spawn. A symlink it
+  # planted where one of our directories goes would steer those writes
+  # anywhere the operator can write, so remove it rather than follow it. The
+  # files themselves are removed before each write for the same reason.
+  @owned_dirs [@gemini_dir, Path.dirname(@settings_path), Path.dirname(@mcp_config_path)]
+
+  defp unlink_planted_links(dir) do
+    Enum.each(@owned_dirs, fn rel ->
+      path = Path.join(dir, rel)
+
+      case File.lstat(path) do
+        {:ok, %File.Stat{type: :symlink}} -> File.rm(path)
+        _ -> :ok
+      end
+    end)
   end
 
   # Always (re)write the generated settings so the posture can never drift from

@@ -92,6 +92,9 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
     # on to host an agent CLI and whatever that CLI runs — so the scrub has to
     # happen once here, at the scope boundary, and is inherited by every pane.
     "apps/arbiter/lib/arbiter/sessions/runner/host.ex" => :scrubbed,
+    # bd-5gvqgc: the write-jail probe runs the configured bwrap (a path, so
+    # not a literal) around `sh`; `git rev-parse` is the only other spawn.
+    "apps/arbiter/lib/arbiter/worker/jail.ex" => :scrubbed,
     "apps/arbiter/lib/arbiter/single_instance.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/version.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/worker.ex" => :pure_tool,

@@ -114,6 +114,32 @@ defmodule Arbiter.Agents.Gemini.Security do
       Claude side these are *permission-layer* guards inside the agent, not OS
       isolation.
 
+  ## The `:strict` OS write jail (bd-5gvqgc)
+
+  Since nothing in this module can confine `write_to_file`, `:strict` is
+  enforced one level down: `Arbiter.Agents.Gemini.default_argv/2` runs agy
+  under bubblewrap (`Arbiter.Worker.Jail`) with `/` read-only and only the
+  worktree, the git common dir (with `hooks/`, `config`, the sibling
+  worktrees' gitdirs, the own `commondir` and the worktree's `.git` file
+  re-bound read-only), the isolated agy `$HOME` and any
+  `sandbox.writable_paths` writable. A `write_to_file` outside those fails
+  with `read-only file system`, as does every other write path (`run_command`,
+  anything agy backgrounds). `HEX_HOME`/`MIX_HOME`/`XDG_CACHE_HOME` point at
+  per-worker dirs under the agy `$HOME`, so no shared toolchain cache becomes a
+  way to leave code behind for the operator's later runs.
+  `Arbiter.Agents.Gemini.write_confinement/1` answers `:os_jail` only when the
+  jail applies: `:strict`, `sandbox.enabled`, agy (not upstream gemini),
+  worker config isolation on, and a host that passes `Jail.available?/0`'s real
+  probe. Otherwise it answers `:none`, and a `:strict` spawn is refused rather
+  than run unconfined. `:bypass` and `:auto` are not jailed yet (bd-3s82pf).
+
+  Accepted gaps, by design: the network is shared (`arb`, MCP, `git push`);
+  reads are not restricted, so `:no_secret_reads` is still only this module's
+  `read_file(...)` deny; the main `.git` stays writable, so refs of sibling
+  worktrees can be written; `git config --local` fails with `EBUSY` (git
+  renames over the read-only `config`); submodule git dirs are not protected;
+  and `/tmp` is a private tmpfs per worker. See `docs/worker-security.md`.
+
   ## Worker-protocol bootstrap allowlist (bd-25ivqe)
 
   `:strict` is allowlist-only (see the table above), but the Arbiter worker

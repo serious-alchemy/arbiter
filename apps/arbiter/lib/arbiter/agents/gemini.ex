@@ -18,6 +18,7 @@ defmodule Arbiter.Agents.Gemini do
   alias Arbiter.Agents.Gemini.ConfigDir
   alias Arbiter.Agents.Gemini.Security
   alias Arbiter.Agents.SecurityPolicy
+  alias Arbiter.Worker.Jail
 
   @done_regex ~r/\barb done\b/
 
@@ -66,17 +67,30 @@ defmodule Arbiter.Agents.Gemini do
   end
 
   @doc """
-  `:none` (bd-1abj7u, `docs/design/agy-strict-write-isolation.md`). Neither
-  branch confines writes: the upstream `gemini` CLI has no allow/deny
-  mechanism at all, and agy's native `write_to_file` ignores every
+  `:os_jail` when this spawn runs inside the bubblewrap write jail
+  (`Arbiter.Worker.Jail`, bd-5gvqgc), `:none` otherwise
+  (`docs/design/agy-strict-write-isolation.md`).
+
+  No agy setting confines writes: agy's native `write_to_file` ignores every
   `write_file(...)` deny, `disabledTools`, and `--sandbox` (bd-25ivqe,
-  bd-7h2cuk) — `security_enforced?/0` above is about the *deny-list*
-  contract, which is a separate claim from confining writes to the
-  worktree. The bwrap OS jail (bd-5gvqgc) is expected to flip this to
-  `:os_jail` once a host passes its self-test; nothing here does that yet.
+  bd-7h2cuk), and the upstream `gemini` CLI has no allow/deny mechanism at
+  all. `security_enforced?/0` above is about the *deny-list* contract, a
+  separate claim. So the only confinement is the kernel's, and it applies
+  exactly when `default_argv/2` jails the spawn: the resolved mode is
+  `:strict`, `sandbox.enabled` is on, the CLI is agy, the isolated agy
+  `$HOME` is on (it is the one writable place agy keeps its own state) and
+  the host passes the jail's probe (`Jail.available?/0`). Other modes are
+  not jailed yet (bd-3s82pf), so they answer `:none`.
   """
   @impl true
-  def write_confinement(%SecurityPolicy{}), do: :none
+  def write_confinement(%SecurityPolicy{} = policy) do
+    with {:ok, {:agy, _}} <- resolve_executable(),
+         :ok <- jail_blocker(policy) do
+      :os_jail
+    else
+      _ -> :none
+    end
+  end
 
   @impl true
   def done_sentinel, do: @done_regex
@@ -87,7 +101,12 @@ defmodule Arbiter.Agents.Gemini do
       {:ok, {type, exec}} ->
         policy = security_policy(opts)
         inner = build_argv(type, exec, prompt, opts, policy)
-        {:ok, ["sh", "-c", ~s(exec "$@" < /dev/null), "sh" | inner]}
+
+        # The jail sits between `sh` and the CLI, so the element before `-p`
+        # is still the CLI and `splice_prompt/2` (resume, nudge) is unchanged.
+        with {:ok, command} <- maybe_jail(type, inner, opts, policy) do
+          {:ok, ["sh", "-c", ~s(exec "$@" < /dev/null), "sh" | command]}
+        end
 
       {:error, _} = err ->
         err
@@ -413,6 +432,45 @@ defmodule Arbiter.Agents.Gemini do
         end
     end
   end
+
+  # bd-5gvqgc: under `:strict` the spawn is jailed or refused, never run with
+  # agy's own (unenforced) write confinement. This is the same condition
+  # `write_confinement/1` reports to the dispatch gate (bd-1abj7u); refusing
+  # here too covers a caller that reaches the adapter without the gate.
+  defp maybe_jail(_type, command, _opts, %SecurityPolicy{permissions: %{mode: mode}})
+       when mode != :strict,
+       do: {:ok, command}
+
+  defp maybe_jail(:gemini, _command, _opts, _policy),
+    do:
+      {:error,
+       {:write_jail_unavailable,
+        "the upstream gemini CLI keeps its state in the operator's $HOME and cannot be jailed"}}
+
+  defp maybe_jail(:agy, command, opts, policy) do
+    with :ok <- jail_blocker(policy),
+         {:ok, argv} <-
+           Jail.wrap(command,
+             worktree: Keyword.get(opts, :worktree) || Keyword.get(opts, :worktree_path),
+             home: ConfigDir.path(opts),
+             writable_paths: Map.get(policy.sandbox, :writable_paths, [])
+           ) do
+      {:ok, argv}
+    else
+      {:error, reason} -> {:error, {:write_jail_unavailable, reason}}
+    end
+  end
+
+  # Why agy can't be jailed under `policy` on this host, or `:ok`.
+  defp jail_blocker(%SecurityPolicy{permissions: %{mode: :strict}, sandbox: sandbox}) do
+    cond do
+      not Map.get(sandbox, :enabled, true) -> {:error, "sandbox.enabled is false"}
+      not ConfigDir.enabled?() -> {:error, "the isolated agy HOME (worker_isolate_config) is off"}
+      true -> with {:error, reason} <- Jail.status(), do: {:error, {:jail_probe_failed, reason}}
+    end
+  end
+
+  defp jail_blocker(_policy), do: {:error, "only :strict runs jailed"}
 
   # The resolved `Arbiter.Agents.SecurityPolicy` for this spawn. Falls back to
   # the install-wide default so a bare adapter call is still safe.

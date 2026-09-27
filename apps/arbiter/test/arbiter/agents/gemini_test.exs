@@ -22,16 +22,181 @@ defmodule Arbiter.Agents.GeminiTest do
     end
   end
 
-  describe "write_confinement/1 (bd-1abj7u)" do
-    test "always :none — no verified worktree-write confinement mechanism" do
-      assert Gemini.write_confinement(SecurityPolicy.base()) == :none
+  # bd-5gvqgc: agy under :strict runs inside the bwrap write jail on a host
+  # that passes `Arbiter.Worker.Jail`'s probe. Everything here pins the jail's
+  # availability through `:worker_jail_available` and never execs bwrap or agy
+  # (the stubs on PATH are never run).
+  describe "the :strict write jail (bd-5gvqgc)" do
+    setup do
+      base =
+        Path.join(
+          System.tmp_dir!(),
+          "gemini-jail-#{System.pid()}-#{System.unique_integer([:positive])}"
+        )
 
-      strict = %{
-        SecurityPolicy.base()
-        | permissions: %{SecurityPolicy.base().permissions | mode: :strict}
-      }
+      bin = Path.join(base, "bin")
+      worktree = Path.join(base, "wt")
+      File.mkdir_p!(bin)
+      File.mkdir_p!(worktree)
 
-      assert Gemini.write_confinement(strict) == :none
+      for name <- ~w(agy bwrap) do
+        File.write!(Path.join(bin, name), "#!/bin/sh\nexit 0\n")
+        File.chmod!(Path.join(bin, name), 0o755)
+      end
+
+      keys =
+        ~w(worker_isolate_config worker_agy_home_root worker_jail_available worker_jail_bwrap)a
+
+      prev = Map.new(keys, &{&1, Application.get_env(:arbiter, &1)})
+      old_path = System.get_env("PATH")
+
+      Application.put_env(:arbiter, :worker_isolate_config, true)
+      Application.put_env(:arbiter, :worker_agy_home_root, Path.join(base, "homes"))
+      Application.put_env(:arbiter, :worker_jail_available, true)
+      Application.put_env(:arbiter, :worker_jail_bwrap, Path.join(bin, "bwrap"))
+      System.put_env("PATH", bin)
+
+      on_exit(fn ->
+        System.put_env("PATH", old_path)
+
+        Enum.each(prev, fn
+          {k, nil} -> Application.delete_env(:arbiter, k)
+          {k, v} -> Application.put_env(:arbiter, k, v)
+        end)
+
+        File.rm_rf!(base)
+      end)
+
+      {:ok,
+       base: base,
+       bin: bin,
+       worktree: worktree,
+       agy: Path.join(bin, "agy"),
+       bwrap: Path.join(bin, "bwrap")}
+    end
+
+    defp policy(mode, sandbox \\ %{}),
+      do:
+        SecurityPolicy.merge(SecurityPolicy.base(), %{
+          permissions: %{mode: mode},
+          sandbox: sandbox
+        })
+
+    defp jail_and_command(argv) do
+      assert ["sh", "-c", ~s(exec "$@" < /dev/null), "sh" | rest] = argv
+      {jail, ["--" | command]} = Enum.split_while(rest, &(&1 != "--"))
+      {jail, command}
+    end
+
+    test "write_confinement/1 is :os_jail under :strict for agy on a jail-capable host" do
+      assert Gemini.write_confinement(policy(:strict)) == :os_jail
+    end
+
+    test "write_confinement/1 is :none outside :strict: only :strict runs jailed today" do
+      assert Gemini.write_confinement(policy(:bypass)) == :none
+      assert Gemini.write_confinement(policy(:auto)) == :none
+    end
+
+    test "write_confinement/1 is :none when the host fails the jail probe" do
+      Application.put_env(:arbiter, :worker_jail_available, false)
+      assert Gemini.write_confinement(policy(:strict)) == :none
+    end
+
+    test "write_confinement/1 is :none without the isolated agy HOME (nothing writable to bind)" do
+      Application.put_env(:arbiter, :worker_isolate_config, false)
+      assert Gemini.write_confinement(policy(:strict)) == :none
+    end
+
+    test "write_confinement/1 is :none when the policy turns the sandbox off" do
+      assert Gemini.write_confinement(policy(:strict, %{enabled: false})) == :none
+    end
+
+    test "write_confinement/1 is :none for the upstream gemini CLI", %{bin: bin} do
+      File.rm!(Path.join(bin, "agy"))
+      File.write!(Path.join(bin, "gemini"), "#!/bin/sh\nexit 0\n")
+      File.chmod!(Path.join(bin, "gemini"), 0o755)
+
+      assert Gemini.write_confinement(policy(:strict)) == :none
+    end
+
+    test "Agents' :strict gate now admits agy on a jail-capable host" do
+      assert Arbiter.Agents.strict_eligible_provider(:gemini, policy(:strict), [:gemini],
+               explicit: true
+             ) == {:ok, :gemini}
+    end
+
+    test "default_argv/2 under :strict runs agy inside bwrap, inside the sh wrapper", %{
+      worktree: worktree,
+      agy: agy,
+      bwrap: bwrap
+    } do
+      assert {:ok, argv} =
+               Gemini.default_argv("the prompt",
+                 security: policy(:strict, %{writable_paths: ["/opt/extra"]}),
+                 worktree_path: worktree
+               )
+
+      {jail, command} = jail_and_command(argv)
+      home = Arbiter.Agents.Gemini.ConfigDir.path(worktree_path: worktree)
+
+      assert [^bwrap, "--ro-bind", "/", "/" | _] = jail
+      assert ["--bind", worktree, worktree] in Enum.chunk_every(jail, 3, 1)
+      assert ["--bind", home, home] in Enum.chunk_every(jail, 3, 1)
+      assert ["--setenv", "HOME", home] in Enum.chunk_every(jail, 3, 1)
+      assert ["--bind-try", "/opt/extra", "/opt/extra"] in Enum.chunk_every(jail, 3, 1)
+      assert "--unshare-pid" in jail
+      assert [^agy, "-p", "the prompt" | _] = command
+      refute "--sandbox" in command
+      refute "--dangerously-skip-permissions" in command
+    end
+
+    test "splice_prompt/2 still swaps the prompt and adds --conversation on a jailed argv", %{
+      worktree: worktree,
+      agy: agy
+    } do
+      {:ok, argv} =
+        Gemini.default_argv("first", security: policy(:strict), worktree_path: worktree)
+
+      {jail, _} = jail_and_command(argv)
+
+      assert {:ok, nudged} = Gemini.splice_prompt(argv, ["nudge"])
+      assert {^jail, [^agy, "-p", "nudge" | _]} = jail_and_command(nudged)
+
+      assert {:ok, resumed} = Gemini.splice_prompt(argv, ["--resume", "conv-1", "go on"])
+
+      assert {^jail, [^agy, "-p", "go on", "--conversation", "conv-1" | _]} =
+               jail_and_command(resumed)
+    end
+
+    test "default_argv/2 outside :strict is not jailed", %{worktree: worktree, agy: agy} do
+      assert {:ok, ["sh", "-c", _, "sh", ^agy, "-p", "p" | _]} =
+               Gemini.default_argv("p", security: policy(:bypass), worktree_path: worktree)
+    end
+
+    test "default_argv/2 under :strict fails closed when the host cannot jail", %{
+      worktree: worktree
+    } do
+      Application.put_env(:arbiter, :worker_jail_available, false)
+
+      assert {:error, {:write_jail_unavailable, _reason}} =
+               Gemini.default_argv("p", security: policy(:strict), worktree_path: worktree)
+    end
+
+    test "default_argv/2 under :strict fails closed with no worktree to confine to" do
+      assert {:error, {:write_jail_unavailable, :no_worktree}} =
+               Gemini.default_argv("p", security: policy(:strict))
+    end
+
+    test "default_argv/2 under :strict refuses the upstream gemini CLI", %{
+      bin: bin,
+      worktree: worktree
+    } do
+      File.rm!(Path.join(bin, "agy"))
+      File.write!(Path.join(bin, "gemini"), "#!/bin/sh\nexit 0\n")
+      File.chmod!(Path.join(bin, "gemini"), 0o755)
+
+      assert {:error, {:write_jail_unavailable, _}} =
+               Gemini.default_argv("p", security: policy(:strict), worktree_path: worktree)
     end
   end
 
@@ -616,17 +781,6 @@ defmodule Arbiter.Agents.GeminiTest do
       end)
 
       {:ok, agy: agy}
-    end
-
-    test ":strict emits neither flag — --sandbox disables the allowlist gate (bd-25ivqe)", %{
-      agy: agy
-    } do
-      policy = SecurityPolicy.merge(SecurityPolicy.base(), %{permissions: %{mode: :strict}})
-
-      assert {:ok, argv} = Gemini.default_argv("p", security: policy)
-      assert ["sh", "-c", _exec, "sh", ^agy, "-p", "p" | rest] = argv
-      refute "--sandbox" in rest
-      refute "--dangerously-skip-permissions" in rest
     end
 
     test ":auto emits neither flag — the generated settings carry the posture", %{agy: agy} do
