@@ -49,9 +49,12 @@ defmodule ArbiterWeb.SessionDockTranscriptTest do
     ended
   end
 
+  # The dock loads its sessions off the mount (bd-6mfl0s).
   defp dock(conn) do
     {:ok, view, _html} = live(conn, "/")
-    find_live_child(view, "session-dock")
+    dock = find_live_child(view, "session-dock")
+    render_async(dock)
+    dock
   end
 
   defp open!(dock, session) do

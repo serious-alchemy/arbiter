@@ -77,9 +77,13 @@ defmodule ArbiterWeb.SessionDockLiveTest do
     dock
   end
 
+  # The dock loads its sessions off the mount (bd-6mfl0s); every test below
+  # that is not about that load starts from a dock that has finished it.
   defp dock(conn, path \\ "/") do
     {:ok, view, _html} = live(conn, path)
-    {view, find_live_child(view, "session-dock")}
+    dock = find_live_child(view, "session-dock")
+    render_async(dock)
+    {view, dock}
   end
 
   defp open_roster(dock) do
@@ -184,6 +188,196 @@ defmodule ArbiterWeb.SessionDockLiveTest do
 
       open_roster(dock)
       assert has_element?(dock, "#session-dock-roster-#{later.id}")
+    end
+  end
+
+  # bd-6mfl0s: the dock is chrome on every page, so its two reads — every
+  # session row and every workspace — run off the connected mount rather than
+  # in it, and not at all on the dead render. What that costs is an ordering
+  # race: the hook's `restore` can land before the sessions it has to be
+  # validated against, and must then wait for them rather than be dropped.
+  describe "the async load" do
+    # Holds `Sessions.list/0`'s result in whichever process called it until the
+    # test says go, so the loading state is something to assert on rather than
+    # a race. The rows are read *before* the hold — a slow query's answer is as
+    # old as the query — and the `after` only makes a regression hang for
+    # seconds rather than forever.
+    defp hold_session_list do
+      test = self()
+      mock_sessions()
+
+      :meck.expect(Sessions, :list, fn ->
+        sessions = :meck.passthrough([])
+        send(test, {:listing, self()})
+
+        receive do
+          :release -> :ok
+        after
+          5_000 -> :ok
+        end
+
+        sessions
+      end)
+    end
+
+    defp release(dock, loader) do
+      send(loader, :release)
+      render_async(dock)
+      :meck.expect(Sessions, :list, fn -> :meck.passthrough([]) end)
+      dock
+    end
+
+    defp mock_sessions do
+      :meck.new(Sessions, [:passthrough])
+      on_exit(fn -> :meck.unload() end)
+    end
+
+    # `dock/2` without the `render_async/1` — the dock as the client first sees it.
+    defp dock_unloaded(conn) do
+      {:ok, view, _html} = live(conn, ~p"/")
+      {view, find_live_child(view, "session-dock")}
+    end
+
+    test "the dead render shows the loading state and reads nothing", %{conn: conn} do
+      test = self()
+      mock_sessions()
+
+      :meck.expect(Sessions, :list, fn ->
+        send(test, :listed)
+        :meck.passthrough([])
+      end)
+
+      html = conn |> get(~p"/") |> html_response(200)
+
+      assert html
+             |> LazyHTML.from_document()
+             |> LazyHTML.query(~s(#session-dock-running-count[data-state="loading"]))
+             |> Enum.count() == 1
+
+      refute_received :listed
+    end
+
+    test "renders a loading state, then the sessions", %{conn: conn} do
+      session = launch!(name: "late arrival")
+      hold_session_list()
+
+      {_view, dock} = dock_unloaded(conn)
+      assert_receive {:listing, loader}
+
+      assert has_element?(dock, ~s(#session-dock-running-count[data-state="loading"]))
+
+      release(dock, loader)
+
+      assert has_element?(dock, ~s(#session-dock-running-count[data-state="loaded"]), "1 running")
+      open_roster(dock)
+      assert has_element?(dock, "#session-dock-roster-#{session.id}", "late arrival")
+    end
+
+    test "a restore that lands before the sessions do is applied once they have", %{conn: conn} do
+      a = launch!(name: "a")
+      b = launch!(name: "b")
+      hold_session_list()
+
+      {_view, dock} = dock_unloaded(conn)
+      assert_receive {:listing, loader}
+
+      render_hook(dock, "restore", %{"open" => [a.id, b.id], "expanded" => b.id})
+      refute has_element?(dock, ~s([id^="session-dock-window-"]))
+
+      release(dock, loader)
+
+      assert has_element?(dock, ~s(#session-dock-window-#{a.id}[data-expanded="false"]))
+      assert has_element?(dock, ~s(#session-dock-window-#{b.id}[data-expanded="true"]))
+      assert_push_event(dock, "session-dock:persist", %{open: [_, _], expanded: expanded})
+      assert expanded == b.id
+    end
+
+    # Validated against what *did* land, exactly as a restore after the load is.
+    test "a queued restore still drops ids that are not sessions", %{conn: conn} do
+      a = launch!()
+      hold_session_list()
+
+      {_view, dock} = dock_unloaded(conn)
+      assert_receive {:listing, loader}
+
+      render_hook(dock, "restore", %{
+        "open" => [a.id, "00000000-0000-0000-0000-000000000000"],
+        "expanded" => "00000000-0000-0000-0000-000000000000"
+      })
+
+      release(dock, loader)
+
+      assert has_element?(dock, ~s(#session-dock-window-#{a.id}[data-expanded="false"]))
+      assert length(Regex.scan(~r/id="session-dock-window-/, render(dock))) == 1
+    end
+
+    @tag :capture_log
+    test "a failed load renders an inline error, and Retry recovers", %{conn: conn} do
+      session = launch!()
+      mock_sessions()
+      :meck.expect(Sessions, :list, fn -> raise "database is locked" end)
+
+      {_view, dock} = dock_unloaded(conn)
+      render_async(dock)
+
+      assert has_element?(dock, ~s(#session-dock-running-count[data-state="error"]))
+
+      # Opening the roster retries rather than re-reading inline — the read
+      # that just failed would take the whole dock down with it.
+      open_roster(dock)
+      render_async(dock)
+      assert has_element?(dock, "#session-dock-roster-error", "database is locked")
+      refute has_element?(dock, "#session-dock-roster-empty")
+
+      :meck.expect(Sessions, :list, fn -> :meck.passthrough([]) end)
+      render_click(element(dock, "#session-dock-roster-retry"))
+      render_async(dock)
+
+      refute has_element?(dock, "#session-dock-roster-error")
+      assert has_element?(dock, "#session-dock-roster-#{session.id}")
+      assert has_element?(dock, ~s(#session-dock-running-count[data-state="loaded"]), "1 running")
+    end
+
+    # A tab closed mid-load must not kill its read mid-query: a DB client that
+    # dies holding a checkout costs the pool that connection (and, under test,
+    # the one shared sandbox connection — bd-5scl0c). The read finishes, and
+    # only then does the task go.
+    test "a dock that goes away mid-load lets its read finish", %{conn: conn} do
+      hold_session_list()
+      Process.flag(:trap_exit, true)
+
+      {_view, dock} = dock_unloaded(conn)
+      assert_receive {:listing, loader}
+      loader_ref = Process.monitor(loader)
+      dock_ref = Process.monitor(dock.pid)
+
+      Process.exit(dock.pid, :kill)
+      assert_receive {:DOWN, ^dock_ref, :process, _pid, :killed}
+      refute_receive {:DOWN, ^loader_ref, :process, _pid, _reason}, 100
+
+      send(loader, :release)
+      assert_receive {:DOWN, ^loader_ref, :process, _pid, _reason}
+    end
+
+    # A lifecycle broadcast mid-load re-reads inline, which is the newer data:
+    # the in-flight result that lands after it must not roll the roster back.
+    test "a lifecycle refresh during the load is not undone by it", %{conn: conn} do
+      hold_session_list()
+
+      {_view, dock} = dock_unloaded(conn)
+      assert_receive {:listing, loader}
+      :meck.expect(Sessions, :list, fn -> :meck.passthrough([]) end)
+
+      later = launch!()
+      send(dock.pid, {:session_open_requested, later.id})
+      assert has_element?(dock, ~s(#session-dock-window-#{later.id}[data-expanded="true"]))
+
+      # The held result was read before `later` existed.
+      send(loader, :release)
+      render_async(dock)
+
+      assert has_element?(dock, ~s(#session-dock-window-#{later.id}[data-expanded="true"]))
+      assert has_element?(dock, "#session-dock-running-count", "1 running")
     end
   end
 
@@ -1333,7 +1527,16 @@ defmodule ArbiterWeb.SessionDockLiveTest do
 
     test "no badge when the bridge is fine, or Remote Control was never requested",
          %{conn: conn} do
-      ok = launch!(auth_mode: :seeded_credentials, remote_control: true)
+      # "Fine" has to be said: with the real verifier there is no bridge
+      # record here, so config/test.exs's 50ms timeout would mark it
+      # unavailable mid-test whenever the suite is slow enough.
+      ok =
+        launch!(
+          auth_mode: :seeded_credentials,
+          remote_control: true,
+          bridge_verify_fun: fn _config_dir, _opts -> :ok end
+        )
+
       unset = launch!(auth_mode: :seeded_credentials, remote_control: false)
       {:ok, unset} = Sessions.mark_bridge_unavailable(unset)
 

@@ -194,9 +194,28 @@ defmodule ArbiterWeb.SessionDockLive do
 
   @impl true
   def mount(_params, session, socket) do
-    if connected?(socket) do
-      Phoenix.PubSub.subscribe(Arbiter.PubSub, Sessions.lifecycle_topic())
-    end
+    socket =
+      socket
+      |> assign(:sessions, [])
+      |> assign(:sessions_by_id, %{})
+      |> assign(:running_count, 0)
+      |> assign(:workspaces, [])
+      # bd-6mfl0s: this view is chrome on every page, so its two reads — every
+      # session row, every workspace — are not allowed to hold up the page's
+      # join. They run in `start_async/3` on the connected mount only (the dead
+      # render reads nothing and says "loading"); `:load_state` is what the
+      # strip and roster render from until they land, and `:pending_restore` is
+      # the hook's `restore` if it arrived first — see `handle_event("restore")`.
+      |> assign(:load_state, :loading)
+      |> assign(:pending_restore, nil)
+
+    socket =
+      if connected?(socket) do
+        Phoenix.PubSub.subscribe(Arbiter.PubSub, Sessions.lifecycle_topic())
+        start_load(socket)
+      else
+        socket
+      end
 
     {:ok,
      socket
@@ -238,7 +257,6 @@ defmodule ArbiterWeb.SessionDockLive do
      # §9.5: on when mode B, which is the default auth mode — see
      # `SessionIndexLive`'s moduledoc.
      |> assign(:launch_remote_control?, true)
-     |> assign(:workspaces, SessionIndexLive.workspaces())
      |> assign(:launch_error, nil)
      # The dock's own error notice. It cannot use `put_flash/3`: this view
      # mounts `layout: false` and a nested LiveView's flash never reaches the
@@ -247,8 +265,7 @@ defmodule ArbiterWeb.SessionDockLive do
      |> assign(:error_message, nil)
      |> assign(:loopback?, Map.get(session, "loopback?", true))
      |> assign(:terminal_live?, false)
-     |> assign(:terminal_stalled?, false)
-     |> load_sessions(), layout: false}
+     |> assign(:terminal_stalled?, false), layout: false}
   end
 
   # -- events -----------------------------------------------------------------
@@ -256,50 +273,19 @@ defmodule ArbiterWeb.SessionDockLive do
   # The hook's first word after it has read `localStorage`. Nothing is trusted:
   # ids that are not strings, are not sessions, or repeat are dropped, and the
   # expanded id has to be one of the survivors.
+  #
+  # It is sent on join, so it routinely beats the async load (bd-6mfl0s) —
+  # and there is nothing yet to validate its ids against. It is then held,
+  # not dropped, and applied against whatever the load brings back
+  # (`put_sessions/2`). A later `restore` simply replaces a held one: it is
+  # the client's newer statement of the same state.
   @impl true
   def handle_event("restore", params, socket) do
-    socket = load_sessions(socket)
-    known = MapSet.new(socket.assigns.sessions, & &1.id)
-
-    open_ids =
-      params
-      |> Map.get("open", [])
-      |> List.wrap()
-      |> Enum.filter(&(is_binary(&1) and MapSet.member?(known, &1)))
-      |> Enum.uniq()
-      |> Enum.take(@max_open)
-
-    expanded_id =
-      case Map.get(params, "expanded") do
-        id when is_binary(id) -> if id in open_ids, do: id
-        _other -> nil
-      end
-
-    # Which windows are holding a *dead* pane is the other half of the state a
-    # rejoin resets (bd-a292yj). The client reads it off the panes themselves
-    # and says so here; without it a rejoin would quietly relabel an ended
-    # window "its output is unavailable" while its scrollback was on screen.
-    # Trusted no further than the rest of this payload: it has to be an open
-    # window, and the row has to actually be over.
-    frozen =
-      params
-      |> Map.get("frozen", [])
-      |> List.wrap()
-      |> Enum.filter(fn id ->
-        is_binary(id) and id in open_ids and
-          not attachable?(Map.fetch!(socket.assigns.sessions_by_id, id), MapSet.new())
-      end)
-      |> MapSet.new()
-
-    socket =
-      if expanded_id, do: expand_window(socket, expanded_id), else: collapse_window(socket)
-
-    {:noreply,
-     socket
-     |> assign(:open_ids, open_ids)
-     |> assign(:frozen, frozen)
-     |> assign(:sizes, restored_sizes(params, open_ids))
-     |> persist()}
+    if socket.assigns.load_state == :loaded do
+      {:noreply, socket |> load_sessions() |> apply_restore(params)}
+    else
+      {:noreply, assign(socket, :pending_restore, params)}
+    end
   end
 
   # The size preset of the expanded window (bd-covojz). A discrete geometry
@@ -333,10 +319,24 @@ defmodule ArbiterWeb.SessionDockLive do
   def handle_event("toggle_roster", _params, socket) do
     # Re-read on the way open: a session launched from `/sessions` since this
     # dock mounted has no lifecycle broadcast of its own to announce itself.
+    # Not while the first load is still out — the roster says "loading" until
+    # it lands — and not inline after it failed: the read that just failed
+    # would take the dock down with it, so that is a retry (bd-6mfl0s).
     socket =
-      if socket.assigns.roster_open?, do: socket, else: load_sessions(socket)
+      cond do
+        socket.assigns.roster_open? -> socket
+        socket.assigns.load_state == :loaded -> load_sessions(socket)
+        socket.assigns.load_state == :loading -> socket
+        true -> start_load(socket)
+      end
 
     {:noreply, assign(socket, :roster_open?, not socket.assigns.roster_open?)}
+  end
+
+  def handle_event("retry_load", _params, socket) do
+    if socket.assigns.load_state == :loading,
+      do: {:noreply, socket},
+      else: {:noreply, start_load(socket)}
   end
 
   # New session (bd-cdut29). The panel and the roster panel are independent —
@@ -662,6 +662,29 @@ defmodule ArbiterWeb.SessionDockLive do
   # rendered from — anything else that lands here is not this view's business.
   def handle_info(_message, socket), do: {:noreply, socket}
 
+  # The mount's reads (bd-6mfl0s). A lifecycle broadcast or a click may have
+  # re-read the sessions inline while this was out: that list is the newer
+  # one, so it stands and only the workspaces are taken from here.
+  @impl true
+  def handle_async(:load, {:ok, {sessions, workspaces}}, socket) do
+    socket = assign(socket, :workspaces, workspaces)
+
+    if socket.assigns.load_state == :loaded,
+      do: {:noreply, socket},
+      else: {:noreply, put_sessions(socket, sessions)}
+  end
+
+  # Said inline, in the strip and the roster, rather than as a crash: the
+  # dock is on every page, and a page that cannot list sessions is still a
+  # page. A held `restore` stays held for the retry.
+  def handle_async(:load, {:exit, reason}, socket) do
+    Logger.error("SessionDockLive: loading sessions failed: #{inspect(reason)}")
+
+    if socket.assigns.load_state == :loaded,
+      do: {:noreply, socket},
+      else: {:noreply, assign(socket, :load_state, {:error, describe_exit(reason)})}
+  end
+
   # -- state ------------------------------------------------------------------
 
   # bd-cdretj round 2: `mark_bridge_unavailable` is a one-way durable flag —
@@ -686,14 +709,92 @@ defmodule ArbiterWeb.SessionDockLive do
     end
   end
 
-  defp load_sessions(socket) do
+  defp load_sessions(socket), do: put_sessions(socket, Sessions.list())
+
+  # The one place the session list lands, inline or async. Whichever read
+  # succeeds first also settles a `restore` the hook sent before there was
+  # anything to validate it against — before the caller acts on the list, so
+  # e.g. an `open` that raced the load adds to the restored windows rather
+  # than being overwritten by them.
+  defp put_sessions(socket, sessions) do
+    socket =
+      socket
+      |> assign(:sessions, sessions)
+      |> assign(:sessions_by_id, Map.new(sessions, &{&1.id, &1}))
+      |> assign(:running_count, Enum.count(sessions, &(&1.status == :running)))
+      |> assign(:load_state, :loaded)
+
+    case socket.assigns.pending_restore do
+      nil -> socket
+      params -> socket |> assign(:pending_restore, nil) |> apply_restore(params)
+    end
+  end
+
+  defp start_load(socket) do
+    socket
+    |> assign(:load_state, :loading)
+    |> start_async(:load, &load/0)
+  end
+
+  # The task is linked to this view, so a tab closed mid-read would kill it
+  # mid-query — and a DB client that dies holding a checkout costs the pool
+  # that connection (under test, the one shared sandbox connection,
+  # bd-5scl0c). Trapping turns the view's exit into a message: the query in
+  # flight finishes, and the task goes before it starts another.
+  defp load do
+    Process.flag(:trap_exit, true)
     sessions = Sessions.list()
-    by_id = Map.new(sessions, &{&1.id, &1})
+
+    receive do
+      {:EXIT, _view, _reason} -> exit(:shutdown)
+    after
+      0 -> {sessions, SessionIndexLive.workspaces()}
+    end
+  end
+
+  # `restore`'s validation, run against the sessions already on the socket —
+  # freshly re-read for a live `restore`, just landed for a held one.
+  defp apply_restore(socket, params) do
+    known = MapSet.new(socket.assigns.sessions, & &1.id)
+
+    open_ids =
+      params
+      |> Map.get("open", [])
+      |> List.wrap()
+      |> Enum.filter(&(is_binary(&1) and MapSet.member?(known, &1)))
+      |> Enum.uniq()
+      |> Enum.take(@max_open)
+
+    expanded_id =
+      case Map.get(params, "expanded") do
+        id when is_binary(id) -> if id in open_ids, do: id
+        _other -> nil
+      end
+
+    # Which windows are holding a *dead* pane is the other half of the state a
+    # rejoin resets (bd-a292yj). The client reads it off the panes themselves
+    # and says so here; without it a rejoin would quietly relabel an ended
+    # window "its output is unavailable" while its scrollback was on screen.
+    # Trusted no further than the rest of this payload: it has to be an open
+    # window, and the row has to actually be over.
+    frozen =
+      params
+      |> Map.get("frozen", [])
+      |> List.wrap()
+      |> Enum.filter(fn id ->
+        is_binary(id) and id in open_ids and
+          not attachable?(Map.fetch!(socket.assigns.sessions_by_id, id), MapSet.new())
+      end)
+      |> MapSet.new()
+
+    socket =
+      if expanded_id, do: expand_window(socket, expanded_id), else: collapse_window(socket)
 
     socket
-    |> assign(:sessions, sessions)
-    |> assign(:sessions_by_id, by_id)
-    |> assign(:running_count, Enum.count(sessions, &(&1.status == :running)))
+    |> assign(:open_ids, open_ids)
+    |> assign(:frozen, frozen)
+    |> assign(:sizes, restored_sizes(params, open_ids))
+    |> persist()
   end
 
   # Opening always keeps the id being opened, even at the @max_open cap: the
@@ -800,6 +901,10 @@ defmodule ArbiterWeb.SessionDockLive do
 
   defp describe(%{__exception__: true} = error), do: Exception.message(error)
   defp describe(reason), do: inspect(reason)
+
+  # A raise inside the async load arrives as `{exception, stacktrace}`.
+  defp describe_exit({%{__exception__: true} = error, _stacktrace}), do: describe(error)
+  defp describe_exit(reason), do: describe(reason)
 
   defp load_info_usage(socket) do
     session = Map.get(socket.assigns.sessions_by_id, socket.assigns.info_id)
@@ -978,6 +1083,7 @@ defmodule ArbiterWeb.SessionDockLive do
 
       <.roster
         open?={@roster_open?}
+        load_state={@load_state}
         sessions={@sessions}
         open_ids={@open_ids}
         running_count={@running_count}
@@ -1297,6 +1403,11 @@ defmodule ArbiterWeb.SessionDockLive do
   end
 
   attr :open?, :boolean, required: true
+
+  attr :load_state, :any,
+    required: true,
+    doc: ":loading, :loaded or {:error, message} — the async session load (bd-6mfl0s)"
+
   attr :sessions, :list, required: true
   attr :open_ids, :list, required: true
   attr :running_count, :integer, required: true
@@ -1359,14 +1470,51 @@ defmodule ArbiterWeb.SessionDockLive do
         ]}
       >
         <p
-          :if={@sessions == []}
+          :if={@load_state == :loading}
+          id="session-dock-roster-loading"
+          class="flex items-center gap-2 px-3 py-4 text-[12px] text-[var(--text-secondary)]"
+        >
+          <.icon name="hero-arrow-path-micro" class="size-4 shrink-0 animate-spin" />
+          Loading sessions…
+        </p>
+
+        <div
+          :if={match?({:error, _}, @load_state)}
+          id="session-dock-roster-error"
+          role="alert"
+          class="flex items-start gap-2 px-3 py-3 text-[12px] text-[var(--arb-fail-text)] bg-[var(--arb-fail-wash)]"
+        >
+          <.icon name="hero-exclamation-triangle-micro" class="size-4 shrink-0 mt-px" />
+          <span class="grow min-w-0 break-words">
+            Could not load sessions: {elem(@load_state, 1)}
+          </span>
+          <button
+            type="button"
+            id="session-dock-roster-retry"
+            phx-click="retry_load"
+            class={[
+              "shrink-0 px-2 h-[22px] rounded-[var(--radius-field)] cursor-pointer",
+              "border border-solid border-[var(--arb-fail-edge)] bg-[var(--surface-chrome)]",
+              "text-[11px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
+            ]}
+          >
+            Retry
+          </button>
+        </div>
+
+        <p
+          :if={@load_state == :loaded and @sessions == []}
           id="session-dock-roster-empty"
           class="px-3 py-4 text-[12px] text-[var(--text-secondary)]"
         >
           No coordinator sessions yet.
         </p>
 
-        <ul :if={@sessions != []} id="session-dock-roster-list" class="flex flex-col">
+        <ul
+          :if={@load_state == :loaded and @sessions != []}
+          id="session-dock-roster-list"
+          class="flex flex-col"
+        >
           <li
             :for={session <- @sessions}
             id={"session-dock-roster-#{session.id}"}
@@ -1422,9 +1570,16 @@ defmodule ArbiterWeb.SessionDockLive do
           <span class="grow text-left">Sessions</span>
           <span
             id="session-dock-running-count"
-            class="font-[family-name:var(--font-mono)] text-[10.5px] text-[var(--text-label)]"
+            data-state={load_state_name(@load_state)}
+            class={[
+              "font-[family-name:var(--font-mono)] text-[10.5px]",
+              if(match?({:error, _}, @load_state),
+                do: "text-[var(--arb-fail-text)]",
+                else: "text-[var(--text-label)]"
+              )
+            ]}
           >
-            {@running_count} running
+            {running_label(@load_state, @running_count)}
           </span>
           <.icon
             name={if @open?, do: "hero-chevron-down-micro", else: "hero-chevron-up-micro"}
@@ -1454,6 +1609,13 @@ defmodule ArbiterWeb.SessionDockLive do
     </div>
     """
   end
+
+  defp load_state_name({:error, _message}), do: "error"
+  defp load_state_name(state), do: Atom.to_string(state)
+
+  defp running_label(:loading, _count), do: "loading…"
+  defp running_label({:error, _message}, _count), do: "unavailable"
+  defp running_label(:loaded, count), do: "#{count} running"
 
   attr :session, :any, required: true
   attr :expanded?, :boolean, required: true
