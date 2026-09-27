@@ -111,7 +111,13 @@ defmodule Arbiter.Worker.ReviewFindings do
   # negative lookbehind stops a *preceding* prose dot (`...config.exs`) from
   # being pulled in as part of the path, which would otherwise capture
   # `.config.exs` and make `touched?/2` compare against the wrong basename.
-  @path ~r/((?:[\w.\-]+\/)*(?<![\w.])\.?[\w\-]+\.[a-zA-Z]{1,6})(?::\d+(?:-\d+)?)?/
+  #
+  # The filename segment also allows a bare `*` (bd-7urncn / bd-bcroux round
+  # 3: a disposition citing `docs/pr-2086-screenshots/before-*.png` is naming
+  # a whole family of committed files, not a single path — `touched?/2` below
+  # expands the `*` into a glob match instead of requiring a literal file that
+  # can never exist).
+  @path ~r/((?:[\w.\-]+\/)*(?<![\w.])\.?[\w\-*]+\.[a-zA-Z]{1,6})(?::\d+(?:-\d+)?)?/
   @path_stoplist ~w(e.g i.e etc vs no.of)
 
   # A finding id as it appears in a DISPOSITIONS line.
@@ -548,11 +554,39 @@ defmodule Arbiter.Worker.ReviewFindings do
   # reports the repo-relative one, so match on either the full path or the
   # basename.
   defp touched?(path, touched) do
-    base = Path.basename(path)
+    if String.contains?(path, "*") do
+      glob_touched?(path, touched)
+    else
+      base = Path.basename(path)
+
+      Enum.any?(touched, fn changed ->
+        changed == path or Path.basename(changed) == base or
+          String.ends_with?(changed, "/" <> path)
+      end)
+    end
+  end
+
+  # `docs/pr-2086-screenshots/before-*.png` names a whole family of files a
+  # revision committed, not one literal path — `*` matches any run of
+  # characters other than `/`, so a glob never crosses a directory boundary.
+  # Tried against both the full touched path and its basename, the same two
+  # shapes the non-glob branch above compares against.
+  defp glob_touched?(glob, touched) do
+    full = glob_regex(glob)
+    base = glob_regex(Path.basename(glob))
 
     Enum.any?(touched, fn changed ->
-      changed == path or Path.basename(changed) == base or String.ends_with?(changed, "/" <> path)
+      Regex.match?(full, changed) or Regex.match?(base, Path.basename(changed))
     end)
+  end
+
+  defp glob_regex(glob) do
+    pattern =
+      glob
+      |> Regex.escape()
+      |> String.replace("\\*", "[^/]*")
+
+    Regex.compile!("^" <> pattern <> "$")
   end
 
   defp cited(%{files: []}), do: "(no file cited)"

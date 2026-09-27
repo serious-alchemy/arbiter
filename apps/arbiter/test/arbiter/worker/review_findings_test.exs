@@ -409,6 +409,464 @@ defmodule Arbiter.Worker.ReviewFindingsTest do
     end
   end
 
+  describe "approval_gap/3 — bd-bcroux (PR #2086 round 3, false park) root cause (bd-7urncn)" do
+    # Verbatim from `review_gate_rounds.findings`, task_id=bd-bcroux, round 1,
+    # role=review, id=cb0758d5-ebcf-4e55-b072-393f992f27f9. This is the exact
+    # text the live round-1 reviewer produced and the live round-3 reviewer
+    # (below) was reacting to.
+    @bcroux_round1 """
+    VERDICT: REQUEST_CHANGES
+    CRITERIA:
+    - [NOT MET] Every listed issue is fixed at 375px and 414px widths in light and dark themes, with no page-level horizontal scroll — both issues are fixed in code: the pane scrolls sideways (`domain.ex:603-616`, `overflow-x-auto`, rows `w-max min-w-full`, `whitespace-pre`), and close/Max are 44px below `sm` (`session_dock_live.ex:2050,2089`) with Compact taken out of the row that overflowed (`session_dock_live.ex:903-908`). But the PR itself says the page still scrolls sideways by about 4px at 375px (`#app-status-bar`) and calls that out of scope. It also gives no clear way back out of Maximize on a phone (finding 2).
+    - [NOT MET] No desktop regression at 1280px (screenshots) — every `max-sm:` change is inactive at 1280px, so a regression is unlikely. But the PR has no 1280px screenshots, only a statement that some were taken locally in `/tmp`.
+    - [NOT MET] Before/after mobile screenshots in the PR — the PR says outright that the screenshots are not in it ("They live only in this local run's `/tmp` scratch space") and hands the reviewer a command to make them.
+    - [NOT MET] `mix precommit` passes — the PR marks this `[~]` and lists failing tests as unrelated or flaky. It is not shown passing. The failures it lists do match known baseline flakes (the `ARB_*` worker-env tests and a browser test under parallel load), but the criterion is still unmet as written.
+    Findings:
+    1. **High — PR description (AC 2 and AC 3): the required screenshots are missing.** The ticket asks for before/after mobile screenshots, and a 1280px comparison, in the PR. The PR contains none.
+       - Fix: run `ARB_MOBILE_TOUCH_SCREENSHOT=... mix test .../mobile_touch_browser_test.exs --include browser`.
+       - Attach the PNGs through GitHub's own PR image upload, or commit them to the branch and link them. Do not use a public or anonymous paste host.
+       - If attaching is impossible from a worker, list the criterion as unmet and escalate it rather than relying on local `/tmp` files.
+    2. **Medium — `apps/arbiter_web/lib/arbiter_web/live/session_dock_live.ex:2049` has no clear "way back" from Maximize below `sm`.**
+       - The ticket says Maximize should fill the viewport "with an obvious way back".
+       - Below `sm`, Compact and Side are hidden (`size != "max" && "max-sm:hidden"`). Once maximized, the only visible size button is Max, already pressed, and pressing it again does nothing (`set_size` just stores `"max"`, line 312).
+       - The only other exits are tapping the window title (collapses it, which nothing signals) and Dismiss (closes the window).
+       - On a phone, Compact is now nearly full-screen anyway (`inset-x-3`), so the two sizes look almost the same and there is nothing to restore to.
+       - Fix: below `sm`, show one touch-sized Restore/Minimize button in place of Max while maximized. It can call `collapse`, or `set_size` back to the stored non-max preference. Add a test asserting it is present and at least 44px.
+    3. **Medium — AC 1, the page still scrolls sideways at 375px.**
+       - The PR's own measurements show `#app-status-bar` (`layouts.ex`) overflowing the viewport by about 4px at 375px on every page, including the pages this ticket covers. The acceptance criterion rules out any page-level horizontal scroll.
+       - Fix: stop the status bar overflowing below `sm`, for example `min-w-0` or truncation on the wordmark, or tighter gaps under `max-sm:`. Or get the coordinator to confirm the carve-out.
+       - Once fixed, drop the header-hiding exception from `scripts/verify_mobile_touch.mjs` so the browser test checks the page as users actually see it.
+    4. **Low — `apps/arbiter_web/lib/arbiter_web/live/session_dock_live.ex:2126`: the window-menu trigger (`...`) is still 22px below `sm`.**
+       - It sits in the same title bar as the resized close and Max buttons, and it is the only way to reach Detach, Kill and Info on a phone.
+       - Fix: add `max-sm:size-11` for consistency with the other title-bar controls.
+    5. **Low — `apps/arbiter_web/lib/arbiter_web/components/core_components/domain.ex:603-640`: the change reaches pages beyond the worker view.**
+       - `log_stream/1` is also used by `run_detail_live.ex:173` and `task_detail_live.ex:2479,2521`. Those panes switch from ellipsis truncation to horizontal scrolling too.
+       - This is probably what we want, but the PR doesn't mention it and there are no screenshots of those pages.
+       - Fix: say so in the PR, and include a 1280px screenshot of task detail as well.
+    What was checked: I confirmed HEAD is `ab9d4f0d` and reviewed only this branch's changes (diff against `ef2effa5`). I did not run `mix precommit` or the browser test, and I did not boot the app.
+    VERIFICATION: FULL
+    arb done
+    ⚙ claude session success · 115.1s · $0.4671
+    """
+
+    # ROOT CAUSE (bd-7urncn): the guard's own log said "approved without
+    # dispositioning open finding(s) F1.20, F1.3" for the round-3 APPROVE
+    # below, even though that text plainly contains "[ADDRESSED] F1.3" and
+    # "[ADDRESSED] F1.20" lines that `dispositions/1` parses correctly (see
+    # the parsing test below — it always could). The guard's ids never came
+    # from those two `[ADDRESSED]` lines failing to parse; they came from the
+    # extractor that was live at the time (pre-#2105 / bd-93cnn9)
+    # FRAGMENTING round 1's own indented sub-bullets into their own
+    # `:unknown`-severity (fail-closed blocking) top-level findings. Under
+    # that old extractor, item 1's "- Fix: run `ARB_MOBILE_TOUCH_SCREENSHOT=…`
+    # … .../mobile_touch_browser_test.exs" sub-bullet became its own finding
+    # (numbered "F1.3" in the live run), and item 5's "- `log_stream/1` is
+    # also used by `run_detail_live.ex:173` and
+    # `task_detail_live.ex:2479,2521`" sub-bullet became another (numbered
+    # "F1.20") — both citing files the PR's revise rounds never touched again
+    # (one names a *command target*, not a file to edit; the other repeats a
+    # citation from the initial commit, before round 1 ever ran). The
+    # round-3 reviewer, prompted with THOSE ids, correctly dispositioned them
+    # — the DISPOSITIONS lines are right there — but the guard's mechanical
+    # unproven-file backstop (bd-6r8caj) rejected both anyway, because
+    # neither cited file had been touched by any revision.
+    #
+    # `extract/2`'s current behavior (bd-93cnn9 / #2105, already on this
+    # branch's base) fixes the fragmentation itself: an indented sub-bullet is
+    # a continuation of its parent item, not a new finding. Re-running the
+    # verbatim round-1 text above through today's `extract/2` proves the
+    # phantom "F1.3"/"F1.20" fragments this incident hinged on can no longer
+    # be manufactured.
+    test "extract/2 no longer fragments round 1's sub-bullets into phantom unknown-severity findings" do
+      items = ReviewFindings.extract(@bcroux_round1, 1)
+
+      # The two phantom fragments from the live incident must not appear as
+      # their own standalone finding text.
+      refute Enum.any?(items, fn f ->
+               String.trim(f.text) ==
+                 "- Fix: run `ARB_MOBILE_TOUCH_SCREENSHOT=... mix test .../mobile_touch_browser_test.exs --include browser`."
+             end)
+
+      refute Enum.any?(items, fn f ->
+               String.trim(f.text) ==
+                 "- `log_stream/1` is also used by `run_detail_live.ex:173` and `task_detail_live.ex:2479,2521`."
+             end)
+
+      # Instead, each numbered item (plus the bare "Findings:" header, which
+      # is a separate pre-existing quirk this task does not touch) stays a
+      # single finding: 5 numbered items + 1 header = 6, with the real
+      # severities the reviewer actually wrote.
+      assert Enum.map(items, & &1.severity) == [:unknown, :high, :medium, :medium, :low, :low]
+    end
+
+    # The `[ADDRESSED] F1.3` / `[ADDRESSED] F1.20` lines from the real
+    # round-3 text, exactly as persisted — proving `dispositions/1` was never
+    # the part of the pipeline that misread this incident.
+    test "dispositions/1 correctly parses the real F1.3 and F1.20 ADDRESSED lines verbatim" do
+      text = """
+      DISPOSITIONS:
+      - [ADDRESSED] F1.3 — The implementer ran the browser test with `ARB_MOBILE_TOUCH_SCREENSHOT` set, on this branch and on an `ef2effa5` scratch worktree. The test file needed no edit. The resulting PNGs are committed under `docs/pr-2086-screenshots/`.
+      - [ADDRESSED] F1.20 — Disclosed in PR body Summary bullet 1, which names `run_detail_live.ex` and `task_detail_live.ex`. Neither file needed a change.
+      """
+
+      d = ReviewFindings.dispositions(text)
+
+      assert %{status: :addressed} = d["F1.3"]
+      assert %{status: :addressed} = d["F1.20"]
+    end
+
+    # Verbatim from `review_gate_rounds.findings`, task_id=bd-bcroux, round 2,
+    # role=review, id=5d04238f-9518-4ec3-ba76-9e456e01b051.
+    @bcroux_round2 """
+    VERDICT: REQUEST_CHANGES
+    CRITERIA:
+    - [MET] Every listed issue is fixed at 375px and 414px in light and dark themes, with no page-level horizontal scroll — I ran `mix test test/arbiter_web/live/mobile_touch_browser_test.exs --include browser` in headless Chromium and it printed `RESULT: PASS`. At both widths and in both themes:
+      - The output pane has `overflow-x=auto` and scrolls sideways by itself (pane `scrollWidth=3364`, `clientWidth=341`/`380`; `pane.scrollLeft=200` while `page.scrollX` stays at 0).
+      - The page's `scrollWidth` equals the viewport width.
+      - Close, Max, Restore and the `...` menu button are all 44x44.
+      - Max fills the viewport (351x670 in 375x812), and Restore goes back to compact.
+      - Code: `domain.ex:603-640` (`overflow-x-auto`, `w-max min-w-full`, `whitespace-pre`), `session_dock_live.ex:903-908` (Compact is `fixed` below `sm`), `:2035-2085` (Max and the new Restore button), `:2115` and `:2158` (`max-sm:size-11`), `app.css:298-308`, `layouts.ex:126-136`.
+    - [MET] No desktop regression at 1280px — the browser check `desktop-1280-no-page-level-horizontal-scroll` passes (`scrollWidth=1265`, viewport 1280). The PR has 1280 screenshots of worker output and the session dock, and all the new phone classes are behind `max-sm:`/`sm:hidden`. The 147 tests in `session_dock_live_test.exs`, `worker_detail_live_test.exs` and `run_detail_live_test.exs` pass with 0 failures.
+    - [NOT MET] Before/after mobile screenshots in the PR — every mobile screenshot is an "after" capture. The PR body says so itself: "These are 'after' captures from this round's live run. I did not re-capture pre-round-2 'before' shots…" The round-1 "before" states (the line cut off with an ellipsis, the Compact window pushed off-screen) are only described in text. The file `414-light-session-dock-before-maximize.png` means "before pressing Max", not "before the fix".
+    - [NOT MET] `mix precommit` passes — the implementer marks this `[~]` and reports 8 umbrella failures they call unrelated. My own checks came out clean: `mix format --check-formatted` exits 0, `mix credo --strict` finds no issues in the changed files, and the targeted tests pass. But neither I nor the implementer has recorded a clean full `mix precommit` run.
+    FINDINGS:
+    1. **Severity: Medium** — the PR description (PR #2086 body, "## Screenshots" section; images in `docs/pr-2086-screenshots/`) has no "before" mobile screenshots, which acceptance criterion 3 requires.
+       - Fix: check out the fork point `ef2effa5` in a scratch worktree and copy in `scripts/verify_mobile_touch.mjs` and `mobile_touch_browser_test.exs`. The script's checks will fail there, which is expected; the screenshots are still written. Run it with `ARB_MOBILE_TOUCH_SCREENSHOT=<path>` so it captures `375-{light,dark}-worker-output` and `375/414-*-session-dock-before-maximize` from the unfixed code. Add them to the PR as clearly labelled Before/After pairs.
+    2. **Severity: Low** — the "Test plan" in the PR body leaves `mix precommit` as `[~]`.
+       - Fix: re-run `mix precommit && mix audit` with `ARB_WORKER_BEAD_ID`, `ARB_RELEASE_REPO`, `ARB_PRIMARY_CHECKOUT` and `ARB_WORKSPACE` unset (the 6 env-dependent failures are a known artifact of running inside a worker). Re-run any flaky timing test such as `ProcessTeardownTest` on its own, and record the resulting pass in the PR.
+    3. **Severity: Low (optional)** — `docs/pr-2086-screenshots/*.png` commits about 230KB of PR-only images to the repo permanently.
+       - Fix: once the PR body points at hosted copies, consider dropping `docs/pr-2086-screenshots/` from the branch before merge, or confirm with the coordinator that screenshots belong in the repo.
+    The code changes themselves were checked in a real browser and I found no correctness defects in them. Changing `log_stream/1` also affects the run and task detail panes: they now scroll sideways instead of cutting off long lines with an ellipsis. That is consistent with the ticket, and the PR says so.
+    VERIFICATION: FULL
+    arb done
+    ⚙ claude session success · 203.2s · $0.6274
+    """
+
+    # Verbatim from `review_gate_rounds.findings`, task_id=bd-bcroux, round 3,
+    # role=review, id=9f7c1b37-b2dd-46e3-83e3-0995ee2df2c1 — the exact APPROVE
+    # text the live guard rejected as `verdict_guard_exhausted`.
+    @bcroux_round3 """
+    VERDICT: APPROVE
+    DISPOSITIONS:
+    - [ADDRESSED] F1.1 — This is the empty "Findings:" header from round 1, not a finding in itself. Every item under it is dispositioned below.
+    - [ADDRESSED] F1.2 — PR #2086 body, "## Screenshots" section, now has before/after pairs and two 1280px shots. The images are in `docs/pr-2086-screenshots/before-*.png`, `after-*.png` and `desktop-1280-*.png`. I opened the PNGs: the before shots show the pre-fix wordmark, the ellipsis-truncated line and the Compact/Side/Max strip. The after shots show the icon brandmark, the scrollable pane and the Restore icon. All 12 files have different md5 hashes. The PR's rendered HTML resolves the image `src` to `../blob/<branch>/docs/...?raw=true`.
+    - [ADDRESSED] F1.3 — The implementer ran the browser test with `ARB_MOBILE_TOUCH_SCREENSHOT` set, on this branch and on an `ef2effa5` scratch worktree. The test file needed no edit. The resulting PNGs are committed under `docs/pr-2086-screenshots/`.
+    - [ADDRESSED] F1.4 — The PNGs are committed to the branch (`docs/pr-2086-screenshots/*`) and linked through github.com blob URLs. No paste host was used.
+    - [OBSOLETE] F1.5 — This was the fallback in case attaching proved impossible. It didn't: the screenshots are attached.
+    - [ADDRESSED] F1.6 — There is now a Restore button below `sm` while maximized: `session_dock_live.ex:2073-2085` (`id="session-dock-restore-…"`, `size-11 sm:hidden`, `set_size` to `compact`).
+    - [ADDRESSED] F1.7 — The Restore button (`session_dock_live.ex:2076`) is the way back. It is visible in `after-375-light-session-dock-maximized.png`.
+    - [ADDRESSED] F1.8 — Max now hides itself below `sm` while maximized (`session_dock_live.ex:2054-2055`), and Restore takes its place.
+    - [ADDRESSED] F1.9 — Leaving Maximize no longer depends on tapping the title or dismissing the window, because Restore exists (`session_dock_live.ex:2073-2085`).
+    - [OBSOLETE] F1.10 — This was context for F1.6/F1.11. Restoring to Compact returns the window to its docked `fixed inset-x-3` layout (`:903-908`), which the browser check confirms.
+    - [ADDRESSED] F1.11 — The button is at `session_dock_live.ex:2073-2085`. The test at `session_dock_live_test.exs:1491-1509` checks that it is absent, then present with `size-11` once maximized, and that clicking it removes it. The browser check `restore-from-maximize-is-touch-sized` is at `verify_mobile_touch.mjs:286`.
+    - [ADDRESSED] F1.12 — Below `sm` the status bar shows the icon brandmark instead of the wordmark (`layouts.ex:126,134`). The browser check `no-page-level-horizontal-scroll` now runs without the header exception (`verify_mobile_touch.mjs:342-349`).
+    - [ADDRESSED] F1.13 — `layouts.ex:126` (wordmark `max-sm:hidden`) and `layouts.ex:134` (icon `sm:hidden`).
+    - [ADDRESSED] F1.14 — Same fix, in `layouts.ex:126-136`.
+    - [ADDRESSED] F1.15 — The header-hiding exception has been removed from `scripts/verify_mobile_touch.mjs:342-349`, and the comment there records the removal.
+    - [ADDRESSED] F1.16 — The menu trigger now has `max-sm:size-11` (`session_dock_live.ex:2158`).
+    - [ADDRESSED] F1.17 — Same fix as F1.16 (`session_dock_live.ex:2158`).
+    - [ADDRESSED] F1.18 — `max-sm:size-11` is on the trigger at `session_dock_live.ex:2158`.
+    - [ADDRESSED] F1.19 — The fix is a disclosure rather than a code change. The PR body's Summary bullet 1 says the run and task detail panes get the same horizontal scroll. The behaviour change is intended by the ticket.
+    - [ADDRESSED] F1.20 — Disclosed in PR body Summary bullet 1, which names `run_detail_live.ex` and `task_detail_live.ex`. Neither file needed a change.
+    - [ADDRESSED] F1.21 — Disclosed in the PR body. The body also says openly that task and run detail were reviewed by inspection, not by screenshot.
+    - [ADDRESSED] F1.22 — The disclosure is done. There is no task-detail 1280px shot, but the PR body says so plainly. The worker-output 1280px shot uses the same `log_stream/1` component (`domain.ex:603-640`). The round-2 review accepted this.
+    - [OBSOLETE] F2.1 — This was a positive observation from round 2's CRITERIA, not a defect. The code it describes is still in place at `domain.ex:610,628,640`.
+    - [OBSOLETE] F2.2 — A positive observation, not a defect. It is still covered by the `no-page-level-horizontal-scroll` check (`verify_mobile_touch.mjs:349`).
+    - [OBSOLETE] F2.3 — A positive observation, not a defect. The controls are still at `session_dock_live.ex:2076,2115,2158`.
+    - [OBSOLETE] F2.4 — A positive observation, not a defect. The Max and Restore behaviour is still at `session_dock_live.ex:2054,2073-2085`.
+    - [OBSOLETE] F2.5 — This is a list of code citations from round 2's CRITERIA, not a defect. I re-read each cited location in the current diff and it still matches.
+    - [ADDRESSED] F2.6 — The PR body now has labelled before/after pairs. The before files are `docs/pr-2086-screenshots/before-375-{light,dark}-worker-output.png`, `before-375-{light,dark}-session-dock-maximized.png` and `before-414-light-session-dock-before-maximize.png`, all added in commit `8f0d706b`. I viewed them, and they show the pre-fix UI.
+    - [ADDRESSED] F2.7 — The implementer followed this procedure: a scratch worktree at `ef2effa5` with the test and script copied in. The resulting `before-*.png` files were committed in `8f0d706b`.
+    - [ADDRESSED] F2.8 — The Test plan in the PR body now marks `mix precommit` `[x]` with counts from a run with the worker env vars unset. The only failure is `EpicPageBrowserTest`'s "stuck chip" check, a known failure that also happens on main.
+    - [ADDRESSED] F2.9 — The re-run with `ARB_*` unset is recorded in the PR body's Test plan, together with a clean `mix audit` result.
+    - [OBSOLETE] F2.10 — This was optional. Hosting the images anywhere but the repo is ruled out, and AC3 needs them in the PR. Committing them to the repo was the approach round 1 suggested. The implementer's rebuttal holds, and whether to keep them is for the coordinator to decide.
+    - [OBSOLETE] F2.11 — Same reason as F2.10: there is no hosted copy the PR could point to instead.
+    CRITERIA:
+    - [MET] Every listed issue is fixed at 375px and 414px, in light and dark themes, with no page-level horizontal scroll.
+      - Output pane: `overflow-x-auto`, rows are `w-max min-w-full`, text is `whitespace-pre` (`domain.ex:610,628,640`).
+      - Dock: Compact is `fixed` below `sm` (`session_dock_live.ex:903-908`).
+      - Touch targets are 44px: close at `:2115`, menu at `:2158`, Max at `:2054-2055`, Restore at `:2073-2085`.
+      - Status bar uses the icon below `sm` (`layouts.ex:126,134`).
+      - The browser check runs without the header exception.
+    - [MET] No desktop regression at 1280px. All the new classes are scoped to `max-sm:` or `sm:hidden`. The check `desktop-1280-no-page-level-horizontal-scroll` passes (`verify_mobile_touch.mjs:173`), and the 1280px screenshots are in the PR.
+    - [MET] Before/after mobile screenshots in the PR. They are real before (`ef2effa5`) and after captures, committed and embedded as labelled pairs. I viewed them and confirmed they are distinct and plausible.
+    - [MET] `mix precommit` passes. The PR records a run with the worker env vars unset: arbiter 0 failures, arbiter_cli 0 failures, and arbiter_web 1 failure, the known "stuck chip" check that also fails on main. `mix audit` is clean. I re-ran `session_dock_live_test.exs` and `worker_detail_live_test.exs` just now: 147 tests, 0 failures. `mix format --check-formatted` exits 0.
+    FINDINGS:
+    None blocking. One informational note: Restore always returns to `compact` rather than to the last non-max size the user had. That is acceptable, because Side is not available below `sm` anyway.
+    VERIFICATION: FULL
+    arb done
+    ⚙ claude session success · 152.4s · $0.7205
+    """
+
+    # THE REAL INCIDENT (bd-7urncn round 2 finding 1): running the actual
+    # stored round-3 APPROVE above through `approval_gap/3` — with `open`
+    # built from round 1's AND round 2's real blocking findings, and
+    # `touched` the real files `git diff --name-only` reports across the
+    # merged PR's round-2 (`18eb2da9`) and round-3 (`8f0d706b`) commits — used
+    # to still return `unproven: ["F1.2"]` even after the fragmentation fix
+    # above (bd-93cnn9): F1.2's real disposition line cites only glob paths
+    # (`docs/pr-2086-screenshots/before-*.png`, `after-*.png`,
+    # `desktop-1280-*.png`), and neither `files_in/1` nor `touched?/2` could
+    # match a `*` against a literal committed filename — `files_in/1` did not
+    # even extract a glob as a path token (the filename character class
+    # rejected `*` outright), so the disposition named no location at all and
+    # `unproven?/3` fired. The fix widens `@path`'s filename segment to accept
+    # `*` and gives `touched?/2` a glob-matching branch (`*` never crosses
+    # `/`) so a disposition can legitimately point at a whole family of
+    # committed files instead of one literal path.
+    test "the real bd-bcroux round-3 APPROVE clears the guard against round 1 + round 2's real open findings" do
+      open1 =
+        ReviewFindings.extract(@bcroux_round1, 1) |> Enum.filter(&ReviewFindings.blocking?/1)
+
+      open2 =
+        ReviewFindings.extract(@bcroux_round2, 2) |> Enum.filter(&ReviewFindings.blocking?/1)
+
+      assert Enum.map(open1, & &1.id) == ["F1.1", "F1.2", "F1.3", "F1.4"]
+      assert Enum.map(open2, & &1.id) == ["F2.1", "F2.2"]
+
+      # The real files `git show --name-only` reports for the merged PR's
+      # round-2 (`18eb2da9`) and round-3 (`8f0d706b`) commits — the same
+      # material `record_touched_files/3` would have accumulated across those
+      # two revise rounds. Verified directly against this repo's history
+      # (both commits are on `main`): 11 files from `18eb2da9` plus 10 from
+      # `8f0d706b`, 21 total.
+      touched =
+        MapSet.new([
+          "apps/arbiter_web/lib/arbiter_web/components/layouts.ex",
+          "apps/arbiter_web/lib/arbiter_web/live/session_dock_live.ex",
+          "apps/arbiter_web/test/arbiter_web/live/session_dock_live_test.exs",
+          "scripts/verify_mobile_touch.mjs",
+          "docs/pr-2086-screenshots/375-dark-session-dock-maximized.png",
+          "docs/pr-2086-screenshots/375-dark-worker-output.png",
+          "docs/pr-2086-screenshots/375-light-session-dock-maximized.png",
+          "docs/pr-2086-screenshots/375-light-worker-output.png",
+          "docs/pr-2086-screenshots/414-light-session-dock-before-maximize.png",
+          "docs/pr-2086-screenshots/desktop-1280-session-dock.png",
+          "docs/pr-2086-screenshots/desktop-1280-worker-output.png",
+          "docs/pr-2086-screenshots/after-375-dark-session-dock-maximized.png",
+          "docs/pr-2086-screenshots/after-375-dark-worker-output.png",
+          "docs/pr-2086-screenshots/after-375-light-session-dock-maximized.png",
+          "docs/pr-2086-screenshots/after-375-light-worker-output.png",
+          "docs/pr-2086-screenshots/after-414-light-session-dock-before-maximize.png",
+          "docs/pr-2086-screenshots/before-375-dark-session-dock-maximized.png",
+          "docs/pr-2086-screenshots/before-375-dark-worker-output.png",
+          "docs/pr-2086-screenshots/before-375-light-session-dock-maximized.png",
+          "docs/pr-2086-screenshots/before-375-light-worker-output.png",
+          "docs/pr-2086-screenshots/before-414-light-session-dock-before-maximize.png"
+        ])
+
+      gap = ReviewFindings.approval_gap(open1 ++ open2, @bcroux_round3, touched)
+
+      refute ReviewFindings.gap?(gap)
+    end
+  end
+
+  describe "approval_gap/3 — F-id prefix collisions (bd-7urncn AC3)" do
+    test "an F1.20 disposition does not satisfy the distinct open finding F1.2" do
+      open = [
+        %{
+          id: "F1.2",
+          round: 1,
+          severity: :medium,
+          files: ["router.ex"],
+          text: "short-circuit missing"
+        },
+        %{
+          id: "F1.20",
+          round: 1,
+          severity: :medium,
+          files: ["other.ex"],
+          text: "unrelated 20th finding"
+        }
+      ]
+
+      approve = """
+      VERDICT: APPROVE
+      DISPOSITIONS:
+      - [ADDRESSED] F1.20 — fixed in other.ex:9
+      VERIFICATION: FULL
+      """
+
+      gap = ReviewFindings.approval_gap(open, approve, MapSet.new(["other.ex"]))
+
+      assert ["F1.2"] = Enum.map(gap.missing, & &1.id)
+    end
+
+    test "an F1.3 disposition does not satisfy the distinct open finding F1.30" do
+      open = [
+        %{id: "F1.3", round: 1, severity: :medium, files: ["a.ex"], text: "third finding"},
+        %{id: "F1.30", round: 1, severity: :medium, files: ["b.ex"], text: "thirtieth finding"}
+      ]
+
+      approve = """
+      VERDICT: APPROVE
+      DISPOSITIONS:
+      - [ADDRESSED] F1.3 — fixed in a.ex:2
+      VERIFICATION: FULL
+      """
+
+      gap = ReviewFindings.approval_gap(open, approve, MapSet.new(["a.ex"]))
+
+      assert ["F1.30"] = Enum.map(gap.missing, & &1.id)
+    end
+
+    test "id-first form also keeps F1.3 and F1.30 distinct" do
+      d =
+        ReviewFindings.dispositions("""
+        F1.30 — [ADDRESSED] fixed
+        F1.3 — [NOT ADDRESSED] still open
+        """)
+
+      assert %{status: :addressed} = d["F1.30"]
+      assert %{status: :not_addressed} = d["F1.3"]
+    end
+  end
+
+  describe "approval_gap/3 — glob paths in a disposition line (bd-7urncn round 2 finding 1)" do
+    # `files: ["missing.png"]` mirrors the real F1.2 shape: the finding itself
+    # cites a placeholder file nobody would ever commit (a command target, not
+    # an edit target), so the ONLY thing that can prove the disposition is the
+    # glob path the disposition line itself names — `unproven?/3`'s early
+    # `files: []` escape hatch must not be the reason these pass.
+    test "a disposition citing only a glob path proves a finding whose committed files match it" do
+      open = [
+        %{
+          id: "F1.1",
+          round: 1,
+          severity: :medium,
+          files: ["missing.png"],
+          text: "missing screenshots"
+        }
+      ]
+
+      approve = """
+      VERDICT: APPROVE
+      DISPOSITIONS:
+      - [ADDRESSED] F1.1 — screenshots are committed under `docs/shots/before-*.png` and `after-*.png`.
+      VERIFICATION: FULL
+      """
+
+      touched = MapSet.new(["docs/shots/before-375-light.png", "docs/shots/after-375-light.png"])
+
+      refute ReviewFindings.gap?(ReviewFindings.approval_gap(open, approve, touched))
+    end
+
+    test "a glob does not cross a directory boundary" do
+      open = [
+        %{
+          id: "F1.1",
+          round: 1,
+          severity: :medium,
+          files: ["missing.png"],
+          text: "missing screenshots"
+        }
+      ]
+
+      approve = """
+      VERDICT: APPROVE
+      DISPOSITIONS:
+      - [ADDRESSED] F1.1 — screenshots are committed under `docs/shots/before-*.png`.
+      VERIFICATION: FULL
+      """
+
+      # Same basename shape but in a different directory — must NOT match,
+      # since `*` in a glob is scoped to one path segment.
+      touched = MapSet.new(["docs/other/before-nested/375-light.png"])
+
+      gap = ReviewFindings.approval_gap(open, approve, touched)
+      assert ["F1.1"] = Enum.map(gap.unproven, & &1.id)
+    end
+
+    test "a glob disposition does not prove an unrelated file was touched" do
+      open = [
+        %{
+          id: "F1.1",
+          round: 1,
+          severity: :medium,
+          files: ["missing.png"],
+          text: "missing screenshots"
+        }
+      ]
+
+      approve = """
+      VERDICT: APPROVE
+      DISPOSITIONS:
+      - [ADDRESSED] F1.1 — screenshots are committed under `docs/shots/before-*.png`.
+      VERIFICATION: FULL
+      """
+
+      touched = MapSet.new(["lib/unrelated.ex"])
+
+      gap = ReviewFindings.approval_gap(open, approve, touched)
+      assert ["F1.1"] = Enum.map(gap.unproven, & &1.id)
+    end
+  end
+
+  describe "approval_gap/3 — the untouched-file backstop with no seed in place (bd-7urncn)" do
+    # `revise_touched_files` no longer seeds from the PR's initial
+    # `base_sha..head_sha` commit (the prior round of this PR removed
+    # `ReviewGate.seed_touched_files/1`). A finding whose only cited file was
+    # part of that initial commit — never revisited by any revise round — must
+    # still be rejected as unproven when the round-N reviewer claims it
+    # `[ADDRESSED]`, exactly as bd-6r8caj/bd-8mtb0q intended: an `[ADDRESSED]`
+    # claim needs a revision to actually back it, not just a citation to
+    # code that has always been there.
+    test "an ADDRESSED disposition citing a file only from the initial commit is still rejected" do
+      open = [
+        %{
+          id: "F1.1",
+          round: 1,
+          severity: :medium,
+          files: ["run_detail_live.ex"],
+          text: "log_stream/1 also affects run_detail_live.ex, from the initial commit"
+        }
+      ]
+
+      approve = """
+      VERDICT: APPROVE
+      DISPOSITIONS:
+      - [ADDRESSED] F1.1 — disclosed in the PR body; `run_detail_live.ex` needed no change.
+      VERIFICATION: FULL
+      """
+
+      # The revise round's real `git diff --name-only` output — it never
+      # touched `run_detail_live.ex`, which only appeared in the PR's initial
+      # commit, before round 1 ever reviewed it.
+      touched = MapSet.new(["session_dock_live.ex"])
+
+      gap = ReviewFindings.approval_gap(open, approve, touched)
+      assert ["F1.1"] = Enum.map(gap.unproven, & &1.id)
+    end
+  end
+
+  describe "dispositions/1 — long lines (bd-7urncn AC3)" do
+    test "a very long single-line ADDRESSED disposition is still parsed" do
+      long_reason =
+        String.duplicate(
+          "verified against the current diff and confirmed the fix landed exactly here; ",
+          20
+        )
+
+      text = "- [ADDRESSED] F1.1 — #{long_reason}see router.ex:42"
+
+      assert %{status: :addressed, line: line} = ReviewFindings.dispositions(text)["F1.1"]
+      assert line == String.trim(text)
+    end
+
+    test "a long line does not stop the NEXT disposition line from parsing" do
+      long_reason = String.duplicate("x", 2000)
+
+      text = """
+      - [ADDRESSED] F1.1 — #{long_reason}
+      - [NOT ADDRESSED] F1.2 — still broken
+      """
+
+      d = ReviewFindings.dispositions(text)
+      assert %{status: :addressed} = d["F1.1"]
+      assert %{status: :not_addressed} = d["F1.2"]
+    end
+  end
+
   describe "approval_gap/3 — the bd-1xss5z deadlock shape (bd-c6tdbu)" do
     test "an honest APPROVE that marks non-blocking observations [NOT ADDRESSED] is not a gap" do
       round1 =

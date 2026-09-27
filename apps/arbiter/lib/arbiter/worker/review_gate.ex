@@ -780,9 +780,12 @@ defmodule Arbiter.Worker.ReviewGate do
       # obsolete; an APPROVE must account for every Medium-or-higher entry here
       # or it is not honored.
       open_findings: [],
-      # The set of repo-relative paths the implementer's revise round(s)
-      # actually changed, accumulated across rounds. nil until the first revise
-      # round completes (and stays nil without a worktree / git), which keeps the
+      # The set of repo-relative paths the implementer actually changed,
+      # accumulated only from each revise round's own diff (bd-7urncn: NOT
+      # seeded from the initial base_sha..head_sha commit — a finding citing a
+      # file from the PR's initial commit, never revisited by a revise round,
+      # must stay open, not count as "touched"). nil until a diff is actually
+      # computed (and stays nil without a worktree / git), which keeps the
       # untouched-file backstop silent rather than guessing.
       revise_touched_files: nil,
       # bd-c6tdbu: set only when the round just rejected was an APPROVE turned
@@ -2052,6 +2055,16 @@ defmodule Arbiter.Worker.ReviewGate do
             "re-reviewing the new head instead"
         )
 
+        # bd-7urncn: this fast-forward is a real diff (another actor's commit),
+        # but it lands OUTSIDE `note_head_change/1`'s revise-round bookkeeping —
+        # without recording it here, a finding this commit actually fixed would
+        # still show up "NOT TOUCHED" to a later revise round's backstop check
+        # (bd-6r8caj), because `revise_touched_files` would never have seen it.
+        # Pinned directly against `record_touched_files/3` (via
+        # `note_head_change/1`) in `ReviewGateTest`'s
+        # "record_touched_files/3 turns a first diff into a real touched set".
+        new_head = current_head_sha(state)
+
         state
         |> record_thread(
           :system,
@@ -2068,8 +2081,9 @@ defmodule Arbiter.Worker.ReviewGate do
           a fresh review round, which reads the pushed code.
           """
         )
+        |> record_touched_files(state.head_sha, new_head)
         |> Map.put(:commit_nudge_used, false)
-        |> then(&%{&1 | head_sha: current_head_sha(&1)})
+        |> Map.put(:head_sha, new_head)
         |> dispatch_next_review(restarted_on_remote_head: remote_head)
         |> keep_waiting()
 
@@ -2583,14 +2597,17 @@ defmodule Arbiter.Worker.ReviewGate do
     _ -> false
   end
 
-  # bd-6r8caj: the mechanical backstop's raw material — which files the revise
-  # round actually changed, accumulated across rounds. `git diff --name-only
-  # old..new` between the SHA the reviewer last saw and the SHA after the
-  # implementer's round; an empty diff for a file a finding cited is the exact
-  # bd-8mtb0q signal ("the implementer only ran `mix format`"). Stays nil without
-  # a worktree or when either SHA is unknown, and an unchanged HEAD contributes
-  # nothing — both leave the backstop silent rather than guessing. Best-effort:
-  # a git failure is not allowed to break the round.
+  # bd-6r8caj: the mechanical backstop's raw material — which files were
+  # actually changed, accumulated only from each revise round's own diff
+  # (bd-7urncn: deliberately NOT seeded from the PR's initial commit — a
+  # finding citing a file from before round 1 ever ran must stay open until a
+  # revise round actually revisits it). `git diff --name-only old..new`
+  # between the SHA the reviewer last saw and the SHA after; an empty diff for
+  # a file a finding cited is the exact bd-8mtb0q signal ("the implementer
+  # only ran `mix format`"). Stays nil without a worktree or when either SHA is
+  # unknown, and an unchanged HEAD contributes nothing — both leave the
+  # backstop silent rather than guessing. Best-effort: a git failure is not
+  # allowed to break the round.
   defp record_touched_files(%{worktree_path: wt} = state, old_sha, new_sha)
        when is_binary(wt) and is_binary(old_sha) and is_binary(new_sha) do
     changed =

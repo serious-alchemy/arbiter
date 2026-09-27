@@ -4706,6 +4706,49 @@ defmodule Arbiter.Worker.ReviewGateTest do
     end
   end
 
+  # bd-7urncn: `restart_on_remote_head/3` records the OTHER actor's commit into
+  # `revise_touched_files` via this same `record_touched_files/3` helper (used
+  # by `note_head_change/1` above), so the backstop can see a fix that landed
+  # via a remote push instead of a revise round's own implementer. This used
+  # to be justified as protecting against a seed that no longer exists
+  # (bd-7urncn removed it); the real reason to keep it is that a finding fixed
+  # by that push must not come back as "NOT TOUCHED" just because no revise
+  # round ran. Pinned here directly against `revise_touched_files: nil` (no
+  # revise round has happened yet), the same starting state a remote advance
+  # before round 1's own fix round sees.
+  describe "record_touched_files/3 turns a first diff into a real touched set (bd-7urncn)" do
+    test "starting from nil, a single diff already populates revise_touched_files",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws, %{description: "the directive"})
+      branch = "feature/remote-advance-touch"
+
+      {_, 0} = git(["checkout", "-q", "-b", branch], repo)
+      {_, 0} = git(["commit", "-q", "--allow-empty", "-m", "round 1"], repo)
+      old_sha = String.trim(elem(git(["rev-parse", "--short", "HEAD"], repo), 0))
+
+      File.write!(Path.join(repo, "guard.txt"), "fixed by the other actor\n")
+      {_, 0} = git(["add", "guard.txt"], repo)
+      {_, 0} = git(["commit", "-q", "-m", "address review follow-ups"], repo)
+      new_sha = String.trim(elem(git(["rev-parse", "--short", "HEAD"], repo), 0))
+
+      state = %{
+        task_id: task.id,
+        branch: branch,
+        target_branch: "main",
+        worktree_path: repo,
+        round: 1,
+        head_sha: old_sha,
+        thread: [],
+        revise_touched_files: nil
+      }
+
+      {state, ^new_sha} = ReviewGate.note_head_change(state)
+
+      assert %MapSet{} = state.revise_touched_files
+      assert MapSet.member?(state.revise_touched_files, "guard.txt")
+    end
+  end
+
   # ---- Pre-spawn commit gate and HEAD-SHA anchoring (bd-1mksks) ------------
 
   describe "pre-spawn commit gate (bd-1mksks)" do

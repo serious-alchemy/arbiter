@@ -241,6 +241,30 @@ defmodule Arbiter.Worker.ReviewGateRemoteAdvanceTest do
     end
   end
 
+  # Like `wait_until/2`, but returns `fun`'s first truthy value instead of
+  # `:ok` — needed to read the gate's own state (`:sys.get_state/1`) at the
+  # moment a condition becomes true, since the gate process can exit normally
+  # (a completed review) shortly after and take that state with it.
+  defp wait_until_value(fun, timeout) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_wait_value(fun, deadline)
+  end
+
+  defp do_wait_value(fun, deadline) do
+    case fun.() do
+      value when value not in [nil, false] ->
+        value
+
+      _ ->
+        if System.monotonic_time(:millisecond) > deadline do
+          flunk("condition not met within timeout")
+        else
+          Process.sleep(20)
+          do_wait_value(fun, deadline)
+        end
+    end
+  end
+
   describe "a remote that advances mid-round" do
     test "the fix round aborts, no orphan commit is made, and a fresh round reviews the new head",
          %{repo: repo, ws: ws, tmp: tmp} do
@@ -256,10 +280,35 @@ defmodule Arbiter.Worker.ReviewGateRemoteAdvanceTest do
 
       author = start_author(task, ws, repo, branch, wt)
 
-      start_gate(author, task, ws, branch, wt,
-        command: [@remote_advance, patrol_clone_path, branch],
-        revise_command: [@revise_commit]
-      )
+      gate =
+        start_gate(author, task, ws, branch, wt,
+          command: [@remote_advance, patrol_clone_path, branch],
+          revise_command: [@revise_commit]
+        )
+
+      # bd-7urncn: `restart_on_remote_head/3` itself (not just `note_head_change/1`,
+      # which the unit test in `ReviewGateTest` already pins) must record the
+      # patrol's commit into `revise_touched_files` — otherwise a finding that
+      # commit actually fixed would still read "NOT TOUCHED" to the bd-6r8caj
+      # backstop on a later revise round. Read this off the gate's own state as
+      # soon as round 2 is dispatched, since the gate process exits normally
+      # once the (fast, fixture-driven) round 2 review completes.
+      touched =
+        wait_until_value(
+          fn ->
+            try do
+              case :sys.get_state(gate) do
+                %{round: 2, revise_touched_files: %MapSet{} = t} -> t
+                _ -> nil
+              end
+            catch
+              :exit, _ -> nil
+            end
+          end,
+          10_000
+        )
+
+      assert MapSet.member?(touched, "guard.txt")
 
       wait_until(fn -> Ash.get!(Issue, task.id).last_reviewed_sha == patrol_sha end, 30_000)
 
