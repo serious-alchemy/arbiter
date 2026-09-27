@@ -34,6 +34,7 @@ defmodule ArbiterWeb.TaskIndexLive do
   alias Arbiter.Tasks.{Dependency, Issue, Workspace}
   alias ArbiterWeb.Paging
   require Ash.Query
+  require Logger
 
   @tasks_topic "tasks"
 
@@ -74,19 +75,37 @@ defmodule ArbiterWeb.TaskIndexLive do
 
   @impl true
   def mount(_params, _session, socket) do
-    if connected?(socket), do: Phoenix.PubSub.subscribe(Arbiter.PubSub, @tasks_topic)
+    live? = connected?(socket)
+    if live?, do: Phoenix.PubSub.subscribe(Arbiter.PubSub, @tasks_topic)
 
-    {:ok,
-     socket
-     |> assign(:issue_label, "issue")
-     |> assign(:filter_tabs, @filter_tabs)
-     |> assign(:sort_options, Enum.map(@sorts, &{@sort_labels[&1], Atom.to_string(&1)}))
-     |> assign(:workspaces, load_workspaces())
-     |> assign(:epics, load_epics())
-     |> assign(:repos, load_repos())
-     |> assign(:issue_types, @issue_types)
-     |> assign(:priorities, @priorities)
-     |> assign(:difficulties, @difficulties)}
+    # Both the filter-option lists (workspaces/epics/repos) and the result
+    # page arrive by `start_async/3` on the connected mount only: the dead
+    # render reads nothing and draws a loading state (bd-y9civj).
+    socket =
+      socket
+      |> assign(:issue_label, "issue")
+      |> assign(:filter_tabs, @filter_tabs)
+      |> assign(:sort_options, Enum.map(@sorts, &{@sort_labels[&1], Atom.to_string(&1)}))
+      |> assign(:issue_types, @issue_types)
+      |> assign(:priorities, @priorities)
+      |> assign(:difficulties, @difficulties)
+      |> assign(:workspaces, [])
+      |> assign(:epics, [])
+      |> assign(:repos, [])
+      |> assign(:filter_options_loaded?, false)
+      |> assign(:filter_options_error, nil)
+      |> assign(:tasks, [])
+      |> assign(:page, 1)
+      |> assign(:total_pages, 1)
+      |> assign(:total_count, 0)
+      |> assign(:tasks_loaded?, false)
+      |> assign(:tasks_loading?, false)
+      |> assign(:tasks_stale?, false)
+      |> assign(:tasks_error, nil)
+
+    socket = if live?, do: fetch_filter_options(socket), else: socket
+
+    {:ok, socket}
   end
 
   @impl true
@@ -94,11 +113,14 @@ defmodule ArbiterWeb.TaskIndexLive do
     filters = parse_filters(params)
     page = Paging.parse_page(params)
 
-    {:noreply,
-     socket
-     |> assign(:f, filters)
-     |> assign(:page, page)
-     |> refresh()}
+    socket =
+      socket
+      |> assign(:f, filters)
+      |> assign(:page, page)
+
+    socket = if connected?(socket), do: fetch_tasks(socket), else: socket
+
+    {:noreply, socket}
   end
 
   @impl true
@@ -107,38 +129,159 @@ defmodule ArbiterWeb.TaskIndexLive do
     {:noreply, push_patch(socket, to: task_path(parse_filters(params), 1))}
   end
 
+  def handle_event("retry_filter_options", _params, socket) do
+    {:noreply, fetch_filter_options(socket)}
+  end
+
+  def handle_event("retry_tasks", _params, socket) do
+    {:noreply, socket |> assign(:tasks_error, nil) |> fetch_tasks()}
+  end
+
   # Any task transition can change which rows belong on the current page;
   # re-read the page in place (same filters + page).
   @impl true
   def handle_info({:task_lifecycle, _event, _issue}, socket) do
-    {:noreply, refresh(socket)}
+    {:noreply, fetch_tasks(socket)}
   end
 
   def handle_info(_msg, socket), do: {:noreply, socket}
 
-  # ---- data ----
+  @impl true
+  def handle_async(:filter_options, {:ok, options}, socket) do
+    {:noreply,
+     socket
+     |> assign(:workspaces, options.workspaces)
+     |> assign(:epics, options.epics)
+     |> assign(:repos, options.repos)
+     |> assign(:filter_options_loaded?, true)
+     |> assign(:filter_options_error, nil)}
+  end
 
-  defp refresh(socket) do
-    query =
-      Issue
-      |> filter_by_status(socket.assigns.f.status)
-      |> filter_by_query(socket.assigns.f.q)
-      |> filter_by_workspace(socket.assigns.f.workspace)
-      |> filter_by_type(socket.assigns.f.type)
-      |> filter_by_priority(socket.assigns.f.priority)
-      |> filter_by_difficulty(socket.assigns.f.difficulty)
-      |> filter_by_stage(socket.assigns.f.stage)
-      |> filter_by_repo(socket.assigns.f.repo)
-      |> filter_by_epic(socket.assigns.f.epic)
-      |> sort_by(socket.assigns.f.sort)
+  def handle_async(:filter_options, {:exit, reason}, socket) do
+    Logger.error("TaskIndexLive: loading filter options failed: #{inspect(reason)}")
+    {:noreply, assign(socket, :filter_options_error, describe_exit(reason))}
+  end
 
-    result = Paging.paginate(query, socket.assigns.page)
+  # A stale result belongs to filters/page that are no longer current — a
+  # newer request was already queued behind this one while it was in
+  # flight (see `fetch_tasks/1`'s coalescing clause). Applying it would
+  # snap `@page`/`@f` back to what they were when this read started,
+  # fighting the URL the user already navigated to (bd-y9civj). Drop it and
+  # let `tasks_read_done/1` fire the queued refetch against the current
+  # assigns instead.
+  def handle_async(:tasks, {:ok, _result}, %{assigns: %{tasks_stale?: true}} = socket) do
+    tasks_read_done(socket)
+  end
 
+  def handle_async(:tasks, {:ok, result}, socket) do
     socket
     |> assign(:tasks, result.entries)
     |> assign(:page, result.page)
     |> assign(:total_pages, result.total_pages)
     |> assign(:total_count, result.total_count)
+    |> assign(:tasks_loaded?, true)
+    |> assign(:tasks_error, nil)
+    |> tasks_read_done()
+  end
+
+  # Same coalescing: an error for a superseded request isn't worth
+  # flashing to the user when a fresher read is about to fire anyway.
+  def handle_async(:tasks, {:exit, reason}, %{assigns: %{tasks_stale?: true}} = socket) do
+    Logger.error("TaskIndexLive: loading tasks failed (superseded, retrying): #{inspect(reason)}")
+    tasks_read_done(socket)
+  end
+
+  # A read that fails must not take the page down. Whatever list is on
+  # screen stays there — the skeleton on a first load, the last good read on
+  # a refresh — under an error that says so.
+  def handle_async(:tasks, {:exit, reason}, socket) do
+    Logger.error("TaskIndexLive: loading tasks failed: #{inspect(reason)}")
+
+    socket
+    |> assign(:tasks_error, describe_exit(reason))
+    |> tasks_read_done()
+  end
+
+  defp describe_exit({%{__exception__: true} = error, _stacktrace}), do: Exception.message(error)
+  defp describe_exit(reason), do: Exception.format_exit(reason)
+
+  # ---- data ----
+
+  defp fetch_filter_options(socket) do
+    start_async(socket, :filter_options, &run_filter_options_load/0)
+  end
+
+  # The task is linked to this view, so a tab closed mid-read would kill it
+  # mid-query — and a DB client that dies holding a checkout costs the pool
+  # that connection (under test, the one shared sandbox connection,
+  # bd-5scl0c). Trapping turns the view's exit into a message: the query in
+  # flight finishes, and the task goes before it starts another.
+  defp run_filter_options_load do
+    Process.flag(:trap_exit, true)
+    result = __MODULE__.load_filter_options()
+
+    receive do
+      {:EXIT, _view, _reason} -> exit(:shutdown)
+    after
+      0 -> result
+    end
+  end
+
+  @doc false
+  def load_filter_options do
+    %{workspaces: load_workspaces(), epics: load_epics(), repos: load_repos()}
+  end
+
+  # A refresh requested while one is already in flight marks the page stale
+  # and gets exactly one more read once the current one lands, so a burst of
+  # lifecycle broadcasts costs two reads, not one each (same discipline as
+  # BoardLive's `refresh_board/1`, bd-15bn6s).
+  defp fetch_tasks(%{assigns: %{tasks_loading?: true}} = socket),
+    do: assign(socket, :tasks_stale?, true)
+
+  defp fetch_tasks(socket) do
+    f = socket.assigns.f
+    page = socket.assigns.page
+
+    socket
+    |> assign(:tasks_loading?, true)
+    |> assign(:tasks_stale?, false)
+    |> start_async(:tasks, fn -> run_tasks_load(f, page) end)
+  end
+
+  defp tasks_read_done(socket) do
+    socket = assign(socket, :tasks_loading?, false)
+
+    {:noreply, if(socket.assigns.tasks_stale?, do: fetch_tasks(socket), else: socket)}
+  end
+
+  defp run_tasks_load(f, page) do
+    Process.flag(:trap_exit, true)
+    result = __MODULE__.load_tasks(f, page)
+
+    receive do
+      {:EXIT, _view, _reason} -> exit(:shutdown)
+    after
+      0 -> result
+    end
+  end
+
+  @doc false
+  def load_tasks(f, page) do
+    query =
+      Issue
+      |> filter_by_status(f.status)
+      |> filter_by_query(f.q)
+      |> filter_by_workspace(f.workspace)
+      |> filter_by_type(f.type)
+      |> filter_by_priority(f.priority)
+      |> filter_by_difficulty(f.difficulty)
+      |> filter_by_stage(f.stage)
+      |> filter_by_repo(f.repo)
+      |> filter_by_epic(f.epic)
+      |> sort_by(f.sort)
+
+    Paging.paginate(query, page)
   end
 
   defp load_workspaces, do: Workspace |> Ash.read!() |> Enum.sort_by(& &1.name)
@@ -150,6 +293,8 @@ defmodule ArbiterWeb.TaskIndexLive do
     |> Enum.sort_by(& &1.title)
   end
 
+  # AshSqlite has no `distinct` support (bd-y9civj), so this still uniques in
+  # Elixir; the `select` at least keeps every other Issue column off the wire.
   defp load_repos do
     Issue
     |> Ash.Query.select([:repo])
@@ -440,7 +585,7 @@ defmodule ArbiterWeb.TaskIndexLive do
             size="sm"
             prompt="Any workspace"
             value={@f.workspace || ""}
-            options={Enum.map(@workspaces, &{&1.name, &1.id})}
+            options={ensure_selected_option(Enum.map(@workspaces, &{&1.name, &1.id}), @f.workspace)}
           />
 
           <ArbiterWeb.CoreComponents.Forms.select
@@ -487,7 +632,7 @@ defmodule ArbiterWeb.TaskIndexLive do
             size="sm"
             prompt="Any repo"
             value={@f.repo || ""}
-            options={@repos}
+            options={ensure_selected_option(@repos, @f.repo)}
           />
 
           <ArbiterWeb.CoreComponents.Forms.select
@@ -496,9 +641,12 @@ defmodule ArbiterWeb.TaskIndexLive do
             size="sm"
             prompt="Any parent"
             value={epic_select_value(@f.epic)}
-            options={[
-              {"No parent", "none"} | Enum.map(@epics, &{"#{&1.id} — #{&1.title}", &1.id})
-            ]}
+            options={
+              ensure_selected_option(
+                [{"No parent", "none"} | Enum.map(@epics, &{"#{&1.id} — #{&1.title}", &1.id})],
+                epic_extra_selected(@f.epic)
+              )
+            }
           />
 
           <ArbiterWeb.CoreComponents.Forms.select
@@ -519,6 +667,33 @@ defmodule ArbiterWeb.TaskIndexLive do
           </.link>
         </form>
 
+        <div
+          :if={@filter_options_error}
+          id="tasks-filter-options-error"
+          role="alert"
+          class="flex items-start gap-2 px-3 py-2.5 rounded-[var(--radius-field)] border border-solid border-[var(--arb-fail-edge)] bg-[var(--arb-fail-wash)] text-[12px] text-[var(--arb-fail-text)]"
+        >
+          <ArbiterWeb.CoreComponents.Core.icon
+            name="hero-exclamation-triangle-micro"
+            class="size-4 shrink-0 mt-px"
+          />
+          <span class="grow min-w-0 break-words">
+            Could not load filter options: {@filter_options_error}
+          </span>
+          <button
+            type="button"
+            id="tasks-filter-options-retry"
+            phx-click="retry_filter_options"
+            class={[
+              "shrink-0 px-2 h-[22px] rounded-[var(--radius-field)] cursor-pointer",
+              "border border-solid border-[var(--arb-fail-edge)] bg-[var(--surface-chrome)]",
+              "text-[11px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
+            ]}
+          >
+            Retry
+          </button>
+        </div>
+
         <div :if={@active_filters != []} id="tasks-active-filters" class="flex flex-wrap gap-1.5">
           <span
             :for={label <- @active_filters}
@@ -528,49 +703,98 @@ defmodule ArbiterWeb.TaskIndexLive do
           </span>
         </div>
 
-        <ArbiterWeb.CoreComponents.Core.panel body_class="flex flex-col gap-4">
-          <div :if={@tasks == []} id="tasks-empty">
-            <ArbiterWeb.CoreComponents.Feedback.empty_state icon="hero-clipboard-document-list">
-              No {plural(@issue_label)} match
-              <%= if @active_filters != [] do %>
-                the active filters ({Enum.join(@active_filters, ", ")}).
-              <% else %>
-                this filter.
-              <% end %>
-            </ArbiterWeb.CoreComponents.Feedback.empty_state>
-          </div>
-
-          <ul :if={@tasks != []} id="tasks" class="flex flex-col gap-1.5">
-            <li :for={b <- @tasks} class={issue_row_class(b)}>
-              <.priority_tag priority={b.priority} />
-              <.difficulty_meter difficulty={b.difficulty} />
-              <.link
-                navigate={~p"/tasks/#{b.id}"}
-                class="min-w-0 flex-1 flex items-center gap-2 group"
+        <div
+          id="tasks-panel"
+          data-state={tasks_state(@tasks_loaded?, @tasks_error)}
+          aria-busy={to_string(not @tasks_loaded? and is_nil(@tasks_error))}
+        >
+          <ArbiterWeb.CoreComponents.Core.panel body_class="flex flex-col gap-4">
+            <div
+              :if={@tasks_error}
+              id="tasks-error"
+              role="alert"
+              class="flex items-start gap-2 px-3 py-2.5 rounded-[var(--radius-field)] border border-solid border-[var(--arb-fail-edge)] bg-[var(--arb-fail-wash)] text-[12px] text-[var(--arb-fail-text)]"
+            >
+              <ArbiterWeb.CoreComponents.Core.icon
+                name="hero-exclamation-triangle-micro"
+                class="size-4 shrink-0 mt-px"
+              />
+              <span class="grow min-w-0 break-words">
+                Could not load {plural(@issue_label)}: {@tasks_error}<span :if={@tasks_loaded?}> — showing the last page that loaded.</span>
+              </span>
+              <button
+                type="button"
+                id="tasks-retry"
+                phx-click="retry_tasks"
+                class={[
+                  "shrink-0 px-2 h-[22px] rounded-[var(--radius-field)] cursor-pointer",
+                  "border border-solid border-[var(--arb-fail-edge)] bg-[var(--surface-chrome)]",
+                  "text-[11px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
+                ]}
               >
-                <span class="font-[family-name:var(--font-mono)] text-[10.5px] text-[var(--text-secondary)] shrink-0 group-hover:text-[var(--text-link)] transition-colors">
-                  {b.id}
-                </span>
-                <span
-                  class="truncate text-[12.5px] font-medium text-[var(--text-title)] group-hover:text-[var(--text-link)] transition-colors"
-                  title={b.title}
-                >
-                  {b.title}
-                </span>
-              </.link>
-              <ArbiterWeb.CoreComponents.Core.copy_id id={b.id} />
-              <.status_chip status={b.status} />
-            </li>
-          </ul>
+                Retry
+              </button>
+            </div>
 
-          <ArbiterWeb.CoreComponents.Navigation.pager
-            page={@page}
-            total_pages={@total_pages}
-            total_count={@total_count}
-            page_path={fn page -> task_path(@f, page) end}
-            class={@tasks != [] && "pt-2"}
-          />
-        </ArbiterWeb.CoreComponents.Core.panel>
+            <div
+              :if={not @tasks_loaded? and is_nil(@tasks_error)}
+              id="tasks-loading"
+              aria-label={"Loading #{plural(@issue_label)}"}
+              class="flex flex-col gap-1.5"
+            >
+              <div
+                :for={n <- 1..5}
+                id={"tasks-loading-#{n}"}
+                aria-hidden="true"
+                class="h-[34px] rounded-[var(--radius-field)] border border-solid border-[var(--border-strong)] bg-[var(--surface-card)] animate-pulse"
+              >
+              </div>
+            </div>
+
+            <div :if={@tasks_loaded? and @tasks == []} id="tasks-empty">
+              <ArbiterWeb.CoreComponents.Feedback.empty_state icon="hero-clipboard-document-list">
+                No {plural(@issue_label)} match
+                <%= if @active_filters != [] do %>
+                  the active filters ({Enum.join(@active_filters, ", ")}).
+                <% else %>
+                  this filter.
+                <% end %>
+              </ArbiterWeb.CoreComponents.Feedback.empty_state>
+            </div>
+
+            <ul :if={@tasks_loaded? and @tasks != []} id="tasks" class="flex flex-col gap-1.5">
+              <li :for={b <- @tasks} class={issue_row_class(b)}>
+                <.priority_tag priority={b.priority} />
+                <.difficulty_meter difficulty={b.difficulty} />
+                <.link
+                  navigate={~p"/tasks/#{b.id}"}
+                  class="min-w-0 flex-1 flex items-center gap-2 group"
+                >
+                  <span class="font-[family-name:var(--font-mono)] text-[10.5px] text-[var(--text-secondary)] shrink-0 group-hover:text-[var(--text-link)] transition-colors">
+                    {b.id}
+                  </span>
+                  <span
+                    class="truncate text-[12.5px] font-medium text-[var(--text-title)] group-hover:text-[var(--text-link)] transition-colors"
+                    title={b.title}
+                  >
+                    {b.title}
+                  </span>
+                </.link>
+                <ArbiterWeb.CoreComponents.Core.copy_id id={b.id} />
+                <.status_chip status={b.status} />
+              </li>
+            </ul>
+
+            <ArbiterWeb.CoreComponents.Navigation.pager
+              :if={@tasks_loaded?}
+              page={@page}
+              total_pages={@total_pages}
+              total_count={@total_count}
+              page_path={fn page -> task_path(@f, page) end}
+              class={@tasks != [] && "pt-2"}
+            />
+          </ArbiterWeb.CoreComponents.Core.panel>
+        </div>
 
         <ArbiterWeb.CoreComponents.Navigation.back_link />
       </div>
@@ -580,6 +804,10 @@ defmodule ArbiterWeb.TaskIndexLive do
 
   # ---- view helpers ----
 
+  defp tasks_state(_loaded?, error) when not is_nil(error), do: "error"
+  defp tasks_state(true, nil), do: "loaded"
+  defp tasks_state(false, nil), do: "loading"
+
   defp difficulty_select_value(:none), do: "none"
   defp difficulty_select_value(d) when is_integer(d), do: Integer.to_string(d)
   defp difficulty_select_value(nil), do: ""
@@ -587,6 +815,29 @@ defmodule ArbiterWeb.TaskIndexLive do
   defp epic_select_value(:none), do: "none"
   defp epic_select_value(id) when is_binary(id), do: id
   defp epic_select_value(nil), do: ""
+
+  defp epic_extra_selected(id) when is_binary(id), do: id
+  defp epic_extra_selected(_), do: nil
+
+  # The workspace/repo/epic filter lists load async and can be `[]` while
+  # loading, or stay `[]` after a failed load. If the URL already names a
+  # value not yet in the list, the select's browser-rendered value would
+  # silently fall back to the prompt option — and the next unrelated
+  # `phx-change` would then push_patch that filter away (bd-y9civj).
+  # Keeping the current value as an option (even without its real label)
+  # until the real list lands avoids losing it.
+  defp ensure_selected_option(options, nil), do: options
+
+  defp ensure_selected_option(options, selected) do
+    if Enum.any?(options, &(option_value(&1) == selected)) do
+      options
+    else
+      options ++ [{selected, selected}]
+    end
+  end
+
+  defp option_value({_label, value}), do: value
+  defp option_value(value), do: value
 
   # P1 is the only priority that owns the row: a red left rule plus a faint
   # wash, matching the accent-rule treatment `Domain.task_card/1` uses for
