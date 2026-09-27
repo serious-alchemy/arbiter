@@ -117,6 +117,11 @@ defmodule ArbiterWeb.SessionIndexLive do
       Phoenix.PubSub.subscribe(Arbiter.PubSub, Sessions.lifecycle_topic())
     end
 
+    # bd-b88x6g: the session list, the usage ledger rollup, and the launch
+    # form's workspace list are all reads this page used to run synchronously
+    # on every mount, dead render included. The dead render now draws nothing
+    # but the loading state; the connected mount starts the reads and lands
+    # them via `handle_async/3` below.
     socket =
       socket
       |> assign(:kill_candidate, nil)
@@ -128,8 +133,25 @@ defmodule ArbiterWeb.SessionIndexLive do
       |> assign(:launch_can_dispatch?, false)
       # §9.5: on when mode B, which is the default auth mode — see moduledoc.
       |> assign(:launch_remote_control?, true)
-      |> assign(:workspaces, workspaces())
-      |> refresh()
+      |> assign(:workspaces, [])
+      |> assign(:sessions, [])
+      |> assign(:running_count, 0)
+      |> assign(:usage_by_session, %{})
+      |> assign(:sessions_loaded?, false)
+      |> assign(:sessions_loading?, false)
+      |> assign(:sessions_stale?, false)
+      |> assign(:sessions_error, nil)
+      |> assign(:usage_loading?, false)
+      |> assign(:usage_error, nil)
+
+    socket =
+      if connected?(socket) do
+        socket
+        |> start_async(:workspaces, &load_workspaces_task/0)
+        |> refresh()
+      else
+        socket
+      end
 
     {:ok, socket}
   end
@@ -169,6 +191,10 @@ defmodule ArbiterWeb.SessionIndexLive do
   def handle_event("confirm_kill", %{"id" => id}, socket) do
     {:noreply,
      assign(socket, :kill_candidate, Enum.find(socket.assigns.sessions, &(&1.id == id)))}
+  end
+
+  def handle_event("retry_sessions", _params, socket) do
+    {:noreply, socket |> assign(:sessions_error, nil) |> refresh()}
   end
 
   def handle_event("cancel_kill", _params, socket) do
@@ -211,15 +237,120 @@ defmodule ArbiterWeb.SessionIndexLive do
   # with a `handle_info/2` of its own has to tolerate them.
   def handle_info(_message, socket), do: {:noreply, socket}
 
-  defp refresh(socket) do
-    sessions = Sessions.list()
+  # bd-b88x6g: stage 1 of the two-stage load lands here. Every session row
+  # can render off this alone — the usage ledger rollup is stage 2, started
+  # right after, so an operator sees the roster before the cost/tokens
+  # column fills in rather than waiting on both reads before anything shows.
+  @impl true
+  def handle_async(:sessions, {:ok, sessions}, socket) do
     running_count = Enum.count(sessions, &(&1.status == :running))
 
     socket
     |> assign(:sessions, sessions)
     |> assign(:running_count, running_count)
-    |> assign(:usage_by_session, SessionUsage.for_sessions(sessions))
-    |> schedule_usage_refresh(running_count)
+    |> assign(:sessions_loaded?, true)
+    |> assign(:sessions_error, nil)
+    |> assign(:usage_loading?, true)
+    |> assign(:usage_error, nil)
+    |> start_async(:usage, fn -> load_usage_task(sessions) end)
+    |> sessions_read_done()
+  end
+
+  def handle_async(:sessions, {:exit, reason}, socket) do
+    Logger.error("SessionIndexLive: loading sessions failed: #{inspect(reason)}")
+
+    socket
+    |> assign(:sessions_error, describe_exit(reason))
+    |> schedule_usage_refresh(socket.assigns.running_count)
+    |> sessions_read_done()
+  end
+
+  # Stage 2. Re-arms the polling timer only once this lands (ok or failed) —
+  # never from stage 1 — so a tick can never fire while the usage read it
+  # would duplicate is still in flight.
+  def handle_async(:usage, {:ok, usage_by_session}, socket) do
+    socket
+    |> assign(:usage_by_session, usage_by_session)
+    |> assign(:usage_loading?, false)
+    |> assign(:usage_error, nil)
+    |> schedule_usage_refresh(socket.assigns.running_count)
+    |> sessions_read_done()
+  end
+
+  def handle_async(:usage, {:exit, reason}, socket) do
+    Logger.error("SessionIndexLive: loading usage failed: #{inspect(reason)}")
+
+    socket
+    |> assign(:usage_loading?, false)
+    |> assign(:usage_error, describe_exit(reason))
+    |> schedule_usage_refresh(socket.assigns.running_count)
+    |> sessions_read_done()
+  end
+
+  def handle_async(:workspaces, {:ok, workspaces}, socket) do
+    {:noreply, assign(socket, :workspaces, workspaces)}
+  end
+
+  def handle_async(:workspaces, {:exit, reason}, socket) do
+    Logger.error("SessionIndexLive: loading workspaces failed: #{inspect(reason)}")
+    {:noreply, assign(socket, :workspaces, [])}
+  end
+
+  defp describe_exit({%{__exception__: true} = error, _stacktrace}), do: Exception.message(error)
+  defp describe_exit(reason), do: Exception.format_exit(reason)
+
+  # Both stages are one refresh cycle: `sessions_loading?` only drops back to
+  # false once stage 2 lands, so a refresh requested mid-cycle (a lifecycle
+  # broadcast, Kill, the tick) is marked stale instead of starting a second
+  # overlapping stage-1 read — and gets exactly one more full cycle once this
+  # one finishes.
+  defp sessions_read_done(socket) do
+    socket = assign(socket, :sessions_loading?, false)
+    {:noreply, if(socket.assigns.sessions_stale?, do: refresh(socket), else: socket)}
+  end
+
+  defp refresh(%{assigns: %{sessions_loading?: true}} = socket),
+    do: assign(socket, :sessions_stale?, true)
+
+  defp refresh(socket) do
+    socket
+    |> assign(:sessions_loading?, true)
+    |> assign(:sessions_stale?, false)
+    |> start_async(:sessions, &load_sessions_task/0)
+  end
+
+  # The task is linked to this view, so a tab closed mid-read (or a test
+  # tearing down) would kill it mid-query — and a DB client that dies holding
+  # a checkout costs the pool that connection (under test, the shared sandbox
+  # one, bd-5scl0c). Trapping turns the view's exit into a message: the query
+  # in flight finishes, and the task goes before it starts another.
+  defp load_sessions_task do
+    Process.flag(:trap_exit, true)
+    result = Sessions.list()
+    exit_if_view_gone()
+    result
+  end
+
+  defp load_usage_task(sessions) do
+    Process.flag(:trap_exit, true)
+    result = SessionUsage.for_sessions(sessions)
+    exit_if_view_gone()
+    result
+  end
+
+  defp load_workspaces_task do
+    Process.flag(:trap_exit, true)
+    result = workspaces()
+    exit_if_view_gone()
+    result
+  end
+
+  defp exit_if_view_gone do
+    receive do
+      {:EXIT, _view, _reason} -> exit(:shutdown)
+    after
+      0 -> :ok
+    end
   end
 
   defp open_in_dock(socket, id), do: push_event(socket, "session-dock:open", %{id: id})
@@ -456,7 +587,44 @@ defmodule ArbiterWeb.SessionIndexLive do
           meta={"#{@running_count} running"}
           body_class="flex flex-col gap-3"
         >
-          <div :if={@sessions == []} id="sessions-empty">
+          <div
+            :if={not @sessions_loaded? and is_nil(@sessions_error)}
+            id="sessions-loading"
+            class="flex items-center gap-2 p-4 text-[12.5px] text-[var(--text-secondary)]"
+          >
+            <.icon name="hero-arrow-path-micro" class="size-4 shrink-0 animate-spin" />
+            Loading sessions…
+          </div>
+
+          <div
+            :if={@sessions_error}
+            id="sessions-error"
+            role="alert"
+            class="flex items-start gap-3 p-4 rounded-[var(--radius-field)] border border-solid border-[var(--arb-fail-edge)] bg-[var(--arb-fail-wash)] text-[12.5px] text-[var(--arb-fail-text)]"
+          >
+            <.icon
+              name="hero-exclamation-triangle"
+              class="size-5 shrink-0 mt-0.5 text-[var(--arb-fail-text)]"
+            />
+            <div class="grow min-w-0">
+              <p class="font-medium">Could not load sessions</p>
+              <p class="mt-1 text-[12px] opacity-90">{@sessions_error}</p>
+            </div>
+            <button
+              type="button"
+              id="sessions-retry"
+              phx-click="retry_sessions"
+              class={[
+                "shrink-0 px-3 h-[28px] rounded-[var(--radius-field)] cursor-pointer",
+                "border border-solid border-[var(--arb-fail-edge)] bg-[var(--surface-chrome)]",
+                "text-[12px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
+              ]}
+            >
+              Retry
+            </button>
+          </div>
+
+          <div :if={@sessions_loaded? and @sessions == []} id="sessions-empty">
             <Feedback.empty_state
               icon="hero-command-line"
               detail="launching one scaffolds its own workspace, config dir and MCP token"
@@ -465,7 +633,11 @@ defmodule ArbiterWeb.SessionIndexLive do
             </Feedback.empty_state>
           </div>
 
-          <ul :if={@sessions != []} id="sessions-list" class="flex flex-col gap-2">
+          <ul
+            :if={@sessions_loaded? and @sessions != []}
+            id="sessions-list"
+            class="flex flex-col gap-2"
+          >
             <li
               :for={session <- @sessions}
               id={"session-#{session.id}"}
@@ -503,6 +675,8 @@ defmodule ArbiterWeb.SessionIndexLive do
               <.usage_cell
                 session_id={session.id}
                 usage={@usage_by_session[session.provider_session_id]}
+                loading={@usage_loading?}
+                error={@usage_error}
               />
 
               <span :if={session.end_reason} class="text-[11px] text-[var(--text-label)] italic">
@@ -744,6 +918,8 @@ defmodule ArbiterWeb.SessionIndexLive do
   # `$0.00` for a session the ledger has no rows for yet (bd-9mrzti).
   attr :session_id, :string, required: true
   attr :usage, :any, required: true, doc: "an `Arbiter.Usage.summarize/1` rollup, or nil"
+  attr :loading, :boolean, default: false, doc: "stage 2 of the two-stage load is still out"
+  attr :error, :any, default: nil, doc: "stage 2 failed with this message"
 
   defp usage_cell(assigns) do
     ~H"""
@@ -757,7 +933,21 @@ defmodule ArbiterWeb.SessionIndexLive do
       )}<span :if={@usage.estimated}> (estimated)</span>
     </span>
     <span
-      :if={!@usage}
+      :if={!@usage and @loading}
+      id={"session-#{@session_id}-usage-loading"}
+      class="text-[11px] text-[var(--text-label)] italic"
+    >
+      loading usage…
+    </span>
+    <span
+      :if={!@usage and !@loading and @error}
+      id={"session-#{@session_id}-usage-error"}
+      class="text-[11px] text-[var(--arb-fail-text)] italic"
+    >
+      usage unavailable
+    </span>
+    <span
+      :if={!@usage and !@loading and !@error}
       id={"session-#{@session_id}-usage-empty"}
       class="text-[11px] text-[var(--text-label)] italic"
     >

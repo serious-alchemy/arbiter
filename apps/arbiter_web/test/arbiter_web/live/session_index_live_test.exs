@@ -37,6 +37,16 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
     session
   end
 
+  # bd-b88x6g: the session list and the usage ledger rollup both load via
+  # `start_async` on the connected mount now, in two stages. Every test that
+  # wants to see sessions or usage on screen — not the loading state itself —
+  # goes through this helper so it isn't racing either stage.
+  defp live_sessions!(conn) do
+    {:ok, view, _html} = live(conn, ~p"/sessions")
+    html = render_async(view)
+    {:ok, view, html}
+  end
+
   defp put_env(key, value) do
     previous = Application.fetch_env(:arbiter, key)
     Application.put_env(:arbiter, key, value)
@@ -68,7 +78,7 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
       session = launch!()
       {:ok, _ended} = Sessions.kill(session.id)
 
-      {:ok, view, _html} = live(conn, "/sessions")
+      {:ok, view, _html} = live_sessions!(conn)
 
       assert has_element?(view, "#view-transcript-#{session.id}", "View transcript")
       refute has_element?(view, "#open-in-dock-button-#{session.id}")
@@ -78,7 +88,7 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
       session = launch!()
       {:ok, _ended} = Sessions.kill(session.id)
 
-      {:ok, view, _html} = live(conn, "/sessions")
+      {:ok, view, _html} = live_sessions!(conn)
       render_click(element(view, "#view-transcript-#{session.id}"))
 
       assert_push_event(view, "session-dock:open", %{id: id})
@@ -88,7 +98,7 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
     test "a running session still says Open in dock", %{conn: conn} do
       session = launch!()
 
-      {:ok, view, _html} = live(conn, "/sessions")
+      {:ok, view, _html} = live_sessions!(conn)
 
       assert has_element?(view, "#open-in-dock-button-#{session.id}", "Open in dock")
       refute has_element?(view, "#view-transcript-#{session.id}")
@@ -111,7 +121,7 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
 
       {:ok, _ended} = Sessions.kill(session.id, runner: NoopRunner, reason: "done")
 
-      {:ok, view, _html} = live(conn, ~p"/sessions")
+      {:ok, view, _html} = live_sessions!(conn)
 
       assert has_element?(view, "#session-#{session.id}-usage", "$1.50")
       assert has_element?(view, "#session-#{session.id}-usage", "1.0k in")
@@ -130,7 +140,7 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
         raw: %{"arb_usage_source" => %{"cost_source" => "estimated"}}
       })
 
-      {:ok, view, _html} = live(conn, ~p"/sessions")
+      {:ok, view, _html} = live_sessions!(conn)
 
       assert has_element?(view, "#session-#{session.id}-usage", "estimated")
     end
@@ -139,7 +149,7 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
          %{conn: conn} do
       session = launch!()
 
-      {:ok, view, _html} = live(conn, ~p"/sessions")
+      {:ok, view, _html} = live_sessions!(conn)
 
       assert has_element?(view, "#session-#{session.id}-usage-empty")
       refute has_element?(view, "#session-#{session.id}-usage", "$0.00")
@@ -151,7 +161,7 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
       session = launch!()
       {:ok, _} = Sessions.record_provider_session(session, "prov-running-1")
 
-      {:ok, view, _html} = live(conn, ~p"/sessions")
+      {:ok, view, _html} = live_sessions!(conn)
 
       assert has_element?(view, "#session-#{session.id}-usage-empty")
 
@@ -164,6 +174,7 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
       })
 
       send(view.pid, :refresh_session_usage)
+      render_async(view)
 
       assert has_element?(view, "#session-#{session.id}-usage", "$0.75")
       refute has_element?(view, "#session-#{session.id}-usage-empty")
@@ -177,7 +188,7 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
     end
 
     test "shows an empty state when nothing has ever been launched", %{conn: conn} do
-      {:ok, view, _html} = live(conn, ~p"/sessions")
+      {:ok, view, _html} = live_sessions!(conn)
 
       assert has_element?(view, "#sessions-empty")
       refute has_element?(view, "#sessions-list")
@@ -187,7 +198,7 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
       older = launch!()
       newer = launch!()
 
-      {:ok, view, html} = live(conn, ~p"/sessions")
+      {:ok, view, html} = live_sessions!(conn)
 
       assert has_element?(view, "#session-#{older.id}")
       assert has_element?(view, "#session-#{newer.id}")
@@ -208,7 +219,7 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
     test "the cwd label never forces horizontal scroll on a phone-width viewport", %{conn: conn} do
       launch!()
 
-      {:ok, _view, html} = live(conn, ~p"/sessions")
+      {:ok, _view, html} = live_sessions!(conn)
 
       # A bare `max-w-[26rem]` (416px) is wider than a 375px viewport minus
       # padding, and a flex item with no shrink basis holds that width even
@@ -222,7 +233,7 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
       named = launch!(name: "refinement session")
       unnamed = launch!()
 
-      {:ok, view, html} = live(conn, ~p"/sessions")
+      {:ok, view, html} = live_sessions!(conn)
 
       assert html =~ "refinement session"
 
@@ -243,7 +254,7 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
       session = launch!()
       {:ok, _ended} = Sessions.kill(session.id, runner: NoopRunner, reason: "killed by hand")
 
-      {:ok, view, html} = live(conn, ~p"/sessions")
+      {:ok, view, html} = live_sessions!(conn)
 
       assert has_element?(view, "#session-#{session.id}")
       assert html =~ "killed by hand"
@@ -252,7 +263,7 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
     test "a session ending on its own (no Kill click) updates the list live, via PubSub (bd-bsdeb2)",
          %{conn: conn} do
       session = launch!()
-      {:ok, view, _html} = live(conn, ~p"/sessions")
+      {:ok, view, _html} = live_sessions!(conn)
 
       assert has_element?(view, "#session-#{session.id}", "running")
 
@@ -261,7 +272,7 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
       # place that runs, no Kill click involved.
       {:ok, _ended} = Sessions.mark_ended(session, "exited")
 
-      assert render(view) =~ "exited"
+      assert render_async(view) =~ "exited"
       assert has_element?(view, "#session-#{session.id}", "ended")
     end
 
@@ -270,7 +281,7 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
       session = launch!(remote_control: true)
       {:ok, session} = Sessions.mark_bridge_unavailable(session)
 
-      {:ok, view, _html} = live(conn, ~p"/sessions")
+      {:ok, view, _html} = live_sessions!(conn)
 
       assert has_element?(view, "#session-#{session.id}", "remote control bridge unavailable")
     end
@@ -279,10 +290,117 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
          %{conn: conn} do
       session = launch!(remote_control: true)
 
-      {:ok, view, _html} = live(conn, ~p"/sessions")
+      {:ok, view, _html} = live_sessions!(conn)
 
       assert has_element?(view, "#session-#{session.id}", "remote control requested")
       refute has_element?(view, "#session-#{session.id}", "remote control bridge unavailable")
+    end
+  end
+
+  # bd-b88x6g: the session list is a `start_async/3` read on the connected
+  # mount, not a synchronous one in `mount/3` — the dead render draws nothing
+  # but the loading state, and a slow or failed read can never hold the
+  # LiveView process itself.
+  describe "the async session load (bd-b88x6g)" do
+    setup do
+      :meck.new(Sessions, [:passthrough, :no_link])
+      on_exit(fn -> :meck.unload(Sessions) end)
+      :ok
+    end
+
+    # Holds the read in its loader until the test says go, so the loading
+    # state is something to assert on rather than a race. A read the test
+    # never releases gives up well inside the render_async default timeout
+    # and reports itself, so the test fails on `refute_held_load/0`, not on a
+    # `render_async` timeout.
+    defp hold_sessions_load do
+      test = self()
+
+      :meck.expect(Sessions, :list, fn ->
+        sessions = :meck.passthrough([])
+        send(test, {:loading_sessions, self()})
+
+        receive do
+          :release -> :ok
+        after
+          1_000 -> send(test, {:unreleased_sessions_load, self()})
+        end
+
+        sessions
+      end)
+    end
+
+    defp refute_held_load, do: refute_received({:unreleased_sessions_load, _})
+
+    test "the dead render shows the loading state and reads nothing", %{conn: conn} do
+      test = self()
+      :meck.expect(Sessions, :list, fn -> send(test, :sessions_read) && :meck.passthrough([]) end)
+
+      html = conn |> get(~p"/sessions") |> html_response(200)
+
+      assert html =~ ~s(id="sessions-loading")
+      refute html =~ ~s(id="sessions-list")
+      refute_received :sessions_read
+    end
+
+    test "renders a loading state, then the session list", %{conn: conn} do
+      session = launch!()
+      hold_sessions_load()
+
+      {:ok, view, _html} = live(conn, ~p"/sessions")
+      assert_receive {:loading_sessions, loader}
+
+      assert has_element?(view, "#sessions-loading")
+      refute has_element?(view, "#session-#{session.id}")
+
+      send(loader, :release)
+      render_async(view)
+
+      refute has_element?(view, "#sessions-loading")
+      assert has_element?(view, "#session-#{session.id}")
+      refute_held_load()
+    end
+
+    @tag :capture_log
+    test "a failed load renders an inline error, and Retry recovers", %{conn: conn} do
+      session = launch!()
+      :meck.expect(Sessions, :list, fn -> raise "database is locked" end)
+
+      {:ok, view, _html} = live(conn, ~p"/sessions")
+      render_async(view)
+
+      assert has_element?(view, "#sessions-error", "database is locked")
+      refute has_element?(view, "#sessions-loading")
+      refute has_element?(view, "#session-#{session.id}")
+
+      :meck.expect(Sessions, :list, fn -> :meck.passthrough([]) end)
+      view |> element("#sessions-retry") |> render_click()
+      render_async(view)
+
+      refute has_element?(view, "#sessions-error")
+      assert has_element?(view, "#session-#{session.id}")
+    end
+
+    # bd-b88x6g round 2: a stage-2 (usage) failure must say so per row, not
+    # fall through to the "no usage data" empty state — that phrasing is for
+    # a session the ledger genuinely has no rows for yet (bd-9mrzti), and
+    # reusing it here would tell the operator there is no cost data when the
+    # read actually failed.
+    @tag :capture_log
+    test "a failed usage load renders an inline per-row error, not the empty state", %{
+      conn: conn
+    } do
+      session = launch!()
+      :meck.new(ArbiterWeb.SessionUsage, [:passthrough, :no_link])
+      on_exit(fn -> :meck.unload(ArbiterWeb.SessionUsage) end)
+
+      :meck.expect(ArbiterWeb.SessionUsage, :for_sessions, fn _sessions -> raise "ledger down" end)
+
+      {:ok, view, _html} = live(conn, ~p"/sessions")
+      render_async(view)
+
+      assert has_element?(view, "#session-#{session.id}-usage-error")
+      refute has_element?(view, "#session-#{session.id}-usage-empty")
     end
   end
 
@@ -292,7 +410,7 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
     # page, so a redirect would only have thrown away what was on screen.
     test "the launch button provisions a session with the phase-5 defaults and opens it in the dock",
          %{conn: conn} do
-      {:ok, view, _html} = live(conn, ~p"/sessions")
+      {:ok, view, _html} = live_sessions!(conn)
 
       assert has_element?(view, "#launch-session")
 
@@ -317,7 +435,7 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
     end
 
     test "an operator-supplied name reaches the session row (bd-o2vtsz)", %{conn: conn} do
-      {:ok, view, _html} = live(conn, ~p"/sessions")
+      {:ok, view, _html} = live_sessions!(conn)
 
       view
       |> form("#launch-session-form", %{"name" => "refinement session"})
@@ -328,7 +446,7 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
     end
 
     test "a blank name launches with no name, same as leaving it empty", %{conn: conn} do
-      {:ok, view, _html} = live(conn, ~p"/sessions")
+      {:ok, view, _html} = live_sessions!(conn)
 
       view |> form("#launch-session-form", %{"name" => "   "}) |> render_submit()
 
@@ -339,7 +457,7 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
     test "a failed launch reports why and leaves the operator on the list", %{conn: conn} do
       put_env(:sessions_runner, Arbiter.Test.FailingSessionRunner)
 
-      {:ok, view, _html} = live(conn, ~p"/sessions")
+      {:ok, view, _html} = live_sessions!(conn)
 
       html = view |> form("#launch-session-form") |> render_submit()
 
@@ -353,7 +471,7 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
       {:ok, workspace} =
         Ash.create(Arbiter.Tasks.Workspace, %{name: "acme-web", prefix: "aw"})
 
-      {:ok, view, _html} = live(conn, ~p"/sessions")
+      {:ok, view, _html} = live_sessions!(conn)
 
       assert has_element?(view, "#launch-session-workspace-id")
       assert render(view) =~ workspace.name
@@ -368,7 +486,7 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
       {:ok, workspace} =
         Ash.create(Arbiter.Tasks.Workspace, %{name: "acme-web2", prefix: "aw2"})
 
-      {:ok, view, _html} = live(conn, ~p"/sessions")
+      {:ok, view, _html} = live_sessions!(conn)
 
       view
       |> form("#launch-session-form", %{"workspace_id" => workspace.id})
@@ -383,7 +501,7 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
       {:ok, workspace} =
         Ash.create(Arbiter.Tasks.Workspace, %{name: "acme-web3", prefix: "aw3"})
 
-      {:ok, view, _html} = live(conn, ~p"/sessions")
+      {:ok, view, _html} = live_sessions!(conn)
 
       view
       |> form("#launch-session-form", %{"workspace_id" => workspace.id, "can_dispatch" => "true"})
@@ -423,7 +541,7 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
       # submit from sending one that doesn't — `launch_workspace_id/2` must
       # refuse it rather than binding the session to a workspace that isn't
       # there (review finding, phase 11 round 4).
-      {:ok, view, _html} = live(conn, ~p"/sessions")
+      {:ok, view, _html} = live_sessions!(conn)
 
       # `form/3` refuses to build a submit with a `<select>` value outside
       # its own `<option>` list, so this goes straight at the event — the
@@ -437,7 +555,7 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
 
   describe "can_dispatch in the launch form (§10.1)" do
     test "defaults off", %{conn: conn} do
-      {:ok, view, _html} = live(conn, ~p"/sessions")
+      {:ok, view, _html} = live_sessions!(conn)
 
       refute has_element?(view, "#launch-session-can-dispatch[checked]")
 
@@ -448,7 +566,7 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
     end
 
     test "checking the box turns it on explicitly", %{conn: conn} do
-      {:ok, view, _html} = live(conn, ~p"/sessions")
+      {:ok, view, _html} = live_sessions!(conn)
 
       view
       |> form("#launch-session-form", %{"can_dispatch" => "true"})
@@ -460,7 +578,7 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
 
     test "a second launch from the same view does not inherit the prior can_dispatch choice",
          %{conn: conn} do
-      {:ok, view, _html} = live(conn, ~p"/sessions")
+      {:ok, view, _html} = live_sessions!(conn)
 
       # `render_change` first, so `can_dispatch: true` is actually latched
       # onto the server assign before the launch that must clear it —
@@ -496,7 +614,7 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
       # server-side, the browser's uncontrolled value survives and a second
       # submit with no `name` param would silently reuse the first session's
       # name (review finding, phase 11 round 4).
-      {:ok, view, _html} = live(conn, ~p"/sessions")
+      {:ok, view, _html} = live_sessions!(conn)
 
       view
       |> form("#launch-session-form", %{"name" => "first"})
@@ -515,7 +633,7 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
 
     test "switching to mode A un-checks a previously-checked Remote Control box",
          %{conn: conn} do
-      {:ok, view, _html} = live(conn, ~p"/sessions")
+      {:ok, view, _html} = live_sessions!(conn)
 
       view
       |> form("#launch-session-form", %{"remote_control" => "true"})
@@ -537,7 +655,7 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
       # §9.5's table: "on when mode B" — a fresh launch panel must arrive
       # checked, not merely enabled (review finding, phase 11 round 4: this
       # shipped off by default through round 3).
-      {:ok, view, _html} = live(conn, ~p"/sessions")
+      {:ok, view, _html} = live_sessions!(conn)
 
       refute has_element?(view, "#launch-session-remote-control[disabled]")
       refute has_element?(view, "#launch-session-remote-control-reason")
@@ -550,7 +668,7 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
     end
 
     test "selecting mode A disables the checkbox and shows the reason", %{conn: conn} do
-      {:ok, view, _html} = live(conn, ~p"/sessions")
+      {:ok, view, _html} = live_sessions!(conn)
 
       html =
         view
@@ -563,7 +681,7 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
     end
 
     test "switching back to mode B re-enables the checkbox", %{conn: conn} do
-      {:ok, view, _html} = live(conn, ~p"/sessions")
+      {:ok, view, _html} = live_sessions!(conn)
 
       view
       |> form("#launch-session-form", %{"auth_mode" => "oauth_token"})
@@ -585,7 +703,7 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
       # from "never touched here". Coming back to mode B must re-arrive
       # checked per §9.5, not carry the disabled box's blank state forward
       # (review finding, phase 11 round 4).
-      {:ok, view, _html} = live(conn, ~p"/sessions")
+      {:ok, view, _html} = live_sessions!(conn)
 
       view
       |> form("#launch-session-form", %{"auth_mode" => "oauth_token"})
@@ -602,7 +720,7 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
 
     test "launching under mode B with the box checked records remote_control: true",
          %{conn: conn} do
-      {:ok, view, _html} = live(conn, ~p"/sessions")
+      {:ok, view, _html} = live_sessions!(conn)
 
       view
       |> form("#launch-session-form", %{
@@ -618,7 +736,7 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
 
     test "a submission that spoofs remote_control under mode A is still refused server-side",
          %{conn: conn} do
-      {:ok, view, _html} = live(conn, ~p"/sessions")
+      {:ok, view, _html} = live_sessions!(conn)
 
       # The disabled attribute stops a normal click, but `render_submit/1`
       # posts whatever params it is given — proving `launch_defaults/1`'s own
@@ -642,7 +760,7 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
 
   describe "provider in the launch form (bd-7xuvfl)" do
     test "defaults to Claude Code and offers agy", %{conn: conn} do
-      {:ok, view, _html} = live(conn, ~p"/sessions")
+      {:ok, view, _html} = live_sessions!(conn)
 
       assert has_element?(
                view,
@@ -657,7 +775,7 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
     end
 
     test "choosing agy launches an agy session, mode B with no Remote Control", %{conn: conn} do
-      {:ok, view, _html} = live(conn, ~p"/sessions")
+      {:ok, view, _html} = live_sessions!(conn)
 
       view
       |> form("#launch-session-form", %{"provider" => "agy", "remote_control" => "true"})
@@ -672,7 +790,7 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
     end
 
     test "agy disables the Claude-only options and says why", %{conn: conn} do
-      {:ok, view, _html} = live(conn, ~p"/sessions")
+      {:ok, view, _html} = live_sessions!(conn)
 
       view |> form("#launch-session-form", %{"provider" => "agy"}) |> render_change()
 
@@ -703,11 +821,11 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
       assert ArbiterWebSessionIndex.launch_defaults(%{"provider" => "not_a_provider"})[:provider] ==
                :claude_code
 
-      {:ok, _view, _html} = live(conn, ~p"/sessions")
+      {:ok, _view, _html} = live_sessions!(conn)
     end
 
     test "a second launch does not inherit the prior provider choice", %{conn: conn} do
-      {:ok, view, _html} = live(conn, ~p"/sessions")
+      {:ok, view, _html} = live_sessions!(conn)
 
       view |> form("#launch-session-form", %{"provider" => "agy"}) |> render_submit()
 
@@ -722,7 +840,7 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
     test "kill asks for confirmation first and does nothing until it gets one", %{conn: conn} do
       session = launch!()
 
-      {:ok, view, _html} = live(conn, ~p"/sessions")
+      {:ok, view, _html} = live_sessions!(conn)
 
       refute has_element?(view, "#kill-session-modal")
 
@@ -740,10 +858,11 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
     test "confirming the kill ends the session and says so in the list", %{conn: conn} do
       session = launch!()
 
-      {:ok, view, _html} = live(conn, ~p"/sessions")
+      {:ok, view, _html} = live_sessions!(conn)
 
       view |> element("#kill-session-#{session.id}") |> render_click()
-      html = view |> element("#confirm-kill") |> render_click()
+      view |> element("#confirm-kill") |> render_click()
+      html = render_async(view)
 
       assert {:ok, %{status: :ended}} = Sessions.get(session.id)
       refute has_element?(view, "#kill-session-modal")
