@@ -1829,9 +1829,24 @@ defmodule Arbiter.MCP.ToolsTest do
       assert message =~ "live worker" or message =~ "worker"
     end
 
-    test "refuses to demote a task that is in_progress", ctx do
+    test "demotes an in_progress task with no live worker, resetting it to open", ctx do
       {:ok, _} = Ash.update(ctx.task, %{}, action: :promote_to_ready)
       {:ok, _} = Ash.update(ctx.task, %{status: :in_progress}, action: :update)
+
+      assert {:ok, %{refined: false, status: "open"}} =
+               Tools.task_demote(ctx.coordinator, %{"id" => ctx.task.id})
+    end
+
+    test "refuses to demote an in_progress task with a live worker", ctx do
+      {:ok, _} = Ash.update(ctx.task, %{}, action: :promote_to_ready)
+      {:ok, _} = Ash.update(ctx.task, %{status: :in_progress}, action: :update)
+
+      via = Arbiter.Worker.Registry.via_tuple(ctx.task.id)
+
+      start_supervised!(%{
+        id: :fake_live_worker,
+        start: {Agent, :start_link, [fn -> :ok end, [name: via]]}
+      })
 
       assert {:error, {:invalid, message}} =
                Tools.task_demote(ctx.coordinator, %{"id" => ctx.task.id})

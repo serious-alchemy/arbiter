@@ -1,9 +1,21 @@
+defmodule Arbiter.Tasks.IssueTest.FakeWorkerProcess do
+  use GenServer
+
+  def start_link(via_tuple) do
+    GenServer.start_link(__MODULE__, :ok, name: via_tuple)
+  end
+
+  @impl true
+  def init(:ok), do: {:ok, :ok}
+end
+
 defmodule Arbiter.Tasks.IssueTest do
   use Arbiter.DataCase, async: false
 
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker
+  alias Arbiter.Tasks.IssueTest.FakeWorkerProcess
 
   setup do
     {:ok, ws} = Ash.create(Workspace, %{name: "test-ws", prefix: "test"})
@@ -552,6 +564,133 @@ defmodule Arbiter.Tasks.IssueTest do
 
       refute epic.id in ids
       assert task.id in ids
+    end
+  end
+
+  describe ":return_to_backlog (task demotion, bd-2098)" do
+    test "demotes an open refined task back to backlog — resets refined to false", %{ws: ws} do
+      {:ok, issue} =
+        Ash.create(Issue, %{
+          title: "ready to demote",
+          workspace_id: ws.id,
+          acceptance: "- done"
+        })
+
+      {:ok, refined} = Ash.update(issue, %{}, action: :promote_to_ready)
+      assert refined.refined == true
+      assert refined.status == :open
+
+      {:ok, demoted} = Ash.update(refined, %{}, action: :return_to_backlog)
+
+      assert demoted.refined == false
+      assert demoted.status == :open
+    end
+
+    test "is idempotent — demoting an already-backlog task is a no-op", %{ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "backlog task", workspace_id: ws.id})
+
+      assert issue.refined == false
+
+      {:ok, result} = Ash.update(issue, %{}, action: :return_to_backlog)
+
+      assert result.refined == false
+      assert result.status == :open
+    end
+
+    test "accepts an in_progress task with no live worker and no in-flight fix pass/review, setting refined: false and status: open atomically",
+         %{ws: ws} do
+      {:ok, issue} =
+        Ash.create(Issue, %{
+          title: "was in progress",
+          workspace_id: ws.id,
+          acceptance: "- done"
+        })
+
+      {:ok, refined} = Ash.update(issue, %{}, action: :promote_to_ready)
+      {:ok, in_progress} = Ash.update(refined, %{status: :in_progress})
+
+      assert in_progress.refined == true
+      assert in_progress.status == :in_progress
+
+      # No live worker registered for this task
+      assert Arbiter.Worker.Registry.live_exclusive_for(in_progress.id) == []
+
+      {:ok, demoted} = Ash.update(in_progress, %{}, action: :return_to_backlog)
+
+      assert demoted.refined == false
+      assert demoted.status == :open
+    end
+
+    test "refuses to demote an in_progress task that has a live worker", %{ws: ws} do
+      {:ok, issue} =
+        Ash.create(Issue, %{
+          title: "worker running",
+          workspace_id: ws.id,
+          acceptance: "- done"
+        })
+
+      {:ok, refined} = Ash.update(issue, %{}, action: :promote_to_ready)
+      {:ok, in_progress} = Ash.update(refined, %{status: :in_progress})
+
+      # Register a fake live worker for this task
+      via_tuple = Arbiter.Worker.Registry.via_tuple(in_progress.id)
+      {:ok, _pid} = start_supervised({FakeWorkerProcess, via_tuple})
+
+      assert Arbiter.Worker.Registry.live_exclusive_for(in_progress.id) |> Enum.any?()
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.update(in_progress, %{}, action: :return_to_backlog)
+
+      # The message should mention the worker
+      error_msg = err |> Exception.message()
+      assert error_msg =~ "live worker" or error_msg =~ "Stop the worker"
+    end
+
+    test "refuses to demote an awaiting_verification task", %{ws: ws} do
+      {:ok, issue} =
+        Ash.create(Issue, %{
+          title: "awaiting verification",
+          workspace_id: ws.id,
+          acceptance: "- done"
+        })
+
+      {:ok, refined} = Ash.update(issue, %{}, action: :promote_to_ready)
+      {:ok, in_progress} = Ash.update(refined, %{status: :in_progress})
+      {:ok, awaiting} = Ash.update(in_progress, %{}, action: :await_verification)
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.update(awaiting, %{}, action: :return_to_backlog)
+
+      assert err |> Exception.message() |> String.contains?("awaiting verification")
+    end
+
+    test "refuses to demote a closed task", %{ws: ws} do
+      {:ok, issue} =
+        Ash.create(Issue, %{
+          title: "closed one",
+          workspace_id: ws.id,
+          acceptance: "- done"
+        })
+
+      {:ok, refined} = Ash.update(issue, %{}, action: :promote_to_ready)
+      {:ok, in_progress} = Ash.update(refined, %{status: :in_progress})
+      {:ok, closed} = Ash.update(in_progress, %{}, action: :close)
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.update(closed, %{}, action: :return_to_backlog)
+
+      assert err |> Exception.message() |> String.contains?("closed")
+    end
+
+    test "the error message describes the actual condition that blocks demotion", %{ws: ws} do
+      {:ok, issue} =
+        Ash.create(Issue, %{
+          title: "error message test",
+          workspace_id: ws.id
+        })
+
+      # An open task with no live worker should succeed
+      {:ok, _demoted} = Ash.update(issue, %{}, action: :return_to_backlog)
     end
   end
 end

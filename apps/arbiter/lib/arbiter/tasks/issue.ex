@@ -580,6 +580,7 @@ defmodule Arbiter.Tasks.Issue do
       require_atomic? false
 
       change {Arbiter.Tasks.Issue.Changes.GuardDemote, []}
+      change {Arbiter.Tasks.Issue.Changes.ResetDemotedTaskStatus, []}
       change set_attribute(:refined, false)
 
       # Broadcast the demotion event, same pattern as `:promote_to_ready`.

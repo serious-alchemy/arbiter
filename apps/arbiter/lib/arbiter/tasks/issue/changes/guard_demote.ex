@@ -3,12 +3,15 @@ defmodule Arbiter.Tasks.Issue.Changes.GuardDemote do
   Enforces preconditions for the `:return_to_backlog` action.
 
   A task can only be demoted (refined: true → false) if:
-  1. It has no live worker (task is not currently being executed)
-  2. Its status is :open (undispatch, or not yet started)
+  1. It has no live exclusive worker (task's own worker, fix pass, or conflict resolver)
+  2. Its status is :open or :in_progress with no live worker
 
-  Demoting a task that is :in_progress, :awaiting_verification, or :closed
-  is refused because those states represent active or completed work —
-  moving them back to Backlog would orphan the worker or undo completed work.
+  Demoting a task that is :in_progress with a live worker, :awaiting_verification,
+  or :closed is refused because those states represent active or completed work.
+
+  When demoting an :in_progress task with no live worker, atomically sets both
+  refined: false and status: open, preventing Autopilot from re-grabbing it
+  between the two updates.
 
   Idempotent by construction — demoting an already-backlog task is a no-op.
   """
@@ -37,14 +40,20 @@ defmodule Arbiter.Tasks.Issue.Changes.GuardDemote do
       current_refined == false ->
         cs
 
-      # Refuse if status is :in_progress (task is actively being worked on)
+      # Refuse if status is :in_progress but only if there's a live worker
       current_status == :in_progress ->
-        Changeset.add_error(cs,
-          field: :refined,
-          message:
-            "Cannot demote a task that is in progress. Stop the worker first " <>
-              "or wait for it to complete."
-        )
+        if has_live_workers?(task_id) do
+          Changeset.add_error(cs,
+            field: :refined,
+            message:
+              "Cannot demote a task that is in progress with a live worker. Stop the worker first " <>
+                "(`arb worker stop #{task_id}`) before demoting."
+          )
+        else
+          # No live worker: allow demotion
+          # The status will be changed to open by a separate change in the action
+          cs
+        end
 
       # Refuse if status is :awaiting_verification
       current_status == :awaiting_verification ->
@@ -62,7 +71,7 @@ defmodule Arbiter.Tasks.Issue.Changes.GuardDemote do
           message: "Cannot demote a closed task. Only undispatched or open tasks can be demoted."
         )
 
-      # Check for live workers
+      # Check for live workers in other status
       has_live_workers?(task_id) ->
         Changeset.add_error(cs,
           field: :refined,
