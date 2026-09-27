@@ -45,6 +45,9 @@ defmodule ArbiterWeb.BoardAgentsLiveTest do
       Ash.create(Issue, %{title: title, workspace_id: ws.id, acceptance: "- fixture"})
 
     {:ok, issue} = Ash.update(issue, %{}, action: :promote_to_ready)
+    # In progress, as a dispatch leaves it before its worker starts — the
+    # state the slot count reads (bd-asxw4e).
+    {:ok, issue} = Issue.start_work(issue)
     issue
   end
 
@@ -60,8 +63,7 @@ defmodule ArbiterWeb.BoardAgentsLiveTest do
     slots = view |> element("#board-slots") |> render()
 
     # The record is `running`; no agent is live for it, so the agent count is
-    # 0 — but the task is still in flight (bd-45pwo1), so it still holds its
-    # one slot.
+    # 0 — but the ticket is In progress (bd-asxw4e), so it holds its one slot.
     assert slots =~ "agents live: 0"
     assert slots =~ "slots used: 1"
   end
@@ -98,8 +100,8 @@ defmodule ArbiterWeb.BoardAgentsLiveTest do
     render_async(view, @async_timeout)
 
     slots = view |> element("#board-slots") |> render()
-    # One live agent (the busy worker's OS subprocess), but two tasks still
-    # in flight — bd-45pwo1: the quiet one holds its slot too.
+    # One live agent (the busy worker's OS subprocess), but two tickets In
+    # progress — bd-asxw4e: the quiet one holds its slot too.
     assert slots =~ "agents live: 1"
     assert slots =~ "slots used: 2"
 

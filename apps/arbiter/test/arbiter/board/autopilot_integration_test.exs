@@ -209,14 +209,28 @@ defmodule Arbiter.Board.AutopilotIntegrationTest do
     assert_receive {:dispatched, ^promoted}
   end
 
-  test "an operator's hand-ranking decides which card goes next", %{ws: ws} do
-    _leader = issue(ws, "what the machine would pick", %{priority: 0})
-    underdog = issue(ws, "what the operator wants", %{priority: 3})
+  # bd-asxw4e: Autopilot dispatches in the persisted order — priority, then
+  # rank — not the LiveView's session-only `ready_order`.
+  test "within a priority band the lower rank goes next, whatever the creation order", %{
+    ws: ws
+  } do
+    first_filed = issue(ws, "filed first", %{priority: 2})
+    ranked_ahead = issue(ws, "ranked ahead", %{priority: 2})
+    assert first_filed.rank < ranked_ahead.rank
+
+    # No rank-writing action until the drag-to-rank child (bd-79w1fs).
+    Ecto.Adapters.SQL.query!(Arbiter.Repo, "UPDATE issues SET rank = ? WHERE id = ?", [
+      first_filed.rank - 1,
+      ranked_ahead.id
+    ])
 
     pid = start_autopilot()
 
-    assert %{promote: promoted} = Autopilot.board(pid, ready_order: [underdog.id])
-    assert promoted == underdog.id
+    assert %{promote: promoted} = Autopilot.board(pid, ready_order: [first_filed.id])
+    assert promoted == ranked_ahead.id
+
+    assert {:ok, ^promoted} = Autopilot.tick(pid)
+    assert_receive {:dispatched, ^promoted}
   end
 
   # `Arbiter.Board.AutopilotTest` covers the retry/escalation bookkeeping

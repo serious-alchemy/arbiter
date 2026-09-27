@@ -1,11 +1,13 @@
 # Ticket Lifecycle — Design Document
 
-**Status:** in progress — children 1 (stored state) and 2 (the view) of 13 implemented
+**Status:** in progress — children 1 (stored state), 2 (the view) and 3 (the scheduler) of 13 implemented
 **Last updated:** 2026-09-27
 **Epic:** bd-9yqspm (refined with the operator on 2026-09-27)
 **Code:** `Arbiter.Tasks.Lifecycle` (the table), `Arbiter.Tasks.Issue` (the
 actions), `Arbiter.Tasks.Issue.Changes.Transition` (applies a transition),
-`Arbiter.Tasks.Lifecycle.View` (the projection every surface reads)
+`Arbiter.Tasks.Lifecycle.View` (the projection every surface reads),
+`Arbiter.Tasks.Lifecycle.Dispatchable` (the dispatch-eligibility predicate),
+`Arbiter.Tasks.SlotGate` (the slot count)
 
 ---
 
@@ -259,9 +261,10 @@ it in bd-36ytcl):
   already stopped (bd-2098). `Changes.FollowLegacyStatus` re-derives `state`
   from the row by the backfill rule, so the two never disagree. It is the only
   writer of `state` besides the transitions and `:create`.
-- **A manual dispatch from Backlog** has no transition either: bd-asxw4e puts
-  it behind `--force`. Until then, `Issue.start_work/2` keeps its legacy
-  single write (`status: :in_progress`), and the state follows it to `active`.
+- **A manual dispatch from Backlog** has no transition either. Since bd-asxw4e
+  it needs `--force` (and is recorded); the forced dispatch still goes through
+  `Issue.start_work/2`'s legacy single write (`status: :in_progress`), and the
+  state follows it to `active`.
 - **`await_verification` is stricter than the old status guard**, which
   allowed `open`. A merge that lands while its ticket sits in the queue (a
   requeue after the PR opened, or a merge by hand) is put to work first by
@@ -339,3 +342,86 @@ columns onto today's five:
 
 The primary author row decides, not a subordinate fix or conflict pass
 sharing its id; a ticket gets exactly one card.
+
+---
+
+## Child 3 (bd-asxw4e): the scheduler on ticket state
+
+### A slot is a ticket In progress
+
+`SlotGate.slots_used/1` counts the tickets whose stored state is `:active`
+(`holds_slot?/1`; epics never count). The worker rows are not an input:
+
+| ticket | before (author row's `Worker.Phase`) | now |
+|---|---|---|
+| between ReviewGate rounds, no agent live | held (`handing_off`) | held — `:active` (bd-45pwo1 still holds) |
+| parked on a human (`:waiting_on_you`) | **released** | held — `:active`, with attention |
+| open PR (`waiting_ci_merge`) | held | released — `:merging` |
+| `:unknown` liveness probe | held | whatever the state says |
+| merged, waiting on verification | released | released — `:verifying` |
+
+This replaces the operator's 2026-09-21 rule "another slot doesn't open until
+the issue occupying it is merged" (confirmed 2026-09-27). The board header's
+`slots_used`, `scheduler_status` (`Board.Drain.status/1`: `slots_used`,
+`slot_holders`; `arb scheduler status` prints them) and `ResumeSlot` all read
+this one count. `conductor_slot_basis` now only changes `agents live`.
+
+The count is fleet-wide, like the board it sits on: the cap it is measured
+against is the default workspace's (#1359, unchanged).
+
+### ResumeSlot
+
+A resume of an `:active` ticket needs no new slot, whatever its worker did
+(parked, failed mid hand-off, cut off by a restart). Any other state —
+`:queued`, `:merging`, `:verifying` — must acquire one: refused for a human at
+a full cap (`force` goes over, recorded), deferred to Autopilot for an
+automatic caller. An admitted resume of a `:merging` ticket (a revise round on
+its PR) moves it back to `:active` (`return_to_work`), so the round holds the
+slot it was admitted into. The boot reconciler resumes `:active` tickets
+first.
+
+### One dispatch-eligibility predicate
+
+`Lifecycle.dispatchable(ticket, ctx)` is `:ok` when the ticket's column is
+`:ready` and the scheduler holds nothing against it, else `{:held, hold}`:
+
+| precedence | hold | phrased |
+|---|---|---|
+| 1 | `{:column, :backlog}` | in Backlog |
+| 1 | `{:blocked_by, ids}` | blocked by ids |
+| 1 | `{:column, :in_progress \| :merging \| :verifying \| :closed}` | already In progress, … |
+| 2 | `{:conflicts_with, id}` | conflicts with id |
+| 3 | `{:file_overlap, files, id}` | files in flight on id |
+| 4 | `:paused` | scheduler paused |
+| 5 | `{:quota, reason}` | the reason |
+| 6 | `:no_slot` | no free worker slot |
+
+Every hold is an input; one the caller does not pass is not asked about.
+
+- **`Board.Scheduler.plan/1`** asks it for every Ready card with every hold,
+  and keeps its queue semantics on top: only the head carries a board-wide
+  hold (quota, slot), paused holds every eligible card, a card's own hold
+  never advances the queue position. The card reasons are unchanged.
+- **`Worker.Dispatch`** asks it with the ticket's open blockers
+  (`EdgeGate.blockers_of/1`) and no scheduler holds — a dispatch that reaches
+  it was either planned by the scheduler or is a person overriding it:
+
+  | caller | Backlog / Blocked | In progress / Merging / Verifying | Closed |
+  |---|---|---|---|
+  | Autopilot (`dispatched_by: "autopilot"`) | refused `task_not_ready` | refused `task_not_ready` | refused |
+  | manual (`arb dispatch`, MCP `worker_dispatch`, REST, the task page) | refused `not_dispatchable` with the reason, unless `force` | passes (a re-dispatch) | refused |
+  | resume, review | passes | passes | refused |
+
+  A forced dispatch of a Backlog or Blocked ticket writes a `dispatch_forced`
+  event (`task_id`, `bypassed`, `column`, `blocked_by`, `dispatched_by`).
+  PRPatrol's auto-filed follow-ups are created in Backlog and dispatched at
+  once, so they force — recorded as `dispatched_by: "pr_patrol"`.
+
+### Order
+
+`Scheduler.order/1` sorts Ready by priority, then `rank`, then `created_at`
+— the order the board shows and Autopilot dispatches in. The LiveView's
+session-only `ready_order` hand-ranking is gone: Autopilot never saw it. A
+reorder drag on the board now explains itself and changes nothing until
+drag-to-rank writes `rank` (bd-79w1fs).
+

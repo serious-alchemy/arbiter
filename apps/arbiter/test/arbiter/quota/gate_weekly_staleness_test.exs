@@ -258,7 +258,9 @@ defmodule Arbiter.Quota.GateWeeklyStalenessTest do
 
       # ...and the dispatch path Autopilot calls (`Dispatch.dispatch/1`) holds
       # it anyway, which is the choke point that actually matters.
-      assert {:error, {:quota_held, held_id}} = Dispatch.dispatch(task.id, start_driver: false)
+      assert {:error, {:quota_held, held_id}} =
+               Dispatch.dispatch(task.id, force: true, start_driver: false)
+
       assert held_id == task.id
 
       {:ok, reloaded} = Ash.get(Issue, task.id)

@@ -847,8 +847,17 @@ defmodule Arbiter.MCP.Tools.Worker do
   # task `:in_progress` (hand-off path); otherwise the workspace's `agent.type`
   # config is used to pick the first healthy provider.
   defp worker_dispatch_opts(scope, args) do
-    base = dispatch_opts(scope, args)
+    with {:ok, force} <- Tools.fetch_bool(args, "force", false) do
+      scope
+      |> dispatch_opts(args)
+      # bd-asxw4e: dispatch a Backlog or Blocked ticket anyway (recorded).
+      |> Keyword.put(:force, force)
+      |> Keyword.put(:dispatched_by, "mcp")
+      |> with_provider(args)
+    end
+  end
 
+  defp with_provider(base, args) do
     case dispatch_provider(args) do
       {:error, {:unknown_provider, value}} ->
         # bd-dcvo3n: an explicit but unrecognized `provider` must fail LOUDLY.
@@ -924,6 +933,10 @@ defmodule Arbiter.MCP.Tools.Worker do
       _ -> Keyword.put(opts, :start_claude, true)
     end
   end
+
+  # bd-asxw4e: a Backlog or Blocked ticket, dispatched without `force`.
+  defp dispatch_error_message({:not_dispatchable, id, hold}),
+    do: Dispatch.refusal_message(id, hold)
 
   defp dispatch_error_message({:task_closed, id}),
     do: "task #{id} is closed; reopen it before dispatching"

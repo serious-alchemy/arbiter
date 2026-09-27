@@ -1,6 +1,10 @@
 defmodule Arbiter.Worker.DispatchTest do
   use Arbiter.DataCase, async: false
 
+  # bd-asxw4e: the tickets here are created in Backlog and dispatched straight
+  # away, which a dispatch refuses unless forced — so these calls pass
+  # `force: true`. What a dispatch admits is `DispatchEligibilityTest`'s.
+
   alias Arbiter.ReviewGate.Round
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Usage.Event, as: UsageEvent
@@ -50,7 +54,9 @@ defmodule Arbiter.Worker.DispatchTest do
     test "spawns a worker and starts a workflow machine", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "hello world", workspace_id: ws.id})
 
-      assert {:ok, result} = Dispatch.dispatch(task.id, repo: "test/repo", start_driver: false)
+      assert {:ok, result} =
+               Dispatch.dispatch(task.id, force: true, repo: "test/repo", start_driver: false)
+
       assert result.task.status == :in_progress
       assert is_pid(result.worker_pid)
       assert is_pid(result.machine_pid)
@@ -63,11 +69,13 @@ defmodule Arbiter.Worker.DispatchTest do
 
     test "idempotent for already-in_progress tasks", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "t", workspace_id: ws.id})
-      {:ok, _first} = Dispatch.dispatch(task.id, repo: "r", start_driver: false)
+      {:ok, _first} = Dispatch.dispatch(task.id, force: true, repo: "r", start_driver: false)
 
       # Second dispatch: task is already :in_progress; worker already exists.
       # Should NOT crash; should return the existing worker pid.
-      assert {:ok, second} = Dispatch.dispatch(task.id, repo: "r", start_driver: false)
+      assert {:ok, second} =
+               Dispatch.dispatch(task.id, force: true, repo: "r", start_driver: false)
+
       assert second.task.status == :in_progress
       assert Worker.whereis(task.id) == second.worker_pid
     end
@@ -79,14 +87,14 @@ defmodule Arbiter.Worker.DispatchTest do
     test "redispatch a :failed worker starts a fresh :idle worker (bd-d70whv)", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "redispatch failed", workspace_id: ws.id})
 
-      {:ok, first} = Dispatch.dispatch(task.id, repo: "r", start_driver: false)
+      {:ok, first} = Dispatch.dispatch(task.id, force: true, repo: "r", start_driver: false)
       first_pid = first.worker_pid
 
       :ok = Worker.fail(first_pid, :credentials_expired)
       assert Worker.state(first_pid).status == :failed
 
       # Re-dispatch: must evict the stale worker and start a new one.
-      {:ok, second} = Dispatch.dispatch(task.id, repo: "r", start_driver: false)
+      {:ok, second} = Dispatch.dispatch(task.id, force: true, repo: "r", start_driver: false)
 
       assert second.worker_pid != first_pid
       refute Process.alive?(first_pid)
@@ -96,14 +104,14 @@ defmodule Arbiter.Worker.DispatchTest do
     test "redispatch a :completed worker also starts fresh (bd-d70whv)", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "redispatch completed", workspace_id: ws.id})
 
-      {:ok, first} = Dispatch.dispatch(task.id, repo: "r", start_driver: false)
+      {:ok, first} = Dispatch.dispatch(task.id, force: true, repo: "r", start_driver: false)
       first_pid = first.worker_pid
 
       :ok = Worker.advance(first_pid, :work)
       :ok = Worker.complete(first_pid, :done)
       assert Worker.state(first_pid).status == :completed
 
-      {:ok, second} = Dispatch.dispatch(task.id, repo: "r", start_driver: false)
+      {:ok, second} = Dispatch.dispatch(task.id, force: true, repo: "r", start_driver: false)
 
       assert second.worker_pid != first_pid
       refute Process.alive?(first_pid)
@@ -113,7 +121,9 @@ defmodule Arbiter.Worker.DispatchTest do
     test "starts a Driver by default and drives task to :closed", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "drive me", workspace_id: ws.id})
 
-      assert {:ok, result} = Dispatch.dispatch(task.id, repo: "test/repo", interval_ms: 5)
+      assert {:ok, result} =
+               Dispatch.dispatch(task.id, force: true, repo: "test/repo", interval_ms: 5)
+
       assert is_pid(result.driver_pid)
       assert Process.alive?(result.driver_pid)
 
@@ -138,7 +148,7 @@ defmodule Arbiter.Worker.DispatchTest do
       {:ok, task} = Ash.create(Issue, %{title: "t", workspace_id: ws.id})
       {:ok, _closed} = Ash.update(task, %{}, action: :close)
 
-      assert {:error, {:task_closed, _}} = Dispatch.dispatch(task.id)
+      assert {:error, {:task_closed, _}} = Dispatch.dispatch(task.id, force: true)
     end
 
     test "tasks already awaiting review cannot be re-slung (bd-appwsh)", %{ws: ws} do
@@ -167,7 +177,7 @@ defmodule Arbiter.Worker.DispatchTest do
       assert Worker.state(pid).status == :awaiting_review
 
       assert {:error, {:task_awaiting_review, _}} =
-               Dispatch.dispatch(task.id, start_driver: false)
+               Dispatch.dispatch(task.id, force: true, start_driver: false)
     end
 
     test "Autopilot dispatch checks refined flag at dispatch time (bd-a1bmyx)", %{ws: ws} do
@@ -227,6 +237,7 @@ defmodule Arbiter.Worker.DispatchTest do
       # probe so the test never touches the network.
       assert {:error, :missing_worktree} =
                Dispatch.dispatch(task.id,
+                 force: true,
                  repo: "test/repo",
                  start_driver: false,
                  start_claude: true,
@@ -245,6 +256,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       assert {:error, :missing_worktree} =
                Dispatch.dispatch(task.id,
+                 force: true,
                  repo: "test/repo",
                  start_driver: false,
                  start_claude: true,
@@ -308,6 +320,7 @@ defmodule Arbiter.Worker.DispatchTest do
       # {:error, {:repo_not_found, "acme-corp/apex-client"}}.
       assert {:error, :missing_worktree} =
                Dispatch.dispatch(task.id,
+                 force: true,
                  repo: "acme-corp/apex-client",
                  start_driver: false,
                  start_claude: true,
@@ -353,6 +366,7 @@ defmodule Arbiter.Worker.DispatchTest do
       # never spawns a probe at all now — so this exercises the real path.
       assert {:error, :missing_worktree} =
                Dispatch.dispatch(task.id,
+                 force: true,
                  repo: "test/repo",
                  start_driver: false,
                  start_claude: true,
@@ -384,6 +398,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       assert {:error, {:auth_check_failed, reason}} =
                Dispatch.dispatch(task.id,
+                 force: true,
                  repo: "test/repo",
                  start_driver: false,
                  start_claude: true
@@ -427,6 +442,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       assert {:error, {:auth_check_failed, reason}} =
                Dispatch.dispatch(task.id,
+                 force: true,
                  repo: "test/repo",
                  start_driver: false,
                  start_claude: true,
@@ -474,6 +490,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       assert {:ok, %{worker_pid: pid}} =
                Dispatch.dispatch(task1.id,
+                 force: true,
                  repo: "wave/repo",
                  start_driver: false,
                  start_claude: true
@@ -488,6 +505,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       assert {:ok, %{worker_pid: pid2}} =
                Dispatch.dispatch(task_retry.id,
+                 force: true,
                  repo: "wave/repo",
                  start_driver: false,
                  start_claude: true
@@ -505,6 +523,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       assert {:error, {:auth_check_failed, reason}} =
                Dispatch.dispatch(task2.id,
+                 force: true,
                  repo: "wave/repo",
                  start_driver: false,
                  start_claude: true,
@@ -536,6 +555,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       {:error, {:auth_check_failed, _}} =
         Dispatch.dispatch(task.id,
+          force: true,
           repo: "test/repo",
           start_driver: false,
           start_claude: true
@@ -566,6 +586,7 @@ defmodule Arbiter.Worker.DispatchTest do
       # provision_worktree: false so we don't try to git-fetch /tmp.
       assert {:ok, result} =
                Dispatch.dispatch(task.id,
+                 force: true,
                  repo: "test/repo",
                  start_driver: false,
                  provision_worktree: false
@@ -595,6 +616,7 @@ defmodule Arbiter.Worker.DispatchTest do
       # repo-resolution guard (bd-1ziw04) passes before reaching the auth gate.
       assert {:error, :missing_worktree} =
                Dispatch.dispatch(task.id,
+                 force: true,
                  repo: "test/repo",
                  start_driver: false,
                  start_claude: true,
@@ -607,7 +629,9 @@ defmodule Arbiter.Worker.DispatchTest do
   describe "dispatch/2 result shape" do
     test "returns a map with the standard keys", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "shape", workspace_id: ws.id})
-      {:ok, result} = Dispatch.dispatch(task.id, repo: "test/repo", start_driver: false)
+
+      {:ok, result} =
+        Dispatch.dispatch(task.id, force: true, repo: "test/repo", start_driver: false)
 
       for key <- [:task, :worker_pid, :machine_id, :machine_pid, :driver_pid, :worktree_path] do
         assert Map.has_key?(result, key), "missing #{key}"
@@ -739,7 +763,9 @@ defmodule Arbiter.Worker.DispatchTest do
     test "defaults to start_claude: false → claude_port is nil", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "no claude", workspace_id: ws.id})
 
-      {:ok, result} = Dispatch.dispatch(task.id, repo: "test/repo", start_driver: false)
+      {:ok, result} =
+        Dispatch.dispatch(task.id, force: true, repo: "test/repo", start_driver: false)
+
       assert result.claude_port == nil
     end
 
@@ -758,6 +784,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       {:ok, result} =
         Dispatch.dispatch(task.id,
+          force: true,
           repo: "claude/repo",
           start_driver: false,
           start_claude: true,
@@ -804,6 +831,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       {:ok, result} =
         Dispatch.dispatch(task.id,
+          force: true,
           repo: "canary/repo",
           start_driver: false,
           start_claude: true,
@@ -888,6 +916,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       {:ok, result} =
         Dispatch.dispatch(task.id,
+          force: true,
           repo: "rv/repo",
           review: true,
           start_driver: false,
@@ -928,6 +957,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       {:ok, result} =
         Dispatch.dispatch(task.id,
+          force: true,
           repo: "rv/stale",
           review: true,
           start_driver: false,
@@ -978,6 +1008,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       {:ok, result} =
         Dispatch.dispatch(task.id,
+          force: true,
           repo: "task/repo",
           start_driver: false,
           start_claude: true,
@@ -1038,6 +1069,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       {:ok, result} =
         Dispatch.dispatch(task.id,
+          force: true,
           repo: "local/repo",
           start_driver: false,
           start_claude: true,
@@ -1068,6 +1100,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       assert {:error, {:inspect_worktree_failed, _}} =
                Dispatch.dispatch(task.id,
+                 force: true,
                  repo: "bad/repo",
                  base_branch: "no-such-upstream-branch",
                  start_driver: false,
@@ -1099,7 +1132,8 @@ defmodule Arbiter.Worker.DispatchTest do
       assert squatter == Worktree.worktree_path(branch)
       assert {:ok, "HEAD"} = Worktree.current_branch(squatter)
 
-      {:ok, result} = Dispatch.dispatch(task.id, repo: "col/repo", start_driver: false)
+      {:ok, result} =
+        Dispatch.dispatch(task.id, force: true, repo: "col/repo", start_driver: false)
 
       assert result.worktree_path == squatter
       assert {:ok, ^branch} = Worktree.current_branch(squatter)
@@ -1119,7 +1153,8 @@ defmodule Arbiter.Worker.DispatchTest do
 
       {:ok, inspect_path} = Worktree.create_detached(repo, Worktree.inspect_name(branch), "main")
 
-      {:ok, result} = Dispatch.dispatch(task.id, repo: "cx/repo", start_driver: false)
+      {:ok, result} =
+        Dispatch.dispatch(task.id, force: true, repo: "cx/repo", start_driver: false)
 
       assert result.worktree_path == Worktree.worktree_path(branch)
       refute result.worktree_path == inspect_path
@@ -1152,6 +1187,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       {:ok, result} =
         Dispatch.dispatch(task.id,
+          force: true,
           repo: "fu/repo",
           start_driver: false,
           start_claude: true,
@@ -1182,6 +1218,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       {:ok, result} =
         Dispatch.dispatch(task.id,
+          force: true,
           repo: "work/repo",
           start_driver: false,
           start_claude: true,
@@ -1216,6 +1253,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       {:ok, result} =
         Dispatch.dispatch(task.id,
+          force: true,
           repo: "codexmcp/repo",
           start_driver: false,
           start_claude: true,
@@ -1255,6 +1293,7 @@ defmodule Arbiter.Worker.DispatchTest do
         ExUnit.CaptureLog.capture_log(fn ->
           {:ok, _result} =
             Dispatch.dispatch(task.id,
+              force: true,
               repo: "codexverify/repo",
               start_driver: false,
               start_claude: true,
@@ -1294,6 +1333,7 @@ defmodule Arbiter.Worker.DispatchTest do
         with_log(fn ->
           {:ok, result} =
             Dispatch.dispatch(task.id,
+              force: true,
               repo: "agymcp/repo",
               start_driver: false,
               start_claude: true,
@@ -1367,6 +1407,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       {:ok, result} =
         Dispatch.dispatch(task.id,
+          force: true,
           repo: "gic/repo",
           start_driver: false,
           start_claude: true,
@@ -1399,6 +1440,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       assert {:error, {:repo_not_found, "no-such-repo"}} =
                Dispatch.dispatch(task.id,
+                 force: true,
                  repo: "no-such-repo",
                  start_driver: false,
                  start_claude: true,
@@ -1417,6 +1459,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       {:ok, result} =
         Dispatch.dispatch(task.id,
+          force: true,
           repo: "drvr/repo",
           start_claude: true,
           # A stand-in for a *running* Claude session: it must stay alive for the
@@ -1477,6 +1520,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       {:ok, _result} =
         Dispatch.dispatch(task.id,
+          force: true,
           repo: "m/repo",
           start_driver: false,
           start_claude: true,
@@ -1511,6 +1555,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       {:ok, _result} =
         Dispatch.dispatch(task.id,
+          force: true,
           repo: "o/repo",
           start_driver: false,
           start_claude: true,
@@ -1546,6 +1591,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       {:ok, result} =
         Dispatch.dispatch(task.id,
+          force: true,
           repo: "g/repo",
           start_driver: false,
           start_claude: true,
@@ -1608,6 +1654,7 @@ defmodule Arbiter.Worker.DispatchTest do
       # `--provider` flag would resolve it.
       {:ok, _result} =
         Dispatch.dispatch(task.id,
+          force: true,
           repo: "gw/repo",
           start_driver: false,
           start_claude: true,
@@ -1647,6 +1694,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       {:ok, result} =
         Dispatch.dispatch(task.id,
+          force: true,
           repo: "c/repo",
           start_driver: false,
           start_claude: true,
@@ -1693,6 +1741,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       {:ok, _result} =
         Dispatch.dispatch(task.id,
+          force: true,
           repo: "p/repo",
           start_driver: false,
           start_claude: true,
@@ -1748,6 +1797,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       {:ok, result} =
         Dispatch.dispatch(task.id,
+          force: true,
           repo: "prov/repo",
           start_driver: false,
           start_claude: true,
@@ -1808,6 +1858,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       {:ok, _result} =
         Dispatch.dispatch(task.id,
+          force: true,
           repo: "t/repo",
           start_driver: false,
           start_claude: true,
@@ -1849,6 +1900,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       {:ok, _result} =
         Dispatch.dispatch(task.id,
+          force: true,
           repo: "t/repo",
           start_driver: false,
           start_claude: true,
@@ -1885,6 +1937,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       {:ok, _result} =
         Dispatch.dispatch(task.id,
+          force: true,
           repo: "c2/repo",
           start_driver: false,
           start_claude: true,
@@ -1920,6 +1973,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       {:ok, _result} =
         Dispatch.dispatch(task.id,
+          force: true,
           repo: "o/repo",
           start_driver: false,
           start_claude: true,
@@ -1975,6 +2029,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       assert {:error, {:claude_start_failed, {:strict_write_confinement_unavailable, message}}} =
                Dispatch.dispatch(task.id,
+                 force: true,
                  repo: "sg/repo",
                  start_driver: false,
                  start_claude: true,
@@ -2010,6 +2065,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       {:ok, _result} =
         Dispatch.dispatch(task.id,
+          force: true,
           repo: "sp/repo",
           start_driver: false,
           start_claude: true,
@@ -2036,6 +2092,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       assert {:error, {:claude_start_failed, {:strict_write_confinement_unavailable, _}}} =
                Dispatch.dispatch(task.id,
+                 force: true,
                  repo: "sn/repo",
                  start_driver: false,
                  start_claude: true,
@@ -2070,6 +2127,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       {:ok, _result} =
         Dispatch.dispatch(task.id,
+          force: true,
           repo: "bg/repo",
           start_driver: false,
           start_claude: true,
@@ -2152,10 +2210,12 @@ defmodule Arbiter.Worker.DispatchTest do
         claude_command: ["sleep", "30"]
       ]
 
-      {:ok, first} = Dispatch.dispatch(task.id, opts)
+      {:ok, first} = Dispatch.dispatch(task.id, Keyword.put(opts, :force, true))
       assert is_port(first.claude_port)
 
-      assert {:error, {:agent_session_active, task_id}} = Dispatch.dispatch(task.id, opts)
+      assert {:error, {:agent_session_active, task_id}} =
+               Dispatch.dispatch(task.id, Keyword.put(opts, :force, true))
+
       assert task_id == task.id
 
       # The live session is untouched: same worker, same port, still running.
@@ -2182,13 +2242,16 @@ defmodule Arbiter.Worker.DispatchTest do
 
       base = [repo: "dg/repo", start_driver: false, start_claude: true, preflight: false]
 
-      {:ok, first} = Dispatch.dispatch(task.id, base ++ [agent_type: :gemini])
+      {:ok, first} =
+        Dispatch.dispatch(task.id, Keyword.put(base ++ [agent_type: :gemini], :force, true))
+
       _ = wait_for_argv!(gemini_file)
 
       # The follow-up dispatch carries no `agent_type`, so it resolves the
       # workspace default (Claude) — the exact shape that put an agy session and
       # a Claude session in one run.
-      assert {:error, {:agent_session_active, _}} = Dispatch.dispatch(task.id, base)
+      assert {:error, {:agent_session_active, _}} =
+               Dispatch.dispatch(task.id, Keyword.put(base, :force, true))
 
       # No Claude CLI was ever spawned for this task.
       refute File.exists?(claude_file)
@@ -2209,6 +2272,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       {:ok, first} =
         Dispatch.dispatch(task.id,
+          force: true,
           repo: "park/repo",
           start_driver: false,
           start_claude: true,
@@ -2218,7 +2282,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       # A no-agent dispatch spends nothing, so it keeps today's attach semantics.
       assert {:ok, second} =
-               Dispatch.dispatch(task.id, repo: "park/repo", start_driver: false)
+               Dispatch.dispatch(task.id, force: true, repo: "park/repo", start_driver: false)
 
       assert second.worker_pid == first.worker_pid
       assert second.claude_port == nil
@@ -2247,7 +2311,7 @@ defmodule Arbiter.Worker.DispatchTest do
         claude_command: ["sleep", "30"]
       ]
 
-      {:ok, first} = Dispatch.dispatch(task.id, opts)
+      {:ok, first} = Dispatch.dispatch(task.id, Keyword.put(opts, :force, true))
 
       # Drive the worker to :completed the way the `arb done` path does — via
       # complete_now/2, which leaves the session port open.
@@ -2256,7 +2320,7 @@ defmodule Arbiter.Worker.DispatchTest do
       assert Worker.state(first.worker_pid).status == :completed
       assert Worker.agent_session_live?(first.worker_pid)
 
-      assert {:ok, second} = Dispatch.dispatch(task.id, opts)
+      assert {:ok, second} = Dispatch.dispatch(task.id, Keyword.put(opts, :force, true))
       assert second.worker_pid != first.worker_pid
       assert is_port(second.claude_port)
 
@@ -2277,6 +2341,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       {:ok, first} =
         Dispatch.dispatch(task.id,
+          force: true,
           repo: "again/repo",
           start_driver: false,
           start_claude: true,
@@ -2289,6 +2354,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       assert {:ok, second} =
                Dispatch.dispatch(task.id,
+                 force: true,
                  repo: "again/repo",
                  start_driver: false,
                  start_claude: true,
@@ -2360,7 +2426,7 @@ defmodule Arbiter.Worker.DispatchTest do
         })
 
       {:ok, result} =
-        Dispatch.dispatch(task.id, repo: "st/repo", start_driver: false)
+        Dispatch.dispatch(task.id, force: true, repo: "st/repo", start_driver: false)
 
       assert is_binary(result.worktree_path)
       assert String.starts_with?(result.worktree_path, root)
@@ -2374,7 +2440,9 @@ defmodule Arbiter.Worker.DispatchTest do
     test "skips worktree when repo is not in repo_paths", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "unmapped", workspace_id: ws.id})
 
-      {:ok, result} = Dispatch.dispatch(task.id, repo: "no-such-repo", start_driver: false)
+      {:ok, result} =
+        Dispatch.dispatch(task.id, force: true, repo: "no-such-repo", start_driver: false)
+
       assert result.worktree_path == nil
     end
 
@@ -2390,7 +2458,9 @@ defmodule Arbiter.Worker.DispatchTest do
           issue_type: :task
         })
 
-      {:ok, result} = Dispatch.dispatch(task.id, repo: "st/repo", start_driver: false)
+      {:ok, result} =
+        Dispatch.dispatch(task.id, force: true, repo: "st/repo", start_driver: false)
+
       assert result.worktree_path == nil
     end
 
@@ -2407,6 +2477,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       {:ok, result} =
         Dispatch.dispatch(task.id,
+          force: true,
           repo: "st/repo",
           start_driver: false,
           provision_worktree: true
@@ -2429,7 +2500,9 @@ defmodule Arbiter.Worker.DispatchTest do
 
       # `per-ws/repo` is NOT in Application env — only in this workspace's
       # config. Dispatch must still find it.
-      {:ok, result} = Dispatch.dispatch(task.id, repo: "per-ws/repo", start_driver: false)
+      {:ok, result} =
+        Dispatch.dispatch(task.id, force: true, repo: "per-ws/repo", start_driver: false)
+
       assert is_binary(result.worktree_path)
       assert File.dir?(result.worktree_path)
     end
@@ -2463,7 +2536,8 @@ defmodule Arbiter.Worker.DispatchTest do
       {:ok, task} =
         Ash.create(Issue, %{title: "non-main base", workspace_id: ws_local.id, repo: "bb/repo"})
 
-      {:ok, result} = Dispatch.dispatch(task.id, repo: "bb/repo", start_driver: false)
+      {:ok, result} =
+        Dispatch.dispatch(task.id, force: true, repo: "bb/repo", start_driver: false)
 
       # Worktree was cut from `develop`: the develop-only file is present.
       assert is_binary(result.worktree_path)
@@ -2479,6 +2553,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       {:ok, result} =
         Dispatch.dispatch(task.id,
+          force: true,
           repo: "st/repo",
           start_driver: false,
           provision_worktree: false
@@ -2496,7 +2571,7 @@ defmodule Arbiter.Worker.DispatchTest do
         Ash.create(Issue, %{title: "re-dispatch after review", workspace_id: ws.id})
 
       # First dispatch — provisions the worktree, creating the branch locally.
-      {:ok, first} = Dispatch.dispatch(task.id, repo: "st/repo", start_driver: false)
+      {:ok, first} = Dispatch.dispatch(task.id, force: true, repo: "st/repo", start_driver: false)
       assert is_binary(first.worktree_path)
       branch = BranchNamer.derive(task)
 
@@ -2513,7 +2588,9 @@ defmodule Arbiter.Worker.DispatchTest do
       {:ok, task} = Ash.update(task, %{status: :open})
 
       # Second dispatch — branch already exists; must attach instead of creating.
-      assert {:ok, second} = Dispatch.dispatch(task.id, repo: "st/repo", start_driver: false)
+      assert {:ok, second} =
+               Dispatch.dispatch(task.id, force: true, repo: "st/repo", start_driver: false)
+
       assert is_binary(second.worktree_path)
       assert File.dir?(second.worktree_path)
       assert {:ok, ^branch} = Arbiter.Worker.Worktree.current_branch(second.worktree_path)
@@ -2538,7 +2615,8 @@ defmodule Arbiter.Worker.DispatchTest do
 
       {:ok, task} = Ash.create(Issue, %{title: "stale local base", workspace_id: ws.id})
 
-      {:ok, result} = Dispatch.dispatch(task.id, repo: "st/repo", start_driver: false)
+      {:ok, result} =
+        Dispatch.dispatch(task.id, force: true, repo: "st/repo", start_driver: false)
 
       assert File.exists?(Path.join(result.worktree_path, "UPSTREAM.md"))
     end
@@ -2565,7 +2643,7 @@ defmodule Arbiter.Worker.DispatchTest do
       {:ok, task} = Ash.create(Issue, %{title: "fetch failure", workspace_id: ws.id})
 
       assert {:error, {:worktree_failed, reason}} =
-               Dispatch.dispatch(task.id, repo: "broken/repo", start_driver: false)
+               Dispatch.dispatch(task.id, force: true, repo: "broken/repo", start_driver: false)
 
       assert match?({:fetch_failed, _}, reason) or match?({:missing_origin_ref, _}, reason),
              "expected fetch_failed or missing_origin_ref, got: #{inspect(reason)}"
@@ -2598,7 +2676,8 @@ defmodule Arbiter.Worker.DispatchTest do
           target_branch: "dolphin"
         })
 
-      {:ok, result} = Dispatch.dispatch(task.id, repo: "pb/repo", start_driver: false)
+      {:ok, result} =
+        Dispatch.dispatch(task.id, force: true, repo: "pb/repo", start_driver: false)
 
       # The task-specified target wins: the worktree carries the dolphin file
       # and the worker's meta records dolphin as the merge target.
@@ -2631,7 +2710,8 @@ defmodule Arbiter.Worker.DispatchTest do
       {:ok, task} =
         Ash.create(Issue, %{title: "repo default", workspace_id: ws_local.id, repo: "rd/repo"})
 
-      {:ok, result} = Dispatch.dispatch(task.id, repo: "rd/repo", start_driver: false)
+      {:ok, result} =
+        Dispatch.dispatch(task.id, force: true, repo: "rd/repo", start_driver: false)
 
       assert File.exists?(Path.join(result.worktree_path, "DOLPHIN.md"))
       assert %{target_branch: "dolphin"} = Worker.state(result.worker_pid).meta
@@ -2688,7 +2768,8 @@ defmodule Arbiter.Worker.DispatchTest do
       {:ok, task} = Ash.update(task, %{}, action: :await_verification)
       {:ok, task} = Arbiter.Tasks.Verification.failed(task, "still broken in prod")
 
-      {:ok, result} = Dispatch.dispatch(task.id, repo: "st/repo", start_driver: false)
+      {:ok, result} =
+        Dispatch.dispatch(task.id, force: true, repo: "st/repo", start_driver: false)
 
       assert result.worktree_path == wt_path
       # No commits ahead of the current upstream main — the stale, already-
@@ -2720,7 +2801,8 @@ defmodule Arbiter.Worker.DispatchTest do
       {_, 0} = System.cmd("git", ["-C", wt_path, "add", "WIP.md"])
       {_, 0} = System.cmd("git", ["-C", wt_path, "commit", "-q", "-m", "wip, not merged yet"])
 
-      {:ok, result} = Dispatch.dispatch(task.id, repo: "st/repo", start_driver: false)
+      {:ok, result} =
+        Dispatch.dispatch(task.id, force: true, repo: "st/repo", start_driver: false)
 
       assert result.worktree_path == wt_path
       assert File.exists?(Path.join(wt_path, "WIP.md"))
@@ -3194,7 +3276,7 @@ defmodule Arbiter.Worker.DispatchTest do
     # the worker fails (lingers in :failed, registered) with the worktree left
     # on disk — exactly the state `arb resume` is built to recover from.
     defp stop_worker_with_outpost(task_id) do
-      {:ok, first} = Dispatch.dispatch(task_id, repo: "rs/repo", start_driver: false)
+      {:ok, first} = Dispatch.dispatch(task_id, force: true, repo: "rs/repo", start_driver: false)
       assert is_binary(first.worktree_path)
       :ok = Worker.fail(first.worker_pid, :token_exhausted)
       first
@@ -3439,7 +3521,7 @@ defmodule Arbiter.Worker.DispatchTest do
     test "refuses while an worker is still actively working", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "active resume", workspace_id: ws.id})
       # Dispatch but DON'T stop — the worker is live (:idle/:running), not stopped.
-      {:ok, _live} = Dispatch.dispatch(task.id, repo: "rs/repo", start_driver: false)
+      {:ok, _live} = Dispatch.dispatch(task.id, force: true, repo: "rs/repo", start_driver: false)
 
       assert {:error, {:worker_active, _status}} =
                Dispatch.resume(task.id, start_driver: false)
@@ -3519,6 +3601,7 @@ defmodule Arbiter.Worker.DispatchTest do
       # prior run's ledger row, not from workspace/routing config.
       {:ok, first} =
         Dispatch.dispatch(task.id,
+          force: true,
           repo: "rs/repo",
           start_driver: false,
           start_claude: true,
@@ -3619,6 +3702,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       {:ok, first} =
         Dispatch.dispatch(task.id,
+          force: true,
           repo: "rs/repo",
           start_driver: false,
           start_claude: true,
@@ -3683,6 +3767,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       {:ok, first} =
         Dispatch.dispatch(task.id,
+          force: true,
           repo: "rs/repo",
           start_driver: false,
           start_claude: true,
@@ -3763,6 +3848,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       {:ok, first} =
         Dispatch.dispatch(task.id,
+          force: true,
           repo: "rs/repo",
           start_driver: false,
           start_claude: true,
@@ -3841,7 +3927,12 @@ defmodule Arbiter.Worker.DispatchTest do
       {:ok, task} = Ash.create(Issue, %{title: "review me", workspace_id: ws.id})
 
       {:ok, result} =
-        Dispatch.dispatch(task.id, repo: "rv/repo", review: true, start_driver: false)
+        Dispatch.dispatch(task.id,
+          force: true,
+          repo: "rv/repo",
+          review: true,
+          start_driver: false
+        )
 
       # No per-task branch, no worktree.
       assert result.worktree_path == nil
@@ -3948,6 +4039,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       {:ok, result} =
         Dispatch.dispatch(task.id,
+          force: true,
           repo: "rv/repo",
           review: true,
           start_claude: true,
@@ -3967,6 +4059,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       assert {:error, {:repo_not_found, "no-such-repo"}} =
                Dispatch.dispatch(task.id,
+                 force: true,
                  repo: "no-such-repo",
                  review: true,
                  start_claude: true,
@@ -4042,6 +4135,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       {:ok, result} =
         Dispatch.dispatch(task.id,
+          force: true,
           repo: "rv/repo",
           review: true,
           start_claude: true,
@@ -4078,6 +4172,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       {:ok, result} =
         Dispatch.dispatch(task.id,
+          force: true,
           repo: "rv/repo",
           review: true,
           start_claude: true,
@@ -4107,6 +4202,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       {:ok, result} =
         Dispatch.dispatch(task.id,
+          force: true,
           repo: "rv/repo",
           review: true,
           start_claude: true,
@@ -4134,6 +4230,7 @@ defmodule Arbiter.Worker.DispatchTest do
       # `finish_dispatch/4`'s `else` could not see the rebound opts carrying it.
       assert {:error, {:machine_start_failed, _}} =
                Dispatch.dispatch(task.id,
+                 force: true,
                  repo: "rv/repo",
                  review: true,
                  start_claude: true,
@@ -4166,6 +4263,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       {:ok, result} =
         Dispatch.dispatch(task.id,
+          force: true,
           repo: "rv/repo",
           review: true,
           start_claude: true,
@@ -4258,6 +4356,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       assert {:error, :no_repo_configured} =
                Dispatch.dispatch(task.id,
+                 force: true,
                  start_driver: false,
                  start_claude: true,
                  claude_command: ["true"],
@@ -4277,6 +4376,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       assert {:ok, result} =
                Dispatch.dispatch(task.id,
+                 force: true,
                  start_driver: false,
                  start_claude: true,
                  claude_command: ["sleep", "2"],
@@ -4295,6 +4395,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       assert {:error, {:ambiguous_repo, repos}} =
                Dispatch.dispatch(task.id,
+                 force: true,
                  start_driver: false,
                  start_claude: true,
                  claude_command: ["true"],
@@ -4318,6 +4419,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       assert {:ok, result} =
                Dispatch.dispatch(task.id,
+                 force: true,
                  start_driver: false,
                  start_claude: true,
                  claude_command: ["true"],
@@ -4339,6 +4441,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       assert {:error, {:ambiguous_repo, repos}} =
                Dispatch.dispatch(task.id,
+                 force: true,
                  start_driver: false,
                  start_claude: true,
                  claude_command: ["true"],
@@ -4357,6 +4460,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       assert {:ok, result} =
                Dispatch.dispatch(task.id,
+                 force: true,
                  repo: "repo/a",
                  start_driver: false,
                  start_claude: true,
@@ -4375,6 +4479,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       assert {:error, {:repo_not_found, "no-such/repo"}} =
                Dispatch.dispatch(task.id,
+                 force: true,
                  repo: "no-such/repo",
                  start_driver: false,
                  start_claude: true,
@@ -4398,6 +4503,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       assert {:ok, result} =
                Dispatch.dispatch(task.id,
+                 force: true,
                  repo: "acme-corp/apex_server",
                  start_driver: false,
                  start_claude: true,
@@ -4414,7 +4520,7 @@ defmodule Arbiter.Worker.DispatchTest do
       {:ok, task} = Ash.create(Issue, %{title: "dry dispatch", workspace_id: ws.id})
 
       # No --with-claude → no repo required → succeeds and parks as :in_progress.
-      assert {:ok, result} = Dispatch.dispatch(task.id, start_driver: false)
+      assert {:ok, result} = Dispatch.dispatch(task.id, force: true, start_driver: false)
       assert result.task.status == :in_progress
       assert result.worktree_path == nil
     end
@@ -4494,6 +4600,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       assert {:ok, result} =
                Dispatch.dispatch(task.id,
+                 force: true,
                  start_driver: false,
                  start_claude: true,
                  claude_command: ["true"],
@@ -4510,6 +4617,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       assert {:ok, result} =
                Dispatch.dispatch(task.id,
+                 force: true,
                  repo: "org/alpha",
                  start_driver: false,
                  start_claude: true,
@@ -4532,6 +4640,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       assert {:error, {:repo_not_found, "org/gone"}} =
                Dispatch.dispatch(task.id,
+                 force: true,
                  start_driver: false,
                  start_claude: true,
                  claude_command: ["true"],
@@ -4547,6 +4656,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       assert {:error, {:ambiguous_repo, repos}} =
                Dispatch.dispatch(task.id,
+                 force: true,
                  start_driver: false,
                  start_claude: true,
                  claude_command: ["true"],
@@ -4561,7 +4671,7 @@ defmodule Arbiter.Worker.DispatchTest do
       {:ok, task} =
         Ash.create(Issue, %{title: "dry with issue repo", workspace_id: ws.id, repo: "org/beta"})
 
-      assert {:ok, result} = Dispatch.dispatch(task.id, start_driver: false)
+      assert {:ok, result} = Dispatch.dispatch(task.id, force: true, start_driver: false)
       assert result.task.status == :in_progress
       assert File.exists?(Path.join(result.worktree_path, "MARKER-beta"))
     end
@@ -4583,7 +4693,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       # In a test environment where migrations are applied, dispatch should proceed
       # (or fail for other reasons, but not due to pending migrations)
-      case Dispatch.dispatch(task.id, repo: "test/repo", start_driver: false) do
+      case Dispatch.dispatch(task.id, force: true, repo: "test/repo", start_driver: false) do
         {:ok, result} ->
           assert result.task.status == :in_progress
 
@@ -4605,7 +4715,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       {:ok, task} = Ash.create(Issue, %{title: "migrations pending", workspace_id: ws.id})
 
-      assert Dispatch.dispatch(task.id, repo: "test/repo", start_driver: false) ==
+      assert Dispatch.dispatch(task.id, force: true, repo: "test/repo", start_driver: false) ==
                {:error, {:pending_migrations, 3}}
 
       reloaded = Ash.get!(Issue, task.id)
@@ -4621,7 +4731,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       {:ok, task} = Ash.create(Issue, %{title: "migrations check failed", workspace_id: ws.id})
 
-      assert Dispatch.dispatch(task.id, repo: "test/repo", start_driver: false) ==
+      assert Dispatch.dispatch(task.id, force: true, repo: "test/repo", start_driver: false) ==
                {:error, {:migrations_check_failed, :unreachable}}
 
       reloaded = Ash.get!(Issue, task.id)
@@ -4638,6 +4748,7 @@ defmodule Arbiter.Worker.DispatchTest do
       # Dispatch with skip_quota_gate and capture_quota_bypass_reason
       assert {:ok, result} =
                Dispatch.dispatch(task.id,
+                 force: true,
                  repo: "test/repo",
                  start_driver: false,
                  skip_quota_gate: true,
@@ -4672,6 +4783,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       assert {:ok, _result} =
                Dispatch.dispatch(task.id,
+                 force: true,
                  repo: "test/repo",
                  start_driver: false,
                  skip_quota_gate: true,
@@ -4698,10 +4810,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       # Dispatch WITHOUT skip_quota_gate
       assert {:ok, _result} =
-               Dispatch.dispatch(task.id,
-                 repo: "test/repo",
-                 start_driver: false
-               )
+               Dispatch.dispatch(task.id, force: true, repo: "test/repo", start_driver: false)
 
       # No quota_gate_bypass event should be created
       events =

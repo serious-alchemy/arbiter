@@ -886,6 +886,10 @@ defmodule ArbiterWeb.TaskDetailLive do
       "this task already has a live agent session — wait for it to finish, or stop " <>
         "the worker before dispatching again."
 
+  # bd-asxw4e: a Backlog or Blocked ticket is not Ready to dispatch.
+  defp dispatch_failure({:not_dispatchable, task_id, hold}),
+    do: Dispatch.refusal_message(task_id, hold)
+
   defp dispatch_failure(reason), do: inspect(reason)
 
   # ---- data ----

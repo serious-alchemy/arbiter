@@ -154,9 +154,8 @@ defmodule Arbiter.Board.Autopilot do
       `{:task_lifecycle, event, issue}`, which covers a close, a promote to
       Ready, and a `depends_on`/`blocks`/`conflicts_with` edge add or remove
       (`Arbiter.Tasks.Dependencies` broadcasts on the same topic for both
-      endpoints). `ready_order` is a `BoardLive` assign only — nothing
-      persists or broadcasts it server-side, so a reorder neither triggers a
-      pass nor changes what Autopilot would plan.
+      endpoints). The queue's order is priority, then the persisted `rank`
+      (bd-asxw4e), so there is no session-only ordering to miss.
     * `"events"` (`Arbiter.Events`'s global topic) — `{:event, %{topic:
       "worker_done" | "worker_failed"}}`, meaning a slot just freed.
 
@@ -494,8 +493,7 @@ defmodule Arbiter.Board.Autopilot do
 
   # A task closed, was promoted to Ready, or gained/lost a dependency edge —
   # `Arbiter.Tasks.Issue.broadcast_lifecycle/2` and `Arbiter.Tasks.Dependencies`
-  # both broadcast here for all of these. (`ready_order` is a LiveView-only
-  # assign — nothing broadcasts it, so it is not covered.)
+  # both broadcast here for all of these.
   def handle_info({:task_lifecycle, _event, _issue}, state) do
     {:noreply, request_plan(state)}
   end

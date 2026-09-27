@@ -272,45 +272,55 @@ defmodule Arbiter.Board.SnapshotTest do
     end
   end
 
-  describe "manual ready order" do
-    test "ids named in :ready_order lead the queue, in that order" do
-      board =
-        derive(
-          issues: [issue("bd-a", %{priority: 1}), issue("bd-b", %{priority: 2}), issue("bd-c")],
-          ready_order: ["bd-c", "bd-b"]
-        )
+  describe "Ready order (bd-asxw4e): priority, then rank, then created_at" do
+    test "a lower rank goes first within a priority band, whatever the creation order" do
+      older = DateTime.add(@now, -3600)
 
-      assert ids(board.ready) == ["bd-c", "bd-b", "bd-a"]
-    end
-
-    test "an id the operator ranked but that is no longer Ready is simply ignored" do
-      board = derive(issues: [issue("bd-a")], ready_order: ["bd-gone", "bd-a"])
-
-      assert ids(board.ready) == ["bd-a"]
-    end
-
-    test "unranked cards keep priority order behind the ranked ones" do
       board =
         derive(
           issues: [
-            issue("bd-a", %{priority: 3}),
-            issue("bd-b", %{priority: 1}),
-            issue("bd-c", %{priority: 2})
-          ],
-          ready_order: ["bd-a"]
+            issue("bd-old", %{priority: 2, rank: 2048, created_at: older}),
+            issue("bd-new", %{priority: 2, rank: 1024, created_at: @now})
+          ]
         )
 
-      assert ids(board.ready) == ["bd-a", "bd-b", "bd-c"]
+      assert ids(board.ready) == ["bd-new", "bd-old"]
+      assert board.promote == "bd-new"
     end
 
-    test "the hand-ranked leader is the card the scheduler promotes" do
+    test "priority outranks rank" do
+      board =
+        derive(
+          issues: [
+            issue("bd-a", %{priority: 3, rank: 0}),
+            issue("bd-b", %{priority: 1, rank: 9000})
+          ]
+        )
+
+      assert ids(board.ready) == ["bd-b", "bd-a"]
+    end
+
+    test "equal priority and rank fall back to the older ticket" do
+      board =
+        derive(
+          issues: [
+            issue("bd-new", %{rank: 1024, created_at: @now}),
+            issue("bd-old", %{rank: 1024, created_at: DateTime.add(@now, -60)})
+          ]
+        )
+
+      assert ids(board.ready) == ["bd-old", "bd-new"]
+    end
+
+    test "the LiveView's :ready_order no longer feeds the queue" do
       board =
         derive(
           issues: [issue("bd-a", %{priority: 1}), issue("bd-b", %{priority: 3})],
           ready_order: ["bd-b"]
         )
 
-      assert board.promote == "bd-b"
+      assert ids(board.ready) == ["bd-a", "bd-b"]
+      assert board.promote == "bd-a"
     end
   end
 
@@ -335,27 +345,41 @@ defmodule Arbiter.Board.SnapshotTest do
   end
 
   describe "slots" do
-    test "every worker holding a subprocess consumes a slot" do
+    # bd-asxw4e: a slot is a ticket In progress — the `:active` tickets.
+    test "every ticket In progress consumes a slot" do
       board =
         derive(
           slots_total: 3,
+          issues: [
+            issue("bd-1", %{state: :active, status: :in_progress}),
+            issue("bd-2", %{state: :active, status: :in_progress})
+          ],
           workers: [worker("bd-1", :running), worker("bd-2", :awaiting_review_gate)]
         )
 
       assert board.slots_total == 3
+      assert board.slots_used == 2
       assert board.slots_free == 1
     end
 
-    test "a worker parked on its merge request still holds its task's slot" do
-      # bd-45pwo1: an open MR is not a merge — the task's slot stays held
-      # until it actually merges, closes, fails, or parks for a human.
-      board = derive(slots_total: 2, workers: [worker("bd-1", :awaiting_review)])
+    test "a ticket Merging on its open PR releases its slot" do
+      board =
+        derive(
+          slots_total: 2,
+          issues: [issue("bd-1", %{state: :merging, status: :in_progress, pr_ref: "pr/1"})],
+          workers: [worker("bd-1", :awaiting_review)]
+        )
 
-      assert board.slots_free == 1
+      assert board.slots_free == 2
     end
 
-    test "a merged (:completed) worker frees its task's slot" do
-      board = derive(slots_total: 2, workers: [worker("bd-1", :completed)])
+    test "a closed ticket frees its slot" do
+      board =
+        derive(
+          slots_total: 2,
+          issues: [issue("bd-1", %{state: :closed, status: :closed})],
+          workers: [worker("bd-1", :completed)]
+        )
 
       assert board.slots_free == 2
     end
@@ -364,7 +388,7 @@ defmodule Arbiter.Board.SnapshotTest do
       board =
         derive(
           slots_total: 1,
-          issues: [issue("bd-a")],
+          issues: [issue("bd-a"), issue("bd-1", %{state: :active, status: :in_progress})],
           workers: [worker("bd-1", :running)]
         )
 

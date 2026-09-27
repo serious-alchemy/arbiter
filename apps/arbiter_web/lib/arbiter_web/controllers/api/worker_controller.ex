@@ -109,6 +109,12 @@ defmodule ArbiterWeb.Api.WorkerController do
         {:error,
          {:invalid_request, "task is closed; reopen it before dispatching", %{task_id: task_id}}}
 
+      # bd-asxw4e: a Backlog or Blocked ticket, dispatched without `force`.
+      {:error, {:not_dispatchable, _, hold}} ->
+        {:error,
+         {:invalid_request, Dispatch.refusal_message(task_id, hold),
+          %{task_id: task_id, reason: Arbiter.Tasks.Lifecycle.describe_hold(hold)}}}
+
       {:error, {:task_awaiting_review, _}} ->
         {:error,
          {:invalid_request,
@@ -561,6 +567,9 @@ defmodule ArbiterWeb.Api.WorkerController do
       [repo: params["repo"]]
       |> add_model_override(params["model"])
       |> maybe_add_skip_quota_gate(params["force_quota"])
+      # bd-asxw4e: dispatch a Backlog or Blocked ticket anyway (recorded).
+      |> Keyword.put(:force, truthy(params["force"]) == true)
+      |> Keyword.put(:dispatched_by, "http_api")
 
     with {:ok, worker_opts} <- worker_dispatch_opts(params) do
       opts =

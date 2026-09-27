@@ -78,6 +78,7 @@ defmodule Arbiter.Board.Scheduler do
 
   alias Arbiter.Board.FileScope
   alias Arbiter.Tasks.EdgeGate
+  alias Arbiter.Tasks.Lifecycle
 
   @typedoc """
   One Ready card. `scope` is its declared file scope (`FileScope.declared_paths/1`),
@@ -156,46 +157,91 @@ defmodule Arbiter.Board.Scheduler do
   """
   @spec plan(input()) :: t()
   def plan(input) when is_map(input) do
-    ready = Map.get(input, :ready) || []
+    ready = input |> Map.get(:ready) |> List.wrap() |> order()
     running = Map.get(input, :running) || []
-    paused? = Map.get(input, :paused) == true
 
-    hold = board_hold(paused?, Map.get(input, :quota), Map.get(input, :slots_free, 0))
-    in_flight = Enum.map(running, &{&1.task_id, scope_of(&1)})
+    board = %{
+      paused: Map.get(input, :paused) == true,
+      quota: Map.get(input, :quota),
+      slots_free: Map.get(input, :slots_free, 0)
+    }
 
     seed = %{
       promote: nil,
       held?: false,
       ahead: 0,
-      in_flight: in_flight,
+      in_flight: Enum.map(running, &{&1.task_id, scope_of(&1)}),
       claimed: nil,
       mutex: conflict_claims(Map.get(input, :conflict_claims))
     }
 
     {entries, acc} =
-      Enum.map_reduce(ready, seed, fn card, acc -> step(card, hold, paused?, acc) end)
+      Enum.map_reduce(ready, seed, fn card, acc -> step(card, board, acc) end)
 
     %{promote: acc.promote, entries: entries}
   end
 
   def plan(_), do: %{promote: nil, entries: []}
 
-  # One card's standing. `acc.held?` records that the board-wide hold has
-  # already been shown on the card it actually applies to; `acc.ahead` counts
-  # the cards genuinely queued in front of this one.
-  defp step(card, hold, paused?, acc) do
-    case card_block(card, claims(acc), acc.mutex) do
-      # A card's own block never advances the queue position: the card behind
-      # it is still next in line.
-      {:blocked, reason} ->
-        {entry(card, :blocked, reason), acc}
+  @doc """
+  The Ready queue's order (bd-asxw4e): priority, then `rank` (the manual order
+  inside a priority band, `docs/design/ticket-lifecycle.md` §1), then
+  `created_at`, oldest first. The sort is stable, so cards that carry none of
+  the three keep the order they were given in.
+  """
+  @spec order([card()]) :: [card()]
+  def order(cards) when is_list(cards), do: Enum.sort_by(cards, &order_key/1)
 
-      nil when paused? ->
+  # A missing key sorts after every present one (an atom outranks any number
+  # in term order), so an unranked card never jumps a ranked one.
+  defp order_key(card) do
+    {Map.get(card, :priority) || :none, Map.get(card, :rank) || :none, created_key(card)}
+  end
+
+  defp created_key(%{created_at: %DateTime{} = at}), do: DateTime.to_unix(at, :microsecond)
+  defp created_key(_card), do: :none
+
+  # One card's standing, from the one dispatch-eligibility predicate
+  # (`Lifecycle.dispatchable/2`, bd-asxw4e). `acc.held?` records that the
+  # board-wide hold has already been shown on the card it actually applies
+  # to; `acc.ahead` counts the cards genuinely queued in front of this one.
+  defp step(card, board, acc) do
+    case Lifecycle.dispatchable(ticket(card), ctx(card, board, acc)) do
+      :ok ->
+        decide(card, nil, acc)
+
+      # Paused holds every otherwise-eligible card, not just the head.
+      {:held, :paused} ->
         {entry(card, :blocked, @paused_reason), bump(acc)}
 
-      nil ->
-        decide(card, hold, acc)
+      # Only the head of the queue carries a board-wide hold.
+      {:held, :no_slot} ->
+        decide(card, @no_slot_reason, acc)
+
+      {:held, {:quota, _} = hold} ->
+        decide(card, phrase(hold, acc.mutex), acc)
+
+      # A card's own block never advances the queue position: the card behind
+      # it is still next in line.
+      {:held, hold} ->
+        {entry(card, :blocked, phrase(hold, acc.mutex)), acc}
     end
+  end
+
+  # A card handed to `plan/1` is a Ready candidate, so one that carries no
+  # state of its own (a hand-built plan) reads as queued. `Arbiter.Board.Snapshot`
+  # always stamps the ticket's real state, so a card that is no longer Ready
+  # by the time it is planned is held in its column rather than dispatched.
+  defp ticket(card), do: Map.put_new(card, :state, :queued)
+
+  defp ctx(card, board, acc) do
+    Map.merge(board, %{
+      blocked_by: Map.get(card, :blocked_by),
+      conflicts_with: Map.get(card, :conflicts_with),
+      claimed: acc.mutex,
+      scope: scope_of(card),
+      in_flight: claims(acc)
+    })
   end
 
   defp decide(card, _hold, %{held?: true} = acc), do: queued(card, acc)
@@ -232,55 +278,22 @@ defmodule Arbiter.Board.Scheduler do
   defp entry(card, state, reason),
     do: %{id: card.id, state: state, reason: reason, card: card}
 
-  # nil when the board as a whole is free to dispatch, otherwise the phrase to
-  # show on the card the hold lands on.
-  defp board_hold(true, _quota, _slots), do: @paused_reason
-  defp board_hold(_paused, {:hold, reason}, _slots), do: "blocked — #{reason}"
-  defp board_hold(_paused, _quota, slots) when is_integer(slots) and slots > 0, do: nil
-  defp board_hold(_paused, _quota, _slots), do: @no_slot_reason
+  # The hold, as the card says it. The counterpart's state is the half of a
+  # mutex reason the predicate cannot know: it answers *whether* the mutex
+  # holds, the board says what is holding it.
+  defp phrase({:blocked_by, ids}, _mutex),
+    do: "blocked — " <> EdgeGate.describe({:waiting_on, ids})
 
-  # The edge question is `EdgeGate`'s; the file overlap is the board's alone,
-  # and only gets asked once the edges are clear.
-  defp card_block(card, claimed, mutex) do
-    gate =
-      EdgeGate.gate(%{
-        blocked_by: Map.get(card, :blocked_by),
-        conflicts: Map.get(card, :conflicts_with),
-        claimed: mutex
-      })
+  defp phrase({:conflicts_with, peer} = hold, mutex),
+    do: "blocked — #{Lifecycle.describe_hold(hold)} (#{Map.get(mutex, peer, @unlabelled_state)})"
 
-    case gate do
-      :ok -> overlap_block(card, claimed)
-      {:blocked, block} -> {:blocked, "blocked — " <> phrase(block, mutex)}
-    end
-  end
-
-  # The counterpart's state is the half of the reason `EdgeGate` cannot know:
-  # it answers *whether* the mutex holds, the board says what is holding it.
-  defp phrase({:conflicts_with, peer} = block, mutex),
-    do: "#{EdgeGate.describe(block)} (#{Map.get(mutex, peer, @unlabelled_state)})"
-
-  defp phrase(block, _mutex), do: EdgeGate.describe(block)
+  defp phrase(hold, _mutex), do: "blocked — " <> Lifecycle.describe_hold(hold)
 
   # A bare list of ids is accepted so a caller that has no states to report
   # still gets the mutex honoured, just with a vaguer reason.
   defp conflict_claims(nil), do: %{}
   defp conflict_claims(claims) when is_map(claims), do: claims
   defp conflict_claims(ids) when is_list(ids), do: Map.new(ids, &{&1, @unlabelled_state})
-
-  defp overlap_block(card, claimed) do
-    scope = scope_of(card)
-
-    Enum.find_value(claimed, fn {task_id, other} ->
-      case FileScope.overlap(scope, other) do
-        [] -> nil
-        files -> {:blocked, "blocked — #{name_files(files)} in flight on #{task_id}"}
-      end
-    end)
-  end
-
-  defp name_files([file]), do: file
-  defp name_files([file | rest]), do: "#{file} +#{length(rest)} more"
 
   defp scope_of(%{scope: %MapSet{} = scope}), do: scope
   defp scope_of(%{scope: paths}) when is_list(paths), do: MapSet.new(paths)

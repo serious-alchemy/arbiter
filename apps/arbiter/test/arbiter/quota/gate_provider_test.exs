@@ -10,6 +10,10 @@ defmodule Arbiter.Quota.GateProviderTest do
   """
   use Arbiter.DataCase, async: false
 
+  # bd-asxw4e: the tickets here are created in Backlog and dispatched straight
+  # away, which a dispatch refuses unless forced — so these calls pass
+  # `force: true`. What a dispatch admits is `DispatchEligibilityTest`'s.
+
   alias Arbiter.Quota
   alias Arbiter.Quota.AnthropicQuota
   alias Arbiter.Quota.CodexQuota
@@ -467,7 +471,7 @@ defmodule Arbiter.Quota.GateProviderTest do
       })
 
       assert {:error, {:quota_held, held_id}} =
-               Arbiter.Worker.Dispatch.dispatch(task.id, start_driver: false)
+               Arbiter.Worker.Dispatch.dispatch(task.id, force: true, start_driver: false)
 
       assert held_id == task.id
 
@@ -491,7 +495,11 @@ defmodule Arbiter.Quota.GateProviderTest do
       })
 
       assert {:ok, result} =
-               Arbiter.Worker.Dispatch.dispatch(task.id, repo: "r", start_driver: false)
+               Arbiter.Worker.Dispatch.dispatch(task.id,
+                 force: true,
+                 repo: "r",
+                 start_driver: false
+               )
 
       assert result.task.status == :in_progress
     end
@@ -519,7 +527,11 @@ defmodule Arbiter.Quota.GateProviderTest do
       })
 
       assert {:ok, result} =
-               Arbiter.Worker.Dispatch.dispatch(task.id, repo: "r", start_driver: false)
+               Arbiter.Worker.Dispatch.dispatch(task.id,
+                 force: true,
+                 repo: "r",
+                 start_driver: false
+               )
 
       assert result.task.status == :in_progress
     end
@@ -551,6 +563,7 @@ defmodule Arbiter.Quota.GateProviderTest do
 
       assert {:error, {:quota_held, _}} =
                Arbiter.Worker.Dispatch.dispatch(gtask.id,
+                 force: true,
                  start_driver: false,
                  agent_type: :gemini
                )
@@ -615,7 +628,7 @@ defmodule Arbiter.Quota.GateProviderTest do
       })
 
       assert {:error, {:quota_held, held_id}} =
-               Arbiter.Worker.Dispatch.dispatch(task.id, start_driver: false)
+               Arbiter.Worker.Dispatch.dispatch(task.id, force: true, start_driver: false)
 
       assert held_id == task.id
       assert DispatchQueue.held?(workspace.id, task.id)
@@ -663,7 +676,7 @@ defmodule Arbiter.Quota.GateProviderTest do
       })
 
       assert {:error, {:quota_held, held_id}} =
-               Arbiter.Worker.Dispatch.dispatch(task.id, start_driver: false)
+               Arbiter.Worker.Dispatch.dispatch(task.id, force: true, start_driver: false)
 
       assert held_id == task.id
       assert DispatchQueue.held?(ws.id, task.id)
@@ -766,7 +779,7 @@ defmodule Arbiter.Quota.GateProviderTest do
       })
 
       assert {:error, {:quota_held, _}} =
-               Arbiter.Worker.Dispatch.dispatch(task.id, start_driver: false)
+               Arbiter.Worker.Dispatch.dispatch(task.id, force: true, start_driver: false)
 
       assert length(DispatchQueue.state(pid).items) == 1
 

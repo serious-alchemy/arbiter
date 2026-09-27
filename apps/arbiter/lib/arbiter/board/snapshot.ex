@@ -92,13 +92,13 @@ defmodule Arbiter.Board.Snapshot do
   reason defaults to "a person's" instead of silently reading as pipeline
   wait. It measures "still needs a human today", not "something is imperfect".
 
-  A worker at `:awaiting_review` holds an MR, not a subprocess — no agent is
-  burning quota for it — but it still occupies its task's *slot* (bd-45pwo1):
-  the operator's rule is "another slot doesn't open until the issue occupying
-  it is merged", and an open MR is not merged. `slots_free` means "tasks I
-  could start dispatching right now given the cap", which is a different
-  number from `agents_live`, "agents actually burning quota this instant" —
-  see `Arbiter.Tasks.SlotGate`'s "A slot is a task, not an agent" section.
+  `slots_used` is the tickets In progress — stored state `:active` — and
+  nothing else (bd-asxw4e): a ticket between ReviewGate rounds holds its slot
+  with no agent live, and one Merging on its open PR or Verifying holds none,
+  whatever worker row lingers. `slots_free` means "tickets I could start
+  dispatching right now given the cap", which is a different number from
+  `agents_live`, "agents actually burning quota this instant" — see
+  `Arbiter.Tasks.SlotGate`'s "A slot is a ticket In progress" section.
 
   ## Deriving vs loading
 
@@ -189,15 +189,14 @@ defmodule Arbiter.Board.Snapshot do
   Expected keys: `:issues`, `:workers`, `:blocked_by` (issue id → unsatisfied
   blocker ids, from `EdgeGate.blockers/2`), `:conflicts_with` (`{a, b}` pairs
   from the mutex edges), `:changed_files` (task id → repo-relative paths a worktree has touched),
-  `:now`, `:slots_total`, `:quota`, `:paused` and `:ready_order`. Every key has
-  a sane default, so a caller may pass only what it has.
+  `:now`, `:slots_total`, `:quota` and `:paused`. Every key has a sane
+  default, so a caller may pass only what it has.
 
-  `:ready_order` is the operator's hand-ranking of the Ready queue — the ids
-  it names lead the queue in that order, and everything else follows in
-  priority order behind them. Because the scheduler promotes the first
-  eligible card, dragging a card to the top of Ready is how a human overrides
-  the machine's idea of what matters most without dispatching anything by
-  hand.
+  The Ready queue is in `Arbiter.Board.Scheduler.order/1`'s order — priority,
+  then the persisted `rank`, then age (bd-asxw4e) — the same order Autopilot
+  dispatches in. The LiveView-only `:ready_order` hand-ranking it used to
+  take is gone: Autopilot never saw it, so it made the board promise a
+  dispatch order the scheduler did not follow.
   """
   @spec derive(map()) :: t()
   def derive(input) when is_map(input) do
@@ -214,7 +213,6 @@ defmodule Arbiter.Board.Snapshot do
     slots_total = Map.get(input, :slots_total, 0)
     quota = Map.get(input, :quota, :ok)
     paused? = Map.get(input, :paused) == true
-    ready_order = Map.get(input, :ready_order, [])
     # bd-38of5i: `{parent_id, child_id}` pairs from the `:parent_of` edges. An
     # *input*, like `:blocked_by` — the pure half never goes looking for rows.
     parent_of = Map.get(input, :parent_of, [])
@@ -266,19 +264,17 @@ defmodule Arbiter.Board.Snapshot do
     # and no longer what the dispatch cap is measured against; see below.
     agents_live = SlotGate.occupied(workers, slot_basis)
 
-    # bd-45pwo1: the dispatch cap is measured in TASKS, not agent sessions —
-    # "another slot doesn't open until the issue occupying it is merged". A
-    # task between ReviewGate rounds, waiting on CI, or waiting on a merge
-    # still holds its one slot even with no agent live for it right now; only
-    # `:done` and `:waiting_on_you` (human-parked) release it early. See
-    # `SlotGate`'s "A slot is a task, not an agent" section.
-    annotated_workers = Phase.annotate(workers)
-    slots_used = SlotGate.occupied_tasks(annotated_workers, slot_basis)
+    # bd-asxw4e: the dispatch cap is measured in TICKETS In progress — the
+    # tickets whose stored state is `:active`, the same set as the In progress
+    # column. A ticket between ReviewGate rounds keeps its slot with no agent
+    # live (bd-45pwo1); Merging and Verifying release it. The worker rows
+    # never enter into it. See `SlotGate`'s "A slot is a ticket In progress".
+    slots_used = SlotGate.slots_used(issues)
     slots_free = max(slots_total - slots_used, 0)
 
     plan =
       Scheduler.plan(%{
-        ready: ready_cards(issues, columns, blocked_by, conflicts, ready_order),
+        ready: ready_cards(issues, columns, blocked_by, conflicts),
         running: in_flight(authors, issues_by_id, changed),
         conflict_claims: conflict_claims(authors, gate_workers, issues, worked, now),
         slots_free: slots_free,
@@ -320,7 +316,7 @@ defmodule Arbiter.Board.Snapshot do
   Read the world and derive the board.
 
   Options mirror `derive/1`'s inputs and override what would otherwise be
-  read: `:now`, `:slots_total`, `:quota`, `:paused`, `:ready_order`,
+  read: `:now`, `:slots_total`, `:quota`, `:paused`,
   `:issues`, `:workers`, `:changed_files`, `:workspace_id`. Every read is
   best-effort — a board that renders five columns beats one that raises.
 
@@ -356,20 +352,16 @@ defmodule Arbiter.Board.Snapshot do
       changed_files: Keyword.get(opts, :changed_files, %{}),
       now: Keyword.get(opts, :now) || DateTime.utc_now(),
       slot_basis: slot_basis,
-      # bd-aw2cyt/bd-45pwo1: `derive/1` subtracts the *occupied* slots from
-      # this total, and the account term folded in below is a headroom
-      # expressed in the caller's own frame — so the two have to agree on
-      # what "occupied" means. Since bd-45pwo1 that is task occupancy, not
-      # live agent sessions — hand it the same count `derive/1` will subtract.
+      # `derive/1` subtracts the used slots from this total, and the account
+      # term folded in below is a headroom expressed in the caller's own frame
+      # — so the two have to agree on what "used" means. Since bd-asxw4e that
+      # is the tickets In progress: hand it the same count `derive/1` will
+      # subtract.
       slots_total:
         Keyword.get(opts, :slots_total) ||
-          effective_max_concurrent(
-            workspace_id,
-            SlotGate.occupied_tasks(Phase.annotate(workers), slot_basis)
-          ),
+          effective_max_concurrent(workspace_id, SlotGate.slots_used(issues)),
       quota: Keyword.get_lazy(opts, :quota, fn -> quota_hold(workspace_id) end),
       paused: Keyword.get(opts, :paused, false),
-      ready_order: Keyword.get(opts, :ready_order, []),
       watchdog_live: Keyword.get_lazy(opts, :watchdog_live, fn -> watchdog_live(workers) end),
       over_budget: Keyword.get_lazy(opts, :over_budget, fn -> Budget.over_budget_ids(issues) end)
     })
@@ -667,17 +659,17 @@ defmodule Arbiter.Board.Snapshot do
     end)
   end
 
-  defp ready_cards(issues, columns, blocked_by, conflicts, ready_order) do
-    ranked = ranking(ready_order)
-
+  # In no particular order: `Scheduler.plan/1` orders the queue.
+  defp ready_cards(issues, columns, blocked_by, conflicts) do
     issues
     |> Enum.filter(&in_column?(columns, &1.id, :ready))
-    |> Enum.sort_by(&{Map.get(ranked, &1.id, :infinity), priority(&1), created_at(&1)}, :asc)
     |> Enum.map(fn issue ->
       %{
         id: issue.id,
         title: Map.get(issue, :title),
         priority: Map.get(issue, :priority),
+        rank: Map.get(issue, :rank),
+        created_at: created_at(issue),
         difficulty: Map.get(issue, :difficulty),
         issue_type: Map.get(issue, :issue_type),
         workspace_id: Map.get(issue, :workspace_id),
@@ -685,18 +677,10 @@ defmodule Arbiter.Board.Snapshot do
         blocked_by: Map.get(blocked_by, issue.id, []),
         conflicts_with: EdgeGate.conflicts(conflicts, issue.id),
         refined: true,
+        state: Lifecycle.state_of(issue),
         status: Map.get(issue, :status)
       }
     end)
-  end
-
-  # Rank → sort key. Hand-ranked ids get their index; everything else sorts
-  # behind them under `:infinity`, which compares greater than any integer in
-  # Erlang's term order. Ranked ids that are no longer Ready just never match.
-  defp ranking(ready_order) do
-    ready_order
-    |> Enum.with_index()
-    |> Map.new()
   end
 
   # ---- running / waiting ----------------------------------------------------
@@ -1337,14 +1321,6 @@ defmodule Arbiter.Board.Snapshot do
   end
 
   defp since(worker), do: Map.get(worker, :step_started_at) || Map.get(worker, :started_at)
-
-  # nil priority sorts last: an unprioritised issue is not urgent by omission.
-  defp priority(issue) do
-    case Map.get(issue, :priority) do
-      n when is_integer(n) -> n
-      _ -> 99
-    end
-  end
 
   defp created_at(issue), do: Map.get(issue, :created_at) || ~U[1970-01-01 00:00:00Z]
 

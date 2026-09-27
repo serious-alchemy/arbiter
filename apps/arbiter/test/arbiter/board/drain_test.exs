@@ -348,6 +348,43 @@ defmodule Arbiter.Board.DrainTest do
     end
   end
 
+  # bd-asxw4e: `scheduler_status` reports the same slot count the board's
+  # header does — the tickets In progress.
+  describe "status/1 — slots" do
+    test "counts the tickets In progress, the same rule as the board" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "drain-slots", prefix: "dsl"})
+
+      tickets =
+        for {title, state} <- [a: :active, b: :active, m: :merging, v: :verifying, q: :queued] do
+          {:ok, issue} = Ash.create(Issue, %{title: "#{title}", workspace_id: ws.id})
+          %{issue | state: state}
+        end
+
+      [a, b | _] = tickets
+      ap = start_autopilot!(paused: true)
+
+      status = Drain.status(autopilot: ap, supervisor: empty_supervisor!(), tickets: tickets)
+
+      assert status.slots_used == 2
+      assert status.slot_holders == [a.id, b.id]
+      assert status.slots_used == Arbiter.Board.Snapshot.derive(%{issues: tickets}).slots_used
+
+      assert %{slots_used: 2, slot_holders: [_, _]} = Drain.to_json(status)
+    end
+
+    test "reads the tickets In progress when not handed them" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "drain-slots-db", prefix: "dsd"})
+      {:ok, issue} = Ash.create(Issue, %{title: "working", workspace_id: ws.id})
+      {:ok, issue} = Issue.start_work(issue)
+      ap = start_autopilot!(paused: true)
+
+      status = Drain.status(autopilot: ap, supervisor: empty_supervisor!())
+
+      assert issue.id in status.slot_holders
+      assert status.slots_used == length(status.slot_holders)
+    end
+  end
+
   describe "to_json/1" do
     test "renders the state, the safe-to-restart verdict and each in-flight entry" do
       ap = start_autopilot!(paused: true)

@@ -15,9 +15,17 @@ defmodule Arbiter.Worker.Dispatch do
 
   ## Steps
 
-  1. Load + validate the task. Task must not be `:closed`.
-  2. Transition task to `:in_progress` (via the task's `:update` action,
-     skipping the `:close` FSM path).
+  1. Load the task and ask the one dispatch-eligibility predicate,
+     `Arbiter.Tasks.Lifecycle.dispatchable/2` (bd-asxw4e), with its open
+     blockers. A closed ticket is always refused. A Backlog or Blocked ticket
+     is refused with the reason (`{:not_dispatchable, id, hold}`,
+     `refusal_message/2`) unless `force: true`, which is recorded as a
+     `dispatch_forced` event. Autopilot's dispatch (`dispatched_by:
+     "autopilot"`) must still find the ticket Ready and is never forced. A
+     resume, a review, or a re-dispatch of work already In progress is not an
+     admission and passes.
+  2. Transition the ticket to `:active` (`Issue.start_work/2`; a resumed
+     Merging ticket goes back to work).
   3. Provision a git worktree on a per-task branch — skipped when the
      repo isn't in `:arbiter, :repo_paths` or `provision_worktree: false`.
   4. Start a worker under `Arbiter.Worker.Supervisor` for the task.
@@ -67,8 +75,10 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Mergers.Github.RepoResolver
   alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Reviews.Checkout
+  alias Arbiter.Tasks.EdgeGate
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.IssueRepo
+  alias Arbiter.Tasks.Lifecycle
   alias Arbiter.Tasks.RepoConfig
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Trackers
@@ -108,6 +118,9 @@ defmodule Arbiter.Worker.Dispatch do
           preflight: boolean(),
           agent_adapter: module() | nil,
           depth: non_neg_integer(),
+          # bd-asxw4e: dispatch a Backlog or Blocked ticket anyway; recorded.
+          force: boolean(),
+          dispatched_by: String.t() | nil,
           # bd-92mx1m, resume/2 and resume_session/2 only — see ResumeSlot.
           resume_origin: :human | :automatic,
           force_slot: boolean(),
@@ -155,14 +168,8 @@ defmodule Arbiter.Worker.Dispatch do
     opts = normalize_opts(opts)
 
     with {:ok, task} <- load_task(task_id),
-         # bd-a1bmyx: Autopilot re-checks refined before dispatching to catch
-         # demotions (refined: true → false) that happen between when Autopilot
-         # plans the dispatch and when it actually runs. We only do this for
-         # Autopilot dispatches (marked with `dispatched_by: "autopilot"`), not manual
-         # dispatches via CLI/API which are allowed to dispatch unrefined tasks.
-         :ok <- maybe_ensure_refined(task, opts),
+         :ok <- ensure_dispatchable(task, opts),
          opts = apply_issue_repo_default(task, opts),
-         :ok <- ensure_not_closed(task),
          :ok <- ensure_not_awaiting_review(task_id),
          :ok <- ensure_no_live_agent_session(task_id, opts),
          opts = route_implementer(task, opts),
@@ -211,7 +218,7 @@ defmodule Arbiter.Worker.Dispatch do
                attach_and_start_machine(task, worktree_path, opts),
              {:ok, driver_pid} <-
                maybe_start_driver(task, worker_pid, machine_id, machine_pid, worktree_path, opts),
-             # bd-cgmidt: `ensure_not_closed/1` above is a front-of-pipeline check. An
+             # bd-cgmidt: `ensure_dispatchable/2` above is a front-of-pipeline check. An
              # async close (in production, the MergeQueue direct-strategy close of an
              # in-flight `{:worker_done}` from the just-stopped run) can land in the
              # window between that guard and `start_worker/3`, flipping the task to
@@ -335,7 +342,7 @@ defmodule Arbiter.Worker.Dispatch do
 
   defp do_resume(task_id, opts) do
     with {:ok, task} <- load_task(task_id),
-         :ok <- ensure_not_closed(task),
+         :ok <- ensure_dispatchable(task, resume: true),
          :ok <- ensure_not_active(task_id),
          {:ok, repo} <- resolve_resume_repo(task, opts),
          {:ok, worktree_path} <- resume_worktree(task, repo),
@@ -438,7 +445,7 @@ defmodule Arbiter.Worker.Dispatch do
 
   defp do_resume_session(task_id, opts) do
     with {:ok, task} <- load_task(task_id),
-         :ok <- ensure_not_closed(task),
+         :ok <- ensure_dispatchable(task, resume: true),
          :ok <- ensure_not_active(task_id),
          {:ok, repo} <- resolve_resume_repo(task, opts),
          {:ok, worktree_path} <- resume_worktree(task, repo),
@@ -916,30 +923,94 @@ defmodule Arbiter.Worker.Dispatch do
     end
   end
 
-  defp ensure_not_closed(%Issue{status: :closed, id: id}), do: {:error, {:task_closed, id}}
-  defp ensure_not_closed(_task), do: :ok
+  # ---- admission (bd-asxw4e) ----------------------------------------------
 
-  # bd-a1bmyx: Autopilot re-checks refined before dispatching to catch demotions
-  # (refined: true → false) that happen between when Autopilot plans the dispatch
-  # and when it actually runs. Manual dispatch (via CLI/API) is allowed to dispatch
-  # unrefined tasks, so we only check for Autopilot dispatches (marked with
-  # `dispatched_by: "autopilot"`).
-  defp maybe_ensure_refined(%Issue{} = task, opts) do
-    case Keyword.get(opts, :dispatched_by) do
-      "autopilot" ->
-        case task.refined do
-          true -> :ok
-          _ -> {:error, {:task_not_ready, task.id}}
-        end
-
-      _ ->
-        :ok
+  # The one dispatch-eligibility predicate, `Lifecycle.dispatchable/2`, asked
+  # with the ticket's own blockers and none of the scheduler's holds: a
+  # dispatch that reaches here has either been planned by the scheduler
+  # (which asked with every hold) or is a person overriding it. What the
+  # answer means depends on who is asking — `admit/3`.
+  defp ensure_dispatchable(%Issue{} = task, opts) do
+    case Lifecycle.dispatchable(task, %{blocked_by: EdgeGate.blockers_of(task)}) do
+      :ok -> :ok
+      {:held, hold} -> admit(task, hold, opts)
     end
   end
 
+  # A closed ticket is reopened, never dispatched — force or not.
+  defp admit(%Issue{id: id}, {:column, :closed}, _opts), do: {:error, {:task_closed, id}}
+
+  defp admit(%Issue{id: id} = task, hold, opts) do
+    cond do
+      # A resume re-enters work that was admitted once (`ResumeSlot` gates its
+      # slot), and a review reads a PR rather than starting work.
+      Keyword.get(opts, :resume) == true or Keyword.get(opts, :review) == true ->
+        :ok
+
+      # Autopilot planned the ticket as Ready; anything else now means the
+      # plan went stale (a demotion, a new blocker, a manual dispatch that got
+      # there first) — bd-a1bmyx's re-check, and it is never forced.
+      Keyword.get(opts, :dispatched_by) == "autopilot" ->
+        {:error, {:task_not_ready, id}}
+
+      # A re-dispatch of work already under way is not an admission.
+      under_way?(hold) ->
+        :ok
+
+      Keyword.get(opts, :force) == true ->
+        record_forced_dispatch(task, hold, opts)
+
+      true ->
+        {:error, {:not_dispatchable, id, hold}}
+    end
+  end
+
+  defp under_way?({:column, column}), do: column in [:in_progress, :merging, :verifying]
+  defp under_way?(_hold), do: false
+
+  defp record_forced_dispatch(%Issue{id: id, workspace_id: ws_id}, hold, opts) do
+    require Logger
+
+    bypassed = Lifecycle.describe_hold(hold)
+    Logger.info("Dispatch: #{id} dispatched by force although #{bypassed}")
+
+    Arbiter.Events.broadcast(ws_id, "dispatch_forced", %{
+      "task_id" => id,
+      "bypassed" => bypassed,
+      "column" => forced_column(hold),
+      "blocked_by" => forced_blockers(hold),
+      "dispatched_by" => Keyword.get(opts, :dispatched_by)
+    })
+
+    :ok
+  end
+
+  defp forced_column({:column, column}), do: to_string(column)
+  defp forced_column({:blocked_by, _}), do: "blocked"
+
+  defp forced_blockers({:blocked_by, ids}), do: ids
+  defp forced_blockers(_hold), do: []
+
+  @doc """
+  The operator-facing refusal for `{:error, {:not_dispatchable, task_id, hold}}`
+  (bd-asxw4e). One source of truth for MCP, the REST API (and so the CLI) and
+  the task page.
+  """
+  @spec refusal_message(String.t(), Lifecycle.Dispatchable.hold()) :: String.t()
+  def refusal_message(task_id, hold) do
+    "#{task_id} is #{Lifecycle.describe_hold(hold)}, so it is not Ready to dispatch. " <>
+      next_step(hold) <>
+      " To dispatch it anyway, pass force (`arb dispatch --force`, MCP `force: true`) " <>
+      "— the bypass is recorded as a `dispatch_forced` event."
+  end
+
+  defp next_step({:column, :backlog}), do: "Promote it to Ready (`arb promote`) first."
+  defp next_step({:blocked_by, _}), do: "It goes once its blockers merge."
+  defp next_step(_hold), do: ""
+
   # Invariant backstop for the dispatch window (bd-cgmidt): when a live worker has
   # just been attached to `task_id`, guarantee the task is not `:closed`. A close
-  # can land asynchronously between `ensure_not_closed/1` (checked once, at the
+  # can land asynchronously between `ensure_dispatchable/2` (checked once, at the
   # front of `dispatch/2`) and `start_worker/3` — e.g. the MergeQueue's
   # direct-strategy close of an in-flight `{:worker_done}` from the run the
   # operator just stopped. Because that close's `StopWorker` after-action fires
@@ -1366,10 +1437,25 @@ defmodule Arbiter.Worker.Dispatch do
     attrs = if Keyword.get(opts, :review, false), do: %{review_only: true}, else: %{}
 
     case Issue.start_work(task, attrs) do
-      {:ok, updated} -> {:ok, updated}
+      {:ok, updated} -> resume_back_to_work(updated, opts)
       {:error, e} -> {:error, {:transition_failed, e}}
     end
   end
+
+  # bd-asxw4e: a resume of a Merging ticket (a revise round on its open PR) was
+  # admitted into a slot by `ResumeSlot`, and a slot is a ticket In progress —
+  # so the ticket goes back to work, or the round would run holding nothing
+  # and the scheduler would fill its slot behind it.
+  defp resume_back_to_work(%Issue{state: :merging, id: id} = task, opts) do
+    if Keyword.get(opts, :resume) == true do
+      :ok = Issue.back_to_work(id)
+      load_task(id)
+    else
+      {:ok, task}
+    end
+  end
+
+  defp resume_back_to_work(task, _opts), do: {:ok, task}
 
   defp start_worker(%Issue{id: id, workspace_id: ws_id} = task, worktree_path, opts) do
     repo = Keyword.get(opts, :repo) || "unknown"

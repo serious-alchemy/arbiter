@@ -553,34 +553,20 @@ defmodule ArbiterWeb.BoardLiveTest do
     end
   end
 
-  describe "hand-ranking Ready" do
-    test "reordering moves a card to the head of the queue and makes it next up", %{
-      conn: conn,
-      ws: ws
-    } do
+  describe "reordering Ready (bd-asxw4e)" do
+    test "a reorder leaves the scheduler's order alone and says why", %{conn: conn, ws: ws} do
       leader = issue(ws, "machine's pick", %{priority: 1})
       underdog = issue(ws, "operator's pick", %{priority: 4})
 
-      {:ok, view, html} = live_board(conn)
-      assert html =~ "next up"
+      {:ok, view, _html} = live_board(conn)
 
       render_hook(view, "reorder_ready", %{"order" => [underdog.id, leader.id]})
 
       html = render_async(view, @async_timeout)
-      # The operator's card now leads: it carries the promotion reason and the
-      # machine's pick has fallen in behind it.
-      assert html =~ ~s(id="card-#{underdog.id}")
-      assert board_position(html, underdog.id) < board_position(html, leader.id)
-    end
-
-    test "an id that is no longer Ready is ignored rather than fatal", %{conn: conn, ws: ws} do
-      task = issue(ws, "still here")
-
-      {:ok, view, _html} = live_board(conn)
-
-      render_hook(view, "reorder_ready", %{"order" => ["bd-vanished", task.id]})
-
-      assert render_async(view, @async_timeout) =~ task.id
+      # Autopilot dispatches in priority-then-rank order, so the board shows
+      # that order rather than a hand-ranking nothing else would follow.
+      assert board_position(html, leader.id) < board_position(html, underdog.id)
+      assert html =~ "priority order, then rank"
     end
   end
 
@@ -834,10 +820,11 @@ defmodule ArbiterWeb.BoardLiveTest do
       assert has_element?(view, ~s(#board-column-running [id="card-#{task.id}"]))
     end
 
-    # bd-92mx1m: a worker parked on a question released its task's slot, so
-    # letting it proceed is a new admission. At a full cap it stays parked, and
-    # the board says what holds the slots.
-    test "at a full cap a parked card will not proceed, and names what holds the slots", %{
+    # bd-asxw4e: a ticket parked on a question is still In progress, so it
+    # never gave its slot up — letting it proceed is not a new admission, and
+    # a full cap does not stop it (bd-92mx1m's refusal is for tickets that are
+    # not In progress).
+    test "at a full cap a parked card still proceeds: it holds its own slot", %{
       conn: conn,
       ws: ws
     } do
@@ -862,10 +849,9 @@ defmodule ArbiterWeb.BoardLiveTest do
 
       html = drag(view, parked.id, "waiting", "closed")
 
-      assert html =~ "cap is 1"
-      assert html =~ holder.id
-      assert Worker.state(pid).status == :awaiting
-      assert has_element?(view, ~s(#board-column-waiting [id="card-#{parked.id}"]))
+      assert html =~ "proceed"
+      refute html =~ "cap is 1"
+      assert Worker.state(pid).status == :running
     end
 
     test "a card the worker FSM will not un-park says so rather than moving", %{
@@ -1067,15 +1053,18 @@ defmodule ArbiterWeb.BoardLiveTest do
       assert html =~ "slots free"
     end
 
-    # bd-45pwo1: "agents live" (live agent sessions) and "slots used" (tasks
-    # occupying the dispatch cap) are different numbers now — a task parked
-    # on an open MR burns no agent but still holds its slot.
+    # "agents live" (live agent sessions) and "slots used" (tickets In
+    # progress, bd-asxw4e) are different numbers — a ticket between rounds
+    # burns no agent but holds its slot, and one Merging on an open MR holds
+    # neither.
     test "shows agents live and slots used separately, and they can differ", %{
       conn: conn,
       ws: ws
     } do
-      task = working_issue(ws, "parked on its MR")
-      merge_worker(ws, task)
+      _between_rounds = working_issue(ws, "between review rounds")
+      on_its_mr = working_issue(ws, "parked on its MR")
+      merge_worker(ws, on_its_mr)
+      assert Ash.get!(Issue, on_its_mr.id).state == :merging
 
       {:ok, _view, html} = live_board(conn)
 

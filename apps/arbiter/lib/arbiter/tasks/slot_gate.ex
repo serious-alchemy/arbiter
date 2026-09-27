@@ -59,42 +59,41 @@ defmodule Arbiter.Tasks.SlotGate do
 
       config :arbiter, conductor_slot_basis: :issues
 
-  ## A slot is a task, not an agent (bd-45pwo1)
+  ## A slot is a ticket In progress (bd-asxw4e)
 
   `occupies_slot?/2` / `occupied/2` above answer "is an agent burning quota
-  right now" — useful for the `agents live: X of N` header, and left alone.
-  They are **not** what gates a new dispatch any more.
+  right now" — the `agents live: X of N` header. They are **not** what gates
+  a new dispatch.
 
-  The operator's rule (2026-09-21, restated 2026-09-22): "another slot
-  doesn't open until the issue occupying it is merged." A slot belongs to
-  the **task**, from dispatch until its PR merges (or it closes, fails,
-  stops, or parks for a human) — not to whichever agent happens to be live
-  for it at the moment the board is drawn. Under the agent-liveness rule
-  alone, a task sitting between ReviewGate rounds (no agent live, but not
-  done either) held no slot, and the fleet ran three author tasks at once
-  against a cap of two.
+  The dispatch cap counts **tickets whose stored state is `:active`**
+  (`Arbiter.Tasks.Lifecycle`) — exactly the board's In progress column
+  (`holds_slot?/1`, `slots_used/1`, `slot_holders/1`). The worker list is not
+  an input at all: no resident worker row can hold a slot on its own, and
+  none can release one. So:
 
-  `occupied_tasks/2` counts this instead: one slot per distinct task whose
-  `Arbiter.Worker.Phase` is not released. A phase is released only at
-  `:done` (the worker completed — merged, closed, or otherwise finalized) or
-  `:waiting_on_you` (the worker asked a question, or parked failed — a human
-  might take arbitrarily long to answer, so a slot must not pin on that).
-  Every other phase — `:implementing`, `:in_review`, `:addressing_review`,
-  `:fixing_ci`, `:resolving_conflict`, `:waiting_ci_merge`, and
-  `:handing_off` (the gap between rounds) — still holds the slot. A worker
-  explicitly stopped drops out of the registry entirely, so it stops being
-  counted the same way a card would stop being rendered.
+    * a ticket between ReviewGate rounds, or handing off, is still `:active`
+      and holds its slot with no agent live (the bd-45pwo1 guarantee — the
+      fleet can no longer run three tickets against a cap of two);
+    * a ticket parked on a human is still `:active` — it is In progress with
+      an attention flag, and it holds its slot until it moves;
+    * `:merging` and `:verifying` release the slot. An open PR waiting on CI
+      or the merge queue is not work in progress. This deliberately replaces
+      the 2026-09-21 rule "another slot doesn't open until the issue
+      occupying it is merged" (operator, 2026-09-27; `docs/design/ticket-lifecycle.md` §5).
 
-  `occupied_tasks/2` takes the worker list already annotated with `:phase`
-  (`Arbiter.Worker.Phase.annotate/1`) rather than computing it itself:
-  `Phase` already aliases this module, so the reverse dependency would be
-  circular, and the board already annotates the list for its cards anyway.
+  Before bd-asxw4e the count read `Arbiter.Worker.Phase` off each task's
+  author row, so a ticket held its slot through `waiting_ci_merge`,
+  `in_review`, `handing_off` and an `:unknown` probe — invisibly — and a
+  ReviewGate park released it. The stored state is what every surface shows,
+  so the cap now cannot disagree with the board.
 
-  Exactly one slot per task regardless of how many subordinate rounds
-  (reviewer, implementer, fix pass, conflict resolver) are live for it: only
-  the task's own author row is consulted, because `Phase.of/2` already folds
-  every sibling's liveness into that row's phase.
+  Epics never hold a slot: they are never dispatched and never on the board.
+  The `conductor_slot_basis` setting above only changes the `agents live`
+  count; the cap is counted in tickets under either basis.
   """
+
+  alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.Lifecycle
 
   @typedoc "How a slot is counted."
   @type basis :: :agents | :issues
@@ -211,80 +210,42 @@ defmodule Arbiter.Tasks.SlotGate do
     end
   end
 
-  # Phases that release a task's slot early. See the moduledoc's "A slot is
-  # a task, not an agent" section for why only these two.
-  @released_phases [:done, :waiting_on_you]
-
-  # A reviewer / implementer / fix pass / conflict resolver never holds a
-  # second slot for the task it belongs to — `occupied_tasks/2` counts from
-  # each task's own author row only.
-  @subordinate_roles [:reviewer, :implementer, :fix_pass, :conflict_resolver]
-
   @doc """
-  Does this phase still hold a task's slot? False only at `:done` or
-  `:waiting_on_you` — see the moduledoc.
+  Does this ticket hold a slot? True only for a ticket whose stored state is
+  `:active` (a legacy row is judged by the state its columns imply) and that is
+  not an epic. See the moduledoc's "A slot is a ticket In progress".
   """
-  @spec task_occupies_slot?(atom()) :: boolean()
-  def task_occupies_slot?(phase) when is_atom(phase), do: phase not in @released_phases
-
-  @doc """
-  How many distinct tasks occupy a slot, given `annotated_workers` — the full
-  worker list with `:phase` already stamped
-  (`Arbiter.Worker.Phase.annotate/1`).
-
-  Under `:agents` (the default), one slot per task whose phase is not
-  released (`task_occupies_slot?/1`), read off the task's own author row —
-  a live reviewer, implementer, fix pass or conflict resolver never adds a
-  second slot for the same task. Under `:issues`, falls back to the
-  pre-bd-aw2cyt per-record rule (`record_slot?/1`), deduplicated by task id
-  so a fix pass or conflict resolver sharing its author's task id does not
-  double-count either.
-  """
-  @spec occupied_tasks([map()], basis() | nil) :: non_neg_integer()
-  def occupied_tasks(annotated_workers, basis \\ nil) when is_list(annotated_workers) do
-    annotated_workers |> slot_holders(basis) |> length()
+  @spec holds_slot?(map()) :: boolean()
+  def holds_slot?(ticket) when is_map(ticket) do
+    Lifecycle.state_of(ticket) == :active and
+      Map.get(ticket, :issue_type) not in Issue.non_dispatchable_types()
   end
 
-  @doc """
-  The distinct task ids `occupied_tasks/2` counts, in first-seen order — the
-  same rule, but naming the holders rather than counting them.
-
-  `Arbiter.Worker.ResumeSlot` (bd-92mx1m) needs both halves: whether the task
-  being resumed is itself among the holders (a resume of work that never gave
-  its slot up is not a new admission), and, when the cap is full, *which*
-  tasks hold it, so a refusal can say so.
-  """
-  @spec slot_holders([map()], basis() | nil) :: [String.t()]
-  def slot_holders(annotated_workers, basis \\ nil) when is_list(annotated_workers) do
-    holding =
-      case normalize_basis(basis) do
-        :issues -> Enum.filter(annotated_workers, &record_slot?/1)
-        :agents -> Enum.filter(annotated_workers, &phase_slot?/1)
-      end
-
-    holding
-    |> Enum.map(&Map.get(&1, :task_id))
-    |> Enum.uniq()
-  end
+  def holds_slot?(_ticket), do: false
 
   @doc """
-  Task slots left out of `total`, mirroring `free/3` but for task occupancy
-  (`occupied_tasks/2`) rather than agent-session occupancy. Never negative,
-  for the same reason `free/3` never is.
+  The ids of the tickets holding a slot, in the order given. `Arbiter.Worker.ResumeSlot`
+  names them in a refusal; the board and `Arbiter.Board.Drain` report them.
   """
-  @spec task_free(non_neg_integer(), [map()], basis() | nil) :: non_neg_integer()
-  def task_free(total, annotated_workers, basis \\ nil)
-      when is_integer(total) and is_list(annotated_workers) do
-    max(total - occupied_tasks(annotated_workers, basis), 0)
+  @spec slot_holders([map()]) :: [String.t()]
+  def slot_holders(tickets) when is_list(tickets) do
+    for ticket <- tickets, holds_slot?(ticket), uniq: true, do: Map.get(ticket, :id)
   end
+
+  @doc "How many of `tickets` hold a slot — the dispatch cap's used count."
+  @spec slots_used([map()]) :: non_neg_integer()
+  def slots_used(tickets) when is_list(tickets), do: tickets |> slot_holders() |> length()
+
+  @doc """
+  Slots left out of `total` once `tickets` have taken theirs. Never negative:
+  a forced dispatch or resume may legitimately push the count past the cap,
+  and "-1 slots free" is not a thing a scheduler or a header should ever say.
+  """
+  @spec slots_free(non_neg_integer(), [map()]) :: non_neg_integer()
+  def slots_free(total, tickets) when is_integer(total) and is_list(tickets),
+    do: max(total - slots_used(tickets), 0)
 
   # ---- internals ------------------------------------------------------------
-
-  # A task's own author row, in a phase that still holds its slot.
-  defp phase_slot?(worker),
-    do: author_row?(worker) and task_occupies_slot?(Map.get(worker, :phase))
-
-  defp author_row?(worker), do: role_of(worker) not in @subordinate_roles
 
   defp agent_slot?(worker) do
     case agent_live(worker) do

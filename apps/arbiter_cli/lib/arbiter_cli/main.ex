@@ -23,7 +23,7 @@ defmodule ArbiterCli.Main do
       arb issue claim     <ref> [--force] [--repo <repo>]
       arb issue sync      [--dry]
       arb issue ready
-      arb issue dispatch  <id> [<repo>] [--with-claude] [--model <name>]
+      arb issue dispatch  <id> [<repo>] [--with-claude] [--model <name>] [--force]
 
       arb worker list
       arb worker show     <task-id>

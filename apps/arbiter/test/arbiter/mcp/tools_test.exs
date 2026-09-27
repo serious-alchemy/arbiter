@@ -71,6 +71,15 @@ defmodule Arbiter.MCP.ToolsTest do
 
   defp driver_owning?(_pid, _worktree_path), do: nil
 
+  # bd-asxw4e: a ticket a manual dispatch accepts without `force` — refined,
+  # so in the Ready column.
+  defp ready_issue(ctx, title) do
+    {:ok, issue} =
+      Ash.create(Issue, %{title: title, workspace_id: ctx.ws.id, acceptance: "- fixture"})
+
+    Ash.update(issue, %{}, action: :promote_to_ready)
+  end
+
   defp create_usage_event!(ctx, attrs) do
     base = %{
       task_id: ctx.task.id,
@@ -4279,7 +4288,7 @@ defmodule Arbiter.MCP.ToolsTest do
     # path surfaces a repo error, proving the workspace default was honored (a
     # park would return {:ok, ...} with claude_started: false).
     test "omitting provider takes the workspace-default real-work path (not a park)", ctx do
-      {:ok, task} = Ash.create(Issue, %{title: "default dispatch", workspace_id: ctx.ws.id})
+      {:ok, task} = ready_issue(ctx, "default dispatch")
 
       assert {:error, {:invalid, msg}} =
                Tools.worker_dispatch(ctx.coordinator, %{
@@ -4293,7 +4302,7 @@ defmodule Arbiter.MCP.ToolsTest do
     end
 
     test "no_agent: true parks the task in_progress (explicit hand-off)", ctx do
-      {:ok, task} = Ash.create(Issue, %{title: "parked dispatch", workspace_id: ctx.ws.id})
+      {:ok, task} = ready_issue(ctx, "parked dispatch")
 
       assert {:ok, data} =
                Tools.worker_dispatch(ctx.coordinator, %{
@@ -4309,12 +4318,75 @@ defmodule Arbiter.MCP.ToolsTest do
       on_exit(fn -> Worker.stop(task.id, :normal) end)
     end
 
+    # bd-asxw4e: a Backlog or Blocked ticket is refused with the reason unless
+    # `force: true`, and a forced dispatch is recorded.
+    test "a Backlog ticket is refused, naming why and how to force it", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "unrefined", workspace_id: ctx.ws.id})
+
+      assert {:error, {:invalid, msg}} =
+               Tools.worker_dispatch(ctx.coordinator, %{
+                 "task_id" => task.id,
+                 "repo" => "test/repo",
+                 "no_agent" => true
+               })
+
+      assert msg =~ "#{task.id} is in Backlog"
+      assert msg =~ "force: true"
+      assert Ash.get!(Issue, task.id).state == :backlog
+    end
+
+    test "a Blocked ticket is refused, naming its blockers", ctx do
+      {:ok, blocker} =
+        Ash.create(Issue, %{title: "blocker", workspace_id: ctx.ws.id, acceptance: "- ok"})
+
+      {:ok, task} =
+        Ash.create(Issue, %{title: "blocked", workspace_id: ctx.ws.id, acceptance: "- ok"})
+
+      {:ok, _} = Ash.update(task, %{}, action: :promote_to_ready)
+
+      {:ok, _} =
+        Ash.create(Arbiter.Tasks.Dependency, %{
+          from_issue_id: task.id,
+          to_issue_id: blocker.id,
+          type: :depends_on
+        })
+
+      assert {:error, {:invalid, msg}} =
+               Tools.worker_dispatch(ctx.coordinator, %{"task_id" => task.id, "no_agent" => true})
+
+      assert msg =~ "blocked by #{blocker.id}"
+    end
+
+    test "force: true dispatches a Backlog ticket and records the bypass", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "forced", workspace_id: ctx.ws.id})
+
+      assert {:ok, data} =
+               Tools.worker_dispatch(ctx.coordinator, %{
+                 "task_id" => task.id,
+                 "repo" => "test/repo",
+                 "no_agent" => true,
+                 "force" => true
+               })
+
+      assert data.task.status == "in_progress"
+      on_exit(fn -> Worker.stop(task.id, :normal) end)
+
+      [event] =
+        Arbiter.Events.Record
+        |> Ash.Query.filter(workspace_id == ^ctx.ws.id and topic == "dispatch_forced")
+        |> Ash.read!()
+
+      assert event.payload["task_id"] == task.id
+      assert event.payload["bypassed"] == "in Backlog"
+      assert event.payload["dispatched_by"] == "mcp"
+    end
+
     # `provider` (and the deprecated `with_claude` alias) take the real-work
     # dispatch path. Without a configured repo that path surfaces a repo error —
     # which is exactly the signal that the provider was honored as a worker
     # dispatch (a park would have returned {:ok, ...} with claude_started: false).
     test "provider: \"gemini\" takes the real-work path (not a park)", ctx do
-      {:ok, task} = Ash.create(Issue, %{title: "gem dispatch", workspace_id: ctx.ws.id})
+      {:ok, task} = ready_issue(ctx, "gem dispatch")
 
       assert {:error, {:invalid, msg}} =
                Tools.worker_dispatch(ctx.coordinator, %{
@@ -4329,7 +4401,7 @@ defmodule Arbiter.MCP.ToolsTest do
     end
 
     test "provider: \"claude\" takes the real-work path (not a park)", ctx do
-      {:ok, task} = Ash.create(Issue, %{title: "claude dispatch", workspace_id: ctx.ws.id})
+      {:ok, task} = ready_issue(ctx, "claude dispatch")
 
       assert {:error, {:invalid, msg}} =
                Tools.worker_dispatch(ctx.coordinator, %{
@@ -4344,7 +4416,7 @@ defmodule Arbiter.MCP.ToolsTest do
     end
 
     test "the deprecated with_claude: true alias still dispatches a worker", ctx do
-      {:ok, task} = Ash.create(Issue, %{title: "alias dispatch", workspace_id: ctx.ws.id})
+      {:ok, task} = ready_issue(ctx, "alias dispatch")
 
       assert {:error, {:invalid, msg}} =
                Tools.worker_dispatch(ctx.coordinator, %{
@@ -4366,7 +4438,7 @@ defmodule Arbiter.MCP.ToolsTest do
     # with zero error/warning. The tell: the error is about the bad provider,
     # NOT the (also-unconfigured) repo, proving we reject before dispatching.
     test "an unrecognized provider is rejected loudly (not a silent default)", ctx do
-      {:ok, task} = Ash.create(Issue, %{title: "bad provider", workspace_id: ctx.ws.id})
+      {:ok, task} = ready_issue(ctx, "bad provider")
 
       assert {:error, {:invalid, msg}} =
                Tools.worker_dispatch(ctx.coordinator, %{
@@ -4442,7 +4514,7 @@ defmodule Arbiter.MCP.ToolsTest do
       {:ok, ws} =
         Ash.update(ctx.ws, %{config: %{"agent" => %{"type" => ["claude", "gemini"]}}})
 
-      {:ok, task} = Ash.create(Issue, %{title: "codex mcp dispatch", workspace_id: ws.id})
+      {:ok, task} = ready_issue(%{ws: ws}, "codex mcp dispatch")
       coordinator = %{ctx.coordinator | workspace_id: ws.id}
 
       assert {:ok, data} =
@@ -4540,7 +4612,7 @@ defmodule Arbiter.MCP.ToolsTest do
     end
 
     test "the refusal names the live session and how to clear it", ctx do
-      {:ok, task} = Ash.create(Issue, %{title: "live session dispatch", workspace_id: ctx.ws.id})
+      {:ok, task} = ready_issue(ctx, "live session dispatch")
 
       args = %{
         "task_id" => task.id,
@@ -4563,7 +4635,7 @@ defmodule Arbiter.MCP.ToolsTest do
 
   describe "worker_dispatch/2 with force_quota: true" do
     test "force_quota: true is accepted in the schema", ctx do
-      {:ok, task} = Ash.create(Issue, %{title: "force quota dispatch", workspace_id: ctx.ws.id})
+      {:ok, task} = ready_issue(ctx, "force quota dispatch")
 
       # Use no_agent: true to test the force_quota flag without dealing with repo setup
       assert {:ok, data} =
@@ -4582,7 +4654,7 @@ defmodule Arbiter.MCP.ToolsTest do
     test "force_quota: true with force_quota_reason creates audit event with reason via MCP args",
          ctx do
       {:ok, task} =
-        Ash.create(Issue, %{title: "force quota with reason", workspace_id: ctx.ws.id})
+        ready_issue(ctx, "force quota with reason")
 
       # Call Tools.worker_dispatch (the MCP tool handler) with force_quota_reason
       assert {:ok, data} =
@@ -4613,7 +4685,7 @@ defmodule Arbiter.MCP.ToolsTest do
     end
 
     test "force_quota: false is accepted in the schema", ctx do
-      {:ok, task} = Ash.create(Issue, %{title: "normal quota dispatch", workspace_id: ctx.ws.id})
+      {:ok, task} = ready_issue(ctx, "normal quota dispatch")
 
       assert {:ok, data} =
                Tools.worker_dispatch(ctx.coordinator, %{
@@ -4630,7 +4702,7 @@ defmodule Arbiter.MCP.ToolsTest do
 
   describe "worker_resume/2 with force_quota: true" do
     test "force_quota: true is accepted in the schema on resume", ctx do
-      {:ok, task} = Ash.create(Issue, %{title: "force quota resume", workspace_id: ctx.ws.id})
+      {:ok, task} = ready_issue(ctx, "force quota resume")
 
       # First dispatch with no_agent to park the task
       {:ok, _dispatch_result} =
@@ -4668,7 +4740,7 @@ defmodule Arbiter.MCP.ToolsTest do
     test "force_quota_reason is accepted in the schema and does not cause additional properties error",
          ctx do
       {:ok, task} =
-        Ash.create(Issue, %{title: "force quota resume with reason", workspace_id: ctx.ws.id})
+        ready_issue(ctx, "force quota resume with reason")
 
       # First dispatch with no_agent to park the task
       {:ok, _dispatch_result} =
@@ -4709,7 +4781,7 @@ defmodule Arbiter.MCP.ToolsTest do
     end
 
     test "returns active workers scoped to the coordinator's workspace", ctx do
-      {:ok, task} = Ash.create(Issue, %{title: "worker-list target", workspace_id: ctx.ws.id})
+      {:ok, task} = ready_issue(ctx, "worker-list target")
 
       {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ctx.ws.id)
       on_exit(fn -> Process.alive?(pid) && Worker.stop(task.id, :normal) end)

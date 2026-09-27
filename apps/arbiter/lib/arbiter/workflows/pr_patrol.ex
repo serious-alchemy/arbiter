@@ -474,7 +474,7 @@ defmodule Arbiter.Workflows.PRPatrol do
   # doesn't retry silently forever. A quota hold is NOT a failure: it means
   # Dispatch.dispatch/2 already enqueued the intent in DispatchQueue for
   # automatic re-drain, and closing the task here would make that later
-  # re-dispatch fail at ensure_not_closed.
+  # re-dispatch fail at ensure_dispatchable (task_closed).
   defp dispatch_follow_up(task, pr_number, state) do
     # bd-6v2my2: no `provision_worktree: true` override — `:task`'s default
     # (skip branch provisioning) is exactly right here. The worker still gets
@@ -484,7 +484,16 @@ defmodule Arbiter.Workflows.PRPatrol do
     # <source_pr>` (onto the ORIGINAL PR's branch — see the branch-policy note
     # this description carries) safe to run there: nothing Arbiter provisioned
     # is a branch of its own to begin with.
-    opts = Keyword.merge([repo: state.repo, start_claude: true], state.dispatch_opts)
+    #
+    # bd-asxw4e: the follow-up was filed a moment ago, so it is in Backlog, and
+    # a dispatch of a ticket that is not Ready is refused unless forced. The
+    # patrol files it precisely to work it now, so it forces — and the bypass
+    # is recorded as a `dispatch_forced` event naming the patrol.
+    opts =
+      Keyword.merge(
+        [repo: state.repo, start_claude: true, force: true, dispatched_by: "pr_patrol"],
+        state.dispatch_opts
+      )
 
     case Dispatch.dispatch(task.id, opts) do
       {:ok, _result} ->

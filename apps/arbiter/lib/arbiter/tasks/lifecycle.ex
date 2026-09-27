@@ -103,6 +103,19 @@ defmodule Arbiter.Tasks.Lifecycle do
   @doc "The stored state, or the one a legacy row's columns imply; `nil` when neither."
   defdelegate state_of(ticket), to: Arbiter.Tasks.Lifecycle.View
 
+  @doc """
+  The one dispatch-eligibility predicate (bd-asxw4e): `:ok` when the ticket is
+  in the `:ready` column and the scheduler holds nothing against it, else
+  `{:held, hold}`. See `Arbiter.Tasks.Lifecycle.Dispatchable` for `ctx`.
+  """
+  defdelegate dispatchable(ticket, ctx \\ %{}), to: Arbiter.Tasks.Lifecycle.Dispatchable
+
+  @doc "Whether `dispatchable/2` is `:ok`."
+  defdelegate dispatchable?(ticket, ctx \\ %{}), to: Arbiter.Tasks.Lifecycle.Dispatchable
+
+  @doc ~s[A dispatch hold, phrased for an operator ("in Backlog", "blocked by bd-3").]
+  defdelegate describe_hold(hold), to: Arbiter.Tasks.Lifecycle.Dispatchable
+
   @doc "The stored states, in lifecycle order."
   @spec states() :: [state()]
   def states, do: @states

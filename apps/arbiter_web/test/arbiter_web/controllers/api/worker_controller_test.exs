@@ -7,6 +7,8 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
   alias Arbiter.Worker.PromptLog
   alias Arbiter.Workers.Run
 
+  require Ash.Query
+
   setup %{conn: conn} do
     # Clean slate — other tests in the umbrella may have left workers running.
     for snap <- Worker.list_children() do
@@ -130,13 +132,57 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
     end
   end
 
+  # bd-asxw4e: a ticket `arb dispatch` accepts without `--force` — refined, so
+  # in the Ready column.
+  defp ready_issue(ws, title) do
+    {:ok, issue} = Ash.create(Issue, %{title: title, workspace_id: ws.id, acceptance: "- ok"})
+    Ash.update(issue, %{}, action: :promote_to_ready)
+  end
+
   describe "POST /api/workers/dispatch" do
+    # bd-asxw4e: `arb dispatch` of a Backlog or Blocked ticket is refused with
+    # the reason unless `force`, and a forced dispatch is recorded.
+    test "a Backlog ticket is refused with the reason", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "unrefined", workspace_id: ws.id})
+
+      conn =
+        post(conn, ~p"/api/workers/dispatch", %{"task_id" => task.id, "no_agent" => true})
+
+      body = json_response(conn, 400)
+      assert inspect(body) =~ "#{task.id} is in Backlog"
+      assert inspect(body) =~ "--force"
+      assert Ash.get!(Issue, task.id).state == :backlog
+    end
+
+    test "force dispatches a Backlog ticket and records the bypass", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "forced", workspace_id: ws.id})
+
+      conn =
+        post(conn, ~p"/api/workers/dispatch", %{
+          "task_id" => task.id,
+          "repo" => "test/repo",
+          "no_agent" => true,
+          "force" => true
+        })
+
+      assert json_response(conn, 201)["task"]["status"] == "in_progress"
+      on_exit(fn -> Worker.stop(task.id, :normal) end)
+
+      [event] =
+        Arbiter.Events.Record
+        |> Ash.Query.filter(workspace_id == ^ws.id and topic == "dispatch_forced")
+        |> Ash.read!()
+
+      assert event.payload["bypassed"] == "in Backlog"
+      assert event.payload["dispatched_by"] == "http_api"
+    end
+
     # --no-agent preserves the manual-attach path: the task parks in
     # `:in_progress` with no Driver, so the no-op Work workflow never races
     # to a bogus `:closed`. Regression against the old dry-dispatch footgun.
     test "--no-agent parks the task and does NOT close it",
          %{conn: conn, ws: ws} do
-      {:ok, task} = Ash.create(Issue, %{title: "dry-dispatch-me", workspace_id: ws.id})
+      {:ok, task} = ready_issue(ws, "dry-dispatch-me")
 
       conn =
         post(conn, ~p"/api/workers/dispatch", %{
@@ -165,7 +211,7 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
     # 201 with the task in_progress and no agent).
     test "provider routes to a real worker dispatch (repo error rather than park)",
          %{conn: conn, ws: ws} do
-      {:ok, task} = Ash.create(Issue, %{title: "gem-provider", workspace_id: ws.id})
+      {:ok, task} = ready_issue(ws, "gem-provider")
 
       conn =
         post(conn, ~p"/api/workers/dispatch", %{
@@ -185,7 +231,7 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
     # check is the unknown-provider test below).
     test "provider \"codex\" routes to a real worker dispatch (repo error)",
          %{conn: conn, ws: ws} do
-      {:ok, task} = Ash.create(Issue, %{title: "codex-provider", workspace_id: ws.id})
+      {:ok, task} = ready_issue(ws, "codex-provider")
 
       conn =
         post(conn, ~p"/api/workers/dispatch", %{
@@ -225,7 +271,7 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
     end
 
     test "accepts force_quota: true to bypass the quota gate", %{conn: conn, ws: ws} do
-      {:ok, task} = Ash.create(Issue, %{title: "force-quota-dispatch", workspace_id: ws.id})
+      {:ok, task} = ready_issue(ws, "force-quota-dispatch")
 
       conn =
         post(conn, ~p"/api/workers/dispatch", %{
@@ -271,7 +317,7 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
     end
 
     test "a bearer token with can_dispatch: true is allowed", %{conn: conn, ws: ws} do
-      {:ok, task} = Ash.create(Issue, %{title: "can-dispatch-token", workspace_id: ws.id})
+      {:ok, task} = ready_issue(ws, "can-dispatch-token")
       token = Arbiter.MCP.Scope.mint_coordinator(nil, can_dispatch: true)
 
       conn =

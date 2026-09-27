@@ -85,6 +85,7 @@ defmodule Arbiter.Worker.CompletionMergeTest do
 
     {:ok, result} =
       Dispatch.dispatch(task.id,
+        force: true,
         repo: "merge/repo",
         start_claude: true,
         claude_command: [@fixture],

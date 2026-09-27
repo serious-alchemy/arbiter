@@ -291,8 +291,54 @@ defmodule Arbiter.Board.SchedulerTest do
     end
   end
 
+  describe "order (bd-asxw4e)" do
+    test "priority, then rank, then created_at: the lower rank dispatches first" do
+      t0 = ~U[2026-09-27 10:00:00Z]
+
+      older =
+        Map.merge(card("bd-old"), %{state: :queued, priority: 2, rank: 2048, created_at: t0})
+
+      newer =
+        Map.merge(card("bd-new"), %{
+          state: :queued,
+          priority: 2,
+          rank: 1024,
+          created_at: DateTime.add(t0, 3600)
+        })
+
+      urgent =
+        Map.merge(card("bd-p1"), %{
+          state: :queued,
+          priority: 1,
+          rank: 9999,
+          created_at: DateTime.add(t0, 7200)
+        })
+
+      tie =
+        Map.merge(card("bd-tie"), %{
+          state: :queued,
+          priority: 2,
+          rank: 2048,
+          created_at: DateTime.add(t0, 60)
+        })
+
+      plan = plan(ready: [tie, older, newer, urgent], slots_free: 0)
+      assert Enum.map(plan.entries, & &1.id) == ["bd-p1", "bd-new", "bd-old", "bd-tie"]
+
+      plan = plan(ready: [tie, older, newer])
+      assert plan.promote == "bd-new"
+    end
+
+    test "a card the ready list carries that is no longer Ready is held in its column" do
+      plan = plan(ready: [Map.put(card("bd-1"), :state, :backlog), card("bd-2")])
+
+      assert %{state: :blocked, reason: "blocked — in Backlog"} = reason(plan, "bd-1")
+      assert plan.promote == "bd-2"
+    end
+  end
+
   describe "entries" do
-    test "preserve queue order" do
+    test "cards with nothing to order them by keep the order given" do
       plan = plan(ready: [card("bd-3"), card("bd-1"), card("bd-2")])
 
       assert Enum.map(plan.entries, & &1.id) == ["bd-3", "bd-1", "bd-2"]

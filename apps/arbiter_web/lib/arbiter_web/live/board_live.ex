@@ -62,9 +62,11 @@ defmodule ArbiterWeb.BoardLive do
 
   Drag remains a human action, for the moves only a human can decide:
 
-    * **reordering within Ready** — the operator's hand-ranking leads the
-      queue, so dragging a card to the top is how you override the machine's
-      idea of what matters most without dispatching anything by hand;
+    * **reordering within Ready** — not yet. The queue is in priority, then
+      rank order (bd-asxw4e), which is the order Autopilot dispatches in; a
+      session-only hand-ranking used to reorder the cards here while
+      Autopilot ignored it. Until drag-to-rank writes the rank (bd-79w1fs),
+      a reorder is answered with that explanation and changes nothing;
     * **pulling a card out of Running** — stops the worker, and asks first,
       because that kills a live agent mid-thought;
     * **Waiting outcomes** — dropping a Waiting card on Ready sends the work
@@ -142,7 +144,6 @@ defmodule ArbiterWeb.BoardLive do
       |> assign(:now, now)
       |> assign(:filter, "")
       |> assign(:workspace, "all")
-      |> assign(:ready_order, [])
       |> assign(:expanded, MapSet.new())
       |> assign(:confirm_stop, nil)
       |> assign(:columns, @columns)
@@ -263,14 +264,18 @@ defmodule ArbiterWeb.BoardLive do
 
   # ---- drag: reordering Ready ----------------------------------------------
 
-  # The operator's hand-ranking. It does not dispatch anything: it changes
-  # which card the scheduler considers first, and the scheduler still has to
-  # agree the card is eligible. Held in the session, not the database — a
-  # ranking is a thing you are doing right now, not a property of the issue.
-  def handle_event("reorder_ready", %{"order" => order}, socket) when is_list(order) do
+  # bd-asxw4e: the Ready queue is in the scheduler's own order — priority,
+  # then the persisted rank — so a session-only hand-ranking would only make
+  # the board promise an order Autopilot does not follow. Drag-to-rank, which
+  # writes the rank, is bd-79w1fs; until then the gesture explains itself.
+  def handle_event("reorder_ready", _params, socket) do
     {:noreply,
      socket
-     |> assign(:ready_order, Enum.filter(order, &is_binary/1))
+     |> put_flash(
+       :info,
+       "Ready is in priority order, then rank — the order the scheduler dispatches in. " <>
+         "Change a card's priority to move it; drag-to-rank is coming."
+     )
      |> refresh_board()}
   end
 
@@ -384,8 +389,9 @@ defmodule ArbiterWeb.BoardLive do
   # the board, decides whether that is legal from where the card actually sits
   # — a review rejection parks at :failed and refuses.
   #
-  # bd-92mx1m: a worker parked on a question released its task's slot, so
-  # letting it carry on is a new admission — at a full cap it stays parked and
+  # bd-92mx1m / bd-asxw4e: a ticket still In progress holds its own slot, so
+  # un-parking it is never a new admission. One whose ticket has left In
+  # progress meanwhile must acquire a slot — at a full cap it stays parked and
   # the flash names the cap and what holds it. No override here: going over the
   # cap is `arb worker resume --force` / MCP `force: true`, which is recorded.
   defp proceed(socket, id) do
@@ -509,17 +515,15 @@ defmodule ArbiterWeb.BoardLive do
   # while one is out marks the board stale, and the stale board gets exactly
   # one more read when the current one lands — so a burst of lifecycle
   # broadcasts costs two reads, not one each, and the second read sees
-  # everything the burst changed, `ready_order` included.
+  # everything the burst changed.
   defp refresh_board(%{assigns: %{board_loading?: true}} = socket),
     do: assign(socket, :board_stale?, true)
 
   defp refresh_board(socket) do
-    ready_order = socket.assigns.ready_order
-
     socket
     |> assign(:board_loading?, true)
     |> assign(:board_stale?, false)
-    |> start_async(:board, fn -> load_board(ready_order) end)
+    |> start_async(:board, fn -> load_board() end)
   end
 
   defp board_read_done(socket) do
@@ -536,12 +540,12 @@ defmodule ArbiterWeb.BoardLive do
   # that connection (under test, the one shared sandbox connection,
   # bd-5scl0c). Trapping turns the view's exit into a message: the query in
   # flight finishes, and the task goes before it starts another.
-  defp load_board(ready_order) do
+  defp load_board do
     Process.flag(:trap_exit, true)
     running? = scheduler_running?()
     paused? = not running? or scheduler_paused?()
 
-    board = Snapshot.load(now: DateTime.utc_now(), ready_order: ready_order, paused: paused?)
+    board = Snapshot.load(now: DateTime.utc_now(), paused: paused?)
     exit_if_view_gone()
     workspaces = load_workspaces()
     exit_if_view_gone()

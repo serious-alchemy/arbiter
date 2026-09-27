@@ -208,7 +208,7 @@ defmodule Arbiter.Worker.DriverTest do
     test "Dispatch with default opts starts a driver that closes the task", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "via-dispatch", workspace_id: ws.id})
 
-      {:ok, result} = Dispatch.dispatch(task.id, repo: "r", interval_ms: 1)
+      {:ok, result} = Dispatch.dispatch(task.id, force: true, repo: "r", interval_ms: 1)
       assert is_pid(result.driver_pid)
 
       ref = Process.monitor(result.driver_pid)

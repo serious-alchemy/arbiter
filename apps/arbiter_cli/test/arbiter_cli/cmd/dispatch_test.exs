@@ -112,6 +112,28 @@ defmodule ArbiterCli.Cmd.DispatchTest do
       assert body["model"] == "haiku"
     end
 
+    # bd-asxw4e: a Backlog or Blocked ticket is refused unless forced.
+    test "--force sends force: true in the POST body" do
+      stub_dispatch_capture()
+
+      {_out, _err, code} =
+        capture(fn -> ArbiterCli.Cmd.Dispatch.run(["gte-017", "--force"]) end)
+
+      assert code == 0
+      assert_receive {:body, body}
+      assert body["force"] == true
+    end
+
+    test "without --force the request body omits the force key" do
+      stub_dispatch_capture()
+
+      {_out, _err, code} = capture(fn -> ArbiterCli.Cmd.Dispatch.run(["gte-017"]) end)
+
+      assert code == 0
+      assert_receive {:body, body}
+      refute Map.has_key?(body, "force")
+    end
+
     test "without --model the request body omits the model key" do
       stub_dispatch_capture()
 

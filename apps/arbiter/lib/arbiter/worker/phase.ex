@@ -188,8 +188,8 @@ defmodule Arbiter.Worker.Phase do
   # ReviewGate fix round, the Watchdog's awaiting_review auto-resume — carries
   # `meta[:slot_handoff]` until that round starts or is given up on. Nobody has
   # been asked anything yet, so it is a hand-off between agents, not a park:
-  # the task keeps its slot (`SlotGate.task_occupies_slot?/1`), and a resume
-  # of it is not a new admission (`Arbiter.Worker.ResumeSlot`).
+  # the card reads `:handing_off`. (Its slot is its ticket's: it is held
+  # while the ticket is In progress — `SlotGate.holds_slot?/1`, bd-asxw4e.)
   defp slot_handoff?(worker),
     do: Map.get(worker, :status) == :failed and meta_get(worker, :slot_handoff) == true
 

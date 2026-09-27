@@ -13,29 +13,29 @@ defmodule Arbiter.Worker.ResumeSlot do
   the cap: two tasks in flight under a cap of 1, and the scheduler could admit
   nothing until both merged.
 
-  ## The rule: does the task hold a slot *right now*?
+  ## The rule: is the ticket In progress?
 
-  Not who is resuming it. The answer comes from the same place the board's own
-  count does (`Arbiter.Tasks.SlotGate.slot_holders/2` over the live workers,
-  annotated by `Arbiter.Worker.Phase`), so the gate can never disagree with the
-  number on the board:
+  Not who is resuming it. A ticket holds a slot exactly while its stored state
+  is `:active` (bd-asxw4e) — the same rule the board's `slots_used` counts by
+  (`Arbiter.Tasks.SlotGate.holds_slot?/1`), so the gate can never disagree
+  with the number on the board:
 
-    * **Held** — the task's author row is in a phase that keeps its slot
-      (implementing, in review, waiting on CI / merge, handing off — which
-      includes a worker failed only so an automatic round can replace it,
-      `meta[:slot_handoff]`). The resume passes through **uncapped**. This is
-      the #1969/#1995 no-deadlock guarantee: a fix round for a task that is
-      already in flight is never a new admission.
-    * **Held, after a reboot** — the registry is empty after a restart, so a
-      task with no worker at all is judged by its latest main run: one cut off
-      by the restart (`:running`, `:interrupted`, or swept to "server
-      restarted" by `Arbiter.Workers.Reconciler`) was in flight, and resuming
-      it is a reboot of in-flight work.
-    * **Released** — anything else: parked for a human (`:waiting_on_you`),
-      completed (`:done`), explicitly stopped (no worker, and a run that ended
-      on its own terms). The resume must **re-acquire** a slot, exactly like a
-      new admission, against the task's workspace's effective cap
+    * **Held** — the ticket is `:active`, whatever its worker did: working,
+      between ReviewGate rounds, failed mid hand-off so an automatic round can
+      replace it, parked on a human, or cut off by a restart. The resume
+      passes through **uncapped**. This is the #1969/#1995 no-deadlock
+      guarantee: a round for a ticket already In progress is never a new
+      admission.
+    * **Not held** — any other state: `:queued` (requeued, reopened),
+      `:merging` (an open PR holds no slot), `:verifying`. The resume must
+      **acquire** a slot, exactly like a new admission, against the ticket's
+      workspace's effective cap
       (`Arbiter.Board.Snapshot.effective_max_concurrent/2`).
+
+  No worker rows are read. Before bd-asxw4e the answer came from the
+  author row's `Arbiter.Worker.Phase`, so a human-parked ticket had released
+  its slot (the 2026-09-23 incident below) while an `:awaiting_review` one on
+  an open PR still held it; the stored state now decides both.
 
   ## When no slot is free
 
@@ -58,8 +58,6 @@ defmodule Arbiter.Worker.ResumeSlot do
   alias Arbiter.Board.Snapshot
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.SlotGate
-  alias Arbiter.Worker
-  alias Arbiter.Worker.Phase
   alias Arbiter.Workers.Run
 
   require Ash.Query
@@ -88,24 +86,22 @@ defmodule Arbiter.Worker.ResumeSlot do
     * `:force` — override a full cap (human surfaces only); recorded.
     * `:actor` — who forced it, for the audit record.
     * `:slot_admitted` — the scheduler already admitted this resume.
-    * `:workers` / `:cap` — seams: the live worker list and the effective cap,
-      read from the worker supervisor and `Snapshot` when absent.
+    * `:tickets` / `:cap` — seams: the tickets to count holders among and the
+      effective cap, read from the repo and `Snapshot` when absent.
   """
   @spec admit(Issue.t(), keyword()) :: result()
   def admit(%Issue{} = task, opts \\ []) do
-    if Keyword.get(opts, :slot_admitted) == true do
-      {:ok, :admitted}
-    else
-      basis = SlotGate.basis()
-      workers = opts |> Keyword.get_lazy(:workers, &live_workers/0) |> Phase.annotate()
-      holders = SlotGate.slot_holders(workers, basis)
+    cond do
+      Keyword.get(opts, :slot_admitted) == true ->
+        {:ok, :admitted}
 
-      if holds_slot?(task.id, workers, holders) do
+      SlotGate.holds_slot?(task) ->
         {:ok, :held}
-      else
+
+      true ->
+        holders = opts |> Keyword.get_lazy(:tickets, &tickets_in_progress/0) |> holders_but(task)
         cap = Keyword.get_lazy(opts, :cap, fn -> cap_for(task, length(holders)) end)
         acquire(task, %{task_id: task.id, cap: cap, holders: holders}, opts)
-      end
     end
   end
 
@@ -116,8 +112,8 @@ defmodule Arbiter.Worker.ResumeSlot do
   @spec refusal_message(info()) :: String.t()
   def refusal_message(%{task_id: task_id, cap: cap, holders: holders}) do
     "no free worker slot to resume #{task_id}: the concurrency cap is #{cap} and " <>
-      "#{held_by(holders)}. #{task_id} released its slot when it parked (or " <>
-      "stopped), so resuming it is a new admission. Wait for a slot to free, or " <>
+      "#{held_by(holders)}. #{task_id} is not In progress, so it holds no slot " <>
+      "and resuming it is a new admission. Wait for a slot to free, or " <>
       "resume with force (MCP `force: true`, `arb worker resume --force`) to go " <>
       "over the cap — the override is recorded."
   end
@@ -129,25 +125,10 @@ defmodule Arbiter.Worker.ResumeSlot do
 
   # ---- internals -----------------------------------------------------------
 
-  defp holds_slot?(task_id, workers, holders) do
-    cond do
-      task_id in holders -> true
-      Enum.any?(workers, &author_row_for?(&1, task_id)) -> false
-      true -> cut_off_by_restart?(task_id)
-    end
-  end
-
-  # The task's own author row — a fix pass or conflict resolver shares the task
-  # id but never says, on its own, whether the *task* holds a slot.
-  defp author_row_for?(worker, task_id) do
-    Map.get(worker, :task_id) == task_id and
-      (Map.get(worker, :role) || get_in(worker, [:meta, :role])) not in [
-        :reviewer,
-        :implementer,
-        :fix_pass,
-        :conflict_resolver
-      ]
-  end
+  # A stale copy of the ticket being resumed in the list is not a holder: the
+  # ticket itself was just judged not to hold a slot.
+  defp holders_but(tickets, %Issue{id: id}),
+    do: tickets |> SlotGate.slot_holders() |> List.delete(id)
 
   @doc """
   Was `task_id`'s latest main run cut off by a restart rather than ended on its
@@ -202,12 +183,15 @@ defmodule Arbiter.Worker.ResumeSlot do
     })
   end
 
-  defp live_workers do
-    Worker.list_children()
+  # Every ticket In progress, the board's own count (`Snapshot.derive/1`
+  # counts over every ticket it reads). An unreadable table is no holders:
+  # the cap is still enforced against what could be read.
+  defp tickets_in_progress do
+    Issue
+    |> Ash.Query.filter(state == :active)
+    |> Ash.read!()
   rescue
     _ -> []
-  catch
-    :exit, _ -> []
   end
 
   # The same cap the board promotes against, for the task's own workspace. The

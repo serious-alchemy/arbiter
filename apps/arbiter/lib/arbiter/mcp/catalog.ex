@@ -770,6 +770,13 @@ defmodule Arbiter.MCP.Catalog do
             "description" =>
               "DEPRECATED alias for `provider: \"claude\"`. `true` → start a Claude worker."
           },
+          "force" => %{
+            "type" => "boolean",
+            "description" =>
+              "Dispatch a ticket that is not Ready — in Backlog, or blocked by open dependencies. " <>
+                "Without it such a dispatch is refused with the reason. The bypass is recorded as a " <>
+                "`dispatch_forced` event. Defaults to false."
+          },
           "force_quota" => %{
             "type" => "boolean",
             "description" =>

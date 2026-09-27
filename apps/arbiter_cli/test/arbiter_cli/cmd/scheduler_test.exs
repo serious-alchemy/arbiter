@@ -89,6 +89,26 @@ defmodule ArbiterCli.Cmd.SchedulerTest do
       assert out =~ "not a safe restart point"
     end
 
+    # bd-asxw4e: the dispatch cap's count — the tickets In progress.
+    test "names the slots used and the tickets holding them" do
+      stub_get(
+        "/api/scheduler/status",
+        Map.merge(body("running"), %{"slots_used" => 2, "slot_holders" => ["bd-a", "bd-b"]})
+      )
+
+      {out, _err, 0} = capture(fn -> Scheduler.run(["status"]) end)
+
+      assert out =~ "Slots used: 2 (bd-a, bd-b)"
+    end
+
+    test "a server that predates the slot count prints no slots line" do
+      stub_get("/api/scheduler/status", body("running"))
+
+      {out, _err, 0} = capture(fn -> Scheduler.run(["status"]) end)
+
+      refute out =~ "Slots used"
+    end
+
     test "a server that predates the drain state is reported unknown, never safe" do
       stub_get("/api/scheduler/status", %{
         "paused" => true,

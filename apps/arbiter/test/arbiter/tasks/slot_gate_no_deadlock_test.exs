@@ -76,9 +76,11 @@ defmodule Arbiter.Tasks.SlotGateNoDeadlockTest do
     assert Process.alive?(impl)
   end
 
-  test "the rounds still count toward the cap once they are running", %{ws: ws} do
-    # Three live agents against a cap of 2: the board reports zero free slots
-    # (so nothing NEW is dispatched) and never a negative number.
+  test "rounds over the cap leave nothing free for new work, and never go negative", %{ws: ws} do
+    # Three tickets In progress against a cap of 2 (bd-asxw4e: a slot is a
+    # ticket In progress), one of them with a live review round: the board
+    # reports zero free slots (so nothing NEW is dispatched) and never a
+    # negative number. The round itself adds a live agent, not a slot.
     workers = [
       %{task_id: "bd-1", status: :awaiting_review_gate, role: nil, meta: %{}, agent_live: false},
       %{
@@ -95,9 +97,16 @@ defmodule Arbiter.Tasks.SlotGateNoDeadlockTest do
     assert SlotGate.occupied(workers, :agents) == 3
     assert SlotGate.free(2, workers, :agents) == 0
 
+    issues =
+      for id <- ~w(bd-1 bd-2 bd-3),
+          do: %{id: id, state: :active, status: :in_progress, issue_type: :task}
+
+    assert SlotGate.slots_used(issues) == 3
+    assert SlotGate.slots_free(2, issues) == 0
+
     board =
       Snapshot.derive(%{
-        issues: [],
+        issues: issues,
         workers: Enum.map(workers, &Map.merge(&1, %{started_at: DateTime.utc_now()})),
         now: DateTime.utc_now(),
         slots_total: 2,
@@ -105,6 +114,7 @@ defmodule Arbiter.Tasks.SlotGateNoDeadlockTest do
       })
 
     assert board.agents_live == 3
+    assert board.slots_used == 3
     assert board.slots_free == 0
     assert board.promote == nil
 

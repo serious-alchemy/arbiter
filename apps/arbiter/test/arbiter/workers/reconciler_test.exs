@@ -615,17 +615,22 @@ defmodule Arbiter.Workers.ReconcilerTest do
     assert Message.inbox("admiral", workspace_id: ws.id) == []
   end
 
-  # bd-92mx1m: a task the restart cut off mid-flight still holds its slot and
-  # re-enters uncapped, so it goes first; a task that had parked before the
-  # restart released its slot and competes for what is left.
-  test "resume sweep resumes restart-interrupted work before tasks that had parked" do
+  # bd-92mx1m / bd-asxw4e: a ticket still In progress holds its own slot and
+  # re-enters uncapped, so it goes first — even one that had parked before the
+  # restart; a Merging ticket whose revision the restart cut off holds no slot
+  # and competes for what is left.
+  test "resume sweep resumes tickets In progress before a Merging one" do
     ws = create_workspace()
+
+    merging =
+      create_issue(ws.id, %{status: :in_progress, pr_ref: "https://example.test/pull/1"})
+
     parked = create_issue(ws.id, %{status: :in_progress})
-    interrupted = create_issue(ws.id, %{status: :in_progress})
+    assert {merging.state, parked.state} == {:merging, :active}
 
     for {issue, attrs} <- [
-          {parked, %{status: :failed, failure_reason: ":review_gate_rejected"}},
-          {interrupted, %{status: :failed, failure_reason: "server restarted"}}
+          {merging, %{status: :failed, failure_reason: "server restarted"}},
+          {parked, %{status: :failed, failure_reason: ":review_gate_rejected"}}
         ] do
       {:ok, _} =
         Ash.create(
@@ -646,7 +651,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
 
     resume = fn %Issue{id: id} ->
       send(test_pid, {:resumed, id})
-      if id == parked.id, do: {:ok, %{deferred: true, task_id: id}}, else: {:ok, %{task_id: id}}
+      if id == merging.id, do: {:ok, %{deferred: true, task_id: id}}, else: {:ok, %{task_id: id}}
     end
 
     assert {:ok, %{resumed: 2, escalated: 0}} =
@@ -655,7 +660,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
     # The mailbox is in call order.
     assert_received {:resumed, first}
     assert_received {:resumed, second}
-    assert [first, second] == [interrupted.id, parked.id]
+    assert [first, second] == [parked.id, merging.id]
   end
 
   test "resume sweep skips when primary?: false" do

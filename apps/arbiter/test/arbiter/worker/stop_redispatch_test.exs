@@ -54,7 +54,7 @@ defmodule Arbiter.Worker.StopRedispatchTest do
     test "stopping a task's worker never transitions the bead to :closed", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "stop teardown", workspace_id: ws.id})
 
-      {:ok, result} = Dispatch.dispatch(task.id, repo: "r", start_driver: false)
+      {:ok, result} = Dispatch.dispatch(task.id, force: true, repo: "r", start_driver: false)
       assert result.task.status == :in_progress
 
       :ok = Worker.stop(task.id, :normal)
@@ -111,7 +111,7 @@ defmodule Arbiter.Worker.StopRedispatchTest do
     test "ends :in_progress with exactly one live worker and was never closed", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "stop then redispatch", workspace_id: ws.id})
 
-      {:ok, first} = Dispatch.dispatch(task.id, repo: "r", start_driver: false)
+      {:ok, first} = Dispatch.dispatch(task.id, force: true, repo: "r", start_driver: false)
       first_pid = first.worker_pid
       assert first.task.status == :in_progress
 
@@ -123,7 +123,7 @@ defmodule Arbiter.Worker.StopRedispatchTest do
       refute after_stop.status == :closed
 
       # Operator re-dispatches the same task.
-      {:ok, second} = Dispatch.dispatch(task.id, repo: "r", start_driver: false)
+      {:ok, second} = Dispatch.dispatch(task.id, force: true, repo: "r", start_driver: false)
 
       assert second.task.status == :in_progress
       assert Process.alive?(second.worker_pid)

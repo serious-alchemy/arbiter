@@ -43,6 +43,7 @@ defmodule Arbiter.Workers.Reconciler do
   alias Arbiter.Accounts.Resolver, as: AccountResolver
   alias Arbiter.Messages.Message
   alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.SlotGate
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Usage.ClaudeSessionFile
   alias Arbiter.Usage.Event
@@ -131,8 +132,9 @@ defmodule Arbiter.Workers.Reconciler do
   node booted: the stop that killed it is what this boot follows. A genuine
   machine crash that far from a restart is left alone.
 
-  Run it before `reconcile_resumable_tasks/1`, which then resumes the task with
-  its slot held (`Arbiter.Worker.ResumeSlot.cut_off_by_restart?/1`).
+  Run it before `reconcile_resumable_tasks/1`, which then resumes the task
+  (`Arbiter.Worker.ResumeSlot.cut_off_by_restart?/1` picks an open-PR task's
+  cut-off revision up; whether the resume needs a slot is the ticket state's).
 
   ## Options
 
@@ -341,18 +343,18 @@ defmodule Arbiter.Workers.Reconciler do
       |> Ash.read!()
       |> Enum.reject(&(live_worker_for_issue?(&1) or review_only?(&1)))
       |> Enum.filter(&(is_nil(&1.pr_ref) or ResumeSlot.cut_off_by_restart?(&1.id)))
-      # bd-92mx1m: work the restart cut off mid-flight still holds its slot and
-      # re-enters uncapped, so resume it first. A task that had parked or
-      # stopped before the restart then competes for whatever is left, and is
-      # deferred to the scheduler if nothing is.
-      |> Enum.sort_by(&(not ResumeSlot.cut_off_by_restart?(&1.id)))
+      # bd-92mx1m / bd-asxw4e: a ticket still In progress holds its own slot
+      # and re-enters uncapped, so resume those first. A Merging ticket whose
+      # revision the restart cut off then competes for whatever is left, and
+      # is deferred to the scheduler if nothing is.
+      |> Enum.sort_by(&(not SlotGate.holds_slot?(&1)))
 
     {resumed, escalated} =
       Enum.reduce(stuck, {0, 0}, fn issue, {res, esc} ->
         case resume_fun.(issue) do
           {:ok, %{deferred: true}} ->
             Logger.info(
-              "Workers.Reconciler: task #{issue.id} released its slot before the restart; " <>
+              "Workers.Reconciler: task #{issue.id} is not In progress, so holds no slot; " <>
                 "its resume is deferred until a worker slot frees"
             )
 

@@ -5,6 +5,11 @@ defmodule Arbiter.Worker.DispatchResumeSlotTest do
   against a real git repo and real workers, so the gate is proven where it
   actually sits — after the resume's own validity checks, before the prior
   worker is stopped.
+
+  bd-asxw4e: a ticket holds a slot exactly while it is In progress (`:active`).
+  So the full cap here is A Merging on its open PR (no slot) and B In
+  progress (the one slot); a resume of A must acquire a slot, and a resume of
+  a ticket still In progress passes through uncapped.
   """
   use Arbiter.DataCase, async: false
 
@@ -33,16 +38,17 @@ defmodule Arbiter.Worker.DispatchResumeSlotTest do
     %{ws: ws, a: a, b: b}
   end
 
-  # Task A ran, then parked for a human: its worker lingers :failed, which
-  # releases its slot (bd-45pwo1).
-  defp park_a(a, fail_opts \\ []), do: ResumeSlotFixture.park!(a, fail_opts)
+  # Task A ran and parked (its worker lingers :failed), and its PR opened: it
+  # is Merging, which holds no slot. `release: nil` keeps it In progress.
+  defp park_a(a, fail_opts \\ [], release \\ :merging),
+    do: ResumeSlotFixture.park!(a, fail_opts, release)
 
-  # Task B was admitted into the slot A freed.
+  # Task B was admitted into the slot A freed: In progress.
   defp admit_b(ws, b), do: ResumeSlotFixture.admit!(ws, b)
 
   defp overrides(ws), do: ResumeSlotFixture.overrides(ws)
 
-  describe "the 2026-09-23 incident (cap 1, A parked, B admitted)" do
+  describe "a full cap (cap 1, A Merging, B In progress)" do
     test "a human resume of A is refused, naming the cap and B; the parked worker is untouched",
          %{ws: ws, a: a, b: b} do
       first = park_a(a)
@@ -74,6 +80,8 @@ defmodule Arbiter.Worker.DispatchResumeSlotTest do
 
       assert result.worker_pid != first.worker_pid
       assert Worker.state(result.worker_pid).meta[:slot_cap_override] == true
+      # Admitted into a slot, so back In progress: the round holds it.
+      assert Ash.get!(Issue, a.id).state == :active
 
       assert [event] = overrides(ws)
       assert event.payload["task_id"] == a.id
@@ -152,6 +160,8 @@ defmodule Arbiter.Worker.DispatchResumeSlotTest do
       assert resumed not in [nil, first.worker_pid]
       assert Worker.state(resumed).meta[:resume] == true
       assert overrides(ws) == []
+      # The slot it was admitted into is its own now: A is In progress again.
+      assert Ash.get!(Issue, a.id).state == :active
     end
 
     test "a deferral nobody can take is a refusal, never a bypass", %{ws: ws, a: a, b: b} do
@@ -203,31 +213,47 @@ defmodule Arbiter.Worker.DispatchResumeSlotTest do
       assert opts[:awaiting_review_resume_attempts] == 2
     end
 
-    test "ReviewGate fix round (when its hand-off was already given up)", %{a: a} do
+    test "ReviewGate fix round (on a ticket no longer In progress)", %{a: a} do
       %{task_id: a.id, attempt: 1, verdict: :request_changes, findings: "x"}
       |> ReviewGateFixRoundDispatcher.dispatch()
       |> assert_deferred(a.id)
     end
+  end
 
-    test "the boot reconciler", %{a: a, first: first} do
-      # After a reboot nothing is registered for A, and its last run ended on
-      # its own terms (parked), so it released its slot.
+  describe "the boot reconciler" do
+    # After a reboot nothing is registered for A. A ticket still In progress
+    # holds its own slot, whatever cut its run off, so the reconciler resumes
+    # it for real at a full cap rather than deferring it.
+    test "resumes a ticket In progress uncapped", %{ws: ws, a: a, b: b} do
+      first = park_a(a, [], nil)
+      admit_b(ws, b)
       Worker.stop(a.id, :normal)
       refute Process.alive?(first.worker_pid)
 
-      assert {:ok, %{resumed: 1, escalated: 0}} = Reconciler.reconcile_resumable_tasks()
-      assert [{task_id, :resume, opts}] = StubResumeDeferrer.deferrals()
-      assert task_id == a.id
-      assert opts[:resume_origin] == :automatic
+      assert {:ok, %{resumed: 1, escalated: 0}} =
+               Reconciler.reconcile_resumable_tasks(
+                 resume_fun: fn issue ->
+                   Dispatch.resume(issue.id,
+                     resume_origin: :automatic,
+                     start_driver: false,
+                     claude_command: ["sleep", "2"]
+                   )
+                 end
+               )
+
+      assert StubResumeDeferrer.deferrals() == []
+      assert Worker.whereis(a.id) not in [nil, first.worker_pid]
+      assert overrides(ws) == []
     end
   end
 
   describe "a resume of a task that still holds its slot" do
     # Acceptance 1: the fix-round shape. The ReviewGate fails the author only
-    # so the implementer round can replace it (`slot_handoff`), and the round
-    # spawns even though B has filled the cap — #1969/#1995's no-deadlock rule.
+    # so the implementer round can replace it (`slot_handoff`); the ticket is
+    # still In progress, so the round spawns even though the cap is full —
+    # #1969/#1995's no-deadlock rule.
     test "a ReviewGate fix round spawns at a full cap", %{ws: ws, a: a, b: b} do
-      first = park_a(a, slot_handoff: true)
+      first = park_a(a, [slot_handoff: true], nil)
       admit_b(ws, b)
 
       assert {:ok, result} =

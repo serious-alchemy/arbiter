@@ -1,9 +1,15 @@
 defmodule Arbiter.Test.ResumeSlotFixture do
   @moduledoc """
-  The 2026-09-23 incident as a fixture (bd-92mx1m), shared by every surface
-  that resumes a task: a real git repo, `conductor_system_max_concurrent = 1`,
-  task A dispatched and then parked for a human (its worker lingers `:failed`,
-  which releases its slot), and task B admitted into the slot A freed.
+  A full cap as a fixture (bd-92mx1m), shared by every surface that resumes a
+  task: a real git repo, `conductor_system_max_concurrent = 1`, task A
+  dispatched, parked (its worker lingers `:failed`) and then moved out of In
+  progress — its PR opened, so it is `:merging` and holds no slot
+  (bd-asxw4e) — and task B admitted into the slot A freed, `:active`.
+
+  Before bd-asxw4e this was the 2026-09-23 incident verbatim: a worker parked
+  for a human released its task's slot. Under the ticket rule a parked ticket
+  is still In progress and keeps its slot, so the fixture releases A the way
+  the rule does — by leaving In progress.
 
   Every agent CLI is stubbed (`Arbiter.TestSandbox`), so a resume that
   succeeds spawns a sleeping stub, never the operator's real CLI.
@@ -29,14 +35,14 @@ defmodule Arbiter.Test.ResumeSlotFixture do
   def repo, do: @repo
 
   @doc """
-  Build the incident in `ws`. `:park` options go to `Worker.fail/3` (e.g.
-  `slot_handoff: true` for the fix-round shape).
+  Build the incident in `ws`. `:park` options go to `Worker.fail/3`, and
+  `:release` to `park!/3`.
   """
   def setup_incident(ws, opts \\ []) do
     setup_repo!()
     {:ok, a} = Ash.create(Issue, %{title: "task A (parked)", workspace_id: ws.id})
     {:ok, b} = Ash.create(Issue, %{title: "task B (admitted)", workspace_id: ws.id})
-    first = park!(a, Keyword.get(opts, :park, []))
+    first = park!(a, Keyword.get(opts, :park, []), Keyword.get(opts, :release, :merging))
     admit!(ws, b)
     %{a: a, b: b, first: first}
   end
@@ -61,16 +67,28 @@ defmodule Arbiter.Test.ResumeSlotFixture do
     sandbox
   end
 
-  @doc "Dispatch `task`, then fail its worker: parked for a human."
-  def park!(%Issue{id: id}, fail_opts \\ []) do
-    {:ok, first} = Dispatch.dispatch(id, repo: @repo, start_driver: false)
+  @doc """
+  Dispatch `task`, then fail its worker: parked. `release: :merging` (the
+  default) then opens its PR, so the ticket leaves In progress and holds no
+  slot; `release: nil` leaves it `:active`, holding its slot.
+  """
+  def park!(%Issue{id: id}, fail_opts \\ [], release \\ :merging) do
+    # Created in Backlog and dispatched at once, so forced (bd-asxw4e).
+    {:ok, first} = Dispatch.dispatch(id, force: true, repo: @repo, start_driver: false)
     :ok = Worker.fail(first.worker_pid, :review_gate_rejected, fail_opts)
     on_exit(fn -> stop_quietly(id) end)
+
+    if release == :merging do
+      {:ok, %Issue{state: :merging}} = Issue.pr_opened(id, "https://example.test/pull/#{id}")
+    end
+
     first
   end
 
-  @doc "A running worker for `task`: it holds a slot."
-  def admit!(ws, %Issue{id: id}) do
+  @doc "A running worker for `task`, In progress: it holds a slot."
+  def admit!(ws, %Issue{} = task) do
+    id = task.id
+    {:ok, %Issue{state: :active}} = Issue.start_work(task)
     {:ok, pid} = Worker.start(task_id: id, repo: @repo, workspace_id: ws.id)
     :ok = Worker.advance(pid, :implement)
     on_exit(fn -> stop_quietly(id) end)

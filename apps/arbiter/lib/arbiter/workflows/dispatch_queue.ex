@@ -43,7 +43,7 @@ defmodule Arbiter.Workflows.DispatchQueue do
       finds a stale hold (the close raced the drop, or predates this fix)
       re-dispatches it and gets back a **terminal** failure, which is dropped
       instead of requeued:
-        - `{:task_closed, _}` — `Dispatch.dispatch/2`'s `ensure_not_closed/1`
+        - `{:task_closed, _}` — `Dispatch.dispatch/2`'s `ensure_dispatchable/2`
         - `{:task_not_found, _}` — `Dispatch.dispatch/2`'s `load_task/1`
       Every other failure shape is **retryable** — quota still held, a live
       agent session already on the task, a migration/preflight hiccup, a
@@ -453,7 +453,7 @@ defmodule Arbiter.Workflows.DispatchQueue do
   # (bd-atjyzu). Retryable failures requeue exactly as before.
   #
   # Terminal (drop, don't requeue):
-  #   * `{:task_closed, _}`     — `Dispatch.dispatch/2`'s `ensure_not_closed/1`
+  #   * `{:task_closed, _}`     — `Dispatch.dispatch/2`'s `ensure_dispatchable/2`
   #   * `{:task_not_found, _}`  — `Dispatch.dispatch/2`'s `load_task/1`
   #
   # Retryable (requeue, same as before): everything else — quota still held,

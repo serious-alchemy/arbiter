@@ -105,7 +105,11 @@ defmodule Arbiter.Worker.ConcurrentTaskWorkersTest do
       :ok = Worker.advance(fixpass, :claude)
 
       assert {:error, {:worker_start_failed, {:task_worker_live, info}}} =
-               Arbiter.Worker.Dispatch.dispatch(task.id, repo: "r", start_driver: false)
+               Arbiter.Worker.Dispatch.dispatch(task.id,
+                 force: true,
+                 repo: "r",
+                 start_driver: false
+               )
 
       assert info.registry_key == task.id <> ":fixpass"
       assert Worker.whereis(task.id) == nil

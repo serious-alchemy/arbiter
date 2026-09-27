@@ -106,31 +106,20 @@ defmodule Arbiter.Tasks.SlotGateTest do
     end
   end
 
-  # bd-92mx1m: the resume gate needs to *name* what holds the slots, not just
-  # count them, and to ask whether one task is among them.
-  describe "slot_holders/2" do
-    test "names each task whose author row holds a slot, once" do
-      workers = [
-        %{task_id: "bd-a", status: :running, phase: :implementing},
-        %{task_id: "bd-a", registry_key: "bd-a:fixpass", role: :fix_pass, phase: :fixing_ci},
-        %{task_id: "bd-b", status: :awaiting_review, phase: :waiting_ci_merge},
-        %{task_id: "bd-c", status: :failed, phase: :waiting_on_you},
-        %{task_id: "bd-d", status: :completed, phase: :done},
-        %{task_id: "bd-a#review", role: :reviewer, meta: %{reviews: "bd-a"}, phase: :in_review}
+  # bd-asxw4e: holders are tickets In progress — see `SlotGateTaskTest`. The
+  # worker rows, whatever their phase, name none.
+  describe "slot_holders/1" do
+    test "names each :active ticket once, and no worker row" do
+      tickets = [
+        %{id: "bd-a", state: :active},
+        %{id: "bd-b", state: :merging},
+        %{id: "bd-a", state: :active}
       ]
 
-      assert SlotGate.slot_holders(workers, :agents) == ["bd-a", "bd-b"]
-      assert SlotGate.occupied_tasks(workers, :agents) == 2
-    end
+      assert SlotGate.slot_holders(tickets) == ["bd-a"]
 
-    test "follows the record rule on the :issues basis" do
-      workers = [
-        %{task_id: "bd-a", status: :running},
-        %{task_id: "bd-b", status: :awaiting_review},
-        %{task_id: "bd-c", status: :awaiting}
-      ]
-
-      assert SlotGate.slot_holders(workers, :issues) == ["bd-a", "bd-c"]
+      workers = [%{task_id: "bd-c", status: :running, phase: :implementing}]
+      assert SlotGate.slot_holders(workers) == []
     end
   end
 

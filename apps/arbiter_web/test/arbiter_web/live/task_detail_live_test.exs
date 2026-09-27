@@ -354,11 +354,18 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
         })
 
       {:ok, task} =
-        Ash.create(Issue, %{title: "ambiguous", workspace_id: ws.id, repo: "org/alpha"})
+        Ash.create(Issue, %{
+          title: "ambiguous",
+          workspace_id: ws.id,
+          repo: "org/alpha",
+          acceptance: "- ok"
+        })
 
       # bd-9dwbvt: dispatch's ambiguity only arises for a task with no repo,
       # which is now a post-create state rather than a creatable one.
       {:ok, task} = Ash.update(task, %{repo: nil})
+      # bd-asxw4e: Ready, so the dispatch gets as far as resolving the repo.
+      {:ok, task} = Ash.update(task, %{}, action: :promote_to_ready)
 
       {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
       view |> element(~s(button[phx-click="open_dispatch"])) |> render_click()
@@ -889,6 +896,11 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
   end
 
   describe "dispatch" do
+    defp ready_issue(ws, title) do
+      {:ok, issue} = Ash.create(Issue, %{title: title, workspace_id: ws.id, acceptance: "- ok"})
+      Ash.update!(issue, %{}, action: :promote_to_ready)
+    end
+
     test "no dispatch action while a worker is already running", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "busy", workspace_id: ws.id})
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "test/repo")
@@ -939,7 +951,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
     # auth preflight, so it must not block the LiveView process), hence the
     # submit itself only shows the pending state and the outcome lands after.
     test "an acknowledged dispatch reaches the real dispatch path", %{conn: conn, ws: ws} do
-      {:ok, task} = Ash.create(Issue, %{title: "acked", workspace_id: ws.id})
+      task = ready_issue(ws, "acked")
 
       {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
       view |> element(~s(button[phx-click="open_dispatch"])) |> render_click()
@@ -967,7 +979,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
     # not the raw `{:agent_session_active, "bd-..."}` tuple.
     test "a live agent session is refused with a readable message",
          %{conn: conn, ws: ws} do
-      {:ok, task} = Ash.create(Issue, %{title: "already live", workspace_id: ws.id})
+      task = ready_issue(ws, "already live")
 
       {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
       view |> element(~s(button[phx-click="open_dispatch"])) |> render_click()
@@ -985,6 +997,28 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
 
       assert html =~ "already has a live agent session"
       refute html =~ "agent_session_active"
+    end
+
+    # bd-asxw4e: a Backlog ticket is not Ready; the page says why and how to
+    # force it rather than dispatching it silently.
+    test "a Backlog ticket is refused with the reason", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "unrefined", workspace_id: ws.id})
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      view |> element(~s(button[phx-click="open_dispatch"])) |> render_click()
+
+      view
+      |> form("#task-dispatch-form", %{
+        "dispatch" => %{"provider" => "claude", "repo" => "", "acknowledge" => "true"}
+      })
+      |> render_submit()
+
+      html = render_async(view)
+
+      assert html =~ "is in Backlog"
+      assert html =~ "--force"
+      refute html =~ "not_dispatchable"
+      assert Ash.get!(Issue, task.id).state == :backlog
     end
 
     # The dropdown must not offer a repo `Dispatch` would then reject with

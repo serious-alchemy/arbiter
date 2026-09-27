@@ -281,7 +281,7 @@ defmodule Arbiter.Worker.AuthDeathTest do
   # ---- helpers --------------------------------------------------------------
 
   defp dispatch(id),
-    do: Dispatch.dispatch(id, repo: "ad/repo", start_claude: true, interval_ms: 20)
+    do: Dispatch.dispatch(id, force: true, repo: "ad/repo", start_claude: true, interval_ms: 20)
 
   defp ready_task!(ws, title) do
     {:ok, task} =

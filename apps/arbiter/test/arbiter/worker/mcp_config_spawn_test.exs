@@ -130,7 +130,12 @@ defmodule Arbiter.Worker.MCPConfigSpawnTest do
     {:ok, task} = Ash.create(Issue, %{title: "do work", workspace_id: ws.id})
 
     {:ok, result} =
-      Dispatch.dispatch(task.id, repo: "test/repo", start_driver: false, start_claude: true)
+      Dispatch.dispatch(task.id,
+        force: true,
+        repo: "test/repo",
+        start_driver: false,
+        start_claude: true
+      )
 
     TestSandbox.own!(sandbox, result.worker_pid)
 

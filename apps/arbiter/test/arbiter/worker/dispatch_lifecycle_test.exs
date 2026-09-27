@@ -26,7 +26,9 @@ defmodule Arbiter.Worker.DispatchLifecycleTest do
   end
 
   defp dispatch!(issue) do
-    {:ok, result} = Dispatch.dispatch(issue.id, repo: "test/repo", start_driver: false)
+    {:ok, result} =
+      Dispatch.dispatch(issue.id, force: true, repo: "test/repo", start_driver: false)
+
     on_exit(fn -> Arbiter.ProcessTeardown.stop_child(Worker.Supervisor, result.worker_pid) end)
     result
   end
@@ -54,7 +56,12 @@ defmodule Arbiter.Worker.DispatchLifecycleTest do
     {:ok, queued} = Ash.update(ticket(ws), %{}, action: :promote)
 
     {:ok, result} =
-      Dispatch.dispatch(queued.id, repo: "test/repo", start_driver: false, review: true)
+      Dispatch.dispatch(queued.id,
+        force: true,
+        repo: "test/repo",
+        start_driver: false,
+        review: true
+      )
 
     on_exit(fn -> Arbiter.ProcessTeardown.stop_child(Worker.Supervisor, result.worker_pid) end)
 
@@ -76,7 +83,9 @@ defmodule Arbiter.Worker.DispatchLifecycleTest do
     {:ok, queued} = Ash.update(ticket(ws), %{}, action: :promote)
     first = dispatch!(queued)
 
-    assert {:ok, second} = Dispatch.dispatch(queued.id, repo: "test/repo", start_driver: false)
+    assert {:ok, second} =
+             Dispatch.dispatch(queued.id, force: true, repo: "test/repo", start_driver: false)
+
     assert second.worker_pid == first.worker_pid
     assert second.task.state == :active
   end

@@ -5,8 +5,9 @@ defmodule Arbiter.Tasks.SlotGateConformanceTest do
 
   The Conductor used to be a second dispatcher with its own slot arithmetic,
   and this file pinned the two together. #1965 deleted it, so the pairing that
-  matters now is the board's rendered `slots_free` (task occupancy, bd-45pwo1)
-  and `agents_live` (live agent sessions, unchanged since bd-aw2cyt) against
+  matters now is the board's rendered `slots_free` (tickets In progress,
+  bd-asxw4e) and `agents_live` (live agent sessions, unchanged since
+  bd-aw2cyt) against
   the shared predicates in `Arbiter.Tasks.SlotGate` — the things
   `Board.Autopilot` gates a new dispatch on. If `derive/1` ever grows its own
   rule again, these worlds catch it.
@@ -15,7 +16,6 @@ defmodule Arbiter.Tasks.SlotGateConformanceTest do
 
   alias Arbiter.Board.Snapshot
   alias Arbiter.Tasks.SlotGate
-  alias Arbiter.Worker.Phase
 
   @now ~U[2026-09-16 22:25:00Z]
 
@@ -91,14 +91,42 @@ defmodule Arbiter.Tasks.SlotGateConformanceTest do
     ]
   end
 
+  defp ticket(id, state) do
+    %{
+      id: id,
+      title: "Task #{id}",
+      state: state,
+      status: Arbiter.Tasks.Lifecycle.legacy_fields(state).status,
+      priority: 2,
+      issue_type: :task,
+      workspace_id: "ws-1",
+      refined: state != :backlog,
+      created_at: @now,
+      updated_at: @now,
+      closed_at: nil
+    }
+  end
+
+  # bd-asxw4e: the tickets beside each worker world — bd-1 in every state, and
+  # a second ticket In progress or not.
+  defp ticket_worlds do
+    for state <- Arbiter.Tasks.Lifecycle.states(), other <- [:active, :queued] do
+      {"bd-1 #{state}, bd-2 #{other}", [ticket("bd-1", state), ticket("bd-2", other)]}
+    end
+  end
+
   for basis <- [:agents, :issues] do
     test "the board's slot arithmetic is SlotGate's, under #{basis}" do
       basis = unquote(basis)
 
-      for {name, workers} <- worlds(), total <- [0, 1, 2, 4] do
+      for {name, workers} <- worlds(),
+          {ticket_name, tickets} <- ticket_worlds(),
+          total <- [0, 1, 2, 4] do
+        name = "#{name} / #{ticket_name}"
+
         board =
           Snapshot.derive(%{
-            issues: [],
+            issues: tickets,
             workers: workers,
             blocked_by: %{},
             changed_files: %{},
@@ -109,11 +137,11 @@ defmodule Arbiter.Tasks.SlotGateConformanceTest do
             paused: false
           })
 
-        assert board.slots_free == SlotGate.task_free(total, Phase.annotate(workers), basis),
+        assert board.slots_free == SlotGate.slots_free(total, tickets),
                "board disagrees with SlotGate on free slots for #{name} (total=#{total}, basis=#{basis})"
 
-        assert board.slots_used == SlotGate.occupied_tasks(Phase.annotate(workers), basis),
-               "board disagrees with SlotGate on task occupancy for #{name} (total=#{total}, basis=#{basis})"
+        assert board.slots_used == SlotGate.slots_used(tickets),
+               "board disagrees with SlotGate on tickets In progress for #{name} (total=#{total}, basis=#{basis})"
 
         assert board.agents_live == SlotGate.occupied(workers, basis),
                "board disagrees with SlotGate on agent occupancy for #{name} (total=#{total}, basis=#{basis})"
@@ -123,7 +151,7 @@ defmodule Arbiter.Tasks.SlotGateConformanceTest do
     end
   end
 
-  test "a cap full of live agents leaves nothing to promote, and a finished task does not" do
+  test "a cap full of tickets In progress leaves nothing to promote, and a merging one does not" do
     ready = %{
       id: "bd-ready",
       title: "Ready",
@@ -152,21 +180,26 @@ defmodule Arbiter.Tasks.SlotGateConformanceTest do
       paused: false
     }
 
-    live =
-      Snapshot.derive(Map.put(common, :workers, [worker("bd-1", :running, %{agent_live: true})]))
+    # bd-asxw4e: an In progress ticket holds its slot with or without a live
+    # agent; once it is Merging, the slot is free whatever worker lingers.
+    for agent_live <- [true, false] do
+      held =
+        common
+        |> Map.put(:issues, [ready, ticket("bd-1", :active)])
+        |> Map.put(:workers, [worker("bd-1", :running, %{agent_live: agent_live})])
+        |> Snapshot.derive()
 
-    assert live.slots_free == 0
-    assert live.promote == nil
+      assert held.slots_free == 0
+      assert held.promote == nil
+    end
 
-    # bd-45pwo1: an agent-less record no longer frees the slot by itself — the
-    # task is still in flight (`:handing_off`) until it finishes or parks for
-    # a human. Only a `:completed` worker (merged/closed) does.
-    quiet =
-      Snapshot.derive(
-        Map.put(common, :workers, [worker("bd-1", :completed, %{agent_live: false})])
-      )
+    merging =
+      common
+      |> Map.put(:issues, [ready, ticket("bd-1", :merging)])
+      |> Map.put(:workers, [worker("bd-1", :awaiting_review, %{agent_live: false})])
+      |> Snapshot.derive()
 
-    assert quiet.slots_free == 1
-    assert quiet.promote == ready.id
+    assert merging.slots_free == 1
+    assert merging.promote == ready.id
   end
 end

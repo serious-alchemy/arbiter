@@ -147,7 +147,7 @@ defmodule Arbiter.Worker.WatchdogAutoResumeIntegrationTest do
   defp task_with_outpost(ws, title \\ "auto-resume e2e") do
     {:ok, task} = Ash.create(Issue, %{title: title, workspace_id: ws.id})
 
-    {:ok, first} = Dispatch.dispatch(task.id, repo: "ar/repo", start_driver: false)
+    {:ok, first} = Dispatch.dispatch(task.id, force: true, repo: "ar/repo", start_driver: false)
     assert is_binary(first.worktree_path)
 
     on_exit(fn -> if Process.alive?(first.worker_pid), do: Worker.stop(first.worker_pid) end)

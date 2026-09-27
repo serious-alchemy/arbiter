@@ -18,6 +18,10 @@ defmodule Arbiter.Worker.ProviderRoutingDispatchTest do
   """
   use Arbiter.DataCase, async: false
 
+  # bd-asxw4e: the tickets here are created in Backlog and dispatched straight
+  # away, which a dispatch refuses unless forced — so these calls pass
+  # `force: true`. What a dispatch admits is `DispatchEligibilityTest`'s.
+
   alias Arbiter.Accounts.{ProviderAccount, WorkspaceProviderAccount}
   alias Arbiter.Agents.ProviderPool
   alias Arbiter.Quota.{AnthropicQuota, CodexQuota}
@@ -148,7 +152,7 @@ defmodule Arbiter.Worker.ProviderRoutingDispatchTest do
   # Dispatch with a worktree, then stop the worker mid-work — the state every
   # resume role recovers from.
   defp dispatch_and_stop!(task, sandbox) do
-    {:ok, first} = Dispatch.dispatch(task.id, repo: @repo, start_driver: false)
+    {:ok, first} = Dispatch.dispatch(task.id, force: true, repo: @repo, start_driver: false)
     TestSandbox.own!(sandbox, first.worker_pid)
     :ok = Worker.fail(first.worker_pid, :token_exhausted)
     first
@@ -161,7 +165,7 @@ defmodule Arbiter.Worker.ProviderRoutingDispatchTest do
       %{ws: ws, claude: claude, codex: codex} = claude_and_codex!()
       task = task!(ws)
 
-      {:ok, result} = Dispatch.dispatch(task.id, repo: "r", start_driver: false)
+      {:ok, result} = Dispatch.dispatch(task.id, force: true, repo: "r", start_driver: false)
 
       assert Worker.state(result.worker_pid).meta[:provider] == "codex"
 
@@ -195,7 +199,7 @@ defmodule Arbiter.Worker.ProviderRoutingDispatchTest do
       ProviderPool.mark_exhausted(:codex)
       task = task!(ws)
 
-      {:ok, _} = Dispatch.dispatch(task.id, repo: "r", start_driver: false)
+      {:ok, _} = Dispatch.dispatch(task.id, force: true, repo: "r", start_driver: false)
 
       run = latest_run(task.id)
       assert run.provider == "claude"
@@ -215,7 +219,12 @@ defmodule Arbiter.Worker.ProviderRoutingDispatchTest do
         task = task!(ws, %{difficulty: unquote(difficulty)})
 
         {:ok, first} =
-          Dispatch.dispatch(task.id, repo: @repo, start_driver: false, start_claude: true)
+          Dispatch.dispatch(task.id,
+            force: true,
+            repo: @repo,
+            start_driver: false,
+            start_claude: true
+          )
 
         TestSandbox.own!(sandbox, first.worker_pid)
         await_agent_exit(first.claude_port)
@@ -234,7 +243,12 @@ defmodule Arbiter.Worker.ProviderRoutingDispatchTest do
         task2 = task!(ws2, %{difficulty: unquote(difficulty)})
 
         {:ok, second} =
-          Dispatch.dispatch(task2.id, repo: @repo, start_driver: false, start_claude: true)
+          Dispatch.dispatch(task2.id,
+            force: true,
+            repo: @repo,
+            start_driver: false,
+            start_claude: true
+          )
 
         TestSandbox.own!(sandbox, second.worker_pid)
         await_agent_exit(second.claude_port)
@@ -260,7 +274,7 @@ defmodule Arbiter.Worker.ProviderRoutingDispatchTest do
       codex_used!(codex, 10.0)
       task = task!(ws)
 
-      {:ok, result} = Dispatch.dispatch(task.id, repo: "r", start_driver: false)
+      {:ok, result} = Dispatch.dispatch(task.id, force: true, repo: "r", start_driver: false)
 
       assert Worker.state(result.worker_pid).meta[:provider] == nil
       run = latest_run(task.id)
@@ -278,7 +292,13 @@ defmodule Arbiter.Worker.ProviderRoutingDispatchTest do
       %{ws: ws, claude: claude} = claude_and_codex!()
       task = task!(ws)
 
-      {:ok, _} = Dispatch.dispatch(task.id, repo: "r", start_driver: false, agent_type: :claude)
+      {:ok, _} =
+        Dispatch.dispatch(task.id,
+          force: true,
+          repo: "r",
+          start_driver: false,
+          agent_type: :claude
+        )
 
       run = latest_run(task.id)
       assert run.provider == "claude"
@@ -508,7 +528,7 @@ defmodule Arbiter.Worker.ProviderRoutingDispatchTest do
       %{ws: ws} = accounts = claude_and_codex!()
       task = task!(ws, %{issue_type: :feature})
       # The main dispatch pins codex.
-      {:ok, first} = Dispatch.dispatch(task.id, repo: "r", start_driver: false)
+      {:ok, first} = Dispatch.dispatch(task.id, force: true, repo: "r", start_driver: false)
       :ok = Worker.fail(first.worker_pid, :token_exhausted)
 
       branch = BranchNamer.derive(task)

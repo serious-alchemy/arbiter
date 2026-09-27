@@ -379,6 +379,17 @@ defmodule Arbiter.Workflows.PRPatrolTest do
       pid = Worker.whereis(task.id)
       assert is_pid(pid)
       assert %{issue_type: :task, worktree_path: nil} = Worker.state(pid).meta
+
+      # bd-asxw4e: the follow-up is dispatched straight out of Backlog, which
+      # takes a recorded force.
+      assert [event] =
+               Arbiter.Events.Record
+               |> Ash.Query.filter(workspace_id == ^ws.id and topic == "dispatch_forced")
+               |> Ash.read!()
+
+      assert event.payload["task_id"] == task.id
+      assert event.payload["bypassed"] == "in Backlog"
+      assert event.payload["dispatched_by"] == "pr_patrol"
     end
 
     test "COMMENTED review with an unresolved review thread → 1 task created, worker spawned",

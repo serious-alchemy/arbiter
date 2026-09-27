@@ -82,9 +82,12 @@ defmodule Arbiter.Board.Drain do
   """
 
   alias Arbiter.Board.Autopilot
+  alias Arbiter.Tasks.SlotGate
   alias Arbiter.Worker
   alias Arbiter.Worker.Driver
   alias Arbiter.Worker.ReviewGate
+
+  require Ash.Query
 
   @type state :: :running | :draining | :quiescent
 
@@ -128,6 +131,8 @@ defmodule Arbiter.Board.Drain do
           changed_by: String.t() | nil,
           in_flight: [entry()],
           parked: [entry()],
+          slots_used: non_neg_integer(),
+          slot_holders: [String.t()],
           checked_at: DateTime.t()
         }
 
@@ -181,6 +186,14 @@ defmodule Arbiter.Board.Drain do
     * `:autopilot` — the autopilot server (default `Arbiter.Board.Autopilot`).
     * `:supervisor` — the worker supervisor (default `Arbiter.Worker.Supervisor`).
     * `:registry` — the `track/3` registry (default `Arbiter.Board.Drain.Registry`).
+    * `:tickets` — the tickets to count slots among (default: every `:active`
+      ticket in the repo).
+
+  `slots_used` / `slot_holders` (bd-asxw4e) are the dispatch cap's count —
+  the tickets In progress, by `Arbiter.Tasks.SlotGate.slot_holders/1`, the
+  same rule the board header's `slots_used` counts by. They say nothing about
+  whether a restart is safe: a ticket In progress between rounds holds a slot
+  with nothing in flight.
   """
   @spec status(keyword()) :: t()
   def status(opts \\ []) do
@@ -199,6 +212,9 @@ defmodule Arbiter.Board.Drain do
 
     in_flight = promotions ++ tracked ++ in_flight
 
+    slot_holders =
+      opts |> Keyword.get_lazy(:tickets, &tickets_in_progress/0) |> SlotGate.slot_holders()
+
     state =
       cond do
         not autopilot.paused? -> :running
@@ -214,8 +230,20 @@ defmodule Arbiter.Board.Drain do
       changed_by: autopilot.changed_by,
       in_flight: in_flight,
       parked: parked,
+      slots_used: length(slot_holders),
+      slot_holders: slot_holders,
       checked_at: DateTime.utc_now()
     }
+  end
+
+  # An unreadable table reads as no holders rather than failing the status —
+  # the drain verdict above does not depend on it.
+  defp tickets_in_progress do
+    Arbiter.Tasks.Issue
+    |> Ash.Query.filter(state == :active)
+    |> Ash.read!()
+  rescue
+    _ -> []
   end
 
   @doc """
@@ -233,6 +261,8 @@ defmodule Arbiter.Board.Drain do
       changed_by: status.changed_by,
       in_flight: Enum.map(status.in_flight, &entry_json/1),
       parked: Enum.map(status.parked, &entry_json/1),
+      slots_used: Map.get(status, :slots_used, 0),
+      slot_holders: Map.get(status, :slot_holders, []),
       checked_at: status.checked_at
     }
   end

@@ -7,6 +7,10 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
   """
   use Arbiter.DataCase, async: false
 
+  # bd-asxw4e: the tickets here are created in Backlog and dispatched straight
+  # away, which a dispatch refuses unless forced — so these calls pass
+  # `force: true`. What a dispatch admits is `DispatchEligibilityTest`'s.
+
   alias Arbiter.Quota.AnthropicQuota
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
@@ -152,7 +156,9 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
       task = make_task(ws)
       seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99})
 
-      assert {:error, {:quota_held, task_id}} = Dispatch.dispatch(task.id, start_driver: false)
+      assert {:error, {:quota_held, task_id}} =
+               Dispatch.dispatch(task.id, force: true, start_driver: false)
+
       assert task_id == task.id
 
       # Task was NOT flipped to :in_progress and no worker spawned — it is held.
@@ -184,8 +190,12 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
 
       # Over the cap → both are held.
       seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99})
-      assert {:error, {:quota_held, _}} = Dispatch.dispatch(p2.id, start_driver: false)
-      assert {:error, {:quota_held, _}} = Dispatch.dispatch(p0.id, start_driver: false)
+
+      assert {:error, {:quota_held, _}} =
+               Dispatch.dispatch(p2.id, force: true, start_driver: false)
+
+      assert {:error, {:quota_held, _}} =
+               Dispatch.dispatch(p0.id, force: true, start_driver: false)
 
       assert length(DispatchQueue.state(pid).items) == 2
 
@@ -223,7 +233,7 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
       seed_usage(ws, 5.0)
 
       t1 = make_task(ws)
-      assert {:ok, result} = Dispatch.dispatch(t1.id, repo: "r", start_driver: false)
+      assert {:ok, result} = Dispatch.dispatch(t1.id, force: true, repo: "r", start_driver: false)
       assert result.task.status == :in_progress
       assert is_pid(result.worker_pid)
 
@@ -235,7 +245,7 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
       # A second dispatch in the same window (same crossing) must NOT re-alert,
       # and must still proceed.
       t2 = make_task(ws)
-      assert {:ok, _} = Dispatch.dispatch(t2.id, repo: "r", start_driver: false)
+      assert {:ok, _} = Dispatch.dispatch(t2.id, force: true, repo: "r", start_driver: false)
       refute_receive {:overage_alert, _, _, _}, 100
     end
   end
@@ -246,7 +256,9 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
       task = make_task(ws)
       # No AnthropicQuota row seeded → latest/2 is nil → fail open.
 
-      assert {:ok, result} = Dispatch.dispatch(task.id, repo: "r", start_driver: false)
+      assert {:ok, result} =
+               Dispatch.dispatch(task.id, force: true, repo: "r", start_driver: false)
+
       assert result.task.status == :in_progress
     end
   end
@@ -267,7 +279,9 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
       })
 
       # Gate must fail open and dispatch proceeds normally.
-      assert {:ok, result} = Dispatch.dispatch(task.id, repo: "r", start_driver: false)
+      assert {:ok, result} =
+               Dispatch.dispatch(task.id, force: true, repo: "r", start_driver: false)
+
       assert result.task.status == :in_progress
     end
 
@@ -283,7 +297,9 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
         reset_5h_at: future
       })
 
-      assert {:error, {:quota_held, task_id}} = Dispatch.dispatch(task.id, start_driver: false)
+      assert {:error, {:quota_held, task_id}} =
+               Dispatch.dispatch(task.id, force: true, start_driver: false)
+
       assert task_id == task.id
       assert DispatchQueue.held?(ws.id, task.id)
 
@@ -311,7 +327,10 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
         )
 
       task = make_task(ws)
-      assert {:error, {:quota_held, _}} = Dispatch.dispatch(task.id, start_driver: false)
+
+      assert {:error, {:quota_held, _}} =
+               Dispatch.dispatch(task.id, force: true, start_driver: false)
+
       assert DispatchQueue.held?(ws.id, task.id)
 
       # Update snapshot to be stale (reset 1 hour ago).
@@ -350,7 +369,9 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
       pid = start_queue(ws, dispatcher: QuotaExhaustedDispatcher, auto_subscribe: false)
 
       task = make_task(ws)
-      assert {:error, {:quota_held, _}} = Dispatch.dispatch(task.id, start_driver: false)
+
+      assert {:error, {:quota_held, _}} =
+               Dispatch.dispatch(task.id, force: true, start_driver: false)
 
       # The gate holds the item on the very first `hold/5` call, before any
       # dispatcher is ever invoked — so no probe attempt yet.
@@ -411,7 +432,9 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
       pid = start_queue(ws, dispatcher: QuotaExhaustedDispatcher, auto_subscribe: false)
 
       task = make_task(ws)
-      assert {:error, {:quota_held, _}} = Dispatch.dispatch(task.id, start_driver: false)
+
+      assert {:error, {:quota_held, _}} =
+               Dispatch.dispatch(task.id, force: true, start_driver: false)
 
       past = DateTime.utc_now() |> DateTime.add(-3600, :second) |> DateTime.truncate(:second)
       seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99, reset_5h_at: past})
@@ -459,7 +482,9 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
       pid = start_queue(ws, dispatcher: QuotaExhaustedDispatcher, auto_subscribe: false)
 
       task = make_task(ws)
-      assert {:error, {:quota_held, _}} = Dispatch.dispatch(task.id, start_driver: false)
+
+      assert {:error, {:quota_held, _}} =
+               Dispatch.dispatch(task.id, force: true, start_driver: false)
 
       past = DateTime.utc_now() |> DateTime.add(-3600, :second) |> DateTime.truncate(:second)
       seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99, reset_5h_at: past})
@@ -494,8 +519,12 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
       on_exit(fn -> Application.delete_env(:arbiter, :test_boom_task_id) end)
 
       seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99})
-      assert {:error, {:quota_held, _}} = Dispatch.dispatch(boom.id, start_driver: false)
-      assert {:error, {:quota_held, _}} = Dispatch.dispatch(ok.id, start_driver: false)
+
+      assert {:error, {:quota_held, _}} =
+               Dispatch.dispatch(boom.id, force: true, start_driver: false)
+
+      assert {:error, {:quota_held, _}} =
+               Dispatch.dispatch(ok.id, force: true, start_driver: false)
 
       seed_quota(ws, %{status_5h: "allowed", utilization_5h: 0.10})
       :ok = DispatchQueue.drain(pid)
@@ -521,11 +550,16 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
 
       # Without force, this would be held by the quota gate.
       assert {:error, {:quota_held, _}} =
-               Dispatch.dispatch(task.id, start_driver: false)
+               Dispatch.dispatch(task.id, force: true, start_driver: false)
 
       # With force: true (via skip_quota_gate internal opt), dispatch proceeds.
       assert {:ok, result} =
-               Dispatch.dispatch(task.id, repo: "r", start_driver: false, skip_quota_gate: true)
+               Dispatch.dispatch(task.id,
+                 force: true,
+                 repo: "r",
+                 start_driver: false,
+                 skip_quota_gate: true
+               )
 
       assert result.task.status == :in_progress
     end
@@ -537,7 +571,8 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
       task = make_task(ws)
       seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99})
 
-      assert {:error, {:quota_held, _}} = Dispatch.dispatch(task.id, start_driver: false)
+      assert {:error, {:quota_held, _}} =
+               Dispatch.dispatch(task.id, force: true, start_driver: false)
 
       # Simulate a restart: kill the queue process. The held intent is in-memory
       # and lost, BUT the task was never transitioned, so it is still resolvable
@@ -553,7 +588,10 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
 
       # Headroom returns; a fresh dispatch (new queue) proceeds normally.
       seed_quota(ws, %{status_5h: "allowed", utilization_5h: 0.10})
-      assert {:ok, result} = Dispatch.dispatch(task.id, repo: "r", start_driver: false)
+
+      assert {:ok, result} =
+               Dispatch.dispatch(task.id, force: true, repo: "r", start_driver: false)
+
       assert result.task.status == :in_progress
 
       if pid = DispatchQueueSupervisor.whereis(ws.id) do
@@ -579,7 +617,9 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
       task = make_task(ws)
       seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99})
 
-      assert {:error, {:quota_held, _}} = Dispatch.dispatch(task.id, start_driver: false)
+      assert {:error, {:quota_held, _}} =
+               Dispatch.dispatch(task.id, force: true, start_driver: false)
+
       assert DispatchQueue.held?(ws.id, task.id)
 
       {:ok, _closed} = Ash.update(task, %{}, action: :close)
@@ -600,7 +640,10 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
 
       task = make_task(ws)
       seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99})
-      assert {:error, {:quota_held, _}} = Dispatch.dispatch(task.id, start_driver: false)
+
+      assert {:error, {:quota_held, _}} =
+               Dispatch.dispatch(task.id, force: true, start_driver: false)
+
       assert DispatchQueue.held?(ws.id, task.id)
 
       {:ok, _closed} = Ash.update(task, %{}, action: :close)
@@ -634,7 +677,10 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
 
       task = make_task(ws)
       seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99})
-      assert {:error, {:quota_held, _}} = Dispatch.dispatch(task.id, start_driver: false)
+
+      assert {:error, {:quota_held, _}} =
+               Dispatch.dispatch(task.id, force: true, start_driver: false)
+
       assert length(DispatchQueue.state(pid).items) == 1
 
       # Headroom returns so the gate lets the drain through to the dispatcher,
@@ -660,7 +706,9 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
 
       task = make_task(ws)
       seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99})
-      assert {:error, {:quota_held, _}} = Dispatch.dispatch(task.id, start_driver: false)
+
+      assert {:error, {:quota_held, _}} =
+               Dispatch.dispatch(task.id, force: true, start_driver: false)
 
       seed_quota(ws, %{status_5h: "allowed", utilization_5h: 0.10})
       :ok = DispatchQueue.drain(pid)
@@ -721,7 +769,9 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
 
       task = make_task(ws)
       seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99})
-      assert {:error, {:quota_held, _}} = Dispatch.dispatch(task.id, start_driver: false)
+
+      assert {:error, {:quota_held, _}} =
+               Dispatch.dispatch(task.id, force: true, start_driver: false)
 
       seed_quota(ws, %{status_5h: "allowed", utilization_5h: 0.10})
 
@@ -805,7 +855,9 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
 
       task = make_task(ws)
       task_id = task.id
-      assert {:error, {:quota_held, _}} = Dispatch.dispatch(task_id, start_driver: false)
+
+      assert {:error, {:quota_held, _}} =
+               Dispatch.dispatch(task_id, force: true, start_driver: false)
 
       # Fail the gate open (stale snapshot) so the drain actually reaches the
       # dispatcher and exercises the real pre-flight failure path.

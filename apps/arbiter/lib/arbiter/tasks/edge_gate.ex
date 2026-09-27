@@ -172,6 +172,35 @@ defmodule Arbiter.Tasks.EdgeGate do
   end
 
   @doc """
+  One ticket's unsatisfied gating blockers — `blockers/2` for a single
+  ticket, reading its own gating rows and the tickets they point at. What a
+  dispatch of one ticket hands `Arbiter.Tasks.Lifecycle.dispatchable/2`
+  (bd-asxw4e), so the refusal names the same blockers the board shows.
+  """
+  @spec blockers_of(map()) :: [String.t()]
+  def blockers_of(%{id: id} = ticket) when is_binary(id) do
+    gating = gating_types()
+
+    deps =
+      Dependency
+      |> Ash.Query.filter(type in ^gating and (from_issue_id == ^id or to_issue_id == ^id))
+      |> Ash.read!()
+
+    others = deps |> Enum.flat_map(&[&1.from_issue_id, &1.to_issue_id]) |> Enum.uniq()
+    others = List.delete(others, id)
+
+    issues =
+      if others == [],
+        do: [ticket],
+        else: [ticket | Arbiter.Tasks.Issue |> Ash.Query.filter(id in ^others) |> Ash.read!()]
+
+    deps |> blockers(issues) |> Map.get(id, [])
+  end
+
+  # A ticket with no id yet has no edges.
+  def blockers_of(_ticket), do: []
+
+  @doc """
   The `:conflicts_with` rows as stored, `{from_issue_id, to_issue_id}`.
 
   The direction is meaningless (the edge is symmetric) but preserved, so a

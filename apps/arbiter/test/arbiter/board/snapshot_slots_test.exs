@@ -9,7 +9,7 @@ defmodule Arbiter.Board.SnapshotSlotsTest do
 
   @now ~U[2026-09-16 22:25:00Z]
 
-  defp issue(id, attrs \\ %{}) do
+  defp issue(id, attrs) do
     Map.merge(
       %{
         id: id,
@@ -135,8 +135,6 @@ defmodule Arbiter.Board.SnapshotSlotsTest do
       board = derive(slots_total: 5, workers: workers)
 
       assert board.agents_live == 3
-      assert board.slots_used == 3
-      assert board.slots_free == 2
     end
 
     test "an implementer round and a conflict resolver each count, but fold into their author's one slot" do
@@ -150,107 +148,90 @@ defmodule Arbiter.Board.SnapshotSlotsTest do
       board = derive(slots_total: 4, workers: workers)
 
       assert board.agents_live == 2
-      # Two agent sessions, but still only two tasks — bd-45pwo1's rule is
-      # exactly one slot per task regardless of how many subordinate rounds
-      # are live for it.
-      assert board.slots_used == 2
     end
   end
 
-  describe "bd-45pwo1: a slot belongs to the task, not to whichever agent is live" do
-    test "a task between ReviewGate rounds with no live agent still holds its slot" do
-      # The exact shape the ticket names: no reviewer/implementer/fix-pass
-      # currently live, but the task is not done and nobody parked it for a
-      # human, so it must still occupy its one slot.
-      board = derive(slots_total: 2, workers: [author("bd-1", :running, %{agent_live: false})])
-
-      assert board.agents_live == 0
-      assert board.slots_used == 1
-      assert board.slots_free == 1
-    end
-
-    test "waiting on CI / merge still holds the slot" do
-      board =
-        derive(slots_total: 2, workers: [author("bd-1", :awaiting_review, %{agent_live: false})])
-
-      assert board.slots_used == 1
-      assert board.slots_free == 1
-    end
-
-    test "a question or a parked failure (:waiting_on_you) releases the slot" do
-      board = derive(slots_total: 2, workers: [author("bd-1", :awaiting, %{agent_live: false})])
-
-      assert board.slots_used == 0
-      assert board.slots_free == 2
-
-      board = derive(slots_total: 2, workers: [author("bd-1", :failed, %{agent_live: false})])
-
-      assert board.slots_used == 0
-      assert board.slots_free == 2
-    end
-
-    test "a merged task (:completed) releases the slot" do
-      board = derive(slots_total: 2, workers: [author("bd-1", :completed, %{agent_live: false})])
-
-      assert board.slots_used == 0
-      assert board.slots_free == 2
-    end
-
-    test "rounds above the cap never report negative free slots" do
-      workers = [
-        author("bd-1", :awaiting_review_gate, %{agent_live: false}),
-        reviewer("bd-1", %{agent_live: true}),
-        author("bd-2", :running, %{agent_live: true}),
-        author("bd-3", :running, %{agent_live: true})
-      ]
-
-      board = derive(slots_total: 1, workers: workers)
-
-      assert board.agents_live == 3
-      assert board.slots_used == 3
-      assert board.slots_free == 0
-    end
-
-    test "a cap-full board promotes nothing new" do
+  describe "bd-asxw4e: a slot is a ticket In progress" do
+    test "a :merging ticket holds no slot, even with a resident :awaiting_review worker" do
       board =
         derive(
           slots_total: 1,
-          issues: [issue("bd-ready")],
-          workers: [author("bd-1", :running, %{agent_live: true})]
-        )
-
-      assert board.slots_free == 0
-      assert board.promote == nil
-    end
-
-    test "a task waiting on CI / merge still occupies the cap, so nothing new promotes" do
-      board =
-        derive(
-          slots_total: 1,
-          issues: [issue("bd-ready")],
+          issues: [
+            issue("bd-1", %{state: :merging, status: :in_progress, pr_ref: "https://pr/1"}),
+            issue("bd-ready", %{state: :queued})
+          ],
           workers: [author("bd-1", :awaiting_review, %{agent_live: false})]
         )
 
-      assert board.slots_free == 0
-      assert board.promote == nil
+      assert board.slots_used == 0
+      assert board.slots_free == 1
+      assert board.promote == "bd-ready"
     end
 
-    test "a merged task frees its slot and promotes the next Ready card" do
+    test "an :active ticket between ReviewGate rounds with no live agent holds one slot" do
+      # The bd-45pwo1 shape: no reviewer / implementer / fix pass live, the
+      # author between rounds — and now even no worker row at all.
+      for workers <- [[author("bd-1", :running, %{agent_live: false})], []] do
+        board =
+          derive(
+            slots_total: 1,
+            issues: [
+              issue("bd-1", %{state: :active, status: :in_progress}),
+              issue("bd-ready", %{state: :queued})
+            ],
+            workers: workers
+          )
+
+        assert board.agents_live == 0
+        assert board.slots_used == 1
+        assert board.slots_free == 0
+        assert board.promote == nil
+      end
+    end
+
+    test "a :verifying ticket holds none" do
       board =
         derive(
           slots_total: 1,
-          issues: [issue("bd-ready")],
-          workers: [author("bd-1", :completed, %{agent_live: false})]
+          issues: [issue("bd-1", %{state: :verifying, status: :awaiting_verification})]
         )
 
+      assert board.slots_used == 0
       assert board.slots_free == 1
-      assert board.promote == "bd-ready"
+    end
+
+    test "an :active ticket parked on a human keeps its slot" do
+      board =
+        derive(
+          slots_total: 2,
+          issues: [issue("bd-1", %{state: :active, status: :in_progress})],
+          workers: [author("bd-1", :failed, %{agent_live: false})]
+        )
+
+      assert board.slots_used == 1
+    end
+
+    test "worker rows alone hold nothing: the count is read off the tickets" do
+      board = derive(slots_total: 2, workers: [author("bd-1", :running, %{agent_live: true})])
+
+      assert board.agents_live == 1
+      assert board.slots_used == 0
+    end
+
+    test "tickets forced over the cap never report negative free slots" do
+      issues =
+        for id <- ~w(bd-1 bd-2 bd-3), do: issue(id, %{state: :active, status: :in_progress})
+
+      board = derive(slots_total: 1, issues: issues)
+
+      assert board.slots_used == 3
+      assert board.slots_free == 0
     end
   end
 
   describe "slot_basis" do
     @tag :slot_basis
-    test ":issues restores the pre-bd-aw2cyt record-based counting" do
+    test ":issues restores the pre-bd-aw2cyt record-based agents-live count" do
       workers = [
         author("bd-1", :running, %{agent_live: false}),
         author("bd-2", :awaiting, %{agent_live: false}),
@@ -260,8 +241,11 @@ defmodule Arbiter.Board.SnapshotSlotsTest do
       agents = derive(slots_total: 4, workers: workers, slot_basis: :agents)
       issues = derive(slots_total: 4, workers: workers, slot_basis: :issues)
 
-      assert agents.slots_free == 3
-      assert issues.slots_free == 2
+      assert agents.agents_live == 1
+      assert issues.agents_live == 2
+      # The cap is counted in tickets under either basis.
+      assert agents.slots_used == 0
+      assert issues.slots_used == 0
     end
   end
 

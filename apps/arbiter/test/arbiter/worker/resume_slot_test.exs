@@ -1,16 +1,17 @@
 defmodule Arbiter.Worker.ResumeSlotTest do
   @moduledoc """
-  bd-92mx1m: a resume is gated on whether the task **currently holds a slot**,
-  not on who is resuming it. A task that still holds its slot passes through
-  uncapped (the #1969/#1995 no-deadlock guarantee); one that released it —
-  human-parked, stopped, completed — re-acquires one like a new admission.
+  bd-92mx1m / bd-asxw4e: a resume is gated on whether the ticket **currently
+  holds a slot**, not on who is resuming it — and a ticket holds a slot
+  exactly while it is In progress (`:active`), the same rule the board counts
+  by (`Arbiter.Tasks.SlotGate`). An `:active` ticket passes through uncapped
+  (the #1969/#1995 no-deadlock guarantee); any other re-acquires a slot like a
+  new admission.
   """
   use Arbiter.DataCase, async: false
 
   alias Arbiter.Events.Record
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Worker.ResumeSlot
-  alias Arbiter.Workers.Run
 
   require Ash.Query
 
@@ -26,76 +27,60 @@ defmodule Arbiter.Worker.ResumeSlotTest do
     %{ws: ws, a: a, b: b}
   end
 
-  defp author(task, status, meta \\ %{}),
-    do: %{task_id: task.id, registry_key: task.id, status: status, role: nil, meta: meta}
+  # A ticket in `state`, as the gate would read it — the struct is never written.
+  defp in_state(ticket, state), do: %{ticket | state: state}
 
-  defp run!(task, attrs) do
-    {:ok, run} =
-      Ash.create(
-        Run,
-        Map.merge(
-          %{
-            task_id: task.id,
-            repo: "test/repo",
-            workspace_id: task.workspace_id,
-            worker_type: :main,
-            status: :failed,
-            started_at: DateTime.utc_now()
-          },
-          attrs
-        )
-      )
-
-    run
-  end
-
-  describe "a task that still holds its slot" do
-    test "passes through at a full cap, whoever resumes it", %{a: a, b: b} do
-      workers = [author(a, :awaiting_review), author(b, :running)]
+  describe "an :active ticket holds its slot" do
+    test "resuming it needs no new slot, at a full cap, whoever resumes it", %{a: a, b: b} do
+      a = in_state(a, :active)
+      tickets = [a, in_state(b, :active)]
 
       for origin <- [:human, :automatic] do
-        assert {:ok, :held} = ResumeSlot.admit(a, origin: origin, workers: workers, cap: 1)
+        assert {:ok, :held} = ResumeSlot.admit(a, origin: origin, tickets: tickets, cap: 1)
       end
     end
 
-    # The fix-round shape: the ReviewGate failed the author only so the
-    # implementer round can replace it. The slot was never given up.
-    test "a worker failed mid hand-off still holds its slot", %{a: a, b: b} do
-      workers = [author(a, :failed, %{slot_handoff: true}), author(b, :running)]
-
-      assert {:ok, :held} = ResumeSlot.admit(a, origin: :automatic, workers: workers, cap: 1)
-    end
-
-    # After a reboot the registry is empty: a task whose run was cut off by the
-    # restart was in flight, and its resume is a reboot of in-flight work.
-    test "no worker, but the last run was cut off by a restart", %{a: a, b: b} do
-      run!(a, %{status: :failed, failure_reason: "server restarted"})
+    # The fix-round and reboot shapes: whatever happened to the worker (failed
+    # mid hand-off, cut off by a restart, parked on a human), the ticket never
+    # left In progress, so it never gave its slot up.
+    test "whatever its worker did — no worker rows are read at all", %{a: a, b: b} do
+      a = in_state(a, :active)
 
       assert {:ok, :held} =
-               ResumeSlot.admit(a, origin: :automatic, workers: [author(b, :running)], cap: 1)
-
-      {:ok, c} = Ash.create(Issue, %{title: "task C", workspace_id: a.workspace_id})
-      run!(c, %{status: :interrupted, failure_reason: "server shutdown"})
-
-      assert {:ok, :held} =
-               ResumeSlot.admit(c, origin: :automatic, workers: [author(b, :running)], cap: 1)
+               ResumeSlot.admit(a, origin: :automatic, tickets: [in_state(b, :active)], cap: 1)
     end
   end
 
-  describe "a task that released its slot" do
-    test "re-acquires a free one", %{a: a, b: b} do
-      workers = [author(a, :failed), author(b, :running)]
-      assert {:ok, :acquired} = ResumeSlot.admit(a, workers: workers, cap: 2)
+  describe "a ticket not In progress must acquire a slot" do
+    test "resuming a :queued ticket needs a slot", %{a: a, b: b} do
+      a = in_state(a, :queued)
+      tickets = [a, in_state(b, :active)]
+
+      assert {:ok, :acquired} = ResumeSlot.admit(a, tickets: tickets, cap: 2)
+      assert {:error, {:slot_cap_full, _}} = ResumeSlot.admit(a, tickets: tickets, cap: 1)
+    end
+
+    test "so does a :merging one — an open PR holds no slot", %{a: a, b: b} do
+      a = in_state(a, :merging)
+
+      assert {:defer, %{holders: [holder]}} =
+               ResumeSlot.admit(a,
+                 origin: :automatic,
+                 tickets: [a, in_state(b, :active)],
+                 cap: 1
+               )
+
+      assert holder == b.id
     end
 
     test "a human resume at a full cap is refused, naming the cap and the holders", %{
       a: a,
       b: b
     } do
-      workers = [author(a, :failed), author(b, :running)]
+      a = in_state(a, :queued)
 
       assert {:error, {:slot_cap_full, info}} =
-               ResumeSlot.admit(a, origin: :human, workers: workers, cap: 1)
+               ResumeSlot.admit(a, origin: :human, tickets: [a, in_state(b, :active)], cap: 1)
 
       assert info.cap == 1
       assert info.holders == [b.id]
@@ -109,35 +94,30 @@ defmodule Arbiter.Worker.ResumeSlotTest do
     end
 
     test "the default origin is human — refuse, never bypass", %{a: a, b: b} do
-      workers = [author(a, :failed), author(b, :running)]
-      assert {:error, {:slot_cap_full, _}} = ResumeSlot.admit(a, workers: workers, cap: 1)
+      a = in_state(a, :queued)
+
+      assert {:error, {:slot_cap_full, _}} =
+               ResumeSlot.admit(a, tickets: [in_state(b, :active)], cap: 1)
     end
 
     test "an automatic resume at a full cap is deferred", %{a: a, b: b} do
-      workers = [author(a, :completed), author(b, :running)]
+      a = in_state(a, :verifying)
 
       assert {:defer, %{cap: 1, holders: [holder]}} =
-               ResumeSlot.admit(a, origin: :automatic, workers: workers, cap: 1)
+               ResumeSlot.admit(a, origin: :automatic, tickets: [in_state(b, :active)], cap: 1)
 
       assert holder == b.id
     end
 
-    test "a stopped task (no worker, run not cut off by a restart) released it", %{a: a, b: b} do
-      run!(a, %{status: :failed, failure_reason: ":review_gate_rejected"})
-
-      assert {:error, {:slot_cap_full, _}} =
-               ResumeSlot.admit(a, workers: [author(b, :running)], cap: 1)
-    end
-
     test "force overrides the cap and records the override", %{ws: ws, a: a, b: b} do
-      workers = [author(a, :failed), author(b, :running)]
+      a = in_state(a, :queued)
 
       assert {:ok, :forced} =
                ResumeSlot.admit(a,
                  origin: :human,
                  force: true,
                  actor: "coordinator",
-                 workers: workers,
+                 tickets: [in_state(b, :active)],
                  cap: 1
                )
 
@@ -153,7 +133,7 @@ defmodule Arbiter.Worker.ResumeSlotTest do
     end
 
     test "force with a free slot is a plain admission, not an override", %{ws: ws, a: a} do
-      assert {:ok, :acquired} = ResumeSlot.admit(a, force: true, workers: [], cap: 1)
+      assert {:ok, :acquired} = ResumeSlot.admit(a, force: true, tickets: [], cap: 1)
 
       assert [] =
                Record
@@ -162,13 +142,11 @@ defmodule Arbiter.Worker.ResumeSlotTest do
     end
 
     test "a resume the scheduler already admitted is not re-checked", %{a: a, b: b} do
-      workers = [author(a, :failed), author(b, :running)]
-
       assert {:ok, :admitted} =
                ResumeSlot.admit(a,
                  origin: :automatic,
                  slot_admitted: true,
-                 workers: workers,
+                 tickets: [in_state(b, :active)],
                  cap: 1
                )
     end
@@ -186,22 +164,18 @@ defmodule Arbiter.Worker.ResumeSlotTest do
       end)
     end
 
-    test "reads live workers and the configured cap when not handed them", %{ws: ws, a: a, b: b} do
-      {:ok, pid_a} = Arbiter.Worker.start(task_id: a.id, repo: "test/repo", workspace_id: ws.id)
-      {:ok, pid_b} = Arbiter.Worker.start(task_id: b.id, repo: "test/repo", workspace_id: ws.id)
-
-      on_exit(fn ->
-        for {id, pid} <- [{a.id, pid_a}, {b.id, pid_b}],
-            Process.alive?(pid),
-            do: Arbiter.Worker.stop(id, :normal)
-      end)
-
-      :ok = Arbiter.Worker.advance(pid_b, :implement)
-      :ok = Arbiter.Worker.advance(pid_a, :implement)
-      :ok = Arbiter.Worker.fail(pid_a, :token_exhausted)
+    test "reads the tickets In progress and the configured cap when not handed them", %{
+      a: a,
+      b: b
+    } do
+      {:ok, b} = Issue.start_work(b)
+      assert b.state == :active
 
       assert {:error, {:slot_cap_full, %{cap: 1, holders: holders}}} = ResumeSlot.admit(a)
       assert b.id in holders
+
+      {:ok, a} = Issue.start_work(a)
+      assert {:ok, :held} = ResumeSlot.admit(a)
     end
   end
 end

@@ -96,6 +96,7 @@ defmodule ArbiterCli.Cmd.Scheduler do
           IO.puts(Jason.encode!(body))
         else
           IO.puts("Board scheduler is #{SchedulerState.headline(body)}.")
+          emit_slots(body)
           emit_entries(body)
         end
 
@@ -182,6 +183,16 @@ defmodule ArbiterCli.Cmd.Scheduler do
     if ctx.mode == :json, do: IO.puts(Jason.encode!(body)), else: IO.puts(text)
     if code != 0, do: Output.halt(code)
   end
+
+  # bd-asxw4e: the dispatch cap's count, the same one the board header shows.
+  defp emit_slots(%{"slots_used" => used} = body) when is_integer(used) do
+    case Map.get(body, "slot_holders") do
+      [_ | _] = ids -> IO.puts("Slots used: #{used} (#{Enum.join(ids, ", ")})")
+      _ -> IO.puts("Slots used: #{used}")
+    end
+  end
+
+  defp emit_slots(_body), do: :ok
 
   defp emit_entries(body) do
     Enum.each(SchedulerState.entry_lines(body), &IO.puts("  " <> &1))
