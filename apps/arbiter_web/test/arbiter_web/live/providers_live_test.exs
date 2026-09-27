@@ -18,6 +18,16 @@ defmodule ArbiterWeb.ProvidersLiveTest do
 
   @secret "sk-ant-oat01-do-not-echo-me-4f9c"
 
+  # The account/pool/pace/credential/cost overview arrives by `start_async/3`
+  # on the connected mount (bd-34f7gt); every test but the loading/error ones
+  # themselves wants the page once it has landed.
+  @async_timeout 5_000
+
+  defp live_providers(conn, path \\ ~p"/providers") do
+    {:ok, view, _html} = live(conn, path)
+    {:ok, view, render_async(view, @async_timeout)}
+  end
+
   setup do
     prev = Application.get_env(:arbiter, :provider_accounts_enabled)
 
@@ -74,7 +84,7 @@ defmodule ArbiterWeb.ProvidersLiveTest do
     end
 
     test "is linked from the nav", %{conn: conn} do
-      {:ok, view, _html} = live(conn, ~p"/providers")
+      {:ok, view, _html} = live_providers(conn)
       assert has_element?(view, ~s(a[href="/providers"]))
     end
 
@@ -83,7 +93,7 @@ defmodule ArbiterWeb.ProvidersLiveTest do
       account = account!(:claude, "pv-main", %{label: "Main Max plan"})
       {:ok, _} = Accounts.attach_workspace(ws.id, :claude, account.id)
 
-      {:ok, view, _html} = live(conn, ~p"/providers")
+      {:ok, view, _html} = live_providers(conn)
 
       assert has_element?(view, "#account-#{account.id}")
       assert has_element?(view, "#account-#{account.id}-provider svg[aria-label=Claude]")
@@ -109,7 +119,7 @@ defmodule ArbiterWeb.ProvidersLiveTest do
         action: :record_oauth_snapshot
       )
 
-      {:ok, view, _html} = live(conn, ~p"/providers")
+      {:ok, view, _html} = live_providers(conn)
 
       assert has_element?(view, "#account-#{account.id}-quota [data-quota-bar=claude]")
       assert has_element?(view, "#account-#{account.id}-pace-5h", "90% used")
@@ -120,7 +130,7 @@ defmodule ArbiterWeb.ProvidersLiveTest do
 
     test "an account with no quota snapshot says so rather than drawing empty bars", %{conn: conn} do
       account = account!(:codex, "pv-noquota")
-      {:ok, view, _html} = live(conn, ~p"/providers")
+      {:ok, view, _html} = live_providers(conn)
       assert has_element?(view, "#account-#{account.id}-quota", "No quota snapshot")
     end
 
@@ -128,7 +138,7 @@ defmodule ArbiterWeb.ProvidersLiveTest do
       capped = account!(:claude, "pv-capped", %{max_concurrent: 4})
       uncapped = account!(:claude, "pv-uncapped")
 
-      {:ok, view, _html} = live(conn, ~p"/providers")
+      {:ok, view, _html} = live_providers(conn)
 
       assert has_element?(view, "#account-#{capped.id}-concurrency", "0 / 4")
       assert has_element?(view, "#account-#{uncapped.id}-concurrency", "no cap")
@@ -145,7 +155,7 @@ defmodule ArbiterWeb.ProvidersLiveTest do
           secret: @secret
         })
 
-      {:ok, view, html} = live(conn, ~p"/providers")
+      {:ok, view, html} = live_providers(conn)
 
       assert has_element?(view, "#account-#{bare.id}-health[data-health=no_credential]")
       assert has_element?(view, "#account-#{credentialed.id}-health[data-health=ok]")
@@ -166,7 +176,7 @@ defmodule ArbiterWeb.ProvidersLiveTest do
       event!(priced, %{provider: "claude", cost_usd: 1.5, tokens_in: 1000, tokens_out: 500})
       event!(unpriced, %{provider: "gemini", cost_usd: nil, tokens_in: 10, tokens_out: 5})
 
-      {:ok, view, _html} = live(conn, ~p"/providers")
+      {:ok, view, _html} = live_providers(conn)
 
       assert has_element?(view, "#account-#{priced.id}-cost", "$1.50")
       assert has_element?(view, "#account-#{unpriced.id}-cost", "n/a")
@@ -174,7 +184,7 @@ defmodule ArbiterWeb.ProvidersLiveTest do
     end
 
     test "an empty install shows an empty state", %{conn: conn} do
-      {:ok, view, _html} = live(conn, ~p"/providers")
+      {:ok, view, _html} = live_providers(conn)
       assert has_element?(view, "#providers-empty")
     end
   end
@@ -186,7 +196,7 @@ defmodule ArbiterWeb.ProvidersLiveTest do
     end
 
     test "creates the account and lists it", %{conn: conn} do
-      {:ok, view, _html} = live(conn, ~p"/providers")
+      {:ok, view, _html} = live_providers(conn)
 
       view |> element("#new-account-button") |> render_click()
 
@@ -195,6 +205,8 @@ defmodule ArbiterWeb.ProvidersLiveTest do
         account: %{provider: "codex", slug: "pv-new", label: "New one", max_concurrent: "3"}
       )
       |> render_submit()
+
+      render_async(view, @async_timeout)
 
       assert {:ok, account} = Accounts.get_account("codex:pv-new")
       assert account.label == "New one"
@@ -205,7 +217,7 @@ defmodule ArbiterWeb.ProvidersLiveTest do
 
     # bd-ac53wz: the upstream Gemini CLI provider is dropped; agy stays.
     test "offers every live provider and not the removed Gemini CLI", %{conn: conn} do
-      {:ok, view, _html} = live(conn, ~p"/providers")
+      {:ok, view, _html} = live_providers(conn)
 
       view |> element("#new-account-button") |> render_click()
 
@@ -217,7 +229,7 @@ defmodule ArbiterWeb.ProvidersLiveTest do
 
     test "a duplicate slug keeps the form open with the error", %{conn: conn} do
       account!(:claude, "pv-dupe")
-      {:ok, view, _html} = live(conn, ~p"/providers")
+      {:ok, view, _html} = live_providers(conn)
 
       view |> element("#new-account-button") |> render_click()
 
@@ -238,7 +250,7 @@ defmodule ArbiterWeb.ProvidersLiveTest do
 
     test "posts the secret to the encrypted store and never echoes it back", %{conn: conn} do
       account = account!(:claude, "pv-rotate")
-      {:ok, view, _html} = live(conn, ~p"/providers")
+      {:ok, view, _html} = live_providers(conn)
 
       view |> element("#account-#{account.id}-credential-button") |> render_click()
 
@@ -253,6 +265,8 @@ defmodule ArbiterWeb.ProvidersLiveTest do
           credential: %{kind: "oauth_token", env_var: "CLAUDE_CODE_OAUTH_TOKEN", secret: @secret}
         )
         |> render_submit()
+
+      render_async(view, @async_timeout)
 
       assert [credential] = active_credentials(account)
       assert ProviderCredential.secret(credential) == @secret
@@ -276,7 +290,7 @@ defmodule ArbiterWeb.ProvidersLiveTest do
           secret: "sk-ant-oat01-old"
         })
 
-      {:ok, view, _html} = live(conn, ~p"/providers")
+      {:ok, view, _html} = live_providers(conn)
       view |> element("#account-#{account.id}-credential-button") |> render_click()
 
       view
@@ -285,13 +299,15 @@ defmodule ArbiterWeb.ProvidersLiveTest do
       )
       |> render_submit()
 
+      render_async(view, @async_timeout)
+
       assert [credential] = active_credentials(account)
       assert ProviderCredential.secret(credential) == @secret
     end
 
     test "a failed submit reports the error without echoing the secret", %{conn: conn} do
       account = account!(:claude, "pv-rotate-bad")
-      {:ok, view, _html} = live(conn, ~p"/providers")
+      {:ok, view, _html} = live_providers(conn)
       view |> element("#account-#{account.id}-credential-button") |> render_click()
 
       html =
@@ -308,7 +324,7 @@ defmodule ArbiterWeb.ProvidersLiveTest do
 
     test "a blank secret is refused", %{conn: conn} do
       account = account!(:claude, "pv-rotate-blank")
-      {:ok, view, _html} = live(conn, ~p"/providers")
+      {:ok, view, _html} = live_providers(conn)
       view |> element("#account-#{account.id}-credential-button") |> render_click()
 
       view
@@ -336,13 +352,15 @@ defmodule ArbiterWeb.ProvidersLiveTest do
     test "attaches a workspace to the account", %{conn: conn} do
       ws = workspace!("pv-attach-me")
       account = account!(:claude, "pv-attach")
-      {:ok, view, _html} = live(conn, ~p"/providers")
+      {:ok, view, _html} = live_providers(conn)
 
       view |> element("#account-#{account.id}-attach-button") |> render_click()
 
       view
       |> form("#attach-form-#{account.id}", attach: %{workspace_id: ws.id, share: "2"})
       |> render_submit()
+
+      render_async(view, @async_timeout)
 
       assert [%{workspace_id: ws_id, share: 2}] = links(account)
       assert ws_id == ws.id
@@ -353,9 +371,10 @@ defmodule ArbiterWeb.ProvidersLiveTest do
       ws = workspace!("pv-detach-me")
       account = account!(:claude, "pv-detach")
       {:ok, _} = Accounts.attach_workspace(ws.id, :claude, account.id)
-      {:ok, view, _html} = live(conn, ~p"/providers")
+      {:ok, view, _html} = live_providers(conn)
 
       view |> element("#detach-#{account.id}-#{ws.id}") |> render_click()
+      render_async(view, @async_timeout)
 
       assert links(account) == []
       refute has_element?(view, "#account-#{account.id}-ws-#{ws.id}")
@@ -370,9 +389,10 @@ defmodule ArbiterWeb.ProvidersLiveTest do
 
     test "soft-deletes an unattached account, hiding its card", %{conn: conn} do
       account = account!(:claude, "pv-delete-me")
-      {:ok, view, _html} = live(conn, ~p"/providers")
+      {:ok, view, _html} = live_providers(conn)
 
       view |> element("#delete-account-#{account.id}") |> render_click()
+      render_async(view, @async_timeout)
 
       refute has_element?(view, "#account-#{account.id}")
       assert {:ok, %{deleted_at: %DateTime{}}} = Accounts.get_account(account.id)
@@ -382,9 +402,10 @@ defmodule ArbiterWeb.ProvidersLiveTest do
       ws = workspace!("pv-delete-attached-ws")
       account = account!(:claude, "pv-delete-attached")
       {:ok, _} = Accounts.attach_workspace(ws.id, :claude, account.id)
-      {:ok, view, _html} = live(conn, ~p"/providers")
+      {:ok, view, _html} = live_providers(conn)
 
       view |> element("#delete-account-#{account.id}") |> render_click()
+      render_async(view, @async_timeout)
 
       assert has_element?(view, "#account-#{account.id}")
       assert render(view) =~ "detach first"
@@ -403,7 +424,7 @@ defmodule ArbiterWeb.ProvidersLiveTest do
       account = account!(:claude, "pv-readonly")
       {:ok, _} = Accounts.attach_workspace(ws.id, :claude, account.id)
 
-      {:ok, view, _html} = live(conn, ~p"/providers")
+      {:ok, view, _html} = live_providers(conn)
 
       assert has_element?(
                view,
@@ -423,7 +444,7 @@ defmodule ArbiterWeb.ProvidersLiveTest do
       ws = workspace!("pv-ro-2")
       account = account!(:claude, "pv-readonly-2")
       {:ok, _} = Accounts.attach_workspace(ws.id, :claude, account.id)
-      {:ok, view, _html} = live(conn, ~p"/providers")
+      {:ok, view, _html} = live_providers(conn)
 
       render_hook(view, "create_account", %{
         "account" => %{"provider" => "claude", "slug" => "sneaky"}
@@ -442,6 +463,104 @@ defmodule ArbiterWeb.ProvidersLiveTest do
       assert [_] = links(account)
       assert {:ok, %{deleted_at: nil}} = Accounts.get_account(account.id)
       refute render(view) =~ @secret
+    end
+  end
+
+  describe "async load" do
+    setup do
+      enable!(true)
+      :ok
+    end
+
+    # Holds the overview read (`Overview.list/1`) in flight until the test
+    # says go, so the loading state is something to assert on rather than a
+    # race — same discipline as `worker_index_live_test.exs`'s
+    # `hold_workers_load/0` (bd-4gtia5).
+    defp hold_providers_load do
+      test = self()
+
+      :meck.new(Arbiter.Accounts.Overview, [:passthrough, :no_link])
+
+      :meck.expect(Arbiter.Accounts.Overview, :list, fn opts ->
+        rows = :meck.passthrough([opts])
+        send(test, {:loading_providers, self()})
+
+        receive do
+          :release -> :ok
+        after
+          1_000 -> send(test, {:unreleased_providers_load, self()})
+        end
+
+        rows
+      end)
+
+      on_exit(fn -> :meck.unload(Arbiter.Accounts.Overview) end)
+    end
+
+    test "the dead render shows the loading state and does not read the overview", %{conn: conn} do
+      test = self()
+      :meck.new(Arbiter.Accounts.Overview, [:passthrough, :no_link])
+
+      :meck.expect(Arbiter.Accounts.Overview, :list, fn opts ->
+        send(test, :overview_read) && :meck.passthrough([opts])
+      end)
+
+      on_exit(fn -> :meck.unload(Arbiter.Accounts.Overview) end)
+
+      doc = conn |> get(~p"/providers") |> html_response(200) |> LazyHTML.from_document()
+
+      assert doc |> LazyHTML.query(~s(#providers-panel[data-state="loading"])) |> Enum.count() ==
+               1
+
+      assert doc |> LazyHTML.query("#providers-loading") |> Enum.count() == 1
+      refute_received :overview_read
+    end
+
+    test "renders a loading skeleton before the async overview lands, then the data", %{
+      conn: conn
+    } do
+      account = account!(:claude, "pv-async-loading")
+      hold_providers_load()
+
+      {:ok, view, _html} = live(conn, ~p"/providers")
+      assert_receive {:loading_providers, loader}
+
+      assert has_element?(view, ~s(#providers-panel[data-state="loading"]))
+      assert has_element?(view, "#providers-loading")
+      refute has_element?(view, "#account-#{account.id}")
+
+      send(loader, :release)
+      html = render_async(view, @async_timeout)
+
+      assert has_element?(view, ~s(#providers-panel[data-state="loaded"]))
+      refute has_element?(view, "#providers-loading")
+      assert html =~ account.id
+      refute_received {:unreleased_providers_load, _}
+    end
+
+    test "an async overview-read failure renders an inline error, not a crash", %{conn: conn} do
+      :meck.new(Arbiter.Accounts.Overview, [:passthrough, :no_link])
+      :meck.expect(Arbiter.Accounts.Overview, :list, fn _opts -> raise "boom" end)
+      on_exit(fn -> :meck.unload(Arbiter.Accounts.Overview) end)
+
+      {:ok, view, _html} = live(conn, ~p"/providers")
+      html = render_async(view, @async_timeout)
+
+      assert html =~ ~s(id="providers-error")
+      assert html =~ "boom"
+      assert has_element?(view, "#providers-retry")
+    end
+
+    test "the tick refresh still updates the page after the initial async load", %{conn: conn} do
+      {:ok, view, _html} = live_providers(conn)
+      account = account!(:claude, "pv-tick-refresh")
+
+      refute has_element?(view, "#account-#{account.id}")
+
+      send(view.pid, :refresh)
+      html = render_async(view, @async_timeout)
+
+      assert html =~ account.id
     end
   end
 end

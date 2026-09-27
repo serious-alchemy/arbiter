@@ -62,25 +62,54 @@ defmodule ArbiterWeb.ProvidersLive do
 
   @impl true
   def mount(_params, _session, socket) do
-    if connected?(socket), do: :timer.send_interval(@refresh_ms, :refresh)
+    live? = connected?(socket)
+    if live?, do: :timer.send_interval(@refresh_ms, :refresh)
 
-    {:ok,
-     socket
-     |> assign(:page_title, "Providers")
-     |> assign(:creating?, false)
-     |> assign(:account_form, account_form())
-     |> assign(:account_error, nil)
-     |> assign(:credential_for, nil)
-     |> assign(:credential_form, nil)
-     |> assign(:credential_error, nil)
-     |> assign(:attach_for, nil)
-     |> assign(:attach_form, nil)
-     |> assign(:attach_error, nil)
-     |> refresh()}
+    socket =
+      socket
+      |> assign(:page_title, "Providers")
+      |> assign(:creating?, false)
+      |> assign(:account_form, account_form())
+      |> assign(:account_error, nil)
+      |> assign(:credential_for, nil)
+      |> assign(:credential_form, nil)
+      |> assign(:credential_error, nil)
+      |> assign(:attach_for, nil)
+      |> assign(:attach_form, nil)
+      |> assign(:attach_error, nil)
+      |> assign(:enabled?, false)
+      |> assign(:rows, [])
+      |> assign(:workspace_options, [])
+      |> assign(:providers_loaded?, false)
+      |> assign(:providers_loading?, false)
+      |> assign(:providers_stale?, false)
+      |> assign(:providers_error, nil)
+
+    {:ok, if(live?, do: fetch_providers(socket), else: socket)}
   end
 
   @impl true
-  def handle_info(:refresh, socket), do: {:noreply, refresh(socket)}
+  def handle_info(:refresh, socket), do: {:noreply, fetch_providers(socket)}
+
+  @impl true
+  def handle_async(:providers, {:ok, data}, socket) do
+    socket
+    |> assign(:enabled?, data.enabled?)
+    |> assign(:rows, data.rows)
+    |> assign(:workspace_options, data.workspace_options)
+    |> assign(:providers_loaded?, true)
+    |> assign(:providers_error, nil)
+    |> providers_read_done()
+  end
+
+  # A read that fails must not take the page down. Whatever was on screen
+  # stays there — the skeleton on a first load, the last good read on a
+  # refresh — under an error that says so.
+  def handle_async(:providers, {:exit, reason}, socket) do
+    socket
+    |> assign(:providers_error, load_error(reason))
+    |> providers_read_done()
+  end
 
   # ---- events ---------------------------------------------------------------
 
@@ -91,7 +120,7 @@ defmodule ArbiterWeb.ProvidersLive do
     else
       {:noreply,
        socket
-       |> refresh()
+       |> fetch_providers()
        |> put_flash(:error, "Accounts are not enabled on this install — this page is read-only.")}
     end
   end
@@ -111,7 +140,7 @@ defmodule ArbiterWeb.ProvidersLive do
        socket
        |> assign(creating?: false, account_error: nil)
        |> put_flash(:info, "Created #{account.provider}:#{account.slug}.")
-       |> refresh()}
+       |> fetch_providers()}
     else
       {:error, error} ->
         {:noreply,
@@ -170,7 +199,7 @@ defmodule ArbiterWeb.ProvidersLive do
            :info,
            "Stored #{credential.env_var} (#{String.slice(credential.fingerprint, 0, 12)}…)."
          )
-         |> refresh()}
+         |> fetch_providers()}
 
       {:error, error} ->
         {:noreply,
@@ -202,7 +231,7 @@ defmodule ArbiterWeb.ProvidersLive do
        socket
        |> assign(attach_for: nil, attach_form: nil, attach_error: nil)
        |> put_flash(:info, "Attached to #{account.provider}:#{account.slug}.")
-       |> refresh()}
+       |> fetch_providers()}
     else
       {:error, error} ->
         {:noreply,
@@ -217,10 +246,10 @@ defmodule ArbiterWeb.ProvidersLive do
   defp action("detach", %{"account" => account_id, "workspace" => workspace_id}, socket) do
     case Accounts.detach_workspace(workspace_id, account_id) do
       {:ok, _link} ->
-        {:noreply, socket |> put_flash(:info, "Detached.") |> refresh()}
+        {:noreply, socket |> put_flash(:info, "Detached.") |> fetch_providers()}
 
       {:error, error} ->
-        {:noreply, socket |> put_flash(:error, error_message(error)) |> refresh()}
+        {:noreply, socket |> put_flash(:error, error_message(error)) |> fetch_providers()}
     end
   end
 
@@ -230,23 +259,55 @@ defmodule ArbiterWeb.ProvidersLive do
         {:noreply,
          socket
          |> put_flash(:info, "Deleted #{account.provider}:#{account.slug}.")
-         |> refresh()}
+         |> fetch_providers()}
 
       {:error, error} ->
-        {:noreply, socket |> put_flash(:error, error_message(error)) |> refresh()}
+        {:noreply, socket |> put_flash(:error, error_message(error)) |> fetch_providers()}
     end
   end
+
+  defp action("retry_providers", _params, socket),
+    do: {:noreply, socket |> assign(:providers_error, nil) |> fetch_providers()}
 
   defp action(_event, _params, socket), do: {:noreply, socket}
 
   # ---- state ----------------------------------------------------------------
 
-  defp refresh(socket) do
+  defp fetch_providers(%{assigns: %{providers_loading?: true}} = socket),
+    do: assign(socket, :providers_stale?, true)
+
+  defp fetch_providers(socket) do
     socket
-    |> assign(:enabled?, Accounts.enabled?())
-    |> assign(:rows, Overview.list())
-    |> assign(:workspace_options, Overview.workspace_options())
+    |> assign(:providers_loading?, true)
+    |> assign(:providers_stale?, false)
+    |> start_async(:providers, fn -> load_providers() end)
   end
+
+  defp providers_read_done(socket) do
+    socket = assign(socket, :providers_loading?, false)
+
+    {:noreply, if(socket.assigns.providers_stale?, do: fetch_providers(socket), else: socket)}
+  end
+
+  defp load_error({%{__exception__: true} = error, _stacktrace}), do: Exception.message(error)
+  defp load_error(reason), do: Exception.format_exit(reason)
+
+  # Runs in the async task: `Accounts.enabled?/0`, the account/pool/pace,
+  # concurrency, credential-health and per-account cost overview (ledger
+  # reads), and the workspace options for the attach form — kept off the
+  # connected mount and every tick so a slow ledger scan can never block the
+  # LiveView process (bd-34f7gt).
+  defp load_providers do
+    %{
+      enabled?: Accounts.enabled?(),
+      rows: Overview.list([]),
+      workspace_options: Overview.workspace_options()
+    }
+  end
+
+  defp providers_state(_loaded?, error) when not is_nil(error), do: "error"
+  defp providers_state(true, nil), do: "loaded"
+  defp providers_state(false, nil), do: "loading"
 
   defp find_row(socket, id), do: Enum.find(socket.assigns.rows, &(&1.account.id == id))
 
@@ -442,7 +503,7 @@ defmodule ArbiterWeb.ProvidersLive do
         >
           <:actions>
             <ArbiterWeb.CoreComponents.Core.button
-              :if={@enabled? and not @creating?}
+              :if={@providers_loaded? and @enabled? and not @creating?}
               id="new-account-button"
               phx-click="new_account"
               variant="primary"
@@ -455,402 +516,453 @@ defmodule ArbiterWeb.ProvidersLive do
         </ArbiterWeb.CoreComponents.Domain.index_header>
 
         <div
-          :if={not @enabled?}
-          id="accounts-disabled-notice"
-          role="status"
-          class="flex items-start gap-3 rounded-[var(--radius-panel)] border border-[var(--arb-attention-edge)] bg-[var(--arb-attention-wash)] px-4 py-3 text-[13px] text-[var(--arb-attention-ink)]"
+          id="providers-panel"
+          data-state={providers_state(@providers_loaded?, @providers_error)}
+          aria-busy={to_string(not @providers_loaded? and is_nil(@providers_error))}
+          class="flex flex-col gap-4"
         >
-          <ArbiterWeb.CoreComponents.Core.icon
-            name="hero-lock-closed"
-            size={16}
-            class="mt-0.5 shrink-0"
-          />
-          <div class="flex flex-col gap-0.5">
-            <span class="font-medium">Accounts not enabled on this install</span>
-            <span class="text-[12px] opacity-90">
-              <code class="font-[family-name:var(--font-mono)]">:provider_accounts_enabled</code>
-              is off, so workers still take credentials from each workspace's worker env. This page is read-only until it is turned on.
+          <div
+            :if={@providers_error}
+            id="providers-error"
+            role="alert"
+            class="flex items-start gap-2 px-3 py-2.5 rounded-[var(--radius-field)] border border-solid border-[var(--arb-fail-edge)] bg-[var(--arb-fail-wash)] text-[12px] text-[var(--arb-fail-text)]"
+          >
+            <ArbiterWeb.CoreComponents.Core.icon
+              name="hero-exclamation-triangle-micro"
+              class="size-4 shrink-0 mt-px"
+            />
+            <span class="grow min-w-0 break-words">
+              Could not load provider accounts: {@providers_error}<span :if={@providers_loaded?}> — showing the last list that loaded.</span>
             </span>
-          </div>
-        </div>
-
-        <ArbiterWeb.CoreComponents.Core.panel
-          :if={@enabled? and @creating?}
-          id="new-account-panel"
-          title="New provider account"
-          meta="no credential needed yet"
-        >
-          <.form
-            for={@account_form}
-            id="account-form"
-            phx-submit="create_account"
-            class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 items-end"
-          >
-            <.input
-              field={@account_form[:provider]}
-              type="select"
-              label="Provider"
-              options={@providers}
-            />
-            <.input field={@account_form[:slug]} label="Slug" placeholder="work-max" required />
-            <.input field={@account_form[:label]} label="Label" placeholder="Work Max plan" />
-            <.input field={@account_form[:plan]} label="Plan" placeholder="max_20x" />
-            <.input
-              field={@account_form[:max_concurrent]}
-              type="number"
-              min="0"
-              label="Concurrency cap"
-              placeholder="none"
-            />
-            <p
-              :if={@account_error}
-              id="account-form-error"
-              class="sm:col-span-2 lg:col-span-5 text-[12px] text-[var(--arb-fail-text)]"
+            <button
+              type="button"
+              id="providers-retry"
+              phx-click="retry_providers"
+              class={[
+                "shrink-0 px-2 h-[22px] rounded-[var(--radius-field)] cursor-pointer",
+                "border border-solid border-[var(--arb-fail-edge)] bg-[var(--surface-chrome)]",
+                "text-[11px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
+              ]}
             >
-              {@account_error}
-            </p>
-            <div class="sm:col-span-2 lg:col-span-5 flex gap-2">
-              <ArbiterWeb.CoreComponents.Core.button type="submit" variant="primary" size="sm">
-                Create account
-              </ArbiterWeb.CoreComponents.Core.button>
-              <ArbiterWeb.CoreComponents.Core.button
-                type="button"
-                variant="ghost"
-                size="sm"
-                phx-click="cancel_account"
-              >
-                Cancel
-              </ArbiterWeb.CoreComponents.Core.button>
-            </div>
-          </.form>
-        </ArbiterWeb.CoreComponents.Core.panel>
+              Retry
+            </button>
+          </div>
 
-        <div :if={@rows == []} id="providers-empty">
-          <ArbiterWeb.CoreComponents.Feedback.empty_state
-            icon="hero-key"
-            detail="arb account create <provider> <slug>, or New account above"
+          <div
+            :if={not @providers_loaded? and is_nil(@providers_error)}
+            id="providers-loading"
+            aria-label="Loading provider accounts"
+            class="flex flex-col gap-3"
           >
-            No provider accounts yet.
-          </ArbiterWeb.CoreComponents.Feedback.empty_state>
-        </div>
-
-        <div id="provider-accounts" class="flex flex-col gap-3">
-          <article
-            :for={row <- @rows}
-            id={"account-#{row.account.id}"}
-            class="rounded-[var(--radius-panel)] border border-[var(--border-default)] bg-[var(--surface-panel)] overflow-hidden transition-shadow duration-150 hover:shadow-sm"
-          >
-            <header class="flex flex-wrap items-center gap-3 px-[18px] py-3 border-b border-[var(--border-default)]">
-              <span
-                id={"account-#{row.account.id}-provider"}
-                class="inline-flex size-8 items-center justify-center rounded-[var(--radius-box)] bg-[var(--surface-card)] text-[var(--text-title)]"
-              >
-                <.provider_icon provider={icon_provider(row.account.provider)} class="size-4" />
-              </span>
-              <div class="flex flex-col min-w-0">
-                <span
-                  id={"account-#{row.account.id}-name"}
-                  class="font-medium text-[14px] text-[var(--text-title)] truncate"
-                >
-                  {account_name(row.account)}
-                </span>
-                <span class="text-[11px] text-[var(--text-label)] font-[family-name:var(--font-mono)]">
-                  {row.account.provider}:{row.account.slug}<span :if={row.account.plan}> · {row.account.plan}</span>
-                </span>
-              </div>
-              <span
-                :if={not row.account.enabled}
-                class="text-[11px] px-2 py-0.5 rounded-[var(--radius-chip)] border border-[var(--border-default)] text-[var(--arb-text-muted)]"
-              >
-                parked
-              </span>
-              <span
-                id={"account-#{row.account.id}-health"}
-                data-health={row.health.state}
-                title={health_title(row.account)}
-                class={[
-                  "ml-auto text-[11px] font-medium px-2 py-0.5 rounded-[var(--radius-chip)] border",
-                  health_class(row.health.state)
-                ]}
-              >
-                {health_label(row.health)}
-              </span>
-              <button
-                :if={@enabled?}
-                id={"delete-account-#{row.account.id}"}
-                type="button"
-                phx-click="delete_account"
-                phx-value-id={row.account.id}
-                data-confirm={"Delete #{row.account.provider}:#{row.account.slug}? " <>
-                  "It will be hidden from lists but its usage history is kept."}
-                class="text-[11px] px-2 py-0.5 rounded-[var(--radius-chip)] border border-[var(--border-default)] text-[var(--arb-text-muted)] hover:text-[var(--text-title)]"
-              >
-                Delete
-              </button>
-            </header>
-
-            <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-[minmax(0,1.6fr)_minmax(0,0.8fr)_minmax(0,1.2fr)_minmax(0,0.8fr)] gap-px bg-[var(--arb-line-soft)]">
-              <section
-                id={"account-#{row.account.id}-quota"}
-                class="bg-[var(--surface-panel)] px-[18px] py-3 flex flex-col gap-2"
-              >
-                <h3 class="text-[11px] uppercase tracking-wide text-[var(--text-label)]">Pools</h3>
-                <p :if={row.quotas == []} class="text-[12px] text-[var(--arb-text-muted)]">
-                  No quota snapshot yet.
-                </p>
-                <div :for={view <- row.quotas} class="flex flex-col gap-1.5">
-                  <div :for={pool <- pools(view)} class="flex flex-col gap-0.5">
-                    <.quota_bar
-                      provider={view.provider}
-                      window={pool.window}
-                      label={pool.label}
-                      utilization={pool.utilization}
-                      reset_at={pool.reset_at}
-                      overage_status={pool.overage_status}
-                      gate_policy={view.gate_policy}
-                      stale_message={view[:message]}
-                      width={160}
-                      label_width={52}
-                    />
-                    <span
-                      id={"account-#{row.account.id}-pace-#{pool.window}"}
-                      data-pace-verdict={pool.pace.verdict}
-                      class="text-[11px] font-[family-name:var(--font-mono)] text-[var(--arb-text-muted)]"
-                    >
-                      {pace_text(pool)} ·
-                      <span class={verdict_class(pool.pace.verdict)}>
-                        {verdict_label(pool.pace.verdict)}
-                      </span>
-                    </span>
-                  </div>
-                </div>
-              </section>
-
-              <section class="bg-[var(--surface-panel)] px-[18px] py-3 flex flex-col gap-2">
-                <h3 class="text-[11px] uppercase tracking-wide text-[var(--text-label)]">
-                  Concurrency
-                </h3>
-                <span
-                  id={"account-#{row.account.id}-concurrency"}
-                  class="text-[18px] font-medium tabular-nums text-[var(--text-title)]"
-                >
-                  {concurrency_text(row)}
-                </span>
-                <div
-                  :if={row.max_concurrent}
-                  class="h-1.5 w-full rounded-[var(--radius-pill)] bg-[var(--surface-card)] overflow-hidden"
-                >
-                  <div
-                    class="h-full bg-[var(--arb-live)] transition-[width] duration-300"
-                    style={"width: #{concurrency_pct(row)}%"}
-                  />
-                </div>
-                <span class="text-[11px] text-[var(--arb-text-muted)]">
-                  workers live across every attached workspace
-                </span>
-              </section>
-
-              <section class="bg-[var(--surface-panel)] px-[18px] py-3 flex flex-col gap-2">
-                <div class="flex items-center justify-between gap-2">
-                  <h3 class="text-[11px] uppercase tracking-wide text-[var(--text-label)]">
-                    Credential
-                  </h3>
-                  <ArbiterWeb.CoreComponents.Core.button
-                    :if={@enabled? and @credential_for != row.account.id}
-                    id={"account-#{row.account.id}-credential-button"}
-                    phx-click="open_credential"
-                    phx-value-id={row.account.id}
-                    variant="ghost"
-                    size="sm"
-                  >
-                    {if row.credentials == [], do: "Add", else: "Rotate"}
-                  </ArbiterWeb.CoreComponents.Core.button>
-                </div>
-                <ul
-                  id={"account-#{row.account.id}-credentials"}
-                  class="flex flex-col gap-1 list-none m-0 p-0"
-                >
-                  <li :if={row.credentials == []} class="text-[12px] text-[var(--arb-text-muted)]">
-                    No active credential.
-                  </li>
-                  <li
-                    :for={credential <- row.credentials}
-                    class="flex flex-wrap items-baseline gap-x-2 text-[12px] font-[family-name:var(--font-mono)]"
-                  >
-                    <span class="text-[var(--text-title)]">{credential.env_var}</span>
-                    <span class="text-[var(--arb-text-muted)]">{credential.kind}</span>
-                    <span class="text-[var(--arb-text-faint)]" title="sha256 fingerprint prefix">
-                      {credential.fingerprint}…
-                    </span>
-                  </li>
-                </ul>
-                <span class="text-[11px] text-[var(--arb-text-muted)]">
-                  last probe
-                  <span id={"account-#{row.account.id}-last-probe"} class="text-[var(--text-body)]">
-                    {ago(row.health.last_probe_at)}
-                  </span>
-                </span>
-
-                <.form
-                  :if={@enabled? and @credential_for == row.account.id}
-                  for={@credential_form}
-                  id={"credential-form-#{row.account.id}"}
-                  phx-submit="rotate_credential"
-                  autocomplete="off"
-                  class="flex flex-col gap-2 pt-2 border-t border-[var(--arb-line-soft)]"
-                >
-                  <input type="hidden" name="account_id" value={row.account.id} />
-                  <div class="grid grid-cols-2 gap-2">
-                    <.input
-                      field={@credential_form[:kind]}
-                      type="select"
-                      label="Kind"
-                      options={@kinds}
-                    />
-                    <.input field={@credential_form[:env_var]} label="Env var" required />
-                  </div>
-                  <.input
-                    id={"credential-form-#{row.account.id}-secret"}
-                    name="credential[secret]"
-                    type="password"
-                    value=""
-                    label="Secret"
-                    autocomplete="new-password"
-                    placeholder="pasted once, stored encrypted, never shown again"
-                    required
-                  />
-                  <p
-                    :if={@credential_error}
-                    id={"credential-form-#{row.account.id}-error"}
-                    class="text-[12px] text-[var(--arb-fail-text)]"
-                  >
-                    {@credential_error}
-                  </p>
-                  <div class="flex gap-2">
-                    <ArbiterWeb.CoreComponents.Core.button type="submit" variant="primary" size="sm">
-                      Store credential
-                    </ArbiterWeb.CoreComponents.Core.button>
-                    <ArbiterWeb.CoreComponents.Core.button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      phx-click="cancel_credential"
-                    >
-                      Cancel
-                    </ArbiterWeb.CoreComponents.Core.button>
-                  </div>
-                </.form>
-              </section>
-
-              <section class="bg-[var(--surface-panel)] px-[18px] py-3 flex flex-col gap-1">
-                <h3 class="text-[11px] uppercase tracking-wide text-[var(--text-label)]">
-                  Last {@window_days} days
-                </h3>
-                <span
-                  id={"account-#{row.account.id}-cost"}
-                  title={if row.usage.cost_usd == nil, do: "usage on this provider cannot be priced"}
-                  class="text-[18px] font-medium tabular-nums text-[var(--text-title)]"
-                >
-                  {cost_text(row.usage)}
-                </span>
-                <span class="text-[11px] text-[var(--arb-text-muted)] tabular-nums">
-                  {format_tokens(row.usage.tokens)} tokens · {usage_rows_text(row.usage.rows)}
-                </span>
-              </section>
+            <div
+              :for={n <- 1..3}
+              id={"providers-loading-#{n}"}
+              aria-hidden="true"
+              class="h-[132px] rounded-[var(--radius-panel)] border border-solid border-[var(--border-default)] bg-[var(--arb-panel-alt)] animate-pulse"
+            >
             </div>
+          </div>
 
-            <footer class="flex flex-wrap items-center gap-2 px-[18px] py-2.5 border-t border-[var(--border-default)] bg-[var(--surface-chrome)]">
-              <span class="text-[11px] uppercase tracking-wide text-[var(--text-label)] mr-1">
-                Workspaces
+          <div
+            :if={@providers_loaded? and not @enabled?}
+            id="accounts-disabled-notice"
+            role="status"
+            class="flex items-start gap-3 rounded-[var(--radius-panel)] border border-[var(--arb-attention-edge)] bg-[var(--arb-attention-wash)] px-4 py-3 text-[13px] text-[var(--arb-attention-ink)]"
+          >
+            <ArbiterWeb.CoreComponents.Core.icon
+              name="hero-lock-closed"
+              size={16}
+              class="mt-0.5 shrink-0"
+            />
+            <div class="flex flex-col gap-0.5">
+              <span class="font-medium">Accounts not enabled on this install</span>
+              <span class="text-[12px] opacity-90">
+                <code class="font-[family-name:var(--font-mono)]">:provider_accounts_enabled</code>
+                is off, so workers still take credentials from each workspace's worker env. This page is read-only until it is turned on.
               </span>
-              <span :if={row.workspaces == []} class="text-[12px] text-[var(--arb-text-muted)]">
-                none attached
-              </span>
-              <span
-                :for={link <- row.workspaces}
-                id={"account-#{row.account.id}-ws-#{link.workspace_id}"}
-                class="inline-flex items-center gap-1 rounded-[var(--radius-chip)] border border-[var(--border-default)] bg-[var(--surface-card)] pl-2 pr-1 py-0.5 text-[12px]"
-              >
-                <.link navigate={~p"/workspaces/#{link.workspace_id}"} class="hover:underline">
-                  {link.workspace_name}
-                </.link>
-                <span
-                  :if={link.share}
-                  class="text-[var(--arb-text-muted)] font-[family-name:var(--font-mono)]"
-                  title="this workspace's cap on the account's concurrency"
-                >
-                  ≤{link.share}
-                </span>
-                <button
-                  :if={@enabled?}
-                  type="button"
-                  id={"detach-#{row.account.id}-#{link.workspace_id}"}
-                  phx-click="detach"
-                  phx-value-account={row.account.id}
-                  phx-value-workspace={link.workspace_id}
-                  data-confirm={"Detach #{link.workspace_name} from #{row.account.slug}?"}
-                  aria-label={"Detach #{link.workspace_name}"}
-                  class="inline-flex size-4 items-center justify-center rounded-full text-[var(--arb-text-muted)] transition-colors hover:bg-[var(--arb-fail-wash)] hover:text-[var(--arb-fail-text)]"
-                >
-                  <ArbiterWeb.CoreComponents.Core.icon name="hero-x-mark" size={11} />
-                </button>
-              </span>
-              <ArbiterWeb.CoreComponents.Core.button
-                :if={@enabled? and @attach_for != row.account.id}
-                id={"account-#{row.account.id}-attach-button"}
-                phx-click="open_attach"
-                phx-value-id={row.account.id}
-                variant="ghost"
-                size="sm"
-                class="ml-auto"
-              >
-                <:icon><ArbiterWeb.CoreComponents.Core.icon name="hero-link" size={13} /></:icon>
-                Attach workspace
-              </ArbiterWeb.CoreComponents.Core.button>
+            </div>
+          </div>
 
-              <.form
-                :if={@enabled? and @attach_for == row.account.id}
-                for={@attach_form}
-                id={"attach-form-#{row.account.id}"}
-                phx-submit="attach"
-                class="basis-full flex flex-wrap items-end gap-2 pt-2"
+          <ArbiterWeb.CoreComponents.Core.panel
+            :if={@providers_loaded? and @enabled? and @creating?}
+            id="new-account-panel"
+            title="New provider account"
+            meta="no credential needed yet"
+          >
+            <.form
+              for={@account_form}
+              id="account-form"
+              phx-submit="create_account"
+              class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 items-end"
+            >
+              <.input
+                field={@account_form[:provider]}
+                type="select"
+                label="Provider"
+                options={@providers}
+              />
+              <.input field={@account_form[:slug]} label="Slug" placeholder="work-max" required />
+              <.input field={@account_form[:label]} label="Label" placeholder="Work Max plan" />
+              <.input field={@account_form[:plan]} label="Plan" placeholder="max_20x" />
+              <.input
+                field={@account_form[:max_concurrent]}
+                type="number"
+                min="0"
+                label="Concurrency cap"
+                placeholder="none"
+              />
+              <p
+                :if={@account_error}
+                id="account-form-error"
+                class="sm:col-span-2 lg:col-span-5 text-[12px] text-[var(--arb-fail-text)]"
               >
-                <input type="hidden" name="account_id" value={row.account.id} />
-                <.input
-                  field={@attach_form[:workspace_id]}
-                  type="select"
-                  label="Workspace"
-                  prompt="Pick a workspace"
-                  options={attachable(@workspace_options, row)}
-                />
-                <.input
-                  field={@attach_form[:share]}
-                  type="number"
-                  min="0"
-                  label="Share (optional cap)"
-                  placeholder="none"
-                />
+                {@account_error}
+              </p>
+              <div class="sm:col-span-2 lg:col-span-5 flex gap-2">
                 <ArbiterWeb.CoreComponents.Core.button type="submit" variant="primary" size="sm">
-                  Attach
+                  Create account
                 </ArbiterWeb.CoreComponents.Core.button>
                 <ArbiterWeb.CoreComponents.Core.button
                   type="button"
                   variant="ghost"
                   size="sm"
-                  phx-click="cancel_attach"
+                  phx-click="cancel_account"
                 >
                   Cancel
                 </ArbiterWeb.CoreComponents.Core.button>
-                <p
-                  :if={@attach_error}
-                  id={"attach-form-#{row.account.id}-error"}
-                  class="basis-full text-[12px] text-[var(--arb-fail-text)]"
+              </div>
+            </.form>
+          </ArbiterWeb.CoreComponents.Core.panel>
+
+          <div :if={@providers_loaded? and @rows == []} id="providers-empty">
+            <ArbiterWeb.CoreComponents.Feedback.empty_state
+              icon="hero-key"
+              detail="arb account create <provider> <slug>, or New account above"
+            >
+              No provider accounts yet.
+            </ArbiterWeb.CoreComponents.Feedback.empty_state>
+          </div>
+
+          <div id="provider-accounts" class="flex flex-col gap-3">
+            <article
+              :for={row <- @rows}
+              id={"account-#{row.account.id}"}
+              class="rounded-[var(--radius-panel)] border border-[var(--border-default)] bg-[var(--surface-panel)] overflow-hidden transition-shadow duration-150 hover:shadow-sm"
+            >
+              <header class="flex flex-wrap items-center gap-3 px-[18px] py-3 border-b border-[var(--border-default)]">
+                <span
+                  id={"account-#{row.account.id}-provider"}
+                  class="inline-flex size-8 items-center justify-center rounded-[var(--radius-box)] bg-[var(--surface-card)] text-[var(--text-title)]"
                 >
-                  {@attach_error}
-                </p>
-              </.form>
-            </footer>
-          </article>
+                  <.provider_icon provider={icon_provider(row.account.provider)} class="size-4" />
+                </span>
+                <div class="flex flex-col min-w-0">
+                  <span
+                    id={"account-#{row.account.id}-name"}
+                    class="font-medium text-[14px] text-[var(--text-title)] truncate"
+                  >
+                    {account_name(row.account)}
+                  </span>
+                  <span class="text-[11px] text-[var(--text-label)] font-[family-name:var(--font-mono)]">
+                    {row.account.provider}:{row.account.slug}<span :if={row.account.plan}> · {row.account.plan}</span>
+                  </span>
+                </div>
+                <span
+                  :if={not row.account.enabled}
+                  class="text-[11px] px-2 py-0.5 rounded-[var(--radius-chip)] border border-[var(--border-default)] text-[var(--arb-text-muted)]"
+                >
+                  parked
+                </span>
+                <span
+                  id={"account-#{row.account.id}-health"}
+                  data-health={row.health.state}
+                  title={health_title(row.account)}
+                  class={[
+                    "ml-auto text-[11px] font-medium px-2 py-0.5 rounded-[var(--radius-chip)] border",
+                    health_class(row.health.state)
+                  ]}
+                >
+                  {health_label(row.health)}
+                </span>
+                <button
+                  :if={@enabled?}
+                  id={"delete-account-#{row.account.id}"}
+                  type="button"
+                  phx-click="delete_account"
+                  phx-value-id={row.account.id}
+                  data-confirm={"Delete #{row.account.provider}:#{row.account.slug}? " <>
+                  "It will be hidden from lists but its usage history is kept."}
+                  class="text-[11px] px-2 py-0.5 rounded-[var(--radius-chip)] border border-[var(--border-default)] text-[var(--arb-text-muted)] hover:text-[var(--text-title)]"
+                >
+                  Delete
+                </button>
+              </header>
+
+              <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-[minmax(0,1.6fr)_minmax(0,0.8fr)_minmax(0,1.2fr)_minmax(0,0.8fr)] gap-px bg-[var(--arb-line-soft)]">
+                <section
+                  id={"account-#{row.account.id}-quota"}
+                  class="bg-[var(--surface-panel)] px-[18px] py-3 flex flex-col gap-2"
+                >
+                  <h3 class="text-[11px] uppercase tracking-wide text-[var(--text-label)]">Pools</h3>
+                  <p :if={row.quotas == []} class="text-[12px] text-[var(--arb-text-muted)]">
+                    No quota snapshot yet.
+                  </p>
+                  <div :for={view <- row.quotas} class="flex flex-col gap-1.5">
+                    <div :for={pool <- pools(view)} class="flex flex-col gap-0.5">
+                      <.quota_bar
+                        provider={view.provider}
+                        window={pool.window}
+                        label={pool.label}
+                        utilization={pool.utilization}
+                        reset_at={pool.reset_at}
+                        overage_status={pool.overage_status}
+                        gate_policy={view.gate_policy}
+                        stale_message={view[:message]}
+                        width={160}
+                        label_width={52}
+                      />
+                      <span
+                        id={"account-#{row.account.id}-pace-#{pool.window}"}
+                        data-pace-verdict={pool.pace.verdict}
+                        class="text-[11px] font-[family-name:var(--font-mono)] text-[var(--arb-text-muted)]"
+                      >
+                        {pace_text(pool)} ·
+                        <span class={verdict_class(pool.pace.verdict)}>
+                          {verdict_label(pool.pace.verdict)}
+                        </span>
+                      </span>
+                    </div>
+                  </div>
+                </section>
+
+                <section class="bg-[var(--surface-panel)] px-[18px] py-3 flex flex-col gap-2">
+                  <h3 class="text-[11px] uppercase tracking-wide text-[var(--text-label)]">
+                    Concurrency
+                  </h3>
+                  <span
+                    id={"account-#{row.account.id}-concurrency"}
+                    class="text-[18px] font-medium tabular-nums text-[var(--text-title)]"
+                  >
+                    {concurrency_text(row)}
+                  </span>
+                  <div
+                    :if={row.max_concurrent}
+                    class="h-1.5 w-full rounded-[var(--radius-pill)] bg-[var(--surface-card)] overflow-hidden"
+                  >
+                    <div
+                      class="h-full bg-[var(--arb-live)] transition-[width] duration-300"
+                      style={"width: #{concurrency_pct(row)}%"}
+                    />
+                  </div>
+                  <span class="text-[11px] text-[var(--arb-text-muted)]">
+                    workers live across every attached workspace
+                  </span>
+                </section>
+
+                <section class="bg-[var(--surface-panel)] px-[18px] py-3 flex flex-col gap-2">
+                  <div class="flex items-center justify-between gap-2">
+                    <h3 class="text-[11px] uppercase tracking-wide text-[var(--text-label)]">
+                      Credential
+                    </h3>
+                    <ArbiterWeb.CoreComponents.Core.button
+                      :if={@enabled? and @credential_for != row.account.id}
+                      id={"account-#{row.account.id}-credential-button"}
+                      phx-click="open_credential"
+                      phx-value-id={row.account.id}
+                      variant="ghost"
+                      size="sm"
+                    >
+                      {if row.credentials == [], do: "Add", else: "Rotate"}
+                    </ArbiterWeb.CoreComponents.Core.button>
+                  </div>
+                  <ul
+                    id={"account-#{row.account.id}-credentials"}
+                    class="flex flex-col gap-1 list-none m-0 p-0"
+                  >
+                    <li :if={row.credentials == []} class="text-[12px] text-[var(--arb-text-muted)]">
+                      No active credential.
+                    </li>
+                    <li
+                      :for={credential <- row.credentials}
+                      class="flex flex-wrap items-baseline gap-x-2 text-[12px] font-[family-name:var(--font-mono)]"
+                    >
+                      <span class="text-[var(--text-title)]">{credential.env_var}</span>
+                      <span class="text-[var(--arb-text-muted)]">{credential.kind}</span>
+                      <span class="text-[var(--arb-text-faint)]" title="sha256 fingerprint prefix">
+                        {credential.fingerprint}…
+                      </span>
+                    </li>
+                  </ul>
+                  <span class="text-[11px] text-[var(--arb-text-muted)]">
+                    last probe
+                    <span id={"account-#{row.account.id}-last-probe"} class="text-[var(--text-body)]">
+                      {ago(row.health.last_probe_at)}
+                    </span>
+                  </span>
+
+                  <.form
+                    :if={@enabled? and @credential_for == row.account.id}
+                    for={@credential_form}
+                    id={"credential-form-#{row.account.id}"}
+                    phx-submit="rotate_credential"
+                    autocomplete="off"
+                    class="flex flex-col gap-2 pt-2 border-t border-[var(--arb-line-soft)]"
+                  >
+                    <input type="hidden" name="account_id" value={row.account.id} />
+                    <div class="grid grid-cols-2 gap-2">
+                      <.input
+                        field={@credential_form[:kind]}
+                        type="select"
+                        label="Kind"
+                        options={@kinds}
+                      />
+                      <.input field={@credential_form[:env_var]} label="Env var" required />
+                    </div>
+                    <.input
+                      id={"credential-form-#{row.account.id}-secret"}
+                      name="credential[secret]"
+                      type="password"
+                      value=""
+                      label="Secret"
+                      autocomplete="new-password"
+                      placeholder="pasted once, stored encrypted, never shown again"
+                      required
+                    />
+                    <p
+                      :if={@credential_error}
+                      id={"credential-form-#{row.account.id}-error"}
+                      class="text-[12px] text-[var(--arb-fail-text)]"
+                    >
+                      {@credential_error}
+                    </p>
+                    <div class="flex gap-2">
+                      <ArbiterWeb.CoreComponents.Core.button type="submit" variant="primary" size="sm">
+                        Store credential
+                      </ArbiterWeb.CoreComponents.Core.button>
+                      <ArbiterWeb.CoreComponents.Core.button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        phx-click="cancel_credential"
+                      >
+                        Cancel
+                      </ArbiterWeb.CoreComponents.Core.button>
+                    </div>
+                  </.form>
+                </section>
+
+                <section class="bg-[var(--surface-panel)] px-[18px] py-3 flex flex-col gap-1">
+                  <h3 class="text-[11px] uppercase tracking-wide text-[var(--text-label)]">
+                    Last {@window_days} days
+                  </h3>
+                  <span
+                    id={"account-#{row.account.id}-cost"}
+                    title={
+                      if row.usage.cost_usd == nil, do: "usage on this provider cannot be priced"
+                    }
+                    class="text-[18px] font-medium tabular-nums text-[var(--text-title)]"
+                  >
+                    {cost_text(row.usage)}
+                  </span>
+                  <span class="text-[11px] text-[var(--arb-text-muted)] tabular-nums">
+                    {format_tokens(row.usage.tokens)} tokens · {usage_rows_text(row.usage.rows)}
+                  </span>
+                </section>
+              </div>
+
+              <footer class="flex flex-wrap items-center gap-2 px-[18px] py-2.5 border-t border-[var(--border-default)] bg-[var(--surface-chrome)]">
+                <span class="text-[11px] uppercase tracking-wide text-[var(--text-label)] mr-1">
+                  Workspaces
+                </span>
+                <span :if={row.workspaces == []} class="text-[12px] text-[var(--arb-text-muted)]">
+                  none attached
+                </span>
+                <span
+                  :for={link <- row.workspaces}
+                  id={"account-#{row.account.id}-ws-#{link.workspace_id}"}
+                  class="inline-flex items-center gap-1 rounded-[var(--radius-chip)] border border-[var(--border-default)] bg-[var(--surface-card)] pl-2 pr-1 py-0.5 text-[12px]"
+                >
+                  <.link navigate={~p"/workspaces/#{link.workspace_id}"} class="hover:underline">
+                    {link.workspace_name}
+                  </.link>
+                  <span
+                    :if={link.share}
+                    class="text-[var(--arb-text-muted)] font-[family-name:var(--font-mono)]"
+                    title="this workspace's cap on the account's concurrency"
+                  >
+                    ≤{link.share}
+                  </span>
+                  <button
+                    :if={@enabled?}
+                    type="button"
+                    id={"detach-#{row.account.id}-#{link.workspace_id}"}
+                    phx-click="detach"
+                    phx-value-account={row.account.id}
+                    phx-value-workspace={link.workspace_id}
+                    data-confirm={"Detach #{link.workspace_name} from #{row.account.slug}?"}
+                    aria-label={"Detach #{link.workspace_name}"}
+                    class="inline-flex size-4 items-center justify-center rounded-full text-[var(--arb-text-muted)] transition-colors hover:bg-[var(--arb-fail-wash)] hover:text-[var(--arb-fail-text)]"
+                  >
+                    <ArbiterWeb.CoreComponents.Core.icon name="hero-x-mark" size={11} />
+                  </button>
+                </span>
+                <ArbiterWeb.CoreComponents.Core.button
+                  :if={@enabled? and @attach_for != row.account.id}
+                  id={"account-#{row.account.id}-attach-button"}
+                  phx-click="open_attach"
+                  phx-value-id={row.account.id}
+                  variant="ghost"
+                  size="sm"
+                  class="ml-auto"
+                >
+                  <:icon><ArbiterWeb.CoreComponents.Core.icon name="hero-link" size={13} /></:icon>
+                  Attach workspace
+                </ArbiterWeb.CoreComponents.Core.button>
+
+                <.form
+                  :if={@enabled? and @attach_for == row.account.id}
+                  for={@attach_form}
+                  id={"attach-form-#{row.account.id}"}
+                  phx-submit="attach"
+                  class="basis-full flex flex-wrap items-end gap-2 pt-2"
+                >
+                  <input type="hidden" name="account_id" value={row.account.id} />
+                  <.input
+                    field={@attach_form[:workspace_id]}
+                    type="select"
+                    label="Workspace"
+                    prompt="Pick a workspace"
+                    options={attachable(@workspace_options, row)}
+                  />
+                  <.input
+                    field={@attach_form[:share]}
+                    type="number"
+                    min="0"
+                    label="Share (optional cap)"
+                    placeholder="none"
+                  />
+                  <ArbiterWeb.CoreComponents.Core.button type="submit" variant="primary" size="sm">
+                    Attach
+                  </ArbiterWeb.CoreComponents.Core.button>
+                  <ArbiterWeb.CoreComponents.Core.button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    phx-click="cancel_attach"
+                  >
+                    Cancel
+                  </ArbiterWeb.CoreComponents.Core.button>
+                  <p
+                    :if={@attach_error}
+                    id={"attach-form-#{row.account.id}-error"}
+                    class="basis-full text-[12px] text-[var(--arb-fail-text)]"
+                  >
+                    {@attach_error}
+                  </p>
+                </.form>
+              </footer>
+            </article>
+          </div>
         </div>
       </div>
     </Layouts.app>
