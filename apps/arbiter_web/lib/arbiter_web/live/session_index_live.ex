@@ -435,6 +435,7 @@ defmodule ArbiterWeb.SessionIndexLive do
           title="Sessions"
           count={length(@sessions)}
           subtitle="Coordinator sessions Arbiter hosts. They live in their own systemd scope, so they survive an arbiter restart."
+          stack_on_mobile
         >
           <:actions>
             <.launch_form
@@ -489,7 +490,7 @@ defmodule ArbiterWeb.SessionIndexLive do
                 {short_id(session.id)}
               </span>
 
-              <span class="text-[12px] text-[var(--text-secondary)] truncate max-w-[26rem]">
+              <span class="text-[12px] text-[var(--text-secondary)] truncate max-w-full sm:max-w-[26rem]">
                 {session.cwd}
               </span>
 
