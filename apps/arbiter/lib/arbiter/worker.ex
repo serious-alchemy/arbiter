@@ -2462,13 +2462,17 @@ defmodule Arbiter.Worker do
     # the worker with a nudge prompt when arb-done arrives with uncommitted
     # work, without round-tripping through the workspace-aware Dispatch builder
     # that does not know how to swap the prompt mid-session.
-    # bd-au3xrq: stash the coordinates the on-disk session-JSONL fallback needs.
-    # `config_dir` is the effective CLAUDE_CONFIG_DIR this spawn ran under (from
-    # the injected env, else the inherited default); `cwd` is the worktree the
-    # CLI derives its project-slug from. `session_id` lands later (init event,
-    # via sync_session_meta) — together they root
-    # `<config_dir>/projects/<slug>/<session_id>.jsonl`.
-    config_dir = effective_config_dir(port_args)
+    # bd-au3xrq: stash the coordinates the on-disk session archive needs.
+    # `config_dir` is the effective config root this spawn ran under: the
+    # injected CLAUDE_CONFIG_DIR for a Claude spawn, or the injected agy
+    # `$HOME` (bd-6nupvc / T9 — `Arbiter.Agents.Gemini.ConfigDir`) for a
+    # gemini spawn, else each provider's own inherited default. `cwd` is the
+    # worktree the CLI derives its project-slug from. `session_id` lands
+    # later (init event, via sync_session_meta) — together they root either
+    # `<config_dir>/projects/<slug>/<session_id>.jsonl` (Claude) or
+    # `<config_dir>/.gemini/antigravity-cli/conversations/<session_id>.db`
+    # (agy) — see `Arbiter.Worker.SessionArchive`.
+    config_dir = effective_config_dir(port_args, provider)
 
     meta =
       (state.meta || %{})
@@ -2538,7 +2542,7 @@ defmodule Arbiter.Worker do
       backfill_run_fields(run_id, %{provider: to_string(provider)}, task_id)
     end
 
-    if config_dir && run_id && Map.get(session_config, :provider) in [nil, "claude"] do
+    if config_dir && run_id && Map.get(session_config, :provider) in [nil, "claude", "gemini"] do
       backfill_run_fields(run_id, %{config_dir: config_dir}, task_id)
     end
   end
@@ -3058,10 +3062,12 @@ defmodule Arbiter.Worker do
 
   defp append_prompt(_state, _prompt, _session_config), do: :ok
 
-  # The effective CLAUDE_CONFIG_DIR a spawn ran under: the value injected into
-  # this spawn's env (workers isolate into `~/.cache/arbiter/worker-claude`),
-  # else the inherited `$CLAUDE_CONFIG_DIR`, else Claude's `~/.claude` default.
-  # port_args.env is the pre-charlist binary-pair list built by
+  # The effective config root a spawn ran under: the value injected into this
+  # spawn's env — `CLAUDE_CONFIG_DIR` for Claude (workers isolate into
+  # `~/.cache/arbiter/worker-claude`), `HOME` for agy (bd-6nupvc / T9 — workers
+  # isolate into `~/.cache/arbiter/worker-agy`, see
+  # `Arbiter.Agents.Gemini.ConfigDir`) — else each provider's own inherited
+  # default. port_args.env is the pre-charlist binary-pair list built by
   # `Arbiter.Worker.ClaudeSession.env_pairs/3`, which appends the caller/agent
   # env AFTER the workspace's user-defined worker env — and the OS applies the
   # list last-wins, the invariant `Arbiter.Worker.WorkerEnv` documents ("caller
@@ -3069,19 +3075,34 @@ defmodule Arbiter.Worker do
   # END: the first match from the front could be a workspace-level override that
   # the child never actually runs under, which would send `locate/2` to a
   # directory holding no session file and silently disable the fallback.
-  defp effective_config_dir(%{env: env}) when is_list(env) do
+  defp effective_config_dir(%{env: env}, "gemini") when is_list(env) do
+    case env |> Enum.reverse() |> List.keyfind("HOME", 0) do
+      {_k, dir} when is_binary(dir) and dir != "" -> dir
+      _ -> inherited_home_dir()
+    end
+  end
+
+  defp effective_config_dir(%{env: env}, _provider) when is_list(env) do
     case env |> Enum.reverse() |> List.keyfind("CLAUDE_CONFIG_DIR", 0) do
       {_k, dir} when is_binary(dir) and dir != "" -> dir
       _ -> inherited_config_dir()
     end
   end
 
-  defp effective_config_dir(_port_args), do: inherited_config_dir()
+  defp effective_config_dir(_port_args, "gemini"), do: inherited_home_dir()
+  defp effective_config_dir(_port_args, _provider), do: inherited_config_dir()
 
   defp inherited_config_dir do
     case System.get_env("CLAUDE_CONFIG_DIR") do
       dir when is_binary(dir) and dir != "" -> dir
       _ -> Path.expand("~/.claude")
+    end
+  end
+
+  defp inherited_home_dir do
+    case System.get_env("HOME") do
+      dir when is_binary(dir) and dir != "" -> dir
+      _ -> System.user_home()
     end
   end
 

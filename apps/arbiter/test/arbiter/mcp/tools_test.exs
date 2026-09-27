@@ -4068,6 +4068,7 @@ defmodule Arbiter.MCP.ToolsTest do
           status: :completed,
           session_id: "sess-both",
           config_dir: "/tmp/cfg",
+          provider: "claude",
           started_at: base
         })
 
@@ -4090,6 +4091,7 @@ defmodule Arbiter.MCP.ToolsTest do
           status: :completed,
           session_id: "sess-log-only",
           config_dir: "/tmp/cfg",
+          provider: "claude",
           started_at: DateTime.add(base, 60, :second)
         })
 
@@ -4097,38 +4099,82 @@ defmodule Arbiter.MCP.ToolsTest do
       Arbiter.Worker.OutputLog.append(h2, "line")
       Arbiter.Worker.OutputLog.close(h2)
 
-      # A Gemini run: has a session_id but no config_dir, so it never had a
-      # Claude JSONL to lose. It must not be counted as a Claude session.
-      {:ok, gemini} =
+      # A run on neither provider: has a session_id but no JSONL/db archive
+      # branch at all. It must not be counted as a Claude session.
+      {:ok, other} =
         Ash.create(Arbiter.Workers.Run, %{
           task_id: ctx.task.id,
           repo: "arbiter",
           workspace_id: ctx.ws.id,
           status: :completed,
-          session_id: "sess-gemini",
+          session_id: "sess-other",
           started_at: DateTime.add(base, 120, :second)
         })
 
+      # A gemini (agy) run WITH its db archive present. Since bd-6nupvc T9 it
+      # records config_dir too (its effective $HOME) — that must not make it
+      # count as a Claude session or a JSONL loss.
+      {:ok, gemini_ok} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: ctx.task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          status: :completed,
+          session_id: "sess-gemini-ok",
+          config_dir: "/tmp/agy-home",
+          provider: "gemini",
+          started_at: DateTime.add(base, 180, :second)
+        })
+
+      File.write!(
+        Arbiter.Worker.SessionArchive.db_path_for(gemini_ok.id),
+        :zlib.gzip("db-bytes")
+      )
+
+      # A gemini run with NO db archive — this is the real loss finding 2 was
+      # about being unable to see (folded into jsonl_missing before this fix).
+      {:ok, gemini_missing} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: ctx.task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          status: :completed,
+          session_id: "sess-gemini-missing",
+          config_dir: "/tmp/agy-home",
+          provider: "gemini",
+          started_at: DateTime.add(base, 240, :second)
+        })
+
       on_exit(fn ->
-        for r <- [both, log_only, gemini] do
+        for r <- [both, log_only, other, gemini_ok, gemini_missing] do
           File.rm(Arbiter.Worker.OutputLog.path_for(r.id))
           File.rm(Arbiter.Worker.SessionArchive.path_for(r.id))
+          File.rm(Arbiter.Worker.SessionArchive.db_path_for(r.id))
         end
       end)
 
       assert {:ok, stats} = Tools.transcript_capture_stats(ctx.coordinator, %{})
 
       # The rendered-log denominator is unchanged: every provider writes one.
-      assert stats.claude_sessions == 3
-      assert stats.transcript_missing == 1
+      # `other`, `gemini_ok`, and `gemini_missing` never opened an OutputLog
+      # in this fixture (only the JSONL/db-archive branch is under test
+      # here), so they count toward transcript_missing alongside log_only.
+      assert stats.claude_sessions == 5
+      assert stats.transcript_missing == 3
 
-      # The JSONL denominator excludes the Gemini run — it never had a Claude
-      # session file to lose, so counting it would manufacture a loss.
+      # The JSONL denominator is Claude runs only — the gemini runs (which
+      # also carry a config_dir) must not land in it.
       assert stats.non_claude_sessions == 1
       assert stats.jsonl_sessions == 2
       assert stats.jsonl_archived == 1
       assert stats.jsonl_missing == 1
       assert stats.jsonl_archive_rate_pct == 50.0
+
+      # The gemini/agy db-archive denominator is counted separately.
+      assert stats.gemini_db_sessions == 2
+      assert stats.gemini_db_archived == 1
+      assert stats.gemini_db_missing == 1
+      assert stats.gemini_db_archive_rate_pct == 50.0
     end
   end
 

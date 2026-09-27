@@ -76,30 +76,63 @@ defmodule Arbiter.Worker.SessionArchive do
   Deduping is left to the filesystem/backup layer; a resumed run is a small
   minority and correctness beats a few MB.
 
-  ## Non-Claude runs
+  ## Non-Claude runs (agy / Gemini, bd-6nupvc T9)
 
-  `config_dir` is a Claude-only column. A Gemini-driven run carries a
-  `session_id` but no `config_dir` (its session lives in
-  `~/.gemini/antigravity-cli/conversations/<sid>.db`), so `archive/4` returns
-  `:no_config_dir` rather than pretending a Claude JSONL is missing. This is
-  the whole of the "September loss channel" bd-db0p38 asked to diagnose: all
-  32 of those runs are Gemini reviewer runs, not lost Claude files.
+  `config_dir` was originally Claude-only (`CLAUDE_CONFIG_DIR`), and a
+  Gemini-driven run used to carry a `session_id` with no `config_dir` at all
+  — `archive/4` returned `:no_config_dir` for every one of them rather than
+  pretending a Claude JSONL was missing. That was the whole of the "September
+  loss channel" bd-db0p38 asked to diagnose: all 32 of those runs were Gemini
+  reviewer runs, not lost Claude files.
+
+  `config_dir` now also carries the effective agy `$HOME` an agy spawn ran
+  under (workers isolate into a per-worktree home — see
+  `Arbiter.Agents.Gemini.ConfigDir` — else the operator's own `$HOME`), so an
+  agy run's coordinates are populated exactly like a Claude run's. `archive/4`
+  tries `Arbiter.Usage.ClaudeSessionFile.locate/2` first; when that comes back
+  `:not_found` it falls back to `Arbiter.Usage.GeminiSessionFile.locate/2`,
+  which finds the run's conversation SQLite database at
+  `<config_dir>/.gemini/antigravity-cli/conversations/<session_id>.db`. Only
+  when *neither* locates anything does the run report `:no_session_file`.
+  `:no_config_dir` still means exactly what it always did: no config root was
+  ever recorded for this run, full stop.
+
+  ### Redaction doesn't apply to the SQLite branch
+
+  The JSONL redaction described above is a verbatim byte-for-byte string
+  replace — safe because a placeholder of different length just shifts text
+  around in a line-oriented format nothing else indexes by offset. A SQLite
+  database is the opposite: page and cell layout, length prefixes and B-tree
+  pointers are all offset- and length-sensitive, so replacing a secret with a
+  differently-sized placeholder risks corrupting the file rather than
+  cleaning it. So the agy branch does **not** redact — `write_db_archive/2`
+  archives the raw bytes unchanged — and the report says so explicitly
+  (`redacted: false`) rather than silently defaulting to "redacted" like every
+  JSONL archive. What it does keep is the *other* half of the Claude path's
+  policy: the archive is written `0600` under the same best-effort `0700`
+  root, so `docs/session-archive.md`'s "treat `output_log_root` as
+  secret-bearing storage" applies here unchanged — same rule, no redaction to
+  back it up.
   """
 
   require Logger
 
   alias Arbiter.Redaction
   alias Arbiter.Usage.ClaudeSessionFile
+  alias Arbiter.Usage.GeminiSessionFile
   alias Arbiter.Worker.OutputLog
 
   @typedoc """
   Outcome of one archive attempt.
 
-    * `:ok` — the session JSONL was archived (`bytes_in`/`bytes_out` are the
-      pre/post-gzip sizes, `subagents` the count of subagent transcripts).
-    * `:no_config_dir` — not a Claude run (see the moduledoc).
+    * `:ok` — the session was archived (`bytes_in`/`bytes_out` are the
+      pre/post-gzip sizes, `subagents` the count of subagent transcripts —
+      always `0` for the agy/SQLite branch, which has no subagent concept).
+    * `:no_config_dir` — no config root (`CLAUDE_CONFIG_DIR` / agy `$HOME`)
+      was ever recorded for this run.
     * `:no_session_id` — the run never reached a `system/init` event.
-    * `:no_session_file` — the CLI's file is gone (pruned, or the config dir
+    * `:no_session_file` — neither the Claude JSONL nor the agy conversation
+      db was found under the recorded config root (pruned, or the config dir
       was reaped). Irrecoverable, and the reason this module exists.
     * `:too_large` — over `max_bytes/0`; skipped rather than risk the VM.
     * `:error` — read/write failed; `reason` carries the posix error.
@@ -113,6 +146,7 @@ defmodule Arbiter.Worker.SessionArchive do
           bytes_in: non_neg_integer(),
           bytes_out: non_neg_integer(),
           subagents: non_neg_integer(),
+          redacted: boolean(),
           reason: term()
         }
 
@@ -132,6 +166,12 @@ defmodule Arbiter.Worker.SessionArchive do
     Path.join(OutputLog.root(), run_id <> ".jsonl.gz")
   end
 
+  @doc "Absolute path of the gzipped agy conversation-db archive for `run_id`."
+  @spec db_path_for(String.t()) :: String.t()
+  def db_path_for(run_id) when is_binary(run_id) and run_id != "" do
+    Path.join(OutputLog.root(), run_id <> ".db.gz")
+  end
+
   @doc "Absolute path of the directory holding `run_id`'s subagent archives."
   @spec subagents_dir_for(String.t()) :: String.t()
   def subagents_dir_for(run_id) when is_binary(run_id) and run_id != "" do
@@ -144,6 +184,13 @@ defmodule Arbiter.Worker.SessionArchive do
     do: File.regular?(path_for(run_id))
 
   def archived?(_), do: false
+
+  @doc "True when `run_id` has an agy conversation-db archive on disk."
+  @spec db_archived?(String.t() | nil) :: boolean()
+  def db_archived?(run_id) when is_binary(run_id) and run_id != "",
+    do: File.regular?(db_path_for(run_id))
+
+  def db_archived?(_), do: false
 
   @doc """
   Read `run_id`'s archive back, decompressed. `{:error, :enoent}` when the run
@@ -160,6 +207,22 @@ defmodule Arbiter.Worker.SessionArchive do
   end
 
   def read(_), do: {:error, :invalid_run_id}
+
+  @doc """
+  Read `run_id`'s agy conversation-db archive back, decompressed.
+  `{:error, :enoent}` when the run has no db archive.
+  """
+  @spec read_db(String.t()) :: {:ok, binary()} | {:error, term()}
+  def read_db(run_id) when is_binary(run_id) and run_id != "" do
+    case File.read(db_path_for(run_id)) do
+      {:ok, gz} -> {:ok, :zlib.gunzip(gz)}
+      {:error, reason} -> {:error, reason}
+    end
+  rescue
+    e -> {:error, Exception.message(e)}
+  end
+
+  def read_db(_), do: {:error, :invalid_run_id}
 
   @doc """
   Archive the session JSONL for `run_id`, located via `config_dir` /
@@ -294,8 +357,14 @@ defmodule Arbiter.Worker.SessionArchive do
   # Session id first: a workflow-mode (bookkeeping-only) run has neither
   # coordinate, and `:no_session_id` — "never opened an agent session" — is
   # the informative half. That ordering also keeps `:no_config_dir` meaning
-  # exactly one thing: a run that *did* open a session, on another provider.
-  # See `Arbiter.Workers.SessionArchiveBackfill`'s report.
+  # exactly one thing: a run that *did* open a session, but never got a
+  # config root recorded at all. See `Arbiter.Workers.SessionArchiveBackfill`'s
+  # report.
+  #
+  # `config_dir` roots both a Claude session JSONL and an agy conversation
+  # db (see the moduledoc's "Non-Claude runs" section) — try Claude's shape
+  # first (the overwhelming majority of runs), then agy's, before giving up
+  # with `:no_session_file`.
   defp dispatch_archive(run_id, config_dir, session_id, opts) do
     cond do
       not (is_binary(session_id) and session_id != "") ->
@@ -305,8 +374,18 @@ defmodule Arbiter.Worker.SessionArchive do
         {:ok, blank(run_id, :no_config_dir)}
 
       true ->
-        case ClaudeSessionFile.locate(config_dir, session_id) do
-          {:ok, path} -> do_archive(run_id, path, Keyword.get(opts, :redact_values) || [])
+        locate_and_archive(run_id, config_dir, session_id, opts)
+    end
+  end
+
+  defp locate_and_archive(run_id, config_dir, session_id, opts) do
+    case ClaudeSessionFile.locate(config_dir, session_id) do
+      {:ok, path} ->
+        do_archive(run_id, path, Keyword.get(opts, :redact_values) || [])
+
+      :not_found ->
+        case GeminiSessionFile.locate(config_dir, session_id) do
+          {:ok, path} -> do_archive_db(run_id, path)
           :not_found -> {:ok, blank(run_id, :no_session_file)}
         end
     end
@@ -341,7 +420,8 @@ defmodule Arbiter.Worker.SessionArchive do
          | source: path,
            bytes_in: byte_size(raw),
            bytes_out: byte_size(gz),
-           subagents: subagents
+           subagents: subagents,
+           redacted: true
        }}
     else
       {:error, reason} ->
@@ -351,6 +431,85 @@ defmodule Arbiter.Worker.SessionArchive do
 
         {:ok, %{blank(run_id, :error) | source: path, reason: reason}}
     end
+  end
+
+  # The agy conversation db is opaque SQLite, not line-oriented JSON — there is
+  # no safe byte-for-byte redaction here (see the moduledoc's "Redaction
+  # doesn't apply to the SQLite branch"), so this archives the raw bytes
+  # unchanged and the report says so (`redacted: false`) rather than reusing
+  # `write_archive`'s implicit "redacted" default. Same size guard, same
+  # 0600/0700 write policy, same idempotent overwrite. No subagent concept for
+  # agy today, so `subagents` is always `0`.
+  defp do_archive_db(run_id, path) do
+    case File.stat(path) do
+      {:ok, %File.Stat{size: size}} when size > @max_bytes ->
+        Logger.warning(
+          "SessionArchive: skipping oversized conversation db run=#{run_id} size=#{size}"
+        )
+
+        {:ok, %{blank(run_id, :too_large) | source: path, bytes_in: size}}
+
+      {:ok, _stat} ->
+        write_db_archive(run_id, path)
+
+      {:error, reason} ->
+        {:ok, %{blank(run_id, :error) | source: path, reason: reason}}
+    end
+  end
+
+  defp write_db_archive(run_id, path) do
+    with {:ok, raw} <- snapshot_db(path),
+         gz = :zlib.gzip(raw),
+         :ok <- write_private(db_path_for(run_id), gz) do
+      {:ok,
+       %{
+         blank(run_id, :ok)
+         | source: path,
+           bytes_in: byte_size(raw),
+           bytes_out: byte_size(gz),
+           redacted: false
+       }}
+    else
+      {:error, reason} ->
+        Logger.warning(
+          "SessionArchive: could not archive conversation db run=#{run_id} path=#{path}: " <>
+            inspect(reason)
+        )
+
+        {:ok, %{blank(run_id, :error) | source: path, reason: reason}}
+    end
+  end
+
+  # agy keeps its conversation db in WAL mode and the CLI process holds it
+  # open for the run's whole lifetime, so at archive time a run's rows can
+  # sit entirely uncheckpointed in `<sid>.db-wal` — a plain `File.read/1` of
+  # `<sid>.db` alone then archives an empty shell. `VACUUM INTO` opened
+  # read-only against the live path forces SQLite to fold the WAL back in
+  # and write a single, fully-checkpointed, self-contained file — the same
+  # bytes a fresh `sqlite3 <sid>.db ".dump"` would see — without touching the
+  # source db the agy process still owns. The snapshot is written to a
+  # private temp path, read back into memory, and removed again; nothing
+  # here persists beyond this function.
+  defp snapshot_db(path) do
+    tmp =
+      Path.join(
+        System.tmp_dir!(),
+        "arbiter-session-archive-#{:erlang.unique_integer([:positive, :monotonic])}.db"
+      )
+
+    _ = File.rm(tmp)
+
+    result =
+      with {:ok, conn} <- Exqlite.start_link(database: path, mode: :readonly),
+           {:ok, _} <- Exqlite.query(conn, "VACUUM INTO ?1", [tmp]) do
+        GenServer.stop(conn)
+        File.read(tmp)
+      else
+        {:error, reason} -> {:error, reason}
+      end
+
+    _ = File.rm(tmp)
+    result
   end
 
   # Subagent transcripts sit beside the parent session file, under a directory
@@ -415,6 +574,7 @@ defmodule Arbiter.Worker.SessionArchive do
       bytes_in: 0,
       bytes_out: 0,
       subagents: 0,
+      redacted: true,
       reason: nil
     }
   end

@@ -50,6 +50,46 @@ defmodule Arbiter.Worker.SessionArchiveTest do
 
   defp gunzip_at!(path), do: path |> File.read!() |> :zlib.gunzip()
 
+  # Build a real agy $HOME holding one conversation db exactly where
+  # `GeminiSessionFile.locate/2` looks for it — a real SQLite database (not
+  # fake bytes), since `write_db_archive/2` now opens the source with
+  # `Exqlite` to fold any WAL content back in before archiving.
+  defp seed_gemini_db(home, session_id, bodies) do
+    dir = Path.join([home, ".gemini", "antigravity-cli", "conversations"])
+    File.mkdir_p!(dir)
+    path = Path.join(dir, session_id <> ".db")
+    File.rm(path)
+
+    {:ok, conn} = Exqlite.start_link(database: path, mode: [:readwrite, :create])
+    Exqlite.query!(conn, "CREATE TABLE steps (body TEXT)")
+
+    Enum.each(bodies, fn body ->
+      Exqlite.query!(conn, "INSERT INTO steps (body) VALUES (?1)", [body])
+    end)
+
+    GenServer.stop(conn)
+    path
+  end
+
+  # Read the `steps.body` column back out of a (possibly gunzipped) SQLite
+  # database's raw bytes, via a private temp file.
+  defp read_step_bodies(db_bytes) do
+    tmp =
+      Path.join(
+        System.tmp_dir!(),
+        "session-archive-readback-#{System.unique_integer([:positive])}.db"
+      )
+
+    File.write!(tmp, db_bytes)
+
+    {:ok, conn} = Exqlite.start_link(database: tmp, mode: :readonly)
+    {:ok, result} = Exqlite.query(conn, "SELECT body FROM steps", [])
+    GenServer.stop(conn)
+    File.rm(tmp)
+
+    Enum.map(result.rows, fn [body] -> body end)
+  end
+
   describe "path_for/1" do
     test "lives in the durable log root, keyed by run id", %{root: root, run_id: run_id} do
       assert SessionArchive.path_for(run_id) == Path.join(root, run_id <> ".jsonl.gz")
@@ -131,9 +171,15 @@ defmodule Arbiter.Worker.SessionArchiveTest do
       refute File.exists?(SessionArchive.path_for(ctx.run_id))
     end
 
-    test "a non-Claude run (session id, no config_dir) reports :no_config_dir", ctx do
+    test "a run with no config root recorded at all reports :no_config_dir", ctx do
       assert {:ok, %{status: :no_config_dir}} = SessionArchive.archive(ctx.run_id, "", "sid")
       assert {:ok, %{status: :no_config_dir}} = SessionArchive.archive(ctx.run_id, nil, "sid")
+    end
+
+    test "a config root with neither a Claude JSONL nor an agy db reports :no_session_file",
+         ctx do
+      assert {:ok, %{status: :no_session_file}} =
+               SessionArchive.archive(ctx.run_id, ctx.config_dir, "no-such-session")
     end
 
     test "a workflow-mode run (neither coordinate) reports :no_session_id", ctx do
@@ -154,6 +200,108 @@ defmodule Arbiter.Worker.SessionArchiveTest do
       body = gunzip_at!(SessionArchive.path_for(ctx.run_id))
       assert body =~ ~s("n":2)
       refute body =~ ~s("n":1)
+    end
+  end
+
+  describe "archive/3 — agy conversation db (bd-6nupvc T9)" do
+    test "archives the raw db unredacted when no Claude JSONL exists at the same coordinates",
+         ctx do
+      sid = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+      seed_gemini_db(ctx.config_dir, sid, ["conversation-body"])
+
+      assert {:ok, report} = SessionArchive.archive(ctx.run_id, ctx.config_dir, sid)
+      assert report.status == :ok
+      assert report.redacted == false
+      assert report.subagents == 0
+
+      archive = SessionArchive.db_path_for(ctx.run_id)
+      assert File.regular?(archive)
+      assert read_step_bodies(gunzip_at!(archive)) == ["conversation-body"]
+    end
+
+    test "does not scrub known secret values — redaction is unsafe on raw SQLite bytes", ctx do
+      sid = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+      secret = "sk-live-DEADBEEFCAFE"
+      seed_gemini_db(ctx.config_dir, sid, ["prefix" <> secret <> "suffix"])
+
+      assert {:ok, %{redacted: false}} =
+               SessionArchive.archive(ctx.run_id, ctx.config_dir, sid, redact_values: [secret])
+
+      assert read_step_bodies(gunzip_at!(SessionArchive.db_path_for(ctx.run_id))) == [
+               "prefix" <> secret <> "suffix"
+             ]
+    end
+
+    test "the db archive is written 0600, same as the Claude path", ctx do
+      sid = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+      seed_gemini_db(ctx.config_dir, sid, ["bytes"])
+
+      assert {:ok, _} = SessionArchive.archive(ctx.run_id, ctx.config_dir, sid)
+
+      %File.Stat{mode: mode} = File.stat!(SessionArchive.db_path_for(ctx.run_id))
+      assert Bitwise.band(mode, 0o777) == 0o600
+    end
+
+    test "db_archived?/1 and read_db/1 round-trip", ctx do
+      sid = "dddddddd-dddd-dddd-dddd-dddddddddddd"
+      refute SessionArchive.db_archived?(ctx.run_id)
+
+      seed_gemini_db(ctx.config_dir, sid, ["hello-agy"])
+      assert {:ok, _} = SessionArchive.archive(ctx.run_id, ctx.config_dir, sid)
+
+      assert SessionArchive.db_archived?(ctx.run_id)
+      assert {:ok, bytes} = SessionArchive.read_db(ctx.run_id)
+      assert read_step_bodies(bytes) == ["hello-agy"]
+    end
+
+    test "a run whose recorded config root has an agy db, driven through archive_run/2", ctx do
+      sid = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
+      seed_gemini_db(ctx.config_dir, sid, ["via-run"])
+
+      run = %{
+        id: ctx.run_id,
+        config_dir: ctx.config_dir,
+        session_id: sid,
+        provider: "gemini",
+        task_id: nil
+      }
+
+      assert {:ok, %{status: :ok, redacted: false}} =
+               SessionArchive.archive_run(run, redact_values: [])
+
+      assert read_step_bodies(gunzip_at!(SessionArchive.db_path_for(ctx.run_id))) == ["via-run"]
+    end
+
+    test "captures rows that are only in the WAL sidecar, not yet checkpointed into the .db file",
+         ctx do
+      sid = "ffffffff-ffff-ffff-ffff-ffffffffffff"
+      path = seed_gemini_db(ctx.config_dir, sid, [])
+
+      {:ok, conn} = Exqlite.start_link(database: path, mode: [:readwrite, :create])
+      Exqlite.query!(conn, "PRAGMA journal_mode=WAL")
+      Exqlite.query!(conn, "INSERT INTO steps (body) VALUES ('checkpointed')")
+      Exqlite.query!(conn, "PRAGMA wal_checkpoint")
+      Exqlite.query!(conn, "INSERT INTO steps (body) VALUES ('wal-only')")
+
+      assert File.exists?(path <> "-wal")
+
+      # Sanity check that this test actually exercises the bug: reading the
+      # `.db` file alone (the old, broken behavior) must miss the WAL-only row.
+      assert read_step_bodies(File.read!(path)) == ["checkpointed"]
+
+      assert {:ok, report} = SessionArchive.archive(ctx.run_id, ctx.config_dir, sid)
+      assert report.status == :ok
+
+      archived_bodies =
+        ctx.run_id
+        |> SessionArchive.db_path_for()
+        |> File.read!()
+        |> :zlib.gunzip()
+        |> read_step_bodies()
+
+      assert archived_bodies == ["checkpointed", "wal-only"]
+
+      GenServer.stop(conn)
     end
   end
 
@@ -186,11 +334,12 @@ defmodule Arbiter.Worker.SessionArchiveTest do
       assert gunzip_at!(SessionArchive.path_for(ctx.run_id)) =~ ~s("via":"run")
     end
 
-    test "a Gemini run (session_id but no config_dir) is :no_config_dir, not a loss", ctx do
+    test "a run with no config root recorded at all is :no_config_dir, not a loss", ctx do
       run = %{
         id: ctx.run_id,
         config_dir: nil,
         session_id: "3ab7e7ea-8b87-4537-a271-840980e60907",
+        provider: "gemini",
         task_id: nil
       }
 

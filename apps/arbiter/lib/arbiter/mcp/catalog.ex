@@ -1218,9 +1218,13 @@ defmodule Arbiter.MCP.Catalog do
           "claude_sessions is 0). bd-db0p38: the richer artifact — the agent CLI's own session " <>
           "JSONL, archived per run as <run_id>.jsonl.gz — is counted separately, since the two " <>
           "losses are independent and a single rate hides the JSONL's absence: jsonl_sessions " <>
-          "(Claude-driven runs, i.e. those carrying a config_dir), jsonl_archived, jsonl_missing, " <>
-          "jsonl_archive_rate_pct, and non_claude_sessions (session-bearing runs on another " <>
-          "provider, which never had a Claude JSONL to lose). " <>
+          "(runs with provider == \"claude\"), jsonl_archived, jsonl_missing, " <>
+          "jsonl_archive_rate_pct. bd-6nupvc T9: agy (provider == \"gemini\") runs archive into " <>
+          "their own SQLite branch (<run_id>.db.gz), counted separately as gemini_db_sessions, " <>
+          "gemini_db_archived, gemini_db_missing, gemini_db_archive_rate_pct — folding them into " <>
+          "the jsonl_* counts would report every one as a lost JSONL, since agy runs also carry a " <>
+          "config_dir (their effective $HOME) but never had a JSONL to lose. non_claude_sessions " <>
+          "is session-bearing runs on neither provider, which have no archive branch at all today. " <>
           "Optional `workspace` to target a workspace other than the default.",
       input_schema: %{
         "type" => "object",

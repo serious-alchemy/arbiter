@@ -713,7 +713,16 @@ defmodule Arbiter.MCP.Tools.Worker do
       write one).
     * `jsonl_sessions` / `jsonl_archived` / `jsonl_missing` /
       `jsonl_archive_rate_pct` — the `<run_id>.jsonl.gz` archive, over
-      Claude-driven runs only. `non_claude_sessions` reports the rest.
+      `provider == "claude"` runs only.
+    * `gemini_db_sessions` / `gemini_db_archived` / `gemini_db_missing` /
+      `gemini_db_archive_rate_pct` — the `<run_id>.db.gz` archive
+      (`Arbiter.Worker.SessionArchive.db_archived?/1`), over
+      `provider == "gemini"` (agy) runs only (bd-6nupvc T9). Since agy runs
+      also record `config_dir` (their effective `$HOME`), splitting by
+      provider rather than by "has a `config_dir`" is what keeps these two
+      counts from double-counting or manufacturing loss for the other.
+      `non_claude_sessions` is everything that is neither — providers with no
+      archive branch at all today.
 
   Coordinator only. Optional `workspace` (resolved the same way as
   `worker_list` / `task_ready`).
@@ -735,18 +744,28 @@ defmodule Arbiter.MCP.Tools.Worker do
           not File.regular?(Arbiter.Worker.OutputLog.path_for(run.id))
         end)
 
-      # bd-db0p38: the JSONL archive has its own denominator. `config_dir` is a
-      # Claude-only column (see `Arbiter.Workers.Run`), so a session-bearing run
-      # without one is a non-Claude run — its session lives in that provider's
-      # own store and it never had a Claude JSONL to lose. Counting those as
-      # missing manufactures a loss that isn't there: all 32 such runs in the
-      # production corpus are Gemini reviewer runs whose conversations are
-      # intact under `~/.gemini/antigravity-cli/conversations/`.
-      {jsonl_sessions, non_claude} =
-        Enum.split_with(agent_sessions, &(&1.config_dir not in [nil, ""]))
+      # bd-db0p38: the JSONL archive has its own denominator, and it must be
+      # split by `provider` rather than by "has a `config_dir`" — since
+      # bd-6nupvc T9, a gemini (agy) run records `config_dir` too (its
+      # effective `$HOME`), so that no longer distinguishes "has a Claude
+      # JSONL to lose" from "archives into agy's own SQLite branch instead".
+      # Folding gemini runs into `jsonl_sessions` would recreate the phantom
+      # loss bd-db0p38 removed: every one would show up in `jsonl_missing`
+      # because `SessionArchive.archived?/1` only ever checks `.jsonl.gz`.
+      {claude_provider_sessions, other_provider_sessions} =
+        Enum.split_with(agent_sessions, &(&1.provider == "claude"))
+
+      {gemini_sessions, non_claude} =
+        Enum.split_with(other_provider_sessions, &(&1.provider == "gemini"))
 
       jsonl_missing =
-        Enum.count(jsonl_sessions, &(not Arbiter.Worker.SessionArchive.archived?(&1.id)))
+        Enum.count(
+          claude_provider_sessions,
+          &(not Arbiter.Worker.SessionArchive.archived?(&1.id))
+        )
+
+      db_missing =
+        Enum.count(gemini_sessions, &(not Arbiter.Worker.SessionArchive.db_archived?(&1.id)))
 
       {:ok,
        %{
@@ -757,10 +776,14 @@ defmodule Arbiter.MCP.Tools.Worker do
          workflow_only_runs: length(workflow_only),
          capture_rate_pct: capture_rate_pct(agent_sessions, missing),
          non_claude_sessions: length(non_claude),
-         jsonl_sessions: length(jsonl_sessions),
-         jsonl_archived: length(jsonl_sessions) - jsonl_missing,
+         jsonl_sessions: length(claude_provider_sessions),
+         jsonl_archived: length(claude_provider_sessions) - jsonl_missing,
          jsonl_missing: jsonl_missing,
-         jsonl_archive_rate_pct: capture_rate_pct(jsonl_sessions, jsonl_missing)
+         jsonl_archive_rate_pct: capture_rate_pct(claude_provider_sessions, jsonl_missing),
+         gemini_db_sessions: length(gemini_sessions),
+         gemini_db_archived: length(gemini_sessions) - db_missing,
+         gemini_db_missing: db_missing,
+         gemini_db_archive_rate_pct: capture_rate_pct(gemini_sessions, db_missing)
        }}
     end
   rescue

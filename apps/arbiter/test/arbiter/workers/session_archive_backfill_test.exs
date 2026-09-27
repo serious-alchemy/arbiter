@@ -130,4 +130,38 @@ defmodule Arbiter.Workers.SessionArchiveBackfillTest do
     report = SessionArchiveBackfill.backfill(apply?: true, limit: 2)
     assert report.scanned == 2
   end
+
+  test "an agy (gemini) run's conversation db is rescued too, and dry run matches apply (bd-6nupvc T9)" do
+    session_id = "sess-#{System.unique_integer([:positive])}"
+    home = Path.join(System.tmp_dir!(), "agy-home-#{System.unique_integer([:positive])}")
+    dir = Path.join([home, ".gemini", "antigravity-cli", "conversations"])
+    File.mkdir_p!(dir)
+    db_path = Path.join(dir, session_id <> ".db")
+
+    {:ok, conn} = Exqlite.start_link(database: db_path, mode: [:readwrite, :create])
+    Exqlite.query!(conn, "CREATE TABLE steps (body TEXT)")
+    Exqlite.query!(conn, "INSERT INTO steps (body) VALUES ('agy-ground-truth')")
+    GenServer.stop(conn)
+    on_exit(fn -> File.rm_rf(home) end)
+
+    run = run!(%{config_dir: home, session_id: session_id})
+
+    # A dry run must classify this exactly as an apply run would — falling
+    # back to `GeminiSessionFile.locate/2` when there's no Claude JSONL —
+    # rather than reporting it as `:no_session_file`.
+    dry = SessionArchiveBackfill.backfill()
+    assert dry.apply? == false
+    assert dry.archived >= 1
+    refute SessionArchive.db_archived?(run.id)
+
+    applied = SessionArchiveBackfill.backfill(apply?: true)
+    assert applied.archived >= 1
+    assert SessionArchive.db_archived?(run.id)
+
+    # `db_archived?/1` must count as already-archived too, or every agy run
+    # gets re-read and re-written on every pass.
+    second = SessionArchiveBackfill.backfill(apply?: true)
+    assert second.archived == 0
+    assert second.already_archived >= 1
+  end
 end

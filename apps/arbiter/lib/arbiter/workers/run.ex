@@ -355,27 +355,32 @@ defmodule Arbiter.Workers.Run do
       description "Clickable link for mr_ref, resolved at record time (best-effort)."
     end
 
-    # bd-au3xrq: identifying coordinates for this run's Claude Code on-disk
-    # session JSONL (`<config_dir>/projects/<slug>/<session_id>.jsonl`), captured
-    # so `Arbiter.Usage.ClaudeSessionFile` can reconcile token usage from disk
-    # when the primary stdout path missed it (agent killed/crashed before the
-    # terminal `result` event, or the node died mid-run). Both nullable: a
-    # non-Claude run, or one that died before its `system/init` event, has no
-    # session id to record.
+    # bd-au3xrq (Claude) / bd-6nupvc T9 (agy): identifying coordinates for this
+    # run's on-disk session — Claude Code's session JSONL
+    # (`<config_dir>/projects/<slug>/<session_id>.jsonl`) or agy's conversation
+    # SQLite db (`<config_dir>/.gemini/antigravity-cli/conversations/<session_id>.db`)
+    # — captured so `Arbiter.Usage.ClaudeSessionFile` / `Arbiter.Usage.GeminiSessionFile`
+    # can reconcile from disk (Claude token usage when the primary stdout path
+    # missed it; either provider's `Arbiter.Worker.SessionArchive`). Both
+    # nullable: a run on neither provider, or one that died before its
+    # session ever opened, has no coordinates to record.
     attribute :session_id, :string do
       public? true
       constraints max_length: 255, trim?: true
 
-      description "Claude Code session id (== CLAUDE_CODE_SESSION_ID == the on-disk " <>
-                    "session JSONL filename). Nullable; set once the session's init event lands."
+      description "Session id: Claude Code's (== CLAUDE_CODE_SESSION_ID == the on-disk " <>
+                    "session JSONL filename), or agy's conversation id (== the on-disk " <>
+                    "<session_id>.db filename). Nullable; set once the session's init event " <>
+                    "lands."
     end
 
     attribute :config_dir, :string do
       public? true
       constraints max_length: 2000, trim?: true
 
-      description "Effective CLAUDE_CONFIG_DIR the worker spawned under (workers use an " <>
-                    "isolated dir, not ~/.claude). Roots the on-disk session JSONL lookup."
+      description "Effective config root the worker spawned under: CLAUDE_CONFIG_DIR for " <>
+                    "Claude, or the isolated $HOME for agy (workers use an isolated dir, not " <>
+                    "~/.claude or the operator's own $HOME). Roots the on-disk session lookup."
     end
 
     # ---- Run provenance (bd-dzz6ly) ---------------------------------------

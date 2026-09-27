@@ -86,7 +86,7 @@ defmodule Arbiter.Workers.SessionArchiveBackfill do
   # needs one), so the dry path locates and classifies here instead.
   defp archive_one(run, apply?, force?, opts) do
     cond do
-      not force? and SessionArchive.archived?(run.id) ->
+      not force? and (SessionArchive.archived?(run.id) or SessionArchive.db_archived?(run.id)) ->
         %{status: :already_archived, bytes_in: 0, bytes_out: 0, subagents: 0}
 
       apply? ->
@@ -114,8 +114,9 @@ defmodule Arbiter.Workers.SessionArchiveBackfill do
   defp rename_ok(:ok), do: :archived
   defp rename_ok(other), do: other
 
-  # Classify without writing: the same three coordinate checks
-  # `SessionArchive.archive/4` makes, so the dry report matches the apply run.
+  # Classify without writing: the same coordinate checks
+  # `SessionArchive.archive/4` makes — Claude JSONL first, then the agy
+  # conversation db (bd-6nupvc T9) — so the dry report matches the apply run.
   defp dry_status(run) do
     cond do
       run.session_id in [nil, ""] ->
@@ -126,8 +127,14 @@ defmodule Arbiter.Workers.SessionArchiveBackfill do
 
       true ->
         case Arbiter.Usage.ClaudeSessionFile.locate(run.config_dir, run.session_id) do
-          {:ok, _path} -> :archived
-          :not_found -> :no_session_file
+          {:ok, _path} ->
+            :archived
+
+          :not_found ->
+            case Arbiter.Usage.GeminiSessionFile.locate(run.config_dir, run.session_id) do
+              {:ok, _path} -> :archived
+              :not_found -> :no_session_file
+            end
         end
     end
   end

@@ -559,6 +559,69 @@ defmodule Arbiter.WorkerRunPersistenceTest do
     assert body =~ "ground truth"
   end
 
+  test "a gemini spawn records the injected HOME as config_dir, not CLAUDE_CONFIG_DIR (bd-6nupvc T9)" do
+    task_id = "bd-agyconfigdir-#{System.unique_integer([:positive])}"
+    uniq = System.unique_integer([:positive])
+
+    cwd = Path.join(System.tmp_dir!(), "agy-cfgdir-cwd-#{uniq}")
+    File.mkdir_p!(cwd)
+    home = Path.join(System.tmp_dir!(), "agy-cfgdir-home-#{uniq}")
+
+    on_exit(fn ->
+      File.rm_rf(cwd)
+      File.rm_rf(home)
+    end)
+
+    {:ok, pid} = Worker.start(task_id: task_id, repo: "arbiter", workspace_id: "ws-runs")
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+
+    {:ok, _port} =
+      ClaudeSession.start(
+        owner: pid,
+        worktree_path: cwd,
+        provider: "gemini",
+        env: [{"HOME", home}],
+        command: ["true"]
+      )
+
+    [run] = runs_for(task_id)
+    assert run.config_dir == home
+  end
+
+  test "a HOME earlier in the spawn's env list does not win over a later one (bd-6nupvc T9)" do
+    # `env_pairs/3` appends caller/agent env AFTER the workspace's own vars,
+    # and the OS applies the list last-wins — so `effective_config_dir/2`
+    # must scan from the end, not take the first HOME it finds.
+    task_id = "bd-agyconfigdirorder-#{System.unique_integer([:positive])}"
+    uniq = System.unique_integer([:positive])
+
+    cwd = Path.join(System.tmp_dir!(), "agy-cfgdirorder-cwd-#{uniq}")
+    File.mkdir_p!(cwd)
+    earlier_home = Path.join(System.tmp_dir!(), "agy-cfgdirorder-earlier-#{uniq}")
+    later_home = Path.join(System.tmp_dir!(), "agy-cfgdirorder-later-#{uniq}")
+
+    on_exit(fn ->
+      File.rm_rf(cwd)
+      File.rm_rf(earlier_home)
+      File.rm_rf(later_home)
+    end)
+
+    {:ok, pid} = Worker.start(task_id: task_id, repo: "arbiter", workspace_id: "ws-runs")
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+
+    {:ok, _port} =
+      ClaudeSession.start(
+        owner: pid,
+        worktree_path: cwd,
+        provider: "gemini",
+        env: [{"HOME", earlier_home}, {"HOME", later_home}],
+        command: ["true"]
+      )
+
+    [run] = runs_for(task_id)
+    assert run.config_dir == later_home
+  end
+
   defp wait_until(fun, timeout_ms \\ 500, step_ms \\ 20) do
     deadline = System.monotonic_time(:millisecond) + timeout_ms
     do_wait(fun, deadline, step_ms)
