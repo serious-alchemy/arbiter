@@ -71,10 +71,11 @@ defmodule Arbiter.Agents.Gemini do
   (`Arbiter.Worker.Jail`, bd-5gvqgc), `:none` otherwise
   (`docs/design/agy-strict-write-isolation.md`).
 
-  No agy setting confines writes: agy's native `write_to_file` ignores every
-  `write_file(...)` deny, `disabledTools`, and `--sandbox` (bd-25ivqe,
-  bd-7h2cuk), and the upstream `gemini` CLI has no allow/deny mechanism at
-  all. `security_enforced?/0` above is about the *deny-list* contract, a
+  No agy setting confines every write. agy's `write_file(...)` rules gate its
+  native `write_to_file` only as literal path prefixes, with its own `/tmp`
+  exception (bd-f8f9ln), a shell write through an allowed command is never
+  checked against them, and the upstream `gemini` CLI has no allow/deny
+  mechanism at all. `security_enforced?/0` above is about the *deny-list* contract, a
   separate claim. So the only confinement is the kernel's, and it applies
   exactly when `default_argv/2` jails the spawn: `sandbox.enabled` is on,
   `sandbox.filesystem` is `:worktree` (the base default — bd-3s82pf makes the
@@ -522,10 +523,10 @@ defmodule Arbiter.Agents.Gemini do
   end
 
   # A worktree-backed review dispatch (`Dispatch.review_security_policy/2`)
-  # unions `deny: ["Edit", "Write", "NotebookEdit"]` onto the policy — that
-  # bare-tool-name deny is otherwise unenforced for agy's native writes
-  # (`Arbiter.Agents.Gemini.Security`'s `bare_tool_rule/1`), so the jail binds
-  # the worktree `--ro-bind` instead whenever it's present.
+  # unions `deny: ["Edit", "Write", "NotebookEdit"]` onto the policy. agy
+  # enforces that as `write_file(/)` for its native writes (bd-f8f9ln), but not
+  # for a shell write, so the jail binds the worktree `--ro-bind` instead
+  # whenever it's present.
   defp review_dispatch?(%SecurityPolicy{permissions: %{deny: deny}}), do: "Write" in deny
 
   # The resolved `Arbiter.Agents.SecurityPolicy` for this spawn. Falls back to

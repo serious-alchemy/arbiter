@@ -86,6 +86,13 @@ defmodule Arbiter.Agents.Gemini.ConfigDirTest do
       assert settings["toolPermission"] == "proceed-in-sandbox"
       assert settings["allowNonWorkspaceAccess"] == false
       assert settings["permissions"]["deny"] != []
+
+      # bd-f8f9ln: the worker may write its worktree, but not this settings file.
+      assert "write_file(#{Path.expand(wt)})" in settings["permissions"]["allow"]
+
+      assert "write_file(#{Path.join(home, ".gemini/antigravity-cli")})" in settings[
+               "permissions"
+             ]["deny"]
     end
 
     test "writes an Arbiter worker GEMINI.md and never the operator's persona", %{

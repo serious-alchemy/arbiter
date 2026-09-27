@@ -84,7 +84,7 @@ defmodule Arbiter.Agents.Gemini.SecurityTest do
     test "outside-write denies become write_file rules" do
       deny = Security.settings(policy())["permissions"]["deny"]
 
-      assert "write_file(/etc/**)" in deny
+      assert "write_file(/etc)" in deny
     end
 
     test "operator allow rules are translated too" do
@@ -103,11 +103,11 @@ defmodule Arbiter.Agents.Gemini.SecurityTest do
       assert "command(git diff)" in allow
       assert "command(git log)" in allow
 
-      # The bootstrap baseline widens `allow` with read/exec commands only —
-      # it must never carry an out-of-worktree write, so `write_file(/etc/**)`
-      # stays denied under :strict the same way it does under :bypass.
-      assert "write_file(/etc/**)" in deny
-      refute Enum.any?(allow, &String.starts_with?(&1, "write_file("))
+      # With no worktree in hand the only write allow is the jail's private
+      # `/tmp` (bd-f8f9ln), and `/etc` stays denied under :strict the same
+      # way it does under :bypass.
+      assert "write_file(/etc)" in deny
+      assert Enum.filter(allow, &String.starts_with?(&1, "write_file(")) == ["write_file(/tmp)"]
     end
 
     test "the bootstrap baseline is present alongside operator allow rules, not replaced by them" do
@@ -179,7 +179,7 @@ defmodule Arbiter.Agents.Gemini.SecurityTest do
           "permissions" => %{"deny" => ["Edit", "Write", "NotebookEdit"]}
         })
 
-      assert "write_file(**)" in Security.deny_rules(review)
+      assert "write_file(/)" in Security.deny_rules(review)
     end
 
     test "the exact policy Dispatch.review_security_policy/2 produces denies writes" do
@@ -191,7 +191,7 @@ defmodule Arbiter.Agents.Gemini.SecurityTest do
           review_checkout: %{path: "/tmp/some-review-checkout"}
         )
 
-      assert "write_file(**)" in Security.deny_rules(policy)
+      assert "write_file(/)" in Security.deny_rules(policy)
     end
 
     test "bare Read / WebFetch tool names map onto agy's whole-path rules" do
@@ -202,7 +202,7 @@ defmodule Arbiter.Agents.Gemini.SecurityTest do
           })
         )
 
-      assert "read_file(**)" in deny
+      assert "read_file(/)" in deny
       assert "read_url(*)" in deny
       refute "url(*)" in deny
     end
@@ -215,8 +215,8 @@ defmodule Arbiter.Agents.Gemini.SecurityTest do
           })
         )
 
-      assert "read_file(**)" in allow
-      assert "write_file(**)" in allow
+      assert "read_file(/)" in allow
+      assert "write_file(/)" in allow
     end
 
     test "`pwd` is allowed in every mode, so `pwd && git status` is not soft-denied (bd-7wymls)" do
@@ -333,42 +333,244 @@ defmodule Arbiter.Agents.Gemini.SecurityTest do
     end
   end
 
-  describe "AC6 (bd-25ivqe) — write_file deny does not gate write_to_file (post-merge probe bd-7h2cuk)" do
-    test "the generated document still carries a write_file(**) deny for a review policy" do
-      # Kept here as the premise the next test disproves: the deny rule is
-      # emitted (see "a worktree-backed review spawn's read-only deny
-      # survives translation" above), it just is not enforced by agy against
-      # its own native write tool (see the moduledoc's "Honesty about
-      # enforcement level" section).
-      review =
-        SecurityPolicy.merge(SecurityPolicy.base(), %{
-          "permissions" => %{"deny" => ["Edit", "Write", "NotebookEdit"]}
-        })
-
-      assert "write_file(**)" in Security.deny_rules(review)
-    end
-
-    test "a write_to_file outside the worktree still succeeds despite a matching write_file deny" do
+  describe "AC6 (bd-25ivqe) — the old write_file(**) deny, re-read (bd-f8f9ln)" do
+    test "the bd-7h2cuk capture wrote to /tmp, which agy lets through, under a glob that matches nothing" do
       # Captured live against agy 1.2.11 with `permissions.deny:
-      # ["write_file(**)"]` (a blanket rule that matches every path) and
-      # `toolPermission: "proceed-in-sandbox"`: `write_to_file` to a path
-      # outside the worktree still comes back DONE, not ERROR/denied. This is
-      # the live root cause behind bd-7h2cuk's finding (arb/notes worked, but
-      # a stray file was created outside any worktree with no denial) — there
-      # is currently no `settings.json` rule that confines `write_to_file` to
-      # the worktree.
-      #
-      # This test only pins the captured fixture's shape (a static JSON file
-      # checked into the repo) — it does not run agy or any translation code,
-      # so it cannot fail or catch a regression if a future agy release
-      # starts honoring `write_file` denies, or if the moduledoc/doc prose is
-      # edited back to the disproven "write_file is enforced" claim. Re-probe
-      # live (bd-80talz-style) to confirm this is still true before trusting
-      # it.
+      # ["write_file(**)"]` and `toolPermission: "proceed-in-sandbox"`. It was
+      # read as "write_file rules never gate write_to_file". bd-f8f9ln's probes
+      # show two other reasons: a glob inside write_file(...) matches no path,
+      # and agy auto-allows writes under /tmp. Both are pinned by
+      # agy_write_file_rule_matching.json below.
       step = fixture("agy_write_to_file_deny_not_enforced.json")["step_update"]
 
       assert step["tool_name"] == "write_to_file"
       assert step["state"] == "DONE"
+      assert step["tool_info"]["parameters"]["TargetFile"] =~ ~r{\A/tmp/}
+    end
+  end
+
+  # bd-f8f9ln: real `write_to_file` step events captured from agy 1.2.11 under
+  # `toolPermission: "proceed-in-sandbox"`, one per probe, each with the
+  # settings.json permissions agy loaded and whether the file really appeared.
+  describe "write_file rule matching on agy 1.2.11 (captured, bd-f8f9ln)" do
+    setup do
+      %{cases: fixture("agy_write_file_rule_matching.json")["cases"]}
+    end
+
+    test "an in-worktree write with no write_file allow is soft-denied (the bug)", %{cases: c} do
+      probe = c["worktree_without_allow_soft_denied"]
+
+      assert probe["result"]["denied_actions"] == [
+               %{"action" => "write_file", "display_name" => "WriteToFile"}
+             ]
+
+      refute probe["file_created_on_disk"]
+    end
+
+    test "a `<dir>/**` allow matches nothing, a bare `<dir>` allow covers nested paths", %{
+      cases: c
+    } do
+      glob = c["glob_allow_does_not_match"]
+      assert Enum.any?(glob["settings_permissions"]["allow"], &String.ends_with?(&1, "/ws/**)"))
+      assert glob["step_update"]["state"] == "ERROR"
+      refute glob["file_created_on_disk"]
+
+      dir = c["dir_allow_matches_nested"]
+      assert Enum.any?(dir["settings_permissions"]["allow"], &String.ends_with?(&1, "/ws)"))
+      assert dir["step_update"]["tool_info"]["parameters"]["TargetFile"] =~ "/ws/sub/a.txt"
+      assert dir["step_update"]["state"] == "DONE"
+      assert dir["file_created_on_disk"]
+    end
+
+    test "a worktree allow does not cover a path outside it, or a sibling sharing its prefix", %{
+      cases: c
+    } do
+      for key <- ["outside_worktree_soft_denied", "sibling_prefix_soft_denied"] do
+        probe = c[key]
+        assert probe["step_update"]["state"] == "ERROR", key
+        assert probe["result"]["denied_actions"] != nil, key
+        refute probe["file_created_on_disk"], key
+      end
+
+      assert c["sibling_prefix_soft_denied"]["step_update"]["tool_info"]["parameters"][
+               "TargetFile"
+             ] =~ "/wsx/a.txt"
+    end
+
+    test "/tmp is auto-allowed with no rule, and an explicit write_file(/tmp) deny blocks it", %{
+      cases: c
+    } do
+      assert c["tmp_auto_allowed"]["settings_permissions"] == %{"allow" => ["command(pwd)"]}
+      assert c["tmp_auto_allowed"]["step_update"]["state"] == "DONE"
+
+      denied = c["tmp_explicit_deny"]
+      assert denied["step_update"]["state"] == "ERROR"
+
+      assert denied["step_update"]["tool_info"]["error"]["message"] =~
+               "Matches user-configured deny rule"
+    end
+
+    test "write_file(/) denies everything and outranks a worktree allow", %{cases: c} do
+      probe = c["root_deny_beats_worktree_allow"]
+
+      assert probe["settings_permissions"]["deny"] == ["write_file(/)"]
+      assert probe["step_update"]["state"] == "ERROR"
+      refute probe["file_created_on_disk"]
+    end
+
+    test "a write_file deny also holds under always-proceed and --dangerously-skip-permissions",
+         %{cases: c} do
+      for key <- ["always_proceed_root_deny", "skip_permissions_root_deny"] do
+        probe = c[key]
+        assert probe["toolPermission"] == "always-proceed", key
+        assert probe["step_update"]["state"] == "ERROR", key
+
+        assert probe["step_update"]["tool_info"]["error"]["message"] =~
+                 "Matches user-configured deny rule",
+               key
+
+        refute probe["file_created_on_disk"], key
+      end
+
+      assert c["skip_permissions_root_deny"]["extra_argv"] == ["--dangerously-skip-permissions"]
+    end
+  end
+
+  describe ":strict working set (bd-f8f9ln)" do
+    @wt "/home/op/dev/worktrees/task-1"
+
+    defp strict_allow(overrides \\ %{}, opts \\ [worktree: @wt]) do
+      %{"permissions" => %{"mode" => "strict"}}
+      |> deep_merge(overrides)
+      |> policy()
+      |> Security.settings(opts)
+      |> get_in(["permissions", "allow"])
+    end
+
+    defp deep_merge(a, b),
+      do: Map.merge(a, b, fn _k, x, y -> if is_map(x), do: deep_merge(x, y), else: y end)
+
+    defp write_allows(allow), do: Enum.filter(allow, &String.starts_with?(&1, "write_file("))
+
+    test "allows writes inside the worktree as a bare directory rule, never a glob" do
+      allow = strict_allow()
+
+      assert "write_file(#{@wt})" in allow
+      refute Enum.any?(write_allows(allow), &(&1 =~ "*"))
+    end
+
+    test "allows the git/mix/arb commands a worker needs" do
+      allow = strict_allow()
+
+      for cmd <-
+            ~w(arb mix) ++
+              ["git status", "git diff", "git add", "git commit", "git rev-parse", "git push"] do
+        assert "command(#{cmd})" in allow, cmd
+      end
+    end
+
+    test "allows exactly the worktree, /tmp and sandbox.writable_paths for writes, nothing else" do
+      home = System.user_home()
+
+      allow =
+        strict_allow(%{
+          "sandbox" => %{"writable_paths" => ["~/.cache/shared-hex", "/opt/tool-cache"]}
+        })
+
+      assert Enum.sort(write_allows(allow)) ==
+               Enum.sort([
+                 "write_file(#{@wt})",
+                 "write_file(/tmp)",
+                 "write_file(#{Path.join(home, ".cache/shared-hex")})",
+                 "write_file(/opt/tool-cache)"
+               ])
+    end
+
+    test "still denies the outside paths, and write_file(/) for a review dispatch outranks the worktree allow" do
+      review =
+        Arbiter.Worker.Dispatch.review_security_policy(
+          SecurityPolicy.merge(SecurityPolicy.base(), %{"permissions" => %{"mode" => "strict"}}),
+          review_checkout: %{path: @wt}
+        )
+
+      settings = Security.settings(review, worktree: @wt)
+      assert "write_file(#{@wt})" in settings["permissions"]["allow"]
+      # agy checks deny before allow (captured: root_deny_beats_worktree_allow).
+      assert "write_file(/)" in settings["permissions"]["deny"]
+    end
+
+    test "is only emitted under :strict; :auto/:bypass keep the bootstrap allow list" do
+      for m <- ["auto", "bypass"] do
+        allow = Security.settings(mode(m), worktree: @wt)["permissions"]["allow"]
+        assert write_allows(allow) == [], m
+        refute "command(mix)" in allow, m
+      end
+    end
+
+    test "with no worktree in hand only /tmp is allowed for writes" do
+      assert write_allows(strict_allow(%{}, [])) == ["write_file(/tmp)"]
+    end
+  end
+
+  describe "write_file/read_file paths are emitted in the form agy matches (bd-f8f9ln)" do
+    test "the outside-write baseline carries absolute directories, no globs and no `~`" do
+      home = System.user_home()
+      deny = Security.deny_rules(policy())
+
+      for dir <- [
+            "/etc",
+            "/usr",
+            "#{home}/.ssh",
+            "#{home}/.gemini",
+            "#{home}/.claude",
+            "#{home}/.config"
+          ] do
+        assert "write_file(#{dir})" in deny, dir
+      end
+
+      refute Enum.any?(deny, &(String.starts_with?(&1, "write_file(") and &1 =~ ~r/[*~]/))
+    end
+
+    test "operator rules have a trailing glob stripped and `~` expanded" do
+      home = System.user_home()
+
+      deny =
+        Security.deny_rules(
+          policy(%{
+            "permissions" => %{
+              "deny" => [
+                "Write(/srv/data/**)",
+                "write_file(~/notes/*)",
+                "Edit(**)",
+                "Read(~/.aws)",
+                "Write(/srv/logs*)"
+              ]
+            }
+          })
+        )
+
+      assert "write_file(/srv/data)" in deny
+      assert "write_file(#{home}/notes)" in deny
+      assert "write_file(/)" in deny
+      assert "read_file(#{home}/.aws)" in deny
+      # Only a whole trailing `*`/`**` segment is stripped.
+      assert "write_file(/srv/logs*)" in deny
+    end
+
+    test "a relative glob has no prefix form and is left untouched" do
+      deny = Security.deny_rules(policy())
+
+      assert "read_file(**/.env)" in deny
+      assert "read_file(**/.ssh/**)" in deny
+    end
+
+    test "the isolated agy HOME's settings dir is denied when the home is known" do
+      deny =
+        Security.settings(policy(), worktree: "/w", home: "/cache/worker-agy/w-abc")[
+          "permissions"
+        ]["deny"]
+
+      assert "write_file(/cache/worker-agy/w-abc/.gemini/antigravity-cli)" in deny
     end
   end
 

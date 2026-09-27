@@ -445,21 +445,18 @@ symlink cycle inside the worker's own `$HOME`.
 Rules are rewritten into agy's own grammar (`command(...)`, `read_file(...)`,
 `write_file(...)`, `read_url(...)`, `execute_url(...)`). A *bare* Claude tool
 name (no `(...)`) maps onto the equivalent whole-path rule where agy has one —
-`Write`/`Edit`/`MultiEdit`/`NotebookEdit` → `write_file(**)`, `Read` →
-`read_file(**)`, `WebFetch`/`WebSearch` → `read_url(*)`, and
-`WebFetch(domain:<host>)` → `read_url(<host>)`. Until bd-80talz these were
-emitted as `url(*)`, which is not an agy rule kind: agy rewrites
+`Write`/`Edit`/`MultiEdit`/`NotebookEdit` → `write_file(/)`, `Read` →
+`read_file(/)`, `WebFetch`/`WebSearch` → `read_url(*)`, and
+`WebFetch(domain:<host>)` → `read_url(<host>)`. Until bd-80talz the URL rules
+were emitted as `url(*)`, which is not an agy rule kind: agy rewrites
 `settings.json` on load and silently drops it (probed on 1.2.11), so the
-network-off deny and the reviewer's `WebFetch` deny never reached agy. The
-`write_file(**)` side of the `Edit`/`Write`/`NotebookEdit` mapping is still
-emitted, but does **not** gate agy's native `write_to_file` tool (see the
-"`write_file(...)` deny rules do not gate" bullet below) — so the reviewer
-read-only posture from `Arbiter.Worker.Dispatch.review_security_policy/2`
-(which denies `Edit`/`Write`/`NotebookEdit` on every worktree-backed review
-dispatch) is only actually enforced for agy's `run_command` and `read_file`,
-not for native writes. A rule with no agy analogue at all — `Monitor`,
-`ScheduleWakeup`, for which agy has no tool-name rule kind — is dropped
-rather than emitted uninterpretably.
+network-off deny and the reviewer's `WebFetch` deny never reached agy. Until
+bd-f8f9ln the path rules were emitted as globs (`write_file(**)`,
+`write_file(/etc/**)`, `write_file(~/.ssh/**)`), which agy keeps but never
+matches; see "Path rules are literal prefixes" below. Every
+`write_file`/`read_file` path is now emitted in the form agy matches. A rule
+with no agy analogue at all — `Monitor`, `ScheduleWakeup`, for which agy has
+no tool-name rule kind — is dropped rather than emitted uninterpretably.
 
 ### What was verified live, and what agy does *not* enforce
 
@@ -499,22 +496,49 @@ throwaway `$HOME`:
   `touch <outside-the-worktree>/marker` via `run_command` still succeeded, and
   so did a `view_file` read of a file outside the workspace. The key is still
   emitted (it is the documented switch and costs nothing).
-* **`write_file(...)` deny rules do not gate agy's native `write_to_file`
-  tool at all (bd-25ivqe AC6, agy 1.2.11).** A prior revision of this doc
-  claimed `write_file` was "deny-list-gated" like `command`/`read_file`; that
-  was never confirmed against a real match, only against `/etc/**`, which a
-  non-root user cannot write to regardless of agy's own gating. Re-probed
-  against a path the user genuinely can write: an exactly-matching
-  `write_file(<dir>/**)` deny, a blanket `write_file(**)` deny, and
-  `--sandbox` (which bwraps `run_command` but not the native tool) all still
-  let `write_to_file` write outside the worktree with no denial.
-  `disabledTools` (a real `settings.json` key) doesn't stop it either — that
-  key gates MCP-server tools, not agy's own built-ins. There is currently no
-  `settings.json` lever that confines `write_to_file` to the worktree; this
-  is exactly what post-merge probe bd-7h2cuk observed (arb/notes worked, but
-  an out-of-worktree `write_to_file` was not denied). Closing it needs an
-  upstream agy fix or real OS isolation, not a settings change — see AC6 in
-  bd-25ivqe, explicitly post-merge and non-blocking for this reason.
+* **`write_file(...)` rules *do* gate agy's native `write_to_file`, but only
+  as literal path prefixes (bd-f8f9ln, agy 1.2.11).** bd-25ivqe AC6 concluded
+  the opposite: a `write_file(**)` deny and a `write_file(<dir>/**)` deny both
+  let `write_to_file` through. Re-probed with `toolPermission:
+  "proceed-in-sandbox"`, the real cause is two separate things. A glob never
+  matches (see the next bullet), and the probe's target was under `/tmp`,
+  which agy lets through with no rule at all (see the `/tmp` bullet). A bare
+  directory rule works in both directions: `write_file(/tmp)` in `deny`
+  blocked a `/tmp` write ("Matches user-configured deny rule"), and
+  `write_file(/)` in `deny` blocked an in-worktree write that
+  `write_file(<worktree>)` in `allow` would otherwise have let through, so
+  deny outranks allow for writes too. The captures are in
+  `apps/arbiter/test/fixtures/agy_write_file_rule_matching.json`.
+  `disabledTools` (a real `settings.json` key) gates MCP-server tools, not
+  agy's own built-ins.
+* **Path rules are literal prefixes (bd-f8f9ln).** `write_file(<dir>)`
+  allowed `<dir>/sub/a.txt` and refused `<dir>x/a.txt` (the match stops at a
+  path-component boundary). `write_file(<dir>/**)` did not match
+  `<dir>/a.txt`. `~` is not expanded: `write_file(~/scratch)` in `allow` did
+  not allow `$HOME/scratch/j.txt`. `read_file(...)` behaves the same way:
+  `read_file(**/.env)` did not stop a `view_file` of `<ws>/.env`, and
+  `read_file(<ws>/.env)` did. So `Gemini.Security` strips a trailing
+  `*`/`**` segment (`**` alone becomes `/`), and expands `~` against the
+  operator's home. A relative glob such as `read_file(**/.env)` has no prefix
+  form and is still emitted as is, which means the `:no_secret_reads`
+  `read_file` globs do not block anything on agy today.
+* **agy lets `/tmp` writes through with no allow rule.** Under
+  `"proceed-in-sandbox"`, with an allow list naming only `command(pwd)`, a
+  `write_to_file` to `/tmp/<dir>/e.txt` landed, while the same call into the
+  trusted workspace itself was soft-denied. This is agy's own scratch
+  allowance, not something the settings grant, and an explicit
+  `write_file(/tmp)` deny removes it. It is why bd-b67vc2 saw `/tmp` allowed
+  and `~/.cache` refused. It no longer matters for the host: every jailed agy
+  spawn gets a private tmpfs `/tmp`, so the write never reaches the host.
+  `:strict` now allows `write_file(/tmp)` explicitly, so the behaviour no
+  longer depends on an agy default.
+* **Headless `:strict` soft-denies an un-allowed write, as it does a
+  command.** Before bd-f8f9ln a `:strict` agy worker's allow list had no
+  `write_file` rule, so its first `write_to_file` into its own worktree came
+  back "user denied permission for write_file(...)", with `denied_actions:
+  [{"action": "write_file"}]`, and the turn ended (bd-bi3in6, run
+  `39f3366f`). `git rev-parse` was soft-denied the same way. See "The
+  `:strict` working set" below for the fix.
   **Decided in bd-ca7xko** ([design/agy-strict-write-isolation.md](design/agy-strict-write-isolation.md)):
   refuse `:strict` dispatch to agy until agy runs under a bubblewrap jail
   that makes the worktree the only writable project path (probed live: a
@@ -535,8 +559,8 @@ throwaway `$HOME`:
   change, with `Gemini.write_jail_warning/1` naming the reason for
   doctor/posture. A worktree-backed agy **review** dispatch also gets its
   worktree bound `--ro-bind` instead of `--bind`, so the reviewer read-only
-  posture is an OS guarantee there too, not just a deny rule agy's native
-  writes ignore.
+  posture is an OS guarantee there too. Since bd-f8f9ln the reviewer's
+  `write_file(/)` deny is also enforced by agy itself.
 * **`--sandbox` disables the allowlist gate under `"proceed-in-sandbox"`
   (bd-25ivqe).** With `--sandbox` on argv, agy runs the command inside a real
   `bwrap` jail and *auto-proceeds* there regardless of `permissions.allow` —
@@ -548,6 +572,32 @@ throwaway `$HOME`:
 As on the Claude side these are *permission-layer* guards inside the agent.
 The one exception is the `:strict` write jail above, which is OS isolation
 for writes only.
+
+### The `:strict` working set (bd-f8f9ln)
+
+A `:strict` agy spawn only runs inside the OS write jail, so the jail is the
+write boundary. agy's own gate must not also refuse the work the jail allows.
+Under `:strict`, `Gemini.Security.allow_rules/2` adds:
+
+* `write_file(<worktree>)`, `write_file(/tmp)`, and `write_file(<path>)` for
+  each `sandbox.writable_paths` entry (normalized the way the jail normalizes
+  them). This is the same set the jail binds writable. The worker's agy
+  `$HOME` is also writable in the jail, but it is not allowed here, and its
+  `.gemini/antigravity-cli` settings directory is denied outright.
+* The commands a worker needs on top of the bootstrap set (`arb`, `git
+  status`/`diff`/`log`, `pwd`): `git add`, `commit`, `rev-parse`, `show`,
+  `branch`, `checkout`, `switch`, `restore`, `rm`, `mv`, `fetch`, `pull`,
+  `push`, `rebase`, `reset`, `stash`, `merge-base`, `ls-files`, `grep`,
+  `blame`, and `mix`, `mkdir`, `touch`, `cp`, `mv`, `rm`.
+
+Deny still outranks allow, so `git push --force`, `rm -rf`, `gh pr create` and
+the rest of the deny baseline stay blocked. A write outside the allowed set
+is refused twice. agy soft-denies it first (captured: an out-of-worktree
+write, and a write to a sibling directory that shares the worktree's name as
+a prefix, were both refused). If that is ever bypassed (a shell command, a
+future agy change), the jail answers `read-only file system`
+(`Arbiter.Worker.JailTest`). `:auto` and `:bypass` do not get the working
+set: `always-proceed` never consults `allow`.
 
 ### Credentials are untouched by the `$HOME` redirect
 

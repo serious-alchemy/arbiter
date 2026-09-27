@@ -359,7 +359,7 @@ defmodule Arbiter.Agents.Gemini.ConfigDir do
   defp write_settings(dir, opts) do
     path = Path.join(dir, @settings_path)
     _ = File.rm(path)
-    File.write(path, Security.settings_json(policy(opts), worktree: worktree(opts)))
+    File.write(path, Security.settings_json(policy(opts), worktree: worktree(opts), home: dir))
   end
 
   defp policy(opts) do

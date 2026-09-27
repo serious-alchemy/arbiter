@@ -1,0 +1,339 @@
+{
+ "agy_version": "1.2.11",
+ "captured": "2026-09-27",
+ "toolPermission": "proceed-in-sandbox",
+ "cases": {
+  "glob_allow_does_not_match": {
+   "probe": "B_allow_glob_ws",
+   "settings_permissions": {
+    "allow": [
+     "command(pwd)",
+     "write_file(/home/ryan/dev/arbiter-worktrees/bugfix-2103-agy-under-strict-can-t-write/tmp/agyprobe/B_allow_glob_ws/ws/**)"
+    ]
+   },
+   "step_update": {
+    "conversation_id": "9ab464a7-1c78-4a6c-b360-a15695cee195",
+    "step_index": 2,
+    "state": "ERROR",
+    "step_type": "tool",
+    "tool_name": "write_to_file",
+    "duration_seconds": 0.112694311,
+    "tool_info": {
+     "name": "write_to_file",
+     "parameters": {
+      "TargetFile": "/home/ryan/dev/arbiter-worktrees/bugfix-2103-agy-under-strict-can-t-write/tmp/agyprobe/B_allow_glob_ws/ws/a.txt"
+     },
+     "error": {
+      "type": "TOOL_ERROR",
+      "message": "permission check failed for write_file \"/home/ryan/dev/arbiter-worktrees/bugfix-2103-agy-under-strict-can-t-write/tmp/agyprobe/B_allow_glob_ws/ws/a.txt\": user denied permission for write_file(/home/ryan/dev/arbiter-worktrees/bugfix-2103-agy-under-strict-can-t-write/tmp/agyprobe/B_allow_glob_ws/ws/a.txt)\nDo not attempt to circumvent this denial by rephrasing the command, using alternative tools/scripts (e.g. python, sh, curl), or accessing the same target resource. Proceed without performing this action."
+     }
+    }
+   },
+   "result": {
+    "denied_actions": [
+     {
+      "action": "write_file",
+      "display_name": "WriteToFile"
+     }
+    ]
+   },
+   "file_created_on_disk": false
+  },
+  "dir_allow_matches_nested": {
+   "probe": "C_allow_dir_ws_nested",
+   "settings_permissions": {
+    "allow": [
+     "command(pwd)",
+     "write_file(/home/ryan/dev/arbiter-worktrees/bugfix-2103-agy-under-strict-can-t-write/tmp/agyprobe/C_allow_dir_ws_nested/ws)"
+    ]
+   },
+   "step_update": {
+    "conversation_id": "c6d0e1c3-7286-4e09-bd6a-e0d0ae68fbf2",
+    "step_index": 2,
+    "state": "DONE",
+    "step_type": "tool",
+    "tool_name": "write_to_file",
+    "duration_seconds": 0.023498524,
+    "tool_info": {
+     "name": "write_to_file",
+     "parameters": {
+      "TargetFile": "/home/ryan/dev/arbiter-worktrees/bugfix-2103-agy-under-strict-can-t-write/tmp/agyprobe/C_allow_dir_ws_nested/ws/sub/a.txt"
+     }
+    }
+   },
+   "result": {
+    "denied_actions": null
+   },
+   "file_created_on_disk": true
+  },
+  "outside_worktree_soft_denied": {
+   "probe": "D_allow_ws_write_out",
+   "settings_permissions": {
+    "allow": [
+     "command(pwd)",
+     "write_file(/home/ryan/dev/arbiter-worktrees/bugfix-2103-agy-under-strict-can-t-write/tmp/agyprobe/D_allow_ws_write_out/ws)"
+    ]
+   },
+   "step_update": {
+    "conversation_id": "354719cb-98d4-4d71-8aab-ac8f371b149d",
+    "step_index": 2,
+    "state": "ERROR",
+    "step_type": "tool",
+    "tool_name": "write_to_file",
+    "duration_seconds": 0.023653781,
+    "tool_info": {
+     "name": "write_to_file",
+     "parameters": {
+      "TargetFile": "/home/ryan/dev/arbiter-worktrees/bugfix-2103-agy-under-strict-can-t-write/tmp/agyprobe/D_allow_ws_write_out/outside/a.txt"
+     },
+     "error": {
+      "type": "TOOL_ERROR",
+      "message": "permission check failed for write_file \"/home/ryan/dev/arbiter-worktrees/bugfix-2103-agy-under-strict-can-t-write/tmp/agyprobe/D_allow_ws_write_out/outside/a.txt\": user denied permission for write_file(/home/ryan/dev/arbiter-worktrees/bugfix-2103-agy-under-strict-can-t-write/tmp/agyprobe/D_allow_ws_write_out/outside/a.txt)\nDo not attempt to circumvent this denial by rephrasing the command, using alternative tools/scripts (e.g. python, sh, curl), or accessing the same target resource. Proceed without performing this action."
+     }
+    }
+   },
+   "result": {
+    "denied_actions": [
+     {
+      "action": "write_file",
+      "display_name": "WriteToFile"
+     }
+    ]
+   },
+   "file_created_on_disk": false
+  },
+  "sibling_prefix_soft_denied": {
+   "probe": "D2_allow_ws_write_sibling_prefix",
+   "settings_permissions": {
+    "allow": [
+     "command(pwd)",
+     "write_file(/home/ryan/dev/arbiter-worktrees/bugfix-2103-agy-under-strict-can-t-write/tmp/agyprobe/D2_allow_ws_write_sibling_prefix/ws)"
+    ]
+   },
+   "step_update": {
+    "conversation_id": "da940e10-fec4-4865-a02f-f2fe320f4ae3",
+    "step_index": 2,
+    "state": "ERROR",
+    "step_type": "tool",
+    "tool_name": "write_to_file",
+    "duration_seconds": 0.044752589,
+    "tool_info": {
+     "name": "write_to_file",
+     "parameters": {
+      "TargetFile": "/home/ryan/dev/arbiter-worktrees/bugfix-2103-agy-under-strict-can-t-write/tmp/agyprobe/D2_allow_ws_write_sibling_prefix/wsx/a.txt"
+     },
+     "error": {
+      "type": "TOOL_ERROR",
+      "message": "permission check failed for write_file \"/home/ryan/dev/arbiter-worktrees/bugfix-2103-agy-under-strict-can-t-write/tmp/agyprobe/D2_allow_ws_write_sibling_prefix/wsx/a.txt\": user denied permission for write_file(/home/ryan/dev/arbiter-worktrees/bugfix-2103-agy-under-strict-can-t-write/tmp/agyprobe/D2_allow_ws_write_sibling_prefix/wsx/a.txt)\nDo not attempt to circumvent this denial by rephrasing the command, using alternative tools/scripts (e.g. python, sh, curl), or accessing the same target resource. Proceed without performing this action."
+     }
+    }
+   },
+   "result": {
+    "denied_actions": [
+     {
+      "action": "write_file",
+      "display_name": "WriteToFile"
+     }
+    ]
+   },
+   "file_created_on_disk": false
+  },
+  "tmp_auto_allowed": {
+   "probe": "E_noallow_tmp",
+   "settings_permissions": {
+    "allow": [
+     "command(pwd)"
+    ]
+   },
+   "step_update": {
+    "conversation_id": "76e527d5-afbe-4d8f-838e-ecd4766e2c2e",
+    "step_index": 2,
+    "state": "DONE",
+    "step_type": "tool",
+    "tool_name": "write_to_file",
+    "duration_seconds": 0.03137796,
+    "tool_info": {
+     "name": "write_to_file",
+     "parameters": {
+      "TargetFile": "/tmp/agyprobe-1790483005163452514/e.txt"
+     }
+    }
+   },
+   "result": {
+    "denied_actions": null
+   },
+   "file_created_on_disk": true
+  },
+  "tmp_explicit_deny": {
+   "probe": "F_deny_tmp_dir",
+   "settings_permissions": {
+    "allow": [
+     "command(pwd)"
+    ],
+    "deny": [
+     "write_file(/tmp)"
+    ]
+   },
+   "step_update": {
+    "conversation_id": "2b5c0fb6-ec29-4828-89f9-5c328d9d202e",
+    "step_index": 2,
+    "state": "ERROR",
+    "step_type": "tool",
+    "tool_name": "write_to_file",
+    "duration_seconds": 0.063589914,
+    "tool_info": {
+     "name": "write_to_file",
+     "parameters": {
+      "TargetFile": "/tmp/agyprobe-1790483005163452514/f.txt"
+     },
+     "error": {
+      "type": "TOOL_ERROR",
+      "message": "permission check failed for write_file \"/tmp/agyprobe-1790483005163452514/f.txt\": Permission denied for write_file(/tmp/agyprobe-1790483005163452514/f.txt). Matches user-configured deny rule."
+     }
+    }
+   },
+   "result": {
+    "denied_actions": null
+   },
+   "file_created_on_disk": false
+  },
+  "root_deny_beats_worktree_allow": {
+   "probe": "I_deny_root",
+   "settings_permissions": {
+    "allow": [
+     "command(pwd)",
+     "write_file(/home/ryan/dev/arbiter-worktrees/bugfix-2103-agy-under-strict-can-t-write/tmp/agyprobe/I_deny_root/ws)"
+    ],
+    "deny": [
+     "write_file(/)"
+    ]
+   },
+   "step_update": {
+    "conversation_id": "d0623660-c45f-40cd-b379-ecc9403af742",
+    "step_index": 2,
+    "state": "ERROR",
+    "step_type": "tool",
+    "tool_name": "write_to_file",
+    "duration_seconds": 0.027177784,
+    "tool_info": {
+     "name": "write_to_file",
+     "parameters": {
+      "TargetFile": "/home/ryan/dev/arbiter-worktrees/bugfix-2103-agy-under-strict-can-t-write/tmp/agyprobe/I_deny_root/ws/i.txt"
+     },
+     "error": {
+      "type": "TOOL_ERROR",
+      "message": "permission check failed for write_file \"/home/ryan/dev/arbiter-worktrees/bugfix-2103-agy-under-strict-can-t-write/tmp/agyprobe/I_deny_root/ws/i.txt\": Permission denied for write_file(/home/ryan/dev/arbiter-worktrees/bugfix-2103-agy-under-strict-can-t-write/tmp/agyprobe/I_deny_root/ws/i.txt). Matches user-configured deny rule."
+     }
+    }
+   },
+   "result": {
+    "denied_actions": null
+   },
+   "file_created_on_disk": false
+  },
+  "worktree_without_allow_soft_denied": {
+   "probe": "A_noallow_ws",
+   "settings_permissions": {
+    "allow": [
+     "command(pwd)"
+    ]
+   },
+   "step_update": {
+    "conversation_id": "89f745b6-ac4a-4b22-86cf-7732019886eb",
+    "step_index": 2,
+    "state": "DONE",
+    "step_type": "tool",
+    "tool_name": "write_to_file",
+    "duration_seconds": 0.021895599,
+    "tool_info": {
+     "name": "write_to_file",
+     "parameters": {
+      "TargetFile": "/home/ryan/dev/arbiter-worktrees/bugfix-2103-agy-under-strict-can-t-write/tmp/agyprobe/A_noallow_ws/ws/a.txt"
+     }
+    }
+   },
+   "result": {
+    "denied_actions": [
+     {
+      "action": "write_file",
+      "display_name": "WriteToFile"
+     }
+    ]
+   },
+   "file_created_on_disk": false
+  },
+  "always_proceed_root_deny": {
+   "probe": "P1_always_proceed_root_deny",
+   "toolPermission": "always-proceed",
+   "extra_argv": [],
+   "settings_permissions": {
+    "allow": [
+     "command(pwd)"
+    ],
+    "deny": [
+     "write_file(/)"
+    ]
+   },
+   "step_update": {
+    "conversation_id": "753cbc3a-fc13-498f-bc98-cc3617783403",
+    "step_index": 2,
+    "state": "ERROR",
+    "step_type": "tool",
+    "tool_name": "write_to_file",
+    "duration_seconds": 0.018553063,
+    "tool_info": {
+     "name": "write_to_file",
+     "parameters": {
+      "TargetFile": "/home/ryan/dev/arbiter-worktrees/bugfix-2103-agy-under-strict-can-t-write/tmp/agyprobe/P1_always_proceed_root_deny/ws/p.txt"
+     },
+     "error": {
+      "type": "TOOL_ERROR",
+      "message": "permission check failed for write_file \"/home/ryan/dev/arbiter-worktrees/bugfix-2103-agy-under-strict-can-t-write/tmp/agyprobe/P1_always_proceed_root_deny/ws/p.txt\": Permission denied for write_file(/home/ryan/dev/arbiter-worktrees/bugfix-2103-agy-under-strict-can-t-write/tmp/agyprobe/P1_always_proceed_root_deny/ws/p.txt). Matches user-configured deny rule."
+     }
+    }
+   },
+   "result": {
+    "denied_actions": null
+   },
+   "file_created_on_disk": false
+  },
+  "skip_permissions_root_deny": {
+   "probe": "P2_skip_perms_root_deny",
+   "toolPermission": "always-proceed",
+   "extra_argv": [
+    "--dangerously-skip-permissions"
+   ],
+   "settings_permissions": {
+    "allow": [
+     "command(pwd)"
+    ],
+    "deny": [
+     "write_file(/)"
+    ]
+   },
+   "step_update": {
+    "conversation_id": "25bb2819-4548-450e-a2dc-de9c20534174",
+    "step_index": 2,
+    "state": "ERROR",
+    "step_type": "tool",
+    "tool_name": "write_to_file",
+    "duration_seconds": 0.018754256,
+    "tool_info": {
+     "name": "write_to_file",
+     "parameters": {
+      "TargetFile": "/home/ryan/dev/arbiter-worktrees/bugfix-2103-agy-under-strict-can-t-write/tmp/agyprobe/P2_skip_perms_root_deny/ws/p.txt"
+     },
+     "error": {
+      "type": "TOOL_ERROR",
+      "message": "permission check failed for write_file \"/home/ryan/dev/arbiter-worktrees/bugfix-2103-agy-under-strict-can-t-write/tmp/agyprobe/P2_skip_perms_root_deny/ws/p.txt\": Permission denied for write_file(/home/ryan/dev/arbiter-worktrees/bugfix-2103-agy-under-strict-can-t-write/tmp/agyprobe/P2_skip_perms_root_deny/ws/p.txt). Matches user-configured deny rule."
+     }
+    }
+   },
+   "result": {
+    "denied_actions": null
+   },
+   "file_created_on_disk": false
+  }
+ },
+ "toolPermission_note": "cases without their own toolPermission ran under proceed-in-sandbox"
+}
