@@ -31,6 +31,14 @@ defmodule ArbiterWeb.Api.QuotaController do
   data; the rest are `null`, the same as an unauthenticated CLI. Takes
   priority over `?workspace=` when both are given.
 
+  `account_policy` / `policy_binding` (bd-c7ll4t) describe the headline
+  account's own `quota_config` (mode, ceilings) and, under `?workspace=`,
+  which side of `min(account, workspace)` is currently binding each flat
+  ceiling — `:account`, `:workspace`, or `:default`. With `:provider_accounts_enabled`
+  on, an account's flat ceiling can bind tighter than a paced/looser
+  workspace's own config silently (bd-5ps98m); this is how `arb quota` says
+  so instead of only ever printing "not quota-held".
+
     * `claude` — the latest polled snapshot, including per-model weekly breakdowns
       and overage spend; `null` before the first poll.
     * `codex` — the persisted OpenAI session/weekly-window snapshot (a distinct
@@ -68,6 +76,13 @@ defmodule ArbiterWeb.Api.QuotaController do
         # may sit on a different account per provider, so each `quotas` entry
         # carries its own pair too.
         headline = Quota.account_fields(accounts["claude"], "claude", spend)
+        headline_workspace = safe_workspace(ws_id)
+
+        policy =
+          Quota.policy_fields(
+            Arbiter.Accounts.Resolver.get(accounts["claude"]),
+            headline_workspace
+          )
 
         render(conn, :show,
           workspace_id: ws_id,
@@ -81,6 +96,9 @@ defmodule ArbiterWeb.Api.QuotaController do
           quotas: Quota.list_serialized_for_workspace(ws_id, spend_cache: spend),
           account: headline[:account],
           workspaces: headline[:workspaces],
+          account_policy: policy[:account_policy],
+          policy_binding: policy[:policy_binding],
+          effective_policy: policy[:effective],
           codex: codex,
           codex_message: Quota.codex_absence_message(codex),
           # bd-1fpjgx: mirrors `claude`'s `credentials_expired` field, sourced
@@ -115,6 +133,7 @@ defmodule ArbiterWeb.Api.QuotaController do
         fields = Quota.account_fields(account.id, provider, spend)
 
         codex = if provider == "codex", do: Quota.Codex.serialize_latest(account.id)
+        policy = Quota.policy_fields(account, nil)
 
         render(conn, :show,
           workspace_id: nil,
@@ -127,6 +146,9 @@ defmodule ArbiterWeb.Api.QuotaController do
           quotas: Quota.list_serialized(account.id, spend_cache: spend),
           account: fields[:account],
           workspaces: fields[:workspaces],
+          account_policy: policy[:account_policy],
+          policy_binding: policy[:policy_binding],
+          effective_policy: policy[:effective],
           codex: codex,
           codex_message: Quota.codex_absence_message(codex),
           codex_credentials_expired:
@@ -169,6 +191,15 @@ defmodule ArbiterWeb.Api.QuotaController do
     end
   rescue
     _ -> %{id: ws_id, name: nil}
+  end
+
+  defp safe_workspace(ws_id) do
+    case Ash.get(Workspace, ws_id) do
+      {:ok, %Workspace{} = ws} -> ws
+      _ -> nil
+    end
+  rescue
+    _ -> nil
   end
 
   # Explicit `?workspace=` (id, then name) wins; else the installation default.

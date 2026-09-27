@@ -295,6 +295,33 @@ defmodule ArbiterWeb.Api.QuotaControllerTest do
       end
     end
 
+    # bd-5ps98m: `claude:default` had `quota_config: {}` (a flat 0.90 weekly
+    # threshold), which silently capped a workspace configured `paced` with
+    # no ceiling of its own — this pins that the response now says the
+    # account side binds, instead of only ever showing "not quota-held".
+    test "an account's flat weekly_threshold binds even when the workspace is paced (bd-5ps98m)",
+         %{conn: conn, ws: ws} do
+      account =
+        Ash.create!(ProviderAccount, %{
+          provider: :claude,
+          slug: "default",
+          quota_config: %{"weekly_threshold" => 0.90}
+        })
+
+      Ash.create!(WorkspaceProviderAccount, %{
+        workspace_id: ws.id,
+        provider: :claude,
+        provider_account_id: account.id
+      })
+
+      Ash.update!(ws, %{config: %{"quota" => %{"threshold_mode" => "paced"}}})
+
+      resp = conn |> get("/api/quota?workspace=#{ws.id}") |> json_response(200)
+
+      assert resp["data"]["account_policy"]["weekly_threshold"] == 0.90
+      assert resp["data"]["policy_binding"]["weekly_threshold"] == "account"
+    end
+
     test "--json keeps workspace_id as a deprecated alias alongside account/workspaces",
          %{conn: conn, ws: ws} do
       {:ok, _} = Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.24"}])
@@ -353,6 +380,26 @@ defmodule ArbiterWeb.Api.QuotaControllerTest do
     test "an unknown account ref is a 404, not a crash", %{conn: conn} do
       resp = conn |> get("/api/quota?account=no-such-account") |> json_response(404)
       assert resp["error"]["type"] == "not_found"
+    end
+
+    test "?account=<slug> reports the account's own quota policy with no workspace side", %{
+      conn: conn
+    } do
+      Ash.create!(ProviderAccount, %{
+        provider: :claude,
+        slug: "policy-account",
+        quota_config: %{"threshold_mode" => "paced", "weekly_threshold" => 0.92}
+      })
+
+      resp = conn |> get("/api/quota?account=policy-account") |> json_response(200)
+
+      assert resp["data"]["account_policy"]["threshold_mode"] == "paced"
+      # bd-c7ll4t (review finding 2): a paced side ignores its own flat key —
+      # `weekly_threshold: 0.92` is stale and would never bind, so it reports
+      # `nil` rather than a number nothing is actually enforcing.
+      assert resp["data"]["account_policy"]["weekly_threshold"] == nil
+      # no workspace lookup happened, so both sides read `:account`/`:default`
+      assert resp["data"]["policy_binding"]["weekly_threshold"] == "account"
     end
 
     test "cost_usd includes a preflight row that carries no workspace_id (bd-adyhvn)", %{

@@ -103,6 +103,7 @@ defmodule ArbiterCli.Cmd.Quota do
 
   defp emit(data, :text, params) do
     emit_via_workspace(data, params)
+    emit_policy(data, params)
     emit_claude(data)
     IO.puts("")
     emit_codex(data)
@@ -138,6 +139,79 @@ defmodule ArbiterCli.Cmd.Quota do
 
   defp workspace_label(%{"workspace" => %{"name" => name}}, _ref) when is_binary(name), do: name
   defp workspace_label(_data, ref), do: ref
+
+  # ---- account policy (bd-c7ll4t) -----------------------------------------
+
+  # With `:provider_accounts_enabled` on, `Arbiter.Quota.Gate` resolves every
+  # threshold as `min(account, workspace)` — an account's flat ceiling can
+  # bind tighter than a workspace set to paced/looser, silently (bd-5ps98m).
+  # `--account` shows the account's own policy on its own (no workspace side
+  # to bind against); `--workspace`/the default shows which side is actually
+  # in force.
+  defp emit_policy(%{"account_policy" => %{} = policy} = data, params) do
+    IO.puts("Account policy (#{account_label(data)}):")
+    IO.puts("  threshold_mode:      #{policy["threshold_mode"]}")
+    emit_policy_line("throttle_threshold", policy, data, params)
+    emit_policy_line("weekly_threshold", policy, data, params)
+
+    if policy["threshold_mode"] == "paced" do
+      IO.puts("  paced_floor:         #{format_frac(policy["paced_floor"])}")
+      IO.puts("  weekly_paced_floor:  #{format_frac(policy["weekly_paced_floor"])}")
+    end
+
+    IO.puts("")
+  end
+
+  defp emit_policy(_data, _params), do: :ok
+
+  defp account_label(data) do
+    case data["account"] do
+      %{"slug" => slug, "provider" => provider} -> "#{provider}:#{slug}"
+      _ -> "—"
+    end
+  end
+
+  # Under `--workspace` (or the default workspace lookup) the number that
+  # binds may not be the account's own — a paced/looser workspace whose
+  # account is flat and stricter is exactly the silent cap `bd-5ps98m` hit —
+  # so print the *effective* `min(account, workspace)` ceiling
+  # (`data["effective_policy"]`, bd-c7ll4t) rather than always the account's
+  # raw setting. `--account` has no workspace side to differ from, so its
+  # effective value is just the account's own number.
+  defp emit_policy_line(key, policy, data, params) do
+    effective = get_in(data, ["effective_policy", key]) || policy[key]
+
+    IO.puts(
+      "  #{String.pad_trailing(key <> ":", 21)}#{format_frac(effective)}#{binds(key, policy, data, params)}"
+    )
+  end
+
+  # `--account` never carries a workspace to compare against, so
+  # `policy_binding` always reads `:account`/`:default` and saying so would
+  # be noise; only `--workspace` (or the default workspace lookup) says which
+  # side is binding. When the workspace binds, also name the account's own
+  # (now overridden) number so a reader isn't left wondering what it was.
+  defp binds(key, policy, data, params) do
+    case Keyword.get(params, :account) do
+      ref when is_binary(ref) and ref != "" ->
+        ""
+
+      _ ->
+        case get_in(data, ["policy_binding", key]) do
+          "workspace" = side ->
+            case policy[key] do
+              n when is_number(n) -> "  (#{side} binds; account #{format_frac(n)})"
+              _ -> "  (#{side} binds)"
+            end
+
+          side when is_binary(side) ->
+            "  (#{side} binds)"
+
+          _ ->
+            ""
+        end
+    end
+  end
 
   # ---- account header (§6) -----------------------------------------------
 

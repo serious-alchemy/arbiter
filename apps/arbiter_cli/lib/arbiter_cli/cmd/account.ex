@@ -19,13 +19,26 @@ defmodule ArbiterCli.Cmd.Account do
                                      [--max-concurrent N]
                                      No credential is required at creation
                                      time (§2.4 — operator-asserted identity).
-      arb account set    <ref> --max-concurrent N|none
-                                     The account concurrency ceiling (P8,
-                                     §4.2): at most N workers may run on this
-                                     account across every workspace metered
-                                     under it. `none` clears it — the ceiling
-                                     is opt-in (§4.4) and an account without
-                                     one behaves exactly as it did before P8.
+      arb account set    <ref> [--max-concurrent N|none]
+                                     [--threshold-mode flat|paced]
+                                     [--weekly-threshold F] [--paced-floor F]
+                                     [--weekly-paced-floor F]
+                                     `--max-concurrent`: the account
+                                     concurrency ceiling (P8, §4.2): at most N
+                                     workers may run on this account across
+                                     every workspace metered under it. `none`
+                                     clears it — the ceiling is opt-in (§4.4)
+                                     and an account without one behaves
+                                     exactly as it did before P8.
+                                     `--threshold-mode` / `--weekly-threshold`
+                                     / `--paced-floor` / `--weekly-paced-floor`
+                                     (bd-c7ll4t): a partial merge into the
+                                     account's `quota_config` — the gate
+                                     settings `Arbiter.Quota.Gate` resolves as
+                                     `min(account, workspace)`. Only the given
+                                     fields change; a sibling key already set
+                                     (e.g. `throttle_threshold`) is untouched.
+                                     At least one flag is required.
       arb account attach <workspace-id> <provider> <ref> [--share N]
                                      Points a workspace at an account for a
                                      provider — writes/updates the
@@ -65,6 +78,10 @@ defmodule ArbiterCli.Cmd.Account do
     # :string, not :integer, so `--max-concurrent none` can clear the
     # ceiling — it is nullable and `nil` means "no ceiling" (§4.4).
     max_concurrent: :string,
+    threshold_mode: :string,
+    weekly_threshold: :string,
+    paced_floor: :string,
+    weekly_paced_floor: :string,
     share: :integer,
     kind: :string,
     env_var: :string,
@@ -219,26 +236,78 @@ defmodule ArbiterCli.Cmd.Account do
   defp set(args, opts, mode) do
     ref = one_ref!(args, "set")
 
-    max_concurrent =
-      case Keyword.fetch(opts, :max_concurrent) do
-        {:ok, _} -> max_concurrent!(opts)
-        :error -> Output.die("account set requires --max-concurrent N|none")
-      end
+    payload =
+      %{}
+      |> maybe_put_ceiling(opts)
+      |> maybe_put_quota_config(opts)
 
-    ceiling = if max_concurrent == :clear, do: nil, else: max_concurrent
+    if payload == %{} do
+      Output.die(
+        "account set requires at least one of --max-concurrent, --threshold-mode, " <>
+          "--weekly-threshold, --paced-floor, --weekly-paced-floor"
+      )
+    end
 
-    case Client.patch("/api/accounts/" <> URI.encode(ref), %{"max_concurrent" => ceiling}) do
+    case Client.patch("/api/accounts/" <> URI.encode(ref), payload) do
       {:ok, account} -> emit_set(account, mode)
       {:error, err} -> Output.die(err)
+    end
+  end
+
+  defp maybe_put_ceiling(payload, opts) do
+    case Keyword.fetch(opts, :max_concurrent) do
+      {:ok, _} ->
+        ceiling =
+          case max_concurrent!(opts) do
+            :clear -> nil
+            value -> value
+          end
+
+        Map.put(payload, "max_concurrent", ceiling)
+
+      :error ->
+        payload
+    end
+  end
+
+  defp maybe_put_quota_config(payload, opts) do
+    quota_config =
+      %{}
+      |> maybe_put("threshold_mode", opts[:threshold_mode])
+      |> maybe_put(
+        "weekly_threshold",
+        parse_fraction!(opts[:weekly_threshold], "--weekly-threshold")
+      )
+      |> maybe_put("paced_floor", parse_fraction!(opts[:paced_floor], "--paced-floor"))
+      |> maybe_put(
+        "weekly_paced_floor",
+        parse_fraction!(opts[:weekly_paced_floor], "--weekly-paced-floor")
+      )
+
+    if quota_config == %{}, do: payload, else: Map.put(payload, "quota_config", quota_config)
+  end
+
+  defp parse_fraction!(nil, _flag), do: nil
+
+  defp parse_fraction!(value, flag) do
+    case Float.parse(value) do
+      {f, ""} when f > 0 and f <= 1 ->
+        f
+
+      _ ->
+        Output.die("#{flag} must be a number in 0..1 (got #{inspect(value)})")
     end
   end
 
   defp emit_set(account, :json), do: IO.puts(Jason.encode!(account))
 
   defp emit_set(account, :text) do
+    quota_config = account["quota_config"] || %{}
+
     IO.puts(
       "#{account["provider"]}:#{account["slug"]} max_concurrent=" <>
-        "#{account["max_concurrent"] || "(none)"}"
+        "#{account["max_concurrent"] || "(none)"}" <>
+        " threshold_mode=#{quota_config["threshold_mode"] || "flat"}"
     )
   end
 

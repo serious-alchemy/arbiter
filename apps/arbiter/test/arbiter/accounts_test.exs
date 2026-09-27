@@ -189,6 +189,68 @@ defmodule Arbiter.AccountsTest do
     end
   end
 
+  describe "set_quota_config/2 (bd-c7ll4t)" do
+    test "sets threshold_mode" do
+      create_account!(%{provider: :claude, slug: "policy-set"})
+
+      assert {:ok, account} =
+               Accounts.set_quota_config("policy-set", %{"threshold_mode" => "paced"})
+
+      assert account.quota_config["threshold_mode"] == "paced"
+    end
+
+    test "merges into the existing quota_config rather than replacing it" do
+      create_account!(%{
+        provider: :claude,
+        slug: "policy-merge",
+        quota_config: %{"throttle_threshold" => 0.8}
+      })
+
+      assert {:ok, account} =
+               Accounts.set_quota_config("policy-merge", %{"weekly_threshold" => 0.95})
+
+      assert account.quota_config["weekly_threshold"] == 0.95
+      assert account.quota_config["throttle_threshold"] == 0.8
+    end
+
+    test "rejects an invalid threshold_mode without writing anything" do
+      account = create_account!(%{provider: :claude, slug: "policy-bad-mode"})
+
+      assert {:error, {:invalid_quota_config, _}} =
+               Accounts.set_quota_config("policy-bad-mode", %{"threshold_mode" => "bogus"})
+
+      assert {:ok, unchanged} = Accounts.get_account(account.id)
+      assert unchanged.quota_config == %{}
+    end
+
+    test "rejects an out-of-range float" do
+      create_account!(%{provider: :claude, slug: "policy-bad-float"})
+
+      assert {:error, {:invalid_quota_config, _}} =
+               Accounts.set_quota_config("policy-bad-float", %{"weekly_threshold" => 1.5})
+    end
+
+    test "rejects an unknown key" do
+      create_account!(%{provider: :claude, slug: "policy-bad-key"})
+
+      assert {:error, {:invalid_quota_config, _}} =
+               Accounts.set_quota_config("policy-bad-key", %{"not_a_real_key" => "x"})
+    end
+
+    test "resolves the same refs every other verb does" do
+      account = create_account!(%{provider: :claude, slug: "policy-refs"})
+
+      assert {:ok, _} =
+               Accounts.set_quota_config(account.id, %{"threshold_mode" => "paced"})
+
+      assert {:ok, _} =
+               Accounts.set_quota_config("claude:policy-refs", %{"threshold_mode" => "flat"})
+
+      assert {:error, :not_found} =
+               Accounts.set_quota_config("no-such-account", %{"threshold_mode" => "flat"})
+    end
+  end
+
   describe "share is a cap, not a reservation (§4.3)" do
     test "shares may sum to more than the account ceiling" do
       account = create_account!(%{provider: :claude, slug: "oversubscribed", max_concurrent: 4})

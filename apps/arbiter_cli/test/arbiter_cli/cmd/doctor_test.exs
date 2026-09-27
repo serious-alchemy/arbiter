@@ -158,7 +158,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     assert exit_code == 0
     assert {:ok, %{"ok" => true, "checks" => checks}} = Jason.decode(String.trim(out))
     assert is_list(checks)
-    assert length(checks) == 11
+    assert length(checks) == 12
   end
 
   test "version mismatch is non-fatal (exit 0 but shows [fail])" do
@@ -1026,6 +1026,185 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       assert out =~ "[fail] agy write jail"
       assert out =~ "default (repo tonic): agy write jail unavailable"
       assert out =~ "hint:"
+    end
+  end
+
+  describe "account/workspace quota policy check (bd-c7ll4t)" do
+    test "green when no workspace configures its own quota settings" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] account/workspace quota policy"
+    end
+
+    # bd-5ps98m: a workspace explicitly configured `paced`/no ceiling, but the
+    # account's own flat, stricter setting was the one actually binding —
+    # invisible until this check.
+    test "names the workspace when the account overrides its own quota config" do
+      workspace_with_quota_config = %{
+        "data" => [
+          %{
+            "id" => "ws-1",
+            "name" => "default",
+            "prefix" => "bd",
+            "config" => %{"quota" => %{"threshold_mode" => "paced"}}
+          }
+        ]
+      }
+
+      stub_routes([
+        {{"get", "/api/workspaces"}, {workspace_with_quota_config, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/quota"},
+         fn conn ->
+           conn
+           |> Plug.Conn.put_status(200)
+           |> Req.Test.json(%{
+             "data" => %{
+               "policy_binding" => %{
+                 "throttle_threshold" => "account",
+                 "weekly_threshold" => "account"
+               }
+             }
+           })
+         end}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      # Non-fatal: named, but does not block readiness or fail the exit code.
+      assert exit_code == 0
+      assert out =~ "[fail] account/workspace quota policy"
+      assert out =~ "default: account overrides its own throttle_threshold"
+      assert out =~ "default: account overrides its own weekly_threshold"
+    end
+
+    test "quiet when the workspace's own config is the side that binds" do
+      workspace_with_quota_config = %{
+        "data" => [
+          %{
+            "id" => "ws-1",
+            "name" => "default",
+            "prefix" => "bd",
+            "config" => %{"quota" => %{"throttle_threshold" => 0.5}}
+          }
+        ]
+      }
+
+      stub_routes([
+        {{"get", "/api/workspaces"}, {workspace_with_quota_config, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/quota"},
+         fn conn ->
+           conn
+           |> Plug.Conn.put_status(200)
+           |> Req.Test.json(%{
+             "data" => %{
+               "policy_binding" => %{
+                 "throttle_threshold" => "workspace",
+                 "weekly_threshold" => "default"
+               }
+             }
+           })
+         end}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] account/workspace quota policy"
+    end
+
+    # bd-c7ll4t (review finding 3): a workspace that only set
+    # `throttle_threshold` never expressed an opinion about the weekly
+    # window, so the account binding that window must not be reported as an
+    # override — there is nothing of the workspace's own being overridden.
+    test "does not flag a window the workspace never configured" do
+      workspace_with_quota_config = %{
+        "data" => [
+          %{
+            "id" => "ws-1",
+            "name" => "default",
+            "prefix" => "bd",
+            "config" => %{"quota" => %{"throttle_threshold" => 0.7}}
+          }
+        ]
+      }
+
+      stub_routes([
+        {{"get", "/api/workspaces"}, {workspace_with_quota_config, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/quota"},
+         fn conn ->
+           conn
+           |> Plug.Conn.put_status(200)
+           |> Req.Test.json(%{
+             "data" => %{
+               "policy_binding" => %{
+                 "throttle_threshold" => "account",
+                 "weekly_threshold" => "account"
+               }
+             }
+           })
+         end}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[fail] account/workspace quota policy"
+      assert out =~ "default: account overrides its own throttle_threshold"
+      refute out =~ "weekly_threshold"
+    end
+
+    # bd-c7ll4t (review finding 3): a `quota` map that only sets an unrelated
+    # key (no flat key of its own, no `threshold_mode: "paced"`) expressed no
+    # opinion about either window, so the account binding both is not an
+    # override of anything.
+    test "stays ok when the workspace's quota config sets only an unrelated key" do
+      workspace_with_quota_config = %{
+        "data" => [
+          %{
+            "id" => "ws-1",
+            "name" => "default",
+            "prefix" => "bd",
+            "config" => %{"quota" => %{"weekly_warning_policy" => "hold"}}
+          }
+        ]
+      }
+
+      stub_routes([
+        {{"get", "/api/workspaces"}, {workspace_with_quota_config, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/quota"},
+         fn conn ->
+           conn
+           |> Plug.Conn.put_status(200)
+           |> Req.Test.json(%{
+             "data" => %{
+               "policy_binding" => %{
+                 "throttle_threshold" => "account",
+                 "weekly_threshold" => "account"
+               }
+             }
+           })
+         end}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] account/workspace quota policy"
     end
   end
 end

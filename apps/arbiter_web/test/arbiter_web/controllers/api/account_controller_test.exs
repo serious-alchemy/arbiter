@@ -72,6 +72,124 @@ defmodule ArbiterWeb.Api.AccountControllerTest do
     end
   end
 
+  describe "PATCH /api/accounts/:ref (bd-c7ll4t — quota_config)" do
+    test "sets threshold_mode without disturbing max_concurrent", %{conn: conn} do
+      create_account!(%{provider: :claude, slug: "policy", max_concurrent: 3})
+
+      body =
+        json_response(
+          patch(conn, ~p"/api/accounts/policy", %{
+            quota_config: %{threshold_mode: "paced"}
+          }),
+          200
+        )
+
+      assert body["quota_config"]["threshold_mode"] == "paced"
+      assert body["max_concurrent"] == 3
+    end
+
+    test "merges into existing quota_config rather than replacing it", %{conn: conn} do
+      create_account!(%{
+        provider: :claude,
+        slug: "merge-policy",
+        quota_config: %{"throttle_threshold" => 0.8}
+      })
+
+      body =
+        json_response(
+          patch(conn, ~p"/api/accounts/merge-policy", %{
+            quota_config: %{weekly_threshold: 0.95}
+          }),
+          200
+        )
+
+      assert body["quota_config"]["weekly_threshold"] == 0.95
+      assert body["quota_config"]["throttle_threshold"] == 0.8
+    end
+
+    test "sets weekly_threshold, paced_floor, weekly_paced_floor together", %{conn: conn} do
+      create_account!(%{provider: :claude, slug: "full-policy"})
+
+      body =
+        json_response(
+          patch(conn, ~p"/api/accounts/full-policy", %{
+            quota_config: %{
+              threshold_mode: "paced",
+              weekly_threshold: 0.92,
+              paced_floor: 0.4,
+              weekly_paced_floor: 0.25
+            }
+          }),
+          200
+        )
+
+      assert body["quota_config"] == %{
+               "threshold_mode" => "paced",
+               "weekly_threshold" => 0.92,
+               "paced_floor" => 0.4,
+               "weekly_paced_floor" => 0.25
+             }
+    end
+
+    test "400s on an invalid threshold_mode", %{conn: conn} do
+      create_account!(%{provider: :claude, slug: "bad-mode"})
+
+      assert json_response(
+               patch(conn, ~p"/api/accounts/bad-mode", %{
+                 quota_config: %{threshold_mode: "aggressive"}
+               }),
+               400
+             )
+    end
+
+    test "400s on an out-of-range float", %{conn: conn} do
+      create_account!(%{provider: :claude, slug: "bad-float"})
+
+      assert json_response(
+               patch(conn, ~p"/api/accounts/bad-float", %{
+                 quota_config: %{weekly_threshold: 1.5}
+               }),
+               400
+             )
+    end
+
+    test "400s on an unknown quota_config key", %{conn: conn} do
+      create_account!(%{provider: :claude, slug: "bad-key"})
+
+      assert json_response(
+               patch(conn, ~p"/api/accounts/bad-key", %{
+                 quota_config: %{not_a_real_key: "x"}
+               }),
+               400
+             )
+    end
+
+    test "400s when neither max_concurrent nor quota_config is given", %{conn: conn} do
+      create_account!(%{provider: :claude, slug: "no-updates"})
+      assert json_response(patch(conn, ~p"/api/accounts/no-updates", %{}), 400)
+    end
+
+    # bd-c7ll4t (review finding 4): an invalid quota_config alongside a valid
+    # max_concurrent must not partially apply — the request is one edit, not
+    # two independent ones the caller can end up half-committed to.
+    test "an invalid quota_config rejects the whole request without writing max_concurrent", %{
+      conn: conn
+    } do
+      create_account!(%{provider: :claude, slug: "atomic-update", max_concurrent: 1})
+
+      assert json_response(
+               patch(conn, ~p"/api/accounts/atomic-update", %{
+                 max_concurrent: 3,
+                 quota_config: %{threshold_mode: "bogus"}
+               }),
+               400
+             )
+
+      body = json_response(get(conn, ~p"/api/accounts/atomic-update"), 200)
+      assert body["max_concurrent"] == 1
+    end
+  end
+
   describe "GET /api/accounts" do
     test "lists accounts", %{conn: conn} do
       create_account!(%{provider: :claude, slug: "list-a"})

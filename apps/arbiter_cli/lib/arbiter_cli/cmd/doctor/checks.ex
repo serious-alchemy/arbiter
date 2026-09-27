@@ -37,7 +37,8 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       check_restart_safety(),
       check_security_defaults(),
       check_legacy_safe_defaults_key(),
-      check_agy_write_jail()
+      check_agy_write_jail(),
+      check_account_policy_binding()
     ]
   end
 
@@ -714,6 +715,95 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
             "cause and fix named above, or drop it out of `:strict` until the host can jail."
         end,
       fatal: strict?,
+      blocks_readiness: false
+    }
+  end
+
+  # bd-c7ll4t: `Arbiter.Quota.Gate` resolves every threshold as
+  # `min(account, workspace)` — the account's `quota_config` is a floor a
+  # workspace may only tighten, never loosen. `claude:default` left at the
+  # migrated `quota_config: {}` (a flat 0.90 weekly threshold) silently
+  # capped a workspace explicitly set to `threshold_mode: paced` with no
+  # ceiling of its own (bd-5ps98m) — `GET /api/quota?workspace=` was the only
+  # place that showed which side actually bound, and only after this ticket.
+  # Flag any workspace that configured its own `quota` setting but is not
+  # the side `policy_binding` reports as binding.
+  defp check_account_policy_binding do
+    case Client.get("/api/workspaces") do
+      {:ok, %{"data" => list}} when is_list(list) ->
+        offenders =
+          list
+          |> Enum.filter(&workspace_configures_quota?/1)
+          |> Enum.flat_map(&policy_override_offenders/1)
+
+        account_policy_binding_result(offenders)
+
+      _ ->
+        %Result{
+          name: "account/workspace quota policy",
+          status: :ok,
+          detail: "server unreachable — skipping",
+          fatal: false,
+          blocks_readiness: false
+        }
+    end
+  end
+
+  defp workspace_configures_quota?(ws) do
+    case get_in(config_of(ws), ["quota"]) do
+      %{} = quota -> map_size(quota) > 0
+      _ -> false
+    end
+  end
+
+  # A workspace's `quota` map qualifies a *window* only when it expressed an
+  # opinion about that window itself — its own flat key, or `threshold_mode:
+  # "paced"` (which covers both windows, since a paced side has no flat key
+  # to set). Flagging every key just because the workspace configured
+  # *something* reported "account overrides its own weekly_threshold" for a
+  # workspace that only ever set `throttle_threshold`, or an unrelated key
+  # like `weekly_warning_policy` — a false positive against nothing the
+  # workspace actually asked for.
+  defp workspace_configures_window?(quota, key),
+    do: Map.has_key?(quota, key) or Map.get(quota, "threshold_mode") == "paced"
+
+  defp policy_override_offenders(ws) do
+    quota = get_in(config_of(ws), ["quota"]) || %{}
+
+    case Client.get("/api/quota", workspace: Map.get(ws, "id")) do
+      {:ok, %{"data" => data}} ->
+        ["throttle_threshold", "weekly_threshold"]
+        |> Enum.filter(
+          &(workspace_configures_window?(quota, &1) and
+              get_in(data, ["policy_binding", &1]) == "account")
+        )
+        |> Enum.map(&"#{workspace_label(ws)}: account overrides its own #{&1}")
+
+      _ ->
+        []
+    end
+  end
+
+  defp account_policy_binding_result([]) do
+    %Result{
+      name: "account/workspace quota policy",
+      status: :ok,
+      detail: "no workspace's own quota setting is overridden by a stricter account policy",
+      fatal: false,
+      blocks_readiness: false
+    }
+  end
+
+  defp account_policy_binding_result(offenders) do
+    %Result{
+      name: "account/workspace quota policy",
+      status: :fail,
+      detail: Enum.join(offenders, "; "),
+      hint:
+        "Arbiter.Quota.Gate resolves each ceiling as min(account, workspace) — the account's " <>
+          "quota_config is a floor the workspace may only tighten, never loosen. `arb account " <>
+          "set <ref> --threshold-mode ... / --weekly-threshold ...` adjusts the account side.",
+      fatal: false,
       blocks_readiness: false
     }
   end

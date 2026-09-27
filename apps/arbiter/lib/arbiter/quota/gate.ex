@@ -290,6 +290,176 @@ defmodule Arbiter.Quota.Gate do
   @spec threshold_modes() :: [String.t()]
   def threshold_modes, do: @threshold_modes
 
+  @quota_config_settable_keys ~w(threshold_mode weekly_threshold paced_floor weekly_paced_floor)
+
+  @doc """
+  Validate a partial `quota_config` update (bd-c7ll4t) — the fields `arb
+  account set --threshold-mode ...` / `PATCH /api/accounts/:ref` may write.
+  `threshold_mode` must be one of `threshold_modes/0`; `weekly_threshold`,
+  `paced_floor` and `weekly_paced_floor` must be a number (or its string
+  form) in `0..1`, the same fraction shape every other `quota_config` reader
+  in this module expects. An unknown key is rejected outright rather than
+  silently accepted and then never read by anything here — the failure mode
+  that let `bd-5ps98m` set an account's `quota_config` only via `bin/arbiter
+  eval`.
+
+  Returns the validated map with numbers coerced to floats, ready to
+  `Map.merge/2` into an account's existing `quota_config` (a partial update
+  must not clobber sibling keys like `throttle_threshold` it does not
+  mention).
+  """
+  @spec validate_quota_config(map()) ::
+          {:ok, map()} | {:error, {:invalid_quota_config, String.t()}}
+  def validate_quota_config(updates) when is_map(updates) do
+    case Map.keys(updates) -- @quota_config_settable_keys do
+      [] ->
+        validate_quota_config_values(updates)
+
+      unknown ->
+        {:error,
+         {:invalid_quota_config, "unknown quota_config key(s): #{Enum.join(unknown, ", ")}"}}
+    end
+  end
+
+  defp validate_quota_config_values(updates) do
+    Enum.reduce_while(updates, {:ok, %{}}, fn {key, value}, {:ok, acc} ->
+      case validate_quota_config_field(key, value) do
+        {:ok, validated} -> {:cont, {:ok, Map.put(acc, key, validated)}}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+  end
+
+  defp validate_quota_config_field("threshold_mode", mode) when mode in @threshold_modes,
+    do: {:ok, mode}
+
+  defp validate_quota_config_field("threshold_mode", mode) do
+    {:error,
+     {:invalid_quota_config,
+      "threshold_mode must be one of #{Enum.join(@threshold_modes, ", ")} (got #{inspect(mode)})"}}
+  end
+
+  defp validate_quota_config_field(key, value)
+       when key in ~w(weekly_threshold paced_floor weekly_paced_floor) do
+    case strict_fraction(value) do
+      {:ok, f} ->
+        {:ok, f}
+
+      :error ->
+        {:error,
+         {:invalid_quota_config, "#{key} must be a number in 0..1 (got #{inspect(value)})"}}
+    end
+  end
+
+  defp strict_fraction(n) when is_number(n) and n > 0 and n <= 1, do: {:ok, n * 1.0}
+
+  defp strict_fraction(s) when is_binary(s) do
+    case Float.parse(s) do
+      {f, ""} when f > 0 and f <= 1 -> {:ok, f}
+      _ -> :error
+    end
+  end
+
+  defp strict_fraction(_), do: :error
+
+  @doc """
+  Which side of `min(account, workspace)` is currently binding `key`
+  (bd-c7ll4t) — `threshold/1` / `weekly_threshold/1` collapse this into one
+  number, which is exactly how a workspace set to `paced`/no-ceiling reading
+  as capped at the account's flat `0.90` went unnoticed in `bd-5ps98m`. `arb
+  quota --workspace` needs to say whose number is in force.
+
+  Compares each side the same way `Pace.evaluate/4` does (`side/2` +
+  `Pace.side_ceiling/2`), not by reading `throttle_threshold` /
+  `weekly_threshold` directly — a side in `threshold_mode: "paced"` ignores
+  its own flat key, so comparing the raw keys can name the wrong side, or
+  keep comparing a stale flat value a paced account no longer uses.
+
+  `opts[:elapsed]` is the window's elapsed fraction (`0.0..1.0`, from
+  `Pace.elapsed_seconds/3` + `Pace.elapsed_fraction/2`) at the moment being
+  described — pass it when a real reset time is known so a paced side
+  resolves to its true `max(floor, elapsed)` ceiling. With no `elapsed`
+  (unknown window length or `reset_at`), a paced side falls back to its own
+  flat setting if it has one, exactly like the gate's own dispatch-time
+  fallback, or drops out if it does not.
+
+  Returns `:account`, `:workspace`, or `:default` (neither side resolved to
+  a number for `key`, so the global app-env / built-in default applies).
+  """
+  @spec binding_side(policy(), :throttle_threshold | :weekly_threshold, keyword()) ::
+          :account | :workspace | :default
+  def binding_side(policy, key, opts \\ [])
+      when key in [:throttle_threshold, :weekly_threshold] do
+    case ranked_sides(policy, key, opts) do
+      [] -> :default
+      sides -> sides |> Enum.min_by(fn {_who, ceiling} -> ceiling end) |> elem(0)
+    end
+  end
+
+  @doc """
+  The `min(account, workspace)` ceiling for `key` actually in force right now
+  (bd-c7ll4t) — the paced-aware companion to `binding_side/3`. Unlike
+  `threshold/1` / `weekly_threshold/1`, which read the flat keys only, this
+  resolves a `threshold_mode: "paced"` side to `max(floor, elapsed)` when
+  `opts[:elapsed]` is known, so `arb quota --workspace` can print the number
+  that binds instead of a flat figure a paced side has already stopped using.
+  """
+  @spec effective_threshold(policy(), :throttle_threshold | :weekly_threshold, keyword()) ::
+          float()
+  def effective_threshold(policy, key, opts \\ [])
+      when key in [:throttle_threshold, :weekly_threshold] do
+    case ranked_sides(policy, key, opts) do
+      [] -> flat_default(threshold_window(key))
+      sides -> sides |> Enum.min_by(fn {_who, ceiling} -> ceiling end) |> elem(1)
+    end
+  end
+
+  # One `{who, ceiling}` pair per side that resolves to a number right now,
+  # in `[account, workspace]` order so a tie (`Enum.min_by/2` keeps the first
+  # match) reads as the account binding — same "account is the floor" call as
+  # the old flat-key comparison made.
+  defp ranked_sides(policy, key, opts) do
+    {account, workspace} = split_policy(policy)
+    window = threshold_window(key)
+    elapsed = Keyword.get(opts, :elapsed)
+
+    [account: account_config(account), workspace: ws_quota(workspace)]
+    |> Enum.map(fn {who, config} -> {who, side(config, window)} end)
+    |> Enum.map(fn {who, s} -> {who, s && Pace.side_ceiling(s, elapsed)} end)
+    |> Enum.flat_map(fn
+      {who, {ceiling, _mode}} -> [{who, ceiling}]
+      {_who, nil} -> []
+    end)
+  end
+
+  defp threshold_window(:throttle_threshold), do: :primary
+  defp threshold_window(:weekly_threshold), do: :long
+
+  @doc """
+  The account's own quota policy, independent of any workspace (bd-c7ll4t) —
+  `arb quota --account` shows this so the ceiling a bare account carries is
+  visible on its own, ahead of any workspace's override.
+
+  Under `threshold_mode: "paced"` the flat `throttle_threshold` /
+  `weekly_threshold` keys are ignored by the gate (the paced floors bind
+  instead), so they report `nil` rather than a number nothing is actually
+  enforcing — showing the global default there read as though it still
+  applied.
+  """
+  @spec account_policy_summary(ProviderAccount.t() | nil) :: map()
+  def account_policy_summary(account) do
+    config = account_config(account)
+    mode = parse_mode(Map.get(config, "threshold_mode"))
+
+    %{
+      threshold_mode: Atom.to_string(mode),
+      throttle_threshold: if(mode == :flat, do: threshold(account)),
+      weekly_threshold: if(mode == :flat, do: weekly_threshold(account)),
+      paced_floor: paced_floor(config, :primary),
+      weekly_paced_floor: paced_floor(config, :long)
+    }
+  end
+
   @doc """
   The length in seconds of the quota window a snapshot labels `label`, or `nil`
   when it has no fixed length (bd-2daof2). First match wins:

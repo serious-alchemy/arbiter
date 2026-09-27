@@ -98,18 +98,34 @@ defmodule Arbiter.Quota.Pace do
 
   def elapsed_seconds(_reset_at, _window_seconds, _now), do: nil
 
-  defp elapsed_fraction(elapsed, window) when is_number(elapsed) and is_integer(window) do
+  @doc """
+  How far into a window `elapsed` seconds (out of `window`) is, clamped to
+  `0.0..1.0`, or `nil` when either input is unknown — public so a caller that
+  computes its own `elapsed_seconds/3` (`Arbiter.Quota.Gate.binding_side/3`,
+  bd-c7ll4t) can turn it into the same fraction `evaluate/4` uses internally,
+  rather than re-deriving the clamp.
+  """
+  @spec elapsed_fraction(number() | nil, pos_integer() | nil) :: float() | nil
+  def elapsed_fraction(elapsed, window) when is_number(elapsed) and is_integer(window) do
     (elapsed / window) |> max(0.0) |> min(1.0)
   end
 
-  defp elapsed_fraction(_elapsed, _window), do: nil
+  def elapsed_fraction(_elapsed, _window), do: nil
 
-  defp side_ceiling({:paced, floor, _flat}, elapsed) when is_float(elapsed),
+  @doc """
+  The ceiling (and its mode) a single `side/0` resolves to right now, given
+  the window's `elapsed` fraction (`nil` when unknown). Public so
+  `Arbiter.Quota.Gate.binding_side/3` (bd-c7ll4t) can rank each side of
+  `min(account, workspace)` the same way `evaluate/4` picks the smallest —
+  there is deliberately only one place a paced side turns into a number.
+  """
+  @spec side_ceiling(side(), float() | nil) :: {float(), :paced | :flat} | nil
+  def side_ceiling({:paced, floor, _flat}, elapsed) when is_float(elapsed),
     do: {max(floor, elapsed), :paced}
 
-  defp side_ceiling({:paced, _floor, nil}, _elapsed), do: nil
-  defp side_ceiling({:paced, _floor, flat}, _elapsed), do: {flat, :flat}
-  defp side_ceiling({:flat, ceiling}, _elapsed), do: {ceiling, :flat}
+  def side_ceiling({:paced, _floor, nil}, _elapsed), do: nil
+  def side_ceiling({:paced, _floor, flat}, _elapsed), do: {flat, :flat}
+  def side_ceiling({:flat, ceiling}, _elapsed), do: {ceiling, :flat}
 
   defp verdict(u, ceiling, elapsed) when is_number(u) do
     cond do

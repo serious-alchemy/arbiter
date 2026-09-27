@@ -151,6 +151,104 @@ defmodule ArbiterCli.Cmd.AccountTest do
     assert err =~ "account set requires"
   end
 
+  # ---- set --threshold-mode / --weekly-threshold / ... (bd-c7ll4t) ---------
+
+  test "account set --threshold-mode PATCHes quota_config without max_concurrent" do
+    stub_routes([
+      {{"patch", "/api/accounts/personal-max"},
+       fn conn ->
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+         assert Jason.decode!(body) == %{"quota_config" => %{"threshold_mode" => "paced"}}
+
+         conn
+         |> Plug.Conn.put_status(200)
+         |> Req.Test.json(%{
+           "id" => "acct-1",
+           "provider" => "claude",
+           "slug" => "personal-max",
+           "max_concurrent" => nil,
+           "quota_config" => %{"threshold_mode" => "paced"},
+           "enabled" => true,
+           "merged_into_id" => nil
+         })
+       end}
+    ])
+
+    {out, _err, exit_code} =
+      capture(fn -> Account.run(["set", "personal-max", "--threshold-mode", "paced"]) end)
+
+    assert exit_code == 0
+    assert out =~ "threshold_mode=paced"
+  end
+
+  test "account set combines --max-concurrent with the quota_config flags in one PATCH" do
+    stub_routes([
+      {{"patch", "/api/accounts/personal-max"},
+       fn conn ->
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+
+         assert Jason.decode!(body) == %{
+                  "max_concurrent" => 4,
+                  "quota_config" => %{
+                    "threshold_mode" => "paced",
+                    "weekly_threshold" => 0.92,
+                    "paced_floor" => 0.4,
+                    "weekly_paced_floor" => 0.25
+                  }
+                }
+
+         conn
+         |> Plug.Conn.put_status(200)
+         |> Req.Test.json(%{
+           "id" => "acct-1",
+           "provider" => "claude",
+           "slug" => "personal-max",
+           "max_concurrent" => 4,
+           "quota_config" => %{"threshold_mode" => "paced"},
+           "enabled" => true,
+           "merged_into_id" => nil
+         })
+       end}
+    ])
+
+    {out, _err, exit_code} =
+      capture(fn ->
+        Account.run([
+          "set",
+          "personal-max",
+          "--max-concurrent",
+          "4",
+          "--threshold-mode",
+          "paced",
+          "--weekly-threshold",
+          "0.92",
+          "--paced-floor",
+          "0.4",
+          "--weekly-paced-floor",
+          "0.25"
+        ])
+      end)
+
+    assert exit_code == 0
+    assert out =~ "max_concurrent=4"
+  end
+
+  test "account set rejects an out-of-range --weekly-threshold" do
+    {_out, err, exit_code} =
+      capture(fn ->
+        Account.run(["set", "personal-max", "--weekly-threshold", "1.5"])
+      end)
+
+    assert exit_code != 0
+    assert err =~ "--weekly-threshold"
+  end
+
+  test "account set with no flags at all is an error" do
+    {_out, err, exit_code} = capture(fn -> Account.run(["set", "personal-max"]) end)
+    assert exit_code != 0
+    assert err =~ "account set requires at least one of"
+  end
+
   test "account show prints credentials and workspaces, never a secret" do
     stub_get("/api/accounts/personal-max", %{
       "id" => "acct-1",

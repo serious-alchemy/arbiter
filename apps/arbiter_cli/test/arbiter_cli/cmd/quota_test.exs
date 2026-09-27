@@ -33,6 +33,73 @@ defmodule ArbiterCli.Cmd.QuotaTest do
     "captured_at" => "2026-06-23T20:20:06Z"
   }
 
+  describe "arb quota (bd-c7ll4t — policy binding)" do
+    # bd-5ps98m: with `:provider_accounts_enabled` on, an account's flat
+    # ceiling silently capped a workspace set to paced/looser — `arb quota`
+    # said nothing about it beyond the number. Now it names which side binds.
+    test "says the account side binds when its ceiling is the tighter one" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => nil,
+          "account" => %{"slug" => "default", "provider" => "claude"},
+          "account_policy" => %{
+            "threshold_mode" => "flat",
+            "throttle_threshold" => 0.85,
+            "weekly_threshold" => 0.9,
+            "paced_floor" => nil,
+            "weekly_paced_floor" => nil
+          },
+          "policy_binding" => %{
+            "throttle_threshold" => "account",
+            "weekly_threshold" => "account"
+          }
+        }
+      })
+
+      {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Quota.run([]) end)
+
+      assert code == 0
+      assert out =~ "weekly_threshold:    90.0%  (account binds)"
+      assert out =~ "throttle_threshold:  85.0%  (account binds)"
+    end
+
+    # bd-c7ll4t (review finding 1): the number printed next to "workspace
+    # binds" must be the *effective* `min(account, workspace)` ceiling
+    # (70%), not the account's own 90% — printing the account's number here
+    # would read as though the workspace's tighter setting had no effect.
+    test "says the workspace side binds when it tightened the account's ceiling" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => nil,
+          "account" => %{"slug" => "default", "provider" => "claude"},
+          "account_policy" => %{
+            "threshold_mode" => "flat",
+            "throttle_threshold" => 0.85,
+            "weekly_threshold" => 0.9,
+            "paced_floor" => nil,
+            "weekly_paced_floor" => nil
+          },
+          "policy_binding" => %{
+            "throttle_threshold" => "workspace",
+            "weekly_threshold" => "workspace"
+          },
+          "effective_policy" => %{
+            "throttle_threshold" => 0.5,
+            "weekly_threshold" => 0.7
+          }
+        }
+      })
+
+      {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Quota.run([]) end)
+
+      assert code == 0
+      assert out =~ "weekly_threshold:    70.0%  (workspace binds; account 90.0%)"
+      assert out =~ "throttle_threshold:  50.0%  (workspace binds; account 85.0%)"
+    end
+  end
+
   describe "arb quota" do
     test "renders 5h and 7d utilization, status, and reset times in text mode" do
       stub_get("/api/quota", %{"data" => %{"workspace_id" => "ws-1", "claude" => @snapshot}})
@@ -632,6 +699,39 @@ defmodule ArbiterCli.Cmd.QuotaTest do
       assert out =~ "Anthropic quota (account personal-max"
       assert out =~ "2 workspaces: default, emricare"
       refute out =~ "via workspace"
+    end
+
+    test "shows the account's threshold mode and ceilings (bd-c7ll4t)" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => nil,
+          "claude" => nil,
+          "account" => %{"slug" => "personal-max", "provider" => "claude"},
+          "account_policy" => %{
+            "threshold_mode" => "paced",
+            "throttle_threshold" => 0.85,
+            "weekly_threshold" => 0.9,
+            "paced_floor" => 0.35,
+            "weekly_paced_floor" => 0.2
+          },
+          "policy_binding" => %{
+            "throttle_threshold" => "account",
+            "weekly_threshold" => "account"
+          }
+        }
+      })
+
+      {out, _err, code} =
+        capture(fn -> ArbiterCli.Cmd.Quota.run(["--account", "personal-max"]) end)
+
+      assert code == 0
+      assert out =~ "Account policy (claude:personal-max)"
+      assert out =~ "threshold_mode:      paced"
+      assert out =~ "throttle_threshold:  85.0%"
+      assert out =~ "weekly_threshold:    90.0%"
+      assert out =~ "paced_floor:         35.0%"
+      assert out =~ "weekly_paced_floor:  20.0%"
+      refute out =~ "binds"
     end
 
     test "--account is forwarded to the API as a query param, taking priority over --workspace" do

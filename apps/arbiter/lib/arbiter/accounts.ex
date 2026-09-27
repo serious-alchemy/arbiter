@@ -177,6 +177,29 @@ defmodule Arbiter.Accounts do
   end
 
   @doc """
+  Merge quota-policy fields into an account's `quota_config` — `arb account
+  set --threshold-mode ... --weekly-threshold ...` / `PATCH
+  /api/accounts/:ref` (bd-c7ll4t). Before this, `quota_config` was settable
+  only at `create`; an existing account (`claude:default` in bd-5ps98m) could
+  only be corrected with `bin/arbiter eval` because `ProviderAccount`'s
+  `:update` action already accepted the attribute, just nothing above the
+  Ash layer wrote to it.
+
+  `updates` is validated by `Arbiter.Quota.Gate.validate_quota_config/1`
+  first — an invalid `threshold_mode` or an out-of-range float never reaches
+  the resource. Only the given keys are touched: `Map.merge/2` onto the
+  account's current `quota_config` leaves sibling keys (`throttle_threshold`,
+  `weekly_warning_policy`, ...) exactly as they were.
+  """
+  @spec set_quota_config(String.t(), map()) :: {:ok, ProviderAccount.t()} | {:error, term()}
+  def set_quota_config(account_ref, updates) when is_map(updates) do
+    with {:ok, validated} <- Arbiter.Quota.Gate.validate_quota_config(updates),
+         {:ok, account} <- get_account(account_ref) do
+      Ash.update(account, %{quota_config: Map.merge(account.quota_config || %{}, validated)})
+    end
+  end
+
+  @doc """
   Attach a workspace to an account for a provider — `arb account attach
   <workspace> <provider> <slug> [--share N]`. Writes or updates the
   `(workspace_id, provider)` `WorkspaceProviderAccount` row (`ProviderAccount`

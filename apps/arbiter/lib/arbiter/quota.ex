@@ -50,6 +50,9 @@ defmodule Arbiter.Quota do
   alias Arbiter.Accounts.Resolver
   alias Arbiter.Quota.AnthropicQuota
   alias Arbiter.Quota.CloudCode
+  alias Arbiter.Quota.Gate
+  alias Arbiter.Quota.Gate.Snapshot
+  alias Arbiter.Quota.Pace
   alias Arbiter.Quota.SpendCache
   alias Arbiter.Tasks.Workspace
   require Ash.Query
@@ -419,6 +422,94 @@ defmodule Arbiter.Quota do
         |> Map.merge(gating_fields(q, Resolver.get(account_id), gate_workspace(account_id, opts)))
         |> Map.merge(account_fields(account_id, provider, Keyword.get(opts, :spend_cache, %{})))
     end
+  end
+
+  @doc """
+  The account's own quota policy, plus which side of `min(account,
+  workspace)` binds each flat ceiling (bd-c7ll4t) — an account whose flat
+  threshold bound tighter than a paced/looser workspace used to be invisible
+  (bd-5ps98m: `arb quota` only ever printed "not quota-held"). Provider
+  agnostic — unlike `serialize/3` (Claude-only), this works off the account
+  and workspace structs directly, so `GET /api/quota?account=` can show it for
+  any provider's account.
+
+  `workspace` is `nil` for the `?account=` lookup (no workspace in play, so
+  `policy_binding` only ever reads `:account` or `:default`).
+
+  `effective` carries the ceiling actually in force for each key right now
+  (bd-c7ll4t) — the paced-aware number `arb quota --workspace` prints
+  instead of the account's raw flat setting, computed from the account's own
+  latest quota snapshot's `reset_at`s (via `Gate.window_seconds/2` and
+  `Pace.elapsed_seconds/3`) when one exists; with no snapshot yet, a paced
+  side falls back exactly like the gate's own dispatch-time fallback.
+  """
+  @spec policy_fields(ProviderAccount.t() | nil, Workspace.t() | nil) :: map()
+  def policy_fields(account, workspace) do
+    elapsed = elapsed_fractions(account)
+
+    %{
+      account_policy: Gate.account_policy_summary(account),
+      policy_binding: %{
+        throttle_threshold:
+          Gate.binding_side({account, workspace}, :throttle_threshold,
+            elapsed: elapsed.throttle_threshold
+          ),
+        weekly_threshold:
+          Gate.binding_side({account, workspace}, :weekly_threshold,
+            elapsed: elapsed.weekly_threshold
+          )
+      },
+      effective: %{
+        throttle_threshold:
+          Gate.effective_threshold({account, workspace}, :throttle_threshold,
+            elapsed: elapsed.throttle_threshold
+          ),
+        weekly_threshold:
+          Gate.effective_threshold({account, workspace}, :weekly_threshold,
+            elapsed: elapsed.weekly_threshold
+          )
+      }
+    }
+  end
+
+  # The elapsed fraction of each window right now, read off the account's own
+  # latest quota snapshot (any provider — `Snapshot.normalize/1` projects
+  # `reset_at` / `secondary_reset_at` the same way regardless of table) so a
+  # paced side of `min(account, workspace)` resolves to its true
+  # `max(floor, elapsed)` ceiling rather than always falling back to a flat
+  # setting it has stopped using. `nil` for either window when there is no
+  # account, no snapshot yet, or that window's length/`reset_at` is unknown —
+  # `Gate.binding_side/3` / `effective_threshold/3` fall back gracefully.
+  defp elapsed_fractions(nil), do: %{throttle_threshold: nil, weekly_threshold: nil}
+
+  defp elapsed_fractions(%ProviderAccount{} = account) do
+    now = DateTime.utc_now()
+    snapshot = Snapshot.normalize(latest_for_provider(account.id, account.provider))
+
+    %{
+      throttle_threshold:
+        window_elapsed(
+          snapshot && snapshot.window_label,
+          snapshot && snapshot.reset_at,
+          account,
+          now
+        ),
+      weekly_threshold:
+        window_elapsed(
+          snapshot && snapshot.secondary_window_label,
+          snapshot && snapshot.secondary_reset_at,
+          account,
+          now
+        )
+    }
+  end
+
+  defp window_elapsed(nil, _reset_at, _account, _now), do: nil
+  defp window_elapsed(_label, nil, _account, _now), do: nil
+
+  defp window_elapsed(label, reset_at, account, now) do
+    seconds = Gate.window_seconds(label, account)
+    Pace.elapsed_seconds(reset_at, seconds, now) |> Pace.elapsed_fraction(seconds)
   end
 
   defp gate_workspace(account_id, opts) do

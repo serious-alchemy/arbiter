@@ -8,7 +8,9 @@ defmodule ArbiterWeb.Api.AccountController do
     * `GET    /api/accounts`            — :index (optional `?provider=`, `?include_merged=true`)
     * `POST   /api/accounts`            — :create
     * `GET    /api/accounts/:ref`       — :show   (`:ref` — uuid, `provider:slug`, or bare slug)
-    * `PATCH  /api/accounts/:ref`       — :update (`max_concurrent`, nullable)
+    * `PATCH  /api/accounts/:ref`       — :update (`max_concurrent`, nullable;
+      `quota_config`, a partial merge — `threshold_mode`, `weekly_threshold`,
+      `paced_floor`, `weekly_paced_floor`)
     * `POST   /api/accounts/:ref/attach`  — :attach (`workspace_id`, `provider`, optional `share`)
     * `POST   /api/accounts/:ref/rotate`  — :rotate (`kind`, `env_var`, `secret`, optional `scopes`)
     * `POST   /api/accounts/:ref/merge`   — :merge  (`into` — the surviving account ref)
@@ -74,28 +76,36 @@ defmodule ArbiterWeb.Api.AccountController do
 
   @doc """
   The account concurrency ceiling (P8, `docs/provider-account-design.md`
-  §4.2). `max_concurrent` is nullable and an explicit `null` clears it: the
-  ceiling is opt-in (§4.4), so "no ceiling" has to be reachable, and an
-  *absent* key is a malformed request rather than a clear.
+  §4.2) and/or the account's gate policy (bd-c7ll4t). `max_concurrent` is
+  nullable and an explicit `null` clears it: the ceiling is opt-in (§4.4), so
+  "no ceiling" has to be reachable, and giving the key an absent value is a
+  malformed request rather than a clear. `quota_config` is a **partial**
+  merge — `threshold_mode`, `weekly_threshold`, `paced_floor`,
+  `weekly_paced_floor` — validated against `Arbiter.Quota.Gate
+  .threshold_modes/0` and 0..1 floats; keys not mentioned (e.g.
+  `throttle_threshold`) are left untouched. At least one of the two must be
+  given.
 
-  Deliberately the only attribute this action accepts. `provider`/`slug` are
-  the account's identity (§3.1) and changing either is a new account, not an
-  edit; everything else an operator sets today is set at `create`.
+  Before `quota_config` landed here, an existing account's gate policy could
+  only be edited with `bin/arbiter eval` (bd-5ps98m) — `PATCH` accepted only
+  `max_concurrent`, and `quota_config` was settable solely at `create`.
+
+  `provider`/`slug` are still never accepted here — they are the account's
+  identity (§3.1) and changing either is a new account, not an edit.
   """
   def update(conn, %{"ref" => ref} = params) do
     with {:ok, max_concurrent} <- fetch_max_concurrent(params),
-         {:ok, account} <- ref |> Accounts.set_max_concurrent(max_concurrent) |> friendly() do
+         {:ok, quota_config} <- fetch_quota_config(params),
+         :ok <- require_an_update(max_concurrent, quota_config),
+         {:ok, account} <- apply_updates(ref, max_concurrent, quota_config) do
       render(conn, :show, account: account)
     end
   end
 
   defp fetch_max_concurrent(params) do
     case Map.fetch(params, "max_concurrent") do
-      :error ->
-        {:error, {:invalid_request, "missing required parameter: max_concurrent"}}
-
-      {:ok, value} ->
-        cast_max_concurrent(value)
+      :error -> {:ok, :absent}
+      {:ok, value} -> with {:ok, v} <- cast_max_concurrent(value), do: {:ok, {:set, v}}
     end
   end
 
@@ -114,6 +124,45 @@ defmodule ArbiterWeb.Api.AccountController do
 
   defp invalid_max_concurrent,
     do: {:error, {:invalid_request, "max_concurrent must be a non-negative integer or null"}}
+
+  # Validated here, before `apply_updates/3` writes anything (bd-c7ll4t) — a
+  # `PATCH` with a bad `quota_config` alongside a good `max_concurrent` must
+  # not persist the `max_concurrent` half and then 422 on the other; the two
+  # updates read as one request.
+  defp fetch_quota_config(params) do
+    case Map.fetch(params, "quota_config") do
+      :error ->
+        {:ok, :absent}
+
+      {:ok, %{} = updates} ->
+        case Arbiter.Quota.Gate.validate_quota_config(updates) |> friendly() do
+          {:ok, validated} -> {:ok, {:set, validated}}
+          {:error, _} = err -> err
+        end
+
+      {:ok, _} ->
+        {:error, {:invalid_request, "quota_config must be an object"}}
+    end
+  end
+
+  defp require_an_update(:absent, :absent),
+    do: {:error, {:invalid_request, "missing required parameter: max_concurrent or quota_config"}}
+
+  defp require_an_update(_max_concurrent, _quota_config), do: :ok
+
+  defp apply_updates(ref, max_concurrent, quota_config) do
+    with {:ok, account} <- ref |> apply_max_concurrent(max_concurrent) |> friendly() do
+      account |> apply_quota_config(quota_config) |> friendly()
+    end
+  end
+
+  defp apply_max_concurrent(ref, :absent), do: Accounts.get_account(ref)
+  defp apply_max_concurrent(ref, {:set, value}), do: Accounts.set_max_concurrent(ref, value)
+
+  defp apply_quota_config(account, :absent), do: {:ok, account}
+
+  defp apply_quota_config(%{id: id}, {:set, updates}),
+    do: Accounts.set_quota_config(id, updates)
 
   def attach(conn, %{"ref" => ref} = params) do
     with {:ok, workspace_id} <- require_param(params, "workspace_id"),
@@ -202,6 +251,9 @@ defmodule ArbiterWeb.Api.AccountController do
 
   defp friendly({:error, {:missing, key}}),
     do: {:error, {:invalid_request, "missing required field: #{key}"}}
+
+  defp friendly({:error, {:invalid_quota_config, message}}),
+    do: {:error, {:invalid_request, message}}
 
   defp friendly(other), do: other
 
