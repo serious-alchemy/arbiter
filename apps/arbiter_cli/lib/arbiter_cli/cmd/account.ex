@@ -65,6 +65,24 @@ defmodule ArbiterCli.Cmd.Account do
                                      <from-ref> (merged_into_id set). All-or-
                                      nothing (§2.5) — the operationally
                                      critical command in this design.
+      arb account delete <ref>       [--detach] [--hard]
+                                     Soft-deletes by default: hidden from
+                                     `arb account list` and every account
+                                     picker, but the row and its usage_events
+                                     attribution are kept (`arb usage --by
+                                     account` still resolves it). Every
+                                     active credential is retired first,
+                                     never printed. Refused, with a reason,
+                                     while the account is attached to a
+                                     workspace (pass --detach to detach as
+                                     part of the delete), is required by a
+                                     workspace's implementer/reviewer
+                                     settings (not bypassed by --detach), or
+                                     is pinned by a running task's provider
+                                     routing. `--hard` destroys the row
+                                     outright instead — only for an account
+                                     with no usage rows and no credentials,
+                                     ever.
 
   All verbs go through the REST API at `/api/accounts`.
   """
@@ -90,7 +108,9 @@ defmodule ArbiterCli.Cmd.Account do
     scopes: :string,
     into: :string,
     json: :boolean,
-    include_merged: :boolean
+    include_merged: :boolean,
+    detach: :boolean,
+    hard: :boolean
   ]
 
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
@@ -123,10 +143,13 @@ defmodule ArbiterCli.Cmd.Account do
         ["merge" | args] ->
           merge(args, opts, mode)
 
+        ["delete" | args] ->
+          delete(args, opts, mode)
+
         [] ->
           Output.die(
             "account requires a subcommand",
-            "verbs: list, show, create, set, attach, rotate, merge"
+            "verbs: list, show, create, set, attach, rotate, merge, delete"
           )
 
         [unknown | _] ->
@@ -418,6 +441,31 @@ defmodule ArbiterCli.Cmd.Account do
   defp emit_merged(account, :text),
     do:
       IO.puts("merged into account #{account["provider"]}:#{account["slug"]} (#{account["id"]})")
+
+  # ---- delete --------------------------------------------------------------
+
+  defp delete(args, opts, mode) do
+    ref = one_ref!(args, "delete")
+
+    params =
+      []
+      |> then(fn p -> if opts[:detach], do: [{:detach, "true"} | p], else: p end)
+      |> then(fn p -> if opts[:hard], do: [{:hard, "true"} | p], else: p end)
+
+    case Client.delete("/api/accounts/" <> URI.encode(ref), params) do
+      {:ok, account} -> emit_deleted(account, opts[:hard], mode)
+      {:error, err} -> Output.die(err)
+    end
+  end
+
+  defp emit_deleted(account, _hard, :json), do: IO.puts(Jason.encode!(account))
+
+  defp emit_deleted(account, true, :text),
+    do: IO.puts("deleted account #{account["provider"]}:#{account["slug"]} (#{account["id"]})")
+
+  defp emit_deleted(account, _hard, :text),
+    do:
+      IO.puts("soft-deleted account #{account["provider"]}:#{account["slug"]} (#{account["id"]})")
 
   # ---- output ------------------------------------------------------------
 

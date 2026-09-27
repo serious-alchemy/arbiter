@@ -440,4 +440,79 @@ defmodule ArbiterWeb.Api.AccountControllerTest do
       assert %{"error" => %{"type" => "invalid_request"}} = json_response(conn, 400)
     end
   end
+
+  describe "DELETE /api/accounts/:ref" do
+    test "soft-deletes an unattached account", %{conn: conn} do
+      account = create_account!(%{provider: :claude, slug: "rest-delete-plain"})
+
+      body = conn |> delete(~p"/api/accounts/#{account.id}") |> json_response(200)
+
+      assert body["id"] == account.id
+      refute is_nil(body["deleted_at"])
+      assert body["enabled"] == false
+
+      # Hidden from the default list, still fetchable by id.
+      index_body = json_response(get(conn, ~p"/api/accounts"), 200)
+      refute account.id in Enum.map(index_body["data"], & &1["id"])
+      assert json_response(get(conn, ~p"/api/accounts/#{account.id}"), 200)["id"] == account.id
+    end
+
+    test "400s while attached, without ?detach=true", %{conn: conn} do
+      account = create_account!(%{provider: :claude, slug: "rest-delete-attached"})
+      ws = create_workspace!("rest-delete-attached-ws")
+      {:ok, _link} = Accounts.attach_workspace(ws.id, :claude, account.id)
+
+      conn = delete(conn, ~p"/api/accounts/#{account.id}")
+      assert %{"error" => %{"type" => "invalid_request"}} = json_response(conn, 400)
+    end
+
+    test "detaches and deletes with ?detach=true", %{conn: conn} do
+      account = create_account!(%{provider: :claude, slug: "rest-delete-detach"})
+      ws = create_workspace!("rest-delete-detach-ws")
+      {:ok, _link} = Accounts.attach_workspace(ws.id, :claude, account.id)
+
+      conn = delete(conn, ~p"/api/accounts/#{account.id}?detach=true")
+      assert json_response(conn, 200)["id"] == account.id
+    end
+
+    test "400s when required by a workspace's implementer setting, even with ?detach=true", %{
+      conn: conn
+    } do
+      account = create_account!(%{provider: :claude, slug: "rest-delete-implementer-required"})
+      ws = create_workspace!("rest-delete-implementer-ws")
+      {:ok, link} = Accounts.attach_workspace(ws.id, :claude, account.id)
+
+      link |> Ash.Changeset.for_update(:update, %{implementer_position: 0}) |> Ash.update!()
+
+      conn = delete(conn, ~p"/api/accounts/#{account.id}?detach=true")
+      assert %{"error" => %{"type" => "invalid_request"}} = json_response(conn, 400)
+    end
+
+    test "hard-deletes a clean account with ?hard=true", %{conn: conn} do
+      account = create_account!(%{provider: :claude, slug: "rest-delete-hard"})
+
+      conn = delete(conn, ~p"/api/accounts/#{account.id}?hard=true")
+      assert json_response(conn, 200)["id"] == account.id
+
+      assert json_response(get(conn, ~p"/api/accounts/#{account.id}"), 404)
+    end
+
+    test "400s a hard delete when the account has usage rows", %{conn: conn} do
+      account = create_account!(%{provider: :claude, slug: "rest-delete-hard-blocked"})
+
+      {:ok, _event} =
+        Ash.create(Arbiter.Usage.Event, %{
+          provider_account_id: account.id,
+          task_id: "bd-rest-delete-hard",
+          source: :task,
+          repo: "arbiter",
+          workspace_id: "ws-rest-delete-hard",
+          step: :work,
+          occurred_at: DateTime.utc_now()
+        })
+
+      conn = delete(conn, ~p"/api/accounts/#{account.id}?hard=true")
+      assert %{"error" => %{"type" => "invalid_request"}} = json_response(conn, 400)
+    end
+  end
 end

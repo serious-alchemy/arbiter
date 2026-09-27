@@ -74,6 +74,16 @@ defmodule Arbiter.Accounts.ProviderAccount do
         :merged_into_id
       ]
     end
+
+    # `arb account delete` (bd-agb7ai): soft-delete, mirroring
+    # `ProviderCredential`'s `:retire` — no accepted input, just the two
+    # attributes a delete always sets together.
+    update :soft_delete do
+      require_atomic? false
+      accept []
+      change set_attribute(:enabled, false)
+      change set_attribute(:deleted_at, &DateTime.utc_now/0)
+    end
   end
 
   attributes do
@@ -158,6 +168,13 @@ defmodule Arbiter.Accounts.ProviderAccount do
       allow_nil? true
 
       description "Set by arb account merge (§2.5, P11) — the surviving account this one merged into."
+    end
+
+    attribute :deleted_at, :utc_datetime do
+      public? true
+      allow_nil? true
+
+      description "Set by arb account delete (bd-agb7ai) — soft-deleted (hidden from lists/pickers, row and usage attribution kept). Distinct from merged_into_id: a delete has no survivor."
     end
 
     create_timestamp :inserted_at

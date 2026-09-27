@@ -402,6 +402,82 @@ defmodule ArbiterCli.Cmd.AccountTest do
     assert err =~ "--into"
   end
 
+  test "account delete soft-deletes by default" do
+    stub_delete(
+      "/api/accounts/delete-me",
+      %{
+        "id" => "acct-del",
+        "provider" => "claude",
+        "slug" => "delete-me",
+        "deleted_at" => "2026-09-27T00:00:00Z"
+      },
+      200
+    )
+
+    {out, _err, exit_code} = capture(fn -> Account.run(["delete", "delete-me"]) end)
+
+    assert exit_code == 0
+    assert out =~ "soft-deleted account claude:delete-me (acct-del)"
+  end
+
+  test "account delete --detach forwards detach=true" do
+    stub_routes([
+      {{"delete", "/api/accounts/delete-with-detach"},
+       fn conn ->
+         conn = Plug.Conn.fetch_query_params(conn)
+         assert conn.query_params["detach"] == "true"
+
+         conn
+         |> Plug.Conn.put_status(200)
+         |> Req.Test.json(%{"id" => "acct-del", "provider" => "claude", "slug" => "detached"})
+       end}
+    ])
+
+    {out, _err, exit_code} =
+      capture(fn -> Account.run(["delete", "delete-with-detach", "--detach"]) end)
+
+    assert exit_code == 0
+    assert out =~ "soft-deleted account claude:detached"
+  end
+
+  test "account delete --hard forwards hard=true and reports a hard delete" do
+    stub_routes([
+      {{"delete", "/api/accounts/delete-hard"},
+       fn conn ->
+         conn = Plug.Conn.fetch_query_params(conn)
+         assert conn.query_params["hard"] == "true"
+
+         conn
+         |> Plug.Conn.put_status(200)
+         |> Req.Test.json(%{"id" => "acct-del", "provider" => "claude", "slug" => "hard-deleted"})
+       end}
+    ])
+
+    {out, _err, exit_code} = capture(fn -> Account.run(["delete", "delete-hard", "--hard"]) end)
+
+    assert exit_code == 0
+    assert out =~ "deleted account claude:hard-deleted (acct-del)"
+    refute out =~ "soft-deleted"
+  end
+
+  test "account delete surfaces a refusal reason" do
+    stub_delete(
+      "/api/accounts/delete-attached",
+      %{
+        "error" => %{
+          "type" => "invalid_request",
+          "message" => "account is attached to workspace(s) ws-1"
+        }
+      },
+      400
+    )
+
+    {_out, err, exit_code} = capture(fn -> Account.run(["delete", "delete-attached"]) end)
+
+    assert exit_code != 0
+    assert err =~ "attached to workspace"
+  end
+
   test "unknown subcommand dies with a helpful message" do
     {_out, err, exit_code} = capture(fn -> Account.run(["bogus"]) end)
     assert exit_code != 0

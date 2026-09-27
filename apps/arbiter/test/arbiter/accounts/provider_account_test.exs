@@ -49,4 +49,17 @@ defmodule Arbiter.Accounts.ProviderAccountTest do
       assert updated.slug == "fixed"
     end
   end
+
+  describe "soft_delete" do
+    test "sets deleted_at and disables the account" do
+      assert {:ok, account} = Ash.create(ProviderAccount, %{provider: :claude, slug: "to-delete"})
+      assert account.deleted_at == nil
+
+      assert {:ok, deleted} =
+               account |> Ash.Changeset.for_update(:soft_delete, %{}) |> Ash.update()
+
+      assert %DateTime{} = deleted.deleted_at
+      assert deleted.enabled == false
+    end
+  end
 end

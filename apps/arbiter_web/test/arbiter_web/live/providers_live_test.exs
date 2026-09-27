@@ -350,6 +350,36 @@ defmodule ArbiterWeb.ProvidersLiveTest do
     end
   end
 
+  describe "delete" do
+    setup do
+      enable!(true)
+      :ok
+    end
+
+    test "soft-deletes an unattached account, hiding its card", %{conn: conn} do
+      account = account!(:claude, "pv-delete-me")
+      {:ok, view, _html} = live(conn, ~p"/providers")
+
+      view |> element("#delete-account-#{account.id}") |> render_click()
+
+      refute has_element?(view, "#account-#{account.id}")
+      assert {:ok, %{deleted_at: %DateTime{}}} = Accounts.get_account(account.id)
+    end
+
+    test "shows a refusal reason instead of deleting when attached", %{conn: conn} do
+      ws = workspace!("pv-delete-attached-ws")
+      account = account!(:claude, "pv-delete-attached")
+      {:ok, _} = Accounts.attach_workspace(ws.id, :claude, account.id)
+      {:ok, view, _html} = live(conn, ~p"/providers")
+
+      view |> element("#delete-account-#{account.id}") |> render_click()
+
+      assert has_element?(view, "#account-#{account.id}")
+      assert render(view) =~ "detach first"
+      assert {:ok, %{deleted_at: nil}} = Accounts.get_account(account.id)
+    end
+  end
+
   describe "with accounts disabled" do
     setup do
       enable!(false)
@@ -374,6 +404,7 @@ defmodule ArbiterWeb.ProvidersLiveTest do
       refute has_element?(view, "#account-#{account.id}-credential-button")
       refute has_element?(view, "#account-#{account.id}-attach-button")
       refute has_element?(view, "#detach-#{account.id}-#{ws.id}")
+      refute has_element?(view, "#delete-account-#{account.id}")
     end
 
     test "the server refuses every action, not just the hidden buttons", %{conn: conn} do
@@ -392,10 +423,12 @@ defmodule ArbiterWeb.ProvidersLiveTest do
       })
 
       render_hook(view, "detach", %{"account" => account.id, "workspace" => ws.id})
+      render_hook(view, "delete_account", %{"id" => account.id})
 
       assert {:error, :not_found} = Accounts.get_account("claude:sneaky")
       assert active_credentials(account) == []
       assert [_] = links(account)
+      assert {:ok, %{deleted_at: nil}} = Accounts.get_account(account.id)
       refute render(view) =~ @secret
     end
   end

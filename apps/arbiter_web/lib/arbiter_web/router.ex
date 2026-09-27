@@ -183,7 +183,7 @@ defmodule ArbiterWeb.Router do
     delete("/skills/:id", SkillController, :delete)
 
     # Provider accounts (P11, `docs/provider-account-design.md` §2.5) —
-    # backs `arb account list|show|create|attach|rotate|merge`.
+    # backs `arb account list|show|create|attach|rotate|merge|delete`.
     get("/accounts", AccountController, :index)
     post("/accounts", AccountController, :create)
     get("/accounts/:ref", AccountController, :show)
@@ -191,6 +191,7 @@ defmodule ArbiterWeb.Router do
     post("/accounts/:ref/attach", AccountController, :attach)
     post("/accounts/:ref/rotate", AccountController, :rotate)
     post("/accounts/:ref/merge", AccountController, :merge)
+    delete("/accounts/:ref", AccountController, :delete)
 
     # Workspaces
     get("/workspaces", WorkspaceController, :index)

@@ -226,6 +226,19 @@ defmodule ArbiterWeb.ProvidersLive do
     end
   end
 
+  defp action("delete_account", %{"id" => id}, socket) do
+    case Accounts.delete_account(id) do
+      {:ok, account} ->
+        {:noreply,
+         socket
+         |> put_flash(:info, "Deleted #{account.provider}:#{account.slug}.")
+         |> refresh()}
+
+      {:error, error} ->
+        {:noreply, socket |> put_flash(:error, error_message(error)) |> refresh()}
+    end
+  end
+
   defp action(_event, _params, socket), do: {:noreply, socket}
 
   # ---- state ----------------------------------------------------------------
@@ -288,6 +301,23 @@ defmodule ArbiterWeb.ProvidersLive do
   defp error_message(:not_found), do: "Not found — pick a workspace."
   defp error_message(:not_attached), do: "That workspace is no longer attached to this account."
   defp error_message(:ambiguous), do: "That account reference is ambiguous."
+  defp error_message(:already_deleted), do: "This account has already been deleted."
+
+  defp error_message({:pinned_by_task, task_id}),
+    do: "Pinned by running task #{task_id}'s provider routing."
+
+  defp error_message({:required_by_workspace, _workspace_id, roles}),
+    do: "Required by a workspace's #{Enum.join(roles, "/")} setting — clear it first."
+
+  defp error_message({:attached, workspace_ids}),
+    do: "Attached to #{length(workspace_ids)} workspace(s) — detach first."
+
+  defp error_message({:missing_credential_risk, _workspace_id}),
+    do: "A workspace still needs this account's credential — detaching would break it."
+
+  defp error_message(:hard_delete_blocked),
+    do: "Hard delete needs an account with no usage or credentials, ever."
+
   defp error_message(other), do: inspect(other)
 
   defp humanize(field),
@@ -549,6 +579,18 @@ defmodule ArbiterWeb.ProvidersLive do
               >
                 {health_label(row.health)}
               </span>
+              <button
+                :if={@enabled?}
+                id={"delete-account-#{row.account.id}"}
+                type="button"
+                phx-click="delete_account"
+                phx-value-id={row.account.id}
+                data-confirm={"Delete #{row.account.provider}:#{row.account.slug}? " <>
+                  "It will be hidden from lists but its usage history is kept."}
+                class="text-[11px] px-2 py-0.5 rounded-[var(--radius-chip)] border border-[var(--border-default)] text-[var(--arb-text-muted)] hover:text-[var(--text-title)]"
+              >
+                Delete
+              </button>
             </header>
 
             <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-[minmax(0,1.6fr)_minmax(0,0.8fr)_minmax(0,1.2fr)_minmax(0,0.8fr)] gap-px bg-[var(--arb-line-soft)]">

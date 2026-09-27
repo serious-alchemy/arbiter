@@ -58,12 +58,14 @@ defmodule Arbiter.Accounts do
     WorkspaceProviderAccount
   }
 
-  alias Arbiter.Tasks.Workspace
+  alias Arbiter.Tasks.{Issue, Workspace}
+  alias Arbiter.Usage.Event
 
   @doc """
   List accounts, ordered by provider then slug. Excludes merged-away rows
-  (`merged_into_id` set) unless `:include_merged` is true — P11's `arb
-  account list`.
+  (`merged_into_id` set) unless `:include_merged` is true, and excludes
+  soft-deleted rows (`deleted_at` set, bd-agb7ai) unless `:include_deleted` is
+  true — P11's `arb account list`.
   """
   @spec list_accounts(keyword()) :: [ProviderAccount.t()]
   def list_accounts(opts \\ []) do
@@ -75,11 +77,21 @@ defmodule Arbiter.Accounts do
         provider -> Ash.Query.filter(query, provider == ^provider)
       end
 
-    if Keyword.get(opts, :include_merged, false) do
-      Ash.read!(query)
-    else
-      query |> Ash.Query.filter(is_nil(merged_into_id)) |> Ash.read!()
-    end
+    query =
+      if Keyword.get(opts, :include_merged, false) do
+        query
+      else
+        Ash.Query.filter(query, is_nil(merged_into_id))
+      end
+
+    query =
+      if Keyword.get(opts, :include_deleted, false) do
+        query
+      else
+        Ash.Query.filter(query, is_nil(deleted_at))
+      end
+
+    Ash.read!(query)
   end
 
   @doc """
@@ -282,10 +294,13 @@ defmodule Arbiter.Accounts do
   defp ensure_provider_match(%{provider: account_provider}, _),
     do: {:error, {:provider_mismatch, account_provider}}
 
-  defp ensure_not_merged_away(%{merged_into_id: nil}), do: :ok
-
-  defp ensure_not_merged_away(%{merged_into_id: survivor_id}),
+  defp ensure_not_merged_away(%{merged_into_id: survivor_id}) when not is_nil(survivor_id),
     do: {:error, {:merged_away, survivor_id}}
+
+  defp ensure_not_merged_away(%{deleted_at: at}) when not is_nil(at),
+    do: {:error, :already_deleted}
+
+  defp ensure_not_merged_away(_account), do: :ok
 
   defp existing_link(workspace_id, provider) do
     WorkspaceProviderAccount
@@ -360,6 +375,177 @@ defmodule Arbiter.Accounts do
   """
   @spec merge_accounts(String.t(), String.t()) :: {:ok, ProviderAccount.t()} | {:error, term()}
   defdelegate merge_accounts(from_ref, into_ref), to: Merge, as: :merge
+
+  @doc """
+  Delete an account — `arb account delete <ref>` / `DELETE /api/accounts/:ref`
+  (bd-agb7ai). Soft-delete by default: the row and its `usage_events`
+  attribution are kept, but it is marked `deleted_at` and `enabled: false`
+  (mirroring `Merge`'s `soft_delete!/2`), which hides it from
+  `list_accounts/1` and every enabled-only picker. Every active credential is
+  retired first — never revealed, only marked inactive.
+
+  Refuses, with a specific reason, when the account:
+
+    * is required by a workspace's implementer or reviewer settings
+      (`{:error, {:required_by_workspace, workspace_id, roles}}`) — always, `
+      :detach` included; the operator must clear the role setting first
+      (`Arbiter.Accounts.ProviderSettings.remove/3`).
+    * is pinned by a running task's provider routing (bd-40pzpj)
+      (`{:error, {:pinned_by_task, task_id}}`).
+    * is attached to a workspace at all (`{:error, {:attached, workspace_ids}}`)
+      — unless `opts[:detach]` is true, in which case the links are removed as
+      part of the delete.
+    * would drop a workspace's only credential source while
+      `enabled?/0` is true and that workspace's `worker_env` still carries a
+      credential for this provider — the `Arbiter.Accounts.MissingCredentialError`
+      a next dispatch would hit (`{:error, {:missing_credential_risk, workspace_id}}`).
+      Not bypassed by `:detach`.
+
+  `opts[:hard]` destroys the row outright instead — only permitted for an
+  account with no `usage_events` row and no `provider_credentials` row, ever
+  (`{:error, :hard_delete_blocked}` otherwise).
+  """
+  @spec delete_account(String.t(), keyword()) :: {:ok, ProviderAccount.t()} | {:error, term()}
+  def delete_account(ref, opts \\ []) do
+    hard? = Keyword.get(opts, :hard, false)
+    detach? = Keyword.get(opts, :detach, false)
+
+    with {:ok, account} <- get_account(ref),
+         :ok <- ensure_not_already_gone(account),
+         :ok <- ensure_not_pinned(account),
+         :ok <- ensure_no_required_links(account),
+         {:ok, links} <- ensure_attachments_removable(account, detach?) do
+      if hard?, do: hard_delete(account, links), else: soft_delete(account, links)
+    end
+  end
+
+  defp ensure_not_already_gone(%{merged_into_id: id}) when not is_nil(id),
+    do: {:error, {:merged_away, id}}
+
+  defp ensure_not_already_gone(%{deleted_at: at}) when not is_nil(at),
+    do: {:error, :already_deleted}
+
+  defp ensure_not_already_gone(_account), do: :ok
+
+  defp ensure_not_pinned(%{id: id}) do
+    Issue
+    |> Ash.Query.filter(implementer_account_id == ^id and status != :closed)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> case do
+      [task] -> {:error, {:pinned_by_task, task.id}}
+      [] -> :ok
+    end
+  end
+
+  defp ensure_no_required_links(%{id: id}) do
+    id
+    |> account_links()
+    |> Enum.find(&(&1.implementer_position || &1.reviewer_position))
+    |> case do
+      nil -> :ok
+      link -> {:error, {:required_by_workspace, link.workspace_id, required_roles(link)}}
+    end
+  end
+
+  defp required_roles(link) do
+    [{link.implementer_position, :implementer}, {link.reviewer_position, :reviewer}]
+    |> Enum.filter(fn {position, _role} -> not is_nil(position) end)
+    |> Enum.map(fn {_position, role} -> role end)
+  end
+
+  defp ensure_attachments_removable(account, detach?) do
+    links = account_links(account.id)
+
+    cond do
+      links == [] -> {:ok, []}
+      not detach? -> {:error, {:attached, Enum.map(links, & &1.workspace_id)}}
+      true -> ensure_no_missing_credential_risk(account, links)
+    end
+  end
+
+  defp ensure_no_missing_credential_risk(account, links) do
+    links
+    |> Enum.find(&missing_credential_risk?(&1, account))
+    |> case do
+      nil -> {:ok, links}
+      link -> {:error, {:missing_credential_risk, link.workspace_id}}
+    end
+  end
+
+  # §7.5's read flip: once `enabled?/0` is true, a workspace whose
+  # `worker_env` still carries this provider's credential key resolves it
+  # solely through this link (`Arbiter.Accounts.Credentials.workspace_pairs/1`
+  # — cardinality is one account per (workspace, provider), so there is never
+  # a second link to fall back to). Removing the link would raise
+  # `Arbiter.Accounts.MissingCredentialError` at the workspace's next spawn.
+  defp missing_credential_risk?(link, account) do
+    enabled?() and workspace_carries_credential?(link.workspace_id, account.provider)
+  end
+
+  defp workspace_carries_credential?(workspace_id, provider) do
+    case get_workspace(workspace_id) do
+      {:ok, workspace} ->
+        provider_str = to_string(provider)
+
+        workspace
+        |> Workspace.worker_env_keys()
+        |> Enum.any?(fn %{name: name} ->
+          match?(%{provider: ^provider_str}, Census.credential_keys()[name])
+        end)
+
+      {:error, _} ->
+        false
+    end
+  end
+
+  defp account_links(account_id) do
+    WorkspaceProviderAccount
+    |> Ash.Query.filter(provider_account_id == ^account_id)
+    |> Ash.read!()
+  end
+
+  defp soft_delete(account, links) do
+    Arbiter.Repo.transaction(fn ->
+      Enum.each(links, &Ash.destroy!/1)
+      retire_active_credentials(account.id)
+      account |> Ash.Changeset.for_update(:soft_delete, %{}) |> Ash.update!()
+    end)
+  rescue
+    error -> {:error, error}
+  end
+
+  defp retire_active_credentials(account_id) do
+    ProviderCredential
+    |> Ash.Query.filter(provider_account_id == ^account_id and active == true)
+    |> Ash.read!()
+    |> Enum.each(&Ash.update!(&1, %{}, action: :retire))
+  end
+
+  defp hard_delete(account, links) do
+    with :ok <- ensure_hard_deletable(account) do
+      Arbiter.Repo.transaction(fn ->
+        Enum.each(links, &Ash.destroy!/1)
+        Ash.destroy!(account)
+        account
+      end)
+    end
+  rescue
+    error -> {:error, error}
+  end
+
+  defp ensure_hard_deletable(account) do
+    usage_count = Event |> Ash.Query.filter(provider_account_id == ^account.id) |> Ash.count!()
+
+    credential_count =
+      ProviderCredential |> Ash.Query.filter(provider_account_id == ^account.id) |> Ash.count!()
+
+    if usage_count == 0 and credential_count == 0 do
+      :ok
+    else
+      {:error, :hard_delete_blocked}
+    end
+  end
 
   @doc "Resolve a workspace by UUID id (`arb account attach`'s `<workspace>` arg)."
   @spec get_workspace(String.t()) :: {:ok, Workspace.t()} | {:error, :not_found}

@@ -5,7 +5,8 @@ defmodule ArbiterWeb.Api.AccountController do
 
   Routes:
 
-    * `GET    /api/accounts`            — :index (optional `?provider=`, `?include_merged=true`)
+    * `GET    /api/accounts`            — :index (optional `?provider=`, `?include_merged=true`,
+      `?include_deleted=true`)
     * `POST   /api/accounts`            — :create
     * `GET    /api/accounts/:ref`       — :show   (`:ref` — uuid, `provider:slug`, or bare slug)
     * `PATCH  /api/accounts/:ref`       — :update (`max_concurrent`, nullable;
@@ -14,6 +15,7 @@ defmodule ArbiterWeb.Api.AccountController do
     * `POST   /api/accounts/:ref/attach`  — :attach (`workspace_id`, `provider`, optional `share`)
     * `POST   /api/accounts/:ref/rotate`  — :rotate (`kind`, `env_var`, `secret`, optional `scopes`)
     * `POST   /api/accounts/:ref/merge`   — :merge  (`into` — the surviving account ref)
+    * `DELETE /api/accounts/:ref`         — :delete (optional `?detach=true`, `?hard=true`)
 
   `:ref` resolution is `Arbiter.Accounts.get_account/1` — a bare slug that
   matches more than one provider's account is rejected as ambiguous.
@@ -27,7 +29,11 @@ defmodule ArbiterWeb.Api.AccountController do
 
   def index(conn, params) do
     with {:ok, opts} <- provider_filter(params) do
-      opts = Keyword.put(opts, :include_merged, truthy?(Map.get(params, "include_merged")))
+      opts =
+        opts
+        |> Keyword.put(:include_merged, truthy?(Map.get(params, "include_merged")))
+        |> Keyword.put(:include_deleted, truthy?(Map.get(params, "include_deleted")))
+
       render(conn, :index, accounts: Accounts.list_accounts(opts))
     end
   end
@@ -203,6 +209,22 @@ defmodule ArbiterWeb.Api.AccountController do
     end
   end
 
+  @doc """
+  Delete an account (bd-agb7ai). Soft-delete by default; `?hard=true` for a
+  hard delete (only permitted for an account with no `usage_events` row and
+  no `provider_credentials` row, ever); `?detach=true` to remove the
+  account's `workspace_provider_accounts` links as part of the delete — a
+  link required by a workspace's implementer/reviewer settings is never
+  removed this way, `:detach` included. See `Accounts.delete_account/2`.
+  """
+  def delete(conn, %{"ref" => ref} = params) do
+    opts = [detach: truthy?(Map.get(params, "detach")), hard: truthy?(Map.get(params, "hard"))]
+
+    with {:ok, account} <- ref |> Accounts.delete_account(opts) |> friendly() do
+      render(conn, :show, account: account)
+    end
+  end
+
   defp require_param(params, key) do
     case Map.get(params, key) do
       nil -> {:error, {:invalid_request, "missing required parameter: #{key}"}}
@@ -248,6 +270,40 @@ defmodule ArbiterWeb.Api.AccountController do
 
   defp friendly({:error, {:merged_away, survivor_id}}),
     do: {:error, {:invalid_request, "account has been merged into #{survivor_ref(survivor_id)}"}}
+
+  defp friendly({:error, :already_deleted}),
+    do: {:error, {:invalid_request, "account has already been deleted"}}
+
+  defp friendly({:error, {:pinned_by_task, task_id}}),
+    do:
+      {:error,
+       {:invalid_request, "account is pinned by running task #{task_id}'s provider routing"}}
+
+  defp friendly({:error, {:required_by_workspace, workspace_id, roles}}),
+    do:
+      {:error,
+       {:invalid_request,
+        "account is required by workspace #{workspace_id}'s #{Enum.join(roles, "/")} setting"}}
+
+  defp friendly({:error, {:attached, workspace_ids}}),
+    do:
+      {:error,
+       {:invalid_request,
+        "account is attached to workspace(s) #{Enum.join(workspace_ids, ", ")} — " <>
+          "detach first, or pass ?detach=true"}}
+
+  defp friendly({:error, {:missing_credential_risk, workspace_id}}),
+    do:
+      {:error,
+       {:invalid_request,
+        "workspace #{workspace_id} still carries this provider's credential in its worker " <>
+          "env — detaching would leave it with no credential source"}}
+
+  defp friendly({:error, :hard_delete_blocked}),
+    do:
+      {:error,
+       {:invalid_request,
+        "hard delete requires an account with no usage rows and no credentials, ever"}}
 
   defp friendly({:error, {:missing, key}}),
     do: {:error, {:invalid_request, "missing required field: #{key}"}}

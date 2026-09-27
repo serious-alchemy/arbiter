@@ -4,7 +4,7 @@ defmodule Arbiter.AccountsTest do
   alias Arbiter.Accounts
   alias Arbiter.Accounts.{ProviderAccount, ProviderCredential, WorkspaceProviderAccount}
   alias Arbiter.Quota.{AnthropicQuota, CodexQuota, GoogleQuota, Rekey}
-  alias Arbiter.Tasks.Workspace
+  alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Usage.Event
 
   require Ash.Query
@@ -326,6 +326,14 @@ defmodule Arbiter.AccountsTest do
 
       assert survivor_id == into_account.id
     end
+
+    test "rejects attaching to an account that has been soft-deleted" do
+      ws = create_workspace!("attach-ws-deleted")
+      account = create_account!(%{provider: :claude, slug: "attach-deleted"})
+      assert {:ok, _} = Accounts.delete_account(account.id)
+
+      assert {:error, :already_deleted} = Accounts.attach_workspace(ws.id, :claude, account.id)
+    end
   end
 
   describe "detach_workspace/2" do
@@ -474,6 +482,18 @@ defmodule Arbiter.AccountsTest do
                })
 
       assert survivor_id == into_account.id
+    end
+
+    test "rejects rotating a credential on an account that has been soft-deleted" do
+      account = create_account!(%{provider: :claude, slug: "rotate-deleted"})
+      assert {:ok, _} = Accounts.delete_account(account.id)
+
+      assert {:error, :already_deleted} =
+               Accounts.rotate_credential(account.id, %{
+                 kind: :oauth_token,
+                 env_var: "CLAUDE_CODE_OAUTH_TOKEN",
+                 secret: "sk-should-not-be-written"
+               })
     end
   end
 
@@ -681,6 +701,22 @@ defmodule Arbiter.AccountsTest do
                Accounts.merge_accounts(other.id, from_account.id)
     end
 
+    test "rejects merging a soft-deleted account into another one" do
+      deleted = create_account!(%{provider: :claude, slug: "merge-from-deleted"})
+      other = create_account!(%{provider: :claude, slug: "merge-from-deleted-into"})
+      assert {:ok, _} = Accounts.delete_account(deleted.id)
+
+      assert {:error, :already_deleted} = Accounts.merge_accounts(deleted.id, other.id)
+    end
+
+    test "rejects merging another account into a soft-deleted account" do
+      other = create_account!(%{provider: :claude, slug: "merge-into-deleted-from"})
+      deleted = create_account!(%{provider: :claude, slug: "merge-into-deleted"})
+      assert {:ok, _} = Accounts.delete_account(deleted.id)
+
+      assert {:error, :already_deleted} = Accounts.merge_accounts(other.id, deleted.id)
+    end
+
     test "re-points a stale merge chain onto the current survivor", %{
       from_account: from_account,
       into_account: into_account
@@ -805,6 +841,203 @@ defmodule Arbiter.AccountsTest do
       assert_in_delta merged.utilization_5h, 0.42, 0.001
     end
   end
+
+  describe "delete_account/2" do
+    test "soft-deletes: hides from list_accounts/1, keeps the row and usage attribution" do
+      account = create_account!(%{provider: :claude, slug: "delete-plain"})
+      create_event!(%{provider_account_id: account.id, model: "claude-3", cost_usd: 1.0})
+
+      assert {:ok, deleted} = Accounts.delete_account(account.id)
+
+      assert %DateTime{} = deleted.deleted_at
+      assert deleted.enabled == false
+      refute account.id in Enum.map(Accounts.list_accounts(), & &1.id)
+      assert {:ok, %{id: id}} = Accounts.get_account(account.id)
+      assert id == account.id
+      assert sum_cost(account.id) == 1.0
+    end
+
+    test "retires every active credential, never exposing the secret" do
+      account = create_account!(%{provider: :claude, slug: "delete-retires-creds"})
+
+      {:ok, credential} =
+        Ash.create(ProviderCredential, %{
+          provider_account_id: account.id,
+          kind: :oauth_token,
+          env_var: "CLAUDE_CODE_OAUTH_TOKEN",
+          secret: "super-secret-token",
+          fingerprint: "fp-delete-1"
+        })
+
+      assert {:ok, _} = Accounts.delete_account(account.id)
+
+      assert {:ok, retired} = Ash.get(ProviderCredential, credential.id)
+      assert retired.active == false
+      assert %DateTime{} = retired.retired_at
+      # `secret` is a write-only, decrypt-on-demand calculation — not
+      # selected by a plain `Ash.get/2`, so it never carries the plaintext
+      # here.
+      assert match?(%Ash.NotLoaded{}, retired.secret)
+    end
+
+    test "refused while attached to a workspace, without --detach" do
+      account = create_account!(%{provider: :claude, slug: "delete-attached"})
+      ws = create_workspace!("delete-attached-ws")
+      {:ok, _link} = Accounts.attach_workspace(ws.id, :claude, account.id)
+
+      assert {:error, {:attached, [workspace_id]}} = Accounts.delete_account(account.id)
+      assert workspace_id == ws.id
+
+      assert {:ok, %{deleted_at: nil}} = Accounts.get_account(account.id)
+    end
+
+    test "with detach: true, detaches the plain link and deletes" do
+      account = create_account!(%{provider: :claude, slug: "delete-with-detach"})
+      ws = create_workspace!("delete-with-detach-ws")
+      {:ok, _link} = Accounts.attach_workspace(ws.id, :claude, account.id)
+
+      assert {:ok, deleted} = Accounts.delete_account(account.id, detach: true)
+      assert %DateTime{} = deleted.deleted_at
+
+      assert [] =
+               WorkspaceProviderAccount
+               |> Ash.Query.filter(provider_account_id == ^account.id)
+               |> Ash.read!()
+    end
+
+    test "refused when required by a workspace's implementer settings, even with --detach" do
+      account = create_account!(%{provider: :claude, slug: "delete-implementer-required"})
+      ws = create_workspace!("delete-implementer-ws")
+
+      {:ok, link} = Accounts.attach_workspace(ws.id, :claude, account.id)
+
+      link
+      |> Ash.Changeset.for_update(:update, %{implementer_position: 0})
+      |> Ash.update!()
+
+      assert {:error, {:required_by_workspace, workspace_id, [:implementer]}} =
+               Accounts.delete_account(account.id, detach: true)
+
+      assert workspace_id == ws.id
+      assert {:ok, %{deleted_at: nil}} = Accounts.get_account(account.id)
+    end
+
+    test "refused when required by a workspace's reviewer settings" do
+      account = create_account!(%{provider: :claude, slug: "delete-reviewer-required"})
+      ws = create_workspace!("delete-reviewer-ws")
+
+      {:ok, link} = Accounts.attach_workspace(ws.id, :claude, account.id)
+
+      link
+      |> Ash.Changeset.for_update(:update, %{reviewer_position: 0})
+      |> Ash.update!()
+
+      assert {:error, {:required_by_workspace, _workspace_id, [:reviewer]}} =
+               Accounts.delete_account(account.id)
+    end
+
+    test "refused when the account would drop a workspace's sole active-credential source with the flag on" do
+      prev = Application.get_env(:arbiter, :provider_accounts_enabled)
+      Application.put_env(:arbiter, :provider_accounts_enabled, true)
+      on_exit(fn -> restore_flag(prev) end)
+
+      account = create_account!(%{provider: :claude, slug: "delete-missing-credential-risk"})
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "delete-missing-credential-risk-ws",
+          prefix: "mcr",
+          worker_env: %{"CLAUDE_CODE_OAUTH_TOKEN" => %{"value" => "tok", "secret" => true}}
+        })
+
+      {:ok, _link} = Accounts.attach_workspace(ws.id, :claude, account.id)
+
+      assert {:error, {:missing_credential_risk, workspace_id}} =
+               Accounts.delete_account(account.id, detach: true)
+
+      assert workspace_id == ws.id
+    end
+
+    test "refused when pinned by a running task's provider routing" do
+      account = create_account!(%{provider: :claude, slug: "delete-pinned"})
+      ws = create_workspace!("delete-pinned-ws")
+
+      {:ok, task} = Ash.create(Issue, %{title: "pinned work", workspace_id: ws.id})
+
+      {:ok, _task} =
+        task
+        |> Ash.Changeset.for_update(:pin_implementer, %{implementer_account_id: account.id})
+        |> Ash.update()
+
+      assert {:error, {:pinned_by_task, task_id}} = Accounts.delete_account(account.id)
+      assert task_id == task.id
+    end
+
+    test "not refused by a pin on a closed task" do
+      account = create_account!(%{provider: :claude, slug: "delete-pin-closed"})
+      ws = create_workspace!("delete-pin-closed-ws")
+
+      {:ok, task} = Ash.create(Issue, %{title: "done work", workspace_id: ws.id})
+
+      {:ok, task} =
+        task
+        |> Ash.Changeset.for_update(:pin_implementer, %{implementer_account_id: account.id})
+        |> Ash.update()
+
+      {:ok, _task} = task |> Ash.Changeset.for_update(:close, %{}) |> Ash.update()
+
+      assert {:ok, _deleted} = Accounts.delete_account(account.id)
+    end
+
+    test "refused a second time — already deleted" do
+      account = create_account!(%{provider: :claude, slug: "delete-twice"})
+      assert {:ok, _} = Accounts.delete_account(account.id)
+      assert {:error, :already_deleted} = Accounts.delete_account(account.id)
+    end
+
+    test "refused on an already-merged-away account" do
+      into = create_account!(%{provider: :claude, slug: "delete-merged-survivor"})
+      from = create_account!(%{provider: :claude, slug: "delete-merged-away"})
+      assert {:ok, _} = Accounts.merge_accounts(from.id, into.id)
+
+      assert {:error, {:merged_away, into_id}} = Accounts.delete_account(from.id)
+      assert into_id == into.id
+    end
+
+    test "hard delete succeeds for an account with no usage rows and no credentials ever" do
+      account = create_account!(%{provider: :claude, slug: "delete-hard-clean"})
+
+      assert {:ok, _deleted} = Accounts.delete_account(account.id, hard: true)
+      assert {:error, :not_found} = Accounts.get_account(account.id)
+    end
+
+    test "hard delete refused when the account has usage rows" do
+      account = create_account!(%{provider: :claude, slug: "delete-hard-with-usage"})
+      create_event!(%{provider_account_id: account.id, model: "claude-3", cost_usd: 0.5})
+
+      assert {:error, :hard_delete_blocked} = Accounts.delete_account(account.id, hard: true)
+      assert {:ok, %{deleted_at: nil}} = Accounts.get_account(account.id)
+    end
+
+    test "hard delete refused when the account has ever had a credential, even retired" do
+      account = create_account!(%{provider: :claude, slug: "delete-hard-with-credential"})
+
+      {:ok, _credential} =
+        Ash.create(ProviderCredential, %{
+          provider_account_id: account.id,
+          kind: :oauth_token,
+          env_var: "CLAUDE_CODE_OAUTH_TOKEN",
+          secret: "tok",
+          fingerprint: "fp-hard-1",
+          active: false
+        })
+
+      assert {:error, :hard_delete_blocked} = Accounts.delete_account(account.id, hard: true)
+    end
+  end
+
+  defp restore_flag(nil), do: Application.delete_env(:arbiter, :provider_accounts_enabled)
+  defp restore_flag(value), do: Application.put_env(:arbiter, :provider_accounts_enabled, value)
 
   # A plain read-time aggregation over usage_events — not Usage.summarize/1's
   # workspace-approximation path (that's P9's job to make exact), a direct

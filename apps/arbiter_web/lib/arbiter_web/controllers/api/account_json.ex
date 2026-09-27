@@ -34,6 +34,7 @@ defmodule ArbiterWeb.Api.AccountJSON do
       quota_config: account.quota_config || %{},
       enabled: account.enabled,
       merged_into_id: account.merged_into_id,
+      deleted_at: iso(account.deleted_at),
       inserted_at: iso(account.inserted_at),
       updated_at: iso(account.updated_at)
     }
