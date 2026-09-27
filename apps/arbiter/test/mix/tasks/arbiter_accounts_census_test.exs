@@ -288,4 +288,45 @@ defmodule Mix.Tasks.Arbiter.Accounts.CensusTest do
     %{rows: rows} = Repo.query!("SELECT * FROM workspaces ORDER BY id")
     rows
   end
+
+  describe "acceptance 6 — recognizing pre-existing joined accounts" do
+    test "when all workspaces in a candidate are already joined to one account, the census proposes that account's slug",
+         ctx do
+      # Create a pre-existing provider account
+      account =
+        Ash.create!(Arbiter.Accounts.ProviderAccount, %{
+          provider: :claude,
+          slug: "claude:default",
+          label: "Default Claude Account"
+        })
+
+      # Create workspaces with the same token
+      ws1 = seed!("census-existing-1", %{"CLAUDE_CODE_OAUTH_TOKEN" => @token_a})
+      ws2 = seed!("census-existing-2", %{"CLAUDE_CODE_OAUTH_TOKEN" => @token_a})
+
+      # Join both workspaces to the pre-existing account
+      Ash.create!(Arbiter.Accounts.WorkspaceProviderAccount, %{
+        workspace_id: ws1.id,
+        provider_account_id: account.id,
+        provider: :claude
+      })
+
+      Ash.create!(Arbiter.Accounts.WorkspaceProviderAccount, %{
+        workspace_id: ws2.id,
+        provider_account_id: account.id,
+        provider: :claude
+      })
+
+      census(["--plan", ctx.plan_path])
+      plan = Jason.decode!(File.read!(ctx.plan_path))
+
+      # Should have one account with the existing slug
+      assert [account_in_plan] = plan["accounts"]
+      assert account_in_plan["slug"] == "claude:default"
+      assert account_in_plan["label"] == "Default Claude Account"
+
+      assert Enum.map(account_in_plan["workspaces"], & &1["name"]) |> Enum.sort() ==
+               ["census-existing-1", "census-existing-2"]
+    end
+  end
 end

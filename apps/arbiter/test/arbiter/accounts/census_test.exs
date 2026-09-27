@@ -290,6 +290,31 @@ defmodule Arbiter.Accounts.CensusTest do
     end
   end
 
+  describe "recognizing existing accounts" do
+    test "group_accounts recognizes when all workspaces are joined to the same existing account" do
+      ws_default = ws("default", %{"CLAUDE_CODE_OAUTH_TOKEN" => @token_a})
+      ws_emricare = ws("emricare", %{"CLAUDE_CODE_OAUTH_TOKEN" => @token_a})
+
+      existing_accounts = %{
+        {:claude, ws_default[:id]} =>
+          {"claude:default", "Default Claude Account", "account-id-1"},
+        {:claude, ws_emricare[:id]} =>
+          {"claude:default", "Default Claude Account", "account-id-1"}
+      }
+
+      census =
+        Census.build(
+          [ws_default, ws_emricare],
+          existing_accounts: existing_accounts
+        )
+
+      assert [account] = census.accounts
+      assert account.slug == "claude:default"
+      assert account.label == "Default Claude Account"
+      assert account.existing_id == "account-id-1"
+    end
+  end
+
   describe "report/1" do
     test "names workspaces, key names and truncated fingerprints, and never a value" do
       text =
@@ -311,6 +336,27 @@ defmodule Arbiter.Accounts.CensusTest do
 
       refute text =~ "sk-ant-oat01"
       refute text =~ "debug"
+    end
+
+    test "marks accounts that are recognized as existing with '→ existing'" do
+      ws_default = ws("default", %{"CLAUDE_CODE_OAUTH_TOKEN" => @token_a})
+      ws_emricare = ws("emricare", %{"CLAUDE_CODE_OAUTH_TOKEN" => @token_a})
+
+      existing_accounts = %{
+        {:claude, ws_default[:id]} =>
+          {"claude:default", "Default Claude Account", "account-id-1"},
+        {:claude, ws_emricare[:id]} =>
+          {"claude:default", "Default Claude Account", "account-id-1"}
+      }
+
+      text =
+        Census.build(
+          [ws_default, ws_emricare],
+          existing_accounts: existing_accounts
+        )
+        |> Census.report()
+
+      assert text =~ "claude:default  [claude] → existing"
     end
 
     test "states plainly that nothing was written" do

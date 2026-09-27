@@ -181,9 +181,42 @@ defmodule Arbiter.Accounts.Census do
   end
 
   @doc """
+  Reads existing provider accounts and their workspace joins.
+
+  Returns a map keyed by `{provider, workspace_id}` where the value is the
+  account's `{slug, label, account_id}`. Used by `group_accounts/1` to
+  recognize when all workspaces in a candidate are already joined to one
+  existing account.
+  """
+  @spec collect_existing_accounts() :: %{
+          {atom(), String.t()} => {String.t(), String.t(), String.t()}
+        }
+  def collect_existing_accounts do
+    Arbiter.Accounts.WorkspaceProviderAccount
+    |> Ash.Query.load(:provider_account)
+    |> Ash.read!()
+    |> Enum.group_by(&{&1.provider, &1.workspace_id})
+    |> Map.new(fn {key, joins} ->
+      # Should be at most one account per (provider, workspace), enforced by DB constraint
+      case joins do
+        [join] ->
+          account = join.provider_account
+
+          {key, {account.slug, account.label, account.id}}
+
+        _ ->
+          # Shouldn't happen per the schema, but be defensive
+          {key, nil}
+      end
+    end)
+    |> Enum.reject(fn {_, v} -> v == nil end)
+    |> Map.new()
+  end
+
+  @doc """
   Builds the census from already-decrypted workspaces.
 
-  Pure: no database, no filesystem, no clock beyond `generated_at`.
+  Pure (except when `existing_accounts` is provided): no database, no filesystem, no clock beyond `generated_at`.
 
   ## Options
 
@@ -193,6 +226,8 @@ defmodule Arbiter.Accounts.Census do
       of its own stack frame.
     * `:operator_credential_error` — a reason string when the file could not be
       read, recorded as a note instead of a failure.
+    * `:existing_accounts` — map of `{provider, workspace_id} => {slug, label, account_id}`,
+      used to recognize pre-existing joined accounts.
   """
   @spec build([source_workspace()], keyword()) :: map()
   def build(workspaces, opts \\ []) do
@@ -201,7 +236,8 @@ defmodule Arbiter.Accounts.Census do
       |> Enum.sort_by(& &1.name)
       |> Enum.map(&partition/1)
 
-    accounts = group_accounts(workspaces)
+    existing_accounts = Keyword.get(opts, :existing_accounts, %{})
+    accounts = group_accounts(workspaces, existing_accounts)
     operator = Keyword.get(opts, :operator_credential)
 
     {accounts, suggestions, suggestion_notes} = offer_operator_credential(accounts, operator)
@@ -226,7 +262,11 @@ defmodule Arbiter.Accounts.Census do
   Convenience wrapper: `collect/0` then `build/2`.
   """
   @spec run(keyword()) :: map()
-  def run(opts \\ []), do: collect() |> build(opts)
+  def run(opts \\ []) do
+    workspaces = collect()
+    existing_accounts = collect_existing_accounts()
+    build(workspaces, [existing_accounts: existing_accounts] ++ opts)
+  end
 
   # ---------------------------------------------------------------- partition
 
@@ -267,7 +307,11 @@ defmodule Arbiter.Accounts.Census do
   # defaulted to `<provider>-<n>`. Numbering follows first appearance walking
   # workspaces by name, so a re-run over unchanged data produces an identical
   # plan (an operator diffing two censuses is the point).
-  defp group_accounts(workspaces) do
+  #
+  # When every workspace in a candidate group is already joined to a single
+  # existing account of that provider, use that account's slug and label
+  # instead of proposing a new candidate.
+  defp group_accounts(workspaces, existing_accounts) do
     pairs =
       for workspace <- workspaces,
           credential <- workspace.credentials,
@@ -287,18 +331,57 @@ defmodule Arbiter.Accounts.Census do
           c.provider == provider and c.fingerprint == fingerprint
         end)
 
-      slug = "#{provider}-#{n}"
+      workspace_ids = members |> Enum.map(fn {_, w} -> w.id end) |> Enum.uniq()
+
+      # Check if all workspaces in this candidate are already joined to the same
+      # existing account
+      {slug, label, existing_id} =
+        case check_existing_account(provider, workspace_ids, existing_accounts) do
+          {s, l, id} ->
+            {s, l, id}
+
+          nil ->
+            # No existing account, create a new slug
+            {"#{provider}-#{n}", "#{provider}-#{n}", nil}
+        end
 
       %{
         slug: slug,
-        label: slug,
+        label: label,
         provider: provider,
         index: n,
+        existing_id: existing_id,
         credentials: account_credentials(members, fingerprint),
         workspaces: account_workspaces(members)
       }
     end)
     |> Enum.sort_by(&{&1.provider, &1.index})
+  end
+
+  # Check if all workspaces in workspace_ids are joined to the same existing
+  # account of the given provider. Returns {slug, label, account_id} if so,
+  # nil otherwise.
+  defp check_existing_account(provider, workspace_ids, existing_accounts) do
+    # Provider is a string in credentials but an atom in the existing_accounts
+    # keys, so compare as strings rather than minting atoms from input
+    provider_key = to_string(provider)
+
+    accounts_for_ws =
+      workspace_ids
+      |> Enum.map(fn ws_id ->
+        Enum.find_value(existing_accounts, fn {{p, w}, account} ->
+          if w == ws_id and to_string(p) == provider_key, do: account
+        end)
+      end)
+      |> Enum.reject(&is_nil/1)
+
+    # All workspaces must be joined, and they must all join the same account
+    if length(accounts_for_ws) == length(workspace_ids) and
+         accounts_for_ws == List.duplicate(List.first(accounts_for_ws), length(accounts_for_ws)) do
+      List.first(accounts_for_ws)
+    else
+      nil
+    end
   end
 
   # One account is one fingerprint, but that one secret can be configured under
@@ -701,7 +784,9 @@ defmodule Arbiter.Accounts.Census do
 
   defp account_lines(%{accounts: accounts}) do
     Enum.flat_map(accounts, fn account ->
-      ["  #{account.slug}  [#{account.provider}]"] ++
+      existing_marker = if account.existing_id, do: " → existing", else: ""
+
+      ["  #{account.slug}  [#{account.provider}]#{existing_marker}"] ++
         Enum.map(account.credentials, fn credential ->
           flag = if credential.suggested?, do: "  ** suggested, unconfirmed **", else: ""
 

@@ -17,6 +17,7 @@ defmodule Arbiter.ReleaseAccountsTest do
   alias Arbiter.Accounts.Census
   alias Arbiter.Accounts.ProviderAccount
   alias Arbiter.Accounts.ProviderAccountMigrationBackup, as: Backup
+  alias Arbiter.Accounts.WorkspaceProviderAccount
   alias Arbiter.Release
   alias Arbiter.Tasks.Workspace
 
@@ -297,6 +298,57 @@ defmodule Arbiter.ReleaseAccountsTest do
       assert Ash.read!(ProviderAccount) == []
       assert Ash.read!(Backup) == []
       assert Map.has_key?(Workspace.worker_env_map(reload!(ws)), "CLAUDE_CODE_OAUTH_TOKEN")
+
+      refute_secrets_leak(out)
+    end
+
+    test "dry_run?: true passes unedited when all workspaces are already joined to one existing account",
+         ctx do
+      # Create a pre-existing provider account
+      existing_account =
+        Ash.create!(ProviderAccount, %{
+          provider: :claude,
+          slug: "claude:default",
+          label: "Default Claude Account"
+        })
+
+      # Create workspaces with the same token
+      ws1 = seed!("rel-existing-1", %{"CLAUDE_CODE_OAUTH_TOKEN" => @token})
+      ws2 = seed!("rel-existing-2", %{"CLAUDE_CODE_OAUTH_TOKEN" => @token})
+
+      # Join both workspaces to the pre-existing account
+      Ash.create!(WorkspaceProviderAccount, %{
+        workspace_id: ws1.id,
+        provider_account_id: existing_account.id,
+        provider: :claude
+      })
+
+      Ash.create!(WorkspaceProviderAccount, %{
+        workspace_id: ws2.id,
+        provider_account_id: existing_account.id,
+        provider: :claude
+      })
+
+      # Run census to produce the plan
+      capture_io(fn -> Release.accounts_census(plan: ctx.plan_path) end)
+      plan_text = File.read!(ctx.plan_path)
+      plan = Jason.decode!(plan_text)
+
+      # Verify the plan shows the existing account
+      assert [account] = plan["accounts"]
+      assert account["slug"] == "claude:default"
+      assert account["label"] == "Default Claude Account"
+
+      # Run dry_run without editing the plan
+      out = observe(fn -> Release.accounts_migrate(plan: ctx.plan_path, dry_run?: true) end)
+
+      # Should succeed without refusal
+      assert %{dry_run?: true, keys_removed: 2} = out.result
+      # Should report "already present" or similar for the existing account
+      assert out.stdout =~ "already"
+      # Nothing should be written
+      assert Ash.read!(ProviderAccount) |> length() == 1
+      assert Ash.read!(Backup) == []
 
       refute_secrets_leak(out)
     end

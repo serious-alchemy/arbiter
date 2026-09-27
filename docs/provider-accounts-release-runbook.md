@@ -76,7 +76,10 @@ plan is the record of your decisions.
 
 Rename the slugs, and merge any candidates you know to be one account. Two
 different tokens can belong to one Anthropic plan (§2.2). Fingerprints alone
-cannot tell you that.
+cannot tell you that. If every workspace in a candidate group is already joined
+to a single existing account, the census will have proposed that account's
+slug and label automatically, marked with "→ existing" in the report — no
+rename is needed in that case.
 
 ### 3. Dry run (writes nothing, safe with the server running)
 
