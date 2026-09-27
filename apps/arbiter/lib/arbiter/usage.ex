@@ -55,7 +55,6 @@ defmodule Arbiter.Usage do
   alias Arbiter.Repo
   alias Arbiter.Tasks.Dependency
   alias Arbiter.Usage.Estimate
-  alias Arbiter.Usage.Event
   alias Arbiter.Usage.LedgerRow
   require Ash.Query
 
@@ -122,6 +121,17 @@ defmodule Arbiter.Usage do
   # validation, same as every other caller.
   @deprecated_by %{campaign: :epic, account: :provider_account}
 
+  # bd-5cevwg: the columns a rollup reads, and nothing else. This used to be
+  # a full-row `Ash.read!(Event)` — every column, the `raw` JSON blob
+  # included, decoded and cast per row — which took ~1s per call on a
+  # 30-day window of the live ledger (8.9k rows) against ~0.1s for this
+  # projection. Rows come back as plain maps with the same field names the
+  # `Event` struct has (`source`/`step` as strings rather than atoms — see
+  # `group_events/2`), plus an `:estimated` marker — see `select_estimated/2`.
+  @rollup_fields ~w(task_id source session_id workspace_id provider_account_id repo model
+                    provider step occurred_at cost_usd tokens_in tokens_out thinking_tokens
+                    cache_creation_tokens cache_read_tokens duration_ms)a
+
   @doc """
   Roll up usage events into a list of summary rows.
 
@@ -171,18 +181,47 @@ defmodule Arbiter.Usage do
   @spec summarize(keyword()) :: {:ok, [rollup()]} | {:error, term()}
   def summarize(opts) when is_list(opts) do
     with {:ok, by} <- fetch_by(opts) do
-      events =
-        Event
-        |> base_filter(opts)
-        |> Ash.read!()
-
-      {:ok,
-       events
-       |> group_events(by)
-       |> Enum.map(&aggregate_group(by, &1))
-       |> sort_rollups(by)
-       |> maybe_limit(opts)}
+      {:ok, opts |> ledger_rows(@rollup_fields) |> rollup(by, opts)}
     end
+  end
+
+  @doc """
+  Several `summarize/1` rollups of the same window from **one** ledger read.
+
+  `bys` is a list of groupings (deprecated aliases accepted, as for
+  `summarize/1`'s `:by`); `opts` takes every other `summarize/1` option, and
+  `:limit` applies to each rollup. Returns `{:ok, %{by => [rollup]}}`, keyed by
+  the grouping exactly as the caller spelled it, where each value is what
+  `summarize([by: by] ++ opts)` would have returned — or the first
+  `{:error, reason}` for an invalid grouping, before anything is read.
+
+  A page that shows the same spend cut several ways (`/usage`: by task,
+  model, repo and account) should call this instead of `summarize/1` once
+  per grouping: the ledger read, not the grouping, is the expensive part.
+  """
+  @spec summarize_many([atom()], keyword()) :: {:ok, %{atom() => [rollup()]}} | {:error, term()}
+  def summarize_many(bys, opts) when is_list(bys) and is_list(opts) do
+    with {:ok, groupings} <- validate_groupings(bys) do
+      rows = ledger_rows(opts, @rollup_fields)
+      {:ok, Map.new(groupings, fn {key, by} -> {key, rollup(rows, by, opts)} end)}
+    end
+  end
+
+  defp validate_groupings(bys) do
+    Enum.reduce_while(bys, {:ok, []}, fn by, {:ok, acc} ->
+      case validate_by(by) do
+        {:ok, norm} -> {:cont, {:ok, [{by, norm} | acc]}}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp rollup(rows, by, opts) do
+    rows
+    |> group_events(by)
+    |> Enum.map(&aggregate_group(by, &1))
+    |> sort_rollups(by)
+    |> maybe_limit(opts)
   end
 
   @doc """
@@ -290,10 +329,7 @@ defmodule Arbiter.Usage do
   """
   @spec zero_token_providers(keyword()) :: {:ok, [zero_token_report()]}
   def zero_token_providers(opts \\ []) do
-    events =
-      Event
-      |> base_filter(opts)
-      |> Ash.read!()
+    events = ledger_rows(opts, [:provider, :tokens_in, :tokens_out])
 
     flagged =
       events
@@ -372,18 +408,49 @@ defmodule Arbiter.Usage do
 
   defp fetch_by(opts) do
     case Keyword.fetch(opts, :by) do
-      {:ok, by} ->
-        case normalize_by(by) do
-          norm when norm in @valid_by -> {:ok, norm}
-          _ -> {:error, {:invalid_grouping, by}}
-        end
-
-      :error ->
-        {:error, :missing_grouping}
+      {:ok, by} -> validate_by(by)
+      :error -> {:error, :missing_grouping}
     end
   end
 
-  defp base_filter(query, opts) do
+  defp validate_by(by) do
+    case normalize_by(by) do
+      norm when norm in @valid_by -> {:ok, norm}
+      _ -> {:error, {:invalid_grouping, by}}
+    end
+  end
+
+  defp ledger_rows(opts, fields) do
+    LedgerRow
+    |> select([e], map(e, ^fields))
+    |> select_estimated(fields)
+    |> filter_ledger(opts)
+    |> Repo.all()
+  end
+
+  # `raw["arb_usage_source"]["cost_source"] == "estimated"`, evaluated by
+  # SQLite so the blob never leaves the database. Computed for every rollup
+  # read, not just `:by :session`: session rows are counted in `:day`,
+  # `:model`, `:source`, ... too, and those rollups have always carried the
+  # flag. `json_valid` guards the extract — `json_extract` on a malformed
+  # value raises and would fail the whole read.
+  defp select_estimated(query, @rollup_fields) do
+    select_merge(query, [e], %{
+      estimated:
+        type(
+          fragment(
+            "COALESCE(CASE WHEN json_valid(?) THEN json_extract(?, '$.arb_usage_source.cost_source') = 'estimated' END, 0)",
+            e.raw,
+            e.raw
+          ),
+          :boolean
+        )
+    })
+  end
+
+  defp select_estimated(query, _fields), do: query
+
+  defp filter_ledger(query, opts) do
     query
     |> filter_since(Keyword.get(opts, :since))
     |> filter_until(Keyword.get(opts, :until))
@@ -393,26 +460,26 @@ defmodule Arbiter.Usage do
   end
 
   defp filter_since(query, nil), do: query
-  defp filter_since(query, %DateTime{} = dt), do: Ash.Query.filter(query, occurred_at >= ^dt)
+  defp filter_since(query, %DateTime{} = dt), do: where(query, [e], e.occurred_at >= ^dt)
 
   defp filter_until(query, nil), do: query
-  defp filter_until(query, %DateTime{} = dt), do: Ash.Query.filter(query, occurred_at <= ^dt)
+  defp filter_until(query, %DateTime{} = dt), do: where(query, [e], e.occurred_at <= ^dt)
 
   defp filter_workspace_id(query, nil), do: query
   defp filter_workspace_id(query, ""), do: query
-  defp filter_workspace_id(query, ws), do: Ash.Query.filter(query, workspace_id == ^ws)
+  defp filter_workspace_id(query, ws), do: where(query, [e], e.workspace_id == ^ws)
 
   defp filter_provider_account_id(query, nil), do: query
   defp filter_provider_account_id(query, ""), do: query
 
   defp filter_provider_account_id(query, account_id),
-    do: Ash.Query.filter(query, provider_account_id == ^account_id)
+    do: where(query, [e], e.provider_account_id == ^account_id)
 
   defp filter_session_ids(query, nil), do: query
   defp filter_session_ids(query, []), do: query
 
   defp filter_session_ids(query, ids) when is_list(ids),
-    do: Ash.Query.filter(query, session_id in ^ids)
+    do: where(query, [e], e.session_id in ^ids)
 
   # Group events by the requested dimension. For :epic we resolve each
   # event's task's `:parent_of` parents at read time (a join would be cleaner
@@ -432,7 +499,7 @@ defmodule Arbiter.Usage do
   end
 
   defp group_events(events, :source),
-    do: Enum.group_by(events, &Atom.to_string(&1.source || :task))
+    do: Enum.group_by(events, &(&1.source || "task"))
 
   # Mirrors `:task`'s exclusion above: a row with no `session_id` belongs to
   # no session, so it is dropped rather than grouped under a `nil` sentinel.
@@ -459,7 +526,7 @@ defmodule Arbiter.Usage do
   defp group_events(events, :repo), do: Enum.group_by(events, &(&1.repo || "(none)"))
   defp group_events(events, :model), do: Enum.group_by(events, &(&1.model || "(unknown)"))
   defp group_events(events, :provider), do: Enum.group_by(events, &(&1.provider || "(unknown)"))
-  defp group_events(events, :step), do: Enum.group_by(events, &Atom.to_string(&1.step))
+  defp group_events(events, :step), do: Enum.group_by(events, & &1.step)
 
   defp group_events(events, :epic) do
     parents = load_parent_edges(events)
@@ -484,31 +551,34 @@ defmodule Arbiter.Usage do
   def base_task_id(nil), do: nil
   defdelegate base_task_id(task_id), to: Arbiter.Worker.ReviewGate
 
+  # AshSqlite compiles `to_issue_id in ^ids` to one `OR` term per id, and
+  # SQLite rejects an expression tree deeper than 1000 — so the lookup is
+  # chunked. It wasn't, until bd-5cevwg: once the live ledger passed 1000
+  # distinct base task ids the read raised, a blanket `rescue` turned that
+  # into `%{}`, and every row of an all-time `:epic` rollup silently landed in
+  # `(no_epic)`. The rescue is gone too — a failed parent lookup must fail
+  # the rollup, not misreport it.
+  @parent_lookup_chunk 200
+
   # Map each event's task to the parent task(s) it hangs under via `:parent_of`
   # edges (the task is the `to_issue`; its parents are the `from_issue`s).
   defp load_parent_edges(events) do
     parent_of = :parent_of
 
-    task_ids =
-      events
-      |> Enum.map(&base_task_id(&1.task_id))
-      |> Enum.reject(&is_nil/1)
-      |> Enum.uniq()
-
-    case task_ids do
-      [] ->
-        %{}
-
-      ids ->
-        Dependency
-        |> Ash.Query.filter(type == ^parent_of and to_issue_id in ^ids)
-        |> Ash.read!()
-        |> Enum.reduce(%{}, fn d, acc ->
-          Map.update(acc, d.to_issue_id, [d.from_issue_id], &[d.from_issue_id | &1])
-        end)
-    end
-  rescue
-    _ -> %{}
+    events
+    |> Enum.map(&base_task_id(&1.task_id))
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
+    |> Enum.chunk_every(@parent_lookup_chunk)
+    |> Enum.flat_map(fn ids ->
+      Dependency
+      |> Ash.Query.filter(type == ^parent_of and to_issue_id in ^ids)
+      |> Ash.Query.select([:from_issue_id, :to_issue_id])
+      |> Ash.read!()
+    end)
+    |> Enum.reduce(%{}, fn d, acc ->
+      Map.update(acc, d.to_issue_id, [d.from_issue_id], &[d.from_issue_id | &1])
+    end)
   end
 
   defp aggregate_group(_by, {group, events}) do
@@ -555,10 +625,9 @@ defmodule Arbiter.Usage do
   # with the same `:cost_state | :estimated | none` provenance
   # `ClaudeSessionFile` reports live (see `ClaudePricing`'s moduledoc) — this
   # is the persisted mirror of that marker, so a rollup can carry it forward
-  # without recomputing an estimate itself.
-  defp estimated_event?(%{raw: %{"arb_usage_source" => %{"cost_source" => "estimated"}}}),
-    do: true
-
+  # without recomputing an estimate itself. `ledger_rows/2` extracts it in
+  # SQL as the row's `:estimated` boolean.
+  defp estimated_event?(%{estimated: true}), do: true
   defp estimated_event?(_ev), do: false
 
   defp sort_rollups(rollups, :day), do: Enum.sort_by(rollups, & &1.group)

@@ -60,10 +60,13 @@ defmodule ArbiterWeb.UsageLive do
   defp load_data(socket) do
     since = since_for_range(socket.assigns.range)
 
-    task_rollup = summarize!(by: :task, since: since)
-    model_rollup = summarize!(by: :model, since: since)
-    repo_rollup = summarize!(by: :repo, since: since)
-    account_rollup = summarize!(by: :provider_account, since: since)
+    %{
+      task: task_rollup,
+      model: model_rollup,
+      repo: repo_rollup,
+      provider_account: account_rollup
+    } = summarize_many!([:task, :model, :repo, :provider_account], since: since)
+
     work_sessions = load_work_sessions(since)
     titles = load_titles(task_rollup)
 
@@ -119,10 +122,13 @@ defmodule ArbiterWeb.UsageLive do
     |> assign(:in_overage, in_overage?)
   end
 
-  defp summarize!(opts) do
-    case Usage.summarize(opts) do
-      {:ok, rows} -> rows
-      _ -> []
+  # One ledger read for every rollup on the page (bd-5cevwg) — the read, not
+  # the grouping, is what costs; four `summarize/1` calls read the window
+  # four times.
+  defp summarize_many!(bys, opts) do
+    case Usage.summarize_many(bys, opts) do
+      {:ok, rollups} -> rollups
+      _ -> Map.new(bys, &{&1, []})
     end
   end
 
@@ -147,7 +153,9 @@ defmodule ArbiterWeb.UsageLive do
         dt -> Ash.Query.filter(base_query, occurred_at >= ^dt)
       end
 
+    # Only the three columns the rework math reads — never `raw` (bd-5cevwg).
     query
+    |> Ash.Query.select([:task_id, :cost_usd, :occurred_at])
     |> Ash.read!()
     |> Enum.group_by(&base_task_id/1)
     |> Map.new(fn {task_id, events} ->

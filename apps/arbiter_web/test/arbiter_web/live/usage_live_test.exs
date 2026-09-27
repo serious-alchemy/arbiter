@@ -227,6 +227,56 @@ defmodule ArbiterWeb.UsageLiveTest do
     assert model_bar_segment =~ "—"
   end
 
+  # bd-5cevwg: the page used to call `Usage.summarize/1` once per rollup (by
+  # task, model, repo, account) — four full-row reads of the window, each
+  # decoding every row's `raw` JSON — plus a full-row read for the rework
+  # sessions. It now takes all four rollups from one `summarize_many/2` read.
+  test "a dead render reads the ledger window once for all four rollups, never selecting raw", %{
+    conn: conn,
+    ws: ws
+  } do
+    task = new_issue!(ws, "One read")
+    event!(%{task_id: task.id, workspace_id: ws.id, cost_usd: 0.5, raw: %{"type" => "result"}})
+
+    ref = make_ref()
+    parent = self()
+
+    :telemetry.attach(
+      ref,
+      [:arbiter, :repo, :query],
+      fn _event, _measurements, metadata, _config ->
+        if metadata.source == "usage_events", do: send(parent, {:usage_sql, ref, metadata.query})
+      end,
+      nil
+    )
+
+    html =
+      try do
+        conn |> get(~p"/usage") |> html_response(200)
+      after
+        :telemetry.detach(ref)
+      end
+
+    assert html =~ "One read"
+
+    queries = collect_usage_sql(ref, [])
+    rollup_reads = Enum.filter(queries, &(&1 =~ ~s("tokens_in")))
+
+    assert length(rollup_reads) == 1, "expected one rollup read, got: #{inspect(rollup_reads)}"
+
+    for sql <- queries do
+      refute sql =~ ~r/(?<!json_valid\(|json_extract\()u0\."raw"/, "selected raw: #{sql}"
+    end
+  end
+
+  defp collect_usage_sql(ref, acc) do
+    receive do
+      {:usage_sql, ^ref, sql} -> collect_usage_sql(ref, [sql | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
+
   test "shows an empty state when there is no usage yet", %{conn: conn} do
     {:ok, _view, html} = live(conn, ~p"/usage")
     assert html =~ "Usage"
