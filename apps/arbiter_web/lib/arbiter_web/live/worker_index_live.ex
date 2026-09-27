@@ -30,17 +30,35 @@ defmodule ArbiterWeb.WorkerIndexLive do
 
   @impl true
   def mount(_params, _session, socket) do
-    if connected?(socket) do
+    live? = connected?(socket)
+
+    if live? do
       Phoenix.PubSub.subscribe(Arbiter.PubSub, @workers_topic)
       :timer.send_interval(1000, self(), :tick)
     end
 
-    {:ok,
-     socket
-     |> assign(:now, DateTime.utc_now())
-     |> assign(:worker_label, "worker")
-     |> assign(:issue_label, "issue")
-     |> assign(:filters, @filters)}
+    socket =
+      socket
+      |> assign(:now, DateTime.utc_now())
+      |> assign(:worker_label, "worker")
+      |> assign(:issue_label, "issue")
+      |> assign(:filters, @filters)
+      |> assign(:workers_raw, [])
+      |> assign(:workers, [])
+      |> assign(:page, 1)
+      |> assign(:requested_page, 1)
+      |> assign(:total_pages, 1)
+      |> assign(:total_count, 0)
+      |> assign(:workers_loaded?, false)
+      |> assign(:workers_loading?, false)
+      |> assign(:workers_stale?, false)
+      |> assign(:workers_error, nil)
+
+    # The worker walk arrives by `start_async/3` on the connected mount only
+    # (bd-4gtia5): the dead render reads nothing and draws a skeleton, and a
+    # slow or wedged worker in `Worker.list_children/0`'s GenServer fan-out
+    # can no longer block the page.
+    {:ok, if(live?, do: fetch_workers(socket), else: socket)}
   end
 
   @impl true
@@ -48,38 +66,85 @@ defmodule ArbiterWeb.WorkerIndexLive do
     {:noreply,
      socket
      |> assign(:status, parse_status(params))
-     |> assign(:page, Paging.parse_page(params))
-     |> refresh()}
+     |> assign(:requested_page, Paging.parse_page(params))
+     |> paginate()}
   end
 
   @impl true
-  def handle_info({:worker_lifecycle, _event, _snap}, socket), do: {:noreply, refresh(socket)}
+  def handle_info({:worker_lifecycle, _event, _snap}, socket),
+    do: {:noreply, fetch_workers(socket)}
+
   def handle_info(:tick, socket), do: {:noreply, assign(socket, :now, DateTime.utc_now())}
   def handle_info(_msg, socket), do: {:noreply, socket}
 
-  defp refresh(socket) do
+  @impl true
+  def handle_async(:workers, {:ok, raw}, socket) do
+    socket
+    |> assign(:workers_raw, raw)
+    |> assign(:workers_loaded?, true)
+    |> assign(:workers_error, nil)
+    |> paginate()
+    |> workers_read_done()
+  end
+
+  # A read that fails must not take the page down. Whatever list is on
+  # screen stays there — the skeleton on a first load, the last good read on
+  # a refresh — under an error that says so.
+  def handle_async(:workers, {:exit, reason}, socket) do
+    socket
+    |> assign(:workers_error, load_error(reason))
+    |> workers_read_done()
+  end
+
+  @impl true
+  def handle_event("retry_workers", _params, socket),
+    do: {:noreply, socket |> assign(:workers_error, nil) |> fetch_workers()}
+
+  defp fetch_workers(%{assigns: %{workers_loading?: true}} = socket),
+    do: assign(socket, :workers_stale?, true)
+
+  defp fetch_workers(socket) do
+    socket
+    |> assign(:workers_loading?, true)
+    |> assign(:workers_stale?, false)
+    |> start_async(:workers, fn -> load_workers() end)
+  end
+
+  defp workers_read_done(socket) do
+    socket = assign(socket, :workers_loading?, false)
+
+    {:noreply, if(socket.assigns.workers_stale?, do: fetch_workers(socket), else: socket)}
+  end
+
+  defp load_error({%{__exception__: true} = error, _stacktrace}), do: Exception.message(error)
+  defp load_error(reason), do: Exception.format_exit(reason)
+
+  # Runs in the async task: the GenServer fan-out over every live worker
+  # (bd-4gtia5) plus the workspaces read, kept off the render path.
+  defp load_workers do
     workspaces_by_id = index_workspaces()
 
-    all =
-      list_children()
-      # bd-aw2cyt: a row's phase depends on the task's other live rounds, so
-      # stamp it over the whole list before filtering or paging.
-      |> Arbiter.Worker.Phase.annotate()
-      |> Enum.map(fn p ->
-        Map.put(p, :workspace_name, workspace_name(workspaces_by_id, p.workspace_id))
-      end)
-      |> Enum.filter(&matches_status?(&1, socket.assigns.status))
-      # bd-45tkhq: a degraded (stale-probe) entry can carry a nil
-      # `started_at` when it has no matching Run row; DateTime.compare/2
-      # has no nil clause, so sort nils last instead of crashing.
-      |> Enum.sort_by(& &1.started_at, fn
-        nil, nil -> true
-        nil, _ -> false
-        _, nil -> true
-        a, b -> DateTime.compare(a, b) != :gt
-      end)
+    list_children()
+    # bd-aw2cyt: a row's phase depends on the task's other live rounds, so
+    # stamp it over the whole list before filtering or paging.
+    |> Arbiter.Worker.Phase.annotate()
+    |> Enum.map(fn p ->
+      Map.put(p, :workspace_name, workspace_name(workspaces_by_id, p.workspace_id))
+    end)
+    # bd-45tkhq: a degraded (stale-probe) entry can carry a nil
+    # `started_at` when it has no matching Run row; DateTime.compare/2
+    # has no nil clause, so sort nils last instead of crashing.
+    |> Enum.sort_by(& &1.started_at, fn
+      nil, nil -> true
+      nil, _ -> false
+      _, nil -> true
+      a, b -> DateTime.compare(a, b) != :gt
+    end)
+  end
 
-    result = Paging.paginate_list(all, socket.assigns.page)
+  defp paginate(socket) do
+    all = Enum.filter(socket.assigns.workers_raw, &matches_status?(&1, socket.assigns.status))
+    result = Paging.paginate_list(all, socket.assigns.requested_page)
 
     socket
     |> assign(:workers, result.entries)
@@ -154,91 +219,140 @@ defmodule ArbiterWeb.WorkerIndexLive do
           tab_path={fn value -> worker_path(String.to_existing_atom(value), 1) end}
         />
 
-        <ArbiterWeb.CoreComponents.Core.panel body_class="flex flex-col gap-4">
-          <div :if={@workers == []} id="workers-empty">
-            <Feedback.empty_state icon="hero-moon">
-              No active {plural(@worker_label)} match this filter.
-            </Feedback.empty_state>
-          </div>
+        <div
+          id="workers-panel"
+          data-state={workers_state(@workers_loaded?, @workers_error)}
+          aria-busy={to_string(not @workers_loaded? and is_nil(@workers_error))}
+        >
+          <ArbiterWeb.CoreComponents.Core.panel body_class="flex flex-col gap-4">
+            <div
+              :if={@workers_error}
+              id="workers-error"
+              role="alert"
+              class="flex items-start gap-2 px-3 py-2.5 rounded-[var(--radius-field)] border border-solid border-[var(--arb-fail-edge)] bg-[var(--arb-fail-wash)] text-[12px] text-[var(--arb-fail-text)]"
+            >
+              <ArbiterWeb.CoreComponents.Core.icon
+                name="hero-exclamation-triangle-micro"
+                class="size-4 shrink-0 mt-px"
+              />
+              <span class="grow min-w-0 break-words">
+                Could not load {plural(@worker_label)}: {@workers_error}<span :if={@workers_loaded?}> — showing the last list that loaded.</span>
+              </span>
+              <button
+                type="button"
+                id="workers-retry"
+                phx-click="retry_workers"
+                class={[
+                  "shrink-0 px-2 h-[22px] rounded-[var(--radius-field)] cursor-pointer",
+                  "border border-solid border-[var(--arb-fail-edge)] bg-[var(--surface-chrome)]",
+                  "text-[11px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
+                ]}
+              >
+                Retry
+              </button>
+            </div>
 
-          <ul :if={@workers != []} id="workers" class="flex flex-col gap-3">
-            <li :for={p <- @workers} class="flex flex-col">
-              <div class="flex items-center gap-1">
-                <.link
-                  navigate={~p"/workers/#{p.task_id}"}
-                  class={[
-                    "flex items-center justify-between gap-2 px-3 py-2 rounded-[var(--radius-field)] border border-solid",
-                    "border-[var(--border-default)] bg-[var(--arb-panel-alt)] hover:bg-[var(--arb-raised-hover)]",
-                    "transition-colors duration-[var(--dur-hover)] no-underline flex-1 min-w-0"
-                  ]}
-                >
-                  <div class="flex items-center gap-2 min-w-0 flex-1">
-                    <span class="relative flex h-2.5 w-2.5 shrink-0">
+            <div
+              :if={not @workers_loaded? and is_nil(@workers_error)}
+              id="workers-loading"
+              aria-label={"Loading #{plural(@worker_label)}"}
+              class="flex flex-col gap-3"
+            >
+              <div
+                :for={n <- 1..3}
+                id={"workers-loading-#{n}"}
+                aria-hidden="true"
+                class="h-[52px] rounded-[var(--radius-field)] border border-solid border-[var(--border-default)] bg-[var(--arb-panel-alt)] animate-pulse"
+              >
+              </div>
+            </div>
+
+            <div :if={@workers_loaded? and @workers == []} id="workers-empty">
+              <Feedback.empty_state icon="hero-moon">
+                No active {plural(@worker_label)} match this filter.
+              </Feedback.empty_state>
+            </div>
+
+            <ul :if={@workers_loaded? and @workers != []} id="workers" class="flex flex-col gap-3">
+              <li :for={p <- @workers} class="flex flex-col">
+                <div class="flex items-center gap-1">
+                  <.link
+                    navigate={~p"/workers/#{p.task_id}"}
+                    class={[
+                      "flex items-center justify-between gap-2 px-3 py-2 rounded-[var(--radius-field)] border border-solid",
+                      "border-[var(--border-default)] bg-[var(--arb-panel-alt)] hover:bg-[var(--arb-raised-hover)]",
+                      "transition-colors duration-[var(--dur-hover)] no-underline flex-1 min-w-0"
+                    ]}
+                  >
+                    <div class="flex items-center gap-2 min-w-0 flex-1">
+                      <span class="relative flex h-2.5 w-2.5 shrink-0">
+                        <span
+                          :if={p.status == :running}
+                          class="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--arb-live)] opacity-75"
+                        >
+                        </span>
+                        <span class={[
+                          "relative inline-flex h-2.5 w-2.5 rounded-full",
+                          status_dot_class(p.status)
+                        ]}>
+                        </span>
+                      </span>
+                      <code class="text-[11px] font-medium font-[family-name:var(--font-mono)] text-[var(--text-secondary)] group-hover:text-[var(--text-link)] transition-colors truncate">
+                        {p.task_id}
+                      </code>
+                      <.provider_icon
+                        provider={Worker.provider(p.meta)}
+                        class="size-3.5 text-[var(--text-label)] shrink-0"
+                      />
+                    </div>
+                    <div class="flex items-center gap-2 flex-none">
                       <span
-                        :if={p.status == :running}
-                        class="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--arb-live)] opacity-75"
+                        class="text-[10.5px] text-[var(--text-label)] font-[family-name:var(--font-mono)] whitespace-nowrap"
+                        title="Elapsed"
                       >
+                        {humanize_seconds(runtime_seconds(p.started_at, @now))}
                       </span>
-                      <span class={[
-                        "relative inline-flex h-2.5 w-2.5 rounded-full",
-                        status_dot_class(p.status)
-                      ]}>
-                      </span>
-                    </span>
-                    <code class="text-[11px] font-medium font-[family-name:var(--font-mono)] text-[var(--text-secondary)] group-hover:text-[var(--text-link)] transition-colors truncate">
-                      {p.task_id}
-                    </code>
-                    <.provider_icon
-                      provider={Worker.provider(p.meta)}
-                      class="size-3.5 text-[var(--text-label)] shrink-0"
-                    />
-                  </div>
-                  <div class="flex items-center gap-2 flex-none">
-                    <span
-                      class="text-[10.5px] text-[var(--text-label)] font-[family-name:var(--font-mono)] whitespace-nowrap"
-                      title="Elapsed"
-                    >
-                      {humanize_seconds(runtime_seconds(p.started_at, @now))}
-                    </span>
-                    <%!-- bd-aw2cyt: the status badge is the record's state; the
+                      <%!-- bd-aw2cyt: the status badge is the record's state; the
                     phase chip beside it is what is actually happening, and it
                     dims when no agent is live for this row. --%>
-                    <span
-                      :if={p[:phase]}
-                      data-phase={p[:phase]}
-                      data-agent-live={to_string(p[:agent_live])}
-                      class={[
-                        "text-[10.5px] px-1.5 py-px rounded-[var(--radius-field)]",
-                        "font-[family-name:var(--font-mono)] border border-solid",
-                        "border-[var(--border-strong)] text-[var(--text-label)]",
-                        p[:agent_live] != true && "opacity-60"
-                      ]}
-                    >
-                      {Arbiter.Worker.Phase.label(p[:phase])}
-                    </span>
-                    <span class={[
-                      "text-[10.5px] px-1.5 py-px rounded-[var(--radius-field)] font-medium",
-                      awaiting_review_status_class(p)
-                    ]}>
-                      {awaiting_review_status_label(p)}
-                    </span>
-                  </div>
-                </.link>
-                <ArbiterWeb.CoreComponents.Core.copy_id id={p.task_id} class="flex-none" />
-              </div>
-              <span class="text-[10.5px] text-[var(--text-label)] px-3 py-1">
-                {p.workspace_name}
-              </span>
-            </li>
-          </ul>
+                      <span
+                        :if={p[:phase]}
+                        data-phase={p[:phase]}
+                        data-agent-live={to_string(p[:agent_live])}
+                        class={[
+                          "text-[10.5px] px-1.5 py-px rounded-[var(--radius-field)]",
+                          "font-[family-name:var(--font-mono)] border border-solid",
+                          "border-[var(--border-strong)] text-[var(--text-label)]",
+                          p[:agent_live] != true && "opacity-60"
+                        ]}
+                      >
+                        {Arbiter.Worker.Phase.label(p[:phase])}
+                      </span>
+                      <span class={[
+                        "text-[10.5px] px-1.5 py-px rounded-[var(--radius-field)] font-medium",
+                        awaiting_review_status_class(p)
+                      ]}>
+                        {awaiting_review_status_label(p)}
+                      </span>
+                    </div>
+                  </.link>
+                  <ArbiterWeb.CoreComponents.Core.copy_id id={p.task_id} class="flex-none" />
+                </div>
+                <span class="text-[10.5px] text-[var(--text-label)] px-3 py-1">
+                  {p.workspace_name}
+                </span>
+              </li>
+            </ul>
 
-          <Navigation.pager
-            page={@page}
-            total_pages={@total_pages}
-            total_count={@total_count}
-            page_path={fn page -> worker_path(@status, page) end}
-          />
-        </ArbiterWeb.CoreComponents.Core.panel>
+            <Navigation.pager
+              :if={@workers_loaded?}
+              page={@page}
+              total_pages={@total_pages}
+              total_count={@total_count}
+              page_path={fn page -> worker_path(@status, page) end}
+            />
+          </ArbiterWeb.CoreComponents.Core.panel>
+        </div>
 
         <div class="flex items-center gap-4">
           <Navigation.back_link />
@@ -256,6 +370,10 @@ defmodule ArbiterWeb.WorkerIndexLive do
   end
 
   # ---- view helpers ----
+
+  defp workers_state(_loaded?, error) when not is_nil(error), do: "error"
+  defp workers_state(true, nil), do: "loaded"
+  defp workers_state(false, nil), do: "loading"
 
   defp runtime_seconds(%DateTime{} = started_at, %DateTime{} = now),
     do: DateTime.diff(now, started_at, :second)

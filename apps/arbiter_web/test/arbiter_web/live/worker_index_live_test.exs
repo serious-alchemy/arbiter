@@ -35,6 +35,16 @@ defmodule ArbiterWeb.WorkerIndexLiveTest do
   alias Arbiter.Worker
   alias ArbiterWeb.WorkerIndexLiveTest.TestMerger
 
+  # The worker walk arrives by `start_async/3` after the connected mount
+  # (bd-4gtia5); everything but the async tests themselves wants the page
+  # once it has landed.
+  @async_timeout 5_000
+
+  defp live_workers(conn, path \\ ~p"/workers") do
+    {:ok, view, _html} = live(conn, path)
+    {:ok, view, render_async(view, @async_timeout)}
+  end
+
   setup do
     for snap <- Worker.list_children(), do: Worker.stop(snap.task_id)
     Process.sleep(50)
@@ -56,7 +66,7 @@ defmodule ArbiterWeb.WorkerIndexLiveTest do
   end
 
   test "empty state when no workers are active", %{conn: conn} do
-    {:ok, _view, html} = live(conn, ~p"/workers")
+    {:ok, _view, html} = live_workers(conn)
     assert html =~ ~s(id="workers-empty")
     assert html =~ "hero-moon"
   end
@@ -65,7 +75,7 @@ defmodule ArbiterWeb.WorkerIndexLiveTest do
     {:ok, task} = Ash.create(Issue, %{title: "active-worker", workspace_id: ws.id})
     {:ok, _pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ws.id)
 
-    {:ok, _view, html} = live(conn, ~p"/workers")
+    {:ok, _view, html} = live_workers(conn)
 
     assert html =~ ~s(id="workers")
     assert html =~ task.id
@@ -78,7 +88,7 @@ defmodule ArbiterWeb.WorkerIndexLiveTest do
     {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ws.id)
     :ok = Worker.report(pid, :provider, "gemini")
 
-    {:ok, _view, html} = live(conn, ~p"/workers")
+    {:ok, _view, html} = live_workers(conn)
 
     assert html =~ ~s(aria-label="Antigravity")
   end
@@ -87,13 +97,13 @@ defmodule ArbiterWeb.WorkerIndexLiveTest do
     {:ok, task} = Ash.create(Issue, %{title: "soon-stopped", workspace_id: ws.id})
     {:ok, _pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ws.id)
 
-    {:ok, view, _html} = live(conn, ~p"/workers")
-    assert render(view) =~ task.id
+    {:ok, view, html} = live_workers(conn)
+    assert html =~ task.id
 
     Worker.stop(task.id)
     Process.sleep(150)
 
-    refute render(view) =~ task.id
+    refute render_async(view, @async_timeout) =~ task.id
   end
 
   test "awaiting review worker shows expected badge status", %{conn: conn, ws: ws} do
@@ -105,7 +115,7 @@ defmodule ArbiterWeb.WorkerIndexLiveTest do
     # Record merger status: MR is open, not approved (awaiting review)
     :ok = Worker.record_merger_status(pid, %{status: :open, approved: false})
 
-    {:ok, _view, html} = live(conn, ~p"/workers?status=awaiting")
+    {:ok, _view, html} = live_workers(conn, ~p"/workers?status=awaiting")
 
     assert html =~ task.id
     # When CI is not running, should show "Open · awaiting approval"
@@ -121,7 +131,7 @@ defmodule ArbiterWeb.WorkerIndexLiveTest do
     # Record merger status: MR is open, not approved, but CI is running
     :ok = Worker.record_merger_status(pid, %{status: :open, approved: false, pipeline: :running})
 
-    {:ok, _view, html} = live(conn, ~p"/workers?status=awaiting")
+    {:ok, _view, html} = live_workers(conn, ~p"/workers?status=awaiting")
 
     assert html =~ task.id
     # When CI is running, should show "Open · CI running"
@@ -157,7 +167,114 @@ defmodule ArbiterWeb.WorkerIndexLiveTest do
     :sys.suspend(wedged_pid)
     on_exit(fn -> Arbiter.ProcessTeardown.stop_child(Arbiter.Worker.Supervisor, wedged_pid) end)
 
-    {:ok, _view, html} = live(conn, ~p"/workers")
+    {:ok, _view, html} = live_workers(conn)
     assert html =~ task.id
+  end
+
+  # Holds the GenServer fan-out (`Worker.list_children/0`) in flight until the
+  # test says go, so the loading state is something to assert on rather than
+  # a race — the same discipline board_live_test.exs uses for its own
+  # `hold_board_load/0` around `Snapshot.load/1` (bd-15bn6s).
+  defp hold_workers_load do
+    test = self()
+
+    :meck.new(Arbiter.Worker, [:passthrough, :no_link])
+
+    :meck.expect(Arbiter.Worker, :list_children, fn ->
+      children = :meck.passthrough([])
+      send(test, {:loading_workers, self()})
+
+      receive do
+        :release -> :ok
+      after
+        1_000 -> send(test, {:unreleased_workers_load, self()})
+      end
+
+      children
+    end)
+
+    on_exit(fn ->
+      :meck.unload(Arbiter.Worker)
+    end)
+  end
+
+  test "the dead render shows the loading state and does not walk live workers", %{conn: conn} do
+    test = self()
+    :meck.new(Arbiter.Worker, [:passthrough, :no_link])
+    :meck.expect(Arbiter.Worker, :list_children, fn -> send(test, :worker_walk) && [] end)
+    on_exit(fn -> :meck.unload(Arbiter.Worker) end)
+
+    doc = conn |> get(~p"/workers") |> html_response(200) |> LazyHTML.from_document()
+
+    assert doc |> LazyHTML.query(~s(#workers-panel[data-state="loading"])) |> Enum.count() == 1
+    assert doc |> LazyHTML.query("#workers-loading") |> Enum.count() == 1
+    refute_received :worker_walk
+  end
+
+  test "renders a loading skeleton before the async worker walk lands, then the data",
+       %{conn: conn, ws: ws} do
+    {:ok, task} = Ash.create(Issue, %{title: "loading-worker", workspace_id: ws.id})
+    {:ok, _pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ws.id)
+    hold_workers_load()
+
+    {:ok, view, _html} = live(conn, ~p"/workers")
+    assert_receive {:loading_workers, loader}
+
+    assert has_element?(view, ~s(#workers-panel[data-state="loading"]))
+    assert has_element?(view, "#workers-loading")
+    refute has_element?(view, "#workers-empty")
+
+    send(loader, :release)
+    html = render_async(view, @async_timeout)
+
+    assert has_element?(view, ~s(#workers-panel[data-state="loaded"]))
+    refute has_element?(view, "#workers-loading")
+    assert html =~ task.id
+    refute_received {:unreleased_workers_load, _}
+  end
+
+  # bd-4gtia5 round 2: `handle_params` used to clamp `:page` against
+  # `workers_raw` before the async load landed, which is `[]` on every fresh
+  # mount — so a direct link/reload of `?page=2` (or later) always paged
+  # against an empty list and got clamped back to page 1, silently dropping
+  # the requested page once real data arrived. The requested page must
+  # survive until the load lands.
+  test "opening ?page=2 directly shows page 2 once the async load lands", %{conn: conn, ws: ws} do
+    page_size = ArbiterWeb.Paging.default_page_size()
+
+    for n <- 1..(page_size + 1) do
+      {:ok, task} = Ash.create(Issue, %{title: "paged-worker-#{n}", workspace_id: ws.id})
+      {:ok, _pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ws.id)
+    end
+
+    {:ok, _view, html} = live_workers(conn, ~p"/workers?page=2")
+
+    assert html =~ "2 / 2"
+  end
+
+  test "an async worker-walk failure renders an inline error, not a crash", %{
+    conn: conn,
+    ws: ws
+  } do
+    {:ok, task} = Ash.create(Issue, %{title: "error-path-worker", workspace_id: ws.id})
+    {:ok, _pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ws.id)
+
+    # `list_children/0` and `index_workspaces/0` both rescue their own reads,
+    # so the only unguarded step left in the async load is the phase
+    # annotation — raising there is what actually exercises the
+    # `handle_async(:workers, {:exit, _}, socket)` clause.
+    :meck.new(Arbiter.Worker.Phase, [:passthrough, :no_link])
+    :meck.expect(Arbiter.Worker.Phase, :annotate, fn _workers -> raise "boom" end)
+
+    on_exit(fn ->
+      :meck.unload(Arbiter.Worker.Phase)
+    end)
+
+    {:ok, view, _html} = live(conn, ~p"/workers")
+    html = render_async(view, @async_timeout)
+
+    assert html =~ ~s(id="workers-error")
+    assert html =~ "boom"
+    assert has_element?(view, "#workers-retry")
   end
 end
