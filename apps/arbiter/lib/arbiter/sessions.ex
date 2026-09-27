@@ -126,7 +126,9 @@ defmodule Arbiter.Sessions do
       default is the scaffolded `<sessions_root>/<id>/workspace`, because
       decision 4 / §10.2 layer 1 is that a session is scaffolded rather than
       pointed at an existing checkout.
-    * `:provider` — default `:claude_code`.
+    * `:provider` — `:claude_code` (default) or `:agy` (bd-7xuvfl; see
+      `Arbiter.Sessions.Provider.Agy`). An agy session has no config dir, is
+      mode B only and never carries Remote Control.
     * `:workspace_id` — `nil` (default) means cross-workspace.
     * `:issue_id` — binds the session to one issue, which makes it a **refine
       session** (bd-1lszsc): its MCP token is minted at the `:refine` tier
@@ -134,7 +136,8 @@ defmodule Arbiter.Sessions do
       live session may carry a given `issue_id`. Set by
       `Arbiter.Sessions.Refine.open/2`, which is the supported way in.
     * `:config_dir` — override the session's `CLAUDE_CONFIG_DIR`; defaults to
-      the scaffolded one.
+      the scaffolded one. Ignored (the row stores `nil`) for a provider with
+      no config dir.
     * `:name` — an operator-supplied display name (bd-o2vtsz). Passed through
       as `claude --name`, shell-quoted, in the generated `launch.sh`
       (`Arbiter.Sessions.Provisioning`). `nil` (default) leaves `launch.sh`

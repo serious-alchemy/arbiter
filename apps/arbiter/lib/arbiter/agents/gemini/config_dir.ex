@@ -107,6 +107,7 @@ defmodule Arbiter.Agents.Gemini.ConfigDir do
   @settings_path Path.join([".gemini", "antigravity-cli", "settings.json"])
   @memory_path Path.join(".gemini", "GEMINI.md")
   @mcp_config_path Path.join([".gemini", "config", "mcp_config.json"])
+  @onboarding_path Path.join([".gemini", "antigravity-cli", "cache", "onboarding.json"])
 
   @doc """
   The env pairs to inject into an agy spawn: `[{"HOME", dir}]` when isolation is
@@ -152,19 +153,14 @@ defmodule Arbiter.Agents.Gemini.ConfigDir do
     if enabled?() do
       dir = path(opts)
 
-      unlink_planted_links(dir)
+      case seed(dir, opts) do
+        :ok ->
+          {:ok, dir}
 
-      with :ok <- File.mkdir_p(Path.join(dir, Path.dirname(@settings_path))),
-           :ok <- write_settings(dir, opts),
-           :ok <- write_memory(dir) do
-        passthrough(dir)
-        seed_credentials(dir, opts)
-        {:ok, dir}
-      else
         {:error, reason} ->
           Logger.warning(
             "Arbiter.Agents.Gemini.ConfigDir: could not prepare isolated agy HOME " <>
-              "#{inspect(path(opts))} (#{inspect(reason)}); worker will inherit the operator's " <>
+              "#{inspect(dir)} (#{inspect(reason)}); worker will inherit the operator's " <>
               "$HOME — including their ~/.gemini permission posture and GEMINI.md"
           )
 
@@ -173,13 +169,56 @@ defmodule Arbiter.Agents.Gemini.ConfigDir do
     else
       :disabled
     end
+  end
+
+  @doc """
+  Seed `dir` as an agy `$HOME`, unconditionally — the part of `ensure/1` that
+  does not decide *whether* or *where* to isolate.
+
+  `ensure/1` calls it for a worker (gated on `enabled?/0`, keyed on the
+  worktree). A browser session (`Arbiter.Sessions.Provisioning`, bd-7xuvfl)
+  calls it directly for its own `<session>/home`: a session's `$HOME` is not
+  optional — its MCP token has nowhere else to go that agy reads — so the
+  worker master switch does not apply.
+
+  Options, on top of `ensure/1`'s `:worktree` / `:security` / `:keyring`:
+
+    * `:memory` — the `.gemini/GEMINI.md` content; defaults to
+      `worker_memory/0`, which is headless-worker doctrine and wrong for
+      anything interactive.
+    * `:source_home` — the operator `$HOME` to pass through; defaults to
+      `source_home/0`.
+    * `:boundary` — the directory `dir` is created under (default: the worker
+      home root). It is never linked, and an operator-`$HOME` entry containing
+      it is mirrored rather than linked, so `dir` can never end up inside
+      itself.
+    * `:interactive` — `true` also carries the operator's agy onboarding state
+      (`antigravity-cli/cache/onboarding.json`) over. Observed live on agy
+      1.2.12: with a fresh `.gemini`, `agy --prompt-interactive` opens on a
+      "Choose your color scheme" wizard instead of running its prompt, and
+      that file's `onboardingComplete` is what gates it. Headless `agy -p`
+      never shows the wizard, so a worker leaves it alone. Copied, not
+      written, so a consumer vs. enterprise account keeps its own answer; an
+      operator who never onboarded agy gets the wizard, which is honest.
+
+  Returns `:ok` or `{:error, reason}`. Never raises.
+  """
+  @spec seed(String.t(), keyword()) :: :ok | {:error, term()}
+  def seed(dir, opts \\ []) when is_binary(dir) do
+    unlink_planted_links(dir)
+
+    with :ok <- File.mkdir_p(Path.join(dir, Path.dirname(@settings_path))),
+         :ok <- write_settings(dir, opts),
+         :ok <- write_memory(dir, Keyword.get(opts, :memory, worker_memory())) do
+      passthrough(dir, opts)
+      seed_credentials(dir, opts)
+      if Keyword.get(opts, :interactive, false), do: seed_onboarding(dir, opts)
+      :ok
+    end
   rescue
     e ->
-      Logger.warning(
-        "Arbiter.Agents.Gemini.ConfigDir: seeding raised #{inspect(e)}; not isolating"
-      )
-
-      :error
+      Logger.warning("Arbiter.Agents.Gemini.ConfigDir: seeding raised #{inspect(e)}")
+      {:error, {:seed_raised, e}}
   end
 
   @doc """
@@ -197,14 +236,7 @@ defmodule Arbiter.Agents.Gemini.ConfigDir do
   def write_mcp_config(config, opts \\ []) when is_map(config) do
     case ensure(opts) do
       {:ok, dir} ->
-        path = Path.join(dir, @mcp_config_path)
-
-        _ = File.rm(path)
-
-        with :ok <- File.mkdir_p(Path.dirname(path)),
-             :ok <- File.write(path, Jason.encode!(config, pretty: true)) do
-          {:ok, path}
-        end
+        write_mcp_config_into(dir, config)
 
       :disabled ->
         {:error, :disabled}
@@ -213,6 +245,30 @@ defmodule Arbiter.Agents.Gemini.ConfigDir do
         {:error, :unavailable}
     end
   end
+
+  @doc """
+  Write an agy MCP config document into an already-seeded agy `$HOME` `dir`,
+  at `<dir>/.gemini/config/mcp_config.json`, mode `0600` from creation — it
+  carries a live bearer token. The primitive under `write_mcp_config/2`, public
+  for a caller that owns its `$HOME` outright (a browser session, bd-7xuvfl).
+  """
+  @spec write_mcp_config_into(String.t(), map()) :: {:ok, String.t()} | {:error, term()}
+  def write_mcp_config_into(dir, config) when is_binary(dir) and is_map(config) do
+    path = Path.join(dir, @mcp_config_path)
+
+    _ = File.rm(path)
+
+    with :ok <- File.mkdir_p(Path.dirname(path)),
+         :ok <- File.write(path, ""),
+         :ok <- File.chmod(path, 0o600),
+         :ok <- File.write(path, Jason.encode!(config, pretty: true)) do
+      {:ok, path}
+    end
+  end
+
+  @doc "Where `write_mcp_config_into/2` writes, relative to the agy `$HOME`."
+  @spec mcp_config_path() :: String.t()
+  def mcp_config_path, do: @mcp_config_path
 
   @doc """
   Whether a freedesktop Secret Service is reachable for this OS user.
@@ -341,7 +397,12 @@ defmodule Arbiter.Agents.Gemini.ConfigDir do
   # planted where one of our directories goes would steer those writes
   # anywhere the operator can write, so remove it rather than follow it. The
   # files themselves are removed before each write for the same reason.
-  @owned_dirs [@gemini_dir, Path.dirname(@settings_path), Path.dirname(@mcp_config_path)]
+  @owned_dirs [
+    @gemini_dir,
+    Path.dirname(@settings_path),
+    Path.dirname(@mcp_config_path),
+    Path.dirname(@onboarding_path)
+  ]
 
   defp unlink_planted_links(dir) do
     Enum.each(@owned_dirs, fn rel ->
@@ -369,20 +430,22 @@ defmodule Arbiter.Agents.Gemini.ConfigDir do
     end
   end
 
-  defp write_memory(dir) do
+  defp write_memory(dir, memory) do
     path = Path.join(dir, @memory_path)
     _ = File.rm(path)
 
     with :ok <- File.mkdir_p(Path.dirname(path)) do
-      File.write(path, worker_memory())
+      File.write(path, memory)
     end
   end
 
   # Symlink every top-level entry of the operator's HOME except the trees we
   # shadow. Idempotent: an existing correct link is left alone, a stale one is
   # replaced, and anything we own (`.gemini`) is never touched.
-  defp passthrough(dir) do
-    case source_home() do
+  defp passthrough(dir, opts) do
+    boundary = Keyword.get(opts, :boundary) || root()
+
+    case Keyword.get_lazy(opts, :source_home, &source_home/0) do
       nil ->
         :ok
 
@@ -391,7 +454,7 @@ defmodule Arbiter.Agents.Gemini.ConfigDir do
           {:ok, entries} ->
             entries
             |> Enum.reject(&(&1 in @shadowed))
-            |> Enum.each(&link_one(src, dir, &1))
+            |> Enum.each(&link_one(src, dir, &1, boundary))
 
           {:error, reason} ->
             Logger.warning(
@@ -402,14 +465,15 @@ defmodule Arbiter.Agents.Gemini.ConfigDir do
     end
   end
 
-  defp link_one(src, dir, name) do
+  defp link_one(src, dir, name, boundary) do
     target = Path.join(src, name)
     link = Path.join(dir, name)
 
     cond do
-      # The entry *is* the home root (`<cache>/arbiter/worker-agy`): linking it
-      # would put the worker's own HOME inside itself. Drop it.
-      same_path?(target, root()) ->
+      # The entry *is* the home root (`<cache>/arbiter/worker-agy`, or a
+      # session's sessions root): linking it would put this HOME inside
+      # itself. Drop it.
+      same_path?(target, boundary) ->
         :ok
 
       # The entry *contains* the home root. The default root lives under
@@ -419,8 +483,8 @@ defmodule Arbiter.Agents.Gemini.ConfigDir do
       # the worker's own HOME that any `du -L` / `rg --follow` / `cp -rL` the
       # worker runs would walk until ELOOP. Mirror the directory instead and
       # link its children, so `~/.cache/mix` & friends stay reachable.
-      root_under?(target) ->
-        descend(target, link)
+      root_under?(target, boundary) ->
+        descend(target, link, boundary)
 
       true ->
         do_link(target, link)
@@ -429,15 +493,15 @@ defmodule Arbiter.Agents.Gemini.ConfigDir do
 
   # Recreate `target` as a real directory under the worker HOME and pass its
   # children through individually — recursing while the root is still below us,
-  # and never linking the root itself (see `link_one/3`).
-  defp descend(target, link) do
+  # and never linking the root itself (see `link_one/4`).
+  defp descend(target, link, boundary) do
     # A HOME seeded before this rule existed still carries the cycle as a plain
     # symlink; replace it with a real directory.
     if match?({:ok, %{type: :symlink}}, File.lstat(link)), do: File.rm(link)
 
     with :ok <- File.mkdir_p(link),
          {:ok, entries} <- File.ls(target) do
-      Enum.each(entries, &link_one(target, link, &1))
+      Enum.each(entries, &link_one(target, link, &1, boundary))
     else
       _ -> :ok
     end
@@ -466,28 +530,29 @@ defmodule Arbiter.Agents.Gemini.ConfigDir do
 
   defp same_path?(a, b), do: Path.expand(a) == Path.expand(b)
 
-  defp root_under?(path),
-    do: String.starts_with?(Path.expand(root()), Path.expand(path) <> "/")
+  defp root_under?(path, boundary),
+    do: String.starts_with?(Path.expand(boundary), Path.expand(path) <> "/")
 
   # See the moduledoc: with a keyring there is nothing to seed, and seeding
   # anyway would hand the worker a refreshable copy of the operator's grant.
   defp seed_credentials(dir, opts) do
     keyring? = Keyword.get(opts, :keyring, keyring_available?())
+    home = Keyword.get_lazy(opts, :source_home, &source_home/0)
 
     cond do
       keyring? ->
         :ok
 
-      is_nil(source_home()) ->
+      is_nil(home) ->
         :ok
 
       true ->
-        Enum.each(@credential_files, &copy_credential(dir, &1))
+        Enum.each(@credential_files, &copy_credential(dir, home, &1))
     end
   end
 
-  defp copy_credential(dir, name) do
-    src = Path.join([source_home(), @gemini_dir, name])
+  defp copy_credential(dir, home, name) do
+    src = Path.join([home, @gemini_dir, name])
     dst = Path.join([dir, @gemini_dir, name])
 
     if File.regular?(src) and not fresh_copy?(src, dst) do
@@ -504,6 +569,30 @@ defmodule Arbiter.Agents.Gemini.ConfigDir do
               "(#{inspect(reason)}); this agy worker may be unauthenticated"
           )
       end
+    end
+  end
+
+  # The file itself is removed first and its directory is one of
+  # `@owned_dirs`, so a link planted at either is never written through.
+  defp seed_onboarding(dir, opts) do
+    with home when is_binary(home) <- Keyword.get_lazy(opts, :source_home, &source_home/0),
+         src = Path.join(home, @onboarding_path),
+         true <- File.regular?(src) do
+      dst = Path.join(dir, @onboarding_path)
+      _ = File.rm(dst)
+
+      with :ok <- File.mkdir_p(Path.dirname(dst)),
+           :ok <- File.cp(src, dst) do
+        :ok
+      else
+        {:error, reason} ->
+          Logger.warning(
+            "Arbiter.Agents.Gemini.ConfigDir: could not seed #{inspect(dst)} " <>
+              "(#{inspect(reason)}); agy will open on its onboarding wizard"
+          )
+      end
+    else
+      _ -> :ok
     end
   end
 

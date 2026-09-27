@@ -230,6 +230,7 @@ defmodule ArbiterWeb.SessionDockLive do
      # belongs on the form the operator is looking at, not the dock's general
      # banner, and it must survive `dismiss_error` and vice versa.
      |> assign(:launch_open?, false)
+     |> assign(:launch_provider, "claude_code")
      |> assign(:launch_auth_mode, "seeded_credentials")
      |> assign(:launch_name, nil)
      |> assign(:launch_workspace_id, nil)
@@ -981,6 +982,7 @@ defmodule ArbiterWeb.SessionDockLive do
         open_ids={@open_ids}
         running_count={@running_count}
         launch_open?={@launch_open?}
+        launch_provider={@launch_provider}
         launch_auth_mode={@launch_auth_mode}
         launch_name={@launch_name}
         launch_workspace_id={@launch_workspace_id}
@@ -1299,6 +1301,7 @@ defmodule ArbiterWeb.SessionDockLive do
   attr :open_ids, :list, required: true
   attr :running_count, :integer, required: true
   attr :launch_open?, :boolean, required: true
+  attr :launch_provider, :string, default: "claude_code"
   attr :launch_auth_mode, :string, required: true
   attr :launch_name, :string, default: nil
   attr :launch_workspace_id, :string, default: nil
@@ -1334,6 +1337,7 @@ defmodule ArbiterWeb.SessionDockLive do
       >
         <SessionIndexLive.launch_form
           prefix="session-dock-launch"
+          launch_provider={@launch_provider}
           launch_auth_mode={@launch_auth_mode}
           launch_name={@launch_name}
           launch_workspace_id={@launch_workspace_id}

@@ -319,3 +319,10 @@ config :arbiter,
 config :arbiter,
        :sessions_credentials_source,
        Path.join(System.tmp_dir!(), "arbiter-test-absent-operator-config")
+
+# Same hazard for an agy session (bd-7xuvfl): its `$HOME` passes the operator's
+# HOME through, and without a Secret Service copies agy's credential files out
+# of it. Point it at nothing; the tests that exercise passthrough pass their own.
+config :arbiter,
+       :sessions_agy_source_home,
+       Path.join(System.tmp_dir!(), "arbiter-test-absent-operator-home")

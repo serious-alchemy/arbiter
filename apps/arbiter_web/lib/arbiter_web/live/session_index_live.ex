@@ -27,9 +27,13 @@ defmodule ArbiterWeb.SessionIndexLive do
   ## The §9.5 pre-launch options (phase 11)
 
   `launch_form/1` carries the whole option set: session name, provider
-  (Claude Code — the only one there is, so no selector for it), auth mode,
-  Remote Control (§8, gated to mode B), workspace binding, and
-  `can_dispatch`. Every option keeps its §9.5 default, including Remote
+  (Claude Code by default, or agy — bd-7xuvfl), auth mode, Remote Control
+  (§8, gated to mode B), workspace binding, and `can_dispatch`. Choosing agy
+  disables auth mode and Remote Control with the reason shown, for the same
+  §8.3 "never a toggle that silently does nothing" rule: an agy session runs
+  on the operator's own grant (mode B, always), and bridge verification reads
+  Claude Code's JSONL. `launch_defaults/1` clamps both server-side, as the
+  `Session` resource does again at the row. Every option keeps its §9.5 default, including Remote
   Control's — see below, this was wrong through round 3 (review finding,
   phase 11 round 4: the code shipped it off by default and this moduledoc
   claimed that was the spec):
@@ -117,6 +121,7 @@ defmodule ArbiterWeb.SessionIndexLive do
       socket
       |> assign(:kill_candidate, nil)
       |> assign(:usage_refresh_ref, nil)
+      |> assign(:launch_provider, "claude_code")
       |> assign(:launch_auth_mode, "seeded_credentials")
       |> assign(:launch_name, nil)
       |> assign(:launch_workspace_id, nil)
@@ -243,7 +248,7 @@ defmodule ArbiterWeb.SessionIndexLive do
   # operator can already set (bd-o2vtsz) — an empty or missing field launches
   # with no name, same as before this option existed.
   #
-  # Public, and `launch_auth_mode_param/1` and `describe/1` below alongside
+  # Public, and `launch_auth_mode_param/2` and `describe/1` below alongside
   # it, so `ArbiterWeb.SessionDockLive`'s own `launch`/`validate_launch`
   # handlers can call the exact same params-to-opts logic (see `launch_form/1`
   # above) rather than a second copy that could drift from this one — the
@@ -252,15 +257,18 @@ defmodule ArbiterWeb.SessionIndexLive do
   # build.
   @doc false
   def launch_defaults(params) do
-    auth_mode = launch_auth_mode_param(params)
+    provider = launch_provider_param(params)
+    auth_mode = launch_auth_mode_param(params, provider)
 
     [
+      provider: String.to_existing_atom(provider),
       auth_mode: launch_auth_mode(auth_mode),
-      # Mode A can never carry Remote Control (§8.3) — enforced again here
-      # (on top of the disabled checkbox and the `Session` resource's own
-      # validation) so a submission that bypassed the disabled attribute
-      # still cannot request it.
-      remote_control: auth_mode == "seeded_credentials" and launch_remote_control?(params),
+      # Mode A can never carry Remote Control (§8.3), and neither can agy —
+      # enforced again here (on top of the disabled checkbox and the `Session`
+      # resource's own validation) so a submission that bypassed the disabled
+      # attribute still cannot request it.
+      remote_control:
+        remote_control_available?(provider, auth_mode) and launch_remote_control?(params),
       workspace_id: launch_workspace_id(params, Enum.map(workspaces(), & &1.id)),
       # §10.1: off unless the operator explicitly checks the box. A session
       # that could dispatch workers by default is the wrong thing to ship
@@ -296,20 +304,26 @@ defmodule ArbiterWeb.SessionIndexLive do
   `validate_launch` calls the same mapping rather than a second copy of it.
   """
   def assign_launch_params(socket, params) do
-    previous_auth_mode = socket.assigns.launch_auth_mode
-    auth_mode = launch_auth_mode_param(params)
+    previous_available? =
+      remote_control_available?(socket.assigns.launch_provider, socket.assigns.launch_auth_mode)
+
+    provider = launch_provider_param(params)
+    auth_mode = launch_auth_mode_param(params, provider)
+    available? = remote_control_available?(provider, auth_mode)
 
     # A disabled checkbox never contributes to form params (the browser omits
     # it entirely), so a plain "was `remote_control` => "true" in params?"
     # check can't tell "operator explicitly unchecked it under mode B" apart
     # from "it was disabled under mode A and never sent anything". Mode A ->
     # B is the one transition that must re-arrive checked (§9.5: on when mode
-    # B) rather than inheriting whatever mode A's disabled box last rendered.
-    entering_mode_b? = auth_mode == "seeded_credentials" and previous_auth_mode != auth_mode
+    # B) rather than inheriting whatever mode A's disabled box last rendered —
+    # and so is agy -> Claude Code, which disables the box the same way.
+    entering_mode_b? = available? and not previous_available?
 
     valid_workspace_ids = Enum.map(socket.assigns.workspaces, & &1.id)
 
     socket
+    |> Phoenix.Component.assign(:launch_provider, provider)
     |> Phoenix.Component.assign(:launch_auth_mode, auth_mode)
     |> Phoenix.Component.assign(:launch_name, launch_name(params))
     |> Phoenix.Component.assign(
@@ -324,8 +338,7 @@ defmodule ArbiterWeb.SessionIndexLive do
     # Mirrors the clamp `launch_defaults/1` applies server-side.
     |> Phoenix.Component.assign(
       :launch_remote_control?,
-      auth_mode == "seeded_credentials" and
-        (entering_mode_b? or launch_remote_control?(params))
+      available? and (entering_mode_b? or launch_remote_control?(params))
     )
   end
 
@@ -340,6 +353,7 @@ defmodule ArbiterWeb.SessionIndexLive do
   """
   def reset_launch_params(socket) do
     socket
+    |> Phoenix.Component.assign(:launch_provider, "claude_code")
     |> Phoenix.Component.assign(:launch_auth_mode, "seeded_credentials")
     |> Phoenix.Component.assign(:launch_name, nil)
     |> Phoenix.Component.assign(:launch_workspace_id, nil)
@@ -349,8 +363,23 @@ defmodule ArbiterWeb.SessionIndexLive do
   end
 
   @doc false
-  def launch_auth_mode_param(%{"auth_mode" => "oauth_token"}), do: "oauth_token"
-  def launch_auth_mode_param(_params), do: "seeded_credentials"
+  # agy is mode B, always — whatever a crafted submit says.
+  def launch_auth_mode_param(params, provider \\ "claude_code")
+  def launch_auth_mode_param(_params, "agy"), do: "seeded_credentials"
+  def launch_auth_mode_param(%{"auth_mode" => "oauth_token"}, _provider), do: "oauth_token"
+  def launch_auth_mode_param(_params, _provider), do: "seeded_credentials"
+
+  # Only the providers the form offers; anything else is Claude Code, so a
+  # crafted value never reaches `String.to_existing_atom/1` unvetted.
+  @launch_providers ~w(claude_code agy)
+  @doc false
+  def launch_provider_param(%{"provider" => provider}) when provider in @launch_providers,
+    do: provider
+
+  def launch_provider_param(_params), do: "claude_code"
+
+  defp remote_control_available?(provider, auth_mode),
+    do: provider == "claude_code" and auth_mode == "seeded_credentials"
 
   defp launch_auth_mode("oauth_token"), do: :oauth_token
   defp launch_auth_mode(_mode), do: :seeded_credentials
@@ -410,6 +439,7 @@ defmodule ArbiterWeb.SessionIndexLive do
           <:actions>
             <.launch_form
               prefix="launch-session"
+              launch_provider={@launch_provider}
               launch_auth_mode={@launch_auth_mode}
               launch_name={@launch_name}
               launch_workspace_id={@launch_workspace_id}
@@ -548,6 +578,7 @@ defmodule ArbiterWeb.SessionIndexLive do
   failure message inline through this attr instead.
   """
   attr :prefix, :string, required: true
+  attr :launch_provider, :string, default: "claude_code"
   attr :launch_auth_mode, :string, required: true
   attr :launch_name, :string, default: nil
   attr :launch_workspace_id, :string, default: nil
@@ -574,15 +605,30 @@ defmodule ArbiterWeb.SessionIndexLive do
         size="sm"
       />
       <Forms.select
+        name="provider"
+        id={"#{@prefix}-provider"}
+        size="sm"
+        value={@launch_provider}
+        options={[{"Claude Code", "claude_code"}, {"agy (Antigravity)", "agy"}]}
+      />
+      <Forms.select
         name="auth_mode"
         id={"#{@prefix}-auth-mode"}
         size="sm"
         value={@launch_auth_mode}
+        disabled={@launch_provider == "agy"}
         options={[
           {"Mode B — seeded credentials", "seeded_credentials"},
           {"Mode A — workspace token", "oauth_token"}
         ]}
       />
+      <span
+        :if={@launch_provider == "agy"}
+        id={"#{@prefix}-provider-reason"}
+        class="text-[11px] text-[var(--text-label)]"
+      >
+        agy runs on your own Google login, with no Remote Control
+      </span>
       <%!-- §9.5: cross-workspace unless the operator opts a session into a
             single workspace. --%>
       <Forms.select
@@ -598,11 +644,11 @@ defmodule ArbiterWeb.SessionIndexLive do
           id={"#{@prefix}-remote-control"}
           value="true"
           checked={@launch_remote_control?}
-          disabled={@launch_auth_mode != "seeded_credentials"}
+          disabled={@launch_provider == "agy" or @launch_auth_mode != "seeded_credentials"}
           label="Remote Control"
         />
         <span
-          :if={@launch_auth_mode != "seeded_credentials"}
+          :if={@launch_provider != "agy" and @launch_auth_mode != "seeded_credentials"}
           id={"#{@prefix}-remote-control-reason"}
           class="text-[11px] text-[var(--text-label)]"
         >

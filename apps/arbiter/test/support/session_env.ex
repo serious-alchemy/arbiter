@@ -15,6 +15,7 @@ defmodule Arbiter.Test.SessionEnv do
     :sessions_runtime_dir,
     :primary_checkout,
     :sessions_credentials_source,
+    :sessions_agy_source_home,
     :sessions_agent_command,
     :sessions_launch_command,
     :sessions_bridge_verify_timeout_ms,
@@ -48,8 +49,8 @@ defmodule Arbiter.Test.SessionEnv do
 
   @doc """
   A full set of unique tmp roots for a session test — `:sessions_root`,
-  `:sessions_runtime_dir`, `:primary_checkout` and
-  `:sessions_credentials_source` — all removed on exit.
+  `:sessions_runtime_dir`, `:primary_checkout`, `:sessions_credentials_source`
+  and `:sessions_agy_source_home` — all removed on exit.
   """
   @spec sandbox(String.t()) :: keyword()
   def sandbox(tag) do
@@ -61,11 +62,13 @@ defmodule Arbiter.Test.SessionEnv do
       sessions_runtime_dir: Path.join(base, "runtime"),
       primary_checkout: Path.join(base, "checkout"),
       sessions_credentials_source: Path.join(base, "operator"),
+      sessions_agy_source_home: Path.join(base, "operator-home"),
       memory_root: Path.join(base, "memory")
     ]
 
     File.mkdir_p!(overrides[:primary_checkout])
     File.mkdir_p!(overrides[:sessions_credentials_source])
+    File.mkdir_p!(overrides[:sessions_agy_source_home])
     ExUnit.Callbacks.on_exit(fn -> File.rm_rf(base) end)
 
     override(overrides)

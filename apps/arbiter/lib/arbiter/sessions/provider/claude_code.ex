@@ -41,17 +41,16 @@ defmodule Arbiter.Sessions.Provider.ClaudeCode do
 
   @behaviour Arbiter.Sessions.Provider
 
-  alias Arbiter.Sessions.Layout
+  alias Arbiter.Sessions.Provider
   alias Arbiter.Sessions.Session
 
-  @fallback_shell "/bin/sh"
+  @impl Provider
+  def command(%Session{} = session), do: Provider.launch_payload(session)
 
-  @impl Arbiter.Sessions.Provider
-  def command(%Session{} = session) do
-    Application.get_env(:arbiter, :sessions_launch_command) || payload(session)
-  end
+  @impl Provider
+  def config_dir?, do: true
 
-  @impl Arbiter.Sessions.Provider
+  @impl Provider
   def env(%Session{} = session) do
     ([{"ARB_SESSION_ID", session.id}] ++
        pair("CLAUDE_CONFIG_DIR", session.config_dir) ++
@@ -59,16 +58,6 @@ defmodule Arbiter.Sessions.Provider.ClaudeCode do
     |> Enum.uniq_by(&elem(&1, 0))
   end
 
-  defp payload(%Session{id: id}) do
-    script = Layout.launch_script_path(id)
-
-    if File.regular?(script), do: script, else: interactive_shell()
-  end
-
   defp pair(_name, value) when value in [nil, ""], do: []
   defp pair(name, value), do: [{name, value}]
-
-  # The operator's own shell, so an unprovisioned pane behaves like the terminal
-  # it replaces.
-  defp interactive_shell, do: System.get_env("SHELL") || @fallback_shell
 end

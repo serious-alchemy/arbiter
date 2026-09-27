@@ -1,7 +1,12 @@
 defmodule Arbiter.Sessions.Instructions do
   @moduledoc """
   The generated `CLAUDE.md` a provisioned session boots with (bd-aprlbb,
-  RFC §9.1 — "generated: role, workspace binding, guardrails").
+  RFC §9.1 — "generated: role, workspace binding, guardrails") — or, for an
+  agy session, the `GEMINI.md` (bd-7xuvfl). The doctrine is the same; what
+  differs per provider is only the host's own mechanics: where the MCP config
+  sits (`.mcp.json` in the cwd vs. `mcp_config.json` under the session's own
+  `$HOME`) and whether there is a persistent Monitor tool to arm the event
+  stream with (Claude Code has one, agy does not).
 
   This is **§10.2 layer 4**, "belt and braces": the RFC's own note is that the
   dispatched-worker prompt already carries the live-checkout warning and it
@@ -35,6 +40,7 @@ defmodule Arbiter.Sessions.Instructions do
   regenerated on every launch.
   """
 
+  alias Arbiter.Agents.Gemini.ConfigDir, as: AgyConfigDir
   alias Arbiter.MCP.RefinePolicy
   alias Arbiter.Sessions.Layout
   alias Arbiter.Sessions.RefineDoctrine
@@ -74,14 +80,14 @@ defmodule Arbiter.Sessions.Instructions do
     # is, and where its `.mcp.json` actually sits (it lives in the cwd; see
     # `Arbiter.Sessions.Layout.mcp_config_path/1`).
     cwd = session.cwd || Layout.workspace_dir(id)
-    mcp_config = Path.join(cwd, ".mcp.json")
+    mcp_config = mcp_config_path(session, cwd)
     can_dispatch = Keyword.get(opts, :can_dispatch, session.can_dispatch)
     server = Keyword.get(opts, :mcp_server_name, "arbiter")
 
     """
     # Arbiter coordinator session `#{id}`
 
-    You are a **coordinator session**: an interactive Claude Code session that
+    You are a **coordinator session**: an interactive #{host(session)} session that
     Arbiter provisioned and launched into a tmux pane, reachable from the
     Arbiter dashboard in a browser. You are not a dispatched worker and you have
     no single assigned task. You drive the fleet.
@@ -99,7 +105,7 @@ defmodule Arbiter.Sessions.Instructions do
 
     Your working directory is `#{cwd}`. It is a fresh directory that Arbiter
     created for this session — deliberately **not** a checkout of anything. The
-    only thing in it is the `.mcp.json` below.
+    only thing in it is #{cwd_contents(session)}.
 
     #{checkout_section(Keyword.get(opts, :primary_checkout, default_checkout()))}
 
@@ -117,26 +123,7 @@ defmodule Arbiter.Sessions.Instructions do
     terminate you mid-call. Ask the operator to kill it from the dashboard or
     the CLI.
 
-    ## Event monitor
-
-    A `SessionStart` hook already told you to do this, but in case it fired
-    before this file did: run `$ARB_SESSION_ROOT/monitor.sh` via the **Monitor**
-    tool with `persistent: true`, not background Bash — an infinite loop never
-    exits, so it never produces a notification for `run_in_background` to
-    surface. It streams `/events` (inbox, review_gate, worker_done,
-    worker_failed) using your own session token; it never calls
-    `arb mcp token mint`.
-
-    Treat every line it prints as a **wake-up signal only**, not the payload:
-    call `coordinator_inbox` for the authoritative unread view before acting on
-    anything. The stream is shared — **every session receives every event**,
-    including ones filed for other sessions' tasks — so decide what concerns
-    you and ignore the rest.
-
-    `curl`'s own `--max-time` closes the connection periodically; re-arm the
-    monitor whenever it exits (token expiry or a network blip). It resumes
-    with `since=<last cursor>` automatically, so re-arming never re-delivers
-    what you already saw or drops what arrived while it was down.
+    #{event_monitor_section(session)}
 
     ## Memory
 
@@ -163,6 +150,62 @@ defmodule Arbiter.Sessions.Instructions do
     pattern that matches your own process matches the live Arbiter server and
     every running worker just as easily. Capture an exact PID and kill that.
     """
+  end
+
+  defp host(%Session{provider: :agy}), do: "agy (Antigravity)"
+  defp host(%Session{}), do: "Claude Code"
+
+  # agy reads MCP servers from `$HOME/.gemini/config/mcp_config.json` only
+  # (bd-m8geh4), and an agy session's `$HOME` is its own.
+  defp mcp_config_path(%Session{provider: :agy, id: id}, _cwd),
+    do: Path.join(Layout.home_dir(id), AgyConfigDir.mcp_config_path())
+
+  defp mcp_config_path(%Session{}, cwd), do: Path.join(cwd, ".mcp.json")
+
+  defp cwd_contents(%Session{provider: :agy}), do: "this `GEMINI.md`"
+  defp cwd_contents(%Session{}), do: "the `.mcp.json` below"
+
+  # agy has no persistent-monitor tool and no `SessionStart` hook, and its
+  # `run_command` backgrounds a long-running command and moves on — so an
+  # agy session is told to poll rather than handed a stream it cannot hold.
+  defp event_monitor_section(%Session{provider: :agy}) do
+    """
+    ## Events
+
+    There is no event monitor in this session: agy has no persistent tool to
+    hold a streaming connection open, and a backgrounded infinite loop would
+    only outlive the turn that started it. Poll instead — call
+    `coordinator_inbox` at the start of every turn, and whenever the operator
+    asks what has happened, for the authoritative unread view. The inbox is
+    shared across sessions, so decide what concerns you and ignore the rest.
+    """
+    |> String.trim()
+  end
+
+  defp event_monitor_section(%Session{}) do
+    """
+    ## Event monitor
+
+    A `SessionStart` hook already told you to do this, but in case it fired
+    before this file did: run `$ARB_SESSION_ROOT/monitor.sh` via the **Monitor**
+    tool with `persistent: true`, not background Bash — an infinite loop never
+    exits, so it never produces a notification for `run_in_background` to
+    surface. It streams `/events` (inbox, review_gate, worker_done,
+    worker_failed) using your own session token; it never calls
+    `arb mcp token mint`.
+
+    Treat every line it prints as a **wake-up signal only**, not the payload:
+    call `coordinator_inbox` for the authoritative unread view before acting on
+    anything. The stream is shared — **every session receives every event**,
+    including ones filed for other sessions' tasks — so decide what concerns
+    you and ignore the rest.
+
+    `curl`'s own `--max-time` closes the connection periodically; re-arm the
+    monitor whenever it exits (token expiry or a network blip). It resumes
+    with `since=<last cursor>` automatically, so re-arming never re-delivers
+    what you already saw or drops what arrived while it was down.
+    """
+    |> String.trim()
   end
 
   # ---- the refine variant (bd-980x89) --------------------------------------

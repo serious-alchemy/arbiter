@@ -9,8 +9,9 @@ defmodule Arbiter.Sessions.Provider do
   this behaviour: the command tmux runs, and the environment that command
   needs.
 
-  Claude Code is the first implementation (`Arbiter.Sessions.Provider.ClaudeCode`).
-  Adding Codex or Gemini is an adapter plus one atom in
+  Claude Code is the first implementation (`Arbiter.Sessions.Provider.ClaudeCode`),
+  agy (Antigravity) the second (`Arbiter.Sessions.Provider.Agy`, bd-7xuvfl).
+  Adding another is an adapter plus one atom in
   `Arbiter.Sessions.Session.providers/0` — not a schema or lifecycle change.
 
   ## The env rule is part of the contract
@@ -23,6 +24,7 @@ defmodule Arbiter.Sessions.Provider do
   (phase 3), never from here.
   """
 
+  alias Arbiter.Sessions.Layout
   alias Arbiter.Sessions.Session
 
   @doc """
@@ -35,7 +37,20 @@ defmodule Arbiter.Sessions.Provider do
   @doc "Non-secret environment the pane needs. See the module's env rule."
   @callback env(Session.t()) :: [{String.t(), String.t()}]
 
-  @adapters %{claude_code: Arbiter.Sessions.Provider.ClaudeCode}
+  @doc """
+  Whether the provider runs with a per-session config dir (the row's
+  `config_dir`). Claude Code does (`CLAUDE_CONFIG_DIR`); agy has no such
+  override, so its row carries `nil` and provisioning neither creates nor
+  seeds one.
+  """
+  @callback config_dir?() :: boolean()
+
+  @adapters %{
+    claude_code: Arbiter.Sessions.Provider.ClaudeCode,
+    agy: Arbiter.Sessions.Provider.Agy
+  }
+
+  @fallback_shell "/bin/sh"
 
   @doc "The adapter module for a session's provider."
   @spec adapter(Session.t() | atom()) :: module()
@@ -55,4 +70,28 @@ defmodule Arbiter.Sessions.Provider do
   @doc "Delegates to the session's adapter."
   @spec env(Session.t()) :: [{String.t(), String.t()}]
   def env(%Session{} = session), do: adapter(session).env(session)
+
+  @doc "Delegates to the provider's adapter. See `c:config_dir?/0`."
+  @spec config_dir?(Session.t() | atom()) :: boolean()
+  def config_dir?(session_or_provider), do: adapter(session_or_provider).config_dir?()
+
+  @doc """
+  The pane payload every adapter shares: the provisioned `launch.sh` when
+  there is one, else an interactive shell.
+
+  `config :arbiter, :sessions_launch_command, "…"` overrides both — see
+  `Arbiter.Sessions.Provider.ClaudeCode`'s moduledoc for why an unprovisioned
+  pane gets a shell rather than the agent.
+  """
+  @spec launch_payload(Session.t()) :: String.t()
+  def launch_payload(%Session{id: id}) do
+    script = Layout.launch_script_path(id)
+
+    Application.get_env(:arbiter, :sessions_launch_command) ||
+      if(File.regular?(script), do: script, else: interactive_shell())
+  end
+
+  # The operator's own shell, so an unprovisioned pane behaves like the terminal
+  # it replaces.
+  defp interactive_shell, do: System.get_env("SHELL") || @fallback_shell
 end

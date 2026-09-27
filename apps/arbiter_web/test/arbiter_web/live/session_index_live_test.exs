@@ -24,6 +24,7 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
   alias Arbiter.Sessions
   alias Arbiter.Test.NoopRunner
   alias Arbiter.Usage.Event
+  alias ArbiterWeb.SessionIndexLive, as: ArbiterWebSessionIndex
 
   setup do
     Arbiter.Test.SessionEnv.sandbox("session-index-usage")
@@ -623,6 +624,84 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
       assert [session] = Sessions.list()
       assert session.auth_mode == :oauth_token
       assert session.remote_control == false
+    end
+  end
+
+  describe "provider in the launch form (bd-7xuvfl)" do
+    test "defaults to Claude Code and offers agy", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/sessions")
+
+      assert has_element?(
+               view,
+               ~s(#launch-session-provider option[value="claude_code"][selected])
+             )
+
+      assert has_element?(view, ~s(#launch-session-provider option[value="agy"]))
+
+      view |> form("#launch-session-form") |> render_submit()
+
+      assert [%{provider: :claude_code}] = Sessions.list()
+    end
+
+    test "choosing agy launches an agy session, mode B with no Remote Control", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/sessions")
+
+      view
+      |> form("#launch-session-form", %{"provider" => "agy", "remote_control" => "true"})
+      |> render_submit()
+
+      assert [session] = Sessions.list()
+      assert session.provider == :agy
+      assert session.status == :running
+      assert session.auth_mode == :seeded_credentials
+      assert session.remote_control == false
+      assert session.config_dir == nil
+    end
+
+    test "agy disables the Claude-only options and says why", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/sessions")
+
+      view |> form("#launch-session-form", %{"provider" => "agy"}) |> render_change()
+
+      assert has_element?(view, "#launch-session-auth-mode[disabled]")
+      assert has_element?(view, "#launch-session-remote-control[disabled]")
+      refute has_element?(view, "#launch-session-remote-control[checked]")
+      assert has_element?(view, "#launch-session-provider-reason")
+
+      # …and switching back restores Claude Code's defaults.
+      view |> form("#launch-session-form", %{"provider" => "claude_code"}) |> render_change()
+
+      refute has_element?(view, "#launch-session-auth-mode[disabled]")
+      assert has_element?(view, "#launch-session-remote-control[checked]")
+      refute has_element?(view, "#launch-session-provider-reason")
+    end
+
+    test "a crafted submit cannot put agy in mode A or pick an unknown provider",
+         %{conn: conn} do
+      assert ArbiterWebSessionIndex.launch_defaults(%{
+               "provider" => "agy",
+               "auth_mode" => "oauth_token",
+               "remote_control" => "true"
+             })[:auth_mode] == :seeded_credentials
+
+      assert ArbiterWebSessionIndex.launch_defaults(%{"provider" => "agy"})[:remote_control] ==
+               false
+
+      assert ArbiterWebSessionIndex.launch_defaults(%{"provider" => "not_a_provider"})[:provider] ==
+               :claude_code
+
+      {:ok, _view, _html} = live(conn, ~p"/sessions")
+    end
+
+    test "a second launch does not inherit the prior provider choice", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/sessions")
+
+      view |> form("#launch-session-form", %{"provider" => "agy"}) |> render_submit()
+
+      assert has_element?(
+               view,
+               ~s(#launch-session-provider option[value="claude_code"][selected])
+             )
     end
   end
 

@@ -27,10 +27,12 @@ defmodule Arbiter.Sessions.Session do
       session's own `sessions/<pid>.json` from outside, so a later rename does
       not reach Claude Code's prompt box / `/resume` picker / terminal title
       for a session already running. Only `--name` at launch does.
-    * `provider` — which agent CLI runs in the pane. `:claude_code` is the
-      first (and currently only) implementation; the launch command itself is
-      behind `Arbiter.Sessions.Provider` so a second provider is an adapter,
-      not a schema change.
+    * `provider` — which agent CLI runs in the pane: `:claude_code` (the
+      default) or `:agy` (Antigravity, bd-7xuvfl). The launch command itself is
+      behind `Arbiter.Sessions.Provider`, so a provider is an adapter, not a
+      schema change. An `:agy` row is held to mode B with no Remote Control
+      (see `validations`): its credential is the operator's own Google grant,
+      and Remote Control's bridge verification reads Claude Code's JSONL.
     * `workspace_id` — **nullable on purpose**. `nil` means a cross-workspace
       session, which is the coordinator's normal shape (decision 6: a
       workspace-agnostic coordinator token). A bound session is one deliberately
@@ -49,7 +51,9 @@ defmodule Arbiter.Sessions.Session do
       §10.2 layer 1 — "scaffold, never point at a checkout" (decision 4) — made
       structural: a caller cannot aim a session at the live source tree because
       it cannot choose the path at all. `config_dir` stays nullable for the
-      phase-1 rows that predate provisioning.
+      phase-1 rows that predate provisioning, and is always `nil` for a
+      provider that has no config dir (`Arbiter.Sessions.Provider.config_dir?/1`
+      — agy, whose configuration lives under its `$HOME` instead).
     * `can_dispatch` — whether this session's MCP token may dispatch workers.
       Defaults **off** (§10.1 dispatch recursion); switching it on is a
       deliberate pre-launch choice.
@@ -110,8 +114,9 @@ defmodule Arbiter.Sessions.Session do
 
   alias Arbiter.Sessions.Layout
   alias Arbiter.Sessions.Naming
+  alias Arbiter.Sessions.Provider
 
-  @providers ~w(claude_code)a
+  @providers ~w(claude_code agy)a
   @auth_modes ~w(seeded_credentials oauth_token)a
   @statuses ~w(starting running ended)a
 
@@ -187,7 +192,7 @@ defmodule Arbiter.Sessions.Session do
             |> Ash.Changeset.force_change_attribute(:tmux_socket, socket)
             |> Ash.Changeset.force_change_attribute(:root_dir, Layout.session_dir(id))
             |> default_attribute(:cwd, fn -> Layout.workspace_dir(id) end)
-            |> default_attribute(:config_dir, fn -> Layout.config_dir(id) end)
+            |> config_dir_for_provider(id)
 
           {:error, :no_runtime_dir} ->
             Ash.Changeset.add_error(changeset,
@@ -344,6 +349,32 @@ defmodule Arbiter.Sessions.Session do
   end
 
   validations do
+    # agy (bd-7xuvfl) has neither of Claude Code's alternative auth postures:
+    # its grant is the operator's own Google login (keyring or copied files,
+    # `Arbiter.Agents.Gemini.ConfigDir`), which is mode B by definition, and
+    # mode A's `CLAUDE_CODE_OAUTH_TOKEN` means nothing to it. Remote Control is
+    # refused for the same "silently does nothing" reason as under mode A:
+    # `Arbiter.Sessions.BridgeVerification` looks for Claude Code's
+    # bridge-session record, which an agy pane never writes.
+    validate fn changeset, _context ->
+      if Ash.Changeset.get_attribute(changeset, :provider) == :agy do
+        cond do
+          Ash.Changeset.get_attribute(changeset, :auth_mode) != :seeded_credentials ->
+            {:error,
+             field: :auth_mode,
+             message: "an agy session runs on the operator's own grant (mode B) only"}
+
+          Ash.Changeset.get_attribute(changeset, :remote_control) == true ->
+            {:error, field: :remote_control, message: "is not supported for an agy session"}
+
+          true ->
+            :ok
+        end
+      else
+        :ok
+      end
+    end
+
     # §8.3's spike: `--remote-control` under mode A starts normally and never
     # establishes a bridge — no error, no bridge-session record, ever. A row
     # that recorded `remote_control: true` under `:oauth_token` would be
@@ -428,7 +459,7 @@ defmodule Arbiter.Sessions.Session do
     attribute :config_dir, :string do
       public? true
       constraints max_length: 512, trim?: true
-      description "CLAUDE_CONFIG_DIR for the session (§9.1)."
+      description "CLAUDE_CONFIG_DIR for the session (§9.1); nil for a provider with none (agy)."
     end
 
     attribute :cwd, :string do
@@ -516,6 +547,20 @@ defmodule Arbiter.Sessions.Session do
   end
 
   # Force `attribute` to `fun.()` unless the caller supplied a non-blank value.
+  # A provider with no config dir (agy) gets `nil` even when a caller passed
+  # one: the column means "the CLAUDE_CONFIG_DIR this pane runs with", and a
+  # path recorded for a pane that never reads it would send the usage ingest
+  # and the transcript reader looking for Claude Code JSONL that never lands.
+  defp config_dir_for_provider(changeset, id) do
+    provider = Ash.Changeset.get_attribute(changeset, :provider)
+
+    if provider in @providers and not Provider.config_dir?(provider) do
+      Ash.Changeset.force_change_attribute(changeset, :config_dir, nil)
+    else
+      default_attribute(changeset, :config_dir, fn -> Layout.config_dir(id) end)
+    end
+  end
+
   defp default_attribute(changeset, attribute, fun) do
     case Ash.Changeset.get_attribute(changeset, attribute) do
       value when is_binary(value) and value != "" ->

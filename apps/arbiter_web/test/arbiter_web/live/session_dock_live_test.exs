@@ -289,6 +289,23 @@ defmodule ArbiterWeb.SessionDockLiveTest do
       assert session.workspace_id == workspace.id
     end
 
+    test "the roster's launch panel offers the provider choice, and agy launches from it (bd-7xuvfl)",
+         %{conn: conn} do
+      {_view, dock} = dock(conn)
+      render_click(element(dock, "#session-dock-new-session"))
+
+      assert has_element?(dock, ~s(#session-dock-launch-provider option[value="agy"]))
+
+      dock |> form("#session-dock-launch-form", %{"provider" => "agy"}) |> render_change()
+      assert has_element?(dock, "#session-dock-launch-remote-control[disabled]")
+
+      dock |> form("#session-dock-launch-form", %{"provider" => "agy"}) |> render_submit()
+
+      assert [session] = Sessions.list()
+      assert session.provider == :agy
+      assert session.remote_control == false
+    end
+
     test "switching auth mode in the dock's panel does not discard a workspace pick or can_dispatch",
          %{conn: conn} do
       {:ok, workspace} =

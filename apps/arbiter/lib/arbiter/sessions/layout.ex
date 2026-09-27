@@ -6,9 +6,11 @@ defmodule Arbiter.Sessions.Layout do
       <sessions_root>/<session-id>/
         workspace/            # cwd for the agent; git worktrees created here
           .mcp.json           # per-session scope token (§9.3) — must sit in the cwd
-        config/               # CLAUDE_CONFIG_DIR (isolated, per session)
+        config/               # CLAUDE_CONFIG_DIR (isolated, per session; claude_code only)
+        home/                 # agy only: the pane's $HOME (agy has no config-dir env var)
         repo/                 # refine sessions only: read-only detached worktree
         CLAUDE.md             # generated: role, workspace binding, guardrails
+                              #   (agy: workspace/GEMINI.md instead)
         memory/
           shared/             # read-only mounted layers, type-scoped (§9.4)
             user/, feedback/, reference/, project/
@@ -64,6 +66,18 @@ defmodule Arbiter.Sessions.Layout do
   @doc "The session's isolated `CLAUDE_CONFIG_DIR`."
   @spec config_dir(String.t()) :: String.t()
   def config_dir(id), do: Path.join(session_dir(id), "config")
+
+  @doc """
+  An agy session's isolated `$HOME` (bd-7xuvfl).
+
+  agy reads every piece of its configuration — permission posture, user
+  memory, MCP servers — from `$HOME/.gemini` and exposes no config-dir
+  override (`Arbiter.Agents.Gemini.ConfigDir`), so this directory is agy's
+  analogue of `config_dir/1`: the pane's `HOME`, seeded by
+  `Arbiter.Sessions.Provisioning`. Unused by a Claude Code session.
+  """
+  @spec home_dir(String.t()) :: String.t()
+  def home_dir(id), do: Path.join(session_dir(id), "home")
 
   @doc "The generated coordinator instructions (§9.1, and §10.2 layer 4)."
   @spec instructions_path(String.t()) :: String.t()
@@ -194,6 +208,7 @@ defmodule Arbiter.Sessions.Layout do
       workspace: workspace_dir(id),
       repo_checkout: repo_checkout_dir(id),
       config: config_dir(id),
+      home: home_dir(id),
       instructions: instructions_path(id),
       mcp_config: mcp_config_path(id),
       mcp_token: mcp_token_path(id),

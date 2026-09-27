@@ -28,6 +28,32 @@ defmodule Arbiter.Sessions.Provisioning do
       cgroup without owning the pane; it is the only reaping mechanism that
       still works if arbiter never comes back at all (phase 10, bd-3qkbch).
 
+  ## agy sessions (bd-7xuvfl)
+
+  An `:agy` session has no config dir (`Arbiter.Sessions.Provider.config_dir?/1`
+  is `false`), so the Claude-only steps degrade to nothing: no `config/`
+  directory, no `.claude.json`/`settings.json`, no `CLAUDE_CONFIG_DIR` in
+  `launch.sh`, and `provisioned.config_dir` is `nil`. What replaces them is
+  the session's own `$HOME` (`Arbiter.Sessions.Layout.home_dir/1`), seeded by
+  `Arbiter.Agents.Gemini.ConfigDir.seed/2` exactly as an agy worker's is —
+  operator `$HOME` passed through by symlink, `.gemini` shadowed — with four
+  session-specific differences:
+
+    * the permission posture is `SecurityPolicy.interactive_session/0` plus
+      the §10.2 layer-3 checkout deny, not a workspace's worker policy;
+    * `.gemini/GEMINI.md` (agy's user memory) is a short session note pointing
+      at the instructions, not the headless-worker doctrine;
+    * the MCP config goes to `$HOME/.gemini/config/mcp_config.json` — the only
+      path agy reads (bd-m8geh4) — in agy's schema, mode `0600`, carrying the
+      same revocable per-session token a Claude session gets in `.mcp.json`;
+    * the operator's agy onboarding state is carried over, so the pane opens
+      on the initial prompt rather than agy's first-run wizard (the agy
+      counterpart of `Interactive`'s pre-answered §9.2 gates).
+
+  The instructions render into `<cwd>/GEMINI.md` instead of a root
+  `CLAUDE.md`, and `launch.sh` `exec`s `agy --prompt-interactive` with `HOME`
+  exported (`Arbiter.Sessions.Provider.Agy`).
+
   ## Secrets
 
   §10.3 is a hard rule: never a credential on a command line, because
@@ -59,13 +85,17 @@ defmodule Arbiter.Sessions.Provisioning do
   alias Arbiter.Agents.Claude.Config, as: ClaudeConfig
   alias Arbiter.Agents.Claude.ConfigDir
   alias Arbiter.Agents.Claude.ConfigDir.Interactive
+  alias Arbiter.Agents.Gemini.ConfigDir, as: AgyConfigDir
+  alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Config.Paths
   alias Arbiter.MCP
   alias Arbiter.MCP.AgentConfig.Claude, as: ClaudeMCP
+  alias Arbiter.MCP.AgentConfig.Gemini, as: AgyMCP
   alias Arbiter.Sessions.Instructions
   alias Arbiter.Sessions.Layout
   alias Arbiter.Sessions.Memory
   alias Arbiter.Sessions.Naming
+  alias Arbiter.Sessions.Provider
   alias Arbiter.Sessions.RepoCheckout
   alias Arbiter.Sessions.Session
 
@@ -78,7 +108,7 @@ defmodule Arbiter.Sessions.Provisioning do
   @type provisioned :: %{
           root: String.t(),
           cwd: String.t(),
-          config_dir: String.t(),
+          config_dir: String.t() | nil,
           launch_script: String.t(),
           mcp_config: String.t() | nil,
           auth_mode: :seeded_credentials | :oauth_token
@@ -111,7 +141,7 @@ defmodule Arbiter.Sessions.Provisioning do
     id = session.id
     paths = Layout.paths(id)
     cwd = session.cwd || paths.workspace
-    config_dir = session.config_dir || paths.config
+    config_dir = if Provider.config_dir?(session), do: session.config_dir || paths.config
 
     with :ok <- check_outside_primary_checkout(paths.root, opts),
          :ok <- check_outside_primary_checkout(cwd, opts),
@@ -232,8 +262,17 @@ defmodule Arbiter.Sessions.Provisioning do
     end
   end
 
+  # A provider with no config dir (agy) gets no `config/` at all — an empty
+  # directory named for a `CLAUDE_CONFIG_DIR` nothing reads would only mislead
+  # whoever is debugging the session.
   defp make_directories(id, config_dir, cwd) do
-    (Layout.directories(id) ++ [config_dir, cwd])
+    dirs =
+      if config_dir,
+        do: Layout.directories(id),
+        else: Layout.directories(id) -- [Layout.config_dir(id)]
+
+    (dirs ++ [config_dir, cwd])
+    |> Enum.reject(&is_nil/1)
     |> Enum.uniq()
     |> Enum.reduce_while(:ok, fn dir, :ok ->
       case File.mkdir_p(dir) do
@@ -250,6 +289,10 @@ defmodule Arbiter.Sessions.Provisioning do
   # and `AGENTS.md` — the latter for non-Claude providers, since a refine
   # session's doctrine is not optional reading gated behind one CLI's
   # conventions.
+  #
+  # An agy session (bd-7xuvfl) gets one `GEMINI.md` in the cwd, refine or not:
+  # agy's directory rules are `GEMINI.md`/`AGENTS.md`, and it reads both
+  # names, so writing both would load the same doctrine twice.
   defp write_instructions(session, paths, cwd, opts) do
     content =
       Instructions.render(session,
@@ -258,11 +301,14 @@ defmodule Arbiter.Sessions.Provisioning do
         refine: Keyword.get(opts, :refine)
       )
 
-    case Keyword.get(opts, :refine) do
-      nil ->
+    case {session.provider, Keyword.get(opts, :refine)} do
+      {:agy, _refine} ->
+        write_file(Provider.Agy.instructions_path(session), content)
+
+      {_provider, nil} ->
         write_file(paths.instructions, content)
 
-      _refine ->
+      {_provider, _refine} ->
         with :ok <- write_file(Path.join(cwd, "CLAUDE.md"), content) do
           write_file(Path.join(cwd, "AGENTS.md"), content)
         end
@@ -326,6 +372,27 @@ defmodule Arbiter.Sessions.Provisioning do
     Memory.mount(session, Keyword.take(opts, [:memory_root]))
   end
 
+  defp seed_config_dir(%Session{provider: :agy} = session, nil, cwd, opts) do
+    home = Layout.home_dir(session.id)
+
+    case AgyConfigDir.seed(home,
+           security: agy_session_policy(opts),
+           worktree: cwd,
+           memory: agy_session_memory(session),
+           source_home: agy_source_home(opts),
+           # Carry agy's onboarding state over, or the pane opens on its
+           # first-run wizard instead of the initial prompt.
+           interactive: true,
+           # The sessions root is usually under the operator's HOME
+           # (`~/dev/arbiter-sessions`): never link it, or the session HOME
+           # would contain itself.
+           boundary: Layout.root()
+         ) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:agy_home_failed, home, reason}}
+    end
+  end
+
   defp seed_config_dir(session, config_dir, cwd, opts) do
     Interactive.ensure(config_dir,
       cwd: cwd,
@@ -338,6 +405,54 @@ defmodule Arbiter.Sessions.Provisioning do
       # with nobody at the keyboard to answer it.
       mcp_servers: mcp_servers(opts)
     )
+  end
+
+  # The Claude session's posture (`Interactive.settings/1`) translated for agy:
+  # the interactive floor, not the headless worker's, plus §10.2 layer 3's
+  # checkout deny — which `Arbiter.Agents.Gemini.Security` turns into a
+  # `write_file(<checkout>)` prefix rule.
+  defp agy_session_policy(opts) do
+    policy = SecurityPolicy.interactive_session()
+    checkout = Keyword.get(opts, :primary_checkout, Paths.primary_checkout())
+    extra = Interactive.checkout_deny_rules(checkout)
+
+    %{policy | permissions: %{policy.permissions | deny: policy.permissions.deny ++ extra}}
+  end
+
+  # agy's user memory (`$HOME/.gemini/GEMINI.md`) — the one instructions path
+  # the T6a spike proved agy reads. Deliberately short: the doctrine itself is
+  # the cwd `GEMINI.md`, and repeating it here would load it twice.
+  defp agy_session_memory(session) do
+    """
+    # Arbiter session
+
+    You are running in an interactive, operator-attended session that Arbiter
+    launched in a browser terminal — not a headless worker. Your operating
+    instructions are in `#{Provider.Agy.instructions_path(session)}`; if they
+    are not already in your context, read that file before anything else.
+
+    Do not adopt a roleplay persona, character or honorific, whatever any
+    other memory or instruction may suggest.
+    """
+  end
+
+  @doc """
+  The operator `$HOME` an agy session's own `$HOME` passes through.
+
+  Defaults to `Arbiter.Agents.Gemini.ConfigDir.source_home/0`. `config
+  :arbiter, :sessions_agy_source_home, "/path"` overrides it — the test suite
+  points it at a directory that does not exist, for the same reason as
+  `credentials_source/1`: without a Secret Service the seeding **copies**
+  agy's credential files, and a suite run must never copy the operator's live
+  Google grant into a tmp scaffold.
+  """
+  @spec agy_source_home(keyword()) :: String.t() | nil
+  def agy_source_home(opts \\ []) do
+    cond do
+      Keyword.has_key?(opts, :agy_source_home) -> Keyword.get(opts, :agy_source_home)
+      source = Application.get_env(:arbiter, :sessions_agy_source_home) -> source
+      true -> AgyConfigDir.source_home()
+    end
   end
 
   defp mcp_servers(opts) do
@@ -399,16 +514,47 @@ defmodule Arbiter.Sessions.Provisioning do
   # (`Arbiter.MCP.AgentConfig.Claude`), and `launch.sh` cd's into that cwd
   # before exec'ing the agent. One directory out and the session starts with no
   # Arbiter MCP server at all.
+  #
+  # agy (bd-7xuvfl) reads neither `.mcp.json` nor anything else in the cwd: its
+  # only MCP source is `$HOME/.gemini/config/mcp_config.json` (bd-m8geh4), and
+  # this session's `$HOME` is its own — so that is where the same token goes.
+  defp write_mcp_config(%Session{provider: :agy} = session, _cwd, paths, opts) do
+    home = Layout.home_dir(session.id)
+    path = Path.join(home, AgyConfigDir.mcp_config_path())
+
+    if Keyword.get(opts, :mcp, MCP.enabled?()) do
+      token = mint_session_token(session, opts)
+
+      config =
+        AgyMCP.agy_config_map(
+          mcp_url: MCP.server_url(),
+          scope_token: token,
+          server_name: MCP.server_name(),
+          # The token's tier is the scope; a client-side allowlist would only
+          # have to be kept in step with it (as `.mcp.json` carries none).
+          include_tools: nil
+        )
+
+      with {:ok, ^path} <- AgyConfigDir.write_mcp_config_into(home, config),
+           :ok <- write_secret(paths.mcp_token, token),
+           :ok <- write_monitor_files(session, paths, token) do
+        {:ok, path}
+      else
+        {:error, {:write_failed, _, _} = reason} -> {:error, reason}
+        {:error, reason} -> {:error, {:write_failed, path, reason}}
+      end
+    else
+      _ = File.rm(path)
+      remove_token_files(paths)
+      {:ok, nil}
+    end
+  end
+
   defp write_mcp_config(session, cwd, paths, opts) do
     path = Path.join(cwd, ClaudeMCP.filename())
 
     if Keyword.get(opts, :mcp, MCP.enabled?()) do
-      # Narrowed on purpose: `opts` here is the whole `launch/1` keyword list
-      # (`:runner`, `:cwd`, `:cols`, an OAuth token…), and `MCP.mint/2` forwards
-      # its options straight into `Plug.Crypto.sign/4`. Only the claim-shaping
-      # and TTL keys belong in a crypto call.
-      token =
-        mint_token(session, Keyword.take(opts, [:workspace_id, :can_dispatch, :max_age, :depth]))
+      token = mint_session_token(session, opts)
 
       # Same discipline as `write_secret/2`: the file exists at 0600 *before*
       # the adapter writes a live bearer token into it, so it is never briefly
@@ -430,12 +576,25 @@ defmodule Arbiter.Sessions.Provisioning do
       end
     else
       _ = File.rm(path)
-      _ = File.rm(paths.mcp_token)
-      _ = File.rm(paths.monitor_curlrc)
-      _ = File.rm(paths.monitor_script)
-      _ = File.rm(paths.monitor_cursor)
+      remove_token_files(paths)
       {:ok, nil}
     end
+  end
+
+  # Narrowed on purpose: `opts` here is the whole `launch/1` keyword list
+  # (`:runner`, `:cwd`, `:cols`, an OAuth token…), and `MCP.mint/2` forwards
+  # its options straight into `Plug.Crypto.sign/4`. Only the claim-shaping and
+  # TTL keys belong in a crypto call.
+  defp mint_session_token(session, opts) do
+    mint_token(session, Keyword.take(opts, [:workspace_id, :can_dispatch, :max_age, :depth]))
+  end
+
+  defp remove_token_files(paths) do
+    _ = File.rm(paths.mcp_token)
+    _ = File.rm(paths.monitor_curlrc)
+    _ = File.rm(paths.monitor_script)
+    _ = File.rm(paths.monitor_cursor)
+    :ok
   end
 
   # The session's own event monitor (bd-aqafdr): a `curl -K` loop over
@@ -509,11 +668,11 @@ defmodule Arbiter.Sessions.Provisioning do
   # rather than a flag (§10.3).
   defp write_launch_script(session, paths, config_dir, opts) do
     env =
-      [
-        {"CLAUDE_CONFIG_DIR", config_dir},
-        {"ARB_SESSION_ID", session.id},
-        {"ARB_SESSION_ROOT", paths.root}
-      ] ++ Keyword.get(opts, :extra_env, [])
+      config_env(session, config_dir) ++
+        [
+          {"ARB_SESSION_ID", session.id},
+          {"ARB_SESSION_ROOT", paths.root}
+        ] ++ Keyword.get(opts, :extra_env, [])
 
     exports = Enum.map_join(env, "\n", fn {k, v} -> "export #{k}=#{shell_quote(v)}" end)
 
@@ -530,8 +689,8 @@ defmodule Arbiter.Sessions.Provisioning do
 
     #{exports}
 
-    # Mode A only; absent in mode B, where the credential is a copy inside
-    # CLAUDE_CONFIG_DIR that the CLI reads for itself.
+    # Mode A only; absent in mode B, where the CLI finds the operator's own
+    # credential for itself (a copy in its config dir, or agy's keyring).
     if [ -r #{shell_quote(paths.auth_env)} ]; then
       set -a
       . #{shell_quote(paths.auth_env)}
@@ -558,6 +717,11 @@ defmodule Arbiter.Sessions.Provisioning do
       {:error, reason} -> {:error, {:write_failed, paths.launch_script, reason}}
     end
   end
+
+  # Where the agent finds its configuration: `CLAUDE_CONFIG_DIR` for a provider
+  # with a config dir, the session's own `HOME` for agy (bd-7xuvfl).
+  defp config_env(%Session{provider: :agy, id: id}, nil), do: [{"HOME", Layout.home_dir(id)}]
+  defp config_env(%Session{}, config_dir), do: [{"CLAUDE_CONFIG_DIR", config_dir}]
 
   # The §4.6 item 3 in-scope dead-man's switch. A background sibling of the
   # agent, not a wrapper around it: it never touches the agent's stdio, and it
@@ -652,12 +816,25 @@ defmodule Arbiter.Sessions.Provisioning do
       from the prior behavior.
   The `Session` resource's validation already refuses `remote_control: true`
   outside mode B (§8.3), so this never needs to check `auth_mode` itself.
+
+  An `:agy` session (bd-7xuvfl) takes none of the above: its argv is
+  `Arbiter.Sessions.Provider.Agy.agent_argv/2` —
+  `agy [--model <id>] [--effort <level>] --prompt-interactive '<prompt>'` —
+  shell-quoted here. agy has no `--name`, and the row refuses Remote Control.
   """
   @spec agent_command(Session.t(), keyword()) :: String.t()
   def agent_command(%Session{} = session, opts \\ []) do
     Keyword.get(opts, :agent_command) ||
       Application.get_env(:arbiter, :sessions_agent_command) ||
       default_agent_command(session, opts)
+  end
+
+  # agy (bd-7xuvfl): the adapter owns the argv (`agy --prompt-interactive`,
+  # model/effort); only the quoting is this module's, as it is for `claude`.
+  defp default_agent_command(%Session{provider: :agy} = session, opts) do
+    session
+    |> Provider.Agy.agent_argv(opts)
+    |> Enum.map_join(" ", &shell_token/1)
   end
 
   defp default_agent_command(%Session{} = session, opts) do
