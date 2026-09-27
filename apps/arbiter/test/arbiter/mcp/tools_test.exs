@@ -790,9 +790,11 @@ defmodule Arbiter.MCP.ToolsTest do
   describe "quota_get/2" do
     test "returns null claude quota before anything is captured", ctx do
       assert {:ok, %{claude: nil} = payload} = Tools.quota_get(ctx.worker, %{})
-      # Gemini/Antigravity fetch is disabled in test → present but nil.
-      assert payload.gemini == nil
+      # Antigravity fetch is disabled in test → present but nil. The upstream
+      # Gemini CLI key is gone (bd-ac53wz).
+      assert Map.has_key?(payload, :antigravity)
       assert payload.antigravity == nil
+      refute Map.has_key?(payload, :gemini)
     end
 
     test "includes a graceful codex no-op when Codex is not authenticated", ctx do
@@ -819,19 +821,20 @@ defmodule Arbiter.MCP.ToolsTest do
       assert result.codex_message == nil
     end
 
-    test "surfaces the persisted Gemini CLI snapshot from the DB (bd-ajh7bd)", ctx do
+    test "surfaces the persisted Antigravity snapshot and no Gemini CLI key (bd-ac53wz)", ctx do
       Ash.create!(Arbiter.Quota.GoogleQuota, %{
-        provider_account_id: quota_account_id!(ctx.ws.id, "gemini_cli"),
-        provider: "gemini_cli",
-        plan: "Free",
+        provider_account_id: quota_account_id!(ctx.ws.id, "antigravity"),
+        provider: "antigravity",
+        plan: "Pro",
         used_percent: 75.0,
-        snapshot: %{"provider" => "gemini-cli", "plan" => "Free", "models" => []},
+        snapshot: %{"provider" => "antigravity", "plan" => "Pro", "models" => []},
         captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
       })
 
       assert {:ok, result} = Tools.quota_get(ctx.worker, %{})
-      assert result.gemini["plan"] == "Free"
-      assert result.gemini["models"] == []
+      assert result.antigravity["plan"] == "Pro"
+      assert result.antigravity["models"] == []
+      refute Map.has_key?(result, :gemini)
     end
 
     test "returns the captured snapshot for the scope's workspace", ctx do

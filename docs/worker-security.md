@@ -625,7 +625,10 @@ behaviour contract requires any adapter to:
 CLI on `PATH` is `agy` *and* worker config isolation is on, since without an
 Arbiter-owned `$HOME` there is nowhere to put the generated settings document;
 it answers `false` otherwise, including for the upstream `gemini` CLI, which has
-no allow/deny mechanism at all. `Codex` does not implement the contract yet and
+no allow/deny mechanism at all. (The upstream Gemini CLI *provider* —
+`gemini_cli` accounts, quota and the Providers page entry — was dropped in
+bd-ac53wz; only the adapter's own fallback to that binary when `agy` is not on
+`PATH` remains, and it still answers `false` here.) `Codex` does not implement the contract yet and
 answers `false`. The REST `security_posture.policy_enforced` field reports each
 adapter's own answer, so operators can see whether the declared posture is
 actually being enforced by the running adapter.

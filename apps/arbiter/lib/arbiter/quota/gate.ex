@@ -33,7 +33,7 @@ defmodule Arbiter.Quota.Gate do
 
   Every helper here takes a *snapshot* rather than an `AnthropicQuota` row:
   `Arbiter.Quota.Gate.Snapshot.normalize/1` projects `AnthropicQuota` (Claude),
-  `CodexQuota` (Codex) and `GoogleQuota` (Gemini CLI / Antigravity) onto one
+  `CodexQuota` (Codex) and `GoogleQuota` (Antigravity) onto one
   provider-neutral shape — primary-window `utilization`, past-plan `status`,
   `reset_at` / `captured_at` — so the same near-cap semantics apply to all four
   providers without the gate knowing any provider's field names. The caller
@@ -67,8 +67,8 @@ defmodule Arbiter.Quota.Gate do
       just before the reset.
 
   A paced window falls back to its **flat** threshold when
-  `window_seconds/2` cannot resolve its length (Codex `"session"`, Gemini CLI
-  `"used"`, by default) or its `reset_at` is `nil`.
+  `window_seconds/2` cannot resolve its length (Codex `"session"`, Antigravity's
+  collapsed `"used"`, by default) or its `reset_at` is `nil`.
 
   The account's `quota_config` and the workspace's `config["quota"]` each
   carry their own `threshold_mode` and floors. Composition is P7's
@@ -111,7 +111,7 @@ defmodule Arbiter.Quota.Gate do
 
   # Built-in window lengths by snapshot window label — the second step of
   # `window_seconds/2`. Codex "session" (a session reset, not a fixed-length
-  # window) and Gemini CLI "used" (no time window) are absent on purpose.
+  # window) and Antigravity's collapsed "used" (no time window) are absent.
   @builtin_window_seconds %{"5h" => 18_000, "7d" => 604_800, "weekly" => 604_800}
 
   # Staleness thresholds, per `capture_source` — see
@@ -468,7 +468,7 @@ defmodule Arbiter.Quota.Gate do
        contracts and non-standard tiers;
     2. the built-in table: `"5h"` → 18_000, `"7d"` / `"weekly"` → 604_800;
     3. `nil` — Codex `"session"` (a session reset, not a fixed-length window)
-       and Gemini CLI `"used"` (no time window) by default.
+       and Antigravity's collapsed `"used"` (no time window) by default.
 
   There is deliberately no workspace step: window length is a property of the
   account's plan, not of who is spending it.

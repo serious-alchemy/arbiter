@@ -236,8 +236,8 @@ defmodule Arbiter.Accounts.OverviewTest do
                row(Overview.list(auth_hold: hold, watchdog: watchdog), account)
     end
 
-    test "gemini_cli and antigravity accounts read the shared Gemini adapter" do
-      assert Overview.adapter(:gemini_cli) == Gemini
+    test "antigravity accounts read the Gemini adapter; gemini_cli is gone (bd-ac53wz)" do
+      assert Overview.adapter(:gemini_cli) == nil
       assert Overview.adapter(:antigravity) == Gemini
       assert Overview.adapter(:claude) == Claude
       assert Overview.adapter(:codex) == Codex

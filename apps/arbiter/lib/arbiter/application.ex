@@ -189,7 +189,7 @@ defmodule Arbiter.Application do
       DispatchQueueSupervisor,
       # Periodic refresh of every quota provider (bd-atyrrq: Anthropic's own
       # `/api/oauth/usage` poll now drives the primary + long-window columns
-      # `Arbiter.Quota.Gate` reads, alongside Codex, Gemini CLI, and
+      # `Arbiter.Quota.Gate` reads, alongside Codex and
       # Antigravity, which have no passive proxy signal — bd-ajh7bd). Each
       # cycle fetches per workspace, upserts the persisted snapshot, and
       # broadcasts a quota_updated event so the web dashboard updates live,

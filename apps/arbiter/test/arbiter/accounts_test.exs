@@ -163,6 +163,26 @@ defmodule Arbiter.AccountsTest do
       assert account.slug == "fresh"
       assert account.enabled == true
     end
+
+    # bd-ac53wz: the upstream Gemini CLI provider is dropped; agy stays.
+    test "rejects the removed gemini_cli provider" do
+      assert {:error, _} = Accounts.create_account(%{provider: :gemini_cli, slug: "gone"})
+
+      assert {:error, _} =
+               Ash.create(ProviderAccount, %{provider: :gemini_cli, slug: "gone-too"})
+
+      assert {:ok, %{provider: :antigravity}} =
+               Accounts.create_account(%{provider: :antigravity, slug: "agy-stays"})
+    end
+  end
+
+  describe "parse_provider/1" do
+    test "knows every live provider and not the removed gemini_cli (bd-ac53wz)" do
+      for p <- ~w(claude codex antigravity),
+          do: assert(Accounts.parse_provider(p) == {:ok, String.to_existing_atom(p)})
+
+      assert Accounts.parse_provider("gemini_cli") == :error
+    end
   end
 
   describe "set_max_concurrent/2 (P8 §4.2)" do
@@ -796,16 +816,16 @@ defmodule Arbiter.AccountsTest do
                |> Ash.read!()
     end
 
-    test "cloud_code_quotas (gemini_cli): collapses to the single newest row" do
-      from = create_account!(%{provider: :gemini_cli, slug: "gemini-merge-from"})
-      into = create_account!(%{provider: :gemini_cli, slug: "gemini-merge-into"})
+    test "cloud_code_quotas (antigravity): collapses to the single newest row" do
+      from = create_account!(%{provider: :antigravity, slug: "agy-merge-from"})
+      into = create_account!(%{provider: :antigravity, slug: "agy-merge-into"})
 
-      create_cloud_code_quota!(from.id, "gemini_cli",
+      create_cloud_code_quota!(from.id, "antigravity",
         captured_at: ~U[2026-01-01 00:00:00Z],
         plan: "from-plan"
       )
 
-      create_cloud_code_quota!(into.id, "gemini_cli",
+      create_cloud_code_quota!(into.id, "antigravity",
         captured_at: ~U[2026-01-05 00:00:00Z],
         plan: "into-plan"
       )
@@ -814,14 +834,14 @@ defmodule Arbiter.AccountsTest do
 
       assert {:ok, merged} =
                GoogleQuota
-               |> Ash.Query.filter(provider_account_id == ^into.id and provider == "gemini_cli")
+               |> Ash.Query.filter(provider_account_id == ^into.id and provider == "antigravity")
                |> Ash.read_one()
 
       assert merged.plan == "into-plan"
 
       assert [_one] =
                GoogleQuota
-               |> Ash.Query.filter(provider_account_id == ^into.id and provider == "gemini_cli")
+               |> Ash.Query.filter(provider_account_id == ^into.id and provider == "antigravity")
                |> Ash.read!()
     end
 

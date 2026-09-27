@@ -114,6 +114,10 @@ defmodule Arbiter.Accounts.Census do
   # §7.3. Providers are the codes `Arbiter.Quota.provider_code/1` speaks, so a
   # plan row can be joined straight onto the existing quota tables (§6).
   #
+  # `GEMINI_API_KEY` / `GOOGLE_GENAI_API_KEY` are not listed: they belonged to
+  # the upstream Gemini CLI provider (`gemini_cli`), dropped in bd-ac53wz, so
+  # a workspace that still carries one passes it through as plain env.
+  #
   # `ANTIGRAVITY_API_KEY` is a placeholder: Antigravity currently stores no
   # token Arbiter can read at all (bd-d7hmqn, `Arbiter.Quota.CloudCode`), so on
   # this install it never matches. It is listed so the allowlist is complete
@@ -124,8 +128,6 @@ defmodule Arbiter.Accounts.Census do
     "ANTHROPIC_API_KEY" => %{provider: "claude", kind: :api_key},
     "OPENAI_API_KEY" => %{provider: "codex", kind: :api_key},
     "CODEX_API_KEY" => %{provider: "codex", kind: :api_key},
-    "GEMINI_API_KEY" => %{provider: "gemini_cli", kind: :api_key},
-    "GOOGLE_GENAI_API_KEY" => %{provider: "gemini_cli", kind: :api_key},
     "ANTIGRAVITY_API_KEY" => %{provider: "antigravity", kind: :api_key}
   }
 

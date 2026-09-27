@@ -145,14 +145,14 @@ defmodule Arbiter.Accounts do
 
   @doc """
   Parse a provider string against the known set of provider atoms
-  (`claude`, `codex`, `gemini_cli`, `antigravity`). Returns `:error` for
+  (`claude`, `codex`, `antigravity`). Returns `:error` for
   anything else, whether or not that string happens to already be an atom
   elsewhere in the VM.
   """
   @spec parse_provider(String.t()) :: {:ok, atom()} | :error
   def parse_provider(str) do
     case str do
-      s when s in ~w(claude codex gemini_cli antigravity) -> {:ok, String.to_existing_atom(s)}
+      s when s in ~w(claude codex antigravity) -> {:ok, String.to_existing_atom(s)}
       _ -> :error
     end
   end

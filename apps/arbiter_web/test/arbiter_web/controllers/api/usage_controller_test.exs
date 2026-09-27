@@ -459,4 +459,50 @@ defmodule ArbiterWeb.Api.UsageControllerTest do
       assert body["flagged"] == []
     end
   end
+
+  # bd-ac53wz dropped the upstream Gemini CLI provider and deleted its
+  # `gemini_cli` provider accounts. `usage_events` were deliberately left
+  # alone: `provider` is a free string, so a historical `"gemini_cli"` row
+  # still rolls up under its own label, and its `provider_account_id` still
+  # groups (as the raw id) even though the account row is gone.
+  describe "historical gemini_cli rows (bd-ac53wz)" do
+    test "stay readable by provider, by account and as raw events", %{conn: conn} do
+      removed_account = Ecto.UUID.generate()
+
+      _ =
+        insert_event!(%{
+          task_id: "bd-legacy-gem",
+          provider: "gemini_cli",
+          cost_usd: 0.25,
+          provider_account_id: removed_account
+        })
+
+      by_provider =
+        conn
+        |> get(~p"/api/usage", %{by: "provider"})
+        |> json_response(200)
+        |> Map.fetch!("data")
+        |> Map.new(&{&1["group"], &1})
+
+      assert by_provider["gemini_cli"]["rows"] == 1
+      assert_in_delta by_provider["gemini_cli"]["total_cost_usd"], 0.25, 0.001
+
+      by_account =
+        conn
+        |> get(~p"/api/usage", %{by: "provider_account"})
+        |> json_response(200)
+        |> Map.fetch!("data")
+        |> Map.new(&{&1["group"], &1})
+
+      assert by_account[removed_account]["rows"] == 1
+
+      events =
+        conn
+        |> get(~p"/api/usage/events", %{task_id: "bd-legacy-gem"})
+        |> json_response(200)
+        |> Map.fetch!("data")
+
+      assert [%{"provider" => "gemini_cli"}] = events
+    end
+  end
 end

@@ -36,6 +36,30 @@ defmodule Arbiter.Quota.GateProviderTest do
   # counts toward `DispatchQueueSupervisor`'s intensity (3 in 5s). Four such
   # stops close together shut the supervisor down, and the `DataCase` sweep
   # that ran next hit `:noproc`.
+  # `Quota.provider_code(:gemini)` probes PATH live, and with the upstream
+  # Gemini CLI provider gone (bd-ac53wz) it resolves to nothing unless `agy`
+  # is there — pin a stub so the gate reads the antigravity row regardless of
+  # whether this host has `agy` installed.
+  defp pin_agy_on_path do
+    tmp =
+      Path.join(
+        System.tmp_dir!(),
+        "arbiter-dispatch-hint-stub-#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(tmp)
+    old_path = System.get_env("PATH") || ""
+    agy_path = Path.join(tmp, "agy")
+    File.write!(agy_path, "#!/bin/sh\nexit 0\n")
+    File.chmod!(agy_path, 0o755)
+    System.put_env("PATH", tmp <> ":" <> old_path)
+
+    on_exit(fn ->
+      System.put_env("PATH", old_path)
+      File.rm_rf!(tmp)
+    end)
+  end
+
   defp stop_dispatch_queue(workspace_id) do
     if pid = DispatchQueueSupervisor.whereis(workspace_id) do
       Arbiter.ProcessTeardown.stop_child(DispatchQueueSupervisor, pid)
@@ -48,7 +72,7 @@ defmodule Arbiter.Quota.GateProviderTest do
   end
 
   defp google_quota(attrs) do
-    %GoogleQuota{provider_account_id: "acct-x", provider: "gemini_cli", captured_at: now()}
+    %GoogleQuota{provider_account_id: "acct-x", provider: "antigravity", captured_at: now()}
     |> struct(attrs)
   end
 
@@ -130,7 +154,7 @@ defmodule Arbiter.Quota.GateProviderTest do
     test "Google maps the representative used-percent onto the primary slot" do
       s = Snapshot.normalize(google_quota(%{used_percent: 95.0, reset_at: ahead(600)}))
 
-      assert s.provider == "gemini_cli"
+      assert s.provider == "antigravity"
       assert_in_delta s.utilization, 0.95, 0.0001
     end
   end
@@ -197,7 +221,7 @@ defmodule Arbiter.Quota.GateProviderTest do
     end
   end
 
-  describe "Gate.Throttle.check/4 — Google (Gemini CLI / Antigravity)" do
+  describe "Gate.Throttle.check/4 — Google (Antigravity, collapsed representative figure)" do
     test "holds when the representative model is at/over the threshold" do
       assert {:hold, reason} =
                Gate.Throttle.check(
@@ -207,7 +231,7 @@ defmodule Arbiter.Quota.GateProviderTest do
                  []
                )
 
-      assert reason.provider == "gemini_cli"
+      assert reason.provider == "antigravity"
     end
 
     test "allows when there is headroom" do
@@ -378,15 +402,9 @@ defmodule Arbiter.Quota.GateProviderTest do
         captured_at: now()
       })
 
-      # `:gemini` resolves dynamically (bd-7qj58o) to whichever quota code
-      # matches the executable that would actually run on this host — seed
-      # that code so the test doesn't depend on whether `agy` happens to be
-      # on PATH.
-      gemini_code = Quota.provider_code(:gemini)
-
       Ash.create!(GoogleQuota, %{
-        provider_account_id: quota_account_id!(workspace.id, gemini_code),
-        provider: gemini_code,
+        provider_account_id: quota_account_id!(workspace.id, "antigravity"),
+        provider: "antigravity",
         used_percent: 77.0,
         captured_at: now()
       })
@@ -397,10 +415,21 @@ defmodule Arbiter.Quota.GateProviderTest do
                Quota.latest_for_workspace(workspace.id, :codex)
 
       assert %GoogleQuota{used_percent: 77.0} =
-               Quota.latest_for_workspace(workspace.id, :gemini)
+               Quota.latest_for_workspace(workspace.id, :antigravity)
 
-      other_code = if gemini_code == "gemini_cli", do: :antigravity, else: :gemini_cli
-      assert Quota.latest_for_workspace(workspace.id, other_code) == nil
+      # `:gemini` resolves dynamically (bd-7qj58o) to the agy code when `agy`
+      # is on this host's PATH, and — since bd-ac53wz dropped the upstream
+      # Gemini CLI provider — to no tracked quota otherwise.
+      case Quota.provider_code(:gemini) do
+        "antigravity" ->
+          assert %GoogleQuota{used_percent: 77.0} =
+                   Quota.latest_for_workspace(workspace.id, :gemini)
+
+        nil ->
+          assert Quota.latest_for_workspace(workspace.id, :gemini) == nil
+      end
+
+      assert Quota.latest_for_workspace(workspace.id, :gemini_cli) == nil
       assert Quota.latest_for_workspace(workspace.id, :nonesuch) == nil
     end
   end
@@ -500,6 +529,8 @@ defmodule Arbiter.Quota.GateProviderTest do
     } do
       # Workspace default is codex (healthy); the dispatch forces gemini, which
       # is blown — the gate must consult Google, not Codex.
+      pin_agy_on_path()
+
       {:ok, gtask} = Ash.create(Issue, %{title: "gemini work", workspace_id: workspace.id})
 
       Ash.create!(CodexQuota, %{
@@ -533,23 +564,7 @@ defmodule Arbiter.Quota.GateProviderTest do
     # seed is actually the one the gate looks up, regardless of whether this
     # host happens to have `agy` installed.
     setup do
-      tmp =
-        Path.join(
-          System.tmp_dir!(),
-          "arbiter-dispatch-hint-stub-#{System.unique_integer([:positive])}"
-        )
-
-      File.mkdir_p!(tmp)
-      old_path = System.get_env("PATH") || ""
-      agy_path = Path.join(tmp, "agy")
-      File.write!(agy_path, "#!/bin/sh\nexit 0\n")
-      File.chmod!(agy_path, 0o755)
-      System.put_env("PATH", tmp <> ":" <> old_path)
-
-      on_exit(fn ->
-        System.put_env("PATH", old_path)
-        File.rm_rf!(tmp)
-      end)
+      pin_agy_on_path()
 
       {:ok, workspace} =
         Ash.create(Workspace, %{

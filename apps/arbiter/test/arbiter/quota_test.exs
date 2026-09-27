@@ -403,7 +403,7 @@ defmodule Arbiter.QuotaTest do
     alias Arbiter.Quota.CodexQuota
     alias Arbiter.Quota.GoogleQuota
 
-    # `provider` here is the *ledger* provider ("claude"/"openai"/"gemini");
+    # `provider` here is the *ledger* provider ("claude"/"openai");
     # `cost_for/2` maps it onto a quota provider code via `@ledger_providers`
     # to find the account. `provider_spend/1` (what `decorate_view/2` now
     # reads the headline `cost_usd` from) filters on `provider_account_id`
@@ -411,8 +411,7 @@ defmodule Arbiter.QuotaTest do
     # `workspace_id` set — real ingested rows always carry both (P9).
     @quota_provider_for_ledger %{
       "claude" => "claude",
-      "openai" => "codex",
-      "gemini" => "gemini_cli"
+      "openai" => "codex"
     }
 
     defp usage_event!(ws_id, provider, cost) do
@@ -440,8 +439,8 @@ defmodule Arbiter.QuotaTest do
         captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
       })
 
-      # Ledger provider keys ("claude"/"openai"/"gemini") differ from the quota
-      # provider codes ("claude"/"codex"/"gemini_cli"); the mapping rolls spend up.
+      # Ledger provider keys ("claude"/"openai") differ from the quota
+      # provider codes ("claude"/"codex"); the mapping rolls spend up.
       usage_event!(ws.id, "claude", 1.25)
       usage_event!(ws.id, "claude", 0.75)
       usage_event!(ws.id, "openai", 3.0)
@@ -511,9 +510,9 @@ defmodule Arbiter.QuotaTest do
       })
 
       Ash.create!(GoogleQuota, %{
-        provider_account_id: quota_account_id!(ws.id, "gemini_cli"),
-        provider: "gemini_cli",
-        plan: "Free",
+        provider_account_id: quota_account_id!(ws.id, "antigravity"),
+        provider: "antigravity",
+        plan: "Pro",
         used_percent: 75.0,
         snapshot: %{"models" => []},
         captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
@@ -524,7 +523,7 @@ defmodule Arbiter.QuotaTest do
 
       # claude sorts first; the rest present regardless of order
       assert hd(providers) == "claude"
-      assert Enum.sort(providers) == ["claude", "codex", "gemini_cli"]
+      assert Enum.sort(providers) == ["antigravity", "claude", "codex"]
 
       # every entry is the uniform view map (not a raw resource struct)
       assert Enum.all?(views, &is_map/1)
@@ -535,7 +534,7 @@ defmodule Arbiter.QuotaTest do
       assert_in_delta codex.utilization_7d, 0.08, 0.0001
       assert codex.primary_label == "session"
 
-      google = Enum.find(views, &(&1.provider == "gemini_cli"))
+      google = Enum.find(views, &(&1.provider == "antigravity"))
       assert_in_delta google.utilization_5h, 0.75, 0.0001
     end
 
@@ -630,31 +629,27 @@ defmodule Arbiter.QuotaTest do
   end
 
   describe "google_snapshots/1" do
-    test "returns nils when the google fetch is disabled" do
-      assert Quota.google_snapshots(enabled: false) == %{gemini: nil, antigravity: nil}
+    # bd-ac53wz: the upstream Gemini CLI provider is dropped — only
+    # Antigravity is fetched, and the result carries no `:gemini` key.
+    test "returns nil antigravity when the google fetch is disabled" do
+      assert Quota.google_snapshots(enabled: false) == %{antigravity: nil}
     end
 
     test "defaults to disabled in the test env (no live network calls)" do
-      assert Quota.google_snapshots() == %{gemini: nil, antigravity: nil}
+      assert Quota.google_snapshots() == %{antigravity: nil}
     end
 
-    test "no-ops gemini to nil when credentials are absent; antigravity degrades instead of nil-ing (bd-d7hmqn)" do
-      # `:creds_path` isolates `gemini/1`, which still returns `nil` when its
-      # creds file is absent. `antigravity/1` no longer reads any stored
-      # token — it shells out to the `agy` CLI — so it never returns `nil`;
-      # stub `:agy_usage_probe` so this test doesn't depend on whether `agy`
-      # is actually installed on the host running the suite.
-      missing =
-        Path.join(System.tmp_dir!(), "absent_#{System.unique_integer([:positive])}.json")
-
+    test "antigravity degrades instead of nil-ing (bd-d7hmqn)" do
+      # `antigravity/1` reads no stored token — it shells out to the `agy`
+      # CLI — so it never returns `nil`; stub `:agy_usage_probe` so this test
+      # doesn't depend on whether `agy` is installed on the host running it.
       result =
         Quota.google_snapshots(
           enabled: true,
-          creds_path: missing,
           agy_usage_probe: fn -> {:error, :not_installed} end
         )
 
-      assert result.gemini == nil
+      refute Map.has_key?(result, :gemini)
       refute is_nil(result.antigravity)
       assert result.antigravity.message =~ "not installed"
     end

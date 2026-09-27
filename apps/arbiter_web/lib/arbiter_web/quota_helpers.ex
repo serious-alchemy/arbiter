@@ -15,9 +15,7 @@ defmodule ArbiterWeb.QuotaHelpers do
   # apply (bd-7uwovg). Every other provider shows neither — its colour still
   # comes from the gate, which falls back to its flat ceiling:
   #   - "codex" is excluded because its `reset_5h_at` slot is a *session*
-  #     reset, not a fixed-duration window.
-  #   - "gemini_cli" is excluded because it has no time window at all.
-  #   (both per bd-d8wo5m review round 1)
+  #     reset, not a fixed-duration window (per bd-d8wo5m review round 1).
   @fixed_window_providers ~w(claude antigravity)
 
   # Providers with a paid-overage mode (Arbiter.Quota.default_workspace_on_exhaustion/0).
@@ -273,7 +271,6 @@ defmodule ArbiterWeb.QuotaHelpers do
   @provider_labels %{
     "claude" => "Claude",
     "codex" => "Codex",
-    "gemini_cli" => "Gemini CLI",
     "antigravity" => "Antigravity"
   }
 
@@ -385,8 +382,8 @@ defmodule ArbiterWeb.QuotaHelpers do
   time-elapsed marker position on the 5h usage bars. `nil` when there's no
   `reset_5h_at` to derive a window from (marker isn't rendered), or when
   `provider` isn't in `@fixed_window_providers` (Codex's `reset_5h_at` slot
-  is a session reset, not a fixed-duration window; Gemini CLI has no time
-  window at all; see bd-d8wo5m review round 1).
+  is a session reset, not a fixed-duration window; see bd-d8wo5m review
+  round 1).
   """
   def quota_elapsed_pct_5h(provider, reset_at) when provider in @fixed_window_providers,
     do: elapsed_pct(reset_at, window_seconds("5h"))

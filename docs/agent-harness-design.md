@@ -267,7 +267,10 @@ resolved at spawn time:
   `--reasoning-effort <level>` (default; configurable per-workspace via
   `agent.config["thinking_argv"]`).
 * **Gemini** — resolution and thinking surface differ by which CLI is on
-  PATH (`agy` is preferred, falling back to upstream `gemini`; bd-d2yut8):
+  PATH (`agy` is preferred, falling back to upstream `gemini`; bd-d2yut8).
+  The upstream Gemini CLI *provider* (`gemini_cli` accounts and quota) was
+  dropped in bd-ac53wz in favour of agy; the adapter's fallback below is
+  unchanged but has no provider account or quota behind it:
   * upstream `gemini` — tier → `gemini-2.5-flash-lite` / `gemini-2.5-flash`
     / `gemini-2.5-pro` (no `flagship` tier); thinking → `GEMINI_THINKING_LEVEL`
     env var only — the CLI has no `--effort` flag and rejects one
@@ -531,6 +534,10 @@ show up cleanly in `arb usage`, we'll see the shape of the worker spend and the
 multi-vendor question will answer itself.
 
 ## 11. Gemini usage scraping — findings (bd-guegdl)
+
+> **Historical.** This spike predates Antigravity; the upstream Gemini CLI
+> provider (`gemini_cli`) it studies was dropped in bd-ac53wz in favour of agy
+> (see `docs/provider-account-design.md`, "Removed: `gemini_cli`").
 
 `bd-guegdl` added the `provider` dispatch parameter (CLI `--provider`, MCP
 `provider`) and, as part of it, spiked **what the Gemini CLI actually emits** so

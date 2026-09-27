@@ -31,8 +31,8 @@ defmodule Arbiter.Agents.ProviderRouting do
 
     * `disabled` / `merged` — the account is parked or merged away;
     * `no_adapter` — its provider has no agent adapter;
-    * `cli_unavailable` — a Google account (`antigravity` / `gemini_cli`)
-      whose CLI is not the one the `gemini` adapter would spawn on this host;
+    * `cli_unavailable` — an `antigravity` account on a host where the
+      `gemini` adapter would not spawn agy;
     * `auth_expired` — `Arbiter.Agents.AuthHold` is open, or
       `Arbiter.Agents.CredentialWatchdog` holds the adapter's credential
       expired. agy and Codex authenticate through their CLI logins, so a
@@ -140,7 +140,8 @@ defmodule Arbiter.Agents.ProviderRouting do
       workspace's);
     * `:now`;
     * `:quota_fun` — `(ProviderAccount.t() -> quota row | nil)`;
-    * `:gemini_code` — which Google CLI the `gemini` adapter would spawn;
+    * `:gemini_code` — the quota code of the CLI the `gemini` adapter would
+      spawn (`"antigravity"` for agy, `nil` otherwise);
     * `:write_confinement` — `(adapter, policy -> atom)`;
     * `:role` — the role being routed (default `:main`; `select/4` sets it),
       which decides whether the task's own live workers count toward
@@ -581,9 +582,8 @@ defmodule Arbiter.Agents.ProviderRouting do
     ArgumentError -> {:drop, "no_adapter", nil}
   end
 
-  defp check_cli(%{account: %{provider: provider}} = entry, ctx)
-       when provider in [:antigravity, :gemini_cli] do
-    if Atom.to_string(provider) == ctx.gemini_code,
+  defp check_cli(%{account: %{provider: :antigravity}} = entry, ctx) do
+    if ctx.gemini_code == "antigravity",
       do: {:ok, entry},
       else:
         {:drop, "cli_unavailable", "the gemini adapter would run #{ctx.gemini_code || "nothing"}"}

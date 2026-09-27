@@ -181,17 +181,16 @@ defmodule Arbiter.Accounts.Merge do
         "codex"
       )
 
-  defp collapse_quota(%{provider: provider, id: from_id}, into_id)
-       when provider in [:gemini_cli, :antigravity] do
-    collapse_table(
-      "cloud_code_quotas",
-      @cloud_code_columns,
-      &Rekey.collapse_newest/1,
-      from_id,
-      into_id,
-      to_string(provider)
-    )
-  end
+  defp collapse_quota(%{provider: :antigravity, id: from_id}, into_id),
+    do:
+      collapse_table(
+        "cloud_code_quotas",
+        @cloud_code_columns,
+        &Rekey.collapse_newest/1,
+        from_id,
+        into_id,
+        "antigravity"
+      )
 
   # Mirrors the P5 migration's collapse (`Arbiter.Repo.Migrations.RekeyQuotaTablesToProviderAccount`):
   # read both candidate rows raw, collapse in Elixir via the same pure

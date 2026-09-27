@@ -14,7 +14,6 @@ defmodule Arbiter.Agents.ModelFamily do
   | `antigravity` (agy)    | `gemini-*` / unknown   | `:google`    | `"antigravity:gemini_models"`         |
   | `antigravity` (agy)    | `claude-*`             | `:anthropic` | `"antigravity:claude_and_gpt_models"` |
   | `antigravity` (agy)    | `gpt-*`                | `:openai`    | `"antigravity:claude_and_gpt_models"` |
-  | `gemini_cli`           | any                    | `:google`    | `"gemini_cli"`                        |
   | `codex`                | any                    | `:openai`    | `"codex"`                             |
   | `grok` (later)         | any                    | `:xai`       | `"grok"`                              |
   | `ollama` (later)       | any                    | `:local`     | `"ollama"`                            |
@@ -57,7 +56,6 @@ defmodule Arbiter.Agents.ModelFamily do
 
   def classify("claude", _model), do: %{family: :anthropic, pool: "claude"}
   def classify("codex", _model), do: %{family: :openai, pool: "codex"}
-  def classify("gemini_cli", _model), do: %{family: :google, pool: "gemini_cli"}
   def classify("grok", _model), do: %{family: :xai, pool: "grok"}
   def classify("ollama", _model), do: %{family: :local, pool: "ollama"}
 
@@ -113,8 +111,7 @@ defmodule Arbiter.Agents.ModelFamily do
   defp builtin(agy) when agy in ["antigravity", "agy"],
     do: {"gemini", GeminiConfig.default_tier_models(:agy)}
 
-  defp builtin(gemini) when gemini in ["gemini_cli", "gemini"],
-    do: {"gemini", GeminiConfig.default_tier_models(:gemini)}
+  defp builtin("gemini"), do: {"gemini", GeminiConfig.default_tier_models(:gemini)}
 
   defp builtin(_), do: nil
 

@@ -7,8 +7,8 @@ defmodule ArbiterWeb.Api.QuotaController do
 
   A pure DB read (bd-ajh7bd): every provider is read from its persisted quota
   table, kept fresh by the background `Arbiter.Quota.CloudProbe` polling
-  (`/api/oauth/usage` for Anthropic, and similar endpoints for Codex / Gemini
-  CLI / Antigravity). No provider is fetched live here, so a dashboard/CLI load
+  (`/api/oauth/usage` for Anthropic, and similar endpoints for Codex /
+  Antigravity). No provider is fetched live here, so a dashboard/CLI load
   carries no request-time latency or rate-limit exposure.
 
   `quotas` carries every tracked provider as the uniform view shape (each
@@ -107,7 +107,6 @@ defmodule ArbiterWeb.Api.QuotaController do
           # signal `CloudProbe` now feeds it for these adapters too.
           codex_credentials_expired:
             Arbiter.Agents.CredentialWatchdog.expired?(Arbiter.Agents.Codex),
-          gemini: Quota.CloudCode.serialize_latest(accounts["gemini_cli"], "gemini_cli"),
           antigravity: Quota.CloudCode.serialize_latest(accounts["antigravity"], "antigravity"),
           gemini_credentials_expired:
             Arbiter.Agents.CredentialWatchdog.expired?(Arbiter.Agents.Gemini)
@@ -153,10 +152,6 @@ defmodule ArbiterWeb.Api.QuotaController do
           codex_message: Quota.codex_absence_message(codex),
           codex_credentials_expired:
             Arbiter.Agents.CredentialWatchdog.expired?(Arbiter.Agents.Codex),
-          gemini:
-            if(provider == "gemini_cli",
-              do: Quota.CloudCode.serialize_latest(account.id, "gemini_cli")
-            ),
           antigravity:
             if(provider == "antigravity",
               do: Quota.CloudCode.serialize_latest(account.id, "antigravity")

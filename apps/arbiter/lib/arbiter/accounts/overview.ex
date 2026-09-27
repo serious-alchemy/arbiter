@@ -45,9 +45,9 @@ defmodule Arbiter.Accounts.Overview do
   # `@ledger_providers`: Antigravity has no ledger key it can be priced by).
   @unpriced_providers [:antigravity]
 
-  # Gemini CLI and Antigravity share the one Gemini adapter — the key both
-  # `CredentialWatchdog` and `AuthHold` hold their state under.
-  @adapters %{claude: Claude, codex: Codex, gemini_cli: Gemini, antigravity: Gemini}
+  # Antigravity runs under the Gemini adapter — the key both
+  # `CredentialWatchdog` and `AuthHold` hold its state under.
+  @adapters %{claude: Claude, codex: Codex, antigravity: Gemini}
 
   @type health_state :: :ok | :no_credential | :expired | :auth_hold
 

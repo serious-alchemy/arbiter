@@ -38,9 +38,8 @@ defmodule Arbiter.Agents.ModelFamilyTest do
       assert ModelFamily.classify(:codex, "gpt-5-codex") == %{family: :openai, pool: "codex"}
     end
 
-    test "the upstream gemini CLI is google on its own pool" do
-      assert ModelFamily.classify(:gemini_cli, "gemini-2.5-pro") ==
-               %{family: :google, pool: "gemini_cli"}
+    test "the removed upstream gemini CLI provider has no family (bd-ac53wz)" do
+      assert ModelFamily.classify(:gemini_cli, "gemini-2.5-pro") == %{family: nil, pool: nil}
     end
 
     test "a run's recorded adapter type classifies by its model" do
@@ -70,7 +69,8 @@ defmodule Arbiter.Agents.ModelFamilyTest do
       assert ModelFamily.model_for_tier(:antigravity, "flagship", %{}) ==
                "claude-opus-4-6-thinking"
 
-      assert ModelFamily.model_for_tier(:gemini_cli, "premium", %{}) == "gemini-2.5-pro"
+      # bd-ac53wz: the upstream Gemini CLI provider is gone.
+      assert ModelFamily.model_for_tier(:gemini_cli, "premium", %{}) == nil
     end
 
     test "a provider-scoped tier_models override wins over the flat one and the default" do

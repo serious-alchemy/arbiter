@@ -73,7 +73,7 @@ defmodule Arbiter.MCP.Tools do
   This is a pure DB read (bd-ajh7bd): every provider's figures are read from the
   persisted quota tables, kept fresh by the background `Arbiter.Quota.CloudProbe`
   polling (`/api/oauth/usage` for Anthropic, and similar endpoints for Codex /
-  Gemini CLI / Antigravity). Nothing here fetches live, so there's no
+  Antigravity). Nothing here fetches live, so there's no
   request-time latency or rate-limit exposure.
 
   `claude` is the latest polled snapshot, including per-model weekly breakdowns
@@ -82,9 +82,11 @@ defmodule Arbiter.MCP.Tools do
   and the 7d figures are reported, but only one of them, or neither, is what the
   gate is acting on. `nil` until the first poll. `codex` is `nil` with a
   `codex_message` until the Codex probe has stored a snapshot (i.e. the `codex`
-  CLI is authenticated on this host). `gemini` / `antigravity` are the persisted
-  per-model Cloud Code Assist snapshots (`nil` until the Gemini CLI is
-  authenticated and probed).
+  CLI is authenticated on this host). `antigravity` is the persisted agy
+  `/usage` snapshot (`nil` until the probe has stored one);
+  `gemini_credentials_expired` is the `Arbiter.Agents.Gemini` adapter's
+  (agy's) held credential state. The upstream Gemini CLI's `gemini` snapshot
+  is gone with its provider (bd-ac53wz).
   """
   @spec quota_get(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def quota_get(%Scope{} = scope, args) do
@@ -105,7 +107,6 @@ defmodule Arbiter.MCP.Tools do
          # this reports live regardless of whether a quota row has landed yet.
          codex_credentials_expired:
            Arbiter.Agents.CredentialWatchdog.expired?(Arbiter.Agents.Codex),
-         gemini: Arbiter.Quota.CloudCode.serialize_latest(accounts["gemini_cli"], "gemini_cli"),
          antigravity:
            Arbiter.Quota.CloudCode.serialize_latest(accounts["antigravity"], "antigravity"),
          gemini_credentials_expired:

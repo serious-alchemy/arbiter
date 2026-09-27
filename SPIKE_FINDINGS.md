@@ -1,5 +1,10 @@
 # Spike: Gemini CLI / Antigravity OAuth Credential File Discovery
 
+> **Historical.** The upstream Gemini CLI provider (`gemini_cli`) and its
+> stored-token quota probe were dropped in bd-ac53wz; Antigravity's quota now
+> comes from `agy --print "/usage"` with no stored token (bd-d7hmqn). See
+> `docs/provider-account-design.md`, "Removed: `gemini_cli`".
+
 ## Summary
 
 Confirmed OAuth credential storage locations and structures for `gemini-cli` and `antigravity` CLIs. Neither provider caches the Google Cloud project ID locally — both require runtime API calls to `loadCodeAssist` to resolve it.

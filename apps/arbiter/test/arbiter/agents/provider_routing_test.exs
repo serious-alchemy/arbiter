@@ -369,7 +369,9 @@ defmodule Arbiter.Agents.ProviderRoutingTest do
       agy = account!(:antigravity, "agy-not-installed")
       allow!(ws, agy, 1)
 
-      decision = ProviderRouting.evaluate(ws, task!(ws), opts([], gemini_code: "gemini_cli"))
+      # No agy on this host: since bd-ac53wz the `gemini` adapter's quota code
+      # is `nil` then (the upstream Gemini CLI provider is gone).
+      decision = ProviderRouting.evaluate(ws, task!(ws), opts([], gemini_code: nil))
       assert reasons(decision)[agy.slug] == "cli_unavailable"
     end
   end

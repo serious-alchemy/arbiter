@@ -1,7 +1,8 @@
 defmodule Arbiter.Quota.CloudProbe do
   @moduledoc """
-  Periodic refresh probe for all quota providers — Anthropic, Codex, Gemini
-  CLI, and Antigravity (bd-ajh7bd).
+  Periodic refresh probe for all quota providers — Anthropic, Codex and
+  Antigravity (bd-ajh7bd). The upstream Gemini CLI probe is gone with its
+  provider (bd-ac53wz).
 
   ## Motivation
 
@@ -15,9 +16,9 @@ defmodule Arbiter.Quota.CloudProbe do
   out to the external providers, so `GET /api/quota` and `arb quota` are pure DB
   reads (no request-time latency or rate-limit risk).
 
-  For Codex / Gemini CLI / Antigravity: their figures only ever came from a live
-  fetch on each `GET /api/quota` call, and (before this change) Gemini/Antigravity
-  were never persisted at all. The web dashboard, which reads only the persisted
+  For Codex / Antigravity: their figures only ever came from a live
+  fetch on each `GET /api/quota` call, and (before this change) Antigravity
+  was never persisted at all. The web dashboard, which reads only the persisted
   quota tables, could never show them, and there was no history to audit. This
   GenServer closes that gap.
 
@@ -25,9 +26,8 @@ defmodule Arbiter.Quota.CloudProbe do
 
     * `Arbiter.Quota.Codex.fetch/2` — one GET to OpenAI's usage endpoint using
       the `codex` CLI's stored token; upserts `CodexQuota` + broadcasts.
-    * `Arbiter.Quota.CloudCode.refresh/3` for `:gemini` and `:antigravity` — a
-      direct Cloud Code Assist call using the Gemini CLI's stored token; upserts
-      `GoogleQuota` + broadcasts.
+    * `Arbiter.Quota.CloudCode.refresh/3` for `:antigravity` — the `agy` CLI's
+      own `/usage` report; upserts `GoogleQuota` + broadcasts.
     * `Arbiter.Quota.capture_oauth_usage_for_group/2` — Anthropic's
       `/api/oauth/usage` source (per-model weekly + `extra_usage` overage,
       bd-8tpha6, *and* the primary gate columns since bd-b0zody). This is the
@@ -97,7 +97,7 @@ defmodule Arbiter.Quota.CloudProbe do
 
   ## Credential-expiry signals (bd-1pmf9h, generalised bd-1fpjgx)
 
-  Claude, Codex and Gemini/Antigravity each get a **free** expiry signal off
+  Claude, Codex and Antigravity each get a **free** expiry signal off
   the same poll cycle that already fetches their quota — no extra billed
   calls, no worker has to die first:
 
@@ -118,18 +118,18 @@ defmodule Arbiter.Quota.CloudProbe do
       outcome (no local credentials, a non-401 error, a transport failure) is
       neutral for the same reason as Claude's case above; only a `200` reply
       resets the streak.
-    * **Gemini/Antigravity** — an `agy --print "/usage"` row whose `agy`
+    * **Antigravity** — an `agy --print "/usage"` row whose `agy`
       subprocess exited non-zero, the one outcome `Arbiter.Quota.CloudCode`
       itself distinguishes as "not authenticated" (its `auth_expired` flag;
       see that module's moduledoc). `:antigravity_auth_expiry_threshold`
       consecutive occurrences (default: same as Claude's) call
-      `mark_expired/3` for `Arbiter.Agents.Gemini` — the adapter both Gemini
-      CLI and Antigravity run under (`Arbiter.Agents.adapters/0`). `agy`
+      `mark_expired/3` for `Arbiter.Agents.Gemini` — the adapter Antigravity
+      runs under (`Arbiter.Agents.adapters/0`). `agy`
       simply not being installed, a subprocess timeout, or unparseable JSON
       say nothing about the credential, so none of them touch the streak;
       only a row with model data (`message: nil`) resets it.
 
-  Each streak is host-global (Codex/Gemini/Antigravity credentials aren't
+  Each streak is host-global (Codex/Antigravity credentials aren't
   per-workspace), so only the *first* result observed in a probe cycle is
   counted — every workspace's independent fetch would otherwise inflate one
   bad cycle into several.
@@ -589,14 +589,14 @@ defmodule Arbiter.Quota.CloudProbe do
     )
   end
 
-  # ---- Gemini/Antigravity credential-expiry signal (bd-1fpjgx) -----------
+  # ---- Antigravity credential-expiry signal (bd-1fpjgx) -------------------
   #
   # Mirrors `note_codex_result/2` above, keyed off `CloudCode.antigravity/1`'s
   # `auth_expired` flag (only set on the "agy exited non-zero" outcome —
   # `agy` not installed, a subprocess timeout, or unparseable JSON say
-  # nothing about the credential and are left neutral). Gemini CLI and
-  # Antigravity share `Arbiter.Agents.Gemini`, so both this and the CLI probe
-  # target the same adapter.
+  # nothing about the credential and are left neutral). Antigravity runs
+  # under `Arbiter.Agents.Gemini`, so both this and the CLI probe target that
+  # adapter.
   defp note_antigravity_result(%State{antigravity_result_seen_this_cycle: true} = state, _snap),
     do: state
 
@@ -702,8 +702,6 @@ defmodule Arbiter.Quota.CloudProbe do
   defp default_refresh(workspace_id, parent) do
     codex_result = Arbiter.Quota.Codex.fetch(workspace_id)
     send(parent, {:codex_refresh_result, codex_result})
-
-    Arbiter.Quota.CloudCode.refresh(workspace_id, :gemini)
 
     antigravity_result = Arbiter.Quota.CloudCode.refresh(workspace_id, :antigravity)
     send(parent, {:antigravity_refresh_result, antigravity_result})

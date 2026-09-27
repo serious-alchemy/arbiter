@@ -1,73 +1,33 @@
 defmodule Arbiter.Quota.CloudCode do
   @moduledoc """
-  On-demand quota snapshots for the Google Cloud Code Assist family:
-  **Gemini CLI** and **Antigravity** (bd-57ukgb, part of bd-5qe3qs).
+  On-demand quota snapshots for **Antigravity** (agy), the Google Cloud Code
+  Assist family's one supported surface (bd-57ukgb, part of bd-5qe3qs).
+
+  The upstream Gemini CLI provider (`gemini_cli`) and its quota probe — a
+  stored-token `loadCodeAssist` / `retrieveUserQuota` call, the source of the
+  recurring "Gemini CLI project id not available; reconnect the CLI …" line
+  in `arb quota` — were dropped in bd-ac53wz in favour of agy.
 
   Unlike the Anthropic quota — which is updated via explicit polling of
   `Arbiter.Quota.OAuthUsage` and header capture from worker responses
-  (`Arbiter.Quota.AnthropicQuota`) — neither Gemini CLI nor Antigravity emits
-  usage on ordinary traffic. We query it directly, modeled on 9router's
-  `open-sse/services/usage/google.js`, using the same Cloud Code Assist
-  endpoints the real `gemini /stats` command hits.
+  (`Arbiter.Quota.AnthropicQuota`) — Antigravity emits no usage on ordinary
+  traffic, so we query it directly.
 
-  ## Credentials (read-only)
+  ## Credentials: none held (bd-d7hmqn)
 
-  The Gemini CLI stores its OAuth token at `~/.gemini/oauth_creds.json`
-  (`access_token`).
-
-  ### Antigravity: no stored token at all (bd-d7hmqn)
-
-  Antigravity used to follow the same read-a-stored-token-and-call-the-API
-  shape as Gemini CLI above (bd-4ku4ze): read the IDE's `state.vscdb`
-  sqlite DB, fall back to the Gemini CLI creds file, and if neither yielded a
-  token, shell out to `agy models` as a pure liveness check so a stale local
-  copy could at least be distinguished from a logged-out account. In practice
-  that stack of fallbacks degraded to a message telling the *operator* to go
-  refresh the token by hand — not useful when nothing was actually wrong with
-  the account, just with Arbiter's own copy of its token.
+  Antigravity used to read a stored token (the IDE's `state.vscdb` sqlite DB,
+  falling back to the Gemini CLI creds file) and call the Cloud Code API with
+  it, with `agy models` as a pure liveness check. In practice that stack of
+  fallbacks degraded to a message telling the *operator* to go refresh the
+  token by hand — not useful when nothing was actually wrong with the
+  account, just with Arbiter's own copy of its token.
 
   `agy` (Antigravity's own CLI, `~/.local/bin/agy`) can report the real
   quota directly — `agy --output-format json --print "/usage"` — using
   whatever credential it holds in its own keyring/ADC/WIF chain, without us
-  ever reading or holding a token ourselves. So Antigravity now shells out to
-  that command instead of making an HTTP call with a stored token: see
-  `antigravity/1` below. This removes the token-reading paths above entirely
-  (no `state.vscdb`, no Gemini CLI fallback, no liveness-only probe) — there
-  is nothing left in Arbiter's control to go stale.
-
-  ### Gemini CLI keyring review (bd-4ku4ze)
-
-  Reviewed whether the Gemini CLI (`@google/gemini-cli`, an npm/Node package)
-  has an equivalent keyring/ADC source hiding behind its `oauth_creds.json` —
-  it **does**: the installed bundle declares `@github/keytar` as a direct
-  dependency (`package.json`) and ships a keychain-backed
-  `code_assist/oauth-credential-storage.ts` `OAuthCredentialStorage`
-  (service `gemini-cli-oauth`, via `HybridTokenStorage`), plus a
-  `GOOGLE_APPLICATION_CREDENTIALS` ADC load path — both bypass
-  `oauth_creds.json` entirely. Which path is authoritative is gated by the
-  `GEMINI_FORCE_ENCRYPTED_FILE_STORAGE` env var: unset (the default), the CLI
-  reads/writes `oauth_creds.json` as Arbiter assumes; set to `"true"`, the
-  CLI never touches that file and Arbiter's read here goes stale exactly like
-  the original Antigravity bug this task fixes. We do not probe the keyring
-  or ADC for Gemini CLI (no equivalent of `agy`'s own liveness-probe CLI
-  exists to shell out to), so a host running with that flag set will degrade
-  with `project id not available` even though Gemini CLI itself is live —
-  a known blind spot, not a silent-wrong-answer one. Its degraded
-  `project id not available` message (`project_missing_message/1`) is a
-  separate failure mode — a valid token but no cached Cloud Code project —
-  already distinct from an auth failure, so no probe is needed on that path.
-
-  ## Flow — Gemini CLI
-
-  1. Read `access_token` from the creds file. Missing/blank → `nil` (no-op).
-  2. Resolve the Cloud Code project id. The CLI doesn't cache it locally, so we
-     POST `loadCodeAssist` (which also returns `currentTier.name`, the plan).
-     A caller may inject a known id via `opts[:project_id]` to skip this hop.
-  3. POST `retrieveUserQuota` with `{project: id}` and normalize each model's
-     `remainingFraction` into a `{used, total: 1000, ...}` shape.
-
-  `gemini/1` returns either `nil` (not configured) or a serialized snapshot
-  map — never raises.
+  ever reading or holding a token ourselves. So Antigravity shells out to
+  that command instead: see `antigravity/1` below. There is nothing left in
+  Arbiter's control to go stale.
 
   ## Flow — Antigravity (bd-d7hmqn)
 
@@ -76,9 +36,9 @@ defmodule Arbiter.Quota.CloudCode do
   `.command.data.groups[].buckets[]` — each bucket a `{window, remaining_fraction,
   reset_time}` triple, grouped by model family (`"Gemini Models"`, `"Claude and
   GPT models"` at last check; the CLI's JSON may add more). Each `{group,
-  window}` pair is normalized into a `model_quota()` entry via the same
-  `normalize_model/4` Gemini CLI uses, so the existing `arb quota` / REST / MCP
-  rendering (which walks `snapshot.models`) needs no special-casing for the
+  window}` pair is normalized into a `model_quota()` entry via
+  `normalize_model/4`, so the existing `arb quota` / REST / MCP rendering
+  (which walks `snapshot.models`) needs no special-casing for the
   multi-group, multi-window shape — it just sees more "model" rows, one per
   group/window combination. `remaining_fraction` is already a *remaining*
   fraction (unlike the Anthropic/Codex snapshots, which store *utilization*),
@@ -97,10 +57,6 @@ defmodule Arbiter.Quota.CloudCode do
   `window` / `reset_time` fields are kept, and JSON decode failures log
   nothing about the raw body.
 
-  Both `gemini/1` and `antigravity/1` return a map the `arb quota` /
-  `quota_get` / `GET /api/quota` surface can render without special-casing
-  errors.
-
   ## Persistence (bd-ajh7bd)
 
   `refresh/3` wraps a live fetch with an upsert into `Arbiter.Quota.GoogleQuota`
@@ -117,12 +73,6 @@ defmodule Arbiter.Quota.CloudCode do
   alias Arbiter.Quota.GoogleQuota
   alias Arbiter.Worker.ReleaseEnv
 
-  # ---- endpoints (verified against 9router registry/gemini-cli.js)
-  @gemini_quota_url "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota"
-  @gemini_load_url "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
-
-  @default_creds_path "~/.gemini/oauth_creds.json"
-
   # Normalized base — the provider only hands us a fraction, not raw units, so
   # we mirror 9router's arbitrary 1000-unit base for used/total. Percentage is
   # carried alongside for callers that prefer a plain 0–100 figure.
@@ -133,11 +83,6 @@ defmodule Arbiter.Quota.CloudCode do
   # "claude_and_gpt_models", each combined with a `_5h` / `_weekly` window
   # suffix into the model id persisted in `GoogleQuota.snapshot["models"]`.
   @antigravity_gemini_group "gemini_models"
-
-  # loadCodeAssist metadata (9router CLIENT_METADATA): ideType ANTIGRAVITY=9,
-  # pluginType GEMINI=2. Platform is a coarse enum; LINUX_AMD64=3 is a safe
-  # default for the server host and is not load-bearing for quota reads.
-  @client_metadata %{"ideType" => 9, "pluginType" => 2, "platform" => 3}
 
   # `agy --output-format json --print "/usage"` — reports real per-window
   # remaining quota directly from whatever credential `agy` itself holds
@@ -175,79 +120,6 @@ defmodule Arbiter.Quota.CloudCode do
           captured_at: String.t(),
           auth_expired: boolean()
         }
-
-  # ---- Gemini CLI --------------------------------------------------------
-
-  @doc """
-  Gemini CLI per-model quota snapshot, or `nil` when not configured.
-
-  Options:
-    * `:creds_path`   — override the oauth creds file (tests / non-default homes)
-    * `:project_id`   — a known Cloud Code project id, skips `loadCodeAssist`
-    * `:plug`         — a `Req.Test` plug for stubbing HTTP in tests
-    * `:receive_timeout` — per-request timeout (default 8s)
-  """
-  @spec gemini(keyword()) :: snapshot() | nil
-  def gemini(opts \\ []) do
-    case load_access_token(opts) do
-      {:ok, token} -> fetch_gemini(token, opts)
-      :error -> nil
-    end
-  end
-
-  defp fetch_gemini(token, opts) do
-    {project_id, plan} = resolve_gemini_project(token, opts)
-
-    if is_nil(project_id) do
-      snapshot("gemini-cli", plan, [], project_missing_message("Gemini CLI"))
-    else
-      case post(@gemini_quota_url, bearer_headers(token), %{project: project_id}, opts) do
-        {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
-          snapshot("gemini-cli", plan, gemini_models(body), nil)
-
-        {:ok, %Req.Response{status: 401}} ->
-          snapshot(
-            "gemini-cli",
-            plan,
-            [],
-            "Gemini CLI quota auth expired; reconnect the CLI.",
-            true
-          )
-
-        {:ok, %Req.Response{status: status}} ->
-          snapshot("gemini-cli", plan, [], "Gemini CLI quota error (#{status}).")
-
-        {:error, err} ->
-          snapshot("gemini-cli", plan, [], "Gemini CLI quota error: #{transport_message(err)}")
-      end
-    end
-  end
-
-  defp resolve_gemini_project(token, opts) do
-    case normalize_project_id(opts[:project_id]) do
-      pid when is_binary(pid) ->
-        {pid, "Free"}
-
-      nil ->
-        case post(@gemini_load_url, bearer_headers(token), %{metadata: @client_metadata}, opts) do
-          {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
-            {normalize_project_id(body["cloudaicompanionProject"]), plan_name(body)}
-
-          _ ->
-            {nil, "Free"}
-        end
-    end
-  end
-
-  defp gemini_models(%{"buckets" => buckets}) when is_list(buckets) do
-    for bucket <- buckets,
-        is_binary(bucket["modelId"]),
-        not is_nil(bucket["remainingFraction"]) do
-      normalize_model(bucket["modelId"], bucket["remainingFraction"], bucket["resetTime"], nil)
-    end
-  end
-
-  defp gemini_models(_), do: []
 
   # ---- Antigravity (bd-d7hmqn) -------------------------------------------
 
@@ -345,58 +217,44 @@ defmodule Arbiter.Quota.CloudCode do
 
   # ---- persistence (bd-ajh7bd) -------------------------------------------
 
-  # Persisted provider codes (match `ArbiterWeb.QuotaHelpers` labels), keyed by
-  # the fetch atom passed to `refresh/3`.
-  @provider_codes %{gemini: "gemini_cli", antigravity: "antigravity"}
-
   @doc """
-  Fetch one Google provider's live quota and upsert it into `GoogleQuota`.
+  Fetch Antigravity's live quota and upsert it into `GoogleQuota`.
 
-  `which` is `:gemini` or `:antigravity`. Returns the serialized snapshot map on
-  a successful fetch (persisting a row + broadcasting `{:quota_updated, ws, view}`).
+  `which` is `:antigravity` — the only Google provider left since bd-ac53wz
+  dropped the upstream Gemini CLI (`:gemini`, which this no longer accepts).
+  Returns the serialized snapshot map (persisting a row + broadcasting
+  `{:quota_updated, ws, view}`), or `nil` if the refresh itself raised.
 
-  For `:gemini`, `nil` means the CLI isn't configured on this host (no creds) —
-  in which case **no row is written**, so a transient logout doesn't wipe the
-  last good reading.
-
-  For `:antigravity` (bd-d7hmqn), the fetch never returns `nil` — `agy` itself
-  determines whether it's installed/authenticated, so every call writes a row.
-  When that snapshot has no model data (agy missing / not authenticated /
-  timed out / malformed output), the write preserves the previous row's
-  `used_percent` / `reset_at` / `snapshot` figures rather than nulling them
-  out, so a transient error updates the status `message` without wiping the
-  last good quota reading. `opts` are forwarded to `gemini/1` / `antigravity/1`.
+  The fetch never returns `nil` (bd-d7hmqn) — `agy` itself determines whether
+  it's installed/authenticated, so every call writes a row. When that
+  snapshot has no model data (agy missing / not authenticated / timed out /
+  malformed output), the write preserves the previous row's `used_percent` /
+  `reset_at` / `snapshot` figures rather than nulling them out, so a
+  transient error updates the status `message` without wiping the last good
+  quota reading. `opts` are forwarded to `antigravity/1`.
   """
-  @spec refresh(String.t(), :gemini | :antigravity, keyword()) :: snapshot() | nil
+  @spec refresh(String.t(), :antigravity, keyword()) :: snapshot() | nil
   def refresh(workspace_id, which, opts \\ [])
-      when is_binary(workspace_id) and which in [:gemini, :antigravity] do
-    case fetch_snapshot(which, opts) do
-      nil ->
-        nil
+      when is_binary(workspace_id) and which == :antigravity do
+    snapshot = antigravity(opts)
+    provider = "antigravity"
 
-      snapshot ->
-        provider = Map.fetch!(@provider_codes, which)
-
-        # P5 (§6): the row is keyed by the provider account this workspace
-        # meters under, resolved here so the probe's call site is unchanged.
-        with {:ok, account_id} <- Arbiter.Quota.ensure_account_id(workspace_id, provider),
-             {:ok, row} <- upsert(account_id, provider, snapshot) do
-          broadcast(account_id, row)
-          snapshot
-        else
-          {:error, reason} ->
-            Logger.debug("Arbiter.Quota.CloudCode: #{provider} upsert failed: #{inspect(reason)}")
-            snapshot
-        end
+    # P5 (§6): the row is keyed by the provider account this workspace
+    # meters under, resolved here so the probe's call site is unchanged.
+    with {:ok, account_id} <- Arbiter.Quota.ensure_account_id(workspace_id, provider),
+         {:ok, row} <- upsert(account_id, provider, snapshot) do
+      broadcast(account_id, row)
+      snapshot
+    else
+      {:error, reason} ->
+        Logger.debug("Arbiter.Quota.CloudCode: #{provider} upsert failed: #{inspect(reason)}")
+        snapshot
     end
   rescue
     e ->
       Logger.debug("Arbiter.Quota.CloudCode.refresh raised: #{Exception.message(e)}")
       nil
   end
-
-  defp fetch_snapshot(:gemini, opts), do: gemini(opts)
-  defp fetch_snapshot(:antigravity, opts), do: antigravity(opts)
 
   defp upsert(account_id, provider, snapshot) do
     now = DateTime.utc_now() |> DateTime.truncate(:second)
@@ -522,9 +380,7 @@ defmodule Arbiter.Quota.CloudCode do
 
   @doc """
   Map a stored `GoogleQuota` row to the uniform two-window quota view shape the
-  topbar / `/usage` page render. Gemini has no time windows, so the
-  representative used-fraction fills the primary ("5h") slot and the secondary
-  ("7d") slot is left empty. Antigravity does have explicit `5h`/`weekly`
+  topbar / `/usage` page render. Antigravity has explicit `5h`/`weekly`
   windows, per group — this reads the `"gemini_models"` group's buckets
   (bd-7mro0t) via `antigravity_bucket/3` (the same reader
   `Gate.Snapshot.bucket_reading/3` uses for dispatch gating) into the
@@ -695,42 +551,6 @@ defmodule Arbiter.Quota.CloudCode do
 
   defp parse_reset(_), do: nil
 
-  defp plan_name(body, default \\ "Free")
-  defp plan_name(%{"currentTier" => %{"name" => name}}, _default) when is_binary(name), do: name
-  defp plan_name(_body, default), do: default
-
-  defp normalize_project_id(project) when is_binary(project) do
-    case String.trim(project) do
-      "" -> nil
-      trimmed -> trimmed
-    end
-  end
-
-  defp normalize_project_id(%{"id" => id}) when is_binary(id), do: normalize_project_id(id)
-  defp normalize_project_id(_), do: nil
-
-  defp project_missing_message(label) do
-    "#{label} project id not available; reconnect the CLI or configure a Cloud " <>
-      "project with Code Assist access before checking quota."
-  end
-
-  # ---- credentials (read-only) -------------------------------------------
-
-  defp load_access_token(opts) do
-    path =
-      opts[:creds_path] ||
-        Application.get_env(:arbiter, :gemini_creds_path) ||
-        @default_creds_path
-
-    with {:ok, raw} <- File.read(Path.expand(path)),
-         {:ok, %{"access_token" => token}} <- Jason.decode(raw),
-         true <- is_binary(token) and token != "" do
-      {:ok, token}
-    else
-      _ -> :error
-    end
-  end
-
   # Run `agy --output-format json --print "/usage"` off-process — see
   # moduledoc's "Flow — Antigravity". `{:ok, decoded_json}` on a clean `0`
   # exit with parseable JSON, else `{:error, :not_installed | :timeout |
@@ -882,44 +702,4 @@ defmodule Arbiter.Quota.CloudCode do
       _ -> {:error, :malformed}
     end
   end
-
-  # ---- HTTP --------------------------------------------------------------
-
-  defp bearer_headers(token) do
-    [
-      {"authorization", "Bearer " <> token},
-      {"content-type", "application/json"}
-    ]
-  end
-
-  defp post(url, headers, body, opts) do
-    full =
-      [
-        method: :post,
-        url: url,
-        headers: headers,
-        json: body,
-        receive_timeout: Keyword.get(opts, :receive_timeout, 8_000),
-        retry: false
-      ]
-      |> Keyword.merge(stub_opts(opts))
-
-    Req.request(full)
-  end
-
-  defp stub_opts(opts) do
-    cond do
-      Keyword.has_key?(opts, :plug) ->
-        [plug: Keyword.fetch!(opts, :plug)]
-
-      Application.get_env(:arbiter, :cloud_code_http_stub, false) ->
-        [plug: {Req.Test, __MODULE__}]
-
-      true ->
-        []
-    end
-  end
-
-  defp transport_message(%{reason: reason}), do: inspect(reason)
-  defp transport_message(other), do: inspect(other)
 end

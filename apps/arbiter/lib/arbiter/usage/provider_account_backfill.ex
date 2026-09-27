@@ -32,10 +32,10 @@ defmodule Arbiter.Usage.ProviderAccountBackfill do
   `usage_events.provider` stores the agent-type alias a spawn ran under
   (`"anthropic"`, `"openai"`, `"gemini"` — `Arbiter.Quota.provider_code/1`),
   not always the canonical `provider_accounts.provider` code
-  (`"claude"`, `"codex"`, `"gemini_cli"` / `"antigravity"`). The join below
-  matches both the literal code and the known aliases so historical alias
-  rows are not left unresolved; a `"gemini"` row matches either concrete
-  Gemini surface, since the alias does not distinguish which CLI ran it.
+  (`"claude"`, `"codex"`, `"antigravity"`). The join below matches both the
+  literal code and the known aliases so historical alias rows are not left
+  unresolved; a `"gemini"` row matches the `antigravity` link (the upstream
+  `gemini_cli` code was dropped in bd-ac53wz).
   """
 
   alias Arbiter.Repo
@@ -63,7 +63,7 @@ defmodule Arbiter.Usage.ProviderAccountBackfill do
               wpa.provider = usage_events.provider
               OR (usage_events.provider = 'anthropic' AND wpa.provider = 'claude')
               OR (usage_events.provider = 'openai' AND wpa.provider = 'codex')
-              OR (usage_events.provider = 'gemini' AND wpa.provider IN ('gemini_cli', 'antigravity'))
+              OR (usage_events.provider = 'gemini' AND wpa.provider = 'antigravity')
             )
         )
         WHERE provider_account_id IS NULL
@@ -76,7 +76,7 @@ defmodule Arbiter.Usage.ProviderAccountBackfill do
                 wpa.provider = usage_events.provider
                 OR (usage_events.provider = 'anthropic' AND wpa.provider = 'claude')
                 OR (usage_events.provider = 'openai' AND wpa.provider = 'codex')
-                OR (usage_events.provider = 'gemini' AND wpa.provider IN ('gemini_cli', 'antigravity'))
+                OR (usage_events.provider = 'gemini' AND wpa.provider = 'antigravity')
               )
           )
         """,

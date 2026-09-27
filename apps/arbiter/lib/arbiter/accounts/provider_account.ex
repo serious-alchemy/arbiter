@@ -12,10 +12,10 @@ defmodule Arbiter.Accounts.ProviderAccount do
 
   ## Deviations from the design doc
 
-  * `provider` uses the `gemini_cli` spelling (not `gemini`, as literally
-    written in §3.1) to match `Arbiter.Quota.provider_code/1` and the
-    already-merged `Arbiter.Accounts.Census` (P0), which both settled on
-    `gemini_cli` as the canonical code.
+  * `provider` has no `gemini` value (§3.1 lists one). The upstream Gemini
+    CLI provider was first spelled `gemini_cli` here, to match
+    `Arbiter.Quota.provider_code/1`, then dropped entirely (bd-ac53wz) in
+    favour of Antigravity (`antigravity`).
   * `enabled?` / `active?`-style trailing-`?` attribute names are not used
     elsewhere in this codebase's Ash resources (e.g. `Skill.code_only`,
     `CodexQuota.limit_reached`), so `enabled` (§3.1's `enabled?`) is named
@@ -92,7 +92,7 @@ defmodule Arbiter.Accounts.ProviderAccount do
     attribute :provider, :atom do
       allow_nil? false
       public? true
-      constraints one_of: [:claude, :codex, :gemini_cli, :antigravity]
+      constraints one_of: [:claude, :codex, :antigravity]
 
       description "Arbiter.Quota.provider_code/1 code this account is metered under."
     end

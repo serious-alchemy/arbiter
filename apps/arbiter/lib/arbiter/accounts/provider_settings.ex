@@ -77,12 +77,10 @@ defmodule Arbiter.Accounts.ProviderSettings do
   @config_key %{implementer: "agent", reviewer: "review_agent"}
 
   # Account provider → the adapter (`Arbiter.Agents.valid_agent_types/0`) that
-  # runs it. Both Google CLIs run under the `gemini` adapter, which picks agy
-  # or gemini by what is installed.
+  # runs it. Antigravity (agy) runs under the `gemini` adapter.
   @agent_types %{
     claude: "claude",
     codex: "codex",
-    gemini_cli: "gemini",
     antigravity: "gemini"
   }
 

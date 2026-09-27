@@ -170,10 +170,9 @@ defmodule Arbiter.Quota.Gate.Snapshot do
 
   # The pre-bd-7qj58o representative-used-percent projection: a single
   # collapsed "worst of everything" figure with no secondary window. Still
-  # used for `"gemini_cli"` rows (Gemini CLI reports one representative
-  # model, no explicit windows) and as the fallback for an `"antigravity"`
-  # row whose stored snapshot carries no parseable per-bucket models (stale
-  # schema, transient fetch error preserved via `preserve_last_good/3`, etc).
+  # the fallback for an `"antigravity"` row whose stored snapshot carries no
+  # parseable per-bucket models (stale schema, transient fetch error
+  # preserved via `preserve_last_good/3`, etc).
   defp normalize_google(%GoogleQuota{} = q) do
     %__MODULE__{
       provider: q.provider,

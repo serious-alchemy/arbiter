@@ -76,7 +76,6 @@ defmodule Arbiter.Accounts.Migrate do
   @providers %{
     "claude" => :claude,
     "codex" => :codex,
-    "gemini_cli" => :gemini_cli,
     "antigravity" => :antigravity
   }
 

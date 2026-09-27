@@ -1083,7 +1083,7 @@ defmodule Arbiter.Worker.Dispatch do
   #
   # The gate is provider-aware (bd-2mpo3f): it consults the quota snapshot of the
   # provider this dispatch will ACTUALLY run on — `AnthropicQuota` for Claude,
-  # `CodexQuota` for Codex, `GoogleQuota` for Gemini CLI / Antigravity — so an
+  # `CodexQuota` for Codex, `GoogleQuota` for Antigravity — so an
   # out-of-quota Codex or Gemini dispatch is held exactly like an out-of-quota
   # Anthropic one instead of being spawned into a rate-limited CLI.
   #

@@ -1,12 +1,12 @@
 defmodule ArbiterCli.Cmd.Account do
   @moduledoc """
   `arb account <verb>` — provider accounts (P11, `docs/provider-account-design.md`
-  §2.5). An account is the identity a Claude/Codex/Gemini/Antigravity
+  §2.5). An account is the identity a Claude/Codex/Antigravity
   credential, quota snapshot and concurrency ceiling all hang off (§2.4) — it
   survives credential rotation because none of them ever point at the
   credential itself.
 
-      arb account list                              [--provider claude|codex|gemini_cli|antigravity]
+      arb account list                              [--provider claude|codex|antigravity]
                                      [--include-merged]
                                      By default merged-away accounts (from a
                                      prior `arb account merge`) are hidden;

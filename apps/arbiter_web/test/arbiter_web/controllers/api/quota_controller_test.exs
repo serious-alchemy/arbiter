@@ -22,15 +22,15 @@ defmodule ArbiterWeb.Api.QuotaControllerTest do
     assert resp["data"]["claude"] == nil
   end
 
-  test "carries gemini/antigravity keys, null when the fetch is disabled in test",
+  test "carries the antigravity key, null when the fetch is disabled in test; no gemini key",
        %{conn: conn} do
     resp = conn |> get("/api/quota") |> json_response(200)
-    # The Cloud Code Assist fetch is off in the test env, so these are always
+    # The Cloud Code Assist fetch is off in the test env, so this is always
     # present (never a missing key) but null — no live network call is made.
-    assert Map.has_key?(resp["data"], "gemini")
+    # The upstream Gemini CLI provider is dropped (bd-ac53wz): no `gemini` key.
     assert Map.has_key?(resp["data"], "antigravity")
-    assert resp["data"]["gemini"] == nil
     assert resp["data"]["antigravity"] == nil
+    refute Map.has_key?(resp["data"], "gemini")
   end
 
   test "includes a graceful codex no-op when Codex is not authenticated", %{conn: conn} do
@@ -167,20 +167,23 @@ defmodule ArbiterWeb.Api.QuotaControllerTest do
     assert [%{"provider" => "claude", "utilization_5h" => 0.24}] = resp["data"]["quotas"]
   end
 
-  test "surfaces a persisted Gemini CLI snapshot from the DB (bd-ajh7bd)", %{conn: conn, ws: ws} do
+  test "surfaces a persisted Antigravity snapshot and no Gemini CLI key (bd-ajh7bd, bd-ac53wz)",
+       %{conn: conn, ws: ws} do
     # The controller is now a pure DB read — no live Google fetch. A row
-    # persisted by the CloudProbe (or here directly) is what surfaces.
+    # persisted by the CloudProbe (or here directly) is what surfaces. The
+    # upstream Gemini CLI provider is dropped, so its `gemini` key is gone.
     Ash.create!(Arbiter.Quota.GoogleQuota, %{
-      provider_account_id: account_id!(ws.id, "gemini_cli"),
-      provider: "gemini_cli",
-      plan: "Free",
+      provider_account_id: account_id!(ws.id, "antigravity"),
+      provider: "antigravity",
+      plan: "Pro",
       used_percent: 75.0,
-      snapshot: %{"provider" => "gemini-cli", "plan" => "Free", "models" => []},
+      snapshot: %{"provider" => "antigravity", "plan" => "Pro", "models" => []},
       captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
     })
 
     resp = conn |> get("/api/quota") |> json_response(200)
-    assert resp["data"]["gemini"]["plan"] == "Free"
+    assert resp["data"]["antigravity"]["plan"] == "Pro"
+    refute Map.has_key?(resp["data"], "gemini")
   end
 
   test "surfaces the antigravity 5h + weekly split from a 4-bucket snapshot (bd-7mro0t)", %{
@@ -375,6 +378,8 @@ defmodule ArbiterWeb.Api.QuotaControllerTest do
       assert resp["data"]["account"]["slug"] == "work"
       assert resp["data"]["account"]["provider"] == "codex"
       assert resp["data"]["claude"] == nil
+      # bd-ac53wz: the account path carries no Gemini CLI key either.
+      refute Map.has_key?(resp["data"], "gemini")
     end
 
     test "an unknown account ref is a 404, not a crash", %{conn: conn} do

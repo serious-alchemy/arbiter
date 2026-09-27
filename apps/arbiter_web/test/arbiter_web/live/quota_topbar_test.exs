@@ -75,13 +75,11 @@ defmodule ArbiterWeb.QuotaTopbarTest do
     refute html =~ "Codex"
   end
 
-  test "topbar filters gemini_cli but shows antigravity", %{conn: conn, ws: ws} do
+  test "topbar shows antigravity and no Gemini CLI (bd-ac53wz: provider dropped)", %{
+    conn: conn,
+    ws: ws
+  } do
     {:ok, _} = Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.24"}])
-
-    {:ok, _} =
-      Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.5"}],
-        provider: "gemini_cli"
-      )
 
     {:ok, _} =
       Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.5"}],
@@ -99,13 +97,11 @@ defmodule ArbiterWeb.QuotaTopbarTest do
     assert has_element?(view, "#quota-topbar-antigravity", "Antigravity")
   end
 
-  test "usage page filters gemini_cli but shows antigravity", %{conn: conn, ws: ws} do
+  test "usage page shows antigravity and no Gemini CLI (bd-ac53wz: provider dropped)", %{
+    conn: conn,
+    ws: ws
+  } do
     {:ok, _} = Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.24"}])
-
-    {:ok, _} =
-      Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.5"}],
-        provider: "gemini_cli"
-      )
 
     antigravity_quota!(ws)
 

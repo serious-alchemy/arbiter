@@ -41,10 +41,14 @@ defmodule Arbiter.Accounts.CensusTest do
       assert %{provider: "claude", kind: :oauth_token} = allow["CLAUDE_CODE_OAUTH_TOKEN"]
       assert %{provider: "claude", kind: :api_key} = allow["ANTHROPIC_API_KEY"]
       assert %{provider: "codex", kind: :api_key} = allow["OPENAI_API_KEY"]
-      assert %{provider: "gemini_cli", kind: :api_key} = allow["GEMINI_API_KEY"]
+      # bd-ac53wz: the upstream Gemini CLI provider is dropped, so its API-key
+      # vars are no longer account credentials — they pass through as plain env.
+      refute Map.has_key?(allow, "GEMINI_API_KEY")
+      refute Map.has_key?(allow, "GOOGLE_GENAI_API_KEY")
+      refute Enum.any?(allow, fn {_key, %{provider: p}} -> p == "gemini_cli" end)
 
       # Every allowlisted provider is a *canonical* `Arbiter.Quota.provider_code/1`
-      # code, not one of its input aliases ("gemini" resolves to "gemini_cli"), so
+      # code, not one of its input aliases ("anthropic" resolves to "claude"), so
       # a plan row joins straight onto the quota tables.
       for {_key, %{provider: provider}} <- allow do
         assert Arbiter.Quota.provider_code(provider) == provider,

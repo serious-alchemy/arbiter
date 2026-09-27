@@ -291,9 +291,9 @@ defmodule Arbiter.Quota.GatePacedTest do
       assert %{window: "session", mode: :paced, threshold: 0.35} = gate(q, policy)
     end
 
-    test "Gemini CLI `used` falls back to the flat threshold" do
+    test "an Antigravity collapsed `used` figure falls back to the flat threshold" do
       q = %Snapshot{
-        provider: "gemini_cli",
+        provider: "antigravity",
         utilization: 0.5,
         reset_at: DateTime.add(@now, 3600, :second),
         captured_at: @now,

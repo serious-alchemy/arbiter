@@ -213,7 +213,7 @@ would discard the one fact a split needs.
 | Field | Type | Notes |
 |---|---|---|
 | `id` | uuid, pk | locally minted; the identity of record (§2.4) |
-| `provider` | string | `claude` / `codex` / `gemini` / `antigravity` — the codes `Arbiter.Quota.provider_code/1` already speaks (`apps/arbiter/lib/arbiter/quota.ex:181`) |
+| `provider` | string | `claude` / `codex` / `antigravity` — the codes `Arbiter.Quota.provider_code/1` already speaks. P1 shipped the Google CLI as `gemini_cli`; that upstream Gemini CLI provider was **dropped** in bd-ac53wz (see "Removed: `gemini_cli`" below) |
 | `slug` | string | operator handle, unique per provider — `arb quota --account personal-max` |
 | `label` | string | display name |
 | `plan` | string, nullable | `max_5x` / `max_20x` / `pro` / `team` — operator-stated, or from `claudeAiOauth.rateLimitTier` / the profile when known |
@@ -228,6 +228,41 @@ would discard the one fact a split needs.
 | `inserted_at` / `updated_at` | timestamps | |
 
 Identity: `identity :provider_slug, [:provider, :slug]`.
+
+#### Removed: `gemini_cli` (bd-ac53wz, 2026-09-27)
+
+The upstream Gemini CLI provider (`gemini_cli`, Google's `gemini` binary) was
+deprecated in favour of Antigravity (`antigravity`, the `agy` CLI) and removed
+entirely:
+
+* `:gemini_cli` is gone from `ProviderAccount.provider` /
+  `WorkspaceProviderAccount.provider`, every provider map
+  (`Accounts.parse_provider/1`, `Resolver`, `Migrate`, `ProviderSettings`,
+  `Overview`'s watchdog adapter map, `ModelFamily`, `ProviderRouting`), and
+  the Providers page.
+* Quota: its Cloud Code probe (`CloudCode.gemini/1`, a stored-token
+  `loadCodeAssist` / `retrieveUserQuota` call — the source of the recurring
+  "Gemini CLI project id not available; reconnect the CLI …" line), its
+  `CloudProbe` refresh, its `GoogleQuota` rows and the REST / MCP `gemini`
+  key are gone, and `arb quota` has no Gemini CLI section.
+  `Quota.provider_code("gemini")` is `"antigravity"` when agy is on `PATH`
+  and `nil` otherwise.
+* `GEMINI_API_KEY` / `GOOGLE_GENAI_API_KEY` left the Census credential
+  allowlist (§7.3): a workspace that still carries one passes it through as
+  plain env, as before provider accounts.
+* Migration `20260927170000_remove_gemini_cli_provider` deletes every
+  `gemini_cli` account with its workspace joins, credentials and
+  `cloud_code_quotas` rows. `down` is a no-op.
+* **History is kept verbatim.** `usage_events` is untouched: `provider` is a
+  free string, so a historical `"gemini_cli"` row still rolls up under its own
+  label in `arb usage --by provider`, and a `provider_account_id` naming a
+  removed account still groups under its raw id in `--by provider_account`
+  (the `/usage` page shows the raw id for any deleted account).
+
+agy stays. Its adapter is still `Arbiter.Agents.Gemini`, dispatched with
+`--provider gemini`, and is unchanged — including its own fallback to the
+upstream `gemini` binary when `agy` is not on `PATH`, which now runs with no
+provider account or quota code behind it.
 
 ### 3.2 `provider_credentials` — append-only versions
 
@@ -562,8 +597,10 @@ On this install `worker_env` holds only the token. That will not be true in
 general, so the rule is conservative:
 
 * **Only allowlisted provider-credential keys move**: `CLAUDE_CODE_OAUTH_TOKEN`,
-  `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, the Codex/Gemini/Antigravity
-  equivalents. The list is explicit and versioned in the migration.
+  `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, the Codex/Antigravity
+  equivalents. The list is explicit and versioned in the migration. (The
+  Gemini CLI's `GEMINI_API_KEY` / `GOOGLE_GENAI_API_KEY` were on it until
+  that provider was dropped, bd-ac53wz.)
 * **Everything else stays**, including keys that *look* credential-ish. A
   non-allowlisted key is reported by the census, never moved.
 * The removal is a **normal `Workspace` update through the existing

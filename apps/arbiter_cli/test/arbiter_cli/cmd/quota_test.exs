@@ -347,19 +347,19 @@ defmodule ArbiterCli.Cmd.QuotaTest do
       refute out =~ "CREDENTIALS EXPIRED"
     end
 
-    test "shows a CREDENTIALS EXPIRED line for gemini/antigravity when gemini_credentials_expired is true" do
+    test "shows a CREDENTIALS EXPIRED line for antigravity when gemini_credentials_expired is true" do
       stub_get("/api/quota", %{
         "data" => %{
           "workspace_id" => "ws-1",
           "claude" => nil,
-          "gemini" => %{"provider" => "gemini-cli", "plan" => "Free", "models" => []},
+          "antigravity" => %{"provider" => "antigravity", "plan" => "Pro", "models" => []},
           "gemini_credentials_expired" => true
         }
       })
 
       {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Quota.run([]) end)
       assert code == 0
-      assert out =~ "Gemini CLI quota"
+      assert out =~ "Antigravity quota"
       assert out =~ "CREDENTIALS EXPIRED"
     end
 
@@ -598,27 +598,11 @@ defmodule ArbiterCli.Cmd.QuotaTest do
       assert out =~ "no quota captured yet"
     end
 
-    test "renders per-model Gemini CLI and Antigravity utilization when present" do
+    test "renders per-model Antigravity utilization when present" do
       stub_get("/api/quota", %{
         "data" => %{
           "workspace_id" => "ws-1",
           "claude" => nil,
-          "gemini" => %{
-            "provider" => "gemini-cli",
-            "plan" => "Standard",
-            "message" => nil,
-            "captured_at" => "2026-07-06T20:20:06Z",
-            "models" => [
-              %{
-                "model_id" => "gemini-2.5-pro",
-                "used" => 500,
-                "total" => 1000,
-                "remaining_percentage" => 50.0,
-                "reset_at" => "2026-06-23T21:38:04Z",
-                "unlimited" => false
-              }
-            ]
-          },
           "antigravity" => %{
             "provider" => "antigravity",
             "plan" => "Pro",
@@ -641,16 +625,16 @@ defmodule ArbiterCli.Cmd.QuotaTest do
 
       {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Quota.run([]) end)
       assert code == 0
-      assert out =~ "Gemini CLI"
-      assert out =~ "plan: Standard"
-      assert out =~ "gemini-2.5-pro"
-      assert out =~ "50.0% remaining"
       assert out =~ "Antigravity"
+      assert out =~ "plan: Pro"
       assert out =~ "Gemini 3 Flash"
       assert out =~ "25.0% remaining"
     end
 
-    test "shows the degraded message for Gemini when the API returned one" do
+    # bd-ac53wz: the upstream Gemini CLI provider is dropped. Even a server
+    # that still sends its snapshot (an older build) gets no section — the
+    # recurring "project id not available" line is gone for good.
+    test "never renders a Gemini CLI section, even from a payload that still carries one" do
       stub_get("/api/quota", %{
         "data" => %{
           "workspace_id" => "ws-1",
@@ -658,7 +642,9 @@ defmodule ArbiterCli.Cmd.QuotaTest do
           "gemini" => %{
             "provider" => "gemini-cli",
             "plan" => "Free",
-            "message" => "Gemini CLI quota auth expired; reconnect the CLI.",
+            "message" =>
+              "Gemini CLI project id not available; reconnect the CLI or configure a Cloud " <>
+                "project with Code Assist access before checking quota.",
             "captured_at" => "2026-07-06T20:20:06Z",
             "models" => []
           },
@@ -668,8 +654,8 @@ defmodule ArbiterCli.Cmd.QuotaTest do
 
       {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Quota.run([]) end)
       assert code == 0
-      assert out =~ "Gemini CLI"
-      assert out =~ "auth expired"
+      refute out =~ "Gemini CLI"
+      refute out =~ "project id not available"
     end
   end
 

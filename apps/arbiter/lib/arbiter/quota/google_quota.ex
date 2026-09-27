@@ -1,12 +1,12 @@
 defmodule Arbiter.Quota.GoogleQuota do
   @moduledoc """
-  Per-**account** snapshot of a Google Cloud Code Assist provider's quota state —
-  **Gemini CLI** (`provider: "gemini_cli"`) or **Antigravity**
-  (`provider: "antigravity"`) — persisted for the web dashboard and history
-  (bd-ajh7bd).
+  Per-**account** snapshot of **Antigravity**'s (`provider: "antigravity"`)
+  quota state, persisted for the web dashboard and history (bd-ajh7bd). The
+  upstream Gemini CLI (`"gemini_cli"`) rows went with that provider
+  (bd-ac53wz).
 
   Before this table, `Arbiter.Quota.CloudCode` fetched Google's quota live on
-  every `/api/quota` call and threw the result away, so Gemini CLI / Antigravity
+  every `/api/quota` call and threw the result away, so Antigravity
   could never appear on the topbar or `/usage` page (which only ever read the
   persisted quota tables). `Arbiter.Quota.CloudProbe` now refreshes these on a
   timer and upserts one row per `{provider_account_id, provider}` here —
@@ -73,7 +73,7 @@ defmodule Arbiter.Quota.GoogleQuota do
       allow_nil? false
       public? true
       constraints max_length: 64, trim?: true
-      description ~s("gemini_cli" | "antigravity".)
+      description ~s("antigravity".)
     end
 
     attribute :plan, :string do

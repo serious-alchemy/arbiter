@@ -11,7 +11,6 @@ defmodule ArbiterWeb.QuotaHelpersTest do
     test "maps known provider codes to display names" do
       assert quota_provider_label("claude") == "Claude"
       assert quota_provider_label("codex") == "Codex"
-      assert quota_provider_label("gemini_cli") == "Gemini CLI"
       assert quota_provider_label("antigravity") == "Antigravity"
     end
 
@@ -43,7 +42,6 @@ defmodule ArbiterWeb.QuotaHelpersTest do
     test "providers without a fixed window get no marker, even with a reset_at present" do
       reset_at = DateTime.add(DateTime.utc_now(), 2 * 60 * 60 + 30 * 60, :second)
       assert quota_elapsed_pct_5h("codex", reset_at) == nil
-      assert quota_elapsed_pct_5h("gemini_cli", reset_at) == nil
       assert quota_elapsed_pct_5h("someday_cli", reset_at) == nil
     end
 
@@ -71,7 +69,6 @@ defmodule ArbiterWeb.QuotaHelpersTest do
       window_seconds = 7 * 24 * 60 * 60
       reset_at = DateTime.add(DateTime.utc_now(), round(window_seconds * 2 / 3), :second)
       assert quota_elapsed_pct_7d("codex", reset_at) == nil
-      assert quota_elapsed_pct_7d("gemini_cli", reset_at) == nil
       assert quota_elapsed_pct_7d("someday_cli", reset_at) == nil
     end
 
@@ -107,7 +104,6 @@ defmodule ArbiterWeb.QuotaHelpersTest do
     test "providers without a fixed window get no tooltip" do
       reset_at = DateTime.add(DateTime.utc_now(), 2 * 60 * 60 + 30 * 60, :second)
       assert quota_tooltip_5h("codex", 0.62, reset_at) == nil
-      assert quota_tooltip_5h("gemini_cli", 0.62, reset_at) == nil
       assert quota_tooltip_5h("someday_cli", 0.62, reset_at) == nil
     end
 
@@ -197,9 +193,9 @@ defmodule ArbiterWeb.QuotaHelpersTest do
     end
 
     test "a window with no fixed length uses the gate's flat fallback" do
-      # Codex "session" / Gemini CLI "used" have no length, so paced falls
-      # back to the 0.85 flat ceiling — as the gate does.
-      for {provider, label} <- [{"codex", "session"}, {"gemini_cli", "used"}] do
+      # Codex "session" / Antigravity's collapsed "used" have no length, so
+      # paced falls back to the 0.85 flat ceiling — as the gate does.
+      for {provider, label} <- [{"codex", "session"}, {"antigravity", "used"}] do
         assert state(bar(provider, "5h", 0.35, 0.5, %{label: label})) == :green
         assert state(bar(provider, "5h", 0.80, 0.5, %{label: label})) == :amber
         assert state(bar(provider, "5h", 0.90, 0.5, %{label: label})) == :red
@@ -371,7 +367,7 @@ defmodule ArbiterWeb.QuotaHelpersTest do
     end
 
     test "nil for providers without a fixed window, even when red" do
-      for provider <- ["codex", "gemini_cli", "someday_cli"] do
+      for provider <- ["codex", "someday_cli"] do
         b = bar(provider, "5h", 0.95, 0.1, %{label: "session"})
         assert pace(b, paced()).state == :red
         assert label(b, :continue) == nil
@@ -392,7 +388,7 @@ defmodule ArbiterWeb.QuotaHelpersTest do
     end
 
     test "nil for providers without a fixed window" do
-      for provider <- ["codex", "gemini_cli", "someday_cli"] do
+      for provider <- ["codex", "someday_cli"] do
         assert ratio(bar(provider, "5h", 0.5, 0.5)) == nil
       end
     end
@@ -470,7 +466,6 @@ defmodule ArbiterWeb.QuotaHelpersTest do
       window_seconds = 7 * 24 * 60 * 60
       reset_at = DateTime.add(DateTime.utc_now(), round(window_seconds * 2 / 3), :second)
       assert quota_tooltip_7d("codex", 0.45, reset_at) == nil
-      assert quota_tooltip_7d("gemini_cli", 0.45, reset_at) == nil
       assert quota_tooltip_7d("someday_cli", 0.45, reset_at) == nil
     end
 

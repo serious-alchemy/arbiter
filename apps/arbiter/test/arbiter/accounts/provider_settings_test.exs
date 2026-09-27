@@ -328,7 +328,7 @@ defmodule Arbiter.Accounts.ProviderSettingsTest do
     test "maps each account provider onto the adapter that runs it" do
       assert ProviderSettings.agent_type(:claude) == "claude"
       assert ProviderSettings.agent_type(:codex) == "codex"
-      assert ProviderSettings.agent_type(:gemini_cli) == "gemini"
+      assert ProviderSettings.agent_type(:gemini_cli) == nil
       assert ProviderSettings.agent_type(:antigravity) == "gemini"
     end
   end

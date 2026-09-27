@@ -407,17 +407,31 @@ defmodule Arbiter.Usage.ProbeTest do
 
     # bd-al9qqe review round 1, finding 3: `provider: "gemini"` is the
     # agent-type alias (`Arbiter.Agents.Gemini.provider/0`), not a canonical
-    # `provider_accounts.provider` code (`:gemini_cli` / `:antigravity`).
+    # `provider_accounts.provider` code (`:antigravity`).
     # `Resolver.provider_atom/1` must normalize the alias — otherwise a
     # Gemini preflight/probe (exactly what `CredentialWatchdog` issues in the
     # live fleet) silently fails the seam this test class checks.
     test "a preflight row for the 'gemini' alias still carries a provider_account_id" do
-      # `Arbiter.Quota.provider_code/1` resolves "gemini" to whichever
-      # concrete CLI is on this host's PATH (`:gemini_cli` or `:antigravity`)
-      # — mint the account under that same code so the test is not tied to a
-      # specific host's installed executables.
-      code = Arbiter.Quota.provider_code("gemini") |> String.to_existing_atom()
-      account = Ash.create!(ProviderAccount, %{provider: code, slug: "probe-seam-gemini"})
+      # `Arbiter.Quota.provider_code/1` resolves "gemini" to `"antigravity"`
+      # only when `agy` is on this host's PATH (and, since bd-ac53wz dropped
+      # the upstream Gemini CLI provider, to nothing otherwise) — pin PATH to
+      # an `agy` stub so the test is not tied to the host's executables.
+      stub_dir =
+        Path.join(System.tmp_dir!(), "probe-agy-stub-#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(stub_dir)
+      File.write!(Path.join(stub_dir, "agy"), "#!/bin/sh\nexit 0\n")
+      File.chmod!(Path.join(stub_dir, "agy"), 0o755)
+      old_path = System.get_env("PATH") || ""
+      System.put_env("PATH", stub_dir)
+
+      on_exit(fn ->
+        System.put_env("PATH", old_path)
+        File.rm_rf!(stub_dir)
+      end)
+
+      assert Arbiter.Quota.provider_code("gemini") == "antigravity"
+      account = Ash.create!(ProviderAccount, %{provider: :antigravity, slug: "probe-seam-gemini"})
       {usage, _rest} = Probe.parse([@result_json])
 
       assert :ok = Probe.record(:preflight, usage, provider: "gemini", exit_status: 0)

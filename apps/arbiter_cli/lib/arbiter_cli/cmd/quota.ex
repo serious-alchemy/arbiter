@@ -14,8 +14,6 @@ defmodule ArbiterCli.Cmd.Quota do
   * Codex: OpenAI session + weekly windows, refreshed by the quota probe using
     the `codex` CLI's stored token. Shows a short message until a snapshot has
     been captured (i.e. the CLI isn't authenticated on this host).
-  * Gemini CLI: per-model Cloud Code Assist quota (remaining %, reset time),
-    shown once that CLI is authenticated and probed on this host.
   * Antigravity: per-window remaining % + reset time for each model group
     (`Gemini Models`, `Claude and GPT models` × `5h`, `weekly`), sourced
     directly from `agy --output-format json --print "/usage"` (bd-d7hmqn) —
@@ -108,13 +106,10 @@ defmodule ArbiterCli.Cmd.Quota do
     IO.puts("")
     emit_codex(data)
 
-    emit_google(
-      data["gemini"],
-      "Gemini CLI",
-      provider_cost(data, "gemini_cli"),
-      data["gemini_credentials_expired"] == true
-    )
-
+    # bd-ac53wz: the upstream Gemini CLI provider is dropped. Its `gemini`
+    # snapshot (which an older server may still send) is deliberately not
+    # rendered. `gemini_credentials_expired` is the Gemini adapter's — agy's —
+    # watchdog state, so it belongs to the Antigravity section.
     emit_google(
       data["antigravity"],
       "Antigravity",
@@ -343,7 +338,7 @@ defmodule ArbiterCli.Cmd.Quota do
   defp emit_credentials_expired(_q), do: :ok
 
   # bd-1fpjgx: same unmissable line as `emit_credentials_expired/1` above,
-  # generalised to Codex / Gemini CLI / Antigravity — each reads
+  # generalised to Codex / Antigravity — each reads
   # `CredentialWatchdog`'s live state via its own `*_credentials_expired`
   # field rather than a per-row column, so it shows regardless of whether a
   # quota snapshot has landed yet.
@@ -412,8 +407,8 @@ defmodule ArbiterCli.Cmd.Quota do
     IO.puts("  (no Codex quota available)")
   end
 
-  # Live Cloud Code Assist snapshots (Gemini CLI / Antigravity). `nil` means
-  # that CLI isn't authenticated on this host — stay quiet rather than noisy.
+  # The persisted Antigravity (agy `/usage`) snapshot. `nil` means no
+  # snapshot has been stored yet — stay quiet rather than noisy.
   defp emit_google(nil, _label, _cost, _credentials_expired), do: :ok
 
   # Pre-existing complexity 10 — baselined when bd-4x2yhq first

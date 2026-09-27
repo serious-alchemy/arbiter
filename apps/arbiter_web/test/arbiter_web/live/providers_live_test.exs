@@ -203,6 +203,18 @@ defmodule ArbiterWeb.ProvidersLiveTest do
       refute has_element?(view, "#account-form")
     end
 
+    # bd-ac53wz: the upstream Gemini CLI provider is dropped; agy stays.
+    test "offers every live provider and not the removed Gemini CLI", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/providers")
+
+      view |> element("#new-account-button") |> render_click()
+
+      for p <- ~w(claude codex antigravity),
+          do: assert(has_element?(view, "#account-form option[value='#{p}']"))
+
+      refute has_element?(view, "#account-form option[value='gemini_cli']")
+    end
+
     test "a duplicate slug keeps the form open with the error", %{conn: conn} do
       account!(:claude, "pv-dupe")
       {:ok, view, _html} = live(conn, ~p"/providers")

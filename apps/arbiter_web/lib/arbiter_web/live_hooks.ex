@@ -29,14 +29,13 @@ defmodule ArbiterWeb.LiveHooks do
   workspace and assigns the list as `:quotas` on the socket (`[]` when
   nothing has been captured yet).
 
-  **Temporary:** These providers are filtered from the quota list pending fixes:
-  - Codex: dispatch is broken (bd-1nyedk, bd-dcvo3n, bd-bi5t54). Showing quota
-    bars for a broken provider implies it's dispatchable when it isn't. Once
-    dispatch is fixed, remove the filter.
-  - Gemini CLI: deprecated and has no reconnect path; reports "project id not
-    available; reconnect" (bd-5r6cdy).
+  **Temporary:** Codex is filtered from the quota list pending a fix: its
+  dispatch is broken (bd-1nyedk, bd-dcvo3n, bd-bi5t54), and showing quota
+  bars for a broken provider implies it's dispatchable when it isn't. Once
+  dispatch is fixed, remove it from @hidden_providers and this comment.
 
-  Once these are fixed, remove them from @hidden_providers and this comment.
+  The upstream Gemini CLI (`gemini_cli`) used to be hidden here too
+  (bd-5r6cdy); the provider itself is gone now (bd-ac53wz).
 
   Antigravity was hidden here too (bd-5r6cdy: quota was only checkable while the
   app was open, and its token staled ~1h after it closed). The `agy` CLI

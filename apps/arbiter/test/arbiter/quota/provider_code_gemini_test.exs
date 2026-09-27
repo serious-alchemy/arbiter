@@ -2,9 +2,10 @@ defmodule Arbiter.Quota.ProviderCodeGeminiTest do
   @moduledoc """
   `Arbiter.Quota.provider_code/1` for the `"gemini"` agent type must resolve
   the quota code matching the executable that will actually run (bd-7qj58o):
-  `"antigravity"` when `agy` resolves, `"gemini_cli"` when the upstream CLI
-  resolves — reusing `Arbiter.Agents.Gemini.resolve_executable/0` rather than
-  a second, drift-prone PATH probe.
+  `"antigravity"` when `agy` resolves — reusing
+  `Arbiter.Agents.Gemini.resolve_executable/0` rather than a second,
+  drift-prone PATH probe. Since bd-ac53wz dropped the upstream Gemini CLI
+  provider (`gemini_cli`), anything else resolves to `nil`: no tracked quota.
 
   Before this fix `provider_code("gemini")` was a static map lookup that
   always returned `"gemini_cli"`, so a fleet dispatching through `agy` was
@@ -53,29 +54,28 @@ defmodule Arbiter.Quota.ProviderCodeGeminiTest do
     assert Quota.provider_code(:gemini) == "antigravity"
   end
 
-  test "resolves to \"gemini_cli\" when only the upstream gemini CLI is on PATH", %{tmp: tmp} do
+  test "resolves to nil when only the upstream gemini CLI is on PATH (bd-ac53wz)", %{tmp: tmp} do
     stub!(tmp, "gemini")
     System.put_env("PATH", tmp)
 
-    assert Quota.provider_code("gemini") == "gemini_cli"
-    assert Quota.provider_code(:gemini) == "gemini_cli"
+    assert Quota.provider_code("gemini") == nil
+    assert Quota.provider_code(:gemini) == nil
   end
 
-  test "falls back to \"gemini_cli\" when neither binary is on PATH" do
+  test "resolves to nil when neither binary is on PATH (bd-ac53wz)" do
     System.put_env("PATH", "/nonexistent-dir-for-test")
 
-    assert Quota.provider_code("gemini") == "gemini_cli"
+    assert Quota.provider_code("gemini") == nil
   end
 
-  test "explicit \"gemini_cli\" / \"antigravity\" codes are never resolved dynamically", %{
-    tmp: tmp
-  } do
+  test "the explicit \"antigravity\" code is never resolved dynamically; \"gemini_cli\" is gone",
+       %{tmp: tmp} do
     stub!(tmp, "agy")
     System.put_env("PATH", tmp)
 
     # A caller that already names the concrete quota code gets it verbatim,
     # regardless of what's on PATH right now.
-    assert Quota.provider_code("gemini_cli") == "gemini_cli"
     assert Quota.provider_code("antigravity") == "antigravity"
+    assert Quota.provider_code("gemini_cli") == nil
   end
 end

@@ -31,7 +31,7 @@ defmodule Arbiter.Accounts.ResolverTest do
 
       assert Resolver.account_id(ws.id, "claude") == claude.id
       assert Resolver.account_id(ws.id, "codex") == codex.id
-      assert Resolver.account_id(ws.id, "gemini_cli") == nil
+      assert Resolver.account_id(ws.id, "antigravity") == nil
     end
 
     test "does not create anything when there is no join row" do
@@ -136,13 +136,13 @@ defmodule Arbiter.Accounts.ResolverTest do
     test "maps every linked provider of a workspace to its account" do
       ws = workspace!("res-k")
       claude = account!(:claude, "k-claude")
-      gemini = account!(:gemini_cli, "k-gemini")
+      agy = account!(:antigravity, "k-agy")
       link!(ws, :claude, claude)
-      link!(ws, :gemini_cli, gemini)
+      link!(ws, :antigravity, agy)
 
       assert Resolver.account_ids(ws.id) == %{
                "claude" => claude.id,
-               "gemini_cli" => gemini.id
+               "antigravity" => agy.id
              }
     end
   end

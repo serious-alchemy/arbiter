@@ -103,7 +103,6 @@ defmodule Arbiter.Quota do
   @ledger_providers %{
     "claude" => ["claude"],
     "codex" => ["openai"],
-    "gemini_cli" => ["gemini"],
     "antigravity" => []
   }
 
@@ -111,14 +110,14 @@ defmodule Arbiter.Quota do
   @cost_window_days 30
 
   # Providers `ArbiterWeb.LiveHooks`'s `:quota` hook hides from the top bar
-  # pending fix (bd-1nyedk, bd-dcvo3n, bd-bi5t54, bd-5r6cdy) — see that
+  # pending fix (bd-1nyedk, bd-dcvo3n, bd-bi5t54) — see that
   # module's `:quota` moduledoc section for the full story. Named here, not
   # only there, so `list_latest/2`'s `:exclude_providers` option (bd-4p6pw7)
   # can drop a hidden account's view *before* `decorate_view/2` spends a
   # cache lookup on it, rather than filtering the fully-decorated list after
   # the fact. `GET /api/quota` and `arb quota` do not pass this option — they
   # still report every provider, hidden or not.
-  @hidden_providers ["codex", "gemini_cli"]
+  @hidden_providers ["codex"]
 
   @doc "Quota provider codes `ArbiterWeb.LiveHooks` hides from the top bar — see `@hidden_providers`."
   @spec hidden_providers() :: [String.t()]
@@ -172,8 +171,8 @@ defmodule Arbiter.Quota do
   # gate resolves the provider a dispatch will actually run on and reads that
   # provider's snapshot table through `latest_for_provider/2` (bd-2mpo3f).
   #
-  # `"gemini"` (the agent-type alias, as opposed to the concrete `"gemini_cli"`
-  # / `"antigravity"` codes) is deliberately absent here — it is resolved
+  # `"gemini"` (the agent-type alias, as opposed to the concrete
+  # `"antigravity"` code) is deliberately absent here — it is resolved
   # dynamically in `provider_code/1` via `Arbiter.Agents.Gemini.resolve_executable/0`
   # (bd-7qj58o) rather than pinned to a static code, so the gate always reads
   # the quota table matching the CLI that will actually run.
@@ -182,7 +181,6 @@ defmodule Arbiter.Quota do
     "anthropic" => "claude",
     "codex" => "codex",
     "openai" => "codex",
-    "gemini_cli" => "gemini_cli",
     "antigravity" => "antigravity"
   }
 
@@ -192,7 +190,7 @@ defmodule Arbiter.Quota do
 
     * `:claude` → `AnthropicQuota` (OAuth polling + header capture from responses)
     * `:codex` → `CodexQuota` (`Arbiter.Quota.CloudProbe` / `Quota.Codex.fetch/2`)
-    * `:gemini` / `:antigravity` → `GoogleQuota` (`Arbiter.Quota.CloudCode`)
+    * `:gemini` (when agy runs it) / `:antigravity` → `GoogleQuota` (`Arbiter.Quota.CloudCode`)
 
   Accepts the agent-type atom (`:claude` / `:codex` / `:gemini`) or the quota
   provider code string. Returns `nil` for an unknown provider or when nothing
@@ -203,7 +201,7 @@ defmodule Arbiter.Quota do
     case provider_code(provider) do
       "claude" -> latest(account_id, "claude")
       "codex" -> Arbiter.Quota.Codex.latest(account_id, "codex")
-      code when code in ["gemini_cli", "antigravity"] -> CloudCode.latest(account_id, code)
+      "antigravity" -> CloudCode.latest(account_id, "antigravity")
       _ -> nil
     end
   rescue
@@ -250,17 +248,16 @@ defmodule Arbiter.Quota do
 
   @doc """
   Canonical quota provider code for an agent type / provider alias, or `nil`
-  when the provider has no tracked quota. `:gemini` and `:antigravity` both
-  resolve into the Google Cloud Code table under distinct codes.
+  when the provider has no tracked quota.
 
   `"gemini"` is resolved dynamically (bd-7qj58o): it reuses
   `Arbiter.Agents.Gemini.resolve_executable/0` — the same PATH probe the
   adapter itself uses to pick a CLI to spawn — to return `"antigravity"` when
-  `agy` is what will actually run, or `"gemini_cli"` when the upstream CLI (or
-  neither, matching the adapter's historical dispatch-fails default) would.
-  A caller that already names the concrete code (`"gemini_cli"` /
-  `"antigravity"`) gets it back verbatim — only the ambiguous agent-type alias
-  is resolved live.
+  `agy` is what will actually run, and `nil` otherwise: the upstream Gemini
+  CLI provider (`"gemini_cli"`) was dropped in bd-ac53wz, so it has no quota
+  code, account or snapshot any more. A caller that already names the
+  concrete `"antigravity"` code gets it back verbatim — only the ambiguous
+  agent-type alias is resolved live.
   """
   @spec provider_code(atom() | String.t() | nil) :: String.t() | nil
   def provider_code(provider) when is_atom(provider) and not is_nil(provider),
@@ -273,7 +270,7 @@ defmodule Arbiter.Quota do
   defp gemini_provider_code do
     case Arbiter.Agents.Gemini.resolve_executable() do
       {:ok, {:agy, _path}} -> "antigravity"
-      _ -> "gemini_cli"
+      _ -> nil
     end
   end
 
@@ -604,11 +601,11 @@ defmodule Arbiter.Quota do
   The canonical empty quota "view" — the uniform two-window shape the topbar and
   `/usage` page render, one entry per tracked provider. Each provider's `view/1`
   merges its real figures onto this so the UI can read a single set of keys
-  (`utilization_5h`, `reset_5h_at`, `overage_status`, …) across Claude, Codex,
-  Gemini CLI, and Antigravity — whose native shapes differ (5h/7d vs
-  session/weekly vs per-model). `primary_label` / `secondary_label` name the two
-  bars per provider (Claude: "5h"/"7d"; Codex: "session"/"weekly"; Google:
-  "used"/none).
+  (`utilization_5h`, `reset_5h_at`, `overage_status`, …) across Claude, Codex
+  and Antigravity — whose native shapes differ (5h/7d vs session/weekly vs
+  per-group buckets). `primary_label` / `secondary_label` name the two bars per
+  provider (Claude: "5h"/"7d"; Codex: "session"/"weekly"; Antigravity:
+  "5h"/"weekly", or "used"/none when its snapshot has no parseable buckets).
   """
   @spec blank_view(String.t()) :: map()
   def blank_view(provider) when is_binary(provider) do
@@ -721,35 +718,29 @@ defmodule Arbiter.Quota do
   # ---- Google Cloud Code Assist quota (bd-57ukgb) ------------------------
 
   @doc """
-  On-demand Gemini CLI + Antigravity quota snapshots via the Cloud Code Assist
-  API (`Arbiter.Quota.CloudCode`).
+  On-demand Antigravity quota snapshot via the `agy` CLI
+  (`Arbiter.Quota.CloudCode`). The upstream Gemini CLI snapshot is gone with
+  its provider (bd-ac53wz).
 
-  Returns `%{gemini: snapshot | nil, antigravity: snapshot | nil}`. Unlike the
-  Anthropic snapshot — persisted from OAuth polling + response header capture —
-  these fetch live from Google, so both providers are queried concurrently and
-  each is bounded by a timeout; a hung or crashed fetch degrades to `nil`.
+  Returns `%{antigravity: snapshot | nil}`. Unlike the Anthropic snapshot —
+  persisted from OAuth polling + response header capture — this fetches live,
+  bounded by a timeout; a hung or crashed fetch degrades to `nil`.
 
   Gated by the `:arbiter, :cloud_code_quota` `:enabled` flag (default on; the
   test env turns it off so `GET /api/quota` stays a pure DB read there). Pass
   `enabled: true` in `opts` to force the live path in a test that stubs HTTP.
 
-  Options are forwarded to `CloudCode.gemini/1` and `CloudCode.antigravity/1`
-  (`:creds_path`, `:project_id`, `:plug`, `:receive_timeout`).
+  Options are forwarded to `CloudCode.antigravity/1`.
   """
-  @spec google_snapshots(keyword()) :: %{gemini: map() | nil, antigravity: map() | nil}
+  @spec google_snapshots(keyword()) :: %{antigravity: map() | nil}
   def google_snapshots(opts \\ []) do
     if google_enabled?(opts) do
       fetch_opts = Keyword.delete(opts, :enabled)
-
-      gemini = Task.async(fn -> CloudCode.gemini(fetch_opts) end)
       antigravity = Task.async(fn -> CloudCode.antigravity(fetch_opts) end)
 
-      %{
-        gemini: await_snapshot(gemini),
-        antigravity: await_snapshot(antigravity)
-      }
+      %{antigravity: await_snapshot(antigravity)}
     else
-      %{gemini: nil, antigravity: nil}
+      %{antigravity: nil}
     end
   end
 
@@ -1068,7 +1059,7 @@ defmodule Arbiter.Quota do
 
   Merges three sources (bd-ajh7bd): the generic `AnthropicQuota` table (Claude +
   any legacy header-capture provider), the dedicated `CodexQuota` table, and the
-  dedicated `GoogleQuota` table (Gemini CLI / Antigravity). When the same
+  dedicated `GoogleQuota` table (Antigravity). When the same
   provider appears in both a dedicated table and the generic one, the dedicated
   row wins. This is the single read path the topbar, `/usage` LiveView, and the
   REST `quotas` list all sit on — no live provider fetch at request time.
@@ -1283,8 +1274,7 @@ defmodule Arbiter.Quota do
 
   defp google_views(account_ids) do
     for account_id <- account_ids,
-        provider <- ["gemini_cli", "antigravity"],
-        row = CloudCode.latest(account_id, provider),
+        row = CloudCode.latest(account_id, "antigravity"),
         not is_nil(row) do
       CloudCode.view(row)
     end

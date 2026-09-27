@@ -43,7 +43,6 @@ defmodule ArbiterWeb.ProvidersLive do
   @providers [
     {"Claude", "claude"},
     {"Codex", "codex"},
-    {"Gemini CLI", "gemini_cli"},
     {"Antigravity", "antigravity"}
   ]
 
@@ -58,7 +57,6 @@ defmodule ArbiterWeb.ProvidersLive do
   @credential_defaults %{
     claude: %{"kind" => "oauth_token", "env_var" => "CLAUDE_CODE_OAUTH_TOKEN"},
     codex: %{"kind" => "api_key", "env_var" => "OPENAI_API_KEY"},
-    gemini_cli: %{"kind" => "api_key", "env_var" => "GEMINI_API_KEY"},
     antigravity: %{"kind" => "api_key", "env_var" => "ANTIGRAVITY_API_KEY"}
   }
 
@@ -327,9 +325,7 @@ defmodule ArbiterWeb.ProvidersLive do
 
   defp account_name(account), do: account.label || account.slug
 
-  # `provider_icon/1` knows the three agent logos; both Google surfaces share
-  # Gemini's.
-  defp icon_provider(:gemini_cli), do: "gemini"
+  # `provider_icon/1` knows the three agent logos; Antigravity uses Gemini's.
   defp icon_provider(:antigravity), do: "gemini"
   defp icon_provider(provider), do: Atom.to_string(provider)
 
