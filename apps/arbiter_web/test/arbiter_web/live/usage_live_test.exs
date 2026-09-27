@@ -185,19 +185,41 @@ defmodule ArbiterWeb.UsageLiveTest do
     {:ok, view, _html} = live(conn, ~p"/usage")
     render_async(view)
 
-    html =
-      view
-      |> element("button[phx-value-option='all']")
-      |> render_click()
+    view
+    |> element("button[phx-value-option='all']")
+    |> render_click()
 
+    html = render_async(view)
     assert html =~ "$5.00"
 
-    html =
-      view
-      |> element("button[phx-value-option='7d']")
-      |> render_click()
+    view
+    |> element("button[phx-value-option='7d']")
+    |> render_click()
 
+    html = render_async(view)
     refute html =~ "$5.00"
+  end
+
+  test "the usage rollups render a loading state on mount, then the loaded data", %{
+    conn: conn,
+    ws: ws
+  } do
+    task = new_issue!(ws, "Old task")
+
+    event!(%{
+      task_id: task.id,
+      workspace_id: ws.id,
+      cost_usd: 5.0
+    })
+
+    {:ok, view, dead_html} = live(conn, ~p"/usage")
+
+    assert dead_html =~ "usage-loading"
+    refute dead_html =~ "$5.00"
+
+    html = render_async(view)
+    refute html =~ "usage-loading"
+    assert html =~ "$5.00"
   end
 
   # bd-481sz7 round 2, finding 4: agy rows carry `cost_usd: nil` (subscription,
@@ -238,12 +260,58 @@ defmodule ArbiterWeb.UsageLiveTest do
   # task, model, repo, account) — four full-row reads of the window, each
   # decoding every row's `raw` JSON — plus a full-row read for the rework
   # sessions. It now takes all four rollups from one `summarize_many/2` read.
-  test "a dead render reads the ledger window once for all four rollups, never selecting raw", %{
+  #
+  # bd-5qjpp5: that read now runs via `start_async/3` on the connected mount,
+  # not the dead render — so the dead render does zero rollup reads, and the
+  # single read happens once the socket connects and `render_async/1` awaits it.
+  test "the connected mount reads the ledger window once for all four rollups, never selecting raw",
+       %{
+         conn: conn,
+         ws: ws
+       } do
+    task = new_issue!(ws, "One read")
+    event!(%{task_id: task.id, workspace_id: ws.id, cost_usd: 0.5, raw: %{"type" => "result"}})
+
+    ref = make_ref()
+    parent = self()
+
+    :telemetry.attach(
+      ref,
+      [:arbiter, :repo, :query],
+      fn _event, _measurements, metadata, _config ->
+        if metadata.source == "usage_events", do: send(parent, {:usage_sql, ref, metadata.query})
+      end,
+      nil
+    )
+
+    html =
+      try do
+        {:ok, view, dead_html} = live(conn, ~p"/usage")
+        refute dead_html =~ "One read"
+
+        render_async(view)
+      after
+        :telemetry.detach(ref)
+      end
+
+    assert html =~ "One read"
+
+    queries = collect_usage_sql(ref, [])
+    rollup_reads = Enum.filter(queries, &(&1 =~ ~s("tokens_in")))
+
+    assert length(rollup_reads) == 1, "expected one rollup read, got: #{inspect(rollup_reads)}"
+
+    for sql <- queries do
+      refute sql =~ ~r/(?<!json_valid\(|json_extract\()u0\."raw"/, "selected raw: #{sql}"
+    end
+  end
+
+  test "the disconnected render shows a loading state and does not hit usage_events", %{
     conn: conn,
     ws: ws
   } do
-    task = new_issue!(ws, "One read")
-    event!(%{task_id: task.id, workspace_id: ws.id, cost_usd: 0.5, raw: %{"type" => "result"}})
+    task = new_issue!(ws, "Not yet loaded")
+    event!(%{task_id: task.id, workspace_id: ws.id, cost_usd: 0.5})
 
     ref = make_ref()
     parent = self()
@@ -264,16 +332,27 @@ defmodule ArbiterWeb.UsageLiveTest do
         :telemetry.detach(ref)
       end
 
-    assert html =~ "One read"
+    refute html =~ "Not yet loaded"
+    assert html =~ "usage-loading"
+    assert collect_usage_sql(ref, []) == []
+  end
 
-    queries = collect_usage_sql(ref, [])
-    rollup_reads = Enum.filter(queries, &(&1 =~ ~s("tokens_in")))
+  test "an async failure loading the usage rollups renders an inline error, not a crash", %{
+    conn: conn
+  } do
+    :meck.new(Arbiter.Usage, [:passthrough, :no_link])
+    on_exit(fn -> :meck.unload(Arbiter.Usage) end)
 
-    assert length(rollup_reads) == 1, "expected one rollup read, got: #{inspect(rollup_reads)}"
+    :meck.expect(Arbiter.Usage, :summarize_many, fn _bys, _opts ->
+      raise "database is locked"
+    end)
 
-    for sql <- queries do
-      refute sql =~ ~r/(?<!json_valid\(|json_extract\()u0\."raw"/, "selected raw: #{sql}"
-    end
+    {:ok, view, _html} = live(conn, ~p"/usage")
+    render_async(view)
+
+    assert has_element?(view, "#usage-error")
+    refute has_element?(view, "#usage-loading")
+    refute has_element?(view, "#usage-by-task")
   end
 
   defp collect_usage_sql(ref, acc) do

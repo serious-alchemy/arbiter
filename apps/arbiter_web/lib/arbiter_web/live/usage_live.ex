@@ -30,6 +30,7 @@ defmodule ArbiterWeb.UsageLive do
   alias Arbiter.Usage
   alias Arbiter.Usage.Event
   alias ArbiterWeb.CoreComponents.{Data, Domain, Feedback, Navigation}
+  alias Phoenix.LiveView.AsyncResult
   require Ash.Query
   require Logger
 
@@ -44,14 +45,20 @@ defmodule ArbiterWeb.UsageLive do
      |> assign(:tab, "by_task")
      |> assign(:overage_spend, 0.0)
      |> assign(:in_overage, false)
+     |> assign(:usage, AsyncResult.loading())
      |> maybe_load_overage()
-     |> load_data()}
+     |> maybe_load_usage()}
   end
 
   @impl true
   def handle_event("range", %{"option" => range}, socket) do
     range = if range in @ranges, do: range, else: "30d"
-    {:noreply, socket |> assign(:range, range) |> load_data()}
+
+    {:noreply,
+     socket
+     |> assign(:range, range)
+     |> assign(:usage, AsyncResult.loading(socket.assigns.usage))
+     |> start_async(:usage, fn -> load_usage_data(range) end)}
   end
 
   def handle_event("tab", %{"tab" => tab}, socket) do
@@ -61,8 +68,28 @@ defmodule ArbiterWeb.UsageLive do
 
   # ---- data ----
 
-  defp load_data(socket) do
-    since = since_for_range(socket.assigns.range)
+  # The ledger rollups (`summarize_many!/2`, `load_work_sessions/1`,
+  # `load_titles/1`) run in `start_async/3` on the connected mount only
+  # (bd-5qjpp5): a 30-day scan over `usage_events` is slow enough (worse
+  # still under bd-bdjgwc's CAST-index problem) that it must never block the
+  # LiveView process, and the dead render reads nothing and shows the loading
+  # state instead.
+  defp maybe_load_usage(socket) do
+    if connected?(socket) do
+      range = socket.assigns.range
+      start_async(socket, :usage, fn -> load_usage_data(range) end)
+    else
+      socket
+    end
+  end
+
+  # Trapping exits lets a read in flight finish when the view goes away,
+  # rather than dying holding a DB checkout (bd-6mfl0s) — this page's 30-day
+  # scan is the slowest of the async loads on it, so it's the one most likely
+  # to be caught mid-query by a closed tab.
+  defp load_usage_data(range) do
+    Process.flag(:trap_exit, true)
+    since = since_for_range(range)
 
     %{
       task: task_rollup,
@@ -71,7 +98,9 @@ defmodule ArbiterWeb.UsageLive do
       provider_account: account_rollup
     } = summarize_many!([:task, :model, :repo, :provider_account], since: since)
 
+    exit_if_view_gone()
     work_sessions = load_work_sessions(since)
+    exit_if_view_gone()
     titles = load_titles(task_rollup)
 
     grand_cost = if sum_cost_known?(task_rollup), do: sum_cost(task_rollup), else: nil
@@ -83,21 +112,19 @@ defmodule ArbiterWeb.UsageLive do
     rework_task_count = rework_buckets.two + rework_buckets.three_plus
     rework_extra_cost = rework_extra_cost(base_ids, work_sessions)
 
-    socket
-    |> assign(:grand_cost, grand_cost)
-    |> assign(:grand_tokens, grand_tokens)
-    |> assign(:total_sessions, total_sessions)
-    |> assign(:total_tasks, length(base_ids))
-    |> assign(:rework_task_count, rework_task_count)
-    |> assign(:rework_extra_cost, rework_extra_cost)
-    |> assign(:rework_buckets, rework_buckets)
-    |> assign(:by_task_rows, build_by_task_rows(task_rollup, work_sessions, titles))
-    |> assign(
-      :model_bars,
-      bar_rows(model_rollup, grand_cost, &model_hue/2, &ModelDisplay.short/1)
-    )
-    |> assign(:repo_bars, bar_rows(repo_rollup, grand_cost, &repo_hue/2, &to_string/1))
-    |> assign(:account_bars, bar_rows(account_rollup, grand_cost, &repo_hue/2, &account_label/1))
+    %{
+      grand_cost: grand_cost,
+      grand_tokens: grand_tokens,
+      total_sessions: total_sessions,
+      total_tasks: length(base_ids),
+      rework_task_count: rework_task_count,
+      rework_extra_cost: rework_extra_cost,
+      rework_buckets: rework_buckets,
+      by_task_rows: build_by_task_rows(task_rollup, work_sessions, titles),
+      model_bars: bar_rows(model_rollup, grand_cost, &model_hue/2, &ModelDisplay.short/1),
+      repo_bars: bar_rows(repo_rollup, grand_cost, &repo_hue/2, &to_string/1),
+      account_bars: bar_rows(account_rollup, grand_cost, &repo_hue/2, &account_label/1)
+    }
   end
 
   # Overage-spend indicator (bd-7cd38f): when the Claude quota snapshot shows
@@ -116,6 +143,14 @@ defmodule ArbiterWeb.UsageLive do
     if connected?(socket),
       do: start_async(socket, :overage, &load_overage/0),
       else: socket
+  end
+
+  defp exit_if_view_gone do
+    receive do
+      {:EXIT, _view, _reason} -> exit(:shutdown)
+    after
+      0 -> :ok
+    end
   end
 
   # Trapping exits lets a read in flight finish when the view goes away,
@@ -142,6 +177,15 @@ defmodule ArbiterWeb.UsageLive do
   def handle_async(:overage, {:exit, reason}, socket) do
     Logger.warning("UsageLive: reading the overage spend failed: #{inspect(reason)}")
     {:noreply, socket}
+  end
+
+  def handle_async(:usage, {:ok, data}, socket) do
+    {:noreply, assign(socket, :usage, AsyncResult.ok(socket.assigns.usage, data))}
+  end
+
+  def handle_async(:usage, {:exit, reason}, socket) do
+    Logger.warning("UsageLive: loading usage rollups failed: #{inspect(reason)}")
+    {:noreply, assign(socket, :usage, AsyncResult.failed(socket.assigns.usage, reason))}
   end
 
   # One ledger read for every rollup on the page (bd-5cevwg) — the read, not
@@ -362,26 +406,43 @@ defmodule ArbiterWeb.UsageLive do
           </:actions>
         </Domain.index_header>
 
-        <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
-          <Domain.stat_card
-            label="Total spend"
-            value={format_usd(@grand_cost)}
-            tone="live"
-            note={since_label(@range)}
-          />
-          <Domain.stat_card label="Total tokens" value={format_tokens(@grand_tokens)} />
-          <Domain.stat_card
-            label="Sessions"
-            value={@total_sessions}
-            note={"#{@total_tasks} tasks"}
-          />
-          <Domain.stat_card
-            label="Rework tasks"
-            value={@rework_task_count}
-            tone="attention"
-            note="2+ sessions"
-          />
-        </div>
+        <.async_result :let={usage} assign={@usage}>
+          <:loading>
+            <div id="usage-loading" class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div
+                :for={_ <- 1..4}
+                class="h-[74px] rounded-[var(--radius-md)] bg-[var(--arb-done-wash)] animate-pulse"
+              />
+            </div>
+          </:loading>
+          <:failed>
+            <div id="usage-error">
+              <Feedback.empty_state icon="hero-exclamation-triangle">
+                Could not load usage data. Try reloading the page.
+              </Feedback.empty_state>
+            </div>
+          </:failed>
+          <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <Domain.stat_card
+              label="Total spend"
+              value={format_usd(usage.grand_cost)}
+              tone="live"
+              note={since_label(@range)}
+            />
+            <Domain.stat_card label="Total tokens" value={format_tokens(usage.grand_tokens)} />
+            <Domain.stat_card
+              label="Sessions"
+              value={usage.total_sessions}
+              note={"#{usage.total_tasks} tasks"}
+            />
+            <Domain.stat_card
+              label="Rework tasks"
+              value={usage.rework_task_count}
+              tone="attention"
+              note="2+ sessions"
+            />
+          </div>
+        </.async_result>
 
         <div class="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_320px] gap-4 items-start">
           <.panel title="Spend" meta={tab_meta(@tab)}>
@@ -397,82 +458,98 @@ defmodule ArbiterWeb.UsageLive do
               class="mb-3"
             />
 
-            <Data.data_table
-              :if={@tab == "by_task" && @by_task_rows != []}
-              id="usage-by-task"
-              rows={@by_task_rows}
-            >
-              <:col :let={row} label="task" width="84px">{row.task_id}</:col>
-              <:col :let={row} label="title" mono={false}>{row.title}</:col>
-              <:col :let={row} label="sessions" width="70px" align="right">
-                <span
-                  class={row.sessions > 1 && "text-[var(--arb-attention)]"}
-                  title="Number of :work sessions for this task"
-                >
-                  {row.sessions}
-                </span>
-              </:col>
-              <:col :let={row} label="rework" width="64px" align="right">
-                <span
-                  class={
-                    if row.extra_cost > 0,
-                      do: "text-[var(--arb-attention)]",
-                      else: "text-[var(--text-label)]"
-                  }
-                  title="Extra sessions cost (sessions beyond the first)"
-                >
-                  {if row.extra_cost > 0, do: format_usd(row.extra_cost), else: "—"}
-                </span>
-              </:col>
-              <:col :let={row} label="tokens" width="64px" align="right">
-                {format_tokens(row.tokens)}
-              </:col>
-              <:col :let={row} label="spend" width="60px" align="right">
-                {format_usd(row.cost_usd)}
-              </:col>
-            </Data.data_table>
-            <Feedback.empty_state :if={@tab == "by_task" && @by_task_rows == []} icon={nil}>
-              No usage events yet.
-            </Feedback.empty_state>
+            <.async_result :let={usage} assign={@usage}>
+              <:loading>
+                <div class="flex flex-col gap-[10px]">
+                  <div
+                    :for={_ <- 1..5}
+                    class="h-[18px] rounded bg-[var(--arb-done-wash)] animate-pulse"
+                  />
+                </div>
+              </:loading>
+              <:failed>
+                <Feedback.empty_state icon="hero-exclamation-triangle">
+                  Could not load spend data.
+                </Feedback.empty_state>
+              </:failed>
 
-            <div :if={@tab == "by_model"} class="flex flex-col gap-[10px]">
-              <.usage_bar
-                :for={bar <- @model_bars}
-                label={bar.label}
-                value={bar.value}
-                pct={bar.pct}
-                hue={bar.hue}
-              />
-              <Feedback.empty_state :if={@model_bars == []} icon={nil}>
+              <Data.data_table
+                :if={@tab == "by_task" && usage.by_task_rows != []}
+                id="usage-by-task"
+                rows={usage.by_task_rows}
+              >
+                <:col :let={row} label="task" width="84px">{row.task_id}</:col>
+                <:col :let={row} label="title" mono={false}>{row.title}</:col>
+                <:col :let={row} label="sessions" width="70px" align="right">
+                  <span
+                    class={row.sessions > 1 && "text-[var(--arb-attention)]"}
+                    title="Number of :work sessions for this task"
+                  >
+                    {row.sessions}
+                  </span>
+                </:col>
+                <:col :let={row} label="rework" width="64px" align="right">
+                  <span
+                    class={
+                      if row.extra_cost > 0,
+                        do: "text-[var(--arb-attention)]",
+                        else: "text-[var(--text-label)]"
+                    }
+                    title="Extra sessions cost (sessions beyond the first)"
+                  >
+                    {if row.extra_cost > 0, do: format_usd(row.extra_cost), else: "—"}
+                  </span>
+                </:col>
+                <:col :let={row} label="tokens" width="64px" align="right">
+                  {format_tokens(row.tokens)}
+                </:col>
+                <:col :let={row} label="spend" width="60px" align="right">
+                  {format_usd(row.cost_usd)}
+                </:col>
+              </Data.data_table>
+              <Feedback.empty_state :if={@tab == "by_task" && usage.by_task_rows == []} icon={nil}>
                 No usage events yet.
               </Feedback.empty_state>
-            </div>
 
-            <div :if={@tab == "by_repo"} class="flex flex-col gap-[10px]">
-              <.usage_bar
-                :for={bar <- @repo_bars}
-                label={bar.label}
-                value={bar.value}
-                pct={bar.pct}
-                hue={bar.hue}
-              />
-              <Feedback.empty_state :if={@repo_bars == []} icon={nil}>
-                No usage events yet.
-              </Feedback.empty_state>
-            </div>
+              <div :if={@tab == "by_model"} class="flex flex-col gap-[10px]">
+                <.usage_bar
+                  :for={bar <- usage.model_bars}
+                  label={bar.label}
+                  value={bar.value}
+                  pct={bar.pct}
+                  hue={bar.hue}
+                />
+                <Feedback.empty_state :if={usage.model_bars == []} icon={nil}>
+                  No usage events yet.
+                </Feedback.empty_state>
+              </div>
 
-            <div :if={@tab == "by_account"} class="flex flex-col gap-[10px]">
-              <.usage_bar
-                :for={bar <- @account_bars}
-                label={bar.label}
-                value={bar.value}
-                pct={bar.pct}
-                hue={bar.hue}
-              />
-              <Feedback.empty_state :if={@account_bars == []} icon={nil}>
-                No usage events yet.
-              </Feedback.empty_state>
-            </div>
+              <div :if={@tab == "by_repo"} class="flex flex-col gap-[10px]">
+                <.usage_bar
+                  :for={bar <- usage.repo_bars}
+                  label={bar.label}
+                  value={bar.value}
+                  pct={bar.pct}
+                  hue={bar.hue}
+                />
+                <Feedback.empty_state :if={usage.repo_bars == []} icon={nil}>
+                  No usage events yet.
+                </Feedback.empty_state>
+              </div>
+
+              <div :if={@tab == "by_account"} class="flex flex-col gap-[10px]">
+                <.usage_bar
+                  :for={bar <- usage.account_bars}
+                  label={bar.label}
+                  value={bar.value}
+                  pct={bar.pct}
+                  hue={bar.hue}
+                />
+                <Feedback.empty_state :if={usage.account_bars == []} icon={nil}>
+                  No usage events yet.
+                </Feedback.empty_state>
+              </div>
+            </.async_result>
           </.panel>
 
           <div class="flex flex-col gap-4">
@@ -554,30 +631,48 @@ defmodule ArbiterWeb.UsageLive do
               </div>
             </.panel>
 
-            <.panel title="Rework" meta={"#{@rework_task_count} tasks"}>
-              <div class="flex flex-col gap-[10px]">
-                <.usage_bar
-                  label="1 session"
-                  value={"#{@rework_buckets.one} tasks"}
-                  pct={bucket_pct(@rework_buckets.one, @total_tasks)}
-                  hue="var(--arb-done)"
-                />
-                <.usage_bar
-                  label="2 sessions"
-                  value={"#{@rework_buckets.two} tasks"}
-                  pct={bucket_pct(@rework_buckets.two, @total_tasks)}
-                  hue="var(--arb-attention)"
-                />
-                <.usage_bar
-                  label="3+"
-                  value={"#{@rework_buckets.three_plus} tasks"}
-                  pct={bucket_pct(@rework_buckets.three_plus, @total_tasks)}
-                  hue="var(--arb-fail)"
-                />
-                <p class="m-0 text-[11.5px] leading-[1.55] text-[var(--text-secondary)]">
-                  Extra sessions cost {format_usd(@rework_extra_cost)} over the {since_label(@range)} — the loop pass reads this to propose routing changes.
-                </p>
-              </div>
+            <.panel title="Rework" meta={rework_meta(@usage)}>
+              <.async_result :let={usage} assign={@usage}>
+                <:loading>
+                  <div class="flex flex-col gap-[10px]">
+                    <div
+                      :for={_ <- 1..3}
+                      class="h-[16px] rounded bg-[var(--arb-done-wash)] animate-pulse"
+                    />
+                  </div>
+                </:loading>
+                <:failed>
+                  <Feedback.empty_state icon="hero-exclamation-triangle">
+                    Could not load rework data.
+                  </Feedback.empty_state>
+                </:failed>
+
+                <div class="flex flex-col gap-[10px]">
+                  <.usage_bar
+                    label="1 session"
+                    value={"#{usage.rework_buckets.one} tasks"}
+                    pct={bucket_pct(usage.rework_buckets.one, usage.total_tasks)}
+                    hue="var(--arb-done)"
+                  />
+                  <.usage_bar
+                    label="2 sessions"
+                    value={"#{usage.rework_buckets.two} tasks"}
+                    pct={bucket_pct(usage.rework_buckets.two, usage.total_tasks)}
+                    hue="var(--arb-attention)"
+                  />
+                  <.usage_bar
+                    label="3+"
+                    value={"#{usage.rework_buckets.three_plus} tasks"}
+                    pct={bucket_pct(usage.rework_buckets.three_plus, usage.total_tasks)}
+                    hue="var(--arb-fail)"
+                  />
+                  <p class="m-0 text-[11.5px] leading-[1.55] text-[var(--text-secondary)]">
+                    Extra sessions cost {format_usd(usage.rework_extra_cost)} over the {since_label(
+                      @range
+                    )} — the loop pass reads this to propose routing changes.
+                  </p>
+                </div>
+              </.async_result>
             </.panel>
           </div>
         </div>
@@ -650,6 +745,9 @@ defmodule ArbiterWeb.UsageLive do
   defp tab_meta("by_model"), do: "by model"
   defp tab_meta("by_repo"), do: "by repo"
   defp tab_meta("by_account"), do: "by account"
+
+  defp rework_meta(%AsyncResult{ok?: true, result: %{rework_task_count: n}}), do: "#{n} tasks"
+  defp rework_meta(_usage), do: nil
 
   defp bucket_pct(_count, 0), do: 0
   defp bucket_pct(count, total), do: round(count / total * 100)
