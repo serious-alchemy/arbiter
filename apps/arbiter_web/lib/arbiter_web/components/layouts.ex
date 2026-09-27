@@ -7,6 +7,7 @@ defmodule ArbiterWeb.Layouts do
   import ArbiterWeb.QuotaHelpers
 
   alias Arbiter.Messages.Message
+  alias Phoenix.LiveView.AsyncResult
 
   # Embed all files in layouts/* within this module.
   # The default root.html.heex file contains the HTML
@@ -35,7 +36,11 @@ defmodule ArbiterWeb.Layouts do
     doc: "request path of the current page, used to highlight the active nav link"
   )
 
-  attr(:quotas, :list, default: [], doc: "One AnthropicQuota struct per tracked provider")
+  attr(:quotas, :any,
+    default: [],
+    doc:
+      "One AnthropicQuota struct per tracked provider — a list, or the `AsyncResult` of one ArbiterWeb.LiveHooks' :quota hook loads"
+  )
 
   attr(:live, :boolean,
     default: false,
@@ -48,9 +53,10 @@ defmodule ArbiterWeb.Layouts do
     doc: "override for tests/specimens; real callers omit it and get the installation default"
   )
 
-  attr(:coordinator_inbox, :list,
+  attr(:coordinator_inbox, :any,
     default: [],
-    doc: "unread mailbox-family messages addressed to the coordinator (ArbiterWeb.LiveHooks)"
+    doc:
+      "unread mailbox-family messages addressed to the coordinator — a list, or the `AsyncResult` of one ArbiterWeb.LiveHooks loads"
   )
 
   attr(:coordinator_outstanding_count, :integer,
@@ -78,11 +84,26 @@ defmodule ArbiterWeb.Layouts do
     # `quota_on_exhaustion` defaults to nil via `attr/3`, so a real caller
     # (who never passes it) still falls through to the DB-backed default;
     # only tests/specimens override it to dodge the DB round-trip.
+    #
+    # It only words the bars, so it is only read when there are bars to draw
+    # (bd-adewb4): not on the dead render, whose quota is still loading, and
+    # not on the re-render the loaded quota triggers when there is none.
+    # That re-render comes moments after mount, and a LiveView torn down
+    # while it is inside this read drops the test suite's one sandbox
+    # connection (bd-5scl0c).
+    assigns =
+      assigns
+      |> assign(:quotas, as_async(assigns.quotas))
+      |> assign(:coordinator_inbox, as_async(assigns.coordinator_inbox))
+
     assigns =
       assign(
         assigns,
         :quota_on_exhaustion,
-        assigns.quota_on_exhaustion || Arbiter.Quota.default_workspace_on_exhaustion()
+        if(quota_bars?(assigns.quotas),
+          do: assigns.quota_on_exhaustion || Arbiter.Quota.default_workspace_on_exhaustion(),
+          else: assigns.quota_on_exhaustion
+        )
       )
 
     # Same lazy-read shape as `quota_on_exhaustion` above: the nav's open-epic
@@ -141,15 +162,42 @@ defmodule ArbiterWeb.Layouts do
               repeated downward so a second provider costs height (the bar
               has room for two ~12px rows) rather than width the live badge,
               inbox trigger and theme toggle need at `lg`. --%>
+        <%!-- Loaded off the mount (bd-adewb4): a placeholder the height of
+              one provider row until it lands, an inline notice if it fails. --%>
         <div
-          :if={@quotas != []}
+          :if={@quotas.loading}
+          id="quota-topbar-loading"
+          role="status"
+          aria-label="Loading quota"
+          class="max-lg:hidden flex items-center gap-2"
+        >
+          <span class="min-w-[72px] h-[6px] rounded-[var(--radius-pill)] bg-[var(--border-default)] animate-pulse">
+          </span>
+          <span class="w-[96px] h-[6px] rounded-[var(--radius-pill)] bg-[var(--border-default)] animate-pulse">
+          </span>
+        </div>
+        <button
+          :if={@quotas.failed}
+          type="button"
+          id="quota-topbar-error"
+          phx-click="quota_retry"
+          title={"Could not load quota: #{async_error(@quotas.failed)} — click to retry"}
+          class="max-lg:hidden flex items-center gap-1.5 px-2 h-[22px] rounded-[var(--radius-field)] cursor-pointer border border-solid border-[var(--arb-fail-edge)] bg-[var(--arb-fail-wash)] text-[10.5px] font-[family-name:var(--font-mono)] text-[var(--arb-fail-text)] transition-colors duration-150 hover:bg-[var(--surface-chrome)]"
+        >
+          <ArbiterWeb.CoreComponents.Core.icon
+            name="hero-exclamation-triangle-micro"
+            class="size-3.5 shrink-0"
+          /> quota unavailable
+        </button>
+        <div
+          :if={quota_bars?(@quotas)}
           id="quota-topbar"
           class="max-lg:hidden grid grid-cols-[auto_auto_auto] items-center gap-x-3 gap-y-[3px]"
         >
           <%!-- A subgrid row, so each window column lines up across
                 providers however wide one row's label or note is. --%>
           <div
-            :for={quota <- @quotas}
+            :for={quota <- @quotas.result}
             id={"quota-topbar-#{quota.provider}"}
             class="col-span-3 grid grid-cols-subgrid items-center"
           >
@@ -175,7 +223,7 @@ defmodule ArbiterWeb.Layouts do
           </div>
         </div>
         <ArbiterWeb.CoreComponents.Feedback.live_badge id="appshell-live" live={@live} />
-        <.coordinator_inbox_trigger unread={length(@coordinator_inbox)} />
+        <.coordinator_inbox_trigger inbox={@coordinator_inbox} />
         <.theme_toggle />
       </div>
     </header>
@@ -236,9 +284,11 @@ defmodule ArbiterWeb.Layouts do
     """
   end
 
-  attr(:unread, :integer, required: true)
+  attr(:inbox, AsyncResult, required: true)
 
   defp coordinator_inbox_trigger(assigns) do
+    assigns = assign(assigns, :unread, length(inbox_messages(assigns.inbox)))
+
     ~H"""
     <button
       type="button"
@@ -252,7 +302,15 @@ defmodule ArbiterWeb.Layouts do
     >
       <ArbiterWeb.CoreComponents.Core.icon name="hero-inbox-micro" color="var(--text-secondary)" />
       <span
-        :if={@unread > 0}
+        :if={@inbox.failed}
+        id="coordinator-inbox-error-badge"
+        title="Could not load the coordinator mailbox"
+        class="absolute -top-1 -right-1 min-w-[16px] h-[16px] px-1 rounded-[var(--radius-pill)] bg-[var(--arb-fail)] text-[9.5px] leading-[16px] text-center font-[family-name:var(--font-mono)] text-[var(--surface-chrome)]"
+      >
+        !
+      </span>
+      <span
+        :if={!@inbox.failed && @unread > 0}
         id="coordinator-inbox-unread-badge"
         class="absolute -top-1 -right-1 min-w-[16px] h-[16px] px-1 rounded-[var(--radius-pill)] bg-[var(--arb-attention)] text-[9.5px] leading-[16px] text-center font-[family-name:var(--font-mono)] text-[var(--surface-chrome)]"
       >
@@ -262,7 +320,7 @@ defmodule ArbiterWeb.Layouts do
     """
   end
 
-  attr(:inbox, :list, required: true)
+  attr(:inbox, AsyncResult, required: true)
   attr(:outstanding_count, :integer, required: true)
   attr(:now, DateTime, required: true)
 
@@ -271,6 +329,8 @@ defmodule ArbiterWeb.Layouts do
   # It is not scoped to any one screen because none of the mail in it is
   # scoped to any one screen either.
   defp coordinator_inbox_drawer(assigns) do
+    assigns = assign(assigns, :messages, inbox_messages(assigns.inbox))
+
     ~H"""
     <div
       id="coordinator-drawer-backdrop"
@@ -286,10 +346,14 @@ defmodule ArbiterWeb.Layouts do
       <div class="flex items-center justify-between gap-2 px-4 h-[var(--toolbar-height)] border-b border-solid border-[var(--border-default)] bg-[var(--arb-canvas-sunken)]">
         <h2 class="flex items-center gap-2 text-[12.5px] font-medium text-[var(--text-title)]">
           Coordinator Mailbox
-          <span class="text-[10.5px] font-[family-name:var(--font-mono)] text-[var(--arb-attention)]">
-            {length(@inbox)} unread
+          <span
+            :if={@inbox.ok? && !@inbox.failed}
+            class="text-[10.5px] font-[family-name:var(--font-mono)] text-[var(--arb-attention)]"
+          >
+            {length(@messages)} unread
           </span>
           <span
+            :if={@inbox.ok? && !@inbox.failed}
             id="coordinator-mailbox-outstanding"
             title="Seen but not yet cleared — the triage queue"
             class="text-[10.5px] font-[family-name:var(--font-mono)] text-[var(--text-label)]"
@@ -322,7 +386,47 @@ defmodule ArbiterWeb.Layouts do
         </div>
       </div>
 
-      <div :if={@inbox == []} id="coordinator-mailbox-empty" class="p-4">
+      <%!-- Loaded off the mount (bd-adewb4). --%>
+      <p
+        :if={@inbox.loading}
+        id="coordinator-mailbox-loading"
+        role="status"
+        class="flex items-center gap-2 px-4 py-4 text-[12px] text-[var(--text-secondary)]"
+      >
+        <ArbiterWeb.CoreComponents.Core.icon
+          name="hero-arrow-path-micro"
+          class="size-4 shrink-0 animate-spin"
+        /> Loading mailbox…
+      </p>
+
+      <div
+        :if={@inbox.failed}
+        id="coordinator-mailbox-error"
+        role="alert"
+        class="flex items-start gap-2 m-3 px-3 py-3 rounded-[var(--radius-field)] text-[12px] text-[var(--arb-fail-text)] bg-[var(--arb-fail-wash)]"
+      >
+        <ArbiterWeb.CoreComponents.Core.icon
+          name="hero-exclamation-triangle-micro"
+          class="size-4 shrink-0 mt-px"
+        />
+        <span class="grow min-w-0 break-words">
+          Could not load the mailbox: {async_error(@inbox.failed)}
+        </span>
+        <button
+          type="button"
+          id="coordinator-mailbox-retry"
+          phx-click="coordinator_retry"
+          class="shrink-0 px-2 h-[22px] rounded-[var(--radius-field)] cursor-pointer border border-solid border-[var(--arb-fail-edge)] bg-[var(--surface-chrome)] text-[11px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
+        >
+          Retry
+        </button>
+      </div>
+
+      <div
+        :if={@inbox.ok? && !@inbox.failed && @messages == []}
+        id="coordinator-mailbox-empty"
+        class="p-4"
+      >
         <ArbiterWeb.CoreComponents.Feedback.empty_state
           icon="hero-inbox"
           detail="worker completions, failures and escalations land here in real time"
@@ -332,12 +436,12 @@ defmodule ArbiterWeb.Layouts do
       </div>
 
       <ul
-        :if={@inbox != []}
+        :if={!@inbox.failed && @messages != []}
         id="coordinator-mailbox-list"
         class="flex flex-col gap-2 p-3 overflow-y-auto"
       >
         <li
-          :for={m <- @inbox}
+          :for={m <- @messages}
           class={[
             "rounded-[var(--radius-field)] border border-solid border-[var(--arb-line-strong)]",
             "border-l-[length:var(--border-accent-width)] px-3 py-2 bg-[var(--arb-panel-alt)]",
@@ -388,6 +492,34 @@ defmodule ArbiterWeb.Layouts do
     </aside>
     """
   end
+
+  # `ArbiterWeb.LiveHooks` loads both off the mount (bd-adewb4), so a
+  # LiveView hands over `AsyncResult`s; a plain list (a specimen, a test, a
+  # dead controller render) is already loaded.
+  defp as_async(%AsyncResult{} = async), do: async
+  defp as_async(list) when is_list(list), do: AsyncResult.ok(list)
+
+  defp quota_bars?(%AsyncResult{ok?: true, result: [_ | _]}), do: true
+  defp quota_bars?(%AsyncResult{}), do: false
+
+  # The loaded messages; none until the first load lands. A failed re-read
+  # keeps the last list in the result, but the drawer and the trigger show
+  # the failure instead of it.
+  defp inbox_messages(%AsyncResult{ok?: true, result: messages}) when is_list(messages),
+    do: messages
+
+  defp inbox_messages(%AsyncResult{}), do: []
+
+  # `{:exit, reason}` from a crashed load, `{:error, reason}` from an inline
+  # re-read that raised.
+  defp async_error({:exit, {%{__exception__: true} = error, _stacktrace}}),
+    do: Exception.message(error)
+
+  defp async_error({kind, %{__exception__: true} = error}) when kind in [:exit, :error],
+    do: Exception.message(error)
+
+  defp async_error({_kind, reason}), do: inspect(reason)
+  defp async_error(reason), do: inspect(reason)
 
   defp mailbox_border(:escalation), do: "border-l-[color:var(--arb-fail)]"
   defp mailbox_border(:failure), do: "border-l-[color:var(--arb-fail)]"

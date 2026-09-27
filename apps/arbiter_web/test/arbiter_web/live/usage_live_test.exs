@@ -59,7 +59,8 @@ defmodule ArbiterWeb.UsageLiveTest do
       tokens_out: 4_000
     })
 
-    {:ok, _view, html} = live(conn, ~p"/usage")
+    {:ok, view, _html} = live(conn, ~p"/usage")
+    html = render_async(view)
 
     assert html =~ "Usage"
     assert html =~ "Total spend"
@@ -101,7 +102,8 @@ defmodule ArbiterWeb.UsageLiveTest do
       occurred_at: now
     })
 
-    {:ok, _view, html} = live(conn, ~p"/usage")
+    {:ok, view, _html} = live(conn, ~p"/usage")
+    html = render_async(view)
 
     assert html =~ "$3.50"
     assert [_] = Regex.scan(~r/Probe task two/, html)
@@ -115,6 +117,7 @@ defmodule ArbiterWeb.UsageLiveTest do
     event!(%{task_id: task.id, workspace_id: ws.id, model: "claude-opus-4-6", cost_usd: 0.5})
 
     {:ok, view, _html} = live(conn, ~p"/usage")
+    render_async(view)
 
     html =
       view
@@ -131,6 +134,7 @@ defmodule ArbiterWeb.UsageLiveTest do
     event!(%{task_id: task.id, workspace_id: ws.id, repo: "apex-api", cost_usd: 0.4})
 
     {:ok, view, _html} = live(conn, ~p"/usage")
+    render_async(view)
 
     html =
       view
@@ -158,6 +162,7 @@ defmodule ArbiterWeb.UsageLiveTest do
     })
 
     {:ok, view, _html} = live(conn, ~p"/usage")
+    render_async(view)
 
     html =
       view
@@ -178,6 +183,7 @@ defmodule ArbiterWeb.UsageLiveTest do
     })
 
     {:ok, view, _html} = live(conn, ~p"/usage")
+    render_async(view)
 
     html =
       view
@@ -210,7 +216,8 @@ defmodule ArbiterWeb.UsageLiveTest do
       tokens_out: 250
     })
 
-    {:ok, view, html} = live(conn, ~p"/usage")
+    {:ok, view, _html} = live(conn, ~p"/usage")
+    html = render_async(view)
 
     [_, total_spend_value] =
       Regex.run(~r/Total spend\s*<\/span><span[^>]*>\s*([^<]+?)\s*<\/span>/s, html)
@@ -278,13 +285,15 @@ defmodule ArbiterWeb.UsageLiveTest do
   end
 
   test "shows an empty state when there is no usage yet", %{conn: conn} do
-    {:ok, _view, html} = live(conn, ~p"/usage")
+    {:ok, view, _html} = live(conn, ~p"/usage")
+    html = render_async(view)
     assert html =~ "Usage"
     assert html =~ "$0.00"
   end
 
   test "renders Rate limits and Rework panels", %{conn: conn} do
-    {:ok, _view, html} = live(conn, ~p"/usage")
+    {:ok, view, _html} = live(conn, ~p"/usage")
+    html = render_async(view)
     assert html =~ "Rate limits"
     assert html =~ "Rework"
     assert html =~ "hairline is elapsed time"
@@ -293,7 +302,8 @@ defmodule ArbiterWeb.UsageLiveTest do
   test "stat row and spend/rate-limits panels use responsive grid layouts for mobile", %{
     conn: conn
   } do
-    {:ok, _view, html} = live(conn, ~p"/usage")
+    {:ok, view, _html} = live(conn, ~p"/usage")
+    html = render_async(view)
     # Stat row should stack 2x2 on mobile (grid-cols-2) and 4-across on desktop (sm:grid-cols-4)
     assert html =~ "grid-cols-2"
     assert html =~ "sm:grid-cols-4"
@@ -313,7 +323,8 @@ defmodule ArbiterWeb.UsageLiveTest do
 
       antigravity_quota!(ws)
 
-      {:ok, view, html} = live(conn, ~p"/usage")
+      {:ok, view, _html} = live(conn, ~p"/usage")
+      html = render_async(view)
       doc = LazyHTML.from_fragment(html)
 
       assert quota_bars(doc, "#usage-quota-claude") == 2
@@ -337,6 +348,7 @@ defmodule ArbiterWeb.UsageLiveTest do
       antigravity_quota!(ws, message: agy_missing_message())
 
       {:ok, view, _html} = live(conn, ~p"/usage")
+      render_async(view)
 
       assert has_element?(view, "#usage-quota-antigravity [data-quota-bar][data-quota-stale]")
 
@@ -359,7 +371,8 @@ defmodule ArbiterWeb.UsageLiveTest do
     } do
       antigravity_quota!(ws, models: [])
 
-      {:ok, _view, html} = live(conn, ~p"/usage")
+      {:ok, view, _html} = live(conn, ~p"/usage")
+      html = render_async(view)
       doc = LazyHTML.from_fragment(html)
 
       assert quota_bars(doc, "#usage-quota-antigravity") == 1
@@ -381,4 +394,49 @@ defmodule ArbiterWeb.UsageLiveTest do
       doc
       |> LazyHTML.query("#{scope} [data-quota-pct]")
       |> Enum.map(&String.trim(LazyHTML.text(&1)))
+
+  # bd-adewb4: the Rate limits panel reads the top bar's quota, which
+  # `LiveHooks` now loads off the mount, and the overage indicator reads the
+  # same quota through its own `start_async/3`.
+  describe "Rate limits panel loads off the mount" do
+    test "loading, then the overage indicator for an account in paid overage", %{
+      conn: conn,
+      ws: ws
+    } do
+      {:ok, _} =
+        Arbiter.Quota.capture(ws.id, [
+          {"anthropic-ratelimit-unified-5h-utilization", "1.0"},
+          {"anthropic-ratelimit-unified-overage-status", "in_overage"}
+        ])
+
+      {:ok, view, html} = live(conn, ~p"/usage")
+
+      doc = LazyHTML.from_fragment(html)
+      assert LazyHTML.query(doc, "#usage-quota-loading") |> Enum.count() == 1
+      assert LazyHTML.query(doc, "#overage-indicator") |> Enum.count() == 0
+
+      render_async(view)
+
+      refute has_element?(view, "#usage-quota-loading")
+      assert has_element?(view, "#usage-quota-claude")
+      assert has_element?(view, "#overage-indicator")
+    end
+
+    @tag :capture_log
+    test "a failed quota load says so in the panel and leaves the page up", %{conn: conn} do
+      :meck.new(Arbiter.Quota.QuotaCache, [:passthrough, :no_link])
+      on_exit(fn -> :meck.unload(Arbiter.Quota.QuotaCache) end)
+
+      :meck.expect(Arbiter.Quota.QuotaCache, :fetch, fn _ws_id, _opts, _compute ->
+        raise "database is locked"
+      end)
+
+      {:ok, view, _html} = live(conn, ~p"/usage")
+      render_async(view)
+
+      assert has_element?(view, "#usage-quota-error")
+      refute has_element?(view, "#overage-indicator")
+      assert has_element?(view, "#quota-topbar-error")
+    end
+  end
 end

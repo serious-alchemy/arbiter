@@ -47,7 +47,8 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       {:ok, task} = Ash.create(Issue, %{title: "pd-quota", workspace_id: ws.id})
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "test/repo")
 
-      {:ok, _view, html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+      html = render_async(view)
 
       fills =
         html

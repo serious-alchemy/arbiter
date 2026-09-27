@@ -34,7 +34,8 @@ defmodule ArbiterWeb.MessagesLiveTest do
           body: "the API shape changed"
         })
 
-      {:ok, _view, html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+      html = render_async(view)
 
       assert html =~ "Mailbox"
       assert html =~ "the API shape changed"
@@ -46,6 +47,7 @@ defmodule ArbiterWeb.MessagesLiveTest do
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)
 
       {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+      render_async(view)
 
       view
       |> form("#mailbox form", %{"body" => "check the API contract"})
@@ -66,6 +68,7 @@ defmodule ArbiterWeb.MessagesLiveTest do
         Message.send_mail(%{workspace_id: ws.id, to_ref: task.id, body: "ack me"})
 
       {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+      render_async(view)
       assert render(view) =~ "ack me"
 
       view
@@ -85,7 +88,8 @@ defmodule ArbiterWeb.MessagesLiveTest do
       {:ok, task} = Ash.create(Issue, %{title: "live-mail", workspace_id: ws.id})
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)
 
-      {:ok, view, html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+      html = render_async(view)
       refute html =~ "arrived-after-mount"
 
       {:ok, _} =
@@ -115,7 +119,8 @@ defmodule ArbiterWeb.MessagesLiveTest do
           body: "surfaces on the tasks screen too"
         })
 
-      {:ok, _view, html} = live(conn, ~p"/tasks")
+      {:ok, view, _html} = live(conn, ~p"/tasks")
+      html = render_async(view)
 
       assert html =~ "Coordinator Mailbox"
       assert html =~ "needs a decision off-board"
@@ -137,7 +142,8 @@ defmodule ArbiterWeb.MessagesLiveTest do
           directive_ref: "bd-soren"
         })
 
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/")
+      html = render_async(view)
 
       assert html =~ "Coordinator Mailbox"
       assert html =~ "needs a decision"
@@ -156,7 +162,8 @@ defmodule ArbiterWeb.MessagesLiveTest do
       {:ok, _} =
         Message.notify(%{workspace_id: ws.id, subject: "just-an-fyi", body: "background hum"})
 
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/")
+      html = render_async(view)
 
       assert html =~ "coordinator-mailbox-empty"
       assert html =~ "0 unread"
@@ -164,7 +171,8 @@ defmodule ArbiterWeb.MessagesLiveTest do
     end
 
     test "updates live when coordinator mail is broadcast", %{conn: conn, ws: ws} do
-      {:ok, view, html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/")
+      html = render_async(view)
       refute html =~ "freshly-escalated"
 
       {:ok, _} =
@@ -189,6 +197,7 @@ defmodule ArbiterWeb.MessagesLiveTest do
         })
 
       {:ok, view, _html} = live(conn, "/")
+      render_async(view)
       assert render(view) =~ "ack-this-up"
 
       view
@@ -222,7 +231,8 @@ defmodule ArbiterWeb.MessagesLiveTest do
           body: "still-unread"
         })
 
-      {:ok, view, html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/")
+      html = render_async(view)
       # The read one is not in the unread view; the unread one is.
       refute html =~ "old-read"
       assert html =~ "still-unread"
@@ -252,6 +262,7 @@ defmodule ArbiterWeb.MessagesLiveTest do
         })
 
       {:ok, view, _html} = live(conn, "/")
+      render_async(view)
       assert render(view) =~ "live-clear-test"
 
       # Simulate arb inbox clear --all (the external, non-LiveView path).
@@ -284,6 +295,7 @@ defmodule ArbiterWeb.MessagesLiveTest do
         })
 
       {:ok, view, _html} = live(conn, "/")
+      render_async(view)
       # Only unread shows in the inbox panel.
       assert render(view) =~ "stays-unread"
 
@@ -321,6 +333,7 @@ defmodule ArbiterWeb.MessagesLiveTest do
       {:ok, _} = Message.mark_read(seen)
 
       {:ok, view, _html} = live(conn, "/")
+      render_async(view)
 
       # Two distinct figures, both rendered.
       assert render(view) =~ "1 unread"
@@ -360,6 +373,7 @@ defmodule ArbiterWeb.MessagesLiveTest do
         })
 
       {:ok, view, _html} = live(conn, "/")
+      render_async(view)
       assert render(view) =~ "1 unread"
 
       # Stop this mount before re-mounting below: an orphaned view stays
@@ -374,6 +388,7 @@ defmodule ArbiterWeb.MessagesLiveTest do
 
       # The drawer still owes it — nothing about the operator's view moved.
       {:ok, view, _html} = live(conn, "/")
+      render_async(view)
       html = render(view)
       assert html =~ "1 unread"
       assert html =~ "0 outstanding"
@@ -406,6 +421,7 @@ defmodule ArbiterWeb.MessagesLiveTest do
       # view's own handle_info runs. WorkspaceDetailLive has no matching
       # clause, so without a catch-all it crashed on any mail broadcast.
       {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      render_async(view)
 
       {:ok, _} =
         Message.send_mail(%{
@@ -427,6 +443,7 @@ defmodule ArbiterWeb.MessagesLiveTest do
       # WorkspaceDetailLive has no matching clause, so it crashed every
       # minute. The tick is hook-private state, so it must `:halt`.
       {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      render_async(view)
 
       send(view.pid, :coordinator_inbox_tick)
 

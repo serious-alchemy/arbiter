@@ -19,7 +19,8 @@ defmodule ArbiterWeb.QuotaTopbarTest do
   } do
     {:ok, _} = Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.24"}])
 
-    {:ok, _view, html} = live(conn, "/")
+    {:ok, view, _html} = live(conn, "/")
+    html = render_async(view)
 
     assert html =~ "Claude"
     refute html =~ "Codex"
@@ -36,7 +37,8 @@ defmodule ArbiterWeb.QuotaTopbarTest do
         provider: "codex"
       )
 
-    {:ok, _view, html} = live(conn, "/")
+    {:ok, view, _html} = live(conn, "/")
+    html = render_async(view)
 
     # Codex is filtered from the UI while dispatch is broken (bd-brr92u)
     assert html =~ "Claude"
@@ -50,6 +52,7 @@ defmodule ArbiterWeb.QuotaTopbarTest do
     {:ok, _} = Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.24"}])
 
     {:ok, view, _html} = live(conn, "/")
+    render_async(view)
 
     {:ok, _} = Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.9"}])
 
@@ -68,7 +71,8 @@ defmodule ArbiterWeb.QuotaTopbarTest do
         provider: "codex"
       )
 
-    {:ok, _view, html} = live(conn, "/usage")
+    {:ok, view, _html} = live(conn, "/usage")
+    html = render_async(view)
 
     # Codex is filtered from the UI while dispatch is broken (bd-brr92u)
     assert html =~ "Claude"
@@ -88,7 +92,8 @@ defmodule ArbiterWeb.QuotaTopbarTest do
 
     antigravity_quota!(ws)
 
-    {:ok, view, html} = live(conn, "/")
+    {:ok, view, _html} = live(conn, "/")
+    html = render_async(view)
 
     assert html =~ "Claude"
     assert html =~ "Antigravity"
@@ -105,7 +110,8 @@ defmodule ArbiterWeb.QuotaTopbarTest do
 
     antigravity_quota!(ws)
 
-    {:ok, view, html} = live(conn, "/usage")
+    {:ok, view, _html} = live(conn, "/usage")
+    html = render_async(view)
 
     assert html =~ "Claude"
     refute html =~ "Gemini CLI"
@@ -153,6 +159,7 @@ defmodule ArbiterWeb.QuotaTopbarTest do
       capture!(ws, 0.4)
 
       {:ok, view, _html} = live(conn, "/")
+      render_async(view)
 
       assert has_element?(
                view,
@@ -160,6 +167,7 @@ defmodule ArbiterWeb.QuotaTopbarTest do
              )
 
       {:ok, usage, _html} = live(conn, "/usage")
+      render_async(usage)
 
       assert has_element?(
                usage,
@@ -175,6 +183,7 @@ defmodule ArbiterWeb.QuotaTopbarTest do
       capture!(ws, 0.4)
 
       {:ok, view, _html} = live(conn, "/")
+      render_async(view)
 
       assert has_element?(
                view,
@@ -192,6 +201,7 @@ defmodule ArbiterWeb.QuotaTopbarTest do
       capture!(ws, 0.01, 0.35)
 
       {:ok, view, _html} = live(conn, "/")
+      render_async(view)
 
       assert has_element?(view, "#quota-topbar-claude-7d[data-quota-state=amber]")
       refute has_element?(view, "#quota-topbar-claude-7d[data-quota-hold]")
@@ -202,6 +212,7 @@ defmodule ArbiterWeb.QuotaTopbarTest do
       capture!(ws, 0.1)
 
       {:ok, view, _html} = live(conn, "/")
+      render_async(view)
       refute has_element?(view, "#quota-topbar-claude-5h[data-quota-hold]")
 
       capture!(ws, 0.4)
@@ -221,7 +232,8 @@ defmodule ArbiterWeb.QuotaTopbarTest do
       {:ok, _} = Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.24"}])
       antigravity_quota!(ws)
 
-      {:ok, view, html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/")
+      html = render_async(view)
       doc = LazyHTML.from_fragment(html)
 
       assert has_element?(view, "#quota-topbar.max-lg\\:hidden")
@@ -242,7 +254,8 @@ defmodule ArbiterWeb.QuotaTopbarTest do
     test "the antigravity bars carry the Gemini Models buckets", %{conn: conn, ws: ws} do
       antigravity_quota!(ws)
 
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/")
+      html = render_async(view)
       doc = LazyHTML.from_fragment(html)
 
       # gemini_models_5h is 25% used, gemini_models_weekly 60% used.
@@ -253,6 +266,7 @@ defmodule ArbiterWeb.QuotaTopbarTest do
       {:ok, _} = Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.24"}])
 
       {:ok, view, _html} = live(conn, "/")
+      render_async(view)
       refute has_element?(view, "#quota-topbar-antigravity")
 
       broadcast!(antigravity_quota!(ws, gemini_5h_remaining: 90.0))
@@ -270,6 +284,7 @@ defmodule ArbiterWeb.QuotaTopbarTest do
       antigravity_quota!(ws, message: agy_missing_message())
 
       {:ok, view, _html} = live(conn, "/")
+      render_async(view)
 
       assert has_element?(view, "#quota-topbar-antigravity [data-quota-bar][data-quota-stale]")
       assert has_element?(view, "#quota-topbar-antigravity [data-quota-note]", "stale")
@@ -286,7 +301,8 @@ defmodule ArbiterWeb.QuotaTopbarTest do
     } do
       antigravity_quota!(ws, models: [])
 
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/")
+      html = render_async(view)
       doc = LazyHTML.from_fragment(html)
 
       assert bars(doc, "#quota-topbar-antigravity") == 1

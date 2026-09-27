@@ -31,6 +31,7 @@ defmodule ArbiterWeb.UsageLive do
   alias Arbiter.Usage.Event
   alias ArbiterWeb.CoreComponents.{Data, Domain, Feedback, Navigation}
   require Ash.Query
+  require Logger
 
   @ranges ~w(7d 30d all)
   @tabs ~w(by_task by_model by_repo by_account)
@@ -41,6 +42,9 @@ defmodule ArbiterWeb.UsageLive do
      socket
      |> assign(:range, "30d")
      |> assign(:tab, "by_task")
+     |> assign(:overage_spend, 0.0)
+     |> assign(:in_overage, false)
+     |> maybe_load_overage()
      |> load_data()}
   end
 
@@ -94,7 +98,6 @@ defmodule ArbiterWeb.UsageLive do
     )
     |> assign(:repo_bars, bar_rows(repo_rollup, grand_cost, &repo_hue/2, &to_string/1))
     |> assign(:account_bars, bar_rows(account_rollup, grand_cost, &repo_hue/2, &account_label/1))
-    |> assign_overage()
   end
 
   # Overage-spend indicator (bd-7cd38f): when the Claude quota snapshot shows
@@ -104,22 +107,41 @@ defmodule ArbiterWeb.UsageLive do
   # the alert threshold — which sums by *provider account* since P7, so this
   # resolves the workspace's Claude account first and shows the whole plan's
   # overage rather than one workspace's slice of it.
-  defp assign_overage(socket) do
-    quota = Enum.find(socket.assigns[:quotas] || [], &(&1.provider == "claude"))
-    ws_id = socket.assigns[:_quota_workspace_id]
+  #
+  # The quota it reads is the top bar's, which `LiveHooks` loads off the mount
+  # (bd-adewb4), so it can't be read from the socket here; this runs its own
+  # `start_async/3` through the same `QuotaCache`-backed `load_quotas/0`. It
+  # doesn't depend on the range, so it runs once, on the connected mount.
+  defp maybe_load_overage(socket) do
+    if connected?(socket),
+      do: start_async(socket, :overage, &load_overage/0),
+      else: socket
+  end
 
-    {spend, in_overage?} =
-      case {quota, ws_id} do
-        {%{overage_status: "in_overage"} = q, ws} when is_binary(ws) ->
-          {Arbiter.Quota.Overage.windowed_spend(Arbiter.Quota.account_id(ws, "claude"), q), true}
+  # Trapping exits lets a read in flight finish when the view goes away,
+  # rather than dying holding a DB checkout (bd-6mfl0s).
+  defp load_overage do
+    Process.flag(:trap_exit, true)
+    {:ok, ws_id, quotas} = ArbiterWeb.LiveHooks.load_quotas()
 
-        _ ->
-          {0.0, false}
-      end
+    case {Enum.find(quotas, &(&1.provider == "claude")), ws_id} do
+      {%{overage_status: "in_overage"} = q, ws} when is_binary(ws) ->
+        {Arbiter.Quota.Overage.windowed_spend(Arbiter.Quota.account_id(ws, "claude"), q), true}
 
-    socket
-    |> assign(:overage_spend, spend)
-    |> assign(:in_overage, in_overage?)
+      _ ->
+        {0.0, false}
+    end
+  end
+
+  @impl true
+  def handle_async(:overage, {:ok, {spend, in_overage?}}, socket) do
+    {:noreply, socket |> assign(:overage_spend, spend) |> assign(:in_overage, in_overage?)}
+  end
+
+  # An indicator, not the page: a failed read leaves it off.
+  def handle_async(:overage, {:exit, reason}, socket) do
+    Logger.warning("UsageLive: reading the overage spend failed: #{inspect(reason)}")
+    {:noreply, socket}
   end
 
   # One ledger read for every rollup on the page (bd-5cevwg) — the read, not
@@ -456,42 +478,65 @@ defmodule ArbiterWeb.UsageLive do
           <div class="flex flex-col gap-4">
             <.panel title="Rate limits" meta="live">
               <div class="flex flex-col gap-3">
-                <div
-                  :for={quota <- @quotas}
-                  id={"usage-quota-#{quota.provider}"}
-                  class="flex flex-col gap-[3px]"
-                >
-                  <span class="text-[9.5px] uppercase tracking-[0.08em] leading-none text-[var(--text-label)] font-[family-name:var(--font-mono)]">
-                    {quota_provider_label(quota.provider)}
-                  </span>
-                  <%!-- Antigravity's two bucket groups each get their own pair
+                <%!-- The top bar's quota, loaded off the mount by `LiveHooks`
+                      (bd-adewb4). --%>
+                <.async_result :let={quotas} assign={@quotas}>
+                  <:loading>
+                    <p
+                      id="usage-quota-loading"
+                      class="m-0 flex items-center gap-2 text-[12px] text-[var(--text-secondary)]"
+                    >
+                      <.icon name="hero-arrow-path-micro" class="size-4 shrink-0 animate-spin" />
+                      Loading rate limits…
+                    </p>
+                  </:loading>
+                  <:failed>
+                    <p
+                      id="usage-quota-error"
+                      role="alert"
+                      class="m-0 flex items-start gap-2 text-[12px] text-[var(--arb-fail-text)]"
+                    >
+                      <.icon name="hero-exclamation-triangle-micro" class="size-4 shrink-0 mt-px" />
+                      Could not load rate limits.
+                    </p>
+                  </:failed>
+                  <div
+                    :for={quota <- quotas}
+                    id={"usage-quota-#{quota.provider}"}
+                    class="flex flex-col gap-[3px]"
+                  >
+                    <span class="text-[9.5px] uppercase tracking-[0.08em] leading-none text-[var(--text-label)] font-[family-name:var(--font-mono)]">
+                      {quota_provider_label(quota.provider)}
+                    </span>
+                    <%!-- Antigravity's two bucket groups each get their own pair
                         (bd-gukyy1); anything else — including an antigravity
                         row with no parseable buckets — is the view's own
                         primary/secondary windows. --%>
-                  <%= case usage_quota_groups(quota) do %>
-                    <% [] -> %>
-                      <div class="flex flex-col gap-[6px]">
-                        <.usage_quota_bar
-                          :for={w <- quota_windows(quota)}
-                          quota={quota}
-                          w={w}
-                        />
-                      </div>
-                    <% groups -> %>
-                      <div
-                        :for={group <- groups}
-                        id={"usage-quota-#{quota.provider}-#{group.group}"}
-                        class="flex flex-col gap-[4px] mt-[3px]"
-                      >
-                        <span class="text-[10px] leading-none text-[var(--text-secondary)] font-[family-name:var(--font-mono)]">
-                          {group.label}
-                        </span>
+                    <%= case usage_quota_groups(quota) do %>
+                      <% [] -> %>
                         <div class="flex flex-col gap-[6px]">
-                          <.usage_quota_bar :for={w <- group.windows} quota={quota} w={w} />
+                          <.usage_quota_bar
+                            :for={w <- quota_windows(quota)}
+                            quota={quota}
+                            w={w}
+                          />
                         </div>
-                      </div>
-                  <% end %>
-                </div>
+                      <% groups -> %>
+                        <div
+                          :for={group <- groups}
+                          id={"usage-quota-#{quota.provider}-#{group.group}"}
+                          class="flex flex-col gap-[4px] mt-[3px]"
+                        >
+                          <span class="text-[10px] leading-none text-[var(--text-secondary)] font-[family-name:var(--font-mono)]">
+                            {group.label}
+                          </span>
+                          <div class="flex flex-col gap-[6px]">
+                            <.usage_quota_bar :for={w <- group.windows} quota={quota} w={w} />
+                          </div>
+                        </div>
+                    <% end %>
+                  </div>
+                </.async_result>
                 <p class="m-0 text-[11.5px] leading-[1.55] text-[var(--text-secondary)]">
                   The hairline is elapsed time. Bar past the line means you are burning faster than the window.
                 </p>

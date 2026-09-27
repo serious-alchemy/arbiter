@@ -875,25 +875,30 @@ defmodule ArbiterWeb.WorkerDetailLive do
                   </:item>
                 </.data_list>
 
-                <div :if={@quotas != []} class="flex flex-col gap-2">
-                  <span class="font-medium text-[10.5px] tracking-[var(--tracking-eyebrow)] uppercase text-[var(--text-label)] font-[family-name:var(--font-mono)]">
-                    Quota
-                  </span>
-                  <.quota_bar
-                    :for={{w, i} <- Enum.with_index(QuotaHelpers.quota_windows(hd(@quotas)))}
-                    provider={hd(@quotas).provider}
-                    show_label={i == 0}
-                    window={w.window}
-                    label={w.label}
-                    utilization={w.utilization}
-                    reset_at={w.reset_at}
-                    overage_status={hd(@quotas).overage_status}
-                    representative_claim={hd(@quotas).representative_claim}
-                    stale_message={hd(@quotas).message}
-                    gate_policy={Map.get(hd(@quotas), :gate_policy)}
-                    width={140}
-                  />
-                </div>
+                <%!-- `@quotas` is loaded off the mount by `LiveHooks`
+                      (bd-adewb4); the top bar carries its loading and error
+                      states, so this block just waits for the list. --%>
+                <.async_result :let={quotas} assign={@quotas}>
+                  <div :if={quotas != []} id="worker-quota" class="flex flex-col gap-2">
+                    <span class="font-medium text-[10.5px] tracking-[var(--tracking-eyebrow)] uppercase text-[var(--text-label)] font-[family-name:var(--font-mono)]">
+                      Quota
+                    </span>
+                    <.quota_bar
+                      :for={{w, i} <- Enum.with_index(QuotaHelpers.quota_windows(hd(quotas)))}
+                      provider={hd(quotas).provider}
+                      show_label={i == 0}
+                      window={w.window}
+                      label={w.label}
+                      utilization={w.utilization}
+                      reset_at={w.reset_at}
+                      overage_status={hd(quotas).overage_status}
+                      representative_claim={hd(quotas).representative_claim}
+                      stale_message={hd(quotas).message}
+                      gate_policy={Map.get(hd(quotas), :gate_policy)}
+                      width={140}
+                    />
+                  </div>
+                </.async_result>
 
                 <div class="flex flex-col gap-[7px]">
                   <span class="font-medium text-[10.5px] tracking-[var(--tracking-eyebrow)] uppercase text-[var(--text-label)] font-[family-name:var(--font-mono)]">
