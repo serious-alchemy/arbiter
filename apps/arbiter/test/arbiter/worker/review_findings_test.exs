@@ -65,6 +65,31 @@ defmodule Arbiter.Worker.ReviewFindingsTest do
       assert ReviewFindings.extract(nil, 1) == []
       assert ReviewFindings.extract("VERDICT: APPROVE\n", 1) == []
     end
+
+    test "a numbered item's 3-space-indented sub-bullets are continuation, not new findings (bd-93cnn9)" do
+      # "3. " is 3 characters wide, so a reviewer's elaboration sub-bullets
+      # naturally indent 3 spaces to align under it — the same column range
+      # @item used to treat as a brand-new top-level item. Observed live on
+      # bd-6d3h8m / PR #2074: an approving round's item 3 ("**[Low]**
+      # ... non-blocking") spawned three extra severity-:unknown (fail-closed
+      # blocking) findings from its own continuation bullets, and one of them
+      # cited a path (`~/.arbiter/arbiter.sqlite3`) no revision could ever
+      # "touch", tripping the approval-gap guard on a clean APPROVE.
+      findings = """
+      VERDICT: REQUEST_CHANGES
+
+      1. **[Medium]** `a.ex:1` — the real finding.
+      2. **[Low]** `b.ex:2` — non-blocking, fine to leave as-is.
+         - The file is named after that round, but it's a fair trim.
+         - The real reviews mark AC1 and AC2 met.
+         - Fix: base the fixture on that real text.
+      """
+
+      assert [one, two] = ReviewFindings.extract(findings, 1)
+      assert one.severity == :medium
+      assert two.severity == :low
+      assert two.text =~ "Fix: base the fixture"
+    end
   end
 
   describe "blocking?/1 severity ranking" do

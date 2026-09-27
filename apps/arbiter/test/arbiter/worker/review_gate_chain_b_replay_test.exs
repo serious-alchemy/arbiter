@@ -15,6 +15,11 @@ defmodule Arbiter.Worker.ReviewGateChainBReplayTest do
     2. the task carries the park reason a human can act on;
     3. **exactly one** coordinator escalation (invariant I3);
     4. nothing merged — the content half of the guard is still closed.
+
+  Shape 4 (bd-c6tdbu, second half) no longer parks: bd-93cnn9 found it firing
+  twice in production on a clean APPROVE (bd-6d3h8m / PR #2074, bd-9inpfa / PR
+  #2084), so a no-op fix round after an approval-gap rejection now merges
+  instead, honoring the reviewer's own verdict.
   """
 
   use Arbiter.DataCase, async: false
@@ -230,24 +235,49 @@ defmodule Arbiter.Worker.ReviewGateChainBReplayTest do
     assert Ash.read!(Arbiter.Reviews.Coverage.Entry) == []
   end
 
-  # bd-c6tdbu, second half: the fix round the gap-rejected APPROVE forced had
-  # nothing to fix, so HEAD did not move. The escalation still names the open
-  # finding (bd-c6tdbu's own AC4) — it just parks now instead of failing.
-  test "shape 4 — a no-op fix round after an approval-gap rejection parks",
+  # bd-c6tdbu, second half — superseded by bd-93cnn9: the fix round the
+  # gap-rejected APPROVE forced had nothing to fix, so HEAD did not move. This
+  # USED to park behind a human decision (naming the open finding, bd-c6tdbu's
+  # own AC4); observed live twice in production (bd-6d3h8m / PR #2074, bd-9inpfa
+  # / PR #2084), both times the fix round correctly found nothing to change and
+  # the park cost a slot and a coordinator hand-ruling on work already
+  # approved. A no-op fix round is evidence FOR the reviewer's own APPROVE, not
+  # grounds to override it — so the gate now merges instead, the same as any
+  # other converging round.
+  test "shape 4 — a no-op fix round after an approval-gap rejection merges instead of parking",
        %{repo: repo, ws: ws} do
     task = new_task(ws)
+    branch = "feature/chain-b"
+    :ok = seed_feature_branch(repo, branch)
 
-    run_gate(task, repo, %{
-      review_rounds: 3,
-      review_command: [@unaddressed, "NOT_ADDRESSED"],
-      revise_command: [@revise_commit_once]
-    })
+    {:ok, pid} =
+      Worker.start(
+        task_id: task.id,
+        repo: "trib/repo",
+        workspace_id: task.workspace_id,
+        meta: %{
+          branch: branch,
+          repo_path: repo,
+          target_branch: "main",
+          merge_title: "Merge #{task.id}",
+          review_required: true,
+          worktree_path: repo,
+          review_timeout_ms: 5_000,
+          review_rounds: 3,
+          review_command: [@unaddressed, "NOT_ADDRESSED"],
+          revise_command: [@revise_commit_once]
+        }
+      )
 
-    assert_parked(task, ws, repo, :no_changes_after_approval_gap)
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+    :ok = Worker.advance(pid, :claude)
+    send(pid, {:__claude_session_done__, "arb done"})
 
-    assert [escalation] = escalations(ws, task)
-    assert escalation.body =~ "APPROVE was rejected ONLY because"
-    assert escalation.body =~ "NOT auto-accepted"
+    wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 10_000)
+
+    assert merge_commit_count(repo) == 1
+    refute Ash.get!(Issue, task.id) |> Arbiter.Tasks.ReviewPark.parked?()
+    assert escalations(ws, task) == []
   end
 
   # Round 1 review finding: a reviewer that could never be SPAWNED (quota gate

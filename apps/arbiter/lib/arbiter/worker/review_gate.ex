@@ -303,7 +303,6 @@ defmodule Arbiter.Worker.ReviewGate do
           | :reviewer_failed
           | :reviewer_timeout
           | :verdict_guard_exhausted
-          | :no_changes_after_approval_gap
           | :commit_gate_no_changes
           | :commit_gate_no_changes_after_non_file_fix
           | :commit_gate_uncommitted
@@ -1699,6 +1698,15 @@ defmodule Arbiter.Worker.ReviewGate do
   # via `Worktree.create/3` are always checked out on the per-task branch, so
   # the guard is fully live there.
   defp finalize_approval(state, verdict, findings) do
+    {:done, finalize_approval_state(state, verdict, findings)}
+  end
+
+  # The bare-state core of `finalize_approval/3`, for callers that already own
+  # their own `{:done, _}` wrapping (bd-93cnn9: `escalate_no_changes/1`, whose
+  # caller wraps it the same way `escalate_commit_gate/2`'s bare-state return
+  # does — double-wrapping here would hand a `{:done, state}` tuple where a
+  # plain state map is expected).
+  defp finalize_approval_state(state, verdict, findings) do
     # bd-a22hib: a round checkout IS the branch's pushed head by construction
     # (detached, so the on-branch test would always say no) — ask it directly.
     empty_net_diff? =
@@ -1713,12 +1721,12 @@ defmodule Arbiter.Worker.ReviewGate do
       )
 
       record_round(state, :review, :request_changes, findings, converged: false)
-      {:done, finish(state, {:parked, :empty_net_diff, findings})}
+      finish(state, {:parked, :empty_net_diff, findings})
     else
       record_round(state, :review, :approve, findings, converged: true)
       stamp_reviewed_head(state)
       record_review_coverage(state)
-      {:done, finish(state, verdict)}
+      finish(state, verdict)
     end
   end
 
@@ -1807,8 +1815,14 @@ defmodule Arbiter.Worker.ReviewGate do
   # bd-c6tdbu: only the `:unaddressed_findings` guard's reject carries the gap
   # forward — a plain REQUEST_CHANGES or any other guard's reject is not "an
   # approval this fix round is standing in for", so it clears the flag instead.
-  defp approval_gap_pending_for(%{reason: :unaddressed_findings, gap: gap}), do: %{gap: gap}
-  defp approval_gap_pending_for(_spec), do: nil
+  # bd-93cnn9: the reviewer's own (untouched) APPROVE findings travel with the
+  # gap, not just the gap itself — `escalate_no_changes/1` needs them to honor
+  # the original APPROVE if the fix round that follows turns out to have
+  # nothing to change.
+  defp approval_gap_pending_for(%{reason: :unaddressed_findings, gap: gap}, findings),
+    do: %{gap: gap, findings: findings}
+
+  defp approval_gap_pending_for(_spec, _findings), do: nil
 
   # The post-reject routing, shared by a plain REQUEST_CHANGES and the
   # unmet-criteria reject (bd-4yhv4x). With the round budget exhausted, record
@@ -2165,13 +2179,31 @@ defmodule Arbiter.Worker.ReviewGate do
   # existing :no_changes case) UNLESS it was launched only to stand in for an
   # APPROVE the `:unaddressed_findings` guard rejected (bd-6r8caj). In that
   # specific case "no changes" does not mean the implementer failed to act —
-  # it means there was nothing to act ON, which is exactly the shape of an
-  # honest APPROVE dispositioning a non-blocking observation `[NOT ADDRESSED]`.
-  # Escalate naming the open findings rather than the generic, misleading
-  # "fix round produced no changes" failure; a human decides, so bd-6r8caj's
-  # protection against silently accepting a real unaddressed finding holds.
-  defp escalate_no_changes(%{approval_gap_pending: %{gap: gap}} = state) when not is_nil(gap) do
-    escalate_commit_gate(state, {:no_changes_after_approval_gap, gap})
+  # it means there was nothing to act ON.
+  #
+  # bd-93cnn9: that used to escalate to a park either way, on the theory that a
+  # human should judge whether the open finding(s) genuinely still need a fix.
+  # Observed twice in production (bd-6d3h8m / PR #2074, bd-9inpfa / PR #2084):
+  # both times the fix round correctly found nothing to change, and the park
+  # cost a slot and a coordinator hand-ruling on work the reviewer had already
+  # approved. The gate's OWN verdict for this round is `:approve` (fail_closed
+  # records it honestly, `converged: false`, precisely so this is queryable) —
+  # a fix round that verifies there is nothing left to act on is evidence FOR
+  # that approval, not grounds to override it. Honor it: finalize the same
+  # APPROVE the reviewer actually gave, the same way any other converging round
+  # does, rather than parking behind a human decision that a no-op round cannot
+  # supply new information for.
+  defp escalate_no_changes(%{approval_gap_pending: %{gap: gap, findings: findings}} = state)
+       when not is_nil(gap) do
+    Logger.info(
+      "ReviewGate: task=#{state.task_id} round #{state.round} fix round produced no changes " <>
+        "after an approval-gap rejection (open finding(s): " <>
+        Enum.map_join(ReviewFindings.gap_findings(gap), ", ", & &1.id) <>
+        "); the reviewer's own verdict was APPROVE and there is nothing left to act on, so " <>
+        "merging instead of parking"
+    )
+
+    finalize_approval_state(state, {:approve, findings}, findings)
   end
 
   defp escalate_no_changes(state), do: escalate_commit_gate(state, :no_changes)
@@ -2443,23 +2475,6 @@ defmodule Arbiter.Worker.ReviewGate do
         "dispatched.\n\n" <> escalation_payload(state)
 
     finish(state, {:parked, :commit_gate_no_changes_after_non_file_fix, msg})
-  end
-
-  defp escalate_commit_gate(state, {:no_changes_after_approval_gap, gap}) do
-    findings = ReviewFindings.gap_findings(gap)
-
-    msg =
-      "#{@commit_gate_no_changes_marker} (task #{state.task_id}, round #{state.round}). " <>
-        "The previous round's APPROVE was rejected ONLY because the following open " <>
-        "finding(s) were left undispositioned, marked NOT ADDRESSED, or unproven — and the " <>
-        "fix round that followed made no code change (HEAD did not move, worktree clean):\n\n" <>
-        ReviewFindings.open_findings_block(findings, nil) <>
-        "\nThis may mean the finding(s) genuinely still need a fix, or that the approving " <>
-        "round's own account of them (e.g. a non-blocking observation with no change " <>
-        "requested) was accurate and the approval should not have been rejected. A human " <>
-        "must decide — the approval was NOT auto-accepted.\n\n" <> escalation_payload(state)
-
-    finish(state, {:parked, :no_changes_after_approval_gap, msg})
   end
 
   @doc """
@@ -3170,7 +3185,7 @@ defmodule Arbiter.Worker.ReviewGate do
 
     state = %{
       state
-      | approval_gap_pending: approval_gap_pending_for(spec),
+      | approval_gap_pending: approval_gap_pending_for(spec, findings),
         # bd-9zuvbh: remember that THIS reject came from a guard, not from a
         # reviewer. `do_route_after_reject/2` needs it to tell an exhausted
         # verdict guard (class C: park) from a genuine REQUEST_CHANGES at the

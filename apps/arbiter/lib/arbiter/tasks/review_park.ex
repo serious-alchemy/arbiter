@@ -62,7 +62,6 @@ defmodule Arbiter.Tasks.ReviewPark do
           | :reviewer_failed
           | :reviewer_timeout
           | :verdict_guard_exhausted
-          | :no_changes_after_approval_gap
           | :commit_gate_no_changes
           | :commit_gate_no_changes_after_non_file_fix
           | :commit_gate_uncommitted
@@ -81,8 +80,6 @@ defmodule Arbiter.Tasks.ReviewPark do
         "quota, a dead gateway — before it could produce a verdict (G3)",
     verdict_guard_exhausted:
       "a verdict guard refused the reviewer's APPROVE and its re-prompt budget is spent (G9–G13)",
-    no_changes_after_approval_gap:
-      "the fix round that stood in for a guard-rejected APPROVE made no code change (G16)",
     commit_gate_no_changes: "a fix round left HEAD unmoved and the worktree clean (G15/G16)",
     commit_gate_no_changes_after_non_file_fix:
       "a fix round left HEAD unmoved twice in a row after resolving findings through a " <>
@@ -114,8 +111,6 @@ defmodule Arbiter.Tasks.ReviewPark do
     reviewer_failed: "the reviewer's session failed",
     reviewer_timeout: "reviewing pass timed out",
     verdict_guard_exhausted: "a verdict guard refused the reviewer's APPROVE",
-    no_changes_after_approval_gap:
-      "fix round produced no changes after an approval-gap rejection",
     commit_gate_no_changes: "fix round produced no changes",
     commit_gate_no_changes_after_non_file_fix:
       "fix round produced no changes after resolving findings without a file change",

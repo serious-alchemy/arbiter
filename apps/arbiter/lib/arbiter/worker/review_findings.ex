@@ -87,10 +87,18 @@ defmodule Arbiter.Worker.ReviewFindings do
   # match by accident inside a finding's own prose.
   @non_blocking_header ~r/^\s*\#{0,6}\s*(?:non-?blocking(?:\s+observations?)?|observations?|no\s+changes?\s+requested|no\s+action\s+needed)(?:\s*\([^)]*\))?\s*:?\s*$/i
 
-  # A top-level enumerated item: `-`, `*`, or `1.`/`1)` at column 0..3. Deeper
-  # indentation is a continuation line of the item above it, not a new finding —
-  # a nested sub-bullet must not fragment one finding into several ids.
-  @item ~r/^ {0,3}(?:[-*]|\d+[.)])\s+\S/
+  # A top-level enumerated item: `-`, `*`, or `1.`/`1)` at column 0. Anything
+  # indented — including a `-`/`*` sub-bullet — is a continuation line of the
+  # item above it, not a new finding: a nested sub-bullet must not fragment one
+  # finding into several ids. This must be a strict column 0, not a tolerance
+  # range: a numbered marker like `2. ` is itself 3 characters wide, so a
+  # reviewer's own elaboration sub-bullets naturally indent 3 spaces to align
+  # under it, colliding with any wider "top-level" allowance (bd-93cnn9 / #2087
+  # — a 3-space-indented sub-bullet under an approving round's own Low finding
+  # was misread as three brand-new, severity-less (so fail-closed BLOCKING)
+  # findings, one of which cited a path no revision could ever "touch" and
+  # tripped the approval-gap guard's mechanical backstop on a clean APPROVE).
+  @item ~r/^(?:[-*]|\d+[.)])\s+\S/
 
   # A file path token, optionally with `:line` / `:line-line`. Deliberately
   # requires a dotted extension of 1..6 letters so ordinary prose ("e.g.", "i.e.")

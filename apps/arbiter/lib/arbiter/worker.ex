@@ -6229,28 +6229,27 @@ defmodule Arbiter.Worker do
   # nothing. Point at the coordinator escalation mail instead, which is
   # always sent alongside a non-approve verdict (`escalate_review_gate/3`).
   # bd-cb7wpq: a commit-gate-family park (`park_reason` below) is reached only
-  # after a round genuinely returned REQUEST_CHANGES (or an APPROVE a guard
-  # refused) — the fix round that followed just had nothing new to show for
-  # it. Labeling that "INCONCLUSIVE (no verdict)" reads as if the reviewer
-  # never said anything, when a real verdict is sitting one `review_gate_rounds_list`
-  # call away. `verdict`/`meta.failure_reason` themselves stay untouched
+  # after a round genuinely returned REQUEST_CHANGES — the fix round that
+  # followed just had nothing new to show for it. Labeling that "INCONCLUSIVE
+  # (no verdict)" reads as if the reviewer never said anything, when a real
+  # verdict is sitting one `review_gate_rounds_list` call away. `verdict`/
+  # `meta.failure_reason` themselves stay untouched
   # (`park_verdict_for/1`'s `:no_verdict` — Loop.FailureClassifier and friends
   # still key off that literal atom); only this human-readable note changes.
   @commit_gate_park_reasons [
     :commit_gate_no_changes,
     :commit_gate_uncommitted,
-    :no_changes_after_approval_gap,
     :commit_gate_no_changes_after_non_file_fix
   ]
 
   # "findings resolved" is true ONLY for the non-file-fix park: that's the one
   # case where the implementer actually addressed every finding (through a PR
   # title/description/label edit, a comment) and the fix round just had no
-  # file diff to show for it. The other three reasons in
-  # `@commit_gate_park_reasons` are the idle-worker / uncommitted-work /
-  # approval-gap shapes the gate exists to catch — claiming their findings were
-  # resolved would be false, so they fall through to the generic clause below,
-  # which reports the last round's REAL verdict instead of a hardcoded one.
+  # file diff to show for it. The other two reasons in
+  # `@commit_gate_park_reasons` are the idle-worker / uncommitted-work shapes
+  # the gate exists to catch — claiming their findings were resolved would be
+  # false, so they fall through to the generic clause below, which reports the
+  # last round's REAL verdict instead of a hardcoded one.
   defp format_review_gate_note(
          :no_verdict,
          findings,

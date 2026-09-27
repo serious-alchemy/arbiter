@@ -3470,17 +3470,20 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert Worker.state(pid).meta.failure_reason == :review_gate_rejected
     end
 
-    # bd-c6tdbu (AC4): the `:unaddressed_findings` guard's rejection of an
-    # APPROVE (exercised above) starts a fix round the same way a plain
-    # REQUEST_CHANGES does. When the implementer genuinely has nothing left to
-    # fix — round 1's finding was already addressed by a real commit, and the
-    # round-2 "fix round" that follows the gap-rejected APPROVE touches
-    # nothing — the commit gate must not strand the run behind the generic,
-    # misleading "fix round produced no changes" escalation. It must instead
-    # name the open finding(s) that blocked the approval, so a human reads the
-    # actual situation (an approved, green PR held up only by a disposition
-    # disagreement) rather than "the implementer failed to act."
-    test "a no-op fix round after an approval-gap rejection escalates naming the open finding, not generically",
+    # bd-c6tdbu (AC4) — superseded by bd-93cnn9: the `:unaddressed_findings`
+    # guard's rejection of an APPROVE (exercised above) starts a fix round the
+    # same way a plain REQUEST_CHANGES does. When the implementer genuinely has
+    # nothing left to fix — round 1's finding was already addressed by a real
+    # commit, and the round-2 "fix round" that follows the gap-rejected APPROVE
+    # touches nothing — this USED to strand the run behind a park naming the
+    # open finding(s), on the theory a human should judge whether the approval
+    # should have been rejected. Observed live twice in production (bd-6d3h8m /
+    # PR #2074, bd-9inpfa / PR #2084): both times the fix round correctly found
+    # nothing to change, and the park cost a slot and a coordinator hand-ruling
+    # on work already approved. A no-op fix round is evidence FOR the
+    # reviewer's own APPROVE, not grounds to override it — so the gate now
+    # merges instead.
+    test "a no-op fix round after an approval-gap rejection merges instead of escalating",
          %{repo: repo, ws: ws} do
       task = new_task(ws)
       branch = "feature/rev"
@@ -3509,28 +3512,41 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 10_000)
-      assert merge_commit_count(repo) == 0
-      assert Worker.state(pid).meta.failure_reason == :review_gate_inconclusive
+      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 10_000)
+      assert merge_commit_count(repo) == 1
 
       escalations = Message.inbox("admiral", workspace_id: ws.id)
-      escalation = Enum.find(escalations, &(&1.directive_ref == task.id))
-      assert escalation, "expected an escalation to the coordinator"
-      assert escalation.subject =~ "fix round produced no changes"
 
-      assert escalation.body =~ "APPROVE was rejected ONLY because"
-      assert escalation.body =~ "F1.1"
-      assert escalation.body =~ "NOT auto-accepted"
+      refute Enum.find(escalations, &(&1.directive_ref == task.id)),
+             "expected no coordinator escalation — the reviewer's APPROVE was honored"
+
+      require Ash.Query
+
+      rounds =
+        Arbiter.ReviewGate.Round
+        |> Ash.Query.filter(task_id == ^task.id)
+        |> Ash.read!()
+
+      # The guard's honest rejection is still on the record (converged: false),
+      # alongside the final round that honored the APPROVE (converged: true) —
+      # both are real, queryable history, not one overwriting the other.
+      assert Enum.any?(
+               rounds,
+               &(&1.role == :review and &1.verdict == :approve and not &1.converged)
+             )
+
+      assert Enum.any?(rounds, &(&1.role == :review and &1.verdict == :approve and &1.converged))
     end
 
     # bd-cb7wpq (Finding 2a): the approval-gap escalation must win even when
     # the no-op fix round ALSO prints the `NO-FILE-CHANGE:` marker —
     # `commit_gate_outcome/3` checks `approval_gap_pending?/1` first, before
     # `non_file_fix_declared?/1`, so a guard-rejected APPROVE never gets
-    # silently swapped for the generic non-file-fix advance/park. The park
-    # reason is the gap-specific one, and the verdict label surfaces the real
-    # (guard-refused) APPROVE instead of a bare INCONCLUSIVE.
-    test "a no-op fix round that ALSO declares NO-FILE-CHANGE still escalates the approval gap, not the generic non-file-fix path",
+    # silently swapped for the generic non-file-fix advance/park path. Per
+    # bd-93cnn9 the approval-gap outcome itself now merges rather than parks
+    # (see the test above) — this pins that the ordering still holds even when
+    # a second, unrelated signal (`NO-FILE-CHANGE:`) is also present.
+    test "a no-op fix round that ALSO declares NO-FILE-CHANGE still merges via the approval-gap path, not the generic non-file-fix path",
          %{repo: repo, ws: ws} do
       task = new_task(ws)
       branch = "feature/rev"
@@ -3559,22 +3575,15 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 10_000)
-      assert merge_commit_count(repo) == 0
+      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 10_000)
+      assert merge_commit_count(repo) == 1
 
-      parked = Ash.get!(Issue, task.id)
-      assert parked.review_park_reason == "no_changes_after_approval_gap"
+      refute Ash.get!(Issue, task.id) |> Arbiter.Tasks.ReviewPark.parked?()
 
       escalations = Message.inbox("admiral", workspace_id: ws.id)
-      escalation = Enum.find(escalations, &(&1.directive_ref == task.id))
-      assert escalation, "expected an escalation to the coordinator"
-      assert escalation.body =~ "APPROVE was rejected ONLY because"
-      assert escalation.body =~ "F1.1"
-      assert escalation.body =~ "NOT auto-accepted"
 
-      # The last real review round's verdict was APPROVE (rejected only by the
-      # guard) — the label must surface that, not "INCONCLUSIVE (no verdict)".
-      assert Ash.get!(Issue, task.id).notes =~ "ReviewGate verdict: APPROVE (a guard refused it)"
+      refute Enum.find(escalations, &(&1.directive_ref == task.id)),
+             "expected no coordinator escalation — the reviewer's APPROVE was honored"
 
       require Ash.Query
 
