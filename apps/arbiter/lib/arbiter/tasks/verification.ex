@@ -140,7 +140,12 @@ defmodule Arbiter.Tasks.Verification do
     # nothing local to match it, and a retry would push a second close. This
     # mirrors the unflagged branch, where `SyncTracker` runs as an after-action
     # *inside* the transition and so cannot fire without it.
-    case Ash.update(task, %{}, action: :await_verification) do
+    #
+    # bd-842qio: a ticket enters `:verifying` only from `:active` or
+    # `:merging`. A PR that merged while its ticket sat in the queue (a requeue
+    # after the PR opened, a merge by hand) is put to work first, exactly as a
+    # dispatch would, so the merge still parks it rather than failing.
+    case park(task) do
       {:ok, awaiting} ->
         if Keyword.get(opts, :close_upstream, true) do
           # Not deferred: the PR body's `Closes #N` has already closed the
@@ -192,6 +197,14 @@ defmodule Arbiter.Tasks.Verification do
   end
 
   # ---- internals ---------------------------------------------------------
+
+  # `start_work/2` is a no-op for a ticket already at work and refuses one that
+  # is verifying or closed — so a second finalize still errors without paging.
+  defp park(%Issue{} = task) do
+    with {:ok, working} <- Issue.start_work(task) do
+      Ash.update(working, %{}, action: :await_verification)
+    end
+  end
 
   defp ensure_awaiting(%Issue{status: :awaiting_verification}), do: :ok
   defp ensure_awaiting(%Issue{}), do: {:error, :not_awaiting_verification}

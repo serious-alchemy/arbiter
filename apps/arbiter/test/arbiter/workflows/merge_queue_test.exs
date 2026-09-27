@@ -377,6 +377,23 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       assert reloaded.pr_ref == "#77"
     end
 
+    # bd-842qio: the MergeQueue opening the PR is the ticket's `open_pr`
+    # transition, the same as the worker's own PR-opened path.
+    @tag workspace_config: @ws_github
+    test "opening the PR moves an active ticket to :merging", %{workspace: ws, task: task} do
+      {:ok, %Issue{state: :active}} = Ash.update(task, %{status: :in_progress})
+
+      stub(fn conn ->
+        conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => 78})
+      end)
+
+      {_pid, name} = start_merge_queue(ws)
+      :ok = MergeQueue.enqueue(name, task.id)
+
+      reloaded = Ash.get!(Issue, task.id)
+      assert {reloaded.state, reloaded.status, reloaded.pr_ref} == {:merging, :in_progress, "#78"}
+    end
+
     @tag workspace_config: @ws_github
     test "writes pr_ref even when tracker_ref is already set (issue ref preserved)", %{
       workspace: ws,
@@ -658,6 +675,26 @@ defmodule Arbiter.Workflows.MergeQueueTest do
 
       # The task's pr_ref is unchanged.
       assert Ash.get!(Issue, task.id).pr_ref == "#55"
+    end
+
+    # bd-842qio: adopting the PR hands the ticket to the merge path — the same
+    # `open_pr` transition as opening one. The ref was recorded while the
+    # ticket was still at work (the pre-review open, bd-129xh4), which leaves
+    # it `:active`.
+    @tag workspace_config: @ws_github
+    test "adopting the PR moves an active ticket to :merging", %{workspace: ws, task: task} do
+      {:ok, task} = Ash.update(task, %{status: :in_progress})
+      {:ok, %Issue{state: :active} = task} = Ash.update(task, %{pr_ref: "#56"})
+
+      stub(fn conn ->
+        conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => 999})
+      end)
+
+      {_pid, name} = start_merge_queue(ws)
+      assert :ok = MergeQueue.enqueue(name, task.id)
+
+      reloaded = Ash.get!(Issue, task.id)
+      assert {reloaded.state, reloaded.status, reloaded.pr_ref} == {:merging, :in_progress, "#56"}
     end
   end
 

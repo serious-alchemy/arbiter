@@ -176,10 +176,11 @@ defmodule Arbiter.Tasks.EdgeGateConformanceTest do
     closed
   end
 
-  # Merged, waiting on the coordinator's restart-and-observe. Reachable from
-  # `:open` directly (see `Issue.Changes.GuardStatus`).
+  # Merged, waiting on the coordinator's restart-and-observe. Since bd-842qio
+  # only work in progress parks there, so the ticket is started first.
   defp await(issue) do
-    {:ok, parked} = Ash.update(issue, %{}, action: :await_verification)
+    {:ok, started} = Ash.update(issue, %{status: :in_progress})
+    {:ok, parked} = Ash.update(started, %{}, action: :await_verification)
     parked
   end
 end

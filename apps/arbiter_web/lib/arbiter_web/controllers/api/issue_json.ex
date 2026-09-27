@@ -43,6 +43,12 @@ defmodule ArbiterWeb.Api.IssueJSON do
       qa_notes: issue.qa_notes,
       deployment_notes: issue.deployment_notes,
       status: to_string_atom(issue.status),
+      # bd-842qio: the stored lifecycle state, which the later lifecycle
+      # children move every consumer onto. `close_reason` is null unless the
+      # ticket is closed; `rank` orders a priority band.
+      state: to_string_atom(issue.state),
+      close_reason: to_string_atom(issue.close_reason),
+      rank: issue.rank,
       priority: issue.priority,
       difficulty: issue.difficulty,
       issue_type: to_string_atom(issue.issue_type),

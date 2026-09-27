@@ -223,6 +223,8 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
 
     test "a parked task is not swept again on the next tick", %{ws: ws} do
       task = create_task(ws, "251", verify_after_deploy: true)
+      # bd-842qio: only work in progress parks for verification.
+      {:ok, task} = Ash.update(task, %{status: :in_progress})
       {:ok, _} = Ash.update(task, %{}, action: :await_verification)
 
       stub(fn _conn -> raise "adapter should not be called for parked tasks" end)

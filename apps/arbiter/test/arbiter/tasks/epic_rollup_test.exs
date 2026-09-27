@@ -39,13 +39,16 @@ defmodule Arbiter.Tasks.EpicRollupTest do
         :backlog -> issue
         :ready -> Ash.update!(issue, %{}, action: :promote_to_ready)
         :running -> Ash.update!(issue, %{status: :in_progress})
-        :waiting -> Ash.update!(issue, %{}, action: :await_verification)
+        # bd-842qio: only work in progress parks for verification.
+        :waiting -> issue |> Ash.update!(%{status: :in_progress}) |> park()
         :closed -> Ash.update!(issue, %{}, action: :close)
       end
 
     {:ok, _} = Dependencies.add(epic.id, issue.id, :parent_of)
     issue
   end
+
+  defp park(issue), do: Ash.update!(issue, %{}, action: :await_verification)
 
   defp worker(task_id, status, attrs \\ %{}) do
     Map.merge(
@@ -337,7 +340,7 @@ defmodule Arbiter.Tasks.EpicRollupTest do
     test "blocked by an awaiting_verification blocker flags needs_you", ctx do
       blocked = child(ctx.ws, ctx.epic, "blocked-child", as: :ready)
       {:ok, blocker} = Ash.create(Issue, %{title: "waiting blocker", workspace_id: ctx.ws.id})
-      blocker = Ash.update!(blocker, %{}, action: :await_verification)
+      blocker = blocker |> Ash.update!(%{status: :in_progress}) |> park()
       {:ok, _} = Dependencies.add(blocked.id, blocker.id, :depends_on)
 
       r = rollup(ctx.epic)

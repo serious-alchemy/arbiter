@@ -208,6 +208,8 @@ defmodule ArbiterWeb.TaskIndexLiveTest do
   describe "filters" do
     test "status filter includes awaiting_verification", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "parked-for-verification", workspace_id: ws.id})
+      # bd-842qio: only work in progress parks for verification.
+      {:ok, task} = Ash.update(task, %{status: :in_progress})
       {:ok, task} = Ash.update(task, %{}, action: :await_verification)
       {:ok, _open} = Ash.create(Issue, %{title: "still-open", workspace_id: ws.id})
 

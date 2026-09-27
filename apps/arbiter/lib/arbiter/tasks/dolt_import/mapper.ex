@@ -8,6 +8,7 @@ defmodule Arbiter.Tasks.DoltImport.Mapper do
 
   alias Arbiter.Tasks.Dependency
   alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.Lifecycle
 
   @valid_dep_types Dependency
                    |> then(fn _ ->
@@ -129,6 +130,7 @@ defmodule Arbiter.Tasks.DoltImport.Mapper do
   @doc false
   def issue_record(row, workspace_id, now) do
     {tracker_type, tracker_ref} = parse_external_ref(row["external_ref"])
+    status = map_status(row["status"])
 
     %{
       id: row["id"],
@@ -140,7 +142,13 @@ defmodule Arbiter.Tasks.DoltImport.Mapper do
       qa_notes: "",
       deployment_notes: "",
       # Ecto.insert_all needs the raw DB type — convert atoms to strings.
-      status: Atom.to_string(map_status(row["status"])),
+      status: Atom.to_string(status),
+      # bd-842qio: written around Ash, so nothing else sets the lifecycle
+      # state its status implies (`refined` is left at the column's `false`,
+      # so an open row is backlog). `rank` stays at the column's 0 — an
+      # imported ticket predates everything created here.
+      state: Atom.to_string(Lifecycle.legacy_state(%{status: status})),
+      close_reason: if(status == :closed, do: "completed"),
       priority: parse_priority(row["priority"]),
       issue_type: Atom.to_string(map_issue_type(row["issue_type"])),
       tracker_type: Atom.to_string(tracker_type),
@@ -149,6 +157,42 @@ defmodule Arbiter.Tasks.DoltImport.Mapper do
       updated_at: parse_dt(row["updated_at"]) || now,
       closed_at: parse_dt(row["closed_at"])
     }
+  end
+
+  # The `--sync-status` refresh of an existing row. `state` and `close_reason`
+  # follow the new status by `Lifecycle.legacy_state/1`'s rule, in SQL because
+  # it reads the row's own `refined` / `pr_ref` / `pending_merge`.
+  @status_sync_sql """
+  UPDATE issues SET
+    status = $1,
+    state = CASE
+      WHEN $1 = 'closed' THEN 'closed'
+      WHEN $1 = 'in_progress'
+           AND ((pr_ref IS NOT NULL AND TRIM(pr_ref) != '')
+                OR (pending_merge IS NOT NULL
+                    AND TRIM(pending_merge) NOT IN ('', '{}', 'null')))
+        THEN 'merging'
+      WHEN $1 = 'in_progress' THEN 'active'
+      WHEN refined = 1 THEN 'queued'
+      ELSE 'backlog'
+    END,
+    close_reason = CASE WHEN $1 = 'closed' THEN COALESCE(close_reason, 'completed') END,
+    closed_at = $2,
+    updated_at = $3
+  WHERE id = $4 AND (status != $1 OR (closed_at IS DISTINCT FROM $2))
+  """
+
+  @doc """
+  The `UPDATE` that refreshes an existing row's status (and `closed_at`) from
+  its Dolt row, as `{sql, params}`. bd-842qio: the lifecycle `state` and
+  `close_reason` move with the status, since this write goes around Ash.
+  """
+  def status_sync(row, now) do
+    status = row["status"] |> map_status() |> Atom.to_string()
+    closed_at = parse_dt(row["closed_at"])
+    updated_at = parse_dt(row["updated_at"]) || now
+
+    {@status_sync_sql, [status, closed_at, updated_at, row["id"]]}
   end
 
   @doc false

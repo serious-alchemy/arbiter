@@ -179,6 +179,9 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
            start_worker(task, context, worktree_path, provider, {fallback_reason, decision}),
          {:ok, _port} <-
            maybe_start_claude(worker_pid, worktree_path, context, args, provider) do
+      # bd-842qio: a conflict takes the ticket back to work (merging → active).
+      Issue.back_to_work(task)
+
       {:ok,
        %{
          worker_pid: worker_pid,

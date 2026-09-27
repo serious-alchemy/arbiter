@@ -211,18 +211,12 @@ defmodule Mix.Tasks.Arbiter.ImportFromDolt do
   # local edits made via arb after the initial import).
   defp sync_issue_statuses(rows) do
     Enum.reduce(rows, 0, fn row, acc ->
-      status = row["status"] |> Mapper.map_status() |> Atom.to_string()
-      closed_at = Mapper.parse_dt(row["closed_at"])
-
-      updated_at =
-        Mapper.parse_dt(row["updated_at"]) ||
-          DateTime.utc_now() |> DateTime.truncate(:microsecond)
+      now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+      {sql, params} = Mapper.status_sync(row, now)
 
       {n, _} =
-        Arbiter.Repo.query!(
-          "UPDATE issues SET status = $1, closed_at = $2, updated_at = $3 WHERE id = $4 AND (status != $1 OR (closed_at IS DISTINCT FROM $2))",
-          [status, closed_at, updated_at, row["id"]]
-        )
+        sql
+        |> Arbiter.Repo.query!(params)
         |> then(&{&1.num_rows, &1})
 
       acc + n

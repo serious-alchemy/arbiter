@@ -35,13 +35,16 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
         :backlog -> issue
         :ready -> Ash.update!(issue, %{}, action: :promote_to_ready)
         :running -> Ash.update!(issue, %{status: :in_progress})
-        :waiting -> Ash.update!(issue, %{}, action: :await_verification)
+        # bd-842qio: only work in progress parks for verification.
+        :waiting -> issue |> Ash.update!(%{status: :in_progress}) |> park()
         :closed -> Ash.update!(issue, %{}, action: :close)
       end
 
     {:ok, _} = Dependencies.add(epic.id, issue.id, :parent_of)
     issue
   end
+
+  defp park(issue), do: Ash.update!(issue, %{}, action: :await_verification)
 
   describe "the list" do
     test "lists epics and nothing else", %{conn: conn, ws: ws} do
@@ -415,7 +418,7 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
       {:ok, view, _html} = live(conn, ~p"/epics")
       refute has_element?(view, "#epic-#{e.id} [data-role='needs-you-chips']")
 
-      Ash.update!(c, %{}, action: :await_verification)
+      c |> Ash.update!(%{}, action: :start) |> park()
 
       assert has_element?(view, "#epic-#{e.id}-needs-you-0", "verify #{c.id}")
     end

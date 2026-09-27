@@ -153,7 +153,8 @@ defmodule Arbiter.Workflows.PatrolLifecycleTest do
           workspace_id: ws.id
         })
 
-      {:ok, task} = Ash.update(task, %{pr_ref: "#9"}, action: :update)
+      # bd-842qio: only work in progress parks for verification.
+      {:ok, task} = Ash.update(task, %{pr_ref: "#9", status: :in_progress}, action: :update)
 
       await(fn -> PRPatrolSupervisor.whereis(ws.id) end)
 

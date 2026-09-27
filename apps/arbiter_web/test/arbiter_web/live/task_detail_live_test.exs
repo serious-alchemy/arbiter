@@ -198,6 +198,8 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
           verify_after_deploy: true
         })
 
+      # bd-842qio: only work in progress parks for verification.
+      {:ok, task} = Ash.update(task, %{status: :in_progress})
       {:ok, _} = Ash.update(task, %{}, action: :await_verification)
 
       {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
@@ -210,6 +212,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, task} =
         Ash.create(Issue, %{title: "capture", workspace_id: ws.id, verify_after_deploy: true})
 
+      {:ok, task} = Ash.update(task, %{status: :in_progress})
       {:ok, awaiting} = Ash.update(task, %{}, action: :await_verification)
 
       {:ok, _closed} =
@@ -537,6 +540,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, task} =
         Ash.create(Issue, %{title: "parked", workspace_id: ws.id, verify_after_deploy: true})
 
+      {:ok, task} = Ash.update(task, %{status: :in_progress})
       {:ok, parked} = Ash.update(task, %{}, action: :await_verification)
 
       {:ok, view, _html} = live(conn, ~p"/tasks/#{parked.id}")
@@ -858,6 +862,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
         })
 
       {:ok, task} = Ash.update(task, %{}, action: :promote_to_ready)
+      {:ok, task} = Ash.update(task, %{}, action: :start)
       {:ok, _task} = Ash.update(task, %{}, action: :await_verification)
 
       {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
@@ -1818,6 +1823,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, blocker} =
         Ash.create(Issue, %{title: "merged blocker", workspace_id: ws.id})
 
+      {:ok, blocker} = Ash.update(blocker, %{status: :in_progress})
       {:ok, blocker} = Ash.update(blocker, %{}, action: :await_verification)
 
       {:ok, downstream} = Ash.create(Issue, %{title: "waiting", workspace_id: ws.id})
@@ -2518,6 +2524,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, _pid} = Worker.start(task_id: running_child.id, repo: "r", workspace_id: ws.id)
 
       {:ok, waiting_child} = Ash.create(Issue, %{title: "waiting child", workspace_id: ws.id})
+      {:ok, waiting_child} = Ash.update(waiting_child, %{status: :in_progress})
       {:ok, waiting_child} = Ash.update(waiting_child, %{}, action: :await_verification)
 
       {:ok, closed_child} = Ash.create(Issue, %{title: "closed child", workspace_id: ws.id})

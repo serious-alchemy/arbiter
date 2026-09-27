@@ -84,4 +84,48 @@ defmodule Arbiter.WorkerPrRefTest do
     assert run.mr_ref == "#5678"
     assert run.merger_url == "https://stub.example/mr/#5678"
   end
+
+  # bd-842qio (ticket lifecycle 1/13, AC7): the PR-opened path is the
+  # `open_pr` transition.
+  describe "the ticket's lifecycle state" do
+    test "opening the PR moves an active ticket to :merging", %{ws: ws, task: task} do
+      assert Ash.get!(Issue, task.id).state == :active
+      StubMerger.next_open_ref("#4321")
+
+      {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "arbiter", workspace_id: ws.id)
+      on_exit(fn -> if Process.alive?(worker_pid), do: GenServer.stop(worker_pid, :normal) end)
+      :ok = Worker.advance(worker_pid, :running)
+
+      assert {:ok, "#4321"} = Worker.open_mr(worker_pid, "bd-branch", "title", "body", @parked)
+
+      reloaded = Ash.get!(Issue, task.id)
+
+      assert {reloaded.state, reloaded.status, reloaded.pr_ref} ==
+               {:merging, :in_progress, "#4321"}
+
+      assert :open_pr in version_actions(task.id)
+    end
+
+    test "re-adopting the PR on a ticket already :merging keeps it there and records the ref",
+         %{ws: ws, task: task} do
+      {:ok, _} = Issue |> Ash.get!(task.id) |> Ash.update(%{pr_ref: "#8765"}, action: :open_pr)
+      StubMerger.next_open_ref("#8765")
+
+      {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "arbiter", workspace_id: ws.id)
+      on_exit(fn -> if Process.alive?(worker_pid), do: GenServer.stop(worker_pid, :normal) end)
+      :ok = Worker.advance(worker_pid, :running)
+
+      assert {:ok, "#8765"} = Worker.open_mr(worker_pid, "bd-branch", "title", "body", @parked)
+
+      reloaded = Ash.get!(Issue, task.id)
+      assert {reloaded.state, reloaded.pr_ref} == {:merging, "#8765"}
+    end
+  end
+
+  defp version_actions(issue_id) do
+    Issue.Version
+    |> Ash.Query.filter(version_source_id == ^issue_id)
+    |> Ash.read!()
+    |> Enum.map(& &1.version_action_name)
+  end
 end

@@ -1357,19 +1357,15 @@ defmodule Arbiter.Worker.Dispatch do
     :exit, _ -> nil
   end
 
-  defp transition_to_in_progress(%Issue{status: :in_progress} = task, _opts), do: {:ok, task}
-
+  # bd-842qio: the `start` transition (queued → active) — see
+  # `Issue.start_work/2`, which also covers a manual dispatch from Backlog and
+  # leaves a ticket already at work alone.
   defp transition_to_in_progress(%Issue{} = task, opts) do
     # bd-6xaaam: stamp review_only: true so SyncTracker/SyncFields skip
     # write-back for the in_progress transition and any later field update.
-    attrs =
-      if Keyword.get(opts, :review, false) do
-        %{status: :in_progress, review_only: true}
-      else
-        %{status: :in_progress}
-      end
+    attrs = if Keyword.get(opts, :review, false), do: %{review_only: true}, else: %{}
 
-    case Ash.update(task, attrs) do
+    case Issue.start_work(task, attrs) do
       {:ok, updated} -> {:ok, updated}
       {:error, e} -> {:error, {:transition_failed, e}}
     end

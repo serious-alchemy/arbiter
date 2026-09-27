@@ -94,13 +94,16 @@ defmodule ArbiterWeb.EpicPageBrowserTest do
         :backlog -> issue
         :ready -> Ash.update!(issue, %{}, action: :promote_to_ready)
         :running -> Ash.update!(issue, %{status: :in_progress})
-        :waiting -> Ash.update!(issue, %{}, action: :await_verification)
+        # bd-842qio: only work in progress parks for verification.
+        :waiting -> issue |> Ash.update!(%{status: :in_progress}) |> park()
         :closed -> Ash.update!(issue, %{}, action: :close)
       end
 
     {:ok, _} = Dependencies.add(epic.id, issue.id, :parent_of)
     issue
   end
+
+  defp park(issue), do: Ash.update!(issue, %{}, action: :await_verification)
 
   # The same two commands `mix assets.build` runs, called in-process.
   defp build_assets do

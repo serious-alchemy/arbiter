@@ -38,7 +38,7 @@ Two changes, one enforcement mechanism.
    of them: **nothing retries indefinitely**, and **no guard converts "blocked
    by the guard" into a failed run on an approved PR.** Today the merge guard
    retried one PR 303+ times, the MergeQueue's stale-SHA path has *no bound at
-   all* (`apps/arbiter/lib/arbiter/workflows/merge_queue.ex:1763` (`try_merge`)
+   all* (`apps/arbiter/lib/arbiter/workflows/merge_queue.ex:1769` (`try_merge`)
    deliberately leaves `status` untouched so it re-attempts every tick forever),
    and `$325.82 across 73 runs` was charged to runs that failed for gate reasons
    and produced nothing.
@@ -91,13 +91,13 @@ entire agent spend spent on the gate misfiring.
 ### 1.1 The two root causes, stated precisely
 
 **RC1 — "the reviewed SHA" is a single value.** `issues.last_reviewed_sha`
-(`apps/arbiter/lib/arbiter/tasks/issue.ex:1025` (`last_reviewed_sha`)) is one
+(`apps/arbiter/lib/arbiter/tasks/issue.ex:1271` (`last_reviewed_sha`)) is one
 nullable string, written by whichever of four unrelated writers ran last. There
 is no record of *which* commits an approval covered, so every consumer
 reconstructs one — badly, and differently. `Arbiter.Mergers.ReviewedSha` invents
 a *latch* (`apps/arbiter/lib/arbiter/mergers/reviewed_sha.ex:67` (`latch`)),
 both the Watchdog and the MergeQueue then invent a *suspension* on top of the
-latch (`apps/arbiter/lib/arbiter/worker/watchdog.ex:4808` (`clear_reviewed_latch`), `apps/arbiter/lib/arbiter/workflows/merge_queue.ex:1701` (`clear_reviewed_latch`)), and the Watchdog invents a *memo invalidation* on top
+latch (`apps/arbiter/lib/arbiter/worker/watchdog.ex:4808` (`clear_reviewed_latch`), `apps/arbiter/lib/arbiter/workflows/merge_queue.ex:1707` (`clear_reviewed_latch`)), and the Watchdog invents a *memo invalidation* on top
 of the suspension (`apps/arbiter/lib/arbiter/worker/watchdog.ex:4693` (`load_recorded_reviewed_sha`)). All of that machinery is an attempt to
 reconstruct a set from a scalar.
 
@@ -186,14 +186,14 @@ inventory cannot silently rot.
 
 | # | Guard | Anchor | Protects against | Misfire mode | On failure | Patches |
 |---|---|---|---|---|---|---|
-| M1 | Merge-coverage refusal (reviewed-SHA guard, or `decide/3` under `merge.coverage_enabled` — P4) | `apps/arbiter/lib/arbiter/workflows/merge_queue.ex:1326` (`merge_guarded`) | bd-dxgris/#1498, queue side | Same as W1, without W2–W6's recovery — the queue has **no** forge-lag wait and **no** re-read; P7 gave it W5's content check on the flag-off path (`legacy_merge_decision`, memoised per head) | Returns `{:error, {:stale_reviewed_sha, …}}` | 2 |
-| M2 | Baseline precedence (recorded > latch) | `apps/arbiter/lib/arbiter/workflows/merge_queue.ex:1346` (`item_reviewed_sha`) | Drifting from the Watchdog | Diverges anyway: the queue's third arm floats to `last_head_sha` while suspended | — | 2 |
-| M3 | Stale-SHA retry disposition | `apps/arbiter/lib/arbiter/workflows/merge_queue.ex:1763` (`try_merge`) | Parking an item at `:failed` with no way back in | **Unbounded.** Status untouched ⇒ the same refused merge is re-attempted **every tick, forever**. This is the 303+ retry shape, still live in the queue | Retries indefinitely; no escalation of its own | 1 |
-| M4 | Latch suspension | `apps/arbiter/lib/arbiter/workflows/merge_queue.ex:1701` (`clear_reviewed_latch`) | The queue's own rebase/resolver push deadlocking the guard | Same hole as W8 — closed by P7 the same way: the resolver push no longer suspends | — | 1 |
-| M5 | Per-poll baseline tracking | `apps/arbiter/lib/arbiter/workflows/merge_queue.ex:1729` (`track_reviewed_baseline`) | — | Mirror-maintained by hand against W9 | — | 1 |
-| M6 | Suspension lift condition | `apps/arbiter/lib/arbiter/workflows/merge_queue.ex:1652` (`latch_suspended?`) | An unreadable head lifting the suspension early | Hand-mirrored against the Watchdog's copy | — | 1 |
-| M7 | Item status short-circuits | `apps/arbiter/lib/arbiter/workflows/merge_queue.ex:762` (`poll_item`) | Re-polling terminal items | A `:failed` item has no way back in | Terminal | — |
-| M8 | Coverage-unknown bounded wait (queue) | `apps/arbiter/lib/arbiter/workflows/merge_queue.ex:1501` (`wait_for_coverage`), bound `apps/arbiter/lib/arbiter/workflows/merge_queue.ex:247` (`coverage_unknown_grace_ticks`) | bd-df3zlo/#1736, queue side | Same as W20 | Park + one page, and the parked head short-circuits `merge_guarded` before any forge call | 1 |
+| M1 | Merge-coverage refusal (reviewed-SHA guard, or `decide/3` under `merge.coverage_enabled` — P4) | `apps/arbiter/lib/arbiter/workflows/merge_queue.ex:1332` (`merge_guarded`) | bd-dxgris/#1498, queue side | Same as W1, without W2–W6's recovery — the queue has **no** forge-lag wait and **no** re-read; P7 gave it W5's content check on the flag-off path (`legacy_merge_decision`, memoised per head) | Returns `{:error, {:stale_reviewed_sha, …}}` | 2 |
+| M2 | Baseline precedence (recorded > latch) | `apps/arbiter/lib/arbiter/workflows/merge_queue.ex:1352` (`item_reviewed_sha`) | Drifting from the Watchdog | Diverges anyway: the queue's third arm floats to `last_head_sha` while suspended | — | 2 |
+| M3 | Stale-SHA retry disposition | `apps/arbiter/lib/arbiter/workflows/merge_queue.ex:1769` (`try_merge`) | Parking an item at `:failed` with no way back in | **Unbounded.** Status untouched ⇒ the same refused merge is re-attempted **every tick, forever**. This is the 303+ retry shape, still live in the queue | Retries indefinitely; no escalation of its own | 1 |
+| M4 | Latch suspension | `apps/arbiter/lib/arbiter/workflows/merge_queue.ex:1707` (`clear_reviewed_latch`) | The queue's own rebase/resolver push deadlocking the guard | Same hole as W8 — closed by P7 the same way: the resolver push no longer suspends | — | 1 |
+| M5 | Per-poll baseline tracking | `apps/arbiter/lib/arbiter/workflows/merge_queue.ex:1735` (`track_reviewed_baseline`) | — | Mirror-maintained by hand against W9 | — | 1 |
+| M6 | Suspension lift condition | `apps/arbiter/lib/arbiter/workflows/merge_queue.ex:1658` (`latch_suspended?`) | An unreadable head lifting the suspension early | Hand-mirrored against the Watchdog's copy | — | 1 |
+| M7 | Item status short-circuits | `apps/arbiter/lib/arbiter/workflows/merge_queue.ex:768` (`poll_item`) | Re-polling terminal items | A `:failed` item has no way back in | Terminal | — |
+| M8 | Coverage-unknown bounded wait (queue) | `apps/arbiter/lib/arbiter/workflows/merge_queue.ex:1507` (`wait_for_coverage`), bound `apps/arbiter/lib/arbiter/workflows/merge_queue.ex:247` (`coverage_unknown_grace_ticks`) | bd-df3zlo/#1736, queue side | Same as W20 | Park + one page, and the parked head short-circuits `merge_guarded` before any forge call | 1 |
 
 ### 2.4 `apps/arbiter/lib/arbiter/worker.ex` — the worker commit gate and the fix-round dispatcher
 
@@ -374,7 +374,7 @@ below calls it and nothing writes coverage any other way:
 | ExternalReview baseline | `apps/arbiter/lib/arbiter/reviews/external_review.ex:1418` (`last_reviewed_sha`) | `Coverage.record(kind: :reviewed, source: :external_review)` when the external verdict is an approval; cursor only otherwise |
 | Watchdog fleet push (update-branch / rebase) | `apps/arbiter/lib/arbiter/worker/watchdog.ex:4808` (`clear_reviewed_latch`) suspends the guard | `Coverage.record(kind: :mechanical, …)` **only if** the fingerprint matches; otherwise nothing is recorded and the new head is honestly uncovered |
 | Watchdog CI `fix_pass` | `apps/arbiter/lib/arbiter/worker/watchdog.ex:2657` (`clear_reviewed_latch`) — merges unguarded | nothing. A `fix_pass` changes content by construction, so its head is `:uncovered` and routes to a scoped re-review. **This closes the hole in §2.6.** **P7 ✅ (bd-60r6wp / #1738)** |
-| MergeQueue conflict resolver push | `apps/arbiter/lib/arbiter/workflows/merge_queue.ex:1701` (`clear_reviewed_latch`) | fingerprint test; a conflict resolution that wrote content is uncovered, exactly as `NetDiff`'s moduledoc already argues **P7 ✅ (bd-60r6wp / #1738)** |
+| MergeQueue conflict resolver push | `apps/arbiter/lib/arbiter/workflows/merge_queue.ex:1707` (`clear_reviewed_latch`) | fingerprint test; a conflict resolution that wrote content is uncovered, exactly as `NetDiff`'s moduledoc already argues **P7 ✅ (bd-60r6wp / #1738)** |
 | Operator | out-of-band hand-merge | `arb review cover` → `kind: :operator` |
 
 ### 3.4 How the merge check reads it
@@ -754,8 +754,8 @@ That list is frozen by test: it may shrink, never grow. **P9 shrank it by ten**
 | `forge_head_lagging?` + grace counter | `apps/arbiter/lib/arbiter/worker/watchdog.ex:4471` (`forge_head_lagging?`) | rule 2 (ancestry) |
 | `reconsider_stale_head`, `resolve_against_live_head` | `apps/arbiter/lib/arbiter/worker/watchdog.ex:4177` (`reconsider_stale_head`) | rules 1–4, one pass |
 | `base_merge_only?` | `apps/arbiter/lib/arbiter/worker/watchdog.ex:4312` (`base_merge_only?`) | rule 3 (same `NetDiff`, generalised) |
-| MergeQueue's mirrored latch (M2, M4, M5, M6) | `apps/arbiter/lib/arbiter/workflows/merge_queue.ex:1346` (`item_reviewed_sha`) | the same `Coverage.decide/3` call |
-| M3's unbounded retry | `apps/arbiter/lib/arbiter/workflows/merge_queue.ex:1763` (`try_merge`) | class A's bound + terminal park |
+| MergeQueue's mirrored latch (M2, M4, M5, M6) | `apps/arbiter/lib/arbiter/workflows/merge_queue.ex:1352` (`item_reviewed_sha`) | the same `Coverage.decide/3` call |
+| M3's unbounded retry | `apps/arbiter/lib/arbiter/workflows/merge_queue.ex:1769` (`try_merge`) | class A's bound + terminal park |
 | G16's escalation shapes | `apps/arbiter/lib/arbiter/worker/review_gate.ex:2404` (`escalate_commit_gate`) | one fingerprint predicate, one escalation, two remediation strings |
 
 ### 6.2 Stays, unchanged
@@ -798,7 +798,7 @@ So shadow mode keeps a **durable** counter as well.
 (`apps/arbiter/lib/arbiter/reviews/coverage_shadow.ex:180` (`observe`)) is
 called from both merge paths —
 `apps/arbiter/lib/arbiter/worker/watchdog.ex:4326` (`observe_coverage`) and
-`apps/arbiter/lib/arbiter/workflows/merge_queue.ex:1356`
+`apps/arbiter/lib/arbiter/workflows/merge_queue.ex:1362`
 (`observe_coverage`) — and, per distinct
 `{site, mr_ref, head, old->new}` observation, logs one `:warning` line naming
 both answers and writes one `Arbiter.Events` row on topic `coverage_shadow`.

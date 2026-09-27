@@ -6931,7 +6931,10 @@ defmodule Arbiter.Worker do
     # this the MergeQueue's existing_mr_ref/1 is always nil, it falls
     # through to open_mr_for/3, fails opening a second PR on the
     # already-merged branch, and the task is never auto-closed.
-    record_pr_ref_on_task(state, mr_ref)
+    #
+    # bd-842qio: this is the ticket's `open_pr` transition (active → merging),
+    # written together with the ref.
+    record_pr_ref_on_task(state, mr_ref, :opened)
     record_mr_ref_on_run(state, mr_ref, merger_url)
     sync_tracker_pr_opened(state, mr_ref, merger_url)
 
@@ -7255,12 +7258,18 @@ defmodule Arbiter.Worker do
   # Watchdog-merged PR is invisible to the MergeQueue and the task never closes.
   # Mirrors `Arbiter.Workflows.MergeQueue.maybe_record_mr_ref/2`. Best-effort: a
   # DB hiccup logs at debug and never fails the open.
-  defp record_pr_ref_on_task(%State{task_id: task_id}, mr_ref)
+  #
+  # `moment` is `:opened` from `finalize_opened_mr/5` and `:pre_review` from
+  # the open ahead of the ReviewGate (bd-129xh4), which leaves the ticket where
+  # it is — the review still owns it.
+  defp record_pr_ref_on_task(state, mr_ref, moment \\ :pre_review)
+
+  defp record_pr_ref_on_task(%State{task_id: task_id}, mr_ref, moment)
        when is_binary(mr_ref) and mr_ref != "" do
-    with {:ok, task} <- Ash.get(Arbiter.Tasks.Issue, task_id),
-         {:ok, _updated} <- Ash.update(task, %{pr_ref: mr_ref}, action: :update) do
-      :ok
-    else
+    case write_pr_ref(task_id, mr_ref, moment) do
+      {:ok, _updated} ->
+        :ok
+
       {:error, reason} ->
         Logger.debug(
           "Worker.open_mr: failed to record pr_ref=#{mr_ref} for task=#{task_id}: #{inspect(reason)}"
@@ -7277,7 +7286,17 @@ defmodule Arbiter.Worker do
       :ok
   end
 
-  defp record_pr_ref_on_task(_state, _mr_ref), do: :ok
+  defp record_pr_ref_on_task(_state, _mr_ref, _moment), do: :ok
+
+  # bd-842qio: the PR-opened path is the `open_pr` transition (active →
+  # merging) — see `Issue.pr_opened/2`.
+  defp write_pr_ref(task_id, mr_ref, :opened), do: Arbiter.Tasks.Issue.pr_opened(task_id, mr_ref)
+
+  defp write_pr_ref(task_id, mr_ref, :pre_review) do
+    with {:ok, task} <- Ash.get(Arbiter.Tasks.Issue, task_id) do
+      Ash.update(task, %{pr_ref: mr_ref}, action: :update)
+    end
+  end
 
   # Persist the opened/adopted MR ref onto *this run's* durable Workers.Run
   # row (bd-6h4ia3), alongside record_pr_ref_on_task's write to the task's

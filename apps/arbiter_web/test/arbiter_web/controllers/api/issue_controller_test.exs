@@ -503,6 +503,24 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
       assert body["status"] == "open"
     end
 
+    # bd-842qio: the stored lifecycle state beside the legacy status — what
+    # `arb issue show --json` prints.
+    test "carries the lifecycle state, close_reason and rank", %{conn: conn, ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "show my state", workspace_id: ws.id})
+
+      body = conn |> get(~p"/api/issues/#{issue.id}") |> json_response(200)
+      assert body["state"] == "backlog"
+      assert Map.has_key?(body, "close_reason") and body["close_reason"] == nil
+      assert body["rank"] == issue.rank
+
+      {:ok, _} = Ash.update(issue, %{close_reason: :duplicate}, action: :close)
+
+      body = conn |> get(~p"/api/issues/#{issue.id}") |> json_response(200)
+
+      assert {body["state"], body["status"], body["close_reason"]} ==
+               {"closed", "closed", "duplicate"}
+    end
+
     test "returns 404 for missing issue", %{conn: conn} do
       conn = get(conn, ~p"/api/issues/api-doesnotexist")
       assert %{"error" => %{"type" => "not_found"}} = json_response(conn, 404)
@@ -883,6 +901,8 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
       {:ok, issue} =
         Ash.create(Issue, %{title: "park me", workspace_id: ws.id, verify_after_deploy: true})
 
+      # bd-842qio: only work in progress parks for verification.
+      {:ok, issue} = Ash.update(issue, %{status: :in_progress})
       {:ok, awaiting} = Ash.update(issue, %{}, action: :await_verification)
       {:ok, awaiting: awaiting}
     end

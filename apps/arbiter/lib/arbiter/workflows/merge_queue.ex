@@ -542,6 +542,12 @@ defmodule Arbiter.Workflows.MergeQueue do
         opened_at: DateTime.utc_now()
       )
 
+    # bd-842qio: the merge path owns the PR from here, so adopting it is the
+    # ticket's `open_pr` transition, like opening one. The ref was often
+    # recorded while the ticket was still at work (the pre-review open), which
+    # left it `:active`. Best-effort, like the open path's write.
+    _ = maybe_record_mr_ref(task, mr_ref)
+
     {:ok, %{state | items: [item | state.items]}}
   end
 
@@ -2051,8 +2057,10 @@ defmodule Arbiter.Workflows.MergeQueue do
     end
   end
 
+  # bd-842qio: opening or adopting the PR is the ticket's `open_pr` transition
+  # (active → merging), the same as the worker's own PR-opened path.
   defp maybe_record_mr_ref(%Issue{} = task, mr_ref) do
-    case Ash.update(task, %{pr_ref: mr_ref}, action: :update) do
+    case Issue.pr_opened(task.id, mr_ref) do
       {:ok, _} -> :ok
       {:error, reason} -> {:error, reason}
     end

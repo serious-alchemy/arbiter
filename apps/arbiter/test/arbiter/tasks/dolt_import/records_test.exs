@@ -36,6 +36,45 @@ defmodule Arbiter.Tasks.DoltImport.RecordsTest do
              |> Ash.read!()
   end
 
+  # bd-842qio: rows written around Ash still carry the lifecycle state their
+  # status implies — the column's default would put every one in the backlog.
+  test "issue_record/3 rows land in the lifecycle state their status implies",
+       %{ws: ws, now: now} do
+    rows = [
+      %{"id" => "dlt-open1", "title" => "o", "status" => "open"},
+      %{"id" => "dlt-work1", "title" => "w", "status" => "in_progress"},
+      %{"id" => "dlt-done1", "title" => "d", "status" => "closed"}
+    ]
+
+    {3, _} = Repo.insert_all("issues", Enum.map(rows, &Mapper.issue_record(&1, ws.id, now)))
+
+    assert %Issue{state: :backlog, close_reason: nil} = Ash.get!(Issue, "dlt-open1")
+    assert %Issue{state: :active, close_reason: nil} = Ash.get!(Issue, "dlt-work1")
+    assert %Issue{state: :closed, close_reason: :completed} = Ash.get!(Issue, "dlt-done1")
+  end
+
+  test "status_sync/2 carries the lifecycle state with the refreshed status",
+       %{ws: ws, now: now} do
+    {1, _} =
+      Repo.insert_all("issues", [
+        Mapper.issue_record(
+          %{"id" => "dlt-sync1", "title" => "s", "status" => "open"},
+          ws.id,
+          now
+        )
+      ])
+
+    sync = fn status ->
+      {sql, params} = Mapper.status_sync(%{"id" => "dlt-sync1", "status" => status}, now)
+      Repo.query!(sql, params)
+      Ash.get!(Issue, "dlt-sync1")
+    end
+
+    assert %Issue{status: :closed, state: :closed, close_reason: :completed} = sync.("closed")
+    assert %Issue{status: :in_progress, state: :active, close_reason: nil} = sync.("in_progress")
+    assert %Issue{status: :open, state: :backlog, close_reason: nil} = sync.("open")
+  end
+
   test "dependency_record/3 rows bulk-inserted around Ash are fetchable by id",
        %{ws: ws, now: now} do
     {:ok, a} = Ash.create(Issue, %{title: "A", workspace_id: ws.id})

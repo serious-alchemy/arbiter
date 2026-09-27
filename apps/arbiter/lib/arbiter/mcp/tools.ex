@@ -1785,6 +1785,10 @@ defmodule Arbiter.MCP.Tools do
       qa_notes: i.qa_notes,
       deployment_notes: i.deployment_notes,
       status: to_str(i.status),
+      # bd-842qio: the stored lifecycle state beside the legacy status, as on
+      # `GET /api/issues/:id`.
+      state: to_str(i.state),
+      close_reason: to_str(i.close_reason),
       priority: i.priority,
       difficulty: i.difficulty,
       issue_type: to_str(i.issue_type),

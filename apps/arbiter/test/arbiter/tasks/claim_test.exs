@@ -863,6 +863,11 @@ defmodule Arbiter.Tasks.ClaimTest do
     # would skip the verification the flag exists to force.
     test "a task awaiting post-merge verification is NOT proposed for close", %{github_ws: ws} do
       task = open_task(ws, "63", %{verify_after_deploy: true})
+      # bd-842qio: only work in progress parks for verification. Starting it
+      # pushes "in progress" upstream, which this test neither stubs nor needs.
+      {{:ok, task}, _log} =
+        ExUnit.CaptureLog.with_log(fn -> Ash.update(task, %{status: :in_progress}) end)
+
       {:ok, _} = Ash.update(task, %{}, action: :await_verification)
 
       stub_gh(fn conn ->

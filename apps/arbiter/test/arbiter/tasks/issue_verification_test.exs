@@ -8,6 +8,8 @@ defmodule Arbiter.Tasks.IssueVerificationTest do
   """
   use Arbiter.DataCase, async: false
 
+  require Ash.Query
+
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Verification
   alias Arbiter.Tasks.Workspace
@@ -24,6 +26,13 @@ defmodule Arbiter.Tasks.IssueVerificationTest do
     issue
   end
 
+  # bd-842qio: a task parks for verification only from work in progress, so the
+  # tests that park one directly start it first.
+  defp in_progress(issue) do
+    {:ok, started} = Ash.update(issue, %{status: :in_progress})
+    started
+  end
+
   describe "verify_after_deploy flag" do
     test "defaults to false and is settable at create", %{ws: ws} do
       assert task(ws).verify_after_deploy == false
@@ -38,8 +47,10 @@ defmodule Arbiter.Tasks.IssueVerificationTest do
   end
 
   describe ":await_verification action" do
-    test "moves an open task into :awaiting_verification and stamps the clock", %{ws: ws} do
-      issue = task(ws, %{verify_after_deploy: true})
+    test "moves a task in progress into :awaiting_verification and stamps the clock", %{
+      ws: ws
+    } do
+      issue = task(ws, %{verify_after_deploy: true}) |> in_progress()
 
       {:ok, awaiting} = Ash.update(issue, %{}, action: :await_verification)
 
@@ -47,6 +58,15 @@ defmodule Arbiter.Tasks.IssueVerificationTest do
       assert %DateTime{} = awaiting.awaiting_verification_at
       assert awaiting.closed_at == nil
       assert awaiting.verification_outcome == nil
+    end
+
+    # bd-842qio: the lifecycle table parks only work in progress (active |
+    # merging). A ticket still in the queue has nothing merged to verify.
+    test "is rejected for a task that was never started", %{ws: ws} do
+      issue = task(ws, %{verify_after_deploy: true})
+
+      assert {:error, %Ash.Error.Invalid{}} = Ash.update(issue, %{}, action: :await_verification)
+      assert Ash.get!(Issue, issue.id).status == :open
     end
 
     test "is rejected for an already-closed task", %{ws: ws} do
@@ -63,12 +83,12 @@ defmodule Arbiter.Tasks.IssueVerificationTest do
 
       assert {:error, _} = Ash.update(issue, %{status: :awaiting_verification}, action: :update)
 
-      {:ok, awaiting} = Ash.update(issue, %{}, action: :await_verification)
+      {:ok, awaiting} = issue |> in_progress() |> Ash.update(%{}, action: :await_verification)
       assert {:error, _} = Ash.update(awaiting, %{status: :open}, action: :update)
     end
 
     test ":close is allowed from :awaiting_verification", %{ws: ws} do
-      issue = task(ws, %{verify_after_deploy: true})
+      issue = task(ws, %{verify_after_deploy: true}) |> in_progress()
       {:ok, awaiting} = Ash.update(issue, %{}, action: :await_verification)
 
       {:ok, closed} = Ash.update(awaiting, %{close_upstream: false}, action: :close)
@@ -76,7 +96,7 @@ defmodule Arbiter.Tasks.IssueVerificationTest do
     end
 
     test ":reopen is allowed from :awaiting_verification", %{ws: ws} do
-      issue = task(ws, %{verify_after_deploy: true})
+      issue = task(ws, %{verify_after_deploy: true}) |> in_progress()
       {:ok, awaiting} = Ash.update(issue, %{}, action: :await_verification)
 
       {:ok, reopened} = Ash.update(awaiting, %{}, action: :reopen)
@@ -86,7 +106,7 @@ defmodule Arbiter.Tasks.IssueVerificationTest do
 
   describe "Verification.observed/2" do
     test "closes the task and persists the evidence", %{ws: ws} do
-      issue = task(ws, %{verify_after_deploy: true})
+      issue = task(ws, %{verify_after_deploy: true}) |> in_progress()
       {:ok, awaiting} = Ash.update(issue, %{}, action: :await_verification)
 
       {:ok, verified} = Verification.observed(awaiting, "hit /doctor after restart: 3 repos")
@@ -103,7 +123,7 @@ defmodule Arbiter.Tasks.IssueVerificationTest do
     end
 
     test "requires non-blank evidence", %{ws: ws} do
-      issue = task(ws, %{verify_after_deploy: true})
+      issue = task(ws, %{verify_after_deploy: true}) |> in_progress()
       {:ok, awaiting} = Ash.update(issue, %{}, action: :await_verification)
 
       assert {:error, :evidence_required} = Verification.observed(awaiting, "   ")
@@ -114,7 +134,7 @@ defmodule Arbiter.Tasks.IssueVerificationTest do
     test "reopens the task and persists the evidence", %{ws: ws} do
       issue = task(ws, %{verify_after_deploy: true})
       {:ok, issue} = Ash.update(issue, %{pr_ref: "1633"}, action: :update)
-      {:ok, awaiting} = Ash.update(issue, %{}, action: :await_verification)
+      {:ok, awaiting} = issue |> in_progress() |> Ash.update(%{}, action: :await_verification)
 
       {:ok, failed} = Verification.failed(awaiting, "capture_source still reads headers")
 
@@ -158,7 +178,7 @@ defmodule Arbiter.Tasks.IssueVerificationTest do
 
   describe "Verification.awaiting_since/1" do
     test "prefers the parked-at stamp", %{ws: ws} do
-      issue = task(ws, %{verify_after_deploy: true})
+      issue = task(ws, %{verify_after_deploy: true}) |> in_progress()
       {:ok, awaiting} = Ash.update(issue, %{}, action: :await_verification)
 
       assert Verification.awaiting_since(awaiting) == awaiting.awaiting_verification_at
@@ -169,5 +189,89 @@ defmodule Arbiter.Tasks.IssueVerificationTest do
       at = ~U[2026-09-01 00:00:00Z]
       assert Verification.awaiting_since(%{updated_at: at}) == at
     end
+  end
+
+  # bd-842qio (ticket lifecycle 1/13, AC7): the verification funnel moves the
+  # stored state through the lifecycle transitions.
+  describe "the ticket's lifecycle state" do
+    test "finalize_merged closes an unflagged merging ticket → :closed", %{ws: ws} do
+      issue = merging(ws)
+
+      assert {:ok, :closed, closed} = Verification.finalize_merged(issue, close_upstream: false)
+      assert {closed.state, closed.close_reason} == {:closed, :completed}
+    end
+
+    test "finalize_merged parks a flagged merging ticket → :verifying", %{ws: ws} do
+      issue = merging(ws, %{verify_after_deploy: true})
+
+      assert {:ok, :awaiting_verification, parked} =
+               Verification.finalize_merged(issue, close_upstream: false)
+
+      assert {parked.state, parked.status} == {:verifying, :awaiting_verification}
+    end
+
+    test "finalize_merged walks a flagged ticket still in the queue through start → :verifying",
+         %{ws: ws} do
+      # A PR merged while its ticket sat in the queue — e.g. a requeue after
+      # the PR opened, then a merge by hand.
+      {:ok, queued} =
+        ws
+        |> task(%{verify_after_deploy: true, acceptance: "- works"})
+        |> Ash.update(%{}, action: :promote)
+
+      assert {:ok, :awaiting_verification, parked} =
+               Verification.finalize_merged(queued, close_upstream: false)
+
+      assert parked.state == :verifying
+      assert Enum.take(version_actions(queued.id), -2) == [:start, :await_verification]
+    end
+
+    test "finalize_merged walks a flagged Backlog ticket with a merged PR → :verifying",
+         %{ws: ws} do
+      {:ok, backlog} = Ash.update(task(ws, %{verify_after_deploy: true}), %{pr_ref: "#9"})
+      assert backlog.state == :backlog
+
+      assert {:ok, :awaiting_verification, parked} =
+               Verification.finalize_merged(backlog, close_upstream: false)
+
+      assert parked.state == :verifying
+    end
+
+    test "observed closes a verifying ticket → :closed", %{ws: ws} do
+      {:ok, parked} = ws |> merging(%{verify_after_deploy: true}) |> park()
+
+      {:ok, closed} = Verification.observed(parked, "restarted; the new path answers")
+
+      assert {closed.state, closed.status, closed.close_reason} ==
+               {:closed, :closed, :completed}
+    end
+
+    test "failed reopens a verifying ticket → :queued", %{ws: ws} do
+      {:ok, parked} = ws |> merging(%{verify_after_deploy: true}) |> park()
+
+      {:ok, reopened} = Verification.failed(parked, "after restart the old path still answers")
+
+      assert {reopened.state, reopened.status, reopened.refined, reopened.close_reason} ==
+               {:queued, :open, true, nil}
+    end
+  end
+
+  # A ticket with an open PR, through the lifecycle transitions.
+  defp merging(ws, attrs \\ %{}) do
+    ws
+    |> task(Map.put(attrs, :acceptance, "- works"))
+    |> Ash.update!(%{}, action: :promote)
+    |> Ash.update!(%{}, action: :start)
+    |> Ash.update!(%{pr_ref: "#1633"}, action: :open_pr)
+  end
+
+  defp park(issue), do: Ash.update(issue, %{}, action: :await_verification)
+
+  defp version_actions(issue_id) do
+    Issue.Version
+    |> Ash.Query.filter(version_source_id == ^issue_id)
+    |> Ash.Query.sort(version_inserted_at: :asc)
+    |> Ash.read!()
+    |> Enum.map(& &1.version_action_name)
   end
 end

@@ -2682,7 +2682,9 @@ defmodule Arbiter.Worker.DispatchTest do
       {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "origin", "main"])
 
       # The task parks for post-merge verification and comes back :failed —
-      # exactly the bd-96mn8i sequence.
+      # exactly the bd-96mn8i sequence. (bd-842qio: only work in progress
+      # parks, so it was in progress first, as the prior dispatch left it.)
+      {:ok, task} = Ash.update(task, %{status: :in_progress})
       {:ok, task} = Ash.update(task, %{}, action: :await_verification)
       {:ok, task} = Arbiter.Tasks.Verification.failed(task, "still broken in prod")
 

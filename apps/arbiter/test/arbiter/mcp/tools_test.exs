@@ -1259,19 +1259,26 @@ defmodule Arbiter.MCP.ToolsTest do
     end
 
     test "task_show full view reports the flag and the verification state", ctx do
-      {:ok, task} = Ash.update(ctx.task, %{verify_after_deploy: true}, action: :update)
+      # bd-842qio: only work in progress parks for verification.
+      {:ok, task} =
+        Ash.update(ctx.task, %{verify_after_deploy: true, status: :in_progress}, action: :update)
+
       {:ok, _} = Ash.update(task, %{}, action: :await_verification)
 
       assert {:ok, data} = Tools.task_show(ctx.worker, %{"full" => true})
       assert data.verify_after_deploy == true
       assert data.status == "awaiting_verification"
       assert is_binary(data.awaiting_verification_at)
+      # bd-842qio: the stored lifecycle state, mirroring the REST shape.
+      assert {data.state, data.close_reason} == {"verifying", nil}
     end
   end
 
   describe "task_verify/2" do
     setup ctx do
-      {:ok, task} = Ash.update(ctx.task, %{verify_after_deploy: true}, action: :update)
+      {:ok, task} =
+        Ash.update(ctx.task, %{verify_after_deploy: true, status: :in_progress}, action: :update)
+
       {:ok, awaiting} = Ash.update(task, %{}, action: :await_verification)
       {:ok, awaiting: awaiting}
     end
@@ -1855,8 +1862,9 @@ defmodule Arbiter.MCP.ToolsTest do
     end
 
     test "refuses to demote a task that is awaiting_verification", ctx do
-      {:ok, _} = Ash.update(ctx.task, %{}, action: :promote_to_ready)
-      {:ok, _} = Ash.update(ctx.task, %{}, action: :await_verification)
+      {:ok, promoted} = Ash.update(ctx.task, %{}, action: :promote_to_ready)
+      {:ok, started} = Ash.update(promoted, %{}, action: :start)
+      {:ok, _} = Ash.update(started, %{}, action: :await_verification)
 
       assert {:error, {:invalid, message}} =
                Tools.task_demote(ctx.coordinator, %{"id" => ctx.task.id})
