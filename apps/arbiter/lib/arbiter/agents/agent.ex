@@ -253,6 +253,24 @@ defmodule Arbiter.Agents.Agent do
   """
   @callback write_confinement(SecurityPolicy.t()) :: :os_jail | :permission_layer | :none
 
+  @doc """
+  Why this adapter's `write_confinement/1` degraded to something weaker than
+  the policy asked for, or `nil` when there is nothing to warn about
+  (bd-3s82pf — see `docs/design/agy-strict-write-isolation.md`, "Rollout").
+
+  Outside `:strict`, an adapter that can't confine writes on this host just
+  runs unconfined rather than refusing (`write_confinement/1` quietly answers
+  `:none`), so nothing in the dispatch path itself surfaces the gap. This
+  callback is the seam for `arb server doctor` / the workspace posture API to
+  show that degradation instead of only ever seeing it as `:none` — which
+  also covers "not applicable" (a provider with no jail concept at all, or a
+  policy that opted the sandbox off on purpose).
+
+  Optional — a missing callback means no warning ever surfaces for that
+  adapter, matching today's silence.
+  """
+  @callback write_jail_warning(SecurityPolicy.t()) :: String.t() | nil
+
   @optional_callbacks [
     spawn_env: 1,
     security_enforced?: 0,
@@ -261,6 +279,7 @@ defmodule Arbiter.Agents.Agent do
     async_tool_instruction: 0,
     async_tool_instruction: 3,
     async_arm_signature: 0,
-    write_confinement: 1
+    write_confinement: 1,
+    write_jail_warning: 1
   ]
 end

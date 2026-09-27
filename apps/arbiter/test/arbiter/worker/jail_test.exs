@@ -219,6 +219,17 @@ defmodule Arbiter.Worker.JailTest do
       assert rw == [{"/w", "/w"}]
       refute Enum.any?(flag_pairs(argv, "--setenv"), &(elem(&1, 0) == "HOME"))
     end
+
+    test "worktree_readonly: true ro-binds the worktree instead of binding it writable (bd-3s82pf)" do
+      spec = Map.put(@spec_linked, :worktree_readonly, true)
+      argv = Jail.argv(spec, ["agy", "-p", "hi"])
+
+      refute {"/w/wt", "/w/wt"} in flag_pairs(argv, "--bind")
+      assert {"/w/wt", "/w/wt"} in flag_pairs(argv, "--ro-bind")
+      # Everything else (agy HOME, git common dir) is unaffected.
+      assert {"/h/agy", "/h/agy"} in flag_pairs(argv, "--bind")
+      assert ["--chdir", "/w/wt"] in Enum.chunk_every(argv, 2, 1)
+    end
   end
 
   describe "writable_paths/1" do
@@ -278,6 +289,19 @@ defmodule Arbiter.Worker.JailTest do
     test "requires a worktree" do
       assert Jail.wrap(["agy"], []) == {:error, :no_worktree}
       assert Jail.wrap(["agy"], worktree: "") == {:error, :no_worktree}
+    end
+
+    test "worktree_readonly: true threads through to a --ro-bind of the worktree", %{base: base} do
+      assert {:ok, argv} = Jail.wrap(["agy"], worktree: base, worktree_readonly: true)
+
+      refute {base, base} in flag_pairs(argv, "--bind")
+      assert {base, base} in flag_pairs(argv, "--ro-bind")
+    end
+
+    test "defaults to a writable worktree", %{base: base} do
+      assert {:ok, argv} = Jail.wrap(["agy"], worktree: base)
+
+      assert {base, base} in flag_pairs(argv, "--bind")
     end
 
     test "builds the full argv and prepares per-worker toolchain dirs in the agy HOME", %{
@@ -484,6 +508,24 @@ defmodule Arbiter.Worker.JailTest do
       refute File.read!(Path.join(common, "config")) =~ "jail"
       # The jail's /tmp is a private tmpfs: nothing lands in the host's.
       refute File.exists?(Path.join(System.tmp_dir!(), host_tmp_marker))
+    end
+
+    test "worktree_readonly: true makes a write inside the worktree fail with EROFS too (bd-3s82pf)",
+         %{base: base} do
+      %{wt: wt} = git_repo!(base)
+
+      stub =
+        ~s({ echo x > "$WT/inside.txt"; } 2>&1 | grep -qi 'read-only file system' && echo INSIDE_EROFS)
+
+      {:ok, argv} = Jail.wrap(["sh", "-c", stub], worktree: wt, worktree_readonly: true)
+      [bwrap | args] = argv
+
+      {out, status} =
+        System.cmd(bwrap, args, stderr_to_stdout: true, env: [{"LC_ALL", "C"}, {"WT", wt}])
+
+      assert status == 0, out
+      assert out =~ "INSIDE_EROFS"
+      refute File.exists?(Path.join(wt, "inside.txt"))
     end
 
     test "the exit status of the jailed command is propagated", %{base: base} do

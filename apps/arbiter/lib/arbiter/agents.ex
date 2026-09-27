@@ -156,6 +156,18 @@ defmodule Arbiter.Agents do
   end
 
   @doc """
+  Why `adapter`'s `write_confinement/2` degraded under `policy` (bd-3s82pf),
+  or `nil` when there is nothing to warn about. Delegates to the adapter's
+  optional `write_jail_warning/1` callback; `nil` when the adapter omits it.
+  """
+  @spec write_jail_warning(adapter, SecurityPolicy.t()) :: String.t() | nil
+  def write_jail_warning(adapter, %SecurityPolicy{} = policy) when is_atom(adapter) do
+    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :write_jail_warning, 1) do
+      adapter.write_jail_warning(policy)
+    end
+  end
+
+  @doc """
   Resolve an eligible provider type for a `:strict`-scoped dispatch.
 
   `preferred` is the type the caller's own routing/reviewer resolution

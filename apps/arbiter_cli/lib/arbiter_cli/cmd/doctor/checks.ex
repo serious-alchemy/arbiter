@@ -36,7 +36,8 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       check_bind_address(),
       check_restart_safety(),
       check_security_defaults(),
-      check_legacy_safe_defaults_key()
+      check_legacy_safe_defaults_key(),
+      check_agy_write_jail()
     ]
   end
 
@@ -566,6 +567,66 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           "the current default set minus safe_defaults_exclude). Remove the key, and if it " <>
           "was used to opt a category out, move that category into " <>
           "`agent.security.permissions.safe_defaults_exclude` instead.",
+      fatal: false,
+      blocks_readiness: false
+    }
+  end
+
+  # bd-3s82pf: the agy write jail is default-on in every mode now, keyed on
+  # the base `sandbox.enabled` / `filesystem: :worktree` default. Outside
+  # `:strict` a host that can't jail just runs agy unconfined rather than
+  # refusing (the only fail-closed mode is `:strict`, gated separately by
+  # `security_posture.write_confinement`), so this is the one place that gap
+  # is visible rather than silent.
+  defp check_agy_write_jail do
+    case Client.get("/api/workspaces") do
+      {:ok, %{"data" => list}} when is_list(list) ->
+        offenders =
+          list
+          |> Enum.map(fn ws -> {workspace_label(ws), jail_warning(ws)} end)
+          |> Enum.filter(fn {_name, warning} -> warning != nil end)
+
+        agy_write_jail_result(offenders)
+
+      _ ->
+        %Result{
+          name: "agy write jail",
+          status: :ok,
+          detail: "server unreachable — skipping",
+          fatal: false,
+          blocks_readiness: false
+        }
+    end
+  end
+
+  defp jail_warning(ws) do
+    case Map.get(ws, "security_posture") do
+      %{"write_jail_warning" => warning} when is_binary(warning) -> warning
+      _ -> nil
+    end
+  end
+
+  defp agy_write_jail_result([]) do
+    %Result{
+      name: "agy write jail",
+      status: :ok,
+      detail: "no workspace has a degraded agy write jail",
+      fatal: false,
+      blocks_readiness: false
+    }
+  end
+
+  defp agy_write_jail_result(offenders) do
+    detail = Enum.map_join(offenders, "; ", fn {name, warning} -> "#{name}: #{warning}" end)
+
+    %Result{
+      name: "agy write jail",
+      status: :fail,
+      detail: detail,
+      hint:
+        "Outside :strict this is not fatal — agy runs unconfined instead of refusing. " <>
+          "Install/upgrade bubblewrap and confirm unprivileged user namespaces are enabled " <>
+          "to get the OS write jail back, or set sandbox.enabled: false to opt out explicitly.",
       fatal: false,
       blocks_readiness: false
     }

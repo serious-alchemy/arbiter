@@ -171,20 +171,45 @@ sandbox. The badge and surface show `net=tools-off` to make this scope explicit.
 > empty deny. Genuine OS-level isolation (network namespaces, a real fs jail)
 > is a documented follow-up; the `sandbox.enabled` field is the seam for it.
 
-#### The OS write jail (`Arbiter.Worker.Jail`, bd-5gvqgc)
+#### The OS write jail (`Arbiter.Worker.Jail`, bd-5gvqgc, bd-3s82pf)
 
-The first real kernel-level fence, used today for **agy under `:strict`**
-(see the agy section below for why agy needs it). The worker runs under
-bubblewrap:
+The first real kernel-level fence, used for **every agy spawn** whenever the
+policy's `sandbox.enabled` and `sandbox.filesystem: :worktree` hold — the
+base default, so the jail is default-on for agy in `:bypass`/`:auto` too, not
+just `:strict` (bd-3s82pf; see the agy section below for why agy needs it).
+`sandbox.enabled: false` remains an explicit opt-out that skips the jail in
+every mode. The worker runs under bubblewrap:
 
     bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp --tmpfs /dev/shm \
       [--bind-try <each sandbox.writable_paths entry>] \
-      --bind <worktree> --bind <agy HOME> --setenv HOME <agy HOME> \
+      --bind|--ro-bind <worktree> --bind <agy HOME> --setenv HOME <agy HOME> \
       --bind <git common dir> \
       --ro-bind <common>/hooks --ro-bind <common>/config --ro-bind <common>/worktrees \
       --bind <own gitdir> --ro-bind-try <own gitdir>/commondir --ro-bind <worktree>/.git \
       --setenv HEX_HOME|MIX_HOME|XDG_CACHE_HOME <per-worker dirs under the agy HOME> \
       --unshare-pid --die-with-parent --new-session --chdir <worktree> -- agy -p ...
+
+The worktree bind is `--ro-bind` instead of `--bind` for a worktree-backed
+review dispatch (`Dispatch.review_security_policy/2`'s
+`deny: ["Edit", "Write", "NotebookEdit"]`), so the reviewer read-only posture
+becomes an OS guarantee: an agy reviewer's native `write_to_file` fails with
+`EROFS` against its own worktree, the same as any other outside-worktree
+write.
+
+**Fail-closed only in `:strict`.** Outside `:strict`, a host that can't jail
+(no `bwrap`, userns restricted, `worker_isolate_config` off, …) just runs agy
+unjailed — the same posture as before this change — rather than refusing the
+dispatch: `:bypass`/`:auto` never gated on write confinement, and jailing
+there is a hardening, not a promise dispatch made. `:strict` still refuses
+(`{:write_jail_unavailable, reason}`) rather than silently downgrading.
+`Gemini.write_jail_warning/1` names the reason for that degraded, unjailed
+`:bypass`/`:auto` case (`nil` when the jail applies, or the CLI/policy makes
+the whole question moot); it is surfaced per-workspace as
+`security_posture.write_jail_warning` on the workspace API and as the
+`arb server doctor` check "agy write jail". The full doctor **self-test**
+(does `bwrap` actually work on *this* host) is bd-8xy1mf — the warning here
+only reports what `write_confinement`'s own probe already found while
+building this spawn's argv.
 
 * **Writable:** the worktree, the git common dir (commits need its objects and
   refs), the worker's own agy `$HOME`, and any `sandbox.writable_paths`.
@@ -226,7 +251,9 @@ bubblewrap:
   `apparmor_restrict_unprivileged_userns` and a setuid bwrap all change the
   answer, so the binary alone proves nothing. The result is cached until
   restart. A host that fails keeps agy out of `:strict` (the fail-closed gate,
-  bd-1abj7u); `arb server doctor` explaining why is bd-8xy1mf.
+  bd-1abj7u) and runs agy unjailed everywhere else (`write_jail_warning`
+  names why); a real `arb server doctor` self-test that runs the probe
+  itself is bd-8xy1mf.
 
 **Known, accepted gaps** (the threat model is a misdirected same-user agent,
 not a hostile kernel exploit):
@@ -493,16 +520,23 @@ throwaway `$HOME`:
   that makes the worktree the only writable project path (probed live: a
   jailed `write_to_file` outside it fails with `read-only file system`).
   **Landed in bd-5gvqgc:** under `:strict`, `Gemini.default_argv/2` runs
-  agy inside the OS write jail (see [The OS write jail](#the-os-write-jail-arbiterworkerjail-bd-5gvqgc))
+  agy inside the OS write jail (see [The OS write jail](#the-os-write-jail-arbiterworkerjail-bd-5gvqgc-bd-3s82pf))
   and `Gemini.write_confinement/1` answers `:os_jail`, so the gate admits
   agy, on a host that passes `Jail.available?/0` with worker config
   isolation and `sandbox.enabled` on. Where it can't jail, `write_confinement`
   stays `:none` and the adapter itself refuses a `:strict` spawn
   (`{:write_jail_unavailable, reason}`) rather than run agy unconfined, for a
-  caller that reaches it without the gate. **In `:bypass` and `:auto` an agy
-  worker is not jailed yet and can still write wherever the operator's user
-  can** (bd-3s82pf extends the jail to every mode and makes agy reviews
-  read-only at the OS level).
+  caller that reaches it without the gate. **Extended in bd-3s82pf: the jail
+  is now default-on for agy in `:bypass` and `:auto` too**, keyed on the same
+  `sandbox.enabled` / `sandbox.filesystem: :worktree` base default — the
+  escape is identical there, so an agy worker in the default mode could
+  otherwise still write wherever the operator's user can. Those modes never
+  refuse: a host that can't jail just runs agy unjailed, same as before this
+  change, with `Gemini.write_jail_warning/1` naming the reason for
+  doctor/posture. A worktree-backed agy **review** dispatch also gets its
+  worktree bound `--ro-bind` instead of `--bind`, so the reviewer read-only
+  posture is an OS guarantee there too, not just a deny rule agy's native
+  writes ignore.
 * **`--sandbox` disables the allowlist gate under `"proceed-in-sandbox"`
   (bd-25ivqe).** With `--sandbox` on argv, agy runs the command inside a real
   `bwrap` jail and *auto-proceeds* there regardless of `permissions.allow` —

@@ -9,7 +9,13 @@ defmodule Arbiter.Worker.Jail do
   documented seam, and the only thing an adapter supplies is its command and
   where its own state lives. `Arbiter.Agents.Gemini` is the first caller (agy's
   native `write_to_file` ignores every setting that should confine it, so the
-  kernel is the only place left to enforce `:strict`).
+  kernel is the only place left to enforce it).
+
+  The `:worktree_readonly` option (bd-3s82pf) `--ro-bind`s the worktree
+  instead of `--bind`ing it, for worktree-backed review dispatches: the
+  reviewer read-only posture (`Dispatch.review_security_policy/2` denies
+  `Edit`/`Write`/`NotebookEdit`) becomes an OS guarantee instead of a deny
+  rule agy's native writes ignore.
 
   ## What is writable
 
@@ -105,7 +111,8 @@ defmodule Arbiter.Worker.Jail do
           optional(:home) => String.t() | nil,
           optional(:git) => git() | nil,
           optional(:writable_paths) => [String.t()],
-          optional(:env) => [{String.t(), String.t()}]
+          optional(:env) => [{String.t(), String.t()}],
+          optional(:worktree_readonly) => boolean()
         }
 
   @doc """
@@ -113,12 +120,17 @@ defmodule Arbiter.Worker.Jail do
 
   Options:
 
-    * `:worktree` (required) — the worker's worktree; writable, and the cwd.
+    * `:worktree` (required) — the worker's worktree; writable, and the cwd
+      (unless `:worktree_readonly` is set).
     * `:home` — the agent's own `$HOME` (agy's `ConfigDir` key dir); writable,
       exported as `HOME`, and where the per-worker toolchain dirs are made.
     * `:writable_paths` — extra writable paths (`sandbox.writable_paths`);
       normalized by `writable_paths/1`.
     * `:env` — extra `{name, value}` pairs set inside the jail.
+    * `:worktree_readonly` — bind the worktree `--ro-bind` instead of
+      `--bind` (bd-3s82pf). For a worktree-backed review dispatch, this makes
+      the reviewer's read-only posture an OS guarantee rather than a deny
+      rule agy's native `write_to_file` ignores.
 
   Resolves the worktree's git layout (`git/1`) and prepares the toolchain dirs
   under `:home` on the host, so call it just before spawning. Does not check
@@ -135,7 +147,8 @@ defmodule Arbiter.Worker.Jail do
         home: Keyword.get(opts, :home),
         git: git,
         writable_paths: writable_paths(Keyword.get(opts, :writable_paths, [])),
-        env: toolchain_env ++ Keyword.get(opts, :env, [])
+        env: toolchain_env ++ Keyword.get(opts, :env, []),
+        worktree_readonly: Keyword.get(opts, :worktree_readonly, false)
       }
 
       {:ok, argv(spec, command)}
@@ -154,7 +167,7 @@ defmodule Arbiter.Worker.Jail do
       [bwrap, "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc"],
       ["--tmpfs", "/tmp", "--tmpfs", "/dev/shm"],
       Enum.flat_map(Map.get(spec, :writable_paths, []), &["--bind-try", &1, &1]),
-      bind(worktree),
+      if(Map.get(spec, :worktree_readonly, false), do: ro_bind(worktree), else: bind(worktree)),
       if(home, do: bind(home) ++ ["--setenv", "HOME", home], else: []),
       git_args(Map.get(spec, :git), worktree),
       Enum.flat_map(Map.get(spec, :env, []), fn {k, v} -> ["--setenv", k, v] end),

@@ -44,13 +44,17 @@ defmodule ArbiterWeb.Api.WorkspaceJSON do
       # docs/design/agy-strict-write-isolation.md). Distinct from
       # `policy_enforced`: an adapter can enforce its own deny-list contract
       # while still answering `:none` here (agy/Gemini).
+      # `write_jail_warning` (bd-3s82pf) is non-nil exactly when that `:none`
+      # is a degraded state rather than "not applicable" — outside `:strict`
+      # dispatch never refuses on it, so this is the only place it surfaces.
       security_posture:
         policy
         |> SecurityPolicy.summary()
         |> Map.merge(%{
           "provider" => adapter.provider(),
           "policy_enforced" => security_enforced?(adapter),
-          "write_confinement" => Agents.write_confinement(adapter, policy)
+          "write_confinement" => Agents.write_confinement(adapter, policy),
+          "write_jail_warning" => Agents.write_jail_warning(adapter, policy)
         }),
       created_at: iso(ws.created_at),
       updated_at: iso(ws.updated_at)

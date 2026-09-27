@@ -158,7 +158,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     assert exit_code == 0
     assert {:ok, %{"ok" => true, "checks" => checks}} = Jason.decode(String.trim(out))
     assert is_list(checks)
-    assert length(checks) == 10
+    assert length(checks) == 11
   end
 
   test "version mismatch is non-fatal (exit 0 but shows [fail])" do
@@ -836,6 +836,62 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       assert out =~ "[fail] legacy safe_defaults key"
       assert out =~ "default"
       assert out =~ "safe_defaults_exclude"
+    end
+  end
+
+  # bd-3s82pf: outside :strict, a host that can't jail agy just runs it
+  # unconfined instead of refusing, so `security_posture.write_jail_warning`
+  # (Arbiter.Agents.Gemini.write_jail_warning/1) is the only place that
+  # degradation is visible.
+  describe "agy write jail check" do
+    test "green when no workspace has a write_jail_warning" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] agy write jail"
+    end
+
+    test "names the workspace and the warning when the jail is unavailable" do
+      workspaces_with_warning = %{
+        "data" => [
+          %{
+            "id" => "ws-1",
+            "name" => "default",
+            "prefix" => "vs",
+            "config" => %{},
+            "security_posture" => %{
+              "mode" => "bypass",
+              "allow" => [],
+              "deny" => [],
+              "safe_defaults" => [],
+              "safe_defaults_exclude" => [],
+              "sandbox" => %{"enabled" => true, "filesystem" => "worktree", "network" => true},
+              "write_jail_warning" =>
+                "agy write jail unavailable ({:jail_probe_failed, :bwrap_not_found}) — " <>
+                  "writes are not confined to the worktree outside :strict"
+            }
+          }
+        ]
+      }
+
+      stub_routes([
+        {{"get", "/api/workspaces"}, {workspaces_with_warning, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      # Non-fatal: named, but does not block readiness or fail the exit code.
+      assert exit_code == 0
+      assert out =~ "[fail] agy write jail"
+      assert out =~ "default: agy write jail unavailable"
     end
   end
 end

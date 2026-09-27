@@ -80,6 +80,13 @@ defmodule Arbiter.AgentsTest do
     end
   end
 
+  describe "write_jail_warning/2 (bd-3s82pf)" do
+    test "an adapter missing the callback answers nil" do
+      assert Agents.write_jail_warning(String, policy(:strict)) == nil
+      assert Agents.write_jail_warning(Claude, policy(:strict)) == nil
+    end
+  end
+
   describe "agent_pool/1 (bd-1abj7u)" do
     test "nil workspace is [:claude]" do
       assert Agents.agent_pool(nil) == [:claude]

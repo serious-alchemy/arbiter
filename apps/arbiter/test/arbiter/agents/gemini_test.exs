@@ -92,7 +92,13 @@ defmodule Arbiter.Agents.GeminiTest do
       assert Gemini.write_confinement(policy(:strict)) == :os_jail
     end
 
-    test "write_confinement/1 is :none outside :strict: only :strict runs jailed today" do
+    test "write_confinement/1 is :os_jail in every mode on a jail-capable host (bd-3s82pf)" do
+      assert Gemini.write_confinement(policy(:bypass)) == :os_jail
+      assert Gemini.write_confinement(policy(:auto)) == :os_jail
+    end
+
+    test "write_confinement/1 is :none outside :strict when the host can't jail: no refusal, just unconfined" do
+      Application.put_env(:arbiter, :worker_jail_available, false)
       assert Gemini.write_confinement(policy(:bypass)) == :none
       assert Gemini.write_confinement(policy(:auto)) == :none
     end
@@ -117,6 +123,34 @@ defmodule Arbiter.Agents.GeminiTest do
       File.chmod!(Path.join(bin, "gemini"), 0o755)
 
       assert Gemini.write_confinement(policy(:strict)) == :none
+    end
+
+    test "write_jail_warning/1 is nil on a jail-capable host in every mode" do
+      for mode <- [:bypass, :auto, :strict] do
+        assert Gemini.write_jail_warning(policy(mode)) == nil
+      end
+    end
+
+    test "write_jail_warning/1 warns outside :strict when the host can't jail (bd-3s82pf)" do
+      Application.put_env(:arbiter, :worker_jail_available, false)
+
+      for mode <- [:bypass, :auto, :strict] do
+        assert Gemini.write_jail_warning(policy(mode)) =~ "agy write jail unavailable"
+      end
+    end
+
+    test "write_jail_warning/1 is nil when the policy opts the sandbox off (nothing to warn about)" do
+      Application.put_env(:arbiter, :worker_jail_available, false)
+      assert Gemini.write_jail_warning(policy(:bypass, %{enabled: false})) == nil
+    end
+
+    test "write_jail_warning/1 is nil for the upstream gemini CLI (nothing to jail)", %{bin: bin} do
+      Application.put_env(:arbiter, :worker_jail_available, false)
+      File.rm!(Path.join(bin, "agy"))
+      File.write!(Path.join(bin, "gemini"), "#!/bin/sh\nexit 0\n")
+      File.chmod!(Path.join(bin, "gemini"), 0o755)
+
+      assert Gemini.write_jail_warning(policy(:bypass)) == nil
     end
 
     test "Agents' :strict gate now admits agy on a jail-capable host" do
@@ -168,9 +202,72 @@ defmodule Arbiter.Agents.GeminiTest do
                jail_and_command(resumed)
     end
 
-    test "default_argv/2 outside :strict is not jailed", %{worktree: worktree, agy: agy} do
-      assert {:ok, ["sh", "-c", _, "sh", ^agy, "-p", "p" | _]} =
+    test "default_argv/2 under :bypass and :auto is jailed too (bd-3s82pf: default-on in every mode)",
+         %{worktree: worktree, agy: agy, bwrap: bwrap} do
+      for mode <- [:bypass, :auto] do
+        assert {:ok, argv} =
+                 Gemini.default_argv("p", security: policy(mode), worktree_path: worktree)
+
+        {jail, command} = jail_and_command(argv)
+        assert [^bwrap, "--ro-bind", "/", "/" | _] = jail
+        assert ["--bind", worktree, worktree] in Enum.chunk_every(jail, 3, 1)
+        assert [^agy, "-p", "p" | _] = command
+      end
+    end
+
+    test "default_argv/2 outside :strict falls back unjailed when the host can't jail: no refusal",
+         %{worktree: worktree, agy: agy} do
+      Application.put_env(:arbiter, :worker_jail_available, false)
+
+      for mode <- [:bypass, :auto] do
+        assert {:ok, ["sh", "-c", _, "sh", ^agy, "-p", "p" | _]} =
+                 Gemini.default_argv("p", security: policy(mode), worktree_path: worktree)
+      end
+    end
+
+    test "default_argv/2 outside :strict is not jailed when sandbox.enabled is false (the opt-out)",
+         %{worktree: worktree, agy: agy} do
+      for mode <- [:bypass, :auto, :strict] do
+        result =
+          Gemini.default_argv("p",
+            security: policy(mode, %{enabled: false}),
+            worktree_path: worktree
+          )
+
+        case mode do
+          :strict ->
+            assert {:error, {:write_jail_unavailable, _}} = result
+
+          _ ->
+            assert {:ok, ["sh", "-c", _, "sh", ^agy, "-p", "p" | _]} = result
+        end
+      end
+    end
+
+    test "default_argv/2 for a worktree-backed review dispatch ro-binds the worktree (bd-3s82pf)",
+         %{worktree: worktree} do
+      review_policy =
+        Arbiter.Worker.Dispatch.review_security_policy(policy(:bypass),
+          review_checkout: %{path: worktree}
+        )
+
+      assert {:ok, argv} =
+               Gemini.default_argv("p", security: review_policy, worktree_path: worktree)
+
+      {jail, _command} = jail_and_command(argv)
+      refute ["--bind", worktree, worktree] in Enum.chunk_every(jail, 3, 1)
+      assert ["--ro-bind", worktree, worktree] in Enum.chunk_every(jail, 3, 1)
+    end
+
+    test "default_argv/2 for a non-review dispatch keeps the worktree writable", %{
+      worktree: worktree
+    } do
+      assert {:ok, argv} =
                Gemini.default_argv("p", security: policy(:bypass), worktree_path: worktree)
+
+      {jail, _command} = jail_and_command(argv)
+      assert ["--bind", worktree, worktree] in Enum.chunk_every(jail, 3, 1)
+      refute ["--ro-bind", worktree, worktree] in Enum.chunk_every(jail, 3, 1)
     end
 
     test "default_argv/2 under :strict fails closed when the host cannot jail", %{
@@ -185,6 +282,12 @@ defmodule Arbiter.Agents.GeminiTest do
     test "default_argv/2 under :strict fails closed with no worktree to confine to" do
       assert {:error, {:write_jail_unavailable, :no_worktree}} =
                Gemini.default_argv("p", security: policy(:strict))
+    end
+
+    test "default_argv/2 outside :strict with no worktree falls back unjailed rather than erroring",
+         %{agy: agy} do
+      assert {:ok, ["sh", "-c", _, "sh", ^agy, "-p", "p" | _]} =
+               Gemini.default_argv("p", security: policy(:bypass))
     end
 
     test "default_argv/2 under :strict refuses the upstream gemini CLI", %{

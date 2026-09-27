@@ -76,11 +76,14 @@ defmodule Arbiter.Agents.Gemini do
   bd-7h2cuk), and the upstream `gemini` CLI has no allow/deny mechanism at
   all. `security_enforced?/0` above is about the *deny-list* contract, a
   separate claim. So the only confinement is the kernel's, and it applies
-  exactly when `default_argv/2` jails the spawn: the resolved mode is
-  `:strict`, `sandbox.enabled` is on, the CLI is agy, the isolated agy
-  `$HOME` is on (it is the one writable place agy keeps its own state) and
-  the host passes the jail's probe (`Jail.available?/0`). Other modes are
-  not jailed yet (bd-3s82pf), so they answer `:none`.
+  exactly when `default_argv/2` jails the spawn: `sandbox.enabled` is on,
+  `sandbox.filesystem` is `:worktree` (the base default — bd-3s82pf makes the
+  jail default-on for agy in **every** mode, not just `:strict`), the CLI is
+  agy, the isolated agy `$HOME` is on (it is the one writable place agy keeps
+  its own state) and the host passes the jail's probe (`Jail.available?/0`).
+  Outside `:strict`, a host that fails the probe or has isolation disabled
+  just runs unjailed (`:none`) rather than refusing — only `:strict` fails
+  closed (see `jail_blocker/1`).
   """
   @impl true
   def write_confinement(%SecurityPolicy{} = policy) do
@@ -89,6 +92,28 @@ defmodule Arbiter.Agents.Gemini do
       :os_jail
     else
       _ -> :none
+    end
+  end
+
+  @doc """
+  Why this host can't jail an agy spawn under `policy`, for `arb server
+  doctor` / the workspace posture API (bd-3s82pf). `nil` when the resolved
+  CLI isn't agy (nothing to jail), the policy opted the sandbox off on
+  purpose (`sandbox.enabled: false` / `filesystem: :none` — a deliberate
+  choice, not a degraded state), or the jail actually applies. Non-nil
+  precisely when `default_argv/2` would run this spawn unjailed outside
+  `:strict` (see `jail_blocker/1`) — the gap `write_confinement/1` alone
+  can't distinguish from "not applicable".
+  """
+  @impl true
+  def write_jail_warning(%SecurityPolicy{} = policy) do
+    with {:ok, {:agy, _}} <- resolve_executable(),
+         true <- jail_eligible?(policy),
+         {:error, reason} <- jail_blocker(policy) do
+      "agy write jail unavailable (#{inspect(reason)}) — writes are not confined to the " <>
+        "worktree outside :strict"
+    else
+      _ -> nil
     end
   end
 
@@ -433,44 +458,75 @@ defmodule Arbiter.Agents.Gemini do
     end
   end
 
-  # bd-5gvqgc: under `:strict` the spawn is jailed or refused, never run with
-  # agy's own (unenforced) write confinement. This is the same condition
-  # `write_confinement/1` reports to the dispatch gate (bd-1abj7u); refusing
-  # here too covers a caller that reaches the adapter without the gate.
-  defp maybe_jail(_type, command, _opts, %SecurityPolicy{permissions: %{mode: mode}})
-       when mode != :strict,
-       do: {:ok, command}
-
-  defp maybe_jail(:gemini, _command, _opts, _policy),
+  # bd-3s82pf: the jail is default-on for agy in every mode, keyed on the same
+  # `sandbox.enabled` / `sandbox.filesystem: :worktree` base default the rest
+  # of the policy already uses — not just `:strict`. The escape agy's own
+  # `write_to_file` leaves open is identical in `:bypass`/`:auto` (bd-ca7xko).
+  # `:strict` still fails closed when the jail can't run (never falls back to
+  # agy's own unenforced write confinement, and this is the same condition
+  # `write_confinement/1` reports to the dispatch gate, bd-1abj7u — refusing
+  # here too covers a caller that reaches the adapter without the gate).
+  # `:auto`/`:bypass` fall back to running unjailed instead of refusing,
+  # since jailing there is a hardening on top of an already-accepted posture,
+  # not something dispatch has ever gated on.
+  defp maybe_jail(:gemini, _command, _opts, %SecurityPolicy{permissions: %{mode: :strict}}),
     do:
       {:error,
        {:write_jail_unavailable,
         "the upstream gemini CLI keeps its state in the operator's $HOME and cannot be jailed"}}
 
-  defp maybe_jail(:agy, command, opts, policy) do
-    with :ok <- jail_blocker(policy),
-         {:ok, argv} <-
-           Jail.wrap(command,
-             worktree: Keyword.get(opts, :worktree) || Keyword.get(opts, :worktree_path),
-             home: ConfigDir.path(opts),
-             writable_paths: Map.get(policy.sandbox, :writable_paths, [])
-           ) do
-      {:ok, argv}
-    else
-      {:error, reason} -> {:error, {:write_jail_unavailable, reason}}
+  defp maybe_jail(:gemini, command, _opts, _policy), do: {:ok, command}
+
+  defp maybe_jail(:agy, command, opts, %SecurityPolicy{permissions: %{mode: mode}} = policy) do
+    case jail_blocker(policy) do
+      :ok ->
+        case Jail.wrap(command,
+               worktree: Keyword.get(opts, :worktree) || Keyword.get(opts, :worktree_path),
+               home: ConfigDir.path(opts),
+               writable_paths: Map.get(policy.sandbox, :writable_paths, []),
+               worktree_readonly: review_dispatch?(policy)
+             ) do
+          {:ok, argv} -> {:ok, argv}
+          {:error, reason} -> jail_unavailable(mode, command, reason)
+        end
+
+      {:error, reason} ->
+        jail_unavailable(mode, command, reason)
     end
   end
 
-  # Why agy can't be jailed under `policy` on this host, or `:ok`.
-  defp jail_blocker(%SecurityPolicy{permissions: %{mode: :strict}, sandbox: sandbox}) do
+  defp jail_unavailable(:strict, _command, reason),
+    do: {:error, {:write_jail_unavailable, reason}}
+
+  defp jail_unavailable(_mode, command, _reason), do: {:ok, command}
+
+  # Why agy can't be jailed under `policy` on this host, or `:ok`. Independent
+  # of `permissions.mode` — the eligibility test is the sandbox base default
+  # (`enabled` + `filesystem: :worktree`), the same one every other mode
+  # already resolves through.
+  defp jail_blocker(%SecurityPolicy{} = policy) do
     cond do
-      not Map.get(sandbox, :enabled, true) -> {:error, "sandbox.enabled is false"}
-      not ConfigDir.enabled?() -> {:error, "the isolated agy HOME (worker_isolate_config) is off"}
-      true -> with {:error, reason} <- Jail.status(), do: {:error, {:jail_probe_failed, reason}}
+      not jail_eligible?(policy) ->
+        {:error, "sandbox.enabled is false or sandbox.filesystem is not :worktree"}
+
+      not ConfigDir.enabled?() ->
+        {:error, "the isolated agy HOME (worker_isolate_config) is off"}
+
+      true ->
+        with {:error, reason} <- Jail.status(), do: {:error, {:jail_probe_failed, reason}}
     end
   end
 
-  defp jail_blocker(_policy), do: {:error, "only :strict runs jailed"}
+  defp jail_eligible?(%SecurityPolicy{sandbox: sandbox}) do
+    Map.get(sandbox, :enabled, true) and Map.get(sandbox, :filesystem, :worktree) == :worktree
+  end
+
+  # A worktree-backed review dispatch (`Dispatch.review_security_policy/2`)
+  # unions `deny: ["Edit", "Write", "NotebookEdit"]` onto the policy — that
+  # bare-tool-name deny is otherwise unenforced for agy's native writes
+  # (`Arbiter.Agents.Gemini.Security`'s `bare_tool_rule/1`), so the jail binds
+  # the worktree `--ro-bind` instead whenever it's present.
+  defp review_dispatch?(%SecurityPolicy{permissions: %{deny: deny}}), do: "Write" in deny
 
   # The resolved `Arbiter.Agents.SecurityPolicy` for this spawn. Falls back to
   # the install-wide default so a bare adapter call is still safe.
