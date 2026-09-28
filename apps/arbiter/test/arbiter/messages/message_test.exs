@@ -733,7 +733,9 @@ defmodule Arbiter.Messages.MessageTest do
 
       m = escalate(:merge_blocked, "blocked A", task)
 
-      assert %{id: id} = Message.last_escalation(:merge_blocked, workspace_id: @ws, task_ref: task)
+      assert %{id: id} =
+               Message.last_escalation(:merge_blocked, workspace_id: @ws, task_ref: task)
+
       assert id == m.id
     end
 

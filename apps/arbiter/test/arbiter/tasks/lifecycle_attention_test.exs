@@ -15,12 +15,19 @@ defmodule Arbiter.Tasks.LifecycleAttentionTest do
 
   defp ticket(state, attrs \\ %{}) do
     Map.merge(
-      %{id: "bd-t", state: state, issue_type: :feature, updated_at: @long_ago, created_at: @long_ago},
+      %{
+        id: "bd-t",
+        state: state,
+        issue_type: :feature,
+        updated_at: @long_ago,
+        created_at: @long_ago
+      },
       attrs
     )
   end
 
-  defp run(fields), do: Map.merge(%{task_id: "bd-t", meta: %{}, waiting_on: nil, outcome: nil}, fields)
+  defp run(fields),
+    do: Map.merge(%{task_id: "bd-t", meta: %{}, waiting_on: nil, outcome: nil}, fields)
 
   defp view(ticket, ctx \\ %{}), do: Lifecycle.view(ticket, Map.put_new(ctx, :now, @now))
 
@@ -35,7 +42,9 @@ defmodule Arbiter.Tasks.LifecycleAttentionTest do
   defp state_for(_park_reason), do: :active
 
   defp ctx_for(%{when: :approval}),
-    do: %{merger_status: %{status: :open, approved: true, block_reason: :needs_nonauthor_approval}}
+    do: %{
+      merger_status: %{status: :open, approved: true, block_reason: :needs_nonauthor_approval}
+    }
 
   defp ctx_for(_row), do: %{}
 
@@ -104,7 +113,11 @@ defmodule Arbiter.Tasks.LifecycleAttentionTest do
     test "a failed run with a follow-up round under way needs no one's attention" do
       runs = [
         run(%{state: :finished, outcome: :failed}),
-        run(%{task_id: "bd-t#impl", state: :working, meta: %{role: :implementer, revises: "bd-t"}})
+        run(%{
+          task_id: "bd-t#impl",
+          state: :working,
+          meta: %{role: :implementer, revises: "bd-t"}
+        })
       ]
 
       assert view(ticket(:active), %{runs: runs}).attention == nil

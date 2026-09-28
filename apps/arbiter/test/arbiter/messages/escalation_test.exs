@@ -151,7 +151,9 @@ defmodule Arbiter.Messages.EscalationTest do
       system = MapSet.new(EscalationKind.system_kinds())
 
       assert MapSet.disjoint?(ticket, system)
-      assert Enum.sort(EscalationKind.all()) == Enum.sort(MapSet.to_list(MapSet.union(ticket, system)))
+
+      assert Enum.sort(EscalationKind.all()) ==
+               Enum.sort(MapSet.to_list(MapSet.union(ticket, system)))
     end
 
     test "every cause a kind records is an attention cause the ticket accepts" do

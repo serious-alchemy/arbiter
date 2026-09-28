@@ -154,9 +154,14 @@ defmodule Arbiter.Tasks.Lifecycle.Attention do
     block = Map.get(facts, :block)
 
     cond do
-      block != nil and block not in @auto_resolving_blocks -> {:merge_blocked, nil, nil}
-      Map.get(facts, :watchdog_alive) == false -> {:merge_blocked, "no Watchdog is polling its PR", nil}
-      true -> nil
+      block != nil and block not in @auto_resolving_blocks ->
+        {:merge_blocked, nil, nil}
+
+      Map.get(facts, :watchdog_alive) == false ->
+        {:merge_blocked, "no Watchdog is polling its PR", nil}
+
+      true ->
+        nil
     end
   end
 
@@ -170,7 +175,8 @@ defmodule Arbiter.Tasks.Lifecycle.Attention do
   end
 
   defp build(cause, detail, since, facts) do
-    qualifier = if cause == :merge_blocked and Map.get(facts, :block) in @approval_blocks, do: :approval
+    qualifier =
+      if cause == :merge_blocked and Map.get(facts, :block) in @approval_blocks, do: :approval
 
     {^cause, _, owner, waiting_on, default} =
       Enum.find(@rows, &match?({^cause, ^qualifier, _, _, _}, &1))

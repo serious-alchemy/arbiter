@@ -98,9 +98,7 @@ defmodule Arbiter.Messages.Escalation do
             :ok
 
           {:error, reason} ->
-            Logger.warning(
-              "Escalation: could not record #{cause} on #{ref}: #{inspect(reason)}"
-            )
+            Logger.warning("Escalation: could not record #{cause} on #{ref}: #{inspect(reason)}")
         end
     end
   end

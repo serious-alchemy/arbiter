@@ -1098,6 +1098,7 @@ defmodule Arbiter.Board.SnapshotTest do
         )
 
       assert flags(board) == %{"bd-a" => true, "bd-b" => false}
+
       assert %{"bd-a" => :operator, "bd-b" => :coordinator} ==
                Map.new(board.waiting, &{&1.id, &1.attention.owner})
     end

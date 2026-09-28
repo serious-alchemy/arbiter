@@ -43,7 +43,8 @@ defmodule Arbiter.Tasks.Attention do
   for a ticket that is not open work, or not a ticket at all. Best-effort:
   `{:error, _}` is returned, never raised.
   """
-  @spec raise_cause(String.t(), atom(), String.t() | nil) :: {:ok, Issue.t() | nil} | {:error, term()}
+  @spec raise_cause(String.t(), atom(), String.t() | nil) ::
+          {:ok, Issue.t() | nil} | {:error, term()}
   def raise_cause(ticket_id, cause, detail \\ nil) when is_binary(ticket_id) and is_atom(cause) do
     case Ash.get(Issue, ticket_id) do
       {:ok, %Issue{state: state} = issue} when state in @open_states ->

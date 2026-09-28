@@ -160,7 +160,9 @@ defmodule Arbiter.Tasks.AttentionMigrationTest do
       migrate!(m)
       Ecto.Migrator.down(Repo, @migration_id, m, log: false)
 
-      columns = Repo.query!("SELECT name FROM pragma_table_info('messages')").rows |> List.flatten()
+      columns =
+        Repo.query!("SELECT name FROM pragma_table_info('messages')").rows |> List.flatten()
+
       refute "escalation_kind" in columns
       refute "resolved_at" in columns
     end
@@ -182,7 +184,8 @@ defmodule Arbiter.Tasks.AttentionMigrationTest do
         ])
       end
 
-      assert :ok = Ecto.Migrator.up(Repo, @migration_id, m, log: false, strict_version_order: true)
+      assert :ok =
+               Ecto.Migrator.up(Repo, @migration_id, m, log: false, strict_version_order: true)
     end
   end
 end

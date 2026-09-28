@@ -112,7 +112,11 @@ defmodule Arbiter.Tasks.AttentionAutoClearTest do
     assert merging.state == :merging
 
     :ok =
-      CoordinatorNotifier.merge_blocked(%{task_id: task.id, workspace_id: ws.id}, "#42", :conflict)
+      CoordinatorNotifier.merge_blocked(
+        %{task_id: task.id, workspace_id: ws.id},
+        "#42",
+        :conflict
+      )
 
     blocked = Ash.get!(Issue, task.id)
     assert blocked.attention_cause == :merge_blocked
@@ -132,6 +136,7 @@ defmodule Arbiter.Tasks.AttentionAutoClearTest do
 
       assert returned.state == :active
       assert returned.attention_cause == :pr_closed
+
       assert [%{escalation_kind: :pr_closed, resolved_at: nil, cleared_at: nil}] =
                escalations(task.id)
     end
