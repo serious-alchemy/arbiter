@@ -38,6 +38,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       check_security_defaults(),
       check_legacy_safe_defaults_key(),
       check_agy_write_jail(),
+      check_claude_worker_credentials(),
       check_account_policy_binding()
     ]
   end
@@ -717,6 +718,55 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       fatal: strict?,
       blocks_readiness: false
     }
+  end
+
+  # bd-80ecol: every workspace that runs Claude with no setup token (or API
+  # key) of its own. Such a workspace used to fall back to a copy of the
+  # operator's `.credentials.json` (mode B) — a second holder of a refresh
+  # token Claude rotates on every refresh, so either side's refresh locked the
+  # other out. Its Claude dispatch is now held instead, which is an
+  # operator-actionable failure (non-zero exit) but says nothing about whether
+  # the server itself is healthy, so it never blocks deploy readiness.
+  defp check_claude_worker_credentials do
+    case Client.get("/api/server/claude_credentials") do
+      {:ok, %{"checked" => checked, "missing" => []}} ->
+        %Result{
+          name: "claude worker credentials",
+          status: :ok,
+          detail:
+            "#{checked} Claude workspace(s), each with a setup token of its own — none falls " <>
+              "back to the operator's .credentials.json",
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      {:ok, %{"missing" => missing}} when is_list(missing) ->
+        %Result{
+          name: "claude worker credentials",
+          status: :fail,
+          detail:
+            Enum.map_join(missing, "; ", fn m ->
+              "#{Map.get(m, "workspace") || Map.get(m, "workspace_id")} " <>
+                "(#{Map.get(m, "provider", "claude")}): #{Map.get(m, "summary")} — " <>
+                "fix: #{Map.get(m, "fix")}"
+            end),
+          hint:
+            "Claude dispatch for these workspaces is held: Arbiter no longer copies the " <>
+              "operator's ~/.claude/.credentials.json into a worker, since Claude rotates its " <>
+              "refresh token on every refresh and two holders lock each other out.",
+          fatal: true,
+          blocks_readiness: false
+        }
+
+      _ ->
+        %Result{
+          name: "claude worker credentials",
+          status: :ok,
+          detail: "could not check — server unreachable, or it predates this check",
+          fatal: false,
+          blocks_readiness: false
+        }
+    end
   end
 
   # bd-c7ll4t: `Arbiter.Quota.Gate` resolves every threshold as

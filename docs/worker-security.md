@@ -395,8 +395,10 @@ resolution.
 `Arbiter.Agents.Claude.ConfigDir` runs every worker against an isolated
 `CLAUDE_CONFIG_DIR`. It now:
 
-* **symlinks only `.credentials.json`** (OAuth/token refresh) from the operator
-  dir,
+* **never carries the operator's `.credentials.json`** — not symlinked, not
+  copied (bd-80ecol): a worker authenticates with its own setup token
+  (`CLAUDE_CODE_OAUTH_TOKEN`) or an API key, and a Claude dispatch with neither
+  is refused (`Arbiter.Agents.Claude.CredentialCheck`),
 * **generates `settings.json`** from the install-default policy — a hardened,
   non-empty-deny floor — instead of symlinking the operator's, and
 * writes its own task-focused `CLAUDE.md` (never the operator's persona).

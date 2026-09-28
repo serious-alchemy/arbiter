@@ -216,6 +216,72 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
     do: escalate(:preflight_failed, snapshot, reason)
 
   @doc """
+  Escalate a Claude dispatch refused because the workspace has no setup token
+  of its own (bd-80ecol).
+
+  Fired by `Arbiter.Worker.Dispatch`'s auth guard with the
+  `Arbiter.Agents.Claude.CredentialCheck` answer. Arbiter used to paper over
+  this case by copying the operator's `.credentials.json` into the worker
+  (mode B), whose refresh-token rotation locked the operator out; now the
+  dispatch is held and this page names the command that fixes it.
+
+  **Once per workspace.** The subject names the workspace, not the task:
+  every Ready task in it is held for the same reason, and Autopilot retries
+  the head card every tick. While an identical page is uncleared — or was
+  sent within `:preflight_escalation_cooldown_ms` (default 6h) — a repeat is
+  dropped, and the dedupe lives in the message table, so a restart does not
+  re-page. Best-effort, returns `:ok`.
+  """
+  @spec setup_token_missing(map(), map()) :: :ok
+  def setup_token_missing(%{workspace_id: ws_id} = snapshot, missing) when is_binary(ws_id) do
+    escalate_event("setup_token_missing/2", snapshot, fn task_id ->
+      subject = "Claude dispatch held: no setup token for workspace #{missing_label(missing)}"
+
+      if duplicate_setup_token_escalation?(ws_id, subject) do
+        :skip
+      else
+        body =
+          Enum.join(
+            [
+              "Refused to dispatch #{title_for(task_id)}: #{missing.summary}.",
+              "Every Claude dispatch in this workspace is held until it has a credential of " <>
+                "its own. Arbiter no longer falls back to copying the operator's " <>
+                "~/.claude/.credentials.json into a worker: Claude rotates that grant's " <>
+                "refresh token on every refresh, so two holders lock each other out (bd-80ecol).",
+              "Fix: #{missing.fix}",
+              "Held tasks stay Ready and dispatch on their own once a credential resolves. " <>
+                "This page is not repeated for the workspace's other held tasks."
+            ],
+            "\n"
+          )
+
+        {subject, body}
+      end
+    end)
+  end
+
+  def setup_token_missing(_snapshot, _missing), do: :ok
+
+  defp missing_label(%{workspace: name}) when is_binary(name) and name != "", do: name
+  defp missing_label(%{workspace_id: id}), do: id
+
+  defp duplicate_setup_token_escalation?(ws_id, subject) do
+    coordinator = Message.coordinator_ref()
+    scope = [workspace_id: ws_id]
+
+    if Message.last_with_subject(coordinator, [subject], scope ++ [uncleared: true]) do
+      true
+    else
+      case Message.last_with_subject(coordinator, [subject], scope) do
+        nil -> false
+        last -> within_preflight_cooldown?(last)
+      end
+    end
+  rescue
+    _ -> false
+  end
+
+  @doc """
   Escalate a post-`start_worker` dispatch failure to the coordinator (bd-bi5pn0).
 
   Fired by `Arbiter.Worker.Dispatch` when a step AFTER `start_worker/3` fails

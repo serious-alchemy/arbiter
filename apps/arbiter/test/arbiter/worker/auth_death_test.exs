@@ -30,6 +30,10 @@ defmodule Arbiter.Worker.AuthDeathTest do
   """
 
   setup do
+    # bd-80ecol: the stub `claude` runs the real-agent path, whose dispatch
+    # guard refuses a spawn with no credential of its own.
+    claude_credential_env!()
+
     tmp = Path.join(System.tmp_dir!(), "auth-death-#{System.unique_integer([:positive])}")
     File.mkdir_p!(tmp)
     on_exit(fn -> File.rm_rf(tmp) end)

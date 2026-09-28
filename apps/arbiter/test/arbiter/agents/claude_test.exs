@@ -423,6 +423,64 @@ defmodule Arbiter.Agents.ClaudeTest do
     end
   end
 
+  # bd-80ecol: the workspace-less CredentialWatchdog probe used to run on a
+  # copy of the operator's `.credentials.json` whenever no install-wide token
+  # resolved. With that copy gone it would 401 and mark the adapter expired —
+  # refusing every Claude dispatch fleet-wide, including workspaces that do
+  # have a token. So it declines to run instead; Preflight reports that as a
+  # non-auth failure, which the watchdog leaves alone.
+  describe "auth_probe_argv/1 with no credential (bd-80ecol)" do
+    setup do
+      prev =
+        for var <- ~w(CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY), into: %{} do
+          {var, System.get_env(var)}
+        end
+
+      Enum.each(prev, fn {var, _} -> System.delete_env(var) end)
+
+      # Flag off keeps this DB-free: the legacy chain's workspace scan fails
+      # soft (no sandbox) and reads as "no install-wide token".
+      prev_flag = Application.get_env(:arbiter, :provider_accounts_enabled)
+      Application.put_env(:arbiter, :provider_accounts_enabled, false)
+
+      on_exit(fn ->
+        Enum.each(prev, fn
+          {var, nil} -> System.delete_env(var)
+          {var, v} -> System.put_env(var, v)
+        end)
+
+        case prev_flag do
+          nil -> Application.delete_env(:arbiter, :provider_accounts_enabled)
+          v -> Application.put_env(:arbiter, :provider_accounts_enabled, v)
+        end
+      end)
+
+      :ok
+    end
+
+    @tag :capture_log
+    test "declines to probe when no setup token or API key resolves" do
+      assert {:error, {:no_setup_token, summary}} = Claude.auth_probe_argv([])
+      assert summary =~ "no Claude setup token"
+    end
+
+    @tag :capture_log
+    test "a Preflight check of it is a non-auth failure, and spawns nothing" do
+      assert {:error, %Arbiter.Worker.StopReason{category: category, summary: summary}} =
+               Arbiter.Agents.Preflight.check(Claude, [])
+
+      refute category == :auth_expired
+      assert summary =~ "no Claude setup token"
+    end
+
+    @tag :capture_log
+    test "probes as before once a setup token resolves" do
+      System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "server-token")
+
+      refute match?({:error, {:no_setup_token, _}}, Claude.auth_probe_argv([]))
+    end
+  end
+
   describe "spawn_env/1 (workspace-scoped CLAUDE_CODE_OAUTH_TOKEN, bd-bw3466)" do
     setup do
       prev_oauth_token = System.get_env("CLAUDE_CODE_OAUTH_TOKEN")

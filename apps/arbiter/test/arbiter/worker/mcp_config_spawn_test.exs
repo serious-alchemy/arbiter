@@ -32,6 +32,10 @@ defmodule Arbiter.Worker.MCPConfigSpawnTest do
   alias Arbiter.Workflows.MergeQueue.FixPassDispatcher
 
   setup do
+    # bd-80ecol: the stub `claude` runs the real-agent path, whose dispatch
+    # guard refuses a spawn with no credential of its own.
+    claude_credential_env!()
+
     sandbox = TestSandbox.provision!("mcp-config-spawn")
 
     put_app_env(:arbiter, :worktree_root, sandbox.worktree_root)

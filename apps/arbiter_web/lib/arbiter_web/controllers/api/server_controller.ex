@@ -15,10 +15,18 @@ defmodule ArbiterWeb.Api.ServerController do
       running on the server host needs the host's own answer even when no
       workspace currently resolves `:strict`, so `arb server doctor` has
       something to show for AC1/AC6's "can this host jail agy at all" check.
+    * `GET /api/server/claude_credentials` — every workspace that runs Claude
+      with no setup token (or API key) of its own (bd-80ecol,
+      `Arbiter.Agents.Claude.CredentialCheck.workspace_report/0`): the ones
+      that used to fall back to a copy of the operator's `.credentials.json`,
+      and whose Claude dispatch is now held. `arb server doctor` lists them.
+      A failed read is a 500, so the doctor reports "could not check" rather
+      than a false all-clear.
   """
 
   use ArbiterWeb, :controller
 
+  alias Arbiter.Agents.Claude.CredentialCheck
   alias Arbiter.Worker.Jail
 
   def migrations(conn, _params) do
@@ -68,5 +76,25 @@ defmodule ArbiterWeb.Api.ServerController do
       %{cause: cause, message: message, fix: fix} ->
         json(conn, %{available: false, cause: Atom.to_string(cause), message: message, fix: fix})
     end
+  end
+
+  def claude_credentials(conn, _params) do
+    %{checked: checked, missing: missing} = CredentialCheck.workspace_report()
+
+    json(conn, %{
+      checked: checked,
+      missing:
+        Enum.map(missing, fn m ->
+          %{
+            workspace_id: m.workspace_id,
+            workspace: m.workspace,
+            provider: Atom.to_string(m.provider),
+            account: m.account,
+            reason: Atom.to_string(m.reason),
+            summary: m.summary,
+            fix: m.fix
+          }
+        end)
+    })
   end
 end

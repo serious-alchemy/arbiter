@@ -366,10 +366,18 @@ database password: back it up and keep it stable — rotating it (re-encrypting
 existing secrets) is a separate runbook and is not yet automated. Losing it
 makes existing encrypted secrets unrecoverable.
 
-### Claude CLI authentication (`CLAUDE_CODE_OAUTH_TOKEN`) — recommended
+### Claude CLI authentication (`CLAUDE_CODE_OAUTH_TOKEN`) — required
 
 Real worker spawns and the `CredentialWatchdog`'s health probe both authenticate
-the `claude` CLI via `Arbiter.Agents.Claude.spawn_env/1`. The supported path is
+the `claude` CLI via `Arbiter.Agents.Claude.spawn_env/1`, and a Claude worker
+needs a credential of its own: a setup token (`claude setup-token`) or an
+`ANTHROPIC_API_KEY`. Arbiter **never** copies your own
+`~/.claude/.credentials.json` into a worker — Claude rotates that login's refresh
+token on every refresh, so a second holder locks one of you out. A Claude
+dispatch for a workspace with no credential is refused and held (its tasks stay
+Ready), the coordinator gets one escalation naming the fix, and
+`arb server doctor`'s "claude worker credentials" check lists every such
+workspace. The supported path is
 **provider accounts** — a `provider_accounts` row, joined to a workspace via
 `workspace_provider_accounts`, holding an active `provider_credentials` row for
 `CLAUDE_CODE_OAUTH_TOKEN` (`docs/provider-account-design.md`); enable it with

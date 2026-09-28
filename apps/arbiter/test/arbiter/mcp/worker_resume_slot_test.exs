@@ -13,6 +13,10 @@ defmodule Arbiter.MCP.WorkerResumeSlotTest do
   alias Arbiter.Worker
 
   setup do
+    # bd-80ecol: the resume reaches the real-agent dispatch guard, which
+    # refuses a Claude spawn with no credential of its own.
+    claude_credential_env!()
+
     {:ok, ws} =
       Ash.create(Workspace, %{
         name: "mcp-resume-slot-#{System.unique_integer([:positive])}",

@@ -217,6 +217,13 @@ defmodule Arbiter.Board.Autopilot do
   # out a retry budget. See `Arbiter.Worker.Dispatch.resolve_repo_for_dispatch/2`.
   @deterministic_dispatch_errors [:ambiguous_repo, :no_repo_configured, :repo_not_found]
 
+  # Dispatch error shapes whose refusal already paged the coordinator from
+  # inside `Arbiter.Worker.Dispatch`, with its own durable dedupe — a
+  # `dispatch_stuck` page on top would be a second page for one cause.
+  # `:setup_token_missing` is the bd-80ecol setup-token hold (one page per
+  # workspace, naming the fix).
+  @dispatch_escalated_errors [:setup_token_missing]
+
   # How many consecutive same-shape failures a non-deterministic error (a
   # quota gate, a network blip) gets before Autopilot escalates it too.
   @dispatch_failure_retry_threshold 3
@@ -808,6 +815,9 @@ defmodule Arbiter.Board.Autopilot do
 
     %{state | failures: Map.put(state.failures, id, entry)}
   end
+
+  defp escalate_dispatch_failure?(shape, _count) when shape in @dispatch_escalated_errors,
+    do: false
 
   defp escalate_dispatch_failure?(shape, _count) when shape in @deterministic_dispatch_errors,
     do: true

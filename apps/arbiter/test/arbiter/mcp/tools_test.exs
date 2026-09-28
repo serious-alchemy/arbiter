@@ -4607,6 +4607,8 @@ defmodule Arbiter.MCP.ToolsTest do
 
       put_app_env(:arbiter, :worktree_root, Path.join(tmp, "wt"))
       put_app_env(:arbiter, :repo_paths, %{"mcp/live-repo" => repo})
+      # bd-80ecol: a real-agent Claude dispatch needs a credential of its own.
+      claude_credential_env!()
 
       :ok
     end

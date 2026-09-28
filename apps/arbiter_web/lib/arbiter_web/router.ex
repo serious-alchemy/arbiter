@@ -225,6 +225,7 @@ defmodule ArbiterWeb.Router do
     get("/server/migrations", ServerController, :migrations)
     get("/server/bind_address", ServerController, :bind_address)
     get("/server/agy_write_jail", ServerController, :agy_write_jail)
+    get("/server/claude_credentials", ServerController, :claude_credentials)
 
     # Usage ledger (per-session tokens / cost / duration; rollups)
     get("/usage", UsageController, :summarize)

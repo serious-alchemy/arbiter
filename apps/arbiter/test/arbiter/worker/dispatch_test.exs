@@ -339,6 +339,9 @@ defmodule Arbiter.Worker.DispatchTest do
     # actually fires. No real git repo is needed — the guard aborts before the
     # worktree provisioning step.
     setup do
+      # bd-80ecol: these reach the setup-token guard behind the auth checks
+      # below; give the workspace a credential so only those checks decide.
+      claude_credential_env!()
       prior = Application.get_env(:arbiter, :repo_paths)
       Application.put_env(:arbiter, :repo_paths, %{"test/repo" => "/tmp"})
       on_exit(fn -> CredentialWatchdog.reset() end)

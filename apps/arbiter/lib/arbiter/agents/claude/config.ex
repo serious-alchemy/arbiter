@@ -212,6 +212,30 @@ defmodule Arbiter.Agents.Claude.Config do
   end
 
   @doc """
+  Whether `workspace`'s worker `agent` config names an API key that resolves
+  right now — its `credentials_ref`, or any entry in `api_keys`.
+
+  A read of the workspace itself rather than of the per-process active config,
+  and without advancing the `api_keys` rotation: this is the question
+  `Arbiter.Agents.Claude.CredentialCheck` asks before a dispatch (bd-80ecol),
+  not the pick a spawn makes. `false` for `nil` or on any read failure.
+  """
+  @spec api_key_configured?(Workspace.t() | nil) :: boolean()
+  def api_key_configured?(%Workspace{config: config} = workspace) do
+    raw =
+      (get_in(config || %{}, ["agent", "config"]) || %{})
+      |> ProviderConfig.apply_overrides(@provider)
+      |> CredentialsRef.embed_secrets(Workspace.secrets_map(workspace))
+
+    [stringy(Map.get(raw, "credentials_ref")) | list_of_strings(Map.get(raw, "api_keys"))]
+    |> Enum.any?(&(resolve_ref(&1, raw) != nil))
+  rescue
+    _ -> false
+  end
+
+  def api_key_configured?(_), do: false
+
+  @doc """
   Return the active model name as a string, or `nil` if unset.
 
   Per-task / per-dispatch overrides should be threaded through `:model` in

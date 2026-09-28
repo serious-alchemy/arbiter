@@ -180,6 +180,29 @@ defmodule Arbiter.Board.AutopilotTest do
       assert_receive {:escalated, "bd-1", :timeout, _attempts}
     end
 
+    # bd-80ecol: Dispatch's setup-token guard already paged the coordinator —
+    # once per workspace, naming the fix — so a card held by it must not also
+    # collect a `dispatch_stuck` page after the retry budget runs out.
+    test "a setup-token hold is never re-escalated as dispatch_stuck" do
+      test = self()
+
+      reason = %Arbiter.Worker.StopReason{
+        category: :auth_expired,
+        summary: "Claude dispatch held: no setup token",
+        remediation: "arb account rotate claude:x ..."
+      }
+
+      pid =
+        start(
+          paused: false,
+          dispatch: fn _ -> {:error, {:setup_token_missing, reason}} end,
+          escalate: fn id, reason, attempts -> send(test, {:escalated, id, reason, attempts}) end
+        )
+
+      for _ <- 1..5, do: Autopilot.tick(pid)
+      refute_receive {:escalated, _, _, _}, 50
+    end
+
     # A successful dispatch clears whatever failure history the card had, so
     # a later, unrelated failure gets its own fresh escalation rather than
     # being silently swallowed by a stale latch.

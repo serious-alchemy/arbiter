@@ -158,7 +158,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     assert exit_code == 0
     assert {:ok, %{"ok" => true, "checks" => checks}} = Jason.decode(String.trim(out))
     assert is_list(checks)
-    assert length(checks) == 12
+    assert length(checks) == 13
   end
 
   test "version mismatch is non-fatal (exit 0 but shows [fail])" do
@@ -1205,6 +1205,90 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
       assert exit_code == 0
       assert out =~ "[ ok ] account/workspace quota policy"
+    end
+  end
+
+  # bd-80ecol: a Claude workspace with no setup token of its own used to be
+  # handed a copy of the operator's `.credentials.json` (mode B), whose
+  # refresh-token rotation locked the operator out. Dispatch for it is now
+  # held; doctor lists every such workspace with the command that fixes it.
+  describe "claude worker credentials check" do
+    defp base_routes do
+      [
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+      ]
+    end
+
+    test "ok when every Claude workspace has a credential of its own" do
+      stub_routes(
+        base_routes() ++
+          [{{"get", "/api/server/claude_credentials"}, {%{"checked" => 2, "missing" => []}, 200}}]
+      )
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] claude worker credentials"
+      assert out =~ "2 Claude workspace(s)"
+    end
+
+    test "fails, exits non-zero, and names each workspace/provider and its fix" do
+      missing = %{
+        "workspace_id" => "ws-9",
+        "workspace" => "no-token-ws",
+        "provider" => "claude",
+        "account" => "bare",
+        "reason" => "no_credential",
+        "summary" =>
+          "no Claude setup token resolves for workspace no-token-ws: account claude:bare " <>
+            "has no active CLAUDE_CODE_OAUTH_TOKEN",
+        "fix" =>
+          "`arb account rotate claude:bare --kind oauth_token --env-var " <>
+            "CLAUDE_CODE_OAUTH_TOKEN --secret <token from `claude setup-token`>`"
+      }
+
+      stub_routes(
+        base_routes() ++
+          [
+            {{"get", "/api/server/claude_credentials"},
+             {%{"checked" => 3, "missing" => [missing]}, 200}}
+          ]
+      )
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 1
+      assert out =~ "[fail] claude worker credentials"
+      assert out =~ "no-token-ws (claude)"
+      assert out =~ "arb account rotate claude:bare"
+    end
+
+    test "never blocks readiness — a held workspace is not a broken server" do
+      stub_routes(
+        base_routes() ++
+          [
+            {{"get", "/api/server/claude_credentials"},
+             {%{
+                "checked" => 1,
+                "missing" => [
+                  %{"workspace" => "w", "provider" => "claude", "summary" => "s", "fix" => "f"}
+                ]
+              }, 200}}
+          ]
+      )
+
+      result = Enum.find(Checks.run(), &(&1.name == "claude worker credentials"))
+      assert result.status == :fail
+      refute result.blocks_readiness
+    end
+
+    test "a server that predates the check is reported as unknown, not as a failure" do
+      stub_routes(base_routes())
+
+      {out, _err, _exit_code} = capture(fn -> Doctor.run([]) end)
+      assert out =~ "[ ok ] claude worker credentials"
+      assert out =~ "could not check"
     end
   end
 end

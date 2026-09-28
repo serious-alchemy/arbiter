@@ -63,6 +63,7 @@ defmodule Arbiter.Worker.Dispatch do
   """
 
   alias Arbiter.Agents
+  alias Arbiter.Agents.Claude.CredentialCheck
   alias Arbiter.Agents.Gemini.Config, as: GeminiConfig
   alias Arbiter.Agents.ProviderRouting
   alias Arbiter.Agents.Routing
@@ -2051,8 +2052,58 @@ defmodule Arbiter.Worker.Dispatch do
         refuse_known_expired(task, opts, known_expired_stop_reason(adapter))
 
       true ->
-        :ok
+        guard_setup_token(task, workspace, adapter, opts)
     end
+  end
+
+  # bd-80ecol: a Claude worker with no setup token of its own used to be
+  # handed a copy of the operator's `.credentials.json` (mode B) — a second
+  # holder of a refresh token Claude rotates on every refresh, so whichever
+  # side refreshed first locked the other out. `ConfigDir` no longer copies
+  # it, which leaves such a spawn with no login at all; refuse it here, before
+  # the task transitions or a worktree is provisioned, and page the coordinator
+  # once per workspace with the command that fixes it
+  # (`CoordinatorNotifier.setup_token_missing/2` dedupes).
+  #
+  # Its own error tag rather than `:auth_check_failed`: the escalation is owned
+  # here, so `Arbiter.Board.Autopilot` must not add a `dispatch_stuck` page of
+  # its own for the same refusal.
+  # `:claude_command` swaps the claude binary for a test double, which needs no
+  # Claude login — and the invariant this guard fronts for (no operator
+  # credentials in a worker) lives in `ConfigDir`, not here, so standing down
+  # for a non-claude spawn cannot re-open it.
+  defp guard_setup_token(%Issue{} = task, workspace, Arbiter.Agents.Claude, opts) do
+    if Keyword.get(opts, :claude_command), do: :ok, else: check_setup_token(task, workspace)
+  end
+
+  defp guard_setup_token(_task, _workspace, _adapter, _opts), do: :ok
+
+  defp check_setup_token(task, workspace) do
+    case CredentialCheck.check(workspace) do
+      :ok ->
+        :ok
+
+      {:missing, missing} ->
+        CoordinatorNotifier.setup_token_missing(
+          %{task_id: task.id, workspace_id: task.workspace_id},
+          missing
+        )
+
+        {:error, {:setup_token_missing, setup_token_stop_reason(missing)}}
+    end
+  end
+
+  defp setup_token_stop_reason(missing) do
+    %StopReason{
+      category: :auth_expired,
+      summary: "Claude dispatch held: " <> missing.summary,
+      remediation:
+        missing.fix <>
+          " Arbiter never copies the operator's ~/.claude/.credentials.json into a " <>
+          "worker (bd-80ecol); the task stays Ready and dispatches once a credential resolves.",
+      exit_status: nil,
+      signal: nil
+    }
   end
 
   defp refuse_known_expired(task, opts, %StopReason{} = reason) do

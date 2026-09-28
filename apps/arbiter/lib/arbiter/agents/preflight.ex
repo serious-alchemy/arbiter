@@ -520,6 +520,19 @@ defmodule Arbiter.Agents.Preflight do
     }
   end
 
+  # bd-80ecol: `Arbiter.Agents.Claude.auth_probe_argv/1` declined — there is
+  # no credential to probe. Deliberately not `:auth_expired`: nothing expired,
+  # and the watchdog must not refuse every Claude dispatch over it.
+  defp probe_unavailable({:no_setup_token, summary}) do
+    %StopReason{
+      category: :crashed,
+      summary: "agent auth pre-flight skipped: #{summary}",
+      remediation: "Give the workspace a Claude setup token — see `arb server doctor`.",
+      exit_status: nil,
+      signal: nil
+    }
+  end
+
   defp probe_unavailable(reason) do
     %StopReason{
       category: :crashed,

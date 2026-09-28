@@ -39,6 +39,10 @@ defmodule Arbiter.Worker.ProviderRoutingDispatchTest do
   @repo "pr/repo"
 
   setup do
+    # bd-80ecol: the stub `claude` runs the real-agent path, whose dispatch
+    # guard refuses a spawn with no credential of its own.
+    claude_credential_env!()
+
     sandbox = TestSandbox.provision!("provider-routing")
     put_app_env(:arbiter, :worktree_root, sandbox.worktree_root)
     put_app_env(:arbiter, :repo_paths, %{@repo => sandbox.repo})

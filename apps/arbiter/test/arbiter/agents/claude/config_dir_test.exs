@@ -83,6 +83,12 @@ defmodule Arbiter.Agents.Claude.ConfigDirTest do
   defp restore_env(key, nil), do: Application.delete_env(:arbiter, key)
   defp restore_env(key, val), do: Application.put_env(:arbiter, key, val)
 
+  # A `.credentials.json` left behind by a build that still had mode B.
+  defp seed_stale_copy!(target) do
+    File.mkdir_p!(target)
+    File.write!(Path.join(target, ".credentials.json"), ~s({"token":"stale-copy"}))
+  end
+
   # A bare Workspace struct carrying an encrypted worker_env — the exact column
   # `Workspace.worker_env_map/1` reads. No DB round-trip needed, and the value
   # is never serialised anywhere.
@@ -122,17 +128,15 @@ defmodule Arbiter.Agents.Claude.ConfigDirTest do
       assert memory =~ "public or anonymous file or paste host"
     end
 
-    test "copies auth from the source, but never CLAUDE.md or settings.json", %{
-      source: source,
+    # bd-80ecol: mode B (copying the operator's `.credentials.json` in) is
+    # gone. A copy is a second holder of the operator's refresh token, and the
+    # first refresh on either side revokes the other's (bd-6umoh9).
+    test "never copies the operator's .credentials.json, CLAUDE.md or settings.json", %{
       target: target
     } do
       assert {:ok, ^target} = ConfigDir.ensure()
 
-      # .credentials.json is a real copy (never a symlink — a token refresh
-      # would otherwise write through the link and corrupt the operator's file).
-      cred_path = Path.join(target, ".credentials.json")
-      assert {:error, :einval} = File.read_link(cred_path)
-      assert File.read!(cred_path) == File.read!(Path.join(source, ".credentials.json"))
+      refute File.exists?(Path.join(target, ".credentials.json"))
 
       # CLAUDE.md is ours (a real file), not a link to the operator's persona.
       assert {:error, :einval} = File.read_link(Path.join(target, "CLAUDE.md"))
@@ -176,8 +180,7 @@ defmodule Arbiter.Agents.Claude.ConfigDirTest do
       assert {:ok, ^target} = ConfigDir.ensure()
       assert {:ok, ^target} = ConfigDir.ensure()
 
-      assert {:error, :einval} = File.read_link(Path.join(target, ".credentials.json"))
-      assert File.exists?(Path.join(target, ".credentials.json"))
+      refute File.exists?(Path.join(target, ".credentials.json"))
       assert File.read!(Path.join(target, "CLAUDE.md")) =~ "Arbiter Worker"
     end
 
@@ -239,8 +242,7 @@ defmodule Arbiter.Agents.Claude.ConfigDirTest do
       target: target
     } do
       # Simulate a pre-existing install that seeded before the token was adopted.
-      assert {:ok, ^target} = ConfigDir.ensure()
-      assert File.exists?(Path.join(target, ".credentials.json"))
+      seed_stale_copy!(target)
 
       System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "oauth-session-token")
       assert {:ok, ^target} = ConfigDir.ensure()
@@ -259,16 +261,19 @@ defmodule Arbiter.Agents.Claude.ConfigDirTest do
              ]
     end
 
-    test "seeding still happens when the OS env var is unset (no regression)", %{
-      source: source,
+    # bd-80ecol: this used to be "seeding still happens" — the silent mode-B
+    # fallback that brought the refresh-token lockout back whenever no token
+    # resolved. No token now means no credential at all: the dispatch guard
+    # (`Arbiter.Agents.Claude.CredentialCheck`) refuses before a spawn.
+    test "never seeds when the OS env var is unset, and removes a stale copy", %{
       target: target
     } do
       System.delete_env("CLAUDE_CODE_OAUTH_TOKEN")
+      seed_stale_copy!(target)
 
       assert {:ok, ^target} = ConfigDir.ensure()
 
-      assert File.read!(Path.join(target, ".credentials.json")) ==
-               File.read!(Path.join(source, ".credentials.json"))
+      refute File.exists?(Path.join(target, ".credentials.json"))
     end
 
     test "env/0 explicitly unsets the token when nothing configures one", %{
@@ -338,8 +343,7 @@ defmodule Arbiter.Agents.Claude.ConfigDirTest do
 
     test "ensure/1 removes a stale copy seeded before the workspace token existed",
          %{target: target} do
-      assert {:ok, ^target} = ConfigDir.ensure()
-      assert File.exists?(Path.join(target, ".credentials.json"))
+      seed_stale_copy!(target)
 
       ws = workspace_with_worker_env(%{"CLAUDE_CODE_OAUTH_TOKEN" => "ws-token"})
       assert {:ok, ^target} = ConfigDir.ensure(ws)
@@ -382,36 +386,33 @@ defmodule Arbiter.Agents.Claude.ConfigDirTest do
       refute File.exists?(Path.join(target, ".credentials.json"))
     end
 
-    # The other direction: a gate that never seeds would pass the tests above
-    # while silently breaking every install that has no worker token at all.
-    test "still seeds when neither the workspace nor the server env defines a token",
-         %{source: source, target: target} do
+    # bd-80ecol: this used to assert the mode-B copy. Neither source
+    # configuring a token no longer falls back to the operator's credentials.
+    test "never seeds when neither the workspace nor the server env defines a token",
+         %{target: target} do
       ws = workspace_with_worker_env(%{"SOME_OTHER" => "x"})
 
       assert {:ok, ^target} = ConfigDir.ensure(ws)
 
-      assert File.read!(Path.join(target, ".credentials.json")) ==
-               File.read!(Path.join(source, ".credentials.json"))
+      refute File.exists?(Path.join(target, ".credentials.json"))
     end
 
     test "an empty-string worker_env value is not treated as configured",
-         %{source: source, target: target} do
+         %{target: target} do
       ws = workspace_with_worker_env(%{"CLAUDE_CODE_OAUTH_TOKEN" => ""})
 
       refute ConfigDir.oauth_token_configured?(ws)
       assert {:ok, ^target} = ConfigDir.ensure(ws)
 
-      assert File.read!(Path.join(target, ".credentials.json")) ==
-               File.read!(Path.join(source, ".credentials.json"))
+      refute File.exists?(Path.join(target, ".credentials.json"))
     end
 
     test "a nil workspace behaves exactly like the zero-arity form",
-         %{source: source, target: target} do
+         %{target: target} do
       assert ConfigDir.env(nil) == ConfigDir.env()
       assert {:ok, ^target} = ConfigDir.ensure(nil)
 
-      assert File.read!(Path.join(target, ".credentials.json")) ==
-               File.read!(Path.join(source, ".credentials.json"))
+      refute File.exists?(Path.join(target, ".credentials.json"))
     end
 
     test "an undecryptable worker_env store degrades to the server env var",

@@ -4,7 +4,7 @@ defmodule ArbiterWeb.Api.ServerControllerTest do
   ARB_HOST) server what it's actually bound to, since the CLI has no
   filesystem/OS access of its own to inspect the listening socket.
   """
-  use ArbiterWeb.ConnCase, async: true
+  use ArbiterWeb.ConnCase, async: false
 
   test "GET /api/server/bind_address reports loopback for the default 127.0.0.1 bind", %{
     conn: conn
@@ -69,6 +69,51 @@ defmodule ArbiterWeb.Api.ServerControllerTest do
       assert resp["available"] == false
       assert is_binary(resp["cause"])
       assert is_binary(resp["message"])
+    end
+  end
+
+  # bd-80ecol: `arb server doctor` lists every Claude workspace that has no
+  # credential of its own — the ones that used to fall into copying the
+  # operator's `.credentials.json` (mode B), and whose dispatch is now held.
+  describe "GET /api/server/claude_credentials" do
+    setup do
+      prev_flag = Application.get_env(:arbiter, :provider_accounts_enabled)
+
+      prev_env =
+        for v <- ~w(CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY),
+            into: %{},
+            do: {v, System.get_env(v)}
+
+      Application.put_env(:arbiter, :provider_accounts_enabled, true)
+      Enum.each(prev_env, fn {v, _} -> System.delete_env(v) end)
+
+      on_exit(fn ->
+        case prev_flag do
+          nil -> Application.delete_env(:arbiter, :provider_accounts_enabled)
+          v -> Application.put_env(:arbiter, :provider_accounts_enabled, v)
+        end
+
+        Enum.each(prev_env, fn
+          {v, nil} -> System.delete_env(v)
+          {v, val} -> System.put_env(v, val)
+        end)
+      end)
+
+      :ok
+    end
+
+    test "names each Claude workspace with no setup token, with the fix", %{conn: conn} do
+      {:ok, ws} = Ash.create(Arbiter.Tasks.Workspace, %{name: "no-token-ws"})
+
+      resp = conn |> get("/api/server/claude_credentials") |> json_response(200)
+
+      assert resp["checked"] >= 1
+      assert [entry] = Enum.filter(resp["missing"], &(&1["workspace_id"] == ws.id))
+      assert entry["workspace"] == "no-token-ws"
+      assert entry["provider"] == "claude"
+      assert entry["reason"] == "no_account"
+      assert entry["fix"] =~ "arb account attach #{ws.id} claude"
+      assert entry["summary"] =~ "no Claude setup token"
     end
   end
 end

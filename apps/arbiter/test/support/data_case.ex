@@ -266,6 +266,39 @@ defmodule Arbiter.DataCase do
   end
 
   @doc """
+  Set an OS env var for the rest of the current test, restoring the prior
+  value (or unsetting it) on exit. `async: false` tests only — the process
+  environment is global.
+  """
+  def put_system_env(name, value) do
+    prior = System.get_env(name)
+    System.put_env(name, value)
+
+    ExUnit.Callbacks.on_exit(fn ->
+      case prior do
+        nil -> System.delete_env(name)
+        v -> System.put_env(name, v)
+      end
+    end)
+  end
+
+  @doc """
+  Give every Claude dispatch in the current test a credential of its own: an
+  `ANTHROPIC_API_KEY` in the server environment, which every spawn inherits.
+
+  bd-80ecol: `Arbiter.Worker.Dispatch` refuses a Claude dispatch that resolves
+  no setup token or API key (`Arbiter.Agents.Claude.CredentialCheck`) rather
+  than hand the worker a copy of the operator's `.credentials.json`. A test
+  that drives the real-agent path against a stub `claude` on `PATH` needs to
+  get past that guard; an env key does so under either
+  `:provider_accounts_enabled` leg without creating account rows that the
+  quota gate and routing would also read.
+  """
+  def claude_credential_env! do
+    put_system_env("ANTHROPIC_API_KEY", "sk-ant-test-credential")
+  end
+
+  @doc """
   Create an issue whose `repo` is `nil` — the shape every issue had before
   bd-9dwbvt, and the one the backfill and dispatch's late resolution still
   have to cope with.

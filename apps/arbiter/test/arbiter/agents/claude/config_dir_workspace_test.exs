@@ -116,14 +116,12 @@ defmodule Arbiter.Agents.Claude.ConfigDirWorkspaceTest do
     end
 
     test "an unknown workspace id degrades to the server env rather than raising", %{
-      source: source,
       target: target
     } do
       assert ConfigDir.oauth_token("no-such-workspace") == nil
       assert {:ok, ^target} = ConfigDir.ensure("no-such-workspace")
 
-      assert File.read!(Path.join(target, ".credentials.json")) ==
-               File.read!(Path.join(source, ".credentials.json"))
+      refute File.exists?(Path.join(target, ".credentials.json"))
     end
   end
 
@@ -134,15 +132,15 @@ defmodule Arbiter.Agents.Claude.ConfigDirWorkspaceTest do
       assert ConfigDir.any_workspace_oauth_token?()
     end
 
-    test "ensure/0 does not re-seed credentials once a workspace defines the token", %{
+    test "ensure/0 never seeds credentials, with or without a workspace token", %{
       target: target
     } do
-      # A workspace-less spawn seeds today...
+      # bd-80ecol: a workspace-less spawn with no token anywhere used to get
+      # the operator's grant copied in (mode B). It no longer does...
       assert {:ok, ^target} = ConfigDir.ensure()
-      assert File.exists?(Path.join(target, ".credentials.json"))
+      refute File.exists?(Path.join(target, ".credentials.json"))
 
-      # ...and must stop, and clean up, once any workspace holds a token —
-      # the shared config dir is install-wide, so the gate must be too.
+      # ...and a workspace token does not change that either.
       _ = token_workspace()
 
       assert {:ok, ^target} = ConfigDir.ensure()
@@ -163,8 +161,7 @@ defmodule Arbiter.Agents.Claude.ConfigDirWorkspaceTest do
              ]
     end
 
-    test "workspaces that disagree leave a workspace-less spawn at pre-fix behaviour", %{
-      source: source,
+    test "workspaces that disagree leave a workspace-less spawn with no credential", %{
       target: target
     } do
       _ = token_workspace()
@@ -174,17 +171,15 @@ defmodule Arbiter.Agents.Claude.ConfigDirWorkspaceTest do
           "CLAUDE_CODE_OAUTH_TOKEN" => %{"value" => "other", "secret" => true}
         })
 
-      # Two distinct values: we refuse to guess, so no token is injected — and
-      # the gate must stand down with it rather than emptying the config dir.
+      # Two distinct values: we refuse to guess, so no token is injected —
+      # and (bd-80ecol) the operator's credentials are not copied in instead.
       assert ConfigDir.env() == [
                {"CLAUDE_CONFIG_DIR", target},
                {"CLAUDE_CODE_OAUTH_TOKEN", false}
              ]
 
       assert {:ok, ^target} = ConfigDir.ensure()
-
-      assert File.read!(Path.join(target, ".credentials.json")) ==
-               File.read!(Path.join(source, ".credentials.json"))
+      refute File.exists?(Path.join(target, ".credentials.json"))
     end
 
     test "the workspace-bearing spawn is unaffected by an ambiguous install", %{target: target} do
@@ -217,11 +212,12 @@ defmodule Arbiter.Agents.Claude.ConfigDirWorkspaceTest do
       assert ConfigDir.oauth_token(ws.id) == "ws-oauth-token"
     end
 
-    # The invariant the first cut of bd-bw3466 broke: a spawn whose
-    # `.credentials.json` we suppress must always be handed a token, or it has
-    # no credentials at all. The CredentialWatchdog probes with no workspace,
-    # 401s, and marks the adapter expired — stopping every dispatch.
-    test "ensure/0 suppressing the seed implies env/0 carries a token", %{target: target} do
+    # bd-80ecol replaced bd-bw3466's "suppressed ⟺ injected" lockstep: the
+    # seed is now suppressed for every shape, so a spawn with no token has no
+    # credential at all. That is deliberate — `CredentialCheck` refuses the
+    # dispatch, and the watchdog probe declines to run (`Claude.auth_probe_argv/1`),
+    # instead of either one quietly authenticating as the operator.
+    test "ensure/0 never seeds, whatever the install-wide token shape", %{target: target} do
       for build <- [
             fn -> :none end,
             &token_workspace/0,
@@ -230,33 +226,21 @@ defmodule Arbiter.Agents.Claude.ConfigDirWorkspaceTest do
         _ = build.()
 
         assert {:ok, ^target} = ConfigDir.ensure()
-        suppressed? = not File.exists?(Path.join(target, ".credentials.json"))
-
-        injected? =
-          case List.keyfind(ConfigDir.env(), "CLAUDE_CODE_OAUTH_TOKEN", 0) do
-            {_, token} when is_binary(token) -> true
-            _ -> false
-          end
-
-        assert suppressed? == injected?,
-               "seed suppressed?=#{suppressed?} but token injected?=#{injected?}"
+        refute File.exists?(Path.join(target, ".credentials.json"))
       end
     end
 
-    test "seeding still happens when no workspace and no server env defines a token", %{
-      source: source,
+    test "no seeding when no workspace and no server env defines a token", %{
       target: target
     } do
       _ = workspace_with_env(%{"LOG_LEVEL" => %{"value" => "debug", "secret" => false}})
 
       assert {:ok, ^target} = ConfigDir.ensure()
-
-      assert File.read!(Path.join(target, ".credentials.json")) ==
-               File.read!(Path.join(source, ".credentials.json"))
+      refute File.exists?(Path.join(target, ".credentials.json"))
     end
   end
 
-  describe "env/1 lockstep: seeding suppressed iff a token pair is injected" do
+  describe "env/1: never seeded; a token pair or an explicit unset" do
     defp account(opts \\ []) do
       {:ok, acct} =
         Ash.create(ProviderAccount, %{
@@ -293,26 +277,20 @@ defmodule Arbiter.Agents.Claude.ConfigDirWorkspaceTest do
       link
     end
 
-    # The property under test: exactly one of (a real token pair, seeding
-    # suppressed) or (an explicit `{..., false}` unset pair, seeding
-    # happens) holds for any workspace/flag shape. Breaking it either
-    # 401s the fleet-wide watchdog (gate fires with nothing injected) or
-    # quietly re-opens bd-6umoh9 (gate stands down while a server-process
-    # token still reaches the child via Port.open's ambient inheritance).
+    # The property under test (bd-80ecol): for any workspace/flag shape the
+    # operator's `.credentials.json` is never seeded, and the token pair is
+    # either a real token or an explicit `{..., false}` unset — never absent,
+    # so a server-process token can't reach the child via Port.open's
+    # ambient inheritance (bd-6umoh9).
     defp assert_lockstep(workspace, target) do
       env = ConfigDir.env(workspace)
       token_pair = List.keyfind(env, "CLAUDE_CODE_OAUTH_TOKEN", 0)
 
       assert {:ok, ^target} = ConfigDir.ensure(workspace)
-      seeded? = File.exists?(Path.join(target, ".credentials.json"))
+      refute File.exists?(Path.join(target, ".credentials.json"))
 
-      case token_pair do
-        {"CLAUDE_CODE_OAUTH_TOKEN", token} when is_binary(token) ->
-          refute seeded?, "expected seeding suppressed when a real token is injected"
-
-        {"CLAUDE_CODE_OAUTH_TOKEN", false} ->
-          assert seeded?, "expected seeding once the token pair is an explicit unset"
-      end
+      assert match?({"CLAUDE_CODE_OAUTH_TOKEN", token} when is_binary(token), token_pair) or
+               token_pair == {"CLAUDE_CODE_OAUTH_TOKEN", false}
     end
 
     test "flag off, no workspace, no token anywhere", %{target: target} do

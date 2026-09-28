@@ -47,6 +47,7 @@ defmodule Arbiter.Agents.Claude do
 
   alias Arbiter.Agents.Claude.Config
   alias Arbiter.Agents.Claude.ConfigDir
+  alias Arbiter.Agents.Claude.CredentialCheck
   alias Arbiter.Agents.Claude.Security
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Worker.ClaudeSession
@@ -217,7 +218,22 @@ defmodule Arbiter.Agents.Claude do
   end
 
   @impl true
-  def auth_probe_argv(_opts \\ []) do
+  def auth_probe_argv(opts \\ []) do
+    # bd-80ecol: with no setup token or API key for this probe's workspace (the
+    # watchdog's has none, so the install-wide credential), the spawn would
+    # carry no login at all — the operator's `.credentials.json` is no longer
+    # copied in. Probing would 401 and mark the adapter expired, refusing
+    # every Claude dispatch fleet-wide off a gap that may only be the
+    # workspace-less one. Decline instead: `Preflight` reports this as a
+    # non-auth failure, which `CredentialWatchdog` leaves alone, and the
+    # per-workspace gap is the dispatch guard's to refuse and page.
+    case CredentialCheck.check(Keyword.get(opts, :workspace)) do
+      :ok -> claude_probe_argv()
+      {:missing, missing} -> {:error, {:no_setup_token, missing.summary}}
+    end
+  end
+
+  defp claude_probe_argv do
     # Cheapest token-validity probe: a one-word `claude --print` round-trip.
     # No streaming/model flags — we only care that the CLI authenticates. stdin
     # is closed via the sh wrapper (same as a real spawn) so the CLI doesn't

@@ -60,6 +60,10 @@ defmodule Arbiter.Test.ResumeSlotFixture do
     put_env_restoring(:repo_paths, %{@repo => sandbox.repo})
     # The 2026-09-23 incident's cap.
     put_env_restoring(:conductor_system_max_concurrent, 1)
+    # bd-80ecol: a resume reaches the real-agent dispatch guard, which refuses
+    # a Claude spawn with no credential of its own. The stub needs none, but
+    # the guard can't know that.
+    put_system_env_restoring("ANTHROPIC_API_KEY", "sk-ant-test-credential")
 
     # LIFO: runs before the sandbox's own teardown, so a worker a resume
     # started (whose pid the test may never hold) is stopped first.
@@ -108,6 +112,18 @@ defmodule Arbiter.Test.ResumeSlotFixture do
     if Worker.whereis(task_id), do: Worker.stop(task_id, :normal)
   catch
     :exit, _ -> :ok
+  end
+
+  defp put_system_env_restoring(name, value) do
+    prior = System.get_env(name)
+    System.put_env(name, value)
+
+    on_exit(fn ->
+      case prior do
+        nil -> System.delete_env(name)
+        v -> System.put_env(name, v)
+      end
+    end)
   end
 
   defp put_env_restoring(key, value) do
