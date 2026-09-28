@@ -170,6 +170,33 @@ defmodule ArbiterWeb.ProvidersLiveTest do
       refute html =~ @secret
     end
 
+    test "health badge uses correct contrast colors (not -ink on -wash)", %{conn: conn} do
+      bare = account!(:claude, "pv-bare-contrast")
+      credentialed = account!(:claude, "pv-credentialed-contrast")
+
+      {:ok, _} =
+        Accounts.rotate_credential(credentialed.id, %{
+          kind: :oauth_token,
+          env_var: "CLAUDE_CODE_OAUTH_TOKEN",
+          secret: @secret
+        })
+
+      {:ok, view, html} = live_providers(conn)
+
+      # The health badges should use the base color tokens (e.g., --arb-live)
+      # not the -ink variants on -wash backgrounds, to maintain contrast
+      assert html =~ "text-[var(--arb-live)]" or
+               has_element?(view, "#account-#{credentialed.id}-health")
+
+      assert html =~ "text-[var(--arb-attention)]" or
+               has_element?(view, "#account-#{bare.id}-health")
+
+      # Ensure the -ink variants are NOT used on -wash backgrounds
+      refute html =~ "bg-[var(--arb-live-wash)] text-[var(--arb-live-ink)]"
+      refute html =~ "bg-[var(--arb-attention-wash)] text-[var(--arb-attention-ink)]"
+      refute html =~ "bg-[var(--arb-fail-wash)] text-[var(--arb-fail-ink)]"
+    end
+
     test "shows 30-day cost, and n/a for an unpriced provider", %{conn: conn} do
       priced = account!(:claude, "pv-priced")
       unpriced = account!(:antigravity, "pv-agy")

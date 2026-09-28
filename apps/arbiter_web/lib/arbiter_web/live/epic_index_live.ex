@@ -559,7 +559,7 @@ defmodule ArbiterWeb.EpicIndexLive do
           <span
             :for={{reason, index} <- Enum.with_index(visible_reasons(@row.rollup.needs_you_reasons))}
             id={"epic-#{@row.epic.id}-needs-you-#{index}"}
-            class="badge text-[9.5px] font-[family-name:var(--font-mono)] bg-[var(--arb-attention-wash)] border-[color:var(--arb-attention-edge)] text-[var(--arb-attention-ink)]"
+            class="badge text-[9.5px] font-[family-name:var(--font-mono)] bg-[var(--arb-attention-wash)] border-[color:var(--arb-attention-edge)] text-[var(--arb-attention)]"
           >
             {reason}
           </span>

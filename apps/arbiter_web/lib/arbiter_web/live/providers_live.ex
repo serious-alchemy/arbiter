@@ -421,7 +421,7 @@ defmodule ArbiterWeb.ProvidersLive do
   end
 
   defp verdict_class(:holding), do: "text-[var(--arb-fail-text)]"
-  defp verdict_class(:approaching), do: "text-[var(--arb-attention-ink)]"
+  defp verdict_class(:approaching), do: "text-[var(--arb-attention)]"
   defp verdict_class(_), do: "text-[var(--arb-text-muted)]"
 
   defp verdict_label(:holding), do: "holding"
@@ -444,14 +444,14 @@ defmodule ArbiterWeb.ProvidersLive do
   defp health_label(%{state: :auth_hold}), do: "auth hold"
 
   defp health_class(:ok),
-    do: "bg-[var(--arb-live-wash)] text-[var(--arb-live-ink)] border-[var(--arb-live-edge)]"
+    do: "bg-[var(--arb-live-wash)] text-[var(--arb-live)] border-[var(--arb-live-edge)]"
 
   defp health_class(:no_credential),
     do:
-      "bg-[var(--arb-attention-wash)] text-[var(--arb-attention-ink)] border-[var(--arb-attention-edge)]"
+      "bg-[var(--arb-attention-wash)] text-[var(--arb-attention)] border-[var(--arb-attention-edge)]"
 
   defp health_class(_),
-    do: "bg-[var(--arb-fail-wash)] text-[var(--arb-fail-ink)] border-[var(--arb-fail-edge)]"
+    do: "bg-[var(--arb-fail-wash)] text-[var(--arb-fail-text)] border-[var(--arb-fail-edge)]"
 
   defp health_title(account),
     do:
@@ -574,7 +574,7 @@ defmodule ArbiterWeb.ProvidersLive do
             :if={@providers_loaded? and not @enabled?}
             id="accounts-disabled-notice"
             role="status"
-            class="flex items-start gap-3 rounded-[var(--radius-panel)] border border-[var(--arb-attention-edge)] bg-[var(--arb-attention-wash)] px-4 py-3 text-[13px] text-[var(--arb-attention-ink)]"
+            class="flex items-start gap-3 rounded-[var(--radius-panel)] border border-[var(--arb-attention-edge)] bg-[var(--arb-attention-wash)] px-4 py-3 text-[13px] text-[var(--arb-attention)]"
           >
             <ArbiterWeb.CoreComponents.Core.icon
               name="hero-lock-closed"
