@@ -20,6 +20,8 @@ defmodule ArbiterWeb.LoopProposalIndexLive do
 
   use ArbiterWeb, :live_view
 
+  require Logger
+
   alias Arbiter.Loop
 
   @filters [
@@ -31,6 +33,16 @@ defmodule ArbiterWeb.LoopProposalIndexLive do
     {"Superseded", "superseded"}
   ]
 
+  # bd-cgcplc: `Loop.evidence_bar/1` and the `list_pending/1` query both used
+  # to run synchronously in `mount/3` (and again on every "filter" click),
+  # blocking the dead render and every reconnect on the DB. Both now arrive
+  # together via `start_async/3` on the connected mount only — the dead
+  # render draws nothing but the loading state, and a slow or failing read
+  # can no longer take the page down. The decided-rows overlay (see
+  # `with_decided_rows/2`) is applied when the async result lands, against
+  # whatever `:decisions` looks like *then* — not whatever it was when the
+  # fetch was kicked off — so a decision made while a fetch is in flight
+  # still shows up dimmed once that fetch resolves.
   @impl true
   def mount(_params, _session, socket) do
     # `Loop.pubsub_topic/0` carries every queue state change, including
@@ -38,17 +50,23 @@ defmodule ArbiterWeb.LoopProposalIndexLive do
     if connected?(socket),
       do: Phoenix.PubSub.subscribe(Arbiter.PubSub, Loop.pubsub_topic())
 
-    {:ok,
-     socket
-     |> assign(:filter, "live")
-     |> assign(:selected_id, nil)
-     |> assign(:evidence_bar, Loop.evidence_bar(nil))
-     # id => decided state (:applied | :rejected), for rows decided during
-     # this session — kept visible and dimmed instead of vanishing the
-     # instant a refresh would otherwise filter them out. See `decide/3`.
-     |> assign(:decisions, %{})
-     |> assign(:decision_toast, nil)
-     |> refresh()}
+    socket =
+      socket
+      |> assign(:filter, "live")
+      |> assign(:selected_id, nil)
+      |> assign(:evidence_bar, nil)
+      # id => decided state (:applied | :rejected), for rows decided during
+      # this session — kept visible and dimmed instead of vanishing the
+      # instant a refresh would otherwise filter them out. See `decide/3`.
+      |> assign(:decisions, %{})
+      |> assign(:decision_toast, nil)
+      |> assign(:rows, [])
+      |> assign(:rows_loaded?, false)
+      |> assign(:rows_loading?, false)
+      |> assign(:rows_stale?, false)
+      |> assign(:rows_error, nil)
+
+    {:ok, if(connected?(socket), do: refresh(socket), else: socket)}
   end
 
   @impl true
@@ -123,9 +141,33 @@ defmodule ArbiterWeb.LoopProposalIndexLive do
      |> refresh()}
   end
 
+  def handle_event("retry_loop_proposals", _params, socket),
+    do: {:noreply, socket |> assign(:rows_error, nil) |> refresh()}
+
   @impl true
   def handle_info({:loop_proposal, _event, _id}, socket), do: {:noreply, refresh(socket)}
   def handle_info(_msg, socket), do: {:noreply, socket}
+
+  @impl true
+  def handle_async(:loop_data, {:ok, %{evidence_bar: bar, rows: rows}}, socket) do
+    socket =
+      socket
+      |> assign(:evidence_bar, bar)
+      |> assign(:rows, with_decided_rows(rows, socket.assigns.decisions))
+      |> assign(:rows_loaded?, true)
+      |> assign(:rows_error, nil)
+
+    rows_read_done(socket)
+  end
+
+  # A read that fails must not take the page down. Whatever was on screen
+  # stays there — the skeleton on a first load, the last good read on a
+  # refresh — under an error that says so.
+  def handle_async(:loop_data, {:exit, reason}, socket) do
+    Logger.error("LoopProposalIndexLive: loading proposals failed: #{inspect(reason)}")
+
+    rows_read_done(assign(socket, :rows_error, describe_exit(reason)))
+  end
 
   # Records a just-made decision so `refresh/1` keeps the row in view (dimmed)
   # even once its new state falls outside the active filter, and arms the
@@ -156,11 +198,35 @@ defmodule ArbiterWeb.LoopProposalIndexLive do
   defp already_decided_as?(state, expected) when is_list(expected), do: state in expected
   defp already_decided_as?(state, expected), do: state == expected
 
+  # A refresh already in flight (e.g. a PubSub event arriving mid-filter
+  # switch) is marked stale rather than started twice; `rows_read_done/1`
+  # kicks off the real refetch once the in-flight one lands, so the result
+  # always reflects the filter on screen when it was requested rather than
+  # whatever was on screen when the older fetch happened to start.
+  defp refresh(%{assigns: %{rows_loading?: true}} = socket),
+    do: assign(socket, :rows_stale?, true)
+
   defp refresh(socket) do
-    rows = Loop.list_pending(state: states(socket.assigns.filter))
-    rows = with_decided_rows(rows, socket.assigns.decisions)
-    assign(socket, :rows, rows)
+    filter = socket.assigns.filter
+
+    socket
+    |> assign(:rows_loading?, true)
+    |> assign(:rows_stale?, false)
+    |> start_async(:loop_data, fn -> load_loop_data(filter) end)
   end
+
+  defp rows_read_done(socket) do
+    socket = assign(socket, :rows_loading?, false)
+    {:noreply, if(socket.assigns.rows_stale?, do: refresh(socket), else: socket)}
+  end
+
+  @doc false
+  def load_loop_data(filter) do
+    %{evidence_bar: Loop.evidence_bar(nil), rows: Loop.list_pending(state: states(filter))}
+  end
+
+  defp describe_exit({%{__exception__: true} = error, _stacktrace}), do: Exception.message(error)
+  defp describe_exit(reason), do: Exception.format_exit(reason)
 
   # A row just decided in this session that the active filter's fresh query
   # would otherwise have dropped (e.g. an :applied row while filtering
@@ -224,6 +290,10 @@ defmodule ArbiterWeb.LoopProposalIndexLive do
 
   defp filter_tabs, do: Enum.map(@filters, fn {label, value} -> %{label: label, value: value} end)
 
+  defp rows_state(_loaded?, error) when not is_nil(error), do: "error"
+  defp rows_state(true, nil), do: "loaded"
+  defp rows_state(false, nil), do: "loading"
+
   @impl true
   def render(assigns) do
     assigns = assign(assigns, :selected, selected(assigns.rows, assigns.selected_id))
@@ -270,73 +340,121 @@ defmodule ArbiterWeb.LoopProposalIndexLive do
           </:actions>
         </ArbiterWeb.CoreComponents.Domain.index_header>
 
-        <ArbiterWeb.CoreComponents.Core.panel>
-          <div :if={@rows == []} id="loop-proposals-empty">
-            <ArbiterWeb.CoreComponents.Feedback.empty_state icon="hero-beaker">
-              Nothing queued in this view. The evidence bar is {@evidence_bar.min_incidents} incident(s) across {@evidence_bar.min_distinct_tasks} distinct task(s) — findings below it
-              wait here as hypotheses until a later window reinforces them.
-            </ArbiterWeb.CoreComponents.Feedback.empty_state>
-          </div>
-
-          <ul :if={@rows != []} id="loop-proposals" class="flex flex-col gap-1.5">
-            <li
-              :for={row <- @rows}
-              data-decided={Map.get(@decisions, row.id)}
-              class={[
-                "rounded-[var(--radius-field)] border border-solid px-3 py-2",
-                "bg-[var(--surface-card)]",
-                if(row.id == @selected_id,
-                  do: "border-[var(--accent-primary)]",
-                  else: "border-[var(--border-default)]"
-                ),
-                decided?(@decisions, row.id) && "opacity-60"
-              ]}
+        <div
+          id="loop-proposals-panel"
+          data-state={rows_state(@rows_loaded?, @rows_error)}
+          aria-busy={to_string(not @rows_loaded? and is_nil(@rows_error))}
+        >
+          <ArbiterWeb.CoreComponents.Core.panel>
+            <div
+              :if={@rows_error}
+              id="loop-proposals-error"
+              role="alert"
+              class="flex items-start gap-2 px-3 py-2.5 rounded-[var(--radius-field)] border border-solid border-[var(--arb-fail-edge)] bg-[var(--arb-fail-wash)] text-[12px] text-[var(--arb-fail-text)]"
             >
-              <div class="flex items-start justify-between gap-3">
-                <div class="min-w-0 space-y-1">
-                  <p class="text-[12.5px] font-medium break-words text-[var(--text-title)]">
-                    {row.gist}
-                  </p>
-                  <div class="flex flex-wrap items-center gap-1.5 text-xs">
-                    <.status_chip status={row.state} />
-                    <.type_tag type={row.kind} />
-                    <.type_tag type={row.scope} />
-                    <span
-                      class="font-mono text-[11px] text-[var(--text-label)]"
-                      title="incidents / distinct tasks"
-                    >
-                      {row.evidence_count}i/{row.distinct_tasks}t
-                    </span>
-                    <span
-                      class={[
-                        "font-mono text-[11px]",
-                        if(row.context_cost_tokens > 0,
-                          do: "text-[var(--arb-attention)]",
-                          else: "text-[var(--text-label)]"
-                        )
-                      ]}
-                      title="recurring context added to every dispatch if applied"
-                    >
-                      {context_cost(row.context_cost_tokens)}
-                    </span>
-                    <span :if={row.target} class="text-[11px] text-[var(--text-label)] truncate">
-                      {row.target}
-                    </span>
-                  </div>
-                </div>
-                <ArbiterWeb.CoreComponents.Core.button
-                  phx-click="select"
-                  phx-value-id={row.id}
-                  variant="ghost"
-                  size="sm"
-                  class="shrink-0"
-                >
-                  Review
-                </ArbiterWeb.CoreComponents.Core.button>
+              <ArbiterWeb.CoreComponents.Core.icon
+                name="hero-exclamation-triangle-micro"
+                class="size-4 shrink-0 mt-px"
+              />
+              <span class="grow min-w-0 break-words">
+                Could not load proposals: {@rows_error}<span :if={@rows_loaded?}> — showing the last list that loaded.</span>
+              </span>
+              <button
+                type="button"
+                id="loop-proposals-retry"
+                phx-click="retry_loop_proposals"
+                class={[
+                  "shrink-0 px-2 h-[22px] rounded-[var(--radius-field)] cursor-pointer",
+                  "border border-solid border-[var(--arb-fail-edge)] bg-[var(--surface-chrome)]",
+                  "text-[11px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
+                ]}
+              >
+                Retry
+              </button>
+            </div>
+
+            <div
+              :if={not @rows_loaded? and is_nil(@rows_error)}
+              id="loop-proposals-loading"
+              aria-label="Loading loop proposals"
+              class="flex flex-col gap-1.5"
+            >
+              <div
+                :for={n <- 1..3}
+                id={"loop-proposals-loading-#{n}"}
+                aria-hidden="true"
+                class="h-[52px] rounded-[var(--radius-field)] border border-solid border-[var(--border-default)] bg-[var(--arb-panel-alt)] animate-pulse"
+              >
               </div>
-            </li>
-          </ul>
-        </ArbiterWeb.CoreComponents.Core.panel>
+            </div>
+
+            <div :if={@rows_loaded? and @rows == []} id="loop-proposals-empty">
+              <ArbiterWeb.CoreComponents.Feedback.empty_state icon="hero-beaker">
+                Nothing queued in this view. The evidence bar is {@evidence_bar.min_incidents} incident(s) across {@evidence_bar.min_distinct_tasks} distinct task(s) — findings below it
+                wait here as hypotheses until a later window reinforces them.
+              </ArbiterWeb.CoreComponents.Feedback.empty_state>
+            </div>
+
+            <ul :if={@rows_loaded? and @rows != []} id="loop-proposals" class="flex flex-col gap-1.5">
+              <li
+                :for={row <- @rows}
+                data-decided={Map.get(@decisions, row.id)}
+                class={[
+                  "rounded-[var(--radius-field)] border border-solid px-3 py-2",
+                  "bg-[var(--surface-card)]",
+                  if(row.id == @selected_id,
+                    do: "border-[var(--accent-primary)]",
+                    else: "border-[var(--border-default)]"
+                  ),
+                  decided?(@decisions, row.id) && "opacity-60"
+                ]}
+              >
+                <div class="flex items-start justify-between gap-3">
+                  <div class="min-w-0 space-y-1">
+                    <p class="text-[12.5px] font-medium break-words text-[var(--text-title)]">
+                      {row.gist}
+                    </p>
+                    <div class="flex flex-wrap items-center gap-1.5 text-xs">
+                      <.status_chip status={row.state} />
+                      <.type_tag type={row.kind} />
+                      <.type_tag type={row.scope} />
+                      <span
+                        class="font-mono text-[11px] text-[var(--text-label)]"
+                        title="incidents / distinct tasks"
+                      >
+                        {row.evidence_count}i/{row.distinct_tasks}t
+                      </span>
+                      <span
+                        class={[
+                          "font-mono text-[11px]",
+                          if(row.context_cost_tokens > 0,
+                            do: "text-[var(--arb-attention)]",
+                            else: "text-[var(--text-label)]"
+                          )
+                        ]}
+                        title="recurring context added to every dispatch if applied"
+                      >
+                        {context_cost(row.context_cost_tokens)}
+                      </span>
+                      <span :if={row.target} class="text-[11px] text-[var(--text-label)] truncate">
+                        {row.target}
+                      </span>
+                    </div>
+                  </div>
+                  <ArbiterWeb.CoreComponents.Core.button
+                    phx-click="select"
+                    phx-value-id={row.id}
+                    variant="ghost"
+                    size="sm"
+                    class="shrink-0"
+                  >
+                    Review
+                  </ArbiterWeb.CoreComponents.Core.button>
+                </div>
+              </li>
+            </ul>
+          </ArbiterWeb.CoreComponents.Core.panel>
+        </div>
 
         <ArbiterWeb.CoreComponents.Core.panel :if={@selected} title={@selected.gist}>
           <:actions>

@@ -7,6 +7,22 @@ defmodule ArbiterWeb.LoopProposalIndexLiveTest do
   alias Arbiter.Skills
   alias Arbiter.Tasks.Workspace
 
+  # The evidence-bar + proposal-list load arrives by `start_async/3`
+  # (bd-cgcplc) on the connected mount only; every test but the async ones
+  # themselves wants the page once it has landed.
+  @async_timeout 5_000
+
+  defp live_loop(conn, path \\ ~p"/loop") do
+    {:ok, view, _html} = live(conn, path)
+    {:ok, view, render_async(view, @async_timeout)}
+  end
+
+  # Blocks until the LiveView process has handled everything already in its
+  # mailbox — needed before `render_async/2` when a PubSub broadcast (fired
+  # from the test process, e.g. via `proposed/1`) must be delivered and
+  # trigger `start_async/3` before `render_async/2` has anything to wait on.
+  defp settle(view), do: :sys.get_state(view.pid)
+
   # `resolve_workspace_id/3` attributes a `scope: :fleet` candidate with no
   # `workspace_id` via `Quota.default_workspace_id/0`, which refuses once the
   # install has zero (or several, none named "default") workspaces (bd-3dasqm).
@@ -62,7 +78,7 @@ defmodule ArbiterWeb.LoopProposalIndexLiveTest do
     test "lists proposals with gist, state and evidence count", %{conn: conn} do
       row = proposed()
 
-      {:ok, _view, html} = live(conn, ~p"/loop")
+      {:ok, _view, html} = live_loop(conn)
 
       assert html =~ ~s(id="loop-proposals")
       assert html =~ row.gist
@@ -85,7 +101,7 @@ defmodule ArbiterWeb.LoopProposalIndexLiveTest do
           payload: %{"difficulty" => 2}
         })
 
-      {:ok, _view, html} = live(conn, ~p"/loop")
+      {:ok, _view, html} = live_loop(conn)
 
       assert fleet.context_cost_tokens > 0
       assert html =~ "+#{fleet.context_cost_tokens}ctx"
@@ -95,7 +111,7 @@ defmodule ArbiterWeb.LoopProposalIndexLiveTest do
     end
 
     test "shows an empty state with no proposals", %{conn: conn} do
-      {:ok, _view, html} = live(conn, ~p"/loop")
+      {:ok, _view, html} = live_loop(conn)
 
       assert html =~ ~s(id="loop-proposals-empty")
       assert html =~ "evidence bar"
@@ -105,7 +121,7 @@ defmodule ArbiterWeb.LoopProposalIndexLiveTest do
       hyp = hypothesis()
       {:ok, rejected} = Loop.reject_pending(proposed(), reason: "not worth it")
 
-      {:ok, view, _html} = live(conn, ~p"/loop")
+      {:ok, view, _html} = live_loop(conn)
       assert proposals_html(view) =~ hyp.gist
       refute proposals_html(view) =~ rejected.gist
 
@@ -113,31 +129,116 @@ defmodule ArbiterWeb.LoopProposalIndexLiveTest do
       |> element("button[phx-click=filter][phx-value-tab=rejected]")
       |> render_click()
 
+      render_async(view, @async_timeout)
       assert proposals_html(view) =~ rejected.gist
       refute proposals_html(view) =~ hyp.gist
     end
 
     test "a filter value outside the tabs' options falls back to live", %{conn: conn} do
       hyp = hypothesis()
-      {:ok, view, _html} = live(conn, ~p"/loop")
+      {:ok, view, _html} = live_loop(conn)
 
       # The phx-click payload is client-controlled; an unknown value must not
       # reach String.to_existing_atom/1 and take the LiveView down with it.
-      html = render_click(view, :filter, %{"tab" => "no-such-state-#{System.unique_integer()}"})
+      render_click(view, :filter, %{"tab" => "no-such-state-#{System.unique_integer()}"})
+      html = render_async(view, @async_timeout)
 
       assert html =~ hyp.gist
       assert Process.alive?(view.pid)
     end
   end
 
+  describe "async load" do
+    # Holds `Loop.list_pending/1` in flight until the test says go, so the
+    # loading state is something to assert on rather than a race — the same
+    # discipline worker_index_live_test.exs uses for its own
+    # `hold_workers_load/0` around `Worker.list_children/0` (bd-4gtia5).
+    defp hold_loop_load do
+      test = self()
+
+      :meck.new(Loop, [:passthrough, :no_link])
+
+      :meck.expect(Loop, :list_pending, fn opts ->
+        rows = :meck.passthrough([opts])
+        send(test, {:loading_loop_data, self()})
+
+        receive do
+          :release -> :ok
+        after
+          1_000 -> send(test, {:unreleased_loop_load, self()})
+        end
+
+        rows
+      end)
+
+      on_exit(fn -> :meck.unload(Loop) end)
+    end
+
+    test "the dead render shows the loading state and does not hit the DB", %{conn: conn} do
+      test = self()
+      :meck.new(Loop, [:passthrough, :no_link])
+
+      :meck.expect(Loop, :list_pending, fn opts ->
+        send(test, :loop_list) && :meck.passthrough([opts])
+      end)
+
+      on_exit(fn -> :meck.unload(Loop) end)
+
+      doc = conn |> get(~p"/loop") |> html_response(200) |> LazyHTML.from_document()
+
+      assert doc
+             |> LazyHTML.query(~s(#loop-proposals-panel[data-state="loading"]))
+             |> Enum.count() ==
+               1
+
+      assert doc |> LazyHTML.query("#loop-proposals-loading") |> Enum.count() == 1
+      refute_received :loop_list
+    end
+
+    test "renders a loading skeleton before the async load lands, then the data", %{conn: conn} do
+      row = proposed()
+      hold_loop_load()
+
+      {:ok, view, _html} = live(conn, ~p"/loop")
+      assert_receive {:loading_loop_data, loader}
+
+      assert has_element?(view, ~s(#loop-proposals-panel[data-state="loading"]))
+      assert has_element?(view, "#loop-proposals-loading")
+      refute has_element?(view, "#loop-proposals-empty")
+
+      send(loader, :release)
+      html = render_async(view, @async_timeout)
+
+      assert has_element?(view, ~s(#loop-proposals-panel[data-state="loaded"]))
+      refute has_element?(view, "#loop-proposals-loading")
+      assert html =~ row.gist
+      refute_received {:unreleased_loop_load, _}
+    end
+
+    test "an async load failure renders an inline error, not a crash", %{conn: conn} do
+      :meck.new(Loop, [:passthrough, :no_link])
+      :meck.expect(Loop, :list_pending, fn _opts -> raise "boom" end)
+      on_exit(fn -> :meck.unload(Loop) end)
+
+      {:ok, view, _html} = live(conn, ~p"/loop")
+      html = render_async(view, @async_timeout)
+
+      assert html =~ ~s(id="loop-proposals-error")
+      assert html =~ "boom"
+      assert has_element?(view, "#loop-proposals-retry")
+      assert Process.alive?(view.pid)
+    end
+  end
+
   describe "live refresh" do
     test "picks up a proposal recorded while the page is open", %{conn: conn} do
-      {:ok, view, html} = live(conn, ~p"/loop")
+      {:ok, view, html} = live_loop(conn)
       refute html =~ "arrived after mount"
 
       proposed(%{gist: "arrived after mount"})
+      settle(view)
 
-      assert render(view) =~ "arrived after mount"
+      assert render_async(view, @async_timeout) =~ "arrived after mount"
     end
   end
 
@@ -145,7 +246,7 @@ defmodule ArbiterWeb.LoopProposalIndexLiveTest do
     test "renders the full unified diff for the selected proposal", %{conn: conn} do
       row = proposed()
 
-      {:ok, view, html} = live(conn, ~p"/loop")
+      {:ok, view, html} = live_loop(conn)
       refute html =~ "new line"
 
       html = view |> element("button[phx-value-id='#{row.id}']", "Review") |> render_click()
@@ -158,7 +259,7 @@ defmodule ArbiterWeb.LoopProposalIndexLiveTest do
     test "names what a hypothesis still needs instead of offering apply", %{conn: conn} do
       row = hypothesis()
 
-      {:ok, view, _html} = live(conn, ~p"/loop")
+      {:ok, view, _html} = live_loop(conn)
       html = view |> element("button[phx-value-id='#{row.id}']", "Review") |> render_click()
 
       assert html =~ "1 incident"
@@ -177,10 +278,11 @@ defmodule ArbiterWeb.LoopProposalIndexLiveTest do
       row =
         proposed(%{payload: %{"skill" => skill.name, "body" => "# after the loop applied it"}})
 
-      {:ok, view, _html} = live(conn, ~p"/loop")
+      {:ok, view, _html} = live_loop(conn)
       view |> element("button[phx-value-id='#{row.id}']", "Review") |> render_click()
 
-      html = view |> element("button[phx-click=apply]") |> render_click()
+      view |> element("button[phx-click=apply]") |> render_click()
+      html = render_async(view, @async_timeout)
 
       assert html =~ "applied"
       {:ok, reloaded} = Skills.get_skill(skill.id)
@@ -197,10 +299,11 @@ defmodule ArbiterWeb.LoopProposalIndexLiveTest do
       # skills yet, so the apply path refuses rather than guessing.
       row = proposed(%{payload: %{}})
 
-      {:ok, view, _html} = live(conn, ~p"/loop")
+      {:ok, view, _html} = live_loop(conn)
       view |> element("button[phx-value-id='#{row.id}']", "Review") |> render_click()
 
       html = view |> element("button[phx-click=apply]") |> render_click()
+      render_async(view, @async_timeout)
 
       assert html =~ "authored"
       {:ok, unchanged} = Loop.get_pending(row.id)
@@ -210,13 +313,14 @@ defmodule ArbiterWeb.LoopProposalIndexLiveTest do
     test "rejecting is soft — the row persists with its reason", %{conn: conn} do
       row = proposed()
 
-      {:ok, view, _html} = live(conn, ~p"/loop")
+      {:ok, view, _html} = live_loop(conn)
       view |> element("button[phx-value-id='#{row.id}']", "Review") |> render_click()
 
       view
       |> form("form[phx-submit=reject]", %{"reason" => "handled in CLAUDE.md instead"})
       |> render_submit()
 
+      render_async(view, @async_timeout)
       {:ok, after_reject} = Loop.get_pending(row.id)
       assert after_reject.state == :rejected
       assert after_reject.rejection_reason == "handled in CLAUDE.md instead"
@@ -234,10 +338,11 @@ defmodule ArbiterWeb.LoopProposalIndexLiveTest do
 
       row = proposed(%{payload: %{"skill" => skill.name, "body" => "# after"}})
 
-      {:ok, view, _html} = live(conn, ~p"/loop")
+      {:ok, view, _html} = live_loop(conn)
       view |> element("button[phx-value-id='#{row.id}']", "Review") |> render_click()
 
-      html = view |> element("button[phx-click=apply]") |> render_click()
+      view |> element("button[phx-click=apply]") |> render_click()
+      html = render_async(view, @async_timeout)
 
       # The live filter excludes :applied rows from a fresh query — but this
       # one was *just* decided in this session, so it must not vanish.
@@ -248,6 +353,7 @@ defmodule ArbiterWeb.LoopProposalIndexLiveTest do
       refute html =~ "Undo"
 
       view |> element("[phx-click=dismiss_decision]") |> render_click()
+      render_async(view, @async_timeout)
 
       refute proposals_html(view) =~ row.gist
     end
@@ -257,13 +363,15 @@ defmodule ArbiterWeb.LoopProposalIndexLiveTest do
       row_a = proposed()
       row_b = proposed()
 
-      {:ok, view, _html} = live(conn, ~p"/loop")
+      {:ok, view, _html} = live_loop(conn)
 
       view |> element("button[phx-value-id='#{row_a.id}']", "Review") |> render_click()
       view |> form("form[phx-submit=reject]") |> render_submit()
+      render_async(view, @async_timeout)
 
       view |> element("button[phx-value-id='#{row_b.id}']", "Review") |> render_click()
       view |> form("form[phx-submit=reject]") |> render_submit()
+      render_async(view, @async_timeout)
 
       # Both are dimmed and visible even though only the most recent toast shows.
       proposals = proposals_html(view)
@@ -271,6 +379,7 @@ defmodule ArbiterWeb.LoopProposalIndexLiveTest do
       assert proposals =~ row_b.gist
 
       view |> element("[phx-click=dismiss_decision]") |> render_click()
+      render_async(view, @async_timeout)
       proposals = proposals_html(view)
 
       refute proposals =~ row_a.gist
@@ -287,14 +396,16 @@ defmodule ArbiterWeb.LoopProposalIndexLiveTest do
 
       row = proposed(%{payload: %{"skill" => skill.name, "body" => "# after"}})
 
-      {:ok, view, _html} = live(conn, ~p"/loop")
+      {:ok, view, _html} = live_loop(conn)
       view |> element("button[phx-value-id='#{row.id}']", "Review") |> render_click()
       view |> element("button[phx-click=apply]") |> render_click()
+      render_async(view, @async_timeout)
 
       view
       |> element("button[phx-click=filter][phx-value-tab=rejected]")
       |> render_click()
 
+      render_async(view, @async_timeout)
       # The applied row must not leak into an unrelated filter's list or count.
       refute proposals_html(view) =~ row.gist
     end
@@ -303,12 +414,14 @@ defmodule ArbiterWeb.LoopProposalIndexLiveTest do
          %{conn: conn} do
       older = proposed()
 
-      {:ok, view, _html} = live(conn, ~p"/loop")
+      {:ok, view, _html} = live_loop(conn)
       view |> element("button[phx-value-id='#{older.id}']", "Review") |> render_click()
       view |> element("button[phx-click=apply]") |> render_click()
+      render_async(view, @async_timeout)
 
       newer = proposed()
-      html = render(view)
+      settle(view)
+      html = render_async(view, @async_timeout)
 
       {older_pos, _} = :binary.match(html, older.gist)
       {newer_pos, _} = :binary.match(html, newer.gist)
@@ -326,11 +439,12 @@ defmodule ArbiterWeb.LoopProposalIndexLiveTest do
       row = proposed(%{payload: %{"skill" => skill.name, "body" => "# after"}})
       {:ok, _already_applied} = Loop.apply_pending(row.id, actor: "test-setup")
 
-      {:ok, view, _html} = live(conn, ~p"/loop")
+      {:ok, view, _html} = live_loop(conn)
 
       # Simulate a stray double-click race: the event fires even though the
       # apply button for an already-decided row isn't normally reachable.
-      html = render_click(view, "apply", %{"id" => row.id})
+      render_click(view, "apply", %{"id" => row.id})
+      html = render_async(view, @async_timeout)
 
       refute html =~ "only a :proposed row can be applied"
       assert Process.alive?(view.pid)
@@ -343,9 +457,10 @@ defmodule ArbiterWeb.LoopProposalIndexLiveTest do
       row = proposed()
       {:ok, _already_rejected} = Loop.reject_pending(row.id, actor: "test-setup")
 
-      {:ok, view, _html} = live(conn, ~p"/loop")
+      {:ok, view, _html} = live_loop(conn)
 
-      html = render_click(view, "reject", %{"id" => row.id})
+      render_click(view, "reject", %{"id" => row.id})
+      html = render_async(view, @async_timeout)
 
       refute html =~ "nothing to reject"
       assert Process.alive?(view.pid)
@@ -357,7 +472,7 @@ defmodule ArbiterWeb.LoopProposalIndexLiveTest do
 
   describe "responsive design" do
     test "header includes filter tabs with all state options", %{conn: conn} do
-      {:ok, _view, html} = live(conn, ~p"/loop")
+      {:ok, _view, html} = live_loop(conn)
 
       # All filter tabs should be rendered in the header
       assert html =~ "Live"
