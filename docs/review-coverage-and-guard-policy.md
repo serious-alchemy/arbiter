@@ -615,6 +615,58 @@ still never merges.
 | `{:stale_reviewed_sha, …}` | 303+ retries on one PR; 5 hand-merges | Never produced for a base merge (§4.2, rule 3). M3's unbounded retry is deleted with the guard |
 | `review_not_started` | — | Unchanged; it is already the correct shape (a terminal non-failure) and becomes the template for class C/E terminal states |
 
+### 4.8 A stalled gate, and how to clear one (bd-7xtz6w)
+
+**What happened.** bd-45tkhq finished round 2's implementer at 03:54:19Z on
+2026-09-21. Two seconds later the gate crashed launching the round-3 reviewer:
+a merge to the checkout the server was then running from had triggered a code
+reload, and `Arbiter.Worker.start/1` was briefly undefined (`UndefinedFunctionError`
+in the journal). The per-pass timeout (`review_gate.timeout_ms`) is a timer the
+gate sends to *itself*, so it died with the gate. The author's `:DOWN`
+backstop (bd-2y0gd5) never logged or acted either. So the author sat `:waiting`
+on the review gate for 3+ hours, with no gate, no reviewer, no timer and no
+round-3 row. `worker_resume` meanwhile refused, because "the run is waiting on
+the review gate".
+
+**What bounds it now.**
+
+* A pass whose spawn *raises* is reported like any other spawn failure: a
+  recorded `review` round and a `:reviewer_failed` park
+  (`ReviewGate.guarded_spawn_worker/5`). A round ≥ 2 spawn failure parks the
+  same way instead of reporting REQUEST_CHANGES with no findings.
+* The author runs its own liveness check every `review_gate_liveness_ms`
+  (default 60s; `Worker.check_review_gate/2`). A gate that is gone parks the
+  run `:inconclusive`, exactly like a `:DOWN`. A gate that is alive but has had
+  no reviewer or implementer pass in flight, or has not answered at all, for
+  longer than one pass's budget (`review_gate.timeout_ms`) is stopped, and the
+  run parks `:reviewer_timeout`.
+* The Watchdog's poll ceiling (W12) does not count polls taken while a fix or
+  conflict pass is live on the ticket. vs-61rt5z hit that ceiling while its
+  fix pass was working.
+
+**The resume guard.** `worker_resume` refuses a run that is waiting on the
+review gate only when it has positive evidence the gate is live: the gate
+process the author spawned is alive, or a reviewer or implementer pass for the
+task is registered and not finished (`Dispatch.review_in_flight/2`). The
+refusal names the evidence it saw. It no longer points at `arb worker list`,
+which never shows a gate's passes. The waiting state alone is not evidence,
+because it is exactly what outlives a dead gate.
+
+**Clearing a stalled gate.** Nothing needs to be stopped by hand, and no work is
+discarded:
+
+1. If the gate is gone, or has had nothing in flight past its budget, the
+   author parks within one liveness interval (or one pass budget). The task
+   then carries `review_park_reason` and the coordinator is paged once.
+2. Run `arb worker resume <task>` (MCP `worker_resume`). The branch, its
+   commits and every recorded review round are preserved. The resumed worker
+   continues in the same worktree, and its `arb done` starts a fresh gate,
+   which clears the park (`ReviewPark.clear(_, :review_rerun)`).
+3. If a run is still `:waiting` on the gate and `worker_resume` accepts it,
+   the guard found nothing live. The resume stops the stranded author and
+   proceeds the same way. If it refuses, the refusal names the live gate or
+   pass: wait for the verdict, which is bounded by the per-pass timeout.
+
 ---
 
 ## 5. One failure policy
