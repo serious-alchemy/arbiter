@@ -728,7 +728,32 @@ defmodule Arbiter.Workflows.MergeQueue do
   # priority: `Limiter` classifies PR merges as never-throttled foreground
   # work, and `try_merge/2` has no retry path — a merge withheld by a
   # background pause would strand the item at :failed permanently.
-  defp poll_all(%State{items: items} = state) do
+  defp poll_all(%State{} = state) do
+    state = refresh_workspace(state)
+    poll_items(state)
+  end
+
+  # bd-6dghdv: `state.workspace` / `state.adapter` were only refreshed on
+  # enqueue, so a workspace edit that moved merge.config to another owner/repo
+  # left every already-queued item polled — and merged — against the old repo
+  # until the next enqueue or a server restart. Re-read the workspace once per
+  # cycle before any forge call. An empty queue makes no forge calls, so it
+  # skips the read; a failed read keeps the last good copy.
+  defp refresh_workspace(%State{items: []} = state), do: state
+
+  defp refresh_workspace(%State{workspace_id: workspace_id} = state) do
+    case Ash.get(Workspace, workspace_id) do
+      {:ok, workspace} ->
+        %{state | workspace: workspace, adapter: Mergers.for_workspace(workspace)}
+
+      _ ->
+        state
+    end
+  rescue
+    _ -> state
+  end
+
+  defp poll_items(%State{items: items} = state) do
     {advanced, state} =
       Limiter.with_priority(:background, :merge_queue, fn ->
         # Pass 1: poll + advance each item up to (but not through) the merge.

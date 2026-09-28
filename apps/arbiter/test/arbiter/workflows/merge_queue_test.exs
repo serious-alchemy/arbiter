@@ -2458,4 +2458,61 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       assert path == "/api/v4/projects/111/merge_requests"
     end
   end
+
+  # bd-6dghdv: the queue cached the workspace from its last enqueue, so after a
+  # workspace edit moved merge.config to another owner it kept polling (and
+  # would have merged against) the old repo until the next enqueue or a server
+  # restart. Each poll cycle now re-reads the workspace first.
+  describe "poll cycle re-reads the workspace (bd-6dghdv)" do
+    @tag workspace_config: @ws_github
+    test "after merge.config moves owner, the next tick polls the new repo", %{
+      workspace: ws,
+      task: task
+    } do
+      test_pid = self()
+
+      stub(fn conn ->
+        send(test_pid, {:requested, conn.method, conn.request_path})
+
+        cond do
+          conn.method == "POST" and String.ends_with?(conn.request_path, "/pulls") ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => 71})
+
+          conn.method == "GET" and String.ends_with?(conn.request_path, "/reviews") ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          conn.method == "GET" and String.ends_with?(conn.request_path, "/pulls/71") ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(pr_payload(%{"number" => 71, "mergeStateStatus" => "blocked"}))
+
+          true ->
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
+        end
+      end)
+
+      {_pid, name} = start_merge_queue(ws)
+      :ok = MergeQueue.enqueue(name, task.id)
+
+      {:ok, _ws} =
+        Ash.update(ws, %{config: put_in(ws.config, ["merge", "config", "owner"], "serious-alchemy")},
+          action: :update
+        )
+
+      drain_requests()
+      :ok = MergeQueue.tick(name)
+      polled = drain_requests()
+
+      assert {"GET", "/repos/serious-alchemy/widget/pulls/71"} in polled
+      refute Enum.any?(polled, fn {_method, path} -> String.starts_with?(path, "/repos/octo/") end)
+    end
+
+    defp drain_requests do
+      receive do
+        {:requested, method, path} -> [{method, path} | drain_requests()]
+      after
+        0 -> []
+      end
+    end
+  end
 end
