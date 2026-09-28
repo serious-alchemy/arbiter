@@ -592,7 +592,9 @@ defmodule Arbiter.Board.SnapshotTest do
     # Explicitly `:active`: with a `pr_ref` and no `state`, the backfill rule
     # would read the row as Merging, whose card is the ticket's own
     # (bd-741sid) — no worker is expected there.
-    test "an in_progress issue with no live worker still shows, flagged for a human" do
+    # bd-8if9zt: a stopped run is the coordinator's to resume first, so the
+    # card carries that attention without flagging the operator.
+    test "an in_progress issue with no live worker still shows, as the coordinator's" do
       board =
         derive(
           issues: [
@@ -605,8 +607,11 @@ defmodule Arbiter.Board.SnapshotTest do
           ]
         )
 
-      assert [%{id: "bd-a", reason: reason, mr_ref: "123", needs_you: true}] = board.waiting
+      assert [%{id: "bd-a", reason: reason, mr_ref: "123", needs_you: false} = card] =
+               board.waiting
+
       assert reason =~ "worker stopped"
+      assert %{owner: :coordinator, cause: :run_crashed} = card.attention
 
       refute Enum.any?([board.backlog, board.ready, board.running, board.closed_today], fn col ->
                "bd-a" in ids(col)
@@ -645,7 +650,7 @@ defmodule Arbiter.Board.SnapshotTest do
     # keep `orphaned_cards` from picking the issue up either. The task
     # vanished from every column even though `classify_columns` still called
     # it `:waiting`.
-    test "an in_progress issue whose only worker row succeeded still shows, flagged for a human" do
+    test "an in_progress issue whose only worker row succeeded still shows, with its park" do
       board =
         derive(
           issues: [
@@ -654,14 +659,18 @@ defmodule Arbiter.Board.SnapshotTest do
               state: :active,
               updated_at: @yesterday,
               pr_ref: "!293",
-              review_park_reason: "resume_blocked"
+              review_park_reason: "resume_blocked",
+              attention_cause: :resume_blocked
             })
           ],
           workers: [worker("bd-a", :succeeded)]
         )
 
-      assert [%{id: "bd-a", reason: reason, mr_ref: "!293", needs_you: true}] = board.waiting
+      assert [%{id: "bd-a", reason: reason, mr_ref: "!293", needs_you: false} = card] =
+               board.waiting
+
       assert reason =~ "resume_blocked"
+      assert %{owner: :coordinator, cause: :resume_blocked} = card.attention
 
       refute Enum.any?([board.backlog, board.ready, board.running, board.closed_today], fn col ->
                "bd-a" in ids(col)
@@ -878,7 +887,7 @@ defmodule Arbiter.Board.SnapshotTest do
     # bd-741sid: the "primary alone reads as the machine clearing a CI block"
     # case is a Merging ticket now — see "Merging tickets" below. On a worker
     # card the collapsed pass still names itself.
-    test "a collapsed dead fix pass still flags the card and names itself" do
+    test "a collapsed dead fix pass still names itself on the card" do
       board =
         derive(
           workers: [
@@ -893,7 +902,8 @@ defmodule Arbiter.Board.SnapshotTest do
                  id: "bd-a",
                  status: :waiting,
                  waiting_on: :question,
-                 needs_you: true,
+                 needs_you: false,
+                 attention: %{owner: :coordinator, cause: :run_asked_question},
                  collapsed_note: note
                }
              ] = board.waiting
@@ -1001,10 +1011,11 @@ defmodule Arbiter.Board.SnapshotTest do
              ] = board.waiting
     end
 
-    test "one whose Watchdog is gone says so, and flags for a human" do
+    test "one whose Watchdog is gone says so, as the coordinator's" do
       board = derive(issues: [merging("bd-m")], watchdog_live: MapSet.new())
 
-      assert [%{id: "bd-m", watchdog_alive: false, needs_you: true}] = board.waiting
+      assert [%{id: "bd-m", watchdog_alive: false, needs_you: false} = card] = board.waiting
+      assert %{owner: :coordinator, cause: :merge_blocked} = card.attention
     end
 
     test "omitting the liveness input reports unknown rather than missing" do
@@ -1030,7 +1041,7 @@ defmodule Arbiter.Board.SnapshotTest do
       assert flags(board) == %{"bd-a" => false, "bd-b" => true}
     end
 
-    test "a failed pass still registered under the ticket flags the card and names itself" do
+    test "a failed pass still registered under the ticket names itself on the card" do
       board =
         derive(
           issues: [merging("bd-m")],
@@ -1038,7 +1049,7 @@ defmodule Arbiter.Board.SnapshotTest do
           watchdog_live: MapSet.new(["bd-m"])
         )
 
-      assert [%{id: "bd-m", status: :merging, needs_you: true, collapsed_note: note}] =
+      assert [%{id: "bd-m", status: :merging, needs_you: false, collapsed_note: note}] =
                board.waiting
 
       assert note =~ "failed"
@@ -1049,11 +1060,46 @@ defmodule Arbiter.Board.SnapshotTest do
   # try on its own", read off each Waiting card.
   defp flags(board), do: Map.new(board.waiting, &{&1.id, &1.needs_you})
 
+  # bd-8if9zt (AC6): the flag is `attention.owner == :operator`. The
+  # coordinator comes first — a card it can act on carries its attention but
+  # does not flag the operator; child 7 (bd-8nlez1) adds the hand-off and the
+  # limits that move an item to the operator.
   describe "the needs-you flag" do
-    test "a worker that asked a human a question always flags" do
+    test "a worker that asked a question is the coordinator's to answer" do
       board = derive(workers: [worker("bd-a", :question, %{meta: %{await_reason: "which?"}})])
 
-      assert flags(board) == %{"bd-a" => true}
+      assert flags(board) == %{"bd-a" => false}
+      assert [%{attention: %{owner: :coordinator, cause: :run_asked_question}}] = board.waiting
+    end
+
+    test "a failed run with a follow-up round under way is not flagged" do
+      board =
+        derive(
+          issues: [issue("bd-a", %{status: :in_progress, state: :active})],
+          workers: [
+            worker("bd-a", :failed),
+            worker("bd-a#impl", :working, %{
+              registry_key: "bd-a#impl",
+              meta: %{role: :implementer, revises: "bd-a"}
+            })
+          ]
+        )
+
+      assert [%{id: "bd-a", needs_you: false, attention: nil}] = board.waiting
+    end
+
+    test "an operator-owned cause flags; a coordinator-owned one does not" do
+      board =
+        derive(
+          issues: [
+            merging("bd-a", %{attention_cause: :awaiting_manual_merge}),
+            merging("bd-b", %{attention_cause: :merge_blocked})
+          ]
+        )
+
+      assert flags(board) == %{"bd-a" => true, "bd-b" => false}
+      assert %{"bd-a" => :operator, "bd-b" => :coordinator} ==
+               Map.new(board.waiting, &{&1.id, &1.attention.owner})
     end
 
     # bd-741sid: a merge request is a Merging ticket's, its last poll on the
@@ -1070,7 +1116,7 @@ defmodule Arbiter.Board.SnapshotTest do
       assert flags(board) == %{"bd-a" => false, "bd-b" => false}
     end
 
-    test "an approved merge request blocked on anything the Watchdog cannot clear flags" do
+    test "an approved merge request needing an approval the fleet cannot give flags; other blocks are the coordinator's" do
       board =
         derive(
           issues:
@@ -1078,8 +1124,8 @@ defmodule Arbiter.Board.SnapshotTest do
                   {"bd-a", :conflict},
                   {"bd-b", :needs_approval},
                   {"bd-c", :needs_nonauthor_approval},
-                  # Nothing in Arbiter takes a PR out of draft or resolves a
-                  # forge-specific block, so these are the operator's too.
+                  # A draft or a forge-specific block is the coordinator's to
+                  # try first (bd-8if9zt).
                   {"bd-d", :draft},
                   {"bd-e", :blocked_other}
                 ] do
@@ -1088,12 +1134,14 @@ defmodule Arbiter.Board.SnapshotTest do
         )
 
       assert flags(board) == %{
-               "bd-a" => true,
+               "bd-a" => false,
                "bd-b" => true,
                "bd-c" => true,
-               "bd-d" => true,
-               "bd-e" => true
+               "bd-d" => false,
+               "bd-e" => false
              }
+
+      for card <- board.waiting, do: assert(card.attention.cause == :merge_blocked)
     end
 
     test "a block the system still auto-handles does not flag" do
@@ -1108,7 +1156,7 @@ defmodule Arbiter.Board.SnapshotTest do
       assert flags(board) == %{"bd-a" => false, "bd-b" => false}
     end
 
-    test "a parked failure with nothing left in flight flags" do
+    test "a parked failure with nothing left in flight is the coordinator's" do
       board =
         derive(
           workers: [
@@ -1118,13 +1166,14 @@ defmodule Arbiter.Board.SnapshotTest do
           ]
         )
 
-      assert flags(board) == %{"bd-a" => true}
+      assert flags(board) == %{"bd-a" => false}
+      assert [%{attention: %{owner: :coordinator, cause: :run_crashed}}] = board.waiting
     end
 
     # A review-timeout failure keeps the last poll's merger status in its meta,
     # so a terminal worker can still be carrying an auto-resolvable block. The
     # worker is dead either way — the status wins over the stale block.
-    test "a parked failure flags even carrying a stale auto-resolvable block" do
+    test "a parked failure carrying a stale auto-resolvable block is still the coordinator's" do
       board =
         derive(
           workers: [
@@ -1134,7 +1183,8 @@ defmodule Arbiter.Board.SnapshotTest do
           ]
         )
 
-      assert flags(board) == %{"bd-a" => true}
+      assert flags(board) == %{"bd-a" => false}
+      assert [%{attention: %{cause: :run_crashed}}] = board.waiting
     end
   end
 
@@ -1142,7 +1192,7 @@ defmodule Arbiter.Board.SnapshotTest do
   # will clear them, so they belong in Waiting alongside the other cards that
   # need a human.
   describe "awaiting-verification cards" do
-    test "a parked task appears in Waiting with its age and needs_you" do
+    test "a parked task appears in Waiting with its age, as the coordinator's to verify" do
       board =
         derive(
           issues: [
@@ -1156,7 +1206,8 @@ defmodule Arbiter.Board.SnapshotTest do
       assert [card] = board.waiting
       assert card.id == "bd-v"
       assert card.status == :awaiting_verification
-      assert card.needs_you == true
+      assert card.needs_you == false
+      assert %{owner: :coordinator, waiting_on: :verification} = card.attention
       assert card.since == @yesterday
       assert card.reason =~ "verif"
     end
