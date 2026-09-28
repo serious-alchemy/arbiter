@@ -150,7 +150,7 @@ defmodule ArbiterWeb.WorkspaceDetailComponentsTest do
 
     test "every section event is bound with phx-target so a component owns it", %{conn: conn} do
       ws = fully_populated_workspace()
-      {:ok, view, html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, html} = live_workspace(conn, ws.id)
 
       # The three modals and the security confirmation only exist once opened,
       # so the binding census is taken across every state the page can be in.
@@ -225,7 +225,7 @@ defmodule ArbiterWeb.WorkspaceDetailComponentsTest do
   describe "component-scoped error state" do
     test "a blank repo-override name reports inside the repo-overrides section", %{conn: conn} do
       ws = new_workspace()
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       html =
         view
@@ -239,7 +239,7 @@ defmodule ArbiterWeb.WorkspaceDetailComponentsTest do
 
     test "a blank repo path reports inside the repo-paths section", %{conn: conn} do
       ws = new_workspace()
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       html =
         view
@@ -253,7 +253,7 @@ defmodule ArbiterWeb.WorkspaceDetailComponentsTest do
 
     test "an empty routing adapter reports inside the adapters section", %{conn: conn} do
       ws = new_workspace()
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       html =
         view
@@ -267,7 +267,7 @@ defmodule ArbiterWeb.WorkspaceDetailComponentsTest do
 
     test "a blank routing rule key reports inside the rules section", %{conn: conn} do
       ws = new_workspace()
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       html =
         view
@@ -283,7 +283,7 @@ defmodule ArbiterWeb.WorkspaceDetailComponentsTest do
   describe "cross-component wiring" do
     test "a secret set in the secrets section appears in both credentials selects", %{conn: conn} do
       ws = new_workspace(%{config: %{"tracker" => %{"type" => "github"}}})
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       view |> element("button[phx-click=open_secret_modal]") |> render_click()
 
@@ -315,7 +315,7 @@ defmodule ArbiterWeb.WorkspaceDetailComponentsTest do
 
     test "a workspace write in one section is visible to the others", %{conn: conn} do
       ws = new_workspace(%{config: %{"tracker" => %{"type" => "none"}}})
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       refute has_element?(view, "form[phx-submit=save_tracker_config]")
 
@@ -337,7 +337,7 @@ defmodule ArbiterWeb.WorkspaceDetailComponentsTest do
 
     test "a successful save still raises a page-level flash", %{conn: conn} do
       ws = new_workspace()
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       html =
         view
@@ -360,7 +360,7 @@ defmodule ArbiterWeb.WorkspaceDetailComponentsTest do
 
     test "a section's failure flash reaches the page too", %{conn: conn} do
       ws = new_workspace()
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       # A click can name a key the server no longer has — the row was removed
       # in another tab, or by another operator, between render and click. The
@@ -392,7 +392,7 @@ defmodule ArbiterWeb.WorkspaceDetailComponentsTest do
 
     test "standing orders shows the added order", %{conn: conn} do
       ws = new_workspace()
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       html =
         view
@@ -404,7 +404,7 @@ defmodule ArbiterWeb.WorkspaceDetailComponentsTest do
 
     test "repo paths shows the added path", %{conn: conn} do
       ws = new_workspace()
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       html =
         view
@@ -418,7 +418,7 @@ defmodule ArbiterWeb.WorkspaceDetailComponentsTest do
 
     test "repo overrides shows the added override", %{conn: conn} do
       ws = new_workspace()
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       html =
         view
@@ -432,7 +432,7 @@ defmodule ArbiterWeb.WorkspaceDetailComponentsTest do
 
     test "routing rules shows the saved rule", %{conn: conn} do
       ws = new_workspace()
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       html =
         view
@@ -446,7 +446,7 @@ defmodule ArbiterWeb.WorkspaceDetailComponentsTest do
 
     test "routing adapters shows the added adapter", %{conn: conn} do
       ws = new_workspace()
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       html =
         view
@@ -460,7 +460,7 @@ defmodule ArbiterWeb.WorkspaceDetailComponentsTest do
 
     test "secrets shows the stored key", %{conn: conn} do
       ws = new_workspace()
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       view |> element("button[phx-click=open_secret_modal]") |> render_click()
 
@@ -476,7 +476,7 @@ defmodule ArbiterWeb.WorkspaceDetailComponentsTest do
 
     test "the policy section reveals the tracker fields its own save selected", %{conn: conn} do
       ws = new_workspace(%{config: %{"tracker" => %{"type" => "none"}}})
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       # TrackerConfigComponent is rendered *by* the policy section off the
       # tracker type the policy form just wrote, so a stale derived assign
@@ -516,7 +516,7 @@ defmodule ArbiterWeb.WorkspaceDetailComponentsTest do
 
     test "rendered page does not claim standing_orders reaches a worker prompt", %{conn: conn} do
       ws = new_workspace()
-      {:ok, _view, html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, _view, html} = live_workspace(conn, ws.id)
 
       refute html =~ ~r/worker reads these/i,
              "the consequence text must not claim per-dispatch worker effect"

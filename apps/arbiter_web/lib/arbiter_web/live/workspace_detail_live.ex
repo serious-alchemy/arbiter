@@ -75,6 +75,8 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
   alias ArbiterWeb.CoreComponents.Navigation
   alias ArbiterWeb.WorkspaceDetail
 
+  require Logger
+
   # The rail, in the order an operator onboards a workspace: point it at code,
   # decide how work flows, then how it is run, then what it is allowed to do.
   @sections [
@@ -96,42 +98,109 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
   # board's, see `ArbiterWeb.BoardLive`.
   @scheduler_call_timeout_ms 2_000
 
+  # bd-7p07gw: the workspace read and the scheduler status used to run
+  # synchronously here, on the dead render and the connected one alike. The
+  # dead render now draws nothing but the loading state; the connected mount
+  # starts both reads via `start_async/3` and lands them in `handle_async/3`.
+  # They are separate tasks so a slow scheduler never holds the page — until
+  # it answers, `@autodispatch` is `nil` and the switch is disabled.
   @impl true
   def mount(%{"id" => id}, _session, socket) do
-    case Ash.get(Workspace, id) do
-      {:ok, ws} ->
-        {:ok,
-         socket
-         |> assign(:workspace, ws)
-         |> assign(:not_found, false)
-         |> assign(:details_error, nil)
-         |> assign(:section, "repos")
-         |> assign(:sections, @sections)
-         |> assign(:autodispatch, autodispatch_on?())
-         |> assign(:tracker_types, Workspace.valid_tracker_types())
-         |> assign(:merger_strategies, Workspace.valid_merger_strategies())
-         |> assign(:agent_types, Agents.valid_agent_types())
-         |> assign(:routing_policies, Routing.valid_policies())
-         |> assign(:review_automation_modes, ValidateConfig.valid_review_automation_modes())
-         |> assign(:quota_modes, ValidateConfig.valid_quota_modes())
-         |> assign(
-           :quota_weekly_warning_policies,
-           Arbiter.Quota.Gate.weekly_warning_policies()
-         )
-         |> assign(:security_modes, SecurityPolicy.valid_modes())
-         |> assign(:security_filesystems, SecurityPolicy.valid_filesystems())
-         |> assign(:safe_default_categories, SecurityPolicy.safe_default_categories())}
+    socket =
+      socket
+      |> assign(:workspace_id, id)
+      |> assign(:workspace, nil)
+      |> assign(:not_found, false)
+      |> assign(:workspace_error, nil)
+      |> assign(:details_error, nil)
+      |> assign(:section, "repos")
+      |> assign(:sections, @sections)
+      |> assign(:autodispatch, nil)
+      |> assign(:autodispatch_error?, false)
+      |> assign(:tracker_types, Workspace.valid_tracker_types())
+      |> assign(:merger_strategies, Workspace.valid_merger_strategies())
+      |> assign(:agent_types, Agents.valid_agent_types())
+      |> assign(:routing_policies, Routing.valid_policies())
+      |> assign(:review_automation_modes, ValidateConfig.valid_review_automation_modes())
+      |> assign(:quota_modes, ValidateConfig.valid_quota_modes())
+      |> assign(:quota_weekly_warning_policies, Arbiter.Quota.Gate.weekly_warning_policies())
+      |> assign(:security_modes, SecurityPolicy.valid_modes())
+      |> assign(:security_filesystems, SecurityPolicy.valid_filesystems())
+      |> assign(:safe_default_categories, SecurityPolicy.safe_default_categories())
 
-      _ ->
-        {:ok, assign(socket, workspace: nil, not_found: true)}
+    socket =
+      if connected?(socket) do
+        socket
+        |> load_workspace()
+        |> start_async(:autodispatch, fn -> autodispatch_on?() end)
+      else
+        socket
+      end
+
+    {:ok, socket}
+  end
+
+  defp load_workspace(socket) do
+    id = socket.assigns.workspace_id
+    start_async(socket, :workspace, fn -> load_workspace_task(id) end)
+  end
+
+  # The task is linked to this view, so a tab closed mid-read (or a test
+  # tearing down) would kill it mid-query — trapping exits turns that into a
+  # message instead, so the query in flight finishes rather than dying
+  # holding a DB checkout (the shared sandbox one, under test).
+  defp load_workspace_task(id) do
+    Process.flag(:trap_exit, true)
+    result = Ash.get(Workspace, id)
+
+    receive do
+      {:EXIT, _view, _reason} -> exit(:shutdown)
+    after
+      0 -> result
     end
   end
+
+  # Anything but a found workspace is "not found", as before: an id that isn't
+  # a UUID comes back as an invalid-input error, not a raise. Only a read that
+  # *crashed* is the inline error state.
+  @impl true
+  def handle_async(:workspace, {:ok, {:ok, %Workspace{} = ws}}, socket) do
+    {:noreply, assign(socket, workspace: ws, not_found: false, workspace_error: nil)}
+  end
+
+  def handle_async(:workspace, {:ok, _not_found}, socket) do
+    {:noreply, assign(socket, workspace: nil, not_found: true, workspace_error: nil)}
+  end
+
+  def handle_async(:workspace, {:exit, reason}, socket) do
+    Logger.error("WorkspaceDetailLive: loading workspace failed: #{inspect(reason)}")
+    {:noreply, assign(socket, :workspace_error, describe_exit(reason))}
+  end
+
+  def handle_async(:autodispatch, {:ok, on?}, socket) do
+    {:noreply, assign(socket, autodispatch: on?, autodispatch_error?: false)}
+  end
+
+  # `autodispatch_on?/0` already swallows a dead or slow scheduler, so this is
+  # the task itself dying. The switch stays unknown (and disabled) rather than
+  # guessing a position.
+  def handle_async(:autodispatch, {:exit, reason}, socket) do
+    Logger.error("WorkspaceDetailLive: reading the scheduler failed: #{inspect(reason)}")
+    {:noreply, assign(socket, autodispatch: nil, autodispatch_error?: true)}
+  end
+
+  defp describe_exit({%{__exception__: true} = error, _stacktrace}), do: Exception.message(error)
+  defp describe_exit(reason), do: Exception.format_exit(reason)
 
   # ---- rail ----
 
   @impl true
   def handle_event("section", %{"section" => slug}, socket) when slug in @section_slugs do
     {:noreply, assign(socket, :section, slug)}
+  end
+
+  def handle_event("retry_workspace", _params, socket) do
+    {:noreply, socket |> assign(:workspace_error, nil) |> load_workspace()}
   end
 
   # ---- workspace details (name/prefix) ----
@@ -157,6 +226,13 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
   # per-workspace — the switch is shown here because this is where an operator
   # comes to decide how work flows, but flipping it stops or starts promotion
   # for *every* workspace. The consequence line says so.
+  #
+  # Until the scheduler status has loaded the switch is disabled; a click that
+  # still arrives (a stale client) is dropped rather than guessed at.
+  def handle_event("toggle_autodispatch", _params, %{assigns: %{autodispatch: nil}} = socket) do
+    {:noreply, socket}
+  end
+
   def handle_event("toggle_autodispatch", _params, socket) do
     on? = socket.assigns.autodispatch
 
@@ -267,6 +343,71 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
     """
   end
 
+  # Before the workspace has landed: the connected mount's read is in flight
+  # (or this is the dead render, which never starts it), or the read crashed.
+  # No section is mounted yet — every one of them assumes `@workspace`.
+  def render(%{workspace: nil} = assigns) do
+    ~H"""
+    <Layouts.app
+      flash={@flash}
+      current_path={@current_path}
+      quotas={@quotas}
+      live={@live}
+      coordinator_inbox={@coordinator_inbox}
+      coordinator_outstanding_count={@coordinator_outstanding_count}
+      coordinator_inbox_now={@coordinator_inbox_now}
+    >
+      <div class="mx-auto flex max-w-[1100px] flex-col gap-5 p-4 sm:p-6">
+        <Domain.index_header
+          icon="hero-cog-6-tooth"
+          title="Workspace"
+          subtitle="Tracker, merger, agent routing, standing orders and secrets — per workspace."
+        />
+
+        <div
+          :if={is_nil(@workspace_error)}
+          id="ws-loading"
+          role="status"
+          class="flex min-h-[400px] items-start gap-2 rounded-[var(--radius-panel)] border border-solid border-[var(--border-default)] bg-[var(--surface-chrome)] p-5 text-[12.5px] text-[var(--text-secondary)]"
+        >
+          <Core.icon name="hero-arrow-path-micro" class="size-4 shrink-0 animate-spin" />
+          Loading workspace…
+        </div>
+
+        <div
+          :if={@workspace_error}
+          id="ws-error"
+          role="alert"
+          class="flex items-start gap-3 rounded-[var(--radius-field)] border border-solid border-[var(--arb-fail-edge)] bg-[var(--arb-fail-wash)] p-4 text-[12.5px] text-[var(--arb-fail-text)]"
+        >
+          <Core.icon
+            name="hero-exclamation-triangle"
+            class="mt-0.5 size-5 shrink-0 text-[var(--arb-fail-text)]"
+          />
+          <div class="min-w-0 grow">
+            <p class="m-0 font-medium">Could not load this workspace</p>
+            <p class="m-0 mt-1 text-[12px] opacity-90">{@workspace_error}</p>
+          </div>
+          <button
+            type="button"
+            id="ws-retry"
+            phx-click="retry_workspace"
+            class={[
+              "h-[28px] shrink-0 cursor-pointer rounded-[var(--radius-field)] px-3",
+              "border border-solid border-[var(--arb-fail-edge)] bg-[var(--surface-chrome)]",
+              "text-[12px] text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
+            ]}
+          >
+            Retry
+          </button>
+        </div>
+
+        <Navigation.back_link href={~p"/"} label="Back to board" />
+      </div>
+    </Layouts.app>
+    """
+  end
+
   def render(assigns) do
     ~H"""
     <Layouts.app
@@ -367,10 +508,18 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
                   <.toggle_row
                     name="Auto-dispatch ready issues"
                     consequence="Ready issues promote themselves each scheduler tick, within slot, dependency, file-overlap and quota limits; install-wide"
-                    checked={@autodispatch}
+                    checked={@autodispatch == true}
+                    disabled={is_nil(@autodispatch)}
                     click="toggle_autodispatch"
                   />
                 </.rows>
+                <p
+                  :if={@autodispatch_error?}
+                  id="ws-autodispatch-error"
+                  class="m-0 mt-2 text-[11px] text-[var(--arb-fail-text)]"
+                >
+                  The board scheduler's status could not be read — the switch is unavailable until the page is reloaded.
+                </p>
                 <div class="mt-3 flex items-center gap-3">
                   <Core.button type="submit" variant="primary" size="sm">Save details</Core.button>
                   <p :if={@details_error} class="m-0 text-[11px] text-[var(--arb-fail-text)]">

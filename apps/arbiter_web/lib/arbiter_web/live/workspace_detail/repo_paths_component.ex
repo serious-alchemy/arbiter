@@ -20,8 +20,16 @@ defmodule ArbiterWeb.WorkspaceDetail.RepoPathsComponent do
   alias ArbiterWeb.CoreComponents.Feedback
   alias ArbiterWeb.CoreComponents.Forms
 
+  require Logger
+
   @impl true
-  def mount(socket), do: {:ok, assign(socket, :repo_path_error, nil)}
+  def mount(socket) do
+    {:ok,
+     socket
+     |> assign(:repo_path_error, nil)
+     |> assign(:worktree_states, %{})
+     |> assign(:worktree_error, nil)}
+  end
 
   @impl true
   def update(assigns, socket) do
@@ -36,20 +44,62 @@ defmodule ArbiterWeb.WorkspaceDetail.RepoPathsComponent do
   # Each state costs a `git status` in the repo, so it is recomputed only when
   # the set of paths actually changes — the parent re-renders this component on
   # every write anywhere on the page.
+  #
+  # bd-7p07gw: and it runs in a `start_async/3` task, never in `update/2`
+  # itself — one slow or huge checkout used to hold the whole page. Until the
+  # probe lands, a repo whose path is new chips `checking`; one whose path is
+  # unchanged keeps the state it already had. Starting a probe under the same
+  # name replaces one still in flight, so a stale result is never applied.
   defp load_worktree_states(socket) do
     paths = socket.assigns.repo_paths
 
     if socket.assigns[:worktree_of] == paths do
       socket
     else
+      known = known_states(socket.assigns[:worktree_of] || [], socket.assigns.worktree_states)
+
       socket
       |> assign(:worktree_of, paths)
+      |> assign(:worktree_error, nil)
       |> assign(
         :worktree_states,
-        Map.new(paths, fn {repo, path} -> {repo, worktree_state(path)} end)
+        Map.new(paths, fn {repo, path} ->
+          {repo, Map.get(known, {repo, path}, "checking")}
+        end)
       )
+      |> start_async(:worktree_states, fn ->
+        Map.new(paths, fn {repo, path} -> {repo, worktree_state(path)} end)
+      end)
     end
   end
+
+  defp known_states(paths, states) do
+    for {repo, path} <- paths,
+        state = Map.get(states, repo),
+        state not in [nil, "checking"],
+        into: %{},
+        do: {{repo, path}, state}
+  end
+
+  @impl true
+  def handle_async(:worktree_states, {:ok, states}, socket) do
+    {:noreply, assign(socket, :worktree_states, states)}
+  end
+
+  # The probe itself crashed (a per-path git failure is already `unknown`
+  # inside it). The entries are still legitimate config, so they chip
+  # `unknown` and the section says why, rather than taking the page down.
+  def handle_async(:worktree_states, {:exit, reason}, socket) do
+    Logger.error("RepoPathsComponent: worktree probe failed: #{inspect(reason)}")
+
+    {:noreply,
+     socket
+     |> assign(:worktree_states, Map.new(socket.assigns.repo_paths, &{elem(&1, 0), "unknown"}))
+     |> assign(:worktree_error, describe_exit(reason))}
+  end
+
+  defp describe_exit({%{__exception__: true} = error, _stacktrace}), do: Exception.message(error)
+  defp describe_exit(reason), do: Exception.format_exit(reason)
 
   # A path that isn't a git checkout, or isn't there at all, is `unknown`
   # rather than an error: the entry is still legitimate config, it just can't
@@ -145,8 +195,14 @@ defmodule ArbiterWeb.WorkspaceDetail.RepoPathsComponent do
           <span class="text-[var(--text-secondary)]">{path || "— (invalid entry)"}</span>
         </:col>
         <:col :let={{repo, _path}} label="worktree" width="84px">
-          <span data-worktree-state={Map.get(@worktree_states, repo, "unknown")}>
-            <Data.status_chip status={Map.get(@worktree_states, repo, "unknown")} class="badge-sm" />
+          <span data-worktree-state={Map.get(@worktree_states, repo, "checking")}>
+            <Data.status_chip
+              status={Map.get(@worktree_states, repo, "checking")}
+              class={[
+                "badge-sm",
+                Map.get(@worktree_states, repo, "checking") == "checking" && "animate-pulse"
+              ]}
+            />
           </span>
         </:col>
         <:col :let={{repo, _path}} label="" width="40px">
@@ -159,6 +215,16 @@ defmodule ArbiterWeb.WorkspaceDetail.RepoPathsComponent do
           />
         </:col>
       </Data.data_table>
+
+      <p
+        :if={@worktree_error}
+        id="repo-paths-worktree-error"
+        role="alert"
+        class="m-0 flex items-center gap-1.5 text-[11px] text-[var(--arb-fail-text)]"
+      >
+        <Core.icon name="hero-exclamation-triangle-micro" class="size-3.5 shrink-0" />
+        Couldn't check worktree state: {@worktree_error}
+      </p>
 
       <Feedback.empty_state
         :if={@repo_paths == []}

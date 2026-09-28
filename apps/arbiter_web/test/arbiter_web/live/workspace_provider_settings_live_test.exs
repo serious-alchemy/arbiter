@@ -42,7 +42,7 @@ defmodule ArbiterWeb.WorkspaceProviderSettingsLiveTest do
   end
 
   defp open(conn, ws) do
-    {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+    {:ok, view, _html} = live_workspace(conn, ws.id)
     view |> element(~s(#ws-rail button[phx-value-section=providers])) |> render_click()
     view
   end

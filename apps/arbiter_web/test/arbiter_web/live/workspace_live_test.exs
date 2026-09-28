@@ -72,7 +72,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
       |> element("button", "New workspace")
       |> render_click()
 
-      {:ok, _detail, html} =
+      {:ok, detail, _html} =
         view
         |> form("form[phx-submit=create]", %{
           "workspace" => %{
@@ -85,6 +85,10 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
         |> render_submit()
         |> follow_redirect(conn)
 
+      # The detail page loads the workspace, then its sections, via start_async.
+      _ = render_async(detail)
+      html = render_async(detail)
+
       assert html =~ name
       assert html =~ "cr"
     end
@@ -92,14 +96,14 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
 
   describe "detail" do
     test "renders 404 for an unknown workspace", %{conn: conn} do
-      {:ok, _view, html} = live(conn, ~p"/workspaces/#{Ash.UUID.generate()}")
+      {:ok, _view, html} = live_workspace(conn, Ash.UUID.generate())
       assert html =~ "Workspace not found"
     end
 
     test "edits name and prefix via the details form, validated like the API", %{conn: conn} do
       ws = new_workspace(%{name: "old-name", prefix: "old"})
 
-      {:ok, view, html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, html} = live_workspace(conn, ws.id)
 
       assert html =~ "does not rename existing issue IDs"
 
@@ -134,7 +138,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
     test "adds and removes a standing order", %{conn: conn} do
       ws = new_workspace()
 
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       html =
         view
@@ -156,7 +160,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
     test "saves configuration enums through patch_config", %{conn: conn} do
       ws = new_workspace()
 
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       view
       |> form("form[phx-submit=save_config]", %{
@@ -179,7 +183,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
     } do
       ws = new_workspace()
 
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       view
       |> form("form[phx-submit=save_config]", %{
@@ -213,7 +217,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
           }
         })
 
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       view
       |> form("form[phx-submit=save_config]", %{
@@ -236,7 +240,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
     test "rejects a non-numeric routing.budget_usd_per_day", %{conn: conn} do
       ws = new_workspace()
 
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       html =
         view
@@ -260,7 +264,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
       # is the exact rule the coordinator authors after that change lands.
       ws = new_workspace(%{config: %{"routing" => %{"policy" => "by_difficulty"}}})
 
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       view
       |> form("form[phx-submit=save_routing_rule]", %{
@@ -304,7 +308,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
     test "adds and removes routing.adapters entries", %{conn: conn} do
       ws = new_workspace(%{config: %{"routing" => %{"policy" => "round_robin"}}})
 
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       view
       |> form("form[phx-submit=add_routing_adapter]", %{
@@ -340,7 +344,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
          %{conn: conn} do
       ws = new_workspace()
 
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       view
       |> form("form[phx-submit=save_config]", %{
@@ -380,7 +384,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
           }
         })
 
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       view
       |> form("form[phx-submit=save_config]", %{
@@ -410,7 +414,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
     } do
       ws = new_workspace()
 
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       view
       |> form("form[phx-submit=save_config]", %{
@@ -444,7 +448,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
           }
         })
 
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       view
       |> form("form[phx-submit=save_config]", %{
@@ -472,7 +476,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
     } do
       ws = new_workspace()
 
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       view
       |> form("form[phx-submit=save_config]", %{
@@ -508,7 +512,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
           }
         })
 
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       view
       |> form("form[phx-submit=save_config]", %{
@@ -534,7 +538,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
     test "adds and removes review_automation.repo_overrides entries", %{conn: conn} do
       ws = new_workspace()
 
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       view
       |> form("form[phx-submit=add_repo_override]", %{
@@ -558,7 +562,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
     } do
       ws = new_workspace()
 
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       view
       |> form("form[phx-submit=add_repo_override]", %{
@@ -583,7 +587,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
     test "adds and removes repo_paths entries", %{conn: conn} do
       ws = new_workspace()
 
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       view
       |> form("form[phx-submit=add_repo_path]", %{
@@ -613,7 +617,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
           }
         })
 
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       view
       |> element("button[phx-click=rm_repo_path][phx-value-repo='other']")
@@ -626,7 +630,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
     test "removes a repo_paths entry whose repo name contains a dot", %{conn: conn} do
       ws = new_workspace()
 
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       view
       |> form("form[phx-submit=add_repo_path]", %{
@@ -657,7 +661,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
           }
         })
 
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       view
       |> form("form[phx-submit=add_repo_path]", %{
@@ -688,7 +692,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
           }
         })
 
-      {:ok, view, html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, html} = live_workspace(conn, ws.id)
 
       assert html =~ "broken"
       assert has_element?(view, "button[phx-click=rm_repo_path][phx-value-repo='broken']")
@@ -704,7 +708,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
     test "saves pr_patrol.* and review_patrol.our_login through patch_config", %{conn: conn} do
       ws = new_workspace()
 
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       view
       |> form("form[phx-submit=save_config]", %{
@@ -740,7 +744,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
           }
         })
 
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       refute has_element?(
                view,
@@ -764,7 +768,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
           }
         })
 
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       view
       |> form("form[phx-submit=save_config]", %{
@@ -792,7 +796,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
     } do
       ws = new_workspace()
 
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       view
       |> form("form[phx-submit=save_agent_config]", %{
@@ -843,7 +847,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
           }
         })
 
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       view
       |> form("form[phx-submit=save_agent_config]", %{
@@ -889,7 +893,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
           }
         })
 
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       assert has_element?(view, "input[name='agent_config[tier_flagship]'][value=fable]")
       assert has_element?(view, "input[name='agent_config[thinking_xhigh]']")
@@ -918,7 +922,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
           action: :update
         )
 
-      {:ok, view, html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, html} = live_workspace(conn, ws.id)
 
       assert has_element?(view, "select[name='agent_config[credentials_ref]']")
       refute has_element?(view, "input[name='agent_config[credentials_ref]']")
@@ -940,7 +944,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
     } do
       ws = new_workspace(%{config: %{"tracker" => %{"type" => "jira"}}})
 
-      {:ok, view, html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, html} = live_workspace(conn, ws.id)
 
       assert html =~ "tracker_config[host]"
       assert html =~ "tracker_config[project_key]"
@@ -953,7 +957,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
     } do
       ws = new_workspace(%{config: %{"tracker" => %{"type" => "jira"}}})
 
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       html =
         view
@@ -971,7 +975,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
     } do
       ws = new_workspace(%{config: %{"tracker" => %{"type" => "jira"}}})
 
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       view
       |> form("form[phx-submit=save_tracker_config]", %{
@@ -1008,7 +1012,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
           }
         })
 
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       view
       |> form("form[phx-submit=save_config]", %{"config" => %{"tracker_type" => "github"}})
@@ -1050,7 +1054,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
       {:ok, ws} =
         Ash.update(ws, %{secrets: %{"jira_token" => "tok-not-echoed"}}, action: :update)
 
-      {:ok, view, html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, html} = live_workspace(conn, ws.id)
 
       assert has_element?(view, "select[name='tracker_config[credentials_ref]']")
       refute has_element?(view, "input[name='tracker_config[credentials_ref]']")
@@ -1083,7 +1087,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
           }
         })
 
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       view
       |> form("form[phx-submit=save_tracker_config]", %{
@@ -1109,7 +1113,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
     test "adds and removes per-provider tier_models overrides", %{conn: conn} do
       ws = new_workspace()
 
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       view
       |> form("form[phx-submit=add_provider_override]", %{
@@ -1147,7 +1151,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
           }
         })
 
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       assert has_element?(
                view,
@@ -1170,7 +1174,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
           }
         })
 
-      {:ok, view, html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, html} = live_workspace(conn, ws.id)
 
       # Effective posture (resolved, not just raw config).
       assert html =~ SecurityPolicy.one_line(SecurityPolicy.resolve(ws))
@@ -1186,7 +1190,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
     } do
       ws = new_workspace()
 
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       view
       |> form(
@@ -1212,7 +1216,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
     test "removing a safe_defaults guard requires an explicit confirmation step", %{conn: conn} do
       ws = new_workspace()
 
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       html =
         view
@@ -1241,7 +1245,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
     test "disabling the sandbox requires an explicit confirmation step", %{conn: conn} do
       ws = new_workspace()
 
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       view
       |> form(
@@ -1263,7 +1267,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
           }
         })
 
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       # Everything else identical to the current posture — only strict → bypass,
       # which drops the allow-list restriction and the classifier.
@@ -1292,7 +1296,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
           }
         })
 
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       view
       |> form("form[phx-submit=save_security]", security_params(%{"mode" => "auto"}))
@@ -1317,7 +1321,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
 
       before_config = ws.config
 
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       html =
         view
@@ -1357,7 +1361,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
           }
         })
 
-      {:ok, view, html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, html} = live_workspace(conn, ws.id)
 
       assert has_element?(view, "#security-repo-postures")
       assert html =~ "acme/widgets"
@@ -1372,7 +1376,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
       ws = new_workspace()
       before = SecurityPolicy.resolve(ws)
 
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       view
       |> form(
@@ -1407,7 +1411,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
       before_config = ws.config
       before_policy = SecurityPolicy.resolve(ws)
 
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       view
       |> form("form[phx-submit=save_config]", %{
@@ -1437,7 +1441,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
           }
         })
 
-      {:ok, _view, html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, _view, html} = live_workspace(conn, ws.id)
 
       assert html =~ ~s(phx-value-role="agent")
       assert html =~ ~s(phx-value-role="review_agent")
@@ -1465,7 +1469,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
         provider_account_id: account.id
       })
 
-      {:ok, _view, html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, _view, html} = live_workspace(conn, ws.id)
 
       assert html =~ "account: personal-max"
     end
@@ -1473,7 +1477,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
     test "shows no account label for a provider with no linked account", %{conn: conn} do
       ws = new_workspace(%{config: %{"agent" => %{"type" => "claude"}}})
 
-      {:ok, _view, html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, _view, html} = live_workspace(conn, ws.id)
 
       refute html =~ "account:"
     end
@@ -1481,7 +1485,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
     test "adds, reorders, and removes agent.type providers, persisting order", %{conn: conn} do
       ws = new_workspace()
 
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       click_agent_type(view, "add_agent_type", "agent", "gemini")
       click_agent_type(view, "add_agent_type", "agent", "codex")
@@ -1516,7 +1520,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
           }
         })
 
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       click_agent_type(view, "remove_agent_type", "agent", "gemini")
       click_agent_type(view, "remove_agent_type", "review_agent", "gemini")
@@ -1529,7 +1533,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
     test "sets and removes a secret without ever echoing its value", %{conn: conn} do
       ws = new_workspace()
 
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       view |> element("button[phx-click=open_secret_modal]") |> render_click()
 
@@ -1557,7 +1561,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
     test "sets, reveals, toggles, and removes a secret worker env var", %{conn: conn} do
       ws = new_workspace()
 
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       view |> element("button[phx-click=open_worker_env_modal]") |> render_click()
 
@@ -1610,7 +1614,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
 
     test "rejects an invalid worker env var name", %{conn: conn} do
       ws = new_workspace()
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       view |> element("button[phx-click=open_worker_env_modal]") |> render_click()
 
@@ -1703,7 +1707,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
         ws = new_workspace(%{config: config})
         before = SecurityPolicy.resolve(ws)
 
-        {:ok, _view, html} = live(conn, ~p"/workspaces/#{ws.id}")
+        {:ok, _view, html} = live_workspace(conn, ws.id)
 
         {:ok, reloaded} = Ash.get(Workspace, ws.id)
 
@@ -1721,7 +1725,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
         ws = new_workspace(%{config: config})
         before = SecurityPolicy.resolve(ws)
 
-        {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+        {:ok, view, _html} = live_workspace(conn, ws.id)
 
         # Submit the agent-config form exactly as rendered — no edits.
         view |> form("form[phx-submit=save_agent_config]") |> render_submit()
@@ -1742,7 +1746,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
         ws = new_workspace(%{config: config})
         before = SecurityPolicy.resolve(ws)
 
-        {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+        {:ok, view, _html} = live_workspace(conn, ws.id)
 
         html = view |> form("form[phx-submit=save_security]") |> render_submit()
 

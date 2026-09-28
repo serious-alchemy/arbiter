@@ -420,7 +420,7 @@ defmodule ArbiterWeb.MessagesLiveTest do
       # workspace's mail topic and `:cont`s on {:new_message, _} so the host
       # view's own handle_info runs. WorkspaceDetailLive has no matching
       # clause, so without a catch-all it crashed on any mail broadcast.
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
       render_async(view)
 
       {:ok, _} =
@@ -442,7 +442,7 @@ defmodule ArbiterWeb.MessagesLiveTest do
       # used to `:cont` to every LiveView in live_session :default.
       # WorkspaceDetailLive has no matching clause, so it crashed every
       # minute. The tick is hook-private state, so it must `:halt`.
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
       render_async(view)
 
       send(view.pid, :coordinator_inbox_tick)

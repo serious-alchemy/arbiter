@@ -37,7 +37,7 @@ defmodule ArbiterWeb.WorkspaceConfigScreenTest do
   describe "the section rail" do
     test "offers all nine sections, in the handoff order", %{conn: conn} do
       ws = new_workspace()
-      {:ok, view, html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, html} = live_workspace(conn, ws.id)
 
       for {slug, label} <- @sections do
         assert has_element?(view, ~s(#ws-rail button[phx-value-section="#{slug}"]), label),
@@ -54,7 +54,7 @@ defmodule ArbiterWeb.WorkspaceConfigScreenTest do
 
     test "opens on Repos and follows the operator to another section", %{conn: conn} do
       ws = new_workspace()
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       assert has_element?(
                view,
@@ -80,7 +80,7 @@ defmodule ArbiterWeb.WorkspaceConfigScreenTest do
 
     test "names the section and its workspace context in the body header", %{conn: conn} do
       ws = new_workspace()
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       assert has_element?(view, ~s([data-section-context="repos"]), "0 paths")
       assert has_element?(view, ~s([data-section-context="policy"]), "workspace: #{ws.name}")
@@ -88,7 +88,7 @@ defmodule ArbiterWeb.WorkspaceConfigScreenTest do
 
     test "ends the page on a way back to the board", %{conn: conn} do
       ws = new_workspace()
-      {:ok, _view, html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, _view, html} = live_workspace(conn, ws.id)
       assert html =~ "Back to board"
     end
   end
@@ -96,7 +96,7 @@ defmodule ArbiterWeb.WorkspaceConfigScreenTest do
   describe "mobile layout" do
     test "the rail+body grid collapses to a single column below sm:", %{conn: conn} do
       ws = new_workspace()
-      {:ok, _view, html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, _view, html} = live_workspace(conn, ws.id)
 
       assert html =~ "grid-cols-1"
       assert html =~ "sm:grid-cols-[168px_minmax(0,1fr)]"
@@ -104,7 +104,7 @@ defmodule ArbiterWeb.WorkspaceConfigScreenTest do
 
     test "the section rail scrolls horizontally as a tab strip on mobile", %{conn: conn} do
       ws = new_workspace()
-      {:ok, _view, html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, _view, html} = live_workspace(conn, ws.id)
 
       [rail] = Regex.run(~r/<nav id="ws-rail"[^>]*class="([^"]*)"/, html, capture: :all_but_first)
 
@@ -118,7 +118,7 @@ defmodule ArbiterWeb.WorkspaceConfigScreenTest do
            conn: conn
          } do
       ws = new_workspace()
-      {:ok, _view, html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, _view, html} = live_workspace(conn, ws.id)
 
       assert html =~ ~s(<details open)
       assert html =~ "Tracker, merge &amp; routing"
@@ -133,7 +133,7 @@ defmodule ArbiterWeb.WorkspaceConfigScreenTest do
   describe "consequence copy" do
     test "every setting row states what changing it does", %{conn: conn} do
       ws = new_workspace(%{config: %{"tracker" => %{"type" => "github"}}})
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       html = render(view)
 
@@ -151,7 +151,7 @@ defmodule ArbiterWeb.WorkspaceConfigScreenTest do
 
     test "the concurrency cap explains how it combines with the other caps", %{conn: conn} do
       ws = new_workspace()
-      {:ok, _view, html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, _view, html} = live_workspace(conn, ws.id)
 
       assert html =~ "Max concurrent workers"
       assert html =~ "lowest of this, the account ceiling"
@@ -160,7 +160,7 @@ defmodule ArbiterWeb.WorkspaceConfigScreenTest do
 
     test "auto-dispatch describes the scheduler, not manual dispatch", %{conn: conn} do
       ws = new_workspace()
-      {:ok, view, html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, html} = live_workspace(conn, ws.id)
 
       assert html =~ "Auto-dispatch ready issues"
       assert has_element?(view, ~s([data-setting-row="Auto-dispatch ready issues"]))
@@ -188,7 +188,7 @@ defmodule ArbiterWeb.WorkspaceConfigScreenTest do
           }
         })
 
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       assert has_element?(view, "#repo-paths", "worktree")
       assert has_element?(view, "#repo-paths", "arbiter")
@@ -227,7 +227,7 @@ defmodule ArbiterWeb.WorkspaceConfigScreenTest do
           config: %{"repo_paths" => %{"cleanrepo" => clean, "dirtyrepo" => dirty}}
         })
 
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       assert has_element?(view, ~s(#repo-paths [data-worktree-state="clean"]))
       assert has_element?(view, ~s(#repo-paths [data-worktree-state="dirty"]))
@@ -235,7 +235,7 @@ defmodule ArbiterWeb.WorkspaceConfigScreenTest do
 
     test "offers a register control for a new repo path", %{conn: conn} do
       ws = new_workspace()
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       assert has_element?(view, ~s(input[name="repo_path[path]"][placeholder="~/dev/my-project"]))
 
@@ -260,7 +260,7 @@ defmodule ArbiterWeb.WorkspaceConfigScreenTest do
     test "reads off while the board scheduler is paused", %{conn: conn} do
       Autopilot.pause(Autopilot)
       ws = new_workspace()
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       assert has_element?(view, @switch <> ~s([aria-checked="false"]))
     end
@@ -268,7 +268,7 @@ defmodule ArbiterWeb.WorkspaceConfigScreenTest do
     test "reads on while the board scheduler is promoting", %{conn: conn} do
       Autopilot.resume(Autopilot)
       ws = new_workspace()
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       assert has_element?(view, @switch <> ~s([aria-checked="true"])),
              "a running, unpaused autopilot must read as on"
@@ -280,7 +280,7 @@ defmodule ArbiterWeb.WorkspaceConfigScreenTest do
     test "pauses the scheduler on the way down and resumes it on the way up", %{conn: conn} do
       Autopilot.resume(Autopilot)
       ws = new_workspace()
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       html = view |> element(@switch) |> render_click()
 
@@ -303,7 +303,7 @@ defmodule ArbiterWeb.WorkspaceConfigScreenTest do
   describe "checkbox state" do
     test "paints the worker-env secret box from the box itself", %{conn: conn} do
       ws = new_workspace()
-      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, view, _html} = live_workspace(conn, ws.id)
 
       html = view |> element("button[phx-click=open_worker_env_modal]") |> render_click()
 
@@ -313,7 +313,7 @@ defmodule ArbiterWeb.WorkspaceConfigScreenTest do
 
     test "shows no tick on an unchecked safe-default guard", %{conn: conn} do
       ws = new_workspace()
-      {:ok, _view, html} = live(conn, ~p"/workspaces/#{ws.id}")
+      {:ok, _view, html} = live_workspace(conn, ws.id)
 
       [_, span_class] =
         Regex.run(

@@ -53,4 +53,29 @@ defmodule ArbiterWeb.ConnCase do
 
     {:ok, conn: Phoenix.ConnTest.build_conn()}
   end
+
+  @doc """
+  Mounts `/workspaces/:id` and waits for it to finish loading (bd-7p07gw).
+
+  The page loads in two waves, both via `start_async`: the workspace itself
+  (and the scheduler status) on the connected mount, and then — once the
+  sections exist to ask — each section's own slow read, such as the per-repo
+  `git status` behind the worktree chips. One `render_async/1` only waits for
+  the tasks already running, so this waits for both waves.
+
+  A macro because `Phoenix.LiveViewTest.live/2` is one (it reads the
+  caller's `@endpoint`). Tests about the loading state itself mount with
+  `live/2` directly.
+  """
+  defmacro live_workspace(conn, id) do
+    quote do
+      require Phoenix.LiveViewTest
+
+      {:ok, view, _html} =
+        Phoenix.LiveViewTest.live(unquote(conn), "/workspaces/#{unquote(id)}")
+
+      _ = Phoenix.LiveViewTest.render_async(view)
+      {:ok, view, Phoenix.LiveViewTest.render_async(view)}
+    end
+  end
 end
