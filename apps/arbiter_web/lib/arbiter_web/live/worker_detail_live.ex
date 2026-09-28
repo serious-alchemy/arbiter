@@ -40,6 +40,21 @@ defmodule ArbiterWeb.WorkerDetailLive do
   # so a full reload after a refresh still shows reasonable history.
   @output_cap 200
 
+  # bd-c5m9b5: the worker snapshot and the database reads (task, workspace,
+  # machine state, mailbox, latest run, usage) used to run synchronously here,
+  # on the dead render and the connected one alike — a GenServer hop into a
+  # possibly busy worker held the whole page. The dead render now reads
+  # nothing and draws the loading states; the connected mount starts two
+  # `start_async/3` tasks, one per source, so a slow worker never holds the
+  # mailbox and a slow database never holds the log.
+  #
+  # The output topic is subscribed *before* the snapshot is asked for, so no
+  # line can fall between the two; `@output_seam` then sorts every line that
+  # lands while the snapshot is in flight into "already in the snapshot" or
+  # "after it" — see `load_snapshot/1`.
+  #
+  # Every later refresh (a lifecycle event, a finished Resume or watchdog
+  # restart) goes through the same two tasks — see `refresh_all/1`.
   @impl true
   def mount(%{"task_id" => task_id}, _session, socket) do
     socket =
@@ -60,21 +75,29 @@ defmodule ArbiterWeb.WorkerDetailLive do
       |> assign(:restarting_watchdog, false)
       |> assign(:stop_notice, false)
       |> assign(:stopped_flow_step, nil)
-      |> refresh_all()
-      |> seed_output_lines()
+      |> assign(:snapshot, nil)
+      |> assign(:snapshot_state, :loading)
+      |> assign(:snapshot_ref, nil)
+      |> assign(:output_lines, [])
+      |> assign(:output_seam, nil)
+      |> assign(:details_state, :loading)
+      |> assign(:mailbox_topic, nil)
+      |> assign(empty_details())
 
-    if connected?(socket) do
-      Phoenix.PubSub.subscribe(Arbiter.PubSub, @workers_topic)
-      Phoenix.PubSub.subscribe(Arbiter.PubSub, output_topic(task_id))
-      # Drives the live elapsed-time counter in the header. Only reassigns
-      # :now — no DB reads or GenServer hops in the tick handler.
-      :timer.send_interval(1000, self(), :tick)
+    socket =
+      if connected?(socket) do
+        Phoenix.PubSub.subscribe(Arbiter.PubSub, @workers_topic)
+        Phoenix.PubSub.subscribe(Arbiter.PubSub, output_topic(task_id))
+        # Drives the live elapsed-time counter in the header. Only reassigns
+        # :now — no DB reads or GenServer hops in the tick handler.
+        :timer.send_interval(1000, self(), :tick)
 
-      case workspace_id(socket) do
-        ws when is_binary(ws) -> Phoenix.PubSub.subscribe(Arbiter.PubSub, Message.topic(ws))
-        _ -> :ok
+        socket
+        |> load_snapshot()
+        |> load_details()
+      else
+        socket
       end
-    end
 
     {:ok, socket}
   end
@@ -99,20 +122,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
         {:worker_lifecycle, _event, %{task_id: task_id}},
         %{assigns: %{task_id: task_id}} = socket
       ) do
-    socket = refresh_all(socket)
-
-    socket =
-      case socket.assigns[:snapshot] do
-        %{status: status} ->
-          if active_status?(status),
-            do: assign(socket, stop_notice: false, stopped_flow_step: nil),
-            else: socket
-
-        _ ->
-          socket
-      end
-
-    {:noreply, socket}
+    {:noreply, refresh_all(socket)}
   end
 
   # A lifecycle event for some other worker on the shared "workers" topic —
@@ -120,7 +130,24 @@ defmodule ArbiterWeb.WorkerDetailLive do
   def handle_info({:worker_lifecycle, _event, _snap}, socket), do: {:noreply, socket}
 
   def handle_info({:worker_output, _task_id, line}, socket) do
-    {:noreply, append_output_line(socket, line)}
+    {:noreply, receive_output_line(socket, line)}
+  end
+
+  # The worker's marker for the snapshot in flight: every line before it is
+  # in that snapshot, every line after it is not (`Worker.state/3`).
+  def handle_info(
+        {:worker_snapshot_cut, ref},
+        %{assigns: %{output_seam: %{ref: ref} = seam}} = socket
+      ) do
+    {:noreply, assign(socket, :output_seam, %{seam | cut?: true})}
+  end
+
+  # The snapshot landed first; from here on, lines are live again.
+  def handle_info(
+        {:worker_snapshot_cut, ref},
+        %{assigns: %{output_seam: {:awaiting_cut, ref}}} = socket
+      ) do
+    {:noreply, assign(socket, :output_seam, nil)}
   end
 
   def handle_info({:new_message, _message}, socket) do
@@ -158,6 +185,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
          socket
          |> assign(:stop_notice, true)
          |> assign(:stopped_flow_step, flow_step)
+         |> supersede_snapshot_load()
          |> assign(:snapshot, stopped_snapshot(socket.assigns[:snapshot]))}
 
       {:error, :not_found} ->
@@ -315,9 +343,70 @@ defmodule ArbiterWeb.WorkerDetailLive do
     {:noreply, refresh_mailbox(socket)}
   end
 
+  def handle_event("retry_snapshot", _params, socket) do
+    {:noreply, load_snapshot(socket)}
+  end
+
+  def handle_event("retry_details", _params, socket) do
+    {:noreply, load_details(socket)}
+  end
+
   # ---- async results ----
 
   @impl true
+  # A worker back at an active status (resumed, or restarted elsewhere)
+  # retires the stop toast and the reddened flow node.
+  def handle_async(:snapshot, {:ok, {ref, snapshot}}, %{assigns: %{snapshot_ref: ref}} = socket) do
+    socket =
+      socket
+      |> assign(snapshot: snapshot, snapshot_state: :loaded, snapshot_ref: nil)
+      |> land_output(snapshot)
+
+    socket =
+      case snapshot do
+        %{status: status} ->
+          if active_status?(status),
+            do: assign(socket, stop_notice: false, stopped_flow_step: nil),
+            else: socket
+
+        _ ->
+          socket
+      end
+
+    {:noreply, socket}
+  end
+
+  # Taken before the operator's Stop landed (`supersede_snapshot_load/1`), so
+  # it would put the stopped worker back on the page.
+  def handle_async(:snapshot, {:ok, _stale}, socket), do: {:noreply, socket}
+
+  def handle_async(:snapshot, {:exit, _reason}, %{assigns: %{snapshot_ref: nil}} = socket),
+    do: {:noreply, socket}
+
+  # The worker is there but its snapshot call crashed or timed out. Nothing
+  # to seed from, so every line streamed meanwhile is kept as-is.
+  def handle_async(:snapshot, {:exit, reason}, socket) do
+    Logger.error("WorkerDetailLive: loading the worker snapshot failed: #{inspect(reason)}")
+
+    {:noreply,
+     socket
+     |> assign(snapshot: nil, snapshot_state: {:error, describe_exit(reason)}, snapshot_ref: nil)
+     |> land_output(nil)}
+  end
+
+  def handle_async(:details, {:ok, details}, socket) do
+    {:noreply,
+     socket
+     |> assign(details)
+     |> assign(:details_state, :loaded)
+     |> subscribe_mailbox()}
+  end
+
+  def handle_async(:details, {:exit, reason}, socket) do
+    Logger.error("WorkerDetailLive: loading the task details failed: #{inspect(reason)}")
+    {:noreply, assign(socket, :details_state, {:error, describe_exit(reason)})}
+  end
+
   def handle_async(:retry, {:ok, {:ok, _result}}, socket) do
     {:noreply,
      socket
@@ -404,65 +493,222 @@ defmodule ArbiterWeb.WorkerDetailLive do
 
   # ---- data ----
 
+  # Asks the worker for its snapshot off the LiveView process. The worker
+  # sends `{:worker_snapshot_cut, ref}` from its own process just before it
+  # answers, so it is ordered with that worker's own `{:worker_output, _, _}`
+  # broadcasts — which is what makes the seam exact. Until the snapshot lands,
+  # a streamed line goes to `pre` (before the marker: already in the
+  # snapshot) or `post` (after it: not); see `land_output/2`.
+  #
+  # Only a buffer that has not been seeded yet needs the seam. Once a
+  # snapshot has landed, every line since has streamed straight in, so a
+  # reload keeps the page (and its buffer, which may hold an earlier run's
+  # lines) up while it asks again. Starting `:snapshot` again supersedes the
+  # load in flight, so the newest request's answer is the one that lands.
+  defp load_snapshot(socket) do
+    task_id = socket.assigns.task_id
+    view = self()
+    ref = make_ref()
+
+    socket =
+      case socket.assigns do
+        %{snapshot_state: :loaded} ->
+          socket
+
+        # Everything it caught was streamed before this request's marker, so
+        # it is in this snapshot, or kept if there is none.
+        %{output_seam: %{} = seam} ->
+          assign(socket,
+            snapshot_state: :loading,
+            output_seam: %{ref: ref, cut?: false, pre: seam.post ++ seam.pre, post: []}
+          )
+
+        _ ->
+          assign(socket,
+            snapshot_state: :loading,
+            output_seam: %{ref: ref, cut?: false, pre: [], post: []}
+          )
+      end
+
+    socket
+    |> assign(:snapshot_ref, ref)
+    |> start_async(:snapshot, fn -> {ref, fetch_snapshot(task_id, view, ref)} end)
+  end
+
+  # Drops the load in flight when the operator stops the worker: its answer
+  # predates the stop. Lines it was holding back are kept.
+  defp supersede_snapshot_load(socket) do
+    socket
+    |> land_output(nil)
+    |> assign(snapshot_ref: nil, snapshot_state: :loaded)
+  end
+
+  # A worker that is gone by the time we ask is "no worker", as before; one
+  # that is there but crashes or times out on the call is the error state.
+  defp fetch_snapshot(task_id, view, ref) do
+    case Worker.whereis(task_id) do
+      nil ->
+        nil
+
+      pid ->
+        try do
+          pid |> Worker.state(view, ref) |> Map.put(:pid, pid)
+        catch
+          :exit, {reason, _call} when reason in [:noproc, :normal, :shutdown] -> nil
+          :exit, {{:shutdown, _}, _call} -> nil
+        end
+    end
+  end
+
+  defp receive_output_line(%{assigns: %{output_seam: %{cut?: false} = seam}} = socket, line),
+    do: assign(socket, :output_seam, %{seam | pre: [line | seam.pre]})
+
+  defp receive_output_line(%{assigns: %{output_seam: %{cut?: true} = seam}} = socket, line),
+    do: assign(socket, :output_seam, %{seam | post: [line | seam.post]})
+
+  # The snapshot has landed but the worker's marker hasn't yet: this line was
+  # streamed before the snapshot was taken, so it is already on the page.
+  defp receive_output_line(%{assigns: %{output_seam: {:awaiting_cut, _ref}}} = socket, _line),
+    do: socket
+
+  defp receive_output_line(socket, line), do: append_output_line(socket, line)
+
+  # Seeds the buffer from a landed snapshot and folds in what streamed while
+  # it was in flight: lines after the marker are appended, lines before it are
+  # already in the snapshot. With no snapshot to seed from (no worker, or the
+  # call failed) every streamed line is kept.
+  defp land_output(%{assigns: %{output_seam: %{} = seam}} = socket, snapshot) do
+    streamed = Enum.reverse(seam.pre, Enum.reverse(seam.post))
+
+    {lines, seam} =
+      case snapshot do
+        %{} when seam.cut? -> {snapshot_lines(snapshot) ++ Enum.reverse(seam.post), nil}
+        %{} -> {snapshot_lines(snapshot), {:awaiting_cut, seam.ref}}
+        nil -> {socket.assigns.output_lines ++ streamed, nil}
+      end
+
+    assign(socket, output_lines: Enum.take(lines, -@output_cap), output_seam: seam)
+  end
+
+  defp land_output(socket, _snapshot), do: socket
+
+  defp load_details(socket) do
+    task_id = socket.assigns.task_id
+
+    # A reload keeps what is on the page until the fresh read lands.
+    socket
+    |> assign(
+      :details_state,
+      if(socket.assigns.details_state == :loaded, do: :loaded, else: :loading)
+    )
+    |> start_async(:details, fn -> load_details_task(task_id) end)
+  end
+
+  # The task is linked to this view, so a tab closed mid-read (or a test
+  # tearing down) would kill it mid-query — trapping exits turns that into a
+  # message instead, so the query in flight finishes rather than dying
+  # holding a DB checkout (the shared sandbox one, under test).
+  defp load_details_task(task_id) do
+    Process.flag(:trap_exit, true)
+    result = fetch_details(task_id)
+
+    receive do
+      {:EXIT, _view, _reason} -> exit(:shutdown)
+    after
+      0 -> result
+    end
+  end
+
+  defp fetch_details(task_id) do
+    task = fetch_task(task_id)
+    ms = fetch_machine_state(task_id)
+
+    %{
+      task: task,
+      workspace: fetch_workspace(task),
+      machine_state: ms,
+      workflow_steps: workflow_steps_for(ms),
+      mailbox: fetch_mailbox(task_id),
+      latest_run: fetch_latest_run(task_id),
+      usage_events: fetch_usage(task_id)
+    }
+  end
+
+  defp empty_details do
+    %{
+      task: nil,
+      workspace: nil,
+      machine_state: nil,
+      workflow_steps: [],
+      mailbox: [],
+      latest_run: nil,
+      usage_events: []
+    }
+  end
+
+  # Subscribes to the loaded task's workspace mailbox topic, once.
+  defp subscribe_mailbox(socket) do
+    case workspace_id(socket) do
+      ws when is_binary(ws) and is_nil(socket.assigns.mailbox_topic) ->
+        topic = Message.topic(ws)
+        Phoenix.PubSub.subscribe(Arbiter.PubSub, topic)
+        assign(socket, :mailbox_topic, topic)
+
+      _ ->
+        socket
+    end
+  end
+
+  defp describe_exit({%{__exception__: true} = error, _stacktrace}), do: Exception.message(error)
+  defp describe_exit(reason), do: Exception.format_exit(reason)
+
+  # Re-reads everything off the LiveView process, through the mount's own
+  # tasks: no GenServer hop into the worker here, and a load that had failed
+  # (or was still running) is retried rather than left on the page.
   defp refresh_all(socket) do
     socket
-    |> refresh_snapshot()
-    |> refresh_task()
-    |> refresh_workspace()
-    |> refresh_machine_state()
-    |> refresh_mailbox()
-    |> refresh_latest_run()
-    |> refresh_usage()
+    |> load_snapshot()
+    |> load_details()
   end
 
   # Most-recent Run row for this task, if any. Used to surface a link from
   # the live worker view to the historical post-mortem of a previous run on
   # the same task.
-  defp refresh_latest_run(socket) do
-    run =
-      try do
-        Run
-        |> Ash.Query.filter(task_id == ^socket.assigns.task_id)
-        |> Ash.Query.sort(started_at: :desc)
-        |> Ash.Query.limit(1)
-        |> Ash.read!()
-        |> List.first()
-      rescue
-        _ -> nil
-      end
 
-    assign(socket, :latest_run, run)
+  defp fetch_latest_run(task_id) do
+    Run
+    |> Ash.Query.filter(task_id == ^task_id)
+    |> Ash.Query.sort(started_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> List.first()
+  rescue
+    _ -> nil
   end
 
   # Latest usage event(s) for this task — used to surface cost/tokens on the
   # detail page. Queries by task_id, ordered newest-first, capped at 5 rows
   # (one per recent session: work + optional review). Best-effort — nil on error.
-  defp refresh_usage(socket) do
-    events =
-      try do
-        UsageEvent
-        |> Ash.Query.filter(task_id == ^socket.assigns.task_id)
-        |> Ash.Query.sort(occurred_at: :desc)
-        |> Ash.Query.limit(5)
-        |> Ash.read!()
-      rescue
-        _ -> []
-      end
 
-    assign(socket, :usage_events, events)
+  defp fetch_usage(task_id) do
+    UsageEvent
+    |> Ash.Query.filter(task_id == ^task_id)
+    |> Ash.Query.sort(occurred_at: :desc)
+    |> Ash.Query.limit(5)
+    |> Ash.read!()
+  rescue
+    _ -> []
   end
 
   # Unread mailbox-family messages (mailbox / direction / flag) addressed to
   # this task. Pure read — the operator marks them read explicitly.
-  defp refresh_mailbox(socket) do
-    mailbox =
-      try do
-        Message.inbox(socket.assigns.task_id)
-      rescue
-        _ -> []
-      end
+  defp refresh_mailbox(socket),
+    do: assign(socket, :mailbox, fetch_mailbox(socket.assigns.task_id))
 
-    assign(socket, :mailbox, mailbox)
+  defp fetch_mailbox(task_id) do
+    Message.inbox(task_id)
+  rescue
+    _ -> []
   end
 
   # The task's workspace, needed to scope/address messages. nil when the task
@@ -553,57 +799,31 @@ defmodule ArbiterWeb.WorkerDetailLive do
      |> start_async(:retry, fn -> Dispatch.resume(task_id, opts) end)}
   end
 
-  defp refresh_snapshot(socket) do
-    snap =
-      case Worker.whereis(socket.assigns.task_id) do
-        nil ->
-          nil
-
-        pid ->
-          case safe_state(pid) do
-            %{} = s -> Map.put(s, :pid, pid)
-            _ -> nil
-          end
-      end
-
-    assign(socket, :snapshot, snap)
-  end
-
-  defp refresh_task(socket) do
-    case Ash.get(Issue, socket.assigns.task_id) do
-      {:ok, task} -> assign(socket, :task, task)
-      _ -> assign(socket, :task, nil)
+  defp fetch_task(task_id) do
+    case Ash.get(Issue, task_id) do
+      {:ok, task} -> task
+      _ -> nil
     end
   end
 
-  defp refresh_workspace(%{assigns: %{task: %Issue{workspace_id: ws_id}}} = socket)
-       when is_binary(ws_id) do
+  defp fetch_workspace(%Issue{workspace_id: ws_id}) when is_binary(ws_id) do
     case Ash.get(Workspace, ws_id) do
-      {:ok, ws} -> assign(socket, :workspace, ws)
-      _ -> assign(socket, :workspace, nil)
+      {:ok, ws} -> ws
+      _ -> nil
     end
   end
 
-  defp refresh_workspace(socket), do: assign(socket, :workspace, nil)
+  defp fetch_workspace(_task), do: nil
 
-  defp refresh_machine_state(socket) do
-    ms =
-      try do
-        MachineState
-        |> Ash.Query.filter(task_id == ^socket.assigns.task_id)
-        |> Ash.Query.sort(updated_at: :desc)
-        |> Ash.Query.limit(1)
-        |> Ash.read!()
-        |> List.first()
-      rescue
-        _ -> nil
-      end
-
-    workflow_steps = workflow_steps_for(ms)
-
-    socket
-    |> assign(:machine_state, ms)
-    |> assign(:workflow_steps, workflow_steps)
+  defp fetch_machine_state(task_id) do
+    MachineState
+    |> Ash.Query.filter(task_id == ^task_id)
+    |> Ash.Query.sort(updated_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> List.first()
+  rescue
+    _ -> nil
   end
 
   defp workflow_steps_for(nil), do: []
@@ -620,30 +840,13 @@ defmodule ArbiterWeb.WorkerDetailLive do
     _ -> []
   end
 
-  defp safe_state(pid) do
-    Worker.state(pid)
-  rescue
-    _ -> nil
-  catch
-    :exit, _ -> nil
-  end
-
   defp output_topic(task_id), do: "worker:" <> task_id
 
-  # Seed the live output buffer from the worker's snapshot. Called on mount
-  # (and whenever we deliberately want to resync from the source of truth);
-  # routine `{:worker_output, _, line}` events append to this buffer rather
-  # than re-reading the snapshot, so the page updates with no GenServer hop.
-  defp seed_output_lines(socket) do
-    lines =
-      case socket.assigns[:snapshot] do
-        %{meta: meta} when is_map(meta) -> Map.get(meta, :output_lines, []) || []
-        _ -> []
-      end
-      |> Enum.take(-@output_cap)
-
-    assign(socket, :output_lines, lines)
-  end
+  # The output buffer a snapshot seeds (`land_output/2`); routine
+  # `{:worker_output, _, line}` events append to the buffer rather than
+  # re-reading the snapshot, so the page updates with no GenServer hop.
+  defp snapshot_lines(%{meta: meta}) when is_map(meta), do: Map.get(meta, :output_lines, []) || []
+  defp snapshot_lines(_snapshot), do: []
 
   defp append_output_line(socket, line) do
     lines =
@@ -780,489 +983,527 @@ defmodule ArbiterWeb.WorkerDetailLive do
           </.toast>
         <% end %>
 
-        <%= if @snapshot do %>
-          <%!-- ── Worker session — toolbar + log/rail grid (README §5) ──── --%>
-          <div class="border border-[var(--border-default)] rounded-[var(--radius-panel)] overflow-hidden">
-            <div class="flex flex-wrap items-center gap-[14px] gap-y-2 h-auto px-4 py-2 bg-[var(--surface-chrome)] border-b border-[var(--border-default)]">
-              <span class="font-medium text-[12px] text-[var(--text-title)] font-[family-name:var(--font-mono)]">
-                {@task_id}
-              </span>
-              <Core.copy_id id={@task_id} />
-              <.status_chip status={@snapshot.status} />
-              <span
-                :if={@snapshot.started_at}
-                class="text-[11.5px] font-mono text-[var(--text-secondary)]"
-              >
-                {humanize_seconds(runtime_seconds(@snapshot.started_at, @now))}
-              </span>
-              <span class="text-[11.5px] text-[var(--text-secondary)] font-[family-name:var(--font-mono)] truncate">
-                {toolbar_context(@snapshot, @workspace)}
-              </span>
-              <span class="ml-auto flex items-center gap-[10px]">
-                <span class="text-[11px] text-[var(--text-label)] font-[family-name:var(--font-mono)]">
-                  {toolbar_summary(@snapshot, @usage_events)}
+        <%= cond do %>
+          <% @snapshot_state == :loading -> %>
+            <.panel>
+              <.async_loading id="worker-snapshot-loading" label="Loading worker…" />
+            </.panel>
+          <% match?({:error, _}, @snapshot_state) -> %>
+            <.panel>
+              <.async_error
+                id="worker-snapshot-error"
+                retry_id="worker-snapshot-retry"
+                retry="retry_snapshot"
+                title="Could not read this worker's state"
+                message={elem(@snapshot_state, 1)}
+              />
+            </.panel>
+          <% @snapshot -> %>
+            <%!-- ── Worker session — toolbar + log/rail grid (README §5) ──── --%>
+            <div class="border border-[var(--border-default)] rounded-[var(--radius-panel)] overflow-hidden">
+              <div class="flex flex-wrap items-center gap-[14px] gap-y-2 h-auto px-4 py-2 bg-[var(--surface-chrome)] border-b border-[var(--border-default)]">
+                <span class="font-medium text-[12px] text-[var(--text-title)] font-[family-name:var(--font-mono)]">
+                  {@task_id}
                 </span>
-                <%= cond do %>
-                  <% active_status?(@snapshot.status) -> %>
-                    <Core.button
-                      id="worker-stop-btn"
-                      phx-click="stop"
-                      data-confirm={"Stop #{@worker_label} for #{@task_id}? Any active Claude subprocess will be terminated."}
-                      variant="danger"
-                      size="sm"
-                    >
-                      Stop
-                    </Core.button>
-                  <% retryable?(@task, @snapshot) -> %>
-                    <Core.button
-                      id="worker-toolbar-resume-btn"
-                      phx-click="open_retry"
-                      variant="secondary"
-                      size="sm"
-                    >
-                      Resume
-                    </Core.button>
-                  <% true -> %>
-                <% end %>
-              </span>
-            </div>
-
-            <div class="grid gap-px bg-[var(--border-default)] grid-cols-1 lg:grid-cols-[minmax(0,1fr)_272px]">
-              <div class="bg-[var(--arb-canvas-sunken)]">
-                <%= if @output_lines == [] do %>
-                  <Feedback.empty_state icon="hero-command-line">
-                    No output yet.
-                  </Feedback.empty_state>
-                <% else %>
-                  <.log_stream
-                    id="worker-output"
-                    live={@snapshot.status == :running}
-                    lines={log_stream_lines(@output_lines)}
-                    max_height="28rem"
-                    bare
-                  />
-                <% end %>
+                <Core.copy_id id={@task_id} />
+                <.status_chip status={@snapshot.status} />
+                <span
+                  :if={@snapshot.started_at}
+                  class="text-[11.5px] font-mono text-[var(--text-secondary)]"
+                >
+                  {humanize_seconds(runtime_seconds(@snapshot.started_at, @now))}
+                </span>
+                <span class="text-[11.5px] text-[var(--text-secondary)] font-[family-name:var(--font-mono)] truncate">
+                  {toolbar_context(@snapshot, @workspace)}
+                </span>
+                <span class="ml-auto flex items-center gap-[10px]">
+                  <span class="text-[11px] text-[var(--text-label)] font-[family-name:var(--font-mono)]">
+                    {toolbar_summary(@snapshot, @usage_events)}
+                  </span>
+                  <%= cond do %>
+                    <% active_status?(@snapshot.status) -> %>
+                      <Core.button
+                        id="worker-stop-btn"
+                        phx-click="stop"
+                        data-confirm={"Stop #{@worker_label} for #{@task_id}? Any active Claude subprocess will be terminated."}
+                        variant="danger"
+                        size="sm"
+                      >
+                        Stop
+                      </Core.button>
+                    <% retryable?(@task, @snapshot) -> %>
+                      <Core.button
+                        id="worker-toolbar-resume-btn"
+                        phx-click="open_retry"
+                        variant="secondary"
+                        size="sm"
+                      >
+                        Resume
+                      </Core.button>
+                    <% true -> %>
+                  <% end %>
+                </span>
               </div>
 
-              <div class="bg-[var(--surface-chrome)] px-4 py-[18px] flex flex-col gap-[18px]">
-                <.worker_flow status={flow_status(assigns)} failed={flow_failed?(assigns)} compact />
+              <div class="grid gap-px bg-[var(--border-default)] grid-cols-1 lg:grid-cols-[minmax(0,1fr)_272px]">
+                <div class="bg-[var(--arb-canvas-sunken)]">
+                  <%= if @output_lines == [] do %>
+                    <Feedback.empty_state icon="hero-command-line">
+                      No output yet.
+                    </Feedback.empty_state>
+                  <% else %>
+                    <.log_stream
+                      id="worker-output"
+                      live={@snapshot.status == :running}
+                      lines={log_stream_lines(@output_lines)}
+                      max_height="28rem"
+                      bare
+                    />
+                  <% end %>
+                </div>
 
-                <.data_list class="text-xs">
-                  <:item label="task">
-                    <code class="font-mono text-xs">{@task_id}</code>
-                    <Core.copy_id id={@task_id} dom_id={"copy-id-worker-detail-#{@task_id}"} />
-                  </:item>
-                  <:item label="repo">
-                    <code class="font-mono text-xs">{dash_if_nil(@snapshot.repo)}</code>
-                  </:item>
-                  <:item label="branch">
-                    <code class="font-mono text-xs">{dash_if_nil(snapshot_branch(@snapshot))}</code>
-                  </:item>
-                  <:item label="model">
-                    <code class="font-mono text-xs">{model_label(@snapshot)}</code>
-                  </:item>
-                  <:item label="tokens">
-                    <code class="font-mono text-xs">
-                      {dash_if_nil(
-                        total_tokens(@usage_events) && humanize_tokens(total_tokens(@usage_events))
-                      )}
-                    </code>
-                  </:item>
-                  <:item label="spend">
-                    <code class="font-mono text-xs">
-                      {dash_if_nil(total_cost(@usage_events) && format_usd(total_cost(@usage_events)))}
-                    </code>
-                  </:item>
-                </.data_list>
+                <div class="bg-[var(--surface-chrome)] px-4 py-[18px] flex flex-col gap-[18px]">
+                  <.worker_flow status={flow_status(assigns)} failed={flow_failed?(assigns)} compact />
 
-                <%!-- `@quotas` is loaded off the mount by `LiveHooks`
+                  <.data_list class="text-xs">
+                    <:item label="task">
+                      <code class="font-mono text-xs">{@task_id}</code>
+                      <Core.copy_id id={@task_id} dom_id={"copy-id-worker-detail-#{@task_id}"} />
+                    </:item>
+                    <:item label="repo">
+                      <code class="font-mono text-xs">{dash_if_nil(@snapshot.repo)}</code>
+                    </:item>
+                    <:item label="branch">
+                      <code class="font-mono text-xs">{dash_if_nil(snapshot_branch(@snapshot))}</code>
+                    </:item>
+                    <:item label="model">
+                      <code class="font-mono text-xs">{model_label(@snapshot)}</code>
+                    </:item>
+                    <:item label="tokens">
+                      <code class="font-mono text-xs">
+                        {dash_if_nil(
+                          total_tokens(@usage_events) && humanize_tokens(total_tokens(@usage_events))
+                        )}
+                      </code>
+                    </:item>
+                    <:item label="spend">
+                      <code class="font-mono text-xs">
+                        {dash_if_nil(
+                          total_cost(@usage_events) && format_usd(total_cost(@usage_events))
+                        )}
+                      </code>
+                    </:item>
+                  </.data_list>
+
+                  <%!-- `@quotas` is loaded off the mount by `LiveHooks`
                       (bd-adewb4); the top bar carries its loading and error
                       states, so this block just waits for the list. --%>
-                <.async_result :let={quotas} assign={@quotas}>
-                  <div :if={quotas != []} id="worker-quota" class="flex flex-col gap-2">
-                    <span class="font-medium text-[10.5px] tracking-[var(--tracking-eyebrow)] uppercase text-[var(--text-label)] font-[family-name:var(--font-mono)]">
-                      Quota
-                    </span>
-                    <.quota_bar
-                      :for={{w, i} <- Enum.with_index(QuotaHelpers.quota_windows(hd(quotas)))}
-                      provider={hd(quotas).provider}
-                      show_label={i == 0}
-                      window={w.window}
-                      label={w.label}
-                      utilization={w.utilization}
-                      reset_at={w.reset_at}
-                      overage_status={hd(quotas).overage_status}
-                      representative_claim={hd(quotas).representative_claim}
-                      stale_message={hd(quotas).message}
-                      gate_policy={Map.get(hd(quotas), :gate_policy)}
-                      width={140}
-                    />
-                  </div>
-                </.async_result>
+                  <.async_result :let={quotas} assign={@quotas}>
+                    <div :if={quotas != []} id="worker-quota" class="flex flex-col gap-2">
+                      <span class="font-medium text-[10.5px] tracking-[var(--tracking-eyebrow)] uppercase text-[var(--text-label)] font-[family-name:var(--font-mono)]">
+                        Quota
+                      </span>
+                      <.quota_bar
+                        :for={{w, i} <- Enum.with_index(QuotaHelpers.quota_windows(hd(quotas)))}
+                        provider={hd(quotas).provider}
+                        show_label={i == 0}
+                        window={w.window}
+                        label={w.label}
+                        utilization={w.utilization}
+                        reset_at={w.reset_at}
+                        overage_status={hd(quotas).overage_status}
+                        representative_claim={hd(quotas).representative_claim}
+                        stale_message={hd(quotas).message}
+                        gate_policy={Map.get(hd(quotas), :gate_policy)}
+                        width={140}
+                      />
+                    </div>
+                  </.async_result>
 
-                <div class="flex flex-col gap-[7px]">
-                  <span class="font-medium text-[10.5px] tracking-[var(--tracking-eyebrow)] uppercase text-[var(--text-label)] font-[family-name:var(--font-mono)]">
-                    Actions
-                  </span>
-                  <Core.button
-                    :if={watchdog_missing?(@task_id, @snapshot)}
-                    id="worker-restart-watchdog-btn"
-                    phx-click="restart_watchdog"
-                    data-confirm={"Start a fresh merge watchdog for #{@task_id}, attached to its open #{@pr_label}? Nothing is polling it right now."}
-                    size="sm"
-                    disabled={@restarting_watchdog}
-                  >
-                    <:icon><Core.icon name="hero-bolt" size={12} /></:icon>
-                    {if @restarting_watchdog, do: "Restarting watchdog…", else: "Restart watchdog"}
-                  </Core.button>
-                  <Core.button
-                    :if={retry_auto_resolve_available?(@task_id, @snapshot)}
-                    id="worker-retry-auto-resolve-btn"
-                    phx-click="retry_auto_resolve"
-                    data-confirm={"Re-arm one more auto-resolve attempt for #{@task_id}? This dispatches a fresh fix-pass worker."}
-                    size="sm"
-                  >
-                    <:icon><Core.icon name="hero-arrow-path" size={12} /></:icon>
-                    Retry auto-resolve
-                  </Core.button>
-                  <Core.button
-                    id="worker-resume-note-btn"
-                    phx-click="open_retry"
-                    size="sm"
-                    disabled={!retryable?(@task, @snapshot)}
-                  >
-                    <:icon><Core.icon name="hero-arrow-path" size={12} /></:icon>
-                    Resume with note
-                  </Core.button>
-                  <%= if @latest_run do %>
+                  <div class="flex flex-col gap-[7px]">
+                    <span class="font-medium text-[10.5px] tracking-[var(--tracking-eyebrow)] uppercase text-[var(--text-label)] font-[family-name:var(--font-mono)]">
+                      Actions
+                    </span>
                     <Core.button
+                      :if={watchdog_missing?(@task_id, @snapshot)}
+                      id="worker-restart-watchdog-btn"
+                      phx-click="restart_watchdog"
+                      data-confirm={"Start a fresh merge watchdog for #{@task_id}, attached to its open #{@pr_label}? Nothing is polling it right now."}
                       size="sm"
-                      variant="ghost"
-                      phx-click={JS.navigate(~p"/workers/history/#{@latest_run.id}")}
+                      disabled={@restarting_watchdog}
                     >
-                      <:icon><Core.icon name="hero-clipboard-document-list" size={12} /></:icon>
-                      Full transcript
+                      <:icon><Core.icon name="hero-bolt" size={12} /></:icon>
+                      {if @restarting_watchdog, do: "Restarting watchdog…", else: "Restart watchdog"}
                     </Core.button>
-                  <% else %>
-                    <Core.button size="sm" variant="ghost" disabled>
-                      <:icon><Core.icon name="hero-clipboard-document-list" size={12} /></:icon>
-                      Full transcript
+                    <Core.button
+                      :if={retry_auto_resolve_available?(@task_id, @snapshot)}
+                      id="worker-retry-auto-resolve-btn"
+                      phx-click="retry_auto_resolve"
+                      data-confirm={"Re-arm one more auto-resolve attempt for #{@task_id}? This dispatches a fresh fix-pass worker."}
+                      size="sm"
+                    >
+                      <:icon><Core.icon name="hero-arrow-path" size={12} /></:icon>
+                      Retry auto-resolve
                     </Core.button>
-                  <% end %>
+                    <Core.button
+                      id="worker-resume-note-btn"
+                      phx-click="open_retry"
+                      size="sm"
+                      disabled={!retryable?(@task, @snapshot)}
+                    >
+                      <:icon><Core.icon name="hero-arrow-path" size={12} /></:icon>
+                      Resume with note
+                    </Core.button>
+                    <%= if @latest_run do %>
+                      <Core.button
+                        size="sm"
+                        variant="ghost"
+                        phx-click={JS.navigate(~p"/workers/history/#{@latest_run.id}")}
+                      >
+                        <:icon><Core.icon name="hero-clipboard-document-list" size={12} /></:icon>
+                        Full transcript
+                      </Core.button>
+                    <% else %>
+                      <Core.button size="sm" variant="ghost" disabled>
+                        <:icon><Core.icon name="hero-clipboard-document-list" size={12} /></:icon>
+                        Full transcript
+                      </Core.button>
+                    <% end %>
+                  </div>
                 </div>
               </div>
             </div>
-          </div>
 
-          <%!-- ── Awaiting review panel ──────────────────────────────── --%>
-          <.panel :if={@snapshot.status == :awaiting} title="Awaiting your review">
-            <:actions>
-              <.status_chip status={:awaiting} />
-            </:actions>
-            <p class="text-sm text-[var(--text-secondary)]">
-              This {@worker_label} has paused and is waiting for a human decision before it can proceed.
-            </p>
-            <%= if ref = mr_ref(@snapshot) do %>
-              <a
-                href={ref}
-                target="_blank"
-                rel="noopener"
-                class="inline-flex items-center gap-[7px] mt-2 rounded-[var(--radius-field)] border border-solid font-medium h-[var(--control-sm)] px-[10px] text-[11.5px] bg-[var(--arb-attention)] border-[var(--arb-attention)] text-[var(--arb-attention-ink)] hover:brightness-[1.06] transition-[background,border-color] duration-[var(--dur-hover)] ease-[var(--arb-ease-out)]"
-              >
-                <Core.icon name="hero-arrow-top-right-on-square" size={14} /> Open {@pr_label}
-                <code class="font-mono text-xs opacity-80">{ref}</code>
-              </a>
-            <% else %>
-              <p class="text-sm text-[var(--text-label)] italic flex items-center gap-1.5 mt-2">
-                <Core.icon name="hero-link-slash" size={14} /> No {@pr_label} ref recorded yet.
+            <%!-- ── Awaiting review panel ──────────────────────────────── --%>
+            <.panel :if={@snapshot.status == :awaiting} title="Awaiting your review">
+              <:actions>
+                <.status_chip status={:awaiting} />
+              </:actions>
+              <p class="text-sm text-[var(--text-secondary)]">
+                This {@worker_label} has paused and is waiting for a human decision before it can proceed.
               </p>
-            <% end %>
-          </.panel>
-
-          <%!-- ── Details ─────────────────────────────────────────────── --%>
-          <.panel title="Details">
-            <div class="flex flex-wrap justify-between items-start gap-4">
-              <.data_list class="text-sm">
-                <:item :if={claude_session?(@snapshot)} label="Activity">
-                  {live_activity(@snapshot)}
-                </:item>
-                <:item :if={!claude_session?(@snapshot)} label="Current step">
-                  <code class="font-mono text-xs">{@snapshot.current_step}</code>
-                </:item>
-                <:item label={String.capitalize(@workspace_label)}>
-                  <%= if @workspace do %>
-                    {@workspace.name}
-                    <span class="text-[var(--text-label)]">
-                      (<code class="font-mono text-xs">{@workspace.prefix}</code>)
-                    </span>
-                  <% else %>
-                    <span class="text-[var(--text-label)]">(none)</span>
-                  <% end %>
-                </:item>
-                <:item label="Provider">
-                  <span class="inline-flex items-center gap-1.5">
-                    <.provider_icon provider={Worker.provider(@snapshot.meta)} class="size-4" />
-                    <code class="font-mono text-xs">
-                      {provider_display_name(Worker.provider(@snapshot.meta))}
-                    </code>
-                  </span>
-                </:item>
-                <:item :if={thinking = execution_thinking(@snapshot)} label="Reasoning effort">
-                  <code class="font-mono text-xs">{thinking}</code>
-                </:item>
-                <:item :if={tier = execution_model_tier(@snapshot)} label="Model tier">
-                  <code class="font-mono text-xs">{tier}</code>
-                </:item>
-                <:item label="Started">
-                  <span class="font-mono text-xs tabular-nums">
-                    {format_ts_long(@snapshot.started_at)}
-                  </span>
-                </:item>
-                <:item label="Elapsed">
-                  <span class="font-mono text-xs tabular-nums">
-                    {humanize_seconds(runtime_seconds(@snapshot.started_at, @now))}
-                  </span>
-                </:item>
-                <:item
-                  :if={exit_status = Map.get(@snapshot.meta || %{}, :exit_status)}
-                  label="Exit status"
+              <%= if ref = mr_ref(@snapshot) do %>
+                <a
+                  href={ref}
+                  target="_blank"
+                  rel="noopener"
+                  class="inline-flex items-center gap-[7px] mt-2 rounded-[var(--radius-field)] border border-solid font-medium h-[var(--control-sm)] px-[10px] text-[11.5px] bg-[var(--arb-attention)] border-[var(--arb-attention)] text-[var(--arb-attention-ink)] hover:brightness-[1.06] transition-[background,border-color] duration-[var(--dur-hover)] ease-[var(--arb-ease-out)]"
                 >
-                  <span class="font-mono text-xs">{exit_status}</span>
+                  <Core.icon name="hero-arrow-top-right-on-square" size={14} /> Open {@pr_label}
+                  <code class="font-mono text-xs opacity-80">{ref}</code>
+                </a>
+              <% else %>
+                <p class="text-sm text-[var(--text-label)] italic flex items-center gap-1.5 mt-2">
+                  <Core.icon name="hero-link-slash" size={14} /> No {@pr_label} ref recorded yet.
+                </p>
+              <% end %>
+            </.panel>
+
+            <%!-- ── Details ─────────────────────────────────────────────── --%>
+            <.panel title="Details">
+              <div class="flex flex-wrap justify-between items-start gap-4">
+                <.data_list class="text-sm">
+                  <:item :if={claude_session?(@snapshot)} label="Activity">
+                    {live_activity(@snapshot)}
+                  </:item>
+                  <:item :if={!claude_session?(@snapshot)} label="Current step">
+                    <code class="font-mono text-xs">{@snapshot.current_step}</code>
+                  </:item>
+                  <:item label={String.capitalize(@workspace_label)}>
+                    <%= if @workspace do %>
+                      {@workspace.name}
+                      <span class="text-[var(--text-label)]">
+                        (<code class="font-mono text-xs">{@workspace.prefix}</code>)
+                      </span>
+                    <% else %>
+                      <span class="text-[var(--text-label)]">(none)</span>
+                    <% end %>
+                  </:item>
+                  <:item label="Provider">
+                    <span class="inline-flex items-center gap-1.5">
+                      <.provider_icon provider={Worker.provider(@snapshot.meta)} class="size-4" />
+                      <code class="font-mono text-xs">
+                        {provider_display_name(Worker.provider(@snapshot.meta))}
+                      </code>
+                    </span>
+                  </:item>
+                  <:item :if={thinking = execution_thinking(@snapshot)} label="Reasoning effort">
+                    <code class="font-mono text-xs">{thinking}</code>
+                  </:item>
+                  <:item :if={tier = execution_model_tier(@snapshot)} label="Model tier">
+                    <code class="font-mono text-xs">{tier}</code>
+                  </:item>
+                  <:item label="Started">
+                    <span class="font-mono text-xs tabular-nums">
+                      {format_ts_long(@snapshot.started_at)}
+                    </span>
+                  </:item>
+                  <:item label="Elapsed">
+                    <span class="font-mono text-xs tabular-nums">
+                      {humanize_seconds(runtime_seconds(@snapshot.started_at, @now))}
+                    </span>
+                  </:item>
+                  <:item
+                    :if={exit_status = Map.get(@snapshot.meta || %{}, :exit_status)}
+                    label="Exit status"
+                  >
+                    <span class="font-mono text-xs">{exit_status}</span>
+                  </:item>
+                  <:item :if={result = Map.get(@snapshot.meta || %{}, :result)} label="Result">
+                    <span class="font-mono text-xs">{inspect(result)}</span>
+                  </:item>
+                  <:item
+                    :if={reason = Map.get(@snapshot.meta || %{}, :failure_reason)}
+                    label="Failure"
+                  >
+                    <span class="text-[var(--arb-fail-text)] font-mono text-xs">
+                      {inspect(reason)}
+                    </span>
+                  </:item>
+                </.data_list>
+
+                <div class="flex flex-col gap-2 shrink-0">
+                  <Core.button
+                    variant="ghost"
+                    size="sm"
+                    phx-click={JS.navigate(~p"/tasks/#{@task_id}")}
+                  >
+                    <:icon><Core.icon name="hero-arrow-top-right-on-square" size={14} /></:icon>
+                    {String.capitalize(@issue_label)} detail
+                  </Core.button>
+                  <Core.button
+                    :if={@latest_run}
+                    variant="ghost"
+                    size="sm"
+                    phx-click={JS.navigate(~p"/workers/history/#{@latest_run.id}")}
+                  >
+                    <:icon><Core.icon name="hero-archive-box" size={14} /></:icon>
+                    Run history
+                  </Core.button>
+                </div>
+              </div>
+            </.panel>
+
+            <%!-- ── Assigned task summary ─────────────────────────────── --%>
+            <.panel :if={@task} title={"#{String.capitalize(@issue_label)}: #{@task.title}"}>
+              <.data_list class="text-sm">
+                <:item :if={@task.target_branch} label="Target branch">
+                  <code class="font-mono text-xs">{@task.target_branch}</code>
                 </:item>
-                <:item :if={result = Map.get(@snapshot.meta || %{}, :result)} label="Result">
-                  <span class="font-mono text-xs">{inspect(result)}</span>
+                <:item :if={@task.difficulty} label="Difficulty">
+                  <.difficulty_meter difficulty={@task.difficulty} />
                 </:item>
-                <:item :if={reason = Map.get(@snapshot.meta || %{}, :failure_reason)} label="Failure">
-                  <span class="text-[var(--arb-fail-text)] font-mono text-xs">{inspect(reason)}</span>
+                <:item :if={@task.priority} label="Priority">
+                  <.priority_tag priority={@task.priority} />
+                </:item>
+                <:item :if={@task.issue_type} label="Type">
+                  <.type_tag type={@task.issue_type} />
+                </:item>
+                <:item :if={tracker_display(@task)} label="Tracker">
+                  <span class="font-mono text-xs">{tracker_display(@task)}</span>
                 </:item>
               </.data_list>
+            </.panel>
 
-              <div class="flex flex-col gap-2 shrink-0">
-                <Core.button
-                  variant="ghost"
-                  size="sm"
-                  phx-click={JS.navigate(~p"/tasks/#{@task_id}")}
-                >
-                  <:icon><Core.icon name="hero-arrow-top-right-on-square" size={14} /></:icon>
-                  {String.capitalize(@issue_label)} detail
-                </Core.button>
-                <Core.button
-                  :if={@latest_run}
-                  variant="ghost"
-                  size="sm"
-                  phx-click={JS.navigate(~p"/workers/history/#{@latest_run.id}")}
-                >
-                  <:icon><Core.icon name="hero-archive-box" size={14} /></:icon>
-                  Run history
-                </Core.button>
-              </div>
-            </div>
-          </.panel>
-
-          <%!-- ── Assigned task summary ─────────────────────────────── --%>
-          <.panel :if={@task} title={"#{String.capitalize(@issue_label)}: #{@task.title}"}>
-            <.data_list class="text-sm">
-              <:item :if={@task.target_branch} label="Target branch">
-                <code class="font-mono text-xs">{@task.target_branch}</code>
-              </:item>
-              <:item :if={@task.difficulty} label="Difficulty">
-                <.difficulty_meter difficulty={@task.difficulty} />
-              </:item>
-              <:item :if={@task.priority} label="Priority">
-                <.priority_tag priority={@task.priority} />
-              </:item>
-              <:item :if={@task.issue_type} label="Type">
-                <.type_tag type={@task.issue_type} />
-              </:item>
-              <:item :if={tracker_display(@task)} label="Tracker">
-                <span class="font-mono text-xs">{tracker_display(@task)}</span>
-              </:item>
-            </.data_list>
-          </.panel>
-
-          <%!-- ── Worker metadata ───────────────────────────────────── --%>
-          <.panel :if={meta_has_details?(@snapshot.meta)} title="Metadata">
-            <.data_list class="text-sm">
-              <:item :if={role = Map.get(@snapshot.meta || %{}, :role)} label="Role">
-                {role}
-              </:item>
-              <:item :if={Map.get(@snapshot.meta || %{}, :review_required)} label="Review gate">
-                <.status_chip status="required" />
-              </:item>
-              <:item :if={path = Map.get(@snapshot.meta || %{}, :worktree_path)} label="Worktree">
-                <span class="font-mono text-xs break-all">{path}</span>
-              </:item>
-              <:item :if={branch = Map.get(@snapshot.meta || %{}, :branch)} label="Branch">
-                <code class="font-mono text-xs">{branch}</code>
-              </:item>
-              <:item :if={@snapshot.step_started_at} label="Step started">
-                <span class="font-mono text-xs tabular-nums">
-                  {format_ts_long(@snapshot.step_started_at)}
-                </span>
-              </:item>
-              <:item :if={reason = Map.get(@snapshot.meta || %{}, :stop_reason)} label="Stop reason">
-                <span class="text-[var(--arb-fail-text)] text-xs font-mono">
-                  {Map.get(reason, :summary) || inspect(reason)}
-                </span>
-              </:item>
-            </.data_list>
-          </.panel>
-
-          <%!-- ── Merge request ──────────────────────────────────────── --%>
-          <.panel :if={@snapshot.mr_ref} title="Merge request">
-            <%!-- bd-8jixav: a Watchdog is a :temporary process — when it dies --%>
-            <%!-- it is gone silently, and the fields below go stale forever --%>
-            <%!-- while still looking live. Say so before showing them. --%>
-            <div
-              :if={watchdog_missing?(@task_id, @snapshot)}
-              id="worker-no-watchdog-warning"
-              class="flex items-start gap-2 mb-3 rounded-[var(--radius-field)] border border-solid border-[var(--arb-attention)] bg-[color-mix(in_oklab,var(--arb-attention)_12%,transparent)] px-[10px] py-2"
-            >
-              <Core.icon
-                name="hero-exclamation-triangle"
-                size={14}
-                class="mt-[2px] text-[var(--arb-attention)]"
-              />
-              <div class="text-[12.5px] leading-[1.5]">
-                <span class="font-medium text-[var(--text-title)]">
-                  No watchdog is running for this task.
-                </span>
-                <span class="text-[var(--text-secondary)]">
-                  The {@pr_label} is still open but nothing is polling it, so it will never
-                  merge on its own. The values below are frozen at the last poll. Use
-                  <span class="font-medium">Restart watchdog</span>
-                  to start a replacement on the same {@pr_label}.
-                </span>
-              </div>
-            </div>
-            <.data_list class="text-sm">
-              <:item label="MR">
-                <%= if @snapshot.merger_url do %>
-                  <a
-                    href={@snapshot.merger_url}
-                    target="_blank"
-                    rel="noopener"
-                    class="hover:underline"
-                  >
-                    {@snapshot.mr_ref} ↗
-                  </a>
-                <% else %>
-                  <code class="font-mono text-xs">{@snapshot.mr_ref}</code>
-                <% end %>
-              </:item>
-              <:item label="Approval">
-                <%= if merger_status = Map.get(@snapshot.meta || %{}, :last_merger_status) do %>
-                  <span class={["badge", approval_class(merger_status)]}>
-                    {approval_label(merger_status)}
+            <%!-- ── Worker metadata ───────────────────────────────────── --%>
+            <.panel :if={meta_has_details?(@snapshot.meta)} title="Metadata">
+              <.data_list class="text-sm">
+                <:item :if={role = Map.get(@snapshot.meta || %{}, :role)} label="Role">
+                  {role}
+                </:item>
+                <:item :if={Map.get(@snapshot.meta || %{}, :review_required)} label="Review gate">
+                  <.status_chip status="required" />
+                </:item>
+                <:item :if={path = Map.get(@snapshot.meta || %{}, :worktree_path)} label="Worktree">
+                  <span class="font-mono text-xs break-all">{path}</span>
+                </:item>
+                <:item :if={branch = Map.get(@snapshot.meta || %{}, :branch)} label="Branch">
+                  <code class="font-mono text-xs">{branch}</code>
+                </:item>
+                <:item :if={@snapshot.step_started_at} label="Step started">
+                  <span class="font-mono text-xs tabular-nums">
+                    {format_ts_long(@snapshot.step_started_at)}
                   </span>
-                <% else %>
-                  <span class="text-[var(--text-label)]">awaiting first poll…</span>
-                <% end %>
-              </:item>
-              <:item label="Poll interval">{div(Watchdog.default_interval_ms(), 1000)}s</:item>
-              <:item label="Last checked">
-                <%= case Map.get(@snapshot.meta || %{}, :last_checked_at) do %>
-                  <% %DateTime{} = ts -> %>
-                    <span class="font-mono text-xs tabular-nums">
-                      {Calendar.strftime(ts, "%Y-%m-%d %H:%M:%S UTC")}
+                </:item>
+                <:item :if={reason = Map.get(@snapshot.meta || %{}, :stop_reason)} label="Stop reason">
+                  <span class="text-[var(--arb-fail-text)] text-xs font-mono">
+                    {Map.get(reason, :summary) || inspect(reason)}
+                  </span>
+                </:item>
+              </.data_list>
+            </.panel>
+
+            <%!-- ── Merge request ──────────────────────────────────────── --%>
+            <.panel :if={@snapshot.mr_ref} title="Merge request">
+              <%!-- bd-8jixav: a Watchdog is a :temporary process — when it dies --%>
+              <%!-- it is gone silently, and the fields below go stale forever --%>
+              <%!-- while still looking live. Say so before showing them. --%>
+              <div
+                :if={watchdog_missing?(@task_id, @snapshot)}
+                id="worker-no-watchdog-warning"
+                class="flex items-start gap-2 mb-3 rounded-[var(--radius-field)] border border-solid border-[var(--arb-attention)] bg-[color-mix(in_oklab,var(--arb-attention)_12%,transparent)] px-[10px] py-2"
+              >
+                <Core.icon
+                  name="hero-exclamation-triangle"
+                  size={14}
+                  class="mt-[2px] text-[var(--arb-attention)]"
+                />
+                <div class="text-[12.5px] leading-[1.5]">
+                  <span class="font-medium text-[var(--text-title)]">
+                    No watchdog is running for this task.
+                  </span>
+                  <span class="text-[var(--text-secondary)]">
+                    The {@pr_label} is still open but nothing is polling it, so it will never
+                    merge on its own. The values below are frozen at the last poll. Use
+                    <span class="font-medium">Restart watchdog</span>
+                    to start a replacement on the same {@pr_label}.
+                  </span>
+                </div>
+              </div>
+              <.data_list class="text-sm">
+                <:item label="MR">
+                  <%= if @snapshot.merger_url do %>
+                    <a
+                      href={@snapshot.merger_url}
+                      target="_blank"
+                      rel="noopener"
+                      class="hover:underline"
+                    >
+                      {@snapshot.mr_ref} ↗
+                    </a>
+                  <% else %>
+                    <code class="font-mono text-xs">{@snapshot.mr_ref}</code>
+                  <% end %>
+                </:item>
+                <:item label="Approval">
+                  <%= if merger_status = Map.get(@snapshot.meta || %{}, :last_merger_status) do %>
+                    <span class={["badge", approval_class(merger_status)]}>
+                      {approval_label(merger_status)}
                     </span>
-                  <% _ -> %>
-                    <span class="text-[var(--text-label)]">never</span>
-                <% end %>
-              </:item>
-            </.data_list>
-          </.panel>
+                  <% else %>
+                    <span class="text-[var(--text-label)]">awaiting first poll…</span>
+                  <% end %>
+                </:item>
+                <:item label="Poll interval">{div(Watchdog.default_interval_ms(), 1000)}s</:item>
+                <:item label="Last checked">
+                  <%= case Map.get(@snapshot.meta || %{}, :last_checked_at) do %>
+                    <% %DateTime{} = ts -> %>
+                      <span class="font-mono text-xs tabular-nums">
+                        {Calendar.strftime(ts, "%Y-%m-%d %H:%M:%S UTC")}
+                      </span>
+                    <% _ -> %>
+                      <span class="text-[var(--text-label)]">never</span>
+                  <% end %>
+                </:item>
+              </.data_list>
+            </.panel>
 
-          <%!-- ── Live activity (claude-driven) ──────────────────────── --%>
-          <%!-- A claude-driven worker does the real work in a streaming --%>
-          <%!-- subprocess; its Driver never ticks the workflow Machine, so --%>
-          <%!-- the fixed load_context→submit steps would sit frozen. Show --%>
-          <%!-- the live activity derived from the stream instead (bd-c919xj). --%>
-          <.panel :if={claude_session?(@snapshot)} title="Live activity">
-            <div class="flex items-center gap-2">
-              <span class="text-[13px] font-medium text-[var(--text-title)]">
-                {live_activity(@snapshot)}
-              </span>
-            </div>
-            <p class="text-xs text-[var(--text-label)] mt-1">
-              Driven by a live Claude session — progress streams in the output above rather than
-              advancing fixed workflow steps.
-            </p>
-          </.panel>
+            <%!-- ── Live activity (claude-driven) ──────────────────────── --%>
+            <%!-- A claude-driven worker does the real work in a streaming --%>
+            <%!-- subprocess; its Driver never ticks the workflow Machine, so --%>
+            <%!-- the fixed load_context→submit steps would sit frozen. Show --%>
+            <%!-- the live activity derived from the stream instead (bd-c919xj). --%>
+            <.panel :if={claude_session?(@snapshot)} title="Live activity">
+              <div class="flex items-center gap-2">
+                <span class="text-[13px] font-medium text-[var(--text-title)]">
+                  {live_activity(@snapshot)}
+                </span>
+              </div>
+              <p class="text-xs text-[var(--text-label)] mt-1">
+                Driven by a live Claude session — progress streams in the output above rather than
+                advancing fixed workflow steps.
+              </p>
+            </.panel>
 
-          <.panel :if={@machine_state && not claude_session?(@snapshot)} title="Workflow">
-            <:actions>
-              <code class="text-xs font-mono text-[var(--text-label)]">
-                {short_module(@machine_state.workflow_module)}
-              </code>
-            </:actions>
-            <div class="flex flex-wrap gap-1.5">
-              <span
-                :for={step <- @workflow_steps}
-                class={["badge", step_class(step, @machine_state)]}
+            <.panel :if={@machine_state && not claude_session?(@snapshot)} title="Workflow">
+              <:actions>
+                <code class="text-xs font-mono text-[var(--text-label)]">
+                  {short_module(@machine_state.workflow_module)}
+                </code>
+              </:actions>
+              <div class="flex flex-wrap gap-1.5">
+                <span
+                  :for={step <- @workflow_steps}
+                  class={["badge", step_class(step, @machine_state)]}
+                >
+                  {step}
+                </span>
+              </div>
+              <p class="text-xs text-[var(--text-label)] mt-2">
+                Machine status: <strong>{@machine_state.status}</strong>
+                · current step: <code class="font-mono">{@machine_state.current_step}</code>
+              </p>
+            </.panel>
+          <% true -> %>
+            <.panel>
+              <Feedback.empty_state
+                icon="hero-signal-slash"
+                detail="It may have stopped, or the Phoenix node was restarted since it ran."
               >
-                {step}
-              </span>
-            </div>
-            <p class="text-xs text-[var(--text-label)] mt-2">
-              Machine status: <strong>{@machine_state.status}</strong>
-              · current step: <code class="font-mono">{@machine_state.current_step}</code>
-            </p>
-          </.panel>
-        <% else %>
-          <.panel>
-            <Feedback.empty_state
-              icon="hero-signal-slash"
-              detail="It may have stopped, or the Phoenix node was restarted since it ran."
-            >
-              No {@worker_label} registered for {@issue_label} <code class="font-mono">{@task_id}</code>.
-            </Feedback.empty_state>
-            <div :if={retryable?(@task, @snapshot)} class="flex justify-center mt-3">
-              <Core.button
-                id="worker-fallback-resume-btn"
-                phx-click="open_retry"
-                variant="secondary"
-                size="sm"
-              >
-                <:icon><Core.icon name="hero-arrow-path" size={14} /></:icon>
-                Resume
-              </Core.button>
-            </div>
-          </.panel>
+                No {@worker_label} registered for {@issue_label} <code class="font-mono">{@task_id}</code>.
+              </Feedback.empty_state>
+              <div :if={retryable?(@task, @snapshot)} class="flex justify-center mt-3">
+                <Core.button
+                  id="worker-fallback-resume-btn"
+                  phx-click="open_retry"
+                  variant="secondary"
+                  size="sm"
+                >
+                  <:icon><Core.icon name="hero-arrow-path" size={14} /></:icon>
+                  Resume
+                </Core.button>
+              </div>
+            </.panel>
         <% end %>
 
         <%!-- ── Mailbox + compose ──────────────────────────────────── --%>
         <div id="mailbox">
-          <.panel title="Mailbox" meta={"#{length(@mailbox)} unread"}>
-            <%= if @mailbox == [] do %>
-              <Feedback.empty_state icon="hero-inbox">
-                No unread mail.
-              </Feedback.empty_state>
-            <% else %>
-              <ul class="flex flex-col gap-2" id="mailbox-list">
-                <li
-                  :for={m <- @mailbox}
-                  class="rounded-[var(--radius-field)] bg-[var(--surface-card)] border border-[var(--border-default)] p-3"
-                >
-                  <div class="flex items-baseline justify-between gap-2">
-                    <div class="flex items-baseline gap-2 flex-wrap min-w-0">
-                      <span class={["badge shrink-0", kind_badge_class(m.kind)]}>
-                        {m.kind}
-                      </span>
-                      <span class="text-xs text-[var(--text-label)]">
-                        from <code class="font-mono">{m.from_ref || "?"}</code>
-                      </span>
-                      <span :if={m.subject} class="text-sm font-medium truncate">{m.subject}</span>
+          <.panel
+            title="Mailbox"
+            meta={if(@details_state == :loaded, do: "#{length(@mailbox)} unread")}
+          >
+            <%= cond do %>
+              <% @details_state == :loading -> %>
+                <.async_loading id="worker-details-loading" label="Loading task details…" />
+              <% match?({:error, _}, @details_state) -> %>
+                <.async_error
+                  id="worker-details-error"
+                  retry_id="worker-details-retry"
+                  retry="retry_details"
+                  title="Could not load this task's details"
+                  message={elem(@details_state, 1)}
+                />
+              <% @mailbox == [] -> %>
+                <div id="mailbox-empty">
+                  <Feedback.empty_state icon="hero-inbox">
+                    No unread mail.
+                  </Feedback.empty_state>
+                </div>
+              <% true -> %>
+                <ul class="flex flex-col gap-2" id="mailbox-list">
+                  <li
+                    :for={m <- @mailbox}
+                    class="rounded-[var(--radius-field)] bg-[var(--surface-card)] border border-[var(--border-default)] p-3"
+                  >
+                    <div class="flex items-baseline justify-between gap-2">
+                      <div class="flex items-baseline gap-2 flex-wrap min-w-0">
+                        <span class={["badge shrink-0", kind_badge_class(m.kind)]}>
+                          {m.kind}
+                        </span>
+                        <span class="text-xs text-[var(--text-label)]">
+                          from <code class="font-mono">{m.from_ref || "?"}</code>
+                        </span>
+                        <span :if={m.subject} class="text-sm font-medium truncate">{m.subject}</span>
+                      </div>
+                      <Core.button phx-click="mark_read" phx-value-id={m.id} variant="ghost" size="sm">
+                        Mark read
+                      </Core.button>
                     </div>
-                    <Core.button phx-click="mark_read" phx-value-id={m.id} variant="ghost" size="sm">
-                      Mark read
-                    </Core.button>
-                  </div>
-                  <p class="text-sm mt-1.5 whitespace-pre-wrap text-[var(--text-secondary)]">
-                    {m.body}
-                  </p>
-                </li>
-              </ul>
+                    <p class="text-sm mt-1.5 whitespace-pre-wrap text-[var(--text-secondary)]">
+                      {m.body}
+                    </p>
+                  </li>
+                </ul>
             <% end %>
 
             <form
@@ -1376,6 +1617,60 @@ defmodule ArbiterWeb.WorkerDetailLive do
   end
 
   def approval_class(_), do: "badge-warning"
+
+  # bd-c5m9b5: the in-flight and failed states of the two async loads.
+  attr :id, :string, required: true
+  attr :label, :string, required: true
+
+  defp async_loading(assigns) do
+    ~H"""
+    <div
+      id={@id}
+      role="status"
+      class="flex items-center gap-2 py-3 text-[12.5px] text-[var(--text-secondary)]"
+    >
+      <Core.icon name="hero-arrow-path-micro" class="size-4 shrink-0 animate-spin" />
+      {@label}
+    </div>
+    """
+  end
+
+  attr :id, :string, required: true
+  attr :retry_id, :string, required: true
+  attr :retry, :string, required: true, doc: "the phx-click event that restarts the load"
+  attr :title, :string, required: true
+  attr :message, :string, required: true
+
+  defp async_error(assigns) do
+    ~H"""
+    <div
+      id={@id}
+      role="alert"
+      class="flex items-start gap-3 rounded-[var(--radius-field)] border border-solid border-[var(--arb-fail-edge)] bg-[var(--arb-fail-wash)] p-4 text-[12.5px] text-[var(--arb-fail-text)]"
+    >
+      <Core.icon
+        name="hero-exclamation-triangle"
+        class="mt-0.5 size-5 shrink-0 text-[var(--arb-fail-text)]"
+      />
+      <div class="min-w-0 grow">
+        <p class="m-0 font-medium">{@title}</p>
+        <p class="m-0 mt-1 text-[12px] opacity-90 break-words">{@message}</p>
+      </div>
+      <button
+        type="button"
+        id={@retry_id}
+        phx-click={@retry}
+        class={[
+          "h-[28px] shrink-0 cursor-pointer rounded-[var(--radius-field)] px-3",
+          "border border-solid border-[var(--arb-fail-edge)] bg-[var(--surface-chrome)]",
+          "text-[12px] text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
+        ]}
+      >
+        Retry
+      </button>
+    </div>
+    """
+  end
 
   def approval_label(%{status: :merged}), do: "Merged"
   def approval_label(%{status: :closed}), do: "Closed"

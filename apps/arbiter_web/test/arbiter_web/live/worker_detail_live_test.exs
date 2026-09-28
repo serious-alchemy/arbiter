@@ -25,7 +25,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo")
       :ok = Worker.report(pid, :output_lines, ["hello", "world", "arb done"])
 
-      {:ok, _view, html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, _view, html} = live_worker(conn, task.id)
 
       assert html =~ task.id
       assert html =~ "test/repo"
@@ -47,7 +47,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       {:ok, task} = Ash.create(Issue, %{title: "pd-quota", workspace_id: ws.id})
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "test/repo")
 
-      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, view, _html} = live_worker(conn, task.id)
       html = render_async(view)
 
       fills =
@@ -62,7 +62,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
     end
 
     test "tells the user when no worker is registered", %{conn: conn} do
-      {:ok, _view, html} = live(conn, ~p"/workers/no-such-task")
+      {:ok, _view, html} = live_worker(conn, "no-such-task")
       assert html =~ "No worker registered"
     end
 
@@ -75,7 +75,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo")
       :ok = Worker.report(pid, :output_lines, [long_line])
 
-      {:ok, _view, html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, _view, html} = live_worker(conn, task.id)
 
       pane_class =
         html
@@ -104,7 +104,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       {:ok, task} = Ash.create(Issue, %{title: "pd-no-provider", workspace_id: ws.id})
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "test/repo")
 
-      {:ok, _view, html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, _view, html} = live_worker(conn, task.id)
 
       assert html =~ "Unknown provider"
       refute html =~ ~s(aria-label="Claude")
@@ -115,7 +115,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo")
       :ok = Worker.report(pid, :provider, "codex")
 
-      {:ok, _view, html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, _view, html} = live_worker(conn, task.id)
 
       assert html =~ "Codex"
       assert html =~ ~s(aria-label="Codex")
@@ -125,7 +125,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       {:ok, task} = Ash.create(Issue, %{title: "pd-live", workspace_id: ws.id})
       {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
 
-      {:ok, view, html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, view, html} = live_worker(conn, task.id)
       refute html =~ "fresh-line"
 
       # Push an output line via the same PubSub topic the worker would use.
@@ -154,7 +154,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       {:ok, task} = Ash.create(Issue, %{title: "pd-elapsed", workspace_id: ws.id})
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "r")
 
-      {:ok, _view, html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, _view, html} = live_worker(conn, task.id)
 
       # started_at is "now" at spawn time, so the toolbar reads e.g. "0s"/"0m".
       assert html =~ ~r/font-mono[^>]*>\s*\d+[smh]/
@@ -164,7 +164,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       {:ok, task} = Ash.create(Issue, %{title: "pd-ws", workspace_id: ws.id})
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "r")
 
-      {:ok, _view, html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, _view, html} = live_worker(conn, task.id)
       assert html =~ "Workspace"
       assert html =~ ws.name
     end
@@ -173,7 +173,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       {:ok, task} = Ash.create(Issue, %{title: "pd-wrap", workspace_id: ws.id})
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "r")
 
-      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, view, _html} = live_worker(conn, task.id)
       # Toolbar should have flex-wrap to allow items to wrap on narrow viewports
       assert has_element?(view, "div[class*='flex-wrap'][class*='gap-\\[14px\\]']")
     end
@@ -182,7 +182,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       {:ok, task} = Ash.create(Issue, %{title: "pd-responsive", workspace_id: ws.id})
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "r")
 
-      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, view, _html} = live_worker(conn, task.id)
 
       # Metadata rail grid should be responsive: single column on mobile, two columns on large screens
       assert has_element?(view, "div[class*='grid-cols-1'][class*='lg:grid-cols-']")
@@ -193,7 +193,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       {:ok, task} = Ash.create(Issue, %{title: "pd-stop", workspace_id: ws.id})
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "r")
 
-      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, view, _html} = live_worker(conn, task.id)
       assert has_element?(view, "#worker-stop-btn")
 
       html = render_click(view, "stop")
@@ -223,7 +223,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       {:ok, task} = Ash.create(Issue, %{title: "pd-restart", workspace_id: ws.id})
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "r")
 
-      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, view, _html} = live_worker(conn, task.id)
       html = render_click(view, "stop")
       assert html =~ "the worktree is left in place"
       assert has_element?(view, "#worker-toolbar-resume-btn")
@@ -245,7 +245,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
 
       {:ok, other_task} = Ash.create(Issue, %{title: "pd-other", workspace_id: ws.id})
 
-      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, view, _html} = live_worker(conn, task.id)
       html = render_click(view, "stop")
       assert html =~ "the worktree is left in place"
       assert has_element?(view, "#worker-toolbar-resume-btn")
@@ -270,7 +270,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       :ok = Worker.advance(pid, :design)
       :ok = Worker.complete(pid, :done)
 
-      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, view, _html} = live_worker(conn, task.id)
       refute has_element?(view, "#worker-stop-btn")
     end
 
@@ -279,7 +279,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       {:ok, task} = Ash.create(Issue, %{title: "pd-resuming", workspace_id: ws.id})
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "r", meta: %{resume: true})
 
-      {:ok, _view, html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, _view, html} = live_worker(conn, task.id)
 
       assert html =~ "badge-info"
       assert html =~ "resuming"
@@ -306,7 +306,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
 
       wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(pid)) end)
 
-      {:ok, _view, html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, _view, html} = live_worker(conn, task.id)
 
       assert html =~ "badge-warning"
       assert html =~ "awaiting_review_gate"
@@ -324,7 +324,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
           repo: "r"
         })
 
-      {:ok, _view, html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, _view, html} = live_worker(conn, task.id)
 
       assert html =~ "Workflow"
       # Work's first step is :load_context.
@@ -351,7 +351,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       :ok = Worker.report(pid, :claude_session, true)
       :ok = Worker.report(pid, :activity, "running tests")
 
-      {:ok, _view, html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, _view, html} = live_worker(conn, task.id)
 
       assert html =~ "Live activity"
       assert html =~ "running tests"
@@ -442,7 +442,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
         match?(%{label: "editing widget.ex"}, Map.get(Worker.state(task.id).meta, :activity))
       end)
 
-      {:ok, view, html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, view, html} = live_worker(conn, task.id)
       assert html =~ "editing widget.ex"
       refute html =~ "running tests"
 
@@ -461,7 +461,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
       :ok = Worker.report(pid, :output_lines, ["line 1", "line 2"])
 
-      {:ok, _view, html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, _view, html} = live_worker(conn, task.id)
 
       # The log_stream component brings its own colocated stick-to-bottom
       # hook. Per Phoenix.LiveView.ColocatedHook convention, the source uses
@@ -477,7 +477,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
       :ok = Worker.report(pid, :output_lines, [long_line])
 
-      {:ok, _view, html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, _view, html} = live_worker(conn, task.id)
 
       assert html =~ ~s(title="#{long_line}")
     end
@@ -488,7 +488,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
       :ok = Worker.fail(pid, :boom)
 
-      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, view, _html} = live_worker(conn, task.id)
 
       refute has_element?(view, "a button")
     end
@@ -501,7 +501,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       :ok = Worker.report(pid, :mr_ref, "https://github.com/org/repo/pull/42")
       :ok = Worker.await(pid)
 
-      {:ok, view, html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, view, html} = live_worker(conn, task.id)
 
       refute has_element?(view, "a button")
       assert has_element?(view, ~s(a[href="https://github.com/org/repo/pull/42"]))
@@ -515,7 +515,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
       :ok = Worker.fail(pid, :boom)
 
-      {:ok, view, html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, view, html} = live_worker(conn, task.id)
 
       assert has_element?(view, "#worker-toolbar-resume-btn")
       assert html =~ "Resume"
@@ -525,7 +525,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       {:ok, task} = Ash.create(Issue, %{title: "pd-running", workspace_id: ws.id})
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "r")
 
-      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, view, _html} = live_worker(conn, task.id)
       refute has_element?(view, "#worker-toolbar-resume-btn")
       refute has_element?(view, "#worker-fallback-resume-btn")
       # The rail's "Resume with note" action stays visible but disabled.
@@ -536,12 +536,12 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
          %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "pd-gone", workspace_id: ws.id})
 
-      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, view, _html} = live_worker(conn, task.id)
       assert has_element?(view, "#worker-fallback-resume-btn")
     end
 
     test "no Resume for a task that doesn't exist at all", %{conn: conn} do
-      {:ok, view, _html} = live(conn, ~p"/workers/no-such-task")
+      {:ok, view, _html} = live_worker(conn, "no-such-task")
       refute has_element?(view, "#worker-fallback-resume-btn")
     end
 
@@ -553,7 +553,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       :ok = Worker.fail(pid, :boom)
       {:ok, _} = Ash.update(task, %{}, action: :close)
 
-      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, view, _html} = live_worker(conn, task.id)
       refute has_element?(view, "#worker-toolbar-resume-btn")
       refute has_element?(view, "#worker-fallback-resume-btn")
       refute has_element?(view, "#worker-resume-note-btn")
@@ -565,7 +565,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
       :ok = Worker.fail(pid, :boom)
 
-      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, view, _html} = live_worker(conn, task.id)
       html = view |> element("#worker-toolbar-resume-btn") |> render_click()
 
       assert html =~ ~s(id="worker-retry-modal")
@@ -585,7 +585,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
       :ok = Worker.fail(pid, :boom)
 
-      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, view, _html} = live_worker(conn, task.id)
       view |> element("#worker-toolbar-resume-btn") |> render_click()
 
       pending = render_click(view, "retry")
@@ -606,7 +606,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
       :ok = Worker.fail(pid, :boom)
 
-      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, view, _html} = live_worker(conn, task.id)
       view |> element("#worker-toolbar-resume-btn") |> render_click()
 
       render_click(view, "retry")
@@ -681,7 +681,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
 
       wait_until(fn -> Watchdog.parked_on(task.id) == :ci_failed end)
 
-      {:ok, view, html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, view, html} = live_worker(conn, task.id)
 
       assert has_element?(view, "#worker-retry-auto-resolve-btn")
       assert html =~ "Retry auto-resolve"
@@ -701,7 +701,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       assert :ok = Watchdog.mark_ci_external(task.id, "shared runners down repo-wide today")
       wait_until(fn -> Watchdog.parked_on(task.id) == :ci_failed_external end)
 
-      {:ok, view, html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, view, html} = live_worker(conn, task.id)
 
       assert has_element?(view, "#worker-retry-auto-resolve-btn")
       assert html =~ "Retry auto-resolve"
@@ -727,7 +727,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
 
       wait_until(fn -> Watchdog.parked_on(task.id) == :ci_failed end)
 
-      {:ok, view, html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, view, html} = live_worker(conn, task.id)
 
       assert has_element?(view, "#worker-retry-auto-resolve-btn")
       assert html =~ "Retry auto-resolve"
@@ -748,7 +748,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       wait_until(fn -> Watchdog.whereis(task.id) != nil end)
       Process.sleep(50)
 
-      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, view, _html} = live_worker(conn, task.id)
 
       refute has_element?(view, "#worker-retry-auto-resolve-btn")
     end
@@ -764,7 +764,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       wait_until(fn -> Watchdog.whereis(task.id) != nil end)
       Process.sleep(50)
 
-      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, view, _html} = live_worker(conn, task.id)
 
       refute has_element?(view, "#worker-retry-auto-resolve-btn")
     end
@@ -778,7 +778,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
 
       wait_until(fn -> Watchdog.parked_on(task.id) == :ci_failed end)
 
-      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, view, _html} = live_worker(conn, task.id)
 
       html = render_click(view, "retry_auto_resolve")
 
@@ -800,7 +800,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       {:ok, task} = Ash.create(Issue, %{title: "pd-click-error", workspace_id: ws.id})
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "r")
 
-      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, view, _html} = live_worker(conn, task.id)
 
       html = render_click(view, "retry_auto_resolve")
 
@@ -849,7 +849,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
 
       refute Watchdog.alive?(task.id)
 
-      {:ok, view, html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, view, html} = live_worker(conn, task.id)
 
       assert html =~ "No watchdog is running"
       assert has_element?(view, "#worker-restart-watchdog-btn")
@@ -875,7 +875,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
 
       wait_until(fn -> Watchdog.alive?(task.id) end)
 
-      {:ok, view, html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, view, html} = live_worker(conn, task.id)
 
       refute html =~ "No watchdog is running"
       refute has_element?(view, "#worker-restart-watchdog-btn")
@@ -888,7 +888,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       # The replacement's first poll finds it still open, so it keeps running.
       StubMerger.queue_get(ref, [%{status: :open, approved: false}])
 
-      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, view, _html} = live_worker(conn, task.id)
 
       render_click(view, "restart_watchdog")
       # The handler runs via `start_async`, so wait for the reply to land
@@ -906,7 +906,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
       park_without_watchdog(pid, task, "!wd-dead-3")
 
-      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, view, _html} = live_worker(conn, task.id)
 
       Worker.stop(pid)
       wait_until(fn -> is_nil(Worker.whereis(task.id)) end)

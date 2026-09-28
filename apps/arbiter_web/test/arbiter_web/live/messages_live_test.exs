@@ -34,7 +34,7 @@ defmodule ArbiterWeb.MessagesLiveTest do
           body: "the API shape changed"
         })
 
-      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, view, _html} = live_worker(conn, task.id)
       html = render_async(view)
 
       assert html =~ "Mailbox"
@@ -46,7 +46,7 @@ defmodule ArbiterWeb.MessagesLiveTest do
       {:ok, task} = Ash.create(Issue, %{title: "compose", workspace_id: ws.id})
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)
 
-      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, view, _html} = live_worker(conn, task.id)
       render_async(view)
 
       view
@@ -67,7 +67,7 @@ defmodule ArbiterWeb.MessagesLiveTest do
       {:ok, msg} =
         Message.send_mail(%{workspace_id: ws.id, to_ref: task.id, body: "ack me"})
 
-      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, view, _html} = live_worker(conn, task.id)
       render_async(view)
       assert render(view) =~ "ack me"
 
@@ -88,7 +88,7 @@ defmodule ArbiterWeb.MessagesLiveTest do
       {:ok, task} = Ash.create(Issue, %{title: "live-mail", workspace_id: ws.id})
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)
 
-      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+      {:ok, view, _html} = live_worker(conn, task.id)
       html = render_async(view)
       refute html =~ "arrived-after-mount"
 

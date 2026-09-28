@@ -819,6 +819,19 @@ defmodule Arbiter.Worker do
   end
 
   @doc """
+  `state/1`, but the worker first sends `{:worker_snapshot_cut, ref}` to
+  `notify` from its own process (bd-c5m9b5). Messages between two processes
+  arrive in the order they were sent, so for a `notify` subscribed to the
+  worker's output topic every `{:worker_output, _, _}` ahead of the marker is
+  already in the returned snapshot and every one after it is not — the exact
+  seam between a seeded output buffer and the live stream, even when the
+  snapshot itself is fetched by another process.
+  """
+  @spec state(pid(), pid(), reference()) :: snapshot()
+  def state(pid, notify, ref) when is_pid(pid) and is_pid(notify) and is_reference(ref),
+    do: GenServer.call(pid, {:snapshot, {notify, ref}})
+
+  @doc """
   Mint a **fresh** `Arbiter.Worker.Watchdog` for a worker parked at
   `:awaiting_review` whose Watchdog is no longer running (bd-8jixav).
 
@@ -2236,6 +2249,11 @@ defmodule Arbiter.Worker do
 
   @impl true
   def handle_call(:snapshot, _from, state), do: {:reply, snapshot(state), state}
+
+  def handle_call({:snapshot, {notify, ref}}, _from, state) do
+    send(notify, {:worker_snapshot_cut, ref})
+    {:reply, snapshot(state), state}
+  end
 
   # bd-8jixav: see `restart_watchdog/1`.
   def handle_call(:restart_watchdog, _from, %State{} = state),

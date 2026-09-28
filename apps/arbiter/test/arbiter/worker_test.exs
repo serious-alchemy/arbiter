@@ -69,6 +69,17 @@ defmodule Arbiter.WorkerTest do
       assert Worker.state("gte-nope-#{System.unique_integer([:positive])}") == nil
     end
 
+    # bd-c5m9b5: the cut marker comes from the worker process itself, ahead
+    # of its reply, so it is ordered with the worker's own output broadcasts.
+    test "state/3 sends the cut marker from the worker before it replies" do
+      {pid, task_id} = start_worker()
+      ref = make_ref()
+
+      assert %{task_id: ^task_id} = Worker.state(pid, self(), ref)
+      # Already in the mailbox, not merely on its way: sent before the reply.
+      assert_received {:worker_snapshot_cut, ^ref}
+    end
+
     test "start_link/1 without :task_id returns {:error, :missing_task_id}" do
       assert Worker.start_link(repo: "arbiter") == {:error, :missing_task_id}
     end

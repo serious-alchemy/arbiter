@@ -78,4 +78,23 @@ defmodule ArbiterWeb.ConnCase do
       {:ok, view, Phoenix.LiveViewTest.render_async(view)}
     end
   end
+
+  @doc """
+  Mounts `/workers/:task_id` and waits for it to finish loading (bd-c5m9b5).
+
+  The worker snapshot and the task's database reads each load via
+  `start_async` on the connected mount; this waits for both, so the returned
+  HTML is the loaded page. Tests about the loading state itself mount with
+  `live/2` directly.
+  """
+  defmacro live_worker(conn, task_id) do
+    quote do
+      require Phoenix.LiveViewTest
+
+      {:ok, view, _html} =
+        Phoenix.LiveViewTest.live(unquote(conn), "/workers/#{unquote(task_id)}")
+
+      {:ok, view, Phoenix.LiveViewTest.render_async(view)}
+    end
+  end
 end

@@ -25,7 +25,7 @@ defmodule ArbiterWeb.WorkerDetailResumeSlotTest do
 
   test "Resume at a full cap is refused inline, naming the cap and the holder",
        %{conn: conn} = ctx do
-    {:ok, view, _html} = live(conn, ~p"/workers/#{ctx.a.id}")
+    {:ok, view, _html} = live_worker(conn, ctx.a.id)
     view |> element("#worker-toolbar-resume-btn") |> render_click()
     refute has_element?(view, "#worker-retry-force-btn")
 
@@ -41,7 +41,7 @@ defmodule ArbiterWeb.WorkerDetailResumeSlotTest do
   end
 
   test "the explicit over-the-cap resume goes through and is recorded", %{conn: conn} = ctx do
-    {:ok, view, _html} = live(conn, ~p"/workers/#{ctx.a.id}")
+    {:ok, view, _html} = live_worker(conn, ctx.a.id)
     view |> element("#worker-toolbar-resume-btn") |> render_click()
     render_click(view, "retry")
     render_async(view, 10_000)
