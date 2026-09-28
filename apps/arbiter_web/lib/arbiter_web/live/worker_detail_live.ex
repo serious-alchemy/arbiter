@@ -377,7 +377,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
   # ---- async results ----
 
   @impl true
-  # A worker back at an active status (resumed, or restarted elsewhere)
+  # A worker back at a live run state (resumed, or restarted elsewhere)
   # retires the stop toast and the reddened flow node.
   def handle_async(:snapshot, {:ok, {ref, snapshot}}, %{assigns: %{snapshot_ref: ref}} = socket) do
     socket =
@@ -387,8 +387,8 @@ defmodule ArbiterWeb.WorkerDetailLive do
 
     socket =
       case snapshot do
-        %{status: status} ->
-          if active_status?(status),
+        %{state: _} ->
+          if active_run?(snapshot),
             do: assign(socket, stop_notice: false, stopped_flow_step: nil),
             else: socket
 
@@ -750,26 +750,20 @@ defmodule ArbiterWeb.WorkerDetailLive do
   defp workspace_id(%{assigns: %{task: %Issue{workspace_id: ws}}}) when is_binary(ws), do: ws
   defp workspace_id(_socket), do: nil
 
-  # Statuses where the worker is still working the task. `Dispatch.resume/2`
+  # A run that has not finished (starting, working, or waiting on a question
+  # or the review gate) is still working the task. `Dispatch.resume/2`
   # refuses these outright (stop it first), so we don't offer the action.
-  @active_statuses [
-    :idle,
-    :resuming,
-    :running,
-    :awaiting,
-    :awaiting_review_gate,
-    :awaiting_review
-  ]
-
+  #
   # Resume is offered when the task exists and no worker is actively working
-  # it — a failed/stopped snapshot, or no snapshot at all (the node restarted,
-  # but the worktree may well still be on disk).
-  defp active_status?(status), do: status in @active_statuses
+  # it — a finished/stopped snapshot, or no snapshot at all (the node
+  # restarted, but the worktree may well still be on disk).
+  defp active_run?(%{state: state}), do: Arbiter.Workers.RunState.live?(state)
+  defp active_run?(_snapshot), do: false
 
   defp retryable?(nil, _snapshot), do: false
   defp retryable?(%Issue{status: :closed}, _snapshot), do: false
   defp retryable?(%Issue{}, nil), do: true
-  defp retryable?(%Issue{}, %{status: status}), do: status not in @active_statuses
+  defp retryable?(%Issue{}, %{state: _} = snapshot), do: not active_run?(snapshot)
   defp retryable?(_task, _snapshot), do: false
 
   # A Merging ticket: its PR is open and its Watchdog owns it (bd-741sid).
@@ -829,8 +823,8 @@ defmodule ArbiterWeb.WorkerDetailLive do
   defp resume_failure(:repo_unknown),
     do: "no repo could be resolved for this task — dispatch it explicitly instead."
 
-  defp resume_failure({:worker_active, status}),
-    do: "a worker is still active (#{status}) — stop it first."
+  defp resume_failure({:worker_active, run}),
+    do: "a worker is still active (#{run |> run_label() |> String.downcase()}) — stop it first."
 
   defp resume_failure({:task_closed, _id}), do: "the issue is closed."
 
@@ -917,30 +911,28 @@ defmodule ArbiterWeb.WorkerDetailLive do
 
   # ---- flow / stop-notice helpers ----
 
-  # Maps a live worker status onto one of the four canonical
-  # `StatusHelpers.worker_flow/0` steps `<.worker_flow>` understands —
-  # it has no catch-all clause for statuses like `:resuming` or
-  # `:awaiting_review_gate`.
-  defp normalize_flow_status(:idle), do: :idle
-  defp normalize_flow_status(:resuming), do: :running
-  defp normalize_flow_status(:running), do: :running
-  defp normalize_flow_status(:awaiting), do: :awaiting
-  defp normalize_flow_status(:awaiting_review_gate), do: :awaiting
-  defp normalize_flow_status(:awaiting_review), do: :awaiting
-  defp normalize_flow_status(:completed), do: :completed
-  defp normalize_flow_status(:failed), do: :running
-  defp normalize_flow_status(_), do: :idle
+  # Maps a worker snapshot onto one of the four canonical
+  # `StatusHelpers.worker_flow/0` steps `<.worker_flow>` understands — the run
+  # states themselves, except that a run that finished without succeeding is
+  # drawn (reddened) on the step it was on, `:working`.
+  defp current_flow_step(%{state: :finished, outcome: outcome})
+       when outcome in [:failed, :interrupted],
+       do: :working
 
-  defp current_flow_step(nil), do: :idle
-  defp current_flow_step(%{status: status}), do: normalize_flow_status(status)
+  defp current_flow_step(%{state: :finished}), do: :finished
+
+  defp current_flow_step(%{state: state}) when state in [:starting, :working, :waiting],
+    do: state
+
+  defp current_flow_step(_snapshot), do: :starting
 
   # The flow step to render: the precise step the worker had reached before
   # a user-initiated stop, when we have one, otherwise derived from the live
-  # snapshot's status.
+  # snapshot's state.
   defp flow_status(%{stopped_flow_step: step}) when not is_nil(step), do: step
   defp flow_status(%{snapshot: snapshot}), do: current_flow_step(snapshot)
 
-  defp flow_failed?(%{snapshot: %{status: :failed}}), do: true
+  defp flow_failed?(%{snapshot: %{state: :finished, outcome: :failed}}), do: true
   defp flow_failed?(_), do: false
 
   # `Worker.stop/3` genuinely leaves the worktree in place — it only tears
@@ -950,7 +942,9 @@ defmodule ArbiterWeb.WorkerDetailLive do
     do: "Stop signalled to #{task_id} — the worktree is left in place"
 
   defp stopped_snapshot(nil), do: nil
-  defp stopped_snapshot(snapshot), do: Map.put(snapshot, :status, :failed)
+
+  defp stopped_snapshot(snapshot),
+    do: Map.merge(snapshot, %{state: :finished, outcome: :failed, waiting_on: nil})
 
   # ---- toolbar / rail summary helpers ----
 
@@ -1057,7 +1051,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
                   {@task_id}
                 </span>
                 <Core.copy_id id={@task_id} />
-                <.status_chip status={@snapshot.status} />
+                <.status_chip status={run_status(@snapshot)} />
                 <span
                   :if={@snapshot.started_at}
                   class="text-[11.5px] font-mono text-[var(--text-secondary)]"
@@ -1072,7 +1066,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
                     {toolbar_summary(@snapshot, @usage_events)}
                   </span>
                   <%= cond do %>
-                    <% active_status?(@snapshot.status) -> %>
+                    <% active_run?(@snapshot) -> %>
                       <Core.button
                         id="worker-stop-btn"
                         phx-click="stop"
@@ -1105,7 +1099,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
                   <% else %>
                     <.log_stream
                       id="worker-output"
-                      live={@snapshot.status == :running}
+                      live={@snapshot.state == :working}
                       lines={log_stream_lines(@output_lines)}
                       max_height="28rem"
                       bare
@@ -1204,10 +1198,13 @@ defmodule ArbiterWeb.WorkerDetailLive do
               </div>
             </div>
 
-            <%!-- ── Awaiting review panel ──────────────────────────────── --%>
-            <.panel :if={@snapshot.status == :awaiting} title="Awaiting your review">
+            <%!-- ── Waiting on you panel (the agent asked a question) ───── --%>
+            <.panel
+              :if={@snapshot.state == :waiting and @snapshot.waiting_on == :question}
+              title="Waiting on you"
+            >
               <:actions>
-                <.status_chip status={:awaiting} />
+                <.status_chip status={:waiting} />
               </:actions>
               <p class="text-sm text-[var(--text-secondary)]">
                 This {@worker_label} has paused and is waiting for a human decision before it can proceed.

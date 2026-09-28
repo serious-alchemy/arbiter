@@ -60,7 +60,7 @@ defmodule Arbiter.Worker.DispatchResumeSlotTest do
       assert info.holders == [b.id]
       # Refused before `stop_prior_worker/1`: nothing about A changed.
       assert Worker.whereis(a.id) == first.worker_pid
-      assert Worker.state(first.worker_pid).status == :failed
+      assert Worker.state(first.worker_pid).outcome == :failed
       assert overrides(ws) == []
     end
 

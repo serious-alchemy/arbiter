@@ -161,7 +161,11 @@ defmodule Arbiter.Worker.ReviewGatePushGateTest do
     on_exit(fn -> if Process.alive?(author), do: GenServer.stop(author, :normal) end)
     :ok = Worker.advance(author, :claude)
     send(author, {:__claude_session_done__, "arb done"})
-    wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(author)) end)
+
+    wait_until(fn ->
+      match?(%{state: :waiting, waiting_on: :review_gate}, Worker.state(author))
+    end)
+
     author
   end
 
@@ -347,7 +351,10 @@ defmodule Arbiter.Worker.ReviewGatePushGateTest do
       # A REQUEST_CHANGES that never converges fails the run rather than
       # parking it (only a liveness failure of the gate itself parks) — well
       # after `push_gate/1` ran.
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(author)) end, 20_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(author)) end,
+        20_000
+      )
 
       {out, 0} = System.cmd("git", ["-C", repo, "ls-remote", "--heads", "origin", branch])
 

@@ -211,7 +211,7 @@ defmodule Arbiter.Worker.ReopenAfterReviewGateTest do
     Req.Test.allow(Arbiter.Mergers.Github.HTTP, self(), pid)
 
     send(pid, {:__claude_session_done__, "arb done"})
-    wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(pid)) end)
+    wait_until(fn -> match?(%{state: :waiting, waiting_on: :review_gate}, Worker.state(pid)) end)
 
     # The pre-review open adopted-in-advance the ref onto the task already.
     {:ok, mid_task} = Ash.get(Issue, task.id)
@@ -225,7 +225,7 @@ defmodule Arbiter.Worker.ReopenAfterReviewGateTest do
     assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 3_000
 
     run = run_for(task.id)
-    assert run.status == :completed
+    assert run.outcome == :succeeded
     assert run.mr_ref == "#700"
 
     {:ok, reloaded} = Ash.get(Issue, task.id)

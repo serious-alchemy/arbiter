@@ -275,7 +275,7 @@ defmodule Arbiter.Worker.TicketWatchdogTest do
 
       pid = Worker.whereis(task.id)
       assert Worker.state(pid).meta.role == :fix_pass
-      assert Enum.any?(runs(task.id), &(&1.worker_type == :fix_pass))
+      assert Enum.any?(runs(task.id), &(&1.kind == :fix_pass))
     end
 
     test "conflict → back to work, with a conflict run registered under the ticket id",
@@ -301,7 +301,7 @@ defmodule Arbiter.Worker.TicketWatchdogTest do
 
       pid = Worker.whereis(task.id)
       assert Worker.state(pid).meta.role == :conflict_resolver
-      assert Enum.any?(runs(task.id), &(&1.worker_type == :conflict))
+      assert Enum.any?(runs(task.id), &(&1.kind == :conflict))
     end
 
     test "PR closed → back to work, with the pr_closed cause and a page", %{repo: repo} do

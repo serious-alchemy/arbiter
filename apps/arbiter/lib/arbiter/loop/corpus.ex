@@ -93,7 +93,7 @@ defmodule Arbiter.Loop.Corpus do
 
   `meta.ci` feeds `Arbiter.Loop.CiSection`. It carries two bounded sets:
 
-    * `tasks` — one entry per task with a `:main` run in the window,
+    * `tasks` — one entry per task with an authoring run in the window,
       attributed to its **latest** main run there (repo, provider, model,
       workspace) plus the issue's difficulty and whether it has a PR
       (`issues.pr_ref`).
@@ -208,8 +208,8 @@ defmodule Arbiter.Loop.Corpus do
         run_id = r["run_id"]
         task_id = r["task_id"]
         base = base_task_id(task_id)
-        status = to_atom(r["status"])
-        {read?, lines} = terminal_lines(status, r["stop_category"], run_id)
+        outcome = to_atom(r["outcome"])
+        {read?, lines} = terminal_lines(outcome, r["stop_category"], run_id)
         weighted = Map.get(tokens_by_run, run_id, 0.0)
 
         %{
@@ -217,8 +217,13 @@ defmodule Arbiter.Loop.Corpus do
           task_id: task_id,
           repo: r["repo"],
           title: r["task_title"],
-          worker_type: to_atom(r["worker_type"]),
-          status: status,
+          # bd-1uu19b: the run vocabulary. `role` keeps an authoring run
+          # ("base") apart from a revise-round implementer ("impl"); both are
+          # `kind: :implement`.
+          kind: to_atom(r["kind"]),
+          role: r["role"],
+          state: to_atom(r["state"]),
+          outcome: outcome,
           model: r["model"],
           model_tier: nil,
           difficulty: Map.get(difficulty_by_task, base),
@@ -230,14 +235,14 @@ defmodule Arbiter.Loop.Corpus do
           window_share_5h: Scarcity.window_share(weighted, scarcity.calibration),
           max_round: Map.get(round_by_task, base, 1),
           rejected?: r["failure_reason"] == ":review_gate_rejected",
-          converged?: status == :completed,
+          converged?: outcome == :succeeded,
           findings: Map.get(findings_by_task, base, []),
           transcript_read?: read?,
           terminal_lines: lines
         }
       end)
 
-    failed = Enum.count(rows, &(&1.status == :failed))
+    failed = Enum.count(rows, &(&1.outcome == :failed))
     reads = Enum.count(rows, & &1.transcript_read?)
 
     meta = %{
@@ -297,7 +302,7 @@ defmodule Arbiter.Loop.Corpus do
     if conclusive_stop_category?(stop_category), do: {false, []}, else: {true, tail(run_id)}
   end
 
-  defp terminal_lines(_status, _stop_category, _run_id), do: {false, []}
+  defp terminal_lines(_outcome, _stop_category, _run_id), do: {false, []}
 
   @doc """
   Record the pass's own cost as a single `usage_events` row (step `:other`,
@@ -370,7 +375,7 @@ defmodule Arbiter.Loop.Corpus do
 
     query(
       """
-      SELECT id AS run_id, task_id, repo, task_title, worker_type, status, model,
+      SELECT id AS run_id, task_id, repo, task_title, kind, role, state, outcome, model,
              failure_reason, stop_category
       FROM worker_runs
       WHERE started_at >= ?1 AND started_at < ?2
@@ -571,7 +576,7 @@ defmodule Arbiter.Loop.Corpus do
         """
         SELECT task_id, repo, model, provider, workspace_id
         FROM worker_runs
-        WHERE worker_type = 'main' AND started_at >= ?1 AND started_at < ?2
+        WHERE kind = 'implement' AND COALESCE(role, 'base') = 'base' AND started_at >= ?1 AND started_at < ?2
         ORDER BY started_at DESC
         """,
         [iso(since), iso(until)]
@@ -582,7 +587,7 @@ defmodule Arbiter.Loop.Corpus do
         """
         SELECT id AS run_id, task_id, repo, workspace_id, result_message
         FROM worker_runs
-        WHERE worker_type = 'fix_pass' AND started_at >= ?1 AND started_at < ?2
+        WHERE kind = 'fix_pass' AND started_at >= ?1 AND started_at < ?2
         ORDER BY started_at DESC
         """,
         [iso(since), iso(until)]
@@ -903,7 +908,7 @@ defmodule Arbiter.Loop.Corpus do
     Enum.map(rows, fn row -> cols |> Enum.zip(row) |> Map.new() end)
   end
 
-  # Column values out of Arbiter's own tables — statuses and worker types that
+  # Column values out of Arbiter's own tables — run kinds, states and outcomes that
   # Ash dumped from atoms it defined. `String.to_existing_atom/1` rather than
   # `String.to_atom/1` (sobelow DOS.StringToAtom): a row carrying an
   # unrecognised string is corrupt data, and minting a permanent atom for it

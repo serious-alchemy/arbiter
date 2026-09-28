@@ -45,8 +45,9 @@ defmodule Arbiter.Loop.ScarcityPassIntegrationTest do
       Ash.create(Run, %{
         task_id: issue.id,
         repo: "arbiter",
-        worker_type: :main,
-        status: :completed,
+        kind: :implement,
+        state: :finished,
+        outcome: :succeeded,
         model: "claude-sonnet-5",
         started_at: DateTime.utc_now()
       })

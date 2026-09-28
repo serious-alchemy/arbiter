@@ -247,7 +247,7 @@ defmodule Arbiter.Worker.AgyStrictDenialTest do
       refute prompt =~ "original task prompt"
 
       snap = Worker.state(pid)
-      assert snap.status == :running
+      assert snap.state == :working
       assert snap.meta.resume_attempts == 1
       refute Map.has_key?(snap.meta, :notes_gate_detail)
 
@@ -255,7 +255,7 @@ defmodule Arbiter.Worker.AgyStrictDenialTest do
       {:ok, _} = Ash.update(task, %{notes: "## Findings\n\nwhoami was denied."}, action: :update)
       File.write!(Path.join(dir, "go"), "")
 
-      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end)
+      wait_until(fn -> match?(%{state: :finished, outcome: :succeeded}, Worker.state(pid)) end)
     end
   end
 end

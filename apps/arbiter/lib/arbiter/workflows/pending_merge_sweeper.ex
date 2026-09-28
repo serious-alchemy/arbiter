@@ -209,7 +209,7 @@ defmodule Arbiter.Workflows.PendingMergeSweeper do
   # A run is working the ticket — a fix pass / conflict resolver pushing to the
   # PR registers under the ticket id since bd-741sid. Once it exits, a later
   # sweep re-arms the merge against whatever head it left.
-  defp route(_task, _pending, {:worker, _status}, _opts), do: {:skipped, :live_worker}
+  defp route(_task, _pending, {:worker, _run_state}, _opts), do: {:skipped, :live_worker}
   defp route(_task, _pending, {:subordinate, _key}, _opts), do: {:skipped, :live_worker}
 
   # bd-741sid: a Merging ticket whose PR open recorded its lane (it names the

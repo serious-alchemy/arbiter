@@ -243,43 +243,43 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
       {pid, _task_id} = start_worker()
       cwd = tmp_dir!("cs-done")
 
-      # Must be :running for :completed to be a legal transition.
+      # Must be :working for finishing :succeeded to be a legal transition.
       :ok = Worker.advance(pid, :implement)
 
       {:ok, _port} =
         ClaudeSession.start(owner: pid, worktree_path: cwd, command: [@fixture])
 
-      status =
+      outcome =
         eventually(fn ->
           case Worker.state(pid) do
-            %{status: :completed} = s -> s.status
+            %{state: :finished, outcome: :succeeded} = s -> s.outcome
             _ -> nil
           end
         end)
 
-      assert status == :completed
+      assert outcome == :succeeded
       assert Worker.state(pid).meta.result == :claude_done
     end
 
-    test "completion signal completes the worker even when status is :idle" do
+    test "completion signal completes the worker even when its run is :starting" do
       {pid, _task_id} = start_worker()
       cwd = tmp_dir!("cs-idle-done")
 
       {:ok, _port} =
         ClaudeSession.start(owner: pid, worktree_path: cwd, command: [@fixture])
 
-      # claude_driven mode keeps the worker at :idle (the Machine is not
+      # claude_driven mode keeps the worker at :starting (the Machine is not
       # ticked, so advance/2 is never called). The "arb done" signal must
-      # still complete the worker from :idle.
-      status =
+      # still complete the worker from :starting.
+      outcome =
         eventually(fn ->
           case Worker.state(pid) do
-            %{status: :completed} = s -> s.status
+            %{state: :finished, outcome: :succeeded} = s -> s.outcome
             _ -> nil
           end
         end)
 
-      assert status == :completed
+      assert outcome == :succeeded
       assert Worker.state(pid).meta.result == :claude_done
     end
 
@@ -308,8 +308,8 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
       end)
 
       # The prose line is buffered, but it never flipped the worker to
-      # :completed (it stayed in the :running state from the advance above).
-      refute Worker.state(pid).status == :completed
+      # finished :succeeded (it stayed :working from the advance above).
+      refute Worker.state(pid).outcome == :succeeded
       assert "discussing arb doneness in the abstract" in Worker.state(pid).meta.output_lines
     end
   end
@@ -502,7 +502,7 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
       # fail_now/2 kills the port synchronously, so by the time the run is
       # observably :failed (the signal the Driver / a :close after-action keys
       # off to reap the worktree) the agent is already dead.
-      assert Worker.state(pid).status == :failed
+      assert %{state: :finished, outcome: :failed} = Worker.state(pid)
       refute os_process_alive?(os_pid)
       assert Port.info(port) == nil
     end
@@ -789,15 +789,15 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
           command: stream_json_command(cwd, events)
         )
 
-      status =
+      outcome =
         eventually(fn ->
           case Worker.state(pid) do
-            %{status: :completed} = s -> s.status
+            %{state: :finished, outcome: :succeeded} = s -> s.outcome
             _ -> nil
           end
         end)
 
-      assert status == :completed
+      assert outcome == :succeeded
       assert Worker.state(pid).meta.result == :claude_done
     end
 
@@ -805,8 +805,8 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
       {pid, _task_id} = start_worker()
       cwd = tmp_dir!("cs-sj-toolresult")
 
-      # Must be :running so :completed would be a legal transition — proving the
-      # guard isn't what's keeping us out of :completed.
+      # Must be :working so finishing :succeeded would be a legal transition —
+      # proving the guard isn't what's keeping the run from succeeding.
       :ok = Worker.advance(pid, :implement)
 
       events = [
@@ -830,7 +830,7 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
 
       wait_for_exit(pid)
 
-      refute Worker.state(pid).status == :completed
+      refute Worker.state(pid).outcome == :succeeded
       lines = Worker.state(pid).meta.output_lines
       assert Enum.any?(lines, &String.contains?(&1, "grep hit:"))
     end
@@ -904,7 +904,7 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
       assert Enum.any?(lines, &String.contains?(&1, "gemini session success"))
       # The user prompt echo is not displayed (and must not arm completion).
       refute Enum.any?(lines, &String.contains?(&1, "the prompt"))
-      refute Worker.state(pid).status == :completed
+      refute Worker.state(pid).outcome == :succeeded
     end
 
     test "arb done in gemini assistant text completes the worker" do
@@ -924,15 +924,15 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
           model: "gemini-2.5-pro"
         )
 
-      status =
+      outcome =
         eventually(fn ->
           case Worker.state(pid) do
-            %{status: :completed} = s -> s.status
+            %{state: :finished, outcome: :succeeded} = s -> s.outcome
             _ -> nil
           end
         end)
 
-      assert status == :completed
+      assert outcome == :succeeded
     end
 
     test "arb done split across two assistant deltas still completes (rolling buffer)" do
@@ -960,15 +960,15 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
           model: "gemini-2.5-pro"
         )
 
-      status =
+      outcome =
         eventually(fn ->
           case Worker.state(pid) do
-            %{status: :completed} = s -> s.status
+            %{state: :finished, outcome: :succeeded} = s -> s.outcome
             _ -> nil
           end
         end)
 
-      assert status == :completed
+      assert outcome == :succeeded
     end
 
     # bd-869mmg: upstream gemini's OWN wire schema (`"type" => "message"`, not
@@ -1098,7 +1098,7 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
 
       wait_for_exit(pid)
 
-      refute Worker.state(pid).status == :completed
+      refute Worker.state(pid).outcome == :succeeded
       lines = Worker.state(pid).meta.output_lines
       assert Enum.any?(lines, &String.contains?(&1, "match:"))
     end
@@ -1267,15 +1267,15 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
           model: "gemini-2.5-pro"
         )
 
-      status =
+      outcome =
         eventually(fn ->
           case Worker.state(pid) do
-            %{status: :completed} = s -> s.status
+            %{state: :finished, outcome: :succeeded} = s -> s.outcome
             _ -> nil
           end
         end)
 
-      assert status == :completed
+      assert outcome == :succeeded
     end
 
     test "agy text_delta chunks split mid-word render as one buffered line" do
@@ -1382,15 +1382,15 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
           model: "gemini-2.5-pro"
         )
 
-      status =
+      outcome =
         eventually(fn ->
           case Worker.state(pid) do
-            %{status: :completed} = s -> s.status
+            %{state: :finished, outcome: :succeeded} = s -> s.outcome
             _ -> nil
           end
         end)
 
-      assert status == :completed
+      assert outcome == :succeeded
 
       lines = Worker.state(pid).meta.output_lines
       assert "VERDICT: REQUEST_CHANGES" in lines
@@ -1581,15 +1581,15 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
           model: "gemini-2.5-pro"
         )
 
-      status =
+      outcome =
         eventually(fn ->
           case Worker.state(pid) do
-            %{status: :completed} = s -> s.status
+            %{state: :finished, outcome: :succeeded} = s -> s.outcome
             _ -> nil
           end
         end)
 
-      assert status == :completed
+      assert outcome == :succeeded
 
       failure_summary = Worker.state(pid).meta.failure_summary
       assert failure_summary =~ "RUNNING"
@@ -1615,15 +1615,15 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
           model: "gemini-2.5-pro"
         )
 
-      status =
+      outcome =
         eventually(fn ->
           case Worker.state(pid) do
-            %{status: :completed} = s -> s.status
+            %{state: :finished, outcome: :succeeded} = s -> s.outcome
             _ -> nil
           end
         end)
 
-      assert status == :completed
+      assert outcome == :succeeded
       refute Map.get(Worker.state(pid).meta, :failure_summary)
     end
 
@@ -1642,15 +1642,15 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
           model: "gemini-2.5-pro"
         )
 
-      status =
+      outcome =
         eventually(fn ->
           case Worker.state(pid) do
-            %{status: :completed} = s -> s.status
+            %{state: :finished, outcome: :succeeded} = s -> s.outcome
             _ -> nil
           end
         end)
 
-      assert status == :completed
+      assert outcome == :succeeded
       refute Map.get(Worker.state(pid).meta, :failure_summary)
     end
 
@@ -1672,15 +1672,15 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
           model: "gemini-2.5-pro"
         )
 
-      status =
+      outcome =
         eventually(fn ->
           case Worker.state(pid) do
-            %{status: :completed} = s -> s.status
+            %{state: :finished, outcome: :succeeded} = s -> s.outcome
             _ -> nil
           end
         end)
 
-      assert status == :completed
+      assert outcome == :succeeded
 
       failure_summary = Worker.state(pid).meta.failure_summary
       assert failure_summary =~ "#{task_id}/task-1"
@@ -1711,15 +1711,15 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
           model: "gemini-2.5-pro"
         )
 
-      status =
+      outcome =
         eventually(fn ->
           case Worker.state(pid) do
-            %{status: :completed} = s -> s.status
+            %{state: :finished, outcome: :succeeded} = s -> s.outcome
             _ -> nil
           end
         end)
 
-      assert status == :completed
+      assert outcome == :succeeded
       refute Map.get(Worker.state(pid).meta, :failure_summary)
     end
 
@@ -1742,15 +1742,15 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
           model: "gemini-2.5-pro"
         )
 
-      status =
+      outcome =
         eventually(fn ->
           case Worker.state(pid) do
-            %{status: :completed} = s -> s.status
+            %{state: :finished, outcome: :succeeded} = s -> s.outcome
             _ -> nil
           end
         end)
 
-      assert status == :completed
+      assert outcome == :succeeded
       assert Worker.state(pid).meta.failure_summary =~ "#{task_id}/task-1"
     end
 
@@ -1773,15 +1773,15 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
           model: "gemini-2.5-pro"
         )
 
-      status =
+      outcome =
         eventually(fn ->
           case Worker.state(pid) do
-            %{status: :completed} = s -> s.status
+            %{state: :finished, outcome: :succeeded} = s -> s.outcome
             _ -> nil
           end
         end)
 
-      assert status == :completed
+      assert outcome == :succeeded
       refute Map.get(Worker.state(pid).meta, :failure_summary)
     end
   end
@@ -1831,7 +1831,7 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
       assert "doing the work" in lines
       assert Enum.any?(lines, &String.contains?(&1, "codex session started"))
       assert Enum.any?(lines, &String.contains?(&1, "codex session complete"))
-      refute state.status == :completed
+      refute state.outcome == :succeeded
     end
 
     test "arb done in codex agent_message text completes the worker" do
@@ -1855,15 +1855,15 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
           model: "gpt-5-codex"
         )
 
-      status =
+      outcome =
         eventually(fn ->
           case Worker.state(pid) do
-            %{status: :completed} = s -> s.status
+            %{state: :finished, outcome: :succeeded} = s -> s.outcome
             _ -> nil
           end
         end)
 
-      assert status == :completed
+      assert outcome == :succeeded
     end
 
     test "arb done inside a codex exec command result does NOT complete" do
@@ -1892,7 +1892,7 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
 
       wait_for_exit(pid)
 
-      refute Worker.state(pid).status == :completed
+      refute Worker.state(pid).outcome == :succeeded
     end
 
     test "codex events wrapped in an {id, msg} envelope are still parsed" do
@@ -1914,15 +1914,15 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
           model: "gpt-5-codex"
         )
 
-      status =
+      outcome =
         eventually(fn ->
           case Worker.state(pid) do
-            %{status: :completed} = s -> s.status
+            %{state: :finished, outcome: :succeeded} = s -> s.outcome
             _ -> nil
           end
         end)
 
-      assert status == :completed
+      assert outcome == :succeeded
     end
   end
 
@@ -2047,15 +2047,15 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
           model: "gpt-5-codex"
         )
 
-      status =
+      outcome =
         eventually(fn ->
           case Worker.state(pid) do
-            %{status: :completed} = s -> s.status
+            %{state: :finished, outcome: :succeeded} = s -> s.outcome
             _ -> nil
           end
         end)
 
-      assert status == :completed
+      assert outcome == :succeeded
     end
 
     test "arb done inside a command_execution result does NOT complete" do
@@ -2088,7 +2088,7 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
 
       wait_for_exit(pid)
 
-      refute Worker.state(pid).status == :completed
+      refute Worker.state(pid).outcome == :succeeded
     end
   end
 

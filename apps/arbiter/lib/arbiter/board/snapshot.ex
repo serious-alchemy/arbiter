@@ -25,25 +25,23 @@ defmodule Arbiter.Board.Snapshot do
     * **Ready** — `:queued` tickets, Blocked and Ready alike. A real queue,
       ordered by priority then age, each card carrying the reason
       `Arbiter.Board.Scheduler` gave it (`next up — dispatching...`,
-      `2 ahead in queue`, `blocked — waiting on bd-9`). A leftover
-      `:completed` or `:failed` author row does not hide a queued ticket: the
-      column is the ticket's, not the run's.
+      `2 ahead in queue`, `blocked — waiting on bd-9`). A leftover finished
+      author row does not hide a queued ticket: the column is the ticket's,
+      not the run's.
     * **Running** — `:in_progress` tickets whose primary author run is live:
-      `:idle`, `:resuming`, `:running`, and `:awaiting_review_gate` (parked
-      while a *reviewer agent* reads the diff — automated, so still the
-      machine's turn). Reviewer workers fold into the author's card rather
+      `:starting`, `:working`, or `:waiting` on the review gate (while a
+      *reviewer agent* reads the diff — automated, so still the machine's
+      turn). Reviewer workers fold into the author's card rather
       than occupying one of their own; a review is a phase of the author's
       work, not a second piece of it. An in-progress ticket whose run has not
       registered yet (inside the dispatch grace) is a "dispatching" card here.
     * **Waiting** — `:merging` and `:verifying` tickets, plus an
       `:in_progress` ticket whose author run is done and whose outcome now
-      depends on something outside it: `:awaiting` (it asked a human a
-      question), `:failed` (parked; send it back or close it) and
-      `:awaiting_review` (an MR is open and the Watchdog is polling) — or that
+      depends on something outside it: `:waiting` on a question (it asked a
+      human), finished `:failed` (parked; send it back or close it) — or that
       has **no live worker at all** past the dispatch grace (e.g. `arb worker
-      stop` on an `:awaiting_review` worker, the documented pre-flight for
-      `arb server deploy`), which always flags `needs_you` since nothing will
-      retry it on its own. Longest wait first, because a stalled card is the
+      stop`, the documented pre-flight for `arb server deploy`), which always
+      flags `needs_you` since nothing will retry it on its own. Longest wait first, because a stalled card is the
       thing worth seeing.
     * **Closed · last 24h** — `:closed` tickets closed in the last 24 hours
       (rolling window, keyed on `closed_at`). The day's evidence of progress,
@@ -73,10 +71,11 @@ defmodule Arbiter.Board.Snapshot do
   So it is one column, and that narrower signal rides on the card as
   `:needs_you`:
 
-    * `:awaiting` always flags — the worker asked a question, and there is no
-      such thing as retrying a question.
-    * `:failed` always flags — a parked worker is terminal by definition, so
-      whatever it was last seen waiting on, nothing is going to turn it.
+    * a run `:waiting` on a question always flags — there is no such thing as
+      retrying a question.
+    * a run finished `:failed` always flags — a parked worker is terminal by
+      definition, so whatever it was last seen waiting on, nothing is going
+      to turn it.
     * an open MR flags unless its block is one the Watchdog still resolves by
       itself — `:behind_base` (it rebases) and `:ci_failed` (it dispatches a
       fix pass). Everything else, from `:conflict` to `:needs_approval` to
@@ -123,14 +122,11 @@ defmodule Arbiter.Board.Snapshot do
 
   require Ash.Query
 
-  # Worker statuses that *used* to define a slot (the `:issues` basis).
+  # Run states that *used* to define a slot (the `:issues` basis).
   # bd-aw2cyt moved the question to `Arbiter.Tasks.SlotGate`, which counts live
   # agent sessions instead; this list is still what `:issues` falls back to, and
   # its definition lives there now.
-  @slot_statuses SlotGate.slot_statuses()
-
-  # Live agent working; the author is still "running" while a reviewer reads.
-  @running_statuses [:idle, :resuming, :running, :awaiting_review_gate]
+  @slot_states SlotGate.slot_states()
 
   # The only blocks the Watchdog still clears on its own — mirrors its
   # `auto_resolvable?/1`. Everything else needs a person today.
@@ -138,20 +134,13 @@ defmodule Arbiter.Board.Snapshot do
 
   @default_system_max 16
 
-  # bd-6bax7s: what a live worker's status is *called* on a card held back by a
-  # `:conflicts_with` mutex, and — by omission — which statuses count as in
-  # flight at all. `:failed` is absent on purpose: a parked worker is terminal,
-  # so it holds nothing back. An open MR on the counterpart is exactly the
-  # thing a mutex exists to keep a second worker away from — since bd-741sid
-  # that is a Merging ticket, claimed from its state (`@merging_state`).
-  @conflict_states %{
-    idle: "running",
-    running: "running",
-    resuming: "resuming",
-    awaiting: "awaiting input",
-    awaiting_review_gate: "in review",
-    awaiting_review: "awaiting review"
-  }
+  # bd-6bax7s: what a live worker's run state is *called* on a card held back
+  # by a `:conflicts_with` mutex (`conflict_state/1`), and — by omission —
+  # which states count as in flight at all. A `:finished` run is absent on
+  # purpose: it holds nothing back. An open MR on the counterpart is exactly
+  # the thing a mutex exists to keep a second worker away from — since
+  # bd-741sid that is a Merging ticket, claimed from its state
+  # (`@merging_state`).
 
   @merging_state "merging"
 
@@ -690,9 +679,7 @@ defmodule Arbiter.Board.Snapshot do
 
   defp running_cards(workers, issues_by_id, gate_workers_by_author, all_workers, columns) do
     workers
-    |> Enum.filter(
-      &(&1.status in @running_statuses and in_column?(columns, &1.task_id, :running))
-    )
+    |> Enum.filter(&(running_run?(&1) and in_column?(columns, &1.task_id, :running)))
     # One ticket, one card: the primary row over a live pass sharing its id.
     |> one_row_per_task()
     |> Enum.map(fn {w, _group} ->
@@ -715,7 +702,7 @@ defmodule Arbiter.Board.Snapshot do
   # not missing: the ticket holds its slot, and the card says it is still
   # being dispatched.
   defp dispatching_cards(issues, authors, columns) do
-    live = for w <- authors, w.status in @running_statuses, into: MapSet.new(), do: w.task_id
+    live = for w <- authors, running_run?(w), into: MapSet.new(), do: w.task_id
 
     issues
     |> Enum.filter(&(in_column?(columns, &1.id, :running) and not MapSet.member?(live, &1.id)))
@@ -753,7 +740,7 @@ defmodule Arbiter.Board.Snapshot do
 
     carded =
       Enum.filter(workers, fn w ->
-        w.status != :completed and in_column?(columns, w.task_id, :waiting) and
+        not succeeded?(w) and in_column?(columns, w.task_id, :waiting) and
           not MapSet.member?(verifying, w.task_id) and not MapSet.member?(merging, w.task_id)
       end)
 
@@ -786,7 +773,7 @@ defmodule Arbiter.Board.Snapshot do
     rows = Enum.group_by(workers, & &1.task_id)
 
     Enum.map(issues, fn issue ->
-      group = rows |> Map.get(issue.id, []) |> Enum.reject(&(&1.status == :completed))
+      group = rows |> Map.get(issue.id, []) |> Enum.reject(&succeeded?/1)
 
       %{
         id: issue.id,
@@ -870,8 +857,6 @@ defmodule Arbiter.Board.Snapshot do
     workers
     |> one_row_per_task()
     |> Enum.map(fn {w, group} ->
-      alive = watchdog_alive(w, watchdog_live)
-
       w
       |> base_card(issues_by_id)
       |> Map.merge(%{
@@ -879,7 +864,9 @@ defmodule Arbiter.Board.Snapshot do
         mr_ref: Map.get(w, :mr_ref),
         merger_url: Map.get(w, :merger_url),
         merger_status: get_meta(w, :last_merger_status),
-        watchdog_alive: alive,
+        # bd-741sid: no run stays resident on an open PR, so a worker card has
+        # no Watchdog of its own to report — a Merging ticket's card does.
+        watchdog_alive: nil,
         merge_pulled: false,
         # The collapsed rows keep their vote: a dead fix pass under a
         # legitimately-parked primary still needs a human, even though the
@@ -913,11 +900,11 @@ defmodule Arbiter.Board.Snapshot do
   # What the collapsed subordinate rows say that the primary row's own fields
   # cannot: a `:failed` fix pass / conflict pass under the card. Nil when
   # nothing was collapsed away, or when the surviving row is itself the
-  # subordinate (its own status already says it).
+  # subordinate (its own outcome already says it).
   defp collapsed_note(primary, group) do
     group
     |> Enum.reject(&(&1 == primary))
-    |> Enum.filter(&(Map.get(&1, :status) == :failed))
+    |> Enum.filter(&failed_run?/1)
     |> Enum.map(&(Arbiter.Worker.subordinate_label(&1) || "subordinate pass"))
     |> Enum.uniq()
     |> case do
@@ -948,20 +935,9 @@ defmodule Arbiter.Board.Snapshot do
 
   defp subordinate_rank(worker), do: if(is_nil(Map.get(worker, :role)), do: 0, else: 1)
 
-  # Whether a live Watchdog exists for this card's task — `true`/`false` only
-  # where the question means something (an `:awaiting_review` park is the one
-  # state that is *supposed* to have a Watchdog), and `nil` = unknown wherever
-  # it doesn't, including when the caller supplied no liveness input at all.
-  # A `:failed` or `:awaiting` worker holds no MR, so "no watchdog" is not a
-  # finding about it.
-  defp watchdog_alive(%{status: :awaiting_review} = worker, live) when is_struct(live, MapSet),
-    do: MapSet.member?(live, worker.task_id)
-
-  defp watchdog_alive(_worker, _live), do: nil
-
   # bd-2mv3lx: an in-progress (or merging) ticket with no live worker — e.g.
-  # `arb worker stop` on an `:awaiting_review` worker, the documented
-  # pre-flight for `arb server deploy` — used to vanish from the board
+  # `arb worker stop`, the documented pre-flight for `arb server deploy` —
+  # used to vanish from the board
   # entirely. It reads truest as Waiting: the work is out of the machine's
   # hands, and nothing will retry it on its own, so it always flags
   # `needs_you`. Past the dispatch grace only; inside it the ticket is a
@@ -1007,17 +983,16 @@ defmodule Arbiter.Board.Snapshot do
 
   # A parked worker says why; any other row on a Waiting card (an open MR, or
   # a run still live on a merging ticket) has no halt to report.
-  defp waiting_reason(%{status: status} = worker) when status in [:awaiting, :failed],
-    do: halt_reason(worker)
-
-  defp waiting_reason(_worker), do: nil
+  defp waiting_reason(worker) do
+    if waiting_on_question?(worker) or failed_run?(worker), do: halt_reason(worker)
+  end
 
   @doc """
-  Whether a single live worker row needs the operator: an `:awaiting`
-  question, a `:failed` park, or an open MR blocked for a reason outside the
-  Watchdog's auto-resolvable set. `alive` is the `:awaiting_review`
-  Watchdog-liveness bit (see `watchdog_alive/2`) — `false` always flags,
-  since nothing is polling the MR.
+  Whether a single live worker row needs the operator: a run `:waiting` on a
+  question, a run finished `:failed` (a park), or an open MR blocked for a
+  reason outside the Watchdog's auto-resolvable set. `alive` is the ticket's
+  Watchdog-liveness bit — `false` always flags, since nothing is polling the
+  MR.
 
   Public (bd-58z2tu) so `Arbiter.Tasks.EpicRollup` can classify a child's
   worker the same way the board's Waiting column does, through
@@ -1030,15 +1005,16 @@ defmodule Arbiter.Board.Snapshot do
   # longer exists.
   def needs_you?(_worker, false), do: true
 
-  # A question has no retry, so it is always the human's.
-  def needs_you?(%{status: :awaiting}, _alive), do: true
-
-  # A parked worker is terminal — the system has exhausted itself by
-  # definition, whatever its last poll happened to record.
-  def needs_you?(%{status: :failed}, _alive), do: true
-
-  def needs_you?(worker, _alive),
-    do: blocked_for_you?(get_meta(worker, :last_merger_status) || %{})
+  def needs_you?(worker, _alive) do
+    cond do
+      # A question has no retry, so it is always the human's.
+      waiting_on_question?(worker) -> true
+      # A parked worker is terminal — the system has exhausted itself by
+      # definition, whatever its last poll happened to record.
+      failed_run?(worker) -> true
+      true -> blocked_for_you?(get_meta(worker, :last_merger_status) || %{})
+    end
+  end
 
   defp blocked_for_you?(merger_status) do
     case Watchdog.effective_block_reason(merger_status) do
@@ -1054,14 +1030,18 @@ defmodule Arbiter.Board.Snapshot do
   collapsed-group vote `waiting_cards/3` casts for a card, factored out so
   `Arbiter.Tasks.EpicRollup` can cast the same vote for an epic's child
   (bd-58z2tu). Pass every worker row for the task (a collapsed primary plus
-  any subordinate fix/conflict pass), not just the primary, so a `:failed`
-  fix pass under a legitimately-parked primary still counts. An empty list
-  reads as `false` — a child with no live worker at all is not this
-  function's question; the caller decides what "no worker" means for it.
+  any subordinate fix/conflict pass), not just the primary, so a failed fix
+  pass under a legitimately-parked primary still counts. An empty list reads
+  as `false` — a child with no live worker at all is not this function's
+  question; the caller decides what "no worker" means for it.
+
+  `watchdog_live` is accepted for the callers' convenience and not consulted:
+  since bd-741sid no worker row holds an open PR, so no row has a Watchdog of
+  its own — a Merging ticket's Watchdog is `merging_needs_you?/3`'s question.
   """
   @spec child_needs_you?([map()], MapSet.t() | nil) :: boolean()
-  def child_needs_you?(workers, watchdog_live) do
-    Enum.any?(workers, &needs_you?(&1, watchdog_alive(&1, watchdog_live)))
+  def child_needs_you?(workers, _watchdog_live) do
+    Enum.any?(workers, &needs_you?(&1, nil))
   end
 
   # ---- parent refs (bd-38of5i) ---------------------------------------------
@@ -1212,18 +1192,39 @@ defmodule Arbiter.Board.Snapshot do
       priority: issue && Map.get(issue, :priority),
       difficulty: issue && Map.get(issue, :difficulty),
       workspace_id: Map.get(worker, :workspace_id),
-      status: worker.status
+      # bd-1uu19b: a worker card's status is its run's state; the outcome and
+      # what a waiting run waits on ride alongside.
+      status: Map.get(worker, :state),
+      outcome: Map.get(worker, :outcome),
+      waiting_on: Map.get(worker, :waiting_on)
     }
   end
+
+  # A run the Running column shows: live and driving an agent, or waiting on
+  # the review gate (a reviewer agent is reading — still the machine's turn).
+  defp running_run?(worker),
+    do: Map.get(worker, :state) in [:starting, :working] or Worker.awaiting_review_gate?(worker)
+
+  defp waiting_on_question?(worker),
+    do: Map.get(worker, :state) == :waiting and not Worker.awaiting_review_gate?(worker)
+
+  defp succeeded?(worker),
+    do: Map.get(worker, :state) == :finished and Map.get(worker, :outcome) == :succeeded
+
+  # A finished run that did not succeed: failed, or cut off by the server.
+  defp failed_run?(worker),
+    do:
+      Map.get(worker, :state) == :finished and
+        Map.get(worker, :outcome) in [:failed, :interrupted]
 
   # What the in-flight work has claimed: the issue's declared paths plus
   # whatever the worktree has actually changed. The union matters — a worker
   # ten minutes in has touched files its ticket never named.
   # bd-6bax7s: everything a `:conflicts_with` counterpart must not run beside,
   # as `%{task_id => state}`. Wider than `in_flight/3`, which answers the *file*
-  # question and so only counts slot-holders: a counterpart at
-  # `:awaiting_review` holds an open MR rather than a slot, and is still very
-  # much mid-flight as far as a declared mutex is concerned.
+  # question and so only counts slot-holders: a Merging counterpart holds an
+  # open MR rather than a slot, and is still very much mid-flight as far as a
+  # declared mutex is concerned.
   #
   # Three sources, in increasing authority:
   #
@@ -1236,11 +1237,11 @@ defmodule Arbiter.Board.Snapshot do
   #     it, however long ago it opened.
   #   * a reviewer / implementer worker, claiming on behalf of the author it
   #     works for — covers a fix pass whose author worker has already gone.
-  #   * the author's own live worker, which knows its status exactly.
+  #   * the author's own live worker, which knows its run state exactly.
   #
   # A counterpart that is `:closed`, parked at `:awaiting_verification`
-  # (merged — the worktree is gone, nothing left to collide with) or `:failed`
-  # (parked, terminal) appears in none of them.
+  # (merged — the worktree is gone, nothing left to collide with) or whose run
+  # finished (parked, terminal) appears in none of them.
   defp conflict_claims(authors, gate_workers, issues, worked, now) do
     issues
     |> Enum.filter(&mid_dispatch?(&1, worked, now))
@@ -1262,7 +1263,16 @@ defmodule Arbiter.Board.Snapshot do
     end)
   end
 
-  defp author_state(worker), do: Map.get(@conflict_states, Map.get(worker, :status))
+  defp author_state(worker) do
+    case Map.get(worker, :state) do
+      :starting -> if resumed?(worker), do: "resuming", else: "running"
+      :working -> "running"
+      :waiting -> if Worker.awaiting_review_gate?(worker), do: "in review", else: "awaiting input"
+      _finished -> nil
+    end
+  end
+
+  defp resumed?(worker), do: get_meta(worker, :resume) == true
 
   defp gate_state(worker) do
     case worker_role(worker) do
@@ -1283,7 +1293,7 @@ defmodule Arbiter.Board.Snapshot do
 
   defp in_flight(workers, issues_by_id, changed) do
     workers
-    |> Enum.filter(&(&1.status in @slot_statuses))
+    |> Enum.filter(&(Map.get(&1, :state) in @slot_states))
     |> Enum.map(fn w ->
       declared =
         case Map.get(issues_by_id, w.task_id) do
@@ -1298,7 +1308,13 @@ defmodule Arbiter.Board.Snapshot do
     end)
   end
 
-  defp activity(%{status: :awaiting_review_gate} = w, gate_worker) do
+  defp activity(w, gate_worker) do
+    if Worker.awaiting_review_gate?(w),
+      do: review_activity(w, gate_worker),
+      else: live_label(w) || "working"
+  end
+
+  defp review_activity(w, gate_worker) do
     case gate_worker && round_label(gate_worker.task_id, w.task_id) do
       nil ->
         case gate_worker && live_label(gate_worker) do
@@ -1314,13 +1330,13 @@ defmodule Arbiter.Board.Snapshot do
     end
   end
 
-  defp activity(worker, _gate_worker), do: live_label(worker) || "working"
-
-  # While an author sits in :awaiting_review_gate, the gate worker (reviewer
-  # or implementer) is the one actually running for the issue, so its
-  # provider is what the card shows — not the parked author's.
-  defp card_provider(%{status: :awaiting_review_gate}, %{} = gate_worker) do
-    Worker.provider(Map.get(gate_worker, :meta))
+  # While an author waits on the review gate, the gate worker (reviewer or
+  # implementer) is the one actually running for the issue, so its provider
+  # is what the card shows — not the waiting author's.
+  defp card_provider(worker, %{} = gate_worker) do
+    if Worker.awaiting_review_gate?(worker),
+      do: Worker.provider(Map.get(gate_worker, :meta)),
+      else: Worker.provider(Map.get(worker, :meta))
   end
 
   defp card_provider(worker, _gate_worker), do: Worker.provider(Map.get(worker, :meta))
@@ -1371,10 +1387,13 @@ defmodule Arbiter.Board.Snapshot do
     end
   end
 
-  defp halt_reason(%{status: :awaiting} = worker),
-    do: get_meta(worker, :await_reason) || "waiting on you"
-
   defp halt_reason(worker) do
+    if waiting_on_question?(worker),
+      do: get_meta(worker, :await_reason) || "waiting on you",
+      else: stop_summary(worker)
+  end
+
+  defp stop_summary(worker) do
     case get_meta(worker, :stop_reason) do
       %{summary: summary} when is_binary(summary) -> summary
       %{"summary" => summary} when is_binary(summary) -> summary

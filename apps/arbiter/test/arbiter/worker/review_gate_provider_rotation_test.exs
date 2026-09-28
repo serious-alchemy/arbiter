@@ -287,7 +287,10 @@ defmodule Arbiter.Worker.ReviewGateProviderRotationTest do
 
       pid = run_gate(task, repo, "feature/rot-exhausted")
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 12_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        12_000
+      )
 
       # AC2: each provider ran exactly once. No provider that timed out was
       # retried inside the round.
@@ -334,7 +337,10 @@ defmodule Arbiter.Worker.ReviewGateProviderRotationTest do
 
       pid = run_gate(task, repo, "feature/rot-single")
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 12_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        12_000
+      )
 
       assert calls(log) == ["agy"], "a single-provider pool must not reach another provider"
       assert merge_commit_count(repo) == 0
@@ -401,7 +407,10 @@ defmodule Arbiter.Worker.ReviewGateProviderRotationTest do
 
       pid = run_gate(task, repo, "feature/rot-auth")
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 12_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        12_000
+      )
 
       assert calls(log) == ["agy"], "an auth failure must not rotate to the next provider"
       assert merge_commit_count(repo) == 0
@@ -432,7 +441,10 @@ defmodule Arbiter.Worker.ReviewGateProviderRotationTest do
 
       pid = run_gate(task, repo, "feature/rot-strict")
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 12_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        12_000
+      )
 
       assert calls(log) == ["claude"],
              "gemini cannot confine writes under :strict and must never be spawned, " <>

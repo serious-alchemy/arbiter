@@ -59,18 +59,18 @@ defmodule Arbiter.Reviews.GateActivityTest do
       task = authored_task(ws, "owner/repo#424")
       {:ok, _, _} = Arbiter.Tasks.ReviewPark.park(task.id, :head_not_pushed)
 
-      assert {:gated, :review_parked, %Issue{id: id}} =
+      assert {:gated, :ticket_review_parked, %Issue{id: id}} =
                GateActivity.engaged(ws.id, 424, "owner/repo")
 
       assert id == task.id
     end
 
-    test "a worker parked at :awaiting_review_gate is gated", %{ws: ws} do
+    test "an authoring run waiting on the review gate is gated", %{ws: ws} do
       task = authored_task(ws, "owner/repo#424")
       pid = bare_worker(task.id, ws, %{branch: "feature/x"})
-      :sys.replace_state(pid, &%{&1 | status: :awaiting_review_gate})
+      :sys.replace_state(pid, &%{&1 | state: :waiting, waiting_on: :review_gate})
 
-      assert {:gated, :awaiting_review_gate, %Issue{id: id}} =
+      assert {:gated, :author_in_review, %Issue{id: id}} =
                GateActivity.engaged(ws.id, 424, "owner/repo")
 
       assert id == task.id
@@ -101,7 +101,8 @@ defmodule Arbiter.Reviews.GateActivityTest do
       task = authored_task(ws, "#424")
       {:ok, _, _} = Arbiter.Tasks.ReviewPark.park(task.id, :head_not_pushed)
 
-      assert {:gated, :review_parked, %Issue{}} = GateActivity.engaged(ws.id, 424, "owner/repo")
+      assert {:gated, :ticket_review_parked, %Issue{}} =
+               GateActivity.engaged(ws.id, 424, "owner/repo")
     end
 
     test "a closed authoring task is never gated", %{ws: ws} do
@@ -123,7 +124,8 @@ defmodule Arbiter.Reviews.GateActivityTest do
       task = authored_task(ws, "owner/repo#424")
       {:ok, _, _} = Arbiter.Tasks.ReviewPark.park(task.id, :head_not_pushed)
 
-      assert {:gated, :review_parked, %Issue{}} = GateActivity.engaged(ws.id, "424", "owner/repo")
+      assert {:gated, :ticket_review_parked, %Issue{}} =
+               GateActivity.engaged(ws.id, "424", "owner/repo")
     end
   end
 

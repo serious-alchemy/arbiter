@@ -72,10 +72,9 @@ defmodule Arbiter.Worker.ResumeSlot do
           | {:error, {:slot_cap_full, info()}}
 
   # Latest-run shapes that mean "cut off by a restart, not ended on its own
-  # terms" — the orphan sweep's reason, the graceful-shutdown status, and a row
-  # the sweep has not reached yet.
+  # terms" — the orphan sweep's reason, the graceful-shutdown outcome, and a
+  # row the sweep has not reached yet.
   @restart_failure_reasons ["server restarted", "server shutdown"]
-  @restart_statuses [:running, :interrupted]
 
   @doc """
   Decide whether a resume of `task` may start now. See the moduledoc.
@@ -138,12 +137,13 @@ defmodule Arbiter.Worker.ResumeSlot do
   @spec cut_off_by_restart?(String.t()) :: boolean()
   def cut_off_by_restart?(task_id) do
     Run
-    |> Ash.Query.filter(task_id == ^task_id and worker_type == :main)
+    |> Ash.Query.filter(task_id == ^task_id and kind == :implement)
     |> Ash.Query.sort(started_at: :desc)
     |> Ash.Query.limit(1)
     |> Ash.read!()
     |> case do
-      [%Run{status: status}] when status in @restart_statuses -> true
+      [%Run{state: state}] when state != :finished -> true
+      [%Run{outcome: :interrupted}] -> true
       [%Run{failure_reason: reason}] when reason in @restart_failure_reasons -> true
       _ -> false
     end

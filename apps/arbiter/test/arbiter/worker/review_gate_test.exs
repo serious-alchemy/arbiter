@@ -6,7 +6,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
   Stage 1 covers the four required paths plus verdict parsing:
 
-    * gate parks at `:awaiting_review_gate` (and does NOT merge) when review is
+    * gate parks the author waiting on the review gate (and does NOT merge) when review is
       required,
     * APPROVE → the branch merges (a real `git merge --no-ff` on main),
     * REQUEST_CHANGES → the branch is NOT merged, the task is parked with the
@@ -359,7 +359,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
   defp main_run(task_id) do
     Arbiter.Workers.Run
-    |> Ash.Query.filter(task_id == ^task_id and worker_type == :main)
+    |> Ash.Query.filter(task_id == ^task_id and kind == :implement and role == "base")
     |> Ash.read!()
     |> List.first()
   end
@@ -452,14 +452,16 @@ defmodule Arbiter.Worker.ReviewGateTest do
   # ---- gate behaviour ------------------------------------------------------
 
   describe "the gate" do
-    test "parks at :awaiting_review_gate and does NOT merge when review is required",
+    test "waits on the review gate and does NOT merge when review is required",
          %{repo: repo, ws: ws} do
       task = new_task(ws)
       {pid, _branch} = start_author(task, repo, %{})
 
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(pid)) end)
+      wait_until(fn ->
+        match?(%{state: :waiting, waiting_on: :review_gate}, Worker.state(pid))
+      end)
 
       # The gate held: no merge happened.
       assert merge_commit_count(repo) == 0
@@ -472,13 +474,15 @@ defmodule Arbiter.Worker.ReviewGateTest do
       {pid, _branch} = start_author(task, repo, %{})
 
       send(pid, {:__claude_session_done__, "arb done"})
-      wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(pid)) end)
+
+      wait_until(fn ->
+        match?(%{state: :waiting, waiting_on: :review_gate}, Worker.state(pid))
+      end)
 
       # The author's agent has exited; the record is parked at the gate. An
       # operator watching the stream must be told the stage changed to
       # "in review" rather than being left on the last :handing_off event.
-      assert_receive {:event,
-                      %{topic: "worker_phase", phase: "in_review", status: "awaiting_review_gate"}},
+      assert_receive {:event, %{topic: "worker_phase", phase: "in_review", state: "waiting"}},
                      2_000
     end
 
@@ -488,7 +492,10 @@ defmodule Arbiter.Worker.ReviewGateTest do
       {pid, _branch} = start_author(task, repo, %{})
 
       send(pid, {:__claude_session_done__, "arb done"})
-      wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(pid)) end)
+
+      wait_until(fn ->
+        match?(%{state: :waiting, waiting_on: :review_gate}, Worker.state(pid))
+      end)
 
       :ok = Worker.review_gate_verdict(pid, {:approve, "VERDICT: APPROVE\nlgtm"})
 
@@ -536,7 +543,10 @@ defmodule Arbiter.Worker.ReviewGateTest do
         })
 
       send(pid, {:__claude_session_done__, "arb done"})
-      wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(pid)) end)
+
+      wait_until(fn ->
+        match?(%{state: :waiting, waiting_on: :review_gate}, Worker.state(pid))
+      end)
 
       :ok = Worker.review_gate_verdict(pid, {:approve, "VERDICT: APPROVE\nlgtm"})
 
@@ -579,7 +589,10 @@ defmodule Arbiter.Worker.ReviewGateTest do
         })
 
       send(pid, {:__claude_session_done__, "arb done"})
-      wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(pid)) end)
+
+      wait_until(fn ->
+        match?(%{state: :waiting, waiting_on: :review_gate}, Worker.state(pid))
+      end)
 
       :ok = Worker.review_gate_verdict(pid, {:approve, "VERDICT: APPROVE\nlgtm"})
 
@@ -599,12 +612,15 @@ defmodule Arbiter.Worker.ReviewGateTest do
       {pid, _branch} = start_author(task, repo, %{})
 
       send(pid, {:__claude_session_done__, "arb done"})
-      wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(pid)) end)
+
+      wait_until(fn ->
+        match?(%{state: :waiting, waiting_on: :review_gate}, Worker.state(pid))
+      end)
 
       findings = "VERDICT: REQUEST_CHANGES\n- [high] feature.txt:1 needs a guard"
       :ok = Worker.review_gate_verdict(pid, {:request_changes, findings})
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end)
+      wait_until(fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end)
 
       # Not merged.
       assert merge_commit_count(repo) == 0
@@ -638,7 +654,10 @@ defmodule Arbiter.Worker.ReviewGateTest do
       {pid, _branch} = start_author(task, repo, %{})
 
       send(pid, {:__claude_session_done__, "arb done"})
-      wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(pid)) end)
+
+      wait_until(fn ->
+        match?(%{state: :waiting, waiting_on: :review_gate}, Worker.state(pid))
+      end)
 
       findings =
         "VERDICT: REQUEST_CHANGES\n\nCRITERIA:\n- [MET] does the thing — evidence\n" <>
@@ -647,7 +666,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
       :ok = Worker.review_gate_verdict(pid, {:request_changes, findings})
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end)
+      wait_until(fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end)
 
       # bd-2ddf2x: the CRITERIA breakdown (header + per-criterion lines) must be
       # skipped when picking the "top finding" line — otherwise a criteria-bearing
@@ -662,7 +681,10 @@ defmodule Arbiter.Worker.ReviewGateTest do
       {pid, _branch} = start_author(task, repo, %{})
 
       send(pid, {:__claude_session_done__, "arb done"})
-      wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(pid)) end)
+
+      wait_until(fn ->
+        match?(%{state: :waiting, waiting_on: :review_gate}, Worker.state(pid))
+      end)
 
       raw_findings =
         "VERDICT: REQUEST_CHANGES\nVERIFICATION: PARTIAL — gave up on tests\n" <>
@@ -675,7 +697,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
       :ok = Worker.review_gate_verdict(pid, {:request_changes, findings})
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end)
+      wait_until(fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end)
 
       # bd-2ddf2x: the banner line must not eat the whole failure_summary budget.
       assert Worker.state(pid).meta.failure_summary ==
@@ -688,7 +710,10 @@ defmodule Arbiter.Worker.ReviewGateTest do
       {pid, _branch} = start_author(task, repo, %{})
 
       send(pid, {:__claude_session_done__, "arb done"})
-      wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(pid)) end)
+
+      wait_until(fn ->
+        match?(%{state: :waiting, waiting_on: :review_gate}, Worker.state(pid))
+      end)
 
       raw_findings = "VERDICT: APPROVE\nVERIFICATION: PARTIAL — gave up on tests\nlgtm otherwise"
 
@@ -700,7 +725,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
       :ok = Worker.review_gate_verdict(pid, {:request_changes, findings})
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end)
+      wait_until(fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end)
 
       # bd-2ddf2x: route_approve_verdict fails closed on VERIFICATION: PARTIAL and
       # parks as :request_changes (never merges) — the summary must say so, not open
@@ -717,11 +742,14 @@ defmodule Arbiter.Worker.ReviewGateTest do
       {pid, _branch} = start_author(task, repo, %{})
 
       send(pid, {:__claude_session_done__, "arb done"})
-      wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(pid)) end)
+
+      wait_until(fn ->
+        match?(%{state: :waiting, waiting_on: :review_gate}, Worker.state(pid))
+      end)
 
       :ok = Worker.review_gate_verdict(pid, {:no_verdict, "reviewer crashed"})
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end)
+      wait_until(fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end)
       assert merge_commit_count(repo) == 0
       assert Worker.state(pid).meta.failure_reason == :review_gate_inconclusive
       # bd-2ddf2x: no VERDICT line in "reviewer crashed" — falls back to a
@@ -748,19 +776,20 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
       send(pid, {:__claude_session_done__, "arb done"})
 
-      # Straight to the merger — never parks at :awaiting_review_gate, so the
+      # Straight to the merger — never waits on the review gate, so the
       # ticket has no ReviewGate round on record.
       wait_run_ended(pid)
       assert merge_commit_count(repo) == 1
       assert is_nil(Ash.get!(Issue, task.id).review_gate_state)
     end
 
-    test "review_gate_verdict/2 is rejected outside :awaiting_review_gate", %{repo: repo, ws: ws} do
+    test "review_gate_verdict/2 is rejected unless waiting on the review gate",
+         %{repo: repo, ws: ws} do
       task = new_task(ws)
       {pid, _branch} = start_author(task, repo, %{})
 
-      # Still :running — no verdict expected yet.
-      assert {:error, {:invalid_transition, :running, :review_gate_verdict}} =
+      # Still :working — no verdict expected yet.
+      assert {:error, {:invalid_transition, :working, :review_gate_verdict}} =
                Worker.review_gate_verdict(pid, {:approve, "x"})
     end
   end
@@ -800,7 +829,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
       send(pid, {:__claude_session_done__, "arb done"})
 
       # Reviewer approves → merge fires → author completes.
-      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 6_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :succeeded}, Worker.state(pid)) end,
+        6_000
+      )
+
       assert merge_commit_count(repo) == 1
 
       # The review was run by a DISTINCT worker (different mind, different
@@ -844,7 +877,10 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 6_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :succeeded}, Worker.state(pid)) end,
+        6_000
+      )
 
       require Ash.Query
 
@@ -888,7 +924,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
       send(pid, {:__claude_session_done__, "arb done"})
 
       # First pass hangs → timeout fires → retry approves → merge.
-      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 8_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :succeeded}, Worker.state(pid)) end,
+        8_000
+      )
+
       assert merge_commit_count(repo) == 1
 
       # The retry ran under a distinct timeout-retry id (#t2 suffix), proving the
@@ -939,7 +979,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 6_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        6_000
+      )
+
       snap = Worker.state(pid)
       assert snap.meta.failure_reason == :review_gate_inconclusive
       assert snap.meta.review_gate_verdict == :no_verdict
@@ -998,7 +1042,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 8_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        8_000
+      )
+
       snap = Worker.state(pid)
       assert snap.meta.failure_reason == :review_gate_inconclusive
       assert snap.meta.review_gate_findings =~ "timed out after 1s"
@@ -1056,7 +1104,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
       {:ok, _ws} =
         Ash.update(ws, %{config: Map.put(ws.config, "review_gate", %{"timeout_ms" => 4_000})})
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 15_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        15_000
+      )
+
       snap = Worker.state(pid)
       assert snap.meta.failure_reason == :review_gate_inconclusive
 
@@ -1093,7 +1145,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 6_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        6_000
+      )
+
       assert merge_commit_count(repo) == 0
       assert Worker.state(pid).meta.failure_reason == :review_gate_rejected
 
@@ -1132,7 +1188,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 25_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        25_000
+      )
+
       assert merge_commit_count(repo) == 0
 
       assert Worker.state(pid).meta.failure_reason == :review_gate_rejected,
@@ -1213,7 +1273,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 6_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :succeeded}, Worker.state(pid)) end,
+        6_000
+      )
+
       assert merge_commit_count(repo) == 1
 
       # sync_from_origin fast-forwarded the worktree to commit2 before review;
@@ -1519,7 +1583,10 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 6_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        6_000
+      )
 
       refute File.exists?(argv_file)
       refute File.exists?(gemini_argv_file)
@@ -1748,7 +1815,10 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 6_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :succeeded}, Worker.state(pid)) end,
+        6_000
+      )
 
       require Ash.Query
 
@@ -1792,7 +1862,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 6_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :succeeded}, Worker.state(pid)) end,
+        6_000
+      )
+
       assert merge_commit_count(repo) == 1
 
       # The re-prompt ran as a distinct follow-up reviewer (its own run row under
@@ -1831,7 +1905,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 6_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        6_000
+      )
+
       assert merge_commit_count(repo) == 0
       assert Worker.state(pid).meta.failure_reason == :review_gate_rejected
 
@@ -1865,7 +1943,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 6_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        6_000
+      )
+
       assert merge_commit_count(repo) == 0
       assert Worker.state(pid).meta.failure_reason == :review_gate_inconclusive
 
@@ -1967,7 +2049,10 @@ defmodule Arbiter.Worker.ReviewGateTest do
       # visible to the final escalation by the time it runs.
       File.write!(go_file, "go")
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 6_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        6_000
+      )
 
       # Recovered as a normal REQUEST_CHANGES, NOT escalated as inconclusive —
       # the whole point of the fix.
@@ -2059,7 +2144,10 @@ defmodule Arbiter.Worker.ReviewGateTest do
       # Release round 2's re-prompt pass, which concedes its own :no_verdict.
       File.write!(go_file, "go")
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 8_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        8_000
+      )
 
       # Escalated as genuinely inconclusive — the stale round-1 verdict must
       # NOT have been recovered and dispatched as round 2's outcome.
@@ -2102,7 +2190,10 @@ defmodule Arbiter.Worker.ReviewGateTest do
           :ok = Worker.advance(pid, :claude)
           send(pid, {:__claude_session_done__, "arb done"})
 
-          wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 6_000)
+          wait_until(
+            fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+            6_000
+          )
         end)
 
       assert log =~ "no VERDICT for reviewer task=#{ReviewGate.reviewer_task_id(task.id)}"
@@ -2143,7 +2234,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 6_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        6_000
+      )
+
       assert merge_commit_count(repo) == 0
       assert Worker.state(pid).meta.failure_reason == :review_gate_inconclusive
 
@@ -2193,7 +2288,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 6_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        6_000
+      )
+
       assert merge_commit_count(repo) == 0
       assert Worker.state(pid).meta.failure_reason == :review_gate_inconclusive
 
@@ -2242,7 +2341,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 6_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        6_000
+      )
+
       assert merge_commit_count(repo) == 0
       assert Worker.state(pid).meta.failure_reason == :review_gate_inconclusive
 
@@ -2293,7 +2396,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 6_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        6_000
+      )
+
       assert merge_commit_count(repo) == 0
 
       escalations = Message.inbox("admiral", workspace_id: ws.id)
@@ -2343,7 +2450,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 6_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        6_000
+      )
+
       assert merge_commit_count(repo) == 0
       assert Worker.state(pid).meta.failure_reason == :review_gate_inconclusive
 
@@ -2385,7 +2496,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 6_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :succeeded}, Worker.state(pid)) end,
+        6_000
+      )
+
       # The findings-less verdict did NOT enter the revise loop; the re-prompt's
       # APPROVE merged. A merge at all proves the empty verdict was re-prompted.
       assert merge_commit_count(repo) == 1
@@ -2425,7 +2540,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 6_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        6_000
+      )
+
       assert merge_commit_count(repo) == 0
       assert Worker.state(pid).meta.failure_reason == :review_gate_inconclusive
     end
@@ -2471,7 +2590,10 @@ defmodule Arbiter.Worker.ReviewGateTest do
       # With the fix: round 2 empty-findings extends the cap to 3 so
       # enter_revise fires, the implementer addresses the re-prompt findings, and
       # the round-3 reviewer approves → merge.
-      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 12_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :succeeded}, Worker.state(pid)) end,
+        12_000
+      )
 
       assert merge_commit_count(repo) == 1
 
@@ -2522,7 +2644,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 14_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :succeeded}, Worker.state(pid)) end,
+        14_000
+      )
+
       # Merge proves round 2 got its reprompt (exhausted budget would have escalated).
       assert merge_commit_count(repo) == 1
 
@@ -2574,7 +2700,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 16_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :succeeded}, Worker.state(pid)) end,
+        16_000
+      )
+
       # Merge proves round 3's empty verdict was re-prompted (not treated as a
       # final round-3 cap hit) and that the implementer got to revise.
       assert merge_commit_count(repo) == 1
@@ -2620,7 +2750,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 6_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :succeeded}, Worker.state(pid)) end,
+        6_000
+      )
+
       assert merge_commit_count(repo) == 1
 
       # The re-prompt ran as a distinct follow-up reviewer, proving the partial
@@ -2660,7 +2794,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 6_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        6_000
+      )
+
       assert merge_commit_count(repo) == 0
       assert Worker.state(pid).meta.failure_reason == :review_gate_rejected
 
@@ -2718,7 +2856,10 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 6_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        6_000
+      )
 
       # Never reported as inconclusive/no-verdict: the sentinel was there.
       refute Worker.state(pid).meta.failure_reason == :review_gate_inconclusive
@@ -2775,7 +2916,10 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 6_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        6_000
+      )
 
       refute Worker.state(pid).meta.failure_reason == :review_gate_inconclusive
       assert Worker.state(pid).meta.failure_reason == :review_gate_rejected
@@ -2820,7 +2964,10 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 6_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        6_000
+      )
 
       # No partial-verification disclosure → no re-prompt burned on it.
       reprompt_id = ReviewGate.reviewer_task_id(task.id) <> "#v2"
@@ -2867,7 +3014,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 6_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        6_000
+      )
+
       assert merge_commit_count(repo) == 0
       assert Worker.state(pid).meta.failure_reason == :review_gate_rejected
 
@@ -2912,7 +3063,10 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 6_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        6_000
+      )
 
       require Ash.Query
 
@@ -2970,7 +3124,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 6_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :succeeded}, Worker.state(pid)) end,
+        6_000
+      )
+
       assert merge_commit_count(repo) == 1
 
       reprompt_id = ReviewGate.reviewer_task_id(task.id) <> "#v2"
@@ -3007,7 +3165,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 6_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :succeeded}, Worker.state(pid)) end,
+        6_000
+      )
+
       assert merge_commit_count(repo) == 1
 
       reprompt_id = ReviewGate.reviewer_task_id(task.id) <> "#v2"
@@ -3049,7 +3211,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 6_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        6_000
+      )
+
       assert merge_commit_count(repo) == 0
       assert Worker.state(pid).meta.failure_reason == :review_gate_rejected
 
@@ -3088,7 +3254,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 6_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :succeeded}, Worker.state(pid)) end,
+        6_000
+      )
+
       assert merge_commit_count(repo) == 1
 
       reprompt_id = ReviewGate.reviewer_task_id(task.id) <> "#v2"
@@ -3136,7 +3306,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 10_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        10_000
+      )
+
       assert merge_commit_count(repo) == 0
       assert Worker.state(pid).meta.failure_reason == :review_gate_rejected
 
@@ -3212,7 +3386,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 10_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :succeeded}, Worker.state(pid)) end,
+        10_000
+      )
+
       assert merge_commit_count(repo) == 1
 
       require Ash.Query
@@ -3265,7 +3443,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 10_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :succeeded}, Worker.state(pid)) end,
+        10_000
+      )
+
       assert merge_commit_count(repo) == 1
 
       require Ash.Query
@@ -3330,7 +3512,10 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 10_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :succeeded}, Worker.state(pid)) end,
+        10_000
+      )
 
       # The commit `revise_commit.sh` made — the head round 2 approved.
       {out, 0} = git(["rev-list", "-1", "--grep", "address reviewer finding F1.1", "--all"], repo)
@@ -3373,7 +3558,10 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 10_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :succeeded}, Worker.state(pid)) end,
+        10_000
+      )
 
       stamped = Ash.get!(Issue, task.id).last_reviewed_sha
       assert stamped == head
@@ -3410,7 +3598,10 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 10_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        10_000
+      )
 
       assert Ash.get!(Issue, task.id).last_reviewed_sha == nil
     end
@@ -3447,7 +3638,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 10_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :succeeded}, Worker.state(pid)) end,
+        10_000
+      )
+
       assert merge_commit_count(repo) == 1
     end
 
@@ -3482,7 +3677,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 10_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        10_000
+      )
+
       assert merge_commit_count(repo) == 0
       assert Worker.state(pid).meta.failure_reason == :review_gate_rejected
     end
@@ -3529,7 +3728,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 10_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :succeeded}, Worker.state(pid)) end,
+        10_000
+      )
+
       assert merge_commit_count(repo) == 1
 
       escalations = Message.inbox("admiral", workspace_id: ws.id)
@@ -3592,7 +3795,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 10_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :succeeded}, Worker.state(pid)) end,
+        10_000
+      )
+
       assert merge_commit_count(repo) == 1
 
       refute Ash.get!(Issue, task.id) |> Arbiter.Tasks.ReviewPark.parked?()
@@ -3745,7 +3952,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
       send(pid, {:__claude_session_done__, "arb done"})
 
       # Round 1 rejects → implementer revises → round 2 approves → merge.
-      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 8_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :succeeded}, Worker.state(pid)) end,
+        8_000
+      )
+
       assert merge_commit_count(repo) == 1
 
       # A distinct implementer worker ran between the rounds (its own run row
@@ -3849,7 +4060,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
       # approves → merge. No timeout escalation anywhere in between.
       wait_run_ended(pid, 12_000)
       assert merge_commit_count(repo) == 1
-      assert %{status: :completed, failure_reason: nil} = main_run(task.id)
+      assert %{state: :finished, outcome: :succeeded, failure_reason: nil} = main_run(task.id)
 
       review_id = ReviewGate.reviewer_task_id(task.id)
       runs = Ash.read!(Arbiter.Workers.Run)
@@ -3922,7 +4133,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
       # timeout escalation or spurious timeout-retry run anywhere in between.
       wait_run_ended(pid, 12_000)
       assert merge_commit_count(repo) == 1
-      assert %{status: :completed, failure_reason: nil} = main_run(task.id)
+      assert %{state: :finished, outcome: :succeeded, failure_reason: nil} = main_run(task.id)
 
       review_id = ReviewGate.reviewer_task_id(task.id)
       runs = Ash.read!(Arbiter.Workers.Run)
@@ -3983,7 +4194,10 @@ defmodule Arbiter.Worker.ReviewGateTest do
       send(pid, {:__claude_session_done__, "arb done"})
 
       # Round 1 rejects → huge revise → round 2 approves → merge.
-      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 12_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :succeeded}, Worker.state(pid)) end,
+        12_000
+      )
 
       review_id = ReviewGate.reviewer_task_id(task.id)
       thread = Message.thread(task.id, workspace_id: ws.id)
@@ -4041,7 +4255,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 8_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        8_000
+      )
+
       assert merge_commit_count(repo) == 0
       assert Worker.state(pid).meta.failure_reason == :review_gate_rejected
 
@@ -4121,7 +4339,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 6_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        6_000
+      )
+
       assert merge_commit_count(repo) == 0
       assert Worker.state(pid).meta.failure_reason == :review_gate_rejected
 
@@ -4171,7 +4393,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 8_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        8_000
+      )
+
       assert merge_commit_count(repo) == 0
       assert Worker.state(pid).meta.failure_reason == :review_gate_inconclusive
 
@@ -4245,7 +4471,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 8_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        8_000
+      )
+
       assert merge_commit_count(repo) == 0
       assert Worker.state(pid).meta.failure_reason == :review_gate_inconclusive
 
@@ -4320,7 +4550,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 8_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :succeeded}, Worker.state(pid)) end,
+        8_000
+      )
+
       assert merge_commit_count(repo) == 1
 
       review_id = ReviewGate.reviewer_task_id(task.id)
@@ -4373,7 +4607,10 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 8_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :succeeded}, Worker.state(pid)) end,
+        8_000
+      )
 
       # The branch merged — the fix was real, just not a file change — and the
       # task never got parked as an idle-worker liveness failure.
@@ -4435,7 +4672,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 8_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        8_000
+      )
+
       assert merge_commit_count(repo) == 0
 
       parked = Ash.get!(Issue, task.id)
@@ -4448,7 +4689,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
         |> Ash.read!()
         |> List.first()
 
-      assert run.status == :review_parked
+      assert run.outcome == :failed
 
       escalations = Message.inbox("admiral", workspace_id: ws.id)
       escalation = Enum.find(escalations, &(&1.directive_ref == task.id))
@@ -4784,7 +5025,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
       # Return to main so the repo state is clear.
       {_, 0} = git(["checkout", "-q", "main"], repo)
 
-      # Park the author worker at :awaiting_review_gate via review_spawn: false so
+      # Park the author worker on the review gate via review_spawn: false so
       # the worker commit gate does NOT fire (no worktree_path in meta → gate
       # skips). We then start a ReviewGate manually, pointing at a worktree that is
       # actually on feature/no-commits with 0 commits ahead.
@@ -4803,7 +5044,10 @@ defmodule Arbiter.Worker.ReviewGateTest do
       on_exit(fn -> if Process.alive?(author), do: GenServer.stop(author, :normal) end)
       :ok = Worker.advance(author, :claude)
       send(author, {:__claude_session_done__, "arb done"})
-      wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(author)) end)
+
+      wait_until(fn ->
+        match?(%{state: :waiting, waiting_on: :review_gate}, Worker.state(author))
+      end)
 
       # Switch the branch worktree to `feature/no-commits` so the ReviewGate sees
       # the branch with 0 commits ahead. We use a fresh sub-worktree for this.
@@ -4838,7 +5082,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
         )
 
       # The ReviewGate should report :request_changes immediately (no reviewer spawn).
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(author)) end, 4_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(author)) end,
+        4_000
+      )
+
       snap = Worker.state(author)
       assert snap.meta.failure_reason == :review_gate_rejected
       assert snap.meta.review_gate_findings =~ "no commits ahead"
@@ -4928,7 +5176,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
       {_, 0} = git(["commit", "-q", "-m", "fleet readme"], repo)
       {_, 0} = git(["push", "-q", "origin", "main"], repo)
 
-      # Park the author at :awaiting_review_gate (review_spawn: false, no
+      # Park the author on the review gate (review_spawn: false, no
       # worktree_path so the worker commit gate skips).
       meta = %{
         branch: branch,
@@ -4945,7 +5193,10 @@ defmodule Arbiter.Worker.ReviewGateTest do
       on_exit(fn -> if Process.alive?(author), do: GenServer.stop(author, :normal) end)
       :ok = Worker.advance(author, :claude)
       send(author, {:__claude_session_done__, "arb done"})
-      wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(author)) end)
+
+      wait_until(fn ->
+        match?(%{state: :waiting, waiting_on: :review_gate}, Worker.state(author))
+      end)
 
       # The reviewer command must NEVER run — the gate escalates on conflict first.
       {:ok, _gate} =
@@ -4961,7 +5212,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
           timeout_ms: 5_000
         )
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(author)) end, 6_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(author)) end,
+        6_000
+      )
+
       snap = Worker.state(author)
       assert snap.meta.failure_reason == :review_gate_rejected
       assert snap.meta.review_gate_findings =~ "conflicts with its target"
@@ -5105,8 +5360,8 @@ defmodule Arbiter.Worker.ReviewGateTest do
   end
 
   describe "PR opened before the reviewer (bd-129xh4)" do
-    # With a hosted merger configured, the author must OPEN the PR before parking
-    # at :awaiting_review_gate — so the reviewer has a real PR to review. The
+    # With a hosted merger configured, the author must OPEN the PR before waiting
+    # on the review gate — so the reviewer has a real PR to review. The
     # open must NOT merge; the merge still happens later, on APPROVE.
     test "opens the PR (without merging) before the review gate, recording pr_ref",
          %{repo: repo, ws: ws} do
@@ -5119,7 +5374,10 @@ defmodule Arbiter.Worker.ReviewGateTest do
         start_author(task, repo, %{merger_adapter_override: Arbiter.Test.StubMerger})
 
       send(pid, {:__claude_session_done__, "arb done"})
-      wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(pid)) end)
+
+      wait_until(fn ->
+        match?(%{state: :waiting, waiting_on: :review_gate}, Worker.state(pid))
+      end)
 
       # The PR was opened before the gate, but NOT merged yet.
       assert Arbiter.Test.StubMerger.last_open() != nil,
@@ -5160,7 +5418,10 @@ defmodule Arbiter.Worker.ReviewGateTest do
         })
 
       send(pid, {:__claude_session_done__, "arb done"})
-      wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(pid)) end)
+
+      wait_until(fn ->
+        match?(%{state: :waiting, waiting_on: :review_gate}, Worker.state(pid))
+      end)
 
       :ok = Worker.review_gate_verdict(pid, {:approve, "VERDICT: APPROVE\nlgtm"})
 
@@ -5181,7 +5442,10 @@ defmodule Arbiter.Worker.ReviewGateTest do
         start_author(task, repo, %{merger_adapter_override: Arbiter.Test.StubMerger})
 
       send(pid, {:__claude_session_done__, "arb done"})
-      wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(pid)) end)
+
+      wait_until(fn ->
+        match?(%{state: :waiting, waiting_on: :review_gate}, Worker.state(pid))
+      end)
 
       opened = Arbiter.Test.StubMerger.last_open()
       assert opened != nil, "pre-review PR must have been opened"
@@ -5208,7 +5472,10 @@ defmodule Arbiter.Worker.ReviewGateTest do
         start_author(task, repo, %{merger_adapter_override: Arbiter.Test.StubMerger})
 
       send(pid, {:__claude_session_done__, "arb done"})
-      wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(pid)) end)
+
+      wait_until(fn ->
+        match?(%{state: :waiting, waiting_on: :review_gate}, Worker.state(pid))
+      end)
 
       opened = Arbiter.Test.StubMerger.last_open()
       assert opened != nil, "pre-review PR must have been opened"
@@ -5234,7 +5501,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
       # A direct :snapshot also answers gracefully instead of crashing.
       assert %{role: :review_gate, status: :reviewing} = GenServer.call(review_gate, :snapshot)
       # Gate intact: the author is still parked, nothing merged.
-      assert %{status: :awaiting_review_gate} = Worker.state(pid)
+      assert %{state: :waiting, waiting_on: :review_gate} = Worker.state(pid)
       assert merge_commit_count(repo) == 0
     end
 
@@ -5246,9 +5513,13 @@ defmodule Arbiter.Worker.ReviewGateTest do
       # Kill the gate before it can deliver a verdict.
       Process.exit(review_gate, :kill)
 
-      # The author must escalate to :failed (no_verdict) — NOT hang at
-      # :awaiting_review_gate — and must NOT merge.
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 4_000)
+      # The author must finish :failed (no_verdict) — NOT hang waiting on the
+      # review gate — and must NOT merge.
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        4_000
+      )
+
       assert merge_commit_count(repo) == 0
     end
   end
@@ -5287,7 +5558,12 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
     :ok = Worker.advance(pid, :claude)
     send(pid, {:__claude_session_done__, "arb done"})
-    wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(pid)) end, 4_000)
+
+    wait_until(
+      fn -> match?(%{state: :waiting, waiting_on: :review_gate}, Worker.state(pid)) end,
+      4_000
+    )
+
     pid
   end
 
@@ -5347,7 +5623,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
       send(pid, {:__claude_session_done__, "arb done"})
 
       # Round 1 rejects → revise → round 2 approves → merge.
-      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 8_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :succeeded}, Worker.state(pid)) end,
+        8_000
+      )
+
       assert merge_commit_count(repo) == 1
     end
 
@@ -5396,7 +5676,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
       # The workspace cap of 2 is less than the D3 difficulty default of 4.
       # After 2 rounds of rejections the ReviewGate escalates — not 4.
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 10_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        10_000
+      )
+
       assert merge_commit_count(repo) == 0
       assert Worker.state(pid).meta.failure_reason == :review_gate_rejected
 

@@ -11,7 +11,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   |----------------------|------------------------------------------------------------|
   | completed            | `<title> completed in <duration>`                          |
   | failed               | `<title> failed after <duration> — exit code <N>`          |
-  | awaiting_review      | `<title> opened MR <mr_ref> — awaiting review`             |
+  | waiting              | `<title> — awaiting review` (the run is waiting on you)    |
   | awaiting_review_stuck| `<title> stuck at awaiting_review (MR <mr_ref>) — escalated` |
 
   Directive-closed events are intentionally **not** posted — too noisy.
@@ -111,7 +111,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
           optional(:meta) => map() | nil,
           # A map type built only from `required/1` + `optional/1` literal keys
           # is CLOSED: dialyzer rejects any map carrying a key not listed. Every
-          # real caller passes `Arbiter.Worker.snapshot/1`'s full map (`:status`,
+          # real caller passes `Arbiter.Worker.snapshot/1`'s full map (`:state`,
           # `:role`, `:current_step`, `:mr_ref`, `:registry_key`, ...), so
           # without this the doc above ("extra keys are ignored") is a lie the
           # type does not permit and every call site is a `:call` warning.
@@ -126,9 +126,12 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   @spec failed(snapshot()) :: :ok
   def failed(snapshot), do: post(:failed, snapshot)
 
-  @doc "Post the `:awaiting_review` lifecycle notification. Best-effort, returns `:ok`."
-  @spec awaiting_review(snapshot()) :: :ok
-  def awaiting_review(snapshot), do: post(:awaiting_review, snapshot)
+  @doc """
+  Post the `:waiting` lifecycle notification — the run is `:waiting` on a
+  question for you (bd-1uu19b). Best-effort, returns `:ok`.
+  """
+  @spec waiting(snapshot()) :: :ok
+  def waiting(snapshot), do: post(:waiting, snapshot)
 
   @doc """
   Post a `:pipeline_failed` notification. Best-effort, returns `:ok`. Fired by
@@ -152,8 +155,8 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
 
   @doc """
   Post the `:awaiting_review_stuck` watchdog notification. Best-effort, returns
-  `:ok`. Fired by `Arbiter.Worker.Watchdog` when a worker has been parked at
-  `:awaiting_review` past its poll cap without a terminal MR outcome — so a
+  `:ok`. Fired by `Arbiter.Worker.Watchdog` when a ticket's PR has sat past its
+  poll cap without a terminal MR outcome — so a
   silent hang surfaces to the operator instead of waiting forever (bd-66ey1o).
   """
   @spec awaiting_review_stuck(snapshot(), String.t() | nil) :: :ok
@@ -1824,8 +1827,8 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   end
 
   # bd-8lq2g7: a *subordinate* pass (merge-queue CI fix pass / conflict
-  # resolver) runs under the task's own id but its own registry key, alongside
-  # the task's primary worker parked at `:awaiting_review`. Its death is not the
+  # resolver) runs under the task's own id, after the task's own run opened
+  # its PR. Its death is not the
   # task's worker dying, and the generic payload below said it was — subject
   # `"<task_id> stopped — exited without completing (exit 0)"` with the
   # remediation "run `arb worker resume <task_id>`". That hint is both wrong and
@@ -2085,7 +2088,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
     end
   end
 
-  defp build(:awaiting_review, %{task_id: task_id} = snapshot) do
+  defp build(:waiting, %{task_id: task_id} = snapshot) do
     base(task_id, snapshot, "awaiting review", fn title ->
       case mr_ref(snapshot) do
         nil -> "#{title} — awaiting review"

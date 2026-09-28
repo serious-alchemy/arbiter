@@ -664,10 +664,11 @@ defmodule Arbiter.Agents.ProviderRoutingTest do
         base_task_id: task.id,
         repo: "r",
         workspace_id: ws.id,
-        worker_type: :review,
+        kind: :review,
         provider: "claude",
         model: "claude-opus-4-8",
-        status: :completed,
+        state: :finished,
+        outcome: :succeeded,
         started_at: DateTime.utc_now()
       })
 

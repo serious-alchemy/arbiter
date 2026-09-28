@@ -102,7 +102,7 @@ defmodule Arbiter.Loop.Canary.Metrics do
       SELECT id AS run_id, task_id, difficulty_at_dispatch
       FROM worker_runs
       WHERE workspace_id = ?1
-        AND worker_type = 'main'
+        AND kind = 'implement' AND COALESCE(role, 'base') = 'base'
         AND started_at >= ?2
       """,
       [workspace_id, DateTime.to_iso8601(canary.started_at)]

@@ -2,8 +2,8 @@ defmodule ArbiterCli.Cmd.Worker do
   @moduledoc """
   Worker subcommand router:
 
-      arb worker list             — list active workers with status + step
-      arb worker show <task-id>   — full snapshot incl. recent Claude output
+      arb worker list             — each ticket with a live run: its current run's kind + state
+      arb worker show <task-id>   — the ticket's current run (incl. recent output) + its recent runs
       arb worker runs <task-id>   — list every historical run for the task
       arb worker log <task-id>    — full uncapped durable transcript (audit)
       arb worker stop <task-id>   — terminate a running worker cleanly
@@ -26,13 +26,15 @@ defmodule ArbiterCli.Cmd.Worker do
   the server refuses, naming the cap and the tasks holding it; `--force` goes
   over the cap anyway, and the override is recorded.
 
-  `show` reports a live worker's full snapshot when one is running. When no
-  live worker exists for the task it falls back to the most recent historical
-  run (status, started/completed times, failure reason, and any retained
-  output), so finished or exited runs stay inspectable. `runs` lists *every*
-  recorded run for the task (main, review, and impl workers) newest-first —
-  use it to see how many times a task was worked, by whom, and the outcome of
-  each. `show`'s output is the bounded UI tail (capped); `log` returns the
+  `list` and `show` read the same thing (bd-1uu19b): a ticket's current run,
+  in one run vocabulary — its kind (`implement`, `review`, `fix_pass`,
+  `conflict`), its state (`starting`, `working`, `waiting`, `finished`) and,
+  once finished, its outcome (`succeeded`, `failed`, `interrupted`,
+  `handed_off`). The current run is the ticket's live run when it has one,
+  else its latest run; `show` adds its recent runs, each labelled with its
+  kind. `runs` lists *every* recorded run for the task newest-first — use it
+  to see how many times a task was worked, by what kind of run, and the
+  outcome of each. `show`'s output is the bounded UI tail (capped); `log` returns the
   **full, uncapped** transcript of the task's most recent run from the durable
   on-disk store — the audit source of record, retaining every line however
   long the run.
@@ -41,7 +43,7 @@ defmodule ArbiterCli.Cmd.Worker do
   the repo and model.
   """
 
-  alias ArbiterCli.{Client, Output}
+  alias ArbiterCli.{Client, Output, RunLabel}
 
   @switches [
     json: :boolean,
@@ -208,21 +210,16 @@ defmodule ArbiterCli.Cmd.Worker do
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp emit_show(snap, :text) do
     if snap["source"] == "history" do
-      IO.puts("(no live worker — showing most recent historical run)")
+      IO.puts("(no live run — showing the ticket's latest run)")
     end
 
     IO.puts("Issue:       #{snap["task_id"]}")
-    if snap["worker_type"], do: IO.puts("Type:       #{snap["worker_type"]}")
+    IO.puts("Run:        #{RunLabel.label(snap)}")
 
-    # bd-8lq2g7: a merge-queue subordinate pass shares the task's id but runs
-    # under its own registry key, alongside the task's own worker. Say so, so a
-    # stalled/failed pass isn't mistaken for the task's worker.
-    if snap["role"] && snap["registry_key"] != snap["task_id"] do
-      IO.puts("Role:       #{snap["role"]} (subordinate pass — not the task's own worker)")
-      IO.puts("Worker key: #{snap["registry_key"]}")
+    # A ReviewGate reviewer / implementer runs under its own `<ticket>#…` id.
+    if snap["run_task_id"] && snap["run_task_id"] != snap["task_id"] do
+      IO.puts("Run id:     #{snap["run_task_id"]}")
     end
-
-    IO.puts("Status:     #{snap["status"]}")
 
     # bd-aw2cyt: the record's status outlives its agent. Say which phase the
     # work is actually in, and whether anything is running for it at all.
@@ -254,6 +251,25 @@ defmodule ArbiterCli.Cmd.Worker do
         IO.puts("\nOutput (#{length(lines)} lines, oldest first):")
         Enum.each(lines, fn line -> IO.puts("  | #{line}") end)
     end
+
+    emit_recent_runs(snap["runs"] || [])
+  end
+
+  # bd-1uu19b: the ticket's recent runs, each labelled with its kind; `*`
+  # marks the current one.
+  defp emit_recent_runs([]), do: :ok
+
+  defp emit_recent_runs(runs) do
+    IO.puts("\nRuns (#{length(runs)}, newest first):")
+
+    Enum.each(runs, fn r ->
+      mark = if r["current"], do: "*", else: " "
+      completed = if r["completed_at"], do: "  completed=#{r["completed_at"]}", else: ""
+
+      IO.puts(
+        "  #{mark} #{r["run_id"]}  #{RunLabel.label(r)}  started=#{r["started_at"]}#{completed}"
+      )
+    end)
   end
 
   defp emit_runs(_task_id, list, :json), do: IO.puts(Jason.encode!(%{"data" => list}))
@@ -270,7 +286,7 @@ defmodule ArbiterCli.Cmd.Worker do
       completed = r["completed_at"] || "—"
 
       IO.puts(
-        "  #{r["id"]}  type=#{r["worker_type"]}  status=#{r["status"]}  " <>
+        "  #{r["id"]}  #{RunLabel.label(r)}  " <>
           "started=#{r["started_at"]}  completed=#{completed}#{model_part}"
       )
 
@@ -281,14 +297,14 @@ defmodule ArbiterCli.Cmd.Worker do
 
   # bd-aje6fj: an `interrupted` run (shut down with the server) carries its
   # cause in failure_reason too, but it is not a failure — don't label it one.
-  defp reason_label(%{"status" => "interrupted"}), do: "reason"
+  defp reason_label(%{"outcome" => "interrupted"}), do: "reason"
   defp reason_label(_run), do: "failure"
 
   # bd-1eb6fc: `failure_summary` also carries a non-failure completion note on
-  # a `:completed` run (arb done fired with a background task still RUNNING)
-  # — same reason_label/1 pattern above, so a completed run isn't labeled
+  # a succeeded run (arb done fired with a background task still RUNNING)
+  # — same reason_label/1 pattern above, so a succeeded run isn't labeled
   # with the word "failure" it didn't have.
-  defp summary_label(%{"status" => "completed"}), do: "note"
+  defp summary_label(%{"outcome" => "succeeded"}), do: "note"
   defp summary_label(_run), do: "failure summary"
 
   defp emit_log(data, :json), do: IO.puts(Jason.encode!(data))
@@ -378,8 +394,9 @@ defmodule ArbiterCli.Cmd.Worker do
       phase_part = if p["phase"], do: "  phase=#{p["phase"]}", else: ""
 
       IO.puts(
-        "  #{p["task_id"]}  status=#{p["status"]}#{phase_part}#{agent_note(p)}  #{step}  " <>
-          "repo=#{p["repo"]}  started=#{p["started_at"]}#{model_part}#{cost_part}"
+        "  #{p["task_id"]}  #{RunLabel.label(p)}#{phase_part}#{agent_note(p)}  #{step}  " <>
+          "repo=#{p["repo"]}  started=#{p["started_at"]}#{model_part}#{cost_part}" <>
+          RunLabel.run_suffix(p)
       )
     end)
   end

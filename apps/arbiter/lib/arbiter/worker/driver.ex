@@ -11,8 +11,8 @@ defmodule Arbiter.Worker.Driver do
   ### Claude-driven mode (`claude_driven: true`)
 
   A Claude subprocess is doing the real work; the Driver does NOT tick the
-  Machine. Instead it polls the worker's status and closes the task when
-  the worker reaches `:completed` (typically triggered by Claude printing
+  Machine. Instead it polls the worker's run state and closes the task when
+  the run finishes `:succeeded` (typically triggered by Claude printing
   `arb done` on stdout — see `Worker.ClaudeSession`).
 
   This mode resolves the Driver/Claude race that `arb dispatch --with-claude`
@@ -30,22 +30,23 @@ defmodule Arbiter.Worker.Driver do
   ## Lifecycle (claude-driven mode)
 
   - On start: schedules the first worker check.
-  - On each check: reads worker status:
-    - `:completed` → finalize the task (a `:merged` completion routes through
+  - On each check: reads the worker's run state:
+    - `:finished` / `:succeeded` → finalize the task (a `:merged` completion routes through
       `Arbiter.Tasks.Verification.finalize_merged/2`, so a `verify_after_deploy`
       task parks at `:awaiting_verification` rather than closing), optionally
       cleanup worktree, stop. A run that completed by opening its PR
       (`result: :pr_opened`, bd-741sid) finalizes nothing: its ticket is
       Merging, and the ticket's Watchdog closes it when the PR merges.
-    - `:failed` → log, stop (task remains `:in_progress` for inspection).
-    - `:idle | :running | :awaiting | :awaiting_review_gate` → schedule next
-      check (the ReviewGate, not the Driver, drives `:awaiting_review_gate` to
+    - `:finished` otherwise → log, stop (task remains `:in_progress` for
+      inspection).
+    - `:starting | :working | :waiting` → schedule next check (the
+      ReviewGate, not the Driver, drives a run waiting on the review gate to
       its verdict).
 
   ## Shared lifecycle
 
   - On worker or machine `:DOWN`: stop cleanly; if the machine died first
-    (workflow mode), mark the worker `:failed`.
+    (workflow mode), finish the run `:failed`.
 
   ## Safety backstops
 
@@ -160,7 +161,7 @@ defmodule Arbiter.Worker.Driver do
     # stranded. This handles the race where the Watchdog calls Worker.complete
     # in the same window the Driver's tick budget expires (bd-d1jp4r).
     case safe_worker_state(state.worker_pid) do
-      %{status: :completed} = worker_state ->
+      %{state: :finished, outcome: :succeeded} = worker_state ->
         # bd-cw3w9p: review_only tasks are long-lived engagements (ReviewPatrol).
         # The Driver must NOT auto-close them — they stay :in_progress so
         # ReviewPatrol can keep engaging on subsequent commits.
@@ -175,13 +176,13 @@ defmodule Arbiter.Worker.Driver do
         maybe_cleanup_worktree(state)
         {:stop, :normal, state}
 
-      %{status: status} when status in [:awaiting_review_gate, :awaiting_review] ->
+      %{state: :waiting, waiting_on: :review_gate} ->
         # bd-7b46wd: the tick budget was spent on active worker work, but the
-        # worker has since handed off to the ReviewGate (review gate) or the
-        # Watchdog (merge poller). Both own the terminal transition and have
-        # their own watchdogs, so giving up here would strand a task that is
-        # legitimately mid-merge. Keep waiting for :completed rather than
-        # stopping — same reasoning as the pre-max_ticks handler below.
+        # worker has since handed off to the ReviewGate (review gate), which
+        # owns the terminal transition and has its own bounds, so giving up
+        # here would strand a task that is legitimately mid-review. Keep
+        # waiting for the run to finish rather than stopping — same reasoning
+        # as the pre-max_ticks handler below.
         Process.send_after(self(), :check_worker, state.interval_ms)
         {:noreply, state}
 
@@ -197,7 +198,7 @@ defmodule Arbiter.Worker.Driver do
 
   def handle_info(:check_worker, state) do
     case safe_worker_state(state.worker_pid) do
-      %{status: :completed} = worker_state ->
+      %{state: :finished, outcome: :succeeded} = worker_state ->
         # bd-cw3w9p: review_only tasks are long-lived engagements (ReviewPatrol).
         # The Driver must NOT auto-close them — they stay :in_progress so
         # ReviewPatrol can keep engaging on subsequent commits.
@@ -209,7 +210,7 @@ defmodule Arbiter.Worker.Driver do
         maybe_cleanup_worktree(state)
         {:stop, :normal, state}
 
-      %{status: :failed} = worker_state ->
+      %{state: :finished} = worker_state ->
         # bd-21bmdh: an auth death reclaims its debris and returns the task to
         # Ready (behind the provider's AuthHold). Every other failure keeps the
         # task :in_progress exactly as before.
@@ -231,19 +232,18 @@ defmodule Arbiter.Worker.Driver do
         maybe_cleanup_worktree(state)
         {:stop, :normal, state}
 
-      %{status: status} when status in [:idle, :running, :awaiting] ->
+      %{state: :waiting, waiting_on: :review_gate} ->
+        # A distinct reviewer worker (ReviewGate) is evaluating the diff; it
+        # will report a verdict that opens the PR or parks. Not "Claude stuck"
+        # — an externally owned hand-off, so it burns no tick budget: the
+        # ReviewGate has its own bounds.
+        Process.send_after(self(), :check_worker, state.interval_ms)
+        {:noreply, state}
+
+      %{state: run_state} when run_state in [:starting, :working, :waiting] ->
         # Active states — Claude is working; count against the tick budget.
         Process.send_after(self(), :check_worker, state.interval_ms)
         {:noreply, %{state | ticks: state.ticks + 1}}
-
-      %{status: status} when status in [:awaiting_review_gate, :awaiting_review] ->
-        # :awaiting_review_gate — a distinct reviewer worker (ReviewGate) is
-        # evaluating the diff; it will report a verdict that opens the PR or
-        # parks. Not "Claude stuck" — an externally owned hand-off, so it burns
-        # no tick budget: the ReviewGate has its own bounds. (`:awaiting_review`
-        # is a status no run reaches since bd-741sid.)
-        Process.send_after(self(), :check_worker, state.interval_ms)
-        {:noreply, state}
 
       nil ->
         # Worker snapshot unavailable (process likely dead) — the :DOWN
@@ -613,9 +613,9 @@ defmodule Arbiter.Worker.Driver do
   # Driver never started, never stops, and whose agents may well be mid-run in
   # the very directory it is about to delete.
   #
-  # The Driver's OWN worker is exempt once it is terminal: `:failed` runs
-  # `fail_now/2` (which SIGKILLs the agent before the status flips, bd-7a0pi8)
-  # and `:completed` reaches here only after `close_task/2` stopped it, so in
+  # The Driver's OWN worker is exempt once its run is finished: a failure runs
+  # `fail_now/2` (which SIGKILLs the agent before the state flips, bd-7a0pi8)
+  # and a success reaches here only after `close_task/2` stopped it, so in
   # both cases its agent is provably dead even though the GenServer may linger.
   # A non-terminal own worker — the max_ticks giving-up branch, where nothing
   # failed it — is NOT exempt: its agent can still be running.
@@ -643,7 +643,7 @@ defmodule Arbiter.Worker.Driver do
 
   defp agent_terminal?(pid) do
     case safe_worker_state(pid) do
-      %{status: status} -> status in [:completed, :failed]
+      %{state: run_state} -> run_state == :finished
       _ -> false
     end
   end

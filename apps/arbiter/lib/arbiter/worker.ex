@@ -5,41 +5,50 @@ defmodule Arbiter.Worker do
   → submit).
 
   This module is the Phase 2 skeleton — it provides the lifecycle, registry,
-  and status FSM. The actual workflow logic ships separately as the
+  and run state FSM. The actual workflow logic ships separately as the
   `Arbiter.Worker.Workflow` behaviour (gte-014) and the driver that walks
   steps lives in a later phase.
 
-  ## Status FSM
+  ## Run state FSM (bd-1uu19b)
 
-      :idle              → :running           (advance/2 from :idle)
-      :idle              → :failed            (fail/2 — "stillborn" worker, e.g.
+  A worker is one run of its ticket, and speaks the one run vocabulary
+  (`Arbiter.Workers.RunState`) its durable `Arbiter.Workers.Run` row speaks:
+  a `kind`, a `state`, and once `:finished` an `outcome`.
+
+      :starting          → :working           (advance/2 — a fresh dispatch, or a
+                                              resume re-attaching to its worktree)
+      :starting          → :finished/:failed  (fail/2 — "stillborn" worker, e.g.
                                               machine died before any step ran)
-      :failed            → :running           (advance/2 — defense-in-depth: a re-slung
+      :finished/:failed  → :working           (advance/2 — defense-in-depth: a re-slung
                                               failed worker is normally replaced by a
                                               fresh one (dispatch.ex bd-d70whv), but if for
                                               any reason the stale worker is reused,
-                                              advance resets it to :running so arb-done
+                                              advance resets it to :working so arb-done
                                               is processed instead of silently ignored)
-      :running           → :awaiting          (await/2 — parked, generic external wait)
-      :awaiting          → :running           (resume/1)
-      :running           → :awaiting_review_gate (arb-done when review is required)
-      :awaiting_review_gate → :completed         (review_gate_verdict/2 :approve → PR opened)
-      :awaiting_review_gate → :failed            (review_gate_verdict/2 reject → parked)
-      :failed            → :completed         (review_gate_verdict/2 :approve, and the
+      :working           → :waiting           (await/2 — the agent asked a question;
+                                              `waiting_on: :question`)
+      :waiting           → :working           (resume/1)
+      :working           → :waiting           (arb-done when review is required;
+                                              `waiting_on: :review_gate`)
+      :waiting (review)  → :finished/:succeeded (review_gate_verdict/2 :approve → PR opened)
+      :waiting (review)  → :finished/:failed    (review_gate_verdict/2 reject → parked)
+      :finished/:failed  → :finished/:succeeded (review_gate_verdict/2 :approve, and the
                                               run is terminal *only* because of an earlier
                                               ReviewGate rejection — bd-3wumco)
-      :running           → :completed         (open_mr/5 — PR opened; the run ends)
-      :running           → :completed         (complete/2 — normal exit)
-      :running           → :failed            (fail/2)
-      :awaiting          → :failed            (fail/2)
+      :working           → :finished/:succeeded (open_mr/5 — PR opened; the run ends)
+      :working           → :finished/:succeeded (complete/2 — normal exit)
+      :working           → :finished/:failed    (fail/2)
+      :waiting           → :finished/:failed    (fail/2)
 
   Illegal transitions return `{:error, {:invalid_transition, from, to}}`.
+  `:interrupted` is written to the row only, by `terminate/2` on a node stop;
+  `:handed_off` is written to a prior run's row when a resume supersedes it.
 
-  ## Review gate (`:awaiting_review_gate`)
+  ## Review gate (`waiting_on: :review_gate`)
 
   A standing order: a worker must not merge its own work. When the worker's
   `arb done` fires and the workspace requires review
-  (`Workspace.review_required?/1`), the worker parks at `:awaiting_review_gate` and
+  (`Workspace.review_required?/1`), the worker waits on the review gate and
   spawns an `Arbiter.Worker.ReviewGate` — which runs a **distinct** reviewer
   worker over the diff — *instead of* calling the merger. The ReviewGate reports a
   verdict back via `review_gate_verdict/2`: APPROVE proceeds to `do_open_mr` (the
@@ -52,11 +61,11 @@ defmodule Arbiter.Worker do
   The gate's revise loop can outlive the round that parked the author: an early
   round requests changes, the author goes terminal with
   `failure_reason: :review_gate_rejected`, and a later round then converges to
-  APPROVE. That approval used to arrive at a worker already at `:failed`, be
+  APPROVE. That approval used to arrive at a worker already finished `:failed`, be
   refused as an invalid transition, and be discarded by the gate — leaving an
   approved branch with green CI and no merge handoff at all.
 
-  A `{:approve, _}` verdict is therefore accepted from `:failed` **when the only
+  A `{:approve, _}` verdict is therefore accepted from a failed run **when the only
   reason the run is terminal is the review gate** (`failure_reason` is
   `:review_gate_rejected` or `:review_gate_inconclusive`). The rejection's meta is
   cleared, `:review_gate_reconciled_from` records what was overturned, the
@@ -91,7 +100,7 @@ defmodule Arbiter.Worker do
   The spec gave us a choice between an `advance(pid, :__awaiting__)` sentinel
   and a split API (`advance/2`, `await/2`, `resume/1`, `complete/2`,
   `fail/2`). We picked the split API: each verb has a single meaning, the
-  status FSM lives in dispatch heads rather than in a dictionary of sentinels,
+  state FSM lives in dispatch heads rather than in a dictionary of sentinels,
   and the type signature is honest about what `advance/2` does (change the
   workflow step, not change the lifecycle state).
 
@@ -124,16 +133,11 @@ defmodule Arbiter.Worker do
   alias Arbiter.Worker.ReviewVerification
   alias Arbiter.Workflows.ReviewGateFixRoundDispatcher, as: FixRound
 
-  @typedoc "Lifecycle status — distinct from `Issue.status`."
-  @type status ::
-          :idle
-          | :resuming
-          | :running
-          | :awaiting
-          | :awaiting_review_gate
-          | :awaiting_review
-          | :completed
-          | :failed
+  @typedoc "The run's state — see `Arbiter.Workers.RunState`. Never the ticket's."
+  @type run_state :: Arbiter.Workers.RunState.state()
+
+  @typedoc "What a `:waiting` run waits on; nil in every other state."
+  @type waiting_on :: :question | :review_gate | nil
 
   @typedoc "Current workflow step. Free-form atom; `:idle` until first advance."
   @type step :: atom()
@@ -147,7 +151,10 @@ defmodule Arbiter.Worker do
           workspace_id: String.t() | nil,
           repo: String.t(),
           current_step: step(),
-          status: status(),
+          kind: Arbiter.Workers.RunState.kind(),
+          state: run_state(),
+          outcome: Arbiter.Workers.RunState.outcome() | nil,
+          waiting_on: waiting_on(),
           started_at: DateTime.t(),
           step_started_at: DateTime.t() | nil,
           mr_ref: String.t() | nil,
@@ -168,7 +175,13 @@ defmodule Arbiter.Worker do
       :workspace_id,
       :repo,
       :current_step,
-      :status,
+      # bd-1uu19b: the run vocabulary (`Arbiter.Workers.RunState`). `kind` is
+      # fixed at init from the role meta; `outcome` is nil until `:finished`;
+      # `waiting_on` is nil unless `:waiting`.
+      :kind,
+      :state,
+      :outcome,
+      :waiting_on,
       :started_at,
       :step_started_at,
       :meta,
@@ -210,16 +223,17 @@ defmodule Arbiter.Worker do
   # of findings still parses.
   @max_output_lines 500
 
-  # Statuses in which a subprocess exit means "the worker stopped without
-  # completing" — i.e. a stall to detect + escalate (bd-awi4nw). The review-gate
-  # states (:awaiting_review_gate/:awaiting_review) and terminal states
-  # (:completed/:failed) are excluded: there the subprocess SHOULD exit and the
-  # next stage (ReviewGate/Watchdog) owns the outcome, not the dead port.
-  # `:resuming` is the initial status of a worker re-attached to a preserved
-  # worktree via `arb resume` (bd-auma3z). It's live — a subprocess that exits
-  # before the resumed agent gets going is still a stop worth detecting — and it
-  # advances to `:running` on the first step, exactly like `:idle`.
-  @live_statuses [:idle, :resuming, :running, :awaiting]
+  # Run states in which a subprocess exit means "the worker stopped without
+  # completing" — i.e. a stall to detect + escalate (bd-awi4nw): `:starting`,
+  # `:working`, and `:waiting` on a question. A run waiting on the review gate
+  # and a `:finished` run are excluded: there the subprocess SHOULD exit and
+  # the next stage (ReviewGate/Watchdog) owns the outcome, not the dead port.
+  # A worker re-attached to a preserved worktree via `arb resume` (bd-auma3z)
+  # is `:starting` too — a subprocess that exits before the resumed agent gets
+  # going is still a stop worth detecting.
+  defguardp live_run?(state, waiting_on)
+            when state in [:starting, :working] or
+                   (state == :waiting and waiting_on != :review_gate)
 
   # Grace after a subprocess exit before we classify+escalate a stop. This drains
   # any in-flight `arb done` message that the port's exit_status raced ahead of
@@ -329,18 +343,36 @@ defmodule Arbiter.Worker do
   end
 
   @doc """
-  True when `status` means the worker is (or is about to be) driving an agent
-  session: `:idle` (registered, subprocess not spawned yet), `:resuming`,
-  `:running`, `:awaiting`.
+  True when a worker snapshot (or anything carrying its `:state` and
+  `:waiting_on`) is driving, or about to drive, an agent session: `:starting`
+  (registered, subprocess not spawned yet), `:working`, or `:waiting` on a
+  question the agent asked.
 
-  Everything else is either *parked* (`:awaiting_review`, `:awaiting_review_gate`
-  — no agent, waiting on a reviewer/merge) or *terminal* (`:completed`,
-  `:failed`). The distinction is what `start/1` enforces the single-active-worker
-  rule on: a parked or terminal worker may share a task with a new pass, an
-  active one may not (bd-8tjcms).
+  Everything else is either waiting on the review gate (no agent, a reviewer
+  judging its diff) or `:finished`. The distinction is what `start/1` enforces
+  the single-active-worker rule on: a run waiting on review or finished may
+  share a task with a new pass, an active one may not (bd-8tjcms).
   """
-  @spec active_status?(atom()) :: boolean()
-  def active_status?(status), do: status in [:idle, :resuming, :running, :awaiting]
+  @spec active?(map()) :: boolean()
+  def active?(%{state: state} = snap), do: active_state?(state, Map.get(snap, :waiting_on))
+  def active?(_), do: false
+
+  defp active_state?(state, waiting_on) when live_run?(state, waiting_on), do: true
+  defp active_state?(_state, _waiting_on), do: false
+
+  @doc """
+  True when a worker snapshot is waiting on the ReviewGate's verdict: its
+  `arb done` fired, review is required, and a distinct reviewer is judging
+  the diff (bd-1uu19b).
+  """
+  @spec awaiting_review_gate?(map() | nil) :: boolean()
+  def awaiting_review_gate?(%{state: :waiting, waiting_on: :review_gate}), do: true
+  def awaiting_review_gate?(_), do: false
+
+  @doc "True when a worker snapshot's run is `:finished`."
+  @spec finished?(map() | nil) :: boolean()
+  def finished?(%{state: :finished}), do: true
+  def finished?(_), do: false
 
   # bd-8tjcms / #1511. A task must never have two workers driving agents at the
   # same time. Two agents sharing one worktree and branch interleave commits and
@@ -361,7 +393,7 @@ defmodule Arbiter.Worker do
   # `start/1` is the one choke point every one of them goes through.
   #
   # Deliberately NOT blocked:
-  #   * a parked primary (`:awaiting_review*`) — subordinate passes are designed
+  #   * a primary waiting on the review gate — subordinate passes are designed
   #     to run alongside it (bd-8lq2g7) and the merge queue depends on it;
   #   * a terminal primary — `Dispatch.start_worker/3` evicts it (bd-d70whv) and
   #     `start_or_reap_terminal/1` reaps it (bd-8lq2g7);
@@ -396,7 +428,7 @@ defmodule Arbiter.Worker do
 
   @doc """
   The first worker in `task_id`'s exclusive family, minus the task's own key,
-  that is still driving an agent, as `%{registry_key:, pid:, status:, ...}`,
+  that is still driving an agent, as `%{registry_key:, pid:, state:, ...}`,
   or `nil`. Same probe (and same "unresponsive counts as active" rule) as the
   single-active-worker guard in `start/1`.
   """
@@ -420,15 +452,16 @@ defmodule Arbiter.Worker do
       key == requested_key or pid == self() or not MapSet.member?(workers, pid)
     end)
     |> Enum.find_value(fn {key, pid} ->
-      status = probe_status(pid)
+      snap = safe_snapshot(pid)
 
-      if active_status?(status) or is_nil(status) do
+      if is_nil(snap) or active?(snap) do
         %{
           task_id: task_id,
           registry_key: key,
           requested_key: requested_key,
           pid: pid,
-          status: status || :unknown
+          # An unresponsive worker counts as active; say so rather than guess.
+          state: if(snap, do: snap.state, else: :unresponsive)
         }
       end
     end)
@@ -444,7 +477,7 @@ defmodule Arbiter.Worker do
   @spec live_run_refusal(String.t(), pid(), atom(), atom()) :: term()
   def live_run_refusal(task_id, pid, role, same_role_error) when is_pid(pid) do
     case safe_snapshot(pid) do
-      %{status: status, meta: meta} ->
+      %{state: run_state, meta: meta} ->
         if role_from_meta(meta) == role do
           {same_role_error, pid}
         else
@@ -454,7 +487,7 @@ defmodule Arbiter.Worker do
              registry_key: task_id,
              requested_key: task_id,
              pid: pid,
-             status: status
+             state: run_state
            }}
         end
 
@@ -484,18 +517,11 @@ defmodule Arbiter.Worker do
     :exit, _ -> MapSet.new()
   end
 
-  defp probe_status(pid) do
-    case safe_snapshot(pid) do
-      %{status: status} -> status
-      _ -> nil
-    end
-  end
-
   defp refuse_concurrent_start(info) do
     Logger.warning(
       "Worker.start: REFUSED a second active worker for task=#{info.task_id} " <>
         "requested_key=#{info.requested_key} — #{info.registry_key} is already " <>
-        "#{info.status} (#{inspect(info.pid)}). Stop it first (`arb worker stop " <>
+        "#{info.state} (#{inspect(info.pid)}). Stop it first (`arb worker stop " <>
         "#{info.task_id}`) if this dispatch should supersede it. origin=#{start_origin()}"
     )
 
@@ -605,7 +631,7 @@ defmodule Arbiter.Worker do
       not Process.alive?(pid) ->
         true
 
-      terminal_status(pid) in [:failed, :completed] ->
+      terminal?(pid) ->
         Logger.info("Worker: reaping terminal worker #{inspect(pid)} to free its registry key")
         stop_quietly(pid)
 
@@ -614,15 +640,12 @@ defmodule Arbiter.Worker do
     end
   end
 
-  defp terminal_status(pid) do
-    case state(pid) do
-      %{status: status} -> status
-      _ -> nil
-    end
+  defp terminal?(pid) do
+    finished?(state(pid))
   rescue
-    _ -> nil
+    _ -> false
   catch
-    :exit, _ -> nil
+    :exit, _ -> false
   end
 
   defp stop_quietly(pid) do
@@ -672,13 +695,14 @@ defmodule Arbiter.Worker do
   Return a list of active worker snapshots — one entry per child under
   `Arbiter.Worker.Supervisor`. Only actually-crashed/stopped workers are
   omitted; a live worker that is too busy or wedged to answer `:snapshot`
-  within the probe timeout is still included, degraded to `status: :unknown`
-  and `meta.stale_probe: true`, sourced from its registry key and latest
-  `Arbiter.Workers.Run` row instead of its in-memory state (bd-45tkhq).
+  within the probe timeout is still included, flagged `meta.stale_probe: true`
+  and sourced from its registry key and latest `Arbiter.Workers.Run` row
+  instead of its in-memory state (bd-45tkhq) — the row's kind, state and
+  outcome, the same vocabulary a live snapshot speaks (bd-1uu19b).
 
   Each entry is the same snapshot map `state/1` returns (task_id,
-  workspace_id, repo, current_step, status, started_at, step_started_at,
-  meta), plus `:pid`.
+  workspace_id, repo, current_step, kind, state, outcome, waiting_on,
+  started_at, step_started_at, meta), plus `:pid`.
   """
   @spec list_children() :: [map()]
   def list_children do
@@ -722,9 +746,11 @@ defmodule Arbiter.Worker do
   # running worker read as "does not exist" by `worker_list`), fall back to
   # its durable `Arbiter.Workers.Run` row — the same source `worker_show`
   # falls back to for a worker that has *actually* exited
-  # (`worker_show_historical/2`) — and surface it as `status: :unknown` so
+  # (`worker_show_historical/2`) — flagged `meta.stale_probe: true` so
   # callers can tell a confirmed-live worker from a probe timeout without
-  # losing the worker from the list entirely.
+  # losing the worker from the list entirely. The process is alive, so a row
+  # that already reads `:finished` (or no row at all) is reported `:working`:
+  # the single-active-run guard counts an unresponsive worker as active.
   defp degraded_snapshot(_pid, nil), do: []
 
   defp degraded_snapshot(pid, registry_key) do
@@ -745,7 +771,10 @@ defmodule Arbiter.Worker do
             workspace_id: run.workspace_id,
             repo: run.repo,
             current_step: nil,
-            status: :unknown,
+            kind: run.kind,
+            state: degraded_state(run.state),
+            outcome: nil,
+            waiting_on: nil,
             role: degraded_role(run.role),
             started_at: run.started_at,
             step_started_at: nil,
@@ -762,7 +791,10 @@ defmodule Arbiter.Worker do
             workspace_id: nil,
             repo: nil,
             current_step: nil,
-            status: :unknown,
+            kind: :implement,
+            state: :working,
+            outcome: nil,
+            waiting_on: nil,
             started_at: nil,
             step_started_at: nil,
             meta: %{stale_probe: true}
@@ -781,6 +813,9 @@ defmodule Arbiter.Worker do
   # convert it back through a fixed allowlist rather than
   # `String.to_existing_atom/1` on a DB value.
   @known_subordinate_roles ~w(reviewer implementer fix_pass conflict_resolver)a
+
+  defp degraded_state(state) when state in [:starting, :working, :waiting], do: state
+  defp degraded_state(_finished_or_nil), do: :working
   defp degraded_role(nil), do: nil
 
   defp degraded_role(role) when is_binary(role) do
@@ -886,20 +921,22 @@ defmodule Arbiter.Worker do
   end
 
   @doc """
-  Advance the workflow step. Permitted when status is `:idle` (transitions to
-  `:running`) or `:running` (stays `:running`).
+  Advance the workflow step. Permitted when the run is `:starting`
+  (transitions to `:working`) or `:working` (stays `:working`).
   """
   @spec advance(ref(), step()) :: :ok | {:error, term()}
   def advance(ref, step) when is_atom(step), do: call(ref, {:advance, step})
 
   @doc """
-  Park the worker — status becomes `:awaiting`. Only valid from `:running`.
+  Park the worker on a question — the run becomes `:waiting`
+  (`waiting_on: :question`). Only valid from `:working`.
   """
   @spec await(ref(), term()) :: :ok | {:error, term()}
   def await(ref, reason \\ nil), do: call(ref, {:await, reason})
 
   @doc """
-  Resume a parked worker. Only valid from `:awaiting`.
+  Resume a worker waiting on a question. Only valid from `:waiting` on
+  `:question`.
   """
   @spec resume(ref()) :: :ok | {:error, term()}
   def resume(ref), do: call(ref, :resume)
@@ -911,7 +948,7 @@ defmodule Arbiter.Worker do
   resulting `mr_ref`, its clickable `merger_url` and the Watchdog's lane on the
   ticket (its `open_pr` transition, bd-741sid), and starts the ticket's
   `Arbiter.Worker.Watchdog` from that row. The run is then recorded finished
-  and successful and the worker exits. Only valid from `:running`.
+  and successful and the worker exits. Only valid from `:working`.
 
   `opts` is a map forwarded to the adapter's `open/4` (`:target_branch`,
   `:reviewer_ids`, `:labels`, and — for `Direct` — `:repo_path`, which defaults
@@ -925,7 +962,7 @@ defmodule Arbiter.Worker do
     * `:auto_merge`, `:interval_ms`, `:initial_delay_ms` — Watchdog overrides.
 
   Returns `{:ok, mr_ref}` on success, or `{:error, reason}` (the worker stays
-  `:running`) if the adapter can't be resolved or `open/4` fails.
+  `:working`) if the adapter can't be resolved or `open/4` fails.
   """
   @spec open_mr(ref(), String.t(), String.t(), String.t(), map()) ::
           {:ok, String.t()} | {:error, term()}
@@ -935,7 +972,7 @@ defmodule Arbiter.Worker do
   end
 
   @doc """
-  Mark the workflow completed. Only valid from `:running`. The worker keeps
+  Mark the run finished and successful. Only valid from `:working`. The worker keeps
   running (so callers can read the final state) but rejects further
   transitions.
   """
@@ -943,7 +980,8 @@ defmodule Arbiter.Worker do
   def complete(ref, result \\ nil), do: call(ref, {:complete, result})
 
   @doc """
-  Mark the workflow failed. Valid from `:running` or `:awaiting`.
+  Mark the run finished and failed. Valid from `:starting`, `:working`, or
+  `:waiting` on a question.
 
   There is no slot hand-off failure any more (bd-741sid): a ticket holds its
   slot while it is In progress, whatever its run did (bd-asxw4e), so a worker
@@ -953,16 +991,16 @@ defmodule Arbiter.Worker do
   def fail(ref, reason \\ nil), do: call(ref, {:fail, reason})
 
   @doc """
-  Deliver a ReviewGate (review-gate) verdict. Only valid from `:awaiting_review_gate`
-  — the state the worker parks at after the worker's `arb done` when review is
+  Deliver a ReviewGate (review-gate) verdict. Only valid from `:waiting` on
+  `:review_gate` — where the worker waits after its `arb done` when review is
   required. Called by `Arbiter.Worker.ReviewGate` once the reviewer worker
   reaches its verdict.
 
     * `{:approve, findings}` → records the approval and proceeds to the merger
-      (`do_open_mr`); the worker transitions to `:awaiting_review`.
+      (`do_open_mr`); the PR opens and the run finishes `:succeeded`.
     * `{:request_changes, findings}` → records the findings, escalates to the
-      coordinator, and parks the worker at `:failed` **without** merging. The task
-      stays `:in_progress` (the Driver leaves a `:failed` worker's task open for
+      coordinator, and finishes the run `:failed` **without** merging. The task
+      stays `:in_progress` (the Driver leaves a failed run's task open for
       inspection / re-dispatch).
     * `{:no_verdict, reason}` → an inconclusive review; treated like a rejection
       (escalate, do not merge) since the safe default is never to merge unreviewed
@@ -970,8 +1008,8 @@ defmodule Arbiter.Worker do
     * `{:parked, reason, findings}` → guard class C's terminal state (bd-9zuvbh,
       design #1635 §5.3). The gate reached a terminal state with no verdict it
       could act on. Nothing merges and no APPROVE is accepted — the content half
-      of the guard is still closed — but the run is recorded `:review_parked`
-      rather than `:failed`, the task carries `review_park_reason`, and the
+      of the guard is still closed. The run finishes `:failed` with the park's
+      cause in `failure_reason`, the task carries `review_park_reason`, and the
       coordinator is paged exactly once for the episode.
   """
   @spec review_gate_verdict(
@@ -1063,7 +1101,10 @@ defmodule Arbiter.Worker do
       workspace_id: Keyword.get(opts, :workspace_id),
       repo: Keyword.fetch!(opts, :repo),
       current_step: :idle,
-      status: initial_status(meta),
+      kind: Arbiter.Workers.RunState.kind_from_meta(meta),
+      state: :starting,
+      outcome: nil,
+      waiting_on: nil,
       started_at: now,
       step_started_at: nil,
       meta: meta,
@@ -1094,14 +1135,6 @@ defmodule Arbiter.Worker do
     {:ok, state}
   end
 
-  # A worker re-attached to a preserved worktree via `arb resume` (bd-auma3z)
-  # boots into `:resuming` rather than `:idle`, so the dashboard/CLI can tell a
-  # resumed run apart from a fresh dispatch. It advances to `:running` on the
-  # first step exactly like `:idle` does.
-  defp initial_status(%{resume: true}), do: :resuming
-  defp initial_status(%{"resume" => true}), do: :resuming
-  defp initial_status(_), do: :idle
-
   @doc """
   Broadcast a `{:worker_lifecycle, event, snapshot}` message on the `"workers"`
   topic. `event` is one of:
@@ -1109,8 +1142,8 @@ defmodule Arbiter.Worker do
     * `:started` — the worker just booted (`init/1`).
     * `:stopped` — the worker is terminating (`terminate/2`).
     * `:updated` — a mid-life state change worth pushing to live views, namely
-      parking at `:awaiting_review` (MR opened) and each Watchdog poll that
-      records a fresh merger status. Lets the dashboard's merge-queue view
+      the run opening its PR and each Watchdog poll that records a fresh
+      merger status. Lets the dashboard's merge-queue view
       track in-flight merges without polling.
 
   Best-effort: a PubSub failure is logged at debug and swallowed.
@@ -1164,7 +1197,9 @@ defmodule Arbiter.Worker do
 
       Arbiter.Events.broadcast(ws_id, "worker_done", %{
         task_id: task_id,
-        status: to_string(state.status),
+        kind: to_string(state.kind),
+        state: to_string(state.state),
+        outcome: to_string_or_nil(state.outcome),
         phase: to_string(Arbiter.Worker.Phase.of(snapshot(state)))
       })
     end
@@ -1188,11 +1223,10 @@ defmodule Arbiter.Worker do
   Announce this worker's phase on the `/events` stream when it changes
   (bd-aw2cyt).
 
-  The record's `status` outlives its agent, so an operator watching the stream
+  A run's state outlives its agent, so an operator watching the stream
   could not tell "still implementing" from "the agent exited twenty minutes
   ago and we are waiting on CI". `worker_phase` is that distinction, and it
-  carries `status` + `agent_live` alongside so a consumer never has to choose
-  between the old field and the new one.
+  carries the run's `kind` / `state` / `outcome` + `agent_live` alongside.
 
   Self-derived: a worker can only see its own row, so an author reports
   `:implementing` / `:waiting_ci_merge` / `:waiting_on_you` and a reviewer /
@@ -1220,7 +1254,10 @@ defmodule Arbiter.Worker do
       task_id: state.task_id,
       registry_key: state.registry_key || state.task_id,
       role: to_string_or_nil(role_from_meta(state.meta)),
-      status: to_string(state.status),
+      kind: to_string(state.kind),
+      state: to_string(state.state),
+      outcome: to_string_or_nil(state.outcome),
+      waiting_on: to_string_or_nil(state.waiting_on),
       phase: to_string(phase),
       phase_label: Arbiter.Worker.Phase.label(phase),
       agent_live: session_live?(state)
@@ -1244,12 +1281,14 @@ defmodule Arbiter.Worker do
     # Only the task's own primary
     # worker may make that statement. Review-only workers were already excluded;
     # bd-8lq2g7 adds the subordinate passes, which run under the same task_id
-    # while the primary is parked at :awaiting_review (see subordinate?/1).
+    # as the ticket's own run (see subordinate?/1).
     unless review_only?(meta) or subordinate?(state) do
       Arbiter.Events.broadcast(ws_id, "worker_failed", %{
         task_id: task_id,
         # bd-aw2cyt: additive — the event used to carry an id and nothing else.
-        status: to_string(state.status),
+        kind: to_string(state.kind),
+        state: to_string(state.state),
+        outcome: to_string_or_nil(state.outcome),
         phase: to_string(Arbiter.Worker.Phase.of(snapshot(state)))
       })
     end
@@ -1328,8 +1367,8 @@ defmodule Arbiter.Worker do
   # error, no sandbox checkout in a test) we log a warning and leave run_id
   # nil — subsequent terminal updates will no-op cleanly.
   defp record_run_started(%State{} = state) do
-    worker_type = worker_type_from_meta(state.meta)
-    provider = provider(state.meta) || default_run_provider(state, worker_type)
+    role_tag = role_tag_from_meta(state.meta)
+    provider = provider(state.meta) || default_run_provider(state, role_tag)
     provider_fallback = provider_fallback_from_meta(state.meta)
 
     attrs = %{
@@ -1337,8 +1376,8 @@ defmodule Arbiter.Worker do
       task_title: lookup_task_title(state.task_id),
       repo: state.repo,
       workspace_id: effective_workspace_id(state),
-      worker_type: worker_type,
-      status: :running,
+      kind: state.kind,
+      state: state.state,
       started_at: state.started_at,
       output_lines: [],
       # bd-auma3z: when this worker was resumed (re-attached to a preserved
@@ -1355,7 +1394,7 @@ defmodule Arbiter.Worker do
       # task_id strings. The base_task_id is the root task (strips #review/#impl etc),
       # and role denotes the run's purpose (base/review/impl).
       base_task_id: Arbiter.Worker.ReviewGate.base_task_id(state.task_id),
-      role: worker_type_to_role(worker_type),
+      role: role_tag_to_role(role_tag),
       provider: provider,
       provider_fallback: provider_fallback
     }
@@ -1366,6 +1405,7 @@ defmodule Arbiter.Worker do
 
     case Ash.create(Arbiter.Workers.Run, attrs) do
       {:ok, run} ->
+        hand_off_resumed_run(resumed_from_run_id(state.meta))
         %State{state | run_id: run.id}
 
       {:error, reason} ->
@@ -1420,15 +1460,15 @@ defmodule Arbiter.Worker do
   defp normalize_provider_string(p) when is_binary(p) and p != "", do: p
   defp normalize_provider_string(_), do: nil
 
-  defp default_run_provider(%State{task_id: task_id}, worker_type)
-       when worker_type in [:impl, :fix_pass, :conflict] and is_binary(task_id) do
+  defp default_run_provider(%State{task_id: task_id}, role_tag)
+       when role_tag in [:impl, :fix_pass, :conflict] and is_binary(task_id) do
     case Arbiter.Workers.Run.latest_authoring_provider(task_id) do
       p when is_atom(p) and not is_nil(p) -> Atom.to_string(p)
       _ -> nil
     end
   end
 
-  defp default_run_provider(_state, _worker_type), do: nil
+  defp default_run_provider(_state, _role_tag), do: nil
 
   defp provider_fallback_from_meta(meta) when is_map(meta) do
     case Map.get(meta, :provider_fallback) || Map.get(meta, "provider_fallback") do
@@ -1454,8 +1494,10 @@ defmodule Arbiter.Worker do
 
   defp difficulty_at_dispatch(_), do: nil
 
-  # Classify the worker that owns this run from its meta, mirroring the role
-  # tags the ReviewGate and Dispatch stamp:
+  # The run's `role` column (bd-5fhyry) from the worker's meta, mirroring the
+  # role tags the ReviewGate and Dispatch stamp. Finer than the run's `kind`
+  # (`Arbiter.Workers.RunState.kind_from_meta/1`): an authoring run and a
+  # revise-round implementer are both `:implement`, but `base` vs `impl` here.
   #   * role == :reviewer  → :review  (review-gate reviewer)
   #   * role == :implementer → :impl  (review-gate revise-round implementer)
   #   * role == :fix_pass → :fix_pass (merge-queue CI fix pass)
@@ -1466,7 +1508,7 @@ defmodule Arbiter.Worker do
   # bd-8lq2g7: the two merge-queue subordinate passes were previously recorded
   # as :main, so a failed fix pass showed up in the task's run history — and in
   # the loop analytics' "dispatches" count — as the authoring worker failing.
-  defp worker_type_from_meta(meta) when is_map(meta) do
+  defp role_tag_from_meta(meta) when is_map(meta) do
     cond do
       Map.get(meta, :role) == :reviewer -> :review
       Map.get(meta, :role) == :implementer -> :impl
@@ -1477,25 +1519,25 @@ defmodule Arbiter.Worker do
     end
   end
 
-  defp worker_type_from_meta(_), do: :main
+  defp role_tag_from_meta(_), do: :main
 
-  # Convert worker_type atom to string role for storage in worker_runs.role column.
+  # The role tag as stored in worker_runs.role.
   # bd-5fhyry: replacement for suffix-encoded task_id hierarchy.
-  defp worker_type_to_role(:main), do: "base"
-  defp worker_type_to_role(:review), do: "review"
-  defp worker_type_to_role(:impl), do: "impl"
-  defp worker_type_to_role(:fix_pass), do: "fix_pass"
-  defp worker_type_to_role(:conflict), do: "conflict"
+  defp role_tag_to_role(:main), do: "base"
+  defp role_tag_to_role(:review), do: "review"
+  defp role_tag_to_role(:impl), do: "impl"
+  defp role_tag_to_role(:fix_pass), do: "fix_pass"
+  defp role_tag_to_role(:conflict), do: "conflict"
 
   # Convert meta.role (from ReviewGate spawn context) to Usage.Event role string.
-  # Mirrors worker_type classification: reviewer → "review", implementer → "impl", etc.
+  # Mirrors the role tag classification: reviewer → "review", implementer → "impl", etc.
   defp role_to_usage_step(:reviewer), do: "review"
   defp role_to_usage_step(:implementer), do: "impl"
   defp role_to_usage_step(:fix_pass), do: "fix_pass"
   defp role_to_usage_step(:conflict_resolver), do: "conflict"
   defp role_to_usage_step(_), do: "base"
 
-  # Best-effort: stamp the terminal status / output / exit fields onto the
+  # Best-effort: stamp the terminal state / outcome / output / exit fields onto the
   # Run row created at init. No-op (with a debug breadcrumb) when run_id is
   # nil — the original create failed, so there's nothing to update and the
   # warning was already logged at that time.
@@ -1513,7 +1555,8 @@ defmodule Arbiter.Worker do
     provider_fallback = provider_fallback_from_meta(meta)
 
     attrs = %{
-      status: run_status(state),
+      state: :finished,
+      outcome: state.outcome || :failed,
       completed_at: DateTime.utc_now(),
       exit_code: Map.get(meta, :exit_status),
       output_lines: capture_output_lines(state),
@@ -1547,12 +1590,12 @@ defmodule Arbiter.Worker do
     # short atom-as-string other modules pattern-match on literally. Absent
     # on any run that didn't fail via ReviewGate.
     #
-    # bd-3wumco: a run can be written terminal twice — once as `:failed` for a
+    # bd-3wumco: a run can be written finished twice — once `:failed` for a
     # ReviewGate rejection, then again once a later round overturns it. On that
     # second write the row is no longer a failure, so the summary is cleared
     # outright rather than left behind by `maybe_put/3`'s nil-skip.
     attrs =
-      if state.status == :failed do
+      if state.outcome == :failed do
         maybe_put(attrs, :failure_summary, Map.get(meta, :failure_summary))
       else
         Map.put(attrs, :failure_summary, Map.get(meta, :failure_summary))
@@ -1682,38 +1725,52 @@ defmodule Arbiter.Worker do
       :ok
   end
 
-  # bd-8tjcms / #1511. The durable run status is the FSM status, with one
-  # deliberate divergence: a worker failed with `{:awaiting_review_timeout, N}`
-  # reached `arb done`, exited 0, pushed its branch and (usually) opened a PR —
-  # what timed out is the *review* stage, downstream of the run. Recording that
-  # as `:failed` is the same class of mislabelling as bd-cfhj7z (quota
-  # exhaustion reported as `crashed (exit 1)`), and it is what made vs-ehjarz's
-  # successful run 39c6b497 read as a failure.
-  #
-  # Only the row diverges. `%State{}.status` stays `:failed`: it is the terminal
-  # state `Dispatch.resume/2` checks before re-attaching, and the Watchdog's
-  # bounded auto-resume (bd-8eheb6) fails the worker precisely so it can resume
-  # it. `failure_reason` is still written, so the reason is not lost.
-  defp run_status(%State{
-         status: :failed,
-         meta: %{failure_reason: {:awaiting_review_timeout, _}}
-       }),
-       do: :review_not_started
+  # bd-1uu19b: the row speaks the worker's own vocabulary, so there is no
+  # divergence left to map. A run the Watchdog's review ceiling timed out
+  # (`{:awaiting_review_timeout, N}`, bd-8tjcms) and a run the ReviewGate
+  # parked (`review_park_reason`, bd-9zuvbh) both finish `:failed`; their cause
+  # stays in `failure_reason` and on the ticket.
 
-  # bd-9zuvbh / P9. Same divergence, same reasoning, one guard class over: a run
-  # the ReviewGate PARKED (class C — no parseable verdict, a reviewer timeout, a
-  # verdict guard out of re-prompts, a no-op fix round after an approval-gap
-  # rejection) reached `arb done`, exited 0 and pushed its branch. What gave out
-  # is the review gate, and "the reviewer could not be understood" is not
-  # "the implementation failed". `%State{}.status` stays `:failed` for the same
-  # reason as above — `Dispatch.resume/2` re-attaches from it — and
-  # `failure_reason` is still written, so nothing is lost by recording the row
-  # honestly.
-  defp run_status(%State{status: :failed, meta: %{review_park_reason: reason}})
-       when not is_nil(reason),
-       do: :review_parked
+  # Keep the durable row's state in step with a non-terminal transition, so
+  # `worker list`, `worker show` and the run history read one state. Best
+  # effort, like every other run write.
+  defp record_run_state(%State{run_id: nil}), do: :ok
 
-  defp run_status(%State{status: status}), do: status
+  defp record_run_state(%State{run_id: run_id} = state) do
+    with {:ok, run} <- Ash.get(Arbiter.Workers.Run, run_id),
+         {:ok, _} <-
+           Ash.update(run, %{state: state.state, outcome: state.outcome}, action: :update) do
+      :ok
+    else
+      {:error, reason} -> log_run_warning("state", state.task_id, reason)
+    end
+  rescue
+    e -> log_run_warning("state", state.task_id, e)
+  end
+
+  # A resume that starts a new run supersedes the prior one (bd-1uu19b). A
+  # prior row the restart or a stop left unfinished is `:handed_off` now — it
+  # did not fail, a follow-up run took over. A prior row that already
+  # finished keeps its own outcome.
+  defp hand_off_resumed_run(nil), do: :ok
+
+  defp hand_off_resumed_run(run_id) do
+    case Ash.get(Arbiter.Workers.Run, run_id) do
+      {:ok, %Arbiter.Workers.Run{state: state} = run} when state != :finished ->
+        Ash.update(
+          run,
+          %{state: :finished, outcome: :handed_off, completed_at: DateTime.utc_now()},
+          action: :update
+        )
+
+        :ok
+
+      _ ->
+        :ok
+    end
+  rescue
+    _ -> :ok
+  end
 
   defp stringify_failure(nil), do: nil
   defp stringify_failure(s) when is_binary(s), do: s
@@ -2231,63 +2288,72 @@ defmodule Arbiter.Worker do
     {:reply, session_live?(state), state}
   end
 
-  def handle_call({:advance, step}, _from, %State{status: status} = state)
-      when status in [:idle, :resuming, :failed] do
+  def handle_call({:advance, step}, _from, %State{state: run_state, outcome: outcome} = state)
+      when run_state == :starting or (run_state == :finished and outcome == :failed) do
     new_state = %State{
       state
       | current_step: step,
-        status: :running,
+        state: :working,
+        outcome: nil,
         step_started_at: DateTime.utc_now()
     }
 
+    record_run_state(new_state)
     {:reply, :ok, announce_phase(new_state)}
   end
 
-  def handle_call({:advance, step}, _from, %State{status: :running} = state) do
+  def handle_call({:advance, step}, _from, %State{state: :working} = state) do
     new_state = %State{state | current_step: step, step_started_at: DateTime.utc_now()}
     {:reply, :ok, new_state}
   end
 
-  def handle_call({:advance, step}, _from, %State{status: status} = state) do
-    {:reply, {:error, {:invalid_transition, status, {:advance, step}}}, state}
+  def handle_call({:advance, step}, _from, %State{state: run_state} = state) do
+    {:reply, {:error, {:invalid_transition, run_state, {:advance, step}}}, state}
   end
 
-  def handle_call({:await, reason}, _from, %State{status: :running} = state) do
+  def handle_call({:await, reason}, _from, %State{state: :working} = state) do
     meta =
       case reason do
         nil -> state.meta
         r -> Map.put(state.meta, :await_reason, r)
       end
 
-    new_state = %State{state | status: :awaiting, meta: meta}
-    Arbiter.Messages.CoordinatorNotifier.awaiting_review(snapshot(new_state))
+    new_state = %State{state | state: :waiting, waiting_on: :question, meta: meta}
+    record_run_state(new_state)
+    Arbiter.Messages.CoordinatorNotifier.waiting(snapshot(new_state))
     {:reply, :ok, announce_phase(new_state)}
   end
 
-  def handle_call({:await, _reason}, _from, %State{status: status} = state) do
-    {:reply, {:error, {:invalid_transition, status, :awaiting}}, state}
+  def handle_call({:await, _reason}, _from, %State{state: run_state} = state) do
+    {:reply, {:error, {:invalid_transition, run_state, :waiting}}, state}
   end
 
-  def handle_call(:resume, _from, %State{status: :awaiting} = state) do
-    new_state = %State{state | status: :running, meta: Map.delete(state.meta, :await_reason)}
+  def handle_call(:resume, _from, %State{state: :waiting, waiting_on: :question} = state) do
+    new_state = %State{
+      state
+      | state: :working,
+        waiting_on: nil,
+        meta: Map.delete(state.meta, :await_reason)
+    }
+
+    record_run_state(new_state)
     {:reply, :ok, announce_phase(new_state)}
   end
 
-  def handle_call(:resume, _from, %State{status: status} = state) do
-    {:reply, {:error, {:invalid_transition, status, :running}}, state}
+  def handle_call(:resume, _from, %State{state: run_state} = state) do
+    {:reply, {:error, {:invalid_transition, run_state, :working}}, state}
   end
 
   def handle_call(
         {:open_mr, branch, title, description, opts},
         _from,
-        %State{status: :running} = state
+        %State{state: :working} = state
       ) do
     case do_open_mr(state, branch, title, description, opts) do
       {:ok, mr_ref, new_state} ->
-        # The worker just parked at :awaiting_review with an MR open and a
-        # Watchdog watching. Push an :updated lifecycle event so the dashboard's
-        # merge-queue view picks the in-flight merge up live (the topic
-        # otherwise only fires on :started/:stopped).
+        # The run just opened its PR and finished. Push an :updated lifecycle
+        # event so the dashboard's merge-queue view picks the in-flight merge
+        # up live (the topic otherwise only fires on :started/:stopped).
         broadcast_lifecycle(:updated, new_state)
         {:reply, {:ok, mr_ref}, new_state}
 
@@ -2299,59 +2365,63 @@ defmodule Arbiter.Worker do
   def handle_call(
         {:open_mr, _branch, _title, _description, _opts},
         _from,
-        %State{status: status} = state
+        %State{state: run_state} = state
       ) do
-    {:reply, {:error, {:invalid_transition, status, :awaiting_review}}, state}
+    {:reply, {:error, {:invalid_transition, run_state, :open_mr}}, state}
   end
 
-  def handle_call({:complete, result}, _from, %State{status: status} = state)
-      when status in [:running, :awaiting_review] do
+  def handle_call({:complete, result}, _from, %State{state: :working} = state) do
     {:reply, :ok, complete_now(state, result)}
   end
 
-  def handle_call({:complete, _result}, _from, %State{status: status} = state) do
-    {:reply, {:error, {:invalid_transition, status, :completed}}, state}
+  def handle_call({:complete, _result}, _from, %State{state: run_state} = state) do
+    {:reply, {:error, {:invalid_transition, run_state, :succeeded}}, state}
   end
 
-  def handle_call({:fail, reason}, _from, %State{status: status} = state)
-      when status in [:idle, :running, :awaiting, :awaiting_review] do
+  def handle_call(
+        {:fail, reason},
+        _from,
+        %State{state: run_state, waiting_on: waiting_on} = state
+      )
+      when live_run?(run_state, waiting_on) do
     {:reply, :ok, fail_now(state, reason)}
   end
 
-  def handle_call({:fail, _reason}, _from, %State{status: status} = state) do
-    {:reply, {:error, {:invalid_transition, status, :failed}}, state}
+  def handle_call({:fail, _reason}, _from, %State{state: run_state} = state) do
+    {:reply, {:error, {:invalid_transition, run_state, :failed}}, state}
   end
 
   def handle_call(
         {:review_gate_verdict, verdict},
         _from,
-        %State{status: :awaiting_review_gate} = state
+        %State{state: :waiting, waiting_on: :review_gate} = state
       ) do
     {:reply, :ok, apply_review_gate_verdict(state, verdict)}
   end
 
   # bd-3wumco: a ReviewGate round that converges to APPROVE *after* an earlier
-  # round already parked the author reports that approval to a worker sitting at
-  # :failed. Refusing it there froze the task on the stale rejection: the branch
-  # had a passing re-review and green CI, but nothing ever handed it to the
-  # merger, so the MR sat open until a human merged it by hand (vstim vs-33ulbf).
-  # Reconcile forward instead — but ONLY when the rejection is the sole reason
-  # this run is terminal. A run that failed for any other reason (a merge
-  # conflict, a stopped subprocess) must not be resurrected by a stray verdict.
+  # round already parked the author reports that approval to a worker whose run
+  # finished :failed. Refusing it there froze the task on the stale rejection:
+  # the branch had a passing re-review and green CI, but nothing ever handed it
+  # to the merger, so the MR sat open until a human merged it by hand (vstim
+  # vs-33ulbf). Reconcile forward instead — but ONLY when the rejection is the
+  # sole reason this run failed. A run that failed for any other reason (a
+  # merge conflict, a stopped subprocess) must not be resurrected by a stray
+  # verdict.
   def handle_call(
         {:review_gate_verdict, {:approve, _findings} = verdict},
         _from,
-        %State{status: :failed} = state
+        %State{state: :finished, outcome: :failed} = state
       ) do
     if review_gate_failure?(state) do
       {:reply, :ok, reconcile_review_gate_approval(state, verdict)}
     else
-      {:reply, {:error, {:invalid_transition, :failed, :review_gate_verdict}}, state}
+      {:reply, {:error, {:invalid_transition, :finished, :review_gate_verdict}}, state}
     end
   end
 
-  def handle_call({:review_gate_verdict, _verdict}, _from, %State{status: status} = state) do
-    {:reply, {:error, {:invalid_transition, status, :review_gate_verdict}}, state}
+  def handle_call({:review_gate_verdict, _verdict}, _from, %State{state: run_state} = state) do
+    {:reply, {:error, {:invalid_transition, run_state, :review_gate_verdict}}, state}
   end
 
   def handle_call({:report, key, value}, _from, %State{} = state) do
@@ -2575,12 +2645,12 @@ defmodule Arbiter.Worker do
         # at a silent in_progress — schedule a classify+escalate after a short
         # grace so an in-flight `arb done` (which the exit_status message can
         # race ahead of) still wins and the check no-ops on a normal completion.
-        if new_state.status in @live_statuses do
+        if live_run?(new_state.state, new_state.waiting_on) do
           Process.send_after(self(), {:__worker_stopped__, port}, exit_grace_ms())
         end
 
-        # bd-aw2cyt: the main agent just exited. The record is still `:running`
-        # and will stay that way through review, CI and the merge — say so.
+        # bd-aw2cyt: the main agent just exited. Announce the phase that
+        # follows (review, CI, the merge) — say so.
         {:noreply, announce_phase(new_state)}
 
       :error ->
@@ -2608,8 +2678,11 @@ defmodule Arbiter.Worker do
   #   2. the run already signalled `arb done` somewhere (primary OR continuation)
   #      → prefer completion. Re-enter on_claude_done so the commit gate decides:
   #      committed work routes to the ReviewGate, uncommitted work still diverts.
-  def handle_info({:__worker_stopped__, port}, %State{status: status} = state)
-      when status in @live_statuses do
+  def handle_info(
+        {:__worker_stopped__, port},
+        %State{state: run_state, waiting_on: waiting_on} = state
+      )
+      when live_run?(run_state, waiting_on) do
     case Map.fetch(state.claude_sessions, port) do
       {:ok, session} -> {:noreply, on_agent_stopped(state, port, session)}
       :error -> {:noreply, state}
@@ -2626,13 +2699,13 @@ defmodule Arbiter.Worker do
   # backoff. Re-spawn the session in place; if the respawn can't be built (no
   # pristine spawn args / no `--print` slot / port open failure), fall through to
   # fail_stopped with the original session so the escalation still carries the
-  # real cause. Guarded on a live status so a resume scheduled before a
+  # real cause. Guarded on a live run state so a resume scheduled before a
   # terminal transition (e.g. a late `arb done`) is dropped.
   def handle_info(
         {:__resume_continuation__, session_id, fingerprint, session},
-        %State{status: status} = state
+        %State{state: run_state, waiting_on: waiting_on} = state
       )
-      when status in @live_statuses do
+      when live_run?(run_state, waiting_on) do
     # bd-aje6fj: a backoff that expires mid-shutdown must not spawn a fresh
     # agent into a node that is going down — terminate/2 is on its way.
     if node_stopping?() do
@@ -2651,14 +2724,18 @@ defmodule Arbiter.Worker do
     {:noreply, state}
   end
 
-  def handle_info({:__claude_session_done__, _line}, %State{status: status} = state)
-      when status not in [:completed, :failed, :awaiting_review_gate, :awaiting_review] do
-    # "arb done" detected. The guard accepts most non-terminal statuses
-    # (:idle, :running, :awaiting). In claude_driven mode the worker may sit at
-    # :idle (the Machine is not ticked, so Worker.advance is never called), so
-    # accepting :idle here is intentional and critical for this signal to fire.
+  def handle_info(
+        {:__claude_session_done__, _line},
+        %State{state: run_state, waiting_on: waiting_on} = state
+      )
+      when live_run?(run_state, waiting_on) do
+    # "arb done" detected. The guard accepts every live run state (:starting,
+    # :working, :waiting on a question). In claude_driven mode the worker may
+    # sit at :starting (the Machine is not ticked, so Worker.advance is never
+    # called), so accepting :starting here is intentional and critical for this
+    # signal to fire.
     #
-    # :awaiting_review_gate and :awaiting_review are deliberately excluded: once the
+    # A run waiting on the review gate is deliberately excluded: once the
     # worker has signalled done, the review gate (ReviewGate) and then the merger
     # / Watchdog decide completion — not a repeated "arb done" on the author's
     # stdout. A late marker is ignored (handled by the catch-all clause below).
@@ -2670,18 +2747,18 @@ defmodule Arbiter.Worker do
   end
 
   def handle_info({:__claude_session_done__, _line}, %State{} = state) do
-    # Already :completed / :failed / awaiting a downstream gate — ignore the
+    # Already :finished / waiting on the review gate — ignore the
     # duplicate signal for transition purposes, but still record that the marker
     # was seen (bd-1pdyov) so the whole-run check has a complete picture.
     {:noreply, mark_done_seen(state)}
   end
 
   # The ReviewGate (review gate) exited before delivering a verdict. Do NOT strand
-  # the author at :awaiting_review_gate — treat it as an inconclusive review and
+  # the author waiting on the review gate — treat it as an inconclusive review and
   # escalate (no merge). Matched by the monitor ref stashed in meta. bd-2y0gd5.
   def handle_info(
         {:DOWN, ref, :process, _pid, reason},
-        %State{status: :awaiting_review_gate, meta: %{review_gate_ref: ref}} = state
+        %State{state: :waiting, waiting_on: :review_gate, meta: %{review_gate_ref: ref}} = state
       ) do
     Logger.warning(
       "Worker: ReviewGate for task=#{state.task_id} exited before a verdict " <>
@@ -2698,8 +2775,8 @@ defmodule Arbiter.Worker do
 
   # bd-a9zb7w: decide (and, if warranted, dispatch) the implementer fix round for
   # a ReviewGate rejection this worker just parked on. Posted to self by
-  # `park_rejected/4` so it lands after that call's reply, with `status` already
-  # `:failed`. Never crashes the worker: the whole decision is best-effort.
+  # `park_rejected/4` so it lands after that call's reply, with the run already
+  # finished `:failed`. Never crashes the worker: the whole decision is best-effort.
   def handle_info({:__review_gate_fix_round__, verdict, findings}, %State{} = state) do
     _ = maybe_dispatch_fix_round(state, verdict, findings)
     {:noreply, state}
@@ -2891,7 +2968,7 @@ defmodule Arbiter.Worker do
         # fired) but model arrived late via a subsequent session event, write just the
         # model column to the existing worker_runs row so it is never left NULL.
         if not had_model? and not is_nil(model) and
-             new_state.status in [:completed, :failed] and
+             new_state.state == :finished and
              not is_nil(new_state.run_id) do
           backfill_run_model(new_state.run_id, model, new_state.task_id)
         end
@@ -3071,14 +3148,14 @@ defmodule Arbiter.Worker do
 
   defp complete_now(%State{} = state, result) do
     meta = if is_nil(result), do: state.meta, else: Map.put(state.meta, :result, result)
-    new_state = %State{state | status: :completed, meta: meta}
+    new_state = %State{state | state: :finished, outcome: :succeeded, waiting_on: nil, meta: meta}
     record_run_finished(new_state)
     notify_auth_hold_success(new_state)
     broadcast_done(new_state)
     new_state
   end
 
-  # bd-bi5pn0: `Dispatch.dispatch/2` fails a just-registered `:idle` worker
+  # bd-bi5pn0: `Dispatch.dispatch/2` fails a just-registered `:starting` worker
   # with a `%StopReason{}` (category `:spawn_failed`) when a post-`start_worker`
   # step blows up. Stash the full classification in `meta[:stop_reason]`, same
   # shape `fail_stopped/2` uses, so dashboards/tooling see a consistent
@@ -3092,7 +3169,7 @@ defmodule Arbiter.Worker do
       |> Map.put(:failure_reason, reason.summary)
       |> Map.put(:stop_reason, Arbiter.Worker.StopReason.to_map(reason))
 
-    new_state = %State{state | status: :failed, meta: meta}
+    new_state = %State{state | state: :finished, outcome: :failed, waiting_on: nil, meta: meta}
     record_run_finished(new_state)
     Arbiter.Messages.CoordinatorNotifier.failed(snapshot(new_state))
     broadcast_worker_failed(new_state)
@@ -3105,7 +3182,7 @@ defmodule Arbiter.Worker do
     state = terminate_live_sessions(state)
 
     meta = if is_nil(reason), do: state.meta, else: Map.put(state.meta, :failure_reason, reason)
-    new_state = %State{state | status: :failed, meta: meta}
+    new_state = %State{state | state: :finished, outcome: :failed, waiting_on: nil, meta: meta}
     record_run_finished(new_state)
     Arbiter.Messages.CoordinatorNotifier.failed(snapshot(new_state))
     broadcast_worker_failed(new_state)
@@ -3130,7 +3207,7 @@ defmodule Arbiter.Worker do
   # keeps issuing commands in a cwd that `git worktree remove` has deleted out
   # from under it, burning tokens and invisible to normal control until a human
   # `worker_stop`s it. This runs INSIDE the worker's process, synchronously,
-  # before `status` becomes `:failed` — and the Driver can only read `:failed`
+  # before the run becomes finished `:failed` — and the Driver can only read that
   # via a serialized `GenServer.call`, so the agent is provably dead before any
   # worktree removal can begin. Ordering: SIGKILL the OS process → confirm exit
   # → close the port.
@@ -3235,7 +3312,7 @@ defmodule Arbiter.Worker do
       |> Map.put(:failure_reason, reason.summary)
       |> Map.put(:stop_reason, Arbiter.Worker.StopReason.to_map(reason))
 
-    new_state = %State{state | status: :failed, meta: meta}
+    new_state = %State{state | state: :finished, outcome: :failed, waiting_on: nil, meta: meta}
     record_run_finished(new_state)
     Arbiter.Messages.CoordinatorNotifier.worker_stopped(snapshot(new_state), reason)
     broadcast_lifecycle(:updated, new_state)
@@ -3363,8 +3440,8 @@ defmodule Arbiter.Worker do
   #   * When the worker knows its branch (a worktree was provisioned) we open
   #     the MR / run the merge via the same path open_mr/5 uses. For the default
   #     Direct strategy this merges --no-ff into the target branch synchronously,
-  #     parks at :awaiting_review, and the Watchdog completes the worker on its
-  #     first poll. A merge failure surfaces as a :failure_reason rather than
+  #     hands the PR to the ticket, and the ticket's Watchdog takes it from
+  #     there. A merge failure surfaces as a :failure_reason rather than
   #     silently closing the task as done.
   #   * With no branch (ad-hoc runs / unconfigured repo / no worktree) there is
   #     nothing to integrate. For review_only workers this is the expected path
@@ -3405,7 +3482,9 @@ defmodule Arbiter.Worker do
   defp finish_pass(%State{} = state) do
     finished = %State{
       state
-      | status: :completed,
+      | state: :finished,
+        outcome: :succeeded,
+        waiting_on: nil,
         step_started_at: DateTime.utc_now(),
         meta: Map.put(state.meta, :result, :pass_finished)
     }
@@ -3543,7 +3622,7 @@ defmodule Arbiter.Worker do
       |> Map.put(:failure_reason, reason.summary)
       |> Map.put(:stop_reason, Arbiter.Worker.StopReason.to_map(reason))
 
-    new_state = %State{state | status: :failed, meta: meta}
+    new_state = %State{state | state: :finished, outcome: :failed, waiting_on: nil, meta: meta}
     record_run_finished(new_state)
     Arbiter.Messages.CoordinatorNotifier.worker_stopped(snapshot(new_state), reason)
     broadcast_lifecycle(:updated, new_state)
@@ -3592,7 +3671,7 @@ defmodule Arbiter.Worker do
       |> Map.put(:failure_reason, reason.summary)
       |> Map.put(:stop_reason, Arbiter.Worker.StopReason.to_map(reason))
 
-    new_state = %State{state | status: :failed, meta: meta}
+    new_state = %State{state | state: :finished, outcome: :failed, waiting_on: nil, meta: meta}
     record_run_finished(new_state)
     Arbiter.Messages.CoordinatorNotifier.worker_stopped(snapshot(new_state), reason)
     broadcast_lifecycle(:updated, new_state)
@@ -3602,7 +3681,7 @@ defmodule Arbiter.Worker do
 
   defp route_completion(%State{meta: meta} = state, branch) do
     if review_required?(state) do
-      # Standing order: don't merge unreviewed work. Park at :awaiting_review_gate
+      # Standing order: don't merge unreviewed work. Wait on the review gate
       # and let a distinct reviewer worker judge the diff first. The merge
       # fires only on review_gate_verdict/2 :approve.
       enter_review_gate(state, branch)
@@ -3774,8 +3853,8 @@ defmodule Arbiter.Worker do
   # APPROVE path for a coordinator-dispatched review_only worker. The reviewer
   # has already posted the forge-level review approval.
   #
-  # For hosted-forge workspaces (GitHub/GitLab): park at :awaiting_review and
-  # spawn a Watchdog against the existing PR ref. The Watchdog polls the forge
+  # For hosted-forge workspaces (GitHub/GitLab): hand the existing PR ref to
+  # the ticket and spawn a Watchdog against it. The Watchdog polls the forge
   # and calls Worker.complete only after the PR is actually merged — preventing
   # the Driver from closing the task before the code lands on main. (bd-4u7a1m)
   #
@@ -4109,7 +4188,7 @@ defmodule Arbiter.Worker do
          state
          | claude_sessions: sessions,
            meta: new_meta,
-           status: :running,
+           state: :working,
            step_started_at: DateTime.utc_now()
        }}
     else
@@ -4422,7 +4501,7 @@ defmodule Arbiter.Worker do
     case decision do
       :resume ->
         # bd-4g0fsh: don't respawn inline — a transient gateway blip needs a beat
-        # to clear. Hold at :resuming (a live status, but with no open port) and
+        # to clear. Hold at :starting (a live state, but with no open port) and
         # schedule the respawn after a bounded backoff. The session that just
         # exited rides along so the deferred handler can fail cleanly if the
         # respawn itself can't be built.
@@ -4439,7 +4518,7 @@ defmodule Arbiter.Worker do
           backoff
         )
 
-        %State{state | status: :resuming}
+        %State{state | state: :starting}
 
       {:fail, why} ->
         if why in [:cap_exhausted, :no_progress, :quota_wait_exceeds_max] do
@@ -4568,7 +4647,7 @@ defmodule Arbiter.Worker do
          state
          | claude_sessions: sessions,
            meta: new_meta,
-           status: :running,
+           state: :working,
            step_started_at: now
        }}
     else
@@ -5614,7 +5693,7 @@ defmodule Arbiter.Worker do
 
   defp task_difficulty(_), do: nil
 
-  # Park at :awaiting_review_gate and spawn the reviewer. The branch + merge title
+  # Wait on the review gate and spawn the reviewer. The branch + merge title
   # are stashed in meta so review_gate_verdict/2 can fire the same merge path on
   # approval without re-deriving them.
   defp enter_review_gate(%State{} = state, branch) do
@@ -5647,20 +5726,23 @@ defmodule Arbiter.Worker do
       merge_opts: persistable_merge_opts(meta)
     })
 
-    # bd-aw2cyt: the author's agent has already exited by now, so this park is
-    # exactly the `:running` -> `:in_review` transition the `worker_phase`
+    # bd-aw2cyt: the author's agent has already exited by now, so this wait is
+    # exactly the `:implementing` -> `:in_review` transition the `worker_phase`
     # topic exists to report. Announce it before the gate spawns.
     parked =
       announce_phase(%State{
         state
-        | status: :awaiting_review_gate,
+        | state: :waiting,
+          waiting_on: :review_gate,
           step_started_at: DateTime.utc_now(),
           meta: meta
       })
 
+    record_run_state(parked)
+
     case spawn_review_gate(parked, branch) do
       # Stash the monitor ref so a ReviewGate that dies before reporting can't
-      # silently strand us at :awaiting_review_gate (see the :DOWN handler).
+      # silently strand us waiting on the review gate (see the :DOWN handler).
       {:ok, ref} ->
         %State{parked | meta: Map.put(parked.meta, :review_gate_ref, ref)}
 
@@ -5679,8 +5761,8 @@ defmodule Arbiter.Worker do
   end
 
   # Spawn the ReviewGate (which runs the distinct reviewer worker). The
-  # `:review_spawn` meta flag (default true) lets tests park the worker at
-  # :awaiting_review_gate and drive review_gate_verdict/2 directly, in isolation from a
+  # `:review_spawn` meta flag (default true) lets tests hold the worker waiting
+  # on the review gate and drive review_gate_verdict/2 directly, in isolation from a
   # live reviewer subprocess. `:review_command` is the reviewer argv test escape
   # hatch (forwarded to the ReviewGate → ClaudeSession), mirroring dispatch's
   # `:claude_command`.
@@ -5736,14 +5818,13 @@ defmodule Arbiter.Worker do
     end
   end
 
-  # Apply a ReviewGate verdict from :awaiting_review_gate.
+  # Apply a ReviewGate verdict to a run waiting on the review gate.
   defp apply_review_gate_verdict(%State{} = state, {:approve, findings}) do
     record_review_gate_outcome(state, :approve, findings)
     record_review_gate(state, %{verdict: :approve})
     branch = Map.get(state.meta, :review_gate_branch) || mergeable_branch(state.meta)
     # Tell the Watchdog the gate approved this MR. Without via_review_gate,
-    # hosted-forge adapters (Github) park forever at :awaiting_review waiting
-    # for a PR-level approval the ReviewGate never posts (bd-66ey1o) — a
+    # hosted-forge adapters (Github) wait forever for a PR-level approval the ReviewGate never posts (bd-66ey1o) — a
     # non-terminal poll is treated as approved on the first poll regardless.
     # Whether the Watchdog then actually clicks merge is NOT forced here — it
     # follows the workspace's `auto_merge` setting via the normal cond in
@@ -5767,13 +5848,15 @@ defmodule Arbiter.Worker do
   # VERDICT after the re-prompt, a reviewing-pass timeout, a verdict guard whose
   # re-prompt budget is spent, a no-op fix round after an approval-gap
   # rejection. None of those is evidence the WORK failed, and recording them as
-  # `Run.status = :failed` is what made `:review_gate_inconclusive` alone cost 52
-  # runs / $226.97 in 31 days on work that was fine.
+  # a plain failed run with no named cause is what made
+  # `:review_gate_inconclusive` alone cost 52 runs / $226.97 in 31 days on work
+  # that was fine.
   #
   # Content stays fail-closed — nothing here merges, and the guard's refusal to
   # accept the APPROVE stands. Only liveness opens: the task parks with a named
-  # reason, the coordinator is paged once for the episode, and the run row is
-  # written `:review_parked` instead of `:failed`.
+  # reason (`review_park_reason`) and the coordinator is paged once for the
+  # episode. The run itself finishes `:failed` (bd-1uu19b); the cause is the
+  # ticket's.
   defp apply_review_gate_verdict(%State{} = state, {:parked, reason, findings}) do
     park_rejected(state, park_verdict_for(reason), findings, reason)
   end
@@ -5795,8 +5878,8 @@ defmodule Arbiter.Worker do
     )
   end
 
-  # What the parked outcome is RECORDED as. The park changes the run's status
-  # and the task's flag; it deliberately does not rewrite the gate's own verdict
+  # What the parked outcome is RECORDED as. The park finishes the run and sets
+  # the task's flag; it deliberately does not rewrite the gate's own verdict
   # bookkeeping, because `meta.failure_reason` is still pattern-matched
   # literally by Loop.FailureClassifier / Loop.Corpus.rejected?/1 / Loop.Analysis
   # and the round rows must keep saying what the gate actually decided. A guard
@@ -5808,8 +5891,8 @@ defmodule Arbiter.Worker do
 
   defp park_verdict_for(_reason), do: :no_verdict
 
-  # Reject path: record findings, escalate to the coordinator, and park the worker
-  # at :failed WITHOUT merging. failure_reason stays a short atom (still pattern-
+  # Reject path: record findings, escalate to the coordinator, and finish the run
+  # :failed WITHOUT merging. failure_reason stays a short atom (still pattern-
   # matched literally by Loop.FailureClassifier / Loop.Corpus.rejected?/1 /
   # Loop.Analysis — do not change its content); the full findings live in meta
   # + the escalation message + `Arbiter.ReviewGate.Round` (queryable via
@@ -5860,10 +5943,10 @@ defmodule Arbiter.Worker do
     # bd-a9zb7w: the rejection is recorded and paged — now schedule the
     # implementer. Deferred to a self-message rather than run inline because the
     # dispatch is `Dispatch.resume/2`, which refuses a task whose worker is not
-    # yet terminal and then stops that worker: inline it would read our own
-    # pre-reply `:awaiting_review_gate` status and deadlock stopping ourselves.
-    # By the time this message is handled the caller's reply has been sent and
-    # `status` is `:failed`.
+    # yet finished and then stops that worker: inline it would read our own
+    # pre-reply review-gate wait and deadlock stopping ourselves. By the time
+    # this message is handled the caller's reply has been sent and the run is
+    # finished `:failed`.
     #
     # bd-9zuvbh: a PARKED outcome schedules nothing. The gate has already spent
     # its rounds; the whole point of the park is that a human decides next, and
@@ -6098,8 +6181,8 @@ defmodule Arbiter.Worker do
   # alone is not enough: only the merge paths that finish terminally (the Direct
   # merger completing inside `merge_branch/3`) reach `record_run_finished/1` and
   # rewrite the durable row. On a hosted forge, `merge_branch/3` ->
-  # `do_open_mr/5` -> `finalize_opened_mr/5` parks at `:awaiting_review` and only
-  # records the PR ref — so without the explicit write-back below, the
+  # `do_open_mr/5` -> `finalize_opened_mr/5` used to leave the author resident
+  # and only record the PR ref — so without the explicit write-back below, the
   # `worker_runs` row would keep reading `:failed` / `:review_gate_rejected` for
   # the entire (possibly indefinite, on an `auto_merge: false` workspace) life of
   # the open MR. That is exactly the surface `worker_show`'s historical fallback,
@@ -6138,7 +6221,13 @@ defmodule Arbiter.Worker do
 
     merged =
       apply_review_gate_verdict(
-        announce_phase(%State{state | status: :awaiting_review_gate, meta: meta}),
+        announce_phase(%State{
+          state
+          | state: :waiting,
+            outcome: nil,
+            waiting_on: :review_gate,
+            meta: meta
+        }),
         verdict
       )
 
@@ -6170,7 +6259,7 @@ defmodule Arbiter.Worker do
     drain_run_finished()
 
     case applied do
-      %State{status: :failed, meta: meta} -> {:error, Map.get(meta, :failure_reason)}
+      %State{outcome: :failed, meta: meta} -> {:error, Map.get(meta, :failure_reason)}
       _ -> :ok
     end
   end
@@ -6219,7 +6308,9 @@ defmodule Arbiter.Worker do
            Map.get(ctx, :repo) || Map.get(round, "repo") || (run && run.repo) || issue.repo ||
              "unknown",
          current_step: :review_gate,
-         status: :awaiting_review_gate,
+         kind: :implement,
+         state: :waiting,
+         waiting_on: :review_gate,
          started_at: DateTime.utc_now(),
          meta: round_meta(issue, round, ctx),
          run_id: run && run.id
@@ -6322,7 +6413,7 @@ defmodule Arbiter.Worker do
 
   defp latest_main_run(task_id) do
     Arbiter.Workers.Run
-    |> Ash.Query.filter(task_id == ^task_id and worker_type == :main)
+    |> Ash.Query.filter(task_id == ^task_id and kind == :implement)
     |> Ash.Query.sort(started_at: :desc)
     |> Ash.Query.limit(1)
     |> Ash.read!()
@@ -6332,22 +6423,26 @@ defmodule Arbiter.Worker do
   end
 
   # Write the reconciliation through to the durable `worker_runs` row when the
-  # approve path parked NON-terminally (hosted forge: MR opened, worker sitting
-  # at `:awaiting_review` while the Watchdog polls). A terminal outcome
-  # (`:completed` from a Direct merge, or `:failed` from a merge that then
-  # conflicted) is left alone — `record_run_finished/1` has already written the
-  # row and its state is the accurate one.
+  # approve path left the run unfinished. A finished run (`:succeeded` once the
+  # PR opened, or `:failed` from a merge that then conflicted) is left alone —
+  # `record_run_finished/1` has already written the row and its outcome is the
+  # accurate one.
   #
   # `completed_at` is nulled along with the failure columns: it was stamped by
-  # the rejection's terminal write and a run that is running again has not
-  # completed. All four columns are in the `:update` accept list.
+  # the rejection's terminal write and a run that is live again has not
+  # finished. Every column is in the `:update` accept list.
   defp clear_run_rejection_if_parked(%State{run_id: nil}), do: :ok
 
-  defp clear_run_rejection_if_parked(%State{status: status}) when status in [:completed, :failed],
-    do: :ok
+  defp clear_run_rejection_if_parked(%State{state: :finished}), do: :ok
 
-  defp clear_run_rejection_if_parked(%State{run_id: run_id, task_id: task_id}) do
-    attrs = %{status: :running, failure_reason: nil, failure_summary: nil, completed_at: nil}
+  defp clear_run_rejection_if_parked(%State{run_id: run_id, task_id: task_id} = state) do
+    attrs = %{
+      state: state.state,
+      outcome: nil,
+      failure_reason: nil,
+      failure_summary: nil,
+      completed_at: nil
+    }
 
     with {:ok, run} <- Ash.get(Arbiter.Workers.Run, run_id),
          {:ok, _updated} <- Ash.update(run, attrs, action: :update) do
@@ -6381,7 +6476,7 @@ defmodule Arbiter.Worker do
         "A later ReviewGate round approved this work after an earlier round parked it as " <>
           "#{inspect(prior)}. The run was reconciled forward and the merge handoff resumed; " <>
           "the earlier escalation for this task is superseded. " <>
-          "The worker is now `#{state.status}`."
+          "The run is now #{Arbiter.Workers.RunState.label(state.state, state.outcome)}."
     })
 
     Arbiter.Events.broadcast(ws_id, "review_gate", %{task_id: task_id, message: subject})
@@ -6916,9 +7011,9 @@ defmodule Arbiter.Worker do
     # bookkeeping the boot reconciler (bd-6k8519) was silently masking: the
     # real worker-completion path is `arb done` -> task closes -> the task
     # `:close` after-action StopWorker calls `Worker.stop` -> terminate/2
-    # from a NON-terminal state (:running/:idle/:awaiting/:awaiting_review).
-    # Nothing on that path ever marks the row terminal, so it stayed :running
-    # until the next server boot. See finalize_run_on_terminate/2.
+    # from a live state (:starting/:working/:waiting). Nothing on that path
+    # ever marks the row finished, so it stayed :working until the next
+    # server boot. See finalize_run_on_terminate/2.
     finalize_run_on_terminate(reason, state)
 
     # bd-cryhwk: if the worker is torn down (StopWorker after a task closes,
@@ -6949,43 +7044,43 @@ defmodule Arbiter.Worker do
 
   # On termination, guarantee the worker_runs row is closed out.
   #
-  #   * :completed / :failed — the row was already stamped by complete_now/2 or
+  #   * `:finished` — the row was already stamped by complete_now/2 or
   #     fail_now/2 (the explicit complete/fail paths). Don't double-write.
-  #   * any non-terminal status (:idle/:running/:awaiting/:awaiting_review) —
-  #     the worker is being torn down without an explicit terminal transition.
-  #     What that means depends on WHY (bd-aje6fj):
+  #   * any live state (:starting/:working/:waiting) — the worker is being
+  #     torn down without an explicit terminal transition. What that means
+  #     depends on WHY (bd-aje6fj):
   #       - `:normal` — a deliberate `Worker.stop/3` (the normal `arb done` ->
   #         task :close -> StopWorker teardown). Treat the termination as
-  #         completion and stamp the row :completed + completed_at so `arb
-  #         worker show` reflects the finished run immediately.
+  #         success and stamp the row finished/:succeeded + completed_at so
+  #         `arb worker show` reflects the finished run immediately.
   #       - `:shutdown` / `{:shutdown, _}` — the supervisor shut it down, i.e.
-  #         the node is stopping. The run did not fail and did not finish:
-  #         stamp :interrupted with failure_reason "server shutdown". The task
-  #         is left :in_progress for the boot-time resume sweep.
+  #         the node is stopping. The run did not fail and did not finish on
+  #         its own: stamp finished/:interrupted with failure_reason "server
+  #         shutdown". The task is left :in_progress for the boot-time resume
+  #         sweep.
   #       - anything else — the worker crashed (a raise in a callback, or a
-  #         linked process dying). Stamp :failed with the crash reason, not
-  #         :completed.
-  defp finalize_run_on_terminate(_reason, %State{status: status})
-       when status in [:completed, :failed] do
-    :ok
-  end
+  #         linked process dying). Stamp finished/:failed with the crash
+  #         reason, not :succeeded.
+  defp finalize_run_on_terminate(_reason, %State{state: :finished}), do: :ok
 
   defp finalize_run_on_terminate(reason, %State{} = state) do
+    finished = %State{state | state: :finished, waiting_on: nil}
+
     case terminate_outcome(reason) do
       :completed ->
-        record_run_finished(%State{state | status: :completed})
+        record_run_finished(%State{finished | outcome: :succeeded})
 
       :interrupted ->
         record_run_finished(%State{
-          state
-          | status: :interrupted,
+          finished
+          | outcome: :interrupted,
             meta: Map.put(state.meta, :failure_reason, @shutdown_reason)
         })
 
       :crashed ->
         record_run_finished(%State{
-          state
-          | status: :failed,
+          finished
+          | outcome: :failed,
             meta: Map.put(state.meta, :failure_reason, "worker crashed: #{crash_inspect(reason)}")
         })
     end
@@ -6993,7 +7088,7 @@ defmodule Arbiter.Worker do
 
   # A crash reason can carry a whole state or stacktrace. Bounded so the stamp
   # stays under Run.failure_reason's 2000-char max_length — an over-long value
-  # fails validation, the row is left :running, and the reconciler later
+  # fails validation, the row is left :working, and the reconciler later
   # misreports the crash as "server restarted".
   defp crash_inspect(reason) do
     reason
@@ -7061,7 +7156,11 @@ defmodule Arbiter.Worker do
       workspace_id: s.workspace_id,
       repo: s.repo,
       current_step: s.current_step,
-      status: s.status,
+      # bd-1uu19b: the run vocabulary, the same fields the run's row carries.
+      kind: s.kind,
+      state: s.state,
+      outcome: s.outcome,
+      waiting_on: s.waiting_on,
       # bd-aw2cyt: a slot is a live agent, not a live record. Stamped here so
       # every surface that already reads a snapshot — the board, `arb worker
       # list`, the MCP tools, the worker lifecycle broadcast — gets the answer
@@ -7071,13 +7170,15 @@ defmodule Arbiter.Worker do
       step_started_at: s.step_started_at,
       mr_ref: s.mr_ref,
       merger_url: s.merger_url,
+      # The run's `Arbiter.Workers.Run` row (nil if its create failed).
+      run_id: s.run_id,
       meta: s.meta
     }
   end
 
   # ---- merge-request review internals ------------------------------------
 
-  # Resolve the merger, open the MR / run the merge, park at :awaiting_review,
+  # Resolve the merger, open the MR / run the merge, hand the PR to the ticket,
   # and spawn the Watchdog. Returns `{:ok, mr_ref, new_state}` on success or
   # `{:error, reason, unchanged_state}` on failure.
   #
@@ -7230,7 +7331,9 @@ defmodule Arbiter.Worker do
   defp finish_run_after_pr_opened(%State{} = state) do
     finished = %State{
       state
-      | status: :completed,
+      | state: :finished,
+        outcome: :succeeded,
+        waiting_on: nil,
         step_started_at: DateTime.utc_now(),
         meta: Map.put(state.meta, :result, :pr_opened)
     }

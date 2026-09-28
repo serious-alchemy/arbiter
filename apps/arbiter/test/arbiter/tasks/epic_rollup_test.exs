@@ -50,16 +50,19 @@ defmodule Arbiter.Tasks.EpicRollupTest do
 
   defp park(issue), do: Ash.update!(issue, %{}, action: :await_verification)
 
-  defp worker(task_id, status, attrs \\ %{}) do
-    Map.merge(
-      %{
-        task_id: task_id,
-        status: status,
-        meta: %{}
-      },
-      attrs
-    )
+  # A worker snapshot in one of its run's states. `:question` and
+  # `:review_gate` are a `:waiting` run and what it waits on; `:failed` is a
+  # finished run's outcome.
+  defp worker(task_id, state, attrs \\ %{}) do
+    %{task_id: task_id, meta: %{}}
+    |> Map.merge(run_fields(state))
+    |> Map.merge(attrs)
   end
+
+  defp run_fields(:question), do: %{state: :waiting, waiting_on: :question, outcome: nil}
+  defp run_fields(:review_gate), do: %{state: :waiting, waiting_on: :review_gate, outcome: nil}
+  defp run_fields(:failed), do: %{state: :finished, waiting_on: nil, outcome: :failed}
+  defp run_fields(state), do: %{state: state, waiting_on: nil, outcome: nil}
 
   defp rollup(epic, opts \\ []), do: Map.fetch!(EpicRollup.for_epics([epic], opts), epic.id)
 
@@ -192,9 +195,9 @@ defmodule Arbiter.Tasks.EpicRollupTest do
   end
 
   describe "needs_you rule 2: a child's own worker needs the operator" do
-    test "a live :awaiting worker (a question) flags needs_you", ctx do
+    test "a live worker waiting on a question flags needs_you", ctx do
       c = child(ctx.ws, ctx.epic, "asking-child", as: :running)
-      w = worker(c.id, :awaiting, %{meta: %{await_reason: "which?"}})
+      w = worker(c.id, :question, %{meta: %{await_reason: "which?"}})
 
       r = rollup(ctx.epic, workers: [w])
 
@@ -202,7 +205,7 @@ defmodule Arbiter.Tasks.EpicRollupTest do
       assert "#{c.id} parked" in r.needs_you_reasons
     end
 
-    test "a live :failed worker (parked) flags needs_you", ctx do
+    test "a run finished :failed (parked) flags needs_you", ctx do
       c = child(ctx.ws, ctx.epic, "failed-child", as: :running)
       w = worker(c.id, :failed, %{meta: %{stop_reason: %{summary: "review rejected"}}})
 
@@ -247,45 +250,47 @@ defmodule Arbiter.Tasks.EpicRollupTest do
       refute r.needs_you
     end
 
+    # bd-741sid: an open MR is a Merging child's, its last poll on its row.
     test "an approved MR blocked on something the Watchdog can't clear flags needs_you", ctx do
-      c = child(ctx.ws, ctx.epic, "blocked-mr-child", as: :running)
-
-      w =
-        worker(c.id, :awaiting_review, %{
-          meta: %{last_merger_status: %{approved: true, block_reason: :needs_approval}}
+      c =
+        merging_child(ctx, "blocked-mr-child", %{
+          status: :open,
+          approved: true,
+          block_reason: :needs_approval
         })
 
-      r = rollup(ctx.epic, workers: [w], watchdog_live: MapSet.new([c.id]))
+      r = rollup(ctx.epic, workers: [], watchdog_live: MapSet.new([c.id]))
 
       assert r.needs_you
       assert "#{c.id} parked" in r.needs_you_reasons
     end
 
     test "an approved MR blocked on an auto-resolvable reason does not flag needs_you", ctx do
-      c = child(ctx.ws, ctx.epic, "auto-resolvable-child", as: :running)
-
-      w =
-        worker(c.id, :awaiting_review, %{
-          meta: %{last_merger_status: %{approved: true, block_reason: :ci_failed}}
+      c =
+        merging_child(ctx, "auto-resolvable-child", %{
+          status: :open,
+          approved: true,
+          block_reason: :ci_failed
         })
 
-      r = rollup(ctx.epic, workers: [w], watchdog_live: MapSet.new([c.id]))
+      r = rollup(ctx.epic, workers: [], watchdog_live: MapSet.new([c.id]))
 
       refute r.needs_you
     end
 
     test "a running child with a live author worker does not flag needs_you", ctx do
       c = child(ctx.ws, ctx.epic, "running-child", as: :running)
-      w = worker(c.id, :running)
+      w = worker(c.id, :working)
 
       r = rollup(ctx.epic, workers: [w])
 
       refute r.needs_you
     end
 
-    test "an in-review child mid-review (no merger status yet) does not flag needs_you", ctx do
+    test "an in-review child (its author waiting on the review gate) does not flag needs_you",
+         ctx do
       c = child(ctx.ws, ctx.epic, "reviewing-child", as: :running)
-      w = worker(c.id, :awaiting_review, %{meta: %{}})
+      w = worker(c.id, :review_gate)
 
       r = rollup(ctx.epic, workers: [w], watchdog_live: MapSet.new([c.id]))
 
@@ -295,11 +300,7 @@ defmodule Arbiter.Tasks.EpicRollupTest do
     test "agrees with the board's own needs_you flag for the same worker fixture", ctx do
       c = child(ctx.ws, ctx.epic, "shared-predicate-child", as: :running)
 
-      w =
-        worker(c.id, :awaiting_review, %{
-          mr_ref: "!7",
-          meta: %{last_merger_status: %{approved: true, block_reason: :needs_approval}}
-        })
+      w = worker(c.id, :question, %{meta: %{await_reason: "which?"}})
 
       watchdog_live = MapSet.new([c.id])
 
@@ -460,18 +461,18 @@ defmodule Arbiter.Tasks.EpicRollupTest do
       blocker = Ash.update!(blocker, %{status: :in_progress})
       {:ok, _} = Dependencies.add(blocked.id, blocker.id, :depends_on)
 
-      w = worker(blocker.id, :running)
+      w = worker(blocker.id, :working)
 
       refute rollup(ctx.epic, workers: [w]).needs_you
     end
 
-    test "blocked by a blocker mid-review with a live watchdog does not flag needs_you", ctx do
+    test "blocked by a blocker mid-review does not flag needs_you", ctx do
       blocked = child(ctx.ws, ctx.epic, "blocked-child", as: :ready)
       {:ok, blocker} = Ash.create(Issue, %{title: "reviewing blocker", workspace_id: ctx.ws.id})
       blocker = Ash.update!(blocker, %{status: :in_progress})
       {:ok, _} = Dependencies.add(blocked.id, blocker.id, :depends_on)
 
-      w = worker(blocker.id, :awaiting_review, %{meta: %{}})
+      w = worker(blocker.id, :review_gate)
 
       refute rollup(ctx.epic, workers: [w], watchdog_live: MapSet.new([blocker.id])).needs_you
     end

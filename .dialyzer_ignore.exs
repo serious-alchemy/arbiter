@@ -65,7 +65,6 @@
   {"lib/arbiter_web/live/board_live.ex", :pattern_match_cov},
   {"lib/arbiter_web/live/loop_proposal_index_live.ex", :pattern_match_cov},
   {"lib/arbiter_web/live/worker_detail_live.ex", :pattern_match_cov},
-  {"lib/arbiter_web/live/worker_index_live.ex", :pattern_match_cov},
 
   # ── 2. Defensive error branches (`pattern_match`) ─────────────────────────
   #

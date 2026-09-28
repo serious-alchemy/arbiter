@@ -68,7 +68,7 @@ defmodule Arbiter.Worker.AuthDeathTest do
 
       # The run is still recorded as the failure it was.
       assert [run] = runs(task.id)
-      assert run.status == :failed
+      assert run.outcome == :failed
       assert run.stop_category == "auth_expired"
 
       # The failed worker is gone from the registry, or the board would file
@@ -123,7 +123,7 @@ defmodule Arbiter.Worker.AuthDeathTest do
 
       assert {:ok, _} = dispatch(task.id)
       eventually(fn -> length(runs(task.id)) == 2 and Worker.whereis(task.id) != nil end)
-      eventually(fn -> Enum.all?(runs(task.id), &(&1.status == :failed)) end)
+      eventually(fn -> Enum.all?(runs(task.id), &(&1.outcome == :failed)) end)
 
       # Second auth death on this task: today's behaviour, it stays put.
       assert_stays(fn -> reload(task).status == :in_progress end)
@@ -137,7 +137,7 @@ defmodule Arbiter.Worker.AuthDeathTest do
       task = ready_task!(ws, "crashes")
 
       assert {:ok, %{worker_pid: pid}} = dispatch(task.id)
-      eventually(fn -> Worker.state(pid).status == :failed end)
+      eventually(fn -> Worker.state(pid).outcome == :failed end)
       assert Worker.state(pid).meta.stop_reason.category == :crashed
 
       assert_stays(fn -> reload(task).status == :in_progress end)
@@ -166,7 +166,7 @@ defmodule Arbiter.Worker.AuthDeathTest do
       task = ready_task!(ws, "killed mid-auth-investigation")
 
       assert {:ok, %{worker_pid: pid}} = dispatch(task.id)
-      eventually(fn -> Worker.state(pid).status == :failed end)
+      eventually(fn -> Worker.state(pid).outcome == :failed end)
 
       reason = Worker.state(pid).meta.stop_reason
       assert reason.category == :killed

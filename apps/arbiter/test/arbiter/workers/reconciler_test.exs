@@ -12,12 +12,13 @@ defmodule Arbiter.Workers.ReconcilerTest do
   alias Arbiter.Workers.Run
   require Ash.Query
 
-  defp create_run(task_id, status) do
+  defp create_run(task_id, state, outcome \\ nil) do
     Ash.create!(Run, %{
       task_id: task_id,
       repo: "arbiter",
       workspace_id: "ws-reconcile",
-      status: status,
+      state: state,
+      outcome: outcome,
       started_at: DateTime.utc_now(),
       output_lines: []
     })
@@ -29,16 +30,33 @@ defmodule Arbiter.Workers.ReconcilerTest do
     |> Ash.read_one!()
   end
 
-  test "marks an orphaned :running run :failed with a server-restarted reason" do
+  # bd-1uu19b AC6: the server stopped under the run — it did not fail.
+  test "marks an orphaned :working run finished/interrupted with a server-restarted reason" do
     task_id = "bd-orphan-#{System.unique_integer([:positive])}"
-    create_run(task_id, :running)
+    create_run(task_id, :working)
 
     assert {:ok, 1} = Reconciler.reconcile_orphaned_runs()
 
     run = reload(task_id)
-    assert run.status == :failed
+    assert {run.state, run.outcome} == {:finished, :interrupted}
     assert run.failure_reason == "server restarted"
     assert %DateTime{} = run.completed_at
+  end
+
+  test "sweeps an orphaned :starting or :waiting run the same way" do
+    starting = "bd-orphan-start-#{System.unique_integer([:positive])}"
+    waiting = "bd-orphan-wait-#{System.unique_integer([:positive])}"
+    create_run(starting, :starting)
+    create_run(waiting, :waiting)
+
+    assert {:ok, 2} = Reconciler.reconcile_orphaned_runs()
+
+    for task_id <- [starting, waiting] do
+      run = reload(task_id)
+
+      assert {run.state, run.outcome, run.failure_reason} ==
+               {:finished, :interrupted, "server restarted"}
+    end
   end
 
   test "leaves a :running run with a live worker untouched" do
@@ -52,7 +70,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
     assert {:ok, 0} = Reconciler.reconcile_orphaned_runs()
 
     run = reload(task_id)
-    assert run.status == :running
+    assert run.state in [:starting, :working]
   end
 
   test "a non-primary (second) instance does not sweep live runs" do
@@ -62,12 +80,12 @@ defmodule Arbiter.Workers.ReconcilerTest do
     # sweep on Arbiter.SingleInstance.primary?/0; a non-primary boot passes
     # primary?: false and must touch nothing.
     live = "bd-primary-live-#{System.unique_integer([:positive])}"
-    create_run(live, :running)
+    create_run(live, :working)
 
     assert {:ok, :skipped} = Reconciler.reconcile_orphaned_runs(primary?: false)
 
     run = reload(live)
-    assert run.status == :running
+    assert run.state in [:starting, :working]
     assert run.failure_reason == nil
     assert run.completed_at == nil
   end
@@ -76,21 +94,21 @@ defmodule Arbiter.Workers.ReconcilerTest do
     # The legitimate single-server-restart path: primary?: true reconciles as
     # before, so genuine orphans are still swept.
     task_id = "bd-orphan-primary-#{System.unique_integer([:positive])}"
-    create_run(task_id, :running)
+    create_run(task_id, :working)
 
     assert {:ok, 1} = Reconciler.reconcile_orphaned_runs(primary?: true)
 
-    assert reload(task_id).status == :failed
+    assert reload(task_id).outcome == :interrupted
   end
 
   test "leaves already-terminal runs untouched" do
     task_id = "bd-done-#{System.unique_integer([:positive])}"
-    create_run(task_id, :completed)
+    create_run(task_id, :finished, :succeeded)
 
     assert {:ok, 0} = Reconciler.reconcile_orphaned_runs()
 
     run = reload(task_id)
-    assert run.status == :completed
+    assert run.outcome == :succeeded
     assert run.failure_reason == nil
   end
 
@@ -98,20 +116,20 @@ defmodule Arbiter.Workers.ReconcilerTest do
     orphans =
       for _ <- 1..4 do
         task_id = "bd-stale-#{System.unique_integer([:positive])}"
-        create_run(task_id, :running)
+        create_run(task_id, :working)
         task_id
       end
 
     assert {:ok, 4} = Reconciler.reconcile_orphaned_runs()
 
     for task_id <- orphans do
-      assert reload(task_id).status == :failed
+      assert reload(task_id).outcome == :interrupted
     end
 
     # No :running row survives without a live worker backing it.
     surviving =
       Run
-      |> Ash.Query.filter(status == :running)
+      |> Ash.Query.filter(state == :working)
       |> Ash.read!()
       |> Enum.reject(fn run -> Worker.whereis(run.task_id) end)
 
@@ -181,7 +199,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
         task_id: task_id,
         repo: "arbiter",
         workspace_id: "ws-reconcile",
-        status: :running,
+        state: :working,
         started_at: DateTime.utc_now(),
         session_id: session_id,
         config_dir: config_dir,
@@ -192,7 +210,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
 
     assert {:ok, 1} = Reconciler.reconcile_orphaned_runs()
 
-    assert reload(task_id).status == :failed
+    assert reload(task_id).outcome == :interrupted
 
     assert [ev] = usage_events_for(run.id)
     assert ev.tokens_in == 15
@@ -234,7 +252,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
         task_id: task_id,
         repo: "arbiter",
         workspace_id: ws.id,
-        status: :running,
+        state: :working,
         started_at: DateTime.utc_now(),
         session_id: session_id,
         config_dir: config_dir,
@@ -264,8 +282,9 @@ defmodule Arbiter.Workers.ReconcilerTest do
         task_id: task_id,
         repo: "arbiter",
         workspace_id: "ws-reconcile",
-        status: :running,
-        worker_type: :impl,
+        state: :working,
+        kind: :implement,
+        role: "impl",
         started_at: DateTime.utc_now(),
         session_id: session_id,
         config_dir: config_dir,
@@ -292,7 +311,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
         task_id: task_id,
         repo: "arbiter",
         workspace_id: "ws-reconcile",
-        status: :running,
+        state: :working,
         started_at: DateTime.utc_now(),
         session_id: session_id,
         config_dir: config_dir,
@@ -336,7 +355,8 @@ defmodule Arbiter.Workers.ReconcilerTest do
         repo: "arbiter",
         workspace_id: "ws-reconcile",
         # Terminal: the parent exited cleanly and the stdout path billed it.
-        status: :completed,
+        state: :finished,
+        outcome: :succeeded,
         started_at: parent_started,
         session_id: session_id,
         config_dir: config_dir,
@@ -361,7 +381,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
         task_id: task_id,
         repo: "arbiter",
         workspace_id: "ws-reconcile",
-        status: :running,
+        state: :working,
         started_at: DateTime.utc_now(),
         session_id: session_id,
         config_dir: config_dir,
@@ -385,11 +405,11 @@ defmodule Arbiter.Workers.ReconcilerTest do
 
   test "orphaned run without session coordinates is swept but writes no usage row" do
     task_id = "bd-crash-nocoord-#{System.unique_integer([:positive])}"
-    run = create_run(task_id, :running)
+    run = create_run(task_id, :working)
 
     assert {:ok, 1} = Reconciler.reconcile_orphaned_runs()
 
-    assert reload(task_id).status == :failed
+    assert reload(task_id).outcome == :interrupted
     assert usage_events_for(run.id) == []
   end
 
@@ -639,8 +659,9 @@ defmodule Arbiter.Workers.ReconcilerTest do
     assert {merging.state, parked.state} == {:merging, :active}
 
     for {issue, attrs} <- [
-          {merging, %{status: :interrupted, failure_reason: "server shutdown"}},
-          {parked, %{status: :failed, failure_reason: ":review_gate_rejected"}}
+          {merging,
+           %{state: :finished, outcome: :interrupted, failure_reason: "server shutdown"}},
+          {parked, %{state: :finished, outcome: :failed, failure_reason: ":review_gate_rejected"}}
         ] do
       {:ok, _} =
         Ash.create(
@@ -692,7 +713,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
           task_id: issue.id,
           repo: "arbiter",
           workspace_id: issue.workspace_id,
-          worker_type: :main,
+          kind: :implement,
           started_at: DateTime.add(DateTime.utc_now(), -600, :second)
         },
         attrs
@@ -712,7 +733,12 @@ defmodule Arbiter.Workers.ReconcilerTest do
     ws = create_workspace()
     pr_ref = "#{System.unique_integer([:positive])}"
     issue = revising(create_issue(ws.id, %{status: :in_progress, pr_ref: pr_ref}))
-    create_main_run(issue, %{status: :interrupted, failure_reason: "server shutdown"})
+
+    create_main_run(issue, %{
+      state: :finished,
+      outcome: :interrupted,
+      failure_reason: "server shutdown"
+    })
 
     test_pid = self()
     resume = fn %Issue{id: id} -> send(test_pid, {:resumed, id}) && {:ok, %{task_id: id}} end
@@ -728,7 +754,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
     ws = create_workspace()
     pr_ref = "#{System.unique_integer([:positive])}"
     issue = create_issue(ws.id, %{status: :in_progress, pr_ref: pr_ref})
-    create_main_run(issue, %{status: :review_not_started})
+    create_main_run(issue, %{state: :finished, outcome: :failed})
 
     resume = fn %Issue{} -> flunk("a parked open-PR task must not be resumed") end
 
@@ -744,7 +770,8 @@ defmodule Arbiter.Workers.ReconcilerTest do
 
       run =
         create_main_run(issue, %{
-          status: :failed,
+          state: :finished,
+          outcome: :failed,
           failure_reason: ":machine_died",
           exit_code: 143,
           completed_at: DateTime.add(booted_at, -7, :second)
@@ -753,7 +780,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
       assert {:ok, 1} = Reconciler.reconcile_shutdown_casualties(booted_at: booted_at)
 
       reloaded = Ash.get!(Run, run.id)
-      assert reloaded.status == :interrupted
+      assert reloaded.outcome == :interrupted
       assert reloaded.failure_reason == "server shutdown"
       assert reloaded.exit_code == 143
       assert reloaded.completed_at == run.completed_at
@@ -765,7 +792,8 @@ defmodule Arbiter.Workers.ReconcilerTest do
       booted_at = DateTime.utc_now()
 
       create_main_run(issue, %{
-        status: :failed,
+        state: :finished,
+        outcome: :failed,
         failure_reason: ":machine_died",
         completed_at: DateTime.add(booted_at, -7, :second)
       })
@@ -790,7 +818,8 @@ defmodule Arbiter.Workers.ReconcilerTest do
 
       run =
         create_main_run(issue, %{
-          status: :failed,
+          state: :finished,
+          outcome: :failed,
           failure_reason: ":machine_died",
           completed_at: DateTime.add(booted_at, -3_600, :second)
         })
@@ -798,7 +827,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
       assert {:ok, 0} = Reconciler.reconcile_shutdown_casualties(booted_at: booted_at)
 
       reloaded = Ash.get!(Run, run.id)
-      assert reloaded.status == :failed
+      assert reloaded.outcome == :failed
       assert reloaded.failure_reason == ":machine_died"
     end
 
@@ -809,13 +838,14 @@ defmodule Arbiter.Workers.ReconcilerTest do
 
       run =
         create_main_run(issue, %{
-          status: :failed,
+          state: :finished,
+          outcome: :failed,
           failure_reason: ":auth_expired",
           completed_at: DateTime.add(booted_at, -7, :second)
         })
 
       assert {:ok, 0} = Reconciler.reconcile_shutdown_casualties(booted_at: booted_at)
-      assert Ash.get!(Run, run.id).status == :failed
+      assert Ash.get!(Run, run.id).outcome == :failed
     end
 
     test "skips when primary?: false" do
@@ -825,7 +855,8 @@ defmodule Arbiter.Workers.ReconcilerTest do
 
       run =
         create_main_run(issue, %{
-          status: :failed,
+          state: :finished,
+          outcome: :failed,
           failure_reason: ":machine_died",
           completed_at: DateTime.add(booted_at, -7, :second)
         })
@@ -833,7 +864,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
       assert {:ok, :skipped} =
                Reconciler.reconcile_shutdown_casualties(primary?: false, booted_at: booted_at)
 
-      assert Ash.get!(Run, run.id).status == :failed
+      assert Ash.get!(Run, run.id).outcome == :failed
     end
   end
 
@@ -907,7 +938,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
         task_id: task_id,
         repo: "arbiter",
         workspace_id: "ws-reconcile",
-        status: :running,
+        state: :working,
         started_at: DateTime.utc_now(),
         session_id: session_id,
         config_dir: config_dir,
@@ -952,7 +983,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
         task_id: task_id,
         repo: "arbiter",
         workspace_id: "ws-reconcile",
-        status: :running,
+        state: :working,
         started_at: DateTime.utc_now(),
         session_id: session_id,
         config_dir: config_dir,

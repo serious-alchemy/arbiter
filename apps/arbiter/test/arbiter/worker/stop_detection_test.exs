@@ -60,7 +60,7 @@ defmodule Arbiter.Worker.StopDetectionTest do
   defp wait_for_failed(pid) do
     eventually(fn ->
       case Worker.state(pid) do
-        %{status: :failed} = s -> s
+        %{state: :finished, outcome: :failed} = s -> s
         _ -> nil
       end
     end)
@@ -257,18 +257,18 @@ defmodule Arbiter.Worker.StopDetectionTest do
 
       # The fixture prints "arb done" then exits 0. The done signal must win the
       # race against the exit, so the deferred stop-check no-ops.
-      status =
+      outcome =
         eventually(fn ->
-          case Worker.state(pid).status do
-            :completed -> :completed
+          case Worker.state(pid) do
+            %{state: :finished, outcome: :succeeded} -> :succeeded
             _ -> nil
           end
         end)
 
-      assert status == :completed
+      assert outcome == :succeeded
       # Give the deferred stop-check time to (not) fire.
       Process.sleep(120)
-      refute Worker.state(pid).status == :failed
+      refute Worker.state(pid).outcome == :failed
     end
   end
 
@@ -309,20 +309,20 @@ defmodule Arbiter.Worker.StopDetectionTest do
           command: ["sh", "-c", "sleep 1; echo 'arb done'"]
         )
 
-      status =
+      outcome =
         eventually(
           fn ->
-            case Worker.state(pid).status do
-              :completed -> :completed
+            case Worker.state(pid) do
+              %{state: :finished, outcome: :succeeded} -> :succeeded
               _ -> nil
             end
           end,
           4_000
         )
 
-      assert status == :completed
+      assert outcome == :succeeded
       state = Worker.state(pid)
-      refute state.status == :failed
+      refute state.outcome == :failed
       # It completed via the marker, not by some other path: no stop reason was
       # ever recorded.
       refute Map.has_key?(state.meta, :stop_reason)

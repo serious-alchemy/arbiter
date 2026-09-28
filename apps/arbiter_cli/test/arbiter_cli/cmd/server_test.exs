@@ -143,7 +143,8 @@ defmodule ArbiterCli.Cmd.ServerTest do
       stub_routes([
         {{"get", "/api/workspaces"}, {@green, 200}},
         {{"get", "/api/workers"},
-         {%{"data" => [%{"task_id" => "bd-abc", "status" => "running"}]}, 200}}
+         {%{"data" => [%{"task_id" => "bd-abc", "kind" => "implement", "state" => "working"}]},
+          200}}
       ])
 
       {_out, err, code} = capture(fn -> Server.run(["migrate"]) end)
@@ -157,7 +158,8 @@ defmodule ArbiterCli.Cmd.ServerTest do
       stub_routes([
         {{"get", "/api/workspaces"}, {@green, 200}},
         {{"get", "/api/workers"},
-         {%{"data" => [%{"task_id" => "bd-abc", "status" => "running"}]}, 200}}
+         {%{"data" => [%{"task_id" => "bd-abc", "kind" => "implement", "state" => "working"}]},
+          200}}
       ])
 
       Process.put(:bd2_cmd_runner, fn cmd, args, _opts ->

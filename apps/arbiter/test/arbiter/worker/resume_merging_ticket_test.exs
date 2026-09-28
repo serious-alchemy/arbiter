@@ -117,7 +117,7 @@ defmodule Arbiter.Worker.ResumeMergingTicketTest do
     assert Watchdog.whereis(task.id) == nil
     assert ticket(task.id).state == :active
     assert PendingMerge.get(ticket(task.id)) == nil
-    assert Worker.state(result.worker_pid).status not in [:failed, :completed]
+    refute Worker.finished?(Worker.state(result.worker_pid))
 
     # CI goes green on the head the round is revising. Nothing merges it.
     StubMerger.queue_get(mr_ref, [

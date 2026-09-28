@@ -7,7 +7,8 @@ defmodule ArbiterCli.Cmd.WorkerTest do
     test "prints the snapshot and output lines" do
       stub_get("/api/workers/bd-001", %{
         "task_id" => "bd-001",
-        "status" => "running",
+        "kind" => "implement",
+        "state" => "working",
         "current_step" => "implement",
         "repo" => "test/repo",
         "started_at" => "2026-05-20T19:00:00Z",
@@ -17,7 +18,8 @@ defmodule ArbiterCli.Cmd.WorkerTest do
       {out, _err, exit_code} = capture(fn -> Worker.run(["show", "bd-001"]) end)
       assert exit_code == 0
       assert out =~ "bd-001"
-      assert out =~ "running"
+      assert out =~ "Run:        implement working"
+      refute out =~ "Status:"
       assert out =~ "hello"
       assert out =~ "arb done"
     end
@@ -25,7 +27,9 @@ defmodule ArbiterCli.Cmd.WorkerTest do
     test "shows the phase and agent liveness" do
       stub_get("/api/workers/bd-002", %{
         "task_id" => "bd-002",
-        "status" => "running",
+        "kind" => "implement",
+        "state" => "waiting",
+        "waiting_on" => "review_gate",
         "phase" => "in_review",
         "phase_label" => "in review",
         "agent_live" => false,
@@ -47,11 +51,13 @@ defmodule ArbiterCli.Cmd.WorkerTest do
       assert exit_code != 0
     end
 
-    test "flags a historical fallback run and shows completion time" do
+    test "flags a ticket with no live run and shows completion time" do
       stub_get("/api/workers/bd-003", %{
         "source" => "history",
         "task_id" => "bd-003",
-        "status" => "failed",
+        "kind" => "implement",
+        "state" => "finished",
+        "outcome" => "failed",
         "current_step" => nil,
         "repo" => "arbiter",
         "started_at" => "2026-05-20T19:00:00Z",
@@ -63,8 +69,8 @@ defmodule ArbiterCli.Cmd.WorkerTest do
 
       {out, _err, exit_code} = capture(fn -> Worker.run(["show", "bd-003"]) end)
       assert exit_code == 0
-      assert out =~ "no live worker"
-      assert out =~ "historical run"
+      assert out =~ "no live run"
+      assert out =~ "Run:        implement finished (failed)"
       assert out =~ "Completed:  2026-05-20T19:05:00Z"
       assert out =~ "claude_crashed"
       assert out =~ "boom"
@@ -74,7 +80,9 @@ defmodule ArbiterCli.Cmd.WorkerTest do
       stub_get("/api/workers/bd-004", %{
         "source" => "history",
         "task_id" => "bd-004",
-        "status" => "failed",
+        "kind" => "implement",
+        "state" => "finished",
+        "outcome" => "failed",
         "repo" => "arbiter",
         "started_at" => "2026-05-20T19:00:00Z",
         "output_lines" => []
@@ -82,7 +90,7 @@ defmodule ArbiterCli.Cmd.WorkerTest do
 
       {out, _err, exit_code} = capture(fn -> Worker.run(["show", "bd-004"]) end)
       assert exit_code == 0
-      assert out =~ "no live worker"
+      assert out =~ "no live run"
       assert out =~ "Issue:"
       assert out =~ "Repo:"
     end
@@ -90,7 +98,9 @@ defmodule ArbiterCli.Cmd.WorkerTest do
     test "--json forwards the full snapshot" do
       stub_get("/api/workers/bd-002", %{
         "task_id" => "bd-002",
-        "status" => "completed",
+        "kind" => "implement",
+        "state" => "finished",
+        "outcome" => "succeeded",
         "output_lines" => ["ok"]
       })
 
@@ -100,11 +110,50 @@ defmodule ArbiterCli.Cmd.WorkerTest do
     end
   end
 
+  # bd-1uu19b AC5: the ticket's current run plus its recent runs, each
+  # labelled with its kind — no separate history fallback.
+  describe "worker show recent runs" do
+    test "lists each recent run with its kind, marking the current one" do
+      stub_get("/api/workers/bd-020", %{
+        "task_id" => "bd-020",
+        "kind" => "fix_pass",
+        "state" => "working",
+        "repo" => "test/repo",
+        "started_at" => "2026-05-20T19:10:00Z",
+        "output_lines" => [],
+        "runs" => [
+          %{
+            "run_id" => "run-b",
+            "kind" => "fix_pass",
+            "state" => "working",
+            "started_at" => "2026-05-20T19:10:00Z",
+            "current" => true
+          },
+          %{
+            "run_id" => "run-a",
+            "kind" => "implement",
+            "state" => "finished",
+            "outcome" => "succeeded",
+            "started_at" => "2026-05-20T19:00:00Z",
+            "current" => false
+          }
+        ]
+      })
+
+      {out, _err, 0} = capture(fn -> Worker.run(["show", "bd-020"]) end)
+      assert out =~ "Runs (2, newest first):"
+      assert out =~ ~r/\* run-b  fix_pass working/
+      assert out =~ ~r/  run-a  implement finished \(succeeded\)/
+      assert :binary.match(out, "run-b") < :binary.match(out, "run-a")
+    end
+  end
+
   describe "worker show cost" do
     test "prints the task's settled + in-flight worker spend" do
       stub_get("/api/workers/bd-009", %{
         "task_id" => "bd-009",
-        "status" => "running",
+        "kind" => "implement",
+        "state" => "working",
         "repo" => "test/repo",
         "started_at" => "2026-05-20T19:00:00Z",
         "cost_usd" => 3.75,
@@ -120,7 +169,8 @@ defmodule ArbiterCli.Cmd.WorkerTest do
     test "an unpriced task prints n/a" do
       stub_get("/api/workers/bd-010", %{
         "task_id" => "bd-010",
-        "status" => "running",
+        "kind" => "implement",
+        "state" => "working",
         "repo" => "test/repo",
         "started_at" => "2026-05-20T19:00:00Z",
         "cost_usd" => nil,
@@ -133,14 +183,15 @@ defmodule ArbiterCli.Cmd.WorkerTest do
   end
 
   describe "worker runs" do
-    test "lists historical runs newest-first with type, status, and model" do
+    test "lists historical runs newest-first with kind, state, and model" do
       stub_get("/api/workers/history", %{
         "data" => [
           %{
             "id" => "run-2",
             "task_id" => "bd-010",
-            "worker_type" => "review",
-            "status" => "completed",
+            "kind" => "review",
+            "state" => "finished",
+            "outcome" => "succeeded",
             "model" => "claude-opus-4-8",
             "started_at" => "2026-05-20T19:10:00Z",
             "completed_at" => "2026-05-20T19:12:00Z"
@@ -148,8 +199,9 @@ defmodule ArbiterCli.Cmd.WorkerTest do
           %{
             "id" => "run-1",
             "task_id" => "bd-010",
-            "worker_type" => "main",
-            "status" => "failed",
+            "kind" => "implement",
+            "state" => "finished",
+            "outcome" => "failed",
             "started_at" => "2026-05-20T19:00:00Z",
             "completed_at" => "2026-05-20T19:05:00Z",
             "failure_reason" => "exit code 2",
@@ -161,8 +213,8 @@ defmodule ArbiterCli.Cmd.WorkerTest do
       {out, _err, exit_code} = capture(fn -> Worker.run(["runs", "bd-010"]) end)
       assert exit_code == 0
       assert out =~ "Historical runs for bd-010 (2"
-      assert out =~ "type=review"
-      assert out =~ "type=main"
+      assert out =~ "run-2  review finished (succeeded)"
+      assert out =~ "run-1  implement finished (failed)"
       assert out =~ "model=claude-opus-4-8"
       assert out =~ "failure: exit code 2"
       assert out =~ "summary: VERDICT: REQUEST_CHANGES — needs a guard"
@@ -176,8 +228,9 @@ defmodule ArbiterCli.Cmd.WorkerTest do
           %{
             "id" => "run-3",
             "task_id" => "bd-013",
-            "worker_type" => "main",
-            "status" => "interrupted",
+            "kind" => "implement",
+            "state" => "finished",
+            "outcome" => "interrupted",
             "started_at" => "2026-09-18T14:00:00Z",
             "completed_at" => "2026-09-18T14:30:00Z",
             "failure_reason" => "server shutdown"
@@ -187,7 +240,7 @@ defmodule ArbiterCli.Cmd.WorkerTest do
 
       {out, _err, exit_code} = capture(fn -> Worker.run(["runs", "bd-013"]) end)
       assert exit_code == 0
-      assert out =~ "status=interrupted"
+      assert out =~ "implement finished (interrupted)"
       assert out =~ "reason: server shutdown"
       refute out =~ "failure:"
     end
@@ -202,7 +255,7 @@ defmodule ArbiterCli.Cmd.WorkerTest do
 
     test "--json forwards the full list" do
       stub_get("/api/workers/history", %{
-        "data" => [%{"id" => "run-9", "task_id" => "bd-012", "worker_type" => "main"}]
+        "data" => [%{"id" => "run-9", "task_id" => "bd-012", "kind" => "implement"}]
       })
 
       {out, _err, exit_code} = capture(fn -> Worker.run(["runs", "bd-012", "--json"]) end)
@@ -222,7 +275,8 @@ defmodule ArbiterCli.Cmd.WorkerTest do
         "data" => [
           %{
             "task_id" => "bd-001",
-            "status" => "running",
+            "kind" => "fix_pass",
+            "state" => "working",
             "current_step" => "implement",
             "repo" => "test/repo",
             "started_at" => "2026-05-20T19:00:00Z"
@@ -233,8 +287,8 @@ defmodule ArbiterCli.Cmd.WorkerTest do
       {out, _err, exit_code} = capture(fn -> Worker.run(["list"]) end)
       assert exit_code == 0
       assert out =~ "Active workers (1)"
-      assert out =~ "bd-001"
-      assert out =~ "status=running"
+      assert out =~ "bd-001  fix_pass working"
+      refute out =~ "status="
     end
 
     # bd-aw2cyt: a row whose agent has exited must not read as running work.
@@ -243,7 +297,8 @@ defmodule ArbiterCli.Cmd.WorkerTest do
         "data" => [
           %{
             "task_id" => "bd-001",
-            "status" => "running",
+            "kind" => "implement",
+            "state" => "working",
             "phase" => "waiting_ci_merge",
             "phase_label" => "waiting on CI / merge",
             "agent_live" => false,
@@ -253,7 +308,8 @@ defmodule ArbiterCli.Cmd.WorkerTest do
           },
           %{
             "task_id" => "bd-002",
-            "status" => "running",
+            "kind" => "implement",
+            "state" => "working",
             "phase" => "implementing",
             "phase_label" => "implementing",
             "agent_live" => true,
@@ -278,7 +334,8 @@ defmodule ArbiterCli.Cmd.WorkerTest do
     # must read as an estimate, an unpriced one as n/a, never as $0.00.
     test "renders live, settled, unpriced and degraded cost distinctly" do
       row = %{
-        "status" => "running",
+        "kind" => "implement",
+        "state" => "working",
         "current_step" => "implement",
         "repo" => "test/repo",
         "started_at" => "2026-05-20T19:00:00Z"

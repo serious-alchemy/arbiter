@@ -48,7 +48,7 @@ defmodule Arbiter.Tasks.SlotGateNoDeadlockTest do
     # Cap of 1, and the author already holds it. (Its agent is not really live
     # here, so pin the occupancy question at the predicate instead of the
     # process: what matters is that nothing consults the cap before spawning.)
-    assert SlotGate.free(1, [%{status: :running, agent_live: true}], :agents) == 0
+    assert SlotGate.free(1, [%{state: :working, agent_live: true}], :agents) == 0
 
     # The reviewer spawns regardless — no cap check stands between a task that
     # needs review and its review.
@@ -82,16 +82,23 @@ defmodule Arbiter.Tasks.SlotGateNoDeadlockTest do
     # reports zero free slots (so nothing NEW is dispatched) and never a
     # negative number. The round itself adds a live agent, not a slot.
     workers = [
-      %{task_id: "bd-1", status: :awaiting_review_gate, role: nil, meta: %{}, agent_live: false},
+      %{
+        task_id: "bd-1",
+        state: :waiting,
+        waiting_on: :review_gate,
+        role: nil,
+        meta: %{},
+        agent_live: false
+      },
       %{
         task_id: "bd-1#review",
-        status: :running,
+        state: :working,
         role: :reviewer,
         meta: %{role: :reviewer, reviews: "bd-1"},
         agent_live: true
       },
-      %{task_id: "bd-2", status: :running, role: nil, meta: %{}, agent_live: true},
-      %{task_id: "bd-3", status: :running, role: nil, meta: %{}, agent_live: true}
+      %{task_id: "bd-2", state: :working, role: nil, meta: %{}, agent_live: true},
+      %{task_id: "bd-3", state: :working, role: nil, meta: %{}, agent_live: true}
     ]
 
     assert SlotGate.occupied(workers, :agents) == 3

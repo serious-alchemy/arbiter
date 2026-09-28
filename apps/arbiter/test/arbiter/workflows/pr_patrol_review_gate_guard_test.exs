@@ -5,7 +5,7 @@ defmodule Arbiter.Workflows.PRPatrolReviewGateGuardTest do
 
   The reported incident (leotech `lt-20r7zu`, `admin_server` PR #424,
   2026-09-17): the fleet's own PR picked up two inline Copilot comments while
-  its task was still parked at `:awaiting_review_gate`. PRPatrol read those as
+  its task was still parked waiting on the review gate. PRPatrol read those as
   an unresolved-thread signal, filed a follow-up and dispatched a fix worker,
   which committed `aed4457` and pushed it to `origin/<branch>`. Twenty seconds
   later the gate's round-1 implementer committed on the worktree, its push was
@@ -210,7 +210,7 @@ defmodule Arbiter.Workflows.PRPatrolReviewGateGuardTest do
     Issue |> Ash.Query.filter(source_pr == "424") |> Ash.read!()
   end
 
-  test "no follow-up is filed while the authoring task is parked at :awaiting_review_gate",
+  test "no follow-up is filed while the authoring run is waiting on the review gate",
        %{ws: ws} do
     task = authored_task(ws)
     Req.Test.stub(@stub_name, copilot_threads_stub())
@@ -224,7 +224,7 @@ defmodule Arbiter.Workflows.PRPatrolReviewGateGuardTest do
       )
 
     on_exit(fn -> if Process.alive?(author), do: GenServer.stop(author, :normal, 5_000) end)
-    :sys.replace_state(author, &%{&1 | status: :awaiting_review_gate})
+    :sys.replace_state(author, &%{&1 | state: :waiting, waiting_on: :review_gate})
 
     name = start_patrol(ws)
     :ok = PRPatrol.tick(name)

@@ -188,7 +188,7 @@ defmodule ArbiterWeb.CoreComponents.Domain do
         activity="edit · status_helpers.ex"
         footer="w-14 · sonnet"
       >
-        <:status><.status_chip status={:running} /></:status>
+        <:status><.status_chip status={:working} /></:status>
       </.task_card>
 
       <.task_card id="bd-2wilou" title="Default close_upstream to true" muted footer="merged 09:41 · 2 rounds" />
@@ -384,16 +384,16 @@ defmodule ArbiterWeb.CoreComponents.Domain do
   defp task_card_activity_class(_), do: "text-[var(--text-secondary)]"
 
   @doc """
-  One run against an issue. An issue accumulates many — a `main` dispatch,
-  `review` passes, `impl` and `fix_pass` follow-ups, a `conflict` resolver —
-  so this is a roster row, not a card.
+  One run against an issue. An issue accumulates many — an `implement`
+  dispatch, `review` passes, `impl` and `fix_pass` follow-ups, a `conflict`
+  resolver — so this is a roster row, not a card.
 
   ## Examples
 
       <.run_row
         role="impl"
         worker="w-11"
-        status="running"
+        status="working"
         round={3}
         outcome="edit · loop_queue.ex"
         duration="12m"
@@ -402,13 +402,19 @@ defmodule ArbiterWeb.CoreComponents.Domain do
         expanded
         phx-click="select_run"
       />
-      <.run_row role="review" worker="w-19" status="awaiting review" round={2} outcome="1 finding open" duration="41m" />
+      <.run_row role="review" worker="w-19" status="waiting" round={2} outcome="1 finding open" duration="41m" />
       <.run_row role="fix_pass" worker="w-16" status="failed" outcome="exit 1 · mix test" duration="6m" />
 
-  `role` is one of Arbiter's real `worker_type` values from
-  `Arbiter.Workers.Run` — `main`, `review`, `impl`, `fix_pass`, `conflict`.
-  Don't invent others; PRPatrol and Watchdog are pollers, not run types, and
-  show up here as the `main`/`impl` runs they dispatch.
+  `role` is one of Arbiter's real run kinds from `Arbiter.Workers.Run` —
+  `implement`, `review`, `fix_pass`, `conflict` — except that an `implement`
+  run the ReviewGate dispatched for a revise round (`role` `"impl"` on the
+  row) shows as `impl`, apart from the authoring run. Don't invent others;
+  PRPatrol and Watchdog are pollers, not run kinds, and show up here as the
+  `implement`/`impl` runs they dispatch.
+
+  `status` is the run's state while it is live (`starting`, `working`,
+  `waiting`) and its outcome once it has finished (`succeeded`, `failed`,
+  `interrupted`, `handed_off`) — `ArbiterWeb.StatusHelpers.run_status/1`.
 
   Role is a kind, not a state, so it renders as an outline type tag: the
   status chip and the 2px left rule carry the row's only color.
@@ -420,7 +426,7 @@ defmodule ArbiterWeb.CoreComponents.Domain do
   """
   attr :role, :string,
     required: true,
-    doc: ~s(worker_type: main, review, impl, fix_pass, conflict)
+    doc: ~s(run kind: implement, review, fix_pass, conflict — or impl for a revise round)
 
   attr :worker, :string, required: true, doc: ~s(worker id, e.g. "w-14")
   attr :status, :any, required: true, doc: "carries the row's only color"
@@ -453,7 +459,7 @@ defmodule ArbiterWeb.CoreComponents.Domain do
           # Only the chevron, the worker cell and the role tag are rigid; the
           # outcome takes the slack. The status track is a minmax, not a fixed
           # 92px:
-          # "awaiting review" is 115px with its dot and overruns a fixed track
+          # a long status ("interrupted", "handed_off") overruns a fixed track
           # straight into the metrics cell.
           "grid grid-cols-[84px_48px_minmax(120px,1fr)_minmax(92px,max-content)_minmax(0,max-content)_14px]",
           "gap-[10px] items-center min-h-[var(--row-control)] px-3",
@@ -514,7 +520,7 @@ defmodule ArbiterWeb.CoreComponents.Domain do
   end
 
   @role_labels %{
-    "main" => "main",
+    "implement" => "implement",
     "review" => "review",
     "impl" => "impl",
     "fix_pass" => "fix pass",
@@ -523,22 +529,20 @@ defmodule ArbiterWeb.CoreComponents.Domain do
 
   defp run_row_role_label(role), do: Map.get(@role_labels, to_string(role), to_string(role))
 
-  # Arbiter writes statuses both ways — the handoff's spaced labels
-  # ("awaiting review") and the schema's snake_case atoms
-  # (:awaiting_review_gate). Normalize so both land on the same rule.
-  defp run_row_state(status) do
-    status |> to_string() |> String.replace("_", " ")
-  end
+  # Statuses arrive as atoms or strings (`:working`, "working"); normalize so
+  # both land on the same rule.
+  defp run_row_state(status), do: to_string(status)
 
-  defp run_row_live?(status), do: run_row_state(status) == "running"
+  defp run_row_live?(status), do: run_row_state(status) in ["starting", "working"]
 
   defp run_row_rule_class(status) do
     case run_row_state(status) do
-      "running" -> "border-l-[color:var(--arb-live)]"
-      "awaiting review" <> _ -> "border-l-[color:var(--arb-attention)]"
-      # bd-8tjcms: the work landed, the review stage never started — an
-      # operator needs to see it, but it is not a failure.
-      "review not started" -> "border-l-[color:var(--arb-attention)]"
+      live when live in ["starting", "working"] -> "border-l-[color:var(--arb-live)]"
+      # Waiting on a question or the review gate: an operator may need to
+      # look, but nothing is wrong.
+      "waiting" -> "border-l-[color:var(--arb-attention)]"
+      # bd-aje6fj: shut down with the server — worth seeing, not a failure.
+      "interrupted" -> "border-l-[color:var(--arb-attention)]"
       "failed" -> "border-l-[color:var(--arb-fail)]"
       _ -> "border-l-[color:transparent]"
     end
@@ -559,7 +563,7 @@ defmodule ArbiterWeb.CoreComponents.Domain do
 
       <.log_stream
         id="run-transcript"
-        live={@run.status == :running}
+        live={@run.state == :working}
         lines={[
           %{time: "14:02:11", role: "system", text: "worktree ready · feat/status-helpers @ 4f2a9c1"},
           %{time: "14:02:14", role: "agent", text: "Reading status_helpers.ex", emphasis: true},

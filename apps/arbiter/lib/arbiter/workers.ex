@@ -8,8 +8,9 @@ defmodule Arbiter.Workers do
   restarts and powers the "Completed Workers" view.
 
   See `Arbiter.Workers.Run` for the schema. The worker GenServer writes
-  through this domain on init (status :running) and on terminal transitions
-  (status :completed / :failed); writes are best-effort and never crash the
+  through this domain on init (state `:starting`), on each state change, and
+  when the run finishes (`:finished` with an outcome — see
+  `Arbiter.Workers.RunState`); writes are best-effort and never crash the
   worker.
   """
 

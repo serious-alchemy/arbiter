@@ -396,20 +396,20 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
   end
 
   @doc """
-  The worker lifecycle stepper — idle, running, awaiting review, completed —
-  from `StatusHelpers.worker_flow/0`.
+  The run lifecycle stepper — starting, working, waiting, finished — from
+  `StatusHelpers.worker_flow/0` (the run states of `Arbiter.Workers.RunState`).
 
   ## Examples
 
-      <.worker_flow status={:running} />
-      <.worker_flow status={:awaiting} />
-      <.worker_flow status={:running} failed />
-      <.worker_flow status={:awaiting} compact />
+      <.worker_flow status={:working} />
+      <.worker_flow status={:waiting} />
+      <.worker_flow status={:working} failed />
+      <.worker_flow status={:waiting} compact />
 
   Done steps go grey with a tick, the current step takes the hue of its
   state, and `failed` reds the current step rather than adding a fifth
-  column — pass the step the worker reached before failing (never `:failed`
-  itself, which isn't a flow step).
+  column — pass the step the worker reached before failing (never the
+  `:failed` outcome itself, which isn't a flow step).
 
   Four labels need roughly 340px. In anything narrower — the task-detail and
   worker-session rails — use `compact`: the track keeps its four nodes, and
@@ -501,7 +501,7 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
   end
 
   defp current_hue(%{failed: true}), do: "var(--arb-fail)"
-  defp current_hue(%{status: :awaiting}), do: "var(--arb-attention)"
+  defp current_hue(%{status: :waiting}), do: "var(--arb-attention)"
   defp current_hue(_), do: "var(--arb-live)"
 
   defp worker_flow_dot_class(:done, _failed, _current?),

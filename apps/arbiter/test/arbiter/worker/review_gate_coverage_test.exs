@@ -144,7 +144,7 @@ defmodule Arbiter.Worker.ReviewGateCoverageTest do
     end
   end
 
-  # Park an author worker at :awaiting_review_gate, then drive a ReviewGate over
+  # Park an author worker waiting on the review gate, then drive a ReviewGate over
   # a worktree that is really on the feature branch.
   defp run_gate(task, ws, repo, tmp, opts) do
     branch = "feature/cov"
@@ -169,7 +169,7 @@ defmodule Arbiter.Worker.ReviewGateCoverageTest do
     on_exit(fn -> if Process.alive?(author), do: GenServer.stop(author, :normal) end)
     :ok = Worker.advance(author, :claude)
     send(author, {:__claude_session_done__, "arb done"})
-    wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(author)) end)
+    wait_until(fn -> Worker.awaiting_review_gate?(Worker.state(author)) end)
 
     {:ok, gate} =
       ReviewGate.start(

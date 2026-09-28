@@ -38,12 +38,21 @@ defmodule ArbiterWeb.RunIndexLiveTest do
       run(%{
         task_id: "bd-ok",
         task_title: "the-good-run",
-        status: :completed,
-        worker_type: "main"
+        state: :finished,
+        outcome: :succeeded,
+        kind: :implement,
+        role: "base"
       })
 
     _failed =
-      run(%{task_id: "bd-bad", task_title: "the-bad-run", status: :failed, worker_type: "review"})
+      run(%{
+        task_id: "bd-bad",
+        task_title: "the-bad-run",
+        state: :finished,
+        outcome: :failed,
+        kind: :review,
+        role: "review"
+      })
 
     {:ok, _view, html} = live_runs(conn, ~p"/workers/history")
 
@@ -55,13 +64,86 @@ defmodule ArbiterWeb.RunIndexLiveTest do
   end
 
   test "the failed filter excludes completed runs", %{conn: conn} do
-    _completed = run(%{task_id: "bd-ok2", task_title: "completed-only", status: :completed})
-    _failed = run(%{task_id: "bd-bad2", task_title: "failed-only", status: :failed})
+    _completed =
+      run(%{
+        task_id: "bd-ok2",
+        task_title: "completed-only",
+        state: :finished,
+        outcome: :succeeded
+      })
+
+    _failed =
+      run(%{task_id: "bd-bad2", task_title: "failed-only", state: :finished, outcome: :failed})
 
     {:ok, _view, html} = live_runs(conn, ~p"/workers/history?#{%{status: :failed}}")
 
     assert html =~ "failed-only"
     refute html =~ "completed-only"
+  end
+
+  test "the succeeded filter excludes failed runs", %{conn: conn} do
+    _ok = run(%{task_id: "bd-ok4", task_title: "ok-only", state: :finished, outcome: :succeeded})
+    _bad = run(%{task_id: "bd-bad4", task_title: "bad-only", state: :finished, outcome: :failed})
+
+    {:ok, _view, html} = live_runs(conn, ~p"/workers/history?#{%{status: :succeeded}}")
+
+    assert html =~ "ok-only"
+    refute html =~ "bad-only"
+  end
+
+  test "the live filter shows every run that has not finished", %{conn: conn} do
+    _starting = run(%{task_id: "bd-st", task_title: "starting-run", state: :starting})
+    _working = run(%{task_id: "bd-wk", task_title: "working-run", state: :working})
+    _waiting = run(%{task_id: "bd-wt", task_title: "waiting-run", state: :waiting})
+
+    _done =
+      run(%{task_id: "bd-dn", task_title: "finished-run", state: :finished, outcome: :succeeded})
+
+    {:ok, _view, html} = live_runs(conn, ~p"/workers/history?#{%{status: :live}}")
+
+    assert html =~ "starting-run"
+    assert html =~ "working-run"
+    assert html =~ "waiting-run"
+    refute html =~ "finished-run"
+  end
+
+  test "the handed_off filter shows runs a resume took over", %{conn: conn} do
+    _handed =
+      run(%{task_id: "bd-ho", task_title: "handed-run", state: :finished, outcome: :handed_off})
+
+    _bad = run(%{task_id: "bd-bad5", task_title: "bad-run", state: :finished, outcome: :failed})
+
+    {:ok, _view, html} = live_runs(conn, ~p"/workers/history?#{%{status: :handed_off}}")
+
+    assert html =~ "handed-run"
+    refute html =~ "bad-run"
+  end
+
+  test "pre-5/13 status links land on their new tab", %{conn: conn} do
+    _working = run(%{task_id: "bd-lg1", task_title: "legacy-working", state: :working})
+
+    _ok =
+      run(%{task_id: "bd-lg2", task_title: "legacy-ok", state: :finished, outcome: :succeeded})
+
+    _bad =
+      run(%{task_id: "bd-lg3", task_title: "legacy-bad", state: :finished, outcome: :failed})
+
+    {:ok, _view, html} = live_runs(conn, ~p"/workers/history?#{%{status: :running}}")
+    assert html =~ "legacy-working"
+    refute html =~ "legacy-ok"
+    refute html =~ "legacy-bad"
+
+    {:ok, _view, html} = live_runs(conn, ~p"/workers/history?#{%{status: :completed}}")
+    assert html =~ "legacy-ok"
+    refute html =~ "legacy-working"
+    refute html =~ "legacy-bad"
+
+    for legacy <- [:review_parked, :review_not_started] do
+      {:ok, _view, html} = live_runs(conn, ~p"/workers/history?#{%{status: legacy}}")
+      assert html =~ "legacy-bad"
+      refute html =~ "legacy-ok"
+      refute html =~ "legacy-working"
+    end
   end
 
   test "the interrupted filter shows runs shut down with the server, not failures (bd-aje6fj)",
@@ -70,11 +152,13 @@ defmodule ArbiterWeb.RunIndexLiveTest do
       run(%{
         task_id: "bd-int",
         task_title: "interrupted-only",
-        status: :interrupted,
+        state: :finished,
+        outcome: :interrupted,
         failure_reason: "server shutdown"
       })
 
-    _failed = run(%{task_id: "bd-bad3", task_title: "crashed-only", status: :failed})
+    _failed =
+      run(%{task_id: "bd-bad3", task_title: "crashed-only", state: :finished, outcome: :failed})
 
     {:ok, _view, html} = live_runs(conn, ~p"/workers/history?#{%{status: :interrupted}}")
 
@@ -83,7 +167,7 @@ defmodule ArbiterWeb.RunIndexLiveTest do
   end
 
   test "empty state uses the moon icon when no runs match", %{conn: conn} do
-    {:ok, _view, html} = live_runs(conn, ~p"/workers/history?#{%{status: :running}}")
+    {:ok, _view, html} = live_runs(conn, ~p"/workers/history?#{%{status: :live}}")
 
     # Moon icon should be present in empty state
     assert html =~ "runs-empty"
@@ -117,7 +201,7 @@ defmodule ArbiterWeb.RunIndexLiveTest do
 
     test "renders a loading skeleton before the async load lands, then the data",
          %{conn: conn} do
-      run(%{task_id: "bd-load", task_title: "loading-run", status: :completed})
+      run(%{task_id: "bd-load", task_title: "loading-run", state: :finished, outcome: :succeeded})
 
       test = self()
 
@@ -153,7 +237,12 @@ defmodule ArbiterWeb.RunIndexLiveTest do
     @tag :capture_log
     test "a failed run-page load renders an inline error, and Retry recovers",
          %{conn: conn} do
-      run(%{task_id: "bd-err", task_title: "behind-the-error", status: :completed})
+      run(%{
+        task_id: "bd-err",
+        task_title: "behind-the-error",
+        state: :finished,
+        outcome: :succeeded
+      })
 
       :meck.expect(ArbiterWeb.RunIndexLive, :load_runs, fn _status, _page ->
         raise "database is locked"
@@ -183,7 +272,12 @@ defmodule ArbiterWeb.RunIndexLiveTest do
     test "a lifecycle refresh that fails keeps the last page on screen and says so", %{
       conn: conn
     } do
-      run(%{task_id: "bd-stay", task_title: "was-on-the-page", status: :completed})
+      run(%{
+        task_id: "bd-stay",
+        task_title: "was-on-the-page",
+        state: :finished,
+        outcome: :succeeded
+      })
 
       {:ok, view, _html} = live(conn, ~p"/workers/history")
       render_async(view, @async_timeout)
@@ -206,7 +300,13 @@ defmodule ArbiterWeb.RunIndexLiveTest do
     {:ok, view, html} = live_runs(conn, ~p"/workers/history")
     refute html =~ "freshly-finished"
 
-    run(%{task_id: "bd-new", task_title: "freshly-finished", status: :completed})
+    run(%{
+      task_id: "bd-new",
+      task_title: "freshly-finished",
+      state: :finished,
+      outcome: :succeeded
+    })
+
     Phoenix.PubSub.broadcast(Arbiter.PubSub, "workers", {:worker_lifecycle, :updated, %{}})
     :sys.get_state(view.pid)
 

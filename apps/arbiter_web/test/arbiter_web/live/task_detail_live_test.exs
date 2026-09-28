@@ -28,13 +28,13 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
 
     @impl true
     def handle_call(:snapshot, _from, lines) do
-      {:reply, %{status: :running, started_at: DateTime.utc_now(), meta: %{output_lines: lines}},
+      {:reply, %{state: :working, started_at: DateTime.utc_now(), meta: %{output_lines: lines}},
        lines}
     end
   end
 
   # A worker double that reports a live agent session, so `Dispatch.dispatch/2`
-  # hits the bd-2aslx6 guard without a real CLI subprocess. `:running` keeps it
+  # hits the bd-2aslx6 guard without a real CLI subprocess. `:working` keeps it
   # out of the terminal-worker exemption the guard grants a stale worker.
   defmodule FakeLiveAgentWorker do
     use GenServer
@@ -50,7 +50,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
     def handle_call(:agent_session_live?, _from, state), do: {:reply, true, state}
 
     def handle_call(:snapshot, _from, state) do
-      {:reply, %{status: :running, started_at: DateTime.utc_now(), meta: %{}}, state}
+      {:reply, %{state: :working, started_at: DateTime.utc_now(), meta: %{}}, state}
     end
   end
 
@@ -240,7 +240,8 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
         Ash.create(Run, %{
           task_id: task.id,
           repo: "test/repo",
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           started_at: started_at,
           mr_ref: mr_ref
         })
@@ -1197,8 +1198,9 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
         Ash.create(Run, %{
           task_id: task.id,
           repo: "test/repo",
-          worker_type: :fix_pass,
-          status: :completed,
+          kind: :fix_pass,
+          state: :finished,
+          outcome: :succeeded,
           started_at: ~U[2026-09-26 10:00:00.000000Z],
           completed_at: ~U[2026-09-26 10:05:00.000000Z],
           provider: "claude",
@@ -1238,8 +1240,9 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
         Ash.create(Run, %{
           task_id: task.id,
           repo: "test/repo",
-          worker_type: :main,
-          status: :completed,
+          kind: :implement,
+          state: :finished,
+          outcome: :succeeded,
           started_at: ~U[2026-09-26 09:00:00.000000Z],
           completed_at: ~U[2026-09-26 09:05:00.000000Z]
         })
@@ -1295,8 +1298,9 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
         Ash.create(Run, %{
           task_id: task.id,
           repo: "test/repo",
-          worker_type: :main,
-          status: :completed,
+          kind: :implement,
+          state: :finished,
+          outcome: :succeeded,
           started_at: ~U[2026-07-01 10:00:00.000000Z],
           completed_at: ~U[2026-07-01 10:12:00.000000Z],
           output_lines: ["main run line one", "main run line two"]
@@ -1306,8 +1310,9 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
         Ash.create(Run, %{
           task_id: task.id <> "#review",
           repo: "test/repo",
-          worker_type: :review,
-          status: :failed,
+          kind: :review,
+          state: :finished,
+          outcome: :failed,
           exit_code: 1,
           failure_reason: "compile error in loop_queue.ex",
           started_at: ~U[2026-07-01 11:00:00.000000Z],
@@ -1326,8 +1331,33 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       assert html =~ "2 total"
       # One tab per role present, plus All.
       assert html =~ "All 2"
-      assert html =~ "main 1"
+      assert html =~ "implement 1"
       assert html =~ "review 1"
+    end
+
+    test "a failed run with a clean exit still shows why it failed (bd-1uu19b)",
+         %{conn: conn, task: task} do
+      # A review park is a failed run under the one run vocabulary — exit 0,
+      # the cause on `failure_reason` — so the roster says why, not "0 lines".
+      {:ok, parked} =
+        Ash.create(Run, %{
+          task_id: task.id,
+          repo: "test/repo",
+          kind: :implement,
+          role: "base",
+          state: :finished,
+          outcome: :failed,
+          exit_code: 0,
+          failure_reason: "review parked: gate budget exhausted",
+          started_at: ~U[2026-07-01 12:00:00.000000Z],
+          completed_at: ~U[2026-07-01 12:03:00.000000Z]
+        })
+
+      {:ok, view, html} = live_task(conn, ~p"/tasks/#{task.id}")
+      assert html =~ "review parked: gate budget exhausted"
+
+      view |> element(~s([phx-value-run="#{parked.id}"])) |> render_click()
+      assert has_element?(view, ~s(span[class*="arb-fail-text"]), "review parked")
     end
 
     test "an interrupted run shows its reason but is not styled as a failure (bd-aje6fj)",
@@ -1338,8 +1368,9 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
         Ash.create(Run, %{
           task_id: task.id,
           repo: "test/repo",
-          worker_type: :main,
-          status: :interrupted,
+          kind: :implement,
+          state: :finished,
+          outcome: :interrupted,
           exit_code: 143,
           failure_reason: "server shutdown",
           started_at: ~U[2026-07-01 12:00:00.000000Z],
@@ -1391,8 +1422,8 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
         Ash.create(Run, %{
           task_id: task.id,
           repo: "test/repo",
-          worker_type: :main,
-          status: :running,
+          kind: :implement,
+          state: :working,
           started_at: ~U[2026-07-02 09:00:00.000000Z],
           output_lines: []
         })
@@ -1440,7 +1471,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       assert html =~ "This run has ended — its live session is gone"
     end
 
-    test "role tabs filter the roster by worker_type", %{conn: conn, task: task} do
+    test "role tabs filter the roster by kind", %{conn: conn, task: task} do
       {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       html = view |> element(~s([phx-value-tab="review"])) |> render_click()
@@ -1471,8 +1502,8 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
         Ash.create(Run, %{
           task_id: task.id <> "#review",
           repo: "test/repo",
-          worker_type: :review,
-          status: :running,
+          kind: :review,
+          state: :working,
           started_at: ~U[2026-07-01 12:00:00.000000Z],
           output_lines: ["later review run"]
         })
@@ -1500,8 +1531,10 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
           task_id: task.id <> "#review#impl2",
           base_task_id: task.id,
           repo: "test/repo",
-          worker_type: :impl,
-          status: :completed,
+          kind: :implement,
+          role: "impl",
+          state: :finished,
+          outcome: :succeeded,
           started_at: ~U[2026-07-01 11:30:00.000000Z],
           completed_at: ~U[2026-07-01 11:40:00.000000Z],
           output_lines: ["revise round transcript"]
@@ -1512,8 +1545,9 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
           task_id: task.id <> "#fix",
           base_task_id: task.id,
           repo: "test/repo",
-          worker_type: :fix_pass,
-          status: :completed,
+          kind: :fix_pass,
+          state: :finished,
+          outcome: :succeeded,
           started_at: ~U[2026-07-01 12:30:00.000000Z],
           completed_at: ~U[2026-07-01 12:35:00.000000Z],
           output_lines: ["fix pass transcript"]
@@ -1570,7 +1604,8 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
           Ash.create(Run, %{
             task_id: task.id,
             repo: "test/repo",
-            status: :completed,
+            state: :finished,
+            outcome: :succeeded,
             started_at: started
           })
       end
@@ -1677,7 +1712,8 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
         Ash.create(Run, %{
           task_id: task.id,
           repo: "acme/widgets",
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           started_at: ~U[2026-07-01 10:00:00.000000Z]
         })
 
@@ -1963,8 +1999,9 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
         Ash.create(Run, %{
           task_id: task.id,
           repo: "test/repo",
-          worker_type: :main,
-          status: :completed,
+          kind: :implement,
+          state: :finished,
+          outcome: :succeeded,
           started_at: ~U[2026-07-01 10:00:00.000000Z],
           completed_at: ~U[2026-07-01 10:12:00.000000Z]
         })
@@ -1973,8 +2010,9 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
         Ash.create(Run, %{
           task_id: task.id,
           repo: "test/repo",
-          worker_type: :impl,
-          status: :running,
+          kind: :implement,
+          role: "impl",
+          state: :working,
           started_at: ~U[2026-07-01 11:00:00.000000Z]
         })
 
@@ -2000,19 +2038,21 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
          %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "roles", workspace_id: ws.id})
 
-      for {role, task_id} <- [
-            {:review, task.id <> "#review"},
-            {:conflict, task.id},
-            {:fix_pass, task.id},
-            {:impl, task.id},
-            {:main, task.id}
+      for {kind, role, task_id} <- [
+            {:review, "review", task.id <> "#review"},
+            {:conflict, "conflict", task.id},
+            {:fix_pass, "fix_pass", task.id},
+            {:implement, "impl", task.id},
+            {:implement, "base", task.id}
           ] do
         {:ok, _} =
           Ash.create(Run, %{
             task_id: task_id,
             repo: "test/repo",
-            worker_type: role,
-            status: :completed,
+            kind: kind,
+            role: role,
+            state: :finished,
+            outcome: :succeeded,
             started_at: ~U[2026-07-01 10:00:00.000000Z]
           })
       end
@@ -2022,7 +2062,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       assert html =~ "fix pass 1"
       refute html =~ "fix_pass 1"
 
-      order = ~w(all main impl review fix_pass conflict)
+      order = ~w(all implement impl review fix_pass conflict)
 
       positions =
         Enum.map(order, fn value ->
@@ -2188,8 +2228,9 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
         Ash.create(Run, %{
           task_id: task.id <> "#review",
           repo: "test/repo",
-          worker_type: :review,
-          status: :completed,
+          kind: :review,
+          state: :finished,
+          outcome: :succeeded,
           started_at: DateTime.add(~U[2026-07-01 10:00:00.000000Z], round, :hour),
           completed_at: DateTime.add(~U[2026-07-01 10:30:00.000000Z], round, :hour),
           output_lines: ["round #{round} reviewer transcript"]
@@ -2277,7 +2318,8 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
 
     test "a timed-out round is never shown as approved", %{conn: conn, task: task} do
       # The reviewing pass exhausted its budget with no verdict. Its own run row
-      # can still be `:completed` — only the round record knows it timed out.
+      # can still be `outcome: :succeeded` — only the round record knows it
+      # timed out.
       r1 = review_run(task, 1)
       round!(task, %{round: 1, run_id: r1.id, verdict: :timed_out, finding_count: 0})
 
@@ -2307,7 +2349,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       # A reviewer run that exited 0 and completed cleanly, whose verdict was
       # REQUEST_CHANGES. Reading the run alone would call this a pass.
       r1 = review_run(task, 1)
-      assert r1.status == :completed
+      assert r1.outcome == :succeeded
       round!(task, %{round: 1, run_id: r1.id, verdict: :request_changes, finding_count: 1})
 
       {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
@@ -2347,8 +2389,9 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
         Ash.create(Run, %{
           task_id: task.id,
           repo: "test/repo",
-          worker_type: :main,
-          status: :completed,
+          kind: :implement,
+          state: :finished,
+          outcome: :succeeded,
           started_at: ~U[2026-07-01 09:00:00.000000Z],
           completed_at: ~U[2026-07-01 09:30:00.000000Z],
           output_lines: ["main transcript"]
@@ -2356,8 +2399,9 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
 
       {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
-      # Filter the roster to `main` — the reviewer row is no longer rendered.
-      html = view |> element(~s([phx-value-tab="main"])) |> render_click()
+      # Filter the roster to `implement` — the reviewer row is no longer
+      # rendered.
+      html = view |> element(~s([phx-value-tab="implement"])) |> render_click()
       refute html =~ "round 1 reviewer transcript"
 
       html = view |> element("#review-round-summary") |> render_click()
@@ -2707,7 +2751,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
 
       assert has_element?(view, "#children-running-#{child.id}")
 
-      # `Worker.await/2` is a worker-only transition (:running -> :awaiting):
+      # `Worker.await/2` is a worker-only transition (:working -> :waiting):
       # it never writes the child's Issue row, so no `:task_lifecycle` fires —
       # only the "workers" PubSub topic does. This isolates the mini-board's
       # `epic_child?` refresh path (task_detail_live.ex) from the pre-existing

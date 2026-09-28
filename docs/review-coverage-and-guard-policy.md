@@ -199,10 +199,10 @@ inventory cannot silently rot.
 
 | # | Guard | Anchor | Protects against | Misfire mode | On failure | Patches |
 |---|---|---|---|---|---|---|
-| C1 | bd-ofql8k commit gate (`:uncommitted` / `:no_commits` / `:secret_in_commit`) | `apps/arbiter/lib/arbiter/worker.ex:3860` (`commit_gate`) | A worker printing `arb done` over uncommitted or absent work; committed agent-config bearer tokens | Non-branch worktrees would false-positive, hence the branch check; git errors | **Fails open** on git error; otherwise diverts to a nudge relaunch | 3 |
-| C2 | Rejection parking | `apps/arbiter/lib/arbiter/worker.ex:5769` (`park_rejected`) | — | Since P9, `park_rejected/4` takes a park reason: with one it writes `Run.status = :review_parked` and pages once; without one (a genuine REQUEST_CHANGES only) it is the pre-P9 `Run.status = :failed` via `apps/arbiter/lib/arbiter/worker.ex:5829` (`fail_reason_for`) | `fail_now` | 2 |
+| C1 | bd-ofql8k commit gate (`:uncommitted` / `:no_commits` / `:secret_in_commit`) | `apps/arbiter/lib/arbiter/worker.ex:3934` (`commit_gate`) | A worker printing `arb done` over uncommitted or absent work; committed agent-config bearer tokens | Non-branch worktrees would false-positive, hence the branch check; git errors | **Fails open** on git error; otherwise diverts to a nudge relaunch | 3 |
+| C2 | Rejection parking | `apps/arbiter/lib/arbiter/worker.ex:5845` (`park_rejected`) | — | Since P9, `park_rejected/4` takes a park reason: with one it stamps `issues.review_park_reason` and pages once (since bd-1uu19b the run itself finishes `:failed`, its cause on the ticket); without one (a genuine REQUEST_CHANGES only) it is the pre-P9 plain failed run via `apps/arbiter/lib/arbiter/worker.ex:5907` (`fail_reason_for`) | `fail_now` | 2 |
 | C3 | Fix-round budget and non-convergence digest | `apps/arbiter/lib/arbiter/worker.ex:5970` (`maybe_dispatch_fix_round`) | bd-a9zb7w: a rejection nobody scheduled an implementer for | Identical-findings digest stops the loop — the one guard already shaped the way §5 wants | One escalation | 2 |
-| C4 | `{:awaiting_review_timeout, N}` → `review_not_started` | `apps/arbiter/lib/arbiter/worker.ex:1645` (`awaiting_review_timeout`) | bd-8tjcms/#1511: a resumable timeout recorded as `:failed` | — | Terminal non-failure status | 1 |
+| C4 | `{:awaiting_review_timeout, N}` → auto-resume, not a failed run | `apps/arbiter/lib/arbiter/worker.ex:1687` (`awaiting_review_timeout`) | bd-8tjcms/#1511: a resumable timeout recorded as `:failed` | — | Parked for auto-resume: since bd-741sid the ticket's Watchdog has no run to fail, and since bd-1uu19b there is no `review_not_started` run outcome | 1 |
 
 ### 2.5 ReviewPatrol and PRPatrol
 
@@ -594,9 +594,10 @@ parsing problem. Class C removes it without touching the parser.
 
 **Shipped (P9, bd-9zuvbh/#1650):** every class-C terminal in
 `worker/review_gate.ex` now reports `{:parked, reason, findings}` instead of a
-verdict the author fails the run on. `Arbiter.Worker.park_rejected/4` writes
-`Run.status = :review_parked` (a terminal non-failure, the `:review_not_started`
-shape), stamps `issues.review_park_reason` via `Arbiter.Tasks.ReviewPark`, and
+verdict the author fails the run on. `Arbiter.Worker.park_rejected/4` wrote
+`Run.status = :review_parked` (a terminal non-failure); since bd-1uu19b's one run
+vocabulary the run finishes `:failed` and the park is the ticket's — it stamps
+`issues.review_park_reason` via `Arbiter.Tasks.ReviewPark`, and
 pages the coordinator **once** — the park row itself is the episode claim, so a
 re-report of the same reason is silent. The four shapes above are replayed one
 test each in
@@ -628,9 +629,11 @@ distinction the policy turns on — watching a parked item forever is fine, and 
 class E's terminal state; re-issuing the action forever is not.
 
 **I2 — A guard never strands approved work as a failed run.** When a guard gives
-up, the terminal state is **parked + escalated once**, with the run recorded as
-a terminal non-failure (the `review_not_started` shape, C4). `Run.status =
-:failed` is reserved for work that actually failed.
+up, the terminal state is **parked + escalated once**, with the park named on
+the ticket (`review_park_reason`). Since bd-1uu19b a run speaks only the one run
+vocabulary (`Arbiter.Workers.RunState`): a parked run finishes `:failed`, and
+what tells a guard's park from work that actually failed is the ticket's park
+reason and the run's `failure_reason`, not a run status of its own.
 
 Two supporting rules:
 

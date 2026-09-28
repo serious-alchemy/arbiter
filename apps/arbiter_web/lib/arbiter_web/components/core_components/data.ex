@@ -10,13 +10,13 @@ defmodule ArbiterWeb.CoreComponents.Data do
   @doc """
   Renders a status as a colored badge, using the LITERAL status value
   verbatim — never prettified or humanized. Downstream tooling and
-  operators match on the raw status atom/string (e.g. `awaiting_review_gate`),
-  so this component must not reformat it.
+  operators match on the raw status atom/string (e.g. `handed_off`), so this
+  component must not reformat it.
 
   ## Examples
 
-      <.status_chip status={:completed} />
-      <.status_chip status={:awaiting_review_gate} />
+      <.status_chip status={:succeeded} />
+      <.status_chip status={:waiting} />
   """
   attr :status, :any, required: true
   attr :class, :any, default: nil
@@ -32,13 +32,16 @@ defmodule ArbiterWeb.CoreComponents.Data do
 
   defp status_chip_class("idle"), do: "badge-ghost"
   defp status_chip_class("running"), do: "badge-info"
-  defp status_chip_class("resuming"), do: "badge-info"
-  defp status_chip_class("awaiting"), do: "badge-warning"
-  # The design handoff writes some statuses with spaces where the schema uses
-  # underscores ("awaiting review" on a RunRow). Same state, same badge.
-  defp status_chip_class("awaiting review"), do: "badge-warning"
-  defp status_chip_class("awaiting_review"), do: "badge-warning"
-  defp status_chip_class("awaiting_review_gate"), do: "badge-warning"
+  # bd-1uu19b: a run's state (`Arbiter.Workers.RunState`) while it is live,
+  # its outcome once it has finished.
+  defp status_chip_class("starting"), do: "badge-info"
+  defp status_chip_class("working"), do: "badge-info"
+  defp status_chip_class("waiting"), do: "badge-warning"
+  defp status_chip_class("finished"), do: "badge-ghost"
+  defp status_chip_class("succeeded"), do: "badge-success"
+  # Shut down with the server — not the run failing, but not done either.
+  defp status_chip_class("interrupted"), do: "badge-warning"
+  defp status_chip_class("handed_off"), do: "badge-ghost"
   defp status_chip_class("completed"), do: "badge-success"
   defp status_chip_class("completed_unposted"), do: "badge-warning"
   defp status_chip_class("failed"), do: "badge-error"

@@ -569,3 +569,51 @@ reconciler nor the sweeper re-arms a ticket pulled out of the merge queue.
   (`task_awaiting_review`): a fresh run would hold no slot while the Watchdog
   could merge underneath it. A resume takes the ticket back to work, and
   stops its Watchdog first.
+
+## Child 5 (bd-1uu19b): one run vocabulary
+
+### The vocabulary
+
+`Arbiter.Workers.RunState` is the one vocabulary the worker GenServer and its
+`worker_runs` row share. A worker snapshot and a row both carry `kind`,
+`state` and, once `:finished`, `outcome`; neither carries a `status`.
+
+| old | kind / state / outcome |
+|---|---|
+| `worker_type` main, impl | `implement` (`role` still says `base` / `impl`) |
+| `worker_type` review, fix_pass, conflict | `review`, `fix_pass`, `conflict` |
+| FSM `idle`, `resuming` | `starting` (a resume keeps `meta.resume`) |
+| FSM / row `running` | `working` |
+| FSM `awaiting` | `waiting`, `waiting_on: :question` |
+| FSM `awaiting_review_gate` | `waiting`, `waiting_on: :review_gate` |
+| FSM `awaiting_review` | gone — no run stays resident on an open PR (child 4) |
+| `completed` | `finished` / `succeeded` |
+| `failed`, `review_parked`, `review_not_started` | `finished` / `failed`; a park's cause is the ticket's `review_park_reason` and the run's `failure_reason` |
+| `interrupted` | `finished` / `interrupted` |
+
+`handed_off` is written when a resume starts a new run (`resumed_from_run_id`)
+and the prior row is still live. The row follows every state change, not just
+start and finish. Migration `20260928131352` backfills `kind`, `state`,
+`outcome` (and a NULL `role`) and drops `status` and `worker_type`.
+
+The author waiting on the ReviewGate is still resident, so it is `waiting`
+with `waiting_on: :review_gate` rather than gone: a verdict applied to a
+resident author is still the common path (`ReviewGate.deliver_verdict/4`).
+
+### `worker list` = `worker show`
+
+`Arbiter.Workers.Current` is the one read. `current_run/3` picks a ticket's
+current run — its newest unfinished live run, else its newest registered one,
+else its newest row — and `list/1` (REST `GET /api/workers`, MCP
+`worker_list`) is that run for every ticket with a live one, while `show/2`
+(`GET /api/workers/:task_id`, MCP `worker_show`) adds the recent runs, each
+labelled with its kind. A row is read into the same view as a live snapshot,
+so there is no history fallback with a vocabulary of its own. A reviewer's run
+is reported under its ticket's id and workspace (`run_task_id` keeps its own
+`#review` id), which is what puts it in `arb prime`'s active workers.
+
+### After a restart
+
+`Reconciler.reconcile_orphaned_runs/1` sweeps a live row with no worker to
+`finished` / `interrupted`, "server restarted" — the server stopped under the
+run; it did not fail.

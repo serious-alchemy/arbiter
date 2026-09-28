@@ -156,7 +156,7 @@ defmodule Arbiter.Worker.PushBeforePRTest do
       assert StubMerger.last_open() == nil
 
       # Worker stays :running after a push failure
-      assert Worker.state(pid).status == :running
+      assert Worker.state(pid).state == :working
     end
   end
 

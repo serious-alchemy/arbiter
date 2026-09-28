@@ -4,8 +4,8 @@ defmodule ArbiterWeb.WorkerIndexLive do
   target for the dashboard's active-workers section.
 
   Workers are live GenServer state, not rows, so the listing comes from
-  `Worker.list_children/0` and is paged in memory. A status filter narrows to
-  running vs awaiting work. Re-renders live on `:worker_lifecycle` events and
+  `Worker.list_children/0` and is paged in memory. A state filter narrows to
+  working vs waiting runs (waiting on a question or the review gate). Re-renders live on `:worker_lifecycle` events and
   on a 1s tick (for the elapsed counters). Each row links to the worker
   detail page; completed/failed runs live on the run history index instead.
   """
@@ -24,8 +24,8 @@ defmodule ArbiterWeb.WorkerIndexLive do
 
   @filters [
     %{label: "All", value: "all"},
-    %{label: "Running", value: "running"},
-    %{label: "Awaiting", value: "awaiting"}
+    %{label: "Working", value: "working"},
+    %{label: "Waiting", value: "waiting"}
   ]
 
   @impl true
@@ -175,16 +175,17 @@ defmodule ArbiterWeb.WorkerIndexLive do
   end
 
   defp matches_status?(_p, :all), do: true
-  defp matches_status?(%{status: :running}, :running), do: true
-
-  defp matches_status?(%{status: status}, :awaiting),
-    do: status in [:awaiting, :awaiting_review, :awaiting_review_gate]
-
+  defp matches_status?(%{state: state}, state), do: true
   defp matches_status?(_p, _), do: false
 
-  defp parse_status(%{"status" => s}) when s in ~w(running awaiting all),
+  # bd-1uu19b: the filter is the run state. The pre-5/13 `running` /
+  # `awaiting` values still land on their states, so an old link keeps
+  # working.
+  defp parse_status(%{"status" => s}) when s in ~w(working waiting all),
     do: String.to_existing_atom(s)
 
+  defp parse_status(%{"status" => "running"}), do: :working
+  defp parse_status(%{"status" => "awaiting"}), do: :waiting
   defp parse_status(_), do: :all
 
   defp worker_path(:all, page), do: ~p"/workers?#{%{page: page}}"
@@ -287,13 +288,13 @@ defmodule ArbiterWeb.WorkerIndexLive do
                     <div class="flex items-center gap-2 min-w-0 flex-1">
                       <span class="relative flex h-2.5 w-2.5 shrink-0">
                         <span
-                          :if={p.status == :running}
+                          :if={p.state == :working}
                           class="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--arb-live)] opacity-75"
                         >
                         </span>
                         <span class={[
                           "relative inline-flex h-2.5 w-2.5 rounded-full",
-                          status_dot_class(p.status)
+                          status_dot_class(p.state)
                         ]}>
                         </span>
                       </span>
@@ -330,9 +331,9 @@ defmodule ArbiterWeb.WorkerIndexLive do
                       </span>
                       <span class={[
                         "text-[10.5px] px-1.5 py-px rounded-[var(--radius-field)] font-medium",
-                        awaiting_review_status_class(p)
+                        worker_status_class(ArbiterWeb.StatusHelpers.run_status(p))
                       ]}>
-                        {awaiting_review_status_label(p)}
+                        {ArbiterWeb.StatusHelpers.run_label(p)}
                       </span>
                     </div>
                   </.link>
@@ -384,102 +385,28 @@ defmodule ArbiterWeb.WorkerIndexLive do
   defp humanize_seconds(s) when s < 3600, do: "#{div(s, 60)}m"
   defp humanize_seconds(s), do: "#{div(s, 3600)}h #{div(rem(s, 3600), 60)}m"
 
-  defp status_dot_class(:running), do: "bg-[var(--arb-live)]"
-  defp status_dot_class(:awaiting), do: "bg-[var(--arb-attention)]"
-  defp status_dot_class(:awaiting_review), do: "bg-[var(--arb-attention)]"
-  defp status_dot_class(:awaiting_review_gate), do: "bg-[var(--arb-attention)]"
-  defp status_dot_class(:completed), do: "bg-[var(--arb-done)]"
-  defp status_dot_class(:failed), do: "bg-[var(--arb-fail)]"
+  defp status_dot_class(:working), do: "bg-[var(--arb-live)]"
+  defp status_dot_class(:waiting), do: "bg-[var(--arb-attention)]"
+  defp status_dot_class(:finished), do: "bg-[var(--arb-done)]"
   defp status_dot_class(_), do: "bg-[var(--text-label)]"
 
-  defp worker_status_class(:idle), do: "bg-[var(--arb-panel)] text-[var(--text-secondary)]"
-
-  defp worker_status_class(:resuming),
+  # Keyed on `StatusHelpers.run_status/1`: a live run's state, a finished
+  # run's outcome.
+  defp worker_status_class(:starting),
     do: "bg-[color-mix(in_oklch,var(--arb-info)_20%,transparent)] text-[var(--arb-info)]"
 
-  defp worker_status_class(:running),
+  defp worker_status_class(:working),
     do: "bg-[color-mix(in_oklch,var(--arb-live)_20%,transparent)] text-[var(--arb-live)]"
 
-  defp worker_status_class(:awaiting),
+  defp worker_status_class(:waiting),
     do:
       "bg-[color-mix(in_oklch,var(--arb-attention)_20%,transparent)] text-[var(--arb-attention)]"
 
-  defp worker_status_class(:awaiting_review_gate),
-    do:
-      "bg-[color-mix(in_oklch,var(--arb-attention)_20%,transparent)] text-[var(--arb-attention)]"
-
-  defp worker_status_class(:awaiting_review),
-    do:
-      "bg-[color-mix(in_oklch,var(--arb-attention)_20%,transparent)] text-[var(--arb-attention)]"
-
-  defp worker_status_class(:completed),
+  defp worker_status_class(:succeeded),
     do: "bg-[color-mix(in_oklch,var(--arb-done)_20%,transparent)] text-[var(--arb-done)]"
 
   defp worker_status_class(:failed),
     do: "bg-[color-mix(in_oklch,var(--arb-fail)_20%,transparent)] text-[var(--arb-fail-text)]"
 
   defp worker_status_class(_), do: "bg-[var(--arb-panel)] text-[var(--text-secondary)]"
-
-  defp worker_status_label(:idle), do: "Idle"
-  defp worker_status_label(:resuming), do: "Resuming"
-  defp worker_status_label(:running), do: "Running"
-  defp worker_status_label(:awaiting), do: "Awaiting"
-  defp worker_status_label(:awaiting_review_gate), do: "In review_gate"
-  defp worker_status_label(:awaiting_review), do: "Awaiting review"
-  defp worker_status_label(:completed), do: "Completed"
-  defp worker_status_label(:failed), do: "Failed"
-
-  defp worker_status_label(other) when is_atom(other),
-    do: other |> Atom.to_string() |> String.capitalize()
-
-  defp worker_status_label(other), do: to_string(other)
-
-  # For awaiting_review workers, delegate to approval_class/approval_label to maintain
-  # correct priority order: blocks > approved > ci_pending > default.
-  defp awaiting_review_status_label(%{status: :awaiting_review, meta: meta}) when is_map(meta) do
-    case Map.get(meta, :last_merger_status) do
-      merger_status when is_map(merger_status) ->
-        ArbiterWeb.WorkerDetailLive.approval_label(merger_status)
-
-      _ ->
-        "Awaiting review"
-    end
-  end
-
-  defp awaiting_review_status_label(worker), do: worker_status_label(worker.status)
-
-  defp awaiting_review_status_class(%{status: :awaiting_review, meta: meta}) when is_map(meta) do
-    case Map.get(meta, :last_merger_status) do
-      merger_status when is_map(merger_status) ->
-        approval_badge_class(merger_status)
-
-      _ ->
-        worker_status_class(:awaiting_review)
-    end
-  end
-
-  defp awaiting_review_status_class(worker), do: worker_status_class(worker.status)
-
-  defp approval_badge_class(%{status: :merged}),
-    do: "bg-[color-mix(in_oklch,var(--arb-done)_20%,transparent)] text-[var(--arb-done)]"
-
-  defp approval_badge_class(%{status: :closed}),
-    do: "bg-[color-mix(in_oklch,var(--arb-fail)_20%,transparent)] text-[var(--arb-fail-text)]"
-
-  defp approval_badge_class(status) when is_map(status) do
-    case status do
-      %{blocks: blocks} when is_list(blocks) and blocks != [] ->
-        "bg-[color-mix(in_oklch,var(--arb-fail)_20%,transparent)] text-[var(--arb-fail-text)]"
-
-      %{approved_by: approved} when is_list(approved) and approved != [] ->
-        "bg-[color-mix(in_oklch,var(--arb-done)_20%,transparent)] text-[var(--arb-done)]"
-
-      _ ->
-        "bg-[color-mix(in_oklch,var(--arb-attention)_20%,transparent)] text-[var(--arb-attention)]"
-    end
-  end
-
-  defp approval_badge_class(_),
-    do:
-      "bg-[color-mix(in_oklch,var(--arb-attention)_20%,transparent)] text-[var(--arb-attention)]"
 end

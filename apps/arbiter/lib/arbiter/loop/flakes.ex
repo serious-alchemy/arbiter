@@ -52,7 +52,7 @@ defmodule Arbiter.Loop.Flakes do
 
   def latest_fix_pass_run_id(task_id) do
     Run
-    |> Ash.Query.filter(task_id == ^task_id and worker_type == :fix_pass)
+    |> Ash.Query.filter(task_id == ^task_id and kind == :fix_pass)
     |> Ash.Query.sort(started_at: :desc)
     |> Ash.Query.limit(1)
     |> Ash.read!()

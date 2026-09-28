@@ -35,8 +35,9 @@ defmodule ArbiterWeb.NavRailLiveTest do
         workspace_id: "ws-1",
         task_id: "bd-rail",
         task_title: "rail-run",
-        status: :completed,
-        worker_type: "main",
+        state: :finished,
+        outcome: :succeeded,
+        kind: :implement,
         started_at: DateTime.add(DateTime.utc_now(), -120, :second),
         completed_at: DateTime.utc_now()
       })

@@ -184,7 +184,11 @@ defmodule Arbiter.Worker.ReviewGateReviewCheckoutTest do
     on_exit(fn -> if Process.alive?(author), do: GenServer.stop(author, :normal) end)
     :ok = Worker.advance(author, :claude)
     send(author, {:__claude_session_done__, "arb done"})
-    wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(author)) end)
+
+    wait_until(fn ->
+      match?(%{state: :waiting, waiting_on: :review_gate}, Worker.state(author))
+    end)
+
     author
   end
 

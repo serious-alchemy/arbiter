@@ -493,8 +493,9 @@ defmodule Arbiter.Loop.ProposalsTest do
         Ash.create(Run, %{
           task_id: issue.id,
           repo: "arbiter",
-          worker_type: :main,
-          status: :failed,
+          kind: :implement,
+          state: :finished,
+          outcome: :failed,
           model: "claude-haiku-4-5",
           failure_reason: ":review_gate_rejected",
           started_at: DateTime.utc_now()

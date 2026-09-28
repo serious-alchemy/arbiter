@@ -86,6 +86,7 @@ defmodule ArbiterWeb.TaskDetailLive do
   alias Arbiter.Worker.SessionArchive
   alias Arbiter.Workers.Run
   alias ArbiterWeb.SessionUsage
+  alias ArbiterWeb.StatusHelpers
   alias ArbiterWeb.TaskForm
   require Ash.Query
   require Logger
@@ -291,7 +292,7 @@ defmodule ArbiterWeb.TaskDetailLive do
 
       # The mini-board's Running/Waiting split is worker-derived
       # (`classify_columns/2` reads live worker snapshots), but a worker
-      # status transition (e.g. `:running` -> `:awaiting_review`) broadcasts
+      # state transition (e.g. `:working` -> `:waiting`) broadcasts
       # only on `"workers"` and never touches the child issue row, so no
       # `:task_lifecycle` fires to repaint it. Recompute the mini-board (off
       # the already-fetched `relationship_groups`, no extra query) whenever
@@ -1996,7 +1997,8 @@ defmodule ArbiterWeb.TaskDetailLive do
 
     target =
       case Enum.find(socket.assigns[:runs] || [], &(&1.id == socket.assigns[:expanded_run])) do
-        %Run{id: id, status: :running, task_id: task_id} when is_binary(task_id) ->
+        %Run{id: id, state: state, task_id: task_id}
+        when is_binary(task_id) and state in [:starting, :working, :waiting] ->
           case Worker.whereis(task_id) do
             pid when is_pid(pid) -> {id, output_topic(task_id), pid}
             _ -> nil
@@ -2078,7 +2080,7 @@ defmodule ArbiterWeb.TaskDetailLive do
   # "Did review pass?" is answered by `Arbiter.ReviewGate.Round`, the durable
   # record ReviewGate writes per pass — NOT by aggregating `@runs` by role.
   # A reviewing pass that issued REQUEST_CHANGES exits 0 and records
-  # `status: :completed` exactly like one that approved, so the run rows can
+  # `outcome: :succeeded` exactly like one that approved, so the run rows can
   # only ever count passes; and a pass that exhausted its budget without a
   # verdict is written as a synthetic `verdict: :timed_out` round the run row
   # knows nothing about. Reading runs here would render "approved" over a
@@ -2747,7 +2749,7 @@ defmodule ArbiterWeb.TaskDetailLive do
                   <.run_row
                     role={run_role(r)}
                     worker={run_worker_label(r)}
-                    status={r.status}
+                    status={StatusHelpers.run_status(r)}
                     outcome={run_outcome(r, @live_run_id, @live_run_lines)}
                     duration={humanize_run_duration(r.started_at, r.completed_at)}
                     cost={run_cost_label(Map.get(@usage_by_run, r.id))}
@@ -2815,7 +2817,7 @@ defmodule ArbiterWeb.TaskDetailLive do
                     />
 
                     <ArbiterWeb.CoreComponents.Feedback.empty_state :if={lines == []} icon={nil}>
-                      {if r.status == :running,
+                      {if r.state == :working,
                         do: "Waiting for the first line of output…",
                         else: "No output captured for this run."}
                     </ArbiterWeb.CoreComponents.Feedback.empty_state>
@@ -2824,7 +2826,7 @@ defmodule ArbiterWeb.TaskDetailLive do
                       :if={lines != []}
                       id={"run-transcript-#{r.id}"}
                       lines={transcript_lines(lines)}
-                      live={r.status == :running}
+                      live={r.state == :working}
                       time_width={44}
                       role_width={40}
                       max_height="24rem"
@@ -2908,7 +2910,10 @@ defmodule ArbiterWeb.TaskDetailLive do
                       <span class="text-[11px] font-medium text-[var(--text-label)]">
                         {String.capitalize(@worker_label)}
                       </span>
-                      <.status_chip status={@worker && @worker.status} class="badge-sm" />
+                      <.status_chip
+                        status={StatusHelpers.run_status(@worker)}
+                        class="badge-sm"
+                      />
                     </div>
                     <div class="flex items-center justify-between gap-2 text-[11px] font-[family-name:var(--font-mono)] text-[var(--text-label)]">
                       <span>started {format_started(@worker && @worker.started_at)}</span>
@@ -4420,26 +4425,23 @@ defmodule ArbiterWeb.TaskDetailLive do
 
   # ---- run roster ----
 
-  # Canonical tab order — `Arbiter.Workers.Run.worker_types/0` order, so a new
-  # worker type shows up here as soon as it exists.
   # Handoff order, which is the order a run actually happens in — the
-  # resource's own `worker_types` list is declaration order, not lifecycle
-  # order. Anything the resource grows that isn't listed here still gets a
-  # tab, appended after the known roles.
-  @role_order ~w(main impl review fix_pass conflict)
+  # resource's own `kinds` list is declaration order, not lifecycle order.
+  # Anything `Arbiter.Workers.Run.kinds/0` grows that isn't listed here still
+  # gets a tab, appended after the known roles. `impl` is not a kind: it is an
+  # `:implement` run the ReviewGate dispatched for a revise round (`role`
+  # "impl"), kept on its own tab apart from the authoring run.
+  @role_order ~w(implement impl review fix_pass conflict)
 
   defp run_roles do
-    known = Enum.map(Run.worker_types(), &Atom.to_string/1)
+    known = Enum.map(Run.kinds(), &Atom.to_string/1)
     @role_order ++ (known -- @role_order)
   end
 
   # `fix_pass` is a database value; the tab is prose.
   defp run_role_label(role), do: String.replace(role, "_", " ")
 
-  defp run_role(%Run{worker_type: type}) when is_atom(type) and not is_nil(type),
-    do: Atom.to_string(type)
-
-  defp run_role(_), do: "main"
+  defp run_role(run), do: StatusHelpers.run_role(run)
 
   # "All" plus one tab per role that actually has runs — an empty `conflict`
   # tab is a dead end, not a filter.
@@ -4463,10 +4465,10 @@ defmodule ArbiterWeb.TaskDetailLive do
   defp run_worker_label(%Run{id: id}) when is_binary(id), do: String.slice(id, 0, 8)
   defp run_worker_label(_), do: "—"
 
-  defp run_failed?(%Run{status: :failed}), do: true
+  defp run_failed?(%Run{outcome: :failed}), do: true
   # bd-aje6fj: shut down with the server. The agent usually took systemd's
   # SIGTERM too (exit 143), which is not the run failing.
-  defp run_failed?(%Run{status: :interrupted}), do: false
+  defp run_failed?(%Run{outcome: :interrupted}), do: false
   defp run_failed?(%Run{exit_code: code}) when is_integer(code) and code != 0, do: true
   defp run_failed?(_), do: false
 
@@ -4545,21 +4547,21 @@ defmodule ArbiterWeb.TaskDetailLive do
 
     cond do
       outcome_reason?(run) -> run_failure_line(run)
-      lines == [] and run.status == :running -> "streaming…"
+      lines == [] and run.state == :working -> "streaming…"
       true -> "#{length(lines)} lines"
     end
   end
 
-  # bd-8tjcms `:review_not_started` and bd-9zuvbh `:review_parked` are terminal
-  # NON-failures, so `run_failed?/1` (correctly) says no about both — but the
-  # recorded reason is still the only thing worth showing in this column: the
-  # run itself produced nothing new to count, and "why is this sitting still"
-  # is exactly what an operator is scanning for. bd-aje6fj `:interrupted` (shut
-  # down with the server) is the same shape.
-  @outcome_reason_statuses [:review_not_started, :review_parked, :interrupted]
-
+  # A failed run says why. That includes a review park or a review that never
+  # started (bd-8tjcms, bd-9zuvbh), which are failed runs under the one run
+  # vocabulary (bd-1uu19b) with the cause in `failure_reason`. bd-aje6fj
+  # `:interrupted` (shut down with the server) is a terminal NON-failure, so
+  # `run_failed?/1` (correctly) says no — but the recorded reason is still the
+  # only thing worth showing in this column: the run itself produced nothing
+  # new to count, and "why is this sitting still" is exactly what an operator
+  # is scanning for.
   defp outcome_reason?(%Run{} = run) do
-    (run_failed?(run) or run.status in @outcome_reason_statuses) and run_failure_line(run) != ""
+    (run_failed?(run) or run.outcome == :interrupted) and run_failure_line(run) != ""
   end
 
   # The one place that decides where a run's transcript comes from.
@@ -4584,7 +4586,7 @@ defmodule ArbiterWeb.TaskDetailLive do
   # roster is worth opening. Spend is only shown once something has cost
   # something; a `$0.00` on an issue with no ledger rows reads as a fact.
   defp runs_meta(runs, usage_by_run) do
-    running = Enum.count(runs, &(&1.status == :running))
+    running = Enum.count(runs, &(&1.state == :working))
 
     spend =
       runs
@@ -4678,7 +4680,7 @@ defmodule ArbiterWeb.TaskDetailLive do
 
   defp worker_activity(worker) do
     cond do
-      Map.get(worker, :claude_session?) && worker.status in [:idle, :running] ->
+      Map.get(worker, :claude_session?) && worker.state in [:starting, :working] ->
         worker_activity_label(worker)
 
       # Run over: the adjacent status chip already says what happened, so

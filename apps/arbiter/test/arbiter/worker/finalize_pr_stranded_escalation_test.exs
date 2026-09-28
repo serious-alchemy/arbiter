@@ -132,7 +132,7 @@ defmodule Arbiter.Worker.FinalizePRStrandedEscalationTest do
     Req.Test.allow(Arbiter.Mergers.Github.HTTP, self(), pid)
     send(pid, {:__claude_session_done__, "arb done"})
 
-    wait_until(fn -> Worker.state(pid).status == :failed end)
+    wait_until(fn -> Worker.state(pid).outcome == :failed end)
 
     {:ok, reloaded} = Ash.get(Issue, task.id)
     refute reloaded.status == :closed

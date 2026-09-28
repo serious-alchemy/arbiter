@@ -2,7 +2,7 @@ defmodule Arbiter.Tasks.PullRequest do
   @moduledoc """
   A ticket's open pull request (bd-741sid, ticket lifecycle 4/13).
 
-  The ticket owns its PR's state. What a worker parked at `:awaiting_review`
+  The ticket owns its PR's state. What a worker resident on its open PR
   used to hold in memory now lives on the `Arbiter.Tasks.Issue` row, so no
   worker has to stay resident while the PR is open, and the ticket's
   `Arbiter.Worker.Watchdog` can be restarted from the row alone:

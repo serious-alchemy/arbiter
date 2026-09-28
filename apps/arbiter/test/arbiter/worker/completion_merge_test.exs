@@ -140,12 +140,12 @@ defmodule Arbiter.Worker.CompletionMergeTest do
 
     send(pid, {:__claude_session_done__, "arb done"})
 
-    wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end)
+    wait_until(fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end)
 
     snap = Worker.state(pid)
     assert {:merge_failed, _reason} = snap.meta.failure_reason
     # Critically: not silently :completed.
-    refute snap.status == :completed
+    refute snap.outcome == :succeeded
 
     # bd-8rrn9t: a non-conflict merge failure must escalate to the coordinator
     # too, not just fail silently — an approved run whose merge step fails
@@ -191,7 +191,7 @@ defmodule Arbiter.Worker.CompletionMergeTest do
     :ok = Worker.advance(pid, :claude)
     send(pid, {:__claude_session_done__, "arb done"})
 
-    wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end)
+    wait_until(fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end)
 
     # 1. main is unchanged + compilable: HEAD didn't move, no merge commit, tree clean.
     {head_after, 0} = git(["rev-parse", "HEAD"], repo)
@@ -203,7 +203,7 @@ defmodule Arbiter.Worker.CompletionMergeTest do
 
     # 2. the task is NOT closed (parked for rebase) — and the worker failed, not completed.
     snap = Worker.state(pid)
-    assert snap.status == :failed
+    assert snap.outcome == :failed
     assert snap.meta.failure_reason == :merge_conflict
     {:ok, reloaded} = Ash.get(Issue, task.id)
     refute reloaded.status == :closed

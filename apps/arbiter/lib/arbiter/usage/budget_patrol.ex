@@ -225,7 +225,7 @@ defmodule Arbiter.Usage.BudgetPatrol do
   end
 
   defp describe_worker(worker) do
-    [Map.get(worker, :status), Map.get(worker, :current_step)]
+    [Map.get(worker, :kind), Map.get(worker, :state), Map.get(worker, :current_step)]
     |> Enum.reject(&is_nil/1)
     |> Enum.map_join(" · ", &to_string/1)
   end

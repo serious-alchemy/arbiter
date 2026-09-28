@@ -34,9 +34,9 @@ defmodule Arbiter.Tasks.SlotGateTaskTest do
   end
 
   describe "slots_used/1 and slot_holders/1" do
-    test "a :merging ticket holds no slot, even with a resident :awaiting_review worker" do
-      # The worker list is not an input at all: a resident author row parked
-      # on the open PR cannot put the ticket back in a slot.
+    test "a :merging ticket holds no slot, whatever worker rows linger" do
+      # The worker list is not an input at all: a row lingering under the
+      # open PR cannot put the ticket back in a slot.
       tickets = [ticket("m", :merging)]
       assert SlotGate.slots_used(tickets) == 0
       assert SlotGate.slot_holders(tickets) == []

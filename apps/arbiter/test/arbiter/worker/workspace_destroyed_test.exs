@@ -128,13 +128,13 @@ defmodule Arbiter.Worker.WorkspaceDestroyedTest do
 
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end)
+      wait_until(fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end)
 
       snap = Worker.state(pid)
 
-      refute snap.status == :completed
-      refute snap.status == :awaiting_review_gate
-      refute snap.status == :awaiting_review
+      refute snap.outcome == :succeeded
+      refute snap.waiting_on == :review_gate
+      assert snap.mr_ref == nil
 
       assert snap.meta.stop_reason.category == :workspace_destroyed
       # Distinct from the "never provisioned" condition (bd-7pe74i).
@@ -152,7 +152,7 @@ defmodule Arbiter.Worker.WorkspaceDestroyedTest do
       File.rm_rf!(worktree)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end)
+      wait_until(fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end)
 
       wait_until(fn ->
         Message.coordinator_ref()
@@ -184,7 +184,10 @@ defmodule Arbiter.Worker.WorkspaceDestroyedTest do
 
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> Worker.state(pid).status != :claude end)
+      wait_until(fn ->
+        snap = Worker.state(pid)
+        Worker.finished?(snap) or Worker.awaiting_review_gate?(snap)
+      end)
 
       snap = Worker.state(pid)
       refute match?(%{stop_reason: %{category: :workspace_destroyed}}, snap.meta)
@@ -225,7 +228,7 @@ defmodule Arbiter.Worker.WorkspaceDestroyedTest do
       File.rm_rf!(repo)
 
       send(pid, {:__claude_session_done__, "arb done"})
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end)
+      wait_until(fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end)
 
       snap = Worker.state(pid)
       assert snap.meta.stop_reason.category == :workspace_destroyed
@@ -253,11 +256,11 @@ defmodule Arbiter.Worker.WorkspaceDestroyedTest do
       File.rm_rf!(worktree)
       refute File.dir?(worktree)
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end)
+      wait_until(fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end)
 
       snap = Worker.state(pid)
       assert snap.meta.stop_reason.category == :workspace_destroyed
-      refute snap.status == :resuming
+      refute snap.state == :starting
     end
   end
 end

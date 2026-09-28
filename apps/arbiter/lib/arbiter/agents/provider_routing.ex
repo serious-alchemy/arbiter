@@ -657,7 +657,7 @@ defmodule Arbiter.Agents.ProviderRouting do
 
   defp reviewer_family(task_id) do
     Run
-    |> Ash.Query.filter(base_task_id == ^task_id and worker_type == :review)
+    |> Ash.Query.filter(base_task_id == ^task_id and kind == :review)
     |> Ash.Query.sort(started_at: :desc)
     |> Ash.Query.limit(1)
     |> Ash.read!()

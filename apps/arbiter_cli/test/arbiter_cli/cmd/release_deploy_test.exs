@@ -1371,7 +1371,8 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
       stub_routes([
         {{"get", "/api/workspaces"}, {@green, 200}},
         {{"get", "/api/workers"},
-         {%{"data" => [%{"task_id" => "bd-xyz", "status" => "running"}]}, 200}}
+         {%{"data" => [%{"task_id" => "bd-xyz", "kind" => "implement", "state" => "working"}]},
+          200}}
       ])
 
       stub_cmds()

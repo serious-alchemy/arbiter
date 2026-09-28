@@ -23,9 +23,9 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
     |> Ash.read!()
   end
 
-  defp runs_for_worker_type(base_task_id, worker_type) do
+  defp runs_for_kind(base_task_id, kind) do
     Run
-    |> Ash.Query.filter(base_task_id == ^base_task_id and worker_type == ^worker_type)
+    |> Ash.Query.filter(base_task_id == ^base_task_id and kind == ^kind)
     |> Ash.read!()
   end
 
@@ -170,11 +170,12 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
           base_task_id: task.id,
           repo: "test/repo",
           workspace_id: ws.id,
-          worker_type: :main,
+          kind: :implement,
           role: "base",
           provider: "gemini",
           model: "gemini-3.8-flash-medium",
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           started_at: DateTime.utc_now()
         })
 
@@ -228,7 +229,8 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
 
       [impl_run] = runs_for_task(impl_task_id)
       assert impl_run.provider == "gemini", "implementer pass must record provider as gemini"
-      assert impl_run.worker_type == :impl
+      assert impl_run.kind == :implement
+      assert impl_run.role == "impl"
     end
   end
 
@@ -291,11 +293,12 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
           base_task_id: task.id,
           repo: "test/repo",
           workspace_id: ws.id,
-          worker_type: :main,
+          kind: :implement,
           role: "base",
           provider: "gemini",
           model: "gemini-3.8-flash-medium",
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           started_at: DateTime.utc_now()
         })
 
@@ -323,7 +326,10 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
       :ok = Worker.advance(worker_pid, :claude)
       send(worker_pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(worker_pid)) end, 12_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(worker_pid)) end,
+        12_000
+      )
 
       refute Enum.any?(calls(log), &String.starts_with?(&1, "agy")),
              "agy cannot confine writes under :strict and must never be spawned as the " <>
@@ -386,10 +392,11 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
           base_task_id: task.id,
           repo: "test/repo",
           workspace_id: ws.id,
-          worker_type: :main,
+          kind: :implement,
           role: "base",
           provider: "gemini",
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           started_at: DateTime.utc_now()
         })
 
@@ -442,7 +449,7 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
 
       [rev_run] = runs_for_task(rev_task_id)
       assert rev_run.provider == "claude"
-      assert rev_run.worker_type == :review
+      assert rev_run.kind == :review
     end
   end
 
@@ -486,10 +493,11 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
           base_task_id: task.id,
           repo: "test/repo",
           workspace_id: ws.id,
-          worker_type: :main,
+          kind: :implement,
           role: "base",
           provider: "gemini",
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           started_at: DateTime.utc_now()
         })
 
@@ -601,10 +609,11 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
           base_task_id: task.id,
           repo: "test/repo",
           workspace_id: ws.id,
-          worker_type: :main,
+          kind: :implement,
           role: "base",
           provider: "gemini",
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           started_at: DateTime.utc_now()
         })
 
@@ -651,10 +660,11 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
           base_task_id: task.id,
           repo: "test/repo",
           workspace_id: ws.id,
-          worker_type: :main,
+          kind: :implement,
           role: "base",
           provider: "claude",
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           started_at: DateTime.utc_now()
         })
 
@@ -700,10 +710,11 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
           base_task_id: task.id,
           repo: "test/repo",
           workspace_id: ws.id,
-          worker_type: :main,
+          kind: :implement,
           role: "base",
           provider: "gemini",
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           started_at: DateTime.add(DateTime.utc_now(), -60, :second)
         })
 
@@ -715,11 +726,12 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
           base_task_id: task.id,
           repo: "test/repo",
           workspace_id: ws.id,
-          worker_type: :impl,
-          role: "implementer",
+          kind: :implement,
+          role: "impl",
           provider: "claude",
           provider_fallback: "fell back from gemini: credentials flagged expired",
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           started_at: DateTime.utc_now()
         })
 
@@ -774,10 +786,11 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
           base_task_id: task.id,
           repo: "test/repo",
           workspace_id: ws.id,
-          worker_type: :main,
+          kind: :implement,
           role: "base",
           provider: "gemini",
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           started_at: DateTime.utc_now()
         })
 
@@ -798,15 +811,15 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
 
       # Ensure fix_pass run record has provider: "gemini"
       wait_until(fn ->
-        case runs_for_worker_type(task.id, :fix_pass) do
+        case runs_for_kind(task.id, :fix_pass) do
           [%Run{provider: p}] when not is_nil(p) -> true
           _ -> false
         end
       end)
 
-      [fix_run] = runs_for_worker_type(task.id, :fix_pass)
+      [fix_run] = runs_for_kind(task.id, :fix_pass)
       assert fix_run.provider == "gemini"
-      assert fix_run.worker_type == :fix_pass
+      assert fix_run.kind == :fix_pass
 
       # bd-741sid: a pass that finishes ends its own run.
       await_exit(pid)
@@ -854,10 +867,11 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
           base_task_id: task.id,
           repo: "test/repo",
           workspace_id: ws.id,
-          worker_type: :main,
+          kind: :implement,
           role: "base",
           provider: "gemini",
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           started_at: DateTime.utc_now()
         })
 
@@ -877,15 +891,15 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
       end)
 
       wait_until(fn ->
-        case runs_for_worker_type(task.id, :conflict) do
+        case runs_for_kind(task.id, :conflict) do
           [%Run{provider: p}] when not is_nil(p) -> true
           _ -> false
         end
       end)
 
-      [conflict_run] = runs_for_worker_type(task.id, :conflict)
+      [conflict_run] = runs_for_kind(task.id, :conflict)
       assert conflict_run.provider == "gemini"
-      assert conflict_run.worker_type == :conflict
+      assert conflict_run.kind == :conflict
 
       # bd-741sid: a pass that finishes ends its own run.
       await_exit(pid)

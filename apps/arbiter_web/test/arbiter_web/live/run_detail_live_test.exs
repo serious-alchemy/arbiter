@@ -20,7 +20,8 @@ defmodule ArbiterWeb.RunDetailLiveTest do
             workspace_id: "ws-1",
             started_at: DateTime.add(DateTime.utc_now(), -120, :second),
             completed_at: DateTime.utc_now(),
-            status: :completed
+            state: :finished,
+            outcome: :succeeded
           },
           attrs
         )
@@ -43,6 +44,24 @@ defmodule ArbiterWeb.RunDetailLiveTest do
       assert html =~ "bd-detail-ok"
       assert html =~ "hello"
       refute html =~ ~s(id="run-detail-loading")
+    end
+
+    test "shows the run's kind and its outcome label (bd-1uu19b)", %{conn: conn} do
+      r =
+        run(%{
+          task_id: "bd-detail-kind",
+          task_title: "revise-run",
+          kind: :implement,
+          role: "impl",
+          outcome: :handed_off
+        })
+
+      {:ok, _view, html} = live_run(conn, r.id)
+
+      assert html =~ "KIND"
+      refute html =~ "TYPE"
+      assert html =~ "impl"
+      assert html =~ "Handed off"
     end
 
     test "shows a distinct not-found state for an unknown id", %{conn: conn} do

@@ -16,7 +16,7 @@ defmodule Arbiter.Workflows.ReviewGateFixRoundDispatcher do
   chain behind it.
 
   This is the mirror of bd-di4t6d / #1537, which re-dispatches the *reviewer*
-  out of `:awaiting_review`. Here the reviewer already ran and produced a
+  out of a review that never started. Here the reviewer already ran and produced a
   verdict; the missing actor is the implementer and the terminal state is
   `:review_gate_rejected`, a different branch entirely.
 

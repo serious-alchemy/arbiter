@@ -178,6 +178,6 @@ defmodule Arbiter.Worker.AgyAsyncWaitResumeTest do
 
     {:ok, _} = Ash.update(task, %{notes: "## Findings\n\nnarrowed the run."}, action: :update)
     File.write!(Path.join(dir, "go"), "")
-    wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end)
+    wait_until(fn -> match?(%{state: :finished, outcome: :succeeded}, Worker.state(pid)) end)
   end
 end

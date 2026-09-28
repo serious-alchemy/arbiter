@@ -94,7 +94,7 @@ defmodule Arbiter.Worker.PrOpenEndsRunTest do
     on_exit(fn -> stop_quietly(pid) end)
     :ok = Worker.advance(pid, :claude)
     send(pid, {:__claude_session_done__, "arb done"})
-    wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(pid)) end)
+    wait_until(fn -> match?(%{state: :waiting, waiting_on: :review_gate}, Worker.state(pid)) end)
     pid
   end
 
@@ -152,7 +152,7 @@ defmodule Arbiter.Worker.PrOpenEndsRunTest do
     assert Ash.get!(Issue, task.id).state == :merging
 
     assert [run] = runs(task.id)
-    assert run.status == :completed
+    assert run.outcome == :succeeded
     assert %DateTime{} = run.completed_at
     assert is_nil(run.failure_reason)
     assert run.mr_ref == "!702"

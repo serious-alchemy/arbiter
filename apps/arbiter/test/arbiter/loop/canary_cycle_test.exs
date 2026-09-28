@@ -78,8 +78,10 @@ defmodule Arbiter.Loop.CanaryCycleTest do
         task_id: task_id,
         repo: "arbiter",
         workspace_id: ws.id,
-        worker_type: :main,
-        status: :completed,
+        kind: :implement,
+        role: "base",
+        state: :finished,
+        outcome: :succeeded,
         model: "claude-sonnet-5",
         difficulty_at_dispatch: difficulty,
         started_at: DateTime.utc_now()

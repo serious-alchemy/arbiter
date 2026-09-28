@@ -4,7 +4,7 @@ defmodule Arbiter.Worker.ConcurrentTaskWorkersTest do
   # `Arbiter.Worker` registers under a `:registry_key` that defaults to the
   # task_id, but the merge queue's subordinate passes deliberately take
   # `<task_id>:fixpass` / `<task_id>:conflict` so they can run alongside the
-  # primary worker parked at `:awaiting_review` (bd-8lq2g7). Every "is a worker
+  # primary worker (then parked on its open MR, bd-8lq2g7). Every "is a worker
   # already running for this task?" guard in `Arbiter.Worker.Dispatch` looks up
   # the *exact* task_id key via `Worker.whereis/1`, so it cannot see a
   # subordinate — and `FixPassDispatcher` / `ConflictResolver` only guard their
@@ -12,8 +12,8 @@ defmodule Arbiter.Worker.ConcurrentTaskWorkersTest do
   # vs-ehjarz ended up with two live agent sessions on one task and one branch.
   #
   # The rule enforced here: at most one worker per task may be in an *active*
-  # (agent-bearing) status. Parked (`:awaiting_review*`) and terminal
-  # (`:failed` / `:completed`) workers still allow a new pass to start — that
+  # (agent-bearing) run state. A run waiting on the review gate and a
+  # `:finished` run (any outcome) still allow a new pass to start — that
   # coexistence is the documented merge-queue design and must not regress.
   #
   # async: false — the Worker registry and DynamicSupervisor are global.
@@ -48,17 +48,33 @@ defmodule Arbiter.Worker.ConcurrentTaskWorkersTest do
     end
   end
 
-  describe "active_status?/1" do
-    test "classifies the FSM's agent-bearing statuses as active" do
-      for status <- [:idle, :resuming, :running, :awaiting] do
-        assert Worker.active_status?(status), "expected #{status} to be active"
+  describe "active?/1" do
+    test "classifies the agent-bearing run states as active" do
+      for snap <- [
+            %{state: :starting, waiting_on: nil},
+            %{state: :starting, waiting_on: nil, meta: %{resume: true}},
+            %{state: :working, waiting_on: nil},
+            %{state: :waiting, waiting_on: :question}
+          ] do
+        assert Worker.active?(snap), "expected #{inspect(snap)} to be active"
       end
     end
 
-    test "parked and terminal statuses are not active" do
-      for status <- [:awaiting_review, :awaiting_review_gate, :completed, :failed] do
-        refute Worker.active_status?(status), "expected #{status} to be inactive"
+    test "a run waiting on the review gate, or finished, is not active" do
+      for snap <- [
+            %{state: :waiting, waiting_on: :review_gate},
+            %{state: :finished, outcome: :succeeded, waiting_on: nil},
+            %{state: :finished, outcome: :failed, waiting_on: nil},
+            %{state: :finished, outcome: :interrupted, waiting_on: nil},
+            %{state: :finished, outcome: :handed_off, waiting_on: nil}
+          ] do
+        refute Worker.active?(snap), "expected #{inspect(snap)} to be inactive"
       end
+    end
+
+    test "anything without a run state is not active" do
+      refute Worker.active?(%{})
+      refute Worker.active?(nil)
     end
   end
 
@@ -72,7 +88,7 @@ defmodule Arbiter.Worker.ConcurrentTaskWorkersTest do
 
       assert info.task_id == task.id
       assert info.registry_key == task.id
-      assert info.status == :running
+      assert info.state == :working
       assert info.pid == primary
       assert info.requested_key == task.id <> ":fixpass"
     end
@@ -86,7 +102,7 @@ defmodule Arbiter.Worker.ConcurrentTaskWorkersTest do
 
       assert {:error, {:task_worker_live, info}} = start_worker(ws, task, [])
       assert info.registry_key == task.id <> ":fixpass"
-      assert info.status == :running
+      assert info.state == :working
     end
 
     test "the same key still reports :already_started, not the new error", %{ws: ws, task: task} do

@@ -98,6 +98,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Worker.Watchdog
   alias Arbiter.Worker.Worktree
   alias Arbiter.Workers.Run
+  alias Arbiter.Workers.RunState
   alias Arbiter.Workflows.CodeReview
   alias Arbiter.Workflows.Machine
   alias Arbiter.Workflows.Work
@@ -189,14 +190,14 @@ defmodule Arbiter.Worker.Dispatch do
   end
 
   # Everything after `start_worker/3` succeeds — the worker is already
-  # registered `:idle`, so a failure here must not be swallowed silently
+  # registered `:starting`, so a failure here must not be swallowed silently
   # (bd-bi5pn0). A step failing partway (e.g. a transient network/VPN outage
   # during the Claude subprocess spawn, or a workflow-machine attach failure)
-  # previously left that `:idle` registration stranded forever: no retry, no
+  # previously left that `:starting` registration stranded forever: no retry, no
   # escalation, and the task stuck `:in_progress` — which also permanently
   # blackholed PRPatrol dedup for the underlying PR (it treats any non-closed
   # follow-up as "already handled"). On error, explicitly fail the worker
-  # (`:idle` -> `:failed` is a valid FSM transition) with a `:spawn_failed`
+  # (`:starting` -> finished `:failed` is a valid FSM transition) with a `:spawn_failed`
   # `StopReason` and escalate to the coordinator, mirroring the
   # `realign_task_if_orphaned/2` pattern (bd-cgmidt) above.
   defp finish_dispatch(task, worker_pid, worktree_path, opts) do
@@ -265,7 +266,7 @@ defmodule Arbiter.Worker.Dispatch do
     end
   end
 
-  # Fail the just-started worker into `:failed` with a `:spawn_failed`
+  # Fail the just-started worker's run `:failed` with a `:spawn_failed`
   # StopReason and raise a coordinator escalation, so the caller's error return
   # is never the *only* signal — the task is not left silently stranded.
   # Best-effort: a dead worker (already terminated some other way) or a
@@ -359,7 +360,7 @@ defmodule Arbiter.Worker.Dispatch do
       # continues from the preserved worktree.
       context = prepend_revise_feedback(context, opts)
 
-      # Free the registry slot: a stopped worker's worker lingers in :failed,
+      # Free the registry slot: a stopped worker lingers `:finished`,
       # still registered under task_id. Without stopping it, dispatch/2's
       # start_worker would hit {:already_started, pid} and attach to the dead
       # one — no fresh run, no resumed_from_run_id. Stopping it does NOT touch
@@ -456,7 +457,7 @@ defmodule Arbiter.Worker.Dispatch do
       prior_run_id = latest_run_id(task_id)
 
       # Free the registry slot the same way resume/2 does: a stopped worker
-      # lingers in :failed, still registered under task_id, and would make
+      # lingers `:finished`, still registered under task_id, and would make
       # dispatch/2 attach to the dead one instead of starting a fresh run.
       # Stopping it never touches the worktree, so it stays preserved.
       _ = stop_prior_worker(task_id)
@@ -581,61 +582,34 @@ defmodule Arbiter.Worker.Dispatch do
   end
 
   @doc """
-  Operator-facing explanation for an `{:error, {:worker_active, status}}`
-  refusal. Single source of truth for the MCP tool and the HTTP API.
+  Operator-facing explanation for an `{:error, {:worker_active, run}}`
+  refusal, where `run` is the live run's `%{state:, waiting_on:}`
+  (bd-1uu19b). Single source of truth for the MCP tool and the HTTP API.
 
-  bd-8lq2g7: the two review-park statuses need their own wording. The generic
-  "stop it before resuming" is sound advice for a worker that is genuinely
-  mid-run, but destructive for a parked one: `:awaiting_review_gate` means the
-  ReviewGate is judging the diff right now, and `:awaiting_review` means the
-  MR/PR is open and the Watchdog is polling it. Stopping either discards that
-  in-flight outcome, and the re-dispatch re-runs the review gate from round 1.
-  A parked worker is nearly always parked *correctly* — the thing that actually
-  failed was some other pass running alongside it (see `Arbiter.Worker.subordinate?/1`).
+  bd-8lq2g7: a run waiting on the review gate needs its own wording. The
+  generic "stop it before resuming" is sound advice for a worker that is
+  genuinely mid-run, but destructive for one the ReviewGate is judging right
+  now: stopping it discards that in-flight review, and the re-dispatch re-runs
+  the review gate from round 1. (The other park that wording once covered — a
+  worker resident on its open MR — no longer exists since bd-741sid: the
+  ticket's Watchdog holds the PR, `Arbiter.Worker.Watchdog.restart_refusal/2`.)
   """
-  @spec worker_active_message(atom(), String.t()) :: String.t()
-  def worker_active_message(status, task_id),
-    do: worker_active_message(status, task_id, Watchdog.alive?(task_id))
-
-  @doc """
-  `worker_active_message/2` with the Watchdog-liveness answer supplied rather
-  than looked up.
-
-  bd-8jixav: the `:awaiting_review` wording used to assert "the watchdog is
-  polling it to completion" from nothing but the worker's static status. A
-  Watchdog is a `:temporary` child — when it crashes it is gone silently — so
-  for the abandoned task that motivated this ticket the sentence an operator
-  read was the precise opposite of the truth, for hours. Only
-  `:awaiting_review` consults the flag; every other status is unaffected.
-  """
-  @spec worker_active_message(atom(), String.t(), boolean()) :: String.t()
-  def worker_active_message(:awaiting_review_gate, task_id, _watchdog_alive?) do
-    "#{task_id}'s worker is parked at awaiting_review_gate — the review gate is " <>
-      "judging its diff right now. It is not stalled and must not be stopped: " <>
-      "stopping it discards the review in flight and the next dispatch restarts " <>
-      "the gate from round 1. Wait for the verdict, or check `arb worker list` for " <>
-      "a fix or conflict pass (role `fix_pass` / `conflict_resolver`) if something else failed."
+  @spec worker_active_message(map() | atom(), String.t()) :: String.t()
+  def worker_active_message(%{waiting_on: :review_gate}, task_id) do
+    "#{task_id}'s run is waiting on the review gate — it is judging the diff " <>
+      "right now. It is not stalled and must not be stopped: stopping it discards " <>
+      "the review in flight and the next dispatch restarts the gate from round 1. " <>
+      "Wait for the verdict, or check `arb worker list` for a fix or conflict pass " <>
+      "(kind `fix_pass` / `conflict`) if something else failed."
   end
 
-  def worker_active_message(:awaiting_review, task_id, false) do
-    "#{task_id}'s worker is parked at awaiting_review with its MR/PR open, but " <>
-      "no watchdog is running for it — nothing is polling that MR, and nothing " <>
-      "will move this task on its own. Re-attach one with " <>
-      "`arb queue restart-watchdog #{task_id}` (cheap: it watches the existing " <>
-      "MR and does not re-run the review gate). Resuming instead would stop the " <>
-      "worker and restart the whole gate from round 1."
+  def worker_active_message(%{state: run_state} = run, _task_id) do
+    "a worker is still active for this task (#{RunState.label(run_state, Map.get(run, :outcome))}); " <>
+      "stop it before resuming"
   end
 
-  def worker_active_message(:awaiting_review, task_id, _watchdog_alive?) do
-    "#{task_id}'s worker is parked at awaiting_review — its MR/PR is open and the " <>
-      "watchdog is polling it to completion. It is not stalled and must not be " <>
-      "stopped: stopping it drops the watchdog and the next dispatch re-runs the " <>
-      "whole review gate. Check the PR, or check `arb worker list` for a fix or " <>
-      "conflict pass (role `fix_pass` / `conflict_resolver`) if something else failed."
-  end
-
-  def worker_active_message(status, _task_id, _watchdog_alive?),
-    do: "a worker is still active for this task (#{status}); stop it before resuming"
+  def worker_active_message(run_state, task_id) when is_atom(run_state),
+    do: worker_active_message(%{state: run_state}, task_id)
 
   @doc """
   Check if a task can be safely resumed. Returns a tuple of {resumable, blocked_reason}.
@@ -648,40 +622,42 @@ defmodule Arbiter.Worker.Dispatch do
         {true, nil}
 
       pid ->
-        case safe_worker_status(pid) do
-          status ->
-            if resumable_pid_status?(status) do
-              {true, nil}
-            else
-              reason = worker_active_message(status, task_id)
-              {false, reason}
-            end
+        case safe_worker_run(pid) do
+          nil ->
+            {true, nil}
+
+          %{state: :finished} ->
+            {true, nil}
+
+          run ->
+            {false, worker_active_message(run, task_id)}
         end
     end
   end
 
   # Resume only applies to a stopped/failed/dead worker. If a worker is still
   # live in a working state, refuse rather than stomp in-flight work — the
-  # operator should `arb worker stop` it first. A :failed (the stopped state)
-  # or :completed worker, or no worker at all, is resumable.
+  # operator should `arb worker stop` it first. A `:finished` run, or no
+  # worker at all, is resumable.
   defp ensure_not_active(task_id) do
     case Worker.whereis(task_id) do
       nil ->
         :ok
 
       pid ->
-        case safe_worker_status(pid) do
-          status ->
-            if resumable_pid_status?(status), do: :ok, else: {:error, {:worker_active, status}}
+        case safe_worker_run(pid) do
+          nil -> :ok
+          %{state: :finished} -> :ok
+          run -> {:error, {:worker_active, run}}
         end
     end
   end
 
-  defp resumable_pid_status?(status), do: status in [:failed, :completed, nil]
-
-  defp safe_worker_status(pid) do
+  # The live run's state, as `%{state:, waiting_on:}`, or nil for a worker
+  # that could not answer.
+  defp safe_worker_run(pid) do
     case Worker.state(pid) do
-      %{status: status} -> status
+      %{state: run_state} = snap -> %{state: run_state, waiting_on: Map.get(snap, :waiting_on)}
       _ -> nil
     end
   rescue
@@ -689,6 +665,8 @@ defmodule Arbiter.Worker.Dispatch do
   catch
     :exit, _ -> nil
   end
+
+  defp finished_worker?(pid), do: match?(%{state: :finished}, safe_worker_run(pid))
 
   # The repo: an explicit opt wins; otherwise inherit the task's most recent run's
   # repo so `arb resume <task>` works without re-specifying it. No run + no opt is
@@ -1091,7 +1069,7 @@ defmodule Arbiter.Worker.Dispatch do
   # Scoped to agent-spawning dispatches: a `start_claude: false` dispatch (the
   # hand-off / park path) spends nothing and keeps today's attach semantics.
   #
-  # A worker that has already reached a terminal status is exempt: `start_worker/3`
+  # A worker whose run has already finished is exempt: `start_worker/3`
   # evicts it (bd-d70whv) and `Worker.stop/2` kills every still-open session port
   # on the way out (`terminate/2`, bd-bmmj4w), so the re-dispatch cannot inherit a
   # live agent. Guarding it here would do the opposite of this task's intent — a
@@ -1112,7 +1090,7 @@ defmodule Arbiter.Worker.Dispatch do
   defp terminal_worker?(task_id) do
     case Worker.whereis(task_id) do
       nil -> false
-      pid -> safe_worker_status(pid) in [:failed, :completed]
+      pid -> finished_worker?(pid)
     end
   end
 
@@ -1481,15 +1459,14 @@ defmodule Arbiter.Worker.Dispatch do
         {:ok, pid}
 
       {:error, {:already_started, pid}} ->
-        # A worker for this task is already registered. If it ended in a
-        # terminal state (:failed / :completed) — the re-dispatch-a-failed-run
-        # scenario (bd-d70whv) — stop the stale process so the registry slot
-        # is freed, then start a fresh one. Without this, the new Claude
-        # session runs inside a :failed worker and the "arb done" marker is
-        # silently dropped by the FSM guard that excludes :failed.
-        # A live worker in a working state is left as-is.
-        case safe_worker_status(pid) do
-          status when status in [:failed, :completed] ->
+        # A worker for this task is already registered. If its run finished
+        # — the re-dispatch-a-failed-run scenario (bd-d70whv) — stop the stale
+        # process so the registry slot is freed, then start a fresh one.
+        # Without this, the new Claude session runs inside a finished worker
+        # and the "arb done" marker is silently dropped by the FSM guard that
+        # excludes `:finished`. A live worker is left as-is.
+        case safe_worker_run(pid) do
+          %{state: :finished} ->
             _ = Worker.stop(pid, :normal)
 
             case Worker.start(task_id: id, repo: repo, workspace_id: ws_id, meta: meta) do
@@ -1563,7 +1540,7 @@ defmodule Arbiter.Worker.Dispatch do
   end
 
   # bd-auma3z: stamp the resume markers into the worker's :meta so (1) the
-  # GenServer boots into `:resuming` rather than `:idle`, (2) `record_run_started`
+  # dashboard/CLI can tell a resumed run from a fresh dispatch, (2) `record_run_started`
   # links the new run to the prior one via `resumed_from_run_id`, and (3) the
   # completion path can reuse an already-open PR (`existing_pr_ref`) instead of
   # opening a duplicate. No-op on a normal fresh dispatch.
@@ -2330,10 +2307,10 @@ defmodule Arbiter.Worker.Dispatch do
             with {:ok, session_opts} <-
                    build_agent_session_opts(task, worker_pid, path, opts),
                  {:ok, port} <- ClaudeSession.start(session_opts) do
-              # Move the worker out of :idle so UI/CLI report a meaningful
-              # status while Claude works. In claude_driven mode the Driver
-              # never ticks the Machine, so without this nudge the worker
-              # would remain :idle until "arb done" flipped it to :completed.
+              # Move the run out of :starting so UI/CLI report a meaningful
+              # state while Claude works. In claude_driven mode the Driver
+              # never ticks the Machine, so without this nudge the run would
+              # remain :starting until "arb done" finished it.
               _ = Worker.advance(worker_pid, :claude)
               {:ok, port, opts}
             else
@@ -2743,11 +2720,11 @@ defmodule Arbiter.Worker.Dispatch do
     end
   end
 
-  # The dispatch call that's asking has already created ITS OWN `:running` Run
-  # row for this attempt (the worker creates it on init, before
+  # The dispatch call that's asking has already created ITS OWN live Run row
+  # for this attempt (the worker creates it on init, before
   # `build_agent_session_opts` ever runs) — so "the last run" as of this check
   # is always the in-flight one, never the prior failure we're trying to
-  # detect. Look at the most recent *:failed* run instead.
+  # detect. Look at the most recent *failed* run instead.
   defp thrashed_last_run?(task_id) do
     case latest_failed_run(task_id) do
       %Run{} = run -> thrashed?(run)
@@ -2769,7 +2746,7 @@ defmodule Arbiter.Worker.Dispatch do
 
   defp latest_failed_run(task_id) when is_binary(task_id) do
     Run
-    |> Ash.Query.filter(task_id == ^task_id and status == :failed)
+    |> Ash.Query.filter(task_id == ^task_id and outcome == :failed)
     |> Ash.Query.sort(started_at: :desc)
     |> Ash.Query.limit(1)
     |> Ash.read!()

@@ -1,8 +1,9 @@
 defmodule Arbiter.Worker.PhaseEventsTest do
   @moduledoc """
   bd-aw2cyt: the `/events` stream carries the worker's phase — a new
-  `worker_phase` event on each transition, and `phase` + `status` on the
-  existing `worker_done` / `worker_failed` payloads.
+  `worker_phase` event on each transition, and `phase` plus the run's
+  `state` / `outcome` (bd-1uu19b) on the existing `worker_done` /
+  `worker_failed` payloads.
   """
   use Arbiter.DataCase, async: false
 
@@ -45,12 +46,14 @@ defmodule Arbiter.Worker.PhaseEventsTest do
 
     assert event.task_id == task.id
     assert event.phase == "waiting_on_you"
-    assert event.status == "awaiting"
+    assert event.kind == "implement"
+    assert event.state == "waiting"
+    assert event.outcome == nil
     assert event.agent_live == false
   end
 
   test "worker_phase is not emitted when the phase did not change", %{pid: pid} do
-    # `:idle` and `:running` with no agent are both `:handing_off` — the
+    # `:starting` and `:working` with no agent are both `:implementing` — the
     # record moved, the work did not. An event stream should not narrate a
     # non-event.
     :ok = Worker.advance(pid, :implement)
@@ -81,18 +84,21 @@ defmodule Arbiter.Worker.PhaseEventsTest do
 
     assert event.task_id == task.id
     assert event.phase == "done"
-    assert event.status == "completed"
+    assert event.state == "finished"
+    assert event.outcome == "succeeded"
     assert event.agent_live == false
   end
 
-  test "worker_failed carries the status and phase", %{pid: pid, task: task} do
+  test "worker_failed carries the run state, outcome and phase", %{pid: pid, task: task} do
     :ok = Worker.advance(pid, :implement)
     :ok = Worker.fail(pid, "boom")
 
     event = await_event("worker_failed")
 
     assert event.task_id == task.id
-    assert event.status == "failed"
+    assert event.kind == "implement"
+    assert event.state == "finished"
+    assert event.outcome == "failed"
     assert event.phase == "waiting_on_you"
   end
 end

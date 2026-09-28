@@ -71,7 +71,7 @@ defmodule Arbiter.Worker.SubordinateStopAttributionTest do
 
     eventually(fn ->
       case Worker.state(pid) do
-        %{status: :failed} = s -> s
+        %{state: :finished, outcome: :failed} = s -> s
         _ -> nil
       end
     end)
@@ -210,7 +210,7 @@ defmodule Arbiter.Worker.SubordinateStopAttributionTest do
       state =
         eventually(fn ->
           case Worker.state(pid) do
-            %{status: :failed} = s -> s
+            %{state: :finished, outcome: :failed} = s -> s
             _ -> nil
           end
         end)
@@ -251,7 +251,7 @@ defmodule Arbiter.Worker.SubordinateStopAttributionTest do
 
   # bd-8lq2g7 finding 1: the escalation promises "the merge queue re-dispatches
   # the fix pass automatically on its next poll". That was false. `fail_stopped`
-  # only sets `status: :failed`; the worker is a `:temporary` DynamicSupervisor
+  # only sets `state: :finished, outcome: :failed`; the worker is a `:temporary` DynamicSupervisor
   # child and stays alive, still registered under `<task_id>:fixpass` (the
   # registry entry is dropped in `terminate/2`, which nothing calls). Meanwhile
   # the Watchdog's `fix_pass_active?/1` reads `:failed` as "not active" and

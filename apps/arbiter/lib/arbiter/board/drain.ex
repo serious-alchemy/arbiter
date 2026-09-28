@@ -33,16 +33,15 @@ defmodule Arbiter.Board.Drain do
 
   A child is in flight unless it is provably idle:
 
-    * an `Arbiter.Worker` whose snapshot status is parked
-      (`:awaiting_review_gate` — no agent, waiting on a reviewer) or terminal
-      (`:completed`, `:failed`) is listed under `parked`, not `in_flight`. A
-      parked worker is recovered on the next boot (`Workers.Reconciler`), so it
-      does not make a restart unsafe — unless it still owns a live agent
-      session (`agent_live`), in which case it is in flight regardless of
-      status. An open PR is not a worker at all since bd-741sid: its ticket's
+    * an `Arbiter.Worker` whose run is waiting on the review gate (no agent,
+      waiting on a reviewer) or `:finished` is listed under `parked`, not
+      `in_flight`. A parked worker is recovered on the next boot
+      (`Workers.Reconciler`), so it does not make a restart unsafe — unless it
+      still owns a live agent session (`agent_live`), in which case it is in
+      flight regardless of its run state. An open PR is not a worker at all since bd-741sid: its ticket's
       Watchdog is restarted from the row on the next boot;
     * an `Arbiter.Worker` that does not answer its snapshot in time is busy,
-      not gone — in flight, kind `:unclassified`, status `:unknown`;
+      not gone — in flight, kind `:unclassified`, no run state;
     * a `ReviewGate` or `Driver` is in flight for as long as it lives (a gate
       runs review/impl rounds; a driver ticks a live dispatch's workflow);
     * any other child — a module this code has never heard of — is in flight
@@ -117,7 +116,7 @@ defmodule Arbiter.Board.Drain do
           kind: kind(),
           task_id: String.t() | nil,
           registry_key: String.t() | nil,
-          status: atom() | nil,
+          state: Arbiter.Workers.RunState.state() | nil,
           agent_live: boolean() | nil,
           started_at: DateTime.t() | nil,
           detail: String.t() | nil,
@@ -136,10 +135,6 @@ defmodule Arbiter.Board.Drain do
           slot_holders: [String.t()],
           checked_at: DateTime.t()
         }
-
-  # A worker in one of these statuses holds no agent: it is waiting on a
-  # reviewer/merge (parked) or finished (terminal) and merely still resident.
-  @idle_statuses [:awaiting_review, :awaiting_review_gate, :completed, :failed]
 
   # Bounded per-child probe. A worker that can't answer in this long is busy,
   # and counted in flight.
@@ -273,7 +268,7 @@ defmodule Arbiter.Board.Drain do
       kind: Atom.to_string(entry.kind),
       task_id: entry.task_id,
       registry_key: entry.registry_key,
-      status: entry.status && Atom.to_string(entry.status),
+      state: entry.state && Atom.to_string(entry.state),
       agent_live: entry.agent_live,
       started_at: entry.started_at,
       detail: entry.detail
@@ -359,19 +354,18 @@ defmodule Arbiter.Board.Drain do
             worker_kind(snap),
             snap.task_id,
             Map.get(snap, :registry_key) || Map.get(keys, pid),
-            snap.status,
+            snap.state,
             Map.get(snap, :agent_live),
             snap.started_at,
             pid
           )
 
-        if snap.status in @idle_statuses and Map.get(snap, :agent_live) != true,
+        if idle_run?(snap) and Map.get(snap, :agent_live) != true,
           do: {:parked, entry},
           else: {:in_flight, entry}
 
       nil ->
-        {:in_flight,
-         entry(:unclassified, key_task_id(keys, pid), keys[pid], :unknown, nil, nil, pid)}
+        {:in_flight, entry(:unclassified, key_task_id(keys, pid), keys[pid], nil, nil, nil, pid)}
     end
   end
 
@@ -383,6 +377,10 @@ defmodule Arbiter.Board.Drain do
 
   defp classify_child(pid, _modules, keys),
     do: {:in_flight, entry(:unclassified, key_task_id(keys, pid), keys[pid], nil, nil, nil, pid)}
+
+  # A run that holds no agent: waiting on a reviewer (parked) or finished, and
+  # merely still resident.
+  defp idle_run?(snap), do: Worker.finished?(snap) or Worker.awaiting_review_gate?(snap)
 
   defp snapshot(pid) do
     GenServer.call(pid, :snapshot, @snapshot_timeout_ms)
@@ -415,12 +413,12 @@ defmodule Arbiter.Board.Drain do
     end
   end
 
-  defp entry(kind, task_id, key, status, agent_live, started_at, pid) do
+  defp entry(kind, task_id, key, run_state, agent_live, started_at, pid) do
     %{
       kind: kind,
       task_id: task_id,
       registry_key: key,
-      status: status,
+      state: run_state,
       agent_live: agent_live,
       started_at: started_at,
       detail: nil,

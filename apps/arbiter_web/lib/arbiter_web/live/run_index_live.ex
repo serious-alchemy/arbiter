@@ -4,7 +4,8 @@ defmodule ArbiterWeb.RunIndexLive do
   the dashboard's completed-workers section.
 
   Lists all persisted `Arbiter.Workers.Run` records (the durable post-mortem
-  of each worker execution) with a status filter and paging, newest first.
+  of each worker execution) with a filter on the run's state or outcome
+  (bd-1uu19b) and paging, newest first.
   Each row links to the run detail page. Re-renders live on
   `:worker_lifecycle` events so a freshly-finished run appears without a
   refresh.
@@ -29,15 +30,18 @@ defmodule ArbiterWeb.RunIndexLive do
 
   @filters [
     %{label: "All", value: "all"},
-    %{label: "Running", value: "running"},
-    %{label: "Completed", value: "completed"},
+    # Any run not finished yet: starting, working, or waiting.
+    %{label: "Live", value: "live"},
+    %{label: "Succeeded", value: "succeeded"},
+    # A review park or a review that never started (bd-8tjcms, bd-9zuvbh) is
+    # a failed run, with its cause on the row's failure reason.
     %{label: "Failed", value: "failed"},
-    # bd-8tjcms: runs that finished cleanly but whose review never started.
-    %{label: "Review not started", value: "review_not_started"},
-    %{label: "Review parked", value: "review_parked"},
     # bd-aje6fj: the worker was shut down with the server — not a failure.
-    %{label: "Interrupted", value: "interrupted"}
+    %{label: "Interrupted", value: "interrupted"},
+    %{label: "Handed off", value: "handed_off"}
   ]
+
+  @outcome_filters ~w(succeeded failed interrupted handed_off)
 
   @impl true
   def mount(_params, _session, socket) do
@@ -167,7 +171,8 @@ defmodule ArbiterWeb.RunIndexLive do
   end
 
   defp filter_by_status(query, :all), do: Ash.Query.new(query)
-  defp filter_by_status(query, status), do: Ash.Query.filter(query, status == ^status)
+  defp filter_by_status(query, :live), do: Ash.Query.filter(query, state != :finished)
+  defp filter_by_status(query, outcome), do: Ash.Query.filter(query, outcome == ^outcome)
 
   defp exclude_output_lines(query) do
     Ash.Query.select(query, [
@@ -176,8 +181,10 @@ defmodule ArbiterWeb.RunIndexLive do
       :task_title,
       :repo,
       :workspace_id,
-      :worker_type,
-      :status,
+      :kind,
+      :role,
+      :state,
+      :outcome,
       :model,
       :started_at,
       :completed_at,
@@ -196,9 +203,19 @@ defmodule ArbiterWeb.RunIndexLive do
     ])
   end
 
-  defp parse_status(%{"status" => s})
-       when s in ~w(running completed failed review_not_started review_parked interrupted),
-       do: String.to_existing_atom(s)
+  # The `status` param names a filter tab: `live`, or a finished run's
+  # outcome. The pre-5/13 values still land on their tab, so an old link
+  # keeps working (`RunState.from_legacy_status/1`'s mapping).
+  defp parse_status(%{"status" => "live"}), do: :live
+
+  defp parse_status(%{"status" => s}) when s in @outcome_filters,
+    do: String.to_existing_atom(s)
+
+  defp parse_status(%{"status" => "running"}), do: :live
+  defp parse_status(%{"status" => "completed"}), do: :succeeded
+
+  defp parse_status(%{"status" => s}) when s in ~w(review_not_started review_parked),
+    do: :failed
 
   defp parse_status(_), do: :all
 
@@ -294,9 +311,9 @@ defmodule ArbiterWeb.RunIndexLive do
                   <Domain.run_row
                     worker={r.task_id}
                     outcome={r.task_title || r.task_id}
-                    status={r.status}
+                    status={ArbiterWeb.StatusHelpers.run_status(r)}
                     duration={humanize_duration(r.started_at, r.completed_at)}
-                    role={r.worker_type}
+                    role={ArbiterWeb.StatusHelpers.run_role(r)}
                     selected={false}
                     expanded={false}
                     class="cursor-pointer hover:bg-[var(--surface-raised)]"

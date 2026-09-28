@@ -13,8 +13,9 @@ defmodule Arbiter.Loop.AnalysisTest do
         task_id: "bd-x",
         repo: "arbiter",
         title: nil,
-        worker_type: :main,
-        status: :completed,
+        kind: :implement,
+        state: :finished,
+        outcome: :succeeded,
         model: "claude-sonnet-5",
         model_tier: "standard",
         difficulty: 2,
@@ -43,7 +44,8 @@ defmodule Arbiter.Loop.AnalysisTest do
           [
             row(%{
               run_id: "run-typed",
-              status: :failed,
+              state: :finished,
+              outcome: :failed,
               failure_reason: "agent was rate-limited / the API was overloaded",
               stop_category: "context_thrash",
               terminal_lines: []
@@ -62,7 +64,8 @@ defmodule Arbiter.Loop.AnalysisTest do
 
     test "a row with no stop_category key at all still classifies (older corpus shape)" do
       bare =
-        row(%{status: :failed, failure_reason: "server restarted"}) |> Map.delete(:stop_category)
+        row(%{state: :finished, outcome: :failed, failure_reason: "server restarted"})
+        |> Map.delete(:stop_category)
 
       report = Analysis.build_report([bare], label: "test")
       seg = hd(report.segmentation)
@@ -80,7 +83,8 @@ defmodule Arbiter.Loop.AnalysisTest do
       row(%{
         run_id: @c88,
         task_id: "bd-dyfaq3",
-        status: :failed,
+        state: :finished,
+        outcome: :failed,
         model: "claude-opus-4-8",
         difficulty: 3,
         failure_reason: "agent was rate-limited / the API was overloaded",
@@ -124,7 +128,8 @@ defmodule Arbiter.Loop.AnalysisTest do
         row(%{
           run_id: "restart-1",
           task_id: "bd-other",
-          status: :failed,
+          state: :finished,
+          outcome: :failed,
           failure_reason: "server restarted",
           terminal_lines: ["⚙ server restarting for deploy", "worker will resume"]
         })
@@ -144,7 +149,8 @@ defmodule Arbiter.Loop.AnalysisTest do
         row(%{
           run_id: "agent-only-1",
           task_id: "bd-agent-only",
-          status: :failed,
+          state: :finished,
+          outcome: :failed,
           failure_reason: ":review_gate_rejected",
           terminal_lines: ["VERDICT: request_changes"]
         })
@@ -173,7 +179,8 @@ defmodule Arbiter.Loop.AnalysisTest do
         row(%{
           run_id: "5fe011e1",
           task_id: "bd-7rspia",
-          status: :failed,
+          state: :finished,
+          outcome: :failed,
           model: "claude-haiku-4-5",
           model_tier: "economy",
           difficulty: 1,
@@ -190,7 +197,8 @@ defmodule Arbiter.Loop.AnalysisTest do
         row(%{
           run_id: "3b2aa23a",
           task_id: "bd-7rspia",
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           model: "claude-sonnet-5",
           model_tier: "standard",
           difficulty: 1,
@@ -250,7 +258,8 @@ defmodule Arbiter.Loop.AnalysisTest do
         row(%{
           run_id: @c88,
           task_id: "bd-dyfaq3",
-          status: :failed,
+          state: :finished,
+          outcome: :failed,
           difficulty: 3,
           failure_reason: "agent was rate-limited / the API was overloaded",
           terminal_lines: ["Autocompact is thrashing", "⚙ claude session error"]
@@ -278,7 +287,8 @@ defmodule Arbiter.Loop.AnalysisTest do
           task_id: "vs-8i7rod",
           repo: "arbiter",
           difficulty: 2,
-          status: :failed,
+          state: :finished,
+          outcome: :failed,
           failure_reason: ":review_gate_rejected",
           cost_usd: 1.86,
           max_round: 1,
@@ -291,7 +301,8 @@ defmodule Arbiter.Loop.AnalysisTest do
           task_id: "vs-8i7rod",
           repo: "arbiter",
           difficulty: 2,
-          status: :failed,
+          state: :finished,
+          outcome: :failed,
           failure_reason: ":review_gate_rejected",
           cost_usd: 1.86,
           max_round: 1,
@@ -304,7 +315,8 @@ defmodule Arbiter.Loop.AnalysisTest do
           task_id: "vs-8i7rod",
           repo: "arbiter",
           difficulty: 2,
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           cost_usd: 1.87,
           max_round: 1,
           converged?: true
@@ -318,7 +330,8 @@ defmodule Arbiter.Loop.AnalysisTest do
         task_id: "vs-cheap",
         repo: "arbiter",
         difficulty: 2,
-        status: :completed,
+        state: :finished,
+        outcome: :succeeded,
         cost_usd: 1.0,
         max_round: 1,
         converged?: true
@@ -365,7 +378,8 @@ defmodule Arbiter.Loop.AnalysisTest do
           task_id: "bd-cohort-target",
           repo: "apex",
           difficulty: 1,
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           cost_usd: 2.0,
           max_round: 2
         }),
@@ -375,7 +389,8 @@ defmodule Arbiter.Loop.AnalysisTest do
           task_id: "bd-cohort-peer-1",
           repo: "apex",
           difficulty: 1,
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           cost_usd: 3.0,
           max_round: 2
         }),
@@ -385,7 +400,8 @@ defmodule Arbiter.Loop.AnalysisTest do
           task_id: "bd-cohort-peer-2",
           repo: "apex",
           difficulty: 1,
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           cost_usd: 5.0,
           max_round: 3
         })
@@ -404,7 +420,8 @@ defmodule Arbiter.Loop.AnalysisTest do
           task_id: "bd-above-rounds-below-cost",
           repo: "apex",
           difficulty: 1,
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           cost_usd: 2.0,
           max_round: 2
         }),
@@ -414,7 +431,8 @@ defmodule Arbiter.Loop.AnalysisTest do
           task_id: "bd-at-median",
           repo: "apex",
           difficulty: 1,
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           cost_usd: 3.0,
           max_round: 1
         }),
@@ -423,7 +441,8 @@ defmodule Arbiter.Loop.AnalysisTest do
           task_id: "bd-above-both",
           repo: "apex",
           difficulty: 1,
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           cost_usd: 5.0,
           max_round: 2
         })
@@ -445,7 +464,8 @@ defmodule Arbiter.Loop.AnalysisTest do
           task_id: "bd-below-rounds-above-cost",
           repo: "apex",
           difficulty: 1,
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           cost_usd: 5.0,
           max_round: 1
         }),
@@ -455,7 +475,8 @@ defmodule Arbiter.Loop.AnalysisTest do
           task_id: "bd-cohort1",
           repo: "apex",
           difficulty: 1,
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           cost_usd: 3.0,
           max_round: 2
         }),
@@ -464,7 +485,8 @@ defmodule Arbiter.Loop.AnalysisTest do
           task_id: "bd-cohort2",
           repo: "apex",
           difficulty: 1,
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           cost_usd: 3.0,
           max_round: 2
         })
@@ -486,7 +508,8 @@ defmodule Arbiter.Loop.AnalysisTest do
           task_id: "bd-above-both",
           repo: "apex",
           difficulty: 1,
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           cost_usd: 5.0,
           max_round: 3
         }),
@@ -496,7 +519,8 @@ defmodule Arbiter.Loop.AnalysisTest do
           task_id: "bd-cohort1",
           repo: "apex",
           difficulty: 1,
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           cost_usd: 3.0,
           max_round: 1
         }),
@@ -505,7 +529,8 @@ defmodule Arbiter.Loop.AnalysisTest do
           task_id: "bd-cohort2",
           repo: "apex",
           difficulty: 1,
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           cost_usd: 3.0,
           max_round: 1
         })
@@ -530,7 +555,8 @@ defmodule Arbiter.Loop.AnalysisTest do
         row(%{
           run_id: "attempt-1",
           task_id: "bd-dup",
-          status: :failed,
+          state: :finished,
+          outcome: :failed,
           failure_reason: ":review_gate_rejected",
           rejected?: true,
           converged?: false,
@@ -541,7 +567,8 @@ defmodule Arbiter.Loop.AnalysisTest do
         row(%{
           run_id: "attempt-2",
           task_id: "bd-dup",
-          status: :failed,
+          state: :finished,
+          outcome: :failed,
           failure_reason: ":review_gate_rejected",
           rejected?: true,
           converged?: false,
@@ -569,7 +596,8 @@ defmodule Arbiter.Loop.AnalysisTest do
           row(%{
             run_id: "ctx-#{i}",
             task_id: task,
-            status: :failed,
+            state: :finished,
+            outcome: :failed,
             difficulty: 3,
             failure_reason: "agent was rate-limited / the API was overloaded",
             terminal_lines: ["Autocompact is thrashing", "⚙ claude session error"]
@@ -601,7 +629,8 @@ defmodule Arbiter.Loop.AnalysisTest do
           row(%{
             run_id: "op-#{i}",
             task_id: "bd-op-#{i}",
-            status: :failed,
+            state: :finished,
+            outcome: :failed,
             failure_reason: "server restarted",
             terminal_lines: ["deploy restart"]
           })
@@ -706,7 +735,8 @@ defmodule Arbiter.Loop.AnalysisTest do
           run_id: run_id,
           task_id: task_id,
           repo: "apex-specs",
-          status: :failed,
+          state: :finished,
+          outcome: :failed,
           failure_reason:
             "worker spawn failed after registration: {:inspect_worktree_failed, " <>
               "{:fetch_failed, \"git fetch origin development failed in " <>

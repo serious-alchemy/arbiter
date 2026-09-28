@@ -114,23 +114,23 @@ defmodule Arbiter.WorkerOpenMrTest do
       assert open.opts.labels == ["wip"]
     end
 
-    test "is rejected from :idle", %{ws: ws} do
+    test "is rejected from :starting", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "idle", workspace_id: ws.id})
       {:ok, pid} = Worker.start(task_id: task.id, repo: "arbiter", workspace_id: ws.id)
       on_exit(fn -> stop_quietly(pid) end)
 
-      assert {:error, {:invalid_transition, :idle, :awaiting_review}} =
+      assert {:error, {:invalid_transition, :starting, :open_mr}} =
                Worker.open_mr(pid, "feature/z", "Z", "", open_opts(ws, @parked))
 
-      assert Worker.state(pid).status == :idle
+      assert Worker.state(pid).state == :starting
     end
 
-    test "an adapter open error leaves the worker :running", %{ws: ws} do
+    test "an adapter open error leaves the worker :working", %{ws: ws} do
       {pid, task} = running_worker(ws)
 
       assert {:error, _} = Worker.open_mr(pid, "feature/q", "Q", "", %{adapter: nil})
 
-      assert Worker.state(pid).status == :running
+      assert Worker.state(pid).state == :working
       assert Ash.get!(Issue, task.id).state == :active
     end
 
@@ -249,7 +249,7 @@ defmodule Arbiter.WorkerOpenMrTest do
     end
   end
 
-  describe "arb-done guard while awaiting review" do
+  describe "arb-done guard while waiting on the review gate" do
     test "a late 'arb done' does NOT complete a worker waiting on its ReviewGate", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "gated", workspace_id: ws.id})
 
@@ -264,13 +264,13 @@ defmodule Arbiter.WorkerOpenMrTest do
       on_exit(fn -> stop_quietly(pid) end)
       :ok = Worker.advance(pid, :implement)
       send(pid, {:__claude_session_done__, "arb done"})
-      wait_until(fn -> Worker.state(pid).status == :awaiting_review_gate end)
+      wait_until(fn -> Worker.state(pid).waiting_on == :review_gate end)
 
       # A second completion marker arriving while the review runs. The review
       # gate, not stdout, owns completion now.
       send(pid, {:__claude_session_done__, "arb done"})
 
-      assert Worker.state(pid).status == :awaiting_review_gate
+      assert %{state: :waiting, waiting_on: :review_gate, outcome: nil} = Worker.state(pid)
     end
   end
 end

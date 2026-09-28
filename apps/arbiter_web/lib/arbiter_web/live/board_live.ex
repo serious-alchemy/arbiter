@@ -402,10 +402,11 @@ defmodule ArbiterWeb.BoardLive do
     end
   end
 
-  # Only a worker the FSM would actually un-park (`:awaiting`) is gated: any
-  # other status gets `Worker.resume/1`'s own, more useful, refusal.
+  # Only a worker the FSM would actually un-park (`:waiting` on a question) is
+  # gated: any other run state gets `Worker.resume/1`'s own, more useful,
+  # refusal.
   defp proceed_slot(id) do
-    with %{status: :awaiting} <- Worker.state(id),
+    with %{state: :waiting, waiting_on: :question} <- Worker.state(id),
          {:ok, %Issue{} = task} <- Ash.get(Issue, id),
          {:error, {:slot_cap_full, info}} <- ResumeSlot.admit(task, origin: :human) do
       {:error, ResumeSlot.refusal_message(info)}
@@ -423,11 +424,11 @@ defmodule ArbiterWeb.BoardLive do
         |> put_flash(:info, "#{id} may proceed — the worker picked up where it parked.")
         |> refresh_board()
 
-      {:error, {:invalid_transition, status, _}} ->
+      {:error, {:invalid_transition, run_state, _}} ->
         put_flash(
           socket,
           :error,
-          "#{id} is #{status} — there is nothing parked to let proceed. Decide it on the " <>
+          "#{id} is #{run_state} — there is nothing parked to let proceed. Decide it on the " <>
             "task instead."
         )
 
@@ -1461,7 +1462,7 @@ defmodule ArbiterWeb.BoardLive do
   defp waiting_note(%{merge_pulled: true}), do: "pulled from merge queue"
   defp waiting_note(%{watchdog_alive: false}), do: "no watchdog polling"
   defp waiting_note(%{status: :merging} = card), do: merge_status_text(card.merger_status)
-  defp waiting_note(%{status: :failed}), do: "failed"
+  defp waiting_note(%{status: :finished, outcome: :failed}), do: "failed"
   defp waiting_note(%{status: :in_progress}), do: "no live worker"
   defp waiting_note(%{status: :awaiting_verification}), do: "restart & observe"
   defp waiting_note(_card), do: "parked"
@@ -1469,7 +1470,7 @@ defmodule ArbiterWeb.BoardLive do
   defp waiting_action(%{merge_pulled: true}), do: "restart watchdog"
   defp waiting_action(%{watchdog_alive: false}), do: "restart watchdog"
   defp waiting_action(%{status: :merging}), do: "merge queue"
-  defp waiting_action(%{status: :failed}), do: "retry"
+  defp waiting_action(%{status: :finished, outcome: :failed}), do: "retry"
   defp waiting_action(%{status: :in_progress}), do: "resume"
   defp waiting_action(%{status: :awaiting_verification}), do: "verify"
   defp waiting_action(_card), do: "answer"

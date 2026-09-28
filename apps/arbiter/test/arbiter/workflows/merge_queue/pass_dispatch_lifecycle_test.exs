@@ -163,7 +163,7 @@ defmodule Arbiter.Workflows.MergeQueue.PassDispatchLifecycleTest do
       assert List.last(version_actions(issue.id)) == :open_pr
     end
 
-    test "a pass whose agent cannot start is failed, not left idle on the ticket",
+    test "a pass whose agent cannot start is finished as failed, not left starting on the ticket",
          %{ws: ws, repo: repo} do
       issue = merging_ticket(ws, repo)
       inert_lane!(issue)
@@ -180,7 +180,7 @@ defmodule Arbiter.Workflows.MergeQueue.PassDispatchLifecycleTest do
 
       pid = Worker.whereis(issue.id)
       on_exit(fn -> stop_quietly(pid) end)
-      assert Worker.state(pid).status == :failed
+      assert %{state: :finished, outcome: :failed} = Worker.state(pid)
       assert Ash.get!(Issue, issue.id).state == :merging
     end
 

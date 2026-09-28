@@ -31,7 +31,8 @@ defmodule Arbiter.Loop.CorpusTest do
         Ash.create(Run, %{
           task_id: "bd-test-fingerprint",
           repo: "arbiter",
-          status: :failed,
+          state: :finished,
+          outcome: :failed,
           failure_reason: "claude session error",
           started_at: DateTime.utc_now()
         })
@@ -54,7 +55,8 @@ defmodule Arbiter.Loop.CorpusTest do
         Ash.create(Run, %{
           task_id: "bd-test-context-exhaustion",
           repo: "arbiter",
-          status: :failed,
+          state: :finished,
+          outcome: :failed,
           failure_reason: "agent was rate-limited / the API was overloaded",
           started_at: DateTime.utc_now()
         })
@@ -112,7 +114,8 @@ defmodule Arbiter.Loop.CorpusTest do
             %{
               task_id: task_id,
               repo: "arbiter",
-              status: :failed,
+              state: :finished,
+              outcome: :failed,
               started_at: DateTime.utc_now()
             },
             attrs
@@ -209,7 +212,8 @@ defmodule Arbiter.Loop.CorpusTest do
         Ash.create(Run, %{
           task_id: "bd-corpus-ok",
           repo: "arbiter",
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           started_at: DateTime.utc_now()
         })
 
@@ -267,7 +271,8 @@ defmodule Arbiter.Loop.CorpusTest do
           task_id: "lt-6glz4n",
           repo: "apex_server",
           task_title: "PR #3701: chore: merge integration/dolphin i…",
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           started_at: DateTime.utc_now()
         })
 

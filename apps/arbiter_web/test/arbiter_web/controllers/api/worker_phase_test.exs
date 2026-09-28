@@ -2,8 +2,8 @@ defmodule ArbiterWeb.Api.WorkerPhaseTest do
   @moduledoc """
   bd-aw2cyt: `GET /api/workers` and `/api/workers/:task_id` — the JSON the
   `arb worker list` / `arb worker show` CLI renders — carry the worker's
-  phase and whether its agent subprocess is live, alongside the unchanged
-  `status`.
+  phase and whether its agent subprocess is live, alongside its run state
+  (bd-1uu19b: `kind` / `state` / `outcome`).
   """
   use ArbiterWeb.ConnCase, async: false
 
@@ -28,15 +28,18 @@ defmodule ArbiterWeb.Api.WorkerPhaseTest do
     %{ws: ws, task: task, pid: pid}
   end
 
-  test "index reports the phase and liveness next to the unchanged status", %{
+  test "index reports the phase and liveness next to the run state", %{
     conn: conn,
     task: task
   } do
     body = conn |> get(~p"/api/workers") |> json_response(200)
     row = Enum.find(body["data"], &(&1["task_id"] == task.id))
 
-    assert row["status"] == "running"
-    # The record says running; nothing is actually running for it.
+    assert row["kind"] == "implement"
+    assert row["state"] == "working"
+    assert row["outcome"] == nil
+    refute Map.has_key?(row, "status")
+    # The record says working; nothing is actually running for it.
     assert row["agent_live"] == false
     # bd-741sid: the phase names the stage — the missing agent is
     # `agent_live: false`, not a hand-off phase.
@@ -47,7 +50,8 @@ defmodule ArbiterWeb.Api.WorkerPhaseTest do
   test "show reports the phase and liveness", %{conn: conn, task: task} do
     body = conn |> get(~p"/api/workers/#{task.id}") |> json_response(200)
 
-    assert body["status"] == "running"
+    assert body["state"] == "working"
+    assert body["outcome"] == nil
     assert body["agent_live"] == false
     assert is_binary(body["phase"])
     assert is_binary(body["phase_label"])

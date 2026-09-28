@@ -126,7 +126,7 @@ defmodule Arbiter.Workflows.MergeQueue.PassAdmission do
   defp run_live?(task_id) do
     case Worker.whereis(task_id) do
       nil -> false
-      pid -> Worker.state(pid).status not in [:failed, :completed]
+      pid -> not Worker.finished?(Worker.state(pid))
     end
   catch
     :exit, {:timeout, _} -> true

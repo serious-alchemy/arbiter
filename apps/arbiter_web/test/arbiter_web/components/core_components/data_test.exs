@@ -7,11 +7,11 @@ defmodule ArbiterWeb.CoreComponents.DataTest do
 
   describe "status_chip/1" do
     test "renders the literal status value, never prettified" do
-      html = render_component(&status_chip/1, status: :awaiting_review_gate)
+      html = render_component(&status_chip/1, status: :handed_off)
 
-      assert html =~ "awaiting_review_gate"
-      refute html =~ "In review_gate"
-      refute html =~ "Awaiting Review Gate"
+      assert html =~ "handed_off"
+      refute html =~ "Handed off"
+      refute html =~ "Handed Off"
     end
 
     test "renders literal in_progress verbatim" do
@@ -28,21 +28,22 @@ defmodule ArbiterWeb.CoreComponents.DataTest do
     end
 
     test "known statuses get a semantic badge class" do
-      html = render_component(&status_chip/1, status: :completed)
+      html = render_component(&status_chip/1, status: :succeeded)
       assert html =~ "badge-success"
 
       html = render_component(&status_chip/1, status: :failed)
       assert html =~ "badge-error"
     end
 
-    test "the handoff's spaced display labels get the same badge as their snake_case twins" do
-      # RunRow renders `status="awaiting review"` straight from the design
-      # handoff; without this it fell through to badge-ghost and the amber
-      # "needs you" signal was lost on the roster.
-      html = render_component(&status_chip/1, status: "awaiting review")
-
-      assert html =~ "badge-warning"
-      assert html =~ "awaiting review"
+    test "run states and outcomes get a semantic badge class" do
+      # bd-1uu19b: a run chip shows its state while live, its outcome once
+      # finished (`StatusHelpers.run_status/1`).
+      assert render_component(&status_chip/1, status: :starting) =~ "badge-info"
+      assert render_component(&status_chip/1, status: :working) =~ "badge-info"
+      assert render_component(&status_chip/1, status: :waiting) =~ "badge-warning"
+      assert render_component(&status_chip/1, status: :interrupted) =~ "badge-warning"
+      assert render_component(&status_chip/1, status: :handed_off) =~ "badge-ghost"
+      assert render_component(&status_chip/1, status: "waiting") =~ "badge-warning"
     end
 
     test "unknown status falls back to a ghost badge without crashing" do

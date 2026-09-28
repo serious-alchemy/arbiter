@@ -39,8 +39,12 @@ defmodule ArbiterWeb.Api.LoopControllerTest do
     base = %{
       task_id: "bd-ctrl",
       repo: "arbiter",
-      worker_type: :main,
-      status: :completed,
+      # An authoring run, as the worker records it (bd-1uu19b: kind +
+      # role replace worker_type :main).
+      kind: :implement,
+      role: "base",
+      state: :finished,
+      outcome: :succeeded,
       model: "claude-sonnet-5",
       started_at: DateTime.utc_now()
     }
@@ -55,7 +59,8 @@ defmodule ArbiterWeb.Api.LoopControllerTest do
       c88 =
         run!(%{
           task_id: "bd-dyfaq3",
-          status: :failed,
+          state: :finished,
+          outcome: :failed,
           failure_reason: "agent was rate-limited / the API was overloaded"
         })
 
@@ -77,7 +82,7 @@ defmodule ArbiterWeb.Api.LoopControllerTest do
     end
 
     test "the pass writes only its own-cost usage row (report-only)", %{conn: conn} do
-      _ = run!(%{task_id: "bd-ctrl-2", status: :completed})
+      _ = run!(%{task_id: "bd-ctrl-2", state: :finished, outcome: :succeeded})
       before = Event |> Ash.read!() |> length()
 
       conn = get(conn, ~p"/api/loop/analyze", %{since: "24h"})
@@ -98,7 +103,7 @@ defmodule ArbiterWeb.Api.LoopControllerTest do
     end
 
     test "the response body carries no :proposals key without the opt-in", %{conn: conn} do
-      _ = run!(%{task_id: "bd-ctrl-3", status: :completed})
+      _ = run!(%{task_id: "bd-ctrl-3", state: :finished, outcome: :succeeded})
 
       conn = get(conn, ~p"/api/loop/analyze", %{since: "24h"})
       body = json_response(conn, 200)
@@ -114,7 +119,13 @@ defmodule ArbiterWeb.Api.LoopControllerTest do
       {:ok, issue} =
         Ash.create(Issue, %{title: "ctrl residue", difficulty: 1, workspace_id: workspace!().id})
 
-      run = run!(%{task_id: issue.id, status: :failed, failure_reason: ":review_gate_rejected"})
+      run =
+        run!(%{
+          task_id: issue.id,
+          state: :finished,
+          outcome: :failed,
+          failure_reason: ":review_gate_rejected"
+        })
 
       {:ok, _} =
         Ash.create(Round, %{
@@ -150,7 +161,7 @@ defmodule ArbiterWeb.Api.LoopControllerTest do
 
       run!(%{task_id: red.id, provider: "claude"})
       run!(%{task_id: green.id, provider: "claude"})
-      fp = run!(%{task_id: red.id, worker_type: :fix_pass, provider: "claude"})
+      fp = run!(%{task_id: red.id, kind: :fix_pass, role: "fix_pass", provider: "claude"})
 
       conn = get(conn, ~p"/api/loop/analyze", %{since: "24h"})
       body = json_response(conn, 200)
@@ -288,7 +299,8 @@ defmodule ArbiterWeb.Api.LoopControllerTest do
       run =
         run!(%{
           task_id: issue.id,
-          status: :failed,
+          state: :finished,
+          outcome: :failed,
           model: "claude-haiku-4-5",
           failure_reason: ":review_gate_rejected"
         })
@@ -320,7 +332,7 @@ defmodule ArbiterWeb.Api.LoopControllerTest do
     # an integer and posts it in a JSON body, so it never arrives as the string
     # the query-string routes see.
     test "accepts an integer limit from the JSON body", %{conn: conn} do
-      _ = run!(%{task_id: "bd-ctrl-limit", status: :completed})
+      _ = run!(%{task_id: "bd-ctrl-limit", state: :finished, outcome: :succeeded})
 
       conn = post(conn, ~p"/api/loop/propose", %{since: "24h", limit: 50})
       body = json_response(conn, 200)
@@ -355,7 +367,8 @@ defmodule ArbiterWeb.Api.LoopControllerTest do
       run =
         run!(%{
           task_id: issue.id,
-          status: :failed,
+          state: :finished,
+          outcome: :failed,
           model: "claude-haiku-4-5",
           failure_reason: ":review_gate_rejected"
         })

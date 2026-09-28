@@ -119,7 +119,7 @@ defmodule Arbiter.Worker.ReviewGateFixRoundTest do
     task
   end
 
-  # An author parked at :awaiting_review_gate with `review_spawn: false`, so a
+  # An author waiting on the review gate with `review_spawn: false`, so a
   # verdict can be delivered directly (exactly as the gate would).
   defp start_parked_author(task, repo, extra_meta \\ %{}) do
     branch = "feature/fixround-#{System.unique_integer([:positive])}"
@@ -149,13 +149,13 @@ defmodule Arbiter.Worker.ReviewGateFixRoundTest do
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
     :ok = Worker.advance(pid, :claude)
     send(pid, {:__claude_session_done__, "arb done"})
-    wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(pid)) end)
+    wait_until(fn -> match?(%{state: :waiting, waiting_on: :review_gate}, Worker.state(pid)) end)
     pid
   end
 
   defp reject(pid, verdict \\ :request_changes, findings \\ @findings) do
     :ok = Worker.review_gate_verdict(pid, {verdict, findings})
-    wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end)
+    wait_until(fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end)
     :ok
   end
 

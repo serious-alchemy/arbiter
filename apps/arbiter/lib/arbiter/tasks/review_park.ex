@@ -20,8 +20,8 @@ defmodule Arbiter.Tasks.ReviewPark do
   A park is what "fail open on liveness" looks like on the record. The work is
   committed, the PR is open, the round is recorded honestly (`converged: false`)
   and the work is usually one human decision away from merging — so the durable
-  run row says `:review_parked`, not `:failed`, and the task carries a named
-  reason a human can act on.
+  run finishes `:failed` with the park as its cause, and the task carries a
+  named reason a human can act on (`review_park_reason`).
 
   Whether the branch is *pushed* is checked, never assumed: bd-2jkrqu found the
   escalation asserting "the branch is pushed" over a branch that was not, next

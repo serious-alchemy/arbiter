@@ -3,104 +3,112 @@ defmodule Arbiter.Tasks.SlotGateTest do
 
   alias Arbiter.Tasks.SlotGate
 
-  defp worker(task_id, status, attrs \\ %{}) do
+  # A worker snapshot in one of the run's states. `:question` and
+  # `:review_gate` are a `:waiting` run and what it waits on; `:finished` is
+  # a run that is over (the author opened its PR, or it failed).
+  defp worker(task_id, state, attrs \\ %{}) do
     Map.merge(
-      %{task_id: task_id, registry_key: task_id, status: status, role: nil, meta: %{}},
+      Map.merge(
+        %{task_id: task_id, registry_key: task_id, role: nil, meta: %{}},
+        run_fields(state)
+      ),
       attrs
     )
   end
 
+  defp run_fields(:question), do: %{state: :waiting, waiting_on: :question, outcome: nil}
+  defp run_fields(:review_gate), do: %{state: :waiting, waiting_on: :review_gate, outcome: nil}
+  defp run_fields(:finished), do: %{state: :finished, waiting_on: nil, outcome: :succeeded}
+  defp run_fields(state), do: %{state: state, waiting_on: nil, outcome: nil}
+
+  @run_states [:starting, :working, :question, :review_gate, :finished]
+
   describe "occupies_slot?/2 on the :agents basis" do
-    test "a live agent session occupies a slot whatever the record's status says" do
-      for status <- [
-            :idle,
-            :resuming,
-            :running,
-            :awaiting,
-            :awaiting_review_gate,
-            :awaiting_review
-          ] do
-        assert SlotGate.occupies_slot?(worker("bd-1", status, %{agent_live: true}), :agents),
-               "#{status} with a live agent should hold a slot"
+    test "a live agent session occupies a slot whatever the record's state says" do
+      for state <- @run_states do
+        assert SlotGate.occupies_slot?(worker("bd-1", state, %{agent_live: true}), :agents),
+               "#{state} with a live agent should hold a slot"
       end
     end
 
-    test "a record with no live agent occupies no slot, including :awaiting" do
-      for status <- [
-            :idle,
-            :resuming,
-            :running,
-            :awaiting,
-            :awaiting_review_gate,
-            :awaiting_review
-          ] do
-        refute SlotGate.occupies_slot?(worker("bd-1", status, %{agent_live: false}), :agents),
-               "#{status} without a live agent should hold no slot"
+    test "a record with no live agent occupies no slot, including one waiting on a question" do
+      for state <- @run_states do
+        refute SlotGate.occupies_slot?(worker("bd-1", state, %{agent_live: false}), :agents),
+               "#{state} without a live agent should hold no slot"
       end
     end
 
     test "every role counts, not just the author" do
       for role <- [nil, :reviewer, :implementer, :fix_pass, :conflict_resolver] do
         assert SlotGate.occupies_slot?(
-                 worker("bd-1", :running, %{role: role, agent_live: true}),
+                 worker("bd-1", :working, %{role: role, agent_live: true}),
                  :agents
                ),
                "#{inspect(role)} with a live agent should hold a slot"
       end
     end
 
-    test "unknown liveness degrades to the legacy status rule rather than to 'free'" do
+    test "unknown liveness degrades to the run-state rule rather than to 'free'" do
       # A caller that cannot answer the liveness question (no :agent_live key)
       # must not have its workers silently counted as free — that would
-      # over-dispatch. It falls back to the pre-bd-aw2cyt status test.
-      assert SlotGate.occupies_slot?(worker("bd-1", :running), :agents)
-      refute SlotGate.occupies_slot?(worker("bd-1", :awaiting_review), :agents)
+      # over-dispatch. It falls back to the pre-bd-aw2cyt run-state test.
+      assert SlotGate.occupies_slot?(worker("bd-1", :working), :agents)
+      refute SlotGate.occupies_slot?(worker("bd-1", :finished), :agents)
     end
   end
 
   describe "occupies_slot?/2 on the :issues basis" do
-    test "reproduces the pre-bd-aw2cyt rule: author records in a live status" do
-      assert SlotGate.occupies_slot?(worker("bd-1", :running, %{agent_live: false}), :issues)
-      assert SlotGate.occupies_slot?(worker("bd-1", :awaiting, %{agent_live: false}), :issues)
+    test "reproduces the pre-bd-aw2cyt rule: author records in a live run state" do
+      for state <- [:starting, :working, :question, :review_gate] do
+        assert SlotGate.occupies_slot?(worker("bd-1", state, %{agent_live: false}), :issues),
+               "#{state} should hold a slot on the :issues basis"
+      end
 
       refute SlotGate.occupies_slot?(
-               worker("bd-1", :awaiting_review, %{agent_live: true}),
+               worker("bd-1", :finished, %{agent_live: true}),
                :issues
              )
     end
 
     test "a reviewer / implementer pass folds into its author and holds nothing of its own" do
       refute SlotGate.occupies_slot?(
-               worker("bd-1#review", :running, %{role: :reviewer, agent_live: true}),
+               worker("bd-1#review", :working, %{role: :reviewer, agent_live: true}),
                :issues
              )
 
       refute SlotGate.occupies_slot?(
-               worker("bd-1#review#impl1", :running, %{role: :implementer, agent_live: true}),
+               worker("bd-1#review#impl1", :working, %{role: :implementer, agent_live: true}),
                :issues
              )
+    end
+  end
+
+  describe "slot_states/0" do
+    test "is every live run state" do
+      assert SlotGate.slot_states() == [:starting, :working, :waiting]
     end
   end
 
   describe "occupied/2" do
     test "counts live agents across every role" do
       workers = [
-        worker("bd-1", :awaiting_review, %{agent_live: false}),
-        worker("bd-1", :running, %{role: :fix_pass, agent_live: true}),
-        worker("bd-2#review", :running, %{role: :reviewer, agent_live: true}),
-        worker("bd-2", :awaiting_review_gate, %{agent_live: false}),
-        worker("bd-3", :awaiting, %{agent_live: false})
+        worker("bd-1", :finished, %{agent_live: false}),
+        worker("bd-1", :working, %{role: :fix_pass, agent_live: true}),
+        worker("bd-2#review", :working, %{role: :reviewer, agent_live: true}),
+        worker("bd-2", :review_gate, %{agent_live: false}),
+        worker("bd-3", :question, %{agent_live: false})
       ]
 
       assert SlotGate.occupied(workers, :agents) == 2
-      # The old rule saw three author records instead.
+      # The old rule saw three live author records instead (the fix pass
+      # shares its author's id; the finished run and the reviewer hold none).
       assert SlotGate.occupied(workers, :issues) == 3
     end
   end
 
   describe "free/3" do
     test "never reports a negative number of slots" do
-      workers = for i <- 1..5, do: worker("bd-#{i}", :running, %{agent_live: true})
+      workers = for i <- 1..5, do: worker("bd-#{i}", :working, %{agent_live: true})
       assert SlotGate.free(2, workers, :agents) == 0
       assert SlotGate.free(8, workers, :agents) == 3
     end
@@ -118,7 +126,7 @@ defmodule Arbiter.Tasks.SlotGateTest do
 
       assert SlotGate.slot_holders(tickets) == ["bd-a"]
 
-      workers = [%{task_id: "bd-c", status: :running, phase: :implementing}]
+      workers = [%{task_id: "bd-c", state: :working, phase: :implementing}]
       assert SlotGate.slot_holders(workers) == []
     end
   end

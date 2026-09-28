@@ -31,22 +31,33 @@ defmodule Arbiter.Board.SnapshotConflictsTest do
     )
   end
 
-  defp worker(task_id, status, attrs \\ %{}) do
+  # A worker snapshot in one of its run's states. `:question` and
+  # `:review_gate` are a `:waiting` run and what it waits on; `:resuming` is a
+  # `:starting` run re-attaching (`meta.resume`); `:failed` a finished run.
+  defp worker(task_id, state, attrs \\ %{}) do
     Map.merge(
-      %{
-        task_id: task_id,
-        status: status,
-        workspace_id: "ws-1",
-        current_step: :implement,
-        started_at: @now,
-        step_started_at: @now,
-        mr_ref: nil,
-        merger_url: nil,
-        meta: %{}
-      },
+      Map.merge(
+        %{
+          task_id: task_id,
+          workspace_id: "ws-1",
+          current_step: :implement,
+          started_at: @now,
+          step_started_at: @now,
+          mr_ref: nil,
+          merger_url: nil,
+          meta: if(state == :resuming, do: %{resume: true}, else: %{})
+        },
+        run_fields(state)
+      ),
       attrs
     )
   end
+
+  defp run_fields(:resuming), do: %{state: :starting, waiting_on: nil, outcome: nil}
+  defp run_fields(:question), do: %{state: :waiting, waiting_on: :question, outcome: nil}
+  defp run_fields(:review_gate), do: %{state: :waiting, waiting_on: :review_gate, outcome: nil}
+  defp run_fields(:failed), do: %{state: :finished, waiting_on: nil, outcome: :failed}
+  defp run_fields(state), do: %{state: state, waiting_on: nil, outcome: nil}
 
   defp derive(overrides) do
     Snapshot.derive(
@@ -74,7 +85,7 @@ defmodule Arbiter.Board.SnapshotConflictsTest do
       board =
         derive(
           issues: [issue("bd-1"), issue("bd-7", %{status: :in_progress})],
-          workers: [worker("bd-7", :running)],
+          workers: [worker("bd-7", :working)],
           conflicts_with: [{"bd-1", "bd-7"}]
         )
 
@@ -88,7 +99,7 @@ defmodule Arbiter.Board.SnapshotConflictsTest do
       board =
         derive(
           issues: [issue("bd-1"), issue("bd-7", %{status: :in_progress})],
-          workers: [worker("bd-7", :running)],
+          workers: [worker("bd-7", :working)],
           # stored bd-7 → bd-1; bd-1 is the Ready card and must still be held.
           conflicts_with: [{"bd-7", "bd-1"}]
         )
@@ -99,19 +110,20 @@ defmodule Arbiter.Board.SnapshotConflictsTest do
                entry(board, "bd-1")
     end
 
-    for {status, state} <- [
-          idle: "running",
-          running: "running",
+    # An open PR is no longer a worker state (bd-741sid) — see the Merging
+    # counterpart below.
+    for {run, state} <- [
+          starting: "running",
+          working: "running",
           resuming: "resuming",
-          awaiting: "awaiting input",
-          awaiting_review_gate: "in review",
-          awaiting_review: "awaiting review"
+          question: "awaiting input",
+          review_gate: "in review"
         ] do
-      test "a #{status} counterpart is in flight (#{state})" do
+      test "a #{run} counterpart is in flight (#{state})" do
         board =
           derive(
             issues: [issue("bd-1"), issue("bd-7", %{status: :in_progress})],
-            workers: [worker("bd-7", unquote(status))],
+            workers: [worker("bd-7", unquote(run))],
             conflicts_with: [{"bd-1", "bd-7"}]
           )
 
@@ -149,8 +161,8 @@ defmodule Arbiter.Board.SnapshotConflictsTest do
         derive(
           issues: [issue("bd-1"), issue("bd-7", %{status: :in_progress})],
           workers: [
-            worker("bd-7", :awaiting_review_gate),
-            worker("bd-7#review", :running, %{meta: %{role: :reviewer, reviews: "bd-7"}})
+            worker("bd-7", :review_gate),
+            worker("bd-7#review", :working, %{meta: %{role: :reviewer, reviews: "bd-7"}})
           ],
           conflicts_with: [{"bd-1", "bd-7"}]
         )
@@ -164,7 +176,7 @@ defmodule Arbiter.Board.SnapshotConflictsTest do
         derive(
           issues: [issue("bd-1"), issue("bd-7", %{status: :in_progress})],
           workers: [
-            worker("bd-7#impl2", :running, %{meta: %{role: :implementer, revises: "bd-7"}})
+            worker("bd-7#impl2", :working, %{meta: %{role: :implementer, revises: "bd-7"}})
           ],
           conflicts_with: [{"bd-1", "bd-7"}]
         )
@@ -253,7 +265,7 @@ defmodule Arbiter.Board.SnapshotConflictsTest do
             issue("bd-1c4pg3", %{priority: 1, status: :in_progress}),
             issue("bd-7srf5d", %{priority: 2})
           ],
-          workers: [worker("bd-1c4pg3", :running)],
+          workers: [worker("bd-1c4pg3", :working)],
           conflicts_with: [{"bd-7srf5d", "bd-1c4pg3"}]
         )
 
@@ -281,7 +293,7 @@ defmodule Arbiter.Board.SnapshotConflictsTest do
       board =
         derive(
           issues: [issue("bd-1"), issue("bd-7", %{status: :in_progress})],
-          workers: [worker("bd-7", :running)],
+          workers: [worker("bd-7", :working)],
           parent_of: [{"bd-7", "bd-1"}],
           conflicts_with: []
         )
@@ -295,7 +307,7 @@ defmodule Arbiter.Board.SnapshotConflictsTest do
       board =
         derive(
           issues: [issue("bd-1"), issue("bd-7", %{status: :in_progress})],
-          workers: [worker("bd-7", :running)],
+          workers: [worker("bd-7", :working)],
           blocked_by: %{"bd-1" => ["bd-9"]},
           conflicts_with: [{"bd-1", "bd-7"}]
         )

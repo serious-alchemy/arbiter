@@ -182,9 +182,9 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
 
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> Worker.state(pid).status == :completed end)
+      wait_until(fn -> Worker.state(pid).outcome == :succeeded end)
 
-      assert Worker.state(pid).status == :completed
+      assert Worker.state(pid).outcome == :succeeded
       # No merge must have been attempted.
       assert StubMerger.merge_count("pr-42") == 0
     end
@@ -205,9 +205,9 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
 
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> Worker.state(pid).status == :completed end, 3_000)
+      wait_until(fn -> Worker.state(pid).outcome == :succeeded end, 3_000)
 
-      assert Worker.state(pid).status == :completed
+      assert Worker.state(pid).outcome == :succeeded
       assert StubMerger.merge_count("pr-99") == 0
     end
 
@@ -219,9 +219,9 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
 
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> Worker.state(pid).status == :completed end)
+      wait_until(fn -> Worker.state(pid).outcome == :succeeded end)
 
-      assert Worker.state(pid).status == :completed
+      assert Worker.state(pid).outcome == :succeeded
     end
   end
 
@@ -241,10 +241,10 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
 
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> Worker.state(pid).status == :failed end)
+      wait_until(fn -> Worker.state(pid).outcome == :failed end)
 
       snap = Worker.state(pid)
-      assert snap.status == :failed
+      assert snap.outcome == :failed
       # The PR must NOT have been merged.
       assert StubMerger.merge_count("pr-77") == 0
     end
@@ -262,7 +262,7 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
 
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> Worker.state(pid).status == :failed end)
+      wait_until(fn -> Worker.state(pid).outcome == :failed end)
 
       # An escalation message should have been posted to the Coordinator mailbox.
       messages = Message.inbox("admiral", workspace_id: ws.id)
@@ -294,9 +294,9 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
 
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> Worker.state(pid).status == :failed end)
+      wait_until(fn -> Worker.state(pid).outcome == :failed end)
 
-      assert Worker.state(pid).status == :failed
+      assert Worker.state(pid).outcome == :failed
       assert StubMerger.merge_count("pr-810") == 0
 
       {:ok, updated_task} = Ash.get(Issue, task.id)
@@ -317,9 +317,9 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
 
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> Worker.state(pid).status == :completed end)
+      wait_until(fn -> Worker.state(pid).outcome == :succeeded end)
 
-      assert Worker.state(pid).status == :completed
+      assert Worker.state(pid).outcome == :succeeded
       assert StubMerger.merge_count("pr-811") == 0
     end
 
@@ -337,9 +337,9 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
 
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> Worker.state(pid).status == :failed end)
+      wait_until(fn -> Worker.state(pid).outcome == :failed end)
 
-      assert Worker.state(pid).status == :failed
+      assert Worker.state(pid).outcome == :failed
       assert StubMerger.merge_count("pr-812") == 0
 
       {:ok, updated_task} = Ash.get(Issue, task.id)
@@ -360,7 +360,7 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
 
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> Worker.state(pid).status == :failed end)
+      wait_until(fn -> Worker.state(pid).outcome == :failed end)
 
       {:ok, updated_task} = Ash.get(Issue, task.id)
       refute String.contains?(updated_task.notes || "", "ISSUED WITHOUT FULL VERIFICATION")
@@ -379,9 +379,9 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
 
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> Worker.state(pid).status == :failed end)
+      wait_until(fn -> Worker.state(pid).outcome == :failed end)
 
-      assert Worker.state(pid).status == :failed
+      assert Worker.state(pid).outcome == :failed
       assert StubMerger.merge_count("pr-55") == 0
     end
 
@@ -396,7 +396,7 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
 
       pid = start_reviewer(task, ["some output but no verdict line"])
       send(pid, {:__claude_session_done__, "arb done"})
-      wait_until(fn -> Worker.state(pid).status == :failed end)
+      wait_until(fn -> Worker.state(pid).outcome == :failed end)
 
       run =
         Arbiter.Workers.Run
@@ -404,7 +404,7 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
         |> Ash.read!()
         |> List.first()
 
-      assert run.status == :review_parked
+      assert run.outcome == :failed
 
       {:ok, parked} = Ash.get(Issue, task.id)
       assert parked.review_park_reason == "inconclusive"
@@ -460,7 +460,7 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
 
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> Worker.state(pid).status == :failed end)
+      wait_until(fn -> Worker.state(pid).outcome == :failed end)
 
       state = Worker.state(pid)
 
@@ -509,9 +509,9 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
 
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> Worker.state(pid).status == :completed end)
+      wait_until(fn -> Worker.state(pid).outcome == :succeeded end)
 
-      assert Worker.state(pid).status == :completed
+      assert Worker.state(pid).outcome == :succeeded
     end
   end
 
@@ -521,7 +521,7 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
     test "APPROVE after posting gh pr review completes cleanly (not failed/INCONCLUSIVE)" do
       # Regression for bd-btcyn6 + bd-ddtbhb: a reviewer that posts the GitHub
       # review via `gh pr review --approve` AND emits the required `VERDICT:
-      # APPROVE` sentinel must land in :completed, NOT :failed or INCONCLUSIVE.
+      # APPROVE` sentinel must finish :succeeded, NOT :failed or INCONCLUSIVE.
       # (Previously expected :awaiting_review; after bd-ddtbhb the reviewer
       # completes directly without parking — it must not merge.)
       ws = new_workspace()
@@ -538,9 +538,9 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
 
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> Worker.state(pid).status == :completed end)
+      wait_until(fn -> Worker.state(pid).outcome == :succeeded end)
 
-      assert Worker.state(pid).status == :completed
+      assert Worker.state(pid).outcome == :succeeded
       assert StubMerger.merge_count("pr-200") == 0
     end
 
@@ -565,10 +565,10 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
 
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> Worker.state(pid).status == :failed end)
+      wait_until(fn -> Worker.state(pid).outcome == :failed end)
 
       snap = Worker.state(pid)
-      assert snap.status == :failed
+      assert snap.outcome == :failed
       assert StubMerger.merge_count("pr-201") == 0
 
       # The task should NOT have landed as INCONCLUSIVE — it should have
@@ -653,7 +653,7 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
       send(worker_pid, {:__claude_session_done__, "arb done"})
 
       # Wait for the worker to fail.
-      wait_until(fn -> Worker.state(worker_pid).status == :failed end)
+      wait_until(fn -> Worker.state(worker_pid).outcome == :failed end)
 
       # Driver should exit after seeing :failed.
       assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 3_000
@@ -692,9 +692,9 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
 
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> Worker.state(pid).status == :completed end)
+      wait_until(fn -> Worker.state(pid).outcome == :succeeded end)
 
-      assert Worker.state(pid).status == :completed
+      assert Worker.state(pid).outcome == :succeeded
       assert StubMerger.merge_count("pr-300") == 0
     end
 
@@ -723,10 +723,10 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
 
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> Worker.state(pid).status == :failed end)
+      wait_until(fn -> Worker.state(pid).outcome == :failed end)
 
       snap = Worker.state(pid)
-      assert snap.status == :failed
+      assert snap.outcome == :failed
       assert StubMerger.merge_count("pr-301") == 0
 
       assert {:ok, updated_task} = Ash.get(Arbiter.Tasks.Issue, task.id)
@@ -746,10 +746,10 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
 
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> Worker.state(pid).status == :failed end)
+      wait_until(fn -> Worker.state(pid).outcome == :failed end)
 
       snap = Worker.state(pid)
-      assert snap.status == :failed
+      assert snap.outcome == :failed
       assert StubMerger.merge_count("pr-302") == 0
     end
   end
@@ -1018,9 +1018,9 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
 
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> Worker.state(pid).status == :completed end)
+      wait_until(fn -> Worker.state(pid).outcome == :succeeded end)
 
-      assert Worker.state(pid).status == :completed
+      assert Worker.state(pid).outcome == :succeeded
     end
   end
 end

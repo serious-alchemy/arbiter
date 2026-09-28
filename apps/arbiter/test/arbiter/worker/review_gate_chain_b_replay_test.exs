@@ -11,7 +11,9 @@ defmodule Arbiter.Worker.ReviewGateChainBReplayTest do
   One test per shape, each driving the real gate with a real reviewer fixture
   and asserting the same four things:
 
-    1. the run row says `:review_parked`, not `:failed`;
+    1. the run row finishes `:failed` with a review-gate cause, and — unlike a
+       genuine rejection — the ticket is parked (since bd-1uu19b the park lives
+       on the ticket, not in a `:review_parked` run status);
     2. the task carries the park reason a human can act on;
     3. **exactly one** coordinator escalation (invariant I3);
     4. nothing merged — the content half of the guard is still closed.
@@ -29,7 +31,7 @@ defmodule Arbiter.Worker.ReviewGateChainBReplayTest do
   alias Arbiter.Messages.Message
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Worker
-  alias Arbiter.Workers.Run
+  alias Arbiter.Workers.{Run, RunState}
 
   @print_timeout Path.expand("../../fixtures/review_print_timeout.sh", __DIR__)
   @no_verdict_auth_prose Path.expand("../../fixtures/review_no_verdict_auth_prose.sh", __DIR__)
@@ -148,7 +150,7 @@ defmodule Arbiter.Worker.ReviewGateChainBReplayTest do
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
     :ok = Worker.advance(pid, :claude)
     send(pid, {:__claude_session_done__, "arb done"})
-    wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 10_000)
+    wait_until(fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end, 10_000)
     pid
   end
 
@@ -175,7 +177,12 @@ defmodule Arbiter.Worker.ReviewGateChainBReplayTest do
     assert %DateTime{} = parked.review_parked_at
 
     run = author_run(task.id)
-    assert run.status == :review_parked, "run was #{run.status}, expected :review_parked"
+    assert run.state == :finished
+
+    assert run.outcome == :failed,
+           "run was #{RunState.label(run.state, run.outcome)}, expected finished (failed)"
+
+    assert run.failure_reason in [":review_gate_inconclusive", ":review_gate_rejected"]
 
     assert [escalation] = escalations(ws, task)
     assert escalation.subject =~ "parked"
@@ -273,7 +280,10 @@ defmodule Arbiter.Worker.ReviewGateChainBReplayTest do
     :ok = Worker.advance(pid, :claude)
     send(pid, {:__claude_session_done__, "arb done"})
 
-    wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 10_000)
+    wait_until(
+      fn -> match?(%{state: :finished, outcome: :succeeded}, Worker.state(pid)) end,
+      10_000
+    )
 
     assert merge_commit_count(repo) == 1
     refute Ash.get!(Issue, task.id) |> Arbiter.Tasks.ReviewPark.parked?()

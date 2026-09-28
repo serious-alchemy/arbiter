@@ -36,8 +36,8 @@ defmodule Arbiter.Tasks.EpicRollup do
        clears that state.
     2. Its own live worker needs the operator, per
        `Arbiter.Board.Snapshot.child_needs_you?/2` — the same predicate the
-       board's Waiting column votes with, not a second definition. Covers an
-       `:awaiting` question, a `:failed` park, an MR blocked for a reason
+       board's Waiting column votes with, not a second definition. Covers a
+       run `:waiting` on a question, a failed run, an MR blocked for a reason
        outside the Watchdog's auto-resolvable set, and an `:in_progress`
        child with no live worker that has sat past `Snapshot.orphaned?/3`'s
        dispatch grace window (nothing will retry it on its own). A child

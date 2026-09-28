@@ -242,7 +242,7 @@ defmodule Arbiter.Workflows.MergeQueue.AutoResumeDispatcher do
 
   defp body(task_id, mr_ref, attempts, :budget_exhausted) do
     """
-    Task #{task_id} timed out at :awaiting_review on MR #{mr_ref || "(unknown)"} and
+    Task #{task_id} timed out awaiting review on MR #{mr_ref || "(unknown)"} and
     auto-resume is exhausted after #{attempts} attempt(s).
 
     #{lede(attempts)}
@@ -253,7 +253,7 @@ defmodule Arbiter.Workflows.MergeQueue.AutoResumeDispatcher do
 
   defp body(task_id, mr_ref, attempts, {:resume_failed, reason}) do
     """
-    Task #{task_id} timed out at :awaiting_review on MR #{mr_ref || "(unknown)"} and
+    Task #{task_id} timed out awaiting review on MR #{mr_ref || "(unknown)"} and
     the Watchdog could not auto-resume it: #{inspect(reason)}.
 
     Auto-resume was still within budget (#{attempts} attempt(s) used), so this is not
@@ -269,7 +269,7 @@ defmodule Arbiter.Workflows.MergeQueue.AutoResumeDispatcher do
 
   defp body(task_id, mr_ref, _attempts, {:resume_blocked, reason, deferrals}) do
     """
-    Task #{task_id} timed out at :awaiting_review on MR #{mr_ref || "(unknown)"} and
+    Task #{task_id} timed out awaiting review on MR #{mr_ref || "(unknown)"} and
     the Watchdog could not auto-resume it because another pass on the same task still
     holds the worker slot: #{inspect(reason)}.
 
@@ -281,8 +281,8 @@ defmodule Arbiter.Workflows.MergeQueue.AutoResumeDispatcher do
     was still live after #{deferrals} retries.
 
     That is long enough that the subordinate pass is itself likely wedged. Check it
-    first: `worker_show #{task_id}` and look for a run whose worker_type is fix_pass or
-    conflict and whose status is still `running`. Stopping or finishing that pass frees
+    first: `worker_show #{task_id}` and look for a run whose kind is fix_pass or
+    conflict and whose state is still `working`. Stopping or finishing that pass frees
     the slot; a `worker_resume #{task_id}` will then take.
 
     The task is PARKED (`review_park_reason: resume_blocked`), not failed — the work is
@@ -294,7 +294,7 @@ defmodule Arbiter.Workflows.MergeQueue.AutoResumeDispatcher do
 
   defp body(task_id, mr_ref, _attempts, {:resume_blocker_vanished, reason, deferrals}) do
     """
-    Task #{task_id} timed out at :awaiting_review on MR #{mr_ref || "(unknown)"} and the
+    Task #{task_id} timed out awaiting review on MR #{mr_ref || "(unknown)"} and the
     Watchdog could not auto-resume it: #{inspect(reason)}.
 
     This is the bd-985tkl arm of the bd-di4t6d condition. The refusal names a
@@ -308,7 +308,7 @@ defmodule Arbiter.Workflows.MergeQueue.AutoResumeDispatcher do
     committed, the PR is open and nothing was merged. Clearing the park is a plain
     `worker_resume #{task_id}` once the slot is free.
 
-    Check the slot first: `worker_show #{task_id}`, and look for a run whose worker_type
+    Check the slot first: `worker_show #{task_id}`, and look for a run whose kind
     is fix_pass or conflict. If nothing is running, the key is being held by a terminal
     worker that was never reaped — stopping it (`arb worker stop #{task_id}`) frees it.
 

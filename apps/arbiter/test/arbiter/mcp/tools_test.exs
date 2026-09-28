@@ -3383,7 +3383,8 @@ defmodule Arbiter.MCP.ToolsTest do
           task_id: task.id,
           repo: "arbiter",
           workspace_id: ctx.ws.id,
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           started_at: older,
           completed_at: older,
           output_lines: ["stale"]
@@ -3394,7 +3395,8 @@ defmodule Arbiter.MCP.ToolsTest do
           task_id: task.id,
           repo: "arbiter",
           workspace_id: ctx.ws.id,
-          status: :failed,
+          state: :finished,
+          outcome: :failed,
           started_at: newer,
           completed_at: newer,
           exit_code: 2,
@@ -3405,7 +3407,8 @@ defmodule Arbiter.MCP.ToolsTest do
       assert {:ok, snap} = Tools.worker_show(ctx.coordinator, %{"task_id" => task.id})
 
       assert snap.source == "history"
-      assert snap.status == "failed"
+      assert snap.state == "finished"
+      assert snap.outcome == "failed"
       assert snap.exit_status == 2
       assert snap.failure_reason == "claude_crashed"
       assert snap.output_lines == ["a", "b", "boom"]
@@ -3434,7 +3437,7 @@ defmodule Arbiter.MCP.ToolsTest do
       {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ctx.ws.id)
       on_exit(fn -> Process.alive?(pid) && Worker.stop(task.id, :normal) end)
 
-      # Worker in :failed status should be resumable
+      # A finished (failed) run should be resumable
       :ok = Worker.fail(pid)
       assert {:ok, snap} = Tools.worker_show(ctx.coordinator, %{"task_id" => task.id})
       assert snap.resumable == true
@@ -3443,7 +3446,7 @@ defmodule Arbiter.MCP.ToolsTest do
 
     # bd-741sid: a run whose PR is open has ended, so the parked worker that
     # must not be stopped is the one waiting on its ReviewGate.
-    test "surfaces blocked_reason for a worker parked at awaiting_review_gate", ctx do
+    test "surfaces blocked_reason for a worker waiting on the review gate", ctx do
       {:ok, task} =
         Ash.create(Issue, %{title: "awaiting-review-gate-test", workspace_id: ctx.ws.id})
 
@@ -3459,12 +3462,14 @@ defmodule Arbiter.MCP.ToolsTest do
 
       :ok = Worker.advance(pid, :implement)
       send(pid, {:__claude_session_done__, "arb done"})
-      wait_until(fn -> Worker.state(pid).status == :awaiting_review_gate end)
+      wait_until(fn -> Worker.state(pid).waiting_on == :review_gate end)
 
       assert {:ok, snap} = Tools.worker_show(ctx.coordinator, %{"task_id" => task.id})
+      assert snap.state == "waiting"
+      assert snap.waiting_on == "review_gate"
       assert snap.resumable == false
       assert is_binary(snap.blocked_reason)
-      assert String.contains?(snap.blocked_reason, "awaiting_review_gate")
+      assert String.contains?(snap.blocked_reason, "waiting on the review gate")
     end
 
     test "surfaces resumable/blocked_reason for worker_list", ctx do
@@ -3472,7 +3477,7 @@ defmodule Arbiter.MCP.ToolsTest do
       {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ctx.ws.id)
       on_exit(fn -> Process.alive?(pid) && Worker.stop(task.id, :normal) end)
 
-      # Worker in :failed status should be resumable
+      # A finished (failed) run should be resumable
       :ok = Worker.fail(pid)
       assert {:ok, %{workers: workers}} = Tools.worker_list(ctx.coordinator, %{})
       entry = Enum.find(workers, &(&1.task_id == task.id))
@@ -3504,7 +3509,8 @@ defmodule Arbiter.MCP.ToolsTest do
           task_id: task.id,
           repo: "arbiter",
           workspace_id: ctx.ws.id,
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           started_at: DateTime.utc_now(),
           completed_at: DateTime.utc_now(),
           output_lines: ["line 1", "line 2", "line 3", "line 4", "line 5"]
@@ -3528,7 +3534,8 @@ defmodule Arbiter.MCP.ToolsTest do
           task_id: task.id,
           repo: "arbiter",
           workspace_id: ctx.ws.id,
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           started_at: older,
           completed_at: older,
           output_lines: ["stale"]
@@ -3539,7 +3546,8 @@ defmodule Arbiter.MCP.ToolsTest do
           task_id: task.id,
           repo: "arbiter",
           workspace_id: ctx.ws.id,
-          status: :failed,
+          state: :finished,
+          outcome: :failed,
           started_at: newer,
           completed_at: newer,
           exit_code: 2,
@@ -3552,7 +3560,8 @@ defmodule Arbiter.MCP.ToolsTest do
                Tools.worker_runs(ctx.coordinator, %{"task_id" => task.id})
 
       assert first.id == new_run.id
-      assert first.status == "failed"
+      assert first.state == "finished"
+      assert first.outcome == "failed"
       assert first.exit_code == 2
       assert first.failure_reason == "review_gate_rejected"
       # bd-2ddf2x: `worker_runs` surfaces failure_summary directly, so a
@@ -3562,7 +3571,8 @@ defmodule Arbiter.MCP.ToolsTest do
       refute Map.has_key?(first, :output_lines)
 
       assert second.id == old_run.id
-      assert second.status == "completed"
+      assert second.state == "finished"
+      assert second.outcome == "succeeded"
     end
 
     test "returns an empty list when no runs are recorded", ctx do
@@ -3582,7 +3592,8 @@ defmodule Arbiter.MCP.ToolsTest do
           task_id: task.id,
           repo: "arbiter",
           workspace_id: ctx.ws.id,
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           started_at: DateTime.utc_now(),
           resolved_skills: [
             %{"name" => "tdd", "activation_mode" => "always_on", "skill_version" => "v1"}
@@ -3624,7 +3635,8 @@ defmodule Arbiter.MCP.ToolsTest do
           task_id: task.id,
           repo: "arbiter",
           workspace_id: ctx.ws.id,
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           provider: "gemini",
           session_id: "25df47b0-054e-434e-84c1-6876fd9f77de",
           started_at: DateTime.add(DateTime.utc_now(), -600, :second)
@@ -3635,7 +3647,8 @@ defmodule Arbiter.MCP.ToolsTest do
           task_id: task.id,
           repo: "arbiter",
           workspace_id: ctx.ws.id,
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           provider: "gemini",
           session_id: "89a2b784-6bd5-46e6-a971-2178ca58cdcd",
           resumed_from_run_id: prior.id,
@@ -3663,7 +3676,8 @@ defmodule Arbiter.MCP.ToolsTest do
             task_id: task.id,
             repo: "arbiter",
             workspace_id: ctx.ws.id,
-            status: :completed,
+            state: :finished,
+            outcome: :succeeded,
             started_at: DateTime.add(DateTime.utc_now(), -i, :second)
           })
       end
@@ -3706,7 +3720,8 @@ defmodule Arbiter.MCP.ToolsTest do
           task_id: task.id,
           repo: "arbiter",
           workspace_id: ctx.ws.id,
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           started_at: DateTime.utc_now(),
           provider: "codex",
           provider_fallback: decision["fallback"],
@@ -3793,7 +3808,8 @@ defmodule Arbiter.MCP.ToolsTest do
           task_id: task.id,
           repo: "arbiter",
           workspace_id: ctx.ws.id,
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           started_at: DateTime.utc_now(),
           completed_at: DateTime.utc_now()
         })
@@ -3821,7 +3837,8 @@ defmodule Arbiter.MCP.ToolsTest do
           task_id: task.id,
           repo: "arbiter",
           workspace_id: ctx.ws.id,
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           started_at: DateTime.utc_now(),
           completed_at: DateTime.utc_now()
         })
@@ -3858,7 +3875,8 @@ defmodule Arbiter.MCP.ToolsTest do
           task_id: task.id,
           repo: "arbiter",
           workspace_id: ctx.ws.id,
-          status: :failed,
+          state: :finished,
+          outcome: :failed,
           started_at: older,
           completed_at: older
         })
@@ -3868,7 +3886,8 @@ defmodule Arbiter.MCP.ToolsTest do
           task_id: task.id,
           repo: "arbiter",
           workspace_id: ctx.ws.id,
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           started_at: newer,
           completed_at: newer
         })
@@ -3895,7 +3914,8 @@ defmodule Arbiter.MCP.ToolsTest do
           task_id: foreign.id,
           repo: "arbiter",
           workspace_id: other_ws.id,
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           started_at: DateTime.utc_now()
         })
 
@@ -3912,8 +3932,9 @@ defmodule Arbiter.MCP.ToolsTest do
           task_id: review_id,
           repo: "arbiter",
           workspace_id: ctx.ws.id,
-          worker_type: :review,
-          status: :completed,
+          kind: :review,
+          state: :finished,
+          outcome: :succeeded,
           started_at: DateTime.utc_now()
         })
 
@@ -3938,7 +3959,8 @@ defmodule Arbiter.MCP.ToolsTest do
           task_id: task.id,
           repo: "arbiter",
           workspace_id: ctx.ws.id,
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           started_at: DateTime.utc_now(),
           completed_at: DateTime.utc_now()
         })
@@ -3970,7 +3992,8 @@ defmodule Arbiter.MCP.ToolsTest do
           task_id: task.id,
           repo: "arbiter",
           workspace_id: ctx.ws.id,
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           started_at: DateTime.utc_now(),
           completed_at: DateTime.utc_now()
         })
@@ -4007,7 +4030,8 @@ defmodule Arbiter.MCP.ToolsTest do
           task_id: task.id,
           repo: "arbiter",
           workspace_id: ctx.ws.id,
-          status: :failed,
+          state: :finished,
+          outcome: :failed,
           started_at: older,
           completed_at: older
         })
@@ -4017,7 +4041,8 @@ defmodule Arbiter.MCP.ToolsTest do
           task_id: task.id,
           repo: "arbiter",
           workspace_id: ctx.ws.id,
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           started_at: newer,
           completed_at: newer
         })
@@ -4042,8 +4067,9 @@ defmodule Arbiter.MCP.ToolsTest do
           task_id: task.id,
           repo: "arbiter",
           workspace_id: ctx.ws.id,
-          worker_type: :main,
-          status: :completed,
+          kind: :implement,
+          state: :finished,
+          outcome: :succeeded,
           started_at: DateTime.utc_now()
         })
 
@@ -4052,8 +4078,9 @@ defmodule Arbiter.MCP.ToolsTest do
           task_id: review_id,
           repo: "arbiter",
           workspace_id: ctx.ws.id,
-          worker_type: :review,
-          status: :completed,
+          kind: :review,
+          state: :finished,
+          outcome: :succeeded,
           started_at: DateTime.utc_now()
         })
 
@@ -4081,8 +4108,9 @@ defmodule Arbiter.MCP.ToolsTest do
           task_id: task.id,
           repo: "arbiter",
           workspace_id: ctx.ws.id,
-          worker_type: :main,
-          status: :completed,
+          kind: :implement,
+          state: :finished,
+          outcome: :succeeded,
           model: "sonnet",
           started_at: DateTime.add(DateTime.utc_now(), -30, :second)
         })
@@ -4092,8 +4120,9 @@ defmodule Arbiter.MCP.ToolsTest do
           task_id: task.id <> "#review",
           repo: "arbiter",
           workspace_id: ctx.ws.id,
-          worker_type: :review,
-          status: :completed,
+          kind: :review,
+          state: :finished,
+          outcome: :succeeded,
           model: "opus",
           started_at: DateTime.add(DateTime.utc_now(), -20, :second)
         })
@@ -4103,8 +4132,9 @@ defmodule Arbiter.MCP.ToolsTest do
           task_id: task.id <> "#review#t2",
           repo: "arbiter",
           workspace_id: ctx.ws.id,
-          worker_type: :review,
-          status: :failed,
+          kind: :review,
+          state: :finished,
+          outcome: :failed,
           started_at: DateTime.add(DateTime.utc_now(), -10, :second)
         })
 
@@ -4115,7 +4145,8 @@ defmodule Arbiter.MCP.ToolsTest do
           task_id: unrelated.id,
           repo: "arbiter",
           workspace_id: ctx.ws.id,
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           started_at: DateTime.utc_now()
         })
 
@@ -4133,10 +4164,13 @@ defmodule Arbiter.MCP.ToolsTest do
       review_entry = Enum.find(runs, &(&1.run_id == review_run.id))
       assert review_entry.transcript_exists == true
       assert review_entry.line_count == 2
-      assert review_entry.worker_type == "review"
+      assert review_entry.kind == "review"
+      assert review_entry.state == "finished"
+      assert review_entry.outcome == "succeeded"
       assert review_entry.task_id == task.id <> "#review"
 
       author_entry = Enum.find(runs, &(&1.run_id == author_run.id))
+      assert author_entry.kind == "implement"
       assert author_entry.transcript_exists == false
       assert author_entry.line_count == 0
     end
@@ -4159,7 +4193,8 @@ defmodule Arbiter.MCP.ToolsTest do
           task_id: ctx.task.id,
           repo: "arbiter",
           workspace_id: ctx.ws.id,
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           session_id: "sess-captured",
           started_at: base
         })
@@ -4174,7 +4209,8 @@ defmodule Arbiter.MCP.ToolsTest do
           task_id: ctx.task.id,
           repo: "arbiter",
           workspace_id: ctx.ws.id,
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           session_id: "sess-missing",
           started_at: DateTime.add(base, 60, :second)
         })
@@ -4184,7 +4220,8 @@ defmodule Arbiter.MCP.ToolsTest do
           task_id: ctx.task.id,
           repo: "arbiter",
           workspace_id: ctx.ws.id,
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           started_at: DateTime.add(base, 120, :second)
         })
 
@@ -4193,7 +4230,8 @@ defmodule Arbiter.MCP.ToolsTest do
           task_id: ctx.task.id,
           repo: "arbiter",
           workspace_id: ctx.ws.id,
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           session_id: "sess-pre-corpus",
           started_at: ~U[2026-06-10 00:00:00Z]
         })
@@ -4220,7 +4258,8 @@ defmodule Arbiter.MCP.ToolsTest do
           task_id: ctx.task.id,
           repo: "arbiter",
           workspace_id: ctx.ws.id,
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           session_id: "sess-both",
           config_dir: "/tmp/cfg",
           provider: "claude",
@@ -4243,7 +4282,8 @@ defmodule Arbiter.MCP.ToolsTest do
           task_id: ctx.task.id,
           repo: "arbiter",
           workspace_id: ctx.ws.id,
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           session_id: "sess-log-only",
           config_dir: "/tmp/cfg",
           provider: "claude",
@@ -4261,7 +4301,8 @@ defmodule Arbiter.MCP.ToolsTest do
           task_id: ctx.task.id,
           repo: "arbiter",
           workspace_id: ctx.ws.id,
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           session_id: "sess-other",
           started_at: DateTime.add(base, 120, :second)
         })
@@ -4274,7 +4315,8 @@ defmodule Arbiter.MCP.ToolsTest do
           task_id: ctx.task.id,
           repo: "arbiter",
           workspace_id: ctx.ws.id,
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           session_id: "sess-gemini-ok",
           config_dir: "/tmp/agy-home",
           provider: "gemini",
@@ -4293,7 +4335,8 @@ defmodule Arbiter.MCP.ToolsTest do
           task_id: ctx.task.id,
           repo: "arbiter",
           workspace_id: ctx.ws.id,
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           session_id: "sess-gemini-missing",
           config_dir: "/tmp/agy-home",
           provider: "gemini",
@@ -4914,7 +4957,10 @@ defmodule Arbiter.MCP.ToolsTest do
 
       entry = Enum.find(workers, &(&1.task_id == task.id))
       assert is_binary(entry.repo)
-      assert is_binary(entry.status)
+      assert entry.run_task_id == task.id
+      assert entry.kind == "implement"
+      assert entry.state == "starting"
+      assert entry.outcome == nil
       assert entry.repo == "test/repo"
     end
 
@@ -4983,16 +5029,18 @@ defmodule Arbiter.MCP.ToolsTest do
       assert entry.model == "gemini-2.5-pro"
     end
 
-    test "labels a subordinate pass so two rows for one task_id are legible (bd-8lq2g7)", ctx do
-      {:ok, task} = Ash.create(Issue, %{title: "two rows one task", workspace_id: ctx.ws.id})
+    # bd-8lq2g7 + bd-1uu19b: a subordinate pass registered under the ticket's
+    # id stays legible. worker_list is one entry per ticket — its current run,
+    # the newest unfinished one (the pass) — and worker_show lists both runs,
+    # each labelled with its kind.
+    test "labels a subordinate pass as the ticket's current run (bd-8lq2g7)", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "two runs one task", workspace_id: ctx.ws.id})
 
       {:ok, primary} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ctx.ws.id)
 
       # bd-8tjcms: `Worker.start/1` refuses a second *active* worker for one
-      # task. The two-rows-per-task_id shape this test pins is still reachable
-      # in production (a fix pass alongside a primary parked at
-      # `:awaiting_review`); the primary here is `:idle`, so opt out explicitly
-      # rather than staging the full park.
+      # task. The primary here is only `:starting`, so opt out explicitly
+      # rather than staging a full park.
       {:ok, fixpass} =
         Worker.start(
           task_id: task.id,
@@ -5009,14 +5057,17 @@ defmodule Arbiter.MCP.ToolsTest do
       end)
 
       assert {:ok, %{workers: workers}} = Tools.worker_list(ctx.coordinator, %{})
-      rows = Enum.filter(workers, &(&1.task_id == task.id))
-      assert length(rows) == 2
+      assert [row] = Enum.filter(workers, &(&1.task_id == task.id))
 
-      primary_row = Enum.find(rows, &(&1.registry_key == task.id))
-      fixpass_row = Enum.find(rows, &(&1.registry_key == task.id <> ":fixpass"))
+      assert row.registry_key == task.id <> ":fixpass"
+      assert row.role == "fix_pass"
+      assert row.kind == "fix_pass"
 
-      assert primary_row.role == nil
-      assert fixpass_row.role == "fix_pass"
+      assert {:ok, snap} = Tools.worker_show(ctx.coordinator, %{"task_id" => task.id})
+      assert snap.kind == "fix_pass"
+
+      assert snap.runs |> Enum.map(& &1.kind) |> Enum.sort() == ["fix_pass", "implement"]
+      assert [%{kind: "fix_pass"}] = Enum.filter(snap.runs, & &1.current)
     end
   end
 

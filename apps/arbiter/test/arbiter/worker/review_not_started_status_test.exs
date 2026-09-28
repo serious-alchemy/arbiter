@@ -5,21 +5,24 @@ defmodule Arbiter.Worker.ReviewNotStartedStatusTest do
   #
   # vs-ehjarz run 39c6b497 printed `arb done`, reported `session success`, pushed
   # its branch and opened MR !183 — and was then written to `worker_runs` as
-  # `status: :failed, failure_reason: "{:awaiting_review_timeout, 30}"` because
-  # no reviewer picked it up inside the Watchdog's poll ceiling. "The
-  # implementation run failed" is the wrong description of that.
+  # a plain failure because no reviewer picked it up inside the Watchdog's
+  # poll ceiling. "The implementation run failed" is the wrong description of
+  # that.
   #
-  # The durable run row now carries its own status, `:review_not_started`. The
-  # worker's in-memory FSM status stays `:failed` on purpose: it is the terminal
-  # state `Dispatch.resume/2` requires before it will re-attach, and the
-  # Watchdog's bounded auto-resume (bd-8eheb6) depends on that.
+  # Since the one run vocabulary (bd-1uu19b) a review that never started is a
+  # run finished with outcome `:failed` whose cause is its `failure_reason`
+  # (`{:awaiting_review_timeout, N}`) — there is no separate
+  # `:review_not_started` run status any more. The worker finishes `:failed`
+  # on purpose: it is the terminal state `Dispatch.resume/2` requires before it
+  # will re-attach, and the Watchdog's bounded auto-resume (bd-8eheb6) depends
+  # on that.
   #
   # async: false — the Worker registry and DynamicSupervisor are global.
   use Arbiter.DataCase, async: false
 
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Worker
-  alias Arbiter.Workers.Run
+  alias Arbiter.Workers.{Run, RunState}
 
   require Ash.Query
 
@@ -43,18 +46,20 @@ defmodule Arbiter.Worker.ReviewNotStartedStatusTest do
     |> List.first()
   end
 
-  test "an awaiting_review_timeout is recorded as :review_not_started", %{ws: ws, task: task} do
+  test "an awaiting_review_timeout finishes the run :failed with the timeout as its cause",
+       %{ws: ws, task: task} do
     pid = start_worker!(ws, task)
 
     :ok = Worker.fail(pid, {:awaiting_review_timeout, 30})
 
     run = run_for(task.id)
-    assert run.status == :review_not_started
+    assert run.state == :finished
+    assert run.outcome == :failed
     assert run.failure_reason == "{:awaiting_review_timeout, 30}"
 
-    # The FSM status is untouched — Dispatch.resume/2 and the Watchdog's
-    # auto-resume both require a terminal worker.
-    assert Worker.state(pid).status == :failed
+    # The worker is terminal — Dispatch.resume/2 and the Watchdog's
+    # auto-resume both require a finished worker.
+    assert %{state: :finished, outcome: :failed} = Worker.state(pid)
   end
 
   test "any other failure is still recorded as :failed", %{ws: ws, task: task} do
@@ -62,10 +67,14 @@ defmodule Arbiter.Worker.ReviewNotStartedStatusTest do
 
     :ok = Worker.fail(pid, {:claude_exit, 1})
 
-    assert run_for(task.id).status == :failed
+    run = run_for(task.id)
+    assert run.state == :finished
+    assert run.outcome == :failed
+    assert run.failure_reason == "{:claude_exit, 1}"
   end
 
-  test ":review_not_started is a valid run status", %{ws: _ws, task: _task} do
-    assert :review_not_started in Run.statuses()
+  test "a review that never started is not its own run outcome", %{ws: _ws, task: _task} do
+    refute :review_not_started in RunState.outcomes()
+    assert :failed in RunState.outcomes()
   end
 end

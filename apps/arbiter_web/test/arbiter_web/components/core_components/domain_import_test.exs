@@ -19,7 +19,7 @@ defmodule ArbiterWeb.CoreComponents.DomainImportTest do
       ~H"""
       <.stat_card label="Open issues" value={84} tone="live" />
       <.task_card id="bd-1" title="A card" accent="live" />
-      <.run_row role="impl" worker="w-11" status="running" />
+      <.run_row role="impl" worker="w-11" status="working" />
       <.log_stream id="log" lines={[%{time: "t", role: "agent", text: "x"}]} />
       """
     end

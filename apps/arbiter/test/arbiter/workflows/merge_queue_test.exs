@@ -496,7 +496,8 @@ defmodule Arbiter.Workflows.MergeQueueTest do
           task_id: task.id,
           repo: repo,
           workspace_id: task.workspace_id,
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           started_at: DateTime.utc_now()
         })
 

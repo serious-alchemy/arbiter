@@ -69,7 +69,7 @@ defmodule ArbiterCli.SchedulerState do
     [
       String.pad_trailing(to_string(entry["kind"] || "?"), 18),
       String.pad_trailing(entry["task_id"] || "-", 16),
-      String.pad_trailing(entry["status"] || "", 12),
+      String.pad_trailing(entry["state"] || "", 12),
       age(entry["started_at"], now),
       suffix(entry)
     ]

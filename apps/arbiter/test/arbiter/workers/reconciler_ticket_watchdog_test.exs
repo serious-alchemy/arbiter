@@ -87,8 +87,9 @@ defmodule Arbiter.Workers.ReconcilerTicketWatchdogTest do
         task_id: ticket.id,
         repo: "rt/repo",
         workspace_id: ws.id,
-        worker_type: :fix_pass,
-        status: :interrupted,
+        kind: :fix_pass,
+        state: :finished,
+        outcome: :interrupted,
         failure_reason: "server shutdown",
         started_at: DateTime.utc_now()
       })

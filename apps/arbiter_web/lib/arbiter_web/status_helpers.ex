@@ -6,11 +6,48 @@ defmodule ArbiterWeb.StatusHelpers do
   to eliminate duplication and ensure consistent status/badge rendering across the app.
   """
 
-  # Ordered worker lifecycle for the step progress stepper. :failed is handled
+  # Ordered run lifecycle for the step progress stepper (bd-1uu19b: the one
+  # run vocabulary, `Arbiter.Workers.RunState`). A failed run is handled
   # separately in templates (it doesn't belong on the happy-path track).
-  @worker_flow [:idle, :running, :awaiting, :completed]
+  @worker_flow [:starting, :working, :waiting, :finished]
 
   def worker_flow, do: @worker_flow
+
+  # ---- Run state (bd-1uu19b) ----
+
+  @doc """
+  The one atom a badge keys on for a run — a worker snapshot or an
+  `Arbiter.Workers.Run` row: its `outcome` once `:finished`, its `state`
+  before that. `nil` for anything without a `:state`.
+  """
+  def run_status(%{state: :finished} = run), do: Map.get(run, :outcome) || :finished
+  def run_status(%{state: state}) when is_atom(state), do: state
+  def run_status(_), do: nil
+
+  @doc """
+  A human label for a run — a worker snapshot or a `Run` row. Reads
+  `waiting_on` to say what a waiting run is waiting for, and a starting
+  snapshot's `meta.resume` to tell a resume from a fresh dispatch.
+  """
+  def run_label(%{state: :starting, meta: %{resume: true}}), do: "Resuming"
+  def run_label(%{state: :waiting, waiting_on: :question}), do: "Waiting on you"
+  def run_label(%{state: :waiting, waiting_on: :review_gate}), do: "In review"
+
+  def run_label(run) do
+    case run_status(run) do
+      nil -> "Unknown"
+      status -> worker_status_label(status)
+    end
+  end
+
+  @doc """
+  The roster tag for a run row: its kind, except that an `:implement` run the
+  ReviewGate dispatched for a revise round (`role` "impl") is `"impl"`, apart
+  from the authoring run.
+  """
+  def run_role(%{kind: :implement, role: "impl"}), do: "impl"
+  def run_role(%{kind: kind}) when is_atom(kind) and not is_nil(kind), do: Atom.to_string(kind)
+  def run_role(_), do: "implement"
 
   # ---- Status badges ----
 
@@ -22,33 +59,38 @@ defmodule ArbiterWeb.StatusHelpers do
   def difficulty_badge_class(4), do: "badge-error"
   def difficulty_badge_class(_), do: "badge-ghost"
 
-  def worker_status_class(:idle), do: "badge-ghost"
-  def worker_status_class(:resuming), do: "badge-info"
-  def worker_status_class(:running), do: "badge-info"
-  def worker_status_class(:awaiting), do: "badge-warning"
-  def worker_status_class(:awaiting_review_gate), do: "badge-warning"
-  def worker_status_class(:awaiting_review), do: "badge-warning"
-  def worker_status_class(:completed), do: "badge-success"
+  # Keyed on `run_status/1`'s atom: a live run's state, a finished run's
+  # outcome.
+  def worker_status_class(%{} = run), do: worker_status_class(run_status(run))
+  def worker_status_class(:starting), do: "badge-ghost"
+  def worker_status_class(:working), do: "badge-info"
+  def worker_status_class(:waiting), do: "badge-warning"
+  def worker_status_class(:succeeded), do: "badge-success"
   def worker_status_class(:failed), do: "badge-error"
+  def worker_status_class(:interrupted), do: "badge-warning"
+  def worker_status_class(:handed_off), do: "badge-ghost"
+  def worker_status_class(:finished), do: "badge-ghost"
   def worker_status_class(_), do: ""
 
-  def worker_status_label(:idle), do: "Idle"
-  def worker_status_label(:resuming), do: "Resuming"
-  def worker_status_label(:running), do: "Running"
-  def worker_status_label(:awaiting), do: "Awaiting"
-  def worker_status_label(:awaiting_review_gate), do: "In review_gate"
-  def worker_status_label(:awaiting_review), do: "Awaiting review"
-  def worker_status_label(:completed), do: "Completed"
+  def worker_status_label(:starting), do: "Starting"
+  def worker_status_label(:working), do: "Working"
+  def worker_status_label(:waiting), do: "Waiting"
+  def worker_status_label(:finished), do: "Finished"
+  def worker_status_label(:succeeded), do: "Succeeded"
   def worker_status_label(:failed), do: "Failed"
+  def worker_status_label(:interrupted), do: "Interrupted"
+  def worker_status_label(:handed_off), do: "Handed off"
 
   def worker_status_label(other) when is_atom(other),
     do: other |> Atom.to_string() |> String.capitalize()
 
   def worker_status_label(other), do: to_string(other)
 
-  def run_status_class(:completed), do: "badge-success"
+  def run_status_class(%{} = run), do: run_status_class(run_status(run))
+  def run_status_class(:succeeded), do: "badge-success"
   def run_status_class(:failed), do: "badge-error"
-  def run_status_class(:running), do: "badge-info"
+  def run_status_class(:working), do: "badge-info"
+  def run_status_class(:waiting), do: "badge-warning"
   def run_status_class(_), do: "badge-ghost"
 
   def kind_badge_class(:notification), do: "badge-info"
@@ -60,9 +102,9 @@ defmodule ArbiterWeb.StatusHelpers do
   def kind_badge_class(:info), do: "badge-info"
   def kind_badge_class(_), do: "badge-ghost"
 
-  def status_dot_class(:running), do: "bg-info"
-  def status_dot_class(:awaiting), do: "bg-warning"
-  def status_dot_class(:completed), do: "bg-success"
+  def status_dot_class(:working), do: "bg-info"
+  def status_dot_class(:waiting), do: "bg-warning"
+  def status_dot_class(:succeeded), do: "bg-success"
   def status_dot_class(:failed), do: "bg-error"
   def status_dot_class(_), do: "bg-base-content/30"
 
@@ -95,8 +137,8 @@ defmodule ArbiterWeb.StatusHelpers do
   def flow_step_marker(:done), do: "✓"
   def flow_step_marker(_), do: nil
 
-  def flow_step_label(:idle), do: "Idle"
-  def flow_step_label(:running), do: "Running"
-  def flow_step_label(:awaiting), do: "Awaiting review"
-  def flow_step_label(:completed), do: "Completed"
+  def flow_step_label(:starting), do: "Starting"
+  def flow_step_label(:working), do: "Working"
+  def flow_step_label(:waiting), do: "Waiting"
+  def flow_step_label(:finished), do: "Finished"
 end

@@ -153,13 +153,13 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
     end
   end
 
-  describe "awaiting_review/1" do
+  describe "waiting/1 (bd-1uu19b)" do
     test "names the MR ref when present" do
       ws = uniq("ws")
       task_id = uniq("bd")
 
       assert :ok =
-               CoordinatorNotifier.awaiting_review(%{
+               CoordinatorNotifier.waiting(%{
                  task_id: task_id,
                  workspace_id: ws,
                  started_at: started_ago(10),
@@ -174,7 +174,7 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
       task_id = uniq("bd")
 
       assert :ok =
-               CoordinatorNotifier.awaiting_review(%{
+               CoordinatorNotifier.waiting(%{
                  task_id: task_id,
                  workspace_id: ws,
                  started_at: started_ago(10),

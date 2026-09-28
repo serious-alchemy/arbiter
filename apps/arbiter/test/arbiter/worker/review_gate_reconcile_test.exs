@@ -144,7 +144,7 @@ defmodule Arbiter.Worker.ReviewGateReconcileTest do
     task
   end
 
-  # An author parked at :awaiting_review_gate with `review_spawn: false`, so the
+  # An author waiting on the review gate with `review_spawn: false`, so the
   # rounds' verdicts can be delivered directly (exactly as the gate would).
   defp start_parked_author(task, repo, extra_meta \\ %{}) do
     branch = "feature/rev"
@@ -174,7 +174,7 @@ defmodule Arbiter.Worker.ReviewGateReconcileTest do
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
     :ok = Worker.advance(pid, :claude)
     send(pid, {:__claude_session_done__, "arb done"})
-    wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(pid)) end)
+    wait_until(fn -> match?(%{state: :waiting, waiting_on: :review_gate}, Worker.state(pid)) end)
     {pid, branch}
   end
 
@@ -183,7 +183,7 @@ defmodule Arbiter.Worker.ReviewGateReconcileTest do
   defp reject_round_one(pid) do
     findings = "VERDICT: REQUEST_CHANGES\n- [high] feature.txt:1 Enum.max_by/2 uses term order"
     :ok = Worker.review_gate_verdict(pid, {:request_changes, findings})
-    wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end)
+    wait_until(fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end)
     assert Worker.state(pid).meta.failure_reason == :review_gate_rejected
     :ok
   end
@@ -227,7 +227,7 @@ defmodule Arbiter.Worker.ReviewGateReconcileTest do
                reloaded.review_gate_state
 
       run = run_for(task.id)
-      assert run.status == :completed
+      assert run.outcome == :succeeded
       assert is_nil(run.failure_reason)
       assert is_nil(run.failure_summary)
 
@@ -240,7 +240,7 @@ defmodule Arbiter.Worker.ReviewGateReconcileTest do
       :ok = reject_round_one(pid)
 
       failed_run = run_for(task.id)
-      assert failed_run.status == :failed
+      assert failed_run.outcome == :failed
       assert failed_run.failure_reason == ":review_gate_rejected"
       assert is_binary(failed_run.failure_summary)
 
@@ -249,7 +249,7 @@ defmodule Arbiter.Worker.ReviewGateReconcileTest do
 
       reconciled = run_for(task.id)
       assert reconciled.id == failed_run.id
-      assert reconciled.status == :completed
+      assert reconciled.outcome == :succeeded
       assert is_nil(reconciled.failure_reason)
       assert is_nil(reconciled.failure_summary)
     end
@@ -282,7 +282,7 @@ defmodule Arbiter.Worker.ReviewGateReconcileTest do
       :ok = reject_round_one(pid)
 
       failed_run = run_for(task.id)
-      assert failed_run.status == :failed
+      assert failed_run.outcome == :failed
       assert failed_run.failure_reason == ":review_gate_rejected"
       assert is_binary(failed_run.failure_summary)
       assert failed_run.completed_at
@@ -297,7 +297,7 @@ defmodule Arbiter.Worker.ReviewGateReconcileTest do
 
       reconciled = run_for(task.id)
       assert reconciled.id == failed_run.id
-      assert reconciled.status == :completed
+      assert reconciled.outcome == :succeeded
       assert reconciled.mr_ref == "!stub"
       assert is_nil(reconciled.failure_reason)
       assert is_nil(reconciled.failure_summary)
@@ -326,7 +326,7 @@ defmodule Arbiter.Worker.ReviewGateReconcileTest do
       {pid, _branch} = start_parked_author(task, repo)
 
       :ok = Worker.review_gate_verdict(pid, {:no_verdict, "reviewer crashed"})
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end)
+      wait_until(fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end)
       assert Worker.state(pid).meta.failure_reason == :review_gate_inconclusive
 
       :ok = Worker.review_gate_verdict(pid, {:approve, "VERDICT: APPROVE\nlgtm"})
@@ -342,7 +342,7 @@ defmodule Arbiter.Worker.ReviewGateReconcileTest do
       {pid, _branch} = start_parked_author(task, repo)
       :ok = reject_round_one(pid)
 
-      assert {:error, {:invalid_transition, :failed, :review_gate_verdict}} =
+      assert {:error, {:invalid_transition, :finished, :review_gate_verdict}} =
                Worker.review_gate_verdict(pid, {:request_changes, "VERDICT: REQUEST_CHANGES\nx"})
 
       assert Worker.state(pid).meta.failure_reason == :review_gate_rejected
@@ -366,9 +366,9 @@ defmodule Arbiter.Worker.ReviewGateReconcileTest do
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
       :ok = Worker.advance(pid, :claude)
       :ok = Worker.fail(pid, :merge_conflict)
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end)
+      wait_until(fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end)
 
-      assert {:error, {:invalid_transition, :failed, :review_gate_verdict}} =
+      assert {:error, {:invalid_transition, :finished, :review_gate_verdict}} =
                Worker.review_gate_verdict(pid, {:approve, "VERDICT: APPROVE\nlgtm"})
 
       assert Worker.state(pid).meta.failure_reason == :merge_conflict

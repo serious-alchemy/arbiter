@@ -13,15 +13,16 @@ defmodule Arbiter.Tasks.SlotGate do
 
   ## A slot is a live agent, not a record (bd-aw2cyt)
 
-  Before this module, a slot meant "an author worker record in one of
-  `#{inspect([:idle, :resuming, :running, :awaiting, :awaiting_review_gate])}`".
+  Before this module, a slot meant "an author worker record whose run is
+  still live" (`#{inspect([:starting, :working, :waiting])}` in today's run
+  vocabulary, `Arbiter.Workers.RunState`).
   That is not what the operator's cap is for. A worker record outlives its
   agent by a long way: once the main `claude --print` process exits, the
   record stays alive to shepherd the ReviewGate, the implementer rounds, CI
   and the merge — spending nothing, burning no quota, and still holding a slot
-  that blocked the next dispatch. `:awaiting` was the sharpest case: a worker
-  that asked a human a question and has no agent at all held a slot until
-  somebody answered.
+  that blocked the next dispatch. A run `:waiting` on a question was the
+  sharpest case: a worker that asked a human a question and has no agent at
+  all held a slot until somebody answered.
 
   So a slot is occupied by a **live agent subprocess**, whatever role it
   belongs to: the main author session, a ReviewGate reviewer, an implementer
@@ -48,7 +49,7 @@ defmodule Arbiter.Tasks.SlotGate do
   `Arbiter.Worker.agent_session_live?/1`), so the predicate stays pure and the
   board's `derive/1` can be tested with plain maps. A snapshot that carries no
   `:agent_live` key at all is *unknown*, not "not live", and degrades to the
-  old status rule — an unreadable liveness must never read as a free slot,
+  old run-state rule — an unreadable liveness must never read as a free slot,
   which would over-dispatch.
 
   ## `conductor.slot_basis`
@@ -102,10 +103,11 @@ defmodule Arbiter.Tasks.SlotGate do
 
   @bases [:agents, :issues]
 
-  # Worker statuses that held a slot under the `:issues` basis — an author
-  # record with a workflow still in its hands. A run that opened its PR has
-  # ended (bd-741sid); the PR holds no subprocess.
-  @slot_statuses [:idle, :resuming, :running, :awaiting, :awaiting_review_gate]
+  # Run states that held a slot under the `:issues` basis — an author record
+  # with a workflow still in its hands, including one waiting on the review
+  # gate. A run that opened its PR has finished (bd-741sid); the PR holds no
+  # subprocess.
+  @slot_states [:starting, :working, :waiting]
 
   # A reviewer / implementer runs under its *own* synthetic task id on behalf
   # of an author, so under the `:issues` basis it folds into the author's card
@@ -115,10 +117,10 @@ defmodule Arbiter.Tasks.SlotGate do
   @gate_roles [:reviewer, :implementer]
 
   @doc """
-  The statuses that occupy a slot under the `:issues` basis.
+  The run states that occupy a slot under the `:issues` basis.
   """
-  @spec slot_statuses() :: [atom()]
-  def slot_statuses, do: @slot_statuses
+  @spec slot_states() :: [atom()]
+  def slot_states, do: @slot_states
 
   @doc """
   How slots are counted on this install: `:agents` (default) or `:issues`.
@@ -257,7 +259,7 @@ defmodule Arbiter.Tasks.SlotGate do
   end
 
   defp record_slot?(worker) do
-    Map.get(worker, :status) in @slot_statuses and role_of(worker) not in @gate_roles
+    Map.get(worker, :state) in @slot_states and role_of(worker) not in @gate_roles
   end
 
   defp role_of(worker) do

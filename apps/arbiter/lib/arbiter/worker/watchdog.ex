@@ -565,24 +565,17 @@ defmodule Arbiter.Worker.Watchdog do
   def retry_whereis(task_id) when is_binary(task_id),
     do: PRegistry.whereis(@retry_registry_prefix <> task_id)
 
-  # Worker statuses that mean a live worker is still doing something with the
-  # task. Mirrors `Arbiter.Workflows.MergedPRFinalizer`'s list: `:completed` /
-  # `:failed` workers linger registered until the task closes, and own nothing.
-  @active_worker_statuses [
-    :idle,
-    :resuming,
-    :running,
-    :awaiting,
-    :awaiting_review_gate,
-    :awaiting_review
-  ]
+  # Run states that mean a live worker is still doing something with the
+  # task. Mirrors `Arbiter.Workflows.MergedPRFinalizer`'s list: a `:finished`
+  # run lingers registered until the task closes, and owns nothing.
+  @active_run_states [:starting, :working, :waiting]
 
   @doc """
   Who, if anyone, still owns the merge for `task_id` in this node
   (bd-a370ak / #2002):
 
     * `:watchdog` — a live Watchdog is registered for the task;
-    * `{:worker, status}` — no Watchdog, but a run is still working the
+    * `{:worker, state}` — no Watchdog, but a run is still working the
       ticket. Since bd-741sid that includes a fix pass or conflict resolver,
       which registers under the ticket id and is about to push to the branch
       — the v0.1.72 incident was a retry started beside a live pass, giving
@@ -596,7 +589,7 @@ defmodule Arbiter.Worker.Watchdog do
   def live_merge_owner(task_id) when is_binary(task_id) do
     cond do
       is_pid(whereis(task_id)) -> :watchdog
-      (status = worker_status(task_id)) in @active_worker_statuses -> {:worker, status}
+      (run_state = worker_run_state(task_id)) in @active_run_states -> {:worker, run_state}
       (sub = active_subordinate(task_id)) != nil -> {:subordinate, sub.registry_key}
       true -> nil
     end
@@ -610,10 +603,10 @@ defmodule Arbiter.Worker.Watchdog do
     :exit, _ -> nil
   end
 
-  defp worker_status(task_id) do
+  defp worker_run_state(task_id) do
     case Worker.whereis(task_id) do
       nil -> nil
-      pid -> safe_worker_status(pid)
+      pid -> safe_worker_run_state(pid)
     end
   rescue
     _ -> nil
@@ -3147,8 +3140,7 @@ defmodule Arbiter.Worker.Watchdog do
   # The ticket's run, when it is a live pass of `role`.
   defp live_pass(task_id, role) do
     with pid when is_pid(pid) <- Worker.whereis(task_id),
-         %{status: status} = snapshot when status not in [:failed, :completed] <-
-           safe_snapshot(pid),
+         %{state: run_state} = snapshot when run_state != :finished <- safe_snapshot(pid),
          ^role <- snapshot_role(snapshot) do
       pid
     else
@@ -3446,8 +3438,8 @@ defmodule Arbiter.Worker.Watchdog do
 
   # A resolver worker is in flight. The resolver is an `Arbiter.Worker`
   # GenServer that does NOT exit when its rebase worker finishes — it lingers
-  # in a terminal status (:completed/:failed) until task :close — so we drive
-  # completion off the worker's status on each poll rather than a process
+  # `:finished` until task :close — so we drive completion off the worker's
+  # run state on each poll rather than a process
   # `:DOWN` that only fires on an abnormal crash (#354 review). While the
   # resolver is still live we wait; once its pass has finished we tear it down
   # (freeing its `:conflict` registry slot) and re-evaluate — dispatching the
@@ -3574,15 +3566,15 @@ defmodule Arbiter.Worker.Watchdog do
   end
 
   # Has the in-flight resolver worker finished its rebase pass? The resolver is
-  # an `Arbiter.Worker` that lingers in a terminal status (:completed/:failed)
-  # after its worker exits — it is only torn down on task :close — so "finished"
-  # means the worker reports a terminal status (or its process is already gone).
+  # an `Arbiter.Worker` that lingers `:finished` after its worker exits — it is
+  # only torn down on task :close — so "finished" means the worker reports a
+  # `:finished` run (or its process is already gone).
   # This replaces the `:DOWN` monitor, which never fired on a normal completion
   # and left `conflict_resolving` latched true forever (#354 review).
   defp resolver_finished?(%{conflict_resolver_pid: pid}) when is_pid(pid) do
     if Process.alive?(pid) do
       case safe_snapshot(pid) do
-        %{status: status} -> status in [:completed, :failed]
+        %{state: run_state} -> run_state == :finished
         _ -> true
       end
     else
@@ -4062,14 +4054,14 @@ defmodule Arbiter.Worker.Watchdog do
   # finished inside the bound the next retry would succeed and mint a second
   # agent session on work that is already done. So stop, quietly.
   #
-  # `{:worker_active, status}` is `Dispatch.resume/2`'s `ensure_not_active/1`
+  # `{:worker_active, run}` is `Dispatch.resume/2`'s `ensure_not_active/1`
   # guard (it only ever resolves the exact task key). The `:task_worker_live`
   # clause is the same fact arriving through `Worker.start/1`'s family check,
   # which reports the primary's own key when the primary is what is live.
   defp main_worker_live?(state, {:worker_start_failed, inner}),
     do: main_worker_live?(state, inner)
 
-  defp main_worker_live?(_state, {:worker_active, _status}), do: true
+  defp main_worker_live?(_state, {:worker_active, _run}), do: true
 
   defp main_worker_live?(%{task_id: task_id}, {:task_worker_live, %{registry_key: task_id}}),
     do: true
@@ -4093,7 +4085,8 @@ defmodule Arbiter.Worker.Watchdog do
   defp resume_blocker({:worker_start_failed, inner}), do: resume_blocker(inner)
 
   defp resume_blocker({:task_worker_live, %{registry_key: key}}) when is_binary(key), do: key
-  defp resume_blocker({:worker_active, status}), do: status
+  defp resume_blocker({:worker_active, %{state: run_state}}), do: run_state
+  defp resume_blocker({:worker_active, run_state}), do: run_state
   defp resume_blocker(other), do: other
 
   defp deferral_suffix(%{resume_deferrals: 0}), do: ""
@@ -4283,9 +4276,9 @@ defmodule Arbiter.Worker.Watchdog do
     }
   end
 
-  defp safe_worker_status(pid) do
+  defp safe_worker_run_state(pid) do
     case Worker.state(pid) do
-      %{status: status} -> status
+      %{state: run_state} -> run_state
       _ -> nil
     end
   rescue

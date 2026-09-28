@@ -74,7 +74,7 @@ defmodule Arbiter.Worker.DriverTest do
       assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
 
       worker_snap = Worker.state(worker_pid)
-      assert worker_snap.status == :failed
+      assert worker_snap.outcome == :failed
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
       assert reloaded.status == :in_progress
@@ -104,7 +104,7 @@ defmodule Arbiter.Worker.DriverTest do
       assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
 
       worker_snap = Worker.state(worker_pid)
-      assert worker_snap.status == :failed
+      assert worker_snap.outcome == :failed
       assert match?({:driver_timeout, 1}, worker_snap.meta[:failure_reason])
     end
   end
@@ -142,7 +142,7 @@ defmodule Arbiter.Worker.DriverTest do
       assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
 
       worker_snap = Worker.state(worker_pid)
-      assert worker_snap.status == :failed
+      assert worker_snap.outcome == :failed
       assert worker_snap.meta[:failure_reason] == :machine_died
     end
   end
@@ -183,7 +183,7 @@ defmodule Arbiter.Worker.DriverTest do
         DynamicSupervisor.terminate_child(Arbiter.Workflows.MachineSupervisor, ctx.machine_pid)
 
       assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
-      assert Worker.state(ctx.worker_pid).status == :running
+      assert Worker.state(ctx.worker_pid).state == :working
     end
 
     test "any exit while the node is stopping leaves the worker alone", ctx do
@@ -202,7 +202,7 @@ defmodule Arbiter.Worker.DriverTest do
       Process.exit(ctx.machine_pid, :kill)
 
       assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
-      assert Worker.state(ctx.worker_pid).status == :running
+      assert Worker.state(ctx.worker_pid).state == :working
     end
   end
 
@@ -222,7 +222,7 @@ defmodule Arbiter.Worker.DriverTest do
   end
 
   describe "claude_driven mode" do
-    test "closes the task when the worker transitions to :completed", %{ws: ws} do
+    test "closes the task when the worker's run finishes :succeeded", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "cd-complete", workspace_id: ws.id})
 
       {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "r")
@@ -440,8 +440,9 @@ defmodule Arbiter.Worker.DriverTest do
     # the 30-minute tick budget before the merge, leaving the task stranded at
     # :in_progress. bd-741sid: a run no longer parks on its open PR — opening it
     # ends the run and the ticket's Watchdog takes it — so the parked state is
-    # :awaiting_review_gate, and a run that ends with its PR open is no close.
-    test "does not count ticks while worker is :awaiting_review_gate", %{ws: ws} do
+    # waiting on the review gate, and a run that ends with its PR open is no
+    # close.
+    test "does not count ticks while the worker is waiting on the review gate", %{ws: ws} do
       StubMerger.reset()
 
       {:ok, task} = Ash.create(Issue, %{title: "cd-arg-freeze", workspace_id: ws.id})
@@ -452,8 +453,8 @@ defmodule Arbiter.Worker.DriverTest do
       {:ok, machine_id} = Machine.attach(TestWorkflows.Three, task.id, %{x: "v"})
       {:ok, machine_pid} = Machine.start(machine_id)
 
-      # max_ticks: 2 — would expire after 2 cycles in :running, but should NOT
-      # expire while the worker is parked at :awaiting_review_gate.
+      # max_ticks: 2 — would expire after 2 cycles while :working, but should
+      # NOT expire while the worker is waiting on the review gate.
       {:ok, driver_pid} =
         Driver.start(
           task_id: task.id,
@@ -465,12 +466,12 @@ defmodule Arbiter.Worker.DriverTest do
           claude_driven: true
         )
 
-      # Let the driver run several cycles while status is :awaiting_review_gate.
+      # Let the driver run several cycles while the run waits on the review gate.
       # With the fix, ticks don't increment here, so max_ticks: 2 won't fire.
       Process.sleep(60)
 
       assert Process.alive?(driver_pid),
-             "driver should still be alive (ticks frozen at :awaiting_review_gate)"
+             "driver should still be alive (ticks frozen while waiting on the review gate)"
 
       # Monitor before triggering completion (bd-9j4znl) — see comment above.
       ref = Process.monitor(driver_pid)
@@ -491,8 +492,8 @@ defmodule Arbiter.Worker.DriverTest do
     end
 
     # bd-d1jp4r: driver must close the task even when max_ticks fires at the
-    # exact moment the worker transitions to :completed (the Watchdog race).
-    test "closes the task at max_ticks if worker is already :completed", %{ws: ws} do
+    # exact moment the worker's run finishes :succeeded (the Watchdog race).
+    test "closes the task at max_ticks if the worker's run already succeeded", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "cd-maxtick-done", workspace_id: ws.id})
 
       {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "r")
@@ -521,19 +522,19 @@ defmodule Arbiter.Worker.DriverTest do
       ref = Process.monitor(driver_pid)
       assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
 
-      # Even though max_ticks was hit, task must be closed because worker was :completed.
+      # Even though max_ticks was hit, task must be closed because the run succeeded.
       {:ok, reloaded} = Ash.get(Issue, task.id)
       assert reloaded.status == :closed
     end
 
     # bd-7b46wd: if the tick budget is exhausted by active worker work and the
     # max_ticks guard fires while the worker has *already handed off* to the
-    # ReviewGate (:awaiting_review_gate), the driver must NOT stop — the gate
-    # drives the worker to terminal. Stopping here was stranding tasks that
-    # were legitimately mid-merge, and the bd-d1jp4r fix only covered the
-    # already-:completed case. bd-741sid: the approved run ends with its PR
+    # ReviewGate (waiting on the review gate), the driver must NOT stop — the
+    # gate drives the worker to finished. Stopping here was stranding tasks
+    # that were legitimately mid-merge, and the bd-d1jp4r fix only covered the
+    # already-succeeded case. bd-741sid: the approved run ends with its PR
     # open, and the ticket's Watchdog closes the ticket when the PR merges.
-    test "keeps waiting at max_ticks while worker is :awaiting_review_gate, then the merge closes the task",
+    test "keeps waiting at max_ticks while the worker waits on the review gate, then the merge closes the task",
          %{ws: ws} do
       StubMerger.reset()
 
@@ -552,7 +553,7 @@ defmodule Arbiter.Worker.DriverTest do
       {:ok, machine_pid} = Machine.start(machine_id)
 
       # max_ticks: 0 → the t >= m guard fires on the very first check. With the
-      # worker at :awaiting_review_gate the driver must reschedule, not stop.
+      # worker waiting on the review gate the driver must reschedule, not stop.
       {:ok, driver_pid} =
         Driver.start(
           task_id: task.id,
@@ -609,7 +610,7 @@ defmodule Arbiter.Worker.DriverTest do
 
     :ok = Worker.advance(pid, :claude)
     send(pid, {:__claude_session_done__, "arb done"})
-    wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(pid)) end)
+    wait_until(fn -> match?(%{state: :waiting, waiting_on: :review_gate}, Worker.state(pid)) end)
     pid
   end
 
@@ -855,8 +856,9 @@ defmodule Arbiter.Worker.DriverTest do
 
       # bd-8tjcms: `Worker.start/1` now refuses a second *active* worker for one
       # task. In production this fixture's shape is reached with the primary
-      # parked at `:awaiting_review` (which the guard allows); here the primary
-      # is `:idle`, so opt out explicitly to keep building the same state.
+      # waiting on the review gate or finished (which the guard allows); here
+      # the primary is `:starting`, so opt out explicitly to keep building the
+      # same state.
       {:ok, fixpass_pid} =
         Worker.start(
           task_id: task.id,
@@ -983,10 +985,10 @@ defmodule Arbiter.Worker.DriverTest do
   end
 
   describe "review_only long-lived engagement (bd-cw3w9p)" do
-    test "Driver exits without closing the task when worker is review_only and reaches :completed",
+    test "Driver exits without closing the task when worker is review_only and its run succeeds",
          %{ws: ws} do
       # bd-cw3w9p: review_only tasks are long-lived ReviewPatrol engagements.
-      # When the worker reaches :completed the Driver must stop but NOT call
+      # When the worker's run finishes :succeeded the Driver must stop but NOT call
       # close_task — the task remains :in_progress for future review cycles.
       {:ok, task} =
         Ash.create(Issue, %{

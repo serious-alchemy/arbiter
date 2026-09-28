@@ -28,7 +28,7 @@ defmodule ArbiterCli.Cmd.SchedulerTest do
       "kind" => "fix_pass",
       "task_id" => "bd-77j2if",
       "registry_key" => "bd-77j2if:fixpass",
-      "status" => "running",
+      "state" => "working",
       "agent_live" => true,
       "started_at" => DateTime.utc_now() |> DateTime.add(-300) |> DateTime.to_iso8601(),
       "detail" => nil

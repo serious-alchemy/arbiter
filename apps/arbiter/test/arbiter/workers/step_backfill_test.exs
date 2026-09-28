@@ -39,7 +39,8 @@ defmodule Arbiter.Workers.StepBackfillTest do
           %{
             task_id: "bd-bf-#{System.unique_integer([:positive])}",
             repo: "arbiter",
-            status: :completed,
+            state: :finished,
+            outcome: :succeeded,
             started_at: ~U[2026-07-01 20:49:00.000000Z],
             session_id: session_id,
             config_dir: config_dir
@@ -189,7 +190,8 @@ defmodule Arbiter.Workers.StepBackfillTest do
         run!(%{
           session_id: session_id,
           config_dir: config_dir,
-          status: :failed,
+          state: :finished,
+          outcome: :failed,
           started_at: ~U[2026-07-01 20:49:00.000000Z],
           completed_at: ~U[2026-07-01 20:51:00.000000Z]
         })
@@ -211,7 +213,7 @@ defmodule Arbiter.Workers.StepBackfillTest do
     end
 
     test "a still-open run (no completed_at) keeps the unbounded-above read" do
-      run = run!(%{status: :running, completed_at: nil})
+      run = run!(%{state: :working, completed_at: nil})
 
       assert {:ok, %{inserted: 2}} = StepBackfill.backfill_run(run, apply?: true)
     end

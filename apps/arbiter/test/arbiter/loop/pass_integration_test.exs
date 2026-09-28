@@ -41,8 +41,9 @@ defmodule Arbiter.Loop.PassIntegrationTest do
   defp run!(attrs) do
     base = %{
       repo: "arbiter",
-      worker_type: :main,
-      status: :completed,
+      kind: :implement,
+      state: :finished,
+      outcome: :succeeded,
       model: "claude-sonnet-5",
       started_at: DateTime.utc_now()
     }
@@ -78,12 +79,19 @@ defmodule Arbiter.Loop.PassIntegrationTest do
     haiku =
       run!(%{
         task_id: inert_issue.id,
-        status: :failed,
+        state: :finished,
+        outcome: :failed,
         model: "claude-haiku-4-5",
         failure_reason: ":review_gate_rejected"
       })
 
-    sonnet = run!(%{task_id: inert_issue.id, status: :completed, model: "claude-sonnet-5"})
+    sonnet =
+      run!(%{
+        task_id: inert_issue.id,
+        state: :finished,
+        outcome: :succeeded,
+        model: "claude-sonnet-5"
+      })
 
     usage!(haiku, 4.44)
     usage!(sonnet, 6.18)
@@ -103,7 +111,8 @@ defmodule Arbiter.Loop.PassIntegrationTest do
     c88 =
       run!(%{
         task_id: "bd-dyfaq3",
-        status: :failed,
+        state: :finished,
+        outcome: :failed,
         model: "claude-opus-4-8",
         failure_reason: "agent was rate-limited / the API was overloaded"
       })
@@ -170,7 +179,7 @@ defmodule Arbiter.Loop.PassIntegrationTest do
   test "surfaces a warning when a provider's usage rows are wholly zero-token over the window (bd-2fzwlc)",
        %{ws: ws} do
     issue = issue!(ws, %{title: "gemini task"})
-    run = run!(%{task_id: issue.id, status: :completed})
+    run = run!(%{task_id: issue.id, state: :finished, outcome: :succeeded})
 
     {:ok, _} =
       Ash.create(Event, %{
@@ -200,7 +209,7 @@ defmodule Arbiter.Loop.PassIntegrationTest do
   test "a zero-token row outside the analyzed :until window does not trigger the warning (bd-2fzwlc)",
        %{ws: ws} do
     issue = issue!(ws, %{title: "codex task"})
-    run = run!(%{task_id: issue.id, status: :completed})
+    run = run!(%{task_id: issue.id, state: :finished, outcome: :succeeded})
 
     # This row's occurred_at is AFTER the window's :until — a historical
     # report analysing a past window must not be flagged (or cleared) by

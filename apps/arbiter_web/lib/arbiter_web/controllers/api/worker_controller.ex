@@ -18,10 +18,15 @@ defmodule ArbiterWeb.Api.WorkerController do
       number, + optional `repo`/`workspace`) reviews an **external / non-arbiter
       PR** via the MR adapter (`Arbiter.Reviews.ExternalReview`): no task, no
       branch — findings + a verdict are posted to that PR.
-    * `GET  /api/workers`                 — :index (list active workers)
-    * `GET  /api/workers/:task_id`        — :show (full snapshot inc. recent output).
-      When no live worker exists for the task, falls back to the most recent
-      `Arbiter.Workers.Run` row so finished/exited runs stay inspectable.
+    * `GET  /api/workers`                 — :index. Every ticket with a live run,
+      as its current run (`Arbiter.Workers.Current.list/1`). Optional
+      `workspace_id` scopes it to the tickets of one workspace — a ReviewGate
+      reviewer's run included, though its worker carries no workspace itself.
+    * `GET  /api/workers/:task_id`        — :show. The ticket's current run
+      (full detail inc. recent output) plus its recent runs, each labelled with
+      its kind (`Arbiter.Workers.Current.show/2`). The current run is read by
+      the same function `:index` reads, in the same vocabulary — kind / state /
+      outcome (`Arbiter.Workers.RunState`) — live or not.
     * `POST /api/workers/:task_id/resume` — :resume (bd-1z7624, #472).
       Session-level resume: re-spawns the worker continuing the task's PRIOR
       Claude session (`claude --print --resume <session_id>`) in the SAME
@@ -49,6 +54,7 @@ defmodule ArbiterWeb.Api.WorkerController do
   alias Arbiter.Worker.Dispatch
   alias Arbiter.Worker.OutputLog
   alias Arbiter.Worker.PromptLog
+  alias Arbiter.Workers.Current
   alias Arbiter.Workers.Run
   require Ash.Query
 
@@ -335,35 +341,26 @@ defmodule ArbiterWeb.Api.WorkerController do
   defp resume_error(reason, _task_id),
     do: {:server_error, "resume failed", %{reason: inspect(reason)}}
 
-  def index(conn, _params) do
-    children = Worker.list_children()
+  def index(conn, params) do
+    runs = Current.list(workspace_id: blank_to_nil(params["workspace_id"]))
     # bd-8vnuy3: settled + in-flight spend, per task — the issue page's figure.
-    render(conn, :index, children: children, costs: worker_costs(children))
+    render(conn, :index, runs: runs, costs: worker_costs(runs))
   end
 
   def show(conn, %{"task_id" => task_id}) when is_binary(task_id) and task_id != "" do
-    case Worker.whereis(task_id) do
+    case Current.show(task_id) do
+      %{current: current, runs: runs} ->
+        render(conn, :show, current: current, runs: runs, cost: task_cost(task_id))
+
       nil ->
-        show_historical(conn, task_id)
-
-      pid ->
-        case Worker.state(pid) do
-          %{} = snap ->
-            # bd-aw2cyt: the task's other live rounds decide this row's phase.
-            snap = Map.put(snap, :pid, pid)
-
-            render(conn, :show,
-              snapshot: Map.put(snap, :phase, worker_phase(snap)),
-              cost: task_cost(task_id)
-            )
-
-          _ ->
-            show_historical(conn, task_id)
-        end
+        {:error, :not_found}
     end
   end
 
   def show(_conn, _params), do: {:error, {:invalid_request, "task_id is required", %{}}}
+
+  defp blank_to_nil(v) when is_binary(v) and v != "", do: v
+  defp blank_to_nil(_), do: nil
 
   # Best-effort, like the ledger read it replaced: a failed cost read costs the
   # listing its cost fields, not the listing.
@@ -377,26 +374,6 @@ defmodule ArbiterWeb.Api.WorkerController do
     task_id |> Arbiter.Usage.Estimate.fold_task_id() |> Arbiter.Usage.LiveSpend.for_task()
   rescue
     _ -> nil
-  end
-
-  # Best-effort sibling read: an unreadable supervisor just means the phase is
-  # derived from this row alone.
-  defp worker_phase(snap) do
-    Arbiter.Worker.Phase.of(snap, Worker.list_children())
-  rescue
-    _ -> Arbiter.Worker.Phase.of(snap, [])
-  catch
-    :exit, _ -> Arbiter.Worker.Phase.of(snap, [])
-  end
-
-  # No live worker for this task — fall back to the most recent durable
-  # `Run` row so a finished/exited run is still inspectable. 404 only when no
-  # run was ever recorded.
-  defp show_historical(conn, task_id) do
-    case latest_run(task_id) do
-      %Run{} = run -> render(conn, :show, run: run, cost: task_cost(task_id))
-      nil -> {:error, :not_found}
-    end
   end
 
   defp latest_run(task_id) do
@@ -528,8 +505,9 @@ defmodule ArbiterWeb.Api.WorkerController do
     %{
       run_id: run.id,
       task_id: run.task_id,
-      worker_type: run.worker_type && to_string(run.worker_type),
-      status: run.status && to_string(run.status),
+      kind: to_string(run.kind),
+      state: to_string(run.state),
+      outcome: run.outcome && to_string(run.outcome),
       model: run.model,
       started_at: run.started_at && DateTime.to_iso8601(run.started_at),
       transcript_exists: File.regular?(OutputLog.path_for(run.id)),

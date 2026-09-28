@@ -172,7 +172,10 @@ defmodule Arbiter.Worker.ReviewGateEmptyNetDiffTest do
     on_exit(fn -> if Process.alive?(author), do: GenServer.stop(author, :normal) end)
     :ok = Worker.advance(author, :claude)
     send(author, {:__claude_session_done__, "arb done"})
-    wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(author)) end)
+
+    wait_until(fn ->
+      match?(%{state: :waiting, waiting_on: :review_gate}, Worker.state(author))
+    end)
 
     {:ok, _gate} =
       Worker.ReviewGate.start(
@@ -187,7 +190,10 @@ defmodule Arbiter.Worker.ReviewGateEmptyNetDiffTest do
         timeout_ms: 10_000
       )
 
-    wait_until(fn -> match?(%{status: :failed}, Worker.state(author)) end, 15_000)
+    wait_until(
+      fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(author)) end,
+      15_000
+    )
 
     parked = Ash.get!(Issue, task.id)
     assert parked.review_park_reason == "empty_net_diff"

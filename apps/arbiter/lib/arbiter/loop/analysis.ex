@@ -156,7 +156,7 @@ defmodule Arbiter.Loop.Analysis do
   @spec build_report([map()], keyword()) :: Report.t()
   def build_report(rows, opts \\ []) do
     scarcity = scarcity(opts)
-    failed = Enum.filter(rows, &(&1.status == :failed))
+    failed = Enum.filter(rows, &(&1.outcome == :failed))
     classified = Enum.map(failed, &classify_row/1)
     agent_quality = Enum.filter(classified, &(&1.classification.class == :agent_quality))
 
@@ -165,7 +165,7 @@ defmodule Arbiter.Loop.Analysis do
     # Difficulty/cost cells and misestimates are about the *authoring* work, so
     # they consider only main-worker runs — not the synthetic `#review`/`#impl`
     # runs (which carry no issue difficulty and would pollute the cells).
-    main_rows = Enum.filter(rows, &(&1.worker_type == :main))
+    main_rows = Enum.filter(rows, &main_run?/1)
     misestimates = difficulty_misestimates(main_rows, scarcity)
 
     %Report{
@@ -444,7 +444,7 @@ defmodule Arbiter.Loop.Analysis do
 
       quality_failure? =
         Enum.any?(task_rows, fn r ->
-          r.status == :failed and
+          r.outcome == :failed and
             quality_misestimate_signal?(classification_for(r))
         end)
 
@@ -928,13 +928,17 @@ defmodule Arbiter.Loop.Analysis do
     }
   end
 
+  # An authoring run: `kind: :implement`, and not a ReviewGate revise-round
+  # implementer (`role: "impl"`, bd-1uu19b).
+  defp main_run?(row), do: Map.get(row, :kind) == :implement and Map.get(row, :role) != "impl"
+
   defp totals(rows) do
     %{
       runs: length(rows),
-      main_runs: Enum.count(rows, &(&1.worker_type == :main)),
-      dispatches: Enum.count(rows, &(&1.worker_type == :main)),
-      failed: Enum.count(rows, &(&1.status == :failed)),
-      completed: Enum.count(rows, &(&1.status == :completed)),
+      main_runs: Enum.count(rows, &main_run?/1),
+      dispatches: Enum.count(rows, &main_run?/1),
+      failed: Enum.count(rows, &(&1.outcome == :failed)),
+      completed: Enum.count(rows, &(&1.outcome == :succeeded)),
       tasks: rows |> Enum.map(& &1.task_id) |> Enum.uniq() |> length()
     }
   end

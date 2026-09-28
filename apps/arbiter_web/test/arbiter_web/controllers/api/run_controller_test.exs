@@ -14,7 +14,7 @@ defmodule ArbiterWeb.Api.RunControllerTest do
       task_id: "bd-#{System.unique_integer([:positive])}",
       repo: "arbiter",
       workspace_id: @ws,
-      status: :running,
+      state: :working,
       started_at: DateTime.utc_now()
     }
 
@@ -23,17 +23,21 @@ defmodule ArbiterWeb.Api.RunControllerTest do
   end
 
   describe "GET /api/workers/history" do
-    test "lists runs newest first, scoped to workspace and status", %{conn: conn} do
+    test "lists runs newest first, scoped to workspace and outcome", %{conn: conn} do
       now = DateTime.utc_now()
       older = DateTime.add(now, -10, :second)
       newer = DateTime.add(now, 0, :second)
 
-      _ = insert_run!(%{task_id: "bd-h1", started_at: older, status: :completed})
-      _ = insert_run!(%{task_id: "bd-h2", started_at: newer, status: :completed})
-      _ = insert_run!(%{task_id: "bd-h3", started_at: newer, status: :failed})
+      _ =
+        insert_run!(%{task_id: "bd-h1", started_at: older, state: :finished, outcome: :succeeded})
+
+      _ =
+        insert_run!(%{task_id: "bd-h2", started_at: newer, state: :finished, outcome: :succeeded})
+
+      _ = insert_run!(%{task_id: "bd-h3", started_at: newer, state: :finished, outcome: :failed})
       _ = insert_run!(%{task_id: "bd-h4", started_at: newer, workspace_id: "other"})
 
-      conn = get(conn, ~p"/api/workers/history", %{workspace_id: @ws, status: "completed"})
+      conn = get(conn, ~p"/api/workers/history", %{workspace_id: @ws, outcome: "succeeded"})
       data = json_response(conn, 200)["data"]
       ids = Enum.map(data, & &1["task_id"])
       assert ids == ["bd-h2", "bd-h1"]
@@ -41,11 +45,85 @@ defmodule ArbiterWeb.Api.RunControllerTest do
       refute Map.has_key?(List.first(data), "output_lines")
     end
 
+    test "summaries carry kind/state/outcome, not worker_type/status", %{conn: conn} do
+      _ =
+        insert_run!(%{
+          task_id: "bd-vocab",
+          kind: :fix_pass,
+          state: :finished,
+          outcome: :interrupted
+        })
+
+      conn = get(conn, ~p"/api/workers/history", %{task_id: "bd-vocab"})
+      [entry] = json_response(conn, 200)["data"]
+
+      assert entry["kind"] == "fix_pass"
+      assert entry["state"] == "finished"
+      assert entry["outcome"] == "interrupted"
+      refute Map.has_key?(entry, "worker_type")
+      refute Map.has_key?(entry, "status")
+    end
+
+    test "a live run has no outcome yet", %{conn: conn} do
+      _ = insert_run!(%{task_id: "bd-live-vocab", kind: :implement, state: :waiting})
+
+      conn = get(conn, ~p"/api/workers/history", %{task_id: "bd-live-vocab"})
+      [entry] = json_response(conn, 200)["data"]
+
+      assert entry["state"] == "waiting"
+      assert entry["outcome"] == nil
+    end
+
+    test "kind and state filters narrow the list", %{conn: conn} do
+      _ = insert_run!(%{task_id: "bd-kf1", kind: :review, state: :working})
+      _ = insert_run!(%{task_id: "bd-kf2", kind: :implement, state: :working})
+      _ = insert_run!(%{task_id: "bd-kf3", kind: :review, state: :waiting})
+
+      data =
+        conn
+        |> get(~p"/api/workers/history", %{workspace_id: @ws, kind: "review"})
+        |> json_response(200)
+        |> Map.fetch!("data")
+
+      assert data |> Enum.map(& &1["task_id"]) |> Enum.sort() == ["bd-kf1", "bd-kf3"]
+
+      data =
+        conn
+        |> get(~p"/api/workers/history", %{workspace_id: @ws, kind: "review", state: "waiting"})
+        |> json_response(200)
+        |> Map.fetch!("data")
+
+      assert Enum.map(data, & &1["task_id"]) == ["bd-kf3"]
+    end
+
+    test "the legacy status filter maps onto state/outcome", %{conn: conn} do
+      _ = insert_run!(%{task_id: "bd-lg-working", state: :working})
+      _ = insert_run!(%{task_id: "bd-lg-ok", state: :finished, outcome: :succeeded})
+      _ = insert_run!(%{task_id: "bd-lg-fail", state: :finished, outcome: :failed})
+      _ = insert_run!(%{task_id: "bd-lg-int", state: :finished, outcome: :interrupted})
+
+      ids_for = fn status ->
+        conn
+        |> get(~p"/api/workers/history", %{workspace_id: @ws, status: status})
+        |> json_response(200)
+        |> Map.fetch!("data")
+        |> Enum.map(& &1["task_id"])
+      end
+
+      assert ids_for.("running") == ["bd-lg-working"]
+      assert ids_for.("completed") == ["bd-lg-ok"]
+      assert ids_for.("failed") == ["bd-lg-fail"]
+      assert ids_for.("review_parked") == ["bd-lg-fail"]
+      assert ids_for.("review_not_started") == ["bd-lg-fail"]
+      assert ids_for.("interrupted") == ["bd-lg-int"]
+    end
+
     test "limit caps results", %{conn: conn} do
       for i <- 1..5 do
         insert_run!(%{
           task_id: "bd-lim#{i}",
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           started_at: DateTime.add(DateTime.utc_now(), -i, :second)
         })
       end
@@ -89,7 +167,22 @@ defmodule ArbiterWeb.Api.RunControllerTest do
 
     test "invalid status returns 400", %{conn: conn} do
       conn = get(conn, ~p"/api/workers/history", %{status: "nope"})
-      assert %{"error" => %{"type" => "invalid_request"}} = json_response(conn, 400)
+
+      assert %{"error" => %{"type" => "invalid_request", "message" => message}} =
+               json_response(conn, 400)
+
+      assert message =~ "invalid status"
+    end
+
+    test "invalid kind, state or outcome returns 400", %{conn: conn} do
+      for {param, value} <- [kind: "main", state: "running", outcome: "completed"] do
+        conn = get(conn, ~p"/api/workers/history", %{param => value})
+
+        assert %{"error" => %{"type" => "invalid_request", "message" => message}} =
+                 json_response(conn, 400)
+
+        assert message =~ "invalid #{param}"
+      end
     end
 
     test "task_id filter lists every run for one task, newest first", %{conn: conn} do
@@ -99,17 +192,19 @@ defmodule ArbiterWeb.Api.RunControllerTest do
       _ =
         insert_run!(%{
           task_id: task,
-          worker_type: :main,
+          kind: :implement,
           model: "claude-opus-4-8",
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           started_at: DateTime.add(now, -20, :second)
         })
 
       _ =
         insert_run!(%{
           task_id: task,
-          worker_type: :review,
-          status: :completed,
+          kind: :review,
+          state: :finished,
+          outcome: :succeeded,
           started_at: DateTime.add(now, -5, :second)
         })
 
@@ -120,9 +215,9 @@ defmodule ArbiterWeb.Api.RunControllerTest do
       data = json_response(conn, 200)["data"]
 
       assert length(data) == 2
-      # Newest first: the review run precedes the main run.
-      assert Enum.map(data, & &1["worker_type"]) == ["review", "main"]
-      # Summary carries the worker_type + model surfaced in the history list.
+      # Newest first: the review run precedes the implement run.
+      assert Enum.map(data, & &1["kind"]) == ["review", "implement"]
+      # Summary carries the kind + model surfaced in the history list.
       assert List.last(data)["model"] == "claude-opus-4-8"
     end
 
@@ -227,7 +322,8 @@ defmodule ArbiterWeb.Api.RunControllerTest do
       run =
         insert_run!(%{
           task_id: "bd-show",
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           completed_at: DateTime.utc_now(),
           output_lines: ["one", "two", "three"]
         })
@@ -249,7 +345,8 @@ defmodule ArbiterWeb.Api.RunControllerTest do
       run =
         insert_run!(%{
           task_id: "bd-rg-rejected",
-          status: :failed,
+          state: :finished,
+          outcome: :failed,
           completed_at: DateTime.utc_now(),
           failure_reason: "review_gate_rejected",
           failure_summary: "VERDICT: REQUEST_CHANGES — needs a guard"

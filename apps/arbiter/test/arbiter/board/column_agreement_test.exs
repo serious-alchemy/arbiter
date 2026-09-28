@@ -4,7 +4,7 @@ defmodule Arbiter.Board.ColumnAgreementTest do
   (`Snapshot.classify_columns/3`) and the `/epics` rollup
   (`EpicRollup.children_with_status/2` and its counts) all read a ticket's
   column from `Lifecycle.view/2`, so they agree — one fixture per state ×
-  {no worker, live author, completed author row, failed author row}.
+  {no worker, working author, succeeded author row, failed author row}.
 
   Acceptance 3 rides along: no combination vanishes from every column.
   """
@@ -14,18 +14,18 @@ defmodule Arbiter.Board.ColumnAgreementTest do
   alias Arbiter.Tasks.{Dependency, EdgeGate, EpicRollup, Issue, Lifecycle, Workspace}
 
   @fixtures [:backlog, :queued, :blocked, :active, :merging, :verifying, :closed]
-  @workers [:none, :running, :completed, :failed]
+  @workers [:none, :working, :succeeded, :failed]
 
   # What the interim five-column board shows, spelled out from the ticket's
   # mapping table rather than read from the code under test.
   @expected %{
-    backlog: %{none: :backlog, running: :running, completed: :backlog, failed: :backlog},
-    queued: %{none: :ready, running: :running, completed: :ready, failed: :ready},
-    blocked: %{none: :ready, running: :running, completed: :ready, failed: :ready},
-    active: %{none: :waiting, running: :running, completed: :waiting, failed: :waiting},
-    merging: %{none: :waiting, running: :waiting, completed: :waiting, failed: :waiting},
-    verifying: %{none: :waiting, running: :waiting, completed: :waiting, failed: :waiting},
-    closed: %{none: :closed, running: :closed, completed: :closed, failed: :closed}
+    backlog: %{none: :backlog, working: :running, succeeded: :backlog, failed: :backlog},
+    queued: %{none: :ready, working: :running, succeeded: :ready, failed: :ready},
+    blocked: %{none: :ready, working: :running, succeeded: :ready, failed: :ready},
+    active: %{none: :waiting, working: :running, succeeded: :waiting, failed: :waiting},
+    merging: %{none: :waiting, working: :waiting, succeeded: :waiting, failed: :waiting},
+    verifying: %{none: :waiting, working: :waiting, succeeded: :waiting, failed: :waiting},
+    closed: %{none: :closed, working: :closed, succeeded: :closed, failed: :closed}
   }
 
   setup do
@@ -155,10 +155,15 @@ defmodule Arbiter.Board.ColumnAgreementTest do
 
   defp worker(_task_id, :none), do: nil
 
-  defp worker(task_id, status) do
+  # A working run, or a finished one with the given outcome.
+  defp worker(task_id, variant) do
+    {state, outcome} = if variant == :working, do: {:working, nil}, else: {:finished, variant}
+
     %{
       task_id: task_id,
-      status: status,
+      state: state,
+      outcome: outcome,
+      waiting_on: nil,
       workspace_id: nil,
       current_step: :implement,
       started_at: DateTime.utc_now(),

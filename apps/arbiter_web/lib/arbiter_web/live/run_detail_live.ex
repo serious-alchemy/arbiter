@@ -176,9 +176,9 @@ defmodule ArbiterWeb.RunDetailLive do
                 </span>
                 <span class={[
                   "text-[10.5px] px-1.5 py-px rounded-[var(--radius-field)] font-medium",
-                  run_status_badge_class(@run.status)
+                  run_status_badge_class(ArbiterWeb.StatusHelpers.run_status(@run))
                 ]}>
-                  {format_status(@run.status)}
+                  {ArbiterWeb.StatusHelpers.run_label(@run)}
                 </span>
               </div>
             </div>
@@ -213,10 +213,10 @@ defmodule ArbiterWeb.RunDetailLive do
 
               <div class="flex flex-col gap-2 px-3 py-2 rounded-[var(--radius-field)] border border-[var(--border-default)] bg-[var(--arb-panel-alt)]">
                 <span class="text-[10.5px] text-[var(--text-label)] font-medium font-[family-name:var(--font-mono)]">
-                  TYPE
+                  KIND
                 </span>
                 <span class="text-[12px] font-medium text-[var(--text-title)] font-[family-name:var(--font-mono)] truncate">
-                  {@run.worker_type}
+                  {ArbiterWeb.StatusHelpers.run_role(@run)}
                 </span>
                 <span class="text-[10px] text-[var(--text-secondary)]">
                   <%= if @run.model do %>
@@ -280,21 +280,22 @@ defmodule ArbiterWeb.RunDetailLive do
     """
   end
 
-  defp run_status_badge_class(:completed),
+  # Keyed on `StatusHelpers.run_status/1`: a live run's state, a finished
+  # run's outcome.
+  defp run_status_badge_class(:succeeded),
     do: "bg-[color-mix(in_oklch,var(--arb-done)_20%,transparent)] text-[var(--arb-done)]"
 
   defp run_status_badge_class(:failed),
     do: "bg-[color-mix(in_oklch,var(--arb-fail)_20%,transparent)] text-[var(--arb-fail-text)]"
 
-  defp run_status_badge_class(:running),
+  defp run_status_badge_class(:working),
     do: "bg-[color-mix(in_oklch,var(--arb-live)_20%,transparent)] text-[var(--arb-live)]"
 
-  defp run_status_badge_class(_), do: "bg-[var(--arb-panel)] text-[var(--text-secondary)]"
+  defp run_status_badge_class(:waiting),
+    do:
+      "bg-[color-mix(in_oklch,var(--arb-attention)_20%,transparent)] text-[var(--arb-attention)]"
 
-  defp format_status(:completed), do: "Completed"
-  defp format_status(:failed), do: "Failed"
-  defp format_status(:running), do: "Running"
-  defp format_status(status), do: String.capitalize(to_string(status))
+  defp run_status_badge_class(_), do: "bg-[var(--arb-panel)] text-[var(--text-secondary)]"
 
   defp format_dt(%DateTime{} = dt), do: Calendar.strftime(dt, "%Y-%m-%d %H:%M:%S UTC")
   defp format_dt(_), do: ""

@@ -54,7 +54,7 @@ defmodule ArbiterWeb.WorkerDetailAsyncTest do
 
     snapshot
     |> Map.put(:task_id, task_id)
-    |> Map.put(:status, :running)
+    |> Map.merge(%{state: :working, outcome: nil, waiting_on: nil})
     |> Map.put(:meta, Map.put(snapshot.meta, :output_lines, output_lines))
   end
 
@@ -90,9 +90,10 @@ defmodule ArbiterWeb.WorkerDetailAsyncTest do
             send(test, :delivered)
             fake_loop(test, task_id, snapshot)
 
-          # Answers as a worker that has moved to `status`.
-          {:answer_status, status} ->
-            GenServer.reply(from, %{snapshot | status: status})
+          # Answers as a worker that has moved on: `run` is the new
+          # `state` / `outcome` / `waiting_on` (bd-1uu19b).
+          {:answer_run, run} ->
+            GenServer.reply(from, Map.merge(snapshot, run))
             fake_loop(test, task_id, snapshot)
 
           :crash ->
@@ -266,9 +267,9 @@ defmodule ArbiterWeb.WorkerDetailAsyncTest do
       # broadcasts it: the page asks again. The first answer was taken before
       # the failure; whichever order the two land in, the newer one wins.
       send(view.pid, {:worker_lifecycle, :failed, %{task_id: task.id}})
-      send(fake, {:answer_status, :running})
+      send(fake, {:answer_run, %{state: :working}})
       assert_receive {:snapshot_requested, ^fake}
-      send(fake, {:answer_status, :failed})
+      send(fake, {:answer_run, %{state: :finished, outcome: :failed}})
       render_async(view)
 
       refute has_element?(view, "#worker-stop-btn")
@@ -295,7 +296,7 @@ defmodule ArbiterWeb.WorkerDetailAsyncTest do
       refute has_element?(view, "#worker-snapshot-loading")
       assert has_element?(view, "#worker-stop-btn")
 
-      send(fake, {:answer_status, :failed})
+      send(fake, {:answer_run, %{state: :finished, outcome: :failed}})
       render_async(view)
 
       assert has_element?(view, "#worker-toolbar-resume-btn")

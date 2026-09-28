@@ -237,7 +237,7 @@ defmodule Arbiter.Board.SnapshotLoadTest do
     %{
       task_id: "bd-stale",
       registry_key: "bd-stale",
-      status: :running,
+      state: :working,
       role: nil,
       workspace_id: ws.id,
       current_step: :implement,

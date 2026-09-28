@@ -75,7 +75,7 @@ defmodule ArbiterCli.Cmd.Prime do
       labelled text sections.
   """
 
-  alias ArbiterCli.{Client, Output, SchedulerState}
+  alias ArbiterCli.{Client, Output, RunLabel, SchedulerState}
 
   def run(argv) do
     if Output.help?(argv) do
@@ -486,7 +486,10 @@ defmodule ArbiterCli.Cmd.Prime do
           do: "activity=#{activity_label(p)}",
           else: "step=#{p["current_step"]}"
 
-      IO.puts("  #{p["task_id"]}  status=#{p["status"]}  #{step}  repo=#{p["repo"]}")
+      IO.puts(
+        "  #{p["task_id"]}  #{RunLabel.label(p)}  #{step}  repo=#{p["repo"]}" <>
+          RunLabel.run_suffix(p)
+      )
     end)
   end
 

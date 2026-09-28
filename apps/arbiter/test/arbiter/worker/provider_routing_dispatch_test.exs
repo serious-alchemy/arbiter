@@ -130,9 +130,9 @@ defmodule Arbiter.Worker.ProviderRoutingDispatchTest do
   defp task!(ws, attrs \\ %{}),
     do: Ash.create!(Issue, Map.merge(%{title: "routed work", workspace_id: ws.id}, attrs))
 
-  defp runs(task_id, worker_type) do
+  defp runs(task_id, kind) do
     Run
-    |> Ash.Query.filter(base_task_id == ^task_id and worker_type == ^worker_type)
+    |> Ash.Query.filter(base_task_id == ^task_id and kind == ^kind)
     |> Ash.Query.sort(started_at: :asc)
     |> Ash.read!()
   end

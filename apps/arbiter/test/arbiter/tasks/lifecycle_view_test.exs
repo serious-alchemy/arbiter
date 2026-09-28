@@ -24,9 +24,22 @@ defmodule Arbiter.Tasks.LifecycleViewTest do
     )
   end
 
-  defp run(status, attrs \\ %{}) do
-    Map.merge(%{task_id: "bd-t", status: status, meta: %{}}, attrs)
+  # A worker row in one of its run's states. `:resuming` is a `:starting` run
+  # re-attaching (`meta.resume`); `:question` and `:review_gate` are a
+  # `:waiting` run and what it waits on; `:succeeded`, `:failed` and
+  # `:interrupted` are a finished run's outcome.
+  defp run(state, attrs \\ %{}) do
+    Map.merge(%{task_id: "bd-t", meta: %{}}, run_fields(state)) |> Map.merge(attrs)
   end
+
+  defp run_fields(:resuming), do: %{state: :starting, waiting_on: nil, outcome: nil}
+  defp run_fields(:question), do: %{state: :waiting, waiting_on: :question, outcome: nil}
+  defp run_fields(:review_gate), do: %{state: :waiting, waiting_on: :review_gate, outcome: nil}
+
+  defp run_fields(outcome) when outcome in [:succeeded, :failed, :interrupted],
+    do: %{state: :finished, waiting_on: nil, outcome: outcome}
+
+  defp run_fields(state), do: %{state: state, waiting_on: nil, outcome: nil}
 
   defp view(ticket, ctx \\ %{}), do: Lifecycle.view(ticket, Map.put_new(ctx, :now, @now))
 
@@ -89,28 +102,28 @@ defmodule Arbiter.Tasks.LifecycleViewTest do
   end
 
   describe "view/2 — runs never override the stored state, except a live one lagging it" do
-    test "a queued ticket with a leftover completed or failed author row stays queued" do
-      for status <- [:completed, :failed] do
-        assert %{column: :ready} = view(ticket(:queued), %{runs: [run(status)]})
+    test "a queued ticket with a leftover finished author row stays queued" do
+      for outcome <- [:succeeded, :failed, :interrupted] do
+        assert %{column: :ready} = view(ticket(:queued), %{runs: [run(outcome)]})
 
         assert %{column: :blocked} =
-                 view(ticket(:queued), %{runs: [run(status)], blocked_by: ["bd-9"]})
+                 view(ticket(:queued), %{runs: [run(outcome)], blocked_by: ["bd-9"]})
       end
     end
 
     test "a live author run on a queued ticket reads as in progress (the write lags the run)" do
-      assert %{column: :in_progress} = view(ticket(:queued), %{runs: [run(:running)]})
-      assert %{column: :in_progress} = view(ticket(:backlog), %{runs: [run(:awaiting)]})
+      assert %{column: :in_progress} = view(ticket(:queued), %{runs: [run(:working)]})
+      assert %{column: :in_progress} = view(ticket(:backlog), %{runs: [run(:question)]})
     end
 
     test "a live run never reopens a closed or verifying ticket" do
-      assert %{column: :closed} = view(ticket(:closed), %{runs: [run(:running)]})
-      assert %{column: :verifying} = view(ticket(:verifying), %{runs: [run(:running)]})
+      assert %{column: :closed} = view(ticket(:closed), %{runs: [run(:working)]})
+      assert %{column: :verifying} = view(ticket(:verifying), %{runs: [run(:working)]})
     end
 
-    test "a ticket with no state at all is claimed by any non-completed author row" do
+    test "a ticket with no state at all is claimed by any author row that did not succeed" do
       assert %{column: :in_progress} = view(%{id: "bd-t"}, %{runs: [run(:failed)]})
-      assert %{column: nil} = view(%{id: "bd-t"}, %{runs: [run(:completed)]})
+      assert %{column: nil} = view(%{id: "bd-t"}, %{runs: [run(:succeeded)]})
       assert %{column: nil} = view(%{id: "bd-t"})
     end
   end
@@ -118,7 +131,7 @@ defmodule Arbiter.Tasks.LifecycleViewTest do
   describe "view/2 — the step of an in-progress ticket" do
     test "implementing: the author's own agent is live" do
       assert %{step: :implementing} =
-               view(ticket(:active), %{runs: [run(:running, %{agent_live: true})]})
+               view(ticket(:active), %{runs: [run(:working, %{agent_live: true})]})
     end
 
     test "implementing: nothing more specific is known (no run yet)" do
@@ -126,10 +139,10 @@ defmodule Arbiter.Tasks.LifecycleViewTest do
     end
 
     test "in_review: a reviewer is reading the diff" do
-      author = run(:awaiting_review_gate, %{agent_live: false})
+      author = run(:review_gate, %{agent_live: false})
 
       reviewer =
-        run(:running, %{
+        run(:working, %{
           task_id: "bd-t#review",
           agent_live: true,
           meta: %{role: :reviewer, reviews: "bd-t"}
@@ -139,10 +152,10 @@ defmodule Arbiter.Tasks.LifecycleViewTest do
     end
 
     test "addressing_review: an implementer round is applying findings" do
-      author = run(:awaiting_review_gate, %{agent_live: false})
+      author = run(:review_gate, %{agent_live: false})
 
       implementer =
-        run(:running, %{
+        run(:working, %{
           task_id: "bd-t#review#impl1",
           agent_live: true,
           meta: %{role: :implementer, revises: "bd-t"}
@@ -151,24 +164,26 @@ defmodule Arbiter.Tasks.LifecycleViewTest do
       assert %{step: :addressing_review} = view(ticket(:active), %{runs: [author, implementer]})
     end
 
+    # The author row is still live but its own agent is not: a live
+    # subordinate round names the step over the author's own phase.
     test "fixing_ci: a CI fix pass is live" do
-      author = run(:awaiting_review, %{agent_live: false})
-      fix = run(:running, %{registry_key: "bd-t:fix", role: :fix_pass, agent_live: true})
+      author = run(:working, %{agent_live: false})
+      fix = run(:working, %{registry_key: "bd-t:fix", role: :fix_pass, agent_live: true})
 
       assert %{step: :fixing_ci} = view(ticket(:active), %{runs: [author, fix]})
     end
 
     test "resolving_conflict: a conflict resolver is live" do
-      author = run(:awaiting_review, %{agent_live: false})
+      author = run(:working, %{agent_live: false})
 
       resolver =
-        run(:running, %{registry_key: "bd-t:conflict", role: :conflict_resolver, agent_live: true})
+        run(:working, %{registry_key: "bd-t:conflict", role: :conflict_resolver, agent_live: true})
 
       assert %{step: :resolving_conflict} = view(ticket(:active), %{runs: [author, resolver]})
     end
 
     test "a subordinate pass with its author gone still names the step" do
-      fix = run(:running, %{registry_key: "bd-t:fix", role: :fix_pass, agent_live: true})
+      fix = run(:working, %{registry_key: "bd-t:fix", role: :fix_pass, agent_live: true})
       assert %{step: :fixing_ci} = view(ticket(:active), %{runs: [fix]})
     end
   end
@@ -254,41 +269,44 @@ defmodule Arbiter.Tasks.LifecycleViewTest do
     test "merging and verifying → Waiting" do
       assert col(ticket(:merging)) == :waiting
       assert col(ticket(:verifying)) == :waiting
-      assert col(ticket(:merging), %{runs: [run(:running)]}) == :waiting
+      assert col(ticket(:merging), %{runs: [run(:working)]}) == :waiting
     end
 
     test "in progress with a live author → Running" do
-      for status <- [:idle, :resuming, :running, :awaiting_review_gate] do
-        assert col(ticket(:active), %{runs: [run(status)]}) == :running
+      for state <- [:starting, :resuming, :working, :review_gate] do
+        assert col(ticket(:active), %{runs: [run(state)]}) == :running
       end
     end
 
-    test "in progress whose author is failed or awaiting → Waiting (today's needs-you cases)" do
-      for status <- [:awaiting, :failed, :awaiting_review] do
-        assert col(ticket(:active), %{runs: [run(status)]}) == :waiting
+    # An open PR is a Merging ticket since bd-741sid, not an author run state.
+    test "in progress whose author finished unsucceeded or asked a question → Waiting (today's needs-you cases)" do
+      for state <- [:question, :failed, :interrupted] do
+        assert col(ticket(:active), %{runs: [run(state)]}) == :waiting
       end
     end
 
     test "the primary author run decides, not a subordinate pass sharing its id" do
-      parked = run(:awaiting_review, %{role: nil})
-      fix = run(:running, %{registry_key: "bd-t:fix", role: :fix_pass, meta: %{role: :fix_pass}})
+      parked = run(:failed, %{role: nil})
+      fix = run(:working, %{registry_key: "bd-t:fix", role: :fix_pass, meta: %{role: :fix_pass}})
       assert col(ticket(:active), %{runs: [parked, fix]}) == :waiting
 
-      working = run(:running, %{role: nil})
+      working = run(:working, %{role: nil})
       failed_fix = run(:failed, %{registry_key: "bd-t:fix", role: :fix_pass})
       assert col(ticket(:active), %{runs: [working, failed_fix]}) == :running
     end
 
     test "with only subordinate passes left, they decide" do
-      fix = run(:running, %{registry_key: "bd-t:fix", role: :fix_pass})
+      fix = run(:working, %{registry_key: "bd-t:fix", role: :fix_pass})
       assert col(ticket(:active), %{runs: [fix]}) == :running
-      assert col(ticket(:active), %{runs: [%{fix | status: :failed}]}) == :waiting
+
+      assert col(ticket(:active), %{runs: [%{fix | state: :finished, outcome: :failed}]}) ==
+               :waiting
     end
 
     test "in progress with no worker: Running inside the dispatch grace, Waiting past it" do
       assert col(ticket(:active, %{updated_at: @now})) == :running
       assert col(ticket(:active)) == :waiting
-      assert col(ticket(:active), %{runs: [run(:completed)]}) == :waiting
+      assert col(ticket(:active), %{runs: [run(:succeeded)]}) == :waiting
     end
 
     test "a workerless in-progress epic never reads as orphaned" do

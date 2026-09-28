@@ -272,15 +272,16 @@ defmodule ArbiterWeb.CoreComponents.DomainTest do
     defp run(overrides \\ []) do
       render_component(
         &run_row/1,
-        Keyword.merge([role: "impl", worker: "w-11", status: "running"], overrides)
+        Keyword.merge([role: "impl", worker: "w-11", status: "working"], overrides)
       )
     end
 
     test "the status track is a minmax, never a fixed 92px" do
       html = run()
 
-      # A fixed 92px track cannot hold "awaiting review" (115px with its dot);
-      # the label overruns into the metrics cell. Regression guard.
+      # A fixed 92px track cannot hold a long status ("interrupted",
+      # "handed_off"); the label overruns into the metrics cell. Regression
+      # guard.
       assert html =~ "minmax(92px,max-content)"
       refute html =~ "_92px_"
     end
@@ -306,29 +307,33 @@ defmodule ArbiterWeb.CoreComponents.DomainTest do
       assert run(role: "fix_pass") =~ "fix pass"
       assert run(role: "review") =~ "review"
       assert run(role: "conflict") =~ "conflict"
-      assert run(role: "main") =~ "main"
+      assert run(role: "implement") =~ "implement"
     end
 
     test "an unknown role falls through verbatim rather than blanking the cell" do
       assert run(role: "custom_thing") =~ "custom_thing"
     end
 
-    test "the left rule carries the status: lime running, amber awaiting, red failed" do
-      assert run(status: "running") =~ "border-l-[color:var(--arb-live)]"
-      assert run(status: "awaiting review") =~ "border-l-[color:var(--arb-attention)]"
+    test "the left rule carries the status: lime live, amber waiting/interrupted, red failed" do
+      assert run(status: "starting") =~ "border-l-[color:var(--arb-live)]"
+      assert run(status: "working") =~ "border-l-[color:var(--arb-live)]"
+      assert run(status: "waiting") =~ "border-l-[color:var(--arb-attention)]"
+      assert run(status: "interrupted") =~ "border-l-[color:var(--arb-attention)]"
       assert run(status: "failed") =~ "border-l-[color:var(--arb-fail)]"
-      assert run(status: "completed") =~ "border-l-[color:transparent]"
+      assert run(status: "succeeded") =~ "border-l-[color:transparent]"
+      assert run(status: "handed_off") =~ "border-l-[color:transparent]"
     end
 
-    test "Arbiter's snake_case statuses hit the same rules as the spaced labels" do
-      assert run(status: "awaiting_review") =~ "border-l-[color:var(--arb-attention)]"
-      assert run(status: "awaiting_review_gate") =~ "border-l-[color:var(--arb-attention)]"
-      assert run(status: :running) =~ "border-l-[color:var(--arb-live)]"
+    test "atom statuses hit the same rules as their strings" do
+      assert run(status: :working) =~ "border-l-[color:var(--arb-live)]"
+      assert run(status: :waiting) =~ "border-l-[color:var(--arb-attention)]"
+      assert run(status: :failed) =~ "border-l-[color:var(--arb-fail)]"
     end
 
-    test "a running row pulses its status chip; a finished one does not" do
-      assert run(status: "running") =~ "arb-pulse"
-      refute run(status: "completed") =~ "arb-pulse"
+    test "a live row pulses its status chip; a finished one does not" do
+      assert run(status: "working") =~ "arb-pulse"
+      assert run(status: "starting") =~ "arb-pulse"
+      refute run(status: "succeeded") =~ "arb-pulse"
     end
 
     test "shows duration and cost joined, and only what it was given" do
@@ -360,7 +365,7 @@ defmodule ArbiterWeb.CoreComponents.DomainTest do
     test "the failed row reds its outcome text" do
       assert run(status: "failed", outcome: "exit 1 · mix test") =~ "text-[var(--arb-fail-text)]"
 
-      refute run(status: "completed", outcome: "no response needed") =~
+      refute run(status: "succeeded", outcome: "no response needed") =~
                "text-[var(--arb-fail-text)]"
     end
 

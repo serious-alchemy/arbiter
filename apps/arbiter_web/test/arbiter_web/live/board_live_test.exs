@@ -106,7 +106,8 @@ defmodule ArbiterWeb.BoardLiveTest do
     {:ok, view, render_async(view, @async_timeout)}
   end
 
-  # A worker parked at :awaiting — the escalation case that flags in Waiting.
+  # A worker waiting on a question (state :waiting, waiting_on :question) —
+  # the escalation case that flags in Waiting.
   defp parked_worker(ws, task) do
     {:ok, pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)
     :ok = Worker.advance(pid, :verify)
@@ -720,8 +721,9 @@ defmodule ArbiterWeb.BoardLiveTest do
       refute html =~ "no watchdog"
     end
 
-    # The other half of bd-8jixav: a task with both a primary :awaiting_review
-    # row and a subordinate failed fix-pass row rendered as two cards. Since
+    # The other half of bd-8jixav: a task with both a primary worker parked on
+    # its open PR (the pre-bd-741sid `awaiting_review` status, now gone) and a
+    # subordinate failed fix-pass row rendered as two cards. Since
     # bd-741sid the card is the Merging ticket's, and a pass is the ticket's
     # own run, registered under the ticket id.
     test "a Merging ticket with a failed pass under it renders one card, not two", %{
@@ -827,7 +829,7 @@ defmodule ArbiterWeb.BoardLiveTest do
       html = drag(view, task.id, "waiting", "closed")
 
       assert html =~ "proceed"
-      assert Worker.state(pid).status == :running
+      assert %{state: :working, waiting_on: nil} = Worker.state(pid)
       # Un-parking is not a promotion: it went back to its own work, so it
       # belongs in Running, not still waiting.
       assert has_element?(view, ~s(#board-column-running [id="card-#{task.id}"]))
@@ -864,7 +866,7 @@ defmodule ArbiterWeb.BoardLiveTest do
 
       assert html =~ "proceed"
       refute html =~ "cap is 1"
-      assert Worker.state(pid).status == :running
+      assert Worker.state(pid).state == :working
     end
 
     test "a card the worker FSM will not un-park says so rather than moving", %{
@@ -880,7 +882,7 @@ defmodule ArbiterWeb.BoardLiveTest do
       html = drag(view, task.id, "waiting", "closed")
 
       assert html =~ "failed"
-      assert Worker.state(pid).status == :failed
+      assert %{state: :finished, outcome: :failed} = Worker.state(pid)
     end
 
     # bd-741sid: no worker sits on an open MR — the ticket's Watchdog is what

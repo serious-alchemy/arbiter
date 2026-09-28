@@ -134,7 +134,7 @@ defmodule Arbiter.Worker.ReviewGateCoordinatorOnlyTest do
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
     :ok = Worker.advance(pid, :claude)
     send(pid, {:__claude_session_done__, "arb done"})
-    wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(pid)) end)
+    wait_until(fn -> match?(%{state: :waiting, waiting_on: :review_gate}, Worker.state(pid)) end)
 
     :ok = Worker.review_gate_verdict(pid, verdict)
     task
@@ -207,7 +207,10 @@ defmodule Arbiter.Worker.ReviewGateCoordinatorOnlyTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 8_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        8_000
+      )
 
       meta = Worker.state(pid).meta
       assert meta.failure_reason == :review_gate_rejected

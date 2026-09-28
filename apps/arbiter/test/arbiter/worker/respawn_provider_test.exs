@@ -99,7 +99,7 @@ defmodule Arbiter.Worker.RespawnProviderTest do
 
       # First session exits -> notes gate (blank notes) -> nudge respawn of the
       # same stashed argv, which exits the same way -> cap exhausted -> park.
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end)
+      wait_until(fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end)
 
       snap = Worker.state(pid)
       assert snap.meta[:notes_gate_detail] == :cap_exhausted

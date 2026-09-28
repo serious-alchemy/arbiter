@@ -576,7 +576,7 @@ defmodule Arbiter.Tasks.Workspace do
   Whether a ReviewGate (second-worker code review) gates merges for this
   workspace, from `config["review"]["required"]`.
 
-  When `true`, the worker parks at `:awaiting_review_gate` after the worker's
+  When `true`, the worker waits on the review gate after the worker's
   `arb done` and spawns a distinct reviewer worker; the branch merges only on
   an APPROVE verdict. When `false` (the **default**), completion routes straight
   to the merger as before — so enabling reviews never surprises an install that

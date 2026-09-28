@@ -134,7 +134,7 @@ defmodule Arbiter.Worker.ReviewGateTicketVerdictTest do
 
   defp main_run(task_id) do
     Arbiter.Workers.Run
-    |> Ash.Query.filter(task_id == ^task_id and worker_type == :main)
+    |> Ash.Query.filter(task_id == ^task_id and kind == :implement and role == "base")
     |> Ash.read!()
     |> List.first()
   end
@@ -159,7 +159,7 @@ defmodule Arbiter.Worker.ReviewGateTicketVerdictTest do
     on_exit(fn -> stop(pid) end)
     :ok = Worker.advance(pid, :claude)
     send(pid, {:__claude_session_done__, "arb done"})
-    wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(pid)) end)
+    wait_until(fn -> match?(%{state: :waiting, waiting_on: :review_gate}, Worker.state(pid)) end)
     pid
   end
 
@@ -181,8 +181,8 @@ defmodule Arbiter.Worker.ReviewGateTicketVerdictTest do
       :ok =
         Worker.review_gate_verdict(author, {:request_changes, "VERDICT: REQUEST_CHANGES\n- fix"})
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(author)) end)
-      assert main_run(task.id).status == :failed
+      wait_until(fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(author)) end)
+      assert main_run(task.id).outcome == :failed
 
       # ...and is gone before the next round reports (its fix round stopped it).
       :ok = GenServer.stop(author, :normal)
@@ -203,7 +203,7 @@ defmodule Arbiter.Worker.ReviewGateTicketVerdictTest do
       # The rejected run is the run that produced the approved code: finished
       # and successful now, with the PR on it.
       run = main_run(task.id)
-      assert run.status == :completed
+      assert run.outcome == :succeeded
       assert is_nil(run.failure_reason)
       assert run.mr_ref == "!rg1"
 

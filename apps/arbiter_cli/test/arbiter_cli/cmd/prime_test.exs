@@ -193,6 +193,46 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       assert out =~ "Fix the thing"
     end
 
+    # bd-1uu19b AC7: a ReviewGate reviewer's worker carries no workspace of its
+    # own; the server reports its run under the ticket's workspace, so the
+    # active-workers section lists it — labelled with its kind and state.
+    test "lists a reviewer run as its ticket's current run, in the run vocabulary" do
+      stub_all(
+        [%{"id" => "ws-1", "name" => "default", "prefix" => "bd", "config" => %{}}],
+        [
+          %{
+            "task_id" => "bd-001",
+            "run_task_id" => "bd-001#review",
+            "kind" => "review",
+            "state" => "working",
+            "outcome" => nil,
+            "current_step" => "claude",
+            "repo" => "test/repo",
+            "workspace_id" => "ws-1"
+          },
+          %{
+            "task_id" => "bd-002",
+            "run_task_id" => "bd-002",
+            "kind" => "fix_pass",
+            "state" => "finished",
+            "outcome" => "failed",
+            "current_step" => "claude",
+            "repo" => "test/repo",
+            "workspace_id" => "ws-1"
+          }
+        ],
+        []
+      )
+
+      {out, _err, exit_code} = capture(fn -> Prime.run([]) end)
+      assert exit_code == 0
+
+      assert out =~ "== Active workers (2) =="
+      assert out =~ ~r/bd-001  review working .*run=bd-001#review/
+      assert out =~ ~r/bd-002  fix_pass finished \(failed\)/
+      refute out =~ "status="
+    end
+
     test "lists all workspaces when multiple are configured" do
       stub_all(
         [

@@ -21,8 +21,11 @@ defmodule ArbiterWeb.Api.RunJSON do
       task_title: r.task_title,
       repo: r.repo,
       workspace_id: r.workspace_id,
-      worker_type: to_string_atom(r.worker_type),
-      status: to_string_atom(r.status),
+      # bd-1uu19b: the one run vocabulary (`Arbiter.Workers.RunState`);
+      # `outcome` is nil until the run has finished.
+      kind: to_string_atom(r.kind),
+      state: to_string_atom(r.state),
+      outcome: to_string_atom(r.outcome),
       model: r.model,
       started_at: iso(r.started_at),
       completed_at: iso(r.completed_at),

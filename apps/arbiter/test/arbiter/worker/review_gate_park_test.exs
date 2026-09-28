@@ -11,11 +11,17 @@ defmodule Arbiter.Worker.ReviewGateParkTest do
       guard-rejected APPROVE is still never merged and never recorded approved.
     * *"Should this run be marked failed?"* now **fails open** — a terminal
       no-verdict state parks the task and pages the coordinator once instead of
-      writing `Run.status = :failed` on work nobody has found a problem with.
+      recording a bare failure on work nobody has found a problem with.
+
+  Since the one run vocabulary (bd-1uu19b) a parked run finishes with outcome
+  `:failed` like any other terminal run — there is no `:review_parked` run
+  status. What tells a park apart from a genuine rejection is the ticket: a
+  park stamps `review_park_reason`, a real REQUEST_CHANGES leaves it nil. The
+  run's own cause stays in `failure_reason`.
 
   These tests pin the Worker half of that split: the durable run row, the park
   stamped on the task, the single escalation, and the one outcome that must
-  still fail — a genuine REQUEST_CHANGES at the round cap.
+  still fail without a park — a genuine REQUEST_CHANGES at the round cap.
   """
 
   use Arbiter.DataCase, async: false
@@ -26,7 +32,7 @@ defmodule Arbiter.Worker.ReviewGateParkTest do
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Test.StubFixRoundDispatcher
   alias Arbiter.Worker
-  alias Arbiter.Workers.Run
+  alias Arbiter.Workers.{Run, RunState}
 
   @findings "VERDICT: REQUEST_CHANGES\n- [high] feature.txt:1 needs a guard"
 
@@ -112,7 +118,7 @@ defmodule Arbiter.Worker.ReviewGateParkTest do
     task
   end
 
-  # An author parked at `:awaiting_review_gate` with `review_spawn: false`, so a
+  # An author waiting on the review gate with `review_spawn: false`, so a
   # verdict can be handed to it directly — exactly as the gate would.
   defp start_parked_author(task, repo, extra_meta \\ %{}) do
     branch = "feature/park-#{System.unique_integer([:positive])}"
@@ -140,13 +146,13 @@ defmodule Arbiter.Worker.ReviewGateParkTest do
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
     :ok = Worker.advance(pid, :claude)
     send(pid, {:__claude_session_done__, "arb done"})
-    wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(pid)) end)
+    wait_until(fn -> match?(%{state: :waiting, waiting_on: :review_gate}, Worker.state(pid)) end)
     pid
   end
 
   defp deliver(pid, verdict) do
     :ok = Worker.review_gate_verdict(pid, verdict)
-    wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end)
+    wait_until(fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end)
     :ok
   end
 
@@ -166,18 +172,24 @@ defmodule Arbiter.Worker.ReviewGateParkTest do
   end
 
   describe "a terminal no-verdict outcome (AC1, AC2)" do
-    test "records the run as :review_parked rather than :failed", %{repo: repo, ws: ws} do
+    test "finishes the run :failed with the park named on the ticket", %{repo: repo, ws: ws} do
       task = new_task(ws)
       pid = start_parked_author(task, repo)
 
       deliver(pid, {:no_verdict, "Reviewer produced no parseable VERDICT line."})
 
       run = run_for(task.id)
-      assert run.status == :review_parked
+      assert run.state == :finished
+      assert run.outcome == :failed
+      assert run.failure_reason == ":review_gate_inconclusive"
 
-      # The FSM status is untouched: `Dispatch.resume/2` and the Watchdog's
-      # bounded auto-resume both require a terminal worker (the C4 shape).
-      assert Worker.state(pid).status == :failed
+      # The park, not the run outcome, is what separates this from a genuine
+      # rejection.
+      assert reload(task).review_park_reason == "inconclusive"
+
+      # The worker is terminal: `Dispatch.resume/2` and the Watchdog's
+      # bounded auto-resume both require a finished worker (the C4 shape).
+      assert %{state: :finished, outcome: :failed} = Worker.state(pid)
       assert Worker.state(pid).meta.failure_reason == :review_gate_inconclusive
     end
 
@@ -232,7 +244,7 @@ defmodule Arbiter.Worker.ReviewGateParkTest do
   describe "every park reason, one per path (AC1)" do
     # AC1 is a statement about the whole terminal surface, not about four
     # examples: no ReviewGate outcome with an approving or no-verdict result may
-    # write `Run.status = :failed`. The reasons below are exactly
+    # finish the run `:failed` without parking the ticket. The reasons below are exactly
     # `ReviewPark.reasons/0`, so a new class-C terminal that forgets to park
     # fails here rather than quietly costing a run.
     for {reason, _explanation} <- Arbiter.Tasks.ReviewPark.reasons() do
@@ -244,7 +256,7 @@ defmodule Arbiter.Worker.ReviewGateParkTest do
 
         deliver(pid, {:parked, @reason, "VERDICT: APPROVE\nterminal reached: #{@reason}"})
 
-        assert run_for(task.id).status == :review_parked
+        assert run_for(task.id).outcome == :failed
         assert reload(task).review_park_reason == Atom.to_string(@reason)
         assert merge_commit_count(repo) == 0
         assert [_exactly_one] = escalations(ws, task)
@@ -259,7 +271,7 @@ defmodule Arbiter.Worker.ReviewGateParkTest do
       # reporting (bd-2y0gd5) routes through `{:no_verdict, …}`.
       deliver(pid, {:no_verdict, "ReviewGate process exited before delivering a verdict."})
 
-      assert run_for(task.id).status == :review_parked
+      assert run_for(task.id).outcome == :failed
       assert reload(task).review_park_reason == "inconclusive"
     end
   end
@@ -272,7 +284,7 @@ defmodule Arbiter.Worker.ReviewGateParkTest do
       deliver(pid, {:request_changes, @findings})
 
       run = run_for(task.id)
-      assert run.status == :failed
+      assert run.outcome == :failed
       assert Worker.state(pid).meta.failure_reason == :review_gate_rejected
 
       assert reload(task).review_park_reason == nil
@@ -332,9 +344,9 @@ defmodule Arbiter.Worker.ReviewGateParkTest do
 
       deliver(pid, {:parked, :inconclusive, "no parseable VERDICT line"})
       assert reload(task).review_park_reason == "inconclusive"
-      assert run_for(task.id).status == :review_parked
+      assert run_for(task.id).outcome == :failed
 
-      # bd-3wumco: the same gate's next round converges. The worker is at
+      # bd-3wumco: the same gate's next round converges. The worker is finished
       # :failed; the approval reconciles it forward and must take the park with
       # it, or the merged task keeps showing up in `arb prime`. bd-741sid: the
       # approved run merges and ends, leaving the ticket Merging.
@@ -346,7 +358,7 @@ defmodule Arbiter.Worker.ReviewGateParkTest do
       assert reload(task).state == :merging
 
       assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
-      assert run_for(task.id).status == :completed
+      assert run_for(task.id).outcome == :succeeded
     end
   end
 
@@ -391,7 +403,8 @@ defmodule Arbiter.Worker.ReviewGateParkTest do
     end
   end
 
-  test ":review_parked is a valid run status" do
-    assert :review_parked in Run.statuses()
+  test "a review park is not its own run outcome" do
+    refute :review_parked in RunState.outcomes()
+    assert :failed in RunState.outcomes()
   end
 end

@@ -19,40 +19,50 @@ defmodule Arbiter.Tasks.SlotGateConformanceTest do
 
   @now ~U[2026-09-16 22:25:00Z]
 
-  defp worker(task_id, status, attrs) do
+  # A worker snapshot in one of its run's states. `:question` and
+  # `:review_gate` are a `:waiting` run and what it waits on; `:succeeded` is
+  # a finished run (an author that opened its PR, bd-741sid).
+  defp worker(task_id, state, attrs) do
     Map.merge(
-      %{
-        task_id: task_id,
-        registry_key: task_id,
-        status: status,
-        role: nil,
-        workspace_id: "ws-1",
-        current_step: :implement,
-        started_at: @now,
-        step_started_at: @now,
-        mr_ref: nil,
-        merger_url: nil,
-        agent_live: false,
-        meta: %{}
-      },
+      Map.merge(
+        %{
+          task_id: task_id,
+          registry_key: task_id,
+          role: nil,
+          workspace_id: "ws-1",
+          current_step: :implement,
+          started_at: @now,
+          step_started_at: @now,
+          mr_ref: nil,
+          merger_url: nil,
+          agent_live: false,
+          meta: %{}
+        },
+        run_fields(state)
+      ),
       attrs
     )
   end
+
+  defp run_fields(:question), do: %{state: :waiting, waiting_on: :question, outcome: nil}
+  defp run_fields(:review_gate), do: %{state: :waiting, waiting_on: :review_gate, outcome: nil}
+  defp run_fields(:succeeded), do: %{state: :finished, waiting_on: nil, outcome: :succeeded}
+  defp run_fields(state), do: %{state: state, waiting_on: nil, outcome: nil}
 
   # Every shape the ticket names, plus the ones that used to be counted wrong.
   defp worlds do
     [
       {"empty", []},
-      {"author with a live agent", [worker("bd-1", :running, %{agent_live: true})]},
-      {"author whose agent exited", [worker("bd-1", :running, %{agent_live: false})]},
-      {":awaiting with no agent", [worker("bd-1", :awaiting, %{agent_live: false})]},
-      {":awaiting_review with no agent",
-       [worker("bd-1", :awaiting_review, %{agent_live: false})]},
-      {"liveness unknown", [Map.delete(worker("bd-1", :running, %{}), :agent_live)]},
+      {"author with a live agent", [worker("bd-1", :working, %{agent_live: true})]},
+      {"author whose agent exited", [worker("bd-1", :working, %{agent_live: false})]},
+      {"waiting on a question with no agent", [worker("bd-1", :question, %{agent_live: false})]},
+      {"finished author (PR opened) with no agent",
+       [worker("bd-1", :succeeded, %{agent_live: false})]},
+      {"liveness unknown", [Map.delete(worker("bd-1", :working, %{}), :agent_live)]},
       {"author quiet under a live reviewer",
        [
-         worker("bd-1", :awaiting_review_gate, %{agent_live: false}),
-         worker("bd-1#review", :running, %{
+         worker("bd-1", :review_gate, %{agent_live: false}),
+         worker("bd-1#review", :working, %{
            role: :reviewer,
            agent_live: true,
            meta: %{role: :reviewer, reviews: "bd-1"}
@@ -60,8 +70,8 @@ defmodule Arbiter.Tasks.SlotGateConformanceTest do
        ]},
       {"implementer round",
        [
-         worker("bd-1", :awaiting_review_gate, %{agent_live: false}),
-         worker("bd-1#review#impl1", :running, %{
+         worker("bd-1", :review_gate, %{agent_live: false}),
+         worker("bd-1#review#impl1", :working, %{
            role: :implementer,
            agent_live: true,
            meta: %{role: :implementer, revises: "bd-1"}
@@ -69,19 +79,19 @@ defmodule Arbiter.Tasks.SlotGateConformanceTest do
        ]},
       {"CI fix pass beside a second author",
        [
-         worker("bd-1", :awaiting_review, %{agent_live: false}),
-         worker("bd-1", :running, %{
+         worker("bd-1", :succeeded, %{agent_live: false}),
+         worker("bd-1", :working, %{
            registry_key: "bd-1:fixpass",
            role: :fix_pass,
            agent_live: true,
            meta: %{role: :fix_pass}
          }),
-         worker("bd-2", :running, %{agent_live: true})
+         worker("bd-2", :working, %{agent_live: true})
        ]},
       {"conflict resolver",
        [
-         worker("bd-1", :awaiting_review, %{agent_live: false}),
-         worker("bd-1", :running, %{
+         worker("bd-1", :succeeded, %{agent_live: false}),
+         worker("bd-1", :working, %{
            registry_key: "bd-1:conflict",
            role: :conflict_resolver,
            agent_live: true,
@@ -186,7 +196,7 @@ defmodule Arbiter.Tasks.SlotGateConformanceTest do
       held =
         common
         |> Map.put(:issues, [ready, ticket("bd-1", :active)])
-        |> Map.put(:workers, [worker("bd-1", :running, %{agent_live: agent_live})])
+        |> Map.put(:workers, [worker("bd-1", :working, %{agent_live: agent_live})])
         |> Snapshot.derive()
 
       assert held.slots_free == 0
@@ -196,7 +206,7 @@ defmodule Arbiter.Tasks.SlotGateConformanceTest do
     merging =
       common
       |> Map.put(:issues, [ready, ticket("bd-1", :merging)])
-      |> Map.put(:workers, [worker("bd-1", :awaiting_review, %{agent_live: false})])
+      |> Map.put(:workers, [worker("bd-1", :succeeded, %{agent_live: false})])
       |> Snapshot.derive()
 
     assert merging.slots_free == 1

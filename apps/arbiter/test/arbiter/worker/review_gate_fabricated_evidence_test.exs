@@ -150,7 +150,10 @@ defmodule Arbiter.Worker.ReviewGateFabricatedEvidenceTest do
       task = new_task(ws)
       pid = run_gate(task, repo, @fabricated)
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 8_000)
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        8_000
+      )
 
       # One reviewing pass, and the implementer never ran — the gate had a
       # second round in hand and did not spend it.
@@ -184,10 +187,7 @@ defmodule Arbiter.Worker.ReviewGateFabricatedEvidenceTest do
 
       wait_until(fn -> counter(repo, "revise_commit_pass") == "1" end, 8_000)
 
-      wait_until(
-        fn -> Worker.state(pid).status in [:failed, :awaiting_review, :completed] end,
-        8_000
-      )
+      wait_until(fn -> Worker.finished?(Worker.state(pid)) end, 8_000)
 
       refute String.starts_with?(
                Map.get(Worker.state(pid).meta, :review_gate_findings) || "",
@@ -220,7 +220,7 @@ defmodule Arbiter.Worker.ReviewGateFabricatedEvidenceTest do
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
     :ok = Worker.advance(pid, :claude)
     send(pid, {:__claude_session_done__, "arb done"})
-    wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(pid)) end)
+    wait_until(fn -> match?(%{state: :waiting, waiting_on: :review_gate}, Worker.state(pid)) end)
 
     :ok = Worker.review_gate_verdict(pid, verdict)
     task

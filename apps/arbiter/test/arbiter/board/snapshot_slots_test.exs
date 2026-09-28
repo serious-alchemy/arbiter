@@ -1,7 +1,7 @@
 defmodule Arbiter.Board.SnapshotSlotsTest do
   @moduledoc """
   bd-aw2cyt: a slot is a live agent session in any role, not an author record
-  in a live status, and a card names the phase it is actually in.
+  in a live run state, and a card names the phase it is actually in.
   """
   use ExUnit.Case, async: true
 
@@ -31,29 +31,42 @@ defmodule Arbiter.Board.SnapshotSlotsTest do
     )
   end
 
-  defp author(task_id, status, attrs) do
+  # An author worker snapshot in one of its run's states. `:question` and
+  # `:review_gate` are a `:waiting` run and what it waits on; `:succeeded` and
+  # `:failed` are a finished run's outcome.
+  defp author(task_id, state, attrs) do
     Map.merge(
-      %{
-        task_id: task_id,
-        registry_key: task_id,
-        status: status,
-        role: nil,
-        workspace_id: "ws-1",
-        current_step: :implement,
-        started_at: @now,
-        step_started_at: @now,
-        mr_ref: nil,
-        merger_url: nil,
-        agent_live: false,
-        meta: %{}
-      },
+      Map.merge(
+        %{
+          task_id: task_id,
+          registry_key: task_id,
+          role: nil,
+          workspace_id: "ws-1",
+          current_step: :implement,
+          started_at: @now,
+          step_started_at: @now,
+          mr_ref: nil,
+          merger_url: nil,
+          agent_live: false,
+          meta: %{}
+        },
+        run_fields(state)
+      ),
       attrs
     )
   end
 
+  defp run_fields(:question), do: %{state: :waiting, waiting_on: :question, outcome: nil}
+  defp run_fields(:review_gate), do: %{state: :waiting, waiting_on: :review_gate, outcome: nil}
+
+  defp run_fields(outcome) when outcome in [:succeeded, :failed],
+    do: %{state: :finished, waiting_on: nil, outcome: outcome}
+
+  defp run_fields(state), do: %{state: state, waiting_on: nil, outcome: nil}
+
   defp reviewer(of, attrs) do
     Map.merge(
-      author(of <> "#review", :running, %{
+      author(of <> "#review", :working, %{
         role: :reviewer,
         meta: %{role: :reviewer, reviews: of}
       }),
@@ -63,7 +76,7 @@ defmodule Arbiter.Board.SnapshotSlotsTest do
 
   defp implementer(of, attrs) do
     Map.merge(
-      author(of <> "#review#impl1", :running, %{
+      author(of <> "#review#impl1", :working, %{
         role: :implementer,
         meta: %{role: :implementer, revises: of}
       }),
@@ -73,7 +86,7 @@ defmodule Arbiter.Board.SnapshotSlotsTest do
 
   defp fix_pass(of, attrs) do
     Map.merge(
-      author(of, :running, %{
+      author(of, :working, %{
         registry_key: of <> ":fixpass",
         role: :fix_pass,
         meta: %{role: :fix_pass}
@@ -84,7 +97,7 @@ defmodule Arbiter.Board.SnapshotSlotsTest do
 
   defp conflict(of, attrs) do
     Map.merge(
-      author(of, :running, %{
+      author(of, :working, %{
         registry_key: of <> ":conflict",
         role: :conflict_resolver,
         meta: %{role: :conflict_resolver}
@@ -117,19 +130,20 @@ defmodule Arbiter.Board.SnapshotSlotsTest do
 
   describe "agents_live is live agents, not records" do
     test "an author record whose agent has exited holds no live-agent count" do
-      # vs-8iqckq on 2026-09-16: `status=running`, no process anywhere.
-      board = derive(slots_total: 2, workers: [author("bd-1", :running, %{agent_live: false})])
+      # vs-8iqckq on 2026-09-16: a working run record, no process anywhere.
+      board = derive(slots_total: 2, workers: [author("bd-1", :working, %{agent_live: false})])
 
       assert board.agents_live == 0
     end
 
     test "every live role takes a live-agent count of its own" do
       workers = [
-        author("bd-1", :awaiting_review_gate, %{agent_live: false}),
+        author("bd-1", :review_gate, %{agent_live: false}),
         reviewer("bd-1", %{agent_live: true}),
-        author("bd-2", :awaiting_review, %{agent_live: false}),
+        # bd-2's author run finished when it opened its PR (bd-741sid).
+        author("bd-2", :succeeded, %{agent_live: false}),
         fix_pass("bd-2", %{agent_live: true}),
-        author("bd-3", :running, %{agent_live: true})
+        author("bd-3", :working, %{agent_live: true})
       ]
 
       board = derive(slots_total: 5, workers: workers)
@@ -139,9 +153,9 @@ defmodule Arbiter.Board.SnapshotSlotsTest do
 
     test "an implementer round and a conflict resolver each count, but fold into their author's one slot" do
       workers = [
-        author("bd-1", :awaiting_review_gate, %{agent_live: false}),
+        author("bd-1", :review_gate, %{agent_live: false}),
         implementer("bd-1", %{agent_live: true}),
-        author("bd-2", :awaiting_review, %{agent_live: false}),
+        author("bd-2", :succeeded, %{agent_live: false}),
         conflict("bd-2", %{agent_live: true})
       ]
 
@@ -152,7 +166,7 @@ defmodule Arbiter.Board.SnapshotSlotsTest do
   end
 
   describe "bd-asxw4e: a slot is a ticket In progress" do
-    test "a :merging ticket holds no slot, even with a resident :awaiting_review worker" do
+    test "a :merging ticket holds no slot, even with a live CI fix pass on it" do
       board =
         derive(
           slots_total: 1,
@@ -160,7 +174,7 @@ defmodule Arbiter.Board.SnapshotSlotsTest do
             issue("bd-1", %{state: :merging, status: :in_progress, pr_ref: "https://pr/1"}),
             issue("bd-ready", %{state: :queued})
           ],
-          workers: [author("bd-1", :awaiting_review, %{agent_live: false})]
+          workers: [fix_pass("bd-1", %{agent_live: true})]
         )
 
       assert board.slots_used == 0
@@ -171,7 +185,7 @@ defmodule Arbiter.Board.SnapshotSlotsTest do
     test "an :active ticket between ReviewGate rounds with no live agent holds one slot" do
       # The bd-45pwo1 shape: no reviewer / implementer / fix pass live, the
       # author between rounds — and now even no worker row at all.
-      for workers <- [[author("bd-1", :running, %{agent_live: false})], []] do
+      for workers <- [[author("bd-1", :working, %{agent_live: false})], []] do
         board =
           derive(
             slots_total: 1,
@@ -212,7 +226,7 @@ defmodule Arbiter.Board.SnapshotSlotsTest do
     end
 
     test "worker rows alone hold nothing: the count is read off the tickets" do
-      board = derive(slots_total: 2, workers: [author("bd-1", :running, %{agent_live: true})])
+      board = derive(slots_total: 2, workers: [author("bd-1", :working, %{agent_live: true})])
 
       assert board.agents_live == 1
       assert board.slots_used == 0
@@ -233,8 +247,8 @@ defmodule Arbiter.Board.SnapshotSlotsTest do
     @tag :slot_basis
     test ":issues restores the pre-bd-aw2cyt record-based agents-live count" do
       workers = [
-        author("bd-1", :running, %{agent_live: false}),
-        author("bd-2", :awaiting, %{agent_live: false}),
+        author("bd-1", :working, %{agent_live: false}),
+        author("bd-2", :question, %{agent_live: false}),
         reviewer("bd-1", %{agent_live: true})
       ]
 
@@ -251,7 +265,7 @@ defmodule Arbiter.Board.SnapshotSlotsTest do
 
   describe "phase on the card" do
     test "a live main agent is :implementing" do
-      board = derive(workers: [author("bd-1", :running, %{agent_live: true})])
+      board = derive(workers: [author("bd-1", :working, %{agent_live: true})])
 
       assert %{phase: :implementing, agent_live: true} = card(board, :running, "bd-1")
     end
@@ -260,7 +274,7 @@ defmodule Arbiter.Board.SnapshotSlotsTest do
       board =
         derive(
           workers: [
-            author("bd-1", :awaiting_review_gate, %{agent_live: false}),
+            author("bd-1", :review_gate, %{agent_live: false}),
             reviewer("bd-1", %{agent_live: true})
           ]
         )
@@ -272,7 +286,7 @@ defmodule Arbiter.Board.SnapshotSlotsTest do
       board =
         derive(
           workers: [
-            author("bd-1", :awaiting_review_gate, %{agent_live: false}),
+            author("bd-1", :review_gate, %{agent_live: false}),
             implementer("bd-1", %{agent_live: true})
           ]
         )
@@ -280,17 +294,22 @@ defmodule Arbiter.Board.SnapshotSlotsTest do
       assert %{phase: :addressing_review} = card(board, :running, "bd-1")
     end
 
+    # bd-741sid: no worker stays resident on an open PR — the Merging ticket
+    # itself carries the card.
     test "an open MR with nothing running reads :waiting_ci_merge, and no live agent" do
-      board = derive(workers: [author("bd-1", :awaiting_review, %{agent_live: false})])
+      board =
+        derive(issues: [issue("bd-1", %{state: :merging, status: :in_progress, pr_ref: "#1"})])
 
       assert %{phase: :waiting_ci_merge, agent_live: false} = card(board, :waiting, "bd-1")
     end
 
     test "a live CI fix pass reads :fixing_ci on the waiting card" do
+      # The author's run finished when it opened its PR; the fix pass is the
+      # only thing live under the ticket.
       board =
         derive(
           workers: [
-            author("bd-1", :awaiting_review, %{agent_live: false}),
+            author("bd-1", :succeeded, %{agent_live: false}),
             fix_pass("bd-1", %{agent_live: true})
           ]
         )
@@ -299,7 +318,7 @@ defmodule Arbiter.Board.SnapshotSlotsTest do
     end
 
     test "a question reads :waiting_on_you" do
-      board = derive(workers: [author("bd-1", :awaiting, %{agent_live: false})])
+      board = derive(workers: [author("bd-1", :question, %{agent_live: false})])
 
       assert %{phase: :waiting_on_you, agent_live: false} = card(board, :waiting, "bd-1")
     end
@@ -308,7 +327,7 @@ defmodule Arbiter.Board.SnapshotSlotsTest do
     # an agent is behind it — the hand-off phase is gone, and a record between
     # agents only exists for a moment now that every worker stops with its agent.
     test "a running record with no agent is visibly distinguished by its liveness" do
-      board = derive(workers: [author("bd-1", :running, %{agent_live: false})])
+      board = derive(workers: [author("bd-1", :working, %{agent_live: false})])
 
       c = card(board, :running, "bd-1")
       assert c.agent_live == false

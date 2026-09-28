@@ -38,7 +38,12 @@ defmodule Arbiter.Loop.CorpusCiTest do
       Ash.create(
         Run,
         Map.merge(
-          %{repo: "arbiter", status: :completed, started_at: DateTime.utc_now()},
+          %{
+            repo: "arbiter",
+            state: :finished,
+            outcome: :succeeded,
+            started_at: DateTime.utc_now()
+          },
           attrs
         )
       )
@@ -62,14 +67,15 @@ defmodule Arbiter.Loop.CorpusCiTest do
     for {i, model} <- [{red, "claude-opus-5-5"}, {green, "claude-sonnet-5"}, {no_pr, "m"}] do
       run(%{
         task_id: i.id,
-        worker_type: :main,
+        kind: :implement,
+        role: "base",
         model: model,
         provider: "claude",
         workspace_id: ws.id
       })
     end
 
-    run(%{task_id: red.id, worker_type: :fix_pass, model: "claude-sonnet-5", provider: "claude"})
+    run(%{task_id: red.id, kind: :fix_pass, model: "claude-sonnet-5", provider: "claude"})
 
     assert {:ok, _rows, %{ci: ci}} = Corpus.fetch(window())
 
@@ -92,8 +98,8 @@ defmodule Arbiter.Loop.CorpusCiTest do
 
   test "each fix_pass carries its briefed checks, step signals and final summary", %{ws: ws} do
     i = issue(ws, difficulty: 2, pr_ref: "#3")
-    run(%{task_id: i.id, worker_type: :main, model: "m", provider: "claude"})
-    fp = run(%{task_id: i.id, worker_type: :fix_pass, model: "m", provider: "claude"})
+    run(%{task_id: i.id, kind: :implement, role: "base", model: "m", provider: "claude"})
+    fp = run(%{task_id: i.id, kind: :fix_pass, model: "m", provider: "claude"})
 
     :ok =
       PromptLog.write(
@@ -154,7 +160,7 @@ defmodule Arbiter.Loop.CorpusCiTest do
 
   test "the CLI's captured result text outranks the transcript tail", %{ws: ws} do
     i = issue(ws, difficulty: 2, pr_ref: "#4")
-    fp = run(%{task_id: i.id, worker_type: :fix_pass, model: "m"})
+    fp = run(%{task_id: i.id, kind: :fix_pass, model: "m"})
     Ash.update!(fp, %{result_message: "Re-ran the flaky job; green."})
 
     assert {:ok, _rows, %{ci: %{fix_passes: [fix_pass]}}} = Corpus.fetch(window())
@@ -168,7 +174,7 @@ defmodule Arbiter.Loop.CorpusCiTest do
 
     run(%{
       task_id: i.id,
-      worker_type: :fix_pass,
+      kind: :fix_pass,
       started_at: DateTime.add(DateTime.utc_now(), -30 * 24 * 3600, :second)
     })
 

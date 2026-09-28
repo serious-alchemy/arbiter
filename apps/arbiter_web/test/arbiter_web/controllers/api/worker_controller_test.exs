@@ -35,7 +35,9 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
 
       assert body["task_id"] == task.id
       assert body["repo"] == "test/repo"
-      assert body["status"] in ["idle", "running", "awaiting", "completed", "failed"]
+      assert body["kind"] == "implement"
+      assert body["state"] in ["starting", "working"]
+      refute Map.has_key?(body, "status")
       assert body["output_lines"] == ["hello", "world", "arb done"]
     end
 
@@ -44,7 +46,7 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
       assert json_response(conn, 404)
     end
 
-    test "falls back to the most recent historical run when no live worker exists",
+    test "reports the ticket's most recent run when no live worker exists",
          %{conn: conn, ws: ws} do
       task_id = "bd-hist-#{System.unique_integer([:positive])}"
       older = DateTime.add(DateTime.utc_now(), -60, :second)
@@ -55,7 +57,8 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
           task_id: task_id,
           repo: "arbiter",
           workspace_id: ws.id,
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           started_at: older,
           completed_at: older,
           output_lines: ["stale"]
@@ -66,7 +69,8 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
           task_id: task_id,
           repo: "arbiter",
           workspace_id: ws.id,
-          status: :failed,
+          state: :finished,
+          outcome: :failed,
           started_at: newer,
           completed_at: newer,
           exit_code: 2,
@@ -79,8 +83,9 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
 
       assert body["source"] == "history"
       assert body["task_id"] == task_id
-      # Most-recent run wins (failed, not the older completed one).
-      assert body["status"] == "failed"
+      # Most-recent run wins (failed, not the older succeeded one), read into
+      # the same run vocabulary a live run reports (bd-1uu19b).
+      assert {body["kind"], body["state"], body["outcome"]} == {"implement", "finished", "failed"}
       assert body["exit_status"] == 2
       assert body["failure_reason"] == "claude_crashed"
       assert body["output_lines"] == ["a", "b", "boom"]
@@ -96,7 +101,8 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
           task_id: task.id,
           repo: "arbiter",
           workspace_id: ws.id,
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           started_at: DateTime.add(DateTime.utc_now(), -60, :second)
         })
 
@@ -127,7 +133,7 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
       conn = get(conn, ~p"/api/workers/#{task.id}")
       body = json_response(conn, 200)
 
-      assert body["status"] == "failed"
+      assert {body["state"], body["outcome"]} == {"finished", "failed"}
       assert body["failure_reason"] =~ "claude_crashed"
     end
   end
@@ -499,7 +505,8 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
           task_id: task_id,
           repo: "arbiter",
           workspace_id: ws.id,
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           started_at: DateTime.utc_now(),
           completed_at: DateTime.utc_now()
         })
@@ -530,7 +537,7 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
           task_id: task_id,
           repo: "arbiter",
           workspace_id: ws.id,
-          status: :running,
+          state: :working,
           started_at: DateTime.utc_now()
         })
 
@@ -559,7 +566,8 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
           task_id: task_id,
           repo: "arbiter",
           workspace_id: ws.id,
-          status: :failed,
+          state: :finished,
+          outcome: :failed,
           started_at: older,
           completed_at: older
         })
@@ -569,7 +577,8 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
           task_id: task_id,
           repo: "arbiter",
           workspace_id: ws.id,
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           started_at: newer,
           completed_at: newer
         })
@@ -595,8 +604,9 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
           task_id: review_id,
           repo: "arbiter",
           workspace_id: ws.id,
-          worker_type: :review,
-          status: :completed,
+          kind: :review,
+          state: :finished,
+          outcome: :succeeded,
           started_at: DateTime.utc_now()
         })
 
@@ -639,7 +649,8 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
           task_id: task_id,
           repo: "arbiter",
           workspace_id: ws.id,
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           started_at: DateTime.utc_now(),
           completed_at: DateTime.utc_now()
         })
@@ -669,7 +680,7 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
           task_id: task_id,
           repo: "arbiter",
           workspace_id: ws.id,
-          status: :running,
+          state: :working,
           started_at: DateTime.utc_now()
         })
 
@@ -697,7 +708,8 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
           task_id: task_id,
           repo: "arbiter",
           workspace_id: ws.id,
-          status: :failed,
+          state: :finished,
+          outcome: :failed,
           started_at: older,
           completed_at: older
         })
@@ -707,7 +719,8 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
           task_id: task_id,
           repo: "arbiter",
           workspace_id: ws.id,
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           started_at: newer,
           completed_at: newer
         })
@@ -748,8 +761,9 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
           task_id: task_id,
           repo: "arbiter",
           workspace_id: ws.id,
-          worker_type: :main,
-          status: :completed,
+          kind: :implement,
+          state: :finished,
+          outcome: :succeeded,
           started_at: DateTime.add(DateTime.utc_now(), -20, :second)
         })
 
@@ -758,8 +772,9 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
           task_id: task_id <> "#review",
           repo: "arbiter",
           workspace_id: ws.id,
-          worker_type: :review,
-          status: :completed,
+          kind: :review,
+          state: :finished,
+          outcome: :succeeded,
           started_at: DateTime.add(DateTime.utc_now(), -10, :second)
         })
 
@@ -768,7 +783,8 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
           task_id: "bd-unrelated-#{System.unique_integer([:positive])}",
           repo: "arbiter",
           workspace_id: ws.id,
-          status: :completed,
+          state: :finished,
+          outcome: :succeeded,
           started_at: DateTime.utc_now()
         })
 

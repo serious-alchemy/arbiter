@@ -64,8 +64,8 @@ defmodule Arbiter.Loop.FlakesTest do
           task_id: task.id,
           workspace_id: ws.id,
           repo: "arbiter",
-          worker_type: :fix_pass,
-          status: :running,
+          kind: :fix_pass,
+          state: :working,
           started_at: DateTime.add(DateTime.utc_now(), -3_600, :second)
         })
 
@@ -74,8 +74,8 @@ defmodule Arbiter.Loop.FlakesTest do
           task_id: task.id,
           workspace_id: ws.id,
           repo: "arbiter",
-          worker_type: :fix_pass,
-          status: :running,
+          kind: :fix_pass,
+          state: :working,
           started_at: DateTime.utc_now()
         })
 
@@ -91,8 +91,8 @@ defmodule Arbiter.Loop.FlakesTest do
           task_id: task.id,
           workspace_id: ws.id,
           repo: "arbiter",
-          worker_type: :fix_pass,
-          status: :running,
+          kind: :fix_pass,
+          state: :working,
           started_at: DateTime.utc_now()
         })
 

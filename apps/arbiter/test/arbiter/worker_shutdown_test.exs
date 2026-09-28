@@ -107,7 +107,7 @@ defmodule Arbiter.WorkerShutdownTest do
   end
 
   describe "supervised shutdown" do
-    test "runs terminate/2: the run is recorded :interrupted, not :completed or :failed" do
+    test "runs terminate/2: the run is recorded :interrupted, not :succeeded or :failed" do
       sup = start_sup!()
       {pid, task_id} = start_worker!(sup)
       :ok = Worker.advance(pid, :implement)
@@ -117,7 +117,7 @@ defmodule Arbiter.WorkerShutdownTest do
       assert_receive {:DOWN, ^ref, :process, ^pid, :shutdown}
 
       run = run_for(task_id)
-      assert run.status == :interrupted
+      assert run.outcome == :interrupted
       assert run.failure_reason == "server shutdown"
       assert %DateTime{} = run.completed_at
       assert Worker.whereis(task_id) == nil
@@ -147,7 +147,7 @@ defmodule Arbiter.WorkerShutdownTest do
 
       refute os_process_alive?(os_pid)
       refute os_process_alive?(child_pid)
-      assert run_for(task_id).status == :interrupted
+      assert run_for(task_id).outcome == :interrupted
     end
 
     test "a worker that ignores the shutdown is killed after its grace and the supervisor still stops" do
@@ -168,13 +168,15 @@ defmodule Arbiter.WorkerShutdownTest do
       assert_receive {:DOWN, ^ref, :process, ^pid, :killed}
       assert micros < 5_000_000
 
-      # terminate/2 never ran, so the row is still :running — the boot
-      # reconciler's "server restarted" sweep is the backstop for exactly this.
-      assert run_for(task_id).status == :running
+      # terminate/2 never ran, so the row is still live (the worker never
+      # advanced, so :starting) — the boot reconciler's "server restarted"
+      # sweep is the backstop for exactly this.
+      assert %{state: :starting, outcome: nil} = run_for(task_id)
       assert {:ok, n} = Reconciler.reconcile_orphaned_runs(primary?: true)
       assert n >= 1
       run = run_for(task_id)
-      assert run.status == :failed
+      assert run.state == :finished
+      assert run.outcome == :interrupted
       assert run.failure_reason == "server restarted"
     end
   end
@@ -207,7 +209,7 @@ defmodule Arbiter.WorkerShutdownTest do
       :ok = Worker.fail(pid, :simulated_failure)
       _ = :sys.get_state(pid)
       assert Process.alive?(pid)
-      assert Worker.state(pid).status == :failed
+      assert Worker.state(pid).outcome == :failed
     end
 
     test "an abnormal exit from a linked process stops the worker through terminate/2 as a crash" do
@@ -224,7 +226,7 @@ defmodule Arbiter.WorkerShutdownTest do
       assert_receive {:DOWN, ^ref, :process, ^pid, {:linked_exit, _from, :boom}}
 
       run = run_for(task_id)
-      assert run.status == :failed
+      assert run.outcome == :failed
       assert run.failure_reason =~ "worker crashed"
       assert run.failure_reason =~ "boom"
     end
@@ -245,7 +247,7 @@ defmodule Arbiter.WorkerShutdownTest do
       assert_receive {:DOWN, ^ref, :process, ^pid, {:linked_exit, _from, _}}
 
       run = run_for(task_id)
-      assert run.status == :failed
+      assert run.outcome == :failed
       assert run.failure_reason =~ "worker crashed"
       assert run.failure_reason =~ "boom"
       assert String.length(run.failure_reason) < 2_000
@@ -270,10 +272,10 @@ defmodule Arbiter.WorkerShutdownTest do
       # Past the (test-config) exit grace, so the deferred stop check has run.
       Process.sleep(150)
       _ = :sys.get_state(pid)
-      assert Worker.state(pid).status == :running
+      assert Worker.state(pid).state == :working
 
       stop_sup!()
-      assert run_for(task_id).status == :interrupted
+      assert run_for(task_id).outcome == :interrupted
     end
   end
 
@@ -337,12 +339,12 @@ defmodule Arbiter.WorkerShutdownTest do
       :ok = stop_supervised(:shutdown_test_machine_sup)
       assert_receive {:DOWN, ^driver_ref, :process, ^driver_pid, _reason}, 2_000
 
-      assert Worker.state(pid).status == :running
+      assert Worker.state(pid).state == :working
 
       stop_sup!()
 
       run = run_for(task.id)
-      assert run.status == :interrupted
+      assert run.outcome == :interrupted
       assert run.failure_reason == "server shutdown"
     end
   end

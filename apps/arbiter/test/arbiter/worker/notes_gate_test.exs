@@ -168,13 +168,13 @@ defmodule Arbiter.Worker.NotesGateTest do
 
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end)
+      wait_until(fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end)
 
       snap = Worker.state(pid)
 
       # Must not have completed or routed to any review path.
-      refute snap.status == :completed
-      refute snap.status == :awaiting_review_gate
+      refute snap.outcome == :succeeded
+      refute snap.waiting_on == :review_gate
 
       # fail_now/2 stores the failure reason under :failure_reason in meta.
       assert snap.meta.failure_reason == :blank_notes_at_completion
@@ -204,10 +204,10 @@ defmodule Arbiter.Worker.NotesGateTest do
 
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end)
+      wait_until(fn -> match?(%{state: :finished, outcome: :succeeded}, Worker.state(pid)) end)
 
       snap = Worker.state(pid)
-      assert snap.status == :completed
+      assert snap.outcome == :succeeded
     end
 
     test "whitespace-only notes are treated as blank", %{ws: ws} do
@@ -216,7 +216,7 @@ defmodule Arbiter.Worker.NotesGateTest do
 
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end)
+      wait_until(fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end)
 
       assert Worker.state(pid).meta.failure_reason == :blank_notes_at_completion
     end
@@ -237,10 +237,10 @@ defmodule Arbiter.Worker.NotesGateTest do
 
       :ok = exit_clean_without_done(pid, "ng-exit-populated")
 
-      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end)
+      wait_until(fn -> match?(%{state: :finished, outcome: :succeeded}, Worker.state(pid)) end)
 
       snap = Worker.state(pid)
-      assert snap.status == :completed
+      assert snap.outcome == :succeeded
       # It completed straight through the notes gate — never down the resume
       # path (no resume attempt was ever recorded) and never failed.
       refute Map.has_key?(snap.meta, :resume_attempts)
@@ -256,7 +256,7 @@ defmodule Arbiter.Worker.NotesGateTest do
 
       :ok = exit_clean_without_done(pid, "ng-exit-blank")
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end)
+      wait_until(fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end)
 
       snap = Worker.state(pid)
       # Failed via the notes gate (concrete cause), NOT via the resume/stop path.
@@ -284,7 +284,7 @@ defmodule Arbiter.Worker.NotesGateTest do
 
       :ok = exit_agy_denied_without_done(pid, "ng-strict-denied")
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end)
+      wait_until(fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end)
 
       snap = Worker.state(pid)
       # Not the generic catch-all — a concrete, actionable reason naming the
@@ -309,7 +309,7 @@ defmodule Arbiter.Worker.NotesGateTest do
 
       :ok = exit_agy_denied_without_done(pid, "ng-strict-denied-nonboot", "pwd && git status")
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end)
+      wait_until(fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end)
 
       snap = Worker.state(pid)
       assert snap.meta.failure_reason == "strict policy denied command `pwd`"

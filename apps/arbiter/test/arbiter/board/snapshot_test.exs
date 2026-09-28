@@ -31,22 +31,35 @@ defmodule Arbiter.Board.SnapshotTest do
     )
   end
 
-  defp worker(task_id, status, attrs \\ %{}) do
+  # A worker snapshot in one of its run's states. `:question` and
+  # `:review_gate` are a `:waiting` run and what it waits on; `:succeeded`,
+  # `:failed` and `:interrupted` are a finished run's outcome.
+  defp worker(task_id, state, attrs \\ %{}) do
     Map.merge(
-      %{
-        task_id: task_id,
-        status: status,
-        workspace_id: "ws-1",
-        current_step: :implement,
-        started_at: @now,
-        step_started_at: @now,
-        mr_ref: nil,
-        merger_url: nil,
-        meta: %{}
-      },
+      Map.merge(
+        %{
+          task_id: task_id,
+          workspace_id: "ws-1",
+          current_step: :implement,
+          started_at: @now,
+          step_started_at: @now,
+          mr_ref: nil,
+          merger_url: nil,
+          meta: %{}
+        },
+        run_fields(state)
+      ),
       attrs
     )
   end
+
+  defp run_fields(:question), do: %{state: :waiting, waiting_on: :question, outcome: nil}
+  defp run_fields(:review_gate), do: %{state: :waiting, waiting_on: :review_gate, outcome: nil}
+
+  defp run_fields(outcome) when outcome in [:succeeded, :failed, :interrupted],
+    do: %{state: :finished, waiting_on: nil, outcome: outcome}
+
+  defp run_fields(state), do: %{state: state, waiting_on: nil, outcome: nil}
 
   defp derive(overrides) do
     Snapshot.derive(
@@ -88,7 +101,7 @@ defmodule Arbiter.Board.SnapshotTest do
       board =
         derive(
           issues: [issue("bd-a"), issue("bd-b")],
-          workers: [worker("bd-a", :running)]
+          workers: [worker("bd-a", :working)]
         )
 
       assert ids(board.ready) == ["bd-b"]
@@ -130,7 +143,7 @@ defmodule Arbiter.Board.SnapshotTest do
             issue("bd-a", %{description: "Rewrites `lib/board.ex`."}),
             issue("bd-b")
           ],
-          workers: [worker("bd-run", :running)],
+          workers: [worker("bd-run", :working)],
           changed_files: %{"bd-run" => ["lib/board.ex"]}
         )
 
@@ -145,7 +158,7 @@ defmodule Arbiter.Board.SnapshotTest do
             issue("bd-a", %{description: "Rewrites `lib/board.ex`."}),
             issue("bd-run", %{status: :in_progress, description: "Touches `lib/board.ex` too."})
           ],
-          workers: [worker("bd-run", :running)]
+          workers: [worker("bd-run", :working)]
         )
 
       assert [
@@ -193,7 +206,7 @@ defmodule Arbiter.Board.SnapshotTest do
       board =
         derive(
           issues: [issue("bd-a", %{refined: false})],
-          workers: [worker("bd-a", :running)]
+          workers: [worker("bd-a", :working)]
         )
 
       assert ids(board.backlog) == []
@@ -262,7 +275,7 @@ defmodule Arbiter.Board.SnapshotTest do
       board =
         derive(
           issues: [issue("bd-a")],
-          workers: [worker("bd-b", :running)]
+          workers: [worker("bd-b", :working)]
         )
 
       assert [ready] = board.ready
@@ -354,7 +367,7 @@ defmodule Arbiter.Board.SnapshotTest do
             issue("bd-1", %{state: :active, status: :in_progress}),
             issue("bd-2", %{state: :active, status: :in_progress})
           ],
-          workers: [worker("bd-1", :running), worker("bd-2", :awaiting_review_gate)]
+          workers: [worker("bd-1", :working), worker("bd-2", :review_gate)]
         )
 
       assert board.slots_total == 3
@@ -366,8 +379,9 @@ defmodule Arbiter.Board.SnapshotTest do
       board =
         derive(
           slots_total: 2,
+          # bd-741sid: its author run finished when the PR opened.
           issues: [issue("bd-1", %{state: :merging, status: :in_progress, pr_ref: "pr/1"})],
-          workers: [worker("bd-1", :awaiting_review)]
+          workers: [worker("bd-1", :succeeded)]
         )
 
       assert board.slots_free == 2
@@ -378,7 +392,7 @@ defmodule Arbiter.Board.SnapshotTest do
         derive(
           slots_total: 2,
           issues: [issue("bd-1", %{state: :closed, status: :closed})],
-          workers: [worker("bd-1", :completed)]
+          workers: [worker("bd-1", :succeeded)]
         )
 
       assert board.slots_free == 2
@@ -389,7 +403,7 @@ defmodule Arbiter.Board.SnapshotTest do
         derive(
           slots_total: 1,
           issues: [issue("bd-a"), issue("bd-1", %{state: :active, status: :in_progress})],
-          workers: [worker("bd-1", :running)]
+          workers: [worker("bd-1", :working)]
         )
 
       assert board.promote == nil
@@ -403,7 +417,7 @@ defmodule Arbiter.Board.SnapshotTest do
         derive(
           issues: [issue("bd-a", %{status: :in_progress})],
           workers: [
-            worker("bd-a", :running, %{
+            worker("bd-a", :working, %{
               current_step: :implement,
               meta: %{activity: "edit · scheduler.ex"}
             })
@@ -422,7 +436,7 @@ defmodule Arbiter.Board.SnapshotTest do
     end
 
     test "a worker under review is still running, not waiting on you" do
-      board = derive(workers: [worker("bd-a", :awaiting_review_gate)])
+      board = derive(workers: [worker("bd-a", :review_gate)])
 
       assert [%{id: "bd-a", activity: "in review"}] = board.running
       assert board.waiting == []
@@ -432,8 +446,8 @@ defmodule Arbiter.Board.SnapshotTest do
       board =
         derive(
           workers: [
-            worker("bd-a", :awaiting_review_gate),
-            worker("bd-a#review", :running, %{meta: %{role: :reviewer, reviews: "bd-a"}})
+            worker("bd-a", :review_gate),
+            worker("bd-a#review", :working, %{meta: %{role: :reviewer, reviews: "bd-a"}})
           ]
         )
 
@@ -447,8 +461,8 @@ defmodule Arbiter.Board.SnapshotTest do
         derive(
           issues: [issue("bd-a", %{status: :in_progress})],
           workers: [
-            worker("bd-a", :awaiting_review_gate),
-            worker(review_id <> "#impl2", :running, %{
+            worker("bd-a", :review_gate),
+            worker(review_id <> "#impl2", :working, %{
               meta: %{role: :implementer, revises: "bd-a"}
             })
           ]
@@ -464,8 +478,8 @@ defmodule Arbiter.Board.SnapshotTest do
       board =
         derive(
           workers: [
-            worker("bd-a", :awaiting_review_gate),
-            worker(review_id <> "#r2", :running, %{meta: %{role: :reviewer, reviews: "bd-a"}})
+            worker("bd-a", :review_gate),
+            worker(review_id <> "#r2", :working, %{meta: %{role: :reviewer, reviews: "bd-a"}})
           ]
         )
 
@@ -478,8 +492,8 @@ defmodule Arbiter.Board.SnapshotTest do
       board =
         derive(
           workers: [
-            worker("bd-a", :awaiting_review_gate),
-            worker(review_id <> "#r2#v2", :running, %{meta: %{role: :reviewer, reviews: "bd-a"}})
+            worker("bd-a", :review_gate),
+            worker(review_id <> "#r2#v2", :working, %{meta: %{role: :reviewer, reviews: "bd-a"}})
           ]
         )
 
@@ -487,17 +501,17 @@ defmodule Arbiter.Board.SnapshotTest do
     end
 
     test "an author-only card's provider is the author's own" do
-      board = derive(workers: [worker("bd-a", :running, %{meta: %{provider: "codex"}})])
+      board = derive(workers: [worker("bd-a", :working, %{meta: %{provider: "codex"}})])
 
       assert [%{id: "bd-a", provider: "codex"}] = board.running
     end
 
-    test "an author awaiting review shows the gate worker's provider, not its own" do
+    test "an author waiting on the review gate shows the gate worker's provider, not its own" do
       board =
         derive(
           workers: [
-            worker("bd-a", :awaiting_review_gate, %{meta: %{provider: "claude"}}),
-            worker("bd-a#review", :running, %{
+            worker("bd-a", :review_gate, %{meta: %{provider: "claude"}}),
+            worker("bd-a#review", :working, %{
               meta: %{role: :reviewer, reviews: "bd-a", provider: "gemini"}
             })
           ]
@@ -507,7 +521,7 @@ defmodule Arbiter.Board.SnapshotTest do
     end
 
     test "an unknown provider is nil, not a guess" do
-      board = derive(workers: [worker("bd-a", :running, %{meta: %{}})])
+      board = derive(workers: [worker("bd-a", :working, %{meta: %{}})])
 
       assert [%{id: "bd-a", provider: nil}] = board.running
     end
@@ -517,17 +531,25 @@ defmodule Arbiter.Board.SnapshotTest do
     test "unions the parked and the merge-parked, longest wait first" do
       board =
         derive(
+          # bd-741sid: an open PR is a Merging ticket, carded from its row.
+          issues: [
+            issue("bd-c", %{
+              state: :merging,
+              status: :in_progress,
+              pr_ref: "!41",
+              updated_at: @yesterday
+            })
+          ],
           workers: [
             worker("bd-a", :failed, %{
               step_started_at: ~U[2026-08-22 11:00:00Z],
               meta: %{stop_reason: %{category: :exited_without_done, summary: "review rejected"}}
             }),
-            worker("bd-b", :awaiting, %{
+            worker("bd-b", :question, %{
               step_started_at: @now,
               meta: %{await_reason: "needs a decision"}
             }),
-            worker("bd-c", :awaiting_review, %{mr_ref: "!41", step_started_at: @yesterday}),
-            worker("bd-d", :running)
+            worker("bd-d", :working)
           ]
         )
 
@@ -540,12 +562,18 @@ defmodule Arbiter.Board.SnapshotTest do
       board =
         derive(
           workers: [
-            worker("bd-a", :awaiting, %{meta: %{await_reason: "needs a decision"}}),
-            worker("bd-b", :awaiting_review, %{
-              step_started_at: @yesterday,
-              mr_ref: "!42",
+            worker("bd-a", :question, %{meta: %{await_reason: "needs a decision"}})
+          ],
+          # bd-741sid: the merge-parked one is a Merging ticket, its merge
+          # fields on its own row.
+          issues: [
+            issue("bd-b", %{
+              state: :merging,
+              status: :in_progress,
+              updated_at: @yesterday,
+              pr_ref: "!42",
               merger_url: "https://example.test/42",
-              meta: %{last_merger_status: %{approved: false}}
+              merger_status: %{"approved" => false}
             })
           ]
         )
@@ -558,8 +586,7 @@ defmodule Arbiter.Board.SnapshotTest do
       assert [%{merger_status: %{approved: false}}, %{merger_status: nil}] = board.waiting
     end
 
-    # bd-2mv3lx: `arb worker stop` on an `:awaiting_review` worker (the
-    # documented pre-flight for `arb server deploy`) leaves the issue
+    # bd-2mv3lx: `arb worker stop` on a worker (the documented pre-flight for `arb server deploy`) leaves the issue
     # `in_progress` with no live worker — a state that used to match none of
     # the five columns and vanished from the board entirely.
     # Explicitly `:active`: with a `pr_ref` and no `state`, the backfill rule
@@ -607,19 +634,18 @@ defmodule Arbiter.Board.SnapshotTest do
       board =
         derive(
           issues: [issue("bd-a", %{status: :in_progress})],
-          workers: [worker("bd-a", :awaiting_review, %{mr_ref: "!7"})]
+          workers: [worker("bd-a", :question)]
         )
 
       assert ids(board.waiting) == ["bd-a"]
     end
 
-    # bd-6lvc1r: `:completed` is a real, terminal worker status — the CI fix
-    # pass finished — but it is in neither `@running_statuses` nor
-    # `@waiting_statuses`, and its presence in `worked` used to be enough to
+    # bd-6lvc1r: a run finished `:succeeded` is a real, terminal row — the CI
+    # fix pass finished — but it is neither running nor waiting, and its presence in `worked` used to be enough to
     # keep `orphaned_cards` from picking the issue up either. The task
     # vanished from every column even though `classify_columns` still called
     # it `:waiting`.
-    test "an in_progress issue whose only worker row is :completed still shows, flagged for a human" do
+    test "an in_progress issue whose only worker row succeeded still shows, flagged for a human" do
       board =
         derive(
           issues: [
@@ -631,7 +657,7 @@ defmodule Arbiter.Board.SnapshotTest do
               review_park_reason: "resume_blocked"
             })
           ],
-          workers: [worker("bd-a", :completed)]
+          workers: [worker("bd-a", :succeeded)]
         )
 
       assert [%{id: "bd-a", reason: reason, mr_ref: "!293", needs_you: true}] = board.waiting
@@ -642,26 +668,26 @@ defmodule Arbiter.Board.SnapshotTest do
              end)
     end
 
-    test "an in_progress issue whose only worker row is :completed and has no park reason still shows" do
+    test "an in_progress issue whose only worker row succeeded and has no park reason still shows" do
       board =
         derive(
           issues: [
             issue("bd-a", %{status: :in_progress, updated_at: @yesterday})
           ],
-          workers: [worker("bd-a", :completed)]
+          workers: [worker("bd-a", :succeeded)]
         )
 
       assert [%{id: "bd-a", reason: reason}] = board.waiting
       assert reason =~ "worker stopped"
     end
 
-    test "an in_progress issue with both a completed row and a live row is not double-counted" do
+    test "an in_progress issue with both a succeeded row and a live row is not double-counted" do
       board =
         derive(
           issues: [issue("bd-a", %{status: :in_progress, updated_at: @yesterday})],
           workers: [
-            worker("bd-a", :completed),
-            worker("bd-a", :awaiting_review, %{mr_ref: "!7"})
+            worker("bd-a", :succeeded),
+            worker("bd-a", :question)
           ]
         )
 
@@ -671,15 +697,15 @@ defmodule Arbiter.Board.SnapshotTest do
 
   # bd-6zapbl: the board reads each ticket's column from `Lifecycle.view/2`.
   describe "columns from the lifecycle projection (bd-6zapbl)" do
-    test "a queued ticket with a leftover completed or failed author row stays in Ready" do
-      for status <- [:completed, :failed] do
+    test "a queued ticket with a leftover finished author row stays in Ready" do
+      for outcome <- [:succeeded, :failed, :interrupted] do
         board =
           derive(
             issues: [issue("bd-a", %{state: :queued})],
-            workers: [worker("bd-a", status)]
+            workers: [worker("bd-a", outcome)]
           )
 
-        assert ids(Enum.map(board.ready, & &1.card)) == ["bd-a"], "#{status} row hid it"
+        assert ids(Enum.map(board.ready, & &1.card)) == ["bd-a"], "#{outcome} row hid it"
         assert board.waiting == [] and board.running == [] and board.backlog == []
       end
     end
@@ -699,7 +725,7 @@ defmodule Arbiter.Board.SnapshotTest do
       board =
         derive(
           issues: [issue("bd-a", %{state: :backlog, refined: false})],
-          workers: [worker("bd-a", :completed)]
+          workers: [worker("bd-a", :succeeded)]
         )
 
       assert ids(board.backlog) == ["bd-a"]
@@ -709,7 +735,7 @@ defmodule Arbiter.Board.SnapshotTest do
       board =
         derive(
           issues: [issue("bd-a", %{state: :merging, status: :in_progress, pr_ref: "!1"})],
-          workers: [worker("bd-a", :running)]
+          workers: [worker("bd-a", :working)]
         )
 
       assert [%{id: "bd-a", reason: nil}] = board.waiting
@@ -741,12 +767,12 @@ defmodule Arbiter.Board.SnapshotTest do
         derive(
           issues: [issue("bd-a", %{state: :active, status: :in_progress})],
           workers: [
-            worker("bd-a", :running),
-            worker("bd-a", :running, %{role: :fix_pass, registry_key: "bd-a:fix"})
+            worker("bd-a", :working),
+            worker("bd-a", :working, %{role: :fix_pass, registry_key: "bd-a:fix"})
           ]
         )
 
-      assert [%{id: "bd-a", status: :running}] = board.running
+      assert [%{id: "bd-a", status: :working}] = board.running
     end
   end
 
@@ -757,20 +783,20 @@ defmodule Arbiter.Board.SnapshotTest do
     test "every issue classify_columns puts in :waiting or :running gets exactly one card" do
       issues = [
         issue("bd-running", %{status: :in_progress}),
-        issue("bd-waiting-awaiting", %{status: :in_progress}),
+        issue("bd-waiting-question", %{status: :in_progress}),
         issue("bd-waiting-failed", %{status: :in_progress}),
-        issue("bd-waiting-review", %{status: :in_progress}),
-        issue("bd-waiting-completed-only", %{status: :in_progress, updated_at: @yesterday}),
+        issue("bd-waiting-merging", %{status: :in_progress, state: :merging, pr_ref: "!1"}),
+        issue("bd-waiting-succeeded-only", %{status: :in_progress, updated_at: @yesterday}),
         issue("bd-waiting-orphaned", %{status: :in_progress, updated_at: @yesterday}),
         issue("bd-waiting-verification", %{status: :awaiting_verification})
       ]
 
       workers = [
-        worker("bd-running", :running),
-        worker("bd-waiting-awaiting", :awaiting),
+        worker("bd-running", :working),
+        worker("bd-waiting-question", :question),
         worker("bd-waiting-failed", :failed),
-        worker("bd-waiting-review", :awaiting_review, %{mr_ref: "!1"}),
-        worker("bd-waiting-completed-only", :completed)
+        worker("bd-waiting-merging", :succeeded),
+        worker("bd-waiting-succeeded-only", :succeeded)
       ]
 
       board = derive(issues: issues, workers: workers)
@@ -785,16 +811,16 @@ defmodule Arbiter.Board.SnapshotTest do
     end
   end
 
-  # bd-8jixav: a task's own `:awaiting_review` row and a subordinate
-  # `:fixpass` / `:conflict` pass's `:failed` row are BOTH in
-  # `@waiting_statuses`, so one task rendered as two cards in the Waiting
-  # column — read at a glance as two different stuck tickets.
+  # bd-8jixav: a task's own waiting row and a subordinate `:fixpass` /
+  # `:conflict` pass's failed row both belong in Waiting, so one task rendered
+  # as two cards in the Waiting column — read at a glance as two different
+  # stuck tickets.
   describe "waiting column, one card per task" do
     test "a subordinate pass does not add a second card for the same task" do
       board =
         derive(
           workers: [
-            worker("bd-a", :awaiting_review, %{
+            worker("bd-a", :question, %{
               mr_ref: "!42",
               step_started_at: @yesterday
             }),
@@ -819,7 +845,7 @@ defmodule Arbiter.Board.SnapshotTest do
               role: :conflict,
               step_started_at: @now
             }),
-            worker("bd-a", :awaiting_review, %{
+            worker("bd-a", :question, %{
               mr_ref: "!42",
               merger_url: "https://example.test/42",
               step_started_at: @yesterday
@@ -827,8 +853,15 @@ defmodule Arbiter.Board.SnapshotTest do
           ]
         )
 
-      assert [%{id: "bd-a", status: :awaiting_review, mr_ref: "!42", since: @yesterday}] =
-               board.waiting
+      assert [
+               %{
+                 id: "bd-a",
+                 status: :waiting,
+                 waiting_on: :question,
+                 mr_ref: "!42",
+                 since: @yesterday
+               }
+             ] = board.waiting
     end
 
     test "a subordinate pass with no primary row still gets its own card" do
@@ -839,38 +872,44 @@ defmodule Arbiter.Board.SnapshotTest do
           ]
         )
 
-      assert [%{id: "bd-a", status: :failed}] = board.waiting
+      assert [%{id: "bd-a", status: :finished, outcome: :failed}] = board.waiting
     end
 
+    # bd-741sid: the "primary alone reads as the machine clearing a CI block"
+    # case is a Merging ticket now — see "Merging tickets" below. On a worker
+    # card the collapsed pass still names itself.
     test "a collapsed dead fix pass still flags the card and names itself" do
       board =
         derive(
           workers: [
-            worker("bd-a", :awaiting_review, %{
-              mr_ref: "!42",
-              registry_key: "bd-a",
-              meta: %{last_merger_status: %{status: :ci_failed}}
-            }),
+            worker("bd-a", :question, %{mr_ref: "!42", registry_key: "bd-a"}),
             worker("bd-a", :failed, %{registry_key: "bd-a:fixpass", role: :fix_pass})
           ],
           watchdog_live: MapSet.new(["bd-a"])
         )
 
-      # The primary alone would read as "the machine is clearing a CI block" —
-      # but the pass that clears it is dead.
-      assert [%{id: "bd-a", status: :awaiting_review, needs_you: true, collapsed_note: note}] =
-               board.waiting
+      assert [
+               %{
+                 id: "bd-a",
+                 status: :waiting,
+                 waiting_on: :question,
+                 needs_you: true,
+                 collapsed_note: note
+               }
+             ] = board.waiting
 
       assert note =~ "fix pass"
       assert note =~ "failed"
     end
 
+    # bd-741sid: an open PR's card is its Merging ticket's; a healthy pass
+    # still registered under it adds nothing.
     test "a collapsed healthy row adds no note and no flag" do
       board =
         derive(
+          issues: [issue("bd-a", %{state: :merging, status: :in_progress, pr_ref: "!42"})],
           workers: [
-            worker("bd-a", :awaiting_review, %{mr_ref: "!42", registry_key: "bd-a"}),
-            worker("bd-a", :awaiting_review, %{registry_key: "bd-a:fixpass", role: :fix_pass})
+            worker("bd-a", :working, %{registry_key: "bd-a:fixpass", role: :fix_pass})
           ],
           watchdog_live: MapSet.new(["bd-a"])
         )
@@ -882,8 +921,8 @@ defmodule Arbiter.Board.SnapshotTest do
       board =
         derive(
           workers: [
-            worker("bd-a", :awaiting_review, %{mr_ref: "!1", step_started_at: @yesterday}),
-            worker("bd-b", :awaiting_review, %{mr_ref: "!2", step_started_at: @now})
+            worker("bd-a", :question, %{step_started_at: @yesterday}),
+            worker("bd-b", :question, %{step_started_at: @now})
           ]
         )
 
@@ -893,45 +932,21 @@ defmodule Arbiter.Board.SnapshotTest do
 
   # bd-8jixav: a Watchdog is a :temporary child — when it crashes it is gone
   # for good, silently, and the parked card looks exactly like a healthy one.
+  # bd-741sid: no run stays resident on an open PR, so a Watchdog belongs to a
+  # Merging ticket (see "Merging tickets") and a worker card never has one.
   describe "watchdog liveness on a waiting card" do
-    test "an :awaiting_review card whose watchdog is gone says so, and flags for a human" do
+    test "a worker card reports liveness as unknown, not missing" do
       board =
         derive(
-          workers: [worker("bd-a", :awaiting_review, %{mr_ref: "!42"})],
+          workers: [
+            worker("bd-a", :failed, %{}),
+            worker("bd-b", :question, %{step_started_at: @yesterday})
+          ],
           watchdog_live: MapSet.new()
         )
 
-      assert [%{id: "bd-a", watchdog_alive: false, needs_you: true}] = board.waiting
-    end
-
-    test "an :awaiting_review card with a live watchdog is unflagged and marked alive" do
-      board =
-        derive(
-          workers: [worker("bd-a", :awaiting_review, %{mr_ref: "!42"})],
-          watchdog_live: MapSet.new(["bd-a"])
-        )
-
-      assert [%{id: "bd-a", watchdog_alive: true, needs_you: false}] = board.waiting
-    end
-
-    # A :failed / :awaiting worker has no MR and is not supposed to have a
-    # Watchdog, so "no watchdog" is not a finding about it.
-    test "a non-review park reports liveness as unknown, not missing" do
-      board =
-        derive(
-          workers: [worker("bd-a", :failed, %{})],
-          watchdog_live: MapSet.new()
-        )
-
-      assert [%{id: "bd-a", watchdog_alive: nil}] = board.waiting
-    end
-
-    # `derive/1` is pure: liveness is a Registry read, so it is an *input*.
-    # Callers that don't supply it get "unknown" rather than a false alarm.
-    test "omitting the liveness input reports unknown rather than missing" do
-      board = derive(workers: [worker("bd-a", :awaiting_review, %{mr_ref: "!42"})])
-
-      assert [%{id: "bd-a", watchdog_alive: nil, needs_you: false}] = board.waiting
+      assert [%{id: "bd-b", watchdog_alive: nil}, %{id: "bd-a", watchdog_alive: nil}] =
+               board.waiting
     end
 
     test "an orphaned issue card carries the field too, as unknown" do
@@ -1036,17 +1051,19 @@ defmodule Arbiter.Board.SnapshotTest do
 
   describe "the needs-you flag" do
     test "a worker that asked a human a question always flags" do
-      board = derive(workers: [worker("bd-a", :awaiting, %{meta: %{await_reason: "which?"}})])
+      board = derive(workers: [worker("bd-a", :question, %{meta: %{await_reason: "which?"}})])
 
       assert flags(board) == %{"bd-a" => true}
     end
 
+    # bd-741sid: a merge request is a Merging ticket's, its last poll on the
+    # ticket's row.
     test "a merge request the forge is still chewing on does not flag" do
       board =
         derive(
-          workers: [
-            worker("bd-a", :awaiting_review, %{meta: %{last_merger_status: %{approved: false}}}),
-            worker("bd-b", :awaiting_review, %{meta: %{}})
+          issues: [
+            merging("bd-a", %{merger_status: %{approved: false}}),
+            merging("bd-b", %{merger_status: nil})
           ]
         )
 
@@ -1056,7 +1073,7 @@ defmodule Arbiter.Board.SnapshotTest do
     test "an approved merge request blocked on anything the Watchdog cannot clear flags" do
       board =
         derive(
-          workers:
+          issues:
             for {id, reason} <- [
                   {"bd-a", :conflict},
                   {"bd-b", :needs_approval},
@@ -1066,9 +1083,7 @@ defmodule Arbiter.Board.SnapshotTest do
                   {"bd-d", :draft},
                   {"bd-e", :blocked_other}
                 ] do
-              worker(id, :awaiting_review, %{
-                meta: %{last_merger_status: %{approved: true, block_reason: reason}}
-              })
+              merging(id, %{merger_status: %{approved: true, block_reason: reason}})
             end
         )
 
@@ -1084,11 +1099,9 @@ defmodule Arbiter.Board.SnapshotTest do
     test "a block the system still auto-handles does not flag" do
       board =
         derive(
-          workers:
+          issues:
             for {id, reason} <- [{"bd-a", :behind_base}, {"bd-b", :ci_failed}] do
-              worker(id, :awaiting_review, %{
-                meta: %{last_merger_status: %{approved: true, block_reason: reason}}
-              })
+              merging(id, %{merger_status: %{approved: true, block_reason: reason}})
             end
         )
 
@@ -1281,7 +1294,7 @@ defmodule Arbiter.Board.SnapshotTest do
         issue("bd-closed", %{status: :closed, closed_at: @now})
       ]
 
-      board = derive(issues: issues, workers: [worker("bd-run", :running)])
+      board = derive(issues: issues, workers: [worker("bd-run", :working)])
 
       assert ids(board.backlog) == ["bd-backlog"]
       assert Enum.map(board.ready, & &1.card.id) == ["bd-ready"]
@@ -1321,7 +1334,7 @@ defmodule Arbiter.Board.SnapshotTest do
             issue("bd-run", %{status: :in_progress}),
             issue("bd-wait", %{status: :in_progress, updated_at: @yesterday})
           ],
-          workers: [worker("bd-run", :running)],
+          workers: [worker("bd-run", :working)],
           over_budget: ["bd-backlog", "bd-ready", "bd-run", "bd-wait"]
         )
 
@@ -1387,7 +1400,7 @@ defmodule Arbiter.Board.SnapshotTest do
             issue("bd-wait", %{status: :in_progress, updated_at: @yesterday}),
             issue("bd-closed", %{status: :closed, closed_at: @now})
           ],
-          workers: [worker("bd-run", :running)],
+          workers: [worker("bd-run", :working)],
           parent_of: [
             parent_of("bd-epic", "bd-backlog"),
             parent_of("bd-epic", "bd-run"),
@@ -1474,21 +1487,21 @@ defmodule Arbiter.Board.SnapshotTest do
 
     test "an in-progress issue with a live running worker lands in running" do
       issues = [issue("bd-a", %{status: :in_progress})]
-      workers = [worker("bd-a", :running)]
+      workers = [worker("bd-a", :working)]
 
       assert Snapshot.classify_columns(issues, workers) == %{"bd-a" => :running}
     end
 
     test "a worker's presence outranks a stale open status, same as the board" do
       issues = [issue("bd-a", %{status: :open})]
-      workers = [worker("bd-a", :idle)]
+      workers = [worker("bd-a", :starting)]
 
       assert Snapshot.classify_columns(issues, workers) == %{"bd-a" => :running}
     end
 
     test "an in-progress issue with a parked worker lands in waiting" do
       issues = [issue("bd-a", %{status: :in_progress})]
-      workers = [worker("bd-a", :awaiting_review)]
+      workers = [worker("bd-a", :failed)]
 
       assert Snapshot.classify_columns(issues, workers) == %{"bd-a" => :waiting}
     end
@@ -1513,7 +1526,7 @@ defmodule Arbiter.Board.SnapshotTest do
 
     test "a reviewer/implementer worker on the same task does not count as running" do
       issues = [issue("bd-a", %{status: :in_progress})]
-      workers = [worker("bd-a", :running, %{meta: %{role: :reviewer}})]
+      workers = [worker("bd-a", :working, %{meta: %{role: :reviewer}})]
 
       assert Snapshot.classify_columns(issues, workers) == %{"bd-a" => :waiting}
     end
@@ -1527,7 +1540,7 @@ defmodule Arbiter.Board.SnapshotTest do
         issue("bd-closed", %{status: :closed})
       ]
 
-      workers = [worker("bd-running", :running)]
+      workers = [worker("bd-running", :working)]
 
       assert Snapshot.classify_columns(issues, workers) == %{
                "bd-backlog" => :backlog,

@@ -62,6 +62,7 @@ defmodule Arbiter.Tasks.Lifecycle.View do
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Lifecycle
   alias Arbiter.Tasks.PullRequest
+  alias Arbiter.Worker
   alias Arbiter.Worker.Phase
   alias Arbiter.Worker.Watchdog
 
@@ -98,15 +99,6 @@ defmodule Arbiter.Tasks.Lifecycle.View do
   }
 
   @active_steps [:implementing, :in_review, :addressing_review, :fixing_ci, :resolving_conflict]
-
-  # Author statuses whose agent (or its reviewer) is still the machine's turn.
-  @running_statuses [:idle, :resuming, :running, :awaiting_review_gate]
-
-  # Author statuses where the run is done and the outcome is someone else's.
-  @waiting_statuses [:awaiting, :failed, :awaiting_review]
-
-  # A run that no longer claims its ticket.
-  @spent_statuses [:completed, :failed]
 
   @ci_pending [:running, :pending, :not_started]
   @hard_blocks [:conflict, :ci_failed, :draft]
@@ -167,7 +159,7 @@ defmodule Arbiter.Tasks.Lifecycle.View do
   | `:backlog` | `:backlog` |
   | `:ready` | `:blocked` and `:ready` (a blocked card keeps its reason) |
   | `:running` | `:in_progress` |
-  | `:waiting` | `:merging`, `:verifying`, and an `:in_progress` ticket whose primary author run is parked (`:awaiting`, `:failed`, `:awaiting_review`) or gone past the dispatch grace |
+  | `:waiting` | `:merging`, `:verifying`, and an `:in_progress` ticket whose primary author run is parked (`:waiting` on a question, or finished without succeeding) or gone past the dispatch grace |
   | `:closed` | `:closed` |
 
   An `:in_progress` ticket whose primary author run (or, with that gone, any
@@ -213,12 +205,12 @@ defmodule Arbiter.Tasks.Lifecycle.View do
 
     case state_of(ticket) do
       state when state in [:backlog, :queued] ->
-        if Enum.any?(authors, &(Map.get(&1, :status) not in @spent_statuses)),
+        if Enum.any?(authors, &(Map.get(&1, :state) != :finished)),
           do: :active,
           else: state
 
       nil ->
-        if Enum.any?(authors, &(Map.get(&1, :status) != :completed)), do: :active
+        if Enum.any?(authors, &(run_class(&1) != :succeeded)), do: :active
 
       state ->
         state
@@ -231,23 +223,39 @@ defmodule Arbiter.Tasks.Lifecycle.View do
   defp column(state, _blocked_by), do: Map.fetch!(@columns, state)
 
   # The primary author row decides: a fix pass running under a parked author
-  # (`:awaiting_review`) does not make the card Running, and a failed pass
-  # under a working author does not make it Waiting. Only once the primary is
-  # gone do the subordinate passes speak for the ticket.
+  # does not make the card Running, and a failed pass under a working author
+  # does not make it Waiting. Only once the primary is gone do the subordinate
+  # passes speak for the ticket.
   defp in_progress_board_column(ticket, runs, ctx) do
     id = Map.get(ticket, :id)
 
-    statuses =
+    classes =
       case primary(runs, id) do
-        nil -> runs |> author_runs(id) |> Enum.map(&Map.get(&1, :status))
-        author -> [Map.get(author, :status)]
+        nil -> runs |> author_runs(id) |> Enum.map(&run_class/1)
+        author -> [run_class(author)]
       end
 
     cond do
-      Enum.any?(statuses, &(&1 in @running_statuses)) -> :running
-      Enum.any?(statuses, &(&1 in @waiting_statuses)) -> :waiting
+      :running in classes -> :running
+      :waiting in classes -> :waiting
       orphaned?(ticket, ctx) -> :waiting
       true -> :running
+    end
+  end
+
+  # How an author run's state reads on the board (bd-1uu19b):
+  #   * `:running` — its agent (or its reviewer) is still the machine's turn:
+  #     `:starting`, `:working`, or `:waiting` on the review gate;
+  #   * `:waiting` — done, and the outcome is someone else's: `:waiting` on a
+  #     question, or finished without succeeding;
+  #   * `:succeeded` — finished and successful; it no longer claims the ticket.
+  defp run_class(run) do
+    case {Map.get(run, :state), Map.get(run, :outcome)} do
+      {state, _} when state in [:starting, :working] -> :running
+      {:waiting, _} -> if Worker.awaiting_review_gate?(run), do: :running, else: :waiting
+      {:finished, :succeeded} -> :succeeded
+      {:finished, _} -> :waiting
+      _ -> nil
     end
   end
 

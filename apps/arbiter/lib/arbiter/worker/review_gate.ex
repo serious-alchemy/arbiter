@@ -8,7 +8,7 @@ defmodule Arbiter.Worker.ReviewGate do
 
   When an worker signals done (`arb done`), the author `Arbiter.Worker` checks
   whether its workspace requires review (`Workspace.review_required?/1`). If so it
-  parks at `:awaiting_review_gate` and spawns a ReviewGate **instead of** calling the
+  waits on the review gate and spawns a ReviewGate **instead of** calling the
   merger. The ReviewGate then runs the review — and, on a request-changes verdict,
   the **revise-and-rediscuss loop** — and reports a single, terminal verdict back
   to the author (`Arbiter.Worker.review_gate_verdict/2`):
@@ -1420,7 +1420,7 @@ defmodule Arbiter.Worker.ReviewGate do
   # A ReviewGate is NOT a worker, but it lives under Arbiter.Worker.Supervisor —
   # so a stray enumeration (dashboard / list_children) could probe it with the
   # worker `:snapshot` call. Answer gracefully instead of crashing the gate and
-  # stranding the author at :awaiting_review_gate. See bd-2y0gd5.
+  # stranding the author waiting on the review gate. See bd-2y0gd5.
   @impl true
   def handle_call(:snapshot, _from, state) do
     {:reply, snapshot(state), state}
@@ -3427,8 +3427,8 @@ defmodule Arbiter.Worker.ReviewGate do
   Deliver a ReviewGate verdict for ticket `task_id` (bd-741sid): the ReviewGate
   reports to the ticket.
 
-  The `author` run gets it while it is resident — at `:awaiting_review_gate`,
-  or `:failed` on an earlier round's rejection that a later APPROVE overturns
+  The `author` run gets it while it is resident — `:waiting` on the review
+  gate, or finished `:failed` on an earlier round's rejection that a later APPROVE overturns
   (bd-3wumco). When the author is gone — its run ended between rounds, or it
   crashed — the verdict is applied to the ticket itself
   (`Arbiter.Worker.apply_review_gate_verdict_to_ticket/3`): an APPROVE still
@@ -3588,7 +3588,7 @@ defmodule Arbiter.Worker.ReviewGate do
     record_round(state, :review, :timed_out, payload, converged: false)
 
     # bd-9zuvbh: a timeout is a liveness failure of the REVIEW, never of the
-    # work. Class C parks it: the author records the run `:review_parked`, pages
+    # work. Class C parks it: the author stamps the ticket's park reason, pages
     # the coordinator once naming the budget that ran out, and leaves the branch
     # exactly where it is for a human to re-run, merge or reject.
     report(state, {:parked, :reviewer_timeout, payload})

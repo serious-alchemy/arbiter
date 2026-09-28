@@ -14,7 +14,8 @@ defmodule Arbiter.Workers.StepStatsTest do
           %{
             task_id: "bd-stats-#{System.unique_integer([:positive])}",
             repo: "arbiter",
-            status: :completed,
+            state: :finished,
+            outcome: :succeeded,
             started_at: DateTime.utc_now()
           },
           attrs

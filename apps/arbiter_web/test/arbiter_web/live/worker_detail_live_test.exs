@@ -20,7 +20,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
   end
 
   describe "GET /workers/:task_id" do
-    test "renders the snapshot for a running worker", %{conn: conn, ws: ws} do
+    test "renders the snapshot for a live worker", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "pd-test", workspace_id: ws.id})
       {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo")
       :ok = Worker.report(pid, :output_lines, ["hello", "world", "arb done"])
@@ -266,7 +266,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       assert html =~ ~s(badge-error)
     end
 
-    test "no Stop button when the worker is :completed", %{conn: conn, ws: ws} do
+    test "no Stop button when the run has finished", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "pd-done", workspace_id: ws.id})
       {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
       :ok = Worker.advance(pid, :design)
@@ -276,18 +276,19 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       refute has_element?(view, "#worker-stop-btn")
     end
 
-    test "status badge for :resuming is colored and labeled with the literal status",
+    # bd-1uu19b: a resume is a run in state `:starting` (meta.resume); the chip
+    # shows the literal run state.
+    test "status badge for a resuming run is colored and labeled with the literal state",
          %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "pd-resuming", workspace_id: ws.id})
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "r", meta: %{resume: true})
 
       {:ok, _view, html} = live_worker(conn, task.id)
 
-      assert html =~ "badge-info"
-      assert html =~ "resuming"
+      assert html =~ ~r/class="badge badge-info"[^>]*>starting</
     end
 
-    test "status badge for :awaiting_review_gate is colored and labeled with the literal status",
+    test "status badge for a run waiting on the review gate is colored and labeled with the literal state",
          %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "pd-review-gate", workspace_id: ws.id})
 
@@ -306,12 +307,16 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(pid)) end)
+      wait_until(fn ->
+        match?(%{state: :waiting, waiting_on: :review_gate}, Worker.state(pid))
+      end)
 
       {:ok, _view, html} = live_worker(conn, task.id)
 
-      assert html =~ "badge-warning"
-      assert html =~ "awaiting_review_gate"
+      assert html =~ ~r/class="badge badge-warning"[^>]*>waiting</
+      # Waiting on the review gate is not waiting on the operator: no
+      # "Waiting on you" panel.
+      refute html =~ "has paused and is waiting for a human decision"
     end
 
     test "renders the workflow step bar when a MachineState exists",
@@ -535,9 +540,9 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       refute has_element?(view, "a button")
     end
 
-    test "awaiting-review panel's Open PR link is not a button nested in an anchor",
+    test "waiting-on-you panel's Open PR link is not a button nested in an anchor",
          %{conn: conn, ws: ws} do
-      {:ok, task} = Ash.create(Issue, %{title: "pd-awaiting-ref", workspace_id: ws.id})
+      {:ok, task} = Ash.create(Issue, %{title: "pd-waiting-ref", workspace_id: ws.id})
       {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
       :ok = Worker.advance(pid, :claude)
       :ok = Worker.report(pid, :mr_ref, "https://github.com/org/repo/pull/42")
@@ -548,6 +553,8 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       refute has_element?(view, "a button")
       assert has_element?(view, ~s(a[href="https://github.com/org/repo/pull/42"]))
       assert html =~ "Open pull request"
+      assert html =~ "Waiting on you"
+      assert html =~ "has paused and is waiting for a human decision"
     end
   end
 
@@ -572,6 +579,26 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       refute has_element?(view, "#worker-fallback-resume-btn")
       # The rail's "Resume with note" action stays visible but disabled.
       assert has_element?(view, "#worker-resume-note-btn[disabled]")
+    end
+
+    # bd-1uu19b: `Dispatch.resume/2` refuses a live run and says what it is
+    # doing, in the run's own label.
+    test "resuming a worker that is waiting on you is refused with its run label",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "pd-waiting-resume", workspace_id: ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
+      :ok = Worker.advance(pid, :claude)
+      :ok = Worker.await(pid)
+
+      {:ok, view, _html} = live_worker(conn, task.id)
+      refute has_element?(view, "#worker-toolbar-resume-btn")
+
+      render_click(view, "open_retry")
+      render_click(view, "retry")
+      html = render_async(view)
+
+      assert html =~
+               "Resume failed: a worker is still active (waiting on you) — stop it first."
     end
 
     test "an unregistered worker still offers Resume when the task exists",
@@ -677,7 +704,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
     # `:ci_failed` poll exhaust immediately, so no fix-pass worker is ever
     # dispatched. The ticket is In progress when its PR opens, so it goes
     # Merging and the run ends (bd-741sid).
-    defp park_awaiting_review(pid, task, merger_status, opts \\ []) do
+    defp open_pr_and_park(pid, task, merger_status, opts \\ []) do
       {:ok, _} = Ash.update(task, %{status: :in_progress})
       :ok = Worker.advance(pid, :implement)
       ref = "!bd-bspakl-#{System.unique_integer([:positive])}"
@@ -721,7 +748,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       ws = set_max_auto_resolve_attempts(ws, 0)
       {:ok, task} = Ash.create(Issue, %{title: "pd-ci-failed", workspace_id: ws.id})
       {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
-      park_awaiting_review(pid, task, %{status: :open, approved: true, block_reason: :ci_failed})
+      open_pr_and_park(pid, task, %{status: :open, approved: true, block_reason: :ci_failed})
 
       wait_until(fn -> Watchdog.parked_on(task.id) == :ci_failed end)
 
@@ -739,7 +766,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       ws = set_max_auto_resolve_attempts(ws, 0)
       {:ok, task} = Ash.create(Issue, %{title: "pd-ci-ext", workspace_id: ws.id})
       {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
-      park_awaiting_review(pid, task, %{status: :open, approved: true, block_reason: :ci_failed})
+      open_pr_and_park(pid, task, %{status: :open, approved: true, block_reason: :ci_failed})
 
       wait_until(fn -> Watchdog.parked_on(task.id) == :ci_failed end)
       assert :ok = Watchdog.mark_ci_external(task.id, "shared runners down repo-wide today")
@@ -762,7 +789,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       {:ok, task} = Ash.create(Issue, %{title: "pd-ci-failed-gate", workspace_id: ws.id})
       {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
 
-      park_awaiting_review(
+      open_pr_and_park(
         pid,
         task,
         %{status: :open, approved: false, block_reason: :ci_failed},
@@ -781,7 +808,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
          %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "pd-conflict", workspace_id: ws.id})
       {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
-      park_awaiting_review(pid, task, %{status: :open, approved: true, block_reason: :conflict})
+      open_pr_and_park(pid, task, %{status: :open, approved: true, block_reason: :conflict})
 
       # Not waiting on `parked_on/1` here: a `:conflict` block only parks
       # after exhausting its own bounded rebase-attempt budget, which is not
@@ -801,7 +828,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
          %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "pd-pending", workspace_id: ws.id})
       {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
-      park_awaiting_review(pid, task, %{status: :open, approved: false})
+      open_pr_and_park(pid, task, %{status: :open, approved: false})
 
       # See the :conflict test above for why this waits on Watchdog liveness
       # plus one poll interval rather than on `parked_on/1`.
@@ -818,7 +845,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       ws = set_max_auto_resolve_attempts(ws, 0)
       {:ok, task} = Ash.create(Issue, %{title: "pd-retry-flash", workspace_id: ws.id})
       {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
-      park_awaiting_review(pid, task, %{status: :open, approved: true, block_reason: :ci_failed})
+      open_pr_and_park(pid, task, %{status: :open, approved: true, block_reason: :ci_failed})
 
       wait_until(fn -> Watchdog.parked_on(task.id) == :ci_failed end)
 

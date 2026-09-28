@@ -47,7 +47,8 @@ defmodule Arbiter.Workers.SessionArchiveBackfillTest do
           %{
             task_id: "bd-ab-#{System.unique_integer([:positive])}",
             repo: "arbiter",
-            status: :completed,
+            state: :finished,
+            outcome: :succeeded,
             started_at: ~U[2026-08-25 20:49:00.000000Z],
             session_id: session_id,
             config_dir: config_dir

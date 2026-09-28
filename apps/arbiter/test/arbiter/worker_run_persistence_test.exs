@@ -17,7 +17,7 @@ defmodule Arbiter.WorkerRunPersistenceTest do
     |> Ash.read!()
   end
 
-  test "starting a worker creates a :running Run row" do
+  test "starting a worker creates a :starting Run row, kept in step with the worker" do
     task_id = "bd-runstart-#{System.unique_integer([:positive])}"
 
     {:ok, pid} =
@@ -26,14 +26,26 @@ defmodule Arbiter.WorkerRunPersistenceTest do
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
 
     [run] = runs_for(task_id)
-    assert run.status == :running
+    assert run.state == :starting
+    assert run.outcome == nil
+    assert run.kind == :implement
     assert run.repo == "arbiter"
     assert run.workspace_id == "ws-runs"
     assert %DateTime{} = run.started_at
     assert run.completed_at == nil
+
+    # The row follows the worker: driving → :working, a question → :waiting.
+    :ok = Worker.advance(pid, :implement)
+    assert [%{state: :working, outcome: nil}] = runs_for(task_id)
+
+    :ok = Worker.await(pid, :question)
+    assert [%{state: :waiting, outcome: nil}] = runs_for(task_id)
+
+    :ok = Worker.resume(pid)
+    assert [%{state: :working, outcome: nil}] = runs_for(task_id)
   end
 
-  test "worker_type is derived from meta (reviewer/implementer/main)" do
+  test "kind is derived from meta (reviewer/implementer/main)" do
     main_id = "bd-typemain-#{System.unique_integer([:positive])}"
     review_id = "bd-typereview-#{System.unique_integer([:positive])}"
     impl_id = "bd-typeimpl-#{System.unique_integer([:positive])}"
@@ -71,10 +83,10 @@ defmodule Arbiter.WorkerRunPersistenceTest do
           do: GenServer.stop(pid, :normal)
     end)
 
-    assert [%{worker_type: :main}] = runs_for(main_id)
-    assert [%{worker_type: :review}] = runs_for(review_id)
-    assert [%{worker_type: :impl}] = runs_for(impl_id)
-    assert [%{worker_type: :review}] = runs_for(revonly_id)
+    assert [%{kind: :implement}] = runs_for(main_id)
+    assert [%{kind: :review}] = runs_for(review_id)
+    assert [%{kind: :implement, role: "impl"}] = runs_for(impl_id)
+    assert [%{kind: :review}] = runs_for(revonly_id)
   end
 
   test "the resolved model is persisted onto the Run row on completion" do
@@ -90,7 +102,7 @@ defmodule Arbiter.WorkerRunPersistenceTest do
     :ok = Worker.complete(pid, :done)
 
     [run] = runs_for(task_id)
-    assert run.status == :completed
+    assert run.outcome == :succeeded
     assert run.model == "claude-opus-4-8"
   end
 
@@ -116,7 +128,7 @@ defmodule Arbiter.WorkerRunPersistenceTest do
     :ok = Worker.fail(pid, :uncommitted_at_completion)
 
     [pre_run] = runs_for(task_id)
-    assert pre_run.status == :failed
+    assert pre_run.outcome == :failed
     assert pre_run.model == nil
 
     # Now open a session AFTER the fail. The port will output a stream-json init
@@ -155,7 +167,7 @@ defmodule Arbiter.WorkerRunPersistenceTest do
       )
 
     [run] = runs_for(task_id)
-    assert run.status == :failed
+    assert run.outcome == :failed
     assert run.model == "claude-haiku-4-5"
   end
 
@@ -227,7 +239,7 @@ defmodule Arbiter.WorkerRunPersistenceTest do
     assert run.thinking == "high"
   end
 
-  test "completing a worker stamps the Run row :completed with output_lines" do
+  test "completing a worker finishes the Run row :succeeded with output_lines" do
     task_id = "bd-runcomp-#{System.unique_integer([:positive])}"
 
     {:ok, pid} =
@@ -241,13 +253,14 @@ defmodule Arbiter.WorkerRunPersistenceTest do
     :ok = Worker.complete(pid, :done)
 
     [run] = runs_for(task_id)
-    assert run.status == :completed
+    assert run.state == :finished
+    assert run.outcome == :succeeded
     assert run.exit_code == 0
     assert run.output_lines == ["line one", "line two"]
     assert %DateTime{} = run.completed_at
   end
 
-  test "claude __claude_session_done__ also persists :completed" do
+  test "claude __claude_session_done__ also finishes the row :succeeded" do
     task_id = "bd-runclaude-#{System.unique_integer([:positive])}"
 
     {:ok, pid} =
@@ -259,18 +272,19 @@ defmodule Arbiter.WorkerRunPersistenceTest do
     send(pid, {:__claude_session_done__, "arb done"})
 
     # Wait briefly for the cast-like handle_info to land + write.
-    :ok = wait_until(fn -> match?([%{status: :completed}], runs_for(task_id)) end)
+    :ok =
+      wait_until(fn -> match?([%{state: :finished, outcome: :succeeded}], runs_for(task_id)) end)
 
     [run] = runs_for(task_id)
-    assert run.status == :completed
+    assert run.outcome == :succeeded
   end
 
-  test "terminate from a non-terminal state finalizes the Run row :completed" do
+  test "terminate from an unfinished state finishes the Run row :succeeded" do
     # Mirror the REAL worker-completion teardown: a claude-driven worker sits
-    # at a non-terminal status (:running) and is torn down by the task `:close`
+    # at an unfinished state (:working) and is torn down by the task `:close`
     # after-action (StopWorker -> Worker.stop -> terminate/2) WITHOUT any
     # explicit Worker.complete/2 ever firing. Before bd-39q7sk this left the
-    # row stuck :running until the next boot reconcile.
+    # row stuck live until the next boot reconcile.
     task_id = "bd-runterm-#{System.unique_integer([:positive])}"
 
     {:ok, pid} =
@@ -281,7 +295,7 @@ defmodule Arbiter.WorkerRunPersistenceTest do
     :ok = Worker.report(pid, :exit_status, 0)
 
     [running] = runs_for(task_id)
-    assert running.status == :running
+    assert running.state == :working
     assert running.completed_at == nil
 
     # Synchronous stop: GenServer.stop blocks until terminate/2 returns, so the
@@ -289,13 +303,14 @@ defmodule Arbiter.WorkerRunPersistenceTest do
     :ok = Worker.stop(pid, :normal)
 
     [run] = runs_for(task_id)
-    assert run.status == :completed
+    assert run.state == :finished
+    assert run.outcome == :succeeded
     assert %DateTime{} = run.completed_at
     assert run.exit_code == 0
     assert run.output_lines == ["working", "arb done"]
   end
 
-  test "terminate after an explicit :completed does not double-write the Run row" do
+  test "terminate after an explicit completion does not double-write the Run row" do
     # complete_now/2 already stamped the row; terminate/2 must no-op so it does
     # not clobber the completed_at / exit fields written at completion time.
     task_id = "bd-runterm2-#{System.unique_integer([:positive])}"
@@ -308,17 +323,17 @@ defmodule Arbiter.WorkerRunPersistenceTest do
     :ok = Worker.complete(pid, :done)
 
     [completed] = runs_for(task_id)
-    assert completed.status == :completed
+    assert completed.outcome == :succeeded
     first_completed_at = completed.completed_at
 
     :ok = Worker.stop(pid, :normal)
 
     [run] = runs_for(task_id)
-    assert run.status == :completed
+    assert run.outcome == :succeeded
     assert run.completed_at == first_completed_at
   end
 
-  test "failing a worker stamps the Run row :failed with failure_reason" do
+  test "failing a worker finishes the Run row :failed with failure_reason" do
     task_id = "bd-runfail-#{System.unique_integer([:positive])}"
 
     {:ok, pid} =
@@ -330,7 +345,8 @@ defmodule Arbiter.WorkerRunPersistenceTest do
     :ok = Worker.fail(pid, :max_ticks_exceeded)
 
     [run] = runs_for(task_id)
-    assert run.status == :failed
+    assert run.state == :finished
+    assert run.outcome == :failed
     assert run.failure_reason == ":max_ticks_exceeded"
     assert %DateTime{} = run.completed_at
   end
@@ -354,10 +370,14 @@ defmodule Arbiter.WorkerRunPersistenceTest do
       )
 
     # Wait for the fixture's "arb done" to land and the Run row to be stamped.
-    :ok = wait_until(fn -> match?([%{status: :completed}], runs_for(task_id)) end, 2000)
+    :ok =
+      wait_until(
+        fn -> match?([%{state: :finished, outcome: :succeeded}], runs_for(task_id)) end,
+        2000
+      )
 
     [run] = runs_for(task_id)
-    assert run.status == :completed
+    assert run.outcome == :succeeded
     assert %DateTime{} = run.completed_at
     # The fixture emits these lines; they must survive into the DB row.
     assert "doing important work" in run.output_lines
@@ -457,10 +477,14 @@ defmodule Arbiter.WorkerRunPersistenceTest do
         command: ["sh", "-c", "echo 'API Error: 401 Invalid authentication credentials'; exit 1"]
       )
 
-    :ok = wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 3_000)
+    :ok =
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        3_000
+      )
 
     [run] = runs_for(task_id)
-    assert run.status == :failed
+    assert run.outcome == :failed
     assert run.stop_category == "auth_expired"
     # The prose label is untouched — the typed column is additive.
     assert is_binary(run.failure_reason)
@@ -478,7 +502,7 @@ defmodule Arbiter.WorkerRunPersistenceTest do
     :ok = Worker.complete(pid, :done)
 
     [run] = runs_for(task_id)
-    assert run.status == :completed
+    assert run.outcome == :succeeded
     assert run.stop_category == nil
   end
 

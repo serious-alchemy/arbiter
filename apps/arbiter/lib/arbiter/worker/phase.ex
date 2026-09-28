@@ -2,15 +2,14 @@ defmodule Arbiter.Worker.Phase do
   @moduledoc """
   What a worker is *actually doing right now*, derived (bd-aw2cyt).
 
-  ## Why a phase and not just a status
+  ## Why a phase and not just a run state
 
-  `status` is the worker record's FSM state, and it is honest about the
-  record. It is not honest about the work: the main `claude --print` process
-  exits when the author agent finishes its turn, but the worker record lives
-  on to shepherd the ReviewGate, the implementer rounds, the CI fix passes and
-  the merge. Through all of that it reported `:running` (or
-  `:awaiting_review_gate`), so the board, `arb worker list` and the MCP tools
-  all said "running" about a task with no process anywhere. On 2026-09-16 the
+  A run's `state` (`Arbiter.Workers.RunState`) is honest about the run. It is
+  not the whole story of the work: the main `claude --print` process exits
+  when the author agent finishes its turn, but an author waiting on the review
+  gate lives on while the ReviewGate and its implementer rounds work. Before
+  the phase, the board, `arb worker list` and the MCP tools all said
+  "running" about a task with no process anywhere. On 2026-09-16 the
   coordinator saw three such cards at once.
 
   A phase names the stage instead:
@@ -23,8 +22,9 @@ defmodule Arbiter.Worker.Phase do
     * `:resolving_conflict` — a conflict resolver is live.
     * `:waiting_ci_merge` — no agent; an MR is open and CI / the merge queue
       owns the outcome.
-    * `:waiting_on_you` — the worker asked a question, or parked failed.
-    * `:done` — the worker completed.
+    * `:waiting_on_you` — the run is waiting on a question, or finished
+      without succeeding.
+    * `:done` — the run finished and succeeded (or was handed off).
 
   There is no hand-off phase any more (bd-741sid). It named the window a
   worker spent between agents holding its task's slot — the `slot_handoff`
@@ -41,11 +41,10 @@ defmodule Arbiter.Worker.Phase do
   the liveness as the card's own emphasis. Slot accounting reads liveness
   only, via `Arbiter.Tasks.SlotGate`.
 
-  ## Compatibility
+  ## Alongside the run vocabulary
 
-  `phase` is **additive**. Every surface keeps emitting `status` unchanged, so
-  a consumer matching on `:running` / `"running"` keeps working; the phase
-  rides alongside it. See `Arbiter.Tasks.SlotGate` for the slot half.
+  `phase` rides alongside the run's `kind` / `state` / `outcome` on every
+  surface. See `Arbiter.Tasks.SlotGate` for the slot half.
 
   ## Siblings
 
@@ -123,8 +122,9 @@ defmodule Arbiter.Worker.Phase do
 
   def of(worker, siblings) when is_map(worker) do
     cond do
-      Map.get(worker, :status) == :completed -> :done
-      Map.get(worker, :status) in [:awaiting, :failed] -> :waiting_on_you
+      finished_ok?(worker) -> :done
+      Map.get(worker, :state) == :finished -> :waiting_on_you
+      waiting_on_question?(worker) -> :waiting_on_you
       subordinate_role(worker) -> subordinate_phase(worker)
       true -> author_phase(worker, siblings)
     end
@@ -174,11 +174,18 @@ defmodule Arbiter.Worker.Phase do
     cond do
       SlotGate.agent_live(worker) == true -> :implementing
       round = live_round(worker, siblings) -> round
-      Map.get(worker, :status) == :awaiting_review -> :waiting_ci_merge
-      Map.get(worker, :status) == :awaiting_review_gate -> :in_review
+      Arbiter.Worker.awaiting_review_gate?(worker) -> :in_review
       true -> :implementing
     end
   end
+
+  defp finished_ok?(worker),
+    do:
+      Map.get(worker, :state) == :finished and
+        Map.get(worker, :outcome) in [:succeeded, :handed_off]
+
+  defp waiting_on_question?(worker),
+    do: Map.get(worker, :state) == :waiting and Map.get(worker, :waiting_on) != :review_gate
 
   defp live_round(worker, siblings) do
     live =

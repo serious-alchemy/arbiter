@@ -102,14 +102,15 @@ defmodule Arbiter.Worker.MissingWorktreeTest do
 
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end)
+      wait_until(fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end)
 
       snap = Worker.state(pid)
 
-      # Must NOT have completed or routed to any review/merge path.
-      refute snap.status == :completed
-      refute snap.status == :awaiting_review_gate
-      refute snap.status == :awaiting_review
+      # Must NOT have completed or routed to any review/merge path (opening
+      # the MR finishes the run :succeeded since bd-741sid).
+      refute snap.outcome == :succeeded
+      refute snap.waiting_on == :review_gate
+      assert snap.mr_ref == nil
 
       # The synthetic stop reason names the missing worktree.
       assert snap.meta.stop_reason.category == :missing_worktree
@@ -152,9 +153,11 @@ defmodule Arbiter.Worker.MissingWorktreeTest do
 
       send(pid, {:__claude_session_done__, "arb done"})
 
-      # It reaches a terminal/parked state without the missing_worktree reason.
+      # It finishes (or waits on the review gate) without the missing_worktree
+      # reason.
       wait_until(fn ->
-        Worker.state(pid).status in [:failed, :completed, :awaiting_review, :awaiting_review_gate]
+        snap = Worker.state(pid)
+        Worker.finished?(snap) or Worker.awaiting_review_gate?(snap)
       end)
 
       snap = Worker.state(pid)
@@ -193,10 +196,10 @@ defmodule Arbiter.Worker.MissingWorktreeTest do
           command: ["sh", "-c", "exit 7"]
         )
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end)
+      wait_until(fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end)
 
       snap = Worker.state(pid)
-      refute snap.status == :completed
+      refute snap.outcome == :succeeded
 
       # The bead stays open — a failed start never closes it.
       {:ok, reloaded} = Ash.get(Issue, task.id)

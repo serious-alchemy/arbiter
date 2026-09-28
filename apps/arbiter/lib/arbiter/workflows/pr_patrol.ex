@@ -348,8 +348,8 @@ defmodule Arbiter.Workflows.PRPatrol do
   # `author_allowed?/2` is scoped to the fleet identity precisely so patrol
   # answers review threads on the fleet's OWN PRs — which is also every PR the
   # gate could be holding. On 2026-09-17 that overlap fired: two inline Copilot
-  # comments landed on a fleet PR whose task was still at
-  # `:awaiting_review_gate`, patrol filed a follow-up, and its fix worker
+  # comments landed on a fleet PR whose task was still waiting on the review
+  # gate, patrol filed a follow-up, and its fix worker
   # pushed to `origin/<branch>` twenty seconds before the gate's round-1
   # implementer committed on the worktree. The gate's push was rejected
   # `:diverged` and the task parked `head_not_pushed`.
@@ -889,7 +889,7 @@ defmodule Arbiter.Workflows.PRPatrol do
   # `meta.worktree_path` is nil for every HEALTHY run too, not just a zombie
   # — Dispatch skips branch-worktree provisioning for `:task` by design (its
   # cwd, when it has one, is a detached inspect checkout, never tracked in
-  # meta). `:idle` alone is therefore the load-bearing zombie signal here (see
+  # meta). `:starting` alone is therefore the load-bearing zombie signal here (see
   # `still_blocking?/1`'s reasoning above) — this was already true for plain
   # research/ops `:task` directives before this fix, so no behavior changes,
   # just the discriminator that now matters for every follow-up too.
@@ -900,8 +900,8 @@ defmodule Arbiter.Workflows.PRPatrol do
     # nor filter. The nil case is still handled — it is a persisted column and
     # this reads a live GenServer's state, hence the rescue/catch below.
     case Worker.state(pid) do
-      %{status: :idle, meta: nil} -> true
-      %{status: :idle, meta: meta} -> is_nil(Map.get(meta, :worktree_path))
+      %{state: :starting, meta: nil} -> true
+      %{state: :starting, meta: meta} -> is_nil(Map.get(meta, :worktree_path))
       _ -> false
     end
   rescue

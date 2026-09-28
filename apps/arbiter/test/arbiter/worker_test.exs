@@ -39,7 +39,7 @@ defmodule Arbiter.WorkerTest do
       assert snap.repo == "arbiter"
       assert snap.workspace_id == "ws-1"
       assert snap.current_step == :idle
-      assert snap.status == :idle
+      assert snap.state == :starting
       assert %DateTime{} = snap.started_at
       assert snap.step_started_at == nil
       assert snap.meta == %{}
@@ -97,17 +97,17 @@ defmodule Arbiter.WorkerTest do
   end
 
   describe "advance/2" do
-    test "from :idle → step transitions status to :running and sets step_started_at" do
+    test "from :starting → step transitions the run to :working and sets step_started_at" do
       {pid, _} = start_worker()
       assert :ok = Worker.advance(pid, :load)
 
       snap = Worker.state(pid)
       assert snap.current_step == :load
-      assert snap.status == :running
+      assert snap.state == :working
       assert %DateTime{} = snap.step_started_at
     end
 
-    test "sequential advances update step but keep status=:running" do
+    test "sequential advances update step but keep state=:working" do
       {pid, _} = start_worker()
       :ok = Worker.advance(pid, :load)
       first = Worker.state(pid).step_started_at
@@ -117,7 +117,7 @@ defmodule Arbiter.WorkerTest do
 
       snap = Worker.state(pid)
       assert snap.current_step == :design
-      assert snap.status == :running
+      assert snap.state == :working
       assert DateTime.compare(snap.step_started_at, first) == :gt
     end
 
@@ -132,63 +132,68 @@ defmodule Arbiter.WorkerTest do
     end
 
     # bd-d70whv: redispatch a failed worker reuses the existing worker record.
-    # advance/2 must transition :failed → :running so arb-done is processed
-    # instead of being silently ignored by the guard in handle_info.
-    test "advance/2 from :failed → :running (redispatch a failed worker)" do
+    # advance/2 must take a run finished :failed back to :working so arb-done
+    # is processed instead of being silently ignored by the guard in
+    # handle_info.
+    test "advance/2 from finished/:failed → :working (redispatch a failed worker)" do
       {pid, _} = start_worker()
       :ok = Worker.advance(pid, :load)
       :ok = Worker.fail(pid, :credentials_expired)
-      assert Worker.state(pid).status == :failed
+      assert Worker.state(pid).outcome == :failed
 
       assert :ok = Worker.advance(pid, :load)
       snap = Worker.state(pid)
-      assert snap.status == :running
+      assert snap.state == :working
+      assert snap.outcome == nil
       assert snap.current_step == :load
     end
   end
 
   describe "await / resume" do
-    test "await/2 from :running transitions to :awaiting and stores reason" do
+    test "await/2 from :working waits on a question and stores reason" do
       {pid, _} = start_worker()
       :ok = Worker.advance(pid, :verify)
       :ok = Worker.await(pid, :pr_review)
 
       snap = Worker.state(pid)
-      assert snap.status == :awaiting
+      assert snap.state == :waiting
+      assert snap.waiting_on == :question
       assert snap.meta[:await_reason] == :pr_review
     end
 
-    test "resume/1 from :awaiting transitions back to :running" do
+    test "resume/1 from waiting on a question transitions back to :working" do
       {pid, _} = start_worker()
       :ok = Worker.advance(pid, :verify)
       :ok = Worker.await(pid, :pr_review)
       :ok = Worker.resume(pid)
 
       snap = Worker.state(pid)
-      assert snap.status == :running
+      assert snap.state == :working
+      assert snap.waiting_on == nil
       refute Map.has_key?(snap.meta, :await_reason)
     end
 
-    test "await/2 from :idle is rejected" do
+    test "await/2 from :starting is rejected" do
       {pid, _} = start_worker()
-      assert {:error, {:invalid_transition, :idle, :awaiting}} = Worker.await(pid)
+      assert {:error, {:invalid_transition, :starting, :waiting}} = Worker.await(pid)
     end
 
-    test "resume/1 from :running is rejected" do
+    test "resume/1 from :working is rejected" do
       {pid, _} = start_worker()
       :ok = Worker.advance(pid, :load)
-      assert {:error, {:invalid_transition, :running, :running}} = Worker.resume(pid)
+      assert {:error, {:invalid_transition, :working, :working}} = Worker.resume(pid)
     end
   end
 
   describe "complete / fail" do
-    test "complete/2 from :running transitions to :completed" do
+    test "complete/2 from :working finishes the run :succeeded" do
       {pid, _} = start_worker()
       :ok = Worker.advance(pid, :submit)
       :ok = Worker.complete(pid, %{pr: "https://example.com/pr/1"})
 
       snap = Worker.state(pid)
-      assert snap.status == :completed
+      assert snap.state == :finished
+      assert snap.outcome == :succeeded
       assert snap.meta[:result] == %{pr: "https://example.com/pr/1"}
     end
 
@@ -221,7 +226,7 @@ defmodule Arbiter.WorkerTest do
       send(pid, {:__claude_session_done__, "arb done"})
 
       assert_receive {:worker_done, ^task_id}, 500
-      assert Worker.state(pid).status == :completed
+      assert Worker.state(pid).outcome == :succeeded
     end
 
     # bd-6v2my2: a `:task`-type directive (PRPatrol's reply/resolve follow-ups
@@ -244,7 +249,7 @@ defmodule Arbiter.WorkerTest do
       send(pid, {:__claude_session_done__, "arb done"})
 
       refute_receive {:worker_done, ^task_id}, 500
-      assert Worker.state(pid).status == :completed
+      assert Worker.state(pid).outcome == :succeeded
     end
 
     test "advance/2 after complete/2 is rejected" do
@@ -252,32 +257,33 @@ defmodule Arbiter.WorkerTest do
       :ok = Worker.advance(pid, :submit)
       :ok = Worker.complete(pid)
 
-      assert {:error, {:invalid_transition, :completed, {:advance, :design}}} =
+      assert {:error, {:invalid_transition, :finished, {:advance, :design}}} =
                Worker.advance(pid, :design)
     end
 
-    test "fail/2 from :running transitions to :failed" do
+    test "fail/2 from :working finishes the run :failed" do
       {pid, _} = start_worker()
       :ok = Worker.advance(pid, :implement)
       :ok = Worker.fail(pid, :compile_error)
 
       snap = Worker.state(pid)
-      assert snap.status == :failed
+      assert snap.state == :finished
+      assert snap.outcome == :failed
       assert snap.meta[:failure_reason] == :compile_error
     end
 
-    test "fail/2 from :awaiting also transitions to :failed" do
+    test "fail/2 while waiting on a question also finishes the run :failed" do
       {pid, _} = start_worker()
       :ok = Worker.advance(pid, :verify)
       :ok = Worker.await(pid, :pr_review)
       :ok = Worker.fail(pid, :pr_rejected)
 
-      assert Worker.state(pid).status == :failed
+      assert Worker.state(pid).outcome == :failed
     end
 
-    test "complete/2 from :idle is rejected" do
+    test "complete/2 from :starting is rejected" do
       {pid, _} = start_worker()
-      assert {:error, {:invalid_transition, :idle, :completed}} = Worker.complete(pid)
+      assert {:error, {:invalid_transition, :starting, :succeeded}} = Worker.complete(pid)
     end
   end
 
@@ -355,7 +361,19 @@ defmodule Arbiter.WorkerTest do
       {pid, _task} = start_worker()
       [entry | _] = Worker.list_children() |> Enum.filter(&(&1.pid == pid))
 
-      for key <- [:task_id, :workspace_id, :repo, :current_step, :status, :started_at, :meta] do
+      for key <- [
+            :task_id,
+            :workspace_id,
+            :repo,
+            :current_step,
+            :kind,
+            :state,
+            :outcome,
+            :waiting_on,
+            :run_id,
+            :started_at,
+            :meta
+          ] do
         assert Map.has_key?(entry, key), "missing #{inspect(key)} in #{inspect(entry)}"
       end
     end
@@ -392,14 +410,17 @@ defmodule Arbiter.WorkerTest do
     # worker can miss it in — it does not remove the window. A worker that is
     # still alive but does not answer :snapshot even within the new (5s)
     # budget must degrade rather than vanish, the same way `active_sibling/2`
-    # treats an unresponsive-but-alive sibling as busy, not gone.
+    # treats an unresponsive-but-alive sibling as busy, not gone. bd-1uu19b:
+    # there is no `:unknown` state any more — a degraded entry is flagged by
+    # `meta.stale_probe` and, with no run row to read, reads as :working.
     test "a live worker that never answers :snapshot is degraded, not dropped" do
       {pid, task_id} = start_worker()
       :sys.suspend(pid)
 
       try do
         [entry] = Worker.list_children() |> Enum.filter(&(&1.task_id == task_id))
-        assert entry.status == :unknown
+        assert entry.state == :working
+        assert entry.outcome == nil
         assert entry.meta.stale_probe == true
         assert entry.pid == pid
       after
@@ -469,7 +490,11 @@ defmodule Arbiter.WorkerTest do
         assert entry.registry_key == task_id <> ":fixpass"
         assert entry.task_id == task_id
         assert entry.workspace_id == "ws-probe"
-        assert entry.status == :unknown
+        # The degraded entry reads the run from its row: a fix pass that has
+        # not advanced yet.
+        assert entry.kind == :fix_pass
+        assert entry.state == :starting
+        assert entry.meta.stale_probe == true
         # bd-45tkhq round 3 (self-review after rebasing onto bd-aw2cyt/#1969):
         # Arbiter.Worker.Phase.of/2 classifies a subordinate by its top-level
         # `:role`; without it a degraded fix-pass entry falls through to

@@ -319,7 +319,8 @@ defmodule ArbiterCli.Cmd.RestartTest do
       stub_routes([
         {{"get", "/api/workspaces"}, {@green, 200}},
         {{"get", "/api/workers"},
-         {%{"data" => [%{"task_id" => "bd-abc", "status" => "running"}]}, 200}}
+         {%{"data" => [%{"task_id" => "bd-abc", "kind" => "implement", "state" => "working"}]},
+          200}}
       ])
 
       {_out, err, code} = capture(fn -> Restart.run([]) end)
@@ -334,7 +335,8 @@ defmodule ArbiterCli.Cmd.RestartTest do
       stub_routes([
         {{"get", "/api/workspaces"}, {@green, 200}},
         {{"get", "/api/workers"},
-         {%{"data" => [%{"task_id" => "bd-abc", "status" => "running"}]}, 200}}
+         {%{"data" => [%{"task_id" => "bd-abc", "kind" => "implement", "state" => "working"}]},
+          200}}
       ])
 
       Process.put(:bd2_cmd_runner, fn cmd, _args, _opts ->

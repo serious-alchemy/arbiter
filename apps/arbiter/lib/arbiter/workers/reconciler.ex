@@ -1,25 +1,29 @@
 defmodule Arbiter.Workers.Reconciler do
   @moduledoc """
-  Reconciles orphaned `:running` `Arbiter.Workers.Run` rows on boot.
+  Reconciles orphaned live `Arbiter.Workers.Run` rows on boot.
 
-  A worker GenServer is ephemeral: it writes a `:running` Run row on init and
-  stamps the terminal status (`:completed` / `:failed`) when it stops. If the
-  node dies between those two writes — a crash, a hard restart — the row is left
-  `:running` forever. `arb prime` tracks live processes, so it correctly shows
+  A worker GenServer is ephemeral: it writes its Run row on init, keeps the
+  row's state in step (`:starting` / `:working` / `:waiting`), and stamps it
+  `:finished` with an outcome when it stops (`Arbiter.Workers.RunState`). If
+  the node dies before that last write — a crash, a hard restart — the row is
+  left live forever. `arb prime` tracks live processes, so it correctly shows
   no active workers, but the durable history lies: it claims work is still in
   flight when the process that owned it is long gone.
 
-  This module sweeps those orphans. A `:running` row whose `task_id` has no live
-  worker registered under `Arbiter.Worker.Registry` is marked `:failed` with a
-  `failure_reason` of `"server restarted"`. Run on application start (see
+  This module sweeps those orphans. A live row (`:working`, and the rarer
+  `:starting` / `:waiting`) whose `task_id` has no live worker registered under
+  `Arbiter.Worker.Registry` is marked `:finished` / `:interrupted` with a
+  `failure_reason` of `"server restarted"` (bd-1uu19b): the run did not fail,
+  the server stopped under it. Run on application start (see
   `Arbiter.Application`) after the Repo and the Worker Registry are online.
 
   This is the **backstop**, not the shutdown path. Since bd-aje6fj a worker
   traps exits, so an orderly application stop runs its `terminate/2`, which
-  reaps the agent and stamps the run `:interrupted` / "server shutdown" itself.
+  reaps the agent and stamps the run `:finished` / `:interrupted`, "server
+  shutdown", itself.
   Only a run that missed that — a hard crash of the node, a teardown that
   overran `Arbiter.Worker.shutdown_grace_ms/0` and was killed, systemd's stop
-  timeout firing first — is still `:running` when this sweep sees it.
+  timeout firing first — is still live when this sweep sees it.
 
   ## Single-instance gate
 
@@ -67,7 +71,8 @@ defmodule Arbiter.Workers.Reconciler do
   @shutdown_window_ms 300_000
 
   @doc """
-  Sweep `:running` Run rows with no live worker and mark them `:failed`.
+  Sweep live Run rows with no live worker and mark them `:finished` /
+  `:interrupted`, "server restarted".
 
   Returns `{:ok, count}` where `count` is the number of rows reconciled, or
   `{:error, reason}` if the read failed (in which case nothing was written).
@@ -99,14 +104,16 @@ defmodule Arbiter.Workers.Reconciler do
   defp do_reconcile do
     orphans =
       Run
-      |> Ash.Query.filter(status == :running)
+      |> Ash.Query.filter(state in [:starting, :working, :waiting])
       |> Ash.read!()
       |> Enum.reject(&live_worker?/1)
 
     reconciled = Enum.count(orphans, &mark_interrupted/1)
 
     if reconciled > 0 do
-      Logger.info("Workers.Reconciler: marked #{reconciled} orphaned :running run(s) :failed")
+      Logger.info(
+        "Workers.Reconciler: marked #{reconciled} orphaned live run(s) finished/interrupted"
+      )
     end
 
     {:ok, reconciled}
@@ -158,7 +165,7 @@ defmodule Arbiter.Workers.Reconciler do
     casualties =
       Run
       |> Ash.Query.filter(
-        status == :failed and failure_reason == ^@machine_died_reason and
+        outcome == :failed and failure_reason == ^@machine_died_reason and
           completed_at >= ^since
       )
       |> Ash.read!()
@@ -184,7 +191,7 @@ defmodule Arbiter.Workers.Reconciler do
   end
 
   defp restamp_interrupted(%Run{} = run) do
-    case Ash.update(run, %{status: :interrupted, failure_reason: @shutdown_reason},
+    case Ash.update(run, %{outcome: :interrupted, failure_reason: @shutdown_reason},
            action: :update
          ) do
       {:ok, _} ->
@@ -488,7 +495,7 @@ defmodule Arbiter.Workers.Reconciler do
   defp watch_merging(issue, _watch_fun, rewatch_fun), do: rewatch_or_escalate(issue, rewatch_fun)
 
   # The ticket's latest run was a fix or conflict pass that the restart cut off
-  # (the graceful-shutdown `:interrupted`, a row still `:running`, or the orphan
+  # (the graceful-shutdown `:interrupted`, a row still live, or the orphan
   # sweep's "server restarted").
   defp pass_cut_off?(task_id) do
     Run
@@ -497,14 +504,15 @@ defmodule Arbiter.Workers.Reconciler do
     |> Ash.Query.limit(1)
     |> Ash.read!()
     |> case do
-      [%Run{worker_type: type} = run] when type in [:fix_pass, :conflict] -> cut_off?(run)
+      [%Run{kind: kind} = run] when kind in [:fix_pass, :conflict] -> cut_off?(run)
       _ -> false
     end
   rescue
     _ -> false
   end
 
-  defp cut_off?(%Run{status: status}) when status in [:running, :interrupted], do: true
+  defp cut_off?(%Run{state: state}) when state != :finished, do: true
+  defp cut_off?(%Run{outcome: :interrupted}), do: true
 
   defp cut_off?(%Run{failure_reason: reason}),
     do: reason in ["server restarted", "server shutdown"]
@@ -639,7 +647,7 @@ defmodule Arbiter.Workers.Reconciler do
   end
 
   # A run is live iff a worker GenServer is registered for its task_id. After a
-  # boot the registry is empty, so every :running row is an orphan; mid-life this
+  # boot the registry is empty, so every live row is an orphan; mid-life this
   # guards against racing a worker that is legitimately still working.
   defp live_worker?(%Run{task_id: task_id}), do: not is_nil(Worker.whereis(task_id))
 
@@ -647,7 +655,8 @@ defmodule Arbiter.Workers.Reconciler do
   # count it), false on a per-row write failure that we've logged and skipped.
   defp mark_interrupted(%Run{} = run) do
     attrs = %{
-      status: :failed,
+      state: :finished,
+      outcome: :interrupted,
       completed_at: DateTime.utc_now(),
       failure_reason: @failure_reason
     }
@@ -723,7 +732,7 @@ defmodule Arbiter.Workers.Reconciler do
       task_id: run.task_id,
       workspace_id: run.workspace_id,
       repo: run.repo,
-      step: usage_step_for(run.worker_type),
+      step: usage_step_for(run),
       model: run.model || totals.model,
       provider: "claude",
       provider_account_id: provider_account_id,
@@ -751,7 +760,7 @@ defmodule Arbiter.Workers.Reconciler do
       # it as a second base work session — i.e. a re-dispatch that never
       # happened.
       base_task_id: run.base_task_id || Worker.ReviewGate.base_task_id(run.task_id),
-      role: run.role || usage_role_for(run.worker_type),
+      role: run.role || usage_role_for(run.kind),
       raw: %{
         "arb_usage_source" => %{
           "reconciled_from" => "session_jsonl",
@@ -786,11 +795,11 @@ defmodule Arbiter.Workers.Reconciler do
   # Mirrors `Worker.record_usage_event/3`: only a reviewer and a review-gate
   # implementer get their own step; the merge queue's fix/conflict passes are
   # still work, distinguished by `role`.
-  defp usage_step_for(:review), do: :review
-  defp usage_step_for(:impl), do: :impl
-  defp usage_step_for(_), do: :work
+  defp usage_step_for(%Run{kind: :review}), do: :review
+  defp usage_step_for(%Run{role: "impl"}), do: :impl
+  defp usage_step_for(_run), do: :work
 
-  defp usage_role_for(:main), do: "base"
+  defp usage_role_for(:implement), do: "base"
   defp usage_role_for(nil), do: "base"
-  defp usage_role_for(worker_type), do: Atom.to_string(worker_type)
+  defp usage_role_for(kind), do: Atom.to_string(kind)
 end

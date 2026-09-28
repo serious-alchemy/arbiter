@@ -19,107 +19,106 @@ defmodule ArbiterWeb.Api.WorkerJSON do
     }
   end
 
-  def index(%{children: children, costs: costs}) do
+  # bd-1uu19b: `index` and `show` render the same thing — a view of a
+  # ticket's current run from `Arbiter.Workers.Current` — through the same
+  # `run/1`, in the one run vocabulary (kind / state / outcome).
+  def index(%{runs: runs, costs: costs}) do
     %{
-      # bd-aw2cyt: a row's phase depends on the task's other live rounds, so
-      # stamp it over the whole list first.
       data:
-        children
-        |> Arbiter.Worker.Phase.annotate()
-        |> Enum.map(fn snap ->
-          meta = Map.get(snap, :meta, %{}) || %{}
-          model_id = Map.get(meta, :model) || get_in(meta, [:routing_config, :model])
-
-          %{
-            task_id: snap.task_id,
-            # bd-8lq2g7: a task can have two live rows — its primary worker plus
-            # a merge-queue subordinate pass under `<task_id>:fixpass` /
-            # `:conflict`. These two fields are what tell them apart.
-            registry_key: Map.get(snap, :registry_key) || snap.task_id,
-            role: to_string_atom(Map.get(snap, :role)),
-            workspace_id: snap.workspace_id,
-            repo: snap.repo,
-            current_step: snap.current_step,
-            claude_session: Map.get(meta, :claude_session, false),
-            activity: Map.get(meta, :activity),
-            status: snap.status,
-            # bd-aw2cyt: additive — `status` keeps its meaning for every
-            # existing consumer, and these two say whether a process exists.
-            phase: phase(snap),
-            phase_label: Arbiter.Worker.Phase.label(Map.get(snap, :phase)),
-            agent_live: Map.get(snap, :agent_live),
-            started_at: snap.started_at,
-            mr_ref: Map.get(snap, :mr_ref),
-            merger_url: Map.get(snap, :merger_url),
-            pid: inspect(snap.pid),
-            model: Arbiter.Worker.Stats.short_model_name(model_id)
-          }
-          # bd-8vnuy3: settled + in-flight; `cost_usd: nil` means n/a.
-          |> Map.merge(LiveSpend.cost_fields(Map.get(costs, snap.task_id)))
+        Enum.map(runs, fn view ->
+          view
+          |> run()
+          |> Map.merge(LiveSpend.cost_fields(Map.get(costs, view.task_id)))
         end)
     }
   end
 
-  def show(%{snapshot: snap} = assigns) do
-    meta = Map.get(snap, :meta, %{})
+  def show(%{current: current, runs: runs} = assigns) do
+    meta = Map.get(current, :meta) || %{}
 
-    %{
-      source: "live",
-      task_id: snap.task_id,
-      # See index/1 — a subordinate pass shares the task's id (bd-8lq2g7).
-      registry_key: Map.get(snap, :registry_key) || snap.task_id,
-      role: to_string_atom(Map.get(snap, :role)),
-      workspace_id: snap.workspace_id,
-      repo: snap.repo,
-      current_step: snap.current_step,
-      claude_session: Map.get(meta, :claude_session, false),
-      activity: Map.get(meta, :activity),
-      status: snap.status,
-      # See index/1 — additive alongside the unchanged status (bd-aw2cyt).
-      phase: phase(snap),
-      phase_label: Arbiter.Worker.Phase.label(Map.get(snap, :phase)),
-      agent_live: Map.get(snap, :agent_live),
-      started_at: snap.started_at,
-      step_started_at: Map.get(snap, :step_started_at),
-      mr_ref: Map.get(snap, :mr_ref),
-      merger_url: Map.get(snap, :merger_url),
+    current
+    |> run()
+    |> Map.merge(%{
+      task_title: task_title(current),
+      step_started_at: Map.get(current, :step_started_at),
       last_merger_status: Map.get(meta, :last_merger_status),
       last_checked_at: Map.get(meta, :last_checked_at),
-      pid: inspect(snap.pid),
       output_lines: Map.get(meta, :output_lines, []),
       exit_status: Map.get(meta, :exit_status),
       exited_at: Map.get(meta, :exited_at),
       result: Map.get(meta, :result),
-      failure_reason: stringify(Map.get(meta, :failure_reason))
-    }
+      runs: Enum.map(runs, &recent_run/1)
+    })
     |> Map.merge(LiveSpend.cost_fields(Map.get(assigns, :cost)))
   end
 
-  # Historical fallback: no live worker, so we render the most recent durable
-  # `Run` row into the same shape the CLI's `worker show` already knows how to
-  # display. `source: "history"` lets clients flag that this is a post-mortem
-  # rather than a live snapshot.
-  def show(%{run: %Run{} = run} = assigns) do
+  # One run, as both `index` and `show` report it. `task_id` is the ticket;
+  # `run_task_id` is the id the run itself runs under — a ReviewGate reviewer
+  # runs under `<ticket>#review`.
+  defp run(view) do
+    meta = Map.get(view, :meta) || %{}
+    model_id = Map.get(meta, :model) || get_in(meta, [:routing_config, :model])
+
     %{
-      source: "history",
-      task_id: run.task_id,
-      task_title: run.task_title,
-      workspace_id: run.workspace_id,
-      repo: run.repo,
-      worker_type: to_string_atom(run.worker_type),
-      current_step: nil,
-      claude_session: false,
-      activity: nil,
-      status: to_string_atom(run.status),
-      model: run.model,
-      started_at: run.started_at,
-      completed_at: run.completed_at,
-      exit_status: run.exit_code,
-      output_lines: run.output_lines || [],
-      failure_reason: run.failure_reason
+      task_id: view.ticket_id,
+      run_task_id: view.task_id,
+      run_id: Map.get(view, :run_id),
+      source: to_string_atom(view.source),
+      kind: to_string_atom(view.kind),
+      state: to_string_atom(view.state),
+      outcome: to_string_atom(view.outcome),
+      waiting_on: to_string_atom(Map.get(view, :waiting_on)),
+      # bd-8lq2g7: the registry key + role tell a merge-queue pass from the
+      # ticket's own run.
+      registry_key: Map.get(view, :registry_key),
+      role: to_string_atom(Map.get(view, :role)),
+      workspace_id: view.workspace_id,
+      repo: view.repo,
+      current_step: Map.get(view, :current_step),
+      claude_session: Map.get(meta, :claude_session, false),
+      activity: Map.get(meta, :activity),
+      # bd-aw2cyt: what the work is actually doing, and whether a process
+      # exists behind it.
+      phase: phase(view),
+      phase_label: Arbiter.Worker.Phase.label(Map.get(view, :phase)),
+      agent_live: Map.get(view, :agent_live),
+      started_at: view.started_at,
+      completed_at: Map.get(view, :completed_at),
+      mr_ref: Map.get(view, :mr_ref),
+      merger_url: Map.get(view, :merger_url),
+      pid: pid(Map.get(view, :pid)),
+      model: Arbiter.Worker.Stats.short_model_name(model_id),
+      failure_reason: stringify(Map.get(view, :failure_reason)),
+      failure_summary: Map.get(meta, :failure_summary)
     }
-    |> Map.merge(LiveSpend.cost_fields(Map.get(assigns, :cost)))
   end
+
+  # A recent run in `show`'s `runs` list: the same vocabulary, no transcript.
+  defp recent_run(view) do
+    view
+    |> run()
+    |> Map.take([
+      :run_id,
+      :run_task_id,
+      :source,
+      :kind,
+      :state,
+      :outcome,
+      :role,
+      :model,
+      :started_at,
+      :completed_at,
+      :failure_reason,
+      :failure_summary
+    ])
+    |> Map.put(:current, Map.get(view, :current, false))
+  end
+
+  defp task_title(%{run: %Run{task_title: title}}), do: title
+  defp task_title(_view), do: nil
+
+  defp pid(nil), do: nil
+  defp pid(pid), do: inspect(pid)
 
   defp phase(snap), do: to_string_atom(Map.get(snap, :phase))
 

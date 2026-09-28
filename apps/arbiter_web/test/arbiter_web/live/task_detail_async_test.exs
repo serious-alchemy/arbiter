@@ -59,8 +59,9 @@ defmodule ArbiterWeb.TaskDetailAsyncTest do
       Ash.create(Run, %{
         task_id: task.id,
         repo: "test/repo",
-        worker_type: :main,
-        status: :completed,
+        kind: :implement,
+        state: :finished,
+        outcome: :succeeded,
         started_at: DateTime.utc_now(),
         mr_ref: marker
       })

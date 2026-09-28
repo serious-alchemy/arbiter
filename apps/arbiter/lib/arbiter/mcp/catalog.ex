@@ -42,8 +42,8 @@ defmodule Arbiter.MCP.Catalog do
   | `worker_resume` | coordinator (`can_dispatch`) | `Arbiter.Worker.Dispatch.resume/2` |
   | `worker_review` | coordinator (`can_dispatch`) | `Arbiter.Worker.Dispatch.dispatch/2` (`review: true`) / `Arbiter.Reviews.ExternalReview.dispatch/1` (`pr`) |
   | `worker_stop` | coordinator | `Arbiter.Worker.stop/2` |
-  | `worker_list` | coordinator | `Arbiter.Worker.list_children/0` |
-  | `worker_show` | coordinator | `Arbiter.Worker.whereis/1` + `Worker.state/1`, falls back to `Arbiter.Workers.Run` |
+  | `worker_list` | coordinator | `Arbiter.Workers.Current.list/1` |
+  | `worker_show` | coordinator | `Arbiter.Workers.Current.show/2` (the same current-run read as `worker_list`) |
   | `worker_runs` | coordinator | `Ash.read(Arbiter.Workers.Run, task_id: …)`, newest first (accepts synthetic ids) |
   | `worker_log` | coordinator | `Arbiter.Worker.OutputLog.read_lines/1` for one run (by `run_id` or the task's most recent) |
   | `worker_prompt` | coordinator | `Arbiter.Worker.PromptLog.read/1` for one run (by `run_id` or the task's most recent) |
@@ -1067,8 +1067,12 @@ defmodule Arbiter.MCP.Catalog do
       name: "worker_list",
       tiers: @coordinator,
       description:
-        "List active workers in the workspace: task_id, registry_key, role, status, repo, " <>
-          "started_at, activity, model (short display name e.g. \"Sonnet\"), cost_usd (sum " <>
+        "List the workspace's tickets with a live run, each as its current run: task_id " <>
+          "(the ticket), run_task_id (the id the run runs under — a ReviewGate reviewer's is " <>
+          "`<ticket>#review`), kind (implement | review | fix_pass | conflict), state " <>
+          "(starting | working | waiting | finished), outcome (succeeded | failed | " <>
+          "interrupted | handed_off, once finished), waiting_on, registry_key, role, phase, " <>
+          "repo, started_at, activity, model (short display name e.g. \"Sonnet\"), cost_usd (sum " <>
           "of all ledger entries for the task), resumable (boolean: whether the task can be " <>
           "safely resumed), and blocked_reason (string or nil: human-readable reason if " <>
           "resumable is false). A merge-queue pass is an ordinary run of its ticket, " <>
@@ -1089,11 +1093,12 @@ defmodule Arbiter.MCP.Catalog do
       name: "worker_show",
       tiers: @coordinator,
       description:
-        "Full snapshot for a single task's worker (`arb worker show <task-id>`): status, " <>
-          "activity, and recent output lines. When a worker is currently live, returns its " <>
-          "in-memory state (`source: \"live\"`); otherwise falls back to the most recent " <>
-          "durable run row (`source: \"history\"`) so a finished/exited run stays inspectable. " <>
-          "Not-found only when neither a live worker nor any run has ever been recorded.",
+        "The ticket's current run (`arb worker show <task-id>`) — the same read `worker_list` " <>
+          "makes — with its kind, state, outcome, activity and recent output lines, plus " <>
+          "`runs`: its recent runs newest first, each labelled with its kind, state and " <>
+          "outcome (`current: true` on the current one). A live run is read from its worker " <>
+          ~s[(`source: "live"`), a finished one from its run row (`source: "history"`), ] <>
+          "in the same vocabulary. Not-found only when the ticket never had a run.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
@@ -1118,7 +1123,7 @@ defmodule Arbiter.MCP.Catalog do
       description:
         "List every historical run recorded for a task, newest first (`arb worker runs " <>
           "<task-id>`). Each entry is a run summary (no output lines — use `worker_log` for " <>
-          "the transcript): id, task_id, task_title, repo, workspace_id, worker_type, status, " <>
+          "the transcript): id, task_id, task_title, repo, workspace_id, kind, state, outcome, " <>
           "model, started_at, completed_at, exit_code, failure_reason, failure_summary " <>
           "(a bounded human-readable ReviewGate VERDICT + top finding, when the run failed " <>
           "via a ReviewGate rejection; nil otherwise), provider, provider_fallback, and — " <>
@@ -1221,7 +1226,7 @@ defmodule Arbiter.MCP.Catalog do
           "whole retrievable transcript corpus for a task in one call. Unlike `worker_runs` " <>
           "(exact `task_id` match only), this also matches anything prefixed `<task_id>#`, " <>
           "surfacing the reviewer/re-prompt corpus alongside the author's own runs. Each " <>
-          "entry: run_id, task_id, worker_type, status, model, started_at, " <>
+          "entry: run_id, task_id, kind, state, outcome, model, started_at, " <>
           "transcript_exists, line_count. Optional `limit` (default 200, max 1000).",
       input_schema: %{
         "type" => "object",

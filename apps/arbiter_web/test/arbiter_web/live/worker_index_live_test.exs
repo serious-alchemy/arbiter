@@ -106,8 +106,8 @@ defmodule ArbiterWeb.WorkerIndexLiveTest do
     refute render_async(view, @async_timeout) =~ task.id
   end
 
-  # bd-741sid: the worker that opens a PR no longer parks on it at
-  # :awaiting_review — its run ends and the ticket owns the PR. The MR's badge
+  # bd-741sid: the worker that opens a PR no longer parks on it (the old
+  # `awaiting_review` status is gone) — its run ends and the ticket owns the PR. The MR's badge
   # went with it, from this list to the ticket's Merge request panel.
   defp open_pr(ws, title) do
     {:ok, task} = Ash.create(Issue, %{title: title, workspace_id: ws.id})
@@ -129,7 +129,7 @@ defmodule ArbiterWeb.WorkerIndexLiveTest do
     # Record merger status: MR is open, not approved (awaiting review)
     :ok = PullRequest.record_merger_status(task.id, %{status: :open, approved: false})
 
-    {:ok, view, _html} = live_workers(conn, ~p"/workers?status=awaiting")
+    {:ok, view, _html} = live_workers(conn, ~p"/workers?status=waiting")
     assert has_element?(view, ~s(#workers-panel[data-state="loaded"]))
     refute has_element?(view, ~s(#workers a[href="/workers/#{task.id}"]))
 
@@ -155,6 +155,66 @@ defmodule ArbiterWeb.WorkerIndexLiveTest do
     {:ok, view, _html} = live_worker(conn, task.id)
     # When CI is running, should show "Open · CI running"
     assert has_element?(view, "#worker-merge-request", "Open · CI running")
+  end
+
+  # bd-1uu19b: the filter is the run state — working vs waiting (on a
+  # question or the review gate) — and each row's badge is the run's label.
+  describe "state filter" do
+    setup %{ws: ws} do
+      {:ok, working} = Ash.create(Issue, %{title: "working-worker", workspace_id: ws.id})
+      {:ok, pid} = Worker.start(task_id: working.id, repo: "test/repo", workspace_id: ws.id)
+      :ok = Worker.advance(pid, :implement)
+
+      {:ok, waiting} = Ash.create(Issue, %{title: "waiting-worker", workspace_id: ws.id})
+      {:ok, pid} = Worker.start(task_id: waiting.id, repo: "test/repo", workspace_id: ws.id)
+      :ok = Worker.advance(pid, :implement)
+      :ok = Worker.await(pid)
+
+      {:ok, working: working, waiting: waiting}
+    end
+
+    defp listed?(view, task), do: has_element?(view, ~s(#workers a[href="/workers/#{task.id}"]))
+
+    test "All lists both, each badged with its run label", %{
+      conn: conn,
+      working: working,
+      waiting: waiting
+    } do
+      {:ok, view, _html} = live_workers(conn)
+
+      assert listed?(view, working)
+      assert listed?(view, waiting)
+      assert has_element?(view, ~s(#workers a[href="/workers/#{working.id}"]), "Working")
+      assert has_element?(view, ~s(#workers a[href="/workers/#{waiting.id}"]), "Waiting on you")
+    end
+
+    test "working and waiting narrow to their state", %{
+      conn: conn,
+      working: working,
+      waiting: waiting
+    } do
+      {:ok, view, _html} = live_workers(conn, ~p"/workers?status=working")
+      assert listed?(view, working)
+      refute listed?(view, waiting)
+
+      {:ok, view, _html} = live_workers(conn, ~p"/workers?status=waiting")
+      refute listed?(view, working)
+      assert listed?(view, waiting)
+    end
+
+    test "pre-5/13 running/awaiting links land on working/waiting", %{
+      conn: conn,
+      working: working,
+      waiting: waiting
+    } do
+      {:ok, view, _html} = live_workers(conn, ~p"/workers?status=running")
+      assert listed?(view, working)
+      refute listed?(view, waiting)
+
+      {:ok, view, _html} = live_workers(conn, ~p"/workers?status=awaiting")
+      refute listed?(view, working)
+      assert listed?(view, waiting)
+    end
   end
 
   # bd-45tkhq round 2: a wedged worker whose registry key has no matching

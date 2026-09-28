@@ -135,7 +135,7 @@ defmodule Arbiter.Worker.CommitGateTest do
           merge_title: "Merge #{task.id}",
           # Skip the live ReviewGate subprocess — a tripped gate must NOT route
           # to a ReviewGate at all, so a stubbed-out spawn would prove nothing.
-          # If the gate fails, status moves to :failed before this even matters.
+          # If the gate fails, the run finishes :failed before this even matters.
           review_spawn: false
         },
         extra_meta
@@ -230,13 +230,13 @@ defmodule Arbiter.Worker.CommitGateTest do
 
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end)
+      wait_until(fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end)
 
       snap = Worker.state(pid)
 
       # The structural pin: NEVER routed to ReviewGate.
-      refute snap.status == :awaiting_review_gate
-      refute snap.status == :completed
+      refute snap.waiting_on == :review_gate
+      refute snap.outcome == :succeeded
       assert snap.meta.failure_reason == :uncommitted_at_completion
       assert snap.meta.commit_gate_reason == :uncommitted
 
@@ -288,10 +288,10 @@ defmodule Arbiter.Worker.CommitGateTest do
 
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end)
+      wait_until(fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end)
 
       snap = Worker.state(pid)
-      refute snap.status == :awaiting_review_gate
+      refute snap.waiting_on == :review_gate
       assert snap.meta.failure_reason == :no_commits_at_completion
       assert snap.meta.commit_gate_reason == :no_commits
 
@@ -315,12 +315,14 @@ defmodule Arbiter.Worker.CommitGateTest do
 
       send(pid, {:__claude_session_done__, "arb done"})
 
-      # The gate passes → review_spawn: false leaves the worker parked at
-      # :awaiting_review_gate waiting for a directly-delivered verdict.
-      wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(pid)) end)
+      # The gate passes → review_spawn: false leaves the worker waiting on the
+      # review gate for a directly-delivered verdict.
+      wait_until(fn ->
+        match?(%{state: :waiting, waiting_on: :review_gate}, Worker.state(pid))
+      end)
 
       snap = Worker.state(pid)
-      refute snap.status == :failed
+      refute snap.outcome == :failed
       # The gate did NOT record a trip when the worktree was ready.
       refute Map.has_key?(snap.meta, :commit_gate_reason)
     end
@@ -332,7 +334,7 @@ defmodule Arbiter.Worker.CommitGateTest do
       # alive — it kept issuing commands in a cwd that had been deleted out from
       # under it. The teardown must now SIGKILL the agent OS process and confirm
       # it is dead as part of `fail_now`, which runs synchronously inside the
-      # worker before `status` becomes `:failed`. Because any observer (the
+      # worker before the run finishes `:failed`. Because any observer (the
       # Driver) can only read `:failed` via a serialized GenServer.call, the
       # agent is provably dead before any worktree removal can begin.
       task = new_task(ws)
@@ -354,7 +356,7 @@ defmodule Arbiter.Worker.CommitGateTest do
       assert {_, 0} =
                System.cmd("kill", ["-0", Integer.to_string(os_pid)], stderr_to_stdout: true)
 
-      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end)
+      wait_until(fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end)
 
       # The instant the worker is observable as :failed, the agent is already
       # dead — no post-teardown commands can run.
@@ -391,13 +393,15 @@ defmodule Arbiter.Worker.CommitGateTest do
       # the gate and proceed directly.
       wait_until(fn ->
         snap = Worker.state(pid)
-        snap.status in [:completed, :awaiting_review, :awaiting_review_gate]
+
+        match?(%{state: :finished, outcome: :succeeded}, snap) or
+          Worker.awaiting_review_gate?(snap)
       end)
 
       snap = Worker.state(pid)
       # The gate was SKIPPED because review_only=true, so the worker must NOT
       # be :failed with a commit_gate_reason.
-      refute snap.status == :failed
+      refute snap.outcome == :failed
       refute Map.has_key?(snap.meta, :commit_gate_reason)
       refute snap.meta[:failure_reason] == :no_commits_at_completion
     end

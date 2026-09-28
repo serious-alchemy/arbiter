@@ -15,16 +15,16 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
   defmodule FakeWorker do
     use GenServer
 
-    def start_link(task_id, status) do
-      GenServer.start_link(__MODULE__, status, name: Arbiter.Worker.Registry.via_tuple(task_id))
+    def start_link(task_id, snapshot) do
+      GenServer.start_link(__MODULE__, snapshot, name: Arbiter.Worker.Registry.via_tuple(task_id))
     end
 
     @impl true
-    def init(status), do: {:ok, status}
+    def init(snapshot), do: {:ok, snapshot}
 
     @impl true
-    def handle_call(:snapshot, _from, status) do
-      {:reply, %{status: status}, status}
+    def handle_call(:snapshot, _from, snapshot) do
+      {:reply, snapshot, snapshot}
     end
   end
 
@@ -129,9 +129,10 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
   # live_worker?/1 uses Arbiter.Worker.whereis/1 (a lookup in Arbiter.Worker.Registry)
   # plus a Arbiter.Worker.state/1 snapshot (bd-6w7j8h), so this double answers
   # the `:snapshot` GenServer.call the same way a real Worker would, reporting
-  # `status`. Defaults to `:running` — a genuinely active worker.
-  defp register_live_worker(task_id, status \\ :running) do
-    {:ok, pid} = FakeWorker.start_link(task_id, status)
+  # the given run `state` (and `outcome`, once finished). Defaults to
+  # `:working` — a genuinely active worker.
+  defp register_live_worker(task_id, state \\ :working, outcome \\ nil) do
+    {:ok, pid} = FakeWorker.start_link(task_id, %{state: state, outcome: outcome})
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
     pid
   end
@@ -350,8 +351,8 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
     end
 
     # bd-6w7j8h: complete_now/2 never stops the Worker GenServer — the process
-    # lingers, still registered, at status: :completed until the task's
-    # `:close` action's after-action reaps it (Worker.stop, see worker.ex
+    # lingers, still registered, finished with outcome :succeeded until the
+    # task's `:close` action's after-action reaps it (Worker.stop, see worker.ex
     # terminate/2). If the task never gets closed (e.g. the MergeQueue lost
     # the item), this "done but not yet reaped" worker is exactly what
     # MergedPRFinalizer is supposed to route around. Treating ANY registered
@@ -359,10 +360,10 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
     # deadlocks the two safety nets against each other: the finalizer defers
     # to "the live worker" to close the task, but the worker is only ever
     # stopped as a side effect of the task closing.
-    test "a completed-but-not-yet-reaped worker does not block finalization", %{ws: ws} do
+    test "a finished-but-not-yet-reaped worker does not block finalization", %{ws: ws} do
       task = create_task(ws, "703")
       {:ok, _} = Ash.update(task, %{status: :in_progress}, action: :update)
-      register_live_worker(task.id, :completed)
+      register_live_worker(task.id, :finished, :succeeded)
 
       stub(pr_get_stub(703, :merged))
 

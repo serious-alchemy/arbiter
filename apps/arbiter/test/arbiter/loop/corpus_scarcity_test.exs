@@ -30,7 +30,8 @@ defmodule Arbiter.Loop.CorpusScarcityTest do
           %{
             task_id: "bd-scar-#{System.unique_integer([:positive])}",
             repo: "arbiter",
-            status: :completed,
+            state: :finished,
+            outcome: :succeeded,
             started_at: DateTime.utc_now()
           },
           attrs

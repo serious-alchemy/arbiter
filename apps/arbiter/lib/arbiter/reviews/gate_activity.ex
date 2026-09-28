@@ -5,7 +5,7 @@ defmodule Arbiter.Reviews.GateActivity do
   bd-bq8c8a / #1860. On 2026-09-17 two arbiter components wrote to one task
   branch inside thirty seconds. `Arbiter.Workflows.PRPatrol` saw two unresolved
   Copilot threads on PR #424 — a PR the fleet had authored and whose task was
-  still parked at `:awaiting_review_gate` — filed a follow-up, and its fix
+  still waiting on the review gate — filed a follow-up, and its fix
   worker committed and pushed `aed4457` to `origin/<branch>`. The gate's own
   round-1 implementer committed `19665a3` on the worktree twenty seconds later,
   its push was rejected `:diverged`, and the task parked `head_not_pushed`.
@@ -21,15 +21,15 @@ defmodule Arbiter.Reviews.GateActivity do
 
   Three signals, any one of which gates the PR:
 
-    * `:awaiting_review_gate` — the authoring worker is parked waiting on the
-      gate. This is the whole gate lifetime, from the moment the author hands
+    * `:author_in_review` — the authoring run is `:waiting` on the review
+      gate (bd-1uu19b; `Arbiter.Worker.awaiting_review_gate?/1`). This is the whole gate lifetime, from the moment the author hands
       off until a verdict lands, and it is the signal that would have caught
       the reported incident.
     * `:round_running` — a reviewer or implementer worker is registered for the
       task (`meta.reviews` / `meta.revises`). Redundant with the above in the
       normal case, but it still fires if the author's registration is missing —
       an ad-hoc gate, a re-run gate, a restarted author.
-    * `:review_parked` — the gate gave up and stamped
+    * `:ticket_review_parked` — the gate gave up and stamped
       `Arbiter.Tasks.ReviewPark`. The branch is mid-incident and a human owns
       it; a patrol commit landing on top is exactly what made the reported
       recovery manual.
@@ -68,7 +68,7 @@ defmodule Arbiter.Reviews.GateActivity do
   alias Arbiter.Workflows.PatrolRepoScope
 
   @typedoc "Why the PR's branch is spoken for. See the moduledoc."
-  @type reason :: :awaiting_review_gate | :round_running | :review_parked | :undeterminable
+  @type reason :: :author_in_review | :round_running | :ticket_review_parked | :undeterminable
 
   @typedoc """
   `:clear` means no task in the workspace has this PR under the gate — which
@@ -132,13 +132,13 @@ defmodule Arbiter.Reviews.GateActivity do
       "the gate-activity read failed, so whether the ReviewGate owns the branch is " <>
         "unknown — holding until a tick can answer it"
 
-  def describe({:gated, :awaiting_review_gate, %Issue{id: id}}),
-    do: "task #{id} is parked at :awaiting_review_gate — the ReviewGate owns the branch"
+  def describe({:gated, :author_in_review, %Issue{id: id}}),
+    do: "task #{id}'s run is waiting on the review gate — the ReviewGate owns the branch"
 
   def describe({:gated, :round_running, %Issue{id: id}}),
     do: "a ReviewGate round is running for task #{id} — the gate owns the branch"
 
-  def describe({:gated, :review_parked, %Issue{id: id} = task}),
+  def describe({:gated, :ticket_review_parked, %Issue{id: id} = task}),
     do:
       "task #{id} is review-parked (#{task.review_park_reason}) — a human owns the branch " <>
         "until the park clears"
@@ -147,15 +147,15 @@ defmodule Arbiter.Reviews.GateActivity do
 
   defp classify(%Issue{} = task) do
     cond do
-      ReviewPark.parked?(task) -> {:gated, :review_parked, task}
-      author_awaiting_gate?(task.id) -> {:gated, :awaiting_review_gate, task}
+      ReviewPark.parked?(task) -> {:gated, :ticket_review_parked, task}
+      author_awaiting_gate?(task.id) -> {:gated, :author_in_review, task}
       round_running?(task.id) -> {:gated, :round_running, task}
       true -> :clear
     end
   end
 
   defp author_awaiting_gate?(task_id) do
-    match?(%{status: :awaiting_review_gate}, Worker.state(task_id))
+    Worker.awaiting_review_gate?(Worker.state(task_id))
   catch
     :exit, _ -> false
   end

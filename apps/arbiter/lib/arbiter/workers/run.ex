@@ -2,14 +2,15 @@ defmodule Arbiter.Workers.Run do
   @moduledoc """
   Durable record of a single worker run.
 
-  Created when an `Arbiter.Worker` GenServer initialises (status `:running`)
-  and updated on terminal transitions (`:completed` or `:failed`). The worker
+  Created when an `Arbiter.Worker` GenServer initialises (state `:starting`),
+  kept in step with the worker's state, and stamped `:finished` with an
+  `outcome` when the run ends (see `Arbiter.Workers.RunState`). The worker
   treats both writes as best-effort: a DB hiccup logs a warning but never
   crashes the workflow runner.
 
   `task_title` is denormalised so the dashboard's history list never needs to
-  join against `issues` on every render. `worker_type` records which kind of
-  worker produced the run (`:main` / `:review` / `:impl`) so a task's history
+  join against `issues` on every render. `kind` records what the run did for
+  its ticket (`:implement` / `:review` / `:fix_pass` / `:conflict`) so a task's history
   shows *who* worked it at each step; `model` records the resolved agent model
   id once the session stream reports it.
 
@@ -36,55 +37,33 @@ defmodule Arbiter.Workers.Run do
     domain: Arbiter.Workers,
     data_layer: AshSqlite.DataLayer
 
-  # bd-8tjcms / #1511: `:review_not_started` is a *terminal, non-failure* outcome
-  # — the run reached `arb done` and exited cleanly, but the downstream review
-  # stage never started inside the Watchdog's poll ceiling
-  # (`{:awaiting_review_timeout, N}`). It was previously written as `:failed`,
-  # which reads as "the implementation run failed" and is wrong: the branch is
-  # pushed and the PR is open. Written by `Arbiter.Worker.record_run_finished/1`;
-  # the worker's in-memory FSM status stays `:failed` because that is the
-  # terminal state `Dispatch.resume/2` and the Watchdog's bounded auto-resume
-  # both require.
-  # bd-9zuvbh / P9: `:review_parked` is the class-C terminal (design #1635
-  # §5.3). The run reached `arb done`, its branch is pushed and its PR open —
-  # what gave out is the *review gate*: no parseable verdict, a reviewer
-  # timeout, or a verdict guard that refused an APPROVE and ran out of
-  # re-prompts. None of that is evidence the work failed, and recording it as
-  # `:failed` is what made `:review_gate_inconclusive` cost 52 runs / $226.97 in
-  # 31 days. The task is parked (`issues.review_park_reason`) and the
-  # coordinator paged once instead. Same shape as `:review_not_started`: only
-  # the durable row diverges, the worker's FSM status stays `:failed` because
-  # that is the terminal state `Dispatch.resume/2` re-attaches from.
-  # bd-aje6fj / #1896: `:interrupted` is the run whose worker was shut down
-  # WITH the node (an application stop — `systemctl restart`), its agent reaped
-  # by the worker's own terminate/2. It neither failed nor finished; the task
-  # stays in progress and the boot-time resume sweep re-attaches it. Written with
-  # failure_reason "server shutdown". A run that missed that graceful path (a
-  # hard crash, a teardown that overran its grace) is still swept to `:failed` /
-  # "server restarted" by `Arbiter.Workers.Reconciler` on the next boot.
-  @statuses ~w(running completed failed review_not_started review_parked interrupted)a
-
-  # The kind of worker that produced this run. A task can be worked by more
-  # than one worker over its life: the `:main` worker that authors the change,
-  # a `:review` worker (the review-gate reviewer or a coordinator-dispatched
-  # review-only worker) that judges the diff, and an `:impl` worker (the
-  # review-gate's revise-round implementer) that addresses findings. Recording
-  # the type lets the history list show *who* worked the task at each step.
+  # bd-1uu19b (ticket lifecycle 5/13): the run vocabulary is shared with the
+  # worker GenServer — see `Arbiter.Workers.RunState`. A run is one attempt at
+  # a ticket: its `kind`, its `state`, and once finished its `outcome`.
   #
-  # bd-8lq2g7 adds the two merge-queue *subordinate* passes, which run under the
-  # task's own id alongside the parked primary: `:fix_pass` (CI fix on the open
-  # PR) and `:conflict` (conflict resolution). They were previously recorded as
-  # `:main`, making a failed subordinate read as the authoring worker failing.
-  @worker_types ~w(main review impl fix_pass conflict)a
+  # The old statuses fold in as the 5/13 migration did: a review park
+  # (bd-9zuvbh) and a review that never started (bd-8tjcms) are `finished` /
+  # `failed`, their cause in `failure_reason` (and on the ticket's
+  # `review_park_reason`). A run whose worker was shut down WITH the node
+  # (bd-aje6fj) is `finished` / `interrupted`, "server shutdown"; one that
+  # missed that path is swept to `finished` / `interrupted`, "server
+  # restarted", by `Arbiter.Workers.Reconciler` on the next boot.
+  #
+  # `kind` folds the old `worker_type`: `:main` (the authoring worker) and
+  # `:impl` (the ReviewGate's revise-round implementer) are both `:implement`.
+  # `role` (bd-5fhyry) still tells them apart — "base" vs "impl".
+  @kinds Arbiter.Workers.RunState.kinds()
+  @states Arbiter.Workers.RunState.states()
+  @outcomes Arbiter.Workers.RunState.outcomes()
 
   sqlite do
     table "worker_runs"
     repo Arbiter.Repo
 
     custom_indexes do
-      # Powers "completed workers for workspace W, optionally filtered by
-      # status, newest first" — the dashboard's primary query shape.
-      index [:workspace_id, :status, :started_at]
+      # Powers "finished runs for workspace W, optionally filtered by
+      # state, newest first" — the dashboard's primary query shape.
+      index [:workspace_id, :state, :started_at]
 
       # Powers "all runs for task T, newest first" — the per-task history list
       # surfaced by `GET /api/workers/history?task_id=…` and `arb worker runs`.
@@ -111,9 +90,10 @@ defmodule Arbiter.Workers.Run do
         :task_title,
         :repo,
         :workspace_id,
-        :worker_type,
+        :kind,
         :model,
-        :status,
+        :state,
+        :outcome,
         :started_at,
         :completed_at,
         :exit_code,
@@ -147,7 +127,8 @@ defmodule Arbiter.Workers.Run do
       require_atomic? false
 
       accept [
-        :status,
+        :state,
+        :outcome,
         :model,
         :completed_at,
         :exit_code,
@@ -208,24 +189,31 @@ defmodule Arbiter.Workers.Run do
       description "Workspace scope. Nullable for ad-hoc runs with no workspace."
     end
 
-    attribute :worker_type, :atom do
+    attribute :kind, :atom do
       allow_nil? false
       public? true
-      default :main
-      constraints one_of: @worker_types
+      default :implement
+      constraints one_of: @kinds
 
-      description "Which kind of worker produced this run: :main (authoring), " <>
-                    ":review (review-gate or review-only reviewer), :impl " <>
-                    "(review-gate revise-round implementer), :fix_pass " <>
-                    "(merge-queue CI fix pass), or :conflict (merge-queue " <>
-                    "conflict resolver)."
+      description "What the run did for its ticket: :implement (authoring, or a " <>
+                    "review-gate revise round), :review (review-gate or review-only " <>
+                    "reviewer), :fix_pass (CI fix pass) or :conflict (conflict resolver)."
     end
 
-    attribute :status, :atom do
+    attribute :state, :atom do
       allow_nil? false
       public? true
-      default :running
-      constraints one_of: @statuses
+      default :starting
+      constraints one_of: @states
+      description "Where the run is: :starting, :working, :waiting or :finished."
+    end
+
+    attribute :outcome, :atom do
+      public? true
+      constraints one_of: @outcomes
+
+      description "How a finished run ended: :succeeded, :failed, :interrupted or " <>
+                    ":handed_off (superseded by a follow-up run). Nil until finished."
     end
 
     attribute :model, :string do
@@ -308,14 +296,14 @@ defmodule Arbiter.Workers.Run do
     # "why did this fail" is answerable from `worker_runs` alone, without a
     # separate `review_gate_rounds_list` call.
     #
-    # bd-1eb6fc: also carries a non-failure note on a `:completed` run — `arb
+    # bd-1eb6fc: also carries a non-failure note on a `:succeeded` run — `arb
     # done` fired while a background task the worker had last checked was
     # still RUNNING (`Worker.note_tasks_running_at_done/1`). Nothing in this
     # codebase branches on "non-nil ⇒ failed" (checked at bd-1eb6fc time —
-    # every reader just surfaces the field alongside `status`), so this stays
-    # a single column rather than a `status`-keyed pair; a reader that
+    # every reader just surfaces the field alongside the outcome), so this
+    # stays a single column rather than an outcome-keyed pair; a reader that
     # distinguishes "why did this fail" from "what should I know about this
-    # run" must check `status` too, same as it already must for
+    # run" must check `outcome` too, same as it already must for
     # `failure_reason` on an `:interrupted` run (see
     # `ArbiterCli.Cmd.Worker.reason_label/1`).
     attribute :failure_summary, :string do
@@ -325,7 +313,7 @@ defmodule Arbiter.Workers.Run do
       description "Bounded human-readable summary (truncated). On a run that failed via " <>
                     "ReviewGate rejection: the VERDICT line + top finding. On a completed " <>
                     "run: a non-failure completion note (e.g. arb done fired with a " <>
-                    "background task still RUNNING). Nil otherwise — check `status` to " <>
+                    "background task still RUNNING). Nil otherwise — check `outcome` to " <>
                     "tell which case applies."
     end
 
@@ -547,11 +535,8 @@ defmodule Arbiter.Workers.Run do
 
   # ---- introspection -----------------------------------------------------
 
-  @doc "All valid status atoms."
-  def statuses, do: @statuses
-
-  @doc "All valid worker_type atoms."
-  def worker_types, do: @worker_types
+  @doc "All valid run kinds, in lifecycle order."
+  def kinds, do: @kinds
 
   @doc """
   How many CI fix passes (`:fix_pass` runs) `task_id` has had on PR `mr_ref`.
@@ -575,7 +560,7 @@ defmodule Arbiter.Workers.Run do
     query =
       Ash.Query.filter(
         __MODULE__,
-        (task_id == ^task_id or base_task_id == ^task_id) and worker_type == :fix_pass
+        (task_id == ^task_id or base_task_id == ^task_id) and kind == :fix_pass
       )
 
     query =
@@ -610,8 +595,8 @@ defmodule Arbiter.Workers.Run do
   Find the provider of the most recent authoring worker run for `task_id`.
 
   Strips synthetic suffixes (`#review`, `#impl<N>`, `:fixpass`, `:conflict`) to
-  locate the root task. Considers only authoring worker types (`:main`, `:impl`,
-  `:fix_pass`, `:conflict`), explicitly excluding `:review` passes (which are
+  locate the root task. Considers only authoring kinds (`:implement`,
+  `:fix_pass`, `:conflict`), explicitly excluding `:review` runs (which are
   governed by `review_agent.type`).
 
   bd-2exkl0 (finding 4): prefers the most recent row whose `provider_fallback`
@@ -661,7 +646,7 @@ defmodule Arbiter.Workers.Run do
       Ash.Query.filter(
         __MODULE__,
         (task_id == ^base_id or base_task_id == ^base_id) and
-          worker_type in [:main, :impl, :fix_pass, :conflict] and
+          kind in [:implement, :fix_pass, :conflict] and
           not is_nil(provider)
       )
 

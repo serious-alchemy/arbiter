@@ -1131,12 +1131,13 @@ defmodule Arbiter.Reviews.GuardRegistry do
         {Worker, :escalate_review_park, 3},
         {Worker, :fail_now, 2}
       ],
-      anchors: [":review_gate_inconclusive", "fail_reason_for", ":review_parked"],
+      anchors: [":review_gate_inconclusive", "fail_reason_for", "review_park_reason"],
       summary: "the single point a gate outcome becomes a failed run — or, since P9, a park",
       policy_note:
         "P9 (bd-9zuvbh) split this. `park_rejected/4` now takes a park reason: " <>
-          "with one it writes `Run.status = :review_parked`, stamps " <>
-          "`issues.review_park_reason` and pages once via `park_review_gate/3`; " <>
+          "with one it stamps `issues.review_park_reason` and pages once via " <>
+          "`park_review_gate/3` (the run itself finishes `:failed`, its cause on the " <>
+          "ticket — bd-1uu19b); " <>
           "without one it is the pre-P9 path. Every class-C terminal passes a " <>
           "reason, so the `:failed_run` recorded here is now reachable only from a " <>
           "genuine REQUEST_CHANGES — see G14."
@@ -1162,15 +1163,18 @@ defmodule Arbiter.Reviews.GuardRegistry do
       class: :d,
       class_source: :inferred,
       class_note:
-        "Not classed in §5.3. It is the terminal-status mapping the whole policy " <>
-          "points at (I2's `review_not_started` shape), and it lives beside C1–C3, " <>
-          "so it is classed with them.",
+        "Not classed in §5.3. It is the terminal record the whole policy points at " <>
+          "(I2's review-not-started shape), and it lives beside C1–C3, so it is " <>
+          "classed with them. Since bd-741sid a ticket's Watchdog has no run to fail: " <>
+          "the timeout auto-resumes the ticket (W12). Since bd-1uu19b the run vocabulary " <>
+          "has no review-not-started outcome either; a run that did carry the timeout " <>
+          "would finish `:failed` with it as its `failure_reason`.",
       bound: {:evaluations, 1},
       episode: {:task, :mr_ref},
       terminal: :parked,
-      sites: [{Worker, :run_status, 1}],
-      anchors: [":awaiting_review_timeout", ":review_not_started"],
-      summary: "a resumable timeout is a terminal non-failure, not :failed"
+      sites: [{Worker, :record_run_finished, 1}],
+      anchors: [":awaiting_review_timeout", "failure_reason"],
+      summary: "a resumable timeout parks the ticket for auto-resume; no run is failed for it"
     }
   ]
 
@@ -1409,8 +1413,8 @@ defmodule Arbiter.Reviews.GuardRegistry do
       removed_by: :p10,
       note:
         "P9 met its AC here: no ReviewGate outcome with an approving or no-verdict " <>
-          "result reaches Run.status = :failed any more — `park_rejected/4` writes " <>
-          "`:review_parked` for every class-C terminal. The row keeps the entry " <>
+          "result is an unexplained failed run any more — `park_rejected/4` stamps " <>
+          "`review_park_reason` for every class-C terminal. The row keeps the entry " <>
           "because the one arm P9 deliberately left (a genuine REQUEST_CHANGES at " <>
           "G14's round cap) still routes through this same conversion point."
     },

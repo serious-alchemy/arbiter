@@ -34,7 +34,7 @@ defmodule ArbiterCli.Cmd.Restart do
       within the timeout, or a prerequisite (project root) was missing.
   """
 
-  alias ArbiterCli.{Client, Cmd.Doctor, Cmd.Start, Output}
+  alias ArbiterCli.{Client, Cmd.Doctor, Cmd.Start, Output, RunLabel}
 
   @switches [json: :boolean, timeout: :integer, force: :boolean]
 
@@ -319,9 +319,10 @@ defmodule ArbiterCli.Cmd.Restart do
 
   # ---- active-work guard -------------------------------------------------
 
-  # Statuses that mean a Claude worker is actively spending tokens and has a
+  # Run states (bd-1uu19b) that mean a Claude worker is actively spending
+  # tokens, or waiting mid-run (on a question, or on the review gate), with a
   # worktree that would be abandoned if the server is bounced now.
-  @active_statuses ~w(running awaiting awaiting_review_gate awaiting_review)
+  @active_states ~w(working waiting)
 
   @doc """
   Abort with a helpful error when any workers are actively working, unless
@@ -336,13 +337,13 @@ defmodule ArbiterCli.Cmd.Restart do
       {:ok, %{"data" => workers}} ->
         active =
           Enum.filter(workers, fn p ->
-            p["status"] in @active_statuses
+            p["state"] in @active_states
           end)
 
         if active != [] and not force do
           list =
             Enum.map_join(active, "\n", fn p ->
-              "  #{p["task_id"]}  (#{p["status"]})"
+              "  #{p["task_id"]}  (#{RunLabel.label(p)})"
             end)
 
           Output.die(

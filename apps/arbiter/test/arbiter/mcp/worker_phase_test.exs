@@ -1,8 +1,8 @@
 defmodule Arbiter.MCP.WorkerPhaseTest do
   @moduledoc """
   bd-aw2cyt: `worker_list` / `worker_show` report the phase a worker is
-  actually in, and whether its agent subprocess is live, alongside the
-  unchanged `status` every existing consumer still matches on.
+  actually in, and whether its agent subprocess is live, alongside the run's
+  `state` in the one run vocabulary (bd-1uu19b).
   """
   use Arbiter.DataCase, async: false
 
@@ -50,8 +50,10 @@ defmodule Arbiter.MCP.WorkerPhaseTest do
       assert {:ok, %{workers: workers}} = Tools.worker_list(ctx.coordinator, %{})
       entry = Enum.find(workers, &(&1.task_id == t.id))
 
-      # `status` is unchanged for existing consumers…
-      assert entry.status == "awaiting"
+      # The run is waiting on a question…
+      assert entry.state == "waiting"
+      assert entry.waiting_on == "question"
+      assert entry.outcome == nil
       # …and the phase says what is actually happening.
       assert entry.phase == "waiting_on_you"
       assert entry.phase_label == "waiting on you"
@@ -59,25 +61,33 @@ defmodule Arbiter.MCP.WorkerPhaseTest do
     end
 
     test "an author whose agent has exited stops reading as running work", ctx do
-      # The bd-aw2cyt report, on this surface: `vs-8iqckq` showed
-      # `status=running` with no process anywhere. The status still says
-      # `running` (consumers depend on it); the liveness no longer pretends.
+      # The bd-aw2cyt report, on this surface: `vs-8iqckq` showed a running
+      # worker with no process anywhere. The run state still says `working`;
+      # the liveness no longer pretends.
       # bd-741sid: the phase names the stage (`implementing`) — the missing
       # agent is `agent_live: false`, not a hand-off phase.
       t = task(ctx.ws)
       author = start_worker(ctx.ws, t.id)
       :ok = Worker.advance(author, :implement)
 
+      assert {:ok, %{workers: workers}} = Tools.worker_list(ctx.coordinator, %{})
+
+      entry = Enum.find(workers, &(&1.task_id == t.id))
+      assert entry.run_task_id == t.id
+      assert entry.state == "working"
+      assert entry.agent_live == false
+      assert entry.phase == "implementing"
+
+      # bd-1uu19b: worker_list is one entry per ticket. With a reviewer
+      # registered too, the newest unfinished run (the reviewer) is the
+      # ticket's current run — and it too reports no live agent.
       start_worker(ctx.ws, t.id <> "#review", meta: %{role: :reviewer, reviews: t.id})
 
       assert {:ok, %{workers: workers}} = Tools.worker_list(ctx.coordinator, %{})
 
-      entry = Enum.find(workers, &(&1.task_id == t.id))
-      assert entry.status == "running"
-      assert entry.agent_live == false
-      assert entry.phase == "implementing"
-
-      reviewer = Enum.find(workers, &(&1.task_id == t.id <> "#review"))
+      assert [reviewer] = Enum.filter(workers, &(&1.task_id == t.id))
+      assert reviewer.run_task_id == t.id <> "#review"
+      assert reviewer.kind == "review"
       assert reviewer.role == "reviewer"
       assert reviewer.agent_live == false
       assert is_binary(reviewer.phase)
@@ -92,7 +102,8 @@ defmodule Arbiter.MCP.WorkerPhaseTest do
 
       assert {:ok, snap} = Tools.worker_show(ctx.coordinator, %{"task_id" => t.id})
 
-      assert snap.status == "running"
+      assert snap.state == "working"
+      assert snap.kind == "implement"
       assert snap.agent_live == false
       assert snap.phase == "implementing"
       assert is_binary(snap.phase_label)

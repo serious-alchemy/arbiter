@@ -493,7 +493,9 @@ defmodule Arbiter.Workflows.PRPatrolTest do
 
       send(worker_pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :completed}, Worker.state(worker_pid)) end)
+      wait_until(fn ->
+        match?(%{state: :finished, outcome: :succeeded}, Worker.state(worker_pid))
+      end)
 
       assert :counters.get(pulls_posted, 1) == 0,
              "thread-reply follow-up must never open a new PR on the forge"

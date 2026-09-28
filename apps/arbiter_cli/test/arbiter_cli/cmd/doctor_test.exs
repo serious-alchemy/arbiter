@@ -667,7 +667,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
            "paused" => true,
            "safe_to_restart" => false,
            "in_flight" => [
-             %{"kind" => "conflict_resolver", "task_id" => "vs-3fpek0", "status" => "running"}
+             %{"kind" => "conflict_resolver", "task_id" => "vs-3fpek0", "state" => "working"}
            ]
          }, 200}
       )

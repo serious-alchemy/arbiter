@@ -1150,7 +1150,7 @@ defmodule Arbiter.Tasks.Issue do
 
     # ---- the open PR's state (bd-741sid) ------------------------------------
     #
-    # What a worker parked at `:awaiting_review` used to hold in memory, so the
+    # What a worker resident on its open PR used to hold in memory, so the
     # ticket's Watchdog can run — and be restarted — from this row alone.
     # Written through `Arbiter.Tasks.PullRequest`.
 
@@ -1407,7 +1407,7 @@ defmodule Arbiter.Tasks.Issue do
       re-prompt, a reviewer timeout, a verdict guard that ran out of
       re-prompts, a no-op fix round after an approval-gap rejection — are
       *liveness* failures, not review findings. Class C fails open on them:
-      the run is recorded `:review_parked`, the coordinator is paged once, and
+      the run finishes `:failed` with this reason, the coordinator is paged once, and
       the task sits here until a human re-runs the review, merges by hand, or
       rejects it.
 

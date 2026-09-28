@@ -16,7 +16,7 @@ defmodule Arbiter.Worker.DispatchTest do
   import ExUnit.CaptureLog, only: [with_log: 1]
 
   # The most recent worker_run for a task — used by the resume tests to assert
-  # run lineage (resumed_from_run_id) and terminal status.
+  # run lineage (resumed_from_run_id) and finished outcome.
   defp latest_run(task_id) do
     Run
     |> Ash.Query.filter(task_id == ^task_id)
@@ -94,27 +94,27 @@ defmodule Arbiter.Worker.DispatchTest do
     end
 
     # bd-d70whv: redispatch a failed worker must start a fresh worker rather than
-    # reusing the stale :failed one. Previously, start_worker/3 returned the
-    # existing pid on {:already_started, pid} regardless of status, and the
-    # :failed status caused the "arb done" FSM guard to silently no-op.
-    test "redispatch a :failed worker starts a fresh :idle worker (bd-d70whv)", %{ws: ws} do
+    # reusing the stale failed one. Previously, start_worker/3 returned the
+    # existing pid on {:already_started, pid} regardless of its run, and the
+    # failed run caused the "arb done" FSM guard to silently no-op.
+    test "redispatch a failed worker starts a fresh :starting worker (bd-d70whv)", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "redispatch failed", workspace_id: ws.id})
 
       {:ok, first} = Dispatch.dispatch(task.id, force: true, repo: "r", start_driver: false)
       first_pid = first.worker_pid
 
       :ok = Worker.fail(first_pid, :credentials_expired)
-      assert Worker.state(first_pid).status == :failed
+      assert Worker.state(first_pid).outcome == :failed
 
       # Re-dispatch: must evict the stale worker and start a new one.
       {:ok, second} = Dispatch.dispatch(task.id, force: true, repo: "r", start_driver: false)
 
       assert second.worker_pid != first_pid
       refute Process.alive?(first_pid)
-      assert Worker.state(second.worker_pid).status == :idle
+      assert Worker.state(second.worker_pid).state == :starting
     end
 
-    test "redispatch a :completed worker also starts fresh (bd-d70whv)", %{ws: ws} do
+    test "redispatch a succeeded worker also starts fresh (bd-d70whv)", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "redispatch completed", workspace_id: ws.id})
 
       {:ok, first} = Dispatch.dispatch(task.id, force: true, repo: "r", start_driver: false)
@@ -122,13 +122,13 @@ defmodule Arbiter.Worker.DispatchTest do
 
       :ok = Worker.advance(first_pid, :work)
       :ok = Worker.complete(first_pid, :done)
-      assert Worker.state(first_pid).status == :completed
+      assert Worker.state(first_pid).outcome == :succeeded
 
       {:ok, second} = Dispatch.dispatch(task.id, force: true, repo: "r", start_driver: false)
 
       assert second.worker_pid != first_pid
       refute Process.alive?(first_pid)
-      assert Worker.state(second.worker_pid).status == :idle
+      assert Worker.state(second.worker_pid).state == :starting
     end
 
     test "starts a Driver by default and drives task to :closed", %{ws: ws} do
@@ -226,8 +226,8 @@ defmodule Arbiter.Worker.DispatchTest do
 
   # bd-bi5pn0: a step AFTER start_worker/3 (e.g. the Claude subprocess spawn,
   # hit by a transient network/VPN outage in production) can fail while the
-  # worker GenServer is already registered `:idle`. Previously that left a
-  # zombie `:idle` registration on an `:in_progress` task forever — no retry,
+  # worker GenServer is already registered `:starting`. Previously that left a
+  # zombie `:starting` registration on an `:in_progress` task forever — no retry,
   # no escalation — which also permanently blackholed PRPatrol dedup for the
   # underlying PR. dispatch/2 must instead fail the just-started worker and
   # escalate to the coordinator.
@@ -246,12 +246,12 @@ defmodule Arbiter.Worker.DispatchTest do
       end)
     end
 
-    test "fails the worker instead of leaving it idle", %{ws: ws} do
+    test "fails the worker instead of leaving it :starting", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "spawn fails", workspace_id: ws.id})
 
       # provision_worktree: false + start_claude: true fails inside
       # maybe_start_claude/4 (:missing_worktree) — AFTER start_worker/3 already
-      # registered a live `:idle` worker. preflight: false skips the real CLI
+      # registered a live `:starting` worker. preflight: false skips the real CLI
       # probe so the test never touches the network.
       assert {:error, :missing_worktree} =
                Dispatch.dispatch(task.id,
@@ -265,7 +265,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       pid = Worker.whereis(task.id)
       assert is_pid(pid)
-      assert Worker.state(pid).status == :failed
+      assert Worker.state(pid).outcome == :failed
       assert Worker.state(pid).meta.stop_reason.category == :spawn_failed
     end
 
@@ -517,7 +517,7 @@ defmodule Arbiter.Worker.DispatchTest do
                  start_claude: true
                )
 
-      eventually(fn -> Worker.state(pid).status == :failed end)
+      eventually(fn -> Worker.state(pid).outcome == :failed end)
       assert Worker.state(pid).meta.stop_reason.category == :auth_expired
 
       # One death is a retry: the next dispatch is let through, and dies too.
@@ -532,7 +532,7 @@ defmodule Arbiter.Worker.DispatchTest do
                  start_claude: true
                )
 
-      eventually(fn -> Worker.state(pid2).status == :failed end)
+      eventually(fn -> Worker.state(pid2).outcome == :failed end)
 
       # The second consecutive death opened the hold, which marked the
       # watchdog (a cast — wait for it rather than `:sys.get_state`, since
@@ -1584,12 +1584,12 @@ defmodule Arbiter.Worker.DispatchTest do
 
       assert is_pid(result.driver_pid)
 
-      # Dispatch must have nudged the worker out of :idle so the UI/CLI
-      # report a meaningful status while Claude works. In claude_driven
+      # Dispatch must have nudged the worker out of :starting so the UI/CLI
+      # report a meaningful state while Claude works. In claude_driven
       # mode the Driver never ticks the Machine, so without this nudge
-      # the worker would stay :idle until "arb done" fires.
+      # the worker would stay :starting until "arb done" fires.
       snap = Worker.state(result.worker_pid)
-      assert snap.status == :running
+      assert snap.state == :working
       assert snap.current_step == :claude
 
       # If the Driver were in workflow mode, the no-op steps would close
@@ -1775,7 +1775,7 @@ defmodule Arbiter.Worker.DispatchTest do
       refute File.exists?(claude_file)
 
       run = latest_run(task.id)
-      assert run.worker_type == :main
+      assert run.kind == :implement
 
       assert run.provider == "gemini",
              "the :main run's provider must be written by the real spawn, not seeded"
@@ -1956,7 +1956,8 @@ defmodule Arbiter.Worker.DispatchTest do
           task_title: task.title,
           repo: "t/repo",
           workspace_id: ws.id,
-          status: :failed,
+          state: :finished,
+          outcome: :failed,
           started_at: DateTime.utc_now(),
           exit_code: 1,
           output_lines: [
@@ -2001,7 +2002,8 @@ defmodule Arbiter.Worker.DispatchTest do
           task_title: task.title,
           repo: "t/repo",
           workspace_id: ws.id,
-          status: :failed,
+          state: :finished,
+          outcome: :failed,
           started_at: DateTime.utc_now(),
           exit_code: 1,
           output_lines: [],
@@ -2039,7 +2041,8 @@ defmodule Arbiter.Worker.DispatchTest do
           task_title: task.title,
           repo: "c2/repo",
           workspace_id: ws.id,
-          status: :failed,
+          state: :finished,
+          outcome: :failed,
           started_at: DateTime.utc_now(),
           exit_code: 1,
           output_lines: ["some other unrelated crash"]
@@ -2075,7 +2078,8 @@ defmodule Arbiter.Worker.DispatchTest do
           task_title: task.title,
           repo: "o/repo",
           workspace_id: ws.id,
-          status: :failed,
+          state: :finished,
+          outcome: :failed,
           started_at: DateTime.utc_now(),
           exit_code: 1,
           output_lines: ["autocompact is thrashing"]
@@ -2156,7 +2160,7 @@ defmodule Arbiter.Worker.DispatchTest do
       refute File.exists?(gemini_file)
 
       pid = Worker.whereis(task.id)
-      assert Worker.state(pid).status == :failed
+      assert Worker.state(pid).outcome == :failed
     end
 
     test "automatic selection under :strict skips an ineligible preferred provider for an eligible pool entry",
@@ -2330,7 +2334,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       # The live session is untouched: same worker, same port, still running.
       assert Worker.whereis(task.id) == first.worker_pid
-      assert Worker.state(first.worker_pid).status not in [:failed, :completed]
+      refute Worker.finished?(Worker.state(first.worker_pid))
       assert Port.info(first.claude_port) != nil
 
       Worker.stop(first.worker_pid, :normal)
@@ -2423,11 +2427,11 @@ defmodule Arbiter.Worker.DispatchTest do
 
       {:ok, first} = Dispatch.dispatch(task.id, Keyword.put(opts, :force, true))
 
-      # Drive the worker to :completed the way the `arb done` path does — via
+      # Finish the run :succeeded the way the `arb done` path does — via
       # complete_now/2, which leaves the session port open.
       :ok = Worker.advance(first.worker_pid, :work)
       :ok = Worker.complete(first.worker_pid, :test)
-      assert Worker.state(first.worker_pid).status == :completed
+      assert Worker.state(first.worker_pid).outcome == :succeeded
       assert Worker.agent_session_live?(first.worker_pid)
 
       assert {:ok, second} = Dispatch.dispatch(task.id, Keyword.put(opts, :force, true))
@@ -3392,12 +3396,12 @@ defmodule Arbiter.Worker.DispatchTest do
       first
     end
 
-    test "reuses the worktree, links the new run, and boots into :resuming", %{ws: ws} do
+    test "reuses the worktree, links the new run, and boots as a resume", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "resume work", workspace_id: ws.id})
       first = stop_worker_with_outpost(task.id)
 
       prior_run = latest_run(task.id)
-      assert prior_run.status == :failed
+      assert prior_run.outcome == :failed
 
       {:ok, result} =
         Dispatch.resume(task.id, start_driver: false, claude_command: ["sleep", "2"])
@@ -3408,8 +3412,9 @@ defmodule Arbiter.Worker.DispatchTest do
 
       snap = Worker.state(result.worker_pid)
       assert snap.meta[:resume] == true
-      # The worker advanced :resuming -> :running when the claude session started.
-      assert snap.status == :running
+      # The resumed worker (meta.resume, booted :starting) advanced to :working
+      # when the claude session started.
+      assert snap.state == :working
 
       # The new run is linked to the prior one.
       new_run = latest_run(task.id)
@@ -3630,57 +3635,43 @@ defmodule Arbiter.Worker.DispatchTest do
 
     test "refuses while an worker is still actively working", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "active resume", workspace_id: ws.id})
-      # Dispatch but DON'T stop — the worker is live (:idle/:running), not stopped.
+      # Dispatch but DON'T stop — the run is live (:starting/:working), not stopped.
       {:ok, _live} = Dispatch.dispatch(task.id, force: true, repo: "rs/repo", start_driver: false)
 
-      assert {:error, {:worker_active, _status}} =
+      assert {:error, {:worker_active, %{state: run_state, waiting_on: nil}}} =
                Dispatch.resume(task.id, start_driver: false)
+
+      assert run_state in [:starting, :working]
     end
 
     # bd-8lq2g7: the refusal message is the last thing an operator reads before
     # deciding what to do, and "stop it before resuming" is actively harmful when
-    # the live worker is PARKED awaiting its review/merge — stopping it discards
-    # the review-gate outcome and the Watchdog, and the re-dispatch re-runs the
-    # whole gate from round 1. Say what's really going on instead.
-    test "the refusal message warns rather than instructs a stop when parked at review" do
-      for status <- [:awaiting_review, :awaiting_review_gate] do
-        msg = Dispatch.worker_active_message(status, "vs-6jrn9m")
+    # the live run is WAITING on its review gate — stopping it discards the
+    # review in flight, and the re-dispatch re-runs the whole gate from round 1.
+    # Say what's really going on instead. (bd-741sid: no worker stays resident
+    # on an open PR any more, so the review gate is the only such wait; the
+    # old `:awaiting_review` Watchdog wording, bd-8jixav, went with it.)
+    test "the refusal message warns rather than instructs a stop when waiting on the review gate" do
+      msg =
+        Dispatch.worker_active_message(%{state: :waiting, waiting_on: :review_gate}, "vs-6jrn9m")
 
-        assert msg =~ "vs-6jrn9m"
-        assert msg =~ to_string(status)
+      assert msg =~ "vs-6jrn9m"
+      assert msg =~ "review gate"
 
-        refute msg =~ "stop it before resuming",
-               "parked status #{status} must not be told to stop the worker, got: #{msg}"
-
-        assert msg =~ "review",
-               "message must explain what the park means, got: #{msg}"
-      end
+      refute msg =~ "stop it before resuming",
+             "a run waiting on the review gate must not be told to stop, got: #{msg}"
     end
 
     test "the refusal message still tells an operator to stop a genuinely working worker" do
-      msg = Dispatch.worker_active_message(:running, "vs-6jrn9m")
+      for run <- [%{state: :working, waiting_on: nil}, :working] do
+        msg = Dispatch.worker_active_message(run, "vs-6jrn9m")
+        assert msg =~ "stop it before resuming"
+        assert msg =~ "working"
+      end
+
+      msg = Dispatch.worker_active_message(%{state: :waiting, waiting_on: :question}, "vs-6jrn9m")
       assert msg =~ "stop it before resuming"
-    end
-
-    # bd-8jixav: the :awaiting_review text confidently claimed "the watchdog is
-    # polling it to completion" off nothing but the static worker status. When
-    # the Watchdog has crashed that sentence is the exact opposite of the
-    # truth, and it was the message an operator read while the task sat
-    # abandoned for hours.
-    test "the :awaiting_review refusal says the watchdog is dead when it is" do
-      msg = Dispatch.worker_active_message(:awaiting_review, "vs-6jrn9m", false)
-
-      refute msg =~ "polling it to completion"
-      assert msg =~ "no watchdog"
-      assert msg =~ "restart-watchdog"
-      assert msg =~ "vs-6jrn9m"
-    end
-
-    test "the :awaiting_review refusal keeps the polling wording when the watchdog is alive" do
-      msg = Dispatch.worker_active_message(:awaiting_review, "vs-6jrn9m", true)
-
-      assert msg =~ "polling it to completion"
-      refute msg =~ "no watchdog"
+      assert msg =~ "waiting"
     end
 
     test "inherits the repo from the prior run when omitted", %{ws: ws} do
@@ -3907,8 +3898,9 @@ defmodule Arbiter.Worker.DispatchTest do
           task_id: task.id,
           repo: "rs/repo",
           workspace_id: ws.id,
-          worker_type: :main,
-          status: :failed,
+          kind: :implement,
+          state: :finished,
+          outcome: :failed,
           provider: "claude",
           started_at: DateTime.utc_now()
         })

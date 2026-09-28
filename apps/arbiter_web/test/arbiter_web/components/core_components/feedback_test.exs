@@ -412,37 +412,37 @@ defmodule ArbiterWeb.CoreComponents.FeedbackTest do
 
   describe "worker_flow/1" do
     test "renders every step's label from StatusHelpers.worker_flow/0" do
-      html = render_component(&worker_flow/1, %{status: :running})
+      html = render_component(&worker_flow/1, %{status: :working})
 
-      assert html =~ "Idle"
-      assert html =~ "Running"
-      assert html =~ "Awaiting review"
-      assert html =~ "Completed"
+      assert html =~ "Starting"
+      assert html =~ "Working"
+      assert html =~ "Waiting"
+      assert html =~ "Finished"
     end
 
     test "colors the current step live, and marks earlier steps done" do
-      html = render_component(&worker_flow/1, %{status: :awaiting})
+      html = render_component(&worker_flow/1, %{status: :waiting})
 
       assert html =~ "var(--arb-attention)"
       assert html =~ "✓"
     end
 
     test "failed reds the current step instead of adding a fifth column" do
-      html = render_component(&worker_flow/1, %{status: :running, failed: true})
+      html = render_component(&worker_flow/1, %{status: :working, failed: true})
 
       assert html =~ "var(--arb-fail)"
       refute html =~ "var(--arb-live)"
     end
 
     test "compact names the failed step instead of the fifth column" do
-      html = render_component(&worker_flow/1, %{status: :running, failed: true, compact: true})
+      html = render_component(&worker_flow/1, %{status: :working, failed: true, compact: true})
 
       assert html =~ "failed"
       assert html =~ "var(--arb-fail)"
     end
 
     test "compact renders a dot track with an n-of-4 counter" do
-      html = render_component(&worker_flow/1, %{status: :awaiting, compact: true})
+      html = render_component(&worker_flow/1, %{status: :waiting, compact: true})
 
       assert html =~ "3 of 4"
     end

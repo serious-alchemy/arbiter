@@ -165,7 +165,7 @@ defmodule Arbiter.Worker.FinalizePRAlreadyExistsTest do
     assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
 
     run = run_for(task.id)
-    assert run.status == :completed
+    assert run.outcome == :succeeded
     assert run.mr_ref
 
     {:ok, reloaded} = Ash.get(Issue, task.id)
@@ -201,7 +201,7 @@ defmodule Arbiter.Worker.FinalizePRAlreadyExistsTest do
     Req.Test.allow(Arbiter.Mergers.Github.HTTP, self(), pid)
     send(pid, {:__claude_session_done__, "arb done"})
 
-    wait_until(fn -> Worker.state(pid).status == :failed end)
+    wait_until(fn -> Worker.state(pid).outcome == :failed end)
 
     snap = Worker.state(pid)
     assert {:merge_failed, _reason} = snap.meta.failure_reason

@@ -385,17 +385,10 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
     end
   end
 
-  # Worker statuses that mean the worker is still actively doing something —
-  # the complement, :completed / :failed, means its own job is done and it's
-  # just sitting there waiting to be reaped (see actively_working?/1).
-  @active_worker_statuses [
-    :idle,
-    :resuming,
-    :running,
-    :awaiting,
-    :awaiting_review_gate,
-    :awaiting_review
-  ]
+  # Run states that mean the worker is still actively doing something — the
+  # complement, `:finished`, means its own job is done and it's just sitting
+  # there waiting to be reaped (see actively_working?/1).
+  @active_run_states [:starting, :working, :waiting]
 
   # bd-38l3px: does the task have a live worker registered right now? The sweep
   # is a fallback for orphaned tasks (worker/Watchdog gone) — a task with a live
@@ -403,14 +396,14 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
   # from a prior run can never make this sweep close an in-flight task.
   #
   # bd-6w7j8h: registration alone isn't enough. `Worker.complete_now/2` never
-  # stops the Worker GenServer — it lingers at `status: :completed`, still
+  # stops the Worker GenServer — it lingers `:finished`, still
   # registered, until the task's `:close` action's after-action reaps it
   # (Worker.stop, mirrors `Arbiter.Workers.Reconciler`'s moduledoc on this same
   # reap-on-close design). If the task never gets closed — e.g. the MergeQueue
   # lost the item that would have closed it — a merely-registered-but-done
   # worker used to make this sweep defer to it forever: the fallback safety net
   # explicitly built to route around a stuck task instead got deadlocked
-  # against it. Checking the worker's actual status (not just its
+  # against it. Checking the worker's actual run state (not just its
   # registration) breaks that deadlock: only a worker still doing something
   # protects the task from finalization.
   #
@@ -432,7 +425,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
 
   defp actively_working?(pid) do
     case Worker.state(pid) do
-      %{status: status} -> status in @active_worker_statuses
+      %{state: run_state} -> run_state in @active_run_states
       _ -> false
     end
   rescue

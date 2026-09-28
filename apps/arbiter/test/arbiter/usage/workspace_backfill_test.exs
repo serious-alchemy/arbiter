@@ -38,7 +38,7 @@ defmodule Arbiter.Usage.WorkspaceBackfillTest do
         %{
           task_id: task_id,
           repo: "arbiter",
-          status: :running,
+          state: :working,
           started_at: DateTime.utc_now(),
           output_lines: []
         },

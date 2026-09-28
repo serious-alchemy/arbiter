@@ -164,7 +164,7 @@ defmodule Arbiter.Worker.DivergedPushEscalationTest do
     Req.Test.allow(Arbiter.Mergers.Github.HTTP, self(), pid)
 
     send(pid, {:__claude_session_done__, "arb done"})
-    wait_until(fn -> Worker.state(pid).status == :failed end)
+    wait_until(fn -> Worker.state(pid).outcome == :failed end)
 
     escalations = Message.inbox("admiral", workspace_id: ws.id)
     escalation = Enum.find(escalations, &(&1.kind == :escalation and &1.directive_ref == task.id))
