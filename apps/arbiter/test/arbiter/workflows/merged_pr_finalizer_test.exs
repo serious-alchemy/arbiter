@@ -386,10 +386,11 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
       assert Ash.get!(Issue, task.id).status == :closed
     end
 
-    # bd-2g179m: with `merge.auto_merge` off, an approved task parks with its
-    # worker resident, `:waiting` on the review gate and holding no agent. When
-    # the MR is then merged by hand nothing else is polling it, so this sweep
-    # must not defer to that agent-less worker forever.
+    # bd-2g179m: pre-verdict, the author's agent has exited and the reviewer runs
+    # in a separate ReviewGate process, so the worker is resident, `:waiting` on
+    # the review gate with no agent. A PR merged by hand in that window closes
+    # the ticket (the running gate stops via its author :DOWN monitor) instead of
+    # deferring to the parked worker forever.
     test "a worker parked on the review gate with no agent does not block finalization", %{
       ws: ws
     } do
