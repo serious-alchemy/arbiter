@@ -54,6 +54,23 @@ defmodule ArbiterWeb.AuditLogLive do
   in `:raw_events` and only re-run when the pushed-down filter changes —
   tab switches, in-memory query edits, and paging re-filter/re-slice the
   cached window instead of re-querying.
+
+  ## Async load
+
+  The bounded-but-unbounded-table read (`read_events/1`) runs via
+  `start_async/3` on the connected mount and on every `handle_params/3` that
+  changes the pushed-down filter — never inline in `mount/3` or the
+  disconnected `handle_params/3` (bd-7or1v7). The dead render shows the
+  loading skeleton and never touches the DB. Each such re-read (a search
+  that changes `subject:`/`action:`) flips `events_loading?` back on and
+  re-shows the skeleton in place of the stale rows, cancelling any read
+  already in flight so a fast sequence of searches doesn't pile up
+  concurrent queries. `raw_key` only advances to the filter being loaded
+  once that read actually lands (`pending_key` holds it until then), so a
+  tab/page patch racing an in-flight search re-slices the last *good*
+  window instead of presenting it as a match for the new filter. A failed
+  read shows an inline, retryable error instead of crashing the view; the
+  last good page (if any) stays on screen underneath it.
   """
 
   use ArbiterWeb, :live_view
@@ -62,6 +79,7 @@ defmodule ArbiterWeb.AuditLogLive do
   alias ArbiterWeb.CoreComponents.{Core, Data, Feedback, Forms, Navigation}
   alias ArbiterWeb.Paging
   require Ash.Query
+  require Logger
 
   @tabs [
     %{label: "All", value: "all"},
@@ -75,7 +93,17 @@ defmodule ArbiterWeb.AuditLogLive do
 
   @impl true
   def mount(_params, _session, socket) do
-    {:ok, socket |> assign(:tabs, @tabs) |> assign(:raw_events, nil) |> assign(:raw_key, nil)}
+    {:ok,
+     socket
+     |> assign(:tabs, @tabs)
+     |> assign(:raw_events, nil)
+     |> assign(:raw_key, nil)
+     |> assign(:pending_key, nil)
+     |> assign(:events, [])
+     |> assign(:page_info, Paging.paginate_list([], 1))
+     |> assign(:events_loaded?, false)
+     |> assign(:events_loading?, false)
+     |> assign(:events_error, nil)}
   end
 
   @impl true
@@ -84,12 +112,15 @@ defmodule ArbiterWeb.AuditLogLive do
     query = params["q"] || subject_from_params(params) || ""
     page = Paging.parse_page(params)
 
-    {:noreply,
-     socket
-     |> assign(:tab, tab)
-     |> assign(:query, query)
-     |> assign(:page, page)
-     |> load_events()}
+    socket =
+      socket
+      |> assign(:tab, tab)
+      |> assign(:query, query)
+      |> assign(:page, page)
+
+    socket = if connected?(socket), do: load_events(socket), else: socket
+
+    {:noreply, socket}
   end
 
   # The task detail screen's Activity panel hands the subject over as
@@ -121,40 +152,96 @@ defmodule ArbiterWeb.AuditLogLive do
      )}
   end
 
+  def handle_event("retry", _params, socket) do
+    {:noreply, socket |> assign(:events_error, nil) |> start_raw_read(socket.assigns.pending_key)}
+  end
+
+  @impl true
+  def handle_async(:raw_events, {:ok, raw_events}, socket) do
+    {:noreply,
+     socket
+     |> assign(:raw_key, socket.assigns.pending_key)
+     |> assign(:raw_events, raw_events)
+     |> assign(:pending_key, nil)
+     |> assign(:events_loading?, false)
+     |> assign(:events_error, nil)
+     |> apply_filters()}
+  end
+
+  def handle_async(:raw_events, {:exit, reason}, socket) do
+    Logger.error("AuditLogLive: loading events failed: #{inspect(reason)}")
+
+    {:noreply,
+     socket
+     |> assign(:events_loading?, false)
+     |> assign(:events_error, describe_exit(reason))}
+  end
+
+  defp describe_exit({%{__exception__: true} = error, _stacktrace}), do: Exception.message(error)
+  defp describe_exit(reason), do: Exception.format_exit(reason)
+
   defp audit_path(tab, query, page),
     do: ~p"/audit?#{[tab: tab, q: query, page: page]}"
 
   # ---- data ----
 
+  # Only re-reads the database when the pushed-down (subject/action) portion
+  # of the query changed — tab switches and in-memory-only query edits reuse
+  # the cached window and re-filter/re-slice it synchronously.
   defp load_events(socket) do
     clauses = socket.assigns.query |> String.split() |> Enum.map(&parse_clause/1)
     {sql_clauses, memory_clauses} = Enum.split_with(clauses, &pushable?/1)
 
-    socket = refresh_raw_events(socket, sql_clauses)
+    socket = assign(socket, :memory_clauses, memory_clauses)
 
+    if socket.assigns.raw_key == sql_clauses and socket.assigns.raw_events do
+      apply_filters(socket)
+    else
+      socket |> assign(:events_error, nil) |> start_raw_read(sql_clauses)
+    end
+  end
+
+  # `raw_key` only moves to the filter being loaded once that read lands
+  # (`handle_async/3`'s `{:ok, _}` clause) — until then it stays pointed at
+  # whatever filter's rows are actually cached in `raw_events`, so a tab or
+  # page patch that arrives before the read finishes keeps re-slicing the
+  # last *good* window instead of presenting it as a match for the new one.
+  defp start_raw_read(socket, sql_clauses) do
+    socket
+    |> cancel_async(:raw_events, :cancel)
+    |> assign(:pending_key, sql_clauses)
+    |> assign(:events_loading?, true)
+    |> start_async(:raw_events, fn -> run_raw_read(sql_clauses) end)
+  end
+
+  # The task is linked to this view, so a tab closed mid-read would kill it
+  # mid-query — and a DB client that dies holding a checkout costs the pool
+  # that connection (under test, the one shared sandbox connection,
+  # bd-5scl0c). Trapping turns the view's exit into a message: the query in
+  # flight finishes, and the task goes before it starts another.
+  defp run_raw_read(sql_clauses) do
+    Process.flag(:trap_exit, true)
+    result = __MODULE__.read_events(sql_clauses)
+
+    receive do
+      {:EXIT, _view, _reason} -> exit(:shutdown)
+    after
+      0 -> result
+    end
+  end
+
+  defp apply_filters(socket) do
     rows =
       socket.assigns.raw_events
       |> filter_by_tab(socket.assigns.tab)
-      |> filter_by_clauses(memory_clauses)
+      |> filter_by_clauses(socket.assigns.memory_clauses)
 
     page = Paging.paginate_list(rows, socket.assigns.page)
 
     socket
     |> assign(:events, page.entries)
     |> assign(:page_info, page)
-  end
-
-  # Only re-reads the database when the pushed-down (subject/action) portion
-  # of the query changed — tab switches and in-memory-only query edits reuse
-  # the cached window.
-  defp refresh_raw_events(socket, sql_clauses) do
-    if socket.assigns.raw_key == sql_clauses do
-      socket
-    else
-      socket
-      |> assign(:raw_events, read_events(sql_clauses))
-      |> assign(:raw_key, sql_clauses)
-    end
+    |> assign(:events_loaded?, true)
   end
 
   @known_actions ~w(create update close reopen)
@@ -166,7 +253,8 @@ defmodule ArbiterWeb.AuditLogLive do
   defp pushable?({:action, v}), do: v in @known_actions
   defp pushable?(_clause), do: false
 
-  defp read_events(sql_clauses) do
+  @doc false
+  def read_events(sql_clauses) do
     Version
     |> Ash.Query.new()
     |> Ash.Query.sort(version_inserted_at: :desc)
@@ -318,11 +406,61 @@ defmodule ArbiterWeb.AuditLogLive do
           </form>
         </div>
 
-        <Feedback.empty_state :if={@events == []} icon="hero-inbox" detail="No matching audit events.">
+        <div
+          :if={@events_error}
+          id="audit-error"
+          role="alert"
+          class="flex items-start gap-2 px-3 py-2.5 rounded-[var(--radius-field)] border border-solid border-[var(--arb-fail-edge)] bg-[var(--arb-fail-wash)] text-[12px] text-[var(--arb-fail-text)]"
+        >
+          <Core.icon name="hero-exclamation-triangle-micro" class="size-4 shrink-0 mt-px" />
+          <span class="grow min-w-0 break-words">
+            Could not load audit events: {@events_error}<span :if={@events_loaded?}>
+              — showing the last page that loaded.</span>
+          </span>
+          <button
+            type="button"
+            id="audit-retry"
+            phx-click="retry"
+            class={[
+              "shrink-0 px-2 h-[22px] rounded-[var(--radius-field)] cursor-pointer",
+              "border border-solid border-[var(--arb-fail-edge)] bg-[var(--surface-chrome)]",
+              "text-[11px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
+            ]}
+          >
+            Retry
+          </button>
+        </div>
+
+        <div
+          :if={(not @events_loaded? or @events_loading?) and is_nil(@events_error)}
+          id="audit-loading"
+          aria-label="Loading audit events"
+          aria-busy="true"
+          class="flex flex-col gap-1.5"
+        >
+          <div
+            :for={n <- 1..5}
+            id={"audit-loading-#{n}"}
+            aria-hidden="true"
+            class="h-[34px] rounded-[var(--radius-field)] border border-solid border-[var(--border-strong)] bg-[var(--surface-card)] animate-pulse"
+          >
+          </div>
+        </div>
+
+        <Feedback.empty_state
+          :if={@events_loaded? and not @events_loading? and @events == []}
+          icon="hero-inbox"
+          detail="No matching audit events."
+        >
           Nothing here
         </Feedback.empty_state>
 
-        <Data.data_table :if={@events != []} id="audit-table" rows={@events} min_width="760px">
+        <Data.data_table
+          :if={@events_loaded? and not @events_loading? and @events != []}
+          id="audit-table"
+          rows={@events}
+          min_width="760px"
+        >
           <:col :let={row} label="Time" width="150px">
             <span class="text-xs text-base-content/60 font-mono tabular-nums whitespace-nowrap">
               {Calendar.strftime(row.at, "%Y-%m-%d %H:%M:%S")}
@@ -345,7 +483,7 @@ defmodule ArbiterWeb.AuditLogLive do
         </Data.data_table>
 
         <Navigation.pager
-          :if={@page_info.total_pages > 1}
+          :if={@events_loaded? and not @events_loading? and @page_info.total_pages > 1}
           page={@page_info.page}
           total_pages={@page_info.total_pages}
           total_count={@page_info.total_count}
