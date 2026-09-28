@@ -235,6 +235,44 @@ defmodule Arbiter.Worker.ReviewGateFixRoundTest do
                StubFixRoundDispatcher.escalations()
     end
 
+    # bd-6omte4: `{:quota_held, _}` means the round was queued behind the
+    # quota gate, not dropped. bd-aro53b paged "FAILED to dispatch" for it.
+    test "a round the quota gate holds is reported held, with provider and reason, not failed",
+         %{repo: repo} do
+      ws = new_workspace()
+      task = new_task(ws)
+      pid = start_parked_author(task, repo)
+
+      # What `Dispatch`'s quota gate leaves behind when it refuses the round.
+      :ok =
+        Arbiter.Workflows.DispatchQueue.hold(
+          ws.id,
+          task.id,
+          [resume: true, review_gate_fix_round_attempts: 1],
+          %{window: "5h", phrase: "quota near exhaustion (97% of window used, ceiling 90%)"},
+          :gemini
+        )
+
+      on_exit(fn ->
+        if q = Arbiter.Workflows.DispatchQueueSupervisor.whereis(ws.id),
+          do: Arbiter.ProcessTeardown.stop_child(Arbiter.Workflows.DispatchQueueSupervisor, q)
+      end)
+
+      StubFixRoundDispatcher.arm_dispatch_error({:quota_held, task.id})
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          reject(pid)
+          wait_until(fn -> StubFixRoundDispatcher.escalations() != [] end)
+        end)
+
+      assert [{_task_id, _ws_id, 0, {:quota_held, hold}}] = StubFixRoundDispatcher.escalations()
+      assert hold.attempt == 1
+      assert hold.provider == :gemini
+      assert hold.reason == "quota near exhaustion (97% of window used, ceiling 90%)"
+      refute log =~ "could not be dispatched"
+    end
+
     test "a workspace can disable the fix round entirely with max_fix_rounds: 0",
          %{repo: repo} do
       ws = new_workspace(%{"max_fix_rounds" => 0})

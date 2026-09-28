@@ -47,12 +47,20 @@ defmodule ArbiterWeb.Api.QuotaController do
     * `gemini` / `antigravity` — the persisted per-model Cloud Code Assist
       snapshot (bd-57ukgb), each `null` until that CLI is authenticated and
       probed on this host.
+    * `held_dispatches` — every dispatch the workspace's quota gate is holding
+      (`Arbiter.Workflows.DispatchQueue.serialize_held/1`): the task, what it
+      will do when it drains (a ReviewGate fix round, a resume, a dispatch),
+      the provider it was held on and the gate's reason (bd-6omte4). The
+      per-provider gating lines describe a provider's snapshot; this is what
+      the gate actually held, whichever provider and model bucket it read. `[]`
+      under `?account=`, which names no workspace queue.
   """
 
   use ArbiterWeb, :controller
 
   alias Arbiter.Quota
   alias Arbiter.Tasks.Workspace
+  alias Arbiter.Workflows.DispatchQueue
   require Ash.Query
 
   def show(conn, %{"account" => account_ref}) when is_binary(account_ref) and account_ref != "" do
@@ -109,7 +117,8 @@ defmodule ArbiterWeb.Api.QuotaController do
             Arbiter.Agents.CredentialWatchdog.expired?(Arbiter.Agents.Codex),
           antigravity: Quota.CloudCode.serialize_latest(accounts["antigravity"], "antigravity"),
           gemini_credentials_expired:
-            Arbiter.Agents.CredentialWatchdog.expired?(Arbiter.Agents.Gemini)
+            Arbiter.Agents.CredentialWatchdog.expired?(Arbiter.Agents.Gemini),
+          held_dispatches: held_dispatches(ws_id)
         )
 
       {:error, message} ->
@@ -177,6 +186,13 @@ defmodule ArbiterWeb.Api.QuotaController do
           }
         })
     end
+  end
+
+  defp held_dispatches(ws_id) do
+    ws_id
+    |> DispatchQueue.held_items()
+    |> Enum.sort_by(&DateTime.to_unix(&1.opened_at, :microsecond))
+    |> Enum.map(&DispatchQueue.serialize_held/1)
   end
 
   defp workspace_view(ws_id) do

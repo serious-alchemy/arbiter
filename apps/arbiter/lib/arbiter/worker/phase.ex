@@ -25,6 +25,11 @@ defmodule Arbiter.Worker.Phase do
     * `:waiting_on_you` — the run is waiting on a question, or finished
       without succeeding.
     * `:done` — the run finished and succeeded (or was handed off).
+    * `:held_for_quota` — the run is over and the task's next one — a
+      ReviewGate fix round, a resume — is queued behind the quota gate and
+      resumes by itself (bd-6omte4). Never derived from a snapshot by `of/2`:
+      the hold lives in `Arbiter.Workflows.DispatchQueue`, and
+      `Arbiter.Workers.Current` stamps it over the run's own phase.
 
   There is no hand-off phase any more (bd-741sid). It named the window a
   worker spent between agents holding its task's slot — the `slot_handoff`
@@ -68,6 +73,7 @@ defmodule Arbiter.Worker.Phase do
           | :waiting_ci_merge
           | :waiting_on_you
           | :done
+          | :held_for_quota
 
   @phases [
     :implementing,
@@ -77,7 +83,8 @@ defmodule Arbiter.Worker.Phase do
     :resolving_conflict,
     :waiting_ci_merge,
     :waiting_on_you,
-    :done
+    :done,
+    :held_for_quota
   ]
 
   @labels %{
@@ -88,7 +95,8 @@ defmodule Arbiter.Worker.Phase do
     resolving_conflict: "resolving conflict",
     waiting_ci_merge: "waiting on CI / merge",
     waiting_on_you: "waiting on you",
-    done: "done"
+    done: "done",
+    held_for_quota: "held for quota, will resume"
   }
 
   # Which round each subordinate role *is*, when its agent is live.

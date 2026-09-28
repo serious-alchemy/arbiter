@@ -131,6 +131,7 @@ defmodule Arbiter.Worker do
   alias Arbiter.Worker.PRTemplate
   alias Arbiter.Worker.Registry, as: PRegistry
   alias Arbiter.Worker.ReviewVerification
+  alias Arbiter.Workflows.DispatchQueue
   alias Arbiter.Workflows.ReviewGateFixRoundDispatcher, as: FixRound
 
   @typedoc "The run's state — see `Arbiter.Workers.RunState`. Never the ticket's."
@@ -1073,9 +1074,15 @@ defmodule Arbiter.Worker do
   def stop(ref, reason \\ :normal, timeout \\ :infinity)
   def stop(pid, reason, timeout) when is_pid(pid), do: GenServer.stop(pid, reason, timeout)
 
+  # Stopping a task also cancels a dispatch the quota gate is holding for it
+  # (bd-6omte4) — a held ReviewGate fix round has no worker to stop, and must
+  # not start once the task was stopped. A task with only a held intent
+  # counts as found.
   def stop(task_id, reason, timeout) when is_binary(task_id) do
+    held? = DispatchQueue.cancel(task_id, "the task was stopped")
+
     case whereis(task_id) do
-      nil -> {:error, :not_found}
+      nil -> if held?, do: :ok, else: {:error, :not_found}
       pid -> GenServer.stop(pid, reason, timeout)
     end
   end
@@ -6302,6 +6309,25 @@ defmodule Arbiter.Worker do
         {:ok, _result} ->
           :ok
 
+        # bd-6omte4: the quota gate held the round — it is queued in the
+        # workspace's DispatchQueue and resumes, same round and findings, when
+        # the provider has headroom. Not a failure to dispatch.
+        {:error, {:quota_held, _}} ->
+          hold = held_fix_round(workspace_id, task_id, attempt)
+
+          Logger.info(
+            "Worker: ReviewGate fix round #{attempt} for task=#{task_id} is held for quota " <>
+              "on #{hold.provider || "its provider"} (#{hold.reason}); it resumes when the " <>
+              "quota gate lets it through"
+          )
+
+          dispatcher.escalate_exhausted(
+            task_id,
+            workspace_id,
+            prior_attempts,
+            {:quota_held, hold}
+          )
+
         {:error, reason} ->
           Logger.warning(
             "Worker: ReviewGate fix round #{attempt} could not be dispatched for " <>
@@ -6328,6 +6354,26 @@ defmodule Arbiter.Worker do
         )
 
         :ok
+    end
+  end
+
+  # What the quota gate recorded when it held the round: its provider and the
+  # gate's own reason. A queue that can't be read leaves both unknown rather
+  # than failing the page.
+  defp held_fix_round(workspace_id, task_id, attempt) do
+    case DispatchQueue.held_item(workspace_id, task_id) do
+      nil ->
+        %{attempt: attempt, provider: nil, reason: "quota", held_since: nil}
+
+      item ->
+        held = DispatchQueue.describe(item)
+
+        %{
+          attempt: attempt,
+          provider: held.provider,
+          reason: held.reason,
+          held_since: held.held_since
+        }
     end
   end
 

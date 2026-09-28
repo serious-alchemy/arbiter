@@ -46,6 +46,37 @@ defmodule ArbiterCli.Cmd.WorkerTest do
       assert out =~ "no live agent"
     end
 
+    # bd-6omte4: a fix round the quota gate queued is held, not failed.
+    test "says a held fix round is held for quota, with provider and reason" do
+      stub_get("/api/workers/bd-003", %{
+        "task_id" => "bd-003",
+        "source" => "history",
+        "kind" => "implement",
+        "state" => "finished",
+        "outcome" => "failed",
+        "phase" => "held_for_quota",
+        "phase_label" => "held for quota, will resume",
+        "held" => %{
+          "intent" => "ReviewGate fix round 2",
+          "provider" => "gemini",
+          "provider_label" => "Antigravity (agy)",
+          "reason" => "quota exhausted",
+          "held_since" => "2026-09-25T05:29:00Z"
+        },
+        "agent_live" => false,
+        "repo" => "test/repo",
+        "started_at" => "2026-09-25T05:00:00Z",
+        "output_lines" => []
+      })
+
+      {out, _err, 0} = capture(fn -> Worker.run(["show", "bd-003"]) end)
+      assert out =~ "Phase:      held for quota, will resume"
+
+      assert out =~
+               "Held:       ReviewGate fix round 2 held for quota on Antigravity (agy) " <>
+                 "(quota exhausted), will resume — held since 2026-09-25T05:29:00Z"
+    end
+
     test "missing task_id returns a friendly error" do
       {_out, _err, exit_code} = capture(fn -> Worker.run(["show"]) end)
       assert exit_code != 0

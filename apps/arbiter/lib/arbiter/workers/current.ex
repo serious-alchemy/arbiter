@@ -18,6 +18,11 @@ defmodule Arbiter.Workers.Current do
     * `:workspace_id` — the ticket's workspace. A reviewer worker carries
       `workspace_id: nil` on its own state, which used to drop it from every
       workspace-scoped listing (`arb prime`'s active workers among them).
+    * `:held` — the dispatch the quota gate is holding for the ticket
+      (`Arbiter.Workflows.DispatchQueue.describe/1`), or nil. While one is
+      held and no run is working, the phase reads `:held_for_quota`: a
+      ReviewGate fix round refused for quota is waiting on the gate, not
+      failed (bd-6omte4).
 
   ## The current run
 
@@ -36,6 +41,7 @@ defmodule Arbiter.Workers.Current do
   alias Arbiter.Worker.Phase
   alias Arbiter.Worker.ReviewGate
   alias Arbiter.Workers.Run
+  alias Arbiter.Workflows.DispatchQueue
 
   @recent_limit 10
 
@@ -61,6 +67,7 @@ defmodule Arbiter.Workers.Current do
     |> Enum.reject(&is_nil/1)
     |> with_workspaces()
     |> filter_workspace(Keyword.get(opts, :workspace_id))
+    |> with_holds()
   end
 
   @doc """
@@ -81,7 +88,7 @@ defmodule Arbiter.Workers.Current do
         nil
 
       current ->
-        [current] = with_workspaces([current])
+        [current] = current |> List.wrap() |> with_workspaces() |> with_holds()
         %{current: current, runs: recent_runs(current, live, rows)}
     end
   end
@@ -248,6 +255,21 @@ defmodule Arbiter.Workers.Current do
     |> Map.new(&{&1.id, &1.workspace_id})
   rescue
     _ -> %{}
+  end
+
+  # A run still working owns the ticket's phase; only a finished one gives
+  # way to a held dispatch. Reads the queue only for those.
+  defp with_holds(views) do
+    Enum.map(views, fn view ->
+      held =
+        if Map.get(view, :state) == :finished,
+          do: DispatchQueue.held_item(view.workspace_id, view.ticket_id)
+
+      case held do
+        nil -> Map.put(view, :held, nil)
+        item -> Map.merge(view, %{held: DispatchQueue.describe(item), phase: :held_for_quota})
+      end
+    end)
   end
 
   defp filter_workspace(views, nil), do: views

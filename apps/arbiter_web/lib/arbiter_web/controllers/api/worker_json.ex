@@ -81,6 +81,8 @@ defmodule ArbiterWeb.Api.WorkerJSON do
       # exists behind it.
       phase: phase(view),
       phase_label: Arbiter.Worker.Phase.label(Map.get(view, :phase)),
+      # bd-6omte4: the dispatch the quota gate is holding for the ticket.
+      held: Arbiter.Workflows.DispatchQueue.serialize_held(Map.get(view, :held)),
       agent_live: Map.get(view, :agent_live),
       started_at: view.started_at,
       completed_at: Map.get(view, :completed_at),

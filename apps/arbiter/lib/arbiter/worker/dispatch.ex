@@ -100,6 +100,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Workers.Run
   alias Arbiter.Workers.RunState
   alias Arbiter.Workflows.CodeReview
+  alias Arbiter.Workflows.DispatchQueue
   alias Arbiter.Workflows.Machine
   alias Arbiter.Workflows.Work
 
@@ -183,11 +184,24 @@ defmodule Arbiter.Worker.Dispatch do
          {:ok, task} <- transition_to_in_progress(task, opts),
          {:ok, worktree_path} <- maybe_provision_worktree(task, opts),
          {:ok, worker_pid} <- start_worker(task, worktree_path, opts) do
-      finish_dispatch(task, worker_pid, worktree_path, opts)
+      task
+      |> finish_dispatch(worker_pid, worktree_path, opts)
+      |> drop_superseded_hold(task)
     else
       err -> err
     end
   end
+
+  # bd-6omte4: a dispatch that went ahead supersedes whatever the quota gate
+  # was still holding for the task — on bd-aro53b a held agy fix round
+  # outlived a manual re-dispatch on Claude. The drain also refuses a held
+  # intent for a task that has moved on; this just cancels it at the source.
+  defp drop_superseded_hold({:ok, _} = ok, %Issue{id: id, workspace_id: ws_id}) do
+    DispatchQueue.drop(ws_id, id, "the task was dispatched again")
+    ok
+  end
+
+  defp drop_superseded_hold(other, _task), do: other
 
   # Everything after `start_worker/3` succeeds — the worker is already
   # registered `:starting`, so a failure here must not be swallowed silently
@@ -804,10 +818,12 @@ defmodule Arbiter.Worker.Dispatch do
     end
   end
 
+  # By pid: stopping by task id also cancels the task's held dispatch
+  # (bd-6omte4), and this resume is about to replace that intent itself.
   defp stop_prior_worker(task_id) do
     case Worker.whereis(task_id) do
       nil -> :ok
-      _pid -> Worker.stop(task_id, :normal)
+      pid -> Worker.stop(pid, :normal)
     end
   rescue
     _ -> :ok
@@ -1462,7 +1478,7 @@ defmodule Arbiter.Worker.Dispatch do
         :ok
 
       {:hold, reason} ->
-        case Arbiter.Workflows.DispatchQueue.hold(ws_id, task.id, unroute(opts), reason, provider) do
+        case DispatchQueue.hold(ws_id, task.id, unroute(opts), reason, provider) do
           :ok ->
             {:error, {:quota_held, task.id}}
 
@@ -1479,7 +1495,7 @@ defmodule Arbiter.Worker.Dispatch do
         end
 
       {:overage, spend_usd} ->
-        _ = Arbiter.Workflows.DispatchQueue.record_overage(ws_id, task, spend_usd)
+        _ = DispatchQueue.record_overage(ws_id, task, spend_usd)
         :ok
     end
   end

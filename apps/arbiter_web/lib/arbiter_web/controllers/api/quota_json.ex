@@ -22,7 +22,8 @@ defmodule ArbiterWeb.Api.QuotaJSON do
         codex_message: Map.get(assigns, :codex_message),
         codex_credentials_expired: Map.get(assigns, :codex_credentials_expired, false),
         antigravity: Map.get(assigns, :antigravity),
-        gemini_credentials_expired: Map.get(assigns, :gemini_credentials_expired, false)
+        gemini_credentials_expired: Map.get(assigns, :gemini_credentials_expired, false),
+        held_dispatches: Map.get(assigns, :held_dispatches, [])
       }
     }
   end

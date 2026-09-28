@@ -33,6 +33,40 @@ defmodule ArbiterWeb.Api.QuotaControllerTest do
     refute Map.has_key?(resp["data"], "gemini")
   end
 
+  # bd-6omte4: on bd-aro53b `arb quota` said "gating dispatch: none" while
+  # the Antigravity gate held a fix round, and nothing said why.
+  test "lists what the quota gate is holding, with provider and reason", %{conn: conn, ws: ws} do
+    {:ok, task} = Ash.create(Arbiter.Tasks.Issue, %{title: "held", workspace_id: ws.id})
+
+    :ok =
+      Arbiter.Workflows.DispatchQueue.hold(
+        ws.id,
+        task.id,
+        [resume: true, review_gate_fix_round_attempts: 2],
+        %{window: "5h", phrase: "Gemini Models 5h quota exhausted"},
+        :gemini
+      )
+
+    on_exit(fn ->
+      if q = Arbiter.Workflows.DispatchQueueSupervisor.whereis(ws.id),
+        do: Arbiter.ProcessTeardown.stop_child(Arbiter.Workflows.DispatchQueueSupervisor, q)
+    end)
+
+    resp = conn |> get("/api/quota") |> json_response(200)
+
+    assert [held] = resp["data"]["held_dispatches"]
+    assert held["task_id"] == task.id
+    assert held["intent"] == "ReviewGate fix round 2"
+    assert held["provider"] == "gemini"
+    assert held["provider_label"] == "Antigravity (agy)"
+    assert held["reason"] == "Gemini Models 5h quota exhausted"
+  end
+
+  test "held_dispatches is empty when nothing is held", %{conn: conn} do
+    resp = conn |> get("/api/quota") |> json_response(200)
+    assert resp["data"]["held_dispatches"] == []
+  end
+
   test "includes a graceful codex no-op when Codex is not authenticated", %{conn: conn} do
     resp = conn |> get("/api/quota") |> json_response(200)
     assert resp["data"]["codex"] == nil
