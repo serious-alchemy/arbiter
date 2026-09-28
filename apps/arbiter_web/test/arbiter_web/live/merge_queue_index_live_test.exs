@@ -41,6 +41,8 @@ defmodule ArbiterWeb.MergeQueueIndexLiveTest do
     Ash.update!(Ash.get!(Issue, task.id), %{}, action: :close)
   end
 
+  defp settle(view), do: :sys.get_state(view.pid)
+
   describe "Queued tab" do
     test "empty state when nothing is integrating", %{conn: conn} do
       {:ok, _view, html} = live_merge_queue(conn, ~p"/merge_queue")
@@ -298,6 +300,7 @@ defmodule ArbiterWeb.MergeQueueIndexLiveTest do
       refute html =~ "broadcast-refresh"
 
       merging_ticket(ws, "broadcast-refresh")
+      settle(view)
 
       html = render_async(view, @async_timeout)
 
