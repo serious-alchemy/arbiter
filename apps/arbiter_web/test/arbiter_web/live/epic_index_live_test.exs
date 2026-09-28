@@ -17,6 +17,16 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
     {:ok, ws: ws}
   end
 
+  # bd-9n5sek: the epics query, the child rollups, and the estimate sample all
+  # load via `start_async` on the connected mount now, not synchronously in
+  # mount/handle_params. Every test that wants to see rows on screen — not the
+  # loading state itself — goes through this helper so it isn't racing it.
+  defp live_epics!(conn, path) do
+    {:ok, view, _html} = live(conn, path)
+    html = render_async(view)
+    {:ok, view, html}
+  end
+
   defp epic(ws, title, attrs \\ %{}) do
     {:ok, e} =
       Ash.create(
@@ -51,7 +61,7 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
       e = epic(ws, "an-epic-row")
       {:ok, _plain} = Ash.create(Issue, %{title: "a-plain-issue", workspace_id: ws.id})
 
-      {:ok, view, _html} = live(conn, ~p"/epics")
+      {:ok, view, _html} = live_epics!(conn, ~p"/epics")
 
       assert has_element?(view, "#epic-#{e.id}")
       assert render(view) =~ "an-epic-row"
@@ -61,7 +71,7 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
     test "a row links its title to the task detail page", %{conn: conn, ws: ws} do
       e = epic(ws, "linkable-epic")
 
-      {:ok, view, _html} = live(conn, ~p"/epics")
+      {:ok, view, _html} = live_epics!(conn, ~p"/epics")
 
       assert has_element?(view, ~s(#epic-#{e.id} a[href="/tasks/#{e.id}"]), "linkable-epic")
     end
@@ -76,7 +86,7 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
       child(ws, e, "w1", :waiting)
       child(ws, e, "c1", :closed)
 
-      {:ok, view, _html} = live(conn, ~p"/epics")
+      {:ok, view, _html} = live_epics!(conn, ~p"/epics")
 
       assert has_element?(view, "#epic-#{e.id}-workspace", ws.name)
       assert has_element?(view, "#epic-#{e.id}-status", "open")
@@ -95,7 +105,7 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
       auto = epic(ws, "auto-epic", %{auto_close: true})
       manual = epic(ws, "manual-epic", %{auto_close: false})
 
-      {:ok, view, _html} = live(conn, ~p"/epics")
+      {:ok, view, _html} = live_epics!(conn, ~p"/epics")
 
       assert has_element?(view, "#epic-#{auto.id}-auto-close")
       refute has_element?(view, "#epic-#{manual.id}-auto-close")
@@ -118,7 +128,7 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
           occurred_at: DateTime.utc_now()
         })
 
-      {:ok, view, _html} = live(conn, ~p"/epics")
+      {:ok, view, _html} = live_epics!(conn, ~p"/epics")
 
       rollup = render(element(view, "#epic-#{e.id}-cost-rollup"))
       assert rollup =~ "$9.50 spent"
@@ -128,14 +138,104 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
     test "a row shows the epic's age", %{conn: conn, ws: ws} do
       e = epic(ws, "aged-epic")
 
-      {:ok, view, _html} = live(conn, ~p"/epics")
+      {:ok, view, _html} = live_epics!(conn, ~p"/epics")
 
       assert has_element?(view, "#epic-#{e.id}-age")
     end
 
     test "no epics renders the empty state", %{conn: conn} do
-      {:ok, view, _html} = live(conn, ~p"/epics")
+      {:ok, view, _html} = live_epics!(conn, ~p"/epics")
       assert has_element?(view, "#epics-empty")
+    end
+  end
+
+  # bd-9n5sek: the epics query, the child rollups, and the estimate sample
+  # used to all run synchronously in `mount/3`/`handle_params/3`, dead render
+  # included. They now load via `start_async/3` on the connected mount only —
+  # the dead render draws nothing but the loading state, and a slow or failed
+  # read can never hold the LiveView process itself.
+  describe "the async rows load (bd-9n5sek)" do
+    setup do
+      :meck.new(Arbiter.Tasks, [:passthrough, :no_link])
+      on_exit(fn -> :meck.unload(Arbiter.Tasks) end)
+      :ok
+    end
+
+    # Holds the read in its loader until the test says go, so the loading
+    # state is something to assert on rather than a race. A read the test
+    # never releases gives up well inside the render_async default timeout
+    # and reports itself, so the test fails on `refute_held_load/0`, not on a
+    # `render_async` timeout.
+    defp hold_rows_load do
+      test = self()
+
+      :meck.expect(Arbiter.Tasks, :epic_rollups, fn epics ->
+        rollups = :meck.passthrough([epics])
+        send(test, {:loading_rows, self()})
+
+        receive do
+          :release -> :ok
+        after
+          1_000 -> send(test, {:unreleased_rows_load, self()})
+        end
+
+        rollups
+      end)
+    end
+
+    defp refute_held_load, do: refute_received({:unreleased_rows_load, _})
+
+    test "the dead render shows the loading state and reads nothing", %{conn: conn, ws: ws} do
+      test = self()
+      _e = epic(ws, "dead-render-epic")
+
+      :meck.expect(Arbiter.Tasks, :epic_rollups, fn epics ->
+        send(test, :rows_read) && :meck.passthrough([epics])
+      end)
+
+      html = conn |> get(~p"/epics") |> html_response(200)
+
+      assert html =~ ~s(id="epics-loading")
+      refute html =~ ~s(id="epics")
+      refute_received :rows_read
+    end
+
+    test "renders a loading state, then the epic list", %{conn: conn, ws: ws} do
+      e = epic(ws, "async-loading-epic")
+      hold_rows_load()
+
+      {:ok, view, _html} = live(conn, ~p"/epics")
+      assert_receive {:loading_rows, loader}
+
+      assert has_element?(view, "#epics-loading")
+      refute has_element?(view, "#epic-#{e.id}")
+
+      send(loader, :release)
+      render_async(view)
+
+      refute has_element?(view, "#epics-loading")
+      assert has_element?(view, "#epic-#{e.id}")
+      refute_held_load()
+    end
+
+    @tag :capture_log
+    test "a failed load renders an inline error, and Retry recovers", %{conn: conn, ws: ws} do
+      e = epic(ws, "async-error-epic")
+      :meck.expect(Arbiter.Tasks, :epic_rollups, fn _epics -> raise "database is locked" end)
+
+      {:ok, view, _html} = live(conn, ~p"/epics")
+      render_async(view)
+
+      assert has_element?(view, "#epics-error", "database is locked")
+      refute has_element?(view, "#epics-loading")
+      refute has_element?(view, "#epic-#{e.id}")
+
+      :meck.expect(Arbiter.Tasks, :epic_rollups, fn epics -> :meck.passthrough([epics]) end)
+      view |> element("#epics-retry") |> render_click()
+      render_async(view)
+
+      refute has_element?(view, "#epics-error")
+      assert has_element?(view, "#epic-#{e.id}")
     end
   end
 
@@ -159,7 +259,7 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
       quiet = epic(ws, "quiet-epic")
       child(ws, quiet, "unblocked-child", :ready)
 
-      {:ok, view, _html} = live(conn, ~p"/epics")
+      {:ok, view, _html} = live_epics!(conn, ~p"/epics")
 
       assert has_element?(view, "#epic-#{e.id}-chip-blocked")
       refute has_element?(view, "#epic-#{e.id} [data-role='needs-you-chips']")
@@ -176,7 +276,7 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
       quiet = epic(ws, "quiet-epic")
       child(ws, quiet, "unblocked-child", :ready)
 
-      {:ok, view, _html} = live(conn, ~p"/epics")
+      {:ok, view, _html} = live_epics!(conn, ~p"/epics")
 
       assert has_element?(view, "#epic-#{e.id}-needs-you-0", "blocked by unrefined #{blocker.id}")
       refute has_element?(view, "#epic-#{quiet.id} [data-role='needs-you-chips']")
@@ -190,7 +290,7 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
       quiet = epic(ws, "quiet-epic")
       child(ws, quiet, "run1", :ready)
 
-      {:ok, view, _html} = live(conn, ~p"/epics")
+      {:ok, view, _html} = live_epics!(conn, ~p"/epics")
 
       assert has_element?(view, "#epic-#{e.id}-needs-you-0", "verify #{w.id}")
       refute has_element?(view, "#epic-#{quiet.id} [data-role='needs-you-chips']")
@@ -205,7 +305,7 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
       child(ws, busy, "r2", :ready)
       child(ws, busy, "run1", :running)
 
-      {:ok, view, _html} = live(conn, ~p"/epics")
+      {:ok, view, _html} = live_epics!(conn, ~p"/epics")
 
       assert has_element?(view, "#epic-#{e.id}-chip-idle")
       refute has_element?(view, "#epic-#{e.id} [data-role='needs-you-chips']")
@@ -219,7 +319,7 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
       closed = epic(ws, "a-closed-epic")
       Ash.update!(closed, %{}, action: :close)
 
-      {:ok, view, _html} = live(conn, ~p"/epics")
+      {:ok, view, _html} = live_epics!(conn, ~p"/epics")
 
       assert render(view) =~ "an-open-epic"
       refute render(view) =~ "a-closed-epic"
@@ -230,7 +330,7 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
       closed = epic(ws, "a-closed-epic")
       Ash.update!(closed, %{}, action: :close)
 
-      {:ok, view, _html} = live(conn, ~p"/epics?#{%{status: "closed"}}")
+      {:ok, view, _html} = live_epics!(conn, ~p"/epics?#{%{status: "closed"}}")
 
       assert render(view) =~ "a-closed-epic"
       refute render(view) =~ "an-open-epic"
@@ -241,7 +341,7 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
       closed = epic(ws, "a-closed-epic")
       Ash.update!(closed, %{}, action: :close)
 
-      {:ok, view, _html} = live(conn, ~p"/epics?#{%{status: "all"}}")
+      {:ok, view, _html} = live_epics!(conn, ~p"/epics?#{%{status: "all"}}")
 
       assert render(view) =~ "a-closed-epic"
       assert render(view) =~ "an-open-epic"
@@ -254,7 +354,7 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
       _mine = epic(ws, "mine-epic")
       _theirs = epic(other, "theirs-epic")
 
-      {:ok, view, _html} = live(conn, ~p"/epics?#{%{workspace: ws.id}}")
+      {:ok, view, _html} = live_epics!(conn, ~p"/epics?#{%{workspace: ws.id}}")
 
       assert render(view) =~ "mine-epic"
       refute render(view) =~ "theirs-epic"
@@ -267,13 +367,14 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
       _mine = epic(ws, "mine-epic")
       _theirs = epic(other, "theirs-epic")
 
-      {:ok, view, _html} = live(conn, ~p"/epics")
+      {:ok, view, _html} = live_epics!(conn, ~p"/epics")
       assert render(view) =~ "theirs-epic"
 
-      html =
-        view
-        |> form("#epics-filter-form", %{"workspace" => ws.id})
-        |> render_change()
+      view
+      |> form("#epics-filter-form", %{"workspace" => ws.id})
+      |> render_change()
+
+      html = render_async(view)
 
       assert html =~ "mine-epic"
       refute html =~ "theirs-epic"
@@ -289,10 +390,10 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
       clear = epic(ws, "clear-epic")
       child(ws, clear, "clear-child", :running)
 
-      {:ok, view, _html} = live(conn, ~p"/epics")
+      {:ok, view, _html} = live_epics!(conn, ~p"/epics")
       assert render(view) =~ "clear-epic"
 
-      {:ok, view, _html} = live(conn, ~p"/epics?#{%{blocked: "1"}}")
+      {:ok, view, _html} = live_epics!(conn, ~p"/epics?#{%{blocked: "1"}}")
 
       assert render(view) =~ "blocked-epic"
       refute render(view) =~ "clear-epic"
@@ -305,10 +406,10 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
       {:ok, _} = Dependencies.add(blocked.id, blocker.id, :depends_on)
       Ash.update!(closed_with_blocked, %{}, action: :close)
 
-      {:ok, view, _html} = live(conn, ~p"/epics?#{%{blocked: "1"}}")
+      {:ok, view, _html} = live_epics!(conn, ~p"/epics?#{%{blocked: "1"}}")
       refute render(view) =~ "closed-blocked-epic"
 
-      {:ok, view, _html} = live(conn, ~p"/epics?#{%{blocked: "1", status: "all"}}")
+      {:ok, view, _html} = live_epics!(conn, ~p"/epics?#{%{blocked: "1", status: "all"}}")
       assert render(view) =~ "closed-blocked-epic"
     end
   end
@@ -321,7 +422,7 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
       stuck = epic(ws, "aaa-stuck-epic")
       child(ws, stuck, "w1", :waiting)
 
-      {:ok, view, _html} = live(conn, ~p"/epics")
+      {:ok, view, _html} = live_epics!(conn, ~p"/epics")
       html = render(view)
 
       assert position(html, "aaa-stuck-epic") < position(html, "zzz-calm-epic")
@@ -338,7 +439,7 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
       newer_child = child(ws, newer, "new-child", :running)
       Ash.update!(newer_child, %{title: "new-child touched"})
 
-      {:ok, view, _html} = live(conn, ~p"/epics")
+      {:ok, view, _html} = live_epics!(conn, ~p"/epics")
       html = render(view)
 
       assert position(html, "newer-epic") < position(html, "older-epic")
@@ -349,7 +450,7 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
     test "the sort dropdown offers age, % complete and title", %{conn: conn, ws: ws} do
       _e = epic(ws, "sortable-epic")
 
-      {:ok, view, _html} = live(conn, ~p"/epics")
+      {:ok, view, _html} = live_epics!(conn, ~p"/epics")
       options = render(element(view, "#epics-filter-sort"))
 
       assert options =~ "Age"
@@ -363,7 +464,7 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
       child(ws, stuck, "w1", :waiting)
       _calm = epic(ws, "aaa-calm-epic")
 
-      {:ok, view, _html} = live(conn, ~p"/epics?#{%{sort: "title"}}")
+      {:ok, view, _html} = live_epics!(conn, ~p"/epics?#{%{sort: "title"}}")
       html = render(view)
 
       assert position(html, "aaa-calm-epic") < position(html, "zzz-stuck-epic")
@@ -378,7 +479,7 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
       child(ws, ahead, "c1", :closed)
       child(ws, ahead, "b3", :backlog)
 
-      {:ok, view, _html} = live(conn, ~p"/epics?#{%{sort: "percent"}}")
+      {:ok, view, _html} = live_epics!(conn, ~p"/epics?#{%{sort: "percent"}}")
       html = render(view)
 
       assert position(html, "ahead-epic") < position(html, "behind-epic")
@@ -390,7 +491,7 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
 
       assert DateTime.compare(first.created_at, second.created_at) != :gt
 
-      {:ok, view, _html} = live(conn, ~p"/epics?#{%{sort: "age"}}")
+      {:ok, view, _html} = live_epics!(conn, ~p"/epics?#{%{sort: "age"}}")
       html = render(view)
 
       assert position(html, "first-epic") < position(html, "second-epic")
@@ -402,10 +503,11 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
       e = epic(ws, "live-epic")
       c = child(ws, e, "live-child", :ready)
 
-      {:ok, view, _html} = live(conn, ~p"/epics")
+      {:ok, view, _html} = live_epics!(conn, ~p"/epics")
       assert has_element?(view, "#epic-#{e.id}-progress", "0/1")
 
       Ash.update!(c, %{}, action: :close)
+      render_async(view)
 
       assert has_element?(view, "#epic-#{e.id}-progress", "1/1")
     end
@@ -415,19 +517,26 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
       e = epic(ws, "live-chip-epic")
       c = child(ws, e, "live-child", :ready)
 
-      {:ok, view, _html} = live(conn, ~p"/epics")
+      {:ok, view, _html} = live_epics!(conn, ~p"/epics")
       refute has_element?(view, "#epic-#{e.id} [data-role='needs-you-chips']")
 
-      c |> Ash.update!(%{}, action: :start) |> park()
+      # Two updates, two broadcasts — waiting for each in turn keeps this from
+      # racing `render_async/1`, which only knows about one in-flight refresh
+      # at a time.
+      c = Ash.update!(c, %{}, action: :start)
+      render_async(view)
+      park(c)
+      render_async(view)
 
       assert has_element?(view, "#epic-#{e.id}-needs-you-0", "verify #{c.id}")
     end
 
     test "a newly created epic appears live", %{conn: conn, ws: ws} do
-      {:ok, view, _html} = live(conn, ~p"/epics")
+      {:ok, view, _html} = live_epics!(conn, ~p"/epics")
       refute render(view) =~ "freshly-minted-epic"
 
       _e = epic(ws, "freshly-minted-epic")
+      render_async(view)
 
       assert render(view) =~ "freshly-minted-epic"
     end
@@ -442,7 +551,7 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
       c = epic(ws, "badge-epic-c")
       Ash.update!(c, %{}, action: :close)
 
-      {:ok, view, _html} = live(conn, ~p"/epics")
+      {:ok, view, _html} = live_epics!(conn, ~p"/epics")
 
       assert has_element?(
                view,
@@ -457,7 +566,7 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
          %{conn: conn, ws: ws} do
       e = epic(ws, "narrow-epic")
 
-      {:ok, view, _html} = live(conn, ~p"/epics")
+      {:ok, view, _html} = live_epics!(conn, ~p"/epics")
       row = render(element(view, "#epic-#{e.id}"))
 
       assert row =~ "flex-col"
@@ -465,7 +574,7 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
     end
 
     test "the filter bar wraps rather than overflowing", %{conn: conn} do
-      {:ok, view, _html} = live(conn, ~p"/epics")
+      {:ok, view, _html} = live_epics!(conn, ~p"/epics")
 
       assert render(element(view, "#epics-filter-form")) =~ "flex-wrap"
     end

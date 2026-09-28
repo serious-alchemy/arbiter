@@ -51,6 +51,7 @@ defmodule ArbiterWeb.EpicIndexLive do
   alias Arbiter.Usage
 
   require Ash.Query
+  require Logger
 
   @tasks_topic "tasks"
 
@@ -89,15 +90,25 @@ defmodule ArbiterWeb.EpicIndexLive do
      |> assign(:status_tabs, @status_tabs)
      |> assign(:sort_options, Enum.map(@sorts, &{@sort_labels[&1], Atom.to_string(&1)}))
      |> assign(:buckets, @buckets)
-     |> assign(:workspaces, load_workspaces())}
+     |> assign(:workspaces, load_workspaces())
+     |> assign(:rows, [])
+     |> assign(:total_count, 0)
+     |> assign(:rows_loaded?, false)
+     |> assign(:rows_loading?, false)
+     |> assign(:rows_stale?, false)
+     |> assign(:rows_error, nil)}
   end
 
+  # bd-9n5sek: the epics query, the child rollups, and the 60-day
+  # `Estimate.sample()` used to all run synchronously here, on both the dead
+  # render and the connected one. The dead render now draws nothing but the
+  # loading state; the connected mount's `handle_params/3` starts the read
+  # via `start_async/3` and lands it in `handle_async/3` below.
   @impl true
   def handle_params(params, _uri, socket) do
-    {:noreply,
-     socket
-     |> assign(:f, parse_filters(params))
-     |> refresh()}
+    socket = assign(socket, :f, parse_filters(params))
+    socket = if connected?(socket), do: refresh(socket), else: socket
+    {:noreply, socket}
   end
 
   @impl true
@@ -106,6 +117,10 @@ defmodule ArbiterWeb.EpicIndexLive do
     # rather than letting an unrelated change reset it.
     params = Map.put(params, "status", Atom.to_string(socket.assigns.f.status))
     {:noreply, push_patch(socket, to: epic_path(parse_filters(params)))}
+  end
+
+  def handle_event("retry_rows", _params, socket) do
+    {:noreply, socket |> assign(:rows_error, nil) |> refresh()}
   end
 
   # Any issue transition can move a row: a child's status changes its epic's
@@ -117,8 +132,69 @@ defmodule ArbiterWeb.EpicIndexLive do
 
   # ---- data ----
 
+  # Stage lands here. Overlapping refresh requests (a lifecycle broadcast, a
+  # filter change, Retry) while a read is already in flight are coalesced —
+  # marked stale rather than starting a second overlapping read — and get
+  # exactly one more full cycle once this one finishes.
+  @impl true
+  def handle_async(:rows, {:ok, rows}, socket) do
+    socket
+    |> assign(:rows, rows)
+    |> assign(:total_count, length(rows))
+    |> assign(:rows_loaded?, true)
+    |> assign(:rows_error, nil)
+    |> rows_read_done()
+  end
+
+  def handle_async(:rows, {:exit, reason}, socket) do
+    Logger.error("EpicIndexLive: loading epics failed: #{inspect(reason)}")
+
+    socket
+    |> assign(:rows_error, describe_exit(reason))
+    |> rows_read_done()
+  end
+
+  defp describe_exit({%{__exception__: true} = error, _stacktrace}), do: Exception.message(error)
+  defp describe_exit(reason), do: Exception.format_exit(reason)
+
+  defp rows_read_done(socket) do
+    socket = assign(socket, :rows_loading?, false)
+    {:noreply, if(socket.assigns.rows_stale?, do: refresh(socket), else: socket)}
+  end
+
+  defp refresh(%{assigns: %{rows_loading?: true}} = socket),
+    do: assign(socket, :rows_stale?, true)
+
   defp refresh(socket) do
     f = socket.assigns.f
+    workspaces = socket.assigns.workspaces
+
+    socket
+    |> assign(:rows_loading?, true)
+    |> assign(:rows_stale?, false)
+    |> start_async(:rows, fn -> load_rows_task(f, workspaces) end)
+  end
+
+  # The task is linked to this view, so a tab closed mid-read (or a test
+  # tearing down) would kill it mid-query — trapping exits turns that into a
+  # message instead, so the query in flight finishes rather than dying
+  # holding a DB checkout (the shared sandbox one, under test).
+  defp load_rows_task(f, workspaces) do
+    Process.flag(:trap_exit, true)
+    rows = compute_rows(f, workspaces)
+    exit_if_view_gone()
+    rows
+  end
+
+  defp exit_if_view_gone do
+    receive do
+      {:EXIT, _view, _reason} -> exit(:shutdown)
+    after
+      0 -> :ok
+    end
+  end
+
+  defp compute_rows(f, workspaces) do
     epic = :epic
 
     epics =
@@ -129,25 +205,20 @@ defmodule ArbiterWeb.EpicIndexLive do
       |> Ash.read!()
 
     rollups = Tasks.epic_rollups(epics)
-    workspaces = Map.new(socket.assigns.workspaces, &{&1.id, &1})
+    workspaces_by_id = Map.new(workspaces, &{&1.id, &1})
     sample = Arbiter.Usage.Estimate.sample()
 
-    rows =
-      epics
-      |> Enum.map(fn e ->
-        %{
-          epic: e,
-          rollup: Map.fetch!(rollups, e.id),
-          cost_rollup: Usage.epic_cost_rollup(e, sample: sample),
-          workspace_name: workspace_name(workspaces, e.workspace_id)
-        }
-      end)
-      |> filter_by_blocked(f.blocked)
-      |> sort_rows(f.sort)
-
-    socket
-    |> assign(:rows, rows)
-    |> assign(:total_count, length(rows))
+    epics
+    |> Enum.map(fn e ->
+      %{
+        epic: e,
+        rollup: Map.fetch!(rollups, e.id),
+        cost_rollup: Usage.epic_cost_rollup(e, sample: sample),
+        workspace_name: workspace_name(workspaces_by_id, e.workspace_id)
+      }
+    end)
+    |> filter_by_blocked(f.blocked)
+    |> sort_rows(f.sort)
   end
 
   defp load_workspaces, do: Workspace |> Ash.read!() |> Enum.sort_by(& &1.name)
@@ -361,7 +432,46 @@ defmodule ArbiterWeb.EpicIndexLive do
         </div>
 
         <ArbiterWeb.CoreComponents.Core.panel body_class="flex flex-col gap-4">
-          <div :if={@rows == []} id="epics-empty">
+          <div
+            :if={not @rows_loaded? and is_nil(@rows_error)}
+            id="epics-loading"
+            class="flex items-center gap-2 p-4 text-[12.5px] text-[var(--text-secondary)]"
+          >
+            <ArbiterWeb.CoreComponents.Core.icon
+              name="hero-arrow-path-micro"
+              class="size-4 shrink-0 animate-spin"
+            /> Loading epics…
+          </div>
+
+          <div
+            :if={@rows_error}
+            id="epics-error"
+            role="alert"
+            class="flex items-start gap-3 p-4 rounded-[var(--radius-field)] border border-solid border-[var(--arb-fail-edge)] bg-[var(--arb-fail-wash)] text-[12.5px] text-[var(--arb-fail-text)]"
+          >
+            <ArbiterWeb.CoreComponents.Core.icon
+              name="hero-exclamation-triangle"
+              class="size-5 shrink-0 mt-0.5 text-[var(--arb-fail-text)]"
+            />
+            <div class="grow min-w-0">
+              <p class="font-medium">Could not load epics</p>
+              <p class="mt-1 text-[12px] opacity-90">{@rows_error}</p>
+            </div>
+            <button
+              type="button"
+              id="epics-retry"
+              phx-click="retry_rows"
+              class={[
+                "shrink-0 px-3 h-[28px] rounded-[var(--radius-field)] cursor-pointer",
+                "border border-solid border-[var(--arb-fail-edge)] bg-[var(--surface-chrome)]",
+                "text-[12px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
+              ]}
+            >
+              Retry
+            </button>
+          </div>
+
+          <div :if={@rows_loaded? and @rows == []} id="epics-empty">
             <ArbiterWeb.CoreComponents.Feedback.empty_state icon="hero-rectangle-stack">
               No epics match
               <%= if @active_filters != [] do %>
@@ -372,7 +482,7 @@ defmodule ArbiterWeb.EpicIndexLive do
             </ArbiterWeb.CoreComponents.Feedback.empty_state>
           </div>
 
-          <ul :if={@rows != []} id="epics" class="flex flex-col gap-1.5">
+          <ul :if={@rows_loaded? and @rows != []} id="epics" class="flex flex-col gap-1.5">
             <.epic_row :for={row <- @rows} row={row} buckets={@buckets} />
           </ul>
         </ArbiterWeb.CoreComponents.Core.panel>
