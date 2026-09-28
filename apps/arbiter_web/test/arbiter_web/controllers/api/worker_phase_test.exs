@@ -36,10 +36,11 @@ defmodule ArbiterWeb.Api.WorkerPhaseTest do
     row = Enum.find(body["data"], &(&1["task_id"] == task.id))
 
     assert row["status"] == "running"
-    assert row["agent_live"] == false
     # The record says running; nothing is actually running for it.
-    refute row["phase"] == "implementing"
-    assert is_binary(row["phase"])
+    assert row["agent_live"] == false
+    # bd-741sid: the phase names the stage — the missing agent is
+    # `agent_live: false`, not a hand-off phase.
+    assert row["phase"] == "implementing"
     assert is_binary(row["phase_label"])
   end
 

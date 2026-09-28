@@ -35,14 +35,13 @@ defmodule Arbiter.Test.ResumeSlotFixture do
   def repo, do: @repo
 
   @doc """
-  Build the incident in `ws`. `:park` options go to `Worker.fail/3`, and
-  `:release` to `park!/3`.
+  Build the incident in `ws`. `:release` goes to `park!/2`.
   """
   def setup_incident(ws, opts \\ []) do
     setup_repo!()
     {:ok, a} = Ash.create(Issue, %{title: "task A (parked)", workspace_id: ws.id})
     {:ok, b} = Ash.create(Issue, %{title: "task B (admitted)", workspace_id: ws.id})
-    first = park!(a, Keyword.get(opts, :park, []), Keyword.get(opts, :release, :merging))
+    first = park!(a, Keyword.get(opts, :release, :merging))
     admit!(ws, b)
     %{a: a, b: b, first: first}
   end
@@ -76,10 +75,10 @@ defmodule Arbiter.Test.ResumeSlotFixture do
   default) then opens its PR, so the ticket leaves In progress and holds no
   slot; `release: nil` leaves it `:active`, holding its slot.
   """
-  def park!(%Issue{id: id}, fail_opts \\ [], release \\ :merging) do
+  def park!(%Issue{id: id}, release \\ :merging) do
     # Created in Backlog and dispatched at once, so forced (bd-asxw4e).
     {:ok, first} = Dispatch.dispatch(id, force: true, repo: @repo, start_driver: false)
-    :ok = Worker.fail(first.worker_pid, :review_gate_rejected, fail_opts)
+    :ok = Worker.fail(first.worker_pid, :review_gate_rejected)
     on_exit(fn -> stop_quietly(id) end)
 
     if release == :merging do

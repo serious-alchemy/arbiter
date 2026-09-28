@@ -10,10 +10,11 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
   After bd-4u7a1m (hosted-forge Watchdog path):
 
     * APPROVE on a hosted-forge workspace (GitHub/GitLab) with a pr_ref →
-      reviewer parks at :awaiting_review, spawns a Watchdog against the
-      existing PR. The Watchdog drives the merge and calls Worker.complete
-      only after the PR lands on main. The Driver then closes the task.
-      The task must NOT reach :closed while the PR is still open.
+      the ticket's Watchdog is started against the existing PR and drives the
+      merge. The task must NOT reach :closed while the PR is still open.
+      bd-741sid: the reviewer's run ends there — the Watchdog is the ticket's,
+      not the worker's — and a review-only engagement stays open after the
+      merge (bd-cw3w9p).
     * APPROVE on a :direct workspace (no hosted forge) → reviewer completes
       normally, Driver closes the task, MergeQueue receives the signal and
       closes the task without calling the forge merge API (bd-ddtbhb, bd-bs3z04).
@@ -45,6 +46,7 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Messages.Message
   alias Arbiter.Worker
+  alias Arbiter.Worker.Watchdog
   alias Arbiter.Test.{StubAutoResumeDispatcher, StubMerger}
 
   require Ash.Query
@@ -145,7 +147,19 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
 
     :ok = Worker.advance(pid, :claude)
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+    # bd-741sid: an APPROVE hands the PR to the ticket's Watchdog, which
+    # outlives the reviewer's run.
+    on_exit(fn -> stop_watchdog(task.id) end)
     pid
+  end
+
+  defp stop_watchdog(task_id) do
+    case Watchdog.whereis(task_id) do
+      nil -> :ok
+      pid -> GenServer.stop(pid, :normal)
+    end
+  catch
+    :exit, _ -> :ok
   end
 
   # ---- APPROVE path ----------------------------------------------------------
@@ -787,19 +801,23 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
   # ---- bd-4u7a1m regression: hosted-forge Watchdog path ----------------------
   #
   # APPROVE on a GitHub/GitLab workspace with a pr_ref must NOT call complete_now
-  # immediately. Instead the worker parks at :awaiting_review while a Watchdog
-  # polls the forge and merges the PR, then calls Worker.complete. The Driver only
-  # closes the task after the merge lands — preventing the premature close that
-  # left bd-3u1au5 closed with PR #591 open.
+  # immediately. Instead a Watchdog polls the forge and merges the PR, and the
+  # task only finishes after the merge lands — preventing the premature close
+  # that left bd-3u1au5 closed with PR #591 open. bd-741sid: that Watchdog is the
+  # ticket's; the reviewer's run ends once it has the PR, without announcing the
+  # ticket done. The tickets here are review-only engagements, stamped on the row
+  # as a review dispatch does.
 
   describe "APPROVE on hosted-forge workspace spawns Watchdog (bd-4u7a1m)" do
-    test "worker parks at :awaiting_review, NOT :completed, while Watchdog waits for merge" do
+    test "the reviewer's run ends with the PR in the ticket Watchdog's hands, NOT announced done" do
       # Regression for bd-4u7a1m. The previous implementation called complete_now
       # before signaling MergeQueue, racing the Driver to close the task. Verify
-      # the worker stays :awaiting_review (not :completed) while the Watchdog polls.
+      # the run hands the PR to the Watchdog without the done signal, and the
+      # task stays open while the Watchdog polls.
       ws = new_github_workspace()
-      task = new_task(ws)
+      task = new_task(ws, %{review_only: true})
       {:ok, task} = Ash.update(task, %{pr_ref: "pr-501"}, action: :update)
+      :ok = Phoenix.PubSub.subscribe(Arbiter.PubSub, "worker:done:" <> ws.id)
 
       pid =
         start_reviewer(task, ["VERDICT: APPROVE", "LGTM"], %{
@@ -809,29 +827,32 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
           watchdog_interval_ms: 5_000_000
         })
 
+      ref = Process.monitor(pid)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> Worker.state(pid).status == :awaiting_review end)
-
-      assert Worker.state(pid).status == :awaiting_review
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+      assert Watchdog.alive?(task.id)
+      refute_received {:worker_done, _}
 
       # Task must NOT be :closed while the PR is still open.
       {:ok, reloaded} = Ash.get(Issue, task.id)
       assert reloaded.status == :in_progress
+      assert reloaded.pr_ref == "pr-501"
     end
 
-    test "Watchdog merges PR then Worker.complete fires, Driver exits without closing task (bd-cw3w9p)" do
+    test "the ticket's Watchdog merges the PR, the Driver exits, and the engagement stays open (bd-cw3w9p)" do
       # bd-cw3w9p: review_only tasks are long-lived engagements. Even after the
-      # Watchdog drives the PR merge and Worker.complete fires, the Driver must NOT
-      # close the task — it stays :in_progress for ReviewPatrol to manage.
-      # The Watchdog still drives the actual merge (bd-4u7a1m guarantee holds).
+      # Watchdog drives the PR merge, nothing may close the task — it stays
+      # :in_progress for ReviewPatrol to manage. The Watchdog still drives the
+      # actual merge (bd-4u7a1m guarantee holds).
       ws = new_github_workspace()
-      task = new_task(ws)
+      task = new_task(ws, %{review_only: true})
       {:ok, task} = Ash.update(task, %{pr_ref: "pr-500"}, action: :update)
+      :ok = Watchdog.subscribe(task.id)
 
       # StubMerger.get default: {status: :open, approved: false} — Watchdog sees
       # :pending → effective_outcome(via_review_gate: true) → :approved →
-      # workspace auto_merge: true → StubMerger.merge("pr-500") → :ok → complete.
+      # workspace auto_merge: true → StubMerger.merge("pr-500") → :ok → merged.
       worker_pid =
         start_reviewer(task, ["VERDICT: APPROVE", "LGTM"], %{
           merger_workspace_override: ws,
@@ -857,8 +878,11 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
 
       send(worker_pid, {:__claude_session_done__, "arb done"})
 
-      # Watchdog must drive a merge; Driver then exits. Task stays :in_progress.
+      # The Driver exits with the reviewer's run; the Watchdog must drive a
+      # merge. Task stays :in_progress.
       assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 5_000
+      task_id = task.id
+      assert_receive {:watchdog, ^task_id, {:merged, "pr-500"}}, 5_000
 
       assert StubMerger.merge_count("pr-500") >= 1
 

@@ -114,6 +114,7 @@ defmodule Arbiter.Board.Snapshot do
   alias Arbiter.Board.Scheduler
   alias Arbiter.Tasks.EdgeGate
   alias Arbiter.Tasks.Lifecycle
+  alias Arbiter.Tasks.PullRequest
   alias Arbiter.Tasks.SlotGate
   alias Arbiter.Usage.Budget
   alias Arbiter.Worker
@@ -140,9 +141,9 @@ defmodule Arbiter.Board.Snapshot do
   # bd-6bax7s: what a live worker's status is *called* on a card held back by a
   # `:conflicts_with` mutex, and — by omission — which statuses count as in
   # flight at all. `:failed` is absent on purpose: a parked worker is terminal,
-  # so it holds nothing back. `:awaiting_review` is present even though it
-  # holds no worker slot — an open MR on the counterpart is exactly the thing
-  # a mutex exists to keep a second worker away from.
+  # so it holds nothing back. An open MR on the counterpart is exactly the
+  # thing a mutex exists to keep a second worker away from — since bd-741sid
+  # that is a Merging ticket, claimed from its state (`@merging_state`).
   @conflict_states %{
     idle: "running",
     running: "running",
@@ -151,6 +152,8 @@ defmodule Arbiter.Board.Snapshot do
     awaiting_review_gate: "in review",
     awaiting_review: "awaiting review"
   }
+
+  @merging_state "merging"
 
   # A reviewer / implementer worker claims the mutex on behalf of the author it
   # is working for, for the window where the author's own worker has already
@@ -362,25 +365,25 @@ defmodule Arbiter.Board.Snapshot do
           effective_max_concurrent(workspace_id, SlotGate.slots_used(issues)),
       quota: Keyword.get_lazy(opts, :quota, fn -> quota_hold(workspace_id) end),
       paused: Keyword.get(opts, :paused, false),
-      watchdog_live: Keyword.get_lazy(opts, :watchdog_live, fn -> watchdog_live(workers) end),
+      watchdog_live: Keyword.get_lazy(opts, :watchdog_live, fn -> watchdog_live(issues) end),
       over_budget: Keyword.get_lazy(opts, :over_budget, fn -> Budget.over_budget_ids(issues) end)
     })
   end
 
   @doc """
-  Which of `workers` still has a live Watchdog (bd-8jixav). One Registry
-  lookup per parked worker — cheap, and only for the `:awaiting_review` rows,
-  which are the only ones the question means anything for.
+  Which of the Merging tickets among `issues` still have a live Watchdog
+  (bd-8jixav, bd-741sid). One Registry lookup per Merging ticket — cheap, and
+  only for the one state a ticket's Watchdog is supposed to be running in.
 
   Public so a caller scoped to fewer than the whole fleet (e.g.
   `Arbiter.Tasks.EpicRollup`, bd-58z2tu) can build the same liveness set
-  `needs_you?/2` expects without going through `load/1`.
+  `merging_needs_you?/3` expects without going through `load/1`.
   """
   @spec watchdog_live([map()]) :: MapSet.t() | nil
-  def watchdog_live(workers) do
-    workers
-    |> Enum.filter(&(Map.get(&1, :status) == :awaiting_review and Watchdog.alive?(&1.task_id)))
-    |> MapSet.new(& &1.task_id)
+  def watchdog_live(issues) do
+    issues
+    |> Enum.filter(&(Lifecycle.state_of(&1) == :merging and Watchdog.alive?(&1.id)))
+    |> MapSet.new(& &1.id)
   rescue
     # A board that renders five columns beats one that raises: an unreadable
     # registry degrades to "unknown", not to a false alarm on every card.
@@ -728,7 +731,7 @@ defmodule Arbiter.Board.Snapshot do
         activity: @dispatching_state,
         provider: nil,
         since: Map.get(issue, :updated_at) || created_at(issue),
-        phase: :handing_off,
+        phase: :implementing,
         agent_live: false
       }
     end)
@@ -741,15 +744,17 @@ defmodule Arbiter.Board.Snapshot do
   # produced the card.
   #
   # bd-6zapbl: one card per Waiting ticket. A verifying ticket gets its
-  # verification card whatever worker rows linger; any other gets a card from
-  # its non-completed author rows, or — with none left — the orphan card.
+  # verification card and a merging one its merge card (bd-741sid), whatever
+  # worker rows linger; any other gets a card from its non-completed author
+  # rows, or — with none left — the orphan card.
   defp waiting(workers, issues, issues_by_id, columns, watchdog_live, all_workers) do
-    verifying = for i <- issues, Lifecycle.state_of(i) == :verifying, into: MapSet.new(), do: i.id
+    verifying = ids_in_state(issues, :verifying)
+    merging = ids_in_state(issues, :merging)
 
     carded =
       Enum.filter(workers, fn w ->
         w.status != :completed and in_column?(columns, w.task_id, :waiting) and
-          not MapSet.member?(verifying, w.task_id)
+          not MapSet.member?(verifying, w.task_id) and not MapSet.member?(merging, w.task_id)
       end)
 
     with_rows = MapSet.new(carded, & &1.task_id)
@@ -759,11 +764,71 @@ defmodule Arbiter.Board.Snapshot do
     {verifying_issues, others} =
       Enum.split_with(waiting_issues, &MapSet.member?(verifying, &1.id))
 
+    {merging_issues, others} = Enum.split_with(others, &MapSet.member?(merging, &1.id))
+
     (waiting_cards(carded, issues_by_id, watchdog_live, all_workers) ++
+       merging_cards(merging_issues, all_workers, watchdog_live) ++
        orphaned_cards(Enum.reject(others, &MapSet.member?(with_rows, &1.id))) ++
        awaiting_verification_cards(verifying_issues))
     |> Enum.sort_by(& &1.since, {:asc, DateTime})
   end
+
+  defp ids_in_state(issues, state),
+    do: for(i <- issues, Lifecycle.state_of(i) == state, into: MapSet.new(), do: i.id)
+
+  # bd-741sid: a Merging ticket's implementer stopped when its PR opened, so
+  # the card is built from the ticket — the PR on its row, the forge's last
+  # answer its Watchdog recorded, and whether that Watchdog is still running,
+  # or was stopped on purpose (`merge_pulled`, `PullRequest.pull/1`). A worker
+  # row still registered under the ticket (a pass that failed) keeps its vote
+  # and its note, as a collapsed row does on a worker card.
+  defp merging_cards(issues, workers, watchdog_live) do
+    rows = Enum.group_by(workers, & &1.task_id)
+
+    Enum.map(issues, fn issue ->
+      group = rows |> Map.get(issue.id, []) |> Enum.reject(&(&1.status == :completed))
+
+      %{
+        id: issue.id,
+        title: Map.get(issue, :title),
+        priority: Map.get(issue, :priority),
+        difficulty: Map.get(issue, :difficulty),
+        workspace_id: Map.get(issue, :workspace_id),
+        status: :merging,
+        reason: nil,
+        mr_ref: Map.get(issue, :pr_ref),
+        merger_url: Map.get(issue, :merger_url),
+        merger_status: PullRequest.merger_status(issue),
+        watchdog_alive: ticket_watchdog_alive(issue.id, watchdog_live),
+        merge_pulled: PullRequest.pulled?(issue),
+        needs_you: merging_needs_you?(issue, group, watchdog_live),
+        collapsed_note: collapsed_note(nil, group),
+        since: Map.get(issue, :updated_at) || created_at(issue),
+        phase: :waiting_ci_merge,
+        agent_live: false
+      }
+    end)
+  end
+
+  @doc """
+  Whether a Merging ticket needs the operator (bd-741sid): its Watchdog is
+  gone (`false` in `watchdog_live`, see `watchdog_live/1`) so nothing polls
+  the PR; the forge's last answer is a block the Watchdog cannot clear itself;
+  or a worker row still registered under it (`rows`, e.g. a pass that failed)
+  needs the operator per `child_needs_you?/2`.
+
+  Public so `Arbiter.Tasks.EpicRollup` flags a Merging child exactly as the
+  board's merge card does.
+  """
+  @spec merging_needs_you?(map(), [map()], MapSet.t() | nil) :: boolean()
+  def merging_needs_you?(ticket, rows, watchdog_live) do
+    ticket_watchdog_alive(ticket.id, watchdog_live) == false or
+      blocked_for_you?(PullRequest.merger_status(ticket) || %{}) or
+      child_needs_you?(rows, watchdog_live)
+  end
+
+  defp ticket_watchdog_alive(id, live) when is_struct(live, MapSet), do: MapSet.member?(live, id)
+  defp ticket_watchdog_alive(_id, _live), do: nil
 
   # bd-9so315: a task merged but parked until someone restarts the server and
   # observes the new path. It has no worker (the merge tore it down), so it
@@ -784,6 +849,7 @@ defmodule Arbiter.Board.Snapshot do
         merger_url: nil,
         merger_status: nil,
         watchdog_alive: nil,
+        merge_pulled: false,
         needs_you: true,
         collapsed_note: nil,
         since: awaiting_since(issue)
@@ -814,6 +880,7 @@ defmodule Arbiter.Board.Snapshot do
         merger_url: Map.get(w, :merger_url),
         merger_status: get_meta(w, :last_merger_status),
         watchdog_alive: alive,
+        merge_pulled: false,
         # The collapsed rows keep their vote: a dead fix pass under a
         # legitimately-parked primary still needs a human, even though the
         # primary row alone reads as "the machine has this".
@@ -860,11 +927,9 @@ defmodule Arbiter.Board.Snapshot do
   end
 
   # One task, one card (bd-8jixav). A task's primary row and a subordinate
-  # `:fixpass` / `:conflict` pass's row can both be parked — a
-  # parked `:awaiting_review` primary alongside a `:failed` fix pass is the
-  # ordinary shape of a task the merge queue is working on — so the column used
-  # to render one task as two cards that read at a glance as two different
-  # stuck tickets.
+  # fix / conflict pass's row can both be parked, so the column used to render
+  # one task as two cards that read at a glance as two different stuck
+  # tickets.
   #
   # The primary row (`role: nil`) wins where both exist: it is the one holding
   # the MR, and the one whose fields the card's actions address. `Enum.min_by`
@@ -917,6 +982,7 @@ defmodule Arbiter.Board.Snapshot do
         # No live worker at all, so no Watchdog is expected either — the card
         # already says "worker stopped", which is the stronger statement.
         watchdog_alive: nil,
+        merge_pulled: false,
         needs_you: true,
         collapsed_note: nil,
         since: Map.get(issue, :updated_at) || created_at(issue)
@@ -971,8 +1037,11 @@ defmodule Arbiter.Board.Snapshot do
   # definition, whatever its last poll happened to record.
   def needs_you?(%{status: :failed}, _alive), do: true
 
-  def needs_you?(worker, _alive) do
-    case Watchdog.effective_block_reason(get_meta(worker, :last_merger_status) || %{}) do
+  def needs_you?(worker, _alive),
+    do: blocked_for_you?(get_meta(worker, :last_merger_status) || %{})
+
+  defp blocked_for_you?(merger_status) do
+    case Watchdog.effective_block_reason(merger_status) do
       # No block the forge will admit to: the MR is simply mid-review, which is
       # still the machine's turn.
       nil -> false
@@ -1163,6 +1232,8 @@ defmodule Arbiter.Board.Snapshot do
   #     dispatched into. Past the grace it reads as *orphaned* instead, and
   #     releases the mutex: nothing is going to retry it on its own, so holding
   #     its counterpart hostage would strand both.
+  #   * a Merging ticket (bd-741sid): its PR is open and no worker stays on
+  #     it, however long ago it opened.
   #   * a reviewer / implementer worker, claiming on behalf of the author it
   #     works for — covers a fix pass whose author worker has already gone.
   #   * the author's own live worker, which knows its status exactly.
@@ -1174,6 +1245,9 @@ defmodule Arbiter.Board.Snapshot do
     issues
     |> Enum.filter(&mid_dispatch?(&1, worked, now))
     |> Map.new(&{&1.id, @dispatching_state})
+    |> Map.merge(
+      for i <- issues, Lifecycle.state_of(i) == :merging, into: %{}, do: {i.id, @merging_state}
+    )
     |> Map.merge(Map.new(claims_from(gate_workers, &gate_author/1, &gate_state/1)))
     |> Map.merge(Map.new(claims_from(authors, & &1.task_id, &author_state/1)))
   end

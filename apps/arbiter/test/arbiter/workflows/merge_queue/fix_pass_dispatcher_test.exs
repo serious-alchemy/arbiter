@@ -136,12 +136,6 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcherTest do
     end
   end
 
-  describe "registry_suffix/0" do
-    test "is the :fixpass suffix the Watchdog watches for" do
-      assert FixPassDispatcher.registry_suffix() == ":fixpass"
-    end
-  end
-
   describe "dispatch/1 guards" do
     test "returns {:error, :missing_task_id} without a task id" do
       assert {:error, :missing_task_id} = FixPassDispatcher.dispatch(%{})

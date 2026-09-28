@@ -1,46 +1,15 @@
-defmodule ArbiterWeb.MergeQueueIndexLiveTest.QueueMerger do
-  @moduledoc "Stub merger that parks a worker at :awaiting_review (see dashboard test)."
-  @behaviour Arbiter.Mergers.Merger
-
-  @impl true
-  def open(_branch, _title, _desc, _opts), do: {:ok, "!77"}
-  @impl true
-  def get(_ref), do: {:ok, %{status: :open, approved: false}}
-  @impl true
-  def merge(_ref, _expected_sha), do: :ok
-  @impl true
-  def close(_ref), do: :ok
-  @impl true
-  def add_comment(_ref, _body), do: :ok
-  @impl true
-  def request_review(_ref, _reviewers), do: :ok
-  @impl true
-  def link_for(_ref), do: "https://example.test/mr/77"
-  @impl true
-  def get_diff(_ref, _opts), do: {:ok, ""}
-  @impl true
-  def post_inline_comment(_ref, _finding, _opts), do: :ok
-  @impl true
-  def submit_review(_ref, _verdict, _body, _opts), do: :ok
-  @impl true
-  def list_review_feedback(_ref),
-    do: {:ok, %{changes_requested: false, latest_review_id: nil, feedback: []}}
-end
-
 defmodule ArbiterWeb.MergeQueueIndexLiveTest do
   use ArbiterWeb.ConnCase, async: false
 
+  import Ecto.Query, only: [from: 2]
   import Phoenix.LiveViewTest
 
-  alias ArbiterWeb.MergeQueueIndexLiveTest.QueueMerger
-  alias Arbiter.Tasks.{Issue, Workspace}
-  alias Arbiter.Worker
-  alias Arbiter.Workers.Run
+  alias Arbiter.Tasks.{Issue, PullRequest, Workspace}
 
-  # The worker walk, workspace/title/queue-position reads and the landed
-  # query all arrive by `start_async/3` on the connected mount (bd-aebiwf);
-  # every test but the loading/error ones themselves wants the page once
-  # it has landed.
+  # The Merging tickets, workspace/queue-position reads and the landed query
+  # all arrive by `start_async/3` on the connected mount (bd-aebiwf); every
+  # test but the loading/error ones themselves wants the page once it has
+  # landed.
   @async_timeout 5_000
 
   defp live_merge_queue(conn, path) do
@@ -49,23 +18,27 @@ defmodule ArbiterWeb.MergeQueueIndexLiveTest do
   end
 
   setup do
-    for snap <- Worker.list_children(), do: Worker.stop(snap.task_id)
-    Process.sleep(50)
-
     {:ok, ws} =
       Ash.create(Workspace, %{name: "cr-#{System.unique_integer([:positive])}", prefix: "crx"})
 
     {:ok, ws: ws}
   end
 
-  defp merge_opts do
-    %{
-      adapter: QueueMerger,
-      workspace: nil,
-      auto_merge: false,
-      interval_ms: 600_000,
-      initial_delay_ms: 600_000
-    }
+  # bd-741sid: an open PR belongs to its ticket — Merging, with the PR and the
+  # forge's last answer on the row — not to a worker parked on it.
+  defp merging_ticket(ws, title, merger_status \\ nil) do
+    {:ok, task} = Ash.create(Issue, %{title: title, workspace_id: ws.id})
+    {:ok, _} = Ash.update(task, %{status: :in_progress})
+    {:ok, task} = Issue.pr_opened(task.id, "!77", merger_url: "https://example.test/mr/77")
+
+    if merger_status, do: :ok = PullRequest.record_merger_status(task.id, merger_status)
+
+    task
+  end
+
+  defp landed_ticket(ws, title) do
+    task = merging_ticket(ws, title)
+    Ash.update!(Ash.get!(Issue, task.id), %{}, action: :close)
   end
 
   describe "Queued tab" do
@@ -77,10 +50,7 @@ defmodule ArbiterWeb.MergeQueueIndexLiveTest do
 
     test "row anatomy: position, id, title, PR link, check dots, time-in-queue",
          %{conn: conn, ws: ws} do
-      {:ok, task} = Ash.create(Issue, %{title: "merging-now", workspace_id: ws.id})
-      {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ws.id)
-      :ok = Worker.advance(pid, :integrate)
-      {:ok, "!77"} = Worker.open_mr(pid, "feature/x", "Integrate x", "", merge_opts())
+      task = merging_ticket(ws, "merging-now")
 
       {:ok, _view, html} = live_merge_queue(conn, ~p"/merge_queue")
 
@@ -99,12 +69,19 @@ defmodule ArbiterWeb.MergeQueueIndexLiveTest do
       assert html =~ "title=\"Mergeable\""
     end
 
+    test "a ticket that is not Merging is not in the queue", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "still-working", workspace_id: ws.id})
+      {:ok, _} = Ash.update(task, %{status: :in_progress})
+
+      {:ok, _view, html} = live_merge_queue(conn, ~p"/merge_queue")
+
+      assert html =~ ~s(id="merge_queue-empty")
+      refute html =~ "still-working"
+    end
+
     test "Queued tab is the default and shows in the tab bar with a live count",
          %{conn: conn, ws: ws} do
-      {:ok, task} = Ash.create(Issue, %{title: "merging-now", workspace_id: ws.id})
-      {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ws.id)
-      :ok = Worker.advance(pid, :integrate)
-      {:ok, "!77"} = Worker.open_mr(pid, "feature/x", "Integrate x", "", merge_opts())
+      merging_ticket(ws, "merging-now")
 
       {:ok, _view, html} = live_merge_queue(conn, ~p"/merge_queue")
       assert html =~ "Queued"
@@ -113,17 +90,7 @@ defmodule ArbiterWeb.MergeQueueIndexLiveTest do
     end
 
     test "a draft PR lights the Mergeable dot red, not green", %{conn: conn, ws: ws} do
-      {:ok, task} = Ash.create(Issue, %{title: "draft-pr", workspace_id: ws.id})
-      {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ws.id)
-      :ok = Worker.advance(pid, :integrate)
-      {:ok, "!77"} = Worker.open_mr(pid, "feature/x", "Integrate x", "", merge_opts())
-
-      :ok =
-        Worker.record_merger_status(pid, %{
-          pipeline: :success,
-          approved: true,
-          block_reason: :draft
-        })
+      merging_ticket(ws, "draft-pr", %{pipeline: :success, approved: true, block_reason: :draft})
 
       {:ok, _view, html} = live_merge_queue(conn, ~p"/merge_queue")
 
@@ -136,12 +103,7 @@ defmodule ArbiterWeb.MergeQueueIndexLiveTest do
 
     test "an unknown/not-yet-started CI signal renders as unknown, not passed",
          %{conn: conn, ws: ws} do
-      {:ok, task} = Ash.create(Issue, %{title: "no-ci-yet", workspace_id: ws.id})
-      {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ws.id)
-      :ok = Worker.advance(pid, :integrate)
-      {:ok, "!77"} = Worker.open_mr(pid, "feature/x", "Integrate x", "", merge_opts())
-
-      :ok = Worker.record_merger_status(pid, %{pipeline: :not_started, approved: false})
+      merging_ticket(ws, "no-ci-yet", %{pipeline: :not_started, approved: false})
 
       {:ok, _view, html} = live_merge_queue(conn, ~p"/merge_queue")
 
@@ -155,21 +117,8 @@ defmodule ArbiterWeb.MergeQueueIndexLiveTest do
 
     test "the header count and subtitle describe the active tab, not always Queued",
          %{conn: conn, ws: ws} do
-      {:ok, task} = Ash.create(Issue, %{title: "merging-now", workspace_id: ws.id})
-      {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ws.id)
-      :ok = Worker.advance(pid, :integrate)
-      {:ok, "!77"} = Worker.open_mr(pid, "feature/x", "Integrate x", "", merge_opts())
-
-      Ash.create!(Run, %{
-        task_id: task.id,
-        task_title: task.title,
-        repo: "test/repo",
-        workspace_id: ws.id,
-        status: :completed,
-        started_at: DateTime.add(DateTime.utc_now(), -3600, :second),
-        completed_at: DateTime.utc_now(),
-        mr_ref: "!42"
-      })
+      merging_ticket(ws, "merging-now")
+      landed_ticket(ws, "shipped")
 
       {:ok, _view, queued_html} = live_merge_queue(conn, ~p"/merge_queue")
       assert queued_html =~ "integrating now, longest-waiting first"
@@ -185,19 +134,9 @@ defmodule ArbiterWeb.MergeQueueIndexLiveTest do
   end
 
   describe "Landed today tab" do
-    test "shows a 3-col grid of muted TaskCards for runs completed today", %{conn: conn, ws: ws} do
-      {:ok, task} = Ash.create(Issue, %{title: "shipped-thing", workspace_id: ws.id})
-
-      Ash.create!(Run, %{
-        task_id: task.id,
-        task_title: task.title,
-        repo: "test/repo",
-        workspace_id: ws.id,
-        status: :completed,
-        started_at: DateTime.add(DateTime.utc_now(), -3600, :second),
-        completed_at: DateTime.utc_now(),
-        mr_ref: "!42"
-      })
+    test "shows a 3-col grid of muted TaskCards for tickets whose PR merged today",
+         %{conn: conn, ws: ws} do
+      task = landed_ticket(ws, "shipped-thing")
 
       {:ok, _view, html} = live_merge_queue(conn, ~p"/merge_queue?tab=landed")
 
@@ -210,49 +149,51 @@ defmodule ArbiterWeb.MergeQueueIndexLiveTest do
       refute html =~ ~s(id="merge_queue-landed-empty")
     end
 
+    # bd-741sid: the run that opens a PR completes when the PR opens, so a
+    # completed run with a PR on it is not a merge — the ticket says when.
+    test "a PR that is open, not merged, has not landed", %{conn: conn, ws: ws} do
+      merging_ticket(ws, "opened-not-merged")
+
+      {:ok, _view, html} = live_merge_queue(conn, ~p"/merge_queue?tab=landed")
+
+      assert html =~ ~s(id="merge_queue-landed-empty")
+      refute html =~ "opened-not-merged"
+    end
+
+    test "a merged ticket waiting on its post-merge check has landed", %{conn: conn, ws: ws} do
+      task = merging_ticket(ws, "verifying-thing")
+      Ash.update!(Ash.get!(Issue, task.id), %{}, action: :await_verification)
+
+      {:ok, _view, html} = live_merge_queue(conn, ~p"/merge_queue?tab=landed")
+
+      assert html =~ task.id
+      assert html =~ "verifying-thing"
+    end
+
+    test "a ticket closed without its PR merging has not landed", %{conn: conn, ws: ws} do
+      task = merging_ticket(ws, "wont-do")
+      Ash.update!(Ash.get!(Issue, task.id), %{close_reason: :wont_do}, action: :close)
+
+      {:ok, _view, html} = live_merge_queue(conn, ~p"/merge_queue?tab=landed")
+
+      assert html =~ ~s(id="merge_queue-landed-empty")
+      refute html =~ "wont-do"
+    end
+
     test "empty state when nothing landed today", %{conn: conn} do
       {:ok, _view, html} = live_merge_queue(conn, ~p"/merge_queue?tab=landed")
       assert html =~ ~s(id="merge_queue-landed-empty")
       assert html =~ "landed today"
     end
 
-    test "two landed runs for the same task render without a duplicate DOM id",
-         %{conn: conn, ws: ws} do
-      {:ok, task} = Ash.create(Issue, %{title: "landed-twice", workspace_id: ws.id})
+    test "a ticket merged before today does not show up", %{conn: conn, ws: ws} do
+      task = landed_ticket(ws, "old-news")
+      two_days_ago = DateTime.add(DateTime.utc_now(), -172_000, :second)
 
-      for mr_ref <- ["!42", "!43"] do
-        Ash.create!(Run, %{
-          task_id: task.id,
-          task_title: task.title,
-          repo: "test/repo",
-          workspace_id: ws.id,
-          status: :completed,
-          started_at: DateTime.add(DateTime.utc_now(), -3600, :second),
-          completed_at: DateTime.utc_now(),
-          mr_ref: mr_ref
-        })
-      end
-
-      # `live/2` raises on duplicate DOM ids found while rendering the LiveView.
-      {:ok, _view, html} = live_merge_queue(conn, ~p"/merge_queue?tab=landed")
-
-      assert html =~ ~s(id="merge_queue-landed")
-      assert html =~ task.id
-    end
-
-    test "a run completed before today does not show up", %{conn: conn, ws: ws} do
-      {:ok, task} = Ash.create(Issue, %{title: "old-news", workspace_id: ws.id})
-
-      Ash.create!(Run, %{
-        task_id: task.id,
-        task_title: task.title,
-        repo: "test/repo",
-        workspace_id: ws.id,
-        status: :completed,
-        started_at: DateTime.add(DateTime.utc_now(), -172_800, :second),
-        completed_at: DateTime.add(DateTime.utc_now(), -172_000, :second),
-        mr_ref: "!41"
-      })
+      Arbiter.Repo.update_all(
+        from(i in "issues", where: i.id == ^task.id),
+        set: [closed_at: two_days_ago]
+      )
 
       {:ok, _view, html} = live_merge_queue(conn, ~p"/merge_queue?tab=landed")
       assert html =~ ~s(id="merge_queue-landed-empty")
@@ -272,17 +213,17 @@ defmodule ArbiterWeb.MergeQueueIndexLiveTest do
   end
 
   describe "async mount" do
-    # Holds the worker walk (`Worker.list_children/0`) in flight until the
-    # test says go, so the loading state is something to assert on rather
-    # than a race — same discipline as `worker_index_live_test.exs`'s
-    # `hold_workers_load/0` (bd-4gtia5).
+    # Holds the Merging-ticket read (`PullRequest.merging_tickets/0`) in
+    # flight until the test says go, so the loading state is something to
+    # assert on rather than a race — same discipline as
+    # `worker_index_live_test.exs`'s `hold_workers_load/0` (bd-4gtia5).
     defp hold_merge_queue_load do
       test = self()
 
-      :meck.new(Arbiter.Worker, [:passthrough, :no_link])
+      :meck.new(PullRequest, [:passthrough, :no_link])
 
-      :meck.expect(Arbiter.Worker, :list_children, fn ->
-        children = :meck.passthrough([])
+      :meck.expect(PullRequest, :merging_tickets, fn ->
+        tickets = :meck.passthrough([])
         send(test, {:loading_merge_queue, self()})
 
         receive do
@@ -291,18 +232,18 @@ defmodule ArbiterWeb.MergeQueueIndexLiveTest do
           1_000 -> send(test, {:unreleased_merge_queue_load, self()})
         end
 
-        children
+        tickets
       end)
 
-      on_exit(fn -> :meck.unload(Arbiter.Worker) end)
+      on_exit(fn -> :meck.unload(PullRequest) end)
     end
 
-    test "the dead render shows the loading state and does not walk live workers",
+    test "the dead render shows the loading state and does not read the queue",
          %{conn: conn} do
       test = self()
-      :meck.new(Arbiter.Worker, [:passthrough, :no_link])
-      :meck.expect(Arbiter.Worker, :list_children, fn -> send(test, :worker_walk) && [] end)
-      on_exit(fn -> :meck.unload(Arbiter.Worker) end)
+      :meck.new(PullRequest, [:passthrough, :no_link])
+      :meck.expect(PullRequest, :merging_tickets, fn -> send(test, :queue_read) && [] end)
+      on_exit(fn -> :meck.unload(PullRequest) end)
 
       doc = conn |> get(~p"/merge_queue") |> html_response(200) |> LazyHTML.from_document()
 
@@ -311,15 +252,12 @@ defmodule ArbiterWeb.MergeQueueIndexLiveTest do
              |> Enum.count() == 1
 
       assert doc |> LazyHTML.query("#merge_queue-loading") |> Enum.count() == 1
-      refute_received :worker_walk
+      refute_received :queue_read
     end
 
     test "renders a loading skeleton before the async load lands, then the data",
          %{conn: conn, ws: ws} do
-      {:ok, task} = Ash.create(Issue, %{title: "async-loading", workspace_id: ws.id})
-      {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ws.id)
-      :ok = Worker.advance(pid, :integrate)
-      {:ok, "!77"} = Worker.open_mr(pid, "feature/x", "Integrate x", "", merge_opts())
+      task = merging_ticket(ws, "async-loading")
 
       hold_merge_queue_load()
 
@@ -341,13 +279,11 @@ defmodule ArbiterWeb.MergeQueueIndexLiveTest do
 
     test "an async merge-queue-load failure renders an inline error, not a crash",
          %{conn: conn} do
-      # `list_children/0` rescues raised exceptions (best-effort, matching
-      # the original synchronous code) but not an `:exit` — this exercises
-      # the genuinely-unguarded failure mode and lands in
+      # An `:exit` from the read lands in
       # `handle_async(:merge_queue, {:exit, _}, socket)`.
-      :meck.new(Arbiter.Worker, [:passthrough, :no_link])
-      :meck.expect(Arbiter.Worker, :list_children, fn -> exit(:boom) end)
-      on_exit(fn -> :meck.unload(Arbiter.Worker) end)
+      :meck.new(PullRequest, [:passthrough, :no_link])
+      :meck.expect(PullRequest, :merging_tickets, fn -> exit(:boom) end)
+      on_exit(fn -> :meck.unload(PullRequest) end)
 
       {:ok, view, _html} = live(conn, ~p"/merge_queue")
       html = render_async(view, @async_timeout)
@@ -356,14 +292,12 @@ defmodule ArbiterWeb.MergeQueueIndexLiveTest do
       assert has_element?(view, "#merge_queue-retry")
     end
 
-    test "a :worker_lifecycle broadcast refreshes the queued tab", %{conn: conn, ws: ws} do
+    test "a ticket going Merging while the page is open refreshes the queued tab",
+         %{conn: conn, ws: ws} do
       {:ok, view, html} = live_merge_queue(conn, ~p"/merge_queue")
       refute html =~ "broadcast-refresh"
 
-      {:ok, task} = Ash.create(Issue, %{title: "broadcast-refresh", workspace_id: ws.id})
-      {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ws.id)
-      :ok = Worker.advance(pid, :integrate)
-      {:ok, "!77"} = Worker.open_mr(pid, "feature/x", "Integrate x", "", merge_opts())
+      merging_ticket(ws, "broadcast-refresh")
 
       html = render_async(view, @async_timeout)
 
@@ -373,18 +307,7 @@ defmodule ArbiterWeb.MergeQueueIndexLiveTest do
     test "navigating to a new page while a load is in flight keeps the requested page",
          %{conn: conn, ws: ws} do
       for i <- 1..25 do
-        title = "landed-#{String.pad_leading(to_string(i), 2, "0")}"
-
-        Ash.create!(Run, %{
-          task_id: Ash.create!(Issue, %{title: title, workspace_id: ws.id}).id,
-          task_title: title,
-          repo: "test/repo",
-          workspace_id: ws.id,
-          status: :completed,
-          started_at: DateTime.add(DateTime.utc_now(), -3600, :second),
-          completed_at: DateTime.add(DateTime.utc_now(), -(26 - i), :second),
-          mr_ref: "!#{i}"
-        })
+        landed_ticket(ws, "landed-#{String.pad_leading(to_string(i), 2, "0")}")
       end
 
       hold_merge_queue_load()
@@ -412,23 +335,8 @@ defmodule ArbiterWeb.MergeQueueIndexLiveTest do
 
     test "switching tabs while a load is in flight shows the loading state, not the old tab's data",
          %{conn: conn, ws: ws} do
-      {:ok, queued_task} = Ash.create(Issue, %{title: "queued-thing", workspace_id: ws.id})
-      {:ok, pid} = Worker.start(task_id: queued_task.id, repo: "test/repo", workspace_id: ws.id)
-      :ok = Worker.advance(pid, :integrate)
-      {:ok, "!77"} = Worker.open_mr(pid, "feature/x", "Integrate x", "", merge_opts())
-
-      {:ok, landed_task} = Ash.create(Issue, %{title: "landed-thing", workspace_id: ws.id})
-
-      Ash.create!(Run, %{
-        task_id: landed_task.id,
-        task_title: landed_task.title,
-        repo: "test/repo",
-        workspace_id: ws.id,
-        status: :completed,
-        started_at: DateTime.add(DateTime.utc_now(), -3600, :second),
-        completed_at: DateTime.utc_now(),
-        mr_ref: "!42"
-      })
+      merging_ticket(ws, "queued-thing")
+      landed_ticket(ws, "landed-thing")
 
       hold_merge_queue_load()
 

@@ -73,7 +73,7 @@ defmodule Arbiter.MCP.Catalog do
   | `loop_pending_reject` | coordinator | `Arbiter.Loop.reject_pending/2` (soft — the row persists as `rejected`) |
   | `usage_summarize` | coordinator | `Arbiter.Usage.summarize/1` |
   | `queue_retry_auto_resolve` | coordinator | `Arbiter.Worker.Watchdog.retry_auto_resolve/1` (bd-bspakl) |
-  | `queue_restart_watchdog` | coordinator | `Arbiter.Worker.Watchdog.restart/1` (bd-8jixav) |
+  | `queue_restart_watchdog` | coordinator | `Arbiter.Worker.Watchdog.restart/2` (bd-8jixav) |
   | `ci_rerun` | worker, coordinator | `Arbiter.Worker.Watchdog.rerun_ci/2` → `Merger.rerun_ci/2` (bd-5mzzww) |
   | `ci_mark_external` | worker, coordinator | `Arbiter.Worker.Watchdog.mark_ci_external/2` (bd-5mzzww) |
   | `scheduler_pause` | coordinator | `Arbiter.Board.Autopilot.pause/2` (persisted, bd-pgi97m) |
@@ -1071,10 +1071,9 @@ defmodule Arbiter.MCP.Catalog do
           "started_at, activity, model (short display name e.g. \"Sonnet\"), cost_usd (sum " <>
           "of all ledger entries for the task), resumable (boolean: whether the task can be " <>
           "safely resumed), and blocked_reason (string or nil: human-readable reason if " <>
-          "resumable is false). A task may have TWO rows: its own worker (registry_key == " <>
-          "task_id, role null) plus a merge-queue subordinate pass (registry_key " <>
-          "`<task_id>:fixpass` / `<task_id>:conflict`, role `fix_pass` / `conflict_resolver`) " <>
-          "running while the primary is parked awaiting its merge. Check resumable before " <>
+          "resumable is false). A merge-queue pass is an ordinary run of its ticket, " <>
+          "registered under the ticket id with role `fix_pass` / `conflict_resolver`; the " <>
+          "task's own run has role null. Check resumable before " <>
           "attempting to stop/resume: false indicates the task is blocked (e.g. awaiting " <>
           "merge queue or review gate) and cannot be safely touched. Never operate on a " <>
           "subordinate row (role is not null) — the merge queue owns those passes. The " <>
@@ -2148,22 +2147,24 @@ defmodule Arbiter.MCP.Catalog do
       name: "queue_restart_watchdog",
       tiers: @coordinator,
       description:
-        "Mint a FRESH merge Watchdog for a task whose Watchdog has died, attached to the MR " <>
-          "its worker already has open (bd-8jixav). A Watchdog is a temporary process: when " <>
-          "it crashes it is gone for good, silently, and the task sits at awaiting_review " <>
-          "with an open MR nobody is polling. Use this when a parked task shows 'no watchdog " <>
+        "Mint a FRESH merge Watchdog for a Merging ticket whose Watchdog has died, started " <>
+          "from the ticket's row (bd-8jixav, bd-741sid). A Watchdog is a temporary process: " <>
+          "when it crashes it is gone for good, silently, and the ticket sits in Merging with " <>
+          "an open MR nobody is polling. Use this when a Merging ticket shows 'no watchdog " <>
           "running', or when queue_retry_auto_resolve answered 'no merge watchdog is " <>
           "currently running' on a task whose PR is genuinely still open. Refused if a " <>
           "watchdog is already running (two on one MR would race the merge). Much cheaper " <>
-          "than worker_resume, which restarts the review gate from round 1.",
+          "than worker_resume, which restarts the review gate from round 1. A ticket the " <>
+          "operator pulled out of the merge queue goes back in it, so restart one only when " <>
+          "the operator asks for that.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
           "task_id" => %{
             "type" => "string",
             "description" =>
-              "The task whose parked worker needs a new watchdog (required). Its worker must " <>
-                "be alive and parked at awaiting_review."
+              "The Merging ticket that needs a new watchdog (required). Its PR must be on " <>
+                "its row."
           }
         },
         "required" => ["task_id"],

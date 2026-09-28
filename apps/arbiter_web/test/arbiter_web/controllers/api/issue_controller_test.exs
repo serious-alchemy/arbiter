@@ -521,6 +521,46 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
                {"closed", "closed", "duplicate"}
     end
 
+    # bd-741sid: the ticket owns its open PR — the ref, its URL, the forge's
+    # last answer and when it was read — and the pr_closed cause.
+    test "carries the ticket's PR state and its attention cause", %{conn: conn, ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "show my PR", workspace_id: ws.id})
+      {:ok, _} = Ash.update(issue, %{status: :in_progress})
+
+      body = conn |> get(~p"/api/issues/#{issue.id}") |> json_response(200)
+
+      for key <-
+            ~w(merger_url merger_status merger_checked_at attention_cause attention_detail attention_since) do
+        assert Map.has_key?(body, key) and body[key] == nil, key
+      end
+
+      {:ok, _} = Issue.pr_opened(issue.id, "#7", merger_url: "https://forge.test/pull/7")
+
+      :ok =
+        Arbiter.Tasks.PullRequest.record_merger_status(issue.id, %{
+          status: :open,
+          pipeline: :running
+        })
+
+      body = conn |> get(~p"/api/issues/#{issue.id}") |> json_response(200)
+
+      assert %{
+               "state" => "merging",
+               "pr_ref" => "#7",
+               "merger_url" => "https://forge.test/pull/7",
+               "merger_status" => %{"status" => "open", "pipeline" => "running"}
+             } = body
+
+      assert is_binary(body["merger_checked_at"])
+
+      {:ok, _} = Issue.pr_closed(issue.id, "#7")
+      body = conn |> get(~p"/api/issues/#{issue.id}") |> json_response(200)
+
+      assert %{"state" => "active", "attention_cause" => "pr_closed"} = body
+      assert body["attention_detail"] =~ "#7"
+      assert is_binary(body["attention_since"])
+    end
+
     test "returns 404 for missing issue", %{conn: conn} do
       conn = get(conn, ~p"/api/issues/api-doesnotexist")
       assert %{"error" => %{"type" => "not_found"}} = json_response(conn, 404)

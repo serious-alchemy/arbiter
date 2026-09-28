@@ -3412,15 +3412,62 @@ defmodule Arbiter.Worker.ReviewGate do
     %{state | reported?: true}
   end
 
-  # Report the verdict to the author exactly once. An inconclusive review
-  # (`:no_verdict`) is forwarded as such; the author's safe default for it is to
-  # escalate without merging.
+  # Report the verdict exactly once — to the author, or, when it is gone, to the
+  # ticket (`deliver_verdict/4`). An inconclusive review (`:no_verdict`) is
+  # forwarded as such; its safe default is to escalate without merging.
   defp report(state, verdict) do
     normalized = normalize_verdict(verdict)
     safe(fn -> Worker.report(state.author, :review_gate_rounds, state.round) end)
-    delivered = safe_delivery(fn -> Worker.review_gate_verdict(state.author, normalized) end)
+    delivered = deliver_verdict(state.task_id, state.author, normalized, gate_context(state))
     warn_undelivered(state, normalized, delivered)
     :ok
+  end
+
+  @doc """
+  Deliver a ReviewGate verdict for ticket `task_id` (bd-741sid): the ReviewGate
+  reports to the ticket.
+
+  The `author` run gets it while it is resident — at `:awaiting_review_gate`,
+  or `:failed` on an earlier round's rejection that a later APPROVE overturns
+  (bd-3wumco). When the author is gone — its run ended between rounds, or it
+  crashed — the verdict is applied to the ticket itself
+  (`Arbiter.Worker.apply_review_gate_verdict_to_ticket/3`): an APPROVE still
+  opens the PR and hands it to the ticket's Watchdog, and any other verdict is
+  recorded on the ticket and escalated. `ctx` is what the gate knows about the
+  round (`:branch`, `:worktree_path`, `:target_branch`, `:repo`,
+  `:workspace_id`, `:pr_ref`), over the round state the ticket recorded.
+
+  A verdict for a round some *newer* run has superseded — another run is
+  working the ticket — is refused (`{:error, {:superseded_by_run, pid}}`)
+  rather than applied over that run's work.
+  """
+  @spec deliver_verdict(String.t(), pid() | nil, verdict() | {:no_verdict, String.t()}, map()) ::
+          :ok | {:error, term()}
+  def deliver_verdict(task_id, author, verdict, ctx \\ %{}) when is_binary(task_id) do
+    case deliver_to_author(author, verdict) do
+      {:error, {:exit, _}} -> deliver_to_ticket(task_id, verdict, ctx)
+      {:error, :no_author} -> deliver_to_ticket(task_id, verdict, ctx)
+      other -> other
+    end
+  end
+
+  defp deliver_to_author(author, verdict) when is_pid(author),
+    do: safe_delivery(fn -> Worker.review_gate_verdict(author, verdict) end)
+
+  defp deliver_to_author(_author, _verdict), do: {:error, :no_author}
+
+  defp deliver_to_ticket(task_id, verdict, ctx) do
+    case Worker.whereis(task_id) do
+      nil ->
+        safe_delivery(fn -> Worker.apply_review_gate_verdict_to_ticket(task_id, verdict, ctx) end)
+
+      pid ->
+        {:error, {:superseded_by_run, pid}}
+    end
+  end
+
+  defp gate_context(state) do
+    Map.take(state, [:branch, :worktree_path, :target_branch, :repo, :workspace_id, :pr_ref])
   end
 
   # `safe/1` for the verdict hand-off, except a raise/exit is REPORTED rather
@@ -3452,8 +3499,9 @@ defmodule Arbiter.Worker.ReviewGate do
   defp warn_undelivered(state, verdict, reason) do
     Logger.warning(
       "ReviewGate: could not deliver #{verdict_label(verdict)} verdict for " <>
-        "task=#{state.task_id} (round #{state.round}): #{inspect(reason)}. " <>
-        "The review outcome is orphaned — nothing downstream will act on it."
+        "task=#{state.task_id} (round #{state.round}) to its author or its ticket: " <>
+        "#{inspect(reason)}. The review outcome is orphaned — nothing downstream " <>
+        "will act on it."
     )
   end
 

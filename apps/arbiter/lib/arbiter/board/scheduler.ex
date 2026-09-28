@@ -106,9 +106,9 @@ defmodule Arbiter.Board.Scheduler do
   @typedoc """
   What is in flight for mutex purposes, and what to call it on a card:
   `%{task_id => "running"}`. Wider than `:running`, which only carries the
-  slot-holding workers whose *files* are claimed — a task at
-  `:awaiting_review` holds an open MR rather than a slot, and is still very
-  much something a `conflicts_with` counterpart must not run beside.
+  slot-holding workers whose *files* are claimed — a Merging ticket holds an
+  open MR rather than a slot, and is still very much something a
+  `conflicts_with` counterpart must not run beside.
   """
   @type conflict_claims :: %{optional(String.t()) => String.t()}
 

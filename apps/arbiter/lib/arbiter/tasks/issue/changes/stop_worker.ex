@@ -1,8 +1,8 @@
 defmodule Arbiter.Tasks.Issue.Changes.StopWorker do
   @moduledoc """
-  After-action hook for the `:close` action: stop every worker GenServer
-  registered under this task, including synthetic sub-worker keys
-  (`<task_id>:fixpass`, `<task_id>:conflict`, `<task_id>#review`, etc).
+  After-action hook for the `:close` action: stop every process registered
+  under this task — its run, the ReviewGate sessions (`<task_id>#review`, ...)
+  and its Watchdog (`<task_id>:watchdog`) — except the caller itself.
 
   Best-effort: when no worker is running, silently skip. Any failure to
   stop a worker is logged but never propagated — the `:close` action must
@@ -37,10 +37,14 @@ defmodule Arbiter.Tasks.Issue.Changes.StopWorker do
   # any worker that doesn't answer within the timeout — e.g. one mid-merge
   # in `handle_call({:open_mr, ...})`). Registry enumeration needs no call
   # to the worker process itself, so a busy sub-worker is still swept.
-  # `all_for/1` owns the synthetic-key matching rule (`:fixpass`, `#review`,
+  # `all_for/1` owns the synthetic-key matching rule (`#review`, `:watchdog`,
   # ...) shared with CleanupWorktree's liveness re-check.
   defp stop_all(task_id) do
     WorkerRegistry.all_for(task_id)
+    # bd-741sid: the ticket's Watchdog closes the ticket itself when its PR
+    # merges, and a process cannot stop itself from inside its own call — it
+    # stops on its own once the close returns.
+    |> Enum.reject(fn {_registry_key, pid} -> pid == self() end)
     |> Enum.each(fn {registry_key, pid} -> stop(pid, registry_key) end)
   rescue
     e ->

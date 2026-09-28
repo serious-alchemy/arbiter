@@ -8,6 +8,10 @@ defmodule Arbiter.Worker.WatchdogReviewedShaTest do
   process: the whole point of the fix is that a `:stale_reviewed_sha` re-reads
   the recorded stamp instead of trusting a value memoised polls ago. That needs
   a shared (non-async) sandbox, which `Arbiter.DataCase` gives us.
+
+  bd-741sid: the Watchdog is keyed by the ticket and drives it; no worker is
+  paired with it. What a parked worker's status used to say is read off the
+  Watchdog's own announcements (`Watchdog.subscribe/1`) and the ticket row.
   """
   # async: false — the sandbox is shared with the Watchdog GenServer's process,
   # and the StubMerger / StubAutoResumeDispatcher Agents are singletons.
@@ -16,7 +20,6 @@ defmodule Arbiter.Worker.WatchdogReviewedShaTest do
   alias Arbiter.Tasks.Issue
   alias Arbiter.Test.StubAutoResumeDispatcher
   alias Arbiter.Test.StubMerger
-  alias Arbiter.Worker
   alias Arbiter.Worker.Watchdog
 
   # The net diff the reviewer approved.
@@ -85,8 +88,9 @@ defmodule Arbiter.Worker.WatchdogReviewedShaTest do
     })
   end
 
-  # A persisted task plus a :running worker attached to it.
-  defp running_task(attrs) do
+  # A persisted task — the ticket the Watchdog is keyed by and drives.
+  # bd-741sid: no worker is attached; the run that opened the PR has ended.
+  defp reviewed_task(attrs) do
     ws = workspace()
 
     task =
@@ -98,17 +102,14 @@ defmodule Arbiter.Worker.WatchdogReviewedShaTest do
         )
       )
 
-    {:ok, pid} = Worker.start(task_id: task.id, repo: "arbiter")
-    :ok = Worker.advance(pid, :implement)
-    on_exit(fn -> stop_quietly(pid) end)
-
-    {pid, task, ws}
+    {task, ws}
   end
 
-  defp start_watchdog(worker_pid, task_id, mr_ref, ws, opts) do
+  # Subscribes to the ticket's Watchdog outcomes before starting it, so no
+  # announcement can be missed.
+  defp start_watchdog(task_id, mr_ref, ws, opts) do
     base = [
       task_id: task_id,
-      worker: worker_pid,
       mr_ref: mr_ref,
       adapter: StubMerger,
       workspace: ws,
@@ -118,10 +119,23 @@ defmodule Arbiter.Worker.WatchdogReviewedShaTest do
       auto_resume_dispatcher: StubAutoResumeDispatcher
     ]
 
+    :ok = Watchdog.subscribe(task_id)
     {:ok, wpid} = Watchdog.start(Keyword.merge(base, opts))
     on_exit(fn -> stop_quietly(wpid) end)
     wpid
   end
+
+  # bd-741sid: the merge finishes the ticket (`PullRequest.merged/2`), where it
+  # used to complete the worker paired with the Watchdog.
+  defp assert_merged(task_id, timeout \\ 2_000) do
+    assert_receive {:watchdog, ^task_id, {:merged, _}}, timeout
+    assert Ash.get!(Issue, task_id).state == :closed
+  end
+
+  # bd-741sid: an unreviewed head is announced as it is handed to a review
+  # round, where it used to be the paired worker's failure reason.
+  defp assert_unreviewed_head(task_id, head, timeout \\ 2_000),
+    do: assert_receive({:watchdog, ^task_id, {:unreviewed_head, ^head}}, timeout)
 
   defp wait_until(fun, timeout \\ 2_000) do
     deadline = System.monotonic_time(:millisecond) + timeout
@@ -150,15 +164,15 @@ defmodule Arbiter.Worker.WatchdogReviewedShaTest do
       # was started back when sha-1 was the reviewed head and memoised it —
       # which on a via_review_gate lane it would hold forever, because the
       # effective outcome never lapses from :approved.
-      {pid, task, ws} = running_task(%{last_reviewed_sha: "sha-2"})
+      {task, ws} = reviewed_task(%{last_reviewed_sha: "sha-2"})
 
       StubMerger.queue_get("!rsha1", [
         %{status: :open, approved: true, head_sha: "sha-2", base_ref: "main"}
       ])
 
-      start_watchdog(pid, task.id, "!rsha1", ws, last_reviewed_sha: "sha-1")
+      start_watchdog(task.id, "!rsha1", ws, last_reviewed_sha: "sha-1")
 
-      wait_until(fn -> Worker.state(pid).status == :completed end)
+      assert_merged(task.id)
 
       assert StubMerger.last_merge() == {"!rsha1", "sha-2"},
              "the merge must be pinned to the head the round-2 reviewer approved"
@@ -171,7 +185,7 @@ defmodule Arbiter.Worker.WatchdogReviewedShaTest do
 
   describe "a head that only merged the base branch in" do
     test "merges, pinned to the new head, when the net diff is unchanged" do
-      {pid, task, ws} = running_task(%{last_reviewed_sha: "sha-reviewed"})
+      {task, ws} = reviewed_task(%{last_reviewed_sha: "sha-reviewed"})
 
       StubMerger.set_diff("!rsha2", "sha-reviewed", @reviewed_diff)
       StubMerger.set_diff("!rsha2", "sha-merged", @merge_from_main_diff)
@@ -180,9 +194,9 @@ defmodule Arbiter.Worker.WatchdogReviewedShaTest do
         %{status: :open, approved: true, head_sha: "sha-merged", base_ref: "main"}
       ])
 
-      start_watchdog(pid, task.id, "!rsha2", ws, last_reviewed_sha: "sha-reviewed")
+      start_watchdog(task.id, "!rsha2", ws, last_reviewed_sha: "sha-reviewed")
 
-      wait_until(fn -> Worker.state(pid).status == :completed end)
+      assert_merged(task.id)
 
       assert StubMerger.last_merge() == {"!rsha2", "sha-merged"}
       assert StubAutoResumeDispatcher.resume_count() == 0
@@ -194,7 +208,7 @@ defmodule Arbiter.Worker.WatchdogReviewedShaTest do
     end
 
     test "does NOT merge when the merge resolved a conflict with new content" do
-      {pid, task, ws} = running_task(%{last_reviewed_sha: "sha-reviewed"})
+      {task, ws} = reviewed_task(%{last_reviewed_sha: "sha-reviewed"})
 
       StubMerger.set_diff("!rsha3", "sha-reviewed", @reviewed_diff)
       StubMerger.set_diff("!rsha3", "sha-resolved", @conflict_resolved_diff)
@@ -203,7 +217,7 @@ defmodule Arbiter.Worker.WatchdogReviewedShaTest do
         %{status: :open, approved: true, head_sha: "sha-resolved", base_ref: "main"}
       ])
 
-      start_watchdog(pid, task.id, "!rsha3", ws, last_reviewed_sha: "sha-reviewed")
+      start_watchdog(task.id, "!rsha3", ws, last_reviewed_sha: "sha-reviewed")
 
       wait_until(fn -> StubAutoResumeDispatcher.resume_count() == 1 end)
 
@@ -212,7 +226,7 @@ defmodule Arbiter.Worker.WatchdogReviewedShaTest do
     end
 
     test "does NOT merge when the diffs cannot be read at all (fails closed)" do
-      {pid, task, ws} = running_task(%{last_reviewed_sha: "sha-reviewed"})
+      {task, ws} = reviewed_task(%{last_reviewed_sha: "sha-reviewed"})
 
       # No diffs registered: the stub answers "" for both, which is not
       # evidence of equivalence.
@@ -220,7 +234,7 @@ defmodule Arbiter.Worker.WatchdogReviewedShaTest do
         %{status: :open, approved: true, head_sha: "sha-unknown", base_ref: "main"}
       ])
 
-      start_watchdog(pid, task.id, "!rsha4", ws, last_reviewed_sha: "sha-reviewed")
+      start_watchdog(task.id, "!rsha4", ws, last_reviewed_sha: "sha-reviewed")
 
       wait_until(fn -> StubAutoResumeDispatcher.resume_count() == 1 end)
       assert StubMerger.merge_count("!rsha4") == 0
@@ -231,7 +245,7 @@ defmodule Arbiter.Worker.WatchdogReviewedShaTest do
 
   describe "a head that advanced with authored content (Cause A)" do
     test "is routed back for a review round instead of retried forever" do
-      {pid, task, ws} = running_task(%{last_reviewed_sha: "sha-reviewed"})
+      {task, ws} = reviewed_task(%{last_reviewed_sha: "sha-reviewed"})
 
       StubMerger.set_diff("!rsha5", "sha-reviewed", @reviewed_diff)
       StubMerger.set_diff("!rsha5", "sha-fixpass", @conflict_resolved_diff)
@@ -240,7 +254,7 @@ defmodule Arbiter.Worker.WatchdogReviewedShaTest do
         %{status: :open, approved: true, head_sha: "sha-fixpass", base_ref: "main"}
       ])
 
-      wpid = start_watchdog(pid, task.id, "!rsha5", ws, last_reviewed_sha: "sha-reviewed")
+      wpid = start_watchdog(task.id, "!rsha5", ws, last_reviewed_sha: "sha-reviewed")
       ref = Process.monitor(wpid)
 
       # The merge loop is TERMINAL on a stale head: the Watchdog stops rather
@@ -256,10 +270,12 @@ defmodule Arbiter.Worker.WatchdogReviewedShaTest do
       # One poll's worth of forge traffic, not an unbounded retry storm.
       assert StubMerger.get_count("!rsha5") <= 2
 
-      # bd-92mx1m: the worker was failed only so the review round can replace
-      # it — a slot hand-off, not a park — so the approved task keeps its slot
-      # and the round re-enters it uncapped.
-      assert Worker.state(pid).meta[:slot_handoff] == true
+      # bd-741sid: no run is failed to make way for the review round, so there
+      # is no bd-92mx1m slot hand-off — `ResumeSlot` admits the round. The head
+      # is announced as it goes to review, and the attempt is recorded on the
+      # ticket's lane so the auto-resume budget binds across Watchdogs.
+      assert_unreviewed_head(task.id, "sha-fixpass")
+      assert Ash.get!(Issue, task.id).merge_watch["auto_resumes"] == 1
     end
   end
 
@@ -267,14 +283,14 @@ defmodule Arbiter.Worker.WatchdogReviewedShaTest do
 
   describe "when neither a re-review nor a review round is possible" do
     test "escalates exactly once and stops" do
-      {pid, task, ws} = running_task(%{last_reviewed_sha: "sha-reviewed"})
+      {task, ws} = reviewed_task(%{last_reviewed_sha: "sha-reviewed"})
 
       StubMerger.queue_get("!rsha6", [
         %{status: :open, approved: true, head_sha: "sha-foreign", base_ref: "main"}
       ])
 
       wpid =
-        start_watchdog(pid, task.id, "!rsha6", ws,
+        start_watchdog(task.id, "!rsha6", ws,
           last_reviewed_sha: "sha-reviewed",
           # No auto-resume budget: there is no path back to review.
           max_auto_resumes: 0
@@ -304,7 +320,7 @@ defmodule Arbiter.Worker.WatchdogReviewedShaTest do
   # ---- bd-ch9pmk / #1614: the forge's view of the PR lags our own push ------
 
   describe "a fix round that pushed commits, approved by a later round" do
-    test "waits for the forge to show the pushed head instead of failing the worker" do
+    test "waits for the forge to show the pushed head instead of sending it back to review" do
       # The incident (bd-4fbpto / arbiter #1607, 2026-09-13T01:58Z):
       #
       #   21:58:11  ReviewGate: stamped reviewed SHA 8e7a69ea (the fix-round head)
@@ -315,7 +331,7 @@ defmodule Arbiter.Worker.WatchdogReviewedShaTest do
       # with the push five seconds earlier and still reported the pre-fix-round
       # head. The guard read that as "the branch advanced past the reviewed
       # commit" and burned a full premium re-review on already-approved code.
-      {pid, task, ws} = running_task(%{last_reviewed_sha: "sha-fix2"})
+      {task, ws} = reviewed_task(%{last_reviewed_sha: "sha-fix2"})
 
       StubMerger.queue_get("!rsha7", [
         # Poll 1: still the pre-fix-round head the round-1 reviewer saw.
@@ -324,12 +340,12 @@ defmodule Arbiter.Worker.WatchdogReviewedShaTest do
         %{status: :open, approved: true, head_sha: "sha-fix2", base_ref: "main"}
       ])
 
-      start_watchdog(pid, task.id, "!rsha7", ws,
+      start_watchdog(task.id, "!rsha7", ws,
         last_reviewed_sha: "sha-fix2",
         local_head_sha: "sha-fix2"
       )
 
-      wait_until(fn -> Worker.state(pid).status == :completed end)
+      assert_merged(task.id)
 
       assert StubMerger.last_merge() == {"!rsha7", "sha-fix2"},
              "the merge must be pinned to the fix-round head the reviewer approved"
@@ -343,14 +359,14 @@ defmodule Arbiter.Worker.WatchdogReviewedShaTest do
     test "gives up waiting after the grace and still routes an unreviewed head back to review" do
       # The lag wait is bounded: a forge that never reports our pushed head
       # must not park the lane forever.
-      {pid, task, ws} = running_task(%{last_reviewed_sha: "sha-never-seen"})
+      {task, ws} = reviewed_task(%{last_reviewed_sha: "sha-never-seen"})
 
       StubMerger.queue_get("!rsha10", [
         %{status: :open, approved: true, head_sha: "sha-foreign", base_ref: "main"}
       ])
 
       wpid =
-        start_watchdog(pid, task.id, "!rsha10", ws,
+        start_watchdog(task.id, "!rsha10", ws,
           last_reviewed_sha: "sha-never-seen",
           local_head_sha: "sha-never-seen"
         )
@@ -365,7 +381,7 @@ defmodule Arbiter.Worker.WatchdogReviewedShaTest do
 
   describe "a commit pushed AFTER the approve round (Cause A)" do
     test "still trips the guard once the forge has confirmed the approved head" do
-      {pid, task, ws} = running_task(%{last_reviewed_sha: "sha-approved"})
+      {task, ws} = reviewed_task(%{last_reviewed_sha: "sha-approved"})
 
       StubMerger.set_diff("!rsha8", "sha-approved", @reviewed_diff)
       StubMerger.set_diff("!rsha8", "sha-fixpass", @conflict_resolved_diff)
@@ -385,7 +401,7 @@ defmodule Arbiter.Worker.WatchdogReviewedShaTest do
       ])
 
       wpid =
-        start_watchdog(pid, task.id, "!rsha8", ws,
+        start_watchdog(task.id, "!rsha8", ws,
           last_reviewed_sha: "sha-approved",
           local_head_sha: "sha-approved"
         )
@@ -402,29 +418,35 @@ defmodule Arbiter.Worker.WatchdogReviewedShaTest do
     end
   end
 
-  describe "the failure reason" do
+  # bd-741sid: what used to be the paired worker's failure reason is the
+  # Watchdog's `{:unreviewed_head, head}` announcement, and the review round's
+  # briefing names the same head.
+  describe "the unreviewed head it reports" do
     test "names the live PR head, not the head read on an earlier poll" do
-      {pid, task, ws} = running_task(%{last_reviewed_sha: "sha-reviewed"})
+      {task, ws} = reviewed_task(%{last_reviewed_sha: "sha-reviewed"})
 
       StubMerger.queue_get("!rsha9", [
         # The poll that trips the guard.
         %{status: :open, approved: true, head_sha: "sha-stale", base_ref: "main"},
         # The head as the forge reports it when the guard re-reads before
-        # failing the worker.
+        # routing the head to review.
         %{status: :open, approved: true, head_sha: "sha-live", base_ref: "main"}
       ])
 
-      start_watchdog(pid, task.id, "!rsha9", ws,
+      start_watchdog(task.id, "!rsha9", ws,
         last_reviewed_sha: "sha-reviewed",
         # The forge already showed us our own pushed head, so nothing here is
         # push lag — the branch really did move.
         local_head_sha: "sha-stale"
       )
 
-      wait_until(fn -> Worker.state(pid).status == :failed end)
+      # The reason must name the head the PR actually sits at.
+      assert_unreviewed_head(task.id, "sha-live")
 
-      assert Worker.state(pid).meta.failure_reason == {:unreviewed_head, "sha-live"},
-             "the reason must name the head the PR actually sits at"
+      wait_until(fn -> StubAutoResumeDispatcher.resume_count() == 1 end)
+      assert [%{briefing: briefing}] = StubAutoResumeDispatcher.resumes()
+      assert briefing =~ "sha-live"
+      refute briefing =~ "sha-stale"
 
       assert StubMerger.merge_count("!rsha9") == 0
     end

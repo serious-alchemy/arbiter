@@ -95,6 +95,7 @@ defmodule ArbiterWeb.BoardLive do
   alias Arbiter.Board.Autopilot
   alias Arbiter.Board.Snapshot
   alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.PullRequest
   alias Arbiter.Worker
   alias Arbiter.Worker.ResumeSlot
   alias Arbiter.Worker.Watchdog
@@ -375,11 +376,11 @@ defmodule ArbiterWeb.BoardLive do
 
   # Forward, out of Waiting. One gesture, two meanings, because the column
   # holds two kinds of card and the card — not the drop target — says which:
-  # a *parked* worker is being told "carry on", a worker already sitting on a
-  # merge request is being pulled off it.
+  # a *parked* worker is being told "carry on", a Merging ticket is being
+  # pulled out of the merge queue.
   defp dropped_waiting(socket, id, "closed") do
     case waiting_status(socket, id) do
-      :awaiting_review -> pull_from_merge(socket, id)
+      :merging -> pull_from_merge(socket, id)
       _ -> proceed(socket, id)
     end
   end
@@ -436,12 +437,23 @@ defmodule ArbiterWeb.BoardLive do
   end
 
   # Off the merge request. The merge request itself is not touched — what
-  # stops is the worker sitting on it — so this is reversible by re-opening
-  # the task's merge from the task page.
+  # stops is what would merge it — so this is reversible by restarting its
+  # watchdog from the worker page.
+  # bd-741sid: no worker is resident on an open PR — the ticket's Watchdog is
+  # what keeps it in the merge queue. The pull stops it and is recorded on the
+  # ticket, so no automatic restart undoes it (`PullRequest.pull/1`).
   defp pull_from_merge(socket, id) do
-    socket
-    |> stop_worker(id)
-    |> put_flash(:info, "Pulled #{id} out of the merge queue. Its merge request is untouched.")
+    case PullRequest.pull(id) do
+      :ok ->
+        put_flash(
+          socket,
+          :info,
+          "Pulled #{id} out of the merge queue. Its merge request is untouched."
+        )
+
+      {:error, reason} ->
+        put_flash(socket, :error, "#{id} could not be pulled out: #{inspect(reason)}")
+    end
     |> refresh_board()
   end
 
@@ -661,8 +673,9 @@ defmodule ArbiterWeb.BoardLive do
   # operator there instead of to a screen that will only repeat the lie that
   # the MR is being polled.
   defp waiting_action_href(%{status: :awaiting_verification} = card), do: ~p"/tasks/#{card.id}"
+  defp waiting_action_href(%{merge_pulled: true} = card), do: ~p"/workers/#{card.id}"
   defp waiting_action_href(%{watchdog_alive: false} = card), do: ~p"/workers/#{card.id}"
-  defp waiting_action_href(%{status: :awaiting_review}), do: ~p"/merge_queue"
+  defp waiting_action_href(%{status: :merging}), do: ~p"/merge_queue"
   defp waiting_action_href(card), do: ~p"/workers/#{card.id}"
 
   # ---- formatting -----------------------------------------------------------
@@ -1410,7 +1423,7 @@ defmodule ArbiterWeb.BoardLive do
 
   # The one live line on a Waiting card: why the worker stopped, or — for one
   # already sitting on a merge request — which request.
-  defp waiting_activity(%{status: :awaiting_review} = card), do: merge_activity(card)
+  defp waiting_activity(%{status: :merging} = card), do: merge_activity(card)
   defp waiting_activity(%{reason: reason}) when is_binary(reason) and reason != "", do: reason
   defp waiting_activity(_card), do: "waiting"
 
@@ -1437,20 +1450,25 @@ defmodule ArbiterWeb.BoardLive do
 
   defp with_collapsed(note, _card), do: note
 
-  # bd-8jixav: a Watchdog is a `:temporary` child — when it dies the worker
-  # stays parked on a genuinely open MR that nothing polls, and every other
+  # bd-8jixav: a Watchdog is a `:temporary` child — when it dies the ticket
+  # stays Merging on a genuinely open MR that nothing polls, and every other
   # field on the card keeps reading like an ordinary review wait. This note is
   # the whole difference between "the machine is working on it" and "this will
   # sit here forever", so it outranks the merge status it replaces.
+  #
+  # bd-741sid: except when the operator pulled it out of the merge queue.
+  # Then nothing polling it is the point, not an alarm.
+  defp waiting_note(%{merge_pulled: true}), do: "pulled from merge queue"
   defp waiting_note(%{watchdog_alive: false}), do: "no watchdog polling"
-  defp waiting_note(%{status: :awaiting_review} = card), do: merge_status_text(card.merger_status)
+  defp waiting_note(%{status: :merging} = card), do: merge_status_text(card.merger_status)
   defp waiting_note(%{status: :failed}), do: "failed"
   defp waiting_note(%{status: :in_progress}), do: "no live worker"
   defp waiting_note(%{status: :awaiting_verification}), do: "restart & observe"
   defp waiting_note(_card), do: "parked"
 
+  defp waiting_action(%{merge_pulled: true}), do: "restart watchdog"
   defp waiting_action(%{watchdog_alive: false}), do: "restart watchdog"
-  defp waiting_action(%{status: :awaiting_review}), do: "merge queue"
+  defp waiting_action(%{status: :merging}), do: "merge queue"
   defp waiting_action(%{status: :failed}), do: "retry"
   defp waiting_action(%{status: :in_progress}), do: "resume"
   defp waiting_action(%{status: :awaiting_verification}), do: "verify"

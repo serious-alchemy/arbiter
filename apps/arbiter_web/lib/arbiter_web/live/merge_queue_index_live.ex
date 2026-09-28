@@ -5,22 +5,24 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
 
   Three tabs, each its own slice of the merge lifecycle:
 
-    * **Queued** — a worker parked at `:awaiting_review`: an open MR
-      integrating via `Arbiter.Mergers` (Direct/GitLab/GitHub), with the
-      Watchdog's last poll result. Sourced live from `Worker.list_children/0`,
-      paged in memory, ordered longest-waiting first. Each row anatomy is
-      queue position / task id / title / PR link / check dots / time in
-      queue.
-    * **Landed today** — every `Arbiter.Workers.Run` that reached `:completed`
-      (its MR merged) since UTC midnight, rendered as a 3-column grid of
-      muted `TaskCard`s.
+    * **Queued** — every Merging ticket: an open PR integrating via
+      `Arbiter.Mergers` (Direct/GitLab/GitHub), with the last poll result its
+      Watchdog recorded on the ticket (bd-741sid — no worker stays resident
+      on an open PR). Paged in memory, ordered longest-waiting first. Each row
+      anatomy is queue position / task id / title / PR link / check dots /
+      time in queue.
+    * **Landed today** — every ticket whose PR merged since UTC midnight: it
+      closed as completed, or is awaiting its post-merge verification.
+      Rendered as a 3-column grid of muted `TaskCard`s. Not runs: the run that
+      opens a PR completes when the PR opens.
     * **Rejected** — a rejected/closed MR never accumulates a list here: the
       workflow reopens the task it belongs to, so it leaves the merge queue's
       domain entirely. The tab is a single `EmptyState` explaining that.
 
-  Each entry links to the worker detail page — the worker IS the merge-queue
-  entry, so its detail page is the entry's detail page. Re-renders on
-  `:worker_lifecycle` events and a 1s tick.
+  Each entry links to the worker detail page, which carries the ticket's PR
+  panel and its Watchdog actions. Re-reads on ticket lifecycle events and on
+  every recorded poll (`Arbiter.Tasks.PullRequest.topic/0`), and advances its
+  clock on a 1s tick.
   """
 
   use ArbiterWeb, :live_view
@@ -28,10 +30,9 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
   require Ash.Query
 
   alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.PullRequest
   alias Arbiter.Tasks.Workspace
-  alias Arbiter.Worker
   alias Arbiter.Worker.Watchdog
-  alias Arbiter.Workers.Run
   alias Arbiter.Workflows.MergeQueueSupervisor
   alias ArbiterWeb.CoreComponents.Core
   alias ArbiterWeb.CoreComponents.Domain
@@ -39,7 +40,7 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
   alias ArbiterWeb.CoreComponents.Navigation
   alias ArbiterWeb.Paging
 
-  @workers_topic "workers"
+  @tasks_topic "tasks"
   @tabs ~w(queued landed rejected)
   @landed_page_size 24
 
@@ -48,7 +49,8 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
     live? = connected?(socket)
 
     if live? do
-      Phoenix.PubSub.subscribe(Arbiter.PubSub, @workers_topic)
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, @tasks_topic)
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, PullRequest.topic())
       :timer.send_interval(1000, self(), :tick)
     end
 
@@ -91,17 +93,18 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
   end
 
   @impl true
-  def handle_info({:worker_lifecycle, _event, _snap}, socket),
+  def handle_info({:task_lifecycle, _event, _task}, socket),
+    do: {:noreply, fetch_merge_queue(socket)}
+
+  def handle_info({:pull_request, _event, _task_id}, socket),
     do: {:noreply, fetch_merge_queue(socket)}
 
   def handle_info(:tick, socket), do: {:noreply, assign(socket, :now, DateTime.utc_now())}
   def handle_info(_msg, socket), do: {:noreply, socket}
 
-  # The worker walk (`Worker.list_children/0`'s GenServer fan-out), the
-  # queued-tab's workspace/title/queue-position reads, and the landed-tab's
-  # paginated `Run` query all arrive by `start_async/3` (bd-aebiwf): the dead
-  # render draws a skeleton and reads nothing, and a slow or wedged worker
-  # can no longer block the page.
+  # The Merging tickets, the queued-tab's workspace/queue-position reads, and
+  # the landed-tab's paginated ticket query all arrive by `start_async/3`
+  # (bd-aebiwf): the dead render draws a skeleton and reads nothing.
   @impl true
   def handle_async(:merge_queue, {:ok, data}, socket) do
     # `merge_queue_request_tab` pins the tab this particular load was fetched
@@ -174,15 +177,14 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
   defp load_error(reason), do: Exception.format_exit(reason)
 
   defp load_merge_queue(tab, page) do
-    children = list_children()
-    queued_count = Enum.count(children, &(&1.status == :awaiting_review))
+    queued = queued_tickets()
 
     tab
-    |> load_tab(children, page)
-    |> Map.put(:queued_count, queued_count)
+    |> load_tab(queued, page)
+    |> Map.put(:queued_count, length(queued))
   end
 
-  defp load_tab("landed", _children, page) do
+  defp load_tab("landed", _queued, page) do
     result = Paging.paginate(landed_today_query(), page, @landed_page_size)
 
     %{
@@ -195,7 +197,7 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
     }
   end
 
-  defp load_tab("rejected", _children, page) do
+  defp load_tab("rejected", _queued, page) do
     %{
       entries: [],
       landed: [],
@@ -206,10 +208,10 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
     }
   end
 
-  defp load_tab(_queued, children, page) do
+  defp load_tab(_queued_tab, queued, page) do
     workspaces_by_id = index_workspaces()
     queue_positions = queue_positions_by_task_id()
-    workers = queued_workers(children) |> Enum.sort_by(& &1.since, {:asc, DateTime})
+    workers = Enum.sort_by(queued, & &1.since, {:asc, DateTime})
 
     {_next_rank, wait_ranks} =
       Enum.reduce(workers, {1, %{}}, fn p, {rank, acc} ->
@@ -252,21 +254,16 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
 
   # ---- Queued ----
 
-  defp queued_workers(children) do
-    workers = Enum.filter(children, &(&1.status == :awaiting_review))
-    titles_by_id = titles_for(Enum.map(workers, & &1.task_id))
-
-    Enum.map(workers, fn p ->
-      meta = p.meta || %{}
-
+  defp queued_tickets do
+    Enum.map(PullRequest.merging_tickets(), fn ticket ->
       %{
-        task_id: p.task_id,
-        title: Map.get(titles_by_id, p.task_id, p.task_id),
-        workspace_id: p.workspace_id,
-        mr_ref: p.mr_ref,
-        merger_url: p.merger_url,
-        merger_status: Map.get(meta, :last_merger_status),
-        since: p.step_started_at || p.started_at
+        task_id: ticket.id,
+        title: ticket.title || ticket.id,
+        workspace_id: ticket.workspace_id,
+        mr_ref: ticket.pr_ref,
+        merger_url: ticket.merger_url,
+        merger_status: PullRequest.merger_status(ticket),
+        since: ticket.updated_at || ticket.created_at
       }
     end)
   end
@@ -283,24 +280,6 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
     _ -> %{}
   catch
     :exit, _ -> %{}
-  end
-
-  defp titles_for([]), do: %{}
-
-  defp titles_for(task_ids) do
-    Issue
-    |> Ash.Query.filter(id in ^task_ids)
-    |> Ash.Query.select([:id, :title])
-    |> Ash.read!()
-    |> Map.new(&{&1.id, &1.title})
-  rescue
-    _ -> %{}
-  end
-
-  defp list_children do
-    Worker.list_children()
-  rescue
-    _ -> []
   end
 
   defp index_workspaces do
@@ -327,12 +306,13 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
   defp landed_today_query do
     today = today_start_utc()
 
-    Run
+    Issue
     |> Ash.Query.filter(
-      status == :completed and worker_type == :main and not is_nil(mr_ref) and
-        completed_at >= ^today
+      not is_nil(pr_ref) and
+        ((state == :closed and close_reason == :completed and closed_at >= ^today) or
+           (state == :verifying and awaiting_verification_at >= ^today))
     )
-    |> Ash.Query.sort(completed_at: :desc)
+    |> Ash.Query.sort(updated_at: :desc)
   end
 
   defp landed_today_count do
@@ -343,20 +323,17 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
     :exit, _ -> 0
   end
 
-  defp landed_task_card_attrs(%Run{} = run) do
+  defp landed_task_card_attrs(%Issue{} = ticket) do
     %{
-      id: run.task_id,
-      title: run.task_title || run.task_id,
-      footer: landed_footer(run),
-      copy_dom_id: "copy-id-landed-#{run.id}"
+      id: ticket.id,
+      title: ticket.title || ticket.id,
+      footer: landed_footer(ticket.awaiting_verification_at || ticket.closed_at),
+      copy_dom_id: "copy-id-landed-#{ticket.id}"
     }
   end
 
-  defp landed_footer(%Run{completed_at: nil}), do: nil
-
-  defp landed_footer(%Run{completed_at: completed_at}) do
-    "merged #{Calendar.strftime(completed_at, "%H:%M")} UTC"
-  end
+  defp landed_footer(nil), do: nil
+  defp landed_footer(%DateTime{} = at), do: "merged #{Calendar.strftime(at, "%H:%M")} UTC"
 
   # ---- view helpers ----
 

@@ -17,7 +17,7 @@ defmodule Arbiter.Tasks.Lifecycle.View do
       subordinate fix / conflict pass under the same id, and any reviewer /
       implementer round pointing back at it;
     * `:merger_status` — the PR's last `Arbiter.Mergers.get/1` result,
-      defaulting to the one the author run last recorded;
+      defaulting to the one the ticket's Watchdog recorded on its row;
     * `:now` — for the interim board's dispatch grace (`board_column/2`).
 
   ## Column
@@ -61,6 +61,7 @@ defmodule Arbiter.Tasks.Lifecycle.View do
 
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Lifecycle
+  alias Arbiter.Tasks.PullRequest
   alias Arbiter.Worker.Phase
   alias Arbiter.Worker.Watchdog
 
@@ -269,7 +270,7 @@ defmodule Arbiter.Tasks.Lifecycle.View do
   # ---- step ---------------------------------------------------------------
 
   defp step(:in_progress, ticket, runs, _ctx), do: active_step(Map.get(ticket, :id), runs)
-  defp step(:merging, ticket, runs, ctx), do: merging_step(ticket, runs, ctx)
+  defp step(:merging, ticket, _runs, ctx), do: merging_step(ticket, ctx)
   defp step(_column, _ticket, _runs, _ctx), do: nil
 
   defp active_step(ticket_id, runs) do
@@ -291,8 +292,8 @@ defmodule Arbiter.Tasks.Lifecycle.View do
     |> Enum.find(&(&1 in @active_steps))
   end
 
-  defp merging_step(ticket, runs, ctx) do
-    status = merger_status(ticket, runs, ctx)
+  defp merging_step(ticket, ctx) do
+    status = merger_status(ticket, ctx)
     raw = Watchdog.block_reason(status)
 
     cond do
@@ -303,16 +304,12 @@ defmodule Arbiter.Tasks.Lifecycle.View do
     end
   end
 
-  defp merger_status(ticket, runs, ctx) do
+  # The PR's last poll: `ctx` wins, then what the ticket's Watchdog recorded on
+  # its row (bd-741sid).
+  defp merger_status(ticket, ctx) do
     case Map.get(ctx, :merger_status) do
-      %{} = status ->
-        status
-
-      _ ->
-        case primary(runs, Map.get(ticket, :id)) do
-          nil -> %{}
-          author -> meta(author, :last_merger_status) || %{}
-        end
+      %{} = status -> status
+      _ -> PullRequest.merger_status(ticket) || %{}
     end
   end
 

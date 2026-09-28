@@ -40,8 +40,7 @@ defmodule Arbiter.Worker.DispatchResumeSlotTest do
 
   # Task A ran and parked (its worker lingers :failed), and its PR opened: it
   # is Merging, which holds no slot. `release: nil` keeps it In progress.
-  defp park_a(a, fail_opts \\ [], release \\ :merging),
-    do: ResumeSlotFixture.park!(a, fail_opts, release)
+  defp park_a(a, release \\ :merging), do: ResumeSlotFixture.park!(a, release)
 
   # Task B was admitted into the slot A freed: In progress.
   defp admit_b(ws, b), do: ResumeSlotFixture.admit!(ws, b)
@@ -225,7 +224,7 @@ defmodule Arbiter.Worker.DispatchResumeSlotTest do
     # holds its own slot, whatever cut its run off, so the reconciler resumes
     # it for real at a full cap rather than deferring it.
     test "resumes a ticket In progress uncapped", %{ws: ws, a: a, b: b} do
-      first = park_a(a, [], nil)
+      first = park_a(a, nil)
       admit_b(ws, b)
       Worker.stop(a.id, :normal)
       refute Process.alive?(first.worker_pid)
@@ -248,12 +247,13 @@ defmodule Arbiter.Worker.DispatchResumeSlotTest do
   end
 
   describe "a resume of a task that still holds its slot" do
-    # Acceptance 1: the fix-round shape. The ReviewGate fails the author only
-    # so the implementer round can replace it (`slot_handoff`); the ticket is
-    # still In progress, so the round spawns even though the cap is full —
-    # #1969/#1995's no-deadlock rule.
+    # Acceptance 1: the fix-round shape. The ReviewGate rejected the author and
+    # its implementer round replaces it; the ticket is still In progress, so
+    # the round spawns even though the cap is full — #1969/#1995's no-deadlock
+    # rule. (bd-741sid: the ticket's state holds the slot; there is no longer a
+    # `slot_handoff` marker on the failed author.)
     test "a ReviewGate fix round spawns at a full cap", %{ws: ws, a: a, b: b} do
-      first = park_a(a, [slot_handoff: true], nil)
+      first = park_a(a, nil)
       admit_b(ws, b)
 
       assert {:ok, result} =

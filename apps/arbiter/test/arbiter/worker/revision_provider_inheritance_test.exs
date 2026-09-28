@@ -54,6 +54,11 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
     :ok
   end
 
+  defp await_exit(pid) do
+    ref = Process.monitor(pid)
+    assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 5_000
+  end
+
   defp wait_until(fun, timeout \\ 5_000) do
     deadline = System.monotonic_time(:millisecond) + timeout
     do_wait(fun, deadline)
@@ -803,7 +808,8 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
       assert fix_run.provider == "gemini"
       assert fix_run.worker_type == :fix_pass
 
-      Worker.stop(pid, :normal)
+      # bd-741sid: a pass that finishes ends its own run.
+      await_exit(pid)
     end
   end
 
@@ -881,7 +887,8 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
       assert conflict_run.provider == "gemini"
       assert conflict_run.worker_type == :conflict
 
-      Worker.stop(pid, :normal)
+      # bd-741sid: a pass that finishes ends its own run.
+      await_exit(pid)
     end
   end
 end

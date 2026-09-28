@@ -19,12 +19,17 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
   something it can fix (an infrastructure/flake failure, or a failure it can't
   reproduce) it escalates via the workspace mailbox rather than thrashing.
 
-  ## Registry slot
+  ## An ordinary run (bd-741sid)
 
-  The original work worker is still registered under `task_id` (parked at
-  `:awaiting_review`, watched by the Watchdog). The fix-pass worker registers under
-  `task_id <> ":fixpass"` so `Worker.start` doesn't collide with it — exactly the
-  pattern `Arbiter.Workflows.MergeQueue.ConflictResolver` uses for `:conflict`.
+  The implementer's run ended when it opened the PR; the ticket's Watchdog is
+  what is watching it. So the fix pass is an ordinary run on the ticket: it
+  registers under the ticket id — the single-active-run rule (bd-8tjcms) still
+  refuses it while another run is working the ticket — and takes the ticket
+  back In progress. A Merging ticket holds no slot, so the pass is admitted
+  like an automatic resume (`Arbiter.Workflows.MergeQueue.PassAdmission`): it
+  starts in a free slot, or waits in the scheduler's fast lane, ahead of every
+  Ready ticket, until one frees. When it finishes, the ticket goes back to
+  Merging (`Arbiter.Worker`'s pass completion).
 
   ## Merger/tracker-agnostic
 
@@ -52,16 +57,13 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
   alias Arbiter.Worker.Dispatch
   alias Arbiter.Worker.Worktree
   alias Arbiter.Workers.Run
+  alias Arbiter.Workflows.MergeQueue.PassAdmission
 
   require Logger
 
   # This module both defines the behaviour and ships the default implementation,
   # so it implements itself.
   @behaviour __MODULE__
-
-  # The registry suffix the fix-pass worker registers under. MUST match the
-  # Watchdog's `@fix_pass_registry_suffix` so it can detect an in-flight fix pass.
-  @registry_suffix ":fixpass"
 
   @type failing_check :: Merger.failing_check()
 
@@ -76,11 +78,17 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
           optional(:checks) => [failing_check()],
           optional(:outside_diff_files) => [String.t()],
           optional(:start_claude) => boolean(),
-          optional(:claude_command) => [String.t()]
+          optional(:claude_command) => [String.t()],
+          # bd-741sid: a replay the scheduler already admitted into a slot, and
+          # the test seam standing in for the fast lane (`PassAdmission`).
+          optional(:slot_admitted) => boolean() | nil,
+          optional(:defer_resume) => (String.t(), atom(), keyword() -> term())
         }
 
   @type dispatch_result ::
           {:ok, %{worker_pid: pid(), worktree_path: String.t(), branch: String.t()}}
+          | {:ok,
+             %{deferred: true, task_id: String.t(), cap: non_neg_integer(), holders: [String.t()]}}
           | {:error, term()}
 
   @doc """
@@ -91,19 +99,14 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
   (the fix pass runs asynchronously); the Watchdog picks up the resolution on its
   next poll when CI passes and the PR turns mergeable.
 
+  Returns `{:ok, %{deferred: true, ...}}` when no worker slot is free and the
+  pass is waiting in the scheduler's fast lane (bd-741sid).
+
   Returns `{:error, reason}` when the worker can't be spawned (no local checkout,
   no branch, a fix pass already running). The Watchdog's bounded-retry counter
   handles persistent failure by escalating after N attempts.
   """
   @callback dispatch(args :: dispatch_args()) :: dispatch_result()
-
-  @doc """
-  The registry suffix the fix-pass worker registers under (`":fixpass"`). Public
-  so the Watchdog can reuse the exact same literal when checking for an in-flight
-  fix pass.
-  """
-  @spec registry_suffix() :: String.t()
-  def registry_suffix, do: @registry_suffix
 
   @doc """
   Default implementation of `dispatch/1`. Spawns a real Worker with a
@@ -120,15 +123,14 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
     if is_binary(task_id) and task_id != "" do
       with {:ok, task} <- load_task_or_use(task_id, args),
            {:ok, context} <- resolve_context(task, args),
-           {:ok, worktree_path} <- create_worktree(context),
-           {provider, fallback_reason, decision} <- resolve_pass_provider(task, context),
-           {:ok, worker_pid} <-
-             start_worker(task, context, worktree_path, provider, {fallback_reason, decision}),
-           {:ok, _port} <-
-             maybe_start_claude(worker_pid, worktree_path, context, args, provider) do
-        # bd-842qio: a CI failure takes the ticket back to work (merging → active).
-        Issue.back_to_work(task)
-        {:ok, %{worker_pid: worker_pid, worktree_path: worktree_path, branch: context.branch}}
+           :ok <- PassAdmission.admit(task, :fix_pass, args) do
+        # bd-842qio: a CI failure takes the ticket back to work (merging →
+        # active) — bd-741sid: as soon as the pass is admitted into its slot.
+        PassAdmission.with_slot(task, fn -> start_pass(task, context, args) end)
+      else
+        # bd-741sid: no free slot — the pass waits in the fast lane.
+        {:deferred, info} -> {:ok, info}
+        other -> other
       end
     else
       {:error, :missing_task_id}
@@ -136,6 +138,29 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
   end
 
   def dispatch(_), do: {:error, :missing_task_id}
+
+  defp start_pass(task, context, args) do
+    with {:ok, worktree_path} <- create_worktree(context),
+         {provider, fallback_reason, decision} <- resolve_pass_provider(task, context),
+         {:ok, worker_pid} <-
+           start_worker(task, context, worktree_path, provider, {fallback_reason, decision}),
+         {:ok, _port} <- start_agent(worker_pid, worktree_path, context, args, provider) do
+      # bd-741sid: a pass the Watchdog queued for a slot is an attempt now.
+      Arbiter.Worker.Watchdog.pass_started(task.id, :fix_pass, worker_pid)
+      {:ok, %{worker_pid: worker_pid, worktree_path: worktree_path, branch: context.branch}}
+    end
+  end
+
+  defp start_agent(worker_pid, worktree_path, context, args, provider) do
+    case maybe_start_claude(worker_pid, worktree_path, context, args, provider) do
+      {:ok, _port} = started ->
+        started
+
+      {:error, reason} = failed ->
+        PassAdmission.agent_failed(worker_pid, reason)
+        failed
+    end
+  end
 
   defp load_task_or_use(_task_id, %{task: %Issue{} = task}), do: {:ok, task}
   defp load_task_or_use(task_id, _args), do: load_task(task_id)
@@ -313,28 +338,29 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
 
     meta = Map.merge(meta, ProviderRouting.run_meta(decision))
 
+    # bd-741sid: registered under the ticket id, like every run on the ticket.
     opts = [
       task_id: task.id,
-      registry_key: task.id <> @registry_suffix,
       workspace_id: task.workspace_id,
       repo: context.repo || "unknown",
       meta: meta
     ]
 
-    # `start_or_reap_terminal/1`, not `start/1`: a fix pass that already ran and
-    # went terminal (`:failed`/`:completed`) stays alive holding
-    # `<task_id>:fixpass`, because nothing stops a terminal worker. The Watchdog
-    # counts that pass as inactive and re-dispatches, so plain `start/1` would
-    # return `:already_started` on every poll from then on — burning the
-    # auto-resolve budget without ever running a pass (bd-8lq2g7 / #1204).
+    # `start_or_reap_terminal/1`, not `start/1`: an earlier run on the ticket
+    # that went terminal (`:failed`) stays alive holding its key, because
+    # nothing stops a failed worker. The Watchdog counts that as inactive and
+    # re-dispatches, so plain `start/1` would return `:already_started` on
+    # every poll from then on — burning the auto-resolve budget without ever
+    # running a pass (bd-8lq2g7 / #1204).
     case Worker.start_or_reap_terminal(opts) do
       {:ok, pid} ->
         {:ok, pid}
 
-      # A fix pass is genuinely still in flight for this task (a previous tick's
-      # spawn, not yet terminal). Don't open a second Claude session against it.
+      # A run is genuinely still working the ticket — this fix pass from a
+      # previous tick, or another run. Don't open a second agent session on
+      # the same worktree and branch (bd-8tjcms).
       {:error, {:already_started, pid}} ->
-        {:error, {:fix_pass_already_running, pid}}
+        {:error, Worker.live_run_refusal(task.id, pid, :fix_pass, :fix_pass_already_running)}
 
       # bd-8tjcms / #1511: another worker for this task is already driving an
       # agent (typically the primary, auto-resumed out of an

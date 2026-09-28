@@ -23,9 +23,13 @@ defmodule Arbiter.Worker.FinalizeAdoptsPreReviewPRTest do
 
   use Arbiter.DataCase, async: false
 
+  require Ash.Query
+
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Messages.Message
   alias Arbiter.Worker
+  alias Arbiter.Worker.Watchdog
+  alias Arbiter.Workers.Run
 
   @owner "octo"
   @repo "widget"
@@ -75,6 +79,7 @@ defmodule Arbiter.Worker.FinalizeAdoptsPreReviewPRTest do
     ws
   end
 
+  # In progress, as a dispatch leaves it — the PR moves it to Merging.
   defp new_task(ws) do
     {:ok, task} =
       Ash.create(Issue, %{
@@ -83,6 +88,7 @@ defmodule Arbiter.Worker.FinalizeAdoptsPreReviewPRTest do
         issue_type: :feature
       })
 
+    {:ok, task} = Ash.update(task, %{status: :in_progress})
     task
   end
 
@@ -99,8 +105,25 @@ defmodule Arbiter.Worker.FinalizeAdoptsPreReviewPRTest do
       Worker.start(task_id: task.id, repo: "widget", workspace_id: ws.id, meta: meta)
 
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+    on_exit(fn -> stop_watchdog(task.id) end)
     :ok = Worker.advance(pid, :claude)
     pid
+  end
+
+  defp stop_watchdog(task_id) do
+    case Watchdog.whereis(task_id) do
+      nil -> :ok
+      pid -> GenServer.stop(pid, :normal)
+    end
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp run_for(task_id) do
+    Run
+    |> Ash.Query.filter(task_id == ^task_id)
+    |> Ash.read!()
+    |> List.first()
   end
 
   test "APPROVE adopts the pre-review PR ref without any further /pulls calls" do
@@ -147,13 +170,16 @@ defmodule Arbiter.Worker.FinalizeAdoptsPreReviewPRTest do
     assert mid_task.pr_ref == "#700"
     assert Agent.get(calls, & &1) == %{get: 1, post: 1}
 
+    ref = Process.monitor(pid)
     :ok = Worker.review_gate_verdict(pid, {:approve, "VERDICT: APPROVE\nlgtm"})
 
-    wait_until(fn -> Worker.state(pid).status == :awaiting_review end, 3_000)
+    # bd-741sid: the run ends with its PR open — finished and successful, not
+    # failed — and the ticket carries the PR into Merging.
+    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 3_000
 
-    snap = Worker.state(pid)
-    refute snap.status == :failed
-    assert snap.mr_ref == "#700"
+    run = run_for(task.id)
+    assert run.status == :completed
+    assert run.mr_ref == "#700"
 
     # The finalize step must not have issued a SECOND open/4 call at all —
     # no additional GET or POST to /pulls beyond the pre-review open.
@@ -161,6 +187,7 @@ defmodule Arbiter.Worker.FinalizeAdoptsPreReviewPRTest do
 
     {:ok, reloaded} = Ash.get(Issue, task.id)
     assert reloaded.pr_ref == "#700"
+    assert reloaded.state == :merging
 
     escalations = Message.inbox("admiral", workspace_id: ws.id)
     refute Enum.any?(escalations, &(&1.directive_ref == task.id and &1.kind == :escalation))

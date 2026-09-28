@@ -1033,11 +1033,10 @@ defmodule Arbiter.MCP.Tools.Worker do
 
     %{
       task_id: snap.task_id,
-      # bd-8lq2g7: a task can legitimately have TWO live rows — its primary
-      # worker plus a merge-queue subordinate pass registered under
-      # `<task_id>:fixpass` / `:conflict`. Without these two fields the rows are
-      # indistinguishable, which is what made a dead fix pass look like the
-      # task's own worker having gone stale.
+      # bd-8lq2g7: without these two fields a merge-queue pass (role
+      # `fix_pass` / `conflict_resolver`, under the ticket id since bd-741sid)
+      # is indistinguishable from the task's own run, which is what made a
+      # dead fix pass look like the task's own worker having gone stale.
       registry_key: Map.get(snap, :registry_key) || snap.task_id,
       role: Tools.to_str(Map.get(snap, :role)),
       status: Tools.to_str(snap.status),

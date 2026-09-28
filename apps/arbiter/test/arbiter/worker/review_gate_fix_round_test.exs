@@ -27,10 +27,10 @@ defmodule Arbiter.Worker.ReviewGateFixRoundTest do
 
   use Arbiter.DataCase, async: false
 
-  alias Arbiter.Tasks.{Issue, Workspace}
+  alias Arbiter.Tasks.{Issue, SlotGate, Workspace}
   alias Arbiter.Test.StubFixRoundDispatcher
   alias Arbiter.Worker
-  alias Arbiter.Worker.Phase
+  alias Arbiter.Worker.{Phase, ResumeSlot}
 
   @findings "VERDICT: REQUEST_CHANGES\n- [high] feature.txt:1 needs a guard"
   @other_findings "VERDICT: REQUEST_CHANGES\n- [high] feature.txt:9 leaks a pid"
@@ -252,25 +252,28 @@ defmodule Arbiter.Worker.ReviewGateFixRoundTest do
     end
   end
 
-  # bd-92mx1m: the author is failed only so the fix round can replace it. That
-  # is a hand-off, not a park — the task keeps its slot through it, and the
-  # round's resume is not a new admission (`Arbiter.Worker.ResumeSlot`). Once
-  # the round is given up on, the author IS parked for a human and the slot is
-  # released.
-  describe "the task's slot across a REQUEST_CHANGES rejection" do
-    test "is held while the fix round is dispatched", %{repo: repo} do
+  # bd-92mx1m: the author is failed only so the fix round can replace it — the
+  # task keeps its slot through it, and the round's resume is not a new
+  # admission (`Arbiter.Worker.ResumeSlot`). bd-741sid: a slot is the ticket In
+  # progress (`Arbiter.Tasks.SlotGate`), so the ticket staying `:active` is what
+  # holds it; the worker carries no hand-off flag. Once the round is given up on
+  # (or never offered), the author reads as parked for a human.
+  describe "the task across a REQUEST_CHANGES rejection" do
+    test "holds its slot while the fix round is dispatched", %{repo: repo} do
       ws = new_workspace()
-      pid = start_parked_author(new_task(ws), repo)
+      task = new_task(ws)
+      pid = start_parked_author(task, repo)
 
       reject(pid)
       wait_until(fn -> StubFixRoundDispatcher.dispatch_count() == 1 end)
-      _ = :sys.get_state(pid)
 
-      assert Worker.state(pid).meta[:slot_handoff] == true
-      assert Phase.of(Worker.state(pid)) == :handing_off
+      ticket = Ash.get!(Issue, task.id)
+      assert ticket.state == :active
+      assert SlotGate.holds_slot?(ticket)
+      assert {:ok, :held} = ResumeSlot.admit(ticket, origin: :automatic)
     end
 
-    test "is released when the budget is spent", %{repo: repo} do
+    test "waits on a human when the budget is spent", %{repo: repo} do
       ws = new_workspace()
       pid = start_parked_author(new_task(ws), repo, %{review_gate_fix_round_attempts: 1})
 
@@ -278,11 +281,10 @@ defmodule Arbiter.Worker.ReviewGateFixRoundTest do
       wait_until(fn -> StubFixRoundDispatcher.escalations() != [] end)
       _ = :sys.get_state(pid)
 
-      refute Worker.state(pid).meta[:slot_handoff]
       assert Phase.of(Worker.state(pid)) == :waiting_on_you
     end
 
-    test "is released when the fix round's dispatch fails", %{repo: repo} do
+    test "waits on a human when the fix round's dispatch fails", %{repo: repo} do
       ws = new_workspace()
       pid = start_parked_author(new_task(ws), repo)
       StubFixRoundDispatcher.arm_dispatch_error(:no_outpost)
@@ -291,17 +293,16 @@ defmodule Arbiter.Worker.ReviewGateFixRoundTest do
       wait_until(fn -> StubFixRoundDispatcher.escalations() != [] end)
       _ = :sys.get_state(pid)
 
-      refute Worker.state(pid).meta[:slot_handoff]
       assert Phase.of(Worker.state(pid)) == :waiting_on_you
     end
 
-    test "is never held by an inconclusive verdict, which gets no fix round", %{repo: repo} do
+    test "waits on a human after an inconclusive verdict, which gets no fix round",
+         %{repo: repo} do
       ws = new_workspace()
       pid = start_parked_author(new_task(ws), repo)
 
       reject(pid, :no_verdict, "reviewer crashed")
 
-      refute Worker.state(pid).meta[:slot_handoff]
       assert Phase.of(Worker.state(pid)) == :waiting_on_you
     end
   end

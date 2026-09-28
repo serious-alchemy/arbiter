@@ -304,12 +304,15 @@ defmodule Arbiter.Board.SnapshotSlotsTest do
       assert %{phase: :waiting_on_you, agent_live: false} = card(board, :waiting, "bd-1")
     end
 
-    test "a running record with no agent is visibly distinguished, not called running" do
+    # bd-741sid: the phase names the stage and the card's liveness says whether
+    # an agent is behind it — the hand-off phase is gone, and a record between
+    # agents only exists for a moment now that every worker stops with its agent.
+    test "a running record with no agent is visibly distinguished by its liveness" do
       board = derive(workers: [author("bd-1", :running, %{agent_live: false})])
 
       c = card(board, :running, "bd-1")
       assert c.agent_live == false
-      refute c.phase == :implementing
+      assert c.phase == :implementing
     end
   end
 end

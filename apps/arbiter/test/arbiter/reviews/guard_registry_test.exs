@@ -63,6 +63,16 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
        "precondition as Arbiter.Worker.Dispatch, surfaced through the spawn-failure " <>
        "path like start_worker_process/4. A session-security precondition, not a " <>
        "review/merge guard"},
+    {Arbiter.Worker.ReviewGate, :deliver_verdict, 4,
+     "bd-741sid: routes the gate's verdict to its author or, with no author " <>
+       "resident, to the ticket. Refuses nothing the gate decided; " <>
+       "{:error, :no_author} is the routing miss that selects the ticket"},
+    {Arbiter.Worker.ReviewGate, :deliver_to_author, 2,
+     "bd-741sid: see deliver_verdict/4 — {:error, :no_author} is a routing miss"},
+    {Arbiter.Worker.ReviewGate, :deliver_to_ticket, 3,
+     "bd-741sid: a verdict for a round a newer run superseded belongs to no " <>
+       "run; {:error, :superseded_by_run} keeps it off that run's work and " <>
+       "warn_undelivered/3 logs it. Routing, bounded to one evaluation"},
     {Arbiter.Worker.ReviewGate, :strict_eligible_reviewer?, 2,
      "bd-1abj7u: predicate that filters reviewer_pool/1 down to providers able to " <>
        "confine writes under :strict; {:error, :ineligible} just drops a candidate. " <>
@@ -78,6 +88,12 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
     {Arbiter.Worker.Watchdog, :rerun_ci, 2, "operator API entry point; argument validation"},
     {Arbiter.Worker.Watchdog, :mark_ci_external, 2,
      "operator API entry point; argument validation"},
+    {Arbiter.Worker.Watchdog, :restart, 2,
+     "bd-741sid: operator/reconciler API that starts a ticket's Watchdog from its " <>
+       "row; {:error, :already_running} keeps one Watchdog per ticket"},
+    {Arbiter.Worker.Watchdog, :start_watch, 2,
+     "bd-741sid: start plumbing behind restart/2 and watch/2; maps the " <>
+       "supervisor's answers"},
     {Arbiter.Worker.Watchdog, :handle_call, 3,
      "GenServer call plumbing for the operator API above"},
 
@@ -92,8 +108,9 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
      "{:error, :not_supported} from a tracker adapter that cannot link"},
 
     # --- worker.ex ---
-    # fail/3 since bd-92mx1m (`slot_handoff:`); /1 and /2 are its defaults.
-    {Arbiter.Worker, :fail, 3,
+    # fail/2 again since bd-741sid dropped bd-92mx1m's `slot_handoff:` option;
+    # /1 is its default.
+    {Arbiter.Worker, :fail, 2,
      "the public sink every failure arrives at, not a guard of its own"},
     {Arbiter.Worker, :fail_stopped, 2, "records an externally stopped worker"},
     {Arbiter.Worker, :fail_unresumable, 3,
@@ -161,8 +178,6 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
     {:queue_stale_sha_retry, :unbounded_retry},
     {:merge_expected_sha, :unbounded_retry},
     {:ci_settle_gate, :unbounded_retry},
-    {:unreviewed_head_reroute, :reaches_worker_fail},
-    {:unreviewed_head_reroute, :fails_run},
     {:empty_diff_range, :fails_run},
     {:reviewing_timeout, :fails_run},
     {:verdict_reprompt_budget, :fails_run},
@@ -174,8 +189,7 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
     {:round_budget, :fails_run},
     {:commit_gate_head_unchanged, :fails_run},
     {:commit_gate_escalation, :fails_run},
-    {:rejection_parking, :fails_run},
-    {:poll_ceiling, :fails_run}
+    {:rejection_parking, :fails_run}
   ]
 
   setup_all do
@@ -464,10 +478,28 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
     end
 
     test "the class-A/F reachability check actually detects a fail path", %{sources: sources} do
-      # W6 is the one class-A row that does call Worker.fail/2 today. If this
-      # stops being true the check above is passing for the wrong reason.
-      assert reaches_worker_fail?(GuardRegistry.fetch!(:unreviewed_head_reroute), sources),
-             "W6 no longer reaches Worker.fail/2 — remove its known_violations entry"
+      # No class-A row calls Worker.fail/2 any more — W6 was the last, until
+      # bd-741sid. So the positive control is a fixture: W6's own shape, whose
+      # site fails the run through a helper, as W6 used to. If the walk stops
+      # seeing that, the check above is passing for the wrong reason.
+      fixture = ~S'''
+      defmodule Arbiter.Worker.Watchdog do
+        defp resolve_stale_reviewed_head(state, reviewed, head) do
+          reroute(state, {reviewed, head})
+        end
+
+        defp reroute(state, why), do: Worker.fail(state.worker_pid, {:unreviewed_head, why})
+      end
+      '''
+
+      fixture_sources = Map.put(sources, Arbiter.Worker.Watchdog, fixture)
+      w6 = GuardRegistry.fetch!(:unreviewed_head_reroute)
+
+      assert reaches_worker_fail?(w6, fixture_sources),
+             "the walk no longer sees a Worker.fail/2 reached through a helper"
+
+      refute reaches_worker_fail?(w6, sources),
+             "W6 fails the run again — it must hand the head to a review round (bd-741sid)"
 
       refute reaches_worker_fail?(GuardRegistry.fetch!(:merge_expected_sha), sources),
              "W7 does not fail the run; the reachability walk is over-reporting"
@@ -555,18 +587,18 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
         for row <- GuardRegistry.guards(), row.terminal == :failed_run, do: row.doc_ref
 
       # P9 (bd-9zuvbh) took ten of §2.6's thirteen: every class-C ReviewGate
-      # terminal now parks. What is left is
+      # terminal now parks. bd-741sid took W6 and W12: a ticket's Watchdog has
+      # no run to fail, so an unreviewed head goes straight to a review round
+      # and the poll ceiling straight to the bounded auto-resume. What is left is
       #
       #   G14 — a genuine REQUEST_CHANGES at the round cap, which P9's AC1
       #         explicitly leaves alone (the guard-rejected half of G14 parks);
-      #   C2  — the same arm, seen from the conversion point it routes through;
-      #   W6  — P4's read-path flip;
-      #   W12 — P10's class-E audit.
+      #   C2  — the same arm, seen from the conversion point it routes through.
       #
       # Shrinking this list is the point of the phase table; growing it is a
       # regression, which is why the set is asserted exactly.
       assert Enum.sort(failing) ==
-               Enum.sort(~w(G14 W6 W12 C2)),
+               Enum.sort(~w(G14 C2)),
              "the set of guards that convert a guard decision into a failed run changed: " <>
                inspect(Enum.sort(failing))
     end

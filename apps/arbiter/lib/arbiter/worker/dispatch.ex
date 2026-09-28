@@ -74,6 +74,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.MCP.AgentConfig.Codex
   alias Arbiter.MCP.AgentConfig.Gemini, as: GeminiMCP
   alias Arbiter.Mergers.Github.RepoResolver
+  alias Arbiter.Mergers.PendingMerge
   alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Reviews.Checkout
   alias Arbiter.Tasks.EdgeGate
@@ -171,7 +172,7 @@ defmodule Arbiter.Worker.Dispatch do
     with {:ok, task} <- load_task(task_id),
          :ok <- ensure_dispatchable(task, opts),
          opts = apply_issue_repo_default(task, opts),
-         :ok <- ensure_not_awaiting_review(task_id),
+         :ok <- ensure_not_awaiting_review(task, opts),
          :ok <- ensure_no_live_agent_session(task_id, opts),
          opts = route_implementer(task, opts),
          :ok <- maybe_quota_gate(task, opts),
@@ -613,7 +614,7 @@ defmodule Arbiter.Worker.Dispatch do
       "judging its diff right now. It is not stalled and must not be stopped: " <>
       "stopping it discards the review in flight and the next dispatch restarts " <>
       "the gate from round 1. Wait for the verdict, or check `arb worker list` for " <>
-      "a subordinate pass (`#{task_id}:fixpass` / `:conflict`) if something else failed."
+      "a fix or conflict pass (role `fix_pass` / `conflict_resolver`) if something else failed."
   end
 
   def worker_active_message(:awaiting_review, task_id, false) do
@@ -629,8 +630,8 @@ defmodule Arbiter.Worker.Dispatch do
     "#{task_id}'s worker is parked at awaiting_review — its MR/PR is open and the " <>
       "watchdog is polling it to completion. It is not stalled and must not be " <>
       "stopped: stopping it drops the watchdog and the next dispatch re-runs the " <>
-      "whole review gate. Check the PR, or check `arb worker list` for a subordinate " <>
-      "pass (`#{task_id}:fixpass` / `:conflict`) if something else failed."
+      "whole review gate. Check the PR, or check `arb worker list` for a fix or " <>
+      "conflict pass (role `fix_pass` / `conflict_resolver`) if something else failed."
   end
 
   def worker_active_message(status, _task_id, _watchdog_alive?),
@@ -1060,22 +1061,19 @@ defmodule Arbiter.Worker.Dispatch do
     end
   end
 
-  # Guard against re-dispatching a task whose worker is already parked at
-  # :awaiting_review with an active Watchdog. A second dispatch in this state
-  # would attach a new machine/driver to the live worker, disrupting the
-  # Watchdog's PID watch and preventing the auto-close on MR merge.
-  defp ensure_not_awaiting_review(task_id) do
-    case Worker.whereis(task_id) do
-      nil ->
-        :ok
-
-      pid ->
-        case safe_worker_status(pid) do
-          :awaiting_review -> {:error, {:task_awaiting_review, task_id}}
-          _ -> :ok
-        end
-    end
+  # Guard against re-dispatching a ticket whose PR is open (bd-appwsh): it is
+  # Merging and its Watchdog owns the PR (bd-741sid). A fresh run would start
+  # on the PR's branch holding no slot, and the Watchdog could merge the PR
+  # underneath it. A resume is the way back to work from Merging — it takes
+  # the ticket back to In progress first (`resume_back_to_work/2`) — so only a
+  # plain dispatch is refused.
+  defp ensure_not_awaiting_review(%Issue{state: :merging, id: task_id}, opts) do
+    if Keyword.get(opts, :resume) == true,
+      do: :ok,
+      else: {:error, {:task_awaiting_review, task_id}}
   end
+
+  defp ensure_not_awaiting_review(_task, _opts), do: :ok
 
   # bd-2aslx6 (#1428): refuse to open a SECOND paid agent session on a task
   # whose worker is already running one.
@@ -1447,10 +1445,26 @@ defmodule Arbiter.Worker.Dispatch do
   # admitted into a slot by `ResumeSlot`, and a slot is a ticket In progress —
   # so the ticket goes back to work, or the round would run holding nothing
   # and the scheduler would fill its slot behind it.
+  #
+  # bd-741sid: the PR leaves the merge path first. Its Watchdog belongs to the
+  # ticket, so nothing else stops it. Left running, it would merge the very
+  # head this round was resumed to revise, and once it was gone the sweeper
+  # would re-arm the pending merge it stamped. The round's own approved PR open
+  # starts a fresh Watchdog on the new head. The Watchdog is stopped before the
+  # ticket moves, so a merge its last poll landed is seen: a ticket that
+  # finished meanwhile is not resumed.
   defp resume_back_to_work(%Issue{state: :merging, id: id} = task, opts) do
     if Keyword.get(opts, :resume) == true do
+      :ok = Watchdog.stop(id)
+      _ = PendingMerge.clear(id)
       :ok = Issue.back_to_work(id)
-      load_task(id)
+
+      with {:ok, task} <- load_task(id) do
+        case task.state do
+          :active -> {:ok, task}
+          state -> {:error, {:transition_failed, {:not_back_to_work, state}}}
+        end
+      end
     else
       {:ok, task}
     end

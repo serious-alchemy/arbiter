@@ -15,9 +15,11 @@ defmodule Arbiter.Workflows.MergeQueue.PassDispatchLifecycleTest do
 
   require Ash.Query
 
-  alias Arbiter.Tasks.{Issue, Workspace}
-  alias Arbiter.Worker.BranchNamer
-  alias Arbiter.Workflows.MergeQueue.{ConflictResolver, FixPassDispatcher}
+  alias Arbiter.Tasks.{Issue, PullRequest, Workspace}
+  alias Arbiter.Test.StubMerger
+  alias Arbiter.Worker
+  alias Arbiter.Worker.{BranchNamer, Watchdog}
+  alias Arbiter.Workflows.MergeQueue.{ConflictResolver, FixPassDispatcher, PassAdmission}
 
   setup do
     tmp = Path.join(System.tmp_dir!(), "pdl-#{System.unique_integer([:positive])}")
@@ -121,6 +123,122 @@ defmodule Arbiter.Workflows.MergeQueue.PassDispatchLifecycleTest do
 
     assert Ash.get!(Issue, issue.id).state == :active
     assert version_actions(issue.id) == before
+  end
+
+  # bd-741sid, review round 1 (finding 3): the pass holds its slot from the
+  # moment it is admitted, so the scheduler cannot count the slot free while
+  # the pass is provisioned, and a pass that never starts gives it back.
+  describe "the slot an admitted pass holds" do
+    test "the ticket is In progress before the pass is provisioned", %{ws: ws, repo: repo} do
+      issue = merging_ticket(ws, repo)
+      me = self()
+
+      assert {:ok, :started} =
+               PassAdmission.with_slot(issue, fn ->
+                 send(me, {:while_starting, Ash.get!(Issue, issue.id).state})
+                 {:ok, :started}
+               end)
+
+      assert_received {:while_starting, :active}
+      assert Ash.get!(Issue, issue.id).state == :active
+    end
+
+    test "a pass that never starts puts the ticket back in Merging", %{ws: ws, repo: repo} do
+      issue = merging_ticket(ws, repo)
+      inert_lane!(issue)
+
+      assert {:error, {:worktree_failed, _}} =
+               FixPassDispatcher.dispatch(%{
+                 task_id: issue.id,
+                 workspace_id: ws.id,
+                 repo_path: repo,
+                 repo: "test/repo",
+                 branch: "no-such-branch",
+                 checks: [],
+                 start_claude: false
+               })
+
+      assert Ash.get!(Issue, issue.id).state == :merging
+      assert Worker.whereis(issue.id) == nil
+      assert List.last(version_actions(issue.id)) == :open_pr
+    end
+
+    test "a pass whose agent cannot start is failed, not left idle on the ticket",
+         %{ws: ws, repo: repo} do
+      issue = merging_ticket(ws, repo)
+      inert_lane!(issue)
+
+      assert {:error, {:claude_start_failed, {:executable_not_found, _}}} =
+               FixPassDispatcher.dispatch(%{
+                 task_id: issue.id,
+                 workspace_id: ws.id,
+                 repo_path: repo,
+                 repo: "test/repo",
+                 checks: [],
+                 claude_command: ["/nonexistent/arbiter-pass-agent"]
+               })
+
+      pid = Worker.whereis(issue.id)
+      on_exit(fn -> stop_quietly(pid) end)
+      assert Worker.state(pid).status == :failed
+      assert Ash.get!(Issue, issue.id).state == :merging
+    end
+
+    test "a ticket another run took to work meanwhile keeps its slot", %{ws: ws, repo: repo} do
+      issue = merging_ticket(ws, repo)
+
+      assert {:error, :refused} =
+               PassAdmission.with_slot(issue, fn ->
+                 {:ok, pid} =
+                   Worker.start(task_id: issue.id, repo: "test/repo", workspace_id: ws.id)
+
+                 :ok = Worker.advance(pid, :implement)
+                 on_exit(fn -> stop_quietly(pid) end)
+                 {:error, :refused}
+               end)
+
+      assert Ash.get!(Issue, issue.id).state == :active
+    end
+
+    test "a ticket already In progress is not sent to Merging when its pass fails",
+         %{ws: ws, repo: repo} do
+      issue = ws |> merging_ticket(repo) |> Ash.update!(%{}, action: :return_to_work)
+
+      assert {:error, :boom} = PassAdmission.with_slot(issue, fn -> {:error, :boom} end)
+      assert Ash.get!(Issue, issue.id).state == :active
+    end
+
+    test "a ticket pulled out of the merge queue gets no pass", %{ws: ws, repo: repo} do
+      issue = merging_ticket(ws, repo)
+      :ok = PullRequest.pull(issue.id)
+
+      assert {:error, :pulled} =
+               FixPassDispatcher.dispatch(%{
+                 task_id: issue.id,
+                 workspace_id: ws.id,
+                 repo_path: repo,
+                 repo: "test/repo",
+                 checks: [],
+                 start_claude: false
+               })
+
+      assert Ash.get!(Issue, issue.id).state == :merging
+      assert Worker.whereis(issue.id) == nil
+    end
+  end
+
+  # A ticket that goes back to Merging has its Watchdog restarted from the
+  # row: give it a lane on the stub forge that never polls in a test's time.
+  defp inert_lane!(issue) do
+    lane = PullRequest.lane(adapter: StubMerger, interval_ms: 60_000, initial_delay_ms: 60_000)
+    Ash.update!(Ash.get!(Issue, issue.id), %{merge_watch: lane}, action: :record_merge_watch)
+
+    on_exit(fn ->
+      case Watchdog.whereis(issue.id) do
+        nil -> :ok
+        pid -> Arbiter.ProcessTeardown.stop_child(Arbiter.Worker.WatchdogSupervisor, pid)
+      end
+    end)
   end
 
   defp version_actions(issue_id) do

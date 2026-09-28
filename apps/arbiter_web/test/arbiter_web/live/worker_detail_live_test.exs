@@ -3,7 +3,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
 
   import Phoenix.LiveViewTest
 
-  alias Arbiter.Tasks.{Issue, Workspace}
+  alias Arbiter.Tasks.{Issue, PullRequest, Workspace}
   alias Arbiter.Worker
 
   setup do
@@ -636,8 +636,10 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
     # Watchdog itself processes a poll (bd-bspakl review round 1). Setting
     # `max_auto_resolve_attempts: 0` on the workspace makes the very first
     # `:ci_failed` poll exhaust immediately, so no fix-pass worker is ever
-    # dispatched.
+    # dispatched. The ticket is In progress when its PR opens, so it goes
+    # Merging and the run ends (bd-741sid).
     defp park_awaiting_review(pid, task, merger_status, opts \\ []) do
+      {:ok, _} = Ash.update(task, %{status: :in_progress})
       :ok = Worker.advance(pid, :implement)
       ref = "!bd-bspakl-#{System.unique_integer([:positive])}"
       StubMerger.next_open_ref(ref)
@@ -823,14 +825,15 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       :ok
     end
 
-    # Reproduces the incident exactly: the MR is genuinely open, the worker is
-    # parked at :awaiting_review, and no Watchdog is registered. The
-    # `watchdog_start_error` escape hatch gets us there without killing a real
-    # process mid-poll.
+    # Reproduces the incident exactly: the MR is genuinely open, the ticket is
+    # Merging, and no Watchdog is registered. The `watchdog_start_error` escape
+    # hatch gets us there without killing a real process mid-poll.
     defp park_without_watchdog(pid, task, ref) do
+      {:ok, _} = Ash.update(task, %{status: :in_progress})
       :ok = Worker.advance(pid, :implement)
       StubMerger.next_open_ref(ref)
       {:ok, workspace} = Ash.get(Workspace, task.workspace_id)
+      run = Process.monitor(pid)
 
       {:ok, _} =
         Worker.open_mr(pid, "feature/x", "Add x", "desc", %{
@@ -842,24 +845,31 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
           watchdog_start_error: true
         })
 
+      # The run ends once its PR is open (bd-741sid).
+      assert_receive {:DOWN, ^run, :process, ^pid, _}, 2_000
       ref
     end
 
+    # bd-741sid: the run that opened the PR is gone — the panel and its
+    # restart are the ticket's, not a parked worker's.
     test "warns that no watchdog is running and offers a restart", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "pd-dead-wd", workspace_id: ws.id})
       {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
       park_without_watchdog(pid, task, "!wd-dead-1")
 
       refute Watchdog.alive?(task.id)
+      assert Worker.whereis(task.id) == nil
 
       {:ok, view, html} = live_worker(conn, task.id)
 
       assert html =~ "No watchdog is running"
+      assert has_element?(view, "#worker-merge-request", "!wd-dead-1")
       assert has_element?(view, "#worker-restart-watchdog-btn")
     end
 
     test "shows neither warning nor button while a watchdog is alive", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "pd-live-wd", workspace_id: ws.id})
+      {:ok, _} = Ash.update(task, %{status: :in_progress})
       {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
       :ok = Worker.advance(pid, :implement)
       StubMerger.next_open_ref("!wd-live-1")
@@ -880,6 +890,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
 
       {:ok, view, html} = live_worker(conn, task.id)
 
+      assert has_element?(view, "#worker-merge-request")
       refute html =~ "No watchdog is running"
       refute has_element?(view, "#worker-restart-watchdog-btn")
     end
@@ -899,23 +910,60 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       wait_until(fn -> render(view) =~ "Restarted the merge watchdog" end)
 
       assert Watchdog.alive?(task.id)
-      # And the page stops warning, since the snapshot is refreshed.
-      refute render(view) =~ "No watchdog is running"
+      # And the page stops warning once its refresh — an async re-read of the
+      # ticket and its Watchdog, repeated as the new Watchdog's polls land —
+      # catches up.
+      wait_until(fn -> not (render(view) =~ "No watchdog is running") end)
     end
 
-    test "the restart_watchdog event fails soft when there is no worker", %{conn: conn, ws: ws} do
-      # Reachable from a stale page after the worker exited.
-      {:ok, task} = Ash.create(Issue, %{title: "pd-restart-noworker", workspace_id: ws.id})
+    # bd-741sid, review round 1 (finding 4): a pull out of the merge queue is
+    # deliberate — the page says so rather than alarming, and Restart
+    # watchdog is the operator's way to put it back.
+    test "a ticket pulled out of the merge queue reads as pulled, and Restart watchdog puts it back",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "pd-pulled", workspace_id: ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
+      ref = park_without_watchdog(pid, task, "!wd-pulled-1")
+      StubMerger.queue_get(ref, [%{status: :open, approved: false}])
+      :ok = PullRequest.pull(task.id)
+
+      on_exit(fn ->
+        case Watchdog.whereis(task.id) do
+          nil -> :ok
+          wd -> Arbiter.ProcessTeardown.stop_child(Arbiter.Worker.WatchdogSupervisor, wd)
+        end
+      end)
+
+      {:ok, view, html} = live_worker(conn, task.id)
+
+      assert has_element?(view, "#worker-merge-pulled-notice")
+      refute has_element?(view, "#worker-no-watchdog-warning")
+      refute html =~ "No watchdog is running"
+      assert has_element?(view, "#worker-restart-watchdog-btn")
+
+      render_click(view, "restart_watchdog")
+      wait_until(fn -> render(view) =~ "Restarted the merge watchdog" end)
+
+      assert Watchdog.alive?(task.id)
+      refute PullRequest.pulled?(Ash.get!(Issue, task.id))
+      wait_until(fn -> not has_element?(view, "#worker-merge-pulled-notice") end)
+    end
+
+    test "the restart_watchdog event fails soft once the ticket has left Merging", %{
+      conn: conn,
+      ws: ws
+    } do
+      # Reachable from a stale page after the ticket moved on.
+      {:ok, task} = Ash.create(Issue, %{title: "pd-restart-closed", workspace_id: ws.id})
       {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
       park_without_watchdog(pid, task, "!wd-dead-3")
 
       {:ok, view, _html} = live_worker(conn, task.id)
 
-      Worker.stop(pid)
-      wait_until(fn -> is_nil(Worker.whereis(task.id)) end)
+      Ash.update!(Ash.get!(Issue, task.id), %{}, action: :close)
 
       render_click(view, "restart_watchdog")
-      wait_until(fn -> render(view) =~ "No worker is running" end)
+      wait_until(fn -> render(view) =~ "not Merging" end)
 
       refute Watchdog.alive?(task.id)
     end

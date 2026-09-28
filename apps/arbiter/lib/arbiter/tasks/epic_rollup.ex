@@ -115,9 +115,9 @@ defmodule Arbiter.Tasks.EpicRollup do
     * `:workers` — live worker rows to classify children/blockers against,
       overriding `Arbiter.Worker.list_children/0`. Tests supply plain maps
       here the same way `Arbiter.Board.Snapshot.derive/1`'s tests do.
-    * `:watchdog_live` — overrides the `:awaiting_review` liveness set
-      `Arbiter.Board.Snapshot.watchdog_live/1` would otherwise compute from
-      `:workers` (a real Registry read).
+    * `:watchdog_live` — overrides the set of Merging tickets whose Watchdog
+      is alive, which `Arbiter.Board.Snapshot.watchdog_live/1` would otherwise
+      compute from the children and their blockers (a real Registry read).
   """
   @spec for_epics([Issue.t() | String.t()], keyword()) :: %{String.t() => t()}
   def for_epics(epics, opts \\ []) do
@@ -255,7 +255,9 @@ defmodule Arbiter.Tasks.EpicRollup do
     workers = live_workers(opts, watched_ids)
 
     watchdog_live =
-      Keyword.get_lazy(opts, :watchdog_live, fn -> Snapshot.watchdog_live(workers) end)
+      Keyword.get_lazy(opts, :watchdog_live, fn ->
+        Snapshot.watchdog_live(children ++ Map.values(blockers_by_id))
+      end)
 
     workers_by_task = Enum.group_by(workers, & &1.task_id)
     worked = for {id, ws} <- workers_by_task, ws != [], into: MapSet.new(), do: id
@@ -296,18 +298,27 @@ defmodule Arbiter.Tasks.EpicRollup do
   # child; a blocker checked under rule 3 never is one, since verifying
   # satisfies its dependents.
   #
-  # A workerless in-progress or merging issue flags exactly when the board
-  # gives it the orphan card: `Lifecycle.board_column/2` says `:waiting` with
-  # no run at all. Dispatch moves a ticket to `:active` before its worker
-  # registers, so a fresh dispatch (inside the grace window) is still
-  # `:running` there and does not read as "parked", and a non-dispatchable
-  # child (an :epic) never gets a worker, so it never flags on that basis.
+  # A workerless in-progress issue flags exactly when the board gives it the
+  # orphan card: `Lifecycle.board_column/2` says `:waiting` with no run at
+  # all. Dispatch moves a ticket to `:active` before its worker registers, so
+  # a fresh dispatch (inside the grace window) is still `:running` there and
+  # does not read as "parked", and a non-dispatchable child (an :epic) never
+  # gets a worker, so it never flags on that basis. A merging one has no
+  # worker by design (bd-741sid), so its row and its Watchdog decide, as on
+  # the board's merge card.
   defp needs_you_directly?(issue, ctx) do
     case Lifecycle.state_of(issue) do
       :verifying ->
         true
 
-      state when state in [:active, :merging] ->
+      :merging ->
+        Snapshot.merging_needs_you?(
+          issue,
+          Map.get(ctx.workers_by_task, issue.id, []),
+          ctx.watchdog_live
+        )
+
+      :active ->
         case Map.get(ctx.workers_by_task, issue.id, []) do
           [] -> Lifecycle.board_column(issue, %{runs: [], now: ctx.now}) == :waiting
           workers -> Snapshot.child_needs_you?(workers, ctx.watchdog_live)
@@ -350,7 +361,16 @@ defmodule Arbiter.Tasks.EpicRollup do
   defp blocker_issues(ids) do
     Issue
     |> Ash.Query.filter(id in ^ids)
-    |> Ash.Query.select([:id, :state, :status, :refined, :issue_type, :updated_at, :created_at])
+    |> Ash.Query.select([
+      :id,
+      :state,
+      :status,
+      :refined,
+      :issue_type,
+      :merger_status,
+      :updated_at,
+      :created_at
+    ])
     |> Ash.read!()
     |> Map.new(&{&1.id, &1})
   end

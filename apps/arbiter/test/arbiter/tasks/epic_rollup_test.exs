@@ -325,6 +325,61 @@ defmodule Arbiter.Tasks.EpicRollupTest do
     end
   end
 
+  # bd-741sid: a Merging child has no worker — its implementer stopped when the
+  # PR opened — so the ticket's own row and its Watchdog decide, exactly as on
+  # the board's merge card.
+  describe "a Merging child" do
+    defp merging_child(ctx, title, merger_status) do
+      c = child(ctx.ws, ctx.epic, title, as: :running)
+      {:ok, _} = Issue.pr_opened(c.id, "!#{System.unique_integer([:positive])}")
+      :ok = Arbiter.Tasks.PullRequest.record_merger_status(c.id, merger_status)
+      Ash.get!(Issue, c.id)
+    end
+
+    test "with a live Watchdog and nothing it cannot clear, does not flag", ctx do
+      c = merging_child(ctx, "merging-child", %{status: :open, approved: false})
+
+      refute rollup(ctx.epic, workers: [], watchdog_live: MapSet.new([c.id])).needs_you
+    end
+
+    test "whose Watchdog is gone flags", ctx do
+      c = merging_child(ctx, "unwatched-child", %{status: :open, approved: false})
+
+      r = rollup(ctx.epic, workers: [], watchdog_live: MapSet.new())
+
+      assert r.needs_you
+      assert "#{c.id} parked" in r.needs_you_reasons
+    end
+
+    test "agrees with the board's merge card", ctx do
+      c =
+        merging_child(ctx, "blocked-child", %{
+          status: :open,
+          approved: true,
+          block_reason: :needs_approval
+        })
+
+      watchdog_live = MapSet.new([c.id])
+      epic_r = rollup(ctx.epic, workers: [], watchdog_live: watchdog_live)
+
+      board =
+        Snapshot.derive(%{
+          issues: [c],
+          workers: [],
+          blocked_by: %{},
+          changed_files: %{},
+          now: DateTime.utc_now(),
+          slots_total: 4,
+          quota: :ok,
+          paused: false,
+          watchdog_live: watchdog_live
+        })
+
+      assert [%{status: :merging, needs_you: true}] = board.waiting
+      assert epic_r.needs_you
+    end
+  end
+
   describe "needs_you rule 3: blocked only by something that itself needs the operator" do
     test "blocked by an unrefined (Backlog) blocker flags needs_you", ctx do
       blocked = child(ctx.ws, ctx.epic, "blocked-child", as: :ready)

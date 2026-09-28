@@ -97,8 +97,7 @@ defmodule Arbiter.Tasks.ReviewPark do
         "carry (G18)",
     resume_blocked:
       "the Watchdog could not restart the run after its awaiting-review timeout because " <>
-        "another pass on the same task (`<task>:fixpass` / `<task>:conflict`) still holds " <>
-        "the worker registry slot (W14)"
+        "another pass on the same task still holds the worker registry slot (W14)"
   }
 
   # The phrase each reason contributes to the escalation subject. These are

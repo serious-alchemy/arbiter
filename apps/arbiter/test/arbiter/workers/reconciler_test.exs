@@ -423,9 +423,16 @@ defmodule Arbiter.Workers.ReconcilerTest do
     end
   end
 
-  # An open-PR bead whose workspace has no patrol coverage (a bare test
-  # workspace has no hosted-forge merger configured) can't be auto-watched, so
-  # the default re-watch fails and the reconciler escalates as the fallback.
+  # bd-741sid: a Merging ticket gets its Watchdog back from its row first
+  # (`Arbiter.Workers.ReconcilerTicketWatchdogTest`). These cases pin what
+  # happens when that cannot start (`watch_fun` refusing): the patrols, and
+  # past them the coordinator.
+  defp no_watchdog(_issue), do: {:error, :no_adapter}
+
+  # An open-PR bead whose Watchdog cannot start and whose workspace has no
+  # patrol coverage (a bare test workspace has no hosted-forge merger
+  # configured) can't be auto-watched, so the default re-watch fails and the
+  # reconciler escalates as the fallback.
   test "escalates an open-PR task whose workspace has no patrol coverage (fallback)" do
     ws = create_workspace()
 
@@ -435,7 +442,8 @@ defmodule Arbiter.Workers.ReconcilerTest do
         pr_ref: "#{System.unique_integer([:positive])}"
       })
 
-    assert {:ok, %{rewatched: 0, escalated: 1}} = Reconciler.reconcile_open_pr_tasks()
+    assert {:ok, %{rewatched: 0, escalated: 1}} =
+             Reconciler.reconcile_open_pr_tasks(watch_fun: &no_watchdog/1)
 
     mail = Message.inbox("admiral", workspace_id: ws.id)
     assert length(mail) >= 1
@@ -447,7 +455,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
     assert escalation.subject =~ "stuck"
   end
 
-  test "re-watches an open-PR (awaiting_review) bead via the patrol layer instead of escalating" do
+  test "re-watches an open-PR bead whose Watchdog cannot start via the patrol layer instead of escalating" do
     ws = create_workspace()
 
     issue =
@@ -464,7 +472,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
     end
 
     assert {:ok, %{rewatched: 1, escalated: 0}} =
-             Reconciler.reconcile_open_pr_tasks(rewatch_fun: rewatch)
+             Reconciler.reconcile_open_pr_tasks(watch_fun: &no_watchdog/1, rewatch_fun: rewatch)
 
     assert_received {:rewatched, task_id}
     assert task_id == issue.id
@@ -616,10 +624,12 @@ defmodule Arbiter.Workers.ReconcilerTest do
   end
 
   # bd-92mx1m / bd-asxw4e: a ticket still In progress holds its own slot and
-  # re-enters uncapped, so it goes first — even one that had parked before the
-  # restart; a Merging ticket whose revision the restart cut off holds no slot
-  # and competes for what is left.
-  test "resume sweep resumes tickets In progress before a Merging one" do
+  # re-enters uncapped — even one that had parked before the restart.
+  # bd-741sid: a Merging ticket is not resumed. Its PR is its Watchdog's, which
+  # `reconcile_open_pr_tasks/1` restarts from the row; a revision runs with its
+  # ticket In progress, so a cut-off run on a Merging ticket can only be an
+  # implementer parked on its PR from before bd-741sid, whose work is done.
+  test "resume sweep resumes a ticket In progress and leaves a Merging one to its Watchdog" do
     ws = create_workspace()
 
     merging =
@@ -629,7 +639,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
     assert {merging.state, parked.state} == {:merging, :active}
 
     for {issue, attrs} <- [
-          {merging, %{status: :failed, failure_reason: "server restarted"}},
+          {merging, %{status: :interrupted, failure_reason: "server shutdown"}},
           {parked, %{status: :failed, failure_reason: ":review_gate_rejected"}}
         ] do
       {:ok, _} =
@@ -651,16 +661,15 @@ defmodule Arbiter.Workers.ReconcilerTest do
 
     resume = fn %Issue{id: id} ->
       send(test_pid, {:resumed, id})
-      if id == merging.id, do: {:ok, %{deferred: true, task_id: id}}, else: {:ok, %{task_id: id}}
+      {:ok, %{task_id: id}}
     end
 
-    assert {:ok, %{resumed: 2, escalated: 0}} =
+    assert {:ok, %{resumed: 1, escalated: 0}} =
              Reconciler.reconcile_resumable_tasks(resume_fun: resume)
 
-    # The mailbox is in call order.
-    assert_received {:resumed, first}
-    assert_received {:resumed, second}
-    assert [first, second] == [parked.id, merging.id]
+    assert_received {:resumed, id}
+    assert id == parked.id
+    refute_received {:resumed, _}
   end
 
   test "resume sweep skips when primary?: false" do
@@ -691,13 +700,18 @@ defmodule Arbiter.Workers.ReconcilerTest do
     )
   end
 
+  # A revision on an open PR runs with its ticket In progress: its resume took
+  # it back from Merging (`Dispatch`'s `resume_back_to_work/2`).
+  defp revising(%Issue{state: :merging} = issue),
+    do: Ash.update!(issue, %{}, action: :return_to_work)
+
   test "resumes an open-PR task whose worker the restart cut off mid-flight" do
     # The 2026-09-25 deploy restart: a worker revising an already-open PR was
     # interrupted, and the resume sweep skipped it only because the task had a
     # pr_ref — the open-PR sweep re-watched the PR and nothing resumed the work.
     ws = create_workspace()
     pr_ref = "#{System.unique_integer([:positive])}"
-    issue = create_issue(ws.id, %{status: :in_progress, pr_ref: pr_ref})
+    issue = revising(create_issue(ws.id, %{status: :in_progress, pr_ref: pr_ref}))
     create_main_run(issue, %{status: :interrupted, failure_reason: "server shutdown"})
 
     test_pid = self()
@@ -747,7 +761,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
 
     test "then the resume sweep resumes it, holding its slot" do
       ws = create_workspace()
-      issue = create_issue(ws.id, %{status: :in_progress, pr_ref: "2052"})
+      issue = revising(create_issue(ws.id, %{status: :in_progress, pr_ref: "2052"}))
       booted_at = DateTime.utc_now()
 
       create_main_run(issue, %{
@@ -844,7 +858,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
 
     # Boot ordering: open-PR sweep first (re-watch), then resume sweep.
     assert {:ok, %{rewatched: 1, escalated: 0}} =
-             Reconciler.reconcile_open_pr_tasks(rewatch_fun: rewatch)
+             Reconciler.reconcile_open_pr_tasks(watch_fun: &no_watchdog/1, rewatch_fun: rewatch)
 
     assert {:ok, %{resumed: 0, escalated: 1}} =
              Reconciler.reconcile_resumable_tasks(resume_fun: resume)

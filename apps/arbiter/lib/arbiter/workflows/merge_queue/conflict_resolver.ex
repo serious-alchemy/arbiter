@@ -28,6 +28,15 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   worker escalates via the workspace mailbox (an `:escalation` to
   `to_ref: "coordinator"`) rather than silently failing.
 
+  ## An ordinary run (bd-741sid)
+
+  The resolver is an ordinary run on its ticket: it registers under the ticket
+  id (the single-active-run rule, bd-8tjcms, refuses it while another run is
+  working the ticket), takes the ticket back In progress, and is admitted like
+  an automatic resume (`Arbiter.Workflows.MergeQueue.PassAdmission`) — a free
+  slot, or the scheduler's fast lane until one frees. When it finishes, the
+  ticket goes back to Merging.
+
   ## Merger/tracker-agnostic
 
   This module operates on raw git artefacts (a local checkout, a branch
@@ -58,6 +67,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   alias Arbiter.Worker.TargetBranch
   alias Arbiter.Worker.Worktree
   alias Arbiter.Workers.Run
+  alias Arbiter.Workflows.MergeQueue.PassAdmission
 
   require Logger
 
@@ -75,7 +85,11 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
           optional(:repo) => String.t() | nil,
           optional(:pr_ref) => term(),
           optional(:start_claude) => boolean(),
-          optional(:claude_command) => [String.t()]
+          optional(:claude_command) => [String.t()],
+          # bd-741sid: a replay the scheduler already admitted into a slot, and
+          # the test seam standing in for the fast lane (`PassAdmission`).
+          optional(:slot_admitted) => boolean() | nil,
+          optional(:defer_resume) => (String.t(), atom(), keyword() -> term())
         }
 
   @type resolve_result ::
@@ -173,14 +187,24 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   defp load_task_or_use(task_id, _args), do: load_task(task_id)
 
   defp dispatch(task, context, args) do
+    case PassAdmission.admit(task, :conflict, args) do
+      # bd-842qio: a conflict takes the ticket back to work (merging → active)
+      # — bd-741sid: as soon as the pass is admitted into its slot.
+      :ok -> PassAdmission.with_slot(task, fn -> start_pass(task, context, args) end)
+      # bd-741sid: no free slot — the pass waits in the fast lane.
+      {:deferred, info} -> {:ok, info}
+      {:error, _} = error -> error
+    end
+  end
+
+  defp start_pass(task, context, args) do
     with {:ok, worktree_path} <- create_worktree(context),
          {provider, fallback_reason, decision} <- resolve_pass_provider(task, context),
          {:ok, worker_pid} <-
            start_worker(task, context, worktree_path, provider, {fallback_reason, decision}),
-         {:ok, _port} <-
-           maybe_start_claude(worker_pid, worktree_path, context, args, provider) do
-      # bd-842qio: a conflict takes the ticket back to work (merging → active).
-      Issue.back_to_work(task)
+         {:ok, _port} <- start_agent(worker_pid, worktree_path, context, args, provider) do
+      # bd-741sid: a pass the Watchdog queued for a slot is an attempt now.
+      Arbiter.Worker.Watchdog.pass_started(task.id, :conflict, worker_pid)
 
       {:ok,
        %{
@@ -188,6 +212,17 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
          worktree_path: worktree_path,
          branch: context.branch
        }}
+    end
+  end
+
+  defp start_agent(worker_pid, worktree_path, context, args, provider) do
+    case maybe_start_claude(worker_pid, worktree_path, context, args, provider) do
+      {:ok, _port} = started ->
+        started
+
+      {:error, reason} = failed ->
+        PassAdmission.agent_failed(worker_pid, reason)
+        failed
     end
   end
 
@@ -412,15 +447,6 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
 
   # ---- worktree / worker / claude wiring ---------------------------------
 
-  # Registry suffix the conflict-resolver worker registers under. The original
-  # work worker is still registered (and sitting `:completed`) when the
-  # merge queue picks up the CONFLICTING signal — the registry key is keyed on
-  # task_id and the original is only torn down on task `:close`. Spawning under
-  # `<task_id>:conflict` gives the resolver its own slot so `Worker.start`
-  # doesn't return `:already_started` and we don't accidentally open a Claude
-  # session against the finished worker.
-  @resolver_registry_suffix ":conflict"
-
   # Attach a worktree to the (existing) PR branch — the branch already exists
   # in the repo because the conflicting PR was opened against it, so we must
   # NOT use `Worktree.create/3` (that runs `git worktree add -b <branch> …`,
@@ -455,28 +481,34 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
 
     meta = Map.merge(meta, ProviderRouting.run_meta(decision))
 
+    # bd-741sid: an ordinary run on the ticket, registered under its id.
     opts = [
       task_id: task.id,
-      registry_key: task.id <> @resolver_registry_suffix,
       workspace_id: task.workspace_id,
       repo: context.repo || "unknown",
       meta: meta
     ]
 
-    # `start_or_reap_terminal/1`, not `start/1`: a resolver that already went
-    # terminal (`:failed`/`:completed`) is never stopped, so it keeps holding
-    # `<task_id>:conflict` and every later tick's re-dispatch would collide with
-    # a corpse and report a live resolver that isn't (bd-8lq2g7 / #1204).
+    # `start_or_reap_terminal/1`, not `start/1`: an earlier run on the ticket
+    # that went terminal (`:failed`) is never stopped, so it keeps holding the
+    # key and every later tick's re-dispatch would collide with a corpse and
+    # report a live resolver that isn't (bd-8lq2g7 / #1204).
     case Worker.start_or_reap_terminal(opts) do
       {:ok, pid} ->
         {:ok, pid}
 
-      # A resolver is genuinely still in flight for this task (a previous tick's
-      # spawn, not yet terminal). Don't open a second Claude session against it
-      # — surface the collision so the MergeQueue's escalation path mails the
-      # coordinator instead of pretending we restarted the rebase.
+      # A run is genuinely still working the ticket — this resolver from a
+      # previous tick, or another run. Don't open a second agent session
+      # against it — surface the collision so the MergeQueue's escalation path
+      # mails the coordinator instead of pretending we restarted the rebase.
       {:error, {:already_started, pid}} ->
-        {:error, {:resolver_already_running, pid}}
+        {:error,
+         Worker.live_run_refusal(
+           task.id,
+           pid,
+           :conflict_resolver,
+           :resolver_already_running
+         )}
 
       # bd-8tjcms / #1511: another worker for this task is already driving an
       # agent (typically the primary, auto-resumed out of an

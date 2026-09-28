@@ -29,7 +29,7 @@ defmodule Arbiter.Tasks.Issue.Changes.CleanupWorktree do
 
   Liveness guard (bd-bmmj4w): git status alone cannot prove a worktree is
   safe to delete — a clean, fully-pushed worktree can still have a live
-  sub-worker (`:fixpass`, `#review`, ...) mid-`mix test` inside it, and
+  sub-worker (a `#review` round, a fix pass, ...) mid-`mix test` inside it, and
   removing it then destroys the directory out from under a running process.
 
   The guard has two halves, and it is the pair that makes it sound:
@@ -146,7 +146,11 @@ defmodule Arbiter.Tasks.Issue.Changes.CleanupWorktree do
     # `live_for/1` (not `all_for/1`) so an unreaped registry corpse — a worker
     # that died without terminate/2 running, whose row Registry clears
     # asynchronously — cannot block cleanup forever.
-    case WorkerRegistry.live_for(task_id) do
+    #
+    # bd-741sid: the ticket's Watchdog is not in the worktree — it only talks
+    # to the forge — and it is often the very process closing the ticket
+    # (the PR merged), so it never holds the worktree up.
+    case task_id |> WorkerRegistry.live_for() |> Enum.reject(&watchdog?(&1, task_id)) do
       [] ->
         :drained
 
@@ -158,6 +162,10 @@ defmodule Arbiter.Tasks.Issue.Changes.CleanupWorktree do
           await_worker_drain(task_id, deadline)
         end
     end
+  end
+
+  defp watchdog?({registry_key, pid}, task_id) do
+    pid == self() or registry_key == task_id <> Arbiter.Worker.Watchdog.registry_suffix()
   end
 
   defp drain_ms do

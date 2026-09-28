@@ -27,6 +27,8 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
   import ExUnit.CaptureLog
 
+  require Ash.Query
+
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Messages.Message
   alias Arbiter.Worker
@@ -350,6 +352,18 @@ defmodule Arbiter.Worker.ReviewGateTest do
     out |> String.trim() |> String.to_integer()
   end
 
+  # bd-741sid: the run ends when its PR opens (Direct: merges) — the worker
+  # exits and the ticket's Watchdog owns the PR.
+  defp wait_run_ended(pid, timeout \\ 3_000),
+    do: wait_until(fn -> not Process.alive?(pid) end, timeout)
+
+  defp main_run(task_id) do
+    Arbiter.Workers.Run
+    |> Ash.Query.filter(task_id == ^task_id and worker_type == :main)
+    |> Ash.read!()
+    |> List.first()
+  end
+
   defp wait_until(fun, timeout \\ 2_000) do
     deadline = System.monotonic_time(:millisecond) + timeout
     do_wait(fun, deadline)
@@ -478,9 +492,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
       :ok = Worker.review_gate_verdict(pid, {:approve, "VERDICT: APPROVE\nlgtm"})
 
-      # Direct merges synchronously; the Watchdog then completes the worker.
-      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end)
+      # Direct merges synchronously; the run ends and the ticket's Watchdog
+      # closes the ticket.
+      wait_run_ended(pid)
       assert merge_commit_count(repo) == 1
+      wait_until(fn -> Ash.get!(Issue, task.id).state == :closed end)
 
       # The approval is recorded on the task notes (visible via arb show).
       {:ok, reloaded} = Ash.get(Issue, task.id)
@@ -525,8 +541,8 @@ defmodule Arbiter.Worker.ReviewGateTest do
       :ok = Worker.review_gate_verdict(pid, {:approve, "VERDICT: APPROVE\nlgtm"})
 
       # The Watchdog must merge despite never seeing a forge-side approval.
-      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 3_000)
-      assert Arbiter.Test.StubMerger.merge_count("!76") >= 1
+      wait_until(fn -> Arbiter.Test.StubMerger.merge_count("!76") >= 1 end, 3_000)
+      wait_until(fn -> Ash.get!(Issue, task.id).state == :closed end)
       # The local repo was NOT git-merged (StubMerger is a stub) — the merge
       # happened entirely through the adapter callback.
       assert merge_commit_count(repo) == 0
@@ -569,12 +585,12 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
       # Give the Watchdog several poll cycles to (wrongly) auto-merge if the
       # bug is present.
-      wait_until(fn -> match?(%{status: :awaiting_review}, Worker.state(pid)) end)
-      Process.sleep(150)
+      wait_run_ended(pid)
+      wait_until(fn -> Arbiter.Test.StubMerger.get_count("!77") >= 3 end)
 
       assert Arbiter.Test.StubMerger.merge_count("!77") == 0
       assert merge_commit_count(repo) == 0
-      assert match?(%{status: :awaiting_review}, Worker.state(pid))
+      assert Ash.get!(Issue, task.id).state == :merging
     end
 
     test "REQUEST_CHANGES parks the task with findings and does NOT merge",
@@ -732,10 +748,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
       send(pid, {:__claude_session_done__, "arb done"})
 
-      # Straight to the merger — never parks at :awaiting_review_gate.
-      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end)
+      # Straight to the merger — never parks at :awaiting_review_gate, so the
+      # ticket has no ReviewGate round on record.
+      wait_run_ended(pid)
       assert merge_commit_count(repo) == 1
-      refute Worker.state(pid).meta[:review_gate_verdict]
+      assert is_nil(Ash.get!(Issue, task.id).review_gate_state)
     end
 
     test "review_gate_verdict/2 is rejected outside :awaiting_review_gate", %{repo: repo, ws: ws} do
@@ -3830,9 +3847,9 @@ defmodule Arbiter.Worker.ReviewGateTest do
       # Round 1 rejects → slow implementer revises → round 2 rejects → second
       # implementer revises (surviving the stale round-1 timer) → round 3
       # approves → merge. No timeout escalation anywhere in between.
-      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 12_000)
+      wait_run_ended(pid, 12_000)
       assert merge_commit_count(repo) == 1
-      refute Worker.state(pid).meta[:failure_reason]
+      assert %{status: :completed, failure_reason: nil} = main_run(task.id)
 
       review_id = ReviewGate.reviewer_task_id(task.id)
       runs = Ash.read!(Arbiter.Workers.Run)
@@ -3903,9 +3920,9 @@ defmodule Arbiter.Worker.ReviewGateTest do
       # Round 1 rejects (slowly) → implementer revises (fast) → round 2
       # approves (surviving the stale round-1 reviewer timer) → merge. No
       # timeout escalation or spurious timeout-retry run anywhere in between.
-      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 12_000)
+      wait_run_ended(pid, 12_000)
       assert merge_commit_count(repo) == 1
-      refute Worker.state(pid).meta[:failure_reason]
+      assert %{status: :completed, failure_reason: nil} = main_run(task.id)
 
       review_id = ReviewGate.reviewer_task_id(task.id)
       runs = Ash.read!(Arbiter.Workers.Run)
@@ -5147,8 +5164,8 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
       :ok = Worker.review_gate_verdict(pid, {:approve, "VERDICT: APPROVE\nlgtm"})
 
-      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 3_000)
-      assert Arbiter.Test.StubMerger.merge_count("acme/repo#88") >= 1
+      wait_until(fn -> Arbiter.Test.StubMerger.merge_count("acme/repo#88") >= 1 end, 3_000)
+      assert Arbiter.Test.StubMerger.last_open().branch == "feature/rev"
     end
 
     # Regression for bd-7d5smn: the pre-review PR was opened with the internal

@@ -19,6 +19,10 @@ defmodule Arbiter.Worker.WatchdogPostApprovalPushTest do
       `review_gate_delta_scope_test.exs`);
     * flag on, `decide/3` refuses the same heads; flag off, the shadow records
       no `authored_content` disagreement for them (AC4).
+
+  bd-741sid: the Watchdog is keyed by the ticket and drives it; no worker is
+  paired with it. A merge is read off its announcement (`Watchdog.subscribe/1`)
+  and the ticket row, where it used to complete the worker.
   """
   use Arbiter.DataCase, async: false
 
@@ -31,7 +35,6 @@ defmodule Arbiter.Worker.WatchdogPostApprovalPushTest do
   alias Arbiter.Test.StubAutoResumeDispatcher
   alias Arbiter.Test.StubFixPassDispatcher
   alias Arbiter.Test.StubMerger
-  alias Arbiter.Worker
   alias Arbiter.Worker.Watchdog
 
   defmodule PushedResolver do
@@ -166,7 +169,8 @@ defmodule Arbiter.Worker.WatchdogPostApprovalPushTest do
   end
 
   # The state a ReviewGate approval at `approved` leaves behind: the task's
-  # `last_reviewed_sha` stamp and a `:reviewed` coverage row.
+  # `last_reviewed_sha` stamp and a `:reviewed` coverage row. bd-741sid: no
+  # worker is attached; the run that opened the PR has ended.
   defp approved_task(ws, mr_ref, approved) do
     task =
       Ash.create!(Issue, %{
@@ -188,17 +192,14 @@ defmodule Arbiter.Worker.WatchdogPostApprovalPushTest do
         round: 1
       })
 
-    {:ok, pid} = Worker.start(task_id: task.id, repo: "arbiter")
-    :ok = Worker.advance(pid, :implement)
-    on_exit(fn -> stop_quietly(pid) end)
-
-    {pid, task, entry}
+    {task, entry}
   end
 
-  defp start_watchdog(worker_pid, task_id, mr_ref, ws, opts \\ []) do
+  # Subscribes to the ticket's Watchdog outcomes before starting it, so no
+  # announcement can be missed.
+  defp start_watchdog(task_id, mr_ref, ws, opts \\ []) do
     base = [
       task_id: task_id,
-      worker: worker_pid,
       mr_ref: mr_ref,
       adapter: StubMerger,
       workspace: ws,
@@ -211,9 +212,17 @@ defmodule Arbiter.Worker.WatchdogPostApprovalPushTest do
       auto_resume_dispatcher: StubAutoResumeDispatcher
     ]
 
+    :ok = Watchdog.subscribe(task_id)
     {:ok, wpid} = Watchdog.start(Keyword.merge(base, opts))
     on_exit(fn -> stop_quietly(wpid) end)
     wpid
+  end
+
+  # bd-741sid: the merge finishes the ticket (`PullRequest.merged/2`), where it
+  # used to complete the worker paired with the Watchdog.
+  defp assert_merged(task_id, timeout \\ 3_000) do
+    assert_receive {:watchdog, ^task_id, {:merged, _}}, timeout
+    assert Ash.get!(Issue, task_id).state == :closed
   end
 
   # Approve at A → CI red → fix pass dispatched → (still running) → the fix
@@ -282,12 +291,12 @@ defmodule Arbiter.Worker.WatchdogPostApprovalPushTest do
         approved = sha("approved-#{@n}")
         pushed = sha("fixpass-#{@n}")
 
-        {pid, task, _entry} = approved_task(ws, mr_ref, approved)
+        {task, _entry} = approved_task(ws, mr_ref, approved)
         StubMerger.set_diff(mr_ref, approved, @approved_diff)
         StubMerger.set_diff(mr_ref, pushed, @diff)
         fix_pass_timeline(mr_ref, approved, pushed)
 
-        wpid = start_watchdog(pid, task.id, mr_ref, ws)
+        wpid = start_watchdog(task.id, mr_ref, ws)
         ref = Process.monitor(wpid)
 
         assert_receive {:DOWN, ^ref, :process, ^wpid, :normal}, 3_000
@@ -323,12 +332,12 @@ defmodule Arbiter.Worker.WatchdogPostApprovalPushTest do
         approved = sha("approved-on-#{@n}")
         pushed = sha("fixpass-on-#{@n}")
 
-        {pid, task, _entry} = approved_task(ws, mr_ref, approved)
+        {task, _entry} = approved_task(ws, mr_ref, approved)
         StubMerger.set_diff(mr_ref, approved, @approved_diff)
         StubMerger.set_diff(mr_ref, pushed, @diff)
         fix_pass_timeline(mr_ref, approved, pushed)
 
-        wpid = start_watchdog(pid, task.id, mr_ref, ws)
+        wpid = start_watchdog(task.id, mr_ref, ws)
         ref = Process.monitor(wpid)
 
         assert_receive {:DOWN, ^ref, :process, ^wpid, :normal}, 3_000
@@ -353,14 +362,14 @@ defmodule Arbiter.Worker.WatchdogPostApprovalPushTest do
         approved = sha("approved-eq-#{@coverage_enabled?}")
         pushed = sha("rebased-eq-#{@coverage_enabled?}")
 
-        {pid, task, entry} = approved_task(ws, mr_ref, approved)
+        {task, entry} = approved_task(ws, mr_ref, approved)
         StubMerger.set_diff(mr_ref, approved, @approved_diff)
         StubMerger.set_diff(mr_ref, pushed, @rebased_diff)
         fix_pass_timeline(mr_ref, approved, pushed)
 
-        start_watchdog(pid, task.id, mr_ref, ws)
+        start_watchdog(task.id, mr_ref, ws)
 
-        wait_until(fn -> Worker.state(pid).status == :completed end)
+        assert_merged(task.id)
 
         assert StubMerger.last_merge() == {mr_ref, pushed}
         assert StubAutoResumeDispatcher.resume_count() == 0
@@ -381,7 +390,7 @@ defmodule Arbiter.Worker.WatchdogPostApprovalPushTest do
       pushed = sha("resolved-conflict")
       {_label, authored} = hd(@shapes)
 
-      {pid, task, _entry} = approved_task(ws, mr_ref, approved)
+      {task, _entry} = approved_task(ws, mr_ref, approved)
       StubMerger.set_diff(mr_ref, approved, @approved_diff)
       StubMerger.set_diff(mr_ref, pushed, authored)
 
@@ -397,7 +406,7 @@ defmodule Arbiter.Worker.WatchdogPostApprovalPushTest do
       ])
 
       wpid =
-        start_watchdog(pid, task.id, mr_ref, ws,
+        start_watchdog(task.id, mr_ref, ws,
           conflict_resolver: PushedResolver,
           max_conflict_attempts: 2
         )
@@ -421,7 +430,7 @@ defmodule Arbiter.Worker.WatchdogPostApprovalPushTest do
       merged = sha("update-branch-ub")
       {_label, authored} = hd(@shapes)
 
-      {pid, task, _entry} = approved_task(ws, mr_ref, approved)
+      {task, _entry} = approved_task(ws, mr_ref, approved)
       StubMerger.set_diff(mr_ref, approved, @approved_diff)
       StubMerger.set_diff(mr_ref, merged, authored)
 
@@ -443,7 +452,7 @@ defmodule Arbiter.Worker.WatchdogPostApprovalPushTest do
         %{status: :open, approved: true, head_sha: merged, base_ref: "main"}
       ])
 
-      wpid = start_watchdog(pid, task.id, mr_ref, ws, max_auto_resolve_attempts: 2)
+      wpid = start_watchdog(task.id, mr_ref, ws, max_auto_resolve_attempts: 2)
       ref = Process.monitor(wpid)
       assert_receive {:DOWN, ^ref, :process, ^wpid, :normal}, 3_000
 
@@ -461,7 +470,7 @@ defmodule Arbiter.Worker.WatchdogPostApprovalPushTest do
       pushed = sha("fixpass-susp")
       {_label, authored} = hd(@shapes)
 
-      {pid, task, _entry} = approved_task(ws, mr_ref, approved)
+      {task, _entry} = approved_task(ws, mr_ref, approved)
       StubMerger.set_diff(mr_ref, approved, @approved_diff)
       StubMerger.set_diff(mr_ref, pushed, authored)
 
@@ -486,7 +495,7 @@ defmodule Arbiter.Worker.WatchdogPostApprovalPushTest do
         %{status: :open, approved: true, head_sha: pushed, base_ref: "main"}
       ])
 
-      wpid = start_watchdog(pid, task.id, mr_ref, ws, max_auto_resolve_attempts: 2)
+      wpid = start_watchdog(task.id, mr_ref, ws, max_auto_resolve_attempts: 2)
       ref = Process.monitor(wpid)
       assert_receive {:DOWN, ^ref, :process, ^wpid, :normal}, 3_000
 
@@ -507,7 +516,7 @@ defmodule Arbiter.Worker.WatchdogPostApprovalPushTest do
       pushed = sha("fixpass-defer")
       {_label, authored} = hd(@shapes)
 
-      {pid, task, _entry} = approved_task(ws, mr_ref, approved)
+      {task, _entry} = approved_task(ws, mr_ref, approved)
       StubMerger.set_diff(mr_ref, approved, @approved_diff)
       StubMerger.set_diff(mr_ref, pushed, authored)
       fix_pass_timeline(mr_ref, approved, pushed)
@@ -521,6 +530,9 @@ defmodule Arbiter.Worker.WatchdogPostApprovalPushTest do
           end
         end)
 
+      # The pre-bd-741sid `<task>:fixpass` registration, still handled as a
+      # transient block: since bd-741sid a pass registers under the ticket id,
+      # and a live one refuses the resume as `{:worker_active, _}`.
       StubAutoResumeDispatcher.arm_resume_error(
         {:worker_start_failed,
          {:task_worker_live,
@@ -533,7 +545,7 @@ defmodule Arbiter.Worker.WatchdogPostApprovalPushTest do
           }}}
       )
 
-      wpid = start_watchdog(pid, task.id, mr_ref, ws, interval_ms: 60_000, initial_delay_ms: 0)
+      wpid = start_watchdog(task.id, mr_ref, ws, interval_ms: 60_000, initial_delay_ms: 0)
       ref = Process.monitor(wpid)
 
       # The first three polls are scheduled at `interval_ms`, so drive them.

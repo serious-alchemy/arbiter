@@ -8,10 +8,10 @@ defmodule ArbiterCli.Cmd.Queue do
                                                    its budget on a :ci_failed
                                                    block and parked (bd-bspakl)
       arb queue restart-watchdog <task-id>      — mint a fresh merge Watchdog
-                                                   for a task whose Watchdog
-                                                   died, attached to the MR its
-                                                   worker already has open
-                                                   (bd-8jixav)
+                                                   for a Merging ticket whose
+                                                   Watchdog died, from the
+                                                   ticket's row (bd-8jixav,
+                                                   bd-741sid)
       arb queue rerun-ci <task-id> [--mode M]  — re-run a parked task's CI,
                                                    choosing the granularity
                                                    (bd-5mzzww)
@@ -29,11 +29,11 @@ defmodule ArbiterCli.Cmd.Queue do
 
   `restart-watchdog` recovers the *other* failure: a Watchdog is a `:temporary`
   process, so when it crashes it is gone for good and nothing announces it. The
-  worker stays parked at `:awaiting_review` and its MR stays open, unpolled,
-  forever — and `retry-auto-resolve` cannot help, because there is no Watchdog
-  left to re-arm. `restart-watchdog` starts a replacement on the same MR,
-  replaying the lane (auto-merge, review-gate) the original ran on, without a
-  full re-dispatch through the review gate. It refuses when a Watchdog is
+  ticket stays Merging and its MR stays open, unpolled, forever — and
+  `retry-auto-resolve` cannot help, because there is no Watchdog left to
+  re-arm. `restart-watchdog` starts a replacement on the same MR from the
+  ticket's row, replaying the lane (auto-merge, review-gate) the original ran
+  on, without a full re-dispatch through the review gate. It refuses when a Watchdog is
   already running: two on one MR would race the merge and double-dispatch fix
   passes. `restart_watchdog` (underscored) is accepted as an alias.
 

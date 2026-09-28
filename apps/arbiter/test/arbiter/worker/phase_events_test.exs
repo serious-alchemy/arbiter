@@ -59,11 +59,10 @@ defmodule Arbiter.Worker.PhaseEventsTest do
     refute_receive {:event, %{topic: "worker_phase"}}, 300
   end
 
-  test "parking at :awaiting_review announces waiting_ci_merge", %{pid: pid, task: task} do
-    # The author's agent is long gone by the time the MR opens: the record says
-    # :awaiting_review, the honest phase is "waiting on CI / merge", and the
-    # `worker_phase` topic has to say so — this is one of the two transitions
-    # the ticket exists to surface.
+  test "opening the MR ends the run: it announces done", %{pid: pid, task: task} do
+    # bd-741sid: the author's agent is long gone by the time the MR opens, and
+    # the run ends there — the ticket and its Watchdog own the PR. The
+    # `worker_phase` topic says the run is done, not that it is still parked.
     StubMerger.reset()
     StubMerger.next_open_ref("!91")
 
@@ -73,8 +72,7 @@ defmodule Arbiter.Worker.PhaseEventsTest do
              Worker.open_mr(pid, "feature/phase", "Phase", "desc", %{
                adapter: StubMerger,
                workspace: nil,
-               # Park the Watchdog well past the test so it can't poll the stub
-               # and complete the worker out from under the assertion.
+               # Park the Watchdog well past the test so it can't poll the stub.
                interval_ms: 1_000_000,
                initial_delay_ms: 1_000_000
              })
@@ -82,8 +80,8 @@ defmodule Arbiter.Worker.PhaseEventsTest do
     event = await_event("worker_phase")
 
     assert event.task_id == task.id
-    assert event.phase == "waiting_ci_merge"
-    assert event.status == "awaiting_review"
+    assert event.phase == "done"
+    assert event.status == "completed"
     assert event.agent_live == false
   end
 

@@ -23,14 +23,12 @@ defmodule Arbiter.Worker do
       :running           → :awaiting          (await/2 — parked, generic external wait)
       :awaiting          → :running           (resume/1)
       :running           → :awaiting_review_gate (arb-done when review is required)
-      :awaiting_review_gate → :awaiting_review   (review_gate_verdict/2 :approve → merge)
+      :awaiting_review_gate → :completed         (review_gate_verdict/2 :approve → PR opened)
       :awaiting_review_gate → :failed            (review_gate_verdict/2 reject → parked)
-      :failed            → :awaiting_review_gate (review_gate_verdict/2 :approve, and the
+      :failed            → :completed         (review_gate_verdict/2 :approve, and the
                                               run is terminal *only* because of an earlier
                                               ReviewGate rejection — bd-3wumco)
-      :running           → :awaiting_review   (open_mr/5 — MR opened, parked for review)
-      :awaiting_review   → :completed         (complete/2 — MR merged)
-      :awaiting_review   → :failed            (fail/2 — MR closed/rejected)
+      :running           → :completed         (open_mr/5 — PR opened; the run ends)
       :running           → :completed         (complete/2 — normal exit)
       :running           → :failed            (fail/2)
       :awaiting          → :failed            (fail/2)
@@ -67,16 +65,18 @@ defmodule Arbiter.Worker do
   inconclusive verdict, is still refused — reconciliation only moves a task
   forward.
 
-  ## Merge-request review (`:awaiting_review`)
+  ## Opening the PR ends the run (bd-741sid)
 
-  When a worker finishes its work the worker opens a merge request via
-  `open_mr/5` instead of completing immediately. That call resolves the
-  workspace's merger adapter (`Arbiter.Mergers.for_workspace/1`), opens the
-  MR, stores the `mr_ref` + clickable `merger_url` on the worker, transitions
-  to `:awaiting_review`, and spawns an `Arbiter.Worker.Watchdog` to poll for
-  approval. The Watchdog — not the worker's `arb done` — owns the terminal
-  transition: it completes the worker when the MR merges, or fails it when the
-  MR is closed. See `Arbiter.Worker.Watchdog`.
+  When a worker finishes its work it opens a merge request via `open_mr/5`
+  instead of completing immediately. That call resolves the workspace's merger
+  adapter (`Arbiter.Mergers.for_workspace/1`), opens the MR and records it on
+  the ticket — the ref, its clickable `merger_url` and the lane its Watchdog
+  watches it on (`Arbiter.Tasks.PullRequest`) — in the ticket's `open_pr`
+  transition, starts the ticket's `Arbiter.Worker.Watchdog` from that row, and
+  then the run is over: recorded finished and successful, and the worker
+  exits. The ticket and its Watchdog own the PR from there — the merge, a
+  red CI run, a conflict, a PR closed unmerged. No worker stays resident on an
+  open PR.
 
   This is also the path the `arb done` marker takes in claude-driven mode: when
   the worker knows its branch (a worktree was provisioned at dispatch time) the
@@ -161,10 +161,9 @@ defmodule Arbiter.Worker do
       :task_id,
       # Registry name this worker is registered under. Defaults to task_id
       # but can be overridden via the `:registry_key` start opt so multiple
-      # workers can coexist for the same task (e.g. the merge queue's short-lived
-      # conflict-resolver runs alongside the original work worker under a
-      # `task_id <> ":conflict"` key). `terminate/2` uses this when
-      # unregistering so we don't accidentally wipe the task's primary slot.
+      # workers can coexist for the same task (a ReviewGate round's
+      # `<task_id>#review` id, say). `terminate/2` uses this when unregistering
+      # so we don't accidentally wipe the task's primary slot.
       :registry_key,
       :workspace_id,
       :repo,
@@ -268,14 +267,6 @@ defmodule Arbiter.Worker do
   @resume_backoff_default_base_ms 1_000
   @resume_backoff_max_ms 30_000
 
-  # Ceiling on `restart_watchdog/1`'s call into the worker (bd-8jixav). The
-  # worker is parked at `:awaiting_review` — idle by definition — but the
-  # handler runs `Mergers.prepare_with_repo/2`, which for a hosted forge
-  # rewrites per-process adapter config and can shell out. Generous enough that
-  # a slow forge config step doesn't read as a failure; bounded so a wedged
-  # worker degrades to `{:error, :busy}` instead of taking its caller down.
-  @restart_watchdog_timeout_ms 15_000
-
   # Ceiling on `start_or_reap_terminal/1`'s stop of a terminal worker. Its
   # `terminate/2` only finalizes a run row and flushes session usage, so this is
   # generous; the point is that a wedged teardown can't block a merge-queue tick.
@@ -321,10 +312,8 @@ defmodule Arbiter.Worker do
     * `:workspace_id`   — string.
     * `:meta`           — initial map of workflow-specific state.
     * `:registry_key`   — string. Overrides the registry key (defaults to
-      `:task_id`). Lets multiple workers coexist for the same task — the
-      merge queue's conflict-resolver worker uses `task_id <> ":conflict"` so
-      it doesn't collide with the completed-but-still-resident original
-      work worker (whose lifecycle is tied to task `:close`).
+      `:task_id`). Fix and conflict passes no longer need one: since bd-741sid
+      they are ordinary runs of the ticket, registered under its id.
   """
   @spec start(keyword()) :: DynamicSupervisor.on_start_child()
   def start(opts) when is_list(opts) do
@@ -362,8 +351,9 @@ defmodule Arbiter.Worker do
   # caller were mutually invisible:
   #
   #   * `Dispatch.dispatch/2` and `.resume/2` guard via `Worker.whereis/1`, which
-  #     only resolves the *exact* task_id key — it cannot see a subordinate
-  #     holding `<task_id>:fixpass` / `<task_id>:conflict`.
+  #     only resolves the *exact* task_id key — it cannot see a worker under a
+  #     sibling key of the task's exclusive family (before bd-741sid, the
+  #     merge queue's per-kind fix / conflict pass keys).
   #   * `MergeQueue.FixPassDispatcher` and `.ConflictResolver` call
   #     `start_or_reap_terminal/1` and only ever collide with their OWN key, so
   #     they cannot see the primary.
@@ -405,9 +395,8 @@ defmodule Arbiter.Worker do
   end
 
   @doc """
-  The first subordinate worker for `task_id` — a `<task_id>:fixpass` or
-  `<task_id>:conflict` pass, i.e. the exclusive family minus the task's own key
-  — that is still driving an agent, as `%{registry_key:, pid:, status:, ...}`,
+  The first worker in `task_id`'s exclusive family, minus the task's own key,
+  that is still driving an agent, as `%{registry_key:, pid:, status:, ...}`,
   or `nil`. Same probe (and same "unresponsive counts as active" rule) as the
   single-active-worker guard in `start/1`.
   """
@@ -443,6 +432,35 @@ defmodule Arbiter.Worker do
         }
       end
     end)
+  end
+
+  @doc """
+  What a pass dispatcher reports when `pid` already holds ticket `task_id`'s
+  key (bd-741sid): `{same_role_error, pid}` when it is the same kind of pass
+  (`role`) still in flight from an earlier dispatch, otherwise the
+  single-active-run refusal (`{:task_worker_live, info}`, bd-8tjcms) naming the
+  run that holds the ticket. An unresponsive worker is treated as the busy pass.
+  """
+  @spec live_run_refusal(String.t(), pid(), atom(), atom()) :: term()
+  def live_run_refusal(task_id, pid, role, same_role_error) when is_pid(pid) do
+    case safe_snapshot(pid) do
+      %{status: status, meta: meta} ->
+        if role_from_meta(meta) == role do
+          {same_role_error, pid}
+        else
+          {:task_worker_live,
+           %{
+             task_id: task_id,
+             registry_key: task_id,
+             requested_key: task_id,
+             pid: pid,
+             status: status
+           }}
+        end
+
+      _ ->
+        {same_role_error, pid}
+    end
   end
 
   # Only actual `Arbiter.Worker` processes may be probed with `:snapshot`.
@@ -556,8 +574,8 @@ defmodule Arbiter.Worker do
   `:close` after-action owns its teardown, and its post-mortem state is what
   `arb worker show` reads. For a merge-queue *subordinate* pass it is a trap.
   Both the Watchdog's `fix_pass_active?/1` and the merge queue treat a terminal
-  pass as "not running" and re-dispatch, but the dead pass still holds
-  `<task_id>:fixpass` / `<task_id>:conflict`, so every re-dispatch returns
+  pass as "not running" and re-dispatch, but the dead pass still holds its
+  registry key (the ticket's own id since bd-741sid), so every re-dispatch returns
   `{:error, {:already_started, pid}}` forever: the retry silently no-ops, the
   attempt budget drains, and the task parks with nothing running — the #1204
   symptom. Reaping here makes the "the merge queue re-dispatches automatically"
@@ -710,12 +728,11 @@ defmodule Arbiter.Worker do
   defp degraded_snapshot(_pid, nil), do: []
 
   defp degraded_snapshot(pid, registry_key) do
-    # bd-45tkhq: a merge-queue subordinate pass (FixPassDispatcher,
-    # ConflictResolver) registers under `<task_id>:fixpass` / `<task_id>:conflict`
-    # while its `Arbiter.Workers.Run` row is keyed on the plain `task_id`
-    # (see record_run_started/1 below). Strip only a `:`-suffix so the run
-    # lookup still finds it — a review-gate `#`-id genuinely *is* the
-    # worker's own `task_id` and must not be touched.
+    # bd-45tkhq: a worker under a `:`-suffixed registry key keeps its
+    # `Arbiter.Workers.Run` row on the plain `task_id` (see
+    # record_run_started/1 below). Strip only a `:`-suffix so the run lookup
+    # still finds it — a review-gate `#`-id genuinely *is* the worker's own
+    # `task_id` and must not be touched.
     task_id = registry_key |> String.split(":", parts: 2) |> List.first()
 
     case latest_run(task_id) do
@@ -832,69 +849,14 @@ defmodule Arbiter.Worker do
     do: GenServer.call(pid, {:snapshot, {notify, ref}})
 
   @doc """
-  Mint a **fresh** `Arbiter.Worker.Watchdog` for a worker parked at
-  `:awaiting_review` whose Watchdog is no longer running (bd-8jixav).
-
-  A Watchdog is a `:temporary` child: if it crashes it is gone for good, with
-  no notification and no supervisor restart. The worker stays parked at
-  `:awaiting_review` with a genuinely-open MR that nothing is polling, and the
-  board renders it identically to a healthily-parked one. This is the
-  recovery.
-
-  It is *not* `Watchdog.retry_auto_resolve/1`, which messages an
-  already-running Watchdog to re-arm its auto-resolve budget and is a no-op
-  (`{:error, :not_found}`) once the process is gone. Nor is it
-  `Dispatch.resume/2`, which stops the worker and re-runs the whole review
-  gate from round 1 at real cost — here the MR is fine and only the watcher
-  died.
-
-  The new Watchdog is built by the same `build_watchdog_opts/3` the original
-  used, from the worker's own live state (`mr_ref`, `merger_adapter`, `repo`,
-  `workspace_id`) plus the `:watchdog_opts` slice recorded in meta when the MR
-  was opened — so the replacement watches the same MR on the same lane, and
-  starts its poll count from scratch.
-
-  Returns:
-
-    * `:ok` — a fresh Watchdog is registered and polling.
-    * `{:error, :no_worker}` — no worker is registered for `task_id`. Nothing
-      to attach a Watchdog to; the task needs a dispatch/resume, not this.
-    * `{:error, {:not_parked, status}}` — the worker is alive but not parked
-      at `:awaiting_review`, so there is no open MR for a Watchdog to watch.
-    * `{:error, :already_running}` — a Watchdog is already live for this task.
-      Refused rather than stacked: two Watchdogs polling one MR would race on
-      the merge and double-dispatch fix passes. The `<task_id>:watchdog`
-      registry name makes this atomic — a start that loses the race is
-      rejected by the registry, not by the (racy) liveness pre-check.
-    * `{:error, :no_mr_ref}` / `{:error, :no_adapter}` — the worker parked
-      without recording what to watch (shouldn't happen; surfaced rather than
-      papered over).
-    * `{:error, {:start_failed, reason}}` — `Watchdog.start/1` refused.
-    * `{:error, :busy}` — the worker didn't answer in time.
+  Start the Watchdog for ticket `task_id` from its row alone (bd-8jixav,
+  bd-741sid). The ticket, not a parked worker, holds the PR ref and the lane
+  its Watchdog watches it on, so this needs no worker at all. See
+  `Arbiter.Worker.Watchdog.restart/1` for the return contract.
   """
-  @spec restart_watchdog(ref()) ::
-          :ok
-          | {:error,
-             :no_worker
-             | :already_running
-             | :no_mr_ref
-             | :no_adapter
-             | :busy
-             | {:not_parked, atom()}
-             | {:start_failed, term()}}
-  def restart_watchdog(pid) when is_pid(pid) do
-    GenServer.call(pid, :restart_watchdog, @restart_watchdog_timeout_ms)
-  catch
-    :exit, {:timeout, _} -> {:error, :busy}
-    :exit, _ -> {:error, :no_worker}
-  end
-
-  def restart_watchdog(task_id) when is_binary(task_id) do
-    case whereis(task_id) do
-      nil -> {:error, :no_worker}
-      pid -> restart_watchdog(pid)
-    end
-  end
+  @spec restart_watchdog(String.t()) :: :ok | {:error, term()}
+  def restart_watchdog(task_id) when is_binary(task_id),
+    do: Arbiter.Worker.Watchdog.restart(task_id)
 
   @doc """
   Does this worker currently own an agent subprocess that has not exited?
@@ -943,13 +905,13 @@ defmodule Arbiter.Worker do
   def resume(ref), do: call(ref, :resume)
 
   @doc """
-  Open a merge request for `branch` and park the worker at
-  `:awaiting_review`.
+  Open a merge request for `branch`, hand it to the ticket, and end the run.
 
-  Resolves the workspace's merger adapter, calls `open/4`, stores the resulting
-  `mr_ref` + clickable `merger_url`, transitions `:running -> :awaiting_review`,
-  and spawns an `Arbiter.Worker.Watchdog` to poll for approval. Only valid from
-  `:running`.
+  Resolves the workspace's merger adapter, calls `open/4`, records the
+  resulting `mr_ref`, its clickable `merger_url` and the Watchdog's lane on the
+  ticket (its `open_pr` transition, bd-741sid), and starts the ticket's
+  `Arbiter.Worker.Watchdog` from that row. The run is then recorded finished
+  and successful and the worker exits. Only valid from `:running`.
 
   `opts` is a map forwarded to the adapter's `open/4` (`:target_branch`,
   `:reviewer_ids`, `:labels`, and — for `Direct` — `:repo_path`, which defaults
@@ -973,18 +935,6 @@ defmodule Arbiter.Worker do
   end
 
   @doc """
-  Record the latest `Arbiter.Mergers.get/1` result on the worker's `:meta`
-  (as `:last_merger_status`) along with a `:last_checked_at` timestamp.
-
-  Called by the `Arbiter.Worker.Watchdog` on every poll so the dashboard and
-  detail view can surface approval status and freshness without holding the
-  Watchdog's state.
-  """
-  @spec record_merger_status(ref(), map()) :: :ok | {:error, term()}
-  def record_merger_status(ref, status) when is_map(status),
-    do: call(ref, {:record_merger_status, status})
-
-  @doc """
   Mark the workflow completed. Only valid from `:running`. The worker keeps
   running (so callers can read the final state) but rejects further
   transitions.
@@ -995,28 +945,12 @@ defmodule Arbiter.Worker do
   @doc """
   Mark the workflow failed. Valid from `:running` or `:awaiting`.
 
-  `slot_handoff: true` (bd-92mx1m) marks a failure that exists only so an
-  automatic round can replace this worker — the Watchdog's awaiting_review
-  auto-resume. The task keeps its slot through the hand-off
-  (`Arbiter.Worker.Phase` reads it as `:handing_off`, not `:waiting_on_you`)
-  until the round starts or `clear_slot_handoff/1` gives it up.
+  There is no slot hand-off failure any more (bd-741sid): a ticket holds its
+  slot while it is In progress, whatever its run did (bd-asxw4e), so a worker
+  never has to fail "only so an automatic round can replace it".
   """
-  @spec fail(ref(), term(), keyword()) :: :ok | {:error, term()}
-  def fail(ref, reason \\ nil, opts \\ [])
-
-  def fail(ref, reason, []), do: call(ref, {:fail, reason})
-
-  def fail(ref, reason, opts) when is_list(opts),
-    do: call(ref, {:fail, reason, Keyword.get(opts, :slot_handoff) == true})
-
-  @doc """
-  Drop a pending slot hand-off (`fail/3`'s `slot_handoff: true`, or the
-  ReviewGate fix round's): the automatic round it was waiting for will not
-  run, so the worker is parked for a human now and its task releases its slot.
-  A no-op on a worker that carries no hand-off.
-  """
-  @spec clear_slot_handoff(ref()) :: :ok | {:error, term()}
-  def clear_slot_handoff(ref), do: call(ref, :clear_slot_handoff)
+  @spec fail(ref(), term()) :: :ok | {:error, term()}
+  def fail(ref, reason \\ nil), do: call(ref, {:fail, reason})
 
   @doc """
   Deliver a ReviewGate (review-gate) verdict. Only valid from `:awaiting_review_gate`
@@ -1046,6 +980,39 @@ defmodule Arbiter.Worker do
         ) ::
           :ok | {:error, term()}
   def review_gate_verdict(ref, verdict), do: call(ref, {:review_gate_verdict, verdict})
+
+  @doc """
+  Apply a ReviewGate verdict to ticket `task_id` when no author run is
+  resident (bd-741sid) — the fallback `Arbiter.Worker.ReviewGate.deliver_verdict/4`
+  takes when the author is gone. The ReviewGate reports to the ticket.
+
+  The author's context is rebuilt from the ticket — its ReviewGate round state
+  (`review_gate_state`), its repo and workspace, its latest run — over what
+  the gate knows (`ctx`: `:branch`, `:worktree_path`, `:target_branch`,
+  `:repo`, `:pr_ref`), and the verdict takes the path it takes in a resident
+  author:
+
+    * APPROVE opens (or adopts) the PR, records it on the ticket and hands it
+      to the ticket's Watchdog: the ticket goes to Merging. When the round had
+      been rejected, the rejection is overturned exactly as bd-3wumco does for
+      a resident author: the run row is rewritten finished and successful, the
+      review park is cleared, and the coordinator is told the earlier
+      escalation is superseded.
+    * REQUEST_CHANGES, an inconclusive review, or a park is recorded on the
+      ticket and escalated, and a rejection still schedules the implementer's
+      fix round.
+
+  Runs in the caller's process; nothing here needs the author's. Only an
+  In-progress ticket takes a verdict: `{:error, {:not_in_review, state}}`
+  otherwise.
+  """
+  @spec apply_review_gate_verdict_to_ticket(String.t(), term(), map()) :: :ok | {:error, term()}
+  def apply_review_gate_verdict_to_ticket(task_id, verdict, ctx \\ %{})
+      when is_binary(task_id) and is_map(ctx) do
+    with {:ok, state} <- ticket_round_state(task_id, ctx) do
+      apply_ticket_verdict(state, verdict)
+    end
+  end
 
   @doc """
   Record an arbitrary key/value pair in the worker's `:meta` map.
@@ -1228,8 +1195,8 @@ defmodule Arbiter.Worker do
   between the old field and the new one.
 
   Self-derived: a worker can only see its own row, so an author reports
-  `:implementing` / `:waiting_ci_merge` / `:waiting_on_you` / `:handing_off`
-  and a reviewer / implementer / fix pass reports its own round. The board and
+  `:implementing` / `:waiting_ci_merge` / `:waiting_on_you` and a reviewer /
+  implementer / fix pass reports its own round. The board and
   the worker-list surfaces, which see the whole fleet, fold a live round back
   into the author's card.
 
@@ -1291,28 +1258,32 @@ defmodule Arbiter.Worker do
   end
 
   @doc """
-  True when this worker is a **subordinate** pass rather than the task's own
-  primary worker (bd-8lq2g7).
+  True when this worker is a merge-path **pass** rather than the run that
+  authors the ticket's change (bd-8lq2g7): the CI fix pass
+  (`Arbiter.Workflows.MergeQueue.FixPassDispatcher`, role `:fix_pass`) or the
+  conflict pass (`.ConflictResolver`, role `:conflict_resolver`).
 
-  A subordinate runs under the task's own `task_id` — so its runs, usage, and
-  escalations stay attributed to the task — but registers under a distinct
-  registry key so it can coexist with the primary. The merge queue starts two:
-  the CI fix pass (`<task_id>:fixpass`, `Arbiter.Workflows.MergeQueue.FixPassDispatcher`)
-  and the conflict resolver (`<task_id>:conflict`, `.ConflictResolver`). Both
-  run *while* the primary sits parked at `:awaiting_review` awaiting the merge.
-
-  This is why `worker_list` can show two rows for one `task_id`, and why a
-  subordinate's death must not be reported as the task's worker dying: the
-  remedy for a dead subordinate is never "stop and resume the task's worker".
+  Since bd-741sid a pass is an ordinary run on its ticket, registered under
+  the ticket id — no implementer is parked beside it any more — so it is told
+  apart by its role (a pre-bd-741sid registration under a distinct key still
+  counts). What it is for is unchanged: a pass's death must not be reported as
+  the task's worker dying, because the remedy is never "stop and resume the
+  task's worker" — the ticket's Watchdog dispatches the next pass.
 
   Accepts either a `%State{}` or a `snapshot/1` map.
   """
   @spec subordinate?(map()) :: boolean()
-  def subordinate?(%{task_id: task_id, registry_key: key})
+  def subordinate?(%{task_id: task_id, registry_key: key} = worker)
       when is_binary(key) and is_binary(task_id),
-      do: key != task_id
+      do: key != task_id or pass_role?(worker)
 
+  def subordinate?(worker) when is_map(worker), do: pass_role?(worker)
   def subordinate?(_), do: false
+
+  defp pass_role?(worker) do
+    role = Map.get(worker, :role) || role_from_meta(Map.get(worker, :meta))
+    role in [:fix_pass, :conflict_resolver]
+  end
 
   @doc """
   Human-readable label for a subordinate worker's role, e.g. `"fix pass"`.
@@ -2255,10 +2226,6 @@ defmodule Arbiter.Worker do
     {:reply, snapshot(state), state}
   end
 
-  # bd-8jixav: see `restart_watchdog/1`.
-  def handle_call(:restart_watchdog, _from, %State{} = state),
-    do: {:reply, do_restart_watchdog(state), state}
-
   # bd-2aslx6: see `agent_session_live?/1`.
   def handle_call(:agent_session_live?, _from, %State{} = state) do
     {:reply, session_live?(state), state}
@@ -2337,21 +2304,6 @@ defmodule Arbiter.Worker do
     {:reply, {:error, {:invalid_transition, status, :awaiting_review}}, state}
   end
 
-  def handle_call({:record_merger_status, status_map}, _from, %State{} = state) do
-    meta =
-      state.meta
-      |> Map.put(:last_merger_status, status_map)
-      |> Map.put(:last_checked_at, DateTime.utc_now())
-
-    new_state = %State{state | meta: meta}
-
-    # Each Watchdog poll lands here. Push an :updated lifecycle event so the
-    # merge-queue view's approval status + last-checked freshness stay live.
-    broadcast_lifecycle(:updated, new_state)
-
-    {:reply, :ok, new_state}
-  end
-
   def handle_call({:complete, result}, _from, %State{status: status} = state)
       when status in [:running, :awaiting_review] do
     {:reply, :ok, complete_now(state, result)}
@@ -2368,19 +2320,6 @@ defmodule Arbiter.Worker do
 
   def handle_call({:fail, _reason}, _from, %State{status: status} = state) do
     {:reply, {:error, {:invalid_transition, status, :failed}}, state}
-  end
-
-  def handle_call({:fail, reason, handoff?}, _from, %State{status: status} = state)
-      when status in [:idle, :running, :awaiting, :awaiting_review] do
-    {:reply, :ok, fail_now(put_slot_handoff(state, handoff?), reason)}
-  end
-
-  def handle_call({:fail, _reason, _handoff?}, _from, %State{status: status} = state) do
-    {:reply, {:error, {:invalid_transition, status, :failed}}, state}
-  end
-
-  def handle_call(:clear_slot_handoff, _from, %State{} = state) do
-    {:reply, :ok, drop_slot_handoff(state)}
   end
 
   def handle_call(
@@ -2762,22 +2701,19 @@ defmodule Arbiter.Worker do
   # `park_rejected/4` so it lands after that call's reply, with `status` already
   # `:failed`. Never crashes the worker: the whole decision is best-effort.
   def handle_info({:__review_gate_fix_round__, verdict, findings}, %State{} = state) do
-    case maybe_dispatch_fix_round(state, verdict, findings) do
-      :started -> {:noreply, state}
-      _ -> {:noreply, drop_slot_handoff(state)}
-    end
-  end
-
-  # bd-92mx1m: the fix round's resume failed before it could replace this
-  # worker (a missing worktree, an unresolvable repo…). Nothing will run, so
-  # this is a park for a human now, and the task gives its slot up.
-  def handle_info(:__fix_round_dispatch_failed__, %State{} = state) do
-    {:noreply, drop_slot_handoff(state)}
+    _ = maybe_dispatch_fix_round(state, verdict, findings)
+    {:noreply, state}
   end
 
   # Any other monitor DOWN (the ReviewGate's expected exit AFTER a verdict, or an
   # unrelated monitor) — nothing to do.
   def handle_info({:DOWN, _ref, :process, _pid, _reason}, state), do: {:noreply, state}
+
+  # bd-741sid: the run ended with its PR open (`finish_run_after_pr_opened/1`),
+  # recorded and announced; stop. Posted to self so the verdict / `open_mr/5`
+  # caller gets its reply first. `terminate/2` sees `:completed` and leaves
+  # the run row alone.
+  def handle_info(:__run_finished__, %State{} = state), do: {:stop, :normal, state}
 
   # bd-aje6fj: linked exits, now that the worker traps them. The parent
   # supervisor's own exit never reaches here — `gen_server` handles it and goes
@@ -3160,6 +3096,7 @@ defmodule Arbiter.Worker do
     record_run_finished(new_state)
     Arbiter.Messages.CoordinatorNotifier.failed(snapshot(new_state))
     broadcast_worker_failed(new_state)
+    return_pass_ticket(new_state)
     announce_phase(new_state)
   end
 
@@ -3172,7 +3109,19 @@ defmodule Arbiter.Worker do
     record_run_finished(new_state)
     Arbiter.Messages.CoordinatorNotifier.failed(snapshot(new_state))
     broadcast_worker_failed(new_state)
+    return_pass_ticket(new_state)
     announce_phase(new_state)
+  end
+
+  # bd-741sid: a fix or conflict pass that ends without finishing still leaves
+  # its ticket's PR open — back to Merging, so the ticket's Watchdog (restarted
+  # from the row if it is gone) decides what happens next: another bounded
+  # pass, or a park and a page.
+  defp return_pass_ticket(%State{meta: meta, task_id: task_id}) do
+    if pass?(meta), do: Arbiter.Tasks.PullRequest.back_to_merging(task_id)
+    :ok
+  rescue
+    _ -> :ok
   end
 
   # bd-7a0pi8: a terminal failure must never leave a live agent behind. The
@@ -3291,6 +3240,7 @@ defmodule Arbiter.Worker do
     Arbiter.Messages.CoordinatorNotifier.worker_stopped(snapshot(new_state), reason)
     broadcast_lifecycle(:updated, new_state)
     broadcast_worker_failed(new_state)
+    return_pass_ticket(new_state)
     new_state
   end
 
@@ -3427,15 +3377,55 @@ defmodule Arbiter.Worker do
   defp on_claude_done(%State{} = state) do
     %State{meta: meta} = state
 
-    if task_type?(meta) and not review_only?(meta) do
-      case notes_gate(state) do
-        :ok -> complete_now(note_tasks_running_at_done(state), :claude_done)
-        {:gate, :blank} -> handle_notes_gate(state)
-      end
-    else
-      state = note_tasks_running_at_done(state)
-      on_claude_done_reviewable(state, state.meta)
+    cond do
+      pass?(meta) ->
+        finish_pass(note_tasks_running_at_done(state))
+
+      task_type?(meta) and not review_only?(meta) ->
+        case notes_gate(state) do
+          :ok -> complete_now(note_tasks_running_at_done(state), :claude_done)
+          {:gate, :blank} -> handle_notes_gate(state)
+        end
+
+      true ->
+        state = note_tasks_running_at_done(state)
+        on_claude_done_reviewable(state, state.meta)
     end
+  end
+
+  # bd-741sid: a CI fix pass or a conflict pass — an ordinary run on its ticket
+  # whose deliverable is a push to the PR's existing branch.
+  defp pass?(meta), do: role_from_meta(meta) in [:fix_pass, :conflict_resolver]
+
+  # bd-741sid: the pass is done and its fix is on the PR's branch. The ticket
+  # goes back to Merging and the run ends; the ticket's Watchdog, which kept
+  # watching the PR, takes it from there. Not `complete_now/2`: that announces
+  # the ticket done and hands the PR to the MergeQueue — a second merge driver
+  # on a PR the Watchdog already owns.
+  defp finish_pass(%State{} = state) do
+    finished = %State{
+      state
+      | status: :completed,
+        step_started_at: DateTime.utc_now(),
+        meta: Map.put(state.meta, :result, :pass_finished)
+    }
+
+    record_run_finished(finished)
+    notify_auth_hold_success(finished)
+
+    case Arbiter.Tasks.PullRequest.back_to_merging(state.task_id) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "Worker: #{subordinate_label(state) || "pass"} for task=#{state.task_id} finished " <>
+            "but the ticket could not go back to Merging: #{inspect(reason)}"
+        )
+    end
+
+    send(self(), :__run_finished__)
+    announce_phase(finished)
   end
 
   defp on_claude_done_reviewable(%State{} = state, meta) do
@@ -3823,53 +3813,33 @@ defmodule Arbiter.Worker do
     end
   end
 
-  # bd-4u7a1m: Park at :awaiting_review and spawn a Watchdog against an
-  # already-open PR when a coordinator reviewer approves on a hosted forge.
-  # Mirrors do_open_mr's Watchdog path but skips the adapter.open call since
-  # the PR already exists. The Watchdog calls Worker.complete(:merged) once
-  # the merge lands, so the Driver closes the task only after the code is
-  # actually on main.
-  defp adopt_pr_and_spawn_watchdog(%State{} = state, pr_ref, adapter, workspace, opts) do
+  # bd-4u7a1m: a coordinator reviewer approved on a hosted forge — hand the
+  # already-open PR to a Watchdog. Mirrors `finalize_opened_mr/5` but skips the
+  # adapter.open call since the PR already exists. The Watchdog merges it (or
+  # waits for a human, per the workspace's `auto_merge`) only once it is
+  # actually mergeable, so the task never closes ahead of the code landing.
+  #
+  # bd-741sid: the Watchdog is the ticket's, started from the row, and this
+  # reviewer's run ends here like any other run whose PR is in the Watchdog's
+  # hands. A review-only engagement's ticket stays open for ReviewPatrol
+  # (bd-cw3w9p): the PR is recorded without the Merging transition, and the
+  # Watchdog leaves the ticket open when the PR merges.
+  defp adopt_pr_and_spawn_watchdog(%State{} = state, pr_ref, adapter, _workspace, opts) do
     merger_url = safe_link_for(adapter, pr_ref)
     record_mr_ref_on_run(state, pr_ref, merger_url)
 
-    new_state = %State{
-      state
-      | status: :awaiting_review,
-        mr_ref: pr_ref,
-        merger_url: merger_url,
-        merger_adapter: adapter,
-        step_started_at: DateTime.utc_now(),
-        # bd-8jixav: remember the lane this Watchdog is started on, so
-        # `restart_watchdog/1` can mint an identical replacement if it dies.
-        meta: record_watchdog_opts(state.meta, opts)
-    }
+    record_pr_ref_on_task(state, pr_ref, :engagement,
+      merger_url: merger_url,
+      merge_watch: watch_lane(state, adapter, opts)
+    )
 
-    watchdog_ok? =
-      try do
-        start_watchdog(new_state, workspace, opts) == :ok
-      rescue
-        e ->
-          Logger.warning(
-            "Worker: review_only Watchdog startup raised for task=#{state.task_id}: #{Exception.message(e)}"
-          )
+    new_state = %State{state | mr_ref: pr_ref, merger_url: merger_url, merger_adapter: adapter}
 
-          false
-      catch
-        :exit, reason ->
-          Logger.warning(
-            "Worker: review_only Watchdog startup exit for task=#{state.task_id}: #{inspect(reason)}"
-          )
+    unless start_ticket_watchdog(new_state, opts) == :ok do
+      escalate_watchdog_failure(new_state)
+    end
 
-          false
-      end
-
-    unless watchdog_ok?, do: escalate_watchdog_failure(new_state)
-
-    # bd-aw2cyt: parked at :awaiting_review with no agent — phase
-    # :waiting_ci_merge. Announced after the Watchdog branch resolves so the
-    # event reflects the state we actually settle in.
-    announce_phase(new_state)
+    finish_run_after_pr_opened(new_state)
   end
 
   # Broadcast {:worker_done, task_id} to the workspace MergeQueue when the
@@ -5621,6 +5591,21 @@ defmodule Arbiter.Worker do
         _ -> meta
       end
 
+    # bd-741sid: the round state is the ticket's, so a verdict can still be
+    # applied to it when no author is resident any more.
+    record_review_gate(state, %{
+      branch: branch,
+      pr_ref: Map.get(meta, :review_pr_ref),
+      worktree_path: Map.get(meta, :worktree_path),
+      repo_path: Map.get(meta, :repo_path),
+      target_branch: Map.get(meta, :target_branch),
+      repo: state.repo,
+      verdict: nil,
+      park_reason: nil,
+      reconciled_from: nil,
+      merge_opts: persistable_merge_opts(meta)
+    })
+
     # bd-aw2cyt: the author's agent has already exited by now, so this park is
     # exactly the `:running` -> `:in_review` transition the `worker_phase`
     # topic exists to report. Announce it before the gate spawns.
@@ -5713,6 +5698,7 @@ defmodule Arbiter.Worker do
   # Apply a ReviewGate verdict from :awaiting_review_gate.
   defp apply_review_gate_verdict(%State{} = state, {:approve, findings}) do
     record_review_gate_outcome(state, :approve, findings)
+    record_review_gate(state, %{verdict: :approve})
     branch = Map.get(state.meta, :review_gate_branch) || mergeable_branch(state.meta)
     # Tell the Watchdog the gate approved this MR. Without via_review_gate,
     # hosted-forge adapters (Github) park forever at :awaiting_review waiting
@@ -5816,14 +5802,19 @@ defmodule Arbiter.Worker do
       |> Map.put(:failure_summary, review_gate_failure_summary(verdict, findings))
       |> put_park_reason(park_reason)
 
-    # bd-92mx1m: a rejection that may yet get a fix round is a hand-off, not a
-    # park — the task keeps its slot until `maybe_dispatch_fix_round/3` either
-    # starts the round (whose resume then passes `ResumeSlot` uncapped) or
-    # gives up on it (`drop_slot_handoff/1`, and the slot is released).
-    handoff? = is_nil(park_reason) and verdict == :request_changes
-    state = put_slot_handoff(%State{state | meta: meta}, handoff?)
+    # bd-741sid: no slot hand-off. The ticket stays In progress between
+    # rounds, which is what holds its slot (bd-asxw4e), and the fix round's
+    # resume of an In-progress ticket passes `ResumeSlot` uncapped.
+    failed = fail_now(%State{state | meta: meta}, fail_reason_for(verdict))
 
-    failed = fail_now(state, fail_reason_for(verdict))
+    # bd-741sid: the round state is the ticket's, so the verdict can be read —
+    # and a later round's approval applied — with no author resident.
+    record_review_gate(failed, %{
+      verdict: verdict,
+      park_reason: park_reason,
+      findings_digest: FixRound.findings_digest(findings),
+      fix_round_attempts: fix_round_attempts(failed)
+    })
 
     # bd-a9zb7w: the rejection is recorded and paged — now schedule the
     # implementer. Deferred to a self-message rather than run inline because the
@@ -5842,21 +5833,37 @@ defmodule Arbiter.Worker do
     failed
   end
 
-  # bd-92mx1m: see `fail/3` and `Arbiter.Worker.Phase`. Set on the way into a
-  # hand-off failure; dropped (and the new phase announced, so the board and
-  # the autopilot see the slot come free) when the round will not run.
-  defp put_slot_handoff(%State{} = state, true),
-    do: %State{state | meta: Map.put(state.meta, :slot_handoff, true)}
-
-  defp put_slot_handoff(%State{} = state, _), do: state
-
-  defp drop_slot_handoff(%State{meta: %{slot_handoff: true} = meta} = state),
-    do: announce_phase(%State{state | meta: Map.delete(meta, :slot_handoff)})
-
-  defp drop_slot_handoff(%State{} = state), do: state
-
   defp put_park_reason(meta, nil), do: Map.delete(meta, :review_park_reason)
   defp put_park_reason(meta, reason), do: Map.put(meta, :review_park_reason, reason)
+
+  # bd-741sid: merge `changes` into the ticket's ReviewGate round state
+  # (`Arbiter.Tasks.PullRequest.record_review_gate/2`). Best-effort — the gate's
+  # own bookkeeping never fails a verdict — and only for a ticket's own run: a
+  # review-only reviewer or a ReviewGate session has no round of its own.
+  defp record_review_gate(%State{task_id: task_id, meta: meta}, changes) do
+    if review_only?(meta) or String.contains?(task_id, "#") do
+      :ok
+    else
+      case Arbiter.Tasks.PullRequest.record_review_gate(task_id, changes) do
+        :ok ->
+          :ok
+
+        {:error, reason} ->
+          Logger.debug(
+            "Worker: review-gate state write failed for task=#{task_id}: #{inspect(reason)}"
+          )
+
+          :ok
+      end
+    end
+  rescue
+    e ->
+      Logger.debug(
+        "Worker: review-gate state write raised for task=#{task_id}: #{Exception.message(e)}"
+      )
+
+      :ok
+  end
 
   defp fail_reason_for(:no_verdict), do: :review_gate_inconclusive
   defp fail_reason_for(_), do: :review_gate_rejected
@@ -5956,7 +5963,6 @@ defmodule Arbiter.Worker do
     task_id = state.task_id
     workspace_id = state.workspace_id
     prior_attempts = attempt - 1
-    worker = self()
 
     run = fn ->
       case dispatcher.dispatch(args) do
@@ -5968,8 +5974,6 @@ defmodule Arbiter.Worker do
             "Worker: ReviewGate fix round #{attempt} could not be dispatched for " <>
               "task=#{task_id}: #{inspect(reason)}"
           )
-
-          send(worker, :__fix_round_dispatch_failed__)
 
           dispatcher.escalate_exhausted(
             task_id,
@@ -6089,6 +6093,8 @@ defmodule Arbiter.Worker do
       |> Map.put(:review_gate_findings, findings)
       |> Map.put(:review_gate_reconciled_from, prior)
 
+    record_review_gate(state, %{reconciled_from: prior})
+
     merged =
       apply_review_gate_verdict(
         announce_phase(%State{state | status: :awaiting_review_gate, meta: meta}),
@@ -6098,6 +6104,190 @@ defmodule Arbiter.Worker do
     clear_run_rejection_if_parked(merged)
     notify_review_gate_reconciled(merged, prior)
     merged
+  end
+
+  # ---- bd-741sid: a verdict applied to the ticket ---------------------------
+  #
+  # See `apply_review_gate_verdict_to_ticket/3`. A `%State{}` rebuilt from the
+  # ticket stands in for the author that is gone; the verdict then runs the same
+  # code a resident author runs, in the caller's process. Two of that code's
+  # hand-offs are posts to the author's own mailbox — the end of the run after
+  # the PR opens, and the fix-round decision after a rejection — so they are
+  # taken back out of the caller's mailbox and carried out here.
+
+  defp apply_ticket_verdict(%State{} = state, {:approve, _findings} = verdict) do
+    Logger.info(
+      "Worker: ReviewGate APPROVE for task=#{state.task_id} with no author resident; " <>
+        "applying it to the ticket"
+    )
+
+    applied =
+      if review_gate_failure?(state),
+        do: reconcile_review_gate_approval(state, verdict),
+        else: apply_review_gate_verdict(state, verdict)
+
+    drain_run_finished()
+
+    case applied do
+      %State{status: :failed, meta: meta} -> {:error, Map.get(meta, :failure_reason)}
+      _ -> :ok
+    end
+  end
+
+  defp apply_ticket_verdict(%State{} = state, verdict) do
+    Logger.info(
+      "Worker: ReviewGate verdict #{inspect(elem_or(verdict))} for task=#{state.task_id} " <>
+        "with no author resident; recording it on the ticket"
+    )
+
+    failed = apply_review_gate_verdict(state, verdict)
+    drain_run_finished()
+
+    receive do
+      {:__review_gate_fix_round__, round_verdict, findings} ->
+        _ = maybe_dispatch_fix_round(failed, round_verdict, findings)
+        :ok
+    after
+      0 -> :ok
+    end
+  end
+
+  defp elem_or(verdict) when is_tuple(verdict), do: elem(verdict, 0)
+  defp elem_or(verdict), do: verdict
+
+  defp drain_run_finished do
+    receive do
+      :__run_finished__ -> :ok
+    after
+      0 -> :ok
+    end
+  end
+
+  defp ticket_round_state(task_id, ctx) do
+    with {:ok, issue} <- Ash.get(Arbiter.Tasks.Issue, task_id),
+         :ok <- takes_verdict(issue) do
+      round = issue.review_gate_state || %{}
+      run = latest_main_run(task_id)
+
+      {:ok,
+       %State{
+         task_id: task_id,
+         registry_key: task_id,
+         workspace_id: issue.workspace_id,
+         repo:
+           Map.get(ctx, :repo) || Map.get(round, "repo") || (run && run.repo) || issue.repo ||
+             "unknown",
+         current_step: :review_gate,
+         status: :awaiting_review_gate,
+         started_at: DateTime.utc_now(),
+         meta: round_meta(issue, round, ctx),
+         run_id: run && run.id
+       }}
+    end
+  end
+
+  defp takes_verdict(%{state: :active}), do: :ok
+  defp takes_verdict(%{state: state}), do: {:error, {:not_in_review, state}}
+
+  # The meta a resident author would have carried into its verdict.
+  defp round_meta(issue, round, ctx) do
+    branch = Map.get(ctx, :branch) || Map.get(round, "branch")
+    worktree = Map.get(ctx, :worktree_path) || Map.get(round, "worktree_path")
+
+    %{
+      branch: branch,
+      review_gate_branch: branch,
+      review_pr_ref: Map.get(round, "pr_ref") || Map.get(ctx, :pr_ref) || issue.pr_ref,
+      worktree_path: worktree,
+      repo_path: Map.get(round, "repo_path") || worktree,
+      target_branch: Map.get(ctx, :target_branch) || Map.get(round, "target_branch") || "main",
+      issue_type: issue.issue_type,
+      review_required: true,
+      review_spawn: false,
+      review_gate_fix_round_attempts: Map.get(round, "fix_round_attempts"),
+      review_gate_findings_digest: Map.get(round, "findings_digest")
+    }
+    |> put_round_failure(Map.get(round, "verdict"))
+    |> Map.merge(restored_merge_opts(Map.get(round, "merge_opts") || %{}))
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    |> Map.new()
+  end
+
+  # The round's last recorded verdict, as the `failure_reason` a resident
+  # author would still be carrying (`fail_reason_for/1`) — which is what lets a
+  # later APPROVE overturn it (bd-3wumco).
+  defp put_round_failure(meta, "request_changes"),
+    do: Map.put(meta, :failure_reason, :review_gate_rejected)
+
+  defp put_round_failure(meta, "no_verdict"),
+    do: Map.put(meta, :failure_reason, :review_gate_inconclusive)
+
+  defp put_round_failure(meta, _verdict), do: meta
+
+  # The merge options the author was dispatched with (`persistable_merge_opts/1`).
+  defp restored_merge_opts(opts) do
+    %{
+      merger_adapter_override: restored_module(Map.get(opts, "adapter"), :open, 4),
+      merger_workspace_override: restored_workspace(Map.get(opts, "workspace_id")),
+      watchdog_interval_ms: Map.get(opts, "interval_ms"),
+      watchdog_initial_delay_ms: Map.get(opts, "initial_delay_ms"),
+      watchdog_max_polls: Map.get(opts, "max_polls"),
+      watchdog_auto_resume_dispatcher:
+        restored_module(Map.get(opts, "auto_resume_dispatcher"), :resume, 1)
+    }
+  end
+
+  defp restored_module("Elixir." <> _ = name, fun, arity) do
+    module = String.to_existing_atom(name)
+    if Code.ensure_loaded?(module) and function_exported?(module, fun, arity), do: module
+  rescue
+    ArgumentError -> nil
+  end
+
+  defp restored_module(_name, _fun, _arity), do: nil
+
+  defp restored_workspace(id) when is_binary(id) do
+    case Ash.get(Arbiter.Tasks.Workspace, id) do
+      {:ok, ws} -> ws
+      _ -> nil
+    end
+  end
+
+  defp restored_workspace(_), do: nil
+
+  # The merge options worth keeping on the ticket's round state, so a verdict
+  # applied without the author merges the way the author would have. Only
+  # explicit overrides (tests, advanced callers) — production resolves the
+  # merger from the workspace. Modules by name, the workspace by id.
+  defp persistable_merge_opts(meta) do
+    workspace = Map.get(meta, :merger_workspace_override)
+
+    %{
+      adapter: module_name(Map.get(meta, :merger_adapter_override)),
+      workspace_id: if(is_struct(workspace), do: Map.get(workspace, :id)),
+      interval_ms: Map.get(meta, :watchdog_interval_ms),
+      initial_delay_ms: Map.get(meta, :watchdog_initial_delay_ms),
+      max_polls: Map.get(meta, :watchdog_max_polls),
+      auto_resume_dispatcher: module_name(Map.get(meta, :watchdog_auto_resume_dispatcher))
+    }
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    |> Map.new()
+  end
+
+  defp module_name(module) when is_atom(module) and not is_nil(module),
+    do: Atom.to_string(module)
+
+  defp module_name(_), do: nil
+
+  defp latest_main_run(task_id) do
+    Arbiter.Workers.Run
+    |> Ash.Query.filter(task_id == ^task_id and worker_type == :main)
+    |> Ash.Query.sort(started_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> List.first()
+  rescue
+    _ -> nil
   end
 
   # Write the reconciliation through to the durable `worker_runs` row when the
@@ -6673,7 +6863,7 @@ defmodule Arbiter.Worker do
     # this the `claude` process (and whatever it is blocked on — a `mix test`
     # child, say) survives `GenServer.stop/1` with its cwd still inside the
     # task's worktree. That is exactly the bd-801xs5 loss: `:close` stops the
-    # `<task>:fixpass` worker, the registry empties, `CleanupWorktree`'s drain
+    # fix-pass worker, the registry empties, `CleanupWorktree`'s drain
     # sees nobody home, and `git worktree remove` deletes the directory out
     # from under a test run that is still writing to it. Doing the kill here
     # makes "StopWorker returned" actually imply "the agent is dead", which is
@@ -6822,10 +7012,9 @@ defmodule Arbiter.Worker do
     %{
       task_id: s.task_id,
       # bd-8lq2g7: `registry_key` + `role` are what make two rows for one
-      # `task_id` legible — a subordinate pass (`<task_id>:fixpass` /
-      # `:conflict`) running alongside the task's parked primary. Consumers
-      # (worker_list, the escalation notifier) branch on subordinate?/1, which
-      # reads exactly these two fields.
+      # `task_id` legible. Consumers (worker_list, the escalation notifier)
+      # branch on subordinate?/1, which reads the role (bd-741sid: a pass
+      # registers under the ticket id, so the key alone no longer tells).
       registry_key: s.registry_key || s.task_id,
       role: role_from_meta(s.meta),
       workspace_id: s.workspace_id,
@@ -6936,11 +7125,16 @@ defmodule Arbiter.Worker do
 
   defp known_pr_ref_for_branch(_state, _branch), do: :none
 
-  # Shared success continuation for `do_open_mr`: record the ref, sync the
-  # tracker, park at :awaiting_review, and start the Watchdog. Used whether
-  # `mr_ref` came from a fresh `adapter.open/4` call or was adopted directly
-  # via `known_pr_ref_for_branch/2`.
-  defp finalize_opened_mr(%State{} = state, adapter, workspace, opts, mr_ref) do
+  # Shared success continuation for `do_open_mr`: record the PR on the ticket,
+  # sync the tracker, hand the PR to the ticket's Watchdog, and end the run.
+  # Used whether `mr_ref` came from a fresh `adapter.open/4` call or was
+  # adopted directly via `known_pr_ref_for_branch/2`.
+  #
+  # bd-741sid: the ticket, not this worker, owns the PR from here. Its row gets
+  # the ref, the URL and the lane the Watchdog watches it on (so the Watchdog
+  # can be restarted from the row alone), the Watchdog is started keyed by the
+  # ticket id, and the run ends — no worker stays resident for a Merging ticket.
+  defp finalize_opened_mr(%State{} = state, adapter, _workspace, opts, mr_ref) do
     merger_url = safe_link_for(adapter, mr_ref)
 
     # bd-7b46wd: persist the PR/MR ref onto the task so the workspace
@@ -6952,57 +7146,58 @@ defmodule Arbiter.Worker do
     #
     # bd-842qio: this is the ticket's `open_pr` transition (active → merging),
     # written together with the ref.
-    record_pr_ref_on_task(state, mr_ref, :opened)
+    record_pr_ref_on_task(state, mr_ref, :opened,
+      merger_url: merger_url,
+      merge_watch: watch_lane(state, adapter, opts)
+    )
+
+    if Map.has_key?(state.meta || %{}, :review_gate_branch),
+      do: record_review_gate(state, %{pr_ref: mr_ref})
+
     record_mr_ref_on_run(state, mr_ref, merger_url)
     sync_tracker_pr_opened(state, mr_ref, merger_url)
 
     new_state = %State{
       state
-      | status: :awaiting_review,
-        mr_ref: mr_ref,
+      | mr_ref: mr_ref,
         merger_url: merger_url,
         merger_adapter: adapter,
-        step_started_at: DateTime.utc_now(),
         meta:
           state.meta
           |> Map.put(:mr_ref, mr_ref)
           |> Map.put(:merger_url, merger_url)
-          # bd-8jixav: remember the lane this Watchdog is started on, so
-          # `restart_watchdog/1` can mint an identical replacement if it dies.
-          |> record_watchdog_opts(opts)
     }
 
-    # Guard: MR already exists on the forge. Watchdog startup failure must
-    # NOT prevent the worker from parking at :awaiting_review — the MR
-    # is real and must not be discarded. If the Watchdog can't start for
-    # any reason, escalate to the coordinator so the MR is not silently
-    # orphaned while the worker parks indefinitely.
-    watchdog_ok? =
-      try do
-        start_watchdog(new_state, workspace, opts) == :ok
-      rescue
-        e ->
-          Logger.warning(
-            "Worker.open_mr: Watchdog startup raised for task=#{state.task_id}: #{Exception.message(e)}"
-          )
-
-          false
-      catch
-        :exit, reason ->
-          Logger.warning(
-            "Worker.open_mr: Watchdog startup exit for task=#{state.task_id}: #{inspect(reason)}"
-          )
-
-          false
-      end
-
-    unless watchdog_ok? do
+    # The PR already exists on the forge: a Watchdog that will not start must
+    # not lose it. The ticket is Merging with the PR on its row, so the boot
+    # reconciler or `arb queue restart-watchdog` can watch it again; the
+    # coordinator is paged so it does not sit unwatched until then.
+    unless start_ticket_watchdog(new_state, opts) == :ok do
       escalate_watchdog_failure(new_state)
     end
 
-    # bd-aw2cyt: same park as adopt_pr_and_spawn_watchdog/5 — announce
-    # :waiting_ci_merge once the Watchdog branch has resolved.
-    {:ok, mr_ref, announce_phase(new_state)}
+    {:ok, mr_ref, finish_run_after_pr_opened(new_state)}
+  end
+
+  # bd-741sid: the implementer's run is over once its PR is open. Record it
+  # finished and successful, then stop (`:__run_finished__`): the ticket and
+  # its Watchdog own the PR from here. Deliberately NOT `complete_now/2`, which
+  # announces the *ticket* done — the MergeQueue's `{:worker_done}`, the
+  # coordinator's "completed" notification — and that is the merge's to say
+  # (`Arbiter.Tasks.PullRequest.merged/2`). The Driver leaves a `:pr_opened`
+  # completion alone for the same reason.
+  defp finish_run_after_pr_opened(%State{} = state) do
+    finished = %State{
+      state
+      | status: :completed,
+        step_started_at: DateTime.utc_now(),
+        meta: Map.put(state.meta, :result, :pr_opened)
+    }
+
+    record_run_finished(finished)
+    notify_auth_hold_success(finished)
+    send(self(), :__run_finished__)
+    announce_phase(finished)
   end
 
   # bd-129xh4: open the PR for `branch` BEFORE the reviewer runs, WITHOUT
@@ -7272,19 +7467,21 @@ defmodule Arbiter.Worker do
 
   # Persist the opened MR/PR ref onto the task's `pr_ref` (bd-7b46wd). This is
   # the single signal the workspace MergeQueue reads (`existing_mr_ref/1`) to
-  # ADOPT an already-open PR rather than open a duplicate — without it the
-  # Watchdog-merged PR is invisible to the MergeQueue and the task never closes.
-  # Mirrors `Arbiter.Workflows.MergeQueue.maybe_record_mr_ref/2`. Best-effort: a
-  # DB hiccup logs at debug and never fails the open.
+  # ADOPT an already-open PR rather than open a duplicate. Mirrors
+  # `Arbiter.Workflows.MergeQueue.maybe_record_mr_ref/2`. Best-effort: a DB
+  # hiccup logs at debug and never fails the open.
   #
-  # `moment` is `:opened` from `finalize_opened_mr/5` and `:pre_review` from
-  # the open ahead of the ReviewGate (bd-129xh4), which leaves the ticket where
-  # it is — the review still owns it.
-  defp record_pr_ref_on_task(state, mr_ref, moment \\ :pre_review)
+  # `moment` is `:opened` from `finalize_opened_mr/5` — the ticket's `open_pr`
+  # transition — `:pre_review` from the open ahead of the ReviewGate
+  # (bd-129xh4), which leaves the ticket where it is (the review still owns
+  # it), and `:engagement` for a review-only engagement's PR, whose ticket
+  # never enters Merging (bd-cw3w9p). `opts` rides along on the same write
+  # (bd-741sid): `:merger_url` and the Watchdog's `:merge_watch` lane.
+  defp record_pr_ref_on_task(state, mr_ref, moment \\ :pre_review, opts \\ [])
 
-  defp record_pr_ref_on_task(%State{task_id: task_id}, mr_ref, moment)
+  defp record_pr_ref_on_task(%State{task_id: task_id}, mr_ref, moment, opts)
        when is_binary(mr_ref) and mr_ref != "" do
-    case write_pr_ref(task_id, mr_ref, moment) do
+    case write_pr_ref(task_id, mr_ref, moment, opts) do
       {:ok, _updated} ->
         :ok
 
@@ -7304,17 +7501,15 @@ defmodule Arbiter.Worker do
       :ok
   end
 
-  defp record_pr_ref_on_task(_state, _mr_ref, _moment), do: :ok
+  defp record_pr_ref_on_task(_state, _mr_ref, _moment, _opts), do: :ok
 
   # bd-842qio: the PR-opened path is the `open_pr` transition (active →
-  # merging) — see `Issue.pr_opened/2`.
-  defp write_pr_ref(task_id, mr_ref, :opened), do: Arbiter.Tasks.Issue.pr_opened(task_id, mr_ref)
+  # merging) — see `Issue.pr_opened/3`.
+  defp write_pr_ref(task_id, mr_ref, :opened, opts),
+    do: Arbiter.Tasks.Issue.pr_opened(task_id, mr_ref, opts)
 
-  defp write_pr_ref(task_id, mr_ref, :pre_review) do
-    with {:ok, task} <- Ash.get(Arbiter.Tasks.Issue, task_id) do
-      Ash.update(task, %{pr_ref: mr_ref}, action: :update)
-    end
-  end
+  defp write_pr_ref(task_id, mr_ref, _moment, opts),
+    do: Arbiter.Tasks.Issue.pr_opened(task_id, mr_ref, Keyword.put(opts, :transition, false))
 
   # Persist the opened/adopted MR ref onto *this run's* durable Workers.Run
   # row (bd-6h4ia3), alongside record_pr_ref_on_task's write to the task's
@@ -7364,92 +7559,44 @@ defmodule Arbiter.Worker do
       :ok
   end
 
-  # Spawn the Watchdog that polls for approval. auto_merge + poll interval come
-  # from the workspace config (opts may override, primarily for tests).
+  # bd-741sid: the lane the ticket's Watchdog watches the PR on, recorded on the
+  # ticket with the ref (`merge_watch`) so a Watchdog started from the row
+  # alone — now, after a crash, after a reboot — watches it exactly as this run
+  # would have. `Arbiter.Tasks.PullRequest.watch_opts/1` reads it back.
   #
-  # The `:via_review_gate` opt tells the Watchdog the gate has already approved
-  # this MR; it short-circuits hosted-forge approval polling (meaning a). It does
-  # NOT implicitly force auto_merge — that is opt-in via `:force_merge` (meaning
-  # b), which no caller sets unconditionally anymore: whether an approved MR is
-  # actually merged always falls through to the workspace's `auto_merge`
-  # setting unless a caller has an explicit reason to override it
-  # (bd-ddtbhb, bd-dkwhbn).
-  defp start_watchdog(%State{} = state, workspace, opts) do
-    # Test escape hatch: :watchdog_start_error in opts simulates a Watchdog startup
-    # failure without needing a real error condition, mirroring :review_spawn for
-    # the ReviewGate. Production callers never set this key.
-    if Map.get(opts, :watchdog_start_error) do
-      :error
-    else
-      do_start_watchdog(state, workspace, opts)
-    end
-  end
-
-  defp do_start_watchdog(%State{} = state, workspace, opts) do
-    case Arbiter.Worker.Watchdog.start(build_watchdog_opts(state, workspace, opts)) do
-      {:ok, _pid} ->
-        :ok
-
-      # DynamicSupervisor.start_child/2 admits :ignore per its typespec; today
-      # Watchdog.init/1 returns :ignore when worker_pid is not a pid (defensive
-      # path). Treat as a no-op: the MR is already created and the Watchdog is
-      # simply not needed (matches pattern in start_merge_queue.ex).
-      :ignore ->
-        :ok
-
-      {:error, reason} ->
-        Logger.warning(
-          "Worker.open_mr: failed to start Watchdog for task=#{state.task_id}: #{inspect(reason)}"
-        )
-
-        :error
-    end
-  end
-
-  # The full opt list handed to `Watchdog.start/1`. Split out of
-  # `do_start_watchdog/3` (bd-8jixav) so the restart path builds the *same*
-  # lane from the *same* code rather than a parallel reconstruction that can
-  # drift: a restarted Watchdog differing from the original in `auto_merge` or
-  # `via_review_gate` is worse than no Watchdog at all.
+  # The `:via_review_gate` opt records that the gate has already approved this
+  # MR; it short-circuits hosted-forge approval polling (meaning a). It does
+  # NOT implicitly force auto_merge — that is opt-in via `:force_merge`
+  # (meaning b), which no caller sets unconditionally anymore: whether an
+  # approved MR is actually merged falls through to the workspace's
+  # `auto_merge` setting, read when the Watchdog starts, unless a caller has an
+  # explicit reason to override it (bd-ddtbhb, bd-dkwhbn).
   #
-  # `worker: self()` is deliberate — every caller runs inside the worker
-  # process, and the Watchdog monitors that pid.
-  defp build_watchdog_opts(%State{} = state, workspace, opts) do
-    via_review_gate = Map.get(opts, :via_review_gate, false)
-
-    auto_merge =
-      cond do
-        Map.get(opts, :force_merge, false) -> true
-        Map.has_key?(opts, :auto_merge) -> Map.fetch!(opts, :auto_merge)
-        true -> workspace_auto_merge?(workspace)
-      end
-
-    [
-      task_id: state.task_id,
-      worker: self(),
-      mr_ref: state.mr_ref,
-      adapter: state.merger_adapter,
-      workspace: workspace,
+  # `:local_head_sha` (bd-ch9pmk / #1614) is the branch head this worker holds
+  # locally. Every caller reaches here just after `push_for_hosted_pr/3` put
+  # exactly this commit on origin, so it is the head the PR is *about* to
+  # report — and on a ReviewGate lane it is the commit the gate's APPROVE
+  # stamped. The merge guard uses it to tell "the forge has not seen my push
+  # yet" apart from "somebody pushed a commit nobody reviewed".
+  #
+  # `:auto_resumes` carries the auto-resume count the Dispatch re-stamped onto
+  # this run (bd-8eheb6), so the budget binds across the Watchdogs a
+  # review-timeout loop mints.
+  defp watch_lane(%State{} = state, adapter, opts) do
+    Arbiter.Tasks.PullRequest.lane(
+      adapter: adapter,
       repo: state.repo,
-      auto_merge: auto_merge,
-      via_review_gate: via_review_gate,
-      # bd-ch9pmk / #1614: the branch head this worker holds locally. Every
-      # caller reaches here just after `push_for_hosted_pr/3` put exactly this
-      # commit on origin, so it is the head the PR is *about* to report — and
-      # on a ReviewGate lane it is the commit the gate's APPROVE stamped. The
-      # merge guard uses it to tell "the forge has not seen my push yet" apart
-      # from "somebody pushed a commit nobody reviewed"; the two are
-      # indistinguishable by SHA equality alone, which is what failed an
-      # approved fix round in arbiter #1607 and vstim !219.
-      local_head_sha: local_head_sha(state)
-    ]
-    |> maybe_opt(:interval_ms, Map.get(opts, :interval_ms))
-    |> maybe_opt(:initial_delay_ms, Map.get(opts, :initial_delay_ms))
-    |> maybe_opt(
-      :max_polls,
-      Map.get(opts, :max_polls) || workspace_watchdog_max_polls(workspace)
+      via_review_gate: Map.get(opts, :via_review_gate, false),
+      force_merge: Map.get(opts, :force_merge),
+      auto_merge: Map.get(opts, :auto_merge),
+      local_head_sha: local_head_sha(state),
+      interval_ms: Map.get(opts, :interval_ms),
+      initial_delay_ms: Map.get(opts, :initial_delay_ms),
+      max_polls: Map.get(opts, :max_polls),
+      auto_resume_dispatcher: Map.get(opts, :auto_resume_dispatcher),
+      auto_resumes: Map.get(state.meta || %{}, :awaiting_review_resume_attempts),
+      review_only: if(review_only?(state.meta || %{}), do: true)
     )
-    |> maybe_opt(:auto_resume_dispatcher, Map.get(opts, :auto_resume_dispatcher))
   end
 
   # The worktree's own HEAD, or nil when this worker has no worktree on disk
@@ -7461,122 +7608,47 @@ defmodule Arbiter.Worker do
     end
   end
 
-  # The slice of the MR-open-time `opts` a later Watchdog restart cannot
-  # re-derive from the worker's own state or the workspace config (bd-8jixav).
-  #
-  # `:via_review_gate` is the one that matters in production: it records *how*
-  # this MR was approved — the ReviewGate already approved it, so no
-  # hosted-forge approval is ever coming — and nothing durable stores that
-  # fact. A restart that guessed `false` would mint a Watchdog that parks
-  # forever waiting on an approval that never arrives, which is the vs-3vlaqi
-  # failure mode wearing a different hat. The rest are advanced/test overrides,
-  # replayed for the same reason.
-  #
-  # Deliberately an allowlist: `:watchdog_start_error` (the test escape hatch
-  # that simulates a startup failure) must never be replayed, or a restart of
-  # exactly the worker that hit it would be a guaranteed no-op.
-  @watchdog_restart_opt_keys [
-    :via_review_gate,
-    :force_merge,
-    :auto_merge,
-    :interval_ms,
-    :initial_delay_ms,
-    :max_polls,
-    :auto_resume_dispatcher
-  ]
+  # bd-741sid: start the ticket's Watchdog from the row this worker just wrote.
+  # Test escape hatch: `:watchdog_start_error` in opts simulates a Watchdog
+  # startup failure without needing a real error condition, mirroring
+  # `:review_spawn` for the ReviewGate. Production callers never set it.
+  defp start_ticket_watchdog(%State{} = state, opts) do
+    if Map.get(opts, :watchdog_start_error) do
+      :error
+    else
+      case Arbiter.Worker.Watchdog.watch(state.task_id) do
+        :ok ->
+          :ok
 
-  defp record_watchdog_opts(meta, opts) when is_map(opts),
-    do: Map.put(meta || %{}, :watchdog_opts, Map.take(opts, @watchdog_restart_opt_keys))
+        {:error, reason} ->
+          Logger.warning(
+            "Worker.open_mr: failed to start the Watchdog for task=#{state.task_id}: " <>
+              inspect(reason)
+          )
 
-  # bd-8jixav: mint a fresh Watchdog for a worker parked at `:awaiting_review`
-  # whose Watchdog is gone. Runs inside the worker process so `self()` is the
-  # pid the new Watchdog monitors, and so the MR ref / adapter come from live
-  # state rather than a guess.
-  defp do_restart_watchdog(%State{status: :awaiting_review, task_id: task_id} = state) do
-    cond do
-      not (is_binary(state.mr_ref) and state.mr_ref != "") ->
-        {:error, :no_mr_ref}
-
-      is_nil(state.merger_adapter) ->
-        {:error, :no_adapter}
-
-      # Cheap pre-check for a clear answer. It is NOT the safety guard — the
-      # Watchdog registers under a `<task_id>:watchdog` via-tuple, so a racing
-      # second start loses the name atomically and comes back
-      # `{:already_started, pid}` below. Two live Watchdogs on one MR cannot
-      # happen even if this check reads stale.
-      is_pid(Arbiter.Worker.Watchdog.whereis(task_id)) ->
-        {:error, :already_running}
-
-      true ->
-        start_replacement_watchdog(state)
-    end
-  end
-
-  defp do_restart_watchdog(%State{status: status}), do: {:error, {:not_parked, status}}
-
-  defp start_replacement_watchdog(%State{} = state) do
-    workspace = load_workspace(state.workspace_id)
-    opts = Map.get(state.meta || %{}, :watchdog_opts) || %{}
-
-    Arbiter.Mergers.prepare_with_repo(workspace, state.repo)
-
-    case Arbiter.Worker.Watchdog.start(build_watchdog_opts(state, workspace, opts)) do
-      {:ok, _pid} ->
-        Logger.info(
-          "Worker: restarted Watchdog for task=#{state.task_id} mr=#{state.mr_ref} " <>
-            "(opts=#{inspect(opts)})"
-        )
-
-        :ok
-
-      # `init/1` returns :ignore only when the worker pid is dead — impossible
-      # here (we ARE that pid), but map it honestly rather than claiming :ok.
-      :ignore ->
-        {:error, :no_worker}
-
-      {:error, {:already_started, _pid}} ->
-        {:error, :already_running}
-
-      {:error, reason} ->
-        Logger.warning(
-          "Worker: Watchdog restart failed for task=#{state.task_id}: #{inspect(reason)}"
-        )
-
-        {:error, {:start_failed, reason}}
+          :error
+      end
     end
   rescue
-    e -> {:error, {:start_failed, Exception.message(e)}}
-  catch
-    # An exit here (DBConnection pool timeout, merger config, Watchdog init)
-    # must not take the parked worker down with it — losing the
-    # :awaiting_review park + mr_ref is exactly what this restart exists to
-    # avoid. Mirrors the guards on the two other start_watchdog call sites.
-    :exit, reason ->
+    e ->
       Logger.warning(
-        "Worker: Watchdog restart exited for task=#{state.task_id}: #{inspect(reason)}"
+        "Worker.open_mr: Watchdog startup raised for task=#{state.task_id}: #{Exception.message(e)}"
       )
 
-      {:error, {:start_failed, reason}}
-  end
-
-  defp load_workspace(id) when is_binary(id) and id != "" do
-    case Ash.get(Arbiter.Tasks.Workspace, id) do
-      {:ok, ws} -> ws
-      _ -> nil
-    end
-  rescue
-    _ -> nil
+      :error
   catch
-    :exit, _reason -> nil
+    :exit, reason ->
+      Logger.warning(
+        "Worker.open_mr: Watchdog startup exit for task=#{state.task_id}: #{inspect(reason)}"
+      )
+
+      :error
   end
 
-  defp load_workspace(_), do: nil
-
-  # An MR was opened but the Watchdog failed to start. The worker stays at
-  # :awaiting_review (the MR is real and must not be discarded), but the coordinator
-  # is escalated so the orphaned MR can be resolved manually rather than hanging
-  # indefinitely with no watcher.
+  # An MR was opened but the Watchdog failed to start. The PR is real and is on
+  # the ticket's row (bd-741sid), so nothing is lost — but nothing is watching
+  # it either, so the coordinator is escalated rather than the PR hanging
+  # unwatched until the next reboot's reconciler.
   defp escalate_watchdog_failure(%State{
          workspace_id: ws_id,
          task_id: task_id,
@@ -7603,10 +7675,9 @@ defmodule Arbiter.Worker do
       subject: "Watchdog startup failed: #{task_id} MR orphaned",
       body:
         "The Watchdog process failed to start after MR #{mr_info} was opened for task #{task_id}. " <>
-          "The MR exists on the forge but has no Watchdog watching it — " <>
-          "manual completion or failure is required once the MR resolves.\n\n" <>
-          "To complete: Worker.complete(#{inspect(task_id)}, :merged)\n" <>
-          "To fail:     Worker.fail(#{inspect(task_id)}, :watchdog_lost)"
+          "The MR exists on the forge and on the ticket, but no Watchdog is watching it. " <>
+          "Start one from the ticket with `arb queue restart-watchdog #{task_id}` " <>
+          "(the boot reconciler also does this for every Merging ticket)."
     })
 
     :ok
@@ -7622,16 +7693,6 @@ defmodule Arbiter.Worker do
   end
 
   defp escalate_watchdog_failure(_state), do: :ok
-
-  defp workspace_auto_merge?(%Arbiter.Tasks.Workspace{} = ws),
-    do: Arbiter.Tasks.Workspace.auto_merge?(ws)
-
-  defp workspace_auto_merge?(_), do: false
-
-  defp workspace_watchdog_max_polls(%Arbiter.Tasks.Workspace{} = ws),
-    do: Arbiter.Tasks.Workspace.watchdog_max_polls(ws)
-
-  defp workspace_watchdog_max_polls(_), do: nil
 
   defp maybe_opt(opts, _key, nil), do: opts
   defp maybe_opt(opts, key, value), do: Keyword.put(opts, key, value)

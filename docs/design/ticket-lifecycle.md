@@ -1,13 +1,14 @@
 # Ticket Lifecycle — Design Document
 
-**Status:** in progress — children 1 (stored state), 2 (the view) and 3 (the scheduler) of 13 implemented
+**Status:** in progress — children 1 (stored state), 2 (the view), 3 (the scheduler) and 4 (PR state and the Watchdog on the ticket) of 13 implemented
 **Last updated:** 2026-09-27
 **Epic:** bd-9yqspm (refined with the operator on 2026-09-27)
 **Code:** `Arbiter.Tasks.Lifecycle` (the table), `Arbiter.Tasks.Issue` (the
 actions), `Arbiter.Tasks.Issue.Changes.Transition` (applies a transition),
 `Arbiter.Tasks.Lifecycle.View` (the projection every surface reads),
 `Arbiter.Tasks.Lifecycle.Dispatchable` (the dispatch-eligibility predicate),
-`Arbiter.Tasks.SlotGate` (the slot count)
+`Arbiter.Tasks.SlotGate` (the slot count), `Arbiter.Tasks.PullRequest` (the
+ticket's open PR), `Arbiter.Worker.Watchdog` (the ticket's merge watch)
 
 ---
 
@@ -238,8 +239,11 @@ It left no null state and no rank out of creation order.
 |---|---|
 | `:promote_to_ready` / `:return_to_backlog` (the legacy doors: `arb promote`/`demote`, MCP, the task page) | `promote` / `demote`, idempotent as before |
 | `Worker.Dispatch.transition_to_in_progress/2` via `Issue.start_work/2` | `start` |
-| `Worker.finalize_opened_mr/5`, and the `MergeQueue` opening or adopting a PR, via `Issue.pr_opened/2` | `open_pr` if the ticket is `active`, with the ref in the same write |
-| `MergeQueue.FixPassDispatcher` / `.ConflictResolver`, once the pass is spawned | `return_to_work` if the ticket is `merging` (`Issue.back_to_work/1`) |
+| `Worker.finalize_opened_mr/5`, and the `MergeQueue` opening or adopting a PR, via `Issue.pr_opened/3` | `open_pr` if the ticket is `active`, with the ref (and, since bd-741sid, its URL and lane) in the same write |
+| `MergeQueue.PassAdmission`, admitting a fix or conflict pass into a slot (bd-741sid) | `return_to_work` if the ticket is `merging` (`Issue.back_to_work/1`), the moment the pass is admitted |
+| `PullRequest.back_to_merging/1`, when that pass ends, or never starts (bd-741sid) | `open_pr` |
+| `Worker.Dispatch`, a resume of a `merging` ticket (bd-asxw4e) | `return_to_work`, once its Watchdog is stopped (bd-741sid) |
+| `PullRequest.closed/2`, the PR closed unmerged (bd-741sid) | `pr_closed`: `return_to_work` with `attention_cause: :pr_closed` |
 | `Tasks.Verification.finalize_merged/2` | `await_verification` (flagged) or `close` |
 | `Tasks.Verification.observed/2` / `failed/2` | `close` / `reopen` |
 
@@ -271,9 +275,8 @@ it in bd-36ytcl):
   `finalize_merged/2` (`start_work/2`), so it still parks for verification.
 - **`reopen` lands in `queued`**, so a reopened ticket is refined whatever it
   was when it closed. The old reopen left `refined` alone.
-- **After a fix or conflict pass** the ticket stays `active` until it merges.
-  Moving it back to `merging` when the pass finishes is bd-741sid's, along
-  with the rest of the run model.
+- **After a fix or conflict pass** the ticket goes back to `merging`
+  (bd-741sid, below).
 
 ---
 
@@ -377,8 +380,12 @@ A resume of an `:active` ticket needs no new slot, whatever its worker did
 a full cap (`force` goes over, recorded), deferred to Autopilot for an
 automatic caller. An admitted resume of a `:merging` ticket (a revise round on
 its PR) moves it back to `:active` (`return_to_work`), so the round holds the
-slot it was admitted into. The boot reconciler resumes `:active` tickets
-first.
+slot it was admitted into. First it stops the ticket's Watchdog and drops the
+pending merge it stamped (bd-741sid). Otherwise the Watchdog, which belongs to
+the ticket and not to any run, would merge the very head the round is
+revising. The round's approved PR open starts a fresh Watchdog on the new
+head. A ticket whose Watchdog merged it during the stop is not resumed. The
+boot reconciler resumes `:active` tickets first.
 
 ### One dispatch-eligibility predicate
 
@@ -409,8 +416,8 @@ Every hold is an input; one the caller does not pass is not asked about.
   | caller | Backlog / Blocked | In progress / Merging / Verifying | Closed |
   |---|---|---|---|
   | Autopilot (`dispatched_by: "autopilot"`) | refused `task_not_ready` | refused `task_not_ready` | refused |
-  | manual (`arb dispatch`, MCP `worker_dispatch`, REST, the task page) | refused `not_dispatchable` with the reason, unless `force` | passes (a re-dispatch) | refused |
-  | resume, review | passes | passes | refused |
+  | manual (`arb dispatch`, MCP `worker_dispatch`, REST, the task page) | refused `not_dispatchable` with the reason, unless `force` | passes (a re-dispatch) — except Merging, refused `task_awaiting_review` (bd-741sid) | refused |
+  | resume, review | passes | passes — except a review of a Merging ticket, refused `task_awaiting_review` | refused |
 
   A forced dispatch of a Backlog or Blocked ticket writes a `dispatch_forced`
   event (`task_id`, `bypassed`, `column`, `blocked_by`, `dispatched_by`).
@@ -425,3 +432,140 @@ session-only `ready_order` hand-ranking is gone: Autopilot never saw it. A
 reorder drag on the board now explains itself and changes nothing until
 drag-to-rank writes `rank` (bd-79w1fs).
 
+---
+
+## Child 4 (bd-741sid): PR state and the Watchdog on the ticket
+
+The implementer used to stay resident at `:awaiting_review` after opening its
+PR, because it was the only home of the PR's state and the Watchdog was
+paired with it. Now the ticket owns the PR, the run ends when its agent
+does, and the Watchdog is the ticket's.
+
+### The ticket owns its PR
+
+Migration `20260928000034_add_pr_state_to_issues` adds `merger_url`,
+`merger_status`, `merger_checked_at`, `merge_watch`, `review_gate_state` and
+the `pr_closed` cause (`attention_cause`, `attention_detail`,
+`attention_since` — the first cause bd-8if9zt's overlay will read).
+`Arbiter.Tasks.PullRequest` reads and writes them:
+
+| the parked worker held | the ticket holds |
+|---|---|
+| `mr_ref`, `merger_url` | `pr_ref`, `merger_url` |
+| `meta.last_merger_status` / `last_checked_at` | `merger_status` / `merger_checked_at`, written on every poll (`record_merger_status/2`) — no paper-trail version, `updated_at` untouched, announced on `PullRequest.topic/0` rather than `"tasks"` |
+| the Watchdog's start options | `merge_watch`, the lane: adapter, repo, `via_review_gate`, `auto_merge` / `force_merge`, the pushed head (`local_head_sha`), poll overrides, `review_only` |
+| the reviewed-SHA baseline | `last_reviewed_sha` (the ReviewGate's stamp, as before) and the Watchdog's latched baseline, `merge_watch.reviewed_sha` |
+| `meta.awaiting_review_resume_attempts` | `merge_watch.auto_resumes` |
+| the ReviewGate round in `meta` | `review_gate_state` |
+
+`GET /api/issues/:id` (so `arb issue show --json`) and MCP `task_show` (full)
+carry `merger_url`, `merger_status`, `merger_checked_at` and the attention
+fields.
+
+### The run ends at PR open
+
+`Worker.finalize_opened_mr/5` writes the ref, URL and lane in the `open_pr`
+write, starts the ticket's Watchdog from the row, marks its run finished and
+successful (`result: :pr_opened`) and exits. It does not announce the ticket
+done — the merge does. The Driver leaves a `:pr_opened` completion alone and
+never cleans up a Merging ticket's worktree. A Watchdog that will not start
+pages the coordinator; the PR is on the row, so `arb queue restart-watchdog`
+or the next boot watches it.
+
+A review-only coordinator reviewer that approves an existing PR records it
+without the transition and with `review_only` on the lane, so its merge
+leaves the engagement open (bd-cw3w9p).
+
+### The ticket's Watchdog
+
+It is registered under `<ticket>:watchdog` and started from the row:
+`Watchdog.watch/2` at PR open, `restart/2` on a reboot, from an operator or
+from the sweeper. `stop/1` takes the PR off the merge path, for a resume
+(above) and for the board's pull out of the merge queue. The pull is
+`PullRequest.pull/1`: it stops the Watchdog, drops the pending merge and
+records `merge_watch.pulled_at`. Every automatic restart honours the mark
+(`restart/2` refuses it with `:pulled`: the reconciler, the sweeper, a
+finished pass). An operator's restart (the worker page, `arb queue
+restart-watchdog`, MCP `queue_restart_watchdog`) passes `clear_pull: true`
+and puts the ticket back in the queue, and so does a run that re-opens the PR
+with a fresh lane. A pass is not admitted on a pulled ticket.
+`Worker.restart_watchdog/1` takes a ticket id. `restart_refusal/2` phrases
+every refusal once, for MCP `queue_restart_watchdog`, the REST endpoint (so
+the CLI) and the worker page. The Watchdog neither monitors nor calls a
+worker, and announces its outcomes on `Watchdog.subscribe/1`:
+
+| the PR | the ticket |
+|---|---|
+| merged | `Verification.finalize_merged/2` — closed, or verifying when `verify_after_deploy`; `{:worker_done}` to the MergeQueue and the coordinator's "completed" |
+| CI failed | a fix pass: `:active`, the pass a run under the ticket id |
+| conflicted | a conflict resolver, the same way |
+| closed unmerged | `:active` with `attention_cause: :pr_closed`; the coordinator is paged |
+| past its poll ceiling, or an unreviewed head | `{:timed_out, n}` / `{:unreviewed_head, sha}` and an auto-resume, its budget on the lane — no worker is failed |
+
+A PR opened before this change has no lane. `watch_opts/1` then uses the
+workspace's adapter and puts the PR on the ReviewGate's lane when the gate's
+approval stamp (`last_reviewed_sha`) is on the row — without it a restarted
+Watchdog would wait on a forge approval an Arbiter-authored PR never gets.
+
+### Fix and conflict passes are ordinary runs, with a fast lane
+
+`MergeQueue.FixPassDispatcher` and `.ConflictResolver` register a pass under
+the ticket id (roles `:fix_pass` / `:conflict_resolver`), refuse it beside a
+live run on the ticket (`Worker.live_run_refusal/4`, bd-8tjcms), and admit it
+through the slot (`MergeQueue.PassAdmission`, `ResumeSlot.admit/2` as an
+automatic caller). A free slot moves the ticket back to work before the pass is
+provisioned (`PassAdmission.with_slot/2`), so the slot is held from the moment
+the pass is admitted rather than from the moment its agent is up. At a full
+cap the pass waits in Autopilot's fast lane (kinds `:fix_pass` and
+`:conflict`) and starts ahead of every Ready ticket when a slot frees. The
+Watchdog knows its pass is queued, not lost. When the pass ends, done or
+failed, `PullRequest.back_to_merging/1` returns the ticket to Merging and
+restarts its Watchdog if it is gone. It does the same for a pass that never
+starts, unless another run holds the ticket by then. A pass whose agent fails
+to start is failed rather than left `:idle` holding the ticket's key.
+
+The slot hand-off (`meta[:slot_handoff]`) and `Worker.Phase`'s
+`:handing_off` are gone: a ticket In progress is the slot.
+
+### The ReviewGate reports to the ticket
+
+`ReviewGate.deliver_verdict/4` hands a verdict to its author when that run is
+still resident. Otherwise it applies it to the ticket: an approval opens the
+PR from `review_gate_state` and the gate's context — the bd-3wumco late
+approval reconciles the rejected run to completed — and a rejection is
+recorded and escalated. A verdict for a round a newer run has superseded is
+not applied.
+
+### After a restart
+
+`Reconciler.reconcile_open_pr_tasks/1` starts a Watchdog, from the row and
+without escalating, for every Merging ticket that has none, and puts a ticket
+whose pass the restart cut off back into Merging. It falls back to the
+patrols only when a Watchdog cannot start. `PendingMergeSweeper` gives a
+Merging ticket whose lane names its adapter its Watchdog back; a PR from
+before lanes gets the worker-less retry, which carries its stamp's baseline.
+The retry ends the ticket the way a live Watchdog does: `PullRequest.merged/2`
+on a merge, `PullRequest.closed/2` on a PR closed unmerged. Neither the
+reconciler nor the sweeper re-arms a ticket pulled out of the merge queue.
+
+### Surfaces
+
+- **Board.** A Merging ticket's Waiting card is built from the ticket
+  (`status: :merging`, the PR fields, `watchdog_alive`, phase
+  `waiting_ci_merge`). It needs you when its Watchdog is gone, when the
+  forge's block is one the Watchdog cannot clear, or when a pass under it
+  failed. A ticket pulled out of the merge queue (`merge_pulled`) reads
+  "pulled from merge queue", not "no watchdog polling". `/epics` flags a Merging child by the same rule
+  (`Snapshot.merging_needs_you?/3`), and the view's Merging step reads the
+  ticket's recorded poll.
+- **`/merge_queue`.** Queued is the Merging tickets still in the queue (a
+  pulled one is not listed); Landed today is the
+  tickets merged today (closed completed, or verifying) — not runs, since the
+  run that opens a PR completes when the PR opens.
+- **The worker page.** The Merge request panel — the no-watchdog warning or
+  the pulled notice, Restart watchdog, Retry auto-resolve — is the ticket's,
+  with or without a worker.
+- **Dispatch.** A plain dispatch of a Merging ticket is refused
+  (`task_awaiting_review`): a fresh run would hold no slot while the Watchdog
+  could merge underneath it. A resume takes the ticket back to work, and
+  stops its Watchdog first.

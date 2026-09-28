@@ -122,6 +122,28 @@ defmodule Arbiter.Board.SnapshotConflictsTest do
       end
     end
 
+    # bd-741sid: an open PR is the ticket's, and no worker stays on it — the
+    # Merging ticket itself is what a counterpart must not run beside, however
+    # long its PR has been open.
+    test "a Merging counterpart with no worker is in flight (merging)" do
+      board =
+        derive(
+          issues: [
+            issue("bd-1"),
+            issue("bd-7", %{
+              status: :in_progress,
+              state: :merging,
+              pr_ref: "#7",
+              updated_at: ~U[2026-09-15 09:00:00Z]
+            })
+          ],
+          conflicts_with: [{"bd-1", "bd-7"}]
+        )
+
+      assert board.promote == nil
+      assert %{reason: "blocked — conflicts with bd-7 (merging)"} = entry(board, "bd-1")
+    end
+
     test "a reviewer's own worker folds onto the author it reviews" do
       board =
         derive(

@@ -22,6 +22,12 @@ defmodule Arbiter.Worker.WatchdogResumeDeferralTest do
   and page the coordinator exactly once — guard class E of
   `docs/review-coverage-and-guard-policy.md` §5.3 (fail open, one escalation,
   parked terminal), registry row `:resume_deferral_budget` (W14).
+
+  bd-741sid: a Watchdog is keyed by its ticket and monitors no worker, so that
+  `:DOWN` cannot recur; the first case now pins that a run on the ticket exiting
+  mid-deferral leaves the deferral alone. The auto-resume count rides the
+  ticket's lane (`auto_resumes`), which is what a Watchdog is started with,
+  rather than a worker's meta.
   """
 
   use Arbiter.DataCase, async: false
@@ -46,11 +52,7 @@ defmodule Arbiter.Worker.WatchdogResumeDeferralTest do
     {:ok, task} = Ash.create(Issue, %{title: "deferral", workspace_id: ws.id})
     {:ok, task} = Ash.update(task, %{status: :in_progress})
 
-    {:ok, pid} = Worker.start(task_id: task.id, repo: "arbiter", workspace_id: ws.id)
-    :ok = Worker.advance(pid, :implement)
-    on_exit(fn -> stop_quietly(pid) end)
-
-    %{ws: ws, task_id: task.id, worker: pid}
+    %{ws: ws, task_id: task.id}
   end
 
   # ---- helpers -------------------------------------------------------------
@@ -64,11 +66,10 @@ defmodule Arbiter.Worker.WatchdogResumeDeferralTest do
 
   # `max_polls: 1` puts the very first poll on the ceiling, so every case starts
   # at the exact moment the incident starts: the timeout is registered and the
-  # auto-resume is attempted.
-  defp start_watchdog(worker_pid, task_id, mr_ref, ws, opts) do
+  # auto-resume is attempted. bd-741sid: keyed by the ticket, with no worker.
+  defp start_watchdog(task_id, mr_ref, ws, opts) do
     base = [
       task_id: task_id,
-      worker: worker_pid,
       mr_ref: mr_ref,
       adapter: StubMerger,
       workspace: ws,
@@ -97,7 +98,10 @@ defmodule Arbiter.Worker.WatchdogResumeDeferralTest do
   end
 
   # The exact refusal shape `Worker.start/1`'s single-active-worker guard
-  # produces when a subordinate pass holds the family.
+  # produces when a subordinate pass holds the family. Since bd-741sid a pass
+  # registers under the ticket id and a live one refuses the resume as
+  # `{:worker_active, _}` ("recovery already happened"); this `<task>:fixpass`
+  # shape is the pre-bd-741sid registration, still handled as a transient block.
   defp fixpass_live(task_id, pid) do
     {:worker_start_failed,
      {:task_worker_live,
@@ -132,20 +136,26 @@ defmodule Arbiter.Worker.WatchdogResumeDeferralTest do
   # ---- acceptance 1: the deferral survives, and re-fires on completion ------
 
   describe "a deferred auto-resume outlives the attempt that deferred it" do
-    test "the primary worker exiting — which the resume attempt itself causes — does not kill the deferral",
-         %{worker: pid, task_id: task_id, ws: ws} do
+    # bd-741sid: the Watchdog no longer monitors the primary worker, so this is
+    # now a run on the ticket, unpaired, exiting mid-deferral.
+    test "a run on the ticket exiting — which the resume attempt itself can cause — does not kill the deferral",
+         %{task_id: task_id, ws: ws} do
+      {:ok, run} = Worker.start(task_id: task_id, repo: "arbiter", workspace_id: ws.id)
+      :ok = Worker.advance(run, :implement)
+      on_exit(fn -> stop_quietly(run) end)
+
       blocker = fixpass_worker()
       StubAutoResumeDispatcher.arm_resume_error(fixpass_live(task_id, blocker))
 
-      wpid = start_watchdog(pid, task_id, "!strand1", ws, max_resume_deferrals: 10)
+      wpid = start_watchdog(task_id, "!strand1", ws, max_resume_deferrals: 10)
       wref = Process.monitor(wpid)
 
       wait_until(fn -> StubAutoResumeDispatcher.resume_count() >= 1 end, 5_000)
 
       # `Dispatch.resume/2` frees the registry slot before the family check
-      # refuses, so the monitored worker is already gone by the time the
-      # Watchdog processes the deferral.
-      stop_quietly(pid)
+      # refuses, so a run lingering under the ticket id is gone by the time
+      # the Watchdog processes the deferral.
+      stop_quietly(run)
 
       # The fix pass then finishes and a resume would take.
       StubAutoResumeDispatcher.arm_resume_error(fixpass_live(task_id, blocker), 0)
@@ -157,14 +167,14 @@ defmodule Arbiter.Worker.WatchdogResumeDeferralTest do
     end
 
     test "the resume re-fires when the blocking fix pass completes, not on a retry tick that may never come",
-         %{worker: pid, task_id: task_id, ws: ws} do
+         %{task_id: task_id, ws: ws} do
       blocker = fixpass_worker()
       StubAutoResumeDispatcher.arm_resume_error(fixpass_live(task_id, blocker))
 
       # A retry interval far beyond the test's own timeout: only the fix pass
       # finishing can produce the second attempt.
       wpid =
-        start_watchdog(pid, task_id, "!strand2", ws,
+        start_watchdog(task_id, "!strand2", ws,
           interval_ms: 60_000,
           max_resume_deferrals: 10
         )
@@ -185,17 +195,17 @@ defmodule Arbiter.Worker.WatchdogResumeDeferralTest do
 
   describe "the auto-resume budget across a deferred retry" do
     test "a retry keeps the attempt count it inherited instead of restarting the budget at 1",
-         %{worker: pid, task_id: task_id, ws: ws} do
-      # Two auto-resumes already spent on this task. The counter lives on the
-      # worker's meta because each round mints a fresh worker + Watchdog.
-      :ok = Worker.report(pid, :awaiting_review_resume_attempts, 2)
-
+         %{task_id: task_id, ws: ws} do
+      # Two auto-resumes already spent on this task. bd-741sid: the count rides
+      # the ticket's lane (`auto_resumes`) — each round mints a fresh Watchdog,
+      # which is started with it — rather than a worker's meta.
       blocker = fixpass_worker()
       StubAutoResumeDispatcher.arm_resume_error(fixpass_live(task_id, blocker))
 
       wpid =
-        start_watchdog(pid, task_id, "!strand6", ws,
+        start_watchdog(task_id, "!strand6", ws,
           interval_ms: 60_000,
+          auto_resumes: 2,
           max_auto_resumes: 3,
           max_resume_deferrals: 10
         )
@@ -204,11 +214,6 @@ defmodule Arbiter.Worker.WatchdogResumeDeferralTest do
       wait_until(fn -> StubAutoResumeDispatcher.resume_count() >= 1 end, 5_000)
       assert [%{attempt: 3}] = StubAutoResumeDispatcher.resumes()
 
-      # The deferred attempt's own `stop_prior_worker/1` kills the primary, so
-      # the retry can no longer read the counter off the worker's meta — the
-      # snapshot fallback carries none. It must not read that as a fresh budget.
-      stop_quietly(pid)
-
       StubAutoResumeDispatcher.arm_resume_error(fixpass_live(task_id, blocker), 0)
       send(blocker, :finish)
 
@@ -216,30 +221,27 @@ defmodule Arbiter.Worker.WatchdogResumeDeferralTest do
       assert_receive {:DOWN, ^wref, :process, ^wpid, :normal}, 5_000
 
       # Still attempt 3 — the deferral never spent one, and it never gave one
-      # back either. Resuming as attempt 1 here would re-stamp 1 onto the new
-      # run's meta and make the cap unbindable on exactly this path.
+      # back either. Resuming as attempt 1 here would record 1 on the ticket's
+      # lane and make the cap unbindable on exactly this path.
       assert [%{attempt: 3}, %{attempt: 3}] = StubAutoResumeDispatcher.resumes()
+      assert Ash.get!(Issue, task_id).merge_watch["auto_resumes"] == 3
       assert StubAutoResumeDispatcher.escalations() == []
     end
 
     test "the escalation from a deferral that ran out reports the inherited attempt count, not 0",
-         %{worker: pid, task_id: task_id, ws: ws} do
-      :ok = Worker.report(pid, :awaiting_review_resume_attempts, 2)
-
+         %{task_id: task_id, ws: ws} do
       blocker = fixpass_worker()
       StubAutoResumeDispatcher.arm_resume_error(fixpass_live(task_id, blocker))
 
       wpid =
-        start_watchdog(pid, task_id, "!strand7", ws,
+        start_watchdog(task_id, "!strand7", ws,
           interval_ms: 20,
+          auto_resumes: 2,
           max_auto_resumes: 3,
           max_resume_deferrals: 2
         )
 
       wref = Process.monitor(wpid)
-      wait_until(fn -> StubAutoResumeDispatcher.resume_count() >= 1 end, 5_000)
-      stop_quietly(pid)
-
       assert_receive {:DOWN, ^wref, :process, ^wpid, :normal}, 5_000
 
       assert [{^task_id, _ws_id, "!strand7", 2, {:resume_blocked, _blocked_by, 2}}] =
@@ -251,12 +253,12 @@ defmodule Arbiter.Worker.WatchdogResumeDeferralTest do
 
   describe "the terminal arms park the task and page once (class E)" do
     test "the deferral budget running out parks with a review_park_reason and pages once",
-         %{worker: pid, task_id: task_id, ws: ws} do
+         %{task_id: task_id, ws: ws} do
       blocker = fixpass_worker()
       StubAutoResumeDispatcher.arm_resume_error(fixpass_live(task_id, blocker))
 
       wpid =
-        start_watchdog(pid, task_id, "!strand3", ws, interval_ms: 20, max_resume_deferrals: 2)
+        start_watchdog(task_id, "!strand3", ws, interval_ms: 20, max_resume_deferrals: 2)
 
       wref = Process.monitor(wpid)
       assert_receive {:DOWN, ^wref, :process, ^wpid, :normal}, 5_000
@@ -277,14 +279,14 @@ defmodule Arbiter.Worker.WatchdogResumeDeferralTest do
     end
 
     test "a blocker that disappears without a completion signal parks and pages once, well inside the budget",
-         %{worker: pid, task_id: task_id, ws: ws} do
+         %{task_id: task_id, ws: ws} do
       dead = spawn(fn -> :ok end)
       wait_until(fn -> not Process.alive?(dead) end, 2_000)
 
       StubAutoResumeDispatcher.arm_resume_error(fixpass_live(task_id, dead))
 
       wpid =
-        start_watchdog(pid, task_id, "!strand4", ws, interval_ms: 20, max_resume_deferrals: 30)
+        start_watchdog(task_id, "!strand4", ws, interval_ms: 20, max_resume_deferrals: 30)
 
       wref = Process.monitor(wpid)
       assert_receive {:DOWN, ^wref, :process, ^wpid, :normal}, 5_000
@@ -307,7 +309,7 @@ defmodule Arbiter.Worker.WatchdogResumeDeferralTest do
 
   describe "a transient GitHub poll error during a deferral" do
     test "neither clears nor duplicates the deferral state",
-         %{worker: pid, task_id: task_id, ws: ws} do
+         %{task_id: task_id, ws: ws} do
       blocker = fixpass_worker()
       StubAutoResumeDispatcher.arm_resume_error(fixpass_live(task_id, blocker))
 
@@ -317,7 +319,7 @@ defmodule Arbiter.Worker.WatchdogResumeDeferralTest do
       ])
 
       wpid =
-        start_watchdog(pid, task_id, "!strand5", ws,
+        start_watchdog(task_id, "!strand5", ws,
           interval_ms: 60_000,
           max_resume_deferrals: 1
         )

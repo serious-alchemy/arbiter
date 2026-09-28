@@ -333,6 +333,22 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
       assert Ash.get!(Issue, task.id).status == :in_progress
     end
 
+    # bd-741sid: a Merging ticket has no worker — its Watchdog owns the merge
+    # and finalizes the ticket itself. The sweep stays the fallback for a PR
+    # nothing watches.
+    test "a ticket whose Watchdog is alive is left to it", %{ws: ws} do
+      task = create_task(ws, "704")
+      {:ok, _} = Ash.update(task, %{status: :in_progress}, action: :update)
+      register_live_worker(task.id <> ":watchdog")
+
+      stub(pr_get_stub(704, :merged))
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      assert Ash.get!(Issue, task.id).status == :in_progress
+    end
+
     # bd-6w7j8h: complete_now/2 never stops the Worker GenServer — the process
     # lingers, still registered, at status: :completed until the task's
     # `:close` action's after-action reaps it (Worker.stop, see worker.ex

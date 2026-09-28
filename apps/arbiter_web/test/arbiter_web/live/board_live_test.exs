@@ -1,5 +1,5 @@
 defmodule ArbiterWeb.BoardLiveTest.BoardMerger do
-  @moduledoc "Stub merger that parks a worker at :awaiting_review, i.e. in Waiting."
+  @moduledoc "Stub merger whose PR puts a ticket in Merging, i.e. in Waiting."
   @behaviour Arbiter.Mergers.Merger
 
   @impl true
@@ -38,8 +38,9 @@ defmodule ArbiterWeb.BoardLiveTest do
 
   alias Arbiter.Board.Autopilot
   alias Arbiter.Board.Snapshot
-  alias Arbiter.Tasks.{Dependency, Issue, Workspace}
+  alias Arbiter.Tasks.{Dependency, Issue, PullRequest, Workspace}
   alias Arbiter.Worker
+  alias Arbiter.Worker.Watchdog
   alias ArbiterWeb.BoardLiveTest.BoardMerger
 
   setup do
@@ -113,12 +114,14 @@ defmodule ArbiterWeb.BoardLiveTest do
     pid
   end
 
-  # A worker parked at :awaiting_review on an open MR — the other half of
-  # Waiting. The Watchdog is pushed far enough out that it never polls, so the
+  # An In-progress ticket's worker opens its MR, so the ticket is Merging — the
+  # other half of Waiting (bd-741sid). The run ends once the MR is open; the
+  # ticket's Watchdog is pushed far enough out that it never polls, so the
   # card's merger status is only ever what a test records by hand.
-  defp merge_worker(ws, task) do
+  defp open_pr(ws, task) do
     {:ok, pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)
     :ok = Worker.advance(pid, :integrate)
+    run = Process.monitor(pid)
 
     {:ok, "!77"} =
       Worker.open_mr(pid, "feature/x", "Integrate x", "", %{
@@ -129,7 +132,8 @@ defmodule ArbiterWeb.BoardLiveTest do
         initial_delay_ms: 600_000
       })
 
-    pid
+    assert_receive {:DOWN, ^run, :process, ^pid, _}, 2_000
+    task
   end
 
   describe "columns" do
@@ -303,7 +307,7 @@ defmodule ArbiterWeb.BoardLiveTest do
       ws: ws
     } do
       task = working_issue(ws, "still in review")
-      merge_worker(ws, task)
+      open_pr(ws, task)
 
       {:ok, view, _html} = live_board(conn)
 
@@ -324,7 +328,7 @@ defmodule ArbiterWeb.BoardLiveTest do
       {:ok, _pid} = Worker.start(task_id: running.id, repo: "r", workspace_id: ws.id)
 
       waiting = working_issue(ws, "waiting card")
-      merge_worker(ws, waiting)
+      open_pr(ws, waiting)
 
       {:ok, view, html} = live_board(conn)
 
@@ -388,7 +392,7 @@ defmodule ArbiterWeb.BoardLiveTest do
 
     test "an open MR under review points the chip at the merge queue", %{conn: conn, ws: ws} do
       task = working_issue(ws, "under review")
-      merge_worker(ws, task)
+      open_pr(ws, task)
 
       {:ok, view, _html} = live_board(conn)
 
@@ -671,11 +675,12 @@ defmodule ArbiterWeb.BoardLiveTest do
 
   describe "the Waiting column holds everything out of the worker's hands" do
     # bd-8jixav: the Watchdog is a :temporary process, so a crash leaves the
-    # worker parked at :awaiting_review with an open MR nothing polls. The
-    # board used to keep showing an ordinary merge card.
-    defp merge_worker_without_watchdog(ws, task) do
+    # ticket Merging on an open MR nothing polls. The board used to keep
+    # showing an ordinary merge card.
+    defp open_pr_without_watchdog(ws, task) do
       {:ok, pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)
       :ok = Worker.advance(pid, :integrate)
+      run = Process.monitor(pid)
 
       {:ok, _} =
         Worker.open_mr(pid, "feature/x", "Integrate x", "", %{
@@ -687,12 +692,13 @@ defmodule ArbiterWeb.BoardLiveTest do
           watchdog_start_error: true
         })
 
-      pid
+      assert_receive {:DOWN, ^run, :process, ^pid, _}, 2_000
+      task
     end
 
     test "a card whose watchdog died says so and offers the restart", %{conn: conn, ws: ws} do
       dead = working_issue(ws, "nobody is watching this")
-      merge_worker_without_watchdog(ws, dead)
+      open_pr_without_watchdog(ws, dead)
 
       {:ok, view, html} = live_board(conn)
 
@@ -707,7 +713,7 @@ defmodule ArbiterWeb.BoardLiveTest do
 
     test "a card with a live watchdog says nothing about one", %{conn: conn, ws: ws} do
       polling = working_issue(ws, "still in review")
-      merge_worker(ws, polling)
+      open_pr(ws, polling)
 
       {:ok, _view, html} = live_board(conn)
 
@@ -715,19 +721,23 @@ defmodule ArbiterWeb.BoardLiveTest do
     end
 
     # The other half of bd-8jixav: a task with both a primary :awaiting_review
-    # row and a subordinate failed fix-pass row rendered as two cards.
-    test "a task with a subordinate pass renders one card, not two", %{conn: conn, ws: ws} do
+    # row and a subordinate failed fix-pass row rendered as two cards. Since
+    # bd-741sid the card is the Merging ticket's, and a pass is the ticket's
+    # own run, registered under the ticket id.
+    test "a Merging ticket with a failed pass under it renders one card, not two", %{
+      conn: conn,
+      ws: ws
+    } do
       task = working_issue(ws, "one card please")
-      merge_worker(ws, task)
+      open_pr(ws, task)
 
-      # A subordinate pass registers under `<task_id>:fixpass` and carries its
-      # role in meta — the same shape MergeQueue.FixPassDispatcher starts.
+      # The pass carries its role in meta — the same shape
+      # MergeQueue.FixPassDispatcher starts.
       {:ok, fixpass} =
         Worker.start(
           task_id: task.id,
           repo: "r",
           workspace_id: ws.id,
-          registry_key: "#{task.id}:fixpass",
           meta: %{role: :fix_pass}
         )
 
@@ -741,14 +751,17 @@ defmodule ArbiterWeb.BoardLiveTest do
              |> render()
              |> then(&Regex.scan(~r/id="card-#{task.id}"/, &1))
              |> length() == 1
+
+      # The collapsed pass keeps its failure on the one card.
+      assert has_element?(view, ~s([id="card-#{task.id}"]), "fix pass failed")
     end
 
-    test "a parked worker and a merge-parked one share the column", %{conn: conn, ws: ws} do
+    test "a parked worker and a Merging ticket share the column", %{conn: conn, ws: ws} do
       parked = working_issue(ws, "answer me")
       parked_worker(ws, parked)
 
       merging = working_issue(ws, "land it later")
-      merge_worker(ws, merging)
+      open_pr(ws, merging)
 
       {:ok, view, _html} = live_board(conn)
 
@@ -761,13 +774,13 @@ defmodule ArbiterWeb.BoardLiveTest do
       parked_worker(ws, parked)
 
       polling = working_issue(ws, "still in review")
-      merge_worker(ws, polling)
+      open_pr(ws, polling)
 
       stuck = working_issue(ws, "conflicted")
-      stuck_pid = merge_worker(ws, stuck)
+      open_pr(ws, stuck)
 
       :ok =
-        Worker.record_merger_status(stuck_pid, %{
+        PullRequest.record_merger_status(stuck.id, %{
           status: :open,
           approved: true,
           block_reason: :conflict
@@ -870,33 +883,47 @@ defmodule ArbiterWeb.BoardLiveTest do
       assert Worker.state(pid).status == :failed
     end
 
-    test "dragging a merge-parked card out stops the worker watching the MR", %{
+    # bd-741sid: no worker sits on an open MR — the ticket's Watchdog is what
+    # keeps it in the merge queue, so that is what the drag stops.
+    test "dragging a Merging card out stops its Watchdog and leaves the MR", %{
       conn: conn,
       ws: ws
     } do
       task = working_issue(ws, "land it later")
-      merge_worker(ws, task)
+      open_pr(ws, task)
+      watchdog = Watchdog.whereis(task.id)
+      assert is_pid(watchdog)
+      watching = Process.monitor(watchdog)
 
       {:ok, view, _html} = live_board(conn)
 
       html = drag(view, task.id, "waiting", "closed")
-      Process.sleep(80)
 
       assert html =~ "merge request is untouched"
-      refute Enum.any?(Worker.list_children(), &(&1.task_id == task.id))
+      assert_receive {:DOWN, ^watching, :process, ^watchdog, _}, 1_000
+      assert %{state: :merging, pr_ref: "!77"} = Ash.get!(Issue, task.id)
+
+      # bd-741sid, review round 1 (finding 4): the pull is on the ticket, so
+      # no automatic restart undoes it, and the card reads as a pull rather
+      # than as a Watchdog that died.
+      assert PullRequest.pulled?(Ash.get!(Issue, task.id))
+      assert {:error, :pulled} = Watchdog.restart(task.id)
+      assert html =~ "pulled from merge queue"
+      refute html =~ "no watchdog polling"
+      assert has_element?(view, ~s([id="card-#{task.id}"] a[href="/workers/#{task.id}"]))
     end
 
     test "merge-queue cards render merger_status text correctly", %{conn: conn, ws: ws} do
       # nil merger_status renders as "checks"
       nil_status = working_issue(ws, "nil status card")
-      _nil_pid = merge_worker(ws, nil_status)
+      open_pr(ws, nil_status)
 
       # pending card (no block_reason) renders as "checks"
       pending = working_issue(ws, "pending card")
-      pending_pid = merge_worker(ws, pending)
+      open_pr(ws, pending)
 
       :ok =
-        Worker.record_merger_status(pending_pid, %{
+        PullRequest.record_merger_status(pending.id, %{
           status: :open,
           approved: false,
           pipeline: :success
@@ -904,10 +931,10 @@ defmodule ArbiterWeb.BoardLiveTest do
 
       # approved card (no block_reason) renders as "approved"
       approved = working_issue(ws, "approved card")
-      approved_pid = merge_worker(ws, approved)
+      open_pr(ws, approved)
 
       :ok =
-        Worker.record_merger_status(approved_pid, %{
+        PullRequest.record_merger_status(approved.id, %{
           status: :open,
           approved: true,
           pipeline: :success
@@ -915,10 +942,10 @@ defmodule ArbiterWeb.BoardLiveTest do
 
       # merged card renders as "merged"
       merged = working_issue(ws, "merged card")
-      merged_pid = merge_worker(ws, merged)
+      open_pr(ws, merged)
 
       :ok =
-        Worker.record_merger_status(merged_pid, %{
+        PullRequest.record_merger_status(merged.id, %{
           status: :merged,
           approved: true,
           pipeline: :success
@@ -926,20 +953,20 @@ defmodule ArbiterWeb.BoardLiveTest do
 
       # blocked cards with various block_reasons
       conflict_card = working_issue(ws, "conflict card")
-      conflict_pid = merge_worker(ws, conflict_card)
+      open_pr(ws, conflict_card)
 
       :ok =
-        Worker.record_merger_status(conflict_pid, %{
+        PullRequest.record_merger_status(conflict_card.id, %{
           status: :open,
           approved: true,
           block_reason: :conflict
         })
 
       ci_failed_card = working_issue(ws, "ci failed card")
-      ci_failed_pid = merge_worker(ws, ci_failed_card)
+      open_pr(ws, ci_failed_card)
 
       :ok =
-        Worker.record_merger_status(ci_failed_pid, %{
+        PullRequest.record_merger_status(ci_failed_card.id, %{
           status: :open,
           approved: true,
           pipeline: :failed,
@@ -947,10 +974,10 @@ defmodule ArbiterWeb.BoardLiveTest do
         })
 
       behind_base_card = working_issue(ws, "behind base card")
-      behind_base_pid = merge_worker(ws, behind_base_card)
+      open_pr(ws, behind_base_card)
 
       :ok =
-        Worker.record_merger_status(behind_base_pid, %{
+        PullRequest.record_merger_status(behind_base_card.id, %{
           status: :open,
           approved: true,
           block_reason: :behind_base
@@ -1063,7 +1090,7 @@ defmodule ArbiterWeb.BoardLiveTest do
     } do
       _between_rounds = working_issue(ws, "between review rounds")
       on_its_mr = working_issue(ws, "parked on its MR")
-      merge_worker(ws, on_its_mr)
+      open_pr(ws, on_its_mr)
       assert Ash.get!(Issue, on_its_mr.id).state == :merging
 
       {:ok, _view, html} = live_board(conn)

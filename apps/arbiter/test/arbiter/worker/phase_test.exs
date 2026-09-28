@@ -69,8 +69,14 @@ defmodule Arbiter.Worker.PhaseTest do
       assert Phase.of(author(:resuming, %{agent_live: true})) == :implementing
     end
 
-    test "a running record whose agent has exited is not :implementing" do
-      refute Phase.of(author(:running, %{agent_live: false})) == :implementing
+    # bd-741sid: the phase names the stage; whether an agent is live is the
+    # liveness beside it (see the moduledoc), which is what tells a record
+    # between agents from running work. Such a record only exists for a moment
+    # now — every worker stops when its agent stops.
+    test "a running record whose agent has exited still names its stage, and reads as not live" do
+      worker = author(:running, %{agent_live: false})
+      assert Phase.of(worker) == :implementing
+      refute Phase.any_agent_live?(worker, [])
     end
   end
 
@@ -121,9 +127,13 @@ defmodule Arbiter.Worker.PhaseTest do
       assert Phase.of(author(:awaiting_review_gate, %{agent_live: false})) == :in_review
     end
 
-    test "a live-status record between agents is :handing_off" do
-      assert Phase.of(author(:running, %{agent_live: false})) == :handing_off
-      assert Phase.of(author(:idle, %{agent_live: false})) == :handing_off
+    test "a live-status record between agents is its stage, never a hand-off (bd-741sid)" do
+      for worker <- [author(:running, %{agent_live: false}), author(:idle, %{agent_live: false})] do
+        assert Phase.of(worker) == :implementing
+        refute Phase.any_agent_live?(worker, [])
+      end
+
+      refute :handing_off in Phase.phases()
     end
 
     test "a completed worker is :done" do
@@ -139,8 +149,10 @@ defmodule Arbiter.Worker.PhaseTest do
       assert Phase.of(conflict(%{agent_live: true})) == :resolving_conflict
     end
 
-    test "a subordinate with no live agent is in transition, not in its round" do
-      assert Phase.of(fix_pass(%{agent_live: false})) == :handing_off
+    test "a pass with no live agent is still in its round, and reads as not live (bd-741sid)" do
+      pass = fix_pass(%{agent_live: false})
+      assert Phase.of(pass) == :fixing_ci
+      refute Phase.any_agent_live?(pass, [])
     end
   end
 
@@ -213,20 +225,13 @@ defmodule Arbiter.Worker.PhaseTest do
     end
   end
 
-  # bd-92mx1m: a worker failed only so an automatic round can replace it (the
-  # ReviewGate fix round, the Watchdog's awaiting_review auto-resume) has not
-  # been parked for a person, so its task keeps its slot through the hand-off.
-  describe "a :failed worker mid slot hand-off" do
-    test "is handing off, not waiting on you" do
-      assert Phase.of(author(:failed, %{meta: %{slot_handoff: true}})) == :handing_off
-    end
-
-    test "a plain :failed worker still waits on you" do
-      assert Phase.of(author(:failed, %{meta: %{slot_handoff: false}})) == :waiting_on_you
+  # bd-92mx1m's slot hand-off is gone (bd-741sid): no worker fails "only so an
+  # automatic round can replace it" any more, so a stale `slot_handoff` marker
+  # on an old snapshot changes nothing.
+  describe "a :failed worker" do
+    test "waits on you, whatever an old snapshot's meta says" do
       assert Phase.of(author(:failed)) == :waiting_on_you
-    end
-
-    test "an :awaiting worker is unaffected by the marker" do
+      assert Phase.of(author(:failed, %{meta: %{slot_handoff: true}})) == :waiting_on_you
       assert Phase.of(author(:awaiting, %{meta: %{slot_handoff: true}})) == :waiting_on_you
     end
   end

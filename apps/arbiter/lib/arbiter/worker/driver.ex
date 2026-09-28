@@ -34,11 +34,13 @@ defmodule Arbiter.Worker.Driver do
     - `:completed` → finalize the task (a `:merged` completion routes through
       `Arbiter.Tasks.Verification.finalize_merged/2`, so a `verify_after_deploy`
       task parks at `:awaiting_verification` rather than closing), optionally
-      cleanup worktree, stop.
+      cleanup worktree, stop. A run that completed by opening its PR
+      (`result: :pr_opened`, bd-741sid) finalizes nothing: its ticket is
+      Merging, and the ticket's Watchdog closes it when the PR merges.
     - `:failed` → log, stop (task remains `:in_progress` for inspection).
-    - `:idle | :running | :awaiting | :awaiting_review` → schedule next check
-      (`:awaiting_review` is the brief window after the worker's `arb done`
-      opens an MR; the Watchdog, not the Driver, drives it to terminal).
+    - `:idle | :running | :awaiting | :awaiting_review_gate` → schedule next
+      check (the ReviewGate, not the Driver, drives `:awaiting_review_gate` to
+      its verdict).
 
   ## Shared lifecycle
 
@@ -236,13 +238,10 @@ defmodule Arbiter.Worker.Driver do
 
       %{status: status} when status in [:awaiting_review_gate, :awaiting_review] ->
         # :awaiting_review_gate — a distinct reviewer worker (ReviewGate) is
-        # evaluating the diff; it will report a verdict that merges or parks.
-        # :awaiting_review — the Watchdog is polling the forge for merge/approval;
-        # it drives the terminal transition, not the Driver.
-        # Neither state is "Claude stuck" — they're externally owned handoffs.
-        # Don't burn tick budget here: the Watchdog (bd-d1jp4r) and ReviewGate each
-        # have their own watchdogs; the Driver just needs to stay alive until
-        # Worker.complete fires.
+        # evaluating the diff; it will report a verdict that opens the PR or
+        # parks. Not "Claude stuck" — an externally owned hand-off, so it burns
+        # no tick budget: the ReviewGate has its own bounds. (`:awaiting_review`
+        # is a status no run reaches since bd-741sid.)
         Process.send_after(self(), :check_worker, state.interval_ms)
         {:noreply, state}
 
@@ -278,8 +277,18 @@ defmodule Arbiter.Worker.Driver do
     end
   end
 
-  def handle_info({:DOWN, _ref, :process, pid, _reason}, %{worker_pid: pid} = state) do
-    Logger.warning("Worker.Driver: worker died for task=#{state.task_id}")
+  # bd-741sid: a run whose PR is open ends there — the worker exits and the
+  # ticket's Watchdog owns the PR — so its exit is not a death.
+  def handle_info({:DOWN, _ref, :process, pid, reason}, %{worker_pid: pid} = state) do
+    if merging?(state.task_id) do
+      Logger.info(
+        "Worker.Driver: run for task=#{state.task_id} ended (#{inspect(reason)}); " <>
+          "its ticket is Merging"
+      )
+    else
+      Logger.warning("Worker.Driver: worker died for task=#{state.task_id}")
+    end
+
     maybe_cleanup_worktree(state)
     {:stop, :normal, state}
   end
@@ -351,6 +360,15 @@ defmodule Arbiter.Worker.Driver do
     # Machine process is gone — normalize to the same reason the :DOWN handler produces.
     :exit, {:noproc, _} -> {:error, :machine_died}
     :exit, reason -> {:error, {:exit, reason}}
+  end
+
+  defp merging?(task_id) do
+    case Ash.get(Issue, task_id) do
+      {:ok, %Issue{state: :merging}} -> true
+      _ -> false
+    end
+  rescue
+    _ -> false
   end
 
   defp safe_worker_state(pid) do
@@ -430,13 +448,27 @@ defmodule Arbiter.Worker.Driver do
   # A non-merge completion (`:claude_done`, `:workflow_completed`) is not a
   # deploy and still closes directly — the flag is about observing merged code
   # on the running server, and parking a task that never merged would strand it.
+  #
+  # bd-741sid: a run that completed by opening its PR (`result: :pr_opened`) is
+  # not the ticket finishing. The ticket is Merging and its Watchdog finishes it
+  # when the PR merges, so there is nothing for the Driver to do.
   defp finalize_task(task_id, close_upstream, worker_state) do
-    if merge_completion?(worker_state) do
-      finalize_merged_task(task_id, close_upstream, worker_state)
-    else
-      close_task(task_id, close_upstream)
+    cond do
+      pr_opened_completion?(worker_state) ->
+        :ok
+
+      merge_completion?(worker_state) ->
+        finalize_merged_task(task_id, close_upstream, worker_state)
+
+      true ->
+        close_task(task_id, close_upstream)
     end
   end
+
+  defp pr_opened_completion?(%{meta: meta}) when is_map(meta),
+    do: Map.get(meta, :result) == :pr_opened
+
+  defp pr_opened_completion?(_), do: false
 
   defp merge_completion?(%{meta: meta}) when is_map(meta) do
     case Map.get(meta, :result) || Map.get(meta, "result") do
@@ -522,7 +554,15 @@ defmodule Arbiter.Worker.Driver do
   defp maybe_cleanup_worktree(%{cleanup_worktree: false}), do: :ok
   defp maybe_cleanup_worktree(%{worktree_path: nil}), do: :ok
 
-  defp maybe_cleanup_worktree(%{worktree_path: path} = state) do
+  # bd-741sid: a Merging ticket's worktree belongs to its merge path — a fix or
+  # conflict pass works in it, and the ticket's close removes it.
+  defp maybe_cleanup_worktree(%{task_id: task_id} = state) when is_binary(task_id) do
+    if merging?(task_id), do: :ok, else: do_maybe_cleanup_worktree(state)
+  end
+
+  defp maybe_cleanup_worktree(state), do: do_maybe_cleanup_worktree(state)
+
+  defp do_maybe_cleanup_worktree(%{worktree_path: path} = state) do
     # The task's :close after_action may already have removed the worktree
     # (see Arbiter.Tasks.Issue.Changes.CleanupWorktree) — nothing left to do,
     # and skipping silently keeps this legacy Driver-side path from logging a

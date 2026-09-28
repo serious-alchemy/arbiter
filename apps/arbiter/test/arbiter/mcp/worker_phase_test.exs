@@ -61,7 +61,9 @@ defmodule Arbiter.MCP.WorkerPhaseTest do
     test "an author whose agent has exited stops reading as running work", ctx do
       # The bd-aw2cyt report, on this surface: `vs-8iqckq` showed
       # `status=running` with no process anywhere. The status still says
-      # `running` (consumers depend on it); the phase no longer pretends.
+      # `running` (consumers depend on it); the liveness no longer pretends.
+      # bd-741sid: the phase names the stage (`implementing`) — the missing
+      # agent is `agent_live: false`, not a hand-off phase.
       t = task(ctx.ws)
       author = start_worker(ctx.ws, t.id)
       :ok = Worker.advance(author, :implement)
@@ -73,7 +75,7 @@ defmodule Arbiter.MCP.WorkerPhaseTest do
       entry = Enum.find(workers, &(&1.task_id == t.id))
       assert entry.status == "running"
       assert entry.agent_live == false
-      refute entry.phase == "implementing"
+      assert entry.phase == "implementing"
 
       reviewer = Enum.find(workers, &(&1.task_id == t.id <> "#review"))
       assert reviewer.role == "reviewer"
@@ -92,7 +94,7 @@ defmodule Arbiter.MCP.WorkerPhaseTest do
 
       assert snap.status == "running"
       assert snap.agent_live == false
-      assert snap.phase == "handing_off"
+      assert snap.phase == "implementing"
       assert is_binary(snap.phase_label)
     end
   end

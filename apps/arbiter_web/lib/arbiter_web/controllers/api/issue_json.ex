@@ -64,6 +64,15 @@ defmodule ArbiterWeb.Api.IssueJSON do
       tracker_type: to_string_atom(issue.tracker_type),
       tracker_ref: issue.tracker_ref,
       pr_ref: issue.pr_ref,
+      # bd-741sid: the ticket owns its open PR — its URL, the forge's last
+      # answer (as recorded, string-keyed) and when its Watchdog read it — and
+      # the cause a closed-unmerged PR sent it back to work with.
+      merger_url: issue.merger_url,
+      merger_status: issue.merger_status,
+      merger_checked_at: iso(issue.merger_checked_at),
+      attention_cause: to_string_atom(issue.attention_cause),
+      attention_detail: issue.attention_detail,
+      attention_since: iso(issue.attention_since),
       pr_body: issue.pr_body,
       target_branch: issue.target_branch,
       repo: issue.repo,

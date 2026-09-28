@@ -2,11 +2,11 @@ defmodule ArbiterWeb.Api.QueueControllerTest do
   @moduledoc """
   bd-8jixav: `POST /api/queue/:task_id/restart_watchdog` — the REST half of the
   dead-Watchdog recovery, and the endpoint `arb queue restart-watchdog` drives.
+  Since bd-741sid the Watchdog is the ticket's, started from its row.
   """
   use ArbiterWeb.ConnCase, async: false
 
-  alias Arbiter.Tasks.{Issue, Workspace}
-  alias Arbiter.Worker
+  alias Arbiter.Tasks.{Issue, PullRequest, Workspace}
   alias Arbiter.Worker.Watchdog
   alias Arbiter.Test.StubMerger
 
@@ -22,37 +22,32 @@ defmodule ArbiterWeb.Api.QueueControllerTest do
     {:ok, conn: put_req_header(conn, "accept", "application/json"), ws: ws}
   end
 
-  defp parked_worker(ws, mr_ref) do
+  # bd-741sid: an open PR is its ticket's — Merging, with the PR and the lane
+  # its Watchdog watches it on recorded on the row — and nothing watches it
+  # until the Watchdog is started from that row. The lane never polls within a
+  # test.
+  defp merging_ticket(ws, mr_ref) do
     {:ok, task} = Ash.create(Issue, %{title: "queue ctrl", workspace_id: ws.id})
-    {:ok, pid} = Worker.start(task_id: task.id, repo: "qc/repo", workspace_id: ws.id)
-    on_exit(fn -> Process.alive?(pid) && Worker.stop(pid, :normal) end)
-    :ok = Worker.advance(pid, :implement)
+    {:ok, _} = Ash.update(task, %{status: :in_progress})
 
-    StubMerger.next_open_ref(mr_ref)
-    StubMerger.queue_get(mr_ref, [%{status: :open, approved: false}])
+    {:ok, task} =
+      Issue.pr_opened(task.id, mr_ref,
+        merger_url: "https://example.test/mr/#{mr_ref}",
+        merge_watch:
+          PullRequest.lane(
+            adapter: StubMerger,
+            repo: "qc/repo",
+            interval_ms: 600_000,
+            initial_delay_ms: 600_000
+          )
+      )
 
-    {:ok, ^mr_ref} =
-      Worker.open_mr(pid, "feature/#{mr_ref}", "MR", "desc", %{
-        adapter: StubMerger,
-        workspace: nil,
-        interval_ms: 50,
-        initial_delay_ms: 0,
-        watchdog_start_error: true
-      })
-
-    on_exit(fn ->
-      case Watchdog.whereis(task.id) do
-        nil -> :ok
-        wpid -> GenServer.stop(wpid, :normal)
-      end
-    end)
-
-    {task, pid}
+    task
   end
 
   describe "POST /api/queue/:task_id/restart_watchdog" do
-    test "restarts a dead watchdog for a parked worker", %{conn: conn, ws: ws} do
-      {task, _pid} = parked_worker(ws, "!qc1")
+    test "restarts a dead watchdog for a Merging ticket", %{conn: conn, ws: ws} do
+      task = merging_ticket(ws, "!qc1")
       refute Watchdog.alive?(task.id)
 
       conn = post(conn, ~p"/api/queue/#{task.id}/restart_watchdog", %{})
@@ -62,13 +57,35 @@ defmodule ArbiterWeb.Api.QueueControllerTest do
       assert Watchdog.alive?(task.id)
     end
 
-    test "404s when no worker is registered for the task", %{conn: conn} do
+    # bd-741sid, review round 1 (finding 4): `arb queue restart-watchdog` is an
+    # operator's own restart, so it puts a ticket pulled out of the merge
+    # queue back in it.
+    test "puts a ticket pulled out of the merge queue back in it", %{conn: conn, ws: ws} do
+      task = merging_ticket(ws, "!qc4")
+      :ok = PullRequest.pull(task.id)
+      assert {:error, :pulled} = Watchdog.restart(task.id)
+
+      on_exit(fn ->
+        case Watchdog.whereis(task.id) do
+          nil -> :ok
+          wd -> Arbiter.ProcessTeardown.stop_child(Arbiter.Worker.WatchdogSupervisor, wd)
+        end
+      end)
+
+      conn = post(conn, ~p"/api/queue/#{task.id}/restart_watchdog", %{})
+
+      assert %{"restarted" => true} = json_response(conn, 200)
+      assert Watchdog.alive?(task.id)
+      refute PullRequest.pulled?(Ash.get!(Issue, task.id))
+    end
+
+    test "404s when there is no such ticket", %{conn: conn} do
       conn = post(conn, ~p"/api/queue/no-such-task-xyz/restart_watchdog", %{})
       assert json_response(conn, 404)
     end
 
     test "409s rather than stacking a second watchdog on one MR", %{conn: conn, ws: ws} do
-      {task, _pid} = parked_worker(ws, "!qc2")
+      task = merging_ticket(ws, "!qc2")
       assert :ok = Watchdog.restart(task.id)
 
       conn = post(conn, ~p"/api/queue/#{task.id}/restart_watchdog", %{})
@@ -77,16 +94,26 @@ defmodule ArbiterWeb.Api.QueueControllerTest do
       assert msg =~ "already running"
     end
 
-    test "400s when the worker is not parked awaiting review", %{conn: conn, ws: ws} do
-      {:ok, task} = Ash.create(Issue, %{title: "not parked", workspace_id: ws.id})
-      {:ok, pid} = Worker.start(task_id: task.id, repo: "qc/repo", workspace_id: ws.id)
-      on_exit(fn -> Process.alive?(pid) && Worker.stop(pid, :normal) end)
-      :ok = Worker.advance(pid, :implement)
+    test "400s when the ticket has no PR on record", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "no PR yet", workspace_id: ws.id})
+      {:ok, _} = Ash.update(task, %{status: :in_progress})
 
       conn = post(conn, ~p"/api/queue/#{task.id}/restart_watchdog", %{})
 
       assert %{"error" => %{"message" => msg}} = json_response(conn, 400)
-      assert msg =~ "awaiting_review"
+      assert msg =~ "no PR on record"
+      refute Watchdog.alive?(task.id)
+    end
+
+    test "400s once the ticket has left Merging", %{conn: conn, ws: ws} do
+      task = merging_ticket(ws, "!qc3")
+      Ash.update!(Ash.get!(Issue, task.id), %{}, action: :close)
+
+      conn = post(conn, ~p"/api/queue/#{task.id}/restart_watchdog", %{})
+
+      assert %{"error" => %{"message" => msg}} = json_response(conn, 400)
+      assert msg =~ "not Merging"
+      refute Watchdog.alive?(task.id)
     end
   end
 
@@ -120,7 +147,7 @@ defmodule ArbiterWeb.Api.QueueControllerTest do
       conn: conn,
       ws: ws
     } do
-      {task, _pid} = parked_worker(ws, "!qc-rerun")
+      task = merging_ticket(ws, "!qc-rerun")
       assert :ok = Watchdog.restart(task.id)
 
       conn = post(conn, ~p"/api/queue/#{task.id}/rerun_ci", %{"mode" => "all_jobs"})
@@ -137,7 +164,7 @@ defmodule ArbiterWeb.Api.QueueControllerTest do
     end
 
     test "400s on an unknown mode before touching the forge", %{conn: conn, ws: ws} do
-      {task, _pid} = parked_worker(ws, "!qc-rerun2")
+      task = merging_ticket(ws, "!qc-rerun2")
       assert :ok = Watchdog.restart(task.id)
 
       conn = post(conn, ~p"/api/queue/#{task.id}/rerun_ci", %{"mode" => "sideways"})
@@ -157,7 +184,7 @@ defmodule ArbiterWeb.Api.QueueControllerTest do
     end
 
     test "400s without a note — an unevidenced verdict is not actionable", %{conn: conn, ws: ws} do
-      {task, _pid} = parked_worker(ws, "!qc-ext1")
+      task = merging_ticket(ws, "!qc-ext1")
       assert :ok = Watchdog.restart(task.id)
 
       conn = post(conn, ~p"/api/queue/#{task.id}/mark_ci_external", %{})
@@ -167,7 +194,7 @@ defmodule ArbiterWeb.Api.QueueControllerTest do
     end
 
     test "400s when the task is not parked on a CI-failed block", %{conn: conn, ws: ws} do
-      {task, _pid} = parked_worker(ws, "!qc-ext2")
+      task = merging_ticket(ws, "!qc-ext2")
       assert :ok = Watchdog.restart(task.id)
 
       conn =

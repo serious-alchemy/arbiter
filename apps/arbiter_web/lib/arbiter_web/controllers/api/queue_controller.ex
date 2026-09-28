@@ -8,9 +8,9 @@ defmodule ArbiterWeb.Api.QueueController do
       attempt for a task whose merge Watchdog is parked after exhausting
       `max_auto_resolve_attempts` on a `:ci_failed` block (bd-bspakl).
     * `POST /api/queue/:task_id/restart_watchdog` — mint a fresh Watchdog for a
-      task whose Watchdog died outright, attached to the MR its worker already
-      has open (bd-8jixav). Distinct from the above, which only re-arms an
-      already-running Watchdog.
+      Merging ticket whose Watchdog died outright, started from the ticket's
+      row (bd-8jixav, bd-741sid). Distinct from the above, which only re-arms
+      an already-running Watchdog.
   """
 
   use ArbiterWeb, :controller
@@ -59,65 +59,39 @@ defmodule ArbiterWeb.Api.QueueController do
   end
 
   @doc """
-  Mint a **fresh** merge Watchdog for a task whose Watchdog has died, attached
-  to the MR its worker already has open (bd-8jixav).
+  Mint a **fresh** merge Watchdog for a Merging ticket whose Watchdog has died,
+  started from the ticket's row (bd-8jixav, bd-741sid).
 
   A Watchdog is a `:temporary` process — when it crashes it is gone for good,
-  silently — leaving the worker parked at `:awaiting_review` with a genuinely
-  open MR nothing is polling. `retry_auto_resolve` cannot recover that: it
-  messages an already-running Watchdog and 404s once the process is gone.
+  silently — leaving the ticket Merging with a genuinely open MR nothing is
+  polling. `retry_auto_resolve` cannot recover that: it messages an
+  already-running Watchdog and 404s once the process is gone.
 
-  Returns `{"restarted": true, "task_id": "..."}` on success.
+  Returns `{"restarted": true, "task_id": "..."}` on success. Refusals are
+  phrased by `Arbiter.Worker.Watchdog.restart_refusal/2`:
 
-  Errors:
-
-    * 404 — no worker is registered for this task; there is nothing to attach
-      a Watchdog to.
+    * 404 — there is no such ticket.
     * 409 — a Watchdog is already running. Refused rather than stacked: two
       Watchdogs polling one MR would race the merge and double-dispatch fix
       passes.
-    * 400 — the worker is alive but not parked at `:awaiting_review`, or
-      parked without an MR ref / adapter to watch.
-    * 503 — the worker didn't answer in time.
+    * 400 — the ticket is not Merging, has no PR on record, or its merger
+      adapter cannot be resolved; or the Watchdog failed to start.
+
+  An explicit restart (`arb queue restart-watchdog`): a ticket pulled out of
+  the merge queue (`Arbiter.Tasks.PullRequest.pull/1`) goes back in it.
   """
-  # Pre-existing complexity 10 — baselined when bd-4x2yhq first
-  # wired Credo up. Thresholds stay at the tool's own default so new
-  # code is held to it; see the note in .credo.exs.
-  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   def restart_watchdog(conn, %{"task_id" => task_id})
       when is_binary(task_id) and task_id != "" do
-    case Watchdog.restart(task_id) do
+    case Watchdog.restart(task_id, clear_pull: true) do
       :ok ->
         json(conn, %{restarted: true, task_id: task_id})
 
-      {:error, :no_worker} ->
-        {:error, :not_found}
-
-      {:error, :already_running} ->
-        {:error,
-         {:conflict,
-          "a merge watchdog is already running for task #{task_id} — restarting would put " <>
-            "two of them on one MR"}}
-
-      {:error, {:not_parked, status}} ->
-        {:error,
-         {:invalid_request,
-          "task #{task_id}'s worker is #{status}, not awaiting_review — it has no open MR " <>
-            "for a watchdog to watch"}}
-
-      {:error, reason} when reason in [:no_mr_ref, :no_adapter] ->
-        {:error,
-         {:invalid_request,
-          "task #{task_id}'s worker is parked at awaiting_review but recorded no " <>
-            "#{if reason == :no_mr_ref, do: "MR ref", else: "merger adapter"} — there is " <>
-            "nothing to watch"}}
-
-      {:error, :busy} ->
-        {:error,
-         {:busy, "task #{task_id}'s worker did not answer in time — try again in a moment"}}
-
-      {:error, {:start_failed, reason}} ->
-        {:error, {:invalid_request, "watchdog restart failed: #{inspect(reason)}"}}
+      {:error, reason} ->
+        case Watchdog.restart_refusal(task_id, reason) do
+          {:not_found, _message} -> {:error, :not_found}
+          {:conflict, message} -> {:error, {:conflict, message}}
+          {_invalid_or_internal, message} -> {:error, {:invalid_request, message}}
+        end
     end
   end
 

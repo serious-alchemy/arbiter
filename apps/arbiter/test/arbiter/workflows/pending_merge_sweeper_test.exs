@@ -20,6 +20,7 @@ defmodule Arbiter.Workflows.PendingMergeSweeperTest do
   alias Arbiter.Mergers.PendingMerge
   alias Arbiter.Messages.Message
   alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.PullRequest
   alias Arbiter.Test.StubAutoResumeDispatcher
   alias Arbiter.Test.StubMerger
   alias Arbiter.Worker
@@ -134,11 +135,13 @@ defmodule Arbiter.Workflows.PendingMergeSweeperTest do
   end
 
   # The worker exits (its machine died, it was reaped, the server shut it
-  # down). Its Watchdog monitors it and stops with it.
+  # down), and its Watchdog is gone too. Since bd-741sid a Watchdog no longer
+  # stops with a worker, so the test stops it, as the server going down would.
   defp kill_worker(worker_pid, task_id) do
     ref = Process.monitor(worker_pid)
     stop_quietly(worker_pid)
     assert_receive {:DOWN, ^ref, :process, ^worker_pid, _}, 2_000
+    stop_quietly(Watchdog.whereis(task_id))
     wait_until(fn -> is_nil(Watchdog.whereis(task_id)) end)
   end
 
@@ -351,6 +354,135 @@ defmodule Arbiter.Workflows.PendingMergeSweeperTest do
       end)
 
       assert Watchdog.retry_whereis(task.id) == nil
+    end
+  end
+
+  # bd-741sid: the Watchdog belongs to the ticket and restarts from its row, so
+  # a Merging ticket whose PR open recorded its lane gets its own Watchdog
+  # back — the full lane, not the merge-only retry.
+  describe "a Merging ticket whose Watchdog died" do
+    test "gets its Watchdog back from the row instead of a worker-less retry" do
+      mr_ref = "!pm-rewatch"
+      ws = workspace()
+      task = task(ws, mr_ref)
+
+      lane =
+        PullRequest.lane(
+          adapter: StubMerger,
+          via_review_gate: true,
+          interval_ms: 60_000,
+          initial_delay_ms: 60_000
+        )
+
+      Ash.update!(reload(task), %{merge_watch: lane}, action: :record_merge_watch)
+      stamp!(task, sha("rewatch"))
+      on_exit(fn -> stop_quietly(Watchdog.whereis(task.id)) end)
+
+      capture_log(fn ->
+        assert %{rewatched: [id], retried: []} = sweep()
+        assert id == task.id
+      end)
+
+      assert Watchdog.alive?(task.id)
+      assert Watchdog.retry_whereis(task.id) == nil
+    end
+
+    # A PR opened before lanes were recorded: the retry carries the stamp's own
+    # baseline, where a restart would have to guess at the lane.
+    test "falls back to the retry when the ticket's lane is not on record" do
+      mr_ref = "!pm-no-lane"
+      ws = workspace()
+      task = task(ws, mr_ref)
+      cleanup_retry(task.id)
+      stamp!(task, sha("no-lane"))
+      :ok = PullRequest.record_reviewed_sha(task.id, sha("no-lane"))
+
+      capture_log(fn -> assert %{retried: [_], rewatched: []} = sweep() end)
+
+      refute Watchdog.alive?(task.id)
+    end
+  end
+
+  # bd-741sid, review round 1 (finding 2): the sweeper falls back to the
+  # worker-less retry for a Merging ticket, so the retry must end the ticket
+  # the way a live Watchdog does — not leave it Merging with nothing watching.
+  describe "the retry ends a Merging ticket as its Watchdog would" do
+    defp merging_task(ws, mr_ref, attrs \\ %{}) do
+      issue =
+        Issue
+        |> Ash.create!(Map.merge(%{title: "merging", workspace_id: ws.id}, attrs))
+        |> Ash.update!(%{status: :in_progress})
+
+      {:ok, merging} = Issue.pr_opened(issue.id, mr_ref)
+      assert merging.state == :merging
+      merging
+    end
+
+    test "a PR closed without merging: back to work with pr_closed, and a page" do
+      reviewed = sha("merging-closed")
+      mr_ref = "!pm-merging-closed"
+      ws = workspace()
+      task = merging_task(ws, mr_ref)
+      cleanup_retry(task.id)
+      stamp!(task, reviewed)
+
+      StubMerger.queue_get(mr_ref, [%{status: :closed, head_sha: reviewed}])
+
+      capture_log(fn ->
+        assert %{retried: [_], rewatched: []} = sweep()
+        wait_until(fn -> reload(task).state == :active end)
+      end)
+
+      assert reload(task).attention_cause == :pr_closed
+      assert PendingMerge.get(reload(task)) == nil
+      assert StubMerger.merge_count(mr_ref) == 0
+      assert Enum.any?(escalations(task.id), &(&1.subject =~ "PR closed"))
+    end
+
+    test "a merge it lands finishes the ticket through PullRequest.merged/2" do
+      reviewed = sha("merging-merged")
+      mr_ref = "!pm-merging-merged"
+      ws = workspace()
+      task = merging_task(ws, mr_ref, %{verify_after_deploy: true})
+      cleanup_retry(task.id)
+      stamp!(task, reviewed)
+      :ok = Phoenix.PubSub.subscribe(Arbiter.PubSub, "worker:done:" <> ws.id)
+
+      StubMerger.queue_get(mr_ref, [
+        %{status: :open, head_sha: reviewed, base_ref: "main", pipeline: :success}
+      ])
+
+      capture_log(fn ->
+        assert %{retried: [_]} = sweep()
+        wait_until(fn -> reload(task).state == :verifying end)
+      end)
+
+      assert StubMerger.merge_count(mr_ref) == 1
+      # Announced the way every merge of a ticket's PR is: the MergeQueue's
+      # post-merge sync hears of it.
+      task_id = task.id
+      assert_receive {:worker_done, ^task_id}, 1_000
+    end
+
+    test "a review-only engagement it merges stays open for ReviewPatrol" do
+      reviewed = sha("merging-review-only")
+      mr_ref = "!pm-merging-review-only"
+      ws = workspace()
+      task = merging_task(ws, mr_ref, %{review_only: true})
+      cleanup_retry(task.id)
+      stamp!(task, reviewed)
+
+      StubMerger.queue_get(mr_ref, [
+        %{status: :open, head_sha: reviewed, base_ref: "main", pipeline: :success}
+      ])
+
+      capture_log(fn ->
+        assert %{retried: [_]} = sweep()
+        wait_until(fn -> StubMerger.merge_count(mr_ref) == 1 end)
+        wait_until(fn -> is_nil(Watchdog.retry_whereis(task.id)) end)
+      end)
+
+      assert reload(task).status not in [:closed, :awaiting_verification]
     end
   end
 
@@ -599,6 +731,8 @@ defmodule Arbiter.Workflows.PendingMergeSweeperTest do
       end)
 
       assert StubMerger.merge_count(mr_ref) == 0
+      # bd-741sid: and the ticket learns its PR closed, as from a live Watchdog.
+      wait_until(fn -> reload(task).attention_cause == :pr_closed end)
     end
   end
 

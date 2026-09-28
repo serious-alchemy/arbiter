@@ -215,11 +215,12 @@ defmodule Arbiter.Tasks.LifecycleViewTest do
                merging_with(%{status: :open, approved: false, block_reason: :needs_approval})
     end
 
-    test "the merger status defaults to the author run's last poll" do
-      author =
-        run(:awaiting_review, %{meta: %{last_merger_status: %{status: :open, pipeline: :running}}})
+    # bd-741sid: no run holds it — the ticket's Watchdog records the poll on
+    # the row, string-keyed as it reads back from the database.
+    test "the merger status defaults to the poll recorded on the ticket" do
+      recorded = %{"status" => "open", "pipeline" => "running"}
 
-      assert %{step: :waiting_ci} = view(ticket(:merging), %{runs: [author]})
+      assert %{step: :waiting_ci} = view(ticket(:merging, %{merger_status: recorded}))
     end
   end
 

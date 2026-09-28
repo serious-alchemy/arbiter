@@ -98,6 +98,7 @@ defmodule Arbiter.Tasks.Issue do
   @statuses ~w(open in_progress awaiting_verification closed)a
   @lifecycle_states Arbiter.Tasks.Lifecycle.states()
   @close_reasons Arbiter.Tasks.Lifecycle.close_reasons()
+  @attention_causes [:pr_closed]
   @issue_types ~w(task bug feature epic chore decision)a
   @tracker_types ~w(none jira shortcut linear github gitlab)a
 
@@ -126,6 +127,10 @@ defmodule Arbiter.Tasks.Issue do
     store_action_name?(true)
     store_action_inputs?(true)
     ignore_attributes([:created_at, :updated_at])
+
+    # bd-741sid: the Watchdog's poll, every interval for every open PR. The
+    # ticket keeps the latest answer; a version row per poll is not history.
+    ignore_actions([:record_merger_status])
   end
 
   actions do
@@ -342,6 +347,11 @@ defmodule Arbiter.Tasks.Issue do
       # bd-a370ak: the PR merged, so there is no merge left to retry.
       change set_attribute(:pending_merge, nil)
 
+      # bd-741sid: a merged PR answers any earlier `pr_closed`.
+      change set_attribute(:attention_cause, nil)
+      change set_attribute(:attention_detail, nil)
+      change set_attribute(:attention_since, nil)
+
       # Same teardown as `:close`: the worker finished and its PR merged, so
       # leaving the agent + worktree alive for the whole verification window
       # would pin a slot and leak a checkout. All best-effort.
@@ -496,6 +506,11 @@ defmodule Arbiter.Tasks.Issue do
       # bd-a370ak: a closed task has no merge left to retry.
       change set_attribute(:pending_merge, nil)
 
+      # bd-741sid: nothing about a closed ticket needs a person any more.
+      change set_attribute(:attention_cause, nil)
+      change set_attribute(:attention_detail, nil)
+      change set_attribute(:attention_since, nil)
+
       # bd-bsco7f: persist what this close meant upstream, so the drift check
       # can read the intent instead of guessing it from `pr_ref`. Mirrors the
       # gate SyncTracker actually applies below: a review-only task never
@@ -579,6 +594,17 @@ defmodule Arbiter.Tasks.Issue do
 
       # bd-a370ak: the reopened task's old PR is not a merge to retry.
       change set_attribute(:pending_merge, nil)
+
+      # bd-741sid: nor is it a PR to watch, and its review is not the next
+      # attempt's review.
+      change set_attribute(:merger_url, nil)
+      change set_attribute(:merger_status, nil)
+      change set_attribute(:merger_checked_at, nil)
+      change set_attribute(:merge_watch, nil)
+      change set_attribute(:review_gate_state, nil)
+      change set_attribute(:attention_cause, nil)
+      change set_attribute(:attention_detail, nil)
+      change set_attribute(:attention_since, nil)
 
       # bd-bqlwjo: a new PR opened after this reopen must still get its own
       # "opened a pull request" comment even though the ticket row itself
@@ -761,17 +787,60 @@ defmodule Arbiter.Tasks.Issue do
     end
 
     # active → merging: the worker opened (or adopted) its PR. Records the ref
-    # in the same write — it is what the MergeQueue adopts (bd-7b46wd).
+    # in the same write — it is what the MergeQueue adopts (bd-7b46wd) — and,
+    # since bd-741sid, the PR's URL and the lane its Watchdog watches it on. A
+    # PR open again is the answer to an earlier `pr_closed`.
     update :open_pr do
       require_atomic? false
-      accept [:pr_ref]
+      accept [:pr_ref, :merger_url, :merge_watch]
 
       change {Transition, transition: :open_pr}
+      change set_attribute(:attention_cause, nil)
+      change set_attribute(:attention_detail, nil)
+      change set_attribute(:attention_since, nil)
 
       change after_action(fn _, issue, _ ->
                Arbiter.Tasks.Issue.broadcast_lifecycle(:updated, issue)
                {:ok, issue}
              end)
+    end
+
+    # The same PR record without a transition: a ticket already `:merging` that
+    # re-adopts its PR, or the ReviewGate's pre-review open while the ticket is
+    # still at work (bd-129xh4).
+    update :record_pr do
+      require_atomic? false
+      accept [:pr_ref, :merger_url, :merge_watch]
+
+      change after_action(fn _, issue, _ ->
+               Arbiter.Tasks.Issue.broadcast_lifecycle(:updated, issue)
+               {:ok, issue}
+             end)
+    end
+
+    # bd-741sid: the Watchdog's poll. Deliberately no `"tasks"` broadcast — it
+    # lands every poll interval for every open PR, and the scheduler replans on
+    # that topic; `Arbiter.Tasks.PullRequest` broadcasts it on its own topic.
+    # Nor is a poll an edit: `merger_checked_at` says when it was read, and
+    # `updated_at` keeps saying when the ticket last changed.
+    update :record_merger_status do
+      require_atomic? false
+      accept [:merger_status, :merger_checked_at]
+
+      change atomic_update(:updated_at, expr(updated_at))
+    end
+
+    # bd-741sid: the Watchdog's lane, rewritten when its reviewed-SHA baseline
+    # moves. No broadcast, like `:record_merger_status`.
+    update :record_merge_watch do
+      require_atomic? false
+      accept [:merge_watch]
+    end
+
+    # bd-741sid: the ReviewGate round state. No broadcast.
+    update :record_review_gate do
+      require_atomic? false
+      accept [:review_gate_state]
     end
 
     # merging → active: a CI fix pass or a conflict resolver took the ticket
@@ -780,6 +849,25 @@ defmodule Arbiter.Tasks.Issue do
       require_atomic? false
 
       change {Transition, transition: :return_to_work}
+
+      change after_action(fn _, issue, _ ->
+               Arbiter.Tasks.Issue.broadcast_lifecycle(:updated, issue)
+               {:ok, issue}
+             end)
+    end
+
+    # bd-741sid: the ticket's PR was closed without merging. A `:merging`
+    # ticket goes back to work (`return_to_work`); one already `:active` — a
+    # fix pass was running when the PR closed — stays where it is. Either way it
+    # carries the `pr_closed` attention cause, for a person to decide.
+    update :pr_closed do
+      require_atomic? false
+      argument :detail, :string, allow_nil?: true
+
+      change {Transition, transition: :return_to_work, idempotent: true}
+      change set_attribute(:attention_cause, :pr_closed)
+      change set_attribute(:attention_detail, arg(:detail))
+      change set_attribute(:attention_since, &DateTime.utc_now/0)
 
       change after_action(fn _, issue, _ ->
                Arbiter.Tasks.Issue.broadcast_lifecycle(:updated, issue)
@@ -1058,6 +1146,90 @@ defmodule Arbiter.Tasks.Issue do
       constraints max_length: 255, trim?: true
 
       description "PR/MR number opened for this task (e.g. \"123\"). Set by the merger when a PR is opened; distinct from tracker_ref which holds the originating issue ref."
+    end
+
+    # ---- the open PR's state (bd-741sid) ------------------------------------
+    #
+    # What a worker parked at `:awaiting_review` used to hold in memory, so the
+    # ticket's Watchdog can run — and be restarted — from this row alone.
+    # Written through `Arbiter.Tasks.PullRequest`.
+
+    attribute :merger_url, :string do
+      allow_nil? true
+      public? true
+      constraints max_length: 2048, trim?: true
+      description "The clickable URL of `pr_ref`, from the adapter that opened it."
+    end
+
+    attribute :merger_status, :map do
+      allow_nil? true
+      public? true
+
+      description """
+      The forge's last answer about the PR, as the ticket's Watchdog last polled
+      it: `status`, `approved`, `pipeline`, `block_reason`, `head_sha`, ... with
+      string keys. Read it through `Arbiter.Tasks.PullRequest.merger_status/1`,
+      which gives the atom-keyed map back.
+      """
+    end
+
+    attribute :merger_checked_at, :utc_datetime_usec do
+      allow_nil? true
+      public? true
+      description "When the Watchdog last read `merger_status`."
+    end
+
+    attribute :merge_watch, :map do
+      allow_nil? true
+      public? false
+
+      description """
+      The lane the ticket's Watchdog watches the PR on: the adapter that opened
+      it, whether the ReviewGate already approved it (`via_review_gate`), the
+      head the run pushed (`local_head_sha`), the reviewed-SHA baseline the
+      Watchdog latched (`reviewed_sha`), and any explicit merge/poll overrides.
+      Everything `Arbiter.Worker.Watchdog.restart/1` needs besides the row's
+      own `pr_ref`, `repo` and workspace.
+      """
+    end
+
+    attribute :review_gate_state, :map do
+      allow_nil? true
+      public? false
+
+      description """
+      The ReviewGate round state for the ticket's current attempt: the branch
+      and worktree under review, the pre-review PR, the round, the last
+      verdict, the fix-round count and findings digest, and the merge options
+      the author was dispatched with. Lets a verdict be applied to the ticket
+      when no author worker is resident any more.
+      """
+    end
+
+    # ---- attention (bd-741sid writes `pr_closed`; bd-8if9zt owns the rest) ---
+
+    attribute :attention_cause, :atom do
+      allow_nil? true
+      public? true
+      constraints one_of: @attention_causes
+
+      description """
+      Why the ticket needs a person, beside its state. Set to `pr_closed` when
+      its PR is closed without merging; cleared when a PR opens again, and on
+      close, verify and reopen.
+      """
+    end
+
+    attribute :attention_detail, :string do
+      allow_nil? true
+      public? true
+      description "What happened, in a sentence, for `attention_cause`."
+    end
+
+    attribute :attention_since, :utc_datetime_usec do
+      allow_nil? true
+      public? true
+      description "When `attention_cause` was set."
     end
 
     attribute :pr_opened_notified_ref, :string do
@@ -1635,12 +1807,49 @@ defmodule Arbiter.Tasks.Issue do
   ticket in any other state — already `:merging` when a revise round re-adopts
   its PR — just has the ref recorded. The ticket is read fresh, so a stale
   struct cannot move one that closed in the meantime.
+
+  Options (bd-741sid), written in the same update:
+
+    * `:merger_url` — the PR's clickable URL.
+    * `:merge_watch` — the lane its Watchdog watches it on
+      (`Arbiter.Tasks.PullRequest`).
+    * `:transition` (default `true`) — `false` records the PR without moving
+      the ticket: the pre-review open, and a review-only engagement, whose
+      ticket never enters Merging.
   """
-  @spec pr_opened(String.t(), String.t()) :: {:ok, t()} | {:error, term()}
-  def pr_opened(id, pr_ref) when is_binary(id) and is_binary(pr_ref) do
+  @spec pr_opened(String.t(), String.t(), keyword()) :: {:ok, t()} | {:error, term()}
+  def pr_opened(id, pr_ref, opts \\ []) when is_binary(id) and is_binary(pr_ref) do
+    attrs =
+      opts
+      |> Keyword.take([:merger_url, :merge_watch])
+      |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+      |> Map.new()
+      |> Map.put(:pr_ref, pr_ref)
+
     with {:ok, issue} <- Ash.get(__MODULE__, id) do
-      action = if issue.state == :active, do: :open_pr, else: :update
-      Ash.update(issue, %{pr_ref: pr_ref}, action: action)
+      action =
+        if issue.state == :active and Keyword.get(opts, :transition, true),
+          do: :open_pr,
+          else: :record_pr
+
+      Ash.update(issue, attrs, action: action)
+    end
+  end
+
+  @doc """
+  The ticket's PR was closed without merging (bd-741sid): back to work, with
+  the `pr_closed` attention cause naming `pr_ref`. Only an open ticket moves;
+  a closed or verifying one is returned untouched.
+  """
+  @spec pr_closed(String.t(), String.t() | nil) :: {:ok, t()} | {:error, term()}
+  def pr_closed(id, pr_ref) when is_binary(id) do
+    with {:ok, issue} <- Ash.get(__MODULE__, id) do
+      if issue.state in [:active, :merging] do
+        detail = "PR #{pr_ref || "(unknown)"} was closed without being merged."
+        Ash.update(issue, %{detail: detail}, action: :pr_closed)
+      else
+        {:ok, issue}
+      end
     end
   end
 

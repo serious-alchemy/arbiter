@@ -562,11 +562,19 @@ defmodule Arbiter.Board.SnapshotTest do
     # documented pre-flight for `arb server deploy`) leaves the issue
     # `in_progress` with no live worker — a state that used to match none of
     # the five columns and vanished from the board entirely.
+    # Explicitly `:active`: with a `pr_ref` and no `state`, the backfill rule
+    # would read the row as Merging, whose card is the ticket's own
+    # (bd-741sid) — no worker is expected there.
     test "an in_progress issue with no live worker still shows, flagged for a human" do
       board =
         derive(
           issues: [
-            issue("bd-a", %{status: :in_progress, updated_at: @yesterday, pr_ref: "123"})
+            issue("bd-a", %{
+              status: :in_progress,
+              state: :active,
+              updated_at: @yesterday,
+              pr_ref: "123"
+            })
           ]
         )
 
@@ -617,6 +625,7 @@ defmodule Arbiter.Board.SnapshotTest do
           issues: [
             issue("bd-a", %{
               status: :in_progress,
+              state: :active,
               updated_at: @yesterday,
               pr_ref: "!293",
               review_park_reason: "resume_blocked"
@@ -720,7 +729,10 @@ defmodule Arbiter.Board.SnapshotTest do
     test "an in-progress ticket inside the dispatch grace is a Running dispatching card" do
       board = derive(issues: [issue("bd-a", %{state: :active, status: :in_progress})])
 
-      assert [%{id: "bd-a", activity: "dispatching", agent_live: false}] = board.running
+      # bd-741sid: no hand-off phase — a run not yet registered reads as its stage.
+      assert [%{id: "bd-a", activity: "dispatching", phase: :implementing, agent_live: false}] =
+               board.running
+
       assert board.waiting == []
     end
 
@@ -930,6 +942,91 @@ defmodule Arbiter.Board.SnapshotTest do
         )
 
       assert [%{id: "bd-a", watchdog_alive: nil}] = board.waiting
+    end
+  end
+
+  # bd-741sid: a Merging ticket's implementer stopped when its PR opened, so
+  # nothing registered speaks for it — the card is built from the ticket.
+  describe "Merging tickets" do
+    defp merging(id, attrs \\ %{}) do
+      issue(
+        id,
+        Map.merge(
+          %{
+            status: :in_progress,
+            state: :merging,
+            pr_ref: "!42",
+            merger_url: "https://example.test/42",
+            merger_status: %{"status" => "open", "approved" => false},
+            updated_at: @yesterday
+          },
+          attrs
+        )
+      )
+    end
+
+    test "with no worker, a Merging ticket is a merge card from its row, not an orphan" do
+      board = derive(issues: [merging("bd-m")], watchdog_live: MapSet.new(["bd-m"]))
+
+      assert [
+               %{
+                 id: "bd-m",
+                 status: :merging,
+                 reason: nil,
+                 mr_ref: "!42",
+                 merger_url: "https://example.test/42",
+                 merger_status: %{status: :open, approved: false},
+                 watchdog_alive: true,
+                 needs_you: false,
+                 collapsed_note: nil,
+                 phase: :waiting_ci_merge,
+                 agent_live: false,
+                 since: @yesterday
+               }
+             ] = board.waiting
+    end
+
+    test "one whose Watchdog is gone says so, and flags for a human" do
+      board = derive(issues: [merging("bd-m")], watchdog_live: MapSet.new())
+
+      assert [%{id: "bd-m", watchdog_alive: false, needs_you: true}] = board.waiting
+    end
+
+    test "omitting the liveness input reports unknown rather than missing" do
+      board = derive(issues: [merging("bd-m")])
+
+      assert [%{id: "bd-m", watchdog_alive: nil, needs_you: false}] = board.waiting
+    end
+
+    test "a block the Watchdog clears itself does not flag; one it cannot, does" do
+      board =
+        derive(
+          issues: [
+            merging("bd-a", %{
+              merger_status: %{"approved" => true, "block_reason" => "ci_failed"}
+            }),
+            merging("bd-b", %{
+              merger_status: %{"approved" => true, "block_reason" => "needs_approval"}
+            })
+          ],
+          watchdog_live: MapSet.new(["bd-a", "bd-b"])
+        )
+
+      assert flags(board) == %{"bd-a" => false, "bd-b" => true}
+    end
+
+    test "a failed pass still registered under the ticket flags the card and names itself" do
+      board =
+        derive(
+          issues: [merging("bd-m")],
+          workers: [worker("bd-m", :failed, %{role: :fix_pass, meta: %{role: :fix_pass}})],
+          watchdog_live: MapSet.new(["bd-m"])
+        )
+
+      assert [%{id: "bd-m", status: :merging, needs_you: true, collapsed_note: note}] =
+               board.waiting
+
+      assert note =~ "failed"
     end
   end
 

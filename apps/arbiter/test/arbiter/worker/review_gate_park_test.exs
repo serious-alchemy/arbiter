@@ -114,7 +114,7 @@ defmodule Arbiter.Worker.ReviewGateParkTest do
 
   # An author parked at `:awaiting_review_gate` with `review_spawn: false`, so a
   # verdict can be handed to it directly — exactly as the gate would.
-  defp start_parked_author(task, repo) do
+  defp start_parked_author(task, repo, extra_meta \\ %{}) do
     branch = "feature/park-#{System.unique_integer([:positive])}"
     :ok = seed_feature_branch(repo, branch)
 
@@ -123,14 +123,18 @@ defmodule Arbiter.Worker.ReviewGateParkTest do
         task_id: task.id,
         repo: "trib/repo",
         workspace_id: task.workspace_id,
-        meta: %{
-          branch: branch,
-          repo_path: repo,
-          target_branch: "main",
-          merge_title: "Merge #{task.id}",
-          review_required: true,
-          review_spawn: false
-        }
+        meta:
+          Map.merge(
+            %{
+              branch: branch,
+              repo_path: repo,
+              target_branch: "main",
+              merge_title: "Merge #{task.id}",
+              review_required: true,
+              review_spawn: false
+            },
+            extra_meta
+          )
       )
 
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
@@ -316,20 +320,43 @@ defmodule Arbiter.Worker.ReviewGateParkTest do
     test "a later round approving clears the park and reconciles the run forward",
          %{repo: repo, ws: ws} do
       task = new_task(ws)
-      pid = start_parked_author(task, repo)
+      on_exit(fn -> stop_watchdog(task.id) end)
+
+      # The ticket's Watchdog is parked, so nothing but the approval can have
+      # cleared the park (a close clears it too).
+      pid =
+        start_parked_author(task, repo, %{
+          watchdog_interval_ms: 60_000,
+          watchdog_initial_delay_ms: 60_000
+        })
 
       deliver(pid, {:parked, :inconclusive, "no parseable VERDICT line"})
       assert reload(task).review_park_reason == "inconclusive"
+      assert run_for(task.id).status == :review_parked
 
       # bd-3wumco: the same gate's next round converges. The worker is at
       # :failed; the approval reconciles it forward and must take the park with
-      # it, or the merged task keeps showing up in `arb prime`.
+      # it, or the merged task keeps showing up in `arb prime`. bd-741sid: the
+      # approved run merges and ends, leaving the ticket Merging.
+      ref = Process.monitor(pid)
       :ok = Worker.review_gate_verdict(pid, {:approve, "VERDICT: APPROVE\nlgtm"})
 
       assert reload(task).review_park_reason == nil
       assert reload(task).review_parked_at == nil
-      refute Map.has_key?(Worker.state(pid).meta, :review_park_reason)
+      assert reload(task).state == :merging
+
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+      assert run_for(task.id).status == :completed
     end
+  end
+
+  defp stop_watchdog(task_id) do
+    case Arbiter.Worker.Watchdog.whereis(task_id) do
+      nil -> :ok
+      pid -> GenServer.stop(pid, :normal)
+    end
+  catch
+    :exit, _ -> :ok
   end
 
   describe "the park row is the episode claim" do

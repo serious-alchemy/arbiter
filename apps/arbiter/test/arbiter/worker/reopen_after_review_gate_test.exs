@@ -31,9 +31,13 @@ defmodule Arbiter.Worker.ReopenAfterReviewGateTest do
 
   use Arbiter.DataCase, async: false
 
+  require Ash.Query
+
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Messages.Message
   alias Arbiter.Worker
+  alias Arbiter.Worker.Watchdog
+  alias Arbiter.Workers.Run
 
   @owner "octo"
   @repo "widget"
@@ -83,6 +87,7 @@ defmodule Arbiter.Worker.ReopenAfterReviewGateTest do
     ws
   end
 
+  # In progress, as a dispatch leaves it — the PR moves it to Merging.
   defp new_task(ws) do
     {:ok, task} =
       Ash.create(Issue, %{
@@ -91,6 +96,7 @@ defmodule Arbiter.Worker.ReopenAfterReviewGateTest do
         issue_type: :feature
       })
 
+    {:ok, task} = Ash.update(task, %{status: :in_progress})
     task
   end
 
@@ -107,8 +113,25 @@ defmodule Arbiter.Worker.ReopenAfterReviewGateTest do
       Worker.start(task_id: task.id, repo: "widget", workspace_id: ws.id, meta: meta)
 
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+    on_exit(fn -> stop_watchdog(task.id) end)
     :ok = Worker.advance(pid, :claude)
     pid
+  end
+
+  defp stop_watchdog(task_id) do
+    case Watchdog.whereis(task_id) do
+      nil -> :ok
+      pid -> GenServer.stop(pid, :normal)
+    end
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp run_for(task_id) do
+    Run
+    |> Ash.Query.filter(task_id == ^task_id)
+    |> Ash.read!()
+    |> List.first()
   end
 
   test "a second open/4 call after APPROVE adopts the worker's own pre-review PR even when " <>
@@ -194,16 +217,20 @@ defmodule Arbiter.Worker.ReopenAfterReviewGateTest do
     {:ok, mid_task} = Ash.get(Issue, task.id)
     assert mid_task.pr_ref == "#700"
 
+    ref = Process.monitor(pid)
     :ok = Worker.review_gate_verdict(pid, {:approve, "VERDICT: APPROVE\nlgtm"})
 
-    wait_until(fn -> Worker.state(pid).status == :awaiting_review end, 3_000)
+    # bd-741sid: the run ends with its PR open — finished and successful, not
+    # failed — and the ticket carries the PR into Merging.
+    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 3_000
 
-    snap = Worker.state(pid)
-    refute snap.status == :failed
-    assert snap.mr_ref == "#700"
+    run = run_for(task.id)
+    assert run.status == :completed
+    assert run.mr_ref == "#700"
 
     {:ok, reloaded} = Ash.get(Issue, task.id)
     assert reloaded.pr_ref == "#700"
+    assert reloaded.state == :merging
 
     # No failure escalation was raised — this was a success, not a stranded run.
     escalations = Message.inbox("admiral", workspace_id: ws.id)

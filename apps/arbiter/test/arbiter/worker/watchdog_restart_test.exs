@@ -1,21 +1,25 @@
 defmodule Arbiter.Worker.WatchdogRestartTest do
   @moduledoc """
   bd-8jixav: a Watchdog GenServer can die outright — crash, or fail to start
-  after the MR was already opened — leaving the worker parked at
-  `:awaiting_review` forever with a genuinely-open MR and nothing polling it.
+  after the MR was already opened — leaving a genuinely-open MR that nothing is
+  polling.
 
   `retry_auto_resolve/1` (bd-bspakl) cannot recover this: it messages an
   *already-running* Watchdog. These cases pin `Watchdog.restart/1`, which mints
-  a **fresh** Watchdog against the worker's existing MR ref without going
+  a **fresh** Watchdog against the ticket's existing MR ref without going
   through a full `worker_resume` (which would restart the review gate from
   round 1 at real cost).
 
-  `watchdog_start_error: true` on `open_mr/5` reproduces the incident state
-  exactly: MR open on the forge, worker parked, no Watchdog registered.
+  bd-741sid: the ticket owns the PR and its Watchdog's lane, and no worker
+  stays resident once the PR is open — so a restart works from the ticket row
+  alone. `watchdog_start_error: true` on `open_mr/5` reproduces the incident
+  state exactly: MR open on the forge and on the ticket, the run ended, no
+  Watchdog registered.
   """
 
   use Arbiter.DataCase, async: false
 
+  alias Arbiter.Messages.Message
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Worker
   alias Arbiter.Worker.Watchdog
@@ -45,22 +49,26 @@ defmodule Arbiter.Worker.WatchdogRestartTest do
         issue_type: :feature
       })
 
+    {:ok, task} = Ash.update(task, %{status: :in_progress})
+    on_exit(fn -> stop_watchdog(task.id) end)
     task
   end
 
-  defp running_worker(task, ws) do
-    {:ok, pid} =
-      Worker.start(task_id: task.id, repo: "wr/repo", workspace_id: ws.id)
-
-    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
-    :ok = Worker.advance(pid, :implement)
-    pid
+  defp stop_watchdog(task_id) do
+    case Watchdog.whereis(task_id) do
+      nil -> :ok
+      pid -> GenServer.stop(pid, :normal)
+    end
+  catch
+    :exit, _ -> :ok
   end
 
-  # Park a worker at :awaiting_review with a real MR ref and NO Watchdog —
-  # the dead-watchdog state this ticket is about.
-  defp parked_without_watchdog(task, ws, mr_ref, opts \\ %{}) do
-    pid = running_worker(task, ws)
+  # Open an MR whose Watchdog fails to start — the dead-watchdog state this
+  # ticket is about. The run ends with the PR open; nothing watches it.
+  defp opened_without_watchdog(task, ws, mr_ref, opts \\ %{}) do
+    {:ok, pid} = Worker.start(task_id: task.id, repo: "wr/repo", workspace_id: ws.id)
+    :ok = Worker.advance(pid, :implement)
+    ref = Process.monitor(pid)
     StubMerger.next_open_ref(mr_ref)
 
     {:ok, ^mr_ref} =
@@ -81,9 +89,10 @@ defmodule Arbiter.Worker.WatchdogRestartTest do
         )
       )
 
-    assert Worker.state(pid).status == :awaiting_review
+    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+    assert Ash.get!(Issue, task.id).state == :merging
     assert Watchdog.whereis(task.id) == nil
-    pid
+    :ok
   end
 
   defp wait_until(fun, timeout \\ 2_000) do
@@ -106,60 +115,71 @@ defmodule Arbiter.Worker.WatchdogRestartTest do
   end
 
   describe "restart/1" do
-    test "mints a fresh Watchdog against the parked worker's existing MR ref" do
+    test "a Watchdog that fails to start at PR open pages the coordinator with the remedy" do
+      ws = new_workspace()
+      task = new_task(ws)
+      StubMerger.queue_get("!wr0", [%{status: :open, approved: false}])
+      opened_without_watchdog(task, ws, "!wr0")
+
+      assert [page] =
+               ws.id
+               |> then(&Message.inbox(Message.coordinator_ref(), workspace_id: &1))
+               |> Enum.filter(&(&1.task_ref == task.id))
+
+      assert page.subject =~ "Watchdog startup failed"
+      assert page.body =~ "arb queue restart-watchdog #{task.id}"
+    end
+
+    test "mints a fresh Watchdog against the ticket's existing MR ref" do
       ws = new_workspace()
       task = new_task(ws)
       StubMerger.queue_get("!wr1", [%{status: :open, approved: false}])
-      parked_without_watchdog(task, ws, "!wr1")
+      opened_without_watchdog(task, ws, "!wr1")
 
       assert :ok = Watchdog.restart(task.id)
 
       wait_until(fn -> is_pid(Watchdog.whereis(task.id)) end)
-      wpid = Watchdog.whereis(task.id)
-      on_exit(fn -> if Process.alive?(wpid), do: GenServer.stop(wpid, :normal) end)
 
       # It is genuinely polling the *existing* MR, not a new one.
       wait_until(fn -> StubMerger.get_count("!wr1") >= 1 end)
     end
 
-    test "the restarted Watchdog carries the task through to completion" do
+    test "the restarted Watchdog carries the ticket through to completion" do
       ws = new_workspace()
       task = new_task(ws)
       StubMerger.queue_get("!wr2", [%{status: :merged}])
-      pid = parked_without_watchdog(task, ws, "!wr2")
+      opened_without_watchdog(task, ws, "!wr2")
 
       assert :ok = Watchdog.restart(task.id)
 
-      wait_until(fn -> Worker.state(pid).status == :completed end)
+      wait_until(fn -> Ash.get!(Issue, task.id).state == :closed end)
     end
 
     test "refuses when a Watchdog is already running (never two live watchdogs)" do
       ws = new_workspace()
       task = new_task(ws)
       StubMerger.queue_get("!wr3", [%{status: :open, approved: false}])
-      parked_without_watchdog(task, ws, "!wr3")
+      opened_without_watchdog(task, ws, "!wr3")
 
       assert :ok = Watchdog.restart(task.id)
       wait_until(fn -> is_pid(Watchdog.whereis(task.id)) end)
       wpid = Watchdog.whereis(task.id)
-      on_exit(fn -> if Process.alive?(wpid), do: GenServer.stop(wpid, :normal) end)
 
       assert {:error, :already_running} = Watchdog.restart(task.id)
       # ...and the original is untouched.
       assert Watchdog.whereis(task.id) == wpid
     end
 
-    test "returns :no_worker when no worker is registered for the task" do
+    test "returns :not_found for a ticket that does not exist" do
       assert Watchdog.restart("no-such-task-#{System.unique_integer([:positive])}") ==
-               {:error, :no_worker}
+               {:error, :not_found}
     end
 
-    test "refuses a worker that isn't parked at :awaiting_review" do
+    test "refuses a ticket with no PR on its row" do
       ws = new_workspace()
       task = new_task(ws)
-      running_worker(task, ws)
 
-      assert Watchdog.restart(task.id) == {:error, {:not_parked, :running}}
+      assert Watchdog.restart(task.id) == {:error, :no_mr_ref}
     end
 
     test "replays the via_review_gate lane recorded when the MR was opened" do
@@ -170,7 +190,7 @@ defmodule Arbiter.Worker.WatchdogRestartTest do
       ws = new_workspace(%{"merge" => %{"auto_merge" => true}})
       task = new_task(ws)
       StubMerger.queue_get("!wr4", [%{status: :open, approved: false}])
-      parked_without_watchdog(task, ws, "!wr4", %{via_review_gate: true})
+      opened_without_watchdog(task, ws, "!wr4", %{via_review_gate: true})
 
       assert :ok = Watchdog.restart(task.id)
 
@@ -181,7 +201,7 @@ defmodule Arbiter.Worker.WatchdogRestartTest do
       ws = new_workspace()
       task = new_task(ws)
       StubMerger.queue_get("!wr5", [%{status: :open, approved: false}])
-      parked_without_watchdog(task, ws, "!wr5")
+      opened_without_watchdog(task, ws, "!wr5")
 
       assert :ok = Watchdog.restart(task.id)
       wait_until(fn -> is_pid(Watchdog.whereis(task.id)) end)
@@ -194,7 +214,6 @@ defmodule Arbiter.Worker.WatchdogRestartTest do
       assert :ok = Watchdog.restart(task.id)
       wait_until(fn -> is_pid(Watchdog.whereis(task.id)) end)
       second = Watchdog.whereis(task.id)
-      on_exit(fn -> if Process.alive?(second), do: GenServer.stop(second, :normal) end)
 
       refute second == first
     end

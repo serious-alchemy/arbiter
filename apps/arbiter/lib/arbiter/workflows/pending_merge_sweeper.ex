@@ -5,11 +5,12 @@ defmodule Arbiter.Workflows.PendingMergeSweeper do
 
   ## Problem this solves
 
-  The auto-merge decision for an approved PR lives in the
-  `Arbiter.Worker.Watchdog` paired with the worker that opened it, and that
-  Watchdog stops when its worker does. A merge that was *waiting* when the
-  worker exited — CI still running, the PR still a draft, a 405/409 from the
-  forge — therefore had no owner left to notice the wait was over. Three
+  The auto-merge decision for an approved PR lives in its
+  `Arbiter.Worker.Watchdog`. It used to be paired with the worker that opened
+  the PR and stop when that worker did; since bd-741sid it belongs to the
+  ticket, but it still dies with the server or on a crash. A merge that was
+  *waiting* when it went — CI still running, the PR still a draft, a 405/409
+  from the forge — then has no owner left to notice the wait was over. Three
   approved, green, CLEAN PRs sat unmerged for 17+ hours this way (#1947,
   #1966, #1932).
 
@@ -22,18 +23,19 @@ defmodule Arbiter.Workflows.PendingMergeSweeper do
   carrying a retryable stamp and, for each:
 
     * leaves it alone while a live lane owns it: a registered Watchdog, a
-      worker that is still working (including a `:fixpass` / `:conflict`
-      subordinate pass), or a retry already running;
-    * restarts the Watchdog of a worker still parked at `:awaiting_review`
-      whose Watchdog died (`Arbiter.Worker.Watchdog.restart/1`) — that is the
-      live lane's own repair;
+      run that is still working the ticket (a fix pass or conflict resolver
+      included), or a retry already running;
+    * restarts the Watchdog of a Merging ticket whose PR open recorded its
+      lane (`Arbiter.Worker.Watchdog.restart/1`, bd-741sid) — the Watchdog
+      belongs to the ticket, and that is the live lane's own repair;
     * otherwise starts a worker-less retry
       (`Arbiter.Worker.Watchdog.start_retry/1`), which waits out the transient
       blocker and merges through the Watchdog's own guards, or pages the
       coordinator once and latches the stamp escalated.
 
   Escalated stamps are never re-armed; neither is a workspace whose
-  `merge.auto_merge` is now off. Only the primary instance
+  `merge.auto_merge` is now off, nor a ticket an operator pulled out of the
+  merge queue (`Arbiter.Tasks.PullRequest.pull/1`). Only the primary instance
   (`Arbiter.SingleInstance.primary?/0`) sweeps: a duplicate boot must not run
   a second merge loop against the live instance's PRs.
 
@@ -57,6 +59,7 @@ defmodule Arbiter.Workflows.PendingMergeSweeper do
 
   alias Arbiter.Mergers
   alias Arbiter.Mergers.PendingMerge
+  alias Arbiter.Tasks.PullRequest
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker.Watchdog
 
@@ -170,6 +173,12 @@ defmodule Arbiter.Workflows.PendingMergeSweeper do
         PendingMerge.clear(task.id)
         {:skipped, :superseded}
 
+      # bd-741sid: an operator pulled the PR out of the merge queue, and a
+      # retry would merge it all the same. `PullRequest.pull/1` drops the
+      # stamp; this covers one written before it landed.
+      PullRequest.pulled?(task) ->
+        {:skipped, :pulled}
+
       is_pid(Watchdog.retry_whereis(task.id)) ->
         {:skipped, :retry_running}
 
@@ -197,32 +206,39 @@ defmodule Arbiter.Workflows.PendingMergeSweeper do
 
   defp route(_task, _pending, :watchdog, _opts), do: {:skipped, :live_watchdog}
 
-  defp route(task, _pending, {:worker, :awaiting_review}, _opts) do
+  # A run is working the ticket — a fix pass / conflict resolver pushing to the
+  # PR registers under the ticket id since bd-741sid. Once it exits, a later
+  # sweep re-arms the merge against whatever head it left.
+  defp route(_task, _pending, {:worker, _status}, _opts), do: {:skipped, :live_worker}
+  defp route(_task, _pending, {:subordinate, _key}, _opts), do: {:skipped, :live_worker}
+
+  # bd-741sid: a Merging ticket whose PR open recorded its lane (it names the
+  # adapter that opened the PR) gets its own Watchdog back from the row — the
+  # live lane's own repair. A PR opened before lanes were recorded, or a
+  # restart that is refused, falls through to the worker-less retry, which
+  # carries the stamp's own baseline rather than guessing at the lane.
+  defp route(%{state: :merging, merge_watch: %{"adapter" => _}} = task, pending, nil, opts) do
     case Watchdog.restart(task.id) do
       :ok ->
-        Logger.info(
-          "PendingMergeSweeper: task=#{task.id} was parked at :awaiting_review with no " <>
-            "Watchdog; restarted it"
-        )
-
+        Logger.info("PendingMergeSweeper: task=#{task.id} had no Watchdog; restarted it")
         :rewatched
+
+      {:error, :already_running} ->
+        {:skipped, :live_watchdog}
 
       {:error, reason} ->
         Logger.info(
-          "PendingMergeSweeper: task=#{task.id} Watchdog restart refused: #{inspect(reason)}"
+          "PendingMergeSweeper: task=#{task.id} Watchdog restart refused " <>
+            "(#{inspect(reason)}); starting a worker-less retry instead"
         )
 
-        {:skipped, :restart_refused}
+        retry(task, pending, opts)
     end
   end
 
-  defp route(_task, _pending, {:worker, _status}, _opts), do: {:skipped, :live_worker}
+  defp route(task, pending, nil, opts), do: retry(task, pending, opts)
 
-  # A fix pass / conflict resolver is still pushing to the PR; once it exits,
-  # a later sweep re-arms the retry against whatever head it left.
-  defp route(_task, _pending, {:subordinate, _key}, _opts), do: {:skipped, :live_worker}
-
-  defp route(task, pending, nil, opts) do
+  defp retry(task, pending, opts) do
     with {:ok, %Workspace{} = ws} <- Ash.get(Workspace, task.workspace_id),
          true <- Workspace.auto_merge?(ws) || {:skipped, :auto_merge_off},
          {:ok, adapter} <- resolve_adapter(ws, opts) do

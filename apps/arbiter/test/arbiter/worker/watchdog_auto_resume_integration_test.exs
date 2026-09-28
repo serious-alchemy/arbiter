@@ -12,6 +12,11 @@ defmodule Arbiter.Worker.WatchdogAutoResumeIntegrationTest do
       preserved worktree carrying the re-stamped attempt counter;
     * the give-up legs -> real `escalate_exhausted/5` -> a real `:escalation`
       row in the coordinator's mailbox.
+
+  bd-741sid: every case starts from the state a real timeout now finds — the
+  implementer's run ended when it opened the PR, and the ticket is Merging with
+  the PR on its row. The Watchdog is keyed by the ticket, and the timeout is its
+  `{:timed_out, polls}` announcement rather than a failed run.
   """
   # async: false — shares the singleton Worker registry/supervisor, the named
   # StubMerger Agent, and VM-global app env (:worktree_root / :repo_paths).
@@ -143,7 +148,7 @@ defmodule Arbiter.Worker.WatchdogAutoResumeIntegrationTest do
   end
 
   # A task with a real, dispatched worker sitting on a real provisioned
-  # worktree — the state `Dispatch.resume/2` is built to recover from.
+  # worktree — the run whose worktree `Dispatch.resume/2` re-attaches to.
   defp task_with_outpost(ws, title \\ "auto-resume e2e") do
     {:ok, task} = Ash.create(Issue, %{title: title, workspace_id: ws.id})
 
@@ -155,13 +160,26 @@ defmodule Arbiter.Worker.WatchdogAutoResumeIntegrationTest do
     {task, first}
   end
 
+  # bd-741sid: the state an awaiting-review timeout finds a ticket in. Opening
+  # the PR ended the implementer's run — no worker stays resident — and put the
+  # ticket in Merging with the PR on its row. The run's worktree is left exactly
+  # where it was; it is what a resume re-attaches to.
+  defp pr_opened(task, first, mr_ref) do
+    :ok = Worker.stop(first.worker_pid)
+    wait_until(fn -> Worker.whereis(task.id) == nil end)
+
+    {:ok, merging} = Issue.pr_opened(task.id, mr_ref)
+    assert merging.state == :merging
+    merging
+  end
+
   # The real Watchdog, wired to the real dispatcher, with a poll budget small
   # enough that it times out immediately. Only the forge adapter is a stub —
-  # there is no real GitLab to poll.
-  defp start_watchdog(worker_pid, task_id, mr_ref, ws, opts) do
+  # there is no real GitLab to poll. bd-741sid: keyed by the ticket, with no
+  # worker to pair it with; subscribed first so no announcement is missed.
+  defp start_watchdog(task_id, mr_ref, ws, opts) do
     base = [
       task_id: task_id,
-      worker: worker_pid,
       mr_ref: mr_ref,
       adapter: StubMerger,
       workspace: ws,
@@ -172,9 +190,17 @@ defmodule Arbiter.Worker.WatchdogAutoResumeIntegrationTest do
       auto_resume_dispatcher: AutoResumeDispatcher
     ]
 
+    :ok = Watchdog.subscribe(task_id)
     {:ok, wpid} = Watchdog.start(Keyword.merge(base, opts))
-    on_exit(fn -> if Process.alive?(wpid), do: GenServer.stop(wpid, :normal) end)
+    on_exit(fn -> stop_quietly(wpid) end)
     wpid
+  end
+
+  defp stop_quietly(pid) do
+    if Process.alive?(pid), do: GenServer.stop(pid, :normal)
+    :ok
+  catch
+    :exit, _reason -> :ok
   end
 
   defp escalations(ws) do
@@ -188,9 +214,10 @@ defmodule Arbiter.Worker.WatchdogAutoResumeIntegrationTest do
          %{ws: ws} do
       {task, first} = task_with_outpost(ws)
 
-      # The Watchdog fails the timed-out worker before resuming it; do the same
-      # so this exercises resume/1 from exactly the state it sees in production.
-      :ok = Worker.fail(first.worker_pid, {:awaiting_review_timeout, 30})
+      # bd-741sid: the Watchdog fails no run before resuming — the run ended
+      # when it opened the PR, and the ticket is Merging. Reproduce that so this
+      # exercises resume/1 from exactly the state it sees in production.
+      pr_opened(task, first, "!e2e-1")
 
       assert {:ok, result} =
                AutoResumeDispatcher.resume(%{
@@ -210,9 +237,10 @@ defmodule Arbiter.Worker.WatchdogAutoResumeIntegrationTest do
       snap = Worker.state(result.worker_pid)
       assert snap.meta[:resume] == true
 
-      # The load-bearing assertion. Without this re-stamp the NEXT Watchdog
-      # episode would read 0, the cap would never bind, and a never-converging
-      # review would auto-resume forever.
+      # The load-bearing assertion. Without this re-stamp the lane the resumed
+      # run records when it re-opens the PR (bd-741sid) would carry no count,
+      # the NEXT Watchdog episode would read 0, the cap would never bind, and a
+      # never-converging review would auto-resume forever.
       assert snap.meta[:awaiting_review_resume_attempts] == 1
 
       # Self-healing means silent: no coordinator page for an in-budget resume.
@@ -223,21 +251,22 @@ defmodule Arbiter.Worker.WatchdogAutoResumeIntegrationTest do
   describe "the real Watchdog driving the real dispatcher" do
     test "a spent budget escalates to the real coordinator mailbox instead of resuming",
          %{ws: ws} do
-      # 3 auto-resumes already spent against the default cap of 3.
       {task, first} = task_with_outpost(ws, "budget spent")
-      :ok = Worker.report(first.worker_pid, :awaiting_review_resume_attempts, 3)
+      task_id = task.id
+      pr_opened(task, first, "!e2e-2")
 
-      start_watchdog(first.worker_pid, task.id, "!e2e-2", ws, [])
+      # 3 auto-resumes already spent against the default cap of 3. bd-741sid:
+      # the count rides the ticket's lane (`auto_resumes`), which is what the
+      # Watchdog is started with.
+      start_watchdog(task.id, "!e2e-2", ws, auto_resumes: 3)
 
-      wait_until(fn -> Worker.state(first.worker_pid).status == :failed end)
+      # The timeout is still announced — the PR really did sit past its
+      # ceiling. bd-741sid: there is no run to record it on.
+      assert_receive {:watchdog, ^task_id, {:timed_out, 2}}, 5_000
       wait_until(fn -> escalations(ws) != [] end)
 
-      # The timeout is still recorded on the run — worker_show must still say so.
-      assert Worker.state(first.worker_pid).meta.failure_reason ==
-               {:awaiting_review_timeout, 2}
-
-      # No fourth resume: the same worker is still the registered one.
-      assert Worker.whereis(task.id) == first.worker_pid
+      # No fourth resume: no run was started on the ticket.
+      assert Worker.whereis(task.id) == nil
 
       exhausted = Enum.find(escalations(ws), &(&1.subject =~ "auto-resume exhausted"))
       assert exhausted, "expected an auto-resume-exhausted escalation in the coordinator inbox"
@@ -251,14 +280,16 @@ defmodule Arbiter.Worker.WatchdogAutoResumeIntegrationTest do
     test "a resume that cannot run escalates with the real reason, not a bogus exhaustion",
          %{ws: ws} do
       {task, first} = task_with_outpost(ws, "worktree gone")
+      task_id = task.id
+      pr_opened(task, first, "!e2e-3")
 
       # The worktree was cleaned up out from under the task, so the real
       # Dispatch.resume/2 has nothing to re-attach to: {:error, :no_outpost}.
       File.rm_rf!(first.worktree_path)
 
-      start_watchdog(first.worker_pid, task.id, "!e2e-3", ws, [])
+      start_watchdog(task.id, "!e2e-3", ws, [])
 
-      wait_until(fn -> Worker.state(first.worker_pid).status == :failed end)
+      assert_receive {:watchdog, ^task_id, {:timed_out, 2}}, 5_000
       wait_until(fn -> escalations(ws) != [] end)
 
       failed = Enum.find(escalations(ws), &(&1.subject =~ "auto-resume FAILED"))

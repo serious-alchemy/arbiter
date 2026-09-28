@@ -33,13 +33,14 @@ defmodule Arbiter.Board.Drain do
 
   A child is in flight unless it is provably idle:
 
-    * an `Arbiter.Worker` whose snapshot status is parked (`:awaiting_review`,
-      `:awaiting_review_gate` — no agent, waiting on a reviewer or a merge) or
-      terminal (`:completed`, `:failed`) is listed under `parked`, not
-      `in_flight`. A parked worker is recovered on the next boot
-      (`Workers.Reconciler` hands its open PR to PRPatrol), so it does not make
-      a restart unsafe — unless it still owns a live agent session
-      (`agent_live`), in which case it is in flight regardless of status;
+    * an `Arbiter.Worker` whose snapshot status is parked
+      (`:awaiting_review_gate` — no agent, waiting on a reviewer) or terminal
+      (`:completed`, `:failed`) is listed under `parked`, not `in_flight`. A
+      parked worker is recovered on the next boot (`Workers.Reconciler`), so it
+      does not make a restart unsafe — unless it still owns a live agent
+      session (`agent_live`), in which case it is in flight regardless of
+      status. An open PR is not a worker at all since bd-741sid: its ticket's
+      Watchdog is restarted from the row on the next boot;
     * an `Arbiter.Worker` that does not answer its snapshot in time is busy,
       not gone — in flight, kind `:unclassified`, status `:unknown`;
     * a `ReviewGate` or `Driver` is in flight for as long as it lives (a gate

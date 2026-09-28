@@ -21,7 +21,7 @@ defmodule ArbiterWeb.Api.EventController do
     * worker_phase  — a worker's phase changed (bd-aw2cyt): `implementing`,
                       `in_review`, `addressing_review`, `fixing_ci`,
                       `resolving_conflict`, `waiting_ci_merge`,
-                      `waiting_on_you`, `handing_off`, `done`. Carries
+                      `waiting_on_you`, `done`. Carries
                       `task_id`, `registry_key`, `role`, `status`, `phase`,
                       `phase_label` and `agent_live`. The record's `status`
                       outlives its agent — a `running` worker whose main agent

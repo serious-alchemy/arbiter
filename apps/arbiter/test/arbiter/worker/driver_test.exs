@@ -3,10 +3,12 @@ defmodule Arbiter.Worker.DriverTest do
 
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
+  alias Arbiter.Test.StubMerger
   alias Arbiter.Worker
   alias Arbiter.Worker.ClaudeSession
   alias Arbiter.Worker.Driver
   alias Arbiter.Worker.Dispatch
+  alias Arbiter.Worker.Watchdog
   alias Arbiter.TestWorkflows
   alias Arbiter.Workflows.Machine
 
@@ -433,23 +435,25 @@ defmodule Arbiter.Worker.DriverTest do
       assert reloaded.status == :in_progress
     end
 
-    # bd-d1jp4r: ticks must not consume budget while the worker is parked at
-    # :awaiting_review (Watchdog) or :awaiting_review_gate (ReviewGate). A long worker
-    # run + review gate was exhausting the 30-minute tick budget before the
-    # Watchdog called Worker.complete, leaving the task stranded at :in_progress.
-    test "does not count ticks while worker is :awaiting_review", %{ws: ws} do
-      alias Arbiter.Test.StubMerger
+    # bd-d1jp4r: ticks must not consume budget while the worker is parked on
+    # something else's decision. A long worker run + review gate was exhausting
+    # the 30-minute tick budget before the merge, leaving the task stranded at
+    # :in_progress. bd-741sid: a run no longer parks on its open PR — opening it
+    # ends the run and the ticket's Watchdog takes it — so the parked state is
+    # :awaiting_review_gate, and a run that ends with its PR open is no close.
+    test "does not count ticks while worker is :awaiting_review_gate", %{ws: ws} do
       StubMerger.reset()
 
-      {:ok, task} = Ash.create(Issue, %{title: "cd-ar-freeze", workspace_id: ws.id})
-
-      {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "r")
-      {:ok, machine_id} = Machine.attach(TestWorkflows.Three, task.id, %{x: "v"})
-      {:ok, machine_pid} = Machine.start(machine_id)
+      {:ok, task} = Ash.create(Issue, %{title: "cd-arg-freeze", workspace_id: ws.id})
       {:ok, _} = Ash.update(task, %{status: :in_progress})
 
+      StubMerger.next_open_ref("!drv1")
+      worker_pid = park_at_review_gate(task, ws)
+      {:ok, machine_id} = Machine.attach(TestWorkflows.Three, task.id, %{x: "v"})
+      {:ok, machine_pid} = Machine.start(machine_id)
+
       # max_ticks: 2 — would expire after 2 cycles in :running, but should NOT
-      # expire while the worker is parked at :awaiting_review.
+      # expire while the worker is parked at :awaiting_review_gate.
       {:ok, driver_pid} =
         Driver.start(
           task_id: task.id,
@@ -461,36 +465,29 @@ defmodule Arbiter.Worker.DriverTest do
           claude_driven: true
         )
 
-      # Advance worker to :running then open an MR to park it at :awaiting_review.
-      # The StubMerger opens synchronously and the Watchdog polls on a long interval
-      # so it won't call Worker.complete during this test.
-      :ok = Worker.advance(worker_pid, :running)
-
-      {:ok, _mr_ref} =
-        Worker.open_mr(worker_pid, "my-branch", "title", "body", %{
-          adapter: StubMerger,
-          interval_ms: 100_000,
-          max_polls: :infinity
-        })
-
-      # Let the driver run several more cycles while status is :awaiting_review.
+      # Let the driver run several cycles while status is :awaiting_review_gate.
       # With the fix, ticks don't increment here, so max_ticks: 2 won't fire.
       Process.sleep(60)
 
       assert Process.alive?(driver_pid),
-             "driver should still be alive (ticks frozen at :awaiting_review)"
+             "driver should still be alive (ticks frozen at :awaiting_review_gate)"
 
       # Monitor before triggering completion (bd-9j4znl) — see comment above.
       ref = Process.monitor(driver_pid)
 
-      # Now simulate the Watchdog calling Worker.complete.
-      :ok = Worker.complete(worker_pid, :merged)
+      # The gate approves; the run opens its PR and ends there.
+      :ok = Worker.review_gate_verdict(worker_pid, {:approve, "VERDICT: APPROVE\nlgtm"})
 
       assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
 
-      # Task must be closed — driver noticed :completed and closed it.
-      {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.status == :closed
+      # The Driver did not close the task: it is Merging, its PR in the hands
+      # of the ticket's Watchdog.
+      reloaded = Ash.get!(Issue, task.id)
+
+      assert {reloaded.state, reloaded.status, reloaded.pr_ref} ==
+               {:merging, :in_progress, "!drv1"}
+
+      assert Watchdog.alive?(task.id)
     end
 
     # bd-d1jp4r: driver must close the task even when max_ticks fires at the
@@ -531,34 +528,31 @@ defmodule Arbiter.Worker.DriverTest do
 
     # bd-7b46wd: if the tick budget is exhausted by active worker work and the
     # max_ticks guard fires while the worker has *already handed off* to the
-    # Watchdog (:awaiting_review) or ReviewGate (:awaiting_review_gate), the driver must
-    # NOT stop — those states are owned by watchdogs that will drive the worker
-    # to terminal. Stopping here was stranding tasks that were legitimately
-    # mid-merge, and the bd-d1jp4r fix only covered the already-:completed case.
-    test "keeps waiting at max_ticks while worker is :awaiting_review, then closes", %{ws: ws} do
-      alias Arbiter.Test.StubMerger
+    # ReviewGate (:awaiting_review_gate), the driver must NOT stop — the gate
+    # drives the worker to terminal. Stopping here was stranding tasks that
+    # were legitimately mid-merge, and the bd-d1jp4r fix only covered the
+    # already-:completed case. bd-741sid: the approved run ends with its PR
+    # open, and the ticket's Watchdog closes the ticket when the PR merges.
+    test "keeps waiting at max_ticks while worker is :awaiting_review_gate, then the merge closes the task",
+         %{ws: ws} do
       StubMerger.reset()
 
       {:ok, task} = Ash.create(Issue, %{title: "cd-maxtick-awaiting", workspace_id: ws.id})
-
-      {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "r")
-      {:ok, machine_id} = Machine.attach(TestWorkflows.Three, task.id, %{x: "v"})
-      {:ok, machine_pid} = Machine.start(machine_id)
       {:ok, _} = Ash.update(task, %{status: :in_progress})
 
-      # Park the worker at :awaiting_review with a Watchdog that won't poll during
-      # the test (long interval), so completion is driven explicitly below.
-      :ok = Worker.advance(worker_pid, :running)
+      # The Watchdog polls promptly once the PR is open, so the merge below is
+      # what finishes the task.
+      StubMerger.next_open_ref("!drv2")
+      StubMerger.queue_get("!drv2", [%{status: :merged}])
 
-      {:ok, _mr_ref} =
-        Worker.open_mr(worker_pid, "my-branch", "title", "body", %{
-          adapter: StubMerger,
-          interval_ms: 100_000,
-          max_polls: :infinity
-        })
+      worker_pid =
+        park_at_review_gate(task, ws, %{watchdog_interval_ms: 20, watchdog_initial_delay_ms: 0})
+
+      {:ok, machine_id} = Machine.attach(TestWorkflows.Three, task.id, %{x: "v"})
+      {:ok, machine_pid} = Machine.start(machine_id)
 
       # max_ticks: 0 → the t >= m guard fires on the very first check. With the
-      # worker at :awaiting_review the driver must reschedule, not stop.
+      # worker at :awaiting_review_gate the driver must reschedule, not stop.
       {:ok, driver_pid} =
         Driver.start(
           task_id: task.id,
@@ -577,15 +571,72 @@ defmodule Arbiter.Worker.DriverTest do
 
       {:ok, %Issue{status: :in_progress}} = Ash.get(Issue, task.id)
 
-      # The Watchdog (here, us) completes the worker — the driver's next guarded
-      # check must close the task rather than stranding it.
+      # The gate approves: the run opens its PR and ends, and the driver's next
+      # guarded check lets it go rather than stranding the task.
       ref = Process.monitor(driver_pid)
-      :ok = Worker.complete(worker_pid, :merged)
+      :ok = Worker.review_gate_verdict(worker_pid, {:approve, "VERDICT: APPROVE\nlgtm"})
 
       assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
 
-      {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.status == :closed
+      # The ticket's Watchdog sees the merge and closes the task.
+      wait_until(fn -> Ash.get!(Issue, task.id).status == :closed end)
+    end
+  end
+
+  # A worker whose run is done and parked on its ReviewGate (`review_spawn:
+  # false`, so the verdict is delivered by hand exactly as the gate would),
+  # with the stub merger for the PR it opens on approval. The ticket's
+  # Watchdog is parked unless `extra_meta` says otherwise.
+  defp park_at_review_gate(task, ws, extra_meta \\ %{}) do
+    meta =
+      Map.merge(
+        %{
+          branch: "feature/#{task.id}",
+          target_branch: "main",
+          review_required: true,
+          review_spawn: false,
+          merger_adapter_override: StubMerger,
+          merger_workspace_override: ws,
+          watchdog_interval_ms: 60_000,
+          watchdog_initial_delay_ms: 60_000
+        },
+        extra_meta
+      )
+
+    {:ok, pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id, meta: meta)
+    on_exit(fn -> stop_quietly(pid) end)
+    on_exit(fn -> stop_quietly(Watchdog.whereis(task.id)) end)
+
+    :ok = Worker.advance(pid, :claude)
+    send(pid, {:__claude_session_done__, "arb done"})
+    wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(pid)) end)
+    pid
+  end
+
+  defp stop_quietly(nil), do: :ok
+
+  defp stop_quietly(pid) do
+    GenServer.stop(pid, :normal)
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp wait_until(fun, timeout \\ 2_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_wait(fun, deadline)
+  end
+
+  defp do_wait(fun, deadline) do
+    cond do
+      fun.() ->
+        :ok
+
+      System.monotonic_time(:millisecond) > deadline ->
+        flunk("condition not met within timeout")
+
+      true ->
+        Process.sleep(10)
+        do_wait(fun, deadline)
     end
   end
 

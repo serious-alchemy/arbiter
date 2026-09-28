@@ -24,11 +24,13 @@ defmodule Arbiter.Worker.Phase do
     * `:waiting_ci_merge` — no agent; an MR is open and CI / the merge queue
       owns the outcome.
     * `:waiting_on_you` — the worker asked a question, or parked failed.
-    * `:handing_off` — a live-status record between agents; the brief
-      transition window. Also a `:failed` worker carrying
-      `meta[:slot_handoff]` — failed only so an automatic round can replace it
-      (bd-92mx1m).
     * `:done` — the worker completed.
+
+  There is no hand-off phase any more (bd-741sid). It named the window a
+  worker spent between agents holding its task's slot — the `slot_handoff`
+  failure of a ReviewGate fix round or a Watchdog auto-resume — and slots are
+  counted by the ticket's state now (`Arbiter.Tasks.SlotGate`, bd-asxw4e), so
+  no worker hands one off. A run between agents reads as its stage.
 
   ## Phase is not liveness
 
@@ -47,12 +49,13 @@ defmodule Arbiter.Worker.Phase do
 
   ## Siblings
 
-  A task's rounds run in *separate* workers: a reviewer / implementer under
-  its own synthetic task id (`meta[:reviews]` / `meta[:revises]` points back at
-  the author), a fix pass / conflict resolver under the author's task id with
-  its own registry key. So an author's phase is a function of its own snapshot
-  plus its siblings', and `of/2` takes both. `annotate/1` does the grouping for
-  a caller that has the whole list.
+  A task's ReviewGate rounds run in *separate* workers: a reviewer /
+  implementer under its own synthetic task id (`meta[:reviews]` /
+  `meta[:revises]` points back at the author). So an author's phase is a
+  function of its own snapshot plus its siblings', and `of/2` takes both.
+  `annotate/1` does the grouping for a caller that has the whole list. A CI
+  fix pass or conflict pass is the ticket's own run since bd-741sid —
+  registered under the ticket id — and reads as its round by its `:role`.
   """
 
   alias Arbiter.Tasks.SlotGate
@@ -65,7 +68,6 @@ defmodule Arbiter.Worker.Phase do
           | :resolving_conflict
           | :waiting_ci_merge
           | :waiting_on_you
-          | :handing_off
           | :done
 
   @phases [
@@ -76,7 +78,6 @@ defmodule Arbiter.Worker.Phase do
     :resolving_conflict,
     :waiting_ci_merge,
     :waiting_on_you,
-    :handing_off,
     :done
   ]
 
@@ -88,7 +89,6 @@ defmodule Arbiter.Worker.Phase do
     resolving_conflict: "resolving conflict",
     waiting_ci_merge: "waiting on CI / merge",
     waiting_on_you: "waiting on you",
-    handing_off: "handing off",
     done: "done"
   }
 
@@ -124,7 +124,6 @@ defmodule Arbiter.Worker.Phase do
   def of(worker, siblings) when is_map(worker) do
     cond do
       Map.get(worker, :status) == :completed -> :done
-      slot_handoff?(worker) -> :handing_off
       Map.get(worker, :status) in [:awaiting, :failed] -> :waiting_on_you
       subordinate_role(worker) -> subordinate_phase(worker)
       true -> author_phase(worker, siblings)
@@ -155,8 +154,8 @@ defmodule Arbiter.Worker.Phase do
   @doc """
   The subset of `workers` that are subordinate rounds of `worker`'s task — a
   reviewer / implementer registered under a synthetic id pointing back here,
-  or a fix pass / conflict resolver sharing the task id under its own
-  registry key.
+  or a pass sharing the task id under another key (the merge queue's per-kind
+  pass keys before bd-741sid).
   """
   @spec subordinates_of(map(), [map()]) :: [map()]
   def subordinates_of(worker, workers) when is_map(worker) and is_list(workers) do
@@ -177,24 +176,8 @@ defmodule Arbiter.Worker.Phase do
       round = live_round(worker, siblings) -> round
       Map.get(worker, :status) == :awaiting_review -> :waiting_ci_merge
       Map.get(worker, :status) == :awaiting_review_gate -> :in_review
-      SlotGate.agent_live(worker) == nil -> unknown_liveness_phase(worker)
-      true -> :handing_off
+      true -> :implementing
     end
-  end
-
-  # No liveness input at all: behave exactly as the pre-bd-aw2cyt surfaces
-  # did, where a `:running` record meant a running agent.
-  # bd-92mx1m: a worker failed only so an automatic round can replace it — the
-  # ReviewGate fix round, the Watchdog's awaiting_review auto-resume — carries
-  # `meta[:slot_handoff]` until that round starts or is given up on. Nobody has
-  # been asked anything yet, so it is a hand-off between agents, not a park:
-  # the card reads `:handing_off`. (Its slot is its ticket's: it is held
-  # while the ticket is In progress — `SlotGate.holds_slot?/1`, bd-asxw4e.)
-  defp slot_handoff?(worker),
-    do: Map.get(worker, :status) == :failed and meta_get(worker, :slot_handoff) == true
-
-  defp unknown_liveness_phase(worker) do
-    if Map.get(worker, :status) in SlotGate.slot_statuses(), do: :implementing, else: :handing_off
   end
 
   defp live_round(worker, siblings) do
@@ -209,12 +192,9 @@ defmodule Arbiter.Worker.Phase do
     end)
   end
 
-  defp subordinate_phase(worker) do
-    case SlotGate.agent_live(worker) do
-      false -> :handing_off
-      _ -> Map.get(@role_phases, subordinate_role(worker), :handing_off)
-    end
-  end
+  # The round the pass *is*, whether or not its agent is live this instant
+  # (phase is not liveness — see the moduledoc).
+  defp subordinate_phase(worker), do: Map.fetch!(@role_phases, subordinate_role(worker))
 
   defp subordinate_role(worker) do
     role = role_of(worker)

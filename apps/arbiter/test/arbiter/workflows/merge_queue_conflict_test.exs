@@ -625,7 +625,7 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
       %{tmp: tmp, repo: repo}
     end
 
-    test "attaches an EXISTING branch (does NOT use -b) and spawns a worker under task_id:conflict",
+    test "attaches an EXISTING branch (does NOT use -b) and spawns a worker under the ticket id",
          %{workspace: ws, task: task, repo: repo} do
       # Pre-create the conflicting branch in the fixture repo. This is the
       # key precondition: the task's branch already exists (the conflicting
@@ -634,9 +634,8 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
       branch = Arbiter.Worker.BranchNamer.derive(task)
       {_, 0} = System.cmd("git", ["-C", repo, "branch", branch])
 
-      # Pre-condition: no worker registered yet under either slot.
+      # Pre-condition: no run registered for the ticket yet.
       assert Arbiter.Worker.whereis(task.id) == nil
-      assert Arbiter.Worker.whereis(task.id <> ":conflict") == nil
 
       {:ok, info} =
         Arbiter.Workflows.MergeQueue.ConflictResolver.resolve(%{
@@ -654,10 +653,10 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
       assert is_binary(info.worktree_path)
       assert File.dir?(info.worktree_path)
 
-      # Crucial: registry slot for the resolver is `task_id:conflict`, NOT
-      # `task_id`. The task_id slot stays open for the original work worker.
-      assert Arbiter.Worker.whereis(task.id <> ":conflict") == info.worker_pid
-      assert Arbiter.Worker.whereis(task.id) == nil
+      # bd-741sid: the resolver is an ordinary run on its ticket, registered
+      # under the ticket id — no `task_id:conflict` side key.
+      assert Arbiter.Worker.whereis(task.id) == info.worker_pid
+      assert Arbiter.Worker.whereis(task.id <> ":conflict") == nil
 
       # The worker's meta carries the conflict-resolver role + the branch
       # being rebased — proves we built the worker for this job, not
@@ -675,18 +674,19 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
     test "a stale resolver worker (already running for this task) is surfaced, not papered over",
          %{workspace: ws, task: task, repo: repo} do
       # Simulate a previous resolver run that hasn't terminated by starting a
-      # second worker under the resolver's registry key. The resolver must
-      # NOT silently return that pid — the round-2 finding was that the
-      # `:already_started` shortcut hid a real wrong-process bug.
+      # conflict-resolver run under the ticket id (where every run on the
+      # ticket registers, bd-741sid). The resolver must NOT silently return
+      # that pid — the round-2 finding was that the `:already_started`
+      # shortcut hid a real wrong-process bug.
       branch = Arbiter.Worker.BranchNamer.derive(task)
       {_, 0} = System.cmd("git", ["-C", repo, "branch", branch])
 
       {:ok, prior} =
         Arbiter.Worker.start(
           task_id: task.id,
-          registry_key: task.id <> ":conflict",
           repo: "test/repo",
-          workspace_id: ws.id
+          workspace_id: ws.id,
+          meta: %{role: :conflict_resolver}
         )
 
       result =
@@ -720,7 +720,7 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
 
       assert {:error, {:worktree_failed, {:git_failed, _}}} = result
       # And no worker got partially spawned.
-      assert Arbiter.Worker.whereis(task.id <> ":conflict") == nil
+      assert Arbiter.Worker.whereis(task.id) == nil
     end
   end
 
@@ -784,7 +784,7 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
       branch = Arbiter.Worker.BranchNamer.derive(task)
       {_, 0} = System.cmd("git", ["-C", repo, "branch", branch, "main"])
 
-      assert Arbiter.Worker.whereis(task.id <> ":conflict") == nil
+      assert Arbiter.Worker.whereis(task.id) == nil
 
       result =
         Arbiter.Workflows.MergeQueue.ConflictResolver.resolve(%{
@@ -798,7 +798,7 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
 
       assert {:ok, :no_op} = result
       # No worktree attach, no worker spawn happened for the no-op path.
-      assert Arbiter.Worker.whereis(task.id <> ":conflict") == nil
+      assert Arbiter.Worker.whereis(task.id) == nil
     end
 
     test "an un-supplied target is derived from the task, not blanket-defaulted to the workspace base",

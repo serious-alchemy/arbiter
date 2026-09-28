@@ -34,8 +34,8 @@ defmodule Arbiter.Worker.ResumeSlot do
 
   No worker rows are read. Before bd-asxw4e the answer came from the
   author row's `Arbiter.Worker.Phase`, so a human-parked ticket had released
-  its slot (the 2026-09-23 incident below) while an `:awaiting_review` one on
-  an open PR still held it; the stored state now decides both.
+  its slot (the 2026-09-23 incident below) while one parked on an open PR
+  still held it; the stored state now decides both.
 
   ## When no slot is free
 

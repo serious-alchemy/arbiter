@@ -413,11 +413,15 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
   # against it. Checking the worker's actual status (not just its
   # registration) breaks that deadlock: only a worker still doing something
   # protects the task from finalization.
+  #
+  # bd-741sid: a Merging ticket has no worker at all — its Watchdog owns the
+  # merge and finalizes the ticket itself — so a live Watchdog protects it too.
   defp live_worker?(%Issue{id: id}) when is_binary(id) do
-    case Worker.whereis(id) do
-      nil -> false
-      pid -> actively_working?(pid)
-    end
+    Arbiter.Worker.Watchdog.alive?(id) or
+      case Worker.whereis(id) do
+        nil -> false
+        pid -> actively_working?(pid)
+      end
   rescue
     _ -> false
   catch

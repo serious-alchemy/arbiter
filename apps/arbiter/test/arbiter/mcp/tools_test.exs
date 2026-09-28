@@ -3205,12 +3205,16 @@ defmodule Arbiter.MCP.ToolsTest do
     end
   end
 
+  # bd-741sid: the Watchdog belongs to the ticket and is restarted from its row,
+  # so every case here is about the ticket — there is no parked worker.
   describe "queue_restart_watchdog/2 (bd-8jixav)" do
+    alias Arbiter.Tasks.PullRequest
     alias Arbiter.Worker.Watchdog
     alias Arbiter.Test.StubMerger
 
-    setup do
+    setup ctx do
       StubMerger.reset()
+      on_exit(fn -> stop_ticket_watchdog(ctx.task.id) end)
       :ok
     end
 
@@ -3218,19 +3222,21 @@ defmodule Arbiter.MCP.ToolsTest do
       assert {:error, {:invalid, _}} = Tools.queue_restart_watchdog(ctx.coordinator, %{})
     end
 
-    test "reports not-found when no worker is registered for the task", ctx do
+    test "reports not-found for a ticket that does not exist", ctx do
       assert {:error, {:not_found, msg}} =
-               Tools.queue_restart_watchdog(ctx.coordinator, %{"task_id" => ctx.task.id})
+               Tools.queue_restart_watchdog(ctx.coordinator, %{"task_id" => "mcp-nosuch"})
 
-      assert msg =~ "no worker"
+      assert msg =~ ~r/no ticket mcp-nosuch/i
     end
 
-    test "mints a fresh watchdog for a parked worker whose watchdog is gone", ctx do
+    test "mints a fresh watchdog for a Merging ticket whose watchdog is gone", ctx do
+      {:ok, _} = Ash.update(ctx.task, %{status: :in_progress})
+
       {:ok, wpid} =
         Worker.start(task_id: ctx.task.id, repo: "test/repo", workspace_id: ctx.ws.id)
 
       :ok = Worker.advance(wpid, :implement)
-      on_exit(fn -> Process.alive?(wpid) && Worker.stop(wpid, :normal) end)
+      ref = Process.monitor(wpid)
 
       StubMerger.next_open_ref("!rw1")
       StubMerger.queue_get("!rw1", [%{status: :open, approved: false}])
@@ -3244,31 +3250,61 @@ defmodule Arbiter.MCP.ToolsTest do
           watchdog_start_error: true
         })
 
+      # The run ended with its PR open and nothing watching it.
+      assert_receive {:DOWN, ^ref, :process, ^wpid, :normal}, 1_000
+      assert Ash.get!(Issue, ctx.task.id).state == :merging
       refute Watchdog.alive?(ctx.task.id)
 
       assert {:ok, %{restarted: true, task_id: task_id}} =
                Tools.queue_restart_watchdog(ctx.coordinator, %{"task_id" => ctx.task.id})
 
       assert task_id == ctx.task.id
-      wait_until(fn -> Watchdog.alive?(ctx.task.id) end)
-
-      on_exit(fn ->
-        Watchdog.whereis(ctx.task.id) |> then(&(&1 && GenServer.stop(&1, :normal)))
-      end)
+      assert Watchdog.alive?(ctx.task.id)
     end
 
-    test "refuses a worker that is not parked awaiting review", ctx do
-      {:ok, wpid} =
-        Worker.start(task_id: ctx.task.id, repo: "test/repo", workspace_id: ctx.ws.id)
+    test "refuses to put a second watchdog on a ticket that has one", ctx do
+      {:ok, _} = Ash.update(ctx.task, %{status: :in_progress})
 
-      :ok = Worker.advance(wpid, :implement)
-      on_exit(fn -> Process.alive?(wpid) && Worker.stop(wpid, :normal) end)
+      lane =
+        PullRequest.lane(adapter: StubMerger, interval_ms: 60_000, initial_delay_ms: 60_000)
+
+      {:ok, %{state: :merging}} = Issue.pr_opened(ctx.task.id, "!rw2", merge_watch: lane)
+
+      assert {:ok, %{restarted: true}} =
+               Tools.queue_restart_watchdog(ctx.coordinator, %{"task_id" => ctx.task.id})
 
       assert {:error, {:invalid, msg}} =
                Tools.queue_restart_watchdog(ctx.coordinator, %{"task_id" => ctx.task.id})
 
-      assert msg =~ "awaiting_review"
+      assert msg =~ ~r/already running/i
     end
+
+    test "refuses a ticket with no open PR to watch", ctx do
+      assert {:error, {:invalid, msg}} =
+               Tools.queue_restart_watchdog(ctx.coordinator, %{"task_id" => ctx.task.id})
+
+      assert msg =~ ~r/no PR on record/i
+
+      # A ticket whose PR is on the row but which is no longer Merging.
+      {:ok, _} = Ash.update(ctx.task, %{status: :in_progress})
+      {:ok, merging} = Issue.pr_opened(ctx.task.id, "!rw3")
+      {:ok, _closed} = Ash.update(merging, %{}, action: :close)
+
+      assert {:error, {:invalid, msg}} =
+               Tools.queue_restart_watchdog(ctx.coordinator, %{"task_id" => ctx.task.id})
+
+      assert msg =~ ~r/not Merging/i
+      refute Watchdog.alive?(ctx.task.id)
+    end
+  end
+
+  defp stop_ticket_watchdog(task_id) do
+    case Arbiter.Worker.Watchdog.whereis(task_id) do
+      nil -> :ok
+      pid -> GenServer.stop(pid, :normal)
+    end
+  catch
+    :exit, _ -> :ok
   end
 
   describe "worker_stop/2" do
@@ -3405,29 +3441,30 @@ defmodule Arbiter.MCP.ToolsTest do
       assert snap.blocked_reason == nil
     end
 
-    test "surfaces blocked_reason for a worker in awaiting_review status", ctx do
-      alias Arbiter.Test.StubMerger
+    # bd-741sid: a run whose PR is open has ended, so the parked worker that
+    # must not be stopped is the one waiting on its ReviewGate.
+    test "surfaces blocked_reason for a worker parked at awaiting_review_gate", ctx do
+      {:ok, task} =
+        Ash.create(Issue, %{title: "awaiting-review-gate-test", workspace_id: ctx.ws.id})
 
-      {:ok, task} = Ash.create(Issue, %{title: "awaiting-review-test", workspace_id: ctx.ws.id})
-      {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ctx.ws.id)
+      {:ok, pid} =
+        Worker.start(
+          task_id: task.id,
+          repo: "test/repo",
+          workspace_id: ctx.ws.id,
+          meta: %{branch: "feature/guard", review_required: true, review_spawn: false}
+        )
+
       on_exit(fn -> Process.alive?(pid) && Worker.stop(task.id, :normal) end)
 
       :ok = Worker.advance(pid, :implement)
-      StubMerger.next_open_ref("!test")
-
-      open_opts = %{
-        adapter: StubMerger,
-        workspace: nil,
-        interval_ms: 1_000_000,
-        initial_delay_ms: 1_000_000
-      }
-
-      assert {:ok, "!test"} = Worker.open_mr(pid, "feature/guard", "Test", "", open_opts)
+      send(pid, {:__claude_session_done__, "arb done"})
+      wait_until(fn -> Worker.state(pid).status == :awaiting_review_gate end)
 
       assert {:ok, snap} = Tools.worker_show(ctx.coordinator, %{"task_id" => task.id})
       assert snap.resumable == false
       assert is_binary(snap.blocked_reason)
-      assert String.contains?(snap.blocked_reason, "awaiting_review")
+      assert String.contains?(snap.blocked_reason, "awaiting_review_gate")
     end
 
     test "surfaces resumable/blocked_reason for worker_list", ctx do

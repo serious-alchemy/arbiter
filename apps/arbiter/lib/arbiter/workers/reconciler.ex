@@ -43,13 +43,13 @@ defmodule Arbiter.Workers.Reconciler do
   alias Arbiter.Accounts.Resolver, as: AccountResolver
   alias Arbiter.Messages.Message
   alias Arbiter.Tasks.Issue
-  alias Arbiter.Tasks.SlotGate
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Usage.ClaudeSessionFile
   alias Arbiter.Usage.Event
   alias Arbiter.Worker
   alias Arbiter.Worker.Dispatch
   alias Arbiter.Worker.ResumeSlot
+  alias Arbiter.Worker.Watchdog
   alias Arbiter.Workers.Run
   alias Arbiter.Workflows.MergedPRFinalizerSupervisor
   alias Arbiter.Workflows.PRPatrolSupervisor
@@ -205,86 +205,94 @@ defmodule Arbiter.Workers.Reconciler do
   end
 
   @doc """
-  Re-establish monitoring for orphaned `:in_progress` Issues whose worker died
-  on a restart but whose PR is still open (or which are review-only engagements),
-  instead of merely escalating them.
+  Re-establish monitoring for orphaned `:in_progress` Issues whose PR is still
+  open (or which are review-only engagements), instead of merely escalating
+  them.
 
-  After a reboot the ephemeral worker/Watchdog that was following the PR no longer
-  exists, so a task parked in awaiting_review loses its active watcher: merge
-  detection and review-feedback follow-up are dropped until a human notices. The
-  patrol layer (`PRPatrol` + `MergedPRFinalizer`, or `ReviewPatrol` for review-only
-  engagements) is exactly the durable, restart-surviving watcher for these tasks.
-  This sweep hands each orphaned open-PR task back to that layer explicitly so:
+  After a reboot nothing in memory is following any PR. bd-741sid: a
+  `:merging` ticket owns its PR's state and its Watchdog is restartable from
+  the row alone, so every Merging ticket with no live Watchdog gets one again
+  (`Arbiter.Worker.Watchdog.restart/2`) — polling resumes exactly where it was,
+  with no escalation and no worker. One an operator pulled out of the merge
+  queue (`Arbiter.Tasks.PullRequest.pull/1`) is left as it is.
+
+  The patrol layer (`PRPatrol` + `MergedPRFinalizer`, or `ReviewPatrol` for
+  review-only engagements) remains the durable watcher for what a Watchdog does
+  not cover: a Merging ticket whose Watchdog cannot start, and an In-progress
+  ticket with a PR on record whose run the restart cut off. This sweep hands
+  those back to that layer explicitly so:
 
     * `MergedPRFinalizer` finalizes the task when the PR merges (keys on `pr_ref`), and
     * `PRPatrol` re-drives review-feedback (CHANGES_REQUESTED / unresolved threads).
 
-  Escalation is kept only as the fallback: a task whose workspace has no patrol
-  coverage (e.g. no hosted-forge merger configured) can't be auto-watched, so it
-  still lands in the coordinator's mailbox rather than being silently dropped.
+  Escalation is kept only as the last fallback: a task whose workspace has no
+  patrol coverage (e.g. no hosted-forge merger configured) can't be
+  auto-watched, so it still lands in the coordinator's mailbox rather than
+  being silently dropped.
 
   Respects the `worker_live?` guard (C6): a task that still has a live worker is
   left untouched — no duplicate watcher is established.
 
-  Returns `{:ok, %{rewatched: non_neg_integer(), escalated: non_neg_integer()}}`,
-  `{:ok, :skipped}` when not the primary instance, or `{:error, reason}`.
+  Returns `{:ok, %{watched: n, rewatched: n, escalated: n}}`, `{:ok, :skipped}`
+  when not the primary instance, or `{:error, reason}`.
 
   ## Options
 
     * `:primary?` — same single-instance gate as `reconcile_orphaned_runs/1`.
       When `false`, skips and returns `{:ok, :skipped}`.
+    * `:watch_fun` — 1-arity fun `(Issue.t() -> :ok | {:error, term()})` that
+      starts a Merging ticket's Watchdog. Defaults to `Watchdog.restart/1` on
+      the ticket id.
     * `:rewatch_fun` — 1-arity fun `(Issue.t() -> :ok | {:error, term()})` used to
       re-establish patrol coverage for a task. Defaults to `&default_rewatch/1`
       (starts the real patrol supervisors for the task's workspace). Injectable so
       tests can drive the re-watch/escalate branches without booting patrols.
   """
   @spec reconcile_open_pr_tasks(keyword()) ::
-          {:ok, %{rewatched: non_neg_integer(), escalated: non_neg_integer()} | :skipped}
+          {:ok,
+           %{
+             watched: non_neg_integer(),
+             rewatched: non_neg_integer(),
+             escalated: non_neg_integer()
+           }
+           | :skipped}
           | {:error, term()}
   def reconcile_open_pr_tasks(opts \\ []) do
     if Keyword.get(opts, :primary?, true) do
-      do_reconcile_open_pr_tasks(Keyword.get(opts, :rewatch_fun, &default_rewatch/1))
+      do_reconcile_open_pr_tasks(
+        Keyword.get(opts, :watch_fun, &default_watch/1),
+        Keyword.get(opts, :rewatch_fun, &default_rewatch/1)
+      )
     else
       {:ok, :skipped}
     end
   end
 
-  defp do_reconcile_open_pr_tasks(rewatch_fun) do
+  defp do_reconcile_open_pr_tasks(watch_fun, rewatch_fun) do
     stuck =
       Issue
       |> Ash.Query.filter(status == :in_progress)
       |> Ash.read!()
       |> Enum.reject(&live_worker_for_issue?/1)
       |> Enum.filter(&rewatchable?/1)
+      |> Enum.reject(&watched?/1)
 
-    {rewatched, escalated} =
-      Enum.reduce(stuck, {0, 0}, fn issue, {rw, esc} ->
-        case rewatch_fun.(issue) do
-          :ok ->
-            Logger.info(
-              "Workers.Reconciler: re-established patrol watching for in_progress task " <>
-                "#{issue.id} (PR #{issue.pr_ref}) — handed to patrol layer, not escalated"
-            )
-
-            {rw + 1, esc}
-
-          {:error, reason} ->
-            Logger.warning(
-              "Workers.Reconciler: could not re-watch task #{issue.id} (PR #{issue.pr_ref}): " <>
-                "#{inspect(reason)} — escalating"
-            )
-
-            if escalate_stuck_issue(issue, :open_pr), do: {rw, esc + 1}, else: {rw, esc}
+    counts =
+      Enum.reduce(stuck, %{watched: 0, rewatched: 0, escalated: 0}, fn issue, counts ->
+        case reconcile_open_pr(issue, watch_fun, rewatch_fun) do
+          :none -> counts
+          outcome -> Map.update!(counts, outcome, &(&1 + 1))
         end
       end)
 
-    if rewatched + escalated > 0 do
+    if counts.watched + counts.rewatched + counts.escalated > 0 do
       Logger.info(
-        "Workers.Reconciler: open-PR sweep — re-watched #{rewatched}, escalated #{escalated}"
+        "Workers.Reconciler: open-PR sweep — watched #{counts.watched}, re-watched " <>
+          "#{counts.rewatched}, escalated #{counts.escalated}"
       )
     end
 
-    {:ok, %{rewatched: rewatched, escalated: escalated}}
+    {:ok, counts}
   rescue
     e ->
       Logger.warning("Workers.Reconciler: open-PR task sweep failed: #{Exception.message(e)}")
@@ -341,13 +349,12 @@ defmodule Arbiter.Workers.Reconciler do
       Issue
       |> Ash.Query.filter(status == :in_progress)
       |> Ash.read!()
-      |> Enum.reject(&(live_worker_for_issue?(&1) or review_only?(&1)))
+      # bd-741sid: a Merging ticket's PR is its Watchdog's, which
+      # `reconcile_open_pr_tasks/1` restarts from the row. A revision runs with
+      # its ticket In progress, so a cut-off run on a Merging ticket can only
+      # be an implementer parked on its PR before bd-741sid, its work done.
+      |> Enum.reject(&(&1.state == :merging or live_worker_for_issue?(&1) or review_only?(&1)))
       |> Enum.filter(&(is_nil(&1.pr_ref) or ResumeSlot.cut_off_by_restart?(&1.id)))
-      # bd-92mx1m / bd-asxw4e: a ticket still In progress holds its own slot
-      # and re-enters uncapped, so resume those first. A Merging ticket whose
-      # revision the restart cut off then competes for whatever is left, and
-      # is deferred to the scheduler if nothing is.
-      |> Enum.sort_by(&(not SlotGate.holds_slot?(&1)))
 
     {resumed, escalated} =
       Enum.reduce(stuck, {0, 0}, fn issue, {res, esc} ->
@@ -400,6 +407,129 @@ defmodule Arbiter.Workers.Reconciler do
   defp review_only?(%Issue{}), do: false
 
   defp live_worker_for_issue?(%Issue{id: task_id}), do: not is_nil(Worker.whereis(task_id))
+
+  # bd-741sid: a ticket whose Watchdog is running is watched already.
+  defp watched?(%Issue{id: task_id}), do: Watchdog.alive?(task_id)
+
+  # One orphaned open-PR ticket: `:watched`, `:rewatched`, `:escalated` or
+  # `:none` (an escalation deduped away, or a ticket pulled out of the merge
+  # queue, left as the operator left it). A Merging ticket gets its Watchdog
+  # back from its row; only when that cannot start does it fall back to the
+  # patrols, and past them to the coordinator.
+  defp reconcile_open_pr(%Issue{state: :merging} = issue, watch_fun, rewatch_fun) do
+    case watch_fun.(issue) do
+      result when result in [:ok, {:error, :already_running}] ->
+        Logger.info(
+          "Workers.Reconciler: Merging ticket #{issue.id} (PR #{issue.pr_ref}) is watched " <>
+            "again — its Watchdog restarted from the row"
+        )
+
+        :watched
+
+      # An operator pulled it out of the merge queue (`PullRequest.pull/1`);
+      # a reboot does not put it back. `MergedPRFinalizer` still closes it if
+      # someone merges the PR by hand.
+      {:error, :pulled} ->
+        Logger.info(
+          "Workers.Reconciler: Merging ticket #{issue.id} (PR #{issue.pr_ref}) was pulled out " <>
+            "of the merge queue; leaving it unwatched"
+        )
+
+        :none
+
+      {:error, reason} ->
+        Logger.warning(
+          "Workers.Reconciler: could not restart the Watchdog for Merging ticket #{issue.id} " <>
+            "(PR #{issue.pr_ref}): #{inspect(reason)} — handing it to the patrols"
+        )
+
+        rewatch_or_escalate(issue, rewatch_fun)
+    end
+  end
+
+  # bd-741sid: a fix or conflict pass the restart cut off leaves its ticket In
+  # progress with the PR still open and nothing working it. Back to Merging,
+  # which restarts its Watchdog from the row: it sees the same red CI or
+  # conflict and asks for the pass again.
+  defp reconcile_open_pr(%Issue{state: :active} = issue, watch_fun, rewatch_fun) do
+    if pass_cut_off?(issue.id) do
+      case Arbiter.Tasks.PullRequest.back_to_merging(issue.id) do
+        :ok ->
+          Logger.info(
+            "Workers.Reconciler: ticket #{issue.id}'s pass was cut off by the restart; " <>
+              "back to Merging (PR #{issue.pr_ref})"
+          )
+
+          Issue |> Ash.get!(issue.id) |> watch_merging(watch_fun, rewatch_fun)
+
+        {:error, reason} ->
+          Logger.warning(
+            "Workers.Reconciler: could not return ticket #{issue.id} to Merging after its " <>
+              "pass was cut off: #{inspect(reason)}"
+          )
+
+          rewatch_or_escalate(issue, rewatch_fun)
+      end
+    else
+      rewatch_or_escalate(issue, rewatch_fun)
+    end
+  end
+
+  defp reconcile_open_pr(issue, _watch_fun, rewatch_fun),
+    do: rewatch_or_escalate(issue, rewatch_fun)
+
+  # `back_to_merging/1` restarts the Watchdog itself; count it, or start it now.
+  defp watch_merging(%Issue{state: :merging} = issue, watch_fun, rewatch_fun) do
+    if Watchdog.alive?(issue.id),
+      do: :watched,
+      else: reconcile_open_pr(issue, watch_fun, rewatch_fun)
+  end
+
+  defp watch_merging(issue, _watch_fun, rewatch_fun), do: rewatch_or_escalate(issue, rewatch_fun)
+
+  # The ticket's latest run was a fix or conflict pass that the restart cut off
+  # (the graceful-shutdown `:interrupted`, a row still `:running`, or the orphan
+  # sweep's "server restarted").
+  defp pass_cut_off?(task_id) do
+    Run
+    |> Ash.Query.filter(task_id == ^task_id)
+    |> Ash.Query.sort(started_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> case do
+      [%Run{worker_type: type} = run] when type in [:fix_pass, :conflict] -> cut_off?(run)
+      _ -> false
+    end
+  rescue
+    _ -> false
+  end
+
+  defp cut_off?(%Run{status: status}) when status in [:running, :interrupted], do: true
+
+  defp cut_off?(%Run{failure_reason: reason}),
+    do: reason in ["server restarted", "server shutdown"]
+
+  defp rewatch_or_escalate(issue, rewatch_fun) do
+    case rewatch_fun.(issue) do
+      :ok ->
+        Logger.info(
+          "Workers.Reconciler: re-established patrol watching for in_progress task " <>
+            "#{issue.id} (PR #{issue.pr_ref}) — handed to patrol layer, not escalated"
+        )
+
+        :rewatched
+
+      {:error, reason} ->
+        Logger.warning(
+          "Workers.Reconciler: could not re-watch task #{issue.id} (PR #{issue.pr_ref}): " <>
+            "#{inspect(reason)} — escalating"
+        )
+
+        if escalate_stuck_issue(issue, :open_pr), do: :escalated, else: :none
+    end
+  end
+
+  defp default_watch(%Issue{id: task_id}), do: Watchdog.restart(task_id)
 
   # Default re-watch: hand the task back to the durable patrol layer for its
   # workspace. Review-only engagements go to ReviewPatrol; author-side open-PR

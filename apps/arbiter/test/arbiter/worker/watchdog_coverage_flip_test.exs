@@ -16,6 +16,10 @@ defmodule Arbiter.Worker.WatchdogCoverageFlipTest do
       one shadowing — including where the two disagree (AC2);
     * a probe that cannot answer waits, bounded, and then parks and escalates
       once. It never merges (AC4).
+
+  bd-741sid: the Watchdog is keyed by the ticket and drives it; no worker is
+  paired with it. What a parked worker's status used to say is read off the
+  Watchdog's own announcements (`Watchdog.subscribe/1`) and the ticket row.
   """
   use Arbiter.DataCase, async: false
 
@@ -29,7 +33,6 @@ defmodule Arbiter.Worker.WatchdogCoverageFlipTest do
   alias Arbiter.Tasks.Issue
   alias Arbiter.Test.StubAutoResumeDispatcher
   alias Arbiter.Test.StubMerger
-  alias Arbiter.Worker
   alias Arbiter.Worker.Watchdog
 
   @reviewed_diff """
@@ -84,27 +87,23 @@ defmodule Arbiter.Worker.WatchdogCoverageFlipTest do
     })
   end
 
-  defp running_task(ws, attrs) do
-    task =
-      Ash.create!(
-        Issue,
-        Map.merge(
-          %{title: "coverage flip", description: "body", workspace_id: ws.id},
-          attrs
-        )
+  # The ticket the Watchdog is keyed by and drives. bd-741sid: no worker is
+  # attached; the run that opened the PR has ended.
+  defp reviewed_task(ws, attrs) do
+    Ash.create!(
+      Issue,
+      Map.merge(
+        %{title: "coverage flip", description: "body", workspace_id: ws.id},
+        attrs
       )
-
-    {:ok, pid} = Worker.start(task_id: task.id, repo: "arbiter")
-    :ok = Worker.advance(pid, :implement)
-    on_exit(fn -> stop_quietly(pid) end)
-
-    {pid, task}
+    )
   end
 
-  defp start_watchdog(worker_pid, task_id, mr_ref, ws, opts) do
+  # Subscribes to the ticket's Watchdog outcomes before starting it, so no
+  # announcement can be missed.
+  defp start_watchdog(task_id, mr_ref, ws, opts) do
     base = [
       task_id: task_id,
-      worker: worker_pid,
       mr_ref: mr_ref,
       adapter: StubMerger,
       workspace: ws,
@@ -114,9 +113,17 @@ defmodule Arbiter.Worker.WatchdogCoverageFlipTest do
       auto_resume_dispatcher: StubAutoResumeDispatcher
     ]
 
+    :ok = Watchdog.subscribe(task_id)
     {:ok, wpid} = Watchdog.start(Keyword.merge(base, opts))
     on_exit(fn -> stop_quietly(wpid) end)
     wpid
+  end
+
+  # bd-741sid: the merge finishes the ticket (`PullRequest.merged/2`), where it
+  # used to complete the worker paired with the Watchdog.
+  defp assert_merged(task_id, timeout \\ 2_000) do
+    assert_receive {:watchdog, ^task_id, {:merged, _}}, timeout
+    assert Ash.get!(Issue, task_id).state == :closed
   end
 
   defp wait_until(fun, timeout \\ 2_000) do
@@ -195,7 +202,7 @@ defmodule Arbiter.Worker.WatchdogCoverageFlipTest do
       mr_ref = "!flipprobe"
       ws = workspace(false)
 
-      {pid, task} = running_task(ws, %{last_reviewed_sha: local})
+      task = reviewed_task(ws, %{last_reviewed_sha: local})
       record_reviewed(task.id, mr_ref, local, NetDiff.fingerprint(@reviewed_diff))
       StubMerger.set_ancestor(mr_ref, {forge_head, local}, {:ok, true})
 
@@ -205,7 +212,7 @@ defmodule Arbiter.Worker.WatchdogCoverageFlipTest do
 
       log =
         capture_log(fn ->
-          start_watchdog(pid, task.id, mr_ref, ws,
+          start_watchdog(task.id, mr_ref, ws,
             last_reviewed_sha: local,
             local_head_sha: local,
             # One poll, then quiet: the Watchdog's own forge-lag grace is five
@@ -243,7 +250,7 @@ defmodule Arbiter.Worker.WatchdogCoverageFlipTest do
       mr_ref = "!flipoff1"
       ws = workspace(false)
 
-      {pid, task} = running_task(ws, %{last_reviewed_sha: head})
+      task = reviewed_task(ws, %{last_reviewed_sha: head})
       StubMerger.set_diff(mr_ref, head, @reviewed_diff)
 
       StubMerger.queue_get(mr_ref, [
@@ -252,8 +259,8 @@ defmodule Arbiter.Worker.WatchdogCoverageFlipTest do
 
       log =
         capture_log(fn ->
-          start_watchdog(pid, task.id, mr_ref, ws, last_reviewed_sha: head, local_head_sha: head)
-          wait_until(fn -> Worker.state(pid).status == :completed end)
+          start_watchdog(task.id, mr_ref, ws, last_reviewed_sha: head, local_head_sha: head)
+          assert_merged(task.id)
         end)
 
       assert StubMerger.last_merge() == {mr_ref, head}
@@ -270,7 +277,7 @@ defmodule Arbiter.Worker.WatchdogCoverageFlipTest do
       mr_ref = "!flipoff2"
       ws = workspace(false)
 
-      {pid, task} = running_task(ws, %{last_reviewed_sha: reviewed})
+      task = reviewed_task(ws, %{last_reviewed_sha: reviewed})
       record_reviewed(task.id, mr_ref, head, NetDiff.fingerprint(@reviewed_diff))
 
       StubMerger.queue_get(mr_ref, [
@@ -278,7 +285,7 @@ defmodule Arbiter.Worker.WatchdogCoverageFlipTest do
       ])
 
       capture_log(fn ->
-        start_watchdog(pid, task.id, mr_ref, ws,
+        start_watchdog(task.id, mr_ref, ws,
           last_reviewed_sha: reviewed,
           local_head_sha: head
         )
@@ -296,7 +303,7 @@ defmodule Arbiter.Worker.WatchdogCoverageFlipTest do
       mr_ref = "!flipon1"
       ws = workspace(true)
 
-      {pid, task} = running_task(ws, %{last_reviewed_sha: head})
+      task = reviewed_task(ws, %{last_reviewed_sha: head})
       StubMerger.set_diff(mr_ref, head, @reviewed_diff)
 
       StubMerger.queue_get(mr_ref, [
@@ -305,7 +312,7 @@ defmodule Arbiter.Worker.WatchdogCoverageFlipTest do
 
       log =
         capture_log(fn ->
-          start_watchdog(pid, task.id, mr_ref, ws, last_reviewed_sha: head, local_head_sha: head)
+          start_watchdog(task.id, mr_ref, ws, last_reviewed_sha: head, local_head_sha: head)
           wait_until(fn -> StubAutoResumeDispatcher.resume_count() == 1 end)
         end)
 
@@ -329,7 +336,7 @@ defmodule Arbiter.Worker.WatchdogCoverageFlipTest do
       mr_ref = "!flipon2"
       ws = workspace(true)
 
-      {pid, task} = running_task(ws, %{last_reviewed_sha: reviewed})
+      task = reviewed_task(ws, %{last_reviewed_sha: reviewed})
       record_reviewed(task.id, mr_ref, head, NetDiff.fingerprint(@reviewed_diff))
 
       StubMerger.queue_get(mr_ref, [
@@ -338,12 +345,12 @@ defmodule Arbiter.Worker.WatchdogCoverageFlipTest do
 
       log =
         capture_log(fn ->
-          start_watchdog(pid, task.id, mr_ref, ws,
+          start_watchdog(task.id, mr_ref, ws,
             last_reviewed_sha: reviewed,
             local_head_sha: head
           )
 
-          wait_until(fn -> Worker.state(pid).status == :completed end)
+          assert_merged(task.id)
         end)
 
       assert StubMerger.last_merge() == {mr_ref, head},
@@ -364,7 +371,7 @@ defmodule Arbiter.Worker.WatchdogCoverageFlipTest do
       mr_ref = "!flipon3"
       ws = workspace(true)
 
-      {pid, task} = running_task(ws, %{last_reviewed_sha: reviewed})
+      task = reviewed_task(ws, %{last_reviewed_sha: reviewed})
       source_row = record_reviewed(task.id, mr_ref, reviewed, NetDiff.fingerprint(@reviewed_diff))
 
       StubMerger.set_diff(mr_ref, reviewed, @reviewed_diff)
@@ -377,12 +384,12 @@ defmodule Arbiter.Worker.WatchdogCoverageFlipTest do
       ])
 
       capture_log(fn ->
-        start_watchdog(pid, task.id, mr_ref, ws,
+        start_watchdog(task.id, mr_ref, ws,
           last_reviewed_sha: reviewed,
           local_head_sha: reviewed
         )
 
-        wait_until(fn -> Worker.state(pid).status == :completed end)
+        assert_merged(task.id)
       end)
 
       assert StubMerger.last_merge() == {mr_ref, head}
@@ -402,7 +409,8 @@ defmodule Arbiter.Worker.WatchdogCoverageFlipTest do
       mr_ref = "!flipprobefail"
       ws = workspace(true)
 
-      {pid, task} = running_task(ws, %{last_reviewed_sha: local})
+      task = reviewed_task(ws, %{last_reviewed_sha: local})
+      task_id = task.id
       record_reviewed(task.id, mr_ref, local, NetDiff.fingerprint(@reviewed_diff))
       # The probe is wired, and the forge cannot answer it.
       StubMerger.set_ancestor(mr_ref, {forge_head, local}, {:error, :timeout})
@@ -422,7 +430,7 @@ defmodule Arbiter.Worker.WatchdogCoverageFlipTest do
       log =
         capture_log(fn ->
           wpid =
-            start_watchdog(pid, task.id, mr_ref, ws,
+            start_watchdog(task.id, mr_ref, ws,
               last_reviewed_sha: local,
               local_head_sha: local,
               max_polls: cap
@@ -434,8 +442,9 @@ defmodule Arbiter.Worker.WatchdogCoverageFlipTest do
           assert state.coverage_unknown_polls == Watchdog.coverage_unknown_grace_polls()
 
           # ...and TERMINAL: the park lifts the poll ceiling, so the lane keeps
-          # watching instead of running the remaining polls out into
-          # `{:awaiting_review_timeout, cap}` and an auto-resumed re-review.
+          # watching instead of running the remaining polls out into a
+          # `{:timed_out, cap}` (bd-741sid; `{:awaiting_review_timeout, cap}`
+          # before it) and an auto-resumed re-review.
           assert state.max_polls == :infinity
           assert state.coverage_park_poll < cap
 
@@ -451,8 +460,9 @@ defmodule Arbiter.Worker.WatchdogCoverageFlipTest do
       assert StubAutoResumeDispatcher.resume_count() == 0,
              "a probe failure must not buy a re-review either — it is a pause"
 
-      assert Worker.state(pid).status != :failed,
-             "the park must not fail the worker: no {:awaiting_review_timeout, _}"
+      # bd-741sid: the timeout is announced, not written on a paired worker.
+      refute_received {:watchdog, ^task_id, {:timed_out, _}},
+                      "the park must not time the lane out: no {:timed_out, _}"
 
       refute log =~ "without a terminal outcome",
              "the auto_merge poll ceiling must not fire while the lane is coverage-parked"
@@ -472,7 +482,7 @@ defmodule Arbiter.Worker.WatchdogCoverageFlipTest do
       mr_ref = "!flipprobeunpark"
       ws = workspace(true)
 
-      {pid, task} = running_task(ws, %{last_reviewed_sha: local})
+      task = reviewed_task(ws, %{last_reviewed_sha: local})
       record_reviewed(task.id, mr_ref, local, NetDiff.fingerprint(@reviewed_diff))
       StubMerger.set_ancestor(mr_ref, {forge_head, local}, {:error, :timeout})
       StubMerger.set_ancestor(mr_ref, {next_head, local}, {:error, :timeout})
@@ -490,7 +500,7 @@ defmodule Arbiter.Worker.WatchdogCoverageFlipTest do
         ])
 
         wpid =
-          start_watchdog(pid, task.id, mr_ref, ws,
+          start_watchdog(task.id, mr_ref, ws,
             last_reviewed_sha: local,
             local_head_sha: local,
             max_polls: cap

@@ -323,8 +323,10 @@ defmodule Arbiter.Board.DrainTest do
       assert status.state == :draining
       refute status.safe_to_restart
 
+      # bd-741sid: an ordinary run on the ticket, registered under its id and
+      # classified by its role.
       assert [%{kind: :fix_pass, registry_key: key, pid: ^pid}] = status_for(ap, task.id)
-      assert key == task.id <> ":fixpass"
+      assert key == task.id
     end
 
     test "a MergeQueue conflict resolver still spawns while paused, and the state is NOT quiescent",

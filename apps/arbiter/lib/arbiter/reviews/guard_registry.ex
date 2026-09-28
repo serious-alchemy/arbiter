@@ -682,10 +682,12 @@ defmodule Arbiter.Reviews.GuardRegistry do
       class_source: :doc,
       bound: {:attempts, {:config, :default_max_auto_resumes}},
       episode: {:task, :mr_ref, :head_sha},
-      terminal: :failed_run,
+      terminal: :resumed,
       sites: [{Watchdog, :resolve_stale_reviewed_head, 3}],
       anchors: [":unreviewed_head", "@default_max_auto_resumes"],
-      summary: "an unreviewed head fails the worker and buys a full re-review"
+      summary:
+        "an unreviewed head is handed to a review round (a new run on the ticket); " <>
+          "bd-741sid removed the worker failure it used to buy it with"
     },
     %{
       id: :merge_expected_sha,
@@ -762,10 +764,12 @@ defmodule Arbiter.Reviews.GuardRegistry do
       class_source: :doc,
       bound: {:polls, {:config, :default_max_polls_auto}},
       episode: {:task, :mr_ref},
-      terminal: :failed_run,
+      terminal: :resumed,
       sites: [{Watchdog, :handle_review_timeout, 2}],
-      anchors: ["@default_max_polls_auto", ":awaiting_review_timeout"],
-      summary: "poll ceiling -> {:awaiting_review_timeout, N}"
+      anchors: ["@default_max_polls_auto", ":timed_out"],
+      summary:
+        "poll ceiling -> the bounded auto-resume (W13); bd-741sid removed the " <>
+          "{:awaiting_review_timeout, N} worker failure — a ticket's Watchdog has no run to fail"
     },
     %{
       id: :auto_resume_budget,
@@ -1389,25 +1393,6 @@ defmodule Arbiter.Reviews.GuardRegistry do
           ":infinity. P6 turns the same counter into a terminal bound at N = 5."
     },
     %{
-      id: :unreviewed_head_reroute,
-      violation: :reaches_worker_fail,
-      removed_by: :p4,
-      note:
-        "§2.2 W6: a class-A guard calls `Worker.fail/2` with {:unreviewed_head, " <>
-          "head} to buy a re-review. P4's read-path flip decides from coverage " <>
-          "instead, and its AC is that no {:unreviewed_head, _} appears in the " <>
-          "journal."
-    },
-    %{
-      id: :unreviewed_head_reroute,
-      violation: :fails_run,
-      removed_by: :p4,
-      note:
-        "The same W6 path records Run.status = :failed while it buys the " <>
-          "re-review, so it breaks I2 as well as class A's fail-closed-with-a-park " <>
-          "rule. P4 removes both together."
-    },
-    %{
       id: :round_budget,
       violation: :fails_run,
       removed_by: :p10,
@@ -1428,15 +1413,6 @@ defmodule Arbiter.Reviews.GuardRegistry do
           "`:review_parked` for every class-C terminal. The row keeps the entry " <>
           "because the one arm P9 deliberately left (a genuine REQUEST_CHANGES at " <>
           "G14's round cap) still routes through this same conversion point."
-    },
-    %{
-      id: :poll_ceiling,
-      violation: :fails_run,
-      removed_by: :p10,
-      note:
-        "§2.2 W12 fails the worker at the ceiling; C4 already maps the reason to " <>
-          ":review_not_started, so the run is recorded as a terminal non-failure. " <>
-          "P10's class-E audit removes the `Worker.fail/2` hop itself."
     },
     %{
       id: :ci_settle_gate,

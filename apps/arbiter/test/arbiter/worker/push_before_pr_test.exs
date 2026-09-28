@@ -10,9 +10,13 @@ defmodule Arbiter.Worker.PushBeforePRTest do
   NOT attempted — no remote branch required for a local git merge.
   """
 
-  use ExUnit.Case, async: false
+  # DataCase: the Watchdog is the ticket's (bd-741sid) and starts from its row,
+  # so the Watchdog test needs a real ticket.
+  use Arbiter.DataCase, async: false
 
+  alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Worker
+  alias Arbiter.Worker.Watchdog
   alias Arbiter.Test.StubMerger
 
   defp git(args, repo),
@@ -261,10 +265,34 @@ defmodule Arbiter.Worker.PushBeforePRTest do
 
   # bd-ch9pmk / #1614. The production call path for the merge guard's
   # `local_head_sha`: a real worktree, a real push to a real origin, and the
-  # Watchdog `open_mr/5` starts on the other side of it.
+  # Watchdog `open_mr/5` starts on the other side of it — the ticket's, from the
+  # lane the run recorded on its row (bd-741sid).
   describe "the Watchdog started after the push" do
     test "waits for the forge to report the head we pushed before merging anything",
-         %{pid: pid, repo: repo} do
+         %{repo: repo} do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "push-before-pr-#{System.unique_integer([:positive])}",
+          prefix: "pbp"
+        })
+
+      {:ok, task} =
+        Ash.create(Issue, %{title: "push before pr", workspace_id: ws.id, issue_type: :feature})
+
+      {:ok, task} = Ash.update(task, %{status: :in_progress})
+      on_exit(fn -> stop_watchdog(task.id) end)
+
+      {:ok, pid} =
+        Worker.start(
+          task_id: task.id,
+          repo: "stub/repo",
+          workspace_id: ws.id,
+          meta: %{worktree_path: repo.worktree}
+        )
+
+      :ok = Worker.advance(pid, :implement)
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+
       {head, 0} =
         System.cmd("git", ["-C", repo.worktree, "rev-parse", "HEAD"], stderr_to_stdout: true)
 
@@ -295,6 +323,17 @@ defmodule Arbiter.Worker.PushBeforePRTest do
 
       assert StubMerger.last_merge() == {"!lag1", head},
              "the merge must be pinned to the commit this worker actually pushed"
+
+      assert Ash.get!(Issue, task.id).merge_watch["local_head_sha"] == head
     end
+  end
+
+  defp stop_watchdog(task_id) do
+    case Watchdog.whereis(task_id) do
+      nil -> :ok
+      pid -> GenServer.stop(pid, :normal)
+    end
+  catch
+    :exit, _ -> :ok
   end
 end

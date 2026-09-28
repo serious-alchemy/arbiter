@@ -1,22 +1,34 @@
 defmodule Arbiter.Worker.Watchdog do
   @moduledoc """
-  Watchdog process for a worker parked at `:awaiting_review`.
+  The merge watch on a ticket's open PR. Since bd-741sid it belongs to the
+  ticket, not to a worker.
 
-  When an worker finishes its work it opens a merge request and the paired
-  `Arbiter.Worker` transitions `:running -> :awaiting_review`, spawning one
-  Watchdog. The Watchdog polls `Arbiter.Mergers.get/1` on an interval and drives
-  the worker to its terminal state based on the MR's fate:
+  When a ticket's PR opens, the ticket goes Merging with the PR and the lane
+  it is watched on recorded on its row (`Arbiter.Tasks.PullRequest`), the run
+  that opened it finishes, and one Watchdog starts for the ticket. It is
+  registered under `"<ticket_id>:watchdog"` and started from the row
+  (`watch/2`, `restart/1`), so no worker has to stay resident, and a restart
+  re-creates it from the row alone (`Arbiter.Workers.Reconciler`). It polls
+  `Arbiter.Mergers.get/1` on an interval, records every answer on the ticket,
+  and applies the PR's fate to the ticket:
 
-      MR merged           -> Worker.complete(:merged)
-      MR approved         -> (auto_merge) Mergers.merge/2 (guarded on the reviewed SHA) then complete(:merged)
-                          -> (manual)     stay parked; a human merges, next
-                                          poll sees :merged, then complete
-      MR closed/rejected  -> Worker.fail({:mr_closed, ref})
+      PR merged           -> the ticket closes (or awaits verification)
+      PR approved         -> (auto_merge) Mergers.merge/2 (guarded on the reviewed SHA), then as merged
+                          -> (manual)     keep watching; a human merges, the next poll sees :merged
+      CI failed           -> a fix pass: back to work, the pass an ordinary run of the ticket
+      conflict            -> a conflict resolver, the same way
+      PR closed unmerged  -> back to work with the `pr_closed` cause; the coordinator is paged
 
-  One Watchdog supervises one worker. It is started under
-  `Arbiter.Worker.WatchdogSupervisor` (a `DynamicSupervisor`, `restart:
-  :temporary`) and monitors the worker: if the worker dies, the Watchdog
-  stops.
+  It is started under `Arbiter.Worker.WatchdogSupervisor` (a
+  `DynamicSupervisor`, `restart: :temporary`) and announces its outcomes on
+  `subscribe/1`'s topic. It keeps watching through a fix or conflict pass;
+  the pass's end takes the ticket back to Merging.
+
+  Two things take the PR off the merge path and stop it (`stop/1`). One is a
+  resume that takes the ticket back to work for a revise round
+  (`Arbiter.Worker.Dispatch`); the round's approved PR open starts a fresh
+  Watchdog on the new head. The other is an operator pulling it out of the
+  merge queue (`Arbiter.Tasks.PullRequest.pull/1`), which `restart/2` honours.
 
   ## The reviewed-SHA guard (bd-dxgris / #1493)
 
@@ -150,25 +162,22 @@ defmodule Arbiter.Worker.Watchdog do
   ceiling to `:infinity`, handing off to indefinite watching so a later human
   approval auto-merges. No failed worker, on any forge.
 
-  ## Auto-resuming an awaiting_review timeout (bd-8eheb6)
+  ## Auto-resuming a review timeout (bd-8eheb6)
 
-  Hitting `max_polls` on an `auto_merge` lane fails the worker with
-  `{:awaiting_review_timeout, N}` — exit_status 0, worktree preserved, MR
-  usually still mergeable. That is a *cleanly resumable* run, not a crash, and
-  the coordinator's remedy has always been a plain `worker_resume`. So the
-  Watchdog now does it itself: `handle_review_timeout/2` still registers the
-  failure reason (the timeout is real and must stay visible), then calls
+  Hitting `max_polls` on an `auto_merge` lane is a timed-out watch (announced
+  as `{:timed_out, N}`), with the worktree preserved and the MR usually still
+  mergeable. The coordinator's remedy has always been a plain resume, so the
+  Watchdog does it itself: `handle_review_timeout/2` calls
   `Arbiter.Workflows.MergeQueue.AutoResumeDispatcher` — swappable via the
-  `:auto_resume_dispatcher` opt — instead of leaving a "failed but resumable"
-  worker for a human to spot on the dashboard.
+  `:auto_resume_dispatcher` opt — instead of leaving the PR for a human to
+  spot on the dashboard.
 
   The budget is bounded by `:max_auto_resumes` (default 3; workspace key
   `merge.max_awaiting_review_resumes`; `0` disables it and restores the old
-  escalate-and-park behaviour). The attempt counter lives on the *worker's*
-  `meta[:awaiting_review_resume_attempts]`, not in Watchdog state, because each
-  auto-resume mints a brand-new worker *and* a brand-new Watchdog — a
-  per-Watchdog counter would reset every round and the cap would never bind.
-  `Arbiter.Worker.Dispatch` re-stamps it onto each resumed run.
+  escalate-and-park behaviour). The attempt counter lives on the ticket's lane
+  (`merge_watch["auto_resumes"]`, bd-741sid), not in Watchdog state, because
+  each auto-resume ends in a fresh Watchdog — a per-Watchdog counter would
+  reset every round and the cap would never bind.
 
   Once the budget is spent the coordinator gets an addressed escalation reading
   "auto-resume exhausted after N attempts", deliberately distinct from a
@@ -255,6 +264,13 @@ defmodule Arbiter.Worker.Watchdog do
   healthy task and, if the blocker cleared inside the bound, fire a redundant
   resume onto work that was already finished.
 
+  Since bd-741sid a fix pass or conflict resolver registers under the ticket id
+  itself, so a resume it refuses takes this third path too. The pass's end
+  takes the ticket back to Merging and restarts its Watchdog from the row
+  (`Arbiter.Tasks.PullRequest.back_to_merging/1`), and that Watchdog's first
+  polls decide again; the deferral above remains for a refusal naming a
+  sibling key.
+
   ### Webhook upgrade (design only — not implemented here)
 
   Polling is the shipped mechanism. A future push path would add
@@ -284,7 +300,7 @@ defmodule Arbiter.Worker.Watchdog do
   alias Arbiter.Mergers.PendingMerge
   alias Arbiter.Reviews.Coverage
   alias Arbiter.Reviews.CoverageShadow
-  alias Arbiter.Tasks.Verification
+  alias Arbiter.Tasks.PullRequest
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker
   alias Arbiter.Worker.Registry, as: PRegistry
@@ -367,9 +383,11 @@ defmodule Arbiter.Worker.Watchdog do
   # the counter resets on a successful merge so a future stall re-notifies.
   @default_merge_fail_notify_threshold 3
 
-  # Registry suffix the fix-pass worker registers under — MUST match
-  # `FixPassDispatcher.registry_suffix/0` so we can detect an in-flight fix pass.
-  @fix_pass_registry_suffix ":fixpass"
+  # bd-741sid: polls a pass may sit in the scheduler's fast lane before this
+  # Watchdog asks for it again. The Autopilot's queue is in memory, so a pass
+  # queued before an Autopilot restart would otherwise be waited on forever;
+  # asking again is idempotent (a re-deferral keeps the pass's place in line).
+  @pass_queue_requeue_polls 30
 
   # Polls between low-frequency re-pages of a park that has seen no state change
   # (bd-5mzzww / #1448 ask 4). The once-per-block-episode dedupe (#1226) is right
@@ -495,8 +513,8 @@ defmodule Arbiter.Worker.Watchdog do
       loudly — auto-merge should fire quickly) and `:infinity` when
       `auto_merge: false` (human-merge lanes; a human may take overnight or
       longer, so the Watchdog parks rather than hard-fails). When a finite cap is
-      reached on a manual lane the worker is **left parked** in
-      `:awaiting_review` and the Watchdog stops polling — it is NOT failed.
+      reached on a manual lane the ticket is **left Merging** and the Watchdog
+      stops polling — nothing is failed.
       Pass `:infinity` to disable the watchdog entirely.
   """
   @spec start(opts()) :: DynamicSupervisor.on_start_child()
@@ -526,10 +544,11 @@ defmodule Arbiter.Worker.Watchdog do
   It polls the PR and runs the very merge decision a live Watchdog runs —
   the reviewed-SHA guard, the coverage decision, the base-merge-only
   exemption, the zero-net-diff guard — but it never dispatches a worker, and
-  every outcome other than "wait" is terminal: merged (the task is finalized
-  the way the Driver would), closed (the stamp is dropped), or refused
-  (the coordinator is paged once and the stamp is latched escalated). See
-  "Worker-less merge retry" in the moduledoc.
+  every outcome other than "wait" is terminal: merged (the ticket is finalized
+  as a live Watchdog finalizes it, `PullRequest.merged/2`), closed (the stamp
+  is dropped and the ticket goes back to work with the `pr_closed` cause,
+  `PullRequest.closed/2`), or refused (the coordinator is paged once and the
+  stamp is latched escalated). See "Worker-less merge retry" in the moduledoc.
 
   Registered under `merge_retry:<task_id>` — deliberately *outside* the
   task's `<task_id>:`/`<task_id>#` registry family, so `:close`'s
@@ -563,15 +582,13 @@ defmodule Arbiter.Worker.Watchdog do
   (bd-a370ak / #2002):
 
     * `:watchdog` — a live Watchdog is registered for the task;
-    * `{:worker, status}` — no Watchdog, but a worker is still active
-      (`:awaiting_review` here means a parked worker whose Watchdog died —
-      `restart/1` is the repair for that, not a worker-less retry);
-    * `{:subordinate, registry_key}` — a fix pass or conflict resolver
-      (`<task_id>:fixpass` / `<task_id>:conflict`) is still working the PR.
-      It is about to push to the branch, and the task's own key may hold no
-      active worker at all while it runs — the v0.1.72 incident, where the
-      retry started beside a live `:fixpass` and gave up on the red pipeline
-      that pass was fixing;
+    * `{:worker, status}` — no Watchdog, but a run is still working the
+      ticket. Since bd-741sid that includes a fix pass or conflict resolver,
+      which registers under the ticket id and is about to push to the branch
+      — the v0.1.72 incident was a retry started beside a live pass, giving
+      up on the red pipeline that pass was fixing;
+    * `{:subordinate, registry_key}` — another worker in the ticket's
+      exclusive family is still working it;
     * `nil` — nobody: no Watchdog, and no worker, or only a terminal one.
   """
   @spec live_merge_owner(String.t()) ::
@@ -757,22 +774,22 @@ defmodule Arbiter.Worker.Watchdog do
 
   The proactive liveness signal (bd-8jixav). A Watchdog is a `:temporary`
   child: when it crashes it is gone for good, with no supervisor restart and
-  no notification, while the worker stays parked at `:awaiting_review` holding
-  a genuinely-open MR. Nothing about that state looks different from a
-  healthily-parked one until somebody tries an action against it, so the board
-  and the worker detail page read this to say so out loud.
+  no notification, while the ticket stays Merging on a genuinely-open MR.
+  Nothing about that state looks different from a healthy one until somebody
+  tries an action against it, so the board and the worker detail page read
+  this to say so out loud.
   """
   @spec alive?(String.t()) :: boolean()
   def alive?(task_id) when is_binary(task_id), do: is_pid(whereis(task_id))
 
   @doc """
-  Mint a **fresh** Watchdog for a task whose Watchdog has died, attached to
-  the MR its worker already has open (bd-8jixav).
-
-  Delegates to `Arbiter.Worker.restart_watchdog/1`, which runs inside the
-  parked worker process — the one place that holds the MR ref, the resolved
-  adapter and the lane the original Watchdog was started on. See that
-  function for the full return contract.
+  Start the Watchdog for ticket `task_id` from its row alone (bd-8jixav,
+  bd-741sid): the PR ref, the workspace and repo, and the lane recorded when
+  the PR was opened (`Arbiter.Tasks.PullRequest.watch_opts/1`) — the adapter
+  that opened it, whether the ReviewGate approved it, the pushed head and the
+  reviewed-SHA baseline. Nothing else has to be alive: this is how a Watchdog
+  that crashed is replaced, and how every open PR is watched again after a
+  reboot (`Arbiter.Workers.Reconciler`).
 
   This is a distinct capability from the two neighbouring recoveries, not a
   variant of either:
@@ -780,21 +797,204 @@ defmodule Arbiter.Worker.Watchdog do
     * `retry_auto_resolve/1` (bd-bspakl) re-arms an *already-running*
       Watchdog's exhausted auto-resolve budget. Once the process is gone it
       answers `{:error, :not_found}` and can do nothing.
-    * `Arbiter.Worker.Dispatch.resume/2` restarts the whole worker, which
-      re-runs the review gate from round 1 at real cost. Here the MR is fine
+    * `Arbiter.Worker.Dispatch.resume/2` starts a new run on the ticket, which
+      re-runs the review gate from round 1 at real cost. Here the PR is fine
       and only the watcher died, so that is a large bill for a small problem.
+
+  A ticket pulled out of the merge queue (`Arbiter.Tasks.PullRequest.pull/1`)
+  is refused unless `opts` carries `clear_pull: true`. That option is an
+  operator's own restart — the dashboard button, `arb queue restart-watchdog`,
+  the MCP tool — and it puts the ticket back in the queue. Every automatic
+  caller (the boot reconciler, the pending-merge sweeper, a finished pass)
+  leaves it out, so a deliberate pull holds.
+
+  Returns `:ok`, or:
+
+    * `{:error, :already_running}` — a Watchdog is registered for the ticket.
+      Refused rather than stacked: two Watchdogs polling one PR would race on
+      the merge and double-dispatch fix passes. The `<task_id>:watchdog`
+      registry name makes this atomic.
+    * `{:error, :not_found}` — no such ticket.
+    * `{:error, :no_mr_ref}` — the ticket has no PR on record.
+    * `{:error, {:not_open, state}}` — the ticket is not `:merging` or
+      `:active` (it merged, closed, or never started).
+    * `{:error, :pulled}` — the ticket was pulled out of the merge queue.
+    * `{:error, :no_adapter}` — the adapter cannot be resolved.
+    * `{:error, {:start_failed, reason}}` — `start/1` refused.
   """
-  @spec restart(String.t()) ::
+  @spec restart(String.t(), keyword()) ::
           :ok
           | {:error,
-             :no_worker
-             | :already_running
+             :already_running
+             | :not_found
              | :no_mr_ref
+             | :pulled
              | :no_adapter
-             | :busy
-             | {:not_parked, atom()}
+             | {:not_open, atom()}
              | {:start_failed, term()}}
-  def restart(task_id) when is_binary(task_id), do: Worker.restart_watchdog(task_id)
+  def restart(task_id, opts \\ []) when is_binary(task_id) and is_list(opts) do
+    if is_pid(whereis(task_id)) do
+      {:error, :already_running}
+    else
+      if Keyword.get(opts, :clear_pull) == true, do: PullRequest.clear_pull(task_id)
+      with {:ok, watch} <- PullRequest.watch_opts(task_id), do: start_watch(task_id, watch)
+    end
+  end
+
+  @doc """
+  An operator-facing explanation of a `restart/1` refusal, as `{kind, message}`
+  — `kind` is `:not_found`, `:conflict`, `:invalid` or `:internal`. The one
+  phrasing the MCP tool, the REST API (and so the CLI) and the dashboard use.
+  """
+  @spec restart_refusal(String.t(), term()) ::
+          {:not_found | :conflict | :invalid | :internal, String.t()}
+  def restart_refusal(task_id, :not_found), do: {:not_found, "No ticket #{task_id}."}
+
+  def restart_refusal(task_id, :already_running),
+    do:
+      {:conflict,
+       "A merge watchdog is already running for #{task_id} — restarting would put two of " <>
+         "them on one PR. Use queue_retry_auto_resolve if it is parked."}
+
+  def restart_refusal(task_id, :no_mr_ref),
+    do:
+      {:invalid,
+       "There is no PR on record for #{task_id}, so there is nothing for a watchdog to " <>
+         "watch. Dispatch or resume it instead."}
+
+  def restart_refusal(task_id, {:not_open, state}),
+    do: {:invalid, "Ticket #{task_id} is #{state}, not Merging — it has no open PR to watch."}
+
+  def restart_refusal(task_id, :pulled),
+    do:
+      {:conflict,
+       "#{task_id} was pulled out of the merge queue, so its watchdog is not restarted on its " <>
+         "own. Restart it explicitly (Restart watchdog on its worker page, or " <>
+         "`arb queue restart-watchdog #{task_id}`) to put it back in the queue."}
+
+  def restart_refusal(task_id, :no_adapter),
+    do:
+      {:invalid, "The merger adapter for #{task_id}'s PR cannot be resolved from its workspace."}
+
+  def restart_refusal(task_id, {:start_failed, reason}),
+    do: {:internal, "Watchdog restart failed for #{task_id}: #{inspect(reason)}"}
+
+  def restart_refusal(task_id, reason),
+    do: {:internal, "Watchdog restart failed for #{task_id}: #{inspect(reason)}"}
+
+  @doc """
+  Watch ticket `task_id`'s just-opened PR: `restart/1`, except that a
+  Watchdog already running for the ticket is replaced rather than refused —
+  the run that opened (or re-adopted) the PR pushed a new head and carries a
+  new approval, so the old lane is stale. `extra` is merged over the
+  row-derived options (test seams such as a stub fix-pass dispatcher).
+  """
+  @spec watch(String.t(), keyword()) ::
+          :ok
+          | {:error,
+             :not_found
+             | :no_mr_ref
+             | :pulled
+             | :no_adapter
+             | {:not_open, atom()}
+             | {:start_failed, term()}}
+  def watch(task_id, extra \\ []) when is_binary(task_id) and is_list(extra) do
+    with {:ok, opts} <- PullRequest.watch_opts(task_id) do
+      stop_existing(task_id)
+      start_watch(task_id, Keyword.merge(opts, extra))
+    end
+  end
+
+  defp start_watch(task_id, opts) do
+    case start(opts) do
+      {:ok, _pid} ->
+        Logger.info("Worker.Watchdog: watching task=#{task_id} mr=#{opts[:mr_ref]} from its row")
+        :ok
+
+      {:error, {:already_started, _pid}} ->
+        {:error, :already_running}
+
+      {:error, reason} ->
+        {:error, {:start_failed, reason}}
+
+      :ignore ->
+        {:error, {:start_failed, :ignore}}
+    end
+  rescue
+    e -> {:error, {:start_failed, Exception.message(e)}}
+  catch
+    :exit, reason -> {:error, {:start_failed, reason}}
+  end
+
+  @doc """
+  Stop ticket `task_id`'s Watchdog, if one is running, and leave the ticket and
+  its PR as they are: nothing polls the PR until `restart/2`. A poll in flight
+  finishes first. Called when the PR leaves the merge path:
+  `Arbiter.Tasks.PullRequest.pull/1`, and a resume that takes a Merging
+  ticket back to work (`Arbiter.Worker.Dispatch`).
+  """
+  @spec stop(String.t()) :: :ok
+  def stop(task_id) when is_binary(task_id) do
+    _ = stop_existing(task_id)
+    :ok
+  end
+
+  defp stop_existing(task_id) do
+    case whereis(task_id) do
+      nil ->
+        :ok
+
+      # The Watchdog's own auto-resume took the ticket back to work. A process
+      # cannot stop itself from inside a call it is making. It stops by itself
+      # once the resume returns, or waits in deferral, where it drops its polls.
+      pid when pid == self() ->
+        :ok
+
+      pid ->
+        GenServer.stop(pid, :normal, 5_000)
+    end
+  catch
+    :exit, _ -> :ok
+  end
+
+  @doc """
+  A fix or conflict pass this ticket's Watchdog queued for a slot has started
+  (bd-741sid): the scheduler admitted it from the fast lane. The dispatchers
+  call this when they start a pass; a Watchdog with nothing queued ignores it.
+  """
+  @spec pass_started(String.t(), :fix_pass | :conflict, pid()) :: :ok
+  def pass_started(task_id, kind, pid) when is_binary(task_id) and is_pid(pid) do
+    case whereis(task_id) do
+      nil -> :ok
+      watchdog -> send(watchdog, {:pass_started, kind, pid})
+    end
+
+    :ok
+  end
+
+  @doc """
+  Subscribe the caller to ticket `task_id`'s Watchdog outcomes, delivered as
+  `{:watchdog, task_id, event}` where `event` is `{:merged, mr_ref}`,
+  `{:closed, mr_ref}`, `{:timed_out, polls}` or `{:unreviewed_head, head}`.
+  The ticket row is the record; this is the live signal.
+  """
+  @spec subscribe(String.t()) :: :ok | {:error, term()}
+  def subscribe(task_id) when is_binary(task_id),
+    do: Phoenix.PubSub.subscribe(Arbiter.PubSub, outcome_topic(task_id))
+
+  defp outcome_topic(task_id), do: "watchdog:" <> task_id
+
+  defp announce(state, event) do
+    Phoenix.PubSub.broadcast(
+      Arbiter.PubSub,
+      outcome_topic(state.task_id),
+      {:watchdog, state.task_id, event}
+    )
+
+    :ok
+  rescue
+    _ -> :ok
+  end
 
   @doc """
   Registry key suffix the Watchdog registers under, so callers that need to
@@ -970,385 +1170,385 @@ defmodule Arbiter.Worker.Watchdog do
     adapter = Keyword.fetch!(opts, :adapter)
     mr_ref = Keyword.fetch!(opts, :mr_ref)
 
-    # bd-a370ak: a worker-less merge retry has no worker by definition.
+    # bd-a370ak: the worker-less merge retry (`start_retry/1`). Since bd-741sid
+    # no Watchdog has a worker: it is keyed by the ticket and drives the ticket.
     detached = Keyword.get(opts, :detached, false)
 
-    worker_pid =
-      if detached do
-        nil
-      else
-        case Keyword.fetch!(opts, :worker) do
-          pid when is_pid(pid) -> pid
-          ref when is_binary(ref) -> Worker.whereis(ref)
-        end
+    workspace = Keyword.get(opts, :workspace)
+    Mergers.prepare_with_repo(workspace, Keyword.get(opts, :repo))
+
+    via_review_gate = Keyword.get(opts, :via_review_gate, false)
+    # A ReviewGate-approved MR has no pending hosted-forge approval to wait
+    # for, so auto_merge is implicit. Honor any explicit override (for
+    # tests) but default to true when the gate has approved.
+    auto_merge = Keyword.get(opts, :auto_merge, via_review_gate)
+
+    default_max_polls =
+      if auto_merge, do: @default_max_polls_auto, else: @default_max_polls_manual
+
+    watch_pipeline =
+      case Keyword.get(opts, :watch_pipeline) do
+        flag when is_boolean(flag) -> flag
+        _ -> watch_pipeline_from_workspace(workspace)
       end
 
-    if detached or is_pid(worker_pid) do
-      workspace = Keyword.get(opts, :workspace)
-      Mergers.prepare_with_repo(workspace, Keyword.get(opts, :repo))
+    max_auto_resolve_attempts =
+      Keyword.get(opts, :max_auto_resolve_attempts) ||
+        max_auto_resolve_from_workspace(workspace) ||
+        @default_max_auto_resolve_attempts
 
-      via_review_gate = Keyword.get(opts, :via_review_gate, false)
-      # A ReviewGate-approved MR has no pending hosted-forge approval to wait
-      # for, so auto_merge is implicit. Honor any explicit override (for
-      # tests) but default to true when the gate has approved.
-      auto_merge = Keyword.get(opts, :auto_merge, via_review_gate)
+    fix_pass_dispatcher =
+      Keyword.get(opts, :fix_pass_dispatcher, @default_fix_pass_dispatcher)
 
-      default_max_polls =
-        if auto_merge, do: @default_max_polls_auto, else: @default_max_polls_manual
+    max_fix_passes =
+      Keyword.get(opts, :max_fix_passes) || max_fix_passes_from_workspace(workspace) ||
+        @default_max_fix_passes
 
-      watch_pipeline =
-        case Keyword.get(opts, :watch_pipeline) do
-          flag when is_boolean(flag) -> flag
-          _ -> watch_pipeline_from_workspace(workspace)
-        end
+    auto_resolve_conflict = resolve_auto_resolve_conflict(opts, workspace)
 
-      max_auto_resolve_attempts =
-        Keyword.get(opts, :max_auto_resolve_attempts) ||
-          max_auto_resolve_from_workspace(workspace) ||
-          @default_max_auto_resolve_attempts
+    park_heartbeat_polls =
+      Keyword.get(opts, :park_heartbeat_polls) ||
+        park_heartbeat_from_workspace(workspace) ||
+        @default_park_heartbeat_polls
 
-      fix_pass_dispatcher =
-        Keyword.get(opts, :fix_pass_dispatcher, @default_fix_pass_dispatcher)
+    max_conflict_attempts = resolve_max_conflict_attempts(opts, workspace)
+    max_auto_resumes = resolve_max_auto_resumes(opts, workspace)
+    max_resume_deferrals = resolve_max_resume_deferrals(opts, workspace)
 
-      max_fix_passes =
-        Keyword.get(opts, :max_fix_passes) || max_fix_passes_from_workspace(workspace) ||
-          @default_max_fix_passes
+    state = %{
+      task_id: task_id,
+      mr_ref: mr_ref,
+      adapter: adapter,
+      workspace: workspace,
+      auto_merge: auto_merge,
+      via_review_gate: via_review_gate,
+      # bd-dxgris / #1493 — the reviewed-SHA guard. `recorded_reviewed_sha` is
+      # the task's own `last_reviewed_sha` (an external-review engagement's
+      # recorded baseline); it wins when present. `reviewed_sha` is the
+      # fallback the Watchdog latches itself: the head observed on the first
+      # poll whose *effective* outcome was `:approved` — i.e. the commit this
+      # Watchdog's merge decision is actually based on, which for a
+      # `via_review_gate` lane is the commit the in-process gate approved.
+      # `last_head_sha` is the head from the most recent poll, so the guard can
+      # refuse locally (with a legible reason) instead of only learning about
+      # the advance from a forge 409. Seeded from opts for tests and callers
+      # that already hold the task; otherwise loaded once per approval
+      # episode by `load_recorded_reviewed_sha/1` — the value is stable for
+      # the life of an approval, so re-reading it on every merge attempt only
+      # buys a DB round-trip per poll of a retrying lane.
+      recorded_reviewed_sha: Keyword.get(opts, :last_reviewed_sha),
+      recorded_sha_loaded?: is_binary(Keyword.get(opts, :last_reviewed_sha)),
+      # Seeded by `start_retry/1`, from the durable stamp: a worker-less
+      # retry must never latch its own baseline off whatever head it happens
+      # to observe first (see `detached_poll/1`). And, since bd-741sid, by
+      # `restart/1` from the ticket's `merge_watch` lane, where every live
+      # Watchdog persists the baseline it latched (`persist_lane/1`), so a
+      # Watchdog restarted from the row guards the merge on the same commit.
+      reviewed_sha: normalize_sha(Keyword.get(opts, :reviewed_sha)),
+      # The baseline as last written to the ticket's lane, so an unchanged one
+      # costs no write per poll.
+      persisted_reviewed_sha: normalize_sha(Keyword.get(opts, :reviewed_sha)),
+      # Set by `clear_reviewed_latch/1` to the head the branch sat at when the
+      # fleet issued its own push. The latch stays suspended — and the guard
+      # floats to whatever head each poll reports — until the head moves off
+      # this value, which is the only observable proof that the fleet's own
+      # commit has actually landed. `:unknown` when no head had been observed
+      # yet, which lifts on the first head we do see.
+      latch_suspended_at_head: nil,
+      # The recorded baseline in effect at the moment of the most recent
+      # `clear_reviewed_latch/1`, if any. `recorded_reviewed_sha/1` treats a
+      # freshly-loaded `last_reviewed_sha` as stale while it still matches
+      # this value — a fleet-initiated advance must not be papered over by
+      # the very engagement row it just invalidated — but honours it again
+      # once ReviewPatrol has advanced the task past it, which is what a
+      # genuine re-review looks like.
+      cleared_recorded_sha: nil,
+      # P7 (bd-60r6wp / #1738). Set once this Watchdog has dispatched a pass
+      # that AUTHORS content on the branch — a CI fix pass or a conflict
+      # resolver (`note_authored_push/1`). Those pushes no longer suspend the
+      # latch: the approved baseline stays pinned so the new head is judged
+      # on content (§4.5). The flag keeps a later update-branch suspension
+      # (`clear_reviewed_latch/1`) from discarding that pinned baseline too,
+      # which would otherwise re-latch onto the merge commit carrying the
+      # still-unreviewed fix. Never cleared: a review round covering the new
+      # head is a fresh worker with a fresh Watchdog.
+      authored_push_pending: false,
+      last_head_sha: nil,
+      # bd-ch9pmk / #1614. `local_head_sha` is the branch head this worker
+      # holds locally — the commit it pushed to origin immediately before
+      # starting this Watchdog, and (on a ReviewGate lane) the commit the
+      # gate's APPROVE stamped. Until a poll has reported that exact SHA as
+      # the PR head, the forge's view of the branch is provably behind ours,
+      # and a mismatch between it and the reviewed stamp is push lag rather
+      # than an unreviewed commit. `forge_saw_local_head?` latches true on
+      # the first poll that confirms it and never drops: after that, every
+      # advance is a genuine one and the guard binds normally (Cause A).
+      # `head_lag_polls` bounds the wait — see `@head_lag_grace_polls`.
+      local_head_sha: normalize_sha(Keyword.get(opts, :local_head_sha)),
+      forge_saw_local_head?: false,
+      head_lag_polls: 0,
+      # bd-df3zlo / #1736. The coverage read path's own bounded wait, kept
+      # separate from `head_lag_polls` because it counts a different thing:
+      # every `{:unknown, _}` answer `Arbiter.Reviews.Coverage.decide/3`
+      # gives, not just the forge-lag latch. The episode is keyed on the head
+      # (`coverage_unknown_head`) — a new head is a new question, so the
+      # count and the one-page-per-episode latch both reset.
+      coverage_unknown_polls: 0,
+      coverage_unknown_head: nil,
+      coverage_parked?: false,
+      # `poll_count` as it stood when the coverage park lifted `max_polls` to
+      # `:infinity`, so the lift can be unwound without the parked polls
+      # counting against the merge timeout. `nil` whenever no coverage park
+      # holds a lift — which is also how `restore_poll_ceiling/1` knows the
+      # lift in effect is not ours to revoke.
+      coverage_park_poll: nil,
+      interval_ms:
+        Keyword.get(
+          opts,
+          :interval_ms,
+          if(detached, do: @default_retry_interval_ms, else: @default_interval_ms)
+        ),
+      max_polls: Keyword.get(opts, :max_polls, default_max_polls),
+      # The configured ceiling as passed at start (before any indefinite-park
+      # lift). Restored into `max_polls` once a block episode clears, and used
+      # as the re-escalation cadence while parked (bd-krg7ci) — see
+      # `maybe_escalate_unresolved/2` and the `nil`-reason recovery branch.
+      base_max_polls: Keyword.get(opts, :max_polls, default_max_polls),
+      poll_count: 0,
+      watch_pipeline: watch_pipeline,
+      last_pipeline: nil,
+      # The last merge-block reason we escalated, so a blocked merge is
+      # surfaced once per reason rather than on every poll (#354, Phase 1).
+      last_block_reason: nil,
+      # The reason a genuine indefinite park is in effect, set alongside
+      # `max_polls: :infinity` by `handle_nonauthor_approval/2` and the
+      # exhausted-retry branch of `handle_block/3`, and cleared only once
+      # that specific episode is confirmed resolved (bd-krg7ci round 4).
+      # Unlike `last_block_reason` — which the adapters can transiently stop
+      # emitting for reasons unrelated to the park actually clearing (CI
+      # going red/running collapses `:needs_nonauthor_approval` to `nil`;
+      # an approval dismissal collapses any approval-gated reason to `nil`)
+      # — `park_reason` only clears on a poll that shows the PR genuinely
+      # approved and unblocked, so a signal lapse can't revoke a park that's
+      # still needed. See `do_maybe_escalate_merge_block/2`.
+      park_reason: nil,
+      # Consecutive auto-resolve attempts for the current block episode
+      # (#354, Phase 2a). Reset to 0 when the block clears. After
+      # `max_auto_resolve_attempts` the Watchdog escalates instead of retrying.
+      auto_resolve_attempts: 0,
+      max_auto_resolve_attempts: max_auto_resolve_attempts,
+      # The configured ceiling as passed at start, mirroring `base_max_polls`.
+      # `retry_auto_resolve/1` bumps `max_auto_resolve_attempts` for the
+      # current block episode only; this is restored into it once the
+      # episode clears so the bump doesn't leak into a later, unrelated
+      # block (bd-bspakl).
+      base_max_auto_resolve_attempts: max_auto_resolve_attempts,
+      fix_pass_dispatcher: fix_pass_dispatcher,
+      # The per-task fix-pass cap (bd-2l0hzm) — see `@default_max_fix_passes`.
+      # `fix_passes_dispatched` is this Watchdog's own lifetime count (never
+      # reset per episode); `fix_pass_history` reads the durable count, which
+      # also covers passes an earlier Watchdog dispatched. The larger wins, so
+      # a failed DB read cannot switch the cap off. `retry_auto_resolve/1`
+      # lifts `max_fix_passes` by one, like the per-episode budget.
+      max_fix_passes: max_fix_passes,
+      fix_passes_dispatched: 0,
+      fix_pass_history:
+        Keyword.get(opts, :fix_pass_history, &Arbiter.Workers.Run.fix_pass_count/2),
+      # The suspected-flake re-run (bd-2l0hzm, `flake_step/3`): the head it
+      # re-ran, the untouched tests that failed, the poll it ran on, and
+      # whether the head has read pending since. One per head.
+      flake_rerun: nil,
+      # The head parked as a suspected flake, and the head
+      # `retry_auto_resolve/1` has cleared for a fix pass anyway. `:none` never
+      # equals a head, including a nil one.
+      flake_parked_head: :none,
+      flake_bypass: :none,
+      # Latches the exhausted-retry escalation so it fires once per block
+      # episode rather than on every subsequent poll (#354, Phase 2a). While
+      # parked indefinitely (max_polls lifted to :infinity) the latch is
+      # periodically cleared — see `last_escalated_poll` — so a block that
+      # never resolves keeps paging instead of going silent forever.
+      unresolved_escalated: false,
+      # poll_count at which `unresolved_escalated` was last set. While parked
+      # indefinitely, re-escalate every `base_max_polls` polls so a stuck MR
+      # keeps surfacing to the coordinator instead of polling silently
+      # forever after the one-time page (bd-krg7ci).
+      last_escalated_poll: 0,
+      # Fired once when an approved MR is parked without auto-merge, so the
+      # external tracker moves to its "approved, awaiting merge" status
+      # (e.g. Jira AX -> Pending Merge) instead of every poll. (bd-c4cfuv)
+      pending_merge_synced: false,
+      # Fired once when an approved + mergeable MR is parked on an
+      # auto_merge:false lane, so the coordinator inbox is paged that the PR
+      # is ready for a manual merge decision instead of parking silently
+      # forever. Debounced like `pending_merge_synced`. (bd-b4pwxa)
+      approved_merge_notified: false,
+      # Auto-resolve of an approved `:conflict` block (#354, Phase 2b).
+      #   auto_resolve_conflict  — master switch (workspace-tunable).
+      #   conflict_resolver      — module that dispatches the rebase worker.
+      #   max_conflict_attempts  — bounded rebase passes before escalation.
+      #   conflict_attempts      — passes dispatched for the current conflict.
+      #   conflict_resolving     — a resolver worker is in flight right now.
+      #   conflict_resolver_pid  — that resolver worker's pid. We poll its
+      #                            terminal status to detect completion: the
+      #                            resolver worker does NOT exit when its
+      #                            worker finishes (it lingers :completed/
+      #                            :failed until task :close), so a `:DOWN`
+      #                            monitor never fires on a normal finish.
+      #   conflict_branch        — branch label (for the exhaustion escalation).
+      #   conflict_escalated     — exhaustion already paged; stay parked, don't spam.
+      #   conflict_no_ops        — consecutive phantom conflicts (the resolver
+      #                            found zero divergence and spawned nothing).
+      #                            Not an attempt; tracked only so a
+      #                            non-converging forge verdict is visible.
+      #   mr_base_ref            — the branch the MR actually merges into, as
+      #                            reported by the adapter's own `get/1`
+      #                            (`base_ref`). Handed to the resolver as
+      #                            `target_branch` so its zero-divergence
+      #                            pre-flight compares against the real
+      #                            target, not a guessed workspace base
+      #                            (bd-1x4r25). nil until the first poll.
+      auto_resolve_conflict: auto_resolve_conflict,
+      conflict_resolver: Keyword.get(opts, :conflict_resolver, @default_conflict_resolver),
+      max_conflict_attempts: max_conflict_attempts,
+      conflict_attempts: 0,
+      conflict_resolving: false,
+      conflict_resolver_pid: nil,
+      conflict_branch: nil,
+      conflict_escalated: false,
+      conflict_no_ops: 0,
+      mr_base_ref: nil,
+      # bd-741sid: a fix or conflict pass this Watchdog asked for that is
+      # waiting in the scheduler's fast lane for a slot (`:fix_pass` /
+      # `:conflict`), and the poll it was queued on. Nothing counts against a
+      # retry budget until the pass actually starts (`pass_started/3`).
+      pass_queued: nil,
+      pass_queued_poll: nil,
+      # Bounded self-healing of `{:awaiting_review_timeout, _}` (bd-8eheb6).
+      #   max_auto_resumes        — auto-resume budget for this task; 0 = off.
+      #   auto_resume_dispatcher  — module that re-attaches the worker and,
+      #                             once the budget is spent, pages the
+      #                             coordinator. The attempt counter itself
+      #                             lives on the WORKER's meta
+      #                             (`:awaiting_review_resume_attempts`), not
+      #                             here: each auto-resume mints a brand-new
+      #                             worker + Watchdog, so a per-Watchdog
+      #                             counter would reset to 0 every round and
+      #                             the cap would never bind.
+      max_auto_resumes: max_auto_resumes,
+      auto_resume_dispatcher:
+        Keyword.get(opts, :auto_resume_dispatcher, @default_auto_resume_dispatcher),
+      # bd-di4t6d: bounded retries of an auto-resume that could not START.
+      #   max_resume_deferrals — how many times we will re-try before paging.
+      #   resume_deferrals     — how many we have used this episode.
+      # A deferred retry re-enters `attempt_auto_resume/1` directly rather than
+      # `handle_review_timeout/2`, so the `{:awaiting_review_timeout, N}` label
+      # is still written exactly once, on the first pass (bd-8tjcms).
+      max_resume_deferrals: max_resume_deferrals,
+      resume_deferrals: 0,
+      # bd-985tkl: everything the deferral episode needs to survive on its own.
+      #   resume_deferred        — a deferral is in flight. While it is, this
+      #                            Watchdog is no longer a merge poller: the
+      #                            merge lane is finished with this worker and
+      #                            what we are waiting on is the registry slot.
+      #                            Stray `:poll` messages are dropped so a
+      #                            transient forge error cannot re-enter the
+      #                            poll ceiling and mint a SECOND retry chain.
+      #   resume_blocker_*       — the subordinate pass named by the refusal.
+      #                            We monitor its pid so the retry fires the
+      #                            moment it finishes, instead of waiting out
+      #                            an interval that, in the incident, never
+      #                            came at all.
+      #   resume_blocker_missing — consecutive refusals naming a blocker that
+      #                            is already dead. Nothing can ever signal
+      #                            completion for one of those, so two in a
+      #                            row is the terminal, not the 30th deferral.
+      #   resume_retry_token     — monotonic tag on the retry timer. A retry
+      #                            triggered early by the blocker's `:DOWN`
+      #                            invalidates the pending tick, so the two
+      #                            paths can never run the chain twice.
+      resume_deferred: false,
+      resume_blocker_key: nil,
+      resume_blocker_pid: nil,
+      resume_blocker_ref: nil,
+      resume_blocker_missing: 0,
+      resume_retry_token: 0,
+      #   resume_attempts_seen   — the highest auto-resume count this episode
+      #                            has ever read off the worker's meta. The
+      #                            meta is still the source of truth ACROSS
+      #                            episodes (see `max_auto_resumes` above),
+      #                            but WITHIN one it has to survive the
+      #                            primary's death: a deferred retry runs
+      #                            after `stop_prior_worker/1` killed the
+      #                            worker, so `snapshot/1` falls back to a
+      #                            meta-less map and the count would read 0.
+      #                            Without this floor every deferred retry
+      #                            would resume as "attempt 1" and re-stamp
+      #                            1 onto the new run's meta, so the
+      #                            auto-resume cap would never bind on the
+      #                            exact path — CI-red → fix_pass → defer —
+      #                            that makes deferrals happen at all.
+      #                            Since bd-741sid the count also rides the
+      #                            ticket's lane (`auto_resumes`), which is
+      #                            where a Watchdog restarted from the row, or
+      #                            a resumed run's new Watchdog, seeds it from.
+      resume_attempts_seen: auto_resumes_seed(Keyword.get(opts, :auto_resumes)),
+      #   resume_reason          — P7 (bd-60r6wp / #1738). Why this episode is
+      #                            resuming: nil for the poll-ceiling timeout
+      #                            (the original trigger), or
+      #                            `{:unreviewed_head, reviewed, head}` when
+      #                            `resolve_stale_reviewed_head/3` is handing
+      #                            an uncovered head to a review round. Only
+      #                            the log line and the resumed worker's
+      #                            briefing read it; the budget, the deferral
+      #                            and the terminals are shared.
+      resume_reason: nil,
+      # Consecutive safe_merge failures (bd-6gxosc). Resets to 0 on success;
+      # a notification fires once when the count first hits the threshold, then
+      # is suppressed until the counter resets and re-hits the threshold.
+      merge_fail_count: 0,
+      merge_fail_notify_threshold:
+        Keyword.get(opts, :merge_fail_notify_threshold, @default_merge_fail_notify_threshold),
+      merge_stall_notified: false,
+      last_merge_stall_poll: 0,
+      # Consecutive `:not_started` polls for the current approval episode
+      # (bd-aeb9wv / #1189). Resets whenever the pipeline reports anything
+      # other than `:not_started`. Once it reaches `@not_started_grace_polls`,
+      # the Watchdog stops deferring and falls through to a merge attempt —
+      # see `apply_outcome(:approved, result, %{auto_merge: true})`.
+      not_started_polls: 0,
+      # Low-frequency re-page of an unchanged park (bd-5mzzww ask 4).
+      # `last_block_escalated_poll` is the poll_count at which the current
+      # block reason was last paged — the heartbeat clock, reset whenever the
+      # reason changes (a genuinely different block is fresh news and pages
+      # immediately, exactly as before).
+      park_heartbeat_polls: park_heartbeat_polls,
+      last_block_escalated_poll: 0,
+      # A worker's "this CI failure is infrastructure, not my diff" verdict
+      # (bd-5mzzww ask 3), set via `mark_ci_external/2`. Scoped to the
+      # current `:ci_failed` episode: cleared the moment the block reason
+      # changes, so a later genuine failure is never mislabelled.
+      ci_external_note: nil,
+      # bd-a370ak / #2002. `detached` marks a worker-less merge retry
+      # (`start_retry/1`); its poll runs `detached_poll/1` instead of the
+      # live loop. `pending_merge_stamp` is the `{reason, reviewed_sha}` this
+      # Watchdog last wrote to the task's durable `pending_merge`, so an
+      # unchanged deferral costs no DB write per poll. `retry_*_failures`
+      # count a retry's consecutive merge failures toward its give-up.
+      detached: detached,
+      repo: Keyword.get(opts, :repo),
+      pending_merge_stamp: nil,
+      retry_merge_failures: 0,
+      retry_transient_failures: 0,
+      # When the pending merge first started waiting (the stamp's `since`),
+      # refreshed from the task on every retry poll, and the total wait a
+      # retry tolerates before it gives up (`@default_retry_max_wait_ms`).
+      pending_since: nil,
+      max_wait_ms: Keyword.get(opts, :max_wait_ms) || configured_retry_max_wait_ms()
+    }
 
-      auto_resolve_conflict = resolve_auto_resolve_conflict(opts, workspace)
-
-      park_heartbeat_polls =
-        Keyword.get(opts, :park_heartbeat_polls) ||
-          park_heartbeat_from_workspace(workspace) ||
-          @default_park_heartbeat_polls
-
-      max_conflict_attempts = resolve_max_conflict_attempts(opts, workspace)
-      max_auto_resumes = resolve_max_auto_resumes(opts, workspace)
-      max_resume_deferrals = resolve_max_resume_deferrals(opts, workspace)
-
-      state = %{
-        task_id: task_id,
-        worker_pid: worker_pid,
-        mr_ref: mr_ref,
-        adapter: adapter,
-        workspace: workspace,
-        auto_merge: auto_merge,
-        via_review_gate: via_review_gate,
-        # bd-dxgris / #1493 — the reviewed-SHA guard. `recorded_reviewed_sha` is
-        # the task's own `last_reviewed_sha` (an external-review engagement's
-        # recorded baseline); it wins when present. `reviewed_sha` is the
-        # fallback the Watchdog latches itself: the head observed on the first
-        # poll whose *effective* outcome was `:approved` — i.e. the commit this
-        # Watchdog's merge decision is actually based on, which for a
-        # `via_review_gate` lane is the commit the in-process gate approved.
-        # `last_head_sha` is the head from the most recent poll, so the guard can
-        # refuse locally (with a legible reason) instead of only learning about
-        # the advance from a forge 409. Seeded from opts for tests and callers
-        # that already hold the task; otherwise loaded once per approval
-        # episode by `load_recorded_reviewed_sha/1` — the value is stable for
-        # the life of an approval, so re-reading it on every merge attempt only
-        # buys a DB round-trip per poll of a retrying lane.
-        recorded_reviewed_sha: Keyword.get(opts, :last_reviewed_sha),
-        recorded_sha_loaded?: is_binary(Keyword.get(opts, :last_reviewed_sha)),
-        # Seeded only by `start_retry/1`, from the durable stamp: a worker-less
-        # retry must never latch its own baseline off whatever head it happens
-        # to observe first (see `detached_poll/1`).
-        reviewed_sha: normalize_sha(Keyword.get(opts, :reviewed_sha)),
-        # Set by `clear_reviewed_latch/1` to the head the branch sat at when the
-        # fleet issued its own push. The latch stays suspended — and the guard
-        # floats to whatever head each poll reports — until the head moves off
-        # this value, which is the only observable proof that the fleet's own
-        # commit has actually landed. `:unknown` when no head had been observed
-        # yet, which lifts on the first head we do see.
-        latch_suspended_at_head: nil,
-        # The recorded baseline in effect at the moment of the most recent
-        # `clear_reviewed_latch/1`, if any. `recorded_reviewed_sha/1` treats a
-        # freshly-loaded `last_reviewed_sha` as stale while it still matches
-        # this value — a fleet-initiated advance must not be papered over by
-        # the very engagement row it just invalidated — but honours it again
-        # once ReviewPatrol has advanced the task past it, which is what a
-        # genuine re-review looks like.
-        cleared_recorded_sha: nil,
-        # P7 (bd-60r6wp / #1738). Set once this Watchdog has dispatched a pass
-        # that AUTHORS content on the branch — a CI fix pass or a conflict
-        # resolver (`note_authored_push/1`). Those pushes no longer suspend the
-        # latch: the approved baseline stays pinned so the new head is judged
-        # on content (§4.5). The flag keeps a later update-branch suspension
-        # (`clear_reviewed_latch/1`) from discarding that pinned baseline too,
-        # which would otherwise re-latch onto the merge commit carrying the
-        # still-unreviewed fix. Never cleared: a review round covering the new
-        # head is a fresh worker with a fresh Watchdog.
-        authored_push_pending: false,
-        last_head_sha: nil,
-        # bd-ch9pmk / #1614. `local_head_sha` is the branch head this worker
-        # holds locally — the commit it pushed to origin immediately before
-        # starting this Watchdog, and (on a ReviewGate lane) the commit the
-        # gate's APPROVE stamped. Until a poll has reported that exact SHA as
-        # the PR head, the forge's view of the branch is provably behind ours,
-        # and a mismatch between it and the reviewed stamp is push lag rather
-        # than an unreviewed commit. `forge_saw_local_head?` latches true on
-        # the first poll that confirms it and never drops: after that, every
-        # advance is a genuine one and the guard binds normally (Cause A).
-        # `head_lag_polls` bounds the wait — see `@head_lag_grace_polls`.
-        local_head_sha: normalize_sha(Keyword.get(opts, :local_head_sha)),
-        forge_saw_local_head?: false,
-        head_lag_polls: 0,
-        # bd-df3zlo / #1736. The coverage read path's own bounded wait, kept
-        # separate from `head_lag_polls` because it counts a different thing:
-        # every `{:unknown, _}` answer `Arbiter.Reviews.Coverage.decide/3`
-        # gives, not just the forge-lag latch. The episode is keyed on the head
-        # (`coverage_unknown_head`) — a new head is a new question, so the
-        # count and the one-page-per-episode latch both reset.
-        coverage_unknown_polls: 0,
-        coverage_unknown_head: nil,
-        coverage_parked?: false,
-        # `poll_count` as it stood when the coverage park lifted `max_polls` to
-        # `:infinity`, so the lift can be unwound without the parked polls
-        # counting against the merge timeout. `nil` whenever no coverage park
-        # holds a lift — which is also how `restore_poll_ceiling/1` knows the
-        # lift in effect is not ours to revoke.
-        coverage_park_poll: nil,
-        interval_ms:
-          Keyword.get(
-            opts,
-            :interval_ms,
-            if(detached, do: @default_retry_interval_ms, else: @default_interval_ms)
-          ),
-        max_polls: Keyword.get(opts, :max_polls, default_max_polls),
-        # The configured ceiling as passed at start (before any indefinite-park
-        # lift). Restored into `max_polls` once a block episode clears, and used
-        # as the re-escalation cadence while parked (bd-krg7ci) — see
-        # `maybe_escalate_unresolved/2` and the `nil`-reason recovery branch.
-        base_max_polls: Keyword.get(opts, :max_polls, default_max_polls),
-        poll_count: 0,
-        watch_pipeline: watch_pipeline,
-        last_pipeline: nil,
-        # The last merge-block reason we escalated, so a blocked merge is
-        # surfaced once per reason rather than on every poll (#354, Phase 1).
-        last_block_reason: nil,
-        # The reason a genuine indefinite park is in effect, set alongside
-        # `max_polls: :infinity` by `handle_nonauthor_approval/2` and the
-        # exhausted-retry branch of `handle_block/3`, and cleared only once
-        # that specific episode is confirmed resolved (bd-krg7ci round 4).
-        # Unlike `last_block_reason` — which the adapters can transiently stop
-        # emitting for reasons unrelated to the park actually clearing (CI
-        # going red/running collapses `:needs_nonauthor_approval` to `nil`;
-        # an approval dismissal collapses any approval-gated reason to `nil`)
-        # — `park_reason` only clears on a poll that shows the PR genuinely
-        # approved and unblocked, so a signal lapse can't revoke a park that's
-        # still needed. See `do_maybe_escalate_merge_block/2`.
-        park_reason: nil,
-        # Consecutive auto-resolve attempts for the current block episode
-        # (#354, Phase 2a). Reset to 0 when the block clears. After
-        # `max_auto_resolve_attempts` the Watchdog escalates instead of retrying.
-        auto_resolve_attempts: 0,
-        max_auto_resolve_attempts: max_auto_resolve_attempts,
-        # The configured ceiling as passed at start, mirroring `base_max_polls`.
-        # `retry_auto_resolve/1` bumps `max_auto_resolve_attempts` for the
-        # current block episode only; this is restored into it once the
-        # episode clears so the bump doesn't leak into a later, unrelated
-        # block (bd-bspakl).
-        base_max_auto_resolve_attempts: max_auto_resolve_attempts,
-        fix_pass_dispatcher: fix_pass_dispatcher,
-        # The per-task fix-pass cap (bd-2l0hzm) — see `@default_max_fix_passes`.
-        # `fix_passes_dispatched` is this Watchdog's own lifetime count (never
-        # reset per episode); `fix_pass_history` reads the durable count, which
-        # also covers passes an earlier Watchdog dispatched. The larger wins, so
-        # a failed DB read cannot switch the cap off. `retry_auto_resolve/1`
-        # lifts `max_fix_passes` by one, like the per-episode budget.
-        max_fix_passes: max_fix_passes,
-        fix_passes_dispatched: 0,
-        fix_pass_history:
-          Keyword.get(opts, :fix_pass_history, &Arbiter.Workers.Run.fix_pass_count/2),
-        # The suspected-flake re-run (bd-2l0hzm, `flake_step/3`): the head it
-        # re-ran, the untouched tests that failed, the poll it ran on, and
-        # whether the head has read pending since. One per head.
-        flake_rerun: nil,
-        # The head parked as a suspected flake, and the head
-        # `retry_auto_resolve/1` has cleared for a fix pass anyway. `:none` never
-        # equals a head, including a nil one.
-        flake_parked_head: :none,
-        flake_bypass: :none,
-        # Latches the exhausted-retry escalation so it fires once per block
-        # episode rather than on every subsequent poll (#354, Phase 2a). While
-        # parked indefinitely (max_polls lifted to :infinity) the latch is
-        # periodically cleared — see `last_escalated_poll` — so a block that
-        # never resolves keeps paging instead of going silent forever.
-        unresolved_escalated: false,
-        # poll_count at which `unresolved_escalated` was last set. While parked
-        # indefinitely, re-escalate every `base_max_polls` polls so a stuck MR
-        # keeps surfacing to the coordinator instead of polling silently
-        # forever after the one-time page (bd-krg7ci).
-        last_escalated_poll: 0,
-        # Fired once when an approved MR is parked without auto-merge, so the
-        # external tracker moves to its "approved, awaiting merge" status
-        # (e.g. Jira AX -> Pending Merge) instead of every poll. (bd-c4cfuv)
-        pending_merge_synced: false,
-        # Fired once when an approved + mergeable MR is parked on an
-        # auto_merge:false lane, so the coordinator inbox is paged that the PR
-        # is ready for a manual merge decision instead of parking silently
-        # forever. Debounced like `pending_merge_synced`. (bd-b4pwxa)
-        approved_merge_notified: false,
-        # Auto-resolve of an approved `:conflict` block (#354, Phase 2b).
-        #   auto_resolve_conflict  — master switch (workspace-tunable).
-        #   conflict_resolver      — module that dispatches the rebase worker.
-        #   max_conflict_attempts  — bounded rebase passes before escalation.
-        #   conflict_attempts      — passes dispatched for the current conflict.
-        #   conflict_resolving     — a resolver worker is in flight right now.
-        #   conflict_resolver_pid  — that resolver worker's pid. We poll its
-        #                            terminal status to detect completion: the
-        #                            resolver worker does NOT exit when its
-        #                            worker finishes (it lingers :completed/
-        #                            :failed until task :close), so a `:DOWN`
-        #                            monitor never fires on a normal finish.
-        #   conflict_branch        — branch label (for the exhaustion escalation).
-        #   conflict_escalated     — exhaustion already paged; stay parked, don't spam.
-        #   conflict_no_ops        — consecutive phantom conflicts (the resolver
-        #                            found zero divergence and spawned nothing).
-        #                            Not an attempt; tracked only so a
-        #                            non-converging forge verdict is visible.
-        #   mr_base_ref            — the branch the MR actually merges into, as
-        #                            reported by the adapter's own `get/1`
-        #                            (`base_ref`). Handed to the resolver as
-        #                            `target_branch` so its zero-divergence
-        #                            pre-flight compares against the real
-        #                            target, not a guessed workspace base
-        #                            (bd-1x4r25). nil until the first poll.
-        auto_resolve_conflict: auto_resolve_conflict,
-        conflict_resolver: Keyword.get(opts, :conflict_resolver, @default_conflict_resolver),
-        max_conflict_attempts: max_conflict_attempts,
-        conflict_attempts: 0,
-        conflict_resolving: false,
-        conflict_resolver_pid: nil,
-        conflict_branch: nil,
-        conflict_escalated: false,
-        conflict_no_ops: 0,
-        mr_base_ref: nil,
-        # Bounded self-healing of `{:awaiting_review_timeout, _}` (bd-8eheb6).
-        #   max_auto_resumes        — auto-resume budget for this task; 0 = off.
-        #   auto_resume_dispatcher  — module that re-attaches the worker and,
-        #                             once the budget is spent, pages the
-        #                             coordinator. The attempt counter itself
-        #                             lives on the WORKER's meta
-        #                             (`:awaiting_review_resume_attempts`), not
-        #                             here: each auto-resume mints a brand-new
-        #                             worker + Watchdog, so a per-Watchdog
-        #                             counter would reset to 0 every round and
-        #                             the cap would never bind.
-        max_auto_resumes: max_auto_resumes,
-        auto_resume_dispatcher:
-          Keyword.get(opts, :auto_resume_dispatcher, @default_auto_resume_dispatcher),
-        # bd-di4t6d: bounded retries of an auto-resume that could not START.
-        #   max_resume_deferrals — how many times we will re-try before paging.
-        #   resume_deferrals     — how many we have used this episode.
-        # A deferred retry re-enters `attempt_auto_resume/1` directly rather than
-        # `handle_review_timeout/2`, so the `{:awaiting_review_timeout, N}` label
-        # is still written exactly once, on the first pass (bd-8tjcms).
-        max_resume_deferrals: max_resume_deferrals,
-        resume_deferrals: 0,
-        # bd-985tkl: everything the deferral episode needs to survive on its own.
-        #   resume_deferred        — a deferral is in flight. While it is, this
-        #                            Watchdog is no longer a merge poller: the
-        #                            merge lane is finished with this worker and
-        #                            what we are waiting on is the registry slot.
-        #                            Stray `:poll` messages are dropped so a
-        #                            transient forge error cannot re-enter the
-        #                            poll ceiling and mint a SECOND retry chain.
-        #   resume_blocker_*       — the subordinate pass named by the refusal.
-        #                            We monitor its pid so the retry fires the
-        #                            moment it finishes, instead of waiting out
-        #                            an interval that, in the incident, never
-        #                            came at all.
-        #   resume_blocker_missing — consecutive refusals naming a blocker that
-        #                            is already dead. Nothing can ever signal
-        #                            completion for one of those, so two in a
-        #                            row is the terminal, not the 30th deferral.
-        #   resume_retry_token     — monotonic tag on the retry timer. A retry
-        #                            triggered early by the blocker's `:DOWN`
-        #                            invalidates the pending tick, so the two
-        #                            paths can never run the chain twice.
-        resume_deferred: false,
-        resume_blocker_key: nil,
-        resume_blocker_pid: nil,
-        resume_blocker_ref: nil,
-        resume_blocker_missing: 0,
-        resume_retry_token: 0,
-        #   resume_attempts_seen   — the highest auto-resume count this episode
-        #                            has ever read off the worker's meta. The
-        #                            meta is still the source of truth ACROSS
-        #                            episodes (see `max_auto_resumes` above),
-        #                            but WITHIN one it has to survive the
-        #                            primary's death: a deferred retry runs
-        #                            after `stop_prior_worker/1` killed the
-        #                            worker, so `snapshot/1` falls back to a
-        #                            meta-less map and the count would read 0.
-        #                            Without this floor every deferred retry
-        #                            would resume as "attempt 1" and re-stamp
-        #                            1 onto the new run's meta, so the
-        #                            auto-resume cap would never bind on the
-        #                            exact path — CI-red → fix_pass → defer —
-        #                            that makes deferrals happen at all.
-        resume_attempts_seen: 0,
-        #   resume_reason          — P7 (bd-60r6wp / #1738). Why this episode is
-        #                            resuming: nil for the poll-ceiling timeout
-        #                            (the original trigger), or
-        #                            `{:unreviewed_head, reviewed, head}` when
-        #                            `resolve_stale_reviewed_head/3` is handing
-        #                            an uncovered head to a review round. Only
-        #                            the log line and the resumed worker's
-        #                            briefing read it; the budget, the deferral
-        #                            and the terminals are shared.
-        resume_reason: nil,
-        # Consecutive safe_merge failures (bd-6gxosc). Resets to 0 on success;
-        # a notification fires once when the count first hits the threshold, then
-        # is suppressed until the counter resets and re-hits the threshold.
-        merge_fail_count: 0,
-        merge_fail_notify_threshold:
-          Keyword.get(opts, :merge_fail_notify_threshold, @default_merge_fail_notify_threshold),
-        merge_stall_notified: false,
-        last_merge_stall_poll: 0,
-        # Consecutive `:not_started` polls for the current approval episode
-        # (bd-aeb9wv / #1189). Resets whenever the pipeline reports anything
-        # other than `:not_started`. Once it reaches `@not_started_grace_polls`,
-        # the Watchdog stops deferring and falls through to a merge attempt —
-        # see `apply_outcome(:approved, result, %{auto_merge: true})`.
-        not_started_polls: 0,
-        # Low-frequency re-page of an unchanged park (bd-5mzzww ask 4).
-        # `last_block_escalated_poll` is the poll_count at which the current
-        # block reason was last paged — the heartbeat clock, reset whenever the
-        # reason changes (a genuinely different block is fresh news and pages
-        # immediately, exactly as before).
-        park_heartbeat_polls: park_heartbeat_polls,
-        last_block_escalated_poll: 0,
-        # A worker's "this CI failure is infrastructure, not my diff" verdict
-        # (bd-5mzzww ask 3), set via `mark_ci_external/2`. Scoped to the
-        # current `:ci_failed` episode: cleared the moment the block reason
-        # changes, so a later genuine failure is never mislabelled.
-        ci_external_note: nil,
-        # bd-a370ak / #2002. `detached` marks a worker-less merge retry
-        # (`start_retry/1`); its poll runs `detached_poll/1` instead of the
-        # live loop. `pending_merge_stamp` is the `{reason, reviewed_sha}` this
-        # Watchdog last wrote to the task's durable `pending_merge`, so an
-        # unchanged deferral costs no DB write per poll. `retry_*_failures`
-        # count a retry's consecutive merge failures toward its give-up.
-        detached: detached,
-        repo: Keyword.get(opts, :repo),
-        pending_merge_stamp: nil,
-        retry_merge_failures: 0,
-        retry_transient_failures: 0,
-        # When the pending merge first started waiting (the stamp's `since`),
-        # refreshed from the task on every retry poll, and the total wait a
-        # retry tolerates before it gives up (`@default_retry_max_wait_ms`).
-        pending_since: nil,
-        max_wait_ms: Keyword.get(opts, :max_wait_ms) || configured_retry_max_wait_ms()
-      }
-
-      if is_pid(worker_pid), do: Process.monitor(worker_pid)
-      schedule(self(), Keyword.get(opts, :initial_delay_ms, 0))
-      {:ok, state}
-    else
-      # Nothing to watch — the worker is already gone.
-      :ignore
-    end
+    schedule(self(), Keyword.get(opts, :initial_delay_ms, 0))
+    {:ok, state}
   end
 
   defp registry_name(task_id), do: PRegistry.via_tuple(task_id <> @watchdog_registry_suffix)
@@ -1478,7 +1678,10 @@ defmodule Arbiter.Worker.Watchdog do
         state = note_flake_rerun_pending(state, result)
         state = maybe_escalate_pipeline(state, result)
         state = maybe_auto_resolve_conflict(state, result)
-        maybe_escalate_merge_block(state, result)
+
+        state
+        |> maybe_escalate_merge_block(result)
+        |> persist_lane()
 
       {:error, reason} ->
         Logger.debug(
@@ -1522,30 +1725,34 @@ defmodule Arbiter.Worker.Watchdog do
     |> retry_deferred_resume()
   end
 
-  # bd-985tkl root cause. `Dispatch.resume/2` calls `stop_prior_worker/1` BEFORE
-  # `Worker.start/1`'s family check refuses, so the primary worker this Watchdog
-  # monitors exits as a direct consequence of the resume attempt we just
-  # deferred. Stopping here is what stranded bd-3qkbch / #1724 and bd-bsdeb2 /
-  # #1732: the `:retry_review_resume` timer died with the process, the log
-  # showed `deferral=1/30` and then nothing for 70+ minutes on an approved,
-  # CI-green, MERGEABLE PR. A deferral in flight outlives its own worker — the
-  # worker is already `:failed` and there is nothing left to watch *but* the
-  # registry slot.
-  def handle_info({:DOWN, _ref, :process, pid, _reason}, %{worker_pid: pid} = state) do
-    if state.resume_deferred do
-      Logger.info(
-        "Worker.Watchdog: review_recovery task=#{state.task_id} mr=#{state.mr_ref} " <>
-          "transition=auto_resume outcome=worker_slot_freed; the failed primary exited (the " <>
-          "resume's own stop_prior_worker), keeping the deferral alive"
-      )
-
-      {:noreply, state}
-    else
-      # Worker died — nothing left to watch.
-      {:stop, :normal, state}
-    end
+  # bd-741sid: the pass queued for a slot is running — it is now an attempt.
+  def handle_info({:pass_started, :fix_pass, _pid}, %{pass_queued: :fix_pass} = state) do
+    {:noreply,
+     %{
+       state
+       | pass_queued: nil,
+         pass_queued_poll: nil,
+         auto_resolve_attempts: state.auto_resolve_attempts + 1,
+         fix_passes_dispatched: state.fix_passes_dispatched + 1
+     }}
   end
 
+  def handle_info({:pass_started, :conflict, pid}, %{pass_queued: :conflict} = state) do
+    {:noreply,
+     %{
+       state
+       | pass_queued: nil,
+         pass_queued_poll: nil,
+         conflict_attempts: state.conflict_attempts + 1,
+         conflict_resolving: true,
+         conflict_resolver_pid: pid
+     }}
+  end
+
+  # bd-985tkl's root cause — a Watchdog that stopped with the worker it watched,
+  # taking a deferred resume's retry timer with it — cannot recur since
+  # bd-741sid: no Watchdog watches a worker. It is keyed by the ticket, and
+  # nothing but the PR's own fate (or a `:close`) ends it.
   def handle_info(_msg, state), do: {:noreply, state}
 
   defp retry_deferred_resume(state) do
@@ -1634,13 +1841,17 @@ defmodule Arbiter.Worker.Watchdog do
     {:stop, :normal, state}
   end
 
+  # bd-741sid: the ticket's fate is the one a live Watchdog gives it — back to
+  # work with the `pr_closed` cause, and the coordinator paged
+  # (`PullRequest.closed/2`) — not a Merging ticket left with nothing watching.
   defp detached_outcome(:closed, _result, state) do
     Logger.info(
       "Worker.Watchdog: merge_retry task=#{state.task_id} mr=#{state.mr_ref} was closed " <>
-        "without merging; dropping the pending merge"
+        "without merging; dropping the pending merge and sending the ticket back to work"
     )
 
     PendingMerge.clear(state.task_id)
+    safe(fn -> PullRequest.closed(state.task_id, state.mr_ref) end)
     {:stop, :normal, state}
   end
 
@@ -1878,44 +2089,25 @@ defmodule Arbiter.Worker.Watchdog do
     {:noreply, %{state | poll_count: state.poll_count + 1}}
   end
 
-  # The Driver's merged-completion path, without a worker to complete: the
-  # tracker hook, then `Verification.finalize_merged/2` (close, or park at
-  # `:awaiting_verification` for a `verify_after_deploy` task) — the same
-  # funnel `MergedPRFinalizer` uses for a PR merged behind a dead worker.
+  # A live Watchdog's merged path, without a live Watchdog: the tracker hook,
+  # then `PullRequest.merged/2` (bd-741sid). That is `Verification.finalize_merged/2`
+  # (close, or Verifying for a `verify_after_deploy` ticket), announced the way
+  # every merge of a ticket's PR is; a review-only engagement stays open for
+  # ReviewPatrol, and a ticket something else finalized is left alone.
   defp finalize_detached_merge(state) do
     sync_tracker_merged(state)
     PendingMerge.clear(state.task_id)
 
-    case Ash.get(Arbiter.Tasks.Issue, state.task_id) do
-      {:ok, %{status: status} = task} when status not in [:closed, :awaiting_verification] ->
-        case Verification.finalize_merged(task, close_upstream: true, mr_ref: state.mr_ref) do
-          {:ok, outcome, _} ->
-            Logger.info(
-              "Worker.Watchdog: merge_retry finalized task=#{state.task_id} (#{outcome})"
-            )
+    case safe(fn -> PullRequest.merged(state.task_id, mr_ref: state.mr_ref) end) do
+      {:ok, outcome} ->
+        Logger.info("Worker.Watchdog: merge_retry finalized task=#{state.task_id} (#{outcome})")
 
-          {:error, reason} ->
-            Logger.warning(
-              "Worker.Watchdog: merge_retry could not finalize task=#{state.task_id}: " <>
-                "#{inspect(reason)} — MergedPRFinalizer will pick it up"
-            )
-        end
-
-      _ ->
-        :ok
+      other ->
+        Logger.warning(
+          "Worker.Watchdog: merge_retry could not finalize task=#{state.task_id}: " <>
+            "#{inspect_short(other)} — MergedPRFinalizer will pick it up"
+        )
     end
-  rescue
-    e ->
-      Logger.warning(
-        "Worker.Watchdog: merge_retry finalize raised for task=#{state.task_id}: " <>
-          Exception.message(e)
-      )
-  catch
-    :exit, reason ->
-      Logger.warning(
-        "Worker.Watchdog: merge_retry finalize exited for task=#{state.task_id}: " <>
-          inspect(reason)
-      )
   end
 
   # AC4: the one page. The stamp is latched escalated so the sweeper — on
@@ -1999,16 +2191,19 @@ defmodule Arbiter.Worker.Watchdog do
     Logger.info("Worker.Watchdog: MR #{state.mr_ref} merged for task=#{state.task_id}")
     state = clear_own_pending_merge(state)
     sync_tracker_merged(state)
-    safe(fn -> Worker.complete(state.worker_pid, :merged) end)
+    finish_merged(state)
 
     {:stop, :normal,
      %{state | merge_fail_count: 0, merge_stall_notified: false, last_merge_stall_poll: 0}}
   end
 
+  # bd-741sid: a closed PR sends the ticket back to work with the `pr_closed`
+  # attention cause and pages the coordinator (`PullRequest.closed/2`).
   defp apply_outcome(:closed, _result, state) do
     Logger.info("Worker.Watchdog: MR #{state.mr_ref} closed for task=#{state.task_id}")
     state = clear_own_pending_merge(state)
-    safe(fn -> Worker.fail(state.worker_pid, {:mr_closed, state.mr_ref}) end)
+    safe(fn -> PullRequest.closed(state.task_id, state.mr_ref) end)
+    announce(state, {:closed, state.mr_ref})
     {:stop, :normal, state}
   end
 
@@ -2174,7 +2369,7 @@ defmodule Arbiter.Worker.Watchdog do
 
         state = clear_own_pending_merge(state)
         sync_tracker_merged(state)
-        safe(fn -> Worker.complete(state.worker_pid, :merged) end)
+        finish_merged(state)
         {:stop, :normal, state}
 
       {:error, reason} ->
@@ -2313,11 +2508,47 @@ defmodule Arbiter.Worker.Watchdog do
 
   # ---- internals ----------------------------------------------------------
 
+  # bd-741sid: the ticket keeps the forge's last answer (`merger_status` /
+  # `merger_checked_at`), not a parked worker's meta.
   defp record_status(state, result) do
-    safe(fn ->
-      Worker.record_merger_status(state.worker_pid, result)
-    end)
+    safe(fn -> PullRequest.record_merger_status(state.task_id, result) end)
   end
+
+  # bd-741sid: the merge finishes the ticket — closed, or Verifying for a
+  # `verify_after_deploy` one (`PullRequest.merged/2`, the same
+  # `Verification.finalize_merged/2` funnel every merge path uses).
+  defp finish_merged(state) do
+    case safe(fn -> PullRequest.merged(state.task_id, mr_ref: state.mr_ref) end) do
+      {:ok, outcome} ->
+        Logger.info("Worker.Watchdog: task=#{state.task_id} finalized after merge (#{outcome})")
+
+      other ->
+        Logger.warning(
+          "Worker.Watchdog: could not finalize task=#{state.task_id} after its MR merged " <>
+            "(#{inspect_short(other)}) — MergedPRFinalizer will pick it up"
+        )
+    end
+
+    announce(state, {:merged, state.mr_ref})
+  end
+
+  # bd-741sid: write the reviewed-SHA baseline this poll left latched onto the
+  # ticket's lane when it moved, so `restart/1` resumes on the same commit.
+  defp persist_lane({:noreply, state}), do: {:noreply, persist_baseline(state)}
+
+  defp persist_lane({:stop, reason, state}), do: {:stop, reason, persist_baseline(state)}
+
+  defp persist_baseline(%{reviewed_sha: sha, persisted_reviewed_sha: sha} = state), do: state
+
+  defp persist_baseline(state) do
+    case safe(fn -> PullRequest.record_reviewed_sha(state.task_id, state.reviewed_sha) end) do
+      :ok -> %{state | persisted_reviewed_sha: state.reviewed_sha}
+      _ -> state
+    end
+  end
+
+  defp auto_resumes_seed(n) when is_integer(n) and n >= 0, do: n
+  defp auto_resumes_seed(_), do: 0
 
   # When watch_pipeline is enabled, escalate to the coordinator on the first poll
   # that reports a failed pipeline. Stay parked — a human may force-merge or
@@ -2335,13 +2566,7 @@ defmodule Arbiter.Worker.Watchdog do
       )
 
       safe(fn ->
-        snap =
-          case safe_snapshot(state.worker_pid) do
-            %{} = s -> s
-            _ -> %{task_id: state.task_id, workspace_id: nil}
-          end
-
-        Arbiter.Messages.CoordinatorNotifier.pipeline_failed(snap, state.mr_ref)
+        Arbiter.Messages.CoordinatorNotifier.pipeline_failed(snapshot(state), state.mr_ref)
       end)
     end
 
@@ -2406,9 +2631,9 @@ defmodule Arbiter.Worker.Watchdog do
 
   # Summon a human reviewer once (debounced on `last_block_reason`) and convert
   # the lane to indefinite park-and-watch by lifting `max_polls` to `:infinity`,
-  # so `reschedule/1`'s auto_merge ceiling can never fail this worker. The worker
-  # stays at `:awaiting_review`; whenever the human approval lands, the ongoing
-  # poll sees `:approved` and auto-merges (or, on a manual lane, a human merges).
+  # so `reschedule/1`'s auto_merge ceiling can never time this lane out. The
+  # ticket stays Merging; whenever the human approval lands, the ongoing poll
+  # sees `:approved` and auto-merges (or, on a manual lane, a human merges).
   defp handle_nonauthor_approval(state, result) do
     state = debounce_escalate_block(state, :needs_nonauthor_approval)
 
@@ -2732,6 +2957,8 @@ defmodule Arbiter.Worker.Watchdog do
   # first rather than handed to a fix pass (`flake_step/3`), and the fix passes
   # a task gets on one PR are capped across heads (`park_at_fix_pass_cap/2`).
   defp resolve_ci_failed(result, state) do
+    state = requeue_stale_pass(state)
+
     if fix_pass_active?(state) do
       reschedule(%{state | last_block_reason: :ci_failed})
     else
@@ -2889,28 +3116,70 @@ defmodule Arbiter.Worker.Watchdog do
         "#{length(checks)} failing check(s))"
     )
 
-    _ = dispatch_fix_pass(state, checks, outside_diff)
+    dispatched = dispatch_fix_pass(state, checks, outside_diff)
 
     # The fix pass AUTHORS commits after the approval; see
     # `note_authored_push/1` for why that no longer suspends the latch.
     state = note_authored_push(state)
 
-    reschedule(%{
-      state
-      | last_block_reason: :ci_failed,
-        auto_resolve_attempts: attempts,
-        fix_passes_dispatched: so_far + 1
-    })
-  end
+    case dispatched do
+      # bd-741sid: no free slot — the pass waits in the fast lane. It has not
+      # run, so it spends no attempt yet; `pass_started/3` counts it.
+      {:ok, %{deferred: true}} ->
+        reschedule(queue_pass(%{state | last_block_reason: :ci_failed}, :fix_pass))
 
-  # True when a fix-pass worker for this task is still working (registered under
-  # the `:fixpass` suffix and not yet terminal).
-  defp fix_pass_active?(state) do
-    case Worker.whereis(state.task_id <> @fix_pass_registry_suffix) do
-      nil -> false
-      pid -> safe_worker_status(pid) not in [:failed, :completed, nil]
+      _ ->
+        reschedule(%{
+          state
+          | last_block_reason: :ci_failed,
+            auto_resolve_attempts: attempts,
+            fix_passes_dispatched: so_far + 1
+        })
     end
   end
+
+  # True when a fix pass is working the ticket — its run, registered under the
+  # ticket id since bd-741sid — or is queued for a slot.
+  defp fix_pass_active?(state) do
+    is_pid(live_pass(state.task_id, :fix_pass)) or state.pass_queued == :fix_pass
+  end
+
+  # The ticket's run, when it is a live pass of `role`.
+  defp live_pass(task_id, role) do
+    with pid when is_pid(pid) <- Worker.whereis(task_id),
+         %{status: status} = snapshot when status not in [:failed, :completed] <-
+           safe_snapshot(pid),
+         ^role <- snapshot_role(snapshot) do
+      pid
+    else
+      _ -> nil
+    end
+  end
+
+  defp snapshot_role(%{meta: %{} = meta}), do: Map.get(meta, :role)
+  defp snapshot_role(_snapshot), do: nil
+
+  defp queue_pass(state, kind),
+    do: %{state | pass_queued: kind, pass_queued_poll: state.poll_count}
+
+  # bd-741sid: a queued pass that has not started within
+  # `@pass_queue_requeue_polls` is asked for again (see the attribute). Returns
+  # the state with the queue mark dropped when it is time to ask.
+  defp requeue_stale_pass(%{pass_queued: kind, pass_queued_poll: at} = state)
+       when not is_nil(kind) and is_integer(at) do
+    if state.poll_count - at >= @pass_queue_requeue_polls do
+      Logger.info(
+        "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} queued #{kind} pass has " <>
+          "not started after #{state.poll_count - at} polls; asking for it again"
+      )
+
+      %{state | pass_queued: nil, pass_queued_poll: nil}
+    else
+      state
+    end
+  end
+
+  defp requeue_stale_pass(state), do: state
 
   defp dispatch_fix_pass(state, checks, outside_diff) do
     args = %{
@@ -3201,6 +3470,15 @@ defmodule Arbiter.Worker.Watchdog do
     %{state | conflict_escalated: true}
   end
 
+  # bd-741sid: the pass is queued for a slot; `pass_started/3` hands over its
+  # pid once it runs.
+  defp drive_conflict_resolution(%{pass_queued: :conflict} = state) do
+    case requeue_stale_pass(state) do
+      %{pass_queued: :conflict} = waiting -> waiting
+      asked_again -> spawn_conflict_resolver(asked_again)
+    end
+  end
+
   defp drive_conflict_resolution(state), do: spawn_conflict_resolver(state)
 
   defp spawn_conflict_resolver(state) do
@@ -3225,6 +3503,17 @@ defmodule Arbiter.Worker.Watchdog do
         no_ops = state.conflict_no_ops + 1
         log_phantom_conflict(state, no_ops)
         %{state | conflict_no_ops: no_ops}
+
+      # bd-741sid: no free slot — the resolver waits in the fast lane. Not an
+      # attempt until it runs (`pass_started/3`); it will author content when
+      # it does (`note_authored_push/1`).
+      {:ok, %{deferred: true}} ->
+        Logger.info(
+          "Worker.Watchdog: conflict-resolve pass for task=#{state.task_id} " <>
+            "mr=#{state.mr_ref} is waiting for a worker slot"
+        )
+
+        queue_pass(note_authored_push(state), :conflict)
 
       {:ok, info} ->
         pid = Map.get(info, :worker_pid)
@@ -3304,8 +3593,8 @@ defmodule Arbiter.Worker.Watchdog do
   defp resolver_finished?(_), do: true
 
   # Tear down a finished resolver worker. It lingers in a terminal status holding
-  # its `task_id <> ":conflict"` registry slot until task :close; stopping it
-  # here frees that slot so the next bounded attempt's `Worker.start` doesn't
+  # its registry slot (the ticket's own id since bd-741sid); stopping it here
+  # frees that slot so the next bounded attempt's `Worker.start` doesn't
   # collide (`:resolver_already_running`). `Worker.stop` unregisters
   # synchronously in the worker's `terminate/2`. Best-effort — a dead/unstoppable
   # pid just clears the in-flight flag.
@@ -3457,19 +3746,20 @@ defmodule Arbiter.Worker.Watchdog do
 
   # Watchdog: bd-66ey1o / bd-akr4il. After `:max_polls` consecutive non-terminal
   # polls, escalate to the coordinator and either:
-  #   - auto_merge ON  → fail the worker (auto-merge should fire quickly; a 30-
-  #                       min timeout means something is broken on the forge side)
-  #   - auto_merge OFF → park the worker (a human reviewer may take overnight or
-  #                       longer; failing here was a false negative — AX-17739).
-  #                       The Watchdog stops polling to free resources, and the
-  #                       worker stays in :awaiting_review so a boot-resume or
-  #                       webhook can re-attach it later.
+  #   - auto_merge ON  → the bounded auto-resume (auto-merge should fire
+  #                       quickly; a 30-min timeout means something is broken
+  #                       on the forge side)
+  #   - auto_merge OFF → park (a human reviewer may take overnight or longer;
+  #                       failing here was a false negative — AX-17739). The
+  #                       Watchdog stops polling to free resources; the ticket
+  #                       stays Merging, so the boot reconciler or
+  #                       `restart/1` can watch it again later.
   # Pass `max_polls: :infinity` to disable.
   defp reschedule(%{max_polls: cap, poll_count: count, auto_merge: true} = state)
        when is_integer(cap) and cap > 0 and count + 1 >= cap do
     Logger.warning(
       "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} exceeded " <>
-        "#{cap} polls without a terminal outcome; failing (see the next line for " <>
+        "#{cap} polls without a terminal outcome (see the next line for " <>
         "whether it was auto-resumed or escalated)"
     )
 
@@ -3487,7 +3777,7 @@ defmodule Arbiter.Worker.Watchdog do
        when is_integer(cap) and cap > 0 and count + 1 >= cap do
     Logger.warning(
       "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} exceeded " <>
-        "#{cap} polls on a manual-merge lane; parking (worker stays :awaiting_review)"
+        "#{cap} polls on a manual-merge lane; parking (the ticket stays Merging)"
     )
 
     escalate_watchdog(state)
@@ -3500,36 +3790,18 @@ defmodule Arbiter.Worker.Watchdog do
   end
 
   # bd-8eheb6 / #1287. An awaiting_review timeout on an auto_merge lane is a
-  # *distinct* failure: exit_status 0, worktree preserved, MR usually mergeable
-  # — the run is cleanly resumable, and the coordinator's remedy has always been
-  # a plain `worker_resume`. So do it here instead of parking a "failed but
-  # resumable" worker that only a `worker_failed` event or the dashboard's
-  # active-worker count would ever surface.
+  # *distinct* failure: worktree preserved, MR usually mergeable — the attempt
+  # is cleanly resumable, and the coordinator's remedy has always been a plain
+  # `worker_resume`. So do it here: a bounded auto-resume, or, once that budget
+  # is spent, an escalation that names the spent budget explicitly.
   #
-  # The worker is failed either way: the run really did time out and
-  # worker_show/the event feed must keep saying so (and `Dispatch.resume`
-  # requires the prior worker to be in a terminal state before it re-attaches).
-  # What changes is what happens next — a bounded auto-resume, or, once that
-  # budget is spent, an escalation that names the spent budget explicitly.
-  #
-  # bd-92mx1m: the failure is a hand-off (`slot_handoff: true`), not a park —
-  # the task keeps its slot so the auto-resume re-enters it uncapped, exactly
-  # as it would a fix round. Every arm that gives up on the resume drops the
-  # hand-off (`release_slot_handoff/1`) before paging, and only then is the
-  # worker parked for a human.
+  # bd-741sid: there is no run to fail any more — the implementer's run ended
+  # when it opened the PR — so the timeout is announced and the resume, a new
+  # run on the Merging ticket, admits itself through `Arbiter.Worker.ResumeSlot`
+  # like any other automatic resume.
   defp handle_review_timeout(state, cap) do
-    safe(fn ->
-      Worker.fail(state.worker_pid, {:awaiting_review_timeout, cap}, slot_handoff: true)
-    end)
-
+    announce(state, {:timed_out, cap})
     attempt_auto_resume(state)
-  end
-
-  # The worker may already be gone — a deferred retry's own resume stops it —
-  # in which case there is nothing left holding the slot to release.
-  defp release_slot_handoff(state) do
-    safe(fn -> Worker.clear_slot_handoff(state.worker_pid) end)
-    :ok
   end
 
   # bd-di4t6d: one auto-resume decision, reachable twice — once from the poll
@@ -3537,12 +3809,10 @@ defmodule Arbiter.Worker.Watchdog do
   # episode is finished (resumed, or paged) and `{:defer, state}` when the resume
   # could not start for a reason that a later retry can clear.
   #
-  # The budget is read from the worker's meta, which is authoritative across
-  # episodes — but on a deferred retry the worker is gone (the deferred attempt's
-  # own `stop_prior_worker/1` killed it) and `snapshot/1`'s fallback map carries
-  # no meta, so that read returns 0. `resume_attempts_seen` is the within-episode
-  # floor that keeps the cap binding across the retry; see the state comment.
-  # It also keeps the `attempts` reported by both escalation paths honest.
+  # The budget is seeded from the ticket's lane (`merge_watch["auto_resumes"]`,
+  # bd-741sid), which is authoritative across Watchdogs, into
+  # `resume_attempts_seen`; `snapshot/1` reports it back, so the cap binds
+  # across a deferred retry and both escalation paths report honest attempts.
   defp attempt_auto_resume(state) do
     snap = snapshot(state)
     attempts = max(awaiting_review_resume_attempts(snap), state.resume_attempts_seen)
@@ -3574,6 +3844,8 @@ defmodule Arbiter.Worker.Watchdog do
     case safe_resume(state, args) do
       {:ok, _} ->
         log_resumed(state, attempt)
+        # bd-741sid: the budget rides the ticket's lane across Watchdogs.
+        safe(fn -> PullRequest.record_auto_resumes(state.task_id, attempt) end)
         {:stop, state}
 
       {:error, reason} ->
@@ -3593,7 +3865,7 @@ defmodule Arbiter.Worker.Watchdog do
   defp log_resumed(state, attempt) do
     Logger.warning(
       "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} timed out at " <>
-        ":awaiting_review; auto-resumed (attempt #{attempt}/#{state.max_auto_resumes}" <>
+        "its poll ceiling; auto-resumed (attempt #{attempt}/#{state.max_auto_resumes}" <>
         deferral_suffix(state) <> ")"
     )
   end
@@ -3866,8 +4138,6 @@ defmodule Arbiter.Worker.Watchdog do
   # "awaiting_review is stuck" notification is deliberately NOT also sent here,
   # because the whole point of this arm is one actionable message.
   defp park_and_escalate_resume_block(state, attempts, reason) do
-    release_slot_handoff(state)
-
     case safe(fn -> Arbiter.Tasks.ReviewPark.park(state.task_id, :resume_blocked) end) do
       {:ok, :already_parked, _issue} ->
         Logger.info(
@@ -3910,8 +4180,6 @@ defmodule Arbiter.Worker.Watchdog do
   end
 
   defp escalate_auto_resume_give_up(state, snap, attempts, reason) do
-    release_slot_handoff(state)
-
     Logger.warning(
       "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} not auto-resumed " <>
         "(#{inspect(reason)}, #{attempts}/#{state.max_auto_resumes} attempts used); " <>
@@ -3933,12 +4201,9 @@ defmodule Arbiter.Worker.Watchdog do
     :ok
   end
 
-  # How many times this task has ALREADY been auto-resumed out of an
-  # awaiting_review timeout. Carried on the worker's `meta` and re-stamped onto
-  # each resumed run by `Arbiter.Worker.Dispatch` (see `maybe_put_resume_meta/2`).
-  # No Watchdog survives an auto-resume round — a fresh worker mints a fresh
-  # Watchdog — but the counter has to survive all of them, so the worker's meta
-  # is where it lives.
+  # How many times this task has ALREADY been auto-resumed out of a review
+  # timeout, from the `snapshot/1` map (seeded from the ticket's lane, which is
+  # where the counter survives from one Watchdog to the next — bd-741sid).
   defp awaiting_review_resume_attempts(%{meta: %{} = meta}) do
     case Map.get(meta, :awaiting_review_resume_attempts) do
       n when is_integer(n) and n >= 0 -> n
@@ -3989,14 +4254,8 @@ defmodule Arbiter.Worker.Watchdog do
   defp max_resume_deferrals_from_workspace(_), do: @default_max_resume_deferrals
 
   defp escalate_watchdog(state) do
-    snap =
-      case safe_snapshot(state.worker_pid) do
-        %{} = s -> s
-        _ -> %{task_id: state.task_id, workspace_id: nil}
-      end
-
     safe(fn ->
-      Arbiter.Messages.CoordinatorNotifier.awaiting_review_stuck(snap, state.mr_ref)
+      Arbiter.Messages.CoordinatorNotifier.awaiting_review_stuck(snapshot(state), state.mr_ref)
     end)
   end
 
@@ -4008,14 +4267,20 @@ defmodule Arbiter.Worker.Watchdog do
     :exit, _ -> nil
   end
 
-  # The worker snapshot the notifiers read, with a workspace-derived fallback so
-  # an escalation can still be addressed (Message.workspace_id is required) when
-  # the worker process can't be reached.
+  # The snapshot the notifiers read. bd-741sid: built from the Watchdog's own
+  # state — there is no parked worker to ask — in the shape a worker snapshot
+  # had, addressed to the ticket's workspace (Message.workspace_id is
+  # required). The auto-resume count is the one this Watchdog carries.
   defp snapshot(state) do
-    case safe_snapshot(state.worker_pid) do
-      %{} = s -> s
-      _ -> %{task_id: state.task_id, workspace_id: workspace_id(state)}
-    end
+    %{
+      task_id: state.task_id,
+      registry_key: state.task_id,
+      role: nil,
+      workspace_id: workspace_id(state),
+      repo: state.repo,
+      mr_ref: state.mr_ref,
+      meta: %{mr_ref: state.mr_ref, awaiting_review_resume_attempts: state.resume_attempts_seen}
+    }
   end
 
   defp safe_worker_status(pid) do
@@ -4683,13 +4948,9 @@ defmodule Arbiter.Worker.Watchdog do
     attempts = max(awaiting_review_resume_attempts(snap), state.resume_attempts_seen)
 
     if state.max_auto_resumes > 0 and attempts < state.max_auto_resumes do
-      # `Dispatch.resume/2` requires the prior worker to be terminal before it
-      # re-attaches, exactly as on the awaiting-review-timeout path — and, as
-      # there, the failure is a slot hand-off (bd-92mx1m), released by every
-      # give-up arm.
-      safe(fn ->
-        Worker.fail(state.worker_pid, {:unreviewed_head, head}, slot_handoff: true)
-      end)
+      # bd-741sid: no run to fail first — the implementer's ended when it
+      # opened the PR. The review round is a new run on the Merging ticket.
+      announce(state, {:unreviewed_head, head})
 
       state = %{
         state

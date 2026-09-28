@@ -85,6 +85,16 @@ defmodule Arbiter.Board.Autopilot do
   restart does to everything else in flight: the boot reconciler re-resumes
   mid-flight tasks, and the patrols re-watch open PRs.
 
+  ## The fast lane: a ticket returning from Merging (bd-741sid)
+
+  The same queue carries the runs of a ticket coming back from Merging — a CI
+  fix pass (`:fix_pass`) or a conflict pass (`:conflict`) its Watchdog asked
+  for. A Merging ticket holds no slot, so the pass must get one
+  (`Arbiter.Workflows.MergeQueue.PassAdmission`); at a full cap it is queued
+  here and replayed through its dispatcher (`FixPassDispatcher.dispatch/1` /
+  `ConflictResolver.resolve/1`) with `slot_admitted: true` the moment a slot
+  frees — ahead of every Ready ticket, exactly like a deferred resume.
+
   ## A dispatch that keeps failing gets escalated (bd-a40f4q)
 
   `finish_dispatch/3`'s log-and-move-on above is right for a card's *first*
@@ -202,6 +212,8 @@ defmodule Arbiter.Board.Autopilot do
   alias Arbiter.Board.Snapshot
   alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Tasks.Issue
+  alias Arbiter.Workflows.MergeQueue.ConflictResolver
+  alias Arbiter.Workflows.MergeQueue.FixPassDispatcher
 
   require Logger
 
@@ -359,10 +371,16 @@ defmodule Arbiter.Board.Autopilot do
   `{:error, :not_running}` when there is no scheduler to take it: the caller
   must refuse the resume rather than bypass the cap.
   """
-  @spec defer_resume(GenServer.server(), String.t(), :resume | :resume_session, keyword()) ::
+  @spec defer_resume(
+          GenServer.server(),
+          String.t(),
+          :resume | :resume_session | :fix_pass | :conflict,
+          keyword()
+        ) ::
           :ok | {:error, term()}
   def defer_resume(server \\ __MODULE__, task_id, kind, opts)
-      when is_binary(task_id) and kind in [:resume, :resume_session] and is_list(opts) do
+      when is_binary(task_id) and kind in [:resume, :resume_session, :fix_pass, :conflict] and
+             is_list(opts) do
     case GenServer.whereis(server) do
       nil -> {:error, :not_running}
       _pid -> GenServer.call(server, {:defer_resume, task_id, kind, opts})
@@ -743,7 +761,19 @@ defmodule Arbiter.Board.Autopilot do
   # The replay's outcome is final: a deferred resume is never re-queued by this
   # process. Losing the race to another resume, or to a close, is not a
   # failure — the task is already where the resume would have put it.
-  @benign_resume_errors [:worker_active, :task_closed, :task_not_found]
+  # bd-741sid: a replayed pass that finds its ticket already has one running
+  # (the Watchdog asked again and got a slot first) is the same kind of race,
+  # and so is one whose ticket an operator pulled out of the merge queue while
+  # it waited (`:pulled`, `Arbiter.Tasks.PullRequest.pull/1`).
+  @benign_resume_errors [
+    :worker_active,
+    :task_closed,
+    :task_not_found,
+    :fix_pass_already_running,
+    :resolver_already_running,
+    :task_worker_live,
+    :pulled
+  ]
 
   defp finish_resume(state, id, {:ok, _}) do
     announce({:board_resumed, id})
@@ -886,6 +916,20 @@ defmodule Arbiter.Board.Autopilot do
 
   defp default_resume(task_id, :resume_session, opts),
     do: Arbiter.Worker.Dispatch.resume_session(task_id, opts)
+
+  # bd-741sid: a pass for a ticket returning from Merging, replayed through its
+  # own dispatcher with the dispatcher's own args.
+  defp default_resume(_task_id, :fix_pass, opts),
+    do: FixPassDispatcher.dispatch(pass_args(opts))
+
+  defp default_resume(_task_id, :conflict, opts),
+    do: ConflictResolver.resolve(pass_args(opts))
+
+  defp pass_args(opts),
+    do:
+      opts
+      |> Keyword.get(:args, %{})
+      |> Map.put(:slot_admitted, Keyword.get(opts, :slot_admitted))
 
   defp dispatching_id(%{dispatching: %{id: id}}), do: id
   defp dispatching_id(_), do: nil

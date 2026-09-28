@@ -31,6 +31,19 @@ defmodule Arbiter.Worker.DispatchTest do
     {:ok, ws: ws}
   end
 
+  # The ticket's Watchdog and any run registered for it.
+  defp stop_task_processes(task_id) do
+    for pid <- [Arbiter.Worker.Watchdog.whereis(task_id), Worker.whereis(task_id)], is_pid(pid) do
+      try do
+        GenServer.stop(pid, :normal)
+      catch
+        :exit, _ -> :ok
+      end
+    end
+
+    :ok
+  end
+
   defp eventually(fun, timeout_ms \\ 2_000, step_ms \\ 20) do
     deadline = System.monotonic_time(:millisecond) + timeout_ms
     do_eventually(fun, deadline, step_ms)
@@ -156,13 +169,16 @@ defmodule Arbiter.Worker.DispatchTest do
 
       StubMerger.reset()
       {:ok, task} = Ash.create(Issue, %{title: "awaiting-review guard", workspace_id: ws.id})
+      {:ok, task} = Ash.update(task, %{status: :in_progress})
 
-      # Boot a worker and park it at :awaiting_review via open_mr/5 with a
-      # stub merger. Use a far-future Watchdog interval so the auto-started Watchdog
-      # does not poll or transition the worker during the assertion window.
-      {:ok, pid} = Worker.start(task_id: task.id, repo: "arbiter")
+      # bd-741sid: a run opens its PR via open_mr/5 with a stub merger and ends
+      # there — the ticket is Merging and its Watchdog owns the PR. Use a
+      # far-future Watchdog interval so it does not poll or move the ticket
+      # during the assertion window.
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "arbiter", workspace_id: ws.id)
       :ok = Worker.advance(pid, :implement)
-      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      ref = Process.monitor(pid)
+      on_exit(fn -> stop_task_processes(task.id) end)
 
       StubMerger.next_open_ref("!test")
 
@@ -174,7 +190,9 @@ defmodule Arbiter.Worker.DispatchTest do
       }
 
       assert {:ok, "!test"} = Worker.open_mr(pid, "feature/guard", "Guard", "", open_opts)
-      assert Worker.state(pid).status == :awaiting_review
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 1_000
+      assert Ash.get!(Issue, task.id).state == :merging
+      assert Arbiter.Worker.Watchdog.alive?(task.id)
 
       assert {:error, {:task_awaiting_review, _}} =
                Dispatch.dispatch(task.id, force: true, start_driver: false)

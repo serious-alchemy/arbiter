@@ -31,7 +31,7 @@ defmodule ArbiterWeb.WorkerIndexLiveTest do
 
   import Phoenix.LiveViewTest
 
-  alias Arbiter.Tasks.{Issue, Workspace}
+  alias Arbiter.Tasks.{Issue, PullRequest, Workspace}
   alias Arbiter.Worker
   alias ArbiterWeb.WorkerIndexLiveTest.TestMerger
 
@@ -106,36 +106,55 @@ defmodule ArbiterWeb.WorkerIndexLiveTest do
     refute render_async(view, @async_timeout) =~ task.id
   end
 
-  test "awaiting review worker shows expected badge status", %{conn: conn, ws: ws} do
-    {:ok, task} = Ash.create(Issue, %{title: "awaiting-task", workspace_id: ws.id})
+  # bd-741sid: the worker that opens a PR no longer parks on it at
+  # :awaiting_review — its run ends and the ticket owns the PR. The MR's badge
+  # went with it, from this list to the ticket's Merge request panel.
+  defp open_pr(ws, title) do
+    {:ok, task} = Ash.create(Issue, %{title: title, workspace_id: ws.id})
+    {:ok, _} = Ash.update(task, %{status: :in_progress})
     {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ws.id)
     :ok = Worker.advance(pid, :integrate)
+    run = Process.monitor(pid)
     {:ok, _} = Worker.open_mr(pid, "feature/test", "Test", "", merge_opts())
-
-    # Record merger status: MR is open, not approved (awaiting review)
-    :ok = Worker.record_merger_status(pid, %{status: :open, approved: false})
-
-    {:ok, _view, html} = live_workers(conn, ~p"/workers?status=awaiting")
-
-    assert html =~ task.id
-    # When CI is not running, should show "Open · awaiting approval"
-    assert html =~ "Open · awaiting approval"
+    assert_receive {:DOWN, ^run, :process, ^pid, _}, 2_000
+    task
   end
 
-  test "awaiting review worker with running CI shows CI running badge", %{conn: conn, ws: ws} do
-    {:ok, task} = Ash.create(Issue, %{title: "ci-running-task", workspace_id: ws.id})
-    {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ws.id)
-    :ok = Worker.advance(pid, :integrate)
-    {:ok, _} = Worker.open_mr(pid, "feature/test", "Test", "", merge_opts())
+  test "an MR awaiting approval leaves the list and badges the ticket's merge request", %{
+    conn: conn,
+    ws: ws
+  } do
+    task = open_pr(ws, "awaiting-task")
+
+    # Record merger status: MR is open, not approved (awaiting review)
+    :ok = PullRequest.record_merger_status(task.id, %{status: :open, approved: false})
+
+    {:ok, view, _html} = live_workers(conn, ~p"/workers?status=awaiting")
+    assert has_element?(view, ~s(#workers-panel[data-state="loaded"]))
+    refute has_element?(view, ~s(#workers a[href="/workers/#{task.id}"]))
+
+    {:ok, view, _html} = live_worker(conn, task.id)
+    # When CI is not running, should show "Open · awaiting approval"
+    assert has_element?(view, "#worker-merge-request", "Open · awaiting approval")
+  end
+
+  test "an MR with running CI badges the ticket's merge request CI running", %{
+    conn: conn,
+    ws: ws
+  } do
+    task = open_pr(ws, "ci-running-task")
 
     # Record merger status: MR is open, not approved, but CI is running
-    :ok = Worker.record_merger_status(pid, %{status: :open, approved: false, pipeline: :running})
+    :ok =
+      PullRequest.record_merger_status(task.id, %{
+        status: :open,
+        approved: false,
+        pipeline: :running
+      })
 
-    {:ok, _view, html} = live_workers(conn, ~p"/workers?status=awaiting")
-
-    assert html =~ task.id
+    {:ok, view, _html} = live_worker(conn, task.id)
     # When CI is running, should show "Open · CI running"
-    assert html =~ "Open · CI running"
+    assert has_element?(view, "#worker-merge-request", "Open · CI running")
   end
 
   # bd-45tkhq round 2: a wedged worker whose registry key has no matching

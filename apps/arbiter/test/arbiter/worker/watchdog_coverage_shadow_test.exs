@@ -9,6 +9,10 @@ defmodule Arbiter.Worker.WatchdogCoverageShadowTest do
   count and log. A test that asserted the coverage predicate's own answer
   belongs in `coverage_decide_test.exs`; what belongs here is that the merge
   came out the same either way.
+
+  bd-741sid: the Watchdog is keyed by the ticket and drives it; no worker is
+  paired with it. A merge is read off its announcement (`Watchdog.subscribe/1`)
+  and the ticket row, where it used to complete the worker.
   """
   use Arbiter.DataCase, async: false
 
@@ -21,7 +25,6 @@ defmodule Arbiter.Worker.WatchdogCoverageShadowTest do
   alias Arbiter.Tasks.Issue
   alias Arbiter.Test.StubAutoResumeDispatcher
   alias Arbiter.Test.StubMerger
-  alias Arbiter.Worker
   alias Arbiter.Worker.Watchdog
 
   @reviewed_diff """
@@ -76,7 +79,9 @@ defmodule Arbiter.Worker.WatchdogCoverageShadowTest do
     })
   end
 
-  defp running_task(attrs) do
+  # The ticket the Watchdog is keyed by and drives. bd-741sid: no worker is
+  # attached; the run that opened the PR has ended.
+  defp reviewed_task(attrs) do
     ws = workspace()
 
     task =
@@ -88,17 +93,14 @@ defmodule Arbiter.Worker.WatchdogCoverageShadowTest do
         )
       )
 
-    {:ok, pid} = Worker.start(task_id: task.id, repo: "arbiter")
-    :ok = Worker.advance(pid, :implement)
-    on_exit(fn -> stop_quietly(pid) end)
-
-    {pid, task, ws}
+    {task, ws}
   end
 
-  defp start_watchdog(worker_pid, task_id, mr_ref, ws, opts) do
+  # Subscribes to the ticket's Watchdog outcomes before starting it, so no
+  # announcement can be missed.
+  defp start_watchdog(task_id, mr_ref, ws, opts) do
     base = [
       task_id: task_id,
-      worker: worker_pid,
       mr_ref: mr_ref,
       adapter: StubMerger,
       workspace: ws,
@@ -108,9 +110,17 @@ defmodule Arbiter.Worker.WatchdogCoverageShadowTest do
       auto_resume_dispatcher: StubAutoResumeDispatcher
     ]
 
+    :ok = Watchdog.subscribe(task_id)
     {:ok, wpid} = Watchdog.start(Keyword.merge(base, opts))
     on_exit(fn -> stop_quietly(wpid) end)
     wpid
+  end
+
+  # bd-741sid: the merge finishes the ticket (`PullRequest.merged/2`), where it
+  # used to complete the worker paired with the Watchdog.
+  defp assert_merged(task_id, timeout \\ 2_000) do
+    assert_receive {:watchdog, ^task_id, {:merged, _}}, timeout
+    assert Ash.get!(Issue, task_id).state == :closed
   end
 
   defp wait_until(fun, timeout \\ 2_000) do
@@ -137,7 +147,7 @@ defmodule Arbiter.Worker.WatchdogCoverageShadowTest do
       head = sha("wd-agree")
       mr_ref = "!wdshadow1"
 
-      {pid, task, ws} = running_task(%{last_reviewed_sha: head})
+      {task, ws} = reviewed_task(%{last_reviewed_sha: head})
 
       {:ok, _} =
         Coverage.record(%{
@@ -156,8 +166,8 @@ defmodule Arbiter.Worker.WatchdogCoverageShadowTest do
 
       log =
         capture_log(fn ->
-          start_watchdog(pid, task.id, mr_ref, ws, last_reviewed_sha: head)
-          wait_until(fn -> Worker.state(pid).status == :completed end)
+          start_watchdog(task.id, mr_ref, ws, last_reviewed_sha: head)
+          assert_merged(task.id)
         end)
 
       assert StubMerger.last_merge() == {mr_ref, head}
@@ -175,7 +185,7 @@ defmodule Arbiter.Worker.WatchdogCoverageShadowTest do
       head = sha("wd-disagree")
       mr_ref = "!wdshadow2"
 
-      {pid, task, ws} = running_task(%{last_reviewed_sha: head})
+      {task, ws} = reviewed_task(%{last_reviewed_sha: head})
 
       StubMerger.set_diff(mr_ref, head, @reviewed_diff)
 
@@ -185,8 +195,8 @@ defmodule Arbiter.Worker.WatchdogCoverageShadowTest do
 
       log =
         capture_log(fn ->
-          start_watchdog(pid, task.id, mr_ref, ws, last_reviewed_sha: head)
-          wait_until(fn -> Worker.state(pid).status == :completed end)
+          start_watchdog(task.id, mr_ref, ws, last_reviewed_sha: head)
+          assert_merged(task.id)
         end)
 
       assert StubMerger.last_merge() == {mr_ref, head},
@@ -218,7 +228,7 @@ defmodule Arbiter.Worker.WatchdogCoverageShadowTest do
       head = sha("wd-authored")
       mr_ref = "!wdshadow3"
 
-      {pid, task, ws} = running_task(%{last_reviewed_sha: reviewed})
+      {task, ws} = reviewed_task(%{last_reviewed_sha: reviewed})
 
       {:ok, _} =
         Coverage.record(%{
@@ -240,7 +250,7 @@ defmodule Arbiter.Worker.WatchdogCoverageShadowTest do
 
       log =
         capture_log(fn ->
-          start_watchdog(pid, task.id, mr_ref, ws, last_reviewed_sha: reviewed)
+          start_watchdog(task.id, mr_ref, ws, last_reviewed_sha: reviewed)
           wait_until(fn -> StubAutoResumeDispatcher.resume_count() == 1 end)
         end)
 

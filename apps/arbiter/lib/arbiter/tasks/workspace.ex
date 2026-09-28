@@ -447,9 +447,9 @@ defmodule Arbiter.Tasks.Workspace do
   `config["merge"]["auto_merge"]`.
 
   When `true`, an approved (but not-yet-merged) MR is merged automatically by
-  the worker's `Arbiter.Worker.Watchdog` before the worker completes. When
-  `false` (the default), the worker parks at `:awaiting_review` until a human
-  merges; the next poll then sees `:merged` and completes.
+  the ticket's `Arbiter.Worker.Watchdog`. When `false` (the default), the
+  ticket stays Merging until a human merges; the next poll then sees `:merged`
+  and finishes the ticket.
 
   Accepts both a real boolean and the string `"true"`/`"false"` that round-trip
   through JSON workspace config. Anything else is treated as `false`.

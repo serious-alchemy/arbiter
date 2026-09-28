@@ -188,6 +188,11 @@ defmodule Arbiter.Worker.ReviewGateReconcileTest do
     :ok
   end
 
+  # bd-741sid: the run ends when its PR opens (Direct: merges) — the worker
+  # exits and the ticket's Watchdog owns the PR.
+  defp wait_run_ended(pid, timeout \\ 3_000),
+    do: wait_until(fn -> not Process.alive?(pid) end, timeout)
+
   defp run_for(task_id) do
     Arbiter.Workers.Run
     |> Ash.Query.filter(task_id == ^task_id)
@@ -209,20 +214,23 @@ defmodule Arbiter.Worker.ReviewGateReconcileTest do
           {:approve, "VERDICT: APPROVE\nAll findings addressed."}
         )
 
-      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end)
+      wait_run_ended(pid)
 
       # The merge handoff actually happened — the whole point of the ticket.
       assert merge_commit_count(repo) == 1
 
-      snap = Worker.state(pid)
-      assert snap.meta.review_gate_verdict == :approve
-      refute Map.has_key?(snap.meta, :failure_reason)
-      refute Map.has_key?(snap.meta, :failure_summary)
-
-      # The reversal is recorded, not silent.
-      assert snap.meta.review_gate_reconciled_from == :review_gate_rejected
-
+      # bd-741sid: the round state is the ticket's, and the reversal is recorded
+      # there, not silent.
       {:ok, reloaded} = Ash.get(Issue, task.id)
+
+      assert %{"verdict" => "approve", "reconciled_from" => "review_gate_rejected"} =
+               reloaded.review_gate_state
+
+      run = run_for(task.id)
+      assert run.status == :completed
+      assert is_nil(run.failure_reason)
+      assert is_nil(run.failure_summary)
+
       assert reloaded.notes =~ "ReviewGate verdict: APPROVE"
     end
 
@@ -237,7 +245,7 @@ defmodule Arbiter.Worker.ReviewGateReconcileTest do
       assert is_binary(failed_run.failure_summary)
 
       :ok = Worker.review_gate_verdict(pid, {:approve, "VERDICT: APPROVE\nlgtm"})
-      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end)
+      wait_run_ended(pid)
 
       reconciled = run_for(task.id)
       assert reconciled.id == failed_run.id
@@ -248,15 +256,14 @@ defmodule Arbiter.Worker.ReviewGateReconcileTest do
 
     # The Direct merger completes *inside* `merge_branch/3`, so the test above
     # only proves the row is clean once `record_run_finished/1` has rewritten it
-    # terminally. The reported configuration (GitLab `ryanborn/vstim!154`) never
-    # gets there: `finalize_opened_mr/5` parks at `:awaiting_review` with the MR
-    # open and records only the PR ref. Without an explicit write-back the row
-    # keeps the rejection's `:failed` / `:review_gate_rejected` /
-    # `failure_summary` / `completed_at` for as long as the MR stays open —
-    # indefinitely on this `auto_merge: false` workspace — which is exactly what
-    # `worker_show`'s historical fallback and the `worker_runs` failure surface
-    # read.
-    test "clears the rejection off the run row when the merge parks at :awaiting_review",
+    # terminally. The reported configuration (GitLab `ryanborn/vstim!154`) opens
+    # an MR and merges nothing locally. Before bd-741sid the worker then parked
+    # at `:awaiting_review` and the row kept the rejection unless written back;
+    # now the run ends at PR open, and its row must read finished and
+    # successful while the MR is merely open — indefinitely on this
+    # `auto_merge: false` workspace — which is exactly what `worker_show`'s
+    # historical fallback and the `worker_runs` failure surface read.
+    test "clears the rejection off the run row when the MR is merely opened",
          %{repo: repo, ws: ws} do
       StubMerger.reset()
       task = new_task(ws)
@@ -281,20 +288,19 @@ defmodule Arbiter.Worker.ReviewGateReconcileTest do
       assert failed_run.completed_at
 
       :ok = Worker.review_gate_verdict(pid, {:approve, "VERDICT: APPROVE\nlgtm"})
-      wait_until(fn -> match?(%{status: :awaiting_review}, Worker.state(pid)) end)
+      wait_run_ended(pid)
 
       # Nothing merged locally — the MR is open on the forge, which is the whole
       # window in which the stale row was visible.
       assert merge_commit_count(repo) == 0
-      assert Worker.state(pid).mr_ref == "!stub"
+      assert %Issue{state: :merging, pr_ref: "!stub"} = Ash.get!(Issue, task.id)
 
       reconciled = run_for(task.id)
       assert reconciled.id == failed_run.id
-      refute reconciled.status == :failed
-      assert reconciled.status == :running
+      assert reconciled.status == :completed
+      assert reconciled.mr_ref == "!stub"
       assert is_nil(reconciled.failure_reason)
       assert is_nil(reconciled.failure_summary)
-      assert is_nil(reconciled.completed_at)
     end
 
     test "tells the coordinator the earlier rejection was overturned", %{repo: repo, ws: ws} do
@@ -303,7 +309,7 @@ defmodule Arbiter.Worker.ReviewGateReconcileTest do
       :ok = reject_round_one(pid)
 
       :ok = Worker.review_gate_verdict(pid, {:approve, "VERDICT: APPROVE\nlgtm"})
-      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end)
+      wait_run_ended(pid)
 
       mail = Message.inbox("admiral", workspace_id: ws.id)
 
@@ -324,7 +330,7 @@ defmodule Arbiter.Worker.ReviewGateReconcileTest do
       assert Worker.state(pid).meta.failure_reason == :review_gate_inconclusive
 
       :ok = Worker.review_gate_verdict(pid, {:approve, "VERDICT: APPROVE\nlgtm"})
-      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end)
+      wait_run_ended(pid)
       assert merge_commit_count(repo) == 1
     end
   end
@@ -399,9 +405,11 @@ defmodule Arbiter.Worker.ReviewGateReconcileTest do
       ref = Process.monitor(gate)
       assert_receive {:DOWN, ^ref, :process, ^gate, _}, 8_000
 
-      wait_until(fn -> match?(%{status: :completed}, Worker.state(author)) end, 8_000)
+      wait_run_ended(author, 8_000)
       assert merge_commit_count(repo) == 1
-      assert Worker.state(author).meta.review_gate_reconciled_from == :review_gate_rejected
+
+      assert %{"reconciled_from" => "review_gate_rejected"} =
+               Ash.get!(Issue, task.id).review_gate_state
     end
   end
 
@@ -456,10 +464,12 @@ defmodule Arbiter.Worker.ReviewGateReconcileTest do
     # The `{:error, _}` return above is only half of it. `Worker.review_gate_verdict/2`
     # bottoms out in `GenServer.call/2` on a raw pid, so an author that died
     # between the round finishing and the report — process crash, node restart —
-    # makes that call *exit*. Plain `safe/1` flattens an exit to `:ok`, which is
-    # indistinguishable from a delivered verdict, so the most likely production
-    # orphan was the one case that stayed silent.
-    test "is logged when the author process is gone, not swallowed as delivered",
+    # makes that call *exit*. Plain `safe/1` flattened an exit to `:ok`, which was
+    # indistinguishable from a delivered verdict. bd-741sid: the ReviewGate
+    # reports to the ticket, so a gone author is no longer an orphan at all —
+    # the verdict is applied to the ticket
+    # (`Arbiter.Worker.ReviewGateTicketVerdictTest`).
+    test "is applied to the ticket when the author process is gone, not orphaned",
          %{repo: repo, ws: ws} do
       task = new_task(ws)
       branch = "feature/rev"
@@ -493,10 +503,12 @@ defmodule Arbiter.Worker.ReviewGateReconcileTest do
         end)
 
       refute Process.alive?(author)
-      assert log =~ "could not deliver"
-      assert log =~ "APPROVE"
-      assert log =~ task.id
-      assert log =~ "The review outcome is orphaned"
+      refute log =~ "could not deliver"
+      refute log =~ "The review outcome is orphaned"
+
+      # The approval went to the ticket: the Direct merge landed and closed it.
+      wait_until(fn -> Ash.get!(Issue, task.id).state == :closed end)
+      assert merge_commit_count(repo) == 1
     end
   end
 end

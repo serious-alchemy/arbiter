@@ -21,11 +21,12 @@ defmodule Arbiter.WorkerPrRefTest do
 
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Worker
+  alias Arbiter.Worker.Watchdog
   alias Arbiter.Workers.Run
   alias Arbiter.Test.StubMerger
 
-  # Park the auto-started Watchdog far in the future so it doesn't merge/complete
-  # (and tear the worker + task down) while we assert on the recorded pr_ref.
+  # Park the ticket's Watchdog far in the future so it doesn't merge (and close
+  # the task) while we assert on the recorded pr_ref.
   @parked %{
     adapter: StubMerger,
     workspace: nil,
@@ -39,7 +40,17 @@ defmodule Arbiter.WorkerPrRefTest do
     {:ok, ws} = Ash.create(Workspace, %{name: "pr-ref-ws", prefix: "pr"})
     {:ok, task} = Ash.create(Issue, %{title: "record my pr_ref", workspace_id: ws.id})
     {:ok, _} = Ash.update(task, %{status: :in_progress})
+    on_exit(fn -> stop_watchdog(task.id) end)
     {:ok, ws: ws, task: task}
+  end
+
+  defp stop_watchdog(task_id) do
+    case Watchdog.whereis(task_id) do
+      nil -> :ok
+      pid -> GenServer.stop(pid, :normal)
+    end
+  catch
+    :exit, _ -> :ok
   end
 
   test "open_mr records the opened ref onto the task's pr_ref", %{ws: ws, task: task} do
@@ -49,6 +60,7 @@ defmodule Arbiter.WorkerPrRefTest do
     on_exit(fn -> if Process.alive?(worker_pid), do: GenServer.stop(worker_pid, :normal) end)
 
     :ok = Worker.advance(worker_pid, :running)
+    ref = Process.monitor(worker_pid)
 
     assert {:ok, "#1234"} =
              Worker.open_mr(worker_pid, "bd-branch", "title", "body", @parked)
@@ -57,9 +69,11 @@ defmodule Arbiter.WorkerPrRefTest do
     # opening a duplicate.
     {:ok, reloaded} = Ash.get(Issue, task.id)
     assert reloaded.pr_ref == "#1234"
-    # The worker is parked for review; the task is not closed yet.
+    # The task is not closed yet: the run has ended (bd-741sid) and the
+    # ticket's Watchdog watches the PR.
     assert reloaded.status == :in_progress
-    assert Worker.state(worker_pid).status == :awaiting_review
+    assert_receive {:DOWN, ^ref, :process, ^worker_pid, :normal}, 1_000
+    assert Watchdog.alive?(task.id)
   end
 
   test "open_mr also records the ref onto this run's durable Workers.Run row (bd-6h4ia3)", %{

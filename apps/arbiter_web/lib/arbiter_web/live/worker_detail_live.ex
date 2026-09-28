@@ -10,6 +10,10 @@ defmodule ArbiterWeb.WorkerDetailLive do
     * `"worker:<task-id>"`  — per-line stdout events.
     * `"messages:<ws_id>"`   — `{:new_message, _}` so the mailbox panel
                                updates live when direction/flags arrive.
+    * `"tasks"` and `Arbiter.Tasks.PullRequest.topic/0` — the ticket's own
+      changes and every poll its Watchdog records, for the merge-request
+      panel. Since bd-741sid that panel is the ticket's: no worker stays
+      resident on an open PR.
   """
 
   use ArbiterWeb, :live_view
@@ -23,6 +27,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
 
   alias Arbiter.Messages.Message
   alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.PullRequest
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Usage.Event, as: UsageEvent
   alias Arbiter.Worker
@@ -82,19 +87,22 @@ defmodule ArbiterWeb.WorkerDetailLive do
       |> assign(:output_seam, nil)
       |> assign(:details_state, :loading)
       |> assign(:mailbox_topic, nil)
+      |> assign(:details_reload, nil)
       |> assign(empty_details())
 
     socket =
       if connected?(socket) do
         Phoenix.PubSub.subscribe(Arbiter.PubSub, @workers_topic)
         Phoenix.PubSub.subscribe(Arbiter.PubSub, output_topic(task_id))
+        Phoenix.PubSub.subscribe(Arbiter.PubSub, "tasks")
+        Phoenix.PubSub.subscribe(Arbiter.PubSub, PullRequest.topic())
         # Drives the live elapsed-time counter in the header. Only reassigns
         # :now — no DB reads or GenServer hops in the tick handler.
         :timer.send_interval(1000, self(), :tick)
 
         socket
         |> load_snapshot()
-        |> load_details()
+        |> reload_details()
       else
         socket
       end
@@ -128,6 +136,18 @@ defmodule ArbiterWeb.WorkerDetailLive do
   # A lifecycle event for some other worker on the shared "workers" topic —
   # not ours, so it must not touch our snapshot/toast/flow state.
   def handle_info({:worker_lifecycle, _event, _snap}, socket), do: {:noreply, socket}
+
+  # The ticket changed, or its Watchdog recorded a poll: the merge-request
+  # panel reads both off the row, which the details load re-reads.
+  def handle_info({:task_lifecycle, _event, %{id: task_id}}, %{assigns: %{task_id: task_id}} = s),
+    do: {:noreply, reload_details(s)}
+
+  def handle_info({:task_lifecycle, _event, _task}, socket), do: {:noreply, socket}
+
+  def handle_info({:pull_request, _event, task_id}, %{assigns: %{task_id: task_id}} = socket),
+    do: {:noreply, reload_details(socket)}
+
+  def handle_info({:pull_request, _event, _task_id}, socket), do: {:noreply, socket}
 
   def handle_info({:worker_output, _task_id, line}, socket) do
     {:noreply, receive_output_line(socket, line)}
@@ -279,12 +299,15 @@ defmodule ArbiterWeb.WorkerDetailLive do
     end
   end
 
-  # Mint a fresh Watchdog for a task whose Watchdog died outright (bd-8jixav).
-  # Unlike "retry_auto_resolve" above, this is not a cheap message to a live
-  # process: the parked worker re-prepares its merger adapter, which for a
-  # hosted forge rewrites config and can shell out. Run it async so a slow
-  # forge can't stall the LiveView (and with it the `:worker_lifecycle`
-  # stream) for the whole of `@restart_watchdog_timeout_ms`.
+  # Mint a fresh Watchdog for a ticket whose Watchdog died outright
+  # (bd-8jixav), from the ticket's row (bd-741sid). Unlike "retry_auto_resolve"
+  # above, this is not a cheap message to a live process: the new Watchdog
+  # prepares its merger adapter, which for a hosted forge rewrites config and
+  # can shell out. Run it async so a slow forge can't stall the LiveView (and
+  # with it the `:worker_lifecycle` stream).
+  #
+  # An operator's own restart, so a ticket pulled out of the merge queue goes
+  # back in it (`clear_pull: true`).
   def handle_event("restart_watchdog", _params, %{assigns: %{restarting_watchdog: true}} = socket) do
     {:noreply, socket}
   end
@@ -295,7 +318,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
     {:noreply,
      socket
      |> assign(:restarting_watchdog, true)
-     |> start_async(:restart_watchdog, fn -> Watchdog.restart(task_id) end)}
+     |> start_async(:restart_watchdog, fn -> Watchdog.restart(task_id, clear_pull: true) end)}
   end
 
   def handle_event("compose_change", %{"body" => body}, socket) do
@@ -399,12 +422,17 @@ defmodule ArbiterWeb.WorkerDetailLive do
      socket
      |> assign(details)
      |> assign(:details_state, :loaded)
-     |> subscribe_mailbox()}
+     |> subscribe_mailbox()
+     |> settle_details_reload()}
   end
 
   def handle_async(:details, {:exit, reason}, socket) do
     Logger.error("WorkerDetailLive: loading the task details failed: #{inspect(reason)}")
-    {:noreply, assign(socket, :details_state, {:error, describe_exit(reason)})}
+
+    {:noreply,
+     socket
+     |> assign(:details_state, {:error, describe_exit(reason)})
+     |> settle_details_reload()}
   end
 
   def handle_async(:retry, {:ok, {:ok, _result}}, socket) do
@@ -443,29 +471,9 @@ defmodule ArbiterWeb.WorkerDetailLive do
            "Restarted the merge watchdog for #{task_id}; it is polling the open " <>
              "#{socket.assigns.pr_label} again."}
 
-        {:error, :no_worker} ->
-          {:error,
-           "No worker is running for #{task_id}, so there is nothing to attach a watchdog to."}
-
-        {:error, :already_running} ->
-          {:error, "A merge watchdog is already running for #{task_id} — nothing to restart."}
-
-        {:error, {:not_parked, status}} ->
-          {:error,
-           "#{task_id}'s worker is #{status}, not awaiting review — it has no open " <>
-             "#{socket.assigns.pr_label} to watch."}
-
-        {:error, reason} when reason in [:no_mr_ref, :no_adapter] ->
-          {:error,
-           "#{task_id} is parked at awaiting review but recorded no " <>
-             "#{if reason == :no_mr_ref, do: "#{socket.assigns.pr_label} ref", else: "merger adapter"} " <>
-             "— there is nothing to watch."}
-
-        {:error, :busy} ->
-          {:error, "#{task_id}'s worker didn't answer in time — try again in a moment."}
-
-        {:error, {:start_failed, reason}} ->
-          {:error, "Watchdog restart failed: #{inspect(reason)}"}
+        {:error, reason} ->
+          {_kind, message} = Watchdog.restart_refusal(task_id, reason)
+          {:error, message}
       end
 
     {:noreply,
@@ -630,9 +638,18 @@ defmodule ArbiterWeb.WorkerDetailLive do
       workflow_steps: workflow_steps_for(ms),
       mailbox: fetch_mailbox(task_id),
       latest_run: fetch_latest_run(task_id),
-      usage_events: fetch_usage(task_id)
+      usage_events: fetch_usage(task_id),
+      watchdog: fetch_watchdog(task)
     }
   end
+
+  # bd-741sid: the ticket's Watchdog as the merge panel shows it — whether it
+  # is alive, and what it is parked on — read here with everything else, off
+  # the LiveView process, rather than by a GenServer hop at render time.
+  defp fetch_watchdog(%Issue{state: :merging, id: id}),
+    do: %{alive?: Watchdog.alive?(id), parked_on: Watchdog.parked_on(id)}
+
+  defp fetch_watchdog(_task), do: %{alive?: nil, parked_on: nil}
 
   defp empty_details do
     %{
@@ -642,9 +659,26 @@ defmodule ArbiterWeb.WorkerDetailLive do
       workflow_steps: [],
       mailbox: [],
       latest_run: nil,
-      usage_events: []
+      usage_events: [],
+      watchdog: %{alive?: nil, parked_on: nil}
     }
   end
+
+  # bd-741sid: a ticket or PR broadcast re-reads the details — but a read in
+  # flight is not restarted, because a newer `start_async/3` supersedes the
+  # older task's result, and a Watchdog polling faster than a read lands
+  # would starve the page. It is marked stale and read once more when it
+  # lands.
+  defp reload_details(%{assigns: %{details_reload: reload}} = socket)
+       when reload in [:running, :stale],
+       do: assign(socket, :details_reload, :stale)
+
+  defp reload_details(socket), do: socket |> assign(:details_reload, :running) |> load_details()
+
+  defp settle_details_reload(%{assigns: %{details_reload: :stale}} = socket),
+    do: socket |> assign(:details_reload, :running) |> load_details()
+
+  defp settle_details_reload(socket), do: assign(socket, :details_reload, nil)
 
   # Subscribes to the loaded task's workspace mailbox topic, once.
   defp subscribe_mailbox(socket) do
@@ -738,37 +772,54 @@ defmodule ArbiterWeb.WorkerDetailLive do
   defp retryable?(%Issue{}, %{status: status}), do: status not in @active_statuses
   defp retryable?(_task, _snapshot), do: false
 
+  # A Merging ticket: its PR is open and its Watchdog owns it (bd-741sid).
+  defp merging?(%Issue{state: :merging}), do: true
+  defp merging?(_task), do: false
+
   # Whether the "Retry auto-resolve" action makes sense to show at all — a
   # Watchdog parked on an exhausted :ci_failed block (bd-bspakl). Reads the
-  # Watchdog's own `park_reason` (via `parked_on/1`) rather than inferring
-  # from the merger-status snapshot: `effective_block_reason/1` (arity-1)
-  # hardcodes `via_review_gate: false` and so never sees a park reached
-  # through the ReviewGate-aware poll loop — exactly the standard Arbiter
-  # flow this action targets. `parked_on/1` is authoritative and needs no
-  # such inference.
-  defp retry_auto_resolve_available?(task_id, %{status: :awaiting_review}) do
-    # `:busy` (mid-poll, `parked_on/1` timed out) is treated as available
-    # rather than hidden: hiding it would make the button flicker out at
-    # exactly the moment an operator is likely to reach for it, and clicking
-    # through to a busy Watchdog surfaces a clear "try again" flash instead.
-    # `:ci_failed_external` (bd-5mzzww) is a reclassification of the same park,
-    # not a different one: once the infrastructure is fixed, re-arming is the
-    # right move, so hiding the button here would strand the task.
-    Watchdog.parked_on(task_id) in [:ci_failed, :ci_failed_external, :busy]
-  end
+  # Watchdog's own `park_reason` (via `parked_on/1`, in `fetch_watchdog/1`)
+  # rather than inferring from the merger status: `effective_block_reason/1`
+  # (arity-1) hardcodes `via_review_gate: false` and so never sees a park
+  # reached through the ReviewGate-aware poll loop — exactly the standard
+  # Arbiter flow this action targets. `parked_on/1` is authoritative and needs
+  # no such inference.
+  #
+  # `:busy` (mid-poll, `parked_on/1` timed out) is treated as available
+  # rather than hidden: hiding it would make the button flicker out at
+  # exactly the moment an operator is likely to reach for it, and clicking
+  # through to a busy Watchdog surfaces a clear "try again" flash instead.
+  # `:ci_failed_external` (bd-5mzzww) is a reclassification of the same park,
+  # not a different one: once the infrastructure is fixed, re-arming is the
+  # right move, so hiding the button here would strand the task.
+  defp retry_auto_resolve_available?(%Issue{state: :merging}, %{parked_on: reason}),
+    do: reason in [:ci_failed, :ci_failed_external, :busy]
 
-  defp retry_auto_resolve_available?(_task_id, _snapshot), do: false
+  defp retry_auto_resolve_available?(_task, _watchdog), do: false
 
   # A Watchdog is a `:temporary` child: when it crashes it is gone for good and
-  # nothing announces it. The worker stays parked at `:awaiting_review` with an
-  # open MR nothing is polling — invisible until someone notices the task never
-  # merged (bd-8jixav). Surface it here and offer the restart.
+  # nothing announces it. The ticket stays Merging with an open MR nothing is
+  # polling — invisible until someone notices it never merged (bd-8jixav).
+  # Surface it here and offer the restart.
   #
-  # Only `:awaiting_review` is checked: at every other status there is no
-  # Watchdog expected, so "missing" would be noise.
-  defp watchdog_missing?(task_id, %{status: :awaiting_review}), do: not Watchdog.alive?(task_id)
+  # Only a Merging ticket is checked: in every other state there is no
+  # Watchdog expected, so "missing" would be noise. Nor is one pulled out of
+  # the merge queue on purpose (`merge_pulled?/2`).
+  defp watchdog_missing?(%Issue{state: :merging} = task, %{alive?: false}),
+    do: not PullRequest.pulled?(task)
 
-  defp watchdog_missing?(_task_id, _snapshot), do: false
+  defp watchdog_missing?(_task, _watchdog), do: false
+
+  # bd-741sid: the operator pulled the PR out of the merge queue
+  # (`PullRequest.pull/1`). Nothing polls it on purpose; Restart watchdog puts
+  # it back.
+  defp merge_pulled?(%Issue{state: :merging} = task, %{alive?: false}),
+    do: PullRequest.pulled?(task)
+
+  defp merge_pulled?(_task, _watchdog), do: false
+
+  defp watchdog_restartable?(task, watchdog),
+    do: watchdog_missing?(task, watchdog) or merge_pulled?(task, watchdog)
 
   defp resume_failure(:no_outpost),
     do:
@@ -1125,27 +1176,6 @@ defmodule ArbiterWeb.WorkerDetailLive do
                       Actions
                     </span>
                     <Core.button
-                      :if={watchdog_missing?(@task_id, @snapshot)}
-                      id="worker-restart-watchdog-btn"
-                      phx-click="restart_watchdog"
-                      data-confirm={"Start a fresh merge watchdog for #{@task_id}, attached to its open #{@pr_label}? Nothing is polling it right now."}
-                      size="sm"
-                      disabled={@restarting_watchdog}
-                    >
-                      <:icon><Core.icon name="hero-bolt" size={12} /></:icon>
-                      {if @restarting_watchdog, do: "Restarting watchdog…", else: "Restart watchdog"}
-                    </Core.button>
-                    <Core.button
-                      :if={retry_auto_resolve_available?(@task_id, @snapshot)}
-                      id="worker-retry-auto-resolve-btn"
-                      phx-click="retry_auto_resolve"
-                      data-confirm={"Re-arm one more auto-resolve attempt for #{@task_id}? This dispatches a fresh fix-pass worker."}
-                      size="sm"
-                    >
-                      <:icon><Core.icon name="hero-arrow-path" size={12} /></:icon>
-                      Retry auto-resolve
-                    </Core.button>
-                    <Core.button
                       id="worker-resume-note-btn"
                       phx-click="open_retry"
                       size="sm"
@@ -1333,71 +1363,6 @@ defmodule ArbiterWeb.WorkerDetailLive do
               </.data_list>
             </.panel>
 
-            <%!-- ── Merge request ──────────────────────────────────────── --%>
-            <.panel :if={@snapshot.mr_ref} title="Merge request">
-              <%!-- bd-8jixav: a Watchdog is a :temporary process — when it dies --%>
-              <%!-- it is gone silently, and the fields below go stale forever --%>
-              <%!-- while still looking live. Say so before showing them. --%>
-              <div
-                :if={watchdog_missing?(@task_id, @snapshot)}
-                id="worker-no-watchdog-warning"
-                class="flex items-start gap-2 mb-3 rounded-[var(--radius-field)] border border-solid border-[var(--arb-attention)] bg-[color-mix(in_oklab,var(--arb-attention)_12%,transparent)] px-[10px] py-2"
-              >
-                <Core.icon
-                  name="hero-exclamation-triangle"
-                  size={14}
-                  class="mt-[2px] text-[var(--arb-attention)]"
-                />
-                <div class="text-[12.5px] leading-[1.5]">
-                  <span class="font-medium text-[var(--text-title)]">
-                    No watchdog is running for this task.
-                  </span>
-                  <span class="text-[var(--text-secondary)]">
-                    The {@pr_label} is still open but nothing is polling it, so it will never
-                    merge on its own. The values below are frozen at the last poll. Use
-                    <span class="font-medium">Restart watchdog</span>
-                    to start a replacement on the same {@pr_label}.
-                  </span>
-                </div>
-              </div>
-              <.data_list class="text-sm">
-                <:item label="MR">
-                  <%= if @snapshot.merger_url do %>
-                    <a
-                      href={@snapshot.merger_url}
-                      target="_blank"
-                      rel="noopener"
-                      class="hover:underline"
-                    >
-                      {@snapshot.mr_ref} ↗
-                    </a>
-                  <% else %>
-                    <code class="font-mono text-xs">{@snapshot.mr_ref}</code>
-                  <% end %>
-                </:item>
-                <:item label="Approval">
-                  <%= if merger_status = Map.get(@snapshot.meta || %{}, :last_merger_status) do %>
-                    <span class={["badge", approval_class(merger_status)]}>
-                      {approval_label(merger_status)}
-                    </span>
-                  <% else %>
-                    <span class="text-[var(--text-label)]">awaiting first poll…</span>
-                  <% end %>
-                </:item>
-                <:item label="Poll interval">{div(Watchdog.default_interval_ms(), 1000)}s</:item>
-                <:item label="Last checked">
-                  <%= case Map.get(@snapshot.meta || %{}, :last_checked_at) do %>
-                    <% %DateTime{} = ts -> %>
-                      <span class="font-mono text-xs tabular-nums">
-                        {Calendar.strftime(ts, "%Y-%m-%d %H:%M:%S UTC")}
-                      </span>
-                    <% _ -> %>
-                      <span class="text-[var(--text-label)]">never</span>
-                  <% end %>
-                </:item>
-              </.data_list>
-            </.panel>
-
             <%!-- ── Live activity (claude-driven) ──────────────────────── --%>
             <%!-- A claude-driven worker does the real work in a streaming --%>
             <%!-- subprocess; its Driver never ticks the workflow Machine, so --%>
@@ -1438,7 +1403,12 @@ defmodule ArbiterWeb.WorkerDetailLive do
             <.panel>
               <Feedback.empty_state
                 icon="hero-signal-slash"
-                detail="It may have stopped, or the Phoenix node was restarted since it ran."
+                detail={
+                  if merging?(@task),
+                    do:
+                      "Its #{@pr_label} is open, and the merge watchdog below watches it — no worker stays on it.",
+                    else: "It may have stopped, or the Phoenix node was restarted since it ran."
+                }
               >
                 No {@worker_label} registered for {@issue_label} <code class="font-mono">{@task_id}</code>.
               </Feedback.empty_state>
@@ -1455,6 +1425,118 @@ defmodule ArbiterWeb.WorkerDetailLive do
               </div>
             </.panel>
         <% end %>
+
+        <%!-- ── Merge request: the ticket's (bd-741sid) ─────────────── --%>
+        <.panel :if={merging?(@task)} id="worker-merge-request" title="Merge request">
+          <%!-- bd-8jixav: a Watchdog is a :temporary process — when it dies --%>
+          <%!-- it is gone silently, and the fields below go stale forever --%>
+          <%!-- while still looking live. Say so before showing them. --%>
+          <div
+            :if={watchdog_missing?(@task, @watchdog)}
+            id="worker-no-watchdog-warning"
+            class="flex items-start gap-2 mb-3 rounded-[var(--radius-field)] border border-solid border-[var(--arb-attention)] bg-[color-mix(in_oklab,var(--arb-attention)_12%,transparent)] px-[10px] py-2"
+          >
+            <Core.icon
+              name="hero-exclamation-triangle"
+              size={14}
+              class="mt-[2px] text-[var(--arb-attention)]"
+            />
+            <div class="text-[12.5px] leading-[1.5]">
+              <span class="font-medium text-[var(--text-title)]">
+                No watchdog is running for this task.
+              </span>
+              <span class="text-[var(--text-secondary)]">
+                The {@pr_label} is still open but nothing is polling it, so it will never
+                merge on its own. The values below are frozen at the last poll. Use
+                <span class="font-medium">Restart watchdog</span>
+                to start a replacement on the same {@pr_label}.
+              </span>
+            </div>
+          </div>
+          <%!-- bd-741sid: pulled out of the merge queue on purpose — not an alarm. --%>
+          <div
+            :if={merge_pulled?(@task, @watchdog)}
+            id="worker-merge-pulled-notice"
+            class="flex items-start gap-2 mb-3 rounded-[var(--radius-field)] border border-solid border-[var(--border-default)] bg-[var(--arb-canvas-sunken)] px-[10px] py-2"
+          >
+            <Core.icon
+              name="hero-pause-circle"
+              size={14}
+              class="mt-[2px] text-[var(--text-label)]"
+            />
+            <div class="text-[12.5px] leading-[1.5]">
+              <span class="font-medium text-[var(--text-title)]">
+                Pulled out of the merge queue.
+              </span>
+              <span class="text-[var(--text-secondary)]">
+                The {@pr_label} is still open, and nothing merges it on its own. The values
+                below are frozen at the last poll. Use
+                <span class="font-medium">Restart watchdog</span>
+                to put it back in the queue.
+              </span>
+            </div>
+          </div>
+          <.data_list class="text-sm">
+            <:item label="MR">
+              <%= if @task.merger_url do %>
+                <a href={@task.merger_url} target="_blank" rel="noopener" class="hover:underline">
+                  {@task.pr_ref} ↗
+                </a>
+              <% else %>
+                <code class="font-mono text-xs">{@task.pr_ref}</code>
+              <% end %>
+            </:item>
+            <:item label="Approval">
+              <%= if merger_status = PullRequest.merger_status(@task) do %>
+                <span class={["badge", approval_class(merger_status)]}>
+                  {approval_label(merger_status)}
+                </span>
+              <% else %>
+                <span class="text-[var(--text-label)]">awaiting first poll…</span>
+              <% end %>
+            </:item>
+            <:item label="Poll interval">{div(Watchdog.default_interval_ms(), 1000)}s</:item>
+            <:item label="Last checked">
+              <%= case @task.merger_checked_at do %>
+                <% %DateTime{} = ts -> %>
+                  <span class="font-mono text-xs tabular-nums">
+                    {Calendar.strftime(ts, "%Y-%m-%d %H:%M:%S UTC")}
+                  </span>
+                <% _ -> %>
+                  <span class="text-[var(--text-label)]">never</span>
+              <% end %>
+            </:item>
+          </.data_list>
+          <div
+            :if={
+              watchdog_restartable?(@task, @watchdog) or
+                retry_auto_resolve_available?(@task, @watchdog)
+            }
+            class="flex flex-wrap items-center gap-2 mt-3"
+          >
+            <Core.button
+              :if={watchdog_restartable?(@task, @watchdog)}
+              id="worker-restart-watchdog-btn"
+              phx-click="restart_watchdog"
+              data-confirm={"Start a fresh merge watchdog for #{@task_id}, attached to its open #{@pr_label}? Nothing is polling it right now."}
+              size="sm"
+              disabled={@restarting_watchdog}
+            >
+              <:icon><Core.icon name="hero-bolt" size={12} /></:icon>
+              {if @restarting_watchdog, do: "Restarting watchdog…", else: "Restart watchdog"}
+            </Core.button>
+            <Core.button
+              :if={retry_auto_resolve_available?(@task, @watchdog)}
+              id="worker-retry-auto-resolve-btn"
+              phx-click="retry_auto_resolve"
+              data-confirm={"Re-arm one more auto-resolve attempt for #{@task_id}? This dispatches a fresh fix-pass worker."}
+              size="sm"
+            >
+              <:icon><Core.icon name="hero-arrow-path" size={12} /></:icon>
+              Retry auto-resolve
+            </Core.button>
+          </div>
+        </.panel>
 
         <%!-- ── Mailbox + compose ──────────────────────────────────── --%>
         <div id="mailbox">

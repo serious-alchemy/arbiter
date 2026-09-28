@@ -254,9 +254,11 @@ defmodule Arbiter.Application do
   #   * reconcile_shutdown_casualties: re-stamp runs the previous node's stop
   #     failed :machine_died as :interrupted, so the resume sweep below picks
   #     them up with their slot held (bd-146u20 / #2053).
-  #   * reconcile_open_prs: find :in_progress tasks with a pr_ref but no live
-  #     worker — the server was killed between `arb done` and the Watchdog being
-  #     established. Escalates each to the coordinator. bd-crqku8.
+  #   * reconcile_open_prs: find in-progress tickets with a PR but no live
+  #     worker. Restarts the Watchdog of each Merging one from its row
+  #     (bd-741sid) and hands the rest to the patrols.
+  #     Escalates each to the coordinator only when neither can watch it.
+  #     bd-crqku8.
   #   * session_adoption: reconcile the `sessions` table against the coordinator
   #     sessions systemd and tmux still have running (bd-bpt0ag, RFC §4.6). This
   #     is the ONLY thing that reconnects Arbiter to a session after a restart —
