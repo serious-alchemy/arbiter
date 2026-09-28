@@ -171,6 +171,7 @@ defmodule Arbiter.Tasks.Workspace do
       change {Arbiter.Tasks.Workspace.Changes.MergeWorkerEnv, []}
       change {Arbiter.Tasks.Workspace.Changes.ValidateConfig, []}
       change {Arbiter.Tasks.Workspace.Changes.ReconcileMergedPRFinalizer, []}
+      change {Arbiter.Tasks.Workspace.Changes.ReconcilePatrols, []}
     end
 
     update :patch_config do
@@ -198,6 +199,7 @@ defmodule Arbiter.Tasks.Workspace do
       change {Arbiter.Tasks.Workspace.Changes.PatchConfig, []}
       change {Arbiter.Tasks.Workspace.Changes.ValidateConfig, []}
       change {Arbiter.Tasks.Workspace.Changes.ReconcileMergedPRFinalizer, []}
+      change {Arbiter.Tasks.Workspace.Changes.ReconcilePatrols, []}
     end
   end
 

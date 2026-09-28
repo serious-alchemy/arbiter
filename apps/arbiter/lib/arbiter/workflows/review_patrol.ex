@@ -344,6 +344,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   alias Arbiter.Worker.ReviewAutomation
   alias Arbiter.Workflows.{CodeReview, PatrolRepoScope, PatrolServer, ReviewReply}
   alias Arbiter.Workflows.ReviewPatrol.ThreadMemory
+  alias Arbiter.Workflows.ReviewPatrolSupervisor
   require Ash.Query
   require Logger
 
@@ -443,7 +444,10 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   def do_tick_body(state) do
     # Re-fetch the workspace on every tick so config changes take effect
-    # immediately without a GenServer restart (mirrors PRPatrol).
+    # immediately without a GenServer restart (mirrors PRPatrol). As there, the
+    # `repo` is fixed per instance (bd-7feiul): a tick whose workspace no longer
+    # resolves to it touches no engagement until `ReviewPatrolSupervisor.
+    # reconcile/1` replaces this patrol with one for the new repo.
     workspace = PatrolServer.refetch_workspace(state.workspace_id)
 
     now = clock_now()
@@ -469,6 +473,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
     else
       {outcomes, rate_limit} =
         with %Workspace{} <- workspace,
+             true <- repo_still_configured?(workspace, state.repo),
              adapter when not is_nil(adapter) <- resolve_adapter(workspace),
              true <- function_exported?(adapter, :get, 1),
              :ok <- Mergers.prepare_with_repo(workspace, state.repo) do
@@ -505,6 +510,19 @@ defmodule Arbiter.Workflows.ReviewPatrol do
           rate_limit: rate_limit,
           idle_ticks: idle_ticks
       }
+    end
+  end
+
+  defp repo_still_configured?(workspace, repo) do
+    if repo in ReviewPatrolSupervisor.patrol_repos(workspace) do
+      true
+    else
+      Logger.warning(
+        "ReviewPatrol: workspace #{workspace.id} no longer resolves to repo=#{repo} — " <>
+          "skipping the tick (awaiting reconcile to a patrol for the current repo)"
+      )
+
+      false
     end
   end
 

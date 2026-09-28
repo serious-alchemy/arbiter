@@ -3048,4 +3048,92 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
       assert ReviewPatrol.child_spec([]).restart == :transient
     end
   end
+
+  # bd-7feiul: a patrol is pinned to the `repo` it was started for, and
+  # `Mergers.prepare_with_repo/2` re-applies that slug every tick — so after a
+  # workspace edit moved merge.config owner/repo, a still-running patrol kept
+  # polling (and acting on) engagements against the OLD repo until a restart.
+  # The supervisor's reconcile replaces it; until then its tick must not touch
+  # the repo the workspace no longer resolves to.
+  describe "tick/1 — workspace no longer resolves to the patrol's repo (bd-7feiul)" do
+    defp merged_pr_requests_to(test_pid, number) do
+      stub(fn conn ->
+        send(test_pid, {:requested, conn.request_path})
+
+        if String.ends_with?(conn.request_path, "/reviews") do
+          conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+        else
+          conn
+          |> Plug.Conn.put_status(200)
+          |> Req.Test.json(%{
+            "number" => number,
+            "state" => "closed",
+            "merged" => true,
+            "head" => %{"sha" => "abc"},
+            "html_url" => "x"
+          })
+        end
+      end)
+    end
+
+    test "after an :update moves merge.config owner, the old patrol's tick queries and closes nothing",
+         %{ws: ws} do
+      eng = engagement(ws, 140)
+      {_pid, name} = start_patrol(ws)
+
+      {:ok, _ws} =
+        Ash.update(
+          ws,
+          %{
+            config: %{
+              "merge" => %{
+                "strategy" => "github",
+                "config" => %{
+                  "owner" => "new-owner",
+                  "repo" => "repo",
+                  "credentials_ref" => "env:GITHUB_TOKEN"
+                }
+              },
+              "review_patrol" => %{"our_login" => "botreviewer"}
+            }
+          },
+          action: :update
+        )
+
+      merged_pr_requests_to(self(), 140)
+      :ok = ReviewPatrol.tick(name)
+
+      refute_received {:requested, _}
+      assert reload(eng).status != :closed
+      assert ReviewPatrol.state(name).ticks == 1
+    end
+
+    test "after a :patch_config moves merge.config repo, the old patrol's tick queries nothing",
+         %{ws: ws} do
+      eng = engagement(ws, 141)
+      {_pid, name} = start_patrol(ws)
+
+      {:ok, _ws} =
+        Ash.update(ws, %{patch: %{"merge" => %{"config" => %{"repo" => "renamed"}}}},
+          action: :patch_config
+        )
+
+      merged_pr_requests_to(self(), 141)
+      :ok = ReviewPatrol.tick(name)
+
+      refute_received {:requested, _}
+      assert reload(eng).status != :closed
+    end
+
+    test "a patrol whose repo still resolves keeps acting on it", %{ws: ws} do
+      eng = engagement(ws, 142)
+      {_pid, name} = start_patrol(ws)
+
+      merged_pr_requests_to(self(), 142)
+      :ok = ReviewPatrol.tick(name)
+
+      assert_received {:requested, "/repos/owner/repo/pulls/142"}
+      assert reload(eng).status == :closed
+    end
+  end
 end
