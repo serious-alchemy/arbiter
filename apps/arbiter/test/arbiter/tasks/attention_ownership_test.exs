@@ -189,6 +189,35 @@ defmodule Arbiter.Tasks.AttentionOwnershipTest do
       assert %{promoted: []} = AttentionSweep.run(now: DateTime.add(now, 9 * 3600, :second))
     end
 
+    test "the supervised sweeper promotes on its tick, on the primary instance only", ctx do
+      raise_crash(ctx.task)
+      later = DateTime.add(DateTime.utc_now(), 5 * 3600, :second)
+
+      secondary =
+        start_supervised!(
+          {AttentionSweep,
+           name: nil, enabled: false, primary?: fn -> false end, clock: fn -> later end},
+          id: :secondary
+        )
+
+      send(secondary, :sweep)
+      _ = :sys.get_state(secondary)
+      assert Ash.get!(Issue, ctx.task.id).attention_owner == nil
+
+      primary =
+        start_supervised!(
+          {AttentionSweep,
+           name: nil, enabled: false, primary?: fn -> true end, clock: fn -> later end},
+          id: :primary
+        )
+
+      send(primary, :sweep)
+      _ = :sys.get_state(primary)
+
+      assert Ash.get!(Issue, ctx.task.id).attention_note ==
+               "coordinator did not resolve within 4h"
+    end
+
     test "the workspace sets the time limit, and 0 turns it off", ctx do
       {:ok, _} =
         Ash.update(ctx.ws, %{config: %{"attention" => %{"coordinator_limit_minutes" => 30}}})

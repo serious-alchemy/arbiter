@@ -29,7 +29,8 @@ defmodule Arbiter.Tasks.AttentionSweep do
   ## Configuration
 
   Via `config :arbiter, :attention_sweep`: `:enabled` (default `true`; `false`
-  in test) and `:interval_ms` (default 60 000).
+  in test) and `:interval_ms` (default 60 000). `start_link/1` also takes
+  `:primary?` and `:clock` (zero-arity funs, for tests).
   """
 
   use GenServer
@@ -115,7 +116,9 @@ defmodule Arbiter.Tasks.AttentionSweep do
       enabled: Keyword.get(opts, :enabled, Keyword.get(cfg, :enabled, true)),
       interval_ms:
         Keyword.get(opts, :interval_ms, Keyword.get(cfg, :interval_ms, @default_interval_ms)),
-      seen: %{}
+      seen: %{},
+      primary?: Keyword.get(opts, :primary?, &Arbiter.SingleInstance.primary?/0),
+      clock: Keyword.get(opts, :clock, &DateTime.utc_now/0)
     }
 
     if state.enabled, do: schedule(state.interval_ms)
@@ -125,8 +128,8 @@ defmodule Arbiter.Tasks.AttentionSweep do
   @impl true
   def handle_info(:sweep, state) do
     seen =
-      if Arbiter.SingleInstance.primary?() do
-        run(seen: state.seen).seen
+      if state.primary?.() do
+        run(seen: state.seen, now: state.clock.()).seen
       else
         state.seen
       end
