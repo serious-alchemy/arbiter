@@ -223,6 +223,7 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
       {:ok, m} =
         Message.send_mail(%{
           kind: :escalation,
+          escalation_kind: :agent_raised,
           workspace_id: ws,
           to_ref: "coordinator",
           body: "shared escalation"
@@ -295,6 +296,7 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
       {:ok, m} =
         Message.send_mail(%{
           kind: :escalation,
+          escalation_kind: :agent_raised,
           workspace_id: ws,
           to_ref: "coordinator",
           task_ref: task,
@@ -357,6 +359,7 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
       {:ok, archived} =
         Message.send_mail(%{
           kind: :escalation,
+          escalation_kind: :agent_raised,
           workspace_id: ws.id,
           to_ref: "coordinator",
           body: "resolved long ago"
@@ -368,6 +371,7 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
       {:ok, unresolved} =
         Message.send_mail(%{
           kind: :escalation,
+          escalation_kind: :agent_raised,
           workspace_id: ws.id,
           to_ref: "coordinator",
           body: "still owed"
@@ -448,6 +452,7 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
       {:ok, escalation} =
         Message.send_mail(%{
           kind: :escalation,
+          escalation_kind: :agent_raised,
           workspace_id: @ws,
           to_ref: "coordinator",
           task_ref: task,
@@ -457,6 +462,7 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
       {:ok, unrelated} =
         Message.send_mail(%{
           kind: :escalation,
+          escalation_kind: :agent_raised,
           workspace_id: @ws,
           to_ref: "coordinator",
           task_ref: "bd-ctrl-other",
@@ -480,6 +486,7 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
       {:ok, elsewhere} =
         Message.send_mail(%{
           kind: :escalation,
+          escalation_kind: :agent_raised,
           workspace_id: "ws-elsewhere-2",
           to_ref: "coordinator",
           task_ref: task,

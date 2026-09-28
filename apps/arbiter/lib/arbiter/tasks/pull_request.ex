@@ -29,7 +29,7 @@ defmodule Arbiter.Tasks.PullRequest do
   alias Arbiter.Mergers
   alias Arbiter.Mergers.PendingMerge
   alias Arbiter.Messages.CoordinatorNotifier
-  alias Arbiter.Messages.Message
+  alias Arbiter.Messages.Escalation
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Verification
   alias Arbiter.Tasks.Workspace
@@ -506,9 +506,8 @@ defmodule Arbiter.Tasks.PullRequest do
 
   defp escalate_closed(%Issue{workspace_id: ws_id, id: id} = issue, mr_ref)
        when is_binary(ws_id) do
-    Message.send_mail(%{
-      kind: :escalation,
-      to_ref: Message.coordinator_ref(),
+    Escalation.post(%{
+      kind: :pr_closed,
       from_ref: id,
       workspace_id: ws_id,
       task_ref: id,

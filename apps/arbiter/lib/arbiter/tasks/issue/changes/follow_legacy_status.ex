@@ -26,12 +26,15 @@ defmodule Arbiter.Tasks.Issue.Changes.FollowLegacyStatus do
 
   use Ash.Resource.Change
 
+  alias Arbiter.Tasks.Issue.Changes.ClearAttention
   alias Arbiter.Tasks.Lifecycle
   alias Ash.Changeset
 
   @impl true
   def change(changeset, _opts, _context) do
-    Changeset.before_action(changeset, &follow/1)
+    changeset
+    |> Changeset.before_action(&follow/1)
+    |> ClearAttention.resolve_after_commit(true)
   end
 
   defp follow(changeset) do
@@ -48,7 +51,17 @@ defmodule Arbiter.Tasks.Issue.Changes.FollowLegacyStatus do
           pending_merge: Changeset.get_attribute(changeset, :pending_merge)
         })
 
-      Changeset.force_change_attribute(changeset, :state, state)
+      changeset
+      |> Changeset.force_change_attribute(:state, state)
+      |> clear_attention(state)
     end
+  end
+
+  # bd-8if9zt: a state change clears the ticket's attention, as a named
+  # transition does (`Changes.Transition`).
+  defp clear_attention(changeset, state) do
+    if state == changeset.data.state,
+      do: changeset,
+      else: Changeset.force_change_attributes(changeset, ClearAttention.nil_fields())
   end
 end

@@ -74,10 +74,12 @@ defmodule Arbiter.Tasks.LifecycleViewTest do
       assert %{column: :closed, step: nil} = view(ticket(:closed))
     end
 
-    test "attention is nil in every state until the attention child fills it" do
-      for state <- Lifecycle.states() do
+    test "with no cause stored and no runs read, only a verifying ticket needs attention" do
+      for state <- Lifecycle.states() -- [:verifying] do
         assert view(ticket(state)).attention == nil
       end
+
+      assert %{cause: :awaiting_verification} = view(ticket(:verifying)).attention
     end
 
     test "a blocker only gates a queued ticket" do

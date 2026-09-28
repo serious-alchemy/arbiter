@@ -106,7 +106,7 @@ defmodule Arbiter.Loop.Canary do
   alias Arbiter.Loop
   alias Arbiter.Loop.Canary.Metrics
   alias Arbiter.Loop.PendingWrite
-  alias Arbiter.Messages.Message
+  alias Arbiter.Messages.Escalation
   alias Arbiter.Tasks.Workspace
 
   require Logger
@@ -932,9 +932,8 @@ defmodule Arbiter.Loop.Canary do
   # is the failure mode this whole stage is trying to avoid — but a mail hiccup
   # must never abort (or, worse, half-abort) the change itself.
   defp notify(%Workspace{} = ws, %__MODULE__{} = canary, headline, detail) do
-    Message.send_mail(%{
-      kind: :escalation,
-      to_ref: Message.coordinator_ref(),
+    Escalation.post(%{
+      kind: :loop_canary,
       from_ref: "loop",
       workspace_id: ws.id,
       subject: "loop canary #{headline}: D#{canary.difficulty} routing tier",

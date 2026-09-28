@@ -445,13 +445,14 @@ defmodule Arbiter.MCP.ToolsTest do
     test "a session launched after an unresolved escalation still sees it", ctx do
       # The feature's primary use case: the notifier raises an escalation while
       # no session is running, the operator launches one to deal with it. The
-      # row stays uncleared, so `last_with_subject/3` keeps suppressing a
+      # row stays uncleared, so `last_escalation/2` keeps suppressing a
       # repeat — if the session could not see it, nothing ever would re-deliver
       # it.
       {:ok, _} =
         Message.send_mail(%{
           workspace_id: ctx.ws.id,
           kind: :escalation,
+          escalation_kind: :agent_raised,
           to_ref: "coordinator",
           subject: "budget exhausted",
           body: "before-the-session"
@@ -470,10 +471,7 @@ defmodule Arbiter.MCP.ToolsTest do
 
       # The dedupe signal is untouched by the session reading it.
       assert %{body: "before-the-session"} =
-               Message.last_with_subject(Message.coordinator_ref(), ["budget exhausted"],
-                 workspace_id: ctx.ws.id,
-                 uncleared: true
-               )
+               Message.last_escalation(:agent_raised, workspace_id: ctx.ws.id, open: true)
     end
 
     test "the minted-token path carries session identity all the way to the handler", ctx do
@@ -682,6 +680,7 @@ defmodule Arbiter.MCP.ToolsTest do
       {:ok, escalation} =
         Message.send_mail(%{
           kind: :escalation,
+          escalation_kind: :agent_raised,
           workspace_id: ctx.ws.id,
           to_ref: "coordinator",
           task_ref: ctx.task.id,
@@ -691,6 +690,7 @@ defmodule Arbiter.MCP.ToolsTest do
       {:ok, unrelated} =
         Message.send_mail(%{
           kind: :escalation,
+          escalation_kind: :agent_raised,
           workspace_id: ctx.ws.id,
           to_ref: "coordinator",
           task_ref: "some-other-task",
@@ -734,6 +734,7 @@ defmodule Arbiter.MCP.ToolsTest do
       {:ok, m} =
         Message.send_mail(%{
           kind: :escalation,
+          escalation_kind: :agent_raised,
           workspace_id: ctx.ws.id,
           to_ref: "coordinator",
           task_ref: ctx.task.id,

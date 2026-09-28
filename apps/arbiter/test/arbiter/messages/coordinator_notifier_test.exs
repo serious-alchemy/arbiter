@@ -432,7 +432,10 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
       assert only_one.body =~ "Reason: needs_approval"
     end
 
-    test "a genuinely different block reason still escalates" do
+    # bd-8if9zt: the item is the ticket's `:merge_blocked` escalation — one
+    # while it is open. A genuinely different block is news, so it goes
+    # through, and refreshes that item to say what blocks the merge now.
+    test "a genuinely different block reason refreshes the one open item" do
       ws = uniq("ws")
       task_id = uniq("bd")
       snapshot = %{task_id: task_id, workspace_id: ws}
@@ -440,7 +443,9 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
       assert :ok = CoordinatorNotifier.merge_blocked(snapshot, "#1226", :needs_nonauthor_approval)
       assert :ok = CoordinatorNotifier.merge_blocked(snapshot, "#1226", :ci_failed)
 
-      assert [_approval, _ci] = merge_escalations(ws)
+      assert [only_one] = merge_escalations(ws)
+      assert only_one.escalation_kind == :merge_blocked
+      assert only_one.body =~ "Reason: ci_failed"
     end
 
     test "an outstanding (read-but-uncleared) escalation still dedupes" do

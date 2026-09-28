@@ -64,7 +64,7 @@ defmodule Arbiter.Messages.Message do
 
     * A **session** reader (`session_reader/1`) writes only its own receipt. The
       row's `cleared_at` stays nil, so one session triaging its copy cannot
-      re-arm an escalation the `last_with_subject/3` dedupe is suppressing.
+      re-arm an escalation the `last_escalation/2` dedupe is suppressing.
     * The **sessionless coordinator** reader (`coordinator_reader/0` — the CLI,
       the dashboard drawer, a plain minted token) mirrors its writes onto the
       row *and* reads through it, so the REST listing, `hard_purge/2` and that
@@ -78,7 +78,7 @@ defmodule Arbiter.Messages.Message do
   session started, **plus** every row that is still globally uncleared. The
   second half is what matters — an escalation raised before the session was
   launched is exactly what that session is usually launched to deal with, and
-  the `last_with_subject/3` dedupe guarantees it is never re-raised. Only the
+  the `last_escalation/2` dedupe guarantees it is never re-raised. Only the
   resolved archive is withheld.
 
   ## PubSub
@@ -175,7 +175,8 @@ defmodule Arbiter.Messages.Message do
         :subject,
         :body,
         :task_ref,
-        :directive_ref
+        :directive_ref,
+        :escalation_kind
       ]
 
       # bd-58vtjk: `task_ref` is the canonical field; `directive_ref` is the
@@ -233,6 +234,41 @@ defmodule Arbiter.Messages.Message do
              end)
     end
 
+    # bd-8if9zt: the `(kind, ticket)` dedupe folds a repeat of an open
+    # ticket-scoped escalation into the open row — its subject and body take
+    # the latest wording (`Arbiter.Messages.Escalation.post/1`). Kind, ticket
+    # and address are left alone: they are the row's identity.
+    update :refresh do
+      accept [:subject, :body]
+      require_atomic? false
+
+      change after_action(fn _changeset, message, _context ->
+               Arbiter.Messages.Message.broadcast_updated(message)
+               {:ok, message}
+             end)
+    end
+
+    # bd-8if9zt: the system resolved this escalation because its ticket moved
+    # on (`Arbiter.Tasks.Attention.clear/2`). Resolved rows are cleared too, so
+    # every outstanding queue drops them; `resolved_at` says it was the ticket,
+    # not a reader, that cleared it.
+    update :resolve do
+      accept []
+      require_atomic? false
+      change set_attribute(:resolved_at, &DateTime.utc_now/0)
+
+      change fn changeset, _context ->
+        if is_nil(changeset.data.cleared_at),
+          do: Ash.Changeset.force_change_attribute(changeset, :cleared_at, DateTime.utc_now()),
+          else: changeset
+      end
+
+      change after_action(fn _changeset, message, _context ->
+               Arbiter.Messages.Message.broadcast_cleared(message.workspace_id)
+               {:ok, message}
+             end)
+    end
+
     update :restate do
       # bd-6jjgk0: rewrites the body of an outstanding escalation in place —
       # used by callers that fold a repeated failure cycle (an updated
@@ -266,6 +302,26 @@ defmodule Arbiter.Messages.Message do
         :ok
       end
     end
+
+    # bd-8if9zt: an escalation is identified by its typed kind, never by its
+    # subject text, so one without a kind is refused — and only an escalation
+    # carries one. Create-only, so an old row is still readable and clearable.
+    validate fn changeset, _context ->
+               kind = Ash.Changeset.get_attribute(changeset, :kind)
+               escalation_kind = Ash.Changeset.get_attribute(changeset, :escalation_kind)
+
+               cond do
+                 kind == :escalation and is_nil(escalation_kind) ->
+                   {:error, field: :escalation_kind, message: "is required on an :escalation"}
+
+                 kind != :escalation and not is_nil(escalation_kind) ->
+                   {:error, field: :escalation_kind, message: "is only set on an :escalation"}
+
+                 true ->
+                   :ok
+               end
+             end,
+             on: [:create]
   end
 
   attributes do
@@ -342,6 +398,19 @@ defmodule Arbiter.Messages.Message do
       description "When a mailbox message was addressed (soft-cleared). nil = not cleared. Mailbox-family only."
     end
 
+    attribute :escalation_kind, :atom do
+      public? true
+      constraints one_of: Arbiter.Messages.EscalationKind.all()
+
+      description "bd-8if9zt: what an :escalation is about (Arbiter.Messages.EscalationKind). nil on every other kind."
+    end
+
+    attribute :resolved_at, :utc_datetime_usec do
+      public? true
+
+      description "bd-8if9zt: when the escalation was resolved because its ticket moved on. nil = not resolved by the system."
+    end
+
     create_timestamp :inserted_at
     update_timestamp :updated_at
   end
@@ -394,7 +463,7 @@ defmodule Arbiter.Messages.Message do
 
   This reader's reads and clears are additionally **mirrored onto the message
   row** (`read_at`/`cleared_at`), which is what keeps the REST `unread=true`
-  listing, `hard_purge/2`, and the `last_with_subject/3` dedupe behaving exactly
+  listing, `hard_purge/2`, and the `last_escalation/2` dedupe behaving exactly
   as they did before per-reader state existed. Session readers never touch the
   row, so one session clearing its copy cannot re-arm a repeat escalation.
   """
@@ -569,6 +638,21 @@ defmodule Arbiter.Messages.Message do
   defp create(attrs), do: Ash.create(__MODULE__, attrs)
 
   @doc """
+  Type a hand-written message (bd-8if9zt): an escalation an agent or a person
+  sends through `arb message`, the MCP `message_send` tool or
+  `POST /api/messages` is an `:agent_raised` escalation. Every other message
+  is returned as given. Takes atom- or string-keyed attrs, as the API does.
+  """
+  @spec hand_written(map()) :: map()
+  def hand_written(%{kind: :escalation} = attrs),
+    do: Map.put_new(attrs, :escalation_kind, :agent_raised)
+
+  def hand_written(%{"kind" => kind} = attrs) when kind in [:escalation, "escalation"],
+    do: Map.put_new(attrs, "escalation_kind", :agent_raised)
+
+  def hand_written(attrs), do: attrs
+
+  @doc """
   Mark a message read (stamps `read_at`). Accepts a `%Message{}` or an id.
   """
   def mark_read(message_or_id, opts \\ [])
@@ -683,7 +767,7 @@ defmodule Arbiter.Messages.Message do
   # **or** still globally uncleared. Anything the operator has not resolved is
   # live mail no matter when it was raised — a session launched at 09:05 to
   # deal with a 09:00 escalation has to be able to see it, and since a session
-  # clear never stamps the row, `last_with_subject/3` would otherwise suppress
+  # clear never stamps the row, `last_escalation/2` would otherwise suppress
   # the repeat forever. What drops out is only the resolved archive.
   #
   # Derived from the reader ref here, in one place, so `inbox/2` and the
@@ -765,68 +849,85 @@ defmodule Arbiter.Messages.Message do
   end
 
   @doc """
-  The most recent mailbox-family message addressed to `to_ref` whose `subject`
-  is one of `subjects`, or `nil` when there is none (bd-brwx7w).
+  The most recent coordinator escalation of `kind` (an
+  `Arbiter.Messages.EscalationKind`), or `nil` when there is none (bd-8if9zt).
 
   This is the durable dedupe/backoff surface for repeated escalations. Two
   independent pollers (and the same poller across a restart) can each ask
-  "has this exact page already gone out?" and get the same answer, because the
-  state lives in the message table rather than in either poller's memory.
-
-  `subjects` is a list so a caller can treat several near-identical subjects as
-  one dedupe key (e.g. the two ways a missing approval is reported).
+  "has this page already gone out?" and get the same answer, because the state
+  lives in the message table rather than in either poller's memory. The
+  identity is the kind and the ticket, never the subject text — before
+  bd-8if9zt it was the subject (`last_with_subject/3`), so a reworded subject
+  was a new escalation.
 
   Options:
 
     * `:workspace_id` — scope to a workspace.
-    * `:task_ref` — scope to the task the message concerns.
-    * `:uncleared` — when `true`, consider only rows with `cleared_at IS NULL`
-      (unread *or* outstanding); a cleared row has been addressed and no longer
-      suppresses a repeat.
+    * `:task_ref` — scope to the ticket (or other ref) the escalation concerns.
+    * `:open` — when `true`, consider only rows with `cleared_at IS NULL`
+      (unread *or* outstanding); a cleared or resolved row has been addressed
+      and no longer suppresses a repeat.
+    * `:subject` — narrow to one subject. Only for a system kind whose episode
+      is finer than its kind (a credential per adapter and source, a quota
+      grant per config dir) until child 8 (bd-7gt8rm) gives those their own
+      records; a ticket-scoped kind never needs it.
 
   Pure read.
   """
-  @spec last_with_subject(String.t(), [String.t()], keyword()) :: struct() | nil
-  def last_with_subject(to_ref, subjects, opts \\ [])
+  @spec last_escalation(atom(), keyword()) :: struct() | nil
+  def last_escalation(kind, opts \\ []) when is_atom(kind) do
+    refs = @coordinator_refs
 
-  def last_with_subject(_to_ref, [], _opts), do: nil
+    __MODULE__
+    |> Ash.Query.filter(to_ref in ^refs and kind == :escalation and escalation_kind == ^kind)
+    |> Ash.Query.sort(inserted_at: :desc)
+    |> Ash.Query.limit(1)
+    |> filter_opt(:workspace_id, Keyword.get(opts, :workspace_id))
+    |> filter_opt(:task_ref, Keyword.get(opts, :task_ref))
+    |> filter_opt(:subject, Keyword.get(opts, :subject))
+    |> then(&if(Keyword.get(opts, :open, false), do: uncleared_filter(&1, nil), else: &1))
+    |> Ash.read!()
+    |> List.first()
+  end
 
-  # Pre-existing complexity 11 — baselined when bd-4x2yhq first
-  # wired Credo up. Thresholds stay at the tool's own default so new
-  # code is held to it; see the note in .credo.exs.
-  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
-  def last_with_subject(to_ref, subjects, opts) when is_binary(to_ref) and is_list(subjects) do
-    refs = ref_variants(to_ref)
+  defp filter_opt(query, :workspace_id, ws) when is_binary(ws),
+    do: Ash.Query.filter(query, workspace_id == ^ws)
 
-    query =
-      __MODULE__
-      |> Ash.Query.filter(to_ref in ^refs and kind in ^@mailbox_kinds and subject in ^subjects)
-      |> Ash.Query.sort(inserted_at: :desc)
-      |> Ash.Query.limit(1)
+  defp filter_opt(query, :task_ref, ref) when is_binary(ref),
+    do: Ash.Query.filter(query, task_ref == ^ref)
 
-    query =
-      case Keyword.get(opts, :workspace_id) do
-        ws when is_binary(ws) -> Ash.Query.filter(query, workspace_id == ^ws)
-        _ -> query
+  defp filter_opt(query, :subject, subject) when is_binary(subject),
+    do: Ash.Query.filter(query, subject == ^subject)
+
+  defp filter_opt(query, _key, _value), do: query
+
+  @doc """
+  Resolve every open ticket-scoped escalation about `ticket_id` (bd-8if9zt):
+  the ticket moved on, so what they reported is no longer its trouble. Only
+  rows inserted at or before `:before` (default: now) are touched, so an
+  escalation the same write raises afterwards — a sync failure on close, the
+  `pr_closed` page — survives it. System-scoped kinds are left alone; their
+  lifecycle is child 8's (bd-7gt8rm).
+
+  Returns the resolved rows.
+  """
+  @spec resolve_ticket_escalations(String.t(), keyword()) :: [struct()]
+  def resolve_ticket_escalations(ticket_id, opts \\ []) when is_binary(ticket_id) do
+    before = Keyword.get(opts, :before) || DateTime.utc_now()
+    kinds = Arbiter.Messages.EscalationKind.ticket_kinds()
+
+    __MODULE__
+    |> Ash.Query.filter(
+      task_ref == ^ticket_id and kind == :escalation and escalation_kind in ^kinds and
+        is_nil(cleared_at) and inserted_at <= ^before
+    )
+    |> Ash.read!()
+    |> Enum.flat_map(fn message ->
+      case Ash.update(message, %{}, action: :resolve) do
+        {:ok, resolved} -> [resolved]
+        {:error, _} -> []
       end
-
-    query =
-      case Keyword.get(opts, :task_ref) do
-        tr when is_binary(tr) -> Ash.Query.filter(query, task_ref == ^tr)
-        _ -> query
-      end
-
-    query =
-      if Keyword.get(opts, :uncleared, false) do
-        Ash.Query.filter(query, is_nil(cleared_at))
-      else
-        query
-      end
-
-    case Ash.read!(query) do
-      [message | _] -> message
-      [] -> nil
-    end
+    end)
   end
 
   @doc """
@@ -876,7 +977,7 @@ defmodule Arbiter.Messages.Message do
 
   # The one place the clear transition branches on reader identity. A session
   # writes only its own receipt: the row's `cleared_at` stays nil, so the
-  # `last_with_subject/3` dedupe keeps suppressing a repeat page that one
+  # `last_escalation/2` dedupe keeps suppressing a repeat page that one
   # session happened to triage away. The sessionless coordinator reader — the
   # operator — also stamps the row, which is the global "resolved" signal
   # `hard_purge/2` and that same dedupe have always read.

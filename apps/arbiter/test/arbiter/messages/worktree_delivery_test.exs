@@ -236,6 +236,7 @@ defmodule Arbiter.Messages.WorktreeDeliveryTest do
       {:ok, _msg} =
         Message.send_mail(%{
           kind: :escalation,
+          escalation_kind: :agent_raised,
           workspace_id: @ws,
           from_ref: "bd-some-worker",
           to_ref: "admiral",

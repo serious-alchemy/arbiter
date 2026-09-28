@@ -113,6 +113,7 @@ defmodule ArbiterWeb.MessagesLiveTest do
         Message.send_mail(%{
           workspace_id: ws.id,
           kind: :escalation,
+          escalation_kind: :agent_raised,
           from_ref: "bd-soren",
           to_ref: "admiral",
           subject: "needs a decision off-board",
@@ -135,6 +136,7 @@ defmodule ArbiterWeb.MessagesLiveTest do
         Message.send_mail(%{
           workspace_id: ws.id,
           kind: :escalation,
+          escalation_kind: :agent_raised,
           from_ref: "bd-soren",
           to_ref: "admiral",
           subject: "needs a decision",
@@ -179,6 +181,7 @@ defmodule ArbiterWeb.MessagesLiveTest do
         Message.send_mail(%{
           workspace_id: ws.id,
           kind: :escalation,
+          escalation_kind: :agent_raised,
           to_ref: "admiral",
           subject: "freshly-escalated",
           body: "live arrival"
@@ -227,6 +230,7 @@ defmodule ArbiterWeb.MessagesLiveTest do
         Message.send_mail(%{
           workspace_id: ws.id,
           kind: :escalation,
+          escalation_kind: :agent_raised,
           to_ref: "admiral",
           body: "still-unread"
         })
@@ -318,6 +322,7 @@ defmodule ArbiterWeb.MessagesLiveTest do
         Message.send_mail(%{
           workspace_id: ws.id,
           kind: :escalation,
+          escalation_kind: :agent_raised,
           to_ref: "admiral",
           body: "still-pending"
         })
@@ -326,6 +331,7 @@ defmodule ArbiterWeb.MessagesLiveTest do
         Message.send_mail(%{
           workspace_id: ws.id,
           kind: :escalation,
+          escalation_kind: :agent_raised,
           to_ref: "admiral",
           body: "seen-not-cleared"
         })
@@ -368,6 +374,7 @@ defmodule ArbiterWeb.MessagesLiveTest do
         Message.send_mail(%{
           workspace_id: ws.id,
           kind: :escalation,
+          escalation_kind: :agent_raised,
           to_ref: "admiral",
           body: "shared-escalation"
         })
@@ -427,6 +434,7 @@ defmodule ArbiterWeb.MessagesLiveTest do
         Message.send_mail(%{
           workspace_id: ws.id,
           kind: :escalation,
+          escalation_kind: :agent_raised,
           to_ref: "admiral",
           subject: "unrelated to this page",
           body: "must not crash the workspace detail view"

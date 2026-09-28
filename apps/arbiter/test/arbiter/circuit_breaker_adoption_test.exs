@@ -149,7 +149,7 @@ defmodule Arbiter.CircuitBreakerAdoptionTest do
   end
 
   describe "CoordinatorNotifier escalation send path — last line of defence" do
-    test "an undeduplicated escalation repeated forever stops at the bound", %{ws: ws} do
+    test "an escalation repeated forever stops at the bound", %{ws: ws} do
       with_bound(:coordinator_escalation, 3)
 
       snapshot = %{task_id: "bd-cn001", workspace_id: ws.id}
@@ -160,7 +160,9 @@ defmodule Arbiter.CircuitBreakerAdoptionTest do
 
       sync = Enum.reject(escalations(ws), &(&1.subject =~ "circuit breaker tripped"))
 
-      assert length(sync) == 3
+      # bd-8if9zt: the sends the breaker lets through fold into the ticket's
+      # one open `(kind, ticket)` item; the breaker still trips past the bound.
+      assert length(sync) == 1
       assert length(trip_escalations(ws)) == 1
     end
 
@@ -259,9 +261,11 @@ defmodule Arbiter.CircuitBreakerAdoptionTest do
       end
 
       # Three subjects × 2 allowed each: the breaker must not have collapsed
-      # three different tasks into one signature.
+      # three different tasks into one signature — each task trips its own.
+      # (bd-8if9zt: each task's allowed sends are its one open item.)
       pages = Enum.reject(escalations(ws), &(&1.subject =~ "circuit breaker tripped"))
-      assert length(pages) == 6
+      assert length(pages) == 3
+      assert length(trip_escalations(ws)) == 3
     end
   end
 
@@ -300,8 +304,10 @@ defmodule Arbiter.CircuitBreakerAdoptionTest do
         escalations(ws)
         |> Enum.filter(&(&1.subject =~ "awaiting verification"))
 
-      assert length(notices) == 2, "the notice bypassed the shared breaker"
-      assert [_trip] = trip_escalations(ws)
+      # bd-8if9zt: the allowed notices fold into the ticket's one open item;
+      # the trip page is the proof the breaker saw every one of them.
+      assert length(notices) == 1
+      assert [_trip] = trip_escalations(ws), "the notice bypassed the shared breaker"
     end
 
     test "two tasks' verification notices keep distinct budgets", %{ws: ws} do

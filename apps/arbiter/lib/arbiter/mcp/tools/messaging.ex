@@ -83,7 +83,7 @@ defmodule Arbiter.MCP.Tools.Messaging do
   is not a mailbox. The bound is a union: mail raised since the session
   started, plus anything still globally uncleared — an escalation raised before
   the session was launched is usually the reason it was launched, and a session
-  clear never stamps the row, so the `last_with_subject/3` dedupe would
+  clear never stamps the row, so the `last_escalation/2` dedupe would
   otherwise suppress the repeat forever. Only the resolved archive is withheld.
 
   ## Workspace scope
@@ -188,7 +188,7 @@ defmodule Arbiter.MCP.Tools.Messaging do
 
   Both forms clear **only the calling reader's view** (bd-8akewg): a session
   token writes its own receipts and leaves the shared row — and therefore every
-  other session, the sessionless coordinator, and the `last_with_subject/3`
+  other session, the sessionless coordinator, and the `last_escalation/2`
   escalation dedupe — untouched. A plain minted token is the shared sessionless
   coordinator reader, which still stamps the row exactly as before.
 
@@ -265,6 +265,7 @@ defmodule Arbiter.MCP.Tools.Messaging do
           :task_ref,
           Tools.fetch_string(args, "task_ref") || Tools.fetch_string(args, "directive_ref")
         )
+        |> Message.hand_written()
 
       case Message.send_mail(attrs) do
         {:ok, message} -> {:ok, serialize_message(message)}

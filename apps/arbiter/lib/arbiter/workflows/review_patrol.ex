@@ -337,7 +337,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   alias Arbiter.{Mergers, Tasks.Workspace}
   alias Arbiter.Mergers.Github.RepoResolver
   alias Arbiter.Mergers.NetDiff
-  alias Arbiter.Messages.Message
+  alias Arbiter.Messages.Escalation
   alias Arbiter.Reviews.Coverage
   alias Arbiter.Reviews.Record
   alias Arbiter.Tasks.{Issue, RepoConfig}
@@ -691,9 +691,8 @@ defmodule Arbiter.Workflows.ReviewPatrol do
 
     _ =
       safe(fn ->
-        Arbiter.Messages.Message.send_mail(%{
-          kind: :escalation,
-          to_ref: Arbiter.Messages.Message.coordinator_ref(),
+        Escalation.post(%{
+          kind: :review_patrol_rate_limited,
           from_ref: ref,
           workspace_id: ws_id,
           task_ref: ref,
@@ -1031,9 +1030,8 @@ defmodule Arbiter.Workflows.ReviewPatrol do
 
     _ =
       safe(fn ->
-        Arbiter.Messages.Message.send_mail(%{
-          kind: :escalation,
-          to_ref: Arbiter.Messages.Message.coordinator_ref(),
+        Escalation.post(%{
+          kind: :review_cap_reached,
           from_ref: engagement.id,
           workspace_id: ws_id,
           task_ref: engagement.id,
@@ -1573,9 +1571,8 @@ defmodule Arbiter.Workflows.ReviewPatrol do
 
     _ =
       safe(fn ->
-        Arbiter.Messages.Message.send_mail(%{
-          kind: :escalation,
-          to_ref: Arbiter.Messages.Message.coordinator_ref(),
+        Escalation.post(%{
+          kind: :report_only_review,
           from_ref: engagement.id,
           workspace_id: ws_id,
           task_ref: engagement.id,
@@ -1973,9 +1970,8 @@ defmodule Arbiter.Workflows.ReviewPatrol do
 
     _ =
       safe(fn ->
-        Message.send_mail(%{
-          kind: :escalation,
-          to_ref: Message.coordinator_ref(),
+        Escalation.post(%{
+          kind: :review_loop,
           from_ref: engagement.id,
           workspace_id: ws_id,
           task_ref: engagement.id,
@@ -2214,9 +2210,8 @@ defmodule Arbiter.Workflows.ReviewPatrol do
 
     _ =
       safe(fn ->
-        Arbiter.Messages.Message.send_mail(%{
-          kind: :escalation,
-          to_ref: Arbiter.Messages.Message.coordinator_ref(),
+        Escalation.post(%{
+          kind: :pr_author_replied,
           from_ref: engagement.id,
           workspace_id: ws_id,
           task_ref: engagement.id,

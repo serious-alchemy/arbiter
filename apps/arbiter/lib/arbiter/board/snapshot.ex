@@ -40,9 +40,10 @@ defmodule Arbiter.Board.Snapshot do
       depends on something outside it: `:waiting` on a question (it asked a
       human), finished `:failed` (parked; send it back or close it) — or that
       has **no live worker at all** past the dispatch grace (e.g. `arb worker
-      stop`, the documented pre-flight for `arb server deploy`), which always
-      flags `needs_you` since nothing will retry it on its own. Longest wait first, because a stalled card is the
-      thing worth seeing.
+      stop`, the documented pre-flight for `arb server deploy`). Every card
+      carries its ticket's attention, and flags `needs_you` when that is the
+      operator's (see below). Longest wait first, because a stalled card is
+      the thing worth seeing.
     * **Closed · last 24h** — `:closed` tickets closed in the last 24 hours
       (rolling window, keyed on `closed_at`). The day's evidence of progress,
       and the only column with no action on it.
@@ -69,27 +70,31 @@ defmodule Arbiter.Board.Snapshot do
   system has anything left to try on its own.
 
   So it is one column, and that narrower signal rides on the card as
-  `:needs_you`:
+  `:needs_you`. Since bd-8if9zt it is read off the ticket's attention
+  (`Arbiter.Tasks.Lifecycle.view/2`, owner table in
+  `Arbiter.Tasks.Lifecycle.Attention`), which every Waiting card also carries
+  as `:attention`: the card flags exactly when `attention.owner == :operator`.
 
-    * a run `:waiting` on a question always flags — there is no such thing as
-      retrying a question.
-    * a run finished `:failed` always flags — a parked worker is terminal by
-      definition, so whatever it was last seen waiting on, nothing is going
-      to turn it.
-    * an open MR flags unless its block is one the Watchdog still resolves by
-      itself — `:behind_base` (it rebases) and `:ci_failed` (it dispatches a
-      fix pass). Everything else, from `:conflict` to `:needs_approval` to
-      `:draft`, waits on a person; an unblocked MR is simply mid-review, which
-      is still the machine's turn.
+  The coordinator comes first. A question a run asked, a run that stopped, a
+  ReviewGate park, a conflict or a draft, a Watchdog that is gone, a ticket
+  waiting on its restart-and-observe — all are the coordinator agent's to act
+  on, so the card says so in its attention without flagging the operator.
+  What flags is what only a person can do: an approval the fleet cannot give
+  its own PR, or a merge by hand when auto-merge is off. A failed run whose
+  follow-up round is already under way has no attention at all — the machine
+  is still working it. Child 7 (bd-8nlez1) adds the hand-off and the limits
+  that move a coordinator-owned item to the operator.
 
-  The block reason is read through `Arbiter.Worker.Watchdog`
+  A block the Watchdog clears by itself — `:behind_base` (it rebases) and
+  `:ci_failed` (it dispatches a fix pass) — is no one's attention. The block
+  reason is read through `Arbiter.Worker.Watchdog`
   (`effective_block_reason/1`, itself gated on `classify/1 == :approved`), the
   same surface the merge-queue screen reads, so the flag can never disagree
-  with the status text rendered next to it. The exempt list is the Watchdog's
-  own `auto_resolvable?/1` set rather than a hand-kept roster of human blocks,
-  so it *shrinks* as more auto-recovery lands and a newly-invented block
-  reason defaults to "a person's" instead of silently reading as pipeline
-  wait. It measures "still needs a human today", not "something is imperfect".
+  with the status text rendered next to it.
+
+  `needs_you?/2`, `child_needs_you?/2` and `merging_needs_you?/3` are the
+  earlier worker-status rule, kept for `Arbiter.Tasks.EpicRollup`'s epic
+  signal until the epic surfaces move onto attention too.
 
   `slots_used` is the tickets In progress — stored state `:active` — and
   nothing else (bd-asxw4e): a ticket between ReviewGate rounds holds its slot
@@ -244,6 +249,10 @@ defmodule Arbiter.Board.Snapshot do
       |> ticket_columns(workers, blocked_by, now)
       |> Map.reject(fn {id, _column} -> epic?(Map.get(issues_by_id, id)) end)
 
+    # bd-8if9zt: every ticket's attention, from the same projection. A Waiting
+    # card flags `needs_you` exactly when its attention is the operator's.
+    attention = ticket_attention(issues, workers, blocked_by, now, watchdog_live)
+
     running =
       (running_cards(authors, issues_by_id, gate_workers_by_author, workers, columns) ++
          dispatching_cards(issues, authors, columns))
@@ -284,7 +293,7 @@ defmodule Arbiter.Board.Snapshot do
       running: running |> with_parents(parents) |> with_over_budget(over_budget),
       waiting:
         authors
-        |> waiting(issues, issues_by_id, columns, watchdog_live, workers)
+        |> waiting(issues, issues_by_id, columns, watchdog_live, workers, attention)
         |> with_parents(parents)
         |> with_over_budget(over_budget),
       # A closed task that ran over is done — there is nothing left to act on,
@@ -615,6 +624,44 @@ defmodule Arbiter.Board.Snapshot do
     |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
   end
 
+  # bd-8if9zt: each ticket's `Lifecycle.view/2` attention, with the same runs,
+  # blockers and clock its column was read with, plus its Watchdog's liveness.
+  # Like `ticket_columns/4`, an author worker whose issue was not read still
+  # gets a bare `%{id: task_id}` ticket, so its card has an answer too.
+  defp ticket_attention(issues, workers, blocked_by, now, watchdog_live) do
+    runs = runs_by_ticket(workers)
+    known = MapSet.new(issues, & &1.id)
+
+    unread =
+      for w <- workers,
+          Lifecycle.View.author?(w),
+          not MapSet.member?(known, w.task_id),
+          uniq: true,
+          do: %{id: w.task_id}
+
+    Map.new(issues ++ unread, fn ticket ->
+      ctx = %{
+        runs: Map.get(runs, ticket.id, []),
+        blocked_by: Map.get(blocked_by, ticket.id, []),
+        now: now,
+        watchdog_alive: ticket_watchdog_alive(ticket.id, watchdog_live)
+      }
+
+      {ticket.id, Lifecycle.view(ticket, ctx).attention}
+    end)
+  end
+
+  # Every Waiting card carries its ticket's attention, and flags `needs_you`
+  # exactly when that attention is the operator's (bd-8if9zt) — the coordinator
+  # comes first, so a coordinator-owned item is not the operator's to act on.
+  defp with_attention(card, attention) do
+    item = Map.get(attention, card.id)
+    Map.merge(card, %{attention: item, needs_you: operator?(item)})
+  end
+
+  defp operator?(%{owner: :operator}), do: true
+  defp operator?(_), do: false
+
   defp in_column?(columns, id, column), do: Map.get(columns, id) == column
 
   defp epic?(nil), do: false
@@ -734,7 +781,7 @@ defmodule Arbiter.Board.Snapshot do
   # verification card and a merging one its merge card (bd-741sid), whatever
   # worker rows linger; any other gets a card from its non-completed author
   # rows, or — with none left — the orphan card.
-  defp waiting(workers, issues, issues_by_id, columns, watchdog_live, all_workers) do
+  defp waiting(workers, issues, issues_by_id, columns, watchdog_live, all_workers, attention) do
     verifying = ids_in_state(issues, :verifying)
     merging = ids_in_state(issues, :merging)
 
@@ -753,10 +800,11 @@ defmodule Arbiter.Board.Snapshot do
 
     {merging_issues, others} = Enum.split_with(others, &MapSet.member?(merging, &1.id))
 
-    (waiting_cards(carded, issues_by_id, watchdog_live, all_workers) ++
+    (waiting_cards(carded, issues_by_id, all_workers) ++
        merging_cards(merging_issues, all_workers, watchdog_live) ++
        orphaned_cards(Enum.reject(others, &MapSet.member?(with_rows, &1.id))) ++
        awaiting_verification_cards(verifying_issues))
+    |> Enum.map(&with_attention(&1, attention))
     |> Enum.sort_by(& &1.since, {:asc, DateTime})
   end
 
@@ -788,7 +836,6 @@ defmodule Arbiter.Board.Snapshot do
         merger_status: PullRequest.merger_status(issue),
         watchdog_alive: ticket_watchdog_alive(issue.id, watchdog_live),
         merge_pulled: PullRequest.pulled?(issue),
-        needs_you: merging_needs_you?(issue, group, watchdog_live),
         collapsed_note: collapsed_note(nil, group),
         since: Map.get(issue, :updated_at) || created_at(issue),
         phase: :waiting_ci_merge,
@@ -820,8 +867,8 @@ defmodule Arbiter.Board.Snapshot do
   # bd-9so315: a task merged but parked until someone restarts the server and
   # observes the new path. It has no worker (the merge tore it down), so it
   # produces no worker-derived card and would otherwise be invisible — which is
-  # precisely the failure the state exists to fix. It is always `needs_you`:
-  # nothing in the fleet can clear it, only a human observation can.
+  # precisely the failure the state exists to fix. The restart-and-observe is
+  # the coordinator's (`awaiting_verification` attention, bd-8if9zt).
   defp awaiting_verification_cards(issues) do
     Enum.map(issues, fn issue ->
       %{
@@ -837,7 +884,6 @@ defmodule Arbiter.Board.Snapshot do
         merger_status: nil,
         watchdog_alive: nil,
         merge_pulled: false,
-        needs_you: true,
         collapsed_note: nil,
         since: awaiting_since(issue)
       }
@@ -853,7 +899,7 @@ defmodule Arbiter.Board.Snapshot do
     Arbiter.Tasks.Verification.awaiting_since(issue) || created_at(issue)
   end
 
-  defp waiting_cards(workers, issues_by_id, watchdog_live, all_workers) do
+  defp waiting_cards(workers, issues_by_id, all_workers) do
     workers
     |> one_row_per_task()
     |> Enum.map(fn {w, group} ->
@@ -868,10 +914,6 @@ defmodule Arbiter.Board.Snapshot do
         # no Watchdog of its own to report — a Merging ticket's card does.
         watchdog_alive: nil,
         merge_pulled: false,
-        # The collapsed rows keep their vote: a dead fix pass under a
-        # legitimately-parked primary still needs a human, even though the
-        # primary row alone reads as "the machine has this".
-        needs_you: child_needs_you?(group, watchdog_live),
         collapsed_note: collapsed_note(w, group),
         since: since(w)
       })
@@ -924,9 +966,8 @@ defmodule Arbiter.Board.Snapshot do
   # the caller's order survives.
   #
   # Returns `{primary_row, all_rows_for_the_task}`: the card renders the
-  # primary's fields, but the whole group is still there for the signals a
-  # collapsed row would otherwise take with it (its `needs_you?` vote, its
-  # failure).
+  # primary's fields, but the whole group is still there for the signal a
+  # collapsed row would otherwise take with it (its failure).
   defp one_row_per_task(workers) do
     workers
     |> Enum.group_by(& &1.task_id)
@@ -939,9 +980,10 @@ defmodule Arbiter.Board.Snapshot do
   # `arb worker stop`, the documented pre-flight for `arb server deploy` —
   # used to vanish from the board
   # entirely. It reads truest as Waiting: the work is out of the machine's
-  # hands, and nothing will retry it on its own, so it always flags
-  # `needs_you`. Past the dispatch grace only; inside it the ticket is a
-  # Running "dispatching" card (`Lifecycle.board_column/2`).
+  # hands, and nothing will retry it on its own — its attention is the
+  # coordinator's `run_crashed` (bd-8if9zt). Past the dispatch grace only;
+  # inside it the ticket is a Running "dispatching" card
+  # (`Lifecycle.board_column/2`).
   defp orphaned_cards(issues) do
     Enum.map(issues, fn issue ->
       %{
@@ -959,7 +1001,6 @@ defmodule Arbiter.Board.Snapshot do
         # already says "worker stopped", which is the stronger statement.
         watchdog_alive: nil,
         merge_pulled: false,
-        needs_you: true,
         collapsed_note: nil,
         since: Map.get(issue, :updated_at) || created_at(issue)
       }

@@ -617,3 +617,86 @@ is reported under its ticket's id and workspace (`run_task_id` keeps its own
 `Reconciler.reconcile_orphaned_runs/1` sweeps a live row with no worker to
 `finished` / `interrupted`, "server restarted" — the server stopped under the
 run; it did not fail.
+
+## Child 6 (bd-8if9zt): the attention overlay and typed escalation kinds
+
+### Typed escalation kinds
+
+Every `:escalation` message carries an `escalation_kind` from
+`Arbiter.Messages.EscalationKind`, and the `Message` resource refuses an
+escalation without one. A kind is **ticket-scoped** (about one `task_ref`) or
+**system-scoped** (credentials, quota, budget, the circuit breaker, the loop,
+and PRPatrol's failed follow-up dispatch, whose follow-up ticket is closed at
+once so the patrol can retry).
+System kinds are typed here; their lifecycle is child 8 (bd-7gt8rm).
+
+Producers go through `Arbiter.Messages.Escalation.post/1`. A ticket-scoped
+kind is deduplicated by `(kind, ticket)`: while one is open, raising it again
+refreshes that row's subject and body, whatever its subject text says.
+`Message.last_escalation/2` is the lookup; `last_with_subject/3` is off the
+escalation path. `:agent_raised` (sent by hand through `arb message`, MCP
+`message_send` or `POST /api/messages`) and `:legacy` (the backfill) are
+ticket-scoped but never deduplicated.
+
+### The attention cause
+
+The ticket stores `attention_cause`, `attention_detail` and `attention_since`.
+A cause is raised by what knows it: a ReviewGate park (its reason), a PR closed
+unmerged (`:pr_closed`), entering verification (`:awaiting_verification`), or
+an escalation whose kind names a cause (`EscalationKind.cause/1`:
+`:merge_blocked`, `:run_crashed`, `:awaiting_manual_merge`). Only an
+`:active`, `:merging` or `:verifying` ticket takes one.
+
+The ReviewGate park moves into the cause. Migration `20260928170000` copies a
+known `review_park_reason` / `review_parked_at` into it and backfills every
+existing escalation as `:legacy`. The park columns stay as a dual-write until
+bd-36ytcl.
+
+### The owner table
+
+`Lifecycle.view/2` fills `attention: %{owner, waiting_on, reason}` (plus the
+`cause` and `since` it came from), or nil. The table lives in
+`Arbiter.Tasks.Lifecycle.Attention`. The coordinator comes first; a row is the
+operator's only when nothing in the fleet can move it.
+
+| cause | owner | waiting on |
+|---|---|---|
+| a ReviewGate park reason | coordinator | `:review_decision` |
+| `:pr_closed` | coordinator | `:pr_decision` |
+| `:merge_blocked` | coordinator | `:merge_block` |
+| `:merge_blocked`, needing an approval the fleet cannot give | operator | `:approval` |
+| `:awaiting_manual_merge` | operator | `:manual_merge` |
+| `:run_crashed` | coordinator | `:resume` |
+| `:run_asked_question` | coordinator | `:answer` |
+| `:awaiting_verification` | coordinator | `:verification` |
+
+A stored cause wins. With none stored, one is derived: `:verifying` →
+`:awaiting_verification`; `:merging` with a block the Watchdog does not clear
+by itself, or with no Watchdog → `:merge_blocked`; `:active` whose author run
+asked a question → `:run_asked_question`; `:active` whose author runs all
+failed, or with no run past the dispatch grace → `:run_crashed`. The last one
+does not apply while any run on the ticket is live, because a failed run with
+a follow-up round under way is still the machine's turn. Child 7 adds the
+hand-off and the limits that move an item to the operator.
+
+### Auto-clear
+
+The cause clears, and the ticket's open ticket-scoped escalations are marked
+`resolved_at`, when:
+
+- **the ticket transitions.** `Changes.Transition` runs
+  `Changes.ClearAttention`, and so does a legacy status write that moves the
+  state. An action that raises its own cause (`:pr_closed`,
+  `:await_verification`) sets it after the clear.
+- **its run restarts.** A resumed run calls `Attention.clear/2`.
+- **its park is cleared.** `ReviewPark.clear/2` does the same.
+
+Only escalations inserted before the write started are resolved, so a page
+raised by the same write survives.
+
+### The board
+
+The Waiting column's `needs_you` is `attention.owner == :operator`, and every
+Waiting card carries its `attention`. A failed run with a follow-up round
+under way no longer flags. `EpicRollup` still uses the older worker-status
+rule until the epic surfaces move onto attention.

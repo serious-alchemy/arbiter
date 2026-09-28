@@ -30,7 +30,7 @@ defmodule Arbiter.Messages.MessageReceipt do
   receipts would be pure overhead) still uses them, the sessionless
   `"coordinator"` reader mirrors its writes onto them so the REST/CLI listing
   and `hard_purge/2` behave exactly as before, and escalation dedupe
-  (`Message.last_with_subject/3` with `uncleared: true`) reads the row so that
+  (`Message.last_escalation/2` with `open: true`) reads the row so that
   one session clearing *its* copy can never re-arm a repeat page.
   """
 

@@ -651,9 +651,8 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
       Manual rebase + push required before the merge queue can proceed.
       """
 
-    Message.send_mail(%{
-      kind: :escalation,
-      to_ref: Message.coordinator_ref(),
+    Arbiter.Messages.Escalation.post(%{
+      kind: :conflict_unresolved,
       from_ref: task_id,
       workspace_id: workspace_id,
       task_ref: task_id,

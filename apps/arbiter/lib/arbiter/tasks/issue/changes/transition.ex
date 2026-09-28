@@ -9,6 +9,11 @@ defmodule Arbiter.Tasks.Issue.Changes.Transition do
   argument (`:completed` when none is given), and every other transition
   clears it, so it is nil whenever the ticket is not closed.
 
+  And it clears the ticket's attention (bd-8if9zt): the cause, the legacy
+  ReviewGate park columns, and — after commit — the ticket's open escalations
+  (`Changes.ClearAttention`). An action that raises its own cause declares
+  that change after this one.
+
   The target attributes are written at change time, so the changes declared
   after this one (`SyncTracker`, `StopWorker`, …) see the new status. A refusal
   is raised from a `before_action` hook instead, so an older guard declared
@@ -26,6 +31,7 @@ defmodule Arbiter.Tasks.Issue.Changes.Transition do
 
   use Ash.Resource.Change
 
+  alias Arbiter.Tasks.Issue.Changes.ClearAttention
   alias Arbiter.Tasks.Lifecycle
   alias Ash.Changeset
 
@@ -53,6 +59,7 @@ defmodule Arbiter.Tasks.Issue.Changes.Transition do
     |> Changeset.force_change_attribute(:state, to)
     |> Changeset.force_change_attributes(Lifecycle.legacy_fields(to))
     |> Changeset.force_change_attribute(:close_reason, close_reason(changeset, to))
+    |> ClearAttention.clear()
   end
 
   defp close_reason(changeset, :closed),

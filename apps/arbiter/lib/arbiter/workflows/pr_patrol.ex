@@ -648,6 +648,7 @@ defmodule Arbiter.Workflows.PRPatrol do
 
     attrs = %{
       kind: :escalation,
+      escalation_kind: :pr_patrol_dispatch_failed,
       to_ref: Message.coordinator_ref(),
       from_ref: task.id,
       workspace_id: state.workspace_id,

@@ -20,9 +20,8 @@ defmodule Arbiter.Usage.BudgetPatrol do
 
   ## Once per task
 
-  The dedupe is `Arbiter.Messages.Message.last_with_subject/3` on a subject
-  carrying no numbers
-  (`Arbiter.Messages.CoordinatorNotifier.budget_exceeded_subject/1`), so it
+  The dedupe is `Arbiter.Messages.Message.last_escalation/2` on the
+  `:budget_exceeded` kind and the task (bd-8if9zt), so it
   holds across ticks *and* across a restart — the state lives in the message
   table, not in this process. A task whose total keeps climbing is not paged
   again: the second page would say exactly what the first said.
