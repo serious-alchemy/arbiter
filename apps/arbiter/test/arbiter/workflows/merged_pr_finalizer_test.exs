@@ -385,6 +385,46 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
 
       assert Ash.get!(Issue, task.id).status == :closed
     end
+
+    # bd-2g179m: pre-verdict, the author's agent has exited and the reviewer runs
+    # in a separate ReviewGate process, so the worker is resident, `:waiting` on
+    # the review gate with no agent. A PR merged by hand in that window closes
+    # the ticket (the running gate stops via its author :DOWN monitor) instead of
+    # deferring to the parked worker forever.
+    test "a worker parked on the review gate with no agent does not block finalization", %{
+      ws: ws
+    } do
+      task = create_task(ws, "704")
+      {:ok, _} = Ash.update(task, %{status: :in_progress}, action: :update)
+
+      pid = register_live_worker(task.id, :waiting)
+
+      :sys.replace_state(pid, fn snap ->
+        Map.merge(snap, %{waiting_on: :review_gate, agent_live: false})
+      end)
+
+      stub(pr_get_stub(704, :merged))
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      assert Ash.get!(Issue, task.id).status == :closed
+    end
+
+    test "a worker waiting on a question still protects the task", %{ws: ws} do
+      task = create_task(ws, "705")
+      {:ok, _} = Ash.update(task, %{status: :in_progress}, action: :update)
+
+      pid = register_live_worker(task.id, :waiting)
+      :sys.replace_state(pid, fn snap -> Map.merge(snap, %{waiting_on: :question}) end)
+
+      stub(pr_get_stub(705, :merged))
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      assert Ash.get!(Issue, task.id).status == :in_progress
+    end
   end
 
   describe "tick/1 — API error" do

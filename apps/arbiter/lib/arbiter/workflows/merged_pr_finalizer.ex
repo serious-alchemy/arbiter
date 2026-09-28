@@ -513,7 +513,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
 
   defp actively_working?(pid) do
     case Worker.state(pid) do
-      %{state: run_state} -> run_state in @active_run_states
+      %{state: run_state} = snap -> run_state in @active_run_states and not parked?(snap)
       _ -> false
     end
   rescue
@@ -521,6 +521,18 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
   catch
     :exit, _ -> false
   end
+
+  # bd-2g179m: a run `:waiting` on the review gate with no agent live is
+  # parked, not working. This is the pre-verdict window: the author's agent has
+  # exited, the reviewer runs in a separate ReviewGate process, and the ticket
+  # already has a `pr_ref` from the pre-review PR open. If the PR is merged by
+  # hand in that window, the finalizer closes the ticket rather than deferring
+  # to the parked worker; the running gate is torn down via its author `:DOWN`
+  # monitor. After approval the ticket's Watchdog (started by
+  # `finalize_opened_mr`) covers a manual merge. A snapshot that says nothing
+  # about `agent_live` is unknown, and stays protected.
+  defp parked?(snap),
+    do: Worker.awaiting_review_gate?(snap) and Map.get(snap, :agent_live) == false
 
   defp skip_live_worker(%Issue{} = task) do
     Logger.debug(
