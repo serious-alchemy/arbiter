@@ -45,7 +45,7 @@ defmodule Arbiter.Loop do
   use Ash.Domain
 
   alias Arbiter.Loop.{Apply, FlakeEvent, Notify, PendingWrite}
-  alias Arbiter.Messages.Message
+  alias Arbiter.Messages.Escalation
   alias Arbiter.Quota
   alias Arbiter.Tasks.{Issue, Workspace}
 
@@ -663,9 +663,8 @@ defmodule Arbiter.Loop do
   end
 
   defp send_escalation(row, ws_id) do
-    case Message.send_mail(%{
-           kind: :escalation,
-           to_ref: Message.coordinator_ref(),
+    case Escalation.post(%{
+           kind: :loop_proposal,
            from_ref: "loop",
            workspace_id: ws_id,
            subject: "loop proposal ready for review: #{row.gist}",

@@ -1,8 +1,8 @@
 defmodule Arbiter.Tasks.Lifecycle.View do
   @moduledoc """
   The one projection of a ticket (bd-9yqspm, child 2: bd-6zapbl): its column,
-  its computed step, what blocks it and — once child 6 fills it — whether it
-  needs attention. Every surface that asks "where is this ticket?" reads the
+  its computed step, what blocks it and whether it needs attention (child 6,
+  bd-8if9zt). Every surface that asks "where is this ticket?" reads the
   answer from here: the board (`Arbiter.Board.Snapshot.derive/1`), the epic
   mini-board (`Snapshot.classify_columns/2`), the `/epics` rollup
   (`Arbiter.Tasks.EpicRollup`) and `Arbiter.Tasks.Issue.ready/1`.
@@ -18,7 +18,9 @@ defmodule Arbiter.Tasks.Lifecycle.View do
       implementer round pointing back at it;
     * `:merger_status` — the PR's last `Arbiter.Mergers.get/1` result,
       defaulting to the one the ticket's Watchdog recorded on its row;
-    * `:now` — for the interim board's dispatch grace (`board_column/2`).
+    * `:now` — for the interim board's dispatch grace (`board_column/2`);
+    * `:watchdog_alive` — whether the ticket's Watchdog is running, when the
+      caller knows (a Registry read, so an input like the rest).
 
   ## Column
 
@@ -57,10 +59,20 @@ defmodule Arbiter.Tasks.Lifecycle.View do
       blocks whatever the approval state; an approval-type block counts only
       once the PR is approved (`Arbiter.Worker.Watchdog.effective_block_reason/1`),
       since an unapproved PR waiting on its review is simply queued.
+
+  ## Attention
+
+  `%{owner, waiting_on, reason, cause, since}` or nil, from the ticket's stored
+  attention cause, its state, its latest runs and its PR, through the owner
+  table in `Arbiter.Tasks.Lifecycle.Attention` (which documents both). The
+  run facts are read here: the primary author run waiting on a question, every
+  author run finished without succeeding with no run on the ticket still live,
+  or — when `:runs` was given — no run at all past the dispatch grace.
   """
 
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Lifecycle
+  alias Arbiter.Tasks.Lifecycle.Attention
   alias Arbiter.Tasks.PullRequest
   alias Arbiter.Worker
   alias Arbiter.Worker.Phase
@@ -85,7 +97,7 @@ defmodule Arbiter.Tasks.Lifecycle.View do
           column: column() | nil,
           step: step() | nil,
           blocked_by: [String.t()],
-          attention: nil
+          attention: Attention.t() | nil
         }
 
   @type board_column :: :backlog | :ready | :running | :waiting | :closed
@@ -121,7 +133,7 @@ defmodule Arbiter.Tasks.Lifecycle.View do
       column: column,
       step: step(column, ticket, runs, ctx),
       blocked_by: blocked_by,
-      attention: nil
+      attention: Attention.of(ticket, attention_facts(state, ticket, runs, ctx))
     }
   end
 
@@ -327,6 +339,44 @@ defmodule Arbiter.Tasks.Lifecycle.View do
 
   defp pending_reason(%{} = pending), do: Map.get(pending, "reason") || Map.get(pending, :reason)
   defp pending_reason(_), do: nil
+
+  # ---- attention ----------------------------------------------------------
+
+  defp attention_facts(state, ticket, runs, ctx) do
+    %{
+      state: state,
+      run: if(state == :active, do: run_fact(ticket, runs, ctx)),
+      block: if(state == :merging, do: block_fact(merger_status(ticket, ctx))),
+      watchdog_alive: Map.get(ctx, :watchdog_alive)
+    }
+  end
+
+  # What the ticket's runs say, for `Attention`: a live run anywhere on the
+  # ticket is the machine's turn, whatever an earlier run did — which is what
+  # keeps a failed run with a follow-up round under way out of anyone's
+  # attention.
+  defp run_fact(ticket, runs, ctx) do
+    id = Map.get(ticket, :id)
+    authors = author_runs(runs, id)
+
+    cond do
+      Enum.any?(runs, &(run_class(&1) == :running)) -> :live
+      match?(%{state: :waiting}, primary(runs, id)) -> :question
+      authors != [] and Enum.all?(authors, &(run_class(&1) == :waiting)) -> :failed
+      authors == [] and Map.has_key?(ctx, :runs) and orphaned?(ticket, ctx) -> :orphaned
+      true -> nil
+    end
+  end
+
+  # The block that reads as `:merge_blocked` in `merging_step/2`: a conflict,
+  # red CI or a draft whatever the approval state, otherwise the effective
+  # (approval-gated) block reason.
+  defp block_fact(status) do
+    case Watchdog.block_reason(status) do
+      raw when raw in @hard_blocks or raw == :behind_base -> raw
+      _ -> Watchdog.effective_block_reason(status)
+    end
+  end
 
   # ---- runs ---------------------------------------------------------------
 

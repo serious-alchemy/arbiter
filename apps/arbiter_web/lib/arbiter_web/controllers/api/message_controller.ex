@@ -71,12 +71,10 @@ defmodule ArbiterWeb.Api.MessageController do
 
   def create(conn, params) do
     attrs =
-      coerce_kind(
-        Map.take(
-          params,
-          ~w(kind from_ref to_ref subject body task_ref directive_ref workspace_id)
-        )
-      )
+      params
+      |> Map.take(~w(kind from_ref to_ref subject body task_ref directive_ref workspace_id))
+      |> coerce_kind()
+      |> Message.hand_written()
 
     case Ash.create(Message, attrs) do
       {:ok, message} ->

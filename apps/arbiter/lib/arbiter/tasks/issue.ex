@@ -98,7 +98,7 @@ defmodule Arbiter.Tasks.Issue do
   @statuses ~w(open in_progress awaiting_verification closed)a
   @lifecycle_states Arbiter.Tasks.Lifecycle.states()
   @close_reasons Arbiter.Tasks.Lifecycle.close_reasons()
-  @attention_causes [:pr_closed]
+  @attention_causes Arbiter.Tasks.Lifecycle.Attention.causes()
   @issue_types ~w(task bug feature epic chore decision)a
   @tracker_types ~w(none jira shortcut linear github gitlab)a
 
@@ -347,10 +347,11 @@ defmodule Arbiter.Tasks.Issue do
       # bd-a370ak: the PR merged, so there is no merge left to retry.
       change set_attribute(:pending_merge, nil)
 
-      # bd-741sid: a merged PR answers any earlier `pr_closed`.
-      change set_attribute(:attention_cause, nil)
-      change set_attribute(:attention_detail, nil)
-      change set_attribute(:attention_since, nil)
+      # bd-8if9zt: the transition cleared the earlier cause (a merged PR
+      # answers any `pr_closed` or `merge_blocked`); the ticket now waits on its
+      # restart-and-observe.
+      change set_attribute(:attention_cause, :awaiting_verification)
+      change set_attribute(:attention_since, &DateTime.utc_now/0)
 
       # Same teardown as `:close`: the worker finished and its PR merged, so
       # leaving the agent + worktree alive for the whole verification window
@@ -399,7 +400,18 @@ defmodule Arbiter.Tasks.Issue do
       require_atomic? false
       accept [:review_park_reason]
 
+      # bd-8if9zt: the park reason is the ticket's attention cause too
+      # (dual-written with the legacy park columns until bd-36ytcl). A reason
+      # the table does not know parks without a cause rather than failing.
+      argument :cause, :atom do
+        allow_nil? true
+        constraints one_of: @attention_causes
+      end
+
       change set_attribute(:review_parked_at, &DateTime.utc_now/0)
+      change set_attribute(:attention_cause, arg(:cause))
+      change set_attribute(:attention_detail, nil)
+      change set_attribute(:attention_since, &DateTime.utc_now/0)
 
       change after_action(fn _, issue, _ ->
                Arbiter.Tasks.Issue.broadcast_lifecycle(:updated, issue)
@@ -414,8 +426,9 @@ defmodule Arbiter.Tasks.Issue do
     update :clear_review_park do
       require_atomic? false
 
-      change set_attribute(:review_park_reason, nil)
-      change set_attribute(:review_parked_at, nil)
+      # bd-8if9zt: the park is the ticket's attention cause, so clearing it
+      # clears the cause and resolves the park's escalations.
+      change {Arbiter.Tasks.Issue.Changes.ClearAttention, []}
 
       change after_action(fn _, issue, _ ->
                Arbiter.Tasks.Issue.broadcast_lifecycle(:updated, issue)
@@ -498,18 +511,13 @@ defmodule Arbiter.Tasks.Issue do
       change set_attribute(:closed_at, &DateTime.utc_now/0)
 
       # bd-9zuvbh: closing is one of the two human actions that resolve a
-      # ReviewGate park (the other is re-running the review). Clearing it here
-      # keeps `arb prime`'s parked list free of tasks nobody needs to look at.
-      change set_attribute(:review_park_reason, nil)
-      change set_attribute(:review_parked_at, nil)
+      # ReviewGate park (the other is re-running the review). The transition
+      # clears the park with the rest of the ticket's attention (bd-8if9zt),
+      # so `arb prime`'s parked list stays free of tasks nobody needs to look
+      # at.
 
       # bd-a370ak: a closed task has no merge left to retry.
       change set_attribute(:pending_merge, nil)
-
-      # bd-741sid: nothing about a closed ticket needs a person any more.
-      change set_attribute(:attention_cause, nil)
-      change set_attribute(:attention_detail, nil)
-      change set_attribute(:attention_since, nil)
 
       # bd-bsco7f: persist what this close meant upstream, so the drift check
       # can read the intent instead of guessing it from `pr_ref`. Mirrors the
@@ -602,9 +610,6 @@ defmodule Arbiter.Tasks.Issue do
       change set_attribute(:merger_checked_at, nil)
       change set_attribute(:merge_watch, nil)
       change set_attribute(:review_gate_state, nil)
-      change set_attribute(:attention_cause, nil)
-      change set_attribute(:attention_detail, nil)
-      change set_attribute(:attention_since, nil)
 
       # bd-bqlwjo: a new PR opened after this reopen must still get its own
       # "opened a pull request" comment even though the ticket row itself
@@ -795,9 +800,6 @@ defmodule Arbiter.Tasks.Issue do
       accept [:pr_ref, :merger_url, :merge_watch]
 
       change {Transition, transition: :open_pr}
-      change set_attribute(:attention_cause, nil)
-      change set_attribute(:attention_detail, nil)
-      change set_attribute(:attention_since, nil)
 
       change after_action(fn _, issue, _ ->
                Arbiter.Tasks.Issue.broadcast_lifecycle(:updated, issue)
@@ -868,6 +870,56 @@ defmodule Arbiter.Tasks.Issue do
       change set_attribute(:attention_cause, :pr_closed)
       change set_attribute(:attention_detail, arg(:detail))
       change set_attribute(:attention_since, &DateTime.utc_now/0)
+
+      change after_action(fn _, issue, _ ->
+               Arbiter.Tasks.Issue.broadcast_lifecycle(:updated, issue)
+               {:ok, issue}
+             end)
+    end
+
+    # bd-8if9zt: record why the ticket needs attention, without a transition
+    # (`Arbiter.Tasks.Attention.raise_cause/3`). Raising the cause the ticket
+    # already carries keeps its `attention_since`, so a repeat does not reset
+    # how long it has waited.
+    update :raise_attention do
+      require_atomic? false
+
+      argument :cause, :atom do
+        allow_nil? false
+        constraints one_of: @attention_causes
+      end
+
+      argument :detail, :string, allow_nil?: true
+
+      change fn changeset, _context ->
+        cause = Ash.Changeset.get_argument(changeset, :cause)
+
+        changeset
+        |> Ash.Changeset.force_change_attribute(:attention_cause, cause)
+        |> Ash.Changeset.force_change_attribute(
+          :attention_detail,
+          Ash.Changeset.get_argument(changeset, :detail)
+        )
+        |> then(fn cs ->
+          if changeset.data.attention_cause == cause and changeset.data.attention_since,
+            do: cs,
+            else: Ash.Changeset.force_change_attribute(cs, :attention_since, DateTime.utc_now())
+        end)
+      end
+
+      change after_action(fn _, issue, _ ->
+               Arbiter.Tasks.Issue.broadcast_lifecycle(:updated, issue)
+               {:ok, issue}
+             end)
+    end
+
+    # bd-8if9zt: the ticket's run restarted (`Arbiter.Tasks.Attention.clear/2`)
+    # — whatever it waited on is being worked again. Clears the cause and the
+    # legacy park columns, and resolves the ticket's escalations.
+    update :clear_attention do
+      require_atomic? false
+
+      change {Arbiter.Tasks.Issue.Changes.ClearAttention, []}
 
       change after_action(fn _, issue, _ ->
                Arbiter.Tasks.Issue.broadcast_lifecycle(:updated, issue)
@@ -1214,9 +1266,11 @@ defmodule Arbiter.Tasks.Issue do
       constraints one_of: @attention_causes
 
       description """
-      Why the ticket needs a person, beside its state. Set to `pr_closed` when
-      its PR is closed without merging; cleared when a PR opens again, and on
-      close, verify and reopen.
+      Why the ticket needs attention, beside its state
+      (`Arbiter.Tasks.Lifecycle.Attention` has the causes and who owns each).
+      Set by a ReviewGate park, a closed PR, a blocked merge, a stopped run,
+      and on entering verification; cleared whenever the ticket's state moves
+      on or its run restarts (`Arbiter.Tasks.Attention.clear/2`).
       """
     end
 
@@ -1758,6 +1812,10 @@ defmodule Arbiter.Tasks.Issue do
 
   @doc "List of valid status atoms."
   def statuses, do: @statuses
+
+  @doc "Every attention cause (`Arbiter.Tasks.Lifecycle.Attention.causes/0`)."
+  @spec attention_causes() :: [atom()]
+  def attention_causes, do: @attention_causes
 
   @doc "List of valid issue_type atoms."
   def issue_types, do: @issue_types

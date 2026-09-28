@@ -45,7 +45,7 @@ defmodule Arbiter.Workers.Reconciler do
   require Logger
 
   alias Arbiter.Accounts.Resolver, as: AccountResolver
-  alias Arbiter.Messages.Message
+  alias Arbiter.Messages.Escalation
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Usage.ClaudeSessionFile
@@ -602,9 +602,8 @@ defmodule Arbiter.Workers.Reconciler do
     %Issue{id: task_id, pr_ref: pr_ref, workspace_id: workspace_id} = issue
     {subject, body} = escalation_copy(task_id, pr_ref, reason)
 
-    Message.send_mail(%{
-      kind: :escalation,
-      to_ref: Message.coordinator_ref(),
+    Escalation.post(%{
+      kind: :ticket_stuck,
       from_ref: "system",
       workspace_id: workspace_id,
       task_ref: task_id,

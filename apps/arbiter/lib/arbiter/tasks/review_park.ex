@@ -135,6 +135,17 @@ defmodule Arbiter.Tasks.ReviewPark do
     end
   end
 
+  # Every reason `park/2` may stamp: the explained ones, plus `:review_rerun`,
+  # which a re-run review records without its own explanation line.
+  @park_reasons Map.keys(@reasons) ++ [:review_rerun]
+
+  @doc """
+  Every park reason as an atom (bd-8if9zt) — each is also an attention cause
+  on the ticket (`Arbiter.Tasks.Lifecycle.Attention`).
+  """
+  @spec park_reasons() :: [reason()]
+  def park_reasons, do: @park_reasons
+
   @doc "Every park reason, with the one-line explanation shown to a human."
   @spec reasons() :: %{reason() => String.t()}
   def reasons, do: @reasons
@@ -198,7 +209,9 @@ defmodule Arbiter.Tasks.ReviewPark do
         # there is nothing to write.
         {:ok, :already_parked, task}
       else
-        case Ash.update(task, %{review_park_reason: stamped}, action: :park_review) do
+        cause = if reason in park_reasons(), do: reason
+
+        case Ash.update(task, %{review_park_reason: stamped, cause: cause}, action: :park_review) do
           {:ok, parked} -> {:ok, :claimed, parked}
           {:error, _} = err -> err
         end

@@ -69,6 +69,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   require Logger
 
   alias Arbiter.CircuitBreaker
+  alias Arbiter.Messages.Escalation
   alias Arbiter.Messages.Message
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
@@ -237,10 +238,10 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   """
   @spec setup_token_missing(map(), map()) :: :ok
   def setup_token_missing(%{workspace_id: ws_id} = snapshot, missing) when is_binary(ws_id) do
-    escalate_event("setup_token_missing/2", snapshot, fn task_id ->
+    escalate_event(:setup_token_missing, snapshot, fn task_id ->
       subject = "Claude dispatch held: no setup token for workspace #{missing_label(missing)}"
 
-      if duplicate_setup_token_escalation?(ws_id, subject) do
+      if duplicate_setup_token_escalation?(ws_id) do
         :skip
       else
         body =
@@ -268,14 +269,14 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   defp missing_label(%{workspace: name}) when is_binary(name) and name != "", do: name
   defp missing_label(%{workspace_id: id}), do: id
 
-  defp duplicate_setup_token_escalation?(ws_id, subject) do
-    coordinator = Message.coordinator_ref()
+  # bd-8if9zt: the identity is the kind and the workspace, not the subject.
+  defp duplicate_setup_token_escalation?(ws_id) do
     scope = [workspace_id: ws_id]
 
-    if Message.last_with_subject(coordinator, [subject], scope ++ [uncleared: true]) do
+    if Message.last_escalation(:setup_token_missing, [open: true] ++ scope) do
       true
     else
-      case Message.last_with_subject(coordinator, [subject], scope) do
+      case Message.last_escalation(:setup_token_missing, scope) do
         nil -> false
         last -> within_preflight_cooldown?(last)
       end
@@ -428,9 +429,8 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
             "over. A future failure will raise a fresh escalation."
 
         send_unless_broken(ws_id, "system", restored_subject, fn ->
-          Message.send_mail(%{
-            kind: :escalation,
-            to_ref: Message.coordinator_ref(),
+          Escalation.post(%{
+            kind: :credential_restored,
             from_ref: "system",
             workspace_id: ws_id,
             task_ref: "system",
@@ -451,10 +451,14 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
 
   def credential_restored(_snapshot, _adapter, _source), do: :ok
 
+  # A credential episode is finer than its kind — one per adapter and source —
+  # so the subject still narrows it, until child 8 (bd-7gt8rm) gives system
+  # alerts their own record.
   defp outstanding_credential_escalation(ws_id, subject) do
-    Message.last_with_subject(Message.coordinator_ref(), [subject],
+    Message.last_escalation(:credential_expired,
       workspace_id: ws_id,
-      uncleared: true
+      subject: subject,
+      open: true
     )
   rescue
     _ -> nil
@@ -510,9 +514,8 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
     """
 
     send_unless_broken(ws_id, task_id, subject, fn ->
-      Message.send_mail(%{
-        kind: :escalation,
-        to_ref: Message.coordinator_ref(),
+      Escalation.post(%{
+        kind: :provider_fallback,
         from_ref: task_id || "system",
         workspace_id: ws_id,
         task_ref: task_id,
@@ -548,7 +551,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   """
   @spec tracker_sync_failed(map(), atom(), term()) :: :ok
   def tracker_sync_failed(snapshot, event, reason) do
-    escalate_event("tracker_sync_failed/3", snapshot, fn task_id ->
+    escalate_event(:tracker_sync_failed, snapshot, fn task_id ->
       tracker = Map.get(snapshot, :tracker_type)
       ref = Map.get(snapshot, :tracker_ref)
 
@@ -583,7 +586,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   """
   @spec review_coverage_write_failed(map(), String.t() | nil, String.t() | nil, term()) :: :ok
   def review_coverage_write_failed(snapshot, mr_ref, head_sha, reason) do
-    escalate_event("review_coverage_write_failed/4", snapshot, fn task_id ->
+    escalate_event(:review_coverage_write_failed, snapshot, fn task_id ->
       subject = "#{task_id} review coverage write failed"
 
       body =
@@ -620,7 +623,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   """
   @spec auto_merge_stalled(map(), String.t() | nil, non_neg_integer(), term()) :: :ok
   def auto_merge_stalled(snapshot, mr_ref, attempts, reason) do
-    escalate_event("auto_merge_stalled/4", snapshot, fn task_id ->
+    escalate_event(:auto_merge_stalled, snapshot, fn task_id ->
       subject = "#{task_id} auto-merge stalled (#{attempts} consecutive failures)"
 
       body =
@@ -652,7 +655,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   """
   @spec orphaned_merge_abandoned(map(), String.t() | nil, term()) :: :ok
   def orphaned_merge_abandoned(snapshot, mr_ref, reason) do
-    escalate_event("orphaned_merge_abandoned/3", snapshot, fn task_id ->
+    escalate_event(:orphaned_merge_abandoned, snapshot, fn task_id ->
       subject = "#{task_id} approved merge abandoned (orphaned PR: #{orphan_reason_tag(reason)})"
 
       body =
@@ -712,7 +715,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   """
   @spec merge_blocked(map(), String.t() | nil, atom()) :: :ok
   def merge_blocked(snapshot, mr_ref, reason) do
-    escalate_event("merge_blocked/3", snapshot, fn task_id ->
+    escalate_event(:merge_blocked, snapshot, fn task_id ->
       ws_id = snapshot.workspace_id
 
       if duplicate_block_escalation?(ws_id, task_id, reason) do
@@ -762,7 +765,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   @spec overage_alert(map(), number(), number()) :: :ok
   def overage_alert(snapshot, spend_usd, threshold_usd) do
     escalate_event(
-      "overage_alert/3",
+      :overage_alert,
       snapshot,
       [task_ref: Map.get(snapshot, :task_id)],
       fn _task_id ->
@@ -815,7 +818,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   """
   @spec quota_poll_failing(map(), pos_integer(), term()) :: :ok
   def quota_poll_failing(snapshot, failures, reason) do
-    escalate_event("quota_poll_failing/3", snapshot, [task_ref: "system"], fn _task_id ->
+    escalate_event(:quota_poll_failing, snapshot, [task_ref: "system"], fn _task_id ->
       subject = "Anthropic quota poll failing — #{failures} consecutive cycles"
 
       body =
@@ -861,7 +864,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   """
   @spec operator_login_lapsed(map(), pos_integer(), term()) :: :ok
   def operator_login_lapsed(snapshot, failures, reason) do
-    escalate_event("operator_login_lapsed/3", snapshot, [task_ref: "system"], fn _task_id ->
+    escalate_event(:operator_login_lapsed, snapshot, [task_ref: "system"], fn _task_id ->
       subject = "Anthropic quota poll blind — operator's interactive Claude login lapsed"
 
       body =
@@ -916,12 +919,15 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
       when is_binary(ws_id) and is_binary(path) do
     config_dir = Path.dirname(path)
 
-    escalate_event("quota_grant_failing/3", snapshot, [task_ref: "system"], fn _task_id ->
+    escalate_event(:quota_grant_failing, snapshot, [task_ref: "system"], fn _task_id ->
       subject = quota_grant_subject(cause, config_dir)
 
-      if Message.last_with_subject(Message.coordinator_ref(), [subject],
+      # A grant's episode is finer than its kind — one per config dir and
+      # cause — so the subject still narrows it (see `last_escalation/2`).
+      if Message.last_escalation(:quota_grant_failing,
            workspace_id: ws_id,
-           uncleared: true
+           subject: subject,
+           open: true
          ) do
         :skip
       else
@@ -1004,7 +1010,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   """
   @spec dispatch_stuck(map(), term(), pos_integer()) :: :ok
   def dispatch_stuck(snapshot, reason, attempts) do
-    escalate_event("dispatch_stuck/3", snapshot, fn task_id ->
+    escalate_event(:dispatch_stuck, snapshot, fn task_id ->
       subject = "#{task_id} dispatch stuck (#{attempts}× #{dispatch_stuck_label(reason)})"
 
       body =
@@ -1036,8 +1042,8 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   size behind that range, the difficulty rating, and what the worker is doing
   right now.
 
-  **Once per task.** The dedupe is `Message.last_with_subject/3` against a
-  subject that carries no numbers, so it survives a restart and does not
+  **Once per task.** The dedupe is `Message.last_escalation/2` on the
+  `:budget_exceeded` kind and the task, so it survives a restart and does not
   re-fire as the total keeps climbing — a second page saying the same task is
   still over budget tells the coordinator nothing the first did not.
 
@@ -1047,10 +1053,10 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   """
   @spec budget_exceeded(map(), map()) :: :ok
   def budget_exceeded(%{workspace_id: ws_id} = snapshot, info) when is_binary(ws_id) do
-    escalate_event("budget_exceeded/2", snapshot, fn task_id ->
+    escalate_event(:budget_exceeded, snapshot, fn task_id ->
       subject = budget_exceeded_subject(task_id)
 
-      if Message.last_with_subject(Message.coordinator_ref(), [subject], workspace_id: ws_id) do
+      if Message.last_escalation(:budget_exceeded, workspace_id: ws_id, task_ref: task_id) do
         :skip
       else
         {subject, budget_exceeded_body(task_id, info)}
@@ -1157,7 +1163,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   @spec merge_block_unresolved(map(), String.t() | nil, atom(), non_neg_integer(), keyword()) ::
           :ok
   def merge_block_unresolved(snapshot, mr_ref, reason, attempts, opts \\ []) do
-    escalate_event("merge_block_unresolved/4", snapshot, fn task_id ->
+    escalate_event(:merge_block_unresolved, snapshot, fn task_id ->
       ws_id = snapshot.workspace_id
       note = Keyword.get(opts, :note)
 
@@ -1205,7 +1211,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   """
   @spec merge_park_heartbeat(map(), String.t() | nil, atom(), non_neg_integer()) :: :ok
   def merge_park_heartbeat(snapshot, mr_ref, reason, polls) do
-    escalate_event("merge_park_heartbeat/4", snapshot, fn task_id ->
+    escalate_event(:merge_park_heartbeat, snapshot, fn task_id ->
       ws_id = snapshot.workspace_id
 
       subject = "#{task_id} still parked after #{polls} polls — #{block_label(reason)}"
@@ -1251,7 +1257,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   """
   @spec approved_awaiting_merge(map(), String.t() | nil, boolean()) :: :ok
   def approved_awaiting_merge(snapshot, mr_ref, via_review_gate) do
-    escalate_event("approved_awaiting_merge/3", snapshot, fn task_id ->
+    escalate_event(:approved_awaiting_merge, snapshot, fn task_id ->
       subject = "#{task_id} approved — awaiting manual merge (auto_merge off)"
 
       approval_line =
@@ -1305,7 +1311,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   """
   @spec awaiting_verification(map(), String.t() | nil, DateTime.t()) :: :ok
   def awaiting_verification(snapshot, mr_ref, merged_at) do
-    escalate_event("awaiting_verification/3", snapshot, fn task_id ->
+    escalate_event(:awaiting_verification, snapshot, fn task_id ->
       booted_at = Arbiter.Boot.Time.booted_at()
       stale? = DateTime.compare(booted_at, merged_at) == :lt
 
@@ -1365,30 +1371,33 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   # occurrence is fresh news and pages again immediately.
   defp fleet_unresolvable?(reason), do: reason in @approval_block_reasons
 
-  # True when an identical page for this workspace/task/reason-family is still
-  # uncleared, or — for a block the fleet cannot resolve — was raised inside the
-  # cooldown window. Both checks read the durable message table, so they hold
-  # across pollers *and* across restarts, which is what kills the stale
-  # duplicates that used to survive a server restart.
+  # True when this ticket's open `:merge_blocked` escalation already reports
+  # this reason-family, or — for a block the fleet cannot resolve — one that
+  # did was raised inside the cooldown window. Both checks read the durable
+  # message table, so they hold across pollers *and* across restarts, which is
+  # what kills the stale duplicates that used to survive a server restart.
+  #
+  # bd-8if9zt: the item is identified by `(kind, ticket)`. A *different* block
+  # on a ticket whose `:merge_blocked` item is still open is not a duplicate:
+  # it goes through, and `Escalation.post/1` refreshes that one item to say
+  # what blocks the merge now, rather than adding a second. The family's
+  # subjects only decide whether the row already says this.
   #
   # Fails open: an unreadable mailbox must never swallow a genuine escalation.
   defp duplicate_block_escalation?(ws_id, task_id, reason) do
     subjects = Enum.map(block_family(reason), &block_subject(task_id, &1))
     scope = [workspace_id: ws_id, task_ref: task_id]
-    coordinator = Message.coordinator_ref()
 
-    cond do
-      Message.last_with_subject(coordinator, subjects, scope ++ [uncleared: true]) != nil ->
-        true
+    case Message.last_escalation(:merge_blocked, [open: true] ++ scope) do
+      %{subject: subject} ->
+        subject in subjects
 
-      not fleet_unresolvable?(reason) ->
-        false
-
-      true ->
-        case Message.last_with_subject(coordinator, subjects, scope) do
-          nil -> false
-          last -> within_cooldown?(last)
-        end
+      nil ->
+        fleet_unresolvable?(reason) and
+          case Message.last_escalation(:merge_blocked, scope) do
+            %{subject: subject} = last -> subject in subjects and within_cooldown?(last)
+            nil -> false
+          end
     end
   rescue
     _ -> false
@@ -1425,18 +1434,24 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   # a resolved-then-recurring condition still gets a fresh page rather than
   # resetting the flood. Fails open: an unreadable mailbox must never swallow
   # a genuine escalation.
+  #
+  # bd-8if9zt: keyed on `(kind, ticket)`. The subject only says whether the
+  # last page reported the same cause (throttled vs. broken credentials): a
+  # different cause while one is open refreshes that item instead of adding a
+  # second.
   defp duplicate_preflight_escalation?(ws_id, task_id, reason) do
     subject = preflight_subject(task_id, reason)
     scope = [workspace_id: ws_id, task_ref: task_id]
-    coordinator = Message.coordinator_ref()
 
-    if Message.last_with_subject(coordinator, [subject], scope ++ [uncleared: true]) do
-      true
-    else
-      case Message.last_with_subject(coordinator, [subject], scope) do
-        nil -> false
-        last -> within_preflight_cooldown?(last)
-      end
+    case Message.last_escalation(:preflight_failed, [open: true] ++ scope) do
+      %{subject: open_subject} ->
+        open_subject == subject
+
+      nil ->
+        case Message.last_escalation(:preflight_failed, scope) do
+          %{subject: ^subject} = last -> within_preflight_cooldown?(last)
+          _ -> false
+        end
     end
   rescue
     _ -> false
@@ -1709,9 +1724,8 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
     task_id = Map.get(snapshot, :task_id)
 
     send_unless_broken(ws_id, task_id, subject, fn ->
-      Message.send_mail(%{
-        kind: :escalation,
-        to_ref: Message.coordinator_ref(),
+      Escalation.post(%{
+        kind: event,
         from_ref: task_id || "system",
         workspace_id: ws_id,
         task_ref: task_id,
@@ -1731,20 +1745,20 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
 
   defp escalate(_event, _snapshot, _reason), do: :ok
 
-  # Shared plumbing for the direct-`Message.send_mail`-style escalations above
-  # (`tracker_sync_failed/3` .. `approved_awaiting_merge/3`): guard on a binary
-  # `workspace_id`, resolve `task_id`, hand both to `build_fun`, and post the
-  # `{subject, body}` it returns as the standard `:escalation` envelope —
+  # Shared plumbing for the escalations above (`tracker_sync_failed/3` ..
+  # `approved_awaiting_merge/3`): guard on a binary `workspace_id`, resolve
+  # `task_id`, hand both to `build_fun`, and post the `{subject, body}` it
+  # returns through `Escalation.post/1` as an escalation of `kind` —
   # swallowing any failure so a notification bug never disrupts the caller's
   # real work. `build_fun` may return `:skip` instead of `{subject, body}` to
   # suppress sending without erroring (used by `merge_blocked/3`'s dedupe).
   # `opts[:task_ref]` overrides the default `task_ref: task_id` — needed by
   # `overage_alert/3`, whose `task_ref` is the raw (possibly-nil) snapshot
   # `:task_id` rather than the "system"-defaulted one used for `subject`/`body`.
-  defp escalate_event(label, snapshot, build_fun),
-    do: escalate_event(label, snapshot, [], build_fun)
+  defp escalate_event(kind, snapshot, build_fun),
+    do: escalate_event(kind, snapshot, [], build_fun)
 
-  defp escalate_event(label, %{workspace_id: ws_id} = snapshot, opts, build_fun)
+  defp escalate_event(kind, %{workspace_id: ws_id} = snapshot, opts, build_fun)
        when is_binary(ws_id) do
     task_id = Map.get(snapshot, :task_id, "system")
 
@@ -1754,9 +1768,8 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
 
       {subject, body} ->
         send_unless_broken(ws_id, task_id, subject, fn ->
-          Message.send_mail(%{
-            kind: :escalation,
-            to_ref: Message.coordinator_ref(),
+          Escalation.post(%{
+            kind: kind,
             from_ref: task_id,
             workspace_id: ws_id,
             task_ref: Keyword.get(opts, :task_ref, task_id),
@@ -1769,13 +1782,13 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
     end
   rescue
     e ->
-      Logger.debug("CoordinatorNotifier.#{label} swallowed: #{Exception.message(e)}")
+      Logger.debug("CoordinatorNotifier.#{kind} swallowed: #{Exception.message(e)}")
       :ok
   catch
     :exit, _ -> :ok
   end
 
-  defp escalate_event(_label, _snapshot, _opts, _build_fun), do: :ok
+  defp escalate_event(_kind, _snapshot, _opts, _build_fun), do: :ok
 
   # The last line of defence (bd-5jr49o). Every escalation this module sends —
   # including the ones that already carry a purpose-built dedupe, and the ones

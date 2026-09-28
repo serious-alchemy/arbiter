@@ -1406,6 +1406,7 @@ defmodule Arbiter.Worker do
     case Ash.create(Arbiter.Workers.Run, attrs) do
       {:ok, run} ->
         hand_off_resumed_run(resumed_from_run_id(state.meta))
+        clear_attention_on_restart(state)
         %State{state | run_id: run.id}
 
       {:error, reason} ->
@@ -1700,9 +1701,8 @@ defmodule Arbiter.Worker do
   def escalate_output_log_failure(%State{} = state, reason) do
     %State{task_id: task_id, workspace_id: workspace_id, run_id: run_id} = state
 
-    Arbiter.Messages.Message.send_mail(%{
-      kind: :escalation,
-      to_ref: Arbiter.Messages.Message.coordinator_ref(),
+    Arbiter.Messages.Escalation.post(%{
+      kind: :transcript_capture_failed,
       from_ref: "system",
       workspace_id: workspace_id,
       task_ref: task_id,
@@ -1770,6 +1770,20 @@ defmodule Arbiter.Worker do
     end
   rescue
     _ -> :ok
+  end
+
+  # bd-8if9zt: a resumed run on the ticket's own id is the ticket's run
+  # restarting — whatever its attention cause waited on (a ReviewGate park, a
+  # crash) is being worked again, so the cause is cleared and the ticket's
+  # escalations resolved (`Arbiter.Tasks.Attention.clear/2`). A reviewer or
+  # implementer round runs under a synthetic id and never clears it.
+  defp clear_attention_on_restart(%State{task_id: task_id, meta: meta}) do
+    if resumed_from_run_id(meta) != nil and is_nil(role_from_meta(meta)) and
+         Arbiter.Worker.ReviewGate.base_task_id(task_id) == task_id do
+      _ = Arbiter.Tasks.Attention.clear(task_id, :run_restarted)
+    end
+
+    :ok
   end
 
   defp stringify_failure(nil), do: nil
@@ -5129,9 +5143,8 @@ defmodule Arbiter.Worker do
 
   defp escalate_commit_gate(%State{workspace_id: ws_id, task_id: task_id}, subject, summary)
        when is_binary(ws_id) do
-    Arbiter.Messages.Message.send_mail(%{
-      kind: :escalation,
-      to_ref: Arbiter.Messages.Message.coordinator_ref(),
+    Arbiter.Messages.Escalation.post(%{
+      kind: :commit_gate,
       from_ref: task_id,
       workspace_id: ws_id,
       task_ref: task_id,
@@ -5261,9 +5274,8 @@ defmodule Arbiter.Worker do
 
   defp escalate_notes_gate(%State{workspace_id: ws_id, task_id: task_id}, summary)
        when is_binary(ws_id) do
-    Arbiter.Messages.Message.send_mail(%{
-      kind: :escalation,
-      to_ref: Arbiter.Messages.Message.coordinator_ref(),
+    Arbiter.Messages.Escalation.post(%{
+      kind: :notes_gate,
       from_ref: task_id,
       workspace_id: ws_id,
       task_ref: task_id,
@@ -5411,9 +5423,8 @@ defmodule Arbiter.Worker do
   # escalate_review_gate/3.
   defp escalate_merge_conflict(%State{workspace_id: ws_id, task_id: task_id}, branch, detail)
        when is_binary(ws_id) do
-    Arbiter.Messages.Message.send_mail(%{
-      kind: :escalation,
-      to_ref: Arbiter.Messages.Message.coordinator_ref(),
+    Arbiter.Messages.Escalation.post(%{
+      kind: :merge_conflict,
       from_ref: task_id,
       workspace_id: ws_id,
       task_ref: task_id,
@@ -5443,9 +5454,8 @@ defmodule Arbiter.Worker do
          reason
        )
        when is_binary(ws_id) do
-    Arbiter.Messages.Message.send_mail(%{
-      kind: :escalation,
-      to_ref: Arbiter.Messages.Message.coordinator_ref(),
+    Arbiter.Messages.Escalation.post(%{
+      kind: :merge_failed,
       from_ref: task_id,
       workspace_id: ws_id,
       task_ref: task_id,
@@ -6733,9 +6743,8 @@ defmodule Arbiter.Worker do
        when is_binary(ws_id) do
     subject = review_gate_escalation_subject(verdict, findings, task_id)
 
-    Arbiter.Messages.Message.send_mail(%{
-      kind: :escalation,
-      to_ref: Arbiter.Messages.Message.coordinator_ref(),
+    Arbiter.Messages.Escalation.post(%{
+      kind: :review_gate_findings,
       from_ref: task_id,
       workspace_id: ws_id,
       task_ref: task_id,
@@ -6819,9 +6828,8 @@ defmodule Arbiter.Worker do
             "claim the episode exactly once — if this trips, the claim is not holding."
       ],
       fn ->
-        Arbiter.Messages.Message.send_mail(%{
-          kind: :escalation,
-          to_ref: Arbiter.Messages.Message.coordinator_ref(),
+        Arbiter.Messages.Escalation.post(%{
+          kind: :review_parked,
           from_ref: task_id,
           workspace_id: ws_id,
           task_ref: task_id,
@@ -7810,9 +7818,8 @@ defmodule Arbiter.Worker do
       "Worker.open_mr: Watchdog failed to start for task=#{task_id} — MR #{mr_ref} orphaned; escalating"
     )
 
-    Arbiter.Messages.Message.send_mail(%{
-      kind: :escalation,
-      to_ref: Arbiter.Messages.Message.coordinator_ref(),
+    Arbiter.Messages.Escalation.post(%{
+      kind: :watchdog_startup_failed,
       from_ref: task_id,
       workspace_id: ws_id,
       task_ref: task_id,

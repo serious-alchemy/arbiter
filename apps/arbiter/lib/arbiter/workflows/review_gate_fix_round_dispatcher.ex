@@ -58,7 +58,7 @@ defmodule Arbiter.Workflows.ReviewGateFixRoundDispatcher do
   `Arbiter.Test.StubFixRoundDispatcher` so the suite never spawns a real agent.
   """
 
-  alias Arbiter.Messages.Message
+  alias Arbiter.Messages.Escalation
   alias Arbiter.ReviewGate.Round
   alias Arbiter.Worker.Dispatch
 
@@ -262,9 +262,8 @@ defmodule Arbiter.Workflows.ReviewGateFixRoundDispatcher do
       when is_binary(task_id) and is_binary(workspace_id) and is_integer(attempts) do
     total_reviews = total_review_rounds(task_id)
 
-    Message.send_mail(%{
-      kind: :escalation,
-      to_ref: Message.coordinator_ref(),
+    Escalation.post(%{
+      kind: :fix_rounds_exhausted,
       from_ref: task_id,
       workspace_id: workspace_id,
       task_ref: task_id,

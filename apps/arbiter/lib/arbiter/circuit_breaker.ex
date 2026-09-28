@@ -550,6 +550,7 @@ defmodule Arbiter.CircuitBreaker do
 
     send_fun.(%{
       kind: :escalation,
+      escalation_kind: :circuit_breaker_tripped,
       to_ref: Message.coordinator_ref(),
       from_ref: task_ref || "system",
       workspace_id: info.workspace_id,

@@ -869,9 +869,8 @@ defmodule Arbiter.Reviews.ExternalReview do
 
     if is_binary(ws_id) do
       safe_call(fn ->
-        Arbiter.Messages.Message.send_mail(%{
-          kind: :escalation,
-          to_ref: Arbiter.Messages.Message.coordinator_ref(),
+        Arbiter.Messages.Escalation.post(%{
+          kind: :report_only_review,
           from_ref: "external_review",
           workspace_id: ws_id,
           task_ref: String.slice(prepared.mr_ref, 0, 255),

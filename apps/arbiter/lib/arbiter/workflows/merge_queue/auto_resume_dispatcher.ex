@@ -35,7 +35,7 @@ defmodule Arbiter.Workflows.MergeQueue.AutoResumeDispatcher do
   session or shell out to git.
   """
 
-  alias Arbiter.Messages.Message
+  alias Arbiter.Messages.Escalation
   alias Arbiter.Worker.Dispatch
 
   require Logger
@@ -191,9 +191,8 @@ defmodule Arbiter.Workflows.MergeQueue.AutoResumeDispatcher do
         ) :: :ok | {:error, :no_workspace_id}
   def escalate_exhausted(task_id, workspace_id, mr_ref, attempts, reason)
       when is_binary(task_id) and is_binary(workspace_id) and is_integer(attempts) do
-    Message.send_mail(%{
-      kind: :escalation,
-      to_ref: Message.coordinator_ref(),
+    Escalation.post(%{
+      kind: :auto_resume_exhausted,
       from_ref: task_id,
       workspace_id: workspace_id,
       task_ref: task_id,
