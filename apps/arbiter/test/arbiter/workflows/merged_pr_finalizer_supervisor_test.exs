@@ -178,6 +178,17 @@ defmodule Arbiter.Workflows.MergedPRFinalizerSupervisorTest do
           else: System.delete_env("GITHUB_TOKEN")
 
         restore_auto_start(prior_auto_start)
+
+        # The same update also reconciles the workspace's patrols (bd-7feiul),
+        # which may start one for a repo with watched work — stop them.
+        for sup <- [
+              Arbiter.Workflows.PRPatrolSupervisor,
+              Arbiter.Workflows.ReviewPatrolSupervisor
+            ],
+            {_, pid, _, _} <- DynamicSupervisor.which_children(sup),
+            is_pid(pid) do
+          Arbiter.ProcessTeardown.stop_child(sup, pid)
+        end
       end)
 
       :ok

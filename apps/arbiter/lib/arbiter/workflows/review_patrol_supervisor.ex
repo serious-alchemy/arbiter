@@ -14,6 +14,13 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisor do
 
   Both auto-start paths are gated by the same `:arbiter, :auto_start_refineries`
   flag PRPatrol uses — disabled in `test`, enabled everywhere else.
+
+  Following a workspace config edit (bd-7feiul) also mirrors PRPatrolSupervisor:
+  each patrol registers with its repo as the registry value, `reconcile/1` (run
+  by `Arbiter.Tasks.Workspace.Changes.ReconcilePatrols` on a workspace `:update`
+  / `:patch_config` that changes `config`) stops every patrol pinned to a repo
+  the workspace no longer resolves to and re-runs the gated `start_patrol/2`,
+  and `ensure_started/2` sweeps stale patrols the same way before starting.
   """
 
   require Logger
@@ -48,11 +55,12 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisor do
   """
   @spec start_patrol(Workspace.t(), keyword()) :: DynamicSupervisor.on_start_child() | :skip
   def start_patrol(%Workspace{} = workspace, opts \\ []) do
-    adapter = resolve_adapter(workspace)
-    repos = patrol_repos(workspace)
+    do_start_patrol(workspace, resolve_adapter(workspace), patrol_repos(workspace), opts)
+  end
 
+  defp do_start_patrol(workspace, adapter, repos, opts) do
     cond do
-      is_nil(adapter) or not function_exported?(adapter, :get, 1) ->
+      not supported_adapter?(adapter) ->
         Logger.info(
           "ReviewPatrolSupervisor: skip workspace #{workspace.id} (#{workspace.name}) — " <>
             "merge adapter #{inspect(adapter)} does not support get/1"
@@ -70,13 +78,11 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisor do
         :skip
 
       true ->
-        reconcile_stale_registrations(workspace.id, repos)
+        desired = desired_children(workspace.id, repos)
+        stop_stale_children(workspace.id, desired)
 
         results =
-          Enum.map(repos, fn repo ->
-            registry_key =
-              if length(repos) == 1, do: workspace.id, else: "#{workspace.id}:#{repo}"
-
+          Enum.map(desired, fn {registry_key, repo} ->
             cond do
               off_mode?(workspace, repo) ->
                 stop_if_running(registry_key)
@@ -113,6 +119,32 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisor do
   end
 
   @doc """
+  Bring the workspace's running patrols in line with its current config
+  (bd-7feiul). Stops every patrol of this workspace whose registry key or repo
+  is no longer what the config resolves to — all of them when the workspace no
+  longer qualifies for a patrol at all — then re-runs the gated start, so a
+  replacement (or a patrol for a newly resolved repo) starts only where the
+  lazy-start gate (bd-7tr11p) finds an open engagement and the repo is not
+  `:off`. A patrol whose repo is unchanged keeps running, with its per-repo
+  rate-limit state intact.
+
+  Called after a workspace `:update` / `:patch_config` that changes `config`.
+  Returns what `start_patrol/2` does, or `:skip`.
+  """
+  @spec reconcile(Workspace.t()) :: DynamicSupervisor.on_start_child() | :skip
+  def reconcile(%Workspace{} = workspace) do
+    adapter = resolve_adapter(workspace)
+    repos = patrol_repos(workspace)
+
+    if supported_adapter?(adapter) and repos != [] do
+      do_start_patrol(workspace, adapter, repos, [])
+    else
+      stop_stale_children(workspace.id, [])
+      :skip
+    end
+  end
+
+  @doc """
   Ensure a patrol is running for the repo a just-opened engagement belongs to,
   WITHOUT re-reading the database (bd-7tr11p). Called by the `PatrolLifecycle`
   subscriber on the lifecycle event: the event itself is proof that an
@@ -129,10 +161,15 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisor do
     adapter = resolve_adapter(workspace)
     repos = patrol_repos(workspace)
 
-    with false <- is_nil(adapter) or not function_exported?(adapter, :get, 1),
+    with true <- supported_adapter?(adapter),
          repo when is_binary(repo) <- resolve_demand_repo(ref, repos),
          false <- off_mode?(workspace, repo) do
-      registry_key = if length(repos) == 1, do: workspace.id, else: "#{workspace.id}:#{repo}"
+      desired = desired_children(workspace.id, repos)
+      # A patrol still pinned to a repo the config has moved away from may hold
+      # this very registry key (bd-7feiul) — replace it rather than collapse
+      # into `{:already_started, stale_pid}`.
+      stop_stale_children(workspace.id, desired)
+      {registry_key, ^repo} = List.keyfind(desired, repo, 1)
       start_repo(workspace, repo, registry_key, [])
     else
       _ -> :skip
@@ -157,7 +194,7 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisor do
       |> Keyword.put(:repo, repo)
       |> Keyword.put(:workspace_id, workspace.id)
       |> Keyword.put_new(:interval_ms, patrol_interval_ms())
-      |> Keyword.put(:name, via(registry_key))
+      |> Keyword.put(:name, via(registry_key, repo))
 
     result = DynamicSupervisor.start_child(__MODULE__, {ReviewPatrol, child_opts})
 
@@ -254,6 +291,9 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisor do
   @doc false
   def via(workspace_id), do: {:via, Registry, {@registry, workspace_id}}
 
+  @doc false
+  def via(registry_key, repo), do: {:via, Registry, {@registry, registry_key, repo}}
+
   @doc """
   Whether patrols should auto-start. Shares the `:auto_start_refineries` config
   flag with `PRPatrolSupervisor` / `MergeQueueSupervisor` — false in test, true
@@ -308,36 +348,41 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisor do
       :ok
   end
 
-  # Stop any patrols registered under the opposite naming scheme for this
-  # workspace before starting new ones, so a 1↔N transition in resolvable-repo
-  # count doesn't leave a ghost patrol under the old registry key.
-  defp reconcile_stale_registrations(workspace_id, repos) do
-    if length(repos) == 1 do
-      @registry
-      |> Registry.select([{{:"$1", :"$2", :_}, [], [{{:"$1", :"$2"}}]}])
-      |> Enum.each(fn {key, pid} ->
-        if String.starts_with?(key, workspace_id <> ":") do
-          Logger.info(
-            "ReviewPatrolSupervisor: stopping stale patrol #{key} (registry scheme changed to single-repo)"
-          )
+  # `{registry_key, repo}` for each patrol the workspace's config resolves to: a
+  # single repo registers under the bare workspace id, several under
+  # "workspace_id:owner/repo".
+  defp desired_children(workspace_id, [repo]), do: [{workspace_id, repo}]
 
-          ProcessTeardown.stop_child(__MODULE__, pid)
-        end
-      end)
-    else
-      case Registry.lookup(@registry, workspace_id) do
-        [{pid, _}] ->
-          Logger.info(
-            "ReviewPatrolSupervisor: stopping stale patrol #{workspace_id} (registry scheme changed to multi-repo)"
-          )
+  defp desired_children(workspace_id, repos),
+    do: Enum.map(repos, &{"#{workspace_id}:#{&1}", &1})
 
-          ProcessTeardown.stop_child(__MODULE__, pid)
+  # Stop every patrol of this workspace that is not in `desired` — a 1↔N
+  # registry-scheme change as well as a patrol still pinned to a repo the
+  # workspace no longer resolves to under an unchanged key (bd-7feiul).
+  defp stop_stale_children(workspace_id, desired) do
+    @registry
+    |> Registry.select([{{:"$1", :"$2", :"$3"}, [], [{{:"$1", :"$2", :"$3"}}]}])
+    |> Enum.filter(fn {key, _pid, _repo} -> workspace_key?(key, workspace_id) end)
+    |> Enum.reject(fn {key, _pid, repo} -> {key, repo} in desired end)
+    |> Enum.each(fn {key, pid, repo} ->
+      Logger.info(
+        "ReviewPatrolSupervisor: stopping stale patrol #{key} (repo=#{inspect(repo)}) — " <>
+          "workspace #{workspace_id} now resolves to #{inspect(Enum.map(desired, &elem(&1, 1)))}"
+      )
 
-        _ ->
-          :ok
-      end
-    end
+      ProcessTeardown.stop_child(__MODULE__, pid)
+    end)
   end
+
+  defp workspace_key?(workspace_id, workspace_id), do: true
+
+  defp workspace_key?(key, workspace_id) when is_binary(key),
+    do: String.starts_with?(key, workspace_id <> ":")
+
+  defp workspace_key?(_key, _workspace_id), do: false
+
+  defp supported_adapter?(adapter),
+    do: not is_nil(adapter) and function_exported?(adapter, :get, 1)
 
   # Resolve the merge adapter for a workspace, or nil on unknown strategy.
   # Load it before `start_patrol/2`'s `function_exported?/3` guard inspects it —
@@ -350,14 +395,19 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisor do
     ArgumentError -> nil
   end
 
-  # Derive the list of "owner/repo" strings to patrol for this workspace, exactly
-  # as PRPatrolSupervisor does: single-repo (merge.config.repo set) or multi-repo
-  # (one per repo, repo derived from each repo's origin remote).
+  @doc """
+  The repos (`"owner/repo"` slugs, or GitLab project ids) the workspace's
+  config resolves to — one patrol each: single-repo (merge.config.repo set) or
+  multi-repo (one per repo, derived from each repo's origin remote), as in
+  PRPatrolSupervisor. `ReviewPatrol` re-checks its own repo against this every
+  tick (bd-7feiul). Empty when none resolve.
+  """
   # Pre-existing complexity 13 — baselined when bd-4x2yhq first
   # wired Credo up. Thresholds stay at the tool's own default so new
   # code is held to it; see the note in .credo.exs.
+  @spec patrol_repos(Workspace.t()) :: [String.t()]
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
-  defp patrol_repos(%Workspace{} = workspace) do
+  def patrol_repos(%Workspace{} = workspace) do
     config = workspace.config || %{}
 
     case get_in(config, ["merge", "strategy"]) do

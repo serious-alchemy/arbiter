@@ -117,7 +117,13 @@ defmodule Arbiter.Workflows.PRPatrol do
   alias Arbiter.Tasks.IssueRepo
   alias Arbiter.Worker
   alias Arbiter.Worker.Dispatch
-  alias Arbiter.Workflows.{CIFailureFollowUp, PatrolRepoScope, PatrolServer, ReviewThreadFollowUp}
+  alias Arbiter.Workflows.{
+    CIFailureFollowUp,
+    PatrolRepoScope,
+    PatrolServer,
+    PRPatrolSupervisor,
+    ReviewThreadFollowUp
+  }
   require Ash.Query
   require Logger
 
@@ -263,6 +269,11 @@ defmodule Arbiter.Workflows.PRPatrol do
   def do_tick_body(state) do
     # Re-fetch the workspace on every tick so config changes (author_logins,
     # merge settings, etc.) take effect immediately without a GenServer restart.
+    # The `repo` is fixed per instance, though (bd-7feiul): if the workspace no
+    # longer resolves to it — merge.config owner/repo or repo_paths moved — the
+    # tick lists and dispatches nothing rather than keep patrolling the old
+    # repo. `PRPatrolSupervisor.reconcile/1`, run on workspace update, replaces
+    # this patrol with one for the new repo.
     workspace = PatrolServer.refetch_workspace(state.workspace_id)
 
     # Thread state through each PR so per-PR dispatch-failure backoff records
@@ -271,6 +282,7 @@ defmodule Arbiter.Workflows.PRPatrol do
     # only resets when a PR was genuinely actionable this tick.
     {dispatched_state, mr_count, dispatched_count} =
       with %Workspace{} <- workspace,
+           true <- repo_still_configured?(workspace, state.repo),
            adapter when not is_nil(adapter) <- resolve_adapter(workspace),
            true <- function_exported?(adapter, :list_open, 0),
            :ok <- Mergers.prepare_with_repo(workspace, state.repo),
@@ -321,6 +333,19 @@ defmodule Arbiter.Workflows.PRPatrol do
         workspace: workspace,
         idle_ticks: idle_ticks
     }
+  end
+
+  defp repo_still_configured?(workspace, repo) do
+    if repo in PRPatrolSupervisor.patrol_repos(workspace) do
+      true
+    else
+      Logger.warning(
+        "PRPatrol: workspace #{workspace.id} no longer resolves to repo=#{repo} — " <>
+          "skipping the tick (awaiting reconcile to a patrol for the current repo)"
+      )
+
+      false
+    end
   end
 
   # The cheap, DB-only / in-memory gate deciding whether a PR is even worth a

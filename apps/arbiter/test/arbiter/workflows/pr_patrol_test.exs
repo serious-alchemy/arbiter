@@ -139,6 +139,17 @@ defmodule Arbiter.Workflows.PRPatrolTest do
 
   # Real git repo + bare "origin" remote so Dispatch.dispatch/2's worktree
   # provisioning (fetch from origin, branch from origin/<base>) succeeds.
+  # A git dir whose `origin` is the GitHub remote for `slug`, so a workspace
+  # `repo_paths` entry pointing at it makes the patrol supervisors derive `slug`
+  # (RepoResolver.from_remote/1). Not a dispatchable checkout — no commits.
+  defp origin_marker!(tmp, sub, slug) do
+    dir = Path.join(tmp, sub <> "-marker")
+    File.mkdir_p!(dir)
+    {_, 0} = System.cmd("git", ["init", "-q", dir])
+    {_, 0} = System.cmd("git", ["-C", dir, "remote", "add", "origin", "git@github.com:#{slug}.git"])
+    dir
+  end
+
   defp seed_repo!(tmp, sub) do
     repo = Path.join(tmp, sub)
     File.mkdir_p!(repo)
@@ -1039,6 +1050,11 @@ defmodule Arbiter.Workflows.PRPatrolTest do
                 "owner" => "owner",
                 "credentials_ref" => "env:GITHUB_TOKEN"
               }
+            },
+            # The workspace must resolve to the patrol's repo (bd-7feiul: a
+            # patrol whose repo the workspace no longer resolves to ticks idle).
+            "repo_paths" => %{
+              "explicit-checkout" => origin_marker!(tmp, "explicit", "owner/explicit-repo")
             }
           }
         })
@@ -1097,8 +1113,8 @@ defmodule Arbiter.Workflows.PRPatrolTest do
     end
 
     test "a follow-up whose repo resolves to nothing is logged, not crashed", %{tmp: tmp} do
-      # Same multi-repo shape, but the patrol repo is NOT in `repo_paths` — so
-      # bd-9dwbvt's create-time resolution has nothing to bind and refuses.
+      # The patrol repo is pinned in the merge config but is NOT in `repo_paths`
+      # — so bd-9dwbvt's create-time resolution has nothing to bind and refuses.
       # The patrol must survive the tick.
       {:ok, multi_ws} =
         Ash.create(Workspace, %{
@@ -1107,8 +1123,12 @@ defmodule Arbiter.Workflows.PRPatrolTest do
           config: %{
             "merge" => %{
               "strategy" => "github",
+              # The workspace must resolve to the patrol's repo (bd-7feiul: a
+              # patrol whose repo the workspace no longer resolves to ticks
+              # idle) — pinned here, so it still has no `repo_paths` checkout.
               "config" => %{
                 "owner" => "owner",
+                "repo" => "unregistered-repo",
                 "credentials_ref" => "env:GITHUB_TOKEN"
               }
             }
@@ -2344,6 +2364,79 @@ defmodule Arbiter.Workflows.PRPatrolTest do
   describe "child_spec restart policy (bd-7tr11p)" do
     test "is :transient so a :normal self-stop is not restarted" do
       assert PRPatrol.child_spec([]).restart == :transient
+    end
+  end
+
+  # bd-7feiul: a patrol is pinned to the `repo` it was started for, and
+  # `Mergers.prepare_with_repo/2` re-applies that slug every tick — so after a
+  # workspace edit moved merge.config owner/repo, a still-running patrol kept
+  # listing (and dispatching against) the OLD repo until a restart. The
+  # supervisor's reconcile replaces it; until then its tick must not touch the
+  # repo the workspace no longer resolves to.
+  describe "tick/1 — workspace no longer resolves to the patrol's repo (bd-7feiul)" do
+    defp requests_to(test_pid) do
+      stub(fn conn ->
+        send(test_pid, {:requested, conn.request_path})
+        conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+      end)
+    end
+
+    test "after an :update moves merge.config owner, the old patrol's tick queries nothing",
+         %{ws: ws} do
+      {_pid, name} = start_patrol(ws)
+
+      {:ok, _ws} =
+        Ash.update(
+          ws,
+          %{
+            config: %{
+              "merge" => %{
+                "strategy" => "github",
+                "config" => %{
+                  "owner" => "new-owner",
+                  "repo" => "repo",
+                  "credentials_ref" => "env:GITHUB_TOKEN"
+                }
+              }
+            }
+          },
+          action: :update
+        )
+
+      requests_to(self())
+      :ok = PRPatrol.tick(name)
+
+      refute_received {:requested, _}
+      assert PRPatrol.state(name).ticks == 1
+    end
+
+    test "after a :patch_config moves merge.config repo, the old patrol's tick queries nothing",
+         %{ws: ws} do
+      {_pid, name} = start_patrol(ws)
+
+      {:ok, _ws} =
+        Ash.update(ws, %{patch: %{"merge" => %{"config" => %{"repo" => "renamed"}}}},
+          action: :patch_config
+        )
+
+      requests_to(self())
+      :ok = PRPatrol.tick(name)
+
+      refute_received {:requested, _}
+    end
+
+    test "a patrol whose repo still resolves keeps querying it", %{ws: ws} do
+      {_pid, name} = start_patrol(ws)
+
+      {:ok, _ws} =
+        Ash.update(ws, %{patch: %{"pr_patrol" => %{"author_logins" => ["someone"]}}},
+          action: :patch_config
+        )
+
+      requests_to(self())
+      :ok = PRPatrol.tick(name)
+
+      assert_received {:requested, "/repos/owner/repo/pulls"}
     end
   end
 end
