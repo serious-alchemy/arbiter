@@ -75,6 +75,7 @@ defmodule ArbiterWeb.Api.MessageController do
       |> Map.take(~w(kind from_ref to_ref subject body task_ref directive_ref workspace_id))
       |> coerce_kind()
       |> Message.hand_written()
+      |> mark_unverified_origin()
 
     case Ash.create(Message, attrs) do
       {:ok, message} ->
@@ -85,6 +86,47 @@ defmodule ArbiterWeb.Api.MessageController do
       {:error, _} = err ->
         err
     end
+  end
+
+  # bd-2nbu7a / #15: `arb` defaults to http://127.0.0.1:4848, so an agent CLI in
+  # a throwaway sandbox on this host (test fixture, nested install) posts to the
+  # live coordinator. Its escalation names a task this installation has no row
+  # for. Mark such an escalation — never drop it: an operator can still read it,
+  # and a real incident phrased the same way is never filtered, only a
+  # task_ref this installation cannot resolve is flagged.
+  defp mark_unverified_origin(attrs) do
+    task_ref = attr(attrs, :task_ref)
+
+    if agent_escalation?(attrs) and is_binary(task_ref) and task_ref != "" and
+         not task_known?(task_ref) do
+      note =
+        "[origin not verified: #{task_ref} is not a task in this installation — " <>
+          "likely a sandbox, test fixture or another install posting to this host]"
+
+      attrs
+      |> put_attr(:subject, "[UNVERIFIED ORIGIN: #{task_ref}] #{attr(attrs, :subject)}")
+      |> put_attr(:body, "#{note}\n\n#{attr(attrs, :body)}")
+    else
+      attrs
+    end
+  end
+
+  defp agent_escalation?(attrs),
+    do: attr(attrs, :kind) in [:escalation, "escalation"]
+
+  defp task_known?(id) do
+    match?({:ok, %Arbiter.Tasks.Issue{}}, Ash.get(Arbiter.Tasks.Issue, id))
+  rescue
+    _ -> false
+  end
+
+  # `hand_written/1` returns string- or atom-keyed attrs depending on `kind`.
+  defp attr(attrs, key), do: Map.get(attrs, key) || Map.get(attrs, Atom.to_string(key))
+
+  defp put_attr(attrs, key, value) do
+    if Map.has_key?(attrs, Atom.to_string(key)),
+      do: Map.put(attrs, Atom.to_string(key), value),
+      else: Map.put(attrs, key, value)
   end
 
   def read(conn, %{"id" => id} = params) do
