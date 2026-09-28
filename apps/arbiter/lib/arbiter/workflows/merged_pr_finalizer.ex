@@ -380,7 +380,10 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
       when is_binary(title) and is_binary(description) and is_binary(ref) and is_binary(repo) do
     String.starts_with?(title, "PR ##{ref}: ") and
       String.ends_with?(title, " needs follow-up") and
-      String.starts_with?(String.trim_leading(description), "Auto-filed by PRPatrol against #{repo}.")
+      String.starts_with?(
+        String.trim_leading(description),
+        "Auto-filed by PRPatrol against #{repo}."
+      )
   end
 
   def legacy_pr_patrol_follow_up?(_task, _repo), do: false

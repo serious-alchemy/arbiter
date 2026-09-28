@@ -2495,7 +2495,9 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       :ok = MergeQueue.enqueue(name, task.id)
 
       {:ok, _ws} =
-        Ash.update(ws, %{config: put_in(ws.config, ["merge", "config", "owner"], "serious-alchemy")},
+        Ash.update(
+          ws,
+          %{config: put_in(ws.config, ["merge", "config", "owner"], "serious-alchemy")},
           action: :update
         )
 
@@ -2504,6 +2506,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       polled = drain_requests()
 
       assert {"GET", "/repos/serious-alchemy/widget/pulls/71"} in polled
+
       refute Enum.any?(polled, fn {_method, path} -> String.starts_with?(path, "/repos/octo/") end)
     end
 
