@@ -36,6 +36,7 @@ defmodule Arbiter.Loop.Analysis do
   alias Arbiter.Loop.{
     CiSection,
     Corpus,
+    Discovery,
     FailureClassifier,
     FindingBuckets,
     Proposals,
@@ -69,6 +70,17 @@ defmodule Arbiter.Loop.Analysis do
   `:limit`, `:label`). Returns `{:ok, %{report: %Report{}, markdown: String,
   usage_event_id: id | nil}}`.
 
+  ## `discover?: true` (opt-in, bd-4f6opo)
+
+  Off by default, and the default path is **byte-identical** to before and
+  makes no model call. Opted in, `Arbiter.Loop.Discovery.run/2` makes one
+  bounded model call over the window's finding residue and the report gains a
+  `discovery` section of candidate detectors that passed a deterministic
+  pre-check. It writes nothing but its own `usage_events` row (step
+  `:loop_discovery`); its candidates never reach `Arbiter.Loop.record/2`, so
+  combining it with `propose?: true` queues exactly what `propose?` alone does.
+  `:invoker` is passed through to `Discovery.run/2`.
+
   ## `propose?: true` (opt-in, bd-9j2g3x)
 
   Off by default, and the default path is **byte-identical** to before Stage 2:
@@ -91,15 +103,17 @@ defmodule Arbiter.Loop.Analysis do
     with {:ok, rows, meta} <- Corpus.fetch(opts) do
       workspace_id = Keyword.get(opts, :workspace_id) || Map.get(meta, :workspace_id)
 
+      opts =
+        opts
+        |> Keyword.put(:meta, meta)
+        |> Keyword.put_new_lazy(:evidence_bar, fn -> Arbiter.Loop.evidence_bar(workspace_id) end)
+        |> Keyword.put_new_lazy(:ci_config, fn -> Arbiter.Loop.ci_config(workspace_id) end)
+
       report =
         rows
-        |> build_report(
-          opts
-          |> Keyword.put(:meta, meta)
-          |> Keyword.put_new_lazy(:evidence_bar, fn -> Arbiter.Loop.evidence_bar(workspace_id) end)
-          |> Keyword.put_new_lazy(:ci_config, fn -> Arbiter.Loop.ci_config(workspace_id) end)
-        )
+        |> build_report(opts)
         |> add_zero_token_notes(meta)
+        |> maybe_discover(meta, workspace_id, opts)
 
       markdown = Report.to_markdown(report)
       duration_ms = System.monotonic_time(:millisecond) - started
@@ -217,6 +231,43 @@ defmodule Arbiter.Loop.Analysis do
   # rather than left to the design doc.
   defp own_draw_note do
     "Analyser's own draw on the quota windows it measures: none — the Stage 1 pass is deterministic Elixir and makes no model call, so its `usage_events` row carries an explicit zero-token draw. If an LLM call ever lands inside `Loop`, its draw lands on that row and this note must stop saying \"none\"."
+  end
+
+  # bd-4f6opo: the opt-in discovery tier. Runs after the deterministic report
+  # is complete and only adds to it — the `discovery` section, and the own-draw
+  # note corrected to say what the model call cost. Nothing it returns is fed
+  # back into `suggestions`, so `Proposals.record_all/2` cannot see it.
+  defp maybe_discover(%Report{} = report, meta, workspace_id, opts) do
+    if Keyword.get(opts, :discover?, false) do
+      discovery =
+        Discovery.run(meta,
+          invoker: Keyword.get(opts, :invoker),
+          workspace_id: workspace_id,
+          evidence_bar: Keyword.get(opts, :evidence_bar)
+        )
+
+      notes =
+        Enum.map(report.notes, fn note ->
+          if note == own_draw_note(), do: discover_draw_note(discovery), else: note
+        end)
+
+      %{report | discovery: discovery, notes: notes}
+    else
+      report
+    end
+  end
+
+  defp discover_draw_note(%{cost: %{usage_event_id: nil}}) do
+    "Analyser's own draw on the quota windows it measures: the deterministic pass drew none; the opt-in `--discover` model pass recorded no draw this run (no call was made, or the call failed before returning usage)."
+  end
+
+  defp discover_draw_note(%{cost: cost}) do
+    dollars =
+      if is_number(cost.cost_usd),
+        do: "$" <> :erlang.float_to_binary(cost.cost_usd * 1.0, decimals: 4),
+        else: "an unknown dollar cost"
+
+    "Analyser's own draw on the quota windows it measures: the deterministic pass drew none; the opt-in `--discover` model pass drew #{dollars} and #{Scarcity.format_share(cost.window_share_5h)}, recorded on its own `usage_events` row (step `loop_discovery`)."
   end
 
   # `Corpus.fetch/1` computes the residue (it owns the raw `review_gate_rounds`

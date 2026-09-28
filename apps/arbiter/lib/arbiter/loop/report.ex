@@ -36,6 +36,11 @@ defmodule Arbiter.Loop.Report do
       and every fix_pass's deterministic outcome class with the `unknown`
       share reported. Built by `Arbiter.Loop.CiSection`; carries the
       approved-PR-only undercount verbatim.
+    * `discovery` (bd-4f6opo) — `nil` unless the pass ran with
+      `discover?: true`; then the candidate detectors
+      `Arbiter.Loop.Discovery` proposed over the residue above and verified
+      deterministically, with the rejected ones counted and explained. A `nil`
+      renders nothing, so the default report is unchanged.
     * `notes` — the small-sample caveats, rendered verbatim.
   """
 
@@ -51,6 +56,7 @@ defmodule Arbiter.Loop.Report do
             suggestions: [],
             finding_residue: Arbiter.Loop.Corpus.empty_finding_residue(),
             ci: Arbiter.Loop.CiSection.empty(),
+            discovery: nil,
             notes: []
 
   @type t :: %__MODULE__{}
@@ -66,6 +72,7 @@ defmodule Arbiter.Loop.Report do
       misclassification(r),
       finding_categories(r),
       finding_residue(r),
+      discovery(r),
       ci(r),
       cells(r),
       difficulty_misestimates(r),
@@ -78,17 +85,30 @@ defmodule Arbiter.Loop.Report do
 
   # ---------------------------------------------------------------------------
 
-  defp header(%{window: w}) do
+  defp header(%{window: w} = r) do
     label = Map.get(w, :label, "window")
     span = window_span(w)
 
     """
     # Loop-analysis report — #{label}
     #{span}
-    This pass is **read-only**: it writes nothing but this report and a single
-    `usage_events` cost row (zero writes to skills, config, or issues). The
-    operator reads it and decides where each lesson lands.
+    #{read_only_text(r)}
     """
+  end
+
+  defp read_only_text(%{discovery: nil}) do
+    "This pass is **read-only**: it writes nothing but this report and a single\n" <>
+      "`usage_events` cost row (zero writes to skills, config, or issues). The\n" <>
+      "operator reads it and decides where each lesson lands."
+  end
+
+  # bd-4f6opo: `--discover` adds the model call's own cost row — still no
+  # write to skills, config, issues or the proposal queue.
+  defp read_only_text(_r) do
+    "This pass is **read-only**: it writes nothing but this report and its own\n" <>
+      "`usage_events` cost rows — one for the deterministic pass, one for the\n" <>
+      "opt-in discovery model call (zero writes to skills, config, issues, or the\n" <>
+      "proposal queue). The operator reads it and decides where each lesson lands."
   end
 
   defp window_span(%{since: since, until: until}) when not is_nil(since) do
@@ -116,7 +136,7 @@ defmodule Arbiter.Loop.Report do
   # number that uses it. Rendered even when uncalibrated — a window whose
   # capacity could not be estimated must say so, because a silent fallback to
   # dollars is exactly the drift Amendment E is about.
-  defp scarcity(%{scarcity: %{unit: unit} = s}) do
+  defp scarcity(%{scarcity: %{unit: unit} = s} = r) do
     {mode, source} = Map.get(s, :billing_mode, {:metered, :default})
     cal = Map.get(s, :calibration, %{})
 
@@ -129,7 +149,7 @@ defmodule Arbiter.Loop.Report do
     | secondary unit | `#{Map.get(s, :secondary_unit)}` |
     | billing mode | #{mode} (#{source}) |
     | 5h calibration | #{calibration_line(cal)} |
-    | analyser's own draw | none — deterministic pass, no model call |
+    | analyser's own draw | #{own_draw_cell(r)} |
 
     Under **subscription** billing the marginal dollar is not the scarce
     resource; the 5-hour utilization window is — it is the window
@@ -140,6 +160,23 @@ defmodule Arbiter.Loop.Report do
   end
 
   defp scarcity(_), do: ""
+
+  # bd-4f6opo: true only while no model call ran. Under `--discover` the cell
+  # names the discovery pass's own recorded draw instead.
+  defp own_draw_cell(%{discovery: %{cost: %{usage_event_id: id} = cost}}) when not is_nil(id) do
+    dollars =
+      if is_number(cost.cost_usd),
+        do: "$" <> :erlang.float_to_binary(cost.cost_usd * 1.0, decimals: 4),
+        else: "unknown $"
+
+    "deterministic pass: none; `--discover` model call: #{dollars}, " <>
+      Arbiter.Loop.Scarcity.format_share(cost.window_share_5h)
+  end
+
+  defp own_draw_cell(%{discovery: %{}}),
+    do: "deterministic pass: none; `--discover` model call: no draw recorded"
+
+  defp own_draw_cell(_r), do: "none — deterministic pass, no model call"
 
   defp calibration_line(%{status: :calibrated} = c) do
     "calibrated — #{round_i(Map.get(c, :capacity_weighted_tokens))} weighted tokens per window " <>
@@ -315,6 +352,9 @@ defmodule Arbiter.Loop.Report do
     #{cites}
     """
   end
+
+  defp discovery(%{discovery: nil}), do: ""
+  defp discovery(%{discovery: d}), do: Arbiter.Loop.Discovery.to_markdown(d)
 
   # bd-cuu8n3: rendered unconditionally, like the corpus-integrity sections
   # — a window with no fix_passes says "0 of N", and the undercount caveat is

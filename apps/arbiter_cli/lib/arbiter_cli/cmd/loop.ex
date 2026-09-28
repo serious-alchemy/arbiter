@@ -16,7 +16,8 @@ defmodule ArbiterCli.Cmd.Loop do
   Usage:
 
       arb loop analyze [--since 7d | <iso8601>] [--until <iso8601>]
-                       [--limit N] [--workspace <id>] [--propose] [--json]
+                       [--limit N] [--workspace <id>] [--propose] [--discover]
+                       [--json]
 
   `--since` accepts `7d` / `24h` / `30m` shortcuts or ISO8601 (default: last 7
   days). `--json` prints the raw envelope (markdown + structured summary)
@@ -41,6 +42,15 @@ defmodule ArbiterCli.Cmd.Loop do
   Without `--propose` the pass is read-only, exactly as it has always been.
   `--propose` additionally persists the proposals the report implies into the
   reviewable queue below — nothing is applied, at any evidence level.
+
+  `--discover` (bd-4f6opo, off by default) adds **one model call** over the
+  window's reviewer-finding residue and a "Candidate detectors" section: each a
+  proposed `@finding_buckets` regex + category that has passed a deterministic
+  pre-check (it matches every residue unit the model claimed, and ≥ 3 units
+  across ≥ 2 tasks in retained history), with its match counts and citations;
+  rejected candidates are counted with the reason. It writes nothing but its
+  own `usage_events` row (step `loop_discovery`) and queues nothing, even with
+  `--propose`. Without it, `arb loop analyze` makes no model call.
 
   ## The proposal queue (Stage 2, bd-9j2g3x)
 
@@ -139,6 +149,10 @@ defmodule ArbiterCli.Cmd.Loop do
     end
   end
 
+  # The discovery model call is capped server-side at 300s by default; leave
+  # headroom for the deterministic pass around it.
+  @discover_timeout_ms 360_000
+
   defp analyze(argv, mode) do
     {opts, _rest, _bad} =
       OptionParser.parse(argv,
@@ -147,7 +161,8 @@ defmodule ArbiterCli.Cmd.Loop do
           until: :string,
           limit: :integer,
           workspace: :string,
-          propose: :boolean
+          propose: :boolean,
+          discover: :boolean
         ],
         aliases: [s: :since, l: :limit, w: :workspace]
       )
@@ -160,12 +175,31 @@ defmodule ArbiterCli.Cmd.Loop do
       |> maybe_put(:workspace_id, Keyword.get(opts, :workspace))
 
     # `--propose` is a different verb on a different route, not a flag on the
-    # read-only GET — the analyze endpoint can never write.
+    # read-only GET — the analyze endpoint can never write. `--discover`
+    # (bd-4f6opo) writes nothing either, so it is a param on whichever route
+    # runs; it makes a model call, so it gets a longer receive timeout. Without
+    # it the request is exactly what it always was.
+    discover? = Keyword.get(opts, :discover, false)
+
     result =
-      if Keyword.get(opts, :propose, false) do
-        Client.post("/api/loop/propose", Map.new(params))
-      else
-        Client.get("/api/loop/analyze", params)
+      case {Keyword.get(opts, :propose, false), discover?} do
+        {true, false} ->
+          Client.post("/api/loop/propose", Map.new(params))
+
+        {true, true} ->
+          Client.post(
+            "/api/loop/propose",
+            params |> Map.new() |> Map.put(:discover, true),
+            receive_timeout: @discover_timeout_ms
+          )
+
+        {false, false} ->
+          Client.get("/api/loop/analyze", params)
+
+        {false, true} ->
+          Client.get("/api/loop/analyze", Keyword.put(params, :discover, "true"),
+            receive_timeout: @discover_timeout_ms
+          )
       end
 
     case result do

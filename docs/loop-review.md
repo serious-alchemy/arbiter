@@ -82,6 +82,24 @@ warrants at least the same gate.
    it is a report of what the four buckets can name, not of everything
    reviewers found.
 
+   **`--discover` (opt-in, bd-4f6opo — discovery Stage 1).** Off by default;
+   without it `arb loop analyze` makes no model call and its output is
+   unchanged. With it, the pass makes **one** model call over this residue —
+   at most 300 units, newest-first, each truncated to 400 characters, read
+   from the `review_gate_rounds.findings` column (never a transcript) — and
+   adds a **Candidate detectors** section. Each candidate is a proposed
+   `@finding_buckets` tuple (regex + category), not a finding, and is shown
+   only after a deterministic pre-check: its regex must match every residue
+   unit the model claimed, and must match ≥ 3 units across ≥ 2 distinct tasks
+   (the evidence bar) over retained history — the residue of the last four
+   windows. Rejected candidates are counted and listed with the discrepancy.
+   Candidates are never queued, fingerprinted or counted as evidence, even
+   under `--propose`; one becomes a detector only when a human merges it into
+   `Arbiter.Loop.FindingBuckets`. The call's own cost lands on its own
+   `usage_events` row (step `loop_discovery`), and the report states its
+   dollars and 5h-window share in place of "no model call". Design:
+   `docs/design/loop-inference-discovery-pass.md`.
+
 5. **CI: first-push red rate and fix_pass outcomes** (bd-cuu8n3). The share
    of PR-bearing tasks (a main run in the window + a PR) that needed at least
    one CI fix_pass, overall and by repo, by provider/model (the task's latest

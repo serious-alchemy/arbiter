@@ -38,6 +38,11 @@ defmodule Arbiter.Usage.Event do
             suffix (chained onto the reviewer suffix), stripped the same way.
   `:other` — escape hatch for future non-Claude agents that don't fit the
               author/reviewer/implementer split.
+  `:loop_discovery` — the opt-in `arb loop analyze --discover` model call
+              (`Arbiter.Loop.Discovery`, bd-4f6opo): `source: :maintenance`,
+              no task. Its own step so the loop's model draw is visible in
+              the ledger it optimises, apart from the deterministic pass's
+              zero-token `:other` row.
 
   Every step's `workspace_id` is the *authoring task's* workspace, resolved
   from `Arbiter.Worker.ReviewGate.base_task_id/1` when the worker's own
@@ -76,7 +81,7 @@ defmodule Arbiter.Usage.Event do
     domain: Arbiter.Usage,
     data_layer: AshSqlite.DataLayer
 
-  @steps ~w(work review impl other)a
+  @steps ~w(work review impl other loop_discovery)a
   @sources ~w(task probe preflight coordinator_session terminal_session maintenance)a
 
   sqlite do

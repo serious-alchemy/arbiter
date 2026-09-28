@@ -205,6 +205,81 @@ defmodule ArbiterWeb.Api.LoopControllerTest do
     end
   end
 
+  # bd-4f6opo: `?discover=true` is the opt-in model pass. The invoker is
+  # swapped in app env (saved and restored — config/test.exs sets `:disabled`).
+  describe "GET /api/loop/analyze?discover=true" do
+    setup do
+      prev = Application.get_env(:arbiter, :loop_discovery_invoker)
+      test_pid = self()
+
+      Application.put_env(:arbiter, :loop_discovery_invoker, fn prompt, _opts ->
+        send(test_pid, {:invoked, prompt})
+
+        {:ok,
+         Jason.encode!(%{
+           "candidates" => [
+             %{
+               "category" => "stale memoisation key",
+               "regex" => "memo key",
+               "matches" => [1, 2, 3],
+               "rationale" => "cache keys omit a discriminator"
+             }
+           ]
+         }), %{tokens_in: 10, tokens_out: 5, cost_usd: 0.01}}
+      end)
+
+      on_exit(fn -> Application.put_env(:arbiter, :loop_discovery_invoker, prev) end)
+
+      for t <- ~w(bd-memo-1 bd-memo-2 bd-memo-3) do
+        {:ok, _} =
+          Ash.create(Round, %{
+            task_id: t,
+            run_id: Ecto.UUID.generate(),
+            round: 1,
+            role: :review,
+            verdict: :request_changes,
+            converged: false,
+            findings: "1. The memo key omits the tenant id."
+          })
+      end
+
+      :ok
+    end
+
+    test "without the opt-in: no model call and no discovery key", %{conn: conn} do
+      body = conn |> get(~p"/api/loop/analyze", %{since: "24h"}) |> json_response(200)
+
+      refute_received {:invoked, _}
+      refute Map.has_key?(body["summary"], "discovery")
+      refute body["markdown"] =~ "Candidate detectors"
+    end
+
+    test "with the opt-in: a verified candidate section, and nothing queued", %{conn: conn} do
+      body =
+        conn
+        |> get(~p"/api/loop/analyze", %{since: "24h", discover: "true"})
+        |> json_response(200)
+
+      assert_received {:invoked, _prompt}
+      assert body["markdown"] =~ "Candidate detectors"
+
+      assert %{"status" => "ok", "candidates" => [cand], "rejected" => []} =
+               body["summary"]["discovery"]
+
+      assert cand["category"] == "stale memoisation key"
+      assert cand["history_matches"] == 3
+      assert length(cand["citations"]) == 3
+      assert body["summary"]["discovery"]["cost"]["usage_event_id"]
+      assert Ash.read!(PendingWrite) == []
+    end
+
+    test "rejects a malformed discover flag with 400", %{conn: conn} do
+      conn = get(conn, ~p"/api/loop/analyze", %{since: "24h", discover: "maybe"})
+      assert json_response(conn, 400)
+      refute_received {:invoked, _}
+    end
+  end
+
   describe "POST /api/loop/propose" do
     test "queues the proposals the report implies and applies nothing", %{conn: conn} do
       {:ok, issue} =

@@ -253,6 +253,10 @@ config :arbiter, :cloud_quota_probe, enabled: false
 # refresher's tests start their own instance with a fake CLI.
 config :arbiter, :quota_grant_refresher, enabled: false
 
+# bd-4f6opo: `arb loop analyze --discover` makes a real model call. Refuse it
+# suite-wide; tests that exercise the pass inject their own `:invoker`.
+config :arbiter, :loop_discovery_invoker, :disabled
+
 # Disable direct Gemini CLI / Antigravity quota fetching in test — there are no
 # real Google credentials or endpoints to hit, so the quota surface stays a pure
 # DB read. Tests that exercise the fetch path pass `enabled: true` explicitly and

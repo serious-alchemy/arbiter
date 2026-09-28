@@ -78,8 +78,19 @@ defmodule ArbiterCli.Client do
   @spec get(String.t(), keyword()) :: {:ok, any()} | {:error, Error.t()}
   def get(path, params \\ []), do: request(:get, path, params: params)
 
+  @doc """
+  `get/2` with extra `Req` options (e.g. a longer `:receive_timeout` for a
+  request that legitimately runs past the 10s default).
+  """
+  @spec get(String.t(), keyword(), keyword()) :: {:ok, any()} | {:error, Error.t()}
+  def get(path, params, req_opts), do: request(:get, path, [params: params] ++ req_opts)
+
   @spec post(String.t(), map()) :: {:ok, any()} | {:error, Error.t()}
   def post(path, body), do: request(:post, path, json: body)
+
+  @doc "`post/2` with extra `Req` options — see `get/3`."
+  @spec post(String.t(), map(), keyword()) :: {:ok, any()} | {:error, Error.t()}
+  def post(path, body, req_opts), do: request(:post, path, [json: body] ++ req_opts)
 
   @spec patch(String.t(), map()) :: {:ok, any()} | {:error, Error.t()}
   def patch(path, body), do: request(:patch, path, json: body)

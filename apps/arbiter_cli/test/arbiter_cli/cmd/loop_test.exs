@@ -60,6 +60,68 @@ defmodule ArbiterCli.Cmd.LoopTest do
     assert exit_code == 0
   end
 
+  # bd-4f6opo — `--discover` is the opt-in model pass: a query param on the
+  # same read-only GET, absent unless the flag is given.
+  test "loop analyze sends no discover param without --discover" do
+    stub_routes([
+      {{"get", "/api/loop/analyze"},
+       fn conn ->
+         conn = Plug.Conn.fetch_query_params(conn)
+         refute Map.has_key?(conn.query_params, "discover")
+
+         Req.Test.json(conn, %{
+           "markdown" => "# report",
+           "usage_event_id" => "x",
+           "summary" => %{}
+         })
+       end}
+    ])
+
+    {_out, _err, exit_code} = capture(fn -> Loop.run(["analyze"]) end)
+    assert exit_code == 0
+  end
+
+  test "loop analyze --discover sends discover=true and prints the section" do
+    stub_routes([
+      {{"get", "/api/loop/analyze"},
+       fn conn ->
+         conn = Plug.Conn.fetch_query_params(conn)
+         assert conn.query_params["discover"] == "true"
+
+         Req.Test.json(conn, %{
+           "markdown" =>
+             "# report\n\n## Candidate detectors (discovery Stage 1 — opt-in model pass)",
+           "usage_event_id" => "x",
+           "summary" => %{}
+         })
+       end}
+    ])
+
+    {out, _err, exit_code} = capture(fn -> Loop.run(["analyze", "--discover"]) end)
+    assert exit_code == 0
+    assert out =~ "Candidate detectors"
+  end
+
+  test "loop analyze --propose --discover posts discover: true in the body" do
+    stub_routes([
+      {{"post", "/api/loop/propose"},
+       fn conn ->
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+         assert Jason.decode!(body)["discover"] == true
+
+         Req.Test.json(conn, %{
+           "markdown" => "# report",
+           "usage_event_id" => "x",
+           "summary" => %{},
+           "proposals" => []
+         })
+       end}
+    ])
+
+    {_out, _err, exit_code} = capture(fn -> Loop.run(["analyze", "--propose", "--discover"]) end)
+    assert exit_code == 0
+  end
+
   # bd-9j2g3x — `--propose` is a different verb on a different route, so the
   # read-only GET can never write.
   test "loop analyze --propose posts to /api/loop/propose and lists what it queued" do

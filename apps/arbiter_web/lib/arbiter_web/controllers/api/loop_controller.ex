@@ -10,6 +10,10 @@ defmodule ArbiterWeb.Api.LoopController do
       `workspace_id`, `label`.
     * `POST /api/loop/propose` — the same pass, plus persistence of the
       proposals it implies. Same params.
+    * `discover=true` on either route (bd-4f6opo) — additionally run the
+      opt-in discovery model pass (`Arbiter.Loop.Discovery`): one bounded call
+      over the finding residue, reported as candidate detectors under
+      `summary.discovery` and a markdown section. It queues nothing.
     * `POST /api/loop/propose/repo_doc_patch` — hand-author a `:repo_doc_patch`
       proposal directly: `repo` + `lesson` (required), optional `category` /
       `workspace_id`. The Stage 1 pass cannot attribute a finding category to
@@ -65,9 +69,10 @@ defmodule ArbiterWeb.Api.LoopController do
   defp run_analysis(conn, params, propose?: propose?) do
     with {:ok, since} <- parse_window(params["since"]),
          {:ok, until} <- parse_iso(params["until"]),
-         {:ok, limit} <- parse_limit(params["limit"]) do
+         {:ok, limit} <- parse_limit(params["limit"]),
+         {:ok, discover?} <- parse_discover(params["discover"]) do
       opts =
-        [propose?: propose?]
+        [propose?: propose?, discover?: discover?]
         |> put(:since, since)
         |> put(:until, until)
         |> put(:limit, limit)
@@ -213,6 +218,24 @@ defmodule ArbiterWeb.Api.LoopController do
       fleet_wide_suggestions: Enum.count(report.suggestions, &(&1.verdict == :fleet_wide)),
       ci: ci_summary(report.ci)
     }
+    |> maybe_put_discovery(report.discovery)
+  end
+
+  # bd-4f6opo: present only under `discover=true`, so the default summary is
+  # byte-identical to before. Carries the verified candidates and every
+  # rejection with its reason — nothing the pre-check dropped goes unreported.
+  defp maybe_put_discovery(summary, nil), do: summary
+
+  defp maybe_put_discovery(summary, d) do
+    Map.put(summary, :discovery, %{
+      status: d.status,
+      error: d.error,
+      slice: d.slice,
+      history: d.history,
+      candidates: d.candidates,
+      rejected: d.rejected,
+      cost: d.cost
+    })
   end
 
   # bd-cuu8n3: the CI section, structured. Per-run rows carry their class,
@@ -343,6 +366,14 @@ defmodule ArbiterWeb.Api.LoopController do
   # integer in the JSON body of `POST /api/loop/propose` (`arb loop analyze
   # --propose --limit N` sends `%{"limit" => 50}`), so both shapes are accepted
   # and anything else is a 400 rather than a FunctionClauseError 500.
+  # bd-4f6opo: the opt-in model pass. A string on the GET query, a boolean in
+  # the POST JSON body; anything unrecognised is a 400, never a silent "off".
+  defp parse_discover(v) when v in [nil, "", false, "false", "0"], do: {:ok, false}
+  defp parse_discover(v) when v in [true, "true", "1"], do: {:ok, true}
+
+  defp parse_discover(_other),
+    do: {:error, {:invalid_request, "discover must be true or false"}}
+
   defp parse_limit(nil), do: {:ok, nil}
   defp parse_limit(""), do: {:ok, nil}
   defp parse_limit(n) when is_integer(n) and n > 0, do: {:ok, n}

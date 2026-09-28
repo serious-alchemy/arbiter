@@ -304,6 +304,11 @@ defmodule Arbiter.Loop.Corpus do
   `source: :maintenance`, no task). Returns the new row id, or `nil` if the
   insert failed (the pass never crashes on a ledger hiccup). This is the pass's
   only write.
+
+  The opt-in discovery pass (`Arbiter.Loop.Discovery`, bd-4f6opo) records its
+  model call through here too, overriding `:step` (`:loop_discovery`),
+  `:model`, `:provider` and merging extra `:raw` keys — one cost-accounting
+  path for everything `Loop` spends.
   """
   @spec record_pass_cost(map()) :: String.t() | nil
   def record_pass_cost(%{} = info) do
@@ -313,12 +318,16 @@ defmodule Arbiter.Loop.Corpus do
       task_id: nil,
       source: :maintenance,
       workspace_id: Map.get(info, :workspace_id),
-      step: :other,
-      model: "loop-analysis-pass",
+      # bd-4f6opo: the discovery pass's model call records through this same
+      # path under its own `step`/`model`/`provider`, so the ledger has one
+      # cost-accounting path for the loop, not two. The defaults are the
+      # deterministic pass's row, unchanged.
+      step: Map.get(info, :step, :other),
+      model: Map.get(info, :model, "loop-analysis-pass"),
       # "arbiter" is a synthetic provider (this pass, not a metered CLI), so
       # it has no provider account to resolve — provider_account_id is
       # deliberately absent here, unlike the real dispatch writers.
-      provider: "arbiter",
+      provider: Map.get(info, :provider, "arbiter"),
       cost_usd: Map.get(info, :cost_usd, 0.0),
       # #1463: the pass's own draw on the quota windows it now measures. Stage 1
       # analysis is deterministic Elixir — it makes no model call — so the draw
@@ -333,11 +342,15 @@ defmodule Arbiter.Loop.Corpus do
       duration_ms: Map.get(info, :duration_ms),
       occurred_at: DateTime.utc_now(),
       worker_run_id: nil,
-      raw: %{
-        kind: "loop_analysis_pass",
-        rows_scanned: Map.get(info, :rows_scanned),
-        quota_window_draw: "none"
-      }
+      raw:
+        Map.merge(
+          %{
+            kind: "loop_analysis_pass",
+            rows_scanned: Map.get(info, :rows_scanned),
+            quota_window_draw: "none"
+          },
+          Map.get(info, :raw, %{})
+        )
     }
 
     case Ash.create(Arbiter.Usage.Event, attrs) do
@@ -749,29 +762,9 @@ defmodule Arbiter.Loop.Corpus do
   # `scripts/measure_loop_finding_residue.sh` sampled over HTTP, now the real
   # thing over the full window in one query.
   defp finding_residue(since, until) do
-    units =
-      review_request_changes_rounds(since, until)
-      |> Enum.flat_map(fn r ->
-        base = base_task_id(r["task_id"])
-
-        r["findings"]
-        |> split_findings()
-        |> Enum.reject(&disposition_preamble?/1)
-        |> Enum.map(&{base, r["run_id"], &1})
-      end)
-
+    units = finding_units(since, until)
     total = length(units)
-
-    # `review_request_changes_rounds/2` orders newest-first, and both
-    # `Enum.flat_map/2` and `Enum.filter/2` below preserve that order — so
-    # `units` (the bounded retained sample) is newest-first without a
-    # separate sort.
-    residue =
-      units
-      |> Enum.filter(fn {_task, _run, text} -> is_nil(FindingBuckets.bucket_finding(text)) end)
-      |> Enum.map(fn {task_id, run_id, text} ->
-        %{task_id: task_id, run_id: run_id, text: truncate(text, @residue_text_limit)}
-      end)
+    residue = residue_of(units)
 
     %{
       total_units: total,
@@ -780,6 +773,47 @@ defmodule Arbiter.Loop.Corpus do
       distinct_tasks: residue |> Enum.map(& &1.task_id) |> Enum.uniq() |> length(),
       units: Enum.take(residue, @residue_retention_limit)
     }
+  end
+
+  @doc """
+  The retained residue units over an arbitrary `[since, until)` span, in the
+  same bounded shape as `meta.finding_residue.units` — newest-first, each
+  truncated to `residue_text_limit/0`, at most `limit` units.
+
+  This is the "retained history" the discovery pass (bd-4f6opo) pre-checks a
+  proposed detector against. Like the window's own residue it is one read of
+  the `review_gate_rounds.findings` column — never a transcript read.
+  """
+  @spec residue_units(DateTime.t(), DateTime.t(), pos_integer()) :: [finding_residue_unit()]
+  def residue_units(%DateTime{} = since, %DateTime{} = until, limit)
+      when is_integer(limit) and limit > 0 do
+    since |> finding_units(until) |> residue_of() |> Enum.take(limit)
+  end
+
+  # Every finding unit from a `role: review`, non-approve round in the span,
+  # tagged `{base_task_id, run_id, text}`.
+  defp finding_units(since, until) do
+    review_request_changes_rounds(since, until)
+    |> Enum.flat_map(fn r ->
+      base = base_task_id(r["task_id"])
+
+      r["findings"]
+      |> split_findings()
+      |> Enum.reject(&disposition_preamble?/1)
+      |> Enum.map(&{base, r["run_id"], &1})
+    end)
+  end
+
+  # `review_request_changes_rounds/2` orders newest-first, and both
+  # `Enum.flat_map/2` and `Enum.filter/2` preserve that order — so the
+  # residue (and any bounded sample taken from its head) is newest-first
+  # without a separate sort.
+  defp residue_of(units) do
+    units
+    |> Enum.filter(fn {_task, _run, text} -> is_nil(FindingBuckets.bucket_finding(text)) end)
+    |> Enum.map(fn {task_id, run_id, text} ->
+      %{task_id: task_id, run_id: run_id, text: truncate(text, @residue_text_limit)}
+    end)
   end
 
   defp review_request_changes_rounds(since, until) do
