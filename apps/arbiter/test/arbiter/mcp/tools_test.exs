@@ -3465,12 +3465,29 @@ defmodule Arbiter.MCP.ToolsTest do
       send(pid, {:__claude_session_done__, "arb done"})
       wait_until(fn -> Worker.state(pid).waiting_on == :review_gate end)
 
+      # bd-7xtz6w: the wait alone is not evidence of a live review — with no
+      # gate spawned (`review_spawn: false`) and no pass running, it resumes.
       assert {:ok, snap} = Tools.worker_show(ctx.coordinator, %{"task_id" => task.id})
       assert snap.state == "waiting"
       assert snap.waiting_on == "review_gate"
+      assert snap.resumable == true
+
+      # A live review pass for the task is.
+      {:ok, reviewer} =
+        Worker.start(
+          task_id: task.id <> "#review",
+          repo: "test/repo",
+          workspace_id: nil,
+          meta: %{role: :reviewer, reviews: task.id}
+        )
+
+      on_exit(fn -> Process.alive?(reviewer) && GenServer.stop(reviewer, :normal) end)
+
+      assert {:ok, snap} = Tools.worker_show(ctx.coordinator, %{"task_id" => task.id})
       assert snap.resumable == false
       assert is_binary(snap.blocked_reason)
       assert String.contains?(snap.blocked_reason, "waiting on the review gate")
+      assert String.contains?(snap.blocked_reason, task.id <> "#review")
     end
 
     test "surfaces resumable/blocked_reason for worker_list", ctx do
