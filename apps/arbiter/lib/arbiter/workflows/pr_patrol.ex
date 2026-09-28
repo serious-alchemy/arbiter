@@ -117,13 +117,8 @@ defmodule Arbiter.Workflows.PRPatrol do
   alias Arbiter.Tasks.IssueRepo
   alias Arbiter.Worker
   alias Arbiter.Worker.Dispatch
-  alias Arbiter.Workflows.{
-    CIFailureFollowUp,
-    PatrolRepoScope,
-    PatrolServer,
-    PRPatrolSupervisor,
-    ReviewThreadFollowUp
-  }
+  alias Arbiter.Workflows.{CIFailureFollowUp, PatrolRepoScope, PatrolServer, ReviewThreadFollowUp}
+  alias Arbiter.Workflows.PRPatrolSupervisor
   require Ash.Query
   require Logger
 

@@ -342,8 +342,9 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   alias Arbiter.Reviews.Record
   alias Arbiter.Tasks.{Issue, RepoConfig}
   alias Arbiter.Worker.ReviewAutomation
-  alias Arbiter.Workflows.{CodeReview, PatrolRepoScope, PatrolServer, ReviewPatrolSupervisor, ReviewReply}
+  alias Arbiter.Workflows.{CodeReview, PatrolRepoScope, PatrolServer, ReviewReply}
   alias Arbiter.Workflows.ReviewPatrol.ThreadMemory
+  alias Arbiter.Workflows.ReviewPatrolSupervisor
   require Ash.Query
   require Logger
 

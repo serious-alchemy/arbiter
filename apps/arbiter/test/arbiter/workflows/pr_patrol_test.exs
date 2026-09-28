@@ -146,7 +146,10 @@ defmodule Arbiter.Workflows.PRPatrolTest do
     dir = Path.join(tmp, sub <> "-marker")
     File.mkdir_p!(dir)
     {_, 0} = System.cmd("git", ["init", "-q", dir])
-    {_, 0} = System.cmd("git", ["-C", dir, "remote", "add", "origin", "git@github.com:#{slug}.git"])
+
+    {_, 0} =
+      System.cmd("git", ["-C", dir, "remote", "add", "origin", "git@github.com:#{slug}.git"])
+
     dir
   end
 
