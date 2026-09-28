@@ -244,8 +244,8 @@ defmodule Arbiter.Workflows.MergedPRFinalizerSupervisor do
   # Pre-existing complexity 13 — baselined when bd-4x2yhq first
   # wired Credo up. Thresholds stay at the tool's own default so new
   # code is held to it; see the note in .credo.exs.
-  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   @spec finalizer_repos(Workspace.t()) :: [String.t()]
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   def finalizer_repos(%Workspace{} = workspace) do
     config = workspace.config || %{}
 
