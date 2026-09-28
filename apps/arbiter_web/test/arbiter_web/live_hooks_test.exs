@@ -301,6 +301,7 @@ defmodule ArbiterWeb.LiveHooksTest do
         Message.send_mail(%{
           workspace_id: ws.id,
           kind: :escalation,
+          escalation_kind: :agent_raised,
           from_ref: "bd-async1",
           to_ref: Message.coordinator_ref(),
           body: "needs a hand"
@@ -381,6 +382,7 @@ defmodule ArbiterWeb.LiveHooksTest do
         Message.send_mail(%{
           workspace_id: ws.id,
           kind: :escalation,
+          escalation_kind: :agent_raised,
           from_ref: "bd-retry1",
           to_ref: Message.coordinator_ref(),
           body: "after the retry"
@@ -423,6 +425,7 @@ defmodule ArbiterWeb.LiveHooksTest do
         Message.send_mail(%{
           workspace_id: ws.id,
           kind: :escalation,
+          escalation_kind: :agent_raised,
           from_ref: "bd-race1",
           to_ref: Message.coordinator_ref(),
           body: "sent while loading"
@@ -439,6 +442,7 @@ defmodule ArbiterWeb.LiveHooksTest do
         Message.send_mail(%{
           workspace_id: ws.id,
           kind: :escalation,
+          escalation_kind: :agent_raised,
           from_ref: "bd-race2",
           to_ref: Message.coordinator_ref(),
           body: "sent after loading"

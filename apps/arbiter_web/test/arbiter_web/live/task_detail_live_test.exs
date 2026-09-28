@@ -2456,6 +2456,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, about} =
         Message.send_mail(%{
           kind: :escalation,
+          escalation_kind: :agent_raised,
           workspace_id: ws.id,
           from_ref: task.id,
           to_ref: "coordinator",
@@ -2544,6 +2545,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, msg} =
         Message.send_mail(%{
           kind: :escalation,
+          escalation_kind: :agent_raised,
           workspace_id: ws.id,
           from_ref: task.id,
           to_ref: "coordinator",

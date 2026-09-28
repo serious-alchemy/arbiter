@@ -296,6 +296,7 @@ defmodule Arbiter.Messages.MessageTest do
         Message.send_mail(%{
           to_ref: "coordinator",
           kind: :escalation,
+          escalation_kind: :agent_raised,
           from_ref: "bd-soren",
           body: "needs a decision",
           workspace_id: @ws
@@ -309,6 +310,7 @@ defmodule Arbiter.Messages.MessageTest do
         Message.send_mail(%{
           to_ref: "coordinator",
           kind: :escalation,
+          escalation_kind: :agent_raised,
           from_ref: "system",
           subject: "Claude credentials expired — usage-poll signal",
           body: "2 consecutive 401s",
@@ -657,6 +659,7 @@ defmodule Arbiter.Messages.MessageTest do
       {:ok, _} =
         Message.send_mail(%{
           kind: :escalation,
+          escalation_kind: :agent_raised,
           to_ref: "admiral",
           workspace_id: @ws,
           subject: "ReviewGate: changes requested for bd-aaa",
@@ -666,6 +669,7 @@ defmodule Arbiter.Messages.MessageTest do
       {:ok, second} =
         Message.send_mail(%{
           kind: :escalation,
+          escalation_kind: :agent_raised,
           to_ref: "admiral",
           workspace_id: @ws,
           subject: "ReviewGate: review inconclusive for bd-bbb",
@@ -675,6 +679,7 @@ defmodule Arbiter.Messages.MessageTest do
       {:ok, _} =
         Message.send_mail(%{
           kind: :escalation,
+          escalation_kind: :agent_raised,
           to_ref: "admiral",
           workspace_id: "other-ws",
           body: "elsewhere"
@@ -694,6 +699,7 @@ defmodule Arbiter.Messages.MessageTest do
       {:ok, _} =
         Message.send_mail(%{
           kind: :escalation,
+          escalation_kind: :agent_raised,
           to_ref: "admiral",
           workspace_id: @ws,
           body: "needs attention"
@@ -704,12 +710,13 @@ defmodule Arbiter.Messages.MessageTest do
     end
   end
 
-  describe "last_with_subject/3 (bd-brwx7w escalation dedupe)" do
-    defp escalate(subject, task, opts \\ []) do
+  describe "last_escalation/2 (bd-brwx7w dedupe, keyed by kind since bd-8if9zt)" do
+    defp escalate(kind, subject, task, opts \\ []) do
       {:ok, m} =
         Message.send_mail(%{
           kind: :escalation,
-          to_ref: "coordinator",
+          escalation_kind: kind,
+          to_ref: Keyword.get(opts, :to_ref, "coordinator"),
           workspace_id: Keyword.get(opts, :workspace_id, @ws),
           task_ref: task,
           subject: subject,
@@ -722,84 +729,96 @@ defmodule Arbiter.Messages.MessageTest do
     test "returns nil when nothing matches, and the row when one does" do
       task = "bd-lws-#{System.unique_integer([:positive])}"
 
-      assert Message.last_with_subject("coordinator", ["nope"],
-               workspace_id: @ws,
-               task_ref: task
-             ) == nil
+      assert Message.last_escalation(:merge_blocked, workspace_id: @ws, task_ref: task) == nil
 
-      m = escalate("blocked A", task)
+      m = escalate(:merge_blocked, "blocked A", task)
 
-      assert %{id: id} =
-               Message.last_with_subject("coordinator", ["blocked A"],
-                 workspace_id: @ws,
-                 task_ref: task
-               )
-
+      assert %{id: id} = Message.last_escalation(:merge_blocked, workspace_id: @ws, task_ref: task)
       assert id == m.id
     end
 
-    test "any subject in the list matches — the dedupe key can span several spellings" do
+    test "the kind is the identity, whatever the subject says" do
       task = "bd-lws-#{System.unique_integer([:positive])}"
-      escalate("blocked B", task)
+      escalate(:merge_blocked, "blocked B", task)
 
-      assert Message.last_with_subject("coordinator", ["blocked A", "blocked B"],
-               workspace_id: @ws,
-               task_ref: task
-             )
+      assert %{subject: "blocked B"} =
+               Message.last_escalation(:merge_blocked, workspace_id: @ws, task_ref: task)
+
+      assert Message.last_escalation(:worker_stopped, workspace_id: @ws, task_ref: task) == nil
     end
 
-    test "an empty subject list never matches" do
-      assert Message.last_with_subject("coordinator", [], workspace_id: @ws) == nil
-    end
-
-    test "scopes to the directive so another task's identical subject does not match" do
+    test "scopes to the ticket so another ticket's escalation of the same kind does not match" do
       mine = "bd-lws-#{System.unique_integer([:positive])}"
       theirs = "bd-lws-#{System.unique_integer([:positive])}"
-      escalate("shared subject", theirs)
+      escalate(:merge_blocked, "shared subject", theirs)
 
-      assert Message.last_with_subject("coordinator", ["shared subject"],
+      assert Message.last_escalation(:merge_blocked, workspace_id: @ws, task_ref: mine) == nil
+    end
+
+    test "subject: narrows a system kind to one episode" do
+      escalate(:credential_expired, "claude expired (probe)", "system")
+
+      assert Message.last_escalation(:credential_expired,
                workspace_id: @ws,
-               task_ref: mine
+               subject: "claude expired (probe)"
+             )
+
+      assert Message.last_escalation(:credential_expired,
+               workspace_id: @ws,
+               subject: "claude expired (usage poll)"
              ) == nil
     end
 
-    test "uncleared: true skips a cleared row but keeps an unread or outstanding one" do
+    test "open: true skips a cleared row but keeps an unread or outstanding one" do
       task = "bd-lws-#{System.unique_integer([:positive])}"
-      m = escalate("cleared soon", task)
-      scope = [workspace_id: @ws, task_ref: task, uncleared: true]
+      m = escalate(:worker_stopped, "cleared soon", task)
+      scope = [workspace_id: @ws, task_ref: task, open: true]
 
-      assert Message.last_with_subject("coordinator", ["cleared soon"], scope)
+      assert Message.last_escalation(:worker_stopped, scope)
 
       {:ok, _} = Message.mark_read(m.id)
-      assert Message.last_with_subject("coordinator", ["cleared soon"], scope)
+      assert Message.last_escalation(:worker_stopped, scope)
 
       {:ok, _} = Message.mark_cleared(m.id)
-      assert Message.last_with_subject("coordinator", ["cleared soon"], scope) == nil
+      assert Message.last_escalation(:worker_stopped, scope) == nil
 
       # ...but it is still the last matching row when cleared rows count.
-      assert Message.last_with_subject("coordinator", ["cleared soon"],
-               workspace_id: @ws,
-               task_ref: task
-             )
+      assert Message.last_escalation(:worker_stopped, workspace_id: @ws, task_ref: task)
     end
 
     test "reads the legacy admiral address too" do
       task = "bd-lws-#{System.unique_integer([:positive])}"
+      escalate(:worker_stopped, "legacy addressed", task, to_ref: "admiral")
 
-      {:ok, _} =
-        Message.send_mail(%{
-          kind: :escalation,
-          to_ref: "admiral",
-          workspace_id: @ws,
-          task_ref: task,
-          subject: "legacy addressed",
-          body: "x"
-        })
+      assert Message.last_escalation(:worker_stopped, workspace_id: @ws, task_ref: task)
+    end
+  end
 
-      assert Message.last_with_subject("coordinator", ["legacy addressed"],
-               workspace_id: @ws,
-               task_ref: task
-             )
+  describe "resolve_ticket_escalations/2 (bd-8if9zt)" do
+    test "resolves the ticket's open ticket-scoped escalations, and nothing else" do
+      task = "bd-res-#{System.unique_integer([:positive])}"
+      other = "bd-res-#{System.unique_integer([:positive])}"
+
+      mine = escalate(:merge_blocked, "blocked", task)
+      system = escalate(:budget_exceeded, "over budget", task)
+      theirs = escalate(:merge_blocked, "blocked", other)
+      {:ok, already} = Message.mark_cleared(escalate(:worker_stopped, "stopped", task))
+
+      assert [%{id: id}] = Message.resolve_ticket_escalations(task)
+      assert id == mine.id
+
+      assert %{resolved_at: %DateTime{}, cleared_at: %DateTime{}} = Ash.get!(Message, mine.id)
+      assert %{resolved_at: nil, cleared_at: nil} = Ash.get!(Message, system.id)
+      assert %{resolved_at: nil} = Ash.get!(Message, theirs.id)
+      assert %{resolved_at: nil} = Ash.get!(Message, already.id)
+    end
+
+    test "leaves a row inserted after :before" do
+      task = "bd-res-#{System.unique_integer([:positive])}"
+      before = DateTime.add(DateTime.utc_now(), -60, :second)
+      escalate(:merge_blocked, "blocked", task)
+
+      assert Message.resolve_ticket_escalations(task, before: before) == []
     end
   end
 
@@ -821,6 +840,7 @@ defmodule Arbiter.Messages.MessageTest do
       {:ok, about} =
         Message.send_mail(%{
           kind: :escalation,
+          escalation_kind: :agent_raised,
           workspace_id: @ws,
           from_ref: task,
           to_ref: "coordinator",
@@ -896,6 +916,7 @@ defmodule Arbiter.Messages.MessageTest do
       {:ok, msg} =
         Message.send_mail(%{
           kind: :escalation,
+          escalation_kind: :agent_raised,
           workspace_id: ws,
           to_ref: coordinator,
           subject: "needs a decision",
@@ -945,7 +966,7 @@ defmodule Arbiter.Messages.MessageTest do
       assert [_] = Message.outstanding(ref, workspace_id: ws, reader: b)
     end
 
-    test "a session clear leaves last_with_subject dedupe suppressing repeats", ctx do
+    test "a session clear leaves the last_escalation dedupe suppressing repeats", ctx do
       %{ws: ws, coordinator: ref, msg: msg} = ctx
       a = Message.session_reader("sess-a")
 
@@ -953,10 +974,7 @@ defmodule Arbiter.Messages.MessageTest do
       {:ok, _, _, _} = Message.clear_all(ref, workspace_id: ws, reader: a)
 
       assert %{id: id} =
-               Message.last_with_subject(ref, ["needs a decision"],
-                 workspace_id: ws,
-                 uncleared: true
-               )
+               Message.last_escalation(:agent_raised, workspace_id: ws, open: true)
 
       assert id == msg.id
     end
@@ -974,10 +992,7 @@ defmodule Arbiter.Messages.MessageTest do
       assert %DateTime{} = reloaded.cleared_at
 
       # ... and a coordinator clear re-enables the escalation repeat, as today.
-      refute Message.last_with_subject(ref, ["needs a decision"],
-               workspace_id: ws,
-               uncleared: true
-             )
+      refute Message.last_escalation(:agent_raised, workspace_id: ws, open: true)
     end
 
     test "sessionless coordinator reads do not touch a session's view", ctx do
@@ -1042,10 +1057,7 @@ defmodule Arbiter.Messages.MessageTest do
       assert reloaded.cleared_at == nil
 
       assert %{id: id} =
-               Message.last_with_subject(ref, ["needs a decision"],
-                 workspace_id: ws,
-                 uncleared: true
-               )
+               Message.last_escalation(:agent_raised, workspace_id: ws, open: true)
 
       assert id == msg.id
     end
@@ -1073,6 +1085,7 @@ defmodule Arbiter.Messages.MessageTest do
       {:ok, m} =
         Message.send_mail(%{
           kind: :escalation,
+          escalation_kind: :agent_raised,
           workspace_id: ws,
           to_ref: ref,
           task_ref: task,
@@ -1100,6 +1113,7 @@ defmodule Arbiter.Messages.MessageTest do
       {:ok, m} =
         Message.send_mail(%{
           kind: :escalation,
+          escalation_kind: :agent_raised,
           workspace_id: ws,
           to_ref: ref,
           task_ref: task,
@@ -1193,6 +1207,7 @@ defmodule Arbiter.Messages.MessageTest do
       {:ok, escalation} =
         Message.send_mail(%{
           kind: :escalation,
+          escalation_kind: :agent_raised,
           workspace_id: @ws,
           from_ref: task,
           to_ref: "coordinator",
@@ -1213,6 +1228,7 @@ defmodule Arbiter.Messages.MessageTest do
       {:ok, other_task_msg} =
         Message.send_mail(%{
           kind: :escalation,
+          escalation_kind: :agent_raised,
           workspace_id: @ws,
           from_ref: other,
           to_ref: "coordinator",
@@ -1248,6 +1264,7 @@ defmodule Arbiter.Messages.MessageTest do
       {:ok, elsewhere} =
         Message.send_mail(%{
           kind: :escalation,
+          escalation_kind: :agent_raised,
           workspace_id: "ws-cleartask-elsewhere",
           to_ref: "coordinator",
           task_ref: task,
@@ -1257,6 +1274,7 @@ defmodule Arbiter.Messages.MessageTest do
       {:ok, here} =
         Message.send_mail(%{
           kind: :escalation,
+          escalation_kind: :agent_raised,
           workspace_id: @ws,
           to_ref: "coordinator",
           task_ref: task,
@@ -1278,6 +1296,7 @@ defmodule Arbiter.Messages.MessageTest do
       {:ok, m} =
         Message.send_mail(%{
           kind: :escalation,
+          escalation_kind: :agent_raised,
           workspace_id: @ws,
           to_ref: "coordinator",
           task_ref: task,
