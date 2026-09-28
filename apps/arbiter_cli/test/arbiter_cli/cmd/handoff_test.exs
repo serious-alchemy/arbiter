@@ -62,7 +62,11 @@ defmodule ArbiterCli.Cmd.HandoffTest do
          conn
          |> Plug.Conn.put_status(422)
          |> Req.Test.json(%{
-           "error" => %{"type" => "validation_error", "message" => "no attention", "details" => %{}}
+           "error" => %{
+             "type" => "validation_error",
+             "message" => "no attention",
+             "details" => %{}
+           }
          })
        end}
     ])

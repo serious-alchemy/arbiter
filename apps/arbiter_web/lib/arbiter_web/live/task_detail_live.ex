@@ -4186,7 +4186,8 @@ defmodule ArbiterWeb.TaskDetailLive do
         if(@attention.owner == :operator,
           do:
             "border-l-[var(--arb-attention)] bg-[var(--arb-attention-wash)] text-[var(--text-title)]",
-          else: "border-l-[var(--border-default)] bg-[var(--surface-sunken)] text-[var(--text-secondary)]"
+          else:
+            "border-l-[var(--border-default)] bg-[var(--surface-sunken)] text-[var(--text-secondary)]"
         )
       ]}
     >

@@ -44,7 +44,9 @@ defmodule ArbiterCli.Cmd.Handoff do
 
   defp parse_id([id], _verb), do: id
   defp parse_id([], verb), do: Output.die("#{verb} requires an issue id")
-  defp parse_id(_, verb), do: Output.die("#{verb} takes exactly one positional argument: the issue id")
+
+  defp parse_id(_, verb),
+    do: Output.die("#{verb} takes exactly one positional argument: the issue id")
 
   defp blank?(nil), do: true
   defp blank?(s), do: String.trim(s) == ""

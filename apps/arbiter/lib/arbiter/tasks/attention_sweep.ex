@@ -113,7 +113,8 @@ defmodule Arbiter.Tasks.AttentionSweep do
 
     state = %{
       enabled: Keyword.get(opts, :enabled, Keyword.get(cfg, :enabled, true)),
-      interval_ms: Keyword.get(opts, :interval_ms, Keyword.get(cfg, :interval_ms, @default_interval_ms)),
+      interval_ms:
+        Keyword.get(opts, :interval_ms, Keyword.get(cfg, :interval_ms, @default_interval_ms)),
       seen: %{}
     }
 

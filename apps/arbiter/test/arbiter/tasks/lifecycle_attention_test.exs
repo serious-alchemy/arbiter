@@ -65,7 +65,9 @@ defmodule Arbiter.Tasks.LifecycleAttentionTest do
                  waiting_on: row.waiting_on,
                  reason: row.reason,
                  cause: row.cause,
-                 since: since
+                 since: since,
+                 note: nil,
+                 owner_since: nil
                }
       end
     end
@@ -80,6 +82,27 @@ defmodule Arbiter.Tasks.LifecycleAttentionTest do
     test "only the approval-blocked merge and the manual merge are the operator's" do
       operator = for r <- Attention.table(), r.owner == :operator, do: {r.cause, r.when}
       assert Enum.sort(operator) == [{:awaiting_manual_merge, nil}, {:merge_blocked, :approval}]
+    end
+
+    # bd-8nlez1: a hand-off, a hand-back or an expired limit moves the owner
+    # of the cause it was made for, and only that cause.
+    test "a moved owner applies to its own cause only" do
+      moved = ~U[2026-09-27 11:00:00Z]
+
+      handed =
+        ticket(:active, %{
+          attention_cause: :run_crashed,
+          attention_owner: :operator,
+          attention_owner_cause: :run_crashed,
+          attention_note: "needs the prod key",
+          attention_owner_since: moved
+        })
+
+      assert %{owner: :operator, note: "needs the prod key", owner_since: ^moved} =
+               view(handed).attention
+
+      stale = %{handed | attention_cause: :pr_closed}
+      assert %{owner: :coordinator, note: nil, owner_since: nil} = view(stale).attention
     end
 
     test "a stored detail is the reason" do
