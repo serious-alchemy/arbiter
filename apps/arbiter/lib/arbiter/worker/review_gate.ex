@@ -2380,7 +2380,8 @@ defmodule Arbiter.Worker.ReviewGate do
         # failure (above) already report. Reporting REQUEST_CHANGES here sent
         # an implementer to "fix" a branch nobody had found anything wrong
         # with.
-        message = "ReviewGate could not spawn the round #{next.round} reviewer: #{inspect(reason)}"
+        message =
+          "ReviewGate could not spawn the round #{next.round} reviewer: #{inspect(reason)}"
 
         next =
           record_thread(next, :system, "Round #{next.round} re-review could not start", message)

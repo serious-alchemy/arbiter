@@ -3669,7 +3669,11 @@ defmodule Arbiter.Worker.DispatchTest do
 
       msg =
         Dispatch.worker_active_message(
-          %{state: :waiting, waiting_on: :review_gate, review_evidence: ["review pass x is running"]},
+          %{
+            state: :waiting,
+            waiting_on: :review_gate,
+            review_evidence: ["review pass x is running"]
+          },
           "vs-6jrn9m"
         )
 
