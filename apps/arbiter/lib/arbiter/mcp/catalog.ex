@@ -34,6 +34,8 @@ defmodule Arbiter.MCP.Catalog do
   | `task_promote` | coordinator | `Ash.update(issue, …, action: :promote_to_ready)` |
   | `task_demote` | coordinator | `Ash.update(issue, …, action: :return_to_backlog)` |
   | `task_rank` | coordinator | `Ash.update(issue, …, action: :set_rank)` |
+  | `ticket_handoff` | coordinator | `Arbiter.Tasks.Attention.hand_off/3` to the operator (bd-8nlez1) |
+  | `ticket_handback` | coordinator | `Arbiter.Tasks.Attention.hand_off/3` back to the coordinator (bd-8nlez1) |
   | `task_sync_upstream_close` | coordinator | `Ash.update(issue, …, action: :sync_upstream_close)` |
   | `dep_add` | coordinator | `Arbiter.Tasks.Dependencies.add/4` (use `parent_of` to attach a child) |
   | `dep_remove` | coordinator | `Arbiter.Tasks.Dependencies.remove/3` |
@@ -222,7 +224,10 @@ defmodule Arbiter.MCP.Catalog do
           "messages and marks them read on return; optionally `clear: true` also soft-clears the " <>
           "outstanding tail (mirrors `arb inbox clear`). `state: \"outstanding\"` lists read-but-uncleared " <>
           "messages (the triage queue) as a pure read — no mutations. `state: \"outstanding\"` and " <>
-          "`clear: true` are mutually exclusive. Coordinator only.",
+          "`clear: true` are mutually exclusive. Coordinator only. Both states also return " <>
+          "`attention`: the computed queue of open tickets whose attention you own (cause, " <>
+          "what it waits on, why, since when). It has no read or clear state — an item goes " <>
+          "when its ticket moves on; resolve it, or hand it to the operator with `ticket_handoff`.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
@@ -665,6 +670,49 @@ defmodule Arbiter.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.task_rank/2
+    },
+    %{
+      name: "ticket_handoff",
+      tiers: @coordinator,
+      description:
+        "Hand a ticket's attention to the operator (bd-8nlez1). The coordinator inbox's " <>
+          "`attention` queue is yours: resolve what you can. Use this only for an item you " <>
+          "cannot move — the operator acts on it from the dashboard. `note` (required) says " <>
+          "what the operator has to do; it is shown with the ticket and in `task_show`. The " <>
+          "ticket must have attention now, owned by you. The move lasts until the attention " <>
+          "clears or the operator hands it back.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "id" => %{"type" => "string", "description" => "Task id (required)."},
+          "note" => %{
+            "type" => "string",
+            "description" => "What the operator has to do, and why you cannot (required)."
+          }
+        },
+        "required" => ["id", "note"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.ticket_handoff/2
+    },
+    %{
+      name: "ticket_handback",
+      tiers: @coordinator,
+      description:
+        "Hand a ticket's attention back to the coordinator (bd-8nlez1) — the operator's " <>
+          "answer to a hand-off or to an item promoted past its limit. The coordinator gets " <>
+          "a fresh time limit and resume-attempt budget. `note` (optional) is shown with the " <>
+          "ticket.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "id" => %{"type" => "string", "description" => "Task id (required)."},
+          "note" => %{"type" => "string", "description" => "What changed (optional)."}
+        },
+        "required" => ["id"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.ticket_handback/2
     },
     %{
       name: "task_sync_upstream_close",

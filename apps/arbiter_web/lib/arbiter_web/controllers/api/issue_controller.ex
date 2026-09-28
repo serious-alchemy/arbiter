@@ -362,6 +362,30 @@ defmodule ArbiterWeb.Api.IssueController do
 
   defp verify_error(conn, {:invalid, err}), do: unprocessable(conn, Exception.message(err))
 
+  @doc """
+  Hand a ticket's attention to the operator (bd-8nlez1) — the coordinator's
+  hand-off. Body: `note` (required), what the operator has to do.
+  """
+  def handoff(conn, %{"id" => id} = params), do: move_attention(conn, id, :operator, params)
+
+  @doc """
+  Hand a ticket's attention back to the coordinator (bd-8nlez1) — the
+  operator's hand-back, which `arb issue handback` wraps. Body: `note`
+  (optional).
+  """
+  def handback(conn, %{"id" => id} = params), do: move_attention(conn, id, :coordinator, params)
+
+  defp move_attention(conn, id, to, params) do
+    note = if is_binary(params["note"]), do: params["note"]
+
+    with {:ok, _issue} <- Ash.get(Issue, id) do
+      case Arbiter.Tasks.Attention.hand_off(id, to, note) do
+        {:ok, _attention} -> render(conn, :show, issue: Ash.get!(Issue, id))
+        {:error, reason} -> unprocessable(conn, Arbiter.Tasks.Attention.describe_error(reason))
+      end
+    end
+  end
+
   defp unprocessable(conn, message) do
     conn
     |> put_status(:unprocessable_entity)

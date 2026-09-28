@@ -174,6 +174,16 @@ defmodule ArbiterCli.ConfigSchema do
     conductor  (map)
       max_concurrent  positive integer — cap on concurrently-dispatched workers
 
+    attention  (map — coordinator-first escalation limits, bd-8nlez1)
+      coordinator_limit_minutes  non-negative integer — a coordinator-owned
+                          attention item left unresolved this long is handed
+                          to the operator, noted "coordinator did not resolve
+                          within <limit>". 0 turns it off.   (default: 240)
+      run_crashed_max_resumes    non-negative integer — a run_crashed item whose
+                          ticket was already resumed this many times out of a
+                          failed run goes to the operator. 0 turns it off.
+                                                              (default: 3)
+
     loop  (map — the loop-engineering review pipeline; see docs/loop-review.md)
       evidence_bar  (map) — how much evidence a finding needs before it is
                     proposed rather than filed as a hypothesis

@@ -10,6 +10,7 @@ defmodule Arbiter.MCP.Tools.Task do
   alias Arbiter.MCP.Scope
   alias Arbiter.MCP.Tools
   alias Arbiter.Tasks.AssigneeCompat
+  alias Arbiter.Tasks.Attention
   alias Arbiter.Tasks.Dependencies
   alias Arbiter.Tasks.Dependency
   alias Arbiter.Tasks.Issue
@@ -58,6 +59,10 @@ defmodule Arbiter.MCP.Tools.Task do
          {:ok, issue} <- Tools.fetch_task(scope, args, id) do
       loaded = load_progress(issue)
       result = if(full, do: Tools.serialize_task(loaded), else: serialize_task_slim(loaded))
+
+      # bd-8nlez1: the ticket's computed attention — owner, what it waits on,
+      # why, and any hand-off note — on both views.
+      result = Map.put(result, :attention, Tools.serialize_attention(Attention.current(issue)))
       # Strip pr_body from coordinator full-view (bandwidth; coordinators don't
       # need the body they didn't write). Worker full-view retains it so the
       # worker can verify its own authored body (bd-53xrmi).
@@ -520,6 +525,37 @@ defmodule Arbiter.MCP.Tools.Task do
     case forms do
       [form] -> {:ok, form}
       _ -> {:error, {:invalid, "give exactly one of: top, bottom, before_id, after_id"}}
+    end
+  end
+
+  # ---- ticket_handoff / ticket_handback -------------------------------------
+
+  @doc """
+  The coordinator hands a ticket's attention to the operator, with a `note`
+  saying what the operator has to do (bd-8nlez1,
+  `Arbiter.Tasks.Attention.hand_off/3`). Coordinator only.
+  """
+  @spec ticket_handoff(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def ticket_handoff(%Scope{} = scope, args), do: move_attention(scope, args, :operator)
+
+  @doc """
+  The operator hands a ticket's attention back to the coordinator, with an
+  optional `note` (bd-8nlez1). The coordinator gets a fresh clock and attempt
+  budget. Coordinator tier (the operator's MCP and CLI both use it).
+  """
+  @spec ticket_handback(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def ticket_handback(%Scope{} = scope, args), do: move_attention(scope, args, :coordinator)
+
+  defp move_attention(scope, args, to) do
+    with {:ok, id} <- Tools.resolve_task_id(scope, args),
+         {:ok, issue} <- Tools.fetch_task(scope, args, id) do
+      case Attention.hand_off(issue.id, to, Tools.fetch_string(args, "note")) do
+        {:ok, attention} ->
+          {:ok, %{id: issue.id, attention: Tools.serialize_attention(attention)}}
+
+        {:error, reason} ->
+          {:error, {:invalid, Attention.describe_error(reason)}}
+      end
     end
   end
 

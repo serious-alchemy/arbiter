@@ -19,6 +19,8 @@ defmodule ArbiterCli.Cmd.Issue do
       arb issue demote    <id>
       arb issue rank      <id> --top | --bottom | --before <id> | --after <id>
       arb issue verify    <id> --observed "<evidence>" | --failed "<evidence>"
+      arb issue handoff   <id> --note "<what the operator has to do>"
+      arb issue handback  <id> [--note "<what changed>"]
       arb issue claim     <issue#> [--force] [--repo <repo>]
       arb issue sync      [--dry]
       arb issue ready
@@ -60,6 +62,8 @@ defmodule ArbiterCli.Cmd.Issue do
       ["demote" | rest] -> Cmd.Demote.run(rest)
       ["rank" | rest] -> Cmd.Rank.run(rest)
       ["verify" | rest] -> Cmd.Verify.run(rest)
+      ["handoff" | rest] -> Cmd.Handoff.run(:operator, rest)
+      ["handback" | rest] -> Cmd.Handoff.run(:coordinator, rest)
       ["claim" | rest] -> Cmd.Claim.run(rest)
       ["sync" | rest] -> Cmd.Sync.run(rest)
       ["ready" | rest] -> Cmd.Ready.run(rest)
@@ -72,6 +76,6 @@ defmodule ArbiterCli.Cmd.Issue do
   end
 
   defp usage_hint do
-    "verbs: list, show, create, update, close, reopen, promote, demote, rank, verify, claim, sync, ready, dispatch"
+    "verbs: list, show, create, update, close, reopen, promote, demote, rank, verify, handoff, handback, claim, sync, ready, dispatch"
   end
 end

@@ -15,6 +15,12 @@ defmodule Arbiter.Tasks.Issue.Changes.ClearAttention do
 
   As a change (`change {ClearAttention, []}`) it clears unconditionally — the
   `:clear_attention` action, used when a ticket's run restarts.
+
+  The ownership a hand-off or an expired limit set (`attention_owner`,
+  `attention_owner_cause`, `attention_note`, `attention_owner_since`,
+  bd-8nlez1) goes with the cause. The run-restart count
+  (`attention_resume_attempts`) survives a restart — counting restarts is its
+  point — and is reset only when the state moves (`clear/1`, `nil_fields/0`).
   """
 
   use Ash.Resource.Change
@@ -27,20 +33,30 @@ defmodule Arbiter.Tasks.Issue.Changes.ClearAttention do
     :attention_detail,
     :attention_since,
     :review_park_reason,
-    :review_parked_at
+    :review_parked_at,
+    :attention_owner,
+    :attention_owner_cause,
+    :attention_note,
+    :attention_owner_since
   ]
 
   @impl true
-  def change(changeset, _opts, _context), do: clear(changeset)
+  def change(changeset, _opts, _context), do: clear(changeset, keep_attempts: true)
 
   @doc """
   Clear the cause on `changeset` and resolve the ticket's escalations once
-  the write commits.
+  the write commits. Resets the run-restart count too, unless
+  `keep_attempts: true` (a restart, not a transition).
   """
-  @spec clear(Changeset.t()) :: Changeset.t()
-  def clear(changeset) do
+  @spec clear(Changeset.t(), keyword()) :: Changeset.t()
+  def clear(changeset, opts \\ []) do
+    fields =
+      if Keyword.get(opts, :keep_attempts, false),
+        do: Map.new(@fields, &{&1, nil}),
+        else: nil_fields()
+
     changeset
-    |> Changeset.force_change_attributes(nil_fields())
+    |> Changeset.force_change_attributes(fields)
     |> resolve_after_commit(false)
   end
 
@@ -66,9 +82,12 @@ defmodule Arbiter.Tasks.Issue.Changes.ClearAttention do
     end)
   end
 
-  @doc "The attributes a clear resets, each to nil."
+  @doc """
+  The attributes a state move resets: each attention field to nil, and the
+  run-restart count to zero.
+  """
   @spec nil_fields() :: map()
-  def nil_fields, do: Map.new(@fields, &{&1, nil})
+  def nil_fields, do: @fields |> Map.new(&{&1, nil}) |> Map.put(:attention_resume_attempts, 0)
 
   # Best-effort: the ticket has already moved; a mailbox hiccup must not turn
   # a committed transition into an error.

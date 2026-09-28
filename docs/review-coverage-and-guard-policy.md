@@ -91,7 +91,7 @@ entire agent spend spent on the gate misfiring.
 ### 1.1 The two root causes, stated precisely
 
 **RC1 — "the reviewed SHA" is a single value.** `issues.last_reviewed_sha`
-(`apps/arbiter/lib/arbiter/tasks/issue.ex:1497` (`last_reviewed_sha`)) is one
+(`apps/arbiter/lib/arbiter/tasks/issue.ex:1618` (`last_reviewed_sha`)) is one
 nullable string, written by whichever of four unrelated writers ran last. There
 is no record of *which* commits an approval covered, so every consumer
 reconstructs one — badly, and differently. `Arbiter.Mergers.ReviewedSha` invents
@@ -199,9 +199,9 @@ inventory cannot silently rot.
 
 | # | Guard | Anchor | Protects against | Misfire mode | On failure | Patches |
 |---|---|---|---|---|---|---|
-| C1 | bd-ofql8k commit gate (`:uncommitted` / `:no_commits` / `:secret_in_commit`) | `apps/arbiter/lib/arbiter/worker.ex:3948` (`commit_gate`) | A worker printing `arb done` over uncommitted or absent work; committed agent-config bearer tokens | Non-branch worktrees would false-positive, hence the branch check; git errors | **Fails open** on git error; otherwise diverts to a nudge relaunch | 3 |
-| C2 | Rejection parking | `apps/arbiter/lib/arbiter/worker.ex:5845` (`park_rejected`) | — | Since P9, `park_rejected/4` takes a park reason: with one it stamps `issues.review_park_reason` and pages once (since bd-1uu19b the run itself finishes `:failed`, its cause on the ticket); without one (a genuine REQUEST_CHANGES only) it is the pre-P9 plain failed run via `apps/arbiter/lib/arbiter/worker.ex:5907` (`fail_reason_for`) | `fail_now` | 2 |
-| C3 | Fix-round budget and non-convergence digest | `apps/arbiter/lib/arbiter/worker.ex:5970` (`maybe_dispatch_fix_round`) | bd-a9zb7w: a rejection nobody scheduled an implementer for | Identical-findings digest stops the loop — the one guard already shaped the way §5 wants | One escalation | 2 |
+| C1 | bd-ofql8k commit gate (`:uncommitted` / `:no_commits` / `:secret_in_commit`) | `apps/arbiter/lib/arbiter/worker.ex:3965` (`commit_gate`) | A worker printing `arb done` over uncommitted or absent work; committed agent-config bearer tokens | Non-branch worktrees would false-positive, hence the branch check; git errors | **Fails open** on git error; otherwise diverts to a nudge relaunch | 3 |
+| C2 | Rejection parking | `apps/arbiter/lib/arbiter/worker.ex:5862` (`park_rejected`) | — | Since P9, `park_rejected/4` takes a park reason: with one it stamps `issues.review_park_reason` and pages once (since bd-1uu19b the run itself finishes `:failed`, its cause on the ticket); without one (a genuine REQUEST_CHANGES only) it is the pre-P9 plain failed run via `apps/arbiter/lib/arbiter/worker.ex:5924` (`fail_reason_for`) | `fail_now` | 2 |
+| C3 | Fix-round budget and non-convergence digest | `apps/arbiter/lib/arbiter/worker.ex:5987` (`maybe_dispatch_fix_round`) | bd-a9zb7w: a rejection nobody scheduled an implementer for | Identical-findings digest stops the loop — the one guard already shaped the way §5 wants | One escalation | 2 |
 | C4 | `{:awaiting_review_timeout, N}` → auto-resume, not a failed run | `apps/arbiter/lib/arbiter/worker.ex:1687` (`awaiting_review_timeout`) | bd-8tjcms/#1511: a resumable timeout recorded as `:failed` | — | Parked for auto-resume: since bd-741sid the ticket's Watchdog has no run to fail, and since bd-1uu19b there is no `review_not_started` run outcome | 1 |
 
 ### 2.5 ReviewPatrol and PRPatrol

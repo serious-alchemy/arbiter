@@ -110,8 +110,14 @@ defmodule Arbiter.Messages.EscalationKind do
     pr_closed: :pr_closed,
     spawn_failed: :run_crashed,
     ticket_stuck: :run_crashed,
+    tracker_sync_failed: :tracker_sync_failed,
     worker_stopped: :run_crashed
   }
+
+  # bd-8nlez1: kinds whose cause is a side report — recorded only on a ticket
+  # that waits on nothing else, so a failed tracker sync never masks a crash
+  # or a blocked merge.
+  @yielding [:tracker_sync_failed]
 
   @type t :: atom()
 
@@ -147,4 +153,11 @@ defmodule Arbiter.Messages.EscalationKind do
   @doc "The attention cause `kind` records on its ticket, or nil."
   @spec cause(t()) :: atom() | nil
   def cause(kind), do: Map.get(@causes, kind)
+
+  @doc """
+  Whether `kind`'s cause yields to one the ticket already carries (bd-8nlez1):
+  recorded only when the ticket has no other cause.
+  """
+  @spec yields?(t()) :: boolean()
+  def yields?(kind), do: kind in @yielding
 end

@@ -9,6 +9,7 @@ defmodule Arbiter.MCP.Tools.Messaging do
   alias Arbiter.MCP.Scope
   alias Arbiter.MCP.Tools
   alias Arbiter.Messages.Message
+  alias Arbiter.Tasks.Attention
 
   @message_kinds_mcp ~w(notification completion failure escalation info)a
 
@@ -69,6 +70,16 @@ defmodule Arbiter.MCP.Tools.Messaging do
   `state: "outstanding"` and `clear: true` are mutually exclusive and will
   return an error.
 
+  ## The computed queue (bd-8nlez1)
+
+  Both states also return `attention`: every open ticket whose attention the
+  coordinator owns (`Arbiter.Tasks.Attention.items(owner: :coordinator)`),
+  oldest first, with `attention_count`. The queue has no read or clear state:
+  an item is listed exactly while its ticket's attention is, and goes when the
+  ticket moves on — `coordinator_inbox_clear` is for the messages beside it.
+  An item the coordinator cannot resolve goes to the operator with
+  `ticket_handoff`.
+
   ## Reader identity (bd-8akewg)
 
   The mailbox itself is shared — every producer writes one row, and every
@@ -125,7 +136,8 @@ defmodule Arbiter.MCP.Tools.Messaging do
              deleted_read: deleted_read,
              deleted_unread: deleted_unread,
              remaining_unread: remaining_unread
-           }}
+           }
+           |> Map.merge(attention_queue(ws_id))}
 
         "outstanding" ->
           messages = Message.outstanding(ref, opts)
@@ -134,9 +146,19 @@ defmodule Arbiter.MCP.Tools.Messaging do
            %{
              messages: Enum.map(messages, &serialize_message/1),
              count: length(messages)
-           }}
+           }
+           |> Map.merge(attention_queue(ws_id))}
       end
     end
+  end
+
+  defp attention_queue(ws_id) do
+    items =
+      [owner: :coordinator, workspace_id: ws_id]
+      |> Attention.items()
+      |> Enum.map(&Tools.serialize_attention_item/1)
+
+    %{attention: items, attention_count: length(items)}
   end
 
   # `[reader: …]` for the calling scope. A session token carries a `session_id`
