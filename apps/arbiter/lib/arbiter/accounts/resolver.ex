@@ -220,11 +220,16 @@ defmodule Arbiter.Accounts.Resolver do
   different kinds (§3.2), and picking one to stamp on a ledger row would be a
   guess. Mirrors the "carry nothing rather than guess" rule
   `Arbiter.Accounts.Credentials.install_credential/1` already applies to a
-  workspace-less spawn's env var.
+  workspace-less spawn's env var. A `:cli_credentials_path` row (the quota
+  poller's grant location, bd-b632tz) is never what usage is spent on, so it
+  is not counted.
   """
   @spec credential_id(String.t() | nil) :: String.t() | nil
   def credential_id(account_id) when is_binary(account_id) do
-    case active_credentials(account_id) do
+    account_id
+    |> active_credentials()
+    |> Enum.reject(&(&1.kind == :cli_credentials_path))
+    |> case do
       [%ProviderCredential{id: id}] -> id
       _ -> nil
     end

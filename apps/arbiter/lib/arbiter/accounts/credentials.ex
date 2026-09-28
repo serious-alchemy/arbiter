@@ -58,6 +58,7 @@ defmodule Arbiter.Accounts.Credentials do
     workspace_id
     |> account_ids()
     |> active_credentials()
+    |> Enum.reject(&quota_grant?/1)
     |> Enum.flat_map(&pair/1)
   end
 
@@ -148,6 +149,55 @@ defmodule Arbiter.Accounts.Credentials do
 
   def worker_oauth_token?(_), do: false
 
+  @doc """
+  The location of the account's dedicated quota-poller grant (bd-b632tz) —
+  the `.credentials.json` path its active `:cli_credentials_path` row names —
+  or `:none` (no such row, a parked account, a blank id).
+
+  `Arbiter.Quota.capture_oauth_usage/2` prefers this over every other
+  `/api/oauth/usage` credential and reads the file's access token fresh on
+  each poll (`Arbiter.Quota.GrantFile`), so nothing Arbiter stores ever
+  holds a token that could go stale. The most recently created row wins
+  mid-rotation, as in `account_oauth_usage_token/1`.
+  """
+  @spec account_quota_grant_path(String.t() | nil) :: {:ok, String.t()} | :none
+  def account_quota_grant_path(account_id) when is_binary(account_id) and account_id != "" do
+    if enabled_account?(account_id) do
+      [account_id]
+      |> active_credentials()
+      |> Enum.filter(&quota_grant?/1)
+      |> Enum.max_by(& &1.created_at, DateTime, fn -> nil end)
+      |> case do
+        nil -> :none
+        credential -> credential |> pair() |> extract_secret()
+      end
+    else
+      :none
+    end
+  end
+
+  def account_quota_grant_path(_), do: :none
+
+  @doc """
+  Every enabled account's dedicated quota-poller grant, as
+  `%{account_id: id, path: path}` — what `Arbiter.Quota.GrantRefresher`
+  keeps fresh. One entry per account (see `account_quota_grant_path/1`).
+  """
+  @spec quota_grants() :: [%{account_id: String.t(), path: String.t()}]
+  def quota_grants do
+    all_enabled_account_ids()
+    |> Enum.flat_map(fn account_id ->
+      case account_quota_grant_path(account_id) do
+        {:ok, path} -> [%{account_id: account_id, path: path}]
+        :none -> []
+      end
+    end)
+  end
+
+  # A `:cli_credentials_path` row's "secret" is a file location for the quota
+  # poller alone — never a credential a spawn carries.
+  defp quota_grant?(%ProviderCredential{kind: kind}), do: kind == :cli_credentials_path
+
   defp enabled_account?(account_id) do
     case Ash.get(ProviderAccount, account_id) do
       {:ok, %ProviderAccount{enabled: true}} -> true
@@ -175,6 +225,7 @@ defmodule Arbiter.Accounts.Credentials do
     secrets =
       all_enabled_account_ids()
       |> active_credentials()
+      |> Enum.reject(&quota_grant?/1)
       |> Enum.filter(&(&1.env_var == env_var))
       |> Enum.flat_map(&pair/1)
       |> Enum.map(fn {_var, secret} -> secret end)

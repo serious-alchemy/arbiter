@@ -92,9 +92,9 @@ defmodule Arbiter.Accounts.ProviderCredential do
     attribute :kind, :atom do
       allow_nil? false
       public? true
-      constraints one_of: [:oauth_token, :api_key, :cli_credentials_file]
+      constraints one_of: [:oauth_token, :api_key, :cli_credentials_file, :cli_credentials_path]
 
-      description "The credential shape: oauth_token / api_key / cli_credentials_file."
+      description "The credential shape: oauth_token / api_key / cli_credentials_file / cli_credentials_path (bd-b632tz: the secret is a `.credentials.json` *location*, never a token)."
     end
 
     attribute :env_var, :string do

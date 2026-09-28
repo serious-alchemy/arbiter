@@ -57,6 +57,16 @@ defmodule ArbiterCli.Cmd.Account do
                                      rotation (§11) — the secret is never
                                      printed or logged, by this command or any
                                      other.
+      arb account rotate <ref> --kind cli_credentials_path --secret DIR
+                                     Points the quota poller at a dedicated
+                                     Claude grant by location (bd-b632tz):
+                                     DIR is a CLAUDE_CONFIG_DIR logged in with
+                                     `CLAUDE_CONFIG_DIR=DIR claude auth login`
+                                     (or its .credentials.json). Only the
+                                     path is stored; the server re-reads the
+                                     token each poll and has the CLI refresh
+                                     it. --env-var defaults to
+                                     CLAUDE_CONFIG_DIR.
       arb account merge  <from-ref> --into <into-ref>
                                      Re-points usage_events, provider_credentials
                                      and workspace_provider_accounts from
@@ -368,8 +378,8 @@ defmodule ArbiterCli.Cmd.Account do
   defp rotate(args, opts, mode) do
     ref = one_ref!(args, "rotate")
     kind = opts[:kind] || Output.die("account rotate requires --kind")
-    env_var = opts[:env_var] || Output.die("account rotate requires --env-var")
-    secret = resolve_secret!(opts, args)
+    env_var = opts[:env_var] || default_env_var(kind)
+    secret = resolve_secret!(kind, opts, args)
 
     payload =
       %{"kind" => kind, "env_var" => env_var, "secret" => secret}
@@ -393,6 +403,21 @@ defmodule ArbiterCli.Cmd.Account do
   defp emit_rotated(credential, :text) do
     IO.puts("rotated #{credential["kind"]} credential (fingerprint=#{credential["fingerprint"]})")
   end
+
+  # A `cli_credentials_path` names a location the server reads, so it gets a
+  # default env var and is sent as an absolute path: the server's cwd is not
+  # the caller's.
+  defp default_env_var("cli_credentials_path"), do: "CLAUDE_CONFIG_DIR"
+  defp default_env_var(_kind), do: Output.die("account rotate requires --env-var")
+
+  defp resolve_secret!("cli_credentials_path", opts, _args) do
+    case opts[:secret] do
+      path when is_binary(path) and path != "" -> Path.expand(path)
+      _ -> Output.die("account rotate --kind cli_credentials_path requires --secret DIR")
+    end
+  end
+
+  defp resolve_secret!(_kind, opts, args), do: resolve_secret!(opts, args)
 
   defp resolve_secret!(opts, args) do
     cond do

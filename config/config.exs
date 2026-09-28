@@ -125,6 +125,12 @@ config :arbiter, :cloud_code_quota, enabled: true
 # rows rather than fetching live. `config/test.exs` turns it off.
 config :arbiter, :cloud_quota_probe, enabled: true, interval_ms: 300_000
 
+# Keeps the quota poller's dedicated Claude grant (an account's
+# `cli_credentials_path` credential) fresh by letting the `claude` CLI refresh
+# it just before its access token expires — `Arbiter.Quota.GrantRefresher`
+# (bd-b632tz). A no-op until an account has such a credential.
+config :arbiter, :quota_grant_refresher, enabled: true, interval_ms: 60_000
+
 # Install-wide default worker security posture (the floor every spawn
 # inherits before per-domain workspace overrides). The hardcoded safe baseline
 # lives in `Arbiter.Agents.SecurityPolicy.base/0` — auto mode, a non-empty

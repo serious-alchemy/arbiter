@@ -197,6 +197,10 @@ defmodule Arbiter.Application do
       # intents drain.
       {Task.Supervisor, name: Arbiter.Quota.CloudProbeSupervisor},
       Arbiter.Quota.CloudProbe,
+      # Has the `claude` CLI renew the quota poller's dedicated OAuth grant
+      # before it expires, so CloudProbe keeps polling `/api/oauth/usage`
+      # with no interactive session (bd-b632tz).
+      Arbiter.Quota.GrantRefresher,
       # Owns the ETS table `Arbiter.Quota.provider_spend/1` and
       # `workspace_spend/1` read their memoized 30-day ledger aggregates
       # from (bd-4p6pw7) — see that module's docs.

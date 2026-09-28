@@ -249,6 +249,10 @@ config :arbiter, :coordinator_session_dirs, []
 # :refresh_fun stub and enable explicitly.
 config :arbiter, :cloud_quota_probe, enabled: false
 
+# Never run the real `claude` CLI against a grant from the test suite; the
+# refresher's tests start their own instance with a fake CLI.
+config :arbiter, :quota_grant_refresher, enabled: false
+
 # Disable direct Gemini CLI / Antigravity quota fetching in test — there are no
 # real Google credentials or endpoints to hit, so the quota surface stays a pure
 # DB read. Tests that exercise the fetch path pass `enabled: true` explicitly and

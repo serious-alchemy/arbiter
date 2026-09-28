@@ -817,6 +817,101 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   end
 
   @doc """
+  Escalate a problem with the quota poller's **dedicated Claude grant**
+  (bd-b632tz): the `.credentials.json` at `path`, kept by a `claude` login
+  in its own `CLAUDE_CONFIG_DIR` and renewed by
+  `Arbiter.Quota.GrantRefresher` running the CLI. Every cause names the one
+  fix — log that config dir in again — as a command the operator can paste.
+
+  `cause` is one of:
+
+    * `{:poll_failing, failures, reason}` — `Arbiter.Quota.CloudProbe`'s
+      `/api/oauth/usage` poll has failed `failures` cycles on this grant (a
+      401, or the file gone / logged out).
+    * `{:refresh_failed, reason}` — the refresher ran the CLI and the grant's
+      `expiresAt` did not move, or the file became unreadable.
+    * `{:refresh_token_expiring, %DateTime{}}` — the grant's
+      `refreshTokenExpiresAt` is within the refresher's warning window; the
+      CLI cannot renew past it.
+
+  **One page per episode.** The subject carries the config dir but no
+  numbers, and nothing is sent while an uncleared escalation with the same
+  subject is already in the coordinator's inbox — so the refresher's page
+  and CloudProbe's page for the same broken grant are one mailbox item, and
+  neither repeats across a restart. The expiring-refresh-token warning has its
+  own subject, since it is advance notice rather than an outage. Best-effort,
+  returns `:ok`.
+  """
+  @spec quota_grant_failing(map(), String.t(), term()) :: :ok
+  def quota_grant_failing(%{workspace_id: ws_id} = snapshot, path, cause)
+      when is_binary(ws_id) and is_binary(path) do
+    config_dir = Path.dirname(path)
+
+    escalate_event("quota_grant_failing/3", snapshot, [task_ref: "system"], fn _task_id ->
+      subject = quota_grant_subject(cause, config_dir)
+
+      if Message.last_with_subject(Message.coordinator_ref(), [subject],
+           workspace_id: ws_id,
+           uncleared: true
+         ) do
+        :skip
+      else
+        {subject, quota_grant_body(cause, path, config_dir)}
+      end
+    end)
+  end
+
+  def quota_grant_failing(_snapshot, _path, _cause), do: :ok
+
+  defp quota_grant_subject({:refresh_token_expiring, _at}, config_dir),
+    do: "Anthropic quota grant expires soon — re-login #{config_dir}"
+
+  defp quota_grant_subject(_cause, config_dir),
+    do: "Anthropic quota grant needs re-login — #{config_dir}"
+
+  defp quota_grant_body(cause, path, config_dir) do
+    [
+      quota_grant_cause(cause, path),
+      "Fix: on the Arbiter host, from a neutral directory (e.g. `cd /tmp` — never the " <>
+        "admiral dir or a repo), run `CLAUDE_CONFIG_DIR=#{config_dir} claude auth login` " <>
+        "and complete the browser login. Use this dedicated config dir only: logging in " <>
+        "there does not touch the operator's own `~/.claude` session. The next poll " <>
+        "picks the new grant up; nothing needs restarting.",
+      quota_grant_impact(cause)
+    ]
+    |> Enum.join("\n")
+  end
+
+  defp quota_grant_cause({:poll_failing, failures, reason}, path),
+    do:
+      "`Arbiter.Quota.CloudProbe`'s `/api/oauth/usage` poll has failed #{failures} " <>
+        "consecutive cycles on the dedicated quota grant `#{path}`: " <>
+        "#{describe_reason(reason)}."
+
+  defp quota_grant_cause({:refresh_failed, reason}, path),
+    do:
+      "`Arbiter.Quota.GrantRefresher` could not renew the dedicated quota grant " <>
+        "`#{path}` with the `claude` CLI: #{describe_reason(reason)}."
+
+  defp quota_grant_cause({:refresh_token_expiring, at}, path),
+    do:
+      "The dedicated quota grant `#{path}` has a refresh token that expires at " <>
+        "#{DateTime.to_iso8601(at)}. The `claude` CLI cannot renew the grant past that, " <>
+        "so the quota poll will go blind then unless it is logged in again first."
+
+  defp quota_grant_cause(other, path),
+    do: "The dedicated quota grant `#{path}` needs attention: #{describe_reason(other)}."
+
+  defp quota_grant_impact({:refresh_token_expiring, _at}),
+    do: "The poll is still healthy; this is advance notice, and it will not repeat."
+
+  defp quota_grant_impact(_cause),
+    do:
+      "Until then the dispatch gate runs on an aging snapshot: the 5h rule fails open on " <>
+        "age, and a 7d hold cannot lift without a fresh polled snapshot. Workers are not " <>
+        "affected — they never use this grant."
+
+  @doc """
   Escalate a card that Autopilot cannot get out of Ready (bd-a40f4q).
 
   Fired by `Arbiter.Board.Autopilot` when a promoted card's dispatch keeps

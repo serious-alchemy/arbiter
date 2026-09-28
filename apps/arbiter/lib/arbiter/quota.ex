@@ -54,6 +54,8 @@ defmodule Arbiter.Quota do
   alias Arbiter.Quota.CloudCode
   alias Arbiter.Quota.Gate
   alias Arbiter.Quota.Gate.Snapshot
+  alias Arbiter.Quota.GrantFile
+  alias Arbiter.Quota.OAuthUsage
   alias Arbiter.Quota.Pace
   alias Arbiter.Quota.SpendCache
   alias Arbiter.Tasks.Workspace
@@ -798,6 +800,15 @@ defmodule Arbiter.Quota do
   `{:operator_login_lapsed, reason}`: the operator's interactive login
   lapsed, not a credential workers use. Otherwise workers are seeded that
   same file, so the bare reason is kept.
+
+  An account's dedicated quota grant (a `:cli_credentials_path` credential,
+  bd-b632tz — `Arbiter.Accounts.Credentials.account_quota_grant_path/1`)
+  outranks all of the above: its `.credentials.json` is re-read for the
+  access token on every call (`Arbiter.Quota.GrantFile`) and never
+  persisted. A 401 with it, or a grant file that is missing or logged out
+  (`{:grant_unreadable, reason}`), is returned as `{:quota_grant_lapsed,
+  path, reason}` — no fallback to another credential — so `CloudProbe` can
+  page with the re-login command for that config dir.
   """
   @spec capture_oauth_usage(String.t() | nil, keyword()) ::
           {:ok, AnthropicQuota.t()} | {:error, term()}
@@ -830,7 +841,7 @@ defmodule Arbiter.Quota do
       {:ok, id} ->
         {fetch_opts, token_source} = account_oauth_fetch_opts(id, opts)
 
-        case Arbiter.Quota.OAuthUsage.fetch(fetch_opts) do
+        case fetch_oauth_usage(fetch_opts, token_source) do
           {:error, reason} -> {:error, {:fetch, label_fetch_error(id, token_source, reason)}}
           {:ok, usage} -> tag_write_error(record_oauth_usage(id, provider, usage))
         end
@@ -857,7 +868,29 @@ defmodule Arbiter.Quota do
       else: reason
   end
 
+  # bd-b632tz: the account's dedicated quota grant is used by nothing but
+  # this poll — workers never see it — so its 401 (or a grant file that is
+  # gone or logged out) is never a worker-credential expiry. Tag it with the
+  # grant's path so `CloudProbe` pages with the re-login command for exactly
+  # that config dir instead of feeding the Claude 401 streak.
+  defp label_fetch_error(_account_id, {:quota_grant, path}, reason)
+       when reason == {:http_error, 401} or
+              (is_tuple(reason) and elem(reason, 0) == :grant_unreadable),
+       do: {:quota_grant_lapsed, path, reason}
+
   defp label_fetch_error(_account_id, _token_source, reason), do: reason
+
+  # The grant's access token is read from its file here, at fetch time, on
+  # every poll — never cached or persisted — so a refresh the CLI writes in
+  # place is picked up by the very next poll.
+  defp fetch_oauth_usage(fetch_opts, {:quota_grant, path}) do
+    case GrantFile.read(path) do
+      {:ok, grant} -> OAuthUsage.fetch(Keyword.put(fetch_opts, :token, grant.access_token))
+      {:error, reason} -> {:error, {:grant_unreadable, reason}}
+    end
+  end
+
+  defp fetch_oauth_usage(fetch_opts, _token_source), do: OAuthUsage.fetch(fetch_opts)
 
   # With provider accounts on, a workspace's workers read only their own
   # account's credential (`ConfigDir.oauth_token/1`) and are seeded the file
@@ -881,36 +914,53 @@ defmodule Arbiter.Quota do
   # credential it wants keeps full control of both the fetch and the
   # cooldown it shares with other calls using that same explicit token.
   #
-  # Also returns where the token comes from — `:explicit`, `:account`, or
-  # `:operator_credentials_file` (the `OAuthUsage.fetch/1` on-disk default) —
-  # so a failure can be attributed to the credential that actually failed.
+  # Also returns where the token comes from — `:explicit`, `{:quota_grant,
+  # path}`, `:account`, or `:operator_credentials_file` (the
+  # `OAuthUsage.fetch/1` on-disk default) — so a failure can be attributed to
+  # the credential that actually failed.
+  #
+  # The account's dedicated quota grant (`:cli_credentials_path`, bd-b632tz)
+  # outranks every stored credential: it is the one source that stays valid
+  # with no interactive session, because `Arbiter.Quota.GrantRefresher` has
+  # the CLI renew it. It never falls back — a lapsed grant must page with its
+  # own fix rather than quietly polling on a snapshot or the operator's login.
   defp account_oauth_fetch_opts(account_id, opts) do
     if Keyword.has_key?(opts, :token) do
       {opts, :explicit}
     else
-      case Credentials.account_oauth_usage_token(account_id) do
-        # Only tag the fetch with `:provider_account_id` — and so only key
-        # its 429 cooldown on the account — when a per-account credential
-        # was actually resolved. When it wasn't (`:none`: pre-migration or
-        # partially-migrated install), `OAuthUsage.fetch/1` falls back to
-        # the operator's on-disk `.credentials.json`, the same real token
-        # every credential-less account shares; tagging the account here
-        # regardless (as before) gave every such account its own cooldown
-        # key for that one shared token, so a 429 on one no longer
-        # suppressed the others — exactly the multiplication this option
-        # exists to eliminate. Leaving `opts` untouched here keeps the
-        # pre-P6 token-keyed cooldown for that shared-fallback case.
-        {:ok, token} ->
-          opts =
-            opts
-            |> Keyword.put(:provider_account_id, account_id)
-            |> Keyword.put(:token, token)
-
-          {opts, :account}
+      case Credentials.account_quota_grant_path(account_id) do
+        {:ok, path} ->
+          {Keyword.put(opts, :provider_account_id, account_id), {:quota_grant, path}}
 
         :none ->
-          {opts, :operator_credentials_file}
+          stored_credential_fetch_opts(account_id, opts)
       end
+    end
+  end
+
+  defp stored_credential_fetch_opts(account_id, opts) do
+    case Credentials.account_oauth_usage_token(account_id) do
+      # Only tag the fetch with `:provider_account_id` — and so only key
+      # its 429 cooldown on the account — when a per-account credential
+      # was actually resolved. When it wasn't (`:none`: pre-migration or
+      # partially-migrated install), `OAuthUsage.fetch/1` falls back to
+      # the operator's on-disk `.credentials.json`, the same real token
+      # every credential-less account shares; tagging the account here
+      # regardless (as before) gave every such account its own cooldown
+      # key for that one shared token, so a 429 on one no longer
+      # suppressed the others — exactly the multiplication this option
+      # exists to eliminate. Leaving `opts` untouched here keeps the
+      # pre-P6 token-keyed cooldown for that shared-fallback case.
+      {:ok, token} ->
+        opts =
+          opts
+          |> Keyword.put(:provider_account_id, account_id)
+          |> Keyword.put(:token, token)
+
+        {opts, :account}
+
+      :none ->
+        {opts, :operator_credentials_file}
     end
   end
 

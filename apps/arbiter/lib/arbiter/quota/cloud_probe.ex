@@ -219,7 +219,7 @@ defmodule Arbiter.Quota.CloudProbe do
       probe_count: 0,
       oauth_consecutive_failures: 0,
       oauth_consecutive_401s: 0,
-      oauth_login_lapsed_in_streak: false,
+      oauth_lapse_in_streak: nil,
       codex_consecutive_401s: 0,
       antigravity_consecutive_auth_failures: 0,
       codex_result_seen_this_cycle: false,
@@ -415,7 +415,7 @@ defmodule Arbiter.Quota.CloudProbe do
           state
           | oauth_consecutive_failures: 0,
             oauth_consecutive_401s: 0,
-            oauth_login_lapsed_in_streak: false
+            oauth_lapse_in_streak: nil
         }
 
       fetch_failed != [] ->
@@ -460,17 +460,17 @@ defmodule Arbiter.Quota.CloudProbe do
           state
           | oauth_consecutive_failures: 0,
             oauth_consecutive_401s: 0,
-            oauth_login_lapsed_in_streak: false
+            oauth_lapse_in_streak: nil
         }
     end
   end
 
   defp note_oauth_result(%State{} = state, workspace_ids, {:error, reason}) do
     failures = state.oauth_consecutive_failures + 1
-    lapsed? = state.oauth_login_lapsed_in_streak or login_lapsed?(reason)
+    lapse = lapse_of(reason) || state.oauth_lapse_in_streak
 
     if failures == @oauth_failure_escalation_threshold do
-      escalate_oauth_failure(workspace_ids, failures, reason, lapsed?)
+      escalate_oauth_failure(workspace_ids, failures, reason, lapse)
     end
 
     # `reason` may still carry a `Quota.write_once_per_account/4` stage tag
@@ -480,7 +480,7 @@ defmodule Arbiter.Quota.CloudProbe do
     # detection doesn't care whether it arrived tagged or not.
     state = note_oauth_401(state, workspace_ids, {:error, unwrap_stage(reason)})
 
-    %{state | oauth_consecutive_failures: failures, oauth_login_lapsed_in_streak: lapsed?}
+    %{state | oauth_consecutive_failures: failures, oauth_lapse_in_streak: lapse}
   end
 
   defp note_oauth_result(%State{} = state, _workspace_ids, _other), do: state
@@ -492,28 +492,49 @@ defmodule Arbiter.Quota.CloudProbe do
   # fallback `.credentials.json` as `{:operator_login_lapsed, inner}`, but only
   # when workers run on their own token) gets its own escalation naming that
   # cause and the fix, instead of the generic poll-failure one; it is still the
-  # only mailbox item for the outage. The kind is chosen from the whole streak
-  # (`lapsed?`), not just the threshold cycle's error, so a live 429 landing on
-  # that cycle can't turn a lapsed-login outage into the generic page.
-  defp escalate_oauth_failure([ws_id | _], failures, reason, lapsed?) when is_binary(ws_id) do
+  # only mailbox item for the outage. A lapsed dedicated quota grant
+  # (bd-b632tz — `{:quota_grant_lapsed, path, inner}`) likewise pages with the
+  # re-login command for that grant's config dir, through the same
+  # `CoordinatorNotifier.quota_grant_failing/3` the grant's refresher uses, so
+  # the two share one mailbox item. The kind is chosen from the whole streak
+  # (`lapse`, the latest lapse seen), not just the threshold cycle's error, so
+  # a live 429 landing on that cycle can't turn a lapsed-login outage into the
+  # generic page.
+  defp escalate_oauth_failure([ws_id | _], failures, reason, lapse) when is_binary(ws_id) do
     safe_escalate(fn ->
-      if lapsed? do
-        CoordinatorNotifier.operator_login_lapsed(
-          %{workspace_id: ws_id},
-          failures,
-          unwrap_lapsed(unwrap_stage(reason))
-        )
-      else
-        CoordinatorNotifier.quota_poll_failing(%{workspace_id: ws_id}, failures, reason)
+      case lapse do
+        {:quota_grant, path} ->
+          CoordinatorNotifier.quota_grant_failing(
+            %{workspace_id: ws_id},
+            path,
+            {:poll_failing, failures, unwrap_lapsed(unwrap_stage(reason))}
+          )
+
+        :operator ->
+          CoordinatorNotifier.operator_login_lapsed(
+            %{workspace_id: ws_id},
+            failures,
+            unwrap_lapsed(unwrap_stage(reason))
+          )
+
+        nil ->
+          CoordinatorNotifier.quota_poll_failing(%{workspace_id: ws_id}, failures, reason)
       end
     end)
   end
 
-  defp escalate_oauth_failure(_workspace_ids, _failures, _reason, _lapsed?), do: :ok
+  defp escalate_oauth_failure(_workspace_ids, _failures, _reason, _lapse), do: :ok
 
-  defp login_lapsed?(reason), do: match?({:operator_login_lapsed, _}, unwrap_stage(reason))
+  defp lapse_of(reason) do
+    case unwrap_stage(reason) do
+      {:operator_login_lapsed, _inner} -> :operator
+      {:quota_grant_lapsed, path, _inner} -> {:quota_grant, path}
+      _ -> nil
+    end
+  end
 
   defp unwrap_lapsed({:operator_login_lapsed, inner}), do: inner
+  defp unwrap_lapsed({:quota_grant_lapsed, _path, inner}), do: inner
   defp unwrap_lapsed(reason), do: reason
 
   # Tracks consecutive `{:http_error, 401}` responses from the oauth-usage

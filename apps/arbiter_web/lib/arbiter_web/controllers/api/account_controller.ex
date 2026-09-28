@@ -262,6 +262,13 @@ defmodule ArbiterWeb.Api.AccountController do
   defp friendly({:error, {:invalid_kind, kind}}),
     do: {:error, {:invalid_request, "unknown credential kind #{inspect(kind)}"}}
 
+  defp friendly({:error, {:invalid_credentials_path, reason}}),
+    do:
+      {:error,
+       {:invalid_request,
+        "no readable Claude grant at that path (#{reason}); log the config dir in first " <>
+          "with `CLAUDE_CONFIG_DIR=<dir> claude auth login`"}}
+
   defp friendly({:error, {:provider_mismatch, provider}}),
     do: {:error, {:invalid_request, "account belongs to provider #{provider}, not the one given"}}
 

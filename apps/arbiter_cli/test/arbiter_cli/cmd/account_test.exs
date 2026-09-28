@@ -331,6 +331,51 @@ defmodule ArbiterCli.Cmd.AccountTest do
     refute out =~ "secret"
   end
 
+  test "account rotate --kind cli_credentials_path sends an absolute path under CLAUDE_CONFIG_DIR" do
+    parent = self()
+
+    stub_routes([
+      {{"post", "/api/accounts/personal-max/rotate"},
+       fn conn ->
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+         send(parent, {:posted_body, Jason.decode!(body)})
+
+         conn
+         |> Plug.Conn.put_status(201)
+         |> Req.Test.json(%{
+           "id" => "cred-4",
+           "kind" => "cli_credentials_path",
+           "fingerprint" => "ddddeeeeffff",
+           "active" => true
+         })
+       end}
+    ])
+
+    {out, _err, exit_code} =
+      capture(fn ->
+        Account.run([
+          "rotate",
+          "personal-max",
+          "--kind",
+          "cli_credentials_path",
+          "--secret",
+          "relative/quota-claude"
+        ])
+      end)
+
+    assert exit_code == 0
+    assert out =~ "rotated cli_credentials_path credential"
+
+    assert_received {:posted_body,
+                     %{
+                       "kind" => "cli_credentials_path",
+                       "env_var" => "CLAUDE_CONFIG_DIR",
+                       "secret" => secret
+                     }}
+
+    assert secret == Path.expand("relative/quota-claude")
+  end
+
   test "account rotate requires a secret source" do
     {_out, err, exit_code} =
       capture(fn ->

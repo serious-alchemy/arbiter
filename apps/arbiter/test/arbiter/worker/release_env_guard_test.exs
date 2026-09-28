@@ -87,6 +87,8 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
     "apps/arbiter/lib/arbiter/workflows/code_review/checks.ex" => :scrubbed,
     "apps/arbiter/lib/arbiter/workflows/review_reply.ex" => :scrubbed,
     "apps/arbiter/lib/arbiter/quota/cloud_code.ex" => :scrubbed,
+    # bd-b632tz: runs the `claude` CLI to refresh the quota poller's grant.
+    "apps/arbiter/lib/arbiter/quota/grant_refresher.ex" => :scrubbed,
     # bd-bpt0ag: the single spawn point for coordinator sessions. It runs
     # `systemd-run` / `tmux` / `systemctl`, and the tmux server it starts goes
     # on to host an agent CLI and whatever that CLI runs — so the scrub has to

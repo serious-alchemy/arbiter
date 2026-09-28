@@ -214,6 +214,20 @@ defmodule Arbiter.Accounts.ResolverTest do
       assert Resolver.credential_id(account.id) == credential.id
     end
 
+    # bd-b632tz: the quota poller's grant path is never what a worker spends
+    # on, so it must not turn a sole worker credential into "ambiguous".
+    test "ignores a quota-grant path credential alongside the worker credential" do
+      account = account!(:claude, "cred-with-grant")
+      credential = credential!(account, "CLAUDE_CODE_OAUTH_TOKEN")
+
+      credential!(account, "CLAUDE_CONFIG_DIR", %{
+        kind: :cli_credentials_path,
+        secret: "/x/quota-claude/.credentials.json"
+      })
+
+      assert Resolver.credential_id(account.id) == credential.id
+    end
+
     test "nil when the account has no active credential" do
       account = account!(:claude, "cred-none")
       assert Resolver.credential_id(account.id) == nil

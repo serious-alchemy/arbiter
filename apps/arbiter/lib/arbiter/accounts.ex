@@ -58,6 +58,7 @@ defmodule Arbiter.Accounts do
     WorkspaceProviderAccount
   }
 
+  alias Arbiter.Quota.GrantFile
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Usage.Event
 
@@ -315,15 +316,24 @@ defmodule Arbiter.Accounts do
   data operation, not automated rotation (§11's non-goals). Never logs or
   returns the secret in a loggable form: the caller gets back the created
   row, whose `secret` field is write-only and never serialized.
+
+  `kind: :cli_credentials_path` (bd-b632tz) references the quota poller's
+  dedicated Claude grant by **location**: `secret` is a config directory or
+  its `.credentials.json` (normalized to the absolute file path, which must
+  already hold a readable grant — `{:error, {:invalid_credentials_path,
+  reason}}` otherwise), and `env_var` defaults to `CLAUDE_CONFIG_DIR`. The
+  grant's tokens are never read into the row; see
+  `Arbiter.Quota.GrantFile`.
   """
   @spec rotate_credential(String.t(), map()) :: {:ok, ProviderCredential.t()} | {:error, term()}
   def rotate_credential(account_ref, attrs) when is_map(attrs) do
     with {:ok, account} <- get_account(account_ref),
          :ok <- ensure_not_merged_away(account),
-         {:ok, secret} <- fetch_required(attrs, :secret),
+         {:ok, raw_secret} <- fetch_required(attrs, :secret),
          {:ok, raw_kind} <- fetch_required(attrs, :kind),
          {:ok, kind} <- parse_kind(raw_kind),
-         {:ok, env_var} <- fetch_required(attrs, :env_var) do
+         {:ok, secret} <- normalize_secret(kind, raw_secret),
+         {:ok, env_var} <- fetch_env_var(kind, attrs) do
       Arbiter.Repo.transaction(fn ->
         # Retire the current active credential of this kind *first* — the
         # partial unique index allows only one active row per
@@ -345,14 +355,38 @@ defmodule Arbiter.Accounts do
     end
   end
 
-  @credential_kinds ~w(oauth_token api_key cli_credentials_file)
+  @credential_kinds ~w(oauth_token api_key cli_credentials_file cli_credentials_path)
+
+  # The env var a `:cli_credentials_path` row is filed under. It names what
+  # the path is for — the `claude` CLI's config dir — but the row is never
+  # projected into a spawn env (`Arbiter.Accounts.Credentials` skips the kind).
+  @grant_path_env_var "CLAUDE_CONFIG_DIR"
 
   defp parse_kind(kind)
-       when is_atom(kind) and kind in [:oauth_token, :api_key, :cli_credentials_file],
+       when is_atom(kind) and
+              kind in [:oauth_token, :api_key, :cli_credentials_file, :cli_credentials_path],
        do: {:ok, kind}
 
   defp parse_kind(kind) when kind in @credential_kinds, do: {:ok, String.to_existing_atom(kind)}
   defp parse_kind(kind), do: {:error, {:invalid_kind, kind}}
+
+  defp normalize_secret(:cli_credentials_path, location) when is_binary(location) do
+    case GrantFile.normalize_path(location) do
+      {:ok, path} -> {:ok, path}
+      {:error, reason} -> {:error, {:invalid_credentials_path, reason}}
+    end
+  end
+
+  defp normalize_secret(_kind, secret), do: {:ok, secret}
+
+  defp fetch_env_var(:cli_credentials_path, attrs) do
+    case fetch_required(attrs, :env_var) do
+      {:ok, env_var} when is_binary(env_var) and env_var != "" -> {:ok, env_var}
+      _missing_or_blank -> {:ok, @grant_path_env_var}
+    end
+  end
+
+  defp fetch_env_var(_kind, attrs), do: fetch_required(attrs, :env_var)
 
   defp fetch_required(attrs, key) do
     case Map.get(attrs, key) || Map.get(attrs, to_string(key)) do

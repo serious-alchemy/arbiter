@@ -49,7 +49,8 @@ defmodule ArbiterWeb.ProvidersLive do
   @kinds [
     {"OAuth token", "oauth_token"},
     {"API key", "api_key"},
-    {"CLI credentials file", "cli_credentials_file"}
+    {"CLI credentials file", "cli_credentials_file"},
+    {"Quota grant (config dir path)", "cli_credentials_path"}
   ]
 
   # What a fresh credential form pre-fills per provider — the env var a
@@ -351,6 +352,12 @@ defmodule ArbiterWeb.ProvidersLive do
   defp error_message({:missing, :secret}), do: "Paste the secret to store."
   defp error_message({:missing, field}), do: "#{humanize(field)} is required."
   defp error_message({:invalid_kind, _}), do: "Pick a credential kind."
+
+  defp error_message({:invalid_credentials_path, reason}),
+    do:
+      "No readable Claude grant there (#{reason}). Log the config dir in first: " <>
+        "`CLAUDE_CONFIG_DIR=<dir> claude auth login`."
+
   defp error_message({:not_a_count, field}), do: "#{humanize(field)} must be a whole number ≥ 0."
   defp error_message({:merged_away, _}), do: "This account was merged into another one."
 
