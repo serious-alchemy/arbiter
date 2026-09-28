@@ -474,6 +474,135 @@ defmodule Arbiter.Worker.WatchdogTest do
     end
   end
 
+  # bd-ati3cp / #2149: a PR polled while a required status check was still
+  # running was misread as blocked on a non-author review and parked
+  # indefinitely. The adapter no longer does that, but a park that was
+  # misclassified must still self-heal once the checks conclude.
+  describe "re-evaluating a :needs_nonauthor_approval park (bd-ati3cp)" do
+    test "a park lifts once CI concludes green and the forge no longer reports the block" do
+      {pid, task_id} = running_worker()
+
+      StubMerger.queue_get("!re1", [
+        %{
+          status: :open,
+          approved: false,
+          block_reason: :needs_nonauthor_approval,
+          pipeline: :running
+        }
+      ])
+
+      wpid =
+        start_watchdog(pid, task_id, "!re1",
+          auto_merge: true,
+          max_polls: 1_000,
+          workspace: test_workspace()
+        )
+
+      wait_until(fn -> Watchdog.parked_on(task_id) == :needs_nonauthor_approval end)
+      assert :sys.get_state(wpid).max_polls == :infinity
+
+      # The checks complete: GitHub's merge state goes clean, no review block.
+      StubMerger.queue_get("!re1", [
+        %{status: :open, approved: false, block_reason: nil, pipeline: :success}
+      ])
+
+      wait_until(fn -> Watchdog.parked_on(task_id) == nil end)
+      assert :sys.get_state(wpid).max_polls == 1_000
+    end
+
+    test "the park holds while the checks are still running" do
+      {pid, task_id} = running_worker()
+
+      StubMerger.queue_get("!re2", [
+        %{
+          status: :open,
+          approved: false,
+          block_reason: :needs_nonauthor_approval,
+          pipeline: :success
+        }
+      ])
+
+      wpid =
+        start_watchdog(pid, task_id, "!re2",
+          auto_merge: true,
+          max_polls: 1_000,
+          workspace: test_workspace()
+        )
+
+      wait_until(fn -> Watchdog.parked_on(task_id) == :needs_nonauthor_approval end)
+
+      # CI re-runs (e.g. a new push): the narrow reason lapses mid-run. That is
+      # not a resolution — the park must survive it (bd-krg7ci round 4).
+      StubMerger.queue_get("!re2", [
+        %{status: :open, approved: false, block_reason: nil, pipeline: :running}
+      ])
+
+      count = StubMerger.get_count("!re2")
+      wait_until(fn -> StubMerger.get_count("!re2") >= count + 5 end)
+
+      assert Watchdog.parked_on(task_id) == :needs_nonauthor_approval
+      assert :sys.get_state(wpid).max_polls == :infinity
+    end
+
+    test "a ReviewGate lane parked mid-CI merges once the checks pass" do
+      {pid, task_id} = running_worker()
+
+      StubMerger.queue_get("!re3", [
+        %{
+          status: :open,
+          approved: false,
+          block_reason: :needs_nonauthor_approval,
+          pipeline: :running
+        }
+      ])
+
+      start_watchdog(pid, task_id, "!re3",
+        auto_merge: true,
+        via_review_gate: true,
+        workspace: test_workspace()
+      )
+
+      wait_until(fn -> Watchdog.parked_on(task_id) == :needs_nonauthor_approval end)
+      assert StubMerger.merge_count("!re3") == 0
+
+      StubMerger.queue_get("!re3", [
+        %{status: :open, approved: false, block_reason: nil, pipeline: :success}
+      ])
+
+      wait_until(fn -> Worker.state(pid).status == :completed end)
+      assert StubMerger.merge_count("!re3") == 1
+    end
+  end
+
+  describe "a blocked PR whose required checks are still running (bd-ati3cp)" do
+    test "keeps polling without escalating, then merges once the checks pass" do
+      {pid, task_id} = running_worker()
+
+      # What the GitHub adapter now reports for a BLOCKED PR mid-CI: no block.
+      StubMerger.queue_get("!pc1", [
+        %{status: :open, approved: false, block_reason: nil, pipeline: :running},
+        %{status: :open, approved: false, block_reason: nil, pipeline: :running},
+        %{status: :open, approved: false, block_reason: nil, pipeline: :running},
+        %{status: :open, approved: false, block_reason: nil, pipeline: :success}
+      ])
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          start_watchdog(pid, task_id, "!pc1",
+            auto_merge: true,
+            via_review_gate: true,
+            workspace: test_workspace()
+          )
+
+          wait_until(fn -> Worker.state(pid).status == :completed end)
+        end)
+
+      assert StubMerger.merge_count("!pc1") == 1
+      assert StubMerger.get_count("!pc1") >= 4
+      refute log =~ "merge blocked"
+    end
+  end
+
   describe "auto-resolve :behind_base (#354 Phase 2a)" do
     test "runs update-branch on an approved behind-base PR, then merges when caught up" do
       {pid, task_id} = running_worker()

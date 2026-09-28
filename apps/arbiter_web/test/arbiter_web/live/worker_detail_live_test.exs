@@ -233,7 +233,9 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       # arrives on the shared "workers" topic.
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "r")
 
-      html = render(view)
+      # The echo only kicks off an async snapshot load; the toast clears when
+      # that lands, so wait for it rather than racing it.
+      html = render_async(view)
       refute html =~ "the worktree is left in place"
       refute has_element?(view, "#worker-toolbar-resume-btn")
     end
@@ -448,12 +450,13 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
 
       # Second activity arrives on the live session. When the worker's state
       # reflects it, its activity-change broadcast has already been delivered to
-      # the (subscribed) view's mailbox, so the next render processes it first.
+      # the (subscribed) view's mailbox. That only kicks off an async snapshot
+      # load, so wait for it to land.
       wait_until(fn ->
         match?(%{label: "running tests"}, Map.get(Worker.state(task.id).meta, :activity))
       end)
 
-      assert render(view) =~ "running tests"
+      assert render_async(view) =~ "running tests"
     end
 
     test "output section has proper phx-hook attribute for auto-scroll", %{conn: conn, ws: ws} do

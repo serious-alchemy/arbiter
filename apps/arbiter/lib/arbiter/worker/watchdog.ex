@@ -2499,9 +2499,12 @@ defmodule Arbiter.Worker.Watchdog do
         # re-notify cadence again — silently disarming the stall park and
         # reproducing the exact incident this whole fix targets (bd-krg7ci
         # round 3). Mirrors what the `:merged` clause already does on success.
+        #
+        # bd-ati3cp: a `:needs_nonauthor_approval` park also lifts once CI has
+        # concluded green with no raw block — see `nonauthor_park_misread?/2`.
         state =
-          if state.park_reason != nil and classify(result) == :approved and
-               block_reason(result) == nil do
+          if state.park_reason != nil and block_reason(result) == nil and
+               (classify(result) == :approved or nonauthor_park_misread?(state, result)) do
             %{
               state
               | max_polls: state.base_max_polls,
@@ -4916,5 +4919,17 @@ defmodule Arbiter.Worker.Watchdog do
     _ -> :ok
   catch
     :exit, _ -> :ok
+  end
+
+  # bd-ati3cp / #2149: GitHub reports "blocked" for a required check that is
+  # still running as well as for a missing review, and a PR polled mid-CI was
+  # once misread as the latter and parked forever. The adapters emit
+  # `:needs_nonauthor_approval` only while a review requirement is unmet, so a
+  # poll with CI *concluded* green and no raw block at all means nothing is left
+  # holding the PR: the park was a misread. CI running or red never qualifies —
+  # that is the round-4 signal lapse, which must not revoke a real park.
+  defp nonauthor_park_misread?(state, result) do
+    state.park_reason == :needs_nonauthor_approval and
+      Map.get(result, :pipeline) in [:success, :neutral]
   end
 end

@@ -885,6 +885,9 @@ defmodule Arbiter.Mergers.GithubTest do
 
           String.contains?(conn.request_path, "/check-runs") ->
             conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"check_runs" => check_runs})
+
+          conn.request_path == "/graphql" ->
+            review_required_graphql(conn)
         end
       end)
 
@@ -908,7 +911,7 @@ defmodule Arbiter.Mergers.GithubTest do
       assert block_get(%{"mergeable_state" => "behind"}).block_reason == :behind_base
     end
 
-    test "blocked with no resolvable author classifies as :needs_approval" do
+    test "blocked on a required review with no resolvable author classifies as :needs_approval" do
       # No `user.login` on the PR → authorship can't be confirmed as the fleet's,
       # so we never even call `/user` and fall back to the generic reason.
       assert block_get(%{"mergeable_state" => "blocked"}).block_reason == :needs_approval
@@ -932,6 +935,9 @@ defmodule Arbiter.Mergers.GithubTest do
 
           String.contains?(conn.request_path, "/check-runs") ->
             conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"check_runs" => []})
+
+          conn.request_path == "/graphql" ->
+            review_required_graphql(conn)
         end
       end)
 
@@ -939,7 +945,17 @@ defmodule Arbiter.Mergers.GithubTest do
       result
     end
 
-    test "blocked on a fleet-authored PR classifies as :needs_nonauthor_approval" do
+    # "blocked" is only a review block when the forge says a review is required
+    # (bd-ati3cp) — these tests model exactly that.
+    defp review_required_graphql(conn) do
+      pull = %{"reviewDecision" => "REVIEW_REQUIRED", "commits" => %{"nodes" => []}}
+
+      conn
+      |> Plug.Conn.put_status(200)
+      |> Req.Test.json(%{"data" => %{"repository" => %{"pullRequest" => pull}}})
+    end
+
+    test "blocked on a required review of a fleet-authored PR classifies as :needs_nonauthor_approval" do
       result =
         block_get_authored(
           %{"mergeable_state" => "blocked", "user" => %{"login" => "fleet-bot"}},
@@ -1008,6 +1024,282 @@ defmodule Arbiter.Mergers.GithubTest do
 
     test "a merged PR carries no block reason" do
       assert block_get(%{"state" => "closed", "merged" => true}).block_reason == nil
+    end
+  end
+
+  # bd-ati3cp / #2149: GitHub reports `mergeable_state: "blocked"` for *any*
+  # unmet branch rule — a still-pending required status check as much as a
+  # required review. The bare state used to be read as a review block, so a
+  # fleet-authored PR polled mid-CI on a repo requiring status checks (and 0
+  # approvals) parked as :needs_nonauthor_approval. The review reason must come
+  # from the PR's actual review requirement (`reviewDecision` / the branch's
+  # `pull_request` rule); other rules map to :blocked_other, named.
+  describe "get/1 block_reason on a blocked PR (bd-ati3cp)" do
+    @success_run %{"name" => "mix test", "status" => "completed", "conclusion" => "success"}
+
+    defp blocked_pr(extra \\ %{}) do
+      Map.merge(
+        %{
+          "state" => "open",
+          "merged" => false,
+          "html_url" => "u",
+          "mergeable_state" => "blocked",
+          "head" => %{"sha" => "abc123"},
+          "base" => %{"ref" => "main"},
+          "user" => %{"login" => "fleet-bot"}
+        },
+        extra
+      )
+    end
+
+    # `signals` — :review_decision (nil | string), :contexts (rollup nodes),
+    # :rules (list | {:status, n}), :graphql ({:status, n} to fail it),
+    # :check_runs, :viewer.
+    defp blocked_get(pr, signals) do
+      test_pid = self()
+
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/repos/octo/widget/pulls/42"} ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(pr)
+
+          {"GET", "/repos/octo/widget/pulls/42/reviews"} ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          {"GET", "/repos/octo/widget/commits/abc123/check-runs"} ->
+            runs = Keyword.get(signals, :check_runs, [@success_run])
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"check_runs" => runs})
+
+          {"GET", "/user"} ->
+            login = Keyword.get(signals, :viewer, "fleet-bot")
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"login" => login})
+
+          {"POST", "/graphql"} ->
+            send(test_pid, :graphql_called)
+
+            case Keyword.get(signals, :graphql) do
+              {:status, status} ->
+                conn |> Plug.Conn.put_status(status) |> Req.Test.json(%{"message" => "nope"})
+
+              nil ->
+                pull = %{
+                  "reviewDecision" => Keyword.get(signals, :review_decision),
+                  "commits" => %{
+                    "nodes" => [
+                      %{
+                        "commit" => %{
+                          "statusCheckRollup" => %{
+                            "contexts" => %{"nodes" => Keyword.get(signals, :contexts, [])}
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+
+                conn
+                |> Plug.Conn.put_status(200)
+                |> Req.Test.json(%{"data" => %{"repository" => %{"pullRequest" => pull}}})
+            end
+
+          {"GET", "/repos/octo/widget/rules/branches/main"} ->
+            send(test_pid, :rules_called)
+
+            case Keyword.get(signals, :rules, []) do
+              {:status, status} ->
+                conn |> Plug.Conn.put_status(status) |> Req.Test.json(%{"message" => "nope"})
+
+              rules ->
+                conn |> Plug.Conn.put_status(200) |> Req.Test.json(rules)
+            end
+        end
+      end)
+
+      {:ok, result} = Github.get(@ref)
+      result
+    end
+
+    defp pr_rule(params) do
+      %{
+        "type" => "pull_request",
+        "parameters" =>
+          Map.merge(
+            %{
+              "required_approving_review_count" => 0,
+              "dismiss_stale_reviews_on_push" => false,
+              "require_code_owner_review" => false,
+              "require_last_push_approval" => false,
+              "required_review_thread_resolution" => false
+            },
+            params
+          )
+      }
+    end
+
+    defp status_checks_rule(contexts) do
+      %{
+        "type" => "required_status_checks",
+        "parameters" => %{
+          "required_status_checks" => Enum.map(contexts, &%{"context" => &1}),
+          "strict_required_status_checks_policy" => false
+        }
+      }
+    end
+
+    test "a required check still running is not a review block — nothing is classified yet" do
+      # The #2148 incident: 0 required approvals, `mix test` in progress.
+      result =
+        blocked_get(blocked_pr(),
+          check_runs: [%{"name" => "mix test", "status" => "in_progress", "conclusion" => nil}],
+          rules: [pr_rule(%{}), status_checks_rule(["mix test"])]
+        )
+
+      assert result.pipeline == :running
+      assert result.block_reason == nil
+    end
+
+    test "a required legacy status context still PENDING is not blocked yet either" do
+      # Check-runs are all green, but a required commit status (Statuses API)
+      # has not reported — REST check-runs can't see it; the rollup can.
+      result =
+        blocked_get(blocked_pr(),
+          contexts: [
+            %{
+              "__typename" => "CheckRun",
+              "name" => "mix test",
+              "status" => "COMPLETED",
+              "conclusion" => "SUCCESS",
+              "isRequired" => true
+            },
+            %{
+              "__typename" => "StatusContext",
+              "context" => "ext/ci",
+              "state" => "PENDING",
+              "isRequired" => true
+            }
+          ],
+          rules: [status_checks_rule(["mix test", "ext/ci"])]
+        )
+
+      assert result.pipeline == :success
+      assert result.block_reason == nil
+    end
+
+    test "reviewDecision REVIEW_REQUIRED on a fleet-authored PR is :needs_nonauthor_approval" do
+      result =
+        blocked_get(blocked_pr(),
+          review_decision: "REVIEW_REQUIRED",
+          rules: [pr_rule(%{"required_approving_review_count" => 1})]
+        )
+
+      assert result.block_reason == :needs_nonauthor_approval
+    end
+
+    test "reviewDecision REVIEW_REQUIRED on someone else's PR is :needs_approval" do
+      result =
+        blocked_get(blocked_pr(%{"user" => %{"login" => "a-human"}}),
+          review_decision: "REVIEW_REQUIRED",
+          rules: [pr_rule(%{"required_approving_review_count" => 1})]
+        )
+
+      assert result.block_reason == :needs_approval
+    end
+
+    test "a required-approval rule still yields :needs_nonauthor_approval when GraphQL is unavailable" do
+      result =
+        blocked_get(blocked_pr(),
+          graphql: {:status, 502},
+          rules: [pr_rule(%{"required_approving_review_count" => 1})]
+        )
+
+      assert result.block_reason == :needs_nonauthor_approval
+    end
+
+    test "a settled green PR with 0 required approvals is never a review block" do
+      # Blocked for some reason the fleet can see nothing of: not a review.
+      result = blocked_get(blocked_pr(), review_decision: nil, rules: [pr_rule(%{})])
+
+      refute result.block_reason in [:needs_approval, :needs_nonauthor_approval]
+      assert result.block_reason == :blocked_other
+    end
+
+    test "an unresolved-conversation rule maps to :blocked_other naming the rule" do
+      result =
+        blocked_get(blocked_pr(),
+          review_decision: nil,
+          rules: [
+            %{"type" => "deletion"},
+            %{"type" => "non_fast_forward"},
+            pr_rule(%{"required_review_thread_resolution" => true})
+          ]
+        )
+
+      assert result.block_reason == :blocked_other
+      assert result.block_detail =~ "pull_request"
+      assert result.block_detail =~ "required_review_thread_resolution"
+      refute result.block_detail =~ "deletion"
+    end
+
+    test "a required deployment rule maps to :blocked_other naming the rule" do
+      result =
+        blocked_get(blocked_pr(),
+          review_decision: nil,
+          rules: [
+            %{
+              "type" => "required_deployments",
+              "parameters" => %{"required_deployment_environments" => ["staging"]}
+            }
+          ]
+        )
+
+      assert result.block_reason == :blocked_other
+      assert result.block_detail =~ "required_deployments"
+      assert result.block_detail =~ "staging"
+    end
+
+    test "a required check that never reported maps to :blocked_other naming the check" do
+      result =
+        blocked_get(blocked_pr(),
+          review_decision: nil,
+          contexts: [
+            %{
+              "__typename" => "CheckRun",
+              "name" => "mix test",
+              "status" => "COMPLETED",
+              "conclusion" => "SUCCESS",
+              "isRequired" => true
+            }
+          ],
+          rules: [status_checks_rule(["mix test", "mix audit"])]
+        )
+
+      assert result.block_reason == :blocked_other
+      assert result.block_detail =~ "required_status_checks"
+      assert result.block_detail =~ "mix audit"
+      refute result.block_detail =~ "mix test"
+    end
+
+    test "with neither GraphQL nor the rules API readable, falls back to the author heuristic" do
+      result = blocked_get(blocked_pr(), graphql: {:status, 502}, rules: {:status, 404})
+
+      assert_received :graphql_called
+      assert_received :rules_called
+      assert result.block_reason == :needs_nonauthor_approval
+    end
+
+    test "a pending pipeline short-circuits before any GraphQL / rules lookup" do
+      blocked_get(blocked_pr(),
+        check_runs: [%{"name" => "mix test", "status" => "queued", "conclusion" => nil}]
+      )
+
+      refute_received :graphql_called
+      refute_received :rules_called
+    end
+
+    test "an unblocked PR carries a nil block_detail" do
+      result = blocked_get(blocked_pr(%{"mergeable_state" => "clean"}), [])
+      assert result.block_reason == nil
+      assert result.block_detail == nil
     end
   end
 

@@ -71,7 +71,16 @@ defmodule Arbiter.Mergers.Github do
   require Logger
 
   alias Arbiter.Http.Client
-  alias Arbiter.Mergers.{CIRerun, Github.Config, Github.Error, Github.RepoResolver, Merger}
+
+  alias Arbiter.Mergers.{
+    CIRerun,
+    Github.BlockedState,
+    Github.Config,
+    Github.Error,
+    Github.RepoResolver,
+    Merger
+  }
+
   alias Arbiter.Providers.Github, as: Provider
 
   @stub_name Arbiter.Mergers.Github.HTTP
@@ -136,11 +145,13 @@ defmodule Arbiter.Mergers.Github do
   # works for both a `CheckRun` (Actions / most CI) and a legacy
   # `StatusContext` (external CI posting via the Statuses API). `isRequired`
   # takes the PR number so GitHub can resolve it against that PR's branch
-  # protection rule.
+  # protection rule. Also carries the PR's `reviewDecision`, which the
+  # blocked-state classification reads (bd-ati3cp, `BlockedState`).
   @required_checks_query """
   query($owner: String!, $repo: String!, $number: Int!) {
     repository(owner: $owner, name: $repo) {
       pullRequest(number: $number) {
+        reviewDecision
         commits(last: 1) {
           nodes {
             commit {
@@ -280,6 +291,17 @@ defmodule Arbiter.Mergers.Github do
       approved = approved?(reviews)
       changes_requested = changes_requested?(reviews)
 
+      {block_reason, block_detail} =
+        block_reason(
+          cfg,
+          {owner, repo, number},
+          pr,
+          status,
+          pipeline,
+          approved,
+          changes_requested
+        )
+
       {:ok,
        %{
          ref: mr_ref,
@@ -306,7 +328,12 @@ defmodule Arbiter.Mergers.Github do
          ci_clean: Map.get(pr, "mergeStateStatus") == "clean",
          conflicting:
            Map.get(pr, "mergeable") == false or Map.get(pr, "mergeStateStatus") == "dirty",
-         block_reason: block_reason(cfg, pr, status, pipeline, approved, changes_requested),
+         block_reason: block_reason,
+         # For `:blocked_other`, the forge rule(s) still unmet, e.g.
+         # "required_deployments (staging)" — nil when there is nothing to name
+         # (bd-ati3cp). Recorded with the rest of this map as the worker's
+         # `last_merger_status`.
+         block_detail: block_detail,
          url: Map.get(pr, "html_url") || ""
        }}
     end
@@ -796,22 +823,9 @@ defmodule Arbiter.Mergers.Github do
     with {:ok, cfg} <- Config.resolve(),
          {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref),
          {:ok, body} <- graphql_required_checks(cfg, owner, repo, number) do
-      contexts =
-        body
-        |> get_in(["data", "repository", "pullRequest", "commits", "nodes"])
-        |> List.wrap()
-        |> List.first()
-        |> case do
-          %{"commit" => %{"statusCheckRollup" => %{"contexts" => %{"nodes" => nodes}}}}
-          when is_list(nodes) ->
-            nodes
-
-          _ ->
-            []
-        end
-
       {:ok,
-       contexts
+       body
+       |> rollup_contexts()
        |> Enum.reject(&is_nil/1)
        |> Enum.filter(&required_settled_failure?/1)
        |> Enum.map(&summarize_required_check/1)}
@@ -1327,53 +1341,134 @@ defmodule Arbiter.Mergers.Github do
   defp pr_status(_), do: :open
 
   # Classify *why* an open PR can't merge, or nil when it is mergeable (or
-  # already terminal). This is the block-reason surface Phase 1 (#354) escalates
-  # on so an approved-but-unmergeable PR never parks silently. Derived from
-  # GitHub's merge-state signal plus the resolved CI pipeline and review state:
+  # already terminal), as `{reason, detail}` — `detail` names the unmet rule
+  # for `:blocked_other` (bd-ati3cp) and is nil otherwise. This is the
+  # block-reason surface Phase 1 (#354) escalates on so an
+  # approved-but-unmergeable PR never parks silently. Derived from GitHub's
+  # merge-state signal plus the resolved CI pipeline and review state:
   #
   #   :conflict                  — mergeable=false / mergeable_state "dirty"
   #   :behind_base               — "behind" (no conflict, just stale vs base)
   #   :ci_failed                 — a required check failed (pipeline :failed)
   #   :needs_approval            — "blocked" by required review, or a dismissed
   #                                approval (a review the fleet can still wait on)
-  #   :needs_nonauthor_approval  — "blocked" purely on a required review of a
+  #   :needs_nonauthor_approval  — "blocked" on a required review of a
   #                                fleet-authored PR (the fleet can't self-approve)
   #   :draft                     — PR is a draft
   #   :blocked_other             — blocked by some other forge rule
-  defp block_reason(_cfg, _pr, status, _pipeline, _approved, _changes_requested)
+  #
+  # "blocked" alone does NOT mean a review is missing — see `blocked_reason/5`.
+  defp block_reason(_cfg, _target, _pr, status, _pipeline, _approved, _changes_requested)
        when status in [:merged, :closed],
-       do: nil
+       do: {nil, nil}
 
   # Pre-existing complexity 11 — baselined when bd-4x2yhq first
   # wired Credo up. Thresholds stay at the tool's own default so new
   # code is held to it; see the note in .credo.exs.
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
-  defp block_reason(cfg, pr, _status, pipeline, _approved, changes_requested) do
+  defp block_reason(cfg, target, pr, _status, pipeline, approved, changes_requested) do
     state = merge_state(pr)
     draft? = Map.get(pr, "draft") == true or state == "draft"
 
     cond do
-      draft? -> :draft
-      state == "dirty" or Map.get(pr, "mergeable") == false -> :conflict
-      state == "behind" -> :behind_base
-      pipeline == :failed -> :ci_failed
-      changes_requested -> :needs_approval
-      state == "blocked" -> blocked_review_reason(cfg, pr)
-      state in ["clean", "has_hooks", "unstable", "unknown", nil] -> nil
-      true -> :blocked_other
+      draft? -> {:draft, nil}
+      state == "dirty" or Map.get(pr, "mergeable") == false -> {:conflict, nil}
+      state == "behind" -> {:behind_base, nil}
+      pipeline == :failed -> {:ci_failed, nil}
+      changes_requested -> {:needs_approval, nil}
+      state == "blocked" -> blocked_reason(cfg, target, pr, pipeline, approved)
+      state in ["clean", "has_hooks", "unstable", "unknown", nil] -> {nil, nil}
+      true -> {:blocked_other, nil}
     end
   end
 
-  # A "blocked" merge state on an otherwise-green PR (no conflict, not behind,
-  # CI not failed, no outstanding CHANGES_REQUESTED) means the only thing missing
-  # is a required approving review. If that PR was opened by the fleet's *own*
-  # identity (the authenticated token's user), the forge's branch protection
-  # requires an approval from someone *other than the author* — which the fleet
-  # can never supply, because GitHub forbids approving your own pull request. The
-  # Watchdog treats `:needs_nonauthor_approval` specially: it parks indefinitely
-  # and escalates to a human once, instead of failing at the auto_merge poll ceiling
-  # (bd-c3lchp / lt-4kjaoe). When authorship can't be confirmed as the fleet's,
-  # fall back to the generic `:needs_approval` (a reviewer may still act).
+  # GitHub reports "blocked" for ANY unmet branch rule — a required status check
+  # still running blocks a PR exactly like a missing required review. Reading
+  # the bare state as a review block parked every fleet-authored PR polled
+  # mid-CI as `:needs_nonauthor_approval` on a repo requiring status checks and
+  # 0 approvals (bd-ati3cp / #2149). So:
+  #
+  #   * CI still in flight → not blocked yet (nil); the Watchdog keeps polling
+  #     and classifies once the checks conclude. No extra requests.
+  #   * otherwise ask the forge why, via `BlockedState`: the PR's GraphQL
+  #     `reviewDecision` + required-check rollup, then the branch's rules.
+  #   * neither readable → the old author heuristic, so a forge hiccup degrades
+  #     to the previous behaviour rather than to "mergeable".
+  defp blocked_reason(_cfg, _target, _pr, pipeline, _approved)
+       when pipeline in [:running, :pending],
+       do: {nil, nil}
+
+  defp blocked_reason(cfg, {owner, repo, number}, pr, pipeline, approved) do
+    signals = fetch_block_signals(cfg, owner, repo, number)
+    rules = fn -> fetch_branch_rules(cfg, owner, repo, get_in(pr, ["base", "ref"])) end
+
+    case BlockedState.classify(signals, rules, pipeline, approved) do
+      :pending ->
+        {nil, nil}
+
+      :changes_requested ->
+        {:needs_approval, nil}
+
+      {:blocked_other, detail} ->
+        {:blocked_other, detail}
+
+      verdict when verdict in [:review_required, :unknown] ->
+        {blocked_review_reason(cfg, pr), nil}
+    end
+  end
+
+  # The PR's `reviewDecision` and head-commit rollup contexts (with
+  # `isRequired`), from the same query `list_required_check_failures/1` uses.
+  defp fetch_block_signals(cfg, owner, repo, number) do
+    case graphql_required_checks(cfg, owner, repo, number) do
+      {:ok, %{"data" => %{"repository" => %{"pullRequest" => %{} = pull}}} = body} ->
+        {:ok,
+         %{review_decision: Map.get(pull, "reviewDecision"), contexts: rollup_contexts(body)}}
+
+      _ ->
+        :error
+    end
+  end
+
+  # The rules in effect on the PR's base branch, across every ruleset
+  # (`GET /repos/{o}/{r}/rules/branches/{b}`). Classic branch protection is not
+  # listed here; `reviewDecision` and the rollup's `isRequired` cover it.
+  defp fetch_branch_rules(_cfg, _owner, _repo, branch) when branch in [nil, ""], do: :error
+
+  defp fetch_branch_rules(cfg, owner, repo, branch) do
+    case request(cfg, :get, "/repos/#{owner}/#{repo}/rules/branches/#{URI.encode(branch)}",
+           params: [per_page: 100]
+         )
+         |> handle_json() do
+      {:ok, rules} when is_list(rules) -> {:ok, Enum.filter(rules, &is_map/1)}
+      _ -> :error
+    end
+  end
+
+  defp rollup_contexts(body) do
+    body
+    |> get_in(["data", "repository", "pullRequest", "commits", "nodes"])
+    |> List.wrap()
+    |> List.first()
+    |> case do
+      %{"commit" => %{"statusCheckRollup" => %{"contexts" => %{"nodes" => nodes}}}}
+      when is_list(nodes) ->
+        nodes
+
+      _ ->
+        []
+    end
+  end
+
+  # A PR whose review policy demands an approval it lacks (per `BlockedState`).
+  # If that PR was opened by the fleet's *own* identity (the authenticated
+  # token's user), the forge requires an approval from someone *other than the
+  # author* — which the fleet can never supply, because GitHub forbids approving
+  # your own pull request. The Watchdog treats `:needs_nonauthor_approval`
+  # specially: it parks indefinitely and escalates to a human once, instead of
+  # failing at the auto_merge poll ceiling (bd-c3lchp / lt-4kjaoe). When
+  # authorship can't be confirmed as the fleet's, fall back to the generic
+  # `:needs_approval` (a reviewer may still act).
   defp blocked_review_reason(cfg, pr) do
     if fleet_authored?(cfg, pr), do: :needs_nonauthor_approval, else: :needs_approval
   end
