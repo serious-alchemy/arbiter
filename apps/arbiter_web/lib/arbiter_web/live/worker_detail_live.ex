@@ -1375,7 +1375,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
                 </span>
               </div>
               <p class="text-xs text-[var(--text-label)] mt-1">
-                Driven by a live Claude session — progress streams in the output above rather than
+                Driven by {live_activity_driven_by(@snapshot)} — progress streams in the output above rather than
                 advancing fixed workflow steps.
               </p>
             </.panel>
@@ -1812,6 +1812,22 @@ defmodule ArbiterWeb.WorkerDetailLive do
   end
 
   defp live_activity(_), do: "working"
+
+  defp live_activity_driven_by(%{meta: meta}) when is_map(meta) do
+    live_activity_driven_by_provider(Worker.provider(meta))
+  end
+
+  defp live_activity_driven_by(_), do: "a live agent session"
+
+  defp live_activity_driven_by_provider(nil), do: "a live agent session"
+
+  defp live_activity_driven_by_provider(provider) do
+    if provider in ArbiterWeb.CoreComponents.ProviderIcon.__known_providers__() do
+      "a live #{display_name(provider)} session"
+    else
+      "a live agent session"
+    end
+  end
 
   # Color a workflow step based on whether it's done, current, or upcoming.
   defp step_class(step, %MachineState{completed_steps: completed, current_step: current}) do

@@ -362,6 +362,45 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       refute html =~ "load_context"
     end
 
+    test "live activity panel names the run's provider or falls back to generic wording (bd-2axs4x)",
+         %{conn: conn, ws: ws} do
+      # Test Claude run
+      {:ok, task_claude} = Ash.create(Issue, %{title: "claude-run", workspace_id: ws.id})
+
+      {:ok, pid_claude} =
+        Worker.start(task_id: task_claude.id, repo: "r", meta: %{provider: "claude"})
+
+      :ok = Worker.report(pid_claude, :claude_session, true)
+      :ok = Worker.report(pid_claude, :activity, "inspecting code")
+
+      {:ok, _view, html_claude} = live_worker(conn, task_claude.id)
+      assert html_claude =~ "Driven by a live Claude session"
+      refute html_claude =~ "Driven by a live agent session"
+
+      # Test gemini (Antigravity) run
+      {:ok, task_gemini} = Ash.create(Issue, %{title: "gemini-run", workspace_id: ws.id})
+
+      {:ok, pid_gemini} =
+        Worker.start(task_id: task_gemini.id, repo: "r", meta: %{provider: "gemini"})
+
+      :ok = Worker.report(pid_gemini, :claude_session, true)
+      :ok = Worker.report(pid_gemini, :activity, "inspecting code")
+
+      {:ok, _view, html_gemini} = live_worker(conn, task_gemini.id)
+      assert html_gemini =~ "Driven by a live Antigravity session"
+      refute html_gemini =~ "Driven by a live Claude session"
+
+      # Test nil / unknown fallback run
+      {:ok, task_nil} = Ash.create(Issue, %{title: "nil-run", workspace_id: ws.id})
+      {:ok, pid_nil} = Worker.start(task_id: task_nil.id, repo: "r")
+      :ok = Worker.report(pid_nil, :claude_session, true)
+      :ok = Worker.report(pid_nil, :activity, "inspecting code")
+
+      {:ok, _view, html_nil} = live_worker(conn, task_nil.id)
+      assert html_nil =~ "Driven by a live agent session"
+      refute html_nil =~ "Driven by a live Claude session"
+    end
+
     test "approval badge shows 'CI running' when pipeline is in progress" do
       # Test the approval_label_default/1 function directly
       status_with_ci_running = %{
