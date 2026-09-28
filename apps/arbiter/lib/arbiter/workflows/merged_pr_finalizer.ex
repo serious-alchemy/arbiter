@@ -56,7 +56,17 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
 
     * Modern: `source_pr` field set (added by bd-ci2jl2, `tracker_type: :none`).
     * Legacy: `tracker_type: :github`, `tracker_ref` is a bare PR number,
-      `source_pr` nil (pre-bd-ci2jl2 format).
+      `source_pr` nil (pre-bd-ci2jl2 format) — and, since bd-6dghdv, only a
+      task that carries PRPatrol's own markers (the `PR #<n>: … needs
+      follow-up` title with `n == tracker_ref`, and the `Auto-filed by PRPatrol
+      against <owner/repo>.` description naming exactly the repo this
+      finalizer queries). An ordinary GitHub-issue-tracked task has the same
+      columns, but its `tracker_ref` is an *issue* number: treating it as a PR
+      number closed 20 ordinary tasks when a repo move renumbered issues 1–38
+      onto the old repo's merged PRs #1–#38.
+
+  Every close logs the rule that matched (`rule=pr_ref|source_pr|
+  legacy_tracker_ref`) and the owner/repo queried.
 
   **Critical guard:** these tasks are closed local-only — `Sync.lifecycle` is
   NOT invoked. For modern follow-ups `tracker_type: :none` would already
@@ -78,6 +88,12 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
   Not in `Application.children`. Started per-workspace via
   `MergedPRFinalizerSupervisor` — one instance per (workspace, repo).
   Test convenience: `tick/1` forces a synchronous sweep.
+
+  The workspace is re-read every tick (bd-6dghdv), so a config edit applies on
+  the next sweep. The `repo` is fixed per instance: a workspace edit that moves
+  it makes `MergedPRFinalizerSupervisor.reconcile/1` replace the instance, and
+  until then a tick whose workspace no longer resolves to `repo` sweeps
+  nothing.
   """
 
   use GenServer
@@ -88,6 +104,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
   alias Arbiter.Tasks.Verification
   alias Arbiter.Trackers.Sync
   alias Arbiter.Worker
+  alias Arbiter.Workflows.{MergedPRFinalizerSupervisor, PatrolRepoScope, PatrolServer}
   require Ash.Query
   require Logger
 
@@ -138,16 +155,11 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
         )
       )
 
-    workspace =
-      case Ash.get(Workspace, workspace_id) do
-        {:ok, ws} -> ws
-        _ -> nil
-      end
-
+    # bd-6dghdv: the workspace is NOT loaded here — `do_tick_body/1` re-reads
+    # it every tick, so a config edit takes effect without a restart.
     state = %__MODULE__{
       repo: repo,
       workspace_id: workspace_id,
-      workspace: workspace,
       interval_ms: interval_ms,
       max_checks_per_tick: max_checks_per_tick
     }
@@ -193,28 +205,40 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
     Limiter.with_priority(:background, :merged_pr_finalizer, fn -> do_tick_body(state) end)
   end
 
+  # bd-6dghdv: the workspace is re-read every tick (it used to be loaded once in
+  # init/1), so a merge-config edit — credentials, owner/repo — is honoured on
+  # the next tick without a restart. This finalizer is still pinned to the
+  # `repo` it was started for, though: if the workspace no longer resolves to
+  # that repo (merge.config or repo_paths moved), the tick queries nothing
+  # rather than keep sweeping the old repo. `MergedPRFinalizerSupervisor.
+  # reconcile/1`, run on workspace update, replaces it with a finalizer for the
+  # new one.
   defp do_tick_body(state) do
+    workspace = PatrolServer.refetch_workspace(state.workspace_id)
+    state = %{state | workspace: workspace}
+
     {result, cursor} =
-      with %Workspace{} <- state.workspace,
-           adapter when not is_nil(adapter) <- resolve_adapter(state.workspace),
+      with %Workspace{} <- workspace,
+           true <- repo_still_configured?(workspace, state.repo),
+           adapter when not is_nil(adapter) <- resolve_adapter(workspace),
            true <- function_exported?(adapter, :get, 1),
-           :ok <- Mergers.prepare_with_repo(state.workspace, state.repo),
+           :ok <- Mergers.prepare_with_repo(workspace, state.repo),
            {:ok, pr_ref_tasks} <- open_tasks_with_pr_ref(state.workspace_id),
            {:ok, follow_up_tasks} <- open_follow_up_tasks(state.workspace_id),
-           {:ok, legacy_tasks} <- open_legacy_pr_tracker_tasks(state.workspace_id) do
+           {:ok, legacy_tasks} <- open_legacy_pr_tracker_tasks(state.workspace_id, state.repo) do
         candidates =
           Enum.sort_by(
             Enum.map(pr_ref_tasks, &{&1, :pr_ref}) ++
-              Enum.map(follow_up_tasks, &{&1, :follow_up}) ++
-              Enum.map(legacy_tasks, &{&1, :follow_up}),
-            fn {task, _kind} -> task.id end
+              Enum.map(follow_up_tasks, &{&1, :source_pr}) ++
+              Enum.map(legacy_tasks, &{&1, :legacy_tracker_ref}),
+            fn {task, _rule} -> task.id end
           )
 
         {window, next_cursor} = window(candidates, state.cursor, state.max_checks_per_tick)
 
         Enum.each(window, fn
-          {task, :pr_ref} -> maybe_finalize(task, adapter)
-          {task, :follow_up} -> maybe_finalize_follow_up(task, adapter)
+          {task, :pr_ref} -> maybe_finalize(task, adapter, state.repo)
+          {task, rule} -> maybe_finalize_follow_up(task, rule, adapter, state.repo)
         end)
 
         {:ok, next_cursor}
@@ -259,6 +283,19 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
     end
   end
 
+  defp repo_still_configured?(workspace, repo) do
+    if repo in MergedPRFinalizerSupervisor.finalizer_repos(workspace) do
+      true
+    else
+      Logger.warning(
+        "MergedPRFinalizer: workspace #{workspace.id} no longer resolves to repo=#{repo} — " <>
+          "skipping the sweep (awaiting reconcile to a finalizer for the current repo)"
+      )
+
+      false
+    end
+  end
+
   defp resolve_adapter(workspace) do
     adapter = Mergers.for_workspace(workspace)
     Code.ensure_loaded(adapter)
@@ -297,10 +334,17 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
   # Legacy PRPatrol follow-ups: pre-bd-ci2jl2 format used tracker_type: :github
   # and stored the source PR number in tracker_ref. We only sweep tasks that
   # have no source_pr (already handled above) and no pr_ref (handled by the
-  # pr_ref pass). The adapter.get call is the safety net: if tracker_ref is
-  # not a PR number (e.g. a real GitHub issue ref) the GitHub API returns 404
-  # and we skip it harmlessly.
-  defp open_legacy_pr_tracker_tasks(workspace_id) do
+  # pr_ref pass).
+  #
+  # bd-6dghdv: that query alone also matches every ordinary GitHub-issue-
+  # tracked task, and a tracker_ref there is an ISSUE number. This used to rely
+  # on the PR API 404ing on an issue number, which is only true in the repo
+  # that issued it: after the move to serious-alchemy/arbiter renumbered issues
+  # 1–38, each matched a merged PR of the same number in the queried repo, and
+  # 20 ordinary tasks were closed. A tracker_ref is now treated as a PR number
+  # only when the task is positively a PRPatrol follow-up (see
+  # `legacy_pr_patrol_follow_up?/2`) filed against exactly the repo queried.
+  defp open_legacy_pr_tracker_tasks(workspace_id, repo) do
     Issue
     |> Ash.Query.filter(
       workspace_id == ^workspace_id and
@@ -308,18 +352,49 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
         not is_nil(tracker_ref) and
         is_nil(source_pr) and
         is_nil(pr_ref) and
+        review_only != true and
         status not in [:closed, :awaiting_verification]
     )
     |> Ash.read()
+    |> case do
+      {:ok, tasks} -> {:ok, Enum.filter(tasks, &legacy_pr_patrol_follow_up?(&1, repo))}
+      error -> error
+    end
   end
 
-  defp maybe_finalize(%Issue{pr_ref: pr_ref} = task, adapter) do
+  # The pre-bd-ci2jl2 `PRPatrol.create_follow_up/4` wrote exactly this shape:
+  #
+  #   title:       "PR #<n>: <PR title> needs follow-up"   (n == tracker_ref)
+  #   description: "Auto-filed by PRPatrol against <owner/repo>.\n..."
+  #
+  # Both markers must hold, the title's number must be the tracker_ref, and the
+  # description's repo must be the one this finalizer queries — so the number
+  # is known to be a pull request in that repo, never an issue number or a PR
+  # of some other repo.
+  @doc false
+  @spec legacy_pr_patrol_follow_up?(Issue.t(), String.t() | nil) :: boolean()
+  def legacy_pr_patrol_follow_up?(
+        %Issue{title: title, description: description, tracker_ref: ref},
+        repo
+      )
+      when is_binary(title) and is_binary(description) and is_binary(ref) and is_binary(repo) do
+    String.starts_with?(title, "PR ##{ref}: ") and
+      String.ends_with?(title, " needs follow-up") and
+      String.starts_with?(
+        String.trim_leading(description),
+        "Auto-filed by PRPatrol against #{repo}."
+      )
+  end
+
+  def legacy_pr_patrol_follow_up?(_task, _repo), do: false
+
+  defp maybe_finalize(%Issue{pr_ref: pr_ref} = task, adapter, repo) do
     if live_worker?(task) do
       skip_live_worker(task)
     else
       case adapter.get(pr_ref) do
         {:ok, %{status: :merged}} ->
-          finalize(task)
+          finalize(task, queried_repo(pr_ref, repo))
 
         # PR is open, approved-but-not-merged, closed without merge, or API
         # error (including 404 for a PR in a different repo). All are no-ops.
@@ -329,9 +404,10 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
     end
   end
 
-  defp finalize(%Issue{} = task) do
+  defp finalize(%Issue{} = task, queried_repo) do
     Logger.info(
       "MergedPRFinalizer: detected externally-merged PR #{task.pr_ref} for task=#{task.id} " <>
+        "rule=pr_ref repo=#{queried_repo} " <>
         "(tracker=#{task.tracker_type} ref=#{task.tracker_ref}) — finalizing"
     )
 
@@ -364,24 +440,36 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
       :ok
   end
 
-  # Determines the source PR ref for a follow-up task (modern: source_pr,
-  # legacy: tracker_ref) and closes the task local-only if the source PR merged.
-  defp maybe_finalize_follow_up(
-         %Issue{source_pr: source_pr, tracker_ref: tracker_ref} = task,
-         adapter
-       ) do
-    ref = source_pr || tracker_ref
+  # Determines the source PR ref for a follow-up task from the rule that
+  # selected it (modern: source_pr; legacy: tracker_ref, only ever reached for a
+  # task `legacy_pr_patrol_follow_up?/2` identified) and closes the task
+  # local-only if the source PR merged.
+  defp maybe_finalize_follow_up(%Issue{} = task, rule, adapter, repo) do
+    ref = follow_up_ref(task, rule)
 
     if live_worker?(task) do
       skip_live_worker(task)
     else
       case adapter.get(ref) do
         {:ok, %{status: :merged}} ->
-          finalize_follow_up(task, ref)
+          finalize_follow_up(task, rule, ref, queried_repo(ref, repo))
 
         _ ->
           :noop
       end
+    end
+  end
+
+  defp follow_up_ref(%Issue{source_pr: source_pr}, :source_pr), do: source_pr
+  defp follow_up_ref(%Issue{tracker_ref: tracker_ref}, :legacy_tracker_ref), do: tracker_ref
+
+  # The owner/repo a ref is looked up in: a qualified `owner/repo#N` ref names
+  # its own repo (`Github.get/1` resolves it there); a bare ref resolves against
+  # this finalizer's repo, which `Mergers.prepare_with_repo/2` seeded.
+  defp queried_repo(ref, repo) do
+    case PatrolRepoScope.repo_of_ref(ref) do
+      {:ok, slug} -> slug
+      :bare -> repo
     end
   end
 
@@ -446,10 +534,10 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
   # close_upstream. The source PR is a merged PR number — calling Sync.lifecycle
   # on it would attempt a tracker transition on a merged PR and fail with
   # Validation Failed (bd-ci2jl2 hazard).
-  defp finalize_follow_up(%Issue{} = task, source_ref) do
+  defp finalize_follow_up(%Issue{} = task, rule, source_ref, queried_repo) do
     Logger.info(
       "MergedPRFinalizer: source PR #{source_ref} merged — closing follow-up task=#{task.id} " <>
-        "(tracker=#{task.tracker_type} source_pr=#{task.source_pr} tracker_ref=#{task.tracker_ref})"
+        "rule=#{rule} repo=#{queried_repo} (tracker=#{task.tracker_type} source_pr=#{task.source_pr} tracker_ref=#{task.tracker_ref})"
     )
 
     case Ash.update(task, %{close_upstream: false}, action: :close) do
