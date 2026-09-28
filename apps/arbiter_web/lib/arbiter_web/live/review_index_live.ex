@@ -25,6 +25,17 @@ defmodule ArbiterWeb.ReviewIndexLive do
 
   Greenlight-from-UI is out of scope for v1 per the design doc — this is a
   read-only view.
+
+  ## Async load
+
+  The workspace list, the paginated record page, and a row's transcript all
+  arrive via `start_async/3` on the connected mount / event only (bd-blnnu3):
+  the dead render reads nothing and draws a loading state, and a failed read
+  renders an inline, retryable error instead of crashing the view. A filter
+  or page change while a record read is in flight marks it stale and gets
+  exactly one more read once the current one lands (same coalescing as
+  `RunIndexLive`/`TaskIndexLive`). Expanding a different row cancels any
+  transcript read still in flight for the previous one.
   """
 
   use ArbiterWeb, :live_view
@@ -36,6 +47,7 @@ defmodule ArbiterWeb.ReviewIndexLive do
   alias ArbiterWeb.CoreComponents.{Core, Data, Feedback, Forms, Navigation}
   alias ArbiterWeb.Paging
   require Ash.Query
+  require Logger
 
   @statuses Record.statuses()
   @status_strings Enum.map(@statuses, &Atom.to_string/1)
@@ -43,20 +55,30 @@ defmodule ArbiterWeb.ReviewIndexLive do
 
   @impl true
   def mount(_params, _session, socket) do
-    if connected?(socket), do: Phoenix.PubSub.subscribe(Arbiter.PubSub, Events.pubsub_topic(nil))
+    live? = connected?(socket)
+    if live?, do: Phoenix.PubSub.subscribe(Arbiter.PubSub, Events.pubsub_topic(nil))
 
-    workspaces =
-      Workspace
-      |> Ash.Query.sort(name: :asc)
-      |> Ash.read!()
+    socket =
+      socket
+      |> assign(:workspaces, [])
+      |> assign(:workspace_names, %{})
+      |> assign(:workspaces_loaded?, false)
+      |> assign(:workspaces_error, nil)
+      |> assign(:status_options, @status_options)
+      |> assign(:expanded, nil)
+      |> assign(:transcript, nil)
+      |> assign(:transcript_loading?, false)
+      |> assign(:transcript_error, nil)
+      |> assign(:records, [])
+      |> assign(:page_info, Paging.paginate_list([], 1))
+      |> assign(:records_loaded?, false)
+      |> assign(:records_loading?, false)
+      |> assign(:records_stale?, false)
+      |> assign(:records_error, nil)
 
-    {:ok,
-     socket
-     |> assign(:workspaces, workspaces)
-     |> assign(:workspace_names, Map.new(workspaces, &{&1.id, &1.name}))
-     |> assign(:status_options, @status_options)
-     |> assign(:expanded, nil)
-     |> assign(:transcript, nil)}
+    socket = if live?, do: fetch_workspaces(socket), else: socket
+
+    {:ok, socket}
   end
 
   @impl true
@@ -65,12 +87,17 @@ defmodule ArbiterWeb.ReviewIndexLive do
     status = if params["status"] in @status_strings, do: params["status"]
     page = Paging.parse_page(params)
 
-    {:noreply,
-     socket
-     |> assign(:workspace_id, workspace_id)
-     |> assign(:status, status)
-     |> assign(:page, page)
-     |> load_records()}
+    socket =
+      socket
+      |> assign(:workspace_id, workspace_id)
+      |> assign(:status, status)
+      |> assign(:page, page)
+
+    # The dead render reads nothing and draws a loading state; the query
+    # only runs once the socket is connected (bd-blnnu3).
+    socket = if connected?(socket), do: fetch_records(socket), else: socket
+
+    {:noreply, socket}
   end
 
   defp present(nil), do: nil
@@ -98,12 +125,29 @@ defmodule ArbiterWeb.ReviewIndexLive do
   end
 
   def handle_event("toggle", %{"id" => id}, socket) do
-    expanded = if socket.assigns.expanded == id, do: nil, else: id
+    if socket.assigns.expanded == id do
+      {:noreply,
+       socket
+       |> cancel_async(:transcript, :cancel)
+       |> assign(:expanded, nil)
+       |> assign(:transcript, nil)
+       |> assign(:transcript_loading?, false)
+       |> assign(:transcript_error, nil)}
+    else
+      {:noreply, start_transcript_load(socket, id)}
+    end
+  end
 
-    {:noreply,
-     socket
-     |> assign(:expanded, expanded)
-     |> assign(:transcript, expanded && load_transcript(expanded))}
+  def handle_event("retry_workspaces", _params, socket) do
+    {:noreply, fetch_workspaces(socket)}
+  end
+
+  def handle_event("retry_records", _params, socket) do
+    {:noreply, socket |> assign(:records_error, nil) |> fetch_records()}
+  end
+
+  def handle_event("retry_transcript", _params, socket) do
+    {:noreply, start_transcript_load(socket, socket.assigns.expanded)}
   end
 
   @impl true
@@ -120,23 +164,151 @@ defmodule ArbiterWeb.ReviewIndexLive do
   # whether this view cares about them.
   def handle_info(_msg, socket), do: {:noreply, socket}
 
+  @impl true
+  def handle_async(:workspaces, {:ok, workspaces}, socket) do
+    {:noreply,
+     socket
+     |> assign(:workspaces, workspaces)
+     |> assign(:workspace_names, Map.new(workspaces, &{&1.id, &1.name}))
+     |> assign(:workspaces_loaded?, true)
+     |> assign(:workspaces_error, nil)}
+  end
+
+  def handle_async(:workspaces, {:exit, reason}, socket) do
+    Logger.error("ReviewIndexLive: loading workspaces failed: #{inspect(reason)}")
+    {:noreply, assign(socket, :workspaces_error, describe_exit(reason))}
+  end
+
+  # A stale result belongs to a filter/page that's no longer current — a
+  # newer request was already queued behind this one while it was in flight
+  # (see `fetch_records/1`'s coalescing clause). Drop it and let
+  # `records_read_done/1` fire the queued refetch against the current
+  # assigns.
+  def handle_async(:records, {:ok, _result}, %{assigns: %{records_stale?: true}} = socket) do
+    records_read_done(socket)
+  end
+
+  def handle_async(:records, {:ok, result}, socket) do
+    socket
+    |> assign(:records, result.entries)
+    |> assign(:page_info, result)
+    |> assign(:records_loaded?, true)
+    |> assign(:records_error, nil)
+    |> records_read_done()
+  end
+
+  def handle_async(:records, {:exit, reason}, %{assigns: %{records_stale?: true}} = socket) do
+    Logger.error(
+      "ReviewIndexLive: loading records failed (superseded, retrying): #{inspect(reason)}"
+    )
+
+    records_read_done(socket)
+  end
+
+  # A read that fails must not take the page down. Whatever list is on
+  # screen stays there — the skeleton on a first load, the last good read on
+  # a refresh — under an error that says so.
+  def handle_async(:records, {:exit, reason}, socket) do
+    Logger.error("ReviewIndexLive: loading records failed: #{inspect(reason)}")
+
+    socket
+    |> assign(:records_error, describe_exit(reason))
+    |> records_read_done()
+  end
+
+  def handle_async(:transcript, {:ok, result}, socket) do
+    {:noreply,
+     socket
+     |> assign(:transcript, result)
+     |> assign(:transcript_loading?, false)
+     |> assign(:transcript_error, nil)}
+  end
+
+  def handle_async(:transcript, {:exit, reason}, socket) do
+    Logger.error("ReviewIndexLive: loading transcript failed: #{inspect(reason)}")
+
+    {:noreply,
+     socket
+     |> assign(:transcript_loading?, false)
+     |> assign(:transcript_error, describe_exit(reason))}
+  end
+
+  defp describe_exit({%{__exception__: true} = error, _stacktrace}), do: Exception.message(error)
+  defp describe_exit(reason), do: Exception.format_exit(reason)
+
   defp reviews_path(workspace_id, status, page),
     do: ~p"/reviews?#{[workspace_id: workspace_id, status: status, page: page]}"
 
   # ---- data ----
 
-  defp load_records(socket) do
-    query =
-      Record
-      |> filter_workspace(socket.assigns.workspace_id)
-      |> filter_status(socket.assigns.status)
-      |> Ash.Query.sort(started_at: :desc)
+  defp fetch_workspaces(socket) do
+    start_async(socket, :workspaces, &run_workspaces_load/0)
+  end
 
-    page = Paging.paginate(query, socket.assigns.page)
+  # The task is linked to this view, so a tab closed mid-read would kill it
+  # mid-query — and a DB client that dies holding a checkout costs the pool
+  # that connection. Trapping turns the view's exit into a message: the
+  # query in flight finishes, and the task goes before it starts another.
+  defp run_workspaces_load do
+    Process.flag(:trap_exit, true)
+    result = __MODULE__.load_workspaces()
+
+    receive do
+      {:EXIT, _view, _reason} -> exit(:shutdown)
+    after
+      0 -> result
+    end
+  end
+
+  @doc false
+  def load_workspaces do
+    Workspace
+    |> Ash.Query.sort(name: :asc)
+    |> Ash.read!()
+  end
+
+  # A refresh requested while one is already in flight marks the page stale
+  # and gets exactly one more read once the current one lands, so a burst of
+  # filter/page patches costs two reads, not one each.
+  defp fetch_records(%{assigns: %{records_loading?: true}} = socket),
+    do: assign(socket, :records_stale?, true)
+
+  defp fetch_records(socket) do
+    workspace_id = socket.assigns.workspace_id
+    status = socket.assigns.status
+    page = socket.assigns.page
 
     socket
-    |> assign(:records, page.entries)
-    |> assign(:page_info, page)
+    |> assign(:records_loading?, true)
+    |> assign(:records_stale?, false)
+    |> start_async(:records, fn -> run_records_load(workspace_id, status, page) end)
+  end
+
+  defp records_read_done(socket) do
+    socket = assign(socket, :records_loading?, false)
+    {:noreply, if(socket.assigns.records_stale?, do: fetch_records(socket), else: socket)}
+  end
+
+  defp run_records_load(workspace_id, status, page) do
+    Process.flag(:trap_exit, true)
+    result = __MODULE__.load_records_page(workspace_id, status, page)
+
+    receive do
+      {:EXIT, _view, _reason} -> exit(:shutdown)
+    after
+      0 -> result
+    end
+  end
+
+  @doc false
+  def load_records_page(workspace_id, status, page) do
+    query =
+      Record
+      |> filter_workspace(workspace_id)
+      |> filter_status(status)
+      |> Ash.Query.sort(started_at: :desc)
+
+    Paging.paginate(query, page)
   end
 
   # Cap on rendered transcript events: an agentic review over a large PR runs
@@ -146,13 +318,35 @@ defmodule ArbiterWeb.ReviewIndexLive do
   # disk and is reachable via `external_review_transcript` / the REST endpoint.
   @event_limit 300
 
+  defp start_transcript_load(socket, id) do
+    socket
+    |> cancel_async(:transcript, :cancel)
+    |> assign(:expanded, id)
+    |> assign(:transcript, nil)
+    |> assign(:transcript_loading?, true)
+    |> assign(:transcript_error, nil)
+    |> start_async(:transcript, fn -> run_transcript_load(id) end)
+  end
+
+  defp run_transcript_load(record_id) do
+    Process.flag(:trap_exit, true)
+    result = __MODULE__.load_transcript(record_id)
+
+    receive do
+      {:EXIT, _view, _reason} -> exit(:shutdown)
+    after
+      0 -> result
+    end
+  end
+
   # Read one review's corpus off disk. Never raises: a review that predates
   # capture, or whose file was reaped, renders as "no transcript captured"
   # rather than taking the page down.
-  defp load_transcript(record_id) do
+  @doc false
+  def load_transcript(record_id) do
     # One read + one decode pass for summary, events and tool uses alike: this
-    # runs synchronously in the LiveView process on every row expand, and the
-    # corpus it is decoding is thousands of JSONL lines.
+    # runs in a Task on every row expand, and the corpus it is decoding is
+    # thousands of JSONL lines.
     corpus = Transcript.corpus(record_id)
     all_events = corpus.events
     shown = Enum.take(all_events, -@event_limit)
@@ -187,7 +381,7 @@ defmodule ArbiterWeb.ReviewIndexLive do
   # the design doc's re-fetch-by-id approach (the broadcast payload only
   # carries a handful of fields — not enough to render every column). If the
   # record isn't part of the loaded page (e.g. a brand new running review on
-  # page 1), a full `load_records/1` re-derives the correct page/total. A
+  # page 1), a full `fetch_records/1` re-derives the correct page/total. A
   # record already on the page is patched in place even if its new status no
   # longer matches an active `?status=` filter — the operator is watching
   # this row transition, so leaving it visible is preferable to it vanishing
@@ -208,7 +402,7 @@ defmodule ArbiterWeb.ReviewIndexLive do
         if Enum.any?(socket.assigns.records, &(&1.id == id)) do
           assign(socket, :records, replace_record(socket.assigns.records, id, record))
         else
-          load_records(socket)
+          fetch_records(socket)
         end
 
       _ ->
@@ -400,155 +594,268 @@ defmodule ArbiterWeb.ReviewIndexLive do
           />
         </form>
 
-        <Feedback.empty_state
-          :if={@records == []}
-          icon="hero-inbox"
-          detail="No external reviews match these filters."
+        <div
+          :if={@workspaces_error}
+          id="reviews-workspaces-error"
+          role="alert"
+          class="flex items-start gap-2 px-3 py-2.5 rounded-[var(--radius-field)] border border-solid border-[var(--arb-fail-edge)] bg-[var(--arb-fail-wash)] text-[12px] text-[var(--arb-fail-text)]"
         >
-          Nothing here
-        </Feedback.empty_state>
-
-        <div :if={@records != []} id="reviews-table" class="w-full overflow-x-auto" role="table">
-          <div
-            class="grid items-center gap-3 h-[30px] px-[14px] bg-[var(--arb-chrome)]"
-            style="grid-template-columns: 150px minmax(120px,1fr) 140px 90px 130px 90px 120px 80px 90px;"
-            role="row"
+          <Core.icon name="hero-exclamation-triangle-micro" class="size-4 shrink-0 mt-px" />
+          <span class="grow min-w-0 break-words">
+            Could not load workspaces: {@workspaces_error}
+          </span>
+          <button
+            type="button"
+            id="reviews-workspaces-retry"
+            phx-click="retry_workspaces"
+            class={[
+              "shrink-0 px-2 h-[22px] rounded-[var(--radius-field)] cursor-pointer",
+              "border border-solid border-[var(--arb-fail-edge)] bg-[var(--surface-chrome)]",
+              "text-[11px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
+            ]}
           >
-            <span
-              :for={label <- ~w(Started PR Workspace Strategy Status Mode Verdict Findings Cost)}
-              class="text-[10.5px] uppercase tracking-[0.06em] font-[family-name:var(--font-mono)] text-[var(--text-label)]"
-              role="columnheader"
-            >
-              {label}
+            Retry
+          </button>
+        </div>
+
+        <div
+          id="reviews-panel"
+          data-state={records_state(@records_loaded?, @records_error)}
+          aria-busy={to_string(not @records_loaded? and is_nil(@records_error))}
+        >
+          <div
+            :if={@records_error}
+            id="reviews-error"
+            role="alert"
+            class="flex items-start gap-2 px-3 py-2.5 rounded-[var(--radius-field)] border border-solid border-[var(--arb-fail-edge)] bg-[var(--arb-fail-wash)] text-[12px] text-[var(--arb-fail-text)]"
+          >
+            <Core.icon name="hero-exclamation-triangle-micro" class="size-4 shrink-0 mt-px" />
+            <span class="grow min-w-0 break-words">
+              Could not load reviews: {@records_error}<span :if={@records_loaded?}> — showing the last page that loaded.</span>
             </span>
+            <button
+              type="button"
+              id="reviews-retry"
+              phx-click="retry_records"
+              class={[
+                "shrink-0 px-2 h-[22px] rounded-[var(--radius-field)] cursor-pointer",
+                "border border-solid border-[var(--arb-fail-edge)] bg-[var(--surface-chrome)]",
+                "text-[11px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
+              ]}
+            >
+              Retry
+            </button>
           </div>
 
-          <div :for={record <- @records} class="flex flex-col">
+          <div
+            :if={not @records_loaded? and is_nil(@records_error)}
+            id="reviews-loading"
+            aria-label="Loading reviews"
+            class="flex flex-col gap-2"
+          >
             <div
-              class="grid items-center gap-3 min-h-[34px] px-[14px] border-b border-[var(--arb-line-soft)] hover:bg-[var(--arb-raised-hover)] cursor-pointer"
+              :for={n <- 1..5}
+              id={"reviews-loading-#{n}"}
+              aria-hidden="true"
+              class="h-[34px] rounded-[var(--radius-field)] border border-solid border-[var(--border-strong)] bg-[var(--surface-card)] animate-pulse"
+            >
+            </div>
+          </div>
+
+          <Feedback.empty_state
+            :if={@records_loaded? and @records == []}
+            icon="hero-inbox"
+            detail="No external reviews match these filters."
+          >
+            Nothing here
+          </Feedback.empty_state>
+
+          <div
+            :if={@records_loaded? and @records != []}
+            id="reviews-table"
+            class="w-full overflow-x-auto"
+            role="table"
+          >
+            <div
+              class="grid items-center gap-3 h-[30px] px-[14px] bg-[var(--arb-chrome)]"
               style="grid-template-columns: 150px minmax(120px,1fr) 140px 90px 130px 90px 120px 80px 90px;"
               role="row"
-              id={"review-row-#{record.id}"}
-              phx-click="toggle"
-              phx-value-id={record.id}
             >
               <span
-                role="cell"
-                class="text-[11.5px] font-[family-name:var(--font-mono)] tabular-nums text-[var(--text-body)]"
+                :for={label <- ~w(Started PR Workspace Strategy Status Mode Verdict Findings Cost)}
+                class="text-[10.5px] uppercase tracking-[0.06em] font-[family-name:var(--font-mono)] text-[var(--text-label)]"
+                role="columnheader"
               >
-                {format_started(record.started_at)}
-              </span>
-              <span role="cell" class="text-[11.5px] truncate">
-                <a
-                  :if={record.link}
-                  href={record.link}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  class="hover:underline"
-                  onclick="event.stopPropagation()"
-                >
-                  {pr_label(record)}
-                </a>
-                <span :if={!record.link}>{pr_label(record)}</span>
-              </span>
-              <span role="cell" class="text-[11.5px] truncate">
-                {workspace_name(@workspace_names, record.workspace_id)}
-              </span>
-              <span role="cell" class="badge badge-ghost text-[10.5px]">
-                {format_maybe(record.strategy)}
-              </span>
-              <span role="cell"><Data.status_chip status={record.status} /></span>
-              <span role="cell" class="text-[11.5px]">{format_maybe(record.mode)}</span>
-              <span role="cell" class="text-[11.5px]">{format_maybe(record.verdict)}</span>
-              <span
-                role="cell"
-                class="text-[11.5px] font-[family-name:var(--font-mono)] tabular-nums"
-              >
-                {format_maybe(record.finding_count)}
-              </span>
-              <span
-                role="cell"
-                class="text-[11.5px] font-[family-name:var(--font-mono)] tabular-nums"
-              >
-                {Data.format_usd(record.cost_usd)}
+                {label}
               </span>
             </div>
 
-            <div
-              :if={@expanded == record.id}
-              class="mt-1 mb-2 border border-[var(--border-default)] rounded-[var(--radius-field)] p-3 flex flex-col gap-3"
-              id={"review-detail-#{record.id}"}
-            >
-              <Data.data_list>
-                <:item label="Findings summary">
-                  <.markdown
-                    :if={record.findings_summary not in [nil, ""]}
-                    id={"review-findings-md-#{record.id}"}
-                    text={record.findings_summary}
-                    class="markdown-body--compact"
+            <div :for={record <- @records} class="flex flex-col">
+              <div
+                class="grid items-center gap-3 min-h-[34px] px-[14px] border-b border-[var(--arb-line-soft)] hover:bg-[var(--arb-raised-hover)] cursor-pointer"
+                style="grid-template-columns: 150px minmax(120px,1fr) 140px 90px 130px 90px 120px 80px 90px;"
+                role="row"
+                id={"review-row-#{record.id}"}
+                phx-click="toggle"
+                phx-value-id={record.id}
+              >
+                <span
+                  role="cell"
+                  class="text-[11.5px] font-[family-name:var(--font-mono)] tabular-nums text-[var(--text-body)]"
+                >
+                  {format_started(record.started_at)}
+                </span>
+                <span role="cell" class="text-[11.5px] truncate">
+                  <a
+                    :if={record.link}
+                    href={record.link}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    class="hover:underline"
+                    onclick="event.stopPropagation()"
+                  >
+                    {pr_label(record)}
+                  </a>
+                  <span :if={!record.link}>{pr_label(record)}</span>
+                </span>
+                <span role="cell" class="text-[11.5px] truncate">
+                  {workspace_name(@workspace_names, record.workspace_id)}
+                </span>
+                <span role="cell" class="badge badge-ghost text-[10.5px]">
+                  {format_maybe(record.strategy)}
+                </span>
+                <span role="cell"><Data.status_chip status={record.status} /></span>
+                <span role="cell" class="text-[11.5px]">{format_maybe(record.mode)}</span>
+                <span role="cell" class="text-[11.5px]">{format_maybe(record.verdict)}</span>
+                <span
+                  role="cell"
+                  class="text-[11.5px] font-[family-name:var(--font-mono)] tabular-nums"
+                >
+                  {format_maybe(record.finding_count)}
+                </span>
+                <span
+                  role="cell"
+                  class="text-[11.5px] font-[family-name:var(--font-mono)] tabular-nums"
+                >
+                  {Data.format_usd(record.cost_usd)}
+                </span>
+              </div>
+
+              <div
+                :if={@expanded == record.id}
+                class="mt-1 mb-2 border border-[var(--border-default)] rounded-[var(--radius-field)] p-3 flex flex-col gap-3"
+                id={"review-detail-#{record.id}"}
+              >
+                <Data.data_list>
+                  <:item label="Findings summary">
+                    <.markdown
+                      :if={record.findings_summary not in [nil, ""]}
+                      id={"review-findings-md-#{record.id}"}
+                      text={record.findings_summary}
+                      class="markdown-body--compact"
+                    />
+                    <span :if={record.findings_summary in [nil, ""]}>—</span>
+                  </:item>
+                  <:item label="Model">{format_maybe(record.model)}</:item>
+                  <:item label="Tokens in / out">
+                    {format_maybe(record.tokens_in)} / {format_maybe(record.tokens_out)}
+                  </:item>
+                  <:item label="Dispatched by">{format_maybe(record.dispatched_by)}</:item>
+                  <:item label="PR">{format_maybe(record.pr)} ({format_maybe(record.pr_ref)})</:item>
+                </Data.data_list>
+
+                <div :if={record.engagement_id} class="flex items-center gap-1">
+                  <.link
+                    navigate={~p"/tasks/#{record.engagement_id}"}
+                    class="text-[11.5px] hover:underline text-[var(--text-label)]"
+                  >
+                    linked engagement: {record.engagement_id} →
+                  </.link>
+                  <Core.copy_id
+                    id={record.engagement_id}
+                    dom_id={"copy-id-review-#{record.id}"}
                   />
-                  <span :if={record.findings_summary in [nil, ""]}>—</span>
-                </:item>
-                <:item label="Model">{format_maybe(record.model)}</:item>
-                <:item label="Tokens in / out">
-                  {format_maybe(record.tokens_in)} / {format_maybe(record.tokens_out)}
-                </:item>
-                <:item label="Dispatched by">{format_maybe(record.dispatched_by)}</:item>
-                <:item label="PR">{format_maybe(record.pr)} ({format_maybe(record.pr_ref)})</:item>
-              </Data.data_list>
+                </div>
 
-              <div :if={record.engagement_id} class="flex items-center gap-1">
-                <.link
-                  navigate={~p"/tasks/#{record.engagement_id}"}
-                  class="text-[11.5px] hover:underline text-[var(--text-label)]"
-                >
-                  linked engagement: {record.engagement_id} →
-                </.link>
-                <Core.copy_id
-                  id={record.engagement_id}
-                  dom_id={"copy-id-review-#{record.id}"}
-                />
-              </div>
+                <div :if={record.status == :failed} class="text-[11.5px]">
+                  <p class="font-medium text-[var(--arb-fail-text)]">
+                    Failed at {format_maybe(record.failure_stage)}
+                  </p>
+                  <p class="text-base-content/70">{record.failure_reason || "no reason recorded"}</p>
+                </div>
 
-              <div :if={record.status == :failed} class="text-[11.5px]">
-                <p class="font-medium text-[var(--arb-fail-text)]">
-                  Failed at {format_maybe(record.failure_stage)}
-                </p>
-                <p class="text-base-content/70">{record.failure_reason || "no reason recorded"}</p>
-              </div>
-
-              <.review_transcript transcript={transcript_for(@transcript, record.id)} />
-
-              <div :if={show_proposed_comments?(record)} class="flex flex-col gap-2">
-                <p class="text-[11.5px] font-medium text-[var(--text-label)]">
-                  Proposed comments ({length(record.proposed_comments)})
-                </p>
                 <div
-                  :for={comment <- record.proposed_comments}
-                  class="text-[11.5px] border-l-2 border-[var(--border-default)] pl-2"
+                  :if={@transcript_loading?}
+                  id={"review-transcript-loading-#{record.id}"}
+                  aria-hidden="true"
+                  aria-label="Loading transcript"
+                  class="h-16 rounded-[var(--radius-field)] border border-solid border-[var(--border-strong)] bg-[var(--surface-card)] animate-pulse"
                 >
-                  <span class="font-[family-name:var(--font-mono)] text-[var(--text-label)]">
-                    {comment_field(comment, :file)}:{comment_field(comment, :line)}
+                </div>
+
+                <div
+                  :if={@transcript_error}
+                  id={"review-transcript-error-#{record.id}"}
+                  role="alert"
+                  class="flex items-start gap-2 px-3 py-2.5 rounded-[var(--radius-field)] border border-solid border-[var(--arb-fail-edge)] bg-[var(--arb-fail-wash)] text-[12px] text-[var(--arb-fail-text)]"
+                >
+                  <Core.icon name="hero-exclamation-triangle-micro" class="size-4 shrink-0 mt-px" />
+                  <span class="grow min-w-0 break-words">
+                    Could not load transcript: {@transcript_error}
                   </span>
-                  <span class="badge badge-ghost text-[10px] ml-1">
-                    {comment_field(comment, :severity)}
-                  </span>
-                  <p class="mt-0.5">{comment_field(comment, :message)}</p>
+                  <button
+                    type="button"
+                    id={"review-transcript-retry-#{record.id}"}
+                    phx-click="retry_transcript"
+                    class={[
+                      "shrink-0 px-2 h-[22px] rounded-[var(--radius-field)] cursor-pointer",
+                      "border border-solid border-[var(--arb-fail-edge)] bg-[var(--surface-chrome)]",
+                      "text-[11px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
+                    ]}
+                  >
+                    Retry
+                  </button>
+                </div>
+
+                <.review_transcript transcript={transcript_for(@transcript, record.id)} />
+
+                <div :if={show_proposed_comments?(record)} class="flex flex-col gap-2">
+                  <p class="text-[11.5px] font-medium text-[var(--text-label)]">
+                    Proposed comments ({length(record.proposed_comments)})
+                  </p>
+                  <div
+                    :for={comment <- record.proposed_comments}
+                    class="text-[11.5px] border-l-2 border-[var(--border-default)] pl-2"
+                  >
+                    <span class="font-[family-name:var(--font-mono)] text-[var(--text-label)]">
+                      {comment_field(comment, :file)}:{comment_field(comment, :line)}
+                    </span>
+                    <span class="badge badge-ghost text-[10px] ml-1">
+                      {comment_field(comment, :severity)}
+                    </span>
+                    <p class="mt-0.5">{comment_field(comment, :message)}</p>
+                  </div>
                 </div>
               </div>
             </div>
           </div>
-        </div>
 
-        <Navigation.pager
-          :if={@page_info.total_pages > 1}
-          page={@page_info.page}
-          total_pages={@page_info.total_pages}
-          total_count={@page_info.total_count}
-          page_path={&reviews_path(@workspace_id, @status, &1)}
-        />
+          <Navigation.pager
+            :if={@records_loaded? and @page_info.total_pages > 1}
+            page={@page_info.page}
+            total_pages={@page_info.total_pages}
+            total_count={@page_info.total_count}
+            page_path={&reviews_path(@workspace_id, @status, &1)}
+          />
+        </div>
       </div>
     </Layouts.app>
     """
   end
+
+  # ---- view helpers ----
+
+  defp records_state(_loaded?, error) when not is_nil(error), do: "error"
+  defp records_state(true, nil), do: "loaded"
+  defp records_state(false, nil), do: "loading"
 end
