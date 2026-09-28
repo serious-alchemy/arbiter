@@ -109,12 +109,25 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
   end
 
   # Legacy PRPatrol follow-up: tracker_type: :github, tracker_ref = PR number,
-  # no source_pr, no pr_ref.
+  # no source_pr, no pr_ref. Title and description are exactly what the
+  # pre-bd-ci2jl2 `PRPatrol.create_follow_up/4` wrote — the description names
+  # the owner/repo slug the patrol was watching.
   defp create_legacy_follow_up_task(ws, source_pr_number, opts \\ []) do
+    {repo, opts} = Keyword.pop(opts, :against, "owner/repo")
+
     create_attrs =
-      opts
+      [
+        title: "PR ##{source_pr_number}: Fix the widget needs follow-up",
+        description: """
+        Auto-filed by PRPatrol against #{repo}.
+
+        Trigger: CI failing.
+
+        Original PR: https://github.com/#{repo}/pull/#{source_pr_number}
+        """
+      ]
+      |> Keyword.merge(opts)
       |> Keyword.merge(
-        title: "PR ##{source_pr_number}: needs follow-up",
         workspace_id: ws.id,
         tracker_type: :github,
         tracker_ref: to_string(source_pr_number)
@@ -684,6 +697,141 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
       {:ok, refreshed} = Ash.get(Issue, task.id)
       # pr_ref=604 is open → task stays open; legacy sweep skipped this task
       assert refreshed.status != :closed
+    end
+  end
+
+  # bd-6dghdv: the legacy sweep used to select EVERY open github-tracked task
+  # with a tracker_ref and treat that issue number as a PR number. After the
+  # repo move to serious-alchemy/arbiter renumbered issues 1–38, each matched
+  # a merged PR of the same number in the queried repo, and 20 ordinary tasks
+  # were closed as "completed". Only a positively identified PRPatrol
+  # follow-up, filed against exactly the repo being queried, may close.
+  describe "tick/1 — ordinary tracker tasks are never legacy follow-ups (bd-6dghdv)" do
+    test "an issue-tracked task whose issue number matches a merged PR stays open", %{ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "Epic: browser-hosted coordinator sessions",
+          description: "An ordinary GitHub-issue-tracked task.",
+          workspace_id: ws.id,
+          tracker_type: :github,
+          tracker_ref: "3"
+        })
+
+      stub(pr_get_stub(3, :merged))
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      {:ok, refreshed} = Ash.get(Issue, task.id)
+      assert refreshed.status != :closed
+    end
+
+    test "a PRPatrol-shaped title alone (no PRPatrol description) is not enough", %{ws: ws} do
+      task =
+        create_legacy_follow_up_task(ws, 610, description: "Filed by hand, not by PRPatrol.")
+
+      stub(pr_get_stub(610, :merged))
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      {:ok, refreshed} = Ash.get(Issue, task.id)
+      assert refreshed.status != :closed
+    end
+
+    test "a title whose PR number differs from tracker_ref is not a legacy follow-up", %{ws: ws} do
+      task = create_legacy_follow_up_task(ws, 611, title: "PR #999: Fix it needs follow-up")
+      stub(pr_get_stub(611, :merged))
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      {:ok, refreshed} = Ash.get(Issue, task.id)
+      assert refreshed.status != :closed
+    end
+
+    test "a legacy follow-up filed against another repo is not closed by this repo's merge",
+         %{ws: ws} do
+      task = create_legacy_follow_up_task(ws, 612, against: "ryanrborn/arbiter")
+      stub(pr_get_stub(612, :merged))
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      {:ok, refreshed} = Ash.get(Issue, task.id)
+      assert refreshed.status != :closed
+    end
+
+    test "an ordinary task is never even looked up on the PR API", %{ws: ws} do
+      {:ok, _task} =
+        Ash.create(Issue, %{
+          title: "Ordinary task",
+          workspace_id: ws.id,
+          tracker_type: :github,
+          tracker_ref: "4"
+        })
+
+      test_pid = self()
+
+      stub(fn conn ->
+        send(test_pid, {:requested, conn.request_path})
+        conn |> Plug.Conn.put_status(404) |> Req.Test.json(%{"message" => "Not Found"})
+      end)
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      refute_received {:requested, _}
+    end
+  end
+
+  # AC4 (bd-6dghdv): every close names the rule that matched and the
+  # owner/repo that was queried, so a wrong close is diagnosable from the log.
+  describe "close logging (bd-6dghdv)" do
+    import ExUnit.CaptureLog
+
+    # The suite's Logger floor is :warning, and capture_log's :level option
+    # can't lower it — raise just this module to :info for the test.
+    setup do
+      Logger.put_module_level(MergedPRFinalizer, :info)
+      on_exit(fn -> Logger.delete_module_level(MergedPRFinalizer) end)
+    end
+
+    test "a legacy follow-up close logs rule=legacy_tracker_ref and the queried repo",
+         %{ws: ws} do
+      task = create_legacy_follow_up_task(ws, 620)
+      stub(pr_get_stub(620, :merged))
+      {_pid, name} = start_finalizer(ws)
+
+      log = capture_log([level: :info], fn -> :ok = MergedPRFinalizer.tick(name) end)
+
+      assert log =~ "task=#{task.id}"
+      assert log =~ "rule=legacy_tracker_ref"
+      assert log =~ "repo=owner/repo"
+    end
+
+    test "a source_pr follow-up close logs rule=source_pr and the queried repo", %{ws: ws} do
+      task = create_follow_up_task(ws, 621)
+      stub(pr_get_stub(621, :merged))
+      {_pid, name} = start_finalizer(ws)
+
+      log = capture_log([level: :info], fn -> :ok = MergedPRFinalizer.tick(name) end)
+
+      assert log =~ "task=#{task.id}"
+      assert log =~ "rule=source_pr"
+      assert log =~ "repo=owner/repo"
+    end
+
+    test "a pr_ref close logs rule=pr_ref and the queried repo", %{ws: ws} do
+      task = create_task(ws, "622")
+      stub(pr_get_stub(622, :merged))
+      {_pid, name} = start_finalizer(ws)
+
+      log = capture_log([level: :info], fn -> :ok = MergedPRFinalizer.tick(name) end)
+
+      assert log =~ "task=#{task.id}"
+      assert log =~ "rule=pr_ref"
+      assert log =~ "repo=owner/repo"
     end
   end
 
