@@ -56,6 +56,63 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
     end
   end
 
+  # bd-2nbu7a / #15: `arb` defaults to http://127.0.0.1:4848, so an agent CLI
+  # running in a throwaway sandbox on this host (a test fixture, a nested
+  # install) posts to the live coordinator. Its escalation names a task this
+  # installation has never heard of; it is delivered, but marked.
+  describe "POST /api/messages escalation origin" do
+    @wording "the task worktree and its entire provider root (/tmp/rev-provider-57795) " <>
+               "were deleted mid-session; arbiter MCP is ConnectionRefused"
+
+    defp post_escalation(conn, task_ref) do
+      post(conn, ~p"/api/messages", %{
+        kind: "escalation",
+        from_ref: task_ref,
+        to_ref: "coordinator",
+        task_ref: task_ref,
+        subject: "CI fix-pass on #{task_ref} needs human review",
+        body: @wording,
+        workspace_id: @ws
+      })
+    end
+
+    test "an escalation about a task this installation does not know is marked", %{conn: conn} do
+      body = json_response(post_escalation(conn, "fp-6u0wu1"), 201)
+
+      assert body["subject"] =~ "[UNVERIFIED ORIGIN"
+      assert body["subject"] =~ "fp-6u0wu1"
+      assert body["body"] =~ "not a task in this installation"
+      # Marked, never dropped: the original wording is still there to read.
+      assert body["body"] =~ "ConnectionRefused"
+    end
+
+    test "a genuine escalation about a real task with the same wording is delivered unmarked",
+         %{conn: conn} do
+      {:ok, ws} = Ash.create(Arbiter.Tasks.Workspace, %{name: "origin-ws", prefix: "orw"})
+      {:ok, task} = Ash.create(Arbiter.Tasks.Issue, %{title: "real work", workspace_id: ws.id})
+
+      body = json_response(post_escalation(conn, task.id), 201)
+
+      refute body["subject"] =~ "UNVERIFIED"
+      refute body["body"] =~ "not a task in this installation"
+      assert body["subject"] == "CI fix-pass on #{task.id} needs human review"
+      assert body["body"] == @wording
+    end
+
+    test "an escalation with no task_ref is not marked", %{conn: conn} do
+      conn =
+        post(conn, ~p"/api/messages", %{
+          kind: "escalation",
+          to_ref: "coordinator",
+          subject: "operator note",
+          body: "hi",
+          workspace_id: @ws
+        })
+
+      refute json_response(conn, 201)["subject"] =~ "UNVERIFIED"
+    end
+  end
+
   describe "GET /api/messages" do
     test "lists messages, filtering by kind and to_ref", %{conn: conn} do
       {:ok, _} = Message.notify(%{workspace_id: @ws, body: "a notification"})
