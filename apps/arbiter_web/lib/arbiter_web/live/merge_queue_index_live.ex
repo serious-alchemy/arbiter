@@ -45,7 +45,9 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
 
   @impl true
   def mount(_params, _session, socket) do
-    if connected?(socket) do
+    live? = connected?(socket)
+
+    if live? do
       Phoenix.PubSub.subscribe(Arbiter.PubSub, @workers_topic)
       :timer.send_interval(1000, self(), :tick)
     end
@@ -54,53 +56,157 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
      socket
      |> assign(:now, DateTime.utc_now())
      |> assign(:merge_queue_label, "merge queue")
-     |> assign(:pr_label, "pull request")}
+     |> assign(:pr_label, "pull request")
+     |> assign(:queued_count, 0)
+     |> assign(:entries, [])
+     |> assign(:landed, [])
+     |> assign(:landed_today_count, 0)
+     |> assign(:page, 1)
+     |> assign(:total_pages, 1)
+     |> assign(:total_count, 0)
+     |> assign(:merge_queue_loaded?, false)
+     |> assign(:merge_queue_loading?, false)
+     |> assign(:merge_queue_stale?, false)
+     |> assign(:merge_queue_request_tab, nil)
+     |> assign(:merge_queue_error, nil)}
   end
 
   @impl true
   def handle_params(params, _uri, socket) do
-    {:noreply,
-     socket
-     |> assign(:tab, parse_tab(params))
-     |> assign(:page, Paging.parse_page(params))
-     |> refresh()}
+    new_tab = parse_tab(params)
+    tab_changed? = Map.get(socket.assigns, :tab) not in [nil, new_tab]
+
+    socket =
+      socket
+      |> assign(:tab, new_tab)
+      |> assign(:page, Paging.parse_page(params))
+
+    # A tab switch invalidates whatever is on screen even before the new
+    # load lands, so a load already in flight for the old tab can't be
+    # mistaken for the new tab's data when it completes (bd-aebiwf review).
+    socket =
+      if tab_changed?, do: assign(socket, :merge_queue_loaded?, false), else: socket
+
+    {:noreply, if(connected?(socket), do: fetch_merge_queue(socket), else: socket)}
   end
 
   @impl true
-  def handle_info({:worker_lifecycle, _event, _snap}, socket), do: {:noreply, refresh(socket)}
+  def handle_info({:worker_lifecycle, _event, _snap}, socket),
+    do: {:noreply, fetch_merge_queue(socket)}
+
   def handle_info(:tick, socket), do: {:noreply, assign(socket, :now, DateTime.utc_now())}
   def handle_info(_msg, socket), do: {:noreply, socket}
+
+  # The worker walk (`Worker.list_children/0`'s GenServer fan-out), the
+  # queued-tab's workspace/title/queue-position reads, and the landed-tab's
+  # paginated `Run` query all arrive by `start_async/3` (bd-aebiwf): the dead
+  # render draws a skeleton and reads nothing, and a slow or wedged worker
+  # can no longer block the page.
+  @impl true
+  def handle_async(:merge_queue, {:ok, data}, socket) do
+    # `merge_queue_request_tab` pins the tab this particular load was fetched
+    # for. If the tab has since changed (a switch while this load was still
+    # in flight), the result belongs to a tab nobody is looking at anymore —
+    # applying it would show the old tab's entries/landed under the new
+    # tab's empty state. Drop it and let the stale-triggered refetch (below)
+    # load the tab actually on screen.
+    socket =
+      if socket.assigns.merge_queue_request_tab == socket.assigns.tab do
+        # Likewise, if a newer request (e.g. a page change) came in while
+        # this one was loading, its `:page` reflects the request now
+        # superseded — keep whatever page `handle_params` most recently set
+        # instead of letting it clobber the page the user just asked for.
+        data = if socket.assigns.merge_queue_stale?, do: Map.delete(data, :page), else: data
+
+        socket
+        |> assign(data)
+        |> assign(:merge_queue_loaded?, true)
+        |> assign(:merge_queue_error, nil)
+      else
+        socket
+      end
+
+    merge_queue_read_done(socket)
+  end
+
+  # A read that fails must not take the page down. Whatever was on screen
+  # stays there — the skeleton on a first load, the last good read on a
+  # refresh — under an error that says so.
+  def handle_async(:merge_queue, {:exit, reason}, socket) do
+    socket =
+      if socket.assigns.merge_queue_request_tab == socket.assigns.tab do
+        assign(socket, :merge_queue_error, load_error(reason))
+      else
+        socket
+      end
+
+    merge_queue_read_done(socket)
+  end
+
+  @impl true
+  def handle_event("retry_merge_queue", _params, socket),
+    do: {:noreply, socket |> assign(:merge_queue_error, nil) |> fetch_merge_queue()}
 
   defp parse_tab(%{"tab" => tab}) when tab in @tabs, do: tab
   defp parse_tab(_params), do: "queued"
 
-  defp refresh(socket) do
+  defp fetch_merge_queue(%{assigns: %{merge_queue_loading?: true}} = socket),
+    do: assign(socket, :merge_queue_stale?, true)
+
+  defp fetch_merge_queue(socket) do
+    tab = socket.assigns.tab
+    page = socket.assigns.page
+
+    socket
+    |> assign(:merge_queue_loading?, true)
+    |> assign(:merge_queue_stale?, false)
+    |> assign(:merge_queue_request_tab, tab)
+    |> start_async(:merge_queue, fn -> load_merge_queue(tab, page) end)
+  end
+
+  defp merge_queue_read_done(socket) do
+    socket = assign(socket, :merge_queue_loading?, false)
+
+    {:noreply, if(socket.assigns.merge_queue_stale?, do: fetch_merge_queue(socket), else: socket)}
+  end
+
+  defp load_error({%{__exception__: true} = error, _stacktrace}), do: Exception.message(error)
+  defp load_error(reason), do: Exception.format_exit(reason)
+
+  defp load_merge_queue(tab, page) do
     children = list_children()
+    queued_count = Enum.count(children, &(&1.status == :awaiting_review))
 
-    socket
-    |> assign(:queued_count, Enum.count(children, &(&1.status == :awaiting_review)))
-    |> refresh_tab(children)
+    tab
+    |> load_tab(children, page)
+    |> Map.put(:queued_count, queued_count)
   end
 
-  defp refresh_tab(%{assigns: %{tab: "landed"}} = socket, _children) do
-    result = Paging.paginate(landed_today_query(), socket.assigns.page, @landed_page_size)
+  defp load_tab("landed", _children, page) do
+    result = Paging.paginate(landed_today_query(), page, @landed_page_size)
 
-    socket
-    |> assign(:landed, Enum.map(result.entries, &landed_task_card_attrs/1))
-    |> assign(:landed_today_count, result.total_count)
-    |> assign(:page, result.page)
-    |> assign(:total_pages, result.total_pages)
-    |> assign(:total_count, result.total_count)
+    %{
+      entries: [],
+      landed: Enum.map(result.entries, &landed_task_card_attrs/1),
+      landed_today_count: result.total_count,
+      page: result.page,
+      total_pages: result.total_pages,
+      total_count: result.total_count
+    }
   end
 
-  defp refresh_tab(%{assigns: %{tab: "rejected"}} = socket, _children) do
-    socket
-    |> assign(:landed_today_count, landed_today_count())
-    |> assign(:total_pages, 1)
-    |> assign(:total_count, 0)
+  defp load_tab("rejected", _children, page) do
+    %{
+      entries: [],
+      landed: [],
+      landed_today_count: landed_today_count(),
+      page: page,
+      total_pages: 1,
+      total_count: 0
+    }
   end
 
-  defp refresh_tab(socket, children) do
+  defp load_tab(_queued, children, page) do
     workspaces_by_id = index_workspaces()
     queue_positions = queue_positions_by_task_id()
     workers = queued_workers(children) |> Enum.sort_by(& &1.since, {:asc, DateTime})
@@ -132,14 +238,16 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
       end)
       |> Enum.sort_by(&{&1.workspace_name, &1.position})
 
-    result = Paging.paginate_list(entries, socket.assigns.page)
+    result = Paging.paginate_list(entries, page)
 
-    socket
-    |> assign(:landed_today_count, landed_today_count())
-    |> assign(:entries, result.entries)
-    |> assign(:page, result.page)
-    |> assign(:total_pages, result.total_pages)
-    |> assign(:total_count, result.total_count)
+    %{
+      entries: result.entries,
+      landed: [],
+      landed_today_count: landed_today_count(),
+      page: result.page,
+      total_pages: result.total_pages,
+      total_count: result.total_count
+    }
   end
 
   # ---- Queued ----
@@ -274,6 +382,10 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
   defp header_subtitle(_tab, pr_label),
     do: "Every #{pr_label} integrating now, longest-waiting first."
 
+  defp merge_queue_state(_loaded?, error) when not is_nil(error), do: "error"
+  defp merge_queue_state(true, nil), do: "loaded"
+  defp merge_queue_state(false, nil), do: "loading"
+
   @impl true
   def render(assigns) do
     assigns =
@@ -312,127 +424,184 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
           tab_path={fn value -> merge_queue_path(value, 1) end}
         />
 
-        <ArbiterWeb.CoreComponents.Core.panel :if={@tab == "queued"} body_class="flex flex-col gap-4">
-          <div :if={@entries == []} id="merge_queue-empty">
-            <Feedback.empty_state icon="hero-inbox">
-              No {plural(@pr_label)} integrating right now.
-            </Feedback.empty_state>
-          </div>
-
-          <ul :if={@entries != []} id="merge_queue" class="flex flex-col gap-3">
-            <li
-              :for={m <- @entries}
-              class="rounded-[var(--radius-panel)] bg-[var(--surface-card)] border border-[var(--border-default)] p-3 transition-colors duration-[var(--dur-hover)] hover:border-[var(--border-strong)]"
+        <div
+          id="merge_queue-panel"
+          data-state={merge_queue_state(@merge_queue_loaded?, @merge_queue_error)}
+          aria-busy={to_string(not @merge_queue_loaded? and is_nil(@merge_queue_error))}
+          class="flex flex-col gap-4"
+        >
+          <div
+            :if={@merge_queue_error}
+            id="merge_queue-error"
+            role="alert"
+            class="flex items-start gap-2 px-3 py-2.5 rounded-[var(--radius-field)] border border-solid border-[var(--arb-fail-edge)] bg-[var(--arb-fail-wash)] text-[12px] text-[var(--arb-fail-text)]"
+          >
+            <ArbiterWeb.CoreComponents.Core.icon
+              name="hero-exclamation-triangle-micro"
+              class="size-4 shrink-0 mt-px"
+            />
+            <span class="grow min-w-0 break-words">
+              Could not load the merge queue: {@merge_queue_error}<span :if={@merge_queue_loaded?}> — showing the last list that loaded.</span>
+            </span>
+            <button
+              type="button"
+              id="merge_queue-retry"
+              phx-click="retry_merge_queue"
+              class={[
+                "shrink-0 px-2 h-[22px] rounded-[var(--radius-field)] cursor-pointer",
+                "border border-solid border-[var(--arb-fail-edge)] bg-[var(--surface-chrome)]",
+                "text-[11px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
+              ]}
             >
-              <div class="flex items-center justify-between gap-2">
-                <div class="flex items-center gap-2 min-w-0">
-                  <span
-                    class="inline-flex items-center rounded-[var(--radius-field)] bg-[var(--arb-panel-alt)] px-1.5 py-0.5 text-[10px] font-[family-name:var(--font-mono)] tabular-nums text-[var(--text-label)] shrink-0"
-                    title="Queue position"
-                  >
-                    {"##{m.position}"}
-                  </span>
-                  <.link
-                    navigate={~p"/workers/#{m.task_id}"}
-                    class="flex items-center gap-2 min-w-0 group"
-                  >
-                    <code class="text-[11px] font-semibold text-[var(--text-title)] group-hover:text-[var(--text-link)] transition-colors truncate font-[family-name:var(--font-mono)]">
-                      {m.task_id}
-                    </code>
-                    <span class="text-[12px] text-[var(--text-secondary)] truncate">{m.title}</span>
-                  </.link>
-                  <Core.copy_id id={m.task_id} />
-                </div>
-                <div class="flex items-center gap-1.5 shrink-0" title="CI / Approval / Mergeable">
-                  <span
-                    :for={{label, state} <- check_dots(m.merger_status)}
-                    class={["h-1.5 w-1.5 rounded-full shrink-0", check_dot_class(state)]}
-                    title={label}
-                  />
-                </div>
-              </div>
-
-              <div class="flex items-center justify-between gap-2 mt-1.5 text-[11px] text-[var(--text-label)]">
-                <span class="truncate">{m.workspace_name}</span>
-                <span
-                  class="font-[family-name:var(--font-mono)] tabular-nums shrink-0"
-                  title="Time in queue"
-                >
-                  {humanize_seconds(runtime_seconds(m.since, @now))} in queue
-                </span>
-              </div>
-
-              <div :if={m.mr_ref} class="flex items-center gap-1 mt-1.5 text-[11px] min-w-0">
-                <ArbiterWeb.CoreComponents.Core.icon
-                  name="hero-arrow-top-right-on-square"
-                  size={12}
-                  class="text-[var(--text-link)] shrink-0"
-                />
-                <a
-                  :if={m.merger_url}
-                  href={m.merger_url}
-                  target="_blank"
-                  rel="noopener"
-                  class="text-[var(--text-link)] hover:underline truncate"
-                >
-                  {m.mr_ref}
-                </a>
-                <code :if={!m.merger_url} class="truncate text-[var(--text-label)]">{m.mr_ref}</code>
-              </div>
-            </li>
-          </ul>
-
-          <Navigation.pager
-            page={@page}
-            total_pages={@total_pages}
-            total_count={@total_count}
-            page_path={fn page -> merge_queue_path(@tab, page) end}
-          />
-        </ArbiterWeb.CoreComponents.Core.panel>
-
-        <ArbiterWeb.CoreComponents.Core.panel :if={@tab == "landed"} body_class="flex flex-col gap-4">
-          <div :if={@landed == []} id="merge_queue-landed-empty">
-            <Feedback.empty_state icon="hero-check-circle">
-              No {plural(@pr_label)} have landed today yet.
-            </Feedback.empty_state>
+              Retry
+            </button>
           </div>
 
           <div
-            :if={@landed != []}
-            id="merge_queue-landed"
-            class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3"
+            :if={not @merge_queue_loaded? and is_nil(@merge_queue_error)}
+            id="merge_queue-loading"
+            aria-label="Loading the merge queue"
+            class="flex flex-col gap-3"
           >
-            <Domain.task_card
-              :for={t <- @landed}
-              id={t.id}
-              title={t.title}
-              footer={t.footer}
-              copy_dom_id={t.copy_dom_id}
-              muted
-            />
-          </div>
-
-          <Navigation.pager
-            page={@page}
-            total_pages={@total_pages}
-            total_count={@total_count}
-            page_path={fn page -> merge_queue_path(@tab, page) end}
-          />
-        </ArbiterWeb.CoreComponents.Core.panel>
-
-        <ArbiterWeb.CoreComponents.Core.panel
-          :if={@tab == "rejected"}
-          body_class="flex flex-col gap-4"
-        >
-          <div id="merge_queue-rejected-empty">
-            <Feedback.empty_state
-              icon="hero-arrow-uturn-left"
-              detail={"A rejected or closed #{@pr_label} reopens its task and sends it back to the board for another pass — nothing stays queued once that happens."}
+            <div
+              :for={n <- 1..3}
+              id={"merge_queue-loading-#{n}"}
+              aria-hidden="true"
+              class="h-[86px] rounded-[var(--radius-panel)] border border-solid border-[var(--border-default)] bg-[var(--arb-panel-alt)] animate-pulse"
             >
-              Rejected merges don't collect here.
-            </Feedback.empty_state>
+            </div>
           </div>
-        </ArbiterWeb.CoreComponents.Core.panel>
+
+          <ArbiterWeb.CoreComponents.Core.panel
+            :if={@merge_queue_loaded? and @tab == "queued"}
+            body_class="flex flex-col gap-4"
+          >
+            <div :if={@entries == []} id="merge_queue-empty">
+              <Feedback.empty_state icon="hero-inbox">
+                No {plural(@pr_label)} integrating right now.
+              </Feedback.empty_state>
+            </div>
+
+            <ul :if={@entries != []} id="merge_queue" class="flex flex-col gap-3">
+              <li
+                :for={m <- @entries}
+                class="rounded-[var(--radius-panel)] bg-[var(--surface-card)] border border-[var(--border-default)] p-3 transition-colors duration-[var(--dur-hover)] hover:border-[var(--border-strong)]"
+              >
+                <div class="flex items-center justify-between gap-2">
+                  <div class="flex items-center gap-2 min-w-0">
+                    <span
+                      class="inline-flex items-center rounded-[var(--radius-field)] bg-[var(--arb-panel-alt)] px-1.5 py-0.5 text-[10px] font-[family-name:var(--font-mono)] tabular-nums text-[var(--text-label)] shrink-0"
+                      title="Queue position"
+                    >
+                      {"##{m.position}"}
+                    </span>
+                    <.link
+                      navigate={~p"/workers/#{m.task_id}"}
+                      class="flex items-center gap-2 min-w-0 group"
+                    >
+                      <code class="text-[11px] font-semibold text-[var(--text-title)] group-hover:text-[var(--text-link)] transition-colors truncate font-[family-name:var(--font-mono)]">
+                        {m.task_id}
+                      </code>
+                      <span class="text-[12px] text-[var(--text-secondary)] truncate">{m.title}</span>
+                    </.link>
+                    <Core.copy_id id={m.task_id} />
+                  </div>
+                  <div class="flex items-center gap-1.5 shrink-0" title="CI / Approval / Mergeable">
+                    <span
+                      :for={{label, state} <- check_dots(m.merger_status)}
+                      class={["h-1.5 w-1.5 rounded-full shrink-0", check_dot_class(state)]}
+                      title={label}
+                    />
+                  </div>
+                </div>
+
+                <div class="flex items-center justify-between gap-2 mt-1.5 text-[11px] text-[var(--text-label)]">
+                  <span class="truncate">{m.workspace_name}</span>
+                  <span
+                    class="font-[family-name:var(--font-mono)] tabular-nums shrink-0"
+                    title="Time in queue"
+                  >
+                    {humanize_seconds(runtime_seconds(m.since, @now))} in queue
+                  </span>
+                </div>
+
+                <div :if={m.mr_ref} class="flex items-center gap-1 mt-1.5 text-[11px] min-w-0">
+                  <ArbiterWeb.CoreComponents.Core.icon
+                    name="hero-arrow-top-right-on-square"
+                    size={12}
+                    class="text-[var(--text-link)] shrink-0"
+                  />
+                  <a
+                    :if={m.merger_url}
+                    href={m.merger_url}
+                    target="_blank"
+                    rel="noopener"
+                    class="text-[var(--text-link)] hover:underline truncate"
+                  >
+                    {m.mr_ref}
+                  </a>
+                  <code :if={!m.merger_url} class="truncate text-[var(--text-label)]">
+                    {m.mr_ref}
+                  </code>
+                </div>
+              </li>
+            </ul>
+
+            <Navigation.pager
+              page={@page}
+              total_pages={@total_pages}
+              total_count={@total_count}
+              page_path={fn page -> merge_queue_path(@tab, page) end}
+            />
+          </ArbiterWeb.CoreComponents.Core.panel>
+
+          <ArbiterWeb.CoreComponents.Core.panel
+            :if={@merge_queue_loaded? and @tab == "landed"}
+            body_class="flex flex-col gap-4"
+          >
+            <div :if={@landed == []} id="merge_queue-landed-empty">
+              <Feedback.empty_state icon="hero-check-circle">
+                No {plural(@pr_label)} have landed today yet.
+              </Feedback.empty_state>
+            </div>
+
+            <div
+              :if={@landed != []}
+              id="merge_queue-landed"
+              class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3"
+            >
+              <Domain.task_card
+                :for={t <- @landed}
+                id={t.id}
+                title={t.title}
+                footer={t.footer}
+                copy_dom_id={t.copy_dom_id}
+                muted
+              />
+            </div>
+
+            <Navigation.pager
+              page={@page}
+              total_pages={@total_pages}
+              total_count={@total_count}
+              page_path={fn page -> merge_queue_path(@tab, page) end}
+            />
+          </ArbiterWeb.CoreComponents.Core.panel>
+
+          <ArbiterWeb.CoreComponents.Core.panel
+            :if={@merge_queue_loaded? and @tab == "rejected"}
+            body_class="flex flex-col gap-4"
+          >
+            <div id="merge_queue-rejected-empty">
+              <Feedback.empty_state
+                icon="hero-arrow-uturn-left"
+                detail={"A rejected or closed #{@pr_label} reopens its task and sends it back to the board for another pass — nothing stays queued once that happens."}
+              >
+                Rejected merges don't collect here.
+              </Feedback.empty_state>
+            </div>
+          </ArbiterWeb.CoreComponents.Core.panel>
+        </div>
 
         <ArbiterWeb.CoreComponents.Navigation.back_link />
       </div>
