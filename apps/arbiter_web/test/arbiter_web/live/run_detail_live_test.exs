@@ -1,0 +1,124 @@
+defmodule ArbiterWeb.RunDetailLiveTest do
+  use ArbiterWeb.ConnCase, async: false
+
+  import Phoenix.LiveViewTest
+
+  alias Arbiter.Workers.Run
+
+  # The run load arrives via `start_async/3` after the connected mount
+  # (bd-ap05jy); everything but the async-path tests themselves wants the
+  # page once it has landed.
+  @async_timeout 5_000
+
+  defp run(attrs) do
+    {:ok, r} =
+      Ash.create(
+        Run,
+        Map.merge(
+          %{
+            repo: "arbiter",
+            workspace_id: "ws-1",
+            started_at: DateTime.add(DateTime.utc_now(), -120, :second),
+            completed_at: DateTime.utc_now(),
+            status: :completed
+          },
+          attrs
+        )
+      )
+
+    r
+  end
+
+  defp live_run(conn, id) do
+    {:ok, view, _html} = live(conn, ~p"/workers/history/#{id}")
+    {:ok, view, render_async(view, @async_timeout)}
+  end
+
+  describe "mount" do
+    test "renders the loading state then the run", %{conn: conn} do
+      r = run(%{task_id: "bd-detail-ok", task_title: "the-good-run", output_lines: ["hello"]})
+
+      {:ok, _view, html} = live_run(conn, r.id)
+
+      assert html =~ "bd-detail-ok"
+      assert html =~ "hello"
+      refute html =~ ~s(id="run-detail-loading")
+    end
+
+    test "shows a distinct not-found state for an unknown id", %{conn: conn} do
+      {:ok, _view, html} = live_run(conn, Ash.UUID.generate())
+
+      assert html =~ ~s(id="run-detail-not-found")
+      refute html =~ ~s(id="run-detail-loading")
+      refute html =~ ~s(id="run-detail-error")
+    end
+  end
+
+  describe "async load" do
+    setup do
+      :meck.new(ArbiterWeb.RunDetailLive, [:passthrough, :no_link])
+      on_exit(fn -> :meck.unload(ArbiterWeb.RunDetailLive) end)
+      :ok
+    end
+
+    test "the dead render shows the loading state and reads nothing", %{conn: conn} do
+      r = run(%{task_id: "bd-detail-dead", task_title: "dead-render"})
+      test = self()
+
+      :meck.expect(ArbiterWeb.RunDetailLive, :load_run_data, fn id ->
+        send(test, :run_read)
+        :meck.passthrough([id])
+      end)
+
+      doc =
+        conn
+        |> get(~p"/workers/history/#{r.id}")
+        |> html_response(200)
+        |> LazyHTML.from_document()
+
+      assert doc |> LazyHTML.query("#run-detail-loading") |> Enum.count() == 1
+      refute_received :run_read
+    end
+
+    test "renders a loading skeleton before the async load lands, then the data", %{conn: conn} do
+      r = run(%{task_id: "bd-detail-loading", task_title: "loading-run"})
+      test = self()
+
+      :meck.expect(ArbiterWeb.RunDetailLive, :load_run_data, fn id ->
+        result = :meck.passthrough([id])
+        send(test, {:loading, self()})
+
+        receive do
+          :continue -> result
+        end
+      end)
+
+      {:ok, view, _html} = live(conn, ~p"/workers/history/#{r.id}")
+
+      assert_receive {:loading, loader}
+      assert has_element?(view, "#run-detail-loading")
+      refute has_element?(view, "#run-detail-error")
+
+      send(loader, :continue)
+      html = render_async(view, @async_timeout)
+
+      assert html =~ "bd-detail-loading"
+      refute has_element?(view, "#run-detail-loading")
+    end
+
+    test "a failed load renders an inline error, not a crash", %{conn: conn} do
+      r = run(%{task_id: "bd-detail-error", task_title: "error-run"})
+
+      :meck.expect(ArbiterWeb.RunDetailLive, :load_run_data, fn _id ->
+        raise "database is locked"
+      end)
+
+      {:ok, view, _html} = live(conn, ~p"/workers/history/#{r.id}")
+      render_async(view, @async_timeout)
+
+      assert has_element?(view, "#run-detail-error")
+      assert has_element?(view, "#run-detail-error", "database is locked")
+      refute has_element?(view, "#run-detail-loading")
+    end
+  end
+end

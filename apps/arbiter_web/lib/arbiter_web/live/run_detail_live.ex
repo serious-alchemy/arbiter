@@ -12,7 +12,17 @@ defmodule ArbiterWeb.RunDetailLive do
   alias Arbiter.Worker
   alias Arbiter.Workers.Run
   alias ArbiterWeb.CoreComponents.Domain
+  require Logger
 
+  # bd-ap05jy: `Run` rows carry `output_lines`, a column bd-6jcebm found can
+  # run to 141MB for a single row — loading it (plus the workspace lookup and
+  # the `Worker.whereis/1` GenServer hop) synchronously in `mount/3` held the
+  # dead render *and* the connected one. The dead render now reads nothing
+  # and draws the loading state; the connected mount fetches everything via
+  # `start_async/3` instead, so a slow read never blocks the socket coming
+  # up. A failed read shows an inline error rather than crashing the view;
+  # "not found" is a distinct, already-loaded state (`run: nil` with no
+  # error), never conflated with "still loading".
   @impl true
   def mount(%{"id" => id}, _session, socket) do
     socket =
@@ -22,26 +32,59 @@ defmodule ArbiterWeb.RunDetailLive do
       |> assign(:issue_label, "issue")
       |> assign(:repo_label, "repo")
       |> assign(:workspace_label, "workspace")
-      |> load_run(id)
+      |> assign(:run, nil)
+      |> assign(:workspace, nil)
+      |> assign(:live_worker?, false)
+      |> assign(:run_loaded?, false)
+      |> assign(:run_error, nil)
+
+    socket =
+      if connected?(socket) do
+        start_async(socket, :run_data, fn -> __MODULE__.load_run_data(id) end)
+      else
+        socket
+      end
 
     {:ok, socket}
   end
 
-  defp load_run(socket, id) do
+  @impl true
+  def handle_async(:run_data, {:ok, result}, socket) do
+    {:noreply,
+     socket
+     |> assign(:run, result.run)
+     |> assign(:workspace, result.workspace)
+     |> assign(:live_worker?, result.live_worker?)
+     |> assign(:run_loaded?, true)
+     |> assign(:run_error, nil)}
+  end
+
+  def handle_async(:run_data, {:exit, reason}, socket) do
+    Logger.error("RunDetailLive: loading run failed: #{inspect(reason)}")
+
+    {:noreply,
+     socket
+     |> assign(:run_loaded?, true)
+     |> assign(:run_error, describe_exit(reason))}
+  end
+
+  @doc false
+  def load_run_data(id) do
     case Ash.get(Run, id) do
       {:ok, run} ->
-        socket
-        |> assign(:run, run)
-        |> assign(:workspace, lookup_workspace(run.workspace_id))
-        |> assign(:live_worker?, !is_nil(Worker.whereis(run.task_id)))
+        %{
+          run: run,
+          workspace: lookup_workspace(run.workspace_id),
+          live_worker?: !is_nil(Worker.whereis(run.task_id))
+        }
 
       _ ->
-        socket
-        |> assign(:run, nil)
-        |> assign(:workspace, nil)
-        |> assign(:live_worker?, false)
+        %{run: nil, workspace: nil, live_worker?: false}
     end
   end
+
+  defp describe_exit({%{__exception__: true} = error, _stacktrace}), do: Exception.message(error)
+  defp describe_exit(reason), do: Exception.format_exit(reason)
 
   defp lookup_workspace(nil), do: nil
 
@@ -65,7 +108,38 @@ defmodule ArbiterWeb.RunDetailLive do
       coordinator_inbox_now={@coordinator_inbox_now}
     >
       <div class="p-4 sm:p-6 max-w-7xl mx-auto space-y-6">
-        <%= if @run do %>
+        <div
+          :if={@run_error}
+          id="run-detail-error"
+          role="alert"
+          class="flex items-start gap-2 px-3 py-2.5 rounded-[var(--radius-field)] border border-solid border-[var(--arb-fail-edge)] bg-[var(--arb-fail-wash)] text-[12px] text-[var(--arb-fail-text)]"
+        >
+          <ArbiterWeb.CoreComponents.Core.icon
+            name="hero-exclamation-triangle-micro"
+            class="size-4 shrink-0 mt-px"
+          />
+          <span class="grow min-w-0 break-words">
+            Could not load this run: {@run_error}
+          </span>
+        </div>
+
+        <div
+          :if={not @run_loaded? and is_nil(@run_error)}
+          id="run-detail-loading"
+          aria-label="Loading run"
+          aria-busy="true"
+          class="flex flex-col gap-1.5"
+        >
+          <div
+            :for={n <- 1..4}
+            id={"run-detail-loading-#{n}"}
+            aria-hidden="true"
+            class="h-[34px] rounded-[var(--radius-field)] border border-solid border-[var(--border-strong)] bg-[var(--surface-card)] animate-pulse"
+          >
+          </div>
+        </div>
+
+        <%= if @run_loaded? and is_nil(@run_error) and @run do %>
           <%!-- ── Header ─────────────────────────────────────────────── --%>
           <div class="flex flex-col gap-6">
             <div class="flex flex-wrap items-center justify-between gap-4">
@@ -176,7 +250,9 @@ defmodule ArbiterWeb.RunDetailLive do
             lines={build_log_lines(@run.output_lines || [])}
             max_height="28rem"
           />
-        <% else %>
+        <% end %>
+
+        <%= if @run_loaded? and is_nil(@run_error) and is_nil(@run) do %>
           <ArbiterWeb.CoreComponents.Core.panel>
             <div class="flex flex-col items-center justify-center gap-3 py-12">
               <ArbiterWeb.CoreComponents.Core.icon
@@ -184,7 +260,7 @@ defmodule ArbiterWeb.RunDetailLive do
                 size={32}
                 color="var(--text-label)"
               />
-              <p class="text-[12px] text-[var(--text-secondary)]">
+              <p class="text-[12px] text-[var(--text-secondary)]" id="run-detail-not-found">
                 No run found for id <code class="font-mono">{@run_id}</code>.
               </p>
             </div>
