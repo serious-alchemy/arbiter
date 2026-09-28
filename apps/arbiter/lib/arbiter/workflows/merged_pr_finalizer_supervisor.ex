@@ -8,8 +8,21 @@ defmodule Arbiter.Workflows.MergedPRFinalizerSupervisor do
   workspaces start their finalizer via the
   `Arbiter.Tasks.Workspace.Changes.StartMergedPRFinalizer` after_action hook.
 
-  Both auto-start paths are gated by the `:arbiter, :auto_start_refineries`
+  A workspace `:update` / `:patch_config` that changes `config` runs
+  `reconcile/1` (via `Arbiter.Tasks.Workspace.Changes.ReconcileMergedPRFinalizer`)
+  so the running finalizers follow the new config without a restart
+  (bd-6dghdv): one whose repo the workspace no longer resolves to is stopped,
+  and a finalizer is started for every repo that now resolves.
+
+  All three auto-start paths are gated by the `:arbiter, :auto_start_refineries`
   config flag — disabled in `test`, enabled everywhere else.
+
+  ## Registry
+
+  Each finalizer registers under `workspace_id` (single-repo workspace) or
+  `"workspace_id:owner/repo"` (multi-repo), with the repo it sweeps as the
+  registry value — which is what lets `reconcile/1` tell a finalizer pinned to
+  a stale repo from a current one without calling into it.
 
   Poll interval is read from `:arbiter, :merged_pr_finalizer_interval_ms`
   (default 120s — less frequent than PRPatrol's 60s since merged PRs are a
@@ -66,19 +79,17 @@ defmodule Arbiter.Workflows.MergedPRFinalizerSupervisor do
         :skip
 
       true ->
-        reconcile_stale_registrations(workspace.id, repos)
+        desired = desired_children(workspace.id, repos)
+        stop_stale_children(workspace.id, desired)
 
         results =
-          Enum.map(repos, fn repo ->
-            registry_key =
-              if length(repos) == 1, do: workspace.id, else: "#{workspace.id}:#{repo}"
-
+          Enum.map(desired, fn {registry_key, repo} ->
             child_opts =
               opts
               |> Keyword.put(:repo, repo)
               |> Keyword.put(:workspace_id, workspace.id)
               |> Keyword.put_new(:interval_ms, finalizer_interval_ms())
-              |> Keyword.put(:name, via(registry_key))
+              |> Keyword.put(:name, via(registry_key, repo))
 
             result = DynamicSupervisor.start_child(__MODULE__, {MergedPRFinalizer, child_opts})
 
@@ -93,6 +104,29 @@ defmodule Arbiter.Workflows.MergedPRFinalizerSupervisor do
     end
   end
 
+  @doc """
+  Bring the workspace's running finalizers in line with its current config
+  (bd-6dghdv). Stops every finalizer of this workspace whose registry key or
+  repo is no longer what the config resolves to — all of them when the
+  workspace no longer qualifies for a finalizer at all — then starts any that
+  are missing. A finalizer whose repo is unchanged keeps running (and keeps its
+  sweep cursor).
+
+  Called after a workspace `:update` / `:patch_config` that changes `config`.
+  Returns what `start_finalizer/2` does, or `:skip` once everything is stopped.
+  """
+  @spec reconcile(Workspace.t()) :: DynamicSupervisor.on_start_child() | :skip
+  def reconcile(%Workspace{} = workspace) do
+    case start_finalizer(workspace) do
+      :skip ->
+        stop_stale_children(workspace.id, [])
+        :skip
+
+      result ->
+        result
+    end
+  end
+
   @doc "Return the pid registered under `workspace_id`, or `nil`."
   @spec whereis(String.t()) :: pid() | nil
   def whereis(workspace_id) when is_binary(workspace_id) do
@@ -104,6 +138,9 @@ defmodule Arbiter.Workflows.MergedPRFinalizerSupervisor do
 
   @doc false
   def via(workspace_id), do: {:via, Registry, {@registry, workspace_id}}
+
+  @doc false
+  def via(registry_key, repo), do: {:via, Registry, {@registry, registry_key, repo}}
 
   @doc """
   Whether finalizers should auto-start. Shares the `:auto_start_refineries`
@@ -158,33 +195,38 @@ defmodule Arbiter.Workflows.MergedPRFinalizerSupervisor do
       :ok
   end
 
-  defp reconcile_stale_registrations(workspace_id, repos) do
-    if length(repos) == 1 do
-      @registry
-      |> Registry.select([{{:"$1", :"$2", :_}, [], [{{:"$1", :"$2"}}]}])
-      |> Enum.each(fn {key, pid} ->
-        if String.starts_with?(key, workspace_id <> ":") do
-          Logger.info(
-            "MergedPRFinalizerSupervisor: stopping stale finalizer #{key} (registry scheme changed to single-repo)"
-          )
+  # `{registry_key, repo}` for each finalizer the workspace should run: a
+  # single repo registers under the bare workspace id, several under
+  # "workspace_id:owner/repo".
+  defp desired_children(workspace_id, [repo]), do: [{workspace_id, repo}]
 
-          ProcessTeardown.stop_child(__MODULE__, pid)
-        end
-      end)
-    else
-      case Registry.lookup(@registry, workspace_id) do
-        [{pid, _}] ->
-          Logger.info(
-            "MergedPRFinalizerSupervisor: stopping stale finalizer #{workspace_id} (registry scheme changed to multi-repo)"
-          )
+  defp desired_children(workspace_id, repos),
+    do: Enum.map(repos, &{"#{workspace_id}:#{&1}", &1})
 
-          ProcessTeardown.stop_child(__MODULE__, pid)
+  # Stop every finalizer of this workspace that is not in `desired` — covers a
+  # registry-scheme change (a repo count crossing 1↔N) as well as a finalizer
+  # still pinned to a repo the workspace no longer resolves to (bd-6dghdv).
+  defp stop_stale_children(workspace_id, desired) do
+    @registry
+    |> Registry.select([{{:"$1", :"$2", :"$3"}, [], [{{:"$1", :"$2", :"$3"}}]}])
+    |> Enum.filter(fn {key, _pid, _repo} -> workspace_key?(key, workspace_id) end)
+    |> Enum.reject(fn {key, _pid, repo} -> {key, repo} in desired end)
+    |> Enum.each(fn {key, pid, repo} ->
+      Logger.info(
+        "MergedPRFinalizerSupervisor: stopping stale finalizer #{key} (repo=#{inspect(repo)}) — " <>
+          "workspace #{workspace_id} now resolves to #{inspect(Enum.map(desired, &elem(&1, 1)))}"
+      )
 
-        _ ->
-          :ok
-      end
-    end
+      ProcessTeardown.stop_child(__MODULE__, pid)
+    end)
   end
+
+  defp workspace_key?(workspace_id, workspace_id), do: true
+
+  defp workspace_key?(key, workspace_id) when is_binary(key),
+    do: String.starts_with?(key, workspace_id <> ":")
+
+  defp workspace_key?(_key, _workspace_id), do: false
 
   defp resolve_adapter(workspace) do
     adapter = Mergers.for_workspace(workspace)
@@ -194,11 +236,17 @@ defmodule Arbiter.Workflows.MergedPRFinalizerSupervisor do
     ArgumentError -> nil
   end
 
+  @doc """
+  The repos (`"owner/repo"` slugs, or GitLab project ids) the workspace's
+  config resolves to — one finalizer each. `MergedPRFinalizer` re-checks its
+  own repo against this every tick (bd-6dghdv).
+  """
   # Pre-existing complexity 13 — baselined when bd-4x2yhq first
   # wired Credo up. Thresholds stay at the tool's own default so new
   # code is held to it; see the note in .credo.exs.
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
-  defp finalizer_repos(%Workspace{} = workspace) do
+  @spec finalizer_repos(Workspace.t()) :: [String.t()]
+  def finalizer_repos(%Workspace{} = workspace) do
     config = workspace.config || %{}
 
     case get_in(config, ["merge", "strategy"]) do

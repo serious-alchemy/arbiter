@@ -785,6 +785,94 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
     end
   end
 
+  # bd-6dghdv: the finalizer used to load its workspace once in init/1, so after
+  # the repo move changed merge.config.owner it kept querying the old repo until
+  # a server restart. It now re-reads the workspace each tick and refuses to
+  # query a repo the workspace no longer resolves to (the supervisor's
+  # `reconcile/1`, run on workspace update, starts the finalizer for the new
+  # one).
+  describe "tick/1 — workspace config is re-read every tick (bd-6dghdv)" do
+    test "after merge.config moves to another repo, the old repo is never queried", %{ws: ws} do
+      task = create_task(ws, "700")
+      {_pid, name} = start_finalizer(ws)
+
+      {:ok, _ws} =
+        Ash.update(
+          ws,
+          %{
+            config: %{
+              "merge" => %{
+                "strategy" => "github",
+                "config" => %{
+                  "owner" => "serious-alchemy",
+                  "repo" => "repo",
+                  "credentials_ref" => "env:GITHUB_TOKEN"
+                }
+              }
+            }
+          },
+          action: :update
+        )
+
+      test_pid = self()
+      merged = pr_get_stub(700, :merged)
+
+      stub(fn conn ->
+        send(test_pid, {:requested, conn.request_path})
+        merged.(conn)
+      end)
+
+      :ok = MergedPRFinalizer.tick(name)
+
+      refute_received {:requested, _}
+      {:ok, refreshed} = Ash.get(Issue, task.id)
+      assert refreshed.status != :closed
+    end
+
+    test "a workspace edit that keeps the repo takes effect without a restart", %{ws: ws} do
+      task = create_task(ws, "701")
+      {_pid, name} = start_finalizer(ws)
+
+      # Point the credential at a different env var: the finalizer must read it
+      # from the updated workspace, not the copy it had at start.
+      System.put_env("MPF_ROTATED_TOKEN", "rotated-token")
+      on_exit(fn -> System.delete_env("MPF_ROTATED_TOKEN") end)
+
+      {:ok, _ws} =
+        Ash.update(
+          ws,
+          %{
+            config: %{
+              "merge" => %{
+                "strategy" => "github",
+                "config" => %{
+                  "owner" => "owner",
+                  "repo" => "repo",
+                  "credentials_ref" => "env:MPF_ROTATED_TOKEN"
+                }
+              }
+            }
+          },
+          action: :update
+        )
+
+      test_pid = self()
+      merged = pr_get_stub(701, :merged)
+
+      stub(fn conn ->
+        send(test_pid, {:auth, Plug.Conn.get_req_header(conn, "authorization")})
+        merged.(conn)
+      end)
+
+      :ok = MergedPRFinalizer.tick(name)
+
+      assert_received {:auth, [auth]}
+      assert auth =~ "rotated-token"
+      {:ok, refreshed} = Ash.get(Issue, task.id)
+      assert refreshed.status == :closed
+    end
+  end
+
   # AC4 (bd-6dghdv): every close names the rule that matched and the
   # owner/repo that was queried, so a wrong close is diagnosable from the log.
   describe "close logging (bd-6dghdv)" do

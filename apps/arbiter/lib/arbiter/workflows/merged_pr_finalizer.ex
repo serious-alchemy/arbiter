@@ -56,7 +56,17 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
 
     * Modern: `source_pr` field set (added by bd-ci2jl2, `tracker_type: :none`).
     * Legacy: `tracker_type: :github`, `tracker_ref` is a bare PR number,
-      `source_pr` nil (pre-bd-ci2jl2 format).
+      `source_pr` nil (pre-bd-ci2jl2 format) — and, since bd-6dghdv, only a
+      task that carries PRPatrol's own markers (the `PR #<n>: … needs
+      follow-up` title with `n == tracker_ref`, and the `Auto-filed by PRPatrol
+      against <owner/repo>.` description naming exactly the repo this
+      finalizer queries). An ordinary GitHub-issue-tracked task has the same
+      columns, but its `tracker_ref` is an *issue* number: treating it as a PR
+      number closed 20 ordinary tasks when a repo move renumbered issues 1–38
+      onto the old repo's merged PRs #1–#38.
+
+  Every close logs the rule that matched (`rule=pr_ref|source_pr|
+  legacy_tracker_ref`) and the owner/repo queried.
 
   **Critical guard:** these tasks are closed local-only — `Sync.lifecycle` is
   NOT invoked. For modern follow-ups `tracker_type: :none` would already
@@ -78,6 +88,12 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
   Not in `Application.children`. Started per-workspace via
   `MergedPRFinalizerSupervisor` — one instance per (workspace, repo).
   Test convenience: `tick/1` forces a synchronous sweep.
+
+  The workspace is re-read every tick (bd-6dghdv), so a config edit applies on
+  the next sweep. The `repo` is fixed per instance: a workspace edit that moves
+  it makes `MergedPRFinalizerSupervisor.reconcile/1` replace the instance, and
+  until then a tick whose workspace no longer resolves to `repo` sweeps
+  nothing.
   """
 
   use GenServer
@@ -88,7 +104,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
   alias Arbiter.Tasks.Verification
   alias Arbiter.Trackers.Sync
   alias Arbiter.Worker
-  alias Arbiter.Workflows.PatrolRepoScope
+  alias Arbiter.Workflows.{MergedPRFinalizerSupervisor, PatrolRepoScope, PatrolServer}
   require Ash.Query
   require Logger
 
@@ -139,16 +155,11 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
         )
       )
 
-    workspace =
-      case Ash.get(Workspace, workspace_id) do
-        {:ok, ws} -> ws
-        _ -> nil
-      end
-
+    # bd-6dghdv: the workspace is NOT loaded here — `do_tick_body/1` re-reads
+    # it every tick, so a config edit takes effect without a restart.
     state = %__MODULE__{
       repo: repo,
       workspace_id: workspace_id,
-      workspace: workspace,
       interval_ms: interval_ms,
       max_checks_per_tick: max_checks_per_tick
     }
@@ -194,12 +205,24 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
     Limiter.with_priority(:background, :merged_pr_finalizer, fn -> do_tick_body(state) end)
   end
 
+  # bd-6dghdv: the workspace is re-read every tick (it used to be loaded once in
+  # init/1), so a merge-config edit — credentials, owner/repo — is honoured on
+  # the next tick without a restart. This finalizer is still pinned to the
+  # `repo` it was started for, though: if the workspace no longer resolves to
+  # that repo (merge.config or repo_paths moved), the tick queries nothing
+  # rather than keep sweeping the old repo. `MergedPRFinalizerSupervisor.
+  # reconcile/1`, run on workspace update, replaces it with a finalizer for the
+  # new one.
   defp do_tick_body(state) do
+    workspace = PatrolServer.refetch_workspace(state.workspace_id)
+    state = %{state | workspace: workspace}
+
     {result, cursor} =
-      with %Workspace{} <- state.workspace,
-           adapter when not is_nil(adapter) <- resolve_adapter(state.workspace),
+      with %Workspace{} <- workspace,
+           true <- repo_still_configured?(workspace, state.repo),
+           adapter when not is_nil(adapter) <- resolve_adapter(workspace),
            true <- function_exported?(adapter, :get, 1),
-           :ok <- Mergers.prepare_with_repo(state.workspace, state.repo),
+           :ok <- Mergers.prepare_with_repo(workspace, state.repo),
            {:ok, pr_ref_tasks} <- open_tasks_with_pr_ref(state.workspace_id),
            {:ok, follow_up_tasks} <- open_follow_up_tasks(state.workspace_id),
            {:ok, legacy_tasks} <- open_legacy_pr_tracker_tasks(state.workspace_id, state.repo) do
@@ -257,6 +280,19 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
     case List.last(window) do
       {task, _kind} -> {window, task.id}
       nil -> {window, nil}
+    end
+  end
+
+  defp repo_still_configured?(workspace, repo) do
+    if repo in MergedPRFinalizerSupervisor.finalizer_repos(workspace) do
+      true
+    else
+      Logger.warning(
+        "MergedPRFinalizer: workspace #{workspace.id} no longer resolves to repo=#{repo} — " <>
+          "skipping the sweep (awaiting reconcile to a finalizer for the current repo)"
+      )
+
+      false
     end
   end
 
