@@ -35,7 +35,9 @@ defmodule Arbiter.Worker.AuthDeath do
        cycle one task forever.
 
   The escalation `fail_stopped/2` sent is unchanged: the first death is still
-  reported.
+  reported. It is a ticket-scoped `:worker_stopped`, so the reopen resolves it
+  (bd-8if9zt) — the retry is the machine's turn; the credential problem itself
+  surfaces through `AuthHold` and the `CredentialWatchdog`.
   """
 
   require Ash.Query

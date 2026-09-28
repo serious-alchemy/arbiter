@@ -625,7 +625,9 @@ run; it did not fail.
 Every `:escalation` message carries an `escalation_kind` from
 `Arbiter.Messages.EscalationKind`, and the `Message` resource refuses an
 escalation without one. A kind is **ticket-scoped** (about one `task_ref`) or
-**system-scoped** (credentials, quota, budget, the circuit breaker, the loop).
+**system-scoped** (credentials, quota, budget, the circuit breaker, the loop,
+and PRPatrol's failed follow-up dispatch, whose follow-up ticket is closed at
+once so the patrol can retry).
 System kinds are typed here; their lifecycle is child 8 (bd-7gt8rm).
 
 Producers go through `Arbiter.Messages.Escalation.post/1`. A ticket-scoped

@@ -17,7 +17,10 @@ defmodule Arbiter.Messages.EscalationKind do
       ticket's state moves on or its run restarts
       (`Arbiter.Tasks.Attention.clear/2`).
     * **`:system`** — about the installation, not a ticket: credentials, quota,
-      budget, the circuit breaker, the loop. Typed here; their own lifecycle
+      budget, the circuit breaker, the loop — and PRPatrol's failed
+      follow-up dispatch, which is about a repo's config: its `task_ref` is a
+      follow-up the patrol closes at once so the next tick can retry, and
+      that close must not resolve the page. Typed here; their own lifecycle
       (clearing when the condition clears) is child 8 (bd-7gt8rm). Their
       producers keep their own dedupe.
 
@@ -55,7 +58,6 @@ defmodule Arbiter.Messages.EscalationKind do
     :orphaned_merge_abandoned,
     :pr_author_replied,
     :pr_closed,
-    :pr_patrol_dispatch_failed,
     :preflight_failed,
     :provider_fallback,
     :report_only_review,
@@ -81,6 +83,7 @@ defmodule Arbiter.Messages.EscalationKind do
     :loop_proposal,
     :operator_login_lapsed,
     :overage_alert,
+    :pr_patrol_dispatch_failed,
     :quota_grant_failing,
     :quota_poll_failing,
     :review_patrol_rate_limited,
@@ -90,12 +93,13 @@ defmodule Arbiter.Messages.EscalationKind do
   @undeduped [:agent_raised, :legacy]
 
   # The attention cause a kind records on its ticket. A kind absent here is a
-  # report about the ticket that does not change what the ticket waits on.
+  # report about the ticket that does not change what the ticket waits on —
+  # or, like `:awaiting_verification`, one whose transition (`:await_verification`)
+  # already recorded the cause.
   @causes %{
     approved_awaiting_merge: :awaiting_manual_merge,
     auto_merge_stalled: :merge_blocked,
     auto_resume_exhausted: :run_crashed,
-    awaiting_verification: :awaiting_verification,
     conflict_unresolved: :merge_blocked,
     merge_block_unresolved: :merge_blocked,
     merge_blocked: :merge_blocked,

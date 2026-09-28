@@ -197,6 +197,24 @@ defmodule Arbiter.Tasks.AttentionAutoClearTest do
       assert again.attention_detail == "stopped again"
     end
 
+    test "entering verification records its cause once", %{task: task} do
+      {:ok, task} = Ash.update(task, %{verify_after_deploy: true})
+      {:ok, merging} = Issue.pr_opened(task.id, "#43")
+
+      # The transition records the cause; its notice must not record it again.
+      {:ok, :awaiting_verification, _} = Verification.finalize_merged(merging)
+
+      assert Ash.get!(Issue, task.id).attention_cause == :awaiting_verification
+      assert [%{escalation_kind: :awaiting_verification}] = escalations(task.id)
+
+      refute Issue.Version
+             |> Ash.Query.filter(
+               version_source_id == ^task.id and version_action_name == :raise_attention
+             )
+             |> Ash.read!()
+             |> Enum.any?()
+    end
+
     test "a closed ticket takes no cause", %{ws: ws, task: task} do
       {:ok, _} = Ash.update(task, %{}, action: :close)
 

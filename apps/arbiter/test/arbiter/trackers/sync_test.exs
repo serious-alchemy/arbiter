@@ -1285,7 +1285,7 @@ defmodule Arbiter.Trackers.SyncTest do
       assert length(escalations_for(ws.id)) == 1
     end
 
-    test "calling notify_failure for different events raises separate escalations" do
+    test "calling notify_failure for different events refreshes the ticket's one open escalation" do
       ws = jira_workspace(%{"merged" => "Code Complete", "closed" => "Done"})
       issue = jira_issue(ws)
 
@@ -1299,8 +1299,12 @@ defmodule Arbiter.Trackers.SyncTest do
       Sync.notify_failure(issue, :merged, reason)
       Sync.notify_failure(issue, :closed, reason)
 
-      # Different events → two separate escalations are allowed.
-      assert length(escalations_for(ws.id)) == 2
+      # bd-8if9zt: a ticket-scoped kind dedupes by (kind, ticket), so a
+      # different event refreshes the open `:tracker_sync_failed` item to say
+      # what failed last instead of adding a second one.
+      assert [escalation] = escalations_for(ws.id)
+      assert escalation.escalation_kind == :tracker_sync_failed
+      assert escalation.subject =~ "closed"
     end
   end
 end

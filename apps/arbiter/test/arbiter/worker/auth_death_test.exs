@@ -77,11 +77,15 @@ defmodule Arbiter.Worker.AuthDeathTest do
       refute Process.alive?(pid)
       assert Snapshot.classify_columns([reload(task)], Worker.list_children())[task.id] == :ready
 
-      # Escalation still fires.
-      assert Enum.any?(
-               Message.inbox("admiral", workspace_id: ws.id),
-               &(&1.kind == :escalation and &1.directive_ref == task.id)
-             )
+      # Escalation still fires — and, since the ticket went back to Ready,
+      # is resolved with it (bd-8if9zt): the retry is the machine's turn.
+      assert [escalation] =
+               Message
+               |> Ash.Query.filter(task_ref == ^task.id and kind == :escalation)
+               |> Ash.read!()
+
+      assert escalation.escalation_kind == :worker_stopped
+      assert %DateTime{} = escalation.resolved_at
 
       # It never produced a commit: no worktree, no branch.
       refute File.dir?(worktree)
