@@ -120,6 +120,22 @@ defmodule Arbiter.Agents.Gemini.ConfigDirTest do
       assert memory =~ "Do not retry"
     end
 
+    # bd-bxwsvo: the standing memory used to mandate `WaitMsBeforeAsync: 10000`
+    # and "run every tool synchronously" — neither is achievable on agy 1.2.12
+    # (the wait caps at 10000 ms), and together with the prompt's polling rule
+    # it drove bd-90kjvk's ~440-poll busy-wait. It must agree with the prompt:
+    # end the turn and let agy's completion message wake you.
+    test "GEMINI.md does not mandate a synchronous run_command or polling" do
+      memory = ConfigDir.worker_memory()
+
+      refute memory =~ "WaitMsBeforeAsync: 10000"
+      refute memory =~ "Run every tool synchronously"
+      refute memory =~ ~r/keep calling `manage_task status`/
+      assert memory =~ "end your turn"
+      assert memory =~ "system message"
+      assert memory =~ ~r/Do not poll/i
+    end
+
     # bd-80talz: the incident was an agy worker, so its standing memory says it
     # in full rather than leaving it to the prompt alone.
     test "GEMINI.md forbids fabricated evidence and public uploads" do

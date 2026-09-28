@@ -185,6 +185,49 @@ defmodule Arbiter.Worker.AsyncWaitAbandonedTest do
       assert reason.exit_status == 0
     end
 
+    # bd-bxwsvo: on agy 1.2.12 ending a turn with a background task running is
+    # legitimate — the CLI waits (up to 30m) and wakes the agent. What remains
+    # an abandoned wait is the CLI giving up and killing the task on exit
+    # (verbatim from its stderr, which the port captures with stdout).
+    test "agy killing a background task on exit is :async_wait_abandoned" do
+      tail = [
+        "I have launched `mix test` and will wait for it to finish.",
+        "root agent idle; waiting up to 30m0s for 1 background task(s)",
+        "terminating 1 background task(s) on exit"
+      ]
+
+      assert StopReason.classify(0, tail, "gemini").category == :async_wait_abandoned
+    end
+
+    test "agy idling on a background task that then completes is not itself an arm marker" do
+      tail = [
+        "I have launched `mix test` and will wait for it to finish.",
+        "root agent idle; waiting up to 30m0s for 1 background task(s)",
+        "All tests pass.",
+        "Summary written; stopping here."
+      ]
+
+      assert StopReason.classify(0, tail, "gemini").category == :exited_without_done
+    end
+
+    # bd-bxwsvo: on 1.2.12 every long command goes to the background, so the
+    # launch step's "still running" / RUNNING status is now the normal shape of
+    # a correct wait, not evidence it was abandoned. A run that waited properly
+    # and then ended short of the sentinel for some unrelated reason must stay
+    # a plain early quit, not get the "narrow it under 30 minutes" correction.
+    test "a honoured wait's launch status is not an arm marker once agy woke the agent" do
+      tail = [
+        "run_command(mix test test/arbiter/foo_test.exs)",
+        "Step is still running.",
+        "Status: RUNNING",
+        ~s(Task id "t-1" finished with result: 12 tests, 0 failures),
+        "All tests pass.",
+        "Summary written; stopping here."
+      ]
+
+      assert StopReason.classify(0, tail, "gemini").category == :exited_without_done
+    end
+
     test "without the provider hint, the same tail falls back to Claude's signature and misses" do
       assert StopReason.classify(0, @agy_tail).category == :exited_without_done
       assert StopReason.classify(0, @agy_tail, nil).category == :exited_without_done
@@ -256,6 +299,28 @@ defmodule Arbiter.Worker.AsyncWaitAbandonedTest do
       assert prompt =~ ~r/never (arrive|be delivered)/
       # It must also protect the work that is already on disk.
       assert prompt =~ "commit"
+    end
+
+    # bd-bxwsvo: the corrective text above is Claude's (Monitor / TaskOutput /
+    # the Bash timeout). An agy session has none of those tools, and on agy
+    # 1.2.12 ending the turn with a running task is the correct way to wait —
+    # the only abandoned wait left is a command that outlived the CLI's 30m
+    # background cap. So an agy resume gets agy's own correction.
+    test "an agy abandoned async wait gets agy's correction, not Claude's" do
+      prompt =
+        Arbiter.Worker.resume_continue_prompt(:async_wait_abandoned, "bd-bxwsvo",
+          provider: "gemini"
+        )
+
+      assert prompt =~ "bd-bxwsvo"
+      refute prompt =~ "Monitor"
+      refute prompt =~ "ScheduleWakeup"
+      refute prompt =~ "TaskOutput"
+      refute prompt =~ "Bash"
+      assert prompt =~ "30 minutes"
+      assert prompt =~ ~r/Do NOT poll/
+      assert prompt =~ "commit"
+      assert prompt =~ "arb done"
     end
 
     test "every other resumable category keeps the terse continue prompt" do
@@ -391,10 +456,14 @@ defmodule Arbiter.Worker.AsyncWaitAbandonedIntegrationTest do
 
     assert reason.category == :async_wait_abandoned
 
-    # The corrective prompt fires, not the generic "pick up where you left off".
-    prompt = Arbiter.Worker.resume_continue_prompt(reason.category, "bd-1zz5mn")
-    assert prompt =~ "Monitor"
-    assert prompt =~ "TaskOutput"
+    # The corrective prompt fires, not the generic "pick up where you left off"
+    # — and (bd-bxwsvo) in agy's own terms, not Claude's.
+    prompt =
+      Arbiter.Worker.resume_continue_prompt(reason.category, "bd-1zz5mn", provider: "gemini")
+
+    refute prompt =~ "Pick up exactly where you left off, complete"
+    refute prompt =~ "TaskOutput"
+    assert prompt =~ "30 minutes"
 
     # A resumed segment that only read files and relaunched a command (same
     # worktree fingerprint) is not failed at attempt 1 of 3 — the no-progress

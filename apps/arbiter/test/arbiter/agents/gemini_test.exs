@@ -1133,15 +1133,12 @@ defmodule Arbiter.Agents.GeminiTest do
     test "async_tool_instruction/0 renders reviewer instruction without Claude tools or disproven flags" do
       text = Gemini.async_tool_instruction()
 
-      assert text =~ "manage_task status"
-      assert text =~ "RUNNING"
       assert text =~ "your VERDICT"
-      assert text =~ "terminates the session and discards the work"
+      assert text =~ "WaitMsBeforeAsync"
       refute text =~ "Monitor"
       refute text =~ "ScheduleWakeup"
       refute text =~ "TaskOutput"
-      assert text =~ "WaitMsBeforeAsync"
-      assert text =~ "Blocking"
+      refute text =~ "Blocking"
       refute text =~ "COMMIT correct work BEFORE"
     end
 
@@ -1151,36 +1148,57 @@ defmodule Arbiter.Agents.GeminiTest do
 
       assert work_text =~ "COMMIT correct work BEFORE"
       assert work_text =~ "before you print `arb done` —\nextra explanation."
-      assert work_text =~ "manage_task status"
-      assert work_text =~ "RUNNING"
       refute work_text =~ "Monitor"
       refute work_text =~ "ScheduleWakeup"
       assert work_text =~ "WaitMsBeforeAsync"
-      assert work_text =~ "Blocking"
 
       no_commit = Gemini.async_tool_instruction("`arb done`", nil, commit_first: false)
       refute no_commit =~ "COMMIT correct work BEFORE"
       assert no_commit =~ "before you print `arb done`."
     end
 
-    # bd-apq1g6: the spike invoked `"Blocking": true` / `"WaitMsBeforeAsync": 0`
-    # verbatim and agy backgrounded the command anyway. The instruction may
-    # still tell the worker to pass those arguments, but it must not promise
-    # they produce foreground/synchronous execution — that claim is disproven,
-    # and a worker that believes it will be surprised by empty inline output.
-    test "does not promise that Blocking/WaitMsBeforeAsync produce synchronous execution" do
+    # bd-bxwsvo: the bd-apq1g6 re-run on agy 1.2.12 found `Blocking` is not a
+    # run_command parameter at all (silently dropped) and `WaitMsBeforeAsync`
+    # caps at 10000 ms — while headless agy now keeps the session alive for up
+    # to 30m after the turn ends and wakes the agent with a completion system
+    # message. The old text ("keep calling `manage_task status` … NEVER end
+    # your turn") is what made bd-90kjvk's worker poll ~440 times and burn 84%
+    # of a Gemini 5h window on one D1.
+    test "launch, end the turn, resume on the completion message — never poll" do
       for text <- [
             Gemini.async_tool_instruction(),
-            Gemini.async_tool_instruction("`arb done`", nil, commit_first: true)
+            Gemini.async_tool_instruction("`arb done`", nil)
           ] do
-        refute text =~ "executes synchronously"
-        refute text =~ "returns its output inline"
-        refute text =~ ~r/synchronously in the\s+foreground/
+        # the disproven flag and the polling loop are gone
+        refute text =~ "Blocking"
+        refute text =~ ~r/keep calling `manage_task status`/
+        refute text =~ ~r/NEVER end your turn/i
+        refute text =~ "WaitMsBeforeAsync: 10000"
+        refute text =~ ~r/"WaitMsBeforeAsync": 0/
 
-        # the corrected framing: flags are set, but backgrounding is expected
-        # and the drain is the polling loop.
-        assert text =~ "does NOT keep a long"
-        assert text =~ "manage_task status"
+        # the verified 1.2.12 behaviour, pinned to the version it was seen on
+        assert text =~ "agy 1.2.12"
+        assert text =~ "end your turn"
+        assert text =~ "system message"
+        assert text =~ "finished with result"
+        assert text =~ ~r/Do NOT poll/
+        assert text =~ "manage_task"
+        assert text =~ "sleep"
+
+        # the long commands the ticket names
+        assert text =~ "mix test"
+        assert text =~ "mix precommit"
+        assert text =~ "dialyzer"
+        assert text =~ "git push"
+
+        # the CLI's own background-wait cap
+        assert text =~ "30 minutes"
+
+        # the shared continuation rule ("a turn with no tool call ENDS the
+        # session") still holds when nothing is running — the block must say
+        # the exception is only while a launched task is still running.
+        assert text =~ "exception"
+        assert text =~ ~r/nothing (is )?running/i
       end
     end
   end

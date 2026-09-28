@@ -307,9 +307,11 @@ defmodule Arbiter.Agents.Gemini.ConfigDir do
       fix. A change-request verdict that names no findings is invalid.
     - Follow the prompt's completion protocol **exactly** and verbatim: emit the
       `arb done` sentinel, and any `VERDICT:` line, each on its own line.
-    - Run every tool synchronously. `run_command` must carry
-      `WaitMsBeforeAsync: 10000` — a backgrounded command outlives the turn and
-      the session ends before its output arrives.
+    - Long commands (`mix test`, `mix precommit`, `mix dialyzer`, `git push`)
+      go to the background. Launch them, then end your turn: agy keeps the
+      session alive for up to 30 minutes and wakes you with a system message
+      when the task finishes. Do not poll it with `manage_task`, re-read its
+      log, or `sleep` in a loop.
     - Run one command per `run_command` call. Under a restricted permission
       policy every part of a chained command (`a && b`, `a; b`, `a | b`) must
       be allowed, and a denied command ends your turn. Do not retry a denied

@@ -1061,9 +1061,34 @@ defmodule Arbiter.Worker.ClaudeSession do
     output = get_in(step, ["tool_info", "output"])
 
     case background_task_id(output) do
-      task_id when is_binary(task_id) -> update_async_tasks(session, &Map.put(&1, task_id, true))
-      nil -> session
+      task_id when is_binary(task_id) ->
+        update_async_tasks(session, &Map.put(&1, task_id, step["step_index"]))
+
+      nil ->
+        session
     end
+  end
+
+  # bd-bxwsvo: on agy 1.2.12 the worker no longer polls — it ends its turn and
+  # agy wakes it with a completion system message. The backgrounded
+  # `run_command` step itself then reports DONE with the command's final output
+  # (seen live: step 2 ACTIVE → DONE once the 20s command exited, task id
+  # `<conversation>/task-2`). That DONE is the drain, so it clears whatever the
+  # same step seeded above. The step index is the join key; the system message
+  # carries no content in stream-json.
+  defp track_async_tasks(%{provider: "gemini"} = session, %{
+         "event" => "step_update",
+         "step_update" => %{
+           "step_type" => "tool",
+           "tool_name" => "run_command",
+           "state" => "DONE",
+           "step_index" => step_index
+         }
+       })
+       when is_integer(step_index) do
+    update_async_tasks(session, fn tasks ->
+      Map.reject(tasks, fn {_task_id, seeded_at} -> seeded_at == step_index end)
+    end)
   end
 
   defp track_async_tasks(%{provider: "gemini"} = session, %{
@@ -1083,7 +1108,8 @@ defmodule Arbiter.Worker.ClaudeSession do
         # tracking, or note_tasks_running_at_done/1 flags a wait the worker
         # chose to walk away from as though it were an unnoticed one.
         params["Action"] == "kill" -> update_async_tasks(session, &Map.delete(&1, task_id))
-        status == "RUNNING" -> update_async_tasks(session, &Map.put(&1, task_id, true))
+        # put_new: keep the seeding step index so its DONE still clears it
+        status == "RUNNING" -> update_async_tasks(session, &Map.put_new(&1, task_id, true))
         is_binary(status) -> update_async_tasks(session, &Map.delete(&1, task_id))
         true -> session
       end

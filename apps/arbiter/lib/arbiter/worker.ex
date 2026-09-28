@@ -4511,12 +4511,13 @@ defmodule Arbiter.Worker do
   defp respawn_with_resume(%State{meta: meta} = state, session_id, fingerprint, session) do
     spawn_args = meta && Map.get(meta, :claude_spawn)
 
+    {provider, model} = respawn_routing(state)
+
     prompt =
       resume_continue_prompt(session_stop_category(session), state.task_id,
-        denied_command: Map.get(session, :denied_command_line)
+        denied_command: Map.get(session, :denied_command_line),
+        provider: provider
       )
-
-    {provider, model} = respawn_routing(state)
 
     with %{} = port_args <- spawn_args || :no_spawn_args,
          {:ok, new_args} <- inject_resume_argv(port_args, session_id, prompt, provider),
@@ -4797,7 +4798,56 @@ defmodule Arbiter.Worker do
     """
   end
 
-  def resume_continue_prompt(:async_wait_abandoned, task_id, _opts) do
+  # bd-bxwsvo: agy has no `Monitor` / `TaskOutput` / `Bash`, and on agy 1.2.12
+  # ending the turn with a background task running is the correct way to wait
+  # — the CLI keeps the session alive (up to 30m) and wakes the agent with a
+  # completion message. The only abandoned wait left is a command that outlived
+  # that cap and was killed on exit, so the correction is about the cap, and it
+  # must not reintroduce the polling loop bd-90kjvk burned a Gemini window on.
+  def resume_continue_prompt(:async_wait_abandoned, task_id, opts) do
+    if Keyword.get(opts, :provider) == "gemini" do
+      agy_async_wait_abandoned_prompt(task_id)
+    else
+      claude_async_wait_abandoned_prompt(task_id)
+    end
+  end
+
+  def resume_continue_prompt(_category, task_id, _opts) do
+    """
+    Your previous session for task #{task_id} ended before you finished — you
+    did not print `arb done`. Your work so far is preserved in this worktree.
+    Pick up exactly where you left off, complete the remaining work, and when the
+    task is fully done print `arb done` on its own line.
+    """
+  end
+
+  defp agy_async_wait_abandoned_prompt(task_id) do
+    """
+    Your previous session for task #{task_id} ended before you finished — you
+    did not print `arb done`. Your work so far is preserved in this worktree.
+
+    It ended because a background command was still running when agy's own
+    background-wait cap ran out: agy waits at most 30 minutes after your turn
+    ends for background tasks, then kills them on exit. Ending your turn to wait
+    for a command is correct; a command that needs longer than 30 minutes is
+    not. Do this instead:
+
+      1. FIRST, commit whatever correct work is already in the worktree, before
+         running any long verification. Verification confirms work; it must
+         never be the thing that loses it.
+      2. Narrow the command so it finishes well inside 30 minutes — run the
+         specific test files you changed rather than the whole suite, or split
+         the run into parts.
+      3. Launch it with `run_command`, then end your turn. agy wakes you with a
+         system message when it finishes. Do NOT poll it with `manage_task`,
+         re-read its log, or `sleep` in a loop while it runs.
+
+    Then complete the remaining work, and when the task is fully done print
+    `arb done` on its own line.
+    """
+  end
+
+  defp claude_async_wait_abandoned_prompt(task_id) do
     """
     Your previous session for task #{task_id} ended before you finished — you
     did not print `arb done`. Your work so far is preserved in this worktree.
@@ -4831,15 +4881,6 @@ defmodule Arbiter.Worker do
 
     Now pick up exactly where you left off, complete the remaining work, and
     when the task is fully done print `arb done` on its own line.
-    """
-  end
-
-  def resume_continue_prompt(_category, task_id, _opts) do
-    """
-    Your previous session for task #{task_id} ended before you finished — you
-    did not print `arb done`. Your work so far is preserved in this worktree.
-    Pick up exactly where you left off, complete the remaining work, and when the
-    task is fully done print `arb done` on its own line.
     """
   end
 

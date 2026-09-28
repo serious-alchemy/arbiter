@@ -619,7 +619,7 @@ defmodule Arbiter.Worker.PromptBuilderTest do
   end
 
   describe "adapter-aware async tools prompt (bd-937r5u)" do
-    test "gemini worker prompt contains no Claude tools and instructs polling manage_task status" do
+    test "gemini worker prompt contains no Claude tools and never instructs polling" do
       work_prompt =
         PromptBuilder.prompt_for_task(task(%{}),
           worktree_path: "/tmp/wt-gemini",
@@ -633,12 +633,15 @@ defmodule Arbiter.Worker.PromptBuilderTest do
       refute work_prompt =~ "Bash"
       refute work_prompt =~ "timeout parameter"
       assert work_prompt =~ "WaitMsBeforeAsync"
-      assert work_prompt =~ "Blocking"
+      refute work_prompt =~ "Blocking"
 
-      # Acceptance criterion 3: instructs polling manage_task status until finished
-      assert work_prompt =~ "manage_task status"
-      assert work_prompt =~ "RUNNING"
-      assert work_prompt =~ "terminates the session and discards the work"
+      # bd-bxwsvo: agy 1.2.12 wakes the agent with a completion system message
+      # after the turn ends, so the work prompt says to end the turn and wait
+      # for it — the old "keep calling `manage_task status`" loop is gone.
+      refute work_prompt =~ ~r/keep calling `manage_task status`/
+      assert work_prompt =~ "end your turn"
+      assert work_prompt =~ "finished with result"
+      assert work_prompt =~ ~r/Do NOT poll/
       assert work_prompt =~ "COMMIT correct work BEFORE"
 
       # task prompt
@@ -648,7 +651,7 @@ defmodule Arbiter.Worker.PromptBuilderTest do
         )
 
       refute task_prompt =~ "Monitor"
-      assert task_prompt =~ "manage_task status"
+      assert task_prompt =~ "finished with result"
 
       # review prompt
       review_prompt =
@@ -659,7 +662,7 @@ defmodule Arbiter.Worker.PromptBuilderTest do
 
       refute review_prompt =~ "Monitor"
       refute review_prompt =~ "COMMIT correct work BEFORE"
-      assert review_prompt =~ "manage_task status"
+      assert review_prompt =~ "finished with result"
     end
 
     test "codex worker prompt contains Codex synchronous execution instruction" do

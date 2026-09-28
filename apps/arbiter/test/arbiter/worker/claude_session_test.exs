@@ -1546,6 +1546,23 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
       }
     end
 
+    defp run_command_done_event(step_index) do
+      %{
+        "event" => "step_update",
+        "step_update" => %{
+          "step_index" => step_index,
+          "state" => "DONE",
+          "step_type" => "tool",
+          "tool_name" => "run_command",
+          "tool_info" => %{
+            "name" => "run_command",
+            "parameters" => %{"CommandLine" => "mix test"},
+            "output" => "Finished in 1.0 seconds\n0 failures\r\n"
+          }
+        }
+      }
+    end
+
     test "completing right after a RUNNING status check is recorded on the run" do
       {pid, task_id} = start_worker()
       cwd = tmp_dir!("agy-sj-task-running")
@@ -1667,6 +1684,74 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
 
       failure_summary = Worker.state(pid).meta.failure_summary
       assert failure_summary =~ "#{task_id}/task-1"
+    end
+
+    # bd-bxwsvo: on agy 1.2.12 the worker is told NOT to poll — it ends its
+    # turn and agy wakes it with a completion system message. The backgrounded
+    # `run_command` step itself then reports DONE with the command's final
+    # output (seen live: step 2 ACTIVE → DONE after the 20s command, its task
+    # id `<conversation>/task-2`). That DONE is the drain, so a task finished
+    # that way must drop out of tracking without any `manage_task` call.
+    test "a backgrounded task whose run_command step later reports DONE is not flagged" do
+      {pid, task_id} = start_worker()
+      cwd = tmp_dir!("agy-sj-task-step-done")
+
+      events = [
+        run_command_backgrounded_event(1, "#{task_id}/task-1"),
+        run_command_done_event(1),
+        agy_text_event(2, "DONE", "arb done\n")
+      ]
+
+      {:ok, _port} =
+        ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: stream_json_command(cwd, events),
+          provider: "gemini",
+          model: "gemini-2.5-pro"
+        )
+
+      status =
+        eventually(fn ->
+          case Worker.state(pid) do
+            %{status: :completed} = s -> s.status
+            _ -> nil
+          end
+        end)
+
+      assert status == :completed
+      refute Map.get(Worker.state(pid).meta, :failure_summary)
+    end
+
+    test "a DONE for a different run_command step does not clear a still-running task" do
+      {pid, task_id} = start_worker()
+      cwd = tmp_dir!("agy-sj-task-other-step-done")
+
+      events = [
+        run_command_backgrounded_event(1, "#{task_id}/task-1"),
+        run_command_done_event(2),
+        agy_text_event(3, "DONE", "arb done\n")
+      ]
+
+      {:ok, _port} =
+        ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: stream_json_command(cwd, events),
+          provider: "gemini",
+          model: "gemini-2.5-pro"
+        )
+
+      status =
+        eventually(fn ->
+          case Worker.state(pid) do
+            %{status: :completed} = s -> s.status
+            _ -> nil
+          end
+        end)
+
+      assert status == :completed
+      assert Worker.state(pid).meta.failure_summary =~ "#{task_id}/task-1"
     end
 
     test "a task explicitly killed is not flagged, even without a Status poll" do

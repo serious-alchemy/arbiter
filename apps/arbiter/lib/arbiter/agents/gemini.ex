@@ -262,18 +262,18 @@ defmodule Arbiter.Agents.Gemini do
     end
   end
 
-  # bd-apq1g6 (spike, answered 2026-09-19): agy print mode has NO flag-based
-  # way to force a long command to run synchronously. The documented
-  # synchronous form from agy's own stock system prompt — `"Blocking": true`
-  # with `"WaitMsBeforeAsync": 0` — was invoked verbatim against a `sleep 20`
-  # and agy backgrounded it anyway ("The command has been launched in the
-  # background"), then terminated the task ~5s later on exit. Both arguments
-  # are accepted; neither is honoured as a wait switch. So this text must NOT
-  # promise foreground/synchronous execution — the only remedy with a positive
-  # control behind it is behavioural: bd-40h2to measured 1-2 `manage_task
-  # status` polls in the runs that died against 73 in the run that survived.
-  # Keep the instruction anchored on "never end a turn while a task is
-  # RUNNING", not on the flags.
+  # bd-bxwsvo: the bd-apq1g6 re-run on agy 1.2.12 settled how a long command
+  # can be waited on. `Blocking` is not a `run_command` parameter at all (agy
+  # drops it silently) and `WaitMsBeforeAsync` caps at 10000 ms, so there is no
+  # synchronous form for anything longer. But headless agy now keeps the session
+  # alive after the turn ends — for up to 30m — while a background task runs,
+  # and wakes the agent with a completion system message ("... finished with
+  # result ..."); two probes waited that way with zero polls. The previous text
+  # here said the opposite ("keep calling `manage_task status` … never end the
+  # turn"), and that is what made bd-90kjvk's worker poll ~440 times and burn
+  # 84% of a Gemini 5h window on one D1. So: launch, end the turn, resume on
+  # the message. The version is named in the text so the next agy upgrade that
+  # changes this is visibly out of date rather than silently wrong.
   @impl true
   def async_tool_instruction do
     async_tool_instruction(
@@ -303,41 +303,48 @@ defmodule Arbiter.Agents.Gemini do
       end
 
     """
-    *** ASYNC TOOLS: THIS SESSION IS HEADLESS AND NON-INTERACTIVE: ending your
-    turn ends the session outright, and no notification can ever reach you
-    afterward. The process that would receive it no longer exists. If you
-    background a long command (`mix test`, `mix precommit`, `dialyzer`, or
-    similar) and end your turn to "wait" for it, the run ends on the spot, the
-    command is killed with it, and any uncommitted work is lost. So:
+    *** ASYNC TOOLS (agy 1.2.12): `run_command` waits at most
+    `WaitMsBeforeAsync` (capped at 10000 ms) for a command, then moves it to the
+    background. Long commands — `mix test`, `mix precommit`, `mix dialyzer`,
+    `git push` — will always go to the background. That is expected, and this is
+    how to wait for them:
 
     #{commit_bullet}\
-      * When calling `run_command`, set `"Blocking": true` with
-        `"WaitMsBeforeAsync": 0`. Be aware that this does NOT keep a long
-        command in the foreground: agy accepts both arguments and backgrounds
-        the command anyway once it runs long. Treat every command you start as
-        one that may go to the background, and drain it yourself as below.
-      * NEVER end your turn expecting to be woken up later. There is no "later"
-        in a headless session. If a task goes to the background and is RUNNING,
-        you MUST keep calling `manage_task status` repeatedly within the SAME turn
-        until the task reports finished. Ending a turn while a task reports
-        RUNNING terminates the session and discards the work.
+      * Launch the command with `run_command`, then end your turn. This
+        headless session stays alive while a background task runs (for up to
+        30 minutes) and agy wakes you with a system message saying the task
+        finished with result: read that result, then carry on. This is the
+        one exception to "a turn with no tool call ends the session": it holds
+        only while a task you launched is still running. With nothing running,
+        ending your turn still ends the session.
+      * Do NOT poll. No `manage_task` status calls, no re-reading the task's
+        log, no `sleep` loops while it runs — each one costs a full model turn
+        and changes nothing.
+      * A command that needs longer than 30 minutes is killed when agy gives up
+        waiting. Narrow it instead: run the test files you changed rather than
+        the whole suite.
 
     You MUST read every command's full output #{tail}\
     """
   end
 
   # bd-1zz5mn: agy's OWN markers for "a tool call went async and the turn
-  # ended before it drained" — despite `async_tool_instruction/0` above telling
-  # it not to, agy's `run_command` backgrounds a call once it outlasts
-  # `WaitMsBeforeAsync` regardless, the model ends its turn, and the CLI is
-  # non-interactive: there is no session left to deliver a completion
-  # notification to. None of these match the Claude CLI's wording, so the
-  # shared Claude-shaped signature never fired for agy and every one of these
-  # early-quits was misclassified as a plain `:exited_without_done`.
+  # ended before it drained". None of these match the Claude CLI's wording,
+  # so the shared Claude-shaped signature never fired for agy and every one of
+  # these early-quits was misclassified as a plain `:exited_without_done`.
+  #
+  # bd-bxwsvo: on agy 1.2.12 ending a turn with a background task running is
+  # legitimate — the CLI waits (up to 30m, "root agent idle; waiting up to …")
+  # and wakes the agent, so that idle line is deliberately NOT a marker. What
+  # still means an abandoned wait is the CLI giving up and killing the task on
+  # exit ("terminating N background task(s) on exit", from its stderr). The
+  # launch step's own "Step is still running." / "Status: RUNNING" were markers
+  # before 1.2.12 but are dropped: every long command now backgrounds, so they
+  # open every correct wait too, and would misread an unrelated early quit
+  # after an honoured wait as an abandoned one.
   @async_arm_signature ~r/
-      step[ _]is[ _]still[ _]running
-    | status:[ _]running
-    | was[ _]canceled[ _]with[ _]result:[ _]tool[ _]execution[ _]was[ _]canceled
+      was[ _]canceled[ _]with[ _]result:[ _]tool[ _]execution[ _]was[ _]canceled
+    | terminating[ _]\d+[ _]background[ _]task\(s\)[ _]on[ _]exit
   /ix
 
   @impl true

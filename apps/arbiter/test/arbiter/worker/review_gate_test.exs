@@ -5452,7 +5452,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
       refute prompt =~ "synchronously"
     end
 
-    test "Gemini workspace emits the sync-only instruction block, not the async block",
+    # bd-bxwsvo: agy 1.2.12 has no synchronous form (`Blocking` is dropped,
+    # `WaitMsBeforeAsync` caps at 10000 ms) and wakes the agent on completion,
+    # so the Gemini reviewer gets agy's own launch-and-wait block, never the
+    # Claude headless warning nor a polling loop.
+    test "Gemini workspace emits agy's own async instruction block, not Claude's",
          %{ws: _ws} do
       {:ok, gemini_ws} =
         Ash.create(Workspace, %{
@@ -5470,14 +5474,20 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert prompt =~ "ASYNC TOOLS",
              "Gemini workspace must include the ASYNC TOOLS heading"
 
-      assert prompt =~ "HEADLESS AND NON-INTERACTIVE",
-             "Gemini workspace must include the HEADLESS phrase"
+      refute prompt =~ "HEADLESS AND NON-INTERACTIVE",
+             "Gemini workspace must not get Claude's headless-session warning"
 
-      assert prompt =~ "Blocking",
-             "Gemini workspace must include the Blocking instruction"
+      refute prompt =~ "Blocking",
+             "Gemini workspace must not be told to pass the dropped Blocking flag"
+
+      assert prompt =~ "finished with result",
+             "Gemini workspace must be told to wait for agy's completion message"
+
+      assert prompt =~ "Do NOT poll",
+             "Gemini workspace must be told not to poll a background task"
     end
 
-    test "Gemini workspace emits sync-only instruction in verdict_reprompt_prompt/1" do
+    test "Gemini workspace emits agy's async instruction in verdict_reprompt_prompt/1" do
       {:ok, gemini_ws} =
         Ash.create(Workspace, %{
           name: "gemini-reprompt-ws-#{System.unique_integer([:positive])}",
@@ -5492,7 +5502,8 @@ defmodule Arbiter.Worker.ReviewGateTest do
       prompt = ReviewGate.verdict_reprompt_prompt(state_for(task, gemini_ws), :empty_findings)
 
       assert prompt =~ "ASYNC TOOLS"
-      assert prompt =~ "Blocking"
+      assert prompt =~ "Do NOT poll"
+      refute prompt =~ "Blocking"
     end
 
     test "review_prompt/1 always includes the timeout fallback note (bd-c1qbee)", %{ws: ws} do
