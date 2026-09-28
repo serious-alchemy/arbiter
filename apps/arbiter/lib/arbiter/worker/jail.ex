@@ -65,6 +65,47 @@ defmodule Arbiter.Worker.Jail do
       feature (agy's `/tmp` escape, cross-worker `/tmp` collisions), but it
       means nothing can be handed to or from the host through `/tmp`.
 
+  ## ssh over git inside the jail (bd-5d5mrs)
+
+  `--ro-bind / /` puts the whole filesystem in the jail's unprivileged user
+  namespace, which maps only the calling uid; every other uid (root's
+  `/etc/ssh/ssh_config.d/*.conf`, `/etc/ssh/ssh_config` itself) reads back as
+  `nobody` inside it. OpenSSH's `Include` handling refuses to load a config
+  file it doesn't consider owned by root or the current user (`Bad owner or
+  permissions on ...`), so a bare `ssh`/`git push` over ssh fails inside the
+  jail on every host that has a system ssh config — which is effectively all
+  of them.
+
+  The fix is `ssh_shadow_config/0`: copy the *content* of
+  `/etc/ssh/ssh_config` and everything it `Include`s to a location the
+  calling user does own (rewriting the `Include` lines to point at the
+  copies), and set `GIT_SSH_COMMAND` to `ssh -F <copy>`. This is not the same
+  as agy's own `ssh -F /dev/null` workaround (bd-90kjvk) — that skips the
+  system config; this reproduces it, just from a path that passes the
+  ownership check. `-F` replaces *both* the system and the per-user config,
+  so the mirror's first line is `Include <operator's ~/.ssh/config>` (already
+  self-owned, mirrored unchanged) whenever that file exists, ahead of the
+  mirrored system config — the same precedence `ssh` gives the per-user
+  config by default. No bind is added: the copy lives under the same cache
+  dir `probe/0` already uses, already visible read-only through the blanket
+  `--ro-bind / /` above. A caller-supplied `:env` entry for `GIT_SSH_COMMAND`
+  still wins (set after this default in `wrap/2`'s `env` list).
+
+  Known gap: only `Include` targets that are absolute paths are mirrored (the
+  only form the shipped `/etc/ssh/ssh_config` uses). A config that `Include`s
+  a relative path is passed through unmirrored and would still fail the
+  ownership check if it resolves to a non-self-owned file.
+
+  `ssh_probe/0` / `ssh_status/0` are the availability side: whether `ssh -G`
+  can parse the mirrored config inside a real jail right now, surfaced to
+  `arb server doctor` via `/api/server/agy_write_jail`'s `ssh` key,
+  independent of `status/0` (a caller that never uses ssh transport
+  shouldn't be blocked by a regression here).
+
+  Claude workers do not go through this module at all — `Arbiter.Agents.
+  Claude` never calls `Jail.wrap/2`, so they are not affected by, or fixed
+  by, any of the above.
+
   ## Teardown
 
   `--unshare-pid` makes bwrap's inner process pid 1 of a fresh pid namespace,
@@ -96,7 +137,20 @@ defmodule Arbiter.Worker.Jail do
       apart from Ubuntu's `kernel.apparmor_restrict_unprivileged_userns = 1`
       (defaults: the real `/proc/sys/...` paths; the test suite points these
       at fixtures to simulate each cause without root).
+    * `:worker_jail_ssh_config_path` — the system ssh config `ssh_shadow_config/0`
+      mirrors (default `/etc/ssh/ssh_config`; the test suite points this at a
+      fixture instead of the real file).
+    * `:worker_jail_user_ssh_config_path` — the operator's own ssh config
+      `ssh_shadow_config/0` `Include`s ahead of the mirrored system config
+      (default `~/.ssh/config`; the test suite points this at a fixture
+      instead of the real file).
+    * `:worker_jail_ssh_shadow_root` — where the mirrored copy is written
+      (default `$XDG_CACHE_HOME/arbiter/jail-ssh-shadow`).
+    * `:worker_jail_ssh_available` — `true`/`false` forces `ssh_status/0`'s
+      answer without probing (the test suite sets `false`).
   """
+
+  require Logger
 
   alias Arbiter.Worker.ReleaseEnv
 
@@ -152,7 +206,7 @@ defmodule Arbiter.Worker.Jail do
         home: Keyword.get(opts, :home),
         git: git,
         writable_paths: writable_paths(Keyword.get(opts, :writable_paths, [])),
-        env: toolchain_env ++ Keyword.get(opts, :env, []),
+        env: ssh_env() ++ toolchain_env ++ Keyword.get(opts, :env, []),
         worktree_readonly: Keyword.get(opts, :worktree_readonly, false)
       }
 
@@ -354,6 +408,237 @@ defmodule Arbiter.Worker.Jail do
     end
   end
 
+  # bd-5d5mrs: the default `GIT_SSH_COMMAND` for `wrap/2` — logged so a
+  # jailed worker's transport is visible, not a surprise like agy's own
+  # `ssh -F /dev/null` workaround.
+  defp ssh_env do
+    case ssh_shadow_config() do
+      {:ok, nil} ->
+        []
+
+      {:ok, path} ->
+        Logger.info(
+          "Arbiter.Worker.Jail: git over ssh inside the jail uses " <>
+            "GIT_SSH_COMMAND=\"ssh -F #{path}\" (a self-owned mirror of " <>
+            "#{ssh_config_path()}, bd-5d5mrs)"
+        )
+
+        [{"GIT_SSH_COMMAND", "ssh -F #{path}"}]
+
+      {:error, reason} ->
+        Logger.warning(
+          "Arbiter.Worker.Jail: could not mirror #{ssh_config_path()} for the jail " <>
+            "(#{inspect(reason)}); git over ssh inside the jail may fail on an " <>
+            "ownership check (bd-5d5mrs)"
+        )
+
+        []
+    end
+  end
+
+  @doc """
+  Materialize a self-owned mirror of the system ssh config (the
+  `:worker_jail_ssh_config_path` override, default `/etc/ssh/ssh_config`) and
+  everything it `Include`s, rewriting each `Include` line to point at the
+  mirrored copies, with the operator's own ssh config (the
+  `:worker_jail_user_ssh_config_path` override, default `~/.ssh/config`)
+  `Include`d ahead of it when that file exists — `ssh -F` replaces both the
+  system and per-user config, so this reproduces the per-user config's
+  normal precedence over the system one. Returns the mirrored top-level
+  config's path, suitable for `ssh -F`/`GIT_SSH_COMMAND`.
+
+  `{:ok, nil}` when neither config exists (nothing to mirror, nothing to
+  fix). `{:error, reason}` on an I/O failure reading a source or writing the
+  mirror — never raises.
+  """
+  @spec ssh_shadow_config() :: {:ok, String.t() | nil} | {:error, term()}
+  def ssh_shadow_config do
+    with {:ok, system_shadow} <- mirror_ssh_config(ssh_config_path(), 0) do
+      wrap_with_user_ssh_config(system_shadow)
+    end
+  end
+
+  defp wrap_with_user_ssh_config(system_shadow) do
+    user_path = user_ssh_config_path()
+    real = user_path && Path.expand(user_path)
+
+    case real && File.exists?(real) do
+      true ->
+        shadow = ssh_shadow_path("worker-jail-top-level-ssh-config")
+
+        include_lines =
+          [real, system_shadow]
+          |> Enum.reject(&is_nil/1)
+          |> Enum.map_join("", &"Include #{&1}\n")
+
+        case write_ssh_shadow(shadow, include_lines) do
+          :ok -> {:ok, shadow}
+          {:error, reason} -> {:error, {:ssh_shadow_write_failed, shadow, reason}}
+        end
+
+      _ ->
+        {:ok, system_shadow}
+    end
+  end
+
+  @max_ssh_include_depth 8
+
+  defp mirror_ssh_config(_path, depth) when depth > @max_ssh_include_depth do
+    {:error, :ssh_include_too_deep}
+  end
+
+  defp mirror_ssh_config(path, depth) do
+    real = Path.expand(path)
+
+    case File.read(real) do
+      {:ok, content} ->
+        case rewrite_ssh_includes(content, depth) do
+          {:ok, rewritten} ->
+            shadow = ssh_shadow_path(real)
+
+            case write_ssh_shadow(shadow, rewritten) do
+              :ok -> {:ok, shadow}
+              {:error, reason} -> {:error, {:ssh_shadow_write_failed, shadow, reason}}
+            end
+
+          {:error, reason} ->
+            {:error, reason}
+        end
+
+      {:error, :enoent} ->
+        {:ok, nil}
+
+      {:error, reason} ->
+        {:error, {:ssh_config_unreadable, real, reason}}
+    end
+  rescue
+    e -> {:error, {:ssh_config_mirror_raised, Exception.message(e)}}
+  end
+
+  defp rewrite_ssh_includes(content, depth) do
+    content
+    |> String.split("\n")
+    |> Enum.reduce_while({:ok, []}, fn line, {:ok, acc} ->
+      case rewrite_ssh_include_line(line, depth) do
+        {:ok, rewritten} -> {:cont, {:ok, [rewritten | acc]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, acc} -> {:ok, acc |> Enum.reverse() |> Enum.join("\n")}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @ssh_include_re ~r/^(\s*)[Ii][Nn][Cc][Ll][Uu][Dd][Ee]\s+(.+?)\s*$/
+
+  defp rewrite_ssh_include_line(line, depth) do
+    case Regex.run(@ssh_include_re, line) do
+      nil ->
+        {:ok, line}
+
+      [_, indent, value] ->
+        value
+        |> split_ssh_include_tokens()
+        |> Enum.reduce_while({:ok, []}, fn token, {:ok, acc} ->
+          case ssh_include_token_shadow_paths(token, depth) do
+            {:ok, paths} -> {:cont, {:ok, acc ++ paths}}
+            {:error, reason} -> {:halt, {:error, reason}}
+          end
+        end)
+        |> case do
+          {:ok, []} -> {:ok, ""}
+          {:ok, paths} -> {:ok, indent <> "Include " <> Enum.join(paths, " ")}
+          {:error, reason} -> {:error, reason}
+        end
+    end
+  end
+
+  # A quoted token can contain spaces; ssh_config quoting is otherwise plain.
+  defp split_ssh_include_tokens(value) do
+    ~r/"([^"]*)"|(\S+)/
+    |> Regex.scan(value)
+    |> Enum.map(fn
+      [_, quoted, ""] -> quoted
+      [_, "", bare] -> bare
+    end)
+  end
+
+  # Only absolute-path Include targets are mirrored (the only form
+  # `/etc/ssh/ssh_config` ships with) — see the "Known gap" in the moduledoc.
+  defp ssh_include_token_shadow_paths("/" <> _ = token, depth) do
+    case Path.wildcard(token) do
+      [] ->
+        {:ok, []}
+
+      matches ->
+        Enum.reduce_while(matches, {:ok, []}, fn match, {:ok, acc} ->
+          case mirror_ssh_config(match, depth + 1) do
+            {:ok, nil} -> {:cont, {:ok, acc}}
+            {:ok, shadow} -> {:cont, {:ok, acc ++ [shadow]}}
+            {:error, reason} -> {:halt, {:error, reason}}
+          end
+        end)
+    end
+  end
+
+  defp ssh_include_token_shadow_paths(token, _depth), do: {:ok, [token]}
+
+  # bd-5d5mrs finding 4: several workers can call `wrap/2` concurrently and
+  # share these mirror paths (`ssh_shadow_root/0` isn't per-worker). Writing
+  # to a temp file in the same directory and renaming into place means a
+  # concurrent reader never observes a truncated or partial mirror — and
+  # skipping the write when the content hasn't changed avoids racing a
+  # reader against a rewrite for no reason.
+  defp write_ssh_shadow(shadow, content) do
+    with :ok <- File.mkdir_p(Path.dirname(shadow)) do
+      case File.read(shadow) do
+        {:ok, ^content} ->
+          File.chmod(shadow, 0o644)
+
+        _ ->
+          tmp = shadow <> ".tmp.#{System.unique_integer([:positive])}"
+
+          with :ok <- File.write(tmp, content),
+               # bd-5d5mrs finding 3: OpenSSH's Include ownership check
+               # rejects group/other-writable files; the process umask can
+               # leave File.write's default mode group-writable.
+               :ok <- File.chmod(tmp, 0o644),
+               :ok <- File.rename(tmp, shadow) do
+            :ok
+          else
+            {:error, reason} ->
+              File.rm(tmp)
+              {:error, reason}
+          end
+      end
+    end
+  end
+
+  defp ssh_shadow_path(real), do: Path.join(ssh_shadow_root(), real)
+
+  defp ssh_shadow_root do
+    Application.get_env(:arbiter, :worker_jail_ssh_shadow_root) ||
+      Path.join([cache_base(), "arbiter", "jail-ssh-shadow"])
+  end
+
+  defp ssh_config_path do
+    Application.get_env(:arbiter, :worker_jail_ssh_config_path, "/etc/ssh/ssh_config")
+  end
+
+  defp user_ssh_config_path do
+    case Application.get_env(:arbiter, :worker_jail_user_ssh_config_path) do
+      path when is_binary(path) ->
+        path
+
+      nil ->
+        case System.user_home() do
+          home when is_binary(home) -> Path.join(home, ".ssh/config")
+          _ -> nil
+        end
+    end
+  end
+
   defp fetch_worktree(opts) do
     case Keyword.get(opts, :worktree) do
       wt when is_binary(wt) and wt != "" -> {:ok, Path.expand(wt)}
@@ -394,12 +679,96 @@ defmodule Arbiter.Worker.Jail do
     end
   end
 
-  @doc "Forget the cached probe result."
+  @doc "Forget the cached probe results (write jail and ssh)."
   @spec reset() :: :ok
   def reset do
     _ = :persistent_term.erase({__MODULE__, :status})
+    _ = :persistent_term.erase({__MODULE__, :ssh_status})
     :ok
   end
+
+  @doc """
+  `:ok` when `ssh -G` can parse the mirror `ssh_shadow_config/0` builds,
+  inside a real jail, right now (bd-5d5mrs) — `{:error, reason}` otherwise.
+  The `:worker_jail_ssh_available` override wins; otherwise the first call
+  runs `ssh_probe/0` and the answer is cached until `reset/0`.
+
+  Independent of `status/0`: a host can jail writes fine while this
+  regresses (`/etc/ssh/ssh_config` changed, no `ssh` on `PATH`), and a caller
+  that never uses ssh transport shouldn't be blocked by it.
+  """
+  @spec ssh_status() :: :ok | {:error, term()}
+  def ssh_status do
+    case Application.get_env(:arbiter, :worker_jail_ssh_available) do
+      true ->
+        :ok
+
+      false ->
+        {:error, :disabled_by_config}
+
+      _ ->
+        case :persistent_term.get({__MODULE__, :ssh_status}, :unprobed) do
+          :unprobed ->
+            result = ssh_probe()
+            :persistent_term.put({__MODULE__, :ssh_status}, result)
+            result
+
+          cached ->
+            cached
+        end
+    end
+  end
+
+  @doc "Why `ssh_status/0` is `{:error, _}` (`nil` when it's `:ok`)."
+  @spec diagnose_ssh() :: diagnosis() | nil
+  def diagnose_ssh do
+    case ssh_status() do
+      :ok -> nil
+      {:error, reason} -> explain_ssh(reason)
+    end
+  end
+
+  @doc "Categorize an `ssh_status/0`/`ssh_probe/0` error `reason` into a cause + fix."
+  @spec explain_ssh(term()) :: diagnosis()
+  def explain_ssh(:ssh_not_found) do
+    %{
+      cause: :other,
+      message: "no `ssh` executable on PATH",
+      fix: "Install an ssh client (`dnf install openssh-clients` / `apt install openssh-client`)."
+    }
+  end
+
+  def explain_ssh({:ssh_config_unreadable, path, reason}) do
+    %{cause: :other, message: "could not read #{path}: #{inspect(reason)}", fix: nil}
+  end
+
+  def explain_ssh({:ssh_shadow_write_failed, path, reason}) do
+    %{
+      cause: :other,
+      message: "could not write the ssh config mirror at #{path}: #{inspect(reason)}",
+      fix: "Check that #{Path.dirname(path)} is writable by the user running Arbiter."
+    }
+  end
+
+  def explain_ssh({:ssh_config_rejected, out}) do
+    %{
+      cause: :other,
+      message: "ssh still rejected the mirrored config inside the jail: #{String.trim(out)}",
+      fix:
+        "Check the ownership of Jail.ssh_shadow_config/0's output — it must be owned by the " <>
+          "user running the jail, not root."
+    }
+  end
+
+  def explain_ssh(:disabled_by_config) do
+    %{
+      cause: :other,
+      message: "ssh probing is disabled by the `:arbiter, :worker_jail_ssh_available` override",
+      fix: "Unset that override to let the real probe run."
+    }
+  end
+
+  def explain_ssh(reason), do: %{cause: :other, message: reason_message(reason), fix: nil}
 
   @type cause :: :bwrap_missing | :user_namespaces_disabled | :apparmor_restricted | :other
 
@@ -586,6 +955,53 @@ defmodule Arbiter.Worker.Jail do
       File.exists?(Path.join(outside, "out")) -> {:error, {:outside_write_not_blocked, out}}
       not (out =~ ~r/read-only file system/i) -> {:error, {:outside_write_not_erofs, out}}
       true -> :ok
+    end
+  end
+
+  @doc """
+  Run the ssh-config-parse check for real (uncached), inside a real jail:
+  `ssh_shadow_config/0`'s mirror, then `ssh -F <mirror> -G localhost` inside
+  bwrap (bd-5d5mrs). `:ok` when there's nothing to mirror (no system ssh
+  config) or `ssh -G` parses the mirror cleanly; `{:error, reason}` when
+  there's no `ssh` on `PATH`, the mirror couldn't be built, or `ssh` still
+  rejects it (a regression in the mirror itself, or on this host's ownership
+  rules).
+  """
+  @spec ssh_probe() :: :ok | {:error, term()}
+  def ssh_probe do
+    with {:ok, ssh} <- find_ssh(),
+         {:ok, bwrap} <- find_bwrap(),
+         {:ok, shadow} <- ssh_shadow_config() do
+      case shadow do
+        nil ->
+          :ok
+
+        path ->
+          root = probe_root()
+          :ok = File.mkdir_p(root)
+
+          argv(%{bwrap: bwrap, worktree: root}, [ssh, "-F", path, "-G", "localhost"])
+          |> run_bounded()
+          |> judge_ssh_probe()
+      end
+    end
+  end
+
+  defp judge_ssh_probe(:timeout), do: {:error, :ssh_probe_timeout}
+  defp judge_ssh_probe({:raised, msg}), do: {:error, {:ssh_probe_raised, msg}}
+
+  defp judge_ssh_probe({out, status}) do
+    cond do
+      out =~ ~r/bad owner or permissions/i -> {:error, {:ssh_config_rejected, out}}
+      status != 0 -> {:error, {:ssh_config_parse_failed, status, String.trim(out)}}
+      true -> :ok
+    end
+  end
+
+  defp find_ssh do
+    case System.find_executable("ssh") do
+      nil -> {:error, :ssh_not_found}
+      path -> {:ok, path}
     end
   end
 

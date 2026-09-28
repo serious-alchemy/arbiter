@@ -158,7 +158,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     assert exit_code == 0
     assert {:ok, %{"ok" => true, "checks" => checks}} = Jason.decode(String.trim(out))
     assert is_list(checks)
-    assert length(checks) == 14
+    assert length(checks) == 15
   end
 
   test "version mismatch is non-fatal (exit 0 but shows [fail])" do
@@ -1026,6 +1026,68 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       assert out =~ "[fail] agy write jail"
       assert out =~ "default (repo tonic): agy write jail unavailable"
       assert out =~ "hint:"
+    end
+  end
+
+  # bd-5d5mrs: `ssh -G` inside the jail is a separate probe from the write
+  # jail's — a host can jail writes fine while this regresses (a changed
+  # `/etc/ssh/ssh_config`, no `ssh` on `PATH`), and that would otherwise
+  # only surface as a jailed worker's `git push` quietly failing.
+  describe "agy ssh transport" do
+    test "ok when the host's ssh probe passes" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/agy_write_jail"},
+         {%{"available" => true, "ssh" => %{"available" => true}}, 200}}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] agy ssh transport"
+    end
+
+    test "fails, with the cause and a hint, when the host's ssh probe fails" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/agy_write_jail"},
+         {%{
+            "available" => true,
+            "ssh" => %{
+              "available" => false,
+              "cause" => "other",
+              "message" => "ssh still rejected the mirrored config inside the jail: boom",
+              "fix" => "Check the ownership of Jail.ssh_shadow_config/0's output."
+            }
+          }, 200}}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      # Not fatal and doesn't block readiness on its own.
+      assert exit_code == 0
+      assert out =~ "[fail] agy ssh transport"
+      assert out =~ "ssh still rejected the mirrored config"
+      assert out =~ "hint:"
+      assert out =~ "Check the ownership of Jail.ssh_shadow_config/0's output."
+    end
+
+    test "ok (skipped) when the server predates the ssh key" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/agy_write_jail"}, {%{"available" => true}, 200}}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] agy ssh transport"
     end
   end
 

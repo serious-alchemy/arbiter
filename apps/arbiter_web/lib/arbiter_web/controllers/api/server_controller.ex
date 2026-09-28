@@ -15,6 +15,10 @@ defmodule ArbiterWeb.Api.ServerController do
       running on the server host needs the host's own answer even when no
       workspace currently resolves `:strict`, so `arb server doctor` has
       something to show for AC1/AC6's "can this host jail agy at all" check.
+      The response's `ssh` key is a second, independent diagnosis (bd-5d5mrs,
+      `Arbiter.Worker.Jail.diagnose_ssh/0`) — whether `ssh -G` can parse the
+      jail's mirrored ssh config, since a host can jail writes fine while
+      that regresses (a changed `/etc/ssh/ssh_config`, no `ssh` on `PATH`).
     * `GET /api/server/claude_credentials` — every workspace that runs Claude
       with no setup token (or API key) of its own (bd-80ecol,
       `Arbiter.Agents.Claude.CredentialCheck.workspace_report/0`): the ones
@@ -76,14 +80,16 @@ defmodule ArbiterWeb.Api.ServerController do
   defp format_ip(ip), do: ip |> :inet.ntoa() |> to_string()
 
   def agy_write_jail(conn, _params) do
-    case Jail.diagnose() do
-      nil ->
-        json(conn, %{available: true})
-
-      %{cause: cause, message: message, fix: fix} ->
-        json(conn, %{available: false, cause: Atom.to_string(cause), message: message, fix: fix})
-    end
+    json(
+      conn,
+      Map.put(jail_diagnosis(Jail.diagnose()), :ssh, jail_diagnosis(Jail.diagnose_ssh()))
+    )
   end
+
+  defp jail_diagnosis(nil), do: %{available: true}
+
+  defp jail_diagnosis(%{cause: cause, message: message, fix: fix}),
+    do: %{available: false, cause: Atom.to_string(cause), message: message, fix: fix}
 
   def claude_credentials(conn, _params) do
     %{checked: checked, missing: missing} = CredentialCheck.workspace_report()

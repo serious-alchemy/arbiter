@@ -10,6 +10,7 @@ defmodule Arbiter.Worker.JailTest do
   # async: false — toggles Application env (the availability override and the
   # probe root) and the cached probe result, which other tests read.
   use ExUnit.Case, async: false
+  import Bitwise
 
   alias Arbiter.Worker.Jail
   alias Arbiter.Worker.OsProcess
@@ -281,8 +282,31 @@ defmodule Arbiter.Worker.JailTest do
   describe "wrap/2" do
     setup %{base: base} do
       prev = Application.get_env(:arbiter, :worker_jail_bwrap)
+      prev_ssh_path = Application.get_env(:arbiter, :worker_jail_ssh_config_path)
+      prev_user_ssh_path = Application.get_env(:arbiter, :worker_jail_user_ssh_config_path)
       Application.put_env(:arbiter, :worker_jail_bwrap, "/usr/bin/bwrap-stub")
-      on_exit(fn -> restore_env(:worker_jail_bwrap, prev) end)
+
+      # No system or user ssh config to mirror, so these tests don't touch
+      # the real host's /etc/ssh, ~/.ssh or ~/.cache/arbiter (bd-5d5mrs's
+      # GIT_SSH_COMMAND default is covered by its own describe block below).
+      Application.put_env(
+        :arbiter,
+        :worker_jail_ssh_config_path,
+        Path.join(base, "no-ssh-config")
+      )
+
+      Application.put_env(
+        :arbiter,
+        :worker_jail_user_ssh_config_path,
+        Path.join(base, "no-user-ssh-config")
+      )
+
+      on_exit(fn ->
+        restore_env(:worker_jail_bwrap, prev)
+        restore_env(:worker_jail_ssh_config_path, prev_ssh_path)
+        restore_env(:worker_jail_user_ssh_config_path, prev_user_ssh_path)
+      end)
+
       {:ok, home: Path.join(base, "agy-home")}
     end
 
@@ -372,6 +396,249 @@ defmodule Arbiter.Worker.JailTest do
       assert {:ok, _} = Jail.wrap(["agy"], worktree: base, home: home)
       assert {:ok, %File.Stat{type: :directory}} = File.lstat(Path.join(home, ".arbiter-jail"))
       assert File.ls!(target) == []
+    end
+  end
+
+  # bd-5d5mrs: bwrap's unprivileged userns maps only the calling uid, so a
+  # root-owned ssh config reads back as `nobody` inside the jail and OpenSSH
+  # refuses to load it. `ssh_shadow_config/0` copies the content to a
+  # self-owned path instead of relying on `--ro-bind-data`/FD plumbing.
+  describe "ssh_shadow_config/0" do
+    setup %{base: base} do
+      prev_path = Application.get_env(:arbiter, :worker_jail_ssh_config_path)
+      prev_user_path = Application.get_env(:arbiter, :worker_jail_user_ssh_config_path)
+      prev_root = Application.get_env(:arbiter, :worker_jail_ssh_shadow_root)
+      shadow_root = Path.join(base, "shadow")
+      Application.put_env(:arbiter, :worker_jail_ssh_shadow_root, shadow_root)
+
+      # Isolate from the real operator ~/.ssh/config: without this, a host
+      # that has one (as the reviewing host did) would fail every assertion
+      # below that expects the mirror to contain only the fixture content.
+      Application.put_env(
+        :arbiter,
+        :worker_jail_user_ssh_config_path,
+        Path.join(base, "no-user-config")
+      )
+
+      on_exit(fn ->
+        restore_env(:worker_jail_ssh_config_path, prev_path)
+        restore_env(:worker_jail_user_ssh_config_path, prev_user_path)
+        restore_env(:worker_jail_ssh_shadow_root, prev_root)
+      end)
+
+      {:ok, shadow_root: shadow_root}
+    end
+
+    test "no source config: {:ok, nil}, nothing written", %{base: base, shadow_root: shadow_root} do
+      Application.put_env(:arbiter, :worker_jail_ssh_config_path, Path.join(base, "missing"))
+
+      assert Jail.ssh_shadow_config() == {:ok, nil}
+      refute File.exists?(shadow_root)
+    end
+
+    test "mirrors content verbatim when there is nothing to Include", %{
+      base: base,
+      shadow_root: shadow_root
+    } do
+      source = Path.join(base, "ssh_config")
+      File.write!(source, "Host *\n  ForwardAgent no\n")
+      Application.put_env(:arbiter, :worker_jail_ssh_config_path, source)
+
+      assert {:ok, shadow} = Jail.ssh_shadow_config()
+      assert shadow == Path.join(shadow_root, String.trim_leading(source, "/"))
+      assert File.read!(shadow) == File.read!(source)
+    end
+
+    test "rewrites an absolute Include glob to self-owned copies of the matched files", %{
+      base: base
+    } do
+      confd = Path.join(base, "ssh_config.d")
+      File.mkdir_p!(confd)
+      File.write!(Path.join(confd, "10-a.conf"), "Ciphers aes256-ctr\n")
+      File.write!(Path.join(confd, "20-b.conf"), "MACs hmac-sha2-256\n")
+
+      source = Path.join(base, "ssh_config")
+      File.write!(source, "Host *\nInclude #{confd}/*.conf\n")
+      Application.put_env(:arbiter, :worker_jail_ssh_config_path, source)
+
+      assert {:ok, shadow} = Jail.ssh_shadow_config()
+      [_host_line, include_line] = shadow |> File.read!() |> String.split("\n", trim: true)
+
+      assert ["Include", shadow_a, shadow_b] = String.split(include_line, " ")
+      assert File.read!(shadow_a) == "Ciphers aes256-ctr\n"
+      assert File.read!(shadow_b) == "MACs hmac-sha2-256\n"
+      # Self-owned: written by this (the operator's) process.
+      assert File.stat!(shadow_a).uid == File.stat!(source).uid
+    end
+
+    test "an Include glob that matches nothing drops the line", %{base: base} do
+      source = Path.join(base, "ssh_config")
+      File.write!(source, "Host *\nInclude #{base}/nonexistent-dir/*.conf\nPort 22\n")
+      Application.put_env(:arbiter, :worker_jail_ssh_config_path, source)
+
+      assert {:ok, shadow} = Jail.ssh_shadow_config()
+      assert File.read!(shadow) == "Host *\n\nPort 22\n"
+    end
+
+    test "a relative Include target passes through unmirrored (known gap)", %{base: base} do
+      source = Path.join(base, "ssh_config")
+      File.write!(source, "Include relative/ssh_config.d/*.conf\n")
+      Application.put_env(:arbiter, :worker_jail_ssh_config_path, source)
+
+      assert {:ok, shadow} = Jail.ssh_shadow_config()
+      assert File.read!(shadow) == "Include relative/ssh_config.d/*.conf\n"
+    end
+
+    # bd-5d5mrs finding 2: `ssh -F` replaces *both* the system and per-user
+    # config, so a jailed `git push` to a `Host` alias (or anything else
+    # from the operator's own `~/.ssh/config`) would silently fail unless
+    # that file is Included too.
+    test "Includes the operator's own ssh config ahead of the mirrored system config", %{
+      base: base
+    } do
+      system_source = Path.join(base, "ssh_config")
+      File.write!(system_source, "Host *\n  ForwardAgent no\n")
+      Application.put_env(:arbiter, :worker_jail_ssh_config_path, system_source)
+
+      user_source = Path.join(base, "user_ssh_config")
+      File.write!(user_source, "Host gh-work\n  HostName github.com\n  User git\n")
+      Application.put_env(:arbiter, :worker_jail_user_ssh_config_path, user_source)
+
+      assert {:ok, shadow} = Jail.ssh_shadow_config()
+
+      assert ["Include " <> ^user_source, "Include " <> system_shadow] =
+               shadow |> File.read!() |> String.split("\n", trim: true)
+
+      assert File.read!(system_shadow) == File.read!(system_source)
+    end
+
+    test "no wrapper is written when the operator has no ssh config of their own", %{
+      base: base,
+      shadow_root: shadow_root
+    } do
+      system_source = Path.join(base, "ssh_config")
+      File.write!(system_source, "Host *\n  ForwardAgent no\n")
+      Application.put_env(:arbiter, :worker_jail_ssh_config_path, system_source)
+
+      assert {:ok, shadow} = Jail.ssh_shadow_config()
+      assert shadow == Path.join(shadow_root, String.trim_leading(system_source, "/"))
+      assert File.read!(shadow) == File.read!(system_source)
+    end
+
+    # bd-5d5mrs finding 3: OpenSSH's Include ownership check rejects a
+    # group/other-writable file even when it's self-owned. `File.write/2`
+    # honours the process umask, so a permissive umask (a UPG dev shell's
+    # 002, not the release's 022) would otherwise leave the mirror rejected;
+    # `write_ssh_shadow/2` forces mode 0644 regardless.
+    test "the mirror is written mode 0644", %{base: base} do
+      source = Path.join(base, "ssh_config")
+      File.write!(source, "Host *\n")
+      Application.put_env(:arbiter, :worker_jail_ssh_config_path, source)
+
+      assert {:ok, shadow} = Jail.ssh_shadow_config()
+      assert (File.stat!(shadow).mode &&& 0o777) == 0o644
+    end
+
+    test "an unchanged mirror is left alone; a changed one is rewritten", %{base: base} do
+      source = Path.join(base, "ssh_config")
+      File.write!(source, "Host *\n")
+      Application.put_env(:arbiter, :worker_jail_ssh_config_path, source)
+
+      assert {:ok, shadow} = Jail.ssh_shadow_config()
+      before = File.stat!(shadow)
+
+      assert {:ok, ^shadow} = Jail.ssh_shadow_config()
+      assert File.stat!(shadow).mtime == before.mtime
+
+      File.write!(source, "Host *\n  ForwardAgent no\n")
+      assert {:ok, ^shadow} = Jail.ssh_shadow_config()
+      assert File.read!(shadow) == "Host *\n  ForwardAgent no\n"
+
+      # The atomic rename leaves no `.tmp.*` siblings behind.
+      refute Path.dirname(shadow) |> File.ls!() |> Enum.any?(&(&1 =~ ~r/\.tmp\./))
+    end
+  end
+
+  describe "wrap/2 sets GIT_SSH_COMMAND from the ssh shadow" do
+    setup %{base: base} do
+      prev_bwrap = Application.get_env(:arbiter, :worker_jail_bwrap)
+      prev_path = Application.get_env(:arbiter, :worker_jail_ssh_config_path)
+      prev_user_path = Application.get_env(:arbiter, :worker_jail_user_ssh_config_path)
+      prev_root = Application.get_env(:arbiter, :worker_jail_ssh_shadow_root)
+
+      Application.put_env(:arbiter, :worker_jail_bwrap, "/usr/bin/bwrap-stub")
+      Application.put_env(:arbiter, :worker_jail_ssh_shadow_root, Path.join(base, "shadow"))
+
+      # Isolate from the real operator ~/.ssh/config; individual tests opt
+      # a fixture back in where they need one.
+      Application.put_env(
+        :arbiter,
+        :worker_jail_user_ssh_config_path,
+        Path.join(base, "no-user-ssh-config")
+      )
+
+      on_exit(fn ->
+        restore_env(:worker_jail_bwrap, prev_bwrap)
+        restore_env(:worker_jail_ssh_config_path, prev_path)
+        restore_env(:worker_jail_user_ssh_config_path, prev_user_path)
+        restore_env(:worker_jail_ssh_shadow_root, prev_root)
+      end)
+
+      :ok
+    end
+
+    test "adds GIT_SSH_COMMAND pointing at the mirror when a system config exists", %{
+      base: base
+    } do
+      source = Path.join(base, "ssh_config")
+      File.write!(source, "Host *\n")
+      Application.put_env(:arbiter, :worker_jail_ssh_config_path, source)
+
+      assert {:ok, argv} = Jail.wrap(["git", "push"], worktree: base)
+      setenv = Map.new(flag_pairs(argv, "--setenv"))
+
+      assert {:ok, shadow} = Jail.ssh_shadow_config()
+      assert setenv["GIT_SSH_COMMAND"] == "ssh -F #{shadow}"
+    end
+
+    test "adds nothing when there is no system or user ssh config", %{base: base} do
+      Application.put_env(:arbiter, :worker_jail_ssh_config_path, Path.join(base, "missing"))
+
+      assert {:ok, argv} = Jail.wrap(["git", "push"], worktree: base)
+      setenv = Map.new(flag_pairs(argv, "--setenv"))
+      refute Map.has_key?(setenv, "GIT_SSH_COMMAND")
+    end
+
+    test "adds GIT_SSH_COMMAND pointing at a wrapper when only a user ssh config exists", %{
+      base: base
+    } do
+      Application.put_env(:arbiter, :worker_jail_ssh_config_path, Path.join(base, "missing"))
+
+      user_source = Path.join(base, "user_ssh_config")
+      File.write!(user_source, "Host gh-work\n  HostName github.com\n")
+      Application.put_env(:arbiter, :worker_jail_user_ssh_config_path, user_source)
+
+      assert {:ok, argv} = Jail.wrap(["git", "push"], worktree: base)
+      setenv = Map.new(flag_pairs(argv, "--setenv"))
+
+      assert {:ok, shadow} = Jail.ssh_shadow_config()
+      assert setenv["GIT_SSH_COMMAND"] == "ssh -F #{shadow}"
+      assert File.read!(shadow) == "Include #{user_source}\n"
+    end
+
+    test "an explicit :env GIT_SSH_COMMAND overrides the shadow default", %{base: base} do
+      source = Path.join(base, "ssh_config")
+      File.write!(source, "Host *\n")
+      Application.put_env(:arbiter, :worker_jail_ssh_config_path, source)
+
+      assert {:ok, argv} =
+               Jail.wrap(["git", "push"],
+                 worktree: base,
+                 env: [{"GIT_SSH_COMMAND", "ssh -F /dev/null"}]
+               )
+
+      setenv = Map.new(flag_pairs(argv, "--setenv"))
+      assert setenv["GIT_SSH_COMMAND"] == "ssh -F /dev/null"
     end
   end
 
@@ -528,6 +795,16 @@ defmodule Arbiter.Worker.JailTest do
 
     @describetag :bwrap
 
+    # bd-5d5mrs finding 4: isolate from the operator's real
+    # $XDG_CACHE_HOME/arbiter/jail-ssh-shadow — every `wrap/2` call below
+    # writes the ssh mirror as a side effect, stub command or not.
+    setup %{base: base} do
+      prev_root = Application.get_env(:arbiter, :worker_jail_ssh_shadow_root)
+      Application.put_env(:arbiter, :worker_jail_ssh_shadow_root, Path.join(base, "shadow"))
+      on_exit(fn -> restore_env(:worker_jail_ssh_shadow_root, prev_root) end)
+      :ok
+    end
+
     test "the probe passes on this host" do
       assert Jail.probe() == :ok
     end
@@ -661,6 +938,66 @@ defmodule Arbiter.Worker.JailTest do
              "processes survived in the jail's pid namespace: #{inspect(pids_in_ns(ns))}"
     end
   end
+
+  # bd-5d5mrs: proves both the bug (bd-90kjvk) and the fix against this
+  # host's real /etc/ssh/ssh_config — no fixture, since the bug only exists
+  # because that file is root-owned, which we can't fabricate without root.
+  describe "real bwrap: ssh config parse (bd-5d5mrs)" do
+    if @probe != :ok do
+      @describetag skip: "bwrap write jail unavailable on this host: #{inspect(@probe)}"
+    end
+
+    if is_nil(System.find_executable("ssh")) do
+      @describetag skip: "no ssh executable on this host"
+    end
+
+    @describetag :bwrap
+
+    # bd-5d5mrs finding 4: without this, these tests write into the
+    # operator's real $XDG_CACHE_HOME/arbiter/jail-ssh-shadow, which a
+    # concurrently running jailed ssh (another worker, or a parallel test
+    # run) could read mid-write.
+    setup %{base: base} do
+      prev_root = Application.get_env(:arbiter, :worker_jail_ssh_shadow_root)
+      Application.put_env(:arbiter, :worker_jail_ssh_shadow_root, Path.join(base, "shadow"))
+      on_exit(fn -> restore_env(:worker_jail_ssh_shadow_root, prev_root) end)
+      :ok
+    end
+
+    test "reproduces the bug: plain ssh -G fails inside the jail on the real system config" do
+      {:ok, [bwrap | args]} = Jail.wrap(["ssh", "-G", "localhost"], worktree: System.tmp_dir!())
+      # Force GIT_SSH_COMMAND's default back off so this exercises the bare,
+      # unfixed transport agy hit in bd-90kjvk.
+      args = drop_setenv(args, "GIT_SSH_COMMAND")
+
+      {out, status} = System.cmd(bwrap, args, stderr_to_stdout: true)
+
+      assert status != 0
+      assert out =~ ~r/bad owner or permissions/i
+    end
+
+    test "the real ssh probe passes on this host" do
+      assert Jail.ssh_probe() == :ok
+    end
+
+    test "wrap/2's GIT_SSH_COMMAND default makes ssh -G succeed inside the jail" do
+      {:ok, [bwrap | args]} =
+        Jail.wrap(["sh", "-c", "eval \"$GIT_SSH_COMMAND\" -G localhost"],
+          worktree: System.tmp_dir!()
+        )
+
+      {out, status} = System.cmd(bwrap, args, stderr_to_stdout: true)
+
+      assert status == 0, out
+      refute out =~ ~r/bad owner or permissions/i
+    end
+  end
+
+  defp drop_setenv(["--setenv", key, _ | rest], name) when key == name,
+    do: drop_setenv(rest, name)
+
+  defp drop_setenv([other | rest], name), do: [other | drop_setenv(rest, name)]
+  defp drop_setenv([], _name), do: []
 
   defp pids_in_ns(ns) do
     "/proc"

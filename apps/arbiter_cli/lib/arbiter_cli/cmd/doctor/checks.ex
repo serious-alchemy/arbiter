@@ -38,6 +38,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       check_security_defaults(),
       check_legacy_safe_defaults_key(),
       check_agy_write_jail(),
+      check_agy_ssh_transport(),
       check_claude_worker_credentials(),
       check_provider_accounts(),
       check_account_policy_binding()
@@ -620,6 +621,45 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   # is only non-nil once some policy actually needs the jail, so on an
   # install where nothing resolves agy yet the workspace scan alone can never
   # tell an operator whether the host can jail at all.
+  # bd-5d5mrs: independent of `check_agy_write_jail/0` — a host can jail
+  # writes fine while `ssh -G` still can't parse the jail's mirrored ssh
+  # config (a changed `/etc/ssh/ssh_config`, no `ssh` on `PATH`), and that
+  # would otherwise only surface as a jailed worker's `git push` failing.
+  # `Jail.diagnose_ssh/0` via the same `/api/server/agy_write_jail` payload's
+  # `ssh` key (added alongside the existing `available`/`cause`/`message`/
+  # `fix` shape, so an older CLI reading only those keeps working).
+  defp check_agy_ssh_transport do
+    case Client.get("/api/server/agy_write_jail") do
+      {:ok, %{"ssh" => %{"available" => true}}} ->
+        %Result{
+          name: "agy ssh transport",
+          status: :ok,
+          detail: "ssh config parses inside the jail",
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      {:ok, %{"ssh" => %{"available" => false, "message" => message} = ssh}} ->
+        %Result{
+          name: "agy ssh transport",
+          status: :fail,
+          detail: "git over ssh inside the jail may fail: #{message}",
+          hint: Map.get(ssh, "fix") || "See Arbiter.Worker.Jail.ssh_shadow_config/0 (bd-5d5mrs).",
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      _ ->
+        %Result{
+          name: "agy ssh transport",
+          status: :ok,
+          detail: "server unreachable or predates this check — skipping",
+          fatal: false,
+          blocks_readiness: false
+        }
+    end
+  end
+
   defp host_jail_status do
     case Client.get("/api/server/agy_write_jail") do
       {:ok, %{"available" => true}} ->
