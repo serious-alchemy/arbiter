@@ -56,11 +56,12 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
       ws =
         new_workspace(%{config: %{"tracker" => %{"type" => "github"}}})
 
-      {:ok, _view, html} = live(conn, ~p"/workspaces")
+      {:ok, view, _html} = live(conn, ~p"/workspaces")
+      html = render_async(view)
 
       assert html =~ ws.name
       assert html =~ "tracker: github"
-      assert html =~ ~s(id="workspaces")
+      assert html =~ ~s(id="workspaces-table")
     end
 
     test "creates a workspace via the inline form and navigates to detail", %{conn: conn} do

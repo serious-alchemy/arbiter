@@ -31,8 +31,58 @@ defmodule ArbiterWeb.WorkspaceIndexLive do
      |> assign(:create_error, nil)
      |> assign(:tracker_types, @valid_tracker_types)
      |> assign(:merger_strategies, @valid_merger_strategies)
-     |> refresh()}
+     |> assign(:workspaces, [])
+     |> assign(:workspaces_loading?, true)
+     |> assign(:workspaces_error, nil)
+     |> maybe_load_workspaces()}
   end
+
+  defp maybe_load_workspaces(socket) do
+    if connected?(socket) do
+      socket |> start_async(:load_workspaces, fn -> load_workspaces_async() end)
+    else
+      socket
+    end
+  end
+
+  defp load_workspaces_async do
+    Process.flag(:trap_exit, true)
+    result = __MODULE__.read_workspaces()
+
+    receive do
+      {:EXIT, _view, _reason} -> exit(:shutdown)
+    after
+      0 -> result
+    end
+  end
+
+  def read_workspaces do
+    Workspace
+    |> Ash.Query.sort(name: :asc)
+    |> Ash.read!()
+  end
+
+  @impl true
+  def handle_async(:load_workspaces, {:ok, workspaces}, socket) do
+    {:noreply,
+     socket
+     |> assign(:workspaces, workspaces)
+     |> assign(:workspaces_loading?, false)
+     |> assign(:workspaces_error, nil)}
+  end
+
+  def handle_async(:load_workspaces, {:exit, reason}, socket) do
+    require Logger
+    Logger.error("WorkspaceIndexLive: loading workspaces failed: #{inspect(reason)}")
+
+    {:noreply,
+     socket
+     |> assign(:workspaces_loading?, false)
+     |> assign(:workspaces_error, describe_exit(reason))}
+  end
+
+  defp describe_exit({%{__exception__: true} = error, _stacktrace}), do: Exception.message(error)
+  defp describe_exit(reason), do: Exception.format_exit(reason)
 
   @impl true
   def handle_event("new", _params, socket) do
@@ -73,13 +123,12 @@ defmodule ArbiterWeb.WorkspaceIndexLive do
     end
   end
 
-  defp refresh(socket) do
-    workspaces =
-      Workspace
-      |> Ash.Query.sort(name: :asc)
-      |> Ash.read!()
-
-    assign(socket, :workspaces, workspaces)
+  def handle_event("retry", _params, socket) do
+    {:noreply,
+     socket
+     |> assign(:workspaces_error, nil)
+     |> assign(:workspaces_loading?, true)
+     |> start_async(:load_workspaces, fn -> load_workspaces_async() end)}
   end
 
   defp error_message(%Ash.Error.Invalid{errors: errors}) do
@@ -190,8 +239,47 @@ defmodule ArbiterWeb.WorkspaceIndexLive do
           </.form>
         </div>
 
+        <div
+          :if={@workspaces_error}
+          id="workspaces-error"
+          role="alert"
+          class="flex items-start gap-2 px-3 py-2.5 rounded-[var(--radius-field)] border border-solid border-[var(--arb-fail-edge)] bg-[var(--arb-fail-wash)] text-[12px] text-[var(--arb-fail-text)]"
+        >
+          <Core.icon name="hero-exclamation-triangle-micro" class="size-4 shrink-0 mt-px" />
+          <span class="grow min-w-0 break-words">
+            Could not load workspaces: {@workspaces_error}
+          </span>
+          <button
+            type="button"
+            id="workspaces-retry"
+            phx-click="retry"
+            class={[
+              "shrink-0 px-2 h-[22px] rounded-[var(--radius-field)] cursor-pointer",
+              "border border-solid border-[var(--arb-fail-edge)] bg-[var(--surface-chrome)]",
+              "text-[11px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
+            ]}
+          >
+            Retry
+          </button>
+        </div>
+
+        <div
+          :if={@workspaces_loading? and is_nil(@workspaces_error)}
+          id="workspaces-loading"
+          aria-label="Loading workspaces"
+          aria-busy="true"
+          class="flex flex-col gap-1.5"
+        >
+          <div
+            :for={_n <- 1..5}
+            aria-hidden="true"
+            class="h-[34px] rounded-[var(--radius-field)] border border-solid border-[var(--border-strong)] bg-[var(--surface-card)] animate-pulse"
+          >
+          </div>
+        </div>
+
         <Feedback.empty_state
-          :if={@workspaces == []}
+          :if={not @workspaces_loading? and is_nil(@workspaces_error) and @workspaces == []}
           icon="hero-cog-6-tooth"
           detail="no workspaces yet"
         >
@@ -199,8 +287,8 @@ defmodule ArbiterWeb.WorkspaceIndexLive do
         </Feedback.empty_state>
 
         <ul
-          :if={@workspaces != []}
-          id="workspaces"
+          :if={not @workspaces_loading? and is_nil(@workspaces_error) and @workspaces != []}
+          id="workspaces-table"
           class="m-0 flex list-none flex-col gap-px overflow-hidden rounded-[var(--radius-panel)] border border-solid border-[var(--border-default)] bg-[var(--border-default)] p-0"
         >
           <li :for={ws <- @workspaces} class="bg-[var(--surface-chrome)]">
