@@ -1308,6 +1308,10 @@ defmodule Arbiter.Worker.Watchdog do
       # `maybe_escalate_unresolved/2` and the `nil`-reason recovery branch.
       base_max_polls: Keyword.get(opts, :max_polls, default_max_polls),
       poll_count: 0,
+      # bd-7xtz6w: polls taken while a fix or conflict pass was live on the
+      # ticket. They are excluded from the `max_polls` ceiling — see
+      # `reschedule/1`.
+      pass_polls: 0,
       watch_pipeline: watch_pipeline,
       last_pipeline: nil,
       # The last merge-block reason we escalated, so a blocked merge is
@@ -2727,6 +2731,7 @@ defmodule Arbiter.Worker.Watchdog do
               state
               | max_polls: state.base_max_polls,
                 poll_count: 0,
+                pass_polls: 0,
                 last_escalated_poll: 0,
                 merge_stall_notified: false,
                 merge_fail_count: 0,
@@ -3747,8 +3752,27 @@ defmodule Arbiter.Worker.Watchdog do
   #                       stays Merging, so the boot reconciler or
   #                       `restart/1` can watch it again later.
   # Pass `max_polls: :infinity` to disable.
-  defp reschedule(%{max_polls: cap, poll_count: count, auto_merge: true} = state)
-       when is_integer(cap) and cap > 0 and count + 1 >= cap do
+  #
+  # bd-7xtz6w: a poll taken while a fix or conflict pass is live on the ticket
+  # does not count toward the ceiling. The pass IS the lane making progress —
+  # usually addressing the very review or CI result this watch is waiting on —
+  # so timing it out marks a task that is doing the right thing as stalled
+  # (vs-61rt5z: `{:awaiting_review_timeout, 30}` fired mid-fix-pass). The
+  # count resumes where it left off once the pass ends.
+  defp reschedule(state), do: state |> count_pass_poll() |> reschedule_poll()
+
+  defp count_pass_poll(%{max_polls: cap} = state) when is_integer(cap) do
+    if live_pass(state.task_id, :fix_pass) || live_pass(state.task_id, :conflict_resolver),
+      do: %{state | pass_polls: state.pass_polls + 1},
+      else: state
+  end
+
+  defp count_pass_poll(state), do: state
+
+  defp reschedule_poll(
+         %{max_polls: cap, poll_count: count, pass_polls: held, auto_merge: true} = state
+       )
+       when is_integer(cap) and cap > 0 and count + 1 - held >= cap do
     Logger.warning(
       "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} exceeded " <>
         "#{cap} polls without a terminal outcome (see the next line for " <>
@@ -3765,8 +3789,10 @@ defmodule Arbiter.Worker.Watchdog do
     end
   end
 
-  defp reschedule(%{max_polls: cap, poll_count: count, auto_merge: false} = state)
-       when is_integer(cap) and cap > 0 and count + 1 >= cap do
+  defp reschedule_poll(
+         %{max_polls: cap, poll_count: count, pass_polls: held, auto_merge: false} = state
+       )
+       when is_integer(cap) and cap > 0 and count + 1 - held >= cap do
     Logger.warning(
       "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} exceeded " <>
         "#{cap} polls on a manual-merge lane; parking (the ticket stays Merging)"
@@ -3776,7 +3802,7 @@ defmodule Arbiter.Worker.Watchdog do
     {:stop, :normal, %{state | poll_count: count + 1}}
   end
 
-  defp reschedule(state) do
+  defp reschedule_poll(state) do
     schedule(self(), state.interval_ms)
     {:noreply, %{state | poll_count: state.poll_count + 1}}
   end
