@@ -104,6 +104,26 @@ defmodule Arbiter.ApplicationTest do
       assert config_migrator_ix < dispatch_queue_ix
     end
 
+    test "provider accounts resolve after the migrators and before any workspace dispatch" do
+      # bd-cvvb02: `:provider_accounts_enabled` ships `:auto`, which reads the
+      # migration-backup table (so the schema must be at head) and decides
+      # where every spawn's credential comes from (so it must precede the
+      # boot tasks that reconcile, resume and dispatch work).
+      ids = Application.children(auto_start?: true) |> Enum.map(&child_id/1)
+
+      accounts_ix = Enum.find_index(ids, &(&1 == Arbiter.Boot.ProviderAccounts))
+      config_migrator_ix = Enum.find_index(ids, &(&1 == Arbiter.Boot.ConfigMigrator))
+
+      assert accounts_ix
+      assert config_migrator_ix < accounts_ix
+
+      for later <- [:reconcile_boot_task, :merge_queue_boot_task, :dispatch_queue_boot_task] do
+        assert accounts_ix < Enum.find_index(ids, &(&1 == later))
+      end
+
+      refute Arbiter.Boot.ProviderAccounts in Application.children(auto_start?: false)
+    end
+
     test "the gated boot tasks are absent when auto_start? is false (the test-env default)" do
       ids = Application.children(auto_start?: false) |> Enum.map(&child_id/1)
 

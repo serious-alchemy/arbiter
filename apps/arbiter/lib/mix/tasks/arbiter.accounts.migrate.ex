@@ -28,10 +28,12 @@ defmodule Mix.Tasks.Arbiter.Accounts.Migrate do
 
   Moving a key out of the blob stops a worker spawned from that workspace
   receiving it from the blob. Since P3 (bd-aiodva) the account row supplies it
-  instead, but only once `:provider_accounts_enabled` is `true` — it ships
-  `false`; set `ARBITER_PROVIDER_ACCOUNTS=1` in the server's environment and
-  restart to turn it on. So the order is: migrate every workspace that carries a provider
-  credential, then flip the flag.
+  instead, but only while provider accounts are on. The flag ships `:auto`
+  (bd-cvvb02): the next boot after a migration resolves it on, since the
+  backup rows this writes are the migration record `Arbiter.Accounts.Enablement`
+  looks for; `ARBITER_PROVIDER_ACCOUNTS=1` pins it on and `=0` keeps it off.
+  So the order is: migrate every workspace that carries a provider credential,
+  then restart.
 
   With the flag on, a workspace whose blob still carries a credential that no
   account supplies raises `Arbiter.Accounts.MissingCredentialError` at spawn

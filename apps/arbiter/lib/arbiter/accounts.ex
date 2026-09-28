@@ -11,10 +11,11 @@ defmodule Arbiter.Accounts do
   P3 is §7.5's "Release N+1 — read flip": `Arbiter.Accounts.Credentials`
   reads these tables, and `Arbiter.Agents.Claude.ConfigDir` /
   `Arbiter.Worker.WorkerEnv` source provider credentials from it **when
-  `enabled?/0` is true**. The flag still ships `false`, so by default nothing
-  consults them and `workspaces.encrypted_worker_env` remains the source of
-  truth for every spawn. The blob is untouched either way — flipping the flag
-  back is the whole of the rollback. Deleting the old fallbacks is P4
+  `enabled?/0` is true**. The flag ships `:auto` (bd-cvvb02), which the boot
+  resolves on only for a fresh or already-migrated install; an un-migrated
+  install keeps `workspaces.encrypted_worker_env` as the source of truth for
+  every spawn (`Arbiter.Accounts.Enablement`). Turning the flag off with
+  `ARBITER_PROVIDER_ACCOUNTS=0` is the read-path rollback. Deleting the old fallbacks is P4
   (bd-cblemv).
 
   `Arbiter.Accounts.Census` (P0) is a plain module, not a resource in this
@@ -36,8 +37,12 @@ defmodule Arbiter.Accounts do
   @doc """
   Whether the provider-account tables are the source of truth for credentials.
 
-  §7.5's `:provider_accounts_enabled`. Ships `false`; flipping it is a config
-  change rather than a deploy, in either direction.
+  §7.5's `:provider_accounts_enabled`. Ships `:auto` (bd-cvvb02): the boot
+  resolves it on for a fresh or already-migrated install and holds it off for
+  an un-migrated one that still carries legacy credentials; an explicit
+  `ARBITER_PROVIDER_ACCOUNTS=0/1` always wins. See
+  `Arbiter.Accounts.Enablement`. Either way, changing it is a config change
+  and a restart rather than a deploy.
 
   Consulted by `Arbiter.Agents.Claude.ConfigDir.oauth_token/1` (and therefore
   `env/1`) and `Arbiter.Worker.WorkerEnv.resolve/1` — P3's read flip. With it
@@ -48,7 +53,7 @@ defmodule Arbiter.Accounts do
   first, or turn the flag back off.
   """
   @spec enabled?() :: boolean()
-  def enabled?, do: Application.get_env(:arbiter, :provider_accounts_enabled, false) == true
+  defdelegate enabled?(), to: Arbiter.Accounts.Enablement
 
   alias Arbiter.Accounts.{
     Census,

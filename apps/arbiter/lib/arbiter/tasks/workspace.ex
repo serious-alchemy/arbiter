@@ -138,6 +138,7 @@ defmodule Arbiter.Tasks.Workspace do
       change {Arbiter.Tasks.Workspace.Changes.StartPRPatrol, []}
       change {Arbiter.Tasks.Workspace.Changes.StartReviewPatrol, []}
       change {Arbiter.Tasks.Workspace.Changes.StartMergedPRFinalizer, []}
+      change {Arbiter.Tasks.Workspace.Changes.JoinDefaultProviderAccounts, []}
     end
 
     update :update do

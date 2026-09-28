@@ -291,22 +291,28 @@ defmodule Arbiter.Accounts.MigrateTest do
     end
   end
 
-  describe "the flag still ships off (acceptance 4)" do
-    test ":provider_accounts_enabled ships false and defaults false when unset" do
-      # The shipped default is what an install gets before an operator opts in;
-      # `config/test.exs` overrides it per matrix leg (P3 / bd-aiodva), so the
-      # runtime value is not the thing to assert here.
+  describe "the shipped default (acceptance 4; :auto since bd-cvvb02)" do
+    test ":provider_accounts_enabled ships :auto, and is off until the boot resolves it" do
+      # The shipped default is what an install gets before an operator states
+      # one; `config/test.exs` overrides it per matrix leg (P3 / bd-aiodva), so
+      # the runtime value is not the thing to assert here. The per-population
+      # resolution is covered by `Arbiter.Accounts.EnablementTest`.
       config = File.read!(Path.join(File.cwd!(), "../../config/config.exs"))
-      assert config =~ "config :arbiter, :provider_accounts_enabled, false"
+      assert config =~ "config :arbiter, :provider_accounts_enabled, :auto"
 
       prev = Application.get_env(:arbiter, :provider_accounts_enabled)
-      Application.delete_env(:arbiter, :provider_accounts_enabled)
+      prev_resolution = Application.get_env(:arbiter, :provider_accounts_resolution)
+      Application.put_env(:arbiter, :provider_accounts_enabled, :auto)
+      Application.delete_env(:arbiter, :provider_accounts_resolution)
 
       on_exit(fn ->
         case prev do
           nil -> Application.delete_env(:arbiter, :provider_accounts_enabled)
           value -> Application.put_env(:arbiter, :provider_accounts_enabled, value)
         end
+
+        if prev_resolution,
+          do: Application.put_env(:arbiter, :provider_accounts_resolution, prev_resolution)
       end)
 
       assert Arbiter.Accounts.enabled?() == false

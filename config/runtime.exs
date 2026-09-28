@@ -21,10 +21,11 @@ if config_env() != :test do
     pool_size: String.to_integer(System.get_env("POOL_SIZE") || "5")
 
   # Provider accounts (docs/provider-account-design.md §7.5): config.exs ships
-  # the flag false and a release bakes that in, so the server's environment is
-  # the only place a release install can turn it on (bd-1zceei). Unset leaves
-  # the default alone. Run the migration first — see
-  # docs/provider-accounts-release-runbook.md. Test sets its own in test.exs.
+  # the flag `:auto` and a release bakes that in; the boot resolves it per
+  # install (Arbiter.Accounts.Enablement, bd-cvvb02). The server's environment
+  # is where a release install states it explicitly (bd-1zceei), and an
+  # explicit value always wins over `:auto`. Unset leaves the default alone.
+  # See docs/provider-accounts-release-runbook.md. Test sets its own in test.exs.
   case System.get_env("ARBITER_PROVIDER_ACCOUNTS") do
     unset when unset in [nil, ""] ->
       :ok

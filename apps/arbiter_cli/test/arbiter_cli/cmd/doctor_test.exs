@@ -158,7 +158,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     assert exit_code == 0
     assert {:ok, %{"ok" => true, "checks" => checks}} = Jason.decode(String.trim(out))
     assert is_list(checks)
-    assert length(checks) == 13
+    assert length(checks) == 14
   end
 
   test "version mismatch is non-fatal (exit 0 but shows [fail])" do
@@ -1288,6 +1288,103 @@ defmodule ArbiterCli.Cmd.DoctorTest do
 
       {out, _err, _exit_code} = capture(fn -> Doctor.run([]) end)
       assert out =~ "[ ok ] claude worker credentials"
+      assert out =~ "could not check"
+    end
+  end
+
+  # bd-cvvb02: `:provider_accounts_enabled` ships `:auto`. An un-migrated
+  # install still carrying legacy credentials is held off at boot rather than
+  # raising MissingCredentialError on every spawn; doctor is where the
+  # operator is told, and pointed at the runbook.
+  describe "provider accounts check" do
+    defp accounts_routes(status) do
+      [
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/provider_accounts"},
+         {Map.merge(
+            %{
+              "configured" => "auto",
+              "enabled" => true,
+              "decision" => "no_legacy_credentials",
+              "stranded_workspaces" => [],
+              "server_env_token" => false,
+              "runbook" => "docs/provider-accounts-release-runbook.md"
+            },
+            status
+          ), 200}}
+      ]
+    end
+
+    test "ok on a fresh or migrated install" do
+      stub_routes(accounts_routes(%{"decision" => "migrated"}))
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] provider accounts"
+      assert out =~ "on (migrated)"
+    end
+
+    test "ok when explicitly turned off — the operator's call" do
+      stub_routes(
+        accounts_routes(%{
+          "configured" => "false",
+          "enabled" => false,
+          "decision" => "explicit_off"
+        })
+      )
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] provider accounts"
+      assert out =~ "ARBITER_PROVIDER_ACCOUNTS=0"
+    end
+
+    test "fails, pointing at the runbook, when held off by un-migrated legacy credentials" do
+      stub_routes(
+        accounts_routes(%{
+          "enabled" => false,
+          "decision" => "unmigrated_legacy_credentials",
+          "stranded_workspaces" => ["default", "emricare"],
+          "server_env_token" => true
+        })
+      )
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 1
+      assert out =~ "[fail] provider accounts"
+      assert out =~ "default, emricare"
+      assert out =~ "CLAUDE_CODE_OAUTH_TOKEN"
+      assert out =~ "docs/provider-accounts-release-runbook.md"
+      assert out =~ "ARBITER_PROVIDER_ACCOUNTS=0"
+
+      result = Enum.find(Checks.run(), &(&1.name == "provider accounts"))
+      refute result.blocks_readiness
+    end
+
+    test "fails when accounts are on but a workspace would raise MissingCredentialError" do
+      stub_routes(
+        accounts_routes(%{
+          "configured" => "true",
+          "decision" => "explicit_on",
+          "stranded_workspaces" => ["straggler"]
+        })
+      )
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 1
+      assert out =~ "[fail] provider accounts"
+      assert out =~ "straggler"
+      assert out =~ "MissingCredentialError"
+    end
+
+    test "a server that predates the check is reported as unknown, not as a failure" do
+      stub_routes(accounts_routes(%{}) |> List.delete_at(-1))
+
+      {out, _err, _exit_code} = capture(fn -> Doctor.run([]) end)
+      assert out =~ "[ ok ] provider accounts"
       assert out =~ "could not check"
     end
   end

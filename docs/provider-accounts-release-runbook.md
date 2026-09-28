@@ -5,14 +5,32 @@
 Mix toolchain. On a source checkout, the `mix arbiter.accounts.*` tasks do the
 same things. They are thin wrappers over the functions used here.
 
-`:provider_accounts_enabled` ships **off**. While it is off, workers take
-provider credentials from each workspace's `worker_env` and the legacy token
-chain, exactly as before. To turn it on you must first move each workspace's
-credential into a provider account. This is the P2 migration in
-[`provider-account-design.md`](provider-account-design.md) §7. With the flag on,
-a workspace whose credential was never migrated raises
-`Arbiter.Accounts.MissingCredentialError` at spawn time. It does not dispatch a
-worker without a credential.
+## What the default does (v0.2.0 and later)
+
+`:provider_accounts_enabled` ships as **`auto`**. At every boot the server
+decides it for this install (`Arbiter.Accounts.Enablement`):
+
+| Install | Result |
+| ------- | ------ |
+| **Fresh**: no workspace `worker_env` carries a provider credential, and there is no `CLAUDE_CODE_OAUTH_TOKEN` in the server's environment | **On.** Every workspace, and each one created later, is joined to `<provider>:default`. Add the credential with `arb account rotate claude:default ...`; `arb server doctor` names the exact command. |
+| **Already migrated**: at least one migration backup row that has not been rolled back | **On**, the same as `ARBITER_PROVIDER_ACCOUNTS=1`. Nothing is joined automatically. |
+| **Upgrading, not migrated**: a workspace `worker_env` or the server environment still carries a provider credential, and there is no migration record | **Off.** Workers keep the legacy credential chain, exactly as on v0.1.x. The boot logs a warning naming the workspaces, and `arb server doctor` reports `[fail] provider accounts`. Follow this page to migrate. |
+
+An explicit `ARBITER_PROVIDER_ACCOUNTS` in the server's environment always wins
+over `auto`: `1`/`true` is on and `0`/`false` is off, whatever the database
+says.
+
+"Upgrading, not migrated" stays off instead of refusing to boot. With the flag
+on, a workspace whose credential was never migrated raises
+`Arbiter.Accounts.MissingCredentialError` at spawn time, and a server-env token
+is ignored. Turning it on would stop every dispatch, while the legacy chain
+still authenticates those workers correctly. Refusing to boot would take down
+the dashboard, the API and the running workers for the same condition, and the
+server can keep running through the migration's read-only steps below.
+
+To move such an install onto accounts, first move each workspace's credential
+into a provider account. This is the P2 migration in
+[`provider-account-design.md`](provider-account-design.md) §7.
 
 The migration is the provider-accounts point of no return. Every step below is
 either read-only or has a written undo. Read the whole page before starting.
@@ -125,14 +143,22 @@ output ends with the **migration id** and the exact rollback command. Keep
 both. Add `delete_plan?: true` if you want the plan file removed after a
 successful apply.
 
-### 6. Set the flag
+### 6. Check the flag setting
+
+You do not need to set anything. The migration wrote backup rows, and those are
+the migration record: with `ARBITER_PROVIDER_ACCOUNTS` unset, the next boot
+resolves accounts **on**. Check that `~/.arbiter/arbiter.env` does not still
+say `ARBITER_PROVIDER_ACCOUNTS=0`, because an explicit value always wins.
+
+To pin the setting so that a later rollback of the backup rows cannot change
+it, set it explicitly:
 
 ```sh
 echo "ARBITER_PROVIDER_ACCOUNTS=1" >> ~/.arbiter/arbiter.env
 ```
 
 `config/runtime.exs` reads `ARBITER_PROVIDER_ACCOUNTS` (`1`/`true` for on,
-`0`/`false` for off, unset for the shipped default). Any other value stops the
+`0`/`false` for off, unset for the shipped `auto`). Any other value stops the
 boot rather than guessing. The service reads `arbiter.env` through
 `EnvironmentFile=`, so the new value takes effect on the next start.
 
@@ -144,9 +170,11 @@ systemctl --user start arbiter.service
 
 ### 8. Verify
 
-- **The flag is on.** The dashboard's `/providers` page no longer shows the
-  "Accounts not enabled on this install" banner, and it lists the migrated
-  accounts with their credential health.
+- **The flag is on.** `arb server doctor` reports `[ ok ] provider accounts`
+  with `on (migrated)` or `on (ARBITER_PROVIDER_ACCOUNTS=1)`. The boot log has
+  a `Provider accounts are on` line. The dashboard's `/providers` page no
+  longer shows the "Accounts not enabled on this install" banner, and it lists
+  the migrated accounts with their credential health.
 - **The rows are there.** `arb account list` shows each account from the
   plan.
 - **Workers get their credential from the account.** Dispatch a task in each
@@ -172,9 +200,9 @@ stale credential in a secrets file is a risk of its own.
 There are two levels of rollback. You can use either one, or both.
 
 **Turn the read path off.** Set `ARBITER_PROVIDER_ACCOUNTS=0` in
-`~/.arbiter/arbiter.env`, or delete the line, then run
-`systemctl --user restart arbiter.service`. Workers go back to the legacy
-chain. The migrated keys are **not** in `worker_env` any more, so this only
+`~/.arbiter/arbiter.env`, then run `systemctl --user restart arbiter.service`.
+Workers go back to the legacy chain. Deleting the line is **not** enough: an
+unset variable means `auto`, and a migrated install resolves `auto` to on. The migrated keys are **not** in `worker_env` any more, so this only
 fully restores the old behaviour if the server's own environment still
 supplies the credential. Otherwise also do the next step.
 
@@ -202,7 +230,11 @@ selectors are:
 - `all: true`: every un-restored backup.
 
 The rollback leaves the `provider_accounts` / `provider_credentials` rows in
-place. Nothing reads them with the flag off. The last resort is the database
+place. Nothing reads them with the flag off. Once every backup is restored,
+the install has no migration record, so `auto` also resolves off at the next
+boot, because the workspaces carry their credentials again. Keep
+`ARBITER_PROVIDER_ACCOUNTS=0` anyway: it states the decision instead of
+inferring it. The last resort is the database
 copy from step 4, restored with the server stopped.
 
 ## Source-checkout equivalents

@@ -110,11 +110,15 @@ config :arbiter, :quota,
 # `provider_accounts` / `provider_credentials` instead of the workspace's
 # `worker_env` blob.
 #
-# It is false here by default. P3+ read from accounts when this flag is true;
-# the fallback chain (§7.5) handles flag-off for legacy deployments.
-# P2 (bd-77j2if) was the additive setup: it populates the new tables and writes
-# an encrypted backup row. Rolling P2 back is "drop the new tables".
-config :arbiter, :provider_accounts_enabled, false
+# It ships `:auto` (bd-cvvb02, v0.2.0): `Arbiter.Boot.ProviderAccounts`
+# resolves it at boot — on for a fresh install (and each workspace is joined to
+# `<provider>:default`) or an already-migrated one; held OFF, with a boot
+# warning and an `arb server doctor` [fail], for an un-migrated install that
+# still carries legacy credentials, so an upgrade never starts raising
+# MissingCredentialError. `config/runtime.exs` turns an explicit
+# `ARBITER_PROVIDER_ACCOUNTS=1/0` into `true`/`false`, which always wins. See
+# `Arbiter.Accounts.Enablement` and docs/provider-accounts-release-runbook.md.
+config :arbiter, :provider_accounts_enabled, :auto
 
 config :arbiter, :cloud_code_quota, enabled: true
 

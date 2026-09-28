@@ -1,6 +1,6 @@
 # Provider accounts — extracting credentials, quota and cost out of the workspace
 
-**Status:** implemented behind `:provider_accounts_enabled` (default off) as of 2026-09-23; P0–P11 all shipped. See §7.5 for deviations from the original design.
+**Status:** implemented behind `:provider_accounts_enabled`, P0–P11 all shipped as of 2026-09-23. Since v0.2.0 (bd-cvvb02) the flag ships `auto`: on for fresh and migrated installs, and held off with a doctor `[fail]` for an un-migrated install that still carries legacy credentials. See §7.5 for this and other deviations from the original design.
 **Date:** 2026-09-12
 **Task:** bd-7df8nh · **Tracker:** github:1593
 **Author:** worker
@@ -630,7 +630,8 @@ Three releases, with exactly one point of no return, and it is late:
 
 * **Release N — additive.** Create the three tables, populate them, **leave
   `workspaces.encrypted_worker_env` untouched**. Reads still come from the
-  workspace; `:provider_accounts_enabled` defaults `false`. *Rollback: flip the
+  workspace; `:provider_accounts_enabled` defaults `false` (the plan at the time; the
+  flag ships `auto` since v0.2.0, see below). *Rollback: flip the
   flag or drop the new tables. Zero data loss.*
 * **Release N+1 — read flip.** `ConfigDir.oauth_token/1` and
   `WorkerEnv.resolve/1` source from the account behind the flag. The workspace
@@ -711,6 +712,40 @@ deleting them there would break that path, not just tidy it
 deferred to a new **P13 ("flip") phase** (§10), which also removes the
 `:provider_accounts_enabled` flag and hard-codes the account join as the
 only path.
+
+**What v0.2.0 shipped: the default (bd-cvvb02).** The flag no longer ships
+off. `config/config.exs` ships `:provider_accounts_enabled, :auto`, and
+`config/runtime.exs` turns an explicit `ARBITER_PROVIDER_ACCOUNTS=1/true` or
+`0/false` into a boolean that always wins. `Arbiter.Boot.ProviderAccounts`
+resolves `auto` once per boot (`Arbiter.Accounts.Enablement`). It runs after
+the schema and config migrators and before the boot tasks that dispatch work.
+
+* **Already migrated.** An un-restored `provider_account_migration_backups`
+  row exists → **on**. P2 writes one per workspace it touches, so the backup
+  rows are the migration record, and a full rollback clears it.
+* **Upgrading, not migrated.** No migration record, and a legacy credential
+  exists → **off**. A legacy credential is an allowlisted (§7.3) key in some
+  workspace's `worker_env` that no account supplies to it, or a
+  `CLAUDE_CODE_OAUTH_TOKEN` in the server environment. The boot logs a warning
+  naming the sources, and `arb server doctor` fails (`GET
+  /api/server/provider_accounts`) and points at
+  `docs/provider-accounts-release-runbook.md`.
+* **Fresh.** Neither of the above → **on**. Each workspace is joined to
+  `<provider>:default` for the providers it runs: the existing ones at boot on
+  the primary instance, and each one created later through an after-action
+  on `Workspace.create`.
+
+Staying off was chosen over refusing to boot. With the flag on, the
+un-migrated population would raise `MissingCredentialError` on every spawn and
+drop the server-env token. The legacy chain still serves those workers
+correctly, and a refused boot would take down the dashboard and the running
+fleet for a condition the operator fixes with the runbook's read-only census
+while the server keeps running. Until the boot has resolved `auto`,
+`Accounts.enabled?/0` answers `false`, and so does a `bin/arbiter eval` or
+`mix arbiter.accounts.*` run, since neither starts the boot children. The
+rollback for this release is unchanged: `ARBITER_PROVIDER_ACCOUNTS=0`, or a
+restore of the backup rows. Leaving the variable unset is no longer a
+rollback, because `auto` resolves a migrated install on.
 
 ### 7.6 `ARBITER_CLOAK_KEY` rotation: **keep it separate, and do it first**
 

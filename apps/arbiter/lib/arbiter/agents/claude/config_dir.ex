@@ -218,7 +218,11 @@ defmodule Arbiter.Agents.Claude.ConfigDir do
   when there is none. It never raises: the fleet-wide watchdog and quota
   probes run on this path and are not workspace configuration errors.
 
-  ## With the flag off (the default)
+  ## With the flag off (an un-migrated install, or `ARBITER_PROVIDER_ACCOUNTS=0`)
+
+  Since bd-cvvb02 the flag ships `:auto`, which resolves off for an install
+  that still carries legacy credentials and has no migration record
+  (`Arbiter.Accounts.Enablement`) — the population this chain exists for.
 
   Per the operator's ruling on PR #1947 (bd-cblemv round 2), the flag-off path
   keeps the full pre-P4 legacy chain verbatim, workspace-less spawns included

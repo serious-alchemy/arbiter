@@ -22,10 +22,17 @@ defmodule ArbiterWeb.Api.ServerController do
       and whose Claude dispatch is now held. `arb server doctor` lists them.
       A failed read is a 500, so the doctor reports "could not check" rather
       than a false all-clear.
+    * `GET /api/server/provider_accounts` — how `:provider_accounts_enabled`
+      resolved for this boot (bd-cvvb02, `Arbiter.Accounts.Enablement.status/0`):
+      the configured value (`auto` / `true` / `false`), whether accounts are
+      on, the decision, and — re-read live — every workspace a spawn would
+      raise `MissingCredentialError` for with accounts on. `arb server doctor`
+      fails when an un-migrated install is held off, and points at the runbook.
   """
 
   use ArbiterWeb, :controller
 
+  alias Arbiter.Accounts.Enablement
   alias Arbiter.Agents.Claude.CredentialCheck
   alias Arbiter.Worker.Jail
 
@@ -95,6 +102,19 @@ defmodule ArbiterWeb.Api.ServerController do
             fix: m.fix
           }
         end)
+    })
+  end
+
+  def provider_accounts(conn, _params) do
+    status = Enablement.status()
+
+    json(conn, %{
+      configured: to_string(status.configured),
+      enabled: status.enabled,
+      decision: Atom.to_string(status.decision),
+      stranded_workspaces: status.stranded_workspaces,
+      server_env_token: status.server_env_token?,
+      runbook: Enablement.runbook()
     })
   end
 end
