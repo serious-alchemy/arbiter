@@ -170,7 +170,9 @@ defmodule Arbiter.Worker.PromptBuilder do
   # an imperative `/name` directive, situational skills are listed as available.
   # Empty string when no skills resolved (the common case today).
   defp skills_section(opts) do
-    Arbiter.Skills.Materializer.prompt_section(Keyword.get(opts, :resolved_skills, []))
+    resolved = Keyword.get(opts, :resolved_skills, [])
+    materialized? = Keyword.get(opts, :skills_materialized?, true)
+    Arbiter.Skills.Materializer.prompt_section(resolved, materialized?)
   end
 
   # bd-8cn795: whole-file reads of large modules (or a large PR body / API

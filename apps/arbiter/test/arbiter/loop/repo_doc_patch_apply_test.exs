@@ -102,6 +102,65 @@ defmodule Arbiter.Loop.RepoDocPatchApplyTest do
       assert log =~ "teach this repo"
     end
 
+    # bd-bbbxvp (agy-parity T8): a repo with neither CLAUDE.md nor AGENTS.md
+    # yet has no established convention to defer to, so the patch writes
+    # BOTH — Claude workers read CLAUDE.md, agy workers read AGENTS.md.
+    test "when the repo has neither file, writes both CLAUDE.md and AGENTS.md", %{
+      ws: ws,
+      repo: repo
+    } do
+      refute File.exists?(Path.join(repo, "CLAUDE.md"))
+      refute File.exists?(Path.join(repo, "AGENTS.md"))
+
+      {:ok, row} = Loop.record(candidate(ws, %{}))
+
+      assert {:ok, applied} = Loop.apply_pending(row.id)
+      assert applied.state == :applied
+
+      claude_content = File.read!(Path.join(repo, "CLAUDE.md"))
+      assert claude_content =~ "this repo's tests need FLAG=1 set"
+      assert claude_content =~ "arbiter:begin"
+
+      agents_content = File.read!(Path.join(repo, "AGENTS.md"))
+      assert agents_content =~ "this repo's tests need FLAG=1 set"
+      assert agents_content =~ "arbiter:begin"
+
+      {log, 0} = System.cmd("git", ["-C", repo, "log", "--oneline", "-5"])
+      assert log =~ "teach this repo"
+    end
+
+    # bd-bbbxvp (agy-parity T8, round 2): once the first lesson plants an
+    # Arbiter-managed section in AGENTS.md, a second lesson must land in BOTH
+    # files, not just CLAUDE.md — otherwise agy workers keep reading a stale
+    # AGENTS.md after the first patch.
+    test "a second lesson in the same repo lands in both CLAUDE.md and AGENTS.md", %{
+      ws: ws,
+      repo: repo
+    } do
+      {:ok, row_a} = Loop.record(candidate(ws, %{}))
+      assert {:ok, _applied} = Loop.apply_pending(row_a.id)
+
+      {:ok, row_b} =
+        Loop.record(
+          candidate(ws, %{
+            gist: "teach this repo: also needs FLAG2=1",
+            category: "another repo convention",
+            payload: %{"lesson" => "this repo's tests also need FLAG2=1 set"}
+          })
+        )
+
+      assert {:ok, applied_b} = Loop.apply_pending(row_b.id)
+      assert applied_b.state == :applied
+
+      claude_content = File.read!(Path.join(repo, "CLAUDE.md"))
+      assert claude_content =~ "this repo's tests need FLAG=1 set"
+      assert claude_content =~ "this repo's tests also need FLAG2=1 set"
+
+      agents_content = File.read!(Path.join(repo, "AGENTS.md"))
+      assert agents_content =~ "this repo's tests need FLAG=1 set"
+      assert agents_content =~ "this repo's tests also need FLAG2=1 set"
+    end
+
     test "when CLAUDE.md is a symlink to AGENTS.md, writes through symlink without replacing it",
          %{
            ws: ws,
@@ -137,6 +196,51 @@ defmodule Arbiter.Loop.RepoDocPatchApplyTest do
       agents_content = File.read!(agents_path)
       assert agents_content =~ "this repo's tests need FLAG=1 set"
       assert agents_content =~ "arbiter:begin"
+    end
+
+    # bd-bbbxvp (agy-parity T8): a repo that already maintains an AGENTS.md
+    # and has no CLAUDE.md gets patched under AGENTS.md — agy never
+    # discovers CLAUDE.md, so writing a fresh one there would be invisible to
+    # it while the repo's real AGENTS.md convention drifts out of sync.
+    test "when the repo has AGENTS.md but no CLAUDE.md, writes AGENTS.md instead", %{
+      ws: ws,
+      repo: repo
+    } do
+      agents_path = Path.join(repo, "AGENTS.md")
+      File.write!(agents_path, "# Agent conventions\n")
+      {_, 0} = System.cmd("git", ["-C", repo, "add", "AGENTS.md"])
+      {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "add AGENTS.md"])
+      {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "origin", "main"])
+
+      {:ok, row} = Loop.record(candidate(ws, %{}))
+
+      assert {:ok, applied} = Loop.apply_pending(row.id)
+      assert applied.state == :applied
+
+      refute File.exists?(Path.join(repo, "CLAUDE.md"))
+
+      content = File.read!(agents_path)
+      assert content =~ "this repo's tests need FLAG=1 set"
+      assert content =~ "arbiter:begin"
+    end
+
+    # An existing CLAUDE.md (not a symlink) still wins over AGENTS.md — no
+    # behavior change for the common case.
+    test "when the repo already has a real CLAUDE.md, keeps patching it", %{ws: ws, repo: repo} do
+      claude_path = Path.join(repo, "CLAUDE.md")
+      File.write!(claude_path, "# existing conventions\n")
+      {_, 0} = System.cmd("git", ["-C", repo, "add", "CLAUDE.md"])
+      {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "add CLAUDE.md"])
+      {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "origin", "main"])
+
+      {:ok, row} = Loop.record(candidate(ws, %{}))
+
+      assert {:ok, applied} = Loop.apply_pending(row.id)
+      assert applied.state == :applied
+
+      content = File.read!(claude_path)
+      assert content =~ "this repo's tests need FLAG=1 set"
+      refute File.exists?(Path.join(repo, "AGENTS.md"))
     end
 
     test "a repo not registered in the workspace's repo_paths fails cleanly", %{ws: ws} do

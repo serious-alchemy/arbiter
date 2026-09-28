@@ -573,29 +573,41 @@ defmodule Arbiter.Loop.ApplyTest do
       assert RepoDoc.cap_bytes(%{"cap_bytes" => "120"}) == 4_000
     end
 
-    test "commit_message/3 carries the attribution, and names evictions when there are any" do
+    test "commit_message/4 carries the attribution, and names evictions when there are any" do
       row = %PendingWrite{gist: "teach FLAG=1"}
 
-      msg = RepoDoc.commit_message(row, [], "loop:proposal:p1")
+      msg = RepoDoc.commit_message(row, [], "loop:proposal:p1", ["CLAUDE.md"])
       assert msg =~ "teach FLAG=1"
       assert msg =~ "Applied-by: loop:proposal:p1"
       refute msg =~ "Evicted"
 
-      evicting = RepoDoc.commit_message(row, ["old-a", "old-b"], "loop:proposal:p1")
+      evicting =
+        RepoDoc.commit_message(row, ["old-a", "old-b"], "loop:proposal:p1", ["CLAUDE.md"])
+
       assert evicting =~ "Evicted (over the CLAUDE.md size cap): old-a, old-b"
       assert evicting =~ "Applied-by: loop:proposal:p1"
+
+      both =
+        RepoDoc.commit_message(row, ["old-a"], "loop:proposal:p1", ["CLAUDE.md", "AGENTS.md"])
+
+      assert both =~ "Evicted (over the CLAUDE.md and AGENTS.md size cap): old-a"
     end
 
-    test "pr_description/3 quotes the lesson and any evictions" do
+    test "pr_description/4 quotes the lesson and any evictions" do
       row = %PendingWrite{id: "p1"}
 
-      base = RepoDoc.pr_description(row, "tests need FLAG=1", [])
+      base = RepoDoc.pr_description(row, "tests need FLAG=1", [], ["CLAUDE.md"])
       assert base =~ "proposal `p1`"
       assert base =~ "tests need FLAG=1"
       refute base =~ "Evicted"
 
-      evicting = RepoDoc.pr_description(row, "tests need FLAG=1", ["old-a"])
+      evicting = RepoDoc.pr_description(row, "tests need FLAG=1", ["old-a"], ["CLAUDE.md"])
       assert evicting =~ "**Evicted to stay under the CLAUDE.md size cap:** old-a"
+
+      both =
+        RepoDoc.pr_description(row, "tests need FLAG=1", ["old-a"], ["CLAUDE.md", "AGENTS.md"])
+
+      assert both =~ "**Evicted to stay under the CLAUDE.md and AGENTS.md size cap:** old-a"
     end
   end
 end

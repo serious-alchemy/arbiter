@@ -25,6 +25,14 @@ defmodule Arbiter.Loop.Apply.RepoDoc do
   # files — any payload-supplied override is ignored so no proposal can steer
   # `File.write/2` outside the file this feature exists to patch.
   @doc_path "CLAUDE.md"
+  # bd-bbbxvp (agy-parity T8): agy discovers AGENTS.md, not CLAUDE.md (this
+  # repo's own CLAUDE.md is a symlink to AGENTS.md, already handled by
+  # `resolve_git_add_path/2` — but that only helps repos that HAVE a
+  # CLAUDE.md). A repo with no CLAUDE.md at all is patched under AGENTS.md
+  # too, and once that first write plants an Arbiter-managed section in
+  # AGENTS.md, every later lesson patches both files so they never drift —
+  # see `resolve_doc_paths/2`.
+  @agents_path "AGENTS.md"
   @default_cap_bytes 4_000
 
   @doc """
@@ -82,8 +90,10 @@ defmodule Arbiter.Loop.Apply.RepoDoc do
   end
 
   @doc """
-  The repo-relative file this path patches. Always `CLAUDE.md` — see
-  bd-1cusio: the payload is untrusted and cannot redirect the write.
+  The repo-relative file this path patches, before the AGENTS.md fallback in
+  `resolve_doc_paths/2` decides the actual target(s). Historically always
+  `CLAUDE.md` — see bd-1cusio: the payload is untrusted and cannot redirect
+  the write.
   """
   @spec doc_path(map()) :: String.t()
   def doc_path(_payload), do: @doc_path
@@ -98,19 +108,19 @@ defmodule Arbiter.Loop.Apply.RepoDoc do
   end
 
   @doc "Commit subject/body for the patch, naming anything the cap evicted."
-  @spec commit_message(PendingWrite.t(), [String.t()], String.t()) :: String.t()
-  def commit_message(row, [], attribution),
+  @spec commit_message(PendingWrite.t(), [String.t()], String.t(), [String.t()]) :: String.t()
+  def commit_message(row, [], attribution, _doc_paths),
     do: "#{row.gist}\n\nApplied-by: #{attribution}"
 
-  def commit_message(row, removed, attribution) do
+  def commit_message(row, removed, attribution, doc_paths) do
     "#{row.gist}\n\n" <>
-      "Evicted (over the CLAUDE.md size cap): #{Enum.join(removed, ", ")}\n\n" <>
+      "Evicted (over the #{doc_paths_label(doc_paths)} size cap): #{Enum.join(removed, ", ")}\n\n" <>
       "Applied-by: #{attribution}"
   end
 
   @doc "Merge-request body for the patch, quoting the lesson and any evictions."
-  @spec pr_description(PendingWrite.t(), String.t(), [String.t()]) :: String.t()
-  def pr_description(row, lesson, removed) do
+  @spec pr_description(PendingWrite.t(), String.t(), [String.t()], [String.t()]) :: String.t()
+  def pr_description(row, lesson, removed, doc_paths) do
     base =
       "Repo-scoped lesson from the loop pass (bd-9j2g3x), applied as proposal `#{row.id}`.\n\n#{lesson}"
 
@@ -120,9 +130,11 @@ defmodule Arbiter.Loop.Apply.RepoDoc do
 
       _ ->
         base <>
-          "\n\n**Evicted to stay under the CLAUDE.md size cap:** #{Enum.join(removed, ", ")}"
+          "\n\n**Evicted to stay under the #{doc_paths_label(doc_paths)} size cap:** #{Enum.join(removed, ", ")}"
     end
   end
+
+  defp doc_paths_label(doc_paths), do: Enum.join(doc_paths, " and ")
 
   # ---- worktree-scoped work ------------------------------------------------
 
@@ -157,15 +169,14 @@ defmodule Arbiter.Loop.Apply.RepoDoc do
   defp write_and_open(target, worktree_path, branch, row, lesson, attribution) do
     %{ws: ws, repo: repo, repo_path: repo_path, target_branch: target_branch} = target
 
-    doc_path = doc_path(row.payload)
-    file_path = Path.join(worktree_path, doc_path)
-    current = read(file_path)
+    doc_paths = resolve_doc_paths(worktree_path, doc_path(row.payload))
     cap_bytes = cap_bytes(row.payload)
 
-    with {:ok, %{content: new_content, removed: removed}} <-
-           RepoDocPatch.upsert(current, row.fingerprint, lesson, cap_bytes: cap_bytes),
-         :ok <- File.write(file_path, new_content),
-         :ok <- commit(worktree_path, doc_path, commit_message(row, removed, attribution)),
+    with {:ok, patches} <- upsert_all(worktree_path, doc_paths, row, lesson, cap_bytes),
+         :ok <- write_patches(worktree_path, patches),
+         removed <- patches |> Enum.flat_map(& &1.removed) |> Enum.uniq(),
+         :ok <-
+           commit(worktree_path, doc_paths, commit_message(row, removed, attribution, doc_paths)),
          :ok <- Mergers.prepare_with_repo(ws, repo),
          adapter <- Mergers.for_workspace(ws),
          :ok <- maybe_push(adapter, worktree_path),
@@ -174,7 +185,7 @@ defmodule Arbiter.Loop.Apply.RepoDoc do
              adapter,
              branch,
              row.gist,
-             pr_description(row, lesson, removed),
+             pr_description(row, lesson, removed, doc_paths),
              %{repo_path: repo_path, target_branch: target_branch}
            ) do
       :ok
@@ -182,16 +193,66 @@ defmodule Arbiter.Loop.Apply.RepoDoc do
       {:error, {:entry_too_large, cap_bytes}} ->
         {:error,
          {:invalid,
-          "this lesson (#{byte_size(lesson)} bytes) alone exceeds the #{cap_bytes}-byte CLAUDE.md section cap"}}
+          "this lesson (#{byte_size(lesson)} bytes) alone exceeds the #{cap_bytes}-byte #{doc_paths_label(doc_paths)} section cap"}}
 
       {:error, :invalid_entry_text} ->
         {:error,
          {:invalid,
           "this lesson must be a single line with no arbiter:begin/end markers " <>
-            "(CLAUDE.md entries are rendered one per line)"}}
+            "(#{doc_paths_label(doc_paths)} entries are rendered one per line)"}}
 
       {:error, reason} ->
         {:error, {:invalid, inspect(reason)}}
+    end
+  end
+
+  # Three cases:
+  #   * Neither file exists: write BOTH. Claude workers read CLAUDE.md and agy
+  #     workers read AGENTS.md, and neither convention has been established
+  #     yet to defer to.
+  #   * CLAUDE.md exists as a SEPARATE file (not a symlink resolving to
+  #     AGENTS.md) and AGENTS.md either doesn't exist or is a human-maintained
+  #     file (no Arbiter managed section): patch CLAUDE.md only — writing
+  #     into a human's AGENTS.md would clobber content this feature doesn't
+  #     own, and agy repos that already keep their own rules in AGENTS.md are
+  #     left alone.
+  #   * CLAUDE.md exists as a SEPARATE file and AGENTS.md carries an Arbiter
+  #     managed section (planted by the neither-file case above): patch
+  #     BOTH, so the two stay in sync instead of AGENTS.md going stale after
+  #     the first lesson.
+  #   * CLAUDE.md is a symlink that resolves to AGENTS.md (this repo's own
+  #     layout): they are the same file, so patch CLAUDE.md only —
+  #     `resolve_git_add_path/2` already writes/stages through the symlink,
+  #     and treating them as "both" would just upsert the same content twice.
+  #   * No CLAUDE.md but an AGENTS.md (human or Arbiter-managed) exists:
+  #     patch AGENTS.md only — agy never discovers CLAUDE.md, so writing one
+  #     into a repo whose actual convention is AGENTS.md would be invisible
+  #     to it.
+  defp resolve_doc_paths(worktree_path, default_path) do
+    claude_path = Path.join(worktree_path, default_path)
+    agents_path = Path.join(worktree_path, @agents_path)
+    claude_exists? = File.exists?(claude_path)
+
+    cond do
+      claude_exists? and symlink_to_agents?(claude_path) -> [default_path]
+      claude_exists? and arbiter_managed?(agents_path) -> [default_path, @agents_path]
+      claude_exists? -> [default_path]
+      File.exists?(agents_path) -> [@agents_path]
+      true -> [default_path, @agents_path]
+    end
+  end
+
+  defp symlink_to_agents?(claude_path) do
+    case File.read_link(claude_path) do
+      {:ok, @agents_path} -> true
+      _ -> false
+    end
+  end
+
+  defp arbiter_managed?(file_path) do
+    case File.read(file_path) do
+      {:ok, content} -> String.contains?(content, RepoDocPatch.begin_marker())
+      {:error, _} -> false
     end
   end
 
@@ -202,11 +263,42 @@ defmodule Arbiter.Loop.Apply.RepoDoc do
     end
   end
 
-  defp commit(worktree_path, doc_path, message) do
-    file_path = Path.join(worktree_path, doc_path)
-    add_path = resolve_git_add_path(file_path, doc_path)
+  defp upsert_all(worktree_path, doc_paths, row, lesson, cap_bytes) do
+    doc_paths
+    |> Enum.reduce_while({:ok, []}, fn doc_path, {:ok, acc} ->
+      current = read(Path.join(worktree_path, doc_path))
 
-    with {_, 0} <- System.cmd("git", ["add", add_path], cd: worktree_path, stderr_to_stdout: true),
+      case RepoDocPatch.upsert(current, row.fingerprint, lesson, cap_bytes: cap_bytes) do
+        {:ok, %{content: content, removed: removed}} ->
+          {:cont, {:ok, [%{doc_path: doc_path, content: content, removed: removed} | acc]}}
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, acc} -> {:ok, Enum.reverse(acc)}
+      error -> error
+    end
+  end
+
+  defp write_patches(worktree_path, patches) do
+    Enum.reduce_while(patches, :ok, fn %{doc_path: doc_path, content: content}, :ok ->
+      case File.write(Path.join(worktree_path, doc_path), content) do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, {:write_failed, doc_path, reason}}}
+      end
+    end)
+  end
+
+  defp commit(worktree_path, doc_paths, message) do
+    add_paths =
+      Enum.map(doc_paths, fn doc_path ->
+        resolve_git_add_path(Path.join(worktree_path, doc_path), doc_path)
+      end)
+
+    with {_, 0} <-
+           System.cmd("git", ["add" | add_paths], cd: worktree_path, stderr_to_stdout: true),
          {_, 0} <-
            System.cmd("git", ["commit", "-m", message], cd: worktree_path, stderr_to_stdout: true) do
       :ok

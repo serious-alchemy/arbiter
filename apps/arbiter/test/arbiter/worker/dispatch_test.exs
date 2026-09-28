@@ -883,6 +883,50 @@ defmodule Arbiter.Worker.DispatchTest do
       assert exclude =~ ".claude/skills/"
     end
 
+    # bd-bbbxvp (agy-parity T8): the target dir is provider-aware —
+    # `.agents/skills` for gemini, agy's documented workspace discovery path.
+    test "materializes into .agents/skills for a gemini-provider dispatch",
+         %{tmp: tmp} do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "skill-gemini-ws",
+          prefix: "skg",
+          config: %{"skills" => %{"workspace" => ["gemini-canary"]}}
+        })
+
+      {:ok, _} =
+        Arbiter.Skills.create_skill(%{
+          name: "gemini-canary",
+          body: "# Gemini canary",
+          activation_mode: :always_on
+        })
+
+      repo = seed_repo!(tmp, "geminirepo")
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "gemini-wt"))
+      put_app_env(:arbiter, :repo_paths, %{"gemini/repo" => repo})
+
+      {:ok, task} =
+        Ash.create(Issue, %{title: "gemini work", workspace_id: ws.id, issue_type: :feature})
+
+      {:ok, result} =
+        Dispatch.dispatch(task.id,
+          force: true,
+          repo: "gemini/repo",
+          agent_type: :gemini,
+          start_driver: false,
+          start_claude: true,
+          claude_command: ["sleep", "2"]
+        )
+
+      wt = result.worktree_path
+      assert is_binary(wt)
+
+      canary = Path.join(wt, ".agents/skills/gemini-canary/SKILL.md")
+      assert File.exists?(canary)
+      assert File.read!(canary) =~ "Gemini canary"
+      refute File.exists?(Path.join(wt, ".claude/skills/gemini-canary/SKILL.md"))
+    end
+
     # bd-d5hy7y: an always-on skill is auto-invoked in the worker prompt, while a
     # situational one is advertised but not forced.
     test "work prompt auto-invokes always-on skills and advertises situational ones",
@@ -918,6 +962,51 @@ defmodule Arbiter.Worker.DispatchTest do
       assert prompt =~ "/tdd"
       assert prompt =~ "Available skills"
       assert prompt =~ "/debug"
+    end
+
+    # bd-bbbxvp (agy-parity T8): agy was verified live to discover NOTHING
+    # worktree-local in `--print` (headless) mode
+    # (`Arbiter.MCP.AgentConfig.Gemini`'s moduledoc), so when
+    # `:skills_materialized?` is false the prompt must not claim the skill is
+    # "available in this worktree" — it must inline the required skill's full
+    # body instead, and drop situational skills entirely rather than falsely
+    # advertise them.
+    test "work prompt inlines required skill bodies instead of claiming availability when not materialized",
+         %{ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{title: "agy prompt work", workspace_id: ws.id, issue_type: :feature})
+
+      resolved = [
+        %{
+          skill: %Arbiter.Skills.Skill{
+            name: "tdd",
+            body: "# TDD\nDo the inlined thing.",
+            activation_mode: :always_on,
+            metadata: %{}
+          },
+          activation: :always_on
+        },
+        %{
+          skill: %Arbiter.Skills.Skill{
+            name: "debug",
+            body: "# Debug",
+            activation_mode: :situational,
+            metadata: %{}
+          },
+          activation: :situational
+        }
+      ]
+
+      prompt =
+        Dispatch.prompt_for_task(task,
+          worktree_path: "/tmp/wt",
+          resolved_skills: resolved,
+          skills_materialized?: false
+        )
+
+      refute prompt =~ "available in this worktree"
+      assert prompt =~ "Do the inlined thing."
+      refute prompt =~ "/debug"
     end
 
     # bd-dlv3no: a review dispatch has no per-task worktree, so its Claude cwd

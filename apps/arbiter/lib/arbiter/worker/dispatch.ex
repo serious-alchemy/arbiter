@@ -2303,13 +2303,29 @@ defmodule Arbiter.Worker.Dispatch do
             opts = Keyword.merge(opts, inject_mcp_config(task, worktree_path, opts))
 
             # Resolve the layered effective skill set and materialize ONLY it
-            # into the isolated worktree (bd-d5hy7y). Threaded onto opts so the
-            # work prompt can auto-invoke always-on skills and advertise
+            # into the isolated worktree (bd-d5hy7y), under a provider-aware
+            # directory resolved the same way as the MCP config write above
+            # (bd-bbbxvp / agy-parity T8): `.claude/skills` for claude/codex,
+            # `.agents/skills` for gemini. Threaded onto opts so the work
+            # prompt can auto-invoke always-on skills and advertise
             # situational ones (DECISION C). No-op without a worktree (review /
             # task-type dispatch) — skills only ever land in an isolated tree.
+            skills_provider = resolve_mcp_provider(task, opts)
             resolved_skills = resolve_skills(task, worktree_path, opts)
-            _ = Arbiter.Skills.Materializer.materialize(worktree_path, resolved_skills)
-            opts = Keyword.put(opts, :resolved_skills, resolved_skills)
+
+            _ =
+              Arbiter.Skills.Materializer.materialize(
+                worktree_path,
+                resolved_skills,
+                skills_provider
+              )
+
+            skills_materialized? = skills_discoverable?(skills_provider, opts)
+
+            opts =
+              opts
+              |> Keyword.put(:resolved_skills, resolved_skills)
+              |> Keyword.put(:skills_materialized?, skills_materialized?)
 
             with {:ok, session_opts} <-
                    build_agent_session_opts(task, worker_pid, path, opts),
@@ -3017,6 +3033,18 @@ defmodule Arbiter.Worker.Dispatch do
       Logger.warning("Arbiter.Worker.Dispatch: skill resolution failed: #{inspect(e)}")
       []
   end
+
+  # Whether a materialized skill set actually becomes discoverable to the
+  # resolved provider's CLI, for `prompt_section/2`'s honesty check
+  # (bd-bbbxvp / agy-parity T8). `:gemini` covers two CLIs with different
+  # discovery behaviour (`Arbiter.MCP.AgentConfig.Gemini`'s moduledoc): the
+  # upstream `gemini` CLI does read a worktree-local skills directory, but
+  # `agy` — the CLI Arbiter actually spawns whenever both are on `PATH` — was
+  # verified live to discover NOTHING worktree-local in `--print` (headless)
+  # mode, including a `.agents/skills/<name>/SKILL.md` planted for that exact
+  # probe. So only the non-agy Gemini-family CLI counts as discoverable.
+  defp skills_discoverable?(:gemini, opts), do: GeminiMCP.cli_flavour(opts) == :gemini
+  defp skills_discoverable?(_provider, _opts), do: true
 
   @skill_blocking_flags ~w(--bare --disable-slash-commands)
 
