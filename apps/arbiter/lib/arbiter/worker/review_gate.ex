@@ -2374,15 +2374,19 @@ defmodule Arbiter.Worker.ReviewGate do
         {:continue, state}
 
       {:error, reason} ->
-        next =
-          record_thread(
-            next,
-            :system,
-            "Round #{next.round} re-review could not start",
-            "The reviewer worker could not be spawned: #{inspect(reason)}"
-          )
+        # bd-9zuvbh / bd-7xtz6w: a reviewer that could not be spawned is a
+        # liveness failure of the review, not a finding against the work —
+        # the same `:reviewer_failed` park the first round and a checkout
+        # failure (above) already report. Reporting REQUEST_CHANGES here sent
+        # an implementer to "fix" a branch nobody had found anything wrong
+        # with.
+        message = "ReviewGate could not spawn the round #{next.round} reviewer: #{inspect(reason)}"
 
-        {:done, finish(next, {:request_changes, escalation_payload(next)})}
+        next =
+          record_thread(next, :system, "Round #{next.round} re-review could not start", message)
+
+        record_round(next, :review, :request_changes, message, converged: false)
+        {:done, finish(next, {:parked, :reviewer_failed, message})}
     end
   end
 
@@ -4297,7 +4301,7 @@ defmodule Arbiter.Worker.ReviewGate do
     timeout_ms = resolve_timeout_ms(state.workspace_id, state.timeout_override_ms)
     state = %{state | timeout_ms: timeout_ms}
 
-    case spawn_worker(state, id, role, prompt, command) do
+    case guarded_spawn_worker(state, id, role, prompt, command) do
       {:ok, pid} ->
         Process.send_after(self(), {:timeout, state.round, attempt}, timeout_ms)
 
@@ -4315,6 +4319,35 @@ defmodule Arbiter.Worker.ReviewGate do
       {:error, _reason} = err ->
         err
     end
+  end
+
+  # bd-7xtz6w: a spawn that RAISES (or exits) must come back as the same
+  # `{:error, _}` an ordinary spawn refusal does. Every caller of
+  # `launch_worker/5` already turns that into a recorded round and a verdict;
+  # a raise instead killed the gate between passes — after one pass's timer was
+  # spent and before the next one's was armed, so nothing was left to time out.
+  # That is bd-45tkhq: `Arbiter.Worker.start/1` was momentarily undefined during
+  # a code reload as round 3's reviewer launched, the gate died with no round
+  # row and no verdict, and the author sat waiting on the review gate for 3+
+  # hours.
+  defp guarded_spawn_worker(state, id, role, prompt, command) do
+    spawn_worker(state, id, role, prompt, command)
+  rescue
+    error ->
+      Logger.error(
+        "ReviewGate: spawning #{role} #{id} for task=#{state.task_id} raised: " <>
+          Exception.format(:error, error, __STACKTRACE__)
+      )
+
+      {:error, {:spawn_crashed, Exception.format_banner(:error, error)}}
+  catch
+    kind, reason ->
+      Logger.error(
+        "ReviewGate: spawning #{role} #{id} for task=#{state.task_id} failed: " <>
+          Exception.format(kind, reason, __STACKTRACE__)
+      )
+
+      {:error, {:spawn_crashed, Exception.format_banner(kind, reason)}}
   end
 
   # Start an worker as a distinct worker + claude session under `id`. The

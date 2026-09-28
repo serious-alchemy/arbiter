@@ -593,14 +593,27 @@ defmodule Arbiter.Worker.Dispatch do
   the review gate from round 1. (The other park that wording once covered — a
   worker resident on its open MR — no longer exists since bd-741sid: the
   ticket's Watchdog holds the PR, `Arbiter.Worker.Watchdog.restart_refusal/2`.)
+
+  bd-7xtz6w: that refusal is only ever issued with positive evidence the gate
+  is live (`review_in_flight/2`), and it names the evidence it saw. It no longer
+  sends the operator to `arb worker list` for a wedged pass: a ReviewGate's
+  passes are not ticket-scoped workers, and a wait with no live gate is not
+  refused at all.
   """
   @spec worker_active_message(map() | atom(), String.t()) :: String.t()
-  def worker_active_message(%{waiting_on: :review_gate}, task_id) do
-    "#{task_id}'s run is waiting on the review gate — it is judging the diff " <>
-      "right now. It is not stalled and must not be stopped: stopping it discards " <>
-      "the review in flight and the next dispatch restarts the gate from round 1. " <>
-      "Wait for the verdict, or check `arb worker list` for a fix or conflict pass " <>
-      "(kind `fix_pass` / `conflict`) if something else failed."
+  def worker_active_message(%{waiting_on: :review_gate} = run, task_id) do
+    evidence =
+      case Map.get(run, :review_evidence) do
+        [_ | _] = seen -> " (#{Enum.join(seen, "; ")})"
+        _ -> ""
+      end
+
+    "#{task_id}'s run is waiting on the review gate, and the gate is live#{evidence}. " <>
+      "Stopping it now discards the review in flight and the next dispatch restarts the " <>
+      "gate from round 1. Wait for the verdict: every pass is bounded by the workspace's " <>
+      "`review_gate.timeout_ms`, and a gate that stalls with nothing in flight is stopped " <>
+      "and the task parked (`review_park_reason`), after which `arb worker resume " <>
+      "#{task_id}` re-runs the review."
   end
 
   def worker_active_message(%{state: run_state} = run, _task_id) do
@@ -622,15 +635,9 @@ defmodule Arbiter.Worker.Dispatch do
         {true, nil}
 
       pid ->
-        case safe_worker_run(pid) do
-          nil ->
-            {true, nil}
-
-          %{state: :finished} ->
-            {true, nil}
-
-          run ->
-            {false, worker_active_message(run, task_id)}
+        case active_run(pid, task_id) do
+          nil -> {true, nil}
+          run -> {false, worker_active_message(run, task_id)}
         end
     end
   end
@@ -645,20 +652,102 @@ defmodule Arbiter.Worker.Dispatch do
         :ok
 
       pid ->
-        case safe_worker_run(pid) do
+        case active_run(pid, task_id) do
           nil -> :ok
-          %{state: :finished} -> :ok
           run -> {:error, {:worker_active, run}}
         end
     end
   end
 
-  # The live run's state, as `%{state:, waiting_on:}`, or nil for a worker
-  # that could not answer.
+  # The run that makes a resume unsafe, or nil when there is none: no answer,
+  # a `:finished` run, or — bd-7xtz6w — a run waiting on a review gate that
+  # nothing shows to be alive.
+  defp active_run(pid, task_id) do
+    case safe_worker_run(pid) do
+      nil ->
+        nil
+
+      %{state: :finished} ->
+        nil
+
+      %{waiting_on: :review_gate} = run ->
+        case review_in_flight(task_id, run) do
+          [] ->
+            require Logger
+
+            Logger.warning(
+              "Dispatch: #{task_id}'s run is waiting on the review gate but no gate process " <>
+                "or review pass is live; treating it as stalled and resumable (bd-7xtz6w)"
+            )
+
+            nil
+
+          evidence ->
+            Map.put(run, :review_evidence, evidence)
+        end
+
+      run ->
+        run
+    end
+  end
+
+  @doc """
+  Positive evidence that the review gate a run is waiting on is actually live,
+  as human-readable lines — `[]` when there is none (bd-7xtz6w).
+
+  The run's own `waiting_on: :review_gate` is NOT evidence: it is exactly the
+  state that outlives a gate that died (bd-45tkhq sat in it for 3+ hours with
+  no gate, no reviewer and no timer left). What counts:
+
+    * the ReviewGate process the author spawned (`meta.review_gate_pid`) is
+      alive — its per-pass timers are then still armed, and the author's own
+      liveness check bounds a gate that stalls;
+    * a reviewer or implementer pass for the task is registered and not
+      finished (`meta.reviews` / `meta.revises`, as `Arbiter.Reviews.GateActivity`
+      reads it).
+  """
+  @spec review_in_flight(String.t(), map()) :: [String.t()]
+  def review_in_flight(task_id, run) when is_binary(task_id) do
+    gate =
+      case Map.get(run, :review_gate_pid) do
+        pid when is_pid(pid) ->
+          if Process.alive?(pid), do: ["ReviewGate process #{inspect(pid)} is alive"], else: []
+
+        _ ->
+          []
+      end
+
+    gate ++ Enum.map(live_review_passes(task_id), &"review pass #{&1} is running")
+  end
+
+  defp live_review_passes(task_id) do
+    Worker.list_children()
+    |> Enum.filter(fn worker ->
+      meta = Map.get(worker, :meta) || %{}
+
+      (Map.get(meta, :reviews) == task_id or Map.get(meta, :revises) == task_id) and
+        Map.get(worker, :state) != :finished
+    end)
+    |> Enum.map(&(Map.get(&1, :registry_key) || Map.get(&1, :task_id)))
+  rescue
+    _ -> []
+  catch
+    :exit, _ -> []
+  end
+
+  # The live run's state, as `%{state:, waiting_on:, review_gate_pid:}`, or nil
+  # for a worker that could not answer.
   defp safe_worker_run(pid) do
     case Worker.state(pid) do
-      %{state: run_state} = snap -> %{state: run_state, waiting_on: Map.get(snap, :waiting_on)}
-      _ -> nil
+      %{state: run_state} = snap ->
+        %{
+          state: run_state,
+          waiting_on: Map.get(snap, :waiting_on),
+          review_gate_pid: Map.get(Map.get(snap, :meta) || %{}, :review_gate_pid)
+        }
+
+      _ ->
+        nil
     end
   rescue
     _ -> nil

@@ -2804,6 +2804,27 @@ defmodule Arbiter.Worker do
      )}
   end
 
+  # bd-7xtz6w: the author's own check that its ReviewGate is still judging.
+  # See `check_review_gate/2`. A tick for any gate but the one we are waiting
+  # on — or arriving after the wait ended — is stale and dropped.
+  def handle_info(
+        {:__review_gate_liveness__, gate},
+        %State{state: :waiting, waiting_on: :review_gate, meta: %{review_gate_pid: gate}} = state
+      ) do
+    {:noreply, check_review_gate(state, gate)}
+  end
+
+  def handle_info({:__review_gate_liveness__, _gate}, state), do: {:noreply, state}
+
+  def handle_info(
+        {:__review_gate_probe__, gate, result},
+        %State{state: :waiting, waiting_on: :review_gate, meta: %{review_gate_pid: gate}} = state
+      ) do
+    {:noreply, apply_review_gate_probe(state, gate, result)}
+  end
+
+  def handle_info({:__review_gate_probe__, _gate, _result}, state), do: {:noreply, state}
+
   # bd-a9zb7w: decide (and, if warranted, dispatch) the implementer fix round for
   # a ReviewGate rejection this worker just parked on. Posted to self by
   # `park_rejected/4` so it lands after that call's reply, with the run already
@@ -5770,8 +5791,20 @@ defmodule Arbiter.Worker do
     case spawn_review_gate(parked, branch) do
       # Stash the monitor ref so a ReviewGate that dies before reporting can't
       # silently strand us waiting on the review gate (see the :DOWN handler).
-      {:ok, ref} ->
-        %State{parked | meta: Map.put(parked.meta, :review_gate_ref, ref)}
+      #
+      # bd-7xtz6w: the pid too, and a liveness check of our own. The monitor
+      # alone was not enough in bd-45tkhq — the gate died and the author
+      # stayed waiting for 3+ hours — and a gate that is alive but has
+      # nothing in flight never sends a `:DOWN` at all.
+      {:ok, ref, gate} ->
+        schedule_review_gate_liveness(parked, gate)
+
+        meta =
+          parked.meta
+          |> Map.put(:review_gate_ref, ref)
+          |> Map.put(:review_gate_pid, gate)
+
+        %State{parked | meta: meta}
 
       # Tests drive review_gate_verdict/2 directly (review_spawn: false).
       :skip ->
@@ -5793,7 +5826,7 @@ defmodule Arbiter.Worker do
   # live reviewer subprocess. `:review_command` is the reviewer argv test escape
   # hatch (forwarded to the ReviewGate → ClaudeSession), mirroring dispatch's
   # `:claude_command`.
-  # Spawn the ReviewGate and MONITOR it. Returns {:ok, monitor_ref} so the author
+  # Spawn the ReviewGate and MONITOR it. Returns {:ok, monitor_ref, pid} so the author
   # can detect a ReviewGate that dies before reporting, :skip when review_spawn is
   # off (tests drive review_gate_verdict/2 directly), or :error when it can't start.
   defp spawn_review_gate(%State{meta: meta} = state, branch) do
@@ -5831,7 +5864,7 @@ defmodule Arbiter.Worker do
           # somebody is actually acting on it.
           Arbiter.Tasks.ReviewPark.clear(state.task_id, :review_rerun)
 
-          {:ok, Process.monitor(pid)}
+          {:ok, Process.monitor(pid), pid}
 
         {:error, reason} ->
           Logger.warning(
@@ -5843,6 +5876,155 @@ defmodule Arbiter.Worker do
     else
       :skip
     end
+  end
+
+  # ---- review-gate liveness (bd-7xtz6w) -----------------------------------
+  #
+  # The gate's per-pass timeout is a timer the gate sends ITSELF, so it only
+  # protects a gate that is alive, responsive, and has a pass armed. bd-45tkhq
+  # hit the gap: the gate crashed between passes, its `:DOWN` was never acted
+  # on, and the author sat waiting on the review gate for 3+ hours with nothing
+  # in flight and nothing left that would ever time out. So the author checks
+  # for itself, every `review_gate_liveness_ms` (default 60s):
+  #
+  #   * gate gone             → the same inconclusive park a `:DOWN` gives;
+  #   * gate alive, reviewing → nothing to do; its own timers own the pass;
+  #   * gate alive but with no pass in flight, or not answering at all (wedged
+  #     inside a callback) for longer than one pass's budget
+  #     (`review_gate.timeout_ms`, or `review_gate_stall_ms`) → the gate is
+  #     stopped and the run parks `:reviewer_timeout`.
+  #
+  # Either park finishes the run and leaves the branch, its commits and every
+  # recorded round in place; `arb worker resume <task>` then re-runs the review
+  # with a fresh gate (`Arbiter.Tasks.ReviewPark`).
+  @review_gate_liveness_ms 60_000
+  @review_gate_probe_timeout_ms 5_000
+
+  defp schedule_review_gate_liveness(%State{meta: meta}, gate) do
+    interval =
+      case Map.get(meta || %{}, :review_gate_liveness_ms) do
+        n when is_integer(n) and n > 0 ->
+          n
+
+        _ ->
+          Application.get_env(:arbiter, :review_gate_liveness_ms, @review_gate_liveness_ms)
+      end
+
+    Process.send_after(self(), {:__review_gate_liveness__, gate}, interval)
+  end
+
+  defp check_review_gate(%State{} = state, gate) do
+    if Process.alive?(gate) do
+      probe_review_gate(state, gate)
+      state
+    else
+      Logger.warning(
+        "Worker: ReviewGate for task=#{state.task_id} is gone but its exit was never " <>
+          "handled; the liveness check is escalating it as no_verdict (bd-7xtz6w)"
+      )
+
+      state
+      |> forget_review_gate()
+      |> apply_review_gate_verdict(
+        {:no_verdict,
+         "The ReviewGate process exited before delivering a verdict; the author's " <>
+           "liveness check found it gone. Nothing was merged. Re-run the review with " <>
+           "`arb worker resume #{state.task_id}`."}
+      )
+    end
+  end
+
+  # Ask the gate what it is doing WITHOUT blocking this process: a wedged gate
+  # would otherwise wedge its author too. The answer comes back as
+  # `{:__review_gate_probe__, gate, snapshot | :unresponsive}`.
+  defp probe_review_gate(%State{meta: meta}, gate) do
+    author = self()
+
+    timeout =
+      case Map.get(meta || %{}, :review_gate_liveness_ms) do
+        n when is_integer(n) and n > 0 -> min(@review_gate_probe_timeout_ms, max(n, 250))
+        _ -> @review_gate_probe_timeout_ms
+      end
+
+    spawn(fn ->
+      result =
+        try do
+          GenServer.call(gate, :snapshot, timeout)
+        catch
+          :exit, _ -> :unresponsive
+        end
+
+      send(author, {:__review_gate_probe__, gate, result})
+    end)
+  end
+
+  defp apply_review_gate_probe(%State{} = state, gate, %{reviewer_alive: true}) do
+    schedule_review_gate_liveness(state, gate)
+    %State{state | meta: Map.delete(state.meta, :review_gate_stalled_since)}
+  end
+
+  defp apply_review_gate_probe(%State{meta: meta} = state, gate, result) do
+    now = System.monotonic_time(:millisecond)
+    since = Map.get(meta, :review_gate_stalled_since) || now
+    limit = review_gate_stall_ms(state)
+
+    if now - since >= limit do
+      stall_out_review_gate(state, gate, result, limit)
+    else
+      schedule_review_gate_liveness(state, gate)
+      %State{state | meta: Map.put(meta, :review_gate_stalled_since, since)}
+    end
+  end
+
+  defp review_gate_stall_ms(%State{meta: meta} = state) do
+    case Map.get(meta || %{}, :review_gate_stall_ms) do
+      n when is_integer(n) and n > 0 ->
+        n
+
+      _ ->
+        Arbiter.Worker.ReviewGate.resolve_timeout_ms(
+          state.workspace_id,
+          review_timeout_override(state)
+        )
+    end
+  end
+
+  defp stall_out_review_gate(%State{} = state, gate, result, limit) do
+    what =
+      if result == :unresponsive,
+        do: "has not answered",
+        else: "has had no reviewer or implementer pass in flight"
+
+    minutes = Float.round(limit / 60_000, 1)
+
+    Logger.warning(
+      "Worker: ReviewGate for task=#{state.task_id} #{what} for #{limit}ms (one pass's " <>
+        "budget); stopping it and parking the run as reviewer_timeout (bd-7xtz6w)"
+    )
+
+    state = forget_review_gate(state)
+    Process.exit(gate, :kill)
+
+    apply_review_gate_verdict(
+      state,
+      {:parked, :reviewer_timeout,
+       "The ReviewGate #{what} for #{minutes} min — longer than one pass's budget " <>
+         "(`review_gate.timeout_ms`) — so its own pass timeout could never fire. The gate " <>
+         "was stopped. Nothing was merged; the branch, its commits and every recorded " <>
+         "review round are preserved. Re-run the review with " <>
+         "`arb worker resume #{state.task_id}`."}
+    )
+  end
+
+  # Drop the monitor (flushing any `:DOWN` already queued) so the verdict the
+  # liveness check applies is the only one.
+  defp forget_review_gate(%State{meta: meta} = state) do
+    case Map.get(meta, :review_gate_ref) do
+      ref when is_reference(ref) -> Process.demonitor(ref, [:flush])
+      _ -> :ok
+    end
+
+    %State{state | meta: Map.drop(meta, [:review_gate_ref, :review_gate_stalled_since])}
   end
 
   # Apply a ReviewGate verdict to a run waiting on the review gate.
