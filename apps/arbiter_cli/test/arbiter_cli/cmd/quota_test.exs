@@ -100,6 +100,44 @@ defmodule ArbiterCli.Cmd.QuotaTest do
     end
   end
 
+  # bd-6omte4: what the quota gate is actually holding, whichever provider.
+  describe "arb quota held dispatches" do
+    test "lists each held dispatch with its provider and the gate's reason" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => @snapshot,
+          "held_dispatches" => [
+            %{
+              "task_id" => "bd-aro53b",
+              "intent" => "ReviewGate fix round 2",
+              "provider" => "gemini",
+              "provider_label" => "Antigravity (agy)",
+              "reason" => "Gemini Models 5h quota exhausted",
+              "held_since" => "2026-09-25T05:29:00Z"
+            }
+          ]
+        }
+      })
+
+      {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "Held dispatches"
+      assert out =~ "bd-aro53b  ReviewGate fix round 2  on Antigravity (agy)"
+      assert out =~ "Gemini Models 5h quota exhausted"
+      assert out =~ "2026-09-25T05:29:00Z"
+    end
+
+    test "says none when nothing is held" do
+      stub_get("/api/quota", %{
+        "data" => %{"workspace_id" => "ws-1", "claude" => @snapshot, "held_dispatches" => []}
+      })
+
+      {out, _err, 0} = capture(fn -> ArbiterCli.Cmd.Quota.run([]) end)
+      assert out =~ "Held dispatches: none"
+    end
+  end
+
   describe "arb quota" do
     test "renders 5h and 7d utilization, status, and reset times in text mode" do
       stub_get("/api/quota", %{"data" => %{"workspace_id" => "ws-1", "claude" => @snapshot}})

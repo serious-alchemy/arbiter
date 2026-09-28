@@ -227,6 +227,8 @@ defmodule ArbiterCli.Cmd.Worker do
       IO.puts("Phase:      #{snap["phase_label"] || snap["phase"]}#{agent_note(snap, :long)}")
     end
 
+    emit_held(snap["held"])
+
     # A claude-driven worker has no ticking workflow step; show the live
     # activity derived from its stream instead of a frozen step. See bd-c919xj.
     if snap["claude_session"] do
@@ -400,6 +402,18 @@ defmodule ArbiterCli.Cmd.Worker do
       )
     end)
   end
+
+  # bd-6omte4: the dispatch the quota gate is holding for the ticket — a
+  # ReviewGate fix round refused for quota is queued, not failed.
+  defp emit_held(%{} = held) do
+    IO.puts(
+      "Held:       #{held["intent"]} held for quota on " <>
+        "#{held["provider_label"] || held["provider"]} (#{held["reason"]}), will resume" <>
+        if(held["held_since"], do: " — held since #{held["held_since"]}", else: "")
+    )
+  end
+
+  defp emit_held(_held), do: :ok
 
   # bd-aw2cyt: `agent_live == false` is the whole point of the phase model —
   # a row that looks like work in progress with no process behind it. Only the

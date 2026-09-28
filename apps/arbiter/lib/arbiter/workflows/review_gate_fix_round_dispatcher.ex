@@ -61,6 +61,7 @@ defmodule Arbiter.Workflows.ReviewGateFixRoundDispatcher do
   alias Arbiter.Messages.Escalation
   alias Arbiter.ReviewGate.Round
   alias Arbiter.Worker.Dispatch
+  alias Arbiter.Workflows.DispatchQueue
 
   require Ash.Query
   require Logger
@@ -104,6 +105,12 @@ defmodule Arbiter.Workflows.ReviewGateFixRoundDispatcher do
       (`Arbiter.Worker.CoordinatorOnlyFindings`, bd-6d3h8m) — e.g. a criterion
       that can only be verified post-merge or post-deploy. Another implementer
       round cannot fix what the reviewer already says it cannot fix.
+    * `{:quota_held, hold}` — not a give-up (bd-6omte4): the quota gate held
+      the round. It is queued in the workspace's
+      `Arbiter.Workflows.DispatchQueue` and resumes, same round number and
+      findings, when the provider has headroom — unless the task moves on
+      first. `hold` names the round, the provider and the gate's reason. The
+      page is a `:fix_round_held` report, not `:fix_rounds_exhausted`.
   """
   @type give_up_reason ::
           :budget_exhausted
@@ -111,6 +118,15 @@ defmodule Arbiter.Workflows.ReviewGateFixRoundDispatcher do
           | :fabricated_evidence
           | :needs_coordinator
           | {:dispatch_failed, term()}
+          | {:quota_held, held_round()}
+
+  @typedoc "A fix round the quota gate held (bd-6omte4)."
+  @type held_round :: %{
+          required(:attempt) => pos_integer(),
+          required(:provider) => atom() | nil,
+          required(:reason) => String.t(),
+          optional(:held_since) => DateTime.t() | nil
+        }
 
   @doc """
   Re-attach a fresh implementer to the task's preserved worktree, briefed with
@@ -263,7 +279,7 @@ defmodule Arbiter.Workflows.ReviewGateFixRoundDispatcher do
     total_reviews = total_review_rounds(task_id)
 
     Escalation.post(%{
-      kind: :fix_rounds_exhausted,
+      kind: escalation_kind(reason),
       from_ref: task_id,
       workspace_id: workspace_id,
       task_ref: task_id,
@@ -312,6 +328,9 @@ defmodule Arbiter.Workflows.ReviewGateFixRoundDispatcher do
     _ -> nil
   end
 
+  defp escalation_kind({:quota_held, _hold}), do: :fix_round_held
+  defp escalation_kind(_reason), do: :fix_rounds_exhausted
+
   defp review_count_note(nil), do: "review count unknown"
   defp review_count_note(1), do: "1 review"
   defp review_count_note(n), do: "#{n} reviews"
@@ -330,6 +349,11 @@ defmodule Arbiter.Workflows.ReviewGateFixRoundDispatcher do
   defp subject(task_id, _attempts, :needs_coordinator, _total_reviews),
     do:
       "#{task_id}: ReviewGate findings need coordinator/operator action — no automatic fix round"
+
+  defp subject(task_id, _attempts, {:quota_held, hold}, _total_reviews) do
+    "#{task_id}: ReviewGate fix round #{hold.attempt} held for quota on " <>
+      "#{provider_name(hold)} (#{hold.reason}), will resume"
+  end
 
   defp subject(task_id, attempts, {:dispatch_failed, _}, _total_reviews),
     do: "#{task_id}: ReviewGate fix round FAILED to dispatch after #{attempts} round(s)"
@@ -407,6 +431,27 @@ defmodule Arbiter.Workflows.ReviewGateFixRoundDispatcher do
     """
   end
 
+  defp body(task_id, _attempts, {:quota_held, hold}, _total_reviews) do
+    """
+    Task #{task_id} was rejected by the ReviewGate (REQUEST_CHANGES) and its
+    automatic fix round #{hold.attempt} is held for quota, will resume. It did
+    not fail.
+
+      provider:    #{provider_name(hold)}
+      hold reason: #{hold.reason}#{held_since_line(hold)}
+
+    The quota gate queued the round in the workspace's dispatch queue. When the
+    provider has headroom it resumes as fix round #{hold.attempt}, against the
+    same findings, on the preserved worktree. `arb quota` lists it under held
+    dispatches.
+
+    Nothing to do unless you want the task moving sooner. If the task is
+    re-dispatched, stopped or closed first, the held round is dropped instead
+    of drained: `arb worker stop #{task_id}` cancels it, and a manual
+    `worker_resume` on another provider supersedes it.
+    """
+  end
+
   defp body(task_id, attempts, {:dispatch_failed, reason}, _total_reviews) do
     """
     Task #{task_id} was rejected by the ReviewGate (REQUEST_CHANGES) and the
@@ -420,6 +465,16 @@ defmodule Arbiter.Workflows.ReviewGateFixRoundDispatcher do
     #{attempts_note(attempts)}
     """
   end
+
+  defp provider_name(%{provider: provider}) when is_atom(provider) and not is_nil(provider),
+    do: DispatchQueue.provider_label(provider)
+
+  defp provider_name(_hold), do: "its provider"
+
+  defp held_since_line(%{held_since: %DateTime{} = at}),
+    do: "\n  held since:  #{DateTime.to_iso8601(DateTime.truncate(at, :second))}"
+
+  defp held_since_line(_hold), do: ""
 
   # Mirrors bd-di4t6d's note: "0 rounds" reads like the fleet declined to try.
   # It did try — the counter records fix rounds that previously *ran*, so a

@@ -21,6 +21,61 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
     {:ok, conn: put_req_header(conn, "accept", "application/json"), ws: ws}
   end
 
+  # bd-6omte4: a ReviewGate fix round the quota gate queued reads as held,
+  # with its provider and the gate's reason — not as the rejected run's failure.
+  describe "GET /api/workers/:task_id for a ticket with a held dispatch" do
+    test "reads held_for_quota, naming the round, provider and reason", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "held-round", workspace_id: ws.id})
+
+      {:ok, _run} =
+        Ash.create(Run, %{
+          task_id: task.id,
+          repo: "arbiter",
+          workspace_id: ws.id,
+          state: :finished,
+          outcome: :failed,
+          failure_reason: "review_gate_rejected",
+          started_at: DateTime.utc_now()
+        })
+
+      :ok =
+        Arbiter.Workflows.DispatchQueue.hold(
+          ws.id,
+          task.id,
+          [resume: true, review_gate_fix_round_attempts: 2],
+          %{window: "5h", phrase: "quota exhausted"},
+          :gemini
+        )
+
+      on_exit(fn -> stop_queue(ws.id) end)
+
+      body = conn |> get(~p"/api/workers/#{task.id}") |> json_response(200)
+
+      assert body["phase"] == "held_for_quota"
+      assert body["phase_label"] == "held for quota, will resume"
+      assert body["held"]["intent"] == "ReviewGate fix round 2"
+      assert body["held"]["fix_round"] == 2
+      assert body["held"]["provider"] == "gemini"
+      assert body["held"]["provider_label"] == "Antigravity (agy)"
+      assert body["held"]["reason"] == "quota exhausted"
+      assert is_binary(body["held"]["held_since"])
+    end
+
+    test "a ticket with nothing held carries held: null", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "not-held", workspace_id: ws.id})
+      {:ok, _pid} = Worker.start(task_id: task.id, repo: "test/repo")
+
+      body = conn |> get(~p"/api/workers/#{task.id}") |> json_response(200)
+      assert Map.has_key?(body, "held")
+      assert body["held"] == nil
+    end
+  end
+
+  defp stop_queue(ws_id) do
+    if q = Arbiter.Workflows.DispatchQueueSupervisor.whereis(ws_id),
+      do: Arbiter.ProcessTeardown.stop_child(Arbiter.Workflows.DispatchQueueSupervisor, q)
+  end
+
   describe "GET /api/workers/:task_id" do
     test "returns the snapshot including output_lines for a running worker",
          %{conn: conn, ws: ws} do

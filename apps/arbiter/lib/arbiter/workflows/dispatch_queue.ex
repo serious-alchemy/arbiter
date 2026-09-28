@@ -59,6 +59,21 @@ defmodule Arbiter.Workflows.DispatchQueue do
       bypasses the breaker entirely and requeues unchanged: a long quota wait
       can never be mistaken for a runaway.
 
+  ## A held intent for a task that has moved on is dropped, not replayed (bd-6omte4)
+
+  Each item records the task's `state` and newest run when it was held. A
+  drain refuses an item whose task has since been closed, has a live worker,
+  has a newer run (it was re-dispatched) or changed state (stopped back to
+  the queue, moved to merging) — `stale_reason/1` — and logs which. Two
+  sources also cancel it outright, with a log line: a dispatch that went ahead
+  for the task (`Arbiter.Worker.Dispatch`) and stopping the task
+  (`Arbiter.Worker.stop/3` by task id). A second hold for a task already held
+  replaces the intent, keeping its place in the queue.
+
+  What is held is readable: `held_items/1`, `held_item/2` and `describe/1`
+  back `arb quota`'s held-dispatch list and the held phase on
+  `arb worker show`.
+
   ## A quota-exhausted pre-flight failure is held, not redrained every cycle (bd-8lnnnt)
 
   Historical: this held a `{:auth_check_failed, %StopReason{category:
@@ -117,8 +132,12 @@ defmodule Arbiter.Workflows.DispatchQueue do
   alias Arbiter.Quota.Gate.Snapshot
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
+  alias Arbiter.Worker
   alias Arbiter.Worker.PreflightHold
+  alias Arbiter.Workers.Run
   alias Arbiter.Workflows.DispatchQueueSupervisor
+
+  require Ash.Query
 
   @typedoc """
   A held dispatch intent. `provider` is the agent type the dispatch resolved to
@@ -134,7 +153,9 @@ defmodule Arbiter.Workflows.DispatchQueue do
           reason: term(),
           provider: atom(),
           preflight_failures: non_neg_integer(),
-          retry_not_before: DateTime.t() | nil
+          retry_not_before: DateTime.t() | nil,
+          held_state: atom() | nil,
+          held_run_id: String.t() | nil
         }
 
   defmodule State do
@@ -223,10 +244,15 @@ defmodule Arbiter.Workflows.DispatchQueue do
   requeued anyway — on the next drain trigger. Best-effort: `:ok` whether or
   not a queue is running, or the task was ever held there.
   """
-  @spec drop(String.t(), String.t()) :: :ok
-  def drop(workspace_id, task_id) when is_binary(workspace_id) and is_binary(task_id) do
+  #
+  # `why` (bd-6omte4) is logged when an intent was actually dropped, so a
+  # cancelled hold is never silent: the task was re-dispatched, or stopped.
+  @spec drop(String.t(), String.t(), String.t() | nil) :: :ok
+  def drop(workspace_id, task_id, why \\ nil)
+
+  def drop(workspace_id, task_id, why) when is_binary(workspace_id) and is_binary(task_id) do
     case DispatchQueueSupervisor.whereis(workspace_id) do
-      pid when is_pid(pid) -> GenServer.call(pid, {:drop, task_id})
+      pid when is_pid(pid) -> GenServer.call(pid, {:drop, task_id, why})
       _ -> :ok
     end
   rescue
@@ -235,7 +261,133 @@ defmodule Arbiter.Workflows.DispatchQueue do
     :exit, _ -> :ok
   end
 
-  def drop(_workspace_id, _task_id), do: :ok
+  def drop(_workspace_id, _task_id, _why), do: :ok
+
+  @doc """
+  Cancel whatever intent is held for `task_id`, in whichever workspace the
+  task belongs to (bd-6omte4), logging `why`. `true` when one was held.
+  Called when the task is stopped by hand: a held fix round must not
+  start after the operator stopped the task.
+  """
+  @spec cancel(String.t(), String.t()) :: boolean()
+  def cancel(task_id, why) when is_binary(task_id) do
+    with %Issue{workspace_id: ws_id} when is_binary(ws_id) <- load_task(task_id),
+         %{} <- held_item(ws_id, task_id) do
+      drop(ws_id, task_id, why)
+      true
+    else
+      _ -> false
+    end
+  end
+
+  @doc """
+  The intent held for `task_id` in `workspace_id`'s queue, or nil
+  (bd-6omte4). Best-effort: nil if the queue isn't running.
+  """
+  @spec held_item(String.t() | nil, String.t()) :: item() | nil
+  def held_item(workspace_id, task_id) when is_binary(workspace_id) and is_binary(task_id) do
+    workspace_id |> held_items() |> Enum.find(&(&1.task_id == task_id))
+  end
+
+  def held_item(_workspace_id, _task_id), do: nil
+
+  @doc "Every intent held in `workspace_id`'s queue. `[]` if it isn't running."
+  @spec held_items(String.t() | nil) :: [item()]
+  def held_items(workspace_id) when is_binary(workspace_id) do
+    case DispatchQueueSupervisor.whereis(workspace_id) do
+      pid when is_pid(pid) -> pid |> state() |> Map.get(:items, [])
+      _ -> []
+    end
+  rescue
+    _ -> []
+  catch
+    :exit, _ -> []
+  end
+
+  def held_items(_workspace_id), do: []
+
+  @doc """
+  A held intent as an operator reads it (bd-6omte4): which task, on which
+  provider, why the gate held it, since when, and what it will do when it
+  drains — `intent` is `"ReviewGate fix round 2"`, `"resume"` or
+  `"dispatch"`, and `fix_round` the round number, if it is one.
+  """
+  @spec describe(item()) :: %{
+          task_id: String.t(),
+          provider: atom(),
+          reason: String.t(),
+          held_since: DateTime.t() | nil,
+          retry_not_before: DateTime.t() | nil,
+          intent: String.t(),
+          fix_round: pos_integer() | nil
+        }
+  def describe(%{task_id: task_id} = item) do
+    opts = Map.get(item, :opts) || []
+    fix_round = Keyword.get(opts, :review_gate_fix_round_attempts)
+
+    %{
+      task_id: task_id,
+      provider: item_provider(item),
+      reason: reason_text(Map.get(item, :reason)),
+      held_since: Map.get(item, :opened_at),
+      retry_not_before: Map.get(item, :retry_not_before),
+      intent: intent(opts, fix_round),
+      fix_round: fix_round
+    }
+  end
+
+  @doc """
+  `describe/1`'s map (or an item) as JSON for the API, MCP and `arb`: string
+  provider with its label, ISO-8601 times. nil passes through.
+  """
+  @spec serialize_held(map() | nil) :: map() | nil
+  def serialize_held(nil), do: nil
+
+  def serialize_held(%{opts: _} = item), do: item |> describe() |> serialize_held()
+
+  def serialize_held(%{task_id: _} = held) do
+    %{
+      task_id: held.task_id,
+      provider: held.provider && to_string(held.provider),
+      provider_label: provider_label(held.provider),
+      reason: held.reason,
+      intent: held.intent,
+      fix_round: held.fix_round,
+      held_since: iso(held.held_since),
+      retry_not_before: iso(held.retry_not_before)
+    }
+  end
+
+  defp iso(%DateTime{} = at), do: DateTime.to_iso8601(at)
+  defp iso(_), do: nil
+
+  defp intent(_opts, round) when is_integer(round), do: "ReviewGate fix round #{round}"
+
+  defp intent(opts, _round),
+    do: if(Keyword.get(opts, :resume) == true, do: "resume", else: "dispatch")
+
+  @doc """
+  A held provider as an operator names it. The agent type `:gemini` is the
+  Antigravity CLI (`agy`), whose quota `arb quota` shows as Antigravity.
+  """
+  @spec provider_label(atom() | String.t() | nil) :: String.t()
+  def provider_label(provider) when provider in [:gemini, "gemini"], do: "Antigravity (agy)"
+  def provider_label(provider) when provider in [:claude, "claude"], do: "Claude"
+  def provider_label(provider) when provider in [:codex, "codex"], do: "Codex"
+  def provider_label(nil), do: "unknown provider"
+  def provider_label(provider), do: to_string(provider)
+
+  @doc """
+  The operator-facing wording of a gate's hold reason: the phrase
+  `Arbiter.Quota.Gate.Throttle` attaches (`"7d quota 0.91 ≥ 0.90"`), else
+  the window it names, else the term itself.
+  """
+  @spec reason_text(term()) :: String.t()
+  def reason_text(%{phrase: phrase}) when is_binary(phrase) and phrase != "", do: phrase
+  def reason_text(%{window: window}) when not is_nil(window), do: "#{window} quota"
+  def reason_text(nil), do: "quota"
+  def reason_text(reason) when is_binary(reason), do: reason
+  def reason_text(reason), do: inspect(reason)
 
   @doc "Return a snapshot of the queue state for inspection / tests."
   @spec state(GenServer.server()) :: map()
@@ -294,13 +446,23 @@ defmodule Arbiter.Workflows.DispatchQueue do
 
   @impl true
   def handle_call({:hold, task_id, opts, reason, provider}, _from, %State{} = state) do
-    state =
+    item = new_item(state, task_id, opts, reason, provider)
+
+    # A second hold for a task already held replaces the intent (bd-6omte4):
+    # the newest dispatch is the one wanted — a later fix round's findings, a
+    # resume on another provider — while the queue position and any
+    # pre-flight backoff stay with the task.
+    items =
       if already_held?(state, task_id) do
-        state
+        Enum.map(state.items, fn
+          %{task_id: ^task_id} = held -> replace_intent(held, item)
+          other -> other
+        end)
       else
-        item = new_item(state, task_id, opts, reason, provider)
-        %{state | items: [item | state.items]}
+        [item | state.items]
       end
+
+    state = %{state | items: items}
 
     # A held intent needs a deterministic wake at the 5h reset even if no fresh
     # capture arrives — (re)arm the reset timer from the latest snapshot.
@@ -317,8 +479,15 @@ defmodule Arbiter.Workflows.DispatchQueue do
     {:reply, :ok, drain_and_reschedule(state)}
   end
 
-  def handle_call({:drop, task_id}, _from, %State{} = state) do
-    items = Enum.reject(state.items, &(&1.task_id == task_id))
+  def handle_call({:drop, task_id, why}, _from, %State{} = state) do
+    {dropped, items} = Enum.split_with(state.items, &(&1.task_id == task_id))
+
+    for item <- dropped, why do
+      Logger.warning(
+        "DispatchQueue: dropped the held #{describe(item).intent} for #{task_id}: #{why}"
+      )
+    end
+
     {:reply, :ok, schedule_reset_drain(%{state | items: items})}
   end
 
@@ -430,19 +599,102 @@ defmodule Arbiter.Workflows.DispatchQueue do
 
     start_drain_task(fn ->
       Enum.each(items, fn item ->
-        case safe_dispatch(dispatcher, item) do
-          {:ok, _} ->
-            :ok
-
-          {:error, reason} ->
-            requeue_or_drop(queue, ws_id, item, reason)
-
-          other ->
-            requeue_or_drop(queue, ws_id, item, other)
+        case stale_reason(item) do
+          nil -> drain_item(queue, ws_id, dispatcher, item)
+          why -> skip_stale(item, why)
         end
       end)
     end)
   end
+
+  defp drain_item(queue, ws_id, dispatcher, item) do
+    case safe_dispatch(dispatcher, item) do
+      {:ok, _} ->
+        :ok
+
+      {:error, reason} ->
+        requeue_or_drop(queue, ws_id, item, reason)
+
+      other ->
+        requeue_or_drop(queue, ws_id, item, other)
+    end
+  end
+
+  # `maybe_drain/1` already took the item out of `state.items`, so skipping it
+  # is dropping it.
+  defp skip_stale(item, why) do
+    Logger.warning(
+      "DispatchQueue: not draining the held #{describe(item).intent} for #{item.task_id}: " <>
+        "#{why}; the held intent is dropped"
+    )
+
+    :ok
+  end
+
+  # ---- stale held intents (bd-6omte4) ---------------------------------------
+  #
+  # A held intent is replayed verbatim, possibly hours later. By then the task
+  # may have moved on: on bd-aro53b an agy ReviewGate fix round was held for
+  # quota, and 13 minutes later the coordinator re-dispatched the task on
+  # Claude. Nothing cancelled the held round, so the next drain would have
+  # replayed an old fix round onto a task with a live worker on its worktree.
+  #
+  # So a drain first asks whether the task is still the one that was held:
+  #
+  #   * it is closed or gone;
+  #   * a worker is live on it — someone else is working it now;
+  #   * it has a newer run than when it was held — it was re-dispatched (and
+  #     that run may have finished already);
+  #   * its state changed — it was stopped back to the queue, demoted, or
+  #     moved to merging. A promotion out of the backlog is the one move that
+  #     leaves a held dispatch still wanted.
+  #
+  # Any of these drops the intent, with a log line saying which. Nil = still
+  # current, drain it.
+  @doc false
+  @spec stale_reason(item()) :: String.t() | nil
+  def stale_reason(%{task_id: task_id} = item) do
+    case load_task(task_id) do
+      nil -> "the task no longer exists"
+      %Issue{state: :closed} -> "the task is closed"
+      %Issue{} = task -> moved_on(task, item)
+    end
+  end
+
+  defp moved_on(%Issue{} = task, item) do
+    held_run = Map.get(item, :held_run_id, :unknown)
+    held_state = Map.get(item, :held_state)
+
+    cond do
+      Keyword.get(item.opts, :review) != true and live_worker?(task.id) ->
+        "a worker is live on the task"
+
+      held_run != :unknown and latest_run_id(task.id) != held_run ->
+        "the task was re-dispatched after it was held (run #{latest_run_id(task.id)})"
+
+      state_moved?(held_state, task.state) ->
+        "the task moved from #{held_state} to #{task.state} after it was held"
+
+      true ->
+        nil
+    end
+  end
+
+  defp live_worker?(task_id) do
+    case Worker.whereis(task_id) do
+      nil -> false
+      pid -> not match?(%{state: :finished}, Worker.state(pid))
+    end
+  rescue
+    _ -> false
+  catch
+    :exit, _ -> false
+  end
+
+  defp state_moved?(nil, _now), do: false
+  defp state_moved?(same, same), do: false
+  defp state_moved?(:backlog, :queued), do: false
+  defp state_moved?(_held, _now), do: true
 
   # A dispatch failure is either terminal (the task can never dispatch again
   # as-is, e.g. it closed underneath the hold) or retryable (a later drain
@@ -724,6 +976,9 @@ defmodule Arbiter.Workflows.DispatchQueue do
 
   # ---- helpers ------------------------------------------------------------
 
+  defp replace_intent(held, item),
+    do: Map.merge(held, Map.take(item, [:opts, :reason, :provider, :held_state, :held_run_id]))
+
   defp already_held?(%State{items: items}, task_id),
     do: Enum.any?(items, &(&1.task_id == task_id))
 
@@ -768,16 +1023,24 @@ defmodule Arbiter.Workflows.DispatchQueue do
     if DateTime.compare(a, b) == :gt, do: a, else: b
   end
 
-  defp new_item(%State{} = state, task_id, opts, reason, provider) do
+  # `held_state` / `held_run_id` are what the task looked like when it was
+  # held (bd-6omte4): the drain compares them against the task as it is then,
+  # so a held intent never lands on a task that has moved on — see
+  # `stale_reason/1`.
+  defp new_item(%State{} = _state, task_id, opts, reason, provider) do
+    task = load_task(task_id)
+
     %{
       task_id: task_id,
       opts: opts,
-      priority: task_priority(state, task_id),
+      priority: priority_of(task),
       opened_at: DateTime.utc_now(),
       reason: reason,
       provider: provider,
       preflight_failures: 0,
-      retry_not_before: nil
+      retry_not_before: nil,
+      held_state: task && task.state,
+      held_run_id: latest_run_id(task_id)
     }
   end
 
@@ -795,14 +1058,35 @@ defmodule Arbiter.Workflows.DispatchQueue do
   end
 
   # Task priority (0 = P0 highest … 4 = P4 lowest) for the queue order key.
-  # Best-effort load; defaults to P2 if the task can't be read.
-  defp task_priority(_state, task_id) do
+  # Defaults to P2 if the task can't be read.
+  defp priority_of(%Issue{priority: p}) when is_integer(p), do: p
+  defp priority_of(_task), do: 2
+
+  defp load_task(task_id) do
     case Ash.get(Issue, task_id) do
-      {:ok, %Issue{priority: p}} when is_integer(p) -> p
-      _ -> 2
+      {:ok, %Issue{} = task} -> task
+      _ -> nil
     end
   rescue
-    _ -> 2
+    _ -> nil
+  end
+
+  # The id of the task's own newest run (not a ReviewGate reviewer's, which
+  # runs under a synthetic `<task>#…` id). A resume links its new run to this
+  # one, so it is the run a held resume was going to continue.
+  defp latest_run_id(task_id) do
+    Run
+    |> Ash.Query.filter(task_id == ^task_id)
+    |> Ash.Query.sort(started_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.Query.select([:id])
+    |> Ash.read!()
+    |> case do
+      [%Run{id: id}] -> id
+      _ -> nil
+    end
+  rescue
+    _ -> nil
   end
 
   # Priority-first, FIFO tiebreak — same shape as MergeQueue.queue_order_key/1.

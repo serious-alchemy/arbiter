@@ -116,7 +116,31 @@ defmodule ArbiterCli.Cmd.Quota do
       provider_cost(data, "antigravity"),
       data["gemini_credentials_expired"] == true
     )
+
+    emit_held(data["held_dispatches"])
   end
+
+  # bd-6omte4: what the quota gate is actually holding, with the provider and
+  # the gate's own reason. The per-provider "gating dispatch" lines read one
+  # snapshot each; an Antigravity hold on one model bucket never showed there.
+  defp emit_held(held) when is_list(held) and held != [] do
+    IO.puts("")
+    IO.puts("Held dispatches (quota gate; each resumes when its provider has headroom):")
+
+    Enum.each(held, fn h ->
+      IO.puts(
+        "  #{h["task_id"]}  #{h["intent"]}  on #{h["provider_label"] || h["provider"]}" <>
+          " — #{h["reason"]} (held since #{h["held_since"] || "—"})"
+      )
+    end)
+  end
+
+  defp emit_held(held) when is_list(held) do
+    IO.puts("")
+    IO.puts("Held dispatches: none")
+  end
+
+  defp emit_held(_held), do: :ok
 
   # §6: `--workspace` is a lookup shorthand for "the account this workspace
   # meters under". Say so, so a reader is never left thinking the figures

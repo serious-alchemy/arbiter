@@ -1016,6 +1016,8 @@ defmodule Arbiter.MCP.Tools.Worker do
       # actually exists behind this row.
       phase: Tools.to_str(Map.get(view, :phase)),
       phase_label: Arbiter.Worker.Phase.label(Map.get(view, :phase)),
+      # bd-6omte4: the dispatch the quota gate is holding for the ticket.
+      held: Arbiter.Workflows.DispatchQueue.serialize_held(Map.get(view, :held)),
       agent_live: Map.get(view, :agent_live),
       workspace_id: view.workspace_id,
       repo: view.repo,
