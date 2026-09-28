@@ -42,6 +42,10 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
      "agent spawn failure: infrastructure, not a refusal of the work"},
     {Arbiter.Worker.ReviewGate, :start_worker_session, 6,
      "agent session failure: infrastructure, not a refusal of the work"},
+    {Arbiter.Worker.ReviewGate, :guarded_spawn_worker, 5,
+     "bd-7xtz6w: turns a spawn that raised into the same {:error, _} as " <>
+       "start_worker_process/4 — infrastructure, surfaced through the spawn-failure " <>
+       "path, not a refusal of the work"},
     {Arbiter.Worker.ReviewGate, :escalate_coverage_write_failure, 4,
      "bd-203cl5: pages when an APPROVE's review-coverage row could not be written " <>
        "(§3.3). It refuses nothing — the approval stands, last_reviewed_sha is " <>

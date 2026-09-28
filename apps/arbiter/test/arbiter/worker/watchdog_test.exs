@@ -1587,6 +1587,41 @@ defmodule Arbiter.Worker.WatchdogTest do
   # genuine failure needing triage. The Watchdog auto-resumes it itself, up to a
   # bounded cap, instead of parking a "failed but resumable" worker nobody is
   # watching.
+  # bd-7xtz6w (vs-61rt5z, 2026-09-21): the poll ceiling fired while a fix pass
+  # was working the review findings it was waiting on — the pass was the
+  # correct response, not a stall. Polls taken while a fix or conflict pass is
+  # live on the ticket do not count toward `max_polls`.
+  describe "poll ceiling while a pass is in flight (bd-7xtz6w)" do
+    test "a live fix pass holds the ceiling; the count resumes once it ends" do
+      task_id = new_task_id()
+
+      {:ok, pass} =
+        Arbiter.Worker.start(
+          task_id: task_id,
+          repo: "test/repo",
+          meta: %{role: :fix_pass}
+        )
+
+      on_exit(fn -> stop_quietly(pass) end)
+
+      start_watchdog(task_id, "!hold1",
+        interval_ms: 10,
+        initial_delay_ms: 0,
+        max_polls: 2,
+        auto_merge: true,
+        workspace: test_workspace(),
+        auto_resume_dispatcher: StubAutoResumeDispatcher
+      )
+
+      # Far more than two polls' worth of time: the ceiling must not fire.
+      refute_receive {:watchdog, ^task_id, {:timed_out, _}}, 300
+
+      :ok = GenServer.stop(pass, :normal)
+
+      assert_timed_out(task_id, 2)
+    end
+  end
+
   describe "awaiting_review_timeout auto-resume (bd-8eheb6)" do
     defp start_timeout_watchdog(task_id, mr_ref, opts \\ []) do
       base = [

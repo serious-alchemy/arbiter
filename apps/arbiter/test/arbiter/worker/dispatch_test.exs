@@ -3660,6 +3660,24 @@ defmodule Arbiter.Worker.DispatchTest do
 
       refute msg =~ "stop it before resuming",
              "a run waiting on the review gate must not be told to stop, got: #{msg}"
+
+      # bd-7xtz6w: `arb worker list` cannot show a ReviewGate's passes, so the
+      # message must not send the operator there; it names the evidence the
+      # guard saw and the supported way out of a stalled gate instead.
+      refute msg =~ "arb worker list"
+      assert msg =~ "arb worker resume vs-6jrn9m"
+
+      msg =
+        Dispatch.worker_active_message(
+          %{
+            state: :waiting,
+            waiting_on: :review_gate,
+            review_evidence: ["review pass x is running"]
+          },
+          "vs-6jrn9m"
+        )
+
+      assert msg =~ "review pass x is running"
     end
 
     test "the refusal message still tells an operator to stop a genuinely working worker" do
