@@ -14,6 +14,9 @@ defmodule ArbiterWeb.Api.IssueController do
     * `POST   /api/issues/:id/reopen`  — :reopen
     * `POST   /api/issues/:id/promote` — :promote
     * `POST   /api/issues/:id/demote`  — :demote (return to backlog)
+    * `PATCH  /api/issues/:id/rank`    — :rank (body: one of `top: true`,
+      `bottom: true`, `before_id: <id>`, `after_id: <id>`) — reorders the
+      ticket inside its workspace's rank order (bd-djapyj)
     * `POST   /api/issues/:id/verify`  — :verify (body: `outcome` +
       `evidence`) — records the post-merge restart-and-observe result
       (bd-9so315)
@@ -284,6 +287,36 @@ defmodule ArbiterWeb.Api.IssueController do
     with {:ok, issue} <- Ash.get(Issue, id),
          {:ok, demoted} <- Ash.update(issue, %{}, action: :return_to_backlog) do
       render(conn, :show, issue: demoted)
+    end
+  end
+
+  @doc """
+  Reorder a ticket inside its workspace's rank order (bd-djapyj). Body is one
+  of `top: true`, `bottom: true`, `before_id: <id>`, `after_id: <id>` — the
+  same four forms the CLI (`arb issue rank`) and MCP (`task_rank`) accept,
+  all backed by the `:set_rank` action. Never changes `priority`.
+  """
+  def rank(conn, %{"id" => id} = params) do
+    with {:ok, rank_args} <- rank_args(params),
+         {:ok, issue} <- Ash.get(Issue, id),
+         {:ok, ranked} <- Arbiter.Tasks.Rank.move(issue, rank_args) do
+      render(conn, :show, issue: ranked)
+    end
+  end
+
+  defp rank_args(params) do
+    forms =
+      [
+        params["top"] == true && %{position: :top},
+        params["bottom"] == true && %{position: :bottom},
+        is_binary(params["before_id"]) && %{before_id: params["before_id"]},
+        is_binary(params["after_id"]) && %{after_id: params["after_id"]}
+      ]
+      |> Enum.reject(&(&1 == false))
+
+    case forms do
+      [form] -> {:ok, form}
+      _ -> {:error, {:invalid_request, "give exactly one of: top, bottom, before_id, after_id"}}
     end
   end
 

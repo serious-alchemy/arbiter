@@ -429,6 +429,37 @@ defmodule Arbiter.Tasks.Issue do
       accept [:implementer_account_id, :implementer_family]
     end
 
+    # bd-djapyj: reorder a ticket inside its workspace's rank order — the
+    # space `board/scheduler.ex` and `board/autopilot.ex` read (priority,
+    # then rank, then age). `rank` is deliberately not in `:update`'s
+    # accept list (see above); this is its one door in, alongside the CLI
+    # (`arb issue rank`), the API (`PATCH /api/issues/:id/rank`), and the MCP
+    # `task_rank` tool. bd-79w1fs's drag-to-rank should call this action too
+    # rather than writing `rank` directly.
+    #
+    # Exactly one of `position: :top`, `position: :bottom`, `before_id`, or
+    # `after_id` must be given — `Changes.SetRank` rejects any other
+    # combination, rejects a before/after target in a different workspace,
+    # rejects a before/after target that is the ticket itself, and never
+    # touches `priority`: ranking before/after a ticket in another priority
+    # band only orders within rank, it does not move the ticket into that
+    # band. Callers MUST go through `Arbiter.Tasks.Rank.move/2`, not this
+    # action directly — see its moduledoc.
+    update :set_rank do
+      require_atomic? false
+      accept []
+
+      argument :position, :atom do
+        allow_nil? true
+        constraints one_of: [:top, :bottom]
+      end
+
+      argument :before_id, :string, allow_nil?: true
+      argument :after_id, :string, allow_nil?: true
+
+      change {Arbiter.Tasks.Issue.Changes.SetRank, []}
+    end
+
     update :close do
       require_atomic? false
       argument :reason, :string

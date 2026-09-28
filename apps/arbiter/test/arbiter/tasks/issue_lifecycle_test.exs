@@ -389,7 +389,11 @@ defmodule Arbiter.Tasks.IssueLifecycleTest do
     end
   end
 
-  # Stands in for a later drag-to-rank (bd-79w1fs), which has no action yet.
+  # Forces an arbitrary absolute rank to exercise scheduler ordering. The real
+  # reordering door is the `:set_rank` action (bd-djapyj, `arb issue rank`),
+  # but it only supports relative moves (top/bottom/before/after), not
+  # setting an arbitrary absolute value — raw SQL is still the right tool
+  # here.
   defp set_rank!(issue, rank) do
     Arbiter.Repo.query!("UPDATE issues SET rank = ?1 WHERE id = ?2", [rank, issue.id])
     issue

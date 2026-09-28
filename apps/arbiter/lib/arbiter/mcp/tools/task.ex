@@ -482,6 +482,47 @@ defmodule Arbiter.MCP.Tools.Task do
     end
   end
 
+  # ---- task_rank ------------------------------------------------------------
+
+  @doc """
+  Reorder a task inside its workspace's rank order (bd-djapyj): the space
+  `board/scheduler.ex` and Autopilot dispatch read (priority, then rank,
+  then age). Coordinator only. Backs onto the `:set_rank` action, the same
+  one the CLI (`arb issue rank`) and REST (`PATCH /api/issues/:id/rank`)
+  use. Exactly one of `top`, `bottom`, `before_id`, `after_id` is required.
+  Never changes priority — ranking before/after a task in a different
+  priority band only orders within rank, it does not move the task into
+  that band.
+  """
+  @spec task_rank(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def task_rank(%Scope{} = scope, args) do
+    with {:ok, id} <- Tools.resolve_task_id(scope, args),
+         {:ok, issue} <- Tools.fetch_task(scope, args, id),
+         :ok <- Tools.authorize_subtree(scope, issue.id),
+         {:ok, rank_args} <- rank_args(args) do
+      case Arbiter.Tasks.Rank.move(issue, rank_args) do
+        {:ok, ranked} -> {:ok, Tools.serialize_task_summary(ranked)}
+        {:error, err} -> {:error, {:invalid, Tools.ash_error_message(err)}}
+      end
+    end
+  end
+
+  defp rank_args(args) do
+    forms =
+      [
+        args["top"] == true && %{position: :top},
+        args["bottom"] == true && %{position: :bottom},
+        is_binary(args["before_id"]) && %{before_id: args["before_id"]},
+        is_binary(args["after_id"]) && %{after_id: args["after_id"]}
+      ]
+      |> Enum.reject(&(&1 == false))
+
+    case forms do
+      [form] -> {:ok, form}
+      _ -> {:error, {:invalid, "give exactly one of: top, bottom, before_id, after_id"}}
+    end
+  end
+
   # ---- task_sync_upstream_close --------------------------------------------
 
   @doc """

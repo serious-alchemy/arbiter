@@ -1768,7 +1768,8 @@ defmodule Arbiter.MCP.Tools do
       issue_type: to_str(i.issue_type),
       workspace_id: i.workspace_id,
       refined: i.refined,
-      acceptance_waived: i.acceptance_waived
+      acceptance_waived: i.acceptance_waived,
+      rank: i.rank
     }
   end
 
@@ -1965,6 +1966,7 @@ defmodule Arbiter.MCP.Tools do
   defdelegate task_verify(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate task_promote(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate task_demote(scope, args), to: Arbiter.MCP.Tools.Task
+  defdelegate task_rank(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate task_sync_upstream_close(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate dep_add(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate dep_remove(scope, args), to: Arbiter.MCP.Tools.Task

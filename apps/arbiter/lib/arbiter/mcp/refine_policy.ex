@@ -39,7 +39,7 @@ defmodule Arbiter.MCP.RefinePolicy do
 
   **Nothing that starts, stops, or closes work.** No dispatch (`can_dispatch` is
   hard-wired false on the tier), no `task_demote`/`task_close`/`task_reopen`/`task_verify`, no
-  scheduler or circuit-breaker controls, no installation or
+  `task_rank`, no scheduler or circuit-breaker controls, no installation or
   workspace config writes, no skill writes, no outbound mail. A refine session
   shapes a backlog item and promotes it; the board decides what happens next.
   """
@@ -97,6 +97,7 @@ defmodule Arbiter.MCP.RefinePolicy do
     "task_verify" => @deny_reason_lifecycle,
     "task_demote" => @deny_reason_lifecycle,
     "task_sync_upstream_close" => @deny_reason_lifecycle,
+    "task_rank" => @deny_reason_scheduler,
 
     # dispatch
     "worker_dispatch" => @deny_reason_dispatch,

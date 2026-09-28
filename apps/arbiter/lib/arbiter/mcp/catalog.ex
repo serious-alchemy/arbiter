@@ -33,6 +33,7 @@ defmodule Arbiter.MCP.Catalog do
   | `task_reopen` | coordinator | `Ash.update(issue, …, action: :reopen)` |
   | `task_promote` | coordinator | `Ash.update(issue, …, action: :promote_to_ready)` |
   | `task_demote` | coordinator | `Ash.update(issue, …, action: :return_to_backlog)` |
+  | `task_rank` | coordinator | `Ash.update(issue, …, action: :set_rank)` |
   | `task_sync_upstream_close` | coordinator | `Ash.update(issue, …, action: :sync_upstream_close)` |
   | `dep_add` | coordinator | `Arbiter.Tasks.Dependencies.add/4` (use `parent_of` to attach a child) |
   | `dep_remove` | coordinator | `Arbiter.Tasks.Dependencies.remove/3` |
@@ -631,6 +632,39 @@ defmodule Arbiter.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.task_demote/2
+    },
+    %{
+      name: "task_rank",
+      tiers: @coordinator,
+      description:
+        "Reorder a task inside its workspace's rank order via the `:set_rank` action — the space " <>
+          "`board/scheduler.ex` and Autopilot dispatch read (priority, then rank, then age). " <>
+          "Coordinator only. Exactly one of `top`, `bottom`, `before_id`, `after_id` is required. " <>
+          "`before_id`/`after_id` must name a task in the same workspace, or the call is rejected. " <>
+          "Never changes `priority` — ranking before/after a task in a different priority band " <>
+          "only orders within rank, it does not move the task into that band.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "id" => %{"type" => "string", "description" => "Task id (required)."},
+          "top" => %{"type" => "boolean", "description" => "Move to the top of the workspace."},
+          "bottom" => %{
+            "type" => "boolean",
+            "description" => "Move to the bottom of the workspace."
+          },
+          "before_id" => %{
+            "type" => "string",
+            "description" => "Move immediately ahead of this task (same workspace)."
+          },
+          "after_id" => %{
+            "type" => "string",
+            "description" => "Move immediately behind this task (same workspace)."
+          }
+        },
+        "required" => ["id"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.task_rank/2
     },
     %{
       name: "task_sync_upstream_close",

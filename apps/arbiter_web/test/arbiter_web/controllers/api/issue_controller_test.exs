@@ -878,6 +878,84 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
     end
   end
 
+  describe "PATCH /api/issues/:id/rank" do
+    test "top moves a ticket ahead of every other ticket in the workspace", %{conn: conn, ws: ws} do
+      {:ok, a} = Ash.create(Issue, %{title: "a", workspace_id: ws.id})
+      {:ok, _b} = Ash.create(Issue, %{title: "b", workspace_id: ws.id})
+      {:ok, c} = Ash.create(Issue, %{title: "c", workspace_id: ws.id})
+
+      conn = patch(conn, ~p"/api/issues/#{c.id}/rank", %{"top" => true})
+
+      body = json_response(conn, 200)
+      assert body["rank"] < a.rank
+    end
+
+    test "before_id places a ticket immediately ahead of the target", %{conn: conn, ws: ws} do
+      {:ok, a} = Ash.create(Issue, %{title: "a", workspace_id: ws.id})
+      {:ok, b} = Ash.create(Issue, %{title: "b", workspace_id: ws.id})
+      {:ok, c} = Ash.create(Issue, %{title: "c", workspace_id: ws.id})
+
+      conn = patch(conn, ~p"/api/issues/#{c.id}/rank", %{"before_id" => b.id})
+
+      body = json_response(conn, 200)
+      assert a.rank < body["rank"]
+      assert body["rank"] < b.rank
+    end
+
+    test "never changes priority", %{conn: conn, ws: ws} do
+      {:ok, a} = Ash.create(Issue, %{title: "a", workspace_id: ws.id, priority: 3})
+      {:ok, _b} = Ash.create(Issue, %{title: "b", workspace_id: ws.id})
+
+      conn = patch(conn, ~p"/api/issues/#{a.id}/rank", %{"bottom" => true})
+
+      body = json_response(conn, 200)
+      assert body["priority"] == 3
+    end
+
+    test "rejects a before_id target in a different workspace", %{conn: conn, ws: ws} do
+      {:ok, other_ws} =
+        Ash.create(Workspace, %{
+          name: "rank-other-#{System.unique_integer([:positive])}",
+          prefix: "rko"
+        })
+
+      {:ok, a} = Ash.create(Issue, %{title: "a", workspace_id: ws.id})
+      {:ok, other} = Ash.create(Issue, %{title: "other", workspace_id: other_ws.id})
+
+      conn = patch(conn, ~p"/api/issues/#{a.id}/rank", %{"before_id" => other.id})
+
+      assert %{"error" => %{"type" => "validation_error"}} = json_response(conn, 422)
+    end
+
+    test "rejects a body with no rank arguments", %{conn: conn, ws: ws} do
+      {:ok, a} = Ash.create(Issue, %{title: "a", workspace_id: ws.id})
+
+      conn = patch(conn, ~p"/api/issues/#{a.id}/rank", %{})
+
+      assert %{"error" => %{"type" => "invalid_request"}} = json_response(conn, 400)
+    end
+
+    test "rejects a body with more than one rank argument", %{conn: conn, ws: ws} do
+      {:ok, a} = Ash.create(Issue, %{title: "a", workspace_id: ws.id})
+      {:ok, b} = Ash.create(Issue, %{title: "b", workspace_id: ws.id})
+
+      conn = patch(conn, ~p"/api/issues/#{a.id}/rank", %{"top" => true, "before_id" => b.id})
+
+      assert %{"error" => %{"type" => "invalid_request"}} = json_response(conn, 400)
+
+      # Unmoved.
+      assert Ash.get!(Issue, a.id).rank == a.rank
+    end
+
+    test "rejects a before_id target that is the ticket itself", %{conn: conn, ws: ws} do
+      {:ok, a} = Ash.create(Issue, %{title: "a", workspace_id: ws.id})
+
+      conn = patch(conn, ~p"/api/issues/#{a.id}/rank", %{"before_id" => a.id})
+
+      assert %{"error" => %{"type" => "validation_error"}} = json_response(conn, 422)
+    end
+  end
+
   # bd-9so315 — post-merge verification over REST (the `arb` CLI's transport).
   describe "verify_after_deploy over REST" do
     test "create + patch set the flag and it is rendered", %{conn: conn, ws: ws} do

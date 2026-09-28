@@ -1885,6 +1885,89 @@ defmodule Arbiter.MCP.ToolsTest do
     end
   end
 
+  describe "task_rank/2" do
+    test "top moves a task ahead of every other task in the workspace", ctx do
+      {:ok, other} = Ash.create(Issue, %{title: "other", workspace_id: ctx.ws.id})
+
+      assert {:ok, data} = Tools.task_rank(ctx.coordinator, %{"id" => ctx.task.id, "top" => true})
+      assert data.rank < other.rank
+    end
+
+    test "bottom moves a task behind every other task in the workspace", ctx do
+      {:ok, other} = Ash.create(Issue, %{title: "other", workspace_id: ctx.ws.id})
+
+      assert {:ok, data} =
+               Tools.task_rank(ctx.coordinator, %{"id" => ctx.task.id, "bottom" => true})
+
+      assert data.rank > other.rank
+    end
+
+    test "before_id places a task immediately ahead of the target", ctx do
+      {:ok, a} = Ash.create(Issue, %{title: "a", workspace_id: ctx.ws.id})
+      {:ok, b} = Ash.create(Issue, %{title: "b", workspace_id: ctx.ws.id})
+
+      assert {:ok, data} =
+               Tools.task_rank(ctx.coordinator, %{"id" => b.id, "before_id" => a.id})
+
+      assert data.rank < a.rank
+    end
+
+    test "after_id places a task immediately behind the target", ctx do
+      {:ok, a} = Ash.create(Issue, %{title: "a", workspace_id: ctx.ws.id})
+      {:ok, b} = Ash.create(Issue, %{title: "b", workspace_id: ctx.ws.id})
+
+      assert {:ok, data} =
+               Tools.task_rank(ctx.coordinator, %{"id" => a.id, "after_id" => b.id})
+
+      assert data.rank > b.rank
+    end
+
+    test "never changes priority", ctx do
+      assert {:ok, data} =
+               Tools.task_rank(ctx.coordinator, %{"id" => ctx.task.id, "bottom" => true})
+
+      assert data.priority == ctx.task.priority
+    end
+
+    test "rejects a before_id target in a different workspace", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "rank-other", prefix: "rko"})
+      {:ok, foreign} = Ash.create(Issue, %{title: "foreign", workspace_id: other_ws.id})
+
+      assert {:error, {:invalid, message}} =
+               Tools.task_rank(ctx.coordinator, %{"id" => ctx.task.id, "before_id" => foreign.id})
+
+      assert message =~ "different workspace" or message =~ "workspace"
+    end
+
+    test "rejects no arguments", ctx do
+      assert {:error, {:invalid, _}} = Tools.task_rank(ctx.coordinator, %{"id" => ctx.task.id})
+    end
+
+    test "rejects more than one rank argument", ctx do
+      {:ok, other} = Ash.create(Issue, %{title: "other", workspace_id: ctx.ws.id})
+
+      assert {:error, {:invalid, _}} =
+               Tools.task_rank(ctx.coordinator, %{
+                 "id" => ctx.task.id,
+                 "top" => true,
+                 "before_id" => other.id
+               })
+    end
+
+    test "rejects a before_id target that is the task itself", ctx do
+      assert {:error, {:invalid, _}} =
+               Tools.task_rank(ctx.coordinator, %{"id" => ctx.task.id, "before_id" => ctx.task.id})
+    end
+
+    test "cannot rank a task in another workspace (not-found)", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "rank-other2", prefix: "rk2"})
+      {:ok, foreign} = Ash.create(Issue, %{title: "foreign", workspace_id: other_ws.id})
+
+      assert {:error, {:not_found, _}} =
+               Tools.task_rank(ctx.coordinator, %{"id" => foreign.id, "top" => true})
+    end
+  end
+
   describe "notify_list/2" do
     test "lists recent notifications scoped to the workspace (both tiers)", ctx do
       {:ok, _} = Message.notify(%{workspace_id: ctx.ws.id, body: "a worker finished"})
