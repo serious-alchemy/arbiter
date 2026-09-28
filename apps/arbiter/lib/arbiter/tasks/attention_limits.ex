@@ -61,7 +61,7 @@ defmodule Arbiter.Tasks.AttentionLimits do
     }
   end
 
-  @doc "The limit phrase a promotion's note names, e.g. `\"4h\"` or `\"90m\"`."
+  @doc ~s(The limit phrase a promotion's note names, e.g. `"4h"` or `"90m"`.)
   @spec describe_minutes(pos_integer()) :: String.t()
   def describe_minutes(minutes) when rem(minutes, 60) == 0, do: "#{div(minutes, 60)}h"
   def describe_minutes(minutes), do: "#{minutes}m"
