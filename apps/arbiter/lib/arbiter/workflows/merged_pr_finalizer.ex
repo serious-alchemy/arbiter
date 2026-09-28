@@ -523,11 +523,14 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
   end
 
   # bd-2g179m: a run `:waiting` on the review gate with no agent live is
-  # parked, not working — with `merge.auto_merge` off an approved task sits
-  # there until a human merges. Its PR merging is the fact the finalizer exists
-  # to act on, and nothing else polls it (the worker holds no Watchdog once the
-  # gate has verdicted), so it must not protect the task. A snapshot that says
-  # nothing about `agent_live` is unknown, and stays protected.
+  # parked, not working. This is the pre-verdict window: the author's agent has
+  # exited, the reviewer runs in a separate ReviewGate process, and the ticket
+  # already has a `pr_ref` from the pre-review PR open. If the PR is merged by
+  # hand in that window, the finalizer closes the ticket rather than deferring
+  # to the parked worker; the running gate is torn down via its author `:DOWN`
+  # monitor. After approval the ticket's Watchdog (started by
+  # `finalize_opened_mr`) covers a manual merge. A snapshot that says nothing
+  # about `agent_live` is unknown, and stays protected.
   defp parked?(snap),
     do: Worker.awaiting_review_gate?(snap) and Map.get(snap, :agent_live) == false
 
