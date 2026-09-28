@@ -705,8 +705,9 @@ defmodule ArbiterWeb.BoardLiveTest do
 
       assert has_element?(view, ~s(#board-column-waiting [id="card-#{dead.id}"]))
       assert html =~ "no watchdog"
-      # A dead watchdog means nothing is left for the system to try.
-      assert has_element?(view, ~s([id="card-#{dead.id}"] [data-needs-you]))
+      # A dead watchdog is the coordinator's to restart first, not the
+      # operator's (bd-8if9zt: needs-you is `attention.owner == :operator`).
+      refute has_element?(view, ~s([id="card-#{dead.id}"] [data-needs-you]))
       # And the card routes to the worker page — where the restart lives —
       # rather than to the merge queue, which can do nothing about it.
       assert has_element?(view, ~s([id="card-#{dead.id}"] a[href="/workers/#{dead.id}"]))
@@ -771,9 +772,22 @@ defmodule ArbiterWeb.BoardLiveTest do
       assert has_element?(view, ~s(#board-column-waiting [id="card-#{merging.id}"]))
     end
 
-    test "the flag marks only what the system has run out of moves for", %{conn: conn, ws: ws} do
+    # bd-8if9zt: the flag is the ticket's attention being the operator's. The
+    # coordinator comes first, so a parked run or a conflict is its to act on;
+    # only what the fleet cannot do itself — an approval on its own PR — flags.
+    test "the flag marks only what needs the operator", %{conn: conn, ws: ws} do
       parked = working_issue(ws, "answer me")
       parked_worker(ws, parked)
+
+      approval = working_issue(ws, "needs a human approval")
+      open_pr(ws, approval)
+
+      :ok =
+        PullRequest.record_merger_status(approval.id, %{
+          status: :open,
+          approved: true,
+          block_reason: :needs_approval
+        })
 
       polling = working_issue(ws, "still in review")
       open_pr(ws, polling)
@@ -790,8 +804,9 @@ defmodule ArbiterWeb.BoardLiveTest do
 
       {:ok, view, _html} = live_board(conn)
 
-      assert has_element?(view, ~s([id="card-#{parked.id}"] [data-needs-you]))
-      assert has_element?(view, ~s([id="card-#{stuck.id}"] [data-needs-you]))
+      assert has_element?(view, ~s([id="card-#{approval.id}"] [data-needs-you]))
+      refute has_element?(view, ~s([id="card-#{parked.id}"] [data-needs-you]))
+      refute has_element?(view, ~s([id="card-#{stuck.id}"] [data-needs-you]))
       # An MR the forge is simply still chewing on is pipeline-wait, not yours.
       refute has_element?(view, ~s([id="card-#{polling.id}"] [data-needs-you]))
     end
@@ -1018,14 +1033,15 @@ defmodule ArbiterWeb.BoardLiveTest do
       awaiting
     end
 
-    test "a parked task renders a Waiting card with its age and needs-you", %{conn: conn, ws: ws} do
+    test "a parked task renders a Waiting card with its age", %{conn: conn, ws: ws} do
       task = awaiting_issue(ws, "doctor probe")
 
       {:ok, view, html} = live_board(conn)
 
       assert has_element?(view, ~s(#board-column-waiting [id="card-#{task.id}"]))
       assert html =~ "awaiting verification"
-      assert has_element?(view, ~s([id="card-#{task.id}"] [data-needs-you]))
+      # The restart-and-observe is the coordinator's (bd-8if9zt), not a flag.
+      refute has_element?(view, ~s([id="card-#{task.id}"] [data-needs-you]))
       # It routes to the task, where the verification evidence lives — not to a
       # worker page for a worker the merge already tore down.
       assert has_element?(view, ~s([id="card-#{task.id}"] a[href="/tasks/#{task.id}"]))

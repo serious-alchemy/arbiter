@@ -1185,7 +1185,7 @@ defmodule ArbiterWeb.BoardLive do
                       <span
                         :if={card.needs_you}
                         data-needs-you
-                        title="needs you — nothing left for the system to try"
+                        title="needs you — only a person can move this"
                         aria-label="needs you"
                         class="hero-flag"
                         style="width: 11px; height: 11px; background-color: var(--arb-attention);"
