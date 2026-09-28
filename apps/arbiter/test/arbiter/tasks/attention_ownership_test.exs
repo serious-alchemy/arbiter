@@ -11,6 +11,8 @@ defmodule Arbiter.Tasks.AttentionOwnershipTest do
   alias Arbiter.MCP.Scope
   alias Arbiter.Messages.Escalation
   alias Arbiter.Tasks.{Attention, AttentionLimits, AttentionSweep, Issue, Workspace}
+  alias Arbiter.Worker
+  alias Arbiter.Workers.Run
 
   setup do
     {:ok, ws} =
@@ -233,6 +235,34 @@ defmodule Arbiter.Tasks.AttentionOwnershipTest do
 
       assert Ash.get!(Issue, ctx.task.id).attention_note ==
                "coordinator did not resolve within 3 resume attempts"
+    end
+
+    test "a resumed run counts an attempt only when it resumes a failed run", ctx do
+      for {outcome, expected} <- [{:succeeded, 0}, {:failed, 1}] do
+        prior =
+          Ash.create!(Run, %{
+            task_id: ctx.task.id,
+            repo: "arbiter",
+            workspace_id: ctx.ws.id,
+            state: :finished,
+            outcome: outcome,
+            started_at: DateTime.add(DateTime.utc_now(), -600, :second)
+          })
+
+        {:ok, pid} =
+          Worker.start(
+            task_id: ctx.task.id,
+            repo: "arbiter",
+            workspace_id: ctx.ws.id,
+            meta: %{resume: true, resumed_from_run_id: prior.id}
+          )
+
+        assert Ash.get!(Issue, ctx.task.id).attention_resume_attempts == expected
+
+        ref = Process.monitor(pid)
+        GenServer.stop(pid, :normal)
+        assert_receive {:DOWN, ^ref, :process, ^pid, _}
+      end
     end
 
     test "a transition resets the resume attempts", ctx do

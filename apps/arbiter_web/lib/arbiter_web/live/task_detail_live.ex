@@ -68,6 +68,7 @@ defmodule ArbiterWeb.TaskDetailLive do
   alias Arbiter.ReviewGate.Round
   alias Arbiter.Sessions.Refine
   alias Arbiter.Skills.Selection
+  alias Arbiter.Tasks.Attention
   alias Arbiter.Tasks.Dependencies
   alias Arbiter.Tasks.Dependency
   alias Arbiter.Tasks.DependencyGraph
@@ -286,6 +287,7 @@ defmodule ArbiterWeb.TaskDetailLive do
         {:noreply,
          socket
          |> refresh_worker()
+         |> refresh_attention()
          |> refresh_runs()
          |> refresh_review_rounds()
          |> refresh_budget()}
@@ -365,6 +367,22 @@ defmodule ArbiterWeb.TaskDetailLive do
   # opening a transcript are socket-local state, never a navigation.
 
   @impl true
+  # bd-8nlez1: the operator hands the ticket's attention back to the
+  # coordinator — the answer to a hand-off or to an item promoted past its
+  # limit. The coordinator gets a fresh clock and attempt budget.
+  def handle_event("hand_back_attention", _params, socket) do
+    case Attention.hand_off(socket.assigns.task_id, :coordinator, nil) do
+      {:ok, _attention} ->
+        {:noreply,
+         socket
+         |> put_flash(:info, "Handed back to the coordinator.")
+         |> refresh_all()}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, Attention.describe_error(reason))}
+    end
+  end
+
   def handle_event("filter_runs", %{"tab" => tab}, socket) do
     {:noreply,
      socket
@@ -1014,6 +1032,7 @@ defmodule ArbiterWeb.TaskDetailLive do
     |> assign(:load_state, Map.new([:header | @async_panels], &{&1, :loading}))
     |> assign(:load_tokens, %{})
     |> assign(task: nil, acceptance_items: [], implementer_pin: nil, workspace: nil, worker: nil)
+    |> assign(:attention, nil)
     |> assign(runs: [], usage_by_run: %{}, issue_repo: nil, prior_mr_refs: [])
     |> assign(review_rounds: [], review_summary: nil)
     |> assign(:relationship_groups, @empty_relationship_groups)
@@ -1151,9 +1170,20 @@ defmodule ArbiterWeb.TaskDetailLive do
       acceptance_items: acceptance_items(task && task.acceptance),
       implementer_pin: implementer_pin(task),
       workspace: fetch_workspace(task),
-      worker: fetch_worker(task_id)
+      worker: fetch_worker(task_id),
+      attention: attention_for(task)
     }
   end
+
+  # bd-8nlez1: the ticket's attention — who has to act on it, and the note a
+  # hand-off or an expired limit left — for the header's attention strip.
+  defp attention_for(%Issue{} = task) do
+    Attention.current(task)
+  rescue
+    _ -> nil
+  end
+
+  defp attention_for(_task), do: nil
 
   defp panel_data(:runs, ctx), do: runs_data(ctx)
   defp panel_data(:review_rounds, ctx), do: %{review_rounds: fetch_review_rounds(ctx.task_id)}
@@ -1364,6 +1394,13 @@ defmodule ArbiterWeb.TaskDetailLive do
     do: start_header_load(socket)
 
   defp refresh_worker(socket), do: socket
+
+  # A run starting or stopping can raise or clear a derived attention item
+  # without touching the ticket's row.
+  defp refresh_attention(%{assigns: %{load_state: %{header: :ok}, task: task}} = socket),
+    do: assign(socket, :attention, attention_for(task))
+
+  defp refresh_attention(socket), do: socket
 
   defp fetch_worker(task_id) do
     case Worker.whereis(task_id) do
@@ -2403,6 +2440,11 @@ defmodule ArbiterWeb.TaskDetailLive do
                the theory that "which epic am I looking at a piece of" is a
                header question, not a panel one. --%>
           <.parent_links :if={@task} id="task-parents" parents={@parent_refs} class="mt-2" />
+
+          <%!-- bd-8nlez1: the ticket's attention. The coordinator comes first:
+               its items read quietly here, the operator's take the attention
+               hue and carry the hand-back. --%>
+          <.attention_strip :if={@attention} attention={@attention} />
         </div>
 
         <%= if @task do %>
@@ -4127,6 +4169,69 @@ defmodule ArbiterWeb.TaskDetailLive do
     </div>
     """
   end
+
+  # bd-8nlez1: the ticket's attention (`Arbiter.Tasks.Attention.current/1`) —
+  # who has to act, why, and the note a hand-off or an expired limit left. An
+  # operator-owned item takes the attention hue and offers the hand-back; a
+  # coordinator-owned one is the coordinator's to work, and reads quietly.
+  attr :attention, :map, required: true
+
+  defp attention_strip(assigns) do
+    ~H"""
+    <div
+      id="task-attention"
+      data-owner={@attention.owner}
+      class={[
+        "mt-3 flex flex-wrap items-start gap-x-3 gap-y-2 rounded-[var(--radius-field)] border-l-[3px] px-3 py-2 text-[12px] transition-colors duration-200",
+        if(@attention.owner == :operator,
+          do:
+            "border-l-[var(--arb-attention)] bg-[var(--arb-attention-wash)] text-[var(--text-title)]",
+          else: "border-l-[var(--border-default)] bg-[var(--surface-sunken)] text-[var(--text-secondary)]"
+        )
+      ]}
+    >
+      <div class="flex min-w-0 flex-1 flex-col gap-0.5">
+        <div class="flex items-center gap-1.5">
+          <.icon
+            name={if(@attention.owner == :operator, do: "hero-hand-raised", else: "hero-cpu-chip")}
+            class={[
+              "size-3.5 shrink-0",
+              @attention.owner == :operator && "text-[var(--arb-attention)]"
+            ]}
+          />
+          <span id="task-attention-owner" class="font-medium">
+            {attention_owner_label(@attention.owner)}
+          </span>
+          <span class="text-[var(--text-label)]">·</span>
+          <span id="task-attention-reason" class="min-w-0 truncate" title={@attention.reason}>
+            {@attention.reason}
+          </span>
+        </div>
+        <p
+          :if={@attention[:note]}
+          id="task-attention-note"
+          class="pl-5 text-[11.5px] italic text-[var(--text-secondary)]"
+        >
+          “{@attention.note}”
+        </p>
+      </div>
+      <button
+        :if={@attention.owner == :operator}
+        id="task-attention-handback"
+        type="button"
+        phx-click="hand_back_attention"
+        phx-disable-with="Handing back…"
+        title="Give this back to the coordinator, with a fresh time limit and resume budget."
+        class="shrink-0 rounded-[var(--radius-chip)] border border-solid border-[var(--arb-attention-edge)] px-2.5 py-1 text-[11.5px] font-medium text-[var(--arb-attention)] transition-colors duration-150 hover:bg-[var(--arb-attention)] hover:text-[var(--arb-attention-ink)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--arb-attention)]"
+      >
+        Hand back to coordinator
+      </button>
+    </div>
+    """
+  end
+
+  defp attention_owner_label(:operator), do: "Needs you"
+  defp attention_owner_label(_), do: "With the coordinator"
 
   # One column of the epic's "Children by status" mini-board (design
   # bd-2s901b §3). Rendered with a plain `<details>` rather than any

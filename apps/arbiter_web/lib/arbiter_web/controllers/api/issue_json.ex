@@ -73,6 +73,11 @@ defmodule ArbiterWeb.Api.IssueJSON do
       attention_cause: to_string_atom(issue.attention_cause),
       attention_detail: issue.attention_detail,
       attention_since: iso(issue.attention_since),
+      # bd-8nlez1: the attention's owner when a hand-off, a hand-back or an
+      # expired limit moved it, and the note that came with the move.
+      attention_owner: to_string_atom(issue.attention_owner),
+      attention_note: issue.attention_note,
+      attention_owner_since: iso(issue.attention_owner_since),
       pr_body: issue.pr_body,
       target_branch: issue.target_branch,
       repo: issue.repo,
