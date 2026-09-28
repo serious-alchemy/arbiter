@@ -513,7 +513,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
 
   defp actively_working?(pid) do
     case Worker.state(pid) do
-      %{state: run_state} -> run_state in @active_run_states
+      %{state: run_state} = snap -> run_state in @active_run_states and not parked?(snap)
       _ -> false
     end
   rescue
@@ -521,6 +521,15 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
   catch
     :exit, _ -> false
   end
+
+  # bd-2g179m: a run `:waiting` on the review gate with no agent live is
+  # parked, not working — with `merge.auto_merge` off an approved task sits
+  # there until a human merges. Its PR merging is the fact the finalizer exists
+  # to act on, and nothing else polls it (the worker holds no Watchdog once the
+  # gate has verdicted), so it must not protect the task. A snapshot that says
+  # nothing about `agent_live` is unknown, and stays protected.
+  defp parked?(snap),
+    do: Worker.awaiting_review_gate?(snap) and Map.get(snap, :agent_live) == false
 
   defp skip_live_worker(%Issue{} = task) do
     Logger.debug(

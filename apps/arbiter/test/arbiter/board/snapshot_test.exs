@@ -387,6 +387,45 @@ defmodule Arbiter.Board.SnapshotTest do
       assert board.slots_free == 2
     end
 
+    # bd-2g179m: an approved ticket parked for a manual merge (`merge.auto_merge`
+    # off) is Merging, so with a cap of 1 it must not block the next dispatch —
+    # and the board's `slots_free` must be exactly what the plan then does.
+    test "a ticket parked for a manual merge does not hold the only slot" do
+      board =
+        derive(
+          slots_total: 1,
+          issues: [
+            issue("bd-parked", %{
+              state: :merging,
+              status: :in_progress,
+              pr_ref: "!274",
+              attention_cause: :awaiting_manual_merge
+            }),
+            issue("bd-next", %{})
+          ],
+          workers: [worker("bd-parked", :review_gate)]
+        )
+
+      assert board.slots_used == 0
+      assert board.slots_free == 1
+      assert board.promote == "bd-next"
+    end
+
+    test "slots_free is zero exactly when the plan will not dispatch" do
+      board =
+        derive(
+          slots_total: 1,
+          issues: [
+            issue("bd-busy", %{state: :active, status: :in_progress}),
+            issue("bd-next", %{})
+          ],
+          workers: [worker("bd-busy", :review_gate)]
+        )
+
+      assert board.slots_free == 0
+      assert board.promote == nil
+    end
+
     test "a closed ticket frees its slot" do
       board =
         derive(
