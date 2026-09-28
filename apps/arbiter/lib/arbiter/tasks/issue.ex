@@ -352,6 +352,7 @@ defmodule Arbiter.Tasks.Issue do
       # restart-and-observe.
       change set_attribute(:attention_cause, :awaiting_verification)
       change set_attribute(:attention_since, &DateTime.utc_now/0)
+      change {Arbiter.Tasks.Issue.Changes.AnnounceAttention, []}
 
       # Same teardown as `:close`: the worker finished and its PR merged, so
       # leaving the agent + worktree alive for the whole verification window
@@ -412,6 +413,7 @@ defmodule Arbiter.Tasks.Issue do
       change set_attribute(:attention_cause, arg(:cause))
       change set_attribute(:attention_detail, nil)
       change set_attribute(:attention_since, &DateTime.utc_now/0)
+      change {Arbiter.Tasks.Issue.Changes.AnnounceAttention, []}
 
       change after_action(fn _, issue, _ ->
                Arbiter.Tasks.Issue.broadcast_lifecycle(:updated, issue)
@@ -870,6 +872,7 @@ defmodule Arbiter.Tasks.Issue do
       change set_attribute(:attention_cause, :pr_closed)
       change set_attribute(:attention_detail, arg(:detail))
       change set_attribute(:attention_since, &DateTime.utc_now/0)
+      change {Arbiter.Tasks.Issue.Changes.AnnounceAttention, []}
 
       change after_action(fn _, issue, _ ->
                Arbiter.Tasks.Issue.broadcast_lifecycle(:updated, issue)
@@ -905,7 +908,22 @@ defmodule Arbiter.Tasks.Issue do
             do: cs,
             else: Ash.Changeset.force_change_attribute(cs, :attention_since, DateTime.utc_now())
         end)
+        |> then(fn cs ->
+          # bd-8nlez1: a hand-off belongs to the cause it was made for; a
+          # different cause starts back at the owner table's default.
+          if changeset.data.attention_owner_cause in [nil, cause],
+            do: cs,
+            else:
+              Ash.Changeset.force_change_attributes(cs, %{
+                attention_owner: nil,
+                attention_owner_cause: nil,
+                attention_note: nil,
+                attention_owner_since: nil
+              })
+        end)
       end
+
+      change {Arbiter.Tasks.Issue.Changes.AnnounceAttention, []}
 
       change after_action(fn _, issue, _ ->
                Arbiter.Tasks.Issue.broadcast_lifecycle(:updated, issue)
@@ -919,7 +937,61 @@ defmodule Arbiter.Tasks.Issue do
     update :clear_attention do
       require_atomic? false
 
+      # bd-8nlez1: a resume out of a failed run is one more attempt at it,
+      # counted for the `run_crashed` attempt limit (`AttentionSweep`).
+      argument :resumed_from_failure, :boolean, allow_nil?: false, default: false
+
       change {Arbiter.Tasks.Issue.Changes.ClearAttention, []}
+
+      change fn changeset, _context ->
+        if Ash.Changeset.get_argument(changeset, :resumed_from_failure) do
+          Ash.Changeset.force_change_attribute(
+            changeset,
+            :attention_resume_attempts,
+            (changeset.data.attention_resume_attempts || 0) + 1
+          )
+        else
+          changeset
+        end
+      end
+
+      change after_action(fn _, issue, _ ->
+               Arbiter.Tasks.Issue.broadcast_lifecycle(:updated, issue)
+               {:ok, issue}
+             end)
+    end
+
+    # bd-8nlez1: move the ticket's attention to `owner` — the coordinator
+    # handing it off to the operator with a note, the operator handing it back,
+    # or an expired limit (`Arbiter.Tasks.Attention.hand_off/3`). The move
+    # applies to `cause`, the attention the ticket has now, and goes when that
+    # clears. A hand-back gives the coordinator a fresh clock and a fresh
+    # attempt budget.
+    update :set_attention_owner do
+      require_atomic? false
+
+      argument :owner, :atom do
+        allow_nil? false
+        constraints one_of: [:coordinator, :operator]
+      end
+
+      argument :cause, :atom do
+        allow_nil? false
+        constraints one_of: @attention_causes
+      end
+
+      argument :note, :string, allow_nil?: true
+
+      change set_attribute(:attention_owner, arg(:owner))
+      change set_attribute(:attention_owner_cause, arg(:cause))
+      change set_attribute(:attention_note, arg(:note))
+      change set_attribute(:attention_owner_since, &DateTime.utc_now/0)
+
+      change fn changeset, _context ->
+        if Ash.Changeset.get_argument(changeset, :owner) == :coordinator,
+          do: Ash.Changeset.force_change_attribute(changeset, :attention_resume_attempts, 0),
+          else: changeset
+      end
 
       change after_action(fn _, issue, _ ->
                Arbiter.Tasks.Issue.broadcast_lifecycle(:updated, issue)
@@ -1284,6 +1356,55 @@ defmodule Arbiter.Tasks.Issue do
       allow_nil? true
       public? true
       description "When `attention_cause` was set."
+    end
+
+    # ---- attention ownership (bd-8nlez1) ------------------------------------
+
+    attribute :attention_owner, :atom do
+      allow_nil? true
+      public? true
+      constraints one_of: [:coordinator, :operator]
+
+      description """
+      Who owns the ticket's attention when a hand-off, a hand-back or an
+      expired limit moved it off the owner table's default
+      (`Arbiter.Tasks.Lifecycle.Attention`). Applies only while the ticket's
+      attention is `attention_owner_cause`; nil means the table decides.
+      Cleared with the rest of the attention.
+      """
+    end
+
+    attribute :attention_owner_cause, :atom do
+      allow_nil? true
+      public? true
+      constraints one_of: @attention_causes
+      description "The attention cause `attention_owner` was set for."
+    end
+
+    attribute :attention_note, :string do
+      allow_nil? true
+      public? true
+      description "The hand-off note, or the limit that moved the attention to the operator."
+    end
+
+    attribute :attention_owner_since, :utc_datetime_usec do
+      allow_nil? true
+      public? true
+      description "When `attention_owner` was last set."
+    end
+
+    attribute :attention_resume_attempts, :integer do
+      allow_nil? false
+      public? true
+      default 0
+      constraints min: 0
+
+      description """
+      How many times the ticket's run was resumed out of a failed run while
+      the ticket stayed in its state. Reset by a transition and by a
+      hand-back to the coordinator; read by the `run_crashed` attempt limit
+      (`Arbiter.Tasks.AttentionSweep`).
+      """
     end
 
     attribute :pr_opened_notified_ref, :string do

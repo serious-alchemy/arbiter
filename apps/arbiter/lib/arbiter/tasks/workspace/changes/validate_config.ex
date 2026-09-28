@@ -50,6 +50,10 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
       a number in (0, 1], `"min_fix_passes"` a positive integer,
       `"check_commands"` a map of repo name → command string (bd-cuu8n3), and
       `"flake_recurrence_threshold"` a positive integer (bd-6vullc).
+    * If `"attention"` is present, it must be a map whose
+      `"coordinator_limit_minutes"` / `"run_crashed_max_resumes"` are
+      non-negative integers — `0` turns a limit off (bd-8nlez1,
+      `Arbiter.Tasks.AttentionLimits`).
 
   Unknown keys are allowed (forward-compat) — including any legacy
   `"vernacular"` key, which is now ignored rather than validated.
@@ -80,6 +84,29 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     |> validate_review_automation(Map.get(config, "review_automation"))
     |> validate_quota(Map.get(config, "quota"))
     |> validate_loop(Map.get(config, "loop"))
+    |> validate_attention(Map.get(config, "attention"))
+  end
+
+  # bd-8nlez1: the escalation limits (`Arbiter.Tasks.AttentionLimits`). Zero is
+  # meaningful — it turns a limit off.
+  defp validate_attention(changeset, nil), do: changeset
+
+  defp validate_attention(changeset, attention) when is_map(attention) do
+    changeset
+    |> validate_non_negative_int(
+      attention,
+      "coordinator_limit_minutes",
+      "attention.coordinator_limit_minutes"
+    )
+    |> validate_non_negative_int(
+      attention,
+      "run_crashed_max_resumes",
+      "attention.run_crashed_max_resumes"
+    )
+  end
+
+  defp validate_attention(changeset, _) do
+    Changeset.add_error(changeset, field: :config, message: "attention must be a map")
   end
 
   defp validate_tracker(changeset, nil), do: changeset

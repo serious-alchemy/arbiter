@@ -234,6 +234,9 @@ config :arbiter, :loop_canary_ticker, enabled: false
 # drive `Arbiter.Usage.BudgetPatrol.sweep/1` synchronously.
 config :arbiter, :budget_patrol, enabled: false
 
+# bd-8nlez1: tests drive `Arbiter.Tasks.AttentionSweep.run/1` with their own clock.
+config :arbiter, :attention_sweep, enabled: false
+
 # Disable the durable events retention sweeper in test — it would otherwise
 # delete rows on a timer off the sandbox connection. Tests drive
 # `Arbiter.Events.Retention.sweep/1` synchronously.

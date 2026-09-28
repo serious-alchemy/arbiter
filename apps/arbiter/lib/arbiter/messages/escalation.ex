@@ -93,7 +93,9 @@ defmodule Arbiter.Messages.Escalation do
         :ok
 
       cause ->
-        case Attention.raise_cause(ref, cause, detail || subject) do
+        opts = [keep_existing: EscalationKind.yields?(kind)]
+
+        case Attention.raise_cause(ref, cause, detail || subject, opts) do
           {:ok, _} ->
             :ok
 

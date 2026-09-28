@@ -1793,6 +1793,12 @@ defmodule Arbiter.MCP.Tools do
       attention_cause: to_str(i.attention_cause),
       attention_detail: i.attention_detail,
       attention_since: iso(i.attention_since),
+      # bd-8nlez1: who the attention was moved to (by a hand-off, a hand-back
+      # or an expired limit), and the note that came with it.
+      attention_owner: to_str(i.attention_owner),
+      attention_note: i.attention_note,
+      attention_owner_since: iso(i.attention_owner_since),
+      attention_resume_attempts: i.attention_resume_attempts,
       pr_body: i.pr_body,
       target_branch: i.target_branch,
       repo: i.repo,
@@ -1888,6 +1894,36 @@ defmodule Arbiter.MCP.Tools do
     do: %{outcome: "error", action: serialize_claim_action(action), reason: inspect(reason)}
 
   # internal — shared
+  @doc """
+  A ticket's computed attention (`Arbiter.Tasks.Lifecycle.Attention.t/0`) as
+  JSON — nil stays nil (bd-8nlez1).
+  """
+  def serialize_attention(nil), do: nil
+
+  def serialize_attention(%{} = a) do
+    %{
+      owner: to_str(a.owner),
+      waiting_on: to_str(a.waiting_on),
+      reason: a.reason,
+      cause: to_str(a.cause),
+      since: iso(a.since),
+      note: Map.get(a, :note),
+      owner_since: iso(Map.get(a, :owner_since))
+    }
+  end
+
+  @doc "One `Arbiter.Tasks.Attention.items/1` entry, flattened for the coordinator's queue."
+  def serialize_attention_item(%{ticket_id: id, attention: attention} = item) do
+    attention
+    |> serialize_attention()
+    |> Map.merge(%{
+      ticket_id: id,
+      title: item.title,
+      state: to_str(item.state),
+      workspace_id: item.workspace_id
+    })
+  end
+
   def to_str(nil), do: nil
   def to_str(a) when is_atom(a), do: Atom.to_string(a)
   def to_str(s) when is_binary(s), do: s
@@ -1952,6 +1988,8 @@ defmodule Arbiter.MCP.Tools do
   defdelegate task_promote(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate task_demote(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate task_rank(scope, args), to: Arbiter.MCP.Tools.Task
+  defdelegate ticket_handoff(scope, args), to: Arbiter.MCP.Tools.Task
+  defdelegate ticket_handback(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate task_sync_upstream_close(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate dep_add(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate dep_remove(scope, args), to: Arbiter.MCP.Tools.Task

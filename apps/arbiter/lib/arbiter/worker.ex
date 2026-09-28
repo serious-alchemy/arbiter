@@ -1777,13 +1777,30 @@ defmodule Arbiter.Worker do
   # crash) is being worked again, so the cause is cleared and the ticket's
   # escalations resolved (`Arbiter.Tasks.Attention.clear/2`). A reviewer or
   # implementer round runs under a synthetic id and never clears it.
+  #
+  # bd-8nlez1: a resume out of a failed run is counted as one more attempt at
+  # it, for the `run_crashed` attempt limit (`Arbiter.Tasks.AttentionSweep`).
   defp clear_attention_on_restart(%State{task_id: task_id, meta: meta}) do
-    if resumed_from_run_id(meta) != nil and is_nil(role_from_meta(meta)) and
+    prior = resumed_from_run_id(meta)
+
+    if prior != nil and is_nil(role_from_meta(meta)) and
          Arbiter.Worker.ReviewGate.base_task_id(task_id) == task_id do
-      _ = Arbiter.Tasks.Attention.clear(task_id, :run_restarted)
+      _ =
+        Arbiter.Tasks.Attention.clear(task_id, :run_restarted,
+          resumed_from_failure: prior_run_failed?(prior)
+        )
     end
 
     :ok
+  end
+
+  defp prior_run_failed?(run_id) do
+    case Ash.get(Arbiter.Workers.Run, run_id) do
+      {:ok, %{outcome: outcome}} -> outcome in [:failed, :interrupted]
+      _ -> false
+    end
+  rescue
+    _ -> false
   end
 
   defp stringify_failure(nil), do: nil
