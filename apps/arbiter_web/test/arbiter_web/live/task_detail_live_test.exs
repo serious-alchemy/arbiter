@@ -2,6 +2,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
   use ArbiterWeb.ConnCase, async: false
 
   import Phoenix.LiveViewTest
+  import ArbiterWeb.TaskDetailLiveHelpers
 
   alias Arbiter.Messages.Message
   alias Arbiter.ReviewGate.Round
@@ -76,7 +77,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
           priority: 1
         })
 
-      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       assert html =~ task.id
       assert html =~ "important thing"
@@ -100,14 +101,14 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
           type: :blocks
         })
 
-      {:ok, _view, a_html} = live(conn, ~p"/tasks/#{a.id}")
+      {:ok, _view, a_html} = live_task(conn, ~p"/tasks/#{a.id}")
 
       assert a_html =~ "Blocks (1)"
       assert a_html =~ b.id
       assert a_html =~ "B"
       refute a_html =~ "Blocked by ("
 
-      {:ok, _view, b_html} = live(conn, ~p"/tasks/#{b.id}")
+      {:ok, _view, b_html} = live_task(conn, ~p"/tasks/#{b.id}")
 
       assert b_html =~ "Blocked by (1)"
       assert b_html =~ a.id
@@ -119,7 +120,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, task} = Ash.create(Issue, %{title: "polly", workspace_id: ws.id})
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "test/repo")
 
-      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       assert html =~ "Worker"
       assert html =~ "idle"
@@ -134,7 +135,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, task} = Ash.create(Issue, %{title: "no-claude", workspace_id: ws.id})
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "test/repo")
 
-      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
       assert html =~ task.id
       assert html =~ "Worker"
     end
@@ -142,13 +143,13 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
     test "tells the user when no worker is running", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "lonely", workspace_id: ws.id})
 
-      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
       assert html =~ "No worker running"
       assert html =~ "arb dispatch"
     end
 
     test "404-ish state when task doesn't exist", %{conn: conn} do
-      {:ok, _view, html} = live(conn, ~p"/tasks/bdt-doesnotexist")
+      {:ok, _view, html} = live_task(conn, ~p"/tasks/bdt-doesnotexist")
       assert html =~ "not found"
     end
 
@@ -163,7 +164,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
           workspace_id: ws.id
         })
 
-      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       assert html =~ long_title
       # Verify the h1 has the truncate class
@@ -175,7 +176,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
     test "re-renders when a relevant task_lifecycle fires", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "transitioning", workspace_id: ws.id})
 
-      {:ok, view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, html} = live_task(conn, ~p"/tasks/#{task.id}")
       assert html =~ "open"
 
       {:ok, _} = Ash.update(task, %{status: :in_progress})
@@ -202,7 +203,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, task} = Ash.update(task, %{status: :in_progress})
       {:ok, _} = Ash.update(task, %{}, action: :await_verification)
 
-      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       assert html =~ "awaiting_verification"
       assert html =~ "arb issue verify"
@@ -218,7 +219,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, _closed} =
         Arbiter.Tasks.Verification.observed(awaiting, "restarted 14:02; the new path fires")
 
-      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       assert html =~ "restarted 14:02; the new path fires"
       assert html =~ "observed"
@@ -227,7 +228,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
     test "an unflagged task shows no verification section", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "ordinary", workspace_id: ws.id})
 
-      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       refute html =~ "arb issue verify"
     end
@@ -253,7 +254,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
 
       create_run(task, "#100", ~U[2026-07-01 00:00:00.000000Z])
 
-      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       assert html =~ "#100"
       refute html =~ "Prior MRs"
@@ -270,7 +271,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       create_run(task, "#200", ~U[2026-07-02 00:00:00.000000Z])
       create_run(task, "#300", ~U[2026-07-03 00:00:00.000000Z])
 
-      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       assert html =~ "Prior MRs"
       assert html =~ "#100"
@@ -293,7 +294,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       create_run(task, "#100", ~U[2026-07-02 00:00:00.000000Z])
       create_run(task, "#100", ~U[2026-07-03 00:00:00.000000Z])
 
-      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       assert (html |> String.split("#100") |> length()) - 1 == 1
       refute html =~ "Prior MRs"
@@ -313,7 +314,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, task} =
         Ash.create(Issue, %{title: "assigned", workspace_id: ws.id, repo: "org/beta"})
 
-      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
       assert html =~ "org/beta"
     end
 
@@ -329,7 +330,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, assigned} =
         Ash.create(Issue, %{title: "assigned", workspace_id: ws.id, repo: "org/beta"})
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{assigned.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{assigned.id}")
       html = view |> element(~s(button[phx-click="open_dispatch"])) |> render_click()
       assert html =~ "Task default (org/beta)"
 
@@ -340,7 +341,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
 
       {:ok, unassigned} = Ash.update(unassigned, %{repo: nil})
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{unassigned.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{unassigned.id}")
       html = view |> element(~s(button[phx-click="open_dispatch"])) |> render_click()
       assert html =~ "Workspace default"
     end
@@ -367,7 +368,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       # bd-asxw4e: Ready, so the dispatch gets as far as resolving the repo.
       {:ok, task} = Ash.update(task, %{}, action: :promote_to_ready)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       view |> element(~s(button[phx-click="open_dispatch"])) |> render_click()
 
       view
@@ -385,7 +386,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, task} =
         Ash.create(Issue, %{title: "before", workspace_id: ws.id, priority: 3})
 
-      {:ok, view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, html} = live_task(conn, ~p"/tasks/#{task.id}")
       refute html =~ ~s(id="task-edit-modal")
 
       html = view |> element(~s(button[phx-click="open_edit"])) |> render_click()
@@ -437,7 +438,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
 
       {:ok, task} = Ash.create(Issue, %{title: "unassigned", workspace_id: ws.id})
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       html = view |> element(~s(button[phx-click="open_edit"])) |> render_click()
 
       # Same source of truth as the dispatch modal: an unresolvable repo_paths
@@ -465,7 +466,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
     test "a blank title is refused and the modal stays open", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "keep-me", workspace_id: ws.id})
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       view |> element(~s(button[phx-click="open_edit"])) |> render_click()
 
       html =
@@ -491,7 +492,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
           workspace_id: ws.id
         })
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       view |> element(~s(button[phx-click="open_edit"])) |> render_click()
 
       html =
@@ -511,7 +512,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, task} = Ash.create(Issue, %{title: "done", workspace_id: ws.id})
       {:ok, _} = Ash.update(task, %{}, action: :close)
 
-      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
       refute html =~ ~s(phx-click="open_edit")
     end
 
@@ -529,7 +530,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
     } do
       {:ok, task} = Ash.create(Issue, %{title: "before", workspace_id: ws.id})
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       html = view |> element(~s(button[phx-click="open_edit"])) |> render_click()
 
       assert html =~ ~s(class="btn btn-sm btn-ghost" type="button" phx-click="cancel_edit")
@@ -550,7 +551,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, task} = Ash.update(task, %{status: :in_progress})
       {:ok, parked} = Ash.update(task, %{}, action: :await_verification)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{parked.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{parked.id}")
       html = view |> element(~s(button[phx-click="open_edit"])) |> render_click()
       assert html =~ "awaiting_verification"
 
@@ -577,7 +578,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
          %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "closeable", workspace_id: ws.id})
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       html = view |> element(~s(button[phx-click="open_close"])) |> render_click()
       assert html =~ ~s(id="task-close-modal")
 
@@ -597,7 +598,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, task} = Ash.create(Issue, %{title: "already", workspace_id: ws.id})
       {:ok, _} = Ash.update(task, %{}, action: :close)
 
-      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
       refute html =~ ~s(phx-click="open_close")
     end
   end
@@ -609,7 +610,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, task} = Ash.create(Issue, %{title: "raw", workspace_id: ws.id})
       refute task.refined
 
-      {:ok, view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       assert html =~ "Move to Ready"
       assert has_element?(view, ~s(button[phx-click="promote_to_ready"]))
@@ -619,7 +620,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, task} =
         Ash.create(Issue, %{title: "refine me", workspace_id: ws.id, acceptance: "- it works"})
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       html = view |> element(~s(button[phx-click="promote_to_ready"])) |> render_click()
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
@@ -639,7 +640,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
 
       {:ok, _} = Ash.update(task, %{}, action: :promote_to_ready)
 
-      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       refute html =~ ~s(phx-click="promote_to_ready")
     end
@@ -648,7 +649,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, task} = Ash.create(Issue, %{title: "dead idea", workspace_id: ws.id})
       {:ok, _} = Ash.update(task, %{}, action: :close)
 
-      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       refute html =~ ~s(phx-click="promote_to_ready")
     end
@@ -664,7 +665,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
           acceptance: "- it works"
         })
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       view |> element(~s(button[phx-click="promote_to_ready"])) |> render_click()
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
@@ -675,7 +676,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, task} = Ash.create(Issue, %{title: "running now", workspace_id: ws.id})
       {:ok, _} = Ash.update(task, %{status: :in_progress})
 
-      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       refute html =~ ~s(phx-click="promote_to_ready")
     end
@@ -686,7 +687,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, task} =
         Ash.create(Issue, %{title: "no ACs", workspace_id: ws.id, issue_type: :bug})
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       html = view |> element(~s(button[phx-click="promote_to_ready"])) |> render_click()
 
       assert html =~ "Promote without acceptance criteria"
@@ -701,7 +702,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, task} =
         Ash.create(Issue, %{title: "no ACs", workspace_id: ws.id, issue_type: :feature})
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       view |> element(~s(button[phx-click="promote_to_ready"])) |> render_click()
 
       html =
@@ -723,7 +724,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, task} =
         Ash.create(Issue, %{title: "no ACs", workspace_id: ws.id, issue_type: :chore})
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       view |> element(~s(button[phx-click="promote_to_ready"])) |> render_click()
 
       html =
@@ -743,7 +744,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
         {:ok, task} =
           Ash.create(Issue, %{title: "exempt #{type}", workspace_id: ws.id, issue_type: type})
 
-        {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+        {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
         view |> element(~s(button[phx-click="promote_to_ready"])) |> render_click()
 
         {:ok, reloaded} = Ash.get(Issue, task.id)
@@ -760,7 +761,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
           difficulty: 0
         })
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       html = view |> element(~s(button[phx-click="promote_to_ready"])) |> render_click()
 
       refute html =~ "Promote without acceptance criteria"
@@ -783,7 +784,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, task} = Ash.update(task, %{}, action: :promote_to_ready)
       assert task.refined
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       assert has_element?(view, ~s(button[phx-click="return_to_backlog"]))
     end
@@ -798,7 +799,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
 
       {:ok, task} = Ash.update(task, %{}, action: :promote_to_ready)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       html = view |> element(~s(button[phx-click="return_to_backlog"])) |> render_click()
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
@@ -814,7 +815,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
 
       refute task.refined
 
-      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       refute html =~ ~s(phx-click="return_to_backlog")
     end
@@ -830,7 +831,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, task} = Ash.update(task, %{}, action: :promote_to_ready)
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "test/repo")
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       # Button is shown for refined + open tasks
       assert has_element?(view, ~s(button[phx-click="return_to_backlog"]))
@@ -854,7 +855,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, task} = Ash.update(task, %{}, action: :promote_to_ready)
       {:ok, _task} = Ash.update(task, %{status: :in_progress})
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       # Button is not shown when status is not :open
       refute has_element?(view, ~s(button[phx-click="return_to_backlog"]))
@@ -872,7 +873,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, task} = Ash.update(task, %{}, action: :start)
       {:ok, _task} = Ash.update(task, %{}, action: :await_verification)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       # Button is not shown when status is not :open
       refute has_element?(view, ~s(button[phx-click="return_to_backlog"]))
@@ -889,7 +890,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, task} = Ash.update(task, %{}, action: :promote_to_ready)
       {:ok, task} = Ash.update(task, %{}, action: :close)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       refute has_element?(view, ~s(button[phx-click="return_to_backlog"]))
     end
@@ -905,7 +906,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, task} = Ash.create(Issue, %{title: "busy", workspace_id: ws.id})
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "test/repo")
 
-      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
       refute html =~ ~s(phx-click="open_dispatch")
     end
 
@@ -913,7 +914,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
          %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "dispatchable", workspace_id: ws.id})
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       html = view |> element(~s(button[phx-click="open_dispatch"])) |> render_click()
 
       assert html =~ ~s(id="task-dispatch-modal")
@@ -925,7 +926,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
     test "dispatch without the acknowledgement is refused", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "unacked", workspace_id: ws.id})
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       view |> element(~s(button[phx-click="open_dispatch"])) |> render_click()
 
       html =
@@ -953,7 +954,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
     test "an acknowledged dispatch reaches the real dispatch path", %{conn: conn, ws: ws} do
       task = ready_issue(ws, "acked")
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       view |> element(~s(button[phx-click="open_dispatch"])) |> render_click()
 
       pending =
@@ -981,7 +982,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
          %{conn: conn, ws: ws} do
       task = ready_issue(ws, "already live")
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       view |> element(~s(button[phx-click="open_dispatch"])) |> render_click()
 
       # The worker (and its live session) shows up after the modal is open.
@@ -1004,7 +1005,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
     test "a Backlog ticket is refused with the reason", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "unrefined", workspace_id: ws.id})
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       view |> element(~s(button[phx-click="open_dispatch"])) |> render_click()
 
       view
@@ -1042,7 +1043,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
 
       {:ok, task} = Ash.create(Issue, %{title: "repo-choices", workspace_id: ws.id})
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       html = view |> element(~s(button[phx-click="open_dispatch"])) |> render_click()
 
       assert html =~ "resolvable-repo"
@@ -1054,7 +1055,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
     test "an unknown provider is rejected loudly", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "bad-provider", workspace_id: ws.id})
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       view |> element(~s(button[phx-click="open_dispatch"])) |> render_click()
 
       html =
@@ -1076,7 +1077,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
          %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "shell", workspace_id: ws.id})
 
-      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       assert html =~ "Board / Issues /"
       assert html =~ task.id
@@ -1093,7 +1094,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
           workspace_id: ws.id
         })
 
-      {:ok, view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       assert html =~ "ACCEPTANCE"
       assert html =~ "first criterion"
@@ -1117,7 +1118,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, task} =
         Ash.create(Issue, %{title: "waived", workspace_id: ws.id, issue_type: :bug})
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       view |> element(~s(button[phx-click="promote_to_ready"])) |> render_click()
 
       html =
@@ -1151,7 +1152,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
 
       {:ok, task} = Ash.update(task, %{verify_after_deploy: true})
 
-      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       main_ids = ~w(
         panel-description panel-acceptance panel-findings panel-merge-review
@@ -1248,7 +1249,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
 
     test "the task's implementer pin is shown on the runs panel",
          %{conn: conn, task: task, account: account} do
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       assert has_element?(view, "#task-implementer-pin", account.slug)
       assert has_element?(view, "#task-implementer-pin", "openai")
@@ -1256,7 +1257,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
 
     test "an expanded routed run shows the decision: chosen account, headroom, drops and fallback",
          %{conn: conn, task: task, routed: routed} do
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       refute has_element?(view, "#run-routing-#{routed.id}")
       view |> element(~s([phx-value-run="#{routed.id}"])) |> render_click()
@@ -1279,7 +1280,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       task: task,
       plain: plain
     } do
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       view |> element(~s([phx-value-run="#{plain.id}"])) |> render_click()
 
       refute has_element?(view, "#run-routing-#{plain.id}")
@@ -1319,7 +1320,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
 
     test "lists every run for the issue with role filter tabs and counts",
          %{conn: conn, task: task} do
-      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       assert html =~ "RUNS"
       assert html =~ "2 total"
@@ -1345,7 +1346,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
           completed_at: ~U[2026-07-01 12:03:00.000000Z]
         })
 
-      {:ok, view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, html} = live_task(conn, ~p"/tasks/#{task.id}")
       assert html =~ "server shutdown"
 
       view |> element(~s([phx-value-run="#{interrupted.id}"])) |> render_click()
@@ -1354,7 +1355,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
 
     test "a run row expands in place to its transcript — no navigation",
          %{conn: conn, task: task, main: main} do
-      {:ok, view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       refute html =~ "main run line one"
 
@@ -1372,7 +1373,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
 
     test "the expanded transcript header carries the run's machine facts",
          %{conn: conn, task: task, review: review} do
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       html = view |> element(~s([phx-value-run="#{review.id}"])) |> render_click()
 
@@ -1401,7 +1402,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
         start: {FakeWorker, :start_link, [task.id, ["seeded line from the snapshot"]]}
       })
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       html = view |> element(~s([phx-value-run="#{running.id}"])) |> render_click()
 
@@ -1430,7 +1431,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
         start: {FakeWorker, :start_link, [task.id, []]}
       })
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       html = view |> element(~s([phx-value-run="#{main.id}"])) |> render_click()
 
@@ -1440,7 +1441,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
     end
 
     test "role tabs filter the roster by worker_type", %{conn: conn, task: task} do
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       html = view |> element(~s([phx-value-tab="review"])) |> render_click()
 
@@ -1451,7 +1452,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
     test "a role with no runs shows the roster empty state", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "runless", workspace_id: ws.id})
 
-      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       assert html =~ "No runs of this kind on this issue yet."
     end
@@ -1462,7 +1463,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
     # review half of the roster stale until a full page reload.
     test "a review-gate run's lifecycle event refreshes the roster",
          %{conn: conn, task: task} do
-      {:ok, view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       refute html =~ "later review run"
 
@@ -1518,7 +1519,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
           output_lines: ["fix pass transcript"]
         })
 
-      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       assert html =~ "4 total"
       assert html =~ "impl 1"
@@ -1532,7 +1533,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, task} = Ash.create(Issue, %{title: "audited", workspace_id: ws.id})
       {:ok, _} = Ash.update(task, %{priority: 0})
 
-      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       assert html =~ "ACTIVITY"
       assert html =~ "create"
@@ -1553,7 +1554,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
         updated
       end)
 
-      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       assert html =~ "latest 20 of 25 transitions"
     end
@@ -1574,7 +1575,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
           })
       end
 
-      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       assert html =~ "CURRENT RUN"
       assert html =~ "2 runs on this issue"
@@ -1600,7 +1601,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
           type: :blocks
         })
 
-      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       assert html =~ "MACHINE STATE"
       assert html =~ "#591"
@@ -1617,7 +1618,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
     test "the messages panel renders an empty state placeholder", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "messageless", workspace_id: ws.id})
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       messages_panel = view |> element("#panel-messages") |> render()
       assert messages_panel =~ "MESSAGES"
@@ -1635,7 +1636,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
           issue_type: :bug
         })
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       machine_state = view |> element("#panel-machine-state") |> render()
 
@@ -1660,7 +1661,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
           type: :parent_of
         })
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{parent.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{parent.id}")
 
       relationships = view |> element("#panel-relationships") |> render()
       assert relationships =~ "1/1 closed"
@@ -1680,7 +1681,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
           started_at: ~U[2026-07-01 10:00:00.000000Z]
         })
 
-      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       assert html =~ "MACHINE STATE"
       assert html =~ "acme/widgets"
@@ -1704,7 +1705,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, task} =
         Ash.create(Issue, %{title: "skilled", workspace_id: ws.id, issue_type: :feature})
 
-      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       assert html =~ "rail-tdd"
       assert html =~ "always_on"
@@ -1727,7 +1728,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
           type: :parent_of
         })
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{parent.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{parent.id}")
       parent_html = view |> element("#panel-relationships") |> render()
 
       assert has_element?(view, "#rel-children")
@@ -1735,7 +1736,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       refute has_element?(view, "#rel-blocks")
       assert parent_html =~ child.id
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{child.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{child.id}")
       child_html = view |> element("#panel-relationships") |> render()
 
       assert has_element?(view, "#rel-parents")
@@ -1751,7 +1752,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, _} =
         Ash.create(Dependency, %{from_issue_id: a.id, to_issue_id: b.id, type: :relates_to})
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{a.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{a.id}")
 
       assert has_element?(view, "#rel-related")
       refute has_element?(view, "#rel-blocked-by")
@@ -1791,7 +1792,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, _} =
         Ash.create(Dependency, %{from_issue_id: a.id, to_issue_id: g.id, type: :discovered_from})
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{a.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{a.id}")
 
       assert has_element?(view, "#rel-blocked-by")
       assert has_element?(view, "#rel-blocks")
@@ -1813,7 +1814,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, _} =
         Ash.create(Dependency, %{from_issue_id: a.id, to_issue_id: c.id, type: :relates_to})
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{a.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{a.id}")
 
       assert has_element?(view, "#rel-blocked-by[data-gating=true]")
       assert has_element?(view, "#rel-related[data-gating=false]")
@@ -1842,7 +1843,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
           type: :parent_of
         })
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{parent.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{parent.id}")
       children = view |> element("#rel-children") |> render()
 
       assert children =~ "1/2 closed"
@@ -1869,7 +1870,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
           type: :depends_on
         })
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{downstream.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{downstream.id}")
       blocked_by = view |> element("#rel-blocked-by") |> render()
 
       assert has_element?(view, "#rel-blocked-by [data-role=awaiting-verification-chip]")
@@ -1896,7 +1897,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
           created_by: "dashboard"
         })
 
-      {:ok, _view, html} = live(conn, ~p"/tasks/#{a.id}")
+      {:ok, _view, html} = live_task(conn, ~p"/tasks/#{a.id}")
 
       assert html =~ "waiting on the migration to land first"
       assert html =~ "dashboard"
@@ -1915,7 +1916,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, _} =
         Ash.create(Dependency, %{from_issue_id: a.id, to_issue_id: b.id, type: :relates_to})
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{a.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{a.id}")
 
       assert has_element?(view, "#rel-related [data-role=cross-workspace-marker]")
     end
@@ -1925,7 +1926,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
     test "the title block dates the issue in relative time", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "dated", workspace_id: ws.id})
 
-      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       # `opened 2d ago · updated 41m ago` — the operator reads age, not
       # wall-clock stamps, in the header.
@@ -1944,7 +1945,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
           workspace_id: ws.id
         })
 
-      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       # The handoff Checkbox hides the native input and draws its own 14px
       # box; the daisyUI one keeps the native control with `checkbox` classes.
@@ -1988,7 +1989,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
           occurred_at: ~U[2026-07-01 10:12:00.000000Z]
         })
 
-      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       assert html =~ "2 total"
       assert html =~ "1 running"
@@ -2016,7 +2017,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
           })
       end
 
-      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       assert html =~ "fix pass 1"
       refute html =~ "fix_pass 1"
@@ -2071,7 +2072,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, task} =
         Ash.create(Issue, %{title: "md-desc", description: @md, workspace_id: ws.id})
 
-      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       assert html =~ "<h1>Heading</h1>"
       assert html =~ "<strong>bold</strong>"
@@ -2090,7 +2091,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
 
       {:ok, task} = Ash.update(task, %{notes: @md})
 
-      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       assert html =~ "<h1>Heading</h1>"
       refute html =~ "# Heading"
@@ -2102,7 +2103,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
 
       {:ok, task} = Ash.update(task, %{notes: @md})
 
-      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       assert html =~ "<h1>Heading</h1>"
     end
@@ -2118,7 +2119,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
           deployment_notes: "## Deploy heading\n\n- deploy bullet\n"
         })
 
-      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       assert html =~ "<h2>PR heading</h2>"
       assert html =~ "<h2>QA heading</h2>"
@@ -2139,7 +2140,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
           deployment_notes: @xss
         })
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       # Scoped to the markdown containers: the page's own root layout legitimately
       # carries <script src="/assets/js/app.js"> tags, which a whole-page refute
@@ -2164,7 +2165,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
           workspace_id: ws.id
         })
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       assert has_element?(view, "#criterion-0")
       assert has_element?(view, "#criterion-1")
@@ -2215,7 +2216,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       round!(task, %{round: 1, role: :impl, verdict: nil, findings: "fixed them"})
       round!(task, %{round: 2, run_id: r2.id, verdict: :approve, converged: true})
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       assert has_element?(view, "#review-round-summary")
       summary = view |> element("#review-round-summary") |> render()
@@ -2252,7 +2253,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
         converged: true
       })
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       summary = view |> element("#review-round-summary") |> render()
 
@@ -2265,7 +2266,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       r1 = review_run(task, 1)
       round!(task, %{round: 1, run_id: r1.id, verdict: :request_changes, finding_count: 2})
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       summary = view |> element("#review-round-summary") |> render()
 
@@ -2280,7 +2281,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       r1 = review_run(task, 1)
       round!(task, %{round: 1, run_id: r1.id, verdict: :timed_out, finding_count: 0})
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       summary = view |> element("#review-round-summary") |> render()
 
@@ -2293,7 +2294,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       r1 = review_run(task, 1)
       round!(task, %{round: 1, run_id: r1.id, verdict: nil, findings: "no parseable VERDICT"})
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       summary = view |> element("#review-round-summary") |> render()
 
@@ -2309,7 +2310,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       assert r1.status == :completed
       round!(task, %{round: 1, run_id: r1.id, verdict: :request_changes, finding_count: 1})
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       summary = view |> element("#review-round-summary") |> render()
 
@@ -2325,7 +2326,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       round!(task, %{round: 1, run_id: r1.id, verdict: :request_changes, finding_count: 3})
       round!(task, %{round: 2, run_id: r2.id, verdict: :approve, converged: true})
 
-      {:ok, view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       refute html =~ "round 2 reviewer transcript"
 
@@ -2353,7 +2354,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
           output_lines: ["main transcript"]
         })
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       # Filter the roster to `main` — the reviewer row is no longer rendered.
       html = view |> element(~s([phx-value-tab="main"])) |> render_click()
@@ -2368,7 +2369,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, bare} = Ash.create(Issue, %{title: "no pr yet", workspace_id: ws.id})
       round!(bare, %{round: 1, verdict: :approve, converged: true})
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{bare.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{bare.id}")
 
       assert has_element?(view, "#panel-merge-review")
       summary = view |> element("#review-round-summary") |> render()
@@ -2380,7 +2381,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
     test "no summary renders for a task with no review activity", %{conn: conn, task: task} do
       _ = review_run(task, 1)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       refute has_element?(view, "#review-round-summary")
     end
@@ -2430,7 +2431,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
           body: "unrelated"
         })
 
-      {:ok, view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       assert has_element?(view, "#panel-messages")
       assert has_element?(view, "#message-#{addressed.id}")
@@ -2465,7 +2466,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
           body: "please"
         })
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       assert has_element?(view, "#message-#{msg.id}")
 
       {:ok, reloaded} = Ash.get(Message, msg.id)
@@ -2476,7 +2477,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
     test "a new message for the task appears live", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "live messages", workspace_id: ws.id})
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       refute has_element?(view, "[data-role='message-row']")
 
       {:ok, msg} =
@@ -2507,7 +2508,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
           body: Enum.map_join(1..20, "\n", &"- finding #{&1}")
         })
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       assert has_element?(view, "#message-toggle-#{msg.id}", "show more")
 
@@ -2523,7 +2524,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
     test "renders an empty state when the task has no messages", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "no messages", workspace_id: ws.id})
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       assert has_element?(view, "#panel-messages")
       refute has_element?(view, "[data-role='message-row']")
@@ -2572,7 +2573,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
         link_parent_of(epic, child)
       end
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{epic.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{epic.id}")
 
       assert has_element?(view, "#panel-children-by-status")
       assert has_element?(view, "#children-backlog-#{backlog_child.id}", "backlog child")
@@ -2609,7 +2610,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
           type: :depends_on
         })
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{epic.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{epic.id}")
 
       assert has_element?(
                view,
@@ -2621,7 +2622,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       # constraint — its marker is dropped (design bd-2s901b §3).
       {:ok, _} = Ash.update(blocker, %{}, action: :close)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{epic.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{epic.id}")
 
       refute has_element?(
                view,
@@ -2639,7 +2640,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
         link_parent_of(epic, child)
       end
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{epic.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{epic.id}")
 
       refute has_element?(view, "#children-closed details[open]")
     end
@@ -2654,7 +2655,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
         link_parent_of(epic, child)
       end
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{epic.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{epic.id}")
 
       assert has_element?(view, "#children-closed details[open]")
     end
@@ -2662,7 +2663,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
     test "a non-epic issue does not render the mini-board", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "plain task", workspace_id: ws.id})
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       refute has_element?(view, "#panel-children-by-status")
     end
@@ -2678,7 +2679,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
 
       link_parent_of(epic, child)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{epic.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{epic.id}")
 
       assert has_element?(view, "#children-ready-#{child.id}")
       refute has_element?(view, "#children-closed-#{child.id}")
@@ -2702,7 +2703,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, pid} = Worker.start(task_id: child.id, repo: "r", workspace_id: ws.id)
       :ok = Worker.advance(pid, :implement)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{epic.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{epic.id}")
 
       assert has_element?(view, "#children-running-#{child.id}")
 
@@ -2751,7 +2752,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, backlog_child} = Ash.create(Issue, %{title: "backlog child", workspace_id: ws.id})
       link_parent_of(epic, backlog_child)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{epic.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{epic.id}")
 
       assert has_element?(view, "#panel-epic-cost-rollup")
       assert has_element?(view, "#epic-cost-rollup-headline", "$6.50 spent")
@@ -2798,7 +2799,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, sub_epic} = Ash.update(sub_epic, %{}, action: :promote_to_ready)
       link_parent_of(epic, sub_epic)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{epic.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{epic.id}")
 
       assert has_element?(view, "#epic-cost-rollup-breakdown", "1 blocked")
       assert has_element?(view, "#epic-cost-rollup-breakdown", "1 in flight")
@@ -2809,7 +2810,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
     test "a non-epic issue does not render the cost rollup panel", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "plain task", workspace_id: ws.id})
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       refute has_element?(view, "#panel-epic-cost-rollup")
     end
@@ -2818,7 +2819,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, epic} =
         Ash.create(Issue, %{title: "childless epic", workspace_id: ws.id, issue_type: :epic})
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{epic.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{epic.id}")
 
       assert has_element?(view, "#panel-epic-cost-rollup")
       assert has_element?(view, "#epic-cost-rollup-headline", "$0.00 spent")
@@ -2862,7 +2863,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
     test "an issue never refined shows no refinement session panel", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "never refined", workspace_id: ws.id})
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       refute has_element?(view, "#panel-refine-session")
     end
@@ -2896,7 +2897,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, _ended} = Sessions.kill(session.id, runner: NoopRunner, reason: "promoted")
       seed_archive!(root, session.id)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       assert has_element?(view, "#panel-refine-session", "promoted")
 
@@ -2921,7 +2922,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
 
       {:ok, _ended} = Sessions.kill(session.id, runner: NoopRunner, reason: "issue_closed")
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       assert has_element?(view, "#panel-refine-session", "issue_closed")
       refute has_element?(view, "#refine-session-transcript-link")

@@ -11,6 +11,7 @@ defmodule ArbiterWeb.TaskDetailRelationshipsTest do
   use ArbiterWeb.ConnCase, async: false
 
   import Phoenix.LiveViewTest
+  import ArbiterWeb.TaskDetailLiveHelpers
 
   require Ash.Query
 
@@ -71,7 +72,7 @@ defmodule ArbiterWeb.TaskDetailRelationshipsTest do
   describe "the + add affordance" do
     test "opens the modal from the RELATIONSHIPS panel header", %{conn: conn, ws: ws} do
       task = issue(ws)
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       refute has_element?(view, "#relationship-add-modal")
       assert has_element?(view, "#rel-add-open")
@@ -92,7 +93,7 @@ defmodule ArbiterWeb.TaskDetailRelationshipsTest do
 
       refute task.refined
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       assert has_element?(view, "#rel-add-open")
       assert has_element?(view, "#rel-remove-#{edge.id}")
@@ -105,7 +106,7 @@ defmodule ArbiterWeb.TaskDetailRelationshipsTest do
       task = issue(ws)
       target = issue(ws, %{title: "the blocker"})
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       html = add_relationship(view, "is_blocked_by", target.id)
 
       assert edges() == [{:depends_on, task.id, target.id}]
@@ -120,7 +121,7 @@ defmodule ArbiterWeb.TaskDetailRelationshipsTest do
       task = issue(ws)
       target = issue(ws)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       html = add_relationship(view, "blocks", target.id)
 
       assert edges() == [{:depends_on, target.id, task.id}]
@@ -131,7 +132,7 @@ defmodule ArbiterWeb.TaskDetailRelationshipsTest do
       task = issue(ws)
       target = issue(ws)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       html = add_relationship(view, "is_parent_of", target.id)
 
       assert edges() == [{:parent_of, task.id, target.id}]
@@ -143,7 +144,7 @@ defmodule ArbiterWeb.TaskDetailRelationshipsTest do
       task = issue(ws)
       target = issue(ws)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       html = add_relationship(view, "is_child_of", target.id)
 
       assert edges() == [{:parent_of, target.id, task.id}]
@@ -154,7 +155,7 @@ defmodule ArbiterWeb.TaskDetailRelationshipsTest do
       task = issue(ws)
       target = issue(ws)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       html = add_relationship(view, "relates_to", target.id)
 
       assert edges() == [{:relates_to, task.id, target.id}]
@@ -165,7 +166,7 @@ defmodule ArbiterWeb.TaskDetailRelationshipsTest do
       task = issue(ws)
       target = issue(ws)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       html = add_relationship(view, "discovered_from", target.id)
 
       assert edges() == [{:discovered_from, task.id, target.id}]
@@ -176,7 +177,7 @@ defmodule ArbiterWeb.TaskDetailRelationshipsTest do
       task = issue(ws)
       target = issue(ws)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       html = add_relationship(view, "conflicts_with", target.id)
 
       assert edges() == [{:conflicts_with, task.id, target.id}]
@@ -187,7 +188,7 @@ defmodule ArbiterWeb.TaskDetailRelationshipsTest do
       task = issue(ws)
       target = issue(ws)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       add_relationship(view, "is_blocked_by", target.id, note: "needs the migration first")
 
       [edge] = Ash.read!(Dependency)
@@ -203,7 +204,7 @@ defmodule ArbiterWeb.TaskDetailRelationshipsTest do
       by_title = issue(ws, %{title: "zzsentinel title"})
       by_id = issue(ws, %{title: "unrelated"})
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       view |> element("#rel-add-open") |> render_click()
 
       html =
@@ -235,7 +236,7 @@ defmodule ArbiterWeb.TaskDetailRelationshipsTest do
       same_ws = issue(ws, %{title: "shared-word sibling"})
       foreign = issue(other_ws, %{title: "shared-word foreigner"})
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       view |> element("#rel-add-open") |> render_click()
 
       view
@@ -253,7 +254,7 @@ defmodule ArbiterWeb.TaskDetailRelationshipsTest do
       {:ok, _} = Ash.update(closed, %{}, action: :close)
       open = issue(ws, %{title: "rankme open"})
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       view |> element("#rel-add-open") |> render_click()
 
       html =
@@ -268,7 +269,7 @@ defmodule ArbiterWeb.TaskDetailRelationshipsTest do
 
     test "the search input is debounced", %{conn: conn, ws: ws} do
       task = issue(ws)
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       view |> element("#rel-add-open") |> render_click()
 
       assert has_element?(view, ~s(#rel-query[phx-debounce]))
@@ -283,7 +284,7 @@ defmodule ArbiterWeb.TaskDetailRelationshipsTest do
       target = issue(ws, %{title: "dupe target"})
       {:ok, _} = Dependencies.add(task.id, target.id, :depends_on)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       view |> element("#rel-add-open") |> render_click()
 
       html =
@@ -310,7 +311,7 @@ defmodule ArbiterWeb.TaskDetailRelationshipsTest do
       # task" would close the loop, so offering mid under "blocks" is a cycle.
       {:ok, _} = Dependencies.add(task.id, mid.id, :depends_on)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       view |> element("#rel-add-open") |> render_click()
 
       html =
@@ -335,7 +336,7 @@ defmodule ArbiterWeb.TaskDetailRelationshipsTest do
       task = issue(ws)
       foreign = issue(other_ws)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       html = add_relationship(view, "relates_to", foreign.id, select: false)
 
       assert has_element?(view, "#relationship-add-modal")
@@ -349,7 +350,7 @@ defmodule ArbiterWeb.TaskDetailRelationshipsTest do
       mid = issue(ws)
       {:ok, _} = Dependencies.add(task.id, mid.id, :depends_on)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       html = add_relationship(view, "blocks", mid.id, select: false)
 
       assert html =~ "dependency cycle"
@@ -364,7 +365,7 @@ defmodule ArbiterWeb.TaskDetailRelationshipsTest do
       target = issue(ws)
       {:ok, _} = Dependencies.add(task.id, target.id, :relates_to)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       html = add_relationship(view, "relates_to", target.id, select: false)
 
       assert html =~ "already linked"
@@ -374,7 +375,7 @@ defmodule ArbiterWeb.TaskDetailRelationshipsTest do
     test "an unknown id reports not found", %{conn: conn, ws: ws} do
       task = issue(ws)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       html = add_relationship(view, "relates_to", "bdt-nosuchthing", select: false)
 
       assert html =~ "not found"
@@ -389,7 +390,7 @@ defmodule ArbiterWeb.TaskDetailRelationshipsTest do
       task = ready(issue(ws, %{issue_type: :task}))
       target = issue(ws)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       view |> element("#rel-add-open") |> render_click()
 
       view
@@ -408,7 +409,7 @@ defmodule ArbiterWeb.TaskDetailRelationshipsTest do
       task = ready(issue(ws, %{issue_type: :task}))
       target = issue(ws)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       view |> element("#rel-add-open") |> render_click()
 
       view
@@ -419,7 +420,7 @@ defmodule ArbiterWeb.TaskDetailRelationshipsTest do
       refute html =~ "in the dispatch queue"
 
       backlog = issue(ws)
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{backlog.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{backlog.id}")
       view |> element("#rel-add-open") |> render_click()
 
       view
@@ -437,7 +438,7 @@ defmodule ArbiterWeb.TaskDetailRelationshipsTest do
       {:ok, _} = Dependencies.add(task.id, existing.id, :depends_on)
       target = issue(ws)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       view |> element("#rel-add-open") |> render_click()
 
       view
@@ -455,7 +456,7 @@ defmodule ArbiterWeb.TaskDetailRelationshipsTest do
       {:ok, task} = Ash.update(task, %{status: :in_progress})
       target = issue(ws)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       view |> element("#rel-add-open") |> render_click()
 
       view
@@ -475,7 +476,7 @@ defmodule ArbiterWeb.TaskDetailRelationshipsTest do
       target = issue(ws)
       {:ok, _} = Ash.update(target, %{status: :in_progress})
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       view |> element("#rel-add-open") |> render_click()
 
       # "this blocks target" gates *target*, which is the one running.
@@ -503,7 +504,7 @@ defmodule ArbiterWeb.TaskDetailRelationshipsTest do
       child = issue(ws)
       {:ok, _} = Ash.update(child, %{}, action: :close)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{parent.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{parent.id}")
       view |> element("#rel-add-open") |> render_click()
 
       view
@@ -521,7 +522,7 @@ defmodule ArbiterWeb.TaskDetailRelationshipsTest do
       parent = issue(ws, %{auto_close: true})
       open_child = issue(ws)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{parent.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{parent.id}")
       view |> element("#rel-add-open") |> render_click()
 
       view
@@ -536,7 +537,7 @@ defmodule ArbiterWeb.TaskDetailRelationshipsTest do
       closed_child = issue(ws)
       {:ok, _} = Ash.update(closed_child, %{}, action: :close)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{plain.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{plain.id}")
       view |> element("#rel-add-open") |> render_click()
 
       view
@@ -558,7 +559,7 @@ defmodule ArbiterWeb.TaskDetailRelationshipsTest do
       {:ok, edge} = Dependencies.add(task.id, one.id, :depends_on)
       {:ok, _keep} = Dependencies.add(task.id, two.id, :depends_on)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       html = view |> element("#rel-remove-#{edge.id}") |> render_click()
       assert html =~ "Remove this relationship"
@@ -579,7 +580,7 @@ defmodule ArbiterWeb.TaskDetailRelationshipsTest do
       blocker = issue(ws)
       {:ok, edge} = Dependencies.add(task.id, blocker.id, :depends_on)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       html = view |> element("#rel-remove-#{edge.id}") |> render_click()
 
       assert html =~ "becomes dispatchable"
@@ -593,7 +594,7 @@ defmodule ArbiterWeb.TaskDetailRelationshipsTest do
       {:ok, edge} = Dependencies.add(task.id, one.id, :depends_on)
       {:ok, _} = Dependencies.add(task.id, two.id, :depends_on)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       html = view |> element("#rel-remove-#{edge.id}") |> render_click()
 
       refute html =~ "becomes dispatchable"
@@ -604,7 +605,7 @@ defmodule ArbiterWeb.TaskDetailRelationshipsTest do
       other = issue(ws)
       {:ok, edge} = Dependencies.add(other.id, task.id, :blocks)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       view |> element("#rel-remove-#{edge.id}") |> render_click()
       view |> element("#rel-remove-confirm") |> render_click()
 
@@ -618,7 +619,7 @@ defmodule ArbiterWeb.TaskDetailRelationshipsTest do
       other = issue(ws)
       {:ok, edge} = Dependencies.add(task.id, other.id, :depends_on)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       view |> element("#rel-remove-#{edge.id}") |> render_click()
 
       # The other tab wins the race.
@@ -649,7 +650,7 @@ defmodule ArbiterWeb.TaskDetailRelationshipsTest do
           type: :relates_to
         })
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       assert has_element?(view, ~s([data-role="cross-workspace-marker"]))
       refute has_element?(view, "#rel-remove-#{edge.id}")
@@ -662,8 +663,8 @@ defmodule ArbiterWeb.TaskDetailRelationshipsTest do
       task = issue(ws)
       target = issue(ws, %{title: "seen from both tabs"})
 
-      {:ok, tab_a, _} = live(conn, ~p"/tasks/#{task.id}")
-      {:ok, tab_b, _} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, tab_a, _} = live_task(conn, ~p"/tasks/#{task.id}")
+      {:ok, tab_b, _} = live_task(conn, ~p"/tasks/#{task.id}")
 
       refute render(tab_b) =~ "Blocked by ("
 

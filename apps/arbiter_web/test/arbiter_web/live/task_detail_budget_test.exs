@@ -8,6 +8,7 @@ defmodule ArbiterWeb.TaskDetailBudgetTest do
   use ArbiterWeb.ConnCase, async: false
 
   import Phoenix.LiveViewTest
+  import ArbiterWeb.TaskDetailLiveHelpers
 
   alias Arbiter.Tasks.Dependencies
   alias Arbiter.Tasks.Issue
@@ -76,7 +77,7 @@ defmodule ArbiterWeb.TaskDetailBudgetTest do
       task = task!(ws, %{difficulty: 2, issue_type: :feature})
       spend!(task.id, ws, 4.25)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       assert has_element?(view, "#task-spend")
       assert render(view) =~ "$4.25"
@@ -95,7 +96,7 @@ defmodule ArbiterWeb.TaskDetailBudgetTest do
       task = task!(ws, %{difficulty: 2, issue_type: :feature})
       spend!(task.id, ws, 4.25)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       figure = view |> element("#task-spend-figure") |> render()
 
@@ -107,7 +108,7 @@ defmodule ArbiterWeb.TaskDetailBudgetTest do
       task = task!(ws, %{difficulty: 2, issue_type: :feature})
       spend!(task.id, ws, 7.0)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       refute has_element?(view, "#task-spend-chip")
     end
@@ -116,7 +117,7 @@ defmodule ArbiterWeb.TaskDetailBudgetTest do
       task = task!(ws, %{difficulty: 2, issue_type: :feature})
       spend!(task.id, ws, 8.5)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       assert has_element?(view, "#task-spend-chip[data-state=running_high]")
       assert view |> element("#task-spend-chip") |> render() =~ "running high"
@@ -126,7 +127,7 @@ defmodule ArbiterWeb.TaskDetailBudgetTest do
       task = task!(ws, %{difficulty: 2, issue_type: :feature})
       spend!(task.id, ws, 30.0)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       assert has_element?(view, "#task-spend-chip[data-state=over_budget]")
       assert view |> element("#task-spend-chip") |> render() =~ "over budget"
@@ -136,7 +137,7 @@ defmodule ArbiterWeb.TaskDetailBudgetTest do
       task = task!(ws, %{difficulty: 2, issue_type: :feature})
       spend!(task.id, ws, 1.0)
 
-      {:ok, view, html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, html} = live_task(conn, ~p"/tasks/#{task.id}")
       assert html =~ "$1.00"
       refute has_element?(view, "#task-spend-chip")
 
@@ -185,7 +186,7 @@ defmodule ArbiterWeb.TaskDetailBudgetTest do
       ready = ready_child!(ws, epic, %{difficulty: 2})
       spend!(ready.id, ws, 2.5)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{epic.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{epic.id}")
 
       assert has_element?(view, "#task-spend")
       assert render(view) =~ "$4.00"
@@ -212,7 +213,7 @@ defmodule ArbiterWeb.TaskDetailBudgetTest do
     } do
       epic = epic!(ws)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{epic.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{epic.id}")
 
       assert render(view) =~ "$0.00"
       assert view |> element("#task-spend-estimate") |> render() =~ "no estimate yet"
@@ -224,7 +225,7 @@ defmodule ArbiterWeb.TaskDetailBudgetTest do
       ready = ready_child!(ws, epic, %{difficulty: 2})
       spend!(ready.id, ws, 1.0)
 
-      {:ok, view, html} = live(conn, ~p"/tasks/#{epic.id}")
+      {:ok, view, html} = live_task(conn, ~p"/tasks/#{epic.id}")
       assert html =~ "$1.00"
 
       spend!(ready.id, ws, 29.0)
@@ -245,7 +246,7 @@ defmodule ArbiterWeb.TaskDetailBudgetTest do
       ready = ready_child!(ws, epic, %{difficulty: 2})
       spend!(ready.id, ws, 30.0)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{epic.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{epic.id}")
 
       assert has_element?(view, "#task-spend-chip[data-state=over_budget]")
       title = view |> element("#task-spend-chip") |> render()
@@ -259,7 +260,7 @@ defmodule ArbiterWeb.TaskDetailBudgetTest do
       task = task!(ws, %{difficulty: 2, issue_type: :feature})
       spend!(task.id, ws, 4.25)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       assert view |> element("#task-spend-estimate") |> render() =~ "no estimate yet"
       assert render(view) =~ "$4.25"

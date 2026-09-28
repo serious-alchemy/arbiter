@@ -9,6 +9,7 @@ defmodule ArbiterWeb.RefineEntryPointTest do
   use ArbiterWeb.ConnCase, async: false
 
   import Phoenix.LiveViewTest
+  import ArbiterWeb.TaskDetailLiveHelpers
 
   # The board loads by start_async (bd-15bn6s) and a real Snapshot.load can
   # outrun render_async's 100ms default under a loaded suite.
@@ -54,7 +55,7 @@ defmodule ArbiterWeb.RefineEntryPointTest do
 
   describe "the issue detail page" do
     test "offers Refine on a Backlog issue", %{conn: conn, issue: issue} do
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{issue.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{issue.id}")
       assert has_element?(view, "#task-refine")
     end
 
@@ -62,21 +63,21 @@ defmodule ArbiterWeb.RefineEntryPointTest do
       {:ok, issue} = Ash.update(issue, %{acceptance: "- ac"}, action: :update)
       {:ok, refined} = Ash.update(issue, %{}, action: :promote_to_ready)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{refined.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{refined.id}")
       refute has_element?(view, "#task-refine")
     end
 
     test "does not offer it on a running issue", %{conn: conn, issue: issue} do
       {:ok, running} = Ash.update(issue, %{status: :in_progress}, action: :update)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{running.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{running.id}")
       refute has_element?(view, "#task-refine")
     end
 
     test "does not offer it on a closed issue", %{conn: conn, issue: issue} do
       {:ok, closed} = Ash.update(issue, %{reason: "dropped"}, action: :close)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{closed.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{closed.id}")
       refute has_element?(view, "#task-refine")
     end
 
@@ -84,7 +85,7 @@ defmodule ArbiterWeb.RefineEntryPointTest do
       conn: conn,
       issue: issue
     } do
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{issue.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{issue.id}")
       dock = find_live_child(view, "session-dock")
 
       render_click(element(view, "#task-refine"))
@@ -100,7 +101,7 @@ defmodule ArbiterWeb.RefineEntryPointTest do
       conn: conn,
       issue: issue
     } do
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{issue.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{issue.id}")
 
       render_click(element(view, "#task-refine"))
       assert [first] = Sessions.list()

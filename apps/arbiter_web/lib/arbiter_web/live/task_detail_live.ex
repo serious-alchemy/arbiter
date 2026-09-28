@@ -5,6 +5,11 @@ defmodule ArbiterWeb.TaskDetailLive do
   into one page. Re-renders on `:task_lifecycle` and `:worker_lifecycle`
   events so the page stays current.
 
+  Nothing loads in `mount/3` (bd-dhghus): the dead render draws a loading
+  state, the connected mount loads the header (issue, workspace, worker) via
+  `start_async/3`, and its arrival starts one async load per secondary panel,
+  each with its own skeleton and inline error + Retry. See "async load" below.
+
   Four operator actions live here — three behind their own hand-rolled modal
   (the `WorkspaceDetailLive` pattern), one a bare button — all writing through
   the same domain calls the CLI/MCP use:
@@ -106,6 +111,30 @@ defmodule ArbiterWeb.TaskDetailLive do
   # The MESSAGES rail is a rail, not an archive: the newest slice is what an
   # operator reads, and a long-lived task can accumulate hundreds of rows.
   @message_limit 50
+
+  # The secondary panels, each its own `start_async/3` once the header has
+  # landed — see "async load" below.
+  @async_panels [
+    :runs,
+    :review_rounds,
+    :deps,
+    :versions,
+    :skills,
+    :messages,
+    :budget,
+    :refine_session
+  ]
+
+  @empty_relationship_groups %{
+    blocked_by: [],
+    blocks: [],
+    parents: [],
+    children: [],
+    relates_to: [],
+    discovered_from: [],
+    discovered: [],
+    conflicts_with: []
+  }
 
   # ---- relationship editing (bd-dmabmg) -----------------------------------
 
@@ -224,11 +253,11 @@ defmodule ArbiterWeb.TaskDetailLive do
      |> assign(:live_run_id, nil)
      |> assign(:live_run_topic, nil)
      |> assign(:live_run_lines, [])
-     |> assign(:messages, [])
      |> assign(:messages_topic, nil)
      |> assign(:expanded_messages, MapSet.new())
      |> assign(:live_spend_timer, nil)
-     |> refresh_all()}
+     |> assign_unloaded()
+     |> then(&if(connected?(&1), do: start_header_load(&1), else: &1))}
   end
 
   @impl true
@@ -350,6 +379,23 @@ defmodule ArbiterWeb.TaskDetailLive do
      socket
      |> assign(:expanded_run, expanded)
      |> resync_live_run()}
+  end
+
+  # ---- load retry (bd-dhghus) ----
+  #
+  # The inline error a failed async load renders offers a Retry that re-runs
+  # just that load. `retry_panel` resolves the name against `@async_panels`
+  # rather than `String.to_atom/1`: it is client input.
+
+  def handle_event("retry_header", _params, socket) do
+    {:noreply, start_header_load(socket)}
+  end
+
+  def handle_event("retry_panel", %{"panel" => name}, socket) do
+    case Enum.find(@async_panels, &(Atom.to_string(&1) == name)) do
+      nil -> {:noreply, socket}
+      panel -> {:noreply, start_panel_load(socket, panel)}
+    end
   end
 
   # ---- messages ----
@@ -728,6 +774,51 @@ defmodule ArbiterWeb.TaskDetailLive do
   def handle_event("remove_edge", _params, socket), do: {:noreply, socket}
 
   @impl true
+  def handle_async(:header, {:ok, header}, socket) do
+    {:noreply,
+     socket
+     |> assign(header)
+     |> put_load_state(:header, :ok)
+     |> follow_messages()
+     |> start_panel_loads()}
+  end
+
+  def handle_async(:header, {:exit, reason}, socket) do
+    Logger.warning("Failed to load #{socket.assigns.task_id}: #{inspect(reason)}")
+    {:noreply, put_load_state(socket, :header, {:error, async_error_message(reason)})}
+  end
+
+  # A panel load a synchronous refresh has since superseded (see
+  # `refresh_panel/2`) carries a stale token: its read may predate the event
+  # that prompted the refresh, so it is dropped rather than painted over it.
+  def handle_async({:panel, panel}, {:ok, {token, data}}, socket) do
+    if Map.get(socket.assigns.load_tokens, panel) == token do
+      {:noreply,
+       socket
+       |> settle_panel(panel)
+       |> apply_panel(panel, data)}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  # Only a load still awaited can fail the panel: a superseded one — including
+  # the `{:shutdown, :cancel}` exit `refresh_panel/2` causes — is ignored.
+  def handle_async({:panel, panel}, {:exit, reason}, socket) do
+    if Map.has_key?(socket.assigns.load_tokens, panel) do
+      Logger.warning(
+        "Failed to load the #{panel} panel for #{socket.assigns.task_id}: #{inspect(reason)}"
+      )
+
+      {:noreply,
+       socket
+       |> assign(:load_tokens, Map.delete(socket.assigns.load_tokens, panel))
+       |> put_load_state(panel, {:error, async_error_message(reason)})}
+    else
+      {:noreply, socket}
+    end
+  end
+
   def handle_async(:dispatch, {:ok, {:ok, _result}}, socket) do
     {:noreply,
      socket
@@ -903,34 +994,174 @@ defmodule ArbiterWeb.TaskDetailLive do
 
   defp acceptance_criteria_error?(_), do: false
 
-  defp refresh_all(socket) do
+  # ---- async load (bd-dhghus) ----
+  #
+  # Nothing loads in `mount/3`: the dead render draws the loading state and
+  # reads nothing. The connected mount starts the header load — the issue, its
+  # workspace and its worker, which every other loader reads — and its arrival
+  # starts one independent `start_async/3` per secondary panel, so a slow
+  # ledger rollup holds up the spend line and nothing else.
+  #
+  # `@load_state` records each load as `:loading | :ok | {:error, message}`.
+  # Once the header has landed, the PubSub/tick/write refreshers run the same
+  # loaders synchronously, as they always have; each one cancels any
+  # still-in-flight load of the panel it repaints, so a read that started
+  # before the event can't land on top of the one that followed it.
+
+  defp assign_unloaded(socket) do
     socket
-    |> refresh_task()
-    |> refresh_budget()
-    |> refresh_workspace()
-    |> refresh_worker()
-    |> refresh_runs()
-    |> refresh_review_rounds()
-    |> refresh_deps()
-    |> refresh_versions()
-    |> refresh_skills()
-    |> refresh_messages()
-    |> follow_messages()
-    |> refresh_refine_session()
+    |> assign(:load_state, Map.new([:header | @async_panels], &{&1, :loading}))
+    |> assign(:load_tokens, %{})
+    |> assign(task: nil, acceptance_items: [], implementer_pin: nil, workspace: nil, worker: nil)
+    |> assign(runs: [], usage_by_run: %{}, issue_repo: nil, prior_mr_refs: [])
+    |> assign(review_rounds: [], review_summary: nil)
+    |> assign(:relationship_groups, @empty_relationship_groups)
+    |> assign(versions: [], version_total: 0, skills: [], messages: [], budget: nil)
+    |> assign(refine_session: nil, refine_session_archived?: false, refine_session_usage: nil)
+    |> derive_roster()
   end
 
-  defp refresh_task(socket) do
+  defp put_load_state(socket, key, state),
+    do: assign(socket, :load_state, Map.put(socket.assigns.load_state, key, state))
+
+  defp start_header_load(socket) do
+    task_id = socket.assigns.task_id
+
+    socket
+    |> put_load_state(:header, :loading)
+    |> start_async(:header, fn -> __MODULE__.load_header(task_id) end)
+  end
+
+  # No issue, no panels: the page renders not-found.
+  defp start_panel_loads(%{assigns: %{task: %Issue{}}} = socket),
+    do: Enum.reduce(@async_panels, socket, &start_panel_load(&2, &1))
+
+  defp start_panel_loads(socket), do: socket
+
+  # `@load_tokens` holds one token per panel load still awaited; the result
+  # carries it back so `handle_async/3` can tell the current load from one a
+  # synchronous refresh has since superseded.
+  defp start_panel_load(socket, panel) do
+    ctx = panel_ctx(socket)
+    token = make_ref()
+
+    socket
+    |> assign(:load_tokens, Map.put(socket.assigns.load_tokens, panel, token))
+    |> put_load_state(panel, :loading)
+    |> start_async({:panel, panel}, fn -> {token, __MODULE__.load_panel(panel, ctx)} end)
+  end
+
+  defp settle_panel(socket, panel) do
+    socket
+    |> assign(:load_tokens, Map.delete(socket.assigns.load_tokens, panel))
+    |> put_load_state(panel, :ok)
+  end
+
+  defp panel_ctx(socket), do: Map.take(socket.assigns, [:task_id, :task, :workspace])
+
+  # Public, and called through `__MODULE__`, only so a test can fail or park
+  # a load; the synchronous refreshers call the private halves directly.
+  @doc false
+  def load_header(task_id), do: header_data(task_id)
+
+  @doc false
+  def load_panel(panel, ctx), do: panel_data(panel, ctx)
+
+  defp async_error_message({error, _stacktrace}) when is_exception(error),
+    do: Exception.message(error)
+
+  defp async_error_message(reason), do: inspect(reason)
+
+  defp refresh_all(%{assigns: %{load_state: %{header: :ok}}} = socket) do
+    socket
+    |> assign(header_data(socket.assigns.task_id))
+    |> follow_messages()
+    |> refresh_panels(@async_panels)
+  end
+
+  # The header is still loading (or failed): reload it, and the panels follow
+  # it in, so every read postdates whatever prompted this refresh.
+  defp refresh_all(socket), do: start_header_load(socket)
+
+  defp refresh_panels(socket, panels), do: Enum.reduce(panels, socket, &refresh_panel(&2, &1))
+
+  defp refresh_panel(%{assigns: %{load_state: %{header: :ok}}} = socket, panel) do
+    data = panel_data(panel, panel_ctx(socket))
+
+    socket
+    |> cancel_async({:panel, panel})
+    |> settle_panel(panel)
+    |> apply_panel(panel, data)
+  end
+
+  # Before the header lands no panel load has started yet, and the ones it
+  # starts will read the current state anyway.
+  defp refresh_panel(socket, _panel), do: socket
+
+  defp refresh_runs(socket), do: refresh_panel(socket, :runs)
+  defp refresh_review_rounds(socket), do: refresh_panel(socket, :review_rounds)
+  defp refresh_budget(socket), do: refresh_panel(socket, :budget)
+  defp refresh_messages(socket), do: refresh_panel(socket, :messages)
+
+  defp refresh_deps(socket) do
+    socket
+    |> refresh_panel(:deps)
+    |> refresh_epic_budget()
+  end
+
+  # bd-byp30z: an epic's header spend reads the same child set as its cost
+  # rollup, so whatever repaints the children has to repaint that figure too.
+  defp refresh_epic_budget(%{assigns: %{task: %Issue{issue_type: :epic}}} = socket),
+    do: refresh_budget(socket)
+
+  defp refresh_epic_budget(socket), do: socket
+
+  defp apply_panel(socket, :runs, data) do
+    socket
+    |> assign(data)
+    |> derive_roster()
+    |> resync_live_run()
+    |> assign_review_summary()
+  end
+
+  defp apply_panel(socket, :review_rounds, data) do
+    socket
+    |> assign(data)
+    |> assign_review_summary()
+  end
+
+  defp apply_panel(socket, :budget, data) do
+    socket
+    |> assign(data)
+    |> schedule_live_spend()
+  end
+
+  defp apply_panel(socket, _panel, data), do: assign(socket, data)
+
+  defp header_data(task_id) do
     task =
-      case Ash.get(Issue, socket.assigns.task_id, load: [:child_total, :child_closed]) do
+      case Ash.get(Issue, task_id, load: [:child_total, :child_closed]) do
         {:ok, task} -> task
         {:error, _} -> nil
       end
 
-    socket
-    |> assign(:task, task)
-    |> assign(:acceptance_items, acceptance_items(task && task.acceptance))
-    |> assign(:implementer_pin, implementer_pin(task))
+    %{
+      task: task,
+      acceptance_items: acceptance_items(task && task.acceptance),
+      implementer_pin: implementer_pin(task),
+      workspace: fetch_workspace(task),
+      worker: fetch_worker(task_id)
+    }
   end
+
+  defp panel_data(:runs, ctx), do: runs_data(ctx)
+  defp panel_data(:review_rounds, ctx), do: %{review_rounds: fetch_review_rounds(ctx.task_id)}
+  defp panel_data(:deps, ctx), do: deps_data(ctx)
+  defp panel_data(:versions, ctx), do: versions_data(ctx.task_id)
+  defp panel_data(:skills, ctx), do: %{skills: resolve_skills(ctx.task, ctx.workspace)}
+  defp panel_data(:messages, ctx), do: %{messages: fetch_messages(ctx.task_id)}
+  defp panel_data(:budget, ctx), do: %{budget: budget_for(ctx.task)}
+  defp panel_data(:refine_session, ctx), do: refine_session_data(ctx.task)
 
   # bd-40pzpj: the provider account `most_quota` routing pinned this task's
   # implementer to, as `%{label:, family:}` — nil when the task was never
@@ -955,47 +1186,35 @@ defmodule ArbiterWeb.TaskDetailLive do
   # stays citable once the session itself is gone. `Refine.latest_session/1`
   # (not `live_session/1`) on purpose: by the time there's anything archived
   # to show, the session has almost always ended.
-  defp refresh_refine_session(%{assigns: %{task: %Issue{id: id}}} = socket) when is_binary(id) do
+  defp refine_session_data(%Issue{id: id}) when is_binary(id) do
     session = Refine.latest_session(id)
 
-    socket
-    |> assign(:refine_session, session)
-    |> assign(:refine_session_archived?, session != nil and SessionArchive.archived?(session.id))
-    |> assign(:refine_session_usage, session && SessionUsage.for_session(session))
+    %{
+      refine_session: session,
+      refine_session_archived?: session != nil and SessionArchive.archived?(session.id),
+      refine_session_usage: session && SessionUsage.for_session(session)
+    }
   rescue
     e ->
       Logger.warning("Failed to resolve refine session for #{id}: #{inspect(e)}")
-
-      socket
-      |> assign(:refine_session, nil)
-      |> assign(:refine_session_archived?, false)
-      |> assign(:refine_session_usage, nil)
+      refine_session_data(nil)
   end
 
-  defp refresh_refine_session(socket) do
-    socket
-    |> assign(:refine_session, nil)
-    |> assign(:refine_session_archived?, false)
-    |> assign(:refine_session_usage, nil)
+  defp refine_session_data(_task) do
+    %{refine_session: nil, refine_session_archived?: false, refine_session_usage: nil}
   end
 
   # bd-8j9i9p (design bd-9jj5lf §3): worker spend so far, the percentile range
   # it is read against, and which of the three threshold states that lands in.
   # Best-effort on purpose — a ledger read that fails costs the header its
   # cost line, not the page.
-  defp refresh_budget(%{assigns: %{task: %Issue{issue_type: :epic} = task}} = socket) do
-    assign(socket, :budget, assess_budget(task, fn -> Budget.assess_epic(task) end))
-  end
+  defp budget_for(%Issue{issue_type: :epic} = task),
+    do: assess_budget(task, fn -> Budget.assess_epic(task) end)
 
   # A task's figure includes whatever its running passes have spent so far
   # (`Arbiter.Usage.LiveSpend`, bd-8vnuy3); an epic's stays the settled rollup.
-  defp refresh_budget(%{assigns: %{task: %Issue{} = task}} = socket) do
-    socket
-    |> assign(:budget, assess_budget(task, fn -> assess_live(task) end))
-    |> schedule_live_spend()
-  end
-
-  defp refresh_budget(socket), do: assign(socket, :budget, nil)
+  defp budget_for(%Issue{} = task), do: assess_budget(task, fn -> assess_live(task) end)
+  defp budget_for(_task), do: nil
 
   defp assess_live(%Issue{} = task) do
     live = LiveSpend.for_task(task.id)
@@ -1061,32 +1280,26 @@ defmodule ArbiterWeb.TaskDetailLive do
   # The effective post-layering skill set (workspace -> repo -> issue) a
   # dispatch of this issue would carry right now — the same resolution the
   # dispatch path runs, so the rail can't drift from what a worker gets.
-  defp refresh_skills(%{assigns: %{task: %Issue{} = task, workspace: workspace}} = socket) do
-    skills =
-      try do
-        [task: task, workspace: workspace]
-        |> Selection.resolve()
-        |> Enum.map(&%{name: &1.skill.name, activation: &1.activation})
-      rescue
-        e ->
-          Logger.warning("Failed to resolve skills for #{task.id}: #{inspect(e)}")
-          []
-      end
-
-    assign(socket, :skills, skills)
+  defp resolve_skills(%Issue{} = task, workspace) do
+    [task: task, workspace: workspace]
+    |> Selection.resolve()
+    |> Enum.map(&%{name: &1.skill.name, activation: &1.activation})
+  rescue
+    e ->
+      Logger.warning("Failed to resolve skills for #{task.id}: #{inspect(e)}")
+      []
   end
 
-  defp refresh_skills(socket), do: assign(socket, :skills, [])
+  defp resolve_skills(_task, _workspace), do: []
 
-  defp refresh_workspace(%{assigns: %{task: %Issue{workspace_id: ws_id}}} = socket)
-       when is_binary(ws_id) do
+  defp fetch_workspace(%Issue{workspace_id: ws_id}) when is_binary(ws_id) do
     case Ash.get(Workspace, ws_id) do
-      {:ok, ws} -> assign(socket, :workspace, ws)
-      _ -> assign(socket, :workspace, nil)
+      {:ok, ws} -> ws
+      _ -> nil
     end
   end
 
-  defp refresh_workspace(socket), do: assign(socket, :workspace, nil)
+  defp fetch_workspace(_task), do: nil
 
   # ---- messages ----
   #
@@ -1099,25 +1312,21 @@ defmodule ArbiterWeb.TaskDetailLive do
   # stamps `read_at`/`cleared_at`. Opening an issue page must not silently
   # drain the coordinator's triage queue, so read state is *rendered*, never
   # changed here.
-  defp refresh_messages(socket) do
-    messages =
-      try do
-        Message.for_task(socket.assigns.task_id, limit: @message_limit)
-      rescue
-        e ->
-          Logger.warning("Failed to load messages for #{socket.assigns.task_id}: #{inspect(e)}")
-          []
-      end
-
-    assign(socket, :messages, messages)
+  defp fetch_messages(task_id) do
+    Message.for_task(task_id, limit: @message_limit)
+  rescue
+    e ->
+      Logger.warning("Failed to load messages for #{task_id}: #{inspect(e)}")
+      []
   end
 
   # Messages broadcast on `"messages:<workspace_id>"` and nothing finer — there
   # is no per-task topic, and this ticket is not the place to invent one (see
   # bd-cpt2ej). So the page follows its issue's workspace feed and filters on
   # arrival. The workspace id only exists once the issue row has loaded, which
-  # is why this runs from `refresh_all/1` rather than `mount/3`; re-running it
-  # is a no-op unless the issue moved workspace.
+  # is why this runs when the header load lands (and from `refresh_all/1`)
+  # rather than in `mount/3`; re-running it is a no-op unless the issue moved
+  # workspace.
   defp follow_messages(%{assigns: %{task: %Issue{workspace_id: ws_id}}} = socket)
        when is_binary(ws_id) do
     topic = Message.topic(ws_id)
@@ -1145,14 +1354,21 @@ defmodule ArbiterWeb.TaskDetailLive do
 
   defp about_this_task?(_message, _task_id), do: false
 
-  defp refresh_worker(socket) do
-    snap =
-      case Worker.whereis(socket.assigns.task_id) do
-        nil -> nil
-        pid -> safe_state(pid)
-      end
+  defp refresh_worker(%{assigns: %{load_state: %{header: :ok}}} = socket),
+    do: assign(socket, :worker, fetch_worker(socket.assigns.task_id))
 
-    assign(socket, :worker, snap)
+  # The worker is part of the header load: restart it so its read postdates
+  # the event that asked for this one.
+  defp refresh_worker(%{assigns: %{load_state: %{header: :loading}}} = socket),
+    do: start_header_load(socket)
+
+  defp refresh_worker(socket), do: socket
+
+  defp fetch_worker(task_id) do
+    case Worker.whereis(task_id) do
+      nil -> nil
+      pid -> safe_state(pid)
+    end
   end
 
   defp safe_state(pid) do
@@ -1163,43 +1379,29 @@ defmodule ArbiterWeb.TaskDetailLive do
     :exit, _ -> nil
   end
 
-  @empty_relationship_groups %{
-    blocked_by: [],
-    blocks: [],
-    parents: [],
-    children: [],
-    relates_to: [],
-    discovered_from: [],
-    discovered: [],
-    conflicts_with: []
-  }
-
-  defp refresh_deps(socket) do
+  defp deps_data(%{task_id: task_id, task: task}) do
     groups =
       try do
-        Dependencies.for_issue(socket.assigns.task_id)
+        Dependencies.for_issue(task_id)
       rescue
         _ -> @empty_relationship_groups
       end
 
-    socket
-    |> assign(:relationship_groups, groups)
-    |> assign(:parent_refs, parent_refs(socket.assigns[:task]))
-    |> refresh_children_by_status(groups)
+    Map.merge(
+      %{relationship_groups: groups, parent_refs: parent_refs(task)},
+      children_by_status_data(task, groups)
+    )
   end
 
   # Design bd-2s901b §3: an epic's children grouped into the same five board
   # columns (Backlog/Ready/Running/Waiting/Closed) as `Arbiter.Board.Snapshot`,
   # via `Snapshot.classify_columns/2` — the mini-board and the board proper
-  # can't drift onto different answers for the same child. Rides on
-  # `refresh_deps/1` because it reuses the `:children` group already fetched
-  # there (no second dependency query for the child list itself), and because
-  # a child's status change arrives as a `:task_lifecycle` event for that
-  # child, which is exactly what `refresh_deps/1` already re-runs on.
-  defp refresh_children_by_status(
-         %{assigns: %{task: %Issue{issue_type: :epic} = epic}} = socket,
-         groups
-       ) do
+  # can't drift onto different answers for the same child. Rides on the deps
+  # load because it reuses the `:children` group already fetched there (no
+  # second dependency query for the child list itself), and because a child's
+  # status change arrives as a `:task_lifecycle` event for that child, which
+  # is exactly what `refresh_deps/1` already re-runs on.
+  defp children_by_status_data(%Issue{issue_type: :epic} = epic, groups) do
     children = groups.children |> Enum.map(& &1.issue) |> Enum.reject(&is_nil/1)
     child_ids = Enum.map(children, & &1.id)
 
@@ -1219,23 +1421,22 @@ defmodule ArbiterWeb.TaskDetailLive do
         Map.update!(acc, column, &(&1 ++ [chip]))
       end)
 
-    socket
-    |> assign(:children_by_status, by_column)
-    # bd-18vl9q, design bd-9jj5lf §4: rides the same refresh trigger as the
-    # mini-board above — a child's lifecycle event is exactly what should
-    # move the epic's cost rollup too.
-    |> assign(:epic_cost_rollup, Usage.epic_cost_rollup(epic))
-    # bd-byp30z: the header's aggregate spend/estimate reads the same child
-    # set as the rollup above, so it has to ride the same trigger — otherwise
-    # a child's ledger update repaints the panel but leaves the header's
-    # figure stale until a full reload or an event on the epic row itself.
-    |> refresh_budget()
+    %{
+      children_by_status: by_column,
+      # bd-18vl9q, design bd-9jj5lf §4: rides the same refresh trigger as the
+      # mini-board above — a child's lifecycle event is exactly what should
+      # move the epic's cost rollup too.
+      epic_cost_rollup: Usage.epic_cost_rollup(epic)
+    }
   end
 
-  defp refresh_children_by_status(socket, _groups) do
+  defp children_by_status_data(_task, _groups),
+    do: %{children_by_status: nil, epic_cost_rollup: nil}
+
+  defp refresh_children_by_status(socket, groups) do
     socket
-    |> assign(:children_by_status, nil)
-    |> assign(:epic_cost_rollup, nil)
+    |> assign(children_by_status_data(socket.assigns.task, groups))
+    |> refresh_epic_budget()
   end
 
   defp epic_child?(
@@ -1674,8 +1875,8 @@ defmodule ArbiterWeb.TaskDetailLive do
     |> Enum.find(&(&1.edge.id == edge_id))
   end
 
-  defp refresh_versions(socket) do
-    query = Ash.Query.filter(Version, version_source_id == ^socket.assigns.task_id)
+  defp versions_data(task_id) do
+    query = Ash.Query.filter(Version, version_source_id == ^task_id)
 
     versions =
       try do
@@ -1697,13 +1898,10 @@ defmodule ArbiterWeb.TaskDetailLive do
         _ -> length(versions)
       end
 
-    socket
-    |> assign(:versions, versions)
-    |> assign(:version_total, total)
+    %{versions: versions, version_total: total}
   end
 
-  defp refresh_runs(socket) do
-    id = socket.assigns.task_id
+  defp runs_data(%{task_id: id, task: task}) do
     review_id = ReviewGate.reviewer_task_id(id)
     task_ids = [id, review_id]
 
@@ -1750,13 +1948,12 @@ defmodule ArbiterWeb.TaskDetailLive do
         end
       end
 
-    socket
-    |> assign(:runs, runs)
-    |> assign(:usage_by_run, usage_by_run)
-    |> assign(:issue_repo, issue_repo(runs, socket.assigns[:task]))
-    |> assign(:prior_mr_refs, prior_mr_refs(runs, current_pr_ref(socket.assigns[:task])))
-    |> derive_roster()
-    |> resync_live_run()
+    %{
+      runs: runs,
+      usage_by_run: usage_by_run,
+      issue_repo: issue_repo(runs, task),
+      prior_mr_refs: prior_mr_refs(runs, current_pr_ref(task))
+    }
   end
 
   # §4's right rail leads with `repo`. The task's own assignment (bd-2jum8j) is
@@ -1886,20 +2083,26 @@ defmodule ArbiterWeb.TaskDetailLive do
   # verdict is written as a synthetic `verdict: :timed_out` round the run row
   # knows nothing about. Reading runs here would render "approved" over a
   # rejection, which is the one mistake this line must never make.
-  defp refresh_review_rounds(socket) do
-    rounds =
-      try do
-        Round
-        |> Ash.Query.filter(task_id == ^socket.assigns.task_id)
-        |> Ash.Query.sort(fix_round_attempt: :asc, round: :asc, inserted_at: :asc)
-        |> Ash.read!()
-      rescue
-        e ->
-          Logger.warning("Failed to load review-gate rounds: #{inspect(e)}")
-          []
-      end
+  #
+  # Rounds and runs load as separate panels, so the summary is re-derived when
+  # either lands: its deep link needs the round's run to be on the roster.
+  defp fetch_review_rounds(task_id) do
+    Round
+    |> Ash.Query.filter(task_id == ^task_id)
+    |> Ash.Query.sort(fix_round_attempt: :asc, round: :asc, inserted_at: :asc)
+    |> Ash.read!()
+  rescue
+    e ->
+      Logger.warning("Failed to load review-gate rounds: #{inspect(e)}")
+      []
+  end
 
-    assign(socket, :review_summary, review_summary(rounds, socket.assigns[:runs] || []))
+  defp assign_review_summary(socket) do
+    assign(
+      socket,
+      :review_summary,
+      review_summary(socket.assigns.review_rounds, socket.assigns.runs)
+    )
   end
 
   # nil means "no ReviewGate activity" — the panel renders no summary line at
@@ -2055,9 +2258,32 @@ defmodule ArbiterWeb.TaskDetailLive do
           >
             {@task.title}
           </h1>
-          <h1 :if={!@task} class="text-[22px] font-semibold tracking-tight">
+          <h1
+            :if={!@task and @load_state.header == :ok}
+            class="text-[22px] font-semibold tracking-tight"
+          >
             {String.capitalize(@issue_label)} not found
           </h1>
+          <%!-- bd-dhghus: the dead render and the first connected render land
+               here — the header (issue, workspace, worker) arrives async. --%>
+          <div
+            :if={@load_state.header == :loading}
+            id="task-header-loading"
+            aria-busy="true"
+            aria-label={"Loading #{@issue_label}"}
+            class="flex flex-col gap-2"
+          >
+            <div class="h-[28px] w-2/3 max-w-[520px] rounded-[var(--radius-field)] bg-[var(--surface-card)] animate-pulse" />
+            <div class="h-[16px] w-1/3 max-w-[260px] rounded-[var(--radius-field)] bg-[var(--surface-card)] animate-pulse" />
+          </div>
+          <.load_error
+            :if={match?({:error, _}, @load_state.header)}
+            id="task-header-error"
+            retry_id="task-header-retry"
+            retry_event="retry_header"
+            what={@issue_label}
+            state={@load_state.header}
+          />
           <div :if={@task} class="flex flex-wrap items-center gap-2 mt-1.5">
             <.priority_tag priority={@task.priority} class="badge-sm font-mono" />
             <.type_tag type={@task.issue_type} />
@@ -2076,6 +2302,23 @@ defmodule ArbiterWeb.TaskDetailLive do
                against what issues like it usually cost. "worker spend", never
                "spent" — §7 keeps coordinator-session overhead out of both
                halves, and the tooltip says so. --%>
+          <div
+            :if={@task && @load_state.budget == :loading}
+            id="task-spend-loading"
+            aria-busy="true"
+            aria-label="Loading worker spend"
+            class="h-[14px] w-[220px] mt-2 rounded-[var(--radius-field)] bg-[var(--surface-card)] animate-pulse"
+          />
+          <.load_error
+            :if={@task && match?({:error, _}, @load_state.budget)}
+            id="task-spend-error"
+            retry_id="task-spend-retry"
+            retry_event="retry_panel"
+            retry_value="budget"
+            what="worker spend"
+            state={@load_state.budget}
+            class="mt-1.5"
+          />
           <div
             :if={@task && @budget}
             id="task-spend"
@@ -2170,6 +2413,28 @@ defmodule ArbiterWeb.TaskDetailLive do
                  column so this group stacks independently of the rail,
                  using source order directly for the desktop order. --%>
             <div class="contents lg:flex lg:flex-col lg:gap-[var(--space-4)] lg:min-w-0">
+              <%!-- The two loads with no panel of their own to fail inside:
+                   the review-round summary line and the refine transcript. --%>
+              <.load_error
+                :if={match?({:error, _}, @load_state.review_rounds)}
+                id="panel-review-rounds-error"
+                retry_id="panel-review-rounds-retry"
+                retry_event="retry_panel"
+                retry_value="review_rounds"
+                what="review rounds"
+                state={@load_state.review_rounds}
+                class="order-3"
+              />
+              <.load_error
+                :if={match?({:error, _}, @load_state.refine_session)}
+                id="panel-refine-session-error"
+                retry_id="panel-refine-session-retry"
+                retry_event="retry_panel"
+                retry_value="refine_session"
+                what="the refine session"
+                state={@load_state.refine_session}
+                class="order-3"
+              />
               <.panel
                 :if={present?(@task.description)}
                 id="panel-description"
@@ -2435,7 +2700,7 @@ defmodule ArbiterWeb.TaskDetailLive do
               <.panel
                 id="panel-runs"
                 title="RUNS"
-                meta={runs_meta(@runs, @usage_by_run)}
+                meta={if(@load_state.runs == :ok, do: runs_meta(@runs, @usage_by_run))}
                 padded={false}
                 body_class="px-[18px] py-[var(--space-4)] flex flex-col gap-[10px]"
                 class="order-9"
@@ -2448,6 +2713,8 @@ defmodule ArbiterWeb.TaskDetailLive do
                     all runs →
                   </.link>
                 </:actions>
+
+                <.panel_load_state id="panel-runs" panel="runs" what="runs" state={@load_state.runs} />
 
                 <div
                   :if={@implementer_pin}
@@ -2469,7 +2736,7 @@ defmodule ArbiterWeb.TaskDetailLive do
                 />
 
                 <ArbiterWeb.CoreComponents.Feedback.empty_state
-                  :if={@visible_runs == []}
+                  :if={@load_state.runs == :ok and @visible_runs == []}
                   icon="hero-cpu-chip"
                   detail={"arb dispatch #{@task_id}"}
                 >
@@ -2574,7 +2841,7 @@ defmodule ArbiterWeb.TaskDetailLive do
               <.panel
                 id="panel-activity"
                 title="ACTIVITY"
-                meta={activity_meta(@versions, @version_total)}
+                meta={if(@load_state.versions == :ok, do: activity_meta(@versions, @version_total))}
                 padded={false}
                 body_class="px-[18px] py-[var(--space-4)]"
                 class="order-12"
@@ -2588,8 +2855,15 @@ defmodule ArbiterWeb.TaskDetailLive do
                   </.link>
                 </:actions>
 
+                <.panel_load_state
+                  id="panel-activity"
+                  panel="versions"
+                  what="history"
+                  state={@load_state.versions}
+                />
+
                 <ArbiterWeb.CoreComponents.Feedback.empty_state
-                  :if={@versions == []}
+                  :if={@load_state.versions == :ok and @versions == []}
                   icon="hero-clock"
                 >
                   No history recorded yet. State transitions for this {@issue_label} appear here.
@@ -2714,7 +2988,7 @@ defmodule ArbiterWeb.TaskDetailLive do
               <.panel
                 id="panel-relationships"
                 title="RELATIONSHIPS"
-                meta={relationships_meta(@relationship_groups)}
+                meta={if(@load_state.deps == :ok, do: relationships_meta(@relationship_groups))}
                 class="order-5"
               >
                 <:actions>
@@ -2730,7 +3004,13 @@ defmodule ArbiterWeb.TaskDetailLive do
                     + add
                   </button>
                 </:actions>
-                <div class="flex flex-col gap-3">
+                <.panel_load_state
+                  id="panel-relationships"
+                  panel="deps"
+                  what="relationships"
+                  state={@load_state.deps}
+                />
+                <div :if={@load_state.deps == :ok} class="flex flex-col gap-3">
                   <.relationship_group
                     id="rel-blocked-by"
                     label="Blocked by"
@@ -2931,10 +3211,16 @@ defmodule ArbiterWeb.TaskDetailLive do
               <.panel
                 id="panel-messages"
                 title="MESSAGES"
-                meta={message_panel_meta(@messages)}
+                meta={if(@load_state.messages == :ok, do: message_panel_meta(@messages))}
                 class="order-10"
               >
-                <div :if={@messages == []} id="messages-empty">
+                <.panel_load_state
+                  id="panel-messages"
+                  panel="messages"
+                  what="messages"
+                  state={@load_state.messages}
+                />
+                <div :if={@load_state.messages == :ok and @messages == []} id="messages-empty">
                   <ArbiterWeb.CoreComponents.Feedback.empty_state icon="hero-envelope">
                     No messages for this {@issue_label} yet.
                   </ArbiterWeb.CoreComponents.Feedback.empty_state>
@@ -3070,10 +3356,19 @@ defmodule ArbiterWeb.TaskDetailLive do
               <.panel
                 id="panel-skills"
                 title="SKILLS"
-                meta={"#{length(@skills)} active"}
+                meta={if(@load_state.skills == :ok, do: "#{length(@skills)} active")}
                 class="order-13"
               >
-                <p :if={@skills == []} class="text-[11.5px] italic text-[var(--text-label)]">
+                <.panel_load_state
+                  id="panel-skills"
+                  panel="skills"
+                  what="skills"
+                  state={@load_state.skills}
+                />
+                <p
+                  :if={@load_state.skills == :ok and @skills == []}
+                  class="text-[11.5px] italic text-[var(--text-label)]"
+                >
                   No skills resolve for this {@issue_label}.
                 </p>
                 <ul :if={@skills != []} class="flex flex-col gap-1">
@@ -3090,8 +3385,24 @@ defmodule ArbiterWeb.TaskDetailLive do
               </.panel>
             </div>
           </div>
-        <% else %>
-          <.panel>
+        <% end %>
+        <div
+          :if={!@task and @load_state.header == :loading}
+          id="task-body-loading"
+          aria-hidden="true"
+          class="flex flex-col gap-[var(--space-4)] lg:grid lg:grid-cols-[minmax(0,1fr)_340px] lg:items-start"
+        >
+          <div class="flex flex-col gap-[var(--space-4)]">
+            <div class="h-[160px] rounded-[var(--radius-panel)] border border-[var(--border-default)] bg-[var(--surface-panel)] animate-pulse" />
+            <div class="h-[220px] rounded-[var(--radius-panel)] border border-[var(--border-default)] bg-[var(--surface-panel)] animate-pulse" />
+          </div>
+          <div class="flex flex-col gap-[var(--space-4)]">
+            <div class="h-[120px] rounded-[var(--radius-panel)] border border-[var(--border-default)] bg-[var(--surface-panel)] animate-pulse" />
+            <div class="h-[180px] rounded-[var(--radius-panel)] border border-[var(--border-default)] bg-[var(--surface-panel)] animate-pulse" />
+          </div>
+        </div>
+        <%= if !@task and @load_state.header == :ok do %>
+          <.panel id="task-not-found">
             <div class="flex flex-col items-center gap-2 py-6 text-center">
               <ArbiterWeb.CoreComponents.icon
                 name="hero-question-mark-circle"
@@ -3591,6 +3902,87 @@ defmodule ArbiterWeb.TaskDetailLive do
   end
 
   # ---- render helpers ----
+
+  # bd-dhghus: a panel whose async load hasn't landed shows skeleton rows in
+  # its body (`<id>-loading`); one whose load failed shows why, inline, with a
+  # Retry that re-runs only that panel's load (`<id>-error`, `<id>-retry`).
+  attr(:id, :string, required: true, doc: "the panel's own DOM id")
+  attr(:panel, :string, required: true, doc: "the load key `retry_panel` re-runs")
+  attr(:what, :string, required: true)
+  attr(:state, :any, required: true)
+
+  defp panel_load_state(assigns) do
+    ~H"""
+    <div
+      :if={@state == :loading}
+      id={"#{@id}-loading"}
+      aria-busy="true"
+      aria-label={"Loading #{@what}"}
+      class="flex flex-col gap-1.5"
+    >
+      <div
+        :for={width <- ["w-full", "w-5/6", "w-2/3"]}
+        aria-hidden="true"
+        class={[
+          "h-[22px] rounded-[var(--radius-field)] bg-[var(--surface-card)] animate-pulse",
+          width
+        ]}
+      />
+    </div>
+    <.load_error
+      :if={match?({:error, _}, @state)}
+      id={"#{@id}-error"}
+      retry_id={"#{@id}-retry"}
+      retry_event="retry_panel"
+      retry_value={@panel}
+      what={@what}
+      state={@state}
+    />
+    """
+  end
+
+  attr(:id, :string, required: true)
+  attr(:retry_id, :string, required: true)
+  attr(:retry_event, :string, required: true)
+  attr(:retry_value, :string, default: nil)
+  attr(:what, :string, required: true)
+  attr(:state, :any, required: true)
+  attr(:class, :any, default: nil)
+
+  defp load_error(assigns) do
+    ~H"""
+    <div
+      id={@id}
+      role="alert"
+      class={[
+        "flex items-start gap-2 px-3 py-2.5 rounded-[var(--radius-field)] border border-solid",
+        "border-[var(--arb-fail-edge)] bg-[var(--arb-fail-wash)] text-[12px] text-[var(--arb-fail-text)]",
+        @class
+      ]}
+    >
+      <ArbiterWeb.CoreComponents.Core.icon
+        name="hero-exclamation-triangle-micro"
+        class="size-4 shrink-0 mt-px"
+      />
+      <span class="grow min-w-0 break-words">
+        Could not load {@what}: {elem(@state, 1)}
+      </span>
+      <button
+        type="button"
+        id={@retry_id}
+        phx-click={@retry_event}
+        phx-value-panel={@retry_value}
+        class={[
+          "shrink-0 px-2 h-[22px] rounded-[var(--radius-field)] cursor-pointer",
+          "border border-solid border-[var(--arb-fail-edge)] bg-[var(--surface-chrome)]",
+          "text-[11px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
+        ]}
+      >
+        Retry
+      </button>
+    </div>
+    """
+  end
 
   # A labeled group of relationship rows, omitted entirely when empty
   # (acceptance #1). `gating` distinguishes the two groups that actually

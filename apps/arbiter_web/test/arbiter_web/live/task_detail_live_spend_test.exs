@@ -14,6 +14,7 @@ defmodule ArbiterWeb.TaskDetailLiveSpendTest do
   use ArbiterWeb.ConnCase, async: false
 
   import Phoenix.LiveViewTest
+  import ArbiterWeb.TaskDetailLiveHelpers
 
   alias Arbiter.MCP.Scope
   alias Arbiter.MCP.Tools
@@ -136,7 +137,7 @@ defmodule ArbiterWeb.TaskDetailLiveSpendTest do
       live_worker!(ctx, task.id)
       spend_live!(ctx, "sid-live", 1.5)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       figure = view |> element("#task-spend-figure") |> render()
       assert figure =~ "$3.50"
@@ -152,7 +153,7 @@ defmodule ArbiterWeb.TaskDetailLiveSpendTest do
       live_worker!(ctx, task.id)
       spend_live!(ctx, "sid-tick", 1.0)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       assert view |> element("#task-spend-figure") |> render() =~ "$1.00"
 
       spend_live!(ctx, "sid-tick", 2.25)
@@ -168,7 +169,7 @@ defmodule ArbiterWeb.TaskDetailLiveSpendTest do
       live_worker!(ctx, task.id)
       spend_live!(ctx, "sid-armed", 1.0)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       :erlang.trace(view.pid, true, [:receive])
 
       assert_receive {:trace, _, :receive, :refresh_live_spend}, 2_000
@@ -183,7 +184,7 @@ defmodule ArbiterWeb.TaskDetailLiveSpendTest do
       live_worker!(ctx, task.id)
       spend_live!(ctx, "sid-same", 1.25)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       assert view |> element("#task-spend-figure") |> render() =~ "$3.75"
 
       assert {:ok, %{workers: workers}} = Tools.worker_list(ctx.coordinator, %{})
@@ -217,7 +218,7 @@ defmodule ArbiterWeb.TaskDetailLiveSpendTest do
       dir = Path.join([ctx.config_dir, "projects", ClaudeSessionFile.project_slug(ctx.cwd)])
       File.write!(Path.join(dir, "sid-torn.jsonl"), ~s({"type":"assistant","mess), [:append])
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       assert view |> element("#task-spend-figure") |> render() =~ "$2.00"
       assert has_element?(view, "#task-spend-degraded")
@@ -229,7 +230,7 @@ defmodule ArbiterWeb.TaskDetailLiveSpendTest do
       task = task!(ws)
       settle!(ws, task.id, %{cost_usd: 4.25})
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       assert view |> element("#task-spend-figure") |> render() =~ "$4.25"
       refute has_element?(view, "#task-spend-figure[data-live]")
@@ -242,7 +243,7 @@ defmodule ArbiterWeb.TaskDetailLiveSpendTest do
       task = task!(ws)
       settle!(ws, task.id, %{cost_usd: 1.0})
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       :erlang.trace(view.pid, true, [:receive])
 
       refute_receive {:trace, _, :receive, :refresh_live_spend}, 300
@@ -256,7 +257,7 @@ defmodule ArbiterWeb.TaskDetailLiveSpendTest do
       {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ws.id)
       on_exit(fn -> if Process.alive?(pid), do: Worker.stop(task.id, :normal) end)
 
-      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       figure = view |> element("#task-spend-figure") |> render()
       assert figure =~ "n/a"
       refute figure =~ "$0.00"

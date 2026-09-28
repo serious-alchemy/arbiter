@@ -11,6 +11,7 @@ defmodule ArbiterWeb.TaskDetailParentBannerTest do
   use ArbiterWeb.ConnCase, async: false
 
   import Phoenix.LiveViewTest
+  import ArbiterWeb.TaskDetailLiveHelpers
 
   alias Arbiter.Tasks.Dependencies
   alias Arbiter.Tasks.Dependency
@@ -45,7 +46,7 @@ defmodule ArbiterWeb.TaskDetailParentBannerTest do
     {:ok, _} = Dependencies.add(epic.id, sibling.id, :parent_of)
     close(sibling)
 
-    {:ok, view, html} = live(conn, "/tasks/#{child.id}")
+    {:ok, view, html} = live_task(conn, "/tasks/#{child.id}")
 
     assert has_element?(view, banner(epic.id))
     assert has_element?(view, ~s(#{banner(epic.id)} a[href="/tasks/#{epic.id}"]))
@@ -57,7 +58,7 @@ defmodule ArbiterWeb.TaskDetailParentBannerTest do
   test "an issue with no parent shows no banner", %{conn: conn, ws: ws} do
     child = issue(ws, "an orphan of no epic")
 
-    {:ok, view, _html} = live(conn, "/tasks/#{child.id}")
+    {:ok, view, _html} = live_task(conn, "/tasks/#{child.id}")
 
     refute has_element?(view, ~s([data-role="parent-banner"]))
   end
@@ -72,7 +73,7 @@ defmodule ArbiterWeb.TaskDetailParentBannerTest do
     {:ok, _} = Dependencies.add(newer.id, child.id, :parent_of)
     {:ok, older} = Ash.update(older, %{title: "Older epic, renamed"})
 
-    {:ok, view, html} = live(conn, "/tasks/#{child.id}")
+    {:ok, view, html} = live_task(conn, "/tasks/#{child.id}")
 
     assert has_element?(view, banner(older.id))
     assert has_element?(view, banner(newer.id))
@@ -86,7 +87,7 @@ defmodule ArbiterWeb.TaskDetailParentBannerTest do
 
     {:ok, _} = Dependencies.add(parent.id, child.id, :parent_of)
 
-    {:ok, view, html} = live(conn, "/tasks/#{child.id}")
+    {:ok, view, html} = live_task(conn, "/tasks/#{child.id}")
 
     assert has_element?(view, banner(parent.id))
     assert html =~ "Child of"
@@ -102,7 +103,7 @@ defmodule ArbiterWeb.TaskDetailParentBannerTest do
     close(child)
     close(epic)
 
-    {:ok, view, html} = live(conn, "/tasks/#{child.id}")
+    {:ok, view, html} = live_task(conn, "/tasks/#{child.id}")
 
     assert has_element?(view, ~s(#{banner(epic.id)}[data-closed="true"]))
     assert html =~ "1/1 closed ✓"
@@ -119,7 +120,7 @@ defmodule ArbiterWeb.TaskDetailParentBannerTest do
     {:ok, _} =
       Ash.create(Dependency, %{from_issue_id: epic.id, to_issue_id: child.id, type: :parent_of})
 
-    {:ok, view, html} = live(conn, "/tasks/#{child.id}")
+    {:ok, view, html} = live_task(conn, "/tasks/#{child.id}")
 
     assert has_element?(view, ~s(#{banner(epic.id)} [data-role="cross-workspace-marker"]))
     assert html =~ "workspace: #{other.name}"
@@ -134,7 +135,7 @@ defmodule ArbiterWeb.TaskDetailParentBannerTest do
       {:ok, _} = Dependencies.add(b.id, a.id, :depends_on)
       {:ok, _} = Dependencies.add(c.id, b.id, :depends_on)
 
-      {:ok, view, html} = live(conn, "/tasks/#{b.id}")
+      {:ok, view, html} = live_task(conn, "/tasks/#{b.id}")
 
       assert has_element?(view, ~s(#{banner(epic.id)} [data-role="parent-position"]))
       assert html =~ "2 of 3"
@@ -147,7 +148,7 @@ defmodule ArbiterWeb.TaskDetailParentBannerTest do
       for child <- [a, b, c], do: {:ok, _} = Dependencies.add(epic.id, child.id, :parent_of)
       {:ok, _} = Dependencies.add(b.id, a.id, :depends_on)
 
-      {:ok, view, html} = live(conn, "/tasks/#{b.id}")
+      {:ok, view, html} = live_task(conn, "/tasks/#{b.id}")
 
       assert has_element?(view, banner(epic.id))
       refute has_element?(view, ~s([data-role="parent-position"]))
@@ -163,7 +164,7 @@ defmodule ArbiterWeb.TaskDetailParentBannerTest do
     {:ok, _} = Dependencies.add(epic.id, child.id, :parent_of)
     {:ok, _} = Dependencies.add(epic.id, sibling.id, :parent_of)
 
-    {:ok, view, html} = live(conn, "/tasks/#{child.id}")
+    {:ok, view, html} = live_task(conn, "/tasks/#{child.id}")
     assert html =~ "0/2 closed"
 
     close(sibling)

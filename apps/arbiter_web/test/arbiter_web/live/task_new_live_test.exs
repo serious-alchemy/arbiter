@@ -2,6 +2,7 @@ defmodule ArbiterWeb.TaskNewLiveTest do
   use ArbiterWeb.ConnCase, async: false
 
   import Phoenix.LiveViewTest
+  import ArbiterWeb.TaskDetailLiveHelpers
 
   alias Arbiter.Tasks.{Issue, Workspace}
   require Ash.Query
@@ -150,7 +151,7 @@ defmodule ArbiterWeb.TaskNewLiveTest do
     assert task.priority == 1
     assert task.difficulty == 3
 
-    {:ok, _detail, html} = live(conn, path)
+    {:ok, _detail, html} = live_task(conn, path)
     assert html =~ "made-from-the-dashboard"
     assert html =~ "filed without the CLI"
   end
