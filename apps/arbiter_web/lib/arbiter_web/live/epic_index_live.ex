@@ -73,10 +73,10 @@ defmodule ArbiterWeb.EpicIndexLive do
   # stacked bar, and their colors.
   @buckets [
     {:backlog, "backlog", "var(--text-label)"},
-    {:ready, "ready", "var(--accent-primary)"},
+    {:ready, "ready", "var(--arb-info)"},
     {:running, "running", "var(--arb-live)"},
     {:waiting, "waiting", "var(--arb-attention)"},
-    {:closed, "closed", "var(--arb-ok)"}
+    {:closed, "closed", "var(--arb-done)"}
   ]
 
   @default_filters %{status: :open, workspace: nil, blocked: false, sort: :stuck}
@@ -608,7 +608,7 @@ defmodule ArbiterWeb.EpicIndexLive do
         </div>
 
         <div
-          class="flex h-[6px] w-full overflow-hidden rounded-[var(--radius-pill)] bg-[var(--surface-raised)]"
+          class="flex h-[6px] w-full overflow-hidden rounded-[var(--radius-pill)] bg-[var(--arb-line)]"
           role="img"
           aria-label={"#{@row.rollup.closed} of #{@row.rollup.total} children closed"}
         >

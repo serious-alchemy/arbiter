@@ -101,6 +101,36 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
       assert breakdown =~ "closed"
     end
 
+    test "the progress bar track and closed segment use defined CSS variables", %{
+      conn: conn,
+      ws: ws
+    } do
+      e = epic(ws, "progress-bar-colors")
+      child(ws, e, "b1", :backlog)
+      child(ws, e, "c1", :closed)
+
+      {:ok, view, _html} = live_epics!(conn, ~p"/epics")
+
+      # Check the breakdown legend which uses the same colors
+      breakdown_html = render(element(view, "#epic-#{e.id}-breakdown"))
+      # Closed segment should use a defined color, not var(--arb-ok) which doesn't exist
+      assert breakdown_html =~ ~r/background:\s*var\(--arb-done\)/
+    end
+
+    test "a fully closed epic renders a visible progress bar", %{conn: conn, ws: ws} do
+      e = epic(ws, "fully-closed-epic")
+      child(ws, e, "c1", :closed)
+      child(ws, e, "c2", :closed)
+
+      {:ok, view, _html} = live_epics!(conn, ~p"/epics")
+
+      # Check the progress text and the breakdown legend
+      assert has_element?(view, "#epic-#{e.id}-progress", "2/2")
+      breakdown_html = render(element(view, "#epic-#{e.id}-breakdown"))
+      # The closed segment should have a defined background color
+      assert breakdown_html =~ ~r/background:\s*var\(--arb-done\)/
+    end
+
     test "an auto_close epic is marked, a manual one is not", %{conn: conn, ws: ws} do
       auto = epic(ws, "auto-epic", %{auto_close: true})
       manual = epic(ws, "manual-epic", %{auto_close: false})
