@@ -152,6 +152,8 @@ defmodule ArbiterWeb.Router do
     post("/issues/:id/demote", IssueController, :demote)
     patch("/issues/:id/rank", IssueController, :rank)
     post("/issues/:id/verify", IssueController, :verify)
+    post("/issues/:id/handoff", IssueController, :handoff)
+    post("/issues/:id/handback", IssueController, :handback)
 
     # Dependencies
     get("/dependencies", DependencyController, :index)

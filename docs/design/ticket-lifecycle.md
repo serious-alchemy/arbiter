@@ -700,3 +700,74 @@ The Waiting column's `needs_you` is `attention.owner == :operator`, and every
 Waiting card carries its `attention`. A failed run with a follow-up round
 under way no longer flags. `EpicRollup` still uses the older worker-status
 rule until the epic surfaces move onto attention.
+
+## Child 7 (bd-8nlez1): coordinator-first attention
+
+The coordinator inbox is the coordinator agent's work queue. An attention
+item reaches the operator only by an explicit hand-off, or when a
+coordinator-owned item stays unresolved past a limit.
+
+### Ownership
+
+The owner table (child 6) is the default. The ticket stores an override —
+`attention_owner`, the `attention_owner_cause` it applies to, the
+`attention_note` that came with it and `attention_owner_since` — set by
+`Arbiter.Tasks.Attention.hand_off/3` or by a promotion, through the
+`:set_attention_owner` action. `Lifecycle.Attention.of/2` applies it only
+while the ticket's attention is still that cause, and adds `note` and
+`owner_since` to the attention map. The override clears with the rest of the
+attention (a transition, a run restart, a cleared park), and raising a
+different cause drops it.
+
+- **Hand-off.** MCP `ticket_handoff(id, note)`, `POST /api/issues/:id/handoff`,
+  `arb issue handoff <id> --note …`. The note is required; the ticket must have
+  attention now, not already the operator's.
+- **Hand-back.** MCP `ticket_handback(id, note?)`, `POST /api/issues/:id/handback`,
+  `arb issue handback <id>`, and the *Hand back to coordinator* button on the
+  task page's attention strip. The coordinator gets a fresh clock and a fresh
+  attempt budget.
+
+`task_show` returns the stored fields (full view) and the computed `attention`
+map (both views).
+
+### Limits
+
+Workspace config `attention` (`Arbiter.Tasks.AttentionLimits`), read with its
+defaults filled in by `workspace_config_get`:
+
+| key | default | |
+|---|---|---|
+| `coordinator_limit_minutes` | 240 | a coordinator-owned item unresolved this long goes to the operator |
+| `run_crashed_max_resumes` | 3 | a `run_crashed` item whose ticket was already resumed this many times out of a failed run goes to the operator |
+
+`0` turns a limit off. `Arbiter.Tasks.AttentionSweep` (every minute, primary
+instance only) promotes an item past either limit with the note "coordinator
+did not resolve within 4h" / "… within 3 resume attempts". The clock runs from
+`attention_since`, or from a hand-back if later. A derived item has no stored
+`since`, so the sweep keeps its first-seen time in memory and forgets it when
+the item goes; a restart starts that clock again.
+
+Resume attempts are `attention_resume_attempts`: a resumed run whose prior
+run failed or was interrupted adds one (`Attention.clear/3`,
+`resumed_from_failure: true`); a transition and a hand-back reset it.
+
+`tracker_sync_failed` now records the `:tracker_sync_failed` cause
+(coordinator, waiting on `:tracker_sync`), so it follows the same rule. It
+yields to a cause the ticket already has, so a failed sync never masks a crash
+or a blocked merge. A sync that fails on close has no open ticket to carry the
+cause and stays a plain coordinator message.
+
+### The computed queue
+
+`coordinator_inbox` returns `attention` — `Attention.items(owner: :coordinator)`
+for the workspace, oldest first — beside its messages, in both states. The
+queue has no read or clear state: an item is listed exactly while its ticket's
+attention is. `coordinator_inbox_clear` still clears messages.
+
+### Wake-ups
+
+`Attention.announce/3` puts `%{kind: "attention", event, task_id, cause, owner,
+note}` on the `inbox` topic when a cause is raised (`Changes.AnnounceAttention`
+on `:raise_attention`, `:park_review`, `:pr_closed` and `:await_verification`;
+the sweep for a derived item it sees for the first time), promoted, handed off
+or handed back.

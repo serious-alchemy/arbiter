@@ -98,6 +98,8 @@ defmodule Arbiter.MCP.RefinePolicy do
     "task_demote" => @deny_reason_lifecycle,
     "task_sync_upstream_close" => @deny_reason_lifecycle,
     "task_rank" => @deny_reason_scheduler,
+    "ticket_handoff" => @deny_reason_ops,
+    "ticket_handback" => @deny_reason_ops,
 
     # dispatch
     "worker_dispatch" => @deny_reason_dispatch,

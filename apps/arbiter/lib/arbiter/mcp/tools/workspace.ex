@@ -11,6 +11,7 @@ defmodule Arbiter.MCP.Tools.Workspace do
 
   alias Arbiter.MCP.Scope
   alias Arbiter.MCP.Tools
+  alias Arbiter.Tasks.AttentionLimits
   alias Arbiter.Tasks.Workspace
 
   @install_settings_keys ~w(
@@ -46,12 +47,16 @@ defmodule Arbiter.MCP.Tools.Workspace do
   `credentials_ref` pointers already embedded in the config JSON.
   Resolved from the optional `workspace` arg, else the scope's bound workspace,
   else the installation default.
+
+  The `attention` section's escalation limits (bd-8nlez1,
+  `Arbiter.Tasks.AttentionLimits`) read with their documented defaults filled
+  in, so the limits in force are visible whether or not they were set.
   """
   @spec workspace_config_get(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def workspace_config_get(%Scope{} = scope, args) do
     with {:ok, ws_id} <- Tools.resolve_workspace_id(scope, args),
          {:ok, ws} <- Tools.fetch_workspace(ws_id) do
-      config = ws.config || %{}
+      config = AttentionLimits.with_defaults(ws.config)
       key = Tools.fetch_string(args, "key")
 
       value =
@@ -101,6 +106,7 @@ defmodule Arbiter.MCP.Tools.Workspace do
          review: Map.get(config, "review", %{}),
          review_gate: Map.get(config, "review_gate", %{}),
          standing_orders: Map.get(config, "standing_orders", []),
+         attention: config |> AttentionLimits.with_defaults() |> Map.get("attention"),
          secret_keys: workspace_secret_keys(ws)
        }}
     end

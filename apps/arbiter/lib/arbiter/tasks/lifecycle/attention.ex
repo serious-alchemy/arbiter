@@ -8,15 +8,25 @@ defmodule Arbiter.Tasks.Lifecycle.Attention do
   why, in a sentence. `Arbiter.Tasks.Lifecycle.View` fills it through
   `of/3`, from the ticket's stored cause (`attention_cause` /
   `attention_detail` / `attention_since`), its state, and what its runs and
-  its PR say. The map also carries the `:cause` it was read from and the
-  `:since` it was raised at (nil for a derived one).
+  its PR say. The map also carries the `:cause` it was read from, the
+  `:since` it was raised at (nil for a derived one), and — once its owner
+  moved by hand or by a limit (bd-8nlez1) — the `:note` that came with the
+  move and the `:owner_since` it moved at (both nil otherwise).
 
   ## The owner table
 
   **The coordinator comes first.** Everything the coordinator agent can act
   on is its own; a row is the operator's only when nothing in the fleet can
-  move it. Child 7 (bd-8nlez1) adds the explicit hand-off and the time limits
-  that move a coordinator-owned item to the operator.
+  move it.
+
+  ## Moving the owner (bd-8nlez1)
+
+  The table is the default. A ticket whose `attention_owner` is set, for the
+  cause it has now (`attention_owner_cause`), belongs to that owner instead:
+  the coordinator handed it off with a note, the operator handed it back, or
+  a coordinator-owned item outlived its limit (`Arbiter.Tasks.AttentionSweep`).
+  The move goes when the attention clears, and a different cause starts back
+  at the table.
 
   | cause | when | owner | waiting on |
   |---|---|---|---|
@@ -28,6 +38,7 @@ defmodule Arbiter.Tasks.Lifecycle.Attention do
   | `:run_crashed` | | coordinator | `:resume` |
   | `:run_asked_question` | | coordinator | `:answer` |
   | `:awaiting_verification` | | coordinator | `:verification` |
+  | `:tracker_sync_failed` | | coordinator | `:tracker_sync` |
 
   ## Where the cause comes from
 
@@ -59,7 +70,9 @@ defmodule Arbiter.Tasks.Lifecycle.Attention do
           waiting_on: atom(),
           reason: String.t(),
           cause: atom(),
-          since: DateTime.t() | nil
+          since: DateTime.t() | nil,
+          note: String.t() | nil,
+          owner_since: DateTime.t() | nil
         }
 
   @typedoc """
@@ -94,7 +107,9 @@ defmodule Arbiter.Tasks.Lifecycle.Attention do
           {:run_crashed, nil, :coordinator, :resume, "its run stopped without finishing"},
           {:run_asked_question, nil, :coordinator, :answer, "its run asked a question"},
           {:awaiting_verification, nil, :coordinator, :verification,
-           "merged — waiting on a restart-and-observe"}
+           "merged — waiting on a restart-and-observe"},
+          {:tracker_sync_failed, nil, :coordinator, :tracker_sync,
+           "its external tracker could not be synced"}
         ] ++
           for(
             reason <- ReviewPark.park_reasons(),
@@ -130,7 +145,7 @@ defmodule Arbiter.Tasks.Lifecycle.Attention do
       state when state in [:active, :merging, :verifying] ->
         case stored(ticket) || derived(state, facts) do
           nil -> nil
-          {cause, detail, since} -> build(cause, detail, since, facts)
+          {cause, detail, since} -> cause |> build(detail, since, facts) |> moved(ticket)
         end
 
       _ ->
@@ -186,8 +201,27 @@ defmodule Arbiter.Tasks.Lifecycle.Attention do
       waiting_on: waiting_on,
       reason: present(detail) || default,
       cause: cause,
-      since: since
+      since: since,
+      note: nil,
+      owner_since: nil
     }
+  end
+
+  # bd-8nlez1: a hand-off, a hand-back or an expired limit owns the attention
+  # it was made for.
+  defp moved(%{cause: cause} = attention, ticket) do
+    case {Map.get(ticket, :attention_owner), Map.get(ticket, :attention_owner_cause)} do
+      {owner, ^cause} when owner in [:coordinator, :operator] ->
+        %{
+          attention
+          | owner: owner,
+            note: present(Map.get(ticket, :attention_note)),
+            owner_since: Map.get(ticket, :attention_owner_since)
+        }
+
+      _ ->
+        attention
+    end
   end
 
   defp present(detail) when is_binary(detail) and detail != "", do: detail
