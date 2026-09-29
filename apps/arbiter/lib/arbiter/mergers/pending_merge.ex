@@ -79,13 +79,13 @@ defmodule Arbiter.Mergers.PendingMerge do
   an optional `:detail`. `since` is preserved while the stamp still describes
   the same merge (same MR, same reviewed baseline); any fresh stamp clears a
   previous escalation, because a live Watchdog stamping again means somebody
-  re-dispatched the work. A task that is already closed or parked at
-  `:awaiting_verification` is left alone.
+  re-dispatched the work. A task that is already `:closed` or parked at
+  `:verifying` is left alone.
   """
   @spec stamp(String.t(), map()) :: :ok | {:error, term()}
   def stamp(task_id, attrs) when is_binary(task_id) and is_map(attrs) do
     with {:ok, %Issue{} = task} <- Ash.get(Issue, task_id) do
-      if task.status in [:closed, :awaiting_verification] do
+      if task.state in [:closed, :verifying] do
         :ok
       else
         write(task, build(get(task), attrs))
@@ -204,14 +204,12 @@ defmodule Arbiter.Mergers.PendingMerge do
 
   @doc """
   Every open task carrying a pending merge, oldest stamp first. Tasks already
-  closed or parked at `:awaiting_verification` are excluded — their PR merged.
+  `:closed` or parked at `:verifying` are excluded — their PR merged.
   """
   @spec list_open() :: {:ok, [Issue.t()]} | {:error, term()}
   def list_open do
     Issue
-    |> Ash.Query.filter(
-      not is_nil(pending_merge) and status not in [:closed, :awaiting_verification]
-    )
+    |> Ash.Query.filter(not is_nil(pending_merge) and state not in [:closed, :verifying])
     |> Ash.Query.sort(updated_at: :asc)
     |> Ash.read()
   end

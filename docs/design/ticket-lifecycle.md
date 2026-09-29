@@ -1,7 +1,7 @@
 # Ticket Lifecycle — Design Document
 
-**Status:** in progress — children 1 (stored state), 2 (the view), 3 (the scheduler) and 4 (PR state and the Watchdog on the ticket) of 13 implemented
-**Last updated:** 2026-09-27
+**Status:** implemented — all 13 children; child 12 (bd-36ytcl) deleted the superseded fields
+**Last updated:** 2026-09-29
 **Epic:** bd-9yqspm (refined with the operator on 2026-09-27)
 **Code:** `Arbiter.Tasks.Lifecycle` (the table), `Arbiter.Tasks.Issue` (the
 actions), `Arbiter.Tasks.Issue.Changes.Transition` (applies a transition),
@@ -67,8 +67,9 @@ The state changes only through these named actions on `Issue`:
 | transition | from → to |
 |---|---|
 | `promote` | backlog → queued |
-| `demote` | queued → backlog |
-| `start` | queued → active |
+| `demote` | queued \| active \| merging → backlog |
+| `start` | backlog \| queued → active |
+| `requeue` | active \| merging → queued |
 | `open_pr` | active → merging |
 | `return_to_work` | merging → active |
 | `await_verification` | active \| merging → verifying |
@@ -78,13 +79,20 @@ The state changes only through these named actions on `Issue`:
 ```
             promote          start            open_pr
   backlog ──────────► queued ──────► active ──────────► merging
-          ◄──────────   ▲             ▲  ◄──────────────   │
-            demote      │             │   return_to_work   │
-                        │             └────────┬───────────┘
-                        │                      ▼ await_verification
+          ◄──────────   ▲  ◄──────── │  ▲ ◄──────────────   │
+            demote      │   requeue  │  │  return_to_work   │
+                        │            └──┴───────┬───────────┘
+                        │                       ▼ await_verification
                         ├──── reopen ──── verifying
                         └──── reopen ──── closed  ◄── close, from any other state
 ```
+
+The three extra edges — `start` from `backlog`, `requeue`, and `demote` from
+`active` / `merging` — were legacy `status` writes until bd-36ytcl made them
+transitions: a forced dispatch that skips the queue (Dispatch holds a Backlog
+ticket unless `--force`), a run that stopped without finishing
+(`Worker.AuthDeath`), and `:return_to_backlog` on a ticket whose worker already
+stopped (`Changes.GuardDemote` refuses while one is live).
 
 Any pair not in the table is refused. A **no-PR ticket** (`task`, and
 `research` once bd-9s9dqz adds it) goes active → closed or active → verifying
@@ -201,10 +209,12 @@ Ash resource snapshots are stale) adds:
   priority-then-age order did. They are spaced 1024 apart, so drag-to-rank can
   drop a card between two neighbours by writing one row.
 
-### Legacy dual-write
+### Legacy dual-write (removed in bd-36ytcl)
 
-Consumers keep reading `status` and `refined` until the later children switch
-them, so every transition also writes them:
+Until child 12, consumers kept reading `status` and `refined`, so every
+transition also wrote them. Child 12 dropped both columns; the mapping is kept
+here because `Lifecycle.legacy_state/1` (the backfill rule below) still reads
+it for pre-lifecycle rows:
 
 | state | status | refined |
 |---|---|---|
@@ -251,10 +261,11 @@ The `task_state` event and the PubSub `"tasks"` message carry `state` and
 `close_reason` beside `status`, and so do `GET /api/issues/:id` (so
 `arb ticket show --json`) and MCP `ticket_show` in its full view.
 
-### The overlap
+### The overlap (ended in bd-36ytcl)
 
-These are the rules that hold only while `status` still exists (they go with
-it in bd-36ytcl):
+These rules held only while `status` still existed. Child 12 removed `status`,
+`Changes.FollowLegacyStatus` and the legacy status guard, and made each
+remaining legacy write a transition (§2):
 
 - **Legacy `status` writes carry the state.** `:update` refuses `state`,
   `close_reason` and `rank` outright. But a few writers still set `status`
@@ -368,7 +379,8 @@ This replaces the operator's 2026-09-21 rule "another slot doesn't open until
 the issue occupying it is merged" (confirmed 2026-09-27). The board header's
 `slots_used`, `scheduler_status` (`Board.Drain.status/1`: `slots_used`,
 `slot_holders`; `arb scheduler status` prints them) and `ResumeSlot` all read
-this one count. `conductor_slot_basis` now only changes `agents live`.
+this one count. `conductor_slot_basis` then only changed `agents live`, and
+child 12 removed it.
 
 The count is fleet-wide, like the board it sits on: the cap it is measured
 against is the default workspace's (#1359, unchanged).
@@ -649,8 +661,8 @@ an escalation whose kind names a cause (`EscalationKind.cause/1`:
 
 The ReviewGate park moves into the cause. Migration `20260928170000` copies a
 known `review_park_reason` / `review_parked_at` into it and backfills every
-existing escalation as `:legacy`. The park columns stay as a dual-write until
-bd-36ytcl.
+existing escalation as `:legacy`. The park columns were a dual-write until
+bd-36ytcl dropped them; the cause is now the park's only record.
 
 ### The owner table
 
@@ -685,8 +697,7 @@ The cause clears, and the ticket's open ticket-scoped escalations are marked
 `resolved_at`, when:
 
 - **the ticket transitions.** `Changes.Transition` runs
-  `Changes.ClearAttention`, and so does a legacy status write that moves the
-  state. An action that raises its own cause (`:pr_closed`,
+  `Changes.ClearAttention`. An action that raises its own cause (`:pr_closed`,
   `:await_verification`) sets it after the clear.
 - **its run restarts.** A resumed run calls `Attention.clear/2`.
 - **its park is cleared.** `ReviewPark.clear/2` does the same.
@@ -888,7 +899,7 @@ Watchdog, the clock — and `payload/1` is the one JSON shape of a view:
 | MCP `ticket_show` | the payload, plus `close_reason`, on both views |
 | MCP `ticket_list` | new `state` and `column` filters; each row carries the payload |
 | MCP `ticket_ready` | `Projection.open/2`, column `:ready` only, dispatch order |
-| `task_state` event | `column` and `attention`, beside `state`, `close_reason` and the legacy `status` |
+| `task_state` event | `column` and `attention`, beside `state` and `close_reason` (the legacy `status` rode along for one release, until bd-36ytcl) |
 
 ### `arb prime`
 
@@ -913,3 +924,63 @@ worker back, so the event's column and attention come from the row, its
 blockers and its Watchdog only. The one thing that loses is the brief window
 where a `:queued` ticket already has a live run: the event says Ready where
 the board says In progress, until the `start` write that follows.
+
+---
+
+## Child 12 (bd-36ytcl): deleting what the redesign replaced
+
+Child 12 runs last. Every reader had moved to `state`, the projection and the
+attention cause, so it deletes the fields, statuses and classifiers they
+replaced.
+
+### Columns
+
+Migration `20260929193617_drop_legacy_state_columns_from_issues`
+(hand-written) drops `status`, `refined`, `review_park_reason` and
+`review_parked_at` from `issues`. Nothing indexes them, so SQLite drops each in
+place; `state`, `close_reason` and the attention columns are untouched. Its
+`down/0` restores the four columns from `state` by the dual-write table above,
+and a park from an attention cause that is a park reason.
+
+### Writes that became transitions
+
+The legacy writes the overlap allowed are now transitions (§2):
+
+| was | now |
+|---|---|
+| `Ash.update(t, %{status: :in_progress})` from Backlog (a forced dispatch) | `start` (`Issue.start_work/2`) |
+| `status: :open` on an in-progress ticket (`Worker.AuthDeath`) | `requeue` |
+| `:return_to_backlog` resetting a stopped in-progress ticket | `demote` from `active` / `merging` |
+| an operator's status edit (`arb ticket update --status`, MCP `ticket_update`, the task page) | removed — the named transitions are the only moves |
+
+`:update` accepts none of `state`, `close_reason` or `rank`. The legacy status
+FSM guard is gone: the transition table refuses every illegal move, and
+`Changes.GuardState` keeps the two non-transition preconditions
+(`:record_verification` needs `:verifying`, `:sync_upstream_close` needs
+`:closed`). A tracker still hears `:open` / `:in_progress` / `:closed`:
+`Tracker.status_for_state/1` maps the state to the upstream item's status.
+
+### The park is the attention cause
+
+`ReviewPark.park/2` records the park only as the ticket's `attention_cause`
+(its reason must be one of `ReviewPark.park_reasons/0`), `parked?/1` and
+`reason/1` read the cause, and the wait clock is `attention_since`.
+`Issue.review_parked/1` and `GET /api/issues/review_parked` are gone; a parked
+ticket shows through its attention like any other.
+
+### Other deletions
+
+- `Worker.Phase` `:waiting_ci_merge` (and the last `:handing_off` remnant): an
+  open PR with nothing running is the `:merging` state and its step.
+- `SlotGate`'s `:issues` basis (`record_slot?/1`, the run-state list, the
+  `conductor_slot_basis` setting): slots are tickets In progress (child 3),
+  and `agents live` counts live agents only.
+- `Board.Drain.status/1`'s `parked` list: an idle worker is simply not in
+  flight, and `scheduler_status` still reports `state` and `safe_to_restart`.
+- The `task_state` event's legacy `status`, and every other ticket `status` /
+  `refined` field on the API, MCP and CLI: `GET /api/issues` filters by
+  `state`, `ticket_list` drops its deprecated `status` filter, and
+  `arb ticket list` takes `--state`.
+
+The `task_*` MCP aliases and the `arb issue` alias from child 11 stay; they go
+in a separate follow-up once coordinators have migrated.

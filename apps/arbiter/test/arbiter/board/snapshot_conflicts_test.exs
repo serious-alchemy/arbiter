@@ -14,12 +14,11 @@ defmodule Arbiter.Board.SnapshotConflictsTest do
       %{
         id: id,
         title: "Task #{id}",
-        status: :open,
+        state: :queued,
         priority: 2,
         difficulty: 2,
         issue_type: :task,
         workspace_id: "ws-1",
-        refined: true,
         description: nil,
         acceptance: nil,
         notes: nil,
@@ -84,7 +83,7 @@ defmodule Arbiter.Board.SnapshotConflictsTest do
     test "holds the Ready card back and names the counterpart and its state" do
       board =
         derive(
-          issues: [issue("bd-1"), issue("bd-7", %{status: :in_progress})],
+          issues: [issue("bd-1"), issue("bd-7", %{state: :active})],
           workers: [worker("bd-7", :working)],
           conflicts_with: [{"bd-1", "bd-7"}]
         )
@@ -98,7 +97,7 @@ defmodule Arbiter.Board.SnapshotConflictsTest do
     test "the edge is honoured in the direction it was not stored in" do
       board =
         derive(
-          issues: [issue("bd-1"), issue("bd-7", %{status: :in_progress})],
+          issues: [issue("bd-1"), issue("bd-7", %{state: :active})],
           workers: [worker("bd-7", :working)],
           # stored bd-7 → bd-1; bd-1 is the Ready card and must still be held.
           conflicts_with: [{"bd-7", "bd-1"}]
@@ -122,7 +121,7 @@ defmodule Arbiter.Board.SnapshotConflictsTest do
       test "a #{run} counterpart is in flight (#{state})" do
         board =
           derive(
-            issues: [issue("bd-1"), issue("bd-7", %{status: :in_progress})],
+            issues: [issue("bd-1"), issue("bd-7", %{state: :active})],
             workers: [worker("bd-7", unquote(run))],
             conflicts_with: [{"bd-1", "bd-7"}]
           )
@@ -143,7 +142,6 @@ defmodule Arbiter.Board.SnapshotConflictsTest do
           issues: [
             issue("bd-1"),
             issue("bd-7", %{
-              status: :in_progress,
               state: :merging,
               pr_ref: "#7",
               updated_at: ~U[2026-09-15 09:00:00Z]
@@ -159,7 +157,7 @@ defmodule Arbiter.Board.SnapshotConflictsTest do
     test "a reviewer's own worker folds onto the author it reviews" do
       board =
         derive(
-          issues: [issue("bd-1"), issue("bd-7", %{status: :in_progress})],
+          issues: [issue("bd-1"), issue("bd-7", %{state: :active})],
           workers: [
             worker("bd-7", :review_gate),
             worker("bd-7#review", :working, %{meta: %{role: :reviewer, reviews: "bd-7"}})
@@ -174,7 +172,7 @@ defmodule Arbiter.Board.SnapshotConflictsTest do
     test "a fix-pass implementer keeps the mutex even with no author worker left" do
       board =
         derive(
-          issues: [issue("bd-1"), issue("bd-7", %{status: :in_progress})],
+          issues: [issue("bd-1"), issue("bd-7", %{state: :active})],
           workers: [
             worker("bd-7#impl2", :working, %{meta: %{role: :implementer, revises: "bd-7"}})
           ],
@@ -190,7 +188,7 @@ defmodule Arbiter.Board.SnapshotConflictsTest do
     test "a closed counterpart releases the card" do
       board =
         derive(
-          issues: [issue("bd-1"), issue("bd-7", %{status: :closed, closed_at: @now})],
+          issues: [issue("bd-1"), issue("bd-7", %{state: :closed, closed_at: @now})],
           conflicts_with: [{"bd-1", "bd-7"}]
         )
 
@@ -200,7 +198,7 @@ defmodule Arbiter.Board.SnapshotConflictsTest do
     test "a merged counterpart parked at awaiting_verification releases the card" do
       board =
         derive(
-          issues: [issue("bd-1"), issue("bd-7", %{status: :awaiting_verification})],
+          issues: [issue("bd-1"), issue("bd-7", %{state: :verifying})],
           conflicts_with: [{"bd-1", "bd-7"}]
         )
 
@@ -210,7 +208,7 @@ defmodule Arbiter.Board.SnapshotConflictsTest do
     test "a parked (:failed) counterpart releases the card" do
       board =
         derive(
-          issues: [issue("bd-1"), issue("bd-7", %{status: :in_progress})],
+          issues: [issue("bd-1"), issue("bd-7", %{state: :active})],
           workers: [worker("bd-7", :failed)],
           conflicts_with: [{"bd-1", "bd-7"}]
         )
@@ -223,7 +221,7 @@ defmodule Arbiter.Board.SnapshotConflictsTest do
 
       board =
         derive(
-          issues: [issue("bd-1"), issue("bd-7", %{status: :in_progress, updated_at: stale})],
+          issues: [issue("bd-1"), issue("bd-7", %{state: :active, updated_at: stale})],
           conflicts_with: [{"bd-1", "bd-7"}]
         )
 
@@ -235,7 +233,7 @@ defmodule Arbiter.Board.SnapshotConflictsTest do
       # registers; inside the orphan grace that reads as in flight, not gone.
       board =
         derive(
-          issues: [issue("bd-1"), issue("bd-7", %{status: :in_progress})],
+          issues: [issue("bd-1"), issue("bd-7", %{state: :active})],
           conflicts_with: [{"bd-1", "bd-7"}]
         )
 
@@ -262,7 +260,7 @@ defmodule Arbiter.Board.SnapshotConflictsTest do
       second =
         derive(
           issues: [
-            issue("bd-1c4pg3", %{priority: 1, status: :in_progress}),
+            issue("bd-1c4pg3", %{priority: 1, state: :active}),
             issue("bd-7srf5d", %{priority: 2})
           ],
           workers: [worker("bd-1c4pg3", :working)],
@@ -278,7 +276,7 @@ defmodule Arbiter.Board.SnapshotConflictsTest do
       third =
         derive(
           issues: [
-            issue("bd-1c4pg3", %{priority: 1, status: :closed, closed_at: @now}),
+            issue("bd-1c4pg3", %{priority: 1, state: :closed, closed_at: @now}),
             issue("bd-7srf5d", %{priority: 2})
           ],
           conflicts_with: [{"bd-7srf5d", "bd-1c4pg3"}]
@@ -292,7 +290,7 @@ defmodule Arbiter.Board.SnapshotConflictsTest do
     test "a parent_of or relates_to edge never holds a card back" do
       board =
         derive(
-          issues: [issue("bd-1"), issue("bd-7", %{status: :in_progress})],
+          issues: [issue("bd-1"), issue("bd-7", %{state: :active})],
           workers: [worker("bd-7", :working)],
           parent_of: [{"bd-7", "bd-1"}],
           conflicts_with: []
@@ -308,7 +306,7 @@ defmodule Arbiter.Board.SnapshotConflictsTest do
     test "the dependency wins when both hold: the card is Blocked, not a Ready hold" do
       board =
         derive(
-          issues: [issue("bd-1"), issue("bd-7", %{status: :in_progress})],
+          issues: [issue("bd-1"), issue("bd-7", %{state: :active})],
           workers: [worker("bd-7", :working)],
           blocked_by: %{"bd-1" => ["bd-9"]},
           conflicts_with: [{"bd-1", "bd-7"}]

@@ -180,7 +180,7 @@ defmodule Arbiter.ReleaseTest do
       assert [proposal] = proposals
       assert proposal.task_id == task.id
 
-      assert {:ok, %Issue{status: :open}} = Ash.get(Issue, task.id)
+      assert {:ok, %Issue{state: :backlog}} = Ash.get(Issue, task.id)
     end
 
     test ":task_statuses apply? closes the matched task" do
@@ -200,7 +200,7 @@ defmodule Arbiter.ReleaseTest do
 
       assert closed == [task.id]
       assert errors == []
-      assert {:ok, %Issue{status: :closed}} = Ash.get(Issue, task.id)
+      assert {:ok, %Issue{state: :closed}} = Ash.get(Issue, task.id)
     end
   end
 end

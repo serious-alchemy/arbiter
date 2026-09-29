@@ -7,7 +7,7 @@ defmodule Arbiter.Workflows.ReviewGateFixRoundDispatcher do
 
   `Arbiter.Worker.park_rejected/3` records the run `:failed` with
   `failure_reason: :review_gate_rejected`, escalates the findings, and stops.
-  Nothing then dispatched the implementer: the task sat `:in_progress` with no
+  Nothing then dispatched the implementer: the task sat `:active` with no
   live worker until a human ran `worker_resume`. Seven occurrences over
   2026-09-09/10 (vs-ciouz8, vs-382bg7, vs-bg7rue, vs-8q9xu8 ×2, vs-2d0xxa,
   vs-7fv3n4) were every one of them cleared by a plain manual `worker_resume`

@@ -75,8 +75,8 @@ defmodule Arbiter.MCP.TaskLifecycleVocabularyTest do
       assert shown.close_reason == nil
       assert %{owner: "coordinator", cause: "run_crashed", reason: reason} = shown.attention
       assert is_binary(reason)
-      # Legacy, for one release.
-      assert shown.status == "in_progress"
+      # bd-36ytcl: the legacy status is gone.
+      refute Map.has_key?(shown, :status)
     end
 
     test "the full view carries them too, and a closed ticket its close reason", ctx do

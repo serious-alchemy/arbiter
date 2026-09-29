@@ -130,7 +130,7 @@ defmodule Arbiter.Tasks.Issue.Changes.CreateUpstream do
     %{}
     |> put_if_present(:title, issue.title)
     |> put_if_present(:description, issue.description)
-    |> put_if_present(:status, issue.status)
+    |> put_if_present(:status, Arbiter.Trackers.Tracker.status_for_state(issue.state))
   end
 
   defp put_if_present(map, _key, nil), do: map

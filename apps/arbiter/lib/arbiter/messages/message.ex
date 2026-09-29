@@ -857,9 +857,8 @@ defmodule Arbiter.Messages.Message do
   independent pollers (and the same poller across a restart) can each ask
   "has this page already gone out?" and get the same answer, because the state
   lives in the message table rather than in either poller's memory. The
-  identity is the kind and the ticket, never the subject text — before
-  bd-8if9zt it was the subject (`last_with_subject/3`), so a reworded subject
-  was a new escalation.
+  identity is the kind and the ticket, never the subject text, so a reworded
+  subject is still the same escalation.
 
   Options:
 

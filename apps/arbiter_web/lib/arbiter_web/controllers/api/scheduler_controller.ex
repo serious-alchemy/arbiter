@@ -67,8 +67,10 @@ defmodule ArbiterWeb.Api.SchedulerController do
   Get the scheduler's drain state.
 
   Returns `{"state": "running"|"draining"|"quiescent", "safe_to_restart":
-  bool, "in_flight": [...], "parked": [...], "paused": bool, "changed_at":
-  iso8601|null, "changed_by": string|null, "checked_at": iso8601}`.
+  bool, "in_flight": [...], "paused": bool, "changed_at": iso8601|null,
+  "changed_by": string|null, "slots_used": int, "slot_holders": [...],
+  "checked_at": iso8601}`. An idle resident worker is not in flight and is
+  not listed.
   """
   def status(conn, _params) do
     json(conn, status_json())

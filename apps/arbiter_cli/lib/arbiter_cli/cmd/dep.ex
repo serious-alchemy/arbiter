@@ -9,7 +9,7 @@ defmodule ArbiterCli.Cmd.Dep do
   `list` with no `<issue>` lists every edge in the active workspace (see
   `arb where` / `ARB_WORKSPACE` / `--workspace`); with an `<issue>` it lists
   that issue's edges in both directions (bd-1defgu). Each row shows both
-  endpoints' id, title, status and priority, so a live edge is
+  endpoints' id, title, state and priority, so a live edge is
   distinguishable from a closed↔closed one without a second lookup.
 
   A `conflicts_with` edge (or any other symmetric type) is stored once,

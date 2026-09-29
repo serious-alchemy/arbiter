@@ -393,7 +393,7 @@ defmodule Arbiter.Usage.Budget do
       issue_type: Map.get(card, :issue_type)
     }
 
-  defp open?(issue), do: Map.get(issue, :status) != :closed and is_binary(Map.get(issue, :id))
+  defp open?(issue), do: Map.get(issue, :state) != :closed and is_binary(Map.get(issue, :id))
 
   defp money(value), do: Float.round(value / 1, 2)
 end

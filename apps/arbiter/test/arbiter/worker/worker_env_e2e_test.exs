@@ -12,6 +12,8 @@ defmodule Arbiter.Worker.WorkerEnvE2ETest do
   """
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures, only: [put_state!: 2]
+
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker
@@ -113,7 +115,7 @@ defmodule Arbiter.Worker.WorkerEnvE2ETest do
       # stream, `worker_runs.output_lines`, and the durable log.
       ws = new_workspace(config: %{"review" => %{"required" => true}})
       {:ok, task} = Ash.create(Issue, %{title: "nudge", workspace_id: ws.id})
-      {:ok, task} = Ash.update(task, %{status: :in_progress})
+      task = put_state!(task, :active)
 
       branch = "bd-we/#{task.id}"
       path = provision_worktree(repo, branch)

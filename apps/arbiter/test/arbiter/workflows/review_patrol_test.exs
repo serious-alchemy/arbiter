@@ -127,7 +127,7 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
       {_pid, name} = start_patrol(ws)
       assert :ok = ReviewPatrol.tick(name)
 
-      assert reload(eng).status == :closed
+      assert reload(eng).state == :closed
       assert ReviewPatrol.state(name).last_terminated == [eng.id]
     end
 
@@ -138,7 +138,7 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
       {_pid, name} = start_patrol(ws)
       assert :ok = ReviewPatrol.tick(name)
 
-      assert reload(eng).status == :closed
+      assert reload(eng).state == :closed
     end
 
     test "idempotent: re-ticking an already-closed engagement is a no-op", %{ws: ws} do
@@ -147,13 +147,13 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
 
       {_pid, name} = start_patrol(ws)
       assert :ok = ReviewPatrol.tick(name)
-      assert reload(eng).status == :closed
+      assert reload(eng).state == :closed
 
       # Second tick: the engagement is already :closed, so the query excludes it
       # and nothing is terminated again.
       assert :ok = ReviewPatrol.tick(name)
       assert ReviewPatrol.state(name).last_terminated == []
-      assert reload(eng).status == :closed
+      assert reload(eng).state == :closed
     end
   end
 
@@ -172,7 +172,7 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
       assert :ok = ReviewPatrol.tick(name)
 
       reloaded = reload(eng)
-      assert reloaded.status != :closed
+      assert reloaded.state != :closed
       assert reloaded.last_reviewed_sha == "deadbeef"
       assert ReviewPatrol.state(name).last_terminated == []
     end
@@ -193,7 +193,7 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
       # Re-review of a new commit lands in task D; this skeleton must NOT touch
       # an already-recorded SHA.
       assert reload(eng).last_reviewed_sha == "original"
-      assert reload(eng).status != :closed
+      assert reload(eng).state != :closed
     end
   end
 
@@ -215,7 +215,7 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
       assert :ok = ReviewPatrol.tick(name)
 
       # The author-side follow-up is untouched — ReviewPatrol filters review_only.
-      assert reload(follow_up).status != :closed
+      assert reload(follow_up).state != :closed
       assert ReviewPatrol.state(name).last_terminated == []
     end
   end
@@ -279,7 +279,7 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
       assert :ok = ReviewPatrol.tick(name)
 
       # Engagement terminated…
-      assert reload(eng).status == :closed
+      assert reload(eng).state == :closed
       # …with ZERO tracker traffic.
       refute_receive {:tracker, _, _}
     end
@@ -326,7 +326,7 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
 
       :ok = ReviewPatrol.tick(name)
       assert ReviewPatrol.state(name).idle_ticks == 0
-      assert reload(eng).status == :closed
+      assert reload(eng).state == :closed
     end
   end
 
@@ -2734,7 +2734,7 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
       assert :ok = ReviewPatrol.tick(name)
 
       refute_receive {:paced, _}
-      assert reload(eng).status == :closed
+      assert reload(eng).state == :closed
     end
   end
 
@@ -2871,7 +2871,7 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
       end)
 
       assert :ok = ReviewPatrol.tick(name)
-      assert Enum.all?(engs, &(reload(&1).status == :closed))
+      assert Enum.all?(engs, &(reload(&1).state == :closed))
       assert ReviewPatrol.state(name).rate_limit_paused_until == nil
     end
 
@@ -3104,7 +3104,7 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
       :ok = ReviewPatrol.tick(name)
 
       refute_received {:requested, _}
-      assert reload(eng).status != :closed
+      assert reload(eng).state != :closed
       assert ReviewPatrol.state(name).ticks == 1
     end
 
@@ -3122,7 +3122,7 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
       :ok = ReviewPatrol.tick(name)
 
       refute_received {:requested, _}
-      assert reload(eng).status != :closed
+      assert reload(eng).state != :closed
     end
 
     test "a patrol whose repo still resolves keeps acting on it", %{ws: ws} do
@@ -3133,7 +3133,7 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
       :ok = ReviewPatrol.tick(name)
 
       assert_received {:requested, "/repos/owner/repo/pulls/142"}
-      assert reload(eng).status == :closed
+      assert reload(eng).state == :closed
     end
   end
 end

@@ -345,7 +345,7 @@ defmodule ArbiterCli.Cmd.Worker do
 
     IO.puts("Resume:")
     IO.puts("  Ticket:   #{task["id"]} — #{task["title"]}")
-    IO.puts("  Status:   #{task["status"]}")
+    IO.puts("  State:    #{task["state"]}")
     IO.puts("  Worker:   #{worker["pid"]}")
     IO.puts("  Machine:  #{machine["id"]} #{machine["pid"]}")
 

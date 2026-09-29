@@ -2,6 +2,7 @@ defmodule ArbiterWeb.TaskIndexLiveTest do
   use ArbiterWeb.ConnCase, async: false
 
   import Phoenix.LiveViewTest
+  import Arbiter.LifecycleFixtures
 
   alias Arbiter.Tasks.{Issue, Workspace}
   require Ash.Query
@@ -23,7 +24,7 @@ defmodule ArbiterWeb.TaskIndexLiveTest do
     {:ok, ws: ws}
   end
 
-  test "lists all directives regardless of status", %{conn: conn, ws: ws} do
+  test "lists all directives regardless of state", %{conn: conn, ws: ws} do
     {:ok, _open} = Ash.create(Issue, %{title: "open-directive", workspace_id: ws.id})
     {:ok, to_close} = Ash.create(Issue, %{title: "closed-directive", workspace_id: ws.id})
     {:ok, _} = Ash.update(to_close, %{}, action: :close)
@@ -41,14 +42,14 @@ defmodule ArbiterWeb.TaskIndexLiveTest do
     {:ok, to_close} = Ash.create(Issue, %{title: "now-closed", workspace_id: ws.id})
     {:ok, _} = Ash.update(to_close, %{}, action: :close)
 
-    {:ok, _view, html} = live_tasks(conn, ~p"/tasks?#{%{status: :closed}}")
+    {:ok, _view, html} = live_tasks(conn, ~p"/tasks?#{%{state: :closed}}")
 
     assert html =~ "now-closed"
     refute html =~ "still-open"
   end
 
   test "empty filter renders the empty state", %{conn: conn} do
-    {:ok, _view, html} = live_tasks(conn, ~p"/tasks?#{%{status: :in_progress}}")
+    {:ok, _view, html} = live_tasks(conn, ~p"/tasks?#{%{state: :active}}")
     assert html =~ ~s(id="tasks-empty")
   end
 
@@ -96,7 +97,7 @@ defmodule ArbiterWeb.TaskIndexLiveTest do
       assert row_html(html, task.id) =~ "opacity-[0.62]"
     end
 
-    test "a row shows the priority tag, difficulty meter, id, title, and status chip",
+    test "a row shows the priority tag, difficulty meter, id, title, and state chip",
          %{conn: conn, ws: ws} do
       {:ok, task} =
         Ash.create(Issue, %{
@@ -113,7 +114,7 @@ defmodule ArbiterWeb.TaskIndexLiveTest do
       assert row =~ "Difficulty D2"
       assert row =~ task.id
       assert row =~ "full-anatomy"
-      assert row =~ "open"
+      assert row =~ "backlog"
     end
 
     defp row_html(html, id) do
@@ -134,15 +135,24 @@ defmodule ArbiterWeb.TaskIndexLiveTest do
   end
 
   describe "filter tabs" do
-    test "renders literal status values with human labels", %{conn: conn} do
+    test "one tab per lifecycle state, linking the literal state value", %{conn: conn} do
       {:ok, _view, html} = live_tasks(conn, ~p"/tasks")
 
       assert html =~ "All"
-      assert html =~ "Open"
-      assert html =~ "In progress"
-      assert html =~ "Closed"
-      assert html =~ ~r/href="\/tasks\?[^"]*status=in_progress/
-      assert html =~ ~r/href="\/tasks\?[^"]*status=closed/
+
+      for {label, state} <- [
+            {"Backlog", "backlog"},
+            {"Queued", "queued"},
+            {"Active", "active"},
+            {"Merging", "merging"},
+            {"Verifying", "verifying"},
+            {"Closed", "closed"}
+          ] do
+        assert html =~ label
+        assert html =~ ~r/href="\/tasks\?[^"]*state=#{state}/
+      end
+
+      refute html =~ ~r/href="\/tasks\?[^"]*status=/
     end
   end
 
@@ -217,14 +227,13 @@ defmodule ArbiterWeb.TaskIndexLiveTest do
   end
 
   describe "filters" do
-    test "status filter includes awaiting_verification", %{conn: conn, ws: ws} do
+    test "state filter includes verifying", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "parked-for-verification", workspace_id: ws.id})
       # bd-842qio: only work in progress parks for verification.
-      {:ok, task} = Ash.update(task, %{status: :in_progress})
-      {:ok, task} = Ash.update(task, %{}, action: :await_verification)
+      task = put_state!(task, :verifying)
       {:ok, _open} = Ash.create(Issue, %{title: "still-open", workspace_id: ws.id})
 
-      {:ok, _view, html} = live_tasks(conn, ~p"/tasks?#{%{status: :awaiting_verification}}")
+      {:ok, _view, html} = live_tasks(conn, ~p"/tasks?#{%{state: :verifying}}")
 
       assert html =~ task.id
       refute html =~ "still-open"
@@ -291,7 +300,7 @@ defmodule ArbiterWeb.TaskIndexLiveTest do
       refute html =~ "has-difficulty"
     end
 
-    test "stage filter narrows Backlog (refined: false)", %{conn: conn, ws: ws} do
+    test "stage filter narrows Backlog (state: :backlog)", %{conn: conn, ws: ws} do
       {:ok, backlog} =
         Ash.create(Issue, %{title: "in-backlog", workspace_id: ws.id, issue_type: :task})
 
@@ -306,7 +315,7 @@ defmodule ArbiterWeb.TaskIndexLiveTest do
       refute html =~ "in-ready"
     end
 
-    test "stage filter narrows Ready (refined: true)", %{conn: conn, ws: ws} do
+    test "stage filter narrows Ready (state: :queued)", %{conn: conn, ws: ws} do
       {:ok, _backlog} =
         Ash.create(Issue, %{title: "in-backlog", workspace_id: ws.id, issue_type: :task})
 
@@ -394,7 +403,7 @@ defmodule ArbiterWeb.TaskIndexLiveTest do
       assert html =~ orphan.id
     end
 
-    test "a three-way filter combination (status + type + priority) is AND'd",
+    test "a three-way filter combination (state + type + priority) is AND'd",
          %{conn: conn, ws: ws} do
       {:ok, target} =
         Ash.create(Issue, %{
@@ -420,23 +429,23 @@ defmodule ArbiterWeb.TaskIndexLiveTest do
           priority: 3
         })
 
-      {:ok, wrong_status} =
+      {:ok, wrong_state} =
         Ash.create(Issue, %{
-          title: "wrong-status",
+          title: "wrong-state",
           workspace_id: ws.id,
           issue_type: :bug,
           priority: 1
         })
 
-      {:ok, _} = Ash.update(wrong_status, %{}, action: :close)
+      {:ok, _} = Ash.update(wrong_state, %{}, action: :close)
 
       {:ok, _view, html} =
-        live_tasks(conn, ~p"/tasks?#{%{status: :open, type: :bug, priority: 1}}")
+        live_tasks(conn, ~p"/tasks?#{%{state: :backlog, type: :bug, priority: 1}}")
 
       assert html =~ target.id
       refute html =~ "wrong-type"
       refute html =~ "wrong-priority"
-      refute html =~ "wrong-status"
+      refute html =~ "wrong-state"
     end
   end
 
@@ -547,7 +556,7 @@ defmodule ArbiterWeb.TaskIndexLiveTest do
       refute html =~ ~s(href="/tasks?page=2)
     end
 
-    test "changing a filter via the form preserves the currently-active status tab", %{
+    test "changing a filter via the form preserves the currently-active state tab", %{
       conn: conn,
       ws: ws
     } do
@@ -559,13 +568,13 @@ defmodule ArbiterWeb.TaskIndexLiveTest do
 
       {:ok, _} = Ash.update(closed_bug, %{}, action: :close)
 
-      {:ok, view, _html} = live_tasks(conn, ~p"/tasks?#{%{status: :open}}")
+      {:ok, view, _html} = live_tasks(conn, ~p"/tasks?#{%{state: :backlog}}")
 
       view
       |> form("#tasks-filter-form", %{"type" => "bug"})
       |> render_change()
 
-      assert_patch(view, ~p"/tasks?#{%{page: 1, status: :open, type: :bug}}")
+      assert_patch(view, ~p"/tasks?#{%{page: 1, state: :backlog, type: :bug}}")
       html = render_async(view, @async_timeout)
       assert html =~ open_bug.id
       refute html =~ closed_bug.id

@@ -30,6 +30,7 @@ defmodule ArbiterWeb.WorkerIndexLiveTest do
   use ArbiterWeb.ConnCase, async: false
 
   import Phoenix.LiveViewTest
+  import Arbiter.LifecycleFixtures
 
   alias Arbiter.Tasks.{Issue, PullRequest, Workspace}
   alias Arbiter.Worker
@@ -111,7 +112,7 @@ defmodule ArbiterWeb.WorkerIndexLiveTest do
   # went with it, from this list to the ticket's Merge request panel.
   defp open_pr(ws, title) do
     {:ok, task} = Ash.create(Issue, %{title: title, workspace_id: ws.id})
-    {:ok, _} = Ash.update(task, %{status: :in_progress})
+    put_state!(task, :active)
     {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ws.id)
     :ok = Worker.advance(pid, :integrate)
     run = Process.monitor(pid)

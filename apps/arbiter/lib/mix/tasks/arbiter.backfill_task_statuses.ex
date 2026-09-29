@@ -1,12 +1,12 @@
 defmodule Mix.Tasks.Arbiter.BackfillTaskStatuses do
-  @shortdoc "Close tasks that have feat() commits on main but are still :open"
+  @shortdoc "Close tasks that have feat() commits on main but are not yet :closed"
   @moduledoc """
   Walk `git log` for `feat(<task-id>)` commits on a branch and close any
-  matching tasks still in `:open` / `:in_progress` status.
+  matching tasks whose lifecycle `state` is not yet `:closed`.
 
   This is a recovery tool for the task-status drift the cutover postmortem
   documented: the original Dolt source-of-truth fell behind during
-  late-Phase implementation, and the importer carried stale `:open`
+  late-Phase implementation, and the importer carried stale open
   statuses forward into Postgres.
 
   ## Usage

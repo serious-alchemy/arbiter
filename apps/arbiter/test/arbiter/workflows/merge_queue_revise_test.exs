@@ -308,7 +308,7 @@ defmodule Arbiter.Workflows.MergeQueueReviseTest do
       assert_received :merge_called
 
       reloaded = Ash.get!(Issue, task.id)
-      assert reloaded.status == :closed
+      assert reloaded.state == :closed
     end
   end
 
@@ -356,7 +356,7 @@ defmodule Arbiter.Workflows.MergeQueueReviseTest do
       refute_received {:revise_called, _}
 
       reloaded = Ash.get!(Issue, task.id)
-      assert reloaded.status == :closed
+      assert reloaded.state == :closed
     end
   end
 end

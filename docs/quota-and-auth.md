@@ -53,11 +53,12 @@ a stranded task:
 2. `Arbiter.Worker.AuthDeath` (called by the Driver) then **returns the task
    to Ready**: it removes the worktree and branch if the worker never
    committed (a dirty worktree or one with commits is kept), stops the
-   `:failed` worker process (its `worker_runs` row stays `:failed`), and sets
-   the task back to `:open`. Not for review-only engagements or resume /
+   `:failed` worker process (its `worker_runs` row stays `:failed`), and puts
+   the ticket back in the queue (the `requeue` transition, `:active` or
+   `:merging` → `:queued`). Not for review-only engagements or resume /
    fix-round workers, and not once a task has died on auth
-   `max_task_reopens` times (default 3) — those keep the old
-   stay-`:in_progress` behaviour. Every other failure shape is unchanged.
+   `max_task_reopens` times (default 3) — those keep the old stay-In-progress
+   behaviour. Every other failure shape is unchanged.
 3. **N consecutive auth deaths on a provider (default 2) open the hold.**
    "Consecutive" means no worker completed on that provider in between. The
    hold marks `CredentialWatchdog` expired for the adapter, which escalates

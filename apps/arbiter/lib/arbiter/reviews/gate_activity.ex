@@ -29,8 +29,8 @@ defmodule Arbiter.Reviews.GateActivity do
       task (`meta.reviews` / `meta.revises`). Redundant with the above in the
       normal case, but it still fires if the author's registration is missing —
       an ad-hoc gate, a re-run gate, a restarted author.
-    * `:ticket_review_parked` — the gate gave up and stamped
-      `Arbiter.Tasks.ReviewPark`. The branch is mid-incident and a human owns
+    * `:ticket_review_parked` — the gate gave up and parked the ticket
+      (`Arbiter.Tasks.ReviewPark` — the park is its attention cause). The branch is mid-incident and a human owns
       it; a patrol commit landing on top is exactly what made the reported
       recovery manual.
 
@@ -140,7 +140,7 @@ defmodule Arbiter.Reviews.GateActivity do
 
   def describe({:gated, :ticket_review_parked, %Issue{id: id} = task}),
     do:
-      "task #{id} is review-parked (#{task.review_park_reason}) — a human owns the branch " <>
+      "task #{id} is review-parked (#{ReviewPark.reason(task)}) — a human owns the branch " <>
         "until the park clears"
 
   # ---- internals -----------------------------------------------------------
@@ -175,9 +175,7 @@ defmodule Arbiter.Reviews.GateActivity do
   # carries `source_pr` instead and so is never selected here.
   defp authoring_task(workspace_id, number, repo) do
     Issue
-    |> Ash.Query.filter(
-      workspace_id == ^workspace_id and not is_nil(pr_ref) and status != :closed
-    )
+    |> Ash.Query.filter(workspace_id == ^workspace_id and not is_nil(pr_ref) and state != :closed)
     |> Ash.read!()
     |> Enum.find(fn %Issue{pr_ref: ref} ->
       PatrolRepoScope.ref_matches_repo?(ref, repo) and number_of_ref(ref) == number

@@ -25,6 +25,8 @@ defmodule Arbiter.Worker.ReviewGateTicketVerdictTest do
 
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures, only: [put_state!: 2]
+
   require Ash.Query
 
   alias Arbiter.Messages.Message
@@ -97,7 +99,7 @@ defmodule Arbiter.Worker.ReviewGateTicketVerdictTest do
     {:ok, task} =
       Ash.create(Issue, %{title: "reviewed", workspace_id: ws.id, issue_type: :feature})
 
-    {:ok, task} = Ash.update(task, %{status: :in_progress})
+    task = put_state!(task, :active)
     on_exit(fn -> stop(Watchdog.whereis(task.id)) end)
     task
   end

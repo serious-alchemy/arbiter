@@ -4,6 +4,8 @@ defmodule Arbiter.Workers.ReconcilerTest do
   # WorkerRunPersistenceTest.
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures, only: [put_state!: 3]
+
   alias Arbiter.Accounts.{ProviderAccount, WorkspaceProviderAccount}
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Messages.Message
@@ -425,22 +427,24 @@ defmodule Arbiter.Workers.ReconcilerTest do
     ws
   end
 
+  # `state:` walks the ticket there through the real transitions
+  # (`put_state!/3`); with `state: :merging`, `pr_ref:` is the ref its
+  # `open_pr` records. A `pr_ref:` on any other ticket is a plain field write.
   defp create_issue(workspace_id, attrs) do
-    {create_attrs, update_attrs} = Map.split(attrs, [:status, :pr_ref])
+    {state, attrs} = Map.pop(attrs, :state)
+    {pr_ref, attrs} = Map.pop(attrs, :pr_ref)
 
     base = %{
       title: "test-issue-#{System.unique_integer([:positive])}",
       workspace_id: workspace_id
     }
 
-    {:ok, issue} = Ash.create(Issue, Map.merge(base, update_attrs))
+    {:ok, issue} = Ash.create(Issue, Map.merge(base, attrs))
+    issue = if state, do: put_state!(issue, state, pr_ref: pr_ref), else: issue
 
-    if map_size(create_attrs) > 0 do
-      {:ok, issue} = Ash.update(issue, create_attrs)
-      issue
-    else
-      issue
-    end
+    if pr_ref && issue.pr_ref != pr_ref,
+      do: Ash.update!(issue, %{pr_ref: pr_ref}),
+      else: issue
   end
 
   # bd-741sid: a Merging ticket gets its Watchdog back from its row first
@@ -458,7 +462,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
 
     issue =
       create_issue(ws.id, %{
-        status: :in_progress,
+        state: :merging,
         pr_ref: "#{System.unique_integer([:positive])}"
       })
 
@@ -480,7 +484,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
 
     issue =
       create_issue(ws.id, %{
-        status: :in_progress,
+        state: :merging,
         pr_ref: "#{System.unique_integer([:positive])}"
       })
 
@@ -503,7 +507,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
 
   test "re-watches a review-only engagement (no pr_ref) via the patrol layer" do
     ws = create_workspace()
-    issue = create_issue(ws.id, %{status: :in_progress})
+    issue = create_issue(ws.id, %{state: :active})
     {:ok, issue} = Ash.update(issue, %{review_only: true})
 
     test_pid = self()
@@ -521,7 +525,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
 
     issue =
       create_issue(ws.id, %{
-        status: :in_progress,
+        state: :merging,
         pr_ref: "#{System.unique_integer([:positive])}"
       })
 
@@ -541,14 +545,14 @@ defmodule Arbiter.Workers.ReconcilerTest do
 
   test "open-PR sweep leaves a bead with no pr_ref alone (that is the resume sweep's job)" do
     ws = create_workspace()
-    _issue = create_issue(ws.id, %{status: :in_progress})
+    _issue = create_issue(ws.id, %{state: :active})
 
     assert {:ok, %{rewatched: 0, escalated: 0}} = Reconciler.reconcile_open_pr_tasks()
 
     assert Message.inbox("admiral", workspace_id: ws.id) == []
   end
 
-  test "open-PR sweep ignores a :closed or :open task even if it somehow has a pr_ref" do
+  test "open-PR sweep ignores a :closed or :backlog task even if it somehow has a pr_ref" do
     ws = create_workspace()
     _issue = create_issue(ws.id, %{pr_ref: "99"})
 
@@ -562,7 +566,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
 
     _issue =
       create_issue(ws.id, %{
-        status: :in_progress,
+        state: :merging,
         pr_ref: "#{System.unique_integer([:positive])}"
       })
 
@@ -575,7 +579,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
 
   test "resumes a mid-flight (:running) bead with no pr_ref via the resume path" do
     ws = create_workspace()
-    issue = create_issue(ws.id, %{status: :in_progress})
+    issue = create_issue(ws.id, %{state: :active})
 
     test_pid = self()
 
@@ -594,7 +598,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
 
   test "escalates a mid-flight bead that cannot be safely resumed (no outpost)" do
     ws = create_workspace()
-    issue = create_issue(ws.id, %{status: :in_progress})
+    issue = create_issue(ws.id, %{state: :active})
 
     # Simulate Dispatch.resume/2 refusing because the worktree was cleaned up.
     resume = fn %Issue{} -> {:error, :no_outpost} end
@@ -611,7 +615,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
 
   test "resume sweep respects the worker_live? guard (never resumes a live bead)" do
     ws = create_workspace()
-    issue = create_issue(ws.id, %{status: :in_progress})
+    issue = create_issue(ws.id, %{state: :active})
 
     {:ok, pid} = Worker.start(task_id: issue.id, repo: "arbiter", workspace_id: ws.id)
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
@@ -630,9 +634,9 @@ defmodule Arbiter.Workers.ReconcilerTest do
     ws = create_workspace()
 
     _open_pr =
-      create_issue(ws.id, %{status: :in_progress, pr_ref: "#{System.unique_integer([:positive])}"})
+      create_issue(ws.id, %{state: :merging, pr_ref: "#{System.unique_integer([:positive])}"})
 
-    review = create_issue(ws.id, %{status: :in_progress})
+    review = create_issue(ws.id, %{state: :active})
     {:ok, _} = Ash.update(review, %{review_only: true})
 
     resume = fn %Issue{} -> flunk("resume must not be called for open-PR/review-only beads") end
@@ -653,9 +657,9 @@ defmodule Arbiter.Workers.ReconcilerTest do
     ws = create_workspace()
 
     merging =
-      create_issue(ws.id, %{status: :in_progress, pr_ref: "https://example.test/pull/1"})
+      create_issue(ws.id, %{state: :merging, pr_ref: "https://example.test/pull/1"})
 
-    parked = create_issue(ws.id, %{status: :in_progress})
+    parked = create_issue(ws.id, %{state: :active})
     assert {merging.state, parked.state} == {:merging, :active}
 
     for {issue, attrs} <- [
@@ -695,7 +699,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
 
   test "resume sweep skips when primary?: false" do
     ws = create_workspace()
-    _issue = create_issue(ws.id, %{status: :in_progress})
+    _issue = create_issue(ws.id, %{state: :active})
 
     resume = fn %Issue{} -> flunk("must not resume on a non-primary boot") end
 
@@ -732,7 +736,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
     # pr_ref — the open-PR sweep re-watched the PR and nothing resumed the work.
     ws = create_workspace()
     pr_ref = "#{System.unique_integer([:positive])}"
-    issue = revising(create_issue(ws.id, %{status: :in_progress, pr_ref: pr_ref}))
+    issue = revising(create_issue(ws.id, %{state: :merging, pr_ref: pr_ref}))
 
     create_main_run(issue, %{
       state: :finished,
@@ -753,7 +757,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
   test "still leaves an open-PR task whose last run ended on its own terms to the patrols" do
     ws = create_workspace()
     pr_ref = "#{System.unique_integer([:positive])}"
-    issue = create_issue(ws.id, %{status: :in_progress, pr_ref: pr_ref})
+    issue = create_issue(ws.id, %{state: :merging, pr_ref: pr_ref})
     create_main_run(issue, %{state: :finished, outcome: :failed})
 
     resume = fn %Issue{} -> flunk("a parked open-PR task must not be resumed") end
@@ -765,7 +769,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
   describe "reconcile_shutdown_casualties/1" do
     test "re-stamps a :machine_died run from the shutdown window as :interrupted / server shutdown" do
       ws = create_workspace()
-      issue = create_issue(ws.id, %{status: :in_progress, pr_ref: "1956"})
+      issue = create_issue(ws.id, %{state: :merging, pr_ref: "1956"})
       booted_at = DateTime.utc_now()
 
       run =
@@ -788,7 +792,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
 
     test "then the resume sweep resumes it, holding its slot" do
       ws = create_workspace()
-      issue = revising(create_issue(ws.id, %{status: :in_progress, pr_ref: "2052"}))
+      issue = revising(create_issue(ws.id, %{state: :merging, pr_ref: "2052"}))
       booted_at = DateTime.utc_now()
 
       create_main_run(issue, %{
@@ -813,7 +817,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
 
     test "leaves a :machine_died run from well before the restart alone" do
       ws = create_workspace()
-      issue = create_issue(ws.id, %{status: :in_progress})
+      issue = create_issue(ws.id, %{state: :active})
       booted_at = DateTime.utc_now()
 
       run =
@@ -833,7 +837,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
 
     test "leaves other failures from the shutdown window alone" do
       ws = create_workspace()
-      issue = create_issue(ws.id, %{status: :in_progress})
+      issue = create_issue(ws.id, %{state: :active})
       booted_at = DateTime.utc_now()
 
       run =
@@ -850,7 +854,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
 
     test "skips when primary?: false" do
       ws = create_workspace()
-      issue = create_issue(ws.id, %{status: :in_progress})
+      issue = create_issue(ws.id, %{state: :active})
       booted_at = DateTime.utc_now()
 
       run =
@@ -873,15 +877,15 @@ defmodule Arbiter.Workers.ReconcilerTest do
   test "restart with in-flight work: awaiting_review bead re-watched, un-resumable bead escalated" do
     ws = create_workspace()
 
-    # One awaiting_review bead: in_progress with an open PR of its own.
+    # One awaiting_review bead: Merging with an open PR of its own.
     watched =
       create_issue(ws.id, %{
-        status: :in_progress,
+        state: :merging,
         pr_ref: "#{System.unique_integer([:positive])}"
       })
 
     # One mid-flight bead whose worktree is gone → cannot be safely resumed.
-    unresumable = create_issue(ws.id, %{status: :in_progress})
+    unresumable = create_issue(ws.id, %{state: :active})
 
     test_pid = self()
     rewatch = fn %Issue{id: id} -> send(test_pid, {:rewatched, id}) && :ok end

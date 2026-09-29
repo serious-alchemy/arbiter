@@ -1,6 +1,8 @@
 defmodule Arbiter.MCP.ToolsTest do
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures, only: [put_state!: 2]
+
   alias Arbiter.Loop.FlakeEvent
   alias Arbiter.Tasks.Dependency
   alias Arbiter.Tasks.Issue
@@ -71,7 +73,7 @@ defmodule Arbiter.MCP.ToolsTest do
 
   defp driver_owning?(_pid, _worktree_path), do: nil
 
-  # bd-asxw4e: a ticket a manual dispatch accepts without `force` — refined,
+  # bd-asxw4e: a ticket a manual dispatch accepts without `force` — queued,
   # so in the Ready column.
   defp ready_issue(ctx, title) do
     {:ok, issue} =
@@ -98,7 +100,7 @@ defmodule Arbiter.MCP.ToolsTest do
       assert {:ok, data} = Tools.task_show(ctx.worker, %{})
       assert data.id == ctx.task.id
       assert data.title == "the bound task"
-      assert data.status == "open"
+      assert data.state == "backlog"
     end
 
     test "a worker may not read another task", ctx do
@@ -174,7 +176,10 @@ defmodule Arbiter.MCP.ToolsTest do
       assert Map.has_key?(data, :title)
       assert Map.has_key?(data, :description)
       assert Map.has_key?(data, :acceptance)
-      assert Map.has_key?(data, :status)
+      assert Map.has_key?(data, :state)
+      # bd-36ytcl: the legacy fields are gone.
+      refute Map.has_key?(data, :status)
+      refute Map.has_key?(data, :refined)
       assert Map.has_key?(data, :priority)
       assert Map.has_key?(data, :difficulty)
       assert Map.has_key?(data, :issue_type)
@@ -195,15 +200,18 @@ defmodule Arbiter.MCP.ToolsTest do
     end
 
     # bd-9zuvbh: `ticket_show` is the coordinator's main surface, so the reason a
-    # ReviewGate-parked task is sitting still has to be readable there.
-    test "full: true carries the ReviewGate park", ctx do
+    # ReviewGate-parked task is sitting still has to be readable there. The
+    # park is the ticket's attention cause (bd-36ytcl).
+    test "full: true carries the ReviewGate park as the attention cause", ctx do
       {:ok, :claimed, _} = Arbiter.Tasks.ReviewPark.park(ctx.task.id, :verdict_guard_exhausted)
 
       assert {:ok, data} =
                Tools.task_show(ctx.coordinator, %{"id" => ctx.task.id, "full" => true})
 
-      assert data.review_park_reason == "verdict_guard_exhausted"
-      assert is_binary(data.review_parked_at)
+      assert data.attention_cause == "verdict_guard_exhausted"
+      assert is_binary(data.attention_since)
+      refute Map.has_key?(data, :review_park_reason)
+      refute Map.has_key?(data, :review_parked_at)
     end
 
     test "full: true returns complete record including review fields", ctx do
@@ -217,6 +225,9 @@ defmodule Arbiter.MCP.ToolsTest do
       assert Map.has_key?(data, :auto_close)
       assert Map.has_key?(data, :created_at)
       assert Map.has_key?(data, :updated_at)
+      assert data.state == "backlog"
+      refute Map.has_key?(data, :status)
+      refute Map.has_key?(data, :refined)
     end
 
     # bd-1defgu: the domain-layer read (`Dependencies.list/1`) existed but
@@ -909,7 +920,7 @@ defmodule Arbiter.MCP.ToolsTest do
                })
 
       assert data.id == ctx.task.id
-      assert data.status == "open"
+      assert data.state == "backlog"
 
       {:ok, full} = Tools.task_show(ctx.worker, %{"full" => true})
       assert full.qa_notes == "verify the login flow"
@@ -926,11 +937,11 @@ defmodule Arbiter.MCP.ToolsTest do
       assert full.pr_body == body
     end
 
-    test "ignores non-progress fields (cannot flip status)", ctx do
+    test "ignores non-progress fields (cannot move the state)", ctx do
       assert {:ok, data} =
-               Tools.task_update_progress(ctx.worker, %{"notes" => "wip", "status" => "closed"})
+               Tools.task_update_progress(ctx.worker, %{"notes" => "wip", "state" => "closed"})
 
-      assert data.status == "open"
+      assert data.state == "backlog"
 
       {:ok, full} = Tools.task_show(ctx.worker, %{"full" => true})
       assert full.notes == "wip"
@@ -962,7 +973,7 @@ defmodule Arbiter.MCP.ToolsTest do
       assert data.title == "new work"
       assert data.priority == 1
       assert data.issue_type == "bug"
-      assert data.status == "open"
+      assert data.state == "backlog"
 
       {:ok, reloaded} = Ash.get(Issue, data.id)
       assert reloaded.workspace_id == ctx.ws.id
@@ -981,7 +992,7 @@ defmodule Arbiter.MCP.ToolsTest do
       assert warning =~ "acceptance criteria"
 
       {:ok, reloaded} = Ash.get(Issue, data.id)
-      assert reloaded.refined == false
+      assert reloaded.state == :backlog
     end
 
     test "no warning when acceptance criteria are given", ctx do
@@ -1152,11 +1163,10 @@ defmodule Arbiter.MCP.ToolsTest do
       assert {:ok, data} =
                Tools.task_update(ctx.coordinator, %{
                  "id" => ctx.task.id,
-                 "status" => "in_progress",
                  "priority" => 0
                })
 
-      assert data.status == "in_progress"
+      assert data.state == "backlog"
       assert data.priority == 0
     end
 
@@ -1171,12 +1181,16 @@ defmodule Arbiter.MCP.ToolsTest do
       assert reloaded.pr_ref == "owner/repo#1"
     end
 
-    test "cannot close a task through task_update (closed status rejected)", ctx do
-      assert {:error, {:invalid, _}} =
-               Tools.task_update(ctx.coordinator, %{"id" => ctx.task.id, "status" => "closed"})
+    # bd-36ytcl: `status` is no longer a field, and `state` never was one —
+    # the lifecycle only moves through the transition tools.
+    test "cannot move the lifecycle through task_update", ctx do
+      for field <- ["status", "state"] do
+        assert {:error, {:invalid, _}} =
+                 Tools.task_update(ctx.coordinator, %{"id" => ctx.task.id, field => "closed"})
+      end
 
       {:ok, reloaded} = Ash.get(Issue, ctx.task.id)
-      assert reloaded.status == :open
+      assert reloaded.state == :backlog
     end
 
     test "requires at least one field to update", ctx do
@@ -1247,10 +1261,10 @@ defmodule Arbiter.MCP.ToolsTest do
       assert {:ok, data} =
                Tools.task_close(ctx.coordinator, %{"id" => ctx.task.id, "reason" => "done"})
 
-      assert data.status == "closed"
+      assert data.state == "closed"
 
       {:ok, reloaded} = Ash.get(Issue, ctx.task.id)
-      assert reloaded.status == :closed
+      assert reloaded.state == :closed
     end
   end
 
@@ -1294,14 +1308,11 @@ defmodule Arbiter.MCP.ToolsTest do
 
     test "ticket_show full view reports the flag and the verification state", ctx do
       # bd-842qio: only work in progress parks for verification.
-      {:ok, task} =
-        Ash.update(ctx.task, %{verify_after_deploy: true, status: :in_progress}, action: :update)
-
-      {:ok, _} = Ash.update(task, %{}, action: :await_verification)
+      {:ok, task} = Ash.update(ctx.task, %{verify_after_deploy: true}, action: :update)
+      put_state!(task, :verifying)
 
       assert {:ok, data} = Tools.task_show(ctx.worker, %{"full" => true})
       assert data.verify_after_deploy == true
-      assert data.status == "awaiting_verification"
       assert is_binary(data.awaiting_verification_at)
       # bd-842qio: the stored lifecycle state, mirroring the REST shape.
       assert {data.state, data.close_reason} == {"verifying", nil}
@@ -1310,11 +1321,8 @@ defmodule Arbiter.MCP.ToolsTest do
 
   describe "task_verify/2" do
     setup ctx do
-      {:ok, task} =
-        Ash.update(ctx.task, %{verify_after_deploy: true, status: :in_progress}, action: :update)
-
-      {:ok, awaiting} = Ash.update(task, %{}, action: :await_verification)
-      {:ok, awaiting: awaiting}
+      {:ok, task} = Ash.update(ctx.task, %{verify_after_deploy: true}, action: :update)
+      {:ok, awaiting: put_state!(task, :verifying)}
     end
 
     test "observed evidence closes the task and persists the evidence", ctx do
@@ -1324,10 +1332,10 @@ defmodule Arbiter.MCP.ToolsTest do
                  "observed" => "restarted; /api/doctor reports 3 repos"
                })
 
-      assert data.status == "closed"
+      assert data.state == "closed"
 
       reloaded = Ash.get!(Issue, ctx.awaiting.id)
-      assert reloaded.status == :closed
+      assert reloaded.state == :closed
       assert reloaded.verification_outcome == :observed
       assert reloaded.verification_evidence == "restarted; /api/doctor reports 3 repos"
     end
@@ -1339,10 +1347,10 @@ defmodule Arbiter.MCP.ToolsTest do
                  "failed" => "still reads the deleted key"
                })
 
-      assert data.status == "open"
+      assert data.state == "queued"
 
       reloaded = Ash.get!(Issue, ctx.awaiting.id)
-      assert reloaded.status == :open
+      assert reloaded.state == :queued
       assert reloaded.verification_outcome == :failed
       assert reloaded.verification_evidence == "still reads the deleted key"
     end
@@ -1483,7 +1491,8 @@ defmodule Arbiter.MCP.ToolsTest do
       assert row.type == "conflicts_with"
       assert row.from.id == ctx.task.id
       assert row.to.id == ctx.other.id
-      assert row.to.status
+      assert row.to.state == "backlog"
+      refute Map.has_key?(row.to, :status)
       assert row.to.priority == ctx.other.priority
     end
 
@@ -1564,7 +1573,7 @@ defmodule Arbiter.MCP.ToolsTest do
       {:ok, _} = Ash.update(child, %{}, action: :close)
 
       assert {:ok, data} = Tools.task_show(ctx.coordinator, %{"id" => parent.id})
-      assert data.status == "closed"
+      assert data.state == "closed"
       assert data.child_closed == 1
       assert data.child_total == 1
     end
@@ -1587,7 +1596,7 @@ defmodule Arbiter.MCP.ToolsTest do
                })
 
       assert {:ok, data} = Tools.task_show(ctx.coordinator, %{"id" => parent.id})
-      assert data.status == "closed"
+      assert data.state == "closed"
     end
 
     test "detaching the last open child closes the auto_close parent", ctx do
@@ -1607,7 +1616,7 @@ defmodule Arbiter.MCP.ToolsTest do
       end
 
       {:ok, _} = Ash.update(done, %{}, action: :close)
-      assert {:ok, %{status: "open"}} = Tools.task_show(ctx.coordinator, %{"id" => parent.id})
+      assert {:ok, %{state: "backlog"}} = Tools.task_show(ctx.coordinator, %{"id" => parent.id})
 
       assert {:ok, %{removed: 1}} =
                Tools.dep_remove(ctx.coordinator, %{
@@ -1616,7 +1625,7 @@ defmodule Arbiter.MCP.ToolsTest do
                  "type" => "parent_of"
                })
 
-      assert {:ok, %{status: "closed"}} = Tools.task_show(ctx.coordinator, %{"id" => parent.id})
+      assert {:ok, %{state: "closed"}} = Tools.task_show(ctx.coordinator, %{"id" => parent.id})
     end
   end
 
@@ -1750,17 +1759,20 @@ defmodule Arbiter.MCP.ToolsTest do
       {:ok, _} = Ash.update(ctx.task, %{reason: "done"}, action: :close)
 
       assert {:ok, data} = Tools.task_reopen(ctx.coordinator, %{"id" => ctx.task.id})
-      assert data.status == "open"
+      assert data.state == "queued"
 
       {:ok, full} = Tools.task_show(ctx.coordinator, %{"id" => ctx.task.id, "full" => true})
       assert is_nil(full.closed_at)
 
       {:ok, reloaded} = Ash.get(Issue, ctx.task.id)
-      assert reloaded.status == :open
+      assert reloaded.state == :queued
     end
 
-    test "reopening a non-closed task is rejected (FSM guard)", ctx do
-      assert {:error, {:invalid, _}} = Tools.task_reopen(ctx.coordinator, %{"id" => ctx.task.id})
+    test "reopening a non-closed task is rejected (transition refusal)", ctx do
+      assert {:error, {:invalid, message}} =
+               Tools.task_reopen(ctx.coordinator, %{"id" => ctx.task.id})
+
+      assert message =~ "Cannot reopen a ticket that is :backlog"
     end
 
     test "cannot reopen a task in another workspace (not-found)", ctx do
@@ -1774,23 +1786,23 @@ defmodule Arbiter.MCP.ToolsTest do
 
   describe "task_promote/2" do
     test "a coordinator promotes a task from Backlog to Ready", ctx do
-      assert ctx.task.refined == false
+      assert ctx.task.state == :backlog
 
       assert {:ok, data} = Tools.task_promote(ctx.coordinator, %{"id" => ctx.task.id})
-      assert data.refined == true
+      assert data.state == "queued"
 
       {:ok, reloaded} = Ash.get(Issue, ctx.task.id)
-      assert reloaded.refined == true
+      assert reloaded.state == :queued
     end
 
-    test "promoting an already-refined task is a no-op success", ctx do
+    test "promoting an already-queued task is a no-op success", ctx do
       {:ok, _} = Ash.update(ctx.task, %{}, action: :promote_to_ready)
-      assert ctx.task.refined == false
+      assert ctx.task.state == :backlog
       {:ok, task} = Ash.get(Issue, ctx.task.id)
-      assert task.refined == true
+      assert task.state == :queued
 
       assert {:ok, data} = Tools.task_promote(ctx.coordinator, %{"id" => ctx.task.id})
-      assert data.refined == true
+      assert data.state == "queued"
     end
 
     test "cannot promote a task in another workspace (not-found)", ctx do
@@ -1822,7 +1834,7 @@ defmodule Arbiter.MCP.ToolsTest do
                  "acceptance_waived" => "trivial config bump"
                })
 
-      assert data.refined == true
+      assert data.state == "queued"
       assert data.acceptance_waived == "trivial config bump"
 
       assert {:ok, shown} = Tools.task_show(ctx.coordinator, %{"id" => task.id})
@@ -1834,20 +1846,20 @@ defmodule Arbiter.MCP.ToolsTest do
     test "a coordinator demotes a task from Ready to Backlog", ctx do
       {:ok, _} = Ash.update(ctx.task, %{}, action: :promote_to_ready)
       {:ok, task} = Ash.get(Issue, ctx.task.id)
-      assert task.refined == true
+      assert task.state == :queued
 
       assert {:ok, data} = Tools.task_demote(ctx.coordinator, %{"id" => ctx.task.id})
-      assert data.refined == false
+      assert data.state == "backlog"
 
       {:ok, reloaded} = Ash.get(Issue, ctx.task.id)
-      assert reloaded.refined == false
+      assert reloaded.state == :backlog
     end
 
     test "demoting an already-backlog task is a no-op success", ctx do
-      assert ctx.task.refined == false
+      assert ctx.task.state == :backlog
 
       assert {:ok, data} = Tools.task_demote(ctx.coordinator, %{"id" => ctx.task.id})
-      assert data.refined == false
+      assert data.state == "backlog"
     end
 
     test "cannot demote a task in another workspace (not-found)", ctx do
@@ -1870,17 +1882,15 @@ defmodule Arbiter.MCP.ToolsTest do
       assert message =~ "live worker" or message =~ "worker"
     end
 
-    test "demotes an in_progress task with no live worker, resetting it to open", ctx do
-      {:ok, _} = Ash.update(ctx.task, %{}, action: :promote_to_ready)
-      {:ok, _} = Ash.update(ctx.task, %{status: :in_progress}, action: :update)
+    test "demotes an active task with no live worker back to backlog", ctx do
+      put_state!(ctx.task, :active)
 
-      assert {:ok, %{refined: false, status: "open"}} =
+      assert {:ok, %{state: "backlog"}} =
                Tools.task_demote(ctx.coordinator, %{"id" => ctx.task.id})
     end
 
-    test "refuses to demote an in_progress task with a live worker", ctx do
-      {:ok, _} = Ash.update(ctx.task, %{}, action: :promote_to_ready)
-      {:ok, _} = Ash.update(ctx.task, %{status: :in_progress}, action: :update)
+    test "refuses to demote an active task with a live worker", ctx do
+      put_state!(ctx.task, :active)
 
       via = Arbiter.Worker.Registry.via_tuple(ctx.task.id)
 
@@ -1892,10 +1902,10 @@ defmodule Arbiter.MCP.ToolsTest do
       assert {:error, {:invalid, message}} =
                Tools.task_demote(ctx.coordinator, %{"id" => ctx.task.id})
 
-      assert message =~ "in progress" or message =~ "in_progress"
+      assert message =~ "live worker"
     end
 
-    test "refuses to demote a task that is awaiting_verification", ctx do
+    test "refuses to demote a task that is verifying", ctx do
       {:ok, promoted} = Ash.update(ctx.task, %{}, action: :promote_to_ready)
       {:ok, started} = Ash.update(promoted, %{}, action: :start)
       {:ok, _} = Ash.update(started, %{}, action: :await_verification)
@@ -1903,7 +1913,7 @@ defmodule Arbiter.MCP.ToolsTest do
       assert {:error, {:invalid, message}} =
                Tools.task_demote(ctx.coordinator, %{"id" => ctx.task.id})
 
-      assert message =~ "awaiting verification" or message =~ "awaiting_verification"
+      assert message =~ "awaiting verification"
     end
   end
 
@@ -3346,7 +3356,7 @@ defmodule Arbiter.MCP.ToolsTest do
     end
 
     test "mints a fresh watchdog for a Merging ticket whose watchdog is gone", ctx do
-      {:ok, _} = Ash.update(ctx.task, %{status: :in_progress})
+      put_state!(ctx.task, :active)
 
       {:ok, wpid} =
         Worker.start(task_id: ctx.task.id, repo: "test/repo", workspace_id: ctx.ws.id)
@@ -3379,7 +3389,7 @@ defmodule Arbiter.MCP.ToolsTest do
     end
 
     test "refuses to put a second watchdog on a ticket that has one", ctx do
-      {:ok, _} = Ash.update(ctx.task, %{status: :in_progress})
+      put_state!(ctx.task, :active)
 
       lane =
         PullRequest.lane(adapter: StubMerger, interval_ms: 60_000, initial_delay_ms: 60_000)
@@ -3402,7 +3412,7 @@ defmodule Arbiter.MCP.ToolsTest do
       assert msg =~ ~r/no PR on record/i
 
       # A ticket whose PR is on the row but which is no longer Merging.
-      {:ok, _} = Ash.update(ctx.task, %{status: :in_progress})
+      put_state!(ctx.task, :active)
       {:ok, merging} = Issue.pr_opened(ctx.task.id, "!rw3")
       {:ok, _closed} = Ash.update(merging, %{}, action: :close)
 
@@ -3449,7 +3459,7 @@ defmodule Arbiter.MCP.ToolsTest do
       {:ok, task} =
         Ash.create(Issue, %{title: "stop teardown", workspace_id: ctx.ws.id})
 
-      {:ok, in_progress} = Ash.update(task, %{status: :in_progress}, action: :update)
+      active = put_state!(task, :active)
       {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ctx.ws.id)
       on_exit(fn -> Process.alive?(pid) && Worker.stop(task.id, :normal) end)
 
@@ -3457,8 +3467,8 @@ defmodule Arbiter.MCP.ToolsTest do
                Tools.worker_stop(ctx.coordinator, %{"task_id" => task.id})
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      refute reloaded.status == :closed
-      assert reloaded.status == in_progress.status
+      refute reloaded.state == :closed
+      assert reloaded.state == active.state
     end
 
     test "cannot stop a worker for a task in another workspace (not-found)", ctx do
@@ -4597,7 +4607,7 @@ defmodule Arbiter.MCP.ToolsTest do
       on_exit(fn -> Worker.stop(task.id, :normal) end)
     end
 
-    test "no_agent: true parks the task in_progress (explicit hand-off)", ctx do
+    test "no_agent: true moves the task to active (explicit hand-off)", ctx do
       {:ok, task} = ready_issue(ctx, "parked dispatch")
 
       assert {:ok, data} =
@@ -4607,7 +4617,7 @@ defmodule Arbiter.MCP.ToolsTest do
                  "no_agent" => true
                })
 
-      assert data.task.status == "in_progress"
+      assert data.task.state == "active"
       assert data.claude_started == false
       assert data.depth == ctx.coordinator.depth + 1
 
@@ -4664,7 +4674,7 @@ defmodule Arbiter.MCP.ToolsTest do
                  "force" => true
                })
 
-      assert data.task.status == "in_progress"
+      assert data.task.state == "active"
       on_exit(fn -> Worker.stop(task.id, :normal) end)
 
       [event] =
@@ -4943,7 +4953,7 @@ defmodule Arbiter.MCP.ToolsTest do
                  "force_quota" => true
                })
 
-      assert data.task.status == "in_progress"
+      assert data.task.state == "active"
       assert data.depth == ctx.coordinator.depth + 1
 
       on_exit(fn -> Worker.stop(task.id, :normal) end)
@@ -4963,7 +4973,7 @@ defmodule Arbiter.MCP.ToolsTest do
                  "force_quota_reason" => "critical path test via MCP"
                })
 
-      assert data.task.status == "in_progress"
+      assert data.task.state == "active"
 
       # Verify the audit event was created with the reason from the MCP argument
       events =
@@ -4992,7 +5002,7 @@ defmodule Arbiter.MCP.ToolsTest do
                  "force_quota" => false
                })
 
-      assert data.task.status == "in_progress"
+      assert data.task.state == "active"
 
       on_exit(fn -> Worker.stop(task.id, :normal) end)
     end
@@ -5211,19 +5221,6 @@ defmodule Arbiter.MCP.ToolsTest do
       assert Enum.any?(tasks, &(&1.id == ctx.task.id))
     end
 
-    test "filters by status", ctx do
-      # `:create` does not accept `:status` (and `:open` is the default anyway).
-      {:ok, _} = Ash.create(Issue, %{title: "another open task", workspace_id: ctx.ws.id})
-
-      assert {:ok, %{tasks: open_tasks}} = Tools.task_list(ctx.coordinator, %{"status" => "open"})
-      assert Enum.all?(open_tasks, &(&1.status == "open"))
-
-      assert {:ok, %{tasks: closed_tasks}} =
-               Tools.task_list(ctx.coordinator, %{"status" => "closed"})
-
-      assert Enum.all?(closed_tasks, &(&1.status == "closed"))
-    end
-
     test "filters by issue_type", ctx do
       {:ok, bug} =
         Ash.create(Issue, %{title: "a bug", workspace_id: ctx.ws.id, issue_type: :bug})
@@ -5250,11 +5247,11 @@ defmodule Arbiter.MCP.ToolsTest do
       refute Enum.any?(tasks, &(&1.id == foreign.id))
     end
 
-    test "rejects an invalid status value", ctx do
+    test "rejects an invalid state value", ctx do
       assert {:error, {:invalid, msg}} =
-               Tools.task_list(ctx.coordinator, %{"status" => "bogus"})
+               Tools.task_list(ctx.coordinator, %{"state" => "bogus"})
 
-      assert msg =~ "status"
+      assert msg =~ "state"
     end
 
     test "rejects an invalid issue_type value", ctx do

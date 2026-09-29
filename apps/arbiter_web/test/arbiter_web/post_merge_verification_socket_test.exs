@@ -111,7 +111,7 @@ defmodule ArbiterWeb.PostMergeVerificationSocketTest do
 
     assert created.status == 201
     assert created.body["verify_after_deploy"] == true
-    assert created.body["status"] == "open"
+    assert created.body["state"] == "backlog"
     id = created.body["id"]
     log("POST /api/issues -> 201 #{id} verify_after_deploy=true")
 
@@ -126,12 +126,12 @@ defmodule ArbiterWeb.PostMergeVerificationSocketTest do
     parked = request!(:get, base <> "/api/issues/" <> id)
 
     assert parked.status == 200
-    assert parked.body["status"] == "awaiting_verification"
+    assert parked.body["state"] == "verifying"
     assert is_binary(parked.body["awaiting_verification_at"])
     assert parked.body["verification_outcome"] == nil
 
     log(
-      "GET /api/issues/#{id} -> status=awaiting_verification " <>
+      "GET /api/issues/#{id} -> state=verifying " <>
         "awaiting_verification_at=#{parked.body["awaiting_verification_at"]}"
     )
 
@@ -161,15 +161,15 @@ defmodule ArbiterWeb.PostMergeVerificationSocketTest do
       })
 
     assert verified.status == 200
-    assert verified.body["status"] == "closed"
+    assert verified.body["state"] == "closed"
     assert verified.body["verification_outcome"] == "observed"
     assert verified.body["verification_evidence"] == evidence
-    log("POST /api/issues/#{id}/verify {observed} -> 200 status=closed")
+    log("POST /api/issues/#{id}/verify {observed} -> 200 state=closed")
 
     # ---- 5. the evidence is durable, not echoed --------------------------
     reread = request!(:get, base <> "/api/issues/" <> id)
 
-    assert reread.body["status"] == "closed"
+    assert reread.body["state"] == "closed"
     assert reread.body["verification_outcome"] == "observed"
     assert reread.body["verification_evidence"] == evidence
     assert is_binary(reread.body["closed_at"])
@@ -194,7 +194,7 @@ defmodule ArbiterWeb.PostMergeVerificationSocketTest do
 
     closed = request!(:get, base <> "/api/issues/" <> id)
 
-    assert closed.body["status"] == "closed"
+    assert closed.body["state"] == "closed"
     assert closed.body["awaiting_verification_at"] == nil
     assert Message.inbox("coordinator", workspace_id: ws.id) == []
     log("unflagged task #{id} closed on merge, coordinator inbox empty")

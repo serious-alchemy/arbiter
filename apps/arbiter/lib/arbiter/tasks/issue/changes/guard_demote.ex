@@ -1,88 +1,61 @@
 defmodule Arbiter.Tasks.Issue.Changes.GuardDemote do
   @moduledoc """
-  Enforces preconditions for the `:return_to_backlog` action.
+  Enforces the preconditions of the `demote` transition (`:demote` and the
+  `:return_to_backlog` legacy door) beyond the table itself.
 
-  A task can only be demoted (refined: true → false) if:
-  1. It has no live exclusive worker (task's own worker, fix pass, or conflict resolver)
-  2. Its status is :open or :in_progress with no live worker
+  A ticket can only be demoted back to `:backlog` if it has no live exclusive
+  worker (its own worker, a fix pass, or a conflict resolver): demoting under
+  a live run would orphan it. That is what lets bd-2098's case through — an
+  `:active` or `:merging` ticket whose worker already stopped is demoted in
+  one write, so Autopilot cannot re-grab it between two.
 
-  Demoting a task that is :in_progress with a live worker, :awaiting_verification,
-  or :closed is refused because those states represent active or completed work.
-
-  When demoting an :in_progress task with no live worker, atomically sets both
-  refined: false and status: open, preventing Autopilot from re-grabbing it
-  between the two updates.
-
-  Idempotent by construction — demoting an already-backlog task is a no-op.
+  A `:verifying` or `:closed` ticket is refused with its own message, since
+  those states are finished work. A ticket already in `:backlog` is left to
+  the transition (a no-op for `:return_to_backlog`, an error for `:demote`).
   """
 
   use Ash.Resource.Change
-
-  require Logger
 
   alias Arbiter.Worker.Registry, as: WorkerRegistry
   alias Ash.Changeset
 
   @impl true
   def change(changeset, _opts, _context) do
-    Changeset.before_action(changeset, fn cs ->
-      validate(cs)
-    end)
+    Changeset.before_action(changeset, &validate/1)
   end
 
   defp validate(cs) do
     task_id = cs.data.id
-    current_status = cs.data.status
-    current_refined = cs.data.refined
 
-    cond do
-      # If already false, it's a no-op
-      current_refined == false ->
+    case cs.data.state do
+      :backlog ->
         cs
 
-      # Refuse if status is :in_progress but only if there's a live worker
-      current_status == :in_progress ->
-        if has_live_workers?(task_id) do
-          Changeset.add_error(cs,
-            field: :refined,
-            message:
-              "Cannot demote a task that is in progress with a live worker. Stop the worker first " <>
-                "(`arb worker stop #{task_id}`) before demoting."
-          )
-        else
-          # No live worker: allow demotion
-          # The status will be changed to open by a separate change in the action
-          cs
-        end
-
-      # Refuse if status is :awaiting_verification
-      current_status == :awaiting_verification ->
+      :verifying ->
         Changeset.add_error(cs,
-          field: :refined,
+          field: :state,
           message:
             "Cannot demote a task that is awaiting verification. " <>
               "Record a verification outcome first."
         )
 
-      # Refuse if status is :closed
-      current_status == :closed ->
+      :closed ->
         Changeset.add_error(cs,
-          field: :refined,
+          field: :state,
           message: "Cannot demote a closed task. Only undispatched or open tasks can be demoted."
         )
 
-      # Check for live workers in other status
-      has_live_workers?(task_id) ->
-        Changeset.add_error(cs,
-          field: :refined,
-          message:
-            "Cannot demote a task with a live worker. Stop the worker first " <>
-              "(`arb worker stop #{task_id}`) before demoting."
-        )
-
-      # All checks passed
-      true ->
-        cs
+      _queued_or_at_work ->
+        if has_live_workers?(task_id) do
+          Changeset.add_error(cs,
+            field: :state,
+            message:
+              "Cannot demote a task with a live worker. Stop the worker first " <>
+                "(`arb worker stop #{task_id}`) before demoting."
+          )
+        else
+          cs
+        end
     end
   end
 

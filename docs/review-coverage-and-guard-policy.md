@@ -91,7 +91,7 @@ entire agent spend spent on the gate misfiring.
 ### 1.1 The two root causes, stated precisely
 
 **RC1 — "the reviewed SHA" is a single value.** `issues.last_reviewed_sha`
-(`apps/arbiter/lib/arbiter/tasks/issue.ex:1683` (`last_reviewed_sha`)) is one
+(`apps/arbiter/lib/arbiter/tasks/issue.ex:1590` (`last_reviewed_sha`)) is one
 nullable string, written by whichever of four unrelated writers ran last. There
 is no record of *which* commits an approval covered, so every consumer
 reconstructs one — badly, and differently. `Arbiter.Mergers.ReviewedSha` invents
@@ -200,7 +200,7 @@ inventory cannot silently rot.
 | # | Guard | Anchor | Protects against | Misfire mode | On failure | Patches |
 |---|---|---|---|---|---|---|
 | C1 | bd-ofql8k commit gate (`:uncommitted` / `:no_commits` / `:secret_in_commit`) | `apps/arbiter/lib/arbiter/worker.ex:4066` (`commit_gate`) | A worker printing `arb done` over uncommitted or absent work; committed agent-config bearer tokens | Non-branch worktrees would false-positive, hence the branch check; git errors | **Fails open** on git error; otherwise diverts to a nudge relaunch | 3 |
-| C2 | Rejection parking | `apps/arbiter/lib/arbiter/worker.ex:6110` (`park_rejected`) | — | Since P9, `park_rejected/4` takes a park reason: with one it stamps `issues.review_park_reason` and pages once (since bd-1uu19b the run itself finishes `:failed`, its cause on the ticket); without one (a genuine REQUEST_CHANGES only) it is the pre-P9 plain failed run via `apps/arbiter/lib/arbiter/worker.ex:6172` (`fail_reason_for`) | `fail_now` | 2 |
+| C2 | Rejection parking | `apps/arbiter/lib/arbiter/worker.ex:6110` (`park_rejected`) | — | Since P9, `park_rejected/4` takes a park reason: with one it stamps the ticket's attention cause and pages once (since bd-1uu19b the run itself finishes `:failed`, its cause on the ticket); without one (a genuine REQUEST_CHANGES only) it is the pre-P9 plain failed run via `apps/arbiter/lib/arbiter/worker.ex:6172` (`fail_reason_for`) | `fail_now` | 2 |
 | C3 | Fix-round budget and non-convergence digest | `apps/arbiter/lib/arbiter/worker.ex:6250` (`maybe_dispatch_fix_round`) | bd-a9zb7w: a rejection nobody scheduled an implementer for | Identical-findings digest stops the loop — the one guard already shaped the way §5 wants | One escalation | 2 |
 | C4 | `{:awaiting_review_timeout, N}` → auto-resume, not a failed run | `apps/arbiter/lib/arbiter/worker.ex:1695` (`awaiting_review_timeout`) | bd-8tjcms/#1511: a resumable timeout recorded as `:failed` | — | Parked for auto-resume: since bd-741sid the ticket's Watchdog has no run to fail, and since bd-1uu19b there is no `review_not_started` run outcome | 1 |
 
@@ -221,7 +221,7 @@ inventory cannot silently rot.
 | P5 | Zombie-idle unblocking | `apps/arbiter/lib/arbiter/workflows/pr_patrol.ex:873` (`still_blocking?`) | lt-c9td4r: a crashed dispatch blackholing every future trigger | A genuinely-idle healthy worker read as a zombie | Allow re-file | 1 |
 | P6 | Answered-thread rejection | `apps/arbiter/lib/arbiter/workflows/pr_patrol.ex:720` (`reject_answered_threads`) | bd-45x4yo: re-filing an already-answered thread (5 tasks, ~$8–11) | A thread we answered but that still needs work is dropped | Skip | 1 |
 | P7 | Author allowlist | `apps/arbiter/lib/arbiter/workflows/pr_patrol.ex:705` (`author_allowed?`) | Patrolling third-party PRs | — | Skip | 1 |
-| P8 | ReviewGate branch hold | `apps/arbiter/lib/arbiter/workflows/pr_patrol.ex:386` (`review_gate_holds?`), decided by `apps/arbiter/lib/arbiter/reviews/gate_activity.ex:98` (`engaged`) | bd-bq8c8a: patrol's fix worker pushed to a branch whose task was still inside the ReviewGate; the gate's round-1 implementer then committed a sibling, its push was rejected `:diverged`, and the task parked `head_not_pushed` | A gate that never converges holds the PR's follow-ups for as long as it runs (the threads stay unresolved, so nothing is lost — the first tick after it converges files them) | **Fail closed** — holds on `:awaiting_review_gate`, a running round, `:review_parked`, *and* on a failed read (`:undeterminable`), because this guard authorises *filing* (§5.2). Skip this tick; nothing written, nothing consumed | 1 |
+| P8 | ReviewGate branch hold | `apps/arbiter/lib/arbiter/workflows/pr_patrol.ex:386` (`review_gate_holds?`), decided by `apps/arbiter/lib/arbiter/reviews/gate_activity.ex:98` (`engaged`) | bd-bq8c8a: patrol's fix worker pushed to a branch whose task was still inside the ReviewGate; the gate's round-1 implementer then committed a sibling, its push was rejected `:diverged`, and the task parked `head_not_pushed` | A gate that never converges holds the PR's follow-ups for as long as it runs (the threads stay unresolved, so nothing is lost — the first tick after it converges files them) | **Fail closed** — holds on `:awaiting_review_gate`, a running round, `:ticket_review_parked`, *and* on a failed read (`:undeterminable`), because this guard authorises *filing* (§5.2). Skip this tick; nothing written, nothing consumed | 1 |
 
 ### 2.6 What the inventory shows
 
@@ -568,7 +568,7 @@ The fix keeps W14 in class E and makes its terminal real:
 * the blocking pass is monitored, so the retry fires on its completion rather
   than only on a tick;
 * both terminal arms — the deferral budget running out, and a blocker that is
-  already dead — **park** the task (`review_park_reason: resume_blocked`) and
+  already dead — **park** the task (attention cause `resume_blocked`) and
   page once through the park claim, which is class E's "parked and still
   watched" terminal and invariant **I2**: the run is not re-failed and nothing
   is merged.
@@ -602,7 +602,8 @@ parsing problem. Class C removes it without touching the parser.
 verdict the author fails the run on. `Arbiter.Worker.park_rejected/4` wrote
 `Run.status = :review_parked` (a terminal non-failure); since bd-1uu19b's one run
 vocabulary the run finishes `:failed` and the park is the ticket's — it stamps
-`issues.review_park_reason` via `Arbiter.Tasks.ReviewPark`, and
+the ticket's `attention_cause` via `Arbiter.Tasks.ReviewPark` (bd-8if9zt; the
+`review_park_reason` column it used to stamp went in bd-36ytcl), and
 pages the coordinator **once** — the park row itself is the episode claim, so a
 re-report of the same reason is silent. The four shapes above are replayed one
 test each in
@@ -662,7 +663,8 @@ discarded:
 
 1. If the gate is gone, or has had nothing in flight past its budget, the
    author parks within one liveness interval (or one pass budget). The task
-   then carries `review_park_reason` and the coordinator is paged once.
+   then carries the park as its attention cause and the coordinator is paged
+   once.
 2. Run `arb worker resume <task>` (MCP `worker_resume`). The branch, its
    commits and every recorded review round are preserved. The resumed worker
    continues in the same worktree, and its `arb done` starts a fresh gate,
@@ -687,7 +689,7 @@ class E's terminal state; re-issuing the action forever is not.
 
 **I2 — A guard never strands approved work as a failed run.** When a guard gives
 up, the terminal state is **parked + escalated once**, with the park named on
-the ticket (`review_park_reason`). Since bd-1uu19b a run speaks only the one run
+the ticket (its `attention_cause`). Since bd-1uu19b a run speaks only the one run
 vocabulary (`Arbiter.Workers.RunState`): a parked run finishes `:failed`, and
 what tells a guard's park from work that actually failed is the ticket's park
 reason and the run's `failure_reason`, not a run status of its own.

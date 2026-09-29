@@ -23,6 +23,8 @@ defmodule Arbiter.Worker.WatchdogFailureTest do
 
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures, only: [put_state!: 2]
+
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Messages.Message
   alias Arbiter.Worker
@@ -54,7 +56,7 @@ defmodule Arbiter.Worker.WatchdogFailureTest do
         issue_type: :feature
       })
 
-    {:ok, task} = Ash.update(task, %{status: :in_progress})
+    task = put_state!(task, :active)
     task
   end
 

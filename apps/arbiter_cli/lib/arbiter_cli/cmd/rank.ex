@@ -95,7 +95,7 @@ defmodule ArbiterCli.Cmd.Rank do
            Client.get("/api/issues", workspace_id: workspace_id, priority: priority) do
       ordered =
         issues
-        |> Enum.reject(&(&1["status"] == "closed"))
+        |> Enum.reject(&(&1["state"] == "closed"))
         |> Enum.sort_by(&{&1["rank"], &1["created_at"]})
 
       position = Enum.find_index(ordered, &(&1["id"] == issue["id"])) || 0

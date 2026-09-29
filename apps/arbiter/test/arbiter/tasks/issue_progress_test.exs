@@ -70,10 +70,10 @@ defmodule Arbiter.Tasks.IssueProgressTest do
       Enum.each([c1, c2], &child_of(parent, &1))
 
       {:ok, _} = Ash.update(c1, %{}, action: :close)
-      assert Ash.get!(Issue, parent.id).status == :open
+      assert Ash.get!(Issue, parent.id).state == :backlog
 
       {:ok, _} = Ash.update(c2, %{}, action: :close)
-      assert Ash.get!(Issue, parent.id).status == :closed
+      assert Ash.get!(Issue, parent.id).state == :closed
     end
 
     test "a parent without auto_close stays open even when all children close", %{ws: ws} do
@@ -82,14 +82,14 @@ defmodule Arbiter.Tasks.IssueProgressTest do
       child_of(parent, c1)
 
       {:ok, _} = Ash.update(c1, %{}, action: :close)
-      assert Ash.get!(Issue, parent.id).status == :open
+      assert Ash.get!(Issue, parent.id).state == :backlog
     end
 
     test "auto_close with no children never closes the parent", %{ws: ws} do
       {:ok, parent} =
         Ash.create(Issue, %{title: "childless", auto_close: true, workspace_id: ws.id})
 
-      assert Issue.maybe_auto_close(parent).status == :open
+      assert Issue.maybe_auto_close(parent).state == :backlog
     end
 
     test "closing a child cascades up a chain of auto_close ancestors", %{ws: ws} do
@@ -104,8 +104,8 @@ defmodule Arbiter.Tasks.IssueProgressTest do
 
       {:ok, _} = Ash.update(child, %{}, action: :close)
 
-      assert Ash.get!(Issue, parent.id).status == :closed
-      assert Ash.get!(Issue, grandparent.id).status == :closed
+      assert Ash.get!(Issue, parent.id).state == :closed
+      assert Ash.get!(Issue, grandparent.id).state == :closed
     end
 
     test "a child with two parents rolls up into each", %{ws: ws} do
@@ -119,9 +119,9 @@ defmodule Arbiter.Tasks.IssueProgressTest do
       {:ok, _} = Ash.update(child, %{}, action: :close)
 
       # p1 auto-closes; p2 (no auto_close) stays open but still counts the child.
-      assert Ash.get!(Issue, p1.id).status == :closed
+      assert Ash.get!(Issue, p1.id).state == :closed
       p2 = Ash.load!(Ash.get!(Issue, p2.id), [:child_total, :child_closed])
-      assert p2.status == :open
+      assert p2.state == :backlog
       assert p2.child_total == 1
       assert p2.child_closed == 1
     end

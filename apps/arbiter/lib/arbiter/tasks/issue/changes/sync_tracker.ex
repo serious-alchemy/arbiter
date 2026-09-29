@@ -1,17 +1,19 @@
 defmodule Arbiter.Tasks.Issue.Changes.SyncTracker do
   @moduledoc """
-  After-action hook for the status-changing actions (`:update`, `:close`,
-  `:reopen`): propagate the new task status to the linked external tracker.
+  After-action hook for the transitions an upstream tracker cares about
+  (`:start`, `:requeue`, `:close`, `:reopen`): propagate the ticket's new
+  state to the linked external tracker, as the tracker status it maps to
+  (`Arbiter.Trackers.Tracker.status_for_state/1`).
 
   Fires only when **all** of these hold:
 
-    * the status actually changed (old != new),
+    * the tracker status actually changed (old != new),
     * the task has a tracker (`tracker_type != :none`), and
     * the task carries a `tracker_ref`.
 
   When it fires, it seeds the per-process tracker config from the task's
   workspace (`Arbiter.Trackers.prepare/2`) and calls the resolved adapter's
-  `transition/2`, mapping the task status to the external state via the
+  `transition/2`, mapping that tracker status to the external state via the
   adapter's own `status_map` (e.g. GitHub `:closed -> "closed"`,
   `:open`/`:in_progress -> "open"`).
 
@@ -39,10 +41,10 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTracker do
 
   ## Forced sync (`force: true`)
 
-  `:sync_upstream_close` (bd-dqjd2f) makes no local status change — it exists
+  `:sync_upstream_close` (bd-dqjd2f) makes no local state change — it exists
   precisely to push a close to the tracker for a task that's already `:closed`
-  locally. Passing `force: true` skips the `old_status == issue.status` no-op
-  guard (which would otherwise always skip a status-unchanged sync) and, when
+  locally. Passing `force: true` skips the unchanged-status no-op guard (which
+  would otherwise always skip a state-unchanged sync) and, when
   the task is closed with a tracker ref, transitions + verifies the upstream
   close unconditionally.
   """
@@ -54,6 +56,7 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTracker do
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Trackers
   alias Arbiter.Trackers.Sync
+  alias Arbiter.Trackers.Tracker
 
   @impl true
   def change(changeset, opts, _context) do
@@ -64,7 +67,7 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTracker do
         maybe_force_sync(issue)
       else
         close_upstream = Ash.Changeset.get_argument(cs, :close_upstream)
-        maybe_sync(cs.data.status, issue, cs.action.name, close_upstream)
+        maybe_sync(Tracker.status_for_state(cs.data.state), issue, cs.action.name, close_upstream)
       end
 
       {:ok, issue}
@@ -73,7 +76,7 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTracker do
 
   defp maybe_force_sync(issue) do
     cond do
-      issue.status != :closed -> :ok
+      issue.state != :closed -> :ok
       issue.tracker_type == :none -> :ok
       blank?(issue.tracker_ref) -> :ok
       issue.review_only == true -> :ok
@@ -83,7 +86,8 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTracker do
 
   defp maybe_sync(old_status, issue, action_name, close_upstream) do
     cond do
-      old_status == issue.status -> :ok
+      is_nil(Tracker.status_for_state(issue.state)) -> :ok
+      old_status == Tracker.status_for_state(issue.state) -> :ok
       issue.tracker_type == :none -> :ok
       blank?(issue.tracker_ref) -> :ok
       action_name == :close and not close_upstream -> :ok
@@ -109,13 +113,13 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTracker do
     # Route through Sync so a genuine failure is loud + raises an escalation
     # (the swallow-on-error that hid AX-17911 is gone). A benign "tracker
     # doesn't model this status" is still skipped quietly.
-    Sync.transition_event(issue, issue.status)
+    Sync.transition_event(issue, Tracker.status_for_state(issue.state))
 
     # For close transitions, verify the upstream issue is actually closed —
     # a silent no-op or a stale server can leave it open even after :ok.
     # Shared with `Arbiter.Tasks.Verification`'s merge-time close so both
     # close paths retry identically (bd-9so315).
-    if issue.status == :closed do
+    if issue.state == :closed do
       Sync.verify_closed(issue)
     end
   end

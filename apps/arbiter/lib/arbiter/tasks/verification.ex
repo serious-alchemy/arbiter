@@ -1,7 +1,7 @@
 defmodule Arbiter.Tasks.Verification do
   @moduledoc """
-  Post-merge verification (bd-9so315) — the `:awaiting_verification` half of the
-  task FSM.
+  Post-merge verification (bd-9so315) — the `:verifying` half of the ticket
+  lifecycle.
 
   ## Why this exists
 
@@ -15,9 +15,10 @@ defmodule Arbiter.Tasks.Verification do
   would have caught every one of them.
 
   So a task flagged `verify_after_deploy: true` does not close on merge. It
-  parks at `:awaiting_verification`, the coordinator is notified (with whether
-  the running server predates the merge, i.e. whether a restart is needed
-  first), and the task leaves the state only through a recorded verdict:
+  parks at `:verifying` (attention cause `:awaiting_verification`), the
+  coordinator is notified (with whether the running server predates the merge,
+  i.e. whether a restart is needed first), and the task leaves the state only
+  through a recorded verdict:
 
       Verification.observed(task, "restarted; /api/doctor now reports 3 repos")
       Verification.failed(task, "after restart capture_source still reads headers")
@@ -108,8 +109,8 @@ defmodule Arbiter.Tasks.Verification do
 
   @doc """
   The single merge-success funnel: close the task, or — when it carries
-  `verify_after_deploy: true` — park it at `:awaiting_verification` and notify
-  the coordinator exactly once.
+  `verify_after_deploy: true` — park it at `:verifying` and notify the
+  coordinator exactly once.
 
   Every path that finalizes a merged PR routes through here — the merge queue's
   own merge, `MergedPRFinalizer`'s sweep for a PR merged outside the queue, and
@@ -127,7 +128,9 @@ defmodule Arbiter.Tasks.Verification do
     * `:merged_at` (default now) — when the merge landed, compared against the
       running node's boot time to say whether a restart is needed first.
 
-  Returns `{:ok, :closed | :awaiting_verification, issue}` or `{:error, reason}`.
+  Returns `{:ok, :closed | :awaiting_verification, issue}` or `{:error, reason}`
+  — `:awaiting_verification` names the outcome (the ticket's attention cause);
+  the ticket itself is then `state: :verifying`.
   """
   @spec finalize_merged(Issue.t(), keyword()) ::
           {:ok, :closed | :awaiting_verification, Issue.t()} | {:error, term()}
@@ -206,7 +209,7 @@ defmodule Arbiter.Tasks.Verification do
     end
   end
 
-  defp ensure_awaiting(%Issue{status: :awaiting_verification}), do: :ok
+  defp ensure_awaiting(%Issue{state: :verifying}), do: :ok
   defp ensure_awaiting(%Issue{}), do: {:error, :not_awaiting_verification}
 
   defp validate_evidence(evidence) when is_binary(evidence) do

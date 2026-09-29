@@ -7,6 +7,8 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
 
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures, only: [put_state!: 2]
+
   alias Arbiter.Agents
   alias Arbiter.Agents.CredentialWatchdog
   alias Arbiter.Messages.Message
@@ -158,7 +160,7 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
           issue_type: :feature
         })
 
-      {:ok, task} = Ash.update(task, %{status: :in_progress})
+      task = put_state!(task, :active)
 
       branch = "task-#{task.id}"
       :ok = seed_feature_branch(repo, branch)
@@ -279,7 +281,7 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
           issue_type: :feature
         })
 
-      {:ok, task} = Ash.update(task, %{status: :in_progress})
+      task = put_state!(task, :active)
 
       branch = "task-#{task.id}"
       :ok = seed_feature_branch(repo, branch)
@@ -380,7 +382,7 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
           issue_type: :feature
         })
 
-      {:ok, task} = Ash.update(task, %{status: :in_progress})
+      task = put_state!(task, :active)
 
       branch = "task-#{task.id}"
       :ok = seed_feature_branch(repo, branch)
@@ -482,7 +484,7 @@ defmodule Arbiter.Worker.RevisionProviderInheritanceTest do
           issue_type: :feature
         })
 
-      {:ok, task} = Ash.update(task, %{status: :in_progress})
+      task = put_state!(task, :active)
 
       branch = "task-#{task.id}"
       :ok = seed_feature_branch(repo, branch)

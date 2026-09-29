@@ -6,8 +6,8 @@ defmodule ArbiterCli.Cmd.ListTest do
   test "prints one line per issue" do
     stub_get("/api/issues", %{
       "data" => [
-        %{"id" => "a", "status" => "open", "priority" => 2, "title" => "first"},
-        %{"id" => "b", "status" => "closed", "priority" => 1, "title" => "second"}
+        %{"id" => "a", "state" => "queued", "priority" => 2, "title" => "first"},
+        %{"id" => "b", "state" => "closed", "priority" => 1, "title" => "second"}
       ]
     })
 
@@ -15,7 +15,7 @@ defmodule ArbiterCli.Cmd.ListTest do
     assert exit_code == 0
     assert out =~ "first"
     assert out =~ "second"
-    assert out =~ "[open]"
+    assert out =~ "[queued]"
     assert out =~ "[closed]"
   end
 
@@ -27,10 +27,26 @@ defmodule ArbiterCli.Cmd.ListTest do
   end
 
   test "--json emits {\"data\": [...]}" do
-    stub_get("/api/issues", %{"data" => [%{"id" => "a", "status" => "open"}]})
+    stub_get("/api/issues", %{"data" => [%{"id" => "a", "state" => "queued"}]})
     {out, _err, exit_code} = capture(fn -> List.run(["--json"]) end)
     assert exit_code == 0
     assert {:ok, %{"data" => [_]}} = Jason.decode(String.trim(out))
+  end
+
+  # bd-36ytcl: the ticket's lifecycle is `state`; the legacy `status` filter
+  # is gone from `GET /api/issues`.
+  test "--state is forwarded as the state filter" do
+    stub_routes([
+      {{"get", "/api/issues"},
+       fn conn ->
+         assert conn.query_params["state"] == "queued"
+         refute Map.has_key?(conn.query_params, "status")
+         conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"data" => []})
+       end}
+    ])
+
+    {_out, _err, exit_code} = capture(fn -> List.run(["--state", "queued"]) end)
+    assert exit_code == 0
   end
 
   # bd-1ozks5: --assignee used to filter the local column, which is gone —
@@ -61,7 +77,7 @@ defmodule ArbiterCli.Cmd.ListTest do
             "data" => [
               %{
                 "id" => "bd-claimed",
-                "status" => "in_progress",
+                "state" => "active",
                 "priority" => 2,
                 "title" => "Already a task",
                 "tracker_type" => "github",
@@ -111,7 +127,7 @@ defmodule ArbiterCli.Cmd.ListTest do
             "data" => [
               %{
                 "id" => "bd-local",
-                "status" => "open",
+                "state" => "queued",
                 "priority" => 1,
                 "title" => "Local-only"
               }
@@ -135,7 +151,7 @@ defmodule ArbiterCli.Cmd.ListTest do
             "data" => [
               %{
                 "id" => "bd-1",
-                "status" => "open",
+                "state" => "queued",
                 "title" => "Local",
                 "tracker_type" => "github",
                 "tracker_ref" => "1"
@@ -164,7 +180,7 @@ defmodule ArbiterCli.Cmd.ListTest do
 
     test "without --tracker flag, behaves exactly as today (no tracker call)" do
       stub_get("/api/issues", %{
-        "data" => [%{"id" => "a", "status" => "open", "title" => "x"}]
+        "data" => [%{"id" => "a", "state" => "queued", "title" => "x"}]
       })
 
       {out, _err, code} = capture(fn -> List.run([]) end)

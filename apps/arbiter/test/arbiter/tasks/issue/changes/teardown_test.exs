@@ -19,6 +19,8 @@ defmodule Arbiter.Tasks.Issue.Changes.TeardownTest do
   alias Arbiter.Worker.ClaudeSession
   alias Arbiter.Worker.Worktree
 
+  import Arbiter.LifecycleFixtures, only: [put_state!: 2]
+
   setup do
     {:ok, ws} = Ash.create(Workspace, %{name: "teardown-ws", prefix: "td"})
     {:ok, ws: ws}
@@ -27,7 +29,7 @@ defmodule Arbiter.Tasks.Issue.Changes.TeardownTest do
   describe "StopWorker after_action" do
     test "stops the worker registered for the task when :close fires", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "with worker", workspace_id: ws.id})
-      {:ok, _} = Ash.update(task, %{status: :in_progress})
+      _ = put_state!(task, :active)
 
       {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "test/repo")
       assert Worker.whereis(task.id) == worker_pid
@@ -45,7 +47,7 @@ defmodule Arbiter.Tasks.Issue.Changes.TeardownTest do
 
       assert Worker.whereis(task.id) == nil
       assert {:ok, closed} = Ash.update(task, %{}, action: :close)
-      assert closed.status == :closed
+      assert closed.state == :closed
     end
 
     # bd-801xs5: a `:fixpass` sub-worker registers under `<task_id>:fixpass`,
@@ -53,7 +55,7 @@ defmodule Arbiter.Tasks.Issue.Changes.TeardownTest do
     # lookup never finds it and it leaks past :close.
     test "stops a :fixpass sub-worker registered under a synthetic key", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "with fixpass", workspace_id: ws.id})
-      {:ok, _} = Ash.update(task, %{status: :in_progress})
+      _ = put_state!(task, :active)
 
       {:ok, fixpass_pid} =
         Worker.start(task_id: task.id, registry_key: task.id <> ":fixpass", repo: "test/repo")
@@ -72,7 +74,7 @@ defmodule Arbiter.Tasks.Issue.Changes.TeardownTest do
     # registry_key differs.
     test "stops a #review sub-worker registered under a synthetic key", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "with review", workspace_id: ws.id})
-      {:ok, _} = Ash.update(task, %{status: :in_progress})
+      _ = put_state!(task, :active)
 
       {:ok, review_pid} = Worker.start(task_id: task.id <> "#review", repo: "test/repo")
 
@@ -89,7 +91,7 @@ defmodule Arbiter.Tasks.Issue.Changes.TeardownTest do
     # unrelated worker swept up.
     test "does not stop a worker for an unrelated task whose id is a prefix", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "closing", workspace_id: ws.id})
-      {:ok, _} = Ash.update(task, %{status: :in_progress})
+      _ = put_state!(task, :active)
 
       unrelated_id = task.id <> "x"
       {:ok, unrelated_pid} = Worker.start(task_id: unrelated_id, repo: "test/repo")
@@ -113,7 +115,7 @@ defmodule Arbiter.Tasks.Issue.Changes.TeardownTest do
       {:ok, wt_path} = Worktree.create(repo, branch, "main")
       assert File.dir?(wt_path)
 
-      {:ok, _} = Ash.update(task, %{status: :in_progress})
+      _ = put_state!(task, :active)
       {:ok, _closed} = Ash.update(task, %{}, action: :close)
 
       refute File.dir?(wt_path)
@@ -126,7 +128,7 @@ defmodule Arbiter.Tasks.Issue.Changes.TeardownTest do
       refute File.dir?(Worktree.worktree_path(branch))
 
       assert {:ok, closed} = Ash.update(task, %{}, action: :close)
-      assert closed.status == :closed
+      assert closed.state == :closed
     end
 
     test "preserves a dirty worktree and lets :close succeed", %{ws: ws, repo: repo} do
@@ -136,9 +138,9 @@ defmodule Arbiter.Tasks.Issue.Changes.TeardownTest do
       {:ok, wt_path} = Worktree.create(repo, branch, "main")
       File.write!(Path.join(wt_path, "scratch.txt"), "wip\n")
 
-      {:ok, _} = Ash.update(task, %{status: :in_progress})
+      _ = put_state!(task, :active)
       assert {:ok, closed} = Ash.update(task, %{}, action: :close)
-      assert closed.status == :closed
+      assert closed.state == :closed
 
       # Uncommitted work is preserved for operator inspection.
       assert File.dir?(wt_path)
@@ -156,7 +158,7 @@ defmodule Arbiter.Tasks.Issue.Changes.TeardownTest do
       {:ok, inspect_path} = Worktree.create_detached(repo, Worktree.inspect_name(branch), "main")
       assert inspect_path == Worktree.inspect_path(branch)
 
-      {:ok, _} = Ash.update(task, %{status: :in_progress})
+      _ = put_state!(task, :active)
       {:ok, _closed} = Ash.update(task, %{}, action: :close)
 
       refute File.dir?(inspect_path)
@@ -173,9 +175,9 @@ defmodule Arbiter.Tasks.Issue.Changes.TeardownTest do
       {:ok, inspect_path} = Worktree.create_detached(repo, Worktree.inspect_name(branch), "main")
       File.write!(Path.join(inspect_path, "scratch.txt"), "audit scratch\n")
 
-      {:ok, _} = Ash.update(task, %{status: :in_progress})
+      _ = put_state!(task, :active)
       assert {:ok, closed} = Ash.update(task, %{}, action: :close)
-      assert closed.status == :closed
+      assert closed.state == :closed
 
       refute File.dir?(inspect_path)
     end
@@ -191,7 +193,7 @@ defmodule Arbiter.Tasks.Issue.Changes.TeardownTest do
       File.write!(Path.join(wt_path, "scratch.txt"), "wip\n")
       {:ok, inspect_path} = Worktree.create_detached(repo, Worktree.inspect_name(branch), "main")
 
-      {:ok, _} = Ash.update(task, %{status: :in_progress})
+      _ = put_state!(task, :active)
       assert {:ok, _closed} = Ash.update(task, %{}, action: :close)
 
       assert File.exists?(Path.join(wt_path, "scratch.txt"))
@@ -265,12 +267,12 @@ defmodule Arbiter.Tasks.Issue.Changes.TeardownTest do
 
       {:ok, stubborn} = StubbornWorker.start(task.id <> ":fixpass", 60_000)
 
-      {:ok, _} = Ash.update(task, %{status: :in_progress})
+      _ = put_state!(task, :active)
 
       log =
         ExUnit.CaptureLog.capture_log(fn ->
           assert {:ok, closed} = Ash.update(task, %{}, action: :close)
-          assert closed.status == :closed
+          assert closed.state == :closed
         end)
 
       # The sub-worker is still alive, so the worktree must survive.
@@ -295,7 +297,7 @@ defmodule Arbiter.Tasks.Issue.Changes.TeardownTest do
 
       {:ok, stubborn} = StubbornWorker.start(task.id <> ":fixpass", 300)
 
-      {:ok, _} = Ash.update(task, %{status: :in_progress})
+      _ = put_state!(task, :active)
       assert {:ok, _closed} = Ash.update(task, %{}, action: :close)
 
       refute Process.alive?(stubborn)
@@ -331,7 +333,7 @@ defmodule Arbiter.Tasks.Issue.Changes.TeardownTest do
       {:os_pid, agent_os_pid} = Port.info(port, :os_pid)
       child_os_pid = await_child_os_pid(agent_os_pid)
 
-      {:ok, _} = Ash.update(task, %{status: :in_progress})
+      _ = put_state!(task, :active)
       {:ok, _closed} = Ash.update(task, %{}, action: :close)
 
       refute Process.alive?(fixpass_pid)
@@ -356,7 +358,7 @@ defmodule Arbiter.Tasks.Issue.Changes.TeardownTest do
 
       {:ok, unrelated} = Worker.start(task_id: task.id <> "x", repo: "test/repo")
 
-      {:ok, _} = Ash.update(task, %{status: :in_progress})
+      _ = put_state!(task, :active)
       assert {:ok, _closed} = Ash.update(task, %{}, action: :close)
 
       refute File.dir?(wt_path)

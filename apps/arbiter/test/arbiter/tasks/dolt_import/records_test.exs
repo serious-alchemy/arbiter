@@ -53,7 +53,7 @@ defmodule Arbiter.Tasks.DoltImport.RecordsTest do
     assert %Issue{state: :closed, close_reason: :completed} = Ash.get!(Issue, "dlt-done1")
   end
 
-  test "status_sync/2 carries the lifecycle state with the refreshed status",
+  test "status_sync/2 moves the lifecycle state to the one the refreshed Dolt status implies",
        %{ws: ws, now: now} do
     {1, _} =
       Repo.insert_all("issues", [
@@ -70,9 +70,21 @@ defmodule Arbiter.Tasks.DoltImport.RecordsTest do
       Ash.get!(Issue, "dlt-sync1")
     end
 
-    assert %Issue{status: :closed, state: :closed, close_reason: :completed} = sync.("closed")
-    assert %Issue{status: :in_progress, state: :active, close_reason: nil} = sync.("in_progress")
-    assert %Issue{status: :open, state: :backlog, close_reason: nil} = sync.("open")
+    assert %Issue{state: :closed, close_reason: :completed} = sync.("closed")
+    assert %Issue{state: :active, close_reason: nil} = sync.("in_progress")
+    assert %Issue{state: :backlog, close_reason: nil} = sync.("open")
+  end
+
+  test "status_sync/2 leaves a queued ticket queued and a ticket already in step untouched",
+       %{ws: ws, now: now} do
+    {:ok, queued} =
+      Issue
+      |> Ash.create!(%{title: "q", workspace_id: ws.id, acceptance: "- works"})
+      |> Ash.update(%{}, action: :promote)
+
+    {sql, params} = Mapper.status_sync(%{"id" => queued.id, "status" => "open"}, now)
+    assert %{num_rows: 0} = Repo.query!(sql, params)
+    assert Ash.get!(Issue, queued.id).state == :queued
   end
 
   test "dependency_record/3 rows bulk-inserted around Ash are fetchable by id",

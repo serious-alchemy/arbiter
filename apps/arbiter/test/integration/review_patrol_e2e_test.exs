@@ -334,7 +334,7 @@ defmodule Arbiter.Integration.ReviewPatrolE2ETest do
       end)
 
       assert :ok = ReviewPatrol.tick(name)
-      assert reload(eng).status == :closed
+      assert reload(eng).state == :closed
       assert ReviewPatrol.state(name).last_terminated == [eng.id]
 
       # ── Final assertion: ZERO Jira tracker HTTP calls in the entire lifecycle
@@ -532,19 +532,19 @@ defmodule Arbiter.Integration.ReviewPatrolE2ETest do
 
       # Tick 1: PR merged → engagement closed.
       assert :ok = ReviewPatrol.tick(name)
-      assert reload(eng).status == :closed
+      assert reload(eng).state == :closed
       assert ReviewPatrol.state(name).last_terminated == [eng.id]
 
       # Tick 2: engagement is already :closed — the open-engagements query
-      # (status != :closed) excludes it, so this is a pure no-op.
+      # (state != :closed) excludes it, so this is a pure no-op.
       assert :ok = ReviewPatrol.tick(name)
       assert ReviewPatrol.state(name).last_terminated == []
-      assert reload(eng).status == :closed
+      assert reload(eng).state == :closed
 
       # Tick 3: same — still a no-op.
       assert :ok = ReviewPatrol.tick(name)
       assert ReviewPatrol.state(name).last_terminated == []
-      assert reload(eng).status == :closed
+      assert reload(eng).state == :closed
     end
 
     test "two engagements on the same PR close independently without cross-contamination",
@@ -575,8 +575,8 @@ defmodule Arbiter.Integration.ReviewPatrolE2ETest do
 
       # Single tick terminates BOTH engagements.
       assert :ok = ReviewPatrol.tick(name)
-      assert reload(eng1).status == :closed
-      assert reload(eng2).status == :closed
+      assert reload(eng1).state == :closed
+      assert reload(eng2).state == :closed
       terminated = ReviewPatrol.state(name).last_terminated
       assert eng1.id in terminated
       assert eng2.id in terminated
@@ -694,7 +694,7 @@ defmodule Arbiter.Integration.ReviewPatrolE2ETest do
       end)
 
       assert :ok = ReviewPatrol.tick(name)
-      assert reload(eng2).status == :closed
+      assert reload(eng2).state == :closed
       assert ReviewPatrol.state(name).last_terminated == [eng2.id]
     end
   end
@@ -800,7 +800,7 @@ defmodule Arbiter.Integration.ReviewPatrolE2ETest do
       end)
 
       assert :ok = ReviewPatrol.tick(name)
-      assert reload(eng2).status == :closed
+      assert reload(eng2).state == :closed
       assert ReviewPatrol.state(name).last_terminated == [eng2.id]
     end
 

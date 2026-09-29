@@ -23,7 +23,7 @@ defmodule ArbiterCli.Cmd.ResumeTest do
       stub_post(
         "/api/workers/bd-1z7624/resume",
         %{
-          "task" => %{"id" => "bd-1z7624", "title" => "resume cmd", "status" => "in_progress"},
+          "task" => %{"id" => "bd-1z7624", "title" => "resume cmd", "state" => "active"},
           "worker" => %{"task_id" => "bd-1z7624", "pid" => "#PID<0.123.0>"},
           "machine" => %{"id" => "mc-1", "pid" => "#PID<0.124.0>"},
           "worktree_path" => "/wt/feature-bd-1z7624",
@@ -41,7 +41,7 @@ defmodule ArbiterCli.Cmd.ResumeTest do
 
     test "--json mode emits JSON" do
       stub_post("/api/workers/bd-1/resume", %{
-        "task" => %{"id" => "bd-1", "title" => "t", "status" => "in_progress"},
+        "task" => %{"id" => "bd-1", "title" => "t", "state" => "active"},
         "worker" => %{"task_id" => "bd-1", "pid" => "x"},
         "machine" => %{"id" => "m", "pid" => "y"}
       })
@@ -82,7 +82,7 @@ defmodule ArbiterCli.Cmd.ResumeTest do
             conn
             |> Plug.Conn.put_status(201)
             |> Req.Test.json(%{
-              "task" => %{"id" => "bd-9", "title" => "t", "status" => "in_progress"},
+              "task" => %{"id" => "bd-9", "title" => "t", "state" => "active"},
               "worker" => %{"task_id" => "bd-9", "pid" => "x"},
               "machine" => %{"id" => "m", "pid" => "y"}
             })
@@ -116,7 +116,7 @@ defmodule ArbiterCli.Cmd.ResumeTest do
         conn
         |> Plug.Conn.put_status(201)
         |> Req.Test.json(%{
-          "task" => %{"id" => "bd-9", "title" => "t", "status" => "in_progress"},
+          "task" => %{"id" => "bd-9", "title" => "t", "state" => "active"},
           "worker" => %{"task_id" => "bd-9", "pid" => "x"},
           "machine" => %{"id" => "m", "pid" => "y"}
         })

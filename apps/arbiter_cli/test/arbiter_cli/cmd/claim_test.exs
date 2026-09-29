@@ -28,7 +28,7 @@ defmodule ArbiterCli.Cmd.ClaimTest do
           "task" => %{
             "id" => "bd-abc",
             "title" => "Wire it up",
-            "status" => "open",
+            "state" => "backlog",
             "tracker_type" => "github",
             "tracker_ref" => "43"
           }
@@ -51,7 +51,7 @@ defmodule ArbiterCli.Cmd.ClaimTest do
           "task" => %{
             "id" => "bd-abc",
             "title" => "Wire it up",
-            "status" => "in_progress",
+            "state" => "active",
             "tracker_type" => "github",
             "tracker_ref" => "43"
           }
@@ -72,7 +72,7 @@ defmodule ArbiterCli.Cmd.ClaimTest do
           "task" => %{
             "id" => "bd-abc",
             "title" => "T",
-            "status" => "open",
+            "state" => "backlog",
             "tracker_type" => "github",
             "tracker_ref" => "43"
           }
@@ -101,7 +101,7 @@ defmodule ArbiterCli.Cmd.ClaimTest do
            "task" => %{
              "id" => "bd-abc",
              "title" => "T",
-             "status" => "open",
+             "state" => "backlog",
              "tracker_type" => "github",
              "tracker_ref" => "43",
              "repo" => "arbiter"
@@ -171,7 +171,7 @@ defmodule ArbiterCli.Cmd.ClaimTest do
            "task" => %{
              "id" => "bd-abc",
              "title" => "Hard task",
-             "status" => "open",
+             "state" => "backlog",
              "tracker_type" => "github",
              "tracker_ref" => "43",
              "difficulty" => 3

@@ -881,7 +881,7 @@ defmodule Arbiter.Workflows.PRPatrolTest do
       {_pid, name} = start_patrol(ws)
       :ok = PRPatrol.tick(name)
 
-      open_tasks = tasks_for_repo() |> Enum.filter(&(&1.status != :closed))
+      open_tasks = tasks_for_repo() |> Enum.filter(&(&1.state != :closed))
       assert length(open_tasks) == 1
     end
   end
@@ -1323,7 +1323,7 @@ defmodule Arbiter.Workflows.PRPatrolTest do
       # Only the closed task from tick 1 exists; no new open task was created.
       open_tasks =
         tasks_for_repo()
-        |> Enum.filter(&(&1.status != :closed))
+        |> Enum.filter(&(&1.state != :closed))
 
       assert open_tasks == [],
              "expected no open tasks after allowlist applied, got: #{inspect(open_tasks)}"
@@ -1395,7 +1395,7 @@ defmodule Arbiter.Workflows.PRPatrolTest do
         |> Ash.Query.filter(source_pr == "90")
         |> Ash.read!()
 
-      assert task.status == :closed
+      assert task.state == :closed
       refute is_pid(Worker.whereis(task.id))
 
       escalations =

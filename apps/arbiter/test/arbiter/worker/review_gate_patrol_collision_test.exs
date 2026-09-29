@@ -23,11 +23,13 @@ defmodule Arbiter.Worker.ReviewGatePatrolCollisionTest do
 
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures, only: [put_state!: 2]
+
   require Ash.Query
 
   alias Arbiter.CircuitBreaker
   alias Arbiter.ReviewGate.Round
-  alias Arbiter.Tasks.{Issue, Workspace}
+  alias Arbiter.Tasks.{Issue, ReviewPark, Workspace}
   alias Arbiter.Worker
   alias Arbiter.Worker.ReviewGate
   alias Arbiter.Workflows.PRPatrol
@@ -222,7 +224,7 @@ defmodule Arbiter.Worker.ReviewGatePatrolCollisionTest do
     {:ok, task} =
       Ash.create(Issue, %{title: "VR-19006 catalog", workspace_id: ws.id, issue_type: :feature})
 
-    {:ok, task} = Ash.update(task, %{status: :in_progress})
+    task = put_state!(task, :active)
     {:ok, task} = Ash.update(task, %{pr_ref: "owner/repo#424"}, action: :update)
     task
   end
@@ -347,7 +349,7 @@ defmodule Arbiter.Worker.ReviewGatePatrolCollisionTest do
     assert sha(repo, "origin/" <> branch) == fix_head
 
     # And the task was never parked.
-    assert Ash.get!(Issue, task.id).review_park_reason == nil
+    assert ReviewPark.reason(Ash.get!(Issue, task.id)) == nil
     assert Enum.any?(rounds(task.id), &(&1.role == :impl))
 
     # Stop before the APPROVE so the author never enters the merge path — the

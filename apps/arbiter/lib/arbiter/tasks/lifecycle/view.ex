@@ -42,8 +42,8 @@ defmodule Arbiter.Tasks.Lifecycle.View do
   `:queued` ticket. Dispatch moves the ticket to `:active` before its run
   starts, so that pair means the write lags a run that is already working
   (a run started around the dispatch path, or a write that failed), and the
-  ticket reads as `:in_progress`. A row with no stored or legacy state at all
-  (a run whose ticket was not read) is claimed by any non-completed author row.
+  ticket reads as `:in_progress`. A row with no stored state at all (a bare
+  `%{id: ...}` for a run whose ticket was not read) is claimed by any non-completed author row.
 
   ## Step
 
@@ -138,17 +138,11 @@ defmodule Arbiter.Tasks.Lifecycle.View do
   end
 
   @doc """
-  The ticket's stored state, falling back to the state its legacy columns
-  imply (`Lifecycle.legacy_state/1`) for a row that predates it. `nil` when
-  there is neither.
+  The ticket's stored state. `nil` for a map that carries none — a bare
+  `%{id: ...}` standing in for a run whose ticket was not read.
   """
   @spec state_of(map() | nil) :: Lifecycle.state() | nil
   def state_of(%{state: state}) when is_atom(state) and not is_nil(state), do: state
-
-  def state_of(%{status: status} = ticket)
-      when status in [:open, :in_progress, :awaiting_verification, :closed],
-      do: Lifecycle.legacy_state(ticket)
-
   def state_of(_), do: nil
 
   @doc """

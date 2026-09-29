@@ -161,6 +161,10 @@ defmodule Arbiter.Worker.PhaseTest do
       refute :handing_off in Phase.phases()
     end
 
+    test "an open PR is no worker phase: that wait is the Merging ticket's step (bd-36ytcl)" do
+      refute :waiting_ci_merge in Phase.phases()
+    end
+
     test "a succeeded worker is :done" do
       assert Phase.of(author(:succeeded, %{agent_live: false})) == :done
     end

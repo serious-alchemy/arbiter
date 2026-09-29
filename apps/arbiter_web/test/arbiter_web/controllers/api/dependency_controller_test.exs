@@ -111,7 +111,7 @@ defmodule ArbiterWeb.Api.DependencyControllerTest do
         })
 
       assert json_response(conn, 201)
-      assert Ash.get!(Issue, parent.id).status == :closed
+      assert Ash.get!(Issue, parent.id).state == :closed
     end
   end
 
@@ -175,10 +175,11 @@ defmodule ArbiterWeb.Api.DependencyControllerTest do
       assert row["id"] == dep.id
       assert row["type"] == "conflicts_with"
       assert row["from"]["id"] == a.id
-      assert row["from"]["status"]
+      assert row["from"]["state"]
       assert row["from"]["priority"] == 1
       assert row["to"]["id"] == b.id
-      assert row["to"]["status"]
+      assert row["to"]["state"]
+      refute Map.has_key?(row["from"], "status")
     end
 
     test "filters by type", %{conn: conn, ws: ws, a: a, b: b} do
@@ -265,11 +266,11 @@ defmodule ArbiterWeb.Api.DependencyControllerTest do
       returned_ids = Enum.map(rows, & &1["id"]) |> Enum.sort()
       assert returned_ids == Enum.sort(conflict_ids)
 
-      assert Enum.all?(rows, fn row -> row["from"]["status"] && row["to"]["status"] end)
+      assert Enum.all?(rows, fn row -> row["from"]["state"] && row["to"]["state"] end)
 
       live_pairs =
         Enum.count(rows, fn row ->
-          row["from"]["status"] == "open" or row["to"]["status"] == "open"
+          row["from"]["state"] != "closed" or row["to"]["state"] != "closed"
         end)
 
       assert live_pairs == 3

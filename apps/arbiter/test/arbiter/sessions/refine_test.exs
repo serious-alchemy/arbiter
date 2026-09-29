@@ -10,6 +10,7 @@ defmodule Arbiter.Sessions.RefineTest do
   """
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures
   import ExUnit.CaptureLog
 
   alias Arbiter.MCP.Catalog
@@ -84,7 +85,7 @@ defmodule Arbiter.Sessions.RefineTest do
     end
 
     test "a running issue cannot", %{issue: issue} do
-      {:ok, running} = Ash.update(issue, %{status: :in_progress}, action: :update)
+      running = put_state!(issue, :active)
       refute Refine.eligible?(running)
     end
 

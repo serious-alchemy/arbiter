@@ -20,6 +20,8 @@ defmodule Arbiter.Worker.ReviewGateReviewCheckoutTest do
 
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures, only: [put_state!: 2]
+
   require Ash.Query
 
   alias Arbiter.Agents.SecurityPolicy
@@ -160,7 +162,7 @@ defmodule Arbiter.Worker.ReviewGateReviewCheckoutTest do
     {:ok, task} =
       Ash.create(Issue, %{title: "checkout task", workspace_id: ws.id, issue_type: :feature})
 
-    {:ok, task} = Ash.update(task, %{status: :in_progress})
+    task = put_state!(task, :active)
     task
   end
 
@@ -488,7 +490,7 @@ defmodule Arbiter.Worker.ReviewGateReviewCheckoutTest do
       {gate, ref} = start_gate(author, task, ws, branch, wt, command: [@probe, log, "APPROVE"])
       await_gate_down(gate, ref)
 
-      assert Ash.get!(Issue, task.id).review_park_reason == "head_not_pushed"
+      assert Ash.get!(Issue, task.id).attention_cause == :head_not_pushed
       assert probe_passes(log) == [], "a reviewer ran on an unpushed head"
       assert gate_checkouts(root) == []
     end
@@ -601,7 +603,7 @@ defmodule Arbiter.Worker.ReviewGateReviewCheckoutTest do
       await_gate_down(gate, ref)
 
       assert probe_passes(log) == [], "the reviewer ran without its own checkout"
-      assert Ash.get!(Issue, task.id).review_park_reason == "reviewer_failed"
+      assert Ash.get!(Issue, task.id).attention_cause == :reviewer_failed
       assert Ash.get!(Issue, task.id).last_reviewed_sha == nil
 
       wait_until(fn -> escalations(ws, task) != [] end)

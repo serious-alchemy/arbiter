@@ -6,7 +6,7 @@ defmodule Arbiter.Trackers.None do
   All callbacks succeed as no-ops. `fetch/1` returns an empty map (there is
   nothing to fetch). `link_for/1` returns an empty string (no URL).
   `parse_ref/1` always returns `:error` (we never own a ref).
-  `list_transitions/1` returns the full task status set, since the task ledger
+  `list_transitions/1` returns the full tracker status set, since the task ledger
   has no externally-imposed restrictions. `list_open/1` returns
   `{:error, :not_supported}` because there is no upstream backlog to list —
   callers (e.g. `arb list --tracker`) treat that as "render local tasks only".

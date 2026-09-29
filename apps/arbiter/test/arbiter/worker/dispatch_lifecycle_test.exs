@@ -47,7 +47,7 @@ defmodule Arbiter.Worker.DispatchLifecycleTest do
     result = dispatch!(queued)
 
     assert result.task.state == :active
-    assert result.task.status == :in_progress
+    assert result.task.state == :active
     assert Ash.get!(Issue, queued.id).state == :active
     assert :start in actions(queued.id)
   end

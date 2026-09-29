@@ -191,7 +191,7 @@ defmodule Arbiter.Usage.BudgetPatrol do
         degraded?: spend.degraded?,
         estimate: assessment.estimate,
         difficulty: issue.difficulty,
-        worker_state: Map.get(workers, issue.id) || "no live worker (#{issue.status})"
+        worker_state: Map.get(workers, issue.id) || "no live worker (#{issue.state})"
       }
     )
   end
@@ -200,7 +200,7 @@ defmodule Arbiter.Usage.BudgetPatrol do
     closed = :closed
 
     Issue
-    |> Ash.Query.filter(status != ^closed)
+    |> Ash.Query.filter(state != ^closed)
     |> Ash.read!()
     |> Enum.reject(&(&1.issue_type in @non_dispatchable_types))
   end

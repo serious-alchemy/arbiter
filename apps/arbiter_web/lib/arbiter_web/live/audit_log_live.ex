@@ -5,8 +5,8 @@ defmodule ArbiterWeb.AuditLogLive do
 
   ## Columns
 
-  time / actor / subject / action / detail — `detail` renders a status
-  transition **verbatim**, e.g. `open → in_progress`, never humanized. Any
+  time / actor / subject / action / detail — `detail` renders a lifecycle
+  `state` transition **verbatim**, e.g. `queued → active`, never humanized. Any
   other changed fields are shown as `key=value`, also verbatim — see
   `ArbiterWeb.CoreComponents.Data.status_chip/1`'s doc for the same rule
   applied elsewhere in this component library.
@@ -274,20 +274,20 @@ defmodule ArbiterWeb.AuditLogLive do
   defp push_sql_clause({:action, v}, query),
     do: Ash.Query.filter(query, version_action_name == ^String.to_existing_atom(v))
 
-  # Walk chronologically so a status change can show what it changed *from*,
+  # Walk chronologically so a state change can show what it changed *from*,
   # not just what it changed to — `changes` (AshPaperTrail's changes_only
   # mode) only ever carries the new value.
   defp annotate_transitions(versions) do
-    {rows, _last_status_by_subject} =
-      Enum.map_reduce(versions, %{}, fn v, last_status ->
+    {rows, _last_state_by_subject} =
+      Enum.map_reduce(versions, %{}, fn v, last_state ->
         subject = v.version_source_id
         changes = v.changes || %{}
-        new_status = Map.get(changes, "status")
+        new_state = Map.get(changes, "state")
 
-        transition = new_status && {Map.get(last_status, subject), new_status}
+        transition = new_state && {Map.get(last_state, subject), new_state}
 
-        last_status =
-          if new_status, do: Map.put(last_status, subject, new_status), else: last_status
+        last_state =
+          if new_state, do: Map.put(last_state, subject, new_state), else: last_state
 
         row = %{
           id: v.id,
@@ -296,10 +296,10 @@ defmodule ArbiterWeb.AuditLogLive do
           subject: subject,
           action: v.version_action_name,
           transition: transition,
-          changes: Map.delete(changes, "status")
+          changes: Map.delete(changes, "state")
         }
 
-        {row, last_status}
+        {row, last_state}
       end)
 
     rows

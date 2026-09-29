@@ -3,7 +3,7 @@ defmodule Arbiter.Worker.AuthDeath do
   What happens to a task whose worker died with `:auth_expired` (bd-21bmdh).
 
   Before this, `Arbiter.Worker.fail_stopped/2` failed the worker, escalated,
-  and left the task `:in_progress` behind a `:failed` worker — nothing ever
+  and left the task `:active` behind a `:failed` worker — nothing ever
   returned it to Ready. That was tolerable while a live pre-flight probe
   caught dead credentials before dispatch. bd-2jgs2h retired that probe, so
   an auth death at spawn is now the normal way the fleet finds out, and
@@ -26,10 +26,11 @@ defmodule Arbiter.Worker.AuthDeath do
        directory.
     2. **Return the task to Ready.** The `:failed` worker process is stopped
        (its `worker_runs` row stays `:failed`; the board files a card with a
-       registered worker under Waiting, not Ready) and the task goes back to
-       `:open`. Skipped — today's behaviour — for a review-only engagement, a
-       resume / fix-round worker (the resume context would be lost to a fresh
-       dispatch), a task no longer `:in_progress`, and a task that has already
+       registered worker under Waiting, not Ready) and the task is requeued
+       (`:active` / `:merging` → `:queued`). Skipped — today's behaviour — for a
+       review-only engagement, a resume / fix-round worker (the resume context
+       would be lost to a fresh dispatch), a task no longer at work (`:active`
+       or `:merging`), and a task that has already
        died on auth `AuthHold.max_task_reopens/0` times. That last bound is
        per task and independent of the hold, so no pattern of recoveries can
        cycle one task forever.
@@ -155,11 +156,12 @@ defmodule Arbiter.Worker.AuthDeath do
   end
 
   defp reopen(task_id, worker_pid) do
-    with {:ok, %Issue{status: :in_progress} = task} <- Ash.get(Issue, task_id),
+    with {:ok, %Issue{state: state} = task} when state in [:active, :merging] <-
+           Ash.get(Issue, task_id),
          :ok <- under_reopen_cap(task_id) do
       stop_failed_worker(worker_pid)
 
-      case Ash.update(task, %{status: :open}) do
+      case Ash.update(task, %{}, action: :requeue) do
         {:ok, _} ->
           :reopened
 
@@ -168,7 +170,7 @@ defmodule Arbiter.Worker.AuthDeath do
           :reopen_failed
       end
     else
-      {:ok, %Issue{}} -> :not_in_progress
+      {:ok, %Issue{}} -> :not_at_work
       {:cap, n} -> cap_outcome(n, task_id)
       _ -> :task_not_found
     end
@@ -181,7 +183,7 @@ defmodule Arbiter.Worker.AuthDeath do
   defp cap_outcome(n, task_id) do
     Logger.warning(
       "AuthDeath: task=#{task_id} has died on auth #{n} time(s) " <>
-        "(max_task_reopens #{AuthHold.max_task_reopens()}); leaving it :in_progress"
+        "(max_task_reopens #{AuthHold.max_task_reopens()}); not requeueing it"
     )
 
     :reopen_cap

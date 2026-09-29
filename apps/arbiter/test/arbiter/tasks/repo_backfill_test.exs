@@ -122,7 +122,7 @@ defmodule Arbiter.Tasks.RepoBackfillTest do
         assert Ash.get!(Issue, id).repo == "tonic"
       end
 
-      assert Ash.get!(Issue, closed.id).status == :closed
+      assert Ash.get!(Issue, closed.id).state == :closed
     end
 
     test "is idempotent — a second run changes nothing" do

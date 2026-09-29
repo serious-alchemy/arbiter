@@ -16,7 +16,7 @@ defmodule Arbiter.Worker.ReviewGateParkTest do
   Since the one run vocabulary (bd-1uu19b) a parked run finishes with outcome
   `:failed` like any other terminal run — there is no `:review_parked` run
   status. What tells a park apart from a genuine rejection is the ticket: a
-  park stamps `review_park_reason`, a real REQUEST_CHANGES leaves it nil. The
+  park sets its `attention_cause`, a real REQUEST_CHANGES leaves none. The
   run's own cause stays in `failure_reason`.
 
   These tests pin the Worker half of that split: the durable run row, the park
@@ -26,10 +26,12 @@ defmodule Arbiter.Worker.ReviewGateParkTest do
 
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures, only: [put_state!: 2]
+
   require Ash.Query
 
   alias Arbiter.Messages.Message
-  alias Arbiter.Tasks.{Issue, Workspace}
+  alias Arbiter.Tasks.{Issue, ReviewPark, Workspace}
   alias Arbiter.Test.StubFixRoundDispatcher
   alias Arbiter.Worker
   alias Arbiter.Workers.{Run, RunState}
@@ -114,7 +116,7 @@ defmodule Arbiter.Worker.ReviewGateParkTest do
     {:ok, task} =
       Ash.create(Issue, %{title: "park task", workspace_id: ws.id, issue_type: :feature})
 
-    {:ok, task} = Ash.update(task, %{status: :in_progress})
+    task = put_state!(task, :active)
     task
   end
 
@@ -185,7 +187,7 @@ defmodule Arbiter.Worker.ReviewGateParkTest do
 
       # The park, not the run outcome, is what separates this from a genuine
       # rejection.
-      assert reload(task).review_park_reason == "inconclusive"
+      assert reload(task).attention_cause == :inconclusive
 
       # The worker is terminal: `Dispatch.resume/2` and the Watchdog's
       # bounded auto-resume both require a finished worker (the C4 shape).
@@ -200,8 +202,8 @@ defmodule Arbiter.Worker.ReviewGateParkTest do
       deliver(pid, {:parked, :reviewer_timeout, "ReviewGate reviewing pass timed out"})
 
       parked = reload(task)
-      assert parked.review_park_reason == "reviewer_timeout"
-      assert %DateTime{} = parked.review_parked_at
+      assert parked.attention_cause == :reviewer_timeout
+      assert %DateTime{} = parked.attention_since
     end
 
     test "escalates to the coordinator exactly once per episode", %{repo: repo, ws: ws} do
@@ -247,7 +249,7 @@ defmodule Arbiter.Worker.ReviewGateParkTest do
     # finish the run `:failed` without parking the ticket. The reasons below are exactly
     # `ReviewPark.reasons/0`, so a new class-C terminal that forgets to park
     # fails here rather than quietly costing a run.
-    for {reason, _explanation} <- Arbiter.Tasks.ReviewPark.reasons() do
+    for {reason, _explanation} <- ReviewPark.reasons() do
       @reason reason
 
       test "#{reason} parks the run and never merges", %{repo: repo, ws: ws} do
@@ -257,7 +259,7 @@ defmodule Arbiter.Worker.ReviewGateParkTest do
         deliver(pid, {:parked, @reason, "VERDICT: APPROVE\nterminal reached: #{@reason}"})
 
         assert run_for(task.id).outcome == :failed
-        assert reload(task).review_park_reason == Atom.to_string(@reason)
+        assert reload(task).attention_cause == @reason
         assert merge_commit_count(repo) == 0
         assert [_exactly_one] = escalations(ws, task)
       end
@@ -272,7 +274,7 @@ defmodule Arbiter.Worker.ReviewGateParkTest do
       deliver(pid, {:no_verdict, "ReviewGate process exited before delivering a verdict."})
 
       assert run_for(task.id).outcome == :failed
-      assert reload(task).review_park_reason == "inconclusive"
+      assert reload(task).attention_cause == :inconclusive
     end
   end
 
@@ -287,7 +289,7 @@ defmodule Arbiter.Worker.ReviewGateParkTest do
       assert run.outcome == :failed
       assert Worker.state(pid).meta.failure_reason == :review_gate_rejected
 
-      assert reload(task).review_park_reason == nil
+      assert ReviewPark.reason(reload(task)) == nil
     end
   end
 
@@ -297,12 +299,12 @@ defmodule Arbiter.Worker.ReviewGateParkTest do
       pid = start_parked_author(task, repo)
 
       deliver(pid, {:parked, :inconclusive, "no parseable VERDICT line"})
-      assert reload(task).review_park_reason == "inconclusive"
+      assert reload(task).attention_cause == :inconclusive
 
       {:ok, closed} = Ash.update(reload(task), %{}, action: :close)
 
-      assert closed.review_park_reason == nil
-      assert closed.review_parked_at == nil
+      assert ReviewPark.reason(closed) == nil
+      assert closed.attention_since == nil
     end
 
     test "re-running the review clears it", %{repo: repo, ws: ws} do
@@ -310,21 +312,27 @@ defmodule Arbiter.Worker.ReviewGateParkTest do
       pid = start_parked_author(task, repo)
 
       deliver(pid, {:parked, :inconclusive, "no parseable VERDICT line"})
-      assert reload(task).review_park_reason == "inconclusive"
+      assert reload(task).attention_cause == :inconclusive
 
-      assert {:ok, cleared} = Arbiter.Tasks.ReviewPark.clear(task.id, :review_rerun)
-      assert cleared.review_park_reason == nil
+      assert {:ok, cleared} = ReviewPark.clear(task.id, :review_rerun)
+      assert ReviewPark.reason(cleared) == nil
     end
 
-    test "Issue.review_parked/1 lists parked tasks for arb prime", %{repo: repo, ws: ws} do
+    test "a parked task is found by its attention cause", %{repo: repo, ws: ws} do
       task = new_task(ws)
       pid = start_parked_author(task, repo)
 
       deliver(pid, {:parked, :inconclusive, "no parseable VERDICT line"})
 
-      assert [listed] = Issue.review_parked(workspace_id: ws.id)
+      parked_causes = ReviewPark.park_reasons()
+
+      assert [listed] =
+               Issue
+               |> Ash.Query.filter(workspace_id == ^ws.id and attention_cause in ^parked_causes)
+               |> Ash.read!()
+
       assert listed.id == task.id
-      assert listed.review_park_reason == "inconclusive"
+      assert listed.attention_cause == :inconclusive
     end
   end
 
@@ -343,7 +351,7 @@ defmodule Arbiter.Worker.ReviewGateParkTest do
         })
 
       deliver(pid, {:parked, :inconclusive, "no parseable VERDICT line"})
-      assert reload(task).review_park_reason == "inconclusive"
+      assert reload(task).attention_cause == :inconclusive
       assert run_for(task.id).outcome == :failed
 
       # bd-3wumco: the same gate's next round converges. The worker is finished
@@ -353,8 +361,8 @@ defmodule Arbiter.Worker.ReviewGateParkTest do
       ref = Process.monitor(pid)
       :ok = Worker.review_gate_verdict(pid, {:approve, "VERDICT: APPROVE\nlgtm"})
 
-      assert reload(task).review_park_reason == nil
-      assert reload(task).review_parked_at == nil
+      assert ReviewPark.reason(reload(task)) == nil
+      assert reload(task).attention_since == nil
       assert reload(task).state == :merging
 
       assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
@@ -373,33 +381,33 @@ defmodule Arbiter.Worker.ReviewGateParkTest do
 
   describe "the park row is the episode claim" do
     # Round 1 review finding: `park/2` computed the `:already_parked` claim but
-    # still ran `:park_review`, whose `set_attribute(:review_parked_at, …)` reset
+    # still ran `:park_review`, whose `set_attribute(:attention_since, …)` reset
     # the wait clock. `arb prime` sorts parks oldest-first so the one most likely
     # to have been forgotten leads — a gate that re-parks for the same reason
     # would have kept pushing itself back to the bottom of that list.
     test "a re-park for the same reason keeps the original wait clock", %{ws: ws} do
       task = new_task(ws)
 
-      assert {:ok, :claimed, first} = Arbiter.Tasks.ReviewPark.park(task.id, :inconclusive)
-      assert %DateTime{} = first.review_parked_at
+      assert {:ok, :claimed, first} = ReviewPark.park(task.id, :inconclusive)
+      assert %DateTime{} = first.attention_since
 
       assert {:ok, :already_parked, again} =
-               Arbiter.Tasks.ReviewPark.park(task.id, :inconclusive)
+               ReviewPark.park(task.id, :inconclusive)
 
-      assert again.review_parked_at == first.review_parked_at
-      assert reload(task).review_parked_at == first.review_parked_at
+      assert again.attention_since == first.attention_since
+      assert reload(task).attention_since == first.attention_since
     end
 
     test "a different reason is a new episode and re-stamps the clock", %{ws: ws} do
       task = new_task(ws)
 
-      assert {:ok, :claimed, first} = Arbiter.Tasks.ReviewPark.park(task.id, :inconclusive)
+      assert {:ok, :claimed, first} = ReviewPark.park(task.id, :inconclusive)
 
       assert {:ok, :claimed, second} =
-               Arbiter.Tasks.ReviewPark.park(task.id, :verdict_guard_exhausted)
+               ReviewPark.park(task.id, :verdict_guard_exhausted)
 
-      assert second.review_park_reason == "verdict_guard_exhausted"
-      assert DateTime.compare(second.review_parked_at, first.review_parked_at) != :lt
+      assert second.attention_cause == :verdict_guard_exhausted
+      assert DateTime.compare(second.attention_since, first.attention_since) != :lt
     end
   end
 

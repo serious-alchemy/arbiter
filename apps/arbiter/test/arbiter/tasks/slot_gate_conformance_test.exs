@@ -106,11 +106,9 @@ defmodule Arbiter.Tasks.SlotGateConformanceTest do
       id: id,
       title: "Task #{id}",
       state: state,
-      status: Arbiter.Tasks.Lifecycle.legacy_fields(state).status,
       priority: 2,
       issue_type: :task,
       workspace_id: "ws-1",
-      refined: state != :backlog,
       created_at: @now,
       updated_at: @now,
       closed_at: nil
@@ -125,39 +123,34 @@ defmodule Arbiter.Tasks.SlotGateConformanceTest do
     end
   end
 
-  for basis <- [:agents, :issues] do
-    test "the board's slot arithmetic is SlotGate's, under #{basis}" do
-      basis = unquote(basis)
+  test "the board's slot arithmetic is SlotGate's" do
+    for {name, workers} <- worlds(),
+        {ticket_name, tickets} <- ticket_worlds(),
+        total <- [0, 1, 2, 4] do
+      name = "#{name} / #{ticket_name}"
 
-      for {name, workers} <- worlds(),
-          {ticket_name, tickets} <- ticket_worlds(),
-          total <- [0, 1, 2, 4] do
-        name = "#{name} / #{ticket_name}"
+      board =
+        Snapshot.derive(%{
+          issues: tickets,
+          workers: workers,
+          blocked_by: %{},
+          changed_files: %{},
+          now: @now,
+          slots_total: total,
+          quota: :ok,
+          paused: false
+        })
 
-        board =
-          Snapshot.derive(%{
-            issues: tickets,
-            workers: workers,
-            blocked_by: %{},
-            changed_files: %{},
-            now: @now,
-            slots_total: total,
-            slot_basis: basis,
-            quota: :ok,
-            paused: false
-          })
+      assert board.slots_free == SlotGate.slots_free(total, tickets),
+             "board disagrees with SlotGate on free slots for #{name} (total=#{total})"
 
-        assert board.slots_free == SlotGate.slots_free(total, tickets),
-               "board disagrees with SlotGate on free slots for #{name} (total=#{total}, basis=#{basis})"
+      assert board.slots_used == SlotGate.slots_used(tickets),
+             "board disagrees with SlotGate on tickets In progress for #{name} (total=#{total})"
 
-        assert board.slots_used == SlotGate.slots_used(tickets),
-               "board disagrees with SlotGate on tickets In progress for #{name} (total=#{total}, basis=#{basis})"
+      assert board.agents_live == SlotGate.occupied(workers),
+             "board disagrees with SlotGate on agent occupancy for #{name} (total=#{total})"
 
-        assert board.agents_live == SlotGate.occupied(workers, basis),
-               "board disagrees with SlotGate on agent occupancy for #{name} (total=#{total}, basis=#{basis})"
-
-        refute board.slots_free < 0
-      end
+      refute board.slots_free < 0
     end
   end
 
@@ -165,12 +158,11 @@ defmodule Arbiter.Tasks.SlotGateConformanceTest do
     ready = %{
       id: "bd-ready",
       title: "Ready",
-      status: :open,
+      state: :queued,
       priority: 1,
       difficulty: 2,
       issue_type: :task,
       workspace_id: "ws-1",
-      refined: true,
       description: nil,
       acceptance: nil,
       notes: nil,
@@ -185,7 +177,6 @@ defmodule Arbiter.Tasks.SlotGateConformanceTest do
       changed_files: %{},
       now: @now,
       slots_total: 1,
-      slot_basis: :agents,
       quota: :ok,
       paused: false
     }

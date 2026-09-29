@@ -56,7 +56,7 @@ defmodule Arbiter.Worker.DispatchEligibilityTest do
 
   describe "a manual dispatch" do
     test "of a Backlog ticket is refused, in Backlog, and nothing moves", %{ws: ws} do
-      task = ticket(ws, "not refined", :backlog)
+      task = ticket(ws, "in backlog", :backlog)
 
       assert {:error, {:not_dispatchable, id, {:column, :backlog} = hold}} = dispatch(task)
       assert id == task.id

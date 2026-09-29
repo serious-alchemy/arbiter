@@ -304,7 +304,7 @@ defmodule Arbiter.Workflows.MergeQueue.AutoResumeDispatcher do
     conflict and whose state is still `working`. Stopping or finishing that pass frees
     the slot; a `worker_resume #{task_id}` will then take.
 
-    The task is PARKED (`review_park_reason: resume_blocked`), not failed — the work is
+    The task is PARKED (`attention_cause: resume_blocked`), not failed — the work is
     committed, the PR is open and nothing was merged. The resume clears the park.
 
     #{diagnosis(task_id)}
@@ -323,7 +323,7 @@ defmodule Arbiter.Workflows.MergeQueue.AutoResumeDispatcher do
     completion, so the Watchdog stopped deferring rather than spending the rest of its
     budget in silence.
 
-    The task is PARKED (`review_park_reason: resume_blocked`), not failed: the work is
+    The task is PARKED (`attention_cause: resume_blocked`), not failed: the work is
     committed, the PR is open and nothing was merged. Clearing the park is a plain
     `worker_resume #{task_id}` once the slot is free.
 

@@ -27,7 +27,7 @@ defmodule Arbiter.Trackers.Shortcut do
 
   ## Status mapping
 
-  Task-vocabulary atoms (`:open | :in_progress | :closed`) map to Shortcut
+  Tracker-vocabulary atoms (`:open | :in_progress | :closed`) map to Shortcut
   workflow *state names*. Shortcut moves a story between states by PUT-ing its
   `workflow_state_id`, so we resolve the mapped state name to a concrete state
   id via `GET /workflows`. Defaults are conservative ("Unstarted", "In
@@ -574,7 +574,7 @@ defmodule Arbiter.Trackers.Shortcut do
          %Error{
            kind: :transition_not_found,
            status: nil,
-           message: "no Shortcut state name mapped for task status #{inspect(status)}",
+           message: "no Shortcut state name mapped for tracker status #{inspect(status)}",
            raw: nil
          }}
     end

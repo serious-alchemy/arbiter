@@ -45,6 +45,8 @@ defmodule Arbiter.Worker.ReviewGateReconcileTest do
 
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures, only: [put_state!: 2]
+
   import ExUnit.CaptureLog
 
   require Ash.Query
@@ -140,7 +142,7 @@ defmodule Arbiter.Worker.ReviewGateReconcileTest do
         issue_type: :feature
       })
 
-    {:ok, task} = Ash.update(task, %{status: :in_progress})
+    task = put_state!(task, :active)
     task
   end
 

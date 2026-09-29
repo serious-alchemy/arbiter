@@ -1,6 +1,8 @@
 defmodule Arbiter.Tasks.ClaimTest do
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures
+
   alias Arbiter.Tasks.{Claim, Issue, Workspace}
   alias Arbiter.Trackers.GitHub.Config, as: GHConfig
   alias Arbiter.Trackers.Jira.Config, as: JiraConfig
@@ -156,7 +158,7 @@ defmodule Arbiter.Tasks.ClaimTest do
       assert task.tracker_ref == "43"
       assert task.title == "Wire up the thing"
       assert task.description == "Mirror me into a task."
-      assert task.status == :open
+      assert task.state == :backlog
     end
 
     test "is idempotent — returns existing task instead of duplicating", %{github_ws: ws} do
@@ -718,8 +720,8 @@ defmodule Arbiter.Tasks.ClaimTest do
       task_43 = Enum.find(tasks, &(&1.tracker_ref == "43"))
       task_44 = Enum.find(tasks, &(&1.tracker_ref == "44"))
 
-      assert task_43.status == :open
-      assert task_44.status == :closed
+      assert task_43.state == :backlog
+      assert task_44.state == :closed
     end
 
     test "empty plan when tracker doesn't support claim", %{none_ws: ws} do
@@ -770,7 +772,7 @@ defmodule Arbiter.Tasks.ClaimTest do
       assert reported_task.id == drifted_task.id
 
       {:ok, reloaded} = Ash.get(Issue, drifted_task.id)
-      assert reloaded.status == :closed
+      assert reloaded.state == :closed
     end
 
     test "no drift reported when the closed task's tracker issue is also closed",
@@ -858,7 +860,7 @@ defmodule Arbiter.Tasks.ClaimTest do
     end
 
     # bd-9so315: the sync's close arm reads "the upstream issue is gone, so the
-    # local task should follow". A task parked at :awaiting_verification is a
+    # local task should follow". A task parked at :verifying is a
     # task whose upstream WAS deliberately closed at merge — closing it here
     # would skip the verification the flag exists to force.
     test "a task awaiting post-merge verification is NOT proposed for close", %{github_ws: ws} do
@@ -866,7 +868,7 @@ defmodule Arbiter.Tasks.ClaimTest do
       # bd-842qio: only work in progress parks for verification. Starting it
       # pushes "in progress" upstream, which this test neither stubs nor needs.
       {{:ok, task}, _log} =
-        ExUnit.CaptureLog.with_log(fn -> Ash.update(task, %{status: :in_progress}) end)
+        ExUnit.CaptureLog.with_log(fn -> {:ok, put_state!(task, :active)} end)
 
       {:ok, _} = Ash.update(task, %{}, action: :await_verification)
 

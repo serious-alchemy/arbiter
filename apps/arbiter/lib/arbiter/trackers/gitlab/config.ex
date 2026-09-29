@@ -37,8 +37,8 @@ defmodule Arbiter.Trackers.Gitlab.Config do
   ## `status_map`
 
   GitLab Issues have only two native states — `"opened"` and `"closed"` — so
-  the task-vocabulary `:in_progress` is expressed as an *open* issue carrying a
-  label. Each task status maps to a `%{state: ..., label: ...}` pair:
+  the tracker-vocabulary `:in_progress` is expressed as an *open* issue carrying a
+  label. Each tracker status maps to a `%{state: ..., label: ...}` pair:
 
     * `state` is `"opened"` or `"closed"` (anything else falls back to the
       default for that status).

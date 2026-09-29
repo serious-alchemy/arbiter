@@ -18,7 +18,7 @@ defmodule Arbiter.Worker.WatchdogResumeDeferralTest do
   These cases pin the whole episode: the deferral survives that `:DOWN`, it
   re-fires the moment the blocking pass finishes, a transient `:network` poll
   error in the middle neither clears nor duplicates it, and both terminal arms
-  (budget spent, blocker vanished) park the task with a `review_park_reason`
+  (budget spent, blocker vanished) park the task (its `attention_cause`)
   and page the coordinator exactly once — guard class E of
   `docs/review-coverage-and-guard-policy.md` §5.3 (fail open, one escalation,
   parked terminal), registry row `:resume_deferral_budget` (W14).
@@ -31,6 +31,8 @@ defmodule Arbiter.Worker.WatchdogResumeDeferralTest do
   """
 
   use Arbiter.DataCase, async: false
+
+  import Arbiter.LifecycleFixtures, only: [put_state!: 2]
 
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
@@ -50,7 +52,7 @@ defmodule Arbiter.Worker.WatchdogResumeDeferralTest do
       })
 
     {:ok, task} = Ash.create(Issue, %{title: "deferral", workspace_id: ws.id})
-    {:ok, task} = Ash.update(task, %{status: :in_progress})
+    task = put_state!(task, :active)
 
     %{ws: ws, task_id: task.id}
   end
@@ -252,7 +254,7 @@ defmodule Arbiter.Worker.WatchdogResumeDeferralTest do
   # ---- acceptance 2: both terminal arms park + page exactly once ------------
 
   describe "the terminal arms park the task and page once (class E)" do
-    test "the deferral budget running out parks with a review_park_reason and pages once",
+    test "the deferral budget running out parks with an attention cause and pages once",
          %{task_id: task_id, ws: ws} do
       blocker = fixpass_worker()
       StubAutoResumeDispatcher.arm_resume_error(fixpass_live(task_id, blocker))
@@ -272,10 +274,10 @@ defmodule Arbiter.Worker.WatchdogResumeDeferralTest do
       assert inspect(blocked_by) =~ "fixpass"
 
       {:ok, reloaded} = Ash.get(Issue, task_id)
-      assert reloaded.review_park_reason == "resume_blocked"
-      assert %DateTime{} = reloaded.review_parked_at
-      # A flag, not a status — the work is still live.
-      assert reloaded.status == :in_progress
+      assert reloaded.attention_cause == :resume_blocked
+      assert %DateTime{} = reloaded.attention_since
+      # An attention cause, not a state — the work is still live.
+      assert reloaded.state == :active
     end
 
     test "a blocker that disappears without a completion signal parks and pages once, well inside the budget",
@@ -301,7 +303,7 @@ defmodule Arbiter.Worker.WatchdogResumeDeferralTest do
       assert inspect(blocked_by) =~ "fixpass"
 
       {:ok, reloaded} = Ash.get(Issue, task_id)
-      assert reloaded.review_park_reason == "resume_blocked"
+      assert reloaded.attention_cause == :resume_blocked
     end
   end
 

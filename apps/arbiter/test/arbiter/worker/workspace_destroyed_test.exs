@@ -24,6 +24,8 @@ defmodule Arbiter.Worker.WorkspaceDestroyedTest do
 
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures, only: [put_state!: 2]
+
   require Ash.Query
 
   alias Arbiter.Messages.Message
@@ -99,7 +101,7 @@ defmodule Arbiter.Worker.WorkspaceDestroyedTest do
         issue_type: :feature
       })
 
-    {:ok, task} = Ash.update(task, %{status: :in_progress})
+    task = put_state!(task, :active)
 
     branch = "feature/workspace-destroyed-#{System.unique_integer([:positive])}"
     worktree = provision_worktree!(branch)
@@ -153,7 +155,7 @@ defmodule Arbiter.Worker.WorkspaceDestroyedTest do
 
       # The task stays open — nothing was integrated and nothing may close it.
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      refute reloaded.status == :closed
+      refute reloaded.state == :closed
     end
 
     test "escalates to the coordinator naming the destroyed workspace",

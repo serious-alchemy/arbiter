@@ -1,8 +1,9 @@
 defmodule Arbiter.Tasks.Issue.Changes.SyncTrackerTest do
   @moduledoc """
-  Wiring tests for Arbiter→tracker sync on task status transitions.
+  Wiring tests for Arbiter→tracker sync on ticket state transitions.
 
-  Exercises the full Ash action path (`:close` / `:reopen` / `:update`) with the
+  Exercises the full Ash action path (`:close` / `:reopen` / `:start` /
+  `:requeue`) with the
   GitHub HTTP client mocked via `Req.Test` (`:github_http_stub` is true in the
   test env). Asserts the local transition reaches out to the resolved adapter
   for tracked tasks, leaves untracked tasks alone, and survives a sync failure.
@@ -95,7 +96,7 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTrackerTest do
         })
 
       assert {:ok, closed} = Ash.update(issue, %{}, action: :close)
-      assert closed.status == :closed
+      assert closed.state == :closed
 
       expected_path = "/repos/#{@owner}/#{@repo}/issues/#{@ref}"
       assert_receive {:github, :patch, ^expected_path, %{"state" => "closed"}}
@@ -114,7 +115,7 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTrackerTest do
         })
 
       assert {:ok, closed} = Ash.update(issue, %{close_upstream: false}, action: :close)
-      assert closed.status == :closed
+      assert closed.state == :closed
 
       refute_receive {:github, :patch, _, _}
     end
@@ -132,7 +133,7 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTrackerTest do
         })
 
       assert {:ok, closed} = Ash.update(issue, %{close_upstream: true}, action: :close)
-      assert closed.status == :closed
+      assert closed.state == :closed
 
       expected_path = "/repos/#{@owner}/#{@repo}/issues/#{@ref}"
       assert_receive {:github, :get, ^expected_path}
@@ -177,7 +178,7 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTrackerTest do
 
       # Local close must succeed regardless of tracker state.
       assert {:ok, closed} = Ash.update(issue, %{close_upstream: true}, action: :close)
-      assert closed.status == :closed
+      assert closed.state == :closed
 
       path = "/repos/#{@owner}/#{@repo}/issues/#{@ref}"
       # Initial close transition fires.
@@ -219,7 +220,7 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTrackerTest do
         })
 
       assert {:ok, closed} = Ash.update(issue, %{close_upstream: true}, action: :close)
-      assert closed.status == :closed
+      assert closed.state == :closed
 
       path = "/repos/#{@owner}/#{@repo}/issues/#{@ref}"
       # No PATCHes: already_in_state? catches the pre-flight GET ("closed") and
@@ -241,7 +242,7 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTrackerTest do
         })
 
       assert {:ok, closed} = Ash.update(issue, %{}, action: :close)
-      assert closed.status == :closed
+      assert closed.state == :closed
 
       refute_receive {:github, _, _}
       refute_receive {:github, _, _, _}
@@ -286,7 +287,7 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTrackerTest do
         })
 
       assert {:ok, closed} = Ash.update(issue, %{}, action: :close)
-      assert closed.status == :closed
+      assert closed.state == :closed
     end
 
     test "missing tracker config does not break the local close" do
@@ -304,7 +305,7 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTrackerTest do
       System.delete_env(@env_var)
 
       assert {:ok, closed} = Ash.update(issue, %{}, action: :close)
-      assert closed.status == :closed
+      assert closed.state == :closed
     end
   end
 
@@ -371,7 +372,7 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTrackerTest do
 
       # Local close succeeds immediately regardless of the upstream retries.
       assert {:ok, closed} = Ash.update(issue, %{}, action: :close)
-      assert closed.status == :closed
+      assert closed.state == :closed
 
       assert_receive {:github, :patch, 0, %{"state" => "closed"}}
       assert_receive {:github, :patch, 1, %{"state" => "closed"}}
@@ -406,7 +407,7 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTrackerTest do
         })
 
       assert {:ok, closed} = Ash.update(issue, %{}, action: :close)
-      assert closed.status == :closed
+      assert closed.state == :closed
 
       escalations =
         Arbiter.Messages.Message
@@ -457,8 +458,8 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTrackerTest do
           workspace_id: ws.id
         })
 
-      assert {:ok, updated} = Ash.update(issue, %{status: :in_progress}, action: :update)
-      assert updated.status == :in_progress
+      assert {:ok, updated} = Ash.update(issue, %{}, action: :start)
+      assert updated.state == :active
 
       assert_receive {:patch_attempted, 1}
       refute_receive {:patch_attempted, 2}, 50
@@ -508,12 +509,12 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTrackerTest do
       end)
 
       assert {:ok, reopened} = Ash.update(closed, %{}, action: :reopen)
-      assert reopened.status == :open
+      assert reopened.state == :queued
       assert_receive {:reopen_patch, %{"state" => "open"}}
     end
   end
 
-  describe ":update with an open ⇄ in_progress transition" do
+  describe ":start / :requeue (the open ⇄ in_progress tracker moves)" do
     test "syncs in_progress to the tracker (open issue + in-progress label)" do
       test_pid = self()
 
@@ -544,15 +545,15 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTrackerTest do
           workspace_id: ws.id
         })
 
-      assert {:ok, updated} = Ash.update(issue, %{status: :in_progress}, action: :update)
-      assert updated.status == :in_progress
+      assert {:ok, updated} = Ash.update(issue, %{}, action: :start)
+      assert updated.state == :active
 
       assert_receive {:update_patch, payload}
       assert payload["state"] == "open"
       assert payload["labels"] == ["in progress"]
     end
 
-    test "a pure status-only :update (no field changes) does NOT call the adapter for field sync" do
+    test "a pure :start (no field changes) does NOT call the adapter for field sync" do
       test_pid = self()
 
       Req.Test.stub(Arbiter.Trackers.GitHub.HTTP, fn conn ->
@@ -577,20 +578,63 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTrackerTest do
 
       {:ok, issue} =
         Ash.create(Issue, %{
-          title: "status-only-update",
+          title: "start-only-update",
           tracker_type: :github,
           tracker_ref: @ref,
           workspace_id: ws.id
         })
 
-      assert {:ok, updated} = Ash.update(issue, %{status: :in_progress}, action: :update)
-      assert updated.status == :in_progress
+      assert {:ok, updated} = Ash.update(issue, %{}, action: :start)
+      assert updated.state == :active
 
-      # SyncTracker fires for the status change; no separate field-sync PATCH for title/description.
+      # SyncTracker fires for the state change; no separate field-sync PATCH for title/description.
       assert_receive {:status_patch, payload}
       assert Map.has_key?(payload, "state")
       refute Map.has_key?(payload, "title")
       refute Map.has_key?(payload, "body")
+    end
+
+    test "a :requeue syncs the ticket back to open upstream (bd-36ytcl)" do
+      test_pid = self()
+
+      Req.Test.stub(Arbiter.Trackers.GitHub.HTTP, fn conn ->
+        case conn.method do
+          "GET" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"number" => 36, "state" => "closed", "labels" => []})
+
+          "PATCH" ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            send(test_pid, {:update_patch, Jason.decode!(body)})
+
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"number" => 36})
+        end
+      end)
+
+      ws = github_workspace()
+
+      {:ok, issue} =
+        Ash.create(Issue, %{
+          title: "to-requeue",
+          tracker_type: :github,
+          tracker_ref: @ref,
+          workspace_id: ws.id
+        })
+
+      {:ok, started} = Ash.update(issue, %{}, action: :start)
+      assert_receive {:update_patch, %{"labels" => ["in progress"]}}
+
+      assert {:ok, requeued} = Ash.update(started, %{}, action: :requeue)
+      assert requeued.state == :queued
+
+      # The stub reports the issue closed, so the adapter has to move it: the
+      # requeue asks for `:open`, with no in-progress label.
+      assert_receive {:update_patch, payload}
+      assert payload["state"] == "open"
+      assert payload["labels"] == []
     end
   end
 
@@ -707,7 +751,7 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTrackerTest do
         })
 
       assert {:ok, closed} = Ash.update(issue, %{close_upstream: true}, action: :close)
-      assert closed.status == :closed
+      assert closed.state == :closed
 
       # The custom fields are written first…
       fields_path = "/rest/api/3/issue/#{@jira_ref}"
@@ -740,7 +784,7 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTrackerTest do
 
       # Local close still succeeds (best-effort sync) …
       assert {:ok, closed} = Ash.update(issue, %{close_upstream: true}, action: :close)
-      assert closed.status == :closed
+      assert closed.state == :closed
 
       # … but NOTHING is pushed to Jira: no field write, no transition.
       refute_receive {:jira, :put_fields, _, _}
@@ -761,9 +805,9 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTrackerTest do
           workspace_id: ws.id
         })
 
-      # Stamp review_only: true and transition to in_progress in the same update.
-      assert {:ok, updated} = Ash.update(issue, %{review_only: true, status: :in_progress})
-      assert updated.status == :in_progress
+      # Stamp review_only: true and start the ticket in the same write.
+      assert {:ok, updated} = Ash.update(issue, %{review_only: true}, action: :start)
+      assert updated.state == :active
       assert updated.review_only == true
 
       refute_receive {:github, :patch, _, _}
@@ -781,11 +825,11 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTrackerTest do
           workspace_id: ws.id
         })
 
-      # Stamp review_only without changing status so SyncTracker skips on equality.
+      # Stamp review_only without changing state so SyncTracker skips on equality.
       {:ok, issue} = Ash.update(issue, %{review_only: true})
 
       assert {:ok, closed} = Ash.update(issue, %{close_upstream: true}, action: :close)
-      assert closed.status == :closed
+      assert closed.state == :closed
 
       refute_receive {:github, :patch, _, _}
     end
@@ -841,7 +885,7 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTrackerTest do
 
       assert {:ok, _} = Ash.update(child, %{}, action: :close)
 
-      assert Ash.get!(Issue, parent.id).status == :closed
+      assert Ash.get!(Issue, parent.id).state == :closed
 
       expected_path = "/repos/#{@owner}/#{@repo}/issues/#{@ref}"
       assert_receive {:github, :patch, ^expected_path, %{"state" => "closed"}}
@@ -868,7 +912,7 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTrackerTest do
       forwarding_stub()
 
       assert {:ok, synced} = Ash.update(closed, %{}, action: :sync_upstream_close)
-      assert synced.status == :closed
+      assert synced.state == :closed
       assert synced.closed_at == closed_at
 
       # bd-bsco7f: the local close said "leave the ticket open"; this action

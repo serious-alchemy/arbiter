@@ -25,14 +25,14 @@ defmodule Arbiter.MCP.Tools.Task do
   # bd-9so315: the one non-text field a worker may set on its own task. It is a
   # self-declaration about its own diff ("this only runs inside the long-lived
   # server"), which the worker is the best-placed party to make and which
-  # nothing else in the pipeline can infer — and unlike status/priority it
+  # nothing else in the pipeline can infer — and unlike state/priority it
   # cannot reroute or reprioritize work: its only effect is that the task waits
   # for a human observation before closing.
   @progress_flags ~w(verify_after_deploy)
 
   # bd-3uy2hn: the fields a `:refine` token may write on a task in its subtree.
-  # Deliberately excludes `status` (lifecycle belongs to the board, and closing
-  # has its own tool), everything tracker- or assignment-shaped, and `pr_ref` /
+  # Deliberately excludes the lifecycle (it belongs to the board and moves only
+  # through the transition tools), everything tracker- or assignment-shaped, and `pr_ref` /
   # `target_branch` / `pr_body` — a refine session shapes *what the work is*, not
   # who does it, where it lands, or whether it is done.
   @refine_writable_fields ~w(title description acceptance notes qa_notes deployment_notes
@@ -64,7 +64,7 @@ defmodule Arbiter.MCP.Tools.Task do
       # bd-6fkgvo: where the ticket is, in the lifecycle vocabulary, on both
       # views — its stored state, its column, its computed step, what blocks
       # it, and its attention (bd-8nlez1: owner, what it waits on, why, and
-      # any hand-off note). `status` stays beside them for one release.
+      # any hand-off note).
       result =
         result
         |> Map.merge(Projection.payload(Projection.view(issue)))
@@ -132,7 +132,7 @@ defmodule Arbiter.MCP.Tools.Task do
   @doc """
   The worker's one write: record `notes` / `qa_notes` / `deployment_notes` /
   `pr_body` on its own task (the structured replacement for `arb ticket update
-  <id> --qa-notes …`). It cannot flip status, reprioritize, or touch another
+  <id> --qa-notes …`). It cannot move the ticket's state, reprioritize, or touch another
   task. Coordinator: the same narrow write against any task in its workspace.
   """
   @spec task_update_progress(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
@@ -349,10 +349,11 @@ defmodule Arbiter.MCP.Tools.Task do
   # ---- task_update --------------------------------------------------------
 
   @doc """
-  Update a task in the scope's workspace (status / priority / title / …).
-  Coordinator only. The `:closed` status is rejected here — closing goes through
-  `ticket_close`, which runs the close FSM + teardown. Backs onto the task's
-  `:update` action.
+  Update a task's fields in the scope's workspace (priority / title / …).
+  Coordinator only. It never moves the lifecycle `state` — that goes through
+  `ticket_promote` / `ticket_demote` / `ticket_close` / `ticket_reopen`, which
+  run the transitions and their side effects. Backs onto the task's `:update`
+  action.
   """
   @spec task_update(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def task_update(%Scope{} = scope, args) do
@@ -388,8 +389,8 @@ defmodule Arbiter.MCP.Tools.Task do
   # ---- task_close ---------------------------------------------------------
 
   @doc """
-  Close a task in the scope's workspace via the `:close` action (sets status,
-  runs the worker/worktree teardown, and syncs the close upstream by default
+  Close a task in the scope's workspace via the `:close` action (moves it to
+  `:closed`, runs the worker/worktree teardown, and syncs the close upstream by default
   when the task carries a `tracker_ref`). Pass `close_upstream: false` to leave
   the linked tracker issue open. Coordinator only.
   """
@@ -413,7 +414,7 @@ defmodule Arbiter.MCP.Tools.Task do
 
   @doc """
   Reopen a closed task in the scope's workspace via the `:reopen` action (clears
-  `closed_at`, returns it to `:open` and the ready queue, and best-effort
+  `closed_at`, returns it to `:queued` and the ready queue, and best-effort
   reopens the linked tracker issue). Coordinator only. Reopening is the only
   supported path out of `:closed` — the `:update` FSM rejects that transition —
   so a non-closed task is reported as an operational error.
@@ -432,9 +433,9 @@ defmodule Arbiter.MCP.Tools.Task do
   # ---- task_promote --------------------------------------------------------
 
   @doc """
-  Promote a task from Backlog to Ready (set `refined: true`) via the
-  `:promote_to_ready` action. Coordinator only. Idempotent by design —
-  promoting an already-refined task is a no-op success, not an error.
+  Promote a task from Backlog to the queue (state `:backlog` → `:queued`) via
+  the `:promote_to_ready` action. Coordinator only. Idempotent by design —
+  promoting an already-queued task is a no-op success, not an error.
   """
   @spec task_promote(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def task_promote(%Scope{} = scope, args) do
@@ -469,14 +470,11 @@ defmodule Arbiter.MCP.Tools.Task do
   # ---- task_demote --------------------------------------------------------
 
   @doc """
-  Move a task from Ready (refined: true) back to Backlog (refined: false).
-  Inverse of `ticket_promote`. Coordinator only, and idempotent.
+  Move a task back to Backlog (state `:queued` | `:active` | `:merging` →
+  `:backlog`) via the `demote` transition. Inverse of `ticket_promote`.
+  Coordinator only, and idempotent.
 
-  A task can only be demoted if:
-  1. It has no live worker
-  2. Its status is :open (undispatched / not yet started)
-
-  Refuses if the task is in progress, awaiting verification, or closed.
+  Refuses a task with a live worker, and one that is verifying or closed.
   """
   @spec task_demote(Scope.t(), map()) ::
           {:ok, map()} | {:error, {atom(), String.t()}}
@@ -573,7 +571,7 @@ defmodule Arbiter.MCP.Tools.Task do
   locally but never synced upstream. Coordinator only. Backs onto the
   `:sync_upstream_close` action, which requires the task to already be
   `:closed` — a non-closed task is reported as an operational error — and
-  makes no local status/closed_at change or close-time side effect (no
+  makes no local state/closed_at change or close-time side effect (no
   StopWorker/CleanupWorktree/parent rollup).
   """
   @spec task_sync_upstream_close(Scope.t(), map()) ::
@@ -591,8 +589,8 @@ defmodule Arbiter.MCP.Tools.Task do
   # ---- task_verify ---------------------------------------------------------
 
   @doc """
-  Record the restart-and-observe result for a task parked at
-  `:awaiting_verification` (bd-9so315). Coordinator only.
+  Record the restart-and-observe result for a task in state `:verifying`
+  (bd-9so315). Coordinator only.
 
   Exactly one of `observed` / `failed` must be given, and its value is the
   evidence — what was actually seen on the running server. `observed` closes
@@ -632,8 +630,8 @@ defmodule Arbiter.MCP.Tools.Task do
 
   defp verify_error_message(:not_awaiting_verification),
     do:
-      "task is not awaiting verification — only a task parked at " <>
-        "awaiting_verification can record a verify result"
+      "task is not awaiting verification — only a task in state " <>
+        "verifying can record a verify result"
 
   defp verify_error_message(:evidence_required),
     do: "evidence text is required: say what you observed on the running server"
@@ -813,7 +811,6 @@ defmodule Arbiter.MCP.Tools.Task do
       {"notes", :string},
       {"qa_notes", :string},
       {"deployment_notes", :string},
-      {"status", {:enum, Issue.statuses()}},
       {"priority", :integer},
       {"difficulty", :integer},
       {"issue_type", {:enum, Issue.issue_types()}},
@@ -838,7 +835,6 @@ defmodule Arbiter.MCP.Tools.Task do
       description: i.description,
       acceptance: i.acceptance,
       acceptance_waived: i.acceptance_waived,
-      status: Tools.to_str(i.status),
       state: Tools.to_str(i.state),
       priority: i.priority,
       difficulty: i.difficulty,

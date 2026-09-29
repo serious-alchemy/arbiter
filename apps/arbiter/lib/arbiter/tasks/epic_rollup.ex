@@ -1,10 +1,10 @@
 defmodule Arbiter.Tasks.EpicRollup do
   @moduledoc """
-  Per-status child aggregation for an epic, plus the `needs_you` signal the
+  Per-column child aggregation for an epic, plus the `needs_you` signal the
   `/epics` page uses to decide which rows deserve the operator's attention
   (bd-58z2tu, superseding the three-signal "stuck" rule from bd-2wmxt5).
 
-  Neither `child_open` nor a per-status count exists on `Issue` — the resource
+  Neither `child_open` nor a per-column count exists on `Issue` — the resource
   only carries the `child_total` / `child_closed` calculations — so this module
   derives the breakdown from the children themselves.
 
@@ -32,13 +32,13 @@ defmodule Arbiter.Tasks.EpicRollup do
   move forward without me" — true exactly when at least one child satisfies
   one of:
 
-    1. Parked in `:awaiting_verification` — nothing but a human observation
-       clears that state.
+    1. It is `:verifying` — merged and waiting on a restart-and-observe;
+       nothing but a human observation clears that state.
     2. Its own live worker needs the operator, per
        `Arbiter.Board.Snapshot.child_needs_you?/2` — the same predicate the
        board's Waiting column votes with, not a second definition. Covers a
        run `:waiting` on a question, a failed run, an MR blocked for a reason
-       outside the Watchdog's auto-resolvable set, and an `:in_progress`
+       outside the Watchdog's auto-resolvable set, and an `:active`
        child with no live worker that has sat past `Snapshot.orphaned?/3`'s
        dispatch grace window (nothing will retry it on its own). A child
        still inside that window, or of a non-dispatchable type (`:epic`),
@@ -65,7 +65,7 @@ defmodule Arbiter.Tasks.EpicRollup do
 
   Children come from `Arbiter.Tasks.Dependencies.for_issue/1` — the same facade
   the detail page reads — one call per epic, rather than a second hand-rolled
-  `:parent_of` query. The gating edges and the blockers' own status/refined
+  `:parent_of` query. The gating edges and the blockers' own state
   are then read in bulk queries across *all* the epics' children, so the
   signal costs a constant number of reads regardless of how many epics are
   listed. Live workers come from `Arbiter.Worker.list_children/0` (or the
@@ -231,7 +231,7 @@ defmodule Arbiter.Tasks.EpicRollup do
   # ---- needs_you (bd-58z2tu) -------------------------------------------------
 
   # One read of the world shared by every epic in the batch: the open gating
-  # blockers (and their own status/refined, for rule 3), plus the live
+  # blockers (and their own state, for rule 3), plus the live
   # workers touching any child or blocker (for rule 2).
   defp build_context(children, opts) do
     child_ids = Enum.map(children, & &1.id)
@@ -364,8 +364,6 @@ defmodule Arbiter.Tasks.EpicRollup do
     |> Ash.Query.select([
       :id,
       :state,
-      :status,
-      :refined,
       :issue_type,
       :merger_status,
       :updated_at,
@@ -398,7 +396,7 @@ defmodule Arbiter.Tasks.EpicRollup do
 
   # Ids of children held by at least one unsatisfied gating edge. Standalone from
   # `build_context/2` above — `children_with_status/1` is a single-epic call
-  # with no reason to also fetch blocker status/refined or live workers.
+  # with no reason to also fetch blocker state or live workers.
   defp blocked_ids([]), do: MapSet.new()
 
   defp blocked_ids(children) do
@@ -447,7 +445,7 @@ defmodule Arbiter.Tasks.EpicRollup do
 
     Issue
     |> Ash.Query.filter(id in ^ids)
-    |> Ash.Query.select([:id, :state, :status])
+    |> Ash.Query.select([:id, :state])
     |> Ash.read!()
     |> Enum.filter(&Lifecycle.blocker_satisfied?/1)
     |> MapSet.new(& &1.id)

@@ -160,16 +160,16 @@ defmodule ArbiterWeb.AuditLogLiveTest do
     end
   end
 
-  describe "status transitions" do
-    test "renders the literal old → new status, never prettified", %{conn: conn, ws: ws} do
+  describe "state transitions" do
+    test "renders the literal old → new state, never prettified", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "transition me", workspace_id: ws.id})
 
       {:ok, _task} =
-        Ash.update(task, %{status: :in_progress, change_origin: "cli"}, action: :update)
+        Ash.update(task, %{acceptance_waived: "test"}, action: :promote_to_ready)
 
       {:ok, _view, html} = live_audit(conn)
 
-      assert html =~ "open → in_progress"
+      assert html =~ "backlog → queued"
     end
   end
 
@@ -179,10 +179,10 @@ defmodule ArbiterWeb.AuditLogLiveTest do
       {:ok, machine_task} = Ash.create(Issue, %{title: "machine edit", workspace_id: ws.id})
 
       {:ok, _} =
-        Ash.update(human_task, %{status: :in_progress, change_origin: "cli"}, action: :update)
+        Ash.update(human_task, %{title: "edited", change_origin: "cli"}, action: :update)
 
       {:ok, _} =
-        Ash.update(machine_task, %{status: :in_progress, change_origin: "worker:au-1"},
+        Ash.update(machine_task, %{title: "edited", change_origin: "worker:au-1"},
           action: :update
         )
 
@@ -199,10 +199,10 @@ defmodule ArbiterWeb.AuditLogLiveTest do
       {:ok, machine_task} = Ash.create(Issue, %{title: "machine edit", workspace_id: ws.id})
 
       {:ok, _} =
-        Ash.update(human_task, %{status: :in_progress, change_origin: "cli"}, action: :update)
+        Ash.update(human_task, %{title: "edited", change_origin: "cli"}, action: :update)
 
       {:ok, _} =
-        Ash.update(machine_task, %{status: :in_progress, change_origin: "worker:au-1"},
+        Ash.update(machine_task, %{title: "edited", change_origin: "worker:au-1"},
           action: :update
         )
 
@@ -249,7 +249,7 @@ defmodule ArbiterWeb.AuditLogLiveTest do
         {:ok, filler} = Ash.create(Issue, %{title: "filler #{n}", workspace_id: ws.id})
 
         {:ok, _} =
-          Ash.update(filler, %{status: :in_progress, change_origin: "cli"}, action: :update)
+          Ash.update(filler, %{title: "edited", change_origin: "cli"}, action: :update)
       end
 
       {:ok, _view, html} = live_audit(conn, "/audit?entity_id=#{target.id}")

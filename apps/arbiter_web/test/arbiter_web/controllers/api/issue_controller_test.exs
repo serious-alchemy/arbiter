@@ -1,6 +1,8 @@
 defmodule ArbiterWeb.Api.IssueControllerTest do
   use ArbiterWeb.ConnCase, async: false
 
+  import Arbiter.LifecycleFixtures
+
   alias Arbiter.Tasks.{Dependency, Issue, Workspace}
 
   setup %{conn: conn} do
@@ -59,7 +61,7 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
       assert %{
                "id" => id,
                "title" => "first",
-               "status" => "open",
+               "state" => "backlog",
                "priority" => 1,
                "issue_type" => "bug",
                "workspace_id" => ws_id
@@ -239,9 +241,13 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
                "error" => %{
                  "type" => "duplicate_task",
                  "message" => msg,
-                 "details" => %{"matches" => [%{"title" => "Duplicate Title"}]}
+                 "details" => %{"matches" => [%{"title" => "Duplicate Title"} = match]}
                }
              } = body
+
+      # A match names the ticket's lifecycle state, never the removed status.
+      assert match["state"] == "backlog"
+      refute Map.has_key?(match, "status")
 
       assert msg =~ "--force"
     end
@@ -500,11 +506,24 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
       body = json_response(conn, 200)
       assert body["id"] == issue.id
       assert body["title"] == "show me"
-      assert body["status"] == "open"
+      assert body["state"] == "backlog"
     end
 
-    # bd-842qio: the stored lifecycle state beside the legacy status — what
-    # `arb ticket show --json` prints.
+    # bd-36ytcl: `state` is the ticket's one lifecycle field — the legacy
+    # `status` / `refined` and the old ReviewGate park columns are gone from
+    # the JSON, not rendered as nulls.
+    test "carries no legacy status, refined or review-park fields", %{conn: conn, ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "no legacy", workspace_id: ws.id})
+
+      body = conn |> get(~p"/api/issues/#{issue.id}") |> json_response(200)
+
+      for key <- ~w(status refined review_park_reason review_parked_at) do
+        refute Map.has_key?(body, key), key
+      end
+    end
+
+    # bd-842qio: the stored lifecycle state — what `arb ticket show --json`
+    # prints.
     test "carries the lifecycle state, close_reason and rank", %{conn: conn, ws: ws} do
       {:ok, issue} = Ash.create(Issue, %{title: "show my state", workspace_id: ws.id})
 
@@ -517,15 +536,14 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
 
       body = conn |> get(~p"/api/issues/#{issue.id}") |> json_response(200)
 
-      assert {body["state"], body["status"], body["close_reason"]} ==
-               {"closed", "closed", "duplicate"}
+      assert {body["state"], body["close_reason"]} == {"closed", "duplicate"}
     end
 
     # bd-741sid: the ticket owns its open PR — the ref, its URL, the forge's
     # last answer and when it was read — and the pr_closed cause.
     test "carries the ticket's PR state and its attention cause", %{conn: conn, ws: ws} do
       {:ok, issue} = Ash.create(Issue, %{title: "show my PR", workspace_id: ws.id})
-      {:ok, _} = Ash.update(issue, %{status: :in_progress})
+      put_state!(issue, :active)
 
       body = conn |> get(~p"/api/issues/#{issue.id}") |> json_response(200)
 
@@ -697,15 +715,32 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
       assert length(list) == 2
     end
 
-    test "filters by status", %{conn: conn, ws: ws} do
-      {:ok, open_issue} = Ash.create(Issue, %{title: "still open", workspace_id: ws.id})
+    test "filters by state", %{conn: conn, ws: ws} do
+      {:ok, backlog} = Ash.create(Issue, %{title: "still backlog", workspace_id: ws.id})
+      {:ok, queued} = Ash.create(Issue, %{title: "queued", workspace_id: ws.id})
+      queued = put_state!(queued, :queued)
       {:ok, will_close} = Ash.create(Issue, %{title: "to close", workspace_id: ws.id})
       {:ok, _closed} = Ash.update(will_close, %{}, action: :close)
 
+      list = conn |> get(~p"/api/issues?state=queued") |> json_response(200) |> Map.fetch!("data")
+      assert Enum.map(list, & &1["id"]) == [queued.id]
+
+      list =
+        conn |> get(~p"/api/issues?state=backlog") |> json_response(200) |> Map.fetch!("data")
+
+      assert Enum.map(list, & &1["id"]) == [backlog.id]
+    end
+
+    # bd-36ytcl: the legacy `status` filter is gone — it is no longer a
+    # filter field at all, so it narrows nothing.
+    test "ignores the removed status filter", %{conn: conn, ws: ws} do
+      {:ok, _a} = Ash.create(Issue, %{title: "a", workspace_id: ws.id})
+      {:ok, b} = Ash.create(Issue, %{title: "b", workspace_id: ws.id})
+      {:ok, _} = Ash.update(b, %{}, action: :close)
+
       conn = get(conn, ~p"/api/issues?status=open")
       assert %{"data" => list} = json_response(conn, 200)
-      assert Enum.any?(list, &(&1["id"] == open_issue.id))
-      refute Enum.any?(list, &(&1["id"] == will_close.id))
+      assert length(list) == 2
     end
 
     test "filters by workspace_id", %{conn: conn, ws: ws} do
@@ -719,8 +754,15 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
       assert Enum.any?(list, &(&1["id"] == mine.id))
     end
 
-    test "returns 400 for unknown status value", %{conn: conn} do
-      conn = get(conn, ~p"/api/issues?status=zzzzz_not_an_atom_zzzzz")
+    test "returns 400 for an unknown state value", %{conn: conn} do
+      conn = get(conn, ~p"/api/issues?state=zzzzz_not_an_atom_zzzzz")
+      assert %{"error" => %{"type" => "invalid_request"}} = json_response(conn, 400)
+    end
+
+    # An existing atom that is not a lifecycle state is still refused, not
+    # passed through into the query.
+    test "returns 400 for a state that is an atom but not a lifecycle state", %{conn: conn} do
+      conn = get(conn, ~p"/api/issues?state=open")
       assert %{"error" => %{"type" => "invalid_request"}} = json_response(conn, 400)
     end
   end
@@ -749,6 +791,17 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
     test "returns 404 on missing", %{conn: conn} do
       conn = patch(conn, ~p"/api/issues/api-nope", %{title: "x"})
       assert %{"error" => %{"type" => "not_found"}} = json_response(conn, 404)
+    end
+
+    # bd-36ytcl: lifecycle moves go through the named transition endpoints;
+    # an update carrying the removed `status` is refused and moves nothing.
+    test "refuses a status change", %{conn: conn, ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "stay backlog", workspace_id: ws.id})
+
+      conn = patch(conn, ~p"/api/issues/#{issue.id}", %{status: "in_progress"})
+
+      assert %{"error" => %{"type" => "validation_error"}} = json_response(conn, 422)
+      assert Ash.get!(Issue, issue.id).state == :backlog
     end
 
     test "persists and serializes pr_body (bd-53xrmi)", %{conn: conn, ws: ws} do
@@ -789,7 +842,7 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
       conn = post(conn, ~p"/api/issues/#{issue.id}/close", %{reason: "done"})
 
       body = json_response(conn, 200)
-      assert body["status"] == "closed"
+      assert body["state"] == "closed"
       refute is_nil(body["closed_at"])
     end
 
@@ -810,7 +863,7 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
       conn = post(conn, ~p"/api/issues/#{closed.id}/reopen")
 
       body = json_response(conn, 200)
-      assert body["status"] == "open"
+      assert body["state"] == "queued"
       assert is_nil(body["closed_at"])
     end
 
@@ -818,7 +871,12 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
       {:ok, issue} = Ash.create(Issue, %{title: "x", workspace_id: ws.id})
 
       conn = post(conn, ~p"/api/issues/#{issue.id}/reopen")
-      assert %{"error" => %{"type" => "validation_error"}} = json_response(conn, 422)
+
+      assert %{"error" => %{"type" => "validation_error", "details" => %{"errors" => errors}}} =
+               json_response(conn, 422)
+
+      # The refusal names the lifecycle field the CLI keys on.
+      assert Enum.any?(errors, &(&1["field"] == "state"))
     end
   end
 
@@ -827,25 +885,25 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
       {:ok, issue} =
         Ash.create(Issue, %{title: "promote me", workspace_id: ws.id, acceptance: "- works"})
 
-      assert issue.refined == false
+      assert issue.state == :backlog
 
       conn = post(conn, ~p"/api/issues/#{issue.id}/promote")
 
       body = json_response(conn, 200)
-      assert body["refined"] == true
+      assert body["state"] == "queued"
     end
 
-    test "promoting an already-refined task is a no-op success", %{conn: conn, ws: ws} do
+    test "promoting an already-queued task is a no-op success", %{conn: conn, ws: ws} do
       {:ok, issue} =
         Ash.create(Issue, %{title: "x", workspace_id: ws.id, acceptance: "- works"})
 
-      {:ok, refined} = Ash.update(issue, %{}, action: :promote_to_ready)
-      assert refined.refined == true
+      {:ok, queued} = Ash.update(issue, %{}, action: :promote_to_ready)
+      assert queued.state == :queued
 
-      conn = post(conn, ~p"/api/issues/#{refined.id}/promote")
+      conn = post(conn, ~p"/api/issues/#{queued.id}/promote")
 
       body = json_response(conn, 200)
-      assert body["refined"] == true
+      assert body["state"] == "queued"
     end
 
     # bd-7mbrlg
@@ -873,7 +931,7 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
         })
 
       body = json_response(conn, 200)
-      assert body["refined"] == true
+      assert body["state"] == "queued"
       assert body["acceptance_waived"] == "trivial config bump"
     end
 
@@ -886,7 +944,7 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
           Ash.create(Issue, %{title: "exempt #{type}", workspace_id: ws.id, issue_type: type})
 
         conn = post(conn, ~p"/api/issues/#{issue.id}/promote")
-        assert json_response(conn, 200)["refined"] == true
+        assert json_response(conn, 200)["state"] == "queued"
       end
     end
   end
@@ -896,25 +954,25 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
       {:ok, issue} =
         Ash.create(Issue, %{title: "demote me", workspace_id: ws.id, acceptance: "- works"})
 
-      {:ok, refined} = Ash.update(issue, %{}, action: :promote_to_ready)
-      assert refined.refined == true
+      {:ok, queued} = Ash.update(issue, %{}, action: :promote_to_ready)
+      assert queued.state == :queued
 
-      conn = post(conn, ~p"/api/issues/#{refined.id}/demote")
+      conn = post(conn, ~p"/api/issues/#{queued.id}/demote")
 
       body = json_response(conn, 200)
-      assert body["refined"] == false
+      assert body["state"] == "backlog"
     end
 
     test "demoting an already-backlog task is a no-op success", %{conn: conn, ws: ws} do
       {:ok, issue} =
         Ash.create(Issue, %{title: "x", workspace_id: ws.id})
 
-      assert issue.refined == false
+      assert issue.state == :backlog
 
       conn = post(conn, ~p"/api/issues/#{issue.id}/demote")
 
       body = json_response(conn, 200)
-      assert body["refined"] == false
+      assert body["state"] == "backlog"
     end
   end
 
@@ -1020,9 +1078,7 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
         Ash.create(Issue, %{title: "park me", workspace_id: ws.id, verify_after_deploy: true})
 
       # bd-842qio: only work in progress parks for verification.
-      {:ok, issue} = Ash.update(issue, %{status: :in_progress})
-      {:ok, awaiting} = Ash.update(issue, %{}, action: :await_verification)
-      {:ok, awaiting: awaiting}
+      {:ok, awaiting: put_state!(issue, :verifying)}
     end
 
     test "observed closes the task and persists the evidence", %{conn: conn, awaiting: task} do
@@ -1033,7 +1089,7 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
         })
 
       body = json_response(conn, 200)
-      assert body["status"] == "closed"
+      assert body["state"] == "closed"
       assert body["verification_outcome"] == "observed"
       assert body["verification_evidence"] == "restarted; new capture_source path fires"
     end
@@ -1046,7 +1102,7 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
         })
 
       body = json_response(conn, 200)
-      assert body["status"] == "open"
+      assert body["state"] == "queued"
       assert body["verification_outcome"] == "failed"
       assert body["verification_evidence"] == "doctor still green with zero repos"
     end
@@ -1103,34 +1159,28 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
   end
 
   # bd-9zuvbh — the ReviewGate park has to be visible to a human, or class C's
-  # terminal state is just a quieter way of losing the work.
-  describe "GET /api/issues/review_parked" do
-    test "returns parked tasks with their reason, oldest first", %{conn: conn, ws: ws} do
-      {:ok, plain} = Ash.create(Issue, %{title: "not parked", workspace_id: ws.id})
+  # terminal state is just a quieter way of losing the work. bd-36ytcl: the
+  # park IS the ticket's attention cause now, so it rides on every ticket
+  # object (the dedicated `review_parked` route is gone).
+  describe "a ReviewGate park over REST" do
+    test "shows as the ticket's attention cause, with when it parked", %{conn: conn, ws: ws} do
+      {:ok, parked} = Ash.create(Issue, %{title: "parked", workspace_id: ws.id})
+      {:ok, :claimed, _} = Arbiter.Tasks.ReviewPark.park(parked.id, :inconclusive)
 
-      {:ok, older} = Ash.create(Issue, %{title: "older park", workspace_id: ws.id})
-      {:ok, newer} = Ash.create(Issue, %{title: "newer park", workspace_id: ws.id})
+      body = conn |> get(~p"/api/issues/#{parked.id}") |> json_response(200)
 
-      {:ok, :claimed, _} = Arbiter.Tasks.ReviewPark.park(older.id, :inconclusive)
-      {:ok, :claimed, _} = Arbiter.Tasks.ReviewPark.park(newer.id, :reviewer_timeout)
-
-      conn = get(conn, ~p"/api/issues/review_parked")
-      assert %{"data" => list} = json_response(conn, 200)
-
-      ids = Enum.map(list, & &1["id"])
-      assert [older.id, newer.id] == Enum.filter(ids, &(&1 in [older.id, newer.id]))
-      refute plain.id in ids
-
-      assert Enum.find(list, &(&1["id"] == older.id))["review_park_reason"] == "inconclusive"
-      assert Enum.find(list, &(&1["id"] == newer.id))["review_park_reason"] == "reviewer_timeout"
-      assert Enum.find(list, &(&1["id"] == newer.id))["review_parked_at"]
+      assert body["attention_cause"] == "inconclusive"
+      assert is_binary(body["attention_since"])
+      refute Map.has_key?(body, "review_park_reason")
     end
 
-    test "an unparked issue reports the field as null", %{conn: conn, ws: ws} do
-      {:ok, plain} = Ash.create(Issue, %{title: "plain", workspace_id: ws.id})
+    test "the removed review_parked route no longer lists parks", %{conn: conn, ws: ws} do
+      {:ok, parked} = Ash.create(Issue, %{title: "parked", workspace_id: ws.id})
+      {:ok, :claimed, _} = Arbiter.Tasks.ReviewPark.park(parked.id, :reviewer_timeout)
 
-      conn = get(conn, ~p"/api/issues/#{plain.id}")
-      assert %{"review_park_reason" => nil, "review_parked_at" => nil} = json_response(conn, 200)
+      # Falls through to `GET /api/issues/:id` with a non-existent id.
+      conn = get(conn, "/api/issues/review_parked")
+      assert %{"error" => %{"type" => "not_found"}} = json_response(conn, 404)
     end
   end
 end

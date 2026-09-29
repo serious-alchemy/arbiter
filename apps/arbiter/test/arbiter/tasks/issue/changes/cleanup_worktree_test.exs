@@ -12,6 +12,7 @@ defmodule Arbiter.Tasks.Issue.Changes.CleanupWorktreeTest do
 
   import ExUnit.CaptureLog
   import Arbiter.Test.GitFixture, only: [origin_and_clone: 0, git!: 2]
+  import Arbiter.LifecycleFixtures, only: [put_state!: 2]
 
   alias Arbiter.Tasks.Claim
   alias Arbiter.Tasks.Issue
@@ -68,7 +69,7 @@ defmodule Arbiter.Tasks.Issue.Changes.CleanupWorktreeTest do
         )
       )
 
-    {:ok, task} = Ash.update(task, %{status: :in_progress})
+    task = put_state!(task, :active)
     task
   end
 
@@ -128,7 +129,7 @@ defmodule Arbiter.Tasks.Issue.Changes.CleanupWorktreeTest do
       log =
         capture_log(fn ->
           assert {:ok, closed} = Ash.update(task, %{}, action: :close)
-          assert closed.status == :closed
+          assert closed.state == :closed
         end)
 
       assert File.dir?(path)
@@ -300,7 +301,7 @@ defmodule Arbiter.Tasks.Issue.Changes.CleanupWorktreeTest do
       Req.Test.allow(@stub_name, self(), pid)
       :ok = MergedPRFinalizer.tick(name)
 
-      assert reload!(task).status == :closed
+      assert reload!(task).state == :closed
       refute File.dir?(path)
       refute local_branch?(clone, branch)
     end
@@ -312,7 +313,7 @@ defmodule Arbiter.Tasks.Issue.Changes.CleanupWorktreeTest do
 
       assert {:ok, [{:closed, _}]} = Claim.apply_plan(ws, [{:close, task.id, "closed upstream"}])
 
-      assert reload!(task).status == :closed
+      assert reload!(task).state == :closed
       refute File.dir?(path)
     end
   end

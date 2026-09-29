@@ -63,9 +63,9 @@ defmodule ArbiterWeb.BoardLiveTest do
     {:ok, ws: ws}
   end
 
-  # bd-b5wyjd: a freshly created issue is unrefined, i.e. Backlog. Almost every
-  # test here is about a card that has already been refined into the queue, so
-  # this helper promotes; `backlog_issue/3` is the un-promoted one.
+  # bd-b5wyjd: a freshly created issue is `:backlog`. Almost every test here is
+  # about a card that has already been promoted into the queue, so this helper
+  # promotes; `backlog_issue/3` is the un-promoted one.
   defp issue(ws, title, attrs \\ %{}) do
     {:ok, issue} = Ash.update(backlog_issue(ws, title, attrs), %{}, action: :promote_to_ready)
     issue
@@ -84,10 +84,10 @@ defmodule ArbiterWeb.BoardLiveTest do
     issue
   end
 
-  # `:status` is not a create input — a task becomes in_progress by being
-  # worked, which is exactly the state these drags start from.
+  # `:state` is not a create input — a task becomes `:active` by being
+  # started, which is exactly the state these drags start from.
   defp working_issue(ws, title) do
-    {:ok, issue} = Ash.update(issue(ws, title), %{status: :in_progress})
+    {:ok, issue} = Ash.update(issue(ws, title), %{}, action: :start)
     issue
   end
 
@@ -411,6 +411,15 @@ defmodule ArbiterWeb.BoardLiveTest do
 
       assert has_element?(view, ~s([id="card-#{task.id}"] a[href="/workers/#{task.id}"]))
     end
+
+    test "an In progress card with no run has no worker to link to", %{conn: conn, ws: ws} do
+      task = working_issue(ws, "dispatching, no run yet")
+
+      {:ok, view, _html} = live_board(conn)
+
+      assert has_element?(view, ~s(#board-column-in_progress [id="card-#{task.id}"]))
+      refute has_element?(view, ~s([id="card-#{task.id}"] a[href="/workers/#{task.id}"]))
+    end
   end
 
   # bd-b5wyjd — Backlog is where work is born, and the promote button on the
@@ -553,7 +562,7 @@ defmodule ArbiterWeb.BoardLiveTest do
       render_async(view, @async_timeout)
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      refute reloaded.refined
+      assert reloaded.state == :backlog
 
       assert has_element?(view, ~s(#board-column-backlog [id="card-#{task.id}"]))
       refute has_element?(view, ~s(#board-column-ready [id="card-#{task.id}"]))
@@ -868,7 +877,7 @@ defmodule ArbiterWeb.BoardLiveTest do
       assert html =~ "cannot be dragged"
 
       # And the task did not move.
-      assert Ash.get!(Issue, task.id).status == :awaiting_verification
+      assert Ash.get!(Issue, task.id).state == :verifying
     end
   end
 
@@ -881,7 +890,7 @@ defmodule ArbiterWeb.BoardLiveTest do
       assert drag(view, task.id, "ready", "closed") =~ "cannot be dragged"
 
       assert has_element?(view, ~s(#board-column-ready [id="card-#{task.id}"]))
-      assert Ash.get!(Issue, task.id).status == :open
+      assert Ash.get!(Issue, task.id).state == :queued
     end
   end
 

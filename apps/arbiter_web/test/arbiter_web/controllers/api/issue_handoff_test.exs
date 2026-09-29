@@ -6,6 +6,8 @@ defmodule ArbiterWeb.Api.IssueHandoffTest do
   """
   use ArbiterWeb.ConnCase, async: false
 
+  import Arbiter.LifecycleFixtures
+
   alias Arbiter.Tasks.{Attention, Issue, Workspace}
 
   setup %{conn: conn} do
@@ -13,7 +15,7 @@ defmodule ArbiterWeb.Api.IssueHandoffTest do
       Ash.create(Workspace, %{name: "ho-#{System.unique_integer([:positive])}", prefix: "hot"})
 
     {:ok, task} = Ash.create(Issue, %{title: "hand me off", workspace_id: ws.id})
-    {:ok, task} = Ash.update(task, %{status: :in_progress})
+    task = put_state!(task, :active)
     {:ok, _} = Attention.raise_cause(task.id, :run_crashed, "boom")
 
     {:ok, conn: put_req_header(conn, "accept", "application/json"), task: task}

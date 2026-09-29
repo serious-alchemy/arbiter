@@ -13,7 +13,7 @@ defmodule Arbiter.Quota.Gate do
       failing open because no snapshot exists).
     * `{:hold, reason}` — HOLD the dispatch. The dispatcher enqueues the intent
       in the per-workspace `Arbiter.Workflows.DispatchQueue` and does NOT
-      transition the task to `:in_progress`; the queue drains it later in
+      transition the task to `:active`; the queue drains it later in
       priority order as headroom frees.
     * `{:overage, spend_usd}` — dispatch proceeds past the cap (paid overage);
       `spend_usd` is the windowed overage spend the caller records + alerts on.

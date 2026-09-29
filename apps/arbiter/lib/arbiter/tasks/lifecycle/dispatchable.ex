@@ -4,15 +4,15 @@ defmodule Arbiter.Tasks.Lifecycle.Dispatchable do
 
   Before this module there were four answers to "may this ticket be
   dispatched?": the board's Ready filter, the scheduler's own card blocks,
-  Autopilot's `refined` re-check in `Arbiter.Worker.Dispatch`, and nothing at
+  Autopilot's own re-check in `Arbiter.Worker.Dispatch`, and nothing at
   all for a manual dispatch, which went ahead from Backlog or past open
   blockers without a word. Now `Arbiter.Board.Scheduler.plan/1` and
   `Arbiter.Worker.Dispatch` both ask `dispatchable/2`.
 
   A ticket is dispatchable when
 
-    1. its column (`Arbiter.Tasks.Lifecycle.view/2`) is `:ready` — refined,
-       and no unsatisfied gating blocker; and
+    1. its column (`Arbiter.Tasks.Lifecycle.view/2`) is `:ready` — `:queued`,
+       with no unsatisfied gating blocker; and
     2. the scheduler holds nothing against it: a `:conflicts_with`
        counterpart in flight, a file overlap with in-flight work, a paused
        scheduler, a quota or auth hold, or no free slot.
@@ -41,7 +41,7 @@ defmodule Arbiter.Tasks.Lifecycle.Dispatchable do
 
   | hold | meaning |
   |---|---|
-  | `{:column, :backlog}` | in Backlog — not refined |
+  | `{:column, :backlog}` | in Backlog — not promoted |
   | `{:blocked_by, ids}` | queued, waiting on these blockers |
   | `{:column, column}` | already past Ready (`:in_progress`, `:merging`, `:verifying`, `:closed`) |
   | `{:conflicts_with, id}` | a `:conflicts_with` counterpart is in flight |

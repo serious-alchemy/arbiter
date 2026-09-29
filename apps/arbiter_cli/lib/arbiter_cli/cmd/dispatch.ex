@@ -4,7 +4,7 @@ defmodule ArbiterCli.Cmd.Dispatch do
   — spawn a worker to work on a task.
 
   POSTs to `/api/workers/dispatch`. The server transitions the task to
-  `:in_progress`, starts a worker GenServer under
+  `:active`, starts a worker GenServer under
   `Arbiter.Worker.Supervisor`, attaches `Arbiter.Workflows.Work` via
   the WorkflowMachine, and spawns an agent subprocess in the worktree.
 
@@ -21,7 +21,7 @@ defmodule ArbiterCli.Cmd.Dispatch do
                      `codex` CLI on PATH (consumes OpenAI credits).
     --with-claude    DEPRECATED alias for `--provider claude`.
     --with-gemini    DEPRECATED alias for `--provider gemini`.
-    --no-agent       dry dispatch — park the task in `:in_progress` for a hand
+    --no-agent       dry dispatch — move the task to `:active` for a hand
                      to attach, with no agent spawned. Preserves the old
                      manual-attach path.
     --model <name>   one-shot override of the model the worker session runs
@@ -120,7 +120,7 @@ defmodule ArbiterCli.Cmd.Dispatch do
 
     IO.puts("Dispatch:")
     IO.puts("  Ticket:    #{task["id"]} — #{task["title"]}")
-    IO.puts("  Status:   #{task["status"]}")
+    IO.puts("  State:    #{task["state"]}")
     IO.puts("  Worker:  #{worker["pid"]}")
     IO.puts("  Machine:  #{machine["id"]} #{machine["pid"]}")
 

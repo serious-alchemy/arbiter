@@ -14,6 +14,8 @@ defmodule Arbiter.Worker.NotesGateTest do
 
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures, only: [put_state!: 2]
+
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Messages.Message
   alias Arbiter.Worker
@@ -56,7 +58,7 @@ defmodule Arbiter.Worker.NotesGateTest do
         issue_type: issue_type
       })
 
-    {:ok, task} = Ash.update(task, %{status: :in_progress})
+    task = put_state!(task, :active)
 
     task =
       if notes do
@@ -189,7 +191,7 @@ defmodule Arbiter.Worker.NotesGateTest do
       # let a re-dispatched worker satisfy the gate without producing real
       # findings. The escalation carries the diagnostic instead.
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      refute reloaded.status == :closed
+      refute reloaded.state == :closed
 
       # Coordinator receives an escalation naming the gate failure.
       escalations = Message.inbox("admiral", workspace_id: ws.id)
@@ -308,7 +310,7 @@ defmodule Arbiter.Worker.NotesGateTest do
 
       # Task stays open — the notes gate never pollutes the notes field.
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      refute reloaded.status == :closed
+      refute reloaded.state == :closed
 
       # Coordinator receives the notes-gate escalation naming the failure.
       escalation =

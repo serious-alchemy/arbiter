@@ -117,8 +117,8 @@ defmodule Arbiter.Integration.Phase1SmokeTest do
 
       reloaded = Ash.get!(Issue, parent.id, load: [:child_total, :child_closed])
 
-      assert reloaded.status == :closed,
-             "auto_close parent with all children closed should auto-close (was #{inspect(reloaded.status)})"
+      assert reloaded.state == :closed,
+             "auto_close parent with all children closed should auto-close (was #{inspect(reloaded.state)})"
 
       assert reloaded.child_total == 1
       assert reloaded.child_closed == 1
@@ -141,7 +141,7 @@ defmodule Arbiter.Integration.Phase1SmokeTest do
 
       reloaded = Ash.get!(Issue, parent.id)
 
-      assert reloaded.status == :open,
+      assert reloaded.state in [:backlog, :queued],
              "a parent without auto_close requires explicit closure; should still be open"
     end
 
@@ -161,7 +161,7 @@ defmodule Arbiter.Integration.Phase1SmokeTest do
 
       reloaded = Ash.get!(Issue, parent.id, load: [:child_total, :child_closed])
 
-      assert reloaded.status == :open,
+      assert reloaded.state in [:backlog, :queued],
              "parent should stay open while child c2 is still open"
 
       assert reloaded.child_total == 2

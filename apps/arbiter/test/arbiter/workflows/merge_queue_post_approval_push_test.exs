@@ -232,7 +232,7 @@ defmodule Arbiter.Workflows.MergeQueuePostApprovalPushTest do
       resolver_push(ws, 311, approved, pushed, @authored_diff)
 
     refute_received {:merged, _}
-    assert Ash.get!(Issue, task.id).status == :open
+    assert Ash.get!(Issue, task.id).state in [:backlog, :queued]
 
     %{items: [after_item]} = MergeQueue.state(name)
     assert {:stale_reviewed_sha, ^approved, ^pushed} = after_item.last_error
@@ -254,7 +254,7 @@ defmodule Arbiter.Workflows.MergeQueuePostApprovalPushTest do
       resolver_push(ws, 312, approved, pushed, @rebased_diff)
 
     assert_received {:merged, ^pushed}
-    assert Ash.get!(Issue, task.id).status == :closed
+    assert Ash.get!(Issue, task.id).state == :closed
 
     assert [%{kind: :mechanical} = row] = coverage_for(item.mr_ref, pushed)
     assert row.derived_from == entry.id

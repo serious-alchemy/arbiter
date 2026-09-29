@@ -251,8 +251,8 @@ defmodule Arbiter.Worker.Watchdog do
   Both terminal arms — the deferral budget running out, and a blocker that is
   already dead two refusals running (`{:resume_blocker_vanished, _, _}`; nothing
   can ever signal its completion) — **park** the task with
-  `review_park_reason: resume_blocked` and page the coordinator exactly once,
-  the park row being the claim. That is guard class E's terminal in
+  the attention cause `:resume_blocked` and page the coordinator exactly once,
+  the park being the claim. That is guard class E's terminal in
   `docs/review-coverage-and-guard-policy.md` §5.3: fail open, one escalation,
   parked and still watched. The run is not re-failed and nothing is merged.
 
@@ -2102,9 +2102,9 @@ defmodule Arbiter.Worker.Watchdog do
       detached_reschedule(state)
   end
 
-  defp retry_disowned_reason(%{status: status}, _pending, _state)
-       when status in [:closed, :awaiting_verification],
-       do: "the task is #{status}"
+  defp retry_disowned_reason(%{state: ticket_state}, _pending, _state)
+       when ticket_state in [:closed, :verifying],
+       do: "the task is #{ticket_state}"
 
   defp retry_disowned_reason(_task, nil, _state), do: "the pending merge was cleared"
 
@@ -3979,7 +3979,7 @@ defmodule Arbiter.Worker.Watchdog do
   #     the Watchdog itself dispatched moments earlier. That pass finishes on its
   #     own within minutes, at which point the resume would succeed; the old code
   #     paged and stopped the Watchdog, so nothing was left to try again and the
-  #     task sat :in_progress with an open PR indefinitely.
+  #     task sat :merging with an open PR indefinitely.
   #
   # The second case is deferred and retried on the poll interval, bounded by
   # `max_resume_deferrals`. Hitting that bound pages ONCE with a give-up reason

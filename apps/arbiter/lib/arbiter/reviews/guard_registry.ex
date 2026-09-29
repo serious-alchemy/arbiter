@@ -1131,11 +1131,12 @@ defmodule Arbiter.Reviews.GuardRegistry do
         {Worker, :escalate_review_park, 3},
         {Worker, :fail_now, 2}
       ],
-      anchors: [":review_gate_inconclusive", "fail_reason_for", "review_park_reason"],
+      anchors: [":review_gate_inconclusive", "fail_reason_for", "park_reason"],
       summary: "the single point a gate outcome becomes a failed run — or, since P9, a park",
       policy_note:
         "P9 (bd-9zuvbh) split this. `park_rejected/4` now takes a park reason: " <>
-          "with one it stamps `issues.review_park_reason` and pages once via " <>
+          "with one it parks the ticket (the reason becomes its attention cause) " <>
+          "and pages once via " <>
           "`park_review_gate/3` (the run itself finishes `:failed`, its cause on the " <>
           "ticket — bd-1uu19b); " <>
           "without one it is the pre-P9 path. Every class-C terminal passes a " <>
@@ -1413,8 +1414,8 @@ defmodule Arbiter.Reviews.GuardRegistry do
       removed_by: :p10,
       note:
         "P9 met its AC here: no ReviewGate outcome with an approving or no-verdict " <>
-          "result is an unexplained failed run any more — `park_rejected/4` stamps " <>
-          "`review_park_reason` for every class-C terminal. The row keeps the entry " <>
+          "result is an unexplained failed run any more — `park_rejected/4` parks the " <>
+          "ticket with a park reason for every class-C terminal. The row keeps the entry " <>
           "because the one arm P9 deliberately left (a genuine REQUEST_CHANGES at " <>
           "G14's round cap) still routes through this same conversion point."
     },

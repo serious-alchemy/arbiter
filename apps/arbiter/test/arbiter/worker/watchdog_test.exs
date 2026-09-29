@@ -1866,7 +1866,7 @@ defmodule Arbiter.Worker.WatchdogTest do
   # "<task>:fixpass"}}}`. That single attempt was escalated as "auto-resume
   # FAILED after 0 attempts" and the Watchdog stopped. Minutes later the fix
   # pass finished and *nothing* re-examined the task: the primary was :failed,
-  # no Watchdog was polling, and the task sat :in_progress with an open PR
+  # no Watchdog was polling, and the task sat :merging with an open PR
   # until a human ran `worker_review` by hand.
   describe "auto-resume blocked by a live subordinate pass (bd-di4t6d)" do
     defp start_blocked_watchdog(task_id, mr_ref, opts) do

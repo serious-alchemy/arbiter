@@ -24,6 +24,8 @@ defmodule Arbiter.Worker.CommitGateTest do
 
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures, only: [put_state!: 2]
+
   require Ash.Query
 
   alias Arbiter.Tasks.{Issue, Workspace}
@@ -120,7 +122,7 @@ defmodule Arbiter.Worker.CommitGateTest do
         issue_type: :feature
       })
 
-    {:ok, task} = Ash.update(task, %{status: :in_progress})
+    task = put_state!(task, :active)
     task
   end
 
@@ -253,7 +255,7 @@ defmodule Arbiter.Worker.CommitGateTest do
 
       # The task is not closed; notes carry the gate diagnostic.
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      refute reloaded.status == :closed
+      refute reloaded.state == :closed
       assert reloaded.notes =~ "Commit gate tripped"
       assert reloaded.notes =~ "forgotten_work.txt"
 

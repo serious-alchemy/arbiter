@@ -1,6 +1,8 @@
 defmodule Arbiter.Worker.DriverTest do
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures, only: [put_state!: 2]
+
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Test.StubMerger
@@ -25,8 +27,8 @@ defmodule Arbiter.Worker.DriverTest do
       {:ok, machine_id} = Machine.attach(TestWorkflows.Three, task.id, %{x: "v"})
       {:ok, machine_pid} = Machine.start(machine_id)
 
-      # Move task to :in_progress so :close is a legal transition.
-      {:ok, _} = Ash.update(task, %{status: :in_progress})
+      # Move task to :active so :close is a legal transition.
+      put_state!(task, :active)
 
       {:ok, driver_pid} =
         Driver.start(
@@ -48,18 +50,18 @@ defmodule Arbiter.Worker.DriverTest do
       refute Process.alive?(worker_pid)
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.status == :closed
+      assert reloaded.state == :closed
     end
   end
 
   describe "tick → failed" do
-    test "marks worker :failed and leaves task :in_progress on workflow error", %{ws: ws} do
+    test "marks worker :failed and leaves task :active on workflow error", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "fail", workspace_id: ws.id})
 
       {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "test/repo")
       {:ok, machine_id} = Machine.attach(TestWorkflows.Failing, task.id, %{})
       {:ok, machine_pid} = Machine.start(machine_id)
-      {:ok, _} = Ash.update(task, %{status: :in_progress})
+      put_state!(task, :active)
 
       {:ok, driver_pid} =
         Driver.start(
@@ -77,7 +79,7 @@ defmodule Arbiter.Worker.DriverTest do
       assert worker_snap.outcome == :failed
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.status == :in_progress
+      assert reloaded.state == :active
     end
   end
 
@@ -88,7 +90,7 @@ defmodule Arbiter.Worker.DriverTest do
       {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "test/repo")
       {:ok, machine_id} = Machine.attach(TestWorkflows.Three, task.id, %{x: "v"})
       {:ok, machine_pid} = Machine.start(machine_id)
-      {:ok, _} = Ash.update(task, %{status: :in_progress})
+      put_state!(task, :active)
 
       {:ok, driver_pid} =
         Driver.start(
@@ -120,7 +122,7 @@ defmodule Arbiter.Worker.DriverTest do
       {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "test/repo")
       {:ok, machine_id} = Machine.attach(TestWorkflows.Three, task.id, %{x: "v"})
       {:ok, machine_pid} = Machine.start(machine_id)
-      {:ok, _} = Ash.update(task, %{status: :in_progress})
+      put_state!(task, :active)
 
       # Pause the machine so the driver doesn't race us to completion.
       :ok = Machine.pause(machine_pid)
@@ -217,7 +219,7 @@ defmodule Arbiter.Worker.DriverTest do
       assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.status == :closed
+      assert reloaded.state == :closed
     end
   end
 
@@ -228,7 +230,7 @@ defmodule Arbiter.Worker.DriverTest do
       {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "r")
       {:ok, machine_id} = Machine.attach(TestWorkflows.Three, task.id, %{x: "v"})
       {:ok, machine_pid} = Machine.start(machine_id)
-      {:ok, _} = Ash.update(task, %{status: :in_progress})
+      put_state!(task, :active)
 
       {:ok, driver_pid} =
         Driver.start(
@@ -256,7 +258,7 @@ defmodule Arbiter.Worker.DriverTest do
       assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.status == :closed
+      assert reloaded.state == :closed
     end
 
     # bd-9so315: the Watchdog completes the worker with `:merged` both when it
@@ -274,7 +276,7 @@ defmodule Arbiter.Worker.DriverTest do
       {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "r")
       {:ok, machine_id} = Machine.attach(TestWorkflows.Three, task.id, %{x: "v"})
       {:ok, machine_pid} = Machine.start(machine_id)
-      {:ok, _} = Ash.update(task, %{status: :in_progress})
+      put_state!(task, :active)
 
       {:ok, driver_pid} =
         Driver.start(
@@ -294,7 +296,7 @@ defmodule Arbiter.Worker.DriverTest do
       assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.status == :awaiting_verification
+      assert reloaded.state == :verifying
       assert %DateTime{} = reloaded.awaiting_verification_at
 
       assert [escalation] = Arbiter.Messages.Message.inbox("coordinator", workspace_id: ws.id)
@@ -309,7 +311,7 @@ defmodule Arbiter.Worker.DriverTest do
           "restarted; the merged path runs on the live server"
         )
 
-      assert verified.status == :closed
+      assert verified.state == :closed
       assert verified.verification_outcome == :observed
       assert verified.verification_evidence =~ "restarted"
     end
@@ -320,7 +322,7 @@ defmodule Arbiter.Worker.DriverTest do
       {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "r")
       {:ok, machine_id} = Machine.attach(TestWorkflows.Three, task.id, %{x: "v"})
       {:ok, machine_pid} = Machine.start(machine_id)
-      {:ok, _} = Ash.update(task, %{status: :in_progress})
+      put_state!(task, :active)
 
       {:ok, driver_pid} =
         Driver.start(
@@ -340,13 +342,13 @@ defmodule Arbiter.Worker.DriverTest do
       assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.status == :closed
+      assert reloaded.state == :closed
       assert Arbiter.Messages.Message.inbox("coordinator", workspace_id: ws.id) == []
     end
 
     # The flag is about observing *merged* code on the running server. A worker
     # that finished without a merge has nothing deployed to observe, so it must
-    # still close rather than strand itself at :awaiting_verification.
+    # still close rather than strand itself at :verifying.
     test "a verify_after_deploy task closes on a non-merge completion", %{ws: ws} do
       {:ok, task} =
         Ash.create(Issue, %{
@@ -358,7 +360,7 @@ defmodule Arbiter.Worker.DriverTest do
       {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "r")
       {:ok, machine_id} = Machine.attach(TestWorkflows.Three, task.id, %{x: "v"})
       {:ok, machine_pid} = Machine.start(machine_id)
-      {:ok, _} = Ash.update(task, %{status: :in_progress})
+      put_state!(task, :active)
 
       {:ok, driver_pid} =
         Driver.start(
@@ -378,16 +380,16 @@ defmodule Arbiter.Worker.DriverTest do
       assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.status == :closed
+      assert reloaded.state == :closed
     end
 
-    test "leaves the task :in_progress when the worker transitions to :failed", %{ws: ws} do
+    test "leaves the task :active when the worker transitions to :failed", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "cd-fail", workspace_id: ws.id})
 
       {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "r")
       {:ok, machine_id} = Machine.attach(TestWorkflows.Three, task.id, %{x: "v"})
       {:ok, machine_pid} = Machine.start(machine_id)
-      {:ok, _} = Ash.update(task, %{status: :in_progress})
+      put_state!(task, :active)
 
       {:ok, driver_pid} =
         Driver.start(
@@ -405,7 +407,7 @@ defmodule Arbiter.Worker.DriverTest do
       assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.status == :in_progress
+      assert reloaded.state == :active
     end
 
     test "max_ticks backstop stops the driver if the worker never completes", %{ws: ws} do
@@ -414,7 +416,7 @@ defmodule Arbiter.Worker.DriverTest do
       {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "r")
       {:ok, machine_id} = Machine.attach(TestWorkflows.Three, task.id, %{x: "v"})
       {:ok, machine_pid} = Machine.start(machine_id)
-      {:ok, _} = Ash.update(task, %{status: :in_progress})
+      put_state!(task, :active)
 
       {:ok, driver_pid} =
         Driver.start(
@@ -430,15 +432,15 @@ defmodule Arbiter.Worker.DriverTest do
       ref = Process.monitor(driver_pid)
       assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
 
-      # Task stays :in_progress; we didn't close because worker didn't complete.
+      # Task stays :active; we didn't close because worker didn't complete.
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.status == :in_progress
+      assert reloaded.state == :active
     end
 
     # bd-d1jp4r: ticks must not consume budget while the worker is parked on
     # something else's decision. A long worker run + review gate was exhausting
     # the 30-minute tick budget before the merge, leaving the task stranded at
-    # :in_progress. bd-741sid: a run no longer parks on its open PR — opening it
+    # :active. bd-741sid: a run no longer parks on its open PR — opening it
     # ends the run and the ticket's Watchdog takes it — so the parked state is
     # waiting on the review gate, and a run that ends with its PR open is no
     # close.
@@ -446,7 +448,7 @@ defmodule Arbiter.Worker.DriverTest do
       StubMerger.reset()
 
       {:ok, task} = Ash.create(Issue, %{title: "cd-arg-freeze", workspace_id: ws.id})
-      {:ok, _} = Ash.update(task, %{status: :in_progress})
+      put_state!(task, :active)
 
       StubMerger.next_open_ref("!drv1")
       worker_pid = park_at_review_gate(task, ws)
@@ -485,8 +487,7 @@ defmodule Arbiter.Worker.DriverTest do
       # of the ticket's Watchdog.
       reloaded = Ash.get!(Issue, task.id)
 
-      assert {reloaded.state, reloaded.status, reloaded.pr_ref} ==
-               {:merging, :in_progress, "!drv1"}
+      assert {reloaded.state, reloaded.pr_ref} == {:merging, "!drv1"}
 
       assert Watchdog.alive?(task.id)
     end
@@ -499,7 +500,7 @@ defmodule Arbiter.Worker.DriverTest do
       {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "r")
       {:ok, machine_id} = Machine.attach(TestWorkflows.Three, task.id, %{x: "v"})
       {:ok, machine_pid} = Machine.start(machine_id)
-      {:ok, _} = Ash.update(task, %{status: :in_progress})
+      put_state!(task, :active)
 
       # Complete the worker BEFORE the driver even starts — simulates the Watchdog
       # completing the worker in the same moment max_ticks fires.
@@ -524,7 +525,7 @@ defmodule Arbiter.Worker.DriverTest do
 
       # Even though max_ticks was hit, task must be closed because the run succeeded.
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.status == :closed
+      assert reloaded.state == :closed
     end
 
     # bd-7b46wd: if the tick budget is exhausted by active worker work and the
@@ -539,7 +540,7 @@ defmodule Arbiter.Worker.DriverTest do
       StubMerger.reset()
 
       {:ok, task} = Ash.create(Issue, %{title: "cd-maxtick-awaiting", workspace_id: ws.id})
-      {:ok, _} = Ash.update(task, %{status: :in_progress})
+      put_state!(task, :active)
 
       # The Watchdog polls promptly once the PR is open, so the merge below is
       # what finishes the task.
@@ -570,7 +571,7 @@ defmodule Arbiter.Worker.DriverTest do
       assert Process.alive?(driver_pid),
              "driver must keep waiting at max_ticks while worker is externally owned"
 
-      {:ok, %Issue{status: :in_progress}} = Ash.get(Issue, task.id)
+      {:ok, %Issue{state: :active}} = Ash.get(Issue, task.id)
 
       # The gate approves: the run opens its PR and ends, and the driver's next
       # guarded check lets it go rather than stranding the task.
@@ -580,7 +581,7 @@ defmodule Arbiter.Worker.DriverTest do
       assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
 
       # The ticket's Watchdog sees the merge and closes the task.
-      wait_until(fn -> Ash.get!(Issue, task.id).status == :closed end)
+      wait_until(fn -> Ash.get!(Issue, task.id).state == :closed end)
     end
   end
 
@@ -690,7 +691,7 @@ defmodule Arbiter.Worker.DriverTest do
       {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "r")
       {:ok, machine_id} = Machine.attach(TestWorkflows.Three, task.id, %{x: "v"})
       {:ok, machine_pid} = Machine.start(machine_id)
-      {:ok, _} = Ash.update(task, %{status: :in_progress})
+      put_state!(task, :active)
 
       {:ok, driver_pid} =
         Driver.start(
@@ -715,7 +716,7 @@ defmodule Arbiter.Worker.DriverTest do
       {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "r")
       {:ok, machine_id} = Machine.attach(TestWorkflows.Three, task.id, %{x: "v"})
       {:ok, machine_pid} = Machine.start(machine_id)
-      {:ok, _} = Ash.update(task, %{status: :in_progress})
+      put_state!(task, :active)
 
       {:ok, driver_pid} =
         Driver.start(
@@ -742,7 +743,7 @@ defmodule Arbiter.Worker.DriverTest do
       {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "r")
       {:ok, machine_id} = Machine.attach(TestWorkflows.Three, task.id, %{x: "v"})
       {:ok, machine_pid} = Machine.start(machine_id)
-      {:ok, _} = Ash.update(task, %{status: :in_progress})
+      put_state!(task, :active)
 
       {:ok, driver_pid} =
         Driver.start(
@@ -772,7 +773,7 @@ defmodule Arbiter.Worker.DriverTest do
       {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "r")
       {:ok, machine_id} = Machine.attach(TestWorkflows.Three, task.id, %{x: "v"})
       {:ok, machine_pid} = Machine.start(machine_id)
-      {:ok, _} = Ash.update(task, %{status: :in_progress})
+      put_state!(task, :active)
 
       {:ok, driver_pid} =
         Driver.start(
@@ -801,7 +802,7 @@ defmodule Arbiter.Worker.DriverTest do
       {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "r")
       {:ok, machine_id} = Machine.attach(TestWorkflows.Three, task.id, %{x: "v"})
       {:ok, machine_pid} = Machine.start(machine_id)
-      {:ok, _} = Ash.update(task, %{status: :in_progress})
+      put_state!(task, :active)
 
       # A LIVE agent whose cwd is the worktree the Driver is about to reap. This
       # is the run-7abf4049 shape: the run gets failed while the agent process
@@ -869,7 +870,7 @@ defmodule Arbiter.Worker.DriverTest do
 
       {:ok, machine_id} = Machine.attach(TestWorkflows.Three, task.id, %{x: "v"})
       {:ok, machine_pid} = Machine.start(machine_id)
-      {:ok, _} = Ash.update(task, %{status: :in_progress})
+      put_state!(task, :active)
 
       {:ok, driver_pid} =
         Driver.start(
@@ -923,7 +924,7 @@ defmodule Arbiter.Worker.DriverTest do
 
       {:ok, machine_id} = Machine.attach(TestWorkflows.Three, task.id, %{x: "v"})
       {:ok, machine_pid} = Machine.start(machine_id)
-      {:ok, _} = Ash.update(task, %{status: :in_progress})
+      put_state!(task, :active)
 
       {:ok, driver_pid} =
         Driver.start(
@@ -962,7 +963,7 @@ defmodule Arbiter.Worker.DriverTest do
       {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "r")
       {:ok, machine_id} = Machine.attach(TestWorkflows.Three, task.id, %{x: "v"})
       {:ok, machine_pid} = Machine.start(machine_id)
-      {:ok, _} = Ash.update(task, %{status: :in_progress})
+      put_state!(task, :active)
 
       {:ok, driver_pid} =
         Driver.start(
@@ -989,7 +990,7 @@ defmodule Arbiter.Worker.DriverTest do
          %{ws: ws} do
       # bd-cw3w9p: review_only tasks are long-lived ReviewPatrol engagements.
       # When the worker's run finishes :succeeded the Driver must stop but NOT call
-      # close_task — the task remains :in_progress for future review cycles.
+      # close_task — the task remains :active for future review cycles.
       {:ok, task} =
         Ash.create(Issue, %{
           title: "rp-open",
@@ -999,7 +1000,7 @@ defmodule Arbiter.Worker.DriverTest do
       {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "r", meta: %{review_only: true})
       {:ok, machine_id} = Machine.attach(TestWorkflows.Three, task.id, %{x: "v"})
       {:ok, machine_pid} = Machine.start(machine_id)
-      {:ok, _} = Ash.update(task, %{status: :in_progress})
+      put_state!(task, :active)
 
       {:ok, driver_pid} =
         Driver.start(
@@ -1023,7 +1024,7 @@ defmodule Arbiter.Worker.DriverTest do
       assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.status == :in_progress
+      assert reloaded.state == :active
     end
   end
 
@@ -1038,7 +1039,7 @@ defmodule Arbiter.Worker.DriverTest do
       {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "test/repo")
       {:ok, machine_id} = Machine.attach(TestWorkflows.Three, task.id, %{x: "v"})
       {:ok, machine_pid} = Machine.start(machine_id)
-      {:ok, _} = Ash.update(task, %{status: :in_progress})
+      put_state!(task, :active)
 
       {:ok, driver_pid} =
         Driver.start(
@@ -1062,7 +1063,7 @@ defmodule Arbiter.Worker.DriverTest do
       assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.status == :closed
+      assert reloaded.state == :closed
     end
   end
 end
