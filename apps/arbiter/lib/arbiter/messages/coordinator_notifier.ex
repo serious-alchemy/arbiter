@@ -719,16 +719,18 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   workspace's windowed overage spend crosses a multiple of its
   `overage_alert_usd` threshold. Informational: dispatch does NOT stop, the
   operator decides whether to switch back to `:throttle` or top up. One alert
-  per workspace — a later crossing refreshes it — cleared by
-  `overage_cleared/1` once the spend is back under the threshold, the
+  per workspace and provider — a later crossing refreshes it — cleared by
+  `overage_cleared/2` once the spend is back under the threshold, the
   threshold is raised or removed, or dispatch is no longer past the cap.
 
-  `snapshot` carries `:workspace_id`; `spend_usd` is the windowed overage
+  `snapshot` carries `:workspace_id` and the gate's `:provider` (may be nil);
+  `spend_usd` is the windowed overage
   spend; `threshold_usd` is the configured alert threshold. Best-effort,
   returns `:ok`.
   """
   @spec overage_alert(map(), number(), number()) :: :ok
-  def overage_alert(%{workspace_id: ws_id}, spend_usd, threshold_usd) when is_binary(ws_id) do
+  def overage_alert(%{workspace_id: ws_id} = snapshot, spend_usd, threshold_usd)
+      when is_binary(ws_id) do
     subject =
       "quota overage spend crossed $#{fmt_usd(threshold_usd)} — #{fmt_usd(spend_usd)} so far"
 
@@ -747,21 +749,30 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
         "\n"
       )
 
-    raise_alert(:overage_alert, ws_id, ws_id, subject, detail)
+    key = overage_alert_key(ws_id, Map.get(snapshot, :provider))
+    raise_alert(:overage_alert, key, ws_id, subject, detail)
   end
 
   def overage_alert(_snapshot, _spend_usd, _threshold_usd), do: :ok
 
   @doc """
-  Clear `workspace_id`'s overage alert: its windowed overage spend is back
-  under the threshold, the threshold was raised or removed, or dispatch is no
-  longer past the plan cap (bd-7gt8rm). A no-op when none is active.
+  Clear `workspace_id`'s overage alert for `provider`: its windowed overage
+  spend is back under the threshold, the threshold was raised or removed, or
+  dispatch on that provider is no longer past its plan cap (bd-7gt8rm). A
+  no-op when none is active.
   """
-  @spec overage_cleared(String.t()) :: :ok
-  def overage_cleared(workspace_id) when is_binary(workspace_id),
-    do: clear_alert(:overage_alert, workspace_id)
+  @spec overage_cleared(String.t(), atom() | nil) :: :ok
+  def overage_cleared(workspace_id, provider \\ nil)
 
-  def overage_cleared(_workspace_id), do: :ok
+  def overage_cleared(workspace_id, provider) when is_binary(workspace_id),
+    do: clear_alert(:overage_alert, overage_alert_key(workspace_id, provider))
+
+  def overage_cleared(_workspace_id, _provider), do: :ok
+
+  # Overage is metered per provider account (P7), so one provider leaving
+  # overage must not clear another's alert in the same workspace.
+  defp overage_alert_key(ws_id, nil), do: ws_id
+  defp overage_alert_key(ws_id, provider), do: "#{ws_id}:#{provider}"
 
   defp fmt_usd(n) when is_number(n), do: :erlang.float_to_binary(n * 1.0, decimals: 2)
 

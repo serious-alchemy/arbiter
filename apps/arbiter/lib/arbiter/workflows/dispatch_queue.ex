@@ -112,7 +112,9 @@ defmodule Arbiter.Workflows.DispatchQueue do
   the dispatcher calls `record_overage/3`. This process tracks the windowed
   overage spend against the workspace's `overage_alert_usd` threshold and fires
   exactly one `Arbiter.Messages.CoordinatorNotifier.overage_alert/3` per threshold
-  crossing (debounced on the crossed multiple) — it never stops dispatch.
+  crossing (debounced on the crossed multiple) — it never stops dispatch. Once
+  the spend is back under the threshold, or the threshold is raised or removed,
+  it calls `overage_cleared/2` to clear the alert (bd-7gt8rm).
 
   ## Injection seams (start_link opts / app-env)
 
@@ -216,11 +218,13 @@ defmodule Arbiter.Workflows.DispatchQueue do
   and fire an alert if it crossed a new `overage_alert_usd` multiple. Best-effort
   — never blocks or fails a dispatch.
   """
-  @spec record_overage(String.t(), Issue.t(), float()) :: :ok
-  def record_overage(workspace_id, %Issue{} = task, spend_usd)
+  @spec record_overage(String.t(), Issue.t(), float(), atom() | nil) :: :ok
+  def record_overage(workspace_id, task, spend_usd, provider \\ nil)
+
+  def record_overage(workspace_id, %Issue{} = task, spend_usd, provider)
       when is_binary(workspace_id) and is_number(spend_usd) do
     with {:ok, pid} <- DispatchQueueSupervisor.ensure_started(workspace_id) do
-      GenServer.call(pid, {:record_overage, task, spend_usd * 1.0})
+      GenServer.call(pid, {:record_overage, task, spend_usd * 1.0, provider})
     end
 
     :ok
@@ -230,7 +234,7 @@ defmodule Arbiter.Workflows.DispatchQueue do
     :exit, _ -> :ok
   end
 
-  def record_overage(_workspace_id, _task, _spend), do: :ok
+  def record_overage(_workspace_id, _task, _spend, _provider), do: :ok
 
   @doc "Force a drain cycle. Returns `:ok` once it completes."
   @spec drain(GenServer.server()) :: :ok
@@ -470,8 +474,10 @@ defmodule Arbiter.Workflows.DispatchQueue do
     {:reply, :ok, state}
   end
 
-  def handle_call({:record_overage, task, spend}, _from, %State{} = state) do
-    {reply, state} = do_record_overage(state, task, spend)
+  def handle_call({:record_overage, task, spend, provider}, _from, %State{} = state) do
+    # Re-read the threshold: raising or removing it clears the alert
+    # (bd-7gt8rm), and a drain may not have run since the change.
+    {reply, state} = state |> reload_workspace() |> do_record_overage(task, spend, provider)
     {:reply, reply, state}
   end
 
@@ -936,7 +942,7 @@ defmodule Arbiter.Workflows.DispatchQueue do
 
   # ---- overage alerting (debounced) ---------------------------------------
 
-  defp do_record_overage(%State{} = state, task, spend) do
+  defp do_record_overage(%State{} = state, task, spend, provider) do
     case Workspace.quota_overage_alert_usd(state.workspace) do
       alert_usd when is_number(alert_usd) and alert_usd > 0 ->
         multiple = trunc(Float.floor(spend / alert_usd))
@@ -944,8 +950,14 @@ defmodule Arbiter.Workflows.DispatchQueue do
 
         cond do
           multiple > last ->
-            fire_overage_alert(state, task, spend, alert_usd)
+            fire_overage_alert(state, task, spend, alert_usd, provider)
             {{:alerted, multiple}, %{state | last_overage_alert_multiple: multiple}}
+
+          multiple == 0 ->
+            # Under the threshold — the window rolled or the threshold was
+            # raised: the alert's condition has cleared (bd-7gt8rm).
+            clear_overage_alert(state, provider)
+            {:ok, %{state | last_overage_alert_multiple: 0}}
 
           multiple < last ->
             # Spend dropped (the 5h window rolled) — reset the debounce so the
@@ -957,13 +969,26 @@ defmodule Arbiter.Workflows.DispatchQueue do
         end
 
       _ ->
-        # No threshold configured — record silently, never alert.
-        {:ok, state}
+        # No threshold configured — record silently, never alert, and clear
+        # an alert raised under a threshold since removed (bd-7gt8rm).
+        clear_overage_alert(state, provider)
+        {:ok, %{state | last_overage_alert_multiple: 0}}
     end
   end
 
-  defp fire_overage_alert(%State{} = state, %Issue{} = task, spend, alert_usd) do
-    snapshot = %{workspace_id: state.workspace_id, task_id: task.id}
+  defp clear_overage_alert(%State{} = state, provider) do
+    state.notifier.overage_cleared(state.workspace_id, provider)
+    :ok
+  rescue
+    e ->
+      Logger.debug("DispatchQueue.clear_overage_alert swallowed: #{Exception.message(e)}")
+      :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp fire_overage_alert(%State{} = state, %Issue{} = task, spend, alert_usd, provider) do
+    snapshot = %{workspace_id: state.workspace_id, task_id: task.id, provider: provider}
     state.notifier.overage_alert(snapshot, spend, alert_usd)
     :ok
   rescue
