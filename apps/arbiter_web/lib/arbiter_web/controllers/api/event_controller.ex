@@ -35,6 +35,12 @@ defmodule ArbiterWeb.Api.EventController do
     * loop_proposal  — a loop-engineering proposal was recorded, reinforced,
                        promoted to `proposed`, applied or rejected (opt-in only —
                        pass subscribe=...,loop_proposal)
+    * gate_cap_hit   — a gate escalated because its round / send-back budget ran
+                       out (bd-4qjl0q): `task_id`, `gate`, `rounds`, `cap`
+                       (opt-in only — pass subscribe=...,gate_cap_hit)
+    * gate_resolved  — the coordinator recorded its answer to a gate escalation
+                       (bd-4qjl0q): `task_id`, `gate`, `decision`, `actor`,
+                       `round` (opt-in only — pass subscribe=...,gate_resolved)
 
   Wire format: one newline-terminated JSON object per event. A bare newline
   is sent every 30 seconds on idle connections as a keepalive. Every event

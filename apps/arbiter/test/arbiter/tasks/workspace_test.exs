@@ -657,6 +657,40 @@ defmodule Arbiter.Tasks.WorkspaceTest do
     end
   end
 
+  describe "notes_gate_nudge_cap/1 (bd-4qjl0q)" do
+    test "defaults to 2 when unset or for no workspace" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "ngnc-unset"})
+      assert Workspace.notes_gate_nudge_cap(ws) == 2
+      assert Workspace.notes_gate_nudge_cap(nil) == 2
+    end
+
+    test "reads an integer, its JSON string form, and 0" do
+      for {value, expected} <- [{3, 3}, {"1", 1}, {0, 0}] do
+        {:ok, ws} =
+          Ash.create(Workspace, %{
+            name: "ngnc-#{System.unique_integer([:positive])}",
+            config: %{"notes_gate" => %{"nudge_cap" => value}}
+          })
+
+        assert Workspace.notes_gate_nudge_cap(ws) == expected
+      end
+    end
+
+    test "validate_config rejects a negative / malformed nudge_cap or a non-map block" do
+      for config <- [
+            %{"notes_gate" => %{"nudge_cap" => -1}},
+            %{"notes_gate" => %{"nudge_cap" => "lots"}},
+            %{"notes_gate" => 2}
+          ] do
+        assert {:error, _} =
+                 Ash.create(Workspace, %{
+                   name: "ngnc-bad-#{System.unique_integer([:positive])}",
+                   config: config
+                 })
+      end
+    end
+  end
+
   describe "review_automation config validation" do
     test "accepts a valid review_automation block with default and auto_authors" do
       config = %{

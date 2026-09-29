@@ -4360,6 +4360,73 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
   # ---- revise-round commit gate (bd-2eyf9y) --------------------------------
 
+  # bd-4qjl0q AC6: hitting the round cap without converging is an event, so
+  # "how often does the cap fire, and what happened after" is answerable from
+  # the events stream instead of by reading the mailbox.
+  describe "round-cap exhaustion event (bd-4qjl0q)" do
+    test "an unconverged run emits a persisted gate_cap_hit event naming task, gate and rounds",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, Arbiter.Events.pubsub_topic(ws.id))
+
+      {:ok, pid} =
+        Worker.start(
+          task_id: task.id,
+          repo: "trib/repo",
+          workspace_id: ws.id,
+          meta: %{
+            branch: branch,
+            repo_path: repo,
+            target_branch: "main",
+            merge_title: "Merge #{task.id}",
+            review_required: true,
+            review_rounds: 2,
+            worktree_path: repo,
+            # Rejects every round: round 1 → revise → round 2 rejects at the cap.
+            review_command: [@reviewer, "REQUEST_CHANGES"],
+            revise_command: [@revise_commit],
+            review_timeout_ms: 5_000
+          }
+        )
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      assert_receive {:event, %{topic: "gate_cap_hit"} = event}, 10_000
+      assert event.task_id == task.id
+      assert event.gate == "review_gate"
+      assert event.rounds == 2
+      assert event.cap == 2
+      assert is_integer(event.cursor)
+
+      # Durable, not just a live broadcast: the cap hit is in the replayable log.
+      require Ash.Query
+
+      assert [%{payload: payload}] =
+               Arbiter.Events.Record
+               |> Ash.Query.filter(topic == "gate_cap_hit" and workspace_id == ^ws.id)
+               |> Ash.read!()
+
+      assert (payload["task_id"] || payload[:task_id]) == task.id
+
+      # The escalation mail names the one-call way to record the answer. The
+      # event fires inside the gate, just before the worker posts the mail.
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        6_000
+      )
+
+      escalation =
+        Message.inbox("admiral", workspace_id: ws.id)
+        |> Enum.find(&(&1.kind == :escalation and &1.directive_ref == task.id))
+
+      assert escalation.body =~ "arb review resolve #{task.id} --amend"
+    end
+  end
+
   describe "revise-round commit gate (bd-2eyf9y)" do
     # Dirty tree, HEAD unchanged: the implementer is resumed once with an
     # explicit "commit and push" instruction (@revise_dirty always leaves an

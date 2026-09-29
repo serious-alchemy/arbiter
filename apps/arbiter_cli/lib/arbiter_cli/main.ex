@@ -20,6 +20,11 @@ defmodule ArbiterCli.Main do
       arb ticket verify   <id> --observed "<evidence>" | --failed "<evidence>"
                                   record the post-merge restart-and-observe result
                                   for a ticket in state verifying
+      arb ticket resolve  <id> --accept-as-is|--amend|--send-back|--reject "<reasoning>"
+                                  [--gate review_gate|notes_gate|commit_gate] [--round N]
+                                  [--actor <who>]
+                                  record your answer to a gate escalation — what the
+                                  coordinator decided and why (bd-4qjl0q)
       arb ticket claim    <ref> [--force] [--repo <repo>]
       arb ticket sync     [--dry]
       arb ticket ready
@@ -34,6 +39,7 @@ defmodule ArbiterCli.Main do
       arb worker stop     <task-id>
       arb worker resume   <task-id> [<repo>] [--model <name>]
       arb worker review   <task-id> [--repo <repo>] [--model <name>]
+      arb review resolve  <task-id> --amend "<reasoning>"   (== arb ticket resolve)
 
       arb repo list
       arb repo show       <name>
@@ -196,6 +202,15 @@ defmodule ArbiterCli.Main do
           rest
       end
 
+    dispatch_resolved(cmd, args)
+  end
+
+  # bd-4qjl0q: `arb review resolve` is the spelling the gate-escalation mail
+  # names. `review` alone is a legacy redirect to `worker review`, which would
+  # read `resolve` as a task id — so route it before that, with no note.
+  defp dispatch_resolved("review", ["resolve" | rest]), do: ArbiterCli.Cmd.Resolve.run(rest)
+
+  defp dispatch_resolved(cmd, args) do
     case ArbiterCli.AliasResolver.resolve(cmd) do
       {:ok, canonical} ->
         dispatch_known(canonical, args)

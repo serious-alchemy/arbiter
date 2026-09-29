@@ -157,6 +157,11 @@ defmodule ArbiterCli.ConfigSchema do
       required    bool — whether a review round gates completion
       max_rounds  positive integer — caps difficulty-derived round count (min wins)
 
+    notes_gate  (map — the research-directive notes gate, bd-4qjl0q)
+      nudge_cap   non-negative integer — send-backs a research worker gets for
+                  signalling done with blank `notes` before the gate escalates
+                  to the coordinator. 0 escalates on the first trip. (default: 2)
+
     review_automation  (map)
       default          one of: #{Enum.join(@review_automation_modes, ", ")}
                        (report_only is an alias of propose; flag is an alias of notify;

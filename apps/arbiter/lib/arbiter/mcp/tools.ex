@@ -54,6 +54,7 @@ defmodule Arbiter.MCP.Tools do
 
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.MCP.Scope
+  alias Arbiter.ReviewGate.Resolutions
   alias Arbiter.Tasks.Claim
   alias Arbiter.Tasks.Dependency
   alias Arbiter.Tasks.Issue
@@ -283,6 +284,13 @@ defmodule Arbiter.MCP.Tools do
   force pulling the entire history just to see the latest one or two.
   Omitting it preserves the original full-history behavior; `total_count`
   always reports how many rounds exist regardless of `limit`.
+
+  bd-4qjl0q: also returns the coordinator's recorded answer to a gate
+  escalation — `resolution` (the latest, or nil) and `resolutions` (all,
+  oldest-first) — plus `outcome`: `"converged"`, `"resolved"`,
+  `"not_converged"` or `"none"` (see `Arbiter.ReviewGate.Resolutions.outcome/2`),
+  so a run that escalated and was amended no longer reads like one that
+  converged.
   """
   @spec review_gate_rounds_list(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def review_gate_rounds_list(%Scope{} = _scope, args) do
@@ -305,10 +313,45 @@ defmodule Arbiter.MCP.Tools do
         |> take_last(limit)
         |> Enum.map(&serialize_review_gate_round/1)
 
-      {:ok, %{rounds: rounds, count: length(rounds), total_count: length(all_rounds)}}
+      resolutions = Resolutions.list(task_id)
+      serialized_resolutions = Enum.map(resolutions, &Resolutions.serialize/1)
+
+      {:ok,
+       %{
+         rounds: rounds,
+         count: length(rounds),
+         total_count: length(all_rounds),
+         outcome: Resolutions.outcome(all_rounds, resolutions),
+         resolution: List.last(serialized_resolutions),
+         resolutions: serialized_resolutions
+       }}
     end
   rescue
     e -> {:error, {:internal, "review_gate_rounds_list failed: #{Exception.message(e)}"}}
+  end
+
+  # ---- review_gate_resolve -------------------------------------------------
+
+  @doc """
+  Record the coordinator's answer to a gate escalation (bd-4qjl0q): `decision`
+  (`accept_as_is` / `amend` / `send_back` / `reject`), `reasoning`, and
+  optionally `gate` (`review_gate` default, `notes_gate`, `commit_gate`),
+  `actor` (default `"coordinator"`), `round` / `fix_round_attempt`. Coordinator
+  only. A record, not an action — see `Arbiter.ReviewGate.Resolution`.
+  """
+  @spec review_gate_resolve(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def review_gate_resolve(%Scope{} = _scope, args) do
+    with {:ok, _task_id} <- require_string(args, "task_id"),
+         {:ok, _decision} <- require_string(args, "decision"),
+         {:ok, _reasoning} <- require_string(args, "reasoning"),
+         {:ok, resolution} <-
+           args
+           |> Map.take(~w(task_id decision reasoning gate actor round fix_round_attempt))
+           |> Resolutions.record() do
+      {:ok, %{resolution: Resolutions.serialize(resolution)}}
+    end
+  rescue
+    e -> {:error, {:internal, "review_gate_resolve failed: #{Exception.message(e)}"}}
   end
 
   defp take_last(list, nil), do: list

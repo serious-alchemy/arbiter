@@ -277,6 +277,24 @@ defmodule Arbiter.Worker.CommitGateTest do
       assert String.trim(merges) == "0"
     end
 
+    # bd-4qjl0q AC6: a spent send-back budget is a cap hit on the events stream.
+    test "an exhausted nudge budget emits a gate_cap_hit event", %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      path = provision_worktree(repo, "bd-gate/#{task.id}")
+      File.write!(Path.join(path, "forgotten_work.txt"), "edited but not committed\n")
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, Arbiter.Events.pubsub_topic(ws.id))
+
+      pid = start_worker(task, repo, path, %{commit_nudge_cap: 0})
+      send(pid, {:__claude_session_done__, "arb " <> "done"})
+
+      wait_until(fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end)
+
+      assert_receive {:event, %{topic: "gate_cap_hit", gate: "commit_gate"} = event}
+      assert event.task_id == task.id
+      assert event.rounds == 0
+      assert event.cap == 0
+    end
+
     test "an arb-done with ZERO commits ahead of base fails + escalates",
          %{repo: repo, ws: ws} do
       # The other half of the gate: a clean worktree but no commits on the

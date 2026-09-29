@@ -1471,6 +1471,63 @@ defmodule Arbiter.MCP.Catalog do
       handler: &Tools.review_gate_rounds_list/2
     },
     %{
+      name: "review_gate_resolve",
+      tiers: @coordinator,
+      description:
+        "Record your answer to a gate escalation (bd-4qjl0q) — the ReviewGate hitting its " <>
+          "round cap without converging, or the notes / commit gate spending its send-back " <>
+          "budget. Persists the decision (accept_as_is / amend / send_back / reject), your " <>
+          "reasoning, the actor and a timestamp against the ticket and, for a ReviewGate " <>
+          "escalation, the reviewer round it answers (the latest one unless you name it). " <>
+          "`review_gate_rounds_list` then returns it after the rounds with `outcome: resolved`, " <>
+          "so an override of a reviewer's standing finding is visible where the argument is, " <>
+          "not only in a commit message. A record, not an action: it does not resume, merge " <>
+          "or close anything — do that with the usual tools. CLI: `arb review resolve <ticket> " <>
+          "--amend \"<reasoning>\"`.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "task_id" => %{
+            "type" => "string",
+            "description" => "Ticket whose escalation you are resolving (required)."
+          },
+          "decision" => %{
+            "type" => "string",
+            "enum" => ["accept_as_is", "amend", "send_back", "reject"],
+            "description" =>
+              "accept_as_is: ship with the finding standing. amend: you change the " <>
+                "requirement or direct a specific change on your own authority. send_back: " <>
+                "return it to the implementer. reject: abandon the work. (required)"
+          },
+          "reasoning" => %{
+            "type" => "string",
+            "description" => "Why — the part a commit message used to carry (required)."
+          },
+          "gate" => %{
+            "type" => "string",
+            "enum" => ["review_gate", "notes_gate", "commit_gate"],
+            "description" => "Which gate escalated. Default review_gate."
+          },
+          "actor" => %{
+            "type" => "string",
+            "description" => "Who decided. Default \"coordinator\"."
+          },
+          "round" => %{
+            "type" => "integer",
+            "description" =>
+              "ReviewGate round this answers. Default: the ticket's latest reviewer round."
+          },
+          "fix_round_attempt" => %{
+            "type" => "integer",
+            "description" => "The fix-round pass `round` belongs to (default 0 with `round`)."
+          }
+        },
+        "required" => ["task_id", "decision", "reasoning"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.review_gate_resolve/2
+    },
+    %{
       name: "review_greenlight",
       tiers: @coordinator,
       description:

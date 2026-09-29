@@ -125,6 +125,7 @@ defmodule Arbiter.Worker do
 
   alias Arbiter.Accounts.Resolver, as: AccountResolver
   alias Arbiter.Agents.Gemini.Security, as: GeminiSecurity
+  alias Arbiter.ReviewGate.Resolutions
   alias Arbiter.Worker.ConflictPassOutcome
   alias Arbiter.Worker.CoordinatorOnlyFindings
   alias Arbiter.Worker.EvidenceIntegrity
@@ -4466,11 +4467,12 @@ defmodule Arbiter.Worker do
   # The worker signalled done on a task-type directive but `notes` is still
   # blank. Mirror the commit gate's bounded send-back: relaunch the same session
   # with a nudge telling it to write findings to `notes`, capped by
-  # `meta[:notes_nudge_cap]` (default 1; tests pass 0 to assert the structural
-  # gate without the retry layer). On cap exhaustion or a respawn failure, fail
-  # the worker rather than silently close a directive with no deliverable.
+  # `notes_nudge_cap/1` (workspace `notes_gate.nudge_cap`, default 2 — bd-4qjl0q;
+  # tests pass `meta[:notes_nudge_cap]` 0 to assert the structural gate without
+  # the retry layer). On cap exhaustion or a respawn failure, fail the worker
+  # rather than silently close a directive with no deliverable.
   defp handle_notes_gate(%State{meta: meta} = state) do
-    cap = notes_nudge_cap(meta)
+    cap = notes_nudge_cap(state)
     attempts = (meta && Map.get(meta, :notes_nudge_attempts)) || 0
 
     if attempts >= cap do
@@ -4538,7 +4540,27 @@ defmodule Arbiter.Worker do
     on_claude_done(state)
   end
 
-  defp notes_nudge_cap(meta), do: (meta && Map.get(meta, :notes_nudge_cap)) || 1
+  # bd-4qjl0q: resolution order is an explicit meta override (tests / advanced
+  # callers), then the workspace's `notes_gate.nudge_cap`, then the default (2).
+  # Was a literal `1`, which turned one forgotten notes write into an operator
+  # interrupt.
+  defp notes_nudge_cap(%State{meta: meta} = state) do
+    case meta && Map.get(meta, :notes_nudge_cap) do
+      n when is_integer(n) and n >= 0 -> n
+      _ -> Arbiter.Tasks.Workspace.notes_gate_nudge_cap(notes_gate_workspace(state))
+    end
+  end
+
+  defp notes_gate_workspace(%State{workspace_id: nil}), do: nil
+
+  defp notes_gate_workspace(%State{workspace_id: workspace_id}) do
+    case Ash.get(Arbiter.Tasks.Workspace, workspace_id) do
+      {:ok, ws} -> ws
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
 
   defp notes_nudge_prompt(%State{task_id: task_id}) do
     """
@@ -5136,6 +5158,7 @@ defmodule Arbiter.Worker do
 
     record_commit_gate_note(state, reason, why, summary)
     escalate_commit_gate(state, subject, summary)
+    if why == :cap_exhausted, do: emit_gate_cap_hit(state, :commit_gate, :commit_nudge_attempts)
 
     meta =
       (state.meta || %{})
@@ -5143,6 +5166,26 @@ defmodule Arbiter.Worker do
       |> Map.put(:commit_gate_detail, why)
 
     fail_now(%State{state | meta: meta}, failure_reason)
+  end
+
+  # bd-4qjl0q: a gate escalating because its send-back budget ran out is a cap
+  # hit — counted on the events stream alongside the ReviewGate's round cap, so
+  # "how often does the cap fire, and what did the coordinator decide after"
+  # is answerable from `gate_cap_hit` + `gate_resolved` events.
+  defp emit_gate_cap_hit(%State{meta: meta} = state, gate, attempts_key) do
+    cap =
+      case gate do
+        :notes_gate -> notes_nudge_cap(state)
+        :commit_gate -> commit_nudge_cap(meta)
+      end
+
+    Resolutions.cap_hit(%{
+      workspace_id: state.workspace_id,
+      task_id: state.task_id,
+      gate: gate,
+      rounds: (meta && Map.get(meta, attempts_key)) || 0,
+      cap: cap
+    })
   end
 
   defp commit_gate_failure_metadata(:uncommitted),
@@ -5267,7 +5310,7 @@ defmodule Arbiter.Worker do
       workspace_id: ws_id,
       task_ref: task_id,
       subject: "Commit gate: #{subject} (#{task_id})",
-      body: summary
+      body: Resolutions.append_footer(summary, task_id, :commit_gate)
     })
 
     :ok
@@ -5298,6 +5341,7 @@ defmodule Arbiter.Worker do
   defp park_notes_gate(%State{} = state, why) do
     summary = notes_gate_summary(state, why)
     escalate_notes_gate(state, summary)
+    if why == :cap_exhausted, do: emit_gate_cap_hit(state, :notes_gate, :notes_nudge_attempts)
 
     meta = Map.put(state.meta || %{}, :notes_gate_detail, why)
     fail_now(%State{state | meta: meta}, notes_gate_failure_reason(meta))
@@ -5337,9 +5381,9 @@ defmodule Arbiter.Worker do
     end
   end
 
-  defp notes_gate_summary(%State{task_id: task_id, meta: meta}, why) do
+  defp notes_gate_summary(%State{task_id: task_id, meta: meta} = state, why) do
     attempts = (meta && Map.get(meta, :notes_nudge_attempts)) || 0
-    cap = notes_nudge_cap(meta)
+    cap = notes_nudge_cap(state)
 
     detail_blurb =
       case why do
@@ -5398,7 +5442,7 @@ defmodule Arbiter.Worker do
       workspace_id: ws_id,
       task_ref: task_id,
       subject: "Notes gate: blank findings on research-type directive (#{task_id})",
-      body: summary
+      body: Resolutions.append_footer(summary, task_id, :notes_gate)
     })
 
     :ok
@@ -7071,7 +7115,7 @@ defmodule Arbiter.Worker do
       workspace_id: ws_id,
       task_ref: task_id,
       subject: subject,
-      body: findings
+      body: Resolutions.append_footer(findings, task_id, :review_gate)
     })
 
     Arbiter.Events.broadcast(ws_id, "review_gate", %{task_id: task_id, message: subject})

@@ -20,6 +20,9 @@ defmodule ArbiterCli.Cmd.Issue do
       arb ticket demote   <id>
       arb ticket rank     <id> --top | --bottom | --before <id> | --after <id>
       arb ticket verify   <id> --observed "<evidence>" | --failed "<evidence>"
+      arb ticket resolve  <id> --accept-as-is|--amend|--send-back|--reject "<why>"
+                          [--gate g] [--round N] [--actor who]
+                          (alias: arb review resolve — bd-4qjl0q)
       arb ticket handoff  <id> --note "<what the operator has to do>"
       arb ticket handback <id> [--note "<what changed>"]
       arb ticket claim    <issue#> [--force] [--repo <repo>]
@@ -63,6 +66,7 @@ defmodule ArbiterCli.Cmd.Issue do
       ["demote" | rest] -> Cmd.Demote.run(rest)
       ["rank" | rest] -> Cmd.Rank.run(rest)
       ["verify" | rest] -> Cmd.Verify.run(rest)
+      ["resolve" | rest] -> Cmd.Resolve.run(rest)
       ["handoff" | rest] -> Cmd.Handoff.run(:operator, rest)
       ["handback" | rest] -> Cmd.Handoff.run(:coordinator, rest)
       ["claim" | rest] -> Cmd.Claim.run(rest)
@@ -76,7 +80,7 @@ defmodule ArbiterCli.Cmd.Issue do
     end
   end
 
-  @subcommands ~w(list show create update close reopen promote demote rank verify handoff handback claim sync ready dispatch)
+  @subcommands ~w(list show create update close reopen promote demote rank verify resolve handoff handback claim sync ready dispatch)
 
   @doc "Every verb `arb ticket` (and its deprecated alias `arb issue`) accepts."
   @spec subcommands() :: [String.t()]

@@ -121,6 +121,7 @@ defmodule Arbiter.MCP.RefinePolicy do
     "external_review_show" => @deny_reason_review,
     "external_review_transcript" => @deny_reason_review,
     "review_gate_rounds_list" => @deny_reason_review,
+    "review_gate_resolve" => @deny_reason_review,
     "review_greenlight" => @deny_reason_review,
 
     # mail

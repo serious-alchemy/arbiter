@@ -227,6 +227,95 @@ defmodule Arbiter.Worker.NotesGateTest do
     end
   end
 
+  describe "nudge cap from workspace config (bd-4qjl0q)" do
+    # A REAL session that prints the completion sentinel and exits, so the
+    # worker stashes its port args (`meta.claude_spawn`) and the notes gate's
+    # send-back can genuinely relaunch it. A fixture argv has no prompt slot to
+    # splice the nudge into, so every relaunch re-runs this same command — which
+    # signals done again with `notes` still blank, exactly the worker that
+    # keeps forgetting to write its findings. (printf keeps the sentinel off
+    # this source line.)
+    defp signal_done_session(pid, tag) do
+      {:ok, _port} =
+        Arbiter.Worker.ClaudeSession.start(
+          owner: pid,
+          worktree_path: tmp_dir!(tag),
+          command: ["sh", "-c", "printf 'arb %s\\n' done"]
+        )
+
+      :ok
+    end
+
+    defp notes_gate_escalation(ws, task) do
+      Message.inbox("admiral", workspace_id: ws.id)
+      |> Enum.find(&(&1.kind == :escalation and &1.directive_ref == task.id))
+    end
+
+    test "defaults to 2: a second send-back is attempted before escalating", %{ws: ws} do
+      task = new_task(ws)
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, Arbiter.Events.pubsub_topic(ws.id))
+      # No `notes_nudge_cap` meta override — the cap comes from config/default.
+      pid = start_worker(task, %{})
+      :ok = signal_done_session(pid, "ng-cap-default")
+
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        10_000
+      )
+
+      snap = Worker.state(pid)
+      assert snap.meta.notes_nudge_attempts == 2
+      assert snap.meta.notes_gate_detail == :cap_exhausted
+
+      escalation = notes_gate_escalation(ws, task)
+      assert escalation
+      assert escalation.body =~ "tried 2/2 send-back attempt(s)"
+      # The mail names the one-call way to record the answer (bd-4qjl0q).
+      assert escalation.body =~ "arb review resolve #{task.id} --gate notes_gate"
+
+      # bd-4qjl0q AC6: the exhausted budget is counted on the events stream.
+      assert_receive {:event, %{topic: "gate_cap_hit", gate: "notes_gate"} = event}
+      assert event.task_id == task.id
+      assert event.rounds == 2
+      assert event.cap == 2
+    end
+
+    test "a respawn failure is not a cap hit and emits no gate_cap_hit", %{ws: ws} do
+      task = new_task(ws)
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, Arbiter.Events.pubsub_topic(ws.id))
+      # No real session → no stashed spawn args → the send-back cannot relaunch.
+      pid = start_worker(task, %{})
+
+      send(pid, {:__claude_session_done__, "arb " <> "done"})
+
+      wait_until(fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end)
+      assert {:respawn_failed, _} = Worker.state(pid).meta.notes_gate_detail
+      refute_received {:event, %{topic: "gate_cap_hit"}}
+    end
+
+    test "notes_gate.nudge_cap = 1 preserves the single send-back", %{ws: ws} do
+      {:ok, ws} =
+        Ash.update(ws, %{config: %{"notes_gate" => %{"nudge_cap" => 1}}})
+
+      task = new_task(ws)
+      pid = start_worker(task, %{})
+      :ok = signal_done_session(pid, "ng-cap-one")
+
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        10_000
+      )
+
+      snap = Worker.state(pid)
+      assert snap.meta.notes_nudge_attempts == 1
+      assert snap.meta.notes_gate_detail == :cap_exhausted
+
+      escalation = notes_gate_escalation(ws, task)
+      assert escalation
+      assert escalation.body =~ "tried 1/1 send-back attempt(s)"
+    end
+  end
+
   describe "operational `task` type has no notes gate (bd-9s9dqz)" do
     test "arb-done with blank notes completes cleanly", %{ws: ws} do
       task = new_task(ws, nil, :task)

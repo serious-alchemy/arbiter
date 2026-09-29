@@ -36,6 +36,9 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     * If `"review_gate.max_fix_rounds"` is present, it must be a NON-NEGATIVE
       integer — `0` is the documented switch that disables the auto fix round
       (bd-a9zb7w), so it cannot share the positive-integer validator.
+    * If `"notes_gate"` is present, it must be a map; if
+      `"notes_gate.nudge_cap"` is present it must be a NON-NEGATIVE integer —
+      `0` escalates on the first blank-notes completion (bd-4qjl0q).
     * If `"conductor"` is present, it must be a map.
     * If `"conductor.max_concurrent"` is present, it must be a positive integer.
     * If `"review_automation"` is present, it must be a map.
@@ -81,6 +84,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     |> validate_agent_block("review_agent", Map.get(config, "review_agent"))
     |> validate_routing(Map.get(config, "routing"))
     |> validate_review_gate(Map.get(config, "review_gate"))
+    |> validate_notes_gate(Map.get(config, "notes_gate"))
     |> validate_conductor(Map.get(config, "conductor"))
     |> validate_review_automation(Map.get(config, "review_automation"))
     |> validate_quota(Map.get(config, "quota"))
@@ -393,6 +397,18 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
 
   defp validate_review_gate(changeset, _) do
     Changeset.add_error(changeset, field: :config, message: "review_gate must be a map")
+  end
+
+  # bd-4qjl0q: the notes gate's send-back budget. Zero is meaningful — it
+  # escalates on the first blank-notes completion without a nudge.
+  defp validate_notes_gate(changeset, nil), do: changeset
+
+  defp validate_notes_gate(changeset, notes_gate) when is_map(notes_gate) do
+    validate_non_negative_int(changeset, notes_gate, "nudge_cap", "notes_gate.nudge_cap")
+  end
+
+  defp validate_notes_gate(changeset, _) do
+    Changeset.add_error(changeset, field: :config, message: "notes_gate must be a map")
   end
 
   # A config value that, when present, must be a positive integer (or its
