@@ -382,6 +382,35 @@ defmodule ArbiterWeb.Api.IssueController do
   defp verify_error(conn, {:invalid, err}), do: unprocessable(conn, Exception.message(err))
 
   @doc """
+  Record the coordinator's answer to a gate escalation (bd-4qjl0q) — what
+  `arb review resolve` wraps. Body: `decision` (`accept_as_is` / `amend` /
+  `send_back` / `reject`) and `reasoning` (both required); optional `gate`,
+  `actor`, `round`, `fix_round_attempt`. Returns the recorded resolution (201).
+  See `Arbiter.ReviewGate.Resolutions.record/1`.
+  """
+  def resolve(conn, %{"id" => id} = params) do
+    attrs =
+      params
+      |> Map.take(~w(decision reasoning gate actor round fix_round_attempt))
+      |> Map.put("task_id", id)
+
+    case Arbiter.ReviewGate.Resolutions.record(attrs) do
+      {:ok, resolution} ->
+        conn
+        |> put_status(:created)
+        |> json(Arbiter.ReviewGate.Resolutions.serialize(resolution))
+
+      {:error, {:not_found, message}} ->
+        conn
+        |> put_status(:not_found)
+        |> json(%{error: %{type: "not_found", message: message, details: %{}}})
+
+      {:error, {:invalid, message}} ->
+        unprocessable(conn, message)
+    end
+  end
+
+  @doc """
   Hand a ticket's attention to the operator (bd-8nlez1) — the coordinator's
   hand-off. Body: `note` (required), what the operator has to do.
   """
