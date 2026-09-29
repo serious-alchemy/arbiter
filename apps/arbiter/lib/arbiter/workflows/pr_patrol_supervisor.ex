@@ -73,12 +73,13 @@ defmodule Arbiter.Workflows.PRPatrolSupervisor do
 
   require Logger
 
-  alias Arbiter.{Mergers, Tasks.RepoConfig, Tasks.Workspace}
-  alias Arbiter.Mergers.Github.RepoResolver
+  alias Arbiter.{Mergers, Tasks.Workspace}
+  alias Arbiter.Mergers.ForgeRepos
   alias Arbiter.ProcessTeardown
   alias Arbiter.Workflows.{PatrolRepoScope, PRPatrol}
 
   @registry Arbiter.Workflows.PRPatrolRegistry
+  @forge_opts [gitlab: :remote_first, log: "PRPatrolSupervisor"]
 
   def child_spec(opts) do
     %{
@@ -109,7 +110,8 @@ defmodule Arbiter.Workflows.PRPatrolSupervisor do
   """
   @spec start_patrol(Workspace.t(), keyword()) :: DynamicSupervisor.on_start_child() | :skip
   def start_patrol(%Workspace{} = workspace, opts \\ []) do
-    do_start_patrol(workspace, resolve_adapter(workspace), patrol_repos(workspace), opts)
+    repos = patrol_repos(workspace)
+    do_start_patrol(workspace, resolve_adapter(workspace, repos), repos, opts)
   end
 
   defp do_start_patrol(workspace, adapter, repos, opts) do
@@ -173,8 +175,8 @@ defmodule Arbiter.Workflows.PRPatrolSupervisor do
   """
   @spec reconcile(Workspace.t()) :: DynamicSupervisor.on_start_child() | :skip
   def reconcile(%Workspace{} = workspace) do
-    adapter = resolve_adapter(workspace)
     repos = patrol_repos(workspace)
+    adapter = resolve_adapter(workspace, repos)
 
     if supported_adapter?(adapter) and repos != [] do
       do_start_patrol(workspace, adapter, repos, [])
@@ -197,8 +199,8 @@ defmodule Arbiter.Workflows.PRPatrolSupervisor do
   @spec ensure_started(Workspace.t(), String.t()) ::
           DynamicSupervisor.on_start_child() | :skip
   def ensure_started(%Workspace{} = workspace, ref) when is_binary(ref) do
-    adapter = resolve_adapter(workspace)
     repos = patrol_repos(workspace)
+    adapter = resolve_adapter(workspace, repos)
 
     with true <- supported_adapter?(adapter),
          repo when is_binary(repo) <- resolve_demand_repo(ref, repos) do
@@ -384,9 +386,12 @@ defmodule Arbiter.Workflows.PRPatrolSupervisor do
   defp supported_adapter?(adapter),
     do: not is_nil(adapter) and function_exported?(adapter, :list_open, 0)
 
-  # Resolve the merge adapter for a workspace, or nil on unknown strategy.
-  defp resolve_adapter(workspace) do
-    adapter = Mergers.for_workspace(workspace)
+  # Resolve the merge adapter for a workspace, or nil on unknown strategy —
+  # the adapter of the repo its first patrolled slug belongs to (bd-73zv62: a
+  # `direct` workspace can still hold a repo overridden onto a forge), or the
+  # workspace-level one when nothing is patrolled.
+  defp resolve_adapter(workspace, repos) do
+    adapter = Mergers.for_workspace(scope(workspace, List.first(repos)))
     # Load the adapter before `start_patrol/2`'s `function_exported?/3` guard
     # inspects it: `function_exported?/3` reports false for a not-yet-loaded
     # module without triggering a load, so under interactive code loading
@@ -403,94 +408,25 @@ defmodule Arbiter.Workflows.PRPatrolSupervisor do
   config resolves to — one patrol each. `PRPatrol` re-checks its own repo
   against this every tick (bd-7feiul). Empty when none resolve.
   """
-  # GitHub supports two shapes:
-  #   - Single-repo: merge.config.repo is set → one patrol against owner/repo.
-  #   - Multi-repo: no repo pinned in the merge config → one patrol per repo,
-  #     with each repo's "owner/repo" derived from its `origin` remote. The repo
-  #     list comes from the workspace's repo_paths map — the same
-  #     source the worker dispatch path resolves worktrees from. Used by
-  #     workspaces like acme, whose repos are distinct acme-corp/*
-  #     repos.
-  # Pre-existing complexity 13 — baselined when bd-4x2yhq first
-  # wired Credo up. Thresholds stay at the tool's own default so new
-  # code is held to it; see the note in .credo.exs.
+  # One patrol per forge repo (`Arbiter.Mergers.ForgeRepos`, bd-73zv62): the
+  # pinned `merge.config.owner/repo`, else each `repo_paths` repo's `origin`
+  # remote, resolved per repo against its effective merge block, so a repo on
+  # a `merge.repos.<repo>.strategy = "direct"` override gets no patrol. GitLab
+  # prefers the remote slug over a pinned `project_id` here: the patrol's repo
+  # is threaded straight into `Dispatch.dispatch/2`'s `repo:` opt by
+  # `PRPatrol.dispatch_follow_up/3`, which resolves it against `repo_paths`
+  # keys or a derived "owner/repo" slug, never a bare numeric project id
+  # (bd-7rxwzc).
   @spec patrol_repos(Workspace.t()) :: [String.t()]
-  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
-  def patrol_repos(%Workspace{} = workspace) do
-    config = workspace.config || %{}
+  def patrol_repos(%Workspace{} = workspace), do: ForgeRepos.slugs(workspace, @forge_opts)
 
-    case get_in(config, ["merge", "strategy"]) do
-      "github" ->
-        owner = get_in(config, ["merge", "config", "owner"])
-        repo = get_in(config, ["merge", "config", "repo"])
-
-        if is_binary(owner) and owner != "" and is_binary(repo) and repo != "" do
-          ["#{owner}/#{repo}"]
-        else
-          repos_from_repo_paths(config)
-        end
-
-      "gitlab" ->
-        # `merge.config.project_id` identifies the forge project (needed to
-        # query the GitLab adapter) but is NOT a `repo_paths` key — and this
-        # same string is threaded straight into `Dispatch.dispatch/2`'s
-        # `repo:` opt by `PRPatrol.dispatch_follow_up/3`, which resolves
-        # `repo` against `repo_paths` KEYS (or a derived "owner/repo" slug),
-        # never a bare numeric project id. Using `project_id` here made every
-        # follow-up dispatch for a workspace with both a pinned `project_id`
-        # and a `repo_paths` map (e.g. vstim) fail with a deterministic
-        # `{:repo_not_found, project_id}` forever (bd-7rxwzc). Prefer the
-        # repo_paths-derived slug — exactly like the multi-repo case — and
-        # fall back to the raw `project_id` only when there's no repo_paths
-        # to derive from at all (nothing else identifies the sole project).
-        case repos_from_repo_paths(config) do
-          [] ->
-            case get_in(config, ["merge", "config", "project_id"]) do
-              v when is_integer(v) -> ["#{v}"]
-              v when is_binary(v) and v != "" -> [v]
-              _ -> []
-            end
-
-          repos ->
-            repos
-        end
-
-      _ ->
-        []
-    end
-  end
-
-  # Resolve every locally-checked-out repo's `origin` remote into an
-  # "owner/repo" slug. Best-effort: a repo whose path is missing, isn't a git
-  # checkout, or whose remote can't be parsed is logged and skipped.
-  defp repos_from_repo_paths(config) do
-    case Map.get(config, "repo_paths") do
-      repo_map when is_map(repo_map) ->
-        repo_map
-        |> Map.values()
-        |> Enum.map(&RepoConfig.repo_path_from_config/1)
-        |> Enum.reject(&is_nil/1)
-        |> Enum.flat_map(fn path ->
-          case RepoResolver.from_remote(path) do
-            {:ok, {owner, repo}} ->
-              ["#{owner}/#{repo}"]
-
-            {:error, err} ->
-              Logger.info(
-                "PRPatrolSupervisor: could not derive repo for path #{path} " <>
-                  "(skipping): #{inspect(err)}"
-              )
-
-              []
-          end
-        end)
-        |> Enum.uniq()
-        |> Enum.sort()
-
-      _ ->
-        []
-    end
-  end
+  @doc """
+  `workspace` narrowed to the repo the patrolled forge `repo` slug belongs to
+  (`Arbiter.Mergers.ForgeRepos.scope/3`), so a patrol reads that repo's
+  effective merge block (bd-73zv62).
+  """
+  @spec scope(Workspace.t(), String.t() | nil) :: Workspace.t()
+  def scope(%Workspace{} = workspace, repo), do: ForgeRepos.scope(workspace, repo, @forge_opts)
 
   defp patrol_interval_ms do
     Application.get_env(:arbiter, :pr_patrol_interval_ms, 60_000)

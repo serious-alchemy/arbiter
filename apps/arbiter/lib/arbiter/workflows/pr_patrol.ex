@@ -278,9 +278,11 @@ defmodule Arbiter.Workflows.PRPatrol do
     {dispatched_state, mr_count, dispatched_count} =
       with %Workspace{} <- workspace,
            true <- repo_still_configured?(workspace, state.repo),
-           adapter when not is_nil(adapter) <- resolve_adapter(workspace),
+           # bd-73zv62: this repo's effective merge block, not the workspace's.
+           merge_ws = PRPatrolSupervisor.scope(workspace, state.repo),
+           adapter when not is_nil(adapter) <- resolve_adapter(merge_ws),
            true <- function_exported?(adapter, :list_open, 0),
-           :ok <- Mergers.prepare_with_repo(workspace, state.repo),
+           :ok <- Mergers.prepare_with_repo(merge_ws, state.repo),
            {:ok, mrs} <- adapter.list_open() do
         base_state = %{state | workspace: workspace}
 

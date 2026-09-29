@@ -66,13 +66,14 @@ defmodule Arbiter.Reviews.ExternalReview do
 
   alias Arbiter.Board.Drain
   alias Arbiter.Mergers
-  alias Arbiter.Mergers.Github.RepoResolver
+  alias Arbiter.Mergers.ForgeRepos
   alias Arbiter.Mergers.NetDiff
   alias Arbiter.Reviews.{Checkout, Coverage, PrState, Record}
   alias Arbiter.Tasks.{Issue, IssueRepo, RepoConfig, Workspace}
   alias Arbiter.Worker.{ReviewAutomation, ReviewScope}
   alias Arbiter.Workflows.CodeReview
   alias Arbiter.Workflows.CodeReview.DiffScope
+  alias Arbiter.Workflows.ReviewPatrolSupervisor
 
   @task_supervisor Arbiter.Reviews.TaskSupervisor
 
@@ -135,6 +136,7 @@ defmodule Arbiter.Reviews.ExternalReview do
 
     with {:ok, pr} <- fetch_pr(opts),
          {:ok, workspace} <- resolve_workspace(Map.get(opts, :workspace)),
+         workspace = scope_workspace(workspace, Map.get(opts, :repo), pr),
          adapter = Mergers.for_workspace(workspace),
          strategy = Workspace.merger_strategy(workspace),
          :ok <- ensure_supports_external(adapter, strategy),
@@ -315,6 +317,7 @@ defmodule Arbiter.Reviews.ExternalReview do
 
     with {:ok, record} <- fetch_record(opts),
          {:ok, workspace} <- resolve_workspace(record.workspace_id),
+         workspace = scope_workspace(workspace, Map.get(opts, :repo), record.pr_ref),
          adapter = Mergers.for_workspace(workspace),
          strategy = Workspace.merger_strategy(workspace),
          :ok <- ensure_supports_external(adapter, strategy),
@@ -547,6 +550,22 @@ defmodule Arbiter.Reviews.ExternalReview do
       _ -> {:error, :pr_required}
     end
   end
+
+  # bd-73zv62: the MR provider is the one the PR's repo merges through — a
+  # `merge.repos.<repo>` override can differ from the workspace-level
+  # `merge.strategy`. Scope by the explicit `repo:` (a `repo_paths` key) when
+  # given, else by the `owner/repo` the PR identifier names.
+  defp scope_workspace(workspace, repo, _pr) when is_binary(repo) and repo != "",
+    do: Mergers.scope(workspace, repo)
+
+  defp scope_workspace(workspace, _repo, pr) when is_binary(pr) do
+    case Regex.run(~r{^(?:github:|gitlab:)?([^/\s#!]+/[^/\s#!]+)[#!]\d+$}, String.trim(pr)) do
+      [_, slug] -> ForgeRepos.scope(workspace, slug)
+      _ -> workspace
+    end
+  end
+
+  defp scope_workspace(workspace, _repo, _pr), do: workspace
 
   # The review targets the MR provider, so an adapter that can't mint a ref for
   # an externally-authored PR (Direct — local merge, no forge) cannot run one.
@@ -1231,62 +1250,10 @@ defmodule Arbiter.Reviews.ExternalReview do
 
   defp follow_up_eligible?(_prepared), do: false
 
-  # Enumerate repos the workspace would patrol, same logic as
-  # ReviewPatrolSupervisor.patrol_repos/1 — returns [] when the merge
-  # strategy is unsupported or no repos can be derived.
+  # The repos the workspace patrols — `ReviewPatrolSupervisor.patrol_repos/1`
+  # itself (resolved per repo, bd-73zv62), [] when none resolve.
   defp patrol_repos_for(%Workspace{} = workspace) do
-    config = workspace.config || %{}
-
-    case get_in(config, ["merge", "strategy"]) do
-      "github" -> patrol_repos_for_github(config)
-      "gitlab" -> patrol_repos_for_gitlab(config)
-      _ -> []
-    end
-  rescue
-    _ -> []
-  end
-
-  defp patrol_repos_for_github(config) do
-    owner = get_in(config, ["merge", "config", "owner"])
-    repo = get_in(config, ["merge", "config", "repo"])
-
-    if is_binary(owner) and owner != "" and is_binary(repo) and repo != "" do
-      ["#{owner}/#{repo}"]
-    else
-      repos_from_repo_paths(config)
-    end
-  end
-
-  defp patrol_repos_for_gitlab(config) do
-    case get_in(config, ["merge", "config", "project_id"]) do
-      v when is_integer(v) -> ["#{v}"]
-      v when is_binary(v) and v != "" -> [v]
-      _ -> repos_from_repo_paths(config)
-    end
-  end
-
-  defp repos_from_repo_paths(config) do
-    case Map.get(config, "repo_paths") do
-      repo_map when is_map(repo_map) ->
-        repo_map
-        |> Map.values()
-        |> Enum.map(&RepoConfig.repo_path_from_config/1)
-        |> Enum.reject(&is_nil/1)
-        |> Enum.flat_map(fn path ->
-          case RepoResolver.from_remote(path) do
-            {:ok, {owner, repo}} ->
-              ["#{owner}/#{repo}"]
-
-            {:error, _err} ->
-              []
-          end
-        end)
-        |> Enum.uniq()
-        |> Enum.sort()
-
-      _ ->
-        []
-    end
+    ReviewPatrolSupervisor.patrol_repos(workspace)
   rescue
     _ -> []
   end

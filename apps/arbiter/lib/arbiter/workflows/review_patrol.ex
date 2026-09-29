@@ -474,9 +474,11 @@ defmodule Arbiter.Workflows.ReviewPatrol do
       {outcomes, rate_limit} =
         with %Workspace{} <- workspace,
              true <- repo_still_configured?(workspace, state.repo),
-             adapter when not is_nil(adapter) <- resolve_adapter(workspace),
+             # bd-73zv62: this repo's effective merge block, not the workspace's.
+             merge_ws = ReviewPatrolSupervisor.scope(workspace, state.repo),
+             adapter when not is_nil(adapter) <- resolve_adapter(merge_ws),
              true <- function_exported?(adapter, :get, 1),
-             :ok <- Mergers.prepare_with_repo(workspace, state.repo) do
+             :ok <- Mergers.prepare_with_repo(merge_ws, state.repo) do
           repo_name = repo_name_for_repo(workspace, state.repo)
 
           state.workspace_id
@@ -2395,11 +2397,16 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   # Single-repo workspaces: `merge.config.repo` IS that bare name directly.
   # Multi-repo workspaces: find the `repo_paths` entry whose git
   # remote resolves to this "owner/repo" and use its key.
-  def repo_name_for_repo(%Workspace{config: config}, repo) when is_binary(repo) and repo != "" do
+  #
+  # bd-73zv62: `merge.config.repo` is read from the effective merge block of
+  # the repo `repo` belongs to (`ReviewPatrolSupervisor.scope/2`), so a
+  # per-repo override is honoured.
+  def repo_name_for_repo(%Workspace{config: config} = workspace, repo)
+      when is_binary(repo) and repo != "" do
     config = config || %{}
 
-    case get_in(config, ["merge", "config", "repo"]) do
-      name when is_binary(name) and name != "" -> name
+    case Mergers.merge_config(ReviewPatrolSupervisor.scope(workspace, repo), nil) do
+      %{"config" => %{"repo" => name}} when is_binary(name) and name != "" -> name
       _ -> repo_name_from_repo_paths(config, repo)
     end
   end
