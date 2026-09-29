@@ -63,7 +63,10 @@ defmodule ArbiterWeb.Api.QueueControllerTest do
     } do
       task = merging_ticket(ws, "!qc-conflict")
       RefusingConflictResolver.arm(task.id, self())
-      StubMerger.queue_get("!qc-conflict", [%{status: :open, approved: true, block_reason: :conflict}])
+
+      StubMerger.queue_get("!qc-conflict", [
+        %{status: :open, approved: true, block_reason: :conflict}
+      ])
 
       {:ok, wpid} =
         Watchdog.start(

@@ -3591,7 +3591,10 @@ defmodule Arbiter.Worker do
         "but did not deliver: #{summary}"
     )
 
-    fail_now(%State{state | meta: unresolved_pass_meta(state.meta, summary)}, {:conflict_unresolved, summary})
+    fail_now(
+      %State{state | meta: unresolved_pass_meta(state.meta, summary)},
+      {:conflict_unresolved, summary}
+    )
   end
 
   defp finish_delivered_pass(%State{} = state) do
