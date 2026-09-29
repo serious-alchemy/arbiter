@@ -6,8 +6,8 @@ defmodule Arbiter.Accounts.ProviderCredential do
   keeps every `usage_events` row's `provider_credential_id` meaningful across
   a rotation.
 
-  Read by `Arbiter.Accounts.Credentials` since P3 (bd-aiodva), behind
-  `Arbiter.Accounts.enabled?/0`. The secret is encrypted at rest with the
+  Read by `Arbiter.Accounts.Credentials` since P3 (bd-aiodva), and the only
+  source of a spawn's provider credential since P13 (bd-9gqj8e). The secret is encrypted at rest with the
   same `Arbiter.Vault` cloak already used for
   `workspaces.encrypted_worker_env`.
 
@@ -162,7 +162,7 @@ defmodule Arbiter.Accounts.ProviderCredential do
   plain attribute) and decrypts it with `Arbiter.Vault`. Mirrors
   `Arbiter.Tasks.Workspace.secrets_map/1`. The read path
   (`Arbiter.Accounts.Credentials`) decrypts through here on every spawn that
-  runs with provider accounts enabled.
+  carries a provider credential.
   """
   @spec secret(t()) :: String.t() | nil
   def secret(credential) do

@@ -34,10 +34,10 @@ defmodule ArbiterWeb.Api.QuotaController do
   `account_policy` / `policy_binding` (bd-c7ll4t) describe the headline
   account's own `quota_config` (mode, ceilings) and, under `?workspace=`,
   which side of `min(account, workspace)` is currently binding each flat
-  ceiling — `:account`, `:workspace`, or `:default`. With `:provider_accounts_enabled`
-  on, an account's flat ceiling can bind tighter than a paced/looser
-  workspace's own config silently (bd-5ps98m); this is how `arb quota` says
-  so instead of only ever printing "not quota-held".
+  ceiling — `:account`, `:workspace`, or `:default`. An account's flat
+  ceiling can bind tighter than a paced/looser workspace's own config
+  silently (bd-5ps98m); this is how `arb quota` says so instead of only ever
+  printing "not quota-held".
 
     * `claude` — the latest polled snapshot, including per-model weekly breakdowns
       and overage spend; `null` before the first poll.

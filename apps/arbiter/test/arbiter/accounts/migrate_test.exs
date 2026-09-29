@@ -18,11 +18,10 @@ defmodule Arbiter.Accounts.MigrateTest do
   4 evidence: no allowlisted key survives in `worker_env` post-migration, the
   backup row is written unconditionally before any strip (so removal without
   a backup cannot happen), and rollback restores a workspace's credential
-  after the destructive step. P4's own work is in `ConfigDir` — per the
-  operator's ruling on PR #1947 (bd-cblemv round 2), the flag-off legacy
-  chain (server env, then install-wide-unambiguous workspace token) is kept
-  rather than deleted until `:provider_accounts_enabled` flips for good; see
-  `config_dir_test.exs` and `config_dir_workspace_test.exs`.
+  after the destructive step. The legacy `ConfigDir` chain (server env, then
+  install-wide-unambiguous workspace token) that P4 kept per the operator's
+  ruling on PR #1947 (bd-cblemv round 2) was deleted with the flag in P13
+  (bd-9gqj8e); see `legacy_chain_removed_test.exs`.
   """
   use Arbiter.DataCase, async: false
 
@@ -291,33 +290,7 @@ defmodule Arbiter.Accounts.MigrateTest do
     end
   end
 
-  describe "the shipped default (acceptance 4; :auto since bd-cvvb02)" do
-    test ":provider_accounts_enabled ships :auto, and is off until the boot resolves it" do
-      # The shipped default is what an install gets before an operator states
-      # one; `config/test.exs` overrides it per matrix leg (P3 / bd-aiodva), so
-      # the runtime value is not the thing to assert here. The per-population
-      # resolution is covered by `Arbiter.Accounts.EnablementTest`.
-      config = File.read!(Path.join(File.cwd!(), "../../config/config.exs"))
-      assert config =~ "config :arbiter, :provider_accounts_enabled, :auto"
-
-      prev = Application.get_env(:arbiter, :provider_accounts_enabled)
-      prev_resolution = Application.get_env(:arbiter, :provider_accounts_resolution)
-      Application.put_env(:arbiter, :provider_accounts_enabled, :auto)
-      Application.delete_env(:arbiter, :provider_accounts_resolution)
-
-      on_exit(fn ->
-        case prev do
-          nil -> Application.delete_env(:arbiter, :provider_accounts_enabled)
-          value -> Application.put_env(:arbiter, :provider_accounts_enabled, value)
-        end
-
-        if prev_resolution,
-          do: Application.put_env(:arbiter, :provider_accounts_resolution, prev_resolution)
-      end)
-
-      assert Arbiter.Accounts.enabled?() == false
-    end
-
+  describe "the read flip's reach (acceptance 4)" do
     test "the read flip (P3) is confined to the surfaces §5 names" do
       # Claude's config dir and WorkerEnv are §5 rows 15–17 and do read the
       # tables now. Gemini's config dir is not in that table and must not have

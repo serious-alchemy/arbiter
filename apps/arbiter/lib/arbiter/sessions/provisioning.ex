@@ -488,7 +488,8 @@ defmodule Arbiter.Sessions.Provisioning do
          {:missing_oauth_token,
           "auth mode A (:oauth_token) needs a CLAUDE_CODE_OAUTH_TOKEN for " <>
             "workspace #{inspect(session.workspace_id)}, and none is configured. " <>
-            "Configure one on the workspace, or launch in mode B (:seeded_credentials)."}}
+            "Attach a Claude provider account holding one to the workspace, or launch in " <>
+            "mode B (:seeded_credentials)."}}
 
       token ->
         write_secret(paths.auth_env, "CLAUDE_CODE_OAUTH_TOKEN=#{token}\n")

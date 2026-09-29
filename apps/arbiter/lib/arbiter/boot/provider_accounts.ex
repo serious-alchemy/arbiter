@@ -1,17 +1,18 @@
 defmodule Arbiter.Boot.ProviderAccounts do
   @moduledoc """
-  Resolve `:provider_accounts_enabled` for this boot (bd-cvvb02) — see
-  `Arbiter.Accounts.Enablement` for the rule.
+  Classify this install's provider-account posture for this boot
+  (bd-cvvb02; P13, bd-9gqj8e) — see `Arbiter.Accounts.Enablement` for the
+  rule.
 
   Mirrors `Arbiter.Boot.ConfigMigrator`: a one-shot synchronous worker that
   returns `:ignore`, placed after the schema and config migrators so it reads
   a current schema, and before the boot tasks that start the per-workspace
   queues. The *resolution* is read-only and runs on every instance, so a
-  duplicate boot answers `Arbiter.Accounts.enabled?/0` the same way; the
+  duplicate boot reports the same `Enablement.status/0`; the
   fresh-install `<provider>:default` joins are writes, so only the
   `Arbiter.SingleInstance` primary makes them.
 
-  Never aborts the boot: a failure resolves provider accounts off and logs.
+  Never aborts the boot: a failure is logged and nothing is auto-joined.
   """
 
   require Logger
@@ -31,7 +32,7 @@ defmodule Arbiter.Boot.ProviderAccounts do
   end
 
   @doc """
-  Resolve the flag, then — on the primary instance of a fresh install —
+  Classify the install, then — on the primary instance of a fresh install —
   join every existing workspace to `<provider>:default`. Always `:ignore`.
 
   `:primary?` overrides the `Arbiter.SingleInstance.primary?/0` lookup (for

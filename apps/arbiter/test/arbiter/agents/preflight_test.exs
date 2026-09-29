@@ -3,9 +3,10 @@ defmodule Arbiter.Agents.PreflightTest do
   # process-global OS environment (bd-2zigo1).
   use ExUnit.Case, async: false
 
-  # bd-bw3466: no Ecto sandbox here, so ConfigDir's install-wide worker_env
-  # scan can't read Workspace and logs a warning on every call. Expected in this
-  # file; capture it so the run stays readable (logs still surface on failure).
+  # No Ecto sandbox here, so ConfigDir's workspace-less read of the
+  # install-wide account credential can't reach the database and degrades to
+  # "no credential". Capture any log so the run stays readable (logs still
+  # surface on failure).
   @moduletag :capture_log
 
   alias Arbiter.Agents.Claude
@@ -75,7 +76,7 @@ defmodule Arbiter.Agents.PreflightTest do
     end
   end
 
-  describe "check/2 CLAUDE_CODE_OAUTH_TOKEN fallback (bd-2zigo1)" do
+  describe "check/2 and a server-env CLAUDE_CODE_OAUTH_TOKEN (bd-2zigo1; inert since P13)" do
     setup do
       prev_oauth_token = System.get_env("CLAUDE_CODE_OAUTH_TOKEN")
 
@@ -91,29 +92,27 @@ defmodule Arbiter.Agents.PreflightTest do
       :ok
     end
 
-    test "Claude.spawn_env/1 exports the token verbatim, never remapped" do
+    # P13 (bd-9gqj8e): the server env is no longer a credential source — the
+    # probe authenticates from the install-wide provider account credential
+    # (`arbiter/accounts/legacy_chain_removed_test.exs` drives that against a
+    # real database and a stub `claude`). What this file can pin without one
+    # is the negative: a server-env token neither reaches `spawn_env/1` nor
+    # the probe's child process.
+    test "Claude.spawn_env/1 never exports a server-env token" do
       System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "test-oauth-session-token")
 
-      assert {"CLAUDE_CODE_OAUTH_TOKEN", "test-oauth-session-token"} in Claude.spawn_env([])
+      assert {"CLAUDE_CODE_OAUTH_TOKEN", false} in Claude.spawn_env([])
+      refute {"CLAUDE_CODE_OAUTH_TOKEN", "test-oauth-session-token"} in Claude.spawn_env([])
     end
 
-    test "probe succeeds via the install-wide CLAUDE_CODE_OAUTH_TOKEN even with no personal API key/session" do
-      # Simulates the incident: the operator's personal ~/.claude/.credentials.json
-      # OAuth session is expired/absent (no api_key configured either), but the
-      # install-wide CLAUDE_CODE_OAUTH_TOKEN is set.
-      #
-      # NOTE: this test alone does NOT prove the probe env comes from
-      # `spawn_env/1` — Erlang's `Port.open` `{:env, ...}` option *extends*
-      # (rather than replaces) the BEAM's own OS environment, so a var set via
-      # `System.put_env/2` reaches the spawned `sh` regardless of what
-      # `spawn_env/1` returns. That wiring is verified separately below with
-      # `SpawnEnvAdapter`, which uses a sentinel var never set on the BEAM
-      # itself. This test instead pins the end-to-end incident scenario: with
-      # `CLAUDE_CODE_OAUTH_TOKEN` present, the real `Claude` adapter's probe
-      # authenticates.
+    test "a server-env token does not reach the probe: the child sees it unset" do
+      # `Port.open`'s `{:env, ...}` extends the BEAM's own environment, so a
+      # token set with `System.put_env/2` would reach the spawned `sh` unless
+      # `spawn_env/1`'s explicit `{..., false}` unsets it — which is exactly
+      # what this asserts.
       System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "test-oauth-session-token")
 
-      assert :ok =
+      assert {:error, reason} =
                Preflight.check(Claude,
                  probe_command: [
                    "sh",
@@ -121,6 +120,8 @@ defmodule Arbiter.Agents.PreflightTest do
                    ~s(if [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ]; then echo pong; exit 0; else echo '401 invalid authentication credentials'; exit 1; fi)
                  ]
                )
+
+      assert reason.category == :auth_expired
     end
 
     test "probe fails without CLAUDE_CODE_OAUTH_TOKEN or an api_key (control case)" do

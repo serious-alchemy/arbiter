@@ -105,10 +105,10 @@ defmodule Arbiter.ApplicationTest do
     end
 
     test "provider accounts resolve after the migrators and before any workspace dispatch" do
-      # bd-cvvb02: `:provider_accounts_enabled` ships `:auto`, which reads the
-      # migration-backup table (so the schema must be at head) and decides
-      # where every spawn's credential comes from (so it must precede the
-      # boot tasks that reconcile, resume and dispatch work).
+      # bd-cvvb02: the boot classification reads the migration-backup table
+      # (so the schema must be at head) and, on a fresh install, joins every
+      # workspace to its default account (so it must precede the boot tasks
+      # that reconcile, resume and dispatch work).
       ids = Application.children(auto_start?: true) |> Enum.map(&child_id/1)
 
       accounts_ix = Enum.find_index(ids, &(&1 == Arbiter.Boot.ProviderAccounts))

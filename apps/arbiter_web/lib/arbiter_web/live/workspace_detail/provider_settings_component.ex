@@ -181,8 +181,7 @@ defmodule ArbiterWeb.WorkspaceDetail.ProviderSettingsComponent do
 
   # P10 (`docs/provider-account-design.md` §8, bd-icwk2k): which account a
   # fallback type is metered under, `%{"claude" => "personal-max"}`. A plain
-  # read of the link, so — like `Usage`/`Quota`'s own account reads — it needs
-  # no `Accounts.enabled?/0` gate: that flag guards the *credential* path.
+  # read of the link, like `Usage`/`Quota`'s own account reads.
   defp account_labels(%Workspace{id: ws_id}, agent_types) do
     for provider <- agent_types,
         account = Arbiter.Accounts.Resolver.account(ws_id, provider),

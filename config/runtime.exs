@@ -19,26 +19,6 @@ if config_env() != :test do
     journal_mode: :wal,
     busy_timeout: 5000,
     pool_size: String.to_integer(System.get_env("POOL_SIZE") || "5")
-
-  # Provider accounts (docs/provider-account-design.md §7.5): config.exs ships
-  # the flag `:auto` and a release bakes that in; the boot resolves it per
-  # install (Arbiter.Accounts.Enablement, bd-cvvb02). The server's environment
-  # is where a release install states it explicitly (bd-1zceei), and an
-  # explicit value always wins over `:auto`. Unset leaves the default alone.
-  # See docs/provider-accounts-release-runbook.md. Test sets its own in test.exs.
-  case System.get_env("ARBITER_PROVIDER_ACCOUNTS") do
-    unset when unset in [nil, ""] ->
-      :ok
-
-    on when on in ["1", "true"] ->
-      config :arbiter, :provider_accounts_enabled, true
-
-    off when off in ["0", "false"] ->
-      config :arbiter, :provider_accounts_enabled, false
-
-    other ->
-      raise "ARBITER_PROVIDER_ACCOUNTS must be 1/true or 0/false, got: #{inspect(other)}"
-  end
 end
 
 if config_env() == :prod do

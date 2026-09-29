@@ -22,7 +22,6 @@ defmodule Arbiter.Worker.DispatchSetupTokenGuardTest do
 
   setup do
     prev_repos = Application.get_env(:arbiter, :repo_paths)
-    prev_flag = Application.get_env(:arbiter, :provider_accounts_enabled)
     prev_isolate = Application.get_env(:arbiter, :worker_isolate_config)
     prev_dir = Application.get_env(:arbiter, :worker_config_dir)
 
@@ -48,7 +47,6 @@ defmodule Arbiter.Worker.DispatchSetupTokenGuardTest do
 
     on_exit(fn ->
       restore_app(:repo_paths, prev_repos)
-      restore_app(:provider_accounts_enabled, prev_flag)
       restore_app(:worker_isolate_config, prev_isolate)
       restore_app(:worker_config_dir, prev_dir)
 
@@ -68,8 +66,6 @@ defmodule Arbiter.Worker.DispatchSetupTokenGuardTest do
 
   defp restore_app(key, nil), do: Application.delete_env(:arbiter, key)
   defp restore_app(key, val), do: Application.put_env(:arbiter, key, val)
-
-  defp flag(on?), do: Application.put_env(:arbiter, :provider_accounts_enabled, on?)
 
   defp account(slug) do
     {:ok, acct} = Ash.create(ProviderAccount, %{provider: :claude, slug: slug, enabled: true})
@@ -135,12 +131,7 @@ defmodule Arbiter.Worker.DispatchSetupTokenGuardTest do
     reason
   end
 
-  describe "provider accounts on" do
-    setup do
-      flag(true)
-      :ok
-    end
-
+  describe "provider accounts" do
     test "an account with no credential rows refuses, escalates once, copies nothing", %{
       ws: ws,
       target: target
@@ -189,33 +180,34 @@ defmodule Arbiter.Worker.DispatchSetupTokenGuardTest do
     end
   end
 
-  describe "provider accounts off" do
-    setup do
-      flag(false)
-      :ok
-    end
-
-    test "no token anywhere refuses with an escalation naming CLAUDE_CODE_OAUTH_TOKEN", %{
-      ws: ws
-    } do
-      t = task(ws)
-
-      reason = assert_refused_untouched(t, dispatch(t))
-      assert reason.remediation =~ "CLAUDE_CODE_OAUTH_TOKEN"
-      assert [_page] = escalations(ws)
-    end
-
-    test "a server-env setup token dispatches as before", %{ws: ws} do
+  # P13 (bd-9gqj8e): the flag-off legacy chain is gone, so what used to let
+  # an un-migrated workspace dispatch no longer does.
+  describe "legacy credential sources no longer count" do
+    test "a server-env setup token alone refuses, naming attach + rotate", %{ws: ws} do
       System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "server-token")
       t = task(ws)
 
-      assert {:error, :missing_worktree} = dispatch(t)
-      assert escalations(ws) == []
+      reason = assert_refused_untouched(t, dispatch(t))
+      assert reason.remediation =~ "arb account attach #{ws.id} claude"
+      assert [_page] = escalations(ws)
+    end
+
+    test "a worker_env token alone refuses, naming the migration", %{ws: ws} do
+      ws
+      |> Ash.Changeset.for_update(:update, %{
+        worker_env: %{"CLAUDE_CODE_OAUTH_TOKEN" => %{"value" => "blob", "secret" => true}}
+      })
+      |> Ash.update!()
+
+      t = task(ws)
+
+      reason = assert_refused_untouched(t, dispatch(t))
+      assert reason.remediation =~ "arbiter.accounts.migrate"
+      assert [_page] = escalations(ws)
     end
   end
 
   test "a non-Claude dispatch is not subject to the guard", %{ws: ws} do
-    flag(true)
     t = task(ws)
 
     assert {:error, :missing_worktree} =

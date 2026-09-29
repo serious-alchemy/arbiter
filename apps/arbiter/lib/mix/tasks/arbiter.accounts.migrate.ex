@@ -28,18 +28,17 @@ defmodule Mix.Tasks.Arbiter.Accounts.Migrate do
 
   Moving a key out of the blob stops a worker spawned from that workspace
   receiving it from the blob. Since P3 (bd-aiodva) the account row supplies it
-  instead, but only while provider accounts are on. The flag ships `:auto`
-  (bd-cvvb02): the next boot after a migration resolves it on, since the
-  backup rows this writes are the migration record `Arbiter.Accounts.Enablement`
-  looks for; `ARBITER_PROVIDER_ACCOUNTS=1` pins it on and `=0` keeps it off.
-  So the order is: migrate every workspace that carries a provider credential,
-  then restart.
+  instead, and since the P13 flip (bd-9gqj8e) the account is the only source
+  there is. The backup rows this writes are the migration record
+  `Arbiter.Accounts.Enablement` looks for. So the order is: migrate every
+  workspace that carries a provider credential, then restart.
 
-  With the flag on, a workspace whose blob still carries a credential that no
-  account supplies raises `Arbiter.Accounts.MissingCredentialError` at spawn
-  time rather than dispatching a worker with no credential. Both undos are
-  cheap: flip the flag back, or run `mix arbiter.accounts.rollback` (the
-  backup row is written for exactly this).
+  A workspace whose blob still carries a credential that no account supplies
+  raises `Arbiter.Accounts.MissingCredentialError` at spawn time rather than
+  dispatching a worker with no credential. `mix arbiter.accounts.rollback`
+  undoes a migration (the backup row is written for exactly this), which
+  puts the key back in the blob — and so leaves the workspace unable to
+  spawn until it is migrated again.
 
   ## Usage
 

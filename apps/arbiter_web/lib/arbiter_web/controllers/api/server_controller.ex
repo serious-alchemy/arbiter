@@ -26,12 +26,13 @@ defmodule ArbiterWeb.Api.ServerController do
       and whose Claude dispatch is now held. `arb server doctor` lists them.
       A failed read is a 500, so the doctor reports "could not check" rather
       than a false all-clear.
-    * `GET /api/server/provider_accounts` — how `:provider_accounts_enabled`
-      resolved for this boot (bd-cvvb02, `Arbiter.Accounts.Enablement.status/0`):
-      the configured value (`auto` / `true` / `false`), whether accounts are
-      on, the decision, and — re-read live — every workspace a spawn would
-      raise `MissingCredentialError` for with accounts on. `arb server doctor`
-      fails when an un-migrated install is held off, and points at the runbook.
+    * `GET /api/server/provider_accounts` — how this boot classified the
+      install's provider accounts (bd-cvvb02, P13 bd-9gqj8e,
+      `Arbiter.Accounts.Enablement.status/0`): the decision, and — re-read
+      live — every workspace a spawn would raise `MissingCredentialError` for
+      and whether a now-ignored `CLAUDE_CODE_OAUTH_TOKEN` is still in the
+      server environment. `arb server doctor` fails on either, and points at
+      the runbook.
     * `GET /api/server/merge_routing` — every workspace repo's effective merge
       strategy (a `merge.repos.<repo>` override, else the workspace's), and
       each one whose checkout cannot carry it (bd-73zv62,
@@ -131,8 +132,6 @@ defmodule ArbiterWeb.Api.ServerController do
     status = Enablement.status()
 
     json(conn, %{
-      configured: to_string(status.configured),
-      enabled: status.enabled,
       decision: Atom.to_string(status.decision),
       stranded_workspaces: status.stranded_workspaces,
       server_env_token: status.server_env_token?,

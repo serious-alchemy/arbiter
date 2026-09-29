@@ -872,13 +872,14 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   defp routing_problem(entry),
     do: "#{routing_label(entry)}: #{Map.get(entry, "problem")} — fix: #{Map.get(entry, "fix")}"
 
-  # bd-cvvb02: `:provider_accounts_enabled` ships `:auto`. An un-migrated
-  # install that still carries legacy provider credentials is held OFF at boot
-  # rather than raising MissingCredentialError on every spawn — correct, but
-  # not where it should stay, so it is an operator-actionable failure
-  # (non-zero exit). Like the Claude credential check it says nothing about
-  # whether the server is healthy, so it never blocks deploy readiness: an
-  # upgrade's `arb server deploy` must not roll back over it.
+  # bd-cvvb02 / P13 (bd-9gqj8e): provider accounts are always on and there is
+  # no legacy credential chain. An un-migrated install that still carries
+  # legacy provider credentials therefore raises MissingCredentialError on
+  # every spawn in those workspaces (and its server-env token is read by
+  # nothing), so it is an operator-actionable failure (non-zero exit). Like
+  # the Claude credential check it says nothing about whether the server is
+  # healthy, so it never blocks deploy readiness: an upgrade's `arb server
+  # deploy` must not roll back over it.
   defp check_provider_accounts do
     case Client.get("/api/server/provider_accounts") do
       {:ok, %{"decision" => decision} = status} ->
@@ -900,26 +901,24 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       name: "provider accounts",
       status: :fail,
       detail:
-        "held OFF: legacy provider credentials with no migration record (" <>
-          legacy_sources(status) <> "); workers use the legacy credential chain",
+        "legacy provider credentials with no migration record (" <>
+          legacy_sources(status) <>
+          "); provider accounts are the only credential " <>
+          "source, so nothing reads them and those workspaces cannot spawn",
       hint:
         "Migrate them into provider accounts — census, migrate, restart — per " <>
-          "#{runbook(status)}. To keep the legacy chain deliberately, set " <>
-          "ARBITER_PROVIDER_ACCOUNTS=0 in the server's env file and restart.",
+          "#{runbook(status)}.",
       fatal: true,
       blocks_readiness: false
     }
   end
 
-  defp provider_accounts_result(
-         decision,
-         %{"enabled" => true, "stranded_workspaces" => [_ | _]} = status
-       ) do
+  defp provider_accounts_result(decision, %{"stranded_workspaces" => [_ | _]} = status) do
     %Result{
       name: "provider accounts",
       status: :fail,
       detail:
-        "on (#{decision}), but workspace(s) #{Enum.join(status["stranded_workspaces"], ", ")} " <>
+        "#{decision}, but workspace(s) #{Enum.join(status["stranded_workspaces"], ", ")} " <>
           "still carry a provider credential in worker_env that no account supplies — their " <>
           "next spawn raises MissingCredentialError",
       hint: "Migrate those workspaces (census, then migrate) per #{runbook(status)}.",
@@ -930,12 +929,16 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
 
   defp provider_accounts_result(decision, status) do
     detail =
-      case {decision, status["enabled"]} do
-        {"explicit_off", _} -> "off (ARBITER_PROVIDER_ACCOUNTS=0)"
-        {"explicit_on", _} -> "on (ARBITER_PROVIDER_ACCOUNTS=1)"
-        {"unresolved", _} -> "not resolved yet — the server is still booting"
-        {_, true} -> "on (#{decision})"
-        {_, _} -> "off (#{decision})"
+      case {decision, status["server_env_token"]} do
+        {"unresolved", _} ->
+          "not resolved yet — the server is still booting"
+
+        {_, true} ->
+          "on (#{decision}); CLAUDE_CODE_OAUTH_TOKEN in the server environment is " <>
+            "ignored — remove it"
+
+        {_, _} ->
+          "on (#{decision})"
       end
 
     %Result{

@@ -290,9 +290,8 @@ defmodule Arbiter.DataCase do
   no setup token or API key (`Arbiter.Agents.Claude.CredentialCheck`) rather
   than hand the worker a copy of the operator's `.credentials.json`. A test
   that drives the real-agent path against a stub `claude` on `PATH` needs to
-  get past that guard; an env key does so under either
-  `:provider_accounts_enabled` leg without creating account rows that the
-  quota gate and routing would also read.
+  get past that guard; an env key does so without creating account rows
+  that the quota gate and routing would also read.
   """
   def claude_credential_env! do
     put_system_env("ANTHROPIC_API_KEY", "sk-ant-test-credential")
