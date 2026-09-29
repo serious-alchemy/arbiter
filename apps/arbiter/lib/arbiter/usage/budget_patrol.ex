@@ -153,14 +153,9 @@ defmodule Arbiter.Usage.BudgetPatrol do
         states = worker_states(workers)
 
         over =
-          issues
-          |> Enum.filter(&(total(spends[&1.id]) > 0.0))
-          |> Enum.filter(fn issue ->
+          Enum.filter(issues, fn issue ->
             spend = spends[issue.id]
-            assessment = Budget.assess(issue, Keyword.put(opts, :spend, total(spend)))
-
-            if assessment.over_budget?, do: escalate(issue, assessment, spend, states)
-            assessment.over_budget?
+            total(spend) > 0.0 and over_budget?(issue, spend, states, opts)
           end)
 
         # bd-7gt8rm: every open task was just assessed, so an alert for a task
@@ -174,6 +169,13 @@ defmodule Arbiter.Usage.BudgetPatrol do
       :ok
   catch
     :exit, _ -> :ok
+  end
+
+  # Assess one task with spend; raise (or refresh) its alert when it is over.
+  defp over_budget?(issue, spend, states, opts) do
+    assessment = Budget.assess(issue, Keyword.put(opts, :spend, total(spend)))
+    if assessment.over_budget?, do: escalate(issue, assessment, spend, states)
+    assessment.over_budget?
   end
 
   # `nil` is "nothing priced" (an agy-only task): there is no figure to be over.
