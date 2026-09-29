@@ -14,8 +14,10 @@ defmodule Arbiter.Alerts do
     * `active/1` lists what is still active, oldest first — the read behind
       `GET /api/alerts` and the MCP `alert_list` tool.
 
-  Every raise, refresh and clear is announced on the workspace's `inbox` event
-  topic as `%{kind: "alert", event: "raised" | "refreshed" | "cleared", …}`.
+  Opening and clearing an alert are announced on its workspace's `inbox` event
+  topic as `%{kind: "alert", event: "raised" | "cleared", …}`. A refresh is
+  not: producers re-raise on every check (the budget patrol every sweep), and
+  each announcement is a persisted event row.
   """
 
   use Ash.Domain
@@ -79,10 +81,7 @@ defmodule Arbiter.Alerts do
       |> Map.take([:subject, :detail])
       |> Map.reject(fn {_k, v} -> is_nil(v) end)
 
-    with {:ok, alert} <- Ash.update(row, changes, action: :refresh) do
-      announce(alert, :refreshed)
-      {:ok, alert}
-    end
+    Ash.update(row, changes, action: :refresh)
   end
 
   @doc """

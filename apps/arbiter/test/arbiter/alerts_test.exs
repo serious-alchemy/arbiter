@@ -137,7 +137,7 @@ defmodule Arbiter.AlertsTest do
   end
 
   describe "announcements" do
-    test "a raise and a clear are broadcast on the workspace's inbox topic" do
+    test "opening and clearing are broadcast on the workspace's inbox topic; a refresh is not" do
       Phoenix.PubSub.subscribe(Arbiter.PubSub, Arbiter.Events.pubsub_topic(@ws))
       key = key()
 
@@ -145,7 +145,7 @@ defmodule Arbiter.AlertsTest do
       assert_receive {:event, %{topic: "inbox", kind: "alert", event: "raised", key: ^key}}
 
       {:ok, _} = raise_one(:quota_poll_failing, key, "still down")
-      assert_receive {:event, %{topic: "inbox", kind: "alert", event: "refreshed", key: ^key}}
+      refute_receive {:event, %{kind: "alert", key: ^key}}, 50
 
       {:ok, _} = Alerts.clear(:quota_poll_failing, key)
       assert_receive {:event, %{topic: "inbox", kind: "alert", event: "cleared", key: ^key}}

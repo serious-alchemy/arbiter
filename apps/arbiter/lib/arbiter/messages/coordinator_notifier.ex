@@ -68,6 +68,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
 
   require Logger
 
+  alias Arbiter.Alerts
   alias Arbiter.CircuitBreaker
   alias Arbiter.Messages.Escalation
   alias Arbiter.Messages.Message
@@ -77,6 +78,10 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
 
   @config_key "coordinator_notifications"
   @legacy_config_key "admiral_notifications"
+
+  # The `/api/oauth/usage` poll is account-wide, so its failure is one alert
+  # for the whole install (bd-7gt8rm).
+  @quota_poll_alert_key "anthropic_oauth_usage"
 
   # How long a merge-block escalation stays "recent enough" to suppress a repeat
   # even after the coordinator has cleared it (bd-brwx7w). The primary dedupe is
@@ -300,57 +305,45 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
     do: escalate(:spawn_failed, snapshot, reason)
 
   @doc """
-  Escalate a proactively-detected credential expiry to the coordinator (bd-5wchp1).
+  Raise a proactively-detected credential expiry as a system alert (bd-5wchp1,
+  bd-7gt8rm).
 
   Fired by `Arbiter.Agents.CredentialWatchdog` when a periodic liveness probe
   detects that credentials are expired *before* any worker has been dispatched
   or failed. Unlike `worker_stopped/2` and `preflight_failed/2`, this has no
   associated task — it names the adapter that failed instead.
 
-  `snapshot` must contain `:workspace_id`; `adapter` is the module whose probe
-  failed. Same addressed `:escalation` shape as the other escalations.
-  Best-effort, returns `:ok`.
+  `snapshot` must contain `:workspace_id` (where the alert is shown); `adapter`
+  is the module whose probe failed. Best-effort, returns `:ok`.
 
-  ## One escalation per episode (bd-6jjgk0)
+  ## One alert per episode (bd-6jjgk0, bd-7gt8rm)
 
-  `Arbiter.Agents.CredentialWatchdog`'s own in-memory dedupe (skip while its
-  `adapters` map already says `{:expired, _}`) is not durable: its own
-  periodic CLI probe can flip an adapter back to `:ok` on a signal this proactive
-  probe never saw (the worker CLI self-refreshing its session while
-  `Arbiter.Quota.CloudProbe`'s `/api/oauth/usage` poll reads a separately
-  cached, still-stale token — #1875), re-arming the in-memory latch on every
-  such flip. One install saw 35 near-identical "N consecutive 401s" pages in
-  ~15h this way — the mailbox equivalent of the `:needs_nonauthor_approval`
-  flood `duplicate_block_escalation?/3` (bd-brwx7w) fixed the same way: the
-  latch has to live in the durable message table, which survives both a
-  flapping in-memory state and a restart.
-
-  While an identical (same workspace + adapter + `source`) escalation is
-  still uncleared, a repeat call rewrites its body in place
-  (`Message.restate/2`) instead of inserting a new row — the counter and
-  "last detected" timestamp move, the mailbox does not grow.
-  `credential_restored/3` clears the row and ends the episode once the same
-  `source` succeeds again; a later failure then opens a fresh one.
+  `Arbiter.Agents.CredentialWatchdog`'s own in-memory latch is not durable: its
+  periodic CLI probe can flip an adapter back to `:ok` on a signal this
+  proactive probe never saw (#1875), re-arming the latch on every flip. One
+  install saw 35 near-identical "N consecutive 401s" pages in ~15h that way.
+  The latch is the alert record: while the `(adapter, source)` alert is active
+  a repeat call refreshes its detail and `last_raised_at` instead of opening a
+  second one. `credential_restored/3` clears it once the same `source`
+  succeeds again; a later failure then opens a fresh episode.
 
   `source` (default `:worker_report`) is which signal detected the failure —
   `:periodic_probe` (the Watchdog's own CLI probe, which gates dispatch 1:1),
   `:worker_report` (N worker deaths via `AuthHold`, also dispatch-gating), or
   `:usage_poll` (`Arbiter.Quota.CloudProbe`'s `/api/oauth/usage`-family poll,
-  a separately cached credential, #1875). It keys both the dedupe subject
-  (so a `:usage_poll` episode and a `:periodic_probe` episode for the same
-  adapter never collide into one row) and the source-description text below,
-  in place of inferring either from `reason.summary`.
+  a separately cached credential, #1875). It keys the alert (so a
+  `:usage_poll` episode and a `:periodic_probe` episode for the same adapter
+  are two alerts) and the source description in its detail.
 
   `gate_closed?` (default `true`, for callers that don't gate dispatch on
   anything and are only ever `:worker_report`/`:periodic_probe`) is the
   adapter's *actual* dispatch-gate state at the moment this call is made —
   `Arbiter.Agents.CredentialWatchdog.expired?/1` right after this same expiry
-  was recorded. It, not `source`, decides whether the body claims dispatches
+  was recorded. It, not `source`, decides whether the detail claims dispatches
   are suspended (bd-6jjgk0 finding 1): a `:usage_poll` expiry never closes the
   gate on its own (#1875 — that probe reads a token the worker CLI doesn't),
-  so its escalation says so and names the probe's own credential as the one
-  that failed, without claiming dispatch is blocked unless some other,
-  gate-closing expiry also happens to be outstanding for the same adapter.
+  so its alert says so and names the probe's own credential as the one that
+  failed.
   """
   @spec credential_expired(%{workspace_id: String.t()}, module(), StopReason.t(), atom()) :: :ok
   def credential_expired(snapshot, adapter, reason),
@@ -380,99 +373,69 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
       |> Map.put(:source, source)
       |> Map.put(:gate_closed?, gate_closed?)
 
-    {subject, body} = escalation_payload(:credential_expired, snapshot_with_adapter, reason)
-
-    case outstanding_credential_escalation(ws_id, subject) do
-      nil -> escalate(:credential_expired, snapshot_with_adapter, reason)
-      outstanding -> restate_credential_escalation(outstanding, body)
-    end
+    {subject, detail} = escalation_payload(:credential_expired, snapshot_with_adapter, reason)
+    raise_alert(:credential_expired, credential_alert_key(adapter, source), ws_id, subject, detail)
   end
 
   def credential_expired(_snapshot, _adapter, _reason, _source, _gate_closed?), do: :ok
 
   @doc """
-  Clear an outstanding proactive-credential-expiry escalation once the probe
-  succeeds again, and tell the coordinator the episode ended (bd-6jjgk0).
+  Clear the credential alert once the probe succeeds again (bd-6jjgk0,
+  bd-7gt8rm).
 
   Fired by `Arbiter.Agents.CredentialWatchdog` when an adapter it had marked
   expired recovers via the *same* `source` that raised it (its own periodic
   probe passing again, `mark_recovered/3` from `Arbiter.Quota.CloudProbe`, or
   an `AuthHold` reset) — `Arbiter.Agents.CredentialWatchdog.on_probe_ok/4`
-  only calls this once the recovering and raising sources match (bd-6jjgk0).
-  Closes whatever `credential_expired/4` escalation is still outstanding for
-  this `(workspace, adapter, source)` triple, so a later failure opens a
-  fresh episode instead of looking like a continuation of the old one. A
-  no-op — posts nothing — when nothing is outstanding, so a routine healthy
-  probe cycle never pages "restored" for a condition that was never
-  escalated. Best-effort, returns `:ok`.
+  only calls this once the recovering and raising sources match. Clears the
+  `(adapter, source)` alert, so a later failure opens a fresh episode; the
+  clear is announced on the `inbox` topic. A no-op when nothing is active.
+  Best-effort, returns `:ok`.
   """
   @spec credential_restored(%{workspace_id: String.t()}, module(), atom()) :: :ok
   def credential_restored(snapshot, adapter),
     do: credential_restored(snapshot, adapter, :worker_report)
 
-  def credential_restored(%{workspace_id: ws_id}, adapter, source)
-      when is_binary(ws_id) and is_atom(adapter) and is_atom(source) do
-    subject = credential_expired_subject(adapter, source)
+  def credential_restored(_snapshot, adapter, source) when is_atom(adapter) and is_atom(source),
+    do: clear_alert(:credential_expired, credential_alert_key(adapter, source))
 
-    case outstanding_credential_escalation(ws_id, subject) do
-      nil ->
+  def credential_restored(_snapshot, _adapter, _source), do: :ok
+
+  # A credential episode is finer than its kind — one per adapter and source.
+  defp credential_alert_key(adapter, source), do: "#{inspect(adapter)}:#{source}"
+
+  # System alerts (bd-7gt8rm) go through `Arbiter.Alerts`, which folds a repeat
+  # into the active row — so no circuit breaker: a repeat cannot add a row.
+  # Best-effort like every other producer here.
+  defp raise_alert(kind, key, ws_id, subject, detail) do
+    case Alerts.raise_alert(%{
+           kind: kind,
+           key: key,
+           workspace_id: ws_id,
+           subject: subject,
+           detail: detail
+         }) do
+      {:ok, _} ->
         :ok
 
-      outstanding ->
-        Message.clear_ids([outstanding.id])
-
-        restored_subject = credential_restored_subject(adapter, source)
-
-        body =
-          "The proactive credential probe for #{inspect(adapter)} (#{source_description(source)}) " <>
-            "succeeded again. The prior \"#{subject}\" escalation is cleared; this episode is " <>
-            "over. A future failure will raise a fresh escalation."
-
-        send_unless_broken(ws_id, "system", restored_subject, fn ->
-          Escalation.post(%{
-            kind: :credential_restored,
-            from_ref: "system",
-            workspace_id: ws_id,
-            task_ref: "system",
-            subject: restored_subject,
-            body: body
-          })
-        end)
-
+      {:error, reason} ->
+        Logger.warning("CoordinatorNotifier: could not raise #{kind} alert: #{inspect(reason)}")
         :ok
     end
   rescue
     e ->
-      Logger.debug("CoordinatorNotifier.credential_restored/3 swallowed: #{Exception.message(e)}")
+      Logger.warning("CoordinatorNotifier: raising #{kind} alert raised: #{Exception.message(e)}")
       :ok
   catch
     :exit, _ -> :ok
   end
 
-  def credential_restored(_snapshot, _adapter, _source), do: :ok
-
-  # A credential episode is finer than its kind — one per adapter and source —
-  # so the subject still narrows it, until child 8 (bd-7gt8rm) gives system
-  # alerts their own record.
-  defp outstanding_credential_escalation(ws_id, subject) do
-    Message.last_escalation(:credential_expired,
-      workspace_id: ws_id,
-      subject: subject,
-      open: true
-    )
-  rescue
-    _ -> nil
-  end
-
-  defp restate_credential_escalation(%{id: id}, body) do
-    Message.restate(id, body)
+  defp clear_alert(kind, key) do
+    _ = Alerts.clear(kind, key)
     :ok
   rescue
     e ->
-      Logger.debug(
-        "CoordinatorNotifier.credential_expired/3 restate swallowed: #{Exception.message(e)}"
-      )
-
+      Logger.warning("CoordinatorNotifier: clearing #{kind} alert raised: #{Exception.message(e)}")
       :ok
   catch
     :exit, _ -> :ok
@@ -749,59 +712,67 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   end
 
   @doc """
-  Escalate a quota-overage spend crossing to the coordinator (bd-7cd38f).
+  Raise a quota-overage spend crossing as a system alert (bd-7cd38f,
+  bd-7gt8rm).
 
   Fired by `Arbiter.Workflows.DispatchQueue` in `:continue` mode when the
   workspace's windowed overage spend crosses a multiple of its
-  `overage_alert_usd` threshold. Same addressed `:escalation` **mailbox** shape
-  as `merge_blocked/3` so it lands in `arb inbox` as an actionable item — but
-  this is informational: dispatch does NOT stop, the operator decides whether to
-  switch back to `:throttle` or top up. Debounced upstream (one per crossing).
+  `overage_alert_usd` threshold. Informational: dispatch does NOT stop, the
+  operator decides whether to switch back to `:throttle` or top up. One alert
+  per workspace — a later crossing refreshes it — cleared by
+  `overage_cleared/1` once the spend is back under the threshold, the
+  threshold is raised or removed, or dispatch is no longer past the cap.
 
-  `snapshot` carries `:workspace_id` (and optionally `:task_id`); `spend_usd` is
-  the windowed overage spend; `threshold_usd` is the configured alert threshold.
-  Best-effort, returns `:ok`.
+  `snapshot` carries `:workspace_id`; `spend_usd` is the windowed overage
+  spend; `threshold_usd` is the configured alert threshold. Best-effort,
+  returns `:ok`.
   """
   @spec overage_alert(map(), number(), number()) :: :ok
-  def overage_alert(snapshot, spend_usd, threshold_usd) do
-    escalate_event(
-      :overage_alert,
-      snapshot,
-      [task_ref: Map.get(snapshot, :task_id)],
-      fn _task_id ->
-        ws_id = snapshot.workspace_id
+  def overage_alert(%{workspace_id: ws_id}, spend_usd, threshold_usd) when is_binary(ws_id) do
+    subject =
+      "quota overage spend crossed $#{fmt_usd(threshold_usd)} — #{fmt_usd(spend_usd)} so far"
 
-        subject =
-          "quota overage spend crossed $#{fmt_usd(threshold_usd)} — #{fmt_usd(spend_usd)} so far"
+    detail =
+      Enum.join(
+        [
+          "This workspace is dispatching past the Anthropic plan cap in `:continue` " <>
+            "mode and has now spent about $#{fmt_usd(spend_usd)} in paid overage this " <>
+            "5h window — crossing the $#{fmt_usd(threshold_usd)} alert threshold.",
+          "Dispatch has NOT stopped. This is an informational alert (cap + alert, " <>
+            "not auto-stop): switch this workspace to `:throttle`, raise " <>
+            "`quota.overage_alert_usd`, or let it ride — your call. It clears by " <>
+            "itself once the spend is back under the threshold.",
+          "Workspace: #{ws_id}"
+        ],
+        "\n"
+      )
 
-        body =
-          [
-            "This workspace is dispatching past the Anthropic plan cap in `:continue` " <>
-              "mode and has now spent about $#{fmt_usd(spend_usd)} in paid overage this " <>
-              "5h window — crossing the $#{fmt_usd(threshold_usd)} alert threshold.",
-            "Dispatch has NOT stopped. This is an informational alert (cap + alert, " <>
-              "not auto-stop): switch this workspace to `:throttle`, raise " <>
-              "`quota.overage_alert_usd`, or let it ride — your call.",
-            "Workspace: #{ws_id}"
-          ]
-          |> Enum.reject(&is_nil/1)
-          |> Enum.join("\n")
-
-        {subject, body}
-      end
-    )
+    raise_alert(:overage_alert, ws_id, ws_id, subject, detail)
   end
+
+  def overage_alert(_snapshot, _spend_usd, _threshold_usd), do: :ok
+
+  @doc """
+  Clear `workspace_id`'s overage alert: its windowed overage spend is back
+  under the threshold, the threshold was raised or removed, or dispatch is no
+  longer past the plan cap (bd-7gt8rm). A no-op when none is active.
+  """
+  @spec overage_cleared(String.t()) :: :ok
+  def overage_cleared(workspace_id) when is_binary(workspace_id),
+    do: clear_alert(:overage_alert, workspace_id)
+
+  def overage_cleared(_workspace_id), do: :ok
 
   defp fmt_usd(n) when is_number(n), do: :erlang.float_to_binary(n * 1.0, decimals: 2)
 
   @doc """
-  Escalate a sustained `/api/oauth/usage` polling outage (bd-4fbpto).
+  Raise a sustained `/api/oauth/usage` polling outage as a system alert
+  (bd-4fbpto, bd-7gt8rm).
 
   Fired by `Arbiter.Quota.CloudProbe` the cycle its consecutive-failure count
-  first reaches the configured threshold — **edge-triggered**, so a sustained
-  outage produces one mailbox item, not one per 5-minute cycle. The caller is
-  responsible for only calling this once per incident (it resets its own
-  counter on the next success, so a later outage escalates again).
+  first reaches the configured threshold. The poll is account-wide, so this is
+  one install-wide alert: a repeat refreshes it, and `quota_poll_recovered/0`
+  clears it on the next successful poll, so a later outage opens a fresh one.
 
   This poll is the *only* thing that refreshes Claude's quota snapshot for an
   idle fleet (bd-atyrrq); a silent, sustained failure here means the dispatch
@@ -817,11 +788,11 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   around it) returned. Best-effort, returns `:ok`.
   """
   @spec quota_poll_failing(map(), pos_integer(), term()) :: :ok
-  def quota_poll_failing(snapshot, failures, reason) do
-    escalate_event(:quota_poll_failing, snapshot, [task_ref: "system"], fn _task_id ->
-      subject = "Anthropic quota poll failing — #{failures} consecutive cycles"
+  def quota_poll_failing(%{workspace_id: ws_id}, failures, reason) when is_binary(ws_id) do
+    subject = "Anthropic quota poll failing — #{failures} consecutive cycles"
 
-      body =
+    detail =
+      Enum.join(
         [
           "`Arbiter.Quota.CloudProbe`'s `/api/oauth/usage` poll has failed " <>
             "#{failures} consecutive cycles: #{describe_reason(reason)}.",
@@ -829,13 +800,23 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
             "open on age, but a 7d hold cannot lift without a fresh polled snapshot.",
           "Check `arb quota` for the last successful poll's source and timestamp, and " <>
             "confirm the account-wide OAuth token this install polls with (the operator's " <>
-            "`~/.claude/.credentials.json`, not a workspace token) is still valid."
-        ]
-        |> Enum.join("\n")
+            "`~/.claude/.credentials.json`, not a workspace token) is still valid. " <>
+            "This alert clears by itself on the next successful poll."
+        ],
+        "\n"
+      )
 
-      {subject, body}
-    end)
+    raise_alert(:quota_poll_failing, @quota_poll_alert_key, ws_id, subject, detail)
   end
+
+  def quota_poll_failing(_snapshot, _failures, _reason), do: :ok
+
+  @doc """
+  Clear the quota-poll alert: `Arbiter.Quota.CloudProbe`'s poll succeeded
+  again (bd-7gt8rm). A no-op when none is active.
+  """
+  @spec quota_poll_recovered() :: :ok
+  def quota_poll_recovered, do: clear_alert(:quota_poll_failing, @quota_poll_alert_key)
 
   @doc """
   Escalate a `/api/oauth/usage` polling outage whose cause is the operator's
@@ -1030,41 +1011,56 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   end
 
   @doc """
-  Escalate an open task whose **worker spend** has passed its estimate group's
-  p90 (bd-8j9i9p AC5; operator decision 2026-09-15).
+  Raise a system alert for an open task whose **worker spend** has passed its
+  estimate group's p90 (bd-8j9i9p AC5; operator decision 2026-09-15;
+  bd-7gt8rm).
 
   This one informs rather than intervenes: it does not stop the worker, pause
   anything or trip a breaker. An overrun is not evidence of a stuck worker the
   way a repeated review failure is — it is evidence that either the task was
-  under-rated or something is looping, and only the coordinator can say which.
-  So the page carries everything needed to judge that without opening the
-  page: the title, the spend, the range it blew through, the basis and sample
-  size behind that range, the difficulty rating, and what the worker is doing
-  right now.
+  under-rated or something is looping. So the alert carries everything needed
+  to judge that: the title, the spend, the range it blew through, the basis
+  and sample size behind that range, the difficulty rating, and what the
+  worker is doing right now.
 
-  **Once per task.** The dedupe is `Message.last_escalation/2` on the
-  `:budget_exceeded` kind and the task, so it survives a restart and does not
-  re-fire as the total keeps climbing — a second page saying the same task is
-  still over budget tells the coordinator nothing the first did not.
+  **One alert per task.** It is keyed by the task, so the patrol re-raising it
+  every sweep only refreshes the figures in its detail.
+  `budget_recovered/1` clears it once the task is back under its p90 — a
+  re-rating or a thicker sample moved the threshold — or is no longer open.
 
   `snapshot` carries `:task_id` + `:workspace_id`; `info` carries `:spend`,
   `:estimate` (an `Arbiter.Usage.Estimate.t()`), `:difficulty` and
   `:worker_state`. Best-effort, returns `:ok`.
   """
   @spec budget_exceeded(map(), map()) :: :ok
-  def budget_exceeded(%{workspace_id: ws_id} = snapshot, info) when is_binary(ws_id) do
-    escalate_event(:budget_exceeded, snapshot, fn task_id ->
-      subject = budget_exceeded_subject(task_id)
-
-      if Message.last_escalation(:budget_exceeded, workspace_id: ws_id, task_ref: task_id) do
-        :skip
-      else
-        {subject, budget_exceeded_body(task_id, info)}
-      end
-    end)
+  def budget_exceeded(%{workspace_id: ws_id, task_id: task_id}, info)
+      when is_binary(ws_id) and is_binary(task_id) do
+    raise_alert(
+      :budget_exceeded,
+      task_id,
+      ws_id,
+      budget_exceeded_subject(task_id),
+      budget_exceeded_body(task_id, info)
+    )
   end
 
   def budget_exceeded(_snapshot, _info), do: :ok
+
+  @doc """
+  Clear the budget alert of every task not in `still_over` — the task ids the
+  patrol's sweep just found over budget (bd-7gt8rm). Best-effort, returns `:ok`.
+  """
+  @spec budget_recovered([String.t()]) :: :ok
+  def budget_recovered(still_over) when is_list(still_over) do
+    _ = Alerts.clear_except(:budget_exceeded, still_over)
+    :ok
+  rescue
+    e ->
+      Logger.warning("CoordinatorNotifier.budget_recovered/1 raised: #{Exception.message(e)}")
+      :ok
+  catch
+    :exit, _ -> :ok
+  end
 
   @doc """
   The (number-free, so dedupe-stable) subject `budget_exceeded/2` pages under.
@@ -1085,9 +1081,10 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
         "#{Map.get(info, :worker_state) || "no live worker"}",
       "Worker spend only — coordinator session overhead is not counted, here or " <>
         "in the estimate.",
-      "Nothing has been stopped or paused. This is one page per task: it will not " <>
-        "repeat as the total climbs. Judge whether the overrun is expected " <>
-        "(under-rated task) or a worker going in circles, and act, or don't."
+      "Nothing has been stopped or paused. This alert tracks the task's figures " <>
+        "while it stays over, and clears once it is back under its p90 or closed. " <>
+        "Judge whether the overrun is expected (under-rated task) or a worker going " <>
+        "in circles, and act, or don't."
     ]
     |> Enum.join("\n")
   end
@@ -1908,16 +1905,6 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
 
   defp credential_expired_subject(adapter, _source),
     do: "#{adapter_short_name(adapter)} credentials expired — proactive detection"
-
-  # Mirrors `credential_expired_subject/2` — a `:usage_poll` recovery must not
-  # read as a full recovery when a `:periodic_probe`/`:worker_report` episode
-  # (and the dispatch gate it closed) is still outstanding for the same
-  # adapter (bd-6jjgk0 finding 3).
-  defp credential_restored_subject(adapter, :usage_poll),
-    do: "#{adapter_short_name(adapter)} credentials restored — usage-poll signal"
-
-  defp credential_restored_subject(adapter, _source),
-    do: "#{adapter_short_name(adapter)} credentials restored"
 
   defp source_description(:periodic_probe), do: "the Watchdog's periodic CLI probe"
   defp source_description(:usage_poll), do: "the /api/oauth/usage-family poll"
