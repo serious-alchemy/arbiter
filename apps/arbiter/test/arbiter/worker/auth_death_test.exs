@@ -79,13 +79,18 @@ defmodule Arbiter.Worker.AuthDeathTest do
 
       # Escalation still fires — and, since the ticket went back to Ready,
       # is resolved with it (bd-8if9zt): the retry is the machine's turn.
-      assert [escalation] =
-               Message
-               |> Ash.Query.filter(task_ref == ^task.id and kind == :escalation)
-               |> Ash.read!()
+      # The reopen resolves the escalation in a later step than the status
+      # write the wait above sees, so wait for it rather than read it racing.
+      escalations = fn ->
+        Message
+        |> Ash.Query.filter(task_ref == ^task.id and kind == :escalation)
+        |> Ash.read!()
+      end
 
+      eventually(fn -> match?([%{resolved_at: %DateTime{}}], escalations.()) end)
+
+      assert [escalation] = escalations.()
       assert escalation.escalation_kind == :worker_stopped
-      assert %DateTime{} = escalation.resolved_at
 
       # It never produced a commit: no worktree, no branch.
       refute File.dir?(worktree)
