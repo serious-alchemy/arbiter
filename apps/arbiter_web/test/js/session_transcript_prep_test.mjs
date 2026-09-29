@@ -34,3 +34,7 @@ test("a screen clear pushes the screen it wipes into scrollback first", () => {
 test("text without escapes is untouched", () => {
   assert.equal(prepareTranscript("hello\r\nworld", 24), "hello\r\nworld")
 })
+
+test("erase-saved-lines is dropped so it cannot wipe the built-up scrollback", () => {
+  assert.equal(prepareTranscript(`a${ESC}[3Jb`, 24), "ab")
+})

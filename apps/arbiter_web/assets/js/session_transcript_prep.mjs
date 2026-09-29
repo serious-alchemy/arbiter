@@ -21,6 +21,8 @@ const SCREEN_SWITCH = /\x1b\[\?(?:47|1047|1048|1049)[hl]/g
 // X10 (9), normal/button/any tracking, and their encodings (1005/1006/1015/1016).
 const MOUSE_TRACKING = /\x1b\[\?(?:9|1000|1002|1003|1005|1006|1015|1016)[hl]/g
 const ERASE_DISPLAY = /\x1b\[2J/g
+// Erase saved lines: would wipe the scrollback the rewrite above builds.
+const ERASE_SCROLLBACK = /\x1b\[3J/g
 
 /**
  * @param {string} data  the replayed snapshot
@@ -32,5 +34,6 @@ export function prepareTranscript(data, rows) {
   return data
     .replace(SCREEN_SWITCH, "")
     .replace(MOUSE_TRACKING, "")
+    .replace(ERASE_SCROLLBACK, "")
     .replace(ERASE_DISPLAY, `${scrollScreenAway}\x1b[2J`)
 }
