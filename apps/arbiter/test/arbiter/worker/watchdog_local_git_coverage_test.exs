@@ -244,7 +244,10 @@ defmodule Arbiter.Worker.WatchdogLocalGitCoverageTest do
       assert StubAutoResumeDispatcher.resume_count() == 0
       assert log =~ "local_git"
 
-      assert Enum.any?(Coverage.for_mr(mr_ref), &(&1.kind == :mechanical and &1.head_sha == head)),
+      assert Enum.any?(
+               Coverage.for_mr(mr_ref),
+               &(&1.kind == :mechanical and &1.head_sha == head)
+             ),
              "the rule-3 proof is persisted, as on the API path"
     end
 

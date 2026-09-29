@@ -170,7 +170,10 @@ defmodule Arbiter.Workflows.MergeQueueLocalGitCoverageTest do
     assert Ash.get!(Issue, task.id).status == :closed
     assert log =~ "decided via local_git"
 
-    assert Enum.any?(Coverage.for_mr(item.mr_ref), &(&1.kind == :mechanical and &1.head_sha == head))
+    assert Enum.any?(
+             Coverage.for_mr(item.mr_ref),
+             &(&1.kind == :mechanical and &1.head_sha == head)
+           )
   end
 
   test "AC4/AC6: an unreviewed commit is refused when compare 403s" do

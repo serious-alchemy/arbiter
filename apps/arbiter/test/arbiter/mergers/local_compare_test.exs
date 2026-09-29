@@ -176,7 +176,8 @@ defmodule Arbiter.Mergers.LocalCompareTest do
 
   describe "ancestry/4 — API first, local git on failure" do
     test "the API's boolean is used when it has one" do
-      assert {:ok, false, :api} = LocalCompare.ancestry(fn _, _ -> {:ok, false} end, nil, "a", "b")
+      assert {:ok, false, :api} =
+               LocalCompare.ancestry(fn _, _ -> {:ok, false} end, nil, "a", "b")
     end
 
     test "an API failure is answered by local git" do
