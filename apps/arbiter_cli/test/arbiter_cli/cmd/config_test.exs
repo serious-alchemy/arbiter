@@ -333,6 +333,23 @@ defmodule ArbiterCli.Cmd.ConfigTest do
       assert out =~ "1. Check your inbox"
     end
 
+    # bd-73zv62: a per-repo merge override shows under the Merge section.
+    test "renders merge.repos per-repo overrides" do
+      config = %{
+        "merge" => %{
+          "strategy" => "github",
+          "repos" => %{"mesaana" => %{"strategy" => "direct"}}
+        }
+      }
+
+      stub_routes([{{"get", "/api/workspaces"}, {default_ws(config), 200}}])
+
+      {out, _err, code} = capture(fn -> Config.run(["overview"]) end)
+      assert code == 0
+      assert out =~ "strategy: github"
+      assert out =~ "repos.mesaana: strategy=direct"
+    end
+
     test "never prints secret values — only key names" do
       config = %{"tracker" => %{"type" => "github"}}
 
