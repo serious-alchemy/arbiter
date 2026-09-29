@@ -14,6 +14,7 @@ defmodule Arbiter.MCP.Tools.Task do
   alias Arbiter.Tasks.Dependencies
   alias Arbiter.Tasks.Dependency
   alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.Lifecycle.Projection
   alias Arbiter.Tasks.Verification
   alias Arbiter.Usage.Estimate
 
@@ -60,9 +61,15 @@ defmodule Arbiter.MCP.Tools.Task do
       loaded = load_progress(issue)
       result = if(full, do: Tools.serialize_task(loaded), else: serialize_task_slim(loaded))
 
-      # bd-8nlez1: the ticket's computed attention — owner, what it waits on,
-      # why, and any hand-off note — on both views.
-      result = Map.put(result, :attention, Tools.serialize_attention(Attention.current(issue)))
+      # bd-6fkgvo: where the ticket is, in the lifecycle vocabulary, on both
+      # views — its stored state, its column, its computed step, what blocks
+      # it, and its attention (bd-8nlez1: owner, what it waits on, why, and
+      # any hand-off note). `status` stays beside them for one release.
+      result =
+        result
+        |> Map.merge(Projection.payload(Projection.view(issue)))
+        |> Map.put(:close_reason, Tools.to_str(issue.close_reason))
+
       # Strip pr_body from coordinator full-view (bandwidth; coordinators don't
       # need the body they didn't write). Worker full-view retains it so the
       # worker can verify its own authored body (bd-53xrmi).
@@ -103,18 +110,18 @@ defmodule Arbiter.MCP.Tools.Task do
   # ---- task_ready ---------------------------------------------------------
 
   @doc """
-  List ready tasks in a workspace — the board's Ready column, `Issue.ready/1`
-  (bd-6zapbl). Coordinator only. The
-  workspace is resolved from the optional `workspace` arg, else the scope's bound
-  workspace, else the installation default.
+  List ready tasks in a workspace — exactly the tickets whose column is
+  `:ready` (bd-6fkgvo), epics excluded as on the board, in dispatch order
+  (priority, rank, age). Coordinator only. The workspace is resolved from the
+  optional `workspace` arg, else the scope's bound workspace, else the
+  installation default.
   """
   @spec task_ready(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def task_ready(%Scope{} = scope, args) do
     with {:ok, ws_id} <- Tools.resolve_workspace_id(scope, args) do
       tasks =
-        [workspace_id: ws_id]
-        |> Issue.ready()
-        |> Enum.map(&Tools.serialize_task_summary/1)
+        for {issue, %{column: :ready} = view} <- Projection.open(ws_id),
+            do: Tools.serialize_task_summary(issue, view)
 
       {:ok, %{tasks: tasks, count: length(tasks)}}
     end
@@ -832,6 +839,7 @@ defmodule Arbiter.MCP.Tools.Task do
       acceptance: i.acceptance,
       acceptance_waived: i.acceptance_waived,
       status: Tools.to_str(i.status),
+      state: Tools.to_str(i.state),
       priority: i.priority,
       difficulty: i.difficulty,
       issue_type: Tools.to_str(i.issue_type)

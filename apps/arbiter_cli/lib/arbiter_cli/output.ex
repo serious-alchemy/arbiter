@@ -13,6 +13,7 @@ defmodule ArbiterCli.Output do
   """
 
   alias ArbiterCli.Client
+  alias ArbiterCli.RunLabel
 
   # ----- mode resolution -----
 
@@ -174,7 +175,14 @@ defmodule ArbiterCli.Output do
 
       ID:           <id>
       Title:        <title>
-      Status:       <status>
+      State:        <state> (<column>)
+      Step:         <step>                  (In progress / Merging only)
+      Attention:    <owner> — <reason>      (when the ticket has attention)
+      Blocked by:   <ids>                   (Blocked only)
+      Close reason: <close_reason>          (Closed only)
+      PR:           <pr_ref>  <merger_url>
+      Merge status: state=… pipeline=… approved=… block=…  (the recorded merger_status)
+      Current run:  <kind> <state>
       Priority:     <priority>
       Type:         <issue_type>
       Workspace:    <workspace_id>
@@ -198,7 +206,17 @@ defmodule ArbiterCli.Output do
       [
         {"ID", issue["id"]},
         {"Title", issue["title"]},
-        {"Status", issue["status"]},
+        # bd-6fkgvo: the lifecycle vocabulary. `Status` only for a server
+        # that predates `state`.
+        {"State", state_label(issue)},
+        {"Status", if(is_nil(issue["state"]), do: issue["status"])},
+        {"Step", issue["step"]},
+        {"Attention", attention_label(issue["attention"])},
+        {"Blocked by", blocked_by_label(issue["blocked_by"])},
+        {"Close reason", issue["close_reason"]},
+        {"PR", pr_label(issue)},
+        {"Merge status", merge_status_label(issue["merger_status"])},
+        {"Current run", current_run_label(issue["current_run"])},
         {"Priority", issue["priority"]},
         {"Difficulty", difficulty_label(issue["difficulty"])},
         {"Estimate", estimate_label(issue["estimate"])},
@@ -216,7 +234,7 @@ defmodule ArbiterCli.Output do
         {"Closed", issue["closed_at"]}
       ]
       |> Enum.reject(fn {_k, v} -> v in [nil, ""] end)
-      |> Enum.map_join("\n", fn {k, v} -> "#{String.pad_trailing(k <> ":", 12)}#{v}" end)
+      |> Enum.map_join("\n", fn {k, v} -> "#{String.pad_trailing(k <> ":", 14)}#{v}" end)
 
     sections =
       issue
@@ -314,9 +332,72 @@ defmodule ArbiterCli.Output do
   defp auto_close_label(_), do: nil
 
   # Display whether task is in Backlog (refined=false) or Ready (refined=true).
+  # Only for a ticket still waiting to start: "Backlog"/"Ready" means nothing
+  # once it is under way or closed (bd-6fkgvo).
+  defp backlog_label(%{"state" => state}) when state not in [nil, "backlog", "queued"], do: nil
+  defp backlog_label(%{"state" => nil, "status" => status}) when status != "open", do: nil
   defp backlog_label(%{"refined" => true}), do: "Ready"
   defp backlog_label(%{"refined" => false}), do: "Backlog"
   defp backlog_label(_), do: nil
+
+  @column_labels %{
+    "backlog" => "Backlog",
+    "blocked" => "Blocked",
+    "ready" => "Ready",
+    "in_progress" => "In progress",
+    "merging" => "Merging",
+    "verifying" => "Verifying",
+    "closed" => "Closed"
+  }
+
+  defp state_label(%{"state" => state} = issue) when is_binary(state) do
+    case Map.get(@column_labels, issue["column"]) do
+      nil -> state
+      column -> "#{state} (#{column})"
+    end
+  end
+
+  defp state_label(_), do: nil
+
+  defp attention_label(%{"owner" => owner} = a) do
+    note = if a["note"] in [nil, ""], do: "", else: " — note: #{a["note"]}"
+    "#{owner} — #{a["reason"]}#{note}"
+  end
+
+  defp attention_label(_), do: nil
+
+  defp blocked_by_label([_ | _] = ids), do: Enum.join(ids, ", ")
+  defp blocked_by_label(_), do: nil
+
+  defp pr_label(%{"pr_ref" => ref} = issue) when is_binary(ref) and ref != "" do
+    case issue["merger_url"] do
+      url when is_binary(url) and url != "" -> "#{ref}  #{url}"
+      _ -> ref
+    end
+  end
+
+  defp pr_label(_), do: nil
+
+  # The forge's last answer, as the ticket's Watchdog recorded it.
+  defp merge_status_label(%{} = status) do
+    [
+      {"state", status["status"]},
+      {"pipeline", status["pipeline"]},
+      {"approved", status["approved"]},
+      {"block", status["block_reason"]}
+    ]
+    |> Enum.reject(fn {_k, v} -> is_nil(v) end)
+    |> Enum.map_join(" ", fn {k, v} -> "#{k}=#{v}" end)
+  end
+
+  defp merge_status_label(_), do: nil
+
+  defp current_run_label(%{} = run) do
+    phase = if run["phase"] in [nil, ""], do: "", else: "  phase=#{run["phase"]}"
+    RunLabel.label(run) <> phase <> RunLabel.run_suffix(run)
+  end
+
+  defp current_run_label(_), do: nil
 
   defp tracker_label(%{"tracker_type" => nil}), do: nil
   defp tracker_label(%{"tracker_type" => "none"}), do: nil

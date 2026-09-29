@@ -57,6 +57,8 @@ defmodule Arbiter.MCP.Tools do
   alias Arbiter.Tasks.Claim
   alias Arbiter.Tasks.Dependency
   alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.Lifecycle
+  alias Arbiter.Tasks.Lifecycle.Projection
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Trackers
   alias Arbiter.Usage
@@ -475,29 +477,51 @@ defmodule Arbiter.MCP.Tools do
 
   @doc """
   List tasks in the scope's workspace with optional filters. Coordinator only.
-  Accepts optional `status`, `priority`, and `issue_type` filters. Always
-  scoped to the coordinator's workspace. Backs onto `Ash.read(Issue, ...)`.
+  Accepts optional `state` and `column` (the lifecycle vocabulary, bd-6fkgvo),
+  the legacy `status`, `priority` and `issue_type` filters. Always scoped to
+  the coordinator's workspace. Each task carries its projection
+  (`Arbiter.Tasks.Lifecycle.Projection`): `state`, `column`, `step`,
+  `blocked_by` and `attention`.
   """
   @spec task_list(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def task_list(%Scope{} = scope, args) do
     with {:ok, ws_id} <- resolve_workspace_id(scope, args),
          {:ok, status} <- optional_enum(args, "status", Issue.statuses()),
+         {:ok, state} <- optional_enum(args, "state", Lifecycle.states()),
+         {:ok, column} <- optional_enum(args, "column", Projection.columns()),
          {:ok, issue_type} <- optional_enum(args, "issue_type", Issue.issue_types()),
          {:ok, priority} <- optional_integer(args, "priority") do
-      query =
+      issues =
         Issue
         |> Ash.Query.filter(workspace_id == ^ws_id)
         |> maybe_filter_status(status)
+        |> maybe_filter_state(state)
+        |> maybe_filter_column_states(column)
         |> maybe_filter_issue_type(issue_type)
         |> maybe_filter_priority(priority)
+        |> Ash.read!()
+
+      views = Projection.views(issues)
 
       tasks =
-        query
-        |> Ash.read!()
-        |> Enum.map(&serialize_task_summary/1)
+        for issue <- issues,
+            view = Map.fetch!(views, issue.id),
+            is_nil(column) or view.column == column,
+            do: serialize_task_summary(issue, view)
 
       {:ok, %{tasks: tasks, count: length(tasks)}}
     end
+  end
+
+  defp maybe_filter_state(query, nil), do: query
+  defp maybe_filter_state(query, state), do: Ash.Query.filter(query, state == ^state)
+
+  # The stored states the column can come from; the projection decides.
+  defp maybe_filter_column_states(query, nil), do: query
+
+  defp maybe_filter_column_states(query, column) do
+    states = Projection.states_for_column(column)
+    Ash.Query.filter(query, state in ^states)
   end
 
   defp maybe_filter_status(query, nil), do: query
@@ -1743,6 +1767,9 @@ defmodule Arbiter.MCP.Tools do
       id: i.id,
       title: i.title,
       status: to_str(i.status),
+      # bd-6fkgvo: the lifecycle state beside the legacy status and refined.
+      state: to_str(i.state),
+      close_reason: to_str(i.close_reason),
       priority: i.priority,
       difficulty: i.difficulty,
       issue_type: to_str(i.issue_type),
@@ -1751,6 +1778,14 @@ defmodule Arbiter.MCP.Tools do
       acceptance_waived: i.acceptance_waived,
       rank: i.rank
     }
+  end
+
+  @doc """
+  A task summary with its lifecycle projection (`Lifecycle.Projection.payload/1`):
+  `state`, `column`, `step`, `blocked_by` and `attention` (bd-6fkgvo).
+  """
+  def serialize_task_summary(%Issue{} = i, %{} = view) do
+    i |> serialize_task_summary() |> Map.merge(Projection.payload(view))
   end
 
   # internal — shared by Arbiter.MCP.Tools.Task (task_show's full view) and
@@ -1902,17 +1937,7 @@ defmodule Arbiter.MCP.Tools do
   """
   def serialize_attention(nil), do: nil
 
-  def serialize_attention(%{} = a) do
-    %{
-      owner: to_str(a.owner),
-      waiting_on: to_str(a.waiting_on),
-      reason: a.reason,
-      cause: to_str(a.cause),
-      since: iso(a.since),
-      note: Map.get(a, :note),
-      owner_since: iso(Map.get(a, :owner_since))
-    }
-  end
+  def serialize_attention(%{} = a), do: Projection.attention_payload(a)
 
   @doc "One `Arbiter.Tasks.Attention.items/1` entry, flattened for the coordinator's queue."
   def serialize_attention_item(%{ticket_id: id, attention: attention} = item) do

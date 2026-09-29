@@ -6,6 +6,7 @@ defmodule ArbiterWeb.Api.IssueJSON do
   """
 
   alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.Lifecycle.Projection
 
   @doc "Renders a single issue."
   def show(%{issue: issue, warnings: warnings}) when warnings != [],
@@ -16,7 +17,12 @@ defmodule ArbiterWeb.Api.IssueJSON do
   # bd-18vl9q: and the epic cost rollup, null for a non-epic issue.
   # bd-1defgu: and the issue's dependency edges — `arb issue show` was
   # write-only for them before.
-  def show(%{issue: issue, estimate: estimate, epic_rollup: epic_rollup, dependencies: deps}) do
+  # bd-6fkgvo: and the ticket's lifecycle projection (column, step,
+  # blocked_by, attention) and its current run, for `arb issue show`.
+  def show(
+        %{issue: issue, estimate: estimate, epic_rollup: epic_rollup, dependencies: deps} =
+          assigns
+      ) do
     %{data: rendered_deps} = ArbiterWeb.Api.DependencyJSON.index(%{dependencies: deps})
 
     issue
@@ -24,6 +30,11 @@ defmodule ArbiterWeb.Api.IssueJSON do
     |> Map.put(:estimate, estimate)
     |> Map.put(:epic_rollup, epic_rollup)
     |> Map.put(:dependencies, rendered_deps)
+    |> put_lifecycle(Map.get(assigns, :lifecycle))
+    |> Map.put(
+      :current_run,
+      ArbiterWeb.Api.WorkerJSON.current_run(Map.get(assigns, :current_run))
+    )
   end
 
   def show(%{issue: issue}), do: data(issue)
@@ -32,6 +43,37 @@ defmodule ArbiterWeb.Api.IssueJSON do
   def index(%{issues: issues}) do
     %{data: Enum.map(issues, &data/1)}
   end
+
+  @doc """
+  `GET /api/issues/lifecycle` (bd-6fkgvo): each open ticket with its
+  lifecycle projection, in the order given (dispatch order). A slim row — what
+  `arb prime` prints — not the full record.
+  """
+  def lifecycle(%{tickets: tickets}) do
+    %{
+      data:
+        Enum.map(tickets, fn {issue, view} ->
+          %{
+            id: issue.id,
+            title: issue.title,
+            priority: issue.priority,
+            difficulty: issue.difficulty,
+            issue_type: to_string_atom(issue.issue_type),
+            rank: issue.rank,
+            workspace_id: issue.workspace_id,
+            pr_ref: issue.pr_ref,
+            merger_url: issue.merger_url,
+            awaiting_verification_at: iso(issue.awaiting_verification_at),
+            created_at: iso(issue.created_at),
+            updated_at: iso(issue.updated_at)
+          }
+          |> Map.merge(Projection.payload(view))
+        end)
+    }
+  end
+
+  defp put_lifecycle(map, nil), do: map
+  defp put_lifecycle(map, view), do: Map.merge(map, Projection.payload(view))
 
   def data(%Issue{} = issue) do
     %{

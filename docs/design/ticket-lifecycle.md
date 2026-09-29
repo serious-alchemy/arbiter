@@ -869,3 +869,47 @@ operator-only (`scripts/verify_board_attention_lane.mjs` exercises both).
 - **Everything else** is refused with a flash — including the old stop-the-
   worker drag out of Running and the Waiting drags: those moves need evidence
   or a deliberate stop, which live on the ticket and worker pages.
+
+---
+
+## Child 10 (bd-6fkgvo): CLI, MCP, `arb prime` and events
+
+Every surface that is not the board reads a ticket through one reader,
+`Arbiter.Tasks.Lifecycle.Projection`. It does the reads `Lifecycle.view/2`
+needs, once per call — the gating edges and the tickets they point at (a
+blocker outside the set still counts), the live runs, each Merging ticket's
+Watchdog, the clock — and `payload/1` is the one JSON shape of a view:
+`state`, `column`, `step`, `blocked_by`, `attention`.
+
+| surface | reads |
+|---|---|
+| `GET /api/issues/lifecycle?workspace_id=` | `Projection.open/2`: every open, non-epic ticket, projected, in dispatch order |
+| `GET /api/issues/:id` (so `arb issue show`) | `Projection.view/2`, plus `current_run` (`Workers.Current`, kind/state/outcome/phase) |
+| MCP `task_show` | the payload, plus `close_reason`, on both views |
+| MCP `task_list` | new `state` and `column` filters; each row carries the payload |
+| MCP `task_ready` | `Projection.open/2`, column `:ready` only, dispatch order |
+| `task_state` event | `column` and `attention`, beside `state`, `close_reason` and the legacy `status` |
+
+### `arb prime`
+
+Per workspace, after the standing orders: **Needs attention**, **In progress**
+(with step), **Merging** (with step and PR), **Verifying** (with the age of the
+wait), **Ready** (dispatch order), **Blocked** (with blockers), and a
+**Backlog** count; then the live runs and the coordinator inbox. Each ticket
+lands in exactly one section: attention wins over the column, with one
+exception — a Verifying ticket whose attention is still the coordinator's
+`awaiting_verification` is listed under Verifying, since that section *is*
+the verification queue. Handed to the operator, it moves up to Needs
+attention. Needs attention lists the coordinator's items before the
+operator's. The "Review parked" and refined-blind "Ready issues" sections are
+gone; `--json` keeps `awaiting_verification` as an alias of `verifying` for
+one release and reports the backlog as `backlog_count`.
+
+### The event projects the row, not the runs
+
+The `task_state` event fires from inside the write (`Issue.broadcast_lifecycle/2`),
+whose caller may be a worker. Reading the live runs there would call that
+worker back, so the event's column and attention come from the row, its
+blockers and its Watchdog only. The one thing that loses is the brief window
+where a `:queued` ticket already has a live run: the event says Ready where
+the board says In progress, until the `start` write that follows.
