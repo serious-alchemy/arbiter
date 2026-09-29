@@ -332,8 +332,9 @@ the ticket.
 
 ### The interim board
 
-Until the seven-column board (bd-79w1fs), `Lifecycle.board_column/2` maps the
-columns onto today's five:
+`Lifecycle.board_column/2` maps the columns onto five. The board itself moved
+to the seven lifecycle columns in bd-79w1fs (Child 9 below); this mapping
+remains for the epic mini-board and the `/epics` rollup:
 
 | board | lifecycle |
 |---|---|
@@ -428,9 +429,8 @@ Every hold is an input; one the caller does not pass is not asked about.
 
 `Scheduler.order/1` sorts Ready by priority, then `rank`, then `created_at`
 — the order the board shows and Autopilot dispatches in. The LiveView's
-session-only `ready_order` hand-ranking is gone: Autopilot never saw it. A
-reorder drag on the board now explains itself and changes nothing until
-drag-to-rank writes `rank` (bd-79w1fs).
+session-only `ready_order` hand-ranking is gone: Autopilot never saw it.
+Drag-to-rank writes `rank` (bd-79w1fs, Child 9 below).
 
 ---
 
@@ -820,6 +820,55 @@ hand as before.
 `GET /api/alerts` (`?workspace=`, `?kind=`) and the coordinator MCP tool
 `alert_list` return the active alerts, oldest first, as `{alerts, count}`.
 Child 9 puts them in the Needs-attention swimlane as cards with no ticket.
+
+## Child 9 (bd-79w1fs): the seven-column board
+
+### Columns
+
+`Board.Snapshot.derive/1` returns `backlog`, `blocked`, `ready` (the
+scheduler's entries), `in_progress`, `merging`, `verifying` and
+`closed_today`, each ticket placed purely by its `Lifecycle.view/2` column;
+epics stay off. Only the Ready column is handed to `Scheduler.plan/1` — a
+Blocked ticket is held by its dependencies, which the plan would skip over
+anyway, so `promote` is unchanged. Every card carries the view's `step` and
+`attention`.
+
+| column | card detail |
+|---|---|
+| Blocked | `waiting on <ids>` |
+| Ready | the scheduler's reason; a hold reads `held — …` on the board |
+| In progress, Merging | the computed `step` |
+| Verifying | awaiting verification |
+| Closed | `close_reason`: completed / won't do / duplicate |
+
+In progress holds every `:active` ticket, whatever its run is doing: a parked
+or crashed run keeps its card there, wearing the coordinator's attention.
+
+### The Needs-attention swimlane
+
+`derive/1` also returns `attention`: every card with attention, with its
+column, owner and reason, operator-owned first. The board shows the
+operator's by default; the `+ coordinator` chip adds the coordinator's.
+Active system alerts (`Alerts.active/1`) are lane cards with no ticket, and
+the board refreshes on the `inbox` topic's `alert` / `attention` events, so a
+cleared alert goes on the next update. The lane collapses to a count. Whether
+it is open and whether the chip is on are kept per viewer in `localStorage`
+by the `.AttentionLane` hook; with no usable storage the lane starts open,
+operator-only (`scripts/verify_board_attention_lane.mjs` exercises both).
+
+### Drags
+
+- **Within Backlog or Ready**: re-rank through `Tasks.Rank.move/2`
+  (`:set_rank`, bd-djapyj), after the nearest same-workspace card above the
+  drop, else before the nearest one below — rank is per workspace. Dropping
+  next to a card of another priority first sets the ticket's priority to that
+  band. Backlog sorts like Ready: priority, then rank, then age.
+- **Backlog → Blocked / Ready**: the `:promote` transition, with its
+  acceptance-criteria rule; where it lands is its dependencies' call.
+  **Blocked / Ready → Backlog**: `:demote`.
+- **Everything else** is refused with a flash — including the old stop-the-
+  worker drag out of Running and the Waiting drags: those moves need evidence
+  or a deliberate stop, which live on the ticket and worker pages.
 
 ---
 

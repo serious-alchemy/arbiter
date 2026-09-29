@@ -9,9 +9,13 @@ defmodule Arbiter.Board.AutopilotTest do
       ready: [
         %{id: "bd-1", state: :next, reason: "next up — dispatching...", card: %{id: "bd-1"}}
       ],
-      running: [],
-      waiting: [],
+      backlog: [],
+      blocked: [],
+      in_progress: [],
+      merging: [],
+      verifying: [],
       closed_today: [],
+      attention: [],
       promote: promote,
       slots_total: 4,
       slots_free: 4,
@@ -541,11 +545,20 @@ defmodule Arbiter.Board.AutopilotTest do
       board = Autopilot.board(pid)
 
       # Every column key present and empty, not a stub map: the caller renders
-      # four columns off this, and a missing key is a crashed page.
-      assert board.ready == []
-      assert board.running == []
-      assert board.waiting == []
-      assert board.closed_today == []
+      # seven columns off this, and a missing key is a crashed page.
+      for column <- [
+            :backlog,
+            :blocked,
+            :ready,
+            :in_progress,
+            :merging,
+            :verifying,
+            :closed_today
+          ] do
+        assert Map.fetch!(board, column) == []
+      end
+
+      assert board.attention == []
       assert board.promote == nil
       assert board.slots_free == 0
       assert %DateTime{} = board.now

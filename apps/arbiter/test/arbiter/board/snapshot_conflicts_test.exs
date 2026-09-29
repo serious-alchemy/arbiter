@@ -303,7 +303,9 @@ defmodule Arbiter.Board.SnapshotConflictsTest do
   end
 
   describe "an open dependency still outranks a conflict" do
-    test "the waiting-on reason wins when both hold" do
+    # bd-79w1fs: an unsatisfied blocker moves the ticket to Blocked, out of
+    # the scheduler's queue, so the conflict never gets to hold it in Ready.
+    test "the dependency wins when both hold: the card is Blocked, not a Ready hold" do
       board =
         derive(
           issues: [issue("bd-1"), issue("bd-7", %{status: :in_progress})],
@@ -312,7 +314,8 @@ defmodule Arbiter.Board.SnapshotConflictsTest do
           conflicts_with: [{"bd-1", "bd-7"}]
         )
 
-      assert %{reason: "blocked — waiting on bd-9"} = entry(board, "bd-1")
+      assert [%{id: "bd-1", blocked_by: ["bd-9"]}] = board.blocked
+      assert entry(board, "bd-1") == nil
     end
   end
 end

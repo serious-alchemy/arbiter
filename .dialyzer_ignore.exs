@@ -62,7 +62,6 @@
   {"lib/arbiter/workflows/review_patrol.ex", :pattern_match_cov},
   {"lib/arbiter_cli/client.ex", :pattern_match_cov},
   {"lib/arbiter_cli/cmd/loop.ex", :pattern_match_cov},
-  {"lib/arbiter_web/live/board_live.ex", :pattern_match_cov},
   {"lib/arbiter_web/live/loop_proposal_index_live.ex", :pattern_match_cov},
   {"lib/arbiter_web/live/worker_detail_live.ex", :pattern_match_cov},
 

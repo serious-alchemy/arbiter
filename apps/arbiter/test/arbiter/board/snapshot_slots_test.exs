@@ -267,7 +267,7 @@ defmodule Arbiter.Board.SnapshotSlotsTest do
     test "a live main agent is :implementing" do
       board = derive(workers: [author("bd-1", :working, %{agent_live: true})])
 
-      assert %{phase: :implementing, agent_live: true} = card(board, :running, "bd-1")
+      assert %{phase: :implementing, agent_live: true} = card(board, :in_progress, "bd-1")
     end
 
     test "a live reviewer makes the author's card read :in_review" do
@@ -279,7 +279,7 @@ defmodule Arbiter.Board.SnapshotSlotsTest do
           ]
         )
 
-      assert %{phase: :in_review, agent_live: true} = card(board, :running, "bd-1")
+      assert %{phase: :in_review, agent_live: true} = card(board, :in_progress, "bd-1")
     end
 
     test "a live implementer round reads :addressing_review" do
@@ -291,7 +291,7 @@ defmodule Arbiter.Board.SnapshotSlotsTest do
           ]
         )
 
-      assert %{phase: :addressing_review} = card(board, :running, "bd-1")
+      assert %{phase: :addressing_review} = card(board, :in_progress, "bd-1")
     end
 
     # bd-741sid: no worker stays resident on an open PR — the Merging ticket
@@ -300,10 +300,10 @@ defmodule Arbiter.Board.SnapshotSlotsTest do
       board =
         derive(issues: [issue("bd-1", %{state: :merging, status: :in_progress, pr_ref: "#1"})])
 
-      assert %{phase: :waiting_ci_merge, agent_live: false} = card(board, :waiting, "bd-1")
+      assert %{phase: :waiting_ci_merge, agent_live: false} = card(board, :merging, "bd-1")
     end
 
-    test "a live CI fix pass reads :fixing_ci on the waiting card" do
+    test "a live CI fix pass reads :fixing_ci on the In progress card" do
       # The author's run finished when it opened its PR; the fix pass is the
       # only thing live under the ticket.
       board =
@@ -314,13 +314,13 @@ defmodule Arbiter.Board.SnapshotSlotsTest do
           ]
         )
 
-      assert %{phase: :fixing_ci, agent_live: true} = card(board, :waiting, "bd-1")
+      assert %{phase: :fixing_ci, agent_live: true} = card(board, :in_progress, "bd-1")
     end
 
     test "a question reads :waiting_on_you" do
       board = derive(workers: [author("bd-1", :question, %{agent_live: false})])
 
-      assert %{phase: :waiting_on_you, agent_live: false} = card(board, :waiting, "bd-1")
+      assert %{phase: :waiting_on_you, agent_live: false} = card(board, :in_progress, "bd-1")
     end
 
     # bd-741sid: the phase names the stage and the card's liveness says whether
@@ -329,7 +329,7 @@ defmodule Arbiter.Board.SnapshotSlotsTest do
     test "a running record with no agent is visibly distinguished by its liveness" do
       board = derive(workers: [author("bd-1", :working, %{agent_live: false})])
 
-      c = card(board, :running, "bd-1")
+      c = card(board, :in_progress, "bd-1")
       assert c.agent_live == false
       assert c.phase == :implementing
     end

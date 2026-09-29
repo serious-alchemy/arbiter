@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 //
 // bd-aro53b — the provider marks on the workers index and the board's
-// Running column, in a real browser.
+// In progress column (bd-79w1fs), in a real browser.
 //
 // `ArbiterWeb.CoreComponents.ProviderIconTest` and `WorkerIndexLiveTest` prove
 // the markup (an <svg>/<image>, a title, an aria-label). Neither can show that
@@ -46,8 +46,8 @@ const PAGES = [
   { path: "/workers", joinSelector: "#workers", iconSelector: '#workers svg[role="img"]', shotName: "workers" },
   {
     path: "/",
-    joinSelector: "#board-column-running",
-    iconSelector: '#board-column-running svg[role="img"]',
+    joinSelector: "#board-column-in_progress",
+    iconSelector: '#board-column-in_progress svg[role="img"]',
     shotName: "board-running"
   }
 ]
