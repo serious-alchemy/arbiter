@@ -175,6 +175,13 @@ systemctl --user start arbiter.service
   a `Provider accounts are on` line. The dashboard's `/providers` page no
   longer shows the "Accounts not enabled on this install" banner, and it lists
   the migrated accounts with their credential health.
+
+  `arb server doctor` also runs the `account/workspace quota policy` check.
+  `Arbiter.Quota.Gate` binds `min(account, workspace)` — the account's quota
+  policy is a ceiling that a workspace can tighten, never loosen. If a
+  workspace's configured quota is overridden by a stricter account setting,
+  adjust the account side using
+  `arb account set <ref> --threshold-mode … / --weekly-threshold …`.
 - **The rows are there.** `arb account list` shows each account from the
   plan.
 - **Workers get their credential from the account.** Dispatch a task in each
@@ -182,7 +189,7 @@ systemctl --user start arbiter.service
   `MissingCredentialError`:
 
   ```sh
-  journalctl --user -u arbiter.service --since "10 min ago" | grep -i MissingCredentialError
+  journalctl --user-unit arbiter.service --since "10 min ago" | grep -i MissingCredentialError
   ```
 
   A hit names the workspace. Either migrate its credential (census, then
