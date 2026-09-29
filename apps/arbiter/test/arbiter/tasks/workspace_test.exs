@@ -125,6 +125,51 @@ defmodule Arbiter.Tasks.WorkspaceTest do
       assert err |> Exception.message() |> String.contains?("merge.strategy must be one of")
     end
 
+    # bd-73zv62: the per-repo merge override.
+    test "accepts a merge.repos per-repo override" do
+      config = %{
+        "merge" => %{
+          "strategy" => "github",
+          "repos" => %{
+            "mesaana" => %{"strategy" => "direct"},
+            "svc" => %{"config" => %{"repo" => "svc"}, "watchdog_max_polls" => "infinity"}
+          }
+        }
+      }
+
+      assert {:ok, ws} = Ash.create(Workspace, %{name: "per-repo-merge", config: config})
+      assert ws.config["merge"]["repos"]["mesaana"]["strategy"] == "direct"
+    end
+
+    test "fails when a merge.repos override names an unknown strategy" do
+      config = %{"merge" => %{"repos" => %{"mesaana" => %{"strategy" => "bogus"}}}}
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{name: "bad-repo-merge", config: config})
+
+      assert err
+             |> Exception.message()
+             |> String.contains?("merge.repos.mesaana.strategy must be one of")
+    end
+
+    test "fails when merge.repos or an entry is not a map, or an entry nests repos" do
+      for {merge, message} <- [
+            {%{"repos" => ["mesaana"]}, "merge.repos must be a map"},
+            {%{"repos" => %{"mesaana" => "direct"}}, "merge.repos.mesaana must be a map"},
+            {%{"repos" => %{"m" => %{"repos" => %{}}}}, "merge.repos.m cannot nest"},
+            {%{"repos" => %{"m" => %{"watchdog_max_polls" => 0}}},
+             "merge.repos.m.watchdog_max_polls must be a positive integer"}
+          ] do
+        assert {:error, %Ash.Error.Invalid{} = err} =
+                 Ash.create(Workspace, %{
+                   name: "bad-repos-#{System.unique_integer([:positive])}",
+                   config: %{"merge" => merge}
+                 })
+
+        assert err |> Exception.message() |> String.contains?(message), message
+      end
+    end
+
     test "fails when merge is not a map" do
       config = %{"merge" => "direct"}
 

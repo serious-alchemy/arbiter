@@ -483,7 +483,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
 
           state.workspace_id
           |> open_engagements(state.repo)
-          |> process_engagements_paced(adapter, workspace, repo_name, state.rate_limit)
+          |> process_engagements_paced(adapter, merge_ws, repo_name, state.rate_limit)
         else
           # On any failure (missing workspace, unsupported adapter), no-op the
           # cycle but still bump the tick counter below so the patrol is observable.
