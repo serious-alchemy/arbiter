@@ -1261,6 +1261,13 @@ defmodule Arbiter.Trackers.GitHubTest do
       assert {:ok, :task} = GitHub.extract_issue_type(%{"labels" => [%{"name" => "type: task"}]})
     end
 
+    test "'research' maps only from the explicit round-trip label, never a bare one" do
+      assert nil == GitHub.extract_issue_type(%{"labels" => [%{"name" => "research"}]})
+
+      assert {:ok, :research} =
+               GitHub.extract_issue_type(%{"labels" => [%{"name" => "type: research"}]})
+    end
+
     test "parses the round-trip 'type: bug' label written by GitHub.create/1" do
       assert {:ok, :bug} = GitHub.extract_issue_type(%{"labels" => [%{"name" => "type: bug"}]})
     end

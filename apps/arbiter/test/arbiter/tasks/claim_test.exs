@@ -1100,6 +1100,14 @@ defmodule Arbiter.Tasks.ClaimTest do
       assert {:ok, []} = Claim.plan(ws)
     end
 
+    test "a `research`-type close stays exempt even when it was meant to propagate",
+         %{github_ws: ws} do
+      stub_forever_open_issues()
+      _research = closed_upstream_task(ws, "77", %{issue_type: :research})
+
+      assert {:ok, []} = Claim.plan(ws)
+    end
+
     test "a review-only close is NOT drift — it never owned the ticket", %{github_ws: ws} do
       stub_forever_open_issues()
       _borrowed = closed_upstream_task(ws, "74", %{issue_type: :bug, review_only: true})

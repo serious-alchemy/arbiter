@@ -1146,7 +1146,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
           acceptance: "- [ ] one",
           notes: "some findings",
           qa_notes: "qa'd",
-          issue_type: :task,
+          issue_type: :research,
           target_branch: "main",
           workspace_id: ws.id
         })
@@ -2137,15 +2137,30 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       refute html =~ "# Heading"
     end
 
-    test "renders findings notes as formatted HTML for a task-type issue", %{conn: conn, ws: ws} do
+    test "renders findings notes as formatted HTML for a research-type issue",
+         %{conn: conn, ws: ws} do
       {:ok, task} =
-        Ash.create(Issue, %{title: "md-findings", issue_type: :task, workspace_id: ws.id})
+        Ash.create(Issue, %{title: "md-findings", issue_type: :research, workspace_id: ws.id})
 
       {:ok, task} = Ash.update(task, %{notes: @md})
 
-      {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       assert html =~ "<h1>Heading</h1>"
+      assert has_element?(view, "#panel-findings")
+    end
+
+    test "an operational task keeps the plain notes panel, not the findings one (bd-9s9dqz)",
+         %{conn: conn, ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{title: "restart it", issue_type: :task, workspace_id: ws.id})
+
+      {:ok, task} = Ash.update(task, %{notes: "restarted; healthy"})
+
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
+
+      assert has_element?(view, "#panel-notes")
+      refute has_element?(view, "#panel-findings")
     end
 
     test "renders pr_body, qa_notes and deployment_notes as formatted HTML",

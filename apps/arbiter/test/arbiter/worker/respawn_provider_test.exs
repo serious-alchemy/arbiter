@@ -52,7 +52,7 @@ defmodule Arbiter.Worker.RespawnProviderTest do
       })
 
     {:ok, task} =
-      Ash.create(Issue, %{title: "respawn provider", workspace_id: ws.id, issue_type: :task})
+      Ash.create(Issue, %{title: "respawn provider", workspace_id: ws.id, issue_type: :research})
 
     {:ok, task} = Ash.update(task, %{status: :in_progress})
 
@@ -62,7 +62,7 @@ defmodule Arbiter.Worker.RespawnProviderTest do
         task_id: task.id,
         repo: "unknown",
         workspace_id: ws.id,
-        meta: %{issue_type: :task, review_spawn: false}
+        meta: %{issue_type: :research, review_spawn: false}
       )
 
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)

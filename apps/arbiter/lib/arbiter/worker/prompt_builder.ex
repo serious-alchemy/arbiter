@@ -25,7 +25,9 @@ defmodule Arbiter.Worker.PromptBuilder do
   def prompt_for_task(%Issue{} = task, opts) do
     cond do
       Keyword.get(opts, :review, false) == true -> review_prompt(task, opts)
-      task.issue_type == :task -> task_prompt(task, opts)
+      # bd-9s9dqz: the two no-PR types share a briefing skeleton but not a
+      # deliverable — `research` owes findings, `task` an action + outcome note.
+      Issue.no_pr_type?(task.issue_type) -> no_pr_prompt(task, opts)
       true -> work_prompt(task, opts)
     end
   end
@@ -311,8 +313,8 @@ defmodule Arbiter.Worker.PromptBuilder do
     """
   end
 
-  # bd-5lc99r: briefing for a `task` issue type — non-reviewable ops/research/
-  # spike work. The deliverable is a findings/results summary written to the
+  # bd-5lc99r / bd-9s9dqz: briefing for a no-PR issue type. `research`: the
+  # non-reviewable investigation type. The deliverable is a findings/results summary written to the
   # directive's `notes` field via the `ticket_update_progress` MCP tool, NOT a code
   # change, commit, or PR. The notes gate (Arbiter.Worker) blocks `arb done`
   # until `notes` is non-blank, so this prompt frames the whole job around
@@ -320,14 +322,20 @@ defmodule Arbiter.Worker.PromptBuilder do
   # steps the standard work prompt carries.
   #
   # bd-6v2my2: a PRPatrol follow-up (`source_pr` set) is also dispatched as a
-  # `:task` — it has no branch/PR of its own either — but unlike a pure
-  # research/ops task it MAY legitimately need to push a code fix. That fix
+  # `:research` — it has no branch/PR of its own either — but unlike a pure
+  # investigation it MAY legitimately need to push a code fix. That fix
   # belongs on the ORIGINAL PR's branch, never a fresh one, so `pr_follow_up_note/1`
   # swaps in that guidance (and the worktree it runs from, when one was
   # provisioned) in place of the generic "you are not expected to edit a repo"
   # line.
-  defp task_prompt(%Issue{} = task, opts) do
+  #
+  # bd-9s9dqz: an operational `task` (a restart, a config flip) gets the same
+  # skeleton with an action-oriented job block instead: do the action, verify
+  # it, leave a short outcome note. It owes no findings write-up and there is no
+  # notes gate — `arb done` completes it. Both bodies forbid code work.
+  defp no_pr_prompt(%Issue{} = task, opts) do
     adapter = Keyword.get(opts, :adapter, Arbiter.Agents.Claude)
+    kind = task.issue_type
 
     """
     You are a worker working autonomously on task #{task.id}.
@@ -340,24 +348,13 @@ defmodule Arbiter.Worker.PromptBuilder do
     Acceptance:
     #{task.acceptance || "(none)"}
 
-    This is a `task`-type directive: it has NO branch or pull request of its
+    This is a `#{kind}`-type directive: it has NO branch or pull request of its
     own, and none will be opened for it.
     #{pr_follow_up_note(task)}#{isolation_section(Keyword.get(opts, :worktree_path))}
     #{process_kill_discipline_section()}
     #{read_discipline_section()}
     #{EvidenceIntegrity.worker_block()}
-    Your job:
-      1. Do the investigation / ops work the directive describes.
-      2. Write your findings to the directive's `notes` field by calling the
-         `ticket_update_progress` MCP tool with its `notes` argument (Markdown is
-         fine). Make it self-contained: what you investigated, what you found,
-         and any recommendation or conclusion the coordinator needs — they read it
-         via `arb show #{task.id}` and the dashboard.
-
-    A notes gate enforces this: if you print `arb done` while `notes` is still
-    blank, you will be reprompted to write your findings before the directive
-    can close. Do NOT shell out to the `arb` CLI for the notes — use the
-    `ticket_update_progress` MCP tool.
+    #{no_pr_job(task, kind)}
     #{completion_notes_step(task)}
     Coordination: at the start of each step, check your mailbox by running
 
@@ -373,7 +370,7 @@ defmodule Arbiter.Worker.PromptBuilder do
 
     #{async_tools_section(adapter, "`arb done`", nil)}
 
-    When you are completely done — findings written to `notes` — print the line:
+    When you are completely done — #{no_pr_done_clause(kind)} — print the line:
 
         arb done
 
@@ -381,6 +378,45 @@ defmodule Arbiter.Worker.PromptBuilder do
     the task complete when it sees that marker.
     """
   end
+
+  # bd-9s9dqz: the type-specific "Your job" block of a no-PR briefing.
+  defp no_pr_job(%Issue{id: id}, :research) do
+    """
+    Your job:
+      1. Do the investigation the directive describes.
+      2. Write your findings to the directive's `notes` field by calling the
+         `ticket_update_progress` MCP tool with its `notes` argument (Markdown is
+         fine). Make it self-contained: what you investigated, what you found,
+         and any recommendation or conclusion the coordinator needs — they read it
+         via `arb show #{id}` and the dashboard.
+
+    A notes gate enforces this: if you print `arb done` while `notes` is still
+    blank, you will be reprompted to write your findings before the directive
+    can close. Do NOT shell out to the `arb` CLI for the notes — use the
+    `ticket_update_progress` MCP tool.\
+    """
+  end
+
+  defp no_pr_job(%Issue{}, :task) do
+    """
+    Your job:
+      1. Carry out the operational action the directive describes (a restart, a
+         config change, a one-off command) — that action and nothing beyond it.
+         This is not code work: do NOT edit, commit or push code.
+      2. Check that the action took effect.
+      3. Record a short outcome note — what you did and the result, a line or
+         two — by calling the `ticket_update_progress` MCP tool with its `notes`
+         argument. Do NOT shell out to the `arb` CLI for it.
+
+    No findings write-up is required and there is no notes gate: printing
+    `arb done` once the action is done completes the directive. If the action
+    cannot be carried out, say why in the outcome note instead of printing
+    `arb done`.\
+    """
+  end
+
+  defp no_pr_done_clause(:task), do: "the action carried out and its outcome noted"
+  defp no_pr_done_clause(_research), do: "findings written to `notes`"
 
   # bd-6v2my2: a PRPatrol follow-up carries `source_pr` — the PR it was auto-filed
   # against (unresolved review threads / CHANGES_REQUESTED / a failing required

@@ -1760,12 +1760,12 @@ defmodule Arbiter.Worker.Dispatch do
       Keyword.get(opts, :provision_worktree, true) == false ->
         {:ok, nil}
 
-      # bd-5lc99r: a `task` issue type is non-reviewable ops/research/spike work
-      # whose deliverable is a findings summary in `notes`, not a code change.
-      # It needs no branch to merge, so skip worktree provisioning by default.
-      # An explicit `provision_worktree: true` still forces one for the rare task
-      # that genuinely needs a repo checkout to inspect.
-      task.issue_type == :task and Keyword.get(opts, :provision_worktree) != true ->
+      # bd-5lc99r / bd-9s9dqz: `task` (operational action) and `research`
+      # (findings in `notes`) are the no-PR types — no code change, so no branch
+      # to merge. Skip worktree provisioning by default. An explicit
+      # `provision_worktree: true` still forces one for the rare ticket that
+      # genuinely needs a repo checkout to inspect.
+      Issue.no_pr_type?(task.issue_type) and Keyword.get(opts, :provision_worktree) != true ->
         {:ok, nil}
 
       true ->
@@ -2469,7 +2469,15 @@ defmodule Arbiter.Worker.Dispatch do
   defp resolve_agent_cwd(_task, worktree_path, opts) when is_binary(worktree_path),
     do: {:ok, worktree_path, opts}
 
-  defp resolve_agent_cwd(%Issue{issue_type: :task} = task, _nil_worktree, opts) do
+  defp resolve_agent_cwd(%Issue{} = task, nil_worktree, opts) do
+    if Issue.no_pr_type?(task.issue_type),
+      do: resolve_no_pr_cwd(task, opts),
+      else: resolve_review_or_missing_cwd(task, nil_worktree, opts)
+  end
+
+  # bd-9s9dqz: a no-PR ticket (`:task` / `:research`) with no worktree still
+  # gets a detached, branch-free checkout to inspect and run `gh`/`git` from.
+  defp resolve_no_pr_cwd(%Issue{} = task, opts) do
     case resolve_repo_path(task, Keyword.get(opts, :repo)) do
       nil ->
         {:error, :missing_worktree}
@@ -2481,7 +2489,7 @@ defmodule Arbiter.Worker.Dispatch do
     end
   end
 
-  defp resolve_agent_cwd(%Issue{} = task, _nil_worktree, opts) do
+  defp resolve_review_or_missing_cwd(%Issue{} = task, _nil_worktree, opts) do
     with true <- Keyword.get(opts, :review, false),
          repo_path when is_binary(repo_path) <-
            resolve_repo_path(task, Keyword.get(opts, :repo)) do

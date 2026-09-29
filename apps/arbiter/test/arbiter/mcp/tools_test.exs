@@ -1002,6 +1002,27 @@ defmodule Arbiter.MCP.ToolsTest do
       refute Map.has_key?(data, :warnings)
     end
 
+    test "accepts research (bd-9s9dqz) on create and update, with no acceptance warning", ctx do
+      assert {:ok, data} =
+               Tools.task_create(ctx.coordinator, %{
+                 "title" => "investigate",
+                 "issue_type" => "research"
+               })
+
+      refute Map.has_key?(data, :warnings)
+      assert Ash.get!(Issue, data.id).issue_type == :research
+
+      assert {:ok, _} =
+               Tools.task_update(ctx.coordinator, %{"id" => data.id, "issue_type" => "task"})
+
+      assert Ash.get!(Issue, data.id).issue_type == :task
+
+      assert {:ok, _} =
+               Tools.task_update(ctx.coordinator, %{"id" => data.id, "issue_type" => "research"})
+
+      assert Ash.get!(Issue, data.id).issue_type == :research
+    end
+
     test "accepts a repo assignment, and task_update can retarget it (bd-2jum8j)", ctx do
       assert {:ok, created} =
                Tools.task_create(ctx.coordinator, %{

@@ -952,21 +952,23 @@ defmodule Arbiter.Workflows.PRPatrol do
       %{
         title: issue_title,
         description: description,
-        # bd-6v2my2: :task, NOT a reviewable type. A follow-up's deliverable is
+        # bd-6v2my2 / bd-9s9dqz: :research, NOT a reviewable type (and not the
+        # operational :task — the follow-up still owes a written outcome, so it
+        # keeps the notes gate). A follow-up's deliverable is
         # replies + resolves against the ORIGINAL PR's review threads — it has
         # no code deliverable of its own. A reviewable type would provision a
         # fresh worktree/branch that `dispatch_follow_up/3`'s
         # `Dispatch.dispatch/2` call turns into a brand-new PR on completion
         # (via the MergeQueue), and its commit gate would fail a run that
         # posts replies/resolves but pushes no commit — exactly the
-        # ac-divfvo -> apex_server#3682 duplicate-PR incident. `:task`
+        # ac-divfvo -> apex_server#3682 duplicate-PR incident. `:research`
         # completes via the notes gate instead: no commit gate, no PR, no
         # merge, and no branch worktree at all — the worker still gets a real
         # (detached, branch-free) repo checkout to run `gh`/`git` from via
-        # `Dispatch.resolve_agent_cwd/3`'s existing `:task` fallback. See the
+        # `Dispatch.resolve_agent_cwd/3`'s no-PR-type fallback. See the
         # branch-policy note this description carries, folded in by
         # `Arbiter.Worker.Dispatch.task_prompt/2` via `source_pr`.
-        issue_type: :task,
+        issue_type: :research,
         priority: 2,
         # No tracker lifecycle write-back: a PR number is not a workable
         # tracker issue (transitioning a merged PR on dispatch fails with

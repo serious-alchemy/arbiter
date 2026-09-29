@@ -220,17 +220,17 @@ defmodule Arbiter.Trackers.Tracker do
   @callback extract_difficulty(map()) :: {:ok, 0..5} | nil
 
   @doc """
-  Derives the Arbiter `issue_type` (`:task | :bug | :feature | :epic | :chore |
-  :decision`) from a raw issue map returned by `fetch/1`, typically via the
+  Derives the Arbiter `issue_type` (`:task | :research | :bug | :feature | :epic |
+  :chore | :decision`) from a raw issue map returned by `fetch/1`, typically via the
   tracker's own labels/type field.
 
   Returns `{:ok, issue_type}` when a usable, unambiguous signal is present;
   returns `nil` when unavailable, unmapped, or ambiguous — callers then fall
   through to the schema default (`:feature`, a PR-expecting type). Implementers
-  should only map to `:task` (the non-reviewable, no-PR-expected type) from an
+  should only map to `:task` / `:research` (the non-reviewable, no-PR-expected types) from an
   *explicit* signal (e.g. GitHub's `type: task` round-trip label) — never from
   an ambiguous/bare one: under-mapping to `:feature` costs a reviewer a no-op
-  pass, but over-mapping to `:task` silently drops the PR a
+  pass, but over-mapping to `:task`/`:research` silently drops the PR a
   `bug`/`feature`/`chore` ticket was supposed to produce.
 
   Optional — adapters without a type signal simply don't implement it, and

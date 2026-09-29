@@ -2601,6 +2601,60 @@ defmodule Arbiter.Worker.DispatchTest do
       assert File.dir?(result.worktree_path)
     end
 
+    # bd-9s9dqz: `task` (operational action) and `research` (findings) are the
+    # two no-PR types. Both run the real dispatch path with a configured repo and
+    # end without a worktree, a ReviewGate round or a Merging stop.
+    for type <- [:task, :research] do
+      test "a #{type} dispatch provisions no worktree, skips ReviewGate and closes (bd-9s9dqz)",
+           %{ws: ws} do
+        claude_credential_env!()
+
+        {:ok, ticket} =
+          Ash.create(Issue, %{
+            title: "no-PR #{unquote(type)}",
+            workspace_id: ws.id,
+            issue_type: unquote(type)
+          })
+
+        # `research` owes findings, so give the notes gate something to find;
+        # `task` is dispatched WITHOUT any notes to prove it needs none.
+        ticket =
+          if unquote(type) == :research do
+            {:ok, t} =
+              Ash.update(ticket, %{notes: "## Findings\n\nNothing odd."}, action: :update)
+
+            t
+          else
+            ticket
+          end
+
+        {:ok, result} =
+          Dispatch.dispatch(ticket.id,
+            force: true,
+            repo: "st/repo",
+            start_claude: true,
+            preflight: false,
+            claude_command: ["sleep", "5"],
+            interval_ms: 5,
+            max_ticks: 200
+          )
+
+        assert result.worktree_path == nil
+
+        ref = Process.monitor(result.driver_pid)
+        send(result.worker_pid, {:__claude_session_done__, "arb done"})
+        assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 5_000
+
+        {:ok, reloaded} = Ash.get(Issue, ticket.id)
+        assert reloaded.state == :closed
+        assert reloaded.pr_ref == nil
+
+        # No ReviewGate round was ever opened, and the run never waited on one.
+        assert Round |> Ash.Query.filter(task_id == ^ticket.id) |> Ash.read!() == []
+        assert latest_run(ticket.id).outcome == :succeeded
+      end
+    end
+
     test "per-workspace repo_paths overrides the Application env", %{repo: repo} do
       {:ok, ws_local} =
         Ash.create(Workspace, %{
@@ -3107,7 +3161,7 @@ defmodule Arbiter.Worker.DispatchTest do
         Ash.create(Issue, %{
           title: "investigate the flaky deploy",
           workspace_id: ws.id,
-          issue_type: :task
+          issue_type: :research
         })
 
       prompt = Dispatch.prompt_for_task(task, [])
@@ -3141,7 +3195,7 @@ defmodule Arbiter.Worker.DispatchTest do
         Ash.create(Issue, %{
           title: "task but reviewed",
           workspace_id: ws.id,
-          issue_type: :task
+          issue_type: :research
         })
 
       prompt = Dispatch.prompt_for_task(task, review: true)
@@ -3156,7 +3210,7 @@ defmodule Arbiter.Worker.DispatchTest do
         Ash.create(Issue, %{
           title: "PR #3679: needs follow-up",
           workspace_id: ws.id,
-          issue_type: :task,
+          issue_type: :research,
           source_pr: "3679"
         })
 
@@ -3182,7 +3236,7 @@ defmodule Arbiter.Worker.DispatchTest do
         Ash.create(Issue, %{
           title: "investigate the flaky deploy",
           workspace_id: ws.id,
-          issue_type: :task
+          issue_type: :research
         })
 
       prompt = Dispatch.prompt_for_task(task, [])

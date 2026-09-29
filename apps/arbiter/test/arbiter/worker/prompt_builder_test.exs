@@ -191,8 +191,47 @@ defmodule Arbiter.Worker.PromptBuilderTest do
            """
   end
 
-  test "task-type prompt is byte-identical for fixed inputs" do
-    prompt = PromptBuilder.prompt_for_task(task(%{issue_type: :task}), [])
+  describe "no-PR type prompts (bd-9s9dqz)" do
+    test "research asks for findings and names the notes gate" do
+      prompt = PromptBuilder.prompt_for_task(task(%{issue_type: :research}), [])
+
+      assert prompt =~ "This is a `research`-type directive"
+      assert prompt =~ "Write your findings to the directive's `notes` field"
+      assert prompt =~ "A notes gate enforces this"
+      refute prompt =~ "operational action"
+    end
+
+    test "task asks for the action and a short outcome note, with no notes gate" do
+      prompt = PromptBuilder.prompt_for_task(task(%{issue_type: :task}), [])
+
+      assert prompt =~ "This is a `task`-type directive"
+      assert prompt =~ "Carry out the operational action the directive describes"
+      assert prompt =~ "Record a short outcome note"
+      assert prompt =~ "there is no notes gate"
+      refute prompt =~ "Write your findings"
+      refute prompt =~ "A notes gate enforces this"
+    end
+
+    test "both no-PR bodies forbid code work and differ from each other" do
+      research = PromptBuilder.prompt_for_task(task(%{issue_type: :research}), [])
+      action = PromptBuilder.prompt_for_task(task(%{issue_type: :task}), [])
+
+      assert action =~ "do NOT edit, commit or push code"
+      assert research =~ "NO branch or pull request"
+      assert action =~ "NO branch or pull request"
+      refute research == action
+    end
+
+    test "a research follow-up keeps the PRPatrol source_pr guidance" do
+      prompt =
+        PromptBuilder.prompt_for_task(task(%{issue_type: :research, source_pr: "42"}), [])
+
+      assert prompt =~ "gh pr checkout 42"
+    end
+  end
+
+  test "research-type prompt is byte-identical for fixed inputs" do
+    prompt = PromptBuilder.prompt_for_task(task(%{issue_type: :research}), [])
 
     assert prompt == """
            You are a worker working autonomously on task bd-golden1.
@@ -205,7 +244,7 @@ defmodule Arbiter.Worker.PromptBuilderTest do
            Acceptance:
            Empty input returns {:error, :empty} instead of raising.
 
-           This is a `task`-type directive: it has NO branch or pull request of its
+           This is a `research`-type directive: it has NO branch or pull request of its
            own, and none will be opened for it.
 
            No worktree is provisioned by default — you are not expected to edit a repo.
@@ -252,7 +291,7 @@ defmodule Arbiter.Worker.PromptBuilderTest do
            are public, often permanent, and outside the operator's control.
 
            Your job:
-             1. Do the investigation / ops work the directive describes.
+             1. Do the investigation the directive describes.
              2. Write your findings to the directive's `notes` field by calling the
                 `ticket_update_progress` MCP tool with its `notes` argument (Markdown is
                 fine). Make it self-contained: what you investigated, what you found,
@@ -646,7 +685,7 @@ defmodule Arbiter.Worker.PromptBuilderTest do
 
       # task prompt
       task_prompt =
-        PromptBuilder.prompt_for_task(task(%{issue_type: :task}),
+        PromptBuilder.prompt_for_task(task(%{issue_type: :research}),
           adapter: Arbiter.Agents.Gemini
         )
 

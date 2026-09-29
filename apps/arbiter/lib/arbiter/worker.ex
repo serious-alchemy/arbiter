@@ -1183,8 +1183,8 @@ defmodule Arbiter.Worker do
   # The coordinator notification still fires so the dashboard / inbox feed picks
   # up the completion.
   #
-  # bd-6v2my2: a `:task` directive (`task_type?/1`) skips it for the same
-  # reason. `MergeQueue.do_enqueue/2` has no issue_type awareness at all — it
+  # bd-6v2my2: a no-PR directive (`no_pr_type?/1`: `:task` or `:research`)
+  # skips it for the same reason. `MergeQueue.do_enqueue/2` has no issue_type awareness at all — it
   # unconditionally computes the per-task branch, pushes it, and opens a PR for
   # it. That's harmless for the common no-worktree `:task` (the push fails,
   # since there's no worktree to push), but a `:task` dispatched with
@@ -1196,7 +1196,7 @@ defmodule Arbiter.Worker do
   defp broadcast_done(%State{workspace_id: nil}), do: :ok
 
   defp broadcast_done(%State{workspace_id: ws_id, task_id: task_id, meta: meta} = state) do
-    unless review_only?(meta) or task_type?(meta) do
+    unless review_only?(meta) or no_pr_type?(meta) do
       Phoenix.PubSub.broadcast(
         Arbiter.PubSub,
         "worker:done:" <> ws_id,
@@ -1360,13 +1360,16 @@ defmodule Arbiter.Worker do
   defp review_only?(%{"review_only" => true}), do: true
   defp review_only?(_), do: false
 
-  # bd-5lc99r: a `task` issue type is non-reviewable work — its deliverable is a
-  # findings summary written to `notes`, not a code change. Dispatch stamps the
-  # task's `:issue_type` into the worker meta; the completion path reads it here
-  # to route through the notes gate instead of the commit/review gates.
-  defp task_type?(%{issue_type: :task}), do: true
-  defp task_type?(%{issue_type: "task"}), do: true
-  defp task_type?(_), do: false
+  # bd-5lc99r / bd-9s9dqz: `:task` and `:research` are non-reviewable no-PR
+  # types — no worktree, commit gate, ReviewGate or merge. Dispatch stamps the
+  # ticket's `:issue_type` into the worker meta; the completion path reads it
+  # here to skip the commit/review gates. Only `:research` additionally runs the
+  # notes gate (`findings_type?/1`); a `:task` completes on `arb done`.
+  defp no_pr_type?(meta), do: Arbiter.Tasks.Issue.no_pr_type?(meta_issue_type(meta))
+  defp findings_type?(meta), do: Arbiter.Tasks.Issue.findings_type?(meta_issue_type(meta))
+
+  defp meta_issue_type(%{issue_type: issue_type}), do: issue_type
+  defp meta_issue_type(_), do: nil
 
   # ---- Run history (Arbiter.Workers.Run) -------------------------------
 
@@ -2903,7 +2906,7 @@ defmodule Arbiter.Worker do
       run_signalled_done?(state) ->
         on_claude_done(state)
 
-      # bd-2da6ay: a non-reviewable `task`-type worker whose subprocess
+      # bd-2da6ay: a non-reviewable no-PR (`task`/`research`) worker whose subprocess
       # exited cleanly (status 0) at wrap-up without ever printing `arb
       # done`. Its deliverable is a findings summary in `notes`, NOT a
       # worktree change — so a clean exit means the agent reached the end of
@@ -2915,8 +2918,10 @@ defmodule Arbiter.Worker do
       # up to the cap then escalate with a concrete cause. Infra failures
       # (auth/credit/rate/killed/crashed) are NOT clean exits, so they fall
       # through to the resume/fail_stopped path and keep their specific
-      # escalations (e.g. the credential watchdog).
-      task_type?(state.meta) and not review_only?(state.meta) and
+      # escalations (e.g. the credential watchdog). bd-9s9dqz: an operational
+      # `:task` has no notes gate, so its clean exit completes as an `arb done`
+      # would — the same path, minus the gate.
+      no_pr_type?(state.meta) and not review_only?(state.meta) and
           clean_exit_without_done?(session) ->
         finalize_task_type_stop(state)
 
@@ -3552,15 +3557,26 @@ defmodule Arbiter.Worker do
       pass?(meta) ->
         finish_pass(note_tasks_running_at_done(state))
 
-      task_type?(meta) and not review_only?(meta) ->
-        case notes_gate(state) do
-          :ok -> complete_now(note_tasks_running_at_done(state), :claude_done)
-          {:gate, :blank} -> handle_notes_gate(state)
-        end
+      no_pr_type?(meta) and not review_only?(meta) ->
+        complete_no_pr(state)
 
       true ->
         state = note_tasks_running_at_done(state)
         on_claude_done_reviewable(state, state.meta)
+    end
+  end
+
+  # bd-9s9dqz: completion of a no-PR run. `:research` owes a findings write-up,
+  # so it goes through the notes gate; `:task` is an operational action with no
+  # deliverable beyond the agent reporting it done, so it completes directly.
+  defp complete_no_pr(%State{meta: meta} = state) do
+    if findings_type?(meta) do
+      case notes_gate(state) do
+        :ok -> complete_now(note_tasks_running_at_done(state), :claude_done)
+        {:gate, :blank} -> handle_notes_gate(state)
+      end
+    else
+      complete_now(note_tasks_running_at_done(state), :claude_done)
     end
   end
 
@@ -3696,16 +3712,14 @@ defmodule Arbiter.Worker do
 
   # bd-7pe74i: a reviewable code directive that Dispatch provisions a worktree
   # for. Dispatch stamps `:issue_type` into meta and only skips worktree
-  # provisioning for `:task` types (see Dispatch.maybe_provision_worktree/2), so
-  # any non-`:task` type is expected to carry a per-task branch by completion.
+  # provisioning for the no-PR types (see Dispatch.maybe_provision_worktree/2), so
+  # any other type is expected to carry a per-task branch by completion.
   # An ad-hoc worker started outside Dispatch has no `:issue_type` in meta and is
   # NOT treated as a code directive here (nothing was ever provisioned for it).
   defp reviewable_code_type?(meta) do
     case meta && Map.get(meta, :issue_type) do
       nil -> false
-      :task -> false
-      "task" -> false
-      _ -> true
+      type -> not Arbiter.Tasks.Issue.no_pr_type?(type)
     end
   end
 
@@ -4412,7 +4426,8 @@ defmodule Arbiter.Worker do
 
   # ---- bd-5lc99r notes gate -------------------------------------------------
   #
-  # A `task` issue type is non-reviewable ops/research/spike work whose
+  # A `research` issue type (bd-9s9dqz; the operational `task` type skips this
+  # gate) is non-reviewable investigation work whose
   # deliverable is a findings summary in the directive's `notes`, not a code
   # change. The notes gate is the task-type analogue of the commit gate: it
   # refuses to let `arb done` close the directive while `notes` is blank, and
@@ -4529,7 +4544,7 @@ defmodule Arbiter.Worker do
   defp notes_nudge_prompt(%State{task_id: task_id}) do
     """
     bd-5lc99r notes gate: you printed `arb done` for task #{task_id}, but this is
-    a `task`-type directive whose deliverable is a findings summary written to
+    a `research`-type directive whose deliverable is a findings summary written to
     the directive's `notes` field — and `notes` is still blank. A task produces
     no code change and no PR; the notes ARE the deliverable, so completion is
     blocked until they exist.
@@ -4656,7 +4671,7 @@ defmodule Arbiter.Worker do
   # still complete the directive, and blank notes still fail with the
   # concrete "strict policy denied command" reason.
   defp fail_unresumable(%State{} = state, session, %{category: :permission_denied}) do
-    if task_type?(state.meta) and not review_only?(state.meta),
+    if no_pr_type?(state.meta) and not review_only?(state.meta),
       do: finalize_task_type_stop(state),
       else: fail_stopped(state, session)
   end
@@ -5341,7 +5356,7 @@ defmodule Arbiter.Worker do
       end
 
     """
-    bd-5lc99r notes gate tripped for task #{task_id}: this is a `task`-type
+    bd-5lc99r notes gate tripped for task #{task_id}: this is a `research`-type
     directive whose deliverable is a findings summary in `notes`, but `notes`
     is blank and `arb done` was signalled.
 
@@ -5383,7 +5398,7 @@ defmodule Arbiter.Worker do
       from_ref: task_id,
       workspace_id: ws_id,
       task_ref: task_id,
-      subject: "Notes gate: blank findings on task-type directive (#{task_id})",
+      subject: "Notes gate: blank findings on research-type directive (#{task_id})",
       body: summary
     })
 

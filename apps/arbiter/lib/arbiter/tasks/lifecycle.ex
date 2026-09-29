@@ -38,7 +38,7 @@ defmodule Arbiter.Tasks.Lifecycle do
   | `close` | any non-closed → closed |
   | `reopen` | closed \\| verifying → queued |
 
-  A no-PR ticket (`task`, and `research` once bd-9s9dqz lands) goes active →
+  A no-PR ticket (`task` or `research` — `Issue.no_pr_type?/1`) goes active →
   closed or active → verifying directly. Those pairs are already in the table
   (`close` and `await_verification` both accept `active`), so no type
   exception is needed to allow them.

@@ -208,7 +208,7 @@ defmodule Arbiter.Worker.AgyStrictDenialTest do
     test "a task-type worker is resumed with a denial prompt instead of failing the notes gate",
          %{ws: ws, dir: dir, stub: stub} do
       {:ok, task} =
-        Ash.create(Issue, %{title: "strict probe", workspace_id: ws.id, issue_type: :task})
+        Ash.create(Issue, %{title: "strict probe", workspace_id: ws.id, issue_type: :research})
 
       {:ok, task} = Ash.update(task, %{status: :in_progress})
 
@@ -219,7 +219,7 @@ defmodule Arbiter.Worker.AgyStrictDenialTest do
           workspace_id: ws.id,
           # Cap 0: before bd-7wymls the clean exit went straight to the notes
           # gate and failed here with "strict policy denied … `whoami`".
-          meta: %{issue_type: :task, review_spawn: false, notes_nudge_cap: 0}
+          meta: %{issue_type: :research, review_spawn: false, notes_nudge_cap: 0}
         )
 
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)

@@ -612,7 +612,8 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
       assert engagement.review_automation == :flag
       # Tracker-inert + non-reviewable (no worktree/branch).
       assert engagement.tracker_type == :none
-      assert engagement.issue_type == :task
+      # bd-9s9dqz: `:research` — a no-PR findings type.
+      assert engagement.issue_type == :research
       # First-pass findings seed the relevance baseline, string-keyed to match
       # what ReviewPatrol persists/reads — so a later commit touching x.ex
       # triggers a re-review.

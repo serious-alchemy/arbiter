@@ -440,10 +440,10 @@ defmodule Arbiter.Tasks.Claim do
   #
   # Two shapes are exempt outright:
   #
-  #   * `:task`-type — the opt-in non-reviewable research/investigation type
-  #     (see `Issue.issue_type`). Its deliverable is a findings summary in
-  #     `notes`: no diff, no PR. Closing one records that the *investigation*
-  #     finished, not that the underlying work is done.
+  #   * a no-PR type (`Issue.no_pr_type?/1`: `:task`, `:research`) — the
+  #     opt-in non-reviewable types (see `Issue.issue_type`). Neither ships a
+  #     diff or a PR. Closing one records that the *investigation* (or the
+  #     operational action) finished, not that the underlying work is done.
   #   * `review_only` — a borrowed ticket this task never owned. SyncTracker
   #     refuses to transition it (bd-6xaaam), so it is open by construction.
   #
@@ -467,14 +467,20 @@ defmodule Arbiter.Tasks.Claim do
   #     available for rows closed before the intent was recorded (`nil`), where
   #     it stays the fallback. That is what keeps the live findings-only closes
   #     vs-9y1ipo/sc-619 and vs-bdix5z/sc-485 unflagged.
-  defp close_meant_to_propagate?(%Issue{issue_type: :task}), do: false
-  defp close_meant_to_propagate?(%Issue{review_only: true}), do: false
-  defp close_meant_to_propagate?(%Issue{close_upstream_expected: true}), do: true
+  defp close_meant_to_propagate?(%Issue{issue_type: issue_type, review_only: review_only} = task) do
+    cond do
+      Issue.no_pr_type?(issue_type) -> false
+      review_only == true -> false
+      true -> close_intent_propagates?(task)
+    end
+  end
 
-  defp close_meant_to_propagate?(%Issue{pr_ref: pr_ref}) when is_binary(pr_ref),
+  defp close_intent_propagates?(%Issue{close_upstream_expected: true}), do: true
+
+  defp close_intent_propagates?(%Issue{pr_ref: pr_ref}) when is_binary(pr_ref),
     do: String.trim(pr_ref) != ""
 
-  defp close_meant_to_propagate?(_task), do: false
+  defp close_intent_propagates?(_task), do: false
 
   defp read_closed_tracker_tasks(workspace, type) do
     query =

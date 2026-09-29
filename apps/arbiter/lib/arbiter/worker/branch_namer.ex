@@ -70,6 +70,7 @@ defmodule Arbiter.Worker.BranchNamer do
   defp prefix_for(:bug), do: "bugfix"
   defp prefix_for(:feature), do: "feature"
   defp prefix_for(:task), do: "feature"
+  defp prefix_for(:research), do: "feature"
   defp prefix_for(:epic), do: "epic"
   defp prefix_for(:chore), do: "chore"
   defp prefix_for(:decision), do: "chore"

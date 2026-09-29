@@ -1,12 +1,15 @@
 defmodule Arbiter.Worker.NotesGateTest do
   @moduledoc """
-  Regression tests for the notes gate introduced for `issue_type: :task`.
+  Regression tests for the notes gate, which guards `issue_type: :research`.
 
-  A task-type directive's deliverable is a findings summary written to the
+  A research directive's deliverable is a findings summary written to the
   `notes` field — not a code change. The notes gate fires when the worker
   signals `arb done` but `notes` is still blank. Like the commit gate, the
   nudge cap is pinned to 0 in these tests so we assert the structural gate
   behaviour (fail + escalate) without exercising the retry layer.
+
+  `issue_type: :task` (an operational action) shares the no-PR path but NOT the
+  gate: it completes on `arb done` with no findings (bd-9s9dqz).
   """
 
   use Arbiter.DataCase, async: false
@@ -45,12 +48,12 @@ defmodule Arbiter.Worker.NotesGateTest do
     %{ws: ws}
   end
 
-  defp new_task(ws, notes \\ nil) do
+  defp new_task(ws, notes \\ nil, issue_type \\ :research) do
     {:ok, task} =
       Ash.create(Issue, %{
         title: "notes-gate task",
         workspace_id: ws.id,
-        issue_type: :task
+        issue_type: issue_type
       })
 
     {:ok, task} = Ash.update(task, %{status: :in_progress})
@@ -138,8 +141,8 @@ defmodule Arbiter.Worker.NotesGateTest do
       Map.merge(
         %{
           # Dispatch stamps issue_type into meta; replicate that here so the
-          # worker's task_type? guard routes through the notes gate path.
-          issue_type: :task,
+          # worker's no-PR guards route through the notes gate path.
+          issue_type: :research,
           review_spawn: false
         },
         extra_meta
@@ -218,6 +221,45 @@ defmodule Arbiter.Worker.NotesGateTest do
 
       wait_until(fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end)
 
+      assert Worker.state(pid).meta.failure_reason == :blank_notes_at_completion
+    end
+  end
+
+  describe "operational `task` type has no notes gate (bd-9s9dqz)" do
+    test "arb-done with blank notes completes cleanly", %{ws: ws} do
+      task = new_task(ws, nil, :task)
+      pid = start_worker(task, %{issue_type: :task, notes_nudge_cap: 0})
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{state: :finished, outcome: :succeeded}, Worker.state(pid)) end)
+
+      snap = Worker.state(pid)
+      refute Map.has_key?(snap.meta, :failure_reason)
+      refute Map.has_key?(snap.meta, :notes_gate_detail)
+      refute snap.waiting_on == :review_gate
+
+      # No escalation: nothing tripped.
+      refute Message.inbox("admiral", workspace_id: ws.id)
+             |> Enum.any?(&(&1.kind == :escalation and &1.directive_ref == task.id))
+    end
+
+    test "a string-typed issue_type still routes as no-PR", %{ws: ws} do
+      task = new_task(ws, nil, :task)
+      pid = start_worker(task, %{issue_type: "task", notes_nudge_cap: 0})
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{state: :finished, outcome: :succeeded}, Worker.state(pid)) end)
+    end
+
+    test "research still refuses a blank-notes completion when typed as a string", %{ws: ws} do
+      task = new_task(ws)
+      pid = start_worker(task, %{issue_type: "research", notes_nudge_cap: 0})
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end)
       assert Worker.state(pid).meta.failure_reason == :blank_notes_at_completion
     end
   end

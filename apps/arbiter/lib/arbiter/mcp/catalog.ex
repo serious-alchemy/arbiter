@@ -407,7 +407,14 @@ defmodule Arbiter.MCP.Catalog do
           },
           "issue_type" => %{
             "type" => "string",
-            "description" => "task | bug | feature | epic | chore | decision."
+            "description" =>
+              "task | research | bug | feature | epic | chore | decision. `research` and " <>
+                "`task` are the two no-PR types (no worktree, commit gate, ReviewGate or merge), " <>
+                "and NEITHER may be used for code work: `research` is an investigation whose " <>
+                "findings write-up in `notes` is required before it completes; `task` is a plain " <>
+                "operational action (a restart, a config flip) that completes when the agent " <>
+                "reports it done, with a short outcome note. Use bug | feature | chore for " <>
+                "anything that ships code."
           },
           "auto_close" => %{
             "type" => "boolean",
@@ -489,7 +496,13 @@ defmodule Arbiter.MCP.Catalog do
           "status" => %{"type" => "string", "description" => "open | in_progress."},
           "priority" => %{"type" => "integer"},
           "difficulty" => %{"type" => "integer"},
-          "issue_type" => %{"type" => "string"},
+          "issue_type" => %{
+            "type" => "string",
+            "description" =>
+              "task | research | bug | feature | epic | chore | decision. `research` " <>
+                "(findings in `notes` required) and `task` (an operational action) are the " <>
+                "no-PR types; neither may be used for code work."
+          },
           "auto_close" => %{
             "type" => "boolean",
             "description" =>
@@ -1507,7 +1520,7 @@ defmodule Arbiter.MCP.Catalog do
         "List tickets in the workspace with optional filters: `state` (backlog | queued | " <>
           "active | merging | verifying | closed), `column` (backlog | blocked | ready | " <>
           "in_progress | merging | verifying | closed), `priority` (integer 0–4) and " <>
-          "`issue_type` (task | bug | feature | epic | chore | decision). Each ticket carries " <>
+          "`issue_type` (task | research | bug | feature | epic | chore | decision). Each ticket carries " <>
           "`state`, `column`, `step`, `blocked_by` and `attention`. The legacy `status` " <>
           "filter still works for one release; prefer `state` or `column`.",
       input_schema: %{
@@ -1537,7 +1550,8 @@ defmodule Arbiter.MCP.Catalog do
           },
           "issue_type" => %{
             "type" => "string",
-            "description" => "Filter by type: task | bug | feature | epic | chore | decision."
+            "description" =>
+              "Filter by type: task | research | bug | feature | epic | chore | decision."
           }
         },
         "additionalProperties" => false

@@ -380,19 +380,20 @@ defmodule Arbiter.Workflows.PRPatrolTest do
       [task] = tasks_for_repo()
       # tracker_type is :none so dispatch never tries to transition the merged
       # PR; the source PR is linked via source_pr instead (bd-ci2jl2). The
-      # follow-up is `:task` (bd-6v2my2, NOT :feature/reviewable): it has no
-      # branch/PR of its own — `:task`'s default (skip branch-worktree
+      # follow-up is `:research` (bd-6v2my2 / bd-9s9dqz, NOT :feature/reviewable):
+      # it has no branch/PR of its own and still owes a written outcome — the
+      # no-PR types' default (skip branch-worktree
       # provisioning) is exactly right, so `meta.worktree_path` stays nil.
       assert task.tracker_type == :none
       assert task.source_pr == "42"
-      assert task.issue_type == :task
+      assert task.issue_type == :research
       assert task.title =~ "PR #42"
       assert task.workspace_id == ws.id
 
       # Worker is registered for this task.
       pid = Worker.whereis(task.id)
       assert is_pid(pid)
-      assert %{issue_type: :task, worktree_path: nil} = Worker.state(pid).meta
+      assert %{issue_type: :research, worktree_path: nil} = Worker.state(pid).meta
 
       # bd-asxw4e: the follow-up is dispatched straight out of Backlog, which
       # takes a recorded force.
@@ -441,7 +442,7 @@ defmodule Arbiter.Workflows.PRPatrolTest do
       assert task.source_pr == "50"
       assert task.title =~ "PR #50"
       # bd-6v2my2: NOT a reviewable type — no branch/PR of its own.
-      assert task.issue_type == :task
+      assert task.issue_type == :research
       assert task.description =~ "unresolved review thread"
       assert task.description =~ "Review thread follow-up protocol"
       assert task.description =~ "Addressed in <sha>"
@@ -492,7 +493,7 @@ defmodule Arbiter.Workflows.PRPatrolTest do
       :ok = PRPatrol.tick(name)
 
       [task] = tasks_for_repo()
-      assert task.issue_type == :task
+      assert task.issue_type == :research
 
       worker_pid = Worker.whereis(task.id)
       assert is_pid(worker_pid)
@@ -927,7 +928,7 @@ defmodule Arbiter.Workflows.PRPatrolTest do
       # the review-thread trigger — a fix pushed here must land on the
       # ORIGINAL PR's branch to turn its required check green; a fix on a
       # fresh branch/PR can never do that.
-      assert task.issue_type == :task
+      assert task.issue_type == :research
       assert task.description =~ "required check(s) failing: ui-integration-tests"
       assert task.description =~ "Required-check failure triage protocol"
       assert task.description =~ "FLAKE"
