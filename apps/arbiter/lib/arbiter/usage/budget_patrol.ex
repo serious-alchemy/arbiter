@@ -124,9 +124,10 @@ defmodule Arbiter.Usage.BudgetPatrol do
   # ---- the sweep -----------------------------------------------------------
 
   @doc """
-  One pass: page the coordinator once for each open task that is past its p90
-  and has not been paged already. Always returns `:ok` — a ledger read that
-  fails must not take the ticker down with it.
+  One pass: raise (or refresh) the budget alert of each open task past its
+  p90, and clear the alert of every task that is not (bd-7gt8rm). Always
+  returns `:ok` — a ledger read that fails must not take the ticker down with
+  it, and clears nothing.
 
   Options are `Arbiter.Usage.Estimate.for_issue/2`'s (`:now`, `:min_n`,
   `:window_days`, `:sample`), plus `:issues` to supply the open tasks
@@ -139,7 +140,7 @@ defmodule Arbiter.Usage.BudgetPatrol do
 
     case issues do
       [] ->
-        :ok
+        CoordinatorNotifier.budget_recovered([])
 
       issues ->
         sample = Keyword.get_lazy(opts, :sample, fn -> Estimate.sample(opts) end)
@@ -151,16 +152,21 @@ defmodule Arbiter.Usage.BudgetPatrol do
         opts = Keyword.put(opts, :sample, sample)
         states = worker_states(workers)
 
-        issues
-        |> Enum.filter(&(total(spends[&1.id]) > 0.0))
-        |> Enum.each(fn issue ->
-          spend = spends[issue.id]
-          assessment = Budget.assess(issue, Keyword.put(opts, :spend, total(spend)))
+        over =
+          issues
+          |> Enum.filter(&(total(spends[&1.id]) > 0.0))
+          |> Enum.filter(fn issue ->
+            spend = spends[issue.id]
+            assessment = Budget.assess(issue, Keyword.put(opts, :spend, total(spend)))
 
-          if assessment.over_budget?, do: escalate(issue, assessment, spend, states)
-        end)
+            if assessment.over_budget?, do: escalate(issue, assessment, spend, states)
+            assessment.over_budget?
+          end)
 
-        :ok
+        # bd-7gt8rm: every open task was just assessed, so an alert for a task
+        # not over now — its threshold moved, or it closed — has cleared. Only
+        # reached when the whole sweep succeeded: a failed read clears nothing.
+        CoordinatorNotifier.budget_recovered(Enum.map(over, & &1.id))
     end
   rescue
     error ->
@@ -195,8 +201,6 @@ defmodule Arbiter.Usage.BudgetPatrol do
     |> Ash.Query.filter(status != ^closed)
     |> Ash.read!()
     |> Enum.reject(&(&1.issue_type in @non_dispatchable_types))
-  rescue
-    _ -> []
   end
 
   defp list_workers do
