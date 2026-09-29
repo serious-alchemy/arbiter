@@ -3040,6 +3040,14 @@ defmodule Arbiter.Worker.Dispatch do
       {:claude, :ok} ->
         [mcp_config: Path.join(worktree_path, Arbiter.MCP.AgentConfig.Claude.filename())]
 
+      # A write was attempted and failed (agy with no isolated `$HOME` →
+      # `{:error, :unsupported}`): the session has no Arbiter MCP tools, so the
+      # prompt must give it the `arb` CLI fallback for notes/progress. `:skipped`
+      # (injection off, no worktree) stays silent — MCP may still arrive via
+      # the operator's own config.
+      {_provider, {:error, _}} ->
+        [mcp_tools?: false]
+
       _ ->
         []
     end

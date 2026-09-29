@@ -4574,11 +4574,13 @@ defmodule Arbiter.Worker do
 
       1. Call the `ticket_update_progress` MCP tool with its `notes` argument set
          to your findings / results summary for this directive (Markdown is fine).
+         If this session has NO Arbiter MCP tools, run
+         `arb ticket update #{task_id} --append-notes "<findings>"` instead.
       2. Make it self-contained: what you investigated, what you found, and any
          recommendation or conclusion the coordinator needs — they read it via
          `arb show #{task_id}` and the dashboard.
 
-    Do NOT shell out to the `arb` CLI for the notes — use the MCP tool. Then
+    Prefer the MCP tool; the `arb` CLI is only for a session without it. Then
     print `arb done`.
     """
   end

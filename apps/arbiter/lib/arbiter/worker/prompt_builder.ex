@@ -250,6 +250,7 @@ defmodule Arbiter.Worker.PromptBuilder do
   end
 
   defp base_work_prompt(%Issue{} = task, opts) do
+    mcp? = mcp_tools?(opts)
     worktree_path = Keyword.get(opts, :worktree_path)
     adapter = Keyword.get(opts, :adapter, Arbiter.Agents.Claude)
     isolation_section = isolation_section(worktree_path)
@@ -277,7 +278,7 @@ defmodule Arbiter.Worker.PromptBuilder do
     create`). The MergeQueue opens the single canonical PR for this task, on
     the correct base branch, using the body you author in the next step.
     Opening your own PR creates a duplicate on the wrong base.
-    #{pr_review_instruction(task)}#{verify_after_deploy_step(task)}#{pr_body_step(task)}#{completion_notes_step(task)}
+    #{pr_review_instruction(task)}#{verify_after_deploy_step(task, mcp?)}#{pr_body_step(task, mcp?)}#{completion_notes_step(task, mcp?)}
     Coordination: at the start of each step, check your mailbox by running
 
         arb inbox #{task.id}
@@ -313,6 +314,18 @@ defmodule Arbiter.Worker.PromptBuilder do
     """
   end
 
+  # A session whose provider could not be handed the Arbiter MCP server (agy with
+  # no isolated `$HOME`, a failed config write — `Dispatch.inject_mcp_config/3`
+  # sets `mcp_tools?: false`) has no `ticket_update_progress` tool. Telling it to
+  # use the tool while forbidding the `arb` CLI deadlocks the notes gate, so
+  # such a session is told to use the CLI instead. Defaults to true: every
+  # session that was not positively known to lack MCP keeps the MCP wording.
+  defp mcp_tools?(opts), do: Keyword.get(opts, :mcp_tools?, true) != false
+
+  # `arb ticket update` is the CLI twin of `ticket_update_progress`; the flag
+  # names match the tool's arguments.
+  defp cli_update(id, flags), do: "arb ticket update #{id} #{flags}"
+
   # bd-5lc99r / bd-9s9dqz: briefing for a no-PR issue type. `research`: the
   # non-reviewable investigation type. The deliverable is a findings/results summary written to the
   # directive's `notes` field via the `ticket_update_progress` MCP tool, NOT a code
@@ -334,6 +347,7 @@ defmodule Arbiter.Worker.PromptBuilder do
   # it, leave a short outcome note. It owes no findings write-up and there is no
   # notes gate — `arb done` completes it. Both bodies forbid code work.
   defp no_pr_prompt(%Issue{} = task, opts) do
+    mcp? = mcp_tools?(opts)
     adapter = Keyword.get(opts, :adapter, Arbiter.Agents.Claude)
     kind = task.issue_type
 
@@ -354,8 +368,8 @@ defmodule Arbiter.Worker.PromptBuilder do
     #{process_kill_discipline_section()}
     #{read_discipline_section()}
     #{EvidenceIntegrity.worker_block()}
-    #{no_pr_job(task, kind)}
-    #{completion_notes_step(task)}
+    #{no_pr_job(task, kind, mcp?)}
+    #{completion_notes_step(task, mcp?)}
     Coordination: at the start of each step, check your mailbox by running
 
         arb inbox #{task.id}
@@ -380,7 +394,7 @@ defmodule Arbiter.Worker.PromptBuilder do
   end
 
   # bd-9s9dqz: the type-specific "Your job" block of a no-PR briefing.
-  defp no_pr_job(%Issue{id: id}, :research) do
+  defp no_pr_job(%Issue{id: id}, :research, true) do
     """
     Your job:
       1. Do the investigation the directive describes.
@@ -397,7 +411,24 @@ defmodule Arbiter.Worker.PromptBuilder do
     """
   end
 
-  defp no_pr_job(%Issue{}, :task) do
+  defp no_pr_job(%Issue{id: id}, :research, false) do
+    """
+    Your job:
+      1. Do the investigation the directive describes.
+      2. Write your findings to the directive's `notes` field by running
+         `#{cli_update(id, "--append-notes \"<findings>\"")}` (Markdown is fine).
+         Make it self-contained: what you investigated, what you found, and any
+         recommendation or conclusion the coordinator needs — they read it via
+         `arb show #{id}` and the dashboard.
+
+    A notes gate enforces this: if you print `arb done` while `notes` is still
+    blank, you will be reprompted to write your findings before the directive
+    can close. This session has NO Arbiter MCP tools (no
+    `ticket_update_progress`), so the `arb` CLI above is the way to record them.\
+    """
+  end
+
+  defp no_pr_job(%Issue{id: id}, :task, mcp?) do
     """
     Your job:
       1. Carry out the operational action the directive describes (a restart, a
@@ -405,8 +436,7 @@ defmodule Arbiter.Worker.PromptBuilder do
          This is not code work: do NOT edit, commit or push code.
       2. Check that the action took effect.
       3. Record a short outcome note — what you did and the result, a line or
-         two — by calling the `ticket_update_progress` MCP tool with its `notes`
-         argument. Do NOT shell out to the `arb` CLI for it.
+         two — #{if mcp?, do: "by calling the `ticket_update_progress` MCP tool with its `notes`\n     argument. Do NOT shell out to the `arb` CLI for it.", else: "by running `#{cli_update(id, "--append-notes \"<outcome>\"")}`\n     (this session has no Arbiter MCP tools)."}
 
     No findings write-up is required and there is no notes gate: printing
     `arb done` once the action is done completes the directive. If the action
@@ -474,7 +504,10 @@ defmodule Arbiter.Worker.PromptBuilder do
   # (`pr_body` field), which the MergeQueue reads back as `pr_body`. We use the
   # MCP tool rather than the `arb` escript so completion never depends on
   # `~/.local/bin/arb` being present (it is transiently deleted by test runs).
-  defp pr_body_step(%Issue{id: id, tracker_type: tracker_type, tracker_ref: tracker_ref}) do
+  defp pr_body_step(
+         %Issue{id: id, tracker_type: tracker_type, tracker_ref: tracker_ref},
+         mcp?
+       ) do
     closes_guidance =
       case {tracker_type, is_binary(tracker_ref) && Regex.match?(~r/^\d+$/, tracker_ref)} do
         {:github, true} ->
@@ -498,13 +531,18 @@ defmodule Arbiter.Worker.PromptBuilder do
       * **References** — the task id (#{id}) and any linked ticket/PRs.#{closes_guidance}
 
     If the repo has a PR template (`.github/pull_request_template.md`), FILL it
-    rather than discard it. Persist the finished body verbatim by calling the
-    `ticket_update_progress` MCP tool with its `pr_body` argument set to the full
-    PR body (Markdown). Use the MCP tool, which is available in this session —
-    do NOT shell out to the `arb` CLI for this.
+    rather than discard it. #{pr_body_persist(id, mcp?)}
 
     Do this before printing `arb done`.
     """
+  end
+
+  defp pr_body_persist(_id, true) do
+    "Persist the finished body verbatim by calling the\n`ticket_update_progress` MCP tool with its `pr_body` argument set to the full\nPR body (Markdown). Use the MCP tool, which is available in this session —\ndo NOT shell out to the `arb` CLI for this."
+  end
+
+  defp pr_body_persist(id, false) do
+    "This session has NO Arbiter MCP tools, so persist the finished body verbatim\nwith the `arb` CLI: write it to a scratch file OUTSIDE the worktree and run\n`#{cli_update(id, "--pr-body \"$(cat <file>)\"")}`."
   end
 
   # bd-9so315: the escaped-defect class this addresses is a change whose only
@@ -512,7 +550,7 @@ defmodule Arbiter.Worker.PromptBuilder do
   # found broken hours later. Nobody upstream of the worker can see the diff, so
   # the worker is the only party in a position to raise the flag, and it has to
   # be told to.
-  defp verify_after_deploy_step(%Issue{verify_after_deploy: true, id: id}) do
+  defp verify_after_deploy_step(%Issue{verify_after_deploy: true, id: id}, _mcp?) do
     """
 
     POST-MERGE VERIFICATION — this task is already flagged
@@ -524,15 +562,14 @@ defmodule Arbiter.Worker.PromptBuilder do
     """
   end
 
-  defp verify_after_deploy_step(%Issue{}) do
+  defp verify_after_deploy_step(%Issue{id: id}, mcp?) do
     """
 
     POST-MERGE VERIFICATION — if your diff's only execution context is the
     long-lived server, flag it. That means anything a green test suite cannot
     prove is live: env/config plumbing that has to reach a spawned worker,
     a `doctor`/health probe, a capture or ingest path, code whose first real
-    run is inside the running Phoenix process. Set the flag by calling the
-    `ticket_update_progress` MCP tool with `verify_after_deploy: true`, and say
+    run is inside the running Phoenix process. Set the flag by #{if mcp?, do: "calling the\n`ticket_update_progress` MCP tool with `verify_after_deploy: true`", else: "running\n`#{cli_update(id, "--verify-after-deploy")}` (no Arbiter MCP tools here)"}, and say
     in your `notes` what to look at after a restart and what a working result
     looks like.
 
@@ -644,11 +681,11 @@ defmodule Arbiter.Worker.PromptBuilder do
   # than the `arb` escript so completion never depends on `~/.local/bin/arb`
   # being present (it is transiently deleted by test runs — bd-53xrmi). Untracked
   # tasks get nothing extra.
-  defp completion_notes_step(%Issue{tracker_type: :none}), do: ""
+  defp completion_notes_step(%Issue{tracker_type: :none}, _mcp?), do: ""
 
-  defp completion_notes_step(%Issue{tracker_ref: ref}) when ref in [nil, ""], do: ""
+  defp completion_notes_step(%Issue{tracker_ref: ref}, _mcp?) when ref in [nil, ""], do: ""
 
-  defp completion_notes_step(%Issue{} = issue) do
+  defp completion_notes_step(%Issue{} = issue, mcp?) do
     adapter = Trackers.for_task(issue)
 
     if Code.ensure_loaded?(adapter) and function_exported?(adapter, :gating_fields, 2) do
@@ -657,8 +694,7 @@ defmodule Arbiter.Worker.PromptBuilder do
       This task is backed by an external tracker ticket. Before you finish, you
       MUST produce its completion notes and persist them on the task — the
       tracker gates the ticket's forward transition until both are filled. Call
-      the `ticket_update_progress` MCP tool (available in this session) with these
-      arguments:
+      #{if mcp?, do: "the `ticket_update_progress` MCP tool (available in this session) with these\narguments:", else: "`#{cli_update(issue.id, "--qa-notes \"...\" --deployment-notes \"...\"")}`\n(this session has no Arbiter MCP tools) with these values:"}
 
         * `qa_notes` — What QA should verify: the user-facing behaviour to
           exercise, edge cases, and how to confirm the fix.
@@ -666,7 +702,7 @@ defmodule Arbiter.Worker.PromptBuilder do
           flags, config/env changes, ordering, and any backout steps. Write
           'None' only if there genuinely are none.
 
-      Use the MCP tool — do NOT shell out to the `arb` CLI for this. Base the
+      #{if mcp?, do: "Use the MCP tool — do NOT shell out to the `arb` CLI for this.", else: "Use the `arb` CLI as shown — there is no MCP tool to call."} Base the
       notes on the change you actually made. This is part of "done": do it before
       printing `arb done`.
       """
