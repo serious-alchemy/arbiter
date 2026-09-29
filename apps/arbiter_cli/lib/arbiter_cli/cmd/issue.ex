@@ -1,8 +1,7 @@
 defmodule ArbiterCli.Cmd.Issue do
   @moduledoc """
-  `arb ticket <verb>` — the ticket resource. `arb issue <verb>` is its
-  deprecated alias (bd-4jojpw): `ArbiterCli.Main` prints a one-line note and
-  runs the same verb here.
+  `arb ticket <verb>` — the ticket resource. `arb issue <verb>` is a
+  deprecated alias: it runs the same verb and prints a one-line note on stderr.
 
       arb ticket list     [--status ...] [--type ...] [--priority ...]
                           [--labels ...] [--tracker]
