@@ -25,13 +25,14 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisor do
 
   require Logger
 
-  alias Arbiter.{Mergers, Tasks.RepoConfig, Tasks.Workspace}
-  alias Arbiter.Mergers.Github.RepoResolver
+  alias Arbiter.{Mergers, Tasks.Workspace}
+  alias Arbiter.Mergers.ForgeRepos
   alias Arbiter.ProcessTeardown
   alias Arbiter.Worker.ReviewAutomation
   alias Arbiter.Workflows.{PatrolRepoScope, ReviewPatrol}
 
   @registry Arbiter.Workflows.ReviewPatrolRegistry
+  @forge_opts [log: "ReviewPatrolSupervisor"]
 
   def child_spec(opts) do
     %{
@@ -55,7 +56,8 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisor do
   """
   @spec start_patrol(Workspace.t(), keyword()) :: DynamicSupervisor.on_start_child() | :skip
   def start_patrol(%Workspace{} = workspace, opts \\ []) do
-    do_start_patrol(workspace, resolve_adapter(workspace), patrol_repos(workspace), opts)
+    repos = patrol_repos(workspace)
+    do_start_patrol(workspace, resolve_adapter(workspace, repos), repos, opts)
   end
 
   defp do_start_patrol(workspace, adapter, repos, opts) do
@@ -133,8 +135,8 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisor do
   """
   @spec reconcile(Workspace.t()) :: DynamicSupervisor.on_start_child() | :skip
   def reconcile(%Workspace{} = workspace) do
-    adapter = resolve_adapter(workspace)
     repos = patrol_repos(workspace)
+    adapter = resolve_adapter(workspace, repos)
 
     if supported_adapter?(adapter) and repos != [] do
       do_start_patrol(workspace, adapter, repos, [])
@@ -158,8 +160,8 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisor do
   @spec ensure_started(Workspace.t(), String.t()) ::
           DynamicSupervisor.on_start_child() | :skip
   def ensure_started(%Workspace{} = workspace, ref) when is_binary(ref) do
-    adapter = resolve_adapter(workspace)
     repos = patrol_repos(workspace)
+    adapter = resolve_adapter(workspace, repos)
 
     with true <- supported_adapter?(adapter),
          repo when is_binary(repo) <- resolve_demand_repo(ref, repos),
@@ -387,8 +389,10 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisor do
   # Resolve the merge adapter for a workspace, or nil on unknown strategy.
   # Load it before `start_patrol/2`'s `function_exported?/3` guard inspects it —
   # see bd-1hn1qw (mirrors PRPatrolSupervisor).
-  defp resolve_adapter(workspace) do
-    adapter = Mergers.for_workspace(workspace)
+  # bd-73zv62: the adapter of the repo the first patrolled slug belongs to, or
+  # the workspace-level one when nothing is patrolled.
+  defp resolve_adapter(workspace, repos) do
+    adapter = Mergers.for_workspace(scope(workspace, List.first(repos)))
     Code.ensure_loaded(adapter)
     adapter
   rescue
@@ -402,65 +406,18 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisor do
   PRPatrolSupervisor. `ReviewPatrol` re-checks its own repo against this every
   tick (bd-7feiul). Empty when none resolve.
   """
-  # Pre-existing complexity 13 — baselined when bd-4x2yhq first
-  # wired Credo up. Thresholds stay at the tool's own default so new
-  # code is held to it; see the note in .credo.exs.
+  # Resolved per repo against its effective merge block
+  # (`Arbiter.Mergers.ForgeRepos`, bd-73zv62): a repo on a
+  # `merge.repos.<repo>.strategy = "direct"` override gets no patrol.
   @spec patrol_repos(Workspace.t()) :: [String.t()]
-  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
-  def patrol_repos(%Workspace{} = workspace) do
-    config = workspace.config || %{}
+  def patrol_repos(%Workspace{} = workspace), do: ForgeRepos.slugs(workspace, @forge_opts)
 
-    case get_in(config, ["merge", "strategy"]) do
-      "github" ->
-        owner = get_in(config, ["merge", "config", "owner"])
-        repo = get_in(config, ["merge", "config", "repo"])
-
-        if is_binary(owner) and owner != "" and is_binary(repo) and repo != "" do
-          ["#{owner}/#{repo}"]
-        else
-          repos_from_repo_paths(config)
-        end
-
-      "gitlab" ->
-        case get_in(config, ["merge", "config", "project_id"]) do
-          v when is_integer(v) -> ["#{v}"]
-          v when is_binary(v) and v != "" -> [v]
-          _ -> repos_from_repo_paths(config)
-        end
-
-      _ ->
-        []
-    end
-  end
-
-  defp repos_from_repo_paths(config) do
-    case Map.get(config, "repo_paths") do
-      repo_map when is_map(repo_map) ->
-        repo_map
-        |> Map.values()
-        |> Enum.map(&RepoConfig.repo_path_from_config/1)
-        |> Enum.reject(&is_nil/1)
-        |> Enum.flat_map(fn path ->
-          case RepoResolver.from_remote(path) do
-            {:ok, {owner, repo}} ->
-              ["#{owner}/#{repo}"]
-
-            {:error, err} ->
-              Logger.info(
-                "ReviewPatrolSupervisor: could not derive repo for path #{path} " <>
-                  "(skipping): #{inspect(err)}"
-              )
-
-              []
-          end
-        end)
-        |> Enum.uniq()
-        |> Enum.sort()
-
-      _ ->
-        []
-    end
-  end
+  @doc """
+  `workspace` narrowed to the repo the patrolled forge `repo` slug belongs to
+  (`Arbiter.Mergers.ForgeRepos.scope/3`, bd-73zv62).
+  """
+  @spec scope(Workspace.t(), String.t() | nil) :: Workspace.t()
+  def scope(%Workspace{} = workspace, repo), do: ForgeRepos.scope(workspace, repo, @forge_opts)
 
   defp patrol_interval_ms do
     Application.get_env(:arbiter, :review_patrol_interval_ms, 60_000)

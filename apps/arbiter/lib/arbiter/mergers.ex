@@ -17,7 +17,9 @@ defmodule Arbiter.Mergers do
   """
 
   alias Arbiter.Mergers.{Direct, Github, Gitlab}
+  alias Arbiter.Tasks.RepoConfig
   alias Arbiter.Tasks.Workspace
+  alias Arbiter.Tasks.Workspace.Changes.PatchConfig
 
   @type adapter :: module()
 
@@ -59,6 +61,136 @@ defmodule Arbiter.Mergers do
   @spec adapters() :: %{atom() => adapter}
   def adapters, do: @adapters
 
+  # ---- per-repo resolution (bd-73zv62) -------------------------------------
+
+  @doc """
+  The effective `merge` block for `repo` in `workspace`.
+
+  A workspace can hold several repos (`repo_paths`), and one of them can
+  merge differently from the rest, e.g. a remote-less infra repo on `direct`
+  while the workspace merges via GitHub. The override lives at
+  `config["merge"]["repos"][repo]` and is deep-merged over the workspace-level
+  `merge` block, so any field it leaves unset falls back field by field (a
+  nested `config` map merges key by key). Mirrors
+  `agent.security.repos.<repo>` (`Arbiter.Agents.SecurityPolicy`), and matches
+  the override key the way `repo_paths` keys match
+  (`Arbiter.Tasks.RepoConfig.find_entry/2`: exact, slug-normalised, then the
+  bare name of an `owner/name`).
+
+  The result carries no `"repos"` key. With a `nil` repo it is the raw
+  workspace-level block, `"repos"` included, unchanged.
+
+  Every reader of `merge.strategy` / `merge.config` for a specific repo
+  resolves through this (or through `scope/2`, `resolve/2`, `for_task/1`), so
+  a repo never half-uses the workspace's forge.
+  """
+  @spec merge_config(Workspace.t() | nil, String.t() | nil) :: map()
+  def merge_config(nil, _repo), do: %{}
+
+  def merge_config(%Workspace{config: config}, repo) do
+    case config do
+      %{"merge" => merge} when is_map(merge) -> effective_merge(merge, repo)
+      _ -> %{}
+    end
+  end
+
+  defp effective_merge(merge, repo) when repo in [nil, ""], do: merge
+
+  defp effective_merge(merge, repo) when is_binary(repo) do
+    {repos, base} = Map.pop(merge, "repos")
+
+    case RepoConfig.find_entry(if(is_map(repos), do: repos, else: %{}), repo) do
+      %{} = override -> PatchConfig.deep_merge(base, Map.delete(override, "repos"))
+      _ -> base
+    end
+  end
+
+  @doc """
+  `workspace`, with its `merge` block replaced by `repo`'s effective one
+  (`merge_config/2`).
+
+  This is how a repo-specific merge flows through code written against a
+  workspace: `for_workspace/1`, `prepare/1`, `Workspace.merger_strategy/1`,
+  `Workspace.auto_merge?/1`, the adapters' `Config.from/1`, all read the
+  scoped workspace exactly as they read an unscoped one. Idempotent: a scoped
+  workspace carries no `merge.repos`, so scoping it again (for any repo) is a
+  no-op. A `nil` repo passes the workspace through unchanged, as does
+  anything that is not a `Workspace` (a `nil`, a test's stand-in map).
+
+  Never persist a scoped workspace. It is a read view.
+  """
+  @spec scope(ws, String.t() | nil) :: ws when ws: Workspace.t() | nil | term()
+  def scope(%Workspace{} = workspace, repo) when repo in [nil, ""], do: workspace
+
+  def scope(%Workspace{config: config} = workspace, repo) when is_binary(repo) do
+    case config do
+      %{"merge" => merge} when is_map(merge) ->
+        %{workspace | config: Map.put(config, "merge", effective_merge(merge, repo))}
+
+      _ ->
+        workspace
+    end
+  end
+
+  def scope(other, _repo), do: other
+
+  @doc """
+  The resolver: the merger adapter and effective merge block for `repo` in
+  `workspace`. See `merge_config/2`.
+  """
+  @spec resolve(Workspace.t(), String.t() | nil) :: {adapter, map()}
+  def resolve(%Workspace{} = workspace, repo) do
+    scoped = scope(workspace, repo)
+    {for_workspace(scoped), merge_config(scoped, nil)}
+  end
+
+  @doc """
+  `resolve/2` for a task: its (loaded) `workspace` and its `repo`.
+  """
+  @spec for_task(Arbiter.Tasks.Issue.t()) :: {adapter, map()}
+  def for_task(%Arbiter.Tasks.Issue{workspace: %Workspace{} = workspace, repo: repo}),
+    do: resolve(workspace, repo)
+
+  @doc "The adapter module for `repo` in `workspace` (`resolve/2`'s first half)."
+  @spec for_repo(Workspace.t(), String.t() | nil) :: adapter
+  def for_repo(%Workspace{} = workspace, repo), do: for_workspace(scope(workspace, repo))
+
+  @doc "The effective strategy atom for `repo` in `workspace`."
+  @spec strategy(Workspace.t(), String.t() | nil) :: atom()
+  def strategy(%Workspace{} = workspace, repo),
+    do: Workspace.merger_strategy(scope(workspace, repo))
+
+  @doc """
+  Every `repo_paths` key of `workspace` mapped to its effective strategy.
+  """
+  @spec repo_strategies(Workspace.t()) :: %{String.t() => atom()}
+  def repo_strategies(%Workspace{config: config} = workspace) do
+    case config do
+      %{"repo_paths" => paths} when is_map(paths) ->
+        Map.new(paths, fn {key, _} -> {key, strategy(workspace, key)} end)
+
+      _ ->
+        %{}
+    end
+  end
+
+  @doc """
+  The effective `merge.base` for `repo` in `workspace` (a per-repo
+  `merge.repos.<repo>.base` override, else the workspace-level `merge.base`),
+  or `nil` when unset/blank.
+  """
+  @spec base_branch(Workspace.t() | nil, String.t() | nil) :: String.t() | nil
+  def base_branch(workspace, repo) do
+    case merge_config(workspace, repo) do
+      %{"base" => base} when is_binary(base) and base != "" -> base
+      _ -> nil
+    end
+  end
+
+  @doc "Whether a strategy merges through a hosted forge (a PR/MR to patrol)."
+  @spec forge?(atom()) :: boolean()
+  def forge?(strategy), do: strategy in [:github, :gitlab]
+
   @doc """
   Prepare the current process to make adapter calls for `workspace`.
 
@@ -95,14 +227,18 @@ defmodule Arbiter.Mergers do
   `Arbiter.Trackers.link_for_workspace/2`.
 
   Returns an empty string when the strategy is `:direct` (no remote web UI) or
-  when `mr_ref` is nil/blank.
+  when `mr_ref` is nil/blank. Pass the task's `repo` so a per-repo merge
+  override (`scope/2`) picks the adapter.
   """
-  @spec link_for_workspace(Workspace.t() | nil, String.t() | nil) :: String.t()
-  def link_for_workspace(nil, _mr_ref), do: ""
-  def link_for_workspace(_workspace, nil), do: ""
-  def link_for_workspace(_workspace, ""), do: ""
+  @spec link_for_workspace(Workspace.t() | nil, String.t() | nil, String.t() | nil) ::
+          String.t()
+  def link_for_workspace(workspace, mr_ref, repo \\ nil)
+  def link_for_workspace(nil, _mr_ref, _repo), do: ""
+  def link_for_workspace(_workspace, nil, _repo), do: ""
+  def link_for_workspace(_workspace, "", _repo), do: ""
 
-  def link_for_workspace(%Workspace{} = workspace, mr_ref) when is_binary(mr_ref) do
+  def link_for_workspace(%Workspace{} = workspace, mr_ref, repo) when is_binary(mr_ref) do
+    workspace = scope(workspace, repo)
     adapter = for_workspace(workspace)
 
     case Workspace.merger_strategy(workspace) do
@@ -133,12 +269,20 @@ defmodule Arbiter.Mergers do
   already have the repo set in the workspace config can still use
   `prepare/1` — or pass `nil` as `repo` to this function, which falls back
   to `prepare/1` with no override.
+
+  The workspace is first narrowed to `repo`'s effective merge block
+  (`scope/2`), so a per-repo `merge.repos.<repo>` override decides the
+  strategy and the adapter config seeded here.
   """
   @spec prepare_with_repo(Workspace.t() | nil, String.t() | nil) :: :ok
   def prepare_with_repo(workspace, nil), do: prepare(workspace)
   def prepare_with_repo(nil, _repo), do: :ok
 
   def prepare_with_repo(%Workspace{} = workspace, repo) when is_binary(repo) and repo != "" do
+    # bd-73zv62: seed from the repo's effective merge block, so a repo whose
+    # `merge.repos.<repo>` override picks another strategy (or another forge
+    # config) never gets the workspace-level one.
+    workspace = scope(workspace, repo)
     :ok = prepare(workspace)
 
     case Workspace.merger_strategy(workspace) do

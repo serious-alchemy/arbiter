@@ -155,8 +155,11 @@ defmodule Arbiter.Workflows.MergeQueue do
 
   ## Merge adapter
 
-  The merge adapter is resolved from `workspace.config["merge"]["strategy"]`
-  via `Arbiter.Mergers.for_workspace/1`. Valid values:
+  The merge adapter is resolved per task from its repo's effective
+  `merge.strategy` (`Arbiter.Mergers.scope/2`: a `merge.repos.<repo>`
+  override, else the workspace-level `merge.strategy`, bd-73zv62), so one
+  queue can open GitHub PRs for one repo and close another's tasks directly.
+  Valid values:
 
     * `"github"` — `Arbiter.Mergers.Github` adapter (PR-based)
     * `"gitlab"` — `Arbiter.Mergers.Gitlab` adapter (MR-based)
@@ -468,10 +471,18 @@ defmodule Arbiter.Workflows.MergeQueue do
     # Re-seed the adapter's per-process config from the latest workspace
     # state — including a per-repo override for multi-GitLab-project
     # workspaces (bd-c9vb0r) — then resolve the adapter module.
+    #
+    # bd-73zv62: everything merge-related is read from the task's repo's
+    # effective merge block (`Mergers.scope/2`): a `merge.repos.<repo>`
+    # override can put one repo on `direct` while the workspace merges via a
+    # forge, or the other way round. `state.workspace` stays the unscoped
+    # workspace — the queue serves every repo in it.
     repo = resolve_task_repo(task)
-    Mergers.prepare_with_repo(task.workspace, repo)
+    workspace = task.workspace
+    Mergers.prepare_with_repo(workspace, repo)
+    task = %{task | workspace: Mergers.scope(workspace, repo)}
     adapter = Mergers.for_workspace(task.workspace)
-    state = %{state | adapter: adapter, workspace: task.workspace}
+    state = %{state | adapter: adapter, workspace: workspace}
 
     strategy = Atom.to_string(Workspace.merger_strategy(task.workspace))
 
@@ -589,7 +600,9 @@ defmodule Arbiter.Workflows.MergeQueue do
   defp open_mr_for(state, task, strategy, repo) do
     base = resolve_base(state, task)
 
-    branch = strategy_for(task.workspace, "merge", "branch_prefix", "") <> task.id
+    # `task.workspace` is already scoped to the task's repo (enqueue_task/3),
+    # so a per-repo `branch_prefix` override applies.
+    branch = branch_prefix(task.workspace) <> task.id
     title = Arbiter.Mergers.PRTitle.format(task, task.workspace)
     description = pr_description_for(task)
 
@@ -753,6 +766,18 @@ defmodule Arbiter.Workflows.MergeQueue do
     _ -> state
   end
 
+  # bd-73zv62: one queue serves every repo in its workspace, and a
+  # `merge.repos.<repo>` override can give each repo its own strategy / forge
+  # config. Before any adapter call for `item`, seed the item's repo's merger
+  # config and point `state.adapter` at that repo's adapter. Without a loaded
+  # workspace (a fake id in supervisor tests) the queue keeps its default.
+  defp for_item(%State{workspace: nil} = state, _item), do: state
+
+  defp for_item(%State{workspace: workspace} = state, item) do
+    Mergers.prepare_with_repo(workspace, item.repo)
+    %{state | adapter: Mergers.for_repo(workspace, item.repo)}
+  end
+
   defp poll_items(%State{items: items} = state) do
     {advanced, state} =
       Limiter.with_priority(:background, :merge_queue, fn ->
@@ -840,8 +865,9 @@ defmodule Arbiter.Workflows.MergeQueue do
     # holds one active merger config at a time, but a single poll cycle walks
     # items from potentially different repos/projects. Re-seed the per-repo
     # override immediately before each adapter call so it always targets the
-    # project the item's task actually merges into.
-    Mergers.prepare_with_repo(state.workspace, item.repo)
+    # project the item's task actually merges into — and (bd-73zv62) point
+    # `state.adapter` at the item's repo's own adapter.
+    state = for_item(state, item)
     log_first_poll(item)
 
     case state.adapter.get(item.mr_ref) do
@@ -1388,7 +1414,7 @@ defmodule Arbiter.Workflows.MergeQueue do
         # merge and spend no forge call until the head moves.
         {{:error, {:coverage_unknown, :parked}}, item}
 
-      Workspace.coverage_enabled?(state.workspace) ->
+      Workspace.coverage_enabled?(Mergers.scope(state.workspace, item.repo)) ->
         coverage_merge_decision(state, item, head)
 
       true ->
@@ -1822,7 +1848,7 @@ defmodule Arbiter.Workflows.MergeQueue do
   end
 
   defp try_merge(state, item) do
-    Mergers.prepare_with_repo(state.workspace, item.repo)
+    state = for_item(state, item)
 
     {result, item} = merge_guarded(state, item)
 
@@ -1940,7 +1966,7 @@ defmodule Arbiter.Workflows.MergeQueue do
   # default false) and always best-effort: never raises into the merge
   # queue, never blocks task close on it.
   defp safe_sync_primary_checkout(state, item) do
-    if Workspace.auto_sync_primary?(state.workspace) do
+    if Workspace.auto_sync_primary?(Mergers.scope(state.workspace, item.repo)) do
       base = item.base || state.base
 
       case resolve_primary_repo_path(state.workspace, item.repo) do
@@ -2067,18 +2093,10 @@ defmodule Arbiter.Workflows.MergeQueue do
     Enum.any?(items, fn i -> i.task_id == task_id and i.status not in [:done, :failed] end)
   end
 
-  defp strategy_for(workspace, key1, key2, default) do
-    case workspace && workspace.config do
-      %{} = config ->
-        config
-        |> Map.get(key1, %{})
-        |> case do
-          %{} = inner -> Map.get(inner, key2, default)
-          _ -> default
-        end
-
-      _ ->
-        default
+  defp branch_prefix(workspace) do
+    case Mergers.merge_config(workspace, nil) do
+      %{"branch_prefix" => prefix} when is_binary(prefix) -> prefix
+      _ -> ""
     end
   end
 
@@ -2158,7 +2176,7 @@ defmodule Arbiter.Workflows.MergeQueue do
 
   # Project the live items into the dashboard's queue view (#354, Phase 3),
   # ordered front-of-queue first and stamped with a 1-based position.
-  defp build_queue_view(%State{items: items, workspace_id: ws_id, adapter: adapter}) do
+  defp build_queue_view(%State{items: items, workspace_id: ws_id} = state) do
     items
     |> Enum.sort_by(&queue_order_key/1)
     |> Enum.with_index(1)
@@ -2171,11 +2189,14 @@ defmodule Arbiter.Workflows.MergeQueue do
         priority: Map.get(item, :priority) || 2,
         position: position,
         base: item.base,
-        merger_url: merger_url_for(adapter, item.mr_ref),
+        merger_url: merger_url_for(item_adapter(state, item), item.mr_ref),
         last_error: item.last_error
       }
     end)
   end
+
+  defp item_adapter(%State{workspace: nil, adapter: adapter}, _item), do: adapter
+  defp item_adapter(%State{workspace: ws}, item), do: Mergers.for_repo(ws, item.repo)
 
   defp merger_url_for(adapter, ref) when is_atom(adapter) and is_binary(ref) and ref != "" do
     adapter.link_for(ref)

@@ -152,6 +152,80 @@ defmodule Arbiter.WorkerOpenMrTest do
     end
   end
 
+  # bd-73zv62: a workspace merging via GitHub holds a remote-less repo with a
+  # `merge.repos.mesaana.strategy = "direct"` override. A run in that repo
+  # resolves the Direct merger (no `:adapter` override here — the real
+  # resolution path) and merges locally, with nothing to push.
+  describe "per-repo merge strategy override (bd-73zv62)" do
+    @tag :tmp_dir
+    test "a run in a direct-override repo merges locally via Mergers.Direct", %{tmp_dir: dir} do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "open-mr-repo-#{System.unique_integer([:positive])}",
+          prefix: "omr",
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{"owner" => "octo", "repo" => "widget", "credentials_ref" => "x"},
+              "repos" => %{"mesaana" => %{"strategy" => "direct"}}
+            },
+            "repo_paths" => %{"mesaana" => dir}
+          }
+        })
+
+      build_local_repo(dir)
+      test_pid = self()
+
+      Req.Test.stub(Arbiter.Mergers.Github.HTTP, fn conn ->
+        send(test_pid, {:github_call, conn.method, conn.request_path})
+        conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
+      end)
+
+      {:ok, task} =
+        Ash.create(Issue, %{title: "infra fix", workspace_id: ws.id, issue_type: :feature})
+
+      {:ok, task} = Ash.update(task, %{status: :in_progress})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "mesaana", workspace_id: ws.id)
+      :ok = Worker.advance(pid, :implement)
+      on_exit(fn -> stop_quietly(pid) end)
+      on_exit(fn -> stop_quietly(Watchdog.whereis(task.id)) end)
+
+      assert {:ok, ref} =
+               Worker.open_mr(
+                 pid,
+                 "feature/x",
+                 "Merge feature/x",
+                 "",
+                 Map.merge(%{repo_path: dir, target_branch: "main"}, Map.new(@parked))
+               )
+
+      assert ref == "direct:feature/x|#{dir}|main"
+      assert File.exists?(Path.join(dir, "feature.txt"))
+      assert {"main\n", 0} = git(dir, ["rev-parse", "--abbrev-ref", "HEAD"])
+      refute_received {:github_call, _, _}
+    end
+  end
+
+  defp git(dir, args), do: System.cmd("git", args, stderr_to_stdout: true, cd: dir)
+
+  # A local-only checkout: `main` plus a `feature/x` branch adding
+  # feature.txt, and no remote at all.
+  defp build_local_repo(dir) do
+    {_, 0} = git(dir, ["init", "-q"])
+    {_, 0} = git(dir, ["config", "user.email", "worker@example.test"])
+    {_, 0} = git(dir, ["config", "user.name", "Worker"])
+    {_, 0} = git(dir, ["config", "commit.gpgsign", "false"])
+    File.write!(Path.join(dir, "base.txt"), "base\n")
+    {_, 0} = git(dir, ["add", "base.txt"])
+    {_, 0} = git(dir, ["commit", "-q", "-m", "init"])
+    {_, 0} = git(dir, ["branch", "-M", "main"])
+    {_, 0} = git(dir, ["checkout", "-q", "-b", "feature/x"])
+    File.write!(Path.join(dir, "feature.txt"), "feature\n")
+    {_, 0} = git(dir, ["add", "feature.txt"])
+    {_, 0} = git(dir, ["commit", "-q", "-m", "add feature"])
+    {_, 0} = git(dir, ["checkout", "-q", "main"])
+  end
+
   describe "via_review_gate: a ReviewGate-approved MR merges without forge approval (bd-66ey1o)" do
     # Before bd-66ey1o the Watchdog waited on `approved: true` from the adapter's
     # get/1 even when it had just been told the gate had approved. For

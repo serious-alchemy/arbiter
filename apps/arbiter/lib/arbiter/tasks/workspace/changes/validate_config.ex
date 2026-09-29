@@ -14,7 +14,8 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
       `"inherit_parent"`, `"mint"`) — a typo would otherwise read as the
       `context_only` default without a word (#1973).
     * If `"tracker.config"` is present, it must be a map.
-    * If `"merge"` is present, it must be a map.
+    * If `"merge"` is present, it must be a map. Its optional `"repos"` is a
+      map of per-repo override maps (bd-73zv62), each validated like `"merge"`.
     * If `"merge.strategy"` is present, it must be one of the values in
       `Arbiter.Tasks.Workspace.valid_merger_strategies/0` (`"direct"`, `"gitlab"`, `"github"`).
     * If `"agent"` / `"review_agent"` is present, it must be a map.
@@ -164,11 +165,46 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
 
   defp validate_merge(changeset, nil), do: changeset
 
+  defp validate_merge(changeset, merge) when is_map(merge) do
+    changeset
+    |> validate_merge_fields(merge, "merge")
+    |> validate_merge_repos(Map.get(merge, "repos"))
+  end
+
+  defp validate_merge(changeset, _) do
+    Changeset.add_error(changeset, field: :config, message: "merge must be a map")
+  end
+
+  # bd-73zv62: `merge.repos.<repo>` — a per-repo override of the merge block,
+  # deep-merged over it (`Arbiter.Mergers.merge_config/2`). Each entry takes
+  # the same fields, validated the same way; it cannot nest another `repos`.
+  defp validate_merge_repos(changeset, nil), do: changeset
+
+  defp validate_merge_repos(changeset, repos) when is_map(repos) do
+    Enum.reduce(repos, changeset, fn
+      {key, %{"repos" => _}}, cs ->
+        Changeset.add_error(cs,
+          field: :config,
+          message: "merge.repos.#{key} cannot nest its own repos block"
+        )
+
+      {key, entry}, cs when is_map(entry) ->
+        validate_merge_fields(cs, entry, "merge.repos.#{key}")
+
+      {key, _entry}, cs ->
+        Changeset.add_error(cs, field: :config, message: "merge.repos.#{key} must be a map")
+    end)
+  end
+
+  defp validate_merge_repos(changeset, _) do
+    Changeset.add_error(changeset, field: :config, message: "merge.repos must be a map")
+  end
+
   # Pre-existing complexity 12 — baselined when bd-4x2yhq first
   # wired Credo up. Thresholds stay at the tool's own default so new
   # code is held to it; see the note in .credo.exs.
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
-  defp validate_merge(changeset, merge) when is_map(merge) do
+  defp validate_merge_fields(changeset, merge, label) do
     valid_strategies = Arbiter.Tasks.Workspace.valid_merger_strategies()
 
     changeset
@@ -184,7 +220,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
             Changeset.add_error(cs,
               field: :config,
               message:
-                "merge.strategy must be one of #{Enum.join(valid_strategies, ", ")}; got: #{inspect(strategy)}"
+                "#{label}.strategy must be one of #{Enum.join(valid_strategies, ", ")}; got: #{inspect(strategy)}"
             )
           end
       end
@@ -209,7 +245,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
               Changeset.add_error(cs,
                 field: :config,
                 message:
-                  "merge.watchdog_max_polls must be a positive integer or \"infinity\"; got: #{inspect(s)}"
+                  "#{label}.watchdog_max_polls must be a positive integer or \"infinity\"; got: #{inspect(s)}"
               )
           end
 
@@ -217,14 +253,10 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
           Changeset.add_error(cs,
             field: :config,
             message:
-              "merge.watchdog_max_polls must be a positive integer or \"infinity\"; got: #{inspect(other)}"
+              "#{label}.watchdog_max_polls must be a positive integer or \"infinity\"; got: #{inspect(other)}"
           )
       end
     end)
-  end
-
-  defp validate_merge(changeset, _) do
-    Changeset.add_error(changeset, field: :config, message: "merge must be a map")
   end
 
   defp validate_agent_block(changeset, _label, nil), do: changeset

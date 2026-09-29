@@ -41,7 +41,8 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       check_agy_ssh_transport(),
       check_claude_worker_credentials(),
       check_provider_accounts(),
-      check_account_policy_binding()
+      check_account_policy_binding(),
+      check_merge_routing()
     ]
   end
 
@@ -809,6 +810,67 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
         }
     end
   end
+
+  # bd-73zv62: every repo's effective merge strategy (a `merge.repos.<repo>`
+  # override, else the workspace's), and each repo whose checkout cannot carry
+  # it — a github/gitlab strategy with no `origin` remote, or an `origin` that
+  # is not the effective owner/repo. Its PRs would never open, or open against
+  # the wrong repository: operator-actionable (non-zero exit), but says nothing
+  # about the server's health, so it never blocks deploy readiness.
+  defp check_merge_routing do
+    case Client.get("/api/server/merge_routing") do
+      {:ok, %{"problems" => [_ | _] = problems}} ->
+        %Result{
+          name: "merge routing",
+          status: :fail,
+          detail: Enum.map_join(problems, "; ", &routing_problem/1),
+          hint:
+            "Set a per-repo override with `arb config set merge.repos.<repo>.…` " <>
+              "(see `arb config schema`, merge.repos).",
+          fatal: true,
+          blocks_readiness: false
+        }
+
+      {:ok, %{"repos" => repos}} when is_list(repos) ->
+        %Result{
+          name: "merge routing",
+          status: :ok,
+          detail: routing_summary(repos),
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      _ ->
+        %Result{
+          name: "merge routing",
+          status: :ok,
+          detail: "could not check — server unreachable, or it predates this check",
+          fatal: false,
+          blocks_readiness: false
+        }
+    end
+  end
+
+  defp routing_summary([]), do: "no workspace repos to route"
+
+  defp routing_summary(repos),
+    do: Enum.map_join(repos, ", ", &"#{routing_label(&1)}: #{Map.get(&1, "strategy")}")
+
+  defp routing_label(entry), do: "#{Map.get(entry, "workspace")}/#{Map.get(entry, "repo")}"
+
+  defp routing_problem(%{"problem" => "no_remote"} = entry) do
+    "#{routing_label(entry)} merges via #{Map.get(entry, "strategy")} but its checkout has " <>
+      "no origin remote — fix: #{Map.get(entry, "fix")}"
+  end
+
+  defp routing_problem(%{"problem" => "remote_mismatch"} = entry) do
+    "#{routing_label(entry)} merges via #{Map.get(entry, "strategy")} into " <>
+      "#{Map.get(entry, "expected")} but its origin is #{Map.get(entry, "remote")} — " <>
+      "fix: #{Map.get(entry, "fix")}"
+  end
+
+  defp routing_problem(entry),
+    do: "#{routing_label(entry)}: #{Map.get(entry, "problem")} — fix: #{Map.get(entry, "fix")}"
 
   # bd-cvvb02: `:provider_accounts_enabled` ships `:auto`. An un-migrated
   # install that still carries legacy provider credentials is held OFF at boot

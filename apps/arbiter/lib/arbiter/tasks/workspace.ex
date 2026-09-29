@@ -32,7 +32,12 @@ defmodule Arbiter.Tasks.Workspace do
             "owner" => "myorg",                # e.g. for "github": owner/repo/credentials
             "repo" => "myrepo",
             "credentials_ref" => "env:GITHUB_TOKEN"
-          }
+          },
+          "repos" => %{                        # optional per-repo overrides (bd-73zv62),
+            "infra" => %{                      # keyed by repo_paths key; any merge key,
+              "strategy" => "direct"           # deep-merged over this block, so unset
+            }                                  # fields fall back field by field. See
+          }                                    # Arbiter.Mergers.merge_config/2.
         },
         "review_gate" => %{
           "max_rounds" => 2,                   # optional integer ≥ 1; caps the difficulty
@@ -47,7 +52,10 @@ defmodule Arbiter.Tasks.Workspace do
       }
 
   Tracker helpers (`Tracker.for_task/1`) land in gte-019.
-  Merger resolution (`Arbiter.Mergers.for_workspace/1`) reads `merge.strategy`.
+  Merger resolution reads `merge.strategy`, per repo: `Arbiter.Mergers.resolve/2`
+  (or `for_task/1`) applies a `merge.repos.<repo>` override first. The merge
+  accessors below (`merger_strategy/1`, `auto_merge?/1`, …) read the workspace
+  they are handed; pass a `Arbiter.Mergers.scope/2`'d one for a specific repo.
   """
 
   use Ash.Resource,

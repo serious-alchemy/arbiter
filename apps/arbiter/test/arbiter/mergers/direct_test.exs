@@ -66,6 +66,52 @@ defmodule Arbiter.Mergers.DirectTest do
     end
   end
 
+  # bd-73zv62: a remote-less repo (e.g. a local infra checkout) merged via a
+  # per-repo `merge.repos.<repo>.strategy = "direct"` override. There is
+  # nowhere to push, so the push is skipped rather than failing a merge that
+  # already landed locally.
+  describe "open/4 on a repo with no git remote (bd-73zv62)" do
+    @tag :tmp_dir
+    test "merges locally and succeeds, skipping the push", %{tmp_dir: dir} do
+      build_local_repo(dir)
+      assert {"", 0} = git(dir, ["remote"])
+
+      assert {:ok, ref} =
+               Direct.open("feature/x", "Merge feature/x", "", %{
+                 repo_path: dir,
+                 target_branch: "main"
+               })
+
+      assert ref == "direct:feature/x|#{dir}|main"
+      assert File.exists?(Path.join(dir, "feature.txt"))
+      assert {parents, 0} = git(dir, ["rev-list", "--parents", "-n", "1", "main"])
+      assert length(String.split(String.trim(parents), " ")) == 3
+    end
+
+    @tag :tmp_dir
+    test "a repo whose only remote is not `origin` also skips the push", %{tmp_dir: dir} do
+      build_local_repo(dir)
+      remote = Path.join(dir, "upstream.git")
+      File.mkdir_p!(remote)
+      {_, 0} = git(remote, ["init", "--bare", "-q"])
+      {_, 0} = git(dir, ["remote", "add", "upstream", remote])
+
+      assert {:ok, _ref} =
+               Direct.open("feature/x", "", "", %{repo_path: dir, target_branch: "main"})
+
+      assert File.exists?(Path.join(dir, "feature.txt"))
+    end
+
+    @tag :tmp_dir
+    test "a failing push to a real origin is still an error", %{tmp_dir: dir} do
+      build_local_repo(dir)
+      {_, 0} = git(dir, ["remote", "add", "origin", Path.join(dir, "does-not-exist.git")])
+
+      assert {:error, {:git_failed, _}} =
+               Direct.open("feature/x", "", "", %{repo_path: dir, target_branch: "main"})
+    end
+  end
+
   describe "open/4 on a conflicting merge (bd-1rhyla)" do
     # A conflicting auto-merge once left the canonical tree half-merged and
     # uncompilable, wedging the live server. open/4 MUST abort the merge so the
@@ -199,6 +245,26 @@ defmodule Arbiter.Mergers.DirectTest do
     {_, 0} = git(dir, ["remote", "add", "origin", remote])
     {_, 0} = git(dir, ["push", "-q", "-u", "origin", "main"])
     {_, 0} = git(dir, ["push", "-q", "origin", "feature/x"])
+  end
+
+  # `build_repo/1` without the bare origin: a local-only checkout.
+  defp build_local_repo(dir) do
+    {_, 0} = git(dir, ["init", "-q"])
+    {_, 0} = git(dir, ["config", "user.email", "worker@example.test"])
+    {_, 0} = git(dir, ["config", "user.name", "Worker"])
+    {_, 0} = git(dir, ["config", "commit.gpgsign", "false"])
+
+    File.write!(Path.join(dir, "base.txt"), "base\n")
+    {_, 0} = git(dir, ["add", "base.txt"])
+    {_, 0} = git(dir, ["commit", "-q", "-m", "init"])
+    {_, 0} = git(dir, ["branch", "-M", "main"])
+
+    {_, 0} = git(dir, ["checkout", "-q", "-b", "feature/x"])
+    File.write!(Path.join(dir, "feature.txt"), "feature\n")
+    {_, 0} = git(dir, ["add", "feature.txt"])
+    {_, 0} = git(dir, ["commit", "-q", "-m", "add feature"])
+
+    {_, 0} = git(dir, ["checkout", "-q", "main"])
   end
 
   # Builds a repo for update_branch/1 tests. HEAD is on main; feature/update

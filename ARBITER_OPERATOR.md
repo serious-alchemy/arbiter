@@ -380,6 +380,32 @@ Use **separate workspaces** for separate concerns (self-dev vs company repos).
 | Company / shared | OFF | A human merges |
 | Self-dev / experimental | ON | Safe to automate |
 
+### Per-repo merge overrides (`merge.repos.<repo>`)
+
+A workspace's `merge.*` settings apply to every repo in its `repo_paths`. One
+repo can differ without a workspace of its own: `merge.repos.<repo>` takes any
+`merge` key (`strategy`, `config`, `auto_merge`, `base`, `branch_prefix`, …)
+and is deep-merged over the workspace block, so whatever it leaves unset falls
+back field by field. `<repo>` is the `repo_paths` key. The typical case is a
+local infra repo with no git remote in a workspace that merges via GitHub:
+
+```bash
+arb config set merge.repos.mesaana.strategy direct
+```
+
+Its tasks then merge locally (`git merge --no-ff` in the checkout; with no
+`origin` the push is skipped), and it gets no PR patrol, review patrol or
+merged-PR finalizer. The other repos keep opening GitHub PRs. The reverse also
+works: in a `direct` workspace, set `merge.repos.<repo>.strategy github` plus
+`merge.repos.<repo>.config.owner` / `.repo`.
+
+The MCP `workspace_config_get` tool reports each repo's
+`effective_merge_strategies`. `arb server doctor`'s **merge routing** check lists
+each repo's effective strategy and fails on a repo whose strategy is
+github/gitlab but whose checkout has no `origin` remote, or whose `origin` is
+not the effective `merge.config` owner/repo. It prints the `arb config set`
+that fixes it.
+
 ## 15. Legacy terminology reference
 
 Older docs and transcripts use themed names for generic concepts. The mapping,

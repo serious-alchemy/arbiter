@@ -240,6 +240,8 @@ defmodule Arbiter.Workflows.PendingMergeSweeper do
 
   defp retry(task, pending, opts) do
     with {:ok, %Workspace{} = ws} <- Ash.get(Workspace, task.workspace_id),
+         # bd-73zv62: the task's repo's effective merge block.
+         ws = Mergers.scope(ws, task.repo),
          true <- Workspace.auto_merge?(ws) || {:skipped, :auto_merge_off},
          {:ok, adapter} <- resolve_adapter(ws, opts) do
       start_retry(task, pending, ws, adapter, opts)

@@ -27,7 +27,8 @@ defmodule Arbiter.Worker.TargetBranch do
     4. `:workspace_base` opt — a queue-level base. The `MergeQueue` passes its
        explicitly-configured `state.base` here so it sits *below* the per-task
        and per-repo config rather than short-circuiting them. nil when unset.
-    5. Workspace merge config (`workspace.config["merge"]["base"]`).
+    5. Workspace merge config (`workspace.config["merge"]["base"]`, or the
+       repo's `merge.repos.<repo>.base` override — `Arbiter.Mergers.base_branch/2`).
     6. `"main"` — the default integration branch.
 
   Steps 2, 3 and 5 read the task and its workspace; steps 1 and 4 come purely
@@ -60,7 +61,7 @@ defmodule Arbiter.Worker.TargetBranch do
       task_target_branch(task) ||
       workspace_repo_target(task, Keyword.get(opts, :repo)) ||
       Keyword.get(opts, :workspace_base) ||
-      workspace_base_branch(task) ||
+      workspace_base_branch(task, Keyword.get(opts, :repo)) ||
       "main"
   end
 
@@ -85,18 +86,14 @@ defmodule Arbiter.Worker.TargetBranch do
 
   defp repo_target_from_config(raw), do: RepoConfig.repo_target_from_config(raw)
 
-  defp workspace_base_branch(%Issue{workspace_id: nil}), do: nil
+  defp workspace_base_branch(%Issue{workspace_id: nil}, _repo), do: nil
 
-  defp workspace_base_branch(%Issue{workspace_id: ws_id}) do
+  # bd-73zv62: through the per-repo merge resolver, so a
+  # `merge.repos.<repo>.base` override applies.
+  defp workspace_base_branch(%Issue{workspace_id: ws_id}, repo) do
     case load_workspace_config(ws_id) do
-      %{} = config ->
-        case get_in(config, ["merge", "base"]) do
-          base when is_binary(base) and base != "" -> base
-          _ -> nil
-        end
-
-      _ ->
-        nil
+      %{} = config -> Arbiter.Mergers.base_branch(%Workspace{config: config}, repo)
+      _ -> nil
     end
   end
 

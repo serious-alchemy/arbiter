@@ -67,6 +67,15 @@ defmodule ArbiterCli.ConfigSchema do
       pr_title_format       string, e.g. "conventional_commit"
       watchdog_max_polls    positive integer, or the string "infinity"
       watch_pipeline        bool — wait for CI before declaring merged  (default: false)
+      repos                 map, repo_paths key -> per-repo override of any key
+                            above (strategy, config, auto_merge, …). Deep-merged
+                            over the workspace-level merge block, so unset
+                            fields fall back field by field; e.g. a remote-less
+                            repo in a github workspace:
+                              arb config set merge.repos.mesaana.strategy direct
+                            `arb server doctor` flags a forge-strategy repo with
+                            no origin remote, or one whose origin is not the
+                            effective merge.config owner/repo.
 
     agent / review_agent  (map — worker / reviewer respectively)
       type            one of: #{Enum.join(@agent_types, ", ")}, or a non-empty list of

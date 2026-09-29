@@ -92,10 +92,32 @@ defmodule ArbiterCli.Cmd.Config.Formatter do
       flag_line(merge, "watch_pipeline") ++
       scalar_line(merge, "pr_title_format") ++
       scalar_line(merge, "watchdog_max_polls") ++
-      kv_lines(Map.get(merge, "config", %{}))
+      kv_lines(Map.get(merge, "config", %{})) ++
+      repo_override_lines(Map.get(merge, "repos"))
   end
 
   defp merge_lines(_), do: []
+
+  # bd-73zv62: `merge.repos.<repo>` — per-repo overrides of the block above,
+  # one line per repo (`repos.mesaana: strategy=direct`).
+  defp repo_override_lines(repos) when is_map(repos) do
+    repos
+    |> Enum.sort_by(fn {k, _} -> k end)
+    |> Enum.map(fn
+      {repo, override} when is_map(override) ->
+        fields =
+          override
+          |> Enum.sort_by(fn {k, _} -> k end)
+          |> Enum.map_join(", ", fn {k, v} -> "#{k}=#{scalarize(v)}" end)
+
+        "repos.#{repo}: #{fields}"
+
+      {repo, other} ->
+        "repos.#{repo}: #{scalarize(other)}"
+    end)
+  end
+
+  defp repo_override_lines(_), do: []
 
   defp agent_lines(nil), do: []
 

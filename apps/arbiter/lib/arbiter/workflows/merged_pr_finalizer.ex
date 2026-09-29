@@ -220,9 +220,11 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
     {result, cursor} =
       with %Workspace{} <- workspace,
            true <- repo_still_configured?(workspace, state.repo),
-           adapter when not is_nil(adapter) <- resolve_adapter(workspace),
+           # bd-73zv62: this repo's effective merge block, not the workspace's.
+           merge_ws = MergedPRFinalizerSupervisor.scope(workspace, state.repo),
+           adapter when not is_nil(adapter) <- resolve_adapter(merge_ws),
            true <- function_exported?(adapter, :get, 1),
-           :ok <- Mergers.prepare_with_repo(workspace, state.repo),
+           :ok <- Mergers.prepare_with_repo(merge_ws, state.repo),
            {:ok, pr_ref_tasks} <- open_tasks_with_pr_ref(state.workspace_id),
            {:ok, follow_up_tasks} <- open_follow_up_tasks(state.workspace_id),
            {:ok, legacy_tasks} <- open_legacy_pr_tracker_tasks(state.workspace_id, state.repo) do

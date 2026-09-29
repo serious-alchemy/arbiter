@@ -51,6 +51,10 @@ defmodule Arbiter.MCP.Tools.Workspace do
   The `attention` section's escalation limits (bd-8nlez1,
   `Arbiter.Tasks.AttentionLimits`) read with their documented defaults filled
   in, so the limits in force are visible whether or not they were set.
+
+  `effective_merge_strategies` maps each `repo_paths` repo to the merge
+  strategy it actually uses — its `merge.repos.<repo>.strategy` override, else
+  the workspace-level `merge.strategy` (bd-73zv62).
   """
   @spec workspace_config_get(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def workspace_config_get(%Scope{} = scope, args) do
@@ -74,10 +78,19 @@ defmodule Arbiter.MCP.Tools.Workspace do
            workspace: ws.name,
            key: key,
            value: value,
+           effective_merge_strategies: effective_merge_strategies(ws),
            secret_keys: workspace_secret_keys(ws)
          }}
       end
     end
+  end
+
+  # bd-73zv62: each `repo_paths` repo's effective merge strategy — a
+  # `merge.repos.<repo>.strategy` override, else the workspace-level one.
+  defp effective_merge_strategies(ws) do
+    Map.new(Arbiter.Mergers.repo_strategies(ws), fn {repo, strategy} ->
+      {repo, Atom.to_string(strategy)}
+    end)
   end
 
   # ---- workspace_config_overview ------------------------------------------

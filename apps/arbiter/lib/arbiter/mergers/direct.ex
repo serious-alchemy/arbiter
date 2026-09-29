@@ -32,9 +32,11 @@ defmodule Arbiter.Mergers.Direct do
   ## Callback semantics
 
     * `open/4` — checks out `target_branch` and runs `git merge --no-ff
-      <branch>` in `repo_path`. Returns `{:ok, ref}` where `ref` encodes the
-      branch, repo path, and target branch. The merge commit message is `title`
-      when given, otherwise git's default.
+      <branch>` in `repo_path`, then pushes `target_branch` to `origin`.
+      Returns `{:ok, ref}` where `ref` encodes the branch, repo path, and
+      target branch. The merge commit message is `title` when given, otherwise
+      git's default. A checkout with no `origin` remote (a local-only repo,
+      bd-73zv62) skips the push: the local merge is the whole integration.
     * `update_branch/1` — rebases the working branch forward onto its base
       (`git checkout <branch>` then `git rebase <target_branch>` inside
       `repo_path`). Returns `:ok` on success or
@@ -98,6 +100,8 @@ defmodule Arbiter.Mergers.Direct do
 
   @behaviour Arbiter.Mergers.Merger
 
+  require Logger
+
   @impl true
   def open(branch, title, _description, opts)
       when is_binary(branch) and is_map(opts) do
@@ -112,7 +116,7 @@ defmodule Arbiter.Mergers.Direct do
               # wired Credo up. Thresholds stay at the tool's own default so new
               # code is held to it; see the note in .credo.exs.
               # credo:disable-for-next-line Credo.Check.Refactor.Nesting
-              with {:ok, _} <- run_git(["push", "origin", target], path) do
+              with {:ok, _} <- push_target(path, target) do
                 {:ok, encode_ref(branch, path, target)}
               end
 
@@ -130,7 +134,8 @@ defmodule Arbiter.Mergers.Direct do
   def get(_mr_ref), do: {:ok, %{status: :merged}}
 
   # bd-dxgris / #1493: `open/4` above already performed the merge (that is what
-  # "direct" means — a local `git merge` + push, no MR), so by the time anyone
+  # "direct" means — a local `git merge` + push to `origin` when there is one,
+  # no MR), so by the time anyone
   # calls this there is no pending merge left to guard and `expected_sha` has
   # nothing to be a precondition on. The guard for this strategy lives in
   # `open/4`, which merges the exact branch ref it was handed.
@@ -366,6 +371,25 @@ defmodule Arbiter.Mergers.Direct do
 
   defp message_args(title) when is_binary(title) and title != "", do: ["-m", title]
   defp message_args(_), do: ["--no-edit"]
+
+  # Publish the merged target to `origin`. A checkout with no `origin` remote
+  # (a local-only repo on a per-repo `direct` override, bd-73zv62) has nowhere
+  # to push: the merge already landed in the canonical checkout, which is the
+  # whole integration, so the push is skipped rather than failing it. A real
+  # `origin` whose push fails is still an error.
+  defp push_target(path, target) do
+    case run_git(["remote", "get-url", "origin"], path) do
+      {:ok, _url} ->
+        run_git(["push", "origin", target], path)
+
+      {:error, _no_origin} ->
+        Logger.info(
+          "Mergers.Direct: #{path} has no `origin` remote; merged #{target} locally, push skipped"
+        )
+
+        {:ok, :no_remote}
+    end
+  end
 
   defp run_git(args, cd) do
     case System.cmd("git", args, stderr_to_stdout: true, cd: cd) do

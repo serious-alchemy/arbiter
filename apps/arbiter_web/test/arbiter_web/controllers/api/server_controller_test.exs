@@ -201,4 +201,52 @@ defmodule ArbiterWeb.Api.ServerControllerTest do
       assert resp["decision"] == "explicit_off"
     end
   end
+
+  # bd-73zv62: `arb server doctor` lists each repo's effective merge strategy and
+  # flags a forge strategy on a checkout with no `origin` remote.
+  describe "GET /api/server/merge_routing" do
+    @tag :tmp_dir
+    test "reports each repo's effective strategy and flags a remote-less forge repo", %{
+      conn: conn,
+      tmp_dir: dir
+    } do
+      mesaana = Path.join(dir, "mesaana")
+      infra = Path.join(dir, "infra")
+
+      for path <- [mesaana, infra] do
+        File.mkdir_p!(path)
+        {_, 0} = System.cmd("git", ["init", "-q"], cd: path)
+      end
+
+      {:ok, ws} =
+        Ash.create(Arbiter.Tasks.Workspace, %{
+          name: "merge-routing-#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{"owner" => "octo", "repo" => "widget"},
+              "repos" => %{"infra" => %{"strategy" => "direct"}}
+            },
+            "repo_paths" => %{"mesaana" => mesaana, "infra" => infra}
+          }
+        })
+
+      resp = conn |> get("/api/server/merge_routing") |> json_response(200)
+      mine = Enum.filter(resp["repos"], &(&1["workspace_id"] == ws.id))
+
+      assert [
+               %{"repo" => "infra", "strategy" => "direct", "problem" => nil},
+               %{"repo" => "mesaana", "strategy" => "github", "problem" => "no_remote"} = flagged
+             ] = mine
+
+      assert flagged["fix"] =~ "merge.repos.mesaana.strategy direct"
+
+      assert Enum.any?(
+               resp["problems"],
+               &(&1["workspace_id"] == ws.id and &1["repo"] == "mesaana")
+             )
+
+      refute Enum.any?(resp["problems"], &(&1["workspace_id"] == ws.id and &1["repo"] == "infra"))
+    end
+  end
 end

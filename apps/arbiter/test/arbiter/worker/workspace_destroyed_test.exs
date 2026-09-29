@@ -24,9 +24,19 @@ defmodule Arbiter.Worker.WorkspaceDestroyedTest do
 
   use Arbiter.DataCase, async: false
 
+  require Ash.Query
+
   alias Arbiter.Messages.Message
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Worker
+  alias Arbiter.Workers.Run
+
+  # The worker's snapshot, or nil once its process has exited.
+  defp live_state(pid) do
+    Worker.state(pid)
+  catch
+    :exit, _ -> nil
+  end
 
   defp wait_until(fun, timeout \\ 2_000) do
     deadline = System.monotonic_time(:millisecond) + timeout
@@ -181,16 +191,31 @@ defmodule Arbiter.Worker.WorkspaceDestroyedTest do
     test "an intact workspace is not reported as destroyed",
          %{ws: ws, task: task, branch: branch, worktree: worktree} do
       pid = start_worker!(ws, task, branch, worktree)
+      ref = Process.monitor(pid)
 
       send(pid, {:__claude_session_done__, "arb done"})
 
+      # The workspace is `direct` and the fixture checkout has no `origin`, so
+      # the local merge now completes (bd-73zv62: no push to fail) and the run
+      # ends — the worker process exits. Either way it must never be read as a
+      # destroyed workspace.
       wait_until(fn ->
-        snap = Worker.state(pid)
-        Worker.finished?(snap) or Worker.awaiting_review_gate?(snap)
+        case live_state(pid) do
+          nil -> true
+          snap -> Worker.finished?(snap) or Worker.awaiting_review_gate?(snap)
+        end
       end)
 
-      snap = Worker.state(pid)
-      refute match?(%{stop_reason: %{category: :workspace_destroyed}}, snap.meta)
+      case live_state(pid) do
+        nil ->
+          assert_receive {:DOWN, ^ref, :process, ^pid, :normal}
+
+          assert [%Run{outcome: :succeeded, failure_reason: nil}] =
+                   Ash.read!(Ash.Query.filter(Run, task_id == ^task.id))
+
+        snap ->
+          refute match?(%{stop_reason: %{category: :workspace_destroyed}}, snap.meta)
+      end
     end
   end
 

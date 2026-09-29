@@ -5364,7 +5364,11 @@ defmodule Arbiter.Worker do
       {:ok, task} when is_binary(task.title) and task.title != "" ->
         case Ash.load(task, [:workspace]) do
           {:ok, task_with_ws} ->
-            Arbiter.Mergers.PRTitle.format(task_with_ws, task_with_ws.workspace)
+            # bd-73zv62: the task's repo's `pr_title_format`.
+            Arbiter.Mergers.PRTitle.format(
+              task_with_ws,
+              Arbiter.Mergers.scope(task_with_ws.workspace, task_with_ws.repo)
+            )
 
           _ ->
             Arbiter.Mergers.PRTitle.format(task, nil)
@@ -7785,16 +7789,24 @@ defmodule Arbiter.Worker do
 
   # Resolve {adapter, workspace} for an open_mr/5 call. An explicit `:adapter`
   # in opts wins (test/advanced override); otherwise resolve from the worker's
-  # workspace via Arbiter.Mergers.for_workspace/1.
+  # workspace, narrowed to the run's repo (bd-73zv62): the workspace handed
+  # back is `Arbiter.Mergers.scope/2`'d, so every downstream reader
+  # (`hosted_forge_merger?/2`, `prepare_with_repo/2`, the Watchdog's opts) sees
+  # the repo's effective merge block, and a `merge.repos.<repo>` override on
+  # `direct` merges locally even when the workspace merges via a forge.
   defp resolve_merger(%State{} = state, opts) do
     cond do
       adapter = Map.get(opts, :adapter) ->
-        {:ok, adapter, Map.get(opts, :workspace)}
+        {:ok, adapter, Arbiter.Mergers.scope(Map.get(opts, :workspace), state.repo)}
 
       is_binary(state.workspace_id) ->
         case Ash.get(Arbiter.Tasks.Workspace, state.workspace_id) do
-          {:ok, ws} -> {:ok, Arbiter.Mergers.for_workspace(ws), ws}
-          _ -> {:error, :workspace_not_found}
+          {:ok, ws} ->
+            ws = Arbiter.Mergers.scope(ws, state.repo)
+            {:ok, Arbiter.Mergers.for_workspace(ws), ws}
+
+          _ ->
+            {:error, :workspace_not_found}
         end
 
       true ->

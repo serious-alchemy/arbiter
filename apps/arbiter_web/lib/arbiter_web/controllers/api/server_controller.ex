@@ -32,12 +32,19 @@ defmodule ArbiterWeb.Api.ServerController do
       on, the decision, and — re-read live — every workspace a spawn would
       raise `MissingCredentialError` for with accounts on. `arb server doctor`
       fails when an un-migrated install is held off, and points at the runbook.
+    * `GET /api/server/merge_routing` — every workspace repo's effective merge
+      strategy (a `merge.repos.<repo>` override, else the workspace's), and
+      each one whose checkout cannot carry it (bd-73zv62,
+      `Arbiter.Mergers.RoutingCheck.report/0`): a forge strategy with no
+      `origin` remote, or an `origin` that is not the effective
+      `owner/repo`. `arb server doctor` lists them with the fix.
   """
 
   use ArbiterWeb, :controller
 
   alias Arbiter.Accounts.Enablement
   alias Arbiter.Agents.Claude.CredentialCheck
+  alias Arbiter.Mergers.RoutingCheck
   alias Arbiter.Worker.Jail
 
   def migrations(conn, _params) do
@@ -109,6 +116,15 @@ defmodule ArbiterWeb.Api.ServerController do
           }
         end)
     })
+  end
+
+  def merge_routing(conn, _params) do
+    repos = Enum.map(RoutingCheck.report(), &routing_entry/1)
+    json(conn, %{repos: repos, problems: Enum.filter(repos, & &1.problem)})
+  end
+
+  defp routing_entry(entry) do
+    %{entry | problem: entry.problem && Atom.to_string(entry.problem)}
   end
 
   def provider_accounts(conn, _params) do

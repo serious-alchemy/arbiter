@@ -31,12 +31,13 @@ defmodule Arbiter.Workflows.MergedPRFinalizerSupervisor do
 
   require Logger
 
-  alias Arbiter.{Mergers, Tasks.RepoConfig, Tasks.Workspace}
-  alias Arbiter.Mergers.Github.RepoResolver
+  alias Arbiter.{Mergers, Tasks.Workspace}
+  alias Arbiter.Mergers.ForgeRepos
   alias Arbiter.ProcessTeardown
   alias Arbiter.Workflows.MergedPRFinalizer
 
   @registry Arbiter.Workflows.MergedPRFinalizerRegistry
+  @forge_opts [log: "MergedPRFinalizerSupervisor"]
 
   def child_spec(opts) do
     %{
@@ -57,8 +58,8 @@ defmodule Arbiter.Workflows.MergedPRFinalizerSupervisor do
   """
   @spec start_finalizer(Workspace.t(), keyword()) :: DynamicSupervisor.on_start_child() | :skip
   def start_finalizer(%Workspace{} = workspace, opts \\ []) do
-    adapter = resolve_adapter(workspace)
     repos = finalizer_repos(workspace)
+    adapter = resolve_adapter(workspace, repos)
 
     cond do
       is_nil(adapter) or not function_exported?(adapter, :get, 1) ->
@@ -228,8 +229,10 @@ defmodule Arbiter.Workflows.MergedPRFinalizerSupervisor do
 
   defp workspace_key?(_key, _workspace_id), do: false
 
-  defp resolve_adapter(workspace) do
-    adapter = Mergers.for_workspace(workspace)
+  # bd-73zv62: the adapter of the repo the first finalized slug belongs to, or
+  # the workspace-level one when nothing is finalized.
+  defp resolve_adapter(workspace, repos) do
+    adapter = Mergers.for_workspace(scope(workspace, List.first(repos)))
     Code.ensure_loaded(adapter)
     adapter
   rescue
@@ -241,65 +244,18 @@ defmodule Arbiter.Workflows.MergedPRFinalizerSupervisor do
   config resolves to — one finalizer each. `MergedPRFinalizer` re-checks its
   own repo against this every tick (bd-6dghdv).
   """
-  # Pre-existing complexity 13 — baselined when bd-4x2yhq first
-  # wired Credo up. Thresholds stay at the tool's own default so new
-  # code is held to it; see the note in .credo.exs.
+  # Resolved per repo against its effective merge block
+  # (`Arbiter.Mergers.ForgeRepos`, bd-73zv62): a repo on a
+  # `merge.repos.<repo>.strategy = "direct"` override gets no finalizer.
   @spec finalizer_repos(Workspace.t()) :: [String.t()]
-  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
-  def finalizer_repos(%Workspace{} = workspace) do
-    config = workspace.config || %{}
+  def finalizer_repos(%Workspace{} = workspace), do: ForgeRepos.slugs(workspace, @forge_opts)
 
-    case get_in(config, ["merge", "strategy"]) do
-      "github" ->
-        owner = get_in(config, ["merge", "config", "owner"])
-        repo = get_in(config, ["merge", "config", "repo"])
-
-        if is_binary(owner) and owner != "" and is_binary(repo) and repo != "" do
-          ["#{owner}/#{repo}"]
-        else
-          repos_from_repo_paths(config)
-        end
-
-      "gitlab" ->
-        case get_in(config, ["merge", "config", "project_id"]) do
-          v when is_integer(v) -> ["#{v}"]
-          v when is_binary(v) and v != "" -> [v]
-          _ -> repos_from_repo_paths(config)
-        end
-
-      _ ->
-        []
-    end
-  end
-
-  defp repos_from_repo_paths(config) do
-    case Map.get(config, "repo_paths") do
-      repo_map when is_map(repo_map) ->
-        repo_map
-        |> Map.values()
-        |> Enum.map(&RepoConfig.repo_path_from_config/1)
-        |> Enum.reject(&is_nil/1)
-        |> Enum.flat_map(fn path ->
-          case RepoResolver.from_remote(path) do
-            {:ok, {owner, repo}} ->
-              ["#{owner}/#{repo}"]
-
-            {:error, err} ->
-              Logger.info(
-                "MergedPRFinalizerSupervisor: could not derive repo for path #{path} " <>
-                  "(skipping): #{inspect(err)}"
-              )
-
-              []
-          end
-        end)
-        |> Enum.uniq()
-        |> Enum.sort()
-
-      _ ->
-        []
-    end
-  end
+  @doc """
+  `workspace` narrowed to the repo the finalized forge `repo` slug belongs to
+  (`Arbiter.Mergers.ForgeRepos.scope/3`, bd-73zv62).
+  """
+  @spec scope(Workspace.t(), String.t() | nil) :: Workspace.t()
+  def scope(%Workspace{} = workspace, repo), do: ForgeRepos.scope(workspace, repo, @forge_opts)
 
   defp finalizer_interval_ms do
     Application.get_env(:arbiter, :merged_pr_finalizer_interval_ms, 120_000)
