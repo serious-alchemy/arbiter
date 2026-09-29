@@ -83,7 +83,32 @@ defmodule ArbiterWeb.MCP.PlugTest do
       assert "ticket_promote" in names
       refute "worker_dispatch" in names
       refute "ticket_close" in names
-      assert Enum.sort(names) == Enum.sort(Arbiter.MCP.RefinePolicy.allowed())
+
+      {aliases, canonical} =
+        Enum.split_with(names, &Map.has_key?(Arbiter.MCP.Catalog.legacy_aliases(), &1))
+
+      assert Enum.sort(canonical) == Enum.sort(Arbiter.MCP.RefinePolicy.allowed())
+
+      # bd-4jojpw: the deprecated `task_*` names ride along exactly where their
+      # `ticket_*` target is allowed.
+      assert "task_update" in aliases
+      refute "task_close" in aliases
+    end
+
+    test "tools/call through a deprecated task_* alias reaches the ticket_* tool", ctx do
+      conn =
+        rpc(
+          ctx.conn,
+          ctx.refine_token,
+          req("tools/call", %{
+            "name" => "task_update",
+            "arguments" => %{"id" => ctx.child.id, "description" => "via the alias"}
+          })
+        )
+
+      assert %{"result" => result} = json_response(conn, 200)
+      refute result["isError"]
+      assert Ash.get!(Issue, ctx.child.id).description == "via the alias"
     end
 
     test "tools/call updates a descendant", ctx do

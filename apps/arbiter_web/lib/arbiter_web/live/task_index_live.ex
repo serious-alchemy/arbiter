@@ -12,7 +12,7 @@ defmodule ArbiterWeb.TaskIndexLive do
   filtered view is shareable and survives reload. Re-renders live on
   `:task_lifecycle` events so a transition shows up without a refresh.
 
-  The "New issue" action navigates to the standalone `/tasks/new` create
+  The "New ticket" action navigates to the standalone `/tasks/new` create
   screen (`ArbiterWeb.TaskNewLive`) rather than opening an inline form here.
 
   ## Filtering strategy

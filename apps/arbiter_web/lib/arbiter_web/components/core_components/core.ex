@@ -17,7 +17,7 @@ defmodule ArbiterWeb.CoreComponents.Core do
 
       <.button variant="primary" key_hint="C">
         <:icon><.icon name="hero-plus" size={13} /></:icon>
-        New issue
+        New ticket
       </.button>
       <.button>Edit</.button>
       <.button variant="ghost" size="sm">Log</.button>

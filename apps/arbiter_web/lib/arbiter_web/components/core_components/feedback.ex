@@ -672,9 +672,9 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
 
   ## Examples
 
-      <.empty_state icon="hero-clipboard-document-list">No issues match this filter.</.empty_state>
-      <.empty_state icon="hero-moon" detail="every open issue has an unclosed blocker">
-        No issues are ready.
+      <.empty_state icon="hero-clipboard-document-list">No tickets match this filter.</.empty_state>
+      <.empty_state icon="hero-moon" detail="every open ticket has an unclosed blocker">
+        No tickets are ready.
       </.empty_state>
 
   Says what is empty, and where possible why. Never a call to action dressed

@@ -1,6 +1,6 @@
 defmodule ArbiterWeb.TaskNewLive do
   @moduledoc """
-  Standalone "Create an issue" screen at `/tasks/new`.
+  Standalone "Create a ticket" screen at `/tasks/new`.
 
   Writes through the same `Issue` `:create` action the CLI/MCP use, so the
   tracker-mirroring and id-generation hooks apply identically, and applies

@@ -107,7 +107,7 @@ defmodule ArbiterCli.Cmd.WorkerTest do
       assert out =~ "boom"
     end
 
-    test "uses the plain worker/issue/repo labels" do
+    test "uses the plain worker/ticket/repo labels" do
       stub_get("/api/workers/bd-004", %{
         "source" => "history",
         "task_id" => "bd-004",
@@ -122,7 +122,7 @@ defmodule ArbiterCli.Cmd.WorkerTest do
       {out, _err, exit_code} = capture(fn -> Worker.run(["show", "bd-004"]) end)
       assert exit_code == 0
       assert out =~ "no live run"
-      assert out =~ "Issue:"
+      assert out =~ "Ticket:"
       assert out =~ "Repo:"
     end
 
