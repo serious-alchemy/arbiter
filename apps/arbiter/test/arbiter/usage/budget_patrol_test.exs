@@ -163,7 +163,7 @@ defmodule Arbiter.Usage.BudgetPatrolTest do
 
       log =
         ExUnit.CaptureLog.capture_log([level: :warning], fn ->
-          assert :ok = BudgetPatrol.sweep(now: @now, sample: [:not_a_row])
+          assert :ok = BudgetPatrol.sweep(now: @now, sample: [%{}])
         end)
 
       assert log =~ "BudgetPatrol.sweep failed"

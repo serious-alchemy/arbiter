@@ -316,6 +316,7 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
 
     test "a dispatch the gate allows outside overage clears it" do
       ws = continue_workspace(1.0)
+
       Arbiter.Messages.CoordinatorNotifier.overage_alert(
         %{workspace_id: ws.id, provider: :claude},
         5.0,

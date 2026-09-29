@@ -12,7 +12,13 @@ defmodule Arbiter.MCP.AlertToolsTest do
 
   defp raise_one(kind, key, ws) do
     {:ok, alert} =
-      Alerts.raise_alert(%{kind: kind, key: key, workspace_id: ws, subject: "s #{key}", detail: "d"})
+      Alerts.raise_alert(%{
+        kind: kind,
+        key: key,
+        workspace_id: ws,
+        subject: "s #{key}",
+        detail: "d"
+      })
 
     alert
   end

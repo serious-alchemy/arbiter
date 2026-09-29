@@ -77,9 +77,27 @@ defmodule Arbiter.Messages.CoordinatorNotifierAlertsTest do
 
     test "each (adapter, source) is its own alert" do
       ws = uniq("ws")
-      CoordinatorNotifier.credential_expired(%{workspace_id: ws}, Arbiter.Agents.Claude, auth_reason(), :periodic_probe)
-      CoordinatorNotifier.credential_expired(%{workspace_id: ws}, Arbiter.Agents.Claude, oauth_401_reason(2), :usage_poll)
-      CoordinatorNotifier.credential_expired(%{workspace_id: ws}, Arbiter.Agents.Codex, oauth_401_reason(2), :usage_poll)
+
+      CoordinatorNotifier.credential_expired(
+        %{workspace_id: ws},
+        Arbiter.Agents.Claude,
+        auth_reason(),
+        :periodic_probe
+      )
+
+      CoordinatorNotifier.credential_expired(
+        %{workspace_id: ws},
+        Arbiter.Agents.Claude,
+        oauth_401_reason(2),
+        :usage_poll
+      )
+
+      CoordinatorNotifier.credential_expired(
+        %{workspace_id: ws},
+        Arbiter.Agents.Codex,
+        oauth_401_reason(2),
+        :usage_poll
+      )
 
       assert length(Alerts.active(kind: :credential_expired)) == 3
     end
@@ -114,7 +132,11 @@ defmodule Arbiter.Messages.CoordinatorNotifierAlertsTest do
     end
 
     test "the default source does not add the usage-poll caveat" do
-      CoordinatorNotifier.credential_expired(%{workspace_id: uniq("ws")}, Arbiter.Agents.Claude, auth_reason())
+      CoordinatorNotifier.credential_expired(
+        %{workspace_id: uniq("ws")},
+        Arbiter.Agents.Claude,
+        auth_reason()
+      )
 
       alert = only_alert(:credential_expired)
       assert alert.detail =~ "new worker dispatches for this adapter are suspended"
@@ -123,7 +145,11 @@ defmodule Arbiter.Messages.CoordinatorNotifierAlertsTest do
 
     test "with no workspace raises nothing" do
       assert :ok =
-               CoordinatorNotifier.credential_expired(%{workspace_id: nil}, Arbiter.Agents.Claude, auth_reason())
+               CoordinatorNotifier.credential_expired(
+                 %{workspace_id: nil},
+                 Arbiter.Agents.Claude,
+                 auth_reason()
+               )
 
       assert Alerts.active() == []
     end
@@ -132,10 +158,17 @@ defmodule Arbiter.Messages.CoordinatorNotifierAlertsTest do
   describe "credential_restored" do
     test "clears the alert its (adapter, source) raised, and posts nothing" do
       ws = uniq("ws")
-      CoordinatorNotifier.credential_expired(%{workspace_id: ws}, Arbiter.Agents.Claude, auth_reason())
+
+      CoordinatorNotifier.credential_expired(
+        %{workspace_id: ws},
+        Arbiter.Agents.Claude,
+        auth_reason()
+      )
+
       alert = only_alert(:credential_expired)
 
-      assert :ok = CoordinatorNotifier.credential_restored(%{workspace_id: ws}, Arbiter.Agents.Claude)
+      assert :ok =
+               CoordinatorNotifier.credential_restored(%{workspace_id: ws}, Arbiter.Agents.Claude)
 
       assert Ash.get!(Arbiter.Alerts.SystemAlert, alert.id).cleared_at
       assert Alerts.active() == []
@@ -144,10 +177,26 @@ defmodule Arbiter.Messages.CoordinatorNotifierAlertsTest do
 
     test "a :usage_poll recovery leaves a :periodic_probe episode for the same adapter active" do
       ws = uniq("ws")
-      CoordinatorNotifier.credential_expired(%{workspace_id: ws}, Arbiter.Agents.Claude, auth_reason(), :periodic_probe)
-      CoordinatorNotifier.credential_expired(%{workspace_id: ws}, Arbiter.Agents.Claude, oauth_401_reason(2), :usage_poll)
 
-      CoordinatorNotifier.credential_restored(%{workspace_id: ws}, Arbiter.Agents.Claude, :usage_poll)
+      CoordinatorNotifier.credential_expired(
+        %{workspace_id: ws},
+        Arbiter.Agents.Claude,
+        auth_reason(),
+        :periodic_probe
+      )
+
+      CoordinatorNotifier.credential_expired(
+        %{workspace_id: ws},
+        Arbiter.Agents.Claude,
+        oauth_401_reason(2),
+        :usage_poll
+      )
+
+      CoordinatorNotifier.credential_restored(
+        %{workspace_id: ws},
+        Arbiter.Agents.Claude,
+        :usage_poll
+      )
 
       alert = only_alert(:credential_expired)
       assert alert.subject =~ "proactive detection"
@@ -155,10 +204,21 @@ defmodule Arbiter.Messages.CoordinatorNotifierAlertsTest do
 
     test "a later failure after recovery opens a fresh alert" do
       ws = uniq("ws")
-      CoordinatorNotifier.credential_expired(%{workspace_id: ws}, Arbiter.Agents.Claude, auth_reason())
+
+      CoordinatorNotifier.credential_expired(
+        %{workspace_id: ws},
+        Arbiter.Agents.Claude,
+        auth_reason()
+      )
+
       first = only_alert(:credential_expired)
       CoordinatorNotifier.credential_restored(%{workspace_id: ws}, Arbiter.Agents.Claude)
-      CoordinatorNotifier.credential_expired(%{workspace_id: ws}, Arbiter.Agents.Claude, auth_reason())
+
+      CoordinatorNotifier.credential_expired(
+        %{workspace_id: ws},
+        Arbiter.Agents.Claude,
+        auth_reason()
+      )
 
       second = only_alert(:credential_expired)
       refute second.id == first.id
@@ -166,7 +226,10 @@ defmodule Arbiter.Messages.CoordinatorNotifierAlertsTest do
 
     test "recovering with nothing active is a no-op" do
       ws = uniq("ws")
-      assert :ok = CoordinatorNotifier.credential_restored(%{workspace_id: ws}, Arbiter.Agents.Claude)
+
+      assert :ok =
+               CoordinatorNotifier.credential_restored(%{workspace_id: ws}, Arbiter.Agents.Claude)
+
       assert Alerts.active() == []
       no_mail(ws)
     end
@@ -176,7 +239,8 @@ defmodule Arbiter.Messages.CoordinatorNotifierAlertsTest do
     test "raises one install-wide alert naming the failure count, and posts no escalation" do
       ws = uniq("ws")
 
-      assert :ok = CoordinatorNotifier.quota_poll_failing(%{workspace_id: ws}, 3, {:http_error, 500})
+      assert :ok =
+               CoordinatorNotifier.quota_poll_failing(%{workspace_id: ws}, 3, {:http_error, 500})
 
       alert = only_alert(:quota_poll_failing)
       assert alert.owner == :operator
@@ -206,7 +270,12 @@ defmodule Arbiter.Messages.CoordinatorNotifierAlertsTest do
     test "raises a per-workspace alert naming the spend and threshold, and posts no escalation" do
       ws = uniq("ws")
 
-      assert :ok = CoordinatorNotifier.overage_alert(%{task_id: uniq("bd"), workspace_id: ws}, 12.5, 10.0)
+      assert :ok =
+               CoordinatorNotifier.overage_alert(
+                 %{task_id: uniq("bd"), workspace_id: ws},
+                 12.5,
+                 10.0
+               )
 
       alert = only_alert(:overage_alert)
       assert alert.key == ws
@@ -258,7 +327,11 @@ defmodule Arbiter.Messages.CoordinatorNotifierAlertsTest do
       ws = uniq("ws")
       task_id = uniq("bd")
 
-      assert :ok = CoordinatorNotifier.budget_exceeded(%{task_id: task_id, workspace_id: ws}, budget_info())
+      assert :ok =
+               CoordinatorNotifier.budget_exceeded(
+                 %{task_id: task_id, workspace_id: ws},
+                 budget_info()
+               )
 
       alert = only_alert(:budget_exceeded)
       assert alert.key == task_id
@@ -272,7 +345,11 @@ defmodule Arbiter.Messages.CoordinatorNotifierAlertsTest do
       ws = uniq("ws")
       task_id = uniq("bd")
       CoordinatorNotifier.budget_exceeded(%{task_id: task_id, workspace_id: ws}, budget_info())
-      CoordinatorNotifier.budget_exceeded(%{task_id: task_id, workspace_id: ws}, %{budget_info() | spend: 55.0})
+
+      CoordinatorNotifier.budget_exceeded(%{task_id: task_id, workspace_id: ws}, %{
+        budget_info()
+        | spend: 55.0
+      })
 
       alert = only_alert(:budget_exceeded)
       assert alert.detail =~ "$55.00"

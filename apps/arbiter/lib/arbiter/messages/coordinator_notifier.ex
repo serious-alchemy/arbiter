@@ -374,7 +374,14 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
       |> Map.put(:gate_closed?, gate_closed?)
 
     {subject, detail} = escalation_payload(:credential_expired, snapshot_with_adapter, reason)
-    raise_alert(:credential_expired, credential_alert_key(adapter, source), ws_id, subject, detail)
+
+    raise_alert(
+      :credential_expired,
+      credential_alert_key(adapter, source),
+      ws_id,
+      subject,
+      detail
+    )
   end
 
   def credential_expired(_snapshot, _adapter, _reason, _source, _gate_closed?), do: :ok
@@ -435,7 +442,10 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
     :ok
   rescue
     e ->
-      Logger.warning("CoordinatorNotifier: clearing #{kind} alert raised: #{Exception.message(e)}")
+      Logger.warning(
+        "CoordinatorNotifier: clearing #{kind} alert raised: #{Exception.message(e)}"
+      )
+
       :ok
   catch
     :exit, _ -> :ok
