@@ -158,7 +158,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     assert exit_code == 0
     assert {:ok, %{"ok" => true, "checks" => checks}} = Jason.decode(String.trim(out))
     assert is_list(checks)
-    assert length(checks) == 15
+    assert length(checks) == 16
   end
 
   test "version mismatch is non-fatal (exit 0 but shows [fail])" do
@@ -1358,6 +1358,95 @@ defmodule ArbiterCli.Cmd.DoctorTest do
   # install still carrying legacy credentials is held off at boot rather than
   # raising MissingCredentialError on every spawn; doctor is where the
   # operator is told, and pointed at the runbook.
+  # bd-73zv62: a repo whose effective merge strategy is a forge but whose
+  # checkout has no origin remote (or the wrong one) can never open its PR.
+  describe "merge routing check" do
+    defp routing_routes(body) do
+      [
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/merge_routing"}, {body, 200}}
+      ]
+    end
+
+    @arbiter_ok %{
+      "workspace" => "default",
+      "repo" => "arbiter",
+      "strategy" => "github",
+      "remote" => "serious-alchemy/arbiter",
+      "problem" => nil
+    }
+
+    test "ok, naming each repo's effective strategy" do
+      mesaana = %{
+        "workspace" => "default",
+        "repo" => "mesaana",
+        "strategy" => "direct",
+        "problem" => nil
+      }
+
+      stub_routes(routing_routes(%{"repos" => [@arbiter_ok, mesaana], "problems" => []}))
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] merge routing"
+      assert out =~ "default/arbiter: github"
+      assert out =~ "default/mesaana: direct"
+    end
+
+    test "fails on a remote-less repo under a forge strategy, with the fix" do
+      flagged = %{
+        "workspace" => "default",
+        "repo" => "mesaana",
+        "strategy" => "github",
+        "remote" => nil,
+        "problem" => "no_remote",
+        "fix" => "`arb config set merge.repos.mesaana.strategy direct --workspace default`"
+      }
+
+      stub_routes(routing_routes(%{"repos" => [@arbiter_ok, flagged], "problems" => [flagged]}))
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 1
+      assert out =~ "[fail] merge routing"
+      assert out =~ "default/mesaana"
+      assert out =~ "no origin remote"
+      assert out =~ "arb config set merge.repos.mesaana.strategy direct"
+
+      result = Enum.find(Checks.run(), &(&1.name == "merge routing"))
+      refute result.blocks_readiness
+    end
+
+    test "fails on a remote that is not the effective owner/repo" do
+      flagged = %{
+        "workspace" => "default",
+        "repo" => "infra",
+        "strategy" => "github",
+        "remote" => "serious-alchemy/infra",
+        "expected" => "serious-alchemy/arbiter",
+        "problem" => "remote_mismatch",
+        "fix" => "set merge.repos.infra.config.owner/repo"
+      }
+
+      stub_routes(routing_routes(%{"repos" => [flagged], "problems" => [flagged]}))
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 1
+      assert out =~ "serious-alchemy/arbiter"
+      assert out =~ "serious-alchemy/infra"
+    end
+
+    test "an old server without the endpoint is not a failure" do
+      stub_routes(Enum.drop(routing_routes(%{}), -1))
+
+      result = Enum.find(Checks.run(), &(&1.name == "merge routing"))
+      assert result.status == :ok
+      assert result.detail =~ "could not check"
+    end
+  end
+
   describe "provider accounts check" do
     defp accounts_routes(status) do
       [
