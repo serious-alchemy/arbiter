@@ -598,8 +598,10 @@ is refused twice. agy soft-denies it first (captured: an out-of-worktree
 write, and a write to a sibling directory that shares the worktree's name as
 a prefix, were both refused). If that is ever bypassed (a shell command, a
 future agy change), the jail answers `read-only file system`
-(`Arbiter.Worker.JailTest`). `:auto` and `:bypass` do not get the working
-set: `always-proceed` never consults `allow`.
+(`Arbiter.Worker.JailTest`). On 2026-09-29, agy 1.2.13 was probe-verified under
+`:strict` (bd-9xiwu1 / chore-68), confirming that writes outside the worktree
+and denied tool calls are correctly blocked. `:auto` and `:bypass` do not get
+the working set: `always-proceed` never consults `allow`.
 
 ### Credentials are untouched by the `$HOME` redirect
 
