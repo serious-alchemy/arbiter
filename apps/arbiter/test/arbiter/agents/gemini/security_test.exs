@@ -8,6 +8,13 @@ defmodule Arbiter.Agents.Gemini.SecurityTest do
 
   defp mode(m), do: policy(%{"permissions" => %{"mode" => m}})
 
+  defp review_policy do
+    Arbiter.Worker.Dispatch.review_security_policy(
+      SecurityPolicy.merge(SecurityPolicy.base(), %{"permissions" => %{"mode" => "strict"}}),
+      review_checkout: %{path: "/tmp/some-review-checkout"}
+    )
+  end
+
   describe "permission_argv/1" do
     test "bypass -> --dangerously-skip-permissions" do
       assert Security.permission_argv(mode("bypass")) == ["--dangerously-skip-permissions"]
@@ -192,6 +199,57 @@ defmodule Arbiter.Agents.Gemini.SecurityTest do
         )
 
       assert "write_file(/)" in Security.deny_rules(policy)
+    end
+
+    test "a review dispatch allows the read-only tracker commands (bd-cwe9n2)" do
+      review = review_policy()
+      allow = Security.allow_rules(review)
+
+      for cmd <- [
+            "gh pr view",
+            "gh pr diff",
+            "gh pr checks",
+            "glab mr view",
+            "glab mr diff",
+            "glab ci status",
+            "glab ci get"
+          ] do
+        assert "command(#{cmd})" in allow, "#{cmd} must be allowed on the review path"
+      end
+
+      refute "command(gh pr merge)" in allow
+    end
+
+    test "a review dispatch keeps tracker writes denied (bd-cwe9n2)" do
+      deny = Security.deny_rules(review_policy())
+
+      for cmd <-
+            [
+              "gh pr comment",
+              "gh pr review",
+              "gh pr merge",
+              "gh pr close",
+              "gh pr edit",
+              "gh api -X",
+              "gh api --method",
+              "glab mr note",
+              "glab mr comment",
+              "glab mr approve",
+              "glab mr merge",
+              "glab mr close",
+              "glab mr update",
+              "glab api -X",
+              "glab api --method"
+            ] do
+        assert "command(#{cmd})" in deny, "#{cmd} must be denied on the review path"
+      end
+    end
+
+    test "a non-review policy gets neither the tracker allow nor the tracker deny" do
+      p = SecurityPolicy.merge(SecurityPolicy.base(), %{"permissions" => %{"mode" => "strict"}})
+
+      refute "command(gh pr view)" in Security.allow_rules(p)
+      refute "command(gh pr merge)" in Security.deny_rules(p)
     end
 
     test "bare Read / WebFetch tool names map onto agy's whole-path rules" do

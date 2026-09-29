@@ -4692,6 +4692,15 @@ defmodule Arbiter.Worker do
   # still complete the directive, and blank notes still fail with the
   # concrete "strict policy denied command" reason.
   defp fail_unresumable(%State{} = state, session, %{category: :permission_denied}) do
+    # bd-cwe9n2: a ReviewGate reviewer that was told to wait for this worker's
+    # resume (`{:worker_denied, …}`) must hear when there won't be one.
+    _ =
+      Phoenix.PubSub.broadcast(
+        Arbiter.PubSub,
+        "worker:" <> state.task_id,
+        {:worker_resume_abandoned, state.task_id}
+      )
+
     if no_pr_type?(state.meta) and not review_only?(state.meta),
       do: finalize_task_type_stop(state),
       else: fail_stopped(state, session)
@@ -4749,7 +4758,8 @@ defmodule Arbiter.Worker do
     prompt =
       resume_continue_prompt(session_stop_category(session), state.task_id,
         denied_command: Map.get(session, :denied_command_line),
-        provider: provider
+        provider: provider,
+        reviewer: (meta || %{})[:role] == :reviewer
       )
 
     with %{} = port_args <- spawn_args || :no_spawn_args,
@@ -5004,6 +5014,35 @@ defmodule Arbiter.Worker do
   # Hence the explicit "don't retry / one command per call / record notes"
   # guidance.
   def resume_continue_prompt(:permission_denied, task_id, opts) do
+    if Keyword.get(opts, :reviewer, false),
+      do: reviewer_permission_denied_prompt(task_id, opts),
+      else: worker_permission_denied_prompt(task_id, opts)
+  end
+
+  # bd-bxwsvo: agy has no `Monitor` / `TaskOutput` / `Bash`, and on agy 1.2.12
+  # ending the turn with a background task running is the correct way to wait
+  # — the CLI keeps the session alive (up to 30m) and wakes the agent with a
+  # completion message. The only abandoned wait left is a command that outlived
+  # that cap and was killed on exit, so the correction is about the cap, and it
+  # must not reintroduce the polling loop bd-90kjvk burned a Gemini window on.
+  def resume_continue_prompt(:async_wait_abandoned, task_id, opts) do
+    if Keyword.get(opts, :provider) == "gemini" do
+      agy_async_wait_abandoned_prompt(task_id)
+    else
+      claude_async_wait_abandoned_prompt(task_id)
+    end
+  end
+
+  def resume_continue_prompt(_category, task_id, _opts) do
+    """
+    Your previous session for task #{task_id} ended before you finished — you
+    did not print `arb done`. Your work so far is preserved in this worktree.
+    Pick up exactly where you left off, complete the remaining work, and when the
+    task is fully done print `arb done` on its own line.
+    """
+  end
+
+  defp worker_permission_denied_prompt(task_id, opts) do
     denied =
       case Keyword.get(opts, :denied_command) do
         cmd when is_binary(cmd) and cmd != "" -> "Your command `#{cmd}` was"
@@ -5031,26 +5070,30 @@ defmodule Arbiter.Worker do
     """
   end
 
-  # bd-bxwsvo: agy has no `Monitor` / `TaskOutput` / `Bash`, and on agy 1.2.12
-  # ending the turn with a background task running is the correct way to wait
-  # — the CLI keeps the session alive (up to 30m) and wakes the agent with a
-  # completion message. The only abandoned wait left is a command that outlived
-  # that cap and was killed on exit, so the correction is about the cap, and it
-  # must not reintroduce the polling loop bd-90kjvk burned a Gemini window on.
-  def resume_continue_prompt(:async_wait_abandoned, task_id, opts) do
-    if Keyword.get(opts, :provider) == "gemini" do
-      agy_async_wait_abandoned_prompt(task_id)
-    else
-      claude_async_wait_abandoned_prompt(task_id)
-    end
-  end
+  # bd-cwe9n2: the reviewer variant. A ReviewGate reviewer's deliverable is a
+  # `VERDICT:` line, not task notes, and it must not be told to `arb done`.
+  defp reviewer_permission_denied_prompt(task_id, opts) do
+    denied =
+      case Keyword.get(opts, :denied_command) do
+        cmd when is_binary(cmd) and cmd != "" -> "Your command `#{cmd}` was"
+        _ -> "An action you attempted was"
+      end
 
-  def resume_continue_prompt(_category, task_id, _opts) do
     """
-    Your previous session for task #{task_id} ended before you finished — you
-    did not print `arb done`. Your work so far is preserved in this worktree.
-    Pick up exactly where you left off, complete the remaining work, and when the
-    task is fully done print `arb done` on its own line.
+    Your previous review turn for task #{task_id} was cut short. #{denied} denied
+    by this workspace's permission policy, and a non-interactive session cannot
+    ask for approval, so the turn ended. What you have read so far is preserved.
+
+    Do NOT retry the command, rephrase it, or reach the same result another way.
+    You have the diff in your checkout: use `git diff`, `git log` and `git show`,
+    one command per `run_command` call (every part of a chained line is checked
+    on its own). Read-only tracker commands (`gh pr view`, `gh pr diff`,
+    `gh pr checks`, `glab mr view`, `glab mr diff`) are allowed; posting comments,
+    reviews or merging is not, and is not your job.
+
+    Finish the review from what you have and end with the `VERDICT:` line
+    (`VERDICT: APPROVE` or `VERDICT: REQUEST_CHANGES`) on its own line, followed
+    by your findings.
     """
   end
 

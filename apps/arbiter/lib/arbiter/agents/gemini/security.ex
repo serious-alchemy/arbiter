@@ -375,6 +375,7 @@ defmodule Arbiter.Agents.Gemini.Security do
     (Enum.flat_map(perms.safe_defaults, &expand_category/1) ++
        translate_all(perms.deny) ++
        sandbox_deny(sandbox) ++
+       review_tracker_deny(perms) ++
        home_settings_deny(Keyword.get(opts, :home)))
     |> finalize()
   end
@@ -466,8 +467,60 @@ defmodule Arbiter.Agents.Gemini.Security do
     (@worker_bootstrap_allow ++
        @harmless_allow ++
        strict_working_set(policy, Keyword.get(opts, :worktree)) ++
+       review_tracker_allow(perms) ++
        translate_all(perms.allow))
     |> finalize()
+  end
+
+  # bd-cwe9n2: a worktree-backed review dispatch (`Dispatch.review_security_policy/2`
+  # unions `Write` into `deny`) reads the PR through the tracker CLI. Under
+  # `:strict` an allowlist miss is soft-denied and ends the headless turn (run
+  # 84bdbdc9: `gh pr view 75` ended the review with no verdict), so the
+  # read-only verbs are allowed. The write verbs are denied explicitly: an
+  # explicit deny is handed back to the model as a tool error and the turn
+  # goes on. Deny is prefix-matched, so `gh api` is only covered where the
+  # method flag directly follows `api`; the rest of the `gh api` surface is
+  # not on the allowlist. Claude reviewers are unaffected (this module is agy
+  # only).
+  @review_tracker_read [
+    "gh pr view",
+    "gh pr diff",
+    "gh pr checks",
+    "glab mr view",
+    "glab mr diff",
+    "glab ci status",
+    "glab ci get"
+  ]
+  @review_tracker_write [
+    "gh pr comment",
+    "gh pr review",
+    "gh pr merge",
+    "gh pr close",
+    "gh pr edit",
+    "gh pr ready",
+    "gh pr reopen",
+    "gh api -X",
+    "gh api --method",
+    "glab mr note",
+    "glab mr comment",
+    "glab mr approve",
+    "glab mr merge",
+    "glab mr close",
+    "glab mr update",
+    "glab mr reopen",
+    "glab api -X",
+    "glab api --method"
+  ]
+
+  defp review_dispatch?(%{deny: deny}) when is_list(deny), do: "Write" in deny
+  defp review_dispatch?(_), do: false
+
+  defp review_tracker_allow(perms) do
+    if review_dispatch?(perms), do: Enum.map(@review_tracker_read, &"command(#{&1})"), else: []
+  end
+
+  defp review_tracker_deny(perms) do
+    if review_dispatch?(perms), do: Enum.map(@review_tracker_write, &"command(#{&1})"), else: []
   end
 
   # ---- internals ---------------------------------------------------------
