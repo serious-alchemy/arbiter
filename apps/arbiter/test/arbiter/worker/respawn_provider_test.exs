@@ -64,7 +64,9 @@ defmodule Arbiter.Worker.RespawnProviderTest do
         task_id: task.id,
         repo: "unknown",
         workspace_id: ws.id,
-        meta: %{issue_type: :research, review_spawn: false}
+        # bd-4qjl0q raised the notes-gate default to 2 send-backs; pin 1 so this
+        # test keeps counting exactly original + one nudge respawn.
+        meta: %{issue_type: :research, review_spawn: false, notes_nudge_cap: 1}
       )
 
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
