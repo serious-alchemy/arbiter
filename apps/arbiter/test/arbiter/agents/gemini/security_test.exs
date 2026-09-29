@@ -93,6 +93,18 @@ defmodule Arbiter.Agents.Gemini.SecurityTest do
       assert "command(mix test)" in Security.settings(p)["permissions"]["allow"]
     end
 
+    test "strict allows the arbiter MCP server only (bd-cy4ls6)" do
+      allow = Security.settings(mode("strict"))["permissions"]["allow"]
+
+      assert "mcp(arbiter/*)" in allow
+      assert Enum.filter(allow, &String.starts_with?(&1, "mcp(")) == ["mcp(arbiter/*)"]
+    end
+
+    test "non-strict modes add no mcp allow rule (bd-cy4ls6)" do
+      allow = Security.settings(mode("bypass"))["permissions"]["allow"] || []
+      refute Enum.any?(allow, &String.starts_with?(&1, "mcp("))
+    end
+
     test "strict mode always allows the worker-protocol bootstrap commands (bd-25ivqe AC1)" do
       settings = Security.settings(mode("strict"))
       allow = settings["permissions"]["allow"]
