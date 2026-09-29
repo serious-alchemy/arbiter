@@ -1,39 +1,74 @@
-# Turning on provider accounts on a release install
+# Migrating a release install to provider accounts
 
 **Audience:** an operator running Arbiter as an OTP release
 (`~/.arbiter/current/bin/arbiter`, managed by `arbiter.service`), which has no
 Mix toolchain. On a source checkout, the `mix arbiter.accounts.*` tasks do the
 same things. They are thin wrappers over the functions used here.
 
-## What the default does (v0.2.0 and later)
+## Release notes: provider accounts are required (the P13 flip, bd-9gqj8e)
 
-`:provider_accounts_enabled` ships as **`auto`**. At every boot the server
-decides it for this install (`Arbiter.Accounts.Enablement`):
+> **Irreversible. This release requires provider accounts to be enabled —
+> migrate every install before upgrading to it.**
+
+- **The `:provider_accounts_enabled` flag is gone.** Provider accounts are
+  always on. The `ARBITER_PROVIDER_ACCOUNTS` variable is no longer read; if
+  the server's environment still sets it, the boot logs a warning saying so.
+  Remove it from `~/.arbiter/arbiter.env`.
+- **The legacy credential chain is deleted.** A spawn's provider credential
+  comes from its workspace's provider account and nowhere else. That covers
+  every spawn path: workers, the `CredentialWatchdog` probe, the quota poll,
+  and code-review checks. None of these is a credential source any more:
+  - a workspace's own `worker_env` token;
+  - `CLAUDE_CODE_OAUTH_TOKEN` in the server's environment;
+  - the install-wide "single unambiguous workspace token".
+
+  A spawn with no workspace in hand (the watchdog probe, a workspace-less
+  review) takes the install's single enabled Claude account credential, and
+  carries none if there is not exactly one.
+- **There is no switch back.** Before this release, `ARBITER_PROVIDER_ACCOUNTS=0`
+  returned workers to the legacy chain. Now nothing does. A workspace whose
+  credential is still only in `worker_env` raises
+  `Arbiter.Accounts.MissingCredentialError` on every spawn. The dispatch guard
+  holds that workspace's Claude tickets and escalates once. The only way back
+  to the legacy chain is to run the previous release binary.
+- **`arb install service` no longer copies `CLAUDE_CODE_OAUTH_TOKEN`** from the
+  installing shell into `arbiter.env`. Nothing would read it.
+- **`/providers` is never read-only.** The "Accounts not enabled on this
+  install" banner is gone.
+- **No schema migrations.**
+
+### Upgrade order
+
+1. **On the release you run now (v0.2.x),** make sure `arb server doctor`
+   reports `[ ok ] provider accounts` with `on (...)`. If it reports `[fail]`,
+   or `off (ARBITER_PROVIDER_ACCOUNTS=0)`, migrate first with the procedure
+   below and restart.
+2. **Upgrade to this release.**
+3. **Run `arb server doctor` again.** Expect `[ ok ] provider accounts` and
+   `[ ok ] claude worker credentials`.
+
+If you upgrade an install that was not migrated, its workspaces cannot spawn
+until they are. The procedure below still works on this release, run the same
+way, with the server stopped for step 5.
+
+## What the boot reports
+
+At every boot the server classifies the install
+(`Arbiter.Accounts.Enablement`). Accounts are on in every case; the
+classification decides only what is auto-joined and what doctor reports:
 
 | Install | Result |
 | ------- | ------ |
-| **Fresh**: no workspace `worker_env` carries a provider credential, and there is no `CLAUDE_CODE_OAUTH_TOKEN` in the server's environment | **On.** Every workspace, and each one created later, is joined to `<provider>:default`. Add the credential with `arb account rotate claude:default ...`; `arb server doctor` names the exact command. |
-| **Already migrated**: at least one migration backup row that has not been rolled back | **On**, the same as `ARBITER_PROVIDER_ACCOUNTS=1`. Nothing is joined automatically. |
-| **Upgrading, not migrated**: a workspace `worker_env` or the server environment still carries a provider credential, and there is no migration record | **Off.** Workers keep the legacy credential chain, exactly as on v0.1.x. The boot logs a warning naming the workspaces, and `arb server doctor` reports `[fail] provider accounts`. Follow this page to migrate. |
+| **Fresh**: no workspace `worker_env` carries a provider credential, and there is no `CLAUDE_CODE_OAUTH_TOKEN` in the server's environment | Every workspace, and each one created later, is joined to `<provider>:default`. Add the credential with `arb account rotate claude:default ...`; `arb server doctor` names the exact command. |
+| **Already migrated**: at least one migration backup row that has not been rolled back | Nothing is joined automatically. Doctor reports `on (migrated)`. |
+| **Legacy credentials, not migrated**: a workspace `worker_env` or the server environment still carries a provider credential, and there is no migration record | The boot logs a warning naming them, and `arb server doctor` reports `[fail] provider accounts`. Nothing reads those credentials: the named workspaces cannot spawn. Follow this page to migrate. |
 
-An explicit `ARBITER_PROVIDER_ACCOUNTS` in the server's environment always wins
-over `auto`: `1`/`true` is on and `0`/`false` is off, whatever the database
-says.
-
-"Upgrading, not migrated" stays off instead of refusing to boot. With the flag
-on, a workspace whose credential was never migrated raises
-`Arbiter.Accounts.MissingCredentialError` at spawn time, and a server-env token
-is ignored. Turning it on would stop every dispatch, while the legacy chain
-still authenticates those workers correctly. Refusing to boot would take down
-the dashboard, the API and the running workers for the same condition, and the
-server can keep running through the migration's read-only steps below.
-
-To move such an install onto accounts, first move each workspace's credential
-into a provider account. This is the P2 migration in
+To move such an install onto accounts, move each workspace's credential into
+a provider account. This is the P2 migration in
 [`provider-account-design.md`](provider-account-design.md) §7.
 
-The migration is the provider-accounts point of no return. Every step below is
-either read-only or has a written undo. Read the whole page before starting.
+Every step below is either read-only or has a written undo. Read the whole
+page before starting.
 
 ## What the operations print
 
@@ -119,11 +154,10 @@ cp -p ~/.arbiter/arbiter.sqlite3* ~/.arbiter/pre-accounts-backup/   # or your DA
 ```
 
 Stop the server because the migration removes the key from `worker_env`, and
-until the flag is on nothing supplies it from the account. A worker spawned
-between the migration and the restart would run without the workspace's
-credential. With the server stopped, the migration is also the only writer on
-the SQLite file, and the copy is consistent. The glob also picks up any
-`-wal` / `-shm` files next to the database.
+a worker spawned mid-migration could see a workspace half-way through. With
+the server stopped, the migration is also the only writer on the SQLite file,
+and the copy is consistent. The glob also picks up any `-wal` / `-shm` files
+next to the database.
 
 ### 5. Migrate
 
@@ -143,24 +177,16 @@ output ends with the **migration id** and the exact rollback command. Keep
 both. Add `delete_plan?: true` if you want the plan file removed after a
 successful apply.
 
-### 6. Check the flag setting
+### 6. Clean up the server environment
 
-You do not need to set anything. The migration wrote backup rows, and those are
-the migration record: with `ARBITER_PROVIDER_ACCOUNTS` unset, the next boot
-resolves accounts **on**. Check that `~/.arbiter/arbiter.env` does not still
-say `ARBITER_PROVIDER_ACCOUNTS=0`, because an explicit value always wins.
+There is nothing to switch on. The migration wrote backup rows, and those are
+the migration record the boot looks for. Remove from `~/.arbiter/arbiter.env`:
 
-To pin the setting so that a later rollback of the backup rows cannot change
-it, set it explicitly:
-
-```sh
-echo "ARBITER_PROVIDER_ACCOUNTS=1" >> ~/.arbiter/arbiter.env
-```
-
-`config/runtime.exs` reads `ARBITER_PROVIDER_ACCOUNTS` (`1`/`true` for on,
-`0`/`false` for off, unset for the shipped `auto`). Any other value stops the
-boot rather than guessing. The service reads `arbiter.env` through
-`EnvironmentFile=`, so the new value takes effect on the next start.
+- any `ARBITER_PROVIDER_ACCOUNTS` line. It is no longer read, and the boot
+  warns while it is there;
+- `CLAUDE_CODE_OAUTH_TOKEN`, once step 1's census has fingerprinted it. It is
+  read by nothing, it makes doctor note it, and a stale credential in a
+  secrets file is a risk of its own.
 
 ### 7. Start the server
 
@@ -170,11 +196,11 @@ systemctl --user start arbiter.service
 
 ### 8. Verify
 
-- **The flag is on.** `arb server doctor` reports `[ ok ] provider accounts`
-  with `on (migrated)` or `on (ARBITER_PROVIDER_ACCOUNTS=1)`. The boot log has
-  a `Provider accounts are on` line. The dashboard's `/providers` page no
-  longer shows the "Accounts not enabled on this install" banner, and it lists
-  the migrated accounts with their credential health.
+- **The install is migrated.** `arb server doctor` reports
+  `[ ok ] provider accounts` with `on (migrated)`. The boot log has a
+  `Provider accounts: migrated` line and no warning naming a workspace.
+  The dashboard's `/providers` page lists the migrated accounts with their
+  credential health.
 
   `arb server doctor` also runs the `account/workspace quota policy` check.
   `Arbiter.Quota.Gate` binds `min(account, workspace)` — the account's quota
@@ -198,31 +224,20 @@ systemctl --user start arbiter.service
   `$ARB eval 'Arbiter.Release.accounts_rollback(list?: true)'` lists the backup
   rows as `pending`.
 
-Once everything is verified, remove `CLAUDE_CODE_OAUTH_TOKEN` from
-`~/.arbiter/arbiter.env` if it was there. It is inert with the flag on, and a
-stale credential in a secrets file is a risk of its own.
-
 ## Rolling back
 
-There are two levels of rollback. You can use either one, or both.
+Since the P13 flip there is **no switch back to the legacy credential chain**
+on this release. Two undos remain.
 
-**Turn the read path off.** Set `ARBITER_PROVIDER_ACCOUNTS=0` in
-`~/.arbiter/arbiter.env`, then run `systemctl --user restart arbiter.service`.
-Workers go back to the legacy chain. Deleting the line is **not** enough: an
-unset variable means `auto`, and a migrated install resolves `auto` to on. The migrated keys are **not** in `worker_env` any more, so this only
-fully restores the old behaviour if the server's own environment still
-supplies the credential. Otherwise also do the next step.
-
-**Put the credentials back into `worker_env`.** Stop the server and dry-run
-the restore first:
+**Put the credentials back into `worker_env`.** This is only useful together
+with running the previous release binary, since nothing on this release
+reads `worker_env` credentials. Stop the server and dry-run the restore first:
 
 ```sh
 systemctl --user stop arbiter.service
 $ARB eval 'Arbiter.Release.accounts_rollback(list?: true)'
 $ARB eval 'Arbiter.Release.accounts_rollback(migration_id: "<id from step 5>", dry_run?: true)'
 $ARB eval 'Arbiter.Release.accounts_rollback(migration_id: "<id from step 5>")'
-# then turn the flag off (above) and start the server
-systemctl --user start arbiter.service
 ```
 
 The restore re-merges each backup through the same `MergeWorkerEnv` change the
@@ -237,12 +252,15 @@ selectors are:
 - `all: true`: every un-restored backup.
 
 The rollback leaves the `provider_accounts` / `provider_credentials` rows in
-place. Nothing reads them with the flag off. Once every backup is restored,
-the install has no migration record, so `auto` also resolves off at the next
-boot, because the workspaces carry their credentials again. Keep
-`ARBITER_PROVIDER_ACCOUNTS=0` anyway: it states the decision instead of
-inferring it. The last resort is the database
-copy from step 4, restored with the server stopped.
+place. Once every backup is restored the install has no migration record, and
+the boot reports it as carrying legacy credentials again.
+
+**Run the previous release.** Point `~/.arbiter/current` back at the previous
+release, set `ARBITER_PROVIDER_ACCOUNTS=0` in `~/.arbiter/arbiter.env` (on
+that release an unset value means `auto`, which resolves a migrated install
+on), and start the server. This release adds no schema migrations, so the
+binary rollback does not need a database restore. The last resort is the
+database copy from step 4, restored with the server stopped.
 
 ## Source-checkout equivalents
 
@@ -257,5 +275,4 @@ copy from step 4, restored with the server stopped.
 | `…accounts_rollback(all: true, all_keys?: true)`               | `… --all --all-keys`                                   |
 
 The Mix tasks also start only config, Ash, the repo and the vault, never the
-full application. The flag is set with the same `ARBITER_PROVIDER_ACCOUNTS`
-variable, in `.arbiter.env` or the service unit.
+full application.

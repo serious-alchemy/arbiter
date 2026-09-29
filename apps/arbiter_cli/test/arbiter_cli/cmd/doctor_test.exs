@@ -1354,10 +1354,6 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     end
   end
 
-  # bd-cvvb02: `:provider_accounts_enabled` ships `:auto`. An un-migrated
-  # install still carrying legacy credentials is held off at boot rather than
-  # raising MissingCredentialError on every spawn; doctor is where the
-  # operator is told, and pointed at the runbook.
   # bd-73zv62: a repo whose effective merge strategy is a forge but whose
   # checkout has no origin remote (or the wrong one) can never open its PR.
   describe "merge routing check" do
@@ -1447,6 +1443,11 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     end
   end
 
+  # bd-cvvb02 / P13 (bd-9gqj8e): provider accounts are always on. An
+  # un-migrated install still carrying legacy credentials cannot spawn in
+  # those workspaces (MissingCredentialError) and its server-env token is
+  # read by nothing; doctor is where the operator is told, and pointed at the
+  # runbook.
   describe "provider accounts check" do
     defp accounts_routes(status) do
       [
@@ -1457,8 +1458,6 @@ defmodule ArbiterCli.Cmd.DoctorTest do
         {{"get", "/api/server/provider_accounts"},
          {Map.merge(
             %{
-              "configured" => "auto",
-              "enabled" => true,
               "decision" => "no_legacy_credentials",
               "stranded_workspaces" => [],
               "server_env_token" => false,
@@ -1478,25 +1477,19 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       assert out =~ "on (migrated)"
     end
 
-    test "ok when explicitly turned off — the operator's call" do
-      stub_routes(
-        accounts_routes(%{
-          "configured" => "false",
-          "enabled" => false,
-          "decision" => "explicit_off"
-        })
-      )
+    test "ok on a migrated install with a leftover server-env token, telling the operator to remove it" do
+      stub_routes(accounts_routes(%{"decision" => "migrated", "server_env_token" => true}))
 
       {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
       assert exit_code == 0
       assert out =~ "[ ok ] provider accounts"
-      assert out =~ "ARBITER_PROVIDER_ACCOUNTS=0"
+      assert out =~ "CLAUDE_CODE_OAUTH_TOKEN"
+      assert out =~ "ignored"
     end
 
-    test "fails, pointing at the runbook, when held off by un-migrated legacy credentials" do
+    test "fails, pointing at the runbook, on un-migrated legacy credentials" do
       stub_routes(
         accounts_routes(%{
-          "enabled" => false,
           "decision" => "unmigrated_legacy_credentials",
           "stranded_workspaces" => ["default", "emricare"],
           "server_env_token" => true
@@ -1509,17 +1502,18 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       assert out =~ "default, emricare"
       assert out =~ "CLAUDE_CODE_OAUTH_TOKEN"
       assert out =~ "docs/provider-accounts-release-runbook.md"
-      assert out =~ "ARBITER_PROVIDER_ACCOUNTS=0"
+      # There is no legacy chain to keep any more, so no switch is offered.
+      refute out =~ "ARBITER_PROVIDER_ACCOUNTS"
+      refute out =~ "held OFF"
 
       result = Enum.find(Checks.run(), &(&1.name == "provider accounts"))
       refute result.blocks_readiness
     end
 
-    test "fails when accounts are on but a workspace would raise MissingCredentialError" do
+    test "fails when a workspace would raise MissingCredentialError" do
       stub_routes(
         accounts_routes(%{
-          "configured" => "true",
-          "decision" => "explicit_on",
+          "decision" => "migrated",
           "stranded_workspaces" => ["straggler"]
         })
       )

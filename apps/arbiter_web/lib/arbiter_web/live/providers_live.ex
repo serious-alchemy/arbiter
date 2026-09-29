@@ -15,10 +15,8 @@ defmodule ArbiterWeb.ProvidersLive do
   ## Actions
 
   Create an account, add or rotate a credential, attach or detach a
-  workspace. They exist only while `Arbiter.Accounts.enabled?/0` is true:
-  with the flag off the page is read-only under an explicit notice, and every
-  action handler refuses server-side too, so a hand-crafted event cannot
-  write through a page that shows no buttons.
+  workspace. Provider accounts are always on since the P13 flip (bd-9gqj8e),
+  so the page is never read-only.
 
   ## The secret
 
@@ -78,7 +76,6 @@ defmodule ArbiterWeb.ProvidersLive do
       |> assign(:attach_for, nil)
       |> assign(:attach_form, nil)
       |> assign(:attach_error, nil)
-      |> assign(:enabled?, false)
       |> assign(:rows, [])
       |> assign(:workspace_options, [])
       |> assign(:providers_loaded?, false)
@@ -95,7 +92,6 @@ defmodule ArbiterWeb.ProvidersLive do
   @impl true
   def handle_async(:providers, {:ok, data}, socket) do
     socket
-    |> assign(:enabled?, data.enabled?)
     |> assign(:rows, data.rows)
     |> assign(:workspace_options, data.workspace_options)
     |> assign(:providers_loaded?, true)
@@ -115,26 +111,15 @@ defmodule ArbiterWeb.ProvidersLive do
   # ---- events ---------------------------------------------------------------
 
   @impl true
-  def handle_event(event, params, socket) do
-    if Accounts.enabled?() do
-      action(event, params, socket)
-    else
-      {:noreply,
-       socket
-       |> fetch_providers()
-       |> put_flash(:error, "Accounts are not enabled on this install — this page is read-only.")}
-    end
-  end
-
-  defp action("new_account", _params, socket),
+  def handle_event("new_account", _params, socket),
     do:
       {:noreply,
        assign(socket, creating?: true, account_form: account_form(), account_error: nil)}
 
-  defp action("cancel_account", _params, socket),
+  def handle_event("cancel_account", _params, socket),
     do: {:noreply, assign(socket, creating?: false, account_error: nil)}
 
-  defp action("create_account", %{"account" => params}, socket) do
+  def handle_event("create_account", %{"account" => params}, socket) do
     with {:ok, attrs} <- account_attrs(params),
          {:ok, account} <- Accounts.create_account(attrs) do
       {:noreply,
@@ -153,7 +138,7 @@ defmodule ArbiterWeb.ProvidersLive do
     end
   end
 
-  defp action("open_credential", %{"id" => id}, socket) do
+  def handle_event("open_credential", %{"id" => id}, socket) do
     defaults =
       case find_row(socket, id) do
         %{account: account} -> Map.get(@credential_defaults, account.provider, %{})
@@ -168,14 +153,14 @@ defmodule ArbiterWeb.ProvidersLive do
      )}
   end
 
-  defp action("cancel_credential", _params, socket),
+  def handle_event("cancel_credential", _params, socket),
     do: {:noreply, assign(socket, credential_for: nil, credential_error: nil)}
 
-  defp action(
-         "rotate_credential",
-         %{"account_id" => id, "credential" => params},
-         socket
-       ) do
+  def handle_event(
+        "rotate_credential",
+        %{"account_id" => id, "credential" => params},
+        socket
+      ) do
     secret = params |> Map.get("secret", "") |> to_string() |> String.trim()
     # Everything the form re-renders with — never the secret.
     echo = Map.take(params, ["kind", "env_var"])
@@ -212,13 +197,13 @@ defmodule ArbiterWeb.ProvidersLive do
     end
   end
 
-  defp action("open_attach", %{"id" => id}, socket),
+  def handle_event("open_attach", %{"id" => id}, socket),
     do: {:noreply, assign(socket, attach_for: id, attach_form: attach_form(), attach_error: nil)}
 
-  defp action("cancel_attach", _params, socket),
+  def handle_event("cancel_attach", _params, socket),
     do: {:noreply, assign(socket, attach_for: nil, attach_error: nil)}
 
-  defp action("attach", %{"account_id" => id, "attach" => params}, socket) do
+  def handle_event("attach", %{"account_id" => id, "attach" => params}, socket) do
     with %{account: account} <- find_row(socket, id) || {:error, :not_found},
          {:ok, opts} <- share_opts(Map.get(params, "share")),
          {:ok, _link} <-
@@ -244,7 +229,7 @@ defmodule ArbiterWeb.ProvidersLive do
     end
   end
 
-  defp action("detach", %{"account" => account_id, "workspace" => workspace_id}, socket) do
+  def handle_event("detach", %{"account" => account_id, "workspace" => workspace_id}, socket) do
     case Accounts.detach_workspace(workspace_id, account_id) do
       {:ok, _link} ->
         {:noreply, socket |> put_flash(:info, "Detached.") |> fetch_providers()}
@@ -254,7 +239,7 @@ defmodule ArbiterWeb.ProvidersLive do
     end
   end
 
-  defp action("delete_account", %{"id" => id}, socket) do
+  def handle_event("delete_account", %{"id" => id}, socket) do
     case Accounts.delete_account(id) do
       {:ok, account} ->
         {:noreply,
@@ -267,10 +252,10 @@ defmodule ArbiterWeb.ProvidersLive do
     end
   end
 
-  defp action("retry_providers", _params, socket),
+  def handle_event("retry_providers", _params, socket),
     do: {:noreply, socket |> assign(:providers_error, nil) |> fetch_providers()}
 
-  defp action(_event, _params, socket), do: {:noreply, socket}
+  def handle_event(_event, _params, socket), do: {:noreply, socket}
 
   # ---- state ----------------------------------------------------------------
 
@@ -293,14 +278,13 @@ defmodule ArbiterWeb.ProvidersLive do
   defp load_error({%{__exception__: true} = error, _stacktrace}), do: Exception.message(error)
   defp load_error(reason), do: Exception.format_exit(reason)
 
-  # Runs in the async task: `Accounts.enabled?/0`, the account/pool/pace,
+  # Runs in the async task: the account/pool/pace,
   # concurrency, credential-health and per-account cost overview (ledger
   # reads), and the workspace options for the attach form — kept off the
   # connected mount and every tick so a slow ledger scan can never block the
   # LiveView process (bd-34f7gt).
   defp load_providers do
     %{
-      enabled?: Accounts.enabled?(),
       rows: Overview.list([]),
       workspace_options: Overview.workspace_options()
     }
@@ -510,7 +494,7 @@ defmodule ArbiterWeb.ProvidersLive do
         >
           <:actions>
             <ArbiterWeb.CoreComponents.Core.button
-              :if={@providers_loaded? and @enabled? and not @creating?}
+              :if={@providers_loaded? and not @creating?}
               id="new-account-button"
               phx-click="new_account"
               variant="primary"
@@ -570,28 +554,8 @@ defmodule ArbiterWeb.ProvidersLive do
             </div>
           </div>
 
-          <div
-            :if={@providers_loaded? and not @enabled?}
-            id="accounts-disabled-notice"
-            role="status"
-            class="flex items-start gap-3 rounded-[var(--radius-panel)] border border-[var(--arb-attention-edge)] bg-[var(--arb-attention-wash)] px-4 py-3 text-[13px] text-[var(--arb-attention)]"
-          >
-            <ArbiterWeb.CoreComponents.Core.icon
-              name="hero-lock-closed"
-              size={16}
-              class="mt-0.5 shrink-0"
-            />
-            <div class="flex flex-col gap-0.5">
-              <span class="font-medium">Accounts not enabled on this install</span>
-              <span class="text-[12px] opacity-90">
-                <code class="font-[family-name:var(--font-mono)]">:provider_accounts_enabled</code>
-                is off, so workers still take credentials from each workspace's worker env. This page is read-only until it is turned on.
-              </span>
-            </div>
-          </div>
-
           <ArbiterWeb.CoreComponents.Core.panel
-            :if={@providers_loaded? and @enabled? and @creating?}
+            :if={@providers_loaded? and @creating?}
             id="new-account-panel"
             title="New provider account"
             meta="no credential needed yet"
@@ -692,7 +656,6 @@ defmodule ArbiterWeb.ProvidersLive do
                   {health_label(row.health)}
                 </span>
                 <button
-                  :if={@enabled?}
                   id={"delete-account-#{row.account.id}"}
                   type="button"
                   phx-click="delete_account"
@@ -772,7 +735,7 @@ defmodule ArbiterWeb.ProvidersLive do
                       Credential
                     </h3>
                     <ArbiterWeb.CoreComponents.Core.button
-                      :if={@enabled? and @credential_for != row.account.id}
+                      :if={@credential_for != row.account.id}
                       id={"account-#{row.account.id}-credential-button"}
                       phx-click="open_credential"
                       phx-value-id={row.account.id}
@@ -808,7 +771,7 @@ defmodule ArbiterWeb.ProvidersLive do
                   </span>
 
                   <.form
-                    :if={@enabled? and @credential_for == row.account.id}
+                    :if={@credential_for == row.account.id}
                     for={@credential_form}
                     id={"credential-form-#{row.account.id}"}
                     phx-submit="rotate_credential"
@@ -900,7 +863,6 @@ defmodule ArbiterWeb.ProvidersLive do
                     ≤{link.share}
                   </span>
                   <button
-                    :if={@enabled?}
                     type="button"
                     id={"detach-#{row.account.id}-#{link.workspace_id}"}
                     phx-click="detach"
@@ -914,7 +876,7 @@ defmodule ArbiterWeb.ProvidersLive do
                   </button>
                 </span>
                 <ArbiterWeb.CoreComponents.Core.button
-                  :if={@enabled? and @attach_for != row.account.id}
+                  :if={@attach_for != row.account.id}
                   id={"account-#{row.account.id}-attach-button"}
                   phx-click="open_attach"
                   phx-value-id={row.account.id}
@@ -927,7 +889,7 @@ defmodule ArbiterWeb.ProvidersLive do
                 </ArbiterWeb.CoreComponents.Core.button>
 
                 <.form
-                  :if={@enabled? and @attach_for == row.account.id}
+                  :if={@attach_for == row.account.id}
                   for={@attach_form}
                   id={"attach-form-#{row.account.id}"}
                   phx-submit="attach"

@@ -25,8 +25,7 @@ defmodule Arbiter.Accounts.Overview do
       quota %), or whenever the ledger rows carry no cost at all; never folded
       into a misleading `$0.00`.
 
-  Pure reads. Nothing here gates on `Arbiter.Accounts.enabled?/0` — the page
-  is readable with the flag off; only its actions are gated.
+  Pure reads.
   """
 
   require Ash.Query

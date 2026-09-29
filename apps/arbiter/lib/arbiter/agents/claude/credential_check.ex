@@ -28,25 +28,21 @@ defmodule Arbiter.Agents.Claude.CredentialCheck do
   Exactly what a spawn's environment would carry:
 
     * the setup token `ConfigDir.oauth_token/1` resolves — the workspace's
-      provider account with `:provider_accounts_enabled` on; with it off, the
-      legacy chain (workspace `worker_env`, the server env, the install-wide
-      unambiguous workspace token);
+      provider account, the only source since the P13 flip (bd-9gqj8e);
     * or an `ANTHROPIC_API_KEY`: in the server's own environment (every spawn
-      inherits it), supplied by the workspace's provider account (flag on) or
-      `worker_env` (flag off), or named by the workspace's `agent.config`
-      `credentials_ref` / `api_keys` (`Arbiter.Agents.Claude.Config`).
+      inherits it), supplied by the workspace's provider account, or named
+      by the workspace's `agent.config` `credentials_ref` / `api_keys`
+      (`Arbiter.Agents.Claude.Config`).
 
   An API key never needed mode B, so a workspace that runs on one is not
   refused.
 
-  With the flag on, a workspace whose `worker_env` still carries a token no
-  account supplies makes `ConfigDir.oauth_token/1` raise
+  A workspace whose `worker_env` still carries a token no account supplies makes `ConfigDir.oauth_token/1` raise
   `Arbiter.Accounts.MissingCredentialError`; here that is a `:missing` answer
   (`:credential_not_migrated`) rather than a raise, so the dispatch guard can
   hold and escalate it like any other missing credential.
   """
 
-  alias Arbiter.Accounts
   alias Arbiter.Accounts.Credentials
   alias Arbiter.Accounts.MissingCredentialError
   alias Arbiter.Accounts.ProviderAccount
@@ -63,14 +59,13 @@ defmodule Arbiter.Agents.Claude.CredentialCheck do
   @typedoc """
   Why no credential resolved:
 
-    * `:no_account` — flag on, the workspace has no Claude account join.
-    * `:no_credential` — flag on, the joined account has no active setup token.
-    * `:account_disabled` — flag on, the joined account is parked.
-    * `:credential_not_migrated` — flag on, the token is still only in the
+    * `:no_account` — the workspace has no Claude account join.
+    * `:no_credential` — the joined account has no active setup token.
+    * `:account_disabled` — the joined account is parked.
+    * `:credential_not_migrated` — the token is still only in the
       workspace's `worker_env` (`MissingCredentialError`).
-    * `:no_install_credential` — flag on, no workspace in hand and no single
+    * `:no_install_credential` — no workspace in hand and no single
       install-wide account credential.
-    * `:no_token` — flag off, nothing in the legacy chain.
   """
   @type reason ::
           :no_account
@@ -78,7 +73,6 @@ defmodule Arbiter.Agents.Claude.CredentialCheck do
           | :account_disabled
           | :credential_not_migrated
           | :no_install_credential
-          | :no_token
 
   @type missing :: %{
           provider: :claude,
@@ -157,11 +151,7 @@ defmodule Arbiter.Agents.Claude.CredentialCheck do
   end
 
   defp workspace_api_key?(%Workspace{} = ws) do
-    if Accounts.enabled?() do
-      match?({:ok, _}, Credentials.workspace_credential(ws.id, @api_key_var))
-    else
-      ws |> Workspace.worker_env_map() |> Map.get(@api_key_var) |> present?()
-    end
+    match?({:ok, _}, Credentials.workspace_credential(ws.id, @api_key_var))
   rescue
     _ -> false
   end
@@ -190,20 +180,13 @@ defmodule Arbiter.Agents.Claude.CredentialCheck do
 
   defp diagnose(_workspace, {:not_migrated, _}), do: {:credential_not_migrated, nil}
 
+  defp diagnose(nil, :none), do: {:no_install_credential, nil}
+
   defp diagnose(workspace, :none) do
-    cond do
-      not Accounts.enabled?() ->
-        {:no_token, nil}
-
-      is_nil(workspace) ->
-        {:no_install_credential, nil}
-
-      true ->
-        case Resolver.account(workspace.id, :claude) do
-          nil -> {:no_account, nil}
-          %ProviderAccount{enabled: false} = account -> {:account_disabled, account}
-          %ProviderAccount{} = account -> {:no_credential, account}
-        end
+    case Resolver.account(workspace.id, :claude) do
+      nil -> {:no_account, nil}
+      %ProviderAccount{enabled: false} = account -> {:account_disabled, account}
+      %ProviderAccount{} = account -> {:no_credential, account}
     end
   end
 
@@ -217,7 +200,6 @@ defmodule Arbiter.Agents.Claude.CredentialCheck do
         :account_disabled -> "account claude:#{account.slug} is parked (enabled: false)"
         :credential_not_migrated -> "its #{@token_var} is still only in worker_env"
         :no_install_credential -> "no single install-wide Claude account credential exists"
-        :no_token -> "no #{@token_var} in its worker_env or the server environment"
       end
   end
 
@@ -241,12 +223,6 @@ defmodule Arbiter.Agents.Claude.CredentialCheck do
 
   defp fix(:no_install_credential, _ws_id, _account) do
     "Give the install one Claude account that holds a setup token: " <> rotate("<slug>")
-  end
-
-  defp fix(:no_token, _ws_id, _account) do
-    "Set #{@token_var}=#{@setup_token_hint} in the workspace's worker_env or in " <>
-      "~/.arbiter/arbiter.env (then restart), or enable provider accounts and " <>
-      rotate("<slug>")
   end
 
   defp rotate(slug) do

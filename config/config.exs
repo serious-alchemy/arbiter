@@ -105,22 +105,6 @@ config :arbiter, :quota,
 # Google's Cloud Code Assist API when `GET /api/quota` / `arb quota` / the MCP
 # `quota_get` tool is invoked. Enabled by default; `config/test.exs` turns it
 # off so the quota surface stays a pure DB read under test.
-# Provider accounts (docs/provider-account-design.md §7.5, bd-77j2if). The
-# read-flip switch for phase P3 (bd-aiodva) onward: when true, `ConfigDir.oauth_token/1`
-# `ConfigDir.env/1` and `WorkerEnv.resolve/1` source provider credentials from
-# `provider_accounts` / `provider_credentials` instead of the workspace's
-# `worker_env` blob.
-#
-# It ships `:auto` (bd-cvvb02, v0.2.0): `Arbiter.Boot.ProviderAccounts`
-# resolves it at boot — on for a fresh install (and each workspace is joined to
-# `<provider>:default`) or an already-migrated one; held OFF, with a boot
-# warning and an `arb server doctor` [fail], for an un-migrated install that
-# still carries legacy credentials, so an upgrade never starts raising
-# MissingCredentialError. `config/runtime.exs` turns an explicit
-# `ARBITER_PROVIDER_ACCOUNTS=1/0` into `true`/`false`, which always wins. See
-# `Arbiter.Accounts.Enablement` and docs/provider-accounts-release-runbook.md.
-config :arbiter, :provider_accounts_enabled, :auto
-
 config :arbiter, :cloud_code_quota, enabled: true
 
 # Periodic refresh of the non-Anthropic quota providers (Codex, Gemini CLI,

@@ -554,13 +554,11 @@ defmodule Arbiter.Release do
 
     """
 
-    The moved key is no longer in the workspace's worker_env. The account row
-    supplies it to a spawn only with provider accounts on: restart the server
-    and the default (`:auto`) resolves on for a migrated install, or set
-    ARBITER_PROVIDER_ACCOUNTS=1 in the server's environment to pin it (an
-    explicit ARBITER_PROVIDER_ACCOUNTS=0 keeps it off). Migrate every
-    workspace that carries a provider credential first. To undo this
-    migration instead:
+    The moved key is no longer in the workspace's worker_env; the account row
+    supplies it to every spawn from now on. Migrate every workspace that
+    carries a provider credential, then restart the server. To undo this
+    migration instead (its workspaces then have no credential a spawn reads
+    until they are migrated again):
 
         #{rollback}\
     """

@@ -1,9 +1,10 @@
 defmodule Arbiter.Agents.ClaudeTest do
   use ExUnit.Case, async: false
 
-  # bd-bw3466: no Ecto sandbox here, so ConfigDir's install-wide worker_env
-  # scan can't read Workspace and logs a warning on every call. Expected in this
-  # file; capture it so the run stays readable (logs still surface on failure).
+  # No Ecto sandbox here, so ConfigDir's workspace-less read of the
+  # install-wide account credential can't reach the database and degrades to
+  # "no credential". Capture any log so the run stays readable (logs still
+  # surface on failure).
   @moduletag :capture_log
 
   alias Arbiter.Agents.Claude
@@ -365,18 +366,15 @@ defmodule Arbiter.Agents.ClaudeTest do
     end
   end
 
+  # bd-2zigo1 exported a server-env `CLAUDE_CODE_OAUTH_TOKEN` to every spawn.
+  # Since the P13 flip (bd-9gqj8e) the token comes from the provider account
+  # alone (`arbiter/accounts/legacy_chain_removed_test.exs` covers that side
+  # against a real database); the server env value is inert, and the pair is
+  # an explicit unset so it cannot leak into the child either.
   describe "spawn_env/1 (CLAUDE_CODE_OAUTH_TOKEN, bd-2zigo1)" do
     setup do
       prev_oauth_token = System.get_env("CLAUDE_CODE_OAUTH_TOKEN")
       System.delete_env("CLAUDE_CODE_OAUTH_TOKEN")
-
-      # `worker_env` as the token's source is the pre-P3 behaviour (bd-aiodva
-      # acceptance 2); the provider-account read behind
-      # `:provider_accounts_enabled` is covered by
-      # `arbiter/accounts/read_flip_test.exs`. Pin the flag off so the
-      # `ARBITER_PROVIDER_ACCOUNTS=1` matrix leg does not reinterpret these.
-      prev_flag = Application.get_env(:arbiter, :provider_accounts_enabled)
-      Application.put_env(:arbiter, :provider_accounts_enabled, false)
 
       on_exit(fn ->
         Claude.Config.clear()
@@ -384,11 +382,6 @@ defmodule Arbiter.Agents.ClaudeTest do
         case prev_oauth_token do
           nil -> System.delete_env("CLAUDE_CODE_OAUTH_TOKEN")
           v -> System.put_env("CLAUDE_CODE_OAUTH_TOKEN", v)
-        end
-
-        case prev_flag do
-          nil -> Application.delete_env(:arbiter, :provider_accounts_enabled)
-          v -> Application.put_env(:arbiter, :provider_accounts_enabled, v)
         end
       end)
 
@@ -399,10 +392,11 @@ defmodule Arbiter.Agents.ClaudeTest do
       assert Claude.spawn_env([]) == [{"CLAUDE_CODE_OAUTH_TOKEN", false}]
     end
 
-    test "exports CLAUDE_CODE_OAUTH_TOKEN under its own literal name, unchanged" do
+    test "a server env token is never exported: the pair stays an explicit unset" do
       System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "oauth-session-token")
 
-      assert Claude.spawn_env([]) == [{"CLAUDE_CODE_OAUTH_TOKEN", "oauth-session-token"}]
+      assert Claude.spawn_env([]) == [{"CLAUDE_CODE_OAUTH_TOKEN", false}]
+      assert Claude.spawn_env(workspace: nil) == [{"CLAUDE_CODE_OAUTH_TOKEN", false}]
     end
 
     test "never remaps the OAuth token onto ANTHROPIC_API_KEY" do
@@ -417,7 +411,7 @@ defmodule Arbiter.Agents.ClaudeTest do
       System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "oauth-session-token")
 
       assert Claude.spawn_env(api_key: "literal-token") == [
-               {"CLAUDE_CODE_OAUTH_TOKEN", "oauth-session-token"},
+               {"CLAUDE_CODE_OAUTH_TOKEN", false},
                {"ANTHROPIC_API_KEY", "literal-token"}
              ]
     end
@@ -438,21 +432,13 @@ defmodule Arbiter.Agents.ClaudeTest do
 
       Enum.each(prev, fn {var, _} -> System.delete_env(var) end)
 
-      # Flag off keeps this DB-free: the legacy chain's workspace scan fails
-      # soft (no sandbox) and reads as "no install-wide token".
-      prev_flag = Application.get_env(:arbiter, :provider_accounts_enabled)
-      Application.put_env(:arbiter, :provider_accounts_enabled, false)
-
+      # No sandbox: the install-wide account read fails soft and reads as
+      # "no install-wide credential".
       on_exit(fn ->
         Enum.each(prev, fn
           {var, nil} -> System.delete_env(var)
           {var, v} -> System.put_env(var, v)
         end)
-
-        case prev_flag do
-          nil -> Application.delete_env(:arbiter, :provider_accounts_enabled)
-          v -> Application.put_env(:arbiter, :provider_accounts_enabled, v)
-        end
       end)
 
       :ok
@@ -474,82 +460,17 @@ defmodule Arbiter.Agents.ClaudeTest do
     end
 
     @tag :capture_log
-    test "probes as before once a setup token resolves" do
+    test "a server-env setup token no longer makes it probe (P13)" do
       System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "server-token")
+
+      assert {:error, {:no_setup_token, _}} = Claude.auth_probe_argv([])
+    end
+
+    @tag :capture_log
+    test "probes as before once a credential resolves" do
+      System.put_env("ANTHROPIC_API_KEY", "sk-ant-server")
 
       refute match?({:error, {:no_setup_token, _}}, Claude.auth_probe_argv([]))
-    end
-  end
-
-  describe "spawn_env/1 (workspace-scoped CLAUDE_CODE_OAUTH_TOKEN, bd-bw3466)" do
-    setup do
-      prev_oauth_token = System.get_env("CLAUDE_CODE_OAUTH_TOKEN")
-      System.delete_env("CLAUDE_CODE_OAUTH_TOKEN")
-
-      # Pre-P3 source (see the bd-2zigo1 block above): pin the flag off so the
-      # `ARBITER_PROVIDER_ACCOUNTS=1` matrix leg does not reinterpret these.
-      prev_flag = Application.get_env(:arbiter, :provider_accounts_enabled)
-      Application.put_env(:arbiter, :provider_accounts_enabled, false)
-
-      on_exit(fn ->
-        Claude.Config.clear()
-
-        case prev_oauth_token do
-          nil -> System.delete_env("CLAUDE_CODE_OAUTH_TOKEN")
-          v -> System.put_env("CLAUDE_CODE_OAUTH_TOKEN", v)
-        end
-
-        case prev_flag do
-          nil -> Application.delete_env(:arbiter, :provider_accounts_enabled)
-          v -> Application.put_env(:arbiter, :provider_accounts_enabled, v)
-        end
-      end)
-
-      :ok
-    end
-
-    defp workspace_with_worker_env(env) do
-      enc =
-        env
-        |> :erlang.term_to_binary()
-        |> Arbiter.Vault.encrypt!()
-        |> Base.encode64()
-
-      %Arbiter.Tasks.Workspace{
-        id: "ws-#{System.unique_integer([:positive])}",
-        name: "spawnenv",
-        encrypted_worker_env: enc
-      }
-    end
-
-    test "resolves the token from the workspace threaded on opts[:workspace]" do
-      ws = workspace_with_worker_env(%{"CLAUDE_CODE_OAUTH_TOKEN" => "ws-token"})
-
-      # Without the workspace there is nothing to consult, so the pair is an
-      # explicit unset rather than the workspace's token.
-      assert Claude.spawn_env([]) == [{"CLAUDE_CODE_OAUTH_TOKEN", false}]
-      assert Claude.spawn_env(workspace: ws) == [{"CLAUDE_CODE_OAUTH_TOKEN", "ws-token"}]
-    end
-
-    test "the workspace token wins over a server env var of the same name" do
-      System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "server-token")
-      ws = workspace_with_worker_env(%{"CLAUDE_CODE_OAUTH_TOKEN" => "ws-token"})
-
-      assert Claude.spawn_env(workspace: ws) == [{"CLAUDE_CODE_OAUTH_TOKEN", "ws-token"}]
-    end
-
-    test "falls back to the server env var when the workspace defines no token" do
-      System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "server-token")
-      ws = workspace_with_worker_env(%{"LOG_LEVEL" => "debug"})
-
-      assert Claude.spawn_env(workspace: ws) == [{"CLAUDE_CODE_OAUTH_TOKEN", "server-token"}]
-    end
-
-    test "a nil / absent :workspace opt is unchanged from the bd-2zigo1 behaviour" do
-      System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "server-token")
-
-      assert Claude.spawn_env(workspace: nil) == [{"CLAUDE_CODE_OAUTH_TOKEN", "server-token"}]
-      assert Claude.spawn_env([]) == [{"CLAUDE_CODE_OAUTH_TOKEN", "server-token"}]
     end
   end
 

@@ -3,7 +3,8 @@ defmodule Arbiter.ReleaseAccountsTest do
   bd-1zceei: the provider-accounts census / migrate / rollback operations are
   callable as `Arbiter.Release.accounts_*` functions — no Mix, no full
   `Arbiter.Application` tree — so a release install can run them through
-  `bin/arbiter eval` and turn `:provider_accounts_enabled` on.
+  `bin/arbiter eval` before upgrading to the P13 flip release, which
+  requires provider accounts.
 
   Every test here greps the operator-visible output (stdout, stderr, Logger)
   *and* the returned term for the seeded fixture credential: acceptance 5's

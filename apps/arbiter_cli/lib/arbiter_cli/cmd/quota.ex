@@ -161,9 +161,9 @@ defmodule ArbiterCli.Cmd.Quota do
 
   # ---- account policy (bd-c7ll4t) -----------------------------------------
 
-  # With `:provider_accounts_enabled` on, `Arbiter.Quota.Gate` resolves every
-  # threshold as `min(account, workspace)` — an account's flat ceiling can
-  # bind tighter than a workspace set to paced/looser, silently (bd-5ps98m).
+  # `Arbiter.Quota.Gate` resolves every threshold as `min(account, workspace)`
+  # — an account's flat ceiling can bind tighter than a workspace set to
+  # paced/looser, silently (bd-5ps98m).
   # `--account` shows the account's own policy on its own (no workspace side
   # to bind against); `--workspace`/the default shows which side is actually
   # in force.

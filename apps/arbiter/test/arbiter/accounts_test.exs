@@ -956,11 +956,7 @@ defmodule Arbiter.AccountsTest do
                Accounts.delete_account(account.id)
     end
 
-    test "refused when the account would drop a workspace's sole active-credential source with the flag on" do
-      prev = Application.get_env(:arbiter, :provider_accounts_enabled)
-      Application.put_env(:arbiter, :provider_accounts_enabled, true)
-      on_exit(fn -> restore_flag(prev) end)
-
+    test "refused when the account would drop a workspace's sole active-credential source" do
       account = create_account!(%{provider: :claude, slug: "delete-missing-credential-risk"})
 
       {:ok, ws} =
@@ -1055,9 +1051,6 @@ defmodule Arbiter.AccountsTest do
       assert {:error, :hard_delete_blocked} = Accounts.delete_account(account.id, hard: true)
     end
   end
-
-  defp restore_flag(nil), do: Application.delete_env(:arbiter, :provider_accounts_enabled)
-  defp restore_flag(value), do: Application.put_env(:arbiter, :provider_accounts_enabled, value)
 
   # A plain read-time aggregation over usage_events — not Usage.summarize/1's
   # workspace-approximation path (that's P9's job to make exact), a direct

@@ -1,8 +1,8 @@
 defmodule ArbiterWeb.ProvidersLiveTest do
   @moduledoc """
   `/providers` (bd-cb86s4): provider accounts with their pools, concurrency,
-  credential health and 30-day cost — and, with `:provider_accounts_enabled`
-  on, create / add-or-rotate credential / attach / detach.
+  credential health and 30-day cost — and create / add-or-rotate credential /
+  attach / detach, always available since the P13 flip (bd-9gqj8e).
   """
   use ArbiterWeb.ConnCase, async: false
 
@@ -27,20 +27,6 @@ defmodule ArbiterWeb.ProvidersLiveTest do
     {:ok, view, _html} = live(conn, path)
     {:ok, view, render_async(view, @async_timeout)}
   end
-
-  setup do
-    prev = Application.get_env(:arbiter, :provider_accounts_enabled)
-
-    on_exit(fn ->
-      if is_nil(prev),
-        do: Application.delete_env(:arbiter, :provider_accounts_enabled),
-        else: Application.put_env(:arbiter, :provider_accounts_enabled, prev)
-    end)
-
-    :ok
-  end
-
-  defp enable!(on?), do: Application.put_env(:arbiter, :provider_accounts_enabled, on?)
 
   defp workspace!(name), do: Ash.create!(Workspace, %{name: name, prefix: "pv"})
 
@@ -78,11 +64,6 @@ defmodule ArbiterWeb.ProvidersLiveTest do
   end
 
   describe "the account list" do
-    setup do
-      enable!(true)
-      :ok
-    end
-
     test "is linked from the nav", %{conn: conn} do
       {:ok, view, _html} = live_providers(conn)
       assert has_element?(view, ~s(a[href="/providers"]))
@@ -217,11 +198,6 @@ defmodule ArbiterWeb.ProvidersLiveTest do
   end
 
   describe "create an account" do
-    setup do
-      enable!(true)
-      :ok
-    end
-
     test "creates the account and lists it", %{conn: conn} do
       {:ok, view, _html} = live_providers(conn)
 
@@ -270,11 +246,6 @@ defmodule ArbiterWeb.ProvidersLiveTest do
   end
 
   describe "add or rotate a credential" do
-    setup do
-      enable!(true)
-      :ok
-    end
-
     test "posts the secret to the encrypted store and never echoes it back", %{conn: conn} do
       account = account!(:claude, "pv-rotate")
       {:ok, view, _html} = live_providers(conn)
@@ -371,11 +342,6 @@ defmodule ArbiterWeb.ProvidersLiveTest do
   end
 
   describe "attach and detach" do
-    setup do
-      enable!(true)
-      :ok
-    end
-
     test "attaches a workspace to the account", %{conn: conn} do
       ws = workspace!("pv-attach-me")
       account = account!(:claude, "pv-attach")
@@ -409,11 +375,6 @@ defmodule ArbiterWeb.ProvidersLiveTest do
   end
 
   describe "delete" do
-    setup do
-      enable!(true)
-      :ok
-    end
-
     test "soft-deletes an unattached account, hiding its card", %{conn: conn} do
       account = account!(:claude, "pv-delete-me")
       {:ok, view, _html} = live_providers(conn)
@@ -440,65 +401,26 @@ defmodule ArbiterWeb.ProvidersLiveTest do
     end
   end
 
-  describe "with accounts disabled" do
-    setup do
-      enable!(false)
-      :ok
-    end
-
-    test "lists accounts read-only under an explicit notice", %{conn: conn} do
-      ws = workspace!("pv-ro")
-      account = account!(:claude, "pv-readonly")
+  # P13 (bd-9gqj8e): there is no flag to hold the page read-only any more.
+  describe "never read-only" do
+    test "shows no disabled notice and offers every action", %{conn: conn} do
+      ws = workspace!("pv-rw")
+      account = account!(:claude, "pv-writable")
       {:ok, _} = Accounts.attach_workspace(ws.id, :claude, account.id)
 
       {:ok, view, _html} = live_providers(conn)
 
-      assert has_element?(
-               view,
-               "#accounts-disabled-notice",
-               "Accounts not enabled on this install"
-             )
-
+      refute has_element?(view, "#accounts-disabled-notice")
       assert has_element?(view, "#account-#{account.id}")
-      refute has_element?(view, "#new-account-button")
-      refute has_element?(view, "#account-#{account.id}-credential-button")
-      refute has_element?(view, "#account-#{account.id}-attach-button")
-      refute has_element?(view, "#detach-#{account.id}-#{ws.id}")
-      refute has_element?(view, "#delete-account-#{account.id}")
-    end
-
-    test "the server refuses every action, not just the hidden buttons", %{conn: conn} do
-      ws = workspace!("pv-ro-2")
-      account = account!(:claude, "pv-readonly-2")
-      {:ok, _} = Accounts.attach_workspace(ws.id, :claude, account.id)
-      {:ok, view, _html} = live_providers(conn)
-
-      render_hook(view, "create_account", %{
-        "account" => %{"provider" => "claude", "slug" => "sneaky"}
-      })
-
-      render_hook(view, "rotate_credential", %{
-        "account_id" => account.id,
-        "credential" => %{"kind" => "oauth_token", "env_var" => "X", "secret" => @secret}
-      })
-
-      render_hook(view, "detach", %{"account" => account.id, "workspace" => ws.id})
-      render_hook(view, "delete_account", %{"id" => account.id})
-
-      assert {:error, :not_found} = Accounts.get_account("claude:sneaky")
-      assert active_credentials(account) == []
-      assert [_] = links(account)
-      assert {:ok, %{deleted_at: nil}} = Accounts.get_account(account.id)
-      refute render(view) =~ @secret
+      assert has_element?(view, "#new-account-button")
+      assert has_element?(view, "#account-#{account.id}-credential-button")
+      assert has_element?(view, "#account-#{account.id}-attach-button")
+      assert has_element?(view, "#detach-#{account.id}-#{ws.id}")
+      assert has_element?(view, "#delete-account-#{account.id}")
     end
   end
 
   describe "async load" do
-    setup do
-      enable!(true)
-      :ok
-    end
-
     # Holds the overview read (`Overview.list/1`) in flight until the test
     # says go, so the loading state is something to assert on rather than a
     # race — same discipline as `worker_index_live_test.exs`'s
