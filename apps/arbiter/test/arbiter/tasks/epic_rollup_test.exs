@@ -297,12 +297,13 @@ defmodule Arbiter.Tasks.EpicRollupTest do
       refute r.needs_you
     end
 
-    # bd-8if9zt: the board's Waiting card now flags from the ticket's
-    # attention, where a question is the coordinator's to answer first; the
-    # epic rollup keeps the earlier worker-status rule until the epic surfaces
-    # move onto attention too (`Arbiter.Board.Snapshot` moduledoc). This pins
-    # that documented split so moving one side is a deliberate change.
-    test "keeps the worker-status rule the board's needs_you left for attention", ctx do
+    # bd-8if9zt / bd-79w1fs: the board's In progress card flags from the
+    # ticket's attention, where a question is the coordinator's to answer
+    # first; the epic rollup keeps the earlier worker-status rule until the
+    # epic surfaces move onto attention too (`Arbiter.Board.Snapshot`
+    # moduledoc). This pins that documented split so moving one side is a
+    # deliberate change.
+    test "keeps the worker-status rule the board left for attention", ctx do
       c = child(ctx.ws, ctx.epic, "shared-predicate-child", as: :running)
 
       w = worker(c.id, :question, %{meta: %{await_reason: "which?"}})
@@ -324,10 +325,10 @@ defmodule Arbiter.Tasks.EpicRollupTest do
           watchdog_live: watchdog_live
         })
 
-      [card] = board.waiting
+      [card] = board.in_progress
 
+      # Not the operator's on the board: the coordinator answers first.
       assert %{owner: :coordinator, waiting_on: :answer} = card.attention
-      assert card.needs_you == false
       assert epic_r.needs_you == true
     end
   end
@@ -382,7 +383,7 @@ defmodule Arbiter.Tasks.EpicRollupTest do
           watchdog_live: watchdog_live
         })
 
-      assert [%{status: :merging, needs_you: true}] = board.waiting
+      assert [%{status: :merging, attention: %{owner: :operator}}] = board.merging
       assert epic_r.needs_you
     end
   end

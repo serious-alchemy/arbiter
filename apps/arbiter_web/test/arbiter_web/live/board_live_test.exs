@@ -138,23 +138,23 @@ defmodule ArbiterWeb.BoardLiveTest do
   end
 
   describe "columns" do
-    test "renders the five stage columns", %{conn: conn} do
+    test "renders the seven lifecycle columns", %{conn: conn} do
       {:ok, view, html} = live_board(conn)
 
-      assert html =~ "Backlog"
-      assert html =~ "Ready"
-      assert html =~ "Running"
-      assert html =~ "Waiting"
+      for label <- ~w(Backlog Blocked Ready Merging Verifying) do
+        assert html =~ label
+      end
+
+      assert html =~ "In progress"
       assert html =~ "Closed · last 24h"
 
-      assert has_element?(view, "#board-column-backlog")
-      assert has_element?(view, "#board-column-waiting")
-      # The two columns Waiting replaced are gone, not renamed alongside it.
-      # ("Merge queue" as a phrase survives in the top nav, so match the
-      # columns themselves rather than the page text.)
-      refute has_element?(view, "#board-column-needs-you")
-      refute has_element?(view, "#board-column-merge")
-      refute html =~ "Needs you"
+      for key <- ~w(backlog blocked ready in_progress merging verifying closed) do
+        assert has_element?(view, "#board-column-#{key}")
+      end
+
+      # bd-79w1fs: the interim five columns are gone, not renamed alongside.
+      refute has_element?(view, "#board-column-running")
+      refute has_element?(view, "#board-column-waiting")
     end
 
     test "an open issue nobody is working shows up in Ready", %{conn: conn, ws: ws} do
@@ -290,7 +290,7 @@ defmodule ArbiterWeb.BoardLiveTest do
       assert card_navigates_to?(view, task.id, "/tasks/#{task.id}")
     end
 
-    test "Running card body navigates to the task page, not the worker page", %{
+    test "In progress card body navigates to the task page, not the worker page", %{
       conn: conn,
       ws: ws
     } do
@@ -303,7 +303,7 @@ defmodule ArbiterWeb.BoardLiveTest do
       refute card_navigates_to?(view, task.id, "/workers/#{task.id}")
     end
 
-    test "Waiting card body navigates to the task page, not the worker page", %{
+    test "Merging card body navigates to the task page, not the worker page", %{
       conn: conn,
       ws: ws
     } do
@@ -341,7 +341,7 @@ defmodule ArbiterWeb.BoardLiveTest do
     end
   end
 
-  describe "Running column: the activity line links to the worker" do
+  describe "In progress column: the activity line links to the worker" do
     test "the activity line is a link to the worker page", %{conn: conn, ws: ws} do
       task = issue(ws, "in flight")
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)
@@ -350,22 +350,22 @@ defmodule ArbiterWeb.BoardLiveTest do
 
       assert has_element?(
                view,
-               ~s(#board-column-running [id="card-#{task.id}"] a[href="/workers/#{task.id}"])
+               ~s(#board-column-in_progress [id="card-#{task.id}"] a[href="/workers/#{task.id}"])
              )
     end
   end
 
-  describe "Waiting column: the action chip keeps today's contextual destination" do
-    test "awaiting verification points the chip at the task page", %{conn: conn, ws: ws} do
+  describe "the activity line keeps its contextual destination" do
+    test "a Verifying card goes to the task page, where the evidence is recorded", %{
+      conn: conn,
+      ws: ws
+    } do
       task = working_issue(ws, "doctor probe")
       {:ok, task} = Ash.update(task, %{}, action: :await_verification)
 
       {:ok, view, _html} = live_board(conn)
 
-      assert has_element?(
-               view,
-               ~s([id="card-#{task.id}"] a[href="/tasks/#{task.id}"])
-             )
+      assert card_navigates_to?(view, task.id, "/tasks/#{task.id}")
     end
 
     test "a dead watchdog points the chip at the worker page, not the merge queue", %{
@@ -443,13 +443,15 @@ defmodule ArbiterWeb.BoardLiveTest do
       refute html =~ "next up — dispatching"
     end
 
-    test "Backlog is newest-first", %{conn: conn, ws: ws} do
-      first = backlog_issue(ws, "thought one")
-      second = backlog_issue(ws, "thought two")
+    test "Backlog is in priority order, then rank", %{conn: conn, ws: ws} do
+      first = backlog_issue(ws, "thought one", %{priority: 3})
+      second = backlog_issue(ws, "thought two", %{priority: 1})
+      third = backlog_issue(ws, "thought three", %{priority: 3})
 
       {:ok, _view, html} = live_board(conn)
 
       assert board_position(html, second.id) < board_position(html, first.id)
+      assert board_position(html, first.id) < board_position(html, third.id)
     end
 
     test "the filter box reaches Backlog like every other column", %{conn: conn, ws: ws} do
@@ -558,87 +560,53 @@ defmodule ArbiterWeb.BoardLiveTest do
     end
   end
 
-  describe "reordering Ready (bd-asxw4e)" do
-    test "a reorder leaves the scheduler's order alone and says why", %{conn: conn, ws: ws} do
-      leader = issue(ws, "machine's pick", %{priority: 1})
-      underdog = issue(ws, "operator's pick", %{priority: 4})
-
-      {:ok, view, _html} = live_board(conn)
-
-      render_hook(view, "reorder_ready", %{"order" => [underdog.id, leader.id]})
-
-      html = render_async(view, @async_timeout)
-      # Autopilot dispatches in priority-then-rank order, so the board shows
-      # that order rather than a hand-ranking nothing else would follow.
-      assert board_position(html, leader.id) < board_position(html, underdog.id)
-      assert html =~ "priority order, then rank"
-    end
-  end
-
-  describe "drag is a human action, and Running is not one of its targets" do
-    test "dragging a card INTO Running is refused with an explanation", %{conn: conn, ws: ws} do
+  describe "drag is a human action, and In progress is not one of its targets" do
+    test "dragging a card INTO In progress is refused with an explanation", %{conn: conn, ws: ws} do
       task = issue(ws, "impatient")
 
       {:ok, view, _html} = live_board(conn)
 
-      html = drag(view, task.id, "ready", "running")
+      html = drag(view, task.id, "ready", "in_progress")
 
       assert html =~ "scheduler"
       # The card did not move. Whether it dispatches is the scheduler's call,
       # and it makes it from Ready.
       assert has_element?(view, ~s(#board-column-ready [id="card-#{task.id}"]))
-      refute has_element?(view, ~s(#board-column-running [id="card-#{task.id}"]))
+      refute has_element?(view, ~s(#board-column-in_progress [id="card-#{task.id}"]))
     end
   end
 
-  describe "pulling work out of Running" do
-    test "asks for confirmation before it stops anything", %{conn: conn, ws: ws} do
+  # bd-79w1fs: pulling a card out of In progress used to offer to stop its
+  # worker. Every cross-column drag but promote / demote is now refused: a
+  # live agent is stopped from its worker page, deliberately.
+  describe "dragging work out of In progress" do
+    test "is refused, and the worker keeps running", %{conn: conn, ws: ws} do
       task = issue(ws, "in flight")
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)
 
       {:ok, view, _html} = live_board(conn)
 
-      html = drag(view, task.id, "running", "ready")
+      html = drag(view, task.id, "in_progress", "ready")
 
-      assert html =~ "Stop"
-      # Still running — nothing was stopped by asking.
+      assert html =~ "cannot be dragged"
       assert Enum.any?(Worker.list_children(), &(&1.task_id == task.id))
-
-      view |> element(~s(button[phx-click="confirm_stop"])) |> render_click()
-      Process.sleep(80)
-
-      refute Enum.any?(Worker.list_children(), &(&1.task_id == task.id))
+      assert has_element?(view, ~s(#board-column-in_progress [id="card-#{task.id}"]))
     end
 
-    test "putting a Running card back down where it was asks nothing", %{conn: conn, ws: ws} do
+    test "putting a card back down where it was says nothing", %{conn: conn, ws: ws} do
       task = issue(ws, "picked up, thought better of it")
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)
 
       {:ok, view, _html} = live_board(conn)
 
-      html = drag(view, task.id, "running", "running")
+      html = drag(view, task.id, "in_progress", "in_progress")
 
-      # A drag that changed nothing must not offer to destroy live work: the
-      # confirmation is one click from killing the agent.
-      refute html =~ "Stop"
-      refute has_element?(view, ~s(button[phx-click="confirm_stop"]))
-      assert Enum.any?(Worker.list_children(), &(&1.task_id == task.id))
-    end
-
-    test "cancelling the confirmation leaves the worker alone", %{conn: conn, ws: ws} do
-      task = issue(ws, "leave me be")
-      {:ok, _pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)
-
-      {:ok, view, _html} = live_board(conn)
-      drag(view, task.id, "running", "ready")
-
-      view |> element(~s(button[phx-click="cancel_stop"])) |> render_click()
-
+      refute html =~ "cannot be dragged"
       assert Enum.any?(Worker.list_children(), &(&1.task_id == task.id))
     end
   end
 
-  describe "Running column rendering" do
+  describe "In progress column rendering" do
     test "displays difficulty on running cards", %{conn: conn, ws: ws} do
       task = issue(ws, "work with difficulty", %{difficulty: 2})
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)
@@ -647,7 +615,7 @@ defmodule ArbiterWeb.BoardLiveTest do
 
       assert has_element?(
                view,
-               ~s(#board-column-running [id="card-#{task.id}"] [aria-label="Difficulty D2"])
+               ~s(#board-column-in_progress [id="card-#{task.id}"] [aria-label="Difficulty D2"])
              )
     end
 
@@ -669,15 +637,17 @@ defmodule ArbiterWeb.BoardLiveTest do
 
       assert has_element?(
                view,
-               ~s(#board-column-running [id="card-#{task.id}"] [aria-label="Codex"])
+               ~s(#board-column-in_progress [id="card-#{task.id}"] [aria-label="Codex"])
              )
     end
   end
 
-  describe "the Waiting column holds everything out of the worker's hands" do
+  # bd-79w1fs: what used to share the Waiting column now sits in its own
+  # lifecycle column — a parked run in In progress, an open PR in Merging —
+  # and what needs someone is the card's attention marker, not a column.
+  describe "In progress and Merging cards out of the worker's hands" do
     # bd-8jixav: the Watchdog is a :temporary process, so a crash leaves the
-    # ticket Merging on an open MR nothing polls. The board used to keep
-    # showing an ordinary merge card.
+    # ticket Merging on an open MR nothing polls.
     defp open_pr_without_watchdog(ws, task) do
       {:ok, pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)
       :ok = Worker.advance(pid, :integrate)
@@ -697,19 +667,21 @@ defmodule ArbiterWeb.BoardLiveTest do
       task
     end
 
-    test "a card whose watchdog died says so and offers the restart", %{conn: conn, ws: ws} do
+    test "a card whose watchdog died says so, as the coordinator's", %{conn: conn, ws: ws} do
       dead = working_issue(ws, "nobody is watching this")
       open_pr_without_watchdog(ws, dead)
 
-      {:ok, view, html} = live_board(conn)
+      {:ok, view, _html} = live_board(conn)
 
-      assert has_element?(view, ~s(#board-column-waiting [id="card-#{dead.id}"]))
-      assert html =~ "no watchdog"
-      # A dead watchdog is the coordinator's to restart first, not the
-      # operator's (bd-8if9zt: needs-you is `attention.owner == :operator`).
-      refute has_element?(view, ~s([id="card-#{dead.id}"] [data-needs-you]))
-      # And the card routes to the worker page — where the restart lives —
-      # rather than to the merge queue, which can do nothing about it.
+      assert has_element?(view, ~s(#board-column-merging [id="card-#{dead.id}"]))
+
+      assert has_element?(
+               view,
+               ~s([id="card-#{dead.id}"] [data-attention="coordinator"]),
+               "no Watchdog is polling its PR"
+             )
+
+      # The restart lives on the worker page, not in the merge queue.
       assert has_element?(view, ~s([id="card-#{dead.id}"] a[href="/workers/#{dead.id}"]))
     end
 
@@ -717,16 +689,12 @@ defmodule ArbiterWeb.BoardLiveTest do
       polling = working_issue(ws, "still in review")
       open_pr(ws, polling)
 
-      {:ok, _view, html} = live_board(conn)
+      {:ok, view, html} = live_board(conn)
 
-      refute html =~ "no watchdog"
+      refute html =~ "no Watchdog"
+      refute has_element?(view, ~s([id="card-#{polling.id}"] [data-attention]))
     end
 
-    # The other half of bd-8jixav: a task with both a primary worker parked on
-    # its open PR (the pre-bd-741sid `awaiting_review` status, now gone) and a
-    # subordinate failed fix-pass row rendered as two cards. Since
-    # bd-741sid the card is the Merging ticket's, and a pass is the ticket's
-    # own run, registered under the ticket id.
     test "a Merging ticket with a failed pass under it renders one card, not two", %{
       conn: conn,
       ws: ws
@@ -734,8 +702,6 @@ defmodule ArbiterWeb.BoardLiveTest do
       task = working_issue(ws, "one card please")
       open_pr(ws, task)
 
-      # The pass carries its role in meta — the same shape
-      # MergeQueue.FixPassDispatcher starts.
       {:ok, fixpass} =
         Worker.start(
           task_id: task.id,
@@ -748,18 +714,17 @@ defmodule ArbiterWeb.BoardLiveTest do
 
       {:ok, view, _html} = live_board(conn)
 
-      assert has_element?(view, ~s(#board-column-waiting [id="card-#{task.id}"]))
+      assert has_element?(view, ~s(#board-column-merging [id="card-#{task.id}"]))
 
       assert view
              |> render()
              |> then(&Regex.scan(~r/id="card-#{task.id}"/, &1))
              |> length() == 1
 
-      # The collapsed pass keeps its failure on the one card.
       assert has_element?(view, ~s([id="card-#{task.id}"]), "fix pass failed")
     end
 
-    test "a parked worker and a Merging ticket share the column", %{conn: conn, ws: ws} do
+    test "a parked run stays In progress; an open PR is Merging", %{conn: conn, ws: ws} do
       parked = working_issue(ws, "answer me")
       parked_worker(ws, parked)
 
@@ -768,14 +733,17 @@ defmodule ArbiterWeb.BoardLiveTest do
 
       {:ok, view, _html} = live_board(conn)
 
-      assert has_element?(view, ~s(#board-column-waiting [id="card-#{parked.id}"]))
-      assert has_element?(view, ~s(#board-column-waiting [id="card-#{merging.id}"]))
+      assert has_element?(view, ~s(#board-column-in_progress [id="card-#{parked.id}"]))
+      assert has_element?(view, ~s(#board-column-merging [id="card-#{merging.id}"]))
     end
 
-    # bd-8if9zt: the flag is the ticket's attention being the operator's. The
-    # coordinator comes first, so a parked run or a conflict is its to act on;
-    # only what the fleet cannot do itself — an approval on its own PR — flags.
-    test "the flag marks only what needs the operator", %{conn: conn, ws: ws} do
+    # bd-8if9zt: the coordinator comes first, so a parked run or a conflict is
+    # its to act on; only what the fleet cannot do itself — an approval on its
+    # own PR — is the operator's.
+    test "the marker names the owner: the operator only for what the fleet cannot do", %{
+      conn: conn,
+      ws: ws
+    } do
       parked = working_issue(ws, "answer me")
       parked_worker(ws, parked)
 
@@ -804,269 +772,113 @@ defmodule ArbiterWeb.BoardLiveTest do
 
       {:ok, view, _html} = live_board(conn)
 
-      assert has_element?(view, ~s([id="card-#{approval.id}"] [data-needs-you]))
-      refute has_element?(view, ~s([id="card-#{parked.id}"] [data-needs-you]))
-      refute has_element?(view, ~s([id="card-#{stuck.id}"] [data-needs-you]))
-      # An MR the forge is simply still chewing on is pipeline-wait, not yours.
-      refute has_element?(view, ~s([id="card-#{polling.id}"] [data-needs-you]))
+      assert has_element?(view, ~s([id="card-#{approval.id}"] [data-attention="operator"]))
+      assert has_element?(view, ~s([id="card-#{parked.id}"] [data-attention="coordinator"]))
+      assert has_element?(view, ~s([id="card-#{stuck.id}"] [data-attention="coordinator"]))
+      refute has_element?(view, ~s([id="card-#{polling.id}"] [data-attention]))
     end
 
-    test "dragging a card back to Ready sends the work back to the queue", %{conn: conn, ws: ws} do
-      task = working_issue(ws, "answer was: redo it")
-      parked_worker(ws, task)
-
-      {:ok, view, _html} = live_board(conn)
-      assert has_element?(view, ~s(#board-column-waiting [id="card-#{task.id}"]))
-
-      html = drag(view, task.id, "waiting", "ready")
-      Process.sleep(80)
-
-      assert html =~ "queue"
-      # The worker is gone and the issue is open again, so the scheduler picks
-      # it up on its own terms rather than resuming a halted session.
-      refute Enum.any?(Worker.list_children(), &(&1.task_id == task.id))
-      assert Ash.get!(Issue, task.id).status == :open
-
-      html = render(view)
-      assert html =~ task.id
-      assert has_element?(view, ~s(#board-column-ready [id="card-#{task.id}"]))
-    end
-
-    test "dragging a parked card toward Closed lets the worker proceed", %{
+    test "dragging a Merging card anywhere is refused, and its PR is left alone", %{
       conn: conn,
       ws: ws
     } do
-      task = working_issue(ws, "answer was: carry on")
-      pid = parked_worker(ws, task)
-
-      {:ok, view, _html} = live_board(conn)
-
-      html = drag(view, task.id, "waiting", "closed")
-
-      assert html =~ "proceed"
-      assert %{state: :working, waiting_on: nil} = Worker.state(pid)
-      # Un-parking is not a promotion: it went back to its own work, so it
-      # belongs in Running, not still waiting.
-      assert has_element?(view, ~s(#board-column-running [id="card-#{task.id}"]))
-    end
-
-    # bd-asxw4e: a ticket parked on a question is still In progress, so it
-    # never gave its slot up — letting it proceed is not a new admission, and
-    # a full cap does not stop it (bd-92mx1m's refusal is for tickets that are
-    # not In progress).
-    test "at a full cap a parked card still proceeds: it holds its own slot", %{
-      conn: conn,
-      ws: ws
-    } do
-      prior = Application.fetch_env(:arbiter, :conductor_system_max_concurrent)
-      Application.put_env(:arbiter, :conductor_system_max_concurrent, 1)
-
-      on_exit(fn ->
-        case prior do
-          {:ok, v} -> Application.put_env(:arbiter, :conductor_system_max_concurrent, v)
-          :error -> Application.delete_env(:arbiter, :conductor_system_max_concurrent)
-        end
-      end)
-
-      parked = working_issue(ws, "asked a question")
-      pid = parked_worker(ws, parked)
-
-      holder = working_issue(ws, "admitted into the freed slot")
-      {:ok, holder_pid} = Worker.start(task_id: holder.id, repo: "r", workspace_id: ws.id)
-      :ok = Worker.advance(holder_pid, :implement)
-
-      {:ok, view, _html} = live_board(conn)
-
-      html = drag(view, parked.id, "waiting", "closed")
-
-      assert html =~ "proceed"
-      refute html =~ "cap is 1"
-      assert Worker.state(pid).state == :working
-    end
-
-    test "a card the worker FSM will not un-park says so rather than moving", %{
-      conn: conn,
-      ws: ws
-    } do
-      task = working_issue(ws, "reviewer said no")
-      pid = parked_worker(ws, task)
-      :ok = Worker.fail(pid, :review_rejected)
-
-      {:ok, view, _html} = live_board(conn)
-
-      html = drag(view, task.id, "waiting", "closed")
-
-      assert html =~ "failed"
-      assert %{state: :finished, outcome: :failed} = Worker.state(pid)
-    end
-
-    # bd-741sid: no worker sits on an open MR — the ticket's Watchdog is what
-    # keeps it in the merge queue, so that is what the drag stops.
-    test "dragging a Merging card out stops its Watchdog and leaves the MR", %{
-      conn: conn,
-      ws: ws
-    } do
-      task = working_issue(ws, "land it later")
+      task = working_issue(ws, "merge me")
       open_pr(ws, task)
-      watchdog = Watchdog.whereis(task.id)
-      assert is_pid(watchdog)
-      watching = Process.monitor(watchdog)
 
       {:ok, view, _html} = live_board(conn)
 
-      html = drag(view, task.id, "waiting", "closed")
+      for to <- ~w(ready in_progress closed) do
+        assert drag(view, task.id, "merging", to) =~ "cannot be dragged"
+      end
 
-      assert html =~ "merge request is untouched"
-      assert_receive {:DOWN, ^watching, :process, ^watchdog, _}, 1_000
-      assert %{state: :merging, pr_ref: "!77"} = Ash.get!(Issue, task.id)
-
-      # bd-741sid, review round 1 (finding 4): the pull is on the ticket, so
-      # no automatic restart undoes it, and the card reads as a pull rather
-      # than as a Watchdog that died.
-      assert PullRequest.pulled?(Ash.get!(Issue, task.id))
-      assert {:error, :pulled} = Watchdog.restart(task.id)
-      assert html =~ "pulled from merge queue"
-      refute html =~ "no watchdog polling"
-      assert has_element?(view, ~s([id="card-#{task.id}"] a[href="/workers/#{task.id}"]))
+      assert Ash.get!(Issue, task.id).state == :merging
+      assert Watchdog.alive?(task.id)
     end
 
-    test "merge-queue cards render merger_status text correctly", %{conn: conn, ws: ws} do
-      # nil merger_status renders as "checks"
-      nil_status = working_issue(ws, "nil status card")
-      open_pr(ws, nil_status)
+    test "a Merging card's detail is its computed step", %{conn: conn, ws: ws} do
+      queued = working_issue(ws, "in the queue")
+      open_pr(ws, queued)
 
-      # pending card (no block_reason) renders as "checks"
-      pending = working_issue(ws, "pending card")
-      open_pr(ws, pending)
+      ci = working_issue(ws, "ci running")
+      open_pr(ws, ci)
+      :ok = PullRequest.record_merger_status(ci.id, %{status: :open, pipeline: :running})
 
-      :ok =
-        PullRequest.record_merger_status(pending.id, %{
-          status: :open,
-          approved: false,
-          pipeline: :success
-        })
-
-      # approved card (no block_reason) renders as "approved"
-      approved = working_issue(ws, "approved card")
-      open_pr(ws, approved)
+      behind = working_issue(ws, "behind base")
+      open_pr(ws, behind)
 
       :ok =
-        PullRequest.record_merger_status(approved.id, %{
-          status: :open,
-          approved: true,
-          pipeline: :success
-        })
-
-      # merged card renders as "merged"
-      merged = working_issue(ws, "merged card")
-      open_pr(ws, merged)
-
-      :ok =
-        PullRequest.record_merger_status(merged.id, %{
-          status: :merged,
-          approved: true,
-          pipeline: :success
-        })
-
-      # blocked cards with various block_reasons
-      conflict_card = working_issue(ws, "conflict card")
-      open_pr(ws, conflict_card)
-
-      :ok =
-        PullRequest.record_merger_status(conflict_card.id, %{
-          status: :open,
-          approved: true,
-          block_reason: :conflict
-        })
-
-      ci_failed_card = working_issue(ws, "ci failed card")
-      open_pr(ws, ci_failed_card)
-
-      :ok =
-        PullRequest.record_merger_status(ci_failed_card.id, %{
-          status: :open,
-          approved: true,
-          pipeline: :failed,
-          block_reason: :ci_failed
-        })
-
-      behind_base_card = working_issue(ws, "behind base card")
-      open_pr(ws, behind_base_card)
-
-      :ok =
-        PullRequest.record_merger_status(behind_base_card.id, %{
+        PullRequest.record_merger_status(behind.id, %{
           status: :open,
           approved: true,
           block_reason: :behind_base
         })
 
-      {:ok, _view, html} = live_board(conn)
+      conflict = working_issue(ws, "conflict")
+      open_pr(ws, conflict)
 
-      # The key assertion: rendering doesn't crash when merger_status is a populated map.
-      # All cards appear in the board, proving the render succeeded.
-      assert html =~ nil_status.id
-      assert html =~ pending.id
-      assert html =~ approved.id
-      assert html =~ merged.id
-      assert html =~ conflict_card.id
-      assert html =~ ci_failed_card.id
-      assert html =~ behind_base_card.id
+      :ok =
+        PullRequest.record_merger_status(conflict.id, %{
+          status: :open,
+          approved: true,
+          block_reason: :conflict
+        })
 
-      # Verify correct merger_status text appears (merge_status_text/1 rendering)
-      # nil status and pending cards
-      assert html =~ "checks"
-      assert html =~ "approved"
-      assert html =~ "merged"
-      assert html =~ "conflict"
-      assert html =~ "ci failed"
-      assert html =~ "behind base"
+      {:ok, view, _html} = live_board(conn)
+
+      for {task, step, label} <- [
+            {queued, "in_merge_queue", "in merge queue"},
+            {ci, "waiting_ci", "waiting on CI"},
+            {behind, "behind_base", "behind base"},
+            {conflict, "merge_blocked", "merge blocked"}
+          ] do
+        assert has_element?(view, ~s([id="card-#{task.id}"] [data-step="#{step}"]), label)
+      end
     end
   end
 
   # bd-9so315 — a merged-but-unverified task has no worker, so without its own
   # card it would be invisible on the board: exactly the gap the state exists
   # to close.
-  describe "the Waiting column lists tasks awaiting verification" do
+  describe "the Verifying column lists tasks awaiting verification" do
     defp awaiting_issue(ws, title) do
       task = working_issue(ws, title)
       {:ok, awaiting} = Ash.update(task, %{}, action: :await_verification)
       awaiting
     end
 
-    test "a parked task renders a Waiting card with its age", %{conn: conn, ws: ws} do
+    test "a parked task renders a Verifying card", %{conn: conn, ws: ws} do
       task = awaiting_issue(ws, "doctor probe")
 
-      {:ok, view, html} = live_board(conn)
+      {:ok, view, _html} = live_board(conn)
 
-      assert has_element?(view, ~s(#board-column-waiting [id="card-#{task.id}"]))
-      assert html =~ "awaiting verification"
-      # The restart-and-observe is the coordinator's (bd-8if9zt), not a flag.
-      refute has_element?(view, ~s([id="card-#{task.id}"] [data-needs-you]))
-      # It routes to the task, where the verification evidence lives — not to a
-      # worker page for a worker the merge already tore down.
-      assert has_element?(view, ~s([id="card-#{task.id}"] a[href="/tasks/#{task.id}"]))
+      assert has_element?(view, ~s(#board-column-verifying [id="card-#{task.id}"]))
+      assert has_element?(view, ~s([id="card-#{task.id}"]), "awaiting verification")
+      # The restart-and-observe is the coordinator's (bd-8if9zt).
+      assert has_element?(view, ~s([id="card-#{task.id}"] [data-attention="coordinator"]))
+      # It routes to the task, where the verification evidence lives.
+      assert card_navigates_to?(view, task.id, "/tasks/#{task.id}")
     end
 
-    test "dragging it out points at the verify verb instead of guessing", %{conn: conn, ws: ws} do
+    test "dragging it out is refused", %{conn: conn, ws: ws} do
       task = awaiting_issue(ws, "capture path")
 
       {:ok, view, _html} = live_board(conn)
 
-      html = drag(view, task.id, "waiting", "closed")
-      assert html =~ "arb issue verify"
+      html = drag(view, task.id, "verifying", "closed")
+      assert html =~ "cannot be dragged"
 
       # And the task did not move.
       assert Ash.get!(Issue, task.id).status == :awaiting_verification
     end
   end
 
-  describe "drops that mean nothing" do
-    test "dropping onto Closed today changes nothing and says nothing", %{conn: conn, ws: ws} do
+  describe "drops onto Closed" do
+    test "dropping onto Closed today is refused and changes nothing", %{conn: conn, ws: ws} do
       task = issue(ws, "not done yet")
 
       {:ok, view, _html} = live_board(conn)
 
-      drag(view, task.id, "ready", "closed")
+      assert drag(view, task.id, "ready", "closed") =~ "cannot be dragged"
 
       assert has_element?(view, ~s(#board-column-ready [id="card-#{task.id}"]))
       assert Ash.get!(Issue, task.id).status == :open
@@ -1189,16 +1001,16 @@ defmodule ArbiterWeb.BoardLiveTest do
       refute html =~ ~s(w-[260px])
     end
 
-    test "columns fill the full width on xl breakpoint and above", %{conn: conn, ws: ws} do
+    test "columns fill the full width on 2xl breakpoint and above", %{conn: conn, ws: ws} do
       issue(ws, "test issue")
       {:ok, _view, html} = live_board(conn)
 
-      # The board-columns container must switch to grid layout on xl:
-      # xl:grid switches display from flex to grid at that breakpoint
-      assert html =~ "xl:grid xl:grid-cols-5"
+      # Seven columns need the room: the board-columns container switches from
+      # a horizontal scroller to a seven-track grid at 2xl.
+      assert html =~ "2xl:grid 2xl:grid-cols-7"
 
-      # Each column must have xl:w-auto so grid tracks stretch to fill width
-      assert html =~ "xl:w-auto"
+      # Each column must have 2xl:w-auto so grid tracks stretch to fill width
+      assert html =~ "2xl:w-auto"
     end
   end
 

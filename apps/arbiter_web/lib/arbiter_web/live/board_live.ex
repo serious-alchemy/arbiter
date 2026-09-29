@@ -3,83 +3,56 @@ defmodule ArbiterWeb.BoardLive do
   The board — the home screen, and the only page that answers "what is the
   fleet doing" in one look.
 
-  Five columns for where a piece of work actually sits: **Backlog**,
-  **Ready**, **Running**, **Waiting**, **Closed · last 24h**. They are stages, not
-  statuses — the task FSM still only knows `open` / `in_progress` / `closed`,
-  and every column is derived from worker state, review state, merge-queue
-  membership and the issue's `refined` flag by `Arbiter.Board.Snapshot`.
-  Nothing here is stored, so nothing here can drift.
+  ## Seven columns, one per lifecycle column (bd-79w1fs)
 
-  ## Backlog is where work is born
+  **Backlog, Blocked, Ready, In progress, Merging, Verifying, Closed · last
+  24h** — `docs/design/ticket-lifecycle.md` §3. Every card is placed purely by
+  its ticket's `Arbiter.Tasks.Lifecycle.view/2` column, which
+  `Arbiter.Board.Snapshot` reads; nothing here is stored, so nothing here can
+  drift. Epics stay off the board and reach it only as the `↳` chip a child
+  card carries.
 
-  Every new issue lands in Backlog (bd-b5wyjd) — `arb create`, `task_create`,
-  the REST API and the dashboard form alike. It is the pile of things somebody
-  wrote down, ordered newest-first because an unrefined pile is a
-  to-think-about list rather than a second queue; nothing in it is a candidate
-  for dispatch and no card in it carries a scheduler reason.
+  Each card says what its column knows about it:
 
-  There is exactly one door out, and it is not on this screen: the task detail
-  page's **Move to Ready** button, which flips `refined` and nothing else.
-  Backlog cards are deliberately not draggable — promotion is a decision made
-  while looking at the ticket, not while looking at five columns of them, and
-  a drag-to-promote gesture can be added later once the button has taught us
-  what promotion actually needs to check.
+    * **Blocked** — `waiting on <ids>`, its unsatisfied gating blockers;
+    * **Ready** — the scheduler's reason: `next up`, `N ahead in queue`, or a
+      hold (slot, quota, paused, conflict, file overlap). A hold reads
+      `held — …` here, because *blocked* is the column next door;
+    * **In progress** and **Merging** — the computed `step`;
+    * **Closed** — the `close_reason` (completed / won't do / duplicate).
 
-  Backlog is a *refinement* surface, not a scheduling one, which is why it
-  ignores dependencies entirely. A refined card whose blocker is still open
-  stays in Ready wearing its `blocked — waiting on bd-9` reason: blocked is a
-  scheduling fact, unrefined is a refinement fact, and a card can be either
-  without being the other.
+  ## Attention is an overlay, not a column
 
-  ## Waiting is one column, and the flag is the only split
+  A ticket with attention keeps its column and wears a marker naming who has
+  to act (operator or coordinator) and why. The **Needs-attention swimlane**
+  across the top collects them: operator-owned items by default, a chip adds
+  the coordinator's, and active system alerts (`Arbiter.Alerts`, bd-7gt8rm)
+  appear as cards with no ticket. The lane collapses to a count. Whether it is
+  open and whether the chip is on are a per-viewer convenience, so they live
+  in the viewer's browser storage (the `.AttentionLane` hook), not on the
+  server: the hook restores them on mount and stores each change the server
+  pushes back. With no storage (private mode, a blocked `localStorage`) the
+  lane simply starts open, operator-only.
 
-  Waiting was two — Needs you and Merge queue — until bd-crn03r merged them.
-  Both held cards whose worker was done and whose outcome hung on something
-  external, and splitting them by *what* is external (a person vs. a poll)
-  drew a line the operator never acts on. The line that matters is narrower:
-  has the system run out of things to try? `Arbiter.Board.Snapshot` answers
-  that per card as `:needs_you`, and this screen renders it as one small flag
-  in the card header — not a hue, not an accent rule, not a column of its own.
-  Everything else in the column reads as plain pipeline-wait.
+  ## Manual order
 
-  ## Ready is a queue, not a parking lot
+  Backlog and Ready sort by priority, then the persisted `rank`
+  (`Arbiter.Board.Scheduler.order/1`) — the order Autopilot dispatches Ready
+  in, so the column is the queue. Dragging within either column rewrites
+  `rank` through `Arbiter.Tasks.Rank.move/2` (the `:set_rank` action,
+  bd-djapyj), placed next to the nearest card of the same workspace, since
+  rank is per workspace. Dropping into a different priority band changes the
+  ticket's priority to that band first.
 
-  The design handoff put a *drop to dispatch* zone at the foot of the Ready
-  column: cards sat there until a human dragged each one into Running. This
-  screen deliberately does not build that (bd-bqyeqa). An operator who must
-  drag every card into flight is a scheduler made of a person, and a person is
-  the one component here that cannot watch sixteen slots at once.
+  ## Column drags
 
-  Instead `Arbiter.Board.Scheduler` decides and `Arbiter.Board.Autopilot`
-  dispatches: the top eligible Ready card is promoted whenever a worker slot
-  frees up, gated on dependency blocks, file overlap with in-flight work, quota
-  headroom and a pause switch. Every Ready card therefore carries a *reason*
-  rather than a static state — `next up — dispatching...`, `2 ahead in queue`,
-  `blocked — waiting on bd-9`, `blocked — quota exhausted`. A queue that
-  explains itself is one an operator can leave alone.
-
-  ## What drag is still for
-
-  Drag remains a human action, for the moves only a human can decide:
-
-    * **reordering within Ready** — not yet. The queue is in priority, then
-      rank order (bd-asxw4e), which is the order Autopilot dispatches in; a
-      session-only hand-ranking used to reorder the cards here while
-      Autopilot ignored it. Until drag-to-rank writes the rank (bd-79w1fs),
-      a reorder is answered with that explanation and changes nothing;
-    * **pulling a card out of Running** — stops the worker, and asks first,
-      because that kills a live agent mid-thought;
-    * **Waiting outcomes** — dropping a Waiting card on Ready sends the work
-      back (the halted worker is discarded and the issue returns to the queue
-      for the scheduler to re-decide); dropping it forward, toward Closed,
-      means "carry on" — a parked worker un-parks and finishes its own way to
-      a merge request, while a card already sitting on one is pulled out of
-      the queue (the worker stops; the merge request itself is untouched).
-      The worker FSM has the final say on the first.
-
-  Dragging *into* Running is refused with an explanation. There is no hidden
-  manual path into flight: if a card is not being promoted, the reason on its
-  face is the thing to fix.
+  Backlog → Blocked or Ready is **promote** (the `:promote` transition, with
+  its acceptance-criteria rule); Blocked or Ready → Backlog is **demote**.
+  Where a promoted ticket lands — Blocked or Ready — is its dependencies'
+  call, not the drop target's. Every other cross-column drag is refused with
+  a flash: the rest of the lifecycle moves with the work (the scheduler
+  dispatches, a PR opens, a merge lands), and a gesture cannot carry the
+  evidence those moves need.
 
   ## Component shadowing
 
@@ -94,11 +67,9 @@ defmodule ArbiterWeb.BoardLive do
 
   alias Arbiter.Board.Autopilot
   alias Arbiter.Board.Snapshot
+  alias Arbiter.Tasks.EdgeGate
   alias Arbiter.Tasks.Issue
-  alias Arbiter.Tasks.PullRequest
-  alias Arbiter.Worker
-  alias Arbiter.Worker.ResumeSlot
-  alias Arbiter.Worker.Watchdog
+  alias Arbiter.Tasks.Rank
 
   @tasks_topic "tasks"
   @workers_topic "workers"
@@ -109,15 +80,34 @@ defmodule ArbiterWeb.BoardLive do
   # Every call this LiveView makes out to another process is bounded. Nothing
   # on the render path may hang the operator's only view of the fleet.
   @scheduler_call_timeout_ms 2_000
-  @stop_timeout_ms 5_000
 
   @columns [
-    %{key: "backlog", label: "Backlog", tone: nil},
-    %{key: "ready", label: "Ready", tone: nil},
-    %{key: "running", label: "Running", tone: "live"},
-    %{key: "waiting", label: "Waiting", tone: nil},
-    %{key: "closed", label: "Closed · last 24h", tone: nil}
+    %{key: "backlog", label: "Backlog", board_key: :backlog, tone: nil},
+    %{key: "blocked", label: "Blocked", board_key: :blocked, tone: nil},
+    %{key: "ready", label: "Ready", board_key: :ready, tone: nil},
+    %{key: "in_progress", label: "In progress", board_key: :in_progress, tone: "live"},
+    %{key: "merging", label: "Merging", board_key: :merging, tone: nil},
+    %{key: "verifying", label: "Verifying", board_key: :verifying, tone: nil},
+    %{key: "closed", label: "Closed · last 24h", board_key: :closed_today, tone: nil}
   ]
+
+  @column_keys Enum.map(@columns, & &1.key)
+  @rank_columns ["backlog", "ready"]
+  @queued_columns ["blocked", "ready"]
+
+  @step_labels %{
+    implementing: "implementing",
+    in_review: "in review",
+    addressing_review: "addressing review",
+    fixing_ci: "fixing CI",
+    resolving_conflict: "resolving conflict",
+    waiting_ci: "waiting on CI",
+    in_merge_queue: "in merge queue",
+    behind_base: "behind base",
+    merge_blocked: "merge blocked"
+  }
+
+  @close_reason_labels %{completed: "completed", wont_do: "won't do", duplicate: "duplicate"}
 
   @impl true
   def mount(_params, _session, socket) do
@@ -127,8 +117,11 @@ defmodule ArbiterWeb.BoardLive do
       Phoenix.PubSub.subscribe(Arbiter.PubSub, @tasks_topic)
       Phoenix.PubSub.subscribe(Arbiter.PubSub, @workers_topic)
       Phoenix.PubSub.subscribe(Arbiter.PubSub, Autopilot.topic())
-      # Elapsed counters on Running cards, and the wait times the Waiting
-      # column is ordered by. Reassigns `:now` only — no reads.
+      # System alerts and attention changes are announced on the event stream
+      # (`inbox` topic), not the tasks topic — the global copy carries every
+      # workspace's, which is what an all-workspaces board wants.
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, Arbiter.Events.pubsub_topic(nil))
+      # Elapsed counters on In-progress cards. Reassigns `:now` only — no reads.
       :timer.send_interval(1000, self(), :tick)
     end
 
@@ -146,12 +139,13 @@ defmodule ArbiterWeb.BoardLive do
       |> assign(:filter, "")
       |> assign(:workspace, "all")
       |> assign(:expanded, MapSet.new())
-      |> assign(:confirm_stop, nil)
       |> assign(:columns, @columns)
       |> assign(:issue_label, "issue")
-      |> assign(:worker_label, "worker")
       |> assign(:workspaces, [])
       |> assign(:board, Snapshot.empty(now))
+      |> assign(:alerts, [])
+      |> assign(:lane_open, true)
+      |> assign(:lane_coordinator, false)
       |> assign(:scheduler_running, false)
       |> assign(:board_loaded?, false)
       |> assign(:board_error, nil)
@@ -176,6 +170,12 @@ defmodule ArbiterWeb.BoardLive do
   def handle_info({:board_scheduler, _state}, socket),
     do: {:noreply, refresh_board(socket)}
 
+  # A system alert raised or cleared, or a ticket's attention raised, moved or
+  # handed back: the swimlane's inputs.
+  def handle_info({:event, %{topic: "inbox", kind: kind}}, socket)
+      when kind in ["alert", "attention"],
+      do: {:noreply, refresh_board(socket)}
+
   def handle_info(:tick, socket), do: {:noreply, assign(socket, :now, DateTime.utc_now())}
 
   def handle_info(_msg, socket), do: {:noreply, socket}
@@ -184,6 +184,7 @@ defmodule ArbiterWeb.BoardLive do
   def handle_async(:board, {:ok, loaded}, socket) do
     socket
     |> assign(:board, loaded.board)
+    |> assign(:alerts, loaded.alerts)
     |> assign(:scheduler_running, loaded.scheduler_running)
     |> assign(:workspaces, loaded.workspaces)
     |> assign(:now, loaded.board.now)
@@ -216,6 +217,24 @@ defmodule ArbiterWeb.BoardLive do
 
   def handle_event("expand", %{"column" => key}, socket),
     do: {:noreply, assign(socket, :expanded, MapSet.put(socket.assigns.expanded, key))}
+
+  # ---- the Needs-attention swimlane ------------------------------------------
+
+  def handle_event("toggle_attention_lane", _params, socket),
+    do: {:noreply, socket |> update(:lane_open, &(not &1)) |> push_lane_pref()}
+
+  def handle_event("toggle_attention_coordinator", _params, socket),
+    do: {:noreply, socket |> update(:lane_coordinator, &(not &1)) |> push_lane_pref()}
+
+  # The `.AttentionLane` hook, on mount, with what the viewer's browser stored.
+  # Anything that is not a boolean — nothing stored, storage unavailable, a
+  # value from some other build — leaves that setting at its default.
+  def handle_event("attention_lane_restore", params, socket) when is_map(params) do
+    {:noreply,
+     socket
+     |> restore_lane(:lane_open, Map.get(params, "open"))
+     |> restore_lane(:lane_coordinator, Map.get(params, "coordinator"))}
+  end
 
   # ---- refine (bd-1lszsc) ---------------------------------------------------
 
@@ -263,249 +282,194 @@ defmodule ArbiterWeb.BoardLive do
     end
   end
 
-  # ---- drag: reordering Ready ----------------------------------------------
+  # ---- drag within a column: rank ------------------------------------------
 
-  # bd-asxw4e: the Ready queue is in the scheduler's own order — priority,
-  # then the persisted rank — so a session-only hand-ranking would only make
-  # the board promise an order Autopilot does not follow. Drag-to-rank, which
-  # writes the rank, is bd-79w1fs; until then the gesture explains itself.
-  def handle_event("reorder_ready", _params, socket) do
-    {:noreply,
-     socket
-     |> put_flash(
-       :info,
-       "Ready is in priority order, then rank — the order the scheduler dispatches in. " <>
-         "Change a card's priority to move it; drag-to-rank is coming."
-     )
-     |> refresh_board()}
+  # The client resolves where in the column the card landed — before or after
+  # the card under the cursor — because only it knows; the server decides what
+  # that means against the board it rendered.
+  def handle_event("reorder", %{"id" => id, "column" => column} = params, socket)
+      when is_binary(id) and column in @rank_columns do
+    {:noreply, reorder(socket, id, column, drop_target(params))}
   end
 
-  # ---- drag: one gesture, and what each landing means -----------------------
+  def handle_event("reorder", _params, socket), do: {:noreply, socket}
+
+  # ---- drag across columns --------------------------------------------------
 
   # The client reports the whole gesture — this card, out of that column, into
-  # this one — and the board decides what it means. Most landings mean
-  # nothing; the ones that do are enumerated here, in the order a person
-  # would read them.
+  # this one — and the board decides what it means.
   def handle_event("drag", %{"id" => id, "from" => from, "to" => to}, socket)
-      when is_binary(id) and is_binary(from) and is_binary(to) do
+      when is_binary(id) and from in @column_keys and to in @column_keys do
     {:noreply, dropped(socket, id, from, to)}
   end
 
   def handle_event("drag", _params, socket), do: {:noreply, socket}
 
-  def handle_event("cancel_stop", _params, socket),
-    do: {:noreply, assign(socket, :confirm_stop, nil)}
-
-  def handle_event("confirm_stop", _params, %{assigns: %{confirm_stop: nil}} = socket),
-    do: {:noreply, socket}
-
-  def handle_event("confirm_stop", _params, socket) do
-    id = socket.assigns.confirm_stop
-
-    socket =
-      case stop_worker_now(id) do
-        :ok ->
-          put_flash(socket, :info, "Stopped the worker on #{id}.")
-
-        {:error, :not_found} ->
-          put_flash(socket, :error, "No worker registered for #{id}.")
-
-        {:error, reason} ->
-          put_flash(socket, :error, "Could not stop the worker on #{id}: #{inspect(reason)}")
-      end
-
-    {:noreply, socket |> assign(:confirm_stop, nil) |> refresh_board()}
-  end
-
   # ---- what a landing means ------------------------------------------------
 
-  # A card released over the column it started in did nothing, whatever column
-  # that is. This has to come first: without it a Running card picked up and
-  # put straight back down falls through to the stop-the-worker prompt below,
-  # which is one stray click from destroying live work the operator never
-  # meant to touch.
+  # A card put back down on the column it came from did nothing.
   defp dropped(socket, _id, same, same), do: socket
 
-  # Running is not a drop target. The whole point of the scheduler is that a
-  # person does not decide *when* — so say what the card is waiting for
-  # instead of pretending the drag did something.
-  defp dropped(socket, id, _from, "running") do
-    put_flash(
-      socket,
-      :error,
-      "Running is the scheduler's column — #{id} goes in when a slot frees up and nothing " <>
-        "blocks it. Its card says what it is waiting for."
-    )
+  defp dropped(socket, id, "backlog", to) when to in @queued_columns, do: promote(socket, id)
+  defp dropped(socket, id, from, "backlog") when from in @queued_columns, do: demote(socket, id)
+  defp dropped(socket, id, from, to), do: put_flash(socket, :error, refusal(id, from, to))
+
+  defp refusal(id, from, to) do
+    "#{id} cannot be dragged from #{column_label(from)} to #{column_label(to)}: " <>
+      refusal_reason(from, to)
   end
 
-  # Pulling a card out of Running kills a live agent mid-thought and throws
-  # away whatever it had not yet written down, so the drag opens a question
-  # rather than doing it.
-  defp dropped(socket, id, "running", _to), do: assign(socket, :confirm_stop, id)
+  defp refusal_reason(from, to) when from in @queued_columns and to in @queued_columns,
+    do: "whether a queued ticket is Blocked or Ready is decided by its dependencies."
 
-  # bd-9so315: a merged-but-unverified card has no gesture-shaped exit. Both
-  # ways out of the state carry *evidence* — what was seen on the running
-  # server — and a drag carries none, so neither drop may guess. Say what to
-  # run instead, and leave the task where it is.
-  defp dropped(socket, id, "waiting", to) when to in ["ready", "closed"] do
-    if waiting_status(socket, id) == :awaiting_verification do
-      put_flash(
-        socket,
-        :error,
-        "#{id} merged but is awaiting verification — restart the server, observe the " <>
-          "new path, then record what you saw: " <>
-          ~s(`arb issue verify #{id} --observed "<evidence>"` ) <>
-          "(or `--failed \"<evidence>\"` to send it back)."
-      )
+  defp refusal_reason(_from, "in_progress"),
+    do:
+      "the scheduler dispatches the top Ready card when a slot frees up, and its card " <>
+        "says what it is waiting for."
+
+  defp refusal_reason(_from, _to),
+    do:
+      "only Backlog ⇄ Blocked/Ready is a drag (promote / demote). The rest of the " <>
+        "lifecycle moves with the work — open the ticket to act on it."
+
+  defp column_label(key), do: Enum.find_value(@columns, key, &(&1.key == key && &1.label))
+
+  # Backlog → Blocked / Ready. Where it lands is its dependencies' call.
+  defp promote(socket, id) do
+    with {:ok, issue} <- Ash.get(Issue, id),
+         {:ok, _promoted} <- Ash.update(issue, %{}, action: :promote) do
+      socket
+      |> put_flash(:info, "Promoted #{id} out of Backlog.")
+      |> refresh_board()
     else
-      dropped_waiting(socket, id, to)
-    end
-  end
-
-  # Everything else — a card dropped back where it came from, or onto a column
-  # that implies no action. Silence is the right answer; a flash for every
-  # stray drop trains the operator to ignore flashes.
-  defp dropped(socket, _id, _from, _to), do: socket
-
-  # Send back. The parked worker is halted already, so nothing is interrupted
-  # — it is discarded, and the issue goes back to open so the queue owns it
-  # again. Deliberately not `Dispatch.resume/1`: sending work back to Ready
-  # means the scheduler re-decides it on the merits, not that a stale session
-  # picks up where it left off.
-  defp dropped_waiting(socket, id, "ready"), do: requeue(socket, id, "Sent")
-
-  # Forward, out of Waiting. One gesture, two meanings, because the column
-  # holds two kinds of card and the card — not the drop target — says which:
-  # a *parked* worker is being told "carry on", a Merging ticket is being
-  # pulled out of the merge queue.
-  defp dropped_waiting(socket, id, "closed") do
-    case waiting_status(socket, id) do
-      :merging -> pull_from_merge(socket, id)
-      _ -> proceed(socket, id)
-    end
-  end
-
-  # Proceed. The answer the worker was parked on is "carry on", so un-park it
-  # and let it finish its own way to review and a merge request. The FSM, not
-  # the board, decides whether that is legal from where the card actually sits
-  # — a review rejection parks at :failed and refuses.
-  #
-  # bd-92mx1m / bd-asxw4e: a ticket still In progress holds its own slot, so
-  # un-parking it is never a new admission. One whose ticket has left In
-  # progress meanwhile must acquire a slot — at a full cap it stays parked and
-  # the flash names the cap and what holds it. No override here: going over the
-  # cap is `arb worker resume --force` / MCP `force: true`, which is recorded.
-  defp proceed(socket, id) do
-    case proceed_slot(id) do
-      :ok -> do_proceed(socket, id)
-      {:error, message} -> put_flash(socket, :error, "#{id} could not proceed: #{message}")
-    end
-  end
-
-  # Only a worker the FSM would actually un-park (`:waiting` on a question) is
-  # gated: any other run state gets `Worker.resume/1`'s own, more useful,
-  # refusal.
-  defp proceed_slot(id) do
-    with %{state: :waiting, waiting_on: :question} <- Worker.state(id),
-         {:ok, %Issue{} = task} <- Ash.get(Issue, id),
-         {:error, {:slot_cap_full, info}} <- ResumeSlot.admit(task, origin: :human) do
-      {:error, ResumeSlot.refusal_message(info)}
-    else
-      _ -> :ok
-    end
-  catch
-    :exit, _ -> :ok
-  end
-
-  defp do_proceed(socket, id) do
-    case Worker.resume(id) do
-      :ok ->
-        socket
-        |> put_flash(:info, "#{id} may proceed — the worker picked up where it parked.")
-        |> refresh_board()
-
-      {:error, {:invalid_transition, run_state, _}} ->
+      {:error, err} ->
         put_flash(
           socket,
           :error,
-          "#{id} is #{run_state} — there is nothing parked to let proceed. Decide it on the " <>
-            "task instead."
+          "#{id} stays in Backlog: #{ArbiterWeb.TaskForm.error_message(err)} " <>
+            "The ticket's own page can promote it with a waiver reason."
         )
-
-      {:error, reason} ->
-        put_flash(socket, :error, "#{id} could not proceed: #{inspect(reason)}")
     end
   end
 
-  # Off the merge request. The merge request itself is not touched — what
-  # stops is what would merge it — so this is reversible by restarting its
-  # watchdog from the worker page.
-  # bd-741sid: no worker is resident on an open PR — the ticket's Watchdog is
-  # what keeps it in the merge queue. The pull stops it and is recorded on the
-  # ticket, so no automatic restart undoes it (`PullRequest.pull/1`).
-  defp pull_from_merge(socket, id) do
-    case PullRequest.pull(id) do
-      :ok ->
-        put_flash(
-          socket,
-          :info,
-          "Pulled #{id} out of the merge queue. Its merge request is untouched."
-        )
-
-      {:error, reason} ->
-        put_flash(socket, :error, "#{id} could not be pulled out: #{inspect(reason)}")
-    end
-    |> refresh_board()
-  end
-
-  # Which half of Waiting the card is in, read off the board that rendered the
-  # card the operator actually dragged.
-  defp waiting_status(socket, id) do
-    case Enum.find(socket.assigns.board.waiting, &(&1.id == id)) do
-      nil -> nil
-      card -> card.status
-    end
-  end
-
-  # Stop whatever worker holds the card and hand the issue back to the queue.
-  defp requeue(socket, id, verb) do
-    socket
-    |> stop_worker(id)
-    |> reopen(id)
-    |> put_flash(:info, "#{verb} #{id} back to the queue — the scheduler decides it from there.")
-    |> refresh_board()
-  end
-
-  defp stop_worker(socket, id) do
-    _ = stop_worker_now(id)
-    socket
-  end
-
-  # `Worker.stop/3` defaults to `:infinity`, and `GenServer.stop/3` *exits the
-  # caller* when the worker is already gone (a `:noproc` race against
-  # `whereis/1`) or dies for a reason other than the one asked for. Neither is
-  # survivable here: this runs in the LiveView, which is the operator's only
-  # view of the fleet, so a worker wedged in `terminate/2` must not be able to
-  # take the board down with it or hang it forever.
-  defp stop_worker_now(id) do
-    Worker.stop(id, :normal, @stop_timeout_ms)
-  rescue
-    e -> {:error, e}
-  catch
-    :exit, reason -> {:error, {:exit, reason}}
-  end
-
-  # Back to `:open` so `Snapshot` counts it as Ready again. A worker leaves its
-  # task `:in_progress` on purpose (so a failure stays inspectable), which is
-  # exactly the state that would otherwise strand the card in no column at all.
-  defp reopen(socket, id) do
+  # Blocked / Ready → Backlog.
+  defp demote(socket, id) do
     with {:ok, issue} <- Ash.get(Issue, id),
-         true <- issue.status != :open,
-         {:ok, _} <- Ash.update(issue, %{status: :open}) do
+         {:ok, _demoted} <- Ash.update(issue, %{}, action: :demote) do
       socket
+      |> put_flash(:info, "Returned #{id} to Backlog.")
+      |> refresh_board()
     else
-      _ -> socket
+      {:error, err} ->
+        put_flash(socket, :error, "#{id} could not be demoted: " <> error_message(err))
     end
+  end
+
+  # ---- rank -----------------------------------------------------------------
+
+  defp drop_target(%{"before_id" => id}) when is_binary(id) and id != "", do: {:before, id}
+  defp drop_target(%{"after_id" => id}) when is_binary(id) and id != "", do: {:after, id}
+  defp drop_target(_params), do: nil
+
+  # Both cards must be in that column on the board the operator dragged on; a
+  # drag against a board that has since moved changes nothing and re-reads.
+  defp reorder(socket, id, column, {where, target_id}) when id != target_id do
+    cards = column_cards(socket.assigns.board, column)
+
+    with %{} = card <- Enum.find(cards, &(&1.id == id)),
+         %{} = target <- Enum.find(cards, &(&1.id == target_id)) do
+      order = place(Enum.reject(cards, &(&1.id == id)), card, where, target_id)
+      rerank(socket, card, target.priority, rank_anchor(order, card))
+    else
+      _ -> refresh_board(socket)
+    end
+  end
+
+  defp reorder(socket, _id, _column, _target), do: socket
+
+  defp place(cards, card, where, target_id) do
+    Enum.flat_map(cards, fn
+      %{id: ^target_id} = target when where == :before -> [card, target]
+      %{id: ^target_id} = target -> [target, card]
+      other -> [other]
+    end)
+  end
+
+  # Rank is per workspace (`Changes.SetRank`), so the card is placed after the
+  # nearest same-workspace card above where it landed, else before the nearest
+  # one below. Alone in its workspace in this column, its rank has nothing to
+  # be relative to here, and only its priority can move.
+  defp rank_anchor(order, card) do
+    {above, [_card | below]} = Enum.split_while(order, &(&1.id != card.id))
+    same_ws? = &(&1.workspace_id == card.workspace_id)
+
+    case {above |> Enum.reverse() |> Enum.find(same_ws?), Enum.find(below, same_ws?)} do
+      {%{id: id}, _} -> %{after_id: id}
+      {nil, %{id: id}} -> %{before_id: id}
+      {nil, nil} -> nil
+    end
+  end
+
+  # Dropping into another priority band moves the ticket into that band first,
+  # then ranks it where it landed.
+  defp rerank(socket, card, band, rank_args) do
+    with {:ok, issue} <- Ash.get(Issue, card.id),
+         {:ok, issue} <- reprioritise(issue, band),
+         {:ok, _ranked} <- rank(issue, rank_args) do
+      socket
+      |> then(fn socket ->
+        if is_integer(band) and band != card.priority,
+          do: put_flash(socket, :info, "Moved #{card.id} to P#{band}."),
+          else: socket
+      end)
+      |> refresh_board()
+    else
+      {:error, err} ->
+        socket
+        |> put_flash(:error, "Could not reorder #{card.id}: " <> error_message(err))
+        |> refresh_board()
+    end
+  end
+
+  defp reprioritise(%Issue{priority: same} = issue, same), do: {:ok, issue}
+
+  defp reprioritise(issue, band) when is_integer(band),
+    do: Ash.update(issue, %{priority: band})
+
+  defp reprioritise(issue, _band), do: {:ok, issue}
+
+  defp rank(issue, nil), do: {:ok, issue}
+
+  defp rank(issue, args) do
+    case Rank.move(issue, args) do
+      {:ok, ranked} ->
+        # `:set_rank` announces nothing of its own; every other board, and
+        # Autopilot's next plan, should see the new order.
+        Issue.broadcast_lifecycle(:updated, ranked)
+        {:ok, ranked}
+
+      error ->
+        error
+    end
+  end
+
+  defp error_message(err) when is_binary(err), do: err
+  defp error_message(err), do: ArbiterWeb.TaskForm.error_message(err)
+
+  # A column's cards in their displayed order, before any view filter.
+  defp column_cards(board, "ready"), do: Enum.map(board.ready, & &1.card)
+  defp column_cards(board, "backlog"), do: board.backlog
+
+  # ---- the lane's per-viewer settings ----------------------------------------
+
+  defp restore_lane(socket, key, value) when is_boolean(value), do: assign(socket, key, value)
+  defp restore_lane(socket, _key, _value), do: socket
+
+  defp push_lane_pref(socket) do
+    push_event(socket, "attention_lane_pref", %{
+      open: socket.assigns.lane_open,
+      coordinator: socket.assigns.lane_coordinator
+    })
   end
 
   # ---- reads ----------------------------------------------------------------
@@ -514,10 +478,7 @@ defmodule ArbiterWeb.BoardLive do
   # is acting on — but derived by this LiveView, not fetched from the
   # autopilot. The only thing that process contributes to a board read is the
   # pause flag, and asking it for the whole snapshot would put every open
-  # board behind one mailbox: behind each other, and behind whatever the
-  # autopilot is doing. Dispatch broadcasts `:started` mid-flight, so the
-  # boards refreshing on that would be queueing against the very promotion
-  # they are refreshing to show.
+  # board behind one mailbox.
   #
   # When the autopilot isn't running at all there is nothing to drain the
   # queue, which is exactly what `paused: true` renders.
@@ -557,13 +518,14 @@ defmodule ArbiterWeb.BoardLive do
     Process.flag(:trap_exit, true)
     running? = scheduler_running?()
     paused? = not running? or scheduler_paused?()
-
     board = Snapshot.load(now: DateTime.utc_now(), paused: paused?)
+    exit_if_view_gone()
+    alerts = load_alerts()
     exit_if_view_gone()
     workspaces = load_workspaces()
     exit_if_view_gone()
 
-    %{board: board, scheduler_running: running?, workspaces: workspaces}
+    %{board: board, alerts: alerts, scheduler_running: running?, workspaces: workspaces}
   end
 
   defp exit_if_view_gone do
@@ -609,6 +571,14 @@ defmodule ArbiterWeb.BoardLive do
     :exit, _ -> true
   end
 
+  # The swimlane's system alerts. Their failure is not the board's: a lane
+  # without alerts still shows every ticket's attention.
+  defp load_alerts do
+    Arbiter.Alerts.active()
+  rescue
+    _ -> []
+  end
+
   # The workspace picker rides along with every board read, so a workspace
   # added since the page opened shows up in it. Its failure is not the
   # board's: an empty picker still leaves "all workspaces".
@@ -624,19 +594,39 @@ defmodule ArbiterWeb.BoardLive do
   # considers. Typing in a search box must not change which card gets
   # dispatched next.
 
-  defp visible(assigns, cards, _key) do
-    Enum.filter(cards, &matches?(&1, assigns))
+  # One list of cards per column, ready to render. A Ready entry's card takes
+  # its queue reason and standing along.
+  defp column_items(assigns, %{board_key: :ready}) do
+    assigns.board.ready
+    |> Enum.map(&Map.merge(&1.card, %{reason: &1.reason, queue_state: &1.state}))
+    |> Enum.filter(&matches?(&1, assigns))
   end
+
+  defp column_items(assigns, %{board_key: key}) do
+    assigns.board |> Map.get(key, []) |> Enum.filter(&matches?(&1, assigns))
+  end
+
+  # The swimlane: ticket attention, operator-owned unless the coordinator chip
+  # is on, and the system alerts under the same rule.
+  defp lane_tickets(assigns) do
+    assigns.board
+    |> Map.get(:attention, [])
+    |> Enum.filter(&(lane_owner?(&1.owner, assigns) and matches?(&1, assigns)))
+  end
+
+  defp lane_alerts(assigns) do
+    Enum.filter(assigns.alerts, fn alert ->
+      lane_owner?(alert.owner, assigns) and
+        (is_nil(alert.workspace_id) or matches_workspace?(alert, assigns.workspace))
+    end)
+  end
+
+  defp lane_owner?(:operator, _assigns), do: true
+  defp lane_owner?(_owner, assigns), do: assigns.lane_coordinator
 
   defp matches?(card, assigns) do
-    card = card_of(card)
-
     matches_workspace?(card, assigns.workspace) and matches_filter?(card, assigns.filter)
   end
-
-  # A Ready entry wraps its card; every other column is the card itself.
-  defp card_of(%{card: %{} = card}), do: card
-  defp card_of(card), do: card
 
   defp matches_workspace?(_card, "all"), do: true
   defp matches_workspace?(card, id), do: Map.get(card, :workspace_id) == id
@@ -665,47 +655,21 @@ defmodule ArbiterWeb.BoardLive do
       else: ~p"/tasks/#{card.id}"
   end
 
-  # Waiting's contextual destination — reachable via the action chip, not the
-  # card body. A card sitting on a merge request is a merge-queue row;
-  # anything else in Waiting is a worker you open and answer.
-  #
-  # bd-8jixav: unless its Watchdog is gone. The merge queue can do nothing
-  # about a dead Watchdog — the restart lives on the worker page, so send the
-  # operator there instead of to a screen that will only repeat the lie that
-  # the MR is being polled.
-  defp waiting_action_href(%{status: :awaiting_verification} = card), do: ~p"/tasks/#{card.id}"
-  defp waiting_action_href(%{merge_pulled: true} = card), do: ~p"/workers/#{card.id}"
-  defp waiting_action_href(%{watchdog_alive: false} = card), do: ~p"/workers/#{card.id}"
-  defp waiting_action_href(%{status: :merging}), do: ~p"/merge_queue"
-  defp waiting_action_href(card), do: ~p"/workers/#{card.id}"
-
   # ---- formatting -----------------------------------------------------------
 
   # bd-aw2cyt: how many agents are actually burning quota. `agents_live` is
   # what `Snapshot.derive/1` counted; an older board map (a stubbed snapshot in
-  # a test, a replayed payload) falls back to the number of running cards,
-  # which is what the header used to say.
+  # a test, a replayed payload) falls back to the number of In-progress cards.
   defp agents_live(board),
-    do: Map.get(board, :agents_live) || length(Map.get(board, :running, []))
+    do: Map.get(board, :agents_live) || length(Map.get(board, :in_progress, []))
 
-  # bd-45pwo1: what the dispatch cap actually measures — one per task not
-  # yet done or parked for a human, not one per live agent. Differs from
-  # `agents_live/1` whenever a task sits between rounds or waits on CI/merge
-  # with no agent live for it right now; an older board map without the key
-  # falls back to `slots_total - slots_free`, which is what `slots_free` was
-  # already computed from.
+  # bd-45pwo1: what the dispatch cap actually measures — one per ticket In
+  # progress, not one per live agent. An older board map without the key falls
+  # back to `slots_total - slots_free`, which `slots_free` was computed from.
   defp slots_used(board) do
     Map.get(board, :slots_used) ||
       max(Map.get(board, :slots_total, 0) - Map.get(board, :slots_free, 0), 0)
   end
-
-  # The card's own line under the title: the phase it is in, which is what an
-  # operator wants once the main agent has exited, falling back to the
-  # workflow step for a card that has no phase (an older snapshot).
-  defp card_footer(%{phase: phase}) when not is_nil(phase),
-    do: Arbiter.Worker.Phase.label(phase)
-
-  defp card_footer(card), do: Map.get(card, :step) && to_string(Map.get(card, :step))
 
   defp elapsed(nil, _now), do: nil
 
@@ -730,8 +694,7 @@ defmodule ArbiterWeb.BoardLive do
 
   # bd-8j9i9p (design bd-9jj5lf §3): worker spend past the p90 of what issues
   # like this one cost. A flag, not a hue — the card's accent belongs to the
-  # state that owns it right now, and money is a second axis, so this reads
-  # alongside `needs_you` rather than competing with it. Open cards only:
+  # state that owns it right now, and money is a second axis. Open cards only:
   # `Snapshot.derive/1` never sets it on a closed one.
   defp over_budget_flag(assigns) do
     ~H"""
@@ -745,8 +708,6 @@ defmodule ArbiterWeb.BoardLive do
     """
   end
 
-  defp quota_note(:ok), do: nil
-  defp quota_note(nil), do: nil
   defp quota_note({:hold, reason}), do: reason
   defp quota_note(_), do: nil
 
@@ -756,20 +717,86 @@ defmodule ArbiterWeb.BoardLive do
 
   # A few placeholder cards per skeleton column, uneven so it reads as a
   # board rather than a grid.
-  defp skeleton_cards("backlog"), do: ["h-[62px]", "h-[62px]"]
   defp skeleton_cards("ready"), do: ["h-[74px]", "h-[74px]", "h-[74px]"]
-  defp skeleton_cards("running"), do: ["h-[92px]", "h-[92px]"]
-  defp skeleton_cards("waiting"), do: ["h-[74px]"]
-  defp skeleton_cards(_), do: ["h-[62px]", "h-[62px]", "h-[62px]"]
+  defp skeleton_cards("in_progress"), do: ["h-[92px]", "h-[92px]"]
+  defp skeleton_cards("merging"), do: ["h-[74px]"]
+  defp skeleton_cards(_), do: ["h-[62px]", "h-[62px]"]
 
   defp scheduler_label(%{paused: true}), do: "paused"
   defp scheduler_label(_), do: "auto"
 
   # The one column head that carries a hue is the one whose state is the
-  # operator's problem.
+  # machine's live work.
   defp head_hue("live"), do: "var(--arb-live)"
-  defp head_hue("attention"), do: "var(--arb-attention)"
   defp head_hue(_), do: nil
+
+  defp column_count(%{key: "in_progress"}, items, board),
+    do: "#{length(items)} / #{board.slots_total}"
+
+  defp column_count(_column, items, _board), do: length(items)
+
+  # ---- card content, per column ----------------------------------------------
+
+  # The column's one line about the card (see the moduledoc).
+  defp detail("blocked", card), do: EdgeGate.describe({:waiting_on, card.blocked_by})
+  defp detail("ready", card), do: ready_reason(card.reason)
+  defp detail(column, card) when column in ["in_progress", "merging"], do: step_label(card.step)
+  defp detail("verifying", _card), do: "awaiting verification — restart & observe"
+  defp detail("closed", card), do: close_reason_label(Map.get(card, :close_reason))
+  defp detail(_column, _card), do: nil
+
+  # The scheduler words a hold as `blocked — …`, which on this board would
+  # read as the Blocked column's business. A Ready card is *held*, not blocked.
+  defp ready_reason("blocked — " <> hold), do: "held — " <> hold
+  defp ready_reason(reason), do: reason
+
+  defp step_label(nil), do: nil
+  defp step_label(step), do: Map.get(@step_labels, step, to_string(step))
+
+  defp close_reason_label(nil), do: "closed"
+  defp close_reason_label(reason), do: Map.get(@close_reason_labels, reason, to_string(reason))
+
+  # The activity line: what an In-progress card's run is doing (linked to its
+  # worker when a run is live), the PR a Merging card is on.
+  defp activity("in_progress", card), do: Map.get(card, :activity)
+  defp activity("merging", card), do: Map.get(card, :mr_ref)
+  defp activity(_column, _card), do: nil
+
+  #
+  # Where the line goes is where the next move is made: a card built from a
+  # run (its `status` is the run's state) goes to that worker, live or parked;
+  # a Merging card to the merge queue — unless its Watchdog is gone or was
+  # pulled (bd-8jixav), whose restart lives on the worker page.
+  defp activity_href("in_progress", %{status: status} = card) when status != :in_progress,
+    do: ~p"/workers/#{card.id}"
+
+  defp activity_href("merging", %{merge_pulled: true} = card), do: ~p"/workers/#{card.id}"
+  defp activity_href("merging", %{watchdog_alive: false} = card), do: ~p"/workers/#{card.id}"
+  defp activity_href("merging", _card), do: ~p"/merge_queue"
+  defp activity_href(_column, _card), do: nil
+
+  defp footer("backlog", card, now), do: relative(card.created_at, now)
+  defp footer("closed", card, _now), do: "closed #{clock(card.closed_at)}"
+
+  defp footer(column, card, _now) when column in ["merging", "in_progress"],
+    do: card.collapsed_note
+
+  defp footer(_column, _card, _now), do: nil
+
+  defp accent("ready", %{queue_state: :next}), do: "live"
+  defp accent("in_progress", %{live: true}), do: "live"
+  defp accent(_column, _card), do: nil
+
+  defp card_type(column, card) when column in ["backlog", "blocked", "ready"],
+    do: Map.get(card, :issue_type)
+
+  defp card_type(_column, _card), do: nil
+
+  defp owner_label(:operator), do: "you"
+  defp owner_label(:coordinator), do: "coordinator"
+  defp owner_label(other), do: to_string(other)
+
+  defp alert_kind_label(kind), do: kind |> to_string() |> String.replace("_", " ")
 
   # ---- render ---------------------------------------------------------------
 
@@ -777,11 +804,9 @@ defmodule ArbiterWeb.BoardLive do
   def render(assigns) do
     assigns =
       assigns
-      |> assign(:backlog, visible(assigns, assigns.board.backlog, "backlog"))
-      |> assign(:ready, visible(assigns, assigns.board.ready, "ready"))
-      |> assign(:running, visible(assigns, assigns.board.running, "running"))
-      |> assign(:waiting, visible(assigns, assigns.board.waiting, "waiting"))
-      |> assign(:closed, visible(assigns, assigns.board.closed_today, "closed"))
+      |> assign(:items, Map.new(@columns, &{&1.key, column_items(assigns, &1)}))
+      |> assign(:lane_tickets, lane_tickets(assigns))
+      |> assign(:lane_alerts, lane_alerts(assigns))
 
     ~H"""
     <Layouts.app
@@ -908,19 +933,153 @@ defmodule ArbiterWeb.BoardLive do
             </button>
           </div>
 
+          <%!-- ── Needs attention ─────────────────────────────────────
+               Always in the DOM, so its hook can restore the viewer's own
+               setting before the first board read lands. --%>
+          <section
+            id="board-attention-lane"
+            phx-hook=".AttentionLane"
+            aria-label="Needs attention"
+            data-open={to_string(@lane_open)}
+            class="border-b border-solid border-[var(--border-default)] bg-[var(--surface-page)]"
+          >
+            <div class="flex flex-wrap items-center gap-2 px-4 py-2">
+              <button
+                id="board-attention-toggle"
+                type="button"
+                phx-click="toggle_attention_lane"
+                aria-expanded={to_string(@lane_open)}
+                aria-controls="board-attention-items"
+                class="group inline-flex items-center gap-1.5 cursor-pointer text-[10.5px] font-medium uppercase tracking-[0.1em] font-[family-name:var(--font-mono)] text-[var(--text-secondary)] hover:text-[var(--text-title)] transition-colors"
+              >
+                <span
+                  aria-hidden="true"
+                  class={[
+                    "hero-chevron-right-micro size-3.5 transition-transform duration-[var(--dur-hover)]",
+                    @lane_open && "rotate-90"
+                  ]}
+                /> Needs attention
+                <span
+                  id="board-attention-count"
+                  class={[
+                    "min-w-[18px] px-1.5 py-px rounded-[var(--radius-pill)] text-center normal-case tracking-normal",
+                    if(@lane_tickets != [] or @lane_alerts != [],
+                      do:
+                        "bg-[color-mix(in_oklch,var(--arb-attention)_18%,transparent)] text-[var(--arb-attention)]",
+                      else: "bg-[var(--arb-canvas-sunken)] text-[var(--text-label)]"
+                    )
+                  ]}
+                >
+                  {if @board_loaded?, do: length(@lane_tickets) + length(@lane_alerts), else: "·"}
+                </span>
+              </button>
+
+              <button
+                id="board-attention-coordinator"
+                type="button"
+                phx-click="toggle_attention_coordinator"
+                aria-pressed={to_string(@lane_coordinator)}
+                title="Also show what the coordinator agent is working through"
+                class={[
+                  "ml-1 px-2 py-[2px] rounded-[var(--radius-chip)] border border-solid cursor-pointer transition-colors",
+                  "text-[10px] font-medium font-[family-name:var(--font-mono)]",
+                  if(@lane_coordinator,
+                    do:
+                      "border-[color-mix(in_oklch,var(--arb-info)_45%,transparent)] text-[var(--arb-info)] bg-[color-mix(in_oklch,var(--arb-info)_10%,transparent)]",
+                    else:
+                      "border-[var(--border-strong)] text-[var(--text-label)] hover:text-[var(--text-secondary)]"
+                  )
+                ]}
+              >
+                + coordinator
+              </button>
+            </div>
+
+            <div
+              :if={@lane_open and @board_loaded?}
+              id="board-attention-items"
+              class="flex gap-2 overflow-x-auto px-4 pb-3"
+            >
+              <div
+                :for={alert <- @lane_alerts}
+                id={"lane-alert-#{alert.id}"}
+                data-lane-item="alert"
+                data-owner={alert.owner}
+                class="flex-none w-64 flex flex-col gap-1 px-[11px] py-[9px] rounded-[var(--radius-field)] border border-solid border-[var(--arb-fail-edge)] bg-[var(--arb-fail-wash)]"
+              >
+                <span class="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-[0.08em] font-[family-name:var(--font-mono)] text-[var(--arb-fail-text)]">
+                  <span aria-hidden="true" class="hero-bell-alert-micro size-3.5" />
+                  {alert_kind_label(alert.kind)}
+                  <span class="ml-auto normal-case tracking-normal text-[var(--text-label)]">
+                    {elapsed(alert.raised_at, @now)}
+                  </span>
+                </span>
+                <span class="text-[12px] font-medium leading-[1.4] text-[var(--text-title)]">
+                  {alert.subject || alert.key}
+                </span>
+                <span
+                  :if={alert.detail}
+                  class="text-[11px] leading-[1.45] text-[var(--text-secondary)] line-clamp-2"
+                  title={alert.detail}
+                >
+                  {alert.detail}
+                </span>
+              </div>
+
+              <div
+                :for={item <- @lane_tickets}
+                id={"lane-ticket-#{item.id}"}
+                data-lane-item="ticket"
+                data-owner={item.owner}
+                phx-click={JS.navigate(~p"/tasks/#{item.id}")}
+                class={[
+                  "flex-none w-64 flex flex-col gap-1 px-[11px] py-[9px] cursor-pointer",
+                  "rounded-[var(--radius-field)] border border-solid bg-[var(--surface-card)]",
+                  "transition-colors duration-[var(--dur-hover)] hover:bg-[var(--arb-canvas-sunken)]",
+                  if(item.owner == :operator,
+                    do: "border-[color-mix(in_oklch,var(--arb-attention)_45%,transparent)]",
+                    else: "border-[var(--arb-line)]"
+                  )
+                ]}
+              >
+                <span class="flex items-center gap-1.5 text-[10.5px] font-[family-name:var(--font-mono)]">
+                  <span class="font-medium text-[var(--text-secondary)]">{item.id}</span>
+                  <span class="text-[var(--text-label)]">
+                    · {column_label(Atom.to_string(item.column))}
+                  </span>
+                  <span class="ml-auto text-[var(--text-label)]">{elapsed(item.since, @now)}</span>
+                </span>
+                <span class="text-[12px] font-medium leading-[1.4] text-[var(--text-title)] line-clamp-2">
+                  {item.title || item.id}
+                </span>
+                <.attention_marker attention={item} />
+              </div>
+
+              <div
+                :if={@lane_tickets == [] and @lane_alerts == []}
+                id="board-attention-empty"
+                class="px-2 py-1 text-[11px] font-[family-name:var(--font-mono)] text-[var(--text-label)]"
+              >
+                {if @lane_coordinator,
+                  do: "nothing needs attention",
+                  else: "nothing needs you — the coordinator has the rest"}
+              </div>
+            </div>
+          </section>
+
           <%!-- ── Skeleton ────────────────────────────────────────────
-               The first read is out: the five columns, with nothing claimed
+               The first read is out: the seven columns, with nothing claimed
                about what is in them. --%>
           <div
             :if={not @board_loaded? and is_nil(@board_error)}
             id="board-loading"
             aria-label="Loading the board"
-            class="flex overflow-x-auto snap-x snap-mandatory gap-px bg-[var(--arb-line-soft)] min-h-[560px] xl:grid xl:grid-cols-5"
+            class="flex overflow-x-auto snap-x snap-mandatory gap-px bg-[var(--arb-line-soft)] min-h-[560px] 2xl:grid 2xl:grid-cols-7"
           >
             <div
               :for={column <- @columns}
               id={"board-loading-#{column.key}"}
-              class="flex-shrink-0 w-[85vw] md:w-72 snap-start bg-[var(--surface-page)] px-3 pt-3 pb-4 flex flex-col gap-[9px] xl:w-auto"
+              class="flex-shrink-0 w-[85vw] md:w-64 snap-start bg-[var(--surface-page)] px-3 pt-3 pb-4 flex flex-col gap-[9px] 2xl:w-auto 2xl:min-w-0"
             >
               <.column_head label={column.label} count="·" tone={column.tone} />
               <div
@@ -945,353 +1104,93 @@ defmodule ArbiterWeb.BoardLive do
             :if={@board_loaded?}
             id="board-columns"
             phx-hook=".BoardDrag"
-            class="flex overflow-x-auto snap-x snap-mandatory gap-px bg-[var(--arb-line-soft)] min-h-[560px] xl:grid xl:grid-cols-5"
+            class="flex overflow-x-auto snap-x snap-mandatory gap-px bg-[var(--arb-line-soft)] min-h-[560px] 2xl:grid 2xl:grid-cols-7"
           >
-            <%!-- Backlog — written down, not yet thought through. No reason
-                 line, no accent, no drag: nothing here is queued for anything,
-                 and the only way out is the detail page's promote button. --%>
             <div
-              id="board-column-backlog"
-              data-column="backlog"
-              class="flex-shrink-0 w-[85vw] md:w-72 snap-start bg-[var(--surface-page)] px-3 pt-3 pb-4 flex flex-col gap-[9px] xl:w-auto"
+              :for={column <- @columns}
+              id={"board-column-#{column.key}"}
+              data-column={column.key}
+              class="flex-shrink-0 w-[85vw] md:w-64 snap-start bg-[var(--surface-page)] px-3 pt-3 pb-4 flex flex-col gap-[9px] 2xl:w-auto 2xl:min-w-0"
             >
-              <.column_head label="Backlog" count={length(@backlog)} tone={nil} />
+              <.column_head
+                label={column.label}
+                count={column_count(column, @items[column.key], @board)}
+                tone={column.tone}
+              />
 
               <div
-                :for={card <- Enum.take(@backlog, limit(@expanded, "backlog"))}
+                :for={card <- Enum.take(@items[column.key], limit(@expanded, column.key))}
                 id={"card-#{card.id}"}
                 class="contents"
                 phx-click={JS.navigate(task_navigate_href(card))}
               >
-                <.task_card
-                  id={card.id}
-                  title={card.title || card.id}
-                  priority={card.priority}
-                  type={card.issue_type}
-                  difficulty={card.difficulty}
-                  footer={relative(card.created_at, @now)}
-                  class="cursor-pointer"
-                  data-card={card.id}
-                  data-column="backlog"
-                >
-                  <:parent :if={card.parent}>
-                    <.parent_link parent={card.parent} mode="compact" />
-                  </:parent>
-                  <:status :if={card.over_budget}>
-                    <.over_budget_flag />
-                  </:status>
-                  <%!-- Refine (bd-1lszsc). Every card in this column is, by
-                       construction, exactly what `Refine.eligible?/1` accepts —
-                       `Board.Snapshot` builds Backlog from queueable, unrefined
-                       issues — so there is nothing to gate on here. Nesting it
-                       inside the card's own `phx-click` navigation is safe:
-                       LiveView resolves a click to the *nearest* `phx-click`
-                       ancestor, so this button's event fires and the card's
-                       navigate does not. --%>
-                  <:actions>
-                    <ArbiterWeb.RefineEntry.refine_button
-                      id={"board-refine-#{card.id}"}
-                      issue_id={card.id}
-                      variant="ghost"
-                    />
-                  </:actions>
-                </.task_card>
+                <.board_card card={card} column={column.key} now={@now} />
               </div>
 
               <.more
-                :if={length(@backlog) > limit(@expanded, "backlog")}
-                column="backlog"
-                count={length(@backlog) - limit(@expanded, "backlog")}
+                :if={length(@items[column.key]) > limit(@expanded, column.key)}
+                column={column.key}
+                count={length(@items[column.key]) - limit(@expanded, column.key)}
               />
 
               <div
-                :if={@backlog == []}
+                :if={column.key == "backlog" and @items["backlog"] == []}
                 id="board-backlog-empty"
                 class="mt-auto px-2 py-2 text-center rounded-[var(--radius-field)] border border-dashed border-[var(--border-strong)] text-[11px] font-[family-name:var(--font-mono)] text-[var(--text-label)]"
               >
                 nothing waiting to be refined
               </div>
-            </div>
-
-            <%!-- Ready — the queue. Every card says why it is or isn't going. --%>
-            <div
-              id="board-column-ready"
-              data-column="ready"
-              class="flex-shrink-0 w-[85vw] md:w-72 snap-start bg-[var(--surface-page)] px-3 pt-3 pb-4 flex flex-col gap-[9px] xl:w-auto"
-            >
-              <.column_head label="Ready" count={length(@ready)} tone={nil} />
-
-              <div
-                :for={entry <- Enum.take(@ready, limit(@expanded, "ready"))}
-                id={"card-#{entry.card.id}"}
-                class="contents"
-                phx-click={JS.navigate(task_navigate_href(entry.card))}
-              >
-                <.task_card
-                  id={entry.card.id}
-                  title={entry.card.title || entry.card.id}
-                  priority={entry.card.priority}
-                  type={entry.card.issue_type}
-                  difficulty={entry.card.difficulty}
-                  activity={entry.reason}
-                  accent={ready_accent(entry.state)}
-                  draggable="true"
-                  class="cursor-pointer"
-                  data-card={entry.card.id}
-                  data-column="ready"
-                >
-                  <:parent :if={entry.card.parent}>
-                    <.parent_link parent={entry.card.parent} mode="compact" />
-                  </:parent>
-                  <:status :if={entry.card.over_budget}>
-                    <.over_budget_flag />
-                  </:status>
-                  <:actions>
-                    <ArbiterWeb.DemoteEntry.demote_button
-                      :if={ArbiterWeb.DemoteEntry.eligible?(entry.card)}
-                      id={"board-demote-#{entry.card.id}"}
-                      issue_id={entry.card.id}
-                      variant="ghost"
-                    />
-                  </:actions>
-                </.task_card>
-              </div>
-
-              <.more
-                :if={length(@ready) > limit(@expanded, "ready")}
-                column="ready"
-                count={length(@ready) - limit(@expanded, "ready")}
-              />
 
               <%!-- Where the handoff put "drop to dispatch". The queue drains
                    itself, so what belongs here is the reason it might not. --%>
               <div
+                :if={column.key == "ready"}
                 id="board-ready-foot"
                 class="mt-auto px-2 py-2 text-center rounded-[var(--radius-field)] border border-dashed border-[var(--border-strong)] text-[11px] font-[family-name:var(--font-mono)] text-[var(--text-label)]"
               >
                 {ready_foot(@board, @scheduler_running)}
               </div>
             </div>
-
-            <%!-- Running — the machine's column. Drag out, never in. --%>
-            <div
-              id="board-column-running"
-              data-column="running"
-              class="flex-shrink-0 w-[85vw] md:w-72 snap-start bg-[var(--surface-page)] px-3 pt-3 pb-4 flex flex-col gap-[9px] xl:w-auto"
-            >
-              <.column_head
-                label="Running"
-                count={"#{length(@running)} / #{@board.slots_total}"}
-                tone="live"
-              />
-
-              <div
-                :for={card <- Enum.take(@running, limit(@expanded, "running"))}
-                id={"card-#{card.id}"}
-                class="contents"
-                phx-click={JS.navigate(task_navigate_href(card))}
-              >
-                <.task_card
-                  id={card.id}
-                  title={card.title || card.id}
-                  accent="live"
-                  activity={card.activity}
-                  activity_href={~p"/workers/#{card.id}"}
-                  difficulty={card.difficulty}
-                  footer={card_footer(card)}
-                  draggable="true"
-                  class="cursor-pointer"
-                  data-card={card.id}
-                  data-column="running"
-                >
-                  <:parent :if={card.parent}>
-                    <.parent_link parent={card.parent} mode="compact" />
-                  </:parent>
-                  <:status>
-                    <span class="flex items-center gap-1.5">
-                      <.over_budget_flag :if={card.over_budget} />
-                      <.provider_icon
-                        provider={card.provider}
-                        class="size-3.5 text-[var(--text-label)]"
-                      />
-                      <%!-- bd-aw2cyt: the pulse is a claim that something is
-                      running. Only a card with a live agent gets it; a card
-                      whose agent has exited (in review, waiting on CI, between
-                      rounds) goes quiet and says so. --%>
-                      <span
-                        data-phase={card.phase}
-                        data-agent-live={to_string(card.agent_live)}
-                        class={[
-                          "text-[10px] font-medium font-[family-name:var(--font-mono)]",
-                          if(card.agent_live,
-                            do:
-                              "text-[var(--arb-live)] animate-[arb-pulse_var(--pulse-period)_var(--ease-in-out)_infinite]",
-                            else: "text-[var(--text-label)] opacity-70"
-                          )
-                        ]}
-                      >
-                        {elapsed(card.since, @now)}
-                      </span>
-                    </span>
-                  </:status>
-                </.task_card>
-              </div>
-
-              <.more
-                :if={length(@running) > limit(@expanded, "running")}
-                column="running"
-                count={length(@running) - limit(@expanded, "running")}
-              />
-            </div>
-
-            <%!-- Waiting — the worker is done; the outcome is somewhere else.
-                 Uniform cards: the flag, not a hue, marks the ones that are
-                 yours. The column head still takes the attention hue when it
-                 holds any of them, because a board is read from across a
-                 room before it is read card by card. --%>
-            <div
-              id="board-column-waiting"
-              data-column="waiting"
-              class="flex-shrink-0 w-[85vw] md:w-72 snap-start bg-[var(--surface-page)] px-3 pt-3 pb-4 flex flex-col gap-[9px] xl:w-auto"
-            >
-              <.column_head
-                label="Waiting"
-                count={length(@waiting)}
-                tone={if Enum.any?(@waiting, & &1.needs_you), do: "attention", else: nil}
-              />
-
-              <div
-                :for={card <- Enum.take(@waiting, limit(@expanded, "waiting"))}
-                id={"card-#{card.id}"}
-                class="contents"
-                phx-click={JS.navigate(task_navigate_href(card))}
-              >
-                <.task_card
-                  id={card.id}
-                  title={card.title || card.id}
-                  activity={waiting_activity(card)}
-                  footer={waiting_note(card, waiting_activity(card))}
-                  draggable="true"
-                  class="cursor-pointer"
-                  data-card={card.id}
-                  data-column="waiting"
-                >
-                  <:parent :if={card.parent}>
-                    <.parent_link parent={card.parent} mode="compact" />
-                  </:parent>
-                  <:status>
-                    <span class="flex items-center gap-1.5">
-                      <.over_budget_flag :if={card.over_budget} />
-                      <span
-                        :if={card.needs_you}
-                        data-needs-you
-                        title="needs you — only a person can move this"
-                        aria-label="needs you"
-                        class="hero-flag"
-                        style="width: 11px; height: 11px; background-color: var(--arb-attention);"
-                      />
-                      <span class="text-[10px] font-medium font-[family-name:var(--font-mono)] text-[var(--text-label)]">
-                        {elapsed(card.since, @now)} waiting
-                      </span>
-                    </span>
-                  </:status>
-                  <:actions>
-                    <.link navigate={waiting_action_href(card)} class="contents">
-                      <span class="px-2 py-[2px] rounded-[var(--radius-chip)] text-[10px] font-medium font-[family-name:var(--font-mono)] border border-solid border-[var(--border-strong)] text-[var(--text-link)]">
-                        {waiting_action(card)}
-                      </span>
-                    </.link>
-                    <.link navigate={~p"/tasks/#{card.id}"} class="contents">
-                      <span class="px-2 py-[2px] rounded-[var(--radius-chip)] text-[10px] font-medium font-[family-name:var(--font-mono)] border border-solid border-[var(--arb-done-edge)] text-[var(--text-secondary)]">
-                        {@issue_label}
-                      </span>
-                    </.link>
-                  </:actions>
-                </.task_card>
-              </div>
-
-              <.more
-                :if={length(@waiting) > limit(@expanded, "waiting")}
-                column="waiting"
-                count={length(@waiting) - limit(@expanded, "waiting")}
-              />
-            </div>
-
-            <%!-- Closed in the last 24 hours (rolling). No action on it. --%>
-            <div
-              id="board-column-closed"
-              data-column="closed"
-              class="flex-shrink-0 w-[85vw] md:w-72 snap-start bg-[var(--surface-page)] px-3 pt-3 pb-4 flex flex-col gap-[9px] xl:w-auto"
-            >
-              <.column_head label="Closed · last 24h" count={length(@closed)} tone={nil} />
-
-              <div
-                :for={card <- Enum.take(@closed, limit(@expanded, "closed"))}
-                id={"card-#{card.id}"}
-                class="contents"
-                phx-click={JS.navigate(task_navigate_href(card))}
-              >
-                <.task_card
-                  id={card.id}
-                  title={card.title || card.id}
-                  muted
-                  footer={"closed #{clock(card.closed_at)}"}
-                  class="cursor-pointer"
-                  data-card={card.id}
-                  data-column="closed"
-                >
-                  <:parent :if={card.parent}>
-                    <.parent_link parent={card.parent} mode="compact" />
-                  </:parent>
-                </.task_card>
-              </div>
-
-              <div
-                :if={length(@closed) > limit(@expanded, "closed")}
-                class="flex items-center justify-between px-[11px] py-[9px] rounded-[var(--radius-field)] border border-dashed border-[var(--arb-line)]"
-              >
-                <span class="text-[11px] font-[family-name:var(--font-mono)] text-[var(--text-label)]">
-                  {length(@closed) - limit(@expanded, "closed")} more
-                </span>
-                <.link
-                  navigate={~p"/tasks"}
-                  class="text-[11px] font-[family-name:var(--font-mono)] text-[var(--text-link)]"
-                >
-                  →
-                </.link>
-              </div>
-            </div>
           </div>
-        </div>
-
-        <%!-- ── Stop confirmation ───────────────────────────────────────
-             Pulling a card out of Running kills a live agent. The drag opens
-             this; only the button here stops anything. --%>
-        <div
-          :if={@confirm_stop}
-          id="board-confirm-stop"
-          class="flex items-center gap-3 px-4 py-3 rounded-[var(--radius-panel)] border border-solid border-[color-mix(in_oklch,var(--arb-fail)_45%,transparent)] bg-[var(--surface-card)]"
-        >
-          <span class="text-[12.5px] text-[var(--text-title)]">
-            Stop the {@worker_label} on <code class="font-[family-name:var(--font-mono)]">{@confirm_stop}</code>? Its agent
-            dies where it stands; the worktree and everything committed survive.
-          </span>
-          <span class="ml-auto flex items-center gap-2">
-            <ArbiterWeb.CoreComponents.Core.button variant="ghost" size="sm" phx-click="cancel_stop">
-              Cancel
-            </ArbiterWeb.CoreComponents.Core.button>
-            <ArbiterWeb.CoreComponents.Core.button variant="danger" size="sm" phx-click="confirm_stop">
-              Stop {@worker_label}
-            </ArbiterWeb.CoreComponents.Core.button>
-          </span>
         </div>
       </div>
 
+      <script :type={Phoenix.LiveView.ColocatedHook} name=".AttentionLane">
+        // The swimlane's open/closed state and its coordinator chip are one
+        // viewer's convenience, so they live in that viewer's browser storage.
+        // Storage can be missing or throw (private mode, a blocked
+        // localStorage): then nothing is restored and nothing is stored, and
+        // the lane keeps the server's defaults.
+        const KEY = "arbiter:board:attention-lane"
+
+        export default {
+          mounted() {
+            let pref = null
+            try {
+              pref = JSON.parse(window.localStorage.getItem(KEY) || "null")
+            } catch (_) {
+              pref = null
+            }
+            if (pref && typeof pref === "object") {
+              this.pushEvent("attention_lane_restore", pref)
+            }
+
+            this.handleEvent("attention_lane_pref", (next) => {
+              try {
+                window.localStorage.setItem(KEY, JSON.stringify(next))
+              } catch (_) {}
+            })
+          },
+        }
+      </script>
+
       <script :type={Phoenix.LiveView.ColocatedHook} name=".BoardDrag">
-        // Drag is a human action, and only for the moves a human decides:
-        // reorder within Ready, pull out of Running, move a Waiting card back
-        // to Ready or forward out of the column. Dropping INTO Running is pushed
-        // to the server so it can explain itself rather than silently no-op.
+        // Drag is a human action. Within Backlog or Ready it re-ranks: only
+        // the client knows where the cursor landed, so it names the card the
+        // drop went before or after. Across columns it reports the whole
+        // gesture, and the server decides what — if anything — it means.
+        const RANKED = ["backlog", "ready"]
+
         export default {
           mounted() { this.wire() },
           updated() { this.wire() },
@@ -1322,25 +1221,33 @@ defmodule ArbiterWeb.BoardLive do
               if (!column) return
               const to = column.dataset.column
 
-              // Reordering Ready is the one gesture the client resolves on
-              // its own, because only it knows where the cursor landed.
-              if (to === "ready" && drag.from === "ready") {
-                const ids = Array.from(column.querySelectorAll("[data-card]"))
-                  .map((n) => n.dataset.card)
-                const over = e.target.closest("[data-card]")
-                const rest = ids.filter((id) => id !== drag.id)
-                const at = over && over.dataset.card !== drag.id
-                  ? rest.indexOf(over.dataset.card)
-                  : rest.length
-                rest.splice(at < 0 ? rest.length : at, 0, drag.id)
-                this.pushEvent("reorder_ready", {order: rest})
+              if (to === drag.from && RANKED.includes(to)) {
+                this.rank(drag, column, e)
                 return
               }
 
-              // Everything else is reported as-is. What a landing means is
-              // the server's call, including "nothing".
               this.pushEvent("drag", {id: drag.id, from: drag.from, to: to})
             })
+          },
+          rank(drag, column, e) {
+            const over = e.target.closest("[data-card]")
+
+            if (over && over.dataset.card !== drag.id) {
+              const box = over.getBoundingClientRect()
+              const after = e.clientY > box.top + box.height / 2
+              const key = after ? "after_id" : "before_id"
+              this.pushEvent("reorder", {id: drag.id, column: drag.from, [key]: over.dataset.card})
+              return
+            }
+
+            // Dropped on the column's empty space: to the bottom.
+            if (!over) {
+              const ids = Array.from(column.querySelectorAll("[data-card]"))
+                .map((n) => n.dataset.card)
+                .filter((id) => id !== drag.id)
+              const last = ids[ids.length - 1]
+              if (last) this.pushEvent("reorder", {id: drag.id, column: drag.from, after_id: last})
+            }
           },
         }
       </script>
@@ -1349,6 +1256,144 @@ defmodule ArbiterWeb.BoardLive do
   end
 
   # ---- render helpers -------------------------------------------------------
+
+  attr(:card, :map, required: true)
+  attr(:column, :string, required: true)
+  attr(:now, :any, required: true)
+
+  # One card, any column. What differs per column is read through the
+  # `detail/2`, `activity/2`, `footer/3` and `accent/2` helpers above rather
+  # than seven copies of the markup.
+  defp board_card(assigns) do
+    assigns =
+      assign(assigns,
+        detail: detail(assigns.column, assigns.card),
+        activity: activity(assigns.column, assigns.card),
+        activity_href: activity_href(assigns.column, assigns.card),
+        footer: footer(assigns.column, assigns.card, assigns.now)
+      )
+
+    ~H"""
+    <.task_card
+      id={@card.id}
+      title={@card.title || @card.id}
+      priority={if @column != "closed", do: @card[:priority]}
+      type={card_type(@column, @card)}
+      difficulty={if @column == "closed", do: :unset, else: @card[:difficulty]}
+      accent={accent(@column, @card)}
+      activity={@activity}
+      activity_href={@activity_href}
+      footer={@footer}
+      muted={@column == "closed"}
+      draggable="true"
+      class="cursor-pointer"
+      data-card={@card.id}
+      data-column={@column}
+    >
+      <:parent :if={@card[:parent]}>
+        <.parent_link parent={@card.parent} mode="compact" />
+      </:parent>
+      <:status>
+        <span class="flex items-center gap-1.5">
+          <.over_budget_flag :if={@card[:over_budget]} />
+          <.provider_icon
+            :if={@column == "in_progress" and @card[:provider]}
+            provider={@card.provider}
+            class="size-3.5 text-[var(--text-label)]"
+          />
+          <%!-- bd-aw2cyt: the pulse is a claim that something is running.
+               Only a card with a live agent gets it. --%>
+          <span
+            :if={@column in ["in_progress", "merging", "verifying"]}
+            data-phase={@card[:phase]}
+            data-agent-live={to_string(@card[:agent_live] == true)}
+            class={[
+              "text-[10px] font-medium font-[family-name:var(--font-mono)]",
+              if(@card[:agent_live],
+                do:
+                  "text-[var(--arb-live)] animate-[arb-pulse_var(--pulse-period)_var(--ease-in-out)_infinite]",
+                else: "text-[var(--text-label)] opacity-70"
+              )
+            ]}
+          >
+            {elapsed(@card[:since], @now)}
+          </span>
+        </span>
+      </:status>
+      <:detail :if={@detail}>
+        <span
+          data-detail={@column}
+          data-step={@card[:step]}
+          data-close-reason={@column == "closed" && @card[:close_reason]}
+          data-queue-state={@card[:queue_state]}
+          class={[
+            "text-[10.5px] leading-[1.5] font-[family-name:var(--font-mono)]",
+            detail_class(@column, @card)
+          ]}
+        >
+          {@detail}
+        </span>
+      </:detail>
+      <:actions :if={
+        @card[:attention] || @column == "backlog" || ArbiterWeb.DemoteEntry.eligible?(@card)
+      }>
+        <span class="flex flex-col gap-1.5 w-full">
+          <.attention_marker :if={@card[:attention]} attention={@card.attention} />
+          <span :if={@column == "backlog"} class="flex gap-1.5">
+            <%!-- Refine (bd-1lszsc). Nesting it inside the card's own
+                 `phx-click` navigation is safe: LiveView resolves a click to
+                 the *nearest* `phx-click` ancestor. --%>
+            <ArbiterWeb.RefineEntry.refine_button
+              id={"board-refine-#{@card.id}"}
+              issue_id={@card.id}
+              variant="ghost"
+            />
+          </span>
+          <span :if={@column == "ready" and ArbiterWeb.DemoteEntry.eligible?(@card)} class="flex">
+            <ArbiterWeb.DemoteEntry.demote_button
+              id={"board-demote-#{@card.id}"}
+              issue_id={@card.id}
+              variant="ghost"
+            />
+          </span>
+        </span>
+      </:actions>
+    </.task_card>
+    """
+  end
+
+  defp detail_class("ready", %{queue_state: :next}), do: "text-[var(--arb-live)]"
+  defp detail_class("ready", %{queue_state: :blocked}), do: "text-[var(--arb-attention)]"
+  defp detail_class("blocked", _card), do: "text-[var(--arb-attention)]"
+  defp detail_class("in_progress", %{live: true}), do: "text-[var(--text-secondary)]"
+  defp detail_class(_column, _card), do: "text-[var(--text-label)]"
+
+  attr(:attention, :map, required: true)
+
+  # Who has to act, and why — on a card in its own column, and on its lane
+  # card. The operator's is the only one that takes the attention hue.
+  defp attention_marker(assigns) do
+    ~H"""
+    <span
+      data-attention={@attention.owner}
+      title={@attention[:note] || @attention.reason}
+      class={[
+        "inline-flex items-start gap-1 max-w-full px-1.5 py-[3px] rounded-[var(--radius-chip)] border border-solid",
+        "text-[10px] leading-[1.35] font-[family-name:var(--font-mono)]",
+        if(@attention.owner == :operator,
+          do:
+            "border-[color-mix(in_oklch,var(--arb-attention)_45%,transparent)] bg-[color-mix(in_oklch,var(--arb-attention)_10%,transparent)] text-[var(--arb-attention)]",
+          else: "border-[var(--arb-line)] text-[var(--text-secondary)]"
+        )
+      ]}
+    >
+      <span aria-hidden="true" class="hero-flag-micro size-3 shrink-0 mt-px" />
+      <span class="min-w-0">
+        <span class="font-medium">{owner_label(@attention.owner)}</span> · {@attention.reason}
+      </span>
+    </span>
+    """
+  end
 
   attr(:label, :string, required: true)
   attr(:count, :any, required: true)
@@ -1392,7 +1437,7 @@ defmodule ArbiterWeb.BoardLive do
       type="button"
       phx-click="expand"
       phx-value-column={@column}
-      class="flex items-center justify-between px-[11px] py-[9px] rounded-[var(--radius-field)] border border-dashed border-[var(--arb-line)]"
+      class="flex items-center justify-between px-[11px] py-[9px] rounded-[var(--radius-field)] border border-dashed border-[var(--arb-line)] cursor-pointer hover:bg-[var(--arb-canvas-sunken)] transition-colors"
     >
       <span class="text-[11px] font-[family-name:var(--font-mono)] text-[var(--text-label)]">
         {@count} more
@@ -1417,98 +1462,6 @@ defmodule ArbiterWeb.BoardLive do
   defp limit(expanded, column) do
     if MapSet.member?(expanded, column), do: 1_000, else: @column_limit
   end
-
-  defp ready_accent(:next), do: "live"
-  defp ready_accent(:blocked), do: "attention"
-  defp ready_accent(_), do: nil
-
-  # The one live line on a Waiting card: why the worker stopped, or — for one
-  # already sitting on a merge request — which request.
-  defp waiting_activity(%{status: :merging} = card), do: merge_activity(card)
-  defp waiting_activity(%{reason: reason}) when is_binary(reason) and reason != "", do: reason
-  defp waiting_activity(_card), do: "waiting"
-
-  # The state word under the card. Deliberately the same mono grey for every
-  # card in the column: what separates them is the flag, not the palette.
-  # Suppressed when the activity line above it already says the same thing —
-  # a worker that stopped with no summary reports "failed" for both.
-  defp waiting_note(card, activity) do
-    case waiting_note(card) do
-      ^activity -> with_collapsed(nil, card)
-      note -> with_collapsed(note, card)
-    end
-  end
-
-  # bd-8jixav: one task is one card, but a collapsed subordinate row's failure
-  # is not the primary row's to swallow — a dead fix pass under a parked
-  # primary is exactly the invisibility this ticket is about.
-  defp with_collapsed(note, %{collapsed_note: extra}) when is_binary(extra) and extra != "" do
-    case note do
-      nil -> extra
-      note -> note <> " · " <> extra
-    end
-  end
-
-  defp with_collapsed(note, _card), do: note
-
-  # bd-8jixav: a Watchdog is a `:temporary` child — when it dies the ticket
-  # stays Merging on a genuinely open MR that nothing polls, and every other
-  # field on the card keeps reading like an ordinary review wait. This note is
-  # the whole difference between "the machine is working on it" and "this will
-  # sit here forever", so it outranks the merge status it replaces.
-  #
-  # bd-741sid: except when the operator pulled it out of the merge queue.
-  # Then nothing polling it is the point, not an alarm.
-  defp waiting_note(%{merge_pulled: true}), do: "pulled from merge queue"
-  defp waiting_note(%{watchdog_alive: false}), do: "no watchdog polling"
-  defp waiting_note(%{status: :merging} = card), do: merge_status_text(card.merger_status)
-  defp waiting_note(%{status: :finished, outcome: :failed}), do: "failed"
-  defp waiting_note(%{status: :in_progress}), do: "no live worker"
-  defp waiting_note(%{status: :awaiting_verification}), do: "restart & observe"
-  defp waiting_note(_card), do: "parked"
-
-  defp waiting_action(%{merge_pulled: true}), do: "restart watchdog"
-  defp waiting_action(%{watchdog_alive: false}), do: "restart watchdog"
-  defp waiting_action(%{status: :merging}), do: "merge queue"
-  defp waiting_action(%{status: :finished, outcome: :failed}), do: "retry"
-  defp waiting_action(%{status: :in_progress}), do: "resume"
-  defp waiting_action(%{status: :awaiting_verification}), do: "verify"
-  defp waiting_action(_card), do: "answer"
-
-  defp merge_activity(%{mr_ref: ref}) when is_binary(ref) and ref != "", do: ref
-  defp merge_activity(_card), do: "waiting on checks"
-
-  # `card.merger_status` is the raw poll result Arbiter.Worker.Watchdog reads
-  # (a map with :status/:approved/:pipeline/etc, not a display string) — reduce
-  # it the same way merge_queue_index_live.ex does, to the board's short
-  # lowercase mono vocabulary instead of rendering the map itself.
-  defp merge_status_text(nil), do: "checks"
-
-  defp merge_status_text(status) when is_map(status) do
-    case Watchdog.effective_block_reason(status) do
-      nil ->
-        case Watchdog.classify(status) do
-          :merged -> "merged"
-          :approved -> "approved"
-          :closed -> "closed"
-          :pending -> "checks"
-        end
-
-      reason ->
-        block_reason_text(reason)
-    end
-  end
-
-  defp merge_status_text(_status), do: "checks"
-
-  defp block_reason_text(:conflict), do: "conflict"
-  defp block_reason_text(:behind_base), do: "behind base"
-  defp block_reason_text(:ci_failed), do: "ci failed"
-  defp block_reason_text(:needs_approval), do: "needs approval"
-  defp block_reason_text(:needs_nonauthor_approval), do: "awaiting reviewer"
-  defp block_reason_text(:draft), do: "draft"
-  defp block_reason_text(:blocked_other), do: "blocked"
-  defp block_reason_text(other), do: "blocked · #{other}"
 
   # The foot of the Ready column, where the handoff's drop zone used to be.
   defp ready_foot(%{paused: true}, false),

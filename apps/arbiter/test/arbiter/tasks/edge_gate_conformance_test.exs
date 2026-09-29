@@ -118,12 +118,11 @@ defmodule Arbiter.Tasks.EdgeGateConformanceTest do
         paused: false
       )
 
-    ready = MapSet.new(board.ready, & &1.id)
-    blocked = for e <- board.ready, e.state == :blocked, into: MapSet.new(), do: e.id
-
-    # A settled issue the Ready column never showed is not the board's to gate
-    # — restrict to the overlap.
-    MapSet.intersection(blocked, ready)
+    # bd-79w1fs: a gating edge puts the card in the Blocked column, out of the
+    # scheduler's queue; a mutex holds it in Ready as a `:blocked` entry. Both
+    # are refusals, and a settled issue is in neither.
+    held = for e <- board.ready, e.state == :blocked, into: MapSet.new(), do: e.id
+    MapSet.union(MapSet.new(board.blocked, & &1.id), held)
   end
 
   # ---- the world -----------------------------------------------------------
