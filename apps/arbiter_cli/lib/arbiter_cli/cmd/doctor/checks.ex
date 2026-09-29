@@ -288,7 +288,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   # `fatal: true` — this is still an operator-actionable misconfiguration
   # (ambiguous or unresolvable workspace selector) and `arb doctor` should
   # exit non-zero on it, same as any other broken CLI command depending on
-  # `Workspace.resolve/0` (`arb issue`, `arb ready`, `arb where`, `arb
+  # `Workspace.resolve/0` (`arb ticket`, `arb ready`, `arb where`, `arb
   # config`). But `blocks_readiness: false` — it says which workspace CLI
   # commands will operate against, not whether the deployed server is
   # healthy, so `green?/0` (which backs `arb server deploy`'s auto-rollback

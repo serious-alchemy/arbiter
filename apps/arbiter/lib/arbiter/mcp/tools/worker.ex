@@ -707,7 +707,7 @@ defmodule Arbiter.MCP.Tools.Worker do
       archive branch at all today.
 
   Coordinator only. Optional `workspace` (resolved the same way as
-  `worker_list` / `task_ready`).
+  `worker_list` / `ticket_ready`).
   """
   @spec transcript_capture_stats(Scope.t(), map()) ::
           {:ok, map()} | {:error, {atom(), String.t()}}

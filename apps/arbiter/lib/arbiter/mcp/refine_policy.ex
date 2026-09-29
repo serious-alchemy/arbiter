@@ -34,12 +34,12 @@ defmodule Arbiter.MCP.RefinePolicy do
   **Writes are narrow, and doubly gated.** A tool being allowed here only means a
   refine session may *call* it; the handler then requires the target to be the
   bound issue or a `parent_of` descendant of it
-  (`Arbiter.MCP.Tools.authorize_subtree/2`). Allowing `task_update` does not allow
+  (`Arbiter.MCP.Tools.authorize_subtree/2`). Allowing `ticket_update` does not allow
   updating any task — it allows updating a task in the subtree.
 
   **Nothing that starts, stops, or closes work.** No dispatch (`can_dispatch` is
-  hard-wired false on the tier), no `task_demote`/`task_close`/`task_reopen`/`task_verify`, no
-  `task_rank`, no scheduler or circuit-breaker controls, no installation or
+  hard-wired false on the tier), no `ticket_demote`/`ticket_close`/`ticket_reopen`/`ticket_verify`, no
+  `ticket_rank`, no scheduler or circuit-breaker controls, no installation or
   workspace config writes, no skill writes, no outbound mail. A refine session
   shapes a backlog item and promotes it; the board decides what happens next.
   """
@@ -52,9 +52,9 @@ defmodule Arbiter.MCP.RefinePolicy do
   #
   # Everything here is a pure read, scoped to the token's bound workspace.
   @allow_reads ~w(
-    task_show
-    task_list
-    task_ready
+    ticket_show
+    ticket_list
+    ticket_ready
     workspace_show
     workspace_config_get
     workspace_config_overview
@@ -70,10 +70,10 @@ defmodule Arbiter.MCP.RefinePolicy do
   # Each of these is additionally gated by `Tools.authorize_subtree/2` inside its
   # handler — being callable is not being unrestricted.
   @allow_writes ~w(
-    task_update
-    task_update_progress
-    task_create
-    task_promote
+    ticket_update
+    ticket_update_progress
+    ticket_create
+    ticket_promote
     dep_add
     dep_remove
   )
@@ -82,22 +82,22 @@ defmodule Arbiter.MCP.RefinePolicy do
   @deny_reason_dispatch "a refine session shapes work, it never starts it (can_dispatch is always false)"
   @deny_reason_lifecycle "a refine session may promote from Backlog but never demote, close, reopen or verify a task"
   @deny_reason_worker_ops "worker operations are outside a refine session's authority"
-  @deny_reason_config "configuration is installation state, not issue state"
+  @deny_reason_config "configuration is installation state, not ticket state"
   @deny_reason_scheduler "board and breaker controls are coordinator authority"
   @deny_reason_mail "a refine session cannot send mail or flag other sessions"
   @deny_reason_review "review gating is coordinator authority"
   @deny_reason_ops "operational triage is outside a refine session's authority"
   @deny_reason_tracker "upstream tracker sync is coordinator authority"
-  @deny_reason_scope "a refine session is bound to one workspace and one issue"
+  @deny_reason_scope "a refine session is bound to one workspace and one ticket"
 
   @deny %{
     # lifecycle / status
-    "task_close" => @deny_reason_lifecycle,
-    "task_reopen" => @deny_reason_lifecycle,
-    "task_verify" => @deny_reason_lifecycle,
-    "task_demote" => @deny_reason_lifecycle,
-    "task_sync_upstream_close" => @deny_reason_lifecycle,
-    "task_rank" => @deny_reason_scheduler,
+    "ticket_close" => @deny_reason_lifecycle,
+    "ticket_reopen" => @deny_reason_lifecycle,
+    "ticket_verify" => @deny_reason_lifecycle,
+    "ticket_demote" => @deny_reason_lifecycle,
+    "ticket_sync_upstream_close" => @deny_reason_lifecycle,
+    "ticket_rank" => @deny_reason_scheduler,
     "ticket_handoff" => @deny_reason_ops,
     "ticket_handback" => @deny_reason_ops,
 

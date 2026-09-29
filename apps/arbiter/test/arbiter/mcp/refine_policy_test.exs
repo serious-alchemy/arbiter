@@ -55,7 +55,7 @@ defmodule Arbiter.MCP.RefinePolicyTest do
 
   describe "the shape of the permission set" do
     test "the read surface a refinement actually needs is allowed" do
-      for tool <- ~w(task_show task_list task_ready workspace_show workspace_config_get
+      for tool <- ~w(ticket_show ticket_list ticket_ready workspace_show workspace_config_get
                      workspace_config_overview repo_list repo_show
                      skill_list skill_get) do
         assert RefinePolicy.allow?(tool), "expected #{tool} to be allowed for a refine session"
@@ -63,13 +63,14 @@ defmodule Arbiter.MCP.RefinePolicyTest do
     end
 
     test "the subtree write surface is allowed" do
-      for tool <- ~w(task_update task_update_progress task_create task_promote dep_add dep_remove) do
+      for tool <-
+            ~w(ticket_update ticket_update_progress ticket_create ticket_promote dep_add dep_remove) do
         assert RefinePolicy.allow?(tool), "expected #{tool} to be allowed for a refine session"
       end
     end
 
     test "status-changing, dispatching and installation-wide tools are denied" do
-      for tool <- ~w(task_close task_reopen task_verify task_sync_upstream_close
+      for tool <- ~w(ticket_close ticket_reopen ticket_verify ticket_sync_upstream_close
                      worker_dispatch worker_resume worker_review worker_stop worker_list
                      worker_show worker_runs worker_log worker_prompt
                      scheduler_pause scheduler_resume scheduler_status
@@ -85,8 +86,17 @@ defmodule Arbiter.MCP.RefinePolicyTest do
   describe "Catalog integration" do
     test "visible/1 lists exactly the allowed tools for a refine scope" do
       visible = @refine |> Catalog.visible() |> Enum.map(& &1.name) |> Enum.sort()
+      {aliases, canonical} = Enum.split_with(visible, &Map.has_key?(Catalog.legacy_aliases(), &1))
 
-      assert visible == Enum.sort(RefinePolicy.allowed())
+      assert canonical == Enum.sort(RefinePolicy.allowed())
+
+      # bd-4jojpw: a deprecated `task_*` alias is visible exactly where its
+      # `ticket_*` target is allowed.
+      assert Enum.sort(aliases) ==
+               Catalog.legacy_aliases()
+               |> Enum.filter(fn {_old, new} -> RefinePolicy.allow?(new) end)
+               |> Enum.map(&elem(&1, 0))
+               |> Enum.sort()
     end
 
     test "a denied tool is refused with a not-permitted rpc error naming the reason" do
@@ -100,7 +110,7 @@ defmodule Arbiter.MCP.RefinePolicyTest do
       # repo, and the test would blow up rather than quietly pass.
       for {tool, args} <- [
             {"worker_dispatch", %{"task_id" => "bd-x"}},
-            {"task_close", %{"id" => "bd-x"}},
+            {"ticket_close", %{"id" => "bd-x"}},
             {"workspace_config_set", %{"key" => "a", "value" => "b"}},
             {"scheduler_pause", %{}},
             {"queue_restart_watchdog", %{"task_id" => "bd-x"}},

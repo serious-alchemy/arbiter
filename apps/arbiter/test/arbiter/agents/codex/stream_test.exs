@@ -296,11 +296,11 @@ defmodule Arbiter.Agents.Codex.StreamTest do
 
       mcp = %{
         "type" => "item.started",
-        "item" => %{"type" => "mcp_tool_call", "server" => "arbiter", "tool" => "task_show"}
+        "item" => %{"type" => "mcp_tool_call", "server" => "arbiter", "tool" => "ticket_show"}
       }
 
       assert [{line, false}] = Stream.format_event(mcp)
-      assert line =~ "task_show"
+      assert line =~ "ticket_show"
     end
 
     test "item.updated is absorbed so streamed text is not double-printed" do

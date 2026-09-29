@@ -101,6 +101,6 @@ defmodule ArbiterCli.Cmd.CloseTest do
   test "close requires id" do
     {_out, err, exit_code} = capture(fn -> Close.run([]) end)
     assert exit_code == 1
-    assert err =~ "requires an issue id"
+    assert err =~ "requires a ticket id"
   end
 end

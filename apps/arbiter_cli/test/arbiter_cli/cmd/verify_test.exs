@@ -1,5 +1,5 @@
 defmodule ArbiterCli.Cmd.VerifyTest do
-  @moduledoc "bd-9so315 — `arb issue verify <id> --observed/--failed`."
+  @moduledoc "bd-9so315 — `arb ticket verify <id> --observed/--failed`."
   use ArbiterCli.CliCase, async: true
 
   alias ArbiterCli.Cmd.Verify
@@ -42,10 +42,10 @@ defmodule ArbiterCli.Cmd.VerifyTest do
     assert {:ok, %{"verification_outcome" => "failed"}} = Jason.decode(out)
   end
 
-  test "requires an issue id" do
+  test "requires a ticket id" do
     {_out, err, exit_code} = capture(fn -> Verify.run(["--observed", "x"]) end)
     assert exit_code == 1
-    assert err =~ "requires an issue id"
+    assert err =~ "requires a ticket id"
   end
 
   test "requires exactly one of --observed / --failed" do

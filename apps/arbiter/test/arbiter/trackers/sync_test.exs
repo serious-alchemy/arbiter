@@ -415,7 +415,7 @@ defmodule Arbiter.Trackers.SyncTest do
       refute_receive :comment, 50
       refute_receive :remotelink, 50
 
-      # A new, different PR on the same task (e.g. after `task_reopen`) still
+      # A new, different PR on the same task (e.g. after `ticket_reopen`) still
       # gets its own comment.
       other_url = "https://github.com/acme/voice-id-core/pull/3700"
       reloaded = Ash.get!(Issue, issue.id)

@@ -27,7 +27,7 @@ defmodule Arbiter.MCP.Scope do
   |---|---|---|---|
   | `:worker` | its own task, its mailbox, its workspace config | progress/qa/deployment notes on **its own task**; flags to siblings | never |
   | `:coordinator` | across any workspace on the installation | create/update/close tasks, deps (incl. `parent_of` grouping); dispatch | yes |
-  | `:refine` | broadly across its **bound workspace** (tasks, graph reads, repos, skills, workspace config) | title/description/acceptance/typing/notes edits, `task_create`, dep edges and `task_promote` — **only inside the bound issue's `parent_of` subtree** | never |
+  | `:refine` | broadly across its **bound workspace** (tasks, graph reads, repos, skills, workspace config) | title/description/acceptance/typing/notes edits, `ticket_create`, dep edges and `ticket_promote` — **only inside the bound issue's `parent_of` subtree** | never |
 
   ## The `:refine` tier (bd-3uy2hn)
 

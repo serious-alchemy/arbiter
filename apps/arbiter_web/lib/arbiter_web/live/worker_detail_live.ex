@@ -69,7 +69,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
       |> assign(:flash_message, nil)
       |> assign(:compose_body, "")
       |> assign(:worker_label, "worker")
-      |> assign(:issue_label, "issue")
+      |> assign(:issue_label, "ticket")
       |> assign(:repo_label, "repo")
       |> assign(:workspace_label, "workspace")
       |> assign(:pr_label, "pull request")
@@ -339,7 +339,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
          put_flash(
            socket,
            :error,
-           "No workspace known for this issue; can't address a direction."
+           "No workspace known for this ticket; can't address a direction."
          )}
 
       {text, ws_id} ->
@@ -822,7 +822,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
   defp resume_failure(:no_outpost),
     do:
       "the worktree for this task is gone, so there's nothing to resume — " <>
-        "dispatch a fresh worker from the issue page instead."
+        "dispatch a fresh worker from the ticket page instead."
 
   defp resume_failure(:repo_unknown),
     do: "no repo could be resolved for this task — dispatch it explicitly instead."
@@ -830,7 +830,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
   defp resume_failure({:worker_active, run}),
     do: "a worker is still active (#{run |> run_label() |> String.downcase()}) — stop it first."
 
-  defp resume_failure({:task_closed, _id}), do: "the issue is closed."
+  defp resume_failure({:task_closed, _id}), do: "the ticket is closed."
 
   defp resume_failure({:slot_cap_full, info}),
     do: Arbiter.Worker.ResumeSlot.refusal_message(info)

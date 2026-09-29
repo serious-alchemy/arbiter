@@ -12,7 +12,7 @@ defmodule ArbiterWeb.TaskIndexLive do
   filtered view is shareable and survives reload. Re-renders live on
   `:task_lifecycle` events so a transition shows up without a refresh.
 
-  The "New issue" action navigates to the standalone `/tasks/new` create
+  The "New ticket" action navigates to the standalone `/tasks/new` create
   screen (`ArbiterWeb.TaskNewLive`) rather than opening an inline form here.
 
   ## Filtering strategy
@@ -83,7 +83,7 @@ defmodule ArbiterWeb.TaskIndexLive do
     # render reads nothing and draws a loading state (bd-y9civj).
     socket =
       socket
-      |> assign(:issue_label, "issue")
+      |> assign(:issue_label, "ticket")
       |> assign(:filter_tabs, @filter_tabs)
       |> assign(:sort_options, Enum.map(@sorts, &{@sort_labels[&1], Atom.to_string(&1)}))
       |> assign(:issue_types, @issue_types)

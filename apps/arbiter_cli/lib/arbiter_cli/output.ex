@@ -96,7 +96,7 @@ defmodule ArbiterCli.Output do
   def emit_issue_list(issues, :text) do
     case issues do
       [] ->
-        IO.puts("(no issues)")
+        IO.puts("(no tickets)")
 
       list ->
         Enum.each(list, fn issue -> IO.puts(format_issue_line(issue)) end)
@@ -245,7 +245,7 @@ defmodule ArbiterCli.Output do
     header <> sections <> dependencies_section(issue["dependencies"])
   end
 
-  # bd-1defgu: `arb issue show` gains a Dependencies section — the edge write
+  # bd-1defgu: `arb ticket show` gains a Dependencies section — the edge write
   # surfaces (`arb dep add`) had no read-side counterpart on this view before.
   defp dependencies_section(deps) when is_list(deps) and deps != [] do
     "\n\nDependencies:\n" <> Enum.map_join(deps, "\n", &("  " <> format_dependency_row(&1)))

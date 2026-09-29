@@ -7,7 +7,7 @@ Some trackers gate a status transition on custom fields — e.g. "QA/Deployment
 notes must be filled before Code Review." If those fields are empty, the
 `pr_opened` sync fails and escalates instead of silently skipping the
 transition. The **worker** is responsible for producing those notes
-(`--qa-notes`, `--deployment-notes` on `issue update`) before the transition
+(`--qa-notes`, `--deployment-notes` on `ticket update`) before the transition
 is expected to succeed.
 
 Some trackers also require rich-text fields to be encoded as their
@@ -19,11 +19,11 @@ shape, not just its documented type.
 ## Tracker status_map mismatches cause silent, permanent failures
 
 A tracker adapter's default `status_map` may not match the actual upstream
-board's workflow states. When it doesn't, `arb issue create` succeeds locally
+board's workflow states. When it doesn't, `arb ticket create` succeeds locally
 but fails the upstream push silently and permanently — the create→tracker push
 only fires once at creation; no auto-retry. The worker run succeeds (locally),
-but the issue ends up with `tracker_ref: null`, unable to sync status changes
-back to the upstream board. If `arb issue create` reports or is later found to
+but the ticket ends up with `tracker_ref: null`, unable to sync status changes
+back to the upstream board. If `arb ticket create` reports or is later found to
 have `tracker_ref: null`, don't retry the same create — instead, check the
 adapter's default `status_map` against the real upstream board's workflow
 states first (usually a workflow_id/state-name mismatch). Fix the mismatch via
@@ -32,7 +32,7 @@ broken local record and recreate.
 
 ## `tracker_sync` is reconciliation, not a push
 
-`mcp__arbiter__tracker_sync` (CLI: `arb issue sync`) claims
+`mcp__arbiter__tracker_sync` (CLI: `arb ticket sync`) claims
 assigned-but-untracked issues and closes orphaned ones. It does **not** push
 field updates or force a status transition on the tracker side — don't
 reach for it expecting a field-push or re-transition; use the
@@ -61,7 +61,7 @@ failure mode is nasty: nothing fails at config-set or dispatch time. The
 failure surfaces much later, silently, after ReviewGate approves and the
 merge actually runs (`{:merge_failed, %Arbiter.Mergers.Gitlab.Error{kind:
 :config_missing}}`). This leaves the worker run with `status: failed`,
-`pr_ref: null`, and the issue stuck `in_progress` forever. When
+`pr_ref: null`, and the ticket stuck `in_progress` forever. When
 configuring a GitLab-strategy workspace, ensure both are explicitly set:
 
 ```

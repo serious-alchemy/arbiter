@@ -107,7 +107,7 @@ defmodule ArbiterWeb.TaskNewLiveTest do
     {:ok, view, _html} = live(conn, ~p"/tasks/new")
     html = render_async(view)
 
-    assert html =~ "Create an issue"
+    assert html =~ "Create a ticket"
     assert html =~ "Writes through the same action the CLI and MCP tools use"
     assert html =~ ~s(id="task-new-form")
     assert html =~ "Back to board"
@@ -358,13 +358,13 @@ defmodule ArbiterWeb.TaskNewLiveTest do
   end
 
   describe "CLI preview footer" do
-    test "shows the bare arb issue create command before anything is typed",
+    test "shows the bare arb ticket create command before anything is typed",
          %{conn: conn} do
       {:ok, view, _html} = live(conn, ~p"/tasks/new")
       html = render_async(view)
 
       assert html =~ ~s(id="task-new-cli-preview")
-      assert html =~ "arb issue create &#39;&#39;"
+      assert html =~ "arb ticket create &#39;&#39;"
     end
 
     test "updates live as the title and other fields are typed", %{conn: conn} do
@@ -385,7 +385,7 @@ defmodule ArbiterWeb.TaskNewLiveTest do
         |> render_change()
 
       assert html =~
-               ~s(arb issue create &#39;Fix the flaky merge queue test&#39; --type bug --priority 1 --difficulty 3 --description &#39;context here&#39;)
+               ~s(arb ticket create &#39;Fix the flaky merge queue test&#39; --type bug --priority 1 --difficulty 3 --description &#39;context here&#39;)
     end
 
     test "defaults (feature type, priority 2, unset difficulty) are omitted from the preview",
@@ -400,7 +400,7 @@ defmodule ArbiterWeb.TaskNewLiveTest do
         })
         |> render_change()
 
-      assert html =~ ~s(arb issue create &#39;plain title&#39;)
+      assert html =~ ~s(arb ticket create &#39;plain title&#39;)
       refute html =~ "--type"
       refute html =~ "--priority"
       refute html =~ "--difficulty"
@@ -416,7 +416,7 @@ defmodule ArbiterWeb.TaskNewLiveTest do
         |> form("#task-new-form", %{"task" => %{"title" => ~s(say 'hi')}})
         |> render_change()
 
-      assert html =~ ~s(arb issue create &#39;say &#39;\\&#39;&#39;hi&#39;\\&#39;&#39;&#39;)
+      assert html =~ ~s(arb ticket create &#39;say &#39;\\&#39;&#39;hi&#39;\\&#39;&#39;&#39;)
     end
 
     test "shell metacharacters in the title stay inert inside single quotes",
@@ -429,7 +429,7 @@ defmodule ArbiterWeb.TaskNewLiveTest do
         |> form("#task-new-form", %{"task" => %{"title" => ~s(Bump $VERSION `date`)}})
         |> render_change()
 
-      assert html =~ ~s(arb issue create &#39;Bump $VERSION `date`&#39;)
+      assert html =~ ~s(arb ticket create &#39;Bump $VERSION `date`&#39;)
     end
 
     test "the selected workspace is appended as --workspace, shell-quoted", %{conn: conn, ws: ws} do

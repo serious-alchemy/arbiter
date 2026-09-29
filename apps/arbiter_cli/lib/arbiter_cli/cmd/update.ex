@@ -73,7 +73,7 @@ defmodule ArbiterCli.Cmd.Update do
   task as one whose only execution context is the long-lived server. When set,
   merging the task's PR parks it at `awaiting_verification` instead of closing
   it, and the coordinator restarts and observes the new path before recording
-  the result with `arb issue verify`.
+  the result with `arb ticket verify`.
 
   `--resume-review` clears a ReviewPatrol engagement's per-engagement circuit
   breaker (`circuit_breaker_tripped` + `circuit_breaker_reason`, bd-1atwts),
@@ -89,7 +89,7 @@ defmodule ArbiterCli.Cmd.Update do
 
   The two modes never collide: editing an issue *requires* an id, so any
   invocation with a positional argument is an edit, and a bare `arb update`
-  (which previously just errored "requires an issue id") becomes the deploy.
+  (which previously just errored "requires a ticket id") becomes the deploy.
 
   ## Exit codes
 
@@ -149,14 +149,14 @@ defmodule ArbiterCli.Cmd.Update do
     if Output.help?(argv), do: IO.puts(@moduledoc), else: do_deploy(argv)
   end
 
-  @doc "Issue-edit mode (requires an issue id). Used by `arb issue update <id>`."
+  @doc "Issue-edit mode (requires a ticket id). Used by `arb ticket update <id>`."
   @spec edit_issue([String.t()]) :: :ok | no_return()
   def edit_issue(argv) do
     if Output.help?(argv), do: IO.puts(@moduledoc), else: do_edit_issue(argv)
   end
 
   # A bare verb, or one whose first token is a flag, is a deploy. The moment a
-  # positional appears (the issue id) it's an edit — see the moduledoc.
+  # positional appears (the ticket id) it's an edit — see the moduledoc.
   defp deploy_invocation?([]), do: true
   defp deploy_invocation?([first | _]), do: String.starts_with?(first, "-")
 
@@ -171,7 +171,7 @@ defmodule ArbiterCli.Cmd.Update do
       ArgParser.parse_strict!(argv, "arb update",
         strict: @deploy_switches,
         hint: fn flag ->
-          "To deploy, run `arb update` with no issue id. To edit an issue, " <>
+          "To deploy, run `arb update` with no ticket id. To edit a ticket, " <>
             "name it: `arb update <id> #{flag} …`."
         end
       )
@@ -287,8 +287,8 @@ defmodule ArbiterCli.Cmd.Update do
     id =
       case rest do
         [id] -> id
-        [] -> Output.die("update requires an issue id")
-        _ -> Output.die("update takes exactly one positional argument: the issue id")
+        [] -> Output.die("update requires a ticket id")
+        _ -> Output.die("update takes exactly one positional argument: the ticket id")
       end
 
     existing =

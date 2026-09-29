@@ -331,8 +331,8 @@ defmodule Arbiter.Agents.Gemini.ConfigDir do
     ## Arbiter MCP tools
 
     If an `arbiter` MCP server is connected this session, prefer its typed tools
-    over shelling out to `arb`: `task_show`, `inbox_check`,
-    `task_update_progress`, `workspace_show`. Use `arb` and the shell for
+    over shelling out to `arb`: `ticket_show`, `inbox_check`,
+    `ticket_update_progress`, `workspace_show`. Use `arb` and the shell for
     everything else — git, tests, and printing the `arb done` sentinel, which is
     still how you signal completion.
     """

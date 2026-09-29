@@ -132,7 +132,7 @@ defmodule ArbiterWeb.Api.DependencyController do
       {:ok, %Issue{} = issue} ->
         {:error,
          {:invalid_request,
-          "issue #{issue_id} is in workspace #{issue.workspace_id}, not #{ws_id}"}}
+          "ticket #{issue_id} is in workspace #{issue.workspace_id}, not #{ws_id}"}}
 
       _ ->
         {:error, :not_found}

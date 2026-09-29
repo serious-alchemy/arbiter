@@ -200,7 +200,7 @@ defmodule ArbiterWeb.WorkspaceIndexLive do
               <Forms.input
                 name="workspace[prefix]"
                 label="Prefix"
-                hint="leads every issue id this workspace mints; changing it later does not rename existing ids"
+                hint="leads every ticket id this workspace mints; changing it later does not rename existing ids"
                 value="bd"
                 size="sm"
                 placeholder="bd"

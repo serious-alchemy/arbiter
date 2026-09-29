@@ -368,11 +368,11 @@ defmodule Arbiter.Sessions.Instructions do
     * Edit the bound issue and any issue in its `parent_of` subtree — title,
       description, acceptance, `issue_type`, difficulty, priority, repo,
       `verify_after_deploy`.
-    * File child issues (`task_create`). They land in Backlog, auto-linked
+    * File child issues (`ticket_create`). They land in Backlog, auto-linked
       `parent_of` from the bound issue.
     * Add edges (`dep_add`/`dep_remove`) touching the bound issue or its
       children.
-    * Promote the bound issue and its children (`task_promote`), once the
+    * Promote the bound issue and its children (`ticket_promote`), once the
       operator agrees in the conversation that they're ready, and only after
       their edges are written.
 
@@ -502,7 +502,7 @@ defmodule Arbiter.Sessions.Instructions do
     * acceptance criteria specific enough to act on.
 
     That write-up is what turns a report into a ticket someone can pick up.
-    File it with `task_create` and put the investigation in the body.
+    File it with `ticket_create` and put the investigation in the body.
 
     **Then stop.** Cutting a branch, creating a worktree, editing a file, or
     running a test suite against a fix are not yours. #{dispatch_tail(can_dispatch)}
@@ -517,7 +517,7 @@ defmodule Arbiter.Sessions.Instructions do
       is the *unasked-for* fix this rule forbids, not every edit you ever
       make.
     * **Coordinator-owned files are yours.** `memory/candidates/`, your own
-      notes and `task_update_progress` notes, and scratch under this session
+      notes and `ticket_update_progress` notes, and scratch under this session
       directory you write freely, with no ticket and no ceremony. They are
       not "the code".
     """
@@ -562,7 +562,7 @@ defmodule Arbiter.Sessions.Instructions do
       recurring failures, "why does this keep happening", anything you will
       want to point at weeks from now → a **`task`-type Arbiter issue**. What
       makes that durable is the tracked issue: the findings land in
-      `task_update_progress` notes and in the issue body, which are
+      `ticket_update_progress` notes and in the issue body, which are
       paper-trailed and survive you, and the run is addressable by its
       `run_id`. A fork's output exists only in a context window that is going
       to end.

@@ -4,7 +4,7 @@ defmodule ArbiterCli.Cmd.DispatchTest do
   describe "arb dispatch" do
     test "missing task-id fails with usage hint" do
       {_out, err, code} = capture(fn -> ArbiterCli.Cmd.Dispatch.run([]) end)
-      assert err =~ "dispatch requires an issue id"
+      assert err =~ "dispatch requires a ticket id"
       assert code != 0
     end
 

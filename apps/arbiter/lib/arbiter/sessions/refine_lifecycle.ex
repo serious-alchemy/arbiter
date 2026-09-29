@@ -11,7 +11,7 @@ defmodule Arbiter.Sessions.RefineLifecycle do
   reacts to exactly two shapes:
 
     * `{:task_lifecycle, :updated, %Issue{refined: true}}` — the issue this
-      event names just got promoted (via `task_promote`, whether the
+      event names just got promoted (via `ticket_promote`, whether the
       session's own call or anyone else's, or the `Move to Ready` button).
       Ends with `end_reason: "promoted"`.
     * `{:task_lifecycle, :closed, issue}` — ends with `end_reason:
@@ -48,7 +48,7 @@ defmodule Arbiter.Sessions.RefineLifecycle do
   ## The refinement summary fallback
 
   The refine doctrine instructs the agent to write a short summary via
-  `task_update`'s `notes` field before promoting. An agent that promotes
+  `ticket_update`'s `notes` field before promoting. An agent that promotes
   without ever writing one (it ran out of context, or just forgot) must not
   leave the issue with nothing — so `ensure_summary/2` writes a plain system
   note only when `notes` is still blank at end time. This only runs when a
@@ -168,7 +168,7 @@ defmodule Arbiter.Sessions.RefineLifecycle do
 
   defp fallback_note(reason) do
     "_Refinement summary unavailable — this refine session ended (#{reason}) " <>
-      "without writing one via `task_update`. See the session's archived " <>
+      "without writing one via `ticket_update`. See the session's archived " <>
       "transcript, linked on this issue, for the refinement conversation._"
   end
 

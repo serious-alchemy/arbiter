@@ -74,7 +74,7 @@ defmodule ArbiterCli.Cmd.List do
     if opts[:labels] do
       IO.puts(
         :stderr,
-        "arb: warning: --labels is accepted for interface parity but the Issue resource has no labels field (ignored)."
+        "arb: warning: --labels is accepted for interface parity but the ticket resource has no labels field (ignored)."
       )
     end
 
@@ -144,7 +144,7 @@ defmodule ArbiterCli.Cmd.List do
   end
 
   defp emit_text_combined([], []) do
-    IO.puts("(no issues)")
+    IO.puts("(no tickets)")
   end
 
   defp emit_text_combined(tasks, unclaimed) do

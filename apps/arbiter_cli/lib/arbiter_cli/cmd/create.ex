@@ -258,7 +258,7 @@ defmodule ArbiterCli.Cmd.Create do
     if opts[:labels] && mode == :text do
       IO.puts(
         :stderr,
-        "arb: warning: --labels is accepted for interface parity but the Issue resource has no labels field (ignored)."
+        "arb: warning: --labels is accepted for interface parity but the ticket resource has no labels field (ignored)."
       )
     end
 
@@ -291,7 +291,7 @@ defmodule ArbiterCli.Cmd.Create do
   end
 
   # bd-7mbrlg: non-blocking heads-up — the task was created either way, but
-  # `task_promote` / `arb issue promote` will later refuse it without ACs
+  # `ticket_promote` / `arb ticket promote` will later refuse it without ACs
   # or an explicit waiver.
   defp print_acceptance_warnings(issue, :text) do
     for warning <- issue["warnings"] || [] do

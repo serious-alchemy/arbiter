@@ -22,8 +22,8 @@ defmodule ArbiterCli.Cmd.Reopen do
       id =
         case rest do
           [id] -> id
-          [] -> Output.die("reopen requires an issue id")
-          _ -> Output.die("reopen takes exactly one positional argument: the issue id")
+          [] -> Output.die("reopen requires a ticket id")
+          _ -> Output.die("reopen takes exactly one positional argument: the ticket id")
         end
 
       case Client.post("/api/issues/" <> id <> "/reopen", %{}) do

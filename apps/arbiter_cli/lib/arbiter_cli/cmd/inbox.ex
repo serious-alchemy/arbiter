@@ -377,7 +377,7 @@ defmodule ArbiterCli.Cmd.Inbox do
         {"From", m["from_ref"]},
         {"To", m["to_ref"]},
         {"Kind", m["kind"]},
-        {"Issue", task_ref},
+        {"Ticket", task_ref},
         {"Subject", m["subject"]},
         {"Sent", m["inserted_at"]}
       ]

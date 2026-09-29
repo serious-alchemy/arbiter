@@ -110,7 +110,7 @@ defmodule ArbiterCli.WorkspaceTest do
     end
   end
 
-  describe "arb issue list --workspace <name> routing" do
+  describe "arb ticket list --workspace <name> routing" do
     setup do
       prev = System.get_env("ARB_WORKSPACE")
 

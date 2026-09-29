@@ -95,15 +95,15 @@ defmodule ArbiterWeb.Api.IssueController do
   def show(conn, %{"id" => id}) do
     case Ash.get(Issue, id, load: [:child_total, :child_closed]) do
       # bd-3j4ch4: the cost estimate rides along on the single-issue read so
-      # `arb issue show` renders it without a second round trip. Only here —
+      # `arb ticket show` renders it without a second round trip. Only here —
       # the index would pay a ledger scan per row for a number nobody reads
       # in a list.
       # bd-18vl9q: same for the epic cost rollup — nil for a non-epic issue.
-      # bd-1defgu: same reasoning for dependency edges — `arb issue show` was
+      # bd-1defgu: same reasoning for dependency edges — `arb ticket show` was
       # write-only for them; the read already existed
       # (`Arbiter.Tasks.Dependencies.list/1`), it just wasn't reachable here.
       # bd-6fkgvo: and where the ticket is in the lifecycle (its projection)
-      # and what its current run is doing, which `arb issue show` prints.
+      # and what its current run is doing, which `arb ticket show` prints.
       {:ok, issue} ->
         {:ok, dependencies} = Dependencies.list(issue_id: id)
         live = live_workers()
@@ -324,7 +324,7 @@ defmodule ArbiterWeb.Api.IssueController do
   @doc """
   Reorder a ticket inside its workspace's rank order (bd-djapyj). Body is one
   of `top: true`, `bottom: true`, `before_id: <id>`, `after_id: <id>` — the
-  same four forms the CLI (`arb issue rank`) and MCP (`task_rank`) accept,
+  same four forms the CLI (`arb ticket rank`) and MCP (`ticket_rank`) accept,
   all backed by the `:set_rank` action. Never changes `priority`.
   """
   def rank(conn, %{"id" => id} = params) do
@@ -401,7 +401,7 @@ defmodule ArbiterWeb.Api.IssueController do
 
   @doc """
   Hand a ticket's attention back to the coordinator (bd-8nlez1) — the
-  operator's hand-back, which `arb issue handback` wraps. Body: `note`
+  operator's hand-back, which `arb ticket handback` wraps. Body: `note`
   (optional).
   """
   def handback(conn, %{"id" => id} = params), do: move_attention(conn, id, :coordinator, params)

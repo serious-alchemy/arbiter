@@ -14,29 +14,29 @@ defmodule Arbiter.MCP.Catalog do
 
   | Tool | Tiers | Backs onto |
   |---|---|---|
-  | `task_show` | worker, coordinator | `Ash.get(Issue, id)` + child-progress calcs |
-  | `task_ready` | coordinator | `Issue.ready/1` |
+  | `ticket_show` | worker, coordinator | `Ash.get(Issue, id)` + child-progress calcs |
+  | `ticket_ready` | coordinator | `Issue.ready/1` |
   | `inbox_check` | worker, coordinator | `Messages.inbox/2` + `mark_read` |
   | `coordinator_inbox` | coordinator | `Messages.inbox/2` + `mark_read` (coordinator mailbox) |
   | `coordinator_inbox_clear` | coordinator | `Messages.clear_ids/2` + `Messages.clear_by_task/2` |
   | `workspace_show` | worker, coordinator | `Ash.get(Workspace, id)` |
-  | `task_update_progress` | worker, coordinator | `Ash.update(issue, …, action: :update)` |
+  | `ticket_update_progress` | worker, coordinator | `Ash.update(issue, …, action: :update)` |
 
   ## Phase 2 catalog (coordinator tools + the both-tier `message_send`)
 
   | Tool | Tiers | Backs onto |
   |---|---|---|
-  | `task_create` | coordinator | `Ash.create(Issue, …)` |
-  | `task_verify` | coordinator | `Arbiter.Tasks.Verification.record_outcome/3` |
-  | `task_update` | coordinator | `Ash.update(issue, …, action: :update)` |
-  | `task_close` | coordinator | `Ash.update(issue, …, action: :close)` |
-  | `task_reopen` | coordinator | `Ash.update(issue, …, action: :reopen)` |
-  | `task_promote` | coordinator | `Ash.update(issue, …, action: :promote_to_ready)` |
-  | `task_demote` | coordinator | `Ash.update(issue, …, action: :return_to_backlog)` |
-  | `task_rank` | coordinator | `Ash.update(issue, …, action: :set_rank)` |
+  | `ticket_create` | coordinator | `Ash.create(Issue, …)` |
+  | `ticket_verify` | coordinator | `Arbiter.Tasks.Verification.record_outcome/3` |
+  | `ticket_update` | coordinator | `Ash.update(issue, …, action: :update)` |
+  | `ticket_close` | coordinator | `Ash.update(issue, …, action: :close)` |
+  | `ticket_reopen` | coordinator | `Ash.update(issue, …, action: :reopen)` |
+  | `ticket_promote` | coordinator | `Ash.update(issue, …, action: :promote_to_ready)` |
+  | `ticket_demote` | coordinator | `Ash.update(issue, …, action: :return_to_backlog)` |
+  | `ticket_rank` | coordinator | `Ash.update(issue, …, action: :set_rank)` |
   | `ticket_handoff` | coordinator | `Arbiter.Tasks.Attention.hand_off/3` to the operator (bd-8nlez1) |
   | `ticket_handback` | coordinator | `Arbiter.Tasks.Attention.hand_off/3` back to the coordinator (bd-8nlez1) |
-  | `task_sync_upstream_close` | coordinator | `Ash.update(issue, …, action: :sync_upstream_close)` |
+  | `ticket_sync_upstream_close` | coordinator | `Ash.update(issue, …, action: :sync_upstream_close)` |
   | `dep_add` | coordinator | `Arbiter.Tasks.Dependencies.add/4` (use `parent_of` to attach a child) |
   | `dep_remove` | coordinator | `Arbiter.Tasks.Dependencies.remove/3` |
   | `dep_list` | worker + coordinator | `Arbiter.Tasks.Dependencies.list/1` |
@@ -54,7 +54,7 @@ defmodule Arbiter.MCP.Catalog do
   | `transcript_capture_stats` | coordinator | `Ash.read(Arbiter.Workers.Run, workspace_id: …)` since the corpus start date, rendered-transcript capture rate plus the session-JSONL archive rate (reported separately) |
   | `message_send` | worker, coordinator | `Messages.send_mail/1` (flag / direction) |
   | `notify_list` | worker, coordinator | `Messages.recent_notifications/2` |
-  | `task_list` | coordinator | `Ash.read(Issue, …)` with filters |
+  | `ticket_list` | coordinator | `Ash.read(Issue, …)` with filters |
   | `tracker_claim` | coordinator | `Arbiter.Tasks.Claim.claim/3` |
   | `tracker_sync` | coordinator | `Arbiter.Tasks.Claim.plan/1` + `apply_plan/2` |
   | `workspace_list` | coordinator | `Ash.read(Workspace)` (summary fields) |
@@ -136,14 +136,14 @@ defmodule Arbiter.MCP.Catalog do
 
   # Tools that call resolve_workspace_id and thus support the optional `workspace` arg.
   # All other tools do not accept a workspace override.
-  @workspace_tools ~w(task_ready coordinator_inbox coordinator_inbox_clear workspace_show quota_get task_create worker_list task_list usage_summarize notify_list tracker_claim tracker_sync workspace_config_get workspace_config_overview workspace_config_set workspace_config_unset external_review_list)
+  @workspace_tools ~w(ticket_ready coordinator_inbox coordinator_inbox_clear workspace_show quota_get ticket_create worker_list ticket_list usage_summarize notify_list tracker_claim tracker_sync workspace_config_get workspace_config_overview workspace_config_set workspace_config_unset external_review_list)
 
   @raw_tools [
     %{
-      name: "task_show",
+      name: "ticket_show",
       tiers: @both,
       description:
-        "Read one task: id, title, description, acceptance, child-progress " <>
+        "Read one ticket: id, title, description, acceptance, child-progress " <>
           "`child_closed`/`child_total` over its `parent_of` children, and where it is in " <>
           "the lifecycle — `state` (backlog | queued | active | merging | verifying | " <>
           "closed), `column` (backlog | blocked | ready | in_progress | merging | verifying " <>
@@ -151,11 +151,11 @@ defmodule Arbiter.MCP.Catalog do
           "`blocked_by` (unsatisfied gating blockers), `attention` ({owner, waiting_on, " <>
           "reason, cause, since, note} or null) and `close_reason`. The legacy `status` " <>
           "rides along for one release; read `state`/`column` instead. A worker reads its " <>
-          "own task (the `id` argument may be omitted); a coordinator must pass the `id`. " <>
+          "own ticket (the `id` argument may be omitted); a coordinator must pass the `id`. " <>
           "Pass `full: true` to include review fields (notes, qa_notes, deployment_notes, " <>
           "pr_body, pr_ref, tracker_ref, target_branch, repo, auto_close, " <>
           "verify_after_deploy + the verification state, timestamps). Every view also " <>
-          "carries `estimate`: what comparable closed tasks actually cost, as " <>
+          "carries `estimate`: what comparable closed tickets actually cost, as " <>
           "`{range: [p25, p75], median, p90, n, basis, fallback_level}` over a 60-day " <>
           "window. `basis` names the group the numbers came from " <>
           "(`difficulty+type` / `difficulty` / `global` / `unrated_as_d2`) and " <>
@@ -168,7 +168,7 @@ defmodule Arbiter.MCP.Catalog do
           "id" => %{
             "type" => "string",
             "description" =>
-              "Task id (e.g. \"bd-dem49g\"). Optional for a worker (defaults to its own task)."
+              "Ticket id (e.g. \"bd-dem49g\"). Optional for a worker (defaults to its own ticket)."
           },
           "full" => %{
             "type" => "boolean",
@@ -186,7 +186,7 @@ defmodule Arbiter.MCP.Catalog do
       handler: &Tools.task_show/2
     },
     %{
-      name: "task_ready",
+      name: "ticket_ready",
       tiers: [:coordinator],
       description:
         "List the tickets in the Ready column, in dispatch order (priority, rank, age): " <>
@@ -201,8 +201,8 @@ defmodule Arbiter.MCP.Catalog do
       name: "inbox_check",
       tiers: @both,
       description:
-        "Read the mailbox for a task — the structured replacement for `arb inbox`. " <>
-          "A worker checks its own task; a coordinator passes `task_id`. " <>
+        "Read the mailbox for a ticket — the structured replacement for `arb inbox`. " <>
+          "A worker checks its own ticket; a coordinator passes `task_id`. " <>
           "Two states: `state: \"unread\"` (default) lists unread messages and marks them read; " <>
           "`state: \"outstanding\"` lists read-but-uncleared messages as a pure read — no mutations.",
       input_schema: %{
@@ -211,7 +211,7 @@ defmodule Arbiter.MCP.Catalog do
           "task_id" => %{
             "type" => "string",
             "description" =>
-              "Recipient task id. Optional for a worker (defaults to its own task)."
+              "Recipient ticket id. Optional for a worker (defaults to its own ticket)."
           },
           "state" => %{
             "type" => "string",
@@ -268,7 +268,7 @@ defmodule Arbiter.MCP.Catalog do
           "`arb inbox clear <id> ...` / `arb inbox clear --task <task-id>`. Accepts `ids` " <>
           "(a list of message ids) and/or `task_id`; at least one is required. `ids` resolve " <>
           "directly by id, regardless of workspace. `task_id` clears every coordinator message " <>
-          "concerning that task; pass `workspace` to scope it explicitly, else it resolves the " <>
+          "concerning that ticket; pass `workspace` to scope it explicitly, else it resolves the " <>
           "usual way (bound workspace, then the installation default) and errors rather than " <>
           "guessing when that's ambiguous. Rows are retained (soft-clear), never destroyed. " <>
           "Clears only YOUR view of the shared mailbox: a session token clears its own copy, " <>
@@ -284,7 +284,7 @@ defmodule Arbiter.MCP.Catalog do
           },
           "task_id" => %{
             "type" => "string",
-            "description" => "Clear every coordinator message concerning this task."
+            "description" => "Clear every coordinator message concerning this ticket."
           }
         },
         "additionalProperties" => false
@@ -317,19 +317,19 @@ defmodule Arbiter.MCP.Catalog do
       handler: &Tools.quota_get/2
     },
     %{
-      name: "task_update_progress",
+      name: "ticket_update_progress",
       tiers: @both,
       description:
-        "Record progress / completion notes on a task — `notes`, `qa_notes`, `deployment_notes`, " <>
+        "Record progress / completion notes on a ticket — `notes`, `qa_notes`, `deployment_notes`, " <>
           "`pr_body`, plus the `verify_after_deploy` flag (the structured replacement for " <>
-          "`arb issue update --qa-notes …`). A worker may only update its own task and cannot " <>
+          "`arb ticket update --qa-notes …`). A worker may only update its own ticket and cannot " <>
           "change status or priority.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
           "id" => %{
             "type" => "string",
-            "description" => "Task id. Optional for a worker (defaults to its own task)."
+            "description" => "Ticket id. Optional for a worker (defaults to its own ticket)."
           },
           "notes" => %{"type" => "string", "description" => "Free-form progress / working notes."},
           "qa_notes" => %{"type" => "string", "description" => "What QA should verify."},
@@ -341,7 +341,7 @@ defmodule Arbiter.MCP.Catalog do
             "type" => "string",
             "description" =>
               "The worker-authored PR/MR description (Summary / Test plan / References) the " <>
-                "MergeQueue opens the task's single canonical PR with."
+                "MergeQueue opens the ticket's single canonical PR with."
           },
           "verify_after_deploy" => %{
             "type" => "boolean",
@@ -349,7 +349,7 @@ defmodule Arbiter.MCP.Catalog do
               "Set true when your diff's only execution context is the long-lived server — " <>
                 "env/config plumbing, a doctor/health probe, a capture or ingest path, " <>
                 "anything a green test suite cannot prove is live. The merge then moves the " <>
-                "task to Verifying (state `verifying`) instead of closing it, and the coordinator " <>
+                "ticket to Verifying (state `verifying`) instead of closing it, and the coordinator " <>
                 "restarts and observes the new path once before it closes."
           }
         },
@@ -360,29 +360,29 @@ defmodule Arbiter.MCP.Catalog do
 
     # ---- Phase 2: coordinator-only mutating tools ----
     %{
-      name: "task_create",
+      name: "ticket_create",
       tiers: @coordinator,
       description:
-        "Create a task in the workspace. `title` is required; optional `description`, " <>
+        "Create a ticket in the workspace. `title` is required; optional `description`, " <>
           "`acceptance`, `priority`, `difficulty`, `issue_type`, `auto_close`, " <>
-          "`tracker_type`, …. The task is always created in the coordinator's own workspace. " <>
-          "Created tasks land in the Backlog column (state `backlog`), not Ready, " <>
-          "and stay there until a human promotes them from the task detail page. " <>
+          "`tracker_type`, …. The ticket is always created in the coordinator's own workspace. " <>
+          "Created tickets land in the Backlog column (state `backlog`), not Ready, " <>
+          "and stay there until a human promotes them from the ticket detail page. " <>
           "The board scheduler (Autopilot) is the only dispatcher, and it promotes from " <>
-          "Ready only, so a task filed here waits for that promotion. bd-7mbrlg: filing a `bug`/`feature`/`chore` with no " <>
-          "`acceptance` returns a non-blocking `warnings` entry in the response — the task " <>
-          "still gets created, but `task_promote` will later refuse it without ACs or a waiver.",
+          "Ready only, so a ticket filed here waits for that promotion. bd-7mbrlg: filing a `bug`/`feature`/`chore` with no " <>
+          "`acceptance` returns a non-blocking `warnings` entry in the response — the ticket " <>
+          "still gets created, but `ticket_promote` will later refuse it without ACs or a waiver.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
-          "title" => %{"type" => "string", "description" => "Task title (required)."},
+          "title" => %{"type" => "string", "description" => "Ticket title (required)."},
           "parent_id" => %{
             "type" => "string",
             "description" =>
-              "Attach the new task as a `parent_of` child of this existing task, in the same " <>
+              "Attach the new ticket as a `parent_of` child of this existing ticket, in the same " <>
                 "workspace, in one call (equivalent to a follow-up `dep_add` with " <>
                 "type `parent_of`). Optional. For a refine session it defaults to the bound " <>
-                "issue and may only name the bound issue or one of its descendants. " <>
+                "ticket and may only name the bound ticket or one of its descendants. " <>
                 "#1973: when the parent is linked to a tracker ticket and `tracker_type` is " <>
                 "omitted, the child follows the workspace's `tracker.child_policy` — by " <>
                 "default it stays local (`tracker_type: none`) with the parent's ticket as " <>
@@ -412,16 +412,16 @@ defmodule Arbiter.MCP.Catalog do
           "auto_close" => %{
             "type" => "boolean",
             "description" =>
-              "When true, this task auto-closes once all its `parent_of` children are closed " <>
+              "When true, this ticket auto-closes once all its `parent_of` children are closed " <>
                 "(≥1 child). Default false."
           },
           "verify_after_deploy" => %{
             "type" => "boolean",
             "description" =>
-              "When true, merging this task's PR does NOT close it: the task moves to " <>
+              "When true, merging this ticket's PR does NOT close it: the ticket moves to " <>
                 "Verifying (state `verifying`) and the coordinator is notified to restart the " <>
                 "server and observe the new path once, then record the result with " <>
-                "`task_verify`. Set it for any change whose only execution context is the " <>
+                "`ticket_verify`. Set it for any change whose only execution context is the " <>
                 "long-lived server (env/config plumbing, a doctor probe, a capture/ingest " <>
                 "path) — the class that merges green and is found broken hours later. " <>
                 "Default false."
@@ -457,12 +457,12 @@ defmodule Arbiter.MCP.Catalog do
           "repo" => %{
             "type" => "string",
             "description" =>
-              "The repo this task belongs to, as a configured `repo_paths` key " <>
-                "(e.g. \"emricare/tonic\"). Every task carries one (bd-9dwbvt); omit it and " <>
+              "The repo this ticket belongs to, as a configured `repo_paths` key " <>
+                "(e.g. \"emricare/tonic\"). Every ticket carries one (bd-9dwbvt); omit it and " <>
                 "it is resolved for you — the workspace's only repo, else its `default_repo`. " <>
                 "Creation is REFUSED, listing the configured keys, when a multi-repo " <>
                 "workspace has no `default_repo`, and a repo that is not a configured key is " <>
-                "rejected. Every dispatch of the task uses it unless one names another repo."
+                "rejected. Every dispatch of the ticket uses it unless one names another repo."
           }
         },
         "required" => ["title"],
@@ -471,15 +471,15 @@ defmodule Arbiter.MCP.Catalog do
       handler: &Tools.task_create/2
     },
     %{
-      name: "task_update",
+      name: "ticket_update",
       tiers: @coordinator,
       description:
-        "Update a task in the workspace (status / priority / title / …). To close a task use " <>
-          "`task_close`; the `closed` status is rejected here.",
+        "Update a ticket in the workspace (status / priority / title / …). To close a ticket use " <>
+          "`ticket_close`; the `closed` status is rejected here.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
-          "id" => %{"type" => "string", "description" => "Task id (required)."},
+          "id" => %{"type" => "string", "description" => "Ticket id (required)."},
           "title" => %{"type" => "string"},
           "description" => %{"type" => "string"},
           "acceptance" => %{"type" => "string"},
@@ -492,15 +492,16 @@ defmodule Arbiter.MCP.Catalog do
           "issue_type" => %{"type" => "string"},
           "auto_close" => %{
             "type" => "boolean",
-            "description" => "Auto-close this task when all its `parent_of` children are closed."
+            "description" =>
+              "Auto-close this ticket when all its `parent_of` children are closed."
           },
           "verify_after_deploy" => %{
             "type" => "boolean",
             "description" =>
-              "When true, merging this task's PR does NOT close it: the task moves to " <>
+              "When true, merging this ticket's PR does NOT close it: the ticket moves to " <>
                 "Verifying (state `verifying`) and the coordinator is notified to restart the " <>
                 "server and observe the new path once, then record the result with " <>
-                "`task_verify`. Set it for any change whose only execution context is the " <>
+                "`ticket_verify`. Set it for any change whose only execution context is the " <>
                 "long-lived server (env/config plumbing, a doctor probe, a capture/ingest " <>
                 "path) — the class that merges green and is found broken hours later. " <>
                 "Default false."
@@ -521,7 +522,7 @@ defmodule Arbiter.MCP.Catalog do
           "repo" => %{
             "type" => "string",
             "description" =>
-              "The repo this task belongs to, as a configured `repo_paths` key " <>
+              "The repo this ticket belongs to, as a configured `repo_paths` key " <>
                 "(e.g. \"emricare/tonic\")."
           }
         },
@@ -531,16 +532,16 @@ defmodule Arbiter.MCP.Catalog do
       handler: &Tools.task_update/2
     },
     %{
-      name: "task_close",
+      name: "ticket_close",
       tiers: @coordinator,
       description:
-        "Close a task in the workspace. Optional `reason`. Also closes the linked external " <>
-          "tracker issue by default when the task has a `tracker_ref`; pass " <>
+        "Close a ticket in the workspace. Optional `reason`. Also closes the linked external " <>
+          "tracker issue by default when the ticket has a `tracker_ref`; pass " <>
           "`close_upstream: false` to leave it open.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
-          "id" => %{"type" => "string", "description" => "Task id (required)."},
+          "id" => %{"type" => "string", "description" => "Ticket id (required)."},
           "reason" => %{"type" => "string"},
           "close_upstream" => %{
             "type" => "boolean",
@@ -554,16 +555,16 @@ defmodule Arbiter.MCP.Catalog do
       handler: &Tools.task_close/2
     },
     %{
-      name: "task_reopen",
+      name: "ticket_reopen",
       tiers: @coordinator,
       description:
-        "Reopen a closed task (clears closed_at, returns it to the ready queue, and best-effort " <>
-          "reopens the linked tracker issue). The only supported path out of `closed` — `task_update` " <>
+        "Reopen a closed ticket (clears closed_at, returns it to the ready queue, and best-effort " <>
+          "reopens the linked tracker issue). The only supported path out of `closed` — `ticket_update` " <>
           "rejects that transition.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
-          "id" => %{"type" => "string", "description" => "Task id (required)."}
+          "id" => %{"type" => "string", "description" => "Ticket id (required)."}
         },
         "required" => ["id"],
         "additionalProperties" => false
@@ -571,28 +572,28 @@ defmodule Arbiter.MCP.Catalog do
       handler: &Tools.task_reopen/2
     },
     %{
-      name: "task_verify",
+      name: "ticket_verify",
       tiers: @coordinator,
       description:
-        "Record the restart-and-observe result for a task in Verifying (state `verifying`) " <>
+        "Record the restart-and-observe result for a ticket in Verifying (state `verifying`) " <>
           "(bd-9so315). Pass exactly one of `observed` or `failed`, whose value is the " <>
           "evidence — what you actually saw on the running server. `observed` closes the " <>
-          "task; `failed` reopens it for another attempt. The evidence is persisted on the " <>
-          "task either way.",
+          "ticket; `failed` reopens it for another attempt. The evidence is persisted on the " <>
+          "ticket either way.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
-          "id" => %{"type" => "string", "description" => "Task id (required)."},
+          "id" => %{"type" => "string", "description" => "Ticket id (required)."},
           "observed" => %{
             "type" => "string",
             "description" =>
               "Evidence that the change is live and working, e.g. \"restarted at 14:02; " <>
-                "GET /api/doctor now reports 3 repos\". Closes the task."
+                "GET /api/doctor now reports 3 repos\". Closes the ticket."
           },
           "failed" => %{
             "type" => "string",
             "description" =>
-              "Evidence that it is NOT working after the restart. Reopens the task for " <>
+              "Evidence that it is NOT working after the restart. Reopens the ticket for " <>
                 "another attempt, with the evidence persisted for the next worker."
           }
         },
@@ -602,28 +603,28 @@ defmodule Arbiter.MCP.Catalog do
       handler: &Tools.task_verify/2
     },
     %{
-      name: "task_promote",
+      name: "ticket_promote",
       tiers: @coordinator,
       description:
-        "Promote a task from Backlog to the queue (state `backlog` → `queued`: column Ready, or " <>
+        "Promote a ticket from Backlog to the queue (state `backlog` → `queued`: column Ready, or " <>
           "Blocked while a gating blocker is open) via the `promote` transition. " <>
-          "Coordinator only. Idempotent by design — promoting an already-queued task is a no-op success, " <>
+          "Coordinator only. Idempotent by design — promoting an already-queued ticket is a no-op success, " <>
           "not an error. bd-7mbrlg: a `bug`/`feature`/`chore` with blank `acceptance` is refused unless " <>
           "you pass `acceptance_waived` with a reason (`task`/`decision`/`epic` are exempt; D0 work is " <>
-          "auto-waived). **Promote last.** Autopilot can claim a task within seconds of it going " <>
-          "Ready, so every `parent_of` child and every dependency edge the task needs must " <>
+          "auto-waived). **Promote last.** Autopilot can claim a ticket within seconds of it going " <>
+          "Ready, so every `parent_of` child and every dependency edge the ticket needs must " <>
           "already exist before you promote it — an edge added after the promote can lose the " <>
           "race. A refine-tier promotion returns this rule as `promotion_note`.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
-          "id" => %{"type" => "string", "description" => "Task id (required)."},
+          "id" => %{"type" => "string", "description" => "Ticket id (required)."},
           "acceptance_waived" => %{
             "type" => "string",
             "description" =>
               "Reason for promoting a bug/feature/chore with no acceptance criteria. Required " <>
-                "(non-blank) only when the task is a gated type, has blank `acceptance`, and " <>
-                "isn't D0. Persisted onto the task and shown in `task_show`."
+                "(non-blank) only when the ticket is a gated type, has blank `acceptance`, and " <>
+                "isn't D0. Persisted onto the ticket and shown in `ticket_show`."
           }
         },
         "required" => ["id"],
@@ -632,18 +633,18 @@ defmodule Arbiter.MCP.Catalog do
       handler: &Tools.task_promote/2
     },
     %{
-      name: "task_demote",
+      name: "ticket_demote",
       tiers: @coordinator,
       description:
-        "Demote a queued task (column Ready or Blocked) back to Backlog via the `demote` transition. " <>
-          "Coordinator only. Idempotent by design — demoting an already-backlog task is a no-op success, " <>
-          "not an error. A task can only be demoted if it has no live worker and its state is `queued` " <>
-          "(undispatched). Refuses to demote tasks that are In progress, Merging, Verifying or Closed " <>
+        "Demote a queued ticket (column Ready or Blocked) back to Backlog via the `demote` transition. " <>
+          "Coordinator only. Idempotent by design — demoting an already-backlog ticket is a no-op success, " <>
+          "not an error. A ticket can only be demoted if it has no live worker and its state is `queued` " <>
+          "(undispatched). Refuses to demote tickets that are In progress, Merging, Verifying or Closed " <>
           "with a clear reason — demoting those would orphan the worker or undo completed work.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
-          "id" => %{"type" => "string", "description" => "Task id (required)."}
+          "id" => %{"type" => "string", "description" => "Ticket id (required)."}
         },
         "required" => ["id"],
         "additionalProperties" => false
@@ -651,19 +652,19 @@ defmodule Arbiter.MCP.Catalog do
       handler: &Tools.task_demote/2
     },
     %{
-      name: "task_rank",
+      name: "ticket_rank",
       tiers: @coordinator,
       description:
-        "Reorder a task inside its workspace's rank order via the `:set_rank` action — the space " <>
+        "Reorder a ticket inside its workspace's rank order via the `:set_rank` action — the space " <>
           "`board/scheduler.ex` and Autopilot dispatch read (priority, then rank, then age). " <>
           "Coordinator only. Exactly one of `top`, `bottom`, `before_id`, `after_id` is required. " <>
-          "`before_id`/`after_id` must name a task in the same workspace, or the call is rejected. " <>
-          "Never changes `priority` — ranking before/after a task in a different priority band " <>
-          "only orders within rank, it does not move the task into that band.",
+          "`before_id`/`after_id` must name a ticket in the same workspace, or the call is rejected. " <>
+          "Never changes `priority` — ranking before/after a ticket in a different priority band " <>
+          "only orders within rank, it does not move the ticket into that band.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
-          "id" => %{"type" => "string", "description" => "Task id (required)."},
+          "id" => %{"type" => "string", "description" => "Ticket id (required)."},
           "top" => %{"type" => "boolean", "description" => "Move to the top of the workspace."},
           "bottom" => %{
             "type" => "boolean",
@@ -671,11 +672,11 @@ defmodule Arbiter.MCP.Catalog do
           },
           "before_id" => %{
             "type" => "string",
-            "description" => "Move immediately ahead of this task (same workspace)."
+            "description" => "Move immediately ahead of this ticket (same workspace)."
           },
           "after_id" => %{
             "type" => "string",
-            "description" => "Move immediately behind this task (same workspace)."
+            "description" => "Move immediately behind this ticket (same workspace)."
           }
         },
         "required" => ["id"],
@@ -690,13 +691,13 @@ defmodule Arbiter.MCP.Catalog do
         "Hand a ticket's attention to the operator (bd-8nlez1). The coordinator inbox's " <>
           "`attention` queue is yours: resolve what you can. Use this only for an item you " <>
           "cannot move — the operator acts on it from the dashboard. `note` (required) says " <>
-          "what the operator has to do; it is shown with the ticket and in `task_show`. The " <>
+          "what the operator has to do; it is shown with the ticket and in `ticket_show`. The " <>
           "ticket must have attention now, owned by you. The move lasts until the attention " <>
           "clears or the operator hands it back.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
-          "id" => %{"type" => "string", "description" => "Task id (required)."},
+          "id" => %{"type" => "string", "description" => "Ticket id (required)."},
           "note" => %{
             "type" => "string",
             "description" => "What the operator has to do, and why you cannot (required)."
@@ -718,7 +719,7 @@ defmodule Arbiter.MCP.Catalog do
       input_schema: %{
         "type" => "object",
         "properties" => %{
-          "id" => %{"type" => "string", "description" => "Task id (required)."},
+          "id" => %{"type" => "string", "description" => "Ticket id (required)."},
           "note" => %{"type" => "string", "description" => "What changed (optional)."}
         },
         "required" => ["id"],
@@ -727,18 +728,18 @@ defmodule Arbiter.MCP.Catalog do
       handler: &Tools.ticket_handback/2
     },
     %{
-      name: "task_sync_upstream_close",
+      name: "ticket_sync_upstream_close",
       tiers: @coordinator,
       description:
-        "Push a close to the linked tracker issue for a task that's already `:closed` locally " <>
+        "Push a close to the linked tracker issue for a ticket that's already `:closed` locally " <>
           "but was never synced upstream (e.g. it closed via auto-close rollup or a caller that " <>
-          "forgot `close_upstream: true`). Makes no local status change — the task must already " <>
+          "forgot `close_upstream: true`). Makes no local status change — the ticket must already " <>
           "be `:closed` and carry a `tracker_ref`. Does not reopen, re-run StopWorker/" <>
           "CleanupWorktree, or re-trigger the parent auto-close rollup.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
-          "id" => %{"type" => "string", "description" => "Task id (required)."}
+          "id" => %{"type" => "string", "description" => "Ticket id (required)."}
         },
         "required" => ["id"],
         "additionalProperties" => false
@@ -749,9 +750,9 @@ defmodule Arbiter.MCP.Catalog do
       name: "dep_add",
       tiers: @coordinator,
       description:
-        "Add a dependency edge between two tasks in the workspace. `type` is one of blocks, " <>
+        "Add a dependency edge between two tickets in the workspace. `type` is one of blocks, " <>
           "depends_on, relates_to, discovered_from, parent_of, conflicts_with. Use `parent_of` " <>
-          "(from = parent, to = child) to attach a child to a parent task — that is how " <>
+          "(from = parent, to = child) to attach a child to a parent ticket — that is how " <>
           "grouping/epics work; the parent then rolls up child progress and can auto-close. " <>
           "`conflicts_with` is a symmetric mutex enforced by the board scheduler " <>
           "(Autopilot), which will not co-dispatch the pair, in either edge " <>
@@ -763,7 +764,7 @@ defmodule Arbiter.MCP.Catalog do
       input_schema: %{
         "type" => "object",
         "properties" => %{
-          "from_issue_id" => %{"type" => "string", "description" => "The dependent task."},
+          "from_issue_id" => %{"type" => "string", "description" => "The dependent ticket."},
           "to_issue_id" => %{"type" => "string", "description" => "The dependency target."},
           "type" => %{"type" => "string", "description" => "Edge type (required)."},
           "notes" => %{"type" => "string"},
@@ -778,7 +779,7 @@ defmodule Arbiter.MCP.Catalog do
       name: "dep_remove",
       tiers: @coordinator,
       description:
-        "Remove dependency edges between two tasks in the workspace. Omit `type` to remove every " <>
+        "Remove dependency edges between two tickets in the workspace. Omit `type` to remove every " <>
           "edge between the pair. Idempotent.",
       input_schema: %{
         "type" => "object",
@@ -802,7 +803,7 @@ defmodule Arbiter.MCP.Catalog do
         "List dependency edges in the workspace. Coordinator or worker — a worker with no " <>
           "`workspace` arg sees its own workspace's edges; naming a different one is refused, " <>
           "the same rule dep_add/dep_remove already apply. With no `issue_id`, lists every edge " <>
-          "in the workspace; with `issue_id`, lists that issue's edges in both directions " <>
+          "in the workspace; with `issue_id`, lists that ticket's edges in both directions " <>
           "instead. Each row carries both endpoints' id/title/status/priority, so a live edge " <>
           "is distinguishable from a closed↔closed one without a second lookup. A symmetric " <>
           "edge (`conflicts_with`) is never doubled — it's stored once, directed, and appears " <>
@@ -816,7 +817,7 @@ defmodule Arbiter.MCP.Catalog do
           },
           "issue_id" => %{
             "type" => "string",
-            "description" => "Scope the listing to one issue's edges instead of the workspace."
+            "description" => "Scope the listing to one ticket's edges instead of the workspace."
           },
           "type" => %{
             "type" => "string",
@@ -831,19 +832,19 @@ defmodule Arbiter.MCP.Catalog do
       name: "worker_dispatch",
       tiers: @coordinator,
       description:
-        "Dispatch a worker to work a task in the workspace. Requires a `can_dispatch` coordinator " <>
+        "Dispatch a worker to work a ticket in the workspace. Requires a `can_dispatch` coordinator " <>
           "token and is depth-limited (the dispatch-recursion guardrail). Omitting `provider` " <>
           "resolves the worker from the workspace's `agent.type` config (first healthy provider via " <>
-          "ProviderPool). Pass `provider` to override; set `no_agent: true` to move the task " <>
+          "ProviderPool). Pass `provider` to override; set `no_agent: true` to move the ticket " <>
           "to In progress without spawning a worker (hand-off / manual-attach workflows).",
       input_schema: %{
         "type" => "object",
         "properties" => %{
-          "task_id" => %{"type" => "string", "description" => "Task to dispatch (required)."},
+          "task_id" => %{"type" => "string", "description" => "Ticket to dispatch (required)."},
           "repo" => %{
             "type" => "string",
             "description" =>
-              "Repo to run in. Optional, and a one-shot override: it beats the task's own " <>
+              "Repo to run in. Optional, and a one-shot override: it beats the ticket's own " <>
                 "`repo` assignment, which in turn beats auto-selecting the workspace's sole " <>
                 "configured repo."
           },
@@ -857,7 +858,7 @@ defmodule Arbiter.MCP.Catalog do
           "no_agent" => %{
             "type" => "boolean",
             "description" =>
-              "Dry dispatch — move the task to In progress without spawning a worker. Use for hand-off / manual-attach workflows."
+              "Dry dispatch — move the ticket to In progress without spawning a worker. Use for hand-off / manual-attach workflows."
           },
           "with_claude" => %{
             "type" => "boolean",
@@ -891,24 +892,24 @@ defmodule Arbiter.MCP.Catalog do
       name: "worker_resume",
       tiers: @coordinator,
       description:
-        "Re-attach a fresh worker to a task's preserved worktree (`arb resume`), continuing " <>
+        "Re-attach a fresh worker to a ticket's preserved worktree (`arb resume`), continuing " <>
           "the stopped run rather than restarting. Requires a `can_dispatch` coordinator token and is " <>
           "depth-limited (the dispatch-recursion guardrail).",
       input_schema: %{
         "type" => "object",
         "properties" => %{
-          "task_id" => %{"type" => "string", "description" => "Task to resume (required)."},
+          "task_id" => %{"type" => "string", "description" => "Ticket to resume (required)."},
           "repo" => %{
             "type" => "string",
-            "description" => "Repo to run in (optional; inherited from the task's last run)."
+            "description" => "Repo to run in (optional; inherited from the ticket's last run)."
           },
           "model" => %{"type" => "string", "description" => "Per-dispatch model override."},
           "force" => %{
             "type" => "boolean",
             "description" =>
-              "Resume over a full concurrency cap. A task that released its slot (parked for you, " <>
+              "Resume over a full concurrency cap. A ticket that released its slot (parked for you, " <>
                 "stopped, completed) must re-acquire one; when none is free the resume is refused " <>
-                "with the cap and the tasks holding it. `true` goes over the cap anyway, and the " <>
+                "with the cap and the tickets holding it. `true` goes over the cap anyway, and the " <>
                 "override is recorded. Defaults to false."
           },
           "force_quota" => %{
@@ -933,9 +934,9 @@ defmodule Arbiter.MCP.Catalog do
       description:
         "Dispatch a review-only worker (`arb review`): no worktree, no branch, no merge. Requires a " <>
           "`can_dispatch` coordinator token and is depth-limited. Pass `task_id` to review the PR/MR " <>
-          "linked to a task (claude-driven; `with_claude: false` skips the agent), or `pr` (URL or " <>
+          "linked to a ticket (claude-driven; `with_claude: false` skips the agent), or `pr` (URL or " <>
           "number, + optional `repo`/`workspace`) to review an external / non-arbiter PR through the " <>
-          "MR adapter — findings + a verdict are posted to the PR, no task or branch required. For a " <>
+          "MR adapter — findings + a verdict are posted to the PR, no ticket or branch required. For a " <>
           "`pr` review, `follow_up` opens a review_only ReviewPatrol engagement after the verdict so " <>
           "the PR is re-reviewed on new commits and its replies handled (defaults on when the " <>
           "workspace has ReviewPatrol running). A `pr` review is refused when this identity has " <>
@@ -947,7 +948,7 @@ defmodule Arbiter.MCP.Catalog do
         "properties" => %{
           "task_id" => %{
             "type" => "string",
-            "description" => "Task to review (one of `task_id` or `pr` is required)."
+            "description" => "Ticket to review (one of `task_id` or `pr` is required)."
           },
           "pr" => %{
             "type" => "string",
@@ -958,7 +959,7 @@ defmodule Arbiter.MCP.Catalog do
           "repo" => %{
             "type" => "string",
             "description" =>
-              "Local checkout. Task review: the reviewer's cwd (needs `gh`/`git`). " <>
+              "Local checkout. Ticket review: the reviewer's cwd (needs `gh`/`git`). " <>
                 "`pr`: resolves owner/repo for a bare PR number."
           },
           "workspace" => %{
@@ -968,7 +969,7 @@ defmodule Arbiter.MCP.Catalog do
           "model" => %{"type" => "string", "description" => "Per-dispatch model override."},
           "with_claude" => %{
             "type" => "boolean",
-            "description" => "(task review) Spawn the reviewer agent (default true)."
+            "description" => "(ticket review) Spawn the reviewer agent (default true)."
           },
           "tracker_context_ref" => %{
             "type" => "string",
@@ -1013,13 +1014,13 @@ defmodule Arbiter.MCP.Catalog do
                 "to dispatch a reviewer at all, no agent spawned, nothing posted (pass `force: true` " <>
                 "to override a single dispatch). When omitted, the mode is resolved from the " <>
                 "workspace policy using the PR author (the actual author for a `pr` review; " <>
-                "`pr_author` for a task review) or the workspace's `review_automation.repo_overrides` " <>
+                "`pr_author` for a ticket review) or the workspace's `review_automation.repo_overrides` " <>
                 "for `repo`."
           },
           "pr_author" => %{
             "type" => "string",
             "description" =>
-              "(task review) Login of the PR author, used to resolve the workspace " <>
+              "(ticket review) Login of the PR author, used to resolve the workspace " <>
                 "review_automation policy (auto_authors list). Ignored when `automation` is set."
           },
           "scope" => %{
@@ -1054,14 +1055,14 @@ defmodule Arbiter.MCP.Catalog do
       name: "worker_stop",
       tiers: @coordinator,
       description:
-        "Stop the worker currently working a task (`arb worker stop`). Scoped to the coordinator's " <>
-          "workspace; a task with no live worker is reported not-found. Teardown only — does not dispatch.",
+        "Stop the worker currently working a ticket (`arb worker stop`). Scoped to the coordinator's " <>
+          "workspace; a ticket with no live worker is reported not-found. Teardown only — does not dispatch.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
           "task_id" => %{
             "type" => "string",
-            "description" => "Task whose worker to stop (required)."
+            "description" => "Ticket whose worker to stop (required)."
           }
         },
         "required" => ["task_id"],
@@ -1073,13 +1074,13 @@ defmodule Arbiter.MCP.Catalog do
       name: "message_send",
       tiers: @both,
       description:
-        "Send a message to a task's mailbox (the structured replacement for `arb message <task> <text>`). " <>
-          "A coordinator sends a direction from `coordinator`; a worker raises a flag from its own task " <>
+        "Send a message to a ticket's mailbox (the structured replacement for `arb message <task> <text>`). " <>
+          "A coordinator sends a direction from `coordinator`; a worker raises a flag from its own ticket " <>
           "to a sibling. The sender identity is set from the scope and pinned to its workspace.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
-          "task_id" => %{"type" => "string", "description" => "Recipient task id (required)."},
+          "task_id" => %{"type" => "string", "description" => "Recipient ticket id (required)."},
           "body" => %{"type" => "string", "description" => "Message body (required)."},
           "subject" => %{"type" => "string"},
           "kind" => %{
@@ -1092,7 +1093,7 @@ defmodule Arbiter.MCP.Catalog do
           "task_ref" => %{
             "type" => "string",
             "description" =>
-              "The task id this message concerns. Shown in brackets by `arb inbox`. " <>
+              "The ticket id this message concerns. Shown in brackets by `arb inbox`. " <>
                 "Defaults to the recipient task_id."
           },
           "directive_ref" => %{
@@ -1133,12 +1134,12 @@ defmodule Arbiter.MCP.Catalog do
           "(starting | working | waiting | finished), outcome (succeeded | failed | " <>
           "interrupted | handed_off, once finished), waiting_on, registry_key, role, phase, " <>
           "repo, started_at, activity, model (short display name e.g. \"Sonnet\"), cost_usd (sum " <>
-          "of all ledger entries for the task), resumable (boolean: whether the task can be " <>
+          "of all ledger entries for the ticket), resumable (boolean: whether the ticket can be " <>
           "safely resumed), and blocked_reason (string or nil: human-readable reason if " <>
           "resumable is false). A merge-queue pass is an ordinary run of its ticket, " <>
           "registered under the ticket id with role `fix_pass` / `conflict_resolver`; the " <>
-          "task's own run has role null. Check resumable before " <>
-          "attempting to stop/resume: false indicates the task is blocked (e.g. awaiting " <>
+          "ticket's own run has role null. Check resumable before " <>
+          "attempting to stop/resume: false indicates the ticket is blocked (e.g. awaiting " <>
           "merge queue or review gate) and cannot be safely touched. Never operate on a " <>
           "subordinate row (role is not null) — the merge queue owns those passes. The " <>
           "response always includes `workspace_id`: the workspace this call actually scoped " <>
@@ -1164,7 +1165,7 @@ defmodule Arbiter.MCP.Catalog do
         "properties" => %{
           "task_id" => %{
             "type" => "string",
-            "description" => "Task whose worker to inspect (required)."
+            "description" => "Ticket whose worker to inspect (required)."
           },
           "lines" => %{
             "type" => "integer",
@@ -1181,7 +1182,7 @@ defmodule Arbiter.MCP.Catalog do
       name: "worker_runs",
       tiers: @coordinator,
       description:
-        "List every historical run recorded for a task, newest first (`arb worker runs " <>
+        "List every historical run recorded for a ticket, newest first (`arb worker runs " <>
           "<task-id>`). Each entry is a run summary (no output lines — use `worker_log` for " <>
           "the transcript): id, task_id, task_title, repo, workspace_id, kind, state, outcome, " <>
           "model, started_at, completed_at, exit_code, failure_reason, failure_summary " <>
@@ -1192,14 +1193,14 @@ defmodule Arbiter.MCP.Catalog do
           "headroom, dropped candidates with reasons, any fallback or override). Optional `limit` " <>
           "(default 20, max 200). `task_id` may be a ReviewGate synthetic id " <>
           "(`<base>#review`, `#r<N>`, `#impl<N>`, `#v<N>`, `#t<N>`) — those aren't `issues` " <>
-          "rows, but the run lookup still resolves (authorization checks the base task).",
+          "rows, but the run lookup still resolves (authorization checks the base ticket).",
       input_schema: %{
         "type" => "object",
         "properties" => %{
           "task_id" => %{
             "type" => "string",
             "description" =>
-              "Task whose run history to list (required). Accepts a plain task id or a " <>
+              "Ticket whose run history to list (required). Accepts a plain ticket id or a " <>
                 "ReviewGate synthetic id such as `<base>#review`."
           },
           "limit" => %{
@@ -1219,7 +1220,7 @@ defmodule Arbiter.MCP.Catalog do
         "Full, uncapped durable transcript of one run — the audit source of record, " <>
           "retaining every line however long the run. Pass `run_id` to read that exact run " <>
           "(independent of which run is latest — the only way to reach a superseded/failed " <>
-          "attempt), or `task_id` (no `run_id`) for the task's most recent run (`arb worker " <>
+          "attempt), or `task_id` (no `run_id`) for the ticket's most recent run (`arb worker " <>
           "log <task-id>`, unchanged behaviour). `task_id` may be a ReviewGate synthetic id " <>
           "(`<base>#review`, `#r<N>`, `#impl<N>`, `#v<N>`, `#t<N>`). `exists` distinguishes " <>
           ~s["no file yet / never captured" (false, empty `lines`) from "captured but empty" ] <>
@@ -1230,14 +1231,14 @@ defmodule Arbiter.MCP.Catalog do
           "task_id" => %{
             "type" => "string",
             "description" =>
-              "Task whose latest run's transcript to read. Accepts a plain task id or a " <>
+              "Ticket whose latest run's transcript to read. Accepts a plain ticket id or a " <>
                 "ReviewGate synthetic id such as `<base>#review`. Ignored when `run_id` is given."
           },
           "run_id" => %{
             "type" => "string",
             "description" =>
               "Exact run id whose transcript to read, independent of which run is latest " <>
-                "for its task. Takes precedence over `task_id`."
+                "for its ticket. Takes precedence over `task_id`."
           }
         },
         "additionalProperties" => false
@@ -1251,7 +1252,7 @@ defmodule Arbiter.MCP.Catalog do
         "The composed prompt one run was spawned with (bd-9rdwe4, #1017 gap G5), redacted " <>
           "through the same choke-point as transcript lines — the sibling of `worker_log` for " <>
           ~s("what was this agent told" instead of "what did it say". Pass `run_id` to read ) <>
-          "that exact run, or `task_id` (no `run_id`) for the task's most recent run. `task_id` " <>
+          "that exact run, or `task_id` (no `run_id`) for the ticket's most recent run. `task_id` " <>
           "may be a ReviewGate synthetic id (`<base>#review`, `#r<N>`, `#impl<N>`, `#v<N>`, " <>
           "`#t<N>`). `exists` distinguishes \"no prompt ever persisted\" (false, `prompt` nil) " <>
           "from a captured (possibly empty-after-redaction) one. `prompt_sha256` mirrors the " <>
@@ -1263,14 +1264,14 @@ defmodule Arbiter.MCP.Catalog do
           "task_id" => %{
             "type" => "string",
             "description" =>
-              "Task whose latest run's prompt to read. Accepts a plain task id or a " <>
+              "Ticket whose latest run's prompt to read. Accepts a plain ticket id or a " <>
                 "ReviewGate synthetic id such as `<base>#review`. Ignored when `run_id` is given."
           },
           "run_id" => %{
             "type" => "string",
             "description" =>
               "Exact run id whose prompt to read, independent of which run is latest for its " <>
-                "task. Takes precedence over `task_id`."
+                "ticket. Takes precedence over `task_id`."
           }
         },
         "additionalProperties" => false
@@ -1281,9 +1282,9 @@ defmodule Arbiter.MCP.Catalog do
       name: "run_log_list",
       tiers: @coordinator,
       description:
-        "Enumerate every run recorded for a task AND its ReviewGate synthetic children " <>
+        "Enumerate every run recorded for a ticket AND its ReviewGate synthetic children " <>
           "(`<task_id>#review`, `#r<N>`, `#impl<N>`, `#v<N>`, `#t<N>`), newest first — the " <>
-          "whole retrievable transcript corpus for a task in one call. Unlike `worker_runs` " <>
+          "whole retrievable transcript corpus for a ticket in one call. Unlike `worker_runs` " <>
           "(exact `task_id` match only), this also matches anything prefixed `<task_id>#`, " <>
           "surfacing the reviewer/re-prompt corpus alongside the author's own runs. Each " <>
           "entry: run_id, task_id, kind, state, outcome, model, started_at, " <>
@@ -1294,8 +1295,8 @@ defmodule Arbiter.MCP.Catalog do
           "task_id" => %{
             "type" => "string",
             "description" =>
-              "Base task whose full run corpus (including synthetic children) to list " <>
-                "(required). Pass the plain task id even to reach synthetic runs."
+              "Base ticket whose full run corpus (including synthetic children) to list " <>
+                "(required). Pass the plain ticket id even to reach synthetic runs."
           },
           "limit" => %{
             "type" => "integer",
@@ -1429,19 +1430,19 @@ defmodule Arbiter.MCP.Catalog do
       name: "review_gate_rounds_list",
       tiers: @coordinator,
       description:
-        "List internal ReviewGate round outcomes for a task (bd-aqyjuc): one row per reviewer " <>
+        "List internal ReviewGate round outcomes for a ticket (bd-aqyjuc): one row per reviewer " <>
           "or implementer pass, oldest-first. Each row carries the round number, role " <>
           "(review/impl), verdict (approve/request_changes, nil for impl), findings text, " <>
           "finding count, the model that ran the pass, its cost, and whether it converged — " <>
           "so a round-1 rejection followed by a round-2 approval is visible as two distinct " <>
-          "rows instead of collapsing into the task's terminal outcome. Backfill is out of " <>
+          "rows instead of collapsing into the ticket's terminal outcome. Backfill is out of " <>
           "scope; rows only exist for ReviewGate runs from 2026-07-28 onward.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
           "task_id" => %{
             "type" => "string",
-            "description" => "Task whose ReviewGate rounds to list (required)."
+            "description" => "Ticket whose ReviewGate rounds to list (required)."
           },
           "limit" => %{
             "type" => "integer",
@@ -1500,13 +1501,13 @@ defmodule Arbiter.MCP.Catalog do
       handler: &Tools.review_greenlight/2
     },
     %{
-      name: "task_list",
+      name: "ticket_list",
       tiers: @coordinator,
       description:
-        "List tasks in the workspace with optional filters: `state` (backlog | queued | " <>
+        "List tickets in the workspace with optional filters: `state` (backlog | queued | " <>
           "active | merging | verifying | closed), `column` (backlog | blocked | ready | " <>
           "in_progress | merging | verifying | closed), `priority` (integer 0–4) and " <>
-          "`issue_type` (task | bug | feature | epic | chore | decision). Each task carries " <>
+          "`issue_type` (task | bug | feature | epic | chore | decision). Each ticket carries " <>
           "`state`, `column`, `step`, `blocked_by` and `attention`. The legacy `status` " <>
           "filter still works for one release; prefer `state` or `column`.",
       input_schema: %{
@@ -1547,9 +1548,9 @@ defmodule Arbiter.MCP.Catalog do
       name: "tracker_claim",
       tiers: @coordinator,
       description:
-        "Claim an external tracker issue into a task (`arb claim <issue#>`). Verifies the issue is " <>
-          "assigned to the workspace user (skip with `force: true`) and creates a linked task. " <>
-          "Idempotent — returns the existing task if one already references the issue. " <>
+        "Claim an external tracker issue into a ticket (`arb claim <issue#>`). Verifies the issue is " <>
+          "assigned to the workspace user (skip with `force: true`) and creates a linked ticket. " <>
+          "Idempotent — returns the existing ticket if one already references the issue. " <>
           "`difficulty` and `issue_type` are otherwise derived from the issue's tracker labels " <>
           "where the adapter supports it (currently GitHub); `difficulty` and `repo` below " <>
           "override whatever would otherwise be derived or left unset.",
@@ -1573,7 +1574,7 @@ defmodule Arbiter.MCP.Catalog do
           "repo" => %{
             "type" => "string",
             "description" =>
-              "The repo this task belongs to, as a configured `repo_paths` key " <>
+              "The repo this ticket belongs to, as a configured `repo_paths` key " <>
                 "(e.g. \"emricare/tonic\"). Optional — only needed in a multi-repo workspace, " <>
                 "where dispatch otherwise can't tell which checkout the claimed issue is for."
           }
@@ -1587,13 +1588,13 @@ defmodule Arbiter.MCP.Catalog do
       name: "tracker_sync",
       tiers: @coordinator,
       description:
-        "Reconcile the workspace's tasks against its external tracker (`arb sync`): open assigned " <>
-          "issues with no task get a linked task; open tasks whose issue is closed upstream or " <>
-          "reassigned away get closed (unassigned issues are left alone); closed tasks whose close was " <>
+        "Reconcile the workspace's tickets against its external tracker (`arb sync`): open assigned " <>
+          "issues with no ticket get a linked ticket; open tickets whose issue is closed upstream or " <>
+          "reassigned away get closed (unassigned issues are left alone); closed tickets whose close was " <>
           "meant to propagate upstream — a recorded close intent, or for rows closed before that was " <>
           "recorded a non-blank `pr_ref` — but whose tracker issue is still open are reported as `drift` " <>
           "(a close that never propagated upstream — drift entries are report-only and never mutate the " <>
-          "local task). `task`-type and `review_only` tasks are exempt: they are expected to close with " <>
+          "local ticket). `task`-type and `review_only` tickets are exempt: they are expected to close with " <>
           "their ticket still open. `dry: true` returns the plan without acting. No-ops cleanly when the " <>
           "tracker does not support reconciliation.",
       input_schema: %{
@@ -1838,7 +1839,7 @@ defmodule Arbiter.MCP.Catalog do
           "code_only" => %{
             "type" => "boolean",
             "description" =>
-              "When true, the skill only applies to code-producing tasks (feature/bug/chore); " <>
+              "When true, the skill only applies to code-producing tickets (feature/bug/chore); " <>
                 "excluded from decision/task/epic. Default false."
           }
         },
@@ -1881,7 +1882,7 @@ defmodule Arbiter.MCP.Catalog do
           },
           "code_only" => %{
             "type" => "boolean",
-            "description" => "Restrict the skill to code-producing tasks (optional)."
+            "description" => "Restrict the skill to code-producing tickets (optional)."
           }
         },
         "required" => ["skill"],
@@ -2033,7 +2034,7 @@ defmodule Arbiter.MCP.Catalog do
         "Apply the queued loop proposal `id`. Coordinator only — a worker must never apply a " <>
           "fleet-wide change. Dispatches on `kind` to the same public domain API a human " <>
           "would call (`Arbiter.Skills.update_skill/2`, the workspace config deep-merge, an " <>
-          "Issue update), so the write lands with a normal paper-trail version attributed to " <>
+          "ticket update), so the write lands with a normal paper-trail version attributed to " <>
           "the proposal id. Refuses anything that is not `proposed`; a `hypothesis` reply " <>
           "names its evidence count and the shortfall. Nothing is ever applied " <>
           "automatically — this tool is the only apply path.",
@@ -2114,8 +2115,8 @@ defmodule Arbiter.MCP.Catalog do
       tiers: @coordinator,
       description:
         "Status of the workspace's running routing canary: proposal id, age, expiry, canary-arm " <>
-          "dispatches still needed for a verdict, and both arms' current dispatches, tasks, " <>
-          "reviewed tasks, first-pass convergence, review rounds, cost and cost per round. " <>
+          "dispatches still needed for a verdict, and both arms' current dispatches, tickets, " <>
+          "reviewed tickets, first-pass convergence, review rounds, cost and cost per round. " <>
           "Returns `running: false` with a message when there is none.",
       input_schema: %{
         "type" => "object",
@@ -2136,8 +2137,8 @@ defmodule Arbiter.MCP.Catalog do
         "Roll up the token/cost usage ledger for the workspace. `by` is required (day, task, " <>
           "epic, workspace, repo, model, step, provider, source — `campaign` also accepted as a " <>
           "deprecated alias for `epic`); optional `since` (ISO-8601) and `limit`. " <>
-          "`by=task` covers task-attributed spend only: quota probes, auth pre-flights and " <>
-          "coordinator/terminal sessions have no task and are grouped under `by=source` instead.",
+          "`by=task` covers ticket-attributed spend only: quota probes, auth pre-flights and " <>
+          "coordinator/terminal sessions have no ticket and are grouped under `by=source` instead.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
@@ -2195,7 +2196,7 @@ defmodule Arbiter.MCP.Catalog do
         "List the active system alerts: problems with the installation that are not " <>
           "tied to a ticket — `credential_expired` (per adapter and detection source), " <>
           "`quota_poll_failing`, `overage_alert` (per workspace and provider) and " <>
-          "`budget_exceeded` (per task). Each carries `kind`, `key`, `subject`, " <>
+          "`budget_exceeded` (per ticket). Each carries `kind`, `key`, `subject`, " <>
           "`detail`, `owner` (always `operator`), `raised_at`, `last_raised_at`, " <>
           "`raise_count` and `cleared_at`. An alert clears by itself when its condition " <>
           "does, so the list is exactly what is still wrong. Optional `workspace`, " <>
@@ -2287,7 +2288,7 @@ defmodule Arbiter.MCP.Catalog do
       name: "queue_retry_auto_resolve",
       tiers: @coordinator,
       description:
-        "Re-arm one more auto-resolve attempt on a task's merge Watchdog after it has " <>
+        "Re-arm one more auto-resolve attempt on a ticket's merge Watchdog after it has " <>
           "exhausted max_auto_resolve_attempts on a :ci_failed block and parked indefinitely " <>
           "(bd-bspakl), or spent its max_conflict_attempts conflict passes and escalated " <>
           "(bd-4olwyg). Bumps this episode's budget by exactly one attempt; the next " <>
@@ -2301,7 +2302,7 @@ defmodule Arbiter.MCP.Catalog do
         "properties" => %{
           "task_id" => %{
             "type" => "string",
-            "description" => "The parked task ID to re-arm (required)."
+            "description" => "The parked ticket ID to re-arm (required)."
           }
         },
         "required" => ["task_id"],
@@ -2318,7 +2319,7 @@ defmodule Arbiter.MCP.Catalog do
           "when it crashes it is gone for good, silently, and the ticket sits in Merging with " <>
           "an open MR nobody is polling. Use this when a Merging ticket shows 'no watchdog " <>
           "running', or when queue_retry_auto_resolve answered 'no merge watchdog is " <>
-          "currently running' on a task whose PR is genuinely still open. Refused if a " <>
+          "currently running' on a ticket whose PR is genuinely still open. Refused if a " <>
           "watchdog is already running (two on one MR would race the merge). Much cheaper " <>
           "than worker_resume, which restarts the review gate from round 1. A ticket the " <>
           "operator pulled out of the merge queue goes back in it, so restart one only when " <>
@@ -2343,7 +2344,7 @@ defmodule Arbiter.MCP.Catalog do
       name: "ci_rerun",
       tiers: @both,
       description:
-        "Re-run CI for a task's PR, choosing the GRANULARITY of the re-run (bd-5mzzww). " <>
+        "Re-run CI for a ticket's PR, choosing the GRANULARITY of the re-run (bd-5mzzww). " <>
           "Arbiter previously had no CI-retry verb at all — every retry was a human clicking " <>
           "the forge UI, and the button a human reaches for first ('re-run failed jobs') " <>
           "reuses every job that already succeeded. When the failing check tests an artifact " <>
@@ -2354,14 +2355,14 @@ defmodule Arbiter.MCP.Catalog do
           "would be reused, or the run is already on attempt 2+), `failed_jobs`, `all_jobs` " <>
           "(re-runs the whole run, rebuilding upstream jobs), `workflow` (a fresh " <>
           "workflow_dispatch — the only mode that can carry `inputs` such as force_deploy). " <>
-          "A worker may re-run its own task's CI; a coordinator must name `task_id`.",
+          "A worker may re-run its own ticket's CI; a coordinator must name `task_id`.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
           "task_id" => %{
             "type" => "string",
             "description" =>
-              "Task whose PR to re-run CI for. A worker may omit this (its own task) and may " <>
+              "Ticket whose PR to re-run CI for. A worker may omit this (its own ticket) and may " <>
                 "not name another; a coordinator must supply it."
           },
           "mode" => %{
@@ -2394,7 +2395,7 @@ defmodule Arbiter.MCP.Catalog do
       name: "ci_mark_external",
       tiers: @both,
       description:
-        "Record a 'this CI failure is infrastructure, not my diff' verdict on a task parked " <>
+        "Record a 'this CI failure is infrastructure, not my diff' verdict on a ticket parked " <>
           "on a :ci_failed block, reclassifying the park as :ci_failed_external (bd-5mzzww). " <>
           "Use when you have EVIDENCE the failure is repo-wide — e.g. the same check failing " <>
           "on unrelated branches today, and nothing in this diff touching the failing code. " <>
@@ -2408,7 +2409,7 @@ defmodule Arbiter.MCP.Catalog do
           "task_id" => %{
             "type" => "string",
             "description" =>
-              "Task parked on the :ci_failed block. A worker may omit this (its own task)."
+              "Ticket parked on the :ci_failed block. A worker may omit this (its own ticket)."
           },
           "note" => %{
             "type" => "string",
@@ -2441,7 +2442,7 @@ defmodule Arbiter.MCP.Catalog do
           "task_id" => %{
             "type" => "string",
             "description" =>
-              "Task the fix_pass is running for. A worker may omit this (its own task)."
+              "Ticket the fix_pass is running for. A worker may omit this (its own ticket)."
           },
           "ci_job" => %{
             "type" => "string",
@@ -2468,7 +2469,7 @@ defmodule Arbiter.MCP.Catalog do
           },
           "repo" => %{
             "type" => "string",
-            "description" => "Defaults to the calling task's repo when omitted."
+            "description" => "Defaults to the calling ticket's repo when omitted."
           }
         },
         "required" => ["ci_job", "signature"],
@@ -2519,9 +2520,57 @@ defmodule Arbiter.MCP.Catalog do
            end
          end)
 
-  @doc "All Phase 1 tool definitions, regardless of tier."
+  # bd-4jojpw: the tools were renamed `task_*` → `ticket_*`. Each old name stays
+  # callable for one release: `call/3` resolves it to its `ticket_*` tool, so the
+  # result is the same by construction, and `visible/1` lists it (marked
+  # deprecated) so a client that filters its menu by name — a Gemini
+  # `includeTools` written before the rename, a running session's cached tool
+  # list — keeps finding it. Removing this table is the follow-up cleanup.
+  @legacy_aliases %{
+    "task_show" => "ticket_show",
+    "task_ready" => "ticket_ready",
+    "task_update_progress" => "ticket_update_progress",
+    "task_create" => "ticket_create",
+    "task_update" => "ticket_update",
+    "task_close" => "ticket_close",
+    "task_reopen" => "ticket_reopen",
+    "task_verify" => "ticket_verify",
+    "task_promote" => "ticket_promote",
+    "task_demote" => "ticket_demote",
+    "task_rank" => "ticket_rank",
+    "task_sync_upstream_close" => "ticket_sync_upstream_close",
+    "task_list" => "ticket_list"
+  }
+
+  @alias_tools @legacy_aliases
+               |> Enum.sort()
+               |> Enum.map(fn {old, new} ->
+                 target = Enum.find(@tools, &(&1.name == new))
+
+                 %{
+                   target
+                   | name: old,
+                     description:
+                       "Deprecated alias of `#{new}` — call `#{new}` instead. Same " <>
+                         "arguments, same result; this `task_*` name is kept for one " <>
+                         "release and then removed."
+                 }
+               end)
+
+  @doc "All tool definitions, regardless of tier. Canonical names only — no deprecated aliases."
   @spec all() :: [tool()]
   def all, do: @tools
+
+  @doc """
+  The deprecated `task_*` tool names, each mapped to the `ticket_*` tool it now
+  calls (bd-4jojpw). Kept for one release.
+  """
+  @spec legacy_aliases() :: %{String.t() => String.t()}
+  def legacy_aliases, do: @legacy_aliases
+
+  @doc "The canonical tool name for `name`: its `ticket_*` target if it is a deprecated alias."
+  @spec canonical_name(String.t()) :: String.t()
+  def canonical_name(name) when is_binary(name), do: Map.get(@legacy_aliases, name, name)
 
   @doc """
   The tool definitions visible to `scope`.
@@ -2533,13 +2582,22 @@ defmodule Arbiter.MCP.Catalog do
   module for why.
   """
   @spec visible(Scope.t()) :: [tool()]
-  def visible(%Scope{tier: :refine}), do: Enum.filter(@tools, &RefinePolicy.allow?(&1.name))
-  def visible(%Scope{tier: tier}), do: Enum.filter(@tools, &(tier in &1.tiers))
+  def visible(%Scope{} = scope), do: Enum.filter(@tools ++ @alias_tools, &visible?(scope, &1))
 
-  @doc "Look up a tool definition by name."
+  # A deprecated alias is visible exactly where its `ticket_*` target is: it
+  # carries the target's `:tiers`, and the refine table is keyed by the target.
+  defp visible?(%Scope{tier: :refine}, tool), do: RefinePolicy.allow?(canonical_name(tool.name))
+  defp visible?(%Scope{tier: tier}, tool), do: tier in tool.tiers
+
+  @doc """
+  Look up a tool definition by name. A deprecated `task_*` alias resolves to
+  its `ticket_*` tool.
+  """
   @spec fetch(String.t()) :: {:ok, tool()} | :error
   def fetch(name) when is_binary(name) do
-    case Enum.find(@tools, &(&1.name == name)) do
+    canonical = canonical_name(name)
+
+    case Enum.find(@tools, &(&1.name == canonical)) do
       nil -> :error
       tool -> {:ok, tool}
     end

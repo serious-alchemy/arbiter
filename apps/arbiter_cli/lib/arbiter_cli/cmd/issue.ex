@@ -1,30 +1,31 @@
 defmodule ArbiterCli.Cmd.Issue do
   @moduledoc """
-  `arb issue <verb>` — the issue resource.
+  `arb ticket <verb>` — the ticket resource. `arb issue <verb>` is a
+  deprecated alias: it runs the same verb and prints a one-line note on stderr.
 
-      arb issue list      [--status ...] [--type ...] [--priority ...]
+      arb ticket list     [--status ...] [--type ...] [--priority ...]
                           [--labels ...] [--tracker]
-      arb issue show      <id>
-      arb issue create    <title> [--description ...] [--priority ...]
+      arb ticket show     <id>
+      arb ticket create   <title> [--description ...] [--priority ...]
                           [--type ...] [--deps id1,id2] [--labels a,b]
                           [--parent <parent-id>] [--auto-close]
                           [--repo <repo_paths key>]
-      arb issue update    <id> [--title ...] [--priority N] [--difficulty N]
+      arb ticket update   <id> [--title ...] [--priority N] [--difficulty N]
                           [--status s] [--description d]
                           [--append-notes text] [--qa-notes text]
                           [--deployment-notes text] [--pr-body text]
-      arb issue close     <id> [--reason ...]
-      arb issue reopen    <id>
-      arb issue promote   <id> [--waive REASON]
-      arb issue demote    <id>
-      arb issue rank      <id> --top | --bottom | --before <id> | --after <id>
-      arb issue verify    <id> --observed "<evidence>" | --failed "<evidence>"
-      arb issue handoff   <id> --note "<what the operator has to do>"
-      arb issue handback  <id> [--note "<what changed>"]
-      arb issue claim     <issue#> [--force] [--repo <repo>]
-      arb issue sync      [--dry]
-      arb issue ready
-      arb issue dispatch  <id> [<repo>] [--with-claude] [--model <name>]
+      arb ticket close    <id> [--reason ...]
+      arb ticket reopen   <id>
+      arb ticket promote  <id> [--waive REASON]
+      arb ticket demote   <id>
+      arb ticket rank     <id> --top | --bottom | --before <id> | --after <id>
+      arb ticket verify   <id> --observed "<evidence>" | --failed "<evidence>"
+      arb ticket handoff  <id> --note "<what the operator has to do>"
+      arb ticket handback <id> [--note "<what changed>"]
+      arb ticket claim    <issue#> [--force] [--repo <repo>]
+      arb ticket sync     [--dry]
+      arb ticket ready
+      arb ticket dispatch <id> [<repo>] [--with-claude] [--model <name>]
   """
 
   alias ArbiterCli.Cmd
@@ -36,7 +37,7 @@ defmodule ArbiterCli.Cmd.Issue do
   # code is held to it; see the note in .credo.exs.
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   def run(argv) do
-    # A `--workspace <name>` flag anywhere in an `arb issue *` invocation
+    # A `--workspace <name>` flag anywhere in an `arb ticket *` invocation
     # overrides the active workspace, exactly as `ARB_WORKSPACE` does. We
     # strip it here and seed the env so every subcommand below — each of
     # which resolves the workspace through `ARB_WORKSPACE` — honors it
@@ -70,12 +71,16 @@ defmodule ArbiterCli.Cmd.Issue do
       ["dispatch" | rest] -> Cmd.Dispatch.run(rest)
       ["--help" | _] -> IO.puts(@moduledoc)
       ["-h" | _] -> IO.puts(@moduledoc)
-      [] -> Output.die("issue requires a subcommand", usage_hint())
-      [unknown | _] -> Output.die("unknown issue subcommand: #{unknown}", usage_hint())
+      [] -> Output.die("ticket requires a subcommand", usage_hint())
+      [unknown | _] -> Output.die("unknown ticket subcommand: #{unknown}", usage_hint())
     end
   end
 
-  defp usage_hint do
-    "verbs: list, show, create, update, close, reopen, promote, demote, rank, verify, handoff, handback, claim, sync, ready, dispatch"
-  end
+  @subcommands ~w(list show create update close reopen promote demote rank verify handoff handback claim sync ready dispatch)
+
+  @doc "Every verb `arb ticket` (and its deprecated alias `arb issue`) accepts."
+  @spec subcommands() :: [String.t()]
+  def subcommands, do: @subcommands
+
+  defp usage_hint, do: "verbs: " <> Enum.join(@subcommands, ", ")
 end

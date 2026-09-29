@@ -330,11 +330,11 @@ defmodule ArbiterCli.Cmd.Init do
       worker_plural: "workers",
       worker_plural_cap: "Workers",
       worker_article: "a",
-      issue: "issue",
-      issue_cap: "Issue",
-      issue_article: "an",
-      issue_plural: "issues",
-      issue_plural_cap: "Issues",
+      issue: "ticket",
+      issue_cap: "Ticket",
+      issue_article: "a",
+      issue_plural: "tickets",
+      issue_plural_cap: "Tickets",
       epic_cap: "Epic",
       repo: "repo",
       repo_cap: "Repo",
@@ -414,7 +414,7 @@ defmodule ArbiterCli.Cmd.Init do
 
     IO.puts(
       "terms: coordinator=#{assigns.coordinator} worker=#{assigns.worker} " <>
-        "issue=#{assigns.issue}  (#{assigns.workspace}: #{assigns.domain_name}/#{assigns.domain_prefix})"
+        "ticket=#{assigns.issue}  (#{assigns.workspace}: #{assigns.domain_name}/#{assigns.domain_prefix})"
     )
 
     if Enum.any?(results, fn {_, s} -> s == :skipped end) do

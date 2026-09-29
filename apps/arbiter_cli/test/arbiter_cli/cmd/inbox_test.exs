@@ -113,7 +113,7 @@ defmodule ArbiterCli.Cmd.InboxTest do
       {out, _err, code} = capture(fn -> Inbox.run(["read", id]) end)
       assert code == 0
       assert out =~ "Full body text here."
-      assert out =~ "Issue:"
+      assert out =~ "Ticket:"
       assert out =~ "bd-1qx1nt"
     end
 

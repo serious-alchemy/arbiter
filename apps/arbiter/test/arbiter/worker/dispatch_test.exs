@@ -2831,7 +2831,7 @@ defmodule Arbiter.Worker.DispatchTest do
       assert %{target_branch: "dolphin"} = Worker.state(result.worker_pid).meta
     end
 
-    # bd-8ssxap: `task_verify failed` reopens a task but leaves its old
+    # bd-8ssxap: `ticket_verify failed` reopens a task but leaves its old
     # per-task branch on disk. That branch's commits are already merged into
     # main (the round that got verified) — redispatching onto it as-is gives
     # the worker nothing new to add, and it can just merge main back in and
@@ -3115,7 +3115,7 @@ defmodule Arbiter.Worker.DispatchTest do
       # Frames the deliverable as a findings summary in notes via the MCP tool.
       assert prompt =~ "findings"
       assert prompt =~ "notes"
-      assert prompt =~ "task_update_progress"
+      assert prompt =~ "ticket_update_progress"
       assert prompt =~ "notes gate"
 
       # Explicitly NOT the code-change/PR work prompt.
@@ -3263,10 +3263,10 @@ defmodule Arbiter.Worker.DispatchTest do
 
       # Notes persist via the MCP tool, never the arb escript (bd-53xrmi).
       assert prompt =~ "backed by an external tracker"
-      assert prompt =~ "task_update_progress"
+      assert prompt =~ "ticket_update_progress"
       assert prompt =~ "qa_notes"
       assert prompt =~ "deployment_notes"
-      refute prompt =~ "arb issue update"
+      refute prompt =~ "arb ticket update"
     end
 
     test "untracked tasks get no completion-notes step", %{ws: ws} do
@@ -3319,11 +3319,11 @@ defmodule Arbiter.Worker.DispatchTest do
       prompt = Dispatch.prompt_for_task(task, [])
 
       # Authors the body and persists it via the MCP tool, never the arb escript.
-      assert prompt =~ "task_update_progress"
+      assert prompt =~ "ticket_update_progress"
       assert prompt =~ "pr_body"
       assert prompt =~ "Summary"
       assert prompt =~ "Test plan"
-      refute prompt =~ "arb issue update"
+      refute prompt =~ "arb ticket update"
 
       # No longer tells the worker to open a PR; explicitly forbids it.
       refute prompt =~ "open a PR if appropriate"
@@ -3337,7 +3337,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       prompt = Dispatch.prompt_for_task(task, [])
       assert prompt =~ "pr_body"
-      assert prompt =~ "task_update_progress"
+      assert prompt =~ "ticket_update_progress"
     end
   end
 

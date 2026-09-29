@@ -1,9 +1,9 @@
 defmodule Arbiter.MCP.TaskLifecycleVocabularyTest do
   @moduledoc """
   bd-6fkgvo (ticket lifecycle 10/13, AC3): MCP speaks the lifecycle
-  vocabulary. `task_show` returns `state`, `column`, `step`, `attention` and
-  `close_reason`; `task_list` filters by `state` and by `column`;
-  `task_ready` is exactly the `:ready` column, in dispatch order.
+  vocabulary. `ticket_show` returns `state`, `column`, `step`, `attention` and
+  `close_reason`; `ticket_list` filters by `state` and by `column`;
+  `ticket_ready` is exactly the `:ready` column, in dispatch order.
   """
   use Arbiter.DataCase, async: false
 
@@ -62,12 +62,12 @@ defmodule Arbiter.MCP.TaskLifecycleVocabularyTest do
 
   defp ids(tasks), do: tasks |> Enum.map(& &1.id) |> Enum.sort()
 
-  describe "task_show" do
+  describe "ticket_show" do
     test "the slim view carries state, column, step, attention and close_reason", ctx do
       id = ctx.t.in_progress.id
       {:ok, _} = Attention.raise_cause(id, :run_crashed, "boom")
 
-      assert {:ok, shown} = Catalog.call(ctx.coordinator, "task_show", %{"id" => id})
+      assert {:ok, shown} = Catalog.call(ctx.coordinator, "ticket_show", %{"id" => id})
 
       assert shown.state == "active"
       assert shown.column == "in_progress"
@@ -81,7 +81,7 @@ defmodule Arbiter.MCP.TaskLifecycleVocabularyTest do
 
     test "the full view carries them too, and a closed ticket its close reason", ctx do
       assert {:ok, shown} =
-               Catalog.call(ctx.coordinator, "task_show", %{
+               Catalog.call(ctx.coordinator, "ticket_show", %{
                  "id" => ctx.t.closed.id,
                  "full" => true
                })
@@ -92,7 +92,7 @@ defmodule Arbiter.MCP.TaskLifecycleVocabularyTest do
 
     test "a queued ticket behind an open blocker reads as blocked, naming it", ctx do
       assert {:ok, shown} =
-               Catalog.call(ctx.coordinator, "task_show", %{"id" => ctx.t.blocked.id})
+               Catalog.call(ctx.coordinator, "ticket_show", %{"id" => ctx.t.blocked.id})
 
       assert shown.column == "blocked"
       assert shown.blocked_by == [ctx.t.in_progress.id]
@@ -100,17 +100,17 @@ defmodule Arbiter.MCP.TaskLifecycleVocabularyTest do
 
     test "a merging ticket's step names where its PR is", ctx do
       assert {:ok, shown} =
-               Catalog.call(ctx.coordinator, "task_show", %{"id" => ctx.t.merging.id})
+               Catalog.call(ctx.coordinator, "ticket_show", %{"id" => ctx.t.merging.id})
 
       assert shown.column == "merging"
       assert shown.step in ~w(waiting_ci in_merge_queue behind_base merge_blocked)
     end
   end
 
-  describe "task_list" do
+  describe "ticket_list" do
     test "filters by state", ctx do
       assert {:ok, %{tasks: tasks}} =
-               Catalog.call(ctx.coordinator, "task_list", %{"state" => "queued"})
+               Catalog.call(ctx.coordinator, "ticket_list", %{"state" => "queued"})
 
       assert ids(tasks) == ids([ctx.t.blocked, ctx.t.ready_low, ctx.t.ready_high])
       assert Enum.all?(tasks, &(&1.state == "queued"))
@@ -118,13 +118,13 @@ defmodule Arbiter.MCP.TaskLifecycleVocabularyTest do
 
     test "filters by column", ctx do
       assert {:ok, %{tasks: blocked}} =
-               Catalog.call(ctx.coordinator, "task_list", %{"column" => "blocked"})
+               Catalog.call(ctx.coordinator, "ticket_list", %{"column" => "blocked"})
 
       assert ids(blocked) == ids([ctx.t.blocked])
       assert [%{column: "blocked", blocked_by: [_]}] = blocked
 
       assert {:ok, %{tasks: ready}} =
-               Catalog.call(ctx.coordinator, "task_list", %{"column" => "ready"})
+               Catalog.call(ctx.coordinator, "ticket_list", %{"column" => "ready"})
 
       assert ids(ready) == ids([ctx.t.ready_low, ctx.t.ready_high])
 
@@ -136,14 +136,14 @@ defmodule Arbiter.MCP.TaskLifecycleVocabularyTest do
             {"closed", :closed}
           ] do
         assert {:ok, %{tasks: tasks}} =
-                 Catalog.call(ctx.coordinator, "task_list", %{"column" => column})
+                 Catalog.call(ctx.coordinator, "ticket_list", %{"column" => column})
 
         assert ids(tasks) == ids([ctx.t[key]]), "column #{column}"
       end
     end
 
     test "every listed task carries its state and column", ctx do
-      assert {:ok, %{tasks: tasks}} = Catalog.call(ctx.coordinator, "task_list", %{})
+      assert {:ok, %{tasks: tasks}} = Catalog.call(ctx.coordinator, "ticket_list", %{})
 
       by_id = Map.new(tasks, &{&1.id, &1})
       assert by_id[ctx.t.verifying.id].column == "verifying"
@@ -153,16 +153,16 @@ defmodule Arbiter.MCP.TaskLifecycleVocabularyTest do
 
     test "rejects an unknown state or column", ctx do
       assert {:tool_error, "`state` must be one of" <> _} =
-               Catalog.call(ctx.coordinator, "task_list", %{"state" => "in_progress"})
+               Catalog.call(ctx.coordinator, "ticket_list", %{"state" => "in_progress"})
 
       assert {:tool_error, "`column` must be one of" <> _} =
-               Catalog.call(ctx.coordinator, "task_list", %{"column" => "waiting"})
+               Catalog.call(ctx.coordinator, "ticket_list", %{"column" => "waiting"})
     end
   end
 
-  describe "task_ready" do
+  describe "ticket_ready" do
     test "returns exactly the :ready column, in dispatch order", ctx do
-      assert {:ok, %{tasks: tasks, count: 2}} = Catalog.call(ctx.coordinator, "task_ready", %{})
+      assert {:ok, %{tasks: tasks, count: 2}} = Catalog.call(ctx.coordinator, "ticket_ready", %{})
 
       assert Enum.map(tasks, & &1.id) == [ctx.t.ready_high.id, ctx.t.ready_low.id]
       assert Enum.all?(tasks, &(&1.column == "ready"))
@@ -172,7 +172,7 @@ defmodule Arbiter.MCP.TaskLifecycleVocabularyTest do
   describe "catalog descriptions" do
     test "the task tools describe tickets in the lifecycle vocabulary" do
       for name <-
-            ~w(task_show task_list task_ready task_promote task_demote task_create task_verify) do
+            ~w(ticket_show ticket_list ticket_ready ticket_promote ticket_demote ticket_create ticket_verify) do
         tool = Enum.find(Catalog.all(), &(&1.name == name))
         text = tool.description <> inspect(tool.input_schema)
 
@@ -180,7 +180,7 @@ defmodule Arbiter.MCP.TaskLifecycleVocabularyTest do
         refute text =~ ~r/parks? at `awaiting_verification`/, "#{name} still parks at a status"
       end
 
-      for name <- ~w(task_show task_list task_ready) do
+      for name <- ~w(ticket_show ticket_list ticket_ready) do
         %{description: description} = Enum.find(Catalog.all(), &(&1.name == name))
         assert description =~ "column", "#{name} does not name the column"
         assert description =~ "attention", "#{name} does not name attention"

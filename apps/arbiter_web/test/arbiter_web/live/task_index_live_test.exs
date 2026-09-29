@@ -154,7 +154,7 @@ defmodule ArbiterWeb.TaskIndexLiveTest do
       assert html =~ "/tasks/new"
 
       {:ok, _new_view, new_html} = live(conn, ~p"/tasks/new")
-      assert new_html =~ "Create an issue"
+      assert new_html =~ "Create a ticket"
     end
   end
 

@@ -25,7 +25,7 @@ defmodule ArbiterWeb.NavTest do
              ]
 
       assert Enum.map(work.items, &{&1.label, &1.href}) == [
-               {"Issues", "/tasks"},
+               {"Tickets", "/tasks"},
                {"Epics", "/epics"},
                {"Merge queues", "/merge_queue"}
              ]

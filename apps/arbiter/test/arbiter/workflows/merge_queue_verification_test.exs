@@ -144,7 +144,7 @@ defmodule Arbiter.Workflows.MergeQueueVerificationTest do
       # It must say whether the running server predates the merge. The test VM
       # booted before this merge, so it must call for a restart first.
       assert escalation.body =~ "booted before"
-      assert escalation.body =~ "arb issue verify #{task.id}"
+      assert escalation.body =~ "arb ticket verify #{task.id}"
     end
   end
 

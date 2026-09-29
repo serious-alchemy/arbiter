@@ -60,13 +60,13 @@ defmodule ArbiterCli.Cmd.IssueTest do
     test "no subcommand errors with a usage hint" do
       {_out, err, code} = capture(fn -> Issue.run([]) end)
       assert code == 1
-      assert err =~ "issue requires a subcommand"
+      assert err =~ "ticket requires a subcommand"
     end
 
     test "unknown subcommand errors" do
       {_out, err, code} = capture(fn -> Issue.run(["frobnicate"]) end)
       assert code == 1
-      assert err =~ "unknown issue subcommand"
+      assert err =~ "unknown ticket subcommand"
     end
   end
 end

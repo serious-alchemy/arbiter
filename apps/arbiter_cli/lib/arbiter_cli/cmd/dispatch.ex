@@ -72,7 +72,7 @@ defmodule ArbiterCli.Cmd.Dispatch do
         case rest do
           [id] -> {id, nil}
           [id, repo] -> {id, repo}
-          [] -> Output.die("dispatch requires an issue id (e.g. `arb dispatch bd-abc123`)")
+          [] -> Output.die("dispatch requires a ticket id (e.g. `arb dispatch bd-abc123`)")
           _ -> Output.die("dispatch takes at most two positional arguments: <task-id> [<repo>]")
         end
 
@@ -119,7 +119,7 @@ defmodule ArbiterCli.Cmd.Dispatch do
     machine = payload["machine"] || %{}
 
     IO.puts("Dispatch:")
-    IO.puts("  Issue:     #{task["id"]} — #{task["title"]}")
+    IO.puts("  Ticket:    #{task["id"]} — #{task["title"]}")
     IO.puts("  Status:   #{task["status"]}")
     IO.puts("  Worker:  #{worker["pid"]}")
     IO.puts("  Machine:  #{machine["id"]} #{machine["pid"]}")

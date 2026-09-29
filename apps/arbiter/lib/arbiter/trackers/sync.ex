@@ -125,7 +125,7 @@ defmodule Arbiter.Trackers.Sync do
   # in its pre-review status for the life of that PR. Both columns are
   # durable (not an ETS/process cache), so idempotency survives a server
   # restart, and both are cleared by `reopen` alongside `pr_ref` so a
-  # genuinely new PR after `task_reopen` still gets its own comment and
+  # genuinely new PR after `ticket_reopen` still gets its own comment and
   # transition.
   defp do_pr_opened(issue, opts) do
     unless already_transitioned?(issue, opts) do

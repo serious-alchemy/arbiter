@@ -162,12 +162,12 @@ defmodule ArbiterWeb.WorkspaceConfigScreenTest do
       ws = new_workspace()
       {:ok, view, html} = live_workspace(conn, ws.id)
 
-      assert html =~ "Auto-dispatch ready issues"
-      assert has_element?(view, ~s([data-setting-row="Auto-dispatch ready issues"]))
+      assert html =~ "Auto-dispatch ready tickets"
+      assert has_element?(view, ~s([data-setting-row="Auto-dispatch ready tickets"]))
 
       [consequence] =
         Regex.run(
-          ~r/data-setting-row="Auto-dispatch ready issues".*?data-consequence="([^"]*)"/s,
+          ~r/data-setting-row="Auto-dispatch ready tickets".*?data-consequence="([^"]*)"/s,
           html,
           capture: :all_but_first
         )
@@ -248,7 +248,7 @@ defmodule ArbiterWeb.WorkspaceConfigScreenTest do
   end
 
   describe "the auto-dispatch switch" do
-    @switch ~s(button[role="switch"][aria-label="Auto-dispatch ready issues"])
+    @switch ~s(button[role="switch"][aria-label="Auto-dispatch ready tickets"])
 
     # The autopilot is one process for the whole VM and ships paused in test.
     # These tests move it, so put it back however they leave it.

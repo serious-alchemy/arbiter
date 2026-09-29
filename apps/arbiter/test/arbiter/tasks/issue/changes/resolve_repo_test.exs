@@ -2,8 +2,8 @@ defmodule Arbiter.Tasks.Issue.Changes.ResolveRepoTest do
   @moduledoc """
   bd-9dwbvt: every issue-creation path funnels through `Ash.create(Issue, …)`,
   so the `:create` action is where the repo requirement is enforced. These are
-  the action-level tests; the per-path tests (MCP `task_create`, the REST
-  create `arb issue create` posts to, claim/sync, the dashboard form) live
+  the action-level tests; the per-path tests (MCP `ticket_create`, the REST
+  create `arb ticket create` posts to, claim/sync, the dashboard form) live
   with their own modules.
   """
   use Arbiter.DataCase, async: false

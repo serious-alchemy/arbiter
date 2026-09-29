@@ -545,7 +545,7 @@ defmodule ArbiterCli.Cmd.Prime do
     if sections.verifying != [] do
       IO.puts(
         "  → restart the server, observe each, then: " <>
-          ~s(arb issue verify <id> --observed "<evidence>")
+          ~s(arb ticket verify <id> --observed "<evidence>")
       )
 
       IO.puts("")

@@ -23,7 +23,7 @@ defmodule ArbiterWeb.PostMergeVerificationSocketTest do
   applies migration `20260913120000`), is the 5-step protocol written out in
   `bd-9so315`'s notes: flag a trivial live task, merge it, confirm it parks at
   `awaiting_verification` with one escalation and an age in `arb prime`, close
-  it with `arb issue verify <id> --observed "…"`, and record the observation on
+  it with `arb ticket verify <id> --observed "…"`, and record the observation on
   the task. That observation IS criterion 6; nothing here replaces it.
 
   ## What this test does cover
@@ -33,7 +33,7 @@ defmodule ArbiterWeb.PostMergeVerificationSocketTest do
   across it:
 
     1. a `verify_after_deploy` task is created by `POST /api/issues` over TCP —
-       the exact wire request `arb issue create --verify-after-deploy` sends;
+       the exact wire request `arb ticket create --verify-after-deploy` sends;
     2. the real `Arbiter.Workflows.MergeQueue` GenServer merges its PR;
     3. `GET /api/issues/:id` over TCP reports `awaiting_verification`, and the
        coordinator has exactly one escalation naming the boot-vs-merge question;
@@ -142,7 +142,7 @@ defmodule ArbiterWeb.PostMergeVerificationSocketTest do
     # The VM serving this socket booted before the merge, so the notification
     # must say a restart is required before the observation counts.
     assert escalation.body =~ "booted before"
-    assert escalation.body =~ "arb issue verify #{id}"
+    assert escalation.body =~ "arb ticket verify #{id}"
     log("coordinator inbox: 1 escalation — #{escalation.subject}")
     log("escalation body:\n" <> indent(escalation.body))
 
@@ -153,7 +153,7 @@ defmodule ArbiterWeb.PostMergeVerificationSocketTest do
         "POST /api/issues/:id/verify on #{base}"
 
     # The exact body ArbiterCli.Cmd.Verify puts on the wire for
-    # `arb issue verify <id> --observed "<evidence>"`.
+    # `arb ticket verify <id> --observed "<evidence>"`.
     verified =
       request!(:post, base <> "/api/issues/" <> id <> "/verify", %{
         "outcome" => "observed",

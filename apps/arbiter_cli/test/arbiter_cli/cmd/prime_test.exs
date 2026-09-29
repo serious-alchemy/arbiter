@@ -175,7 +175,7 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       assert out =~ ~r/bd-merge .*step=waiting_ci.*#12/
       assert out =~ ~r/bd-blocked .*waiting on bd-prog, bd-merge/
       assert out =~ ~r/bd-verify .*2h ago/
-      assert out =~ "arb issue verify <id>"
+      assert out =~ "arb ticket verify <id>"
       assert :binary.match(out, "bd-ready1") < :binary.match(out, "bd-ready2")
     end
 

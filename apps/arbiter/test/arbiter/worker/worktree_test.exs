@@ -388,7 +388,7 @@ defmodule Arbiter.Worker.WorktreeTest do
     end
 
     # bd-8ssxap: `:await_verification` runs `CleanupWorktree` the moment a PR
-    # merges — well before a `task_verify failed` reopen can redispatch. So by
+    # merges — well before a `ticket_verify failed` reopen can redispatch. So by
     # the time a redispatch runs, there is no live worktree directory to reset
     # at all: only the branch ref survives (its worktree was torn down, but
     # `Worktree.cleanup/1` deliberately does not delete the branch itself).

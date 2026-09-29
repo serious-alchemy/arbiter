@@ -1,6 +1,6 @@
 defmodule ArbiterCli.Cmd.Rank do
   @moduledoc """
-  `arb issue rank <id> --top | --bottom | --before <id> | --after <id>` —
+  `arb ticket rank <id> --top | --bottom | --before <id> | --after <id>` —
   reorder a ticket inside its workspace's rank order (bd-djapyj): the space
   `board/scheduler.ex` and Autopilot dispatch read (priority, then rank,
   then age).
@@ -44,8 +44,8 @@ defmodule ArbiterCli.Cmd.Rank do
   defp parse_id(rest) do
     case rest do
       [id] -> id
-      [] -> Output.die("rank requires an issue id")
-      _ -> Output.die("rank takes exactly one positional argument: the issue id")
+      [] -> Output.die("rank requires a ticket id")
+      _ -> Output.die("rank takes exactly one positional argument: the ticket id")
     end
   end
 

@@ -196,7 +196,7 @@ defmodule Arbiter.Tasks.Issue do
       # default only — a child of a tracker-linked parent defaults from the
       # parent's linkage instead of minting its own ticket (see
       # `InheritTrackerType`). The caller still attaches the `parent_of` edge
-      # itself (`task_create`, `POST /api/dependencies`).
+      # itself (`ticket_create`, `POST /api/dependencies`).
       argument :parent_id, :string, allow_nil?: true
 
       # #1973: overrides the workspace's `tracker.child_policy` for this create.
@@ -289,7 +289,7 @@ defmodule Arbiter.Tasks.Issue do
       # `source_pr` is deliberately NOT in `accept` above: it's the PR-dedup
       # linkage PRPatrol/ExternalReview set at :create time (and :reopen clears
       # it), and no legitimate caller of :update ever needs to touch it. A
-      # generic partial-update path (e.g. `task_update`, which has no
+      # generic partial-update path (e.g. `ticket_update`, which has no
       # `source_pr` parameter at all) must never be able to null it out from
       # under PRPatrol's `deduped?/2` check — see bd-ag9pq3.
 
@@ -462,8 +462,8 @@ defmodule Arbiter.Tasks.Issue do
     # space `board/scheduler.ex` and `board/autopilot.ex` read (priority,
     # then rank, then age). `rank` is deliberately not in `:update`'s
     # accept list (see above); this is its one door in, alongside the CLI
-    # (`arb issue rank`), the API (`PATCH /api/issues/:id/rank`), and the MCP
-    # `task_rank` tool. bd-79w1fs's drag-to-rank should call this action too
+    # (`arb ticket rank`), the API (`PATCH /api/issues/:id/rank`), and the MCP
+    # `ticket_rank` tool. bd-79w1fs's drag-to-rank should call this action too
     # rather than writing `rank` directly.
     #
     # Exactly one of `position: :top`, `position: :bottom`, `before_id`, or
@@ -653,7 +653,7 @@ defmodule Arbiter.Tasks.Issue do
     # same reason `:close` is: promotion is a decision with a name, and a
     # named action is what the paper_trail version row records. It also keeps
     # the flag one-way through a single door — no generic partial-update path
-    # (`task_update`, the REST patch, the edit form) can flip a card into the
+    # (`ticket_update`, the REST patch, the edit form) can flip a card into the
     # dispatch queue as a side effect of renaming it.
     #
     # No status change, no tracker sync, no worker: the ticket is explicit
@@ -662,7 +662,7 @@ defmodule Arbiter.Tasks.Issue do
     #
     # bd-842qio: this is the legacy door onto the `promote` transition
     # (backlog → queued), kept for the surfaces that call it by this name
-    # (`arb promote`, MCP `task_promote`, the task page) until bd-6fkgvo moves
+    # (`arb promote`, MCP `ticket_promote`, the task page) until bd-6fkgvo moves
     # them. It keeps its promise of idempotency: a ticket anywhere but
     # `:backlog` is left exactly as it is instead of refused.
     update :promote_to_ready do
@@ -1233,7 +1233,7 @@ defmodule Arbiter.Tasks.Issue do
       it lives here as a plain flag rather than as a fourth state.
 
       Deliberately absent from `:create`'s accept list — every creation path
-      (`arb create`, `task_create`, the REST API, tracker sync, the dashboard
+      (`arb create`, `ticket_create`, the REST API, tracker sync, the dashboard
       form) lands in Backlog, and the only way out is the `:promote_to_ready`
       action behind the task detail page's "Move to Ready" button.
 
@@ -1453,7 +1453,7 @@ defmodule Arbiter.Tasks.Issue do
       same PR — a ReviewGate implementation round, a `worker_resume`, or a
       re-open of an already-linked PR — and both the status transition and the
       comment/remote-link are skipped. Cleared implicitly by `reopen` clearing
-      `pr_ref`, so a new PR after `task_reopen` gets its own comment even
+      `pr_ref`, so a new PR after `ticket_reopen` gets its own comment even
       though the ticket itself is unchanged. Durable (not an ETS/process
       cache) so idempotency survives a server restart.
       """
@@ -1560,9 +1560,9 @@ defmodule Arbiter.Tasks.Issue do
       2026-09-13 follow-up-rate investigation): merged, auto-closed, and
       discovered broken ~8 hours later.
 
-      Settable by the coordinator (`task_create` / `task_update`, `arb issue
+      Settable by the coordinator (`ticket_create` / `ticket_update`, `arb ticket
       create/update --verify-after-deploy`) and by a worker on its own task
-      (`task_update_progress`) once it can see that its diff touches such a
+      (`ticket_update_progress`) once it can see that its diff touches such a
       path.
       """
     end
@@ -2134,7 +2134,7 @@ defmodule Arbiter.Tasks.Issue do
   Ready/Blocked split reads. Epics (`non_dispatchable_types/0`) are excluded
   up front: an epic is a rollup of children, never a unit of work.
 
-  This is the read behind the `task_ready` MCP tool, `GET /api/issues/ready`,
+  This is the read behind the `ticket_ready` MCP tool, `GET /api/issues/ready`,
   `arb ready` and `arb prime`'s "Ready issues". It passes no runs to the
   projection: a `:queued` ticket whose run registered before dispatch's
   `start` transition landed still reads as ready here, for that window.

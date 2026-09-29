@@ -24,8 +24,8 @@ defmodule ArbiterCli.Cmd.Close do
       id =
         case rest do
           [id] -> id
-          [] -> Output.die("close requires an issue id")
-          _ -> Output.die("close takes exactly one positional argument: the issue id")
+          [] -> Output.die("close requires a ticket id")
+          _ -> Output.die("close takes exactly one positional argument: the ticket id")
         end
 
       close_upstream =

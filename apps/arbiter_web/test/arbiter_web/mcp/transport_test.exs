@@ -63,7 +63,7 @@ defmodule ArbiterWeb.MCP.TransportTest do
       list = rpc_post(ctx.token, rpc("tools/list", %{}, 2), session_id)
       list_body = json_response(list, 200)
       assert list_body["id"] == 2
-      assert "task_ready" in Enum.map(list_body["result"]["tools"], & &1["name"])
+      assert "ticket_ready" in Enum.map(list_body["result"]["tools"], & &1["name"])
 
       stream = close_stream(task, stream_pid)
       assert message_events(stream.resp_body) == []

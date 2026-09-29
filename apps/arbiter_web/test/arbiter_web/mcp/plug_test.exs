@@ -79,11 +79,36 @@ defmodule ArbiterWeb.MCP.PlugTest do
 
       names = json_response(conn, 200)["result"]["tools"] |> Enum.map(& &1["name"])
 
-      assert "task_update" in names
-      assert "task_promote" in names
+      assert "ticket_update" in names
+      assert "ticket_promote" in names
       refute "worker_dispatch" in names
-      refute "task_close" in names
-      assert Enum.sort(names) == Enum.sort(Arbiter.MCP.RefinePolicy.allowed())
+      refute "ticket_close" in names
+
+      {aliases, canonical} =
+        Enum.split_with(names, &Map.has_key?(Arbiter.MCP.Catalog.legacy_aliases(), &1))
+
+      assert Enum.sort(canonical) == Enum.sort(Arbiter.MCP.RefinePolicy.allowed())
+
+      # bd-4jojpw: the deprecated `task_*` names ride along exactly where their
+      # `ticket_*` target is allowed.
+      assert "task_update" in aliases
+      refute "task_close" in aliases
+    end
+
+    test "tools/call through a deprecated task_* alias reaches the ticket_* tool", ctx do
+      conn =
+        rpc(
+          ctx.conn,
+          ctx.refine_token,
+          req("tools/call", %{
+            "name" => "task_update",
+            "arguments" => %{"id" => ctx.child.id, "description" => "via the alias"}
+          })
+        )
+
+      assert %{"result" => result} = json_response(conn, 200)
+      refute result["isError"]
+      assert Ash.get!(Issue, ctx.child.id).description == "via the alias"
     end
 
     test "tools/call updates a descendant", ctx do
@@ -92,7 +117,7 @@ defmodule ArbiterWeb.MCP.PlugTest do
           ctx.conn,
           ctx.refine_token,
           req("tools/call", %{
-            "name" => "task_update",
+            "name" => "ticket_update",
             "arguments" => %{"id" => ctx.child.id, "description" => "over the wire"}
           })
         )
@@ -108,7 +133,7 @@ defmodule ArbiterWeb.MCP.PlugTest do
           ctx.conn,
           ctx.refine_token,
           req("tools/call", %{
-            "name" => "task_update",
+            "name" => "ticket_update",
             "arguments" => %{"id" => ctx.outsider.id, "title" => "hijacked"}
           })
         )
@@ -125,7 +150,7 @@ defmodule ArbiterWeb.MCP.PlugTest do
           ctx.conn,
           ctx.refine_token,
           req("tools/call", %{
-            "name" => "task_close",
+            "name" => "ticket_close",
             "arguments" => %{"id" => ctx.task.id}
           })
         )
@@ -210,15 +235,15 @@ defmodule ArbiterWeb.MCP.PlugTest do
       conn = rpc(ctx.conn, ctx.worker_token, req("tools/list"))
       names = json_response(conn, 200)["result"]["tools"] |> Enum.map(& &1["name"])
 
-      assert "task_show" in names
-      refute "task_ready" in names
+      assert "ticket_show" in names
+      refute "ticket_ready" in names
     end
 
     test "a coordinator sees coordinator-only tools", ctx do
       conn = rpc(ctx.conn, ctx.coordinator_token, req("tools/list"))
       names = json_response(conn, 200)["result"]["tools"] |> Enum.map(& &1["name"])
 
-      assert "task_ready" in names
+      assert "ticket_ready" in names
     end
 
     test "tools advertise an inputSchema (camelCase wire field)", ctx do
@@ -234,7 +259,7 @@ defmodule ArbiterWeb.MCP.PlugTest do
         rpc(
           ctx.conn,
           ctx.worker_token,
-          req("tools/call", %{"name" => "task_show", "arguments" => %{}})
+          req("tools/call", %{"name" => "ticket_show", "arguments" => %{}})
         )
 
       result = json_response(conn, 200)["result"]
@@ -248,7 +273,7 @@ defmodule ArbiterWeb.MCP.PlugTest do
         rpc(
           ctx.conn,
           ctx.worker_token,
-          req("tools/call", %{"name" => "task_ready", "arguments" => %{}})
+          req("tools/call", %{"name" => "ticket_ready", "arguments" => %{}})
         )
 
       body = json_response(conn, 200)
@@ -261,7 +286,7 @@ defmodule ArbiterWeb.MCP.PlugTest do
         rpc(
           ctx.conn,
           ctx.coordinator_token,
-          req("tools/call", %{"name" => "task_show", "arguments" => %{"id" => "bd-nope"}})
+          req("tools/call", %{"name" => "ticket_show", "arguments" => %{"id" => "bd-nope"}})
         )
 
       result = json_response(conn, 200)["result"]
@@ -281,7 +306,7 @@ defmodule ArbiterWeb.MCP.PlugTest do
           ctx.conn,
           ctx.coordinator_token,
           req("tools/call", %{
-            "name" => "task_create",
+            "name" => "ticket_create",
             "arguments" => %{"title" => "via mcp", "priority" => 1}
           })
         )
@@ -298,7 +323,7 @@ defmodule ArbiterWeb.MCP.PlugTest do
           ctx.conn,
           ctx.worker_token,
           req("tools/call", %{
-            "name" => "task_create",
+            "name" => "ticket_create",
             "arguments" => %{"title" => "nope"}
           })
         )
@@ -602,8 +627,8 @@ defmodule ArbiterWeb.MCP.PlugTest do
         |> post("/mcp", Jason.encode!(req("tools/list", %{}, 2)))
 
       names = json_response(conn, 200)["result"]["tools"] |> Enum.map(& &1["name"])
-      assert "task_ready" in names
-      assert "task_show" in names
+      assert "ticket_ready" in names
+      assert "ticket_show" in names
     end
   end
 end

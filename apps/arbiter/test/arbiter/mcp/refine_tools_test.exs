@@ -69,18 +69,18 @@ defmodule Arbiter.MCP.RefineToolsTest do
   defp reload!(%Issue{id: id}), do: Ash.get!(Issue, id)
 
   describe "reads are broad within the bound workspace" do
-    test "task_show reads an issue outside the subtree", ctx do
-      assert {:ok, %{id: id}} = call(ctx.refine, "task_show", %{"id" => ctx.unrelated.id})
+    test "ticket_show reads an issue outside the subtree", ctx do
+      assert {:ok, %{id: id}} = call(ctx.refine, "ticket_show", %{"id" => ctx.unrelated.id})
       assert id == ctx.unrelated.id
     end
 
-    test "task_show with no id defaults to the bound issue", ctx do
-      assert {:ok, %{id: id}} = call(ctx.refine, "task_show", %{})
+    test "ticket_show with no id defaults to the bound issue", ctx do
+      assert {:ok, %{id: id}} = call(ctx.refine, "ticket_show", %{})
       assert id == ctx.root.id
     end
 
-    test "task_list returns the workspace's issues", ctx do
-      assert {:ok, %{tasks: tasks}} = call(ctx.refine, "task_list", %{})
+    test "ticket_list returns the workspace's issues", ctx do
+      assert {:ok, %{tasks: tasks}} = call(ctx.refine, "ticket_list", %{})
       ids = Enum.map(tasks, & &1.id)
 
       assert ctx.root.id in ids
@@ -91,15 +91,15 @@ defmodule Arbiter.MCP.RefineToolsTest do
       {:ok, other_ws} = Ash.create(Workspace, %{name: "refine-other-ws", prefix: "rfo"})
       {:ok, stranger} = Ash.create(Issue, %{title: "stranger", workspace_id: other_ws.id})
 
-      assert {:tool_error, message} = call(ctx.refine, "task_show", %{"id" => stranger.id})
+      assert {:tool_error, message} = call(ctx.refine, "ticket_show", %{"id" => stranger.id})
       assert message =~ "not found"
     end
   end
 
-  describe "task_update — subtree only" do
+  describe "ticket_update — subtree only" do
     test "succeeds on the bound issue", ctx do
       assert {:ok, _} =
-               call(ctx.refine, "task_update", %{
+               call(ctx.refine, "ticket_update", %{
                  "id" => ctx.root.id,
                  "description" => "sharpened"
                })
@@ -109,7 +109,7 @@ defmodule Arbiter.MCP.RefineToolsTest do
 
     test "succeeds on a parent_of grandchild", ctx do
       assert {:ok, _} =
-               call(ctx.refine, "task_update", %{
+               call(ctx.refine, "ticket_update", %{
                  "id" => ctx.grandchild.id,
                  "title" => "renamed grandchild"
                })
@@ -120,7 +120,7 @@ defmodule Arbiter.MCP.RefineToolsTest do
     test "is refused on the bound issue's parent, a sibling and an unrelated issue", ctx do
       for target <- [ctx.grandparent, ctx.sibling, ctx.unrelated] do
         assert {:rpc_error, -32_003, message} =
-                 call(ctx.refine, "task_update", %{"id" => target.id, "title" => "nope"})
+                 call(ctx.refine, "ticket_update", %{"id" => target.id, "title" => "nope"})
 
         assert message =~ "subtree"
         assert reload!(target).title != "nope"
@@ -129,7 +129,7 @@ defmodule Arbiter.MCP.RefineToolsTest do
 
     test "refuses to change status even inside the subtree", ctx do
       assert {:rpc_error, -32_003, message} =
-               call(ctx.refine, "task_update", %{"id" => ctx.root.id, "status" => "closed"})
+               call(ctx.refine, "ticket_update", %{"id" => ctx.root.id, "status" => "closed"})
 
       assert message =~ "status"
       assert reload!(ctx.root).status == :open
@@ -137,7 +137,7 @@ defmodule Arbiter.MCP.RefineToolsTest do
 
     test "refuses a field outside the refine write set", ctx do
       assert {:rpc_error, -32_003, message} =
-               call(ctx.refine, "task_update", %{
+               call(ctx.refine, "ticket_update", %{
                  "id" => ctx.root.id,
                  "tracker_ref" => "someone/42"
                })
@@ -147,7 +147,7 @@ defmodule Arbiter.MCP.RefineToolsTest do
 
     test "accepts the documented refine field set", ctx do
       assert {:ok, _} =
-               call(ctx.refine, "task_update", %{
+               call(ctx.refine, "ticket_update", %{
                  "id" => ctx.root.id,
                  "title" => "t",
                  "description" => "d",
@@ -167,10 +167,10 @@ defmodule Arbiter.MCP.RefineToolsTest do
     end
   end
 
-  describe "task_update_progress — subtree only" do
+  describe "ticket_update_progress — subtree only" do
     test "records notes on a descendant", ctx do
       assert {:ok, _} =
-               call(ctx.refine, "task_update_progress", %{
+               call(ctx.refine, "ticket_update_progress", %{
                  "id" => ctx.child.id,
                  "notes" => "refined during session"
                })
@@ -180,7 +180,7 @@ defmodule Arbiter.MCP.RefineToolsTest do
 
     test "is refused outside the subtree", ctx do
       assert {:rpc_error, -32_003, message} =
-               call(ctx.refine, "task_update_progress", %{
+               call(ctx.refine, "ticket_update_progress", %{
                  "id" => ctx.sibling.id,
                  "notes" => "nope"
                })
@@ -239,10 +239,10 @@ defmodule Arbiter.MCP.RefineToolsTest do
 
       # …and the escalation the adoption would have unlocked is still refused.
       assert {:rpc_error, -32_003, _} =
-               call(ctx.refine, "task_update", %{"id" => ctx.sibling.id, "title" => "hijacked"})
+               call(ctx.refine, "ticket_update", %{"id" => ctx.sibling.id, "title" => "hijacked"})
 
       assert {:rpc_error, -32_003, _} =
-               call(ctx.refine, "task_promote", %{"id" => ctx.sibling.id})
+               call(ctx.refine, "ticket_promote", %{"id" => ctx.sibling.id})
 
       assert reload!(ctx.sibling).title == "sibling"
       refute reload!(ctx.sibling).refined
@@ -311,9 +311,9 @@ defmodule Arbiter.MCP.RefineToolsTest do
     end
   end
 
-  describe "task_create — always inside the subtree" do
+  describe "ticket_create — always inside the subtree" do
     test "lands in Backlog as a parent_of child of the bound issue", ctx do
-      assert {:ok, %{id: new_id}} = call(ctx.refine, "task_create", %{"title" => "a new child"})
+      assert {:ok, %{id: new_id}} = call(ctx.refine, "ticket_create", %{"title" => "a new child"})
 
       created = Ash.get!(Issue, new_id)
       refute created.refined
@@ -325,7 +325,7 @@ defmodule Arbiter.MCP.RefineToolsTest do
 
     test "attaches to a named descendant instead of the bound issue", ctx do
       assert {:ok, %{id: new_id}} =
-               call(ctx.refine, "task_create", %{
+               call(ctx.refine, "ticket_create", %{
                  "title" => "grandchild's child",
                  "parent_id" => ctx.grandchild.id
                })
@@ -335,7 +335,7 @@ defmodule Arbiter.MCP.RefineToolsTest do
     end
 
     test "the response reports the parent it attached to", ctx do
-      assert {:ok, result} = call(ctx.refine, "task_create", %{"title" => "reported"})
+      assert {:ok, result} = call(ctx.refine, "ticket_create", %{"title" => "reported"})
       assert result.parent_id == ctx.root.id
     end
 
@@ -343,7 +343,7 @@ defmodule Arbiter.MCP.RefineToolsTest do
       before = Issue |> Ash.Query.filter(workspace_id == ^ctx.ws.id) |> Ash.read!() |> length()
 
       assert {:rpc_error, -32_003, message} =
-               call(ctx.refine, "task_create", %{
+               call(ctx.refine, "ticket_create", %{
                  "title" => "smuggled",
                  "parent_id" => ctx.sibling.id
                })
@@ -362,7 +362,7 @@ defmodule Arbiter.MCP.RefineToolsTest do
             {"target_branch", "release"},
             {"auto_close", true}
           ] do
-        result = call(ctx.refine, "task_create", %{"title" => "shaped", field => value})
+        result = call(ctx.refine, "ticket_create", %{"title" => "shaped", field => value})
 
         assert {:rpc_error, -32_003, message} = result
         assert message =~ field
@@ -414,17 +414,17 @@ defmodule Arbiter.MCP.RefineToolsTest do
       {:ok, other_ws} = Ash.create(Workspace, %{name: "refine-create-other", prefix: "rco"})
 
       assert {:rpc_error, -32_003, _} =
-               call(ctx.refine, "task_create", %{
+               call(ctx.refine, "ticket_create", %{
                  "title" => "elsewhere",
                  "workspace" => other_ws.id
                })
     end
   end
 
-  describe "task_promote — subtree only, acceptance still required" do
+  describe "ticket_promote — subtree only, acceptance still required" do
     test "promotes the bound issue and a grandchild", ctx do
-      assert {:ok, _} = call(ctx.refine, "task_promote", %{"id" => ctx.root.id})
-      assert {:ok, _} = call(ctx.refine, "task_promote", %{"id" => ctx.grandchild.id})
+      assert {:ok, _} = call(ctx.refine, "ticket_promote", %{"id" => ctx.root.id})
+      assert {:ok, _} = call(ctx.refine, "ticket_promote", %{"id" => ctx.grandchild.id})
 
       assert reload!(ctx.root).refined
       assert reload!(ctx.grandchild).refined
@@ -432,7 +432,7 @@ defmodule Arbiter.MCP.RefineToolsTest do
 
     test "is refused outside the subtree", ctx do
       assert {:rpc_error, -32_003, message} =
-               call(ctx.refine, "task_promote", %{"id" => ctx.sibling.id})
+               call(ctx.refine, "ticket_promote", %{"id" => ctx.sibling.id})
 
       assert message =~ "subtree"
       refute reload!(ctx.sibling).refined
@@ -440,22 +440,22 @@ defmodule Arbiter.MCP.RefineToolsTest do
 
     test "still refuses a gated type with no acceptance (bd-7mbrlg)", ctx do
       assert {:ok, %{id: new_id}} =
-               call(ctx.refine, "task_create", %{"title" => "no ACs", "issue_type" => "feature"})
+               call(ctx.refine, "ticket_create", %{"title" => "no ACs", "issue_type" => "feature"})
 
-      assert {:tool_error, message} = call(ctx.refine, "task_promote", %{"id" => new_id})
+      assert {:tool_error, message} = call(ctx.refine, "ticket_promote", %{"id" => new_id})
       assert message =~ "acceptance"
       refute Ash.get!(Issue, new_id).refined
     end
 
     test "the response spells out edges-before-promote", ctx do
-      assert {:ok, result} = call(ctx.refine, "task_promote", %{"id" => ctx.root.id})
+      assert {:ok, result} = call(ctx.refine, "ticket_promote", %{"id" => ctx.root.id})
 
       assert is_binary(result.promotion_note)
       assert result.promotion_note =~ "edge"
     end
 
     test "the catalog description documents edges-before-promote" do
-      %{description: description} = Enum.find(Catalog.all(), &(&1.name == "task_promote"))
+      %{description: description} = Enum.find(Catalog.all(), &(&1.name == "ticket_promote"))
 
       assert description =~ "edge"
     end

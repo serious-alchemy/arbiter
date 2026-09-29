@@ -1,6 +1,6 @@
 defmodule ArbiterCli.Cmd.Promote do
   @moduledoc """
-  `arb issue promote <id> [--waive REASON]` — promote a task from Backlog to Ready.
+  `arb ticket promote <id> [--waive REASON]` — promote a task from Backlog to Ready.
 
   Wraps `POST /api/issues/:id/promote`, which runs the `:promote_to_ready` action:
   it sets `refined: true`, moving the task from Backlog to Ready. Idempotent —
@@ -39,8 +39,8 @@ defmodule ArbiterCli.Cmd.Promote do
   defp parse_id(rest) do
     case rest do
       [id] -> id
-      [] -> Output.die("promote requires an issue id")
-      _ -> Output.die("promote takes exactly one positional argument: the issue id")
+      [] -> Output.die("promote requires a ticket id")
+      _ -> Output.die("promote takes exactly one positional argument: the ticket id")
     end
   end
 

@@ -142,7 +142,7 @@ defmodule ArbiterWeb.Api.WorkerController do
          {:invalid_request,
           "no repos configured — add at least one repo to your workspace config " <>
             "(repo_paths) or application env (:arbiter, :repo_paths), " <>
-            "or pass a repo explicitly: `arb issue dispatch #{task_id} <repo>`",
+            "or pass a repo explicitly: `arb ticket dispatch #{task_id} <repo>`",
           %{task_id: task_id}}}
 
       {:error, {:repo_not_found, repo}} ->
@@ -155,7 +155,8 @@ defmodule ArbiterWeb.Api.WorkerController do
         {:error,
          {:invalid_request,
           "multiple repos available (#{Enum.join(repos, ", ")}) — specify one: " <>
-            "`arb issue dispatch #{task_id} <repo>`", %{task_id: task_id, available_repos: repos}}}
+            "`arb ticket dispatch #{task_id} <repo>`",
+          %{task_id: task_id, available_repos: repos}}}
 
       {:error, {:pending_migrations, count}} ->
         {:error,

@@ -213,7 +213,7 @@ defmodule ArbiterCli.Cmd.Worker do
       IO.puts("(no live run — showing the ticket's latest run)")
     end
 
-    IO.puts("Issue:       #{snap["task_id"]}")
+    IO.puts("Ticket:      #{snap["task_id"]}")
     IO.puts("Run:        #{RunLabel.label(snap)}")
 
     # A ReviewGate reviewer / implementer runs under its own `<ticket>#…` id.
@@ -312,7 +312,7 @@ defmodule ArbiterCli.Cmd.Worker do
   defp emit_log(data, :json), do: IO.puts(Jason.encode!(data))
 
   defp emit_log(data, :text) do
-    IO.puts("Issue:       #{data["task_id"]}")
+    IO.puts("Ticket:      #{data["task_id"]}")
     IO.puts("Run:        #{data["run_id"]}")
     IO.puts("Transcript: #{data["path"]}")
 
@@ -333,7 +333,7 @@ defmodule ArbiterCli.Cmd.Worker do
   defp emit_stop(payload, :json), do: IO.puts(Jason.encode!(payload))
 
   defp emit_stop(payload, :text) do
-    IO.puts("Stopped worker for issue #{payload["task_id"]}.")
+    IO.puts("Stopped worker for ticket #{payload["task_id"]}.")
   end
 
   defp emit_resume(payload, :json), do: IO.puts(Jason.encode!(payload))
@@ -344,7 +344,7 @@ defmodule ArbiterCli.Cmd.Worker do
     machine = payload["machine"] || %{}
 
     IO.puts("Resume:")
-    IO.puts("  Issue:    #{task["id"]} — #{task["title"]}")
+    IO.puts("  Ticket:   #{task["id"]} — #{task["title"]}")
     IO.puts("  Status:   #{task["status"]}")
     IO.puts("  Worker:   #{worker["pid"]}")
     IO.puts("  Machine:  #{machine["id"]} #{machine["pid"]}")
@@ -367,7 +367,7 @@ defmodule ArbiterCli.Cmd.Worker do
     worker = payload["worker"] || %{}
 
     IO.puts("Review worker spawned:")
-    IO.puts("  Issue:  #{task["id"]}")
+    IO.puts("  Ticket: #{task["id"]}")
     IO.puts("  Worker: #{worker["pid"]}")
 
     case payload["worktree_path"] do

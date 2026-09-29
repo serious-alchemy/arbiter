@@ -17,8 +17,8 @@ defmodule ArbiterCli.Cmd.Show do
 
       case rest do
         [id] -> show(id, mode)
-        [] -> Output.die("show requires an issue id (e.g. `arb show bd-abc123`)")
-        _ -> Output.die("show takes exactly one argument: the issue id")
+        [] -> Output.die("show requires a ticket id (e.g. `arb show bd-abc123`)")
+        _ -> Output.die("show takes exactly one argument: the ticket id")
       end
     end
   end

@@ -104,7 +104,7 @@ defmodule ArbiterWeb.RefineEntry do
       class={@class}
       phx-click="refine"
       phx-value-id={@issue_id}
-      title="Open an agent session bound to this issue and shape it into a dispatchable ticket"
+      title="Open an agent session bound to this ticket and shape it until it is ready to dispatch"
       {@rest}
     >
       <:icon><ArbiterWeb.CoreComponents.Core.icon name="hero-sparkles-mini" /></:icon>
@@ -113,16 +113,16 @@ defmodule ArbiterWeb.RefineEntry do
     """
   end
 
-  defp opened_message(true), do: "Reopened this issue's refine session in the dock."
-  defp opened_message(false), do: "Launched a refine session for this issue — see the dock."
+  defp opened_message(true), do: "Reopened this ticket's refine session in the dock."
+  defp opened_message(false), do: "Launched a refine session for this ticket — see the dock."
 
   defp describe(:not_refinable),
-    do: "That issue is no longer in Backlog, so there is nothing to refine."
+    do: "That ticket is no longer in Backlog, so there is nothing to refine."
 
   defp describe(:no_workspace),
-    do: "That issue belongs to no workspace, and a refine session has to be bound to one."
+    do: "That ticket belongs to no workspace, and a refine session has to be bound to one."
 
-  defp describe(:issue_not_found), do: "That issue no longer exists."
+  defp describe(:issue_not_found), do: "That ticket no longer exists."
 
   defp describe(%{__exception__: true} = error),
     do: "Could not open a refine session: #{Exception.message(error)}"

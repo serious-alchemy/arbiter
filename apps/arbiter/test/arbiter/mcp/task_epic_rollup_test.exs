@@ -1,6 +1,6 @@
 defmodule Arbiter.MCP.TaskEpicRollupTest do
   @moduledoc """
-  bd-18vl9q AC3: `task_show` carries the epic cost rollup for an `:epic`
+  bd-18vl9q AC3: `ticket_show` carries the epic cost rollup for an `:epic`
   issue, and `nil` for anything else — mirrors `task_estimate_test.exs`.
   """
 
@@ -23,7 +23,7 @@ defmodule Arbiter.MCP.TaskEpicRollupTest do
     ws
   end
 
-  test "task_show carries the epic cost rollup for an epic" do
+  test "ticket_show carries the epic cost rollup for an epic" do
     ws = workspace!()
 
     {:ok, epic} = Ash.create(Issue, %{title: "an epic", workspace_id: ws.id, issue_type: :epic})

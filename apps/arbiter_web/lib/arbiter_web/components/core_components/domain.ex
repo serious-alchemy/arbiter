@@ -31,7 +31,7 @@ defmodule ArbiterWeb.CoreComponents.Domain do
 
   ## Examples
 
-      <.stat_card label="Open issues" value={84} tone="live" />
+      <.stat_card label="Open tickets" value={84} tone="live" />
       <.stat_card label="Active workers" value={4} tone="info" note="2 slots free" />
       <.stat_card label="Workspaces" value={3} />
 
@@ -89,14 +89,14 @@ defmodule ArbiterWeb.CoreComponents.Domain do
 
       <ArbiterWeb.CoreComponents.Domain.index_header
         icon="hero-clipboard-document-list"
-        title="Issues"
+        title="Tickets"
         count={84}
-        subtitle="Every issue, filterable and paged. The dashboard shows only the current ones."
+        subtitle="Every ticket, filterable and paged. The dashboard shows only the current ones."
       >
         <:actions>
           <.live_badge live />
           <ArbiterWeb.CoreComponents.Core.button variant="primary" size="sm" key_hint="C">
-            New issue
+            New ticket
           </ArbiterWeb.CoreComponents.Core.button>
         </:actions>
       </ArbiterWeb.CoreComponents.Domain.index_header>
@@ -175,7 +175,7 @@ defmodule ArbiterWeb.CoreComponents.Domain do
   end
 
   @doc """
-  The unit of the board and of every dashboard issue list.
+  The unit of the board and of every dashboard ticket list.
 
   ## Examples
 

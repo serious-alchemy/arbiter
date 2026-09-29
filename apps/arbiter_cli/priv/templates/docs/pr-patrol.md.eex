@@ -3,7 +3,7 @@
 
 PR patrol watches for open PRs with unresolved review threads, a
 CHANGES_REQUESTED review, or a settled failing REQUIRED check (bd-ayetel) —
-and auto-files a follow-up issue (plus an idle worker shell) so they don't
+and auto-files a follow-up ticket (plus an idle worker shell) so they don't
 go stale. Optional/informational checks and checks still in progress never
 fire.
 
@@ -11,7 +11,7 @@ fire.
 
 When PR-patrol coverage is newly enabled for a workspace, its first pass
 walks every currently-open PR with unresolved threads — expect a burst of
-follow-up issues and idle shells the first time, not a slow trickle.
+follow-up tickets and idle shells the first time, not a slow trickle.
 
 ## Scope it to specific authors
 

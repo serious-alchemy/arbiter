@@ -53,7 +53,7 @@ The issue's framing is GT-era. Two corrections matter for the design:
   escript**, which talks to the Phoenix REST API at `http://127.0.0.1:4848`
   (`apps/arbiter_cli/lib/arbiter_cli/client.ex`, base URL + `ARB_HOST`). The
   work prompt literally instructs the agent to run `arb inbox <task>`,
-  `arb message <task> <text>`, and `arb issue update <task> --qa-notes …`
+  `arb message <task> <text>`, and `arb ticket update <task> --qa-notes …`
   (`apps/arbiter/lib/arbiter/worker/dispatch.ex`, `base_work_prompt/1`). The model
   constructs those argv strings and parses `--json`; the tool surface is
   discoverable only via `--help`. (`bd2` in this repo is just a test-seam prefix
@@ -71,7 +71,7 @@ An MCP server fixes the agent-facing half at both tiers:
   their mailbox, report progress, and write completion notes — from inside the
   agent loop, as typed tool calls instead of stringly-typed CLI guessing.
 - **Coordinator-scope clients** (operator tooling now; a future autonomous
-  coordinator agent later) get validated `task_create` / `worker_dispatch` /
+  coordinator agent later) get validated `ticket_create` / `worker_dispatch` /
   convoy mutations with structured returns instead of CLI argv.
 
 Because MCP is the write-once/use-across-agents abstraction, the tool
@@ -170,15 +170,15 @@ JSON. `R` = readable, `W` = writable.
 
 | Tool | Tier | R/W | Backs onto (Ash action / domain fn) |
 |---|---|---|---|
-| `task_show` | worker, coordinator | R | `Ash.get(Issue, id)` |
-| `task_list` | coordinator | R | `Ash.read(Issue)` + filters |
-| `task_ready` | coordinator | R | `Issue.ready/1` |
-| `task_update_progress` | worker (own task) | W | `Ash.update(issue, …, action: :update)` — notes / qa_notes / deployment_notes / pr_body / `verify_after_deploy` only |
-| `task_create` | coordinator | W | `Ash.create(Issue, …)` |
-| `task_update` | coordinator | W | `Ash.update(issue, …, action: :update)` (status/priority/…) |
-| `task_close` | coordinator | W | `Ash.update(issue, %{reason}, action: :close)` |
-| `task_reopen` | coordinator | W | `Ash.update(issue, …, action: :reopen)` |
-| `task_verify` | coordinator | W | `Arbiter.Tasks.Verification.record_outcome/3` — the post-merge restart-and-observe verdict (bd-9so315) |
+| `ticket_show` | worker, coordinator | R | `Ash.get(Issue, id)` |
+| `ticket_list` | coordinator | R | `Ash.read(Issue)` + filters |
+| `ticket_ready` | coordinator | R | `Issue.ready/1` |
+| `ticket_update_progress` | worker (own task) | W | `Ash.update(issue, …, action: :update)` — notes / qa_notes / deployment_notes / pr_body / `verify_after_deploy` only |
+| `ticket_create` | coordinator | W | `Ash.create(Issue, …)` |
+| `ticket_update` | coordinator | W | `Ash.update(issue, …, action: :update)` (status/priority/…) |
+| `ticket_close` | coordinator | W | `Ash.update(issue, %{reason}, action: :close)` |
+| `ticket_reopen` | coordinator | W | `Ash.update(issue, …, action: :reopen)` |
+| `ticket_verify` | coordinator | W | `Arbiter.Tasks.Verification.record_outcome/3` — the post-merge restart-and-observe verdict (bd-9so315) |
 | `dep_add` / `dep_remove` | coordinator | W | `Ash.create/destroy(Dependency)` |
 | `convoy_status` | worker (own), coordinator | R | `Ash.get(Convoy, id)` + calcs |
 | `convoy_list` / `convoy_create` / `convoy_add_member` / `convoy_close` | coordinator | R/W | `Convoy` actions / `ConvoyMembership.:add` |
@@ -216,10 +216,10 @@ Notes:
   posture stay behind `workspace_show`, which only ever returns the bound
   workspace.
 
-- **`task_update_progress` is the worker's only write.** It is a narrowed
+- **`ticket_update_progress` is the worker's only write.** It is a narrowed
   alias over `Issue.:update` that accepts *only* `notes`, `qa_notes`,
   `deployment_notes` for the worker's **own** bound task — the structured
-  replacement for today's `arb issue update <id> --qa-notes …` step the work
+  replacement for today's `arb ticket update <id> --qa-notes …` step the work
   prompt requires before `arb done`. A worker cannot flip status, reprioritize,
   or touch another task through it.
 - **`arb done` stays a stdout sentinel, not a tool.** Completion detection is a
@@ -263,7 +263,7 @@ is a design decision, not an oversight:
   tiers.
 - **Aggregate UX — `prime`.** A convenience command that bundles several reads
   into one human-oriented briefing. Reconstructable from the granular read tools
-  (`task_show`, `inbox_check`, `convoy_status`, `notify_list`, …), so it adds a
+  (`ticket_show`, `inbox_check`, `convoy_status`, `notify_list`, …), so it adds a
   second, divergent code path for no new capability. Agents compose the granular
   tools instead.
 
@@ -355,8 +355,8 @@ Two gates, not one:
    tool's `:tiers` list precisely so that a newly added tool cannot default into
    (or silently out of) the tier — a conformance test fails the build when a
    tool has no decision.
-2. **Data-level.** Every allowed *write* (`task_update`, `task_update_progress`,
-   `task_create`, `task_promote`, `dep_add`, `dep_remove`) must target the bound
+2. **Data-level.** Every allowed *write* (`ticket_update`, `ticket_update_progress`,
+   `ticket_create`, `ticket_promote`, `dep_add`, `dep_remove`) must target the bound
    issue or a descendant reachable from it by `parent_of`
    (`Arbiter.MCP.Tools.authorize_subtree/2`). Reads stay broad across the bound
    workspace, because refining an issue means reading its neighbours.
@@ -434,8 +434,8 @@ for the first cut:
 
 - **MCP supplements `arb` for workers; it does not yet replace it.** A worker
   still needs Bash for git, tests, and `arb done` (the stdout sentinel). We add
-  MCP tools for the structured ops (`task_show`, `inbox_check`,
-  `task_update_progress`, `message_send`) and **steer the generated `CLAUDE.md`
+  MCP tools for the structured ops (`ticket_show`, `inbox_check`,
+  `ticket_update_progress`, `message_send`) and **steer the generated `CLAUDE.md`
   / work prompt toward the tools** for those ops, while leaving `arb` available.
   We do not exclude Bash (it's load-bearing for the actual work).
 - **Re-evaluate replacing `arb` for coordinator-scope clients** once an
@@ -473,16 +473,16 @@ Each phase is independently shippable.
 ### Phase 1 — read tools, Claude Code, two tiers
 - `Arbiter.MCP` mounted on :4848 via Streamable HTTP (`anubis_mcp` or Plug).
 - `Arbiter.MCP.Scope` token mint (in `Dispatch`) + validate (plug); two tiers.
-- Read tools: `task_show`, `task_ready`, `convoy_status`, `inbox_check`,
-  `workspace_show`; plus the one narrowed write `task_update_progress`.
+- Read tools: `ticket_show`, `ticket_ready`, `convoy_status`, `inbox_check`,
+  `workspace_show`; plus the one narrowed write `ticket_update_progress`.
 - `Arbiter.MCP.AgentConfig` + Claude `.mcp.json` adapter, wired into the spawn.
 - Steer the generated `CLAUDE.md` toward the tools for those ops.
 - Exit criteria: a dispatched Claude worker reads its task and writes its
   completion notes via MCP tools; existing suite green; an out-of-scope call
-  (e.g. a worker token calling `task_list`) is rejected with a JSON-RPC error.
+  (e.g. a worker token calling `ticket_list`) is rejected with a JSON-RPC error.
 
 ### Phase 2 — mutating tools behind coordinator scope
-- `task_create` / `task_update` / `task_close` / `task_reopen` / `task_verify`, `dep_*`,
+- `ticket_create` / `ticket_update` / `ticket_close` / `ticket_reopen` / `ticket_verify`, `dep_*`,
   `convoy_*`, the `worker_*` lifecycle family (`worker_dispatch` /
   `worker_resume` / `worker_review` / `worker_stop` / `worker_list`),
   `message_send`, `notify_list`, the `tracker_*` bridge (`tracker_claim` /

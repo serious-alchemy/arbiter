@@ -44,7 +44,7 @@ defmodule Arbiter.Sessions.InstructionsTest do
         doc = render(can_dispatch: unquote(can_dispatch))
 
         # The response to a bug is a filed issue, named by the tool that files it.
-        assert doc =~ "task_create"
+        assert doc =~ "ticket_create"
         assert doc =~ ~r/file.{0,40}not.{0,40}fix|not to fix it|don't fix it|do not fix it/i
 
         # Investigating is wanted; patching is not (AC4).
@@ -59,7 +59,7 @@ defmodule Arbiter.Sessions.InstructionsTest do
     test "is placed early — ahead of the workspace and memory sections (AC1)" do
       doc = render()
 
-      delegation = index_of(doc, "task_create")
+      delegation = index_of(doc, "ticket_create")
       assert delegation < index_of(doc, "## Your workspace")
       assert delegation < index_of(doc, "## Memory")
     end
@@ -120,7 +120,7 @@ defmodule Arbiter.Sessions.InstructionsTest do
         assert doc =~ ~r/research/i
         # The two-way split: fork/subagent vs a durable task-type issue.
         assert doc =~ ~r/subagent|fork/i
-        assert doc =~ "task_update_progress"
+        assert doc =~ "ticket_update_progress"
         assert doc =~ "run_id"
 
         # The reason, which is what makes it stick (AC11).
@@ -254,8 +254,8 @@ defmodule Arbiter.Sessions.InstructionsTest do
 
     test "states the permission summary plainly (AC2)" do
       doc = render_refine()
-      assert doc =~ "task_create"
-      assert doc =~ "task_promote"
+      assert doc =~ "ticket_create"
+      assert doc =~ "ticket_promote"
       assert doc =~ ~r/never.{0,40}dispatch/is
     end
 

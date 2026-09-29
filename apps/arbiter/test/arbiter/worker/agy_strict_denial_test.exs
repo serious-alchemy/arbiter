@@ -136,7 +136,7 @@ defmodule Arbiter.Worker.AgyStrictDenialTest do
       assert prompt =~ "`echo probe > /tmp/agy-strict-probe.txt`"
       assert prompt =~ "Do NOT retry"
       assert prompt =~ "one command per"
-      assert prompt =~ "task_update_progress"
+      assert prompt =~ "ticket_update_progress"
       assert prompt =~ "arb done"
     end
 
