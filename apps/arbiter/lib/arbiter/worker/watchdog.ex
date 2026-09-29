@@ -297,6 +297,7 @@ defmodule Arbiter.Worker.Watchdog do
   require Logger
 
   alias Arbiter.Mergers
+  alias Arbiter.Mergers.LocalCompare
   alias Arbiter.Mergers.PendingMerge
   alias Arbiter.Reviews.Coverage
   alias Arbiter.Reviews.CoverageShadow
@@ -4673,7 +4674,7 @@ defmodule Arbiter.Worker.Watchdog do
   # is idempotent regardless). Best-effort: the merge decision is already made.
   defp record_content_equal_coverage(%{mr_base_ref: base} = state, head) do
     with {:ok, coverage} <- safe_coverage(state),
-         {:ok, diff} <- safe_get_diff(state, base, head) do
+         {:ok, [diff], _source} <- compare_diffs(state, base, [head]) do
       record_mechanical(
         state,
         Coverage.mechanical_for_diff(coverage, head, base, diff, :watchdog)
@@ -4752,22 +4753,71 @@ defmodule Arbiter.Worker.Watchdog do
   # every test double that predates the callback) supplies no probe at all,
   # which leaves rule 2 exactly as unreachable as it was — deliberately NOT the
   # same thing as a probe that fails, which is an `{:unknown, _}`.
+  #
+  # bd-wjpxok / #26: both probes fall back to local git in the task's checkout
+  # when the forge cannot answer (`coverage_diff/3`, `coverage_ancestry/3`), so
+  # a compare outage no longer reads as `diff_unavailable` /
+  # `ancestry_unavailable` while the local repo can still say. The fallback
+  # never widens rule 2's reach: an adapter with no probe still gets none.
   defp coverage_ctx(state) do
     ctx = %{
       local_head_sha: state.local_head_sha,
       base_ref: state.mr_base_ref,
-      fetch_diff: fn base, head -> safe_get_diff(state, base, head) end,
+      fetch_diff: fn base, head -> coverage_diff(state, base, head) end,
       source: :watchdog
     }
 
     if ancestry_probe?(state.adapter) do
       Map.put(ctx, :ancestor?, fn ancestor, descendant ->
-        safe_ancestor?(state, ancestor, descendant)
+        coverage_ancestry(state, ancestor, descendant)
       end)
     else
       ctx
     end
   end
+
+  defp coverage_diff(state, base, head) do
+    case compare_diffs(state, base, [head]) do
+      {:ok, [diff], source} ->
+        log_compare_path(state, "net diff #{base}...#{head}", source)
+        {:ok, diff}
+
+      {:error, reasons} ->
+        Logger.info(
+          "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} the compare API could " <>
+            "not serve the net diff #{base}...#{head} and local git could not answer either " <>
+            "(#{inspect_short(reasons)})"
+        )
+
+        {:error, reasons}
+    end
+  end
+
+  defp coverage_ancestry(state, ancestor, descendant) do
+    api = fn a, d -> safe_ancestor?(state, a, d) end
+
+    case LocalCompare.ancestry(api, local_repo(state), ancestor, descendant) do
+      {:ok, answer, source} ->
+        log_compare_path(state, "ancestry #{ancestor} -> #{descendant}", source)
+        {:ok, answer}
+
+      {:error, reasons} ->
+        {:error, reasons}
+    end
+  end
+
+  # AC5: which path answered. The forge is the normal case and stays at debug;
+  # a local-git answer is the outage case an operator will want to see.
+  defp log_compare_path(state, what, :api),
+    do: Logger.debug(fn -> compare_path_line(state, what, :api) end)
+
+  defp log_compare_path(state, what, source),
+    do: Logger.info(compare_path_line(state, what, source))
+
+  defp compare_path_line(state, what, source),
+    do:
+      "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} #{what} decided via " <>
+        "#{source}"
 
   defp ancestry_probe?(adapter),
     do: is_atom(adapter) and function_exported?(adapter, :ancestor?, 3)
@@ -4945,19 +4995,30 @@ defmodule Arbiter.Worker.Watchdog do
   # is true of a semantic-conflict fixup or any other authored change smuggled
   # into a merge commit.
   #
-  # Fails CLOSED: no base ref, an adapter error, or an empty/unreadable diff on
-  # either side all answer "not equivalent", which routes to a review round
-  # rather than to a merge.
+  # Fails CLOSED: no base ref, or an empty/unreadable diff on either side
+  # answers "not equivalent", which routes to a review round rather than to a
+  # merge. A compare the forge cannot serve is answered from local git in the
+  # task's checkout (bd-wjpxok / #26) — both sides from the same source, since
+  # a forge-rendered diff and a git-rendered one need not fingerprint alike —
+  # and only when neither can answer is it "could not compare".
   defp base_merge_only?(%{mr_base_ref: base} = state, reviewed, head)
        when is_binary(base) and base != "" and is_binary(reviewed) and is_binary(head) do
-    with {:ok, reviewed_diff} <- safe_get_diff(state, base, reviewed),
-         {:ok, head_diff} <- safe_get_diff(state, base, head) do
-      Mergers.NetDiff.equivalent?(reviewed_diff, head_diff)
-    else
-      other ->
+    case compare_diffs(state, base, [reviewed, head]) do
+      {:ok, [reviewed_diff, head_diff], source} ->
+        equal? = Mergers.NetDiff.equivalent?(reviewed_diff, head_diff)
+
+        Logger.info(
+          "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} net diff of head " <>
+            "#{head} vs reviewed #{reviewed} against #{base}: " <>
+            "#{if equal?, do: "identical", else: "different"} (decided via #{source})"
+        )
+
+        equal?
+
+      {:error, reasons} ->
         Logger.info(
           "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} could not compare the " <>
-            "reviewed and current net diffs (#{inspect_short(other)}); treating the head as " <>
+            "reviewed and current net diffs (#{inspect_short(reasons)}); treating the head as " <>
             "unreviewed"
         )
 
@@ -4982,6 +5043,19 @@ defmodule Arbiter.Worker.Watchdog do
   end
 
   defp empty_net_diff_at_merge?(_state, _head), do: false
+
+  # The merge guard's compare, adapter first and then local git in the task's
+  # checkout (bd-wjpxok / #26). One source for every head in the call.
+  defp compare_diffs(state, base, heads),
+    do:
+      LocalCompare.diffs(
+        fn b, h -> safe_get_diff(state, b, h) end,
+        local_repo(state),
+        base,
+        heads
+      )
+
+  defp local_repo(state), do: LocalCompare.repo_path(state.workspace, state.repo)
 
   defp safe_get_diff(%{adapter: adapter, mr_ref: mr_ref}, base, head) do
     case adapter.get_diff(mr_ref, %{base: base, head: head}) do
@@ -5020,9 +5094,14 @@ defmodule Arbiter.Worker.Watchdog do
   # shape. A refusal naming it DEFERS (bounded, re-fired by the pass's `:DOWN`,
   # parked + paged once at the bound) instead of paging `:resume_failed` and
   # stopping with the approved PR stranded.
+  #
+  # bd-wjpxok / #26 (AC4): either exit names the unreviewed delta — commits and
+  # files, from local git — in the log and, when it pages, in the page, so the
+  # coordinator does not have to reconstruct it by hand.
   defp resolve_stale_reviewed_head(state, reviewed, head) do
     snap = snapshot(state)
     attempts = max(awaiting_review_resume_attempts(snap), state.resume_attempts_seen)
+    delta = unreviewed_delta(state, reviewed, head)
 
     if state.max_auto_resumes > 0 and attempts < state.max_auto_resumes do
       # bd-741sid: no run to fail first — the implementer's ended when it
@@ -5040,16 +5119,42 @@ defmodule Arbiter.Worker.Watchdog do
         {:stop, state} -> {:stop, :normal, state}
       end
     else
-      escalate_auto_resume_give_up(
-        state,
-        snap,
-        attempts,
-        {:stale_reviewed_sha, reviewed, head}
-      )
+      escalate_auto_resume_give_up(state, snap, attempts, stale_reason(reviewed, head, delta))
 
       {:stop, :normal, state}
     end
   end
+
+  defp stale_reason(reviewed, head, nil), do: {:stale_reviewed_sha, reviewed, head}
+  defp stale_reason(reviewed, head, delta), do: {:stale_reviewed_sha, reviewed, head, delta}
+
+  # Best-effort and never raising: a delta that cannot be computed costs the
+  # page its detail, not the routing decision, which is already made.
+  defp unreviewed_delta(%{mr_base_ref: base} = state, reviewed, head)
+       when is_binary(base) and base != "" and is_binary(reviewed) and is_binary(head) do
+    case LocalCompare.delta(local_repo(state), base, reviewed, head) do
+      {:ok, delta} ->
+        Logger.warning(
+          "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} unreviewed delta " <>
+            "#{reviewed}..#{head} (via local_git): commits=#{inspect(delta.commits)} " <>
+            "files=#{inspect(delta.files)}"
+        )
+
+        delta
+
+      {:error, reason} ->
+        Logger.info(
+          "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} could not list the " <>
+            "unreviewed delta #{reviewed}..#{head} from local git (#{inspect_short(reason)})"
+        )
+
+        nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp unreviewed_delta(_state, _reviewed, _head), do: nil
 
   defp do_safe_merge(%{adapter: adapter, mr_ref: mr_ref}, expected_sha) do
     case adapter.merge(mr_ref, expected_sha) do

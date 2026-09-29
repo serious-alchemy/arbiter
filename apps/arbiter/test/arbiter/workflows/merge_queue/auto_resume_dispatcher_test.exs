@@ -61,6 +61,50 @@ defmodule Arbiter.Workflows.MergeQueue.AutoResumeDispatcherTest do
       refute msg.body =~ "NOT a fresh failure"
     end
 
+    # bd-wjpxok / #26 (AC4). The Watchdog's give-up on a head no review covers
+    # passes `{:stale_reviewed_sha, ...}`, which this module had no clause for:
+    # `subject/3` raised, the rescue swallowed it, and no page was ever posted.
+    test "an unreviewed head pages, naming the unreviewed commits and files", %{ws: ws} do
+      reviewed = String.duplicate("a", 40)
+      head = String.duplicate("b", 40)
+      delta = %{commits: ["8761529 test fix"], files: ["test/a_test.exs"]}
+
+      assert :ok =
+               AutoResumeDispatcher.escalate_exhausted(
+                 "vs-4v8cf0",
+                 ws.id,
+                 "!270",
+                 0,
+                 {:stale_reviewed_sha, reviewed, head, delta}
+               )
+
+      assert [msg] = escalations(ws)
+      assert msg.subject =~ "vs-4v8cf0"
+      assert msg.subject =~ "unreviewed"
+      assert msg.body =~ "!270"
+      assert msg.body =~ reviewed
+      assert msg.body =~ head
+      assert msg.body =~ "8761529 test fix"
+      assert msg.body =~ "test/a_test.exs"
+      assert msg.body =~ "not merged"
+    end
+
+    test "an unreviewed head with no local delta still pages", %{ws: ws} do
+      assert :ok =
+               AutoResumeDispatcher.escalate_exhausted(
+                 "bd-nodelta",
+                 ws.id,
+                 "!3",
+                 2,
+                 {:stale_reviewed_sha, "r1", "h1"}
+               )
+
+      assert [msg] = escalations(ws)
+      assert msg.subject =~ "unreviewed"
+      assert msg.body =~ "r1"
+      assert msg.body =~ "h1"
+    end
+
     test "a resume that could not run reads differently from a spent budget", %{ws: ws} do
       assert :ok =
                AutoResumeDispatcher.escalate_exhausted(
