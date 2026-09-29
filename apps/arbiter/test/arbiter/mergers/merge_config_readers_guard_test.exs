@@ -37,7 +37,8 @@ defmodule Arbiter.Mergers.MergeConfigReadersGuardTest do
       "merge tunables, read off the workspace scoped to the watched repo in init/1",
     "apps/arbiter/lib/arbiter/mcp/tools/workspace.ex" => "raw config display (overview)",
     "apps/arbiter_cli/lib/arbiter_cli/cmd/config/formatter.ex" => "raw config display",
-    "apps/arbiter_cli/lib/arbiter_cli/cmd/workspace.ex" => "workspace create seeds merge.strategy",
+    "apps/arbiter_cli/lib/arbiter_cli/cmd/workspace.ex" =>
+      "workspace create seeds merge.strategy",
     "apps/arbiter_web/lib/arbiter_web/live/workspace_index_live.ex" =>
       "shows / seeds the workspace-level strategy",
     "apps/arbiter_web/lib/arbiter_web/live/workspace_detail/policy_config_component.ex" =>
@@ -120,7 +121,10 @@ defmodule Arbiter.Mergers.MergeConfigReadersGuardTest do
   end
 
   test "every allowlisted file still exists and still matches (no stale entries)" do
-    for {allowed, regex} <- [{@raw_readers, @raw_reader}, {@workspace_resolvers, @workspace_resolver}],
+    for {allowed, regex} <- [
+          {@raw_readers, @raw_reader},
+          {@workspace_resolvers, @workspace_resolver}
+        ],
         file <- Map.keys(allowed) do
       path = Path.join(@umbrella, file)
       assert File.exists?(path), "#{file} is allowlisted but gone"

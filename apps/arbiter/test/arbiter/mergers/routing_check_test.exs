@@ -20,7 +20,11 @@ defmodule Arbiter.Mergers.RoutingCheckTest do
   end
 
   defp ws(merge, repo_paths),
-    do: %Workspace{id: "ws-rc", name: "default", config: %{"merge" => merge, "repo_paths" => repo_paths}}
+    do: %Workspace{
+      id: "ws-rc",
+      name: "default",
+      config: %{"merge" => merge, "repo_paths" => repo_paths}
+    }
 
   defp by_repo(entries), do: Map.new(entries, &{&1.repo, &1})
 
@@ -29,7 +33,10 @@ defmodule Arbiter.Mergers.RoutingCheckTest do
   } do
     workspace =
       ws(
-        %{"strategy" => "github", "config" => %{"owner" => "serious-alchemy", "repo" => "arbiter"}},
+        %{
+          "strategy" => "github",
+          "config" => %{"owner" => "serious-alchemy", "repo" => "arbiter"}
+        },
         %{
           "arbiter" => checkout(dir, "arbiter", "git@github.com:serious-alchemy/arbiter.git"),
           "mesaana" => checkout(dir, "mesaana", nil)
@@ -70,7 +77,10 @@ defmodule Arbiter.Mergers.RoutingCheckTest do
   } do
     workspace =
       ws(
-        %{"strategy" => "github", "config" => %{"owner" => "serious-alchemy", "repo" => "arbiter"}},
+        %{
+          "strategy" => "github",
+          "config" => %{"owner" => "serious-alchemy", "repo" => "arbiter"}
+        },
         %{"infra" => checkout(dir, "infra", "git@github.com:serious-alchemy/infra.git")}
       )
 
@@ -84,7 +94,10 @@ defmodule Arbiter.Mergers.RoutingCheckTest do
   test "owner/repo comparison ignores case", %{tmp_dir: dir} do
     workspace =
       ws(
-        %{"strategy" => "github", "config" => %{"owner" => "Serious-Alchemy", "repo" => "Arbiter"}},
+        %{
+          "strategy" => "github",
+          "config" => %{"owner" => "Serious-Alchemy", "repo" => "Arbiter"}
+        },
         %{"arbiter" => checkout(dir, "arbiter", "git@github.com:serious-alchemy/arbiter.git")}
       )
 

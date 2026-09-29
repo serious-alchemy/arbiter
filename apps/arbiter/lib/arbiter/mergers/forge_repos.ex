@@ -101,7 +101,14 @@ defmodule Arbiter.Mergers.ForgeRepos do
         strategy = Workspace.merger_strategy(%Workspace{config: %{"merge" => merge}})
 
         if Mergers.forge?(strategy),
-          do: [%{key: key, path: RepoConfig.repo_path_from_config(raw), merge: merge, strategy: strategy}],
+          do: [
+            %{
+              key: key,
+              path: RepoConfig.repo_path_from_config(raw),
+              merge: merge,
+              strategy: strategy
+            }
+          ],
           else: []
       end)
 

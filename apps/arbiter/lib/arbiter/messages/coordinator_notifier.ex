@@ -1502,8 +1502,11 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   # override decides it for that repo.
   defp auto_merge?(ws_id, task_id) when is_binary(ws_id) do
     case Ash.get(Workspace, ws_id) do
-      {:ok, workspace} -> Workspace.auto_merge?(Arbiter.Mergers.scope(workspace, task_repo(task_id)))
-      _ -> false
+      {:ok, workspace} ->
+        Workspace.auto_merge?(Arbiter.Mergers.scope(workspace, task_repo(task_id)))
+
+      _ ->
+        false
     end
   rescue
     _ -> false

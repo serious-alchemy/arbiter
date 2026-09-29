@@ -205,9 +205,11 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
     workspace = Map.get(args, :workspace) || maybe_load_workspace(task.workspace_id)
 
     branch = Map.get(args, :branch) || derive_branch(task)
+
     target_branch =
       Map.get(args, :target_branch) || Mergers.base_branch(workspace, Map.get(args, :repo)) ||
         "main"
+
     repo_path = Map.get(args, :repo_path) || resolve_repo_path(workspace, Map.get(args, :repo))
 
     cond do

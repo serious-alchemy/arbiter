@@ -201,6 +201,7 @@ defmodule ArbiterWeb.Api.ServerControllerTest do
       assert resp["decision"] == "explicit_off"
     end
   end
+
   # bd-73zv62: `arb server doctor` lists each repo's effective merge strategy and
   # flags a forge strategy on a checkout with no `origin` remote.
   describe "GET /api/server/merge_routing" do
@@ -239,7 +240,12 @@ defmodule ArbiterWeb.Api.ServerControllerTest do
              ] = mine
 
       assert flagged["fix"] =~ "merge.repos.mesaana.strategy direct"
-      assert Enum.any?(resp["problems"], &(&1["workspace_id"] == ws.id and &1["repo"] == "mesaana"))
+
+      assert Enum.any?(
+               resp["problems"],
+               &(&1["workspace_id"] == ws.id and &1["repo"] == "mesaana")
+             )
+
       refute Enum.any?(resp["problems"], &(&1["workspace_id"] == ws.id and &1["repo"] == "infra"))
     end
   end

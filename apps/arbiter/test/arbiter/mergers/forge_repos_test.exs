@@ -22,7 +22,11 @@ defmodule Arbiter.Mergers.ForgeReposTest do
   end
 
   defp ws(merge, repo_paths),
-    do: %Workspace{id: "ws-forge", name: "forge", config: %{"merge" => merge, "repo_paths" => repo_paths}}
+    do: %Workspace{
+      id: "ws-forge",
+      name: "forge",
+      config: %{"merge" => merge, "repo_paths" => repo_paths}
+    }
 
   describe "slugs/2" do
     test "a direct-override repo contributes nothing to a github workspace", %{tmp_dir: dir} do
@@ -37,7 +41,9 @@ defmodule Arbiter.Mergers.ForgeReposTest do
       assert ForgeRepos.slugs(ws(merge, paths)) == ["octo/arbiter"]
     end
 
-    test "a pinned workspace owner/repo is unchanged by a direct-override sibling", %{tmp_dir: dir} do
+    test "a pinned workspace owner/repo is unchanged by a direct-override sibling", %{
+      tmp_dir: dir
+    } do
       paths = %{"arbiter" => checkout(dir, "arbiter", nil), "mesaana" => checkout(dir, "m", nil)}
 
       merge = %{
@@ -77,7 +83,9 @@ defmodule Arbiter.Mergers.ForgeReposTest do
       merge = %{"strategy" => "github", "config" => %{"owner" => "o", "repo" => "r"}}
       assert ForgeRepos.slugs(ws(merge, %{})) == ["o/r"]
 
-      assert ForgeRepos.slugs(ws(%{"strategy" => "gitlab", "config" => %{"project_id" => 7}}, %{})) ==
+      assert ForgeRepos.slugs(
+               ws(%{"strategy" => "gitlab", "config" => %{"project_id" => 7}}, %{})
+             ) ==
                ["7"]
 
       assert ForgeRepos.slugs(ws(%{"strategy" => "direct"}, %{})) == []

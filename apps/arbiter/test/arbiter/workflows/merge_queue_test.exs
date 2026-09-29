@@ -2496,7 +2496,10 @@ defmodule Arbiter.Workflows.MergeQueueTest do
 
           conn
           |> Plug.Conn.put_status(201)
-          |> Req.Test.json(%{"number" => 7, "html_url" => "https://github.com/octo/widget/pull/7"})
+          |> Req.Test.json(%{
+            "number" => 7,
+            "html_url" => "https://github.com/octo/widget/pull/7"
+          })
         else
           conn |> Plug.Conn.put_status(404) |> Req.Test.json(%{"message" => "Not Found"})
         end
