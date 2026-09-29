@@ -154,7 +154,7 @@ workspace. The active workspace is **<%= @domain_name %>** (prefix `<%= @domain_
 - **Ticket** — a unit of work (formerly *issue*; `arb issue` and the
   `task_*` MCP tools remain as deprecated aliases for one release). Has an
   id like `<%= @domain_prefix %>-001` and
-  an `issue_type`: `task`, `bug`, `feature`, `chore`, `decision`, or `epic`.
+  an `issue_type`: `task`, `research`, `bug`, `feature`, `chore`, `decision`, or `epic`.
   See "Filing convention: issue_type signals whether a PR is expected" below
   — picking the right one isn't cosmetic.
 - **Epic** — a parent ticket grouping related tickets via `parent_of` edges;
@@ -205,11 +205,17 @@ reading the result later) whether a committed code change is expected:
 
 - **`bug` / `feature` / `chore`** — the worker is expected to make a change,
   commit it, and open a PR. ReviewGate engages on that PR before merge.
-- **`task`** — the generic type. Use it for anything that *isn't* expected
-  to end in a committed fix: research, investigation, tracing a bug to its
-  root cause, a spike, "read the code and report back." A `task` worker
-  should report findings via `ticket_update_progress` notes and close with no
-  diff and no PR.
+- **`research`** — no PR. Use it for an investigation whose output is
+  findings: tracing a bug to its root cause, a spike, "read the code and
+  report back." A `research` worker must report findings via
+  `ticket_update_progress` notes (a notes gate refuses completion without
+  them) and closes with no diff and no PR.
+- **`task`** — no PR. A plain operational action: a restart, a config flip —
+  no research, no code. A `task` worker completes when it reports the action
+  done, with a short outcome note via `ticket_update_progress`; no findings
+  are required.
+- Neither `research` nor `task` may be used for code work: both skip the
+  commit gate and ReviewGate.
 - **`decision`** — a choice to be made/documented, not implemented (compare
   a design-options writeup, not a code change).
 - **`epic`** — a parent ticket grouping children via `parent_of` edges; not
@@ -218,7 +224,7 @@ reading the result later) whether a committed code change is expected:
 **Why this matters beyond labeling:** ReviewGate only engages when a PR
 actually exists (see `docs/reviewgate.md`). File a pure research assignment
 as `bug` and a worker that (correctly) produces no diff can dead-end waiting
-on a review that has nothing to review. File it as `task` instead — it
+on a review that has nothing to review. File it as `research` instead — it
 completes cleanly with `pr_ref: nil` and no ReviewGate involvement at all,
 which is the *correct* outcome for that kind of work, not a shortcut around
 review.
@@ -258,7 +264,7 @@ rest of the session without leaving anything durable behind.
 - **Investigation substantial enough to be worth the project remembering** —
   recurring issues, "why does this keep happening," anything a future
   worker in that repo would benefit from already knowing — dispatch a real
-  `task`-type worker instead (see "issue_type signals whether a PR is
+  `research`-type worker instead (see "issue_type signals whether a PR is
   expected" above). Workers read/write their own per-project memory, so
   findings compound in the project over time, not just in your own
   session.

@@ -129,11 +129,18 @@ defmodule Arbiter.Sessions.RefineDoctrine do
 
     * **`bug` / `feature` / `chore`** — a PR is expected. ReviewGate engages
       on the resulting PR.
-    * **`task`** — no PR. Research or investigation only. The commit gate and
-      ReviewGate are both skipped for a `task`-typed issue, so **never use
-      `task` for code work** — code that ships without ReviewGate ever
-      seeing it is not a task, it is an unreviewed change wearing a task's
-      name.
+    * **`research`** — no PR. An investigation whose output is findings: the
+      worker must write them to `notes` before it can complete (the notes
+      gate). The commit gate and ReviewGate are both skipped.
+    * **`task`** — no PR. A plain operational action — a restart, a config
+      flip — with no research and no code. It completes when the agent
+      reports the action done, with a short outcome note; no findings are
+      required. The commit gate and ReviewGate are both skipped.
+
+      **Never use `research` or `task` for code work** — code that ships
+      without ReviewGate ever seeing it is not a task, it is an unreviewed
+      change wearing a task's name. Existing `task` tickets are not
+      reclassified; pick `research` for new investigations.
     * **`decision`** — a documented choice, not an implementation.
     * **`epic`** — a parent grouping children; nothing is implemented against
       an epic directly.

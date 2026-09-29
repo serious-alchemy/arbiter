@@ -40,6 +40,20 @@ defmodule ArbiterCli.Cmd.Create do
   one-line justification in the task's description. Routing maps the value
   to abstract `{model_tier, thinking}` (see `Arbiter.Agents.Routing.ByDifficulty`).
 
+  ## --type T (bd-9s9dqz)
+
+  One of `task | research | bug | feature | epic | chore | decision`
+  (default `feature`). `bug` / `feature` / `chore` are the code types: the
+  worker commits, a PR is opened, ReviewGate engages. `research` and `task`
+  are the two no-PR types — no worktree, commit gate, ReviewGate or merge —
+  and NEITHER may be used for code work:
+
+      research — an investigation; the worker must write its findings to
+                 `notes` before it can complete.
+      task     — a plain operational action (a restart, a config flip);
+                 completes when the worker reports it done, with a short
+                 outcome note. No findings required.
+
   ## --repo owner/name — required, but usually defaulted (bd-9dwbvt)
 
   Every issue now carries a repo from the moment it is created. `--repo`

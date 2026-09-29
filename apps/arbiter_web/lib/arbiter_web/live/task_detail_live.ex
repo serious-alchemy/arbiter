@@ -2574,11 +2574,13 @@ defmodule ArbiterWeb.TaskDetailLive do
                 </div>
               </.panel>
 
-              <%!-- bd-5lc99r: for a `task`-type directive the findings summary
-                 in `notes` is the deliverable, so it gets its own panel with
+              <%!-- bd-5lc99r: for a `research`-type directive the findings summary
+                 in `notes` is the deliverable (bd-9s9dqz: an operational `task`
+                 owes only a short outcome note, so it keeps the plain NOTES
+                 panel), so it gets its own panel with
                  a placeholder while still blank. --%>
               <.panel
-                :if={@task.issue_type == :task}
+                :if={Arbiter.Tasks.Issue.findings_type?(@task.issue_type)}
                 id="panel-findings"
                 title="FINDINGS"
                 class="order-7"
@@ -2590,7 +2592,7 @@ defmodule ArbiterWeb.TaskDetailLive do
               </.panel>
 
               <.panel
-                :if={@task.issue_type != :task and present?(@task.notes)}
+                :if={!Arbiter.Tasks.Issue.findings_type?(@task.issue_type) and present?(@task.notes)}
                 id="panel-notes"
                 title="NOTES"
                 class="order-7"

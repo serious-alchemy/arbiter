@@ -138,4 +138,18 @@ defmodule Arbiter.MCP.CatalogTest do
       end
     end
   end
+
+  describe "issue_type descriptions (bd-9s9dqz)" do
+    for tool <- ~w(ticket_create ticket_update) do
+      test "#{tool} explains research vs task and forbids code work" do
+        spec = Enum.find(Catalog.all(), &(&1.name == unquote(tool)))
+        desc = get_in(spec.input_schema, ["properties", "issue_type", "description"])
+
+        assert desc =~ "research"
+        assert desc =~ "task"
+        assert desc =~ "code work"
+        assert desc =~ "notes"
+      end
+    end
+  end
 end

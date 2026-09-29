@@ -18,11 +18,12 @@ defmodule Arbiter.Sessions.RefineDoctrineTest do
       assert RefineDoctrine.template() =~ ~r/D5 is never\s+assigned by this session/
     end
 
-    test "states task type means no PR" do
+    test "states research and task types mean no PR, and neither is for code work" do
       doc = RefineDoctrine.template()
+      assert doc =~ "`research`"
       assert doc =~ "`task`"
       assert doc =~ ~r/no PR/
-      assert doc =~ ~r/never use\s+.?task.?\s+for code work/i
+      assert doc =~ ~r/never use\s+.?research.?\s+or\s+.?task.?\s+for code work/i
     end
 
     test "states the POST-MERGE AC pattern with verify_after_deploy" do

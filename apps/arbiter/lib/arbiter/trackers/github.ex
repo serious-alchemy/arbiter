@@ -357,8 +357,8 @@ defmodule Arbiter.Trackers.GitHub do
   # Maps a GitHub label to an Arbiter issue_type. Only *unambiguous* single-
   # word conventional labels are mapped; anything else (custom labels,
   # multi-word labels with no recognized synonym) returns nil so the schema
-  # default (`:feature`) holds. `:task` (the non-reviewable, no-PR-expected
-  # type) is ONLY derived from the explicit "type: task" round-trip label
+  # default (`:feature`) holds. `:task` and `:research` (the non-reviewable,
+  # no-PR-expected types) are ONLY derived from the explicit "type: task" round-trip label
   # written by `GitHub.create/1` — a bare "task" label is deliberately left
   # unmapped (falls through to `:feature`), because in the wild "task" usually
   # means "a work item", not "no code expected". Explicit "type: X" labels are
@@ -367,7 +367,7 @@ defmodule Arbiter.Trackers.GitHub do
   # honours the explicit label. Among bare labels, under-mapping to `:feature`
   # costs a reviewer a no-op pass; over-mapping to `:task` silently drops the
   # PR a bug/feature/chore ticket was supposed to produce, so bare labels
-  # never resolve to `:task`.
+  # never resolve to `:task` or `:research`.
   @issue_type_labels %{
     "bug" => :bug,
     "defect" => :bug,
@@ -377,6 +377,7 @@ defmodule Arbiter.Trackers.GitHub do
     "maintenance" => :chore,
     "epic" => :epic,
     "task" => :task,
+    "research" => :research,
     "decision" => :decision
   }
 
@@ -412,10 +413,8 @@ defmodule Arbiter.Trackers.GitHub do
         nil
 
       normalized ->
-        case match_issue_type_synonym(normalized) do
-          :task -> nil
-          type -> type
-        end
+        type = match_issue_type_synonym(normalized)
+        if Arbiter.Tasks.Issue.no_pr_type?(type), do: nil, else: type
     end
   end
 

@@ -204,6 +204,16 @@ defmodule ArbiterCli.OutputTest do
       assert out =~ "trivial config bump"
     end
 
+    test "a research ticket leads with its findings; a task keeps the standard order (bd-9s9dqz)" do
+      base = %{"id" => "x", "title" => "T", "status" => "open", "notes" => "did the thing"}
+
+      research = Output.format_issue_detail(Map.put(base, "issue_type", "research"))
+      assert research =~ "Findings (notes)"
+
+      task = Output.format_issue_detail(Map.put(base, "issue_type", "task"))
+      refute task =~ "Findings (notes)"
+    end
+
     test "omits the acceptance waiver line when unset" do
       issue = %{"id" => "x", "title" => "T", "status" => "open", "issue_type" => "task"}
       refute Output.format_issue_detail(issue) =~ "Acceptance waived:"

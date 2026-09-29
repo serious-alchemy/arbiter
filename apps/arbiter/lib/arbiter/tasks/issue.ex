@@ -100,10 +100,19 @@ defmodule Arbiter.Tasks.Issue do
   @lifecycle_states Arbiter.Tasks.Lifecycle.states()
   @close_reasons Arbiter.Tasks.Lifecycle.close_reasons()
   @attention_causes Arbiter.Tasks.Lifecycle.Attention.causes()
-  @issue_types ~w(task bug feature epic chore decision)a
+  @issue_types ~w(task research bug feature epic chore decision)a
+
+  # bd-9s9dqz: the two no-PR types. Neither provisions a worktree, runs the
+  # commit gate or ReviewGate, or enters Merging — a ticket of either goes
+  # active → closed (or → verifying) directly. They differ only in the
+  # deliverable: `:research` must leave a findings write-up in `notes` (the
+  # notes gate), `:task` is an operational action that completes when the agent
+  # reports it done. Both are forbidden for code work.
+  @no_pr_types ~w(task research)a
+  @findings_types ~w(research)a
   @tracker_types ~w(none jira shortcut linear github gitlab)a
 
-  # bd-7mbrlg: `task`, `decision`, and `epic` never open a PR, so ReviewGate's
+  # bd-7mbrlg: `task`, `research`, `decision`, and `epic` never open a PR, so ReviewGate's
   # criteria guards (`:unmet_criteria` / `:missing_criteria`) never score them
   # — no point gating promotion on ACs they can't use. `bug`/`feature`/`chore`
   # are the reviewable, PR-producing types those guards actually score.
@@ -1192,14 +1201,15 @@ defmodule Arbiter.Tasks.Issue do
     attribute :issue_type, :atom do
       allow_nil? false
       public? true
-      # bd-5lc99r: `:task` is now an OPT-IN non-reviewable type (ops/research/
-      # spikes — deliverable is a findings summary in `notes`, no commit/review/
+      # bd-5lc99r: `:task` and `:research` (bd-9s9dqz split) are OPT-IN
+      # non-reviewable types (`:research` — deliverable is a findings summary in
+      # `notes`; `:task` — an operational action; neither has a commit/review/
       # PR). Because the catch-all creation paths (CLI `arb create` without
       # `--type`, tracker/GitHub sync in Tasks.Claim, the REST API, untyped MCP
       # creates) fall through to this default, it MUST be a reviewable type or
       # every untyped coding task would silently skip the worktree/commit/review
       # path. `:feature` is the generic reviewable default; choose `:task`
-      # explicitly to get the non-reviewable findings workflow.
+      # explicitly to get a non-reviewable workflow.
       default :feature
       constraints one_of: @issue_types
     end
@@ -1975,12 +1985,40 @@ defmodule Arbiter.Tasks.Issue do
   @doc "List of valid issue_type atoms."
   def issue_types, do: @issue_types
 
+  @doc """
+  Whether `issue_type` is one of the no-PR types (`:task`, `:research`) — the
+  single predicate every dispatch/completion branch asks (bd-9s9dqz). Accepts
+  the atom or its string form (worker meta can carry either); anything else,
+  including `nil`, is `false`.
+  """
+  @spec no_pr_type?(atom() | String.t() | nil) :: boolean()
+  def no_pr_type?(issue_type) when is_atom(issue_type), do: issue_type in @no_pr_types
+
+  def no_pr_type?(issue_type) when is_binary(issue_type),
+    do: match_type?(issue_type, @no_pr_types)
+
+  def no_pr_type?(_), do: false
+
+  @doc """
+  Whether `issue_type` is a no-PR type whose completion requires a findings
+  write-up in `notes` (the notes gate) — `:research` only (bd-9s9dqz).
+  """
+  @spec findings_type?(atom() | String.t() | nil) :: boolean()
+  def findings_type?(issue_type) when is_atom(issue_type), do: issue_type in @findings_types
+
+  def findings_type?(issue_type) when is_binary(issue_type),
+    do: match_type?(issue_type, @findings_types)
+
+  def findings_type?(_), do: false
+
+  defp match_type?(string, atoms), do: Enum.any?(atoms, &(Atom.to_string(&1) == string))
+
   @doc "List of valid tracker_type atoms."
   def tracker_types, do: @tracker_types
 
   @doc """
   Issue types gated by bd-7mbrlg's acceptance-criteria-before-Ready rule:
-  `bug`, `feature`, `chore`. `task`, `decision`, and `epic` are exempt — they
+  `bug`, `feature`, `chore`. `task`, `research`, `decision`, and `epic` are exempt — they
   never open a PR, so ReviewGate's criteria guards never score them.
   """
   def gated_issue_types, do: @gated_issue_types
