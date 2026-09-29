@@ -178,7 +178,7 @@ defmodule Arbiter.Loop.Apply.RepoDoc do
          :ok <-
            commit(worktree_path, doc_paths, commit_message(row, removed, attribution, doc_paths)),
          :ok <- Mergers.prepare_with_repo(ws, repo),
-         adapter <- Mergers.for_workspace(ws),
+         adapter <- Mergers.for_repo(ws, repo),
          :ok <- maybe_push(adapter, worktree_path),
          {:ok, _mr_ref} <-
            Mergers.open_with_retry(

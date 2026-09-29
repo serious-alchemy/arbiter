@@ -5364,7 +5364,11 @@ defmodule Arbiter.Worker do
       {:ok, task} when is_binary(task.title) and task.title != "" ->
         case Ash.load(task, [:workspace]) do
           {:ok, task_with_ws} ->
-            Arbiter.Mergers.PRTitle.format(task_with_ws, task_with_ws.workspace)
+            # bd-73zv62: the task's repo's `pr_title_format`.
+            Arbiter.Mergers.PRTitle.format(
+              task_with_ws,
+              Arbiter.Mergers.scope(task_with_ws.workspace, task_with_ws.repo)
+            )
 
           _ ->
             Arbiter.Mergers.PRTitle.format(task, nil)
@@ -7793,7 +7797,7 @@ defmodule Arbiter.Worker do
   defp resolve_merger(%State{} = state, opts) do
     cond do
       adapter = Map.get(opts, :adapter) ->
-        {:ok, adapter, scope_override_workspace(Map.get(opts, :workspace), state.repo)}
+        {:ok, adapter, Arbiter.Mergers.scope(Map.get(opts, :workspace), state.repo)}
 
       is_binary(state.workspace_id) ->
         case Ash.get(Arbiter.Tasks.Workspace, state.workspace_id) do
@@ -7811,11 +7815,6 @@ defmodule Arbiter.Worker do
   rescue
     e -> {:error, {:exception, Exception.message(e)}}
   end
-
-  defp scope_override_workspace(%Arbiter.Tasks.Workspace{} = ws, repo),
-    do: Arbiter.Mergers.scope(ws, repo)
-
-  defp scope_override_workspace(other, _repo), do: other
 
   # Build the opts map handed to the adapter's open/4. Carries the task-domain
   # keys and, when the caller didn't supply them, defaults from the worker's

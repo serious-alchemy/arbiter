@@ -2615,7 +2615,7 @@ defmodule ArbiterWeb.TaskDetailLive do
                 <div class="flex flex-col gap-3">
                   <.data_list class="text-[12.5px]">
                     <:item :if={present?(@task.pr_ref)} label="PR / MR">
-                      <% pr_url = pr_url(@workspace, @task.pr_ref) %>
+                      <% pr_url = pr_url(@workspace, @task.pr_ref, @task.repo) %>
                       <a
                         :if={pr_url != ""}
                         href={pr_url}
@@ -2678,7 +2678,7 @@ defmodule ArbiterWeb.TaskDetailLive do
                     <h3 class="text-[11px] font-medium text-[var(--text-label)]">Prior MRs</h3>
                     <ul class="flex flex-col gap-0.5">
                       <li :for={ref <- @prior_mr_refs}>
-                        <% ref_url = pr_url(@workspace, ref) %>
+                        <% ref_url = pr_url(@workspace, ref, @task.repo) %>
                         <a
                           :if={ref_url != ""}
                           href={ref_url}
@@ -4319,12 +4319,13 @@ defmodule ArbiterWeb.TaskDetailLive do
     _ -> ""
   end
 
-  defp pr_url(nil, _ref), do: ""
-  defp pr_url(_workspace, nil), do: ""
-  defp pr_url(_workspace, ""), do: ""
+  defp pr_url(nil, _ref, _repo), do: ""
+  defp pr_url(_workspace, nil, _repo), do: ""
+  defp pr_url(_workspace, "", _repo), do: ""
 
-  defp pr_url(%Workspace{} = workspace, ref) do
-    Mergers.link_for_workspace(workspace, ref)
+  # bd-73zv62: the link is the task's repo's forge's (a per-repo merge override).
+  defp pr_url(%Workspace{} = workspace, ref, repo) do
+    Mergers.link_for_workspace(workspace, ref, repo)
   rescue
     _ -> ""
   end

@@ -1167,7 +1167,11 @@ defmodule Arbiter.Worker.Watchdog do
     # no Watchdog has a worker: it is keyed by the ticket and drives the ticket.
     detached = Keyword.get(opts, :detached, false)
 
-    workspace = Keyword.get(opts, :workspace)
+    # bd-73zv62: the watched PR's repo's effective merge block, so the
+    # `merge.*` tunables read below (park heartbeat, fix passes, conflict
+    # attempts, …) honour a `merge.repos.<repo>` override. Idempotent for a
+    # caller that already scoped it.
+    workspace = Mergers.scope(Keyword.get(opts, :workspace), Keyword.get(opts, :repo))
     Mergers.prepare_with_repo(workspace, Keyword.get(opts, :repo))
 
     via_review_gate = Keyword.get(opts, :via_review_gate, false)

@@ -852,7 +852,8 @@ defmodule Arbiter.MCP.Tools do
     with {:ok, issue} <- fetch_task(scope, args, task_id),
          {:ok, pr_ref} <- require_pr_ref(issue),
          {:ok, workspace} <- fetch_workspace_for(issue) do
-      adapter = Arbiter.Mergers.for_workspace(workspace)
+      # bd-73zv62: the task's repo's merger, not the workspace-level one.
+      adapter = Arbiter.Mergers.for_repo(workspace, issue.repo)
 
       if function_exported?(adapter, :rerun_ci, 2) do
         Arbiter.Mergers.prepare_with_repo(workspace, issue.repo)

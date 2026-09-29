@@ -40,6 +40,9 @@ defmodule Arbiter.Reviews.PrState do
   """
 
   alias Arbiter.Mergers
+  alias Arbiter.Mergers.ForgeRepos
+  alias Arbiter.Tasks.Workspace
+  alias Arbiter.Workflows.PatrolRepoScope
 
   # States that never change once reached — the poller / dashboard stop
   # re-resolving them. "gone" is a *soft* terminal: see needs_refresh?/1.
@@ -121,10 +124,13 @@ defmodule Arbiter.Reviews.PrState do
         "n/a"
 
       true ->
+        # `strategy` was captured from the PR's repo's effective merge block
+        # when the review ran (bd-73zv62); narrow the workspace to that same
+        # repo so the adapter's config (credentials, host) is the repo's own.
         adapter = Mergers.for_strategy(strategy_atom(strategy))
 
         adapter
-        |> call_adapter_get(workspace, mr_ref)
+        |> call_adapter_get(scope_to_pr_repo(workspace, mr_ref), mr_ref)
         |> classify()
     end
   rescue
@@ -204,6 +210,15 @@ defmodule Arbiter.Reviews.PrState do
   # Call adapter.get/1 with the per-process config set up for the workspace. A
   # nil workspace means config couldn't be resolved — a transient condition, so
   # return an error that classify/1 maps to "unknown" (retry), not a terminal.
+  defp scope_to_pr_repo(%Workspace{} = workspace, mr_ref) do
+    case PatrolRepoScope.repo_of_ref(mr_ref) do
+      {:ok, slug} -> ForgeRepos.scope(workspace, slug)
+      :bare -> workspace
+    end
+  end
+
+  defp scope_to_pr_repo(workspace, _mr_ref), do: workspace
+
   defp call_adapter_get(Mergers.Github, workspace, mr_ref) when not is_nil(workspace) do
     Mergers.Github.with_workspace(workspace, fn -> Mergers.Github.get(mr_ref) end)
   end

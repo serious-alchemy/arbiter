@@ -273,7 +273,13 @@ defmodule Arbiter.Tasks.PullRequest do
 
   def watch_opts(%Issue{} = issue) do
     lane = issue.merge_watch || %{}
-    workspace = load_workspace(issue.workspace_id)
+
+    # bd-73zv62: the PR's repo's effective merge block — its adapter,
+    # `auto_merge`, `watchdog_max_polls` — not the workspace-level one.
+    workspace =
+      issue.workspace_id
+      |> load_workspace()
+      |> Mergers.scope(Map.get(lane, "repo") || issue.repo)
 
     cond do
       not present?(issue.pr_ref) ->

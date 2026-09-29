@@ -733,7 +733,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
             "#{title_for(task_id)} cannot merge: #{block_label(reason)}.",
             mr_ref && "PR/MR: #{mr_ref}",
             "Reason: #{reason}",
-            "Remediation: #{block_remediation(reason, auto_merge?(ws_id))}",
+            "Remediation: #{block_remediation(reason, auto_merge?(ws_id, task_id))}",
             "The Watchdog detected this on its merge poll and parked the PR rather " <>
               "than failing it — resolve the block (or force-merge) and the next " <>
               "poll will pick it up.",
@@ -1177,7 +1177,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
           "Reason: #{reason}",
           "Auto-resolve attempts: #{attempts}",
           note && "Worker's diagnosis: #{note}",
-          "Remediation: #{block_remediation(reason, auto_merge?(ws_id))}",
+          "Remediation: #{block_remediation(reason, auto_merge?(ws_id, task_id))}",
           "The Watchdog auto-resolved this block #{attempts} time(s) without success " <>
             "and has stopped retrying. Resolve it manually (or force-merge) and the " <>
             "next poll will pick it up."
@@ -1222,7 +1222,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
             "consecutive Watchdog polls with no state change: #{block_label(reason)}.",
           mr_ref && "PR/MR: #{mr_ref}",
           "Reason: #{reason}",
-          "Remediation: #{block_remediation(reason, auto_merge?(ws_id))}",
+          "Remediation: #{block_remediation(reason, auto_merge?(ws_id, task_id))}",
           "This is a heartbeat, not a new block — the original escalation is " <>
             "already in this inbox and fires only once per episode. Nothing about " <>
             "this PR has moved since; the Watchdog is alive and still polling, but " <>
@@ -1497,16 +1497,28 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   # Whether this workspace merges an approved PR itself. Defaults to `false` on
   # an unreadable workspace, matching `Workspace.auto_merge?/1`'s own default:
   # promising an auto-merge that never comes is the failure this guards against.
-  defp auto_merge?(ws_id) when is_binary(ws_id) do
+  #
+  # bd-73zv62: read for the task's repo — a `merge.repos.<repo>.auto_merge`
+  # override decides it for that repo.
+  defp auto_merge?(ws_id, task_id) when is_binary(ws_id) do
     case Ash.get(Workspace, ws_id) do
-      {:ok, workspace} -> Workspace.auto_merge?(workspace)
+      {:ok, workspace} -> Workspace.auto_merge?(Arbiter.Mergers.scope(workspace, task_repo(task_id)))
       _ -> false
     end
   rescue
     _ -> false
   end
 
-  defp auto_merge?(_), do: false
+  defp auto_merge?(_, _), do: false
+
+  defp task_repo(task_id) when is_binary(task_id) do
+    case Ash.get(Issue, task_id) do
+      {:ok, %Issue{repo: repo}} -> repo
+      _ -> nil
+    end
+  end
+
+  defp task_repo(_), do: nil
 
   defp block_label(:conflict), do: "merge conflict with the base branch"
   defp block_label(:behind_base), do: "branch is behind the base branch"

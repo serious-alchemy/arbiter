@@ -114,12 +114,12 @@ defmodule Arbiter.Mergers do
   `Workspace.auto_merge?/1`, the adapters' `Config.from/1`, all read the
   scoped workspace exactly as they read an unscoped one. Idempotent: a scoped
   workspace carries no `merge.repos`, so scoping it again (for any repo) is a
-  no-op. A `nil` repo or workspace passes through unchanged.
+  no-op. A `nil` repo passes the workspace through unchanged, as does
+  anything that is not a `Workspace` (a `nil`, a test's stand-in map).
 
   Never persist a scoped workspace. It is a read view.
   """
-  @spec scope(Workspace.t() | nil, String.t() | nil) :: Workspace.t() | nil
-  def scope(nil, _repo), do: nil
+  @spec scope(ws, String.t() | nil) :: ws when ws: Workspace.t() | nil | term()
   def scope(%Workspace{} = workspace, repo) when repo in [nil, ""], do: workspace
 
   def scope(%Workspace{config: config} = workspace, repo) when is_binary(repo) do
@@ -131,6 +131,8 @@ defmodule Arbiter.Mergers do
         workspace
     end
   end
+
+  def scope(other, _repo), do: other
 
   @doc """
   The resolver: the merger adapter and effective merge block for `repo` in
