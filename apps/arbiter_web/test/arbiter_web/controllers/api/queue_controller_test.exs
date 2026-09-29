@@ -45,6 +45,64 @@ defmodule ArbiterWeb.Api.QueueControllerTest do
     task
   end
 
+  # bd-4olwyg AC4: the endpoint `arb queue retry-auto-resolve` drives re-arms an
+  # exhausted conflict auto-resolve, not only a `:ci_failed` one.
+  defp stop_watchdog(task_id) do
+    case Watchdog.whereis(task_id) do
+      nil -> :ok
+      wd -> Arbiter.ProcessTeardown.stop_child(Arbiter.Worker.WatchdogSupervisor, wd)
+    end
+  end
+
+  describe "POST /api/queue/:task_id/retry_auto_resolve" do
+    alias Arbiter.Test.RefusingConflictResolver
+
+    test "re-arms a live watchdog whose conflict auto-resolve is exhausted", %{
+      conn: conn,
+      ws: ws
+    } do
+      task = merging_ticket(ws, "!qc-conflict")
+      RefusingConflictResolver.arm(task.id, self())
+
+      StubMerger.queue_get("!qc-conflict", [
+        %{status: :open, approved: true, block_reason: :conflict}
+      ])
+
+      {:ok, wpid} =
+        Watchdog.start(
+          task_id: task.id,
+          mr_ref: "!qc-conflict",
+          adapter: StubMerger,
+          auto_merge: false,
+          interval_ms: 15,
+          initial_delay_ms: 0,
+          workspace: ws,
+          conflict_resolver: RefusingConflictResolver
+        )
+
+      on_exit(fn -> stop_watchdog(task.id) end)
+      assert is_pid(wpid)
+
+      assert_receive {:conflict_resolve_called, _}, 1_000
+      assert_receive {:conflict_escalated, _}, 1_000
+      assert Watchdog.parked_on(task.id) == :conflict
+
+      body = conn |> post("/api/queue/#{task.id}/retry_auto_resolve") |> json_response(200)
+      assert body == %{"retried" => true, "task_id" => task.id}
+
+      assert_receive {:conflict_resolve_called, _}, 1_000
+    end
+
+    test "400s when the watchdog has nothing to re-arm", %{conn: conn, ws: ws} do
+      task = merging_ticket(ws, "!qc-idle")
+      :ok = Watchdog.restart(task.id)
+      on_exit(fn -> stop_watchdog(task.id) end)
+
+      body = conn |> post("/api/queue/#{task.id}/retry_auto_resolve") |> json_response(400)
+      assert inspect(body) =~ "conflict"
+    end
+  end
+
   describe "POST /api/queue/:task_id/restart_watchdog" do
     test "restarts a dead watchdog for a Merging ticket", %{conn: conn, ws: ws} do
       task = merging_ticket(ws, "!qc1")

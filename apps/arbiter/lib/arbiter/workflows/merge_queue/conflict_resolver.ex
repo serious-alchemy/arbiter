@@ -203,6 +203,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
          {provider, fallback_reason, decision} <- resolve_pass_provider(task, context),
          {:ok, worker_pid} <-
            start_worker(task, context, worktree_path, provider, {fallback_reason, decision}),
+         :ok <- settle_stale_operation(worktree_path),
          {:ok, _port} <- start_agent(worker_pid, worktree_path, context, args, provider) do
       # bd-741sid: a pass the Watchdog queued for a slot is an attempt now.
       Arbiter.Worker.Watchdog.pass_started(task.id, :conflict, worker_pid)
@@ -213,6 +214,33 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
          worktree_path: worktree_path,
          branch: context.branch
        }}
+    end
+  end
+
+  # bd-4olwyg: `Worktree.attach/2` reuses the branch's worktree even when an
+  # earlier run left it stopped mid-rebase. Abort that here — only now, once this
+  # pass holds the ticket's key (`start_worker/5` refuses while any run is live),
+  # so no run can still be working in the tree — and the agent starts from the
+  # branch's own tip, as its briefing assumes.
+  defp settle_stale_operation(worktree_path) do
+    case Worktree.abort_in_progress(worktree_path) do
+      {:ok, nil} ->
+        :ok
+
+      {:ok, op} ->
+        Logger.info(
+          "ConflictResolver: aborted a stale #{op} left in #{worktree_path} before the pass"
+        )
+
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "ConflictResolver: could not abort a stale operation in #{worktree_path}: " <>
+            inspect(reason)
+        )
+
+        :ok
     end
   end
 
@@ -468,6 +496,9 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
       branch: nil,
       target_branch: context.target_branch,
       conflict_resolver_branch: context.branch,
+      # bd-4olwyg: the PR head this pass must move — `ConflictPassOutcome.verdict/1`
+      # fails a pass that ends with the branch still here on origin.
+      conflict_start_head: Worktree.remote_head(worktree_path, context.branch),
       repo_path: context.repo_path
     }
 

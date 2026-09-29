@@ -125,6 +125,7 @@ defmodule Arbiter.Worker do
 
   alias Arbiter.Accounts.Resolver, as: AccountResolver
   alias Arbiter.Agents.Gemini.Security, as: GeminiSecurity
+  alias Arbiter.Worker.ConflictPassOutcome
   alias Arbiter.Worker.CoordinatorOnlyFindings
   alias Arbiter.Worker.EvidenceIntegrity
   alias Arbiter.Worker.OsProcess
@@ -3222,6 +3223,7 @@ defmodule Arbiter.Worker do
   defp fail_now(%State{} = state, %Arbiter.Worker.StopReason{} = reason) do
     # bd-7a0pi8: kill any still-live agent BEFORE marking the run terminal.
     state = terminate_live_sessions(state)
+    settle_pass_worktree(state)
 
     meta =
       state.meta
@@ -3239,6 +3241,7 @@ defmodule Arbiter.Worker do
   defp fail_now(%State{} = state, reason) do
     # bd-7a0pi8: kill any still-live agent BEFORE marking the run terminal.
     state = terminate_live_sessions(state)
+    settle_pass_worktree(state)
 
     meta = if is_nil(reason), do: state.meta, else: Map.put(state.meta, :failure_reason, reason)
     new_state = %State{state | state: :finished, outcome: :failed, waiting_on: nil, meta: meta}
@@ -3258,6 +3261,38 @@ defmodule Arbiter.Worker do
     :ok
   rescue
     _ -> :ok
+  end
+
+  # bd-4olwyg: a pass that ends — failed, or stopped from outside — must not leave
+  # its rebase or merge stopped part-way. A worktree left mid-rebase reads as
+  # detached (HEAD is), and that is how the incident's resume found "no
+  # preserved worktree" while the next pass's `attach` found one "on a
+  # different branch". Runs after the agent is dead, so nothing is still
+  # working in the tree. Best-effort.
+  defp settle_pass_worktree(%State{meta: meta}) do
+    if pass?(meta), do: _ = ConflictPassOutcome.settle_worktree(meta)
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  # bd-4olwyg: whether this pass delivered. Only a conflict pass has a verdict to
+  # check — its one deliverable is a push off the conflicting head — so every
+  # other run (and a fix pass) is `:resolved` here, as before.
+  defp pass_verdict(%State{meta: meta}) do
+    if role_from_meta(meta) == :conflict_resolver do
+      ConflictPassOutcome.verdict(meta)
+    else
+      :resolved
+    end
+  rescue
+    _ -> :resolved
+  end
+
+  defp unresolved_pass_meta(meta, summary) do
+    meta
+    |> Map.put(:failure_reason, {:conflict_unresolved, summary})
+    |> Map.put(:failure_summary, truncate_failure_summary(summary))
   end
 
   # bd-7a0pi8: a terminal failure must never leave a live agent behind. The
@@ -3538,7 +3573,31 @@ defmodule Arbiter.Worker do
   # watching the PR, takes it from there. Not `complete_now/2`: that announces
   # the ticket done and hands the PR to the MergeQueue — a second merge driver
   # on a PR the Watchdog already owns.
+  #
+  # bd-4olwyg: a conflict pass is only finished if it delivered — see
+  # `ConflictPassOutcome.verdict/1`. One that signals done mid-rebase, or without
+  # pushing, is failed with the unresolved state named, so the Watchdog counts
+  # it as the attempt that did not work instead of reading the PR as resolved.
   defp finish_pass(%State{} = state) do
+    case pass_verdict(state) do
+      :resolved -> finish_delivered_pass(state)
+      {:unresolved, summary} -> fail_unresolved_pass(state, summary)
+    end
+  end
+
+  defp fail_unresolved_pass(%State{} = state, summary) do
+    Logger.warning(
+      "Worker: #{subordinate_label(state) || "pass"} for task=#{state.task_id} signalled done " <>
+        "but did not deliver: #{summary}"
+    )
+
+    fail_now(
+      %State{state | meta: unresolved_pass_meta(state.meta, summary)},
+      {:conflict_unresolved, summary}
+    )
+  end
+
+  defp finish_delivered_pass(%State{} = state) do
     finished = %State{
       state
       | state: :finished,
@@ -7273,6 +7332,13 @@ defmodule Arbiter.Worker do
     # server boot. See finalize_run_on_terminate/2.
     finalize_run_on_terminate(reason, state)
 
+    # bd-4olwyg: a pass stopped while live leaves no worktree mid-rebase, and
+    # hands its slot back — `finish_pass`/`fail_now` send the ticket back to
+    # Merging, but a stop from outside never reached either, so the ticket sat
+    # In progress with no run, holding the incident's only slot. Not on a node
+    # shutdown: that run is `:interrupted`, and the boot sweep owns it.
+    settle_stopped_pass(reason, state)
+
     # bd-cryhwk: if the worker is torn down (StopWorker after a task closes,
     # a kill, a crash) while a Claude session's port `:exit_status` message
     # never got processed — the coordinator's close can race ahead of the
@@ -7324,8 +7390,21 @@ defmodule Arbiter.Worker do
     finished = %State{state | state: :finished, waiting_on: nil}
 
     case terminate_outcome(reason) do
+      # bd-4olwyg: a live conflict pass stopped from outside (the incident's
+      # Watchdog stopped one 19 s in, mid-rebase) is only a success if it
+      # delivered; otherwise it is failed with the unresolved state named.
       :completed ->
-        record_run_finished(%State{finished | outcome: :succeeded})
+        case pass_verdict(state) do
+          :resolved ->
+            record_run_finished(%State{finished | outcome: :succeeded})
+
+          {:unresolved, summary} ->
+            record_run_finished(%State{
+              finished
+              | outcome: :failed,
+                meta: unresolved_pass_meta(state.meta, summary)
+            })
+        end
 
       :interrupted ->
         record_run_finished(%State{
@@ -7351,6 +7430,17 @@ defmodule Arbiter.Worker do
     reason
     |> inspect(limit: 20, printable_limit: 200)
     |> String.slice(0, 1_500)
+  end
+
+  defp settle_stopped_pass(_reason, %State{state: :finished}), do: :ok
+
+  defp settle_stopped_pass(reason, %State{} = state) do
+    if terminate_outcome(reason) != :interrupted and pass?(state.meta) do
+      settle_pass_worktree(state)
+      return_pass_ticket(state)
+    end
+
+    :ok
   end
 
   defp terminate_outcome(:normal), do: :completed

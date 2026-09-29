@@ -804,24 +804,22 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       assert html =~ "Retry auto-resolve"
     end
 
-    test "does not offer Retry auto-resolve for an approved MR blocked on something else",
+    # bd-4olwyg: an exhausted conflict auto-resolve is re-armable now, so it
+    # offers the button like an exhausted `:ci_failed` park. (Before, a
+    # `:conflict` never did — and nothing else could re-arm it either.) With no
+    # repo behind the ticket the real resolver cannot dispatch, so the first
+    # attempt fails and the conflict parks exhausted straight away.
+    test "offers Retry auto-resolve once a conflict auto-resolve is exhausted",
          %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "pd-conflict", workspace_id: ws.id})
       {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
       open_pr_and_park(pid, task, %{status: :open, approved: true, block_reason: :conflict})
 
-      # Not waiting on `parked_on/1` here: a `:conflict` block only parks
-      # after exhausting its own bounded rebase-attempt budget, which is not
-      # guaranteed to land inside a short poll window. Waiting for the
-      # Watchdog to exist and letting one poll interval elapse is enough to
-      # observe the button's render decision either way — it must not appear
-      # for a `:conflict` reason regardless of whether the block has parked.
-      wait_until(fn -> Watchdog.whereis(task.id) != nil end)
-      Process.sleep(50)
+      wait_until(fn -> Watchdog.parked_on(task.id) == :conflict end)
 
       {:ok, view, _html} = live_worker(conn, task.id)
 
-      refute has_element?(view, "#worker-retry-auto-resolve-btn")
+      assert has_element?(view, "#worker-retry-auto-resolve-btn")
     end
 
     test "does not offer Retry auto-resolve while still awaiting approval",
@@ -830,8 +828,8 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
       open_pr_and_park(pid, task, %{status: :open, approved: false})
 
-      # See the :conflict test above for why this waits on Watchdog liveness
-      # plus one poll interval rather than on `parked_on/1`.
+      # Waits on Watchdog liveness plus one poll interval rather than on
+      # `parked_on/1`: a PR awaiting approval never parks.
       wait_until(fn -> Watchdog.whereis(task.id) != nil end)
       Process.sleep(50)
 

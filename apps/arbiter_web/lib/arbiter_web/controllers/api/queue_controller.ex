@@ -33,7 +33,8 @@ defmodule ArbiterWeb.Api.QueueController do
 
     * 404 — no Watchdog is currently running for this task.
     * 400 — the Watchdog exists but isn't parked on an exhausted `:ci_failed`
-      block, so there's nothing to re-arm.
+      block or an exhausted conflict auto-resolve (bd-4olwyg), so there's
+      nothing to re-arm.
   """
   def retry_auto_resolve(conn, %{"task_id" => task_id})
       when is_binary(task_id) and task_id != "" do
@@ -47,7 +48,8 @@ defmodule ArbiterWeb.Api.QueueController do
       {:error, :not_parked_on_ci_failed} ->
         {:error,
          {:invalid_request,
-          "task #{task_id} isn't parked on an exhausted :ci_failed block — nothing to re-arm"}}
+          "task #{task_id} isn't parked on an exhausted :ci_failed block or an exhausted " <>
+            "conflict auto-resolve — nothing to re-arm"}}
 
       {:error, :busy} ->
         {:error, {:busy, "task #{task_id}'s watchdog is busy polling — try again in a moment"}}

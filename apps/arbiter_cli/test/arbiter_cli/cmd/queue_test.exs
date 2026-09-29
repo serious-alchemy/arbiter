@@ -36,6 +36,20 @@ defmodule ArbiterCli.Cmd.QueueTest do
       assert err =~ "not currently parked"
     end
 
+    # bd-4olwyg: an exhausted conflict is re-armable too, so the refusal names
+    # both blocks rather than sending the operator off to rebase by hand.
+    test "the not-parked error names both blocks it can re-arm" do
+      stub_routes([
+        {{"post", "/api/queue/bd-6/retry_auto_resolve"},
+         {%{"error" => %{"message" => "nothing to re-arm"}}, 400}}
+      ])
+
+      {_out, err, _exit_code} = capture(fn -> Queue.run(["retry-auto-resolve", "bd-6"]) end)
+
+      assert err =~ ":ci_failed"
+      assert err =~ "conflict"
+    end
+
     test "reports a friendly error when no watchdog is running for the task" do
       stub_routes([
         {{"post", "/api/queue/bd-3/retry_auto_resolve"},

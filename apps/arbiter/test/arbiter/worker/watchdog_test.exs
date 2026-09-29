@@ -34,8 +34,15 @@ defmodule Arbiter.Worker.WatchdogTest do
       {:ok, status}
     end
 
+    # `state` is what `Watchdog.resolver_finished?/1` reads (bd-4olwyg): before,
+    # the fake answered only the long-gone `status` key, so every fake — even a
+    # `:running` one — read as finished.
     @impl true
-    def handle_call(:snapshot, _from, status), do: {:reply, %{status: status}, status}
+    def handle_call(:snapshot, _from, status),
+      do: {:reply, %{status: status, state: run_state(status)}, status}
+
+    defp run_state(:running), do: :working
+    defp run_state(_terminal), do: :finished
 
     @impl true
     def handle_info({:DOWN, _ref, :process, _pid, _reason}, status), do: {:stop, :normal, status}
@@ -1399,6 +1406,88 @@ defmodule Arbiter.Worker.WatchdogTest do
       assert log =~ "zero divergence"
       assert log =~ "[warning]"
       refute_receive {:escalate_called, _, _, _, _}, 200
+    end
+
+    # bd-4olwyg, the incident's root cause: GitHub recomputes a PR's
+    # mergeability after its base moves, and a poll in that window did not
+    # report `:conflict`. `reset_conflict_state/1` then `Worker.stop`ped the
+    # resolver 19 s into its rebase — which its run recorded as a success.
+    test "a poll that stops reporting the conflict does not stop a resolver still at work" do
+      task_id = new_task_id()
+      StubConflictResolver.arm(task_id, self(), pid: :running)
+
+      StubMerger.queue_get("!c9", [
+        %{status: :open, approved: true, block_reason: :conflict},
+        %{status: :open, approved: true}
+      ])
+
+      wpid =
+        start_watchdog(task_id, "!c9",
+          auto_merge: false,
+          conflict_resolver: StubConflictResolver,
+          max_conflict_attempts: 2,
+          interval_ms: 15
+        )
+
+      assert_receive {:resolve_called, _}, 1_000
+      assert_receive {:resolver_spawned, resolver}, 1_000
+      ref = Process.monitor(resolver)
+      wait_until(fn -> StubMerger.get_count("!c9") >= 4 end)
+
+      refute_received {:DOWN, ^ref, :process, ^resolver, _}
+      state = :sys.get_state(wpid)
+      assert state.conflict_resolving
+      assert state.conflict_resolver_pid == resolver
+      refute_received {:resolve_called, _}
+    end
+
+    # bd-4olwyg AC4: nothing could re-arm an exhausted conflict auto-resolve on a
+    # live Watchdog — `retry_auto_resolve/1` only handled `:ci_failed`, and
+    # `restart/2` refuses while a Watchdog runs.
+    test "retry_auto_resolve/1 re-arms one more attempt on an exhausted conflict" do
+      task_id = new_task_id()
+      StubConflictResolver.arm(task_id, self(), pid: :completed)
+      StubMerger.queue_get("!c10", [%{status: :open, approved: true, block_reason: :conflict}])
+
+      wpid =
+        start_watchdog(task_id, "!c10",
+          workspace: test_workspace(),
+          auto_merge: false,
+          conflict_resolver: StubConflictResolver,
+          max_conflict_attempts: 1,
+          interval_ms: 15
+        )
+
+      assert_receive {:resolve_called, _}, 1_000
+      assert_receive {:escalate_called, ^task_id, _, _, _}, 1_000
+      refute_receive {:resolve_called, _}, 100
+      assert Watchdog.parked_on(task_id) == :conflict
+
+      assert :ok = Watchdog.retry_auto_resolve(task_id)
+
+      assert_receive {:resolve_called, %{task_id: ^task_id}}, 1_000
+      # The one re-armed attempt is spent and did not clear it: parked and paged
+      # again, not retried forever.
+      assert_receive {:escalate_called, ^task_id, _, _, reason}, 1_000
+      assert reason =~ "2 rebase attempt"
+      refute_receive {:resolve_called, _}, 100
+      assert :sys.get_state(wpid).conflict_escalated
+    end
+
+    test "retry_auto_resolve/1 still refuses a conflict that is not exhausted" do
+      task_id = new_task_id()
+      StubConflictResolver.arm(task_id, self(), pid: :running)
+      StubMerger.queue_get("!c11", [%{status: :open, approved: true, block_reason: :conflict}])
+
+      start_watchdog(task_id, "!c11",
+        auto_merge: false,
+        conflict_resolver: StubConflictResolver,
+        max_conflict_attempts: 2,
+        interval_ms: 15
+      )
+
+      assert_receive {:resolve_called, _}, 1_000
+      assert {:error, :not_parked_on_ci_failed} = Watchdog.retry_auto_resolve(task_id)
     end
 
     test "a cleared conflict resets the counter so it never escalates" do

@@ -269,7 +269,8 @@ defmodule ArbiterWeb.WorkerDetailLive do
          socket
          |> put_flash(
            :info,
-           "Re-armed auto-resolve for #{task_id}; a fresh fix-pass will start on the next watchdog poll."
+           "Re-armed auto-resolve for #{task_id}; a fresh fix-pass or conflict pass will start " <>
+             "on the next watchdog poll."
          )
          |> refresh_all()}
 
@@ -286,7 +287,8 @@ defmodule ArbiterWeb.WorkerDetailLive do
          put_flash(
            socket,
            :error,
-           "#{task_id} isn't parked on an exhausted CI-failed block yet — nothing to re-arm."
+           "#{task_id} isn't parked on an exhausted CI-failed block or conflict yet — " <>
+             "nothing to re-arm."
          )}
 
       {:error, :busy} ->
@@ -785,9 +787,11 @@ defmodule ArbiterWeb.WorkerDetailLive do
   # through to a busy Watchdog surfaces a clear "try again" flash instead.
   # `:ci_failed_external` (bd-5mzzww) is a reclassification of the same park,
   # not a different one: once the infrastructure is fixed, re-arming is the
-  # right move, so hiding the button here would strand the task.
+  # right move, so hiding the button here would strand the task. `:conflict` is
+  # an exhausted conflict auto-resolve, which the same action re-arms
+  # (bd-4olwyg).
   defp retry_auto_resolve_available?(%Issue{state: :merging}, %{parked_on: reason}),
-    do: reason in [:ci_failed, :ci_failed_external, :busy]
+    do: reason in [:ci_failed, :ci_failed_external, :conflict, :busy]
 
   defp retry_auto_resolve_available?(_task, _watchdog), do: false
 

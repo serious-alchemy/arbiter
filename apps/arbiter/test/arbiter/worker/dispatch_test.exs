@@ -3625,6 +3625,22 @@ defmodule Arbiter.Worker.DispatchTest do
       assert {:error, :no_outpost} = Dispatch.resume(task.id, start_driver: false)
     end
 
+    # bd-4olwyg: a conflict pass left the PR branch's worktree mid-rebase, so
+    # HEAD read as detached and resume answered "no preserved worktree" for a
+    # directory the next conflict dispatch then tripped over as "exists".
+    test "resumes a branch worktree stopped mid-rebase", %{ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "mid-rebase resume", workspace_id: ws.id})
+      first = stop_worker_with_outpost(task.id)
+      path = first.worktree_path
+      stop_mid_rebase!(path)
+      assert {:ok, "HEAD"} = Worktree.current_branch(path)
+
+      assert {:ok, result} =
+               Dispatch.resume(task.id, start_driver: false, claude_command: ["sleep", "2"])
+
+      assert result.worktree_path == path
+    end
+
     test "refuses to resume a closed task", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "closed resume", workspace_id: ws.id})
       _ = stop_worker_with_outpost(task.id)
@@ -4940,5 +4956,33 @@ defmodule Arbiter.Worker.DispatchTest do
 
       assert length(events) == 0
     end
+  end
+
+  # Leave the branch worktree at `path` mid-rebase: a branch commit and a
+  # side commit both add `conflict.txt`, and the branch is rebased onto the side.
+  defp stop_mid_rebase!(path) do
+    git = fn args -> System.cmd("git", ["-C", path | args], stderr_to_stdout: true) end
+    {branch, 0} = git.(["rev-parse", "--abbrev-ref", "HEAD"])
+    {base, 0} = git.(["rev-parse", "HEAD"])
+
+    for {args, _} <- [
+          {["config", "user.email", "t@e.com"], nil},
+          {["config", "user.name", "T"], nil},
+          {["config", "commit.gpgsign", "false"], nil}
+        ],
+        do: {_, 0} = git.(args)
+
+    File.write!(Path.join(path, "conflict.txt"), "branch side\n")
+    {_, 0} = git.(["add", "conflict.txt"])
+    {_, 0} = git.(["commit", "-q", "-m", "branch side"])
+    {_, 0} = git.(["checkout", "-q", "--detach", String.trim(base)])
+    File.write!(Path.join(path, "conflict.txt"), "other side\n")
+    {_, 0} = git.(["add", "conflict.txt"])
+    {_, 0} = git.(["commit", "-q", "-m", "other side"])
+    {side, 0} = git.(["rev-parse", "HEAD"])
+    {_, 0} = git.(["checkout", "-q", String.trim(branch)])
+    {_, status} = git.(["rebase", String.trim(side)])
+    assert status != 0
+    :ok
   end
 end
