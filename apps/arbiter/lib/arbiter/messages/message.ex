@@ -274,7 +274,8 @@ defmodule Arbiter.Messages.Message do
       # used by callers that fold a repeated failure cycle (an updated
       # counter/last-seen timestamp) into the same row instead of inserting a
       # fresh one every cycle, the way `Arbiter.Messages.CoordinatorNotifier`'s
-      # `credential_expired/3` dedupe does. Subject/kind/to_ref are left alone
+      # `credential_expired/3` dedupe did before it became a system alert
+      # (bd-7gt8rm). Subject/kind/to_ref are left alone
       # so the row keeps matching whatever dedupe query found it.
       accept [:body]
       require_atomic? false

@@ -771,3 +771,52 @@ note}` on the `inbox` topic when a cause is raised (`Changes.AnnounceAttention`
 on `:raise_attention`, `:park_review`, `:pr_closed` and `:await_verification`;
 the sweep for a derived item it sees for the first time), promoted, handed off
 or handed back.
+
+## Child 8 (bd-7gt8rm): system alerts
+
+A system alert is a problem with the installation rather than a ticket. It is
+its own record, `Arbiter.Alerts.SystemAlert` (table `system_alerts`), not an
+escalation message:
+
+| field | |
+|---|---|
+| `kind` | `credential_expired`, `quota_poll_failing`, `overage_alert`, `budget_exceeded` |
+| `key` | which one of the kind (below) |
+| `workspace_id` | where it is shown and announced; not part of the dedupe |
+| `subject`, `detail` | the headline and the full explanation |
+| `owner` | always `operator` (bd-9yqspm §3) |
+| `raised_at` | when the episode began |
+| `last_raised_at`, `raise_count` | when and how often its producer last reported it |
+| `cleared_at` | when its condition cleared; nil while active |
+
+At most one row per `(kind, key)` is active, enforced by a partial unique
+index. `Arbiter.Alerts.raise_alert/1` refreshes the active row's subject,
+detail and `last_raised_at` instead of adding a second; a raise after a clear
+opens a fresh episode. Opening and clearing are announced on the workspace's
+`inbox` topic as `%{kind: "alert", event: "raised" | "cleared", alert_id,
+alert_kind, key, subject, owner}`. A refresh is not announced: producers
+re-raise on every check.
+
+### Producers and their clears
+
+The four producers in `CoordinatorNotifier` raise an alert and no longer post
+an escalation. Each has a hook where its condition is seen healthy again.
+
+| kind | key | raised by | cleared when |
+|---|---|---|---|
+| `credential_expired` | adapter and detection source | `CredentialWatchdog` (probe, worker deaths, the usage poll) | the same source succeeds again (`credential_restored/3`) |
+| `quota_poll_failing` | `anthropic_oauth_usage` (account-wide) | `Quota.CloudProbe` at the failure threshold | any successful poll (`quota_poll_recovered/0`) |
+| `overage_alert` | workspace and provider | `DispatchQueue` on a threshold crossing | the windowed spend is back under the threshold, the threshold is raised or removed (the queue re-reads it on each record), or the gate allows a dispatch on that provider outside overage |
+| `budget_exceeded` | task | `Usage.BudgetPatrol`, every sweep while over | the sweep finds the task no longer over its p90 (the estimate moved) or no longer open; a failed sweep clears nothing |
+
+`credential_restored` no longer posts a "restored" message: the clear is the
+signal. `operator_login_lapsed` and `quota_grant_failing`, which fire in place
+of `quota_poll_failing` for a lapsed login, stay coordinator escalations.
+Escalation rows written before this change keep their kinds and are cleared by
+hand as before.
+
+### Reading them
+
+`GET /api/alerts` (`?workspace=`, `?kind=`) and the coordinator MCP tool
+`alert_list` return the active alerts, oldest first, as `{alerts, count}`.
+Child 9 puts them in the Needs-attention swimlane as cards with no ticket.
