@@ -64,6 +64,10 @@ config :arbiter_web, ArbiterWeb.Endpoint,
   secret_key_base: "tP+Fx7+LODDAMtW348NLPMEFQgFBNOCXEW1X3LdQHm5YMSdusJH7vaCC+c18IJgi",
   server: false
 
+# BoardLive refreshes immediately on worker lifecycle broadcasts in tests; the
+# production trailing debounce (500ms) has its own test that widens the window.
+config :arbiter_web, :board_worker_debounce_ms, 0
+
 # Cloak vault key for the test suite. Arbiter.Vault reads ARBITER_CLOAK_KEY at
 # runtime and refuses to boot without it; this config fallback injects a fixed
 # (non-secret) 32-byte AES key so the suite encrypts/decrypts workspace secrets

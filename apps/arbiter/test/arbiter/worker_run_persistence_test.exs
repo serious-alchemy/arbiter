@@ -239,6 +239,26 @@ defmodule Arbiter.WorkerRunPersistenceTest do
     assert run.thinking == "high"
   end
 
+  test "lifecycle broadcasts do not carry meta.output_lines (bd-81vbzg)" do
+    task_id = "bd-lcpayload-#{System.unique_integer([:positive])}"
+    Phoenix.PubSub.subscribe(Arbiter.PubSub, "workers")
+
+    {:ok, pid} =
+      Worker.start(task_id: task_id, repo: "arbiter", workspace_id: "ws-runs")
+
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+
+    :ok = Worker.advance(pid, :implement)
+    :ok = Worker.report(pid, :output_lines, ["line one", "line two"])
+
+    assert_receive {:worker_lifecycle, :started, %{task_id: ^task_id, meta: started_meta}}
+    refute Map.has_key?(started_meta, :output_lines)
+
+    GenServer.stop(pid, :normal)
+    assert_receive {:worker_lifecycle, :stopped, %{task_id: ^task_id, meta: stopped_meta}}, 5_000
+    refute Map.has_key?(stopped_meta, :output_lines)
+  end
+
   test "completing a worker finishes the Run row :succeeded with output_lines" do
     task_id = "bd-runcomp-#{System.unique_integer([:positive])}"
 
