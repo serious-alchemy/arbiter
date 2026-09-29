@@ -48,6 +48,11 @@ defmodule Arbiter.Tasks.Workspace do
                                                # fix rounds auto-dispatch after a REQUEST_CHANGES
                                                # verdict. 0 disables. See
                                                # review_gate_max_fix_rounds/1.
+        },
+        "notes_gate" => %{
+          "nudge_cap" => 2                     # optional integer >= 0; send-backs a research
+                                               # directive gets for blank `notes` before the
+                                               # gate escalates. See notes_gate_nudge_cap/1.
         }
       }
 
@@ -939,6 +944,43 @@ defmodule Arbiter.Tasks.Workspace do
 
       _ ->
         nil
+    end
+  end
+  @default_notes_gate_nudge_cap 2
+
+  @doc "The notes-gate send-back budget when `notes_gate.nudge_cap` is unset (bd-4qjl0q)."
+  @spec default_notes_gate_nudge_cap() :: pos_integer()
+  def default_notes_gate_nudge_cap, do: @default_notes_gate_nudge_cap
+
+  @doc """
+  How many send-back nudges the notes gate gives a research directive whose
+  worker signalled done with blank `notes`, before it escalates to the
+  coordinator — from `config["notes_gate"]["nudge_cap"]` (bd-4qjl0q).
+
+  This was a hard-coded `1` (bd-5lc99r): one forgotten `ticket_update_progress`
+  call became an operator interrupt, and both 2026-09-17 trips were recovered
+  by hand with exactly the mechanical step a second nudge would have taken.
+
+  `0` is meaningful — escalate on the first blank-notes completion, no nudge —
+  so any non-negative integer is accepted (or its stringified JSON form).
+  Unset or unparseable falls back to `default_notes_gate_nudge_cap/0`.
+  """
+  @spec notes_gate_nudge_cap(t() | nil) :: non_neg_integer()
+  def notes_gate_nudge_cap(nil), do: @default_notes_gate_nudge_cap
+
+  def notes_gate_nudge_cap(workspace) do
+    case get_in(workspace.config || %{}, ["notes_gate", "nudge_cap"]) do
+      n when is_integer(n) and n >= 0 ->
+        n
+
+      s when is_binary(s) ->
+        case Integer.parse(s) do
+          {n, ""} when n >= 0 -> n
+          _ -> @default_notes_gate_nudge_cap
+        end
+
+      _ ->
+        @default_notes_gate_nudge_cap
     end
   end
 end
