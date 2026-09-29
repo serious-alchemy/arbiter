@@ -6,7 +6,8 @@ defmodule ArbiterCli.Cmd.Queue do
                                                    attempt on a task's merge
                                                    Watchdog after it exhausted
                                                    its budget on a :ci_failed
-                                                   block and parked (bd-bspakl)
+                                                   block (bd-bspakl) or on a
+                                                   conflict (bd-4olwyg)
       arb queue restart-watchdog <task-id>      — mint a fresh merge Watchdog
                                                    for a Merging ticket whose
                                                    Watchdog died, from the
@@ -24,7 +25,8 @@ defmodule ArbiterCli.Cmd.Queue do
   Watchdog's bounded auto-resolve retries are exhausted: without it, a task
   parked on a genuine `:ci_failed` block after exhaustion had no way to try
   again short of pushing a fix to the branch by hand, outside Arbiter's normal
-  worker/review flow. `retry_auto_resolve` (underscored) is accepted as an
+  worker/review flow. It re-arms an exhausted conflict auto-resolve the same
+  way, dispatching a fresh conflict-resolve pass (bd-4olwyg). `retry_auto_resolve` (underscored) is accepted as an
   undocumented alias for back-compat.
 
   `restart-watchdog` recovers the *other* failure: a Watchdog is a `:temporary`
@@ -118,7 +120,8 @@ defmodule ArbiterCli.Cmd.Queue do
         else
           IO.puts(
             "Re-armed: #{task_id} auto-resolve budget bumped by one; the next watchdog " <>
-              "poll (within the poll interval) will dispatch a fresh fix-pass."
+              "poll (within the poll interval) will dispatch a fresh fix-pass, or a fresh " <>
+              "conflict-resolve pass if the PR is conflicting."
           )
         end
 
@@ -132,8 +135,8 @@ defmodule ArbiterCli.Cmd.Queue do
 
       {:error, %Client.Error{kind: :http, status: 400}} ->
         Output.die(
-          "task #{task_id} is not currently parked on an exhausted :ci_failed block " <>
-            "— there is nothing to re-arm."
+          "task #{task_id} is not currently parked on an exhausted :ci_failed block or " <>
+            "an exhausted conflict auto-resolve — there is nothing to re-arm."
         )
 
       {:error, %Client.Error{kind: :http, status: 503}} ->

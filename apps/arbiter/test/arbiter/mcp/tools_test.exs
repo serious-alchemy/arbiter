@@ -3240,6 +3240,64 @@ defmodule Arbiter.MCP.ToolsTest do
 
       wait_until(fn -> StubFixPassDispatcher.call_count() >= 2 end)
     end
+
+    # bd-4olwyg AC4: the incident's ticket had spent its conflict passes, and
+    # this tool answered that there was nothing to re-arm.
+    test "re-arms a watchdog whose conflict auto-resolve is exhausted", ctx do
+      alias Arbiter.Test.RefusingConflictResolver
+
+      RefusingConflictResolver.arm(ctx.task.id, self())
+
+      StubMerger.queue_get(ctx.task.id, [
+        %{status: :open, approved: true, block_reason: :conflict}
+      ])
+
+      {:ok, watchdog_pid} =
+        Watchdog.start(
+          task_id: ctx.task.id,
+          mr_ref: ctx.task.id,
+          adapter: StubMerger,
+          auto_merge: false,
+          interval_ms: 15,
+          initial_delay_ms: 0,
+          workspace: ctx.ws,
+          conflict_resolver: RefusingConflictResolver
+        )
+
+      on_exit(fn -> Process.alive?(watchdog_pid) && GenServer.stop(watchdog_pid, :normal) end)
+
+      assert_receive {:conflict_resolve_called, _}, 1_000
+      assert_receive {:conflict_escalated, _}, 1_000
+      refute_receive {:conflict_resolve_called, _}, 100
+
+      assert {:ok, %{retried: true, task_id: task_id}} =
+               Tools.queue_retry_auto_resolve(ctx.coordinator, %{"task_id" => ctx.task.id})
+
+      assert task_id == ctx.task.id
+      assert_receive {:conflict_resolve_called, _}, 1_000
+    end
+
+    test "names both blocks it can re-arm when there is nothing to re-arm", ctx do
+      StubMerger.queue_get(ctx.task.id, [%{status: :open, approved: false}])
+
+      {:ok, watchdog_pid} =
+        Watchdog.start(
+          task_id: ctx.task.id,
+          mr_ref: ctx.task.id,
+          adapter: StubMerger,
+          auto_merge: false,
+          interval_ms: 600_000,
+          initial_delay_ms: 600_000
+        )
+
+      on_exit(fn -> Process.alive?(watchdog_pid) && GenServer.stop(watchdog_pid, :normal) end)
+
+      assert {:error, {:invalid, msg}} =
+               Tools.queue_retry_auto_resolve(ctx.coordinator, %{"task_id" => ctx.task.id})
+
+      assert msg =~ ":ci_failed"
+      assert msg =~ "conflict"
+    end
   end
 
   # bd-741sid: the Watchdog belongs to the ticket and is restarted from its row,

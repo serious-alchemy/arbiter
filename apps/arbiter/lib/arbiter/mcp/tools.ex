@@ -700,7 +700,8 @@ defmodule Arbiter.MCP.Tools do
   @doc """
   Re-arm one more auto-resolve attempt on a task's merge Watchdog after it
   has exhausted `max_auto_resolve_attempts` on a `:ci_failed` block and
-  parked indefinitely (bd-bspakl).
+  parked indefinitely (bd-bspakl), or spent its `max_conflict_attempts`
+  conflict passes and escalated (bd-4olwyg).
 
   Without this, once exhausted there is no supported way to try again short
   of pushing a fix to the branch by hand, outside Arbiter's normal
@@ -712,7 +713,7 @@ defmodule Arbiter.MCP.Tools do
 
   Returns `%{retried: true, task_id: task_id}` on success, or an error if no
   Watchdog is running for the task, it isn't parked on an exhausted
-  `:ci_failed` block, or the Watchdog is busy (e.g. mid-poll) and didn't
+  `:ci_failed` block or an exhausted conflict, or the Watchdog is busy (e.g. mid-poll) and didn't
   reply in time — in the last case, wait and retry rather than repeating the
   call immediately, since the original request may still land.
   """
@@ -731,7 +732,7 @@ defmodule Arbiter.MCP.Tools do
           {:error,
            {:invalid,
             "task #{task_id} is not currently parked on an exhausted :ci_failed block " <>
-              "— there is nothing to re-arm"}}
+              "or an exhausted conflict auto-resolve — there is nothing to re-arm"}}
 
         {:error, :busy} ->
           {:error,

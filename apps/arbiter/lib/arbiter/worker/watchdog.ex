@@ -999,7 +999,11 @@ defmodule Arbiter.Worker.Watchdog do
 
   @doc """
   Re-arm one more auto-resolve attempt for a task parked indefinitely after
-  exhausting `max_auto_resolve_attempts` on a `:ci_failed` block (bd-bspakl).
+  exhausting `max_auto_resolve_attempts` on a `:ci_failed` block (bd-bspakl),
+  or after spending `max_conflict_attempts` conflict passes and escalating
+  (bd-4olwyg). For a conflict it lifts this episode's `max_conflict_attempts`
+  to one past the passes spent and clears the escalation latch, so the next
+  poll that still sees `:conflict` dispatches a fresh conflict-resolve pass.
 
   Once exhausted, `handle_block/3` never calls `auto_resolve/3` again on its
   own — by design, so a structurally-broken PR can't burn cost forever. This
@@ -1027,8 +1031,9 @@ defmodule Arbiter.Worker.Watchdog do
       schedule (within `interval_ms`).
     * `{:error, :not_found}` — no Watchdog is registered for `task_id`.
     * `{:error, :not_parked_on_ci_failed}` — the Watchdog isn't parked on an
-      exhausted `:ci_failed` block (e.g. still running, or parked for a
-      different reason), so there is nothing to re-arm.
+      exhausted `:ci_failed` block or an exhausted conflict (e.g. still
+      running, or parked for a different reason), so there is nothing to
+      re-arm. The atom predates the conflict re-arm and is kept for callers.
     * `{:error, :busy}` — the Watchdog is running (e.g. mid-poll) and didn't
       reply within the call timeout. This is *not* the same as "not found":
       the `:retry_auto_resolve` message is still queued in its mailbox and
@@ -1554,6 +1559,12 @@ defmodule Arbiter.Worker.Watchdog do
 
   defp registry_name(task_id), do: PRegistry.via_tuple(task_id <> @watchdog_registry_suffix)
 
+  # A conflict parks through its own latch (`conflict_escalated`), not
+  # `park_reason` — report it, so `parked_on/1` answers what
+  # `retry_auto_resolve/1` would re-arm (bd-4olwyg).
+  defp parked_reason(%{park_reason: nil, conflict_escalated: true}), do: :conflict
+  defp parked_reason(%{park_reason: park}), do: park
+
   @impl true
   def handle_call(:retry_auto_resolve, _from, %{park_reason: park} = state)
       when park in [:ci_failed, :ci_failed_external] do
@@ -1579,6 +1590,34 @@ defmodule Arbiter.Worker.Watchdog do
     # pending timer picks this up within `interval_ms`, which a human re-arm
     # can tolerate.
     {:reply, :ok, state}
+  end
+
+  # bd-4olwyg: an exhausted conflict auto-resolve had no re-arm at all — the
+  # clause above only knows `:ci_failed`, and `restart/2` refuses while this
+  # Watchdog runs — so a ticket whose passes were spent sat parked until someone
+  # rebased by hand. Grant exactly one more pass: lift this episode's cap to one
+  # past the attempts spent and clear the escalation latch, so the next poll that
+  # still sees `:conflict` dispatches it (and escalates again if it too fails).
+  # A resolver that lingers finished is torn down so its key is free for the
+  # next pass. Same no-immediate-poll reasoning as above.
+  def handle_call(:retry_auto_resolve, _from, %{conflict_escalated: true} = state) do
+    Logger.warning(
+      "Worker.Watchdog: manual conflict auto-resolve re-arm for task=#{state.task_id} " <>
+        "mr=#{state.mr_ref} (was #{state.conflict_attempts}/#{state.max_conflict_attempts} attempts)"
+    )
+
+    state =
+      if state.conflict_resolving and resolver_finished?(state),
+        do: teardown_resolver(state),
+        else: state
+
+    {:reply, :ok,
+     %{
+       state
+       | max_conflict_attempts: state.conflict_attempts + 1,
+         conflict_escalated: false,
+         conflict_no_ops: 0
+     }}
   end
 
   def handle_call(:retry_auto_resolve, _from, state) do
@@ -1631,7 +1670,7 @@ defmodule Arbiter.Worker.Watchdog do
 
   @impl true
   def handle_call(:parked_on, _from, state) do
-    {:reply, state.park_reason, state}
+    {:reply, parked_reason(state), state}
   end
 
   # bd-985tkl acceptance 3. Once a resume deferral is in flight this Watchdog has
@@ -3564,6 +3603,21 @@ defmodule Arbiter.Worker.Watchdog do
          } = state
        ),
        do: state
+
+  # bd-4olwyg: but never a resolver still at work. A poll that stops reporting
+  # `:conflict` does not mean the conflict is gone — GitHub recomputes a PR's
+  # mergeability after its base moves, and a poll in that window reads as not
+  # conflicting. Stopping the resolver there is what ended the incident's pass
+  # 19 s in, mid-rebase, recorded as a success. A live resolver finishes on its
+  # own; a later poll tears it down once it has (and, if the conflict is truly
+  # cleared, resets the counter then).
+  defp reset_conflict_state(%{conflict_resolving: true} = state) do
+    if resolver_finished?(state) do
+      state |> teardown_resolver() |> reset_conflict_state()
+    else
+      state
+    end
+  end
 
   defp reset_conflict_state(state) do
     %{
