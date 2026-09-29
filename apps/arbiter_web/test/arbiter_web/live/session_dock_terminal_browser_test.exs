@@ -96,10 +96,23 @@ defmodule ArbiterWeb.SessionDockTerminalBrowserTest do
   # reads back exactly what the capture path writes — redaction included.
   defp ended_with_transcript!(tmp_dir, name) do
     {:ok, session} = Sessions.launch(cwd: tmp_dir, name: name, runner: NoopRunner)
-    :ok = Arbiter.Sessions.Transcript.append(session.id, "\r\n" <> @transcript_marker <> "\r\n")
+    :ok = Arbiter.Sessions.Transcript.append(session.id, tui_recording() <> "\r\n" <> @transcript_marker <> "\r\n")
     {:ok, ended} = Sessions.kill(session.id)
     on_exit(fn -> Stream.stop(session.id) end)
     ended
+  end
+
+  # What a full-screen agent TUI leaves on disk (bd-bgemk5): the alternate
+  # screen, mouse tracking left on, and a full-screen clear before each frame.
+  # Replayed verbatim it has no scrollback and a wheel xterm reports.
+  defp tui_recording do
+    frames =
+      for n <- 1..40 do
+        rows = for r <- 1..30, into: "", do: "frame #{n} row #{r}\r\n"
+        "\e[2J\e[H" <> rows
+      end
+
+    "\e[?1049h\e[?1000h\e[?1006h" <> Enum.join(frames)
   end
 
   # `put/2`, not `install/2`. `Sessions.launch/1` starts §11's transcript
@@ -168,6 +181,10 @@ defmodule ArbiterWeb.SessionDockTerminalBrowserTest do
         assert output =~ "RESULT: PASS"
         refute output =~ ": FAIL"
 
+        # bd-bgemk5: the script typed into the replayed pane; none of it may
+        # have reached the (ended) session's PTY.
+        assert ScriptedPty.input(c.id) in [nil, ""]
+
         # Named one by one as well as by the verdict: a check that quietly
         # stops being emitted still leaves a green `RESULT: PASS` behind, and
         # these are the acceptance criteria themselves.
@@ -198,6 +215,7 @@ defmodule ArbiterWeb.SessionDockTerminalBrowserTest do
               # replay is never dressed up as a live pane.
               "an-ended-sessions-window-replays-its-persisted-transcript",
               "a-replayed-transcript-is-read-only-and-never-looks-live",
+              "a-replayed-transcript-scrolls-back-with-a-real-wheel",
               "a-replay-is-still-the-one-pane-in-the-dock",
               # The size presets (bd-covojz). Named for the same reason as the
               # rest: `maximized-keeps-the-roster-reachable` is a hit test now,

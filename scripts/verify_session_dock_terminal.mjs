@@ -766,6 +766,39 @@ async function transcriptReplay(page) {
     JSON.stringify(replay)
   )
 
+  // bd-bgemk5: the replay is a TUI recording (alternate screen, mouse tracking
+  // on, full-screen clears). It must be navigable with a real wheel.
+  const before = await page.json(`(() => {
+    const term = document.getElementById("session-dock-terminal-${SESSION_C}").__arbTerminal.term
+    const b = term.buffer.active
+    const r = document.querySelector("#session-dock-terminal-${SESSION_C}").getBoundingClientRect()
+    return { type: b.type, length: b.length, rows: term.rows, viewportY: b.viewportY, baseY: b.baseY,
+             x: r.x + r.width / 2, y: r.y + r.height / 2 }
+  })()`)
+
+  await page.wheel(before.x, before.y, -400)
+  await page.settle()
+
+  const after = await page.json(`(() => {
+    const b = document.getElementById("session-dock-terminal-${SESSION_C}").__arbTerminal.term.buffer.active
+    return { viewportY: b.viewportY }
+  })()`)
+
+  check(
+    "a-replayed-transcript-scrolls-back-with-a-real-wheel",
+    before.type === "normal" &&
+      before.length > before.rows &&
+      before.viewportY === before.baseY &&
+      after.viewportY < before.viewportY,
+    `buffer=${before.type} length=${before.length} rows=${before.rows} viewportY ${before.viewportY} -> ${after.viewportY}`
+  )
+
+  // Typing into the pane must still go nowhere (the Elixir side reads the
+  // scripted PTY's input back and asserts it is empty).
+  await page.eval(`document.querySelector("#session-dock-terminal-${SESSION_C} .xterm-helper-textarea").focus()`)
+  await page.type("q")
+  await page.settle()
+
   // The dock's own invariant still holds with a replay open: one pane, and
   // this one holds no socket at all once the file is on screen.
   check(
@@ -1120,6 +1153,15 @@ function pageDriver(cdp, sessionId) {
 
       await cdp.send("Input.dispatchKeyEvent", { type: "keyDown", ...common }, sessionId)
       await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", ...common }, sessionId)
+    },
+
+    // A real mouse wheel at a point, as the browser would deliver it.
+    async wheel(x, y, deltaY) {
+      await cdp.send(
+        "Input.dispatchMouseEvent",
+        { type: "mouseWheel", x, y, deltaX: 0, deltaY },
+        sessionId
+      )
     },
 
     async key(key, { ctrl = false, shift = false } = {}) {
