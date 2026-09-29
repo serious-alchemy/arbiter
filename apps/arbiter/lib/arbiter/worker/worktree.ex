@@ -78,7 +78,7 @@ defmodule Arbiter.Worker.Worktree do
 
     result =
       if File.dir?(path) do
-        case current_branch(path) do
+        case checked_out_branch(path) do
           {:ok, ^branch_name} ->
             {:ok, path}
 
@@ -210,10 +210,14 @@ defmodule Arbiter.Worker.Worktree do
   Lets callers distinguish a detached *inspect* checkout — which holds nothing
   worth preserving and is safe to re-point or throw away — from a branch
   worktree, which may hold unpushed commits (bd-9r1tta).
+
+  A branch worktree stopped mid-rebase is *not* detached, although `git rebase`
+  detaches HEAD while it replays: it is still that branch's worktree, and may
+  hold work (bd-4olwyg). See `checked_out_branch/1`.
   """
   @spec detached?(path()) :: {:ok, boolean()} | {:error, error_reason()}
   def detached?(path) when is_binary(path) do
-    with {:ok, branch} <- current_branch(path) do
+    with {:ok, branch} <- checked_out_branch(path) do
       {:ok, branch == "HEAD"}
     end
   end
@@ -222,7 +226,7 @@ defmodule Arbiter.Worker.Worktree do
   # it is the detached checkout we left there, reclaim-and-recreate if it is not a
   # live worktree at all, refuse if it is on a branch (not ours to clobber).
   defp refresh_or_recreate_detached(repo_path, path, base_branch) do
-    case current_branch(path) do
+    case checked_out_branch(path) do
       {:ok, "HEAD"} ->
         repoint_detached(repo_path, path, base_branch)
 
@@ -550,6 +554,11 @@ defmodule Arbiter.Worker.Worktree do
   and is on the requested branch, returns `{:ok, path}` without re-invoking
   git. If the directory exists on a different branch, returns
   `{:error, {:git_failed, _}}` rather than silently switching it.
+
+  "On the requested branch" includes a worktree stopped mid-rebase of it
+  (`checked_out_branch/1`, bd-4olwyg): it is returned as-is, with the rebase
+  still in progress. Aborting it is the caller's call — only the caller knows
+  whether a live run is still working in it (`abort_in_progress/1`).
   """
   @spec attach(path(), String.t()) :: {:ok, path()} | {:error, error_reason()}
   def attach(_repo_path, ""), do: {:error, :invalid_branch_name}
@@ -560,7 +569,7 @@ defmodule Arbiter.Worker.Worktree do
     path = worktree_path(branch_name)
 
     if File.dir?(path) do
-      case current_branch(path) do
+      case checked_out_branch(path) do
         {:ok, ^branch_name} ->
           {:ok, path}
 
@@ -683,6 +692,98 @@ defmodule Arbiter.Worker.Worktree do
     case run_git(["rev-parse", "--abbrev-ref", "HEAD"], cd: path) do
       {:ok, output} -> {:ok, String.trim(output)}
       {:error, _} = err -> err
+    end
+  end
+
+  @doc """
+  The branch the worktree at `path` belongs to: `current_branch/1`, except that a
+  worktree stopped mid-rebase names the branch being rebased rather than `"HEAD"`.
+
+  `git rebase` detaches HEAD while it replays, so `current_branch/1` reads a
+  branch worktree left mid-rebase as a detached checkout. That is how bd-4olwyg's
+  wedge happened: resume refused the worktree as detached (`:no_outpost`) while
+  `attach/2` refused it as "on a different branch", both of the same directory.
+  Returns `{:ok, "HEAD"}` for a genuinely detached checkout.
+  """
+  @spec checked_out_branch(path()) :: {:ok, String.t()} | {:error, error_reason()}
+  def checked_out_branch(path) when is_binary(path) do
+    case current_branch(path) do
+      {:ok, "HEAD"} -> {:ok, rebasing_branch(path) || "HEAD"}
+      other -> other
+    end
+  end
+
+  @doc """
+  The git operation stopped part-way in the worktree at `path`: `:rebase` (a
+  `rebase-merge/` or `rebase-apply/` directory), `:merge` (`MERGE_HEAD`), or
+  `nil` when none is (or `path` is not a readable worktree).
+  """
+  @spec in_progress_operation(path()) :: :rebase | :merge | nil
+  def in_progress_operation(path) when is_binary(path) do
+    case git_dir(path) do
+      {:ok, dir} ->
+        cond do
+          rebase_dir(dir) != nil -> :rebase
+          File.exists?(Path.join(dir, "MERGE_HEAD")) -> :merge
+          true -> nil
+        end
+
+      {:error, _} ->
+        nil
+    end
+  end
+
+  @doc """
+  The paths with unresolved conflicts in the worktree at `path`, or `[]`.
+  """
+  @spec unmerged_files(path()) :: [String.t()]
+  def unmerged_files(path) when is_binary(path) do
+    case run_git(["diff", "--name-only", "--diff-filter=U"], cd: path) do
+      {:ok, out} -> String.split(out, "\n", trim: true)
+      {:error, _} -> []
+    end
+  end
+
+  @doc """
+  Abort whatever rebase or merge is stopped part-way in the worktree at `path`,
+  putting its branch back where it was before the operation began.
+
+  `{:ok, :rebase | :merge}` for what was aborted, `{:ok, nil}` when nothing was in
+  progress. For a run that ended mid-operation (bd-4olwyg): its half-resolved
+  state is not a deliverable, and leaving it behind makes the worktree read as
+  detached to every later dispatch and resume. Nothing committed on the branch
+  is lost — an abort restores the branch's pre-operation tip.
+  """
+  @spec abort_in_progress(path()) :: {:ok, :rebase | :merge | nil} | {:error, error_reason()}
+  def abort_in_progress(path) when is_binary(path) do
+    case in_progress_operation(path) do
+      nil -> {:ok, nil}
+      op -> with {:ok, _} <- run_git([Atom.to_string(op), "--abort"], cd: path), do: {:ok, op}
+    end
+  end
+
+  defp git_dir(path) do
+    with {:ok, out} <- run_git(["rev-parse", "--absolute-git-dir"], cd: path) do
+      {:ok, String.trim(out)}
+    end
+  end
+
+  defp rebase_dir(git_dir) do
+    ["rebase-merge", "rebase-apply"]
+    |> Enum.map(&Path.join(git_dir, &1))
+    |> Enum.find(&File.dir?/1)
+  end
+
+  # `head-name` holds the ref being rebased (`refs/heads/<branch>`), or
+  # `detached HEAD` when the rebase itself started from one.
+  defp rebasing_branch(path) do
+    with {:ok, dir} <- git_dir(path),
+         rebase when is_binary(rebase) <- rebase_dir(dir),
+         {:ok, head_name} <- File.read(Path.join(rebase, "head-name")),
+         "refs/heads/" <> branch <- String.trim(head_name) do
+      branch
+    else
+      _ -> nil
     end
   end
 
@@ -1125,11 +1226,7 @@ defmodule Arbiter.Worker.Worktree do
   end
 
   defp abort_rebase(path, output) do
-    conflicts =
-      case run_git(["diff", "--name-only", "--diff-filter=U"], cd: path) do
-        {:ok, out} -> String.split(out, "\n", trim: true)
-        {:error, _} -> []
-      end
+    conflicts = unmerged_files(path)
 
     _ = run_git(["rebase", "--abort"], cd: path)
 

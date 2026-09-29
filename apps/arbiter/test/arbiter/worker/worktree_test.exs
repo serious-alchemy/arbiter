@@ -678,6 +678,73 @@ defmodule Arbiter.Worker.WorktreeTest do
       File.mkdir_p!(plain)
       assert {:error, _} = Worktree.detached?(plain)
     end
+
+    # bd-4olwyg: `git rebase` detaches HEAD while it replays. A branch worktree
+    # a conflict pass left mid-rebase is still that branch's worktree — resume
+    # read it as a detached inspect checkout (`:no_outpost`) while `attach/2`
+    # reported it "exists … on a different branch".
+    test "false for a branch worktree stopped mid-rebase", %{repo: repo} do
+      path = mid_rebase_worktree!(repo, "feature/bd-rebase-probe")
+
+      assert {:ok, "HEAD"} = Worktree.current_branch(path)
+      assert {:ok, false} = Worktree.detached?(path)
+    end
+  end
+
+  describe "in-progress rebase / merge (bd-4olwyg)" do
+    test "checked_out_branch/1 names the branch a rebase is replaying", %{repo: repo} do
+      path = mid_rebase_worktree!(repo, "feature/bd-rebase-branch")
+
+      assert {:ok, "feature/bd-rebase-branch"} = Worktree.checked_out_branch(path)
+    end
+
+    test "checked_out_branch/1 is current_branch/1 when nothing is in progress", %{repo: repo} do
+      {:ok, branched} = Worktree.create(repo, "feature/bd-plain-branch", "main")
+      {:ok, detached} = Worktree.create_detached(repo, "feature/bd-plain-det", "main")
+
+      assert {:ok, "feature/bd-plain-branch"} = Worktree.checked_out_branch(branched)
+      assert {:ok, "HEAD"} = Worktree.checked_out_branch(detached)
+    end
+
+    test "in_progress_operation/1 reports a rebase, a merge, or nothing", %{repo: repo} do
+      rebasing = mid_rebase_worktree!(repo, "feature/bd-op-rebase")
+      merging = mid_merge_worktree!(repo, "feature/bd-op-merge")
+      {:ok, clean} = Worktree.create(repo, "feature/bd-op-clean", "main")
+
+      assert Worktree.in_progress_operation(rebasing) == :rebase
+      assert Worktree.in_progress_operation(merging) == :merge
+      assert Worktree.in_progress_operation(clean) == nil
+    end
+
+    test "unmerged_files/1 lists the conflicted paths", %{repo: repo} do
+      path = mid_rebase_worktree!(repo, "feature/bd-unmerged")
+
+      assert Worktree.unmerged_files(path) == ["README.md"]
+    end
+
+    test "abort_in_progress/1 aborts a rebase and puts the branch back", %{repo: repo} do
+      path = mid_rebase_worktree!(repo, "feature/bd-abort-rebase")
+      branch_tip = rev_parse(repo, "refs/heads/feature/bd-abort-rebase")
+
+      assert {:ok, :rebase} = Worktree.abort_in_progress(path)
+      assert Worktree.in_progress_operation(path) == nil
+      assert {:ok, "feature/bd-abort-rebase"} = Worktree.current_branch(path)
+      assert head_sha(path) == branch_tip
+    end
+
+    test "abort_in_progress/1 aborts a merge", %{repo: repo} do
+      path = mid_merge_worktree!(repo, "feature/bd-abort-merge")
+
+      assert {:ok, :merge} = Worktree.abort_in_progress(path)
+      assert Worktree.in_progress_operation(path) == nil
+      assert Worktree.unmerged_files(path) == []
+    end
+
+    test "abort_in_progress/1 is a no-op on a clean worktree", %{repo: repo} do
+      {:ok, path} = Worktree.create(repo, "feature/bd-abort-noop", "main")
+
+      assert {:ok, nil} = Worktree.abort_in_progress(path)
+    end
   end
 
   # bd-9r1tta: for callers that must keep a shared, human-used checkout as their
@@ -1128,6 +1195,26 @@ defmodule Arbiter.Worker.WorktreeTest do
       assert {:error, :invalid_branch_name} = Worktree.attach(repo, "")
       assert {:error, :invalid_branch_name} = Worktree.attach(repo, nil)
     end
+
+    # bd-4olwyg: the incident's second conflict dispatch failed on
+    # "worktree exists … on a different branch" — the first pass had left the
+    # PR branch's worktree mid-rebase, so HEAD read as detached.
+    test "reuses the branch's own worktree left mid-rebase", %{repo: repo} do
+      path = mid_rebase_worktree!(repo, "feature/bd-attach-rebase")
+
+      assert {:ok, ^path} = Worktree.attach(repo, "feature/bd-attach-rebase")
+    end
+
+    test "still refuses a worktree mid-rebase of a different branch", %{repo: repo, root: root} do
+      other = mid_rebase_worktree!(repo, "feature/bd-attach-other")
+      # Park the other branch's rebase at the leaf `attach/2` would use.
+      {_, 0} = System.cmd("git", ["-C", repo, "branch", "feature/bd-attach-mine"])
+      leaf = Path.join(root, "feature-bd-attach-mine")
+      {_, 0} = System.cmd("git", ["-C", repo, "worktree", "move", other, leaf])
+
+      assert {:error, {:git_failed, msg}} = Worktree.attach(repo, "feature/bd-attach-mine")
+      assert msg =~ "different branch"
+    end
   end
 
   describe "seed_compiled_deps/2" do
@@ -1380,6 +1467,32 @@ end
   end
 
   defp head_sha(path), do: rev_parse(path, "HEAD")
+
+  # A branch worktree whose rebase onto origin/main stopped on a conflict in
+  # README.md — the state bd-4olwyg's conflict pass left behind.
+  defp mid_rebase_worktree!(repo, branch) do
+    {:ok, path} = Worktree.create(repo, branch, "main")
+    :ok = commit(path, "README.md", "branch side\n", "branch edit")
+    :ok = advance_origin_main(repo, "README.md", "main side #{branch}\n", "main edit")
+    {_, 0} = System.cmd("git", ["-C", path, "fetch", "-q", "origin", "main"])
+    {_, status} = System.cmd("git", ["-C", path, "rebase", "origin/main"], stderr_to_stdout: true)
+    assert status != 0
+    path
+  end
+
+  # Same conflict, reached by `git merge` instead (HEAD stays on the branch).
+  defp mid_merge_worktree!(repo, branch) do
+    {:ok, path} = Worktree.create(repo, branch, "main")
+    :ok = commit(path, "README.md", "branch side\n", "branch edit")
+    :ok = advance_origin_main(repo, "README.md", "main side #{branch}\n", "main edit")
+    {_, 0} = System.cmd("git", ["-C", path, "fetch", "-q", "origin", "main"])
+
+    {_, status} =
+      System.cmd("git", ["-C", path, "merge", "--no-edit", "origin/main"], stderr_to_stdout: true)
+
+    assert status != 0
+    path
+  end
 
   # Push a commit to the bare `remote` from a throwaway clone, so the source
   # checkout's own refs stay behind — the "human hasn't pulled in a month" shape
