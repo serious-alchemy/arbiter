@@ -220,6 +220,17 @@ defmodule Arbiter.Loop.OperatorCanaryTest do
       assert length(verdict_mail()) == 1
     end
 
+    test "a held canary past max_age_days does not expire", %{ws: ws, proposal: proposal} do
+      assert {:ok, {:awaiting_operator, _}} = Canary.tick(ws)
+
+      old = DateTime.to_iso8601(DateTime.add(DateTime.utc_now(), -30 * 86_400, :second))
+      held = patch!(reload!(ws), %{"loop" => %{"canary" => %{"started_at" => old}}})
+
+      assert {:ok, {:awaiting_operator, _}} = Canary.tick(held)
+      assert Ash.get!(PendingWrite, proposal.id).state == :proposed
+      assert get_in(reload!(ws).config, ["loop", "canary", "proposal_id"]) == proposal.id
+    end
+
     test "the operator then applies it, and the canary is abandoned", %{
       ws: ws,
       proposal: proposal

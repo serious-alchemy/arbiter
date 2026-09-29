@@ -420,7 +420,8 @@ routing change and keep the final call, use the operator flow:
    verdict — canary convergence below control beyond the tolerance — is still
    automatic under either setting: it only deletes the overlay block, which is
    harmless. If the canary never reaches its sample size it expires after
-   `loop.canary_max_age_days`, as before.
+   `loop.canary_max_age_days`, as before; a canary already held for your
+   decision does not expire, it waits for apply/reject (or a revert verdict).
 
 ## Where lessons land (you choose, per finding)
 

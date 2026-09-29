@@ -698,7 +698,9 @@ defmodule Arbiter.Loop.Canary do
   defp judge_age(ws, canary, opts) do
     age_days = DateTime.diff(DateTime.utc_now(), canary.started_at, :day)
 
-    if age_days >= canary.max_age_days do
+    # A canary already held for the operator's apply/reject has met its sample
+    # size: expiring it would reject a passing proposal under a false reason.
+    if age_days >= canary.max_age_days and is_nil(canary.promote_reported_at) do
       expire(ws, canary, age_days, opts)
     else
       judge_metrics(ws, canary, opts)
