@@ -96,7 +96,13 @@ defmodule ArbiterWeb.SessionDockTerminalBrowserTest do
   # reads back exactly what the capture path writes — redaction included.
   defp ended_with_transcript!(tmp_dir, name) do
     {:ok, session} = Sessions.launch(cwd: tmp_dir, name: name, runner: NoopRunner)
-    :ok = Arbiter.Sessions.Transcript.append(session.id, tui_recording() <> "\r\n" <> @transcript_marker <> "\r\n")
+
+    :ok =
+      Arbiter.Sessions.Transcript.append(
+        session.id,
+        tui_recording() <> "\r\n" <> @transcript_marker <> "\r\n"
+      )
+
     {:ok, ended} = Sessions.kill(session.id)
     on_exit(fn -> Stream.stop(session.id) end)
     ended
