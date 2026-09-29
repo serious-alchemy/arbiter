@@ -6,8 +6,7 @@ defmodule Arbiter.Accounts.WorkspaceProviderAccount do
   natural home for `share` (§4).
 
   Read by `Arbiter.Accounts.Credentials` since P3 (bd-aiodva) — it is the
-  join hop between a spawn's workspace and the credential it carries — but
-  only when `Arbiter.Accounts.enabled?/0` is true.
+  join hop between a spawn's workspace and the credential it carries.
 
   Cardinality (§3.4): one account per provider per workspace, enforced by the
   `identity` below. A workspace may have `claude` on one account and `codex`

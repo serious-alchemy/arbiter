@@ -10,13 +10,15 @@ defmodule Arbiter.Accounts do
 
   P3 is §7.5's "Release N+1 — read flip": `Arbiter.Accounts.Credentials`
   reads these tables, and `Arbiter.Agents.Claude.ConfigDir` /
-  `Arbiter.Worker.WorkerEnv` source provider credentials from it **when
-  `enabled?/0` is true**. The flag ships `:auto` (bd-cvvb02), which the boot
-  resolves on only for a fresh or already-migrated install; an un-migrated
-  install keeps `workspaces.encrypted_worker_env` as the source of truth for
-  every spawn (`Arbiter.Accounts.Enablement`). Turning the flag off with
-  `ARBITER_PROVIDER_ACCOUNTS=0` is the read-path rollback. Deleting the old fallbacks is P4
-  (bd-cblemv).
+  `Arbiter.Worker.WorkerEnv` source provider credentials from it. P13
+  (bd-9gqj8e) is the flip release: the `:provider_accounts_enabled` flag and
+  the legacy `worker_env` / server-env credential chain it guarded are gone,
+  so these tables are the only source of a spawn's provider credential. A
+  workspace that still carries a provider credential in its `worker_env` but
+  has no account to supply it raises
+  `Arbiter.Accounts.MissingCredentialError` at spawn rather than dispatching
+  a worker with no credential; `Arbiter.Accounts.Enablement` names those
+  workspaces at boot and in `arb server doctor`.
 
   `Arbiter.Accounts.Census` (P0) is a plain module, not a resource in this
   domain; it inspects `worker_env` read-only and emits the candidate plan
@@ -33,27 +35,6 @@ defmodule Arbiter.Accounts do
     resource Arbiter.Accounts.ProviderAccountMigrationBackup
     resource Arbiter.Accounts.WorkspaceProviderAccount
   end
-
-  @doc """
-  Whether the provider-account tables are the source of truth for credentials.
-
-  §7.5's `:provider_accounts_enabled`. Ships `:auto` (bd-cvvb02): the boot
-  resolves it on for a fresh or already-migrated install and holds it off for
-  an un-migrated one that still carries legacy credentials; an explicit
-  `ARBITER_PROVIDER_ACCOUNTS=0/1` always wins. See
-  `Arbiter.Accounts.Enablement`. Either way, changing it is a config change
-  and a restart rather than a deploy.
-
-  Consulted by `Arbiter.Agents.Claude.ConfigDir.oauth_token/1` (and therefore
-  `env/1`) and `Arbiter.Worker.WorkerEnv.resolve/1` — P3's read flip. With it
-  on, a workspace that still carries a provider credential in its
-  `worker_env` but has no `workspace_provider_accounts` row raises
-  `Arbiter.Accounts.MissingCredentialError` rather than dispatching a worker
-  with no credential: run `mix arbiter.accounts.migrate` for that workspace
-  first, or turn the flag back off.
-  """
-  @spec enabled?() :: boolean()
-  defdelegate enabled?(), to: Arbiter.Accounts.Enablement
 
   alias Arbiter.Accounts.{
     Census,
@@ -512,14 +493,13 @@ defmodule Arbiter.Accounts do
     end
   end
 
-  # §7.5's read flip: once `enabled?/0` is true, a workspace whose
-  # `worker_env` still carries this provider's credential key resolves it
+  # §7.5's read flip: a workspace whose `worker_env` still carries this provider's credential key resolves it
   # solely through this link (`Arbiter.Accounts.Credentials.workspace_pairs/1`
   # — cardinality is one account per (workspace, provider), so there is never
   # a second link to fall back to). Removing the link would raise
   # `Arbiter.Accounts.MissingCredentialError` at the workspace's next spawn.
   defp missing_credential_risk?(link, account) do
-    enabled?() and workspace_carries_credential?(link.workspace_id, account.provider)
+    workspace_carries_credential?(link.workspace_id, account.provider)
   end
 
   defp workspace_carries_credential?(workspace_id, provider) do

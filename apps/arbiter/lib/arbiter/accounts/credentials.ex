@@ -5,11 +5,9 @@ defmodule Arbiter.Accounts.Credentials do
   `docs/provider-account-design.md` §5 rows 15–18).
 
   P1 created the tables and P2 populated them; this module is the first thing
-  in the running system that *reads* them. It is consulted only when
-  `Arbiter.Accounts.enabled?/0` is true — its callers
-  (`Arbiter.Agents.Claude.ConfigDir`, `Arbiter.Worker.WorkerEnv`) keep their
-  pre-P3 path underneath the flag, which is what makes §7.5's Release N+1
-  rollback a config change rather than a deploy.
+  in the running system that *reads* them. Since the P13 flip (bd-9gqj8e) its
+  callers (`Arbiter.Agents.Claude.ConfigDir`, `Arbiter.Worker.WorkerEnv`)
+  have no other source: the pre-P3 path and the flag that kept it are gone.
 
   ## The read
 

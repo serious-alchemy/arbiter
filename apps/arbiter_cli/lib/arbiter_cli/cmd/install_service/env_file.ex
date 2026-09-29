@@ -11,10 +11,13 @@ defmodule ArbiterCli.Cmd.InstallService.EnvFile do
   # Keys forwarded from the installing shell into `.arbiter.env` so the
   # detached, login-less service can still reach GitHub and the model
   # providers. Only keys actually set (and non-empty) in the current
-  # environment are written.
+  # environment are written. `CLAUDE_CODE_OAUTH_TOKEN` is deliberately absent:
+  # since the P13 flip (bd-9gqj8e) workers take their setup token from their
+  # provider account only, so a server-env copy would be read by nothing —
+  # and would make the boot classify a fresh install as carrying legacy
+  # credentials (`Arbiter.Accounts.Enablement`).
   @captured_secrets ~w(
     GITHUB_TOKEN
-    CLAUDE_CODE_OAUTH_TOKEN
     ANTHROPIC_API_KEY
     ANTHROPIC_API_KEY_2
     GEMINI_API_KEY

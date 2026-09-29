@@ -1,7 +1,8 @@
 defmodule Arbiter.Accounts.ReadFlipTest do
   @moduledoc """
-  P3 (bd-aiodva): the read-path flip behind `:provider_accounts_enabled`
-  (`docs/provider-account-design.md` §5 rows 15–18, §7.5 "Release N+1").
+  P3 (bd-aiodva): the read-path flip (`docs/provider-account-design.md` §5
+  rows 15–18, §7.5 "Release N+1"), unconditional since P13 (bd-9gqj8e)
+  removed the flag and the legacy chain — see `LegacyChainRemovedTest`.
 
   Three functions change *where* a provider credential comes from — the
   account's active `provider_credentials` row, joined through
@@ -12,11 +13,9 @@ defmodule Arbiter.Accounts.ReadFlipTest do
     * `Arbiter.Agents.Claude.ConfigDir.env/1`
     * `Arbiter.Worker.WorkerEnv.resolve/1`
 
-  Each has a test here with the flag **on**, a regression test with it
-  **off** (the production default — behaviour must be byte-for-byte what it
-  was pre-P3), and the loud-failure case: a workspace whose blob still
-  carries a credential but which has no `workspace_provider_accounts` row
-  must raise rather than dispatch a worker with no token.
+  Each has a test here, and the loud-failure case: a workspace whose blob
+  still carries a credential but which has no `workspace_provider_accounts`
+  row must raise rather than dispatch a worker with no token.
   """
   # async: false — toggles Application env other tests read.
   use Arbiter.DataCase, async: false
@@ -37,7 +36,6 @@ defmodule Arbiter.Accounts.ReadFlipTest do
     # The config dir itself is out of scope here: with isolation off, `env/1`
     # emits only the token pair, which is the part P3 moves.
     prev_isolate = Application.get_env(:arbiter, :worker_isolate_config)
-    prev_flag = Application.get_env(:arbiter, :provider_accounts_enabled)
     prev_server_token = System.get_env(@oauth_var)
 
     Application.put_env(:arbiter, :worker_isolate_config, false)
@@ -45,7 +43,6 @@ defmodule Arbiter.Accounts.ReadFlipTest do
 
     on_exit(fn ->
       restore_app(:worker_isolate_config, prev_isolate)
-      restore_app(:provider_accounts_enabled, prev_flag)
       restore_sys(@oauth_var, prev_server_token)
     end)
 
@@ -56,8 +53,6 @@ defmodule Arbiter.Accounts.ReadFlipTest do
   defp restore_app(key, val), do: Application.put_env(:arbiter, key, val)
   defp restore_sys(name, nil), do: System.delete_env(name)
   defp restore_sys(name, val), do: System.put_env(name, val)
-
-  defp flag(value), do: Application.put_env(:arbiter, :provider_accounts_enabled, value)
 
   defp uniq, do: System.unique_integer([:positive])
 
@@ -121,12 +116,10 @@ defmodule Arbiter.Accounts.ReadFlipTest do
     acct
   end
 
-  describe "ConfigDir.oauth_token/1 with the flag on (acceptance 1)" do
+  describe "ConfigDir.oauth_token/1 (acceptance 1)" do
     test "sources the token from the account, not the workspace blob" do
       ws = token_workspace("stale-blob-token")
       workspace_on_account(ws, "account-token")
-
-      flag(true)
 
       assert ConfigDir.oauth_token(ws) == "account-token"
       assert ConfigDir.oauth_token(ws.id) == "account-token"
@@ -139,8 +132,6 @@ defmodule Arbiter.Accounts.ReadFlipTest do
       credential(acct, "current-token")
       link(ws, acct)
 
-      flag(true)
-
       assert ConfigDir.oauth_token(ws) == "current-token"
     end
 
@@ -148,25 +139,21 @@ defmodule Arbiter.Accounts.ReadFlipTest do
       ws = token_workspace()
       workspace_on_account(ws, "install-wide-account-token")
 
-      flag(true)
-
       assert ConfigDir.oauth_token() == "install-wide-account-token"
     end
   end
 
-  describe "ConfigDir.env/1 with the flag on (acceptance 1)" do
+  describe "ConfigDir.env/1 (acceptance 1)" do
     test "projects the account's credential into the spawn env pairs" do
       ws = token_workspace("stale-blob-token")
       workspace_on_account(ws, "account-token")
-
-      flag(true)
 
       assert ConfigDir.env(ws) == [{@oauth_var, "account-token"}]
       assert ConfigDir.env(ws.id) == [{@oauth_var, "account-token"}]
     end
   end
 
-  describe "WorkerEnv.resolve/1 with the flag on (acceptance 1)" do
+  describe "WorkerEnv.resolve/1 (acceptance 1)" do
     test "non-credential vars come from the workspace, the credential from the account" do
       ws =
         workspace_with_env(%{
@@ -176,14 +163,6 @@ defmodule Arbiter.Accounts.ReadFlipTest do
 
       workspace_on_account(ws, "account-token")
       task = task_in(ws)
-
-      flag(false)
-      {pairs, secrets} = WorkerEnv.resolve(task.id)
-
-      assert Enum.sort(pairs) == [{@oauth_var, "stale-blob-token"}, {"LOG_LEVEL", "debug"}]
-      refute "account-token" in secrets
-
-      flag(true)
 
       {pairs, secrets} = WorkerEnv.resolve(task.id)
 
@@ -206,8 +185,6 @@ defmodule Arbiter.Accounts.ReadFlipTest do
 
       task = task_in(ws)
 
-      flag(true)
-
       {pairs, _secrets} = WorkerEnv.resolve(task.id)
 
       assert Enum.sort(pairs) == [
@@ -223,8 +200,6 @@ defmodule Arbiter.Accounts.ReadFlipTest do
       ws = token_workspace("stale-blob-token")
       workspace_on_account(ws, "account-token")
 
-      flag(true)
-
       # `Arbiter.Agents.Claude.spawn_env/1` is what actually builds a worker
       # spawn's environment (`claude.ex:258` → `ConfigDir.env/1`), so this is
       # the flip observed where it matters rather than one function down.
@@ -232,38 +207,9 @@ defmodule Arbiter.Accounts.ReadFlipTest do
     end
   end
 
-  describe "with the flag off (acceptance 2 — pre-P3 behaviour, byte for byte)" do
-    test "all three functions ignore the account tables entirely" do
-      ws = token_workspace("blob-token")
-      workspace_on_account(ws, "account-token")
-      task = task_in(ws)
-
-      flag(false)
-
-      assert ConfigDir.oauth_token(ws) == "blob-token"
-      assert ConfigDir.oauth_token(ws.id) == "blob-token"
-      assert ConfigDir.env(ws) == [{@oauth_var, "blob-token"}]
-
-      {pairs, secrets} = WorkerEnv.resolve(task.id)
-      assert pairs == [{@oauth_var, "blob-token"}]
-      assert secrets == ["blob-token"]
-    end
-
-    test "the workspace-less install-wide fallback still reads workspaces" do
-      ws = token_workspace("blob-token")
-      workspace_on_account(ws, "account-token")
-
-      flag(false)
-
-      assert ConfigDir.oauth_token() == "blob-token"
-    end
-  end
-
-  describe "no workspace_provider_accounts row with the flag on (acceptance 3)" do
+  describe "no workspace_provider_accounts row (acceptance 3)" do
     test "ConfigDir.oauth_token/1 raises rather than dispatching a nil token" do
       ws = token_workspace("blob-token")
-
-      flag(true)
 
       assert_raise MissingCredentialError, ~r/#{ws.id}/, fn -> ConfigDir.oauth_token(ws) end
       assert_raise MissingCredentialError, fn -> ConfigDir.oauth_token(ws.id) end
@@ -272,16 +218,12 @@ defmodule Arbiter.Accounts.ReadFlipTest do
     test "ConfigDir.env/1 raises rather than emitting env pairs with no credential" do
       ws = token_workspace("blob-token")
 
-      flag(true)
-
       assert_raise MissingCredentialError, fn -> ConfigDir.env(ws) end
     end
 
     test "WorkerEnv.resolve/1 raises rather than silently dropping the credential" do
       ws = token_workspace("blob-token")
       task = task_in(ws)
-
-      flag(true)
 
       assert_raise MissingCredentialError, ~r/#{@oauth_var}/, fn -> WorkerEnv.resolve(task.id) end
     end
@@ -296,8 +238,6 @@ defmodule Arbiter.Accounts.ReadFlipTest do
       workspace_on_account(ws, "account-token")
       task = task_in(ws)
 
-      flag(true)
-
       assert_raise MissingCredentialError, ~r/OPENAI_API_KEY/, fn ->
         WorkerEnv.resolve(task.id)
       end
@@ -307,18 +247,14 @@ defmodule Arbiter.Accounts.ReadFlipTest do
       ws = token_workspace("blob-token")
       workspace_on_account(ws, "account-token", enabled: false)
 
-      flag(true)
-
       assert_raise MissingCredentialError, fn -> ConfigDir.oauth_token(ws) end
     end
   end
 
   describe "a workspace with no credential at all (the quiet case)" do
-    test "stays quiet with the flag on — there is nothing to lose" do
+    test "stays quiet — there is nothing to lose" do
       ws = workspace_with_env(%{"LOG_LEVEL" => %{"value" => "debug", "secret" => false}})
       task = task_in(ws)
-
-      flag(true)
 
       assert ConfigDir.oauth_token(ws) == nil
       # {..., false} is an explicit Port.open unset, not an empty list — see
@@ -327,9 +263,7 @@ defmodule Arbiter.Accounts.ReadFlipTest do
       assert WorkerEnv.resolve(task.id) == {[{"LOG_LEVEL", "debug"}], []}
     end
 
-    test "an unknown task id and an unknown workspace id stay quiet with the flag on" do
-      flag(true)
-
+    test "an unknown task id and an unknown workspace id stay quiet" do
       assert WorkerEnv.resolve("does-not-exist") == {[], []}
       assert ConfigDir.oauth_token("00000000-0000-0000-0000-000000000000") == nil
     end

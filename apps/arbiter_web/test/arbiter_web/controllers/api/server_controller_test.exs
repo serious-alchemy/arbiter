@@ -103,22 +103,14 @@ defmodule ArbiterWeb.Api.ServerControllerTest do
   # operator's `.credentials.json` (mode B), and whose dispatch is now held.
   describe "GET /api/server/claude_credentials" do
     setup do
-      prev_flag = Application.get_env(:arbiter, :provider_accounts_enabled)
-
       prev_env =
         for v <- ~w(CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY),
             into: %{},
             do: {v, System.get_env(v)}
 
-      Application.put_env(:arbiter, :provider_accounts_enabled, true)
       Enum.each(prev_env, fn {v, _} -> System.delete_env(v) end)
 
       on_exit(fn ->
-        case prev_flag do
-          nil -> Application.delete_env(:arbiter, :provider_accounts_enabled)
-          v -> Application.put_env(:arbiter, :provider_accounts_enabled, v)
-        end
-
         Enum.each(prev_env, fn
           {v, nil} -> System.delete_env(v)
           {v, val} -> System.put_env(v, val)
@@ -143,62 +135,56 @@ defmodule ArbiterWeb.Api.ServerControllerTest do
     end
   end
 
-  # bd-cvvb02: `:provider_accounts_enabled` ships `:auto`. An un-migrated
-  # install carrying legacy credentials is held off at boot; the doctor needs
-  # the server's own answer to report it (and to name any workspace a spawn
-  # would raise MissingCredentialError for while accounts are on).
+  # bd-cvvb02 / P13 (bd-9gqj8e): provider accounts are always on. An
+  # un-migrated install carrying legacy credentials is named at boot; the
+  # doctor needs the server's own answer to report it (and to name any
+  # workspace a spawn would raise MissingCredentialError for).
   describe "GET /api/server/provider_accounts" do
     setup do
-      prev_flag = Application.get_env(:arbiter, :provider_accounts_enabled)
       prev_resolution = Application.get_env(:arbiter, :provider_accounts_resolution)
       prev_token = System.get_env("CLAUDE_CODE_OAUTH_TOKEN")
       System.delete_env("CLAUDE_CODE_OAUTH_TOKEN")
 
       on_exit(fn ->
-        for {key, value} <- [
-              provider_accounts_enabled: prev_flag,
-              provider_accounts_resolution: prev_resolution
-            ] do
-          if is_nil(value),
-            do: Application.delete_env(:arbiter, key),
-            else: Application.put_env(:arbiter, key, value)
-        end
+        if is_nil(prev_resolution),
+          do: Application.delete_env(:arbiter, :provider_accounts_resolution),
+          else: Application.put_env(:arbiter, :provider_accounts_resolution, prev_resolution)
 
-        if prev_token, do: System.put_env("CLAUDE_CODE_OAUTH_TOKEN", prev_token)
+        if prev_token,
+          do: System.put_env("CLAUDE_CODE_OAUTH_TOKEN", prev_token),
+          else: System.delete_env("CLAUDE_CODE_OAUTH_TOKEN")
       end)
 
       :ok
     end
 
-    test "reports an auto-resolved install held off by legacy credentials", %{conn: conn} do
+    test "reports an install with un-migrated legacy credentials", %{conn: conn} do
       {:ok, _ws} =
         Ash.create(Arbiter.Tasks.Workspace, %{
           name: "legacy-ws",
           worker_env: %{"CLAUDE_CODE_OAUTH_TOKEN" => %{"value" => "t", "secret" => true}}
         })
 
-      Application.put_env(:arbiter, :provider_accounts_enabled, :auto)
       ExUnit.CaptureLog.capture_log(fn -> Arbiter.Accounts.Enablement.resolve() end)
 
       resp = conn |> get("/api/server/provider_accounts") |> json_response(200)
 
-      assert resp["configured"] == "auto"
-      assert resp["enabled"] == false
       assert resp["decision"] == "unmigrated_legacy_credentials"
       assert resp["stranded_workspaces"] == ["legacy-ws"]
       assert resp["server_env_token"] == false
       assert resp["runbook"] == "docs/provider-accounts-release-runbook.md"
+      # There is no flag left to report.
+      refute Map.has_key?(resp, "configured")
+      refute Map.has_key?(resp, "enabled")
     end
 
-    test "reports an explicit setting as such", %{conn: conn} do
-      Application.put_env(:arbiter, :provider_accounts_enabled, false)
+    test "reports a fresh install", %{conn: conn} do
       Arbiter.Accounts.Enablement.resolve()
 
       resp = conn |> get("/api/server/provider_accounts") |> json_response(200)
 
-      assert resp["configured"] == "false"
-      assert resp["enabled"] == false
-      assert resp["decision"] == "explicit_off"
+      assert resp["decision"] == "no_legacy_credentials"
+      assert resp["stranded_workspaces"] == []
     end
   end
 

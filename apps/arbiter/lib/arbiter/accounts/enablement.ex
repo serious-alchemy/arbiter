@@ -1,52 +1,46 @@
 defmodule Arbiter.Accounts.Enablement do
   @moduledoc """
-  Resolves `:provider_accounts_enabled` for this install (bd-cvvb02, the
-  v0.2.0 "defaults to on" precondition; `docs/provider-account-design.md`
-  §7.5).
+  Classifies this install's provider-account posture at boot (bd-cvvb02;
+  `docs/provider-account-design.md` §7.5).
 
-  `config/config.exs` ships the flag as `:auto`. `config/runtime.exs` turns an
-  explicit `ARBITER_PROVIDER_ACCOUNTS=1/true` or `0/false` into a boolean,
-  and a boolean **always wins**: it is used as-is and never second-guessed.
-  `:auto` is resolved once per boot by `Arbiter.Boot.ProviderAccounts`, from
-  what the database and the server environment say about three populations:
+  Provider accounts are **always on**: since the P13 flip (bd-9gqj8e) there
+  is no provider-accounts flag and no legacy credential chain to
+  fall back to — a spawn's provider credential comes from its workspace's
+  account and nowhere else. What is still re-derived on every boot, by
+  `Arbiter.Boot.ProviderAccounts`, is which of three populations the install
+  is in, from what the database and the server environment say:
 
     * **Already migrated** — an un-restored `provider_account_migration_backups`
       row exists (`Arbiter.Accounts.Migrate` writes one per workspace before
       it touches that workspace's `worker_env`; a rollback marks it restored).
-      → **on** (`:migrated`), exactly as `ARBITER_PROVIDER_ACCOUNTS=1` today.
-      A server-env token left behind is inert with accounts on and does not
-      hold it off; the runbook tells the operator to remove it.
-    * **Upgrading, un-migrated** — no migration record, and a legacy
+      → `:migrated`. Nothing is joined automatically: the links are the
+      operator's.
+    * **Un-migrated legacy credentials** — no migration record, and a legacy
       credential exists: a workspace whose `worker_env` carries an
       allowlisted provider-credential key (`Arbiter.Accounts.Census.credential_keys/0`)
       that no account supplies to it, or a `CLAUDE_CODE_OAUTH_TOKEN` in the
-      server's own environment. → **off** (`:unmigrated_legacy_credentials`),
-      with a boot warning naming what is holding it off, and `arb server
-      doctor` reports `[fail]` pointing at
-      `docs/provider-accounts-release-runbook.md`. Turning accounts on here
-      would raise `Arbiter.Accounts.MissingCredentialError` on every spawn in
-      those workspaces (or silently drop the server-env token), so the
-      install keeps the legacy chain it already runs on.
-    * **Fresh** — neither of the above. → **on**
-      (`:no_legacy_credentials`), and every workspace — the existing ones at
-      boot, and each one created afterwards — is joined to
-      `<provider>:default` for the providers it runs
+      server's own environment. → `:unmigrated_legacy_credentials`, with a
+      boot warning naming them, and `arb server doctor` reports `[fail]`
+      pointing at `docs/provider-accounts-release-runbook.md`. Every spawn in
+      such a workspace raises `Arbiter.Accounts.MissingCredentialError`
+      (which the dispatch guard holds and escalates), and the server-env
+      token is read by nothing. Before P13 this population was held on the
+      legacy chain; the flip release requires migrating it first.
+    * **Fresh** — neither of the above. → `:no_legacy_credentials`, and every
+      workspace — the existing ones at boot, and each one created afterwards
+      — is joined to `<provider>:default` for the providers it runs
       (`Arbiter.Accounts.Resolver.ensure_account_id/2`). A join carries no
       credential of its own; `arb server doctor`'s Claude credential check
       names the `arb account rotate` that adds one.
 
-  Staying off rather than refusing to boot is deliberate: a refused boot on
-  upgrade takes the dashboard, the API and every running worker down with it
-  for a condition the legacy chain handles correctly today, and the fix (the
-  runbook's census → migrate) does not need the server to be down until its
-  own step 4.
+  The retired `ARBITER_PROVIDER_ACCOUNTS` switch is no longer read; a server
+  environment that still sets it gets a boot warning, since an explicit `0`
+  used to mean "keep the legacy chain" and no longer can.
 
-  Until the boot has resolved `:auto`, `Arbiter.Accounts.enabled?/0` answers
-  `false` — the conservative side, which is also what a `bin/arbiter eval`
-  or a `mix arbiter.accounts.*` task (neither starts the boot children) sees.
-
-  The answer is re-derived on every boot, so migrating (or rolling back) an
-  install changes it at the next restart without any extra step.
+  Until the boot has classified the install, `status/0` answers
+  `:unresolved` and `auto_join?/0` is `false` — which is also what a
+  `bin/arbiter eval` or a `mix arbiter.accounts.*` task (neither starts the
+  boot children) sees.
   """
 
   require Ash.Query
@@ -59,21 +53,18 @@ defmodule Arbiter.Accounts.Enablement do
   alias Arbiter.Accounts.Resolver
   alias Arbiter.Tasks.Workspace
 
-  @flag :provider_accounts_enabled
   @resolution_key :provider_accounts_resolution
   @server_token_var "CLAUDE_CODE_OAUTH_TOKEN"
+  @retired_switch_var "ARBITER_PROVIDER_ACCOUNTS"
   @runbook "docs/provider-accounts-release-runbook.md"
 
   @type decision ::
-          :explicit_on
-          | :explicit_off
-          | :migrated
+          :migrated
           | :no_legacy_credentials
           | :unmigrated_legacy_credentials
           | :unresolved
 
   @type resolution :: %{
-          enabled: boolean(),
           decision: decision(),
           stranded_workspaces: [String.t()],
           server_env_token?: boolean()
@@ -84,47 +75,19 @@ defmodule Arbiter.Accounts.Enablement do
   def runbook, do: @runbook
 
   @doc """
-  The configured value: `true` / `false` (explicit) or `:auto` (the shipped
-  default). Anything else is treated as `false`, the pre-v0.2.0 default.
-  """
-  @spec configured() :: boolean() | :auto
-  def configured do
-    case Application.get_env(:arbiter, @flag, false) do
-      value when is_boolean(value) -> value
-      :auto -> :auto
-      _ -> false
-    end
-  end
-
-  @doc """
-  Whether provider accounts are on — `Arbiter.Accounts.enabled?/0`'s answer.
-  `:auto` is `false` until `resolve/0` has run.
-  """
-  @spec enabled?() :: boolean()
-  def enabled? do
-    case configured() do
-      :auto -> match?(%{enabled: true}, Application.get_env(:arbiter, @resolution_key))
-      explicit -> explicit
-    end
-  end
-
-  @doc """
-  Resolve the flag for this boot and record the answer (see the moduledoc).
-  An explicit boolean is recorded as-is; `:auto` runs `detect/0`. Logs one
-  line — a warning when accounts are held off. Never raises: a detection
-  failure resolves off (the legacy chain), loudly.
+  Classify the install for this boot and record the answer (see the
+  moduledoc). Logs one line — a warning when legacy credentials are
+  stranded — plus a warning if the retired `ARBITER_PROVIDER_ACCOUNTS`
+  switch is still set. Never raises: a detection failure is recorded as
+  `:unmigrated_legacy_credentials`, loudly, so nothing is auto-joined.
   """
   @spec resolve() :: resolution()
   def resolve do
-    resolution =
-      case configured() do
-        true -> explicit(:explicit_on)
-        false -> explicit(:explicit_off)
-        :auto -> detect()
-      end
+    resolution = detect()
 
     Application.put_env(:arbiter, @resolution_key, resolution)
     log(resolution)
+    warn_retired_switch()
     resolution
   end
 
@@ -145,7 +108,6 @@ defmodule Arbiter.Accounts.Enablement do
       end
 
     %{
-      enabled: decision != :unmigrated_legacy_credentials,
       decision: decision,
       stranded_workspaces: stranded,
       server_env_token?: server_token?
@@ -154,11 +116,11 @@ defmodule Arbiter.Accounts.Enablement do
     e ->
       Logger.warning(
         "Arbiter.Accounts.Enablement: could not classify this install (#{inspect(e)}); " <>
-          "leaving provider accounts off — see #{@runbook}"
+          "treating it as un-migrated, so no workspace is joined to a default account — " <>
+          "see #{@runbook}"
       )
 
       %{
-        enabled: false,
         decision: :unmigrated_legacy_credentials,
         stranded_workspaces: [],
         server_env_token?: false
@@ -171,8 +133,6 @@ defmodule Arbiter.Accounts.Enablement do
   boot is still named.
   """
   @spec status() :: %{
-          configured: boolean() | :auto,
-          enabled: boolean(),
           decision: decision(),
           stranded_workspaces: [String.t()],
           server_env_token?: boolean()
@@ -181,12 +141,10 @@ defmodule Arbiter.Accounts.Enablement do
     decision =
       case Application.get_env(:arbiter, @resolution_key) do
         %{decision: decision} -> decision
-        _ -> if configured() == :auto, do: :unresolved, else: explicit_decision(configured())
+        _ -> :unresolved
       end
 
     %{
-      configured: configured(),
-      enabled: enabled?(),
       decision: decision,
       stranded_workspaces: stranded_workspaces(),
       server_env_token?: server_env_token?()
@@ -195,13 +153,12 @@ defmodule Arbiter.Accounts.Enablement do
 
   @doc """
   Whether workspaces are joined to `<provider>:default` automatically: only
-  when `:auto` resolved a fresh install. A migrated install's links are the
-  operator's, and an explicit flag keeps today's behaviour.
+  when the boot classified a fresh install. A migrated install's links are
+  the operator's.
   """
   @spec auto_join?() :: boolean()
   def auto_join? do
-    configured() == :auto and
-      match?(%{decision: :no_legacy_credentials}, Application.get_env(:arbiter, @resolution_key))
+    match?(%{decision: :no_legacy_credentials}, Application.get_env(:arbiter, @resolution_key))
   end
 
   @doc """
@@ -252,18 +209,6 @@ defmodule Arbiter.Accounts.Enablement do
     end
   end
 
-  defp explicit(decision) do
-    %{
-      enabled: decision == :explicit_on,
-      decision: decision,
-      stranded_workspaces: [],
-      server_env_token?: false
-    }
-  end
-
-  defp explicit_decision(true), do: :explicit_on
-  defp explicit_decision(false), do: :explicit_off
-
   defp migration_record? do
     ProviderAccountMigrationBackup
     |> Ash.Query.filter(is_nil(restored_at))
@@ -273,7 +218,7 @@ defmodule Arbiter.Accounts.Enablement do
   end
 
   # Workspaces whose `worker_env` carries a provider-credential key no account
-  # supplies to them — with accounts on, exactly the ones
+  # supplies to them — exactly the ones
   # `Arbiter.Worker.WorkerEnv` / `ConfigDir.oauth_token/1` raise
   # `MissingCredentialError` for. Key names come from `worker_env_meta`, so
   # nothing is decrypted to answer the common "no credential keys" case.
@@ -305,19 +250,31 @@ defmodule Arbiter.Accounts.Enablement do
 
   defp log(%{decision: :unmigrated_legacy_credentials} = resolution) do
     Logger.warning(
-      "Provider accounts are OFF on this install: it still carries legacy provider " <>
-        "credentials (#{describe_legacy(resolution)}) and has no provider-account migration " <>
-        "record, so turning accounts on would fail every spawn that needs one. Workers keep " <>
-        "the legacy credential chain. Migrate with #{@runbook} (census → migrate → restart), " <>
-        "or set ARBITER_PROVIDER_ACCOUNTS=0 to keep the legacy chain deliberately."
+      "Provider accounts: this install still carries legacy provider credentials " <>
+        "(#{describe_legacy(resolution)}) and has no provider-account migration record. " <>
+        "Provider accounts are the only credential source since the P13 flip, so every " <>
+        "spawn in those workspaces raises MissingCredentialError and a server-env " <>
+        "#{@server_token_var} is read by nothing. Migrate with #{@runbook} " <>
+        "(census → migrate → restart)."
     )
   end
 
-  defp log(%{decision: decision, enabled: enabled?}) do
-    Logger.info(
-      "Provider accounts are #{if enabled?, do: "on", else: "off"} (#{decision}; " <>
-        ":provider_accounts_enabled configured #{inspect(configured())})"
-    )
+  defp log(%{decision: decision}) do
+    Logger.info("Provider accounts: #{decision}")
+  end
+
+  defp warn_retired_switch do
+    case System.get_env(@retired_switch_var) do
+      unset when unset in [nil, ""] ->
+        :ok
+
+      value ->
+        Logger.warning(
+          "#{@retired_switch_var}=#{value} is set in the server environment but is no longer " <>
+            "read: provider accounts are always on since the P13 flip and there is no legacy " <>
+            "credential chain to fall back to. Remove it from the server's env file."
+        )
+    end
   end
 
   defp describe_legacy(%{stranded_workspaces: stranded, server_env_token?: server_token?}) do
@@ -329,6 +286,9 @@ defmodule Arbiter.Accounts.Enablement do
 
     server = if server_token?, do: ["#{@server_token_var} in the server environment"], else: []
 
-    Enum.join(workspaces ++ server, "; ")
+    case workspaces ++ server do
+      [] -> "unknown — the install could not be classified"
+      sources -> Enum.join(sources, "; ")
+    end
   end
 end

@@ -205,6 +205,44 @@ defmodule ArbiterCli.Cmd.InstallServiceTest do
     end
   end
 
+  # P13 (bd-9gqj8e): a server-env CLAUDE_CODE_OAUTH_TOKEN is read by nothing
+  # since the legacy credential chain was deleted — workers authenticate from
+  # their provider account — and one left in arbiter.env makes the boot
+  # classify a fresh install as carrying legacy credentials. So install no
+  # longer forwards it; the other captured secrets are unchanged.
+  describe "EnvFile.capture_secrets/1" do
+    setup do
+      vars = ~w(CLAUDE_CODE_OAUTH_TOKEN GITHUB_TOKEN)
+      prev = Map.new(vars, &{&1, System.get_env(&1)})
+
+      on_exit(fn ->
+        Enum.each(prev, fn
+          {var, nil} -> System.delete_env(var)
+          {var, value} -> System.put_env(var, value)
+        end)
+      end)
+
+      :ok
+    end
+
+    test "does not forward CLAUDE_CODE_OAUTH_TOKEN, and still forwards the rest", %{
+      arbiter_home: arbiter_home
+    } do
+      System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-installing-shell")
+      System.put_env("GITHUB_TOKEN", "ghp_installing_shell")
+
+      assert {:written, path, keys} = InstallService.EnvFile.capture_secrets(arbiter_home)
+
+      assert "GITHUB_TOKEN" in keys
+      refute "CLAUDE_CODE_OAUTH_TOKEN" in keys
+
+      contents = File.read!(path)
+      assert contents =~ "GITHUB_TOKEN="
+      refute contents =~ "CLAUDE_CODE_OAUTH_TOKEN"
+      refute contents =~ "sk-ant-oat01-installing-shell"
+    end
+  end
+
   describe "install (system scope)" do
     test "uses the system manager and docker ordering", %{unit_dir: dir} do
       record_cmds()

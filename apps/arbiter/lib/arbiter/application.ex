@@ -246,13 +246,12 @@ defmodule Arbiter.Application do
   #     migrator, and placed right after it so every later child (patrols,
   #     queues) enumerates workspaces whose repo config is already current.
   #     See Arbiter.Boot.ConfigMigrator and bd-3pqzsa.
-  #   * provider_accounts: resolve `:provider_accounts_enabled` (shipped as
-  #     `:auto`) from the migration state — on for a fresh or migrated
-  #     install, held off with a warning for an un-migrated one carrying
-  #     legacy credentials — and, on a fresh primary, join each workspace to
-  #     `<provider>:default`. Synchronous and after the migrators, so every
-  #     later child dispatches under the resolved mode. See
-  #     Arbiter.Accounts.Enablement and bd-cvvb02.
+  #   * provider_accounts: classify the install from the migration state —
+  #     fresh, migrated, or un-migrated with legacy credentials (a boot
+  #     warning naming them; accounts are always on since P13, bd-9gqj8e) —
+  #     and, on a fresh primary, join each workspace to `<provider>:default`.
+  #     Synchronous and after the migrators, so every later child dispatches
+  #     against the joins. See Arbiter.Accounts.Enablement and bd-cvvb02.
   #   * reconcile: sweep orphaned :running worker_runs left behind by a node
   #     that died mid-run. Runs once after Repo + Worker.Registry are online —
   #     but ONLY on the primary instance, so a transient/duplicate boot can't

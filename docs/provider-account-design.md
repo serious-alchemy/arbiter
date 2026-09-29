@@ -1,6 +1,6 @@
 # Provider accounts — extracting credentials, quota and cost out of the workspace
 
-**Status:** implemented behind `:provider_accounts_enabled`, P0–P11 all shipped as of 2026-09-23. Since v0.2.0 (bd-cvvb02) the flag ships `auto`: on for fresh and migrated installs, and held off with a doctor `[fail]` for an un-migrated install that still carries legacy credentials. See §7.5 for this and other deviations from the original design.
+**Status:** implemented; P0–P11 shipped as of 2026-09-23, and P13 (bd-9gqj8e, the "flip") removed the `:provider_accounts_enabled` flag and the legacy credential chain, so provider accounts are the only credential source. From v0.2.0 (bd-cvvb02) until P13 the flag shipped `auto`. See §7.5 for this and other deviations from the original design.
 **Date:** 2026-09-12
 **Task:** bd-7df8nh · **Tracker:** github:1593
 **Author:** worker
@@ -580,8 +580,7 @@ candidates and merges any they know to be one plan, then
 `mix arbiter.accounts.migrate --plan accounts.json` applies it. On a release
 install (no Mix), the census, migrate and rollback steps are
 `Arbiter.Release.accounts_census/1`, `accounts_migrate/1` and
-`accounts_rollback/1` through `bin/arbiter eval`, and the flag is
-`ARBITER_PROVIDER_ACCOUNTS=1` in the server's environment. See
+`accounts_rollback/1` through `bin/arbiter eval`. See
 [`provider-accounts-release-runbook.md`](provider-accounts-release-runbook.md)
 (bd-1zceei).
 
@@ -747,6 +746,26 @@ rollback for this release is unchanged: `ARBITER_PROVIDER_ACCOUNTS=0`, or a
 restore of the backup rows. Leaving the variable unset is no longer a
 rollback, because `auto` resolves a migrated install on.
 
+**What P13 shipped: the flip (bd-9gqj8e).** The `:provider_accounts_enabled`
+flag is gone, along with `config/runtime.exs`'s `ARBITER_PROVIDER_ACCOUNTS`
+parsing and `Arbiter.Accounts.enabled?/0`. `ConfigDir.oauth_token/1` is the
+account join and nothing else: the flag-off legacy chain (workspace
+`worker_env` → server env → install-wide-unambiguous workspace token) is
+deleted, together with `any_workspace_oauth_token?/0` and
+`workspace_oauth_tokens/0`, which existed only for it. The `worker_env` token
+survives only as the `MissingCredentialError` guard. `WorkerEnv.resolve/1`,
+`CredentialCheck` and the quota poll's "workers run on their own token" test
+read the account unconditionally, and `/providers` is never read-only.
+`Arbiter.Accounts.Enablement` still classifies each boot, but the answer
+decides only the fresh-install `<provider>:default` joins and what doctor
+reports. An un-migrated install carrying legacy credentials is no longer held
+on the legacy chain: its boot warning and doctor `[fail]` say those workspaces
+cannot spawn. A still-set `ARBITER_PROVIDER_ACCOUNTS` draws a boot warning,
+and `arb install service` stops copying `CLAUDE_CODE_OAUTH_TOKEN` into
+`arbiter.env`, since nothing reads it there. The only rollback is the
+previous release binary. The release notes live in
+[`provider-accounts-release-runbook.md`](provider-accounts-release-runbook.md).
+
 ### 7.6 `ARBITER_CLOAK_KEY` rotation: **keep it separate, and do it first**
 
 The key is considered exposed (printed into a transcript, 2026-09-12). The
@@ -896,7 +915,7 @@ Each phase is sized to be one child ticket.
 | **P10** | `arb usage --by account` / `--account`; `arb quota --account`; JSON + LiveView surfaces (**shipped**, bd-icwk2k) | P9, P5 | P3 | D2 |
 | **P11** | `arb account` CLI: list / show / create / attach / rotate / **merge** (§2.5) (**shipped**, bd-8zvh5a) | P2 | P2 | D2 |
 | **P12** | Docs + moduledocs: retire the "quota is per workspace" mental model | P10 | P3 | D1 |
-| **P13** | "Flip" phase: delete `ConfigDir.oauth_token/1`'s flag-off legacy chain (the server-env and install-wide-unambiguous fallbacks kept verbatim at `config_dir.ex:263-265`; the flag-on floor was already removed in P4); remove `:provider_accounts_enabled` and hard-code the account join as the only path (deferred from P4, bd-cblemv, per operator ruling on #1947 — see §7.5) | P4 | P2 | D2 |
+| **P13** | "Flip" phase: delete `ConfigDir.oauth_token/1`'s flag-off legacy chain (the server-env and install-wide-unambiguous fallbacks kept verbatim at `config_dir.ex:263-265`; the flag-on floor was already removed in P4); remove `:provider_accounts_enabled` and hard-code the account join as the only path (deferred from P4, bd-cblemv, per operator ruling on #1947 — see §7.5) (**shipped**, bd-9gqj8e) | P4 | P2 | D2 |
 
 P5 and P7 are P1 because they are the correctness fixes — the gate is only sound
 once the budget, the cap and the quota live on the same object.

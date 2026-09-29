@@ -16,12 +16,12 @@ defmodule Arbiter.Accounts.Migrate do
 
   `rollback/1` reverses step 3 from the backup row.
 
-  ## This release is additive (§7.5's "Release N")
+  ## This release was additive (§7.5's "Release N")
 
-  Nothing reads the new tables. `workspaces.encrypted_worker_env` is still the
-  source of truth for every spawn path, `Arbiter.Accounts.enabled?/0` is
-  `false`, and rolling this release back is "drop the new tables", with zero
-  data loss. The read flip is P3.
+  When P2 shipped, nothing read the new tables: `workspaces.encrypted_worker_env`
+  was still the source of truth for every spawn path, and rolling that
+  release back was "drop the new tables", with zero data loss. The read flip
+  is P3, and since P13 (bd-9gqj8e) the tables are the only credential source.
 
   Two consequences worth being explicit about, because they look like bugs
   otherwise:
