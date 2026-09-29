@@ -30,6 +30,7 @@ defmodule ArbiterWeb.SessionStreamNodeTest do
   @suites [
     "apps/arbiter_web/test/js/session_stream_test.mjs",
     "apps/arbiter_web/test/js/session_transcript_test.mjs",
+    "apps/arbiter_web/test/js/session_transcript_prep_test.mjs",
     "apps/arbiter_web/test/js/session_fit_test.mjs",
     "apps/arbiter_web/test/js/session_geometry_test.mjs",
     "apps/arbiter_web/test/js/session_keys_test.mjs",
