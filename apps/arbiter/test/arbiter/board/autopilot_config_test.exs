@@ -9,9 +9,13 @@ defmodule Arbiter.Board.AutopilotConfigTest do
       ready: [
         %{id: "bd-1", state: :next, reason: "next up — dispatching...", card: %{id: "bd-1"}}
       ],
-      running: [],
-      waiting: [],
+      backlog: [],
+      blocked: [],
+      in_progress: [],
+      merging: [],
+      verifying: [],
       closed_today: [],
+      attention: [],
       promote: promote,
       slots_total: 4,
       slots_free: 4,

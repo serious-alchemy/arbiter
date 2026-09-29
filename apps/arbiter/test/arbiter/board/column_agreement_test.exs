@@ -6,6 +6,12 @@ defmodule Arbiter.Board.ColumnAgreementTest do
   column from `Lifecycle.view/2`, so they agree — one fixture per state ×
   {no worker, working author, succeeded author row, failed author row}.
 
+  Since bd-79w1fs the board is in the seven lifecycle columns while the
+  mini-board and the rollup still answer in the interim five
+  (`Lifecycle.board_column/2`), so the board side is checked against the
+  ticket's `Lifecycle.view/2` column, and the two vocabularies against each
+  other: interim `:running` / `:waiting` ⇔ In progress, Merging or Verifying.
+
   Acceptance 3 rides along: no combination vanishes from every column.
   """
   use Arbiter.DataCase, async: false
@@ -16,7 +22,8 @@ defmodule Arbiter.Board.ColumnAgreementTest do
   @fixtures [:backlog, :queued, :blocked, :active, :merging, :verifying, :closed]
   @workers [:none, :working, :succeeded, :failed]
 
-  # What the interim five-column board shows, spelled out from the ticket's
+  # What the interim five-column classification (`classify_columns/3`, the
+  # rollup, `Lifecycle.board_column/2`) answers, spelled out from the ticket's
   # mapping table rather than read from the code under test.
   @expected %{
     backlog: %{none: :backlog, working: :running, succeeded: :backlog, failed: :backlog},
@@ -26,6 +33,41 @@ defmodule Arbiter.Board.ColumnAgreementTest do
     merging: %{none: :waiting, working: :waiting, succeeded: :waiting, failed: :waiting},
     verifying: %{none: :waiting, working: :waiting, succeeded: :waiting, failed: :waiting},
     closed: %{none: :closed, working: :closed, succeeded: :closed, failed: :closed}
+  }
+
+  # bd-79w1fs: which of the seven columns the board puts it in. A live author
+  # run on a backlog or queued ticket reads as In progress (the stored state
+  # lags a run already working); every other combination follows the stored
+  # state, whatever row lingers.
+  @expected_board %{
+    backlog: %{none: :backlog, working: :in_progress, succeeded: :backlog, failed: :backlog},
+    queued: %{none: :ready, working: :in_progress, succeeded: :ready, failed: :ready},
+    blocked: %{none: :blocked, working: :in_progress, succeeded: :blocked, failed: :blocked},
+    active: %{
+      none: :in_progress,
+      working: :in_progress,
+      succeeded: :in_progress,
+      failed: :in_progress
+    },
+    merging: %{none: :merging, working: :merging, succeeded: :merging, failed: :merging},
+    verifying: %{
+      none: :verifying,
+      working: :verifying,
+      succeeded: :verifying,
+      failed: :verifying
+    },
+    closed: %{none: :closed, working: :closed, succeeded: :closed, failed: :closed}
+  }
+
+  # The seven columns each interim column may stand for.
+  @interim_of %{
+    backlog: [:backlog],
+    blocked: [:ready],
+    ready: [:ready],
+    in_progress: [:running, :waiting],
+    merging: [:waiting],
+    verifying: [:waiting],
+    closed: [:closed]
   }
 
   setup do
@@ -74,21 +116,37 @@ defmodule Arbiter.Board.ColumnAgreementTest do
 
       for {key, ticket} <- tickets do
         expected = @expected[key][@variant]
+        expected_board = @expected_board[key][@variant]
         on_board = board_columns(board, ticket.id)
 
-        assert on_board == [expected],
-               "#{key}/#{@variant}: board put it in #{inspect(on_board)}, expected #{expected}"
+        assert on_board == [expected_board],
+               "#{key}/#{@variant}: board put it in #{inspect(on_board)}, expected #{expected_board}"
 
         assert mini[ticket.id] == expected, "#{key}/#{@variant}: classify_columns disagrees"
         assert rollup[ticket.id] == expected, "#{key}/#{@variant}: EpicRollup disagrees"
 
         blocked_by = Map.get(EdgeGate.blockers(deps, issues), ticket.id, [])
 
-        assert Lifecycle.board_column(ticket, %{
-                 runs: List.wrap(worker(ticket.id, @variant)),
-                 blocked_by: blocked_by,
-                 now: now
-               }) == expected
+        ctx = %{
+          runs: List.wrap(worker(ticket.id, @variant)),
+          blocked_by: blocked_by,
+          now: now
+        }
+
+        assert Lifecycle.board_column(ticket, ctx) == expected
+
+        # The board places the ticket by its lifecycle column…
+        assert Lifecycle.view(ticket, ctx).column == expected_board,
+               "#{key}/#{@variant}: the board disagrees with Lifecycle.view/2"
+
+        # …and the interim five-column answer is one that column stands for:
+        # :running / :waiting exactly when the board card is In progress,
+        # Merging or Verifying.
+        assert expected in @interim_of[expected_board],
+               "#{key}/#{@variant}: interim #{expected} vs board #{expected_board}"
+
+        assert expected in [:running, :waiting] ==
+                 expected_board in [:in_progress, :merging, :verifying]
       end
 
       expected_counts =
@@ -105,9 +163,11 @@ defmodule Arbiter.Board.ColumnAgreementTest do
   defp board_columns(board, id) do
     [
       backlog: board.backlog,
+      blocked: board.blocked,
       ready: Enum.map(board.ready, & &1.card),
-      running: board.running,
-      waiting: board.waiting,
+      in_progress: board.in_progress,
+      merging: board.merging,
+      verifying: board.verifying,
       closed: board.closed_today
     ]
     |> Enum.flat_map(fn {column, cards} ->

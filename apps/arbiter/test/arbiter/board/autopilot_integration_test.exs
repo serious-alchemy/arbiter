@@ -92,7 +92,7 @@ defmodule Arbiter.Board.AutopilotIntegrationTest do
     assert promoted == task.id
   end
 
-  test "a dependency-blocked card is skipped, and says why", %{ws: ws} do
+  test "a dependency-blocked card is Blocked, naming its blocker, and never dispatched", %{ws: ws} do
     blocker = issue(ws, "must land first", %{priority: 1})
     blocked = issue(ws, "waits on the other", %{priority: 0})
 
@@ -106,9 +106,11 @@ defmodule Arbiter.Board.AutopilotIntegrationTest do
     pid = start_autopilot()
     board = Autopilot.board(pid, [])
 
-    entry = Enum.find(board.ready, &(&1.id == blocked.id))
-    assert entry.state == :blocked
-    assert entry.reason =~ blocker.id
+    # bd-79w1fs: a ticket with an unsatisfied blocker is in Blocked, out of
+    # the scheduler's queue, carrying the ids it waits on.
+    refute Enum.any?(board.ready, &(&1.id == blocked.id))
+    assert %{blocked_by: [blocker_id_on_card]} = Enum.find(board.blocked, &(&1.id == blocked.id))
+    assert blocker_id_on_card == blocker.id
 
     # Even though the blocked card sorts ahead on priority, the one that goes
     # is its blocker.

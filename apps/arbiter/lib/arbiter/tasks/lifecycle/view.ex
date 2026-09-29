@@ -163,8 +163,10 @@ defmodule Arbiter.Tasks.Lifecycle.View do
   def blocker_satisfied?(_), do: false
 
   @doc """
-  The interim mapping onto today's five board columns, until the
-  seven-column board (child 9, bd-79w1fs):
+  The interim mapping onto five columns. The board itself reads the seven
+  lifecycle columns since bd-79w1fs; this mapping remains for the epic
+  mini-board (`Arbiter.Board.Snapshot.classify_columns/3`) and the `/epics`
+  rollup until those move too:
 
   | board | lifecycle |
   |---|---|

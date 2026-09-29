@@ -41,9 +41,13 @@ defmodule Arbiter.MCP.SchedulerToolsTest do
   defp default_board(paused?) do
     %{
       ready: [],
-      running: [],
-      waiting: [],
+      backlog: [],
+      blocked: [],
+      in_progress: [],
+      merging: [],
+      verifying: [],
       closed_today: [],
+      attention: [],
       promote: nil,
       slots_total: 4,
       slots_free: 4,

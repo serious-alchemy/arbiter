@@ -27,9 +27,13 @@ defmodule Arbiter.Board.DrainTest do
   defp board(paused?, promote \\ nil) do
     %{
       ready: [],
-      running: [],
-      waiting: [],
+      backlog: [],
+      blocked: [],
+      in_progress: [],
+      merging: [],
+      verifying: [],
       closed_today: [],
+      attention: [],
       promote: promote,
       slots_total: 4,
       slots_free: 4,

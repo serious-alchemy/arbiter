@@ -1,100 +1,58 @@
 defmodule Arbiter.Board.Snapshot do
   @moduledoc """
-  The board, derived. One read of the world in, five columns and a dispatch
-  decision out.
+  The board, derived. One read of the world in, seven columns, a
+  Needs-attention list and a dispatch decision out.
 
   The operator console's board is not a stored object — Arbiter has no "board"
   table and deliberately doesn't want one. Every column is a *view* of state
   that already exists (issues, live workers, merge requests), so the board can
   never drift from the system it describes: there is nothing to keep in sync.
 
-  ## The five columns
+  ## The seven columns (bd-79w1fs)
 
-  Every ticket's column comes from one projection, `Arbiter.Tasks.Lifecycle.view/2`
-  (bd-6zapbl), mapped onto these five until the seven-column board lands
-  (bd-79w1fs) by `Arbiter.Tasks.Lifecycle.board_column/2`. The same call
-  classifies the epic mini-board (`classify_columns/3`) and the `/epics`
-  rollup (`Arbiter.Tasks.EpicRollup`), so the three cannot disagree. Each card
-  builder below only builds cards for tickets in its own column, so a ticket
-  lands in exactly one.
+  Every ticket is placed purely by its `Arbiter.Tasks.Lifecycle.view/2`
+  column (`docs/design/ticket-lifecycle.md` §3). Each card builder below only
+  builds cards for tickets in its own column, so a ticket lands in exactly
+  one. Epics are excluded from every column (bd-38of5i): they reach the board
+  only as the `↳` chip a child card carries.
 
-    * **Backlog** — `:backlog` tickets: filed, not refined. Newest first,
-      deliberately: an unrefined pile is a to-think-about list, not a queue,
-      and ordering it by priority would imply a ranking the refinement hasn't
-      earned.
-    * **Ready** — `:queued` tickets, Blocked and Ready alike. A real queue,
-      ordered by priority then age, each card carrying the reason
-      `Arbiter.Board.Scheduler` gave it (`next up — dispatching...`,
-      `2 ahead in queue`, `blocked — waiting on bd-9`). A leftover finished
-      author row does not hide a queued ticket: the column is the ticket's,
-      not the run's.
-    * **Running** — `:in_progress` tickets whose primary author run is live:
-      `:starting`, `:working`, or `:waiting` on the review gate (while a
-      *reviewer agent* reads the diff — automated, so still the machine's
-      turn). Reviewer workers fold into the author's card rather
-      than occupying one of their own; a review is a phase of the author's
-      work, not a second piece of it. An in-progress ticket whose run has not
-      registered yet (inside the dispatch grace) is a "dispatching" card here.
-    * **Waiting** — `:merging` and `:verifying` tickets, plus an
-      `:in_progress` ticket whose author run is done and whose outcome now
-      depends on something outside it: `:waiting` on a question (it asked a
-      human), finished `:failed` (parked; send it back or close it) — or that
-      has **no live worker at all** past the dispatch grace (e.g. `arb worker
-      stop`, the documented pre-flight for `arb server deploy`). Every card
-      carries its ticket's attention, and flags `needs_you` when that is the
-      operator's (see below). Longest wait first, because a stalled card is
-      the thing worth seeing.
+    * **Backlog** — `:backlog`: filed, not yet promoted.
+    * **Blocked** — `:queued` with unsatisfied gating blockers; each card
+      carries its `blocked_by` ids. A blocker is satisfied once it is
+      `:verifying` or `:closed` (`Arbiter.Tasks.Lifecycle.blocker_satisfied?/1`).
+    * **Ready** — `:queued` with nothing blocking it: the scheduler's queue.
+      Each entry carries the reason `Arbiter.Board.Scheduler` gave it (`next up
+      — dispatching...`, `2 ahead in queue`, a hold: slot, quota, paused,
+      conflict, file overlap). Transient holds stay here; they are not a
+      column.
+    * **In progress** — `:active`: exactly the tickets holding a slot, whatever
+      their run is doing. A card is built from the ticket's primary author row
+      (reviewer workers fold into it), or — with no run — is "dispatching"
+      inside the dispatch grace and "worker stopped" past it.
+    * **Merging** — `:merging`: the PR is open and the ticket's Watchdog polls
+      it.
+    * **Verifying** — `:verifying`: merged, waiting on a restart-and-observe.
     * **Closed · last 24h** — `:closed` tickets closed in the last 24 hours
-      (rolling window, keyed on `closed_at`). The day's evidence of progress,
-      and the only column with no action on it.
+      (rolling window, keyed on `closed_at`), each with its `close_reason`.
 
-  Epics are excluded from every column (bd-38of5i): the evidence of a day's
-  progress is the children that closed, not the container that closed because
-  they did, and an epic reaches the board only as the `↳` chip a child card
-  carries.
+  Backlog, Blocked and Ready are in manual order: priority, then the persisted
+  `rank`, then age (`Scheduler.order/1`) — the order Autopilot dispatches
+  Ready in. In progress, Merging and Verifying are longest-wait first; Closed
+  is newest-closed first.
 
-  ## Backlog, and why Blocked is not a separate column (yet)
-
-  Refinement and dependency-readiness are orthogonal questions: a refined
-  card whose blocker is still open is `:blocked` in the lifecycle, and on this
-  interim board it stays in Ready carrying its own `blocked — waiting on
-  bd-9` reason. A blocker is satisfied once it is `:verifying` or `:closed` —
-  verifying unblocks dependents (`Arbiter.Tasks.Lifecycle.blocker_satisfied?/1`).
-
-  ## Waiting, and the needs-you flag
-
-  Waiting used to be two columns — Needs you and Merge queue — which split
-  cards by *what* they wait on: a person, or a poll. That is not the split an
-  operator acts on. Every card in the column is equally out of the worker's
-  hands; the only question that changes what a human does next is whether the
-  system has anything left to try on its own.
-
-  So it is one column, and that narrower signal rides on the card as
-  `:needs_you`. Since bd-8if9zt it is read off the ticket's attention
-  (`Arbiter.Tasks.Lifecycle.view/2`, owner table in
-  `Arbiter.Tasks.Lifecycle.Attention`), which every Waiting card also carries
-  as `:attention`: the card flags exactly when `attention.owner == :operator`.
-
-  The coordinator comes first. A question a run asked, a run that stopped, a
-  ReviewGate park, a conflict or a draft, a Watchdog that is gone, a ticket
-  waiting on its restart-and-observe — all are the coordinator agent's to act
-  on, so the card says so in its attention without flagging the operator.
-  What flags is what only a person can do: an approval the fleet cannot give
-  its own PR, or a merge by hand when auto-merge is off. A failed run whose
-  follow-up round is already under way has no attention at all — the machine
-  is still working it. Child 7 (bd-8nlez1) adds the hand-off and the limits
-  that move a coordinator-owned item to the operator.
-
-  A block the Watchdog clears by itself — `:behind_base` (it rebases) and
-  `:ci_failed` (it dispatches a fix pass) — is no one's attention. The block
-  reason is read through `Arbiter.Worker.Watchdog`
-  (`effective_block_reason/1`, itself gated on `classify/1 == :approved`), the
-  same surface the merge-queue screen reads, so the flag can never disagree
-  with the status text rendered next to it.
+  Every card carries the ticket's computed `step` (In progress and Merging;
+  nil elsewhere) and its `attention` (bd-8if9zt): a card with attention keeps
+  its column and wears the marker. `:attention` lists every such card for the
+  board's Needs-attention swimlane — operator-owned first, then oldest first —
+  with its column, owner and reason. System alerts (bd-7gt8rm) are not
+  tickets and are not read here; the swimlane reads them from
+  `Arbiter.Alerts.active/1`.
 
   `needs_you?/2`, `child_needs_you?/2` and `merging_needs_you?/3` are the
   earlier worker-status rule, kept for `Arbiter.Tasks.EpicRollup`'s epic
-  signal until the epic surfaces move onto attention too.
+  signal until the epic surfaces move onto attention. `classify_columns/3`
+  still answers in the interim five columns
+  (`Arbiter.Tasks.Lifecycle.board_column/2`) for the epic mini-board.
 
   `slots_used` is the tickets In progress — stored state `:active` — and
   nothing else (bd-asxw4e): a ticket between ReviewGate rounds holds its slot
@@ -166,10 +124,13 @@ defmodule Arbiter.Board.Snapshot do
 
   @type t :: %{
           backlog: [map()],
+          blocked: [map()],
           ready: [Scheduler.entry()],
-          running: [map()],
-          waiting: [map()],
+          in_progress: [map()],
+          merging: [map()],
+          verifying: [map()],
           closed_today: [map()],
+          attention: [map()],
           promote: String.t() | nil,
           slots_total: non_neg_integer(),
           slots_free: non_neg_integer(),
@@ -240,23 +201,16 @@ defmodule Arbiter.Board.Snapshot do
 
     worked = MapSet.new(authors, & &1.task_id)
 
-    # bd-6zapbl: every ticket's column, from `Lifecycle.view/2` through the
-    # interim five-column mapping. Each card builder below only ever builds a
+    # bd-79w1fs: every ticket's `Lifecycle.view/2` — its column, its step and
+    # its attention — read once. Each card builder below only ever builds a
     # card for a ticket in its own column, so a ticket lands in exactly one.
     # Epics stay off the board.
-    columns =
+    views =
       issues
-      |> ticket_columns(workers, blocked_by, now)
-      |> Map.reject(fn {id, _column} -> epic?(Map.get(issues_by_id, id)) end)
+      |> ticket_views(workers, blocked_by, now, watchdog_live)
+      |> Map.reject(fn {id, _view} -> epic?(Map.get(issues_by_id, id)) end)
 
-    # bd-8if9zt: every ticket's attention, from the same projection. A Waiting
-    # card flags `needs_you` exactly when its attention is the operator's.
-    attention = ticket_attention(issues, workers, blocked_by, now, watchdog_live)
-
-    running =
-      (running_cards(authors, issues_by_id, gate_workers_by_author, workers, columns) ++
-         dispatching_cards(issues, authors, columns))
-      |> Enum.sort_by(& &1.since, {:asc, DateTime})
+    columns = Map.new(views, fn {id, view} -> {id, view.column} end)
 
     # bd-aw2cyt: a live agent session in any role — author, reviewer,
     # implementer round, CI fix pass, conflict resolver. Counted over ALL
@@ -273,9 +227,11 @@ defmodule Arbiter.Board.Snapshot do
     slots_used = SlotGate.slots_used(issues)
     slots_free = max(slots_total - slots_used, 0)
 
+    # Only the Ready column is the scheduler's queue: a Blocked ticket is held
+    # by its dependencies, which `Scheduler.plan/1` would skip over anyway.
     plan =
       Scheduler.plan(%{
-        ready: ready_cards(issues, columns, blocked_by, conflicts),
+        ready: ready_cards(issues, columns, conflicts),
         running: in_flight(authors, issues_by_id, changed),
         conflict_claims: conflict_claims(authors, gate_workers, issues, worked, now),
         slots_free: slots_free,
@@ -283,25 +239,31 @@ defmodule Arbiter.Board.Snapshot do
         paused: paused?
       })
 
-    %{
-      backlog:
-        backlog_cards(issues, columns) |> with_parents(parents) |> with_over_budget(over_budget),
+    decorate = fn cards, budget ->
+      cards
+      |> Enum.map(&with_view(&1, views))
+      |> with_parents(parents)
+      |> with_over_budget(budget)
+    end
+
+    board = %{
+      backlog: issues |> backlog_cards(columns) |> decorate.(over_budget),
+      blocked: issues |> blocked_cards(columns, views) |> decorate.(over_budget),
       ready:
-        plan.entries
+        Enum.map(plan.entries, fn entry ->
+          %{entry | card: with_view(entry.card, views)}
+        end)
         |> with_parents_in_entries(parents)
         |> with_over_budget_in_entries(over_budget),
-      running: running |> with_parents(parents) |> with_over_budget(over_budget),
-      waiting:
+      in_progress:
         authors
-        |> waiting(issues, issues_by_id, columns, watchdog_live, workers, attention)
-        |> with_parents(parents)
-        |> with_over_budget(over_budget),
+        |> in_progress_cards(issues, issues_by_id, gate_workers_by_author, workers, columns, now)
+        |> decorate.(over_budget),
+      merging: issues |> merging_cards(workers, columns, watchdog_live) |> decorate.(over_budget),
+      verifying: issues |> verifying_cards(columns) |> decorate.(over_budget),
       # A closed task that ran over is done — there is nothing left to act on,
       # so the Closed column never flags, whatever the input says.
-      closed_today:
-        closed_today_cards(issues, columns, now)
-        |> with_parents(parents)
-        |> with_over_budget(nil),
+      closed_today: issues |> closed_today_cards(columns, now) |> decorate.(nil),
       promote: plan.promote,
       slots_total: slots_total,
       slots_free: slots_free,
@@ -311,6 +273,8 @@ defmodule Arbiter.Board.Snapshot do
       paused: paused?,
       now: now
     }
+
+    Map.put(board, :attention, attention_items(board))
   end
 
   @doc """
@@ -319,7 +283,7 @@ defmodule Arbiter.Board.Snapshot do
   Options mirror `derive/1`'s inputs and override what would otherwise be
   read: `:now`, `:slots_total`, `:quota`, `:paused`,
   `:issues`, `:workers`, `:changed_files`, `:workspace_id`. Every read is
-  best-effort — a board that renders five columns beats one that raises.
+  best-effort — a board that renders seven columns beats one that raises.
 
   **Workspace-level scoping:** `slots_total` and `quota` are computed for the
   specified workspace (defaulting to the default workspace if not given).
@@ -383,13 +347,13 @@ defmodule Arbiter.Board.Snapshot do
     |> Enum.filter(&(Lifecycle.state_of(&1) == :merging and Watchdog.alive?(&1.id)))
     |> MapSet.new(& &1.id)
   rescue
-    # A board that renders five columns beats one that raises: an unreadable
+    # A board that renders seven columns beats one that raises: an unreadable
     # registry degrades to "unknown", not to a false alarm on every card.
     _ -> nil
   end
 
   @doc """
-  A board with five empty columns and nothing to promote.
+  A board with seven empty columns, an empty swimlane and nothing to promote.
 
   What a caller renders when its read of the world failed. It reports itself
   `paused: true` on purpose: a queue nobody could read is not one anything
@@ -400,10 +364,13 @@ defmodule Arbiter.Board.Snapshot do
   def empty(now \\ nil) do
     %{
       backlog: [],
+      blocked: [],
       ready: [],
-      running: [],
-      waiting: [],
+      in_progress: [],
+      merging: [],
+      verifying: [],
       closed_today: [],
+      attention: [],
       promote: nil,
       slots_total: 0,
       slots_free: 0,
@@ -624,11 +591,11 @@ defmodule Arbiter.Board.Snapshot do
     |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
   end
 
-  # bd-8if9zt: each ticket's `Lifecycle.view/2` attention, with the same runs,
-  # blockers and clock its column was read with, plus its Watchdog's liveness.
-  # Like `ticket_columns/4`, an author worker whose issue was not read still
-  # gets a bare `%{id: task_id}` ticket, so its card has an answer too.
-  defp ticket_attention(issues, workers, blocked_by, now, watchdog_live) do
+  # bd-79w1fs: each ticket's whole `Lifecycle.view/2` — column, step,
+  # blockers and attention — with its runs, its blockers, the clock and its
+  # Watchdog's liveness. An author worker whose issue was not read still gets
+  # a bare `%{id: task_id}` ticket, so its card lands somewhere.
+  defp ticket_views(issues, workers, blocked_by, now, watchdog_live) do
     runs = runs_by_ticket(workers)
     known = MapSet.new(issues, & &1.id)
 
@@ -647,20 +614,58 @@ defmodule Arbiter.Board.Snapshot do
         watchdog_alive: ticket_watchdog_alive(ticket.id, watchdog_live)
       }
 
-      {ticket.id, Lifecycle.view(ticket, ctx).attention}
+      {ticket.id, Lifecycle.view(ticket, ctx)}
     end)
   end
 
-  # Every Waiting card carries its ticket's attention, and flags `needs_you`
-  # exactly when that attention is the operator's (bd-8if9zt) — the coordinator
-  # comes first, so a coordinator-owned item is not the operator's to act on.
-  defp with_attention(card, attention) do
-    item = Map.get(attention, card.id)
-    Map.merge(card, %{attention: item, needs_you: operator?(item)})
+  # Every card carries its ticket's computed `step` (nil outside In progress
+  # and Merging) and its `attention` (bd-8if9zt): a card with attention keeps
+  # its column and wears the marker.
+  defp with_view(card, views) do
+    view = Map.get(views, card.id, %{})
+    Map.merge(card, %{step: Map.get(view, :step), attention: Map.get(view, :attention)})
   end
 
-  defp operator?(%{owner: :operator}), do: true
-  defp operator?(_), do: false
+  # The Needs-attention swimlane (bd-79w1fs): every card on the board whose
+  # ticket has attention, operator-owned first, then oldest first. Closed
+  # tickets have none (`Lifecycle.Attention.of/2`), so the column is skipped.
+  defp attention_items(board) do
+    [:backlog, :blocked, :ready, :in_progress, :merging, :verifying]
+    |> Enum.flat_map(fn column ->
+      board
+      |> Map.fetch!(column)
+      |> Enum.map(&card_of/1)
+      |> Enum.filter(&match?(%{attention: %{}}, &1))
+      |> Enum.map(&attention_item(&1, column))
+    end)
+    |> Enum.sort_by(fn item ->
+      {if(item.owner == :operator, do: 0, else: 1), since_key(item.since)}
+    end)
+  end
+
+  defp attention_item(card, column) do
+    attention = card.attention
+
+    %{
+      id: card.id,
+      title: Map.get(card, :title),
+      workspace_id: Map.get(card, :workspace_id),
+      column: column,
+      owner: attention.owner,
+      waiting_on: attention.waiting_on,
+      cause: attention.cause,
+      reason: attention.reason,
+      note: Map.get(attention, :note),
+      since:
+        Map.get(attention, :owner_since) || Map.get(attention, :since) || Map.get(card, :since)
+    }
+  end
+
+  defp card_of(%{card: %{} = card}), do: card
+  defp card_of(card), do: card
+
+  defp since_key(%DateTime{} = at), do: DateTime.to_unix(at, :microsecond)
+  defp since_key(_), do: :none
 
   defp in_column?(columns, id, column), do: Map.get(columns, id) == column
 
@@ -678,149 +683,167 @@ defmodule Arbiter.Board.Snapshot do
     Map.get(issue, :issue_type) in Arbiter.Tasks.Issue.non_dispatchable_types()
   end
 
-  # Newest first, and only newest first. This is provisional on purpose: the
-  # moment Backlog grows a priority order it starts reading as a second queue,
-  # and there is exactly one queue.
+  # bd-79w1fs: Backlog, Blocked and Ready are all in manual order — priority,
+  # then the persisted `rank`, then age (`Scheduler.order/1`), the same order
+  # Autopilot dispatches Ready in. Dragging within a column rewrites `rank`.
   defp backlog_cards(issues, columns) do
     issues
     |> Enum.filter(&in_column?(columns, &1.id, :backlog))
-    |> Enum.sort_by(&created_at/1, {:desc, DateTime})
+    |> Enum.map(&queue_card/1)
+    |> Scheduler.order()
+  end
+
+  # A Blocked card says what it waits on: its unsatisfied gating blockers, as
+  # `Lifecycle.view/2` read them.
+  defp blocked_cards(issues, columns, views) do
+    issues
+    |> Enum.filter(&in_column?(columns, &1.id, :blocked))
     |> Enum.map(fn issue ->
-      %{
-        id: issue.id,
-        title: Map.get(issue, :title),
-        priority: Map.get(issue, :priority),
-        difficulty: Map.get(issue, :difficulty),
-        issue_type: Map.get(issue, :issue_type),
-        workspace_id: Map.get(issue, :workspace_id),
-        created_at: created_at(issue)
-      }
+      Map.put(
+        queue_card(issue),
+        :blocked_by,
+        views |> Map.fetch!(issue.id) |> Map.get(:blocked_by)
+      )
     end)
+    |> Scheduler.order()
   end
 
   # In no particular order: `Scheduler.plan/1` orders the queue.
-  defp ready_cards(issues, columns, blocked_by, conflicts) do
+  defp ready_cards(issues, columns, conflicts) do
     issues
     |> Enum.filter(&in_column?(columns, &1.id, :ready))
     |> Enum.map(fn issue ->
-      %{
-        id: issue.id,
-        title: Map.get(issue, :title),
-        priority: Map.get(issue, :priority),
-        rank: Map.get(issue, :rank),
-        created_at: created_at(issue),
-        difficulty: Map.get(issue, :difficulty),
-        issue_type: Map.get(issue, :issue_type),
-        workspace_id: Map.get(issue, :workspace_id),
+      issue
+      |> queue_card()
+      |> Map.merge(%{
         scope: FileScope.declared_paths(issue),
-        blocked_by: Map.get(blocked_by, issue.id, []),
+        blocked_by: [],
         conflicts_with: EdgeGate.conflicts(conflicts, issue.id),
         refined: true,
         state: Lifecycle.state_of(issue),
         status: Map.get(issue, :status)
-      }
-    end)
-  end
-
-  # ---- running / waiting ----------------------------------------------------
-
-  defp running_cards(workers, issues_by_id, gate_workers_by_author, all_workers, columns) do
-    workers
-    |> Enum.filter(&(running_run?(&1) and in_column?(columns, &1.task_id, :running)))
-    # One ticket, one card: the primary row over a live pass sharing its id.
-    |> one_row_per_task()
-    |> Enum.map(fn {w, _group} ->
-      gate_worker = Map.get(gate_workers_by_author, w.task_id)
-
-      w
-      |> base_card(issues_by_id)
-      |> Map.merge(%{
-        step: Map.get(w, :current_step),
-        activity: activity(w, gate_worker),
-        provider: card_provider(w, gate_worker),
-        since: since(w)
       })
-      |> with_phase(w, all_workers)
     end)
   end
 
-  # bd-6zapbl: an in-progress ticket whose run has not registered yet — inside
-  # the dispatch grace window (worktree provisioning, fetch). It is Running,
-  # not missing: the ticket holds its slot, and the card says it is still
-  # being dispatched.
-  defp dispatching_cards(issues, authors, columns) do
-    live = for w <- authors, running_run?(w), into: MapSet.new(), do: w.task_id
-
-    issues
-    |> Enum.filter(&(in_column?(columns, &1.id, :running) and not MapSet.member?(live, &1.id)))
-    |> Enum.map(fn issue ->
-      %{
-        id: issue.id,
-        title: Map.get(issue, :title),
-        priority: Map.get(issue, :priority),
-        difficulty: Map.get(issue, :difficulty),
-        workspace_id: Map.get(issue, :workspace_id),
-        status: :in_progress,
-        step: nil,
-        activity: @dispatching_state,
-        provider: nil,
-        since: Map.get(issue, :updated_at) || created_at(issue),
-        phase: :implementing,
-        agent_live: false
-      }
-    end)
+  defp queue_card(issue) do
+    %{
+      id: issue.id,
+      title: Map.get(issue, :title),
+      priority: Map.get(issue, :priority),
+      rank: Map.get(issue, :rank),
+      difficulty: Map.get(issue, :difficulty),
+      issue_type: Map.get(issue, :issue_type),
+      workspace_id: Map.get(issue, :workspace_id),
+      created_at: created_at(issue)
+    }
   end
 
-  # One column, so one card shape: a parked worker's card still carries the
-  # (empty) merge fields and a merge-parked one still carries a (nil) reason,
-  # and an orphaned issue (no live worker at all) still carries both, nil.
-  # The view reads whichever it has instead of branching on which shape
-  # produced the card.
-  #
-  # bd-6zapbl: one card per Waiting ticket. A verifying ticket gets its
-  # verification card and a merging one its merge card (bd-741sid), whatever
-  # worker rows linger; any other gets a card from its non-completed author
-  # rows, or — with none left — the orphan card.
-  defp waiting(workers, issues, issues_by_id, columns, watchdog_live, all_workers, attention) do
-    verifying = ids_in_state(issues, :verifying)
-    merging = ids_in_state(issues, :merging)
+  # ---- in progress ----------------------------------------------------------
+
+  # Every ticket In progress — stored state `:active`, the tickets holding a
+  # slot — gets one card, oldest first. A ticket with a run on it gets a card
+  # from its primary author row (a live fix pass stands in once the primary is
+  # gone); reviewer workers fold into the author's card rather than occupying
+  # one of their own. A ticket with no run gets a "dispatching" card inside the
+  # dispatch grace and a "worker stopped" one past it — the latter carries the
+  # coordinator's `run_crashed` attention.
+  defp in_progress_cards(
+         authors,
+         issues,
+         issues_by_id,
+         gate_workers_by_author,
+         all_workers,
+         columns,
+         now
+       ) do
+    rows =
+      Enum.filter(
+        authors,
+        &(not succeeded?(&1) and in_column?(columns, &1.task_id, :in_progress))
+      )
 
     carded =
-      Enum.filter(workers, fn w ->
-        not succeeded?(w) and in_column?(columns, w.task_id, :waiting) and
-          not MapSet.member?(verifying, w.task_id) and not MapSet.member?(merging, w.task_id)
+      rows
+      |> one_row_per_task()
+      |> Enum.map(fn {w, group} ->
+        worker_card(
+          w,
+          group,
+          issues_by_id,
+          Map.get(gate_workers_by_author, w.task_id),
+          all_workers
+        )
       end)
 
-    with_rows = MapSet.new(carded, & &1.task_id)
+    with_rows = MapSet.new(rows, & &1.task_id)
 
-    waiting_issues = Enum.filter(issues, &in_column?(columns, &1.id, :waiting))
+    workerless =
+      issues
+      |> Enum.filter(
+        &(in_column?(columns, &1.id, :in_progress) and not MapSet.member?(with_rows, &1.id))
+      )
+      |> Enum.map(&workerless_card(&1, now))
 
-    {verifying_issues, others} =
-      Enum.split_with(waiting_issues, &MapSet.member?(verifying, &1.id))
-
-    {merging_issues, others} = Enum.split_with(others, &MapSet.member?(merging, &1.id))
-
-    (waiting_cards(carded, issues_by_id, all_workers) ++
-       merging_cards(merging_issues, all_workers, watchdog_live) ++
-       orphaned_cards(Enum.reject(others, &MapSet.member?(with_rows, &1.id))) ++
-       awaiting_verification_cards(verifying_issues))
-    |> Enum.map(&with_attention(&1, attention))
-    |> Enum.sort_by(& &1.since, {:asc, DateTime})
+    Enum.sort_by(carded ++ workerless, & &1.since, {:asc, DateTime})
   end
 
-  defp ids_in_state(issues, state),
-    do: for(i <- issues, Lifecycle.state_of(i) == state, into: MapSet.new(), do: i.id)
+  defp worker_card(w, group, issues_by_id, gate_worker, all_workers) do
+    live? = running_run?(w)
+
+    w
+    |> base_card(issues_by_id)
+    |> Map.merge(%{
+      live: live?,
+      activity: if(live?, do: activity(w, gate_worker), else: waiting_reason(w)),
+      provider: card_provider(w, gate_worker),
+      collapsed_note: collapsed_note(w, group),
+      since: since(w)
+    })
+    |> with_phase(w, all_workers)
+  end
+
+  # bd-6zapbl / bd-2mv3lx: an In-progress ticket with no run. Inside the
+  # dispatch grace its run has simply not registered yet (worktree
+  # provisioning, fetch); past it, nothing is working on it — e.g. `arb worker
+  # stop`, the documented pre-flight for `arb server deploy`.
+  defp workerless_card(issue, now) do
+    since = Map.get(issue, :updated_at) || created_at(issue)
+    dispatching? = DateTime.diff(now, since) < @orphan_grace_seconds
+
+    %{
+      id: issue.id,
+      title: Map.get(issue, :title),
+      priority: Map.get(issue, :priority),
+      difficulty: Map.get(issue, :difficulty),
+      workspace_id: Map.get(issue, :workspace_id),
+      status: :in_progress,
+      outcome: nil,
+      waiting_on: nil,
+      live: false,
+      activity: if(dispatching?, do: @dispatching_state, else: orphan_reason(issue)),
+      provider: nil,
+      collapsed_note: nil,
+      since: since,
+      phase: if(dispatching?, do: :implementing, else: :waiting_on_you),
+      agent_live: false
+    }
+  end
+
+  # ---- merging / verifying --------------------------------------------------
 
   # bd-741sid: a Merging ticket's implementer stopped when its PR opened, so
   # the card is built from the ticket — the PR on its row, the forge's last
   # answer its Watchdog recorded, and whether that Watchdog is still running,
   # or was stopped on purpose (`merge_pulled`, `PullRequest.pull/1`). A worker
-  # row still registered under the ticket (a pass that failed) keeps its vote
-  # and its note, as a collapsed row does on a worker card.
-  defp merging_cards(issues, workers, watchdog_live) do
+  # row still registered under the ticket (a pass that failed) keeps its note,
+  # as a collapsed row does on a worker card. Longest wait first.
+  defp merging_cards(issues, workers, columns, watchdog_live) do
     rows = Enum.group_by(workers, & &1.task_id)
 
-    Enum.map(issues, fn issue ->
+    issues
+    |> Enum.filter(&in_column?(columns, &1.id, :merging))
+    |> Enum.map(fn issue ->
       group = rows |> Map.get(issue.id, []) |> Enum.reject(&succeeded?/1)
 
       %{
@@ -830,7 +853,6 @@ defmodule Arbiter.Board.Snapshot do
         difficulty: Map.get(issue, :difficulty),
         workspace_id: Map.get(issue, :workspace_id),
         status: :merging,
-        reason: nil,
         mr_ref: Map.get(issue, :pr_ref),
         merger_url: Map.get(issue, :merger_url),
         merger_status: PullRequest.merger_status(issue),
@@ -842,6 +864,7 @@ defmodule Arbiter.Board.Snapshot do
         agent_live: false
       }
     end)
+    |> Enum.sort_by(& &1.since, {:asc, DateTime})
   end
 
   @doc """
@@ -851,8 +874,8 @@ defmodule Arbiter.Board.Snapshot do
   or a worker row still registered under it (`rows`, e.g. a pass that failed)
   needs the operator per `child_needs_you?/2`.
 
-  Public so `Arbiter.Tasks.EpicRollup` flags a Merging child exactly as the
-  board's merge card does.
+  Public so `Arbiter.Tasks.EpicRollup` flags a Merging child with the older
+  worker-status rule until the epic surfaces move onto attention.
   """
   @spec merging_needs_you?(map(), [map()], MapSet.t() | nil) :: boolean()
   def merging_needs_you?(ticket, rows, watchdog_live) do
@@ -864,13 +887,14 @@ defmodule Arbiter.Board.Snapshot do
   defp ticket_watchdog_alive(id, live) when is_struct(live, MapSet), do: MapSet.member?(live, id)
   defp ticket_watchdog_alive(_id, _live), do: nil
 
-  # bd-9so315: a task merged but parked until someone restarts the server and
-  # observes the new path. It has no worker (the merge tore it down), so it
-  # produces no worker-derived card and would otherwise be invisible — which is
-  # precisely the failure the state exists to fix. The restart-and-observe is
-  # the coordinator's (`awaiting_verification` attention, bd-8if9zt).
-  defp awaiting_verification_cards(issues) do
-    Enum.map(issues, fn issue ->
+  # bd-9so315: a ticket merged and parked until someone restarts the server
+  # and observes the new path. It has no worker (the merge tore it down); the
+  # restart-and-observe is the coordinator's (`awaiting_verification`
+  # attention, bd-8if9zt). Longest wait first.
+  defp verifying_cards(issues, columns) do
+    issues
+    |> Enum.filter(&in_column?(columns, &1.id, :verifying))
+    |> Enum.map(fn issue ->
       %{
         id: issue.id,
         title: Map.get(issue, :title),
@@ -878,17 +902,11 @@ defmodule Arbiter.Board.Snapshot do
         difficulty: Map.get(issue, :difficulty),
         workspace_id: Map.get(issue, :workspace_id),
         status: :awaiting_verification,
-        reason: "merged — awaiting verification (restart and observe)",
         mr_ref: Map.get(issue, :pr_ref),
-        merger_url: nil,
-        merger_status: nil,
-        watchdog_alive: nil,
-        merge_pulled: false,
-        collapsed_note: nil,
         since: awaiting_since(issue)
       }
-      |> workerless_phase()
     end)
+    |> Enum.sort_by(& &1.since, {:asc, DateTime})
   end
 
   # The parked-at stamp, falling back to `updated_at` for rows that entered the
@@ -897,28 +915,6 @@ defmodule Arbiter.Board.Snapshot do
   # exactly one definition.
   defp awaiting_since(issue) do
     Arbiter.Tasks.Verification.awaiting_since(issue) || created_at(issue)
-  end
-
-  defp waiting_cards(workers, issues_by_id, all_workers) do
-    workers
-    |> one_row_per_task()
-    |> Enum.map(fn {w, group} ->
-      w
-      |> base_card(issues_by_id)
-      |> Map.merge(%{
-        reason: waiting_reason(w),
-        mr_ref: Map.get(w, :mr_ref),
-        merger_url: Map.get(w, :merger_url),
-        merger_status: get_meta(w, :last_merger_status),
-        # bd-741sid: no run stays resident on an open PR, so a worker card has
-        # no Watchdog of its own to report — a Merging ticket's card does.
-        watchdog_alive: nil,
-        merge_pulled: false,
-        collapsed_note: collapsed_note(w, group),
-        since: since(w)
-      })
-      |> with_phase(w, all_workers)
-    end)
   end
 
   # bd-aw2cyt: what the card is *actually* doing, and whether anything is
@@ -933,11 +929,6 @@ defmodule Arbiter.Board.Snapshot do
       agent_live: Phase.any_agent_live?(worker, subordinates)
     })
   end
-
-  # A card with no worker behind it at all: nothing is running, and a human is
-  # the only thing that moves it.
-  defp workerless_phase(card),
-    do: Map.merge(card, %{phase: :waiting_on_you, agent_live: false})
 
   # What the collapsed subordinate rows say that the primary row's own fields
   # cannot: a `:failed` fix pass / conflict pass under the card. Nil when
@@ -956,14 +947,13 @@ defmodule Arbiter.Board.Snapshot do
   end
 
   # One task, one card (bd-8jixav). A task's primary row and a subordinate
-  # fix / conflict pass's row can both be parked, so the column used to render
-  # one task as two cards that read at a glance as two different stuck
-  # tickets.
+  # fix / conflict pass's row can both be registered, and used to render one
+  # task as two cards that read at a glance as two different tickets.
   #
-  # The primary row (`role: nil`) wins where both exist: it is the one holding
-  # the MR, and the one whose fields the card's actions address. `Enum.min_by`
-  # returns the first row of the minimal rank, so among rows of the same rank
-  # the caller's order survives.
+  # The primary row (`role: nil`) wins where both exist: it is the one whose
+  # fields the card's actions address. `Enum.min_by` returns the first row of
+  # the minimal rank, so among rows of the same rank the caller's order
+  # survives.
   #
   # Returns `{primary_row, all_rows_for_the_task}`: the card renders the
   # primary's fields, but the whole group is still there for the signal a
@@ -975,38 +965,6 @@ defmodule Arbiter.Board.Snapshot do
   end
 
   defp subordinate_rank(worker), do: if(is_nil(Map.get(worker, :role)), do: 0, else: 1)
-
-  # bd-2mv3lx: an in-progress (or merging) ticket with no live worker — e.g.
-  # `arb worker stop`, the documented pre-flight for `arb server deploy` —
-  # used to vanish from the board
-  # entirely. It reads truest as Waiting: the work is out of the machine's
-  # hands, and nothing will retry it on its own — its attention is the
-  # coordinator's `run_crashed` (bd-8if9zt). Past the dispatch grace only;
-  # inside it the ticket is a Running "dispatching" card
-  # (`Lifecycle.board_column/2`).
-  defp orphaned_cards(issues) do
-    Enum.map(issues, fn issue ->
-      %{
-        id: issue.id,
-        title: Map.get(issue, :title),
-        priority: Map.get(issue, :priority),
-        difficulty: Map.get(issue, :difficulty),
-        workspace_id: Map.get(issue, :workspace_id),
-        status: :in_progress,
-        reason: orphan_reason(issue),
-        mr_ref: Map.get(issue, :pr_ref),
-        merger_url: nil,
-        merger_status: nil,
-        # No live worker at all, so no Watchdog is expected either — the card
-        # already says "worker stopped", which is the stronger statement.
-        watchdog_alive: nil,
-        merge_pulled: false,
-        collapsed_note: nil,
-        since: Map.get(issue, :updated_at) || created_at(issue)
-      }
-      |> workerless_phase()
-    end)
-  end
 
   # bd-6lvc1r: names the park when one is on record (`review_park_reason`,
   # e.g. `resume_blocked`) so a card produced from a stale/terminal worker row
@@ -1022,8 +980,7 @@ defmodule Arbiter.Board.Snapshot do
     end
   end
 
-  # A parked worker says why; any other row on a Waiting card (an open MR, or
-  # a run still live on a merging ticket) has no halt to report.
+  # A parked worker says why; any other row has no halt to report.
   defp waiting_reason(worker) do
     if waiting_on_question?(worker) or failed_run?(worker), do: halt_reason(worker)
   end
@@ -1203,6 +1160,7 @@ defmodule Arbiter.Board.Snapshot do
         title: Map.get(issue, :title),
         issue_type: Map.get(issue, :issue_type),
         workspace_id: Map.get(issue, :workspace_id),
+        close_reason: Map.get(issue, :close_reason),
         closed_at: Map.get(issue, :closed_at) || Map.get(issue, :updated_at)
       }
     end)

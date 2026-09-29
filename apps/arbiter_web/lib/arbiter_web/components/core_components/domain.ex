@@ -242,6 +242,12 @@ defmodule ArbiterWeb.CoreComponents.Domain do
   slot :status, doc: "top-right slot — normally a status chip or an elapsed/waiting time"
   slot :actions, doc: "row of inline action chips"
 
+  slot :detail,
+    doc:
+      "a line under the activity for what the card's column says about it — the " <>
+        "board fills it with the column's detail (a Blocked card's blockers, a " <>
+        "Ready card's queue reason, the computed step, a close reason)"
+
   slot :parent,
     doc:
       "a line under the title for what this card belongs to — the board fills " <>
@@ -313,6 +319,10 @@ defmodule ArbiterWeb.CoreComponents.Domain do
       >
         {@activity}
       </span>
+
+      <div :if={@detail != []} class="flex flex-wrap items-center gap-1">
+        {render_slot(@detail)}
+      </div>
 
       <div
         :if={task_card_meta?(assigns)}

@@ -11,9 +11,13 @@ defmodule Arbiter.Board.AutopilotDeferredResumeTest do
   defp board(slots_free, promote \\ "bd-ready") do
     %{
       ready: [%{id: "bd-ready", state: :next, reason: "next up", card: %{id: "bd-ready"}}],
-      running: [],
-      waiting: [],
+      backlog: [],
+      blocked: [],
+      in_progress: [],
+      merging: [],
+      verifying: [],
       closed_today: [],
+      attention: [],
       promote: if(slots_free > 0, do: promote),
       slots_total: 1,
       slots_free: slots_free,
