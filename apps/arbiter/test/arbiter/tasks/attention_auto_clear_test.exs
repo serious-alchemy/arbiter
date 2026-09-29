@@ -6,6 +6,8 @@ defmodule Arbiter.Tasks.AttentionAutoClearTest do
   """
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures
+
   require Ash.Query
 
   alias Arbiter.Messages.CoordinatorNotifier
@@ -25,7 +27,7 @@ defmodule Arbiter.Tasks.AttentionAutoClearTest do
     {:ok, task} =
       Ash.create(Issue, %{title: "attention", workspace_id: ws.id, issue_type: :feature})
 
-    {:ok, task} = Ash.update(task, %{status: :in_progress})
+    task = put_state!(task, :active)
     assert task.state == :active
 
     %{ws: ws, task: task}
@@ -62,7 +64,7 @@ defmodule Arbiter.Tasks.AttentionAutoClearTest do
     parked = Ash.get!(Issue, task.id)
     assert parked.attention_cause == :inconclusive
     assert %DateTime{} = parked.attention_since
-    assert parked.review_park_reason == "inconclusive"
+    assert ReviewPark.reason(parked) == :inconclusive
 
     prior =
       Ash.create!(Run, %{
@@ -87,7 +89,7 @@ defmodule Arbiter.Tasks.AttentionAutoClearTest do
     resumed = Ash.get!(Issue, task.id)
     assert resumed.attention_cause == nil
     assert resumed.attention_since == nil
-    assert resumed.review_park_reason == nil
+    assert ReviewPark.reason(resumed) == nil
     assert_all_resolved(task.id)
   end
 

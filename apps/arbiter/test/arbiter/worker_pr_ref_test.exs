@@ -17,6 +17,8 @@ defmodule Arbiter.WorkerPrRefTest do
   # singleton named Agent.
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures, only: [put_state!: 2]
+
   require Ash.Query
 
   alias Arbiter.Tasks.{Issue, Workspace}
@@ -39,7 +41,7 @@ defmodule Arbiter.WorkerPrRefTest do
     StubMerger.reset()
     {:ok, ws} = Ash.create(Workspace, %{name: "pr-ref-ws", prefix: "pr"})
     {:ok, task} = Ash.create(Issue, %{title: "record my pr_ref", workspace_id: ws.id})
-    {:ok, _} = Ash.update(task, %{status: :in_progress})
+    put_state!(task, :active)
     on_exit(fn -> stop_watchdog(task.id) end)
     {:ok, ws: ws, task: task}
   end
@@ -71,7 +73,7 @@ defmodule Arbiter.WorkerPrRefTest do
     assert reloaded.pr_ref == "#1234"
     # The task is not closed yet: the run has ended (bd-741sid) and the
     # ticket's Watchdog watches the PR.
-    assert reloaded.status == :in_progress
+    assert reloaded.state == :merging
     assert_receive {:DOWN, ^ref, :process, ^worker_pid, :normal}, 1_000
     assert Watchdog.alive?(task.id)
   end
@@ -114,8 +116,7 @@ defmodule Arbiter.WorkerPrRefTest do
 
       reloaded = Ash.get!(Issue, task.id)
 
-      assert {reloaded.state, reloaded.status, reloaded.pr_ref} ==
-               {:merging, :in_progress, "#4321"}
+      assert {reloaded.state, reloaded.pr_ref} == {:merging, "#4321"}
 
       assert :open_pr in version_actions(task.id)
     end

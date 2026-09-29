@@ -3,13 +3,13 @@ defmodule ArbiterCli.Cmd.CloseTest do
 
   alias ArbiterCli.Cmd.Close
 
-  @closed_issue %{"id" => "bd-001", "title" => "X", "status" => "closed"}
+  @closed_issue %{"id" => "bd-001", "title" => "X", "state" => "closed"}
 
   defp issue_fixture(tracker_type \\ "none", tracker_ref \\ nil) do
     %{
       "id" => "bd-001",
       "title" => "X",
-      "status" => "open",
+      "state" => "queued",
       "tracker_type" => tracker_type,
       "tracker_ref" => tracker_ref
     }

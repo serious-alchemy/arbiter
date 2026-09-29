@@ -10,7 +10,7 @@ defmodule ArbiterCli.Cmd.VerifyTest do
       %{
         "id" => "bd-001",
         "title" => "X",
-        "status" => "closed",
+        "state" => "closed",
         "verification_outcome" => "observed"
       },
       200
@@ -29,7 +29,7 @@ defmodule ArbiterCli.Cmd.VerifyTest do
       %{
         "id" => "bd-001",
         "title" => "X",
-        "status" => "open",
+        "state" => "queued",
         "verification_outcome" => "failed"
       },
       200

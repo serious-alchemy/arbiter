@@ -8,7 +8,7 @@ defmodule ArbiterWeb.Api.DependencyJSON do
 
   @doc """
   Renders the `Arbiter.Tasks.Dependencies.list/1` shape: one row per edge,
-  each carrying both endpoints' id/title/status/priority so a live edge is
+  each carrying both endpoints' id/title/state/priority so a live edge is
   distinguishable from a closed↔closed one without a second lookup
   (bd-1defgu).
   """
@@ -27,7 +27,7 @@ defmodule ArbiterWeb.Api.DependencyJSON do
     %{
       id: issue.id,
       title: issue.title,
-      status: to_string_atom(issue.status),
+      state: to_string_atom(issue.state),
       priority: issue.priority
     }
   end

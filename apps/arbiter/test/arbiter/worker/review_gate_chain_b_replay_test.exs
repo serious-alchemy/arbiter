@@ -26,6 +26,8 @@ defmodule Arbiter.Worker.ReviewGateChainBReplayTest do
 
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures, only: [put_state!: 2]
+
   require Ash.Query
 
   alias Arbiter.Messages.Message
@@ -115,7 +117,7 @@ defmodule Arbiter.Worker.ReviewGateChainBReplayTest do
     {:ok, task} =
       Ash.create(Issue, %{title: "chain-b task", workspace_id: ws.id, issue_type: :feature})
 
-    {:ok, task} = Ash.update(task, %{status: :in_progress})
+    task = put_state!(task, :active)
     task
   end
 
@@ -173,8 +175,8 @@ defmodule Arbiter.Worker.ReviewGateChainBReplayTest do
   defp assert_parked(task, ws, repo, reason) do
     parked = Ash.get!(Issue, task.id)
 
-    assert parked.review_park_reason == Atom.to_string(reason)
-    assert %DateTime{} = parked.review_parked_at
+    assert parked.attention_cause == reason
+    assert %DateTime{} = parked.attention_since
 
     run = author_run(task.id)
     assert run.state == :finished
@@ -237,7 +239,7 @@ defmodule Arbiter.Worker.ReviewGateChainBReplayTest do
     # above), the task never got a reviewed-SHA stamp, and no `:reviewed`
     # coverage row was written for the head.
     parked = Ash.get!(Issue, task.id)
-    assert parked.status == :in_progress
+    assert parked.state == :active
     assert parked.last_reviewed_sha == nil
     assert Ash.read!(Arbiter.Reviews.Coverage.Entry) == []
   end
@@ -320,6 +322,6 @@ defmodule Arbiter.Worker.ReviewGateChainBReplayTest do
     # The re-run cleared the old park; this run reached its own terminal and
     # parked again, which is a fresh episode with its own page.
     assert [_one] = escalations(ws, task)
-    assert Ash.get!(Issue, task.id).review_park_reason == "inconclusive"
+    assert Ash.get!(Issue, task.id).attention_cause == :inconclusive
   end
 end

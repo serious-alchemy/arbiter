@@ -8,7 +8,7 @@ defmodule Arbiter.Tasks.Issue.Calcs do
   `{closed, total}` progress pair on the parent:
 
     * `child_total`  — count of `:parent_of` children
-    * `child_closed` — count of those children whose status is `:closed`
+    * `child_closed` — count of those children whose state is `:closed`
 
   Callers compose a "progress" map: `%{closed: child_closed, total: child_total}`.
 
@@ -58,7 +58,7 @@ defmodule Arbiter.Tasks.Issue.Calcs do
 
       closed_counts =
         edges
-        |> Enum.filter(fn e -> e.to_issue && e.to_issue.status == :closed end)
+        |> Enum.filter(fn e -> e.to_issue && e.to_issue.state == :closed end)
         |> Enum.frequencies_by(& &1.from_issue_id)
 
       {:ok, Enum.map(issues, fn i -> Map.get(closed_counts, i.id, 0) end)}

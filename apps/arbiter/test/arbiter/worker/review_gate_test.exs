@@ -25,11 +25,13 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures, only: [put_state!: 2]
+
   import ExUnit.CaptureLog
 
   require Ash.Query
 
-  alias Arbiter.Tasks.{Issue, Workspace}
+  alias Arbiter.Tasks.{Issue, ReviewPark, Workspace}
   alias Arbiter.Messages.Message
   alias Arbiter.Worker
   alias Arbiter.Worker.ReviewGate
@@ -445,7 +447,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
         Map.merge(%{title: "review_gate task", workspace_id: ws.id, issue_type: :feature}, attrs)
       )
 
-    {:ok, task} = Ash.update(task, %{status: :in_progress})
+    task = put_state!(task, :active)
     task
   end
 
@@ -635,11 +637,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert snap.meta.failure_summary ==
                "VERDICT: REQUEST_CHANGES — - [high] feature.txt:1 needs a guard"
 
-      # Task parked (still in_progress, not closed) with a short verdict
+      # Task parked (still :active, not closed) with a short verdict
       # summary on its notes (bd-dp7hiw) — the full findings text lives in
       # `Arbiter.ReviewGate.Round`, not duplicated into notes.
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.status == :in_progress
+      assert reloaded.state == :active
       assert reloaded.notes =~ "ReviewGate verdict: REQUEST_CHANGES"
       refute reloaded.notes =~ "needs a guard"
 
@@ -1592,7 +1594,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
       refute File.exists?(gemini_argv_file)
 
       parked = Ash.get!(Issue, task.id)
-      assert parked.review_park_reason == "reviewer_failed"
+      assert parked.attention_cause == :reviewer_failed
 
       escalations = Message.inbox("admiral", workspace_id: ws.id)
       escalation = Enum.find(escalations, &(&1.directive_ref == task.id))
@@ -3802,7 +3804,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
       assert merge_commit_count(repo) == 1
 
-      refute Ash.get!(Issue, task.id) |> Arbiter.Tasks.ReviewPark.parked?()
+      refute Ash.get!(Issue, task.id) |> ReviewPark.parked?()
 
       escalations = Message.inbox("admiral", workspace_id: ws.id)
 
@@ -4503,7 +4505,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
       # "INCONCLUSIVE (no verdict)" — this also pins that
       # `last_review_gate_verdict/1`'s `Ash.read!` genuinely resolves here
       # (rather than silently degrading via its bare `rescue`).
-      assert Ash.get!(Issue, task.id).review_park_reason == "commit_gate_no_changes"
+      assert Ash.get!(Issue, task.id).attention_cause == :commit_gate_no_changes
 
       assert Ash.get!(Issue, task.id).notes =~
                "ReviewGate verdict: REQUEST_CHANGES (parked pending human review"
@@ -4615,7 +4617,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
       # The branch merged — the fix was real, just not a file change — and the
       # task never got parked as an idle-worker liveness failure.
       assert merge_commit_count(repo) == 1
-      refute Ash.get!(Issue, task.id).review_park_reason
+      refute ReviewPark.parked?(Ash.get!(Issue, task.id))
 
       review_id = ReviewGate.reviewer_task_id(task.id)
       runs = Ash.read!(Arbiter.Workers.Run)
@@ -4680,7 +4682,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert merge_commit_count(repo) == 0
 
       parked = Ash.get!(Issue, task.id)
-      assert parked.review_park_reason == "commit_gate_no_changes_after_non_file_fix"
+      assert parked.attention_cause == :commit_gate_no_changes_after_non_file_fix
 
       run =
         Arbiter.Workers.Run

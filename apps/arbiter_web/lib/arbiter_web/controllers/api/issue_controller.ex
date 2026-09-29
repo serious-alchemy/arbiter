@@ -5,8 +5,8 @@ defmodule ArbiterWeb.Api.IssueController do
   Routes:
 
     * `POST   /api/issues`             — :create
-    * `GET    /api/issues`             — :index (filters: status, priority,
-                                        issue_type, workspace_id)
+    * `GET    /api/issues`             — :index (filters: state, priority,
+                                        difficulty, issue_type, workspace_id)
     * `GET    /api/issues/ready`       — :ready (Issue.ready/1)
     * `GET    /api/issues/:id`         — :show
     * `PATCH  /api/issues/:id`         — :update
@@ -34,6 +34,7 @@ defmodule ArbiterWeb.Api.IssueController do
   alias Arbiter.Tasks.Dependencies
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Issue.Changes.CreateUpstream
+  alias Arbiter.Tasks.Lifecycle
   alias Arbiter.Tasks.Lifecycle.Projection
   alias Arbiter.Tasks.Verification
   alias Arbiter.Usage.Estimate
@@ -42,8 +43,8 @@ defmodule ArbiterWeb.Api.IssueController do
 
   action_fallback(ArbiterWeb.Api.FallbackController)
 
-  @atom_fields ~w(status issue_type tracker_type)a
-  @filter_fields ~w(status priority difficulty issue_type workspace_id)a
+  @atom_fields ~w(issue_type tracker_type)a
+  @filter_fields ~w(state priority difficulty issue_type workspace_id)a
 
   def index(conn, params) do
     with {:ok, filters} <- build_filters(params) do
@@ -78,19 +79,6 @@ defmodule ArbiterWeb.Api.IssueController do
   end
 
   def lifecycle(conn, _params), do: unprocessable(conn, "workspace_id is required")
-
-  # bd-9zuvbh: every task the ReviewGate parked. A park is a flag, not a status,
-  # so this cannot be expressed as `?status=`; it gets its own route the way
-  # `ready` does.
-  def review_parked(conn, params) do
-    opts =
-      case params["workspace_id"] do
-        ws when is_binary(ws) and ws != "" -> [workspace_id: ws]
-        _ -> []
-      end
-
-    render(conn, :index, issues: Issue.review_parked(opts))
-  end
 
   def show(conn, %{"id" => id}) do
     case Ash.get(Issue, id, load: [:child_total, :child_closed]) do
@@ -177,7 +165,7 @@ defmodule ArbiterWeb.Api.IssueController do
             "details" => %{
               "matches" =>
                 Enum.map(matches, fn i ->
-                  %{"id" => i.id, "title" => i.title, "status" => to_string(i.status)}
+                  %{"id" => i.id, "title" => i.title, "state" => to_string(i.state)}
                 end)
             }
           }
@@ -352,8 +340,8 @@ defmodule ArbiterWeb.Api.IssueController do
   end
 
   @doc """
-  Record the restart-and-observe result for a task parked at
-  `:awaiting_verification` (bd-9so315).
+  Record the restart-and-observe result for a ticket in the `:verifying`
+  state (bd-9so315).
 
   Body: `outcome` (`"observed"` | `"failed"`) and `evidence` (free text, what
   was actually seen on the running server). `observed` closes the task,
@@ -379,8 +367,8 @@ defmodule ArbiterWeb.Api.IssueController do
   defp verify_error(conn, :not_awaiting_verification) do
     unprocessable(
       conn,
-      "task is not awaiting verification — only a task parked at " <>
-        "awaiting_verification can record a verify result"
+      "task is not awaiting verification — only a ticket in state " <>
+        ":verifying can record a verify result"
     )
   end
 
@@ -452,11 +440,20 @@ defmodule ArbiterWeb.Api.IssueController do
        when field in [:priority, :difficulty] and is_integer(raw),
        do: {:ok, raw}
 
-  defp coerce_filter_value(field, raw) when field in [:status, :issue_type] and is_binary(raw) do
+  # Matched against the lifecycle's own list rather than `to_existing_atom`:
+  # plenty of atoms exist that are not states.
+  defp coerce_filter_value(:state, raw) when is_binary(raw) do
+    case Enum.find(Lifecycle.states(), &(Atom.to_string(&1) == raw)) do
+      nil -> {:error, {:invalid_request, "invalid state: #{inspect(raw)}"}}
+      state -> {:ok, state}
+    end
+  end
+
+  defp coerce_filter_value(:issue_type, raw) when is_binary(raw) do
     {:ok, String.to_existing_atom(raw)}
   rescue
     ArgumentError ->
-      {:error, {:invalid_request, "invalid #{field}: #{inspect(raw)}"}}
+      {:error, {:invalid_request, "invalid issue_type: #{inspect(raw)}"}}
   end
 
   defp coerce_filter_value(_, raw) when is_binary(raw), do: {:ok, raw}

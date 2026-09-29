@@ -11,7 +11,7 @@ defmodule ArbiterCli.Cmd.Review do
 
   ## Task review (positional `<task-id>`)
 
-  The server transitions the task to `:in_progress`, attaches the
+  The server transitions the task to `:active`, attaches the
   `Arbiter.Workflows.CodeReview` workflow, **skips** worktree provisioning and
   per-task branch creation, and spawns a Claude subprocess with a review prompt.
   The reviewer reads the PR/MR diff, posts findings + a verdict via the
@@ -231,7 +231,7 @@ defmodule ArbiterCli.Cmd.Review do
 
     IO.puts("Review dispatched:")
     IO.puts("  Ticket:    #{task["id"]} — #{task["title"]}")
-    IO.puts("  Status:   #{task["status"]}")
+    IO.puts("  State:    #{task["state"]}")
     IO.puts("  Worker:  #{worker["pid"]}")
     IO.puts("  Machine:  #{machine["id"]} #{machine["pid"]}")
 

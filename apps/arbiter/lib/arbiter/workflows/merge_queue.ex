@@ -1959,7 +1959,7 @@ defmodule Arbiter.Workflows.MergeQueue do
 
         # bd-9so315: `finalize_merged/2` closes the task exactly as before
         # unless it carries `verify_after_deploy`, in which case it parks at
-        # `:awaiting_verification` and escalates the restart-and-observe.
+        # `:verifying` and escalates the restart-and-observe.
         result =
           Verification.finalize_merged(task,
             close_upstream: close_upstream,
@@ -1974,7 +1974,7 @@ defmodule Arbiter.Workflows.MergeQueue do
           {:ok, :awaiting_verification, _awaiting} ->
             Logger.info(
               "MergeQueue: task #{item.task_id} merged but flagged verify_after_deploy — " <>
-                "parked at :awaiting_verification pending a restart-and-observe result"
+                "parked at :verifying pending a restart-and-observe result"
             )
 
             broadcast_merge_queue_event(state, {:task_awaiting_verification, item.task_id})

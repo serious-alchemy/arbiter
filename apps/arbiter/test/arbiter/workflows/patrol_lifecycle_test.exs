@@ -2,6 +2,8 @@ defmodule Arbiter.Workflows.PatrolLifecycleTest do
   # async: false — starts real patrols under the singleton supervisors/registries.
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures
+
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Workflows.{PatrolLifecycle, PRPatrolSupervisor, ReviewPatrolSupervisor}
 
@@ -136,7 +138,7 @@ defmodule Arbiter.Workflows.PatrolLifecycleTest do
 
     # bd-9so315 — a parked task's PR is already merged, so its stale `pr_ref` is
     # exactly as dead as a closed task's. `:record_verification` broadcasts
-    # `:updated` while the task is still `:awaiting_verification`, so without the
+    # `:updated` while the task is still `:verifying`, so without the
     # guard every recorded verdict (and every coordinator notes edit on a parked
     # task) would spawn a PRPatrol for the merged PR's repo.
     test "an :updated event on an awaiting-verification task starts nothing" do
@@ -154,12 +156,13 @@ defmodule Arbiter.Workflows.PatrolLifecycleTest do
         })
 
       # bd-842qio: only work in progress parks for verification.
-      {:ok, task} = Ash.update(task, %{pr_ref: "#9", status: :in_progress}, action: :update)
+      task = put_state!(task, :active)
+      {:ok, task} = Ash.update(task, %{pr_ref: "#9"}, action: :update)
 
       await(fn -> PRPatrolSupervisor.whereis(ws.id) end)
 
       {:ok, parked} = Ash.update(task, %{}, action: :await_verification)
-      assert parked.status == :awaiting_verification
+      assert parked.state == :verifying
       assert parked.pr_ref == "#9"
 
       for {_k, pid} <- PRPatrolSupervisor.whereis_all(ws.id),

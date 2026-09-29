@@ -7,8 +7,8 @@ defmodule ArbiterWeb.TaskNewLive do
   the same `Arbiter.Tasks.Dedup` check the REST API does (with a "Create
   anyway" override).
 
-  That sameness now includes where the issue lands: `refined` defaults to
-  `false`, so a task filed here starts in the board's Backlog column exactly
+  That sameness now includes where the issue lands: a new ticket's `state`
+  is `:backlog`, so a task filed here starts in the board's Backlog column exactly
   as `arb create` and `ticket_create` do (bd-b5wyjd). The form deliberately has
   no "file this straight into Ready" affordance — the flash names Backlog and
   the redirect drops the operator on the detail page, where the *Move to

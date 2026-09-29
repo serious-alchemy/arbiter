@@ -11,11 +11,11 @@ defmodule ArbiterCli.OutputTest do
   end
 
   describe "format_issue_line/1" do
-    test "formats id, status, priority, title" do
-      issue = %{"id" => "gte-006", "status" => "open", "priority" => 2, "title" => "CLI escript"}
+    test "formats id, state, priority, title" do
+      issue = %{"id" => "gte-006", "state" => "queued", "priority" => 2, "title" => "CLI escript"}
       line = Output.format_issue_line(issue)
       assert line =~ "gte-006"
-      assert line =~ "[open]"
+      assert line =~ "[queued]"
       assert line =~ "P2"
       assert line =~ "CLI escript"
     end
@@ -30,7 +30,7 @@ defmodule ArbiterCli.OutputTest do
       issue = %{
         "id" => "gte-006",
         "title" => "CLI",
-        "status" => "open",
+        "state" => "queued",
         "priority" => 1,
         "issue_type" => "feature",
         "description" => "Build the thing"
@@ -45,7 +45,7 @@ defmodule ArbiterCli.OutputTest do
     end
 
     test "skips empty sections" do
-      issue = %{"id" => "x", "title" => "T", "status" => "open"}
+      issue = %{"id" => "x", "title" => "T", "state" => "queued"}
       out = Output.format_issue_detail(issue)
       refute out =~ "Description:"
       refute out =~ "Notes:"
@@ -57,15 +57,15 @@ defmodule ArbiterCli.OutputTest do
       issue = %{
         "id" => "x",
         "title" => "T",
-        "status" => "open",
+        "state" => "queued",
         "dependencies" => [
           %{
             "id" => "d1",
             "from_issue_id" => "x",
             "to_issue_id" => "y",
             "type" => "conflicts_with",
-            "from" => %{"id" => "x", "title" => "T", "status" => "open", "priority" => 1},
-            "to" => %{"id" => "y", "title" => "the other", "status" => "closed", "priority" => 2}
+            "from" => %{"id" => "x", "title" => "T", "state" => "queued", "priority" => 1},
+            "to" => %{"id" => "y", "title" => "the other", "state" => "closed", "priority" => 2}
           }
         ]
       }
@@ -74,16 +74,16 @@ defmodule ArbiterCli.OutputTest do
       assert out =~ "Dependencies:"
       assert out =~ "conflicts_with"
       assert out =~ "the other"
-      assert out =~ "closed"
+      assert out =~ "[closed P2]"
     end
 
     test "omits the Dependencies section when there are no edges" do
-      issue = %{"id" => "x", "title" => "T", "status" => "open", "dependencies" => []}
+      issue = %{"id" => "x", "title" => "T", "state" => "queued", "dependencies" => []}
       refute Output.format_issue_detail(issue) =~ "Dependencies:"
     end
 
     test "omits the Dependencies section when the field is absent" do
-      issue = %{"id" => "x", "title" => "T", "status" => "open"}
+      issue = %{"id" => "x", "title" => "T", "state" => "queued"}
       refute Output.format_issue_detail(issue) =~ "Dependencies:"
     end
 
@@ -165,14 +165,14 @@ defmodule ArbiterCli.OutputTest do
     end
 
     test "renders Difficulty as D<n> when set" do
-      issue = %{"id" => "x", "title" => "T", "status" => "open", "difficulty" => 3}
+      issue = %{"id" => "x", "title" => "T", "state" => "queued", "difficulty" => 3}
       out = Output.format_issue_detail(issue)
       assert out =~ "Difficulty:"
       assert out =~ "D3"
     end
 
     test "omits Difficulty line when unset" do
-      issue = %{"id" => "x", "title" => "T", "status" => "open"}
+      issue = %{"id" => "x", "title" => "T", "state" => "queued"}
       refute Output.format_issue_detail(issue) =~ "Difficulty:"
 
       issue_nil = Map.put(issue, "difficulty", nil)
@@ -180,7 +180,7 @@ defmodule ArbiterCli.OutputTest do
     end
 
     test "renders the task's repo assignment, and omits the line when unassigned (bd-2jum8j)" do
-      issue = %{"id" => "x", "title" => "T", "status" => "open", "repo" => "emricare/tonic"}
+      issue = %{"id" => "x", "title" => "T", "state" => "queued", "repo" => "emricare/tonic"}
       out = Output.format_issue_detail(issue)
       assert out =~ "Repo:"
       assert out =~ "emricare/tonic"
@@ -194,7 +194,7 @@ defmodule ArbiterCli.OutputTest do
       issue = %{
         "id" => "x",
         "title" => "T",
-        "status" => "open",
+        "state" => "queued",
         "issue_type" => "chore",
         "acceptance_waived" => "trivial config bump"
       }
@@ -205,7 +205,7 @@ defmodule ArbiterCli.OutputTest do
     end
 
     test "a research ticket leads with its findings; a task keeps the standard order (bd-9s9dqz)" do
-      base = %{"id" => "x", "title" => "T", "status" => "open", "notes" => "did the thing"}
+      base = %{"id" => "x", "title" => "T", "state" => "queued", "notes" => "did the thing"}
 
       research = Output.format_issue_detail(Map.put(base, "issue_type", "research"))
       assert research =~ "Findings (notes)"
@@ -215,7 +215,7 @@ defmodule ArbiterCli.OutputTest do
     end
 
     test "omits the acceptance waiver line when unset" do
-      issue = %{"id" => "x", "title" => "T", "status" => "open", "issue_type" => "task"}
+      issue = %{"id" => "x", "title" => "T", "state" => "queued", "issue_type" => "task"}
       refute Output.format_issue_detail(issue) =~ "Acceptance waived:"
     end
   end

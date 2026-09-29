@@ -149,8 +149,7 @@ defmodule Arbiter.MCP.Catalog do
           "closed), `column` (backlog | blocked | ready | in_progress | merging | verifying " <>
           "| closed), `step` (the computed step inside In progress or Merging, else null), " <>
           "`blocked_by` (unsatisfied gating blockers), `attention` ({owner, waiting_on, " <>
-          "reason, cause, since, note} or null) and `close_reason`. The legacy `status` " <>
-          "rides along for one release; read `state`/`column` instead. A worker reads its " <>
+          "reason, cause, since, note} or null) and `close_reason`. A worker reads its " <>
           "own ticket (the `id` argument may be omitted); a coordinator must pass the `id`. " <>
           "Pass `full: true` to include review fields (notes, qa_notes, deployment_notes, " <>
           "pr_body, pr_ref, tracker_ref, target_branch, repo, auto_close, " <>
@@ -176,8 +175,8 @@ defmodule Arbiter.MCP.Catalog do
               "When true, return the complete record including notes, qa_notes, " <>
                 "deployment_notes, pr_body, pr_ref, tracker_ref, target_branch, repo, " <>
                 "auto_close, verify_after_deploy, awaiting_verification_at, " <>
-                "verification_outcome, verification_evidence, review_park_reason, " <>
-                "review_parked_at, and timestamps. " <>
+                "verification_outcome, verification_evidence, attention_cause (a ReviewGate " <>
+                "park is its cause), and timestamps. " <>
                 "Defaults to false (slim payload for workers)."
           }
         },
@@ -323,7 +322,7 @@ defmodule Arbiter.MCP.Catalog do
         "Record progress / completion notes on a ticket — `notes`, `qa_notes`, `deployment_notes`, " <>
           "`pr_body`, plus the `verify_after_deploy` flag (the structured replacement for " <>
           "`arb ticket update --qa-notes …`). A worker may only update its own ticket and cannot " <>
-          "change status or priority.",
+          "change its state or priority.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
@@ -481,8 +480,9 @@ defmodule Arbiter.MCP.Catalog do
       name: "ticket_update",
       tiers: @coordinator,
       description:
-        "Update a ticket in the workspace (status / priority / title / …). To close a ticket use " <>
-          "`ticket_close`; the `closed` status is rejected here.",
+        "Update a ticket's fields in the workspace (priority / title / …). It never moves the " <>
+          "lifecycle `state`: use `ticket_promote` / `ticket_demote` / `ticket_close` / " <>
+          "`ticket_reopen` for that.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
@@ -493,7 +493,6 @@ defmodule Arbiter.MCP.Catalog do
           "notes" => %{"type" => "string"},
           "qa_notes" => %{"type" => "string"},
           "deployment_notes" => %{"type" => "string"},
-          "status" => %{"type" => "string", "description" => "open | in_progress."},
           "priority" => %{"type" => "integer"},
           "difficulty" => %{"type" => "integer"},
           "issue_type" => %{
@@ -651,9 +650,10 @@ defmodule Arbiter.MCP.Catalog do
       description:
         "Demote a queued ticket (column Ready or Blocked) back to Backlog via the `demote` transition. " <>
           "Coordinator only. Idempotent by design — demoting an already-backlog ticket is a no-op success, " <>
-          "not an error. A ticket can only be demoted if it has no live worker and its state is `queued` " <>
-          "(undispatched). Refuses to demote tickets that are In progress, Merging, Verifying or Closed " <>
-          "with a clear reason — demoting those would orphan the worker or undo completed work.",
+          "not an error. A ticket can only be demoted if it has no live worker and its state is `queued`, " <>
+          "or `active` / `merging` with its run stopped. Refuses a ticket with a live worker, and one that " <>
+          "is Verifying or Closed, with a clear reason — demoting those would orphan the worker or undo " <>
+          "completed work.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
@@ -746,7 +746,7 @@ defmodule Arbiter.MCP.Catalog do
       description:
         "Push a close to the linked tracker issue for a ticket that's already `:closed` locally " <>
           "but was never synced upstream (e.g. it closed via auto-close rollup or a caller that " <>
-          "forgot `close_upstream: true`). Makes no local status change — the ticket must already " <>
+          "forgot `close_upstream: true`). Makes no local state change — the ticket must already " <>
           "be `:closed` and carry a `tracker_ref`. Does not reopen, re-run StopWorker/" <>
           "CleanupWorktree, or re-trigger the parent auto-close rollup.",
       input_schema: %{
@@ -817,7 +817,7 @@ defmodule Arbiter.MCP.Catalog do
           "`workspace` arg sees its own workspace's edges; naming a different one is refused, " <>
           "the same rule dep_add/dep_remove already apply. With no `issue_id`, lists every edge " <>
           "in the workspace; with `issue_id`, lists that ticket's edges in both directions " <>
-          "instead. Each row carries both endpoints' id/title/status/priority, so a live edge " <>
+          "instead. Each row carries both endpoints' id/title/state/priority, so a live edge " <>
           "is distinguishable from a closed↔closed one without a second lookup. A symmetric " <>
           "edge (`conflicts_with`) is never doubled — it's stored once, directed, and appears " <>
           "once no matter which endpoint you query from.",
@@ -1521,8 +1521,7 @@ defmodule Arbiter.MCP.Catalog do
           "active | merging | verifying | closed), `column` (backlog | blocked | ready | " <>
           "in_progress | merging | verifying | closed), `priority` (integer 0–4) and " <>
           "`issue_type` (task | research | bug | feature | epic | chore | decision). Each ticket carries " <>
-          "`state`, `column`, `step`, `blocked_by` and `attention`. The legacy `status` " <>
-          "filter still works for one release; prefer `state` or `column`.",
+          "`state`, `column`, `step`, `blocked_by` and `attention`.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
@@ -1537,12 +1536,6 @@ defmodule Arbiter.MCP.Catalog do
             "description" =>
               "Filter by board column: backlog | blocked | ready | in_progress | merging | " <>
                 "verifying | closed. Blocked and Ready split `queued` by its gating edges."
-          },
-          "status" => %{
-            "type" => "string",
-            "description" =>
-              "Deprecated (one release): legacy status open | in_progress | " <>
-                "awaiting_verification | closed. Use `state` or `column`."
           },
           "priority" => %{
             "type" => "integer",

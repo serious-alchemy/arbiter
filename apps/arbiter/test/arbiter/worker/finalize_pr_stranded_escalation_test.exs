@@ -135,7 +135,7 @@ defmodule Arbiter.Worker.FinalizePRStrandedEscalationTest do
     wait_until(fn -> Worker.state(pid).outcome == :failed end)
 
     {:ok, reloaded} = Ash.get(Issue, task.id)
-    refute reloaded.status == :closed
+    refute reloaded.state == :closed
 
     escalations = Message.inbox("admiral", workspace_id: ws.id)
 

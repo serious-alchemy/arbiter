@@ -10,16 +10,17 @@ defmodule Arbiter.Sessions.RefineLifecycle do
   PatrolLifecycle` already reacts to (`Issue.broadcast_lifecycle/2`), and
   reacts to exactly two shapes:
 
-    * `{:task_lifecycle, :updated, %Issue{refined: true}}` — the issue this
-      event names just got promoted (via `ticket_promote`, whether the
-      session's own call or anyone else's, or the `Move to Ready` button).
-      Ends with `end_reason: "promoted"`.
+    * `{:task_lifecycle, :updated, %Issue{state: state}}` with `state` past
+      `:backlog` — the issue this event names just got promoted (via
+      `ticket_promote`, whether the session's own call or anyone else's, or
+      the `Move to Ready` button). Ends with `end_reason: "promoted"`.
     * `{:task_lifecycle, :closed, issue}` — ends with `end_reason:
       "issue_closed"`.
 
   Every other `:task_lifecycle` event (including a plain `:updated` that
-  leaves `refined` false — an edit, a title change) is ignored outright: only
-  these two shapes can possibly be the bound issue's terminal transition.
+  leaves the ticket in `:backlog` — an edit, a title change) is ignored
+  outright: only these two shapes can possibly be the bound issue's terminal
+  transition.
 
   ## Scoped by construction, not by tracking state
 
@@ -95,9 +96,10 @@ defmodule Arbiter.Sessions.RefineLifecycle do
 
   @impl true
   def handle_info(
-        {:task_lifecycle, :updated, %Issue{refined: true} = issue},
+        {:task_lifecycle, :updated, %Issue{state: ticket_state} = issue},
         %{enabled?: true} = state
-      ) do
+      )
+      when ticket_state != :backlog do
     end_bound_session(issue, "promoted", state)
     {:noreply, state}
   rescue

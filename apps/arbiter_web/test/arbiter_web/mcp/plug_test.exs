@@ -157,7 +157,7 @@ defmodule ArbiterWeb.MCP.PlugTest do
 
       assert %{"error" => error} = json_response(conn, 200)
       assert error["code"] == -32_003
-      assert Ash.get!(Issue, ctx.task.id).status == :open
+      refute Ash.get!(Issue, ctx.task.id).state == :closed
     end
 
     test "the token stops working the moment the session is revoked", ctx do

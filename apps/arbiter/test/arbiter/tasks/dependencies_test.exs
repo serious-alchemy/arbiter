@@ -224,11 +224,11 @@ defmodule Arbiter.Tasks.DependenciesTest do
         Ash.create(Issue, %{title: "epic", workspace_id: ctx.ws.id, auto_close: true})
 
       {:ok, child} = Ash.update(ctx.a, %{}, action: :close)
-      assert child.status == :closed
+      assert child.state == :closed
 
       assert {:ok, _dep} = Dependencies.add(parent.id, child.id, :parent_of)
 
-      assert Ash.get!(Issue, parent.id).status == :closed
+      assert Ash.get!(Issue, parent.id).state == :closed
     end
 
     test "removing the last open child closes the auto_close parent", ctx do
@@ -240,10 +240,10 @@ defmodule Arbiter.Tasks.DependenciesTest do
       {:ok, _} = Dependencies.add(parent.id, ctx.b.id, :parent_of)
       {:ok, _} = Ash.update(ctx.b, %{}, action: :close)
 
-      assert Ash.get!(Issue, parent.id).status == :open
+      assert Ash.get!(Issue, parent.id).state == :backlog
 
       assert {:ok, 1} = Dependencies.remove(parent.id, ctx.a.id, :parent_of)
-      assert Ash.get!(Issue, parent.id).status == :closed
+      assert Ash.get!(Issue, parent.id).state == :closed
     end
 
     test "does not close a parent that still has open children", ctx do
@@ -255,7 +255,7 @@ defmodule Arbiter.Tasks.DependenciesTest do
       {:ok, _} = Ash.update(ctx.b, %{}, action: :close)
 
       assert {:ok, 1} = Dependencies.remove(parent.id, ctx.b.id, :parent_of)
-      assert Ash.get!(Issue, parent.id).status == :open
+      assert Ash.get!(Issue, parent.id).state == :backlog
     end
 
     test "does not close a parent without auto_close", ctx do
@@ -263,7 +263,7 @@ defmodule Arbiter.Tasks.DependenciesTest do
       {:ok, child} = Ash.update(ctx.a, %{}, action: :close)
 
       assert {:ok, _} = Dependencies.add(parent.id, child.id, :parent_of)
-      assert Ash.get!(Issue, parent.id).status == :open
+      assert Ash.get!(Issue, parent.id).state == :backlog
     end
   end
 

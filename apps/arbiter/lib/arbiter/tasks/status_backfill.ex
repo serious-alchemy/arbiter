@@ -1,15 +1,16 @@
 defmodule Arbiter.Tasks.StatusBackfill do
   @moduledoc """
-  Reconcile task statuses in the database against git history on a branch.
+  Reconcile task lifecycle states in the database against git history on a
+  branch.
 
   The cutover postmortem flagged that task statuses in the original Dolt
   source drifted out of sync during late-Phase implementation: the coordinator
   stopped closing tasks in Dolt once dogfood-switchover happened, so the
-  `--sync-status` importer carried the stale `:open` statuses forward.
+  `--sync-status` importer carried the stale open statuses forward.
 
   This module reads `git log` for `feat(<task-id>)` commit subjects on a
   configured branch (default `main`) and treats those as evidence the
-  task shipped. Any task with such a commit whose current status isn't
+  task shipped. Any task with such a commit whose current `state` isn't
   `:closed` gets a proposal to close. `apply!/1` performs the closures.
 
   ## What counts as evidence
@@ -24,7 +25,7 @@ defmodule Arbiter.Tasks.StatusBackfill do
   - Detect reverts. If a `feat(<id>)` commit was reverted, the task would
     still be proposed for closure. Operator inspection of the proposals
     list is the safety net for this.
-  - Reopen tasks. The reconciliation is one-directional (open → closed).
+  - Reopen tasks. The reconciliation is one-directional (not closed → closed).
     A task that's `:closed` in the database but has no `feat(<id>)` commit
     is left closed.
   """
@@ -38,7 +39,7 @@ defmodule Arbiter.Tasks.StatusBackfill do
   """
   @type proposal :: %{
           task_id: String.t(),
-          current_status: atom(),
+          current_state: atom(),
           commit_sha: String.t(),
           commit_subject: String.t()
         }
@@ -60,7 +61,7 @@ defmodule Arbiter.Tasks.StatusBackfill do
     lines
     |> Enum.flat_map(&parse_line/1)
     |> consolidate()
-    |> Enum.map(&attach_task_status/1)
+    |> Enum.map(&attach_task_state/1)
     |> Enum.reject(&already_closed_or_missing/1)
   end
 
@@ -134,15 +135,15 @@ defmodule Arbiter.Tasks.StatusBackfill do
     |> Enum.sort_by(& &1.task_id)
   end
 
-  defp attach_task_status(p) do
+  defp attach_task_state(p) do
     case Ash.get(Issue, p.task_id) do
-      {:ok, %Issue{status: status}} -> Map.put(p, :current_status, status)
-      _ -> Map.put(p, :current_status, :_missing)
+      {:ok, %Issue{state: state}} -> Map.put(p, :current_state, state)
+      _ -> Map.put(p, :current_state, :_missing)
     end
   end
 
-  defp already_closed_or_missing(%{current_status: :closed}), do: true
-  defp already_closed_or_missing(%{current_status: :_missing}), do: true
+  defp already_closed_or_missing(%{current_state: :closed}), do: true
+  defp already_closed_or_missing(%{current_state: :_missing}), do: true
   defp already_closed_or_missing(_), do: false
 
   defp close_task(task_id, reason) do

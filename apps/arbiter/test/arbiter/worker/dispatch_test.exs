@@ -1,6 +1,8 @@
 defmodule Arbiter.Worker.DispatchTest do
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures, only: [put_state!: 2]
+
   # bd-asxw4e: the tickets here are created in Backlog and dispatched straight
   # away, which a dispatch refuses unless forced — so these calls pass
   # `force: true`. What a dispatch admits is `DispatchEligibilityTest`'s.
@@ -70,7 +72,7 @@ defmodule Arbiter.Worker.DispatchTest do
       assert {:ok, result} =
                Dispatch.dispatch(task.id, force: true, repo: "test/repo", start_driver: false)
 
-      assert result.task.status == :in_progress
+      assert result.task.state == :active
       assert is_pid(result.worker_pid)
       assert is_pid(result.machine_pid)
       assert is_binary(result.machine_id)
@@ -80,16 +82,16 @@ defmodule Arbiter.Worker.DispatchTest do
       assert Worker.whereis(task.id) == result.worker_pid
     end
 
-    test "idempotent for already-in_progress tasks", %{ws: ws} do
+    test "idempotent for already-active tasks", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "t", workspace_id: ws.id})
       {:ok, _first} = Dispatch.dispatch(task.id, force: true, repo: "r", start_driver: false)
 
-      # Second dispatch: task is already :in_progress; worker already exists.
+      # Second dispatch: task is already :active; worker already exists.
       # Should NOT crash; should return the existing worker pid.
       assert {:ok, second} =
                Dispatch.dispatch(task.id, force: true, repo: "r", start_driver: false)
 
-      assert second.task.status == :in_progress
+      assert second.task.state == :active
       assert Worker.whereis(task.id) == second.worker_pid
     end
 
@@ -147,7 +149,7 @@ defmodule Arbiter.Worker.DispatchTest do
       assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.status == :closed
+      assert reloaded.state == :closed
     end
   end
 
@@ -169,7 +171,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       StubMerger.reset()
       {:ok, task} = Ash.create(Issue, %{title: "awaiting-review guard", workspace_id: ws.id})
-      {:ok, task} = Ash.update(task, %{status: :in_progress})
+      task = put_state!(task, :active)
 
       # bd-741sid: a run opens its PR via open_mr/5 with a stub merger and ends
       # there — the ticket is Merging and its Watchdog owns the PR. Use a
@@ -198,7 +200,7 @@ defmodule Arbiter.Worker.DispatchTest do
                Dispatch.dispatch(task.id, force: true, start_driver: false)
     end
 
-    test "Autopilot dispatch checks refined flag at dispatch time (bd-a1bmyx)", %{ws: ws} do
+    test "Autopilot dispatch checks readiness at dispatch time (bd-a1bmyx)", %{ws: ws} do
       {:ok, task} =
         Ash.create(Issue, %{
           title: "demoted after plan",
@@ -207,18 +209,18 @@ defmodule Arbiter.Worker.DispatchTest do
         })
 
       {:ok, task} = Ash.update(task, %{}, action: :promote_to_ready)
-      assert task.refined
+      assert task.state == :queued
 
-      # Simulate Autopilot planning the dispatch with refined=true but then
+      # Simulate Autopilot planning the dispatch while it was Ready, but then
       # it gets demoted between plan and dispatch.
       {:ok, task} = Ash.update(task, %{}, action: :return_to_backlog)
-      refute task.refined
+      assert task.state == :backlog
 
-      # Autopilot dispatch should refuse because refined is now false.
+      # Autopilot dispatch should refuse because it is back in Backlog.
       assert {:error, {:task_not_ready, _}} =
                Dispatch.dispatch(task.id, dispatched_by: "autopilot", start_driver: false)
 
-      # Non-Autopilot dispatch should still work (manual dispatch allows unrefined).
+      # Non-Autopilot dispatch should still work (manual dispatch allows Backlog).
       {:ok, task} = Ash.get(Issue, task.id)
       assert {:ok, _worker} = Worker.start(task_id: task.id, repo: "arbiter")
     end
@@ -227,7 +229,7 @@ defmodule Arbiter.Worker.DispatchTest do
   # bd-bi5pn0: a step AFTER start_worker/3 (e.g. the Claude subprocess spawn,
   # hit by a transient network/VPN outage in production) can fail while the
   # worker GenServer is already registered `:starting`. Previously that left a
-  # zombie `:starting` registration on an `:in_progress` task forever — no retry,
+  # zombie `:starting` registration on an `:active` task forever — no retry,
   # no escalation — which also permanently blackholed PRPatrol dedup for the
   # underlying PR. dispatch/2 must instead fail the just-started worker and
   # escalate to the coordinator.
@@ -427,10 +429,10 @@ defmodule Arbiter.Worker.DispatchTest do
 
       assert reason.category == :auth_expired
 
-      # Refused BEFORE any state mutation: task is still :open, no worker spawned,
+      # Refused BEFORE any state mutation: task is still :backlog, no worker spawned,
       # no worktree provisioned.
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.status == :open
+      assert reloaded.state == :backlog
       assert Worker.whereis(task.id) == nil
     end
 
@@ -553,7 +555,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       assert reason.category == :auth_expired
       {:ok, reloaded} = Ash.get(Issue, task2.id)
-      assert reloaded.status == :open
+      assert reloaded.state == :backlog
       assert Worker.whereis(task2.id) == nil
       # Refused before worktree provisioning — the branch that would prove it
       # never got the chance to be created.
@@ -613,7 +615,7 @@ defmodule Arbiter.Worker.DispatchTest do
                  provision_worktree: false
                )
 
-      assert result.task.status == :in_progress
+      assert result.task.state == :active
     end
 
     test "preflight: false bypasses the guard even with start_claude and a known-expired adapter",
@@ -1275,7 +1277,7 @@ defmodule Arbiter.Worker.DispatchTest do
     # bd-ci2jl2: a PRPatrol follow-up used to be undispatchable. It carried
     # `issue_type: :task` (→ no worktree provisioned → start_claude 500'd with
     # :missing_worktree) and stored the merged PR number in `tracker_ref` (→ the
-    # :in_progress transition tried to write lifecycle status onto a merged PR
+    # start transition tried to write lifecycle status onto a merged PR
     # and escalated `Validation Failed`). The follow-up is now a reviewable type
     # with `tracker_type: :none` + the PR linked via `source_pr`, so dispatch
     # provisions a FRESH worktree and never touches a tracker.
@@ -1308,8 +1310,8 @@ defmodule Arbiter.Worker.DispatchTest do
       # Fresh worktree provisioned (the bug returned {:error, :missing_worktree}).
       assert is_binary(result.worktree_path)
       assert is_port(result.claude_port)
-      # Transition to :in_progress succeeded without a tracker sync attempt.
-      assert result.task.status == :in_progress
+      # Transition to :active succeeded without a tracker sync attempt.
+      assert result.task.state == :active
       assert result.task.tracker_type == :none
       assert result.task.source_pr == "591"
     end
@@ -1594,11 +1596,11 @@ defmodule Arbiter.Worker.DispatchTest do
 
       # If the Driver were in workflow mode, the no-op steps would close
       # the task in ~500ms. Wait that long and verify the task is still
-      # :in_progress — the Driver is waiting on the worker instead.
+      # :active — the Driver is waiting on the worker instead.
       Process.sleep(150)
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.status == :in_progress
+      assert reloaded.state == :active
 
       # Now simulate Claude completion and let the Driver react.
       :ok = Worker.complete(result.worker_pid, :claude_done)
@@ -1607,7 +1609,7 @@ defmodule Arbiter.Worker.DispatchTest do
       assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.status == :closed
+      assert reloaded.state == :closed
     end
 
     test "passes the workspace `agent.config.model` as `--model` to claude",
@@ -2752,8 +2754,8 @@ defmodule Arbiter.Worker.DispatchTest do
       {branches, 0} = System.cmd("git", ["-C", repo, "branch", "--list", branch])
       assert String.contains?(branches, branch)
 
-      # Reopen task so it can be re-slung.
-      {:ok, task} = Ash.update(task, %{status: :open})
+      # Requeue the task so it can be re-slung.
+      {:ok, task} = Issue |> Ash.get!(task.id) |> Ash.update(%{}, action: :requeue)
 
       # Second dispatch — branch already exists; must attach instead of creating.
       assert {:ok, second} =
@@ -2932,7 +2934,7 @@ defmodule Arbiter.Worker.DispatchTest do
       # The task parks for post-merge verification and comes back :failed —
       # exactly the bd-96mn8i sequence. (bd-842qio: only work in progress
       # parks, so it was in progress first, as the prior dispatch left it.)
-      {:ok, task} = Ash.update(task, %{status: :in_progress})
+      task = put_state!(task, :active)
       {:ok, task} = Ash.update(task, %{}, action: :await_verification)
       {:ok, task} = Arbiter.Tasks.Verification.failed(task, "still broken in prod")
 
@@ -4553,9 +4555,9 @@ defmodule Arbiter.Worker.DispatchTest do
                  preflight: false
                )
 
-      # Refused BEFORE any state mutation: task still :open, no worker.
+      # Refused BEFORE any state mutation: task still :backlog, no worker.
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.status == :open
+      assert reloaded.state == :backlog
       assert Worker.whereis(task.id) == nil
     end
 
@@ -4597,7 +4599,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       # Refused before any state mutation.
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.status == :open
+      assert reloaded.state == :backlog
       assert Worker.whereis(task.id) == nil
     end
 
@@ -4679,7 +4681,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
       # Refused before any state mutation.
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.status == :open
+      assert reloaded.state == :backlog
       assert Worker.whereis(task.id) == nil
     end
 
@@ -4709,9 +4711,9 @@ defmodule Arbiter.Worker.DispatchTest do
       Application.delete_env(:arbiter, @env_key)
       {:ok, task} = Ash.create(Issue, %{title: "dry dispatch", workspace_id: ws.id})
 
-      # No --with-claude → no repo required → succeeds and parks as :in_progress.
+      # No --with-claude → no repo required → succeeds and parks as :active.
       assert {:ok, result} = Dispatch.dispatch(task.id, force: true, start_driver: false)
-      assert result.task.status == :in_progress
+      assert result.task.state == :active
       assert result.worktree_path == nil
     end
   end
@@ -4837,7 +4839,7 @@ defmodule Arbiter.Worker.DispatchTest do
                  preflight: false
                )
 
-      assert Ash.get!(Issue, task.id).status == :open
+      assert Ash.get!(Issue, task.id).state == :backlog
       assert Worker.whereis(task.id) == nil
     end
 
@@ -4862,7 +4864,7 @@ defmodule Arbiter.Worker.DispatchTest do
         Ash.create(Issue, %{title: "dry with issue repo", workspace_id: ws.id, repo: "org/beta"})
 
       assert {:ok, result} = Dispatch.dispatch(task.id, force: true, start_driver: false)
-      assert result.task.status == :in_progress
+      assert result.task.state == :active
       assert File.exists?(Path.join(result.worktree_path, "MARKER-beta"))
     end
   end
@@ -4885,7 +4887,7 @@ defmodule Arbiter.Worker.DispatchTest do
       # (or fail for other reasons, but not due to pending migrations)
       case Dispatch.dispatch(task.id, force: true, repo: "test/repo", start_driver: false) do
         {:ok, result} ->
-          assert result.task.status == :in_progress
+          assert result.task.state == :active
 
         {:error, {:pending_migrations, _count}} ->
           # If we do have pending migrations in test, that's OK too — this just verifies
@@ -4909,7 +4911,7 @@ defmodule Arbiter.Worker.DispatchTest do
                {:error, {:pending_migrations, 3}}
 
       reloaded = Ash.get!(Issue, task.id)
-      assert reloaded.status != :in_progress
+      assert reloaded.state == :backlog
       assert Worker.whereis(task.id) == nil
     end
 
@@ -4925,7 +4927,7 @@ defmodule Arbiter.Worker.DispatchTest do
                {:error, {:migrations_check_failed, :unreachable}}
 
       reloaded = Ash.get!(Issue, task.id)
-      assert reloaded.status != :in_progress
+      assert reloaded.state == :backlog
       assert Worker.whereis(task.id) == nil
     end
   end
@@ -4946,7 +4948,7 @@ defmodule Arbiter.Worker.DispatchTest do
                  quota_bypass_reason: "manual override for critical task"
                )
 
-      assert result.task.status == :in_progress
+      assert result.task.state == :active
 
       # Verify the audit event was created
       events =

@@ -13,6 +13,8 @@ defmodule Arbiter.Worker.ReviewGateProviderRotationTest do
 
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures, only: [put_state!: 2]
+
   alias Arbiter.Agents
   alias Arbiter.Agents.ProviderPool
   alias Arbiter.ReviewGate.Round
@@ -192,7 +194,7 @@ defmodule Arbiter.Worker.ReviewGateProviderRotationTest do
         issue_type: :feature
       })
 
-    {:ok, task} = Ash.update(task, %{status: :in_progress})
+    task = put_state!(task, :active)
     task
   end
 
@@ -310,7 +312,7 @@ defmodule Arbiter.Worker.ReviewGateProviderRotationTest do
 
       # The park is a reviewer timeout, not a generic reviewer failure.
       task_after = Ash.get!(Issue, task.id)
-      assert task_after.review_park_reason == "reviewer_timeout"
+      assert task_after.attention_cause == :reviewer_timeout
 
       # Both providers' timeouts are recorded structurally, in configured order.
       providers =
@@ -353,7 +355,7 @@ defmodule Arbiter.Worker.ReviewGateProviderRotationTest do
              "a single-provider pool must not report a pool-wide exhaustion"
 
       task_after = Ash.get!(Issue, task.id)
-      assert task_after.review_park_reason == "reviewer_timeout"
+      assert task_after.attention_cause == :reviewer_timeout
     end
 
     # AC2 (the identity half): the rotation subtracts the provider that ACTUALLY
@@ -419,7 +421,7 @@ defmodule Arbiter.Worker.ReviewGateProviderRotationTest do
       assert escalation.body =~ "re-authenticate" or escalation.body =~ "expired"
 
       task_after = Ash.get!(Issue, task.id)
-      assert task_after.review_park_reason == "reviewer_failed"
+      assert task_after.attention_cause == :reviewer_failed
     end
   end
 
@@ -454,7 +456,7 @@ defmodule Arbiter.Worker.ReviewGateProviderRotationTest do
       assert Worker.state(pid).meta.failure_reason == :review_gate_inconclusive
 
       task_after = Ash.get!(Issue, task.id)
-      assert task_after.review_park_reason == "reviewer_timeout"
+      assert task_after.attention_cause == :reviewer_timeout
     end
   end
 end

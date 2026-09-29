@@ -30,8 +30,9 @@ defmodule Arbiter.Tasks.Lifecycle do
   | transition | from → to |
   |---|---|
   | `promote` | backlog → queued |
-  | `demote` | queued → backlog |
-  | `start` | queued → active |
+  | `demote` | queued \\| active \\| merging → backlog |
+  | `start` | backlog \\| queued → active |
+  | `requeue` | active \\| merging → queued |
   | `open_pr` | active → merging |
   | `return_to_work` | merging → active |
   | `await_verification` | active \\| merging → verifying |
@@ -43,23 +44,24 @@ defmodule Arbiter.Tasks.Lifecycle do
   (`close` and `await_verification` both accept `active`), so no type
   exception is needed to allow them.
 
-  ## Legacy dual-write (the overlap)
+  The three moves that used to be legacy `status` writes (bd-36ytcl) are
+  transitions too:
 
-  Until the later children switch every consumer to `state`, each transition
-  also writes the legacy fields per `legacy_fields/1`, and
-  `legacy_state/1` is the rule the migration backfilled existing rows with.
+    * `start` from `backlog` — a forced manual dispatch that skips the Ready
+      queue. `dispatchable/2` holds a Backlog ticket, so only
+      `Worker.Dispatch` with `--force` takes this edge;
+    * `requeue` — a run that stopped without finishing puts its ticket back in
+      the queue (`Worker.AuthDeath`, after the run's credentials died);
+    * `demote` from `active` / `merging` — `:return_to_backlog` on a ticket
+      whose worker already stopped (bd-2098). `Changes.GuardDemote` refuses
+      while a worker is live.
 
   Who writes `state`:
 
     * the transition actions, through `Changes.Transition`;
     * `:create`, which always lands in `:backlog`;
-    * during the overlap only, a legacy `status` write — through `:update`,
-      or `:return_to_backlog`'s reset of a stopped in-progress ticket —
-      which re-derives `state` with `legacy_state/1`
-      (`Changes.FollowLegacyStatus`) so the two never disagree. It is deleted
-      with `status` in bd-36ytcl;
-    * the rows written around Ash — the migration's backfill and the Dolt
-      importer (`Arbiter.Tasks.DoltImport.Mapper`) — by the same rule.
+    * the rows written around Ash — the lifecycle migration's backfill and
+      the Dolt importer (`Arbiter.Tasks.DoltImport.Mapper`).
   """
 
   @states [:backlog, :queued, :active, :merging, :verifying, :closed]
@@ -67,8 +69,9 @@ defmodule Arbiter.Tasks.Lifecycle do
 
   @rules %{
     promote: {[:backlog], :queued},
-    demote: {[:queued], :backlog},
-    start: {[:queued], :active},
+    demote: {[:queued, :active, :merging], :backlog},
+    start: {[:backlog, :queued], :active},
+    requeue: {[:active, :merging], :queued},
     open_pr: {[:active], :merging},
     return_to_work: {[:merging], :active},
     await_verification: {[:active, :merging], :verifying},
@@ -82,6 +85,7 @@ defmodule Arbiter.Tasks.Lifecycle do
           :promote
           | :demote
           | :start
+          | :requeue
           | :open_pr
           | :return_to_work
           | :await_verification
@@ -100,7 +104,7 @@ defmodule Arbiter.Tasks.Lifecycle do
   @doc "Whether a gating blocker no longer holds its dependents back: `:verifying` or `:closed`."
   defdelegate blocker_satisfied?(ticket_or_state), to: Arbiter.Tasks.Lifecycle.View
 
-  @doc "The stored state, or the one a legacy row's columns imply; `nil` when neither."
+  @doc "The ticket's stored state; `nil` for a map that carries none."
   defdelegate state_of(ticket), to: Arbiter.Tasks.Lifecycle.View
 
   @doc """
@@ -140,45 +144,4 @@ defmodule Arbiter.Tasks.Lifecycle do
       :error -> false
     end
   end
-
-  @doc """
-  The legacy columns a transition into `state` dual-writes.
-
-  `refined` is omitted for `:closed`: a close leaves it as it was.
-  """
-  @spec legacy_fields(state()) :: %{
-          required(:status) => atom(),
-          optional(:refined) => boolean()
-        }
-  def legacy_fields(:backlog), do: %{status: :open, refined: false}
-  def legacy_fields(:queued), do: %{status: :open, refined: true}
-  def legacy_fields(:active), do: %{status: :in_progress, refined: true}
-  def legacy_fields(:merging), do: %{status: :in_progress, refined: true}
-  def legacy_fields(:verifying), do: %{status: :awaiting_verification, refined: true}
-  def legacy_fields(:closed), do: %{status: :closed}
-
-  @doc """
-  The state a row's legacy columns imply — the migration's backfill rule.
-
-  An `in_progress` row with a PR on record (`pr_ref`) or a merge the Watchdog
-  deferred (`pending_merge`) is `:merging`; any other `in_progress` row is
-  `:active`. An absent `refined` reads as unrefined.
-  """
-  @spec legacy_state(map()) :: state()
-  def legacy_state(row) do
-    case Map.get(row, :status) do
-      :open -> if Map.get(row, :refined) == true, do: :queued, else: :backlog
-      :in_progress -> if pr_on_record?(row), do: :merging, else: :active
-      :awaiting_verification -> :verifying
-      :closed -> :closed
-    end
-  end
-
-  defp pr_on_record?(row),
-    do: present?(Map.get(row, :pr_ref)) or present?(Map.get(row, :pending_merge))
-
-  defp present?(nil), do: false
-  defp present?(value) when is_binary(value), do: String.trim(value) != ""
-  defp present?(value) when is_map(value), do: map_size(value) > 0
-  defp present?(_), do: true
 end

@@ -36,11 +36,13 @@ defmodule Arbiter.Worker.ReviewGateRemoteAdvanceTest do
 
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures, only: [put_state!: 2]
+
   require Ash.Query
 
   alias Arbiter.CircuitBreaker
   alias Arbiter.ReviewGate.Round
-  alias Arbiter.Tasks.{Issue, Workspace}
+  alias Arbiter.Tasks.{Issue, ReviewPark, Workspace}
   alias Arbiter.Worker
   alias Arbiter.Worker.PromptLog
   alias Arbiter.Worker.ReviewGate
@@ -154,7 +156,7 @@ defmodule Arbiter.Worker.ReviewGateRemoteAdvanceTest do
     {:ok, task} =
       Ash.create(Issue, %{title: "remote-advance", workspace_id: ws.id, issue_type: :feature})
 
-    {:ok, task} = Ash.update(task, %{status: :in_progress})
+    task = put_state!(task, :active)
     task
   end
 
@@ -317,7 +319,7 @@ defmodule Arbiter.Worker.ReviewGateRemoteAdvanceTest do
       wait_until(fn -> Ash.get!(Issue, task.id).last_reviewed_sha == patrol_sha end, 30_000)
 
       # The gate approved the head the REMOTE carries, not a local orphan.
-      assert Ash.get!(Issue, task.id).review_park_reason == nil
+      assert ReviewPark.reason(Ash.get!(Issue, task.id)) == nil
       assert sha(wt, "HEAD") == patrol_sha
 
       git!(["fetch", "-q", "origin"], repo)
@@ -369,7 +371,7 @@ defmodule Arbiter.Worker.ReviewGateRemoteAdvanceTest do
         30_000
       )
 
-      assert Ash.get!(Issue, task.id).review_park_reason == nil
+      assert ReviewPark.reason(Ash.get!(Issue, task.id)) == nil
       fix_head = sha(wt, "HEAD")
       refute fix_head == round1_head
 

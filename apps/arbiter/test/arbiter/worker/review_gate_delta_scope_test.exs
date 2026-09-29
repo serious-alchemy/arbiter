@@ -13,6 +13,8 @@ defmodule Arbiter.Worker.ReviewGateDeltaScopeTest do
 
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures, only: [put_state!: 2]
+
   alias Arbiter.Reviews.Coverage
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Worker
@@ -116,7 +118,7 @@ defmodule Arbiter.Worker.ReviewGateDeltaScopeTest do
     {:ok, task} =
       Ash.create(Issue, %{title: "delta task", workspace_id: ws.id, issue_type: :feature})
 
-    {:ok, task} = Ash.update(task, %{status: :in_progress})
+    task = put_state!(task, :active)
     task
   end
 

@@ -19,6 +19,8 @@ defmodule Arbiter.Workflows.PRPatrolReviewGateGuardTest do
 
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures
+
   require Ash.Query
 
   alias Arbiter.Tasks.{Issue, ReviewPark, Workspace}
@@ -182,7 +184,7 @@ defmodule Arbiter.Workflows.PRPatrolReviewGateGuardTest do
         workspace_id: ws.id
       })
 
-    {:ok, task} = Ash.update(task, %{status: :in_progress})
+    task = put_state!(task, :active)
     {:ok, task} = Ash.update(task, %{pr_ref: "owner/repo#424"}, action: :update)
     task
   end

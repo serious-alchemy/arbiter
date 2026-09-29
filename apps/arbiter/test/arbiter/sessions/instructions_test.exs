@@ -174,7 +174,7 @@ defmodule Arbiter.Sessions.InstructionsTest do
           priority: 2,
           difficulty: 2,
           repo: "arbiter",
-          refined: false,
+          state: :backlog,
           tracker_ref: "1999"
         },
         overrides
@@ -232,6 +232,8 @@ defmodule Arbiter.Sessions.InstructionsTest do
       assert doc =~ "bug"
       assert doc =~ "arbiter"
       assert doc =~ "1999"
+      assert doc =~ "**state** — `backlog`"
+      refute doc =~ "**refined**"
     end
 
     test "injects the parent epic (AC2)" do

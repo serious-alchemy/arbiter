@@ -11,6 +11,8 @@ defmodule Arbiter.WorkerOpenMrTest do
   # named StubMerger Agent.
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures, only: [put_state!: 2]
+
   require Ash.Query
 
   alias Arbiter.Tasks.{Issue, Workspace}
@@ -31,7 +33,7 @@ defmodule Arbiter.WorkerOpenMrTest do
     {:ok, task} =
       Ash.create(Issue, %{title: "open mr", workspace_id: ws.id, issue_type: :feature})
 
-    {:ok, task} = Ash.update(task, %{status: :in_progress})
+    task = put_state!(task, :active)
 
     {:ok, pid} = Worker.start(task_id: task.id, repo: "arbiter", workspace_id: ws.id)
     :ok = Worker.advance(pid, :implement)
@@ -184,7 +186,7 @@ defmodule Arbiter.WorkerOpenMrTest do
       {:ok, task} =
         Ash.create(Issue, %{title: "infra fix", workspace_id: ws.id, issue_type: :feature})
 
-      {:ok, task} = Ash.update(task, %{status: :in_progress})
+      task = put_state!(task, :active)
       {:ok, pid} = Worker.start(task_id: task.id, repo: "mesaana", workspace_id: ws.id)
       :ok = Worker.advance(pid, :implement)
       on_exit(fn -> stop_quietly(pid) end)

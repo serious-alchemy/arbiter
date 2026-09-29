@@ -7,6 +7,8 @@ defmodule Arbiter.Tasks.AttentionOwnershipTest do
   """
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures
+
   alias Arbiter.MCP.Catalog
   alias Arbiter.MCP.Scope
   alias Arbiter.Messages.Escalation
@@ -24,7 +26,7 @@ defmodule Arbiter.Tasks.AttentionOwnershipTest do
     {:ok, task} =
       Ash.create(Issue, %{title: "ownership", workspace_id: ws.id, issue_type: :feature})
 
-    {:ok, task} = Ash.update(task, %{status: :in_progress})
+    task = put_state!(task, :active)
     assert task.state == :active
 
     Phoenix.PubSub.subscribe(Arbiter.PubSub, Arbiter.Events.pubsub_topic(ws.id))
@@ -298,7 +300,7 @@ defmodule Arbiter.Tasks.AttentionOwnershipTest do
       {:ok, _} = Attention.clear(ctx.task.id, :run_restarted, resumed_from_failure: true)
       assert Ash.get!(Issue, ctx.task.id).attention_resume_attempts == 1
 
-      {:ok, _} = Ash.update(Ash.get!(Issue, ctx.task.id), %{status: :open})
+      {:ok, _} = Ash.update(Ash.get!(Issue, ctx.task.id), %{}, action: :requeue)
       assert Ash.get!(Issue, ctx.task.id).attention_resume_attempts == 0
     end
 

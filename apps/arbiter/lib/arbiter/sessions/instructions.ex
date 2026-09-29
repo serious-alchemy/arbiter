@@ -259,7 +259,7 @@ defmodule Arbiter.Sessions.Instructions do
     * **priority** — #{format_field(field(issue, :priority))}
     * **difficulty** — #{format_field(field(issue, :difficulty))}
     * **repo** — #{format_field(field(issue, :repo))}
-    * **refined** — #{format_field(field(issue, :refined))}
+    * **state** — `#{field(issue, :state)}`
     * **tracker_ref** — #{format_field(field(issue, :tracker_ref))}
 
     ### Current description

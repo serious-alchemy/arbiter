@@ -13,18 +13,19 @@ defmodule ArbiterWeb.EpicIndexLive do
   bd-58z2tu: every open epic with a dependency chain has *some* blocked
   child, so flagging on that alone made the attention state permanently on
   — no signal. `Arbiter.Tasks.EpicRollup` now derives a single `needs_you`
-  boolean instead: true only when at least one child is parked in
-  `awaiting_verification`, a child's own live worker needs the operator
-  (shared with the board's `needs_you?`), or a child is blocked only by
-  something that itself needs the operator (parked, awaiting verification,
-  or unrefined). That drives the row's attention style, its reason chips,
+  boolean instead: true only when at least one child is `:verifying`
+  (merged, waiting on a restart-and-observe), a child's own live worker needs
+  the operator (shared with the board's `needs_you?`), or a child is blocked
+  only by something that itself needs the operator (parked, or still in
+  `:backlog`). That drives the row's attention style, its reason chips,
   and the default sort. `blocked_children` and `idle_with_ready_work` stay
   on the row as neutral informational chips — the machine may still be on
   either of those — rather than triggering the attention style.
 
   ## Filtering and sorting
 
-  Workspace and open/closed/all are pushed into the `Ash.Query`;
+  Workspace and open/closed/all (the ticket's `state`: open is anything not
+  `:closed`) are pushed into the `Ash.Query`;
   has-blocked-children is applied to the rollups afterwards, since "blocked" is
   a property of an epic's *children's* edges and has no column to filter on.
   All three combine freely. Every bit of that state — plus the sort —
@@ -55,7 +56,7 @@ defmodule ArbiterWeb.EpicIndexLive do
 
   @tasks_topic "tasks"
 
-  @status_tabs [
+  @state_tabs [
     %{label: "Open", value: "open"},
     %{label: "Closed", value: "closed"},
     %{label: "All", value: "all"}
@@ -79,7 +80,7 @@ defmodule ArbiterWeb.EpicIndexLive do
     {:closed, "closed", "var(--arb-done)"}
   ]
 
-  @default_filters %{status: :open, workspace: nil, blocked: false, sort: :stuck}
+  @default_filters %{state: :open, workspace: nil, blocked: false, sort: :stuck}
 
   @impl true
   def mount(_params, _session, socket) do
@@ -87,7 +88,7 @@ defmodule ArbiterWeb.EpicIndexLive do
 
     {:ok,
      socket
-     |> assign(:status_tabs, @status_tabs)
+     |> assign(:state_tabs, @state_tabs)
      |> assign(:sort_options, Enum.map(@sorts, &{@sort_labels[&1], Atom.to_string(&1)}))
      |> assign(:buckets, @buckets)
      |> assign(:workspaces, load_workspaces())
@@ -113,9 +114,9 @@ defmodule ArbiterWeb.EpicIndexLive do
 
   @impl true
   def handle_event("filter", params, socket) do
-    # The status tabs live outside the form, so carry the current one across
+    # The state tabs live outside the form, so carry the current one across
     # rather than letting an unrelated change reset it.
-    params = Map.put(params, "status", Atom.to_string(socket.assigns.f.status))
+    params = Map.put(params, "state", Atom.to_string(socket.assigns.f.state))
     {:noreply, push_patch(socket, to: epic_path(parse_filters(params)))}
   end
 
@@ -123,7 +124,7 @@ defmodule ArbiterWeb.EpicIndexLive do
     {:noreply, socket |> assign(:rows_error, nil) |> refresh()}
   end
 
-  # Any issue transition can move a row: a child's status changes its epic's
+  # Any issue transition can move a row: a child's state changes its epic's
   # breakdown and needs_you chips, and an epic's own close moves it between
   # tabs.
   @impl true
@@ -200,7 +201,7 @@ defmodule ArbiterWeb.EpicIndexLive do
     epics =
       Issue
       |> Ash.Query.filter(issue_type == ^epic)
-      |> filter_by_status(f.status)
+      |> filter_by_state(f.state)
       |> filter_by_workspace(f.workspace)
       |> Ash.read!()
 
@@ -230,16 +231,16 @@ defmodule ArbiterWeb.EpicIndexLive do
     end
   end
 
-  defp filter_by_status(query, :all), do: query
+  defp filter_by_state(query, :all), do: query
 
-  defp filter_by_status(query, :closed) do
+  defp filter_by_state(query, :closed) do
     closed = :closed
-    Ash.Query.filter(query, status == ^closed)
+    Ash.Query.filter(query, state == ^closed)
   end
 
-  defp filter_by_status(query, :open) do
+  defp filter_by_state(query, :open) do
     closed = :closed
-    Ash.Query.filter(query, status != ^closed)
+    Ash.Query.filter(query, state != ^closed)
   end
 
   defp filter_by_workspace(query, nil), do: query
@@ -282,17 +283,17 @@ defmodule ArbiterWeb.EpicIndexLive do
 
   defp parse_filters(params) do
     %{
-      status: parse_status(params),
+      state: parse_state(params),
       workspace: parse_present_string(params, "workspace"),
       blocked: parse_blocked(params),
       sort: parse_sort(params)
     }
   end
 
-  defp parse_status(%{"status" => s}) when s in ~w(open closed all),
+  defp parse_state(%{"state" => s}) when s in ~w(open closed all),
     do: String.to_existing_atom(s)
 
-  defp parse_status(_), do: @default_filters.status
+  defp parse_state(_), do: @default_filters.state
 
   defp parse_present_string(params, key) do
     case Map.get(params, key) do
@@ -310,7 +311,7 @@ defmodule ArbiterWeb.EpicIndexLive do
 
   defp epic_path(f) do
     %{}
-    |> put_param(:status, f.status, @default_filters.status)
+    |> put_param(:state, f.state, @default_filters.state)
     |> put_param(:workspace, f.workspace, @default_filters.workspace)
     |> put_param(:blocked, (f.blocked && "1") || nil, nil)
     |> put_param(:sort, f.sort, @default_filters.sort)
@@ -322,7 +323,7 @@ defmodule ArbiterWeb.EpicIndexLive do
 
   defp active_filter_summary(f, workspaces) do
     [
-      f.status != @default_filters.status && "status: #{f.status}",
+      f.state != @default_filters.state && "state: #{f.state}",
       f.workspace &&
         "workspace: #{workspace_name(Map.new(workspaces, &{&1.id, &1}), f.workspace)}",
       f.blocked && "has blocked children",
@@ -376,9 +377,9 @@ defmodule ArbiterWeb.EpicIndexLive do
         </ArbiterWeb.CoreComponents.Domain.index_header>
 
         <ArbiterWeb.CoreComponents.Navigation.filter_tabs
-          tabs={@status_tabs}
-          active={Atom.to_string(@f.status)}
-          tab_path={fn value -> epic_path(%{@f | status: String.to_existing_atom(value)}) end}
+          tabs={@state_tabs}
+          active={Atom.to_string(@f.state)}
+          tab_path={fn value -> epic_path(%{@f | state: String.to_existing_atom(value)}) end}
         />
 
         <form
@@ -519,8 +520,8 @@ defmodule ArbiterWeb.EpicIndexLive do
               {@row.epic.title}
             </span>
           </.link>
-          <span id={"epic-#{@row.epic.id}-status"}>
-            <.status_chip status={@row.epic.status} class="text-[10px]" />
+          <span id={"epic-#{@row.epic.id}-state"}>
+            <.status_chip status={@row.epic.state} class="text-[10px]" />
           </span>
         </div>
 
@@ -650,7 +651,7 @@ defmodule ArbiterWeb.EpicIndexLive do
         ],
         else: "bg-[var(--surface-card)]"
       ),
-      row.epic.status == :closed && "opacity-[0.62]"
+      row.epic.state == :closed && "opacity-[0.62]"
     ]
   end
 

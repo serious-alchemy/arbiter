@@ -763,7 +763,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
   defp active_run?(_snapshot), do: false
 
   defp retryable?(nil, _snapshot), do: false
-  defp retryable?(%Issue{status: :closed}, _snapshot), do: false
+  defp retryable?(%Issue{state: :closed}, _snapshot), do: false
   defp retryable?(%Issue{}, nil), do: true
   defp retryable?(%Issue{}, %{state: _} = snapshot), do: not active_run?(snapshot)
   defp retryable?(_task, _snapshot), do: false

@@ -15,7 +15,7 @@ defmodule Arbiter.Trackers.Linear.Error do
     * `:network` — transport-level failure
     * `:graphql_error` — the request succeeded (HTTP 200) but Linear returned
       `errors` in the response body
-    * `:transition_not_found` — the requested task status had no mapping to a
+    * `:transition_not_found` — the requested tracker status had no mapping to a
       Linear workflow state in the team's state list
     * `:config_missing` — workspace config is missing credentials or no active
       workspace is set

@@ -145,9 +145,9 @@ defmodule Arbiter.Board.AutopilotIntegrationTest do
     assert entry.state == :blocked
     assert entry.reason == "blocked — conflicts with #{bind.id} (dispatching)"
 
-    # Dispatch flips the issue to :in_progress before its worker registers —
+    # Dispatch moves the ticket to :active before its worker registers —
     # the exact 19-second window the incident dispatched the second task into.
-    {:ok, running} = Ash.update(bind, %{status: :in_progress})
+    {:ok, running} = Ash.update(bind, %{}, action: :start)
 
     docs_id = docs.id
     assert Autopilot.tick(pid) == :idle
@@ -212,7 +212,7 @@ defmodule Arbiter.Board.AutopilotIntegrationTest do
   end
 
   # bd-asxw4e: Autopilot dispatches in the persisted order — priority, then
-  # rank — not the LiveView's session-only `ready_order`.
+  # rank.
   test "within a priority band the lower rank goes next, whatever the creation order", %{
     ws: ws
   } do
@@ -231,7 +231,7 @@ defmodule Arbiter.Board.AutopilotIntegrationTest do
 
     pid = start_autopilot()
 
-    assert %{promote: promoted} = Autopilot.board(pid, ready_order: [first_filed.id])
+    assert %{promote: promoted} = Autopilot.board(pid, [])
     assert promoted == ranked_ahead.id
 
     assert {:ok, ^promoted} = Autopilot.tick(pid)

@@ -72,8 +72,8 @@ defmodule ArbiterCli.Cmd.DepTest do
         "from_issue_id" => "a",
         "to_issue_id" => "b",
         "type" => "conflicts_with",
-        "from" => %{"id" => "a", "title" => "task A", "status" => "open", "priority" => 2},
-        "to" => %{"id" => "b", "title" => "task B", "status" => "closed", "priority" => 1}
+        "from" => %{"id" => "a", "title" => "task A", "state" => "queued", "priority" => 2},
+        "to" => %{"id" => "b", "title" => "task B", "state" => "closed", "priority" => 1}
       },
       overrides
     )
@@ -95,6 +95,7 @@ defmodule ArbiterCli.Cmd.DepTest do
     assert exit_code == 0
     assert out =~ "task A"
     assert out =~ "task B"
+    assert out =~ "[queued P2]"
     assert out =~ "conflicts_with"
   end
 

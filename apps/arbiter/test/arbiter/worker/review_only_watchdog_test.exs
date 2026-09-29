@@ -19,8 +19,8 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
       normally, Driver closes the task, MergeQueue receives the signal and
       closes the task without calling the forge merge API (bd-ddtbhb, bd-bs3z04).
     * REQUEST_CHANGES → reviewer worker fails (not completes) so the Driver
-      does NOT close the task; it stays :in_progress for a fix-pass.
-    * No verdict → same as REQUEST_CHANGES (fail, task stays :in_progress).
+      does NOT close the task; it stays :active for a fix-pass.
+    * No verdict → same as REQUEST_CHANGES (fail, task stays :active).
     * pr_ref absent → complete directly; Driver closes task.
 
   The full ReviewGate merge path (fleet-authored work: enter_review_gate →
@@ -42,6 +42,8 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
   # async: false — shares the singleton Worker registry/supervisor + the
   # named StubMerger Agent.
   use Arbiter.DataCase, async: false
+
+  import Arbiter.LifecycleFixtures, only: [put_state!: 2]
 
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Messages.Message
@@ -117,7 +119,7 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
     {:ok, task} =
       Ash.create(Issue, Map.merge(%{title: "review-only task", workspace_id: ws.id}, opts))
 
-    {:ok, task} = Ash.update(task, %{status: :in_progress})
+    task = put_state!(task, :active)
     task
   end
 
@@ -228,7 +230,7 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
   # ---- REQUEST_CHANGES path --------------------------------------------------
 
   describe "REQUEST_CHANGES verdict" do
-    test "fails the worker (not completes) so the task stays :in_progress" do
+    test "fails the worker (not completes) so the task stays :active" do
       ws = new_workspace()
       task = new_task(ws)
       {:ok, task} = Ash.update(task, %{pr_ref: "pr-77"}, action: :update)
@@ -407,8 +409,8 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
       assert run.outcome == :failed
 
       {:ok, parked} = Ash.get(Issue, task.id)
-      assert parked.review_park_reason == "inconclusive"
-      assert parked.status == :in_progress
+      assert parked.attention_cause == :inconclusive
+      assert parked.state == :active
 
       assert [escalation] =
                "admiral"
@@ -547,7 +549,7 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
     test "REQUEST_CHANGES after posting gh pr review fails the worker (not INCONCLUSIVE)" do
       # Regression for bd-btcyn6: a reviewer that posts CHANGES_REQUESTED via
       # `gh pr review --request-changes` AND emits `VERDICT: REQUEST_CHANGES`
-      # must fail the worker (leaving the task :in_progress for a fix-pass),
+      # must fail the worker (leaving the task :active for a fix-pass),
       # NOT land as INCONCLUSIVE. Previously it landed INCONCLUSIVE because no
       # VERDICT: sentinel was present in stdout.
       ws = new_workspace()
@@ -582,14 +584,14 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
   # ---- bd-cw3w9p: review_only tasks are long-lived engagements (ReviewPatrol) ----
   # bd-do82bt fixed a bug where the Driver never closed review tasks at all.
   # bd-cw3w9p changes the intended behavior: review_only tasks must NOT
-  # auto-close after their first verdict — they stay :in_progress so ReviewPatrol
+  # auto-close after their first verdict — they stay :active so ReviewPatrol
   # can keep engaging on subsequent commits. The Driver exits without closing.
 
-  describe "review_only task stays :in_progress after verdict (bd-cw3w9p)" do
+  describe "review_only task stays :active after verdict (bd-cw3w9p)" do
     test "APPROVE + no pr_ref: Driver exits without closing the task (long-lived engagement)" do
       # bd-cw3w9p: review_only tasks are long-lived ReviewPatrol engagements.
       # The Driver must NOT close the task when the worker completes — task stays
-      # :in_progress so ReviewPatrol can re-dispatch on the next commit.
+      # :active so ReviewPatrol can re-dispatch on the next commit.
       ws = new_workspace()
       task = new_task(ws)
 
@@ -615,12 +617,12 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
       assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 3_000
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.status == :in_progress
+      assert reloaded.state == :active
     end
 
-    test "REQUEST_CHANGES: Driver leaves the task :in_progress for a fix-pass" do
+    test "REQUEST_CHANGES: Driver leaves the task :active for a fix-pass" do
       # Regression for bd-do82bt: REQUEST_CHANGES fails the worker (not completes),
-      # so the Driver exits without closing the task. The task must stay :in_progress
+      # so the Driver exits without closing the task. The task must stay :active
       # so a fix-pass can be dispatched.
       ws = new_workspace()
       task = new_task(ws)
@@ -658,9 +660,9 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
       # Driver should exit after seeing :failed.
       assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 3_000
 
-      # Task must remain :in_progress for the fix-pass.
+      # Task must remain :active for the fix-pass.
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.status == :in_progress
+      assert reloaded.state == :active
     end
   end
 
@@ -761,7 +763,7 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
   # The forge merge count still stays 0 (bd-ddtbhb guarantee holds).
 
   describe "APPROVE + pr_ref: task stays open, PR not merged by forge (bd-ddtbhb, bd-cw3w9p)" do
-    test "APPROVE with pr_ref: task stays :in_progress, PR not merged (direct workspace)" do
+    test "APPROVE with pr_ref: task stays :active, PR not merged (direct workspace)" do
       # bd-cw3w9p: review_only tasks are long-lived ReviewPatrol engagements.
       # After an APPROVE verdict, neither the Driver nor the MergeQueue should
       # close the task. The forge merge count stays 0 (bd-ddtbhb still holds).
@@ -791,7 +793,7 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
       assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 3_000
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.status == :in_progress
+      assert reloaded.state == :active
 
       # :direct strategy never calls the forge merge API.
       assert StubMerger.merge_count("pr-400") == 0
@@ -836,14 +838,14 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
 
       # Task must NOT be :closed while the PR is still open.
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.status == :in_progress
+      assert reloaded.state == :active
       assert reloaded.pr_ref == "pr-501"
     end
 
     test "the ticket's Watchdog merges the PR, the Driver exits, and the engagement stays open (bd-cw3w9p)" do
       # bd-cw3w9p: review_only tasks are long-lived engagements. Even after the
       # Watchdog drives the PR merge, nothing may close the task — it stays
-      # :in_progress for ReviewPatrol to manage. The Watchdog still drives the
+      # :active for ReviewPatrol to manage. The Watchdog still drives the
       # actual merge (bd-4u7a1m guarantee holds).
       ws = new_github_workspace()
       task = new_task(ws, %{review_only: true})
@@ -879,7 +881,7 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
       send(worker_pid, {:__claude_session_done__, "arb done"})
 
       # The Driver exits with the reviewer's run; the Watchdog must drive a
-      # merge. Task stays :in_progress.
+      # merge. Task stays :active.
       assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 5_000
       task_id = task.id
       assert_receive {:watchdog, ^task_id, {:merged, "pr-500"}}, 5_000
@@ -887,7 +889,7 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
       assert StubMerger.merge_count("pr-500") >= 1
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.status == :in_progress
+      assert reloaded.state == :active
     end
 
     # bd-dxgris / #1493 — the reviewed-SHA baseline is loaded from the TASK row
@@ -955,7 +957,7 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
       assert StubMerger.merge_count("pr-600") == 0
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.status == :in_progress
+      assert reloaded.state == :active
 
       if Process.alive?(worker_pid), do: GenServer.stop(worker_pid, :normal)
     end
@@ -1007,7 +1009,7 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
 
     test "no Watchdog spawned and complete_now used when task has no pr_ref (github workspace)" do
       # Even on a GitHub workspace, when no pr_ref is recorded there is nothing
-      # to merge — complete directly. Task stays :in_progress (bd-cw3w9p).
+      # to merge — complete directly. Task stays :active (bd-cw3w9p).
       ws = new_github_workspace()
       task = new_task(ws)
 

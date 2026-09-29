@@ -23,6 +23,8 @@ defmodule Arbiter.Worker.FinalizeAdoptsPreReviewPRTest do
 
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures, only: [put_state!: 2]
+
   require Ash.Query
 
   alias Arbiter.Tasks.{Issue, Workspace}
@@ -88,7 +90,7 @@ defmodule Arbiter.Worker.FinalizeAdoptsPreReviewPRTest do
         issue_type: :feature
       })
 
-    {:ok, task} = Ash.update(task, %{status: :in_progress})
+    task = put_state!(task, :active)
     task
   end
 

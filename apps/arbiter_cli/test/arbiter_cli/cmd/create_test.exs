@@ -8,7 +8,7 @@ defmodule ArbiterCli.Cmd.CreateTest do
       {{"get", "/api/workspaces"},
        {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}, 200}},
       {{"post", "/api/issues"},
-       {%{"id" => "bd-001", "title" => "Hello", "status" => "open", "priority" => 2}, 201}}
+       {%{"id" => "bd-001", "title" => "Hello", "state" => "backlog", "priority" => 2}, 201}}
     ])
 
     {out, _err, exit_code} = capture(fn -> Create.run(["Hello"]) end)

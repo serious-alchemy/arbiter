@@ -12,6 +12,8 @@ defmodule Arbiter.Worker.RespawnProviderTest do
 
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures, only: [put_state!: 2]
+
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Usage.Event
   alias Arbiter.Worker
@@ -54,7 +56,7 @@ defmodule Arbiter.Worker.RespawnProviderTest do
     {:ok, task} =
       Ash.create(Issue, %{title: "respawn provider", workspace_id: ws.id, issue_type: :research})
 
-    {:ok, task} = Ash.update(task, %{status: :in_progress})
+    task = put_state!(task, :active)
 
     # No `:routing_config` — this is the ReviewGate / fix-pass shape.
     {:ok, pid} =

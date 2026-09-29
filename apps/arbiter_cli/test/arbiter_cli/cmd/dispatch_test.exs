@@ -18,7 +18,7 @@ defmodule ArbiterCli.Cmd.DispatchTest do
       stub_post(
         "/api/workers/dispatch",
         %{
-          "task" => %{"id" => "gte-017", "title" => "dispatch cmd", "status" => "in_progress"},
+          "task" => %{"id" => "gte-017", "title" => "dispatch cmd", "state" => "active"},
           "worker" => %{"task_id" => "gte-017", "pid" => "#PID<0.123.0>"},
           "machine" => %{"id" => "mc-1", "pid" => "#PID<0.124.0>"}
         }
@@ -28,13 +28,13 @@ defmodule ArbiterCli.Cmd.DispatchTest do
       assert code == 0
       assert out =~ "Dispatch:"
       assert out =~ "gte-017 — dispatch cmd"
-      assert out =~ "in_progress"
+      assert out =~ "State:    active"
       assert out =~ "#PID<0.123.0>"
     end
 
     test "passes repo in body when provided" do
       stub_post("/api/workers/dispatch", %{
-        "task" => %{"id" => "gte-017", "title" => "t", "status" => "in_progress"},
+        "task" => %{"id" => "gte-017", "title" => "t", "state" => "active"},
         "worker" => %{"task_id" => "gte-017", "pid" => "x"},
         "machine" => %{"id" => "m", "pid" => "y"}
       })
@@ -48,7 +48,7 @@ defmodule ArbiterCli.Cmd.DispatchTest do
 
     test "--json mode emits JSON" do
       stub_post("/api/workers/dispatch", %{
-        "task" => %{"id" => "gte-017", "title" => "t", "status" => "in_progress"},
+        "task" => %{"id" => "gte-017", "title" => "t", "state" => "active"},
         "worker" => %{"task_id" => "gte-017", "pid" => "x"},
         "machine" => %{"id" => "m", "pid" => "y"}
       })
@@ -74,7 +74,7 @@ defmodule ArbiterCli.Cmd.DispatchTest do
             conn
             |> Plug.Conn.put_status(201)
             |> Req.Test.json(%{
-              "task" => %{"id" => "gte-017", "title" => "t", "status" => "in_progress"},
+              "task" => %{"id" => "gte-017", "title" => "t", "state" => "active"},
               "worker" => %{"task_id" => "gte-017", "pid" => "x"},
               "machine" => %{"id" => "m", "pid" => "y"}
             })

@@ -98,13 +98,13 @@ defmodule Arbiter.Sessions.Refine do
   Whether `issue` can be refined — the predicate both UI entry points render
   from, so "where the button appears" has exactly one definition.
 
-  Backlog only: an issue that has been promoted (`refined`) has already had
-  this conversation, one that is `in_progress` has a worker on it, and a closed
-  or awaiting-verification one is past the point where shaping it means
+  Backlog only: an issue that has been promoted (`:queued`) has already had
+  this conversation, one that is `:active` or `:merging` has a worker on it,
+  and a verifying or closed one is past the point where shaping it means
   anything.
   """
   @spec eligible?(Issue.t() | nil) :: boolean()
-  def eligible?(%Issue{status: :open, refined: false}), do: true
+  def eligible?(%Issue{state: :backlog}), do: true
   def eligible?(_issue), do: false
 
   @doc """

@@ -118,7 +118,11 @@ defmodule ArbiterWeb.Api.ClaimControllerTest do
 
       conn = post(conn, ~p"/api/workspaces/#{ws.id}/claim", %{"ref" => "43"})
       body = json_response(conn, 201)
+      # `status` here is the claim's result, not the ticket's; the ticket
+      # carries its lifecycle `state`.
       assert body["status"] == "created"
+      assert body["task"]["state"] == "backlog"
+      refute Map.has_key?(body["task"], "status")
       assert body["task"]["tracker_type"] == "github"
       assert body["task"]["tracker_ref"] == "43"
       assert body["task"]["title"] == "Wire up the thing"

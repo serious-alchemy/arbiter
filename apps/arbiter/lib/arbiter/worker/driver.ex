@@ -25,7 +25,7 @@ defmodule Arbiter.Worker.Driver do
   - On each tick: calls `Machine.advance/1` and reacts:
     - `{:ok, :completed}` → `Worker.complete/2`, close the task, stop.
     - `{:ok, next_step}` → `Worker.advance/2`, schedule next tick.
-    - `{:error, reason}` → `Worker.fail/2`, stop (task remains `:in_progress`).
+    - `{:error, reason}` → `Worker.fail/2`, stop (task remains `:active`).
 
   ## Lifecycle (claude-driven mode)
 
@@ -33,11 +33,11 @@ defmodule Arbiter.Worker.Driver do
   - On each check: reads the worker's run state:
     - `:finished` / `:succeeded` → finalize the task (a `:merged` completion routes through
       `Arbiter.Tasks.Verification.finalize_merged/2`, so a `verify_after_deploy`
-      task parks at `:awaiting_verification` rather than closing), optionally
+      task parks at `:verifying` rather than closing), optionally
       cleanup worktree, stop. A run that completed by opening its PR
       (`result: :pr_opened`, bd-741sid) finalizes nothing: its ticket is
       Merging, and the ticket's Watchdog closes it when the PR merges.
-    - `:finished` otherwise → log, stop (task remains `:in_progress` for
+    - `:finished` otherwise → log, stop (task remains `:active` for
       inspection).
     - `:starting | :working | :waiting` → schedule next check (the
       ReviewGate, not the Driver, drives a run waiting on the review gate to
@@ -163,7 +163,7 @@ defmodule Arbiter.Worker.Driver do
     case safe_worker_state(state.worker_pid) do
       %{state: :finished, outcome: :succeeded} = worker_state ->
         # bd-cw3w9p: review_only tasks are long-lived engagements (ReviewPatrol).
-        # The Driver must NOT auto-close them — they stay :in_progress so
+        # The Driver must NOT auto-close them — they stay :active so
         # ReviewPatrol can keep engaging on subsequent commits.
         unless live_review_engagement?(worker_state) do
           finalize_task(
@@ -200,7 +200,7 @@ defmodule Arbiter.Worker.Driver do
     case safe_worker_state(state.worker_pid) do
       %{state: :finished, outcome: :succeeded} = worker_state ->
         # bd-cw3w9p: review_only tasks are long-lived engagements (ReviewPatrol).
-        # The Driver must NOT auto-close them — they stay :in_progress so
+        # The Driver must NOT auto-close them — they stay :active so
         # ReviewPatrol can keep engaging on subsequent commits.
         unless live_review_engagement?(worker_state) do
           close_upstream = should_close_upstream_for_task(state.task_id, worker_state)
@@ -213,7 +213,7 @@ defmodule Arbiter.Worker.Driver do
       %{state: :finished} = worker_state ->
         # bd-21bmdh: an auth death reclaims its debris and returns the task to
         # Ready (behind the provider's AuthHold). Every other failure keeps the
-        # task :in_progress exactly as before.
+        # task :active exactly as before.
         case AuthDeath.handle(
                state.task_id,
                state.worker_pid,
@@ -222,7 +222,7 @@ defmodule Arbiter.Worker.Driver do
              ) do
           :not_auth ->
             Logger.warning(
-              "Worker.Driver (claude_driven): worker failed for task=#{state.task_id}; leaving task :in_progress"
+              "Worker.Driver (claude_driven): worker failed for task=#{state.task_id}; leaving task :active"
             )
 
           {:auth, _outcome} ->
@@ -487,7 +487,7 @@ defmodule Arbiter.Worker.Driver do
       # on a parked task is refused by the `:await_verification` guard and on a
       # closed one by `:close`; both would log a misleading failure, so no-op
       # explicitly instead.
-      {:ok, %Issue{status: status}} when status in [:closed, :awaiting_verification] ->
+      {:ok, %Issue{state: state}} when state in [:closed, :verifying] ->
         :ok
 
       {:ok, task} ->
@@ -501,7 +501,7 @@ defmodule Arbiter.Worker.Driver do
           {:ok, :awaiting_verification, _} ->
             Logger.info(
               "Worker.Driver: task #{task_id} merged with verify_after_deploy — " <>
-                "parked at :awaiting_verification instead of closing"
+                "parked at :verifying instead of closing"
             )
 
             :ok

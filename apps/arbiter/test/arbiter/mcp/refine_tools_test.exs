@@ -127,12 +127,16 @@ defmodule Arbiter.MCP.RefineToolsTest do
       end
     end
 
-    test "refuses to change status even inside the subtree", ctx do
-      assert {:rpc_error, -32_003, message} =
-               call(ctx.refine, "ticket_update", %{"id" => ctx.root.id, "status" => "closed"})
+    # bd-36ytcl: `ticket_update` has no lifecycle field at all (the legacy
+    # `status` is gone and `state` moves only through the transition tools,
+    # which a refine session is denied), so there is nothing to write.
+    test "cannot move the state even inside the subtree", ctx do
+      for field <- ["status", "state"] do
+        assert {:tool_error, _} =
+                 call(ctx.refine, "ticket_update", %{"id" => ctx.root.id, field => "closed"})
+      end
 
-      assert message =~ "status"
-      assert reload!(ctx.root).status == :open
+      assert reload!(ctx.root).state == ctx.root.state
     end
 
     test "refuses a field outside the refine write set", ctx do
@@ -245,7 +249,7 @@ defmodule Arbiter.MCP.RefineToolsTest do
                call(ctx.refine, "ticket_promote", %{"id" => ctx.sibling.id})
 
       assert reload!(ctx.sibling).title == "sibling"
-      refute reload!(ctx.sibling).refined
+      assert reload!(ctx.sibling).state == :backlog
     end
 
     test "parent_of is refused when only the *to* endpoint is in the subtree", ctx do
@@ -316,7 +320,7 @@ defmodule Arbiter.MCP.RefineToolsTest do
       assert {:ok, %{id: new_id}} = call(ctx.refine, "ticket_create", %{"title" => "a new child"})
 
       created = Ash.get!(Issue, new_id)
-      refute created.refined
+      assert created.state == :backlog
       assert created.workspace_id == ctx.ws.id
 
       children = Dependencies.for_issue(ctx.root.id).children
@@ -426,8 +430,8 @@ defmodule Arbiter.MCP.RefineToolsTest do
       assert {:ok, _} = call(ctx.refine, "ticket_promote", %{"id" => ctx.root.id})
       assert {:ok, _} = call(ctx.refine, "ticket_promote", %{"id" => ctx.grandchild.id})
 
-      assert reload!(ctx.root).refined
-      assert reload!(ctx.grandchild).refined
+      assert reload!(ctx.root).state == :queued
+      assert reload!(ctx.grandchild).state == :queued
     end
 
     test "is refused outside the subtree", ctx do
@@ -435,7 +439,7 @@ defmodule Arbiter.MCP.RefineToolsTest do
                call(ctx.refine, "ticket_promote", %{"id" => ctx.sibling.id})
 
       assert message =~ "subtree"
-      refute reload!(ctx.sibling).refined
+      assert reload!(ctx.sibling).state == :backlog
     end
 
     test "still refuses a gated type with no acceptance (bd-7mbrlg)", ctx do
@@ -444,7 +448,7 @@ defmodule Arbiter.MCP.RefineToolsTest do
 
       assert {:tool_error, message} = call(ctx.refine, "ticket_promote", %{"id" => new_id})
       assert message =~ "acceptance"
-      refute Ash.get!(Issue, new_id).refined
+      assert Ash.get!(Issue, new_id).state == :backlog
     end
 
     test "the response spells out edges-before-promote", ctx do

@@ -87,19 +87,12 @@ defmodule Arbiter.Tasks.LifecycleViewTest do
     end
   end
 
-  describe "view/2 — the legacy columns stand in for a missing state" do
-    test "an open refined row is queued, an open unrefined one backlog" do
-      assert %{column: :ready} = view(%{id: "bd-t", status: :open, refined: true})
-      assert %{column: :backlog} = view(%{id: "bd-t", status: :open})
-    end
-
-    test "an in_progress row is in progress, or merging with a PR on record" do
-      assert %{column: :in_progress} = view(%{id: "bd-t", status: :in_progress})
-      assert %{column: :merging} = view(%{id: "bd-t", status: :in_progress, pr_ref: "!1"})
-    end
-
-    test "awaiting_verification is verifying" do
-      assert %{column: :verifying} = view(%{id: "bd-t", status: :awaiting_verification})
+  # bd-36ytcl: the legacy columns are gone, so nothing stands in for a missing
+  # state — only a live author run claims such a row (a run whose ticket was
+  # not read).
+  describe "view/2 — a row with no stored state" do
+    test "has no state and no column" do
+      assert %{state: nil, column: nil} = view(%{id: "bd-t"})
     end
   end
 
@@ -251,10 +244,10 @@ defmodule Arbiter.Tasks.LifecycleViewTest do
       end
     end
 
-    test "reads a ticket's state, falling back to its legacy status" do
+    test "reads a ticket's stored state; a row without one is not satisfied" do
       assert Lifecycle.blocker_satisfied?(%{state: :verifying})
-      assert Lifecycle.blocker_satisfied?(%{status: :awaiting_verification})
-      refute Lifecycle.blocker_satisfied?(%{status: :in_progress})
+      refute Lifecycle.blocker_satisfied?(%{state: :active})
+      refute Lifecycle.blocker_satisfied?(%{id: "bd-t"})
     end
   end
 

@@ -452,7 +452,7 @@ defmodule Arbiter.Tasks.Dependencies do
 
   defp after_commit({:error, reason}, _from_id, _to_id), do: {:error, reason}
 
-  # Reload so a parent that just auto-closed is announced with its new status,
+  # Reload so a parent that just auto-closed is announced with its new state,
   # and so a caller can't be handed a stale struct.
   defp broadcast_endpoints(from_id, to_id) do
     Enum.each([from_id, to_id], fn id ->

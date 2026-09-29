@@ -7,7 +7,7 @@ defmodule Arbiter.Worker.ReviewGateFixRoundTest do
   reported `{:request_changes, findings}` back to the author, and
   `park_rejected/3` recorded the run `:failed` with
   `failure_reason: :review_gate_rejected`. From there the task sat
-  `:in_progress` with no live worker until a human ran `worker_resume`, which
+  `:active` with no live worker until a human ran `worker_resume`, which
   always worked immediately (7 occurrences over 2026-09-09/10). Nothing was
   structurally blocking the implementer; it simply was never scheduled.
 
@@ -26,6 +26,8 @@ defmodule Arbiter.Worker.ReviewGateFixRoundTest do
   """
 
   use Arbiter.DataCase, async: false
+
+  import Arbiter.LifecycleFixtures, only: [put_state!: 2]
 
   alias Arbiter.Tasks.{Issue, SlotGate, Workspace}
   alias Arbiter.Test.StubFixRoundDispatcher
@@ -115,7 +117,7 @@ defmodule Arbiter.Worker.ReviewGateFixRoundTest do
     {:ok, task} =
       Ash.create(Issue, %{title: "fix round task", workspace_id: ws.id, issue_type: :feature})
 
-    {:ok, task} = Ash.update(task, %{status: :in_progress})
+    task = put_state!(task, :active)
     task
   end
 

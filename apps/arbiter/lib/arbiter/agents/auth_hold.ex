@@ -9,7 +9,7 @@ defmodule Arbiter.Agents.AuthHold do
   bd-2jgs2h retired the per-dispatch live auth probe, so a worker dying at
   spawn is now the normal way the fleet learns a credential is bad. And a
   worker that dies with `:auth_expired` returns its task to Ready
-  (`Arbiter.Worker.AuthDeath`) instead of stranding it `:in_progress`. Those
+  (`Arbiter.Worker.AuthDeath`) instead of stranding it `:active`. Those
   two together make a single auth death a *retry*: the task goes back in the
   queue, and the next dispatch either works (a blip) or dies too. The second
   death is the evidence the credential really is dead — so that is where the

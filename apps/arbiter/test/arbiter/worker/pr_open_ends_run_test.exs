@@ -11,6 +11,8 @@ defmodule Arbiter.Worker.PrOpenEndsRunTest do
 
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures, only: [put_state!: 2]
+
   require Ash.Query
 
   alias Arbiter.Tasks.{Issue, PullRequest, Workspace}
@@ -35,7 +37,7 @@ defmodule Arbiter.Worker.PrOpenEndsRunTest do
         issue_type: :feature
       })
 
-    {:ok, task} = Ash.update(task, %{status: :in_progress})
+    task = put_state!(task, :active)
 
     on_exit(fn ->
       case Watchdog.whereis(task.id) do

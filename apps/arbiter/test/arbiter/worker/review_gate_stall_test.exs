@@ -22,6 +22,8 @@ defmodule Arbiter.Worker.ReviewGateStallTest do
   """
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures, only: [put_state!: 2]
+
   require Ash.Query
 
   alias Arbiter.Tasks.{Issue, Workspace}
@@ -69,7 +71,7 @@ defmodule Arbiter.Worker.ReviewGateStallTest do
       # The gate itself reported: the park names the reviewer that could not
       # be started, rather than the generic `:inconclusive` a gate death leaves.
       task = Ash.get!(Issue, task.id)
-      assert to_string(task.review_park_reason) == "reviewer_failed"
+      assert task.attention_cause == :reviewer_failed
 
       [round] = rounds(task.id)
       assert round.role in [:review, "review"]
@@ -92,7 +94,7 @@ defmodule Arbiter.Worker.ReviewGateStallTest do
       wait_finished(pid)
 
       task = Ash.get!(Issue, task.id)
-      assert to_string(task.review_park_reason) == "inconclusive"
+      assert task.attention_cause == :inconclusive
     end
 
     test "times out a live gate that has no pass in flight", %{repo: repo, ws: ws} do
@@ -110,7 +112,7 @@ defmodule Arbiter.Worker.ReviewGateStallTest do
       assert_receive {:DOWN, ^gate_ref, :process, ^gate, _}, 1_000
 
       task = Ash.get!(Issue, task.id)
-      assert to_string(task.review_park_reason) == "reviewer_timeout"
+      assert task.attention_cause == :reviewer_timeout
     end
 
     test "leaves a gate with a genuine reviewer in flight alone", %{repo: repo, ws: ws} do
@@ -246,7 +248,7 @@ defmodule Arbiter.Worker.ReviewGateStallTest do
     {:ok, task} =
       Ash.create(Issue, %{title: "stall task", workspace_id: ws.id, issue_type: :bug})
 
-    {:ok, task} = Ash.update(task, %{status: :in_progress})
+    task = put_state!(task, :active)
     task
   end
 

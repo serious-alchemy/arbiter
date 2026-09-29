@@ -1,6 +1,8 @@
 defmodule Arbiter.Tasks.StatusBackfillTest do
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures
+
   alias Arbiter.Tasks.{Issue, StatusBackfill, Workspace}
 
   setup do
@@ -25,7 +27,7 @@ defmodule Arbiter.Tasks.StatusBackfillTest do
         )
 
       assert proposal.task_id == task.id
-      assert proposal.current_status == :open
+      assert proposal.current_state == :backlog
       assert proposal.commit_sha == "abc1234567890"
       assert proposal.commit_subject =~ "ship the thing"
     end
@@ -81,14 +83,13 @@ defmodule Arbiter.Tasks.StatusBackfillTest do
       assert [] = StatusBackfill.proposals(git_log_lines: lines)
     end
 
-    test "proposes closure for :in_progress tasks too, not just :open", %{ws: ws} do
-      task = new_task(ws, "in-flight")
-      {:ok, _} = Ash.update(task, %{status: :in_progress})
+    test "proposes closure for :active tasks too, not just backlog ones", %{ws: ws} do
+      task = new_task(ws, "in-flight") |> put_state!(:active)
 
       [proposal] =
         StatusBackfill.proposals(git_log_lines: ["abc|feat(#{task.id}): finished"])
 
-      assert proposal.current_status == :in_progress
+      assert proposal.current_state == :active
     end
   end
 
@@ -112,8 +113,8 @@ defmodule Arbiter.Tasks.StatusBackfillTest do
 
       {:ok, r1} = Ash.get(Issue, b1.id)
       {:ok, r2} = Ash.get(Issue, b2.id)
-      assert r1.status == :closed
-      assert r2.status == :closed
+      assert r1.state == :closed
+      assert r2.state == :closed
     end
 
     test "is idempotent — re-running apply! after closures is a no-op via proposals", %{ws: ws} do

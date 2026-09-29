@@ -12,6 +12,8 @@ defmodule Arbiter.Tasks.PullFromMergeQueueTest do
   """
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures
+
   import ExUnit.CaptureLog
 
   alias Arbiter.Mergers.PendingMerge
@@ -37,7 +39,7 @@ defmodule Arbiter.Tasks.PullFromMergeQueueTest do
   # auto-merge on: a Watchdog that polled it would merge it.
   defp merging_ticket(ws, mr_ref) do
     {:ok, issue} = Ash.create(Issue, %{title: "pull me", workspace_id: ws.id})
-    {:ok, _} = Ash.update(issue, %{status: :in_progress})
+    put_state!(issue, :active)
 
     lane =
       PullRequest.lane(

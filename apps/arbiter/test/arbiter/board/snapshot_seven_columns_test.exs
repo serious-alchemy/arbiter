@@ -16,13 +16,12 @@ defmodule Arbiter.Board.SnapshotSevenColumnsTest do
       %{
         id: id,
         title: "Task #{id}",
-        status: :open,
+        state: :queued,
         priority: 2,
         rank: 1024,
         difficulty: 2,
         issue_type: :task,
         workspace_id: "ws-1",
-        refined: true,
         created_at: @earlier,
         updated_at: @earlier,
         closed_at: nil
@@ -64,19 +63,17 @@ defmodule Arbiter.Board.SnapshotSevenColumnsTest do
   # One ticket per lifecycle column.
   defp fleet do
     [
-      issue("bd-backlog", %{refined: false, state: :backlog}),
+      issue("bd-backlog", %{state: :backlog}),
       issue("bd-blocked", %{state: :queued}),
       issue("bd-ready", %{state: :queued}),
-      issue("bd-active", %{status: :in_progress, state: :active}),
+      issue("bd-active", %{state: :active}),
       issue("bd-merging", %{
-        status: :in_progress,
         state: :merging,
         pr_ref: "!42",
         merger_status: %{"status" => "open", "approved" => false, "pipeline" => "running"}
       }),
-      issue("bd-verifying", %{status: :awaiting_verification, state: :verifying}),
+      issue("bd-verifying", %{state: :verifying}),
       issue("bd-closed", %{
-        status: :closed,
         state: :closed,
         close_reason: :wont_do,
         closed_at: ~U[2026-08-22 11:00:00Z]
@@ -124,7 +121,7 @@ defmodule Arbiter.Board.SnapshotSevenColumnsTest do
         derive(
           issues: [
             issue("bd-epic", %{issue_type: :epic, state: :queued}),
-            issue("bd-epic2", %{issue_type: :epic, refined: false, state: :backlog})
+            issue("bd-epic2", %{issue_type: :epic, state: :backlog})
           ]
         )
 
@@ -159,7 +156,7 @@ defmodule Arbiter.Board.SnapshotSevenColumnsTest do
     test "a parked run keeps its ticket In progress, with the coordinator's attention" do
       board =
         derive(
-          issues: [issue("bd-a", %{status: :in_progress, state: :active})],
+          issues: [issue("bd-a", %{state: :active})],
           workers: [worker("bd-a", :waiting)]
         )
 
@@ -168,14 +165,14 @@ defmodule Arbiter.Board.SnapshotSevenColumnsTest do
     end
 
     test "an In-progress ticket with no run past the grace is still In progress" do
-      board = derive(issues: [issue("bd-a", %{status: :in_progress, state: :active})])
+      board = derive(issues: [issue("bd-a", %{state: :active})])
 
       assert [%{id: "bd-a", attention: %{cause: :run_crashed}}] = board.in_progress
     end
 
     test "an In-progress ticket inside the dispatch grace is dispatching, with no attention" do
       board =
-        derive(issues: [issue("bd-a", %{status: :in_progress, state: :active, updated_at: @now})])
+        derive(issues: [issue("bd-a", %{state: :active, updated_at: @now})])
 
       assert [%{id: "bd-a", activity: "dispatching", attention: nil}] = board.in_progress
     end
@@ -186,9 +183,9 @@ defmodule Arbiter.Board.SnapshotSevenColumnsTest do
       board =
         derive(
           issues: [
-            issue("bd-p2-late", %{refined: false, priority: 2, rank: 3000}),
-            issue("bd-p1", %{refined: false, priority: 1, rank: 9000}),
-            issue("bd-p2-early", %{refined: false, priority: 2, rank: 1000})
+            issue("bd-p2-late", %{state: :backlog, priority: 2, rank: 3000}),
+            issue("bd-p1", %{state: :backlog, priority: 1, rank: 9000}),
+            issue("bd-p2-early", %{state: :backlog, priority: 2, rank: 1000})
           ]
         )
 
@@ -215,9 +212,8 @@ defmodule Arbiter.Board.SnapshotSevenColumnsTest do
       board =
         derive(
           issues: [
-            issue("bd-v", %{status: :awaiting_verification, state: :verifying}),
+            issue("bd-v", %{state: :verifying}),
             issue("bd-m", %{
-              status: :in_progress,
               state: :merging,
               attention_cause: :awaiting_manual_merge,
               attention_since: @earlier

@@ -1,9 +1,11 @@
 defmodule ArbiterCli.Cmd.List do
   @moduledoc """
-  `arb list [--status ...] [--type ...] [--priority N] [--labels ...]
+  `arb list [--state ...] [--type ...] [--priority N] [--labels ...]
             [--tracker] [--workspace-id ID] [--json]`
 
-  Filters are passed through to `GET /api/issues` as query params. `--labels`
+  Filters are passed through to `GET /api/issues` as query params
+  (`--state` is the stored lifecycle state: backlog | queued | active |
+  merging | verifying | closed). `--labels`
   is accepted for interface parity with `bd`, but the current Issue resource
   has no labels field — the flag is ignored with a stderr warning.
 
@@ -28,7 +30,7 @@ defmodule ArbiterCli.Cmd.List do
   alias ArbiterCli.{Client, Output, Workspace}
 
   @switches [
-    status: :string,
+    state: :string,
     type: :string,
     priority: :integer,
     labels: :string,
@@ -49,7 +51,7 @@ defmodule ArbiterCli.Cmd.List do
 
       params =
         []
-        |> put_if(:status, opts[:status])
+        |> put_if(:state, opts[:state])
         |> put_if(:issue_type, opts[:type])
         |> put_if(:priority, opts[:priority])
         |> put_if(:workspace_id, opts[:workspace_id])
@@ -162,6 +164,7 @@ defmodule ArbiterCli.Cmd.List do
   # priority would be — these rows don't *have* a task id or priority yet.
   defp format_unclaimed_line(issue) do
     id = String.pad_trailing("(unclaimed)", 12)
+    # The upstream tracker item's own status, not a ticket state.
     status = "[#{issue["status"] || "open"}]" |> String.pad_trailing(14)
     ref = "##{issue["ref"]}"
     title = issue["title"] || ""

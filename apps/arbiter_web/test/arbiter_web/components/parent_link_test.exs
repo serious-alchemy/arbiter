@@ -16,7 +16,7 @@ defmodule ArbiterWeb.ParentLinkTest do
         id: "bd-cv1inp",
         title: "Browser coordinator sessions",
         issue_type: :epic,
-        status: :open,
+        state: :queued,
         child_total: 14,
         child_closed: 9
       },
@@ -101,7 +101,7 @@ defmodule ArbiterWeb.ParentLinkTest do
     test "a closed epic is muted and reads n/n closed ✓" do
       html =
         render_component(&parent_link/1,
-          parent: epic(%{status: :closed, child_total: 14, child_closed: 14}),
+          parent: epic(%{state: :closed, child_total: 14, child_closed: 14}),
           mode: "full"
         )
 

@@ -51,7 +51,7 @@ Re-run `arb install cli` any time you pull changes to `apps/arbiter_cli`.
 
 **Repos** — registered git repositories. Workers check out code on repos to work on tickets.
 
-**Tickets** — tasks to be worked (formerly *issues*; `arb issue` and the `task_*` MCP tools remain as deprecated aliases for one release). Can be tracked in an external system (Jira, GitHub, Linear) or managed locally. Status flows from creation through ready → in_progress → done.
+**Tickets** — tasks to be worked (formerly *issues*; `arb issue` and the `task_*` MCP tools remain as deprecated aliases for one release). Can be tracked in an external system (Jira, GitHub, Linear) or managed locally. A ticket moves through one lifecycle state: backlog → queued (Ready) → active (In progress) → merging → verifying → closed.
 
 **Workers** — autonomous agents spawned via Claude Code (or future adapters) to work a ticket. Each worker receives a ticket, works it in an isolated git worktree, and reports completion with a PR or notes. Their full transcript is retained for audit and learning.
 

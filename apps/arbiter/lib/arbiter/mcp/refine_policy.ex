@@ -91,7 +91,7 @@ defmodule Arbiter.MCP.RefinePolicy do
   @deny_reason_scope "a refine session is bound to one workspace and one ticket"
 
   @deny %{
-    # lifecycle / status
+    # lifecycle / state
     "ticket_close" => @deny_reason_lifecycle,
     "ticket_reopen" => @deny_reason_lifecycle,
     "ticket_verify" => @deny_reason_lifecycle,

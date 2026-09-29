@@ -27,9 +27,8 @@ defmodule Arbiter.Tasks.SlotGateTaskTest do
       refute SlotGate.holds_slot?(ticket("e", :active, %{issue_type: :epic}))
     end
 
-    test "a legacy row with no stored state is judged by the state its status implies" do
-      assert SlotGate.holds_slot?(%{id: "l", status: :in_progress, pr_ref: nil})
-      refute SlotGate.holds_slot?(%{id: "l", status: :in_progress, pr_ref: "https://pr/1"})
+    test "a row with no stored state holds none" do
+      refute SlotGate.holds_slot?(%{id: "l"})
     end
   end
 

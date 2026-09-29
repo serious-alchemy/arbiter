@@ -12,6 +12,7 @@ defmodule Arbiter.Workflows.PendingMergeSweeperTest do
   # from their own processes, and StubMerger is a singleton Agent.
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures
   import ExUnit.CaptureLog
 
   require Ash.Query
@@ -105,7 +106,7 @@ defmodule Arbiter.Workflows.PendingMergeSweeperTest do
   defp task(ws, mr_ref) do
     Issue
     |> Ash.create!(%{title: "orphaned merge", description: "body", workspace_id: ws.id})
-    |> Ash.update!(%{status: :in_progress, pr_ref: mr_ref})
+    |> put_state!(:merging, pr_ref: mr_ref)
   end
 
   defp running_worker(task) do
@@ -288,7 +289,7 @@ defmodule Arbiter.Workflows.PendingMergeSweeperTest do
       capture_log(fn ->
         assert %{retried: [id]} = sweep()
         assert id == task.id
-        wait_until(fn -> reload(task).status == :closed end)
+        wait_until(fn -> reload(task).state == :closed end)
       end)
 
       assert StubMerger.merge_count(mr_ref) == live_attempts + 1,
@@ -328,7 +329,7 @@ defmodule Arbiter.Workflows.PendingMergeSweeperTest do
 
       capture_log(fn ->
         assert %{retried: [_]} = sweep()
-        wait_until(fn -> reload(task).status == :closed end)
+        wait_until(fn -> reload(task).state == :closed end)
       end)
 
       assert StubMerger.merge_count(mr_ref) == 1
@@ -411,7 +412,7 @@ defmodule Arbiter.Workflows.PendingMergeSweeperTest do
       issue =
         Issue
         |> Ash.create!(Map.merge(%{title: "merging", workspace_id: ws.id}, attrs))
-        |> Ash.update!(%{status: :in_progress})
+        |> put_state!(:active)
 
       {:ok, merging} = Issue.pr_opened(issue.id, mr_ref)
       assert merging.state == :merging
@@ -428,15 +429,17 @@ defmodule Arbiter.Workflows.PendingMergeSweeperTest do
 
       StubMerger.queue_get(mr_ref, [%{status: :closed, head_sha: reviewed}])
 
+      # The page is posted just after the ticket moves back to work, so wait on
+      # the page itself rather than on the state change.
       capture_log(fn ->
         assert %{retried: [_], rewatched: []} = sweep()
-        wait_until(fn -> reload(task).state == :active end)
+        wait_until(fn -> Enum.any?(escalations(task.id), &(&1.subject =~ "PR closed")) end)
       end)
 
+      assert reload(task).state == :active
       assert reload(task).attention_cause == :pr_closed
       assert PendingMerge.get(reload(task)) == nil
       assert StubMerger.merge_count(mr_ref) == 0
-      assert Enum.any?(escalations(task.id), &(&1.subject =~ "PR closed"))
     end
 
     test "a merge it lands finishes the ticket through PullRequest.merged/2" do
@@ -482,7 +485,7 @@ defmodule Arbiter.Workflows.PendingMergeSweeperTest do
         wait_until(fn -> is_nil(Watchdog.retry_whereis(task.id)) end)
       end)
 
-      assert reload(task).status not in [:closed, :awaiting_verification]
+      assert reload(task).state not in [:closed, :verifying]
     end
   end
 
@@ -514,7 +517,7 @@ defmodule Arbiter.Workflows.PendingMergeSweeperTest do
            )}
         )
 
-        wait_until(fn -> reload(task).status == :closed end)
+        wait_until(fn -> reload(task).state == :closed end)
       end)
 
       assert StubMerger.last_merge() == {mr_ref, reviewed}
@@ -556,7 +559,7 @@ defmodule Arbiter.Workflows.PendingMergeSweeperTest do
 
       assert StubMerger.merge_count(mr_ref) == 0
       assert StubAutoResumeDispatcher.resume_count() == 0
-      assert reload(task).status != :closed
+      assert reload(task).state != :closed
       assert length(escalations(task.id)) == 1
     end
 
@@ -578,7 +581,7 @@ defmodule Arbiter.Workflows.PendingMergeSweeperTest do
 
       capture_log(fn ->
         assert %{retried: [_]} = sweep()
-        wait_until(fn -> reload(task).status == :closed end)
+        wait_until(fn -> reload(task).state == :closed end)
       end)
 
       assert StubMerger.last_merge() == {mr_ref, head}
@@ -686,7 +689,7 @@ defmodule Arbiter.Workflows.PendingMergeSweeperTest do
 
       assert [escalation] = escalations(task.id)
       assert escalation.subject =~ task.id
-      assert reload(task).status != :closed
+      assert reload(task).state != :closed
     end
 
     test "transient forge errors keep retrying without escalating" do
@@ -709,7 +712,7 @@ defmodule Arbiter.Workflows.PendingMergeSweeperTest do
         assert %{retried: [_]} = sweep()
         wait_until(fn -> StubMerger.merge_count(mr_ref) >= 5 end)
         StubMerger.set_merge_result(:ok)
-        wait_until(fn -> reload(task).status == :closed end)
+        wait_until(fn -> reload(task).state == :closed end)
       end)
 
       assert escalations(task.id) == []
@@ -797,7 +800,7 @@ defmodule Arbiter.Workflows.PendingMergeSweeperTest do
 
       {:ok, closed} = Ash.update(reload(task), %{close_upstream: false}, action: :close)
       {:ok, reopened} = Ash.update(closed, %{}, action: :reopen)
-      assert reopened.status == :open
+      assert reopened.state == :queued
 
       assert_stands_down_without_merging(retry, mr_ref, reviewed)
       assert PendingMerge.get(reload(task)) == nil
@@ -928,7 +931,7 @@ defmodule Arbiter.Workflows.PendingMergeSweeperTest do
         %{status: :open, head_sha: reviewed, base_ref: "main", pipeline: :success}
       ])
 
-      capture_log(fn -> wait_until(fn -> reload(task).status == :closed end) end)
+      capture_log(fn -> wait_until(fn -> reload(task).state == :closed end) end)
 
       assert StubMerger.merge_count(mr_ref) == 1
       assert StubMerger.last_merge() == {mr_ref, reviewed}
@@ -995,7 +998,7 @@ defmodule Arbiter.Workflows.PendingMergeSweeperTest do
 
       assert StubMerger.merge_count(mr_ref) == 0
       assert PendingMerge.get(reload(task)).escalation_reason =~ "stale_reviewed_sha"
-      assert reload(task).status != :closed
+      assert reload(task).state != :closed
     end
 
     test "red CI that never recovers gives up once max_wait_ms after the merge first waited" do

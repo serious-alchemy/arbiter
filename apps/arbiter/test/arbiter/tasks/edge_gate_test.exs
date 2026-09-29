@@ -4,7 +4,7 @@ defmodule Arbiter.Tasks.EdgeGateTest do
   alias Arbiter.Tasks.EdgeGate
 
   defp dep(type, from, to), do: %{type: type, from_issue_id: from, to_issue_id: to}
-  defp issue(id, status), do: %{id: id, status: status}
+  defp issue(id, state), do: %{id: id, state: state}
 
   describe "edge type classification" do
     test "only depends_on/blocks gate ordering; conflicts_with is the mutex" do
@@ -78,10 +78,10 @@ defmodule Arbiter.Tasks.EdgeGateTest do
       deps = [dep(:depends_on, "bd-1", "bd-2"), dep(:blocks, "bd-3", "bd-4")]
 
       issues = [
-        issue("bd-1", :open),
-        issue("bd-4", :open),
-        issue("bd-2", :open),
-        issue("bd-3", :open)
+        issue("bd-1", :queued),
+        issue("bd-4", :queued),
+        issue("bd-2", :queued),
+        issue("bd-3", :queued)
       ]
 
       assert EdgeGate.blockers(deps, issues) == %{"bd-1" => ["bd-2"], "bd-4" => ["bd-3"]}
@@ -89,7 +89,7 @@ defmodule Arbiter.Tasks.EdgeGateTest do
 
     test "a closed blocker stops blocking" do
       deps = [dep(:depends_on, "bd-1", "bd-2")]
-      issues = [issue("bd-1", :open), issue("bd-2", :closed)]
+      issues = [issue("bd-1", :queued), issue("bd-2", :closed)]
 
       assert EdgeGate.blockers(deps, issues) == %{}
     end
@@ -100,21 +100,21 @@ defmodule Arbiter.Tasks.EdgeGateTest do
       deps = [dep(:depends_on, "bd-1", "bd-2"), dep(:blocks, "bd-3", "bd-4")]
 
       issues = [
-        issue("bd-1", :open),
-        issue("bd-2", :awaiting_verification),
-        %{id: "bd-3", state: :verifying, status: :awaiting_verification},
-        %{id: "bd-4", state: :queued, status: :open}
+        issue("bd-1", :queued),
+        issue("bd-2", :verifying),
+        %{id: "bd-3", state: :verifying},
+        %{id: "bd-4", state: :queued}
       ]
 
       assert EdgeGate.blockers(deps, issues) == %{}
     end
 
-    test "a blocker's stored state wins over its legacy status" do
+    test "a merging blocker still blocks" do
       deps = [dep(:depends_on, "bd-1", "bd-2")]
 
       issues = [
-        %{id: "bd-1", state: :queued, status: :open},
-        %{id: "bd-2", state: :merging, status: :in_progress}
+        %{id: "bd-1", state: :queued},
+        %{id: "bd-2", state: :merging}
       ]
 
       assert EdgeGate.blockers(deps, issues) == %{"bd-1" => ["bd-2"]}
@@ -124,9 +124,9 @@ defmodule Arbiter.Tasks.EdgeGateTest do
       deps = [dep(:depends_on, "bd-1", "bd-9"), dep(:depends_on, "bd-2", "bd-9")]
 
       issues = [
-        %{id: "bd-1", state: :backlog, status: :open},
-        %{id: "bd-2", state: :active, status: :in_progress},
-        %{id: "bd-9", state: :active, status: :in_progress}
+        %{id: "bd-1", state: :backlog},
+        %{id: "bd-2", state: :active},
+        %{id: "bd-9", state: :active}
       ]
 
       assert EdgeGate.blockers(deps, issues) == %{"bd-1" => ["bd-9"]}
@@ -137,7 +137,7 @@ defmodule Arbiter.Tasks.EdgeGateTest do
         for type <- [:relates_to, :discovered_from, :parent_of, :conflicts_with],
             do: dep(type, "bd-1", "bd-2")
 
-      issues = [issue("bd-1", :open), issue("bd-2", :open)]
+      issues = [issue("bd-1", :queued), issue("bd-2", :queued)]
 
       assert EdgeGate.blockers(deps, issues) == %{}
     end

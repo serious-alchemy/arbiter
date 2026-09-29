@@ -602,7 +602,7 @@ defmodule Arbiter.Board.AutopilotTest do
       assert_receive {:dispatched, "bd-1"}, 500
     end
 
-    test "a card promoted to Ready (refined) runs a pass" do
+    test "a card promoted to Ready (:queued) runs a pass" do
       pid = start(paused: false)
 
       send(pid, {:task_lifecycle, :updated, %{id: "bd-2"}})
@@ -715,7 +715,7 @@ defmodule Arbiter.Board.AutopilotTest do
         start(
           paused: false,
           # A dispatched card leaves Ready, same as a real snapshot after a
-          # real (synchronous) status transition to :in_progress — otherwise
+          # real (synchronous) state transition to :active — otherwise
           # every pass, including a legitimate follow-up, would promote the
           # same card again and this test couldn't tell a coalesced burst
           # from an (incorrect) uncapped redispatch loop.

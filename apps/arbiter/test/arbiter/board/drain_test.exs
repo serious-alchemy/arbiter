@@ -88,6 +88,9 @@ defmodule Arbiter.Board.DrainTest do
       assert status.paused == true
       assert status.safe_to_restart
       assert status.in_flight == []
+      # bd-36ytcl: an idle worker is simply not in flight; there is no
+      # separate `parked` list any more.
+      refute Map.has_key?(status, :parked)
     end
 
     test "an unrecognised child of the worker supervisor is counted, not ignored (fail closed)" do
@@ -406,6 +409,7 @@ defmodule Arbiter.Board.DrainTest do
                in_flight: [%{kind: "unclassified", task_id: nil, detail: nil}]
              } = json
 
+      refute Map.has_key?(json, :parked)
       assert Jason.encode!(json)
     end
   end

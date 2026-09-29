@@ -78,11 +78,14 @@ defmodule ArbiterCli.Cmd.RankTest do
 
   test "--json emits raw JSON with priority_band fields" do
     other = Map.put(@issue, "id", "bd-000")
+    # A closed ticket in the band is not part of the queue order.
+    closed = Map.merge(@issue, %{"id" => "bd-00c", "rank" => 0, "state" => "closed"})
 
     stub_routes([
       {{"patch", "/api/issues/bd-001/rank"},
        fn conn -> conn |> Plug.Conn.put_status(200) |> Req.Test.json(@issue) end},
-      {{"get", "/api/issues"}, fn conn -> Req.Test.json(conn, %{"data" => [other, @issue]}) end}
+      {{"get", "/api/issues"},
+       fn conn -> Req.Test.json(conn, %{"data" => [closed, other, @issue]}) end}
     ])
 
     {out, _err, exit_code} = capture(fn -> Rank.run(["bd-001", "--top", "--json"]) end)

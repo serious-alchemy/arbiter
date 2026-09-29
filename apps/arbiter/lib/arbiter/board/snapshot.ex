@@ -77,6 +77,7 @@ defmodule Arbiter.Board.Snapshot do
   alias Arbiter.Tasks.EdgeGate
   alias Arbiter.Tasks.Lifecycle
   alias Arbiter.Tasks.PullRequest
+  alias Arbiter.Tasks.ReviewPark
   alias Arbiter.Tasks.SlotGate
   alias Arbiter.Usage.Budget
   alias Arbiter.Worker
@@ -85,11 +86,9 @@ defmodule Arbiter.Board.Snapshot do
 
   require Ash.Query
 
-  # Run states that *used* to define a slot (the `:issues` basis).
-  # bd-aw2cyt moved the question to `Arbiter.Tasks.SlotGate`, which counts live
-  # agent sessions instead; this list is still what `:issues` falls back to, and
-  # its definition lives there now.
-  @slot_states SlotGate.slot_states()
+  # Run states whose worktree is still in use: a run that is not over. What
+  # `in_flight/3` counts as holding files for the scheduler's overlap check.
+  @in_flight_run_states [:starting, :working, :waiting]
 
   # The only blocks the Watchdog still clears on its own — mirrors its
   # `auto_resolvable?/1`. Everything else needs a person today.
@@ -113,10 +112,10 @@ defmodule Arbiter.Board.Snapshot do
   @reviewer_state "in review"
   @fix_pass_state "fix pass"
 
-  # An issue flipped to :in_progress whose worker has not registered yet.
+  # A ticket moved to :active whose worker has not registered yet.
   @dispatching_state "dispatching"
 
-  # Dispatch flips an issue to :in_progress before the worker is registered
+  # Dispatch moves a ticket to :active before the worker is registered
   # (worktree provisioning, fetch, etc. — seconds on a large repo). Below this
   # age, treat it as mid-dispatch rather than orphaned. The window is the
   # lifecycle projection's (`Lifecycle.board_column/2`), so the two agree.
@@ -152,9 +151,7 @@ defmodule Arbiter.Board.Snapshot do
 
   The Ready queue is in `Arbiter.Board.Scheduler.order/1`'s order — priority,
   then the persisted `rank`, then age (bd-asxw4e) — the same order Autopilot
-  dispatches in. The LiveView-only `:ready_order` hand-ranking it used to
-  take is gone: Autopilot never saw it, so it made the board promise a
-  dispatch order the scheduler did not follow.
+  dispatches in.
   """
   @spec derive(map()) :: t()
   def derive(input) when is_map(input) do
@@ -184,9 +181,6 @@ defmodule Arbiter.Board.Snapshot do
     # ledger question, and the pure half never goes to the ledger. A caller
     # that can't answer passes nothing, and no card flags.
     over_budget = over_budget_set(Map.get(input, :over_budget))
-    # bd-aw2cyt: how a slot is counted. An *input*, like everything else here —
-    # `load/1` resolves the configured basis and the pure half just applies it.
-    slot_basis = SlotGate.normalize_basis(Map.get(input, :slot_basis))
 
     issues_by_id = Map.new(issues, &{&1.id, &1})
     parents = parent_refs(parent_of, issues_by_id)
@@ -217,7 +211,7 @@ defmodule Arbiter.Board.Snapshot do
     # workers, not just the author rows: a reviewer is a second paid session.
     # This is "agents live" on the header — what's actually burning quota —
     # and no longer what the dispatch cap is measured against; see below.
-    agents_live = SlotGate.occupied(workers, slot_basis)
+    agents_live = SlotGate.occupied(workers)
 
     # bd-asxw4e: the dispatch cap is measured in TICKETS In progress — the
     # tickets whose stored state is `:active`, the same set as the In progress
@@ -297,10 +291,6 @@ defmodule Arbiter.Board.Snapshot do
     issues = Keyword.get_lazy(opts, :issues, &load_issues/0)
     workers = Keyword.get_lazy(opts, :workers, &load_workers/0)
     workspace_id = Keyword.get(opts, :workspace_id) || default_workspace_id()
-    # bd-aw2cyt: `load/1` is the impure boundary, so it is where the configured
-    # basis is read. `derive/1` stays a function of its inputs, and an explicit
-    # `:slot_basis` (the pure tests, a caller with its own opinion) still wins.
-    slot_basis = SlotGate.normalize_basis(Keyword.get(opts, :slot_basis) || SlotGate.basis())
 
     # One read of the dependency rows feeds both derived inputs — the gating
     # blockers and (bd-38of5i) the `parent_of` pairs. Skipped entirely when the
@@ -316,7 +306,6 @@ defmodule Arbiter.Board.Snapshot do
         Keyword.get_lazy(opts, :conflicts_with, fn -> EdgeGate.conflict_pairs(deps) end),
       changed_files: Keyword.get(opts, :changed_files, %{}),
       now: Keyword.get(opts, :now) || DateTime.utc_now(),
-      slot_basis: slot_basis,
       # `derive/1` subtracts the used slots from this total, and the account
       # term folded in below is a headroom expressed in the caller's own frame
       # — so the two have to agree on what "used" means. Since bd-asxw4e that
@@ -408,8 +397,8 @@ defmodule Arbiter.Board.Snapshot do
   The workspace's own live workers are added back before the min (via
   `Concurrency.clamp/3`) because `load/1` subtracts the running cards from
   `slots_total` itself — counting them in both places would halve the number.
-  `already_counted` is exactly what the caller will subtract; since bd-aw2cyt
-  that is the *live agent* count, so `load/1` passes it rather than letting
+  `already_counted` is exactly what the caller will subtract; since bd-asxw4e
+  that is the tickets In progress, so `load/1` passes it rather than letting
   this function guess with `Concurrency.workspace_live_count/2`. Omitting it
   keeps the pre-bd-aw2cyt behaviour for callers that have no worker list.
 
@@ -528,7 +517,7 @@ defmodule Arbiter.Board.Snapshot do
   issues rather than the whole board.
 
   Design bd-2s901b §3: an epic detail page groups its children into a
-  "Children by status" mini-board using these same five columns, so it needs
+  children mini-board using these same five columns, so it needs
   the same answer the board itself would give. Since bd-6zapbl both read it
   from `Arbiter.Tasks.Lifecycle.board_column/2` — the ticket's
   `Lifecycle.view/2` column through the interim five-column mapping — and
@@ -719,9 +708,7 @@ defmodule Arbiter.Board.Snapshot do
         scope: FileScope.declared_paths(issue),
         blocked_by: [],
         conflicts_with: EdgeGate.conflicts(conflicts, issue.id),
-        refined: true,
-        state: Lifecycle.state_of(issue),
-        status: Map.get(issue, :status)
+        state: Lifecycle.state_of(issue)
       })
     end)
   end
@@ -817,7 +804,8 @@ defmodule Arbiter.Board.Snapshot do
       priority: Map.get(issue, :priority),
       difficulty: Map.get(issue, :difficulty),
       workspace_id: Map.get(issue, :workspace_id),
-      status: :in_progress,
+      # No run, so no run state (a worker card's `status`, see `base_card/2`).
+      status: nil,
       outcome: nil,
       waiting_on: nil,
       live: false,
@@ -833,7 +821,8 @@ defmodule Arbiter.Board.Snapshot do
   # ---- merging / verifying --------------------------------------------------
 
   # bd-741sid: a Merging ticket's implementer stopped when its PR opened, so
-  # the card is built from the ticket — the PR on its row, the forge's last
+  # the card is built from the ticket. No agent runs for it and it has no
+  # worker phase (bd-36ytcl): what the PR waits on is the ticket's `step` — the PR on its row, the forge's last
   # answer its Watchdog recorded, and whether that Watchdog is still running,
   # or was stopped on purpose (`merge_pulled`, `PullRequest.pull/1`). A worker
   # row still registered under the ticket (a pass that failed) keeps its note,
@@ -852,7 +841,6 @@ defmodule Arbiter.Board.Snapshot do
         priority: Map.get(issue, :priority),
         difficulty: Map.get(issue, :difficulty),
         workspace_id: Map.get(issue, :workspace_id),
-        status: :merging,
         mr_ref: Map.get(issue, :pr_ref),
         merger_url: Map.get(issue, :merger_url),
         merger_status: PullRequest.merger_status(issue),
@@ -860,7 +848,6 @@ defmodule Arbiter.Board.Snapshot do
         merge_pulled: PullRequest.pulled?(issue),
         collapsed_note: collapsed_note(nil, group),
         since: Map.get(issue, :updated_at) || created_at(issue),
-        phase: :waiting_ci_merge,
         agent_live: false
       }
     end)
@@ -901,7 +888,6 @@ defmodule Arbiter.Board.Snapshot do
         priority: Map.get(issue, :priority),
         difficulty: Map.get(issue, :difficulty),
         workspace_id: Map.get(issue, :workspace_id),
-        status: :awaiting_verification,
         mr_ref: Map.get(issue, :pr_ref),
         since: awaiting_since(issue)
       }
@@ -966,17 +952,14 @@ defmodule Arbiter.Board.Snapshot do
 
   defp subordinate_rank(worker), do: if(is_nil(Map.get(worker, :role)), do: 0, else: 1)
 
-  # bd-6lvc1r: names the park when one is on record (`review_park_reason`,
-  # e.g. `resume_blocked`) so a card produced from a stale/terminal worker row
-  # reads as a specific park rather than the generic "gone" message a truly
-  # workerless issue gets.
+  # bd-6lvc1r: names the park when one is on record (the ticket's attention
+  # cause, `ReviewPark.reason/1`, e.g. `resume_blocked`) so a card produced
+  # from a stale/terminal worker row reads as a specific park rather than the
+  # generic "gone" message a truly workerless issue gets.
   defp orphan_reason(issue) do
-    case Map.get(issue, :review_park_reason) do
-      reason when is_binary(reason) and reason != "" ->
-        "review-parked (#{reason}) — resume or close"
-
-      _ ->
-        "worker stopped — resume or close"
+    case ReviewPark.reason(issue) do
+      nil -> "worker stopped — resume or close"
+      reason -> "review-parked (#{reason}) — resume or close"
     end
   end
 
@@ -1137,7 +1120,7 @@ defmodule Arbiter.Board.Snapshot do
   defp child_closed?(child_id, issues_by_id) do
     case Map.get(issues_by_id, child_id) do
       nil -> false
-      issue -> Map.get(issue, :status) == :closed
+      issue -> Lifecycle.state_of(issue) == :closed
     end
   end
 
@@ -1227,7 +1210,7 @@ defmodule Arbiter.Board.Snapshot do
   #
   # Three sources, in increasing authority:
   #
-  #   * an issue flipped to `:in_progress` whose worker has not registered yet
+  #   * a ticket moved to `:active` whose worker has not registered yet
   #     (inside `@orphan_grace_seconds`) — the window the bd-1780 incident
   #     dispatched into. Past the grace it reads as *orphaned* instead, and
   #     releases the mutex: nothing is going to retry it on its own, so holding
@@ -1238,7 +1221,7 @@ defmodule Arbiter.Board.Snapshot do
   #     works for — covers a fix pass whose author worker has already gone.
   #   * the author's own live worker, which knows its run state exactly.
   #
-  # A counterpart that is `:closed`, parked at `:awaiting_verification`
+  # A counterpart that is `:closed`, `:verifying`
   # (merged — the worktree is gone, nothing left to collide with) or whose run
   # finished (parked, terminal) appears in none of them.
   defp conflict_claims(authors, gate_workers, issues, worked, now) do
@@ -1280,10 +1263,10 @@ defmodule Arbiter.Board.Snapshot do
     end
   end
 
-  # The inverse of `orphaned?/3` for an `:in_progress` issue: young enough that
-  # the missing worker reads as "still provisioning", not "stopped".
+  # For an `:active` ticket: young enough that the missing worker reads as
+  # "still provisioning", not "stopped".
   defp mid_dispatch?(issue, worked, now) do
-    issue.status == :in_progress and
+    Lifecycle.state_of(issue) == :active and
       not dispatchable_type_excluded?(issue) and
       not MapSet.member?(worked, issue.id) and
       DateTime.diff(now, Map.get(issue, :updated_at) || created_at(issue)) <
@@ -1292,7 +1275,7 @@ defmodule Arbiter.Board.Snapshot do
 
   defp in_flight(workers, issues_by_id, changed) do
     workers
-    |> Enum.filter(&(Map.get(&1, :state) in @slot_states))
+    |> Enum.filter(&(Map.get(&1, :state) in @in_flight_run_states))
     |> Enum.map(fn w ->
       declared =
         case Map.get(issues_by_id, w.task_id) do

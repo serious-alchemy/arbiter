@@ -12,7 +12,7 @@ defmodule ArbiterCli.Cmd.ReadyTest do
   end
 
   test "lists ready issues from the active workspace by default" do
-    stub_two([%{"id" => "a", "status" => "open", "priority" => 1, "title" => "ready one"}])
+    stub_two([%{"id" => "a", "state" => "queued", "priority" => 1, "title" => "ready one"}])
 
     {out, _err, exit_code} = capture(fn -> Ready.run([]) end)
     assert exit_code == 0
@@ -26,7 +26,7 @@ defmodule ArbiterCli.Cmd.ReadyTest do
   end
 
   test "--all skips the workspace filter" do
-    stub_two([%{"id" => "all-1", "status" => "open", "priority" => 1, "title" => "cross-ws"}])
+    stub_two([%{"id" => "all-1", "state" => "queued", "priority" => 1, "title" => "cross-ws"}])
 
     {out, _err, exit_code} = capture(fn -> Ready.run(["--all"]) end)
     assert exit_code == 0

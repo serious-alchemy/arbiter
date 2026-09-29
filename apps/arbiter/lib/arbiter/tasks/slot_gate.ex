@@ -44,25 +44,22 @@ defmodule Arbiter.Tasks.SlotGate do
 
   ## Liveness is an input
 
-  `occupies_slot?/2` reads `:agent_live` off the worker snapshot
+  `occupies_slot?/1` reads `:agent_live` off the worker snapshot
   (`Arbiter.Worker` stamps it from its own open ports — see
   `Arbiter.Worker.agent_session_live?/1`), so the predicate stays pure and the
-  board's `derive/1` can be tested with plain maps. A snapshot that carries no
-  `:agent_live` key at all is *unknown*, not "not live", and degrades to the
-  old run-state rule — an unreadable liveness must never read as a free slot,
-  which would over-dispatch.
+  board's `derive/1` can be tested with plain maps.
 
-  ## `conductor.slot_basis`
-
-  `:agents` (the default) is the rule above. `:issues` restores the
-  pre-bd-aw2cyt record-based counting, for an operator who wants the old
-  behaviour back when quota loosens:
-
-      config :arbiter, conductor_slot_basis: :issues
+  A snapshot that carries no `:agent_live` key at all is *unknown*, not "not
+  live", and fails closed: it counts unless its run is provably over
+  (`:finished` — the one run state that owns no agent), whatever its role.
+  An unreadable liveness must never read as "nothing is running". (The
+  opt-in record-based slot basis is gone since bd-36ytcl: the dispatch cap is
+  counted in tickets, below, and this count only feeds the `agents live`
+  header.)
 
   ## A slot is a ticket In progress (bd-asxw4e)
 
-  `occupies_slot?/2` / `occupied/2` above answer "is an agent burning quota
+  `occupies_slot?/1` / `occupied/1` above answer "is an agent burning quota
   right now" — the `agents live: X of N` header. They are **not** what gates
   a new dispatch.
 
@@ -83,107 +80,42 @@ defmodule Arbiter.Tasks.SlotGate do
       occupying it is merged" (operator, 2026-09-27; `docs/design/ticket-lifecycle.md` §5).
 
   Before bd-asxw4e the count read `Arbiter.Worker.Phase` off each task's
-  author row, so a ticket held its slot through `waiting_ci_merge`,
-  `in_review`, `handing_off` and an `:unknown` probe — invisibly — and a
-  ReviewGate park released it. The stored state is what every surface shows,
+  author row, so a ticket held its slot through an open PR waiting on CI, a
+  review round, a hand-off between agents and an unknown probe — invisibly —
+  and a ReviewGate park released it. (Those worker phases are gone since
+  bd-36ytcl: a ticket's step comes from `Arbiter.Tasks.Lifecycle.view/2`.) The stored state is what every surface shows,
   so the cap now cannot disagree with the board.
 
   Epics never hold a slot: they are never dispatched and never on the board.
-  The `conductor_slot_basis` setting above only changes the `agents live`
-  count; the cap is counted in tickets under either basis.
   """
 
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Lifecycle
 
-  @typedoc "How a slot is counted."
-  @type basis :: :agents | :issues
-
-  @default_basis :agents
-
-  @bases [:agents, :issues]
-
-  # Run states that held a slot under the `:issues` basis — an author record
-  # with a workflow still in its hands, including one waiting on the review
-  # gate. A run that opened its PR has finished (bd-741sid); the PR holds no
-  # subprocess.
-  @slot_states [:starting, :working, :waiting]
-
-  # A reviewer / implementer runs under its *own* synthetic task id on behalf
-  # of an author, so under the `:issues` basis it folds into the author's card
-  # rather than holding a record of its own. `:fix_pass` / `:conflict_resolver`
-  # share the author's task id and were counted as author rows before this
-  # module existed; that is preserved exactly.
-  @gate_roles [:reviewer, :implementer]
+  # The one run state that provably owns no agent: the run is over. A
+  # snapshot of unknown liveness in any other state counts (see the moduledoc).
+  @over_state :finished
 
   @doc """
-  The run states that occupy a slot under the `:issues` basis.
+  Does this worker snapshot occupy a worker slot — is an agent subprocess live
+  for it? Unknown liveness fails closed (see the moduledoc).
   """
-  @spec slot_states() :: [atom()]
-  def slot_states, do: @slot_states
-
-  @doc """
-  How slots are counted on this install: `:agents` (default) or `:issues`.
-
-  Reads `:arbiter, :conductor_slot_basis`. Accepts an atom or a string; an
-  unrecognised value is not configuration, so it falls back to the default
-  rather than silently adopting something nobody asked for.
-  """
-  @spec basis() :: basis()
-  def basis do
-    normalize_basis(Application.get_env(:arbiter, :conductor_slot_basis))
-  rescue
-    _ -> @default_basis
-  end
-
-  @doc """
-  Coerce a caller-supplied basis (atom, string or `nil`) to a known one.
-
-  Pure: `nil` and anything unrecognised resolve to the default (`:agents`),
-  *not* to the configured basis — reading config here would make every slot
-  predicate impure, and `basis/0` itself calls this on the env value, so the
-  two would recurse. Callers that want the install's configured basis read
-  `basis/0` at their own impure boundary and pass the result down; that is
-  what `Arbiter.Board.Snapshot.load/1` does.
-  """
-  @spec normalize_basis(term()) :: basis()
-  def normalize_basis(nil), do: @default_basis
-  def normalize_basis(b) when b in @bases, do: b
-
-  def normalize_basis(b) when is_binary(b) do
-    # Never `String.to_atom/1` on a config value — match the known set.
-    Enum.find(@bases, @default_basis, &(Atom.to_string(&1) == b))
-  end
-
-  def normalize_basis(_), do: @default_basis
-
-  @doc """
-  Does this worker snapshot occupy a worker slot?
-
-  `basis` defaults to `:agents` (see `normalize_basis/1` — it does *not* read
-  config); pass the install's basis explicitly, resolved once via `basis/0` at
-  an impure boundary, so the answer stays a function of its inputs.
-  """
-  @spec occupies_slot?(map(), basis() | nil) :: boolean()
-  def occupies_slot?(worker, basis \\ nil)
-
-  def occupies_slot?(worker, basis) when is_map(worker) do
-    case normalize_basis(basis) do
-      :issues -> record_slot?(worker)
-      :agents -> agent_slot?(worker)
+  @spec occupies_slot?(map()) :: boolean()
+  def occupies_slot?(worker) when is_map(worker) do
+    case agent_live(worker) do
+      true -> true
+      false -> false
+      nil -> Map.get(worker, :state) != @over_state
     end
   end
 
-  def occupies_slot?(_worker, _basis), do: false
+  def occupies_slot?(_worker), do: false
 
   @doc """
   How many of `workers` occupy a slot.
   """
-  @spec occupied([map()], basis() | nil) :: non_neg_integer()
-  def occupied(workers, basis \\ nil) when is_list(workers) do
-    basis = normalize_basis(basis)
-    Enum.count(workers, &occupies_slot?(&1, basis))
-  end
+  @spec occupied([map()]) :: non_neg_integer()
+  def occupied(workers) when is_list(workers), do: Enum.count(workers, &occupies_slot?/1)
 
   @doc """
   Slots left out of `total` once `workers` have taken theirs. Never negative:
@@ -191,9 +123,9 @@ defmodule Arbiter.Tasks.SlotGate do
   so the occupied count legitimately exceeds `total` sometimes, and "-1 slots
   free" is not a thing a scheduler or a header should ever say.
   """
-  @spec free(non_neg_integer(), [map()], basis() | nil) :: non_neg_integer()
-  def free(total, workers, basis \\ nil) when is_integer(total) and is_list(workers) do
-    max(total - occupied(workers, basis), 0)
+  @spec free(non_neg_integer(), [map()]) :: non_neg_integer()
+  def free(total, workers) when is_integer(total) and is_list(workers) do
+    max(total - occupied(workers), 0)
   end
 
   @doc """
@@ -214,8 +146,8 @@ defmodule Arbiter.Tasks.SlotGate do
 
   @doc """
   Does this ticket hold a slot? True only for a ticket whose stored state is
-  `:active` (a legacy row is judged by the state its columns imply) and that is
-  not an epic. See the moduledoc's "A slot is a ticket In progress".
+  `:active` and that is not an epic. See the moduledoc's "A slot is a ticket
+  In progress".
   """
   @spec holds_slot?(map()) :: boolean()
   def holds_slot?(ticket) when is_map(ticket) do
@@ -246,30 +178,4 @@ defmodule Arbiter.Tasks.SlotGate do
   @spec slots_free(non_neg_integer(), [map()]) :: non_neg_integer()
   def slots_free(total, tickets) when is_integer(total) and is_list(tickets),
     do: max(total - slots_used(tickets), 0)
-
-  # ---- internals ------------------------------------------------------------
-
-  defp agent_slot?(worker) do
-    case agent_live(worker) do
-      true -> true
-      false -> false
-      # Unknown liveness degrades to the record rule rather than to "free".
-      nil -> record_slot?(worker)
-    end
-  end
-
-  defp record_slot?(worker) do
-    Map.get(worker, :state) in @slot_states and role_of(worker) not in @gate_roles
-  end
-
-  defp role_of(worker) do
-    Map.get(worker, :role) || get_in_meta(worker, :role)
-  end
-
-  defp get_in_meta(worker, key) do
-    case Map.get(worker, :meta) do
-      %{} = meta -> Map.get(meta, key) || Map.get(meta, to_string(key))
-      _ -> nil
-    end
-  end
 end

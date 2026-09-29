@@ -11,6 +11,7 @@ defmodule ArbiterWeb.TaskDetailRelationshipsTest do
   use ArbiterWeb.ConnCase, async: false
 
   import Phoenix.LiveViewTest
+  import Arbiter.LifecycleFixtures
   import ArbiterWeb.TaskDetailLiveHelpers
 
   require Ash.Query
@@ -85,13 +86,13 @@ defmodule ArbiterWeb.TaskDetailRelationshipsTest do
     end
 
     # Acceptance #8 — §2.5: editing edges must not require promoting first.
-    test "is present, along with a per-row remove, on a Backlog (unrefined) issue",
+    test "is present, along with a per-row remove, on a Backlog issue",
          %{conn: conn, ws: ws} do
       task = issue(ws)
       other = issue(ws)
       {:ok, edge} = Dependencies.add(task.id, other.id, :depends_on)
 
-      refute task.refined
+      assert task.state == :backlog
 
       {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
@@ -404,7 +405,7 @@ defmodule ArbiterWeb.TaskDetailRelationshipsTest do
       refute has_element?(view, "#rel-submit[disabled]")
     end
 
-    test "no queue warning for a non-gating phrase or an unrefined issue",
+    test "no queue warning for a non-gating phrase or a Backlog issue",
          %{conn: conn, ws: ws} do
       task = ready(issue(ws, %{issue_type: :task}))
       target = issue(ws)
@@ -453,7 +454,7 @@ defmodule ArbiterWeb.TaskDetailRelationshipsTest do
     test "warns that a running worker is not stopped, and links the worker page",
          %{conn: conn, ws: ws} do
       task = issue(ws, %{title: "running one"})
-      {:ok, task} = Ash.update(task, %{status: :in_progress})
+      task = put_state!(task, :active)
       target = issue(ws)
 
       {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
@@ -474,7 +475,7 @@ defmodule ArbiterWeb.TaskDetailRelationshipsTest do
          %{conn: conn, ws: ws} do
       task = issue(ws)
       target = issue(ws)
-      {:ok, _} = Ash.update(target, %{status: :in_progress})
+      put_state!(target, :active)
 
       {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       view |> element("#rel-add-open") |> render_click()

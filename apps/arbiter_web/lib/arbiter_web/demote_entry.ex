@@ -20,10 +20,10 @@ defmodule ArbiterWeb.DemoteEntry do
   @doc """
   Whether `issue` should be offered a Return to Backlog action.
 
-  Only offered on Ready (refined: true) tasks that are undispatched (status: :open).
+  Only offered on Ready tickets that are undispatched (`state: :queued`).
   """
   @spec eligible?(any()) :: boolean()
-  def eligible?(%{refined: true, status: :open}), do: true
+  def eligible?(%{state: :queued}), do: true
   def eligible?(_), do: false
 
   @doc """

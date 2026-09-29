@@ -38,7 +38,7 @@ defmodule Arbiter.Tasks.EdgeGate do
   (`Arbiter.Tasks.Lifecycle.blocker_satisfied?/1`). A blocker that has merged
   and is waiting on its post-merge restart-and-observe no longer holds its
   dependents back (bd-6zapbl). This reverses the long-standing rule that a
-  ticket parked at `:awaiting_verification` still blocked them: the merge is
+  merged ticket waiting on its verification still blocked them: the merge is
   what the dependent builds on, and holding it for the verification stalled
   every chain behind one manual check. `Arbiter.Tasks.Issue.ready/1` and
   `Arbiter.Tasks.EpicRollup` gate on the same predicate, so every surface

@@ -14,12 +14,11 @@ defmodule Arbiter.Board.SnapshotSlotsTest do
       %{
         id: id,
         title: "Task #{id}",
-        status: :open,
+        state: :queued,
         priority: 2,
         difficulty: 2,
         issue_type: :task,
         workspace_id: "ws-1",
-        refined: true,
         description: nil,
         acceptance: nil,
         notes: nil,
@@ -171,7 +170,7 @@ defmodule Arbiter.Board.SnapshotSlotsTest do
         derive(
           slots_total: 1,
           issues: [
-            issue("bd-1", %{state: :merging, status: :in_progress, pr_ref: "https://pr/1"}),
+            issue("bd-1", %{state: :merging, pr_ref: "https://pr/1"}),
             issue("bd-ready", %{state: :queued})
           ],
           workers: [fix_pass("bd-1", %{agent_live: true})]
@@ -190,7 +189,7 @@ defmodule Arbiter.Board.SnapshotSlotsTest do
           derive(
             slots_total: 1,
             issues: [
-              issue("bd-1", %{state: :active, status: :in_progress}),
+              issue("bd-1", %{state: :active}),
               issue("bd-ready", %{state: :queued})
             ],
             workers: workers
@@ -207,7 +206,7 @@ defmodule Arbiter.Board.SnapshotSlotsTest do
       board =
         derive(
           slots_total: 1,
-          issues: [issue("bd-1", %{state: :verifying, status: :awaiting_verification})]
+          issues: [issue("bd-1", %{state: :verifying})]
         )
 
       assert board.slots_used == 0
@@ -218,7 +217,7 @@ defmodule Arbiter.Board.SnapshotSlotsTest do
       board =
         derive(
           slots_total: 2,
-          issues: [issue("bd-1", %{state: :active, status: :in_progress})],
+          issues: [issue("bd-1", %{state: :active})],
           workers: [author("bd-1", :failed, %{agent_live: false})]
         )
 
@@ -234,7 +233,7 @@ defmodule Arbiter.Board.SnapshotSlotsTest do
 
     test "tickets forced over the cap never report negative free slots" do
       issues =
-        for id <- ~w(bd-1 bd-2 bd-3), do: issue(id, %{state: :active, status: :in_progress})
+        for id <- ~w(bd-1 bd-2 bd-3), do: issue(id, %{state: :active})
 
       board = derive(slots_total: 1, issues: issues)
 
@@ -243,23 +242,26 @@ defmodule Arbiter.Board.SnapshotSlotsTest do
     end
   end
 
-  describe "slot_basis" do
-    @tag :slot_basis
-    test ":issues restores the pre-bd-aw2cyt record-based agents-live count" do
-      workers = [
-        author("bd-1", :working, %{agent_live: false}),
-        author("bd-2", :question, %{agent_live: false}),
-        reviewer("bd-1", %{agent_live: true})
-      ]
+  # bd-36ytcl: the record-based `:issues` slot basis is gone. A snapshot that
+  # cannot say whether its agent is live fails closed — it counts unless its
+  # run is over — and the cap is still counted in tickets.
+  describe "unknown liveness" do
+    test "counts every row whose run is not over, in any role" do
+      workers =
+        Enum.map(
+          [
+            author("bd-1", :working, %{}),
+            author("bd-2", :question, %{}),
+            reviewer("bd-1", %{}),
+            author("bd-3", :succeeded, %{})
+          ],
+          &Map.delete(&1, :agent_live)
+        )
 
-      agents = derive(slots_total: 4, workers: workers, slot_basis: :agents)
-      issues = derive(slots_total: 4, workers: workers, slot_basis: :issues)
+      board = derive(slots_total: 4, workers: workers)
 
-      assert agents.agents_live == 1
-      assert issues.agents_live == 2
-      # The cap is counted in tickets under either basis.
-      assert agents.slots_used == 0
-      assert issues.slots_used == 0
+      assert board.agents_live == 3
+      assert board.slots_used == 0
     end
   end
 
@@ -296,11 +298,15 @@ defmodule Arbiter.Board.SnapshotSlotsTest do
 
     # bd-741sid: no worker stays resident on an open PR — the Merging ticket
     # itself carries the card.
-    test "an open MR with nothing running reads :waiting_ci_merge, and no live agent" do
+    # bd-36ytcl: nor is that wait a worker phase — the card has none, and its
+    # ticket's step says what the PR waits on.
+    test "an open MR with nothing running has no phase and no live agent, only a step" do
       board =
-        derive(issues: [issue("bd-1", %{state: :merging, status: :in_progress, pr_ref: "#1"})])
+        derive(issues: [issue("bd-1", %{state: :merging, pr_ref: "#1"})])
 
-      assert %{phase: :waiting_ci_merge, agent_live: false} = card(board, :merging, "bd-1")
+      assert %{agent_live: false, step: step} = card = card(board, :merging, "bd-1")
+      refute Map.has_key?(card, :phase)
+      assert step in [:waiting_ci, :in_merge_queue, :behind_base, :merge_blocked]
     end
 
     test "a live CI fix pass reads :fixing_ci on the In progress card" do

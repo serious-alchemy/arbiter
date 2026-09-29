@@ -1002,7 +1002,7 @@ defmodule Arbiter.Worker do
       (`do_open_mr`); the PR opens and the run finishes `:succeeded`.
     * `{:request_changes, findings}` → records the findings, escalates to the
       coordinator, and finishes the run `:failed` **without** merging. The task
-      stays `:in_progress` (the Driver leaves a failed run's task open for
+      stays `:active` (the Driver leaves a failed run's task open for
       inspection / re-dispatch).
     * `{:no_verdict, reason}` → an inconclusive review; treated like a rejection
       (escalate, do not merge) since the safe default is never to merge unreviewed
@@ -1011,8 +1011,8 @@ defmodule Arbiter.Worker do
       design #1635 §5.3). The gate reached a terminal state with no verdict it
       could act on. Nothing merges and no APPROVE is accepted — the content half
       of the guard is still closed. The run finishes `:failed` with the park's
-      cause in `failure_reason`, the task carries `review_park_reason`, and the
-      coordinator is paged exactly once for the episode.
+      cause in `failure_reason`, the task carries it as its `attention_cause`,
+      and the coordinator is paged exactly once for the episode.
   """
   @spec review_gate_verdict(
           ref(),
@@ -1237,10 +1237,9 @@ defmodule Arbiter.Worker do
   carries the run's `kind` / `state` / `outcome` + `agent_live` alongside.
 
   Self-derived: a worker can only see its own row, so an author reports
-  `:implementing` / `:waiting_ci_merge` / `:waiting_on_you` and a reviewer /
-  implementer / fix pass reports its own round. The board and
-  the worker-list surfaces, which see the whole fleet, fold a live round back
-  into the author's card.
+  `:implementing` / `:waiting_on_you` and a reviewer / implementer / fix pass
+  reports its own round. The board and the worker-list surfaces, which see the
+  whole fleet, fold a live round back into the author's card.
 
   Returns the state with `:last_phase` updated; emits nothing when the phase
   is unchanged.
@@ -1739,7 +1738,7 @@ defmodule Arbiter.Worker do
   # bd-1uu19b: the row speaks the worker's own vocabulary, so there is no
   # divergence left to map. A run the Watchdog's review ceiling timed out
   # (`{:awaiting_review_timeout, N}`, bd-8tjcms) and a run the ReviewGate
-  # parked (`review_park_reason`, bd-9zuvbh) both finish `:failed`; their cause
+  # parked (meta `park_reason`, bd-9zuvbh) both finish `:failed`; their cause
   # stays in `failure_reason` and on the ticket.
 
   # Keep the durable row's state in step with a non-terminal transition, so
@@ -2684,7 +2683,7 @@ defmodule Arbiter.Worker do
         # bd-awi4nw: the port closing is the PRIMARY stop signal. If the worker
         # is still in a live state, the worker died/stopped without completing
         # (token exhaustion, crash, kill, flag-rejection). Don't strand the task
-        # at a silent in_progress — schedule a classify+escalate after a short
+        # at a silent :active — schedule a classify+escalate after a short
         # grace so an in-flight `arb done` (which the exit_status message can
         # race ahead of) still wins and the check no-ops on a normal completion.
         if live_run?(new_state.state, new_state.waiting_on) do
@@ -3377,7 +3376,7 @@ defmodule Arbiter.Worker do
 
   # bd-awi4nw: a stopped/dead worker detected via the closed port. Classify the
   # stop from the exit status + captured output, fail the worker into an
-  # obviously-stalled state (not silent in_progress), and raise an addressed
+  # obviously-stalled state (not silent :active), and raise an addressed
   # coordinator escalation naming the task + cause + remediation. Distinct from
   # fail_now/2's generic "exit code N" notification: the StopReason carries the
   # actionable classification (auth expiry, credit exhaustion, kill, …).
@@ -3547,7 +3546,7 @@ defmodule Arbiter.Worker do
   #     (coordinator-dispatched reviewers have no worktree). When the reviewer
   #     produced an APPROVE verdict, trigger the Watchdog on the task's pr_ref so
   #     the PR is merged automatically (bd-4ji58d). For REQUEST_CHANGES or no
-  #     parseable verdict, fail the worker so the task stays :in_progress for a
+  #     parseable verdict, fail the worker so the task stays :active for a
   #     fix-pass rather than silently closing with the PR unreviewed. Non-review
   #     workers with no branch complete directly as before.
   defp on_claude_done(%State{} = state) do
@@ -3728,7 +3727,7 @@ defmodule Arbiter.Worker do
   # NOT complete (which would broadcast {:worker_done} and let the MergeQueue
   # close the task) — fail the worker and raise an addressed coordinator escalation,
   # exactly like a stopped-subprocess failure. The task stays open: the Driver's
-  # :failed path leaves the task :in_progress, and no {:worker_done} is ever
+  # :failed path leaves the task :active, and no {:worker_done} is ever
   # broadcast, so the task is never silently closed.
   defp fail_missing_worktree(%State{} = state) do
     reason = %Arbiter.Worker.StopReason{
@@ -3834,7 +3833,7 @@ defmodule Arbiter.Worker do
   # path (fleet-authored work) is a separate path and is unaffected.
   #
   # REQUEST_CHANGES / :no_verdict → fail the worker (not complete it) so the
-  # Driver does NOT close the task. The task stays :in_progress for the
+  # Driver does NOT close the task. The task stays :active for the
   # coordinator to dispatch a fix-pass. Mirrors park_rejected/4 from the full
   # review_gate path.
   #
@@ -4059,7 +4058,7 @@ defmodule Arbiter.Worker do
   # workspace_id is nil or no pr_ref.
   #
   # bd-cw3w9p: also skipped for review_only tasks — they are long-lived
-  # ReviewPatrol engagements that must stay :in_progress after the first verdict.
+  # ReviewPatrol engagements that must stay :active after the first verdict.
   # Sending {:worker_done} here would let the MergeQueue auto-close a task that
   # ReviewPatrol intends to keep open.
   defp maybe_enqueue_approved_pr(%State{workspace_id: ws_id, task_id: task_id, meta: meta})
@@ -6148,7 +6147,7 @@ defmodule Arbiter.Worker do
   #
   # Content stays fail-closed — nothing here merges, and the guard's refusal to
   # accept the APPROVE stands. Only liveness opens: the task parks with a named
-  # reason (`review_park_reason`) and the coordinator is paged once for the
+  # reason (its `attention_cause`) and the coordinator is paged once for the
   # episode. The run itself finishes `:failed` (bd-1uu19b); the cause is the
   # ticket's.
   defp apply_review_gate_verdict(%State{} = state, {:parked, reason, findings}) do
@@ -6251,8 +6250,8 @@ defmodule Arbiter.Worker do
     failed
   end
 
-  defp put_park_reason(meta, nil), do: Map.delete(meta, :review_park_reason)
-  defp put_park_reason(meta, reason), do: Map.put(meta, :review_park_reason, reason)
+  defp put_park_reason(meta, nil), do: Map.delete(meta, :park_reason)
+  defp put_park_reason(meta, reason), do: Map.put(meta, :park_reason, reason)
 
   # bd-741sid: merge `changes` into the ticket's ReviewGate round state
   # (`Arbiter.Tasks.PullRequest.record_review_gate/2`). Best-effort — the gate's
@@ -6545,7 +6544,7 @@ defmodule Arbiter.Worker do
     # on a task that had merged.
     meta =
       state.meta
-      |> Map.drop([:failure_reason, :failure_summary, :stop_reason, :review_park_reason])
+      |> Map.drop([:failure_reason, :failure_summary, :stop_reason, :park_reason])
       |> Map.put(:review_gate_verdict, :approve)
       |> Map.put(:review_gate_findings, findings)
       |> Map.put(:review_gate_reconciled_from, prior)
@@ -7394,7 +7393,7 @@ defmodule Arbiter.Worker do
   #       - `:shutdown` / `{:shutdown, _}` — the supervisor shut it down, i.e.
   #         the node is stopping. The run did not fail and did not finish on
   #         its own: stamp finished/:interrupted with failure_reason "server
-  #         shutdown". The task is left :in_progress for the boot-time resume
+  #         shutdown". The task is left :active for the boot-time resume
   #         sweep.
   #       - anything else — the worker crashed (a raise in a callback, or a
   #         linked process dying). Stamp finished/:failed with the crash

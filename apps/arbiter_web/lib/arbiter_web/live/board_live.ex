@@ -764,10 +764,11 @@ defmodule ArbiterWeb.BoardLive do
 
   #
   # Where the line goes is where the next move is made: a card built from a
-  # run (its `status` is the run's state) goes to that worker, live or parked;
-  # a Merging card to the merge queue — unless its Watchdog is gone or was
-  # pulled (bd-8jixav), whose restart lives on the worker page.
-  defp activity_href("in_progress", %{status: status} = card) when status != :in_progress,
+  # run (its `status` is the run's state; a workerless card has none) goes to
+  # that worker, live or parked; a Merging card to the merge queue — unless
+  # its Watchdog is gone or was pulled (bd-8jixav), whose restart lives on the
+  # worker page.
+  defp activity_href("in_progress", %{status: status} = card) when not is_nil(status),
     do: ~p"/workers/#{card.id}"
 
   defp activity_href("merging", %{merge_pulled: true} = card), do: ~p"/workers/#{card.id}"

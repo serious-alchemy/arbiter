@@ -4,7 +4,7 @@ defmodule Arbiter.Trackers.Sync do
 
   Two entry points, both tracker-agnostic:
 
-    * `lifecycle/3` — drive a richer lifecycle moment that isn't a task status
+    * `lifecycle/3` — drive a richer lifecycle moment that isn't a ticket state
       change (PR opened, review approved-but-parked). It seeds the adapter
       config from the task's workspace, transitions the external item toward
       the mapped target status (multi-hop path-finding lives in the adapter),

@@ -146,7 +146,7 @@ defmodule ArbiterWeb.TaskNewLiveTest do
 
     assert path == "/tasks/#{task.id}"
     assert task.workspace_id == ws.id
-    refute task.refined
+    assert task.state == :backlog
     assert task.issue_type == :bug
     assert task.priority == 1
     assert task.difficulty == 3
@@ -537,7 +537,7 @@ defmodule ArbiterWeb.TaskNewLiveTest do
 
     defp open_issues(ws) do
       Issue
-      |> Ash.Query.filter(workspace_id == ^ws.id and status in [:open, :in_progress])
+      |> Ash.Query.filter(workspace_id == ^ws.id and state not in [:verifying, :closed])
       |> Ash.read!()
     end
   end

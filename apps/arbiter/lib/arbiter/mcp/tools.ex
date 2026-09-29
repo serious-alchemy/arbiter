@@ -478,7 +478,7 @@ defmodule Arbiter.MCP.Tools do
   @doc """
   List tasks in the scope's workspace with optional filters. Coordinator only.
   Accepts optional `state` and `column` (the lifecycle vocabulary, bd-6fkgvo),
-  the legacy `status`, `priority` and `issue_type` filters. Always scoped to
+  `priority` and `issue_type` filters. Always scoped to
   the coordinator's workspace. Each task carries its projection
   (`Arbiter.Tasks.Lifecycle.Projection`): `state`, `column`, `step`,
   `blocked_by` and `attention`.
@@ -486,7 +486,6 @@ defmodule Arbiter.MCP.Tools do
   @spec task_list(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def task_list(%Scope{} = scope, args) do
     with {:ok, ws_id} <- resolve_workspace_id(scope, args),
-         {:ok, status} <- optional_enum(args, "status", Issue.statuses()),
          {:ok, state} <- optional_enum(args, "state", Lifecycle.states()),
          {:ok, column} <- optional_enum(args, "column", Projection.columns()),
          {:ok, issue_type} <- optional_enum(args, "issue_type", Issue.issue_types()),
@@ -494,7 +493,6 @@ defmodule Arbiter.MCP.Tools do
       issues =
         Issue
         |> Ash.Query.filter(workspace_id == ^ws_id)
-        |> maybe_filter_status(status)
         |> maybe_filter_state(state)
         |> maybe_filter_column_states(column)
         |> maybe_filter_issue_type(issue_type)
@@ -523,11 +521,6 @@ defmodule Arbiter.MCP.Tools do
     states = Projection.states_for_column(column)
     Ash.Query.filter(query, state in ^states)
   end
-
-  defp maybe_filter_status(query, nil), do: query
-
-  defp maybe_filter_status(query, status),
-    do: Ash.Query.filter(query, status == ^status)
 
   defp maybe_filter_issue_type(query, nil), do: query
 
@@ -1766,15 +1759,12 @@ defmodule Arbiter.MCP.Tools do
     %{
       id: i.id,
       title: i.title,
-      status: to_str(i.status),
-      # bd-6fkgvo: the lifecycle state beside the legacy status and refined.
       state: to_str(i.state),
       close_reason: to_str(i.close_reason),
       priority: i.priority,
       difficulty: i.difficulty,
       issue_type: to_str(i.issue_type),
       workspace_id: i.workspace_id,
-      refined: i.refined,
       acceptance_waived: i.acceptance_waived,
       rank: i.rank
     }
@@ -1800,9 +1790,7 @@ defmodule Arbiter.MCP.Tools do
       notes: i.notes,
       qa_notes: i.qa_notes,
       deployment_notes: i.deployment_notes,
-      status: to_str(i.status),
-      # bd-842qio: the stored lifecycle state beside the legacy status, as on
-      # `GET /api/issues/:id`.
+      # bd-842qio: the stored lifecycle state, as on `GET /api/issues/:id`.
       state: to_str(i.state),
       close_reason: to_str(i.close_reason),
       priority: i.priority,
@@ -1813,11 +1801,6 @@ defmodule Arbiter.MCP.Tools do
       awaiting_verification_at: iso(i.awaiting_verification_at),
       verification_outcome: to_str(i.verification_outcome),
       verification_evidence: i.verification_evidence,
-      # bd-9zuvbh: the ReviewGate park (class C). `ticket_show` is the
-      # coordinator's main surface, so the reason a finished task is sitting
-      # still has to be readable there and not only in `arb prime`.
-      review_park_reason: i.review_park_reason,
-      review_parked_at: iso(i.review_parked_at),
       tracker_type: to_str(i.tracker_type),
       tracker_ref: i.tracker_ref,
       tracker_context_type: to_str(i.tracker_context_type),
@@ -1827,6 +1810,9 @@ defmodule Arbiter.MCP.Tools do
       merger_url: i.merger_url,
       merger_status: i.merger_status,
       merger_checked_at: iso(i.merger_checked_at),
+      # bd-9zuvbh: a ReviewGate park (class C) is the attention cause, so the
+      # reason a finished task is sitting still is readable here and not only
+      # in `arb prime`.
       attention_cause: to_str(i.attention_cause),
       attention_detail: i.attention_detail,
       attention_since: iso(i.attention_since),
@@ -1871,7 +1857,7 @@ defmodule Arbiter.MCP.Tools do
   @doc """
   Render one `Arbiter.Tasks.Dependencies.list/1` row — `%{edge:, from:, to:}`
   — as the MCP `dep_list` / CLI-mirroring shape: the edge fields plus each
-  endpoint's id/title/status/priority, so a live edge is distinguishable
+  endpoint's id/title/state/priority, so a live edge is distinguishable
   from a closed↔closed one without a second lookup (bd-1defgu).
   """
   def serialize_dependency_edge(%{edge: %Dependency{} = dep, from: from, to: to}) do
@@ -1882,7 +1868,7 @@ defmodule Arbiter.MCP.Tools do
   end
 
   defp serialize_dependency_endpoint(%Issue{} = i) do
-    %{id: i.id, title: i.title, status: to_str(i.status), priority: i.priority}
+    %{id: i.id, title: i.title, state: to_str(i.state), priority: i.priority}
   end
 
   def serialize_workspace(%Workspace{} = ws) do

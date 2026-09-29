@@ -12,9 +12,9 @@ defmodule Arbiter.Workflows.DispatchQueue do
 
   When `Arbiter.Worker.Dispatch.dispatch/2`'s quota seam gets `{:hold, reason}`,
   it calls `hold/4`, which enqueues the `(task_id, opts)` intent here instead of
-  spawning a worker. The held task is NOT transitioned to `:in_progress` — it
-  stays in its pre-dispatch DB status, so nothing is lost even across a restart
-  (the task is still resolvable and re-dispatchable from its status).
+  spawning a worker. The held task is NOT transitioned to `:active` — it
+  stays in its pre-dispatch `state`, so nothing is lost even across a restart
+  (the task is still resolvable and re-dispatchable from its state).
 
   The queue drains — re-running `dispatch/2` for held intents in priority order —
   on two triggers:

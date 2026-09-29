@@ -3,11 +3,10 @@ defmodule ArbiterCli.Cmd.Demote do
   `arb ticket demote <id>` — demote a task from Ready to Backlog.
 
   Wraps `POST /api/issues/:id/demote`, which runs the `:return_to_backlog` action:
-  it sets `refined: false`, moving the task from Ready back to Backlog.
+  the `demote` transition (state `queued` | `active` | `merging` → `backlog`).
   Idempotent — demoting an already-backlog task is a no-op success, not an error.
 
-  Refused if the task has a live worker or is in an unsafe state
-  (in_progress, awaiting_verification, or closed).
+  Refused if the task has a live worker, or is `verifying` or `closed`.
   """
 
   alias ArbiterCli.{Client, Output}

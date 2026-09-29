@@ -11,7 +11,6 @@ defmodule Arbiter.Tasks.LifecycleMigrationTest do
   use ExUnit.Case, async: false
 
   alias Arbiter.RekeyMigrationRepo, as: Repo
-  alias Arbiter.Tasks.Lifecycle
 
   @migration_id 20_260_927_184_052
   @migration_file "priv/repo/migrations/20260927184052_add_lifecycle_state_to_issues.exs"
@@ -89,23 +88,6 @@ defmodule Arbiter.Tasks.LifecycleMigrationTest do
       migrate!(migration)
 
       assert query("SELECT COUNT(*) FROM issues WHERE state IS NULL") == [[0]]
-    end
-
-    test "agrees with Lifecycle.legacy_state/1, the same rule in code", %{migration: migration} do
-      seed_rows()
-
-      migrate!(migration)
-
-      for {id, status, refined, pr_ref, pending, _expected} <- @rows do
-        row = %{
-          status: String.to_existing_atom(status),
-          refined: refined == 1,
-          pr_ref: pr_ref,
-          pending_merge: pending && Jason.decode!(pending)
-        }
-
-        assert state_of(id) == Atom.to_string(Lifecycle.legacy_state(row)), id
-      end
     end
   end
 

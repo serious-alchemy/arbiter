@@ -24,6 +24,8 @@ defmodule Arbiter.Worker.MissingWorktreeTest do
 
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures, only: [put_state!: 2]
+
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Messages.Message
   alias Arbiter.Worker
@@ -73,7 +75,7 @@ defmodule Arbiter.Worker.MissingWorktreeTest do
         issue_type: issue_type
       })
 
-    {:ok, task} = Ash.update(task, %{status: :in_progress})
+    task = put_state!(task, :active)
     task
   end
 
@@ -118,7 +120,7 @@ defmodule Arbiter.Worker.MissingWorktreeTest do
 
       # The bead stays open — never silently closed.
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      refute reloaded.status == :closed
+      refute reloaded.state == :closed
 
       # No {:worker_done} broadcast → the MergeQueue never enqueues → the
       # :direct-strategy immediate close can never fire.
@@ -203,7 +205,7 @@ defmodule Arbiter.Worker.MissingWorktreeTest do
 
       # The bead stays open — a failed start never closes it.
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      refute reloaded.status == :closed
+      refute reloaded.state == :closed
 
       # No {:worker_done} broadcast on a failed start.
       refute_receive {:worker_done, _}, 200

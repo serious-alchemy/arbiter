@@ -53,7 +53,7 @@ defmodule Arbiter.Workflows.PRPatrol do
 
   `source_pr` is deliberately NOT `tracker_ref`: `tracker_ref` is the field
   `Arbiter.Trackers.Sync` treats as a writable tracker item to push task
-  lifecycle status onto, and a PR number is not a workable tracker issue —
+  lifecycle state onto, and a PR number is not a workable tracker issue —
   transitioning a *merged PR* on dispatch fails with `Validation Failed` and
   escalates (bd-ci2jl2). A follow-up therefore carries `tracker_type: :none`
   (no lifecycle write-back) and links its source PR via `source_pr` instead.
@@ -203,11 +203,11 @@ defmodule Arbiter.Workflows.PRPatrol do
       when is_binary(workspace_id) and is_binary(repo) do
     Issue
     |> Ash.Query.filter(
-      # bd-9so315: `:awaiting_verification` means the PR already merged — the
+      # bd-9so315: `:verifying` means the PR already merged — the
       # task is only still non-closed because a human has to observe the
       # deploy. Counting it as an open authored PR would keep this repo's
       # patrol polling a merged PR for the whole verification window.
-      status not in [:closed, :awaiting_verification] and not is_nil(pr_ref) and
+      state not in [:closed, :verifying] and not is_nil(pr_ref) and
         workspace_id == ^workspace_id
     )
     |> Ash.read!()
@@ -883,7 +883,7 @@ defmodule Arbiter.Workflows.PRPatrol do
     Issue
     |> Ash.Query.filter(
       workspace_id == ^workspace_id and
-        status != :closed and
+        state != :closed and
         (source_pr == ^ref or (tracker_type == :github and tracker_ref == ^ref))
     )
     |> Ash.read!()

@@ -5,7 +5,7 @@ defmodule Arbiter.Worker.StopRedispatchTest do
   task (the 2026-07-08 apex-client#3266 / lt-c9td4r orphan).
 
   Root cause: `Dispatch.dispatch/2` guards `:closed` only ONCE, at the front of
-  the pipeline (`ensure_not_closed/1`), then transitions to `:in_progress`,
+  the pipeline (`ensure_not_closed/1`), then transitions to `:active`,
   provisions a worktree, and starts the worker. An asynchronous close landing
   inside that window — in production the MergeQueue direct-strategy close of an
   in-flight `{:worker_done}` from the just-stopped run — flips the bead to
@@ -21,6 +21,8 @@ defmodule Arbiter.Worker.StopRedispatchTest do
   """
 
   use Arbiter.DataCase, async: false
+
+  import Arbiter.LifecycleFixtures, only: [put_state!: 2]
 
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Worker
@@ -55,14 +57,14 @@ defmodule Arbiter.Worker.StopRedispatchTest do
       {:ok, task} = Ash.create(Issue, %{title: "stop teardown", workspace_id: ws.id})
 
       {:ok, result} = Dispatch.dispatch(task.id, force: true, repo: "r", start_driver: false)
-      assert result.task.status == :in_progress
+      assert result.task.state == :active
 
       :ok = Worker.stop(task.id, :normal)
       wait_until(fn -> Worker.whereis(task.id) == nil end)
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      refute reloaded.status == :closed
-      assert reloaded.status == :in_progress
+      refute reloaded.state == :closed
+      assert reloaded.state == :active
     end
   end
 
@@ -70,7 +72,7 @@ defmodule Arbiter.Worker.StopRedispatchTest do
     # Reproduces the 18:47:43 → 18:47:44 sequence directly: the bead is already
     # `:closed` (a racing close landed and its StopWorker found no worker) at the
     # instant a live worker is attached. The dispatch reconciler must realign the
-    # task to `:in_progress` rather than leave the worker orphaned on `:closed`.
+    # task to `:active` rather than leave the worker orphaned on `:closed`.
     test "a bead that raced to :closed while the worker started is reopened + realigned",
          %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "orphan race", workspace_id: ws.id})
@@ -78,62 +80,62 @@ defmodule Arbiter.Worker.StopRedispatchTest do
       # The async close (e.g. MergeQueue direct worker_done) already fired.
       {:ok, _closed} = Ash.update(task, %{}, action: :close)
       {:ok, closed} = Ash.get(Issue, task.id)
-      assert closed.status == :closed
+      assert closed.state == :closed
 
       # The re-dispatch's start_worker attaches a fresh, live worker (18:47:44).
       {:ok, pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)
       on_exit(fn -> Process.alive?(pid) && Worker.stop(pid, :normal) end)
 
       assert {:ok, aligned} = Dispatch.realign_task_if_orphaned(task.id, pid)
-      assert aligned.status == :in_progress
+      assert aligned.state == :active
 
       # The live worker is preserved (never a wasted teardown), and the bead is
       # realigned so no live worker sits on a `:closed` task.
       assert Process.alive?(pid)
       {:ok, final} = Ash.get(Issue, task.id)
-      assert final.status == :in_progress
+      assert final.state == :active
     end
 
-    test "reconciler is a no-op when the task is still :in_progress (happy path)", %{ws: ws} do
+    test "reconciler is a no-op when the task is still :active (happy path)", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "no race", workspace_id: ws.id})
-      {:ok, _} = Ash.update(task, %{status: :in_progress}, action: :update)
+      put_state!(task, :active)
 
       {:ok, pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)
       on_exit(fn -> Process.alive?(pid) && Worker.stop(pid, :normal) end)
 
       assert {:ok, aligned} = Dispatch.realign_task_if_orphaned(task.id, pid)
-      assert aligned.status == :in_progress
+      assert aligned.state == :active
       assert Process.alive?(pid)
     end
   end
 
   describe "worker_stop → worker_dispatch operator recovery (bd-cgmidt regression)" do
-    test "ends :in_progress with exactly one live worker and was never closed", %{ws: ws} do
+    test "ends :active with exactly one live worker and was never closed", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "stop then redispatch", workspace_id: ws.id})
 
       {:ok, first} = Dispatch.dispatch(task.id, force: true, repo: "r", start_driver: false)
       first_pid = first.worker_pid
-      assert first.task.status == :in_progress
+      assert first.task.state == :active
 
       # Operator tears down the zombie worker.
       :ok = Worker.stop(task.id, :normal)
       wait_until(fn -> Worker.whereis(task.id) == nil end)
 
       {:ok, after_stop} = Ash.get(Issue, task.id)
-      refute after_stop.status == :closed
+      refute after_stop.state == :closed
 
       # Operator re-dispatches the same task.
       {:ok, second} = Dispatch.dispatch(task.id, force: true, repo: "r", start_driver: false)
 
-      assert second.task.status == :in_progress
+      assert second.task.state == :active
       assert Process.alive?(second.worker_pid)
       assert second.worker_pid != first_pid
       # Exactly one live worker is registered for the task.
       assert Worker.whereis(task.id) == second.worker_pid
 
       {:ok, final} = Ash.get(Issue, task.id)
-      assert final.status == :in_progress
-      refute final.status == :closed
+      assert final.state == :active
+      refute final.state == :closed
     end
   end
 end

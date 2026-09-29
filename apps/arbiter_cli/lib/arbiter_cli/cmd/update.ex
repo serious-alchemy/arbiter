@@ -43,7 +43,7 @@ defmodule ArbiterCli.Cmd.Update do
 
   With an **issue id**, `arb update` patches that issue's fields:
 
-      arb update <id> [--priority N] [--append-notes text] [--status s]
+      arb update <id> [--priority N] [--append-notes text]
                       [--description d] [--acceptance a]
                       [--qa-notes text] [--deployment-notes text]
                       [--pr-body text] [--repo owner/name]
@@ -52,6 +52,10 @@ defmodule ArbiterCli.Cmd.Update do
   and no longer tracks an assignee locally, so the flag is accepted and
   ignored with a stderr warning rather than rejected outright — for one
   release, so an existing script that still passes it doesn't break.
+
+  There is no `--status`: a ticket's lifecycle `state` only moves through its
+  transitions (`arb ticket promote` / `demote` / `close` / `reopen`), so the
+  flag is refused with that pointer rather than silently dropped.
 
   `--acceptance` sets the acceptance criteria field, which guides the worker
   in implementing and testing the change.
@@ -71,7 +75,7 @@ defmodule ArbiterCli.Cmd.Update do
 
   `--verify-after-deploy` / `--no-verify-after-deploy` (bd-9so315) flags the
   task as one whose only execution context is the long-lived server. When set,
-  merging the task's PR parks it at `awaiting_verification` instead of closing
+  merging the task's PR moves it to `verifying` instead of closing
   it, and the coordinator restarts and observes the new path before recording
   the result with `arb ticket verify`.
 
@@ -119,7 +123,6 @@ defmodule ArbiterCli.Cmd.Update do
     qa_notes: :string,
     deployment_notes: :string,
     pr_body: :string,
-    status: :string,
     description: :string,
     title: :string,
     assignee: :string,
@@ -282,6 +285,7 @@ defmodule ArbiterCli.Cmd.Update do
   # code is held to it; see the note in .credo.exs.
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp do_edit_issue(argv) do
+    refuse_status_flag!(argv)
     {opts, rest, mode} = ArgParser.parse(argv, switches: @edit_switches)
 
     id =
@@ -311,7 +315,6 @@ defmodule ArbiterCli.Cmd.Update do
       |> put_if("qa_notes", opts[:qa_notes])
       |> put_if("deployment_notes", opts[:deployment_notes])
       |> put_if("pr_body", opts[:pr_body])
-      |> put_if("status", opts[:status])
       |> put_if("description", opts[:description])
       |> put_if("title", opts[:title])
       |> put_if("repo", opts[:repo])
@@ -378,6 +381,18 @@ defmodule ArbiterCli.Cmd.Update do
 
   # bd-1ozks5: the local assignee field is gone — accept and ignore
   # `--assignee` for one release rather than breaking an existing script.
+  # bd-36ytcl: the legacy `status` is gone and `:update` never moves the
+  # lifecycle `state`. Refuse the old flag with the verbs that do, rather than
+  # let the non-strict parse drop it and fail on "no field flag".
+  defp refuse_status_flag!(argv) do
+    if Enum.any?(argv, &(&1 == "--status" or String.starts_with?(&1, "--status="))) do
+      Output.die(
+        "--status was removed: a ticket's state moves only through its transitions",
+        "Use `arb ticket promote`, `demote`, `close` or `reopen <id>`."
+      )
+    end
+  end
+
   defp warn_deprecated_assignee(nil, _mode), do: :ok
 
   defp warn_deprecated_assignee(_value, :text) do

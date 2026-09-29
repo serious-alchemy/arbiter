@@ -127,7 +127,7 @@ defmodule ArbiterCli.Cmd.Create do
   gap, not an oversight — the CLI is a plain HTTP client and cannot call the
   facade in-process, and closing it properly means teaching `POST /api/issues`
   to accept edges so the issue and its edges share one transaction. It is
-  benign for scheduling: `refined` is not in `Issue`'s `:create` accept list,
+  benign for scheduling: `state` is not in `Issue`'s `:create` accept list,
   so a newly created task lands in Backlog and cannot be dispatched in the
   window before its edges land.
 

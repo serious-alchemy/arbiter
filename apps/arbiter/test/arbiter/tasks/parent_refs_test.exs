@@ -39,7 +39,7 @@ defmodule Arbiter.Tasks.ParentRefsTest do
       assert ParentRefs.for_issue(issue(ws, "lonely")) == []
     end
 
-    test "an epic parent carries its title, type, status and child progress", %{ws: ws} do
+    test "an epic parent carries its title, type, state and child progress", %{ws: ws} do
       epic = issue(ws, "Browser coordinator sessions", %{issue_type: :epic})
       child = issue(ws, "the terminal channel")
       sibling = issue(ws, "the transport")
@@ -53,7 +53,7 @@ defmodule Arbiter.Tasks.ParentRefsTest do
       assert ref.id == epic.id
       assert ref.title == "Browser coordinator sessions"
       assert ref.issue_type == :epic
-      assert ref.status == :open
+      assert ref.state == :backlog
       assert ref.child_total == 2
       assert ref.child_closed == 1
       assert ref.workspace_name == nil
@@ -99,7 +99,7 @@ defmodule Arbiter.Tasks.ParentRefsTest do
       close(epic)
 
       assert [ref] = ParentRefs.for_issue(Ash.get!(Issue, child.id))
-      assert ref.status == :closed
+      assert ref.state == :closed
       assert ref.child_total == 1
       assert ref.child_closed == 1
     end

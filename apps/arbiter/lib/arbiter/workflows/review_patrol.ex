@@ -16,7 +16,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   ## Query / dedup
 
   Each tick selects `review_only == true and not is_nil(source_pr) and
-  status != :closed`, scoped to the patrol's `workspace_id`. The `review_only`
+  state != :closed`, scoped to the patrol's `workspace_id`. The `review_only`
   predicate is the hard boundary that keeps ReviewPatrol from colliding with
   PRPatrol's author-side follow-ups: those are filed with `review_only == false`
   (they take the normal implementation path), so they are never selected here.
@@ -562,7 +562,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   defp open_engagements(workspace_id, repo) do
     Issue
     |> Ash.Query.filter(
-      review_only == true and not is_nil(source_pr) and status != :closed and
+      review_only == true and not is_nil(source_pr) and state != :closed and
         workspace_id == ^workspace_id
     )
     |> Ash.read!()
@@ -1013,7 +1013,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   # same capped engagement concurrently.
   #
   # Goes straight to Ecto (`Repo.update_all/2`) rather than `Ash.bulk_update/4`:
-  # the `:update` action carries a custom `Change` (status-guard logic) that
+  # the `:update` action carries a custom `Change` (state-guard logic) that
   # doesn't implement the atomic optimizer, so Ash's bulk update falls back to
   # a read-then-per-record-update strategy that reopens the exact race this
   # is closing. A single Ecto `UPDATE ... WHERE` bypasses action changes
@@ -1835,7 +1835,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   # circuit_breaker_tripped = false` — so at most one caller ever proceeds to
   # write the record + escalate for a given trip, even across overlapping
   # evaluations or retried ticks. Same shape as `claim_review_cap_escalation/1`
-  # and for the same reason: the custom `:update` change (status-guard logic)
+  # and for the same reason: the custom `:update` change (state-guard logic)
   # doesn't implement Ash's atomic optimizer, so a raw Ecto `UPDATE ... WHERE`
   # is used instead of `Ash.bulk_update/4`, touching only this one boolean.
   defp claim_circuit_breaker_trip(%Issue{id: id}) do

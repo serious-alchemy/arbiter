@@ -20,10 +20,11 @@ defmodule ArbiterWeb.CoreComponents.Data do
   """
   attr :status, :any, required: true
   attr :class, :any, default: nil
+  attr :rest, :global
 
   def status_chip(assigns) do
     ~H"""
-    <span class={["badge", status_chip_class(@status), @class]}>{@status}</span>
+    <span class={["badge", status_chip_class(@status), @class]} {@rest}>{@status}</span>
     """
   end
 
@@ -48,9 +49,15 @@ defmodule ArbiterWeb.CoreComponents.Data do
   defp status_chip_class("open"), do: "badge-success"
   defp status_chip_class("in_progress"), do: "badge-info"
   defp status_chip_class("closed"), do: "badge-ghost"
+  # A ticket's lifecycle state (`Arbiter.Tasks.Lifecycle.states/0`). `closed`
+  # is shared with the clause above.
+  defp status_chip_class("backlog"), do: "badge-ghost"
+  defp status_chip_class("queued"), do: "badge-success"
+  defp status_chip_class("active"), do: "badge-info"
+  defp status_chip_class("merging"), do: "badge-info"
   # bd-9so315: merged, but nobody has seen it run yet — the whole point of the
   # state is that it needs a human, so it warns rather than reading as done.
-  defp status_chip_class("awaiting_verification"), do: "badge-warning"
+  defp status_chip_class("verifying"), do: "badge-warning"
   defp status_chip_class("proposed"), do: "badge-warning"
   defp status_chip_class("hypothesis"), do: "badge-ghost"
   defp status_chip_class("applied"), do: "badge-success"

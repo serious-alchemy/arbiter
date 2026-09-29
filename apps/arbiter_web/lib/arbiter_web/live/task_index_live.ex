@@ -3,8 +3,8 @@ defmodule ArbiterWeb.TaskIndexLive do
   Index of every directive (task) at `/tasks` — the "See all" target for the
   dashboard's current-only recent-directives section.
 
-  Lists all directives with a status filter (all / open / in progress /
-  awaiting verification / closed), a text search, and a combinable set of
+  Lists all directives with a lifecycle-state filter (all / backlog / queued /
+  active / merging / verifying / closed), a text search, and a combinable set of
   filters (workspace, type, priority, difficulty, backlog/ready stage, repo,
   parent epic), paginated with offset/limit and sortable by updated / created
   / priority / difficulty. Every bit of that state — search, filters, sort,
@@ -31,22 +31,19 @@ defmodule ArbiterWeb.TaskIndexLive do
 
   use ArbiterWeb, :live_view
 
-  alias Arbiter.Tasks.{Dependency, Issue, Workspace}
+  alias Arbiter.Tasks.{Dependency, Issue, Lifecycle, Workspace}
   alias ArbiterWeb.Paging
   require Ash.Query
   require Logger
 
   @tasks_topic "tasks"
 
-  # Literal status values — FilterTabs shows these verbatim, not humanized,
-  # so the value here is what lands in the URL and the query filter.
-  @filter_tabs [
-    %{label: "All", value: "all"},
-    %{label: "Open", value: "open"},
-    %{label: "In progress", value: "in_progress"},
-    %{label: "Awaiting verification", value: "awaiting_verification"},
-    %{label: "Closed", value: "closed"}
-  ]
+  # One tab per lifecycle state (`Lifecycle.states/0`), in lifecycle order.
+  # The value is the literal state — it is what lands in the URL and the
+  # query filter.
+  @state_values Enum.map(Lifecycle.states(), &Atom.to_string/1)
+  @filter_tabs [%{label: "All", value: "all"}] ++
+                 Enum.map(@state_values, &%{label: String.capitalize(&1), value: &1})
 
   @sorts ~w(updated created priority difficulty)a
   @sort_labels %{
@@ -61,7 +58,7 @@ defmodule ArbiterWeb.TaskIndexLive do
   @difficulties 0..5
 
   @default_filters %{
-    status: :all,
+    state: :all,
     q: "",
     workspace: nil,
     type: nil,
@@ -125,7 +122,7 @@ defmodule ArbiterWeb.TaskIndexLive do
 
   @impl true
   def handle_event("filter", params, socket) do
-    params = Map.put(params, "status", Atom.to_string(socket.assigns.f.status))
+    params = Map.put(params, "state", Atom.to_string(socket.assigns.f.state))
     {:noreply, push_patch(socket, to: task_path(parse_filters(params), 1))}
   end
 
@@ -270,7 +267,7 @@ defmodule ArbiterWeb.TaskIndexLive do
   def load_tasks(f, page) do
     query =
       Issue
-      |> filter_by_status(f.status)
+      |> filter_by_state(f.state)
       |> filter_by_query(f.q)
       |> filter_by_workspace(f.workspace)
       |> filter_by_type(f.type)
@@ -307,8 +304,8 @@ defmodule ArbiterWeb.TaskIndexLive do
 
   # ---- query filters ----
 
-  defp filter_by_status(query, :all), do: query
-  defp filter_by_status(query, status), do: Ash.Query.filter(query, status == ^status)
+  defp filter_by_state(query, :all), do: query
+  defp filter_by_state(query, state), do: Ash.Query.filter(query, state == ^state)
 
   defp filter_by_query(query, ""), do: query
 
@@ -347,8 +344,8 @@ defmodule ArbiterWeb.TaskIndexLive do
   defp filter_by_difficulty(query, d), do: Ash.Query.filter(query, difficulty == ^d)
 
   defp filter_by_stage(query, nil), do: query
-  defp filter_by_stage(query, :backlog), do: Ash.Query.filter(query, refined == false)
-  defp filter_by_stage(query, :ready), do: Ash.Query.filter(query, refined == true)
+  defp filter_by_stage(query, :backlog), do: Ash.Query.filter(query, state == :backlog)
+  defp filter_by_stage(query, :ready), do: Ash.Query.filter(query, state == :queued)
 
   defp filter_by_repo(query, nil), do: query
   defp filter_by_repo(query, repo), do: Ash.Query.filter(query, repo == ^repo)
@@ -395,7 +392,7 @@ defmodule ArbiterWeb.TaskIndexLive do
 
   defp parse_filters(params) do
     %{
-      status: parse_status(params),
+      state: parse_state(params),
       q: parse_q(params),
       workspace: parse_present_string(params, "workspace"),
       type: parse_type(params),
@@ -408,10 +405,8 @@ defmodule ArbiterWeb.TaskIndexLive do
     }
   end
 
-  defp parse_status(%{"status" => s}) when s in ~w(open in_progress awaiting_verification closed),
-    do: String.to_existing_atom(s)
-
-  defp parse_status(_), do: :all
+  defp parse_state(%{"state" => s}) when s in @state_values, do: String.to_existing_atom(s)
+  defp parse_state(_), do: :all
 
   defp parse_q(%{"q" => q}) when is_binary(q), do: String.trim(q)
   defp parse_q(_), do: ""
@@ -469,7 +464,7 @@ defmodule ArbiterWeb.TaskIndexLive do
 
   defp task_path(f, page) do
     %{}
-    |> put_param(:status, f.status, @default_filters.status)
+    |> put_param(:state, f.state, @default_filters.state)
     |> put_param(:q, f.q, @default_filters.q)
     |> put_param(:workspace, f.workspace, @default_filters.workspace)
     |> put_param(:type, f.type, @default_filters.type)
@@ -490,7 +485,7 @@ defmodule ArbiterWeb.TaskIndexLive do
 
   defp active_filter_summary(f, workspaces) do
     [
-      f.status != :all && "status: #{f.status}",
+      f.state != :all && "state: #{f.state}",
       f.q != "" && "search: #{f.q}",
       f.workspace && "workspace: #{workspace_name(workspaces, f.workspace)}",
       f.type && "type: #{f.type}",
@@ -558,8 +553,8 @@ defmodule ArbiterWeb.TaskIndexLive do
 
         <ArbiterWeb.CoreComponents.Navigation.filter_tabs
           tabs={@filter_tabs}
-          active={Atom.to_string(@f.status)}
-          tab_path={fn value -> task_path(%{@f | status: String.to_existing_atom(value)}, 1) end}
+          active={Atom.to_string(@f.state)}
+          tab_path={fn value -> task_path(%{@f | state: String.to_existing_atom(value)}, 1) end}
         />
 
         <form
@@ -781,7 +776,7 @@ defmodule ArbiterWeb.TaskIndexLive do
                   </span>
                 </.link>
                 <ArbiterWeb.CoreComponents.Core.copy_id id={b.id} />
-                <.status_chip status={b.status} />
+                <.status_chip status={b.state} />
               </li>
             </ul>
 
@@ -854,7 +849,7 @@ defmodule ArbiterWeb.TaskIndexLive do
         ],
         else: "bg-[var(--surface-card)]"
       ),
-      issue.status == :closed && "opacity-[0.62]"
+      issue.state == :closed && "opacity-[0.62]"
     ]
   end
 end

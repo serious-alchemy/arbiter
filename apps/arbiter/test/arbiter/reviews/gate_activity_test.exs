@@ -7,6 +7,8 @@ defmodule Arbiter.Reviews.GateActivityTest do
 
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures
+
   alias Arbiter.Reviews.GateActivity
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Worker
@@ -30,7 +32,7 @@ defmodule Arbiter.Reviews.GateActivityTest do
         workspace_id: ws.id
       })
 
-    {:ok, task} = Ash.update(task, %{status: :in_progress})
+    task = put_state!(task, :active)
     {:ok, task} = Ash.update(task, %{pr_ref: pr_ref}, action: :update)
     task
   end

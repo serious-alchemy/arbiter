@@ -1,6 +1,8 @@
 defmodule Arbiter.Tasks.DependencyTest do
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures
+
   alias Arbiter.Tasks.Dependency
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
@@ -232,12 +234,12 @@ defmodule Arbiter.Tasks.DependencyTest do
       refute MapSet.member?(ready_ids, b.id)
     end
 
-    test ":blocks edge blocks to_issue even when blocker is :in_progress (regression bd-3hpqqi)",
+    test ":blocks edge blocks to_issue even when blocker is :active (regression bd-3hpqqi)",
          %{a: a, b: b} do
-      # Repro shape: blocker (a) transitions to :in_progress before the blocked
-      # task (b) is picked up. In_progress tasks are NOT in open_ids, so the
-      # previous code missed the :blocks edge and falsely returned b as ready.
-      {:ok, a_ip} = Ash.update(a, %{status: :in_progress})
+      # Repro shape: blocker (a) goes to work before the blocked task (b) is
+      # picked up. Active tasks are NOT in open_ids, so the previous code
+      # missed the :blocks edge and falsely returned b as ready.
+      a_ip = put_state!(a, :active)
 
       {:ok, _} =
         Ash.create(Dependency, %{
@@ -336,8 +338,8 @@ defmodule Arbiter.Tasks.DependencyTest do
       refute MapSet.member?(ready_ids, a.id)
     end
 
-    test "in_progress issues are excluded from ready (only :open counts)", %{a: a} do
-      {:ok, _ip} = Ash.update(a, %{status: :in_progress})
+    test "active issues are excluded from ready", %{a: a} do
+      _ip = put_state!(a, :active)
       ready_ids = Issue.ready() |> Enum.map(& &1.id) |> MapSet.new()
       refute MapSet.member?(ready_ids, a.id)
     end

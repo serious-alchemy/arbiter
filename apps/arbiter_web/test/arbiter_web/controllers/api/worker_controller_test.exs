@@ -193,7 +193,7 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
     end
   end
 
-  # bd-asxw4e: a ticket `arb dispatch` accepts without `--force` — refined, so
+  # bd-asxw4e: a ticket `arb dispatch` accepts without `--force` — queued, so
   # in the Ready column.
   defp ready_issue(ws, title) do
     {:ok, issue} = Ash.create(Issue, %{title: title, workspace_id: ws.id, acceptance: "- ok"})
@@ -204,7 +204,7 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
     # bd-asxw4e: `arb dispatch` of a Backlog or Blocked ticket is refused with
     # the reason unless `force`, and a forced dispatch is recorded.
     test "a Backlog ticket is refused with the reason", %{conn: conn, ws: ws} do
-      {:ok, task} = Ash.create(Issue, %{title: "unrefined", workspace_id: ws.id})
+      {:ok, task} = Ash.create(Issue, %{title: "in backlog", workspace_id: ws.id})
 
       conn =
         post(conn, ~p"/api/workers/dispatch", %{"task_id" => task.id, "no_agent" => true})
@@ -226,7 +226,7 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
           "force" => true
         })
 
-      assert json_response(conn, 201)["task"]["status"] == "in_progress"
+      assert json_response(conn, 201)["task"]["state"] == "active"
       on_exit(fn -> Worker.stop(task.id, :normal) end)
 
       [event] =
@@ -239,7 +239,7 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
     end
 
     # --no-agent preserves the manual-attach path: the task parks in
-    # `:in_progress` with no Driver, so the no-op Work workflow never races
+    # `:active` with no Driver, so the no-op Work workflow never races
     # to a bogus `:closed`. Regression against the old dry-dispatch footgun.
     test "--no-agent parks the task and does NOT close it",
          %{conn: conn, ws: ws} do
@@ -255,21 +255,20 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
       body = json_response(conn, 201)
 
       assert body["task"]["id"] == task.id
-      assert body["task"]["status"] == "in_progress"
+      assert body["task"]["state"] == "active"
 
       # Wait well past the old ~500ms Driver-close race window. Under the old
       # behaviour the task would be `:closed` by now; it must remain parked.
       Process.sleep(900)
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.status == :in_progress
-      refute reloaded.status == :closed
+      assert reloaded.state == :active
     end
 
     # A `provider` takes the real-work dispatch path (start_claude: true) rather
     # than parking. With an unconfigured repo that path returns a 400 repo error —
     # the signal that the provider was honored as a worker dispatch (a park would
-    # 201 with the task in_progress and no agent).
+    # 201 with the task active and no agent).
     test "provider routes to a real worker dispatch (repo error rather than park)",
          %{conn: conn, ws: ws} do
       {:ok, task} = ready_issue(ws, "gem-provider")
@@ -344,7 +343,7 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
 
       body = json_response(conn, 201)
       assert body["task"]["id"] == task.id
-      assert body["task"]["status"] == "in_progress"
+      assert body["task"]["state"] == "active"
     end
 
     test "requires a task_id", %{conn: conn} do
@@ -459,7 +458,7 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
       body = json_response(conn, 201)
 
       assert body["task"]["id"] == task.id
-      assert body["task"]["status"] == "in_progress"
+      assert body["task"]["state"] == "active"
       assert is_nil(body["worktree_path"])
 
       # The worker is tagged review_only so completion bypasses the MergeQueue.

@@ -8,6 +8,8 @@ defmodule Arbiter.Usage.BudgetTest do
   # concurrent test writing usage rows would leak into this one's sample.
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures
+
   alias Arbiter.Tasks.Dependencies
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
@@ -206,7 +208,7 @@ defmodule Arbiter.Usage.BudgetTest do
 
   defp running_child!(ws, epic, attrs) do
     ready = ready_child!(ws, epic, attrs)
-    Ash.update!(ready, %{status: :in_progress})
+    put_state!(ready, :active)
   end
 
   describe "assess_epic/2" do

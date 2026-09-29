@@ -166,8 +166,8 @@ defmodule Arbiter.Tasks.EdgeGateConformanceTest do
         acceptance: "- [ ] conformance fixture"
       })
 
-    {:ok, refined} = Ash.update(i, %{}, action: :promote_to_ready)
-    refined
+    {:ok, queued} = Ash.update(i, %{}, action: :promote_to_ready)
+    queued
   end
 
   defp close(issue) do
@@ -178,7 +178,7 @@ defmodule Arbiter.Tasks.EdgeGateConformanceTest do
   # Merged, waiting on the coordinator's restart-and-observe. Since bd-842qio
   # only work in progress parks there, so the ticket is started first.
   defp await(issue) do
-    {:ok, started} = Ash.update(issue, %{status: :in_progress})
+    {:ok, started} = Ash.update(issue, %{}, action: :start)
     {:ok, parked} = Ash.update(started, %{}, action: :await_verification)
     parked
   end
