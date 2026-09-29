@@ -172,6 +172,19 @@ defmodule Arbiter.Mergers do
     end
   end
 
+  @doc """
+  The effective `merge.base` for `repo` in `workspace` (a per-repo
+  `merge.repos.<repo>.base` override, else the workspace-level `merge.base`),
+  or `nil` when unset/blank.
+  """
+  @spec base_branch(Workspace.t() | nil, String.t() | nil) :: String.t() | nil
+  def base_branch(workspace, repo) do
+    case merge_config(workspace, repo) do
+      %{"base" => base} when is_binary(base) and base != "" -> base
+      _ -> nil
+    end
+  end
+
   @doc "Whether a strategy merges through a hosted forge (a PR/MR to patrol)."
   @spec forge?(atom()) :: boolean()
   def forge?(strategy), do: strategy in [:github, :gitlab]

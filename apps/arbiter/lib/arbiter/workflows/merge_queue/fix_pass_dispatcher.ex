@@ -46,6 +46,7 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
 
   alias Arbiter.Agents
   alias Arbiter.Agents.ProviderRouting
+  alias Arbiter.Mergers
   alias Arbiter.Mergers.Merger
   alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Tasks.Issue
@@ -204,7 +205,9 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
     workspace = Map.get(args, :workspace) || maybe_load_workspace(task.workspace_id)
 
     branch = Map.get(args, :branch) || derive_branch(task)
-    target_branch = Map.get(args, :target_branch) || workspace_base_branch(workspace) || "main"
+    target_branch =
+      Map.get(args, :target_branch) || Mergers.base_branch(workspace, Map.get(args, :repo)) ||
+        "main"
     repo_path = Map.get(args, :repo_path) || resolve_repo_path(workspace, Map.get(args, :repo))
 
     cond do
@@ -248,15 +251,6 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
   rescue
     _ -> nil
   end
-
-  defp workspace_base_branch(%Workspace{config: %{} = config}) do
-    case get_in(config, ["merge", "base"]) do
-      base when is_binary(base) and base != "" -> base
-      _ -> nil
-    end
-  end
-
-  defp workspace_base_branch(_), do: nil
 
   # Repo path lookup mirrors `Arbiter.Workflows.MergeQueue.ConflictResolver`:
   # workspace config first, then application env, then the first configured repo.
