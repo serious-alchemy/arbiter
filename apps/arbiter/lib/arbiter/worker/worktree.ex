@@ -762,6 +762,36 @@ defmodule Arbiter.Worker.Worktree do
     end
   end
 
+  @doc """
+  The sha `branch` points at on `origin`, read live with `git ls-remote` from the
+  checkout at `path` — `nil` when origin has no such branch or cannot be reached.
+
+  Live rather than `refs/remotes/origin/<branch>`, which only moves on a fetch: a
+  pass's own push updates it, but a stale local ref is exactly what must not pass
+  for "the PR head" when deciding whether a pass delivered anything (bd-4olwyg).
+  """
+  @spec remote_head(path(), String.t()) :: String.t() | nil
+  def remote_head(path, branch) when is_binary(path) and is_binary(branch) do
+    ref = "refs/heads/" <> branch
+
+    case run_git(["ls-remote", "origin", ref], cd: path) do
+      # stderr is folded into the output, so match the ref's own line rather than
+      # trusting the first token (a warning would otherwise pass for a sha).
+      {:ok, out} ->
+        out
+        |> String.split("\n", trim: true)
+        |> Enum.find_value(fn line ->
+          case String.split(line, "\t") do
+            [sha, ^ref] -> sha
+            _ -> nil
+          end
+        end)
+
+      {:error, _} ->
+        nil
+    end
+  end
+
   defp git_dir(path) do
     with {:ok, out} <- run_git(["rev-parse", "--absolute-git-dir"], cd: path) do
       {:ok, String.trim(out)}
