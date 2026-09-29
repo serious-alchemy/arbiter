@@ -270,6 +270,8 @@ defmodule Arbiter.Worker.NotesGateTest do
       escalation = notes_gate_escalation(ws, task)
       assert escalation
       assert escalation.body =~ "tried 2/2 send-back attempt(s)"
+      # The mail names the one-call way to record the answer (bd-4qjl0q).
+      assert escalation.body =~ "arb review resolve #{task.id} --gate notes_gate"
 
       # bd-4qjl0q AC6: the exhausted budget is counted on the events stream.
       assert_receive {:event, %{topic: "gate_cap_hit", gate: "notes_gate"} = event}

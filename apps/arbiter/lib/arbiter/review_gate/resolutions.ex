@@ -103,6 +103,34 @@ defmodule Arbiter.ReviewGate.Resolutions do
 
   def cap_hit(_), do: :ok
 
+  @doc """
+  The footer a gate's escalation mail ends with: the one call that records the
+  coordinator's answer. If recording the decision is more work than just
+  telling the implementer, it won't happen — so the mail hands over the command.
+  """
+  @spec escalation_footer(String.t(), atom()) :: String.t()
+  def escalation_footer(task_id, gate) do
+    gate_flag = if gate == :review_gate, do: "", else: " --gate #{gate}"
+
+    """
+    ---
+    Record your decision once you have made it (bd-4qjl0q) — one of
+    --accept-as-is / --amend / --send-back / --reject, with your reasoning:
+
+        arb review resolve #{task_id}#{gate_flag} --amend "<why>"
+
+    (MCP: `review_gate_resolve`.) It records the decision against the ticket;
+    act on it with the usual tools.
+    """
+  end
+
+  @doc "`body` followed by `escalation_footer/2` (just the footer for a non-binary body)."
+  @spec append_footer(term(), String.t(), atom()) :: String.t()
+  def append_footer(body, task_id, gate) when is_binary(body),
+    do: body <> "\n\n" <> escalation_footer(task_id, gate)
+
+  def append_footer(_body, task_id, gate), do: escalation_footer(task_id, gate)
+
   @doc "Every resolution recorded for `task_id`, oldest first."
   @spec list(String.t()) :: [Resolution.t()]
   def list(task_id) when is_binary(task_id) do

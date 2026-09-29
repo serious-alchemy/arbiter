@@ -4411,6 +4411,19 @@ defmodule Arbiter.Worker.ReviewGateTest do
                |> Ash.read!()
 
       assert (payload["task_id"] || payload[:task_id]) == task.id
+
+      # The escalation mail names the one-call way to record the answer. The
+      # event fires inside the gate, just before the worker posts the mail.
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        6_000
+      )
+
+      escalation =
+        Message.inbox("admiral", workspace_id: ws.id)
+        |> Enum.find(&(&1.kind == :escalation and &1.directive_ref == task.id))
+
+      assert escalation.body =~ "arb review resolve #{task.id} --amend"
     end
   end
 

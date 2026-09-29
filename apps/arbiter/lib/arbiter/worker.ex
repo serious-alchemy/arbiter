@@ -125,6 +125,7 @@ defmodule Arbiter.Worker do
 
   alias Arbiter.Accounts.Resolver, as: AccountResolver
   alias Arbiter.Agents.Gemini.Security, as: GeminiSecurity
+  alias Arbiter.ReviewGate.Resolutions
   alias Arbiter.Worker.ConflictPassOutcome
   alias Arbiter.Worker.CoordinatorOnlyFindings
   alias Arbiter.Worker.EvidenceIntegrity
@@ -5178,7 +5179,7 @@ defmodule Arbiter.Worker do
         :commit_gate -> commit_nudge_cap(meta)
       end
 
-    Arbiter.ReviewGate.Resolutions.cap_hit(%{
+    Resolutions.cap_hit(%{
       workspace_id: state.workspace_id,
       task_id: state.task_id,
       gate: gate,
@@ -5309,7 +5310,7 @@ defmodule Arbiter.Worker do
       workspace_id: ws_id,
       task_ref: task_id,
       subject: "Commit gate: #{subject} (#{task_id})",
-      body: summary
+      body: Resolutions.append_footer(summary, task_id, :commit_gate)
     })
 
     :ok
@@ -5441,7 +5442,7 @@ defmodule Arbiter.Worker do
       workspace_id: ws_id,
       task_ref: task_id,
       subject: "Notes gate: blank findings on research-type directive (#{task_id})",
-      body: summary
+      body: Resolutions.append_footer(summary, task_id, :notes_gate)
     })
 
     :ok
@@ -7114,7 +7115,7 @@ defmodule Arbiter.Worker do
       workspace_id: ws_id,
       task_ref: task_id,
       subject: subject,
-      body: findings
+      body: Resolutions.append_footer(findings, task_id, :review_gate)
     })
 
     Arbiter.Events.broadcast(ws_id, "review_gate", %{task_id: task_id, message: subject})
