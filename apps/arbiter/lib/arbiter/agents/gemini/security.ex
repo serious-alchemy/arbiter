@@ -426,7 +426,10 @@ defmodule Arbiter.Agents.Gemini.Security do
     "mv",
     "rm"
   ]
-  @strict_work_allow Enum.map(@strict_work_commands, &"command(#{&1})")
+  # bd-cy4ls6: headless agy auto-denies `mcp(<server>/<tool>)` under :strict
+  # unless allowed. Only the `arbiter` server (the one ConfigDir writes) is
+  # named, so any other MCP server stays denied.
+  @strict_work_allow Enum.map(@strict_work_commands, &"command(#{&1})") ++ ["mcp(arbiter/*)"]
 
   @doc """
   Whether `command_line` is one of the worker-protocol bootstrap commands

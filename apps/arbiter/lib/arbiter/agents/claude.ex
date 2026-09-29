@@ -277,15 +277,11 @@ defmodule Arbiter.Agents.Claude do
     # `ConfigDir`-based spawn path shares this single source and can't
     # diverge (bd-6umoh9). The optional API key composes on top.
     #
-    # bd-bw3466: thread the spawn's workspace through so a token configured
-    # the per-workspace way (`worker_env`, encrypted at rest) is found —
-    # `ConfigDir.env/0` sees only the arbiter server's own process env, which
-    # on a `worker_env` install is never where the token lives. Dispatch and
-    # the ReviewGate both put `:workspace` on the adapter opts; a bare adapter
-    # call (no workspace) takes the install-wide account credential with
-    # `:provider_accounts_enabled` on, and falls back to the legacy chain
-    # (server env, then install-wide-unambiguous workspace token) with it off
-    # — kept per the operator's ruling on PR #1947 (P4, bd-cblemv round 2).
+    # bd-bw3466: thread the spawn's workspace through so the token of the
+    # provider account it is joined to is found. Dispatch and the ReviewGate
+    # both put `:workspace` on the adapter opts, so that account answers; a
+    # bare adapter call (no workspace) takes the install-wide account
+    # credential (P13, bd-9gqj8e — there is no legacy chain).
     ConfigDir.env(Keyword.get(opts, :workspace)) ++ api_key_env(opts)
   end
 

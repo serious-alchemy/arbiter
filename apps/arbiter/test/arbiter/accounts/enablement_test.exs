@@ -1,27 +1,25 @@
 defmodule Arbiter.Accounts.EnablementTest do
   @moduledoc """
-  bd-cvvb02: `:provider_accounts_enabled` ships `:auto` (v0.2.0), and the
-  boot resolves it per install. Three populations:
+  bd-cvvb02, P13 (bd-9gqj8e): provider accounts are always on — there is no
+  flag and no legacy credential chain — and the boot classifies each install
+  into one of three populations:
 
-    * **fresh** — no legacy credential anywhere: on, and every workspace is
-      joined to `<provider>:default`;
-    * **upgrading, un-migrated** — a workspace `worker_env` or the server env
-      still carries a provider credential and there is no migration record:
-      stays **off** with a boot warning (and a doctor `[fail]`), so no spawn
-      ever hits `Arbiter.Accounts.MissingCredentialError`;
-    * **already migrated** — an un-restored migration backup exists: on,
-      exactly as with `ARBITER_PROVIDER_ACCOUNTS=1` today.
-
-  An explicit `ARBITER_PROVIDER_ACCOUNTS=0/1` (a boolean in app env) always
-  wins and is never second-guessed.
+    * **fresh** — no legacy credential anywhere: every workspace is joined to
+      `<provider>:default`;
+    * **un-migrated legacy credentials** — a workspace `worker_env` or the
+      server env still carries a provider credential and there is no
+      migration record: a boot warning (and a doctor `[fail]`) naming them,
+      since nothing reads them any more;
+    * **already migrated** — an un-restored migration backup exists; nothing
+      is auto-joined.
   """
   # async: false — toggles Application env and System env other tests read.
   use Arbiter.DataCase, async: false
 
   import ExUnit.CaptureLog
 
-  alias Arbiter.Accounts
   alias Arbiter.Accounts.Enablement
+  alias Arbiter.Accounts.MissingCredentialError
   alias Arbiter.Accounts.ProviderAccount
   alias Arbiter.Accounts.ProviderAccountMigrationBackup
   alias Arbiter.Accounts.ProviderCredential
@@ -34,25 +32,25 @@ defmodule Arbiter.Accounts.EnablementTest do
   alias Arbiter.Worker.WorkerEnv
 
   @oauth_var "CLAUDE_CODE_OAUTH_TOKEN"
+  @retired_var "ARBITER_PROVIDER_ACCOUNTS"
 
   setup do
-    prev_flag = Application.get_env(:arbiter, :provider_accounts_enabled)
     prev_resolution = Application.get_env(:arbiter, :provider_accounts_resolution)
     prev_isolate = Application.get_env(:arbiter, :worker_isolate_config)
-    prev_server_token = System.get_env(@oauth_var)
+    prev_env = for var <- [@oauth_var, @retired_var], into: %{}, do: {var, System.get_env(var)}
 
     Application.put_env(:arbiter, :worker_isolate_config, false)
     Application.delete_env(:arbiter, :provider_accounts_resolution)
-    System.delete_env(@oauth_var)
+    Enum.each(prev_env, fn {var, _} -> System.delete_env(var) end)
 
     on_exit(fn ->
-      restore_app(:provider_accounts_enabled, prev_flag)
       restore_app(:provider_accounts_resolution, prev_resolution)
       restore_app(:worker_isolate_config, prev_isolate)
 
-      if prev_server_token,
-        do: System.put_env(@oauth_var, prev_server_token),
-        else: System.delete_env(@oauth_var)
+      Enum.each(prev_env, fn
+        {var, nil} -> System.delete_env(var)
+        {var, value} -> System.put_env(var, value)
+      end)
     end)
 
     :ok
@@ -60,8 +58,6 @@ defmodule Arbiter.Accounts.EnablementTest do
 
   defp restore_app(key, nil), do: Application.delete_env(:arbiter, key)
   defp restore_app(key, val), do: Application.put_env(:arbiter, key, val)
-
-  defp configure(value), do: Application.put_env(:arbiter, :provider_accounts_enabled, value)
 
   defp uniq, do: System.unique_integer([:positive])
 
@@ -120,59 +116,77 @@ defmodule Arbiter.Accounts.EnablementTest do
     end
   end
 
-  describe "the shipped default" do
-    test "config/config.exs ships :auto, not a hard-coded false" do
-      config = File.read!(Path.join(File.cwd!(), "../../config/config.exs"))
-      assert config =~ "config :arbiter, :provider_accounts_enabled, :auto"
-      refute config =~ "config :arbiter, :provider_accounts_enabled, false"
-    end
-
-    test ":auto is off until the boot has resolved it" do
-      configure(:auto)
-      refute Accounts.enabled?()
+  describe "before the boot has classified the install" do
+    test "status is unresolved and nothing is auto-joined" do
       assert Enablement.status().decision == :unresolved
+      refute Enablement.auto_join?()
+      assert linked_account(workspace(), :claude) == nil
     end
   end
 
-  describe "fresh install (acceptance 1)" do
-    test "no workspaces at all resolves on" do
-      configure(:auto)
-
-      assert %{enabled: true, decision: :no_legacy_credentials} = Enablement.resolve()
-      assert Accounts.enabled?()
+  describe "the retired ARBITER_PROVIDER_ACCOUNTS switch" do
+    test "config no longer carries the flag" do
+      for file <- ~w(config.exs runtime.exs test.exs) do
+        config = File.read!(Path.join([File.cwd!(), "../../config", file]))
+        refute config =~ "provider_accounts_enabled", "#{file} still configures the flag"
+        refute config =~ @retired_var, "#{file} still reads #{@retired_var}"
+      end
     end
 
-    test "workspaces without any provider credential resolve on, and join <provider>:default" do
-      ws = workspace(%{"LOG_LEVEL" => %{"value" => "debug"}})
-      configure(:auto)
+    test "an explicit 0 no longer keeps a legacy chain: the boot warns and it is ignored" do
+      ws = workspace()
+      System.put_env(@retired_var, "0")
 
-      assert %{enabled: true, decision: :no_legacy_credentials} = Enablement.resolve()
+      log =
+        capture_log(fn ->
+          assert %{decision: :no_legacy_credentials} = Enablement.resolve()
+        end)
+
+      assert log =~ "[warning]"
+      assert log =~ "#{@retired_var}=0"
+      assert log =~ "no longer read"
+      assert Enablement.join_defaults() == [{ws.id, :claude, :ok}]
+    end
+
+    test "unset, the boot says nothing about it" do
+      log = capture_log(fn -> Enablement.resolve() end)
+      refute log =~ @retired_var
+    end
+  end
+
+  describe "fresh install" do
+    test "no workspaces at all is fresh" do
+      assert %{decision: :no_legacy_credentials} = Enablement.resolve()
+      assert Enablement.auto_join?()
+    end
+
+    test "workspaces without any provider credential are joined to <provider>:default" do
+      ws = workspace(%{"LOG_LEVEL" => %{"value" => "debug"}})
+
+      assert %{decision: :no_legacy_credentials} = Enablement.resolve()
       assert Enablement.auto_join?()
 
       assert Enablement.join_defaults() == [{ws.id, :claude, :ok}]
       assert linked_account(ws, :claude) == {:claude, "default"}
     end
 
-    test "the boot child resolves and joins the existing workspaces on the primary" do
+    test "the boot child classifies and joins the existing workspaces on the primary" do
       ws = workspace()
-      configure(:auto)
 
       assert BootProviderAccounts.start_link(primary?: true) == :ignore
-      assert Accounts.enabled?()
+      assert Enablement.status().decision == :no_legacy_credentials
       assert linked_account(ws, :claude) == {:claude, "default"}
     end
 
-    test "a non-primary boot resolves the mode but writes nothing" do
+    test "a non-primary boot classifies but writes nothing" do
       ws = workspace()
-      configure(:auto)
 
       assert BootProviderAccounts.start_link(primary?: false) == :ignore
-      assert Accounts.enabled?()
+      assert Enablement.status().decision == :no_legacy_credentials
       assert linked_account(ws, :claude) == nil
     end
 
     test "a workspace created after boot is joined to claude:default" do
-      configure(:auto)
       Enablement.resolve()
 
       ws = workspace()
@@ -182,73 +196,61 @@ defmodule Arbiter.Accounts.EnablementTest do
     test "a workspace whose credential its account already supplies is not legacy" do
       ws = token_workspace("same-token")
       account_with_credential(ws, "same-token")
-      configure(:auto)
 
-      assert %{enabled: true, stranded_workspaces: []} = Enablement.resolve()
+      assert %{decision: :no_legacy_credentials, stranded_workspaces: []} = Enablement.resolve()
     end
   end
 
-  describe "upgrading install with legacy credentials and no migration record (acceptance 2)" do
-    test "a workspace worker_env credential keeps accounts off, with a loud boot warning" do
+  describe "legacy credentials and no migration record" do
+    test "a workspace worker_env credential is named in a loud boot warning" do
       ws = token_workspace()
-      configure(:auto)
 
       log =
         capture_log(fn ->
-          assert %{enabled: false, decision: :unmigrated_legacy_credentials} =
-                   resolution = Enablement.resolve()
-
+          assert %{decision: :unmigrated_legacy_credentials} = resolution = Enablement.resolve()
           assert resolution.stranded_workspaces == [ws.name]
         end)
 
-      refute Accounts.enabled?()
       assert log =~ "[warning]"
       assert log =~ ws.name
+      assert log =~ "MissingCredentialError"
       assert log =~ "docs/provider-accounts-release-runbook.md"
     end
 
-    test "no spawn path raises MissingCredentialError: the legacy chain still serves the token" do
+    test "nothing falls back to the legacy token: the spawn raises instead" do
       ws = token_workspace("legacy-blob-token")
       {:ok, task} = Ash.create(Issue, %{title: "t", workspace_id: ws.id})
-      configure(:auto)
       capture_log(fn -> Enablement.resolve() end)
 
-      assert ConfigDir.oauth_token(ws) == "legacy-blob-token"
-      assert {pairs, _secrets} = WorkerEnv.resolve(task.id)
-      assert {@oauth_var, "legacy-blob-token"} in pairs
+      assert_raise MissingCredentialError, fn -> ConfigDir.oauth_token(ws) end
+      assert_raise MissingCredentialError, fn -> WorkerEnv.resolve(task.id) end
     end
 
-    test "a server-env-only token keeps accounts off too" do
+    test "a server-env-only token is named, and is not a spawn credential" do
       workspace()
       System.put_env(@oauth_var, "server-env-token")
-      configure(:auto)
 
-      capture_log(fn ->
-        assert %{
-                 enabled: false,
-                 decision: :unmigrated_legacy_credentials,
-                 server_env_token?: true
-               } =
-                 Enablement.resolve()
-      end)
+      log =
+        capture_log(fn ->
+          assert %{decision: :unmigrated_legacy_credentials, server_env_token?: true} =
+                   Enablement.resolve()
+        end)
 
-      refute Accounts.enabled?()
-      assert ConfigDir.oauth_token(nil) == "server-env-token"
+      assert log =~ "#{@oauth_var} in the server environment"
+      assert ConfigDir.oauth_token(nil) == nil
     end
 
     test "a fully rolled-back migration counts as no migration record" do
       ws = token_workspace()
       backup(ws, restored: true)
-      configure(:auto)
 
       capture_log(fn ->
-        assert %{enabled: false, decision: :unmigrated_legacy_credentials} = Enablement.resolve()
+        assert %{decision: :unmigrated_legacy_credentials} = Enablement.resolve()
       end)
     end
 
-    test "nothing is auto-joined while held off" do
+    test "nothing is auto-joined" do
       ws = token_workspace()
-      configure(:auto)
 
       capture_log(fn -> assert BootProviderAccounts.start_link(primary?: true) == :ignore end)
 
@@ -257,84 +259,48 @@ defmodule Arbiter.Accounts.EnablementTest do
       assert linked_account(workspace(), :claude) == nil
     end
 
-    test "status reports the held-off state for the doctor" do
+    test "status reports it for the doctor" do
       ws = token_workspace()
-      configure(:auto)
       capture_log(fn -> Enablement.resolve() end)
 
-      assert %{
-               configured: :auto,
-               enabled: false,
-               decision: :unmigrated_legacy_credentials,
-               stranded_workspaces: [name]
-             } = Enablement.status()
+      assert %{decision: :unmigrated_legacy_credentials, stranded_workspaces: [name]} =
+               Enablement.status()
 
       assert name == ws.name
     end
   end
 
-  describe "already migrated install (acceptance 3)" do
-    test "an un-restored migration backup resolves on" do
+  describe "already migrated install" do
+    test "an un-restored migration backup is :migrated" do
       ws = workspace()
       backup(ws)
-      configure(:auto)
 
-      assert %{enabled: true, decision: :migrated} = Enablement.resolve()
-      assert Accounts.enabled?()
+      assert %{decision: :migrated} = Enablement.resolve()
     end
 
-    test "a leftover server-env token does not hold a migrated install off" do
+    test "a leftover server-env token does not change a migrated install's decision" do
       ws = workspace()
       backup(ws)
       System.put_env(@oauth_var, "inert-server-token")
-      configure(:auto)
 
-      assert %{enabled: true, decision: :migrated} = Enablement.resolve()
+      assert %{decision: :migrated, server_env_token?: true} = Enablement.resolve()
     end
 
     test "a migrated install is not auto-joined — its links are the operator's" do
       ws = workspace()
       backup(ws)
-      configure(:auto)
 
       assert BootProviderAccounts.start_link(primary?: true) == :ignore
       refute Enablement.auto_join?()
       assert linked_account(ws, :claude) == nil
     end
-  end
 
-  describe "an explicit ARBITER_PROVIDER_ACCOUNTS always wins (acceptance 3)" do
-    test "explicit on stays on even with unmigrated legacy credentials" do
-      token_workspace()
-      configure(true)
-
-      assert %{enabled: true, decision: :explicit_on} = Enablement.resolve()
-      assert Accounts.enabled?()
-      refute Enablement.auto_join?()
-    end
-
-    test "explicit off stays off on a fresh install" do
-      configure(false)
-
-      assert %{enabled: false, decision: :explicit_off} = Enablement.resolve()
-      refute Accounts.enabled?()
-    end
-
-    test "explicit on writes no links at boot or on create" do
-      configure(true)
-
-      assert BootProviderAccounts.start_link(primary?: true) == :ignore
-      assert linked_account(workspace(), :claude) == nil
-    end
-  end
-
-  describe "status/0 with accounts on and a stranded workspace" do
-    test "names the workspace a spawn would fail on" do
-      ws = token_workspace()
-      configure(true)
+    test "status still names a straggler added since the migration" do
+      backup(workspace())
       Enablement.resolve()
+      ws = token_workspace()
 
-      assert %{enabled: true, stranded_workspaces: [name]} = Enablement.status()
+      assert %{decision: :migrated, stranded_workspaces: [name]} = Enablement.status()
       assert name == ws.name
     end
   end

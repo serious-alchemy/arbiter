@@ -381,37 +381,23 @@ Ready), the coordinator gets one escalation naming the fix, and
 workspace. The supported path is
 **provider accounts** — a `provider_accounts` row, joined to a workspace via
 `workspace_provider_accounts`, holding an active `provider_credentials` row for
-`CLAUDE_CODE_OAUTH_TOKEN` (`docs/provider-account-design.md`); enable it with
-`:provider_accounts_enabled`.
+`CLAUDE_CODE_OAUTH_TOKEN` (`docs/provider-account-design.md`) — and since the
+P13 flip it is the only one. A spawn with a workspace takes its account's
+credential; a workspace-less spawn such as the Watchdog probe takes the
+install's single enabled Claude account credential. A token in a workspace's
+`worker_env` or in the server's own environment (`.arbiter.env`) is **not**
+read. `spawn_env/1` exports the token under its own literal name (never
+remapped to `ANTHROPIC_API_KEY` — the two are not interchangeable to the CLI),
+and emits an explicit unset when there is none, so a server-env value can
+never leak into a worker.
 
-**With that flag off (the default),** `spawn_env/1` keeps the pre-migration
-behaviour exactly: a token configured per-workspace (`worker_env`, encrypted at
-rest) wins, then the arbiter server's own OS process environment
-(`CLAUDE_CODE_OAUTH_TOKEN` in `.arbiter.env` / the service unit), then — for a
-workspace-less spawn like the Watchdog probe — the single unambiguous token
-across every workspace that defines one. Set a long-TTL token once,
-install-wide, in `.arbiter.env` (same file/trust model as `ARBITER_CLOAK_KEY` /
-`SECRET_KEY_BASE` above — loaded via `EnvironmentFile=` when running as a
-service):
-
-```sh
-echo "CLAUDE_CODE_OAUTH_TOKEN=<your-long-ttl-token>" >> ~/.arbiter/arbiter.env
-# (for a non-service run, put it in the project-root .arbiter.env or export it)
-```
-
-`spawn_env/1` exports this under its own literal name (never remapped to
-`ANTHROPIC_API_KEY` — the two are not interchangeable to the CLI) whenever it's
-present in the OS environment, so the probe and real dispatch always agree.
-`arb install service` also forwards `CLAUDE_CODE_OAUTH_TOKEN` from the
-installing shell into `~/.arbiter/arbiter.env` automatically, same as the
-other captured secrets above.
-
-**Migrating to a provider account:** `mix arbiter.accounts.census` only ever
-sees credentials already stored in a workspace's `worker_env`
-(`docs/provider-account-design.md` §7.1) — it has no visibility into the
-arbiter server's own process environment, so a token that has only ever lived
-in `.arbiter.env` will not appear in the census output at all. Before running
-the migration:
+**Migrating an install that still keeps its token in `worker_env` or
+`.arbiter.env`:** `mix arbiter.accounts.census` only ever sees credentials
+already stored in a workspace's `worker_env` (`docs/provider-account-design.md`
+§7.1) — it has no visibility into the arbiter server's own process
+environment, so a token that has only ever lived in `.arbiter.env` will not
+appear in the census output at all. Migrate **before** upgrading to the P13
+release, which requires provider accounts:
 
 1. Set the token as a `worker_env` value (`CLAUDE_CODE_OAUTH_TOKEN`) on at
    least one workspace via the dashboard's workspace environment editor, so
@@ -419,27 +405,22 @@ the migration:
 2. Run `mix arbiter.accounts.census` (optionally with
    `--operator-credential ~/.claude/.credentials.json`), edit the resulting
    plan to merge/name the candidate account, then apply it with
-   `mix arbiter.accounts.migrate --plan accounts.json`.
-3. Flip `:provider_accounts_enabled` on once every workspace that needs the
-   token is covered by the migrated plan: set `ARBITER_PROVIDER_ACCOUNTS=1` in
-   `.arbiter.env` / `~/.arbiter/arbiter.env` and restart. This deletes the
-   legacy chain above for good (the "flip" release; see
-   `docs/provider-account-design.md` §7.5).
-4. Remove `CLAUDE_CODE_OAUTH_TOKEN` from `.arbiter.env` / the service unit —
-   it becomes inert once the flag is on, but leaving a stale credential lying
-   around in a secrets file is its own risk.
+   `mix arbiter.accounts.migrate --plan accounts.json`, and restart.
+3. Remove `CLAUDE_CODE_OAUTH_TOKEN` (and any `ARBITER_PROVIDER_ACCOUNTS` line)
+   from `.arbiter.env` / the service unit — nothing reads them, and a stale
+   credential lying around in a secrets file is its own risk.
 
 On a **release install** (no Mix), the same census, migrate and rollback steps
 run as `bin/arbiter eval 'Arbiter.Release.accounts_census(...)'`,
 `accounts_migrate/1` and `accounts_rollback/1`.
 [`docs/provider-accounts-release-runbook.md`](docs/provider-accounts-release-runbook.md)
-is the step-by-step procedure (census, dry run, migrate, set the flag,
-restart, verify) and the rollback.
+is the step-by-step procedure (census, dry run, migrate, restart, verify), the
+P13 release notes, and the rollback.
 
-#### Account-model path (requires `:provider_accounts_enabled`)
+#### Account-model path
 
-Once the flag is on, you can also manage provider accounts directly via the
-`arb account` CLI instead of (or alongside) the census/migrate flow above:
+You can also manage provider accounts directly via the `arb account` CLI
+instead of (or alongside) the census/migrate flow above:
 
 ```sh
 # Create or reference a provider account
@@ -459,15 +440,14 @@ workspace reference its own account identity directly, without duplicating
 tokens across workspaces or relying on install-wide environment fallbacks.
 
 **Precedence when both are set:** a spawn can end up with both
-`CLAUDE_CODE_OAUTH_TOKEN` (install-wide, or the account's) and
-`ANTHROPIC_API_KEY` (workspace `credentials_ref`/`api_keys` rotation) in its
-environment at once. Which one the `claude` CLI honours is decided by the CLI
-itself, not by Arbiter — if it prefers the OAuth token, a workspace that
-deliberately configured its own key would silently authenticate against the
-install-wide/account credential instead. If a workspace's `ANTHROPIC_API_KEY`
-must win, verify the CLI's actual precedence before relying on it, or unset
-the install-wide token for that install / leave that workspace off the
-provider-account join.
+`CLAUDE_CODE_OAUTH_TOKEN` (the account's) and `ANTHROPIC_API_KEY` (workspace
+`credentials_ref`/`api_keys` rotation) in its environment at once. Which one
+the `claude` CLI honours is decided by the CLI itself, not by Arbiter — if it
+prefers the OAuth token, a workspace that deliberately configured its own key
+would silently authenticate against the account credential instead. If a
+workspace's `ANTHROPIC_API_KEY` must win, verify the CLI's actual precedence
+before relying on it, or leave that workspace's Claude account without a
+setup token.
 
 **Redaction:** `Arbiter.Worker.ClaudeSession.start/1` adds
 `CLAUDE_CODE_OAUTH_TOKEN`/`ANTHROPIC_API_KEY` values to the session's

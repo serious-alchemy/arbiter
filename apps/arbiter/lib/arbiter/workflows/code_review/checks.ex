@@ -322,8 +322,8 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
 
   # The workspace this review is running under, when the caller put one in
   # state (`ReviewPatrol` / `ExternalReview` do). `nil` for an ad-hoc,
-  # workspace-less review — `ConfigDir.env/1` then falls back to the server
-  # environment for the worker OAuth token (bd-bw3466).
+  # workspace-less review — `ConfigDir.env/1` then takes the install-wide
+  # account credential for the worker OAuth token (bd-bw3466, P13).
   defp review_workspace(%{workspace: %Arbiter.Tasks.Workspace{} = ws}), do: ws
   defp review_workspace(_state), do: nil
 

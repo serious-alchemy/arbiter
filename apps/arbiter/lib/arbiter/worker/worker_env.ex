@@ -32,7 +32,6 @@ defmodule Arbiter.Worker.WorkerEnv do
 
   require Logger
 
-  alias Arbiter.Accounts
   alias Arbiter.Accounts.Census
   alias Arbiter.Accounts.Credentials
   alias Arbiter.Accounts.MissingCredentialError
@@ -63,7 +62,7 @@ defmodule Arbiter.Worker.WorkerEnv do
   (corrupt/undecryptable ciphertext), that is caught and logged too — this
   function never raises into a spawn.
 
-  ## Provider credentials with `:provider_accounts_enabled` on (P3, bd-aiodva)
+  ## Provider credentials come from provider accounts (P3, bd-aiodva; P13, bd-9gqj8e)
 
   §5 row 17 splits this function: the workspace keeps answering for every
   **non-credential** var it defines, while the allowlisted provider-credential
@@ -116,21 +115,17 @@ defmodule Arbiter.Worker.WorkerEnv do
     end
   end
 
-  # With the flag off this is the identity function — the pre-P3 answer,
-  # byte for byte. With it on, credential vars are swapped for the account's.
+  # Credential vars are swapped for the account's — the only source since the
+  # P13 flip removed `:provider_accounts_enabled` (bd-9gqj8e).
   defp apply_provider_accounts(%Workspace{} = ws, pairs, secrets) do
-    if Accounts.enabled?() do
-      account_pairs = Credentials.workspace_pairs(ws.id)
-      {credential_pairs, plain_pairs} = split_credential_pairs(pairs)
+    account_pairs = Credentials.workspace_pairs(ws.id)
+    {credential_pairs, plain_pairs} = split_credential_pairs(pairs)
 
-      ensure_no_credential_dropped!(ws, credential_pairs, account_pairs)
+    ensure_no_credential_dropped!(ws, credential_pairs, account_pairs)
 
-      {plain_pairs ++ account_pairs,
-       drop_credential_secrets(secrets, credential_pairs) ++
-         Enum.map(account_pairs, fn {_var, secret} -> secret end)}
-    else
-      {pairs, secrets}
-    end
+    {plain_pairs ++ account_pairs,
+     drop_credential_secrets(secrets, credential_pairs) ++
+       Enum.map(account_pairs, fn {_var, secret} -> secret end)}
   end
 
   defp split_credential_pairs(pairs) do

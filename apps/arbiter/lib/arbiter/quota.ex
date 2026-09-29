@@ -45,11 +45,9 @@ defmodule Arbiter.Quota do
 
   use Ash.Domain
 
-  alias Arbiter.Accounts
   alias Arbiter.Accounts.Credentials
   alias Arbiter.Accounts.ProviderAccount
   alias Arbiter.Accounts.Resolver
-  alias Arbiter.Agents.Claude.ConfigDir
   alias Arbiter.Quota.AnthropicQuota
   alias Arbiter.Quota.CloudCode
   alias Arbiter.Quota.Gate
@@ -794,8 +792,7 @@ defmodule Arbiter.Quota do
   setup token, which this endpoint rejects — bd-4ag0nj) falls back to
   `OAuthUsage.fetch/1`'s own default (the operator's `.credentials.json` on
   disk). When workers run on their own token (the account's `:oauth_token`
-  row with provider accounts on; `ConfigDir.oauth_token_configured?/0` with
-  them off), a `:no_credentials` or
+  row), a `:no_credentials` or
   `{:http_error, 401}` from that fallback is returned as
   `{:operator_login_lapsed, reason}`: the operator's interactive login
   lapsed, not a credential workers use. Otherwise workers are seeded that
@@ -892,16 +889,11 @@ defmodule Arbiter.Quota do
 
   defp fetch_oauth_usage(fetch_opts, _token_source), do: OAuthUsage.fetch(fetch_opts)
 
-  # With provider accounts on, a workspace's workers read only their own
-  # account's credential (`ConfigDir.oauth_token/1`) and are seeded the file
-  # when it has none — so this account's `:oauth_token` row is the answer, and
-  # another account's token must not vouch for it. With the flag off, workers
-  # take the legacy chain, whose install-wide answer is the zero-arity check.
-  defp workers_on_own_token?(account_id) do
-    if Accounts.enabled?(),
-      do: Credentials.worker_oauth_token?(account_id),
-      else: ConfigDir.oauth_token_configured?()
-  end
+  # A workspace's workers read only their own account's credential
+  # (`ConfigDir.oauth_token/1`, the only source since the P13 flip) — so this
+  # account's `:oauth_token` row is the answer, and another account's token,
+  # or one left in the server environment, must not vouch for it.
+  defp workers_on_own_token?(account_id), do: Credentials.worker_oauth_token?(account_id)
 
   defp tag_write_error({:error, reason}), do: {:error, {:write, reason}}
   defp tag_write_error(ok), do: ok

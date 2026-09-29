@@ -1,9 +1,10 @@
 defmodule Arbiter.Accounts.MissingCredentialError do
   @moduledoc """
-  Raised when `:provider_accounts_enabled` is on but the workspace a spawn is
-  for has no account credential to supply a provider credential the workspace
-  demonstrably still needs (P3 / bd-aiodva, `docs/provider-account-design.md`
-  §7.5 "Release N+1").
+  Raised when the workspace a spawn is for has no account credential to
+  supply a provider credential the workspace demonstrably still needs (P3 /
+  bd-aiodva, `docs/provider-account-design.md` §7.5 "Release N+1"). Since the
+  P13 flip (bd-9gqj8e) provider accounts are the only credential source, so
+  there is no legacy chain to fall back to.
 
   This is the acceptance-3 guarantee of the read flip: the failure mode the
   flip must never have is a *silent* one — a worker dispatched with no token,
@@ -12,17 +13,14 @@ defmodule Arbiter.Accounts.MissingCredentialError do
   resolved instead.
 
   It fires only when the credential would actually be lost: the workspace's
-  `worker_env` blob (or, for `ConfigDir.oauth_token/1`, the pre-P3 precedence
-  chain as a whole) still answers with a token, and the account tables do not.
-  A workspace that never had a provider credential resolves to "no credential"
-  exactly as it did pre-P3 and never raises — nothing is being taken away.
+  `worker_env` blob still carries it, and the account tables do not. A
+  workspace that never had a provider credential resolves to "no credential"
+  and never raises — nothing is being taken away.
 
-  The two fixes, both cheap:
-
-    * run `mix arbiter.accounts.migrate` for the workspace, so the credential
-      it already holds becomes an account row; or
-    * set `:provider_accounts_enabled` back to `false` — §7.5's rollback for
-      this release is the flag, and the blob is still there and still correct.
+  The fix: run `mix arbiter.accounts.migrate` (a release install:
+  `Arbiter.Release.accounts_migrate/1`) for the workspace, so the credential
+  it already holds becomes an account row — or attach an account that holds
+  one and remove the key from the workspace's `worker_env`.
   """
 
   defexception [:workspace_id, :env_vars, :message]
@@ -46,12 +44,11 @@ defmodule Arbiter.Accounts.MissingCredentialError do
   end
 
   defp build_message(workspace_id, env_vars) do
-    "provider accounts are enabled (:provider_accounts_enabled) but workspace " <>
-      "#{workspace_id || "(unknown)"} has no active provider account credential for " <>
-      "#{vars(env_vars)}, while its worker_env still supplies one. Dispatching would " <>
-      "hand the worker no credential at all. Run `mix arbiter.accounts.migrate` for " <>
-      "this workspace, or set :provider_accounts_enabled to false to roll the read " <>
-      "flip back (docs/provider-account-design.md §7.5)."
+    "workspace #{workspace_id || "(unknown)"} has no active provider account " <>
+      "credential for #{vars(env_vars)}, while its worker_env still supplies one — " <>
+      "provider accounts are the only credential source, so dispatching would hand " <>
+      "the worker no credential at all. Run `mix arbiter.accounts.migrate` for this " <>
+      "workspace (docs/provider-accounts-release-runbook.md)."
   end
 
   defp vars([]), do: "its provider credential"

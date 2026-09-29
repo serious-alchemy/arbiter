@@ -34,9 +34,9 @@ defmodule ArbiterCli.Cmd.QuotaTest do
   }
 
   describe "arb quota (bd-c7ll4t — policy binding)" do
-    # bd-5ps98m: with `:provider_accounts_enabled` on, an account's flat
-    # ceiling silently capped a workspace set to paced/looser — `arb quota`
-    # said nothing about it beyond the number. Now it names which side binds.
+    # bd-5ps98m: an account's flat ceiling silently capped a workspace set to
+    # paced/looser — `arb quota` said nothing about it beyond the number. Now
+    # it names which side binds.
     test "says the account side binds when its ceiling is the tighter one" do
       stub_get("/api/quota", %{
         "data" => %{

@@ -16,8 +16,6 @@ defmodule Arbiter.Agents.Claude.CredentialCheckTest do
   alias Arbiter.Tasks.Workspace
 
   setup do
-    prev_flag = Application.get_env(:arbiter, :provider_accounts_enabled)
-
     # Both are routinely present in a worker's own shell; either would answer
     # the check for every test in this file.
     prev_env =
@@ -28,11 +26,6 @@ defmodule Arbiter.Agents.Claude.CredentialCheckTest do
     Enum.each(prev_env, fn {var, _} -> System.delete_env(var) end)
 
     on_exit(fn ->
-      case prev_flag do
-        nil -> Application.delete_env(:arbiter, :provider_accounts_enabled)
-        v -> Application.put_env(:arbiter, :provider_accounts_enabled, v)
-      end
-
       Enum.each(prev_env, fn
         {var, nil} -> System.delete_env(var)
         {var, v} -> System.put_env(var, v)
@@ -41,8 +34,6 @@ defmodule Arbiter.Agents.Claude.CredentialCheckTest do
 
     :ok
   end
-
-  defp flag(on?), do: Application.put_env(:arbiter, :provider_accounts_enabled, on?)
 
   defp workspace(attrs \\ %{}) do
     {:ok, ws} =
@@ -90,12 +81,7 @@ defmodule Arbiter.Agents.Claude.CredentialCheckTest do
     :ok
   end
 
-  describe "provider accounts on" do
-    setup do
-      flag(true)
-      :ok
-    end
-
+  describe "provider accounts" do
     test "a workspace joined to an account with a setup token is ok (mode A)" do
       ws = workspace()
       acct = account()
@@ -175,46 +161,36 @@ defmodule Arbiter.Agents.Claude.CredentialCheckTest do
     end
   end
 
-  describe "provider accounts off" do
-    setup do
-      flag(false)
-      :ok
-    end
-
-    test "a worker_env token is ok" do
+  # P13 (bd-9gqj8e): the flag-off legacy chain is gone, so what used to
+  # authenticate an un-migrated workspace no longer does.
+  describe "legacy credential sources no longer count" do
+    test "a worker_env token alone is missing as not migrated" do
       ws =
         workspace(%{
           worker_env: %{"CLAUDE_CODE_OAUTH_TOKEN" => %{"value" => "ws-token", "secret" => true}}
         })
 
-      assert CredentialCheck.check(ws) == :ok
+      assert {:missing, %{reason: :credential_not_migrated}} = CredentialCheck.check(ws)
     end
 
-    test "a server-env token is ok" do
+    test "a server-env token alone is missing: the workspace has no account" do
       System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "server-token")
-      assert CredentialCheck.check(workspace()) == :ok
+
+      assert {:missing, %{reason: :no_account}} = CredentialCheck.check(workspace())
+      assert {:missing, %{reason: :no_install_credential}} = CredentialCheck.check(nil)
     end
 
-    test "no token anywhere is missing and names both fixes" do
-      ws = workspace()
-
-      assert {:missing, missing} = CredentialCheck.check(ws)
-      assert missing.reason == :no_token
-      assert missing.fix =~ "CLAUDE_CODE_OAUTH_TOKEN"
-      assert missing.fix =~ "claude setup-token"
-    end
-
-    test "a worker_env ANTHROPIC_API_KEY is a credential of the workspace's own" do
+    test "a worker_env ANTHROPIC_API_KEY alone is not a credential of the workspace's own" do
       ws =
         workspace(%{
           worker_env: %{"ANTHROPIC_API_KEY" => %{"value" => "sk-ant", "secret" => true}}
         })
 
-      assert CredentialCheck.check(ws) == :ok
+      assert {:missing, %{reason: :no_account}} = CredentialCheck.check(ws)
     end
   end
 
-  describe "API keys, either flag" do
+  describe "API keys" do
     test "a server-env ANTHROPIC_API_KEY is inherited by every spawn, so it is ok" do
       System.put_env("ANTHROPIC_API_KEY", "sk-ant-server")
       assert CredentialCheck.check(workspace()) == :ok
@@ -247,7 +223,6 @@ defmodule Arbiter.Agents.Claude.CredentialCheckTest do
 
   describe "workspace_report/0" do
     test "lists each Claude workspace with no credential, and skips the rest" do
-      flag(true)
       ok_ws = workspace()
       acct = account()
       credential(acct)
@@ -268,8 +243,6 @@ defmodule Arbiter.Agents.Claude.CredentialCheckTest do
     end
 
     test "a Claude reviewer alone makes the workspace a Claude workspace" do
-      flag(true)
-
       ws =
         workspace(%{
           config: %{"agent" => %{"type" => "codex"}, "review_agent" => %{"type" => "claude"}}

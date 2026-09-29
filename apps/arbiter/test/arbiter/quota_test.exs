@@ -22,16 +22,11 @@ defmodule Arbiter.QuotaTest do
 
   # bd-4ag0nj: an account whose workers run on their own setup token, the way
   # the live install is after `mix arbiter.accounts.migrate` — the account's
-  # `:oauth_token` row (what workers read with provider accounts on) *and* the
-  # workspace's `worker_env` token (the legacy chain, flag off).
+  # `:oauth_token` row, which is what workers read.
   defp setup_token_account_id!(name) do
     alias Arbiter.Accounts.ProviderCredential
 
-    ws =
-      Ash.create!(Workspace, %{
-        name: name,
-        worker_env: %{"CLAUDE_CODE_OAUTH_TOKEN" => %{"value" => "setup-token"}}
-      })
+    ws = Ash.create!(Workspace, %{name: name})
 
     account_id = quota_account_id!(ws.id)
 
@@ -874,16 +869,12 @@ defmodule Arbiter.QuotaTest do
                )
     end
 
-    # With provider accounts on, a workspace's workers read only their own
-    # account's credential, so a *different* account's setup token must not
-    # vouch for this one: its workers are seeded the credentials file.
+    # A workspace's workers read only their own account's credential, so a
+    # *different* account's setup token must not vouch for this one: its
+    # workers are seeded the credentials file.
     @tag :tmp_dir
-    test "with provider accounts on, another account's setup token doesn't relabel this account's 401",
+    test "another account's setup token doesn't relabel this account's 401",
          %{tmp_dir: tmp_dir} do
-      saved_flag = Application.get_env(:arbiter, :provider_accounts_enabled)
-      Application.put_env(:arbiter, :provider_accounts_enabled, true)
-      on_exit(fn -> Application.put_env(:arbiter, :provider_accounts_enabled, saved_flag) end)
-
       _other = setup_token_account_id!("other-account")
 
       account_id =
