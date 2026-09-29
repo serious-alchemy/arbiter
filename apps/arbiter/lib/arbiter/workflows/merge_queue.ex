@@ -217,6 +217,7 @@ defmodule Arbiter.Workflows.MergeQueue do
 
   alias Arbiter.GitHub.Limiter
   alias Arbiter.Mergers
+  alias Arbiter.Mergers.LocalCompare
   alias Arbiter.Reviews.Coverage
   alias Arbiter.Reviews.CoverageShadow
   alias Arbiter.Tasks.Issue
@@ -1454,12 +1455,13 @@ defmodule Arbiter.Workflows.MergeQueue do
 
     equal? =
       with true <- is_binary(base) and base != "",
-           {:ok, reviewed_diff} <- safe_get_diff(state, item, base, reviewed),
-           {:ok, head_diff} <- safe_get_diff(state, item, base, head),
+           {:ok, [reviewed_diff, head_diff], source} <-
+             compare_diffs(state, item, base, [reviewed, head]),
            true <- Mergers.NetDiff.equivalent?(reviewed_diff, head_diff) do
         Logger.info(
           "MergeQueue: task=#{item.task_id} mr=#{item.mr_ref} head #{head} carries the same " <>
-            "net diff against #{base} as the reviewed commit #{reviewed}; merging pinned to it"
+            "net diff against #{base} as the reviewed commit #{reviewed} (decided via " <>
+            "#{source}); merging pinned to it"
         )
 
         record_content_equal_coverage(item, head, base, head_diff)
@@ -1470,6 +1472,20 @@ defmodule Arbiter.Workflows.MergeQueue do
 
     {equal?, Map.put(item, :content_checked, {reviewed, head, equal?})}
   end
+
+  # bd-wjpxok / #26: the adapter's compare, then local git in the item's
+  # checkout when the forge cannot answer — one source for every head, as in
+  # the Watchdog's `compare_diffs/3`.
+  defp compare_diffs(%State{} = state, item, base, heads) do
+    LocalCompare.diffs(
+      fn b, h -> safe_get_diff(state, item, b, h) end,
+      local_repo(state, item),
+      base,
+      heads
+    )
+  end
+
+  defp local_repo(%State{workspace: ws}, item), do: LocalCompare.repo_path(ws, item.repo)
 
   defp safe_get_diff(%State{adapter: adapter}, item, base, head) do
     case adapter.get_diff(item.mr_ref, %{base: base, head: head}) do
@@ -1719,19 +1735,44 @@ defmodule Arbiter.Workflows.MergeQueue do
       local_head_sha: Map.get(item, :last_reviewed_sha),
       base_ref: Map.get(item, :base) || state.base,
       fetch_diff: fn diff_base, head ->
-        state.adapter.get_diff(item.mr_ref, %{base: diff_base, head: head})
+        case compare_diffs(state, item, diff_base, [head]) do
+          {:ok, [diff], source} ->
+            log_local_git(item, "net diff #{diff_base}...#{head}", source)
+            {:ok, diff}
+
+          {:error, reasons} ->
+            {:error, reasons}
+        end
       end,
       source: :watchdog
     }
 
     if ancestry_probe?(state.adapter) do
       Map.put(ctx, :ancestor?, fn ancestor, descendant ->
-        safe_ancestor?(state, item, ancestor, descendant)
+        api = fn a, d -> safe_ancestor?(state, item, a, d) end
+
+        case LocalCompare.ancestry(api, local_repo(state, item), ancestor, descendant) do
+          {:ok, answer, source} ->
+            log_local_git(item, "ancestry #{ancestor} -> #{descendant}", source)
+            {:ok, answer}
+
+          {:error, reasons} ->
+            {:error, reasons}
+        end
       end)
     else
       ctx
     end
   end
+
+  defp log_local_git(item, what, :local_git) do
+    Logger.info(
+      "MergeQueue: task=#{item.task_id} mr=#{item.mr_ref} #{what} decided via local_git " <>
+        "(the compare API could not answer)"
+    )
+  end
+
+  defp log_local_git(_item, _what, _source), do: :ok
 
   defp ancestry_probe?(adapter),
     do: is_atom(adapter) and function_exported?(adapter, :ancestor?, 3)

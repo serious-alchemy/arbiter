@@ -48,6 +48,7 @@ defmodule Arbiter.Test.StubMerger do
         submitted_reviews: [],
         get_counts: %{},
         diffs: %{},
+        diff_errors: %{},
         diff_calls: [],
         ancestors: %{},
         ancestor_calls: []
@@ -320,6 +321,17 @@ defmodule Arbiter.Test.StubMerger do
     end)
   end
 
+  @doc """
+  Make every `get_diff/2` call for `ref` return `{:error, reason}` — the
+  compare-API outage shape (bd-wjpxok: GitLab's 403
+  `insufficient_granular_scope`). Takes precedence over `set_diff/3`.
+  """
+  def set_diff_error(ref, reason) when is_binary(ref) do
+    ensure_started()
+    Agent.update(@name, fn s -> put_in(s, [:diff_errors, ref], reason) end)
+    :ok
+  end
+
   @doc "Every `get_diff/2` call as `{ref, base, head}`, oldest first."
   def diff_calls do
     ensure_started()
@@ -336,7 +348,11 @@ defmodule Arbiter.Test.StubMerger do
     Agent.get_and_update(@name, fn s ->
       s = Map.update(s, :diff_calls, [{ref, base, head}], &[{ref, base, head} | &1])
       default = "diff --git a/STUB b/STUB\n+unregistered get_diff for #{inspect({ref, head})}\n"
-      {{:ok, Map.get(Map.get(s, :diffs, %{}), {ref, head}, default)}, s}
+
+      case Map.fetch(Map.get(s, :diff_errors, %{}), ref) do
+        {:ok, reason} -> {{:error, reason}, s}
+        :error -> {{:ok, Map.get(Map.get(s, :diffs, %{}), {ref, head}, default)}, s}
+      end
     end)
   end
 

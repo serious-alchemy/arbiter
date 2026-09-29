@@ -100,12 +100,20 @@ defmodule Arbiter.Workflows.MergeQueue.AutoResumeDispatcher do
       signal its completion, so no later retry will clear the block. Taken well
       inside the deferral budget rather than sitting out the remaining ticks in
       silence. `reason` carries the blocking registry key.
+    * `{:stale_reviewed_sha, reviewed, head}` / `{:stale_reviewed_sha, reviewed,
+      head, delta}` — the PR head carries content no review covers and there is
+      no path back to review. bd-wjpxok / #26: `delta` (when local git could
+      list it) names the unreviewed commits and files, so the page carries what
+      the coordinator would otherwise reconstruct by hand.
   """
   @type give_up_reason ::
           :budget_exhausted
           | {:resume_failed, term()}
           | {:resume_blocked, term(), non_neg_integer()}
           | {:resume_blocker_vanished, term(), non_neg_integer()}
+          | {:stale_reviewed_sha, String.t(), String.t()}
+          | {:stale_reviewed_sha, String.t(), String.t(),
+             %{commits: [String.t()], files: [String.t()]}}
 
   @doc """
   Page the coordinator that the Watchdog has stopped auto-resuming this task.
@@ -239,6 +247,18 @@ defmodule Arbiter.Workflows.MergeQueue.AutoResumeDispatcher do
   defp subject(task_id, _attempts, {:resume_blocker_vanished, _reason, _deferrals}),
     do: "#{task_id}: auto-resume BLOCKED by a pass that is already gone (awaiting_review)"
 
+  defp subject(task_id, _attempts, {:stale_reviewed_sha, _reviewed, head}),
+    do: "#{task_id}: unreviewed commits on the PR head #{short_sha(head)}, not merged"
+
+  defp subject(task_id, attempts, {:stale_reviewed_sha, reviewed, head, _delta}),
+    do: subject(task_id, attempts, {:stale_reviewed_sha, reviewed, head})
+
+  defp body(task_id, mr_ref, attempts, {:stale_reviewed_sha, reviewed, head}),
+    do: stale_body(task_id, mr_ref, attempts, reviewed, head, nil)
+
+  defp body(task_id, mr_ref, attempts, {:stale_reviewed_sha, reviewed, head, delta}),
+    do: stale_body(task_id, mr_ref, attempts, reviewed, head, delta)
+
   defp body(task_id, mr_ref, attempts, :budget_exhausted) do
     """
     Task #{task_id} timed out awaiting review on MR #{mr_ref || "(unknown)"} and
@@ -344,6 +364,41 @@ defmodule Arbiter.Workflows.MergeQueue.AutoResumeDispatcher do
     still never reached a terminal outcome. Another plain resume is unlikely to help.
     """
   end
+
+  # bd-wjpxok / #26 (AC4). Until this clause existed the Watchdog's give-up on
+  # an unreviewed head raised FunctionClauseError in `subject/3`, which the
+  # rescue in `escalate_exhausted/5` swallowed — so this page never arrived.
+  defp stale_body(task_id, mr_ref, attempts, reviewed, head, delta) do
+    """
+    Task #{task_id}: MR #{mr_ref || "(unknown)"} was approved at #{reviewed}, but its head
+    is now #{head} and no review covers the difference. It was not merged, and the
+    Watchdog has no path back to review (auto-resume budget: #{attempts} attempt(s)
+    used, or auto-resume is off).
+
+    #{delta_text(delta)}
+    Review the delta, then either record coverage for #{short_sha(head)} or resume the
+    task so the ReviewGate reviews it (`worker_resume #{task_id}`).
+    """
+  end
+
+  defp delta_text(%{commits: commits, files: files}) do
+    """
+    Unreviewed delta (from local git):
+      commits:
+    #{bullets(commits)}
+      files:
+    #{bullets(files)}
+    """
+  end
+
+  defp delta_text(_delta),
+    do: "The unreviewed delta could not be listed from local git.\n"
+
+  defp bullets([]), do: "    (none)"
+  defp bullets(items), do: Enum.map_join(items, "\n", &"    - #{&1}")
+
+  defp short_sha(sha) when is_binary(sha), do: String.slice(sha, 0, 12)
+  defp short_sha(_sha), do: "(unknown)"
 
   defp diagnosis(task_id) do
     """
