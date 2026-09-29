@@ -110,6 +110,12 @@ defmodule ArbiterWeb.SessionDockLive do
       `retention_deleted`, `never_captured`, `empty`, or `loopback_only` — and
       links the archived session JSONL when one exists. Never a blank terminal.
 
+  The bytes are replayed as recorded except that the recording's alternate-screen
+  and mouse-tracking modes are dropped and each screen clear scrolls the screen
+  into the scrollback first (`assets/js/session_transcript_prep.mjs`,
+  bd-bgemk5): a TUI's stream otherwise leaves a read-only pane with no
+  scrollback, or a wheel xterm reports instead of scrolling.
+
   A frozen pane still wins over a replay while it exists: it holds the real
   screen, styling and all, and the file holds the same bytes.
 

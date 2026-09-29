@@ -16,6 +16,7 @@ import { CanvasAddon } from "../vendor/xterm/addon-canvas.js"
 import { Socket } from "phoenix"
 
 import { SessionStream } from "./session_stream.mjs"
+import { prepareTranscript } from "./session_transcript_prep.mjs"
 import { fitGeometry, settleFit } from "./session_fit.mjs"
 import { PaneGeometry } from "./session_geometry.mjs"
 import { handleTerminalKey } from "./session_keys.mjs"
@@ -273,7 +274,9 @@ export function createSessionTerminal(el, options = {}) {
       sink: {
         repaint: (_seq, data) => {
           term.reset()
-          if (data) term.write(data)
+          // Not verbatim: the recording's alternate screen and mouse modes
+          // would leave nothing to scroll (bd-bgemk5).
+          if (data) term.write(prepareTranscript(data, term.rows))
         },
         joined: (reply) => {
           // The replay's bounds and the session's end, for whoever is drawing
