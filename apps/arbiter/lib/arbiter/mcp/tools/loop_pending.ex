@@ -110,6 +110,43 @@ defmodule Arbiter.MCP.Tools.LoopPending do
     end
   end
 
+  # ---- loop_propose_routing / loop_canary_status --------------------------
+
+  @doc """
+  Hand-author an operator routing canary proposal (`arb loop propose routing`).
+  Coordinator only.
+  """
+  @spec loop_propose_routing(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def loop_propose_routing(%Scope{} = scope, args) do
+    with {:ok, ws_id} <- Tools.resolve_workspace_id(scope, args),
+         {:ok, tier} <- Tools.require_string(args, "model_tier") do
+      attrs = %{
+        workspace: ws_id,
+        difficulty: Map.get(args, "difficulty"),
+        model_tier: tier,
+        thinking: Tools.fetch_string(args, "thinking"),
+        actor: Arbiter.PaperTrail.actor_label(scope)
+      }
+
+      case Arbiter.Loop.propose_routing(attrs) do
+        {:ok, row} -> {:ok, row |> serialize_pending() |> Map.put(:proposed, true)}
+        {:error, reason} -> {:error, loop_error(reason)}
+      end
+    end
+  end
+
+  @doc "Both arms' metrics and verdict progress for the workspace's running canary."
+  @spec loop_canary_status(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def loop_canary_status(%Scope{} = scope, args) do
+    with {:ok, ws_id} <- Tools.resolve_workspace_id(scope, args),
+         {:ok, ws} <- Arbiter.Loop.fetch_workspace(ws_id) do
+      case Arbiter.Loop.Canary.status(ws) do
+        {:ok, status} -> {:ok, %{running: true, status: status}}
+        {:none, message} -> {:ok, %{running: false, message: message}}
+      end
+    end
+  end
+
   # `state` accepts a single name or a list. Some clients JSON-encode the list
   # into a string despite the schema, so unwrap that shape first (bd-1dtufq).
   defp loop_states(args) do

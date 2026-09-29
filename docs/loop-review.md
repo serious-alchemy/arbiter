@@ -377,6 +377,51 @@ is what makes the revert *automatic*: it walks every workspace on a timer and
 judges any running canary. For a workspace with the flag unset it does a single
 map lookup and stops.
 
+### Running a canary by hand, and deciding the outcome yourself
+
+The autonomous path above waits for `arb loop analyze --propose` to produce a
+routing candidate and then promotes the winner on its own. To test a specific
+routing change and keep the final call, use the operator flow:
+
+1. **Start.** Opt the workspace in, and turn autopromotion off:
+
+       arb config set loop.autonomous_routing_enabled true --workspace default
+       arb config set loop.canary_auto_promote false --workspace default
+       arb loop propose routing --workspace default --difficulty 3 \
+           --model-tier standard --thinking high
+
+   (MCP: `loop_propose_routing`.) This writes an operator-authored
+   `routing.rules.D3` `:config_set`, already `proposed` and escalated. Being
+   hand-written it is exempt from the aggregate evidence bar — you are the
+   evidence — but it must still be a single-tier `model_tier` / `thinking`
+   change on a `by_difficulty` workspace. The next 15-minute canary tick starts
+   a 50/50 canary for it. `loop.canary_auto_promote` defaults to `true` (the
+   behaviour described above); only the literal `false` changes anything.
+2. **Status.** At any time:
+
+       arb loop canary status --workspace default
+
+   (MCP: `loop_canary_status`.) Prints the proposal id and age, when it
+   expires, how many more canary-arm dispatches it needs before a verdict is
+   possible, the verdict *if judged now*, and for each arm the dispatches,
+   tasks, reviewed tasks, first-pass convergence, review rounds, cost and cost
+   per round. With no canary running it says why (flag unset, nothing queued).
+3. **Kill switch.** `arb config unset loop.autonomous_routing_enabled
+   --workspace default` drops the `loop.canary` block on the next tick and the
+   overlay stops on the very next dispatch. It is terminal, not a pause.
+4. **Decide.** With `canary_auto_promote: false`, a passing verdict writes
+   nothing to `routing.rules`. The coordinator is mailed the per-arm stats
+   **once**, the canary keeps measuring, and the proposal stays `proposed`:
+
+       arb loop apply <id>     # land routing.rules.D3 workspace-wide
+       arb loop reject <id>    # drop it
+
+   Either decision ends the canary on the next tick (`abandoned`). A *revert*
+   verdict — canary convergence below control beyond the tolerance — is still
+   automatic under either setting: it only deletes the overlay block, which is
+   harmless. If the canary never reaches its sample size it expires after
+   `loop.canary_max_age_days`, as before.
+
 ## Where lessons land (you choose, per finding)
 
 - **A skill** — the primary home for a *general working practice* (read

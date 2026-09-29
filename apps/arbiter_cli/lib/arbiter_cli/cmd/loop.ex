@@ -75,6 +75,21 @@ defmodule ArbiterCli.Cmd.Loop do
   `:proposed` immediately (task-scoped, like a difficulty override) — review
   it with `arb loop diff <id>` and apply it like any other proposal.
 
+  ## Operator-started routing canary
+
+      arb loop propose routing --workspace <ws> --difficulty <n>
+                       --model-tier <tier> [--thinking <level>]
+      arb loop canary status [--workspace <ws>] [--json]
+
+  `propose routing` writes an operator-authored `routing.rules.D<n>` proposal,
+  already `:proposed`. With `loop.autonomous_routing_enabled` set on the
+  workspace, the next 15-minute canary tick starts a 50/50 canary for it. Set
+  `loop.canary_auto_promote` to `false` to have a passing verdict mail the
+  coordinator instead of landing the rule — then decide with `arb loop apply
+  <id>` / `arb loop reject <id>`. `canary status` prints both arms' current
+  metrics and how far the canary is from a verdict. See
+  `docs/loop-review.md`.
+
   A finding below the evidence bar is kept as a `hypothesis` carrying its
   incident refs, so a later window reinforces it in place rather than starting
   its count from zero. Crossing the bar (default: 3 incidents across 2 distinct
@@ -113,8 +128,21 @@ defmodule ArbiterCli.Cmd.Loop do
         ["propose", "repo-doc-patch" | tail] ->
           propose_repo_doc_patch(tail, mode)
 
+        ["propose", "routing" | tail] ->
+          propose_routing(tail, mode)
+
+        ["canary", "status" | tail] ->
+          canary_status(tail, mode)
+
+        ["canary" | _] ->
+          Output.die("usage: arb loop canary status [--workspace <ws>]")
+
         ["propose" | _] ->
-          Output.die("usage: arb loop propose repo-doc-patch --repo <repo> --lesson \"...\"")
+          Output.die(
+            "usage: arb loop propose repo-doc-patch --repo <repo> --lesson \"...\" | " <>
+              "arb loop propose routing --workspace <ws> --difficulty <n> --model-tier <tier> " <>
+              "[--thinking <level>]"
+          )
 
         ["pending" | tail] ->
           pending(tail, mode)
@@ -229,6 +257,80 @@ defmodule ArbiterCli.Cmd.Loop do
       {:error, err} -> Output.die(err)
     end
   end
+
+  defp propose_routing(argv, mode) do
+    {opts, _rest, _bad} =
+      OptionParser.parse(argv,
+        switches: [
+          workspace: :string,
+          difficulty: :integer,
+          model_tier: :string,
+          thinking: :string
+        ],
+        aliases: [w: :workspace]
+      )
+
+    body =
+      %{}
+      |> maybe_put_map("workspace_id", Keyword.get(opts, :workspace))
+      |> maybe_put_map("difficulty", Keyword.get(opts, :difficulty))
+      |> maybe_put_map("model_tier", Keyword.get(opts, :model_tier))
+      |> maybe_put_map("thinking", Keyword.get(opts, :thinking))
+
+    case Client.post("/api/loop/propose/routing", body) do
+      {:ok, %{"pending" => row}} -> emit_decision(row, "proposed", mode)
+      {:ok, other} -> Output.die("unexpected response: #{inspect(other)}")
+      {:error, err} -> Output.die(err)
+    end
+  end
+
+  defp canary_status(argv, mode) do
+    {opts, _rest, _bad} =
+      OptionParser.parse(argv, switches: [workspace: :string], aliases: [w: :workspace])
+
+    params = maybe_put([], :workspace_id, Keyword.get(opts, :workspace))
+
+    case Client.get("/api/loop/canary", params) do
+      {:ok, envelope} when mode == :json -> IO.puts(Jason.encode!(envelope))
+      {:ok, %{"running" => false, "message" => message}} -> IO.puts(message)
+      {:ok, %{"running" => true, "status" => status}} -> IO.puts(format_canary_status(status))
+      {:ok, other} -> Output.die("unexpected response: #{inspect(other)}")
+      {:error, err} -> Output.die(err)
+    end
+  end
+
+  @doc false
+  def format_canary_status(s) do
+    rule = s["rule"] |> Enum.map_join(", ", fn {k, v} -> "#{k}=#{v}" end)
+
+    header = [
+      "Canary #{s["proposal_id"]} on D#{s["difficulty"]} (#{rule}) — proposal #{s["proposal_state"]}",
+      "Started #{s["started_at"]} (#{Float.round(s["age_days"] / 1, 1)}d ago); expires #{s["expires_at"]}",
+      "Canary-arm dispatches until a verdict is possible: #{s["dispatches_left"]} " <>
+        "(of #{s["min_dispatches"]})",
+      "Verdict if judged now: #{s["verdict"]}" <>
+        if(s["auto_promote"], do: "", else: " (loop.canary_auto_promote=false: you decide)"),
+      ""
+    ]
+
+    rows =
+      for {label, key} <- [{"canary", "canary"}, {"control", "control"}] do
+        a = s[key]
+
+        "  #{String.pad_trailing(label, 8)} dispatches=#{a["dispatches"]} tasks=#{a["tasks"]} " <>
+          "reviewed=#{a["reviewed_tasks"]} first-pass=#{fmt_pct(a["first_pass_convergence"])} " <>
+          "rounds=#{a["review_rounds"]} cost=$#{a["cost_usd"]} " <>
+          "cost/round=#{fmt_money(a["cost_per_round"])}"
+      end
+
+    Enum.join(header ++ rows, "\n")
+  end
+
+  defp fmt_pct(nil), do: "—"
+  defp fmt_pct(f) when is_number(f), do: "#{Float.round(f * 100, 1)}%"
+
+  defp fmt_money(nil), do: "—"
+  defp fmt_money(c) when is_number(c), do: "$#{Float.round(c / 1, 4)}"
 
   defp emit(_markdown, envelope, :json), do: IO.puts(Jason.encode!(envelope))
 

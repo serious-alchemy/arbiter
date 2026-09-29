@@ -1978,6 +1978,8 @@ defmodule Arbiter.MCP.Tools do
   defdelegate loop_pending_diff(scope, args), to: Arbiter.MCP.Tools.LoopPending
   defdelegate loop_pending_apply(scope, args), to: Arbiter.MCP.Tools.LoopPending
   defdelegate loop_pending_reject(scope, args), to: Arbiter.MCP.Tools.LoopPending
+  defdelegate loop_propose_routing(scope, args), to: Arbiter.MCP.Tools.LoopPending
+  defdelegate loop_canary_status(scope, args), to: Arbiter.MCP.Tools.LoopPending
 
   defdelegate task_show(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate task_ready(scope, args), to: Arbiter.MCP.Tools.Task

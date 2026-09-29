@@ -543,6 +543,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
   defp validate_autonomy(changeset, loop) do
     changeset
     |> validate_autonomy_flag(Map.get(loop, "autonomous_routing_enabled"))
+    |> validate_auto_promote(Map.get(loop, "canary_auto_promote"))
     |> validate_canary_block(Map.get(loop, "canary"))
     |> validate_canary_min_dispatches(Map.get(loop, "canary_min_dispatches"))
     |> validate_canary_tolerance(Map.get(loop, "canary_regression_tolerance"))
@@ -556,6 +557,16 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     Changeset.add_error(changeset,
       field: :config,
       message: "loop.autonomous_routing_enabled must be true or false; got: #{inspect(other)}"
+    )
+  end
+
+  defp validate_auto_promote(changeset, nil), do: changeset
+  defp validate_auto_promote(changeset, v) when is_boolean(v), do: changeset
+
+  defp validate_auto_promote(changeset, other) do
+    Changeset.add_error(changeset,
+      field: :config,
+      message: "loop.canary_auto_promote must be true or false; got: #{inspect(other)}"
     )
   end
 
