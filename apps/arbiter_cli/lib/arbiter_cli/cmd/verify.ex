@@ -2,8 +2,8 @@ defmodule ArbiterCli.Cmd.Verify do
   @moduledoc """
   `arb ticket verify <id> --observed "<evidence>" | --failed "<evidence>"`
 
-  Records the post-merge restart-and-observe result for a task parked at
-  `awaiting_verification` (bd-9so315).
+  Records the post-merge restart-and-observe result for a task in state
+  `verifying` (bd-9so315).
 
   A task flagged `verify_after_deploy` does not close when its PR merges: its
   only execution context is the long-lived server, so the merge proves nothing

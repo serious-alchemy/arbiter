@@ -17,6 +17,8 @@ defmodule Arbiter.Tasks.IssueTest do
   alias Arbiter.Worker
   alias Arbiter.Tasks.IssueTest.FakeWorkerProcess
 
+  import Arbiter.LifecycleFixtures, only: [put_state!: 2]
+
   setup do
     {:ok, ws} = Ash.create(Workspace, %{name: "test-ws", prefix: "test"})
     {:ok, ws: ws}
@@ -29,7 +31,7 @@ defmodule Arbiter.Tasks.IssueTest do
       assert String.starts_with?(issue.id, "test-")
       assert String.length(issue.id) == 5 + 6, "id should be 'test-' + 6 chars: #{issue.id}"
       assert issue.title == "first"
-      assert issue.status == :open
+      assert issue.state == :backlog
       assert issue.priority == 2
       # bd-5lc99r: the default issue_type is `:feature` (a reviewable type), not
       # `:task`. `:task` is now an opt-in non-reviewable type, so untyped work
@@ -161,29 +163,6 @@ defmodule Arbiter.Tasks.IssueTest do
     end
   end
 
-  describe "status FSM via :update" do
-    setup %{ws: ws} do
-      {:ok, issue} = Ash.create(Issue, %{title: "to-update", workspace_id: ws.id})
-      {:ok, issue: issue}
-    end
-
-    test "open → in_progress is allowed", %{issue: issue} do
-      assert {:ok, updated} = Ash.update(issue, %{status: :in_progress})
-      assert updated.status == :in_progress
-    end
-
-    test "in_progress → open is allowed", %{issue: issue} do
-      {:ok, ip} = Ash.update(issue, %{status: :in_progress})
-      assert {:ok, opened} = Ash.update(ip, %{status: :open})
-      assert opened.status == :open
-    end
-
-    test "open → closed via :update is BLOCKED (must use :close action)", %{issue: issue} do
-      assert {:error, %Ash.Error.Invalid{} = err} = Ash.update(issue, %{status: :closed})
-      assert err |> Exception.message() |> String.contains?("Use the :close action")
-    end
-  end
-
   describe ":close action" do
     setup %{ws: ws} do
       {:ok, issue} = Ash.create(Issue, %{title: "to-close", workspace_id: ws.id})
@@ -192,21 +171,24 @@ defmodule Arbiter.Tasks.IssueTest do
 
     test "closes an open issue and sets closed_at", %{issue: issue} do
       assert {:ok, closed} = Ash.update(issue, %{}, action: :close)
-      assert closed.status == :closed
+      assert closed.state == :closed
       assert %DateTime{} = closed.closed_at
     end
 
-    test "can close an in_progress issue", %{issue: issue} do
-      {:ok, ip} = Ash.update(issue, %{status: :in_progress})
+    test "can close an active issue", %{issue: issue} do
+      ip = put_state!(issue, :active)
       assert {:ok, closed} = Ash.update(ip, %{}, action: :close)
-      assert closed.status == :closed
+      assert closed.state == :closed
     end
 
     test "cannot close an already-closed issue", %{issue: issue} do
       {:ok, closed} = Ash.update(issue, %{}, action: :close)
 
       assert {:error, %Ash.Error.Invalid{} = err} = Ash.update(closed, %{}, action: :close)
-      assert err |> Exception.message() |> String.contains?("already closed")
+
+      assert err
+             |> Exception.message()
+             |> String.contains?("Cannot close a ticket that is :closed")
     end
 
     # bd-bsco7f: `close_upstream` is an argument, so it vanishes with the
@@ -264,14 +246,17 @@ defmodule Arbiter.Tasks.IssueTest do
 
     test "reopens a closed issue and clears closed_at", %{closed: closed} do
       assert {:ok, reopened} = Ash.update(closed, %{}, action: :reopen)
-      assert reopened.status == :open
+      assert reopened.state == :queued
       assert reopened.closed_at == nil
     end
 
     test "cannot reopen an open issue", %{issue: issue} do
-      # Use the original open issue (before :close was applied)
+      # Use the original backlog issue (before :close was applied)
       assert {:error, %Ash.Error.Invalid{} = err} = Ash.update(issue, %{}, action: :reopen)
-      assert err |> Exception.message() |> String.contains?("must be :closed")
+
+      assert err
+             |> Exception.message()
+             |> String.contains?("Cannot reopen a ticket that is :backlog")
     end
 
     test "clears stale pr_ref and source_pr so a fresh attempt starts clean (bd-38l3px)",
@@ -290,7 +275,7 @@ defmodule Arbiter.Tasks.IssueTest do
       # A reopened bead is a fresh attempt — its prior PR reference must not
       # linger, or MergedPRFinalizer would re-detect that merged PR and re-close
       # the bead every reopen cycle.
-      assert reopened.status == :open
+      assert reopened.state == :queued
       assert reopened.pr_ref == nil
       assert reopened.source_pr == nil
     end
@@ -326,35 +311,25 @@ defmodule Arbiter.Tasks.IssueTest do
       assert reopened.close_upstream_expected == nil
     end
 
-    test "cannot update fields on a closed issue via :update (status guard)", %{closed: closed} do
-      # Can update non-status fields? per FSM, only status is guarded — title should be OK
-      assert {:ok, _updated} = Ash.update(closed, %{title: "renamed but still closed"})
+    test "a closed issue's fields can be edited through :update, but not its state",
+         %{closed: closed} do
+      assert {:ok, updated} = Ash.update(closed, %{title: "renamed but still closed"})
+      assert updated.state == :closed
 
-      # But trying to set status explicitly should error
-      assert {:error, %Ash.Error.Invalid{}} = Ash.update(closed, %{status: :open})
+      assert {:error, %Ash.Error.Invalid{}} = Ash.update(closed, %{state: :queued})
     end
   end
 
-  # bd-b5wyjd — refinement is a board signal, not an FSM state. `refined`
-  # decides Backlog vs Ready and nothing else; `status` still only ever moves
-  # open → in_progress → closed.
-  describe ":refined and the :promote_to_ready action" do
-    test "a brand-new issue is unrefined — it lands in Backlog, not Ready", %{ws: ws} do
+  # bd-b5wyjd — refinement moves a ticket from Backlog to the Ready queue
+  # (`:queued`, bd-842qio) and does nothing else.
+  describe "the :promote_to_ready action" do
+    test "a brand-new issue lands in Backlog, not Ready", %{ws: ws} do
       {:ok, issue} = Ash.create(Issue, %{title: "raw idea", workspace_id: ws.id})
 
-      assert issue.refined == false
+      assert issue.state == :backlog
     end
 
-    test "refined is not create-accepted — no create path can skip refinement", %{ws: ws} do
-      # Rejected outright rather than silently dropped: a caller that thinks it
-      # created a Ready card should hear that it did not.
-      assert {:error, %Ash.Error.Invalid{} = err} =
-               Ash.create(Issue, %{title: "sneaky", workspace_id: ws.id, refined: true})
-
-      assert err |> Exception.message() |> String.contains?("refined")
-    end
-
-    test ":promote_to_ready flips the flag and touches nothing else", %{ws: ws} do
+    test ":promote_to_ready queues the ticket and touches nothing else", %{ws: ws} do
       {:ok, issue} =
         Ash.create(Issue, %{
           title: "refine me",
@@ -365,8 +340,7 @@ defmodule Arbiter.Tasks.IssueTest do
 
       assert {:ok, promoted} = Ash.update(issue, %{}, action: :promote_to_ready)
 
-      assert promoted.refined == true
-      assert promoted.status == issue.status
+      assert promoted.state == :queued
       assert promoted.priority == issue.priority
       assert promoted.closed_at == nil
     end
@@ -377,7 +351,7 @@ defmodule Arbiter.Tasks.IssueTest do
 
       {:ok, once} = Ash.update(issue, %{}, action: :promote_to_ready)
       assert {:ok, twice} = Ash.update(once, %{}, action: :promote_to_ready)
-      assert twice.refined == true
+      assert twice.state == :queued
     end
   end
 
@@ -404,7 +378,7 @@ defmodule Arbiter.Tasks.IssueTest do
           Ash.create(Issue, %{title: "exempt (#{type})", workspace_id: ws.id, issue_type: type})
 
         assert {:ok, promoted} = Ash.update(issue, %{}, action: :promote_to_ready)
-        assert promoted.refined == true
+        assert promoted.state == :queued
         assert promoted.acceptance_waived == nil
       end
     end
@@ -419,7 +393,7 @@ defmodule Arbiter.Tasks.IssueTest do
         })
 
       assert {:ok, promoted} = Ash.update(issue, %{}, action: :promote_to_ready)
-      assert promoted.refined == true
+      assert promoted.state == :queued
       assert promoted.acceptance_waived == nil
     end
 
@@ -432,7 +406,7 @@ defmodule Arbiter.Tasks.IssueTest do
                  action: :promote_to_ready
                )
 
-      assert promoted.refined == true
+      assert promoted.state == :queued
       assert promoted.acceptance_waived == "spike, no user-facing behavior"
     end
 
@@ -454,11 +428,11 @@ defmodule Arbiter.Tasks.IssueTest do
         })
 
       assert {:ok, promoted} = Ash.update(issue, %{}, action: :promote_to_ready)
-      assert promoted.refined == true
+      assert promoted.state == :queued
       assert promoted.acceptance_waived =~ "D0"
     end
 
-    test "re-promoting an already-refined issue is still idempotent even with no ACs/waiver", %{
+    test "re-promoting an already-queued issue is still idempotent even with no ACs/waiver", %{
       ws: ws
     } do
       {:ok, issue} =
@@ -469,12 +443,12 @@ defmodule Arbiter.Tasks.IssueTest do
           acceptance: "- ok"
         })
 
-      {:ok, refined} = Ash.update(issue, %{}, action: :promote_to_ready)
+      {:ok, queued} = Ash.update(issue, %{}, action: :promote_to_ready)
       # Simulate a pre-existing Ready card that predates the rule and has no ACs.
-      {:ok, grandfathered} = Ash.update(refined, %{acceptance: ""})
+      {:ok, grandfathered} = Ash.update(queued, %{acceptance: ""})
 
       assert {:ok, twice} = Ash.update(grandfathered, %{}, action: :promote_to_ready)
-      assert twice.refined == true
+      assert twice.state == :queued
     end
   end
 
@@ -506,10 +480,6 @@ defmodule Arbiter.Tasks.IssueTest do
   end
 
   describe "enums helpers" do
-    test "statuses/0" do
-      assert Issue.statuses() == ~w(open in_progress awaiting_verification closed)a
-    end
-
     test "issue_types/0" do
       assert Issue.issue_types() == ~w(task research bug feature epic chore decision)a
     end
@@ -607,7 +577,7 @@ defmodule Arbiter.Tasks.IssueTest do
   end
 
   describe ":return_to_backlog (task demotion, bd-2098)" do
-    test "demotes an open refined task back to backlog — resets refined to false", %{ws: ws} do
+    test "demotes a queued task back to backlog", %{ws: ws} do
       {:ok, issue} =
         Ash.create(Issue, %{
           title: "ready to demote",
@@ -615,28 +585,25 @@ defmodule Arbiter.Tasks.IssueTest do
           acceptance: "- done"
         })
 
-      {:ok, refined} = Ash.update(issue, %{}, action: :promote_to_ready)
-      assert refined.refined == true
-      assert refined.status == :open
+      {:ok, queued} = Ash.update(issue, %{}, action: :promote_to_ready)
+      assert queued.state == :queued
 
-      {:ok, demoted} = Ash.update(refined, %{}, action: :return_to_backlog)
+      {:ok, demoted} = Ash.update(queued, %{}, action: :return_to_backlog)
 
-      assert demoted.refined == false
-      assert demoted.status == :open
+      assert demoted.state == :backlog
     end
 
     test "is idempotent — demoting an already-backlog task is a no-op", %{ws: ws} do
       {:ok, issue} = Ash.create(Issue, %{title: "backlog task", workspace_id: ws.id})
 
-      assert issue.refined == false
+      assert issue.state == :backlog
 
       {:ok, result} = Ash.update(issue, %{}, action: :return_to_backlog)
 
-      assert result.refined == false
-      assert result.status == :open
+      assert result.state == :backlog
     end
 
-    test "accepts an in_progress task with no live worker and no in-flight fix pass/review, setting refined: false and status: open atomically",
+    test "demotes an active task with no live worker and no in-flight fix pass/review, in one write",
          %{ws: ws} do
       {:ok, issue} =
         Ash.create(Issue, %{
@@ -645,22 +612,17 @@ defmodule Arbiter.Tasks.IssueTest do
           acceptance: "- done"
         })
 
-      {:ok, refined} = Ash.update(issue, %{}, action: :promote_to_ready)
-      {:ok, in_progress} = Ash.update(refined, %{status: :in_progress})
-
-      assert in_progress.refined == true
-      assert in_progress.status == :in_progress
+      in_progress = put_state!(issue, :active)
 
       # No live worker registered for this task
       assert Arbiter.Worker.Registry.live_exclusive_for(in_progress.id) == []
 
       {:ok, demoted} = Ash.update(in_progress, %{}, action: :return_to_backlog)
 
-      assert demoted.refined == false
-      assert demoted.status == :open
+      assert demoted.state == :backlog
     end
 
-    test "refuses to demote an in_progress task that has a live worker", %{ws: ws} do
+    test "refuses to demote an active task that has a live worker", %{ws: ws} do
       {:ok, issue} =
         Ash.create(Issue, %{
           title: "worker running",
@@ -668,8 +630,7 @@ defmodule Arbiter.Tasks.IssueTest do
           acceptance: "- done"
         })
 
-      {:ok, refined} = Ash.update(issue, %{}, action: :promote_to_ready)
-      {:ok, in_progress} = Ash.update(refined, %{status: :in_progress})
+      in_progress = put_state!(issue, :active)
 
       # Register a fake live worker for this task
       via_tuple = Arbiter.Worker.Registry.via_tuple(in_progress.id)
@@ -685,7 +646,7 @@ defmodule Arbiter.Tasks.IssueTest do
       assert error_msg =~ "live worker" or error_msg =~ "Stop the worker"
     end
 
-    test "refuses to demote an awaiting_verification task", %{ws: ws} do
+    test "refuses to demote a verifying task", %{ws: ws} do
       {:ok, issue} =
         Ash.create(Issue, %{
           title: "awaiting verification",
@@ -693,9 +654,7 @@ defmodule Arbiter.Tasks.IssueTest do
           acceptance: "- done"
         })
 
-      {:ok, refined} = Ash.update(issue, %{}, action: :promote_to_ready)
-      {:ok, in_progress} = Ash.update(refined, %{status: :in_progress})
-      {:ok, awaiting} = Ash.update(in_progress, %{}, action: :await_verification)
+      awaiting = put_state!(issue, :verifying)
 
       assert {:error, %Ash.Error.Invalid{} = err} =
                Ash.update(awaiting, %{}, action: :return_to_backlog)
@@ -711,9 +670,7 @@ defmodule Arbiter.Tasks.IssueTest do
           acceptance: "- done"
         })
 
-      {:ok, refined} = Ash.update(issue, %{}, action: :promote_to_ready)
-      {:ok, in_progress} = Ash.update(refined, %{status: :in_progress})
-      {:ok, closed} = Ash.update(in_progress, %{}, action: :close)
+      closed = issue |> put_state!(:active) |> put_state!(:closed)
 
       assert {:error, %Ash.Error.Invalid{} = err} =
                Ash.update(closed, %{}, action: :return_to_backlog)

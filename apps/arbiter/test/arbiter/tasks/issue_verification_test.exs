@@ -3,10 +3,12 @@ defmodule Arbiter.Tasks.IssueVerificationTest do
   bd-9so315 — post-merge verification state.
 
   A task flagged `verify_after_deploy: true` must not close on merge. It enters
-  `:awaiting_verification` and only leaves that state when the coordinator
-  records a restart-and-observe result.
+  `:verifying` and only leaves that state when the coordinator records a
+  restart-and-observe result.
   """
   use Arbiter.DataCase, async: false
+
+  import Arbiter.LifecycleFixtures
 
   require Ash.Query
 
@@ -28,10 +30,7 @@ defmodule Arbiter.Tasks.IssueVerificationTest do
 
   # bd-842qio: a task parks for verification only from work in progress, so the
   # tests that park one directly start it first.
-  defp in_progress(issue) do
-    {:ok, started} = Ash.update(issue, %{status: :in_progress})
-    started
-  end
+  defp in_progress(issue), do: put_state!(issue, :active)
 
   describe "verify_after_deploy flag" do
     test "defaults to false and is settable at create", %{ws: ws} do
@@ -47,14 +46,13 @@ defmodule Arbiter.Tasks.IssueVerificationTest do
   end
 
   describe ":await_verification action" do
-    test "moves a task in progress into :awaiting_verification and stamps the clock", %{
-      ws: ws
-    } do
+    test "moves a task in progress into :verifying and stamps the clock", %{ws: ws} do
       issue = task(ws, %{verify_after_deploy: true}) |> in_progress()
 
       {:ok, awaiting} = Ash.update(issue, %{}, action: :await_verification)
 
-      assert awaiting.status == :awaiting_verification
+      assert awaiting.state == :verifying
+      assert awaiting.attention_cause == :awaiting_verification
       assert %DateTime{} = awaiting.awaiting_verification_at
       assert awaiting.closed_at == nil
       assert awaiting.verification_outcome == nil
@@ -66,7 +64,7 @@ defmodule Arbiter.Tasks.IssueVerificationTest do
       issue = task(ws, %{verify_after_deploy: true})
 
       assert {:error, %Ash.Error.Invalid{}} = Ash.update(issue, %{}, action: :await_verification)
-      assert Ash.get!(Issue, issue.id).status == :open
+      assert Ash.get!(Issue, issue.id).state == :backlog
     end
 
     test "is rejected for an already-closed task", %{ws: ws} do
@@ -77,30 +75,31 @@ defmodule Arbiter.Tasks.IssueVerificationTest do
     end
   end
 
-  describe "status FSM guards" do
-    test ":update cannot move a task into or out of :awaiting_verification", %{ws: ws} do
+  describe "lifecycle guards" do
+    test ":update cannot move a task into or out of :verifying", %{ws: ws} do
       issue = task(ws, %{verify_after_deploy: true})
 
-      assert {:error, _} = Ash.update(issue, %{status: :awaiting_verification}, action: :update)
+      assert {:error, _} = Ash.update(issue, %{state: :verifying}, action: :update)
 
       {:ok, awaiting} = issue |> in_progress() |> Ash.update(%{}, action: :await_verification)
-      assert {:error, _} = Ash.update(awaiting, %{status: :open}, action: :update)
+      assert {:error, _} = Ash.update(awaiting, %{state: :queued}, action: :update)
+      assert Ash.get!(Issue, awaiting.id).state == :verifying
     end
 
-    test ":close is allowed from :awaiting_verification", %{ws: ws} do
+    test ":close is allowed from :verifying", %{ws: ws} do
       issue = task(ws, %{verify_after_deploy: true}) |> in_progress()
       {:ok, awaiting} = Ash.update(issue, %{}, action: :await_verification)
 
       {:ok, closed} = Ash.update(awaiting, %{close_upstream: false}, action: :close)
-      assert closed.status == :closed
+      assert closed.state == :closed
     end
 
-    test ":reopen is allowed from :awaiting_verification", %{ws: ws} do
+    test ":reopen is allowed from :verifying", %{ws: ws} do
       issue = task(ws, %{verify_after_deploy: true}) |> in_progress()
       {:ok, awaiting} = Ash.update(issue, %{}, action: :await_verification)
 
       {:ok, reopened} = Ash.update(awaiting, %{}, action: :reopen)
-      assert reopened.status == :open
+      assert reopened.state == :queued
     end
   end
 
@@ -111,7 +110,7 @@ defmodule Arbiter.Tasks.IssueVerificationTest do
 
       {:ok, verified} = Verification.observed(awaiting, "hit /doctor after restart: 3 repos")
 
-      assert verified.status == :closed
+      assert verified.state == :closed
       assert verified.verification_outcome == :observed
       assert verified.verification_evidence == "hit /doctor after restart: 3 repos"
       assert %DateTime{} = verified.closed_at
@@ -138,7 +137,7 @@ defmodule Arbiter.Tasks.IssueVerificationTest do
 
       {:ok, failed} = Verification.failed(awaiting, "capture_source still reads headers")
 
-      assert failed.status == :open
+      assert failed.state == :queued
       assert failed.verification_outcome == :failed
       assert failed.verification_evidence == "capture_source still reads headers"
       assert failed.closed_at == nil
@@ -154,7 +153,7 @@ defmodule Arbiter.Tasks.IssueVerificationTest do
       issue = task(ws)
 
       assert {:ok, :closed, closed} = Verification.finalize_merged(issue, close_upstream: false)
-      assert closed.status == :closed
+      assert closed.state == :closed
       assert Arbiter.Messages.Message.inbox("coordinator", workspace_id: ws.id) == []
     end
 
@@ -164,7 +163,7 @@ defmodule Arbiter.Tasks.IssueVerificationTest do
       assert {:ok, :awaiting_verification, parked} =
                Verification.finalize_merged(issue, close_upstream: false, mr_ref: "#1633")
 
-      assert parked.status == :awaiting_verification
+      assert parked.state == :verifying
       assert [escalation] = Arbiter.Messages.Message.inbox("coordinator", workspace_id: ws.id)
       assert escalation.subject =~ "awaiting verification"
       assert escalation.body =~ "#1633"
@@ -207,7 +206,7 @@ defmodule Arbiter.Tasks.IssueVerificationTest do
       assert {:ok, :awaiting_verification, parked} =
                Verification.finalize_merged(issue, close_upstream: false)
 
-      assert {parked.state, parked.status} == {:verifying, :awaiting_verification}
+      assert {parked.state, parked.attention_cause} == {:verifying, :awaiting_verification}
     end
 
     test "finalize_merged walks a flagged ticket still in the queue through start → :verifying",
@@ -242,8 +241,7 @@ defmodule Arbiter.Tasks.IssueVerificationTest do
 
       {:ok, closed} = Verification.observed(parked, "restarted; the new path answers")
 
-      assert {closed.state, closed.status, closed.close_reason} ==
-               {:closed, :closed, :completed}
+      assert {closed.state, closed.close_reason} == {:closed, :completed}
     end
 
     test "failed reopens a verifying ticket → :queued", %{ws: ws} do
@@ -251,8 +249,7 @@ defmodule Arbiter.Tasks.IssueVerificationTest do
 
       {:ok, reopened} = Verification.failed(parked, "after restart the old path still answers")
 
-      assert {reopened.state, reopened.status, reopened.refined, reopened.close_reason} ==
-               {:queued, :open, true, nil}
+      assert {reopened.state, reopened.close_reason} == {:queued, nil}
     end
   end
 

@@ -37,7 +37,7 @@ defmodule Arbiter.Trackers.Jira do
 
   ## Status mapping & path-finding
 
-  Task lifecycle atoms (`:open | :in_progress | :closed`, plus the richer
+  Tracker-vocabulary atoms (`:open | :in_progress | :closed`, plus the richer
   `:pr_opened | :approved_unmerged | :merged`) map to a Jira target **status
   name** (NOT a transition name) via `tracker.config.status_map`. Jira's REST
   API moves issues by invoking transitions, so `transition/2` resolves a *path*

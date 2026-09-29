@@ -42,7 +42,7 @@ defmodule Arbiter.Worker.Dispatch do
 
   ```
   {:ok, %{
-    task: %Issue{},              # updated, status: :in_progress
+    task: %Issue{},              # updated, state: :active
     worker_pid: pid(),
     machine_id: String.t(),
     machine_pid: pid(),
@@ -58,7 +58,7 @@ defmodule Arbiter.Worker.Dispatch do
   caller owns it and must `Arbiter.Reviews.Checkout.teardown/1` its `:path`.
 
   Or `{:error, reason}` for any step that fails. On error, partial work is
-  best-effort-rolled-back (started worker is stopped; task status revert is
+  best-effort-rolled-back (started worker is stopped; task state revert is
   NOT attempted because the user may want to inspect what happened).
   """
 
@@ -181,7 +181,7 @@ defmodule Arbiter.Worker.Dispatch do
          :ok <- ensure_migrations_up_to_date(),
          {:ok, opts} <- maybe_resolve_repo_for_real_work(task, opts),
          :ok <- maybe_preflight(task, opts),
-         {:ok, task} <- transition_to_in_progress(task, opts),
+         {:ok, task} <- transition_to_active(task, opts),
          {:ok, worktree_path} <- maybe_provision_worktree(task, opts),
          {:ok, worker_pid} <- start_worker(task, worktree_path, opts) do
       task
@@ -208,7 +208,7 @@ defmodule Arbiter.Worker.Dispatch do
   # (bd-bi5pn0). A step failing partway (e.g. a transient network/VPN outage
   # during the Claude subprocess spawn, or a workflow-machine attach failure)
   # previously left that `:starting` registration stranded forever: no retry, no
-  # escalation, and the task stuck `:in_progress` — which also permanently
+  # escalation, and the task stuck `:active` — which also permanently
   # blackholed PRPatrol dedup for the underlying PR (it treats any non-closed
   # follow-up as "already handled"). On error, explicitly fail the worker
   # (`:starting` -> finished `:failed` is a valid FSM transition) with a `:spawn_failed`
@@ -626,7 +626,7 @@ defmodule Arbiter.Worker.Dispatch do
       "Stopping it now discards the review in flight and the next dispatch restarts the " <>
       "gate from round 1. Wait for the verdict: every pass is bounded by the workspace's " <>
       "`review_gate.timeout_ms`, and a gate that stalls with nothing in flight is stopped " <>
-      "and the task parked (`review_park_reason`), after which `arb worker resume " <>
+      "and the task parked (its attention cause names why), after which `arb worker resume " <>
       "#{task_id}` re-runs the review."
   end
 
@@ -1104,17 +1104,18 @@ defmodule Arbiter.Worker.Dispatch do
   # `:closed` task — the 2026-07-08 lt-c9td4r failure.
   #
   # When the task raced to `:closed` and the worker is still alive, atomically
-  # reopen it (`:reopen` → `:in_progress`) so the live worker is realigned rather
-  # than orphaned — the same recovery the operator had to perform by hand
-  # (`ticket_reopen`). Otherwise the task is returned unchanged. Public (`@doc
-  # false`) so the invariant is unit-testable in isolation.
+  # reopen it (`:reopen` → `:queued`, then `:start` → `:active`) so the live
+  # worker is realigned rather than orphaned — the same recovery the operator
+  # had to perform by hand (`ticket_reopen`). Otherwise the task is returned
+  # unchanged. Public (`@doc false`) so the invariant is unit-testable in
+  # isolation.
   @doc false
   @spec realign_task_if_orphaned(String.t(), pid() | nil) ::
           {:ok, Issue.t()} | {:error, term()}
   def realign_task_if_orphaned(task_id, worker_pid) when is_binary(task_id) do
     with {:ok, task} <- load_task(task_id) do
       cond do
-        task.status != :closed ->
+        task.state != :closed ->
           {:ok, task}
 
         not (is_pid(worker_pid) and Process.alive?(worker_pid)) ->
@@ -1131,7 +1132,7 @@ defmodule Arbiter.Worker.Dispatch do
           )
 
           with {:ok, reopened} <- reopen_task(task) do
-            transition_to_in_progress(reopened, [])
+            transition_to_active(reopened, [])
           end
       end
     end
@@ -1517,9 +1518,9 @@ defmodule Arbiter.Worker.Dispatch do
   # bd-842qio: the `start` transition (queued → active) — see
   # `Issue.start_work/2`, which also covers a manual dispatch from Backlog and
   # leaves a ticket already at work alone.
-  defp transition_to_in_progress(%Issue{} = task, opts) do
+  defp transition_to_active(%Issue{} = task, opts) do
     # bd-6xaaam: stamp review_only: true so SyncTracker/SyncFields skip
-    # write-back for the in_progress transition and any later field update.
+    # write-back for the start transition and any later field update.
     attrs = if Keyword.get(opts, :review, false), do: %{review_only: true}, else: %{}
 
     case Issue.start_work(task, attrs) do

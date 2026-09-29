@@ -159,8 +159,8 @@ defmodule Arbiter.Tasks.DecommissionSweepTest do
 
       {:ok, r1} = Ash.get(Issue, b1.id)
       {:ok, r2} = Ash.get(Issue, b2.id)
-      assert r1.status == :closed
-      assert r2.status == :closed
+      assert r1.state == :closed
+      assert r2.state == :closed
     end
   end
 end

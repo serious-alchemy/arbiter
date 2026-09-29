@@ -59,8 +59,9 @@ defmodule Arbiter.Tasks.Dedup do
   end
 
   @doc """
-  Open local issues in `workspace_id` whose title matches `title`
-  case-insensitively (after trimming). `[]` when the check doesn't apply.
+  Live local tickets (any state short of `:verifying` / `:closed`) in
+  `workspace_id` whose title matches `title` case-insensitively (after
+  trimming). `[]` when the check doesn't apply.
   """
   @spec local_matches(String.t() | nil, String.t() | nil) :: [Issue.t()]
   def local_matches(title, workspace_id) when is_binary(title) and is_binary(workspace_id) do
@@ -69,7 +70,7 @@ defmodule Arbiter.Tasks.Dedup do
     query =
       Issue
       |> Ash.Query.new()
-      |> Ash.Query.filter(status in [:open, :in_progress] and workspace_id == ^workspace_id)
+      |> Ash.Query.filter(state not in [:verifying, :closed] and workspace_id == ^workspace_id)
 
     case Ash.read(query) do
       {:ok, issues} -> Enum.filter(issues, &(normalize_title(&1.title) == norm))

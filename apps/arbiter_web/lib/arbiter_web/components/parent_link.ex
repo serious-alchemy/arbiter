@@ -37,7 +37,7 @@ defmodule ArbiterWeb.ParentLink do
         id: "bd-cv1inp",
         title: "Browser coordinator sessions",
         issue_type: :epic,
-        status: :open,
+        state: :queued,
         child_total: 14,
         child_closed: 9,
         # set only when the parent is in another workspace
@@ -94,7 +94,7 @@ defmodule ArbiterWeb.ParentLink do
     epic? = Map.get(parent, :issue_type) == :epic
     total = Map.get(parent, :child_total) || 0
     closed_count = Map.get(parent, :child_closed) || 0
-    closed? = Map.get(parent, :status) == :closed
+    closed? = Map.get(parent, :state) == :closed
 
     assigns =
       assigns

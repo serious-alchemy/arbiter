@@ -39,14 +39,14 @@ defmodule Arbiter.Trackers.Linear do
   Linear workflow states are team-scoped and named. The adapter resolves the
   target state for a transition in two stages:
 
-    1. If the workspace's `status_map` names a state for the task status, look
+    1. If the workspace's `status_map` names a state for the tracker status, look
        up a state with that name in the team's workflow states.
     2. Otherwise, fall back to the Linear state `type` field:
          * `:open` → type `"unstarted"` or `"backlog"` (first match)
          * `:in_progress` / `:pr_opened` / `:approved_unmerged` → `"started"`
          * `:closed` / `:merged` → `"completed"`
 
-  States with type `"triage"` or `"cancelled"` have no task-vocabulary
+  States with type `"triage"` or `"cancelled"` have no tracker-vocabulary
   equivalent and are never selected by the type-fallback path; they remain
   reachable via an explicit `status_map` entry.
 
@@ -77,7 +77,7 @@ defmodule Arbiter.Trackers.Linear do
 
   @stub_name Arbiter.Trackers.Linear.HTTP
 
-  # Linear state types that map to task-vocabulary atoms (used as fallback
+  # Linear state types that map to tracker-vocabulary atoms (used as fallback
   # when no explicit status_map entry is configured).
   @type_to_status %{
     "unstarted" => :open,
@@ -87,7 +87,7 @@ defmodule Arbiter.Trackers.Linear do
     "cancelled" => :closed
   }
 
-  # Which Linear state types to prefer for each task status, in priority order.
+  # Which Linear state types to prefer for each tracker status, in priority order.
   @status_type_preference %{
     open: ["unstarted", "backlog"],
     in_progress: ["started"],
@@ -440,7 +440,7 @@ defmodule Arbiter.Trackers.Linear do
                status: nil,
                message:
                  "no Linear state with type in #{inspect(preferred_types)} found " <>
-                   "in team's workflow states for task status #{inspect(status)}",
+                   "in team's workflow states for tracker status #{inspect(status)}",
                raw: nil
              }}
         end
@@ -450,7 +450,7 @@ defmodule Arbiter.Trackers.Linear do
          %Error{
            kind: :transition_not_found,
            status: nil,
-           message: "no state mapping for task status #{inspect(status)}",
+           message: "no state mapping for tracker status #{inspect(status)}",
            raw: nil
          }}
     end

@@ -19,6 +19,8 @@ defmodule Arbiter.Worker.WatchdogRestartTest do
 
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures, only: [put_state!: 2]
+
   alias Arbiter.Messages.Message
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Worker
@@ -49,7 +51,7 @@ defmodule Arbiter.Worker.WatchdogRestartTest do
         issue_type: :feature
       })
 
-    {:ok, task} = Ash.update(task, %{status: :in_progress})
+    task = put_state!(task, :active)
     on_exit(fn -> stop_watchdog(task.id) end)
     task
   end

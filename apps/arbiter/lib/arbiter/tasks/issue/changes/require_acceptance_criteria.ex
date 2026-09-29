@@ -9,9 +9,9 @@ defmodule Arbiter.Tasks.Issue.Changes.RequireAcceptanceCriteria do
   no meaningful acceptance criteria to write, so this records a standard
   reason instead of forcing a rubber-stamp waiver on every D0 ticket.
 
-  Already-refined issues skip the check entirely — re-promoting (a no-op
-  write) must stay idempotent even if the issue was refined before this rule
-  existed and has no ACs and no waiver on file.
+  An issue already past `:backlog` skips the check entirely — re-promoting (a
+  no-op write) must stay idempotent even if the issue was promoted before this
+  rule existed and has no ACs and no waiver on file.
   """
 
   use Ash.Resource.Change
@@ -28,7 +28,7 @@ defmodule Arbiter.Tasks.Issue.Changes.RequireAcceptanceCriteria do
     issue = changeset.data
 
     cond do
-      issue.refined ->
+      issue.state != :backlog ->
         changeset
 
       not Issue.gated_type?(issue.issue_type) ->

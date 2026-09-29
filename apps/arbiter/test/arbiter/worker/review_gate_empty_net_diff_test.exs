@@ -17,6 +17,8 @@ defmodule Arbiter.Worker.ReviewGateEmptyNetDiffTest do
 
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures, only: [put_state!: 2]
+
   require Ash.Query
 
   alias Arbiter.Reviews.Coverage.Entry
@@ -88,7 +90,7 @@ defmodule Arbiter.Worker.ReviewGateEmptyNetDiffTest do
     {:ok, task} =
       Ash.create(Issue, %{title: "empty net diff task", workspace_id: ws.id, issue_type: :bug})
 
-    {:ok, task} = Ash.update(task, %{status: :in_progress})
+    task = put_state!(task, :active)
     task
   end
 
@@ -196,7 +198,7 @@ defmodule Arbiter.Worker.ReviewGateEmptyNetDiffTest do
     )
 
     parked = Ash.get!(Issue, task.id)
-    assert parked.review_park_reason == "empty_net_diff"
+    assert parked.attention_cause == :empty_net_diff
 
     # Content stays fail-closed: no coverage row, no stamp, no merge.
     assert coverage_rows(task.id) == []

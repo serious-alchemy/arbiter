@@ -54,7 +54,7 @@ defmodule Arbiter.Trackers.Gitlab do
   ## Status mapping
 
   GitLab Issues have only two native states — `opened` and `closed` — so the
-  task-vocabulary `:in_progress` is expressed as an *opened* issue carrying a
+  tracker-vocabulary `:in_progress` is expressed as an *opened* issue carrying a
   label (default `"in progress"`). `transition/2`:
 
     1. Resolves the target status to a `%{state, label}` pair via the
@@ -194,7 +194,7 @@ defmodule Arbiter.Trackers.Gitlab do
   def list_transitions(ref) when is_binary(ref) do
     # GitLab imposes no transition state machine — an issue can move to any of
     # the mapped statuses at any time — so we validate the ref exists, then
-    # return every task status the workspace knows how to map.
+    # return every tracker status the workspace knows how to map.
     with {:ok, cfg} <- Config.resolve(),
          {:ok, _issue} <- request(cfg, :get, issue_path(ref), []) |> handle_json() do
       statuses =
@@ -692,7 +692,7 @@ defmodule Arbiter.Trackers.Gitlab do
          %Error{
            kind: :transition_not_found,
            status: nil,
-           message: "no GitLab state mapped for task status #{inspect(status)}",
+           message: "no GitLab state mapped for tracker status #{inspect(status)}",
            raw: nil
          }}
     end

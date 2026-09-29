@@ -9,6 +9,7 @@ defmodule ArbiterWeb.RefineEntryPointTest do
   use ArbiterWeb.ConnCase, async: false
 
   import Phoenix.LiveViewTest
+  import Arbiter.LifecycleFixtures
   import ArbiterWeb.TaskDetailLiveHelpers
 
   # The board loads by start_async (bd-15bn6s) and a real Snapshot.load can
@@ -59,16 +60,16 @@ defmodule ArbiterWeb.RefineEntryPointTest do
       assert has_element?(view, "#task-refine")
     end
 
-    test "does not offer it on a refined issue", %{conn: conn, issue: issue} do
+    test "does not offer it on a queued issue", %{conn: conn, issue: issue} do
       {:ok, issue} = Ash.update(issue, %{acceptance: "- ac"}, action: :update)
-      {:ok, refined} = Ash.update(issue, %{}, action: :promote_to_ready)
+      {:ok, queued} = Ash.update(issue, %{}, action: :promote_to_ready)
 
-      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{refined.id}")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{queued.id}")
       refute has_element?(view, "#task-refine")
     end
 
     test "does not offer it on a running issue", %{conn: conn, issue: issue} do
-      {:ok, running} = Ash.update(issue, %{status: :in_progress}, action: :update)
+      running = put_state!(issue, :active)
 
       {:ok, view, _html} = live_task(conn, ~p"/tasks/#{running.id}")
       refute has_element?(view, "#task-refine")
@@ -121,11 +122,11 @@ defmodule ArbiterWeb.RefineEntryPointTest do
 
     test "does not offer it on a Ready card", %{conn: conn, issue: issue} do
       {:ok, issue} = Ash.update(issue, %{acceptance: "- ac"}, action: :update)
-      {:ok, refined} = Ash.update(issue, %{}, action: :promote_to_ready)
+      {:ok, queued} = Ash.update(issue, %{}, action: :promote_to_ready)
 
       {:ok, view, _html} = live(conn, ~p"/")
       render_async(view, @async_timeout)
-      refute has_element?(view, "#board-refine-#{refined.id}")
+      refute has_element?(view, "#board-refine-#{queued.id}")
     end
 
     test "a click launches the bound session and opens it in the dock", %{

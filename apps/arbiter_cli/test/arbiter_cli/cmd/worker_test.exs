@@ -330,7 +330,7 @@ defmodule ArbiterCli.Cmd.WorkerTest do
             "task_id" => "bd-001",
             "kind" => "implement",
             "state" => "working",
-            "phase" => "waiting_ci_merge",
+            "phase" => "in_review",
             "phase_label" => "waiting on CI / merge",
             "agent_live" => false,
             "current_step" => "implement",
@@ -353,7 +353,7 @@ defmodule ArbiterCli.Cmd.WorkerTest do
 
       {out, _err, exit_code} = capture(fn -> Worker.run(["list"]) end)
       assert exit_code == 0
-      assert out =~ "phase=waiting_ci_merge"
+      assert out =~ "phase=in_review"
       assert out =~ "phase=implementing"
       # The dead row is called out; the live one is not.
       [dead, live] = out |> String.split("\n") |> Enum.filter(&(&1 =~ "bd-00"))

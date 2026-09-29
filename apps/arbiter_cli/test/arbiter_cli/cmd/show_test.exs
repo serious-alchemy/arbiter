@@ -7,7 +7,7 @@ defmodule ArbiterCli.Cmd.ShowTest do
     stub_get("/api/issues/gte-006", %{
       "id" => "gte-006",
       "title" => "CLI escript",
-      "status" => "open",
+      "state" => "queued",
       "priority" => 2,
       "description" => "Build it"
     })
@@ -62,11 +62,9 @@ defmodule ArbiterCli.Cmd.ShowTest do
         show(%{
           "id" => "bd-1",
           "title" => "merging one",
-          "status" => "in_progress",
           "state" => "merging",
           "column" => "merging",
           "step" => "merge_blocked",
-          "refined" => true,
           "attention" => %{
             "owner" => "operator",
             "cause" => "merge_blocked",
@@ -111,11 +109,9 @@ defmodule ArbiterCli.Cmd.ShowTest do
         show(%{
           "id" => "bd-2",
           "title" => "closed one",
-          "status" => "closed",
           "state" => "closed",
           "column" => "closed",
           "close_reason" => "duplicate",
-          "refined" => true,
           "attention" => nil,
           "current_run" => nil
         })
@@ -133,11 +129,9 @@ defmodule ArbiterCli.Cmd.ShowTest do
         show(%{
           "id" => "bd-3",
           "title" => "blocked one",
-          "status" => "open",
           "state" => "queued",
           "column" => "blocked",
-          "blocked_by" => ["bd-8", "bd-9"],
-          "refined" => true
+          "blocked_by" => ["bd-8", "bd-9"]
         })
 
       assert line(out, "State") =~ "queued (Blocked)"
@@ -150,11 +144,9 @@ defmodule ArbiterCli.Cmd.ShowTest do
         show(%{
           "id" => "bd-4",
           "title" => "working",
-          "status" => "in_progress",
           "state" => "active",
           "column" => "in_progress",
           "step" => "in_review",
-          "refined" => true,
           "current_run" => %{
             "kind" => "review",
             "state" => "working",
@@ -171,10 +163,13 @@ defmodule ArbiterCli.Cmd.ShowTest do
       refute line(out, "Backlog")
     end
 
-    test "an older server's payload (no state) still prints its status" do
-      out = show(%{"id" => "bd-5", "title" => "old", "status" => "open", "refined" => false})
-      assert line(out, "Status") =~ "open"
+    test "a backlog ticket prints its Backlog line and no legacy Status line" do
+      out =
+        show(%{"id" => "bd-5", "title" => "new", "state" => "backlog", "column" => "backlog"})
+
+      assert line(out, "State") =~ "backlog (Backlog)"
       assert line(out, "Backlog") =~ "Backlog"
+      refute line(out, "Status")
     end
   end
 end

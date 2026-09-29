@@ -354,7 +354,7 @@ defmodule ArbiterCli.Cmd.UpdateDeployTest do
     test "a positional id still routes to the issue editor" do
       stub_patch(
         "/api/issues/bd-001",
-        %{"id" => "bd-001", "title" => "X", "priority" => 0, "status" => "open"},
+        %{"id" => "bd-001", "title" => "X", "priority" => 0, "state" => "queued"},
         200
       )
 

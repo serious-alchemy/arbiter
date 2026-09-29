@@ -100,7 +100,7 @@ defmodule Arbiter.Workflows.MergeQueue.PassDispatchLifecycleTest do
     fix_pass!(ws, repo, issue)
 
     reloaded = Ash.get!(Issue, issue.id)
-    assert {reloaded.state, reloaded.status, reloaded.pr_ref} == {:active, :in_progress, "#77"}
+    assert {reloaded.state, reloaded.pr_ref} == {:active, "#77"}
     assert List.last(version_actions(issue.id)) == :return_to_work
   end
 

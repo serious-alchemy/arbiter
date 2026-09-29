@@ -18,6 +18,8 @@ defmodule Arbiter.Worker.ReviewGateCoordinatorOnlyTest do
 
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures, only: [put_state!: 2]
+
   alias Arbiter.Messages.Message
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Test.StubFixRoundDispatcher
@@ -105,7 +107,7 @@ defmodule Arbiter.Worker.ReviewGateCoordinatorOnlyTest do
         issue_type: :feature
       })
 
-    {:ok, task} = Ash.update(task, %{status: :in_progress})
+    task = put_state!(task, :active)
     task
   end
 

@@ -1,8 +1,9 @@
 defmodule Arbiter.Tasks.IssueLifecycleTest do
   @moduledoc """
   bd-842qio (ticket lifecycle 1/13): the stored `state`, its named
-  transitions, `close_reason`, `rank`, and the legacy dual-write, exercised
-  through the `Issue` actions.
+  transitions, `close_reason` and `rank`, exercised through the `Issue`
+  actions. bd-36ytcl (12/13) removed the legacy `status` / `refined` columns
+  the transitions used to dual-write.
   """
   use Arbiter.DataCase, async: false
 
@@ -16,7 +17,12 @@ defmodule Arbiter.Tasks.IssueLifecycleTest do
   @table [
     {:promote, :backlog, :queued},
     {:demote, :queued, :backlog},
+    {:demote, :active, :backlog},
+    {:demote, :merging, :backlog},
+    {:start, :backlog, :active},
     {:start, :queued, :active},
+    {:requeue, :active, :queued},
+    {:requeue, :merging, :queued},
     {:open_pr, :active, :merging},
     {:return_to_work, :merging, :active},
     {:await_verification, :active, :verifying},
@@ -119,8 +125,8 @@ defmodule Arbiter.Tasks.IssueLifecycleTest do
         succeeded = for {t, f, to, :ok} <- results, do: {t, f, to}
         assert Enum.sort(succeeded) == Enum.sort(@table)
 
-        # 6 from-states × the 8 (transition, target) pairs.
-        assert length(results) == 48
+        # 6 from-states × the 9 (transition, target) pairs.
+        assert length(results) == 54
       end
     end
 
@@ -145,9 +151,9 @@ defmodule Arbiter.Tasks.IssueLifecycleTest do
     test "a refusal names the transition and the state it was refused from", %{ws: ws} do
       issue = ticket(ws)
 
-      assert {:error, %Ash.Error.Invalid{} = err} = Ash.update(issue, %{}, action: :start)
+      assert {:error, %Ash.Error.Invalid{} = err} = Ash.update(issue, %{}, action: :open_pr)
       message = Exception.message(err)
-      assert message =~ "start"
+      assert message =~ "open_pr"
       assert message =~ "backlog"
     end
   end
@@ -169,57 +175,18 @@ defmodule Arbiter.Tasks.IssueLifecycleTest do
     end
   end
 
-  describe "dual-write: each transition writes the legacy columns (AC6)" do
-    test "backlog → status open, unrefined", %{ws: ws} do
-      demoted = ws |> in_state(:queued) |> transition!(:demote)
-
-      assert {demoted.state, demoted.status, demoted.refined} == {:backlog, :open, false}
-      assert %{status: :open, refined: false} = reload(demoted)
+  describe "the legacy columns are gone (bd-36ytcl)" do
+    test "status, refined and the review-park columns are not attributes" do
+      for name <- [:status, :refined, :review_park_reason, :review_parked_at] do
+        assert Ash.Resource.Info.attribute(Issue, name) == nil, "#{name} is still an attribute"
+      end
     end
 
-    test "queued → status open, refined", %{ws: ws} do
-      promoted = in_state(ws, :queued)
-      assert {promoted.state, promoted.status, promoted.refined} == {:queued, :open, true}
+    test ":update refuses a status input and leaves the state alone", %{ws: ws} do
+      issue = in_state(ws, :active)
 
-      # Reopen lands in the queue too, whatever `refined` was when it closed.
-      reopened = ws |> in_state(:closed) |> transition!(:reopen)
-      assert {reopened.state, reopened.status, reopened.refined} == {:queued, :open, true}
-      assert %{status: :open, refined: true} = reload(reopened)
-    end
-
-    test "active → status in_progress, refined", %{ws: ws} do
-      started = in_state(ws, :active)
-      assert {started.state, started.status, started.refined} == {:active, :in_progress, true}
-
-      returned = ws |> in_state(:merging) |> transition!(:return_to_work)
-
-      assert {returned.state, returned.status, returned.refined} ==
-               {:active, :in_progress, true}
-    end
-
-    test "merging → status in_progress, refined", %{ws: ws} do
-      merging = in_state(ws, :merging)
-      assert {merging.state, merging.status, merging.refined} == {:merging, :in_progress, true}
-      assert %{status: :in_progress, refined: true} = reload(merging)
-    end
-
-    test "verifying → status awaiting_verification, refined", %{ws: ws} do
-      verifying = in_state(ws, :verifying)
-
-      assert {verifying.state, verifying.status, verifying.refined} ==
-               {:verifying, :awaiting_verification, true}
-    end
-
-    test "closed → status closed, refined left as it was", %{ws: ws} do
-      from_backlog = ws |> in_state(:backlog) |> transition!(:close)
-
-      assert {from_backlog.state, from_backlog.status, from_backlog.refined} ==
-               {:closed, :closed, false}
-
-      from_queued = ws |> in_state(:queued) |> transition!(:close)
-
-      assert {from_queued.state, from_queued.status, from_queued.refined} ==
-               {:closed, :closed, true}
+      assert {:error, %Ash.Error.Invalid{}} = Ash.update(issue, %{status: :open})
+      assert reload(issue).state == :active
     end
   end
 
@@ -308,7 +275,7 @@ defmodule Arbiter.Tasks.IssueLifecycleTest do
       issue = ticket(ws)
 
       {:ok, promoted} = Ash.update(issue, %{}, action: :promote_to_ready)
-      assert {promoted.state, promoted.refined} == {:queued, true}
+      assert promoted.state == :queued
 
       assert {:ok, %Issue{state: :queued}} = Ash.update(promoted, %{}, action: :promote_to_ready)
     end
@@ -317,7 +284,7 @@ defmodule Arbiter.Tasks.IssueLifecycleTest do
       queued = in_state(ws, :queued)
 
       {:ok, demoted} = Ash.update(queued, %{}, action: :return_to_backlog)
-      assert {demoted.state, demoted.refined} == {:backlog, false}
+      assert demoted.state == :backlog
 
       assert {:ok, %Issue{state: :backlog}} =
                Ash.update(demoted, %{}, action: :return_to_backlog)
@@ -325,32 +292,31 @@ defmodule Arbiter.Tasks.IssueLifecycleTest do
 
     test ":return_to_backlog on an in-progress ticket whose worker stopped lands in :backlog",
          %{ws: ws} do
-      # bd-2098: no live worker, so the demote resets status too.
+      # bd-2098: no live worker, so the ticket is demoted out of its run.
       for state <- [:active, :merging] do
         {:ok, demoted} = ws |> in_state(state) |> Ash.update(%{}, action: :return_to_backlog)
 
-        assert {demoted.state, demoted.status, demoted.refined} == {:backlog, :open, false}
-        assert %{state: :backlog, status: :open, refined: false} = reload(demoted)
+        assert demoted.state == :backlog
+        assert %{state: :backlog} = reload(demoted)
       end
     end
 
-    test "a legacy status write through :update carries the state with it", %{ws: ws} do
-      # open → in_progress: the state follows the backfill rule.
-      {:ok, working} = Ash.update(ticket(ws), %{status: :in_progress})
-      assert working.state == :active
-
-      {:ok, with_pr} = Ash.update(ticket(ws), %{status: :in_progress, pr_ref: "#7"})
-      assert with_pr.state == :merging
-
-      # in_progress → open (AuthDeath, the board's drag back to Ready).
-      {:ok, requeued} = Ash.update(in_state(ws, :active), %{status: :open})
-      assert {requeued.state, requeued.refined} == {:queued, true}
-
-      {:ok, back_to_backlog} = Ash.update(working, %{status: :open})
-      assert {back_to_backlog.state, back_to_backlog.refined} == {:backlog, false}
+    test ":requeue puts an active or merging ticket back in the queue", %{ws: ws} do
+      # AuthDeath and the board's drag back to Ready.
+      for state <- [:active, :merging] do
+        {:ok, requeued} = ws |> in_state(state) |> Ash.update(%{}, action: :requeue)
+        assert requeued.state == :queued
+        assert reload(requeued).state == :queued
+      end
     end
 
-    test "an :update that leaves status alone leaves the state alone", %{ws: ws} do
+    test "Issue.start_work/2 takes a Backlog ticket straight to :active (a forced dispatch)",
+         %{ws: ws} do
+      assert {:ok, %Issue{state: :active}} = Issue.start_work(ticket(ws))
+      assert {:ok, %Issue{state: :active}} = Issue.start_work(in_state(ws, :queued))
+    end
+
+    test "an :update leaves the state alone", %{ws: ws} do
       merging = in_state(ws, :merging)
 
       {:ok, renamed} = Ash.update(merging, %{title: "renamed", pr_ref: nil})
@@ -367,23 +333,24 @@ defmodule Arbiter.Tasks.IssueLifecycleTest do
       transition!(issue, :close, %{close_reason: :duplicate})
 
       assert_receive {:task_lifecycle, :closed,
-                      %Issue{id: ^id, status: :closed, state: :closed, close_reason: :duplicate}}
+                      %Issue{id: ^id, state: :closed, close_reason: :duplicate}}
     end
 
-    test "the task_state Events payload carries state and close_reason", %{ws: ws} do
+    test "the task_state Events payload carries state and close_reason, not status",
+         %{ws: ws} do
       Phoenix.PubSub.subscribe(Arbiter.PubSub, Arbiter.Events.pubsub_topic(ws.id))
       issue = ticket(ws)
       id = issue.id
 
       assert_receive {:event, %{topic: "task_state", task_id: ^id, event: "created"} = created}
-      assert created.status == "open"
+      refute Map.has_key?(created, :status)
       assert created.state == "backlog"
       assert created.close_reason == nil
 
       transition!(issue, :close, %{close_reason: :wont_do})
 
       assert_receive {:event, %{topic: "task_state", task_id: ^id, event: "closed"} = closed}
-      assert closed.status == "closed"
+      refute Map.has_key?(closed, :status)
       assert closed.state == "closed"
       assert closed.close_reason == "wont_do"
     end
@@ -399,7 +366,7 @@ defmodule Arbiter.Tasks.IssueLifecycleTest do
       {:ok, _} = Arbiter.Tasks.Dependencies.add(id, blocker.id, :depends_on)
 
       assert_receive {:event, %{topic: "task_state", task_id: ^id, event: "created"} = created}
-      assert created.status == "open"
+      refute Map.has_key?(created, :status)
       assert created.column == "backlog"
       assert created.attention == nil
 
@@ -413,7 +380,7 @@ defmodule Arbiter.Tasks.IssueLifecycleTest do
       assert_receive {:event,
                       %{topic: "task_state", task_id: ^vid, state: "verifying"} = awaiting}
 
-      assert awaiting.status == "awaiting_verification"
+      refute Map.has_key?(awaiting, :status)
       assert awaiting.column == "verifying"
       assert %{owner: "coordinator", cause: "awaiting_verification"} = awaiting.attention
     end

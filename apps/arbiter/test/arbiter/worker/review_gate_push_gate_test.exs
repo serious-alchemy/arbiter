@@ -30,12 +30,14 @@ defmodule Arbiter.Worker.ReviewGatePushGateTest do
 
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures, only: [put_state!: 2]
+
   require Ash.Query
 
   alias Arbiter.CircuitBreaker
   alias Arbiter.Messages.Message
   alias Arbiter.Reviews.Coverage.Entry
-  alias Arbiter.Tasks.{Issue, Workspace}
+  alias Arbiter.Tasks.{Issue, ReviewPark, Workspace}
   alias Arbiter.Worker
   alias Arbiter.Worker.ReviewGate
 
@@ -137,7 +139,7 @@ defmodule Arbiter.Worker.ReviewGatePushGateTest do
     {:ok, task} =
       Ash.create(Issue, %{title: "push-gate task", workspace_id: ws.id, issue_type: :feature})
 
-    {:ok, task} = Ash.update(task, %{status: :in_progress})
+    task = put_state!(task, :active)
     task
   end
 
@@ -292,9 +294,9 @@ defmodule Arbiter.Worker.ReviewGatePushGateTest do
       author = start_author(task, ws, repo, branch, wt)
       start_gate(author, task, ws, branch, wt, command: [@push_check, branch, "ROUND1"])
 
-      wait_until(fn -> Ash.get!(Issue, task.id).review_park_reason != nil end, 20_000)
+      wait_until(fn -> ReviewPark.parked?(Ash.get!(Issue, task.id)) end, 20_000)
 
-      assert Ash.get!(Issue, task.id).review_park_reason == "head_not_pushed"
+      assert Ash.get!(Issue, task.id).attention_cause == :head_not_pushed
 
       # The reviewer was never launched: no sentinel, no verdict, no coverage.
       # (The fixture writes its sentinel to the COMMON git dir: since bd-a22hib

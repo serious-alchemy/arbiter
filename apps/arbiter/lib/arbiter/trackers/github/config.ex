@@ -35,8 +35,8 @@ defmodule Arbiter.Trackers.GitHub.Config do
   ## `status_map`
 
   GitHub Issues have only two native states — `"open"` and `"closed"` — so the
-  task-vocabulary `:in_progress` is expressed as an *open* issue carrying a
-  label. Each task status maps to a `%{state: ..., label: ...}` pair:
+  tracker-vocabulary `:in_progress` is expressed as an *open* issue carrying a
+  label. Each tracker status maps to a `%{state: ..., label: ...}` pair:
 
     * `state` is `"open"` or `"closed"` (anything else falls back to the
       default for that status).

@@ -13,8 +13,9 @@ defmodule Arbiter.Trackers.Tracker do
       tracker-specific (a Jira issue map, a Linear node, etc.); callers should
       treat the result as opaque and use other callbacks to act on it.
     * `transition/2` — move the external item to a target status. The status
-      atom uses the task vocabulary (`:open | :in_progress | :closed`); each
-      adapter maps it to its own state machine.
+      atom uses the tracker vocabulary (`:open | :in_progress | :closed`, mapped
+      from the ticket's `state` by `status_for_state/1`); each adapter maps it
+      to its own state machine.
     * `update_fields/2` — patch fields on the external item. The fields map
       uses task-domain keys (`:title`, `:description`, ...); the
       adapter renames + format-converts (e.g. Markdown → ADF for Jira).
@@ -24,7 +25,7 @@ defmodule Arbiter.Trackers.Tracker do
       adapter's canonical ref form (e.g. `"AX-17585"` for Jira). Returns
       `:error` if the string is clearly not for this tracker.
     * `list_transitions/1` — return the set of legal next-states from the
-      current state, as task-vocabulary atoms.
+      current state, as tracker-vocabulary atoms.
     * `list_open/1` — return open items in the tracker that look "claimable"
       by the active workspace's user (assignment is the claim signal). Used
       by `arb list --tracker` to surface upstream backlog alongside local
@@ -78,10 +79,11 @@ defmodule Arbiter.Trackers.Tracker do
   @type ref :: String.t()
 
   @typedoc """
-  Task-domain status / lifecycle-event atoms passed to `transition/2`.
+  Tracker-vocabulary status / lifecycle-event atoms passed to `transition/2`.
 
-  `:open | :in_progress | :closed` are the task's own statuses. The remaining
-  atoms are richer lifecycle moments that don't map to a task status but still
+  `:open | :in_progress | :closed` are the upstream item's statuses — a
+  ticket's `state` maps onto them via `status_for_state/1`. The remaining
+  atoms are richer lifecycle moments that don't map to a ticket state but still
   drive an external workflow (e.g. Jira's AX board): `:pr_opened` (PR opened
   for review), `:approved_unmerged` (review approved but parked, not merged),
   and `:merged` (PR merged). Adapters that don't model an event simply leave it
@@ -132,6 +134,19 @@ defmodule Arbiter.Trackers.Tracker do
           optional(:issue_type) => String.t() | nil
         }
 
+  @doc """
+  The tracker status a ticket in lifecycle `state` corresponds to
+  (bd-36ytcl): Backlog and Queued are `:open` upstream, Active and Merging
+  `:in_progress`, Closed `:closed`. `nil` for `:verifying` — a merged ticket's
+  upstream close is pushed at merge time (`Arbiter.Tasks.Verification`), not
+  derived from the state — and for anything else.
+  """
+  @spec status_for_state(atom() | nil) :: :open | :in_progress | :closed | nil
+  def status_for_state(state) when state in [:backlog, :queued], do: :open
+  def status_for_state(state) when state in [:active, :merging], do: :in_progress
+  def status_for_state(:closed), do: :closed
+  def status_for_state(_state), do: nil
+
   @callback fetch(ref) :: {:ok, map()} | {:error, term()}
   @callback transition(ref, status) :: :ok | {:error, term()}
   @callback update_fields(ref, map()) :: :ok | {:error, term()}
@@ -163,7 +178,7 @@ defmodule Arbiter.Trackers.Tracker do
   @callback assignees(map()) :: [String.t()]
 
   @doc """
-  Derives the task-vocabulary status (`:open | :in_progress | :closed`) from
+  Derives the tracker-vocabulary status (`:open | :in_progress | :closed`) from
   a raw issue map returned by `fetch/1`.
   """
   @callback issue_status(map()) :: status()

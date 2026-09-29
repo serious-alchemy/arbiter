@@ -341,13 +341,13 @@ defmodule Arbiter.Tasks.Claim do
 
       closes =
         task_by_ref
-        # bd-9so315: a task parked at :awaiting_verification is one whose
+        # bd-9so315: a task parked at :verifying is one whose
         # upstream issue was deliberately closed at merge — it is absent from
         # `list_open` for exactly that reason, and closing it here would skip
         # the restart-and-observe the flag exists to force. It stays in
         # `task_by_ref` above so the create arm still dedups against it.
         |> Enum.reject(fn {ref, task} ->
-          Map.has_key?(assigned_by_ref, ref) or task.status == :awaiting_verification
+          Map.has_key?(assigned_by_ref, ref) or task.state == :verifying
         end)
         |> Enum.flat_map(fn {ref, task} ->
           case close_reason(adapter, ref, current_user_id) do
@@ -486,7 +486,7 @@ defmodule Arbiter.Tasks.Claim do
     query =
       Issue
       |> Ash.Query.filter(
-        workspace_id == ^workspace.id and tracker_type == ^type and status == :closed and
+        workspace_id == ^workspace.id and tracker_type == ^type and state == :closed and
           not is_nil(tracker_ref)
       )
 
@@ -508,7 +508,7 @@ defmodule Arbiter.Tasks.Claim do
     query =
       Issue
       |> Ash.Query.filter(
-        workspace_id == ^workspace.id and tracker_type == ^type and status != :closed and
+        workspace_id == ^workspace.id and tracker_type == ^type and state != :closed and
           not is_nil(tracker_ref)
       )
 

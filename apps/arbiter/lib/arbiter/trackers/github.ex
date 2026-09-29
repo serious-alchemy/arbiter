@@ -40,7 +40,7 @@ defmodule Arbiter.Trackers.GitHub do
   ## Status mapping
 
   GitHub Issues have only two native states — `open` and `closed` — so the
-  task-vocabulary `:in_progress` is expressed as an open issue carrying a
+  tracker-vocabulary `:in_progress` is expressed as an open issue carrying a
   label (default `"in progress"`). `transition/2`:
 
     1. Resolves the target status to a `%{state, label}` pair via the
@@ -178,7 +178,7 @@ defmodule Arbiter.Trackers.GitHub do
   def list_transitions(ref) when is_binary(ref) do
     # GitHub imposes no transition state machine — an issue can move to any of
     # the mapped statuses at any time — so we validate the ref exists, then
-    # return every task status the workspace knows how to map.
+    # return every tracker status the workspace knows how to map.
     with {:ok, cfg} <- Config.resolve(),
          {:ok, _issue} <- request(cfg, :get, issue_path(cfg, ref), []) |> handle_json() do
       statuses =
@@ -263,7 +263,7 @@ defmodule Arbiter.Trackers.GitHub do
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
   # Merge labels from three sources: the workspace status_map for the initial
-  # task status, a "priority: N" label when priority is given, and a "type: T"
+  # tracker status, a "priority: N" label when priority is given, and a "type: T"
   # label when issue_type is given. Only sets "labels" if there is at least one.
   # Pre-existing complexity 11 — baselined when bd-4x2yhq first
   # wired Credo up. Thresholds stay at the tool's own default so new
@@ -734,7 +734,7 @@ defmodule Arbiter.Trackers.GitHub do
          %Error{
            kind: :transition_not_found,
            status: nil,
-           message: "no GitHub state mapped for task status #{inspect(status)}",
+           message: "no GitHub state mapped for tracker status #{inspect(status)}",
            raw: nil
          }}
     end
@@ -743,8 +743,8 @@ defmodule Arbiter.Trackers.GitHub do
   # Returns true when the issue is already in the desired target state and
   # has the correct label (or no label is needed). Skipping the PATCH in
   # this case prevents redundant API calls — e.g. when two concurrent close
-  # actions race through GuardStatus and both trigger SyncTracker, the second
-  # PATCH to an already-closed issue would otherwise 422.
+  # actions race through the `:close` transition and both trigger SyncTracker,
+  # the second PATCH to an already-closed issue would otherwise 422.
   defp already_in_state?(issue, target_state, target_label) do
     issue["state"] == target_state and
       (target_label == nil or target_label in current_label_names(issue))

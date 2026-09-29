@@ -6,6 +6,8 @@ defmodule ArbiterWeb.Api.QueueControllerTest do
   """
   use ArbiterWeb.ConnCase, async: false
 
+  import Arbiter.LifecycleFixtures
+
   alias Arbiter.Tasks.{Issue, PullRequest, Workspace}
   alias Arbiter.Worker.Watchdog
   alias Arbiter.Test.StubMerger
@@ -28,7 +30,7 @@ defmodule ArbiterWeb.Api.QueueControllerTest do
   # test.
   defp merging_ticket(ws, mr_ref) do
     {:ok, task} = Ash.create(Issue, %{title: "queue ctrl", workspace_id: ws.id})
-    {:ok, _} = Ash.update(task, %{status: :in_progress})
+    put_state!(task, :active)
 
     {:ok, task} =
       Issue.pr_opened(task.id, mr_ref,
@@ -154,7 +156,7 @@ defmodule ArbiterWeb.Api.QueueControllerTest do
 
     test "400s when the ticket has no PR on record", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "no PR yet", workspace_id: ws.id})
-      {:ok, _} = Ash.update(task, %{status: :in_progress})
+      put_state!(task, :active)
 
       conn = post(conn, ~p"/api/queue/#{task.id}/restart_watchdog", %{})
 

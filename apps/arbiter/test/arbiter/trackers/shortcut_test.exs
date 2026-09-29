@@ -159,7 +159,7 @@ defmodule Arbiter.Trackers.ShortcutTest do
       assert :ok = Shortcut.transition(@ref, :open)
     end
 
-    test "returns {:error, :transition_not_found} when the task status has no mapping" do
+    test "returns {:error, :transition_not_found} when the tracker status has no mapping" do
       Config.put_active(%{
         "credentials_ref" => "env:#{@env_var}",
         "status_map" => %{

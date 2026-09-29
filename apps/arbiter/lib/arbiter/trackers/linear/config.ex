@@ -49,7 +49,7 @@ defmodule Arbiter.Trackers.Linear.Config do
 
   ## `status_map`
 
-  Maps task-vocabulary status atoms to Linear workflow state *names*. When a
+  Maps tracker-vocabulary status atoms to Linear workflow state *names*. When a
   status name is absent or `nil`, the adapter falls back to Linear's built-in
   state `type` field:
 

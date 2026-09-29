@@ -6,7 +6,7 @@ defmodule ArbiterCli.Cmd.DemoteTest do
   test "demote success prints updated issue" do
     stub_post(
       "/api/issues/bd-001/demote",
-      %{"id" => "bd-001", "title" => "X", "refined" => false},
+      %{"id" => "bd-001", "title" => "X", "state" => "backlog"},
       200
     )
 
@@ -19,13 +19,13 @@ defmodule ArbiterCli.Cmd.DemoteTest do
   test "demote --json emits raw JSON" do
     stub_post(
       "/api/issues/bd-001/demote",
-      %{"id" => "bd-001", "title" => "X", "refined" => false},
+      %{"id" => "bd-001", "title" => "X", "state" => "backlog"},
       200
     )
 
     {out, _err, exit_code} = capture(fn -> Demote.run(["bd-001", "--json"]) end)
     assert exit_code == 0
-    assert {:ok, %{"refined" => false}} = Jason.decode(out)
+    assert {:ok, %{"state" => "backlog"}} = Jason.decode(out)
   end
 
   test "demote requires id" do
@@ -37,7 +37,7 @@ defmodule ArbiterCli.Cmd.DemoteTest do
   test "demoting an already-backlog task succeeds as a no-op" do
     stub_post(
       "/api/issues/bd-001/demote",
-      %{"id" => "bd-001", "title" => "X", "refined" => false},
+      %{"id" => "bd-001", "title" => "X", "state" => "backlog"},
       200
     )
 

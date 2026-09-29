@@ -14,9 +14,11 @@ defmodule ArbiterWeb.TaskDetailLive do
   (the `WorkspaceDetailLive` pattern), one a bare button — all writing through
   the same domain calls the CLI/MCP use:
 
-    * **Edit** — the fields an operator authors: title, status (open ⇄
-      in_progress), priority, difficulty, type, target branch,
-      description and acceptance. Deliberately NOT editable here: `notes` /
+    * **Edit** — the fields an operator authors: title, priority,
+      difficulty, type, target branch, description and acceptance. The
+      lifecycle `state` is not a form field: it moves only through the named
+      transitions (Move to Ready, Return to Backlog, Dispatch, Close, ...).
+      Deliberately NOT editable here: `notes` /
       `qa_notes` / `deployment_notes` / `pr_body` (worker-authored
       deliverables — a stray dashboard edit would clobber a run's output),
       and the tracker/PR linkage fields (`tracker_ref`, `pr_ref`,
@@ -24,26 +26,26 @@ defmodule ArbiterWeb.TaskDetailLive do
       machinery. Those stay `arb update` territory.
     * **Close** — the `:close` action, with an optional reason.
     * **Dispatch** — `Arbiter.Worker.Dispatch.dispatch/2`, offered only when
-      no worker is attached and the task is open. It spends real API
+      no worker is attached and the ticket is not closed. It spends real API
       credits, so the modal requires an explicit acknowledgement checkbox
       before the server will call dispatch at all. Dispatch runs in
       `start_async/3`, not inline: it shells out to the provider CLI for the
       auth preflight, gates on quota, provisions a worktree and spawns the
       agent, which is far too long to hold the LiveView process for.
     * **Move to Ready** — the `:promote_to_ready` action (bd-b5wyjd), offered
-      only while the task is unrefined and open. It flips `refined` and does
-      nothing else: the card leaves the board's Backlog column and joins the
-      Ready queue on the queue's own terms.
+      only while the ticket is `:backlog`. It moves the ticket to `:queued`
+      and does nothing else: the card leaves the board's Backlog column and
+      joins the Ready queue on the queue's own terms. **Return to Backlog**
+      (`:return_to_backlog`) is its inverse, offered while the ticket is
+      `:queued`.
 
   ## Why promotion has no modal for the common case, and one gate
 
   The other three actions each destroy or spend something, so each asks first.
   Promotion spends nothing, and Ready is not a commitment — the scheduler still
   decides on the merits. So the common case is one click, and no confirmation
-  is one fewer reason to leave work unrefined. It *is* one-way for now:
-  `refined` is not on any action's accept list but this one's, so there is no
-  de-refine path from the UI, CLI, REST or MCP. A demote path is a separate
-  decision.
+  is one fewer reason to leave work in Backlog. Return to Backlog is the one
+  way back, and it refuses a ticket with a live worker.
 
   Description and most other fields are deliberately *not* gated on being
   filled in — Backlog is a refinement surface, not a completeness checklist,
@@ -219,7 +221,7 @@ defmodule ArbiterWeb.TaskDetailLive do
      socket
      |> assign(:task_id, task_id)
      |> assign(:parent_refs, [])
-     |> assign(:children_by_status, nil)
+     |> assign(:children_by_column, nil)
      |> assign(:epic_cost_rollup, nil)
      |> assign(:issue_label, "ticket")
      |> assign(:worker_label, "worker")
@@ -268,7 +270,7 @@ defmodule ArbiterWeb.TaskDetailLive do
   end
 
   # Lifecycle events for other tasks can still affect this page's
-  # dependency section (status of a target changed), so refresh on any.
+  # dependency section (state of a target changed), so refresh on any.
   def handle_info({:task_lifecycle, _event, _other}, socket) do
     {:noreply, refresh_deps(socket)}
   end
@@ -300,7 +302,7 @@ defmodule ArbiterWeb.TaskDetailLive do
       # the already-fetched `relationship_groups`, no extra query) whenever
       # the event belongs to one of this epic's children.
       epic_child?(socket, base_id) ->
-        {:noreply, refresh_children_by_status(socket, socket.assigns.relationship_groups)}
+        {:noreply, refresh_children_by_column(socket, socket.assigns.relationship_groups)}
 
       true ->
         {:noreply, socket}
@@ -492,7 +494,6 @@ defmodule ArbiterWeb.TaskDetailLive do
           target_branch: TaskForm.trimmed(params["target_branch"]),
           repo: TaskForm.trimmed(params["repo"])
         }
-        |> put_given(:status, params["status"])
         |> put_given(:issue_type, params["issue_type"])
 
       case Ash.update(task, attrs) do
@@ -563,7 +564,7 @@ defmodule ArbiterWeb.TaskDetailLive do
 
   def handle_event("promote_to_ready", _params, socket) do
     case socket.assigns.task do
-      %Issue{refined: true} ->
+      %Issue{state: state} when state != :backlog ->
         {:noreply, socket}
 
       %Issue{} = task ->
@@ -633,7 +634,7 @@ defmodule ArbiterWeb.TaskDetailLive do
 
   def handle_event("return_to_backlog", _params, socket) do
     case socket.assigns.task do
-      %Issue{refined: false} ->
+      %Issue{state: :backlog} ->
         {:noreply, socket}
 
       %Issue{} = task ->
@@ -890,7 +891,7 @@ defmodule ArbiterWeb.TaskDetailLive do
   end
 
   # Only send an enum-ish field when the form actually supplied one — a
-  # partial POST must not blank out `status` or `issue_type`.
+  # partial POST must not blank out `issue_type`.
   defp put_given(attrs, key, value) do
     case TaskForm.trimmed(value) do
       nil -> attrs
@@ -1427,7 +1428,7 @@ defmodule ArbiterWeb.TaskDetailLive do
 
     Map.merge(
       %{relationship_groups: groups, parent_refs: parent_refs(task)},
-      children_by_status_data(task, groups)
+      children_by_column_data(task, groups)
     )
   end
 
@@ -1437,9 +1438,9 @@ defmodule ArbiterWeb.TaskDetailLive do
   # can't drift onto different answers for the same child. Rides on the deps
   # load because it reuses the `:children` group already fetched there (no
   # second dependency query for the child list itself), and because a child's
-  # status change arrives as a `:task_lifecycle` event for that child, which
+  # state change arrives as a `:task_lifecycle` event for that child, which
   # is exactly what `refresh_deps/1` already re-runs on.
-  defp children_by_status_data(%Issue{issue_type: :epic} = epic, groups) do
+  defp children_by_column_data(%Issue{issue_type: :epic} = epic, groups) do
     children = groups.children |> Enum.map(& &1.issue) |> Enum.reject(&is_nil/1)
     child_ids = Enum.map(children, & &1.id)
 
@@ -1460,7 +1461,7 @@ defmodule ArbiterWeb.TaskDetailLive do
       end)
 
     %{
-      children_by_status: by_column,
+      children_by_column: by_column,
       # bd-18vl9q, design bd-9jj5lf §4: rides the same refresh trigger as the
       # mini-board above — a child's lifecycle event is exactly what should
       # move the epic's cost rollup too.
@@ -1468,12 +1469,12 @@ defmodule ArbiterWeb.TaskDetailLive do
     }
   end
 
-  defp children_by_status_data(_task, _groups),
-    do: %{children_by_status: nil, epic_cost_rollup: nil}
+  defp children_by_column_data(_task, _groups),
+    do: %{children_by_column: nil, epic_cost_rollup: nil}
 
-  defp refresh_children_by_status(socket, groups) do
+  defp refresh_children_by_column(socket, groups) do
     socket
-    |> assign(children_by_status_data(socket.assigns.task, groups))
+    |> assign(children_by_column_data(socket.assigns.task, groups))
     |> refresh_epic_budget()
   end
 
@@ -1517,7 +1518,7 @@ defmodule ArbiterWeb.TaskDetailLive do
     |> Ash.read!()
     |> Enum.group_by(& &1.from_issue_id, &Map.get(issues_by_id, &1.to_issue_id))
     |> Map.new(fn {id, sibs} ->
-      {id, Enum.reject(sibs, &(is_nil(&1) or &1.status == :closed))}
+      {id, Enum.reject(sibs, &(is_nil(&1) or &1.state == :closed))}
     end)
   rescue
     _ -> %{}
@@ -1717,7 +1718,7 @@ defmodule ArbiterWeb.TaskDetailLive do
     |> Enum.take(@relationship_candidate_limit)
   end
 
-  defp relationship_rank(%Issue{status: :closed}), do: 1
+  defp relationship_rank(%Issue{state: :closed}), do: 1
   defp relationship_rank(_issue), do: 0
 
   defp relationship_candidate_entry(%Issue{} = candidate, socket),
@@ -1770,13 +1771,14 @@ defmodule ArbiterWeb.TaskDetailLive do
 
   # §2.1. Both warnings concern the endpoint the edge *gates* — the `from` of
   # the `depends_on` row, which is this issue for "is blocked by" and the
-  # target for "blocks". They are mutually exclusive: an `:in_progress` issue
-  # is not in the dispatch queue, which only admits open+refined cards.
+  # target for "blocks". They are mutually exclusive: an `:active` or
+  # `:merging` ticket is not in the dispatch queue, which only admits
+  # `:queued` cards.
   defp gating_add_warnings(%{type: :depends_on, invert: invert}, task, target) do
     gated = if invert, do: target, else: task
 
     cond do
-      gated.status == :in_progress -> [in_progress_warning(gated)]
+      gated.state in [:active, :merging] -> [in_progress_warning(gated)]
       dispatchable?(gated) -> [dispatch_queue_warning(gated)]
       true -> []
     end
@@ -1808,7 +1810,7 @@ defmodule ArbiterWeb.TaskDetailLive do
        when type in [:depends_on, :blocks] do
     {dependent, dependency} = DependencyGraph.normalize(edge)
 
-    with {:ok, %Issue{status: :open, refined: true} = gated} <- Ash.get(Issue, dependent),
+    with {:ok, %Issue{state: :queued} = gated} <- Ash.get(Issue, dependent),
          [] <- Enum.reject(gating_blockers(dependent), &(&1.issue_id == dependency)) do
       [
         %{
@@ -1837,21 +1839,21 @@ defmodule ArbiterWeb.TaskDetailLive do
   defp auto_close_remove_warnings(_edge), do: []
 
   defp auto_close_completes?(
-         %Issue{auto_close: true, status: status} = parent,
-         %Issue{status: :closed}
+         %Issue{auto_close: true, state: state} = parent,
+         %Issue{state: :closed}
        )
-       when status != :closed,
+       when state != :closed,
        do: (parent.child_closed || 0) == (parent.child_total || 0)
 
   defp auto_close_completes?(_parent, _child), do: false
 
   defp auto_close_completes_without?(
-         %Issue{auto_close: true, status: status} = parent,
+         %Issue{auto_close: true, state: state} = parent,
          %Issue{} = child
        )
-       when status != :closed do
+       when state != :closed do
     remaining_total = (parent.child_total || 0) - 1
-    remaining_closed = (parent.child_closed || 0) - if(child.status == :closed, do: 1, else: 0)
+    remaining_closed = (parent.child_closed || 0) - if(child.state == :closed, do: 1, else: 0)
 
     remaining_total > 0 and remaining_closed == remaining_total
   end
@@ -1886,7 +1888,7 @@ defmodule ArbiterWeb.TaskDetailLive do
     }
   end
 
-  defp dispatchable?(%Issue{status: :open, refined: true, id: id}), do: gating_blockers(id) == []
+  defp dispatchable?(%Issue{state: :queued, id: id}), do: gating_blockers(id) == []
   defp dispatchable?(_issue), do: false
 
   defp gating_blockers(issue_id) do
@@ -1894,7 +1896,7 @@ defmodule ArbiterWeb.TaskDetailLive do
     |> Dependencies.for_issue()
     |> Map.get(:blocked_by, [])
     |> Enum.filter(fn
-      %{issue: %Issue{status: status}} -> status != :closed
+      %{issue: %Issue{state: state}} -> state != :closed
       _entry -> false
     end)
   end
@@ -2212,7 +2214,7 @@ defmodule ArbiterWeb.TaskDetailLive do
     >
       <div class="p-4 sm:p-6 max-w-[1400px] mx-auto flex flex-col gap-[var(--space-4)]">
         <%!-- ── Toolbar ──────────────────────────────────────────────────
-             Breadcrumb, the id itself and the issue's status chip. The whole
+             Breadcrumb, the id itself and the ticket's lifecycle-state chip. The whole
              crumb trail is one link up to the index — a per-segment crumb
              would be three links to two pages. --%>
         <div class="flex flex-wrap items-center justify-between gap-3">
@@ -2226,12 +2228,18 @@ defmodule ArbiterWeb.TaskDetailLive do
             </.link>
             <code class="text-[var(--text-title)]">{@task_id}</code>
             <ArbiterWeb.CoreComponents.Core.copy_id id={@task_id} />
-            <.status_chip :if={@task} status={@task.status} class="badge-sm" />
+            <.status_chip
+              :if={@task}
+              id="task-state-chip"
+              status={@task.state}
+              data-state={@task.state}
+              class="badge-sm"
+            />
           </div>
 
           <%!-- Operator actions. A closed issue is terminal here: reopening
                it is `arb update` territory, not a dashboard button. --%>
-          <div :if={@task && @task.status != :closed} class="flex flex-wrap items-center gap-2">
+          <div :if={@task && @task.state != :closed} class="flex flex-wrap items-center gap-2">
             <%!-- Refine (bd-1lszsc). Offered on exactly the issues
                   `Arbiter.Sessions.Refine.eligible?/1` accepts — Backlog,
                   not running, not closed — and it sits *before* Move to
@@ -2242,9 +2250,9 @@ defmodule ArbiterWeb.TaskDetailLive do
               id="task-refine"
             />
             <%!-- The one door out of Backlog. Gone the moment it is used —
-                  there is no un-refine here, and nothing to click twice. --%>
+                  nothing to click twice. --%>
             <ArbiterWeb.CoreComponents.Core.button
-              :if={!@task.refined and @task.status == :open}
+              :if={@task.state == :backlog}
               size="sm"
               variant="primary"
               phx-click="promote_to_ready"
@@ -2255,7 +2263,7 @@ defmodule ArbiterWeb.TaskDetailLive do
                     goes in the inner block instead. --%>
               Move to Ready <ArbiterWeb.CoreComponents.Core.icon name="hero-arrow-right-mini" />
             </ArbiterWeb.CoreComponents.Core.button>
-            <%!-- Return to Backlog — inverse of promote. Only shown when refined=true and status=:open. --%>
+            <%!-- Return to Backlog — inverse of promote. Only shown while the ticket is :queued. --%>
             <ArbiterWeb.CoreComponents.Core.button
               :if={ArbiterWeb.DemoteEntry.eligible?(@task)}
               size="sm"
@@ -2269,14 +2277,14 @@ defmodule ArbiterWeb.TaskDetailLive do
               <:icon><ArbiterWeb.CoreComponents.Core.icon name="hero-pencil-square-mini" /></:icon>
               Edit
             </ArbiterWeb.CoreComponents.Core.button>
-            <%!-- Dispatch steps back while the task is unrefined: `Core.button`
+            <%!-- Dispatch steps back while the ticket is in Backlog: `Core.button`
                   allows one primary per region, and on a Backlog card that one
-                  is promotion. Dispatching unrefined work stays possible — it
+                  is promotion. Dispatching Backlog work stays possible — it
                   just stops being the thing the eye lands on. --%>
             <ArbiterWeb.CoreComponents.Core.button
               :if={is_nil(@worker)}
               size="sm"
-              variant={if @task.refined, do: "primary", else: "secondary"}
+              variant={if @task.state == :backlog, do: "secondary", else: "primary"}
               phx-click="open_dispatch"
             >
               <:icon><ArbiterWeb.CoreComponents.Core.icon name="hero-rocket-launch-mini" /></:icon>
@@ -3014,7 +3022,7 @@ defmodule ArbiterWeb.TaskDetailLive do
                   {@task.verification_evidence}
                 </p>
 
-                <div :if={@task.status == :awaiting_verification} class="mt-3 space-y-1">
+                <div :if={@task.state == :verifying} class="mt-3 space-y-1">
                   <p class="text-[12px] text-[var(--text-secondary)]">
                     Merged, but nothing has run the new code yet. Restart the server, observe
                     the new path once, then record what you saw:
@@ -3041,7 +3049,7 @@ defmodule ArbiterWeb.TaskDetailLive do
                 class="order-5"
               >
                 <:actions>
-                  <%!-- bd-dmabmg: available at every status, Backlog included
+                  <%!-- bd-dmabmg: available in every state, Backlog included
                        (§2.5) — wiring edges before promotion is what avoids
                        the promote-then-block dispatch window. --%>
                   <button
@@ -3158,38 +3166,38 @@ defmodule ArbiterWeb.TaskDetailLive do
                    (`Snapshot.classify_columns/2`) so a set of 14-18 children
                    is scannable at a glance instead of one long flat list. --%>
               <.panel
-                :if={@children_by_status}
-                id="panel-children-by-status"
-                title="CHILDREN BY STATUS"
-                meta={children_by_status_meta(@children_by_status)}
+                :if={@children_by_column}
+                id="panel-children-by-column"
+                title="CHILDREN BY COLUMN"
+                meta={children_by_column_meta(@children_by_column)}
                 class="order-5"
               >
                 <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
-                  <.children_status_column
+                  <.children_column
                     id="children-backlog"
                     label="Backlog"
-                    chips={@children_by_status.backlog}
+                    chips={@children_by_column.backlog}
                   />
-                  <.children_status_column
+                  <.children_column
                     id="children-ready"
                     label="Ready"
-                    chips={@children_by_status.ready}
+                    chips={@children_by_column.ready}
                   />
-                  <.children_status_column
+                  <.children_column
                     id="children-running"
                     label="Running"
-                    chips={@children_by_status.running}
+                    chips={@children_by_column.running}
                   />
-                  <.children_status_column
+                  <.children_column
                     id="children-waiting"
                     label="Waiting"
-                    chips={@children_by_status.waiting}
+                    chips={@children_by_column.waiting}
                   />
-                  <.children_status_column
+                  <.children_column
                     id="children-closed"
                     label="Closed"
-                    chips={@children_by_status.closed}
-                    collapsible={length(@children_by_status.closed) > 5}
+                    chips={@children_by_column.closed}
+                    collapsible={length(@children_by_column.closed) > 5}
                   />
                 </div>
               </.panel>
@@ -3354,7 +3362,7 @@ defmodule ArbiterWeb.TaskDetailLive do
                 </ul>
               </.panel>
 
-              <%!-- MACHINE STATE, trimmed: status/priority/type/difficulty
+              <%!-- MACHINE STATE, trimmed: state/priority/type/difficulty
                    already show in the header band (design finding #1), and
                    child progress now lives in RELATIONSHIPS. --%>
               <.panel
@@ -3469,8 +3477,8 @@ defmodule ArbiterWeb.TaskDetailLive do
         </div>
       </div>
       <%!-- Edit modal. Worker-authored fields (notes/qa_notes/deployment_notes/
-           pr_body) and tracker/PR linkage are deliberately absent — see the
-           moduledoc. --%>
+           pr_body), tracker/PR linkage and the lifecycle state are
+           deliberately absent — see the moduledoc. --%>
       <div :if={@edit_modal && @task} class="modal modal-open" id="task-edit-modal">
         <div class="modal-box max-w-2xl">
           <h3 class="font-semibold text-lg mb-3">Edit {@issue_label}</h3>
@@ -3488,13 +3496,6 @@ defmodule ArbiterWeb.TaskDetailLive do
                 value={TaskForm.value(@edit_params, "title", @task.title)}
               />
             </div>
-            <.input
-              type="select"
-              name="task[status]"
-              label="Status"
-              options={TaskForm.editable_status_options(@task.status)}
-              value={TaskForm.value(@edit_params, "status", to_string(@task.status))}
-            />
             <.input
               type="select"
               name="task[issue_type]"
@@ -3528,13 +3529,17 @@ defmodule ArbiterWeb.TaskDetailLive do
               value={TaskForm.value(@edit_params, "target_branch", @task.target_branch || "")}
               placeholder="defaults to the repo's main"
             />
-            <.input
-              type="select"
-              name="task[repo]"
-              label="Repo (optional)"
-              options={@repo_assignment_options}
-              value={TaskForm.value(@edit_params, "repo", @task.repo || "")}
-            />
+            <%!-- Full width: with the state gone from the form this is the
+                 odd one out of the half-width fields. --%>
+            <div class="sm:col-span-2">
+              <.input
+                type="select"
+                name="task[repo]"
+                label="Repo (optional)"
+                options={@repo_assignment_options}
+                value={TaskForm.value(@edit_params, "repo", @task.repo || "")}
+              />
+            </div>
             <div class="sm:col-span-2">
               <.input
                 type="textarea"
@@ -3807,8 +3812,8 @@ defmodule ArbiterWeb.TaskDetailLive do
                 >
                   <code class="text-xs text-[var(--text-label)] shrink-0">{candidate.issue.id}</code>
                   <span class="truncate text-sm flex-1">{candidate.issue.title}</span>
-                  <span class={["badge badge-xs shrink-0", status_badge_class(candidate.issue.status)]}>
-                    {candidate.issue.status}
+                  <span class={["badge badge-xs shrink-0", state_badge_class(candidate.issue.state)]}>
+                    {candidate.issue.state}
                   </span>
                 </button>
                 <%!-- Greyed, not hidden: "why can't I pick this one" is the
@@ -4120,9 +4125,9 @@ defmodule ArbiterWeb.TaskDetailLive do
         </span>
         <span
           :if={@entry.issue && !awaiting_verification_blocker?(@entry, @awaiting_verification_hint)}
-          class={["badge badge-xs shrink-0", status_badge_class(@entry.issue.status)]}
+          class={["badge badge-xs shrink-0", state_badge_class(@entry.issue.state)]}
         >
-          {@entry.issue.status}
+          {@entry.issue.state}
         </span>
         <%!-- Removal is confirmed in a modal rather than a `data-confirm`
              prompt, because the confirm is where the §2.1/§2.2 mirror
@@ -4236,7 +4241,7 @@ defmodule ArbiterWeb.TaskDetailLive do
   defp attention_owner_label(:operator), do: "Needs you"
   defp attention_owner_label(_), do: "With the coordinator"
 
-  # One column of the epic's "Children by status" mini-board (design
+  # One column of the epic's "Children by column" mini-board (design
   # bd-2s901b §3). Rendered with a plain `<details>` rather than any
   # LiveView-tracked open/closed assign: acceptance #4 only asks that Closed
   # start collapsed past 5 children, and `<details open={...}>` gets that for
@@ -4246,9 +4251,9 @@ defmodule ArbiterWeb.TaskDetailLive do
   attr :chips, :list, required: true
   attr :collapsible, :boolean, default: false
 
-  defp children_status_column(assigns) do
+  defp children_column(assigns) do
     ~H"""
-    <div id={@id} data-role="children-status-column" class="min-w-0">
+    <div id={@id} data-role="children-column" class="min-w-0">
       <details open={not @collapsible}>
         <summary class="flex items-center gap-1.5 mb-1.5 cursor-pointer select-none">
           <span class="text-[11px] font-medium text-[var(--text-label)]">{@label}</span>
@@ -4258,7 +4263,7 @@ defmodule ArbiterWeb.TaskDetailLive do
         </summary>
         <ul class="flex flex-col gap-1.5">
           <li :for={chip <- @chips} id={"#{@id}-#{chip.issue.id}"}>
-            <.children_status_chip chip={chip} />
+            <.children_chip chip={chip} />
           </li>
           <li :if={@chips == []} class="text-[11px] italic text-[var(--text-label)]">
             none
@@ -4269,7 +4274,7 @@ defmodule ArbiterWeb.TaskDetailLive do
     """
   end
 
-  defp children_status_chip(assigns) do
+  defp children_chip(assigns) do
     ~H"""
     <div class="flex flex-col gap-0.5 rounded-[var(--radius-field)] border border-[var(--border-default)] p-1.5">
       <.link navigate={~p"/tasks/#{@chip.issue.id}"} class="min-w-0 group">
@@ -4299,7 +4304,7 @@ defmodule ArbiterWeb.TaskDetailLive do
     """
   end
 
-  defp children_by_status_meta(by_column) do
+  defp children_by_column_meta(by_column) do
     total =
       by_column
       |> Map.values()
@@ -4309,7 +4314,7 @@ defmodule ArbiterWeb.TaskDetailLive do
     "#{total} children"
   end
 
-  # ---- view helpers (status visuals + formatting) ----
+  # ---- view helpers (state visuals + formatting) ----
 
   defp tracker_url(nil, _ref), do: ""
   defp tracker_url(_workspace, nil), do: ""
@@ -4332,12 +4337,14 @@ defmodule ArbiterWeb.TaskDetailLive do
     _ -> ""
   end
 
-  # Canonical directive-status mapping (matches dashboard + doctrine).
-  defp status_badge_class(:open), do: "badge-success"
-  defp status_badge_class(:in_progress), do: "badge-info"
-  defp status_badge_class(:closed), do: "badge-ghost"
-  defp status_badge_class(:awaiting_verification), do: "badge-warning"
-  defp status_badge_class(_), do: ""
+  # Lifecycle-state badge colors — the same mapping `status_chip/1` uses for
+  # a ticket's state, so a relationship row and the header chip agree.
+  defp state_badge_class(:backlog), do: "badge-ghost"
+  defp state_badge_class(:queued), do: "badge-success"
+  defp state_badge_class(state) when state in [:active, :merging], do: "badge-info"
+  defp state_badge_class(:verifying), do: "badge-warning"
+  defp state_badge_class(:closed), do: "badge-ghost"
+  defp state_badge_class(_), do: ""
 
   # bd-5lc99r: a string field counts as present only when it is non-nil and not
   # blank after trimming — used to decide whether the findings/notes section has
@@ -4428,7 +4435,7 @@ defmodule ArbiterWeb.TaskDetailLive do
   # Compact changeset summary for the timeline. Mirrors AuditLogLive.
   defp format_changes(changes) when is_map(changes) do
     changes
-    |> Map.take(["status", "title", "priority", "tracker_type"])
+    |> Map.take(["state", "title", "priority", "tracker_type"])
     |> Enum.map_join(", ", fn {k, v} -> "#{k}=#{inspect(v)}" end)
   end
 
@@ -4832,7 +4839,7 @@ defmodule ArbiterWeb.TaskDetailLive do
   defp cross_workspace?(%Issue{workspace_id: ws}, %Issue{workspace_id: ws}), do: false
   defp cross_workspace?(%Issue{}, %Issue{}), do: true
 
-  defp awaiting_verification_blocker?(%{issue: %Issue{status: :awaiting_verification}}, true),
+  defp awaiting_verification_blocker?(%{issue: %Issue{state: :verifying}}, true),
     do: true
 
   defp awaiting_verification_blocker?(_entry, _hint), do: false

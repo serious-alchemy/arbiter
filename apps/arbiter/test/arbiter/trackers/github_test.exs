@@ -428,7 +428,7 @@ defmodule Arbiter.Trackers.GitHubTest do
   end
 
   describe "list_transitions/1" do
-    test "validates the ref and returns the configured task statuses" do
+    test "validates the ref and returns the configured tracker statuses" do
       stub(fn conn ->
         assert conn.method == "GET"
         assert conn.request_path == issue_path()

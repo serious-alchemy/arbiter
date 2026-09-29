@@ -18,7 +18,6 @@ defmodule ArbiterCli.Cmd.SchedulerTest do
       "changed_at" => @now,
       "changed_by" => "cli",
       "in_flight" => in_flight,
-      "parked" => [],
       "checked_at" => @now
     }
   end

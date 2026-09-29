@@ -12,6 +12,8 @@ defmodule Arbiter.Usage.EpicCostRollupTest do
   # writing usage rows would leak into this one's sample.
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures
+
   alias Arbiter.Tasks.Dependencies
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
@@ -83,7 +85,7 @@ defmodule Arbiter.Usage.EpicCostRollupTest do
 
   defp running_child!(ws, epic) do
     child = ready_child!(ws, epic, %{issue_type: :task})
-    Ash.update!(child, %{status: :in_progress})
+    put_state!(child, :active)
   end
 
   defp waiting_child!(ws, epic) do

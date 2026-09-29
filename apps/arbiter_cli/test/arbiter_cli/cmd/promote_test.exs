@@ -6,7 +6,7 @@ defmodule ArbiterCli.Cmd.PromoteTest do
   test "promote success prints updated issue" do
     stub_post(
       "/api/issues/bd-001/promote",
-      %{"id" => "bd-001", "title" => "X", "refined" => true},
+      %{"id" => "bd-001", "title" => "X", "state" => "queued"},
       200
     )
 
@@ -19,13 +19,13 @@ defmodule ArbiterCli.Cmd.PromoteTest do
   test "promote --json emits raw JSON" do
     stub_post(
       "/api/issues/bd-001/promote",
-      %{"id" => "bd-001", "title" => "X", "refined" => true},
+      %{"id" => "bd-001", "title" => "X", "state" => "queued"},
       200
     )
 
     {out, _err, exit_code} = capture(fn -> Promote.run(["bd-001", "--json"]) end)
     assert exit_code == 0
-    assert {:ok, %{"refined" => true}} = Jason.decode(out)
+    assert {:ok, %{"state" => "queued"}} = Jason.decode(out)
   end
 
   test "promote requires id" do
@@ -34,10 +34,10 @@ defmodule ArbiterCli.Cmd.PromoteTest do
     assert err =~ "requires a ticket id"
   end
 
-  test "promoting an already-refined task succeeds as a no-op" do
+  test "promoting an already-queued task succeeds as a no-op" do
     stub_post(
       "/api/issues/bd-001/promote",
-      %{"id" => "bd-001", "title" => "X", "refined" => true},
+      %{"id" => "bd-001", "title" => "X", "state" => "queued"},
       200
     )
 
@@ -81,7 +81,7 @@ defmodule ArbiterCli.Cmd.PromoteTest do
          |> Req.Test.json(%{
            "id" => "bd-001",
            "title" => "X",
-           "refined" => true,
+           "state" => "queued",
            "acceptance_waived" => "spike, no user-facing change"
          })
        end}

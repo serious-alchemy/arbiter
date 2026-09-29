@@ -711,7 +711,7 @@ defmodule Arbiter.Usage.Estimate do
     closed = :closed
 
     Issue
-    |> Ash.Query.filter(id in ^ids and status == ^closed)
+    |> Ash.Query.filter(id in ^ids and state == ^closed)
     |> Ash.Query.select([:id, :title, :difficulty, :issue_type])
     |> Ash.read!()
   end

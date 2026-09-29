@@ -127,7 +127,7 @@ defmodule ArbiterCli.Output do
 
   @doc """
   Print `arb dep list`'s edge rows (`Arbiter.Tasks.Dependencies.list/1`'s REST
-  shape). Mode-aware. Text rows carry both endpoints' id, title, status and
+  shape). Mode-aware. Text rows carry both endpoints' id, title, state and
   priority — the whole point of `arb dep list` over reading the DB by hand is
   telling a live edge from a closed↔closed one at a glance.
   """
@@ -146,8 +146,8 @@ defmodule ArbiterCli.Output do
     "#{from}  --#{dep["type"]}-->  #{to}"
   end
 
-  defp endpoint_label(%{"id" => id, "title" => title, "status" => status, "priority" => p}, _),
-    do: "#{id} (#{title}) [#{status} P#{p}]"
+  defp endpoint_label(%{"id" => id, "title" => title, "state" => state, "priority" => p}, _),
+    do: "#{id} (#{title}) [#{state} P#{p}]"
 
   defp endpoint_label(_, id), do: to_string(id)
 
@@ -156,17 +156,17 @@ defmodule ArbiterCli.Output do
   @doc """
   One-line summary used by `arb list` and `arb ready`. Format:
 
-      <id>  [<status>] <priority?>  <title>
+      <id>  [<state>] <priority?>  <title>
 
   Padding tuned to match the eye-friendly columns the Go `bd list` uses.
   """
   @spec format_issue_line(map()) :: String.t()
   def format_issue_line(issue) do
     id = String.pad_trailing(to_string(issue["id"] || ""), 10)
-    status = "[#{issue["status"] || "?"}]" |> String.pad_trailing(14)
+    state = "[#{issue["state"] || "?"}]" |> String.pad_trailing(14)
     priority = "P#{issue["priority"] || 0}"
     title = issue["title"] || ""
-    "#{id} #{status} #{priority}  #{title}"
+    "#{id} #{state} #{priority}  #{title}"
   end
 
   @doc """
@@ -206,10 +206,8 @@ defmodule ArbiterCli.Output do
       [
         {"ID", issue["id"]},
         {"Title", issue["title"]},
-        # bd-6fkgvo: the lifecycle vocabulary. `Status` only for a server
-        # that predates `state`.
+        # bd-6fkgvo: the lifecycle vocabulary.
         {"State", state_label(issue)},
-        {"Status", if(is_nil(issue["state"]), do: issue["status"])},
         {"Step", issue["step"]},
         {"Attention", attention_label(issue["attention"])},
         {"Blocked by", blocked_by_label(issue["blocked_by"])},
@@ -332,13 +330,11 @@ defmodule ArbiterCli.Output do
   defp auto_close_label(%{"auto_close" => true}), do: "yes (closes when all children done)"
   defp auto_close_label(_), do: nil
 
-  # Display whether task is in Backlog (refined=false) or Ready (refined=true).
+  # Display whether task is in Backlog (state backlog) or Ready (state queued).
   # Only for a ticket still waiting to start: "Backlog"/"Ready" means nothing
   # once it is under way or closed (bd-6fkgvo).
-  defp backlog_label(%{"state" => state}) when state not in [nil, "backlog", "queued"], do: nil
-  defp backlog_label(%{"state" => nil, "status" => status}) when status != "open", do: nil
-  defp backlog_label(%{"refined" => true}), do: "Ready"
-  defp backlog_label(%{"refined" => false}), do: "Backlog"
+  defp backlog_label(%{"state" => "queued"}), do: "Ready"
+  defp backlog_label(%{"state" => "backlog"}), do: "Backlog"
   defp backlog_label(_), do: nil
 
   @column_labels %{

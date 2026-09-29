@@ -264,7 +264,7 @@ defmodule Arbiter.Quota.GateWeeklyStalenessTest do
       assert held_id == task.id
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.status == :open
+      assert reloaded.state == :backlog
       assert Worker.whereis(task.id) == nil
 
       assert %{gating_window: "7d", gating_reason: "7d quota 0.96 ≥ 0.90"} =

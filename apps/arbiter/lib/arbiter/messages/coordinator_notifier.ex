@@ -1348,7 +1348,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
         [
           "#{title_for(task_id)} merged, but it is flagged `verify_after_deploy` — " <>
             "its only execution context is the long-lived server, so the merge alone " <>
-            "proves nothing. The task is parked at `awaiting_verification` and will " <>
+            "proves nothing. The task is parked in `verifying` and will " <>
             "NOT close until a restart-and-observe result is recorded.",
           mr_ref && "PR/MR: #{mr_ref}",
           restart_line,

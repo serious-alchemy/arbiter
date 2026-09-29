@@ -212,9 +212,9 @@ defmodule Arbiter.Workers.Reconciler do
   end
 
   @doc """
-  Re-establish monitoring for orphaned `:in_progress` Issues whose PR is still
-  open (or which are review-only engagements), instead of merely escalating
-  them.
+  Re-establish monitoring for orphaned at-work (`:active` / `:merging`) Issues
+  whose PR is still open (or which are review-only engagements), instead of
+  merely escalating them.
 
   After a reboot nothing in memory is following any PR. bd-741sid: a
   `:merging` ticket owns its PR's state and its Watchdog is restartable from
@@ -278,7 +278,7 @@ defmodule Arbiter.Workers.Reconciler do
   defp do_reconcile_open_pr_tasks(watch_fun, rewatch_fun) do
     stuck =
       Issue
-      |> Ash.Query.filter(status == :in_progress)
+      |> Ash.Query.filter(state in [:active, :merging])
       |> Ash.read!()
       |> Enum.reject(&live_worker_for_issue?/1)
       |> Enum.filter(&rewatchable?/1)
@@ -308,7 +308,7 @@ defmodule Arbiter.Workers.Reconciler do
   end
 
   @doc """
-  Resume orphaned `:in_progress` Issues that were mid-flight (a `:running` /
+  Resume orphaned `:active` Issues that were mid-flight (a `:running` /
   revising worker killed by the restart) but have **no** open PR yet — via the
   existing `bd-auma3z` resume path (`Arbiter.Worker.Dispatch.resume/2`), which
   re-attaches a fresh agent to the task's *preserved* worktree.
@@ -354,7 +354,7 @@ defmodule Arbiter.Workers.Reconciler do
   defp do_reconcile_resumable_tasks(resume_fun) do
     stuck =
       Issue
-      |> Ash.Query.filter(status == :in_progress)
+      |> Ash.Query.filter(state in [:active, :merging])
       |> Ash.read!()
       # bd-741sid: a Merging ticket's PR is its Watchdog's, which
       # `reconcile_open_pr_tasks/1` restarts from the row. A revision runs with
@@ -405,7 +405,7 @@ defmodule Arbiter.Workers.Reconciler do
       {:error, e}
   end
 
-  # An orphaned in_progress task is re-watchable (belongs to the patrol layer)
+  # An orphaned at-work task is re-watchable (belongs to the patrol layer)
   # when it has an open PR of its own (pr_ref) or is a review-only engagement
   # (driven by ReviewPatrol via source_pr).
   defp rewatchable?(%Issue{} = issue), do: not is_nil(issue.pr_ref) or review_only?(issue)
@@ -521,7 +521,7 @@ defmodule Arbiter.Workers.Reconciler do
     case rewatch_fun.(issue) do
       :ok ->
         Logger.info(
-          "Workers.Reconciler: re-established patrol watching for in_progress task " <>
+          "Workers.Reconciler: re-established patrol watching for at-work task " <>
             "#{issue.id} (PR #{issue.pr_ref}) — handed to patrol layer, not escalated"
         )
 
@@ -637,7 +637,7 @@ defmodule Arbiter.Workers.Reconciler do
     subject = "#{task_id} stuck — mid-flight worker lost and cannot be safely resumed"
 
     body =
-      "Task #{task_id} was in_progress with no live worker after a restart, and could not be " <>
+      "Task #{task_id} was active with no live worker after a restart, and could not be " <>
         "auto-resumed (#{inspect(reason)} — e.g. the worktree was cleaned up or the repo is " <>
         "unresolvable).\n" <>
         "Action: inspect the task state, then run `arb ticket dispatch #{task_id}` to re-drive from scratch."

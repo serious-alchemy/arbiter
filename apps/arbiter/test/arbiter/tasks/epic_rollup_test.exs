@@ -1,16 +1,18 @@
 defmodule Arbiter.Tasks.EpicRollupTest do
   @moduledoc """
-  bd-2wmxt5 — the per-status child aggregation behind `/epics`.
+  bd-2wmxt5 — the per-column child aggregation behind `/epics`.
 
   bd-58z2tu replaced the three independent "stuck" signals with a single
-  `needs_you` rule: an epic needs the operator when a child is parked in
-  `awaiting_verification` (rule 1), a child's own live worker needs the
+  `needs_you` rule: an epic needs the operator when a child is `:verifying`
+  (rule 1), a child's own live worker needs the
   operator per the board's shared `Snapshot.child_needs_you?/2` (rule 2), or
   a child is blocked only by something that itself needs the operator
   (rule 3). `blocked_children` / `idle_with_ready_work` stay as
   informational counts.
   """
   use Arbiter.DataCase, async: false
+
+  import Arbiter.LifecycleFixtures
 
   alias Arbiter.Board.Snapshot
   alias Arbiter.Tasks
@@ -38,17 +40,15 @@ defmodule Arbiter.Tasks.EpicRollupTest do
       case Keyword.get(opts, :as) do
         :backlog -> issue
         :ready -> Ash.update!(issue, %{}, action: :promote_to_ready)
-        :running -> Ash.update!(issue, %{status: :in_progress})
+        :running -> put_state!(issue, :active)
         # bd-842qio: only work in progress parks for verification.
-        :waiting -> issue |> Ash.update!(%{status: :in_progress}) |> park()
+        :waiting -> put_state!(issue, :verifying)
         :closed -> Ash.update!(issue, %{}, action: :close)
       end
 
     {:ok, _} = Dependencies.add(epic.id, issue.id, :parent_of)
     issue
   end
-
-  defp park(issue), do: Ash.update!(issue, %{}, action: :await_verification)
 
   # A worker snapshot in one of its run's states. `:question` and
   # `:review_gate` are a `:waiting` run and what it waits on; `:failed` is a
@@ -66,7 +66,7 @@ defmodule Arbiter.Tasks.EpicRollupTest do
 
   defp rollup(epic, opts \\ []), do: Map.fetch!(EpicRollup.for_epics([epic], opts), epic.id)
 
-  describe "per-status child counts" do
+  describe "per-column child counts" do
     test "buckets children into backlog/ready/running/waiting/closed", ctx do
       child(ctx.ws, ctx.epic, "b1", as: :backlog)
       child(ctx.ws, ctx.epic, "b2", as: :backlog)
@@ -240,7 +240,7 @@ defmodule Arbiter.Tasks.EpicRollupTest do
       {:ok, nested_epic} =
         Ash.create(Issue, %{title: "nested epic", workspace_id: ctx.ws.id, issue_type: :epic})
 
-      nested_epic = Ash.update!(nested_epic, %{status: :in_progress})
+      nested_epic = put_state!(nested_epic, :active)
       {:ok, _} = Dependencies.add(ctx.epic.id, nested_epic.id, :parent_of)
 
       later = DateTime.add(DateTime.utc_now(), 120, :second)
@@ -383,7 +383,7 @@ defmodule Arbiter.Tasks.EpicRollupTest do
           watchdog_live: watchdog_live
         })
 
-      assert [%{status: :merging, attention: %{owner: :operator}}] = board.merging
+      assert [%{attention: %{owner: :operator}}] = board.merging
       assert epic_r.needs_you
     end
   end
@@ -405,7 +405,7 @@ defmodule Arbiter.Tasks.EpicRollupTest do
     test "a verifying blocker is not a needs-you cause — it no longer blocks", ctx do
       blocked = child(ctx.ws, ctx.epic, "blocked-child", as: :ready)
       {:ok, blocker} = Ash.create(Issue, %{title: "waiting blocker", workspace_id: ctx.ws.id})
-      blocker = blocker |> Ash.update!(%{status: :in_progress}) |> park()
+      blocker = put_state!(blocker, :verifying)
       {:ok, _} = Dependencies.add(blocked.id, blocker.id, :depends_on)
 
       r = rollup(ctx.epic)
@@ -419,7 +419,7 @@ defmodule Arbiter.Tasks.EpicRollupTest do
     test "blocked by a parked (needs-you) blocker flags needs_you", ctx do
       blocked = child(ctx.ws, ctx.epic, "blocked-child", as: :ready)
       {:ok, blocker} = Ash.create(Issue, %{title: "parked blocker", workspace_id: ctx.ws.id})
-      blocker = Ash.update!(blocker, %{status: :in_progress})
+      blocker = put_state!(blocker, :active)
       {:ok, _} = Dependencies.add(blocked.id, blocker.id, :depends_on)
 
       w = worker(blocker.id, :failed, %{meta: %{stop_reason: %{summary: "gave up"}}})
@@ -465,7 +465,7 @@ defmodule Arbiter.Tasks.EpicRollupTest do
     test "blocked by a running blocker with a live worker does not flag needs_you", ctx do
       blocked = child(ctx.ws, ctx.epic, "blocked-child", as: :ready)
       {:ok, blocker} = Ash.create(Issue, %{title: "running blocker", workspace_id: ctx.ws.id})
-      blocker = Ash.update!(blocker, %{status: :in_progress})
+      blocker = put_state!(blocker, :active)
       {:ok, _} = Dependencies.add(blocked.id, blocker.id, :depends_on)
 
       w = worker(blocker.id, :working)
@@ -476,7 +476,7 @@ defmodule Arbiter.Tasks.EpicRollupTest do
     test "blocked by a blocker mid-review does not flag needs_you", ctx do
       blocked = child(ctx.ws, ctx.epic, "blocked-child", as: :ready)
       {:ok, blocker} = Ash.create(Issue, %{title: "reviewing blocker", workspace_id: ctx.ws.id})
-      blocker = Ash.update!(blocker, %{status: :in_progress})
+      blocker = put_state!(blocker, :active)
       {:ok, _} = Dependencies.add(blocked.id, blocker.id, :depends_on)
 
       w = worker(blocker.id, :review_gate)
@@ -515,7 +515,7 @@ defmodule Arbiter.Tasks.EpicRollupTest do
       Ash.update!(third, %{}, action: :close)
 
       assert Tasks.open_epic_count() == before - 1
-      assert second.status == :open
+      assert second.state != :closed
     end
   end
 

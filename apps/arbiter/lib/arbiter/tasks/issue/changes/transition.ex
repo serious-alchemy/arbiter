@@ -1,24 +1,22 @@
 defmodule Arbiter.Tasks.Issue.Changes.Transition do
   @moduledoc """
   Applies one named lifecycle transition (bd-842qio) inside an Issue action:
-  checks the ticket's current `state` against `Arbiter.Tasks.Lifecycle`, moves
-  it to the transition's target, and dual-writes the legacy columns
-  (`status`, and `refined` except on close) per `Lifecycle.legacy_fields/1`.
+  checks the ticket's current `state` against `Arbiter.Tasks.Lifecycle` and
+  moves it to the transition's target.
 
   It also owns `close_reason`: a close records the action's `close_reason`
   argument (`:completed` when none is given), and every other transition
   clears it, so it is nil whenever the ticket is not closed.
 
-  And it clears the ticket's attention (bd-8if9zt): the cause, the legacy
-  ReviewGate park columns, and — after commit — the ticket's open escalations
-  (`Changes.ClearAttention`). An action that raises its own cause declares
+  And it clears the ticket's attention (bd-8if9zt): the cause and — after
+  commit — the ticket's open escalations (`Changes.ClearAttention`). An action that raises its own cause declares
   that change after this one.
 
   The target attributes are written at change time, so the changes declared
-  after this one (`SyncTracker`, `StopWorker`, …) see the new status. A refusal
-  is raised from a `before_action` hook instead, so an older guard declared
-  ahead of this change (`GuardStatus`, `GuardDemote`) still reports first with
-  its own message.
+  after this one (`SyncTracker`, `StopWorker`, …) see the new state. A refusal
+  is raised from a `before_action` hook instead, so a guard declared ahead of
+  this change (`GuardStatus`, `GuardDemote`) still reports first with its own
+  message.
 
   ## Options
 
@@ -57,7 +55,6 @@ defmodule Arbiter.Tasks.Issue.Changes.Transition do
 
     changeset
     |> Changeset.force_change_attribute(:state, to)
-    |> Changeset.force_change_attributes(Lifecycle.legacy_fields(to))
     |> Changeset.force_change_attribute(:close_reason, close_reason(changeset, to))
     |> ClearAttention.clear()
   end

@@ -2,6 +2,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
   use ArbiterWeb.ConnCase, async: false
 
   import Phoenix.LiveViewTest
+  import Arbiter.LifecycleFixtures
 
   alias Arbiter.Tasks.{Issue, PullRequest, Workspace}
   alias Arbiter.Worker
@@ -705,7 +706,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
     # dispatched. The ticket is In progress when its PR opens, so it goes
     # Merging and the run ends (bd-741sid).
     defp open_pr_and_park(pid, task, merger_status, opts \\ []) do
-      {:ok, _} = Ash.update(task, %{status: :in_progress})
+      put_state!(task, :active)
       :ok = Worker.advance(pid, :implement)
       ref = "!bd-bspakl-#{System.unique_integer([:positive])}"
       StubMerger.next_open_ref(ref)
@@ -893,7 +894,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
     # Merging, and no Watchdog is registered. The `watchdog_start_error` escape
     # hatch gets us there without killing a real process mid-poll.
     defp park_without_watchdog(pid, task, ref) do
-      {:ok, _} = Ash.update(task, %{status: :in_progress})
+      put_state!(task, :active)
       :ok = Worker.advance(pid, :implement)
       StubMerger.next_open_ref(ref)
       {:ok, workspace} = Ash.get(Workspace, task.workspace_id)
@@ -933,7 +934,7 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
 
     test "shows neither warning nor button while a watchdog is alive", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "pd-live-wd", workspace_id: ws.id})
-      {:ok, _} = Ash.update(task, %{status: :in_progress})
+      put_state!(task, :active)
       {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
       :ok = Worker.advance(pid, :implement)
       StubMerger.next_open_ref("!wd-live-1")

@@ -3,6 +3,7 @@ defmodule ArbiterWeb.MergeQueueIndexLiveTest do
 
   import Ecto.Query, only: [from: 2]
   import Phoenix.LiveViewTest
+  import Arbiter.LifecycleFixtures
 
   alias Arbiter.Tasks.{Issue, PullRequest, Workspace}
 
@@ -28,7 +29,7 @@ defmodule ArbiterWeb.MergeQueueIndexLiveTest do
   # forge's last answer on the row — not to a worker parked on it.
   defp merging_ticket(ws, title, merger_status \\ nil) do
     {:ok, task} = Ash.create(Issue, %{title: title, workspace_id: ws.id})
-    {:ok, _} = Ash.update(task, %{status: :in_progress})
+    put_state!(task, :active)
     {:ok, task} = Issue.pr_opened(task.id, "!77", merger_url: "https://example.test/mr/77")
 
     if merger_status, do: :ok = PullRequest.record_merger_status(task.id, merger_status)
@@ -73,7 +74,7 @@ defmodule ArbiterWeb.MergeQueueIndexLiveTest do
 
     test "a ticket that is not Merging is not in the queue", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "still-working", workspace_id: ws.id})
-      {:ok, _} = Ash.update(task, %{status: :in_progress})
+      put_state!(task, :active)
 
       {:ok, _view, html} = live_merge_queue(conn, ~p"/merge_queue")
 

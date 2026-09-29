@@ -12,15 +12,11 @@ defmodule Arbiter.Board.SnapshotTest do
       %{
         id: id,
         title: "Task #{id}",
-        status: :open,
+        state: :queued,
         priority: 2,
         difficulty: 2,
         issue_type: :task,
         workspace_id: "ws-1",
-        # bd-b5wyjd: the fixture is a *refined* issue, because that is what
-        # every column but Backlog is about. Backlog tests pass `refined: false`
-        # explicitly, which is also what a freshly created issue actually is.
-        refined: true,
         description: nil,
         acceptance: nil,
         notes: nil,
@@ -158,7 +154,7 @@ defmodule Arbiter.Board.SnapshotTest do
         derive(
           issues: [
             issue("bd-a", %{description: "Rewrites `lib/board.ex`."}),
-            issue("bd-run", %{status: :in_progress, description: "Touches `lib/board.ex` too."})
+            issue("bd-run", %{state: :active, description: "Touches `lib/board.ex` too."})
           ],
           workers: [worker("bd-run", :working)]
         )
@@ -174,30 +170,25 @@ defmodule Arbiter.Board.SnapshotTest do
     end
   end
 
-  # bd-b5wyjd — Backlog is Ready minus the refinement flag. bd-79w1fs: it is
+  # bd-b5wyjd — the fixture is a `:queued` ticket, because that is what every
+  # column but Backlog is about; Backlog tests pass `state: :backlog`, which is
+  # also what a freshly created issue actually is. bd-79w1fs: Backlog is
   # in the same manual order as Ready (priority, then rank, then age), so a
   # drag within the column rewrites `rank` the way it does in Ready.
   describe "backlog column" do
-    test "an unrefined open issue sits in Backlog, not Ready" do
-      board = derive(issues: [issue("bd-a", %{refined: false}), issue("bd-b")])
+    test "a :backlog ticket sits in Backlog, not Ready" do
+      board = derive(issues: [issue("bd-a", %{state: :backlog}), issue("bd-b")])
 
       assert ids(board.backlog) == ["bd-a"]
       assert ids(board.ready) == ["bd-b"]
-    end
-
-    test "an issue with no refined flag at all reads as unrefined" do
-      board = derive(issues: [Map.delete(issue("bd-a"), :refined)])
-
-      assert ids(board.backlog) == ["bd-a"]
-      assert ids(board.ready) == []
     end
 
     test "Backlog is in manual order: priority first, whatever the age" do
       board =
         derive(
           issues: [
-            issue("bd-new", %{refined: false, priority: 3, created_at: @now}),
-            issue("bd-old", %{refined: false, priority: 1, created_at: @yesterday})
+            issue("bd-new", %{state: :backlog, priority: 3, created_at: @now}),
+            issue("bd-old", %{state: :backlog, priority: 1, created_at: @yesterday})
           ]
         )
 
@@ -208,8 +199,8 @@ defmodule Arbiter.Board.SnapshotTest do
       board =
         derive(
           issues: [
-            issue("bd-new", %{refined: false, rank: 1024, created_at: @now}),
-            issue("bd-old", %{refined: false, rank: 1024, created_at: @yesterday})
+            issue("bd-new", %{state: :backlog, rank: 1024, created_at: @now}),
+            issue("bd-old", %{state: :backlog, rank: 1024, created_at: @yesterday})
           ]
         )
 
@@ -219,7 +210,7 @@ defmodule Arbiter.Board.SnapshotTest do
     test "an unrefined issue with a live worker belongs to In progress, not Backlog" do
       board =
         derive(
-          issues: [issue("bd-a", %{refined: false})],
+          issues: [issue("bd-a", %{state: :backlog})],
           workers: [worker("bd-a", :working)]
         )
 
@@ -230,7 +221,7 @@ defmodule Arbiter.Board.SnapshotTest do
     test "a closed issue is not in Backlog, whatever its flag says" do
       board =
         derive(
-          issues: [issue("bd-a", %{refined: false, status: :closed, updated_at: @now})],
+          issues: [issue("bd-a", %{state: :closed, updated_at: @now})],
           now: @now
         )
 
@@ -240,7 +231,7 @@ defmodule Arbiter.Board.SnapshotTest do
 
     test "epics are a rollup, so they never queue in Backlog either" do
       board =
-        derive(issues: [issue("bd-a", %{refined: false, issue_type: :epic})])
+        derive(issues: [issue("bd-a", %{state: :backlog, issue_type: :epic})])
 
       assert ids(board.backlog) == []
     end
@@ -257,7 +248,7 @@ defmodule Arbiter.Board.SnapshotTest do
     end
 
     test "an unrefined card is never the scheduler's promote, however free the slots" do
-      board = derive(issues: [issue("bd-a", %{refined: false})], slots_total: 8)
+      board = derive(issues: [issue("bd-a", %{state: :backlog})], slots_total: 8)
 
       assert board.promote == nil
     end
@@ -266,7 +257,7 @@ defmodule Arbiter.Board.SnapshotTest do
       board =
         derive(
           issues: [
-            issue("bd-a", %{refined: false, title: "think about caching"})
+            issue("bd-a", %{state: :backlog, title: "think about caching"})
           ]
         )
 
@@ -336,17 +327,6 @@ defmodule Arbiter.Board.SnapshotTest do
 
       assert ids(board.ready) == ["bd-old", "bd-new"]
     end
-
-    test "the LiveView's :ready_order no longer feeds the queue" do
-      board =
-        derive(
-          issues: [issue("bd-a", %{priority: 1}), issue("bd-b", %{priority: 3})],
-          ready_order: ["bd-b"]
-        )
-
-      assert ids(board.ready) == ["bd-a", "bd-b"]
-      assert board.promote == "bd-a"
-    end
   end
 
   describe "empty/1" do
@@ -384,8 +364,8 @@ defmodule Arbiter.Board.SnapshotTest do
         derive(
           slots_total: 3,
           issues: [
-            issue("bd-1", %{state: :active, status: :in_progress}),
-            issue("bd-2", %{state: :active, status: :in_progress})
+            issue("bd-1", %{state: :active}),
+            issue("bd-2", %{state: :active})
           ],
           workers: [worker("bd-1", :working), worker("bd-2", :review_gate)]
         )
@@ -400,7 +380,7 @@ defmodule Arbiter.Board.SnapshotTest do
         derive(
           slots_total: 2,
           # bd-741sid: its author run finished when the PR opened.
-          issues: [issue("bd-1", %{state: :merging, status: :in_progress, pr_ref: "pr/1"})],
+          issues: [issue("bd-1", %{state: :merging, pr_ref: "pr/1"})],
           workers: [worker("bd-1", :succeeded)]
         )
 
@@ -417,7 +397,6 @@ defmodule Arbiter.Board.SnapshotTest do
           issues: [
             issue("bd-parked", %{
               state: :merging,
-              status: :in_progress,
               pr_ref: "!274",
               attention_cause: :awaiting_manual_merge
             }),
@@ -436,7 +415,7 @@ defmodule Arbiter.Board.SnapshotTest do
         derive(
           slots_total: 1,
           issues: [
-            issue("bd-busy", %{state: :active, status: :in_progress}),
+            issue("bd-busy", %{state: :active}),
             issue("bd-next", %{})
           ],
           workers: [worker("bd-busy", :review_gate)]
@@ -450,7 +429,7 @@ defmodule Arbiter.Board.SnapshotTest do
       board =
         derive(
           slots_total: 2,
-          issues: [issue("bd-1", %{state: :closed, status: :closed})],
+          issues: [issue("bd-1", %{state: :closed})],
           workers: [worker("bd-1", :succeeded)]
         )
 
@@ -461,7 +440,7 @@ defmodule Arbiter.Board.SnapshotTest do
       board =
         derive(
           slots_total: 1,
-          issues: [issue("bd-a"), issue("bd-1", %{state: :active, status: :in_progress})],
+          issues: [issue("bd-a"), issue("bd-1", %{state: :active})],
           workers: [worker("bd-1", :working)]
         )
 
@@ -476,7 +455,7 @@ defmodule Arbiter.Board.SnapshotTest do
     test "shows what the worker is doing right now" do
       board =
         derive(
-          issues: [issue("bd-a", %{status: :in_progress})],
+          issues: [issue("bd-a", %{state: :active})],
           workers: [
             worker("bd-a", :working, %{
               current_step: :implement,
@@ -523,7 +502,7 @@ defmodule Arbiter.Board.SnapshotTest do
 
       board =
         derive(
-          issues: [issue("bd-a", %{status: :in_progress})],
+          issues: [issue("bd-a", %{state: :active})],
           workers: [
             worker("bd-a", :review_gate),
             worker(review_id <> "#impl2", :working, %{
@@ -602,11 +581,10 @@ defmodule Arbiter.Board.SnapshotTest do
           issues: [
             issue("bd-c", %{
               state: :merging,
-              status: :in_progress,
               pr_ref: "!41",
               updated_at: @yesterday
             }),
-            issue("bd-e", %{state: :merging, status: :in_progress, pr_ref: "!43"})
+            issue("bd-e", %{state: :merging, pr_ref: "!43"})
           ],
           workers: [
             worker("bd-a", :failed, %{
@@ -639,7 +617,6 @@ defmodule Arbiter.Board.SnapshotTest do
           issues: [
             issue("bd-b", %{
               state: :merging,
-              status: :in_progress,
               updated_at: @yesterday,
               pr_ref: "!42",
               merger_url: "https://example.test/42",
@@ -663,9 +640,6 @@ defmodule Arbiter.Board.SnapshotTest do
     # bd-2mv3lx: `arb worker stop` on a worker (the documented pre-flight for `arb server deploy`) leaves the issue
     # `in_progress` with no live worker — a state that used to match none of
     # the five columns and vanished from the board entirely.
-    # Explicitly `:active`: with a `pr_ref` and no `state`, the backfill rule
-    # would read the row as Merging, whose card is the ticket's own
-    # (bd-741sid) — no worker is expected there.
     # bd-8if9zt: a stopped run is the coordinator's to resume first, so the
     # card carries that attention without flagging the operator.
     test "an in_progress issue with no live worker still shows, as the coordinator's" do
@@ -673,7 +647,6 @@ defmodule Arbiter.Board.SnapshotTest do
         derive(
           issues: [
             issue("bd-a", %{
-              status: :in_progress,
               state: :active,
               updated_at: @yesterday,
               pr_ref: "123"
@@ -693,7 +666,7 @@ defmodule Arbiter.Board.SnapshotTest do
       board =
         derive(
           issues: [
-            issue("bd-a", %{status: :in_progress, updated_at: @yesterday, issue_type: :epic})
+            issue("bd-a", %{state: :active, updated_at: @yesterday, issue_type: :epic})
           ]
         )
 
@@ -702,7 +675,7 @@ defmodule Arbiter.Board.SnapshotTest do
     end
 
     test "an in_progress issue that just started dispatch is not flagged orphaned yet" do
-      board = derive(issues: [issue("bd-a", %{status: :in_progress, updated_at: @now})])
+      board = derive(issues: [issue("bd-a", %{state: :active, updated_at: @now})])
 
       assert [%{id: "bd-a", activity: "dispatching", attention: nil}] = board.in_progress
     end
@@ -710,7 +683,7 @@ defmodule Arbiter.Board.SnapshotTest do
     test "an in_progress issue with a live worker is not double-counted as orphaned" do
       board =
         derive(
-          issues: [issue("bd-a", %{status: :in_progress})],
+          issues: [issue("bd-a", %{state: :active})],
           workers: [worker("bd-a", :question)]
         )
 
@@ -727,11 +700,9 @@ defmodule Arbiter.Board.SnapshotTest do
         derive(
           issues: [
             issue("bd-a", %{
-              status: :in_progress,
               state: :active,
               updated_at: @yesterday,
               pr_ref: "!293",
-              review_park_reason: "resume_blocked",
               attention_cause: :resume_blocked
             })
           ],
@@ -748,7 +719,7 @@ defmodule Arbiter.Board.SnapshotTest do
       board =
         derive(
           issues: [
-            issue("bd-a", %{status: :in_progress, updated_at: @yesterday})
+            issue("bd-a", %{state: :active, updated_at: @yesterday})
           ],
           workers: [worker("bd-a", :succeeded)]
         )
@@ -760,7 +731,7 @@ defmodule Arbiter.Board.SnapshotTest do
     test "an in_progress issue with both a succeeded row and a live row is not double-counted" do
       board =
         derive(
-          issues: [issue("bd-a", %{status: :in_progress, updated_at: @yesterday})],
+          issues: [issue("bd-a", %{state: :active, updated_at: @yesterday})],
           workers: [
             worker("bd-a", :succeeded),
             worker("bd-a", :question)
@@ -808,7 +779,7 @@ defmodule Arbiter.Board.SnapshotTest do
     test "a backlog ticket with a leftover author row stays in Backlog" do
       board =
         derive(
-          issues: [issue("bd-a", %{state: :backlog, refined: false})],
+          issues: [issue("bd-a", %{state: :backlog})],
           workers: [worker("bd-a", :succeeded)]
         )
 
@@ -818,27 +789,27 @@ defmodule Arbiter.Board.SnapshotTest do
     test "a merging ticket is Merging, even with its author row still running" do
       board =
         derive(
-          issues: [issue("bd-a", %{state: :merging, status: :in_progress, pr_ref: "!1"})],
+          issues: [issue("bd-a", %{state: :merging, pr_ref: "!1"})],
           workers: [worker("bd-a", :working)]
         )
 
-      assert [%{id: "bd-a", status: :merging, mr_ref: "!1"}] = board.merging
+      assert [%{id: "bd-a", mr_ref: "!1"}] = board.merging
       assert board.in_progress == []
     end
 
     test "a verifying ticket gets its one verification card, whatever rows linger" do
       board =
         derive(
-          issues: [issue("bd-a", %{state: :verifying, status: :awaiting_verification})],
+          issues: [issue("bd-a", %{state: :verifying})],
           workers: [worker("bd-a", :failed)]
         )
 
-      assert [%{id: "bd-a", status: :awaiting_verification}] = board.verifying
+      assert [%{id: "bd-a"}] = board.verifying
       assert board.in_progress == []
     end
 
     test "an in-progress ticket inside the dispatch grace is an In progress dispatching card" do
-      board = derive(issues: [issue("bd-a", %{state: :active, status: :in_progress})])
+      board = derive(issues: [issue("bd-a", %{state: :active})])
 
       # bd-741sid: no hand-off phase — a run not yet registered reads as its stage.
       assert [
@@ -855,7 +826,7 @@ defmodule Arbiter.Board.SnapshotTest do
     test "a working author and a live fix pass render one In progress card" do
       board =
         derive(
-          issues: [issue("bd-a", %{state: :active, status: :in_progress})],
+          issues: [issue("bd-a", %{state: :active})],
           workers: [
             worker("bd-a", :working),
             worker("bd-a", :working, %{role: :fix_pass, registry_key: "bd-a:fix"})
@@ -873,13 +844,13 @@ defmodule Arbiter.Board.SnapshotTest do
     # Merging and Verifying, by the ticket's `Lifecycle.view/2` column.
     test "every issue classify_columns puts in :waiting or :running gets exactly one card" do
       issues = [
-        issue("bd-running", %{status: :in_progress}),
-        issue("bd-waiting-question", %{status: :in_progress}),
-        issue("bd-waiting-failed", %{status: :in_progress}),
-        issue("bd-waiting-merging", %{status: :in_progress, state: :merging, pr_ref: "!1"}),
-        issue("bd-waiting-succeeded-only", %{status: :in_progress, updated_at: @yesterday}),
-        issue("bd-waiting-orphaned", %{status: :in_progress, updated_at: @yesterday}),
-        issue("bd-waiting-verification", %{status: :awaiting_verification})
+        issue("bd-running", %{state: :active}),
+        issue("bd-waiting-question", %{state: :active}),
+        issue("bd-waiting-failed", %{state: :active}),
+        issue("bd-waiting-merging", %{state: :merging, pr_ref: "!1"}),
+        issue("bd-waiting-succeeded-only", %{state: :active, updated_at: @yesterday}),
+        issue("bd-waiting-orphaned", %{state: :active, updated_at: @yesterday}),
+        issue("bd-waiting-verification", %{state: :verifying})
       ]
 
       workers = [
@@ -1010,7 +981,7 @@ defmodule Arbiter.Board.SnapshotTest do
     test "a collapsed healthy row adds no note and no flag" do
       board =
         derive(
-          issues: [issue("bd-a", %{state: :merging, status: :in_progress, pr_ref: "!42"})],
+          issues: [issue("bd-a", %{state: :merging, pr_ref: "!42"})],
           workers: [
             worker("bd-a", :working, %{registry_key: "bd-a:fixpass", role: :fix_pass})
           ],
@@ -1057,7 +1028,7 @@ defmodule Arbiter.Board.SnapshotTest do
     test "an orphaned issue card carries no liveness field either" do
       board =
         derive(
-          issues: [issue("bd-a", %{status: :in_progress, updated_at: @yesterday})],
+          issues: [issue("bd-a", %{state: :active, updated_at: @yesterday})],
           watchdog_live: MapSet.new()
         )
 
@@ -1074,7 +1045,6 @@ defmodule Arbiter.Board.SnapshotTest do
         id,
         Map.merge(
           %{
-            status: :in_progress,
             state: :merging,
             pr_ref: "!42",
             merger_url: "https://example.test/42",
@@ -1092,14 +1062,12 @@ defmodule Arbiter.Board.SnapshotTest do
       assert [
                %{
                  id: "bd-m",
-                 status: :merging,
                  mr_ref: "!42",
                  merger_url: "https://example.test/42",
                  merger_status: %{status: :open, approved: false},
                  watchdog_alive: true,
                  attention: nil,
                  collapsed_note: nil,
-                 phase: :waiting_ci_merge,
                  agent_live: false,
                  since: @yesterday
                } = card
@@ -1107,6 +1075,10 @@ defmodule Arbiter.Board.SnapshotTest do
 
       assert board.in_progress == []
       refute Map.has_key?(card, :reason)
+      # bd-36ytcl: an open PR is no worker phase; what it waits on is the
+      # ticket's step.
+      refute Map.has_key?(card, :phase)
+      assert card.step == :in_merge_queue
     end
 
     test "one whose Watchdog is gone says so, as the coordinator's" do
@@ -1147,7 +1119,7 @@ defmodule Arbiter.Board.SnapshotTest do
           watchdog_live: MapSet.new(["bd-m"])
         )
 
-      assert [%{id: "bd-m", status: :merging, attention: nil, collapsed_note: note}] =
+      assert [%{id: "bd-m", attention: nil, collapsed_note: note}] =
                board.merging
 
       assert note =~ "failed"
@@ -1181,7 +1153,7 @@ defmodule Arbiter.Board.SnapshotTest do
     test "a failed run with a follow-up round under way is not flagged" do
       board =
         derive(
-          issues: [issue("bd-a", %{status: :in_progress, state: :active})],
+          issues: [issue("bd-a", %{state: :active})],
           workers: [
             worker("bd-a", :failed),
             worker("bd-a#impl", :working, %{
@@ -1303,7 +1275,7 @@ defmodule Arbiter.Board.SnapshotTest do
         derive(
           issues: [
             issue("bd-v", %{
-              status: :awaiting_verification,
+              state: :verifying,
               awaiting_verification_at: @yesterday
             })
           ]
@@ -1311,7 +1283,6 @@ defmodule Arbiter.Board.SnapshotTest do
 
       assert [card] = board.verifying
       assert card.id == "bd-v"
-      assert card.status == :awaiting_verification
 
       assert %{owner: :coordinator, waiting_on: :verification, cause: :awaiting_verification} =
                card.attention
@@ -1324,7 +1295,7 @@ defmodule Arbiter.Board.SnapshotTest do
       board =
         derive(
           issues: [
-            issue("bd-v", %{status: :awaiting_verification, updated_at: @yesterday})
+            issue("bd-v", %{state: :verifying, updated_at: @yesterday})
           ]
         )
 
@@ -1333,13 +1304,13 @@ defmodule Arbiter.Board.SnapshotTest do
 
     test "an open or closed task produces no awaiting card" do
       board =
-        derive(issues: [issue("bd-a"), issue("bd-b", %{status: :closed, updated_at: @now})])
+        derive(issues: [issue("bd-a"), issue("bd-b", %{state: :closed, updated_at: @now})])
 
       assert board.verifying == []
     end
 
     test "a parked task is not also a Ready, Backlog or In progress card" do
-      board = derive(issues: [issue("bd-v", %{status: :awaiting_verification})])
+      board = derive(issues: [issue("bd-v", %{state: :verifying})])
 
       assert ids(board.ready) == []
       assert ids(board.backlog) == []
@@ -1356,9 +1327,9 @@ defmodule Arbiter.Board.SnapshotTest do
       board =
         derive(
           issues: [
-            issue("bd-a", %{status: :closed, closed_at: ~U[2026-08-21 13:00:00Z]}),
-            issue("bd-b", %{status: :closed, closed_at: ~U[2026-08-21 16:00:00Z]}),
-            issue("bd-c", %{status: :closed, closed_at: ~U[2026-08-21 23:00:00Z]})
+            issue("bd-a", %{state: :closed, closed_at: ~U[2026-08-21 13:00:00Z]}),
+            issue("bd-b", %{state: :closed, closed_at: ~U[2026-08-21 16:00:00Z]}),
+            issue("bd-c", %{state: :closed, closed_at: ~U[2026-08-21 23:00:00Z]})
           ]
         )
 
@@ -1372,8 +1343,8 @@ defmodule Arbiter.Board.SnapshotTest do
       board =
         derive(
           issues: [
-            issue("bd-a", %{status: :closed, closed_at: ~U[2026-08-21 11:00:00Z]}),
-            issue("bd-b", %{status: :closed, closed_at: ~U[2026-08-22 11:00:00Z]})
+            issue("bd-a", %{state: :closed, closed_at: ~U[2026-08-21 11:00:00Z]}),
+            issue("bd-b", %{state: :closed, closed_at: ~U[2026-08-22 11:00:00Z]})
           ]
         )
 
@@ -1388,7 +1359,7 @@ defmodule Arbiter.Board.SnapshotTest do
         derive(
           issues: [
             issue("bd-a", %{
-              status: :closed,
+              state: :closed,
               closed_at: ~U[2026-08-21 06:00:00Z],
               updated_at: ~U[2026-08-22 11:00:00Z]
             })
@@ -1404,7 +1375,7 @@ defmodule Arbiter.Board.SnapshotTest do
       board =
         derive(
           issues: [
-            issue("bd-a", %{status: :closed, closed_at: nil, updated_at: ~U[2026-08-22 11:00:00Z]})
+            issue("bd-a", %{state: :closed, closed_at: nil, updated_at: ~U[2026-08-22 11:00:00Z]})
           ]
         )
 
@@ -1416,7 +1387,7 @@ defmodule Arbiter.Board.SnapshotTest do
       board =
         derive(
           issues: [
-            issue("bd-a", %{status: :closed, closed_at: nil, updated_at: ~U[2026-08-21 11:00:00Z]})
+            issue("bd-a", %{state: :closed, closed_at: nil, updated_at: ~U[2026-08-21 11:00:00Z]})
           ]
         )
 
@@ -1435,10 +1406,10 @@ defmodule Arbiter.Board.SnapshotTest do
           issues: [
             issue("bd-epic", %{
               issue_type: :epic,
-              status: :closed,
+              state: :closed,
               closed_at: ~U[2026-08-22 11:00:00Z]
             }),
-            issue("bd-a", %{status: :closed, closed_at: ~U[2026-08-22 10:00:00Z]})
+            issue("bd-a", %{state: :closed, closed_at: ~U[2026-08-22 10:00:00Z]})
           ]
         )
 
@@ -1447,11 +1418,11 @@ defmodule Arbiter.Board.SnapshotTest do
 
     test "excluding the epic leaves every other column, the counts and the slot math alone" do
       issues = [
-        issue("bd-epic", %{issue_type: :epic, status: :closed, closed_at: @now}),
+        issue("bd-epic", %{issue_type: :epic, state: :closed, closed_at: @now}),
         issue("bd-ready"),
-        issue("bd-backlog", %{refined: false}),
-        issue("bd-run", %{status: :in_progress}),
-        issue("bd-closed", %{status: :closed, closed_at: @now})
+        issue("bd-backlog", %{state: :backlog}),
+        issue("bd-run", %{state: :active}),
+        issue("bd-closed", %{state: :closed, closed_at: @now})
       ]
 
       board = derive(issues: issues, workers: [worker("bd-run", :working)])
@@ -1489,13 +1460,13 @@ defmodule Arbiter.Board.SnapshotTest do
       board =
         derive(
           issues: [
-            issue("bd-backlog", %{refined: false}),
+            issue("bd-backlog", %{state: :backlog}),
             issue("bd-blocked"),
             issue("bd-ready"),
-            issue("bd-run", %{status: :in_progress}),
-            issue("bd-wait", %{status: :in_progress, updated_at: @yesterday}),
-            issue("bd-merge", %{status: :in_progress, state: :merging, pr_ref: "!1"}),
-            issue("bd-verify", %{status: :awaiting_verification})
+            issue("bd-run", %{state: :active}),
+            issue("bd-wait", %{state: :active, updated_at: @yesterday}),
+            issue("bd-merge", %{state: :merging, pr_ref: "!1"}),
+            issue("bd-verify", %{state: :verifying})
           ],
           workers: [worker("bd-run", :working)],
           blocked_by: %{"bd-blocked" => ["bd-ready"]},
@@ -1521,7 +1492,7 @@ defmodule Arbiter.Board.SnapshotTest do
     test "a closed card never flags, even if its id is in the set" do
       board =
         derive(
-          issues: [issue("bd-closed", %{status: :closed, closed_at: @now})],
+          issues: [issue("bd-closed", %{state: :closed, closed_at: @now})],
           over_budget: ["bd-closed"]
         )
 
@@ -1542,7 +1513,7 @@ defmodule Arbiter.Board.SnapshotTest do
           issues: [
             issue("bd-epic", %{issue_type: :epic, title: "Browser sessions"}),
             issue("bd-a"),
-            issue("bd-b", %{status: :closed, closed_at: @now})
+            issue("bd-b", %{state: :closed, closed_at: @now})
           ],
           parent_of: [parent_of("bd-epic", "bd-a"), parent_of("bd-epic", "bd-b")]
         )
@@ -1566,13 +1537,13 @@ defmodule Arbiter.Board.SnapshotTest do
 
     test "every column's cards carry the ref, not just Ready" do
       children = [
-        issue("bd-backlog", %{refined: false}),
+        issue("bd-backlog", %{state: :backlog}),
         issue("bd-blocked"),
-        issue("bd-run", %{status: :in_progress}),
-        issue("bd-wait", %{status: :in_progress, updated_at: @yesterday}),
-        issue("bd-merge", %{status: :in_progress, state: :merging, pr_ref: "!1"}),
-        issue("bd-verify", %{status: :awaiting_verification}),
-        issue("bd-closed", %{status: :closed, closed_at: @now})
+        issue("bd-run", %{state: :active}),
+        issue("bd-wait", %{state: :active, updated_at: @yesterday}),
+        issue("bd-merge", %{state: :merging, pr_ref: "!1"}),
+        issue("bd-verify", %{state: :verifying}),
+        issue("bd-closed", %{state: :closed, closed_at: @now})
       ]
 
       board =
@@ -1652,56 +1623,56 @@ defmodule Arbiter.Board.SnapshotTest do
   # drift onto different classifications.
   describe "classify_columns/2" do
     test "an unrefined open issue lands in backlog" do
-      assert Snapshot.classify_columns([issue("bd-a", %{refined: false})]) == %{
+      assert Snapshot.classify_columns([issue("bd-a", %{state: :backlog})]) == %{
                "bd-a" => :backlog
              }
     end
 
     test "a refined open issue lands in ready" do
-      assert Snapshot.classify_columns([issue("bd-a", %{refined: true})]) == %{"bd-a" => :ready}
+      assert Snapshot.classify_columns([issue("bd-a", %{state: :queued})]) == %{"bd-a" => :ready}
     end
 
     test "an in-progress issue with a live running worker lands in running" do
-      issues = [issue("bd-a", %{status: :in_progress})]
+      issues = [issue("bd-a", %{state: :active})]
       workers = [worker("bd-a", :working)]
 
       assert Snapshot.classify_columns(issues, workers) == %{"bd-a" => :running}
     end
 
     test "a worker's presence outranks a stale open status, same as the board" do
-      issues = [issue("bd-a", %{status: :open})]
+      issues = [issue("bd-a", %{state: :queued})]
       workers = [worker("bd-a", :starting)]
 
       assert Snapshot.classify_columns(issues, workers) == %{"bd-a" => :running}
     end
 
     test "an in-progress issue with a parked worker lands in waiting" do
-      issues = [issue("bd-a", %{status: :in_progress})]
+      issues = [issue("bd-a", %{state: :active})]
       workers = [worker("bd-a", :failed)]
 
       assert Snapshot.classify_columns(issues, workers) == %{"bd-a" => :waiting}
     end
 
     test "an in-progress issue with no worker at all lands in waiting" do
-      issues = [issue("bd-a", %{status: :in_progress})]
+      issues = [issue("bd-a", %{state: :active})]
 
       assert Snapshot.classify_columns(issues) == %{"bd-a" => :waiting}
     end
 
     test "an awaiting_verification issue lands in waiting" do
-      issues = [issue("bd-a", %{status: :awaiting_verification})]
+      issues = [issue("bd-a", %{state: :verifying})]
 
       assert Snapshot.classify_columns(issues) == %{"bd-a" => :waiting}
     end
 
     test "a closed issue lands in closed" do
-      issues = [issue("bd-a", %{status: :closed})]
+      issues = [issue("bd-a", %{state: :closed})]
 
       assert Snapshot.classify_columns(issues) == %{"bd-a" => :closed}
     end
 
     test "a reviewer/implementer worker on the same task does not count as running" do
-      issues = [issue("bd-a", %{status: :in_progress})]
+      issues = [issue("bd-a", %{state: :active})]
       workers = [worker("bd-a", :working, %{meta: %{role: :reviewer}})]
 
       assert Snapshot.classify_columns(issues, workers) == %{"bd-a" => :waiting}
@@ -1709,11 +1680,11 @@ defmodule Arbiter.Board.SnapshotTest do
 
     test "classifies a full mix of issues independently" do
       issues = [
-        issue("bd-backlog", %{refined: false}),
-        issue("bd-ready", %{refined: true}),
-        issue("bd-running", %{status: :in_progress}),
-        issue("bd-waiting", %{status: :in_progress}),
-        issue("bd-closed", %{status: :closed})
+        issue("bd-backlog", %{state: :backlog}),
+        issue("bd-ready", %{state: :queued}),
+        issue("bd-running", %{state: :active}),
+        issue("bd-waiting", %{state: :active}),
+        issue("bd-closed", %{state: :closed})
       ]
 
       workers = [worker("bd-running", :working)]

@@ -167,7 +167,7 @@ defmodule Arbiter.Workflows.MergeQueueLocalGitCoverageTest do
 
     assert_received :compare_refused, "the forge was asked first"
     assert_received {:merged, ^head}
-    assert Ash.get!(Issue, task.id).status == :closed
+    assert Ash.get!(Issue, task.id).state == :closed
     assert log =~ "decided via local_git"
 
     assert Enum.any?(
@@ -183,7 +183,7 @@ defmodule Arbiter.Workflows.MergeQueueLocalGitCoverageTest do
     %{task: task, name: name} = enqueue_and_tick(fx, 412, head)
 
     refute_received {:merged, _}
-    assert Ash.get!(Issue, task.id).status == :open
+    assert Ash.get!(Issue, task.id).state in [:backlog, :queued]
 
     reviewed = fx.reviewed
     %{items: [after_item]} = MergeQueue.state(name)

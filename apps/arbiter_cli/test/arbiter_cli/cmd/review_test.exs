@@ -18,7 +18,7 @@ defmodule ArbiterCli.Cmd.ReviewTest do
       stub_post(
         "/api/workers/review",
         %{
-          "task" => %{"id" => "bd-rev1", "title" => "review me", "status" => "in_progress"},
+          "task" => %{"id" => "bd-rev1", "title" => "review me", "state" => "active"},
           "worker" => %{"task_id" => "bd-rev1", "pid" => "#PID<0.123.0>"},
           "machine" => %{"id" => "mc-1", "pid" => "#PID<0.124.0>"},
           "worktree_path" => nil,
@@ -30,13 +30,13 @@ defmodule ArbiterCli.Cmd.ReviewTest do
       assert code == 0
       assert out =~ "Review dispatched:"
       assert out =~ "bd-rev1 — review me"
-      assert out =~ "in_progress"
+      assert out =~ "State:    active"
       assert out =~ "Claude:   started"
     end
 
     test "--json mode emits JSON" do
       stub_post("/api/workers/review", %{
-        "task" => %{"id" => "bd-rev1", "title" => "t", "status" => "in_progress"},
+        "task" => %{"id" => "bd-rev1", "title" => "t", "state" => "active"},
         "worker" => %{"task_id" => "bd-rev1", "pid" => "x"},
         "machine" => %{"id" => "m", "pid" => "y"}
       })
@@ -62,7 +62,7 @@ defmodule ArbiterCli.Cmd.ReviewTest do
             conn
             |> Plug.Conn.put_status(201)
             |> Req.Test.json(%{
-              "task" => %{"id" => "bd-rev1", "title" => "t", "status" => "in_progress"},
+              "task" => %{"id" => "bd-rev1", "title" => "t", "state" => "active"},
               "worker" => %{"task_id" => "bd-rev1", "pid" => "x"},
               "machine" => %{"id" => "m", "pid" => "y"}
             })

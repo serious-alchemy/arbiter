@@ -17,7 +17,7 @@ defmodule Arbiter.MCP.TaskShowPrStateTest do
       Ash.create(Workspace, %{name: "tspr-#{System.unique_integer([:positive])}", prefix: "tp"})
 
     {:ok, task} = Ash.create(Issue, %{title: "show my PR", workspace_id: ws.id})
-    {:ok, task} = Ash.update(task, %{status: :in_progress})
+    task = Arbiter.LifecycleFixtures.put_state!(task, :active)
 
     %{task: task, coordinator: %Scope{tier: :coordinator, workspace_id: ws.id}}
   end

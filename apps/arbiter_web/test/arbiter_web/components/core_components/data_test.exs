@@ -53,15 +53,20 @@ defmodule ArbiterWeb.CoreComponents.DataTest do
       assert html =~ "some_unmapped_status"
     end
 
-    test "Issue status vocabulary gets a semantic badge class" do
-      html = render_component(&status_chip/1, status: :open)
-      assert html =~ "badge-success"
+    test "a ticket's lifecycle states get a semantic badge class" do
+      assert render_component(&status_chip/1, status: :backlog) =~ "badge-ghost"
+      assert render_component(&status_chip/1, status: :queued) =~ "badge-success"
+      assert render_component(&status_chip/1, status: :active) =~ "badge-info"
+      assert render_component(&status_chip/1, status: :merging) =~ "badge-info"
+      assert render_component(&status_chip/1, status: :verifying) =~ "badge-warning"
+      assert render_component(&status_chip/1, status: :closed) =~ "badge-ghost"
+    end
 
-      html = render_component(&status_chip/1, status: :in_progress)
-      assert html =~ "badge-info"
+    test "passes global attributes through to the badge" do
+      html = render_component(&status_chip/1, status: :active, id: "chip", "data-state": "active")
 
-      html = render_component(&status_chip/1, status: :closed)
-      assert html =~ "badge-ghost"
+      assert html =~ ~s(id="chip")
+      assert html =~ ~s(data-state="active")
     end
   end
 
@@ -219,7 +224,7 @@ defmodule ArbiterWeb.CoreComponents.DataTest do
     end
 
     test "min_width keeps columns from collapsing to zero on a narrow viewport" do
-      assigns = %{rows: [%{id: "task1", detail: "open → in_progress"}]}
+      assigns = %{rows: [%{id: "task1", detail: "queued → active"}]}
 
       html =
         rendered_to_string(~H"""

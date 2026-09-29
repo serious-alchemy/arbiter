@@ -6,12 +6,12 @@ defmodule ArbiterCli.Main do
 
   ## Resources
 
-      arb ticket list     [--status ...] [--type ...] [--priority ...] [--labels ...] [--tracker]
+      arb ticket list     [--state ...] [--type ...] [--priority ...] [--labels ...] [--tracker]
       arb ticket show     <id>
       arb ticket create   <title> [--description ...] [--priority ...] [--type ...]
                                   [--deps id1,id2] [--labels a,b] [--parent <parent-id>]
                                   [--auto-close]
-      arb ticket update   <id> [--title ...] [--priority N] [--difficulty N] [--status s]
+      arb ticket update   <id> [--title ...] [--priority N] [--difficulty N]
                                   [--description d] [--append-notes text]
                                   [--qa-notes text] [--deployment-notes text]
                                   [--pr-body text]
@@ -19,7 +19,7 @@ defmodule ArbiterCli.Main do
       arb ticket reopen   <id>
       arb ticket verify   <id> --observed "<evidence>" | --failed "<evidence>"
                                   record the post-merge restart-and-observe result
-                                  for a ticket parked at awaiting_verification
+                                  for a ticket in state verifying
       arb ticket claim    <ref> [--force] [--repo <repo>]
       arb ticket sync     [--dry]
       arb ticket ready

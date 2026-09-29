@@ -1714,7 +1714,7 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
   defp engagements_for(ws_id, mr_ref) do
     Issue
     |> Ash.Query.filter(
-      review_only == true and source_pr == ^mr_ref and status != :closed and
+      review_only == true and source_pr == ^mr_ref and state != :closed and
         workspace_id == ^ws_id
     )
     |> Ash.read!()

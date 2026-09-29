@@ -84,10 +84,9 @@ defmodule ArbiterWeb.Api.IssueJSON do
       notes: issue.notes,
       qa_notes: issue.qa_notes,
       deployment_notes: issue.deployment_notes,
-      status: to_string_atom(issue.status),
-      # bd-842qio: the stored lifecycle state, which the later lifecycle
-      # children move every consumer onto. `close_reason` is null unless the
-      # ticket is closed; `rank` orders a priority band.
+      # bd-842qio: the stored lifecycle state — the ticket's one lifecycle
+      # field. `close_reason` is null unless the ticket is closed; `rank`
+      # orders a priority band.
       state: to_string_atom(issue.state),
       close_reason: to_string_atom(issue.close_reason),
       rank: issue.rank,
@@ -99,16 +98,13 @@ defmodule ArbiterWeb.Api.IssueJSON do
       awaiting_verification_at: iso(issue.awaiting_verification_at),
       verification_outcome: to_string_atom(issue.verification_outcome),
       verification_evidence: issue.verification_evidence,
-      # bd-9zuvbh: the ReviewGate park. Present (and null) on every issue so a
-      # consumer can tell "not parked" from "this API predates the field".
-      review_park_reason: issue.review_park_reason,
-      review_parked_at: iso(issue.review_parked_at),
       tracker_type: to_string_atom(issue.tracker_type),
       tracker_ref: issue.tracker_ref,
       pr_ref: issue.pr_ref,
       # bd-741sid: the ticket owns its open PR — its URL, the forge's last
       # answer (as recorded, string-keyed) and when its Watchdog read it — and
-      # the cause a closed-unmerged PR sent it back to work with.
+      # the cause a closed-unmerged PR sent it back to work with. A ReviewGate
+      # park is an attention cause too (`attention_since` is when it parked).
       merger_url: issue.merger_url,
       merger_status: issue.merger_status,
       merger_checked_at: iso(issue.merger_checked_at),
@@ -124,7 +120,6 @@ defmodule ArbiterWeb.Api.IssueJSON do
       target_branch: issue.target_branch,
       repo: issue.repo,
       workspace_id: issue.workspace_id,
-      refined: issue.refined,
       acceptance_waived: issue.acceptance_waived,
       closed_at: iso(issue.closed_at),
       created_at: iso(issue.created_at),

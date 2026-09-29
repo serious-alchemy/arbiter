@@ -7,6 +7,7 @@ defmodule ArbiterWeb.TaskDetailAttentionTest do
   use ArbiterWeb.ConnCase, async: false
 
   import Phoenix.LiveViewTest
+  import Arbiter.LifecycleFixtures
   import ArbiterWeb.TaskDetailLiveHelpers
 
   alias Arbiter.Tasks.{Attention, Issue, Workspace}
@@ -16,7 +17,7 @@ defmodule ArbiterWeb.TaskDetailAttentionTest do
       Ash.create(Workspace, %{name: "ta-#{System.unique_integer([:positive])}", prefix: "tat"})
 
     {:ok, task} = Ash.create(Issue, %{title: "attention page", workspace_id: ws.id})
-    {:ok, task} = Ash.update(task, %{status: :in_progress})
+    task = put_state!(task, :active)
     {:ok, _} = Attention.raise_cause(task.id, :run_crashed, "the run died")
 
     {:ok, ws: ws, task: task}

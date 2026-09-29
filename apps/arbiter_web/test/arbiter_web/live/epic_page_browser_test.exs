@@ -93,9 +93,9 @@ defmodule ArbiterWeb.EpicPageBrowserTest do
       case as do
         :backlog -> issue
         :ready -> Ash.update!(issue, %{}, action: :promote_to_ready)
-        :running -> Ash.update!(issue, %{status: :in_progress})
+        :running -> Ash.update!(issue, %{}, action: :start)
         # bd-842qio: only work in progress parks for verification.
-        :waiting -> issue |> Ash.update!(%{status: :in_progress}) |> park()
+        :waiting -> issue |> Ash.update!(%{}, action: :start) |> park()
         :closed -> Ash.update!(issue, %{}, action: :close)
       end
 

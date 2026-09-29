@@ -1,7 +1,7 @@
 defmodule Arbiter.Workflows.MergeQueueVerificationTest do
   @moduledoc """
   bd-9so315 — a merge of a `verify_after_deploy` task parks the task at
-  `:awaiting_verification` instead of closing it, and notifies the coordinator
+  `:verifying` instead of closing it, and notifies the coordinator
   once. Unflagged tasks close on merge exactly as before (regression).
   """
   # async: false — DataCase sandbox can't be shared with the GenServer process
@@ -115,13 +115,13 @@ defmodule Arbiter.Workflows.MergeQueueVerificationTest do
   end
 
   describe "flagged task" do
-    test "parks at :awaiting_verification instead of closing", %{workspace: ws} do
+    test "parks at :verifying instead of closing", %{workspace: ws} do
       task = new_task(ws, %{verify_after_deploy: true})
       :ok = Phoenix.PubSub.subscribe(Arbiter.PubSub, "merge_queue:" <> ws.id)
 
       reloaded = run_to_merge(ws, task, 301)
 
-      assert reloaded.status == :awaiting_verification
+      assert reloaded.state == :verifying
       assert reloaded.closed_at == nil
       assert %DateTime{} = reloaded.awaiting_verification_at
 
@@ -155,7 +155,7 @@ defmodule Arbiter.Workflows.MergeQueueVerificationTest do
 
       reloaded = run_to_merge(ws, task, 303)
 
-      assert reloaded.status == :closed
+      assert reloaded.state == :closed
       assert %DateTime{} = reloaded.closed_at
       assert reloaded.awaiting_verification_at == nil
 

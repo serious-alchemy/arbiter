@@ -1,7 +1,7 @@
 defmodule Arbiter.Tasks.Issue do
   @moduledoc """
   An Issue is a unit of work in the task ledger. Equivalent to a bd "task" in the
-  Go implementation: title, description, status, priority, dependencies, audit trail,
+  Go implementation: title, description, lifecycle state, priority, dependencies, audit trail,
   optional external-tracker reference.
 
   IDs are human-friendly strings: `"{workspace.prefix}-{short_id}"`, e.g. `"bd-3o8"`,
@@ -16,34 +16,20 @@ defmodule Arbiter.Tasks.Issue do
   `:open_pr`, `:return_to_work`, `:await_verification`, `:close`, `:reopen`.
   The table lives in `Arbiter.Tasks.Lifecycle`; the model in
   `docs/design/ticket-lifecycle.md`. The legacy doors `:promote_to_ready` and
-  `:return_to_backlog` apply `promote` / `demote`.
+  `:return_to_backlog` apply `promote` / `demote`, and `:requeue` puts a
+  stopped run's ticket back in the queue.
 
-  Until the later lifecycle children switch every consumer to `state`, each
-  transition also dual-writes the legacy `status` and `refined` columns below,
-  and a legacy `status` write through `:update` re-derives `state`
-  (`Changes.FollowLegacyStatus`), so the two never disagree.
-
-  ## Status FSM (legacy)
-
-      :open ⇄ :in_progress
-       │          │
-       │          ├────► :awaiting_verification ─┬─► :closed
-       │          │                              └─► reopen → :open
-       └────►─────┴────► :closed
-                          │
-                          └ reopen → :open
-
-  Enforced in `:update`, `:await_verification`, `:close`, `:reopen` actions. You
-  cannot close an already closed issue, and cannot transition out of :closed
-  without an explicit `:reopen`. The lifecycle table is stricter where the two
-  differ (a ticket enters `:verifying` only from `:active` or `:merging`).
+  `:update` accepts none of `state`, `close_reason` or `rank`. bd-36ytcl
+  removed the legacy `status` and `refined` columns the transitions used to
+  dual-write, and the ReviewGate park columns (the park is the ticket's
+  attention cause).
 
   ## Post-merge verification (bd-9so315)
 
   A task flagged `verify_after_deploy: true` is one whose only execution context
   is the long-lived server — env/config plumbing, a doctor probe, a capture
   path. Merging it proves nothing: the running server still holds the old code.
-  For those, the merge parks the task at `:awaiting_verification` (via
+  For those, the merge parks the task at `:verifying` (via
   `:await_verification`) instead of closing it, and the coordinator records a
   restart-and-observe result through `Arbiter.Tasks.Verification`:
 
@@ -96,7 +82,6 @@ defmodule Arbiter.Tasks.Issue do
   alias Arbiter.Tasks.Issue.Changes.Transition
   alias Arbiter.Tasks.Lifecycle.Projection
 
-  @statuses ~w(open in_progress awaiting_verification closed)a
   @lifecycle_states Arbiter.Tasks.Lifecycle.states()
   @close_reasons Arbiter.Tasks.Lifecycle.close_reasons()
   @attention_causes Arbiter.Tasks.Lifecycle.Attention.causes()
@@ -251,7 +236,6 @@ defmodule Arbiter.Tasks.Issue do
         :notes,
         :qa_notes,
         :deployment_notes,
-        :status,
         :priority,
         :difficulty,
         :issue_type,
@@ -302,22 +286,13 @@ defmodule Arbiter.Tasks.Issue do
       # `source_pr` parameter at all) must never be able to null it out from
       # under PRPatrol's `deduped?/2` check — see bd-ag9pq3.
 
-      # Allow open ⇄ in_progress, but block transitions involving :closed via :update
-      change {Arbiter.Tasks.Issue.Changes.GuardStatus, action: :update}
-
       # bd-842qio: `state`, `close_reason` and `rank` are not in `accept`, so
-      # this action refuses them outright. A legacy `status` write still gets
-      # through (a requeue, an operator's status edit), and carries `state`
-      # with it — see the change's moduledoc for who still writes `status`.
-      change {Arbiter.Tasks.Issue.Changes.FollowLegacyStatus, []}
+      # this action refuses them outright — the named transitions move a
+      # ticket.
 
       # Watermark the head SHA on a circuit-breaker resume so the breaker
       # doesn't immediately re-trip on the next tick (bd-1atwts).
       change {Arbiter.Tasks.Issue.Changes.RecordCircuitBreakerClear, []}
-
-      # Propagate an open ⇄ in_progress status change to the linked external
-      # tracker. Best-effort; no-op when status didn't change or no tracker.
-      change {Arbiter.Tasks.Issue.Changes.SyncTracker, []}
 
       # Propagate title/description changes to the linked external tracker.
       # Best-effort; no-op when neither field changed or no tracker.
@@ -339,13 +314,11 @@ defmodule Arbiter.Tasks.Issue do
     #
     # The `await_verification` transition (bd-842qio): active | merging →
     # verifying. A ticket still sitting in the queue has nothing merged to
-    # verify, which is stricter than the legacy status guard (it allowed
-    # `:open`); `Tasks.Verification.finalize_merged/2` walks a queued ticket
+    # verify; `Tasks.Verification.finalize_merged/2` walks a queued ticket
     # through `start` first.
     update :await_verification do
       require_atomic? false
 
-      change {Arbiter.Tasks.Issue.Changes.GuardStatus, action: :await_verification}
       change {Transition, transition: :await_verification}
       change set_attribute(:awaiting_verification_at, &DateTime.utc_now/0)
 
@@ -386,7 +359,7 @@ defmodule Arbiter.Tasks.Issue do
       end
     end
 
-    # Records the restart-and-observe verdict + its evidence. Makes NO status
+    # Records the restart-and-observe verdict + its evidence. Makes NO state
     # change of its own — `Arbiter.Tasks.Verification` follows it with `:close`
     # (observed) or `:reopen` (failed), so the evidence is durable even if the
     # follow-on transition fails.
@@ -394,7 +367,7 @@ defmodule Arbiter.Tasks.Issue do
       require_atomic? false
       accept [:verification_outcome, :verification_evidence]
 
-      change {Arbiter.Tasks.Issue.Changes.GuardStatus, action: :record_verification}
+      change {Arbiter.Tasks.Issue.Changes.GuardState, action: :record_verification}
 
       change after_action(fn _, issue, _ ->
                Arbiter.Tasks.Issue.broadcast_lifecycle(:updated, issue)
@@ -404,25 +377,22 @@ defmodule Arbiter.Tasks.Issue do
 
     # ---- review-gate park (bd-9zuvbh, design #1635 §5.3 class C) ----------
     #
-    # A park is a FLAG, not a status transition: the task stays `:in_progress`
-    # so `Tasks.Claim`, the board and the dependency graph keep treating it as
-    # live work, and `Dispatch.resume/2` can re-attach to the parked worker the
+    # A park is an attention cause, not a transition: the ticket keeps its
+    # state so `Tasks.Claim`, the board and the dependency graph keep treating
+    # it as live work, and `Dispatch.resume/2` can re-attach to the parked worker the
     # moment a human acts. That is the whole difference from `:failed` — the
     # work is intact and one decision away from merging, so nothing about it
     # should read as "this run did not happen".
     update :park_review do
       require_atomic? false
-      accept [:review_park_reason]
 
-      # bd-8if9zt: the park reason is the ticket's attention cause too
-      # (dual-written with the legacy park columns until bd-36ytcl). A reason
-      # the table does not know parks without a cause rather than failing.
+      # bd-8if9zt: the park reason is the ticket's attention cause — since
+      # bd-36ytcl its only record (`Arbiter.Tasks.ReviewPark.park_reasons/0`).
       argument :cause, :atom do
-        allow_nil? true
+        allow_nil? false
         constraints one_of: @attention_causes
       end
 
-      change set_attribute(:review_parked_at, &DateTime.utc_now/0)
       change set_attribute(:attention_cause, arg(:cause))
       change set_attribute(:attention_detail, nil)
       change set_attribute(:attention_since, &DateTime.utc_now/0)
@@ -527,7 +497,6 @@ defmodule Arbiter.Tasks.Issue do
         constraints one_of: @close_reasons
       end
 
-      change {Arbiter.Tasks.Issue.Changes.GuardStatus, action: :close}
       change {Transition, transition: :close}
       change set_attribute(:closed_at, &DateTime.utc_now/0)
 
@@ -583,14 +552,14 @@ defmodule Arbiter.Tasks.Issue do
     update :sync_upstream_close do
       require_atomic? false
 
-      # No local status/closed_at change — this action exists solely to push
+      # No local state/closed_at change — this action exists solely to push
       # a close to the linked tracker for a task that's already `:closed`
       # locally but never synced upstream (e.g. it closed before the caller
-      # thought to pass `close_upstream: true`). GuardStatus requires the
+      # thought to pass `close_upstream: true`). GuardState requires the
       # task to already be :closed; StopWorker/CleanupWorktree/the auto-close
       # rollup are all close-time side effects and deliberately do NOT run
-      # here, since this isn't a status transition.
-      change {Arbiter.Tasks.Issue.Changes.GuardStatus, action: :sync_upstream_close}
+      # here, since this isn't a transition.
+      change {Arbiter.Tasks.Issue.Changes.GuardState, action: :sync_upstream_close}
 
       # bd-bsco7f: this action exists *only* to propagate a close upstream, so
       # the intent is unambiguous — record it. A legacy close that predates
@@ -609,7 +578,6 @@ defmodule Arbiter.Tasks.Issue do
     update :reopen do
       require_atomic? false
 
-      change {Arbiter.Tasks.Issue.Changes.GuardStatus, action: :reopen}
       change {Transition, transition: :reopen}
       change set_attribute(:closed_at, nil)
 
@@ -658,16 +626,13 @@ defmodule Arbiter.Tasks.Issue do
 
     # bd-b5wyjd: refinement is done — move the card from Backlog to Ready.
     #
-    # Its own action rather than `:refined` in `:update`'s accept list, for the
+    # Its own action rather than a field in `:update`'s accept list, for the
     # same reason `:close` is: promotion is a decision with a name, and a
-    # named action is what the paper_trail version row records. It also keeps
-    # the flag one-way through a single door — no generic partial-update path
-    # (`ticket_update`, the REST patch, the edit form) can flip a card into the
-    # dispatch queue as a side effect of renaming it.
+    # named action is what the paper_trail version row records. No generic
+    # partial-update path (`ticket_update`, the REST patch, the edit form) can
+    # flip a card into the dispatch queue as a side effect of renaming it.
     #
-    # No status change, no tracker sync, no worker: the ticket is explicit
-    # that promotion has no other side effects. Idempotent by construction —
-    # promoting an already-refined card is a no-op write, not an error.
+    # No tracker sync, no worker: promotion has no other side effects.
     #
     # bd-842qio: this is the legacy door onto the `promote` transition
     # (backlog → queued), kept for the surfaces that call it by this name
@@ -711,26 +676,20 @@ defmodule Arbiter.Tasks.Issue do
     # bd-a1bmyx: refinement is complete but the task was returned — move it back
     # to Backlog so it can be re-refined if needed. The same reasons apply as
     # `:promote_to_ready`: a named action (not a generic update), idempotent
-    # (demoting an already-backlog card is a no-op), and orthogonal to status.
+    # (demoting an already-backlog card is a no-op).
     #
     # Refuses if the task has a live worker (demoting would orphan it) or if it
-    # is in a state where demotion is unsafe (awaiting_verification, closed).
-    # bd-2098: an in_progress task whose worker already stopped is demoted too,
-    # with its status reset to open in the same write.
+    # is in a state where demotion is unsafe (verifying, closed).
+    # bd-2098: an active or merging task whose worker already stopped is
+    # demoted too, in the same single write.
     #
-    # bd-842qio: the legacy door onto the `demote` transition (queued →
-    # backlog), idempotent on a ticket already in `:backlog`, like
-    # `:promote_to_ready` above. bd-2098's reset of a stopped in-progress
-    # ticket has no transition in the table (active → backlog), so like the
-    # other legacy status writes it carries the state with it, to `:backlog`.
+    # bd-842qio: the legacy door onto the `demote` transition, idempotent on a
+    # ticket already in `:backlog`, like `:promote_to_ready` above.
     update :return_to_backlog do
       require_atomic? false
 
       change {Arbiter.Tasks.Issue.Changes.GuardDemote, []}
-      change {Arbiter.Tasks.Issue.Changes.ResetDemotedTaskStatus, []}
-      change set_attribute(:refined, false)
       change {Transition, transition: :demote, idempotent: true}
-      change {Arbiter.Tasks.Issue.Changes.FollowLegacyStatus, []}
 
       # Broadcast the demotion event, same pattern as `:promote_to_ready`.
       change fn changeset, _context ->
@@ -749,8 +708,7 @@ defmodule Arbiter.Tasks.Issue do
     #
     # The rest of the table. `:await_verification`, `:close` and `:reopen`
     # above are transitions too; `Arbiter.Tasks.Lifecycle` has the whole
-    # table and `Changes.Transition` checks it and dual-writes the legacy
-    # columns.
+    # table and `Changes.Transition` checks it.
 
     # backlog → queued. The same acceptance-criteria gate as
     # `:promote_to_ready`, but strict: promoting a ticket that is not in the
@@ -775,7 +733,8 @@ defmodule Arbiter.Tasks.Issue do
       end
     end
 
-    # queued → backlog, with `:return_to_backlog`'s live-worker refusal.
+    # queued | active | merging → backlog, with `:return_to_backlog`'s
+    # live-worker refusal.
     update :demote do
       require_atomic? false
 
@@ -794,7 +753,8 @@ defmodule Arbiter.Tasks.Issue do
       end
     end
 
-    # queued → active: a dispatch took the ticket (`Worker.Dispatch`).
+    # backlog | queued → active: a dispatch took the ticket (`Worker.Dispatch`;
+    # from Backlog only with `--force`).
     update :start do
       require_atomic? false
 
@@ -804,8 +764,24 @@ defmodule Arbiter.Tasks.Issue do
 
       change {Transition, transition: :start}
 
-      # open → in_progress upstream, exactly as the `:update` status write this
-      # replaces did.
+      # open → in_progress upstream.
+      change {Arbiter.Tasks.Issue.Changes.SyncTracker, []}
+
+      change after_action(fn _, issue, _ ->
+               Arbiter.Tasks.Issue.broadcast_lifecycle(:updated, issue)
+               {:ok, issue}
+             end)
+    end
+
+    # active | merging → queued (bd-36ytcl): the ticket's run stopped without
+    # finishing and it goes back to the Ready queue — `Worker.AuthDeath` after
+    # an auth failure.
+    update :requeue do
+      require_atomic? false
+
+      change {Transition, transition: :requeue}
+
+      # in_progress → open upstream.
       change {Arbiter.Tasks.Issue.Changes.SyncTracker, []}
 
       change after_action(fn _, issue, _ ->
@@ -1035,10 +1011,8 @@ defmodule Arbiter.Tasks.Issue do
         |> Map.merge(%{
           task_id: Map.get(issue, :id),
           event: to_string(event),
-          # Legacy, kept for one release beside `state` / `column` (bd-6fkgvo).
-          status: to_string(Map.get(issue, :status) || ""),
-          # bd-842qio: the stored lifecycle state beside the legacy status.
-          # `close_reason` is null unless the ticket is closed.
+          # bd-842qio: the stored lifecycle state. `close_reason` is null
+          # unless the ticket is closed.
           state: to_string(Map.get(issue, :state) || ""),
           close_reason: close_reason_string(Map.get(issue, :close_reason))
         })
@@ -1119,13 +1093,6 @@ defmodule Arbiter.Tasks.Issue do
       description "Markdown. Synced to Jira's Deployment Notes custom field via Tracker.Jira."
     end
 
-    attribute :status, :atom do
-      allow_nil? false
-      public? true
-      default :open
-      constraints one_of: @statuses
-    end
-
     attribute :state, :atom do
       allow_nil? false
       public? true
@@ -1135,8 +1102,7 @@ defmodule Arbiter.Tasks.Issue do
       description """
       The ticket's stored lifecycle state (bd-842qio): backlog, queued, active,
       merging, verifying or closed. Changed only by the named transition
-      actions — see `Arbiter.Tasks.Lifecycle`. Every transition dual-writes
-      `status` and `refined` until the lifecycle children retire them.
+      actions — see `Arbiter.Tasks.Lifecycle`.
       """
     end
 
@@ -1228,31 +1194,6 @@ defmodule Arbiter.Tasks.Issue do
       """
     end
 
-    attribute :refined, :boolean do
-      allow_nil? false
-      public? true
-      default false
-
-      description """
-      Whether a human has refined this task enough for it to be dispatchable.
-      Splits the board's Backlog column (`false`) from its Ready queue
-      (`true`) — see `Arbiter.Board.Snapshot`.
-
-      This is NOT a status: the FSM still only knows open/in_progress/closed.
-      It is a derived-column input like any other board signal, which is why
-      it lives here as a plain flag rather than as a fourth state.
-
-      Deliberately absent from `:create`'s accept list — every creation path
-      (`arb create`, `ticket_create`, the REST API, tracker sync, the dashboard
-      form) lands in Backlog, and the only way out is the `:promote_to_ready`
-      action behind the task detail page's "Move to Ready" button.
-
-      Since bd-842qio it is a legacy column dual-written by the lifecycle
-      transitions from `state` (`:backlog` → false, `:queued` onwards → true,
-      left alone on close).
-      """
-    end
-
     attribute :acceptance_waived, :string do
       public? true
       constraints trim?: true
@@ -1302,7 +1243,7 @@ defmodule Arbiter.Tasks.Issue do
       Tracker issue ref for context-only use on a review task (e.g. \"AX-18004\").
       Paired with `tracker_context_type`. The referenced ticket's description is
       fetched at dispatch and injected into the reviewer's prompt. No assignment
-      check, no write-back (no status transition, no assignee change). When
+      check, no write-back (no state transition, no assignee change). When
       `tracker_ref` is blank it is also the ticket key in the branch name and
       conventional-commit PR title (#1973), so a context-only child of
       `VR-19083` still opens a `[VR-19083]` PR.
@@ -1461,7 +1402,7 @@ defmodule Arbiter.Tasks.Issue do
       pull request for this ticket" comment for (bd-bqlwjo). A `:pr_opened`
       lifecycle event whose `pr_url` matches this value is a repeat run on the
       same PR — a ReviewGate implementation round, a `worker_resume`, or a
-      re-open of an already-linked PR — and both the status transition and the
+      re-open of an already-linked PR — and both the state transition and the
       comment/remote-link are skipped. Cleared implicitly by `reopen` clearing
       `pr_ref`, so a new PR after `ticket_reopen` gets its own comment even
       though the ticket itself is unchanged. Durable (not an ETS/process
@@ -1476,10 +1417,10 @@ defmodule Arbiter.Tasks.Issue do
 
       description """
       The PR/MR URL `Arbiter.Trackers.Sync` last successfully drove the
-      `:pr_opened` status transition for (bd-bqlwjo). Tracked separately from
+      `:pr_opened` state transition for (bd-bqlwjo). Tracked separately from
       `pr_opened_notified_ref`: the comment/remote-link is posted at most once
       per PR ref regardless of outcome (a repeat is a visible duplicate the
-      user is showing us), but the status transition itself must keep
+      user is showing us), but the state transition itself must keep
       retrying on the next run for the same PR ref until it actually lands —
       e.g. after a gated-fields escalation (blank qa_notes/deployment_notes)
       or a transient tracker failure on the first attempt. Set only when
@@ -1613,40 +1554,6 @@ defmodule Arbiter.Tasks.Issue do
       """
     end
 
-    # ---- review-gate park (bd-9zuvbh, design #1635 §5.3 class C) ----------
-
-    attribute :review_park_reason, :string do
-      allow_nil? true
-      public? false
-
-      description """
-      Why the ReviewGate parked this task instead of failing its run.
-
-      The gate's terminal no-verdict states — no parseable verdict after the
-      re-prompt, a reviewer timeout, a verdict guard that ran out of
-      re-prompts, a no-op fix round after an approval-gap rejection — are
-      *liveness* failures, not review findings. Class C fails open on them:
-      the run finishes `:failed` with this reason, the coordinator is paged once, and
-      the task sits here until a human re-runs the review, merges by hand, or
-      rejects it.
-
-      The park is a flag, not a status: the task stays `:in_progress` so
-      `Tasks.Claim` and the board still see it as live work. Cleared by
-      `Arbiter.Tasks.ReviewPark.clear/2` (a re-run review) and by `:close`.
-      """
-    end
-
-    attribute :review_parked_at, :utc_datetime_usec do
-      allow_nil? true
-      public? false
-
-      description """
-      When the ReviewGate park was stamped. `arb prime` renders the age of the
-      wait from this, oldest first — the park most likely to have been
-      forgotten leads.
-      """
-    end
-
     attribute :close_upstream_expected, :boolean do
       allow_nil? true
       public? false
@@ -1682,7 +1589,7 @@ defmodule Arbiter.Tasks.Issue do
       description """
       When true, this task was dispatched as a review-only directive (via
       `worker_review`). Review-only tasks must never mutate a linked tracker
-      issue they don't own: no reassignment, no description sync, no status
+      issue they don't own: no reassignment, no description sync, no state
       transition. SyncTracker, SyncFields, and the Driver's close-upstream
       logic all check this flag and skip any write-back when it is set.
       """
@@ -1975,9 +1882,6 @@ defmodule Arbiter.Tasks.Issue do
     end
   end
 
-  @doc "List of valid status atoms."
-  def statuses, do: @statuses
-
   @doc "Every attention cause (`Arbiter.Tasks.Lifecycle.Attention.causes/0`)."
   @spec attention_causes() :: [atom()]
   def attention_causes, do: @attention_causes
@@ -2031,11 +1935,8 @@ defmodule Arbiter.Tasks.Issue do
   run starts (bd-842qio):
 
     * `:queued` → the `start` transition;
-    * `:backlog` → a manual dispatch that skipped the Ready queue. The table
-      has no transition for it (bd-asxw4e puts it behind `--force`), so it
-      keeps its legacy single write, `status: :in_progress` through `:update`,
-      and `Changes.FollowLegacyStatus` carries the state along (`:active`, or
-      `:merging` when a PR is already on record);
+    * `:backlog` → the `start` transition too: a manual dispatch that skipped
+      the Ready queue (bd-asxw4e puts it behind `--force`);
     * `:active` / `:merging` → already at work, returned unchanged;
     * anything else → the `start` transition's refusal.
 
@@ -2046,9 +1947,6 @@ defmodule Arbiter.Tasks.Issue do
 
   def start_work(%{state: state} = issue, _attrs) when state in [:active, :merging],
     do: {:ok, issue}
-
-  def start_work(%{state: :backlog} = issue, attrs),
-    do: Ash.update(issue, Map.put(attrs, :status, :in_progress))
 
   def start_work(issue, attrs), do: Ash.update(issue, attrs, action: :start)
 
@@ -2131,31 +2029,6 @@ defmodule Arbiter.Tasks.Issue do
   instead of keeping its own copy.
   """
   def non_dispatchable_types, do: @non_dispatchable_types
-
-  @doc """
-  Every task the ReviewGate has parked (bd-9zuvbh), oldest park first.
-
-  The oldest wait leads for the same reason it does in the post-merge
-  verification list: the park most likely to have been forgotten is the one a
-  human most needs to see. Backs `arb prime`'s REVIEW-PARKED section and
-  `GET /api/issues/review_parked`.
-
-  ## Options
-
-    * `:workspace_id` — restrict to a single workspace. Default: all.
-  """
-  @spec review_parked(keyword()) :: [t()]
-  def review_parked(opts \\ []) do
-    workspace_id = Keyword.get(opts, :workspace_id)
-
-    __MODULE__
-    |> Ash.read!()
-    |> Enum.filter(fn i ->
-      is_binary(i.review_park_reason) and i.review_park_reason != "" and
-        (is_nil(workspace_id) or i.workspace_id == workspace_id)
-    end)
-    |> Enum.sort_by(&(&1.review_parked_at || DateTime.utc_now()), {:asc, DateTime})
-  end
 
   @doc """
   Returns the "ready" tickets: exactly those whose `Arbiter.Tasks.Lifecycle.view/2`
@@ -2249,7 +2122,7 @@ defmodule Arbiter.Tasks.Issue do
       not parent.auto_close ->
         parent
 
-      parent.status == :closed ->
+      parent.state == :closed ->
         parent
 
       parent.child_total == 0 ->

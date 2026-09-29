@@ -10,7 +10,7 @@ defmodule Arbiter.Tasks do
 
     * `Arbiter.Tasks.Workspace` — gte-P1 (this task) — workspace with config JSON
       (tracker config). Default workspace ships a `:none` tracker.
-    * `Arbiter.Tasks.Issue` — gte-002 — Ash issue resource with status FSM, audit
+    * `Arbiter.Tasks.Issue` — gte-002 — Ash issue resource with the lifecycle `state` FSM, audit
       via paper_trail, tracker_type/tracker_ref fields. A task can be a *parent*
       of other tasks via `:parent_of` dependency edges; it then rolls up
       `{child_closed, child_total}` progress and optionally auto-closes when all
@@ -41,7 +41,7 @@ defmodule Arbiter.Tasks do
   require Ash.Query
 
   @doc """
-  Per-status child breakdown + the `needs_you` attention signal for `epics`,
+  Per-bucket child breakdown + the `needs_you` attention signal for `epics`,
   keyed by epic id.
 
   The read model behind `/epics` (bd-2wmxt5). See `Arbiter.Tasks.EpicRollup`
@@ -60,7 +60,7 @@ defmodule Arbiter.Tasks do
     closed = :closed
 
     Arbiter.Tasks.Issue
-    |> Ash.Query.filter(issue_type == ^epic and status != ^closed)
+    |> Ash.Query.filter(issue_type == ^epic and state != ^closed)
     |> Ash.count!()
   end
 end

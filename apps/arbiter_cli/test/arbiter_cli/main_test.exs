@@ -3,7 +3,7 @@ defmodule ArbiterCli.MainTest do
 
   alias ArbiterCli.Main
 
-  @issues %{"data" => [%{"id" => "bd-1", "title" => "T", "status" => "open"}]}
+  @issues %{"data" => [%{"id" => "bd-1", "title" => "T", "state" => "queued"}]}
 
   describe "arb <resource> <verb>" do
     test "ticket list dispatches to the ticket resource" do
@@ -18,7 +18,7 @@ defmodule ArbiterCli.MainTest do
     test "arb verify <id> reaches the issue verify endpoint" do
       stub_post(
         "/api/issues/bd-1/verify",
-        %{"id" => "bd-1", "title" => "T", "status" => "closed"},
+        %{"id" => "bd-1", "title" => "T", "state" => "closed"},
         200
       )
 
@@ -41,7 +41,7 @@ defmodule ArbiterCli.MainTest do
         Req.Test.json(conn, %{
           "id" => "bd-1",
           "title" => "T",
-          "status" => "open",
+          "state" => "queued",
           "data" => [],
           "task" => %{"id" => "bd-1"},
           "worker" => %{},

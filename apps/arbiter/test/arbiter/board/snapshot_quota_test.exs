@@ -27,12 +27,11 @@ defmodule Arbiter.Board.SnapshotQuotaTest do
     %{
       id: "bd-ready",
       title: "Task bd-ready",
-      status: :open,
+      state: :queued,
       priority: 2,
       difficulty: 2,
       issue_type: :task,
       workspace_id: ws.id,
-      refined: true,
       description: nil,
       acceptance: nil,
       notes: nil,

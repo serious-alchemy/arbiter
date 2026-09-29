@@ -83,7 +83,11 @@ defmodule ArbiterWeb.Api.SchedulerControllerTest do
       conn = get(conn, "/api/scheduler/status")
 
       assert %{"paused" => false, "state" => "running", "safe_to_restart" => false} =
-               json_response(conn, 200)
+               body = json_response(conn, 200)
+
+      # bd-36ytcl: an idle worker is simply not in flight; there is no
+      # separate `parked` list.
+      refute Map.has_key?(body, "parked")
     end
 
     # bd-9fgg04: paused is not idle — live work keeps it draining.

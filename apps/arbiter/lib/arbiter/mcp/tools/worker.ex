@@ -41,7 +41,7 @@ defmodule Arbiter.MCP.Tools.Worker do
   `agent.type` config is consulted and the first healthy provider is selected via
   `ProviderPool` — identical to the REST dispatch default. Pass an explicit
   `provider` (`"claude"` | `"gemini"`, or the deprecated `with_claude: true` alias)
-  to override. Set `no_agent: true` to park the task `:in_progress` without
+  to override. Set `no_agent: true` to move the task to `:active` without
   spawning a worker (hand-off / manual-attach path).
   Backs onto `Arbiter.Worker.Dispatch.dispatch/2`.
   """
@@ -826,7 +826,7 @@ defmodule Arbiter.MCP.Tools.Worker do
   # Map `worker_dispatch` arguments onto `Dispatch.dispatch/2` opts, mirroring the
   # REST `POST /api/workers/dispatch` contract: an explicit `provider` (or deprecated
   # `with_claude`) forces that agent via `agent_type`; `no_agent: true` parks the
-  # task `:in_progress` (hand-off path); otherwise the workspace's `agent.type`
+  # task `:active` (hand-off path); otherwise the workspace's `agent.type`
   # config is used to pick the first healthy provider.
   defp worker_dispatch_opts(scope, args) do
     with {:ok, force} <- Tools.fetch_bool(args, "force", false) do

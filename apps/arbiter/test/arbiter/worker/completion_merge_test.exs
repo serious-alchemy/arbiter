@@ -102,7 +102,7 @@ defmodule Arbiter.Worker.CompletionMergeTest do
     # StopWorker after-action kills the worker process right after close_task
     # returns — checking Worker.state/1 would raise if we arrive slightly late.
     wait_until(fn ->
-      match?({:ok, %Issue{status: :closed}}, Ash.get(Issue, task.id))
+      match?({:ok, %Issue{state: :closed}}, Ash.get(Issue, task.id))
     end)
 
     # main now carries a real merge commit (two parents) — not a fast-forward.
@@ -206,7 +206,7 @@ defmodule Arbiter.Worker.CompletionMergeTest do
     assert snap.outcome == :failed
     assert snap.meta.failure_reason == :merge_conflict
     {:ok, reloaded} = Ash.get(Issue, task.id)
-    refute reloaded.status == :closed
+    refute reloaded.state == :closed
     assert reloaded.notes =~ "Merge conflict"
     assert reloaded.notes =~ "README.md"
 

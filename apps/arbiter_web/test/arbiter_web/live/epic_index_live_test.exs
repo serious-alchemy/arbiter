@@ -1,6 +1,6 @@
 defmodule ArbiterWeb.EpicIndexLiveTest do
   @moduledoc """
-  bd-2wmxt5 — the `/epics` list: child-status breakdown, the derived needs_you attention state,
+  bd-2wmxt5 — the `/epics` list: child-column breakdown, the derived needs_you attention state,
   independent filters, sort, and live updates off the "tasks" topic.
   """
   use ArbiterWeb.ConnCase, async: false
@@ -44,9 +44,9 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
       case as do
         :backlog -> issue
         :ready -> Ash.update!(issue, %{}, action: :promote_to_ready)
-        :running -> Ash.update!(issue, %{status: :in_progress})
+        :running -> Ash.update!(issue, %{}, action: :start)
         # bd-842qio: only work in progress parks for verification.
-        :waiting -> issue |> Ash.update!(%{status: :in_progress}) |> park()
+        :waiting -> issue |> Ash.update!(%{}, action: :start) |> park()
         :closed -> Ash.update!(issue, %{}, action: :close)
       end
 
@@ -76,7 +76,7 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
       assert has_element?(view, ~s(#epic-#{e.id} a[href="/tasks/#{e.id}"]), "linkable-epic")
     end
 
-    test "a row shows workspace, status, closed/total and the child breakdown",
+    test "a row shows workspace, state, closed/total and the child breakdown",
          %{conn: conn, ws: ws} do
       e = epic(ws, "breakdown-epic")
       child(ws, e, "b1", :backlog)
@@ -89,7 +89,7 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
       {:ok, view, _html} = live_epics!(conn, ~p"/epics")
 
       assert has_element?(view, "#epic-#{e.id}-workspace", ws.name)
-      assert has_element?(view, "#epic-#{e.id}-status", "open")
+      assert has_element?(view, "#epic-#{e.id}-state", "backlog")
       assert has_element?(view, "#epic-#{e.id}-progress", "1/6")
 
       breakdown = render(element(view, "#epic-#{e.id}-breakdown"))
@@ -270,7 +270,7 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
   end
 
   describe "needs_you attention state" do
-    test "a child blocked by a Ready (refined) blocker chips the epic as blocked only",
+    test "a child blocked by a Ready (queued) blocker chips the epic as blocked only",
          %{conn: conn, ws: ws} do
       e = epic(ws, "blocked-epic")
       blocked = child(ws, e, "blocked-child", :ready)
@@ -360,7 +360,7 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
       closed = epic(ws, "a-closed-epic")
       Ash.update!(closed, %{}, action: :close)
 
-      {:ok, view, _html} = live_epics!(conn, ~p"/epics?#{%{status: "closed"}}")
+      {:ok, view, _html} = live_epics!(conn, ~p"/epics?#{%{state: "closed"}}")
 
       assert render(view) =~ "a-closed-epic"
       refute render(view) =~ "an-open-epic"
@@ -371,7 +371,7 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
       closed = epic(ws, "a-closed-epic")
       Ash.update!(closed, %{}, action: :close)
 
-      {:ok, view, _html} = live_epics!(conn, ~p"/epics?#{%{status: "all"}}")
+      {:ok, view, _html} = live_epics!(conn, ~p"/epics?#{%{state: "all"}}")
 
       assert render(view) =~ "a-closed-epic"
       assert render(view) =~ "an-open-epic"
@@ -429,7 +429,7 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
       refute render(view) =~ "clear-epic"
     end
 
-    test "the blocked filter is independent of the status filter", %{conn: conn, ws: ws} do
+    test "the blocked filter is independent of the state filter", %{conn: conn, ws: ws} do
       closed_with_blocked = epic(ws, "closed-blocked-epic")
       blocked = child(ws, closed_with_blocked, "blocked-child", :ready)
       {:ok, blocker} = Ash.create(Issue, %{title: "blocker", workspace_id: ws.id})
@@ -439,7 +439,7 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
       {:ok, view, _html} = live_epics!(conn, ~p"/epics?#{%{blocked: "1"}}")
       refute render(view) =~ "closed-blocked-epic"
 
-      {:ok, view, _html} = live_epics!(conn, ~p"/epics?#{%{blocked: "1", status: "all"}}")
+      {:ok, view, _html} = live_epics!(conn, ~p"/epics?#{%{blocked: "1", state: "all"}}")
       assert render(view) =~ "closed-blocked-epic"
     end
   end
@@ -529,7 +529,7 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
   end
 
   describe "live updates" do
-    test "a child's status change updates its epic's row", %{conn: conn, ws: ws} do
+    test "a child's state change updates its epic's row", %{conn: conn, ws: ws} do
       e = epic(ws, "live-epic")
       c = child(ws, e, "live-child", :ready)
 
@@ -542,7 +542,7 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
       assert has_element?(view, "#epic-#{e.id}-progress", "1/1")
     end
 
-    test "a child moving into awaiting_verification raises the needs-you chip live",
+    test "a child moving into :verifying raises the needs-you chip live",
          %{conn: conn, ws: ws} do
       e = epic(ws, "live-chip-epic")
       c = child(ws, e, "live-child", :ready)

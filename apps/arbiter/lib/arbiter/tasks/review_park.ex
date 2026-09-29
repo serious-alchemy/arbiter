@@ -20,8 +20,9 @@ defmodule Arbiter.Tasks.ReviewPark do
   A park is what "fail open on liveness" looks like on the record. The work is
   committed, the PR is open, the round is recorded honestly (`converged: false`)
   and the work is usually one human decision away from merging — so the durable
-  run finishes `:failed` with the park as its cause, and the task carries a
-  named reason a human can act on (`review_park_reason`).
+  run finishes `:failed` with the park as its cause, and the ticket carries a
+  named reason a human can act on: its `attention_cause` (bd-8if9zt; since
+  bd-36ytcl the only record of the park on the ticket).
 
   Whether the branch is *pushed* is checked, never assumed: bd-2jkrqu found the
   escalation asserting "the branch is pushed" over a branch that was not, next
@@ -29,13 +30,13 @@ defmodule Arbiter.Tasks.ReviewPark do
   question for the escalation body, and `:head_not_pushed` is the park for a
   head that could not be put on the remote at all.
 
-  ## A flag, not a status
+  ## An attention cause, not a state
 
-  The park does **not** move the task out of `:in_progress`. `Tasks.Claim`, the
+  The park does **not** move the ticket out of its state. `Tasks.Claim`, the
   board and the dependency graph keep seeing live work, and `Dispatch.resume/2`
   can re-attach to the parked worker the moment someone acts. Contrast
-  `:awaiting_verification` (bd-9so315), which is a real status because that task
-  *is* finished and merged; a review-parked task is not finished.
+  `:verifying` (bd-9so315), which is a real state because that ticket *is*
+  finished and merged; a review-parked ticket is not finished.
 
   ## Leaving the park
 
@@ -44,8 +45,10 @@ defmodule Arbiter.Tasks.ReviewPark do
     * **re-run the review** — `clear/2`, called when a fresh ReviewGate starts
       for the task (an `arb worker resume` / re-dispatch), and available
       directly for a coordinator that merges by hand;
-    * **close the task** — the `:close` action clears the flag inline, so an
+    * **close the task** — the `:close` transition clears the cause, so an
       abandoned park does not linger in `arb prime`.
+
+  Any other transition clears it too, like every attention cause.
   """
 
   require Logger
@@ -190,18 +193,22 @@ defmodule Arbiter.Tasks.ReviewPark do
   on restart — the same reason `ReviewPatrol.claim_review_cap_escalation/1`
   claims in the row rather than in memory.
 
+  `reason` must be one of `park_reasons/0`: the park is recorded as the
+  ticket's attention cause, and the cause column holds only the causes
+  `Arbiter.Tasks.Lifecycle.Attention` knows. Any other reason answers
+  `{:error, {:unknown_park_reason, reason}}`.
+
   Best-effort by design: this runs on the worker's terminal path, and a DB
   hiccup here must not turn a park back into a crash. Callers log and continue.
   """
   @spec park(String.t(), reason()) ::
           {:ok, :claimed | :already_parked, Issue.t()} | {:error, term()}
   def park(task_id, reason) when is_binary(task_id) and is_atom(reason) do
-    stamped = Atom.to_string(reason)
-
-    with {:ok, task} <- Ash.get(Issue, task_id) do
-      if Map.get(task, :review_park_reason) == stamped do
+    with :ok <- known_reason(reason),
+         {:ok, task} <- Ash.get(Issue, task_id) do
+      if Map.get(task, :attention_cause) == reason do
         # Same episode: answer the claim WITHOUT re-running `:park_review`. The
-        # action stamps `review_parked_at` unconditionally, and re-stamping it
+        # action stamps `attention_since` unconditionally, and re-stamping it
         # would reset the wait clock `arb prime` sorts on (oldest first) — so a
         # gate that re-parks for the same reason would keep resetting itself to
         # the bottom of the list and the park most likely to have been forgotten
@@ -209,9 +216,7 @@ defmodule Arbiter.Tasks.ReviewPark do
         # there is nothing to write.
         {:ok, :already_parked, task}
       else
-        cause = if reason in park_reasons(), do: reason
-
-        case Ash.update(task, %{review_park_reason: stamped, cause: cause}, action: :park_review) do
+        case Ash.update(task, %{cause: reason}, action: :park_review) do
           {:ok, parked} -> {:ok, :claimed, parked}
           {:error, _} = err -> err
         end
@@ -219,6 +224,10 @@ defmodule Arbiter.Tasks.ReviewPark do
     end
   rescue
     e -> {:error, e}
+  end
+
+  defp known_reason(reason) do
+    if reason in @park_reasons, do: :ok, else: {:error, {:unknown_park_reason, reason}}
   end
 
   @doc """
@@ -242,12 +251,11 @@ defmodule Arbiter.Tasks.ReviewPark do
     e -> {:error, e}
   end
 
-  @doc "True when `task` carries a ReviewGate park."
+  @doc "True when `task`'s attention cause is a ReviewGate park."
   @spec parked?(Issue.t() | map()) :: boolean()
-  def parked?(task) do
-    case Map.get(task, :review_park_reason) do
-      r when is_binary(r) and r != "" -> true
-      _ -> false
-    end
-  end
+  def parked?(task), do: Map.get(task, :attention_cause) in @park_reasons
+
+  @doc "The park reason `task` carries (its attention cause), or `nil` when it is not parked."
+  @spec reason(Issue.t() | map()) :: reason() | nil
+  def reason(task), do: if(parked?(task), do: Map.get(task, :attention_cause))
 end

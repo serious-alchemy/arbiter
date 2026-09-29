@@ -12,6 +12,8 @@ defmodule Arbiter.Tasks.ReviewParkTest do
 
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures, only: [put_state!: 2]
+
   alias Arbiter.Tasks.{Issue, ReviewPark, Workspace}
 
   setup do
@@ -22,16 +24,18 @@ defmodule Arbiter.Tasks.ReviewParkTest do
       })
 
     {:ok, task} = Ash.create(Issue, %{title: "parkable", workspace_id: ws.id})
-    {:ok, task} = Ash.update(task, %{status: :in_progress})
+    task = put_state!(task, :active)
 
     %{ws: ws, task: task}
   end
 
   test "the first park claims the episode", %{task: task} do
     assert {:ok, :claimed, parked} = ReviewPark.park(task.id, :inconclusive)
-    assert parked.review_park_reason == "inconclusive"
-    assert %DateTime{} = parked.review_parked_at
+    # bd-36ytcl: the park is the ticket's attention cause, stamped when it parked.
+    assert parked.attention_cause == :inconclusive
+    assert %DateTime{} = parked.attention_since
     assert ReviewPark.parked?(parked)
+    assert ReviewPark.reason(parked) == :inconclusive
   end
 
   test "re-parking for the same reason does not re-claim", %{task: task} do
@@ -40,11 +44,33 @@ defmodule Arbiter.Tasks.ReviewParkTest do
     assert {:ok, :already_parked, _} = ReviewPark.park(task.id, :inconclusive)
   end
 
+  test "re-parking for the same reason keeps the wait clock", %{task: task} do
+    {:ok, :claimed, first} = ReviewPark.park(task.id, :inconclusive)
+    {:ok, :already_parked, again} = ReviewPark.park(task.id, :inconclusive)
+
+    assert again.attention_since == first.attention_since
+  end
+
+  test "a reason ReviewPark does not know is refused, not recorded", %{task: task} do
+    assert {:error, {:unknown_park_reason, :some_future_guard}} =
+             ReviewPark.park(task.id, :some_future_guard)
+
+    refute ReviewPark.parked?(Ash.get!(Issue, task.id))
+  end
+
+  test "a ticket carrying a cause that is not a park is not parked", %{task: task} do
+    {:ok, flagged} =
+      Ash.update(task, %{cause: :pr_closed, detail: "closed"}, action: :raise_attention)
+
+    refute ReviewPark.parked?(flagged)
+    assert ReviewPark.reason(flagged) == nil
+  end
+
   test "a different reason is a new episode", %{task: task} do
     {:ok, :claimed, _} = ReviewPark.park(task.id, :inconclusive)
 
     assert {:ok, :claimed, parked} = ReviewPark.park(task.id, :reviewer_timeout)
-    assert parked.review_park_reason == "reviewer_timeout"
+    assert parked.attention_cause == :reviewer_timeout
   end
 
   test "clearing and re-reaching the same terminal is a new episode", %{task: task} do
@@ -60,11 +86,11 @@ defmodule Arbiter.Tasks.ReviewParkTest do
     refute ReviewPark.parked?(unchanged)
   end
 
-  test "the park does not move the task out of :in_progress", %{task: task} do
+  test "the park does not move the task out of :active", %{task: task} do
     {:ok, :claimed, parked} = ReviewPark.park(task.id, :verdict_guard_exhausted)
 
-    # A flag, not a status: Tasks.Claim and the board must keep seeing live work.
-    assert parked.status == :in_progress
+    # A cause, not a state: Tasks.Claim and the board must keep seeing live work.
+    assert parked.state == :active
   end
 
   test "every reason renders a subject phrase and an explanation" do

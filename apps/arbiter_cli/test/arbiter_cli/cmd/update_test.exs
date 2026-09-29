@@ -6,13 +6,24 @@ defmodule ArbiterCli.Cmd.UpdateTest do
   test "updates priority via PATCH" do
     stub_patch(
       "/api/issues/bd-001",
-      %{"id" => "bd-001", "title" => "X", "priority" => 0, "status" => "open"},
+      %{"id" => "bd-001", "title" => "X", "priority" => 0, "state" => "queued"},
       200
     )
 
     {out, _err, exit_code} = capture(fn -> Update.run(["bd-001", "--priority", "0"]) end)
     assert exit_code == 0
     assert out =~ "bd-001"
+  end
+
+  # bd-36ytcl: a ticket's state moves only through its transitions, so the
+  # legacy flag is refused (pointing at them) and nothing is sent.
+  test "--status is refused with the transition verbs, without a request" do
+    for argv <- [["bd-001", "--status", "closed"], ["bd-001", "--status=open"]] do
+      {_out, err, exit_code} = capture(fn -> Update.run(argv) end)
+      assert exit_code == 1
+      assert err =~ "--status was removed"
+      assert err =~ "arb ticket promote"
+    end
   end
 
   test "append-notes fetches first, then patches with combined notes" do

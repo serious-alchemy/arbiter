@@ -130,7 +130,7 @@ defmodule Arbiter.Worker.DispatchSetupTokenGuardTest do
              result
 
     {:ok, reloaded} = Ash.get(Issue, task.id)
-    assert reloaded.status == :open
+    assert reloaded.state == task.state
     assert Worker.whereis(task.id) == nil
     reason
   end

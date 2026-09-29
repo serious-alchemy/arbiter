@@ -2,6 +2,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
   use ArbiterWeb.ConnCase, async: false
 
   import Phoenix.LiveViewTest
+  import Arbiter.LifecycleFixtures
   import ArbiterWeb.TaskDetailLiveHelpers
 
   alias Arbiter.Messages.Message
@@ -68,7 +69,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
   end
 
   describe "GET /tasks/:id" do
-    test "renders the task with workspace, status, and history", %{conn: conn, ws: ws} do
+    test "renders the task with workspace, state, and history", %{conn: conn, ws: ws} do
       {:ok, task} =
         Ash.create(Issue, %{
           title: "important thing",
@@ -176,12 +177,12 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
     test "re-renders when a relevant task_lifecycle fires", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "transitioning", workspace_id: ws.id})
 
-      {:ok, view, html} = live_task(conn, ~p"/tasks/#{task.id}")
-      assert html =~ "open"
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
+      assert has_element?(view, ~s(#task-state-chip[data-state="backlog"]))
 
-      {:ok, _} = Ash.update(task, %{status: :in_progress})
+      put_state!(task, :active)
 
-      assert render(view) =~ "in_progress"
+      assert has_element?(view, ~s(#task-state-chip[data-state="active"]))
     end
   end
 
@@ -200,12 +201,11 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
         })
 
       # bd-842qio: only work in progress parks for verification.
-      {:ok, task} = Ash.update(task, %{status: :in_progress})
-      {:ok, _} = Ash.update(task, %{}, action: :await_verification)
+      put_state!(task, :verifying)
 
-      {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
+      {:ok, view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
-      assert html =~ "awaiting_verification"
+      assert has_element?(view, ~s(#task-state-chip[data-state="verifying"]))
       assert html =~ "arb ticket verify"
     end
 
@@ -213,8 +213,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, task} =
         Ash.create(Issue, %{title: "capture", workspace_id: ws.id, verify_after_deploy: true})
 
-      {:ok, task} = Ash.update(task, %{status: :in_progress})
-      {:ok, awaiting} = Ash.update(task, %{}, action: :await_verification)
+      awaiting = put_state!(task, :verifying)
 
       {:ok, _closed} =
         Arbiter.Tasks.Verification.observed(awaiting, "restarted 14:02; the new path fires")
@@ -398,7 +397,6 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
         |> form("#task-edit-form", %{
           "task" => %{
             "title" => "after",
-            "status" => "in_progress",
             "priority" => "1",
             "difficulty" => "4",
             "issue_type" => "chore",
@@ -415,7 +413,8 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
       assert reloaded.title == "after"
-      assert reloaded.status == :in_progress
+      # The form carries no lifecycle state: a save leaves it where it was.
+      assert reloaded.state == :backlog
       assert reloaded.priority == 1
       assert reloaded.difficulty == 4
       assert reloaded.issue_type == :chore
@@ -538,29 +537,27 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       assert html =~ ~s(class="btn btn-sm btn-primary" type="submit")
     end
 
-    # bd-9so315: the status select only offers the statuses `:update` accepts,
-    # so a parked task's own status was not among them — the browser would fall
-    # back to the first option and an edit that never meant to touch status
-    # would try an illegal transition and fail the whole save.
-    test "editing a parked task keeps its status instead of silently resetting it", %{
+    # The lifecycle state moves only through the named transitions, so the
+    # edit form has no state field at all — and a parked ticket's edit leaves
+    # it parked (bd-9so315 was a status select that silently reset it).
+    test "the edit form has no state field and a save leaves a parked ticket parked", %{
       conn: conn,
       ws: ws
     } do
       {:ok, task} =
         Ash.create(Issue, %{title: "parked", workspace_id: ws.id, verify_after_deploy: true})
 
-      {:ok, task} = Ash.update(task, %{status: :in_progress})
-      {:ok, parked} = Ash.update(task, %{}, action: :await_verification)
+      parked = put_state!(task, :verifying)
 
       {:ok, view, _html} = live_task(conn, ~p"/tasks/#{parked.id}")
-      html = view |> element(~s(button[phx-click="open_edit"])) |> render_click()
-      assert html =~ "awaiting_verification"
+      view |> element(~s(button[phx-click="open_edit"])) |> render_click()
+      refute has_element?(view, ~s(#task-edit-form [name="task[status]"]))
+      refute has_element?(view, ~s(#task-edit-form [name="task[state]"]))
 
       view
       |> form("#task-edit-form", %{
         "task" => %{
           "title" => "parked, retitled",
-          "status" => "awaiting_verification",
           "priority" => "2",
           "difficulty" => "2",
           "issue_type" => "feature"
@@ -570,7 +567,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
 
       reloaded = Ash.get!(Issue, parked.id)
       assert reloaded.title == "parked, retitled"
-      assert reloaded.status == :awaiting_verification
+      assert reloaded.state == :verifying
     end
   end
 
@@ -591,7 +588,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       assert html =~ "closed"
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.status == :closed
+      assert reloaded.state == :closed
       assert reloaded.closed_at
     end
 
@@ -607,9 +604,9 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
   # bd-b5wyjd — the one door out of Backlog. Deliberately not a checklist gate:
   # the button is always clickable, whatever fields are still empty.
   describe "promote to Ready" do
-    test "an unrefined task offers the promote action", %{conn: conn, ws: ws} do
+    test "a Backlog task offers the promote action", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "raw", workspace_id: ws.id})
-      refute task.refined
+      assert task.state == :backlog
 
       {:ok, view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
@@ -617,7 +614,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       assert has_element?(view, ~s(button[phx-click="promote_to_ready"]))
     end
 
-    test "clicking it refines the task and the action goes away", %{conn: conn, ws: ws} do
+    test "clicking it queues the task and the action goes away", %{conn: conn, ws: ws} do
       {:ok, task} =
         Ash.create(Issue, %{title: "refine me", workspace_id: ws.id, acceptance: "- it works"})
 
@@ -625,16 +622,15 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       html = view |> element(~s(button[phx-click="promote_to_ready"])) |> render_click()
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.refined
-      assert reloaded.status == :open
+      assert reloaded.state == :queued
 
       refute html =~ ~s(phx-click="promote_to_ready")
     end
 
-    test "an already-refined task offers no promote action", %{conn: conn, ws: ws} do
+    test "an already-queued task offers no promote action", %{conn: conn, ws: ws} do
       {:ok, task} =
         Ash.create(Issue, %{
-          title: "already refined",
+          title: "already queued",
           workspace_id: ws.id,
           acceptance: "- it works"
         })
@@ -646,7 +642,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       refute html =~ ~s(phx-click="promote_to_ready")
     end
 
-    test "a closed task offers no promote action, refined or not", %{conn: conn, ws: ws} do
+    test "a closed task offers no promote action", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "dead idea", workspace_id: ws.id})
       {:ok, _} = Ash.update(task, %{}, action: :close)
 
@@ -670,12 +666,12 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       view |> element(~s(button[phx-click="promote_to_ready"])) |> render_click()
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.refined
+      assert reloaded.state == :queued
     end
 
-    test "an in_progress task offers no promote action even if unrefined", %{conn: conn, ws: ws} do
+    test "an active task offers no promote action", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "running now", workspace_id: ws.id})
-      {:ok, _} = Ash.update(task, %{status: :in_progress})
+      put_state!(task, :active)
 
       {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
@@ -695,7 +691,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       assert has_element?(view, "#task-promote-waiver-form")
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      refute reloaded.refined
+      assert reloaded.state == :backlog
     end
 
     test "submitting the waiver form with a reason promotes and persists the reason",
@@ -716,7 +712,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       assert html =~ "spike, no user-facing change"
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.refined
+      assert reloaded.state == :queued
       assert reloaded.acceptance_waived == "spike, no user-facing change"
     end
 
@@ -736,7 +732,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       assert html =~ "reason for waiving"
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      refute reloaded.refined
+      assert reloaded.state == :backlog
     end
 
     test "a task/decision/epic with no acceptance criteria promotes directly (exempt)",
@@ -749,7 +745,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
         view |> element(~s(button[phx-click="promote_to_ready"])) |> render_click()
 
         {:ok, reloaded} = Ash.get(Issue, task.id)
-        assert reloaded.refined
+        assert reloaded.state == :queued
       end
     end
 
@@ -768,13 +764,13 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       refute html =~ "Promote without acceptance criteria"
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.refined
+      assert reloaded.state == :queued
       assert reloaded.acceptance_waived =~ "D0"
     end
   end
 
   describe "return to Backlog" do
-    test "a refined task offers the demote action", %{conn: conn, ws: ws} do
+    test "a queued task offers the demote action", %{conn: conn, ws: ws} do
       {:ok, task} =
         Ash.create(Issue, %{
           title: "ready now",
@@ -783,7 +779,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
         })
 
       {:ok, task} = Ash.update(task, %{}, action: :promote_to_ready)
-      assert task.refined
+      assert task.state == :queued
 
       {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
@@ -804,17 +800,16 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       html = view |> element(~s(button[phx-click="return_to_backlog"])) |> render_click()
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      refute reloaded.refined
-      assert reloaded.status == :open
+      assert reloaded.state == :backlog
 
       refute html =~ ~s(phx-click="return_to_backlog")
     end
 
-    test "an already-unrefined task offers no demote action", %{conn: conn, ws: ws} do
+    test "a Backlog task offers no demote action", %{conn: conn, ws: ws} do
       {:ok, task} =
         Ash.create(Issue, %{title: "already backlog", workspace_id: ws.id})
 
-      refute task.refined
+      assert task.state == :backlog
 
       {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
@@ -834,7 +829,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
 
       {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
-      # Button is shown for refined + open tasks
+      # Button is shown for queued tasks
       assert has_element?(view, ~s(button[phx-click="return_to_backlog"]))
 
       # Clicking it returns an error because of the live worker
@@ -842,10 +837,10 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       assert html =~ "live worker"
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.refined
+      assert reloaded.state == :queued
     end
 
-    test "an in_progress task offers no demote button", %{conn: conn, ws: ws} do
+    test "an active task offers no demote button", %{conn: conn, ws: ws} do
       {:ok, task} =
         Ash.create(Issue, %{
           title: "in progress",
@@ -854,15 +849,15 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
         })
 
       {:ok, task} = Ash.update(task, %{}, action: :promote_to_ready)
-      {:ok, _task} = Ash.update(task, %{status: :in_progress})
+      put_state!(task, :active)
 
       {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
-      # Button is not shown when status is not :open
+      # Button is not shown when the state is not :queued
       refute has_element?(view, ~s(button[phx-click="return_to_backlog"]))
     end
 
-    test "an awaiting_verification task offers no demote button", %{conn: conn, ws: ws} do
+    test "a verifying task offers no demote button", %{conn: conn, ws: ws} do
       {:ok, task} =
         Ash.create(Issue, %{
           title: "awaiting verification",
@@ -876,7 +871,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
 
       {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
-      # Button is not shown when status is not :open
+      # Button is not shown when the state is not :queued
       refute has_element?(view, ~s(button[phx-click="return_to_backlog"]))
     end
 
@@ -941,7 +936,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       assert html =~ ~s(id="task-dispatch-modal")
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.status == :open
+      assert reloaded.state == :backlog
     end
 
     # With the acknowledgement ticked the real dispatch path runs. This
@@ -1004,7 +999,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
     # bd-asxw4e: a Backlog ticket is not Ready; the page says why and how to
     # force it rather than dispatching it silently.
     test "a Backlog ticket is refused with the reason", %{conn: conn, ws: ws} do
-      {:ok, task} = Ash.create(Issue, %{title: "unrefined", workspace_id: ws.id})
+      {:ok, task} = Ash.create(Issue, %{title: "in backlog", workspace_id: ws.id})
 
       {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       view |> element(~s(button[phx-click="open_dispatch"])) |> render_click()
@@ -1074,7 +1069,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
   # run that touched this issue is a row in an in-place-expanding roster, and
   # the audit log folds into the Activity stream.
   describe "redesigned shell" do
-    test "renders the toolbar breadcrumb, id, status chip and back link",
+    test "renders the toolbar breadcrumb, id, state chip and back link",
          %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "shell", workspace_id: ws.id})
 
@@ -1084,6 +1079,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       assert html =~ task.id
       assert html =~ "Back to board"
       assert html =~ ~s(aria-label="Copy ticket id #{task.id}")
+      assert html =~ ~s(data-state="backlog")
     end
 
     test "acceptance criteria render as one real checkbox per line",
@@ -1659,9 +1655,9 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       assert messages_panel =~ "MESSAGES"
     end
 
-    # bd-a39f4o: status/priority/type/difficulty are already in the header
+    # bd-a39f4o: state/priority/type/difficulty are already in the header
     # band, so Machine State must not repeat them (design finding #1).
-    test "machine state no longer repeats the header's status/priority/type/difficulty chips",
+    test "machine state no longer repeats the header's state/priority/type/difficulty chips",
          %{conn: conn, ws: ws} do
       {:ok, task} =
         Ash.create(Issue, %{
@@ -1676,6 +1672,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       machine_state = view |> element("#panel-machine-state") |> render()
 
       refute machine_state =~ "Status"
+      refute machine_state =~ ">State<"
       refute machine_state =~ "Priority"
       refute machine_state =~ "Difficulty"
       refute machine_state =~ ">Type<"
@@ -1889,13 +1886,12 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       assert has_element?(view, "#rel-children [data-role=auto-close-marker]")
     end
 
-    test "an awaiting_verification blocker gets a distinct chip, explanation, and verify hint",
+    test "a verifying blocker gets a distinct chip, explanation, and verify hint",
          %{conn: conn, ws: ws} do
       {:ok, blocker} =
         Ash.create(Issue, %{title: "merged blocker", workspace_id: ws.id})
 
-      {:ok, blocker} = Ash.update(blocker, %{status: :in_progress})
-      {:ok, blocker} = Ash.update(blocker, %{}, action: :await_verification)
+      blocker = put_state!(blocker, :verifying)
 
       {:ok, downstream} = Ash.create(Issue, %{title: "waiting", workspace_id: ws.id})
 
@@ -2595,7 +2591,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
 
   # bd-1273p2: design bd-2s901b §3 — an epic's children grouped into the
   # board's own five columns, below RELATIONSHIPS' flat Children rollup.
-  describe "epic children by status mini-board" do
+  describe "epic children by column mini-board" do
     defp link_parent_of(epic, child) do
       {:ok, _} =
         Ash.create(Dependency, %{from_issue_id: epic.id, to_issue_id: child.id, type: :parent_of})
@@ -2624,8 +2620,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, _pid} = Worker.start(task_id: running_child.id, repo: "r", workspace_id: ws.id)
 
       {:ok, waiting_child} = Ash.create(Issue, %{title: "waiting child", workspace_id: ws.id})
-      {:ok, waiting_child} = Ash.update(waiting_child, %{status: :in_progress})
-      {:ok, waiting_child} = Ash.update(waiting_child, %{}, action: :await_verification)
+      waiting_child = put_state!(waiting_child, :verifying)
 
       {:ok, closed_child} = Ash.create(Issue, %{title: "closed child", workspace_id: ws.id})
       {:ok, closed_child} = Ash.update(closed_child, %{}, action: :close)
@@ -2636,7 +2631,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
 
       {:ok, view, _html} = live_task(conn, ~p"/tasks/#{epic.id}")
 
-      assert has_element?(view, "#panel-children-by-status")
+      assert has_element?(view, "#panel-children-by-column")
       assert has_element?(view, "#children-backlog-#{backlog_child.id}", "backlog child")
       assert has_element?(view, "#children-ready-#{ready_child.id}", "ready child")
       assert has_element?(view, "#children-running-#{running_child.id}", "running child")
@@ -2726,10 +2721,10 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
 
       {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
 
-      refute has_element?(view, "#panel-children-by-status")
+      refute has_element?(view, "#panel-children-by-column")
     end
 
-    test "a child's status change moves it between groups live", %{conn: conn, ws: ws} do
+    test "a child's state change moves it between groups live", %{conn: conn, ws: ws} do
       {:ok, epic} =
         Ash.create(Issue, %{title: "the epic", workspace_id: ws.id, issue_type: :epic})
 
@@ -2751,7 +2746,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       refute has_element?(view, "#children-ready-#{child.id}")
     end
 
-    test "a child's worker-only status transition moves it from Running to Waiting live", %{
+    test "a child's worker-only state transition moves it from Running to Waiting live", %{
       conn: conn,
       ws: ws
     } do
@@ -2851,7 +2846,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
         })
 
       {:ok, running_child} = Ash.update(running_child, %{}, action: :promote_to_ready)
-      {:ok, running_child} = Ash.update(running_child, %{status: :in_progress})
+      running_child = put_state!(running_child, :active)
       link_parent_of(epic, running_child)
 
       {:ok, sub_epic} =

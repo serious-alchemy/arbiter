@@ -44,7 +44,7 @@ defmodule Arbiter.Workers.Run do
   # The old statuses fold in as the 5/13 migration did: a review park
   # (bd-9zuvbh) and a review that never started (bd-8tjcms) are `finished` /
   # `failed`, their cause in `failure_reason` (and on the ticket's
-  # `review_park_reason`). A run whose worker was shut down WITH the node
+  # `attention_cause`). A run whose worker was shut down WITH the node
   # (bd-aje6fj) is `finished` / `interrupted`, "server shutdown"; one that
   # missed that path is swept to `finished` / `interrupted`, "server
   # restarted", by `Arbiter.Workers.Reconciler` on the next boot.

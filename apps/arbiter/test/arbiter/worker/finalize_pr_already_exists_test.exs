@@ -15,6 +15,8 @@ defmodule Arbiter.Worker.FinalizePRAlreadyExistsTest do
 
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures, only: [put_state!: 2]
+
   require Ash.Query
 
   alias Arbiter.Tasks.{Issue, Workspace}
@@ -79,7 +81,7 @@ defmodule Arbiter.Worker.FinalizePRAlreadyExistsTest do
         issue_type: :feature
       })
 
-    {:ok, task} = Ash.update(task, %{status: :in_progress})
+    task = put_state!(task, :active)
     task
   end
 
@@ -207,7 +209,7 @@ defmodule Arbiter.Worker.FinalizePRAlreadyExistsTest do
     assert {:merge_failed, _reason} = snap.meta.failure_reason
 
     {:ok, reloaded} = Ash.get(Issue, task.id)
-    refute reloaded.status == :closed
+    refute reloaded.state == :closed
     refute reloaded.pr_ref
 
     escalations = Message.inbox("admiral", workspace_id: ws.id)

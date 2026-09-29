@@ -476,7 +476,7 @@ defmodule Arbiter.Quota.GateProviderTest do
       assert held_id == task.id
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.status == :open
+      assert reloaded.state == :backlog
       assert Worker.whereis(task.id) == nil
       assert DispatchQueue.held?(workspace.id, task.id)
     end
@@ -501,7 +501,7 @@ defmodule Arbiter.Quota.GateProviderTest do
                  start_driver: false
                )
 
-      assert result.task.status == :in_progress
+      assert result.task.state == :active
     end
 
     test "an over-quota Anthropic snapshot does NOT hold a Codex dispatch", %{
@@ -533,7 +533,7 @@ defmodule Arbiter.Quota.GateProviderTest do
                  start_driver: false
                )
 
-      assert result.task.status == :in_progress
+      assert result.task.state == :active
     end
 
     test "an explicit agent_type override picks that provider's snapshot", %{

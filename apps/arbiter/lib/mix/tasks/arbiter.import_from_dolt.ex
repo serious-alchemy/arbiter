@@ -126,7 +126,7 @@ defmodule Mix.Tasks.Arbiter.ImportFromDolt do
 
       if sync_status? do
         n_synced = sync_issue_statuses(issues)
-        Mix.shell().info("  ✓ synced status for #{n_synced} existing issues")
+        Mix.shell().info("  ✓ synced lifecycle state for #{n_synced} existing issues")
       end
 
       deps = dolt_query(path, "SELECT * FROM dependencies")
@@ -204,7 +204,8 @@ defmodule Mix.Tasks.Arbiter.ImportFromDolt do
     n
   end
 
-  # Sync mutable fields (status, closed_at, updated_at) on existing rows.
+  # Sync mutable fields (the lifecycle state the Dolt status implies,
+  # closed_at, updated_at) on existing rows.
   # Distinct from bulk_insert_issues which DO NOTHING on conflict — this is the
   # "refresh from canonical Dolt" pathway used for the Phase 1 dogfood
   # switchover. Untouched: title/description/etc. (we don't want to clobber

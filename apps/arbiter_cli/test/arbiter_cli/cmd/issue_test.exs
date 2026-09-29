@@ -5,7 +5,9 @@ defmodule ArbiterCli.Cmd.IssueTest do
 
   describe "verb routing" do
     test "list routes to the issue list endpoint" do
-      stub_get("/api/issues", %{"data" => [%{"id" => "bd-1", "title" => "T", "status" => "open"}]})
+      stub_get("/api/issues", %{
+        "data" => [%{"id" => "bd-1", "title" => "T", "state" => "queued"}]
+      })
 
       {out, _err, code} = capture(fn -> Issue.run(["list"]) end)
       assert code == 0
@@ -46,7 +48,7 @@ defmodule ArbiterCli.Cmd.IssueTest do
     test "verify routes to the verify endpoint" do
       stub_post(
         "/api/issues/bd-1/verify",
-        %{"id" => "bd-1", "title" => "T", "status" => "closed"},
+        %{"id" => "bd-1", "title" => "T", "state" => "closed"},
         200
       )
 

@@ -7,6 +7,8 @@ defmodule Arbiter.Tasks.IssuePrStateTest do
 
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures
+
   alias Arbiter.Tasks.{Issue, PullRequest, Workspace}
 
   setup do
@@ -19,7 +21,7 @@ defmodule Arbiter.Tasks.IssuePrStateTest do
     {:ok, task} =
       Ash.create(Issue, %{title: "pr state", workspace_id: ws.id, issue_type: :feature})
 
-    {:ok, task} = Ash.update(task, %{status: :in_progress})
+    task = put_state!(task, :active)
     assert task.state == :active
 
     %{task: task}

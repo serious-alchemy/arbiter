@@ -34,11 +34,11 @@ defmodule Arbiter.Board.Drain do
   A child is in flight unless it is provably idle:
 
     * an `Arbiter.Worker` whose run is waiting on the review gate (no agent,
-      waiting on a reviewer) or `:finished` is listed under `parked`, not
-      `in_flight`. A parked worker is recovered on the next boot
-      (`Workers.Reconciler`), so it does not make a restart unsafe — unless it
-      still owns a live agent session (`agent_live`), in which case it is in
-      flight regardless of its run state. An open PR is not a worker at all since bd-741sid: its ticket's
+      waiting on a reviewer) or `:finished` is idle, and simply not listed:
+      it is recovered on the next boot (`Workers.Reconciler`), so it does not
+      make a restart unsafe — unless it still owns a live agent session
+      (`agent_live`), in which case it is in flight regardless of its run
+      state. An open PR is not a worker at all since bd-741sid: its ticket's
       Watchdog is restarted from the row on the next boot;
     * an `Arbiter.Worker` that does not answer its snapshot in time is busy,
       not gone — in flight, kind `:unclassified`, no run state;
@@ -130,7 +130,6 @@ defmodule Arbiter.Board.Drain do
           changed_at: DateTime.t() | nil,
           changed_by: String.t() | nil,
           in_flight: [entry()],
-          parked: [entry()],
           slots_used: non_neg_integer(),
           slot_holders: [String.t()],
           checked_at: DateTime.t()
@@ -194,7 +193,7 @@ defmodule Arbiter.Board.Drain do
   @spec status(keyword()) :: t()
   def status(opts \\ []) do
     autopilot = autopilot_status(Keyword.get(opts, :autopilot, Autopilot))
-    {in_flight, parked} = worker_entries(Keyword.get(opts, :supervisor, Worker.Supervisor))
+    workers = worker_entries(Keyword.get(opts, :supervisor, Worker.Supervisor))
 
     promotions = promotion_entries(autopilot)
 
@@ -206,7 +205,7 @@ defmodule Arbiter.Board.Drain do
       |> tracked_entries()
       |> Enum.reject(&(&1.kind == :dispatch_pending and promoting?(promotions, &1.task_id)))
 
-    in_flight = promotions ++ tracked ++ in_flight
+    in_flight = promotions ++ tracked ++ workers
 
     slot_holders =
       opts |> Keyword.get_lazy(:tickets, &tickets_in_progress/0) |> SlotGate.slot_holders()
@@ -225,7 +224,6 @@ defmodule Arbiter.Board.Drain do
       changed_at: autopilot.changed_at,
       changed_by: autopilot.changed_by,
       in_flight: in_flight,
-      parked: parked,
       slots_used: length(slot_holders),
       slot_holders: slot_holders,
       checked_at: DateTime.utc_now()
@@ -256,7 +254,6 @@ defmodule Arbiter.Board.Drain do
       changed_at: status.changed_at,
       changed_by: status.changed_by,
       in_flight: Enum.map(status.in_flight, &entry_json/1),
-      parked: Enum.map(status.parked, &entry_json/1),
       slots_used: Map.get(status, :slots_used, 0),
       slot_holders: Map.get(status, :slot_holders, []),
       checked_at: status.checked_at
@@ -325,6 +322,8 @@ defmodule Arbiter.Board.Drain do
 
   # ---- worker supervisor -----------------------------------------------------
 
+  # The supervisor's children that are in flight; an idle worker (see the
+  # moduledoc) is dropped.
   defp worker_entries(supervisor) do
     keys = registry_keys_by_pid()
 
@@ -334,19 +333,15 @@ defmodule Arbiter.Board.Drain do
     |> DynamicSupervisor.which_children()
     |> Enum.filter(fn {_id, pid, _type, _modules} -> is_pid(pid) end)
     |> Task.async_stream(
-      fn {_id, pid, _type, modules} -> classify_child(pid, modules, keys) end,
+      fn {_id, pid, _type, modules} -> in_flight_entry(pid, modules, keys) end,
       max_concurrency: 32,
       ordered: true,
       timeout: :infinity
     )
-    |> Enum.map(fn {:ok, classified} -> classified end)
-    |> Enum.split_with(fn {bucket, _entry} -> bucket == :in_flight end)
-    |> then(fn {in_flight, parked} ->
-      {Enum.map(in_flight, &elem(&1, 1)), Enum.map(parked, &elem(&1, 1))}
-    end)
+    |> Enum.flat_map(fn {:ok, entry} -> List.wrap(entry) end)
   end
 
-  defp classify_child(pid, [Worker], keys) do
+  defp in_flight_entry(pid, [Worker], keys) do
     case snapshot(pid) do
       %{} = snap ->
         entry =
@@ -360,26 +355,24 @@ defmodule Arbiter.Board.Drain do
             pid
           )
 
-        if idle_run?(snap) and Map.get(snap, :agent_live) != true,
-          do: {:parked, entry},
-          else: {:in_flight, entry}
+        if idle_run?(snap) and Map.get(snap, :agent_live) != true, do: nil, else: entry
 
       nil ->
-        {:in_flight, entry(:unclassified, key_task_id(keys, pid), keys[pid], nil, nil, nil, pid)}
+        entry(:unclassified, key_task_id(keys, pid), keys[pid], nil, nil, nil, pid)
     end
   end
 
-  defp classify_child(pid, [ReviewGate], keys),
-    do: {:in_flight, entry(:review_gate, key_task_id(keys, pid), keys[pid], nil, nil, nil, pid)}
+  defp in_flight_entry(pid, [ReviewGate], keys),
+    do: entry(:review_gate, key_task_id(keys, pid), keys[pid], nil, nil, nil, pid)
 
-  defp classify_child(pid, [Driver], keys),
-    do: {:in_flight, entry(:driver, key_task_id(keys, pid), keys[pid], nil, nil, nil, pid)}
+  defp in_flight_entry(pid, [Driver], keys),
+    do: entry(:driver, key_task_id(keys, pid), keys[pid], nil, nil, nil, pid)
 
-  defp classify_child(pid, _modules, keys),
-    do: {:in_flight, entry(:unclassified, key_task_id(keys, pid), keys[pid], nil, nil, nil, pid)}
+  defp in_flight_entry(pid, _modules, keys),
+    do: entry(:unclassified, key_task_id(keys, pid), keys[pid], nil, nil, nil, pid)
 
-  # A run that holds no agent: waiting on a reviewer (parked) or finished, and
-  # merely still resident.
+  # A run that holds no agent: waiting on a reviewer or finished, and merely
+  # still resident.
   defp idle_run?(snap), do: Worker.finished?(snap) or Worker.awaiting_review_gate?(snap)
 
   defp snapshot(pid) do

@@ -64,7 +64,7 @@ defmodule Arbiter.Worker.AuthDeathTest do
       worktree = Worktree.worktree_path(BranchNamer.derive(task))
       branch = BranchNamer.derive(task)
 
-      eventually(fn -> reload(task).status == :open end)
+      eventually(fn -> reload(task).state == :queued end)
 
       # The run is still recorded as the failure it was.
       assert [run] = runs(task.id)
@@ -79,7 +79,7 @@ defmodule Arbiter.Worker.AuthDeathTest do
 
       # Escalation still fires — and, since the ticket went back to Ready,
       # is resolved with it (bd-8if9zt): the retry is the machine's turn.
-      # The reopen resolves the escalation in a later step than the status
+      # The reopen resolves the escalation in a later step than the state
       # write the wait above sees, so wait for it rather than read it racing.
       escalations = fn ->
         Message
@@ -116,7 +116,7 @@ defmodule Arbiter.Worker.AuthDeathTest do
       assert {:ok, _} = dispatch(task.id)
       worktree = Worktree.worktree_path(BranchNamer.derive(task))
 
-      eventually(fn -> reload(task).status == :open end)
+      eventually(fn -> reload(task).state == :queued end)
 
       assert File.dir?(worktree)
       assert branch_list(repo, BranchNamer.derive(task)) != ""
@@ -128,19 +128,19 @@ defmodule Arbiter.Worker.AuthDeathTest do
       task = ready_task!(ws, "keeps dying")
 
       assert {:ok, _} = dispatch(task.id)
-      eventually(fn -> reload(task).status == :open end)
+      eventually(fn -> reload(task).state == :queued end)
 
       assert {:ok, _} = dispatch(task.id)
       eventually(fn -> length(runs(task.id)) == 2 and Worker.whereis(task.id) != nil end)
       eventually(fn -> Enum.all?(runs(task.id), &(&1.outcome == :failed)) end)
 
       # Second auth death on this task: today's behaviour, it stays put.
-      assert_stays(fn -> reload(task).status == :in_progress end)
+      assert_stays(fn -> reload(task).state == :active end)
     end
   end
 
   describe "other failure shapes are unchanged (acceptance 6)" do
-    test "a non-auth death leaves the task :in_progress and does not count toward the hold",
+    test "a non-auth death leaves the task :active and does not count toward the hold",
          %{ws: ws, tmp: tmp} do
       stub_claude!(tmp, @crash_stub)
       task = ready_task!(ws, "crashes")
@@ -149,7 +149,7 @@ defmodule Arbiter.Worker.AuthDeathTest do
       eventually(fn -> Worker.state(pid).outcome == :failed end)
       assert Worker.state(pid).meta.stop_reason.category == :crashed
 
-      assert_stays(fn -> reload(task).status == :in_progress end)
+      assert_stays(fn -> reload(task).state == :active end)
       assert AuthHold.status(Claude).deaths == 0
     end
 
@@ -162,7 +162,7 @@ defmodule Arbiter.Worker.AuthDeathTest do
     # output despite dying on signal 15, which both notified
     # `CredentialWatchdog` and counted toward the `AuthHold` streak.
     test "a signal-killed worker with an auth-shaped transcript leaves the task " <>
-           ":in_progress and does not count toward the hold or notify the watchdog",
+           ":active and does not count toward the hold or notify the watchdog",
          %{ws: ws, tmp: tmp} do
       stub_claude!(tmp, """
       #!/bin/sh
@@ -181,7 +181,7 @@ defmodule Arbiter.Worker.AuthDeathTest do
       assert reason.category == :killed
       assert reason.signal == 15
 
-      assert_stays(fn -> reload(task).status == :in_progress end)
+      assert_stays(fn -> reload(task).state == :active end)
       assert AuthHold.status(Claude).deaths == 0
       refute CredentialWatchdog.expired?(Claude)
     end
@@ -196,16 +196,16 @@ defmodule Arbiter.Worker.AuthDeathTest do
       t3 = ready_task!(ws, "refused")
 
       assert {:ok, _} = dispatch(t1.id)
-      eventually(fn -> reload(t1).status == :open end)
+      eventually(fn -> reload(t1).state == :queued end)
       refute AuthHold.open?(Claude)
 
       assert {:ok, _} = dispatch(t2.id)
-      eventually(fn -> reload(t2).status == :open end)
+      eventually(fn -> reload(t2).state == :queued end)
       assert AuthHold.open?(Claude)
 
       assert {:error, {:auth_check_failed, reason}} = dispatch(t3.id)
       assert reason.category == :auth_expired
-      assert reload(t3).status == :open
+      assert reload(t3).state == :queued
       assert Worker.whereis(t3.id) == nil
       refute File.dir?(Worktree.worktree_path(BranchNamer.derive(t3)))
 
@@ -219,7 +219,7 @@ defmodule Arbiter.Worker.AuthDeathTest do
       task = ready_task!(ws, "reset me")
 
       assert {:ok, _} = dispatch(task.id)
-      eventually(fn -> reload(task).status == :open end)
+      eventually(fn -> reload(task).state == :queued end)
       assert AuthHold.open?(Claude)
       assert {:error, {:auth_check_failed, _}} = dispatch(task.id)
 
@@ -268,7 +268,7 @@ defmodule Arbiter.Worker.AuthDeathTest do
 
           # Let whatever just died settle (reopen + cleanup) before the next
           # tick reads the board, as a 15s tick would.
-          eventually(fn -> Enum.all?(tasks, &(reload(&1).status == :open)) end, 10_000)
+          eventually(fn -> Enum.all?(tasks, &(reload(&1).state == :queued)) end, 10_000)
           eventually(fn -> Enum.all?(tasks, &(Worker.whereis(&1.id) == nil)) end, 10_000)
           outcome
         end
@@ -286,7 +286,7 @@ defmodule Arbiter.Worker.AuthDeathTest do
       assert Enum.all?(Enum.drop(outcomes, AuthHold.threshold()), &(&1 == :idle))
 
       # Nothing burned: every task is back in Ready, none stranded.
-      assert Enum.all?(tasks, &(reload(&1).status == :open))
+      assert Enum.all?(tasks, &(reload(&1).state == :queued))
       assert Snapshot.quota_hold(ws.id) |> elem(0) == :hold
     end
   end

@@ -661,7 +661,7 @@ defmodule Arbiter.Sessions.ProvisioningTest do
             priority: 2,
             difficulty: 2,
             repo: "arbiter",
-            refined: false,
+            state: :backlog,
             tracker_ref: nil
           },
           epic: nil,

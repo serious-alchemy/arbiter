@@ -3,7 +3,7 @@ defmodule ArbiterCli.Cmd.Issue do
   `arb ticket <verb>` — the ticket resource. `arb issue <verb>` is a
   deprecated alias: it runs the same verb and prints a one-line note on stderr.
 
-      arb ticket list     [--status ...] [--type ...] [--priority ...]
+      arb ticket list     [--state ...] [--type ...] [--priority ...]
                           [--labels ...] [--tracker]
       arb ticket show     <id>
       arb ticket create   <title> [--description ...] [--priority ...]
@@ -11,7 +11,7 @@ defmodule ArbiterCli.Cmd.Issue do
                           [--parent <parent-id>] [--auto-close]
                           [--repo <repo_paths key>]
       arb ticket update   <id> [--title ...] [--priority N] [--difficulty N]
-                          [--status s] [--description d]
+                          [--description d]
                           [--append-notes text] [--qa-notes text]
                           [--deployment-notes text] [--pr-body text]
       arb ticket close    <id> [--reason ...]

@@ -3,8 +3,9 @@ defmodule ArbiterCli.Cmd.Promote do
   `arb ticket promote <id> [--waive REASON]` — promote a task from Backlog to Ready.
 
   Wraps `POST /api/issues/:id/promote`, which runs the `:promote_to_ready` action:
-  it sets `refined: true`, moving the task from Backlog to Ready. Idempotent —
-  promoting an already-refined task is a no-op success, not an error.
+  the `promote` transition (state `backlog` → `queued`), moving the task from
+  Backlog to Ready. Idempotent — promoting an already-queued task is a no-op
+  success, not an error.
 
   bd-7mbrlg: a `bug`/`feature`/`chore` with blank `acceptance` is refused
   unless `--waive REASON` is given (`task`/`research`/`decision`/`epic` are exempt; D0

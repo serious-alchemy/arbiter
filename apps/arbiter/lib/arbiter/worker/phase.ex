@@ -20,8 +20,6 @@ defmodule Arbiter.Worker.Phase do
     * `:addressing_review` — an implementer round is applying review findings.
     * `:fixing_ci` — a CI fix pass is live.
     * `:resolving_conflict` — a conflict resolver is live.
-    * `:waiting_ci_merge` — no agent; an MR is open and CI / the merge queue
-      owns the outcome.
     * `:waiting_on_you` — the run is waiting on a question, or finished
       without succeeding.
     * `:done` — the run finished and succeeded (or was handed off).
@@ -36,6 +34,11 @@ defmodule Arbiter.Worker.Phase do
   failure of a ReviewGate fix round or a Watchdog auto-resume — and slots are
   counted by the ticket's state now (`Arbiter.Tasks.SlotGate`, bd-asxw4e), so
   no worker hands one off. A run between agents reads as its stage.
+
+  Nor is there a phase for an open PR (bd-36ytcl). Once its PR opens the
+  ticket is `:merging` and no worker runs for it: what it is waiting on — CI,
+  the merge queue, a block — is the ticket's step
+  (`Arbiter.Tasks.Lifecycle.view/2`), not a worker's phase.
 
   ## Phase is not liveness
 
@@ -70,7 +73,6 @@ defmodule Arbiter.Worker.Phase do
           | :addressing_review
           | :fixing_ci
           | :resolving_conflict
-          | :waiting_ci_merge
           | :waiting_on_you
           | :done
           | :held_for_quota
@@ -81,7 +83,6 @@ defmodule Arbiter.Worker.Phase do
     :addressing_review,
     :fixing_ci,
     :resolving_conflict,
-    :waiting_ci_merge,
     :waiting_on_you,
     :done,
     :held_for_quota
@@ -93,7 +94,6 @@ defmodule Arbiter.Worker.Phase do
     addressing_review: "addressing review",
     fixing_ci: "fixing CI",
     resolving_conflict: "resolving conflict",
-    waiting_ci_merge: "waiting on CI / merge",
     waiting_on_you: "waiting on you",
     done: "done",
     held_for_quota: "held for quota, will resume"

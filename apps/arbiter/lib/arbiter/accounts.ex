@@ -468,7 +468,7 @@ defmodule Arbiter.Accounts do
 
   defp ensure_not_pinned(%{id: id}) do
     Issue
-    |> Ash.Query.filter(implementer_account_id == ^id and status != :closed)
+    |> Ash.Query.filter(implementer_account_id == ^id and state != :closed)
     |> Ash.Query.limit(1)
     |> Ash.read!()
     |> case do

@@ -54,18 +54,18 @@ defmodule Arbiter.Tasks.DecommissionSweep do
           task_id: String.t(),
           category: String.t(),
           title: String.t(),
-          current_status: atom()
+          current_state: atom()
         }
 
   @doc """
-  Return the list of proposals — every open or in_progress task whose
-  id/title matches one of the decommissioning patterns and which isn't
+  Return the list of proposals — every live task (any state short of
+  `:verifying` / `:closed`) whose id/title matches one of the decommissioning patterns and which isn't
   on the keep list.
   """
   @spec proposals() :: [proposal()]
   def proposals do
     Issue
-    |> Ash.Query.filter(status in [:open, :in_progress])
+    |> Ash.Query.filter(state not in [:verifying, :closed])
     |> Ash.read!()
     |> Enum.flat_map(&categorize/1)
     |> Enum.reject(&keeper?/1)
@@ -111,7 +111,7 @@ defmodule Arbiter.Tasks.DecommissionSweep do
             task_id: issue.id,
             category: label,
             title: issue.title,
-            current_status: issue.status
+            current_state: issue.state
           }
         ]
       end

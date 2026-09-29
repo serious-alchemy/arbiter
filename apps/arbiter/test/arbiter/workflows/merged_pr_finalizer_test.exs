@@ -1,6 +1,8 @@
 defmodule Arbiter.Workflows.MergedPRFinalizerTest do
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures
+
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Workflows.MergedPRFinalizer
   require Ash.Query
@@ -204,7 +206,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
       :ok = MergedPRFinalizer.tick(name)
 
       {:ok, refreshed} = Ash.get(Issue, task.id)
-      assert refreshed.status != :closed
+      assert refreshed.state != :closed
     end
   end
 
@@ -217,7 +219,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
       :ok = MergedPRFinalizer.tick(name)
 
       {:ok, refreshed} = Ash.get(Issue, task.id)
-      assert refreshed.status == :closed
+      assert refreshed.state == :closed
     end
 
     # bd-9so315: the finalizer is the *other* merge-close path (a PR merged
@@ -231,14 +233,14 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
       :ok = MergedPRFinalizer.tick(name)
 
       {:ok, refreshed} = Ash.get(Issue, task.id)
-      assert refreshed.status == :awaiting_verification
+      assert refreshed.state == :verifying
       assert refreshed.closed_at == nil
     end
 
     test "a parked task is not swept again on the next tick", %{ws: ws} do
       task = create_task(ws, "251", verify_after_deploy: true)
       # bd-842qio: only work in progress parks for verification.
-      {:ok, task} = Ash.update(task, %{status: :in_progress})
+      task = put_state!(task, :merging)
       {:ok, _} = Ash.update(task, %{}, action: :await_verification)
 
       stub(fn _conn -> raise "adapter should not be called for parked tasks" end)
@@ -247,7 +249,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
       :ok = MergedPRFinalizer.tick(name)
 
       {:ok, refreshed} = Ash.get(Issue, task.id)
-      assert refreshed.status == :awaiting_verification
+      assert refreshed.state == :verifying
     end
 
     test "already-closed task is not re-processed", %{ws: ws} do
@@ -271,7 +273,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
       :ok = MergedPRFinalizer.tick(name)
 
       {:ok, refreshed} = Ash.get(Issue, task.id)
-      assert refreshed.status == :closed
+      assert refreshed.state == :closed
     end
 
     test "second tick after merge → task already closed, no double-close error", %{ws: ws} do
@@ -284,25 +286,25 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
       :ok = MergedPRFinalizer.tick(name)
 
       {:ok, refreshed} = Ash.get(Issue, task.id)
-      assert refreshed.status == :closed
+      assert refreshed.state == :closed
       assert MergedPRFinalizer.state(name).ticks == 2
     end
   end
 
   describe "tick/1 — live-worker guard (bd-38l3px)" do
-    test "finalizing one merged/orphaned bead leaves an unrelated in_progress bead alive", %{
+    test "finalizing one merged/orphaned bead leaves an unrelated merging bead alive", %{
       ws: ws
     } do
       # Bead A: an orphaned bead (no live worker) whose PR really merged — the
       # finalizer's legitimate job: close it.
       merged = create_task(ws, "700")
-      {:ok, _} = Ash.update(merged, %{status: :in_progress}, action: :update)
+      put_state!(merged, :merging)
 
-      # Bead B: an unrelated in_progress bead being actively worked. It carries a
+      # Bead B: an unrelated merging bead being actively worked. It carries a
       # STALE pr_ref (a merged PR from a prior, reopened run) — exactly the
       # bd-38l3px silent-loss shape. Its live worker must protect it.
       victim = create_task(ws, "701")
-      {:ok, _} = Ash.update(victim, %{status: :in_progress}, action: :update)
+      put_state!(victim, :merging)
       register_live_worker(victim.id)
 
       # Both PRs report merged; only the orphaned one may be closed.
@@ -329,14 +331,14 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
       {_pid, name} = start_finalizer(ws)
       :ok = MergedPRFinalizer.tick(name)
 
-      assert Ash.get!(Issue, merged.id).status == :closed
-      # The unrelated in_progress bead survives the concurrent finalize.
-      assert Ash.get!(Issue, victim.id).status == :in_progress
+      assert Ash.get!(Issue, merged.id).state == :closed
+      # The unrelated merging bead survives the concurrent finalize.
+      assert Ash.get!(Issue, victim.id).state == :merging
     end
 
     test "follow-up bead with a live worker is not closed on source-PR merge", %{ws: ws} do
       task = create_follow_up_task(ws, 702)
-      {:ok, _} = Ash.update(task, %{status: :in_progress}, action: :update)
+      put_state!(task, :active)
       register_live_worker(task.id)
 
       stub(pr_get_stub(702, :merged))
@@ -344,7 +346,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
       {_pid, name} = start_finalizer(ws)
       :ok = MergedPRFinalizer.tick(name)
 
-      assert Ash.get!(Issue, task.id).status == :in_progress
+      assert Ash.get!(Issue, task.id).state == :active
     end
 
     # bd-741sid: a Merging ticket has no worker — its Watchdog owns the merge
@@ -352,7 +354,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
     # nothing watches.
     test "a ticket whose Watchdog is alive is left to it", %{ws: ws} do
       task = create_task(ws, "704")
-      {:ok, _} = Ash.update(task, %{status: :in_progress}, action: :update)
+      put_state!(task, :merging)
       register_live_worker(task.id <> ":watchdog")
 
       stub(pr_get_stub(704, :merged))
@@ -360,7 +362,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
       {_pid, name} = start_finalizer(ws)
       :ok = MergedPRFinalizer.tick(name)
 
-      assert Ash.get!(Issue, task.id).status == :in_progress
+      assert Ash.get!(Issue, task.id).state == :merging
     end
 
     # bd-6w7j8h: complete_now/2 never stops the Worker GenServer — the process
@@ -375,7 +377,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
     # stopped as a side effect of the task closing.
     test "a finished-but-not-yet-reaped worker does not block finalization", %{ws: ws} do
       task = create_task(ws, "703")
-      {:ok, _} = Ash.update(task, %{status: :in_progress}, action: :update)
+      put_state!(task, :merging)
       register_live_worker(task.id, :finished, :succeeded)
 
       stub(pr_get_stub(703, :merged))
@@ -383,7 +385,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
       {_pid, name} = start_finalizer(ws)
       :ok = MergedPRFinalizer.tick(name)
 
-      assert Ash.get!(Issue, task.id).status == :closed
+      assert Ash.get!(Issue, task.id).state == :closed
     end
 
     # bd-2g179m: pre-verdict, the author's agent has exited and the reviewer runs
@@ -395,7 +397,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
       ws: ws
     } do
       task = create_task(ws, "704")
-      {:ok, _} = Ash.update(task, %{status: :in_progress}, action: :update)
+      put_state!(task, :merging)
 
       pid = register_live_worker(task.id, :waiting)
 
@@ -408,12 +410,12 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
       {_pid, name} = start_finalizer(ws)
       :ok = MergedPRFinalizer.tick(name)
 
-      assert Ash.get!(Issue, task.id).status == :closed
+      assert Ash.get!(Issue, task.id).state == :closed
     end
 
     test "a worker waiting on a question still protects the task", %{ws: ws} do
       task = create_task(ws, "705")
-      {:ok, _} = Ash.update(task, %{status: :in_progress}, action: :update)
+      put_state!(task, :merging)
 
       pid = register_live_worker(task.id, :waiting)
       :sys.replace_state(pid, fn snap -> Map.merge(snap, %{waiting_on: :question}) end)
@@ -423,7 +425,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
       {_pid, name} = start_finalizer(ws)
       :ok = MergedPRFinalizer.tick(name)
 
-      assert Ash.get!(Issue, task.id).status == :in_progress
+      assert Ash.get!(Issue, task.id).state == :merging
     end
   end
 
@@ -439,7 +441,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
       assert :ok = MergedPRFinalizer.tick(name)
 
       {:ok, refreshed} = Ash.get(Issue, task.id)
-      assert refreshed.status != :closed
+      assert refreshed.state != :closed
     end
 
     test "GitHub API 500 → tick bumps, does not crash", %{ws: ws} do
@@ -489,8 +491,8 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
       {:ok, open_task} = Ash.get(Issue, task_open.id)
       {:ok, closed_task} = Ash.get(Issue, task_merged.id)
 
-      assert open_task.status != :closed
-      assert closed_task.status == :closed
+      assert open_task.state != :closed
+      assert closed_task.state == :closed
     end
   end
 
@@ -515,7 +517,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
       :ok = MergedPRFinalizer.tick(name)
 
       {:ok, refreshed} = Ash.get(Issue, task.id)
-      assert refreshed.status == :closed
+      assert refreshed.state == :closed
     end
 
     test "open source PR → follow-up task stays open", %{ws: ws} do
@@ -526,7 +528,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
       :ok = MergedPRFinalizer.tick(name)
 
       {:ok, refreshed} = Ash.get(Issue, task.id)
-      assert refreshed.status != :closed
+      assert refreshed.state != :closed
     end
 
     test "merged source PR, already-closed follow-up → no crash", %{ws: ws} do
@@ -551,7 +553,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
       :ok = MergedPRFinalizer.tick(name)
 
       {:ok, refreshed} = Ash.get(Issue, task.id)
-      assert refreshed.status == :closed
+      assert refreshed.state == :closed
     end
 
     test "pr_ref path is unaffected — existing pr_ref task still finalized normally", %{ws: ws} do
@@ -587,8 +589,8 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
       {:ok, follow_up_closed} = Ash.get(Issue, follow_up.id)
       {:ok, pr_ref_closed} = Ash.get(Issue, pr_ref_task.id)
 
-      assert follow_up_closed.status == :closed
-      assert pr_ref_closed.status == :closed
+      assert follow_up_closed.state == :closed
+      assert pr_ref_closed.state == :closed
     end
 
     test "source_pr follow-up with pr_ref set is excluded (handled by pr_ref pass)", %{ws: ws} do
@@ -626,7 +628,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
 
       {:ok, refreshed} = Ash.get(Issue, task.id)
       # pr_ref=511 is open → task stays open; source_pr sweep skipped this task
-      assert refreshed.status != :closed
+      assert refreshed.state != :closed
     end
 
     test "review_only engagement with source_pr set is excluded", %{ws: ws} do
@@ -648,7 +650,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
       :ok = MergedPRFinalizer.tick(name)
 
       {:ok, refreshed} = Ash.get(Issue, engagement.id)
-      assert refreshed.status != :closed
+      assert refreshed.state != :closed
     end
   end
 
@@ -661,7 +663,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
       :ok = MergedPRFinalizer.tick(name)
 
       {:ok, refreshed} = Ash.get(Issue, task.id)
-      assert refreshed.status == :closed
+      assert refreshed.state == :closed
     end
 
     test "open source PR → legacy follow-up task stays open", %{ws: ws} do
@@ -672,7 +674,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
       :ok = MergedPRFinalizer.tick(name)
 
       {:ok, refreshed} = Ash.get(Issue, task.id)
-      assert refreshed.status != :closed
+      assert refreshed.state != :closed
     end
 
     test "404 for tracker_ref → task left open, no crash (safety net for real issue refs)", %{
@@ -688,7 +690,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
       assert :ok = MergedPRFinalizer.tick(name)
 
       {:ok, refreshed} = Ash.get(Issue, task.id)
-      assert refreshed.status != :closed
+      assert refreshed.state != :closed
     end
 
     test "legacy follow-up with pr_ref set is excluded (handled by pr_ref pass)", %{ws: ws} do
@@ -736,7 +738,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
 
       {:ok, refreshed} = Ash.get(Issue, task.id)
       # pr_ref=604 is open → task stays open; legacy sweep skipped this task
-      assert refreshed.status != :closed
+      assert refreshed.state != :closed
     end
   end
 
@@ -763,7 +765,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
       :ok = MergedPRFinalizer.tick(name)
 
       {:ok, refreshed} = Ash.get(Issue, task.id)
-      assert refreshed.status != :closed
+      assert refreshed.state != :closed
     end
 
     test "a PRPatrol-shaped title alone (no PRPatrol description) is not enough", %{ws: ws} do
@@ -776,7 +778,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
       :ok = MergedPRFinalizer.tick(name)
 
       {:ok, refreshed} = Ash.get(Issue, task.id)
-      assert refreshed.status != :closed
+      assert refreshed.state != :closed
     end
 
     test "a title whose PR number differs from tracker_ref is not a legacy follow-up", %{ws: ws} do
@@ -787,7 +789,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
       :ok = MergedPRFinalizer.tick(name)
 
       {:ok, refreshed} = Ash.get(Issue, task.id)
-      assert refreshed.status != :closed
+      assert refreshed.state != :closed
     end
 
     test "a legacy follow-up filed against another repo is not closed by this repo's merge",
@@ -799,7 +801,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
       :ok = MergedPRFinalizer.tick(name)
 
       {:ok, refreshed} = Ash.get(Issue, task.id)
-      assert refreshed.status != :closed
+      assert refreshed.state != :closed
     end
 
     test "an ordinary task is never even looked up on the PR API", %{ws: ws} do
@@ -866,7 +868,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
 
       refute_received {:requested, _}
       {:ok, refreshed} = Ash.get(Issue, task.id)
-      assert refreshed.status != :closed
+      assert refreshed.state != :closed
     end
 
     test "a workspace edit that keeps the repo takes effect without a restart", %{ws: ws} do
@@ -909,7 +911,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
       assert_received {:auth, [auth]}
       assert auth =~ "rotated-token"
       {:ok, refreshed} = Ash.get(Issue, task.id)
-      assert refreshed.status == :closed
+      assert refreshed.state == :closed
     end
   end
 

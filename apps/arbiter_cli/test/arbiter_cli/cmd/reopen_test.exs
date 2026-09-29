@@ -6,26 +6,26 @@ defmodule ArbiterCli.Cmd.ReopenTest do
   test "reopen success prints updated issue" do
     stub_post(
       "/api/issues/bd-001/reopen",
-      %{"id" => "bd-001", "title" => "X", "status" => "open"},
+      %{"id" => "bd-001", "title" => "X", "state" => "queued"},
       200
     )
 
     {out, _err, exit_code} = capture(fn -> Reopen.run(["bd-001"]) end)
     assert exit_code == 0
     assert out =~ "bd-001"
-    assert out =~ "open"
+    assert out =~ "queued"
   end
 
   test "reopen --json emits raw JSON" do
     stub_post(
       "/api/issues/bd-001/reopen",
-      %{"id" => "bd-001", "title" => "X", "status" => "open"},
+      %{"id" => "bd-001", "title" => "X", "state" => "queued"},
       200
     )
 
     {out, _err, exit_code} = capture(fn -> Reopen.run(["bd-001", "--json"]) end)
     assert exit_code == 0
-    assert {:ok, %{"status" => "open"}} = Jason.decode(out)
+    assert {:ok, %{"state" => "queued"}} = Jason.decode(out)
   end
 
   test "reopen requires id" do
@@ -34,7 +34,7 @@ defmodule ArbiterCli.Cmd.ReopenTest do
     assert err =~ "requires a ticket id"
   end
 
-  test "reopen of a non-closed task surfaces the friendly FSM reason" do
+  test "reopen of a non-closed task surfaces the transition refusal" do
     stub_post(
       "/api/issues/bd-001/reopen",
       %{
@@ -44,8 +44,9 @@ defmodule ArbiterCli.Cmd.ReopenTest do
           "details" => %{
             "errors" => [
               %{
-                "field" => "status",
-                "message" => "Cannot reopen issue with status open (must be :closed)"
+                "field" => "state",
+                "message" =>
+                  "Cannot reopen a ticket that is :queued: reopen moves :closed | :verifying → :queued."
               }
             ]
           }
@@ -57,7 +58,7 @@ defmodule ArbiterCli.Cmd.ReopenTest do
     {_out, err, exit_code} = capture(fn -> Reopen.run(["bd-001"]) end)
     assert exit_code == 1
     assert err =~ "bd-001 could not be reopened"
-    assert err =~ "must be :closed"
+    assert err =~ "Cannot reopen a ticket that is :queued"
     refute err =~ "validation failed"
   end
 end

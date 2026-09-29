@@ -105,7 +105,7 @@ defmodule ArbiterCli.Cmd.Claim do
 
     IO.puts(headline)
     IO.puts("  title:        #{task["title"]}")
-    IO.puts("  status:       #{task["status"]}")
+    IO.puts("  state:        #{task["state"]}")
     IO.puts("  tracker:      #{task["tracker_type"]}:#{task["tracker_ref"]}")
 
     if repo do

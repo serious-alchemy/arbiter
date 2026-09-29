@@ -168,9 +168,9 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
 
       assert task_id == task.id
 
-      # Task was NOT flipped to :in_progress and no worker spawned — it is held.
+      # Task was NOT moved to :active and no worker spawned — it is held.
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.status == :open
+      assert reloaded.state in [:backlog, :queued]
       assert Worker.whereis(task.id) == nil
 
       # The intent is in the workspace's queue.
@@ -241,7 +241,7 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
 
       t1 = make_task(ws)
       assert {:ok, result} = Dispatch.dispatch(t1.id, force: true, repo: "r", start_driver: false)
-      assert result.task.status == :in_progress
+      assert result.task.state == :active
       assert is_pid(result.worker_pid)
 
       assert_receive {:overage_alert, snapshot, spend, threshold}
@@ -351,7 +351,7 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
       assert {:ok, result} =
                Dispatch.dispatch(task.id, force: true, repo: "r", start_driver: false)
 
-      assert result.task.status == :in_progress
+      assert result.task.state == :active
     end
   end
 
@@ -374,7 +374,7 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
       assert {:ok, result} =
                Dispatch.dispatch(task.id, force: true, repo: "r", start_driver: false)
 
-      assert result.task.status == :in_progress
+      assert result.task.state == :active
     end
 
     test "fresh over-cap snapshot still holds (staleness fix does not break throttle)" do
@@ -653,7 +653,7 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
                  skip_quota_gate: true
                )
 
-      assert result.task.status == :in_progress
+      assert result.task.state == :active
     end
   end
 
@@ -676,7 +676,7 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
         do: Arbiter.ProcessTeardown.stop_child(DispatchQueueSupervisor, pid)
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.status == :open
+      assert reloaded.state in [:backlog, :queued]
 
       # Headroom returns; a fresh dispatch (new queue) proceeds normally.
       seed_quota(ws, %{status_5h: "allowed", utilization_5h: 0.10})
@@ -684,7 +684,7 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
       assert {:ok, result} =
                Dispatch.dispatch(task.id, force: true, repo: "r", start_driver: false)
 
-      assert result.task.status == :in_progress
+      assert result.task.state == :active
 
       if pid = DispatchQueueSupervisor.whereis(ws.id) do
         on_exit(fn -> Arbiter.ProcessTeardown.stop_child(DispatchQueueSupervisor, pid) end)

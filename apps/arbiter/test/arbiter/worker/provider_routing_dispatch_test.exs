@@ -18,6 +18,8 @@ defmodule Arbiter.Worker.ProviderRoutingDispatchTest do
   """
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures, only: [put_state!: 2]
+
   # bd-asxw4e: the tickets here are created in Backlog and dispatched straight
   # away, which a dispatch refuses unless forced — so these calls pass
   # `force: true`. What a dispatch admits is `DispatchEligibilityTest`'s.
@@ -455,7 +457,7 @@ defmodule Arbiter.Worker.ProviderRoutingDispatchTest do
         end)
 
       task = task!(ws, %{issue_type: :feature})
-      {:ok, task} = Ash.update(task, %{status: :in_progress})
+      task = put_state!(task, :active)
 
       {:ok, task} =
         task

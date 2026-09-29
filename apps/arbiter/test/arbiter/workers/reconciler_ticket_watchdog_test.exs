@@ -8,6 +8,8 @@ defmodule Arbiter.Workers.ReconcilerTicketWatchdogTest do
 
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures, only: [put_state!: 2]
+
   alias Arbiter.Messages.Message
   alias Arbiter.Tasks.{Issue, PullRequest, Workspace}
   alias Arbiter.Test.StubMerger
@@ -30,7 +32,7 @@ defmodule Arbiter.Workers.ReconcilerTicketWatchdogTest do
   # what a reboot leaves behind.
   defp merging_ticket(ws, mr_ref) do
     {:ok, issue} = Ash.create(Issue, %{title: "open PR", workspace_id: ws.id})
-    {:ok, _} = Ash.update(issue, %{status: :in_progress})
+    put_state!(issue, :active)
 
     lane = PullRequest.lane(adapter: StubMerger, interval_ms: 60_000, initial_delay_ms: 60_000)
     {:ok, merging} = Issue.pr_opened(issue.id, mr_ref, merge_watch: lane)

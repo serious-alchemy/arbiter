@@ -36,9 +36,9 @@ defmodule ArbiterWeb.MobileOverflowBrowserTest do
     end
   end
 
-  # An open, unrefined, unassigned issue renders every operator action button
+  # A Backlog, unassigned issue renders every operator action button
   # (Refine-eligible or not, Move to Ready, Edit, Dispatch, Close) — the
-  # widest form of the action row. A status transition (open -> ready) gives
+  # widest form of the action row. A state transition (backlog -> queued) gives
   # the audit log a real "old -> new" Detail cell to measure.
   defp seed do
     n = System.unique_integer([:positive])

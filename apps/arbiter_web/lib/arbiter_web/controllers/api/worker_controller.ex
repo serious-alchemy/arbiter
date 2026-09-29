@@ -10,7 +10,7 @@ defmodule ArbiterWeb.Api.WorkerController do
       `provider` is `"claude"` | `"gemini"` (deprecated aliases: `with_claude` /
       `with_gemini` booleans). With a provider a worker subprocess works the task
       and the Driver closes it on `arb done`; with `no_agent` the task parks in
-      `:in_progress` (no Driver).
+      `:active` (no Driver).
     * `POST /api/workers/review`          — :review.
       Two shapes: (a) `task_id` (+ optional `repo`) dispatches a review-only
       worker against the PR/MR linked to a task — no worktree, no per-task
@@ -523,7 +523,7 @@ defmodule ArbiterWeb.Api.WorkerController do
   # Map request params onto `Dispatch.dispatch/2` opts.
   #
   # Worker resolution:
-  #   * `no_agent`    → dry dispatch: park the task in `:in_progress` for a hand
+  #   * `no_agent`    → dry dispatch: park the task in `:active` for a hand
   #     to attach. The Driver is suppressed (`start_driver: false`) so the
   #     no-op Work workflow doesn't race to a bogus `:closed`.
   #   * `provider`    → force the named provider (`"claude"` | `"gemini"`),

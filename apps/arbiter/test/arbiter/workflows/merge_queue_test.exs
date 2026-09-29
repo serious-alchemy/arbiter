@@ -3,6 +3,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
   # in async mode.
   use Arbiter.DataCase, async: false
 
+  import Arbiter.LifecycleFixtures
   import ExUnit.CaptureLog
 
   require Ash.Query
@@ -381,7 +382,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
     # transition, the same as the worker's own PR-opened path.
     @tag workspace_config: @ws_github
     test "opening the PR moves an active ticket to :merging", %{workspace: ws, task: task} do
-      {:ok, %Issue{state: :active}} = Ash.update(task, %{status: :in_progress})
+      %Issue{state: :active} = put_state!(task, :active)
 
       stub(fn conn ->
         conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => 78})
@@ -391,7 +392,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       :ok = MergeQueue.enqueue(name, task.id)
 
       reloaded = Ash.get!(Issue, task.id)
-      assert {reloaded.state, reloaded.status, reloaded.pr_ref} == {:merging, :in_progress, "#78"}
+      assert {reloaded.state, reloaded.pr_ref} == {:merging, "#78"}
     end
 
     @tag workspace_config: @ws_github
@@ -428,7 +429,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       %{items: [item]} = MergeQueue.state(name)
       assert item.status == :failed
       reloaded = Ash.get!(Issue, task.id)
-      assert reloaded.status == :open
+      assert reloaded.state in [:backlog, :queued]
     end
 
     @tag workspace_config: @ws_github
@@ -454,7 +455,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       assert match?({:push_failed, _}, item.last_error)
 
       reloaded = Ash.get!(Issue, task.id)
-      assert reloaded.status == :open
+      assert reloaded.state in [:backlog, :queued]
     end
   end
 
@@ -684,7 +685,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
     # it `:active`.
     @tag workspace_config: @ws_github
     test "adopting the PR moves an active ticket to :merging", %{workspace: ws, task: task} do
-      {:ok, task} = Ash.update(task, %{status: :in_progress})
+      task = put_state!(task, :active)
       {:ok, %Issue{state: :active} = task} = Ash.update(task, %{pr_ref: "#56"})
 
       stub(fn conn ->
@@ -695,7 +696,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       assert :ok = MergeQueue.enqueue(name, task.id)
 
       reloaded = Ash.get!(Issue, task.id)
-      assert {reloaded.state, reloaded.status, reloaded.pr_ref} == {:merging, :in_progress, "#56"}
+      assert {reloaded.state, reloaded.pr_ref} == {:merging, "#56"}
     end
   end
 
@@ -784,7 +785,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       refute_received {:unexpected_api_call, _, _}
 
       reloaded = Ash.get!(Issue, task.id)
-      assert reloaded.status == :closed
+      assert reloaded.state == :closed
     end
   end
 
@@ -928,7 +929,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       assert items == []
 
       reloaded = Ash.get!(Issue, task.id)
-      assert reloaded.status == :closed
+      assert reloaded.state == :closed
     end
 
     # bd-dxgris / #1493 — the queue must merge the commit the review was
@@ -945,7 +946,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       :ok = MergeQueue.tick(name)
 
       assert_received {:merge_sha, "reviewed-sha"}
-      assert Ash.get!(Issue, task.id).status == :closed
+      assert Ash.get!(Issue, task.id).state == :closed
     end
 
     @tag workspace_config: @ws_github
@@ -965,7 +966,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       capture_log(fn -> :ok = MergeQueue.tick(name) end)
 
       refute_received {:merge_sha, _}
-      assert Ash.get!(Issue, task.id).status == :open
+      assert Ash.get!(Issue, task.id).state in [:backlog, :queued]
     end
 
     # bd-aq81qz / M1: an approval and a matching reviewed SHA are not proof
@@ -989,7 +990,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       log = capture_log(fn -> :ok = MergeQueue.tick(name) end)
 
       refute_received {:merge_sha, _}
-      assert Ash.get!(Issue, task.id).status == :open
+      assert Ash.get!(Issue, task.id).state in [:backlog, :queued]
       assert log =~ "nets to an empty diff"
       assert [%{last_error: :empty_net_diff}] = MergeQueue.state(name).items
     end
@@ -1061,7 +1062,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       log = capture_log(fn -> :ok = MergeQueue.tick(name) end)
 
       assert_received {:merge_sha, ^head}
-      assert Ash.get!(Issue, task.id).status == :closed
+      assert Ash.get!(Issue, task.id).state == :closed
 
       lines = for line <- String.split(log, "\n"), line =~ "DISAGREEMENT", do: line
       assert length(lines) == 1
@@ -1116,7 +1117,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       log = capture_log(fn -> :ok = MergeQueue.tick(name) end)
 
       assert_received {:merge_sha, ^head}
-      assert Ash.get!(Issue, task.id).status == :closed
+      assert Ash.get!(Issue, task.id).state == :closed
       assert log =~ "old=uncovered"
       assert log =~ "new=covered"
       assert log =~ "coverage predicate's answer (covered) is the one acted on"
@@ -1142,7 +1143,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       capture_log(fn -> :ok = MergeQueue.tick(name) end)
 
       refute_received {:merge_sha, _}
-      assert Ash.get!(Issue, task.id).status == :open
+      assert Ash.get!(Issue, task.id).state in [:backlog, :queued]
     end
 
     @tag workspace_config: @ws_github_coverage
@@ -1335,7 +1336,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       assert item.status == :awaiting_approval
 
       reloaded = Ash.get!(Issue, task.id)
-      assert reloaded.status == :open
+      assert reloaded.state in [:backlog, :queued]
     end
 
     @tag workspace_config: @ws_github
@@ -1385,7 +1386,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       # whether the resolver successfully spawns (it won't in test without a repo,
       # so it'll be :failed or :conflict_resolving). Either way, it's not :closed.
       reloaded = Ash.get!(Issue, task.id)
-      assert reloaded.status == :open
+      assert reloaded.state in [:backlog, :queued]
     end
 
     @tag workspace_config: @ws_github
@@ -1426,7 +1427,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       assert item.status == :failed
 
       reloaded = Ash.get!(Issue, task.id)
-      assert reloaded.status == :open
+      assert reloaded.state in [:backlog, :queued]
     end
   end
 
@@ -1496,7 +1497,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       assert items == []
 
       reloaded = Ash.get!(Issue, task.id)
-      assert reloaded.status == :closed
+      assert reloaded.state == :closed
     end
   end
 
@@ -1571,7 +1572,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       assert items == []
 
       reloaded = Ash.get!(Issue, task.id)
-      assert reloaded.status == :closed
+      assert reloaded.state == :closed
     end
 
     @tag workspace_config: @ws_github
@@ -1861,7 +1862,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       refute_receive {:jira_transition, _}, 200
 
       reloaded = Ash.get!(Issue, task.id)
-      assert reloaded.status == :closed
+      assert reloaded.state == :closed
     end
   end
 
@@ -2003,7 +2004,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       assert_received {:merged, 205}
 
       assert %{items: []} = MergeQueue.state(name)
-      assert Ash.get!(Issue, task.id).status == :closed
+      assert Ash.get!(Issue, task.id).state == :closed
     end
 
     @tag workspace_config: @ws_github
@@ -2041,7 +2042,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
 
       %{items: [item]} = MergeQueue.state(name)
       assert item.status == :conflict_resolving
-      assert Ash.get!(Issue, task.id).status == :open
+      assert Ash.get!(Issue, task.id).state in [:backlog, :queued]
     end
 
     @tag workspace_config: @ws_github
@@ -2080,7 +2081,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       assert_received {:merged, 207}
 
       assert %{items: []} = MergeQueue.state(name)
-      assert Ash.get!(Issue, task.id).status == :closed
+      assert Ash.get!(Issue, task.id).state == :closed
     end
 
     # bd-dxgris round 3, finding 1 — the forge applies update-branch
@@ -2132,7 +2133,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
                       "the queue's own rebase must re-baseline the guard, not deadlock the item"
 
       assert %{items: []} = MergeQueue.state(name)
-      assert Ash.get!(Issue, task.id).status == :closed
+      assert Ash.get!(Issue, task.id).state == :closed
     end
   end
 
@@ -2160,7 +2161,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       assert_received {:merged, 211}
       refute_received {:merged, 212}
 
-      assert Ash.get!(Issue, t1.id).status == :closed
+      assert Ash.get!(Issue, t1.id).state == :closed
 
       %{items: items} = MergeQueue.state(name)
       follower = Enum.find(items, &(&1.task_id == t2.id))
@@ -2180,7 +2181,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       # Cycle 3: follower merges.
       :ok = MergeQueue.tick(name)
       assert_received {:merged, 212}
-      assert Ash.get!(Issue, t2.id).status == :closed
+      assert Ash.get!(Issue, t2.id).state == :closed
     end
 
     @tag workspace_config: @ws_github
@@ -2397,7 +2398,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
 
     defp wait_until_closed(task_id) do
       Enum.reduce_while(1..50, nil, fn _, _ ->
-        if Ash.get!(Issue, task_id).status == :closed do
+        if Ash.get!(Issue, task_id).state == :closed do
           {:halt, :ok}
         else
           Process.sleep(10)
@@ -2510,7 +2511,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       # mesaana: the direct path — no PR, the task closes straight away.
       :ok = MergeQueue.enqueue(name, mesaana_task.id)
       refute_received {:github_call, _, _}
-      assert Ash.get!(Issue, mesaana_task.id).status == :closed
+      assert Ash.get!(Issue, mesaana_task.id).state == :closed
 
       assert %{strategy: "direct", repo: "mesaana", mr_ref: nil} =
                Enum.find(MergeQueue.state(name).items, &(&1.task_id == mesaana_task.id))
@@ -2524,7 +2525,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       assert %{strategy: "github", repo: "arbiter", status: :awaiting_approval} =
                Enum.find(MergeQueue.state(name).items, &(&1.task_id == arbiter_task.id))
 
-      refute Ash.get!(Issue, arbiter_task.id).status == :closed
+      refute Ash.get!(Issue, arbiter_task.id).state == :closed
     end
 
     @tag workspace_config: %{
