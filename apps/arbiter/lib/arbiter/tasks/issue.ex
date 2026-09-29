@@ -357,8 +357,11 @@ defmodule Arbiter.Tasks.Issue do
       # Same teardown as `:close`: the worker finished and its PR merged, so
       # leaving the agent + worktree alive for the whole verification window
       # would pin a slot and leak a checkout. All best-effort.
+      #
+      # bd-9iv4qd: this transition only ever follows a merge, so the task's
+      # local branch is reaped with the worktree.
       change {Arbiter.Tasks.Issue.Changes.StopWorker, []}
-      change {Arbiter.Tasks.Issue.Changes.CleanupWorktree, []}
+      change {Arbiter.Tasks.Issue.Changes.CleanupWorktree, merged: true}
       change {Arbiter.Tasks.Issue.Changes.DropDispatchHold, []}
 
       change fn changeset, _context ->
@@ -500,6 +503,12 @@ defmodule Arbiter.Tasks.Issue do
       # `close_upstream: false`.
       argument :close_upstream, :boolean, default: true
 
+      # bd-9iv4qd: the close is the ticket's PR merging. Set by
+      # `Tasks.Verification.finalize_merged/2` (the funnel every merge path
+      # closes through); `CleanupWorktree` then also reaps the task's local
+      # branch, when nothing on it is held only locally.
+      argument :pr_merged, :boolean, default: false
+
       # bd-842qio: how the ticket closed. Persisted to `close_reason`;
       # `:completed` when the caller gives none. `reason` above is the
       # free-text note for the audit trail, not this.
@@ -528,8 +537,10 @@ defmodule Arbiter.Tasks.Issue do
       change {Arbiter.Tasks.Issue.Changes.RecordCloseIntent, []}
 
       # Best-effort teardown: stop the task's worker (if any) and remove
-      # its worktree (if clean). Failures never fail the :close itself.
-      # Runs for every :close path — CLI, Driver, MergeQueue.
+      # its worktree (unless it holds work, which is saved to the notes).
+      # Failures never fail the :close itself. Runs for every :close path —
+      # CLI, Driver, MergeQueue, Watchdog, MergedPRFinalizer, the upstream-close
+      # sync (bd-9iv4qd tests each).
       change {Arbiter.Tasks.Issue.Changes.StopWorker, []}
       change {Arbiter.Tasks.Issue.Changes.CleanupWorktree, []}
       change {Arbiter.Tasks.Issue.Changes.DropDispatchHold, []}

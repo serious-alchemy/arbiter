@@ -175,7 +175,7 @@ defmodule Arbiter.Tasks.Verification do
   def finalize_merged(%Issue{} = task, opts) do
     close_upstream = Keyword.get(opts, :close_upstream, true)
 
-    case Ash.update(task, %{close_upstream: close_upstream}, action: :close) do
+    case Ash.update(task, %{close_upstream: close_upstream, pr_merged: true}, action: :close) do
       {:ok, closed} -> {:ok, :closed, closed}
       {:error, reason} -> {:error, reason}
     end

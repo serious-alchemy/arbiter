@@ -554,7 +554,10 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
         "rule=#{rule} repo=#{queried_repo} (tracker=#{task.tracker_type} source_pr=#{task.source_pr} tracker_ref=#{task.tracker_ref})"
     )
 
-    case Ash.update(task, %{close_upstream: false}, action: :close) do
+    # `pr_merged`: the PR this follow-up worked on merged, so its local branch
+    # is reaped with the worktree — only if nothing on it is held locally
+    # (bd-9iv4qd).
+    case Ash.update(task, %{close_upstream: false, pr_merged: true}, action: :close) do
       {:ok, _} ->
         Logger.info("MergedPRFinalizer: closed follow-up task=#{task.id}")
 
