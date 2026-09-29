@@ -266,6 +266,14 @@ defmodule ArbiterWeb.BoardLifecycleLiveTest do
       assert has_element?(view, "#board-attention-count", "1")
       assert has_element?(view, ~s(#board-attention-toggle[aria-expanded="false"]))
     end
+
+    test "swimlane ticket navigates to the task detail page", %{conn: conn, ws: ws} do
+      ticket = ws |> merging_issue("needs a person") |> operator_attention!()
+
+      view = live_board(conn)
+
+      assert has_element?(view, ~s(a#lane-ticket-#{ticket.id}[href="/tasks/#{ticket.id}"]))
+    end
   end
 
   # ---- 4. system alerts -------------------------------------------------------

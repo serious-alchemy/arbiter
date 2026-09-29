@@ -1026,16 +1026,17 @@ defmodule ArbiterWeb.BoardLive do
                 </span>
               </div>
 
-              <div
+              <.link
                 :for={item <- @lane_tickets}
                 id={"lane-ticket-#{item.id}"}
+                navigate={~p"/tasks/#{item.id}"}
                 data-lane-item="ticket"
                 data-owner={item.owner}
-                phx-click={JS.navigate(~p"/tasks/#{item.id}")}
                 class={[
-                  "flex-none w-64 flex flex-col gap-1 px-[11px] py-[9px] cursor-pointer",
+                  "flex-none w-64 flex flex-col gap-1 px-[11px] py-[9px]",
                   "rounded-[var(--radius-field)] border border-solid bg-[var(--surface-card)]",
                   "transition-colors duration-[var(--dur-hover)] hover:bg-[var(--arb-canvas-sunken)]",
+                  "no-underline text-inherit",
                   if(item.owner == :operator,
                     do: "border-[color-mix(in_oklch,var(--arb-attention)_45%,transparent)]",
                     else: "border-[var(--arb-line)]"
@@ -1053,7 +1054,7 @@ defmodule ArbiterWeb.BoardLive do
                   {item.title || item.id}
                 </span>
                 <.attention_marker attention={item} />
-              </div>
+              </.link>
 
               <div
                 :if={@lane_tickets == [] and @lane_alerts == []}
