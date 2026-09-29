@@ -946,6 +946,7 @@ defmodule Arbiter.Tasks.Workspace do
         nil
     end
   end
+
   @default_notes_gate_nudge_cap 2
 
   @doc "The notes-gate send-back budget when `notes_gate.nudge_cap` is unset (bd-4qjl0q)."

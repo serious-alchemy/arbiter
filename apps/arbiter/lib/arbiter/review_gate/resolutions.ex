@@ -97,7 +97,10 @@ defmodule Arbiter.ReviewGate.Resolutions do
     :ok
   rescue
     e ->
-      Logger.warning("gate_cap_hit event for task=#{task_id} not emitted: #{Exception.message(e)}")
+      Logger.warning(
+        "gate_cap_hit event for task=#{task_id} not emitted: #{Exception.message(e)}"
+      )
+
       :ok
   end
 

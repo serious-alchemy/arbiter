@@ -102,7 +102,9 @@ defmodule ArbiterCli.Cmd.ResolveTest do
     assert code == 1
     assert err =~ "--amend"
 
-    {_out, err, code} = capture(fn -> Resolve.run(["bd-001", "--amend", "a", "--reject", "b"]) end)
+    {_out, err, code} =
+      capture(fn -> Resolve.run(["bd-001", "--amend", "a", "--reject", "b"]) end)
+
     assert code == 1
     assert err =~ "exactly one"
   end
