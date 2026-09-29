@@ -2459,6 +2459,111 @@ defmodule Arbiter.Workflows.MergeQueueTest do
     end
   end
 
+  # bd-73zv62: a workspace merging via GitHub holds a remote-less repo whose
+  # `merge.repos.mesaana.strategy = "direct"` override merges it locally. The
+  # queue must route each task by its own repo, in the same queue process.
+  describe "enqueue/2 per-repo merge strategy override (bd-73zv62)" do
+    @ws_github_with_direct_repo %{
+      "merge" => %{
+        "strategy" => "github",
+        "branch_prefix" => "feature/",
+        "config" => %{
+          "owner" => "octo",
+          "repo" => "widget",
+          "credentials_ref" => "test-token-abc123"
+        },
+        "repos" => %{"mesaana" => %{"strategy" => "direct"}}
+      }
+    }
+
+    @tag workspace_config: @ws_github_with_direct_repo
+    test "a direct-override repo's task closes with no forge call while a sibling repo's task opens a PR",
+         %{workspace: ws, task: mesaana_task} do
+      :ok = record_run(mesaana_task, "mesaana")
+
+      {:ok, arbiter_task} =
+        Ash.create(Issue, %{title: "merge me too", description: "body", workspace_id: ws.id})
+
+      :ok = record_run(arbiter_task, "arbiter")
+      test_pid = self()
+
+      stub(fn conn ->
+        send(test_pid, {:github_call, conn.method, conn.request_path})
+
+        if conn.method == "POST" do
+          {:ok, body, conn} = Plug.Conn.read_body(conn)
+          send(test_pid, {:pr_head, Jason.decode!(body)["head"]})
+
+          conn
+          |> Plug.Conn.put_status(201)
+          |> Req.Test.json(%{"number" => 7, "html_url" => "https://github.com/octo/widget/pull/7"})
+        else
+          conn |> Plug.Conn.put_status(404) |> Req.Test.json(%{"message" => "Not Found"})
+        end
+      end)
+
+      {_pid, name} = start_merge_queue(ws)
+
+      # mesaana: the direct path — no PR, the task closes straight away.
+      :ok = MergeQueue.enqueue(name, mesaana_task.id)
+      refute_received {:github_call, _, _}
+      assert Ash.get!(Issue, mesaana_task.id).status == :closed
+
+      assert %{strategy: "direct", repo: "mesaana", mr_ref: nil} =
+               Enum.find(MergeQueue.state(name).items, &(&1.task_id == mesaana_task.id))
+
+      # arbiter: same queue, same workspace — still a GitHub PR.
+      :ok = MergeQueue.enqueue(name, arbiter_task.id)
+      assert_received {:github_call, "POST", "/repos/octo/widget/pulls"}
+      assert_received {:pr_head, head}
+      assert head == "feature/" <> arbiter_task.id
+
+      assert %{strategy: "github", repo: "arbiter", status: :awaiting_approval} =
+               Enum.find(MergeQueue.state(name).items, &(&1.task_id == arbiter_task.id))
+
+      refute Ash.get!(Issue, arbiter_task.id).status == :closed
+    end
+
+    @tag workspace_config: %{
+           "merge" => %{
+             "strategy" => "direct",
+             "repos" => %{
+               "svc" => %{
+                 "strategy" => "github",
+                 "config" => %{
+                   "owner" => "octo",
+                   "repo" => "svc",
+                   "credentials_ref" => "test-token-abc123"
+                 }
+               }
+             }
+           }
+         }
+    test "a forge-override repo opens its PR against its own owner/repo in a direct workspace",
+         %{workspace: ws, task: task} do
+      :ok = record_run(task, "svc")
+      test_pid = self()
+
+      stub(fn conn ->
+        send(test_pid, {:github_call, conn.method, conn.request_path})
+
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{"number" => 8, "html_url" => "https://github.com/octo/svc/pull/8"})
+      end)
+
+      {_pid, name} = start_merge_queue(ws)
+      :ok = MergeQueue.enqueue(name, task.id)
+
+      assert_received {:github_call, "POST", "/repos/octo/svc/pulls"}
+
+      assert %{strategy: "github", mr_ref: mr_ref, status: :awaiting_approval} =
+               Enum.find(MergeQueue.state(name).items, &(&1.task_id == task.id))
+
+      assert is_binary(mr_ref)
+    end
+  end
+
   # bd-6dghdv: the queue cached the workspace from its last enqueue, so after a
   # workspace edit moved merge.config to another owner it kept polling (and
   # would have merged against) the old repo until the next enqueue or a server
