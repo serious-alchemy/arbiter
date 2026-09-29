@@ -14,7 +14,8 @@ defmodule Arbiter.Messages.Escalation do
       (`EscalationKind.cause/1`, through `Arbiter.Tasks.Attention.raise_cause/3`).
 
   System-scoped kinds are written as given: their producers keep their own
-  dedupe until child 8 (bd-7gt8rm) gives them a lifecycle.
+  dedupe. Credentials, the quota poll, overage and budget are system alerts
+  (`Arbiter.Alerts`, bd-7gt8rm) and do not come through here.
 
   Callers keep their own circuit breakers and rescue wrappers; this module
   only decides the row.

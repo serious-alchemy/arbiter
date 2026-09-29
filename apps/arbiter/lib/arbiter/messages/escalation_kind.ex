@@ -20,9 +20,11 @@ defmodule Arbiter.Messages.EscalationKind do
       budget, the circuit breaker, the loop — and PRPatrol's failed
       follow-up dispatch, which is about a repo's config: its `task_ref` is a
       follow-up the patrol closes at once so the next tick can retry, and
-      that close must not resolve the page. Typed here; their own lifecycle
-      (clearing when the condition clears) is child 8 (bd-7gt8rm). Their
-      producers keep their own dedupe.
+      that close must not resolve the page. Their producers keep their own
+      dedupe. Four of them — `:credential_expired`, `:quota_poll_failing`,
+      `:overage_alert` and `:budget_exceeded` — are now raised as system
+      alerts (`Arbiter.Alerts`, bd-7gt8rm) that clear with their condition;
+      their kinds stay here for the escalation rows written before that.
 
   `:agent_raised` is what an agent or a person sends by hand (`arb message`,
   the MCP `message_send` tool, `POST /api/messages`). It is ticket-scoped, so

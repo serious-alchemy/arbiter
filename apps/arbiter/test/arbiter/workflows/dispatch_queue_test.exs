@@ -90,6 +90,13 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
 
       :ok
     end
+
+    def overage_cleared(workspace_id, provider) do
+      if pid = Application.get_env(:arbiter, :test_notifier_pid),
+        do: send(pid, {:overage_cleared, workspace_id, provider})
+
+      :ok
+    end
   end
 
   defp make_workspace(config) do
@@ -247,6 +254,91 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
       t2 = make_task(ws)
       assert {:ok, _} = Dispatch.dispatch(t2.id, force: true, repo: "r", start_driver: false)
       refute_receive {:overage_alert, _, _, _}, 100
+    end
+  end
+
+  # bd-7gt8rm: the overage alert is a system alert that clears when its
+  # condition does — spend back under the threshold, the threshold raised or
+  # removed, or dispatch no longer past the cap.
+  describe ":continue — the overage alert clears when its condition clears" do
+    defp continue_workspace(alert_usd) do
+      make_workspace(%{
+        "quota" => %{"on_exhaustion" => "continue", "overage_alert_usd" => alert_usd}
+      })
+    end
+
+    defp overage_alerts(ws), do: Arbiter.Alerts.active(kind: :overage_alert, workspace_id: ws.id)
+
+    test "spend back under the threshold clears it" do
+      ws = continue_workspace(10.0)
+      _pid = start_queue(ws, auto_subscribe: false)
+      task = make_task(ws)
+
+      :ok = DispatchQueue.record_overage(ws.id, task, 12.0, :claude)
+      assert [alert] = overage_alerts(ws)
+      assert alert.owner == :operator
+
+      # The 5h window rolled: the windowed spend is under the threshold again.
+      :ok = DispatchQueue.record_overage(ws.id, task, 3.0, :claude)
+      assert overage_alerts(ws) == []
+      assert Ash.get!(Arbiter.Alerts.SystemAlert, alert.id).cleared_at
+    end
+
+    test "raising the threshold above the spend clears it" do
+      ws = continue_workspace(10.0)
+      _pid = start_queue(ws, auto_subscribe: false)
+      task = make_task(ws)
+
+      :ok = DispatchQueue.record_overage(ws.id, task, 12.0, :claude)
+      assert [_] = overage_alerts(ws)
+
+      Ash.update!(ws, %{patch: %{"quota" => %{"overage_alert_usd" => 50.0}}},
+        action: :patch_config
+      )
+
+      :ok = DispatchQueue.record_overage(ws.id, task, 13.0, :claude)
+      assert overage_alerts(ws) == []
+    end
+
+    test "removing the threshold clears it" do
+      ws = continue_workspace(10.0)
+      _pid = start_queue(ws, auto_subscribe: false)
+      task = make_task(ws)
+
+      :ok = DispatchQueue.record_overage(ws.id, task, 12.0, :claude)
+      assert [_] = overage_alerts(ws)
+
+      Ash.update!(ws, %{unset_paths: ["quota.overage_alert_usd"]}, action: :patch_config)
+
+      :ok = DispatchQueue.record_overage(ws.id, task, 13.0, :claude)
+      assert overage_alerts(ws) == []
+    end
+
+    test "a dispatch the gate allows outside overage clears it" do
+      ws = continue_workspace(1.0)
+
+      Arbiter.Messages.CoordinatorNotifier.overage_alert(
+        %{workspace_id: ws.id, provider: :claude},
+        5.0,
+        1.0
+      )
+
+      # Another provider's overage in the same workspace is not this one's.
+      Arbiter.Messages.CoordinatorNotifier.overage_alert(
+        %{workspace_id: ws.id, provider: :codex},
+        5.0,
+        1.0
+      )
+
+      assert [_, _] = overage_alerts(ws)
+
+      # The plan window reset: no longer in overage.
+      seed_quota(ws, %{status_5h: "allowed", utilization_5h: 0.10})
+
+      t = make_task(ws)
+      assert {:ok, _} = Dispatch.dispatch(t.id, force: true, repo: "r", start_driver: false)
+      assert [%{key: key}] = overage_alerts(ws)
+      assert key == "#{ws.id}:codex"
     end
   end
 

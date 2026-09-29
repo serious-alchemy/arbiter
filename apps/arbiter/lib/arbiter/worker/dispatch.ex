@@ -1475,6 +1475,10 @@ defmodule Arbiter.Worker.Dispatch do
 
     case gate.check(task, quota, workspace, gate_opts) do
       :allow ->
+        # Not past this provider's plan cap: its overage alert's condition has
+        # cleared (bd-7gt8rm). One indexed read when none is active. No
+        # snapshot is not evidence either way, so it leaves the alert alone.
+        if quota, do: CoordinatorNotifier.overage_cleared(ws_id, provider)
         :ok
 
       {:hold, reason} ->
@@ -1495,7 +1499,7 @@ defmodule Arbiter.Worker.Dispatch do
         end
 
       {:overage, spend_usd} ->
-        _ = DispatchQueue.record_overage(ws_id, task, spend_usd)
+        _ = DispatchQueue.record_overage(ws_id, task, spend_usd, provider)
         :ok
     end
   end

@@ -83,6 +83,7 @@ defmodule Arbiter.MCP.Catalog do
   | `scheduler_pause` | coordinator | `Arbiter.Board.Autopilot.pause/2` (persisted, bd-pgi97m) |
   | `scheduler_resume` | coordinator | `Arbiter.Board.Autopilot.resume/2` (persisted, bd-pgi97m) |
   | `scheduler_status` | coordinator | `Arbiter.Board.Drain.status/1` |
+  | `alert_list` | coordinator | `Arbiter.Alerts.active/1` (system alerts, bd-7gt8rm) |
   | `breaker_list` | coordinator | `Arbiter.CircuitBreaker.list/1` + `call_sites/0` |
   | `breaker_reset` | coordinator | `Arbiter.CircuitBreaker.reset/1` / `reset_all/1` |
   | `repo_list` | coordinator | `Arbiter.Tasks.RepoConfig.list_repos()` (mirrors `arb repo list`) |
@@ -2160,6 +2161,33 @@ defmodule Arbiter.MCP.Catalog do
       handler: &Tools.scheduler_status/2
     },
 
+    # ---- system alerts (bd-7gt8rm) -------------------------------------------
+    %{
+      name: "alert_list",
+      tiers: @coordinator,
+      description:
+        "List the active system alerts: problems with the installation that are not " <>
+          "tied to a ticket — `credential_expired` (per adapter and detection source), " <>
+          "`quota_poll_failing`, `overage_alert` (per workspace and provider) and " <>
+          "`budget_exceeded` (per task). Each carries `kind`, `key`, `subject`, " <>
+          "`detail`, `owner` (always `operator`), `raised_at`, `last_raised_at`, " <>
+          "`raise_count` and `cleared_at`. An alert clears by itself when its condition " <>
+          "does, so the list is exactly what is still wrong. Optional `workspace`, " <>
+          "`kind`. Coordinator only.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "workspace" => %{"type" => "string", "description" => "Workspace id or name."},
+          "kind" => %{
+            "type" => "string",
+            "enum" => Enum.map(Arbiter.Alerts.SystemAlert.kinds(), &Atom.to_string/1),
+            "description" => "Restrict to one alert kind."
+          }
+        },
+        "additionalProperties" => false
+      },
+      handler: &Tools.alert_list/2
+    },
     # ---- shared circuit breaker (bd-5jr49o) ---------------------------------
     %{
       name: "breaker_list",

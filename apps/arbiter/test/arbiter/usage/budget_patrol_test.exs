@@ -1,17 +1,19 @@
 defmodule Arbiter.Usage.BudgetPatrolTest do
   @moduledoc """
-  The one-shot coordinator escalation raised when an open task's worker spend
-  first crosses its estimate group's p90 (bd-8j9i9p AC5, operator decision
-  2026-09-15).
+  The system alert raised while an open task's worker spend is past its
+  estimate group's p90 (bd-8j9i9p AC5, operator decision 2026-09-15), and
+  cleared once it is not (bd-7gt8rm).
 
   It informs; it does not intervene. Nothing here stops a worker, pauses
-  anything or trips the circuit breaker — the point is that the coordinator
-  gets to say whether the overrun is expected.
+  anything or trips the circuit breaker — the point is that someone gets to
+  say whether the overrun is expected.
   """
 
   # async: false — the sweep reads the whole ledger and the whole issue table.
   use Arbiter.DataCase, async: false
 
+  alias Arbiter.Alerts
+  alias Arbiter.Alerts.SystemAlert
   alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Messages.Message
   alias Arbiter.Tasks.Issue
@@ -67,43 +69,46 @@ defmodule Arbiter.Usage.BudgetPatrolTest do
     ev
   end
 
-  defp escalations(ws), do: Message.inbox(Message.coordinator_ref(), workspace_id: ws.id)
+  # The active budget alerts shown in the workspace.
+  defp alerts(ws), do: Alerts.active(kind: :budget_exceeded, workspace_id: ws.id)
 
-  # Every escalation row for the workspace, read or not — `inbox/2` only shows
-  # the unread ones, and the dedupe is supposed to outlive a read.
-  defp all_escalations(ws) do
-    kind = :escalation
+  # Every budget alert row for the workspace, active or cleared.
+  defp all_alerts(ws) do
     ws_id = ws.id
 
-    Message
-    |> Ash.Query.filter(workspace_id == ^ws_id and kind == ^kind)
+    SystemAlert
+    |> Ash.Query.filter(workspace_id == ^ws_id and kind == :budget_exceeded)
     |> Ash.read!()
   end
 
+  defp escalations(ws), do: Message.inbox(Message.coordinator_ref(), workspace_id: ws.id)
+
   describe "sweep/1" do
-    test "an open task past p90 gets exactly one escalation, naming the numbers", %{ws: ws} do
+    test "an open task past p90 raises one operator alert naming the numbers, and no escalation",
+         %{ws: ws} do
       task = open_issue!(ws, %{difficulty: 2, issue_type: :feature, title: "runaway task"})
       event!(task.id, ws, %{cost_usd: 40.0})
 
       assert :ok = BudgetPatrol.sweep(now: @now)
 
-      assert [escalation] = escalations(ws)
-      assert escalation.kind == :escalation
-      assert Message.task_ref(escalation) == task.id
-      assert escalation.subject =~ task.id
-      # The fields the coordinator needs to judge whether this is expected.
-      assert escalation.body =~ "runaway task"
-      assert escalation.body =~ "$40.00"
-      assert escalation.body =~ "$3.00"
-      assert escalation.body =~ "$9.00"
-      assert escalation.body =~ "difficulty+type"
-      assert escalation.body =~ "n=10"
-      assert escalation.body =~ "D2"
+      assert [alert] = alerts(ws)
+      assert alert.key == task.id
+      assert alert.owner == :operator
+      assert alert.subject =~ task.id
+      # The fields needed to judge whether this is expected.
+      assert alert.detail =~ "runaway task"
+      assert alert.detail =~ "$40.00"
+      assert alert.detail =~ "$3.00"
+      assert alert.detail =~ "$9.00"
+      assert alert.detail =~ "difficulty+type"
+      assert alert.detail =~ "n=10"
+      assert alert.detail =~ "D2"
       # And the copy is honest about what the figure covers.
-      assert escalation.body =~ "worker spend"
+      assert alert.detail =~ "worker spend"
+      assert escalations(ws) == []
     end
 
-    test "a second sweep does not escalate again", %{ws: ws} do
+    test "a second sweep refreshes the one alert with the new figure", %{ws: ws} do
       task = open_issue!(ws, %{difficulty: 2, issue_type: :feature})
       event!(task.id, ws, %{cost_usd: 40.0})
 
@@ -113,41 +118,78 @@ defmodule Arbiter.Usage.BudgetPatrolTest do
       assert :ok = BudgetPatrol.sweep(now: @now)
       assert :ok = BudgetPatrol.sweep(now: @now)
 
-      assert [_only_one] = escalations(ws)
+      assert [alert] = all_alerts(ws)
+      assert alert.detail =~ "$50.00"
+      assert is_nil(alert.cleared_at)
     end
 
-    test "a read escalation still suppresses the repeat — the dedupe is durable", %{ws: ws} do
+    test "the threshold moving above the spend clears the alert", %{ws: ws} do
       task = open_issue!(ws, %{difficulty: 2, issue_type: :feature})
       event!(task.id, ws, %{cost_usd: 40.0})
 
       assert :ok = BudgetPatrol.sweep(now: @now)
-      assert [escalation] = escalations(ws)
-      {:ok, _} = Message.mark_read(escalation)
+      assert [alert] = alerts(ws)
+
+      # Ten more D2 features closed at $100 each: the group's p90 is now well
+      # past $40, so the task is back under budget.
+      Enum.each(1..10, fn _ ->
+        issue = closed_issue!(ws, %{difficulty: 2, issue_type: :feature})
+        event!(issue.id, ws, %{cost_usd: 100.0})
+      end)
 
       assert :ok = BudgetPatrol.sweep(now: @now)
 
-      assert [_still_only_one] = all_escalations(ws)
+      assert alerts(ws) == []
+      assert Ash.get!(SystemAlert, alert.id).cleared_at
     end
 
-    test "a closed task that ran over is never escalated", %{ws: ws} do
+    test "closing the task clears its alert", %{ws: ws} do
+      task = open_issue!(ws, %{difficulty: 2, issue_type: :feature})
+      event!(task.id, ws, %{cost_usd: 40.0})
+
+      assert :ok = BudgetPatrol.sweep(now: @now)
+      assert [_] = alerts(ws)
+
+      {:ok, _} = Ash.update(task, %{close_upstream: false}, action: :close)
+      assert :ok = BudgetPatrol.sweep(now: @now)
+
+      assert alerts(ws) == []
+    end
+
+    test "a sweep that fails clears nothing", %{ws: ws} do
+      task = open_issue!(ws, %{difficulty: 2, issue_type: :feature})
+      event!(task.id, ws, %{cost_usd: 40.0})
+      assert :ok = BudgetPatrol.sweep(now: @now)
+
+      log =
+        ExUnit.CaptureLog.capture_log([level: :warning], fn ->
+          assert :ok = BudgetPatrol.sweep(now: @now, sample: [%{}])
+        end)
+
+      assert log =~ "BudgetPatrol.sweep failed"
+
+      assert [_] = alerts(ws)
+    end
+
+    test "a closed task that ran over is never alerted", %{ws: ws} do
       task = closed_issue!(ws, %{difficulty: 2, issue_type: :feature})
       event!(task.id, ws, %{cost_usd: 40.0})
 
       assert :ok = BudgetPatrol.sweep(now: @now)
 
-      assert [] = escalations(ws)
+      assert [] = alerts(ws)
     end
 
-    test "a task under p90 is not escalated", %{ws: ws} do
+    test "a task under p90 is not alerted", %{ws: ws} do
       task = open_issue!(ws, %{difficulty: 2, issue_type: :feature})
       event!(task.id, ws, %{cost_usd: 8.5})
 
       assert :ok = BudgetPatrol.sweep(now: @now)
 
-      assert [] = escalations(ws)
+      assert [] = alerts(ws)
     end
 
-    test "a task with no estimate is never escalated, however much it has spent", %{ws: ws} do
+    test "a task with no estimate is never alerted, however much it has spent", %{ws: ws} do
       # D4 has no history of its own, and `min_n: 10` keeps it off the global
       # rung too — so there is no p90 to be over.
       task = open_issue!(ws, %{difficulty: 4, issue_type: :feature})
@@ -155,7 +197,7 @@ defmodule Arbiter.Usage.BudgetPatrolTest do
 
       assert :ok = BudgetPatrol.sweep(now: @now, min_n: 11)
 
-      assert [] = escalations(ws)
+      assert [] = alerts(ws)
     end
   end
 
@@ -202,7 +244,7 @@ defmodule Arbiter.Usage.BudgetPatrolTest do
       }
     end
 
-    test "a pass that is still running pages once it is past p90, and only once",
+    test "a pass that is still running raises the alert once it is past p90, and only one",
          %{ws: ws} = ctx do
       task = open_issue!(ws, %{difficulty: 2, issue_type: :feature, title: "runaway pass"})
       # Settled: $4 — under p75. The pass in flight has burned $30 more.
@@ -211,12 +253,12 @@ defmodule Arbiter.Usage.BudgetPatrolTest do
 
       assert :ok = BudgetPatrol.sweep(now: @now, workers: workers)
 
-      assert [escalation] = escalations(ws)
-      assert escalation.body =~ "$34.00"
-      assert escalation.body =~ "≈$30.00 of that is an in-flight estimate"
+      assert [alert] = alerts(ws)
+      assert alert.detail =~ "$34.00"
+      assert alert.detail =~ "≈$30.00 of that is an in-flight estimate"
 
       assert :ok = BudgetPatrol.sweep(now: @now, workers: workers)
-      assert [_only_one] = all_escalations(ws)
+      assert [_only_one] = all_alerts(ws)
     end
 
     test "without the live pass the same task is not over", %{ws: ws} do
@@ -224,12 +266,12 @@ defmodule Arbiter.Usage.BudgetPatrolTest do
       event!(task.id, ws, %{cost_usd: 4.0})
 
       assert :ok = BudgetPatrol.sweep(now: @now, workers: [])
-      assert [] = escalations(ws)
+      assert [] = alerts(ws)
     end
   end
 
   describe "the supervised ticker" do
-    test "a poll on the running process escalates the same way", %{ws: ws} do
+    test "a poll on the running process raises the alert the same way", %{ws: ws} do
       task = open_issue!(ws, %{difficulty: 2, issue_type: :feature})
       event!(task.id, ws, %{cost_usd: 40.0})
 
@@ -237,8 +279,8 @@ defmodule Arbiter.Usage.BudgetPatrolTest do
 
       assert :ok = BudgetPatrol.poll(pid)
 
-      assert [escalation] = escalations(ws)
-      assert escalation.subject == CoordinatorNotifier.budget_exceeded_subject(task.id)
+      assert [alert] = alerts(ws)
+      assert alert.subject == CoordinatorNotifier.budget_exceeded_subject(task.id)
     end
   end
 end

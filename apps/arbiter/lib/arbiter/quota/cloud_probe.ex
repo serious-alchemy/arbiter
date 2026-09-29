@@ -389,11 +389,11 @@ defmodule Arbiter.Quota.CloudProbe do
       {:error, {:exit, r}}
   end
 
-  # Tracks consecutive oauth-usage-poll failures and escalates to the
-  # coordinator mailbox the cycle the threshold is first crossed — an
-  # edge-trigger, so a sustained outage produces exactly one mailbox item
-  # (bd-4fbpto) rather than one per 5-minute cycle. Resets on the next
-  # success, so a later, distinct outage escalates again.
+  # Tracks consecutive oauth-usage-poll failures and raises the quota-poll
+  # alert the cycle the threshold is first crossed — an edge-trigger, so a
+  # sustained outage is one alert (bd-4fbpto) rather than one per 5-minute
+  # cycle. Resets on the next success, which also clears the alert
+  # (bd-7gt8rm), so a later, distinct outage raises a fresh one.
   defp note_oauth_result(%State{} = state, workspace_ids, {:ok, results}) do
     failed =
       for {workspace_id, {:error, reason}} <- Enum.zip(workspace_ids, results),
@@ -410,6 +410,7 @@ defmodule Arbiter.Quota.CloudProbe do
     cond do
       failed == [] ->
         note_recovered(state, Arbiter.Agents.Claude, state.oauth_consecutive_401s)
+        clear_oauth_failure()
 
         %{
           state
@@ -455,6 +456,8 @@ defmodule Arbiter.Quota.CloudProbe do
         Logger.warning(
           "Arbiter.Quota.CloudProbe: oauth usage fetch succeeded but some writes failed: #{inspect(write_failed)}"
         )
+
+        clear_oauth_failure()
 
         %{
           state
@@ -524,6 +527,11 @@ defmodule Arbiter.Quota.CloudProbe do
   end
 
   defp escalate_oauth_failure(_workspace_ids, _failures, _reason, _lapse), do: :ok
+
+  # bd-7gt8rm: a poll that succeeds clears the quota-poll alert. Not gated on
+  # this process's failure count — an alert raised before a restart must
+  # clear too — and a routine healthy cycle costs one indexed read.
+  defp clear_oauth_failure, do: safe_escalate(&CoordinatorNotifier.quota_poll_recovered/0)
 
   defp lapse_of(reason) do
     case unwrap_stage(reason) do

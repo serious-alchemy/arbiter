@@ -392,15 +392,21 @@ defmodule Arbiter.Quota.CloudProbeTest do
       assert log =~ ws.id
     end
 
-    test "escalates to the coordinator mailbox after the consecutive-failure threshold, once",
+    # bd-7gt8rm: the outage is a system alert, not a coordinator escalation —
+    # one per outage, and cleared by the next successful poll.
+    test "raises one quota-poll alert at the consecutive-failure threshold and clears it on the next success",
          context do
       Req.Test.set_req_test_to_shared(context)
       _ws = workspace_with_token!("solo", "shared-token")
       test_pid = self()
+      healthy = start_supervised!({Agent, fn -> false end})
 
       Req.Test.stub(Arbiter.Quota.OAuthUsage.HTTP, fn conn ->
         send(test_pid, :oauth_call_made)
-        Plug.Conn.send_resp(conn, 429, "")
+
+        if Agent.get(healthy, & &1),
+          do: Req.Test.json(conn, %{"five_hour" => %{"utilization" => 1}}),
+          else: Plug.Conn.send_resp(conn, 429, "")
       end)
 
       pid =
@@ -412,11 +418,11 @@ defmodule Arbiter.Quota.CloudProbeTest do
         )
 
       ExUnit.CaptureLog.capture_log(fn ->
-        for n <- 1..3 do
+        for n <- 1..2 do
           # Each cycle must hit the network (and re-trigger the stub's 429) to
           # be an independent, observable failure — without this reset, the
-          # 180s cooldown after cycle 1's real 429 would short-circuit cycles
-          # 2-3 straight to `{:error, {:backoff, 429}}` with no HTTP call to
+          # 180s cooldown after cycle 1's real 429 would short-circuit later
+          # cycles straight to `{:error, {:backoff, 429}}` with no HTTP call to
           # synchronize on.
           Arbiter.Quota.OAuthUsage.reset_cooldown!("solo-token")
           CloudProbe.probe(pid)
@@ -424,19 +430,37 @@ defmodule Arbiter.Quota.CloudProbeTest do
         end
       end)
 
-      coordinator = Arbiter.Messages.Message.coordinator_ref()
-      [msg] = Arbiter.Messages.Message.inbox(coordinator)
-      assert msg.kind == :escalation
-      assert msg.subject =~ "quota poll failing"
+      assert Arbiter.Alerts.active(kind: :quota_poll_failing) == []
 
-      # A fourth consecutive failure does not raise a second mailbox item.
+      ExUnit.CaptureLog.capture_log(fn ->
+        Arbiter.Quota.OAuthUsage.reset_cooldown!("solo-token")
+        CloudProbe.probe(pid)
+        await_oauth_cycle(pid, 3)
+      end)
+
+      assert [alert] = Arbiter.Alerts.active(kind: :quota_poll_failing)
+      assert alert.subject =~ "quota poll failing"
+      assert alert.owner == :operator
+      assert Arbiter.Messages.Message.inbox(Arbiter.Messages.Message.coordinator_ref()) == []
+
+      # A fourth consecutive failure does not open a second alert.
       ExUnit.CaptureLog.capture_log(fn ->
         Arbiter.Quota.OAuthUsage.reset_cooldown!("solo-token")
         CloudProbe.probe(pid)
         await_oauth_cycle(pid, 4)
       end)
 
-      assert length(Arbiter.Messages.Message.inbox(coordinator)) == 1
+      assert [%{id: id}] = Arbiter.Alerts.active(kind: :quota_poll_failing)
+      assert id == alert.id
+
+      # The poll succeeds again: the alert clears.
+      Agent.update(healthy, fn _ -> true end)
+      Arbiter.Quota.OAuthUsage.reset_cooldown!("solo-token")
+      CloudProbe.probe(pid)
+      await_oauth_cycle(pid, 0)
+
+      assert Arbiter.Alerts.active(kind: :quota_poll_failing) == []
+      assert Ash.get!(Arbiter.Alerts.SystemAlert, alert.id).cleared_at
     end
 
     # bd-4ag0nj, the 2026-09-27 incident: the account's only credential is
@@ -585,7 +609,7 @@ defmodule Arbiter.Quota.CloudProbeTest do
         |> Arbiter.Messages.Message.inbox()
         |> Enum.map(& &1.subject)
 
-      assert Enum.any?(subjects, &(&1 =~ "quota poll failing"))
+      assert [_] = Arbiter.Alerts.active(kind: :quota_poll_failing)
       refute Enum.any?(subjects, &(&1 =~ "interactive Claude login lapsed"))
     end
 
