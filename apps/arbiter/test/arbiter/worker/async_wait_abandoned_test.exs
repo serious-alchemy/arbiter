@@ -367,6 +367,7 @@ defmodule Arbiter.Worker.AsyncWaitPromptGuidanceTest do
     [
       {"work prompt", PromptBuilder.prompt_for_task(task(%{}), worktree_path: "/tmp/wt")},
       {"task prompt", PromptBuilder.prompt_for_task(task(%{issue_type: :task}), [])},
+      {"research prompt", PromptBuilder.prompt_for_task(task(%{issue_type: :research}), [])},
       {"review prompt", PromptBuilder.prompt_for_task(task(%{}), review: true)},
       {"claude adapter async_tool_instruction",
        Arbiter.Agents.Claude.async_tool_instruction("your VERDICT")}

@@ -135,7 +135,7 @@ defmodule Arbiter.Worker.AgyAsyncWaitResumeTest do
   test "an agy run killed at the background-wait cap resumes with agy's own correction",
        %{ws: ws, dir: dir, stub: stub} do
     {:ok, task} =
-      Ash.create(Issue, %{title: "agy async probe", workspace_id: ws.id, issue_type: :task})
+      Ash.create(Issue, %{title: "agy async probe", workspace_id: ws.id, issue_type: :research})
 
     {:ok, task} = Ash.update(task, %{status: :in_progress})
 
@@ -144,7 +144,7 @@ defmodule Arbiter.Worker.AgyAsyncWaitResumeTest do
         task_id: task.id,
         repo: "unknown",
         workspace_id: ws.id,
-        meta: %{issue_type: :task, review_spawn: false, notes_nudge_cap: 0}
+        meta: %{issue_type: :research, review_spawn: false, notes_nudge_cap: 0}
       )
 
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
