@@ -136,6 +136,22 @@ defmodule Arbiter.Alerts do
     |> Ash.read!()
   end
 
+  @doc """
+  A kind named on the wire: `{:ok, nil}` for none, `{:ok, kind}` for a
+  system-alert kind, `:error` for anything else.
+  """
+  @spec parse_kind(term()) :: {:ok, atom() | nil} | :error
+  def parse_kind(name) when name in [nil, ""], do: {:ok, nil}
+
+  def parse_kind(name) when is_binary(name) do
+    case Enum.find(SystemAlert.kinds(), &(Atom.to_string(&1) == name)) do
+      nil -> :error
+      kind -> {:ok, kind}
+    end
+  end
+
+  def parse_kind(_name), do: :error
+
   defp filter_opt(query, _field, nil), do: query
 
   defp filter_opt(query, :workspace_id, ws_id),

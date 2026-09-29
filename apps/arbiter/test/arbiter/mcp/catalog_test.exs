@@ -22,7 +22,8 @@ defmodule Arbiter.MCP.CatalogTest do
                        workspace_config_set workspace_config_unset
                        external_review_list external_review_show review_greenlight
                        loop_pending_list loop_pending_diff loop_pending_apply loop_pending_reject
-                       loop_propose_routing loop_canary_status breaker_list breaker_reset)
+                       loop_propose_routing loop_canary_status breaker_list breaker_reset
+                       alert_list)
 
   # Tools that resolve/authorize a workspace and thus expose the optional
   # `workspace` param. The skill_* tools scope to a workspace (bd-9j6is7).
@@ -33,7 +34,8 @@ defmodule Arbiter.MCP.CatalogTest do
                                 external_review_list skill_create skill_update skill_list skill_get
                                 transcript_capture_stats dep_list
                                 loop_pending_list loop_pending_diff loop_pending_apply
-                                loop_pending_reject loop_propose_routing loop_canary_status breaker_list breaker_reset)
+                                loop_pending_reject loop_propose_routing loop_canary_status breaker_list breaker_reset
+                                alert_list)
 
   describe "tool descriptions" do
     # bd-apj0gq: the description listed five of the six types, but

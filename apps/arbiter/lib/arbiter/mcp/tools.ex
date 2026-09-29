@@ -2013,6 +2013,8 @@ defmodule Arbiter.MCP.Tools do
   defdelegate message_send(scope, args), to: Arbiter.MCP.Tools.Messaging
   defdelegate notify_list(scope, args), to: Arbiter.MCP.Tools.Messaging
 
+  defdelegate alert_list(scope, args), to: Arbiter.MCP.Tools.Alerts
+
   defdelegate breaker_list(scope, args), to: Arbiter.MCP.Tools.Breaker
   defdelegate breaker_reset(scope, args), to: Arbiter.MCP.Tools.Breaker
 
