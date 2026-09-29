@@ -1596,7 +1596,9 @@ defmodule Arbiter.MCP.Catalog do
         "Read a dotted.key (e.g. \"merge.auto_merge\") or the full config for a named workspace. " <>
           "Secret *values* are never returned — only `secret_keys` (the names of configured secrets) " <>
           "and any `credentials_ref` pointers already embedded in the config JSON. " <>
-          "Returns `{workspace, key, value, secret_keys}`.",
+          "`effective_merge_strategies` maps each repo to the merge strategy it actually uses " <>
+          "(a `merge.repos.<repo>.strategy` override, else `merge.strategy`). " <>
+          "Returns `{workspace, key, value, effective_merge_strategies, secret_keys}`.",
       input_schema: %{
         "type" => "object",
         "properties" => %{

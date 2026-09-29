@@ -2245,6 +2245,42 @@ defmodule Arbiter.MCP.ToolsTest do
       assert is_list(data.secret_keys)
     end
 
+    # bd-73zv62: the per-repo merge override is set through the same deep merge,
+    # and workspace_config_get then reports each repo's effective strategy.
+    test "sets a per-repo merge strategy override; get shows the effective strategy", ctx do
+      {:ok, _} =
+        Ash.update(
+          ctx.ws,
+          %{
+            patch: %{
+              "merge" => %{"strategy" => "github", "config" => %{"owner" => "o", "repo" => "r"}},
+              "repo_paths" => %{"arbiter" => "/src/arbiter", "mesaana" => "/src/mesaana"}
+            },
+            unset_paths: []
+          },
+          action: :patch_config
+        )
+
+      assert {:ok, data} =
+               Tools.workspace_config_set(ctx.coordinator, %{
+                 "key" => "merge.repos.mesaana.strategy",
+                 "value" => "direct"
+               })
+
+      assert get_in(data.config, ["merge", "repos", "mesaana", "strategy"]) == "direct"
+      assert get_in(data.config, ["merge", "strategy"]) == "github"
+      assert get_in(data.config, ["merge", "config", "owner"]) == "o"
+
+      assert {:ok, got} = Tools.workspace_config_get(ctx.coordinator, %{})
+      assert got.effective_merge_strategies == %{"arbiter" => "github", "mesaana" => "direct"}
+
+      assert {:ok, got} =
+               Tools.workspace_config_get(ctx.coordinator, %{"key" => "merge.repos.mesaana"})
+
+      assert got.value == %{"strategy" => "direct"}
+      assert got.effective_merge_strategies["mesaana"] == "direct"
+    end
+
     test "sets a nested object, deep-merging into existing config", ctx do
       {:ok, _} =
         Ash.update(ctx.ws, %{patch: %{"routing" => %{"policy" => "static"}}, unset_paths: []},
