@@ -206,6 +206,9 @@ config :arbiter, :sessions_idle_reaper, enabled: false
 config :arbiter, :sessions_orphan_reaper, enabled: false
 config :arbiter, :sessions_heartbeat, enabled: false
 
+# bd-9iv4qd: tests drive `Arbiter.Worker.WorktreeSweeper.sweep_once/1` directly.
+config :arbiter, :worktree_sweeper, enabled: false
+
 # Same reasoning, one more sweeper: tests drive
 # `Arbiter.Sessions.TranscriptRetention.sweep/1` synchronously (§11, phase 9).
 config :arbiter, :sessions_transcript_retention, enabled: false

@@ -29,7 +29,8 @@ defmodule Arbiter.Worker.Worktree do
   * `create/3` and `cleanup/1` are idempotent — re-running either with the
     same inputs is a no-op rather than an error.
   * `cleanup/1` does NOT delete the branch; branch lifecycle is the caller's
-    concern.
+    concern (`delete_branch/3` for a branch that never got a commit,
+    `delete_merged_branch/3` for one whose commits are all on the forge).
   * `has_uncommitted?/1` returns `{:ok, boolean}` (not a raw bool) so callers
     have a consistent shape and we can add metadata later without breaking
     them.
@@ -957,6 +958,289 @@ defmodule Arbiter.Worker.Worktree do
         do: String.starts_with?(file, pat) or file == String.trim_trailing(pat, "/"),
         else: file == pat
     end)
+  end
+
+  # ---- close-time leftovers (bd-9iv4qd) ------------------------------------
+
+  # Untracked paths a build or a tool run regenerates, never authored work.
+  # Directory names match at any depth (`scripts/__pycache__/`); the top-level
+  # `deps`/`_build` roots are already in `@ignored_artifact_paths`.
+  @junk_dirs ~w(__pycache__ node_modules .pytest_cache .mypy_cache .ruff_cache .elixir_ls .tox .venv .gradle)
+  @junk_files ~w(.DS_Store)
+  @junk_extensions ~w(.pyc .pyo)
+
+  # Injected agent config carries per-spawn bearer tokens (bd-9q966y): a patch
+  # saved into task notes must never include it.
+  @patch_pathspec [
+    ".",
+    ":(exclude).mcp.json",
+    ":(exclude).gemini",
+    ":(exclude).codex",
+    ":(exclude).arbiter"
+  ]
+  @patch_limit 60_000
+  @untracked_file_limit 50
+
+  @orphan_min_age_ms 60 * 60_000
+
+  @typedoc "What `leftover_work/2` found still held only in a worktree."
+  @type leftover :: %{
+          path: path(),
+          changes: [String.t()],
+          unpushed: non_neg_integer(),
+          patch: String.t()
+        }
+
+  @doc """
+  What the worktree at `path` still holds that exists nowhere else, or `nil`
+  when removing it loses nothing.
+
+  Work is any of:
+
+    * a staged or modified tracked file — except Arbiter-injected agent config
+      (`.mcp.json`, `.gemini/`, ...), which is regenerated per spawn;
+    * an untracked file that is not build junk (`__pycache__`, `_build`,
+      `deps`, `node_modules`, `*.pyc`, injected config, ...);
+    * a commit on `HEAD` reachable from no remote-tracking ref.
+
+  `:pushed_shas` names commits known to be on the forge even when no local
+  remote ref reaches them any more — the head a squash-merged PR merged, whose
+  branch the forge then deleted. Commits reachable from one of them are not
+  unpushed; unknown SHAs are ignored.
+
+  Returns `{:ok, %{path, changes, unpushed, patch}}` when there is work, where
+  `changes` are the `git status --porcelain` lines that count, `unpushed` the
+  number of unpushed commits, and `patch` a readable (truncated) diff of all of
+  it with injected config excluded. A git failure is `{:error, reason}` — the
+  caller must treat that as "might hold work".
+  """
+  @spec leftover_work(path(), keyword()) :: {:ok, leftover() | nil} | {:error, error_reason()}
+  def leftover_work(path, opts \\ []) when is_binary(path) do
+    not_pushed = not_pushed_revs(path, Keyword.get(opts, :pushed_shas, []))
+
+    with {:ok, status} <- run_git(["status", "--porcelain"], cd: path),
+         {:ok, unpushed} <- count_revs(path, ["HEAD" | not_pushed]) do
+      changes =
+        status |> String.split("\n", trim: true) |> Enum.reject(&leftover_noise?(path, &1))
+
+      if changes == [] and unpushed == 0 do
+        {:ok, nil}
+      else
+        {:ok,
+         %{
+           path: path,
+           changes: changes,
+           unpushed: unpushed,
+           patch: leftover_patch(path, changes, unpushed, not_pushed)
+         }}
+      end
+    end
+  end
+
+  @doc """
+  Delete the local branch `branch_name` in `repo_path` once nothing on it is
+  held only locally: every commit is reachable from a remote-tracking ref or
+  from one of `:pushed_shas` (see `leftover_work/2`).
+
+  For reaping a merged task's branch (bd-9iv4qd) — unlike `delete_branch/3`,
+  which only reclaims a branch with no commits at all. Run it after
+  `cleanup/1`: git refuses to delete a branch a worktree has checked out.
+  Returns `:ok` (deleted, or already absent), `{:error, :unpushed}`, or
+  `{:error, reason}`.
+  """
+  @spec delete_merged_branch(path(), String.t(), keyword()) :: :ok | {:error, term()}
+  def delete_merged_branch(repo_path, branch_name, opts \\ [])
+      when is_binary(repo_path) and is_binary(branch_name) do
+    _ = run_git(["worktree", "prune"], cd: repo_path)
+
+    if local_branch?(repo_path, branch_name) do
+      not_pushed = not_pushed_revs(repo_path, Keyword.get(opts, :pushed_shas, []))
+
+      case count_revs(repo_path, ["refs/heads/" <> branch_name | not_pushed]) do
+        {:ok, 0} ->
+          with {:ok, _} <- run_git(["branch", "-D", branch_name], cd: repo_path), do: :ok
+
+        {:ok, _} ->
+          {:error, :unpushed}
+
+        {:error, _} = err ->
+          err
+      end
+    else
+      :ok
+    end
+  end
+
+  @doc """
+  The repository a linked worktree belongs to — the directory holding its
+  common git dir — or `nil` when `path` is not a git checkout.
+  """
+  @spec repo_path(path()) :: path() | nil
+  def repo_path(path) when is_binary(path) do
+    case run_git(["rev-parse", "--path-format=absolute", "--git-common-dir"], cd: path) do
+      {:ok, out} ->
+        common = String.trim(out)
+        if Path.basename(common) == ".git", do: Path.dirname(common), else: common
+
+      {:error, _} ->
+        nil
+    end
+  end
+
+  @doc """
+  Top-level directories under `root` that are dead worktree leaves: their
+  `.git` is a `gitdir: <path>` file whose metadata directory no longer exists
+  (pruned, or its repository was deleted), so no `git worktree` command will
+  ever reclaim them.
+
+  Deliberately narrow (bd-9iv4qd). A directory with no `.git` file is never
+  named, even an empty one: the worktree root on a real box also holds things
+  Arbiter never made (a database socket or data directory, a plain clone), and
+  nothing proves such a directory was ever a worktree. A live worktree's
+  gitdir exists by construction, so it is never named either. `:min_age_ms`
+  (default one hour, on the `.git` file's mtime) spares a leaf mid-creation.
+  """
+  @spec orphaned_leaves(path(), keyword()) :: [path()]
+  def orphaned_leaves(root, opts \\ []) when is_binary(root) do
+    min_age_s = div(Keyword.get(opts, :min_age_ms, @orphan_min_age_ms), 1000)
+    cutoff = System.os_time(:second) - min_age_s
+
+    case File.ls(root) do
+      {:ok, names} ->
+        names
+        |> Enum.sort()
+        |> Enum.map(&Path.join(root, &1))
+        |> Enum.filter(&orphaned_leaf?(&1, cutoff))
+
+      {:error, _} ->
+        []
+    end
+  end
+
+  defp orphaned_leaf?(leaf, cutoff) do
+    marker = Path.join(leaf, ".git")
+
+    with {:ok, %File.Stat{type: :directory}} <- File.lstat(leaf),
+         {:ok, %File.Stat{type: :regular, mtime: mtime}} <- File.lstat(marker, time: :posix),
+         true <- mtime <= cutoff,
+         {:ok, contents} <- File.read(marker),
+         "gitdir: " <> gitdir <- String.trim(contents) do
+      not File.dir?(Path.expand(gitdir, leaf))
+    else
+      _ -> false
+    end
+  end
+
+  # `--not --remotes <known shas>`: the exclusion half of a rev-list for "held
+  # only locally". An unknown SHA would fail the whole rev-list, so each is
+  # checked first and dropped when git does not have it.
+  defp not_pushed_revs(cd, shas) do
+    known =
+      Enum.filter(shas, fn sha ->
+        is_binary(sha) and sha != "" and
+          match?({:ok, _}, run_git(["cat-file", "-e", sha <> "^{commit}"], cd: cd))
+      end)
+
+    ["--not", "--remotes" | known]
+  end
+
+  defp count_revs(cd, revs) do
+    with {:ok, out} <- run_git(["rev-list", "--count" | revs], cd: cd) do
+      case Integer.parse(String.trim(out)) do
+        {n, _} -> {:ok, n}
+        :error -> {:error, {:git_failed, "unparseable rev-list count: #{out}"}}
+      end
+    end
+  end
+
+  # A porcelain `?? dir/` line collapses a whole untracked directory, so
+  # `scripts/` holding nothing but `scripts/__pycache__/` has to be looked into.
+  defp leftover_noise?(path, <<"?? ", rest::binary>>) do
+    entry = String.trim(rest)
+    junk_path?(entry) or (String.ends_with?(entry, "/") and untracked_files(path, entry) == [])
+  end
+
+  defp leftover_noise?(_path, <<_status::binary-size(2), " ", rest::binary>>),
+    do: injected_config_path?(String.trim(rest))
+
+  defp leftover_noise?(_path, _line), do: false
+
+  defp junk_path?(file) do
+    segments = file |> String.trim_trailing("/") |> String.split("/")
+
+    file in @ignored_artifact_paths or injected_config_path?(file) or
+      String.starts_with?(file, ".claude/skills/") or
+      Enum.any?(segments, &(&1 in @junk_dirs)) or
+      List.last(segments) in @junk_files or
+      Path.extname(file) in @junk_extensions
+  end
+
+  defp leftover_patch(path, changes, unpushed, not_pushed) do
+    untracked = for "?? " <> rest <- changes, do: String.trim(rest)
+    tracked? = Enum.any?(changes, &(not String.starts_with?(&1, "?? ")))
+
+    [
+      tracked? &&
+        {"uncommitted changes", git_text(path, ["diff", "HEAD", "--" | @patch_pathspec])},
+      untracked != [] && {"untracked files", untracked_patch(path, untracked)},
+      unpushed > 0 &&
+        {"unpushed commits",
+         git_text(
+           path,
+           ["log", "-p", "--reverse", "--format=commit %H%n%n    %s%n", "HEAD"] ++
+             not_pushed ++ ["--" | @patch_pathspec]
+         )}
+    ]
+    |> Enum.filter(&is_tuple/1)
+    |> Enum.map_join("\n", fn {title, body} -> "### #{title}\n\n#{body}\n" end)
+    |> truncate_patch()
+  end
+
+  defp untracked_patch(path, entries) do
+    entries
+    |> Enum.flat_map(&untracked_files(path, &1))
+    |> Enum.take(@untracked_file_limit)
+    |> Enum.map_join("\n", fn file ->
+      # `--no-index` exits 1 when the files differ, which they always do here.
+      case System.cmd("git", ["diff", "--no-index", "--", "/dev/null", file],
+             cd: path,
+             stderr_to_stdout: true
+           ) do
+        {out, code} when code in [0, 1] -> out
+        {_out, _code} -> "(could not diff #{file})\n"
+      end
+    end)
+  rescue
+    _ -> Enum.join(entries, "\n")
+  end
+
+  # A porcelain `?? dir/` entry collapses a whole untracked directory.
+  defp untracked_files(path, entry) do
+    if String.ends_with?(entry, "/") do
+      case run_git(["ls-files", "--others", "--exclude-standard", "--", entry], cd: path) do
+        {:ok, out} -> out |> String.split("\n", trim: true) |> Enum.reject(&junk_path?/1)
+        # Unlistable: keep the entry so it still counts as work.
+        {:error, _} -> [entry]
+      end
+    else
+      [entry]
+    end
+  end
+
+  defp git_text(path, args) do
+    case run_git(args, cd: path) do
+      {:ok, out} -> out
+      {:error, reason} -> "(git #{hd(args)} failed: #{inspect(reason)})"
+    end
+  end
+
+  defp truncate_patch(patch) do
+    if byte_size(patch) <= @patch_limit do
+      patch
+    else
+      String.slice(patch, 0, @patch_limit) <>
+        "\n… (truncated at #{@patch_limit} characters; the worktree still holds all of it)\n"
+    end
   end
 
   @typedoc """
