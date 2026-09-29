@@ -581,19 +581,16 @@ defmodule Arbiter.Agents.CredentialWatchdog do
     |> Enum.any?(&match?({:expired, _}, &1))
   end
 
-  # Send a single coordinator escalation for this expiry event. Best-effort —
-  # a DB hiccup or an empty workspace table must not crash the Watchdog.
+  # Raise a single system alert for this expiry event (bd-7gt8rm). Best-effort
+  # — a DB hiccup or an empty workspace table must not crash the Watchdog.
   #
   # Credentials are host-wide, not per-workspace (the same worker binary and
   # keyring back every workspace), so one genuinely expired credential is one
   # event, not one-per-workspace: fanning out to every workspace (the
   # pre-fix behavior) sent 3 identical escalations for the install's 3
-  # workspaces from a single expiry, which the per-(workspace, adapter,
-  # source) dedupe in `CoordinatorNotifier` can't collapse since each row has
-  # a different `workspace_id`. We pick one workspace — the oldest by its
-  # uuid_v7 id, so the choice is stable across calls — as the addressed
-  # mailbox for the episode; `credential_restored/2` below targets the same
-  # one so the clear lands on the escalation that was actually raised.
+  # workspaces from a single expiry. The alert is keyed by (adapter, source)
+  # alone; we still pick one workspace — the oldest by its uuid_v7 id, so the
+  # choice is stable across calls — as where the alert is shown and announced.
   #
   # `gate_closed?` is this adapter's *actual* dispatch-gate state right after
   # this expiry was recorded (see `record_expiry/4` / `gate_source?/1`), not
@@ -618,14 +615,12 @@ defmodule Arbiter.Agents.CredentialWatchdog do
     end)
   end
 
-  # Mirrors `escalate_all/3`: tells the same primary workspace's coordinator
-  # mailbox that `adapter` recovered, clearing whatever `credential_expired/4`
-  # escalation is still outstanding for it (bd-6jjgk0) so the next expiry
-  # starts a fresh episode rather than looking like a continuation of this
-  # one. `source` is the one that actually recovered (and matched the one
-  # that raised it, per `on_probe_ok/4` above) — passed through so the
-  # cleared/restored message names the right episode. Best-effort, same as
-  # `escalate_all/3`.
+  # Mirrors `escalate_all/3`: clears the `(adapter, source)` credential alert
+  # (bd-6jjgk0, bd-7gt8rm) so the next expiry starts a fresh episode rather
+  # than looking like a continuation of this one. `source` is the one that
+  # actually recovered (and matched the one that raised it, per
+  # `on_probe_ok/4` above) — passed through so the right episode clears.
+  # Best-effort, same as `escalate_all/3`.
   defp recover_all(adapter, source) do
     safe(fn ->
       case primary_workspace_id() do
