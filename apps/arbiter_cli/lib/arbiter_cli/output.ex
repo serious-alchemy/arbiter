@@ -253,12 +253,13 @@ defmodule ArbiterCli.Output do
 
   defp dependencies_section(_deps), do: ""
 
-  # bd-5lc99r: for a `task`-type directive the deliverable IS the findings
+  # bd-5lc99r: for a `research`-type directive the deliverable IS the findings
   # summary in `notes`, so surface it first and labelled "Findings", with an
   # explicit placeholder when still blank so the coordinator can see the deliverable
   # is pending. Every other issue type keeps the standard ordering, where `notes`
-  # is supporting context rather than the headline.
-  defp detail_sections(%{"issue_type" => "task"} = issue) do
+  # is supporting context rather than the headline (bd-9s9dqz: including for the
+  # operational `task` type, whose notes are a short outcome line).
+  defp detail_sections(%{"issue_type" => "research"} = issue) do
     findings = blank_to(issue["notes"], "(no findings recorded yet)")
 
     [

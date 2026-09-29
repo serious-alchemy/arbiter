@@ -511,7 +511,38 @@ defmodule Arbiter.Tasks.IssueTest do
     end
 
     test "issue_types/0" do
-      assert Issue.issue_types() == ~w(task bug feature epic chore decision)a
+      assert Issue.issue_types() == ~w(task research bug feature epic chore decision)a
+    end
+
+    test "no_pr_type?/1 covers exactly task and research, as atoms or strings" do
+      for t <- [:task, :research, "task", "research"], do: assert(Issue.no_pr_type?(t))
+
+      for t <- [:bug, :feature, :chore, :epic, :decision, "feature", nil],
+          do: refute(Issue.no_pr_type?(t))
+    end
+
+    test "findings_type?/1 is research only" do
+      assert Issue.findings_type?(:research)
+      assert Issue.findings_type?("research")
+      refute Issue.findings_type?(:task)
+      refute Issue.findings_type?(nil)
+    end
+
+    test "research is accepted by create and update" do
+      {:ok, ws} =
+        Ash.create(Arbiter.Tasks.Workspace, %{
+          name: "research-ws-#{System.unique_integer([:positive])}",
+          prefix: "rs"
+        })
+
+      {:ok, issue} =
+        Ash.create(Issue, %{title: "investigate", workspace_id: ws.id, issue_type: :research})
+
+      assert issue.issue_type == :research
+      {:ok, issue} = Ash.update(issue, %{issue_type: :task}, action: :update)
+      assert issue.issue_type == :task
+      {:ok, issue} = Ash.update(issue, %{issue_type: :research}, action: :update)
+      assert issue.issue_type == :research
     end
 
     test "tracker_types/0" do

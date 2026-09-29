@@ -47,7 +47,7 @@ defmodule Arbiter.Reviews.ExternalReview do
   engagement so ReviewPatrol adopts the PR on its next tick. The engagement:
 
     * is `review_only` and `tracker_type: :none` → tracker-inert (no upstream
-      lifecycle write-back) and `issue_type: :task` → the non-reviewable type
+      lifecycle write-back) and `issue_type: :research` → the non-reviewable type
       that spawns **no worktree/branch**;
     * records `source_pr` = the constructed `mr_ref` (what ReviewPatrol hands to
       `adapter.get/1`), a baseline `last_reviewed_sha` (PR head at review time,
@@ -1358,8 +1358,9 @@ defmodule Arbiter.Reviews.ExternalReview do
   # ReviewPatrol baseline/cursor + automation mode are set at create time (the
   # :create action accepts them — bd-2ovun1) so an engagement is never left
   # half-formed. tracker_type: :none + skip_upstream_create keep it tracker-inert;
-  # issue_type: :task is the non-reviewable type so nothing ever provisions a
-  # worktree/branch for it.
+  # issue_type: :research (bd-9s9dqz) is the non-reviewable findings type — the
+  # engagement is an investigation of someone else's PR, not an operational
+  # action — so nothing ever provisions a worktree/branch for it.
   defp create_engagement_issue(
          %{mr_ref: mr_ref, workspace: %Workspace{id: ws_id}} = prepared,
          opts,
@@ -1378,7 +1379,7 @@ defmodule Arbiter.Reviews.ExternalReview do
       %{
         title: engagement_title(mr_ref),
         description: engagement_description(prepared),
-        issue_type: :task,
+        issue_type: :research,
         priority: 2,
         tracker_type: :none,
         source_pr: mr_ref,

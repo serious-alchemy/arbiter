@@ -446,9 +446,14 @@ defmodule Arbiter.Tasks.PullRequest do
     end
   end
 
-  defp announce_done(%Issue{issue_type: :task}, _mr_ref), do: :ok
+  # No-PR types (`:task`, `:research`) never open a PR, so a merge is never
+  # announced for them (bd-9s9dqz).
+  defp announce_done(%Issue{issue_type: issue_type} = issue, mr_ref) do
+    if Issue.no_pr_type?(issue_type), do: :ok, else: announce_merged(issue, mr_ref)
+  end
 
-  defp announce_done(%Issue{workspace_id: ws_id, id: id} = issue, mr_ref) when is_binary(ws_id) do
+  defp announce_merged(%Issue{workspace_id: ws_id, id: id} = issue, mr_ref)
+       when is_binary(ws_id) do
     Phoenix.PubSub.broadcast(Arbiter.PubSub, "worker:done:" <> ws_id, {:worker_done, id})
 
     Arbiter.Events.broadcast(ws_id, "worker_done", %{
@@ -461,11 +466,11 @@ defmodule Arbiter.Tasks.PullRequest do
     :ok
   rescue
     e ->
-      Logger.debug("PullRequest.announce_done/2 swallowed: #{Exception.message(e)}")
+      Logger.debug("PullRequest.announce_merged/2 swallowed: #{Exception.message(e)}")
       :ok
   end
 
-  defp announce_done(_issue, _mr_ref), do: :ok
+  defp announce_merged(_issue, _mr_ref), do: :ok
 
   @doc """
   A fix or conflict pass finished: its fix is on the PR's branch, so the

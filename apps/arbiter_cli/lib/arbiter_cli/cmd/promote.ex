@@ -7,7 +7,7 @@ defmodule ArbiterCli.Cmd.Promote do
   promoting an already-refined task is a no-op success, not an error.
 
   bd-7mbrlg: a `bug`/`feature`/`chore` with blank `acceptance` is refused
-  unless `--waive REASON` is given (`task`/`decision`/`epic` are exempt; D0
+  unless `--waive REASON` is given (`task`/`research`/`decision`/`epic` are exempt; D0
   work is auto-waived). The reason is persisted onto the task as
   `acceptance_waived` and shown in `task show`.
   """
