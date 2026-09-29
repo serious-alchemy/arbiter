@@ -421,6 +421,42 @@ defmodule ArbiterWeb.Api.LoopControllerTest do
     end
   end
 
+  describe "routing canary endpoints" do
+    test "POST /api/loop/propose/routing then GET /api/loop/canary", %{conn: conn} do
+      ws = workspace!()
+
+      body =
+        conn
+        |> post(~p"/api/loop/propose/routing", %{
+          workspace_id: ws.id,
+          difficulty: 3,
+          model_tier: "standard",
+          thinking: "high"
+        })
+        |> json_response(200)
+
+      assert body["pending"]["kind"] == "config_set"
+      assert body["pending"]["state"] == "proposed"
+
+      status = conn |> get(~p"/api/loop/canary", %{workspace_id: ws.id}) |> json_response(200)
+      assert status["running"] == false
+      assert status["message"] =~ "no canary is running"
+    end
+
+    test "POST /api/loop/propose/routing 400s on a bad difficulty", %{conn: conn} do
+      ws = workspace!()
+
+      conn =
+        post(conn, ~p"/api/loop/propose/routing", %{
+          workspace_id: ws.id,
+          difficulty: 12,
+          model_tier: "standard"
+        })
+
+      assert json_response(conn, 400)
+    end
+  end
+
   describe "the pending queue" do
     setup do
       row = proposed_row()

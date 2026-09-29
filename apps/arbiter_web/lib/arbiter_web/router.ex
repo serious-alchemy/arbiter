@@ -167,6 +167,8 @@ defmodule ArbiterWeb.Router do
     get("/loop/analyze", LoopController, :analyze)
     post("/loop/propose", LoopController, :propose)
     post("/loop/propose/repo_doc_patch", LoopController, :propose_repo_doc_patch)
+    post("/loop/propose/routing", LoopController, :propose_routing)
+    get("/loop/canary", LoopController, :canary_status)
 
     # The reviewable-proposal queue. No auto-apply: an operator decides.
     get("/loop/pending", LoopController, :pending_index)

@@ -98,7 +98,6 @@
   #     unused. No entry needed for either module.
   {"lib/arbiter/agents/preflight.ex", :pattern_match},
   {"lib/arbiter/mcp/tools.ex", :pattern_match},
-  {"lib/arbiter/mcp/tools/loop_pending.ex", :pattern_match},
   {"lib/arbiter/worker/driver.ex", :pattern_match},
   {"lib/arbiter/worker/review_gate.ex", :pattern_match},
   {"lib/arbiter_web/controllers/api/loop_controller.ex", :pattern_match},

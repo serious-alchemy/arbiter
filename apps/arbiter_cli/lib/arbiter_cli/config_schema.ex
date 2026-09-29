@@ -213,6 +213,11 @@ defmodule ArbiterCli.ConfigSchema do
                     convergence regresses. Nothing else is ever auto-applied.
                     Unset (or set false) to stop it, effective on the next
                     dispatch even mid-canary.
+      canary_auto_promote         bool (default: true). Set false and a passing
+                    canary no longer writes routing.rules: the coordinator is
+                    mailed the per-arm stats once and the proposal stays
+                    :proposed for `arb loop apply <id>` / `arb loop reject <id>`.
+                    A regressing canary is still reverted automatically.
       canary_min_dispatches       integer >= 20 — canary-arm dispatches required
                     before any verdict. May be raised, never lowered.
       canary_regression_tolerance number in 0..0.5 — how far below the control

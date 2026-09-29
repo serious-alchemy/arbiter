@@ -97,6 +97,15 @@ defmodule Arbiter.Loop.Canary do
     * otherwise → `:promote`. The rule lands on `routing.rules.D<n>` for the
       whole workspace and the proposal moves to `:applied`.
 
+  A workspace that wants to make the promote call itself sets
+  `loop.canary_auto_promote: false` (default `true`). A `:promote` verdict then
+  writes nothing to `routing.rules`: the coordinator is mailed the per-arm stats
+  once, the canary keeps running, and the proposal stays `:proposed` for `arb
+  loop apply <id>` / `arb loop reject <id>`. A `:revert` stays automatic under
+  either setting — dropping the overlay block is harmless. An operator starts
+  such a canary by hand with `arb loop propose routing` (`Arbiter.Loop.propose_routing/1`),
+  and `status/1` (`arb loop canary status`) reads both arms at any time.
+
   Both outcomes are a `paper_trail` version on `Workspace` with `actor` set to
   `loop:proposal:<id>`, so `arb workspace history` shows exactly which proposal
   moved the routing table and when it was taken back.
@@ -118,6 +127,7 @@ defmodule Arbiter.Loop.Canary do
     :rule,
     :baseline_rule,
     :started_at,
+    :promote_reported_at,
     arm_strategy: :alternating,
     min_dispatches: 20,
     regression_tolerance: 0.0,
@@ -130,6 +140,12 @@ defmodule Arbiter.Loop.Canary do
   @type stats :: map()
 
   @flag_path ["loop", "autonomous_routing_enabled"]
+  @auto_promote_path ["loop", "canary_auto_promote"]
+
+  # `origin` stamped by `Arbiter.Loop.propose_routing/1`. A proposal an
+  # operator wrote by hand is its own evidence: the aggregate bar exists to
+  # filter Stage 1's automatic findings, not a deliberate operator decision.
+  @operator_origin "loop.propose_routing"
   @canary_path ["loop", "canary"]
 
   # The epic's own number: fewer than this in the canary arm and the comparison
@@ -189,6 +205,16 @@ defmodule Arbiter.Loop.Canary do
   def enabled?(config) when is_map(config), do: get_in(config, @flag_path) == true
   def enabled?(_), do: false
 
+  @doc "Whether a passing canary lands its rule itself (default) or waits for the operator."
+  @spec auto_promote?(Workspace.t() | map() | nil) :: boolean()
+  def auto_promote?(%Workspace{config: config}), do: auto_promote?(config)
+  def auto_promote?(config) when is_map(config), do: get_in(config, @auto_promote_path) != false
+  def auto_promote?(_), do: true
+
+  @doc "The `origin` an operator-authored routing proposal carries."
+  @spec operator_origin() :: String.t()
+  def operator_origin, do: @operator_origin
+
   # ---- the running canary -------------------------------------------------
 
   @doc """
@@ -221,6 +247,7 @@ defmodule Arbiter.Loop.Canary do
         rule: rule,
         baseline_rule: Map.get(block, "baseline_rule"),
         started_at: started_at,
+        promote_reported_at: reported_at(Map.get(block, "promote_reported_at")),
         arm_strategy: :alternating,
         min_dispatches: clamp_min_dispatches(Map.get(block, "min_dispatches")),
         regression_tolerance: clamp_tolerance(Map.get(block, "regression_tolerance")),
@@ -241,6 +268,13 @@ defmodule Arbiter.Loop.Canary do
   end
 
   defp parse_started_at(_), do: :error
+
+  defp reported_at(iso) do
+    case parse_started_at(iso) do
+      {:ok, dt} -> dt
+      :error -> nil
+    end
+  end
 
   defp clamp_min_dispatches(n) when is_integer(n), do: max(n, @min_dispatches)
   defp clamp_min_dispatches(_), do: @min_dispatches
@@ -356,6 +390,8 @@ defmodule Arbiter.Loop.Canary do
   # The Stage 2 bar, re-checked on its own terms. A `:task`-scoped row reaches
   # `:proposed` by bypassing the bar (blast radius 1) — but a routing rule is
   # not blast-radius 1, so the bypass does not carry over here.
+  defp check_evidence(%PendingWrite{origin: @operator_origin}, _ws), do: :ok
+
   defp check_evidence(%PendingWrite{} = row, ws) do
     bar = Loop.evidence_bar(ws)
 
@@ -379,8 +415,13 @@ defmodule Arbiter.Loop.Canary do
     end
   end
 
-  # The narrow shape: exactly `routing.rules.D<n> => %{model_tier/thinking}`.
-  defp parse_routing_patch(payload) when is_map(payload) do
+  @doc """
+  Validate a proposal payload against the canary's narrow shape: exactly
+  `routing.rules.D<n> => %{model_tier / thinking}`. Returns `{:ok, difficulty,
+  rule}` or an operator-readable `{:error, reason}`.
+  """
+  @spec parse_routing_patch(term()) :: {:ok, 0..5, map()} | {:error, String.t()}
+  def parse_routing_patch(payload) when is_map(payload) do
     with :ok <- refuse_unset(payload),
          {:ok, patch} <- fetch_patch(payload),
          {:ok, rules} <- fetch_rules(patch),
@@ -391,7 +432,7 @@ defmodule Arbiter.Loop.Canary do
     end
   end
 
-  defp parse_routing_patch(_), do: {:error, "this proposal carries no payload"}
+  def parse_routing_patch(_), do: {:error, "this proposal carries no payload"}
 
   defp refuse_unset(payload) do
     case Map.get(payload, "unset_paths") do
@@ -595,7 +636,7 @@ defmodule Arbiter.Loop.Canary do
           | {:ok, {:abandoned, map()}}
           | {:ok, {:stopped, map()}}
           | {:ok, {:expired, map()}}
-          | {:ok, {:running | :reverted | :promoted, stats()}}
+          | {:ok, {:running | :reverted | :promoted | :awaiting_operator, stats()}}
           | {:error, String.t()}
   def tick(workspace, opts \\ [])
 
@@ -657,7 +698,9 @@ defmodule Arbiter.Loop.Canary do
   defp judge_age(ws, canary, opts) do
     age_days = DateTime.diff(DateTime.utc_now(), canary.started_at, :day)
 
-    if age_days >= canary.max_age_days do
+    # A canary already held for the operator's apply/reject has met its sample
+    # size: expiring it would reject a passing proposal under a false reason.
+    if age_days >= canary.max_age_days and is_nil(canary.promote_reported_at) do
       expire(ws, canary, age_days, opts)
     else
       judge_metrics(ws, canary, opts)
@@ -721,10 +764,37 @@ defmodule Arbiter.Loop.Canary do
     case evaluate(ws, canary: canary) do
       {:insufficient_data, stats} -> {:ok, {:running, stats}}
       {:revert, stats} -> revert(ws, canary, stats, opts)
-      {:promote, stats} -> promote(ws, canary, stats, opts)
+      {:promote, stats} -> promote_or_hold(ws, canary, stats, opts)
       {:error, _} = err -> err
     end
   end
+
+  defp promote_or_hold(ws, canary, stats, opts) do
+    if auto_promote?(ws), do: promote(ws, canary, stats, opts), else: hold(ws, canary, stats)
+  end
+
+  # `loop.canary_auto_promote: false`: the verdict is in, the decision is the
+  # operator's. The block (and so the overlay) stays live — dropping it would
+  # let `maybe_start/2` re-arm the very same still-`:proposed` row next tick —
+  # and the coordinator is told exactly once, marked on the block so the 15-minute
+  # ticker does not repeat it. A later tick that flips to `:revert` still reverts.
+  defp hold(_ws, %__MODULE__{promote_reported_at: %DateTime{}}, stats),
+    do: {:ok, {:awaiting_operator, stats}}
+
+  defp hold(ws, canary, stats) do
+    marker = %{"loop" => %{"canary" => %{"promote_reported_at" => iso_now()}}}
+
+    case patch(ws, marker, [], attribution(canary.proposal_id)) do
+      {:ok, updated} ->
+        notify_promote_held(updated, canary, stats)
+        {:ok, {:awaiting_operator, stats}}
+
+      {:error, reason} ->
+        {:error, "could not record the held promote verdict: #{reason}"}
+    end
+  end
+
+  defp iso_now, do: DateTime.to_iso8601(DateTime.utc_now())
 
   # Try every eligible candidate, not just the first. A row whose payload names
   # a different workspace than the column `Loop.list_pending/1` filtered on
@@ -956,6 +1026,102 @@ defmodule Arbiter.Loop.Canary do
     e ->
       Logger.debug("Loop.Canary notify swallowed: #{Exception.message(e)}")
       :ok
+  end
+
+  defp notify_promote_held(%Workspace{} = ws, %__MODULE__{} = canary, stats) do
+    Escalation.post(%{
+      kind: :loop_canary,
+      from_ref: "loop",
+      workspace_id: ws.id,
+      subject: "loop canary verdict ready: D#{canary.difficulty} routing tier (awaiting you)",
+      body: """
+      The routing canary (proposal #{canary.proposal_id}) reached a :promote verdict, but
+      loop.canary_auto_promote is false on this workspace, so nothing was written to
+      routing.rules. The canary keeps running until you decide.
+
+      Tier:    D#{canary.difficulty}
+      Rule:    #{inspect(canary.rule)}
+      Verdict: #{promote_reason(stats)}
+
+      #{arm_summary("canary", stats.canary)}
+      #{arm_summary("control", stats.control)}
+
+      Land it:    arb loop apply #{canary.proposal_id}
+      Drop it:    arb loop reject #{canary.proposal_id}
+      """
+    })
+
+    :ok
+  rescue
+    e ->
+      Logger.debug("Loop.Canary notify swallowed: #{Exception.message(e)}")
+      :ok
+  end
+
+  defp arm_summary(label, arm) do
+    "#{String.pad_trailing(label <> ":", 9)} #{arm.dispatches} dispatch(es), " <>
+      "#{arm.reviewed_tasks} reviewed task(s), first-pass #{pct(arm.first_pass_convergence)}, " <>
+      "#{arm.review_rounds} round(s), $#{arm.cost_usd} (#{cost_per_round(arm.cost_per_round)}/round)"
+  end
+
+  defp cost_per_round(nil), do: "—"
+  defp cost_per_round(c) when is_number(c), do: "$#{Float.round(c / 1, 4)}"
+
+  # ---- status -------------------------------------------------------------
+
+  @doc """
+  What `arb loop canary status` prints: the running canary's identity, both
+  arms' current metrics and how far it is from a verdict.
+
+  `{:ok, map}` for a running canary, `{:none, message}` otherwise (the message
+  says *why* — flag off, no canary yet — so an operator is not left guessing).
+  """
+  @spec status(Workspace.t()) :: {:ok, map()} | {:none, String.t()}
+  def status(%Workspace{} = ws) do
+    cond do
+      not enabled?(ws) and is_map(get_in(ws.config || %{}, @canary_path)) ->
+        {:none,
+         "a loop.canary block exists but loop.autonomous_routing_enabled is not set, so it is " <>
+           "inert and will be dropped on the next tick"}
+
+      not enabled?(ws) ->
+        {:none,
+         "no canary is running: loop.autonomous_routing_enabled is not set on this workspace"}
+
+      canary = active(ws) ->
+        {:ok, running_status(ws, canary)}
+
+      true ->
+        {:none,
+         "no canary is running; start one with `arb loop propose routing` — the next 15-minute " <>
+           "tick picks it up"}
+    end
+  end
+
+  defp running_status(ws, canary) do
+    stats = Metrics.collect(ws.id, canary)
+    now = DateTime.utc_now()
+    verdict = verdict(canary, stats)
+
+    %{
+      workspace_id: ws.id,
+      proposal_id: canary.proposal_id,
+      proposal_state: proposal_state(canary.proposal_id),
+      difficulty: canary.difficulty,
+      rule: canary.rule,
+      baseline_rule: canary.baseline_rule,
+      started_at: canary.started_at,
+      age_days: DateTime.diff(now, canary.started_at, :second) / 86_400,
+      expires_at: DateTime.add(canary.started_at, canary.max_age_days * 86_400, :second),
+      min_dispatches: canary.min_dispatches,
+      dispatches_left: max(canary.min_dispatches - stats.canary.dispatches, 0),
+      regression_tolerance: canary.regression_tolerance,
+      auto_promote: auto_promote?(ws),
+      verdict: elem(verdict, 0),
+      promote_reported_at: canary.promote_reported_at,
+      canary: stats.canary,
+      control: stats.control
+    }
   end
 
   defp ash_message(%Ash.Error.Invalid{errors: errors}),

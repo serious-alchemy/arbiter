@@ -436,6 +436,84 @@ defmodule ArbiterCli.Cmd.LoopTest do
     end
   end
 
+  test "loop propose routing posts the tier spec and prints the proposal" do
+    stub_post(
+      "/api/loop/propose/routing",
+      %{"pending" => %{"id" => "p-9", "gist" => "route D3 to standard/high"}},
+      200
+    )
+
+    {out, _err, exit_code} =
+      capture(fn ->
+        Loop.run(~w(propose routing --workspace default --difficulty 3
+                    --model-tier standard --thinking high))
+      end)
+
+    assert exit_code == 0
+    assert out =~ "proposed p-9"
+  end
+
+  describe "loop canary status" do
+    test "prints both arms and verdict progress" do
+      arm = fn d, c ->
+        %{
+          "dispatches" => d,
+          "tasks" => d,
+          "reviewed_tasks" => d,
+          "first_pass_convergence" => c,
+          "review_rounds" => d + 1,
+          "cost_usd" => 12.5,
+          "cost_per_round" => 0.5
+        }
+      end
+
+      stub_get(
+        "/api/loop/canary",
+        %{
+          "running" => true,
+          "status" => %{
+            "proposal_id" => "p-9",
+            "proposal_state" => "proposed",
+            "difficulty" => 3,
+            "rule" => %{"model_tier" => "standard", "thinking" => "high"},
+            "started_at" => "2026-09-29T00:00:00Z",
+            "age_days" => 2.34,
+            "expires_at" => "2026-10-13T00:00:00Z",
+            "min_dispatches" => 20,
+            "dispatches_left" => 8,
+            "auto_promote" => false,
+            "verdict" => "insufficient_data",
+            "canary" => arm.(12, 0.75),
+            "control" => arm.(14, 0.5)
+          }
+        },
+        200
+      )
+
+      {out, _err, exit_code} = capture(fn -> Loop.run(~w(canary status)) end)
+
+      assert exit_code == 0
+      assert out =~ "p-9"
+      assert out =~ "until a verdict is possible: 8"
+      assert out =~ "canary   dispatches=12"
+      assert out =~ "first-pass=75.0%"
+      assert out =~ "control  dispatches=14"
+      assert out =~ "you decide"
+    end
+
+    test "prints the server's message when no canary is running" do
+      stub_get(
+        "/api/loop/canary",
+        %{"running" => false, "message" => "no canary is running"},
+        200
+      )
+
+      {out, _err, exit_code} = capture(fn -> Loop.run(~w(canary status)) end)
+      assert exit_code == 0
+      assert out =~ "no canary is running"
+    end
+  end
+
   test "unknown subcommand errors" do
     {_out, err, exit_code} = capture(fn -> Loop.run(["frobnicate"]) end)
     assert exit_code == 1

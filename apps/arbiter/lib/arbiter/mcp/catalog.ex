@@ -72,6 +72,8 @@ defmodule Arbiter.MCP.Catalog do
   | `loop_pending_list` | coordinator | `Arbiter.Loop.list_pending/1` + `evidence_bar/1` |
   | `loop_pending_diff` | coordinator | `Arbiter.Loop.get_pending/1` (full row incl. unified diff) |
   | `loop_pending_apply` | coordinator | `Arbiter.Loop.apply_pending/2` (dispatches to the existing domain API) |
+  | `loop_propose_routing` | coordinator | `Arbiter.Loop.propose_routing/1` (operator-authored routing canary proposal) |
+  | `loop_canary_status` | coordinator | `Arbiter.Loop.Canary.status/1` (both arms' metrics + verdict progress) |
   | `loop_pending_reject` | coordinator | `Arbiter.Loop.reject_pending/2` (soft — the row persists as `rejected`) |
   | `usage_summarize` | coordinator | `Arbiter.Usage.summarize/1` |
   | `queue_retry_auto_resolve` | coordinator | `Arbiter.Worker.Watchdog.retry_auto_resolve/1` (bd-bspakl) |
@@ -2047,6 +2049,58 @@ defmodule Arbiter.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.loop_pending_reject/2
+    },
+    %{
+      name: "loop_propose_routing",
+      tiers: @coordinator,
+      description:
+        "Hand-author a routing canary: creates an operator-authored `:config_set` proposal for " <>
+          "`routing.rules.D<difficulty>` (`model_tier`, optional `thinking`), already `proposed`. " <>
+          "With `loop.autonomous_routing_enabled` set on the workspace, the next canary tick " <>
+          "starts a 50/50 canary for it. Set `loop.canary_auto_promote: false` to decide the " <>
+          "outcome yourself via `loop_pending_apply` / `loop_pending_reject`. Monitor with " <>
+          "`loop_canary_status`.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "difficulty" => %{
+            "type" => "integer",
+            "description" => "Routing tier D0..D5. Required."
+          },
+          "model_tier" => %{
+            "type" => "string",
+            "description" => "Model tier to route that difficulty to, e.g. `standard`. Required."
+          },
+          "thinking" => %{"type" => "string", "description" => "Optional thinking level."},
+          "workspace" => %{
+            "type" => "string",
+            "description" => "Workspace (id or name); defaults to the installation default."
+          }
+        },
+        "required" => ["difficulty", "model_tier"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.loop_propose_routing/2
+    },
+    %{
+      name: "loop_canary_status",
+      tiers: @coordinator,
+      description:
+        "Status of the workspace's running routing canary: proposal id, age, expiry, canary-arm " <>
+          "dispatches still needed for a verdict, and both arms' current dispatches, tasks, " <>
+          "reviewed tasks, first-pass convergence, review rounds, cost and cost per round. " <>
+          "Returns `running: false` with a message when there is none.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "workspace" => %{
+            "type" => "string",
+            "description" => "Workspace (id or name); defaults to the installation default."
+          }
+        },
+        "additionalProperties" => false
+      },
+      handler: &Tools.loop_canary_status/2
     },
     %{
       name: "usage_summarize",

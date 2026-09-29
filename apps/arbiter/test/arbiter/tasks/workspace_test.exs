@@ -917,6 +917,22 @@ defmodule Arbiter.Tasks.WorkspaceTest do
       assert err |> Exception.message() |> String.contains?("loop.canary must be a map")
     end
 
+    test "loop.canary_auto_promote must be a boolean" do
+      assert {:ok, _} =
+               Ash.create(Workspace, %{
+                 name: "loop-auto-bool-ok",
+                 config: %{"loop" => %{"canary_auto_promote" => false}}
+               })
+
+      assert {:error, err} =
+               Ash.create(Workspace, %{
+                 name: "loop-auto-bool-bad",
+                 config: %{"loop" => %{"canary_auto_promote" => "no"}}
+               })
+
+      assert err |> Exception.message() |> String.contains?("loop.canary_auto_promote")
+    end
+
     test "rejects a canary sample size below the Stage 3 floor" do
       config = %{"loop" => %{"canary_min_dispatches" => 5}}
 

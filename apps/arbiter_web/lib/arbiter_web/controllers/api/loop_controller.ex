@@ -66,6 +66,37 @@ defmodule ArbiterWeb.Api.LoopController do
     end
   end
 
+  # Operator-started routing canary: see `Arbiter.Loop.propose_routing/1`.
+  def propose_routing(conn, params) do
+    attrs = %{
+      workspace: blank_to_nil(params["workspace_id"]) || blank_to_nil(params["workspace"]),
+      difficulty: params["difficulty"],
+      model_tier: blank_to_nil(params["model_tier"]),
+      thinking: blank_to_nil(params["thinking"]),
+      actor: @actor
+    }
+
+    case Loop.propose_routing(attrs) do
+      {:ok, row} -> json(conn, %{pending: render_pending(row, :full)})
+      {:error, reason} -> {:error, apply_error(reason)}
+    end
+  end
+
+  # `arb loop canary status`: both arms' metrics + verdict progress.
+  def canary_status(conn, params) do
+    ref = blank_to_nil(params["workspace_id"]) || blank_to_nil(params["workspace"]) || "default"
+
+    with {:ok, ws} <- Loop.fetch_workspace(ref) |> map_ws_error() do
+      case Arbiter.Loop.Canary.status(ws) do
+        {:ok, status} -> json(conn, %{running: true, status: status})
+        {:none, message} -> json(conn, %{running: false, message: message})
+      end
+    end
+  end
+
+  defp map_ws_error({:error, reason}), do: {:error, apply_error(reason)}
+  defp map_ws_error(ok), do: ok
+
   defp run_analysis(conn, params, propose?: propose?) do
     with {:ok, since} <- parse_window(params["since"]),
          {:ok, until} <- parse_iso(params["until"]),

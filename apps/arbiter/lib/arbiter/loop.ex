@@ -44,7 +44,7 @@ defmodule Arbiter.Loop do
 
   use Ash.Domain
 
-  alias Arbiter.Loop.{Apply, FlakeEvent, Notify, PendingWrite}
+  alias Arbiter.Loop.{Apply, Canary, FlakeEvent, Notify, PendingWrite}
   alias Arbiter.Messages.Escalation
   alias Arbiter.Quota
   alias Arbiter.Tasks.{Issue, Workspace}
@@ -324,6 +324,117 @@ defmodule Arbiter.Loop do
 
       record(candidate, actor: fetch(attrs, :actor) || "loop")
     end
+  end
+
+  @doc """
+  Hand-author a routing-tier canary candidate (`arb loop propose routing`).
+
+  Creates an operator-authored `:config_set` for `routing.rules.D<n>` that lands
+  `:proposed` and escalated immediately, in exactly the shape
+  `Arbiter.Loop.Canary.parse_routing_patch/1` accepts. With
+  `loop.autonomous_routing_enabled` set, the next `Canary` tick starts a canary
+  for it (the `origin` is what exempts it from the aggregate evidence bar — the
+  operator *is* the evidence). Set `loop.canary_auto_promote: false` to keep the
+  final apply/reject decision.
+
+  `attrs`: `:workspace` (id or name, required), `:difficulty` (0..5, required),
+  `:model_tier` (required), `:thinking` (optional), `:actor` (default `"loop"`).
+  """
+  @spec propose_routing(map()) :: {:ok, PendingWrite.t()} | {:error, term()}
+  def propose_routing(attrs) when is_map(attrs) do
+    with {:ok, ref} <- required_string(attrs, :workspace),
+         {:ok, ws} <- fetch_workspace(ref),
+         {:ok, tier} <- required_string(attrs, :model_tier),
+         {:ok, difficulty} <- routing_difficulty(fetch(attrs, :difficulty)),
+         rule = routing_rule(tier, fetch(attrs, :thinking)),
+         payload = %{
+           "workspace_id" => ws.id,
+           "patch" => %{"routing" => %{"rules" => %{"D#{difficulty}" => rule}}}
+         },
+         {:ok, _, _} <- canary_shape(payload) do
+      spec = Enum.map_join(rule, "/", fn {_k, v} -> v end)
+
+      candidate = %{
+        kind: :config_set,
+        scope: :task,
+        category: "operator routing canary: D#{difficulty} → #{spec}",
+        target: "routing.rules.D#{difficulty}",
+        difficulty: difficulty,
+        repo: nil,
+        gist: "route D#{difficulty} dispatches to #{spec} (operator-started canary)",
+        target_metric: "first-pass ReviewGate convergence at D#{difficulty}",
+        incident_refs: [],
+        task_refs: [],
+        payload: payload,
+        diff: nil,
+        origin: Canary.operator_origin(),
+        workspace_id: ws.id
+      }
+
+      case record(candidate, actor: fetch(attrs, :actor) || "loop") do
+        {:ok, %PendingWrite{state: :proposed} = row} ->
+          {:ok, row}
+
+        {:ok, %PendingWrite{id: id, state: state}} ->
+          {:error,
+           {:invalid,
+            "an identical routing proposal (#{id}) already exists and is #{state}; " <>
+              "it will not re-open on its own"}}
+
+        other ->
+          other
+      end
+    end
+  end
+
+  defp canary_shape(payload) do
+    case Canary.parse_routing_patch(payload) do
+      {:ok, d, rule} -> {:ok, d, rule}
+      {:error, msg} -> {:error, {:invalid, msg}}
+    end
+  end
+
+  defp routing_difficulty(d) when is_integer(d) and d in 0..5, do: {:ok, d}
+
+  defp routing_difficulty(d) when is_binary(d) do
+    case Integer.parse(d) do
+      {n, ""} -> routing_difficulty(n)
+      _ -> routing_difficulty(nil)
+    end
+  end
+
+  defp routing_difficulty(_), do: {:error, {:invalid, "`difficulty` must be an integer 0..5"}}
+
+  defp routing_rule(tier, thinking) when is_binary(thinking) and thinking != "",
+    do: %{"model_tier" => tier, "thinking" => thinking}
+
+  defp routing_rule(tier, _), do: %{"model_tier" => tier}
+
+  @doc "Resolve a workspace reference (id first, then name)."
+  @spec fetch_workspace(String.t()) :: {:ok, Workspace.t()} | {:error, term()}
+  def fetch_workspace(ref) when is_binary(ref) do
+    with :error <- workspace_by_id(ref),
+         :error <- workspace_by_name(ref) do
+      {:error, {:not_found, "workspace #{inspect(ref)} not found"}}
+    end
+  end
+
+  defp workspace_by_id(ref) do
+    case Ash.get(Workspace, ref) do
+      {:ok, %Workspace{} = ws} -> {:ok, ws}
+      _ -> :error
+    end
+  rescue
+    _ -> :error
+  end
+
+  defp workspace_by_name(ref) do
+    case Workspace |> Ash.Query.filter(name == ^ref) |> Ash.read_one() do
+      {:ok, %Workspace{} = ws} -> {:ok, ws}
+      _ -> :error
+    end
+  rescue
+    _ -> :error
   end
 
   defp required_string(attrs, key) do
