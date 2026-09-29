@@ -95,6 +95,33 @@ defmodule ArbiterWeb.Api.WorkerJSON do
     }
   end
 
+  @doc """
+  A ticket's current run as `GET /api/issues/:id` carries it (bd-6fkgvo):
+  kind, state, outcome and phase in the run vocabulary, no transcript. nil
+  stays nil.
+  """
+  def current_run(nil), do: nil
+
+  def current_run(view) do
+    view
+    |> run()
+    |> Map.take([
+      :run_id,
+      :run_task_id,
+      :source,
+      :kind,
+      :state,
+      :outcome,
+      :waiting_on,
+      :role,
+      :phase,
+      :phase_label,
+      :started_at,
+      :completed_at,
+      :failure_reason
+    ])
+  end
+
   # A recent run in `show`'s `runs` list: the same vocabulary, no transcript.
   defp recent_run(view) do
     view

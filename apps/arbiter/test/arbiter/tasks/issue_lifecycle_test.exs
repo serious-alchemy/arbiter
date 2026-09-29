@@ -387,6 +387,36 @@ defmodule Arbiter.Tasks.IssueLifecycleTest do
       assert closed.state == "closed"
       assert closed.close_reason == "wont_do"
     end
+
+    # bd-6fkgvo AC4: the event stream speaks the lifecycle vocabulary — the
+    # column and the attention ride beside the legacy status.
+    test "the task_state Events payload carries column and attention", %{ws: ws} do
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, Arbiter.Events.pubsub_topic(ws.id))
+
+      blocker = in_state(ws, :active)
+      issue = in_state(ws, :backlog)
+      id = issue.id
+      {:ok, _} = Arbiter.Tasks.Dependencies.add(id, blocker.id, :depends_on)
+
+      assert_receive {:event, %{topic: "task_state", task_id: ^id, event: "created"} = created}
+      assert created.status == "open"
+      assert created.column == "backlog"
+      assert created.attention == nil
+
+      transition!(issue, :promote)
+      assert_receive {:event, %{topic: "task_state", task_id: ^id, state: "queued"} = queued}
+      assert queued.column == "blocked"
+
+      verifying = in_state(ws, :verifying)
+      vid = verifying.id
+
+      assert_receive {:event,
+                      %{topic: "task_state", task_id: ^vid, state: "verifying"} = awaiting}
+
+      assert awaiting.status == "awaiting_verification"
+      assert awaiting.column == "verifying"
+      assert %{owner: "coordinator", cause: "awaiting_verification"} = awaiting.attention
+    end
   end
 
   # Forces an arbitrary absolute rank to exercise scheduler ordering. The real

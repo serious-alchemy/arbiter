@@ -138,7 +138,7 @@ defmodule ArbiterCli.OutputTest do
 
       out = Output.format_issue_detail(issue)
       assert out =~ "Rollup:"
-      assert out =~ "Rollup:     $20.00 spent"
+      assert out =~ "Rollup:       $20.00 spent"
       assert out =~ "~$6.00–$16.00 to go"
       assert out =~ "closed=2"
       assert out =~ "dispatchable=2"

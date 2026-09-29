@@ -5,148 +5,230 @@ defmodule ArbiterCli.Cmd.PrimeTest do
 
   # All /api/messages requests (coordinator + per-workspace coordinator) share
   # a single stub matched by path; query params are not matched by stub_routes.
-  defp stub_all(workspaces, workers, ready, messages \\ []) do
+  defp stub_all(workspaces, workers, tickets, messages \\ []) do
     stub_routes([
       {{"get", "/api/workspaces"}, {%{"data" => workspaces}, 200}},
       {{"get", "/api/workers"}, {%{"data" => workers}, 200}},
-      {{"get", "/api/issues/ready"}, {%{"data" => ready}, 200}},
+      {{"get", "/api/issues/lifecycle"}, {%{"data" => tickets}, 200}},
       {{"get", "/api/messages"}, {%{"data" => messages}, 200}}
     ])
   end
 
-  # bd-9so315 — tasks parked at awaiting_verification, with age.
-  describe "awaiting-verification section" do
-    defp stub_with_awaiting(awaiting) do
-      stub_routes([
-        {{"get", "/api/workspaces"},
-         {%{
-            "data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd", "config" => %{}}]
-          }, 200}},
-        {{"get", "/api/workers"}, {%{"data" => []}, 200}},
-        {{"get", "/api/issues/ready"}, {%{"data" => []}, 200}},
-        {{"get", "/api/issues"}, {%{"data" => awaiting}, 200}},
-        {{"get", "/api/messages"}, {%{"data" => []}, 200}}
-      ])
+  # bd-6fkgvo — the per-workspace lifecycle sections, from
+  # `GET /api/issues/lifecycle` (every open ticket, projected, in dispatch
+  # order).
+  describe "lifecycle sections" do
+    defp stub_with_tickets(tickets) do
+      stub_all(
+        [%{"id" => "ws-1", "name" => "default", "prefix" => "bd", "config" => %{}}],
+        [],
+        tickets
+      )
     end
 
-    test "lists awaiting-verification tasks with their age" do
-      awaiting_since = DateTime.utc_now() |> DateTime.add(-7200, :second) |> DateTime.to_iso8601()
+    defp two_hours_ago,
+      do: DateTime.utc_now() |> DateTime.add(-7200, :second) |> DateTime.to_iso8601()
 
-      stub_with_awaiting([
+    defp ticket(id, column, extra \\ %{}) do
+      Map.merge(
         %{
-          "id" => "bd-001",
-          "title" => "doctor probe",
-          "status" => "awaiting_verification",
-          "awaiting_verification_at" => awaiting_since,
+          "id" => id,
+          "title" => "title of #{id}",
+          "priority" => 2,
+          "issue_type" => "feature",
+          "column" => column,
+          "step" => nil,
+          "blocked_by" => [],
+          "attention" => nil,
           "workspace_id" => "ws-1"
-        }
-      ])
-
-      {out, _err, exit_code} = capture(fn -> Prime.run([]) end)
-      assert exit_code == 0
-
-      assert out =~ "== Awaiting verification (1) =="
-      assert out =~ "bd-001"
-      assert out =~ "doctor probe"
-      assert out =~ "2h ago"
+        },
+        extra
+      )
     end
 
-    test "omits the section entirely when nothing is awaiting verification" do
-      stub_with_awaiting([])
+    defp attention(owner, cause, reason) do
+      %{"owner" => owner, "cause" => cause, "reason" => reason, "waiting_on" => "x"}
+    end
 
-      {out, _err, exit_code} = capture(fn -> Prime.run([]) end)
-      assert exit_code == 0
+    # One ticket in every column, plus attention of both owners. Dispatch
+    # order is the server's; the Ready pair arrives in it.
+    defp every_column do
+      [
+        ticket("bd-ready1", "ready", %{"priority" => 0}),
+        ticket("bd-op", "merging", %{
+          "step" => "merge_blocked",
+          "attention" => attention("operator", "merge_blocked", "needs an approval you can give")
+        }),
+        ticket("bd-coord", "in_progress", %{
+          "step" => "implementing",
+          "attention" => attention("coordinator", "run_crashed", "the run crashed")
+        }),
+        ticket("bd-prog", "in_progress", %{"step" => "in_review"}),
+        ticket("bd-merge", "merging", %{"step" => "waiting_ci", "pr_ref" => "#12"}),
+        ticket("bd-verify", "verifying", %{
+          "awaiting_verification_at" => two_hours_ago(),
+          "attention" =>
+            attention("coordinator", "awaiting_verification", "restart and observe it")
+        }),
+        ticket("bd-ready2", "ready", %{"priority" => 3}),
+        ticket("bd-blocked", "blocked", %{"blocked_by" => ["bd-prog", "bd-merge"]}),
+        ticket("bd-back1", "backlog"),
+        ticket("bd-back2", "backlog")
+      ]
+    end
+
+    @headers [
+      "== Needs attention",
+      "== In progress",
+      "== Merging",
+      "== Verifying",
+      "== Ready",
+      "== Blocked",
+      "== Backlog"
+    ]
+
+    # The text of each section, keyed by its header prefix.
+    defp sections(out) do
+      out
+      |> String.split("\n")
+      |> Enum.chunk_while(
+        nil,
+        fn line, acc ->
+          cond do
+            String.starts_with?(line, "== ") and acc -> {:cont, acc, {line, []}}
+            String.starts_with?(line, "== ") -> {:cont, {line, []}}
+            acc -> {:cont, {elem(acc, 0), [line | elem(acc, 1)]}}
+            true -> {:cont, nil}
+          end
+        end,
+        fn
+          nil -> {:cont, nil}
+          acc -> {:cont, acc, nil}
+        end
+      )
+      |> Enum.flat_map(fn {header, lines} ->
+        case Enum.find(@headers, &String.starts_with?(header, &1)) do
+          nil -> []
+          key -> [{key, Enum.reverse(lines)}]
+        end
+      end)
+    end
+
+    test "prints the sections in lifecycle order" do
+      stub_with_tickets(every_column())
+
+      {out, _err, 0} = capture(fn -> Prime.run([]) end)
+
+      positions = Enum.map(@headers, fn h -> out |> :binary.match(h) |> elem(0) end)
+      assert positions == Enum.sort(positions)
+    end
+
+    test "every ticket appears in exactly one section" do
+      stub_with_tickets(every_column())
+
+      {out, _err, 0} = capture(fn -> Prime.run([]) end)
+      sections = sections(out)
+
+      expected = %{
+        "== Needs attention" => ["bd-coord", "bd-op"],
+        "== In progress" => ["bd-prog"],
+        "== Merging" => ["bd-merge"],
+        "== Verifying" => ["bd-verify"],
+        "== Ready" => ["bd-ready1", "bd-ready2"],
+        "== Blocked" => ["bd-blocked"],
+        "== Backlog" => []
+      }
+
+      for ticket <- every_column(), id = ticket["id"], not String.starts_with?(id, "bd-back") do
+        holders =
+          for {header, lines} <- sections,
+              Enum.any?(lines, &String.starts_with?(String.trim_leading(&1), id <> " ")),
+              do: header
+
+        assert length(holders) == 1, "#{id} appears in #{inspect(holders)}"
+        [holder] = holders
+        assert id in expected[holder], "#{id} landed in #{holder}"
+      end
+
+      refute out =~ "bd-back1"
+      assert out =~ "== Backlog (2) =="
+    end
+
+    test "needs attention lists the coordinator's items before the operator's, with reasons" do
+      stub_with_tickets(every_column())
+
+      {out, _err, 0} = capture(fn -> Prime.run([]) end)
+      {_, lines} = Enum.find(sections(out), &(elem(&1, 0) == "== Needs attention"))
+      text = Enum.join(lines, "\n")
+
+      assert text =~ ~r/bd-coord .*coordinator.*the run crashed/
+      assert text =~ ~r/bd-op .*operator.*needs an approval you can give/
+      assert :binary.match(text, "bd-coord") < :binary.match(text, "bd-op")
+    end
+
+    test "rows carry their step, PR, blockers and verification age" do
+      stub_with_tickets(every_column())
+
+      {out, _err, 0} = capture(fn -> Prime.run([]) end)
+
+      assert out =~ ~r/bd-prog .*step=in_review/
+      assert out =~ ~r/bd-merge .*step=waiting_ci.*#12/
+      assert out =~ ~r/bd-blocked .*waiting on bd-prog, bd-merge/
+      assert out =~ ~r/bd-verify .*2h ago/
+      assert out =~ "arb issue verify <id>"
+      assert :binary.match(out, "bd-ready1") < :binary.match(out, "bd-ready2")
+    end
+
+    test "has no Review parked section, and no refined-blind Ready issues section" do
+      stub_with_tickets(every_column())
+
+      {out, _err, 0} = capture(fn -> Prime.run([]) end)
+      refute out =~ "Review parked"
+      refute out =~ "Ready issues"
       refute out =~ "Awaiting verification"
     end
 
-    test "--json includes the awaiting-verification list" do
-      awaiting_since = DateTime.utc_now() |> DateTime.add(-60, :second) |> DateTime.to_iso8601()
-
-      stub_with_awaiting([
-        %{
-          "id" => "bd-002",
-          "title" => "capture path",
-          "status" => "awaiting_verification",
-          "awaiting_verification_at" => awaiting_since,
-          "workspace_id" => "ws-1"
-        }
+    test "a verification handed off to the operator is attention, not routine" do
+      stub_with_tickets([
+        ticket("bd-verify", "verifying", %{
+          "attention" => attention("operator", "awaiting_verification", "only you can observe it")
+        })
       ])
 
-      {out, _err, exit_code} = capture(fn -> Prime.run(["--json"]) end)
-      assert exit_code == 0
-
-      assert {:ok, decoded} = Jason.decode(out)
-      assert [%{"awaiting_verification" => [%{"id" => "bd-002"}]}] = decoded["workspaces"]
+      {out, _err, 0} = capture(fn -> Prime.run([]) end)
+      assert out =~ "== Needs attention (1) =="
+      assert out =~ "== Verifying =="
     end
-  end
 
-  # bd-9zuvbh — tasks the ReviewGate parked (class C), with the reason and age.
-  describe "review-parked section" do
-    defp stub_with_parked(parked) do
+    test "--json carries each section, and the backlog as a count" do
+      stub_with_tickets(every_column())
+
+      {out, _err, 0} = capture(fn -> Prime.run(["--json"]) end)
+      assert {:ok, %{"workspaces" => [ws]}} = Jason.decode(out)
+
+      ids = fn key -> Enum.map(ws[key], & &1["id"]) end
+      assert ids.("needs_attention") == ["bd-coord", "bd-op"]
+      assert ids.("in_progress") == ["bd-prog"]
+      assert ids.("merging") == ["bd-merge"]
+      assert ids.("verifying") == ["bd-verify"]
+      assert ids.("ready") == ["bd-ready1", "bd-ready2"]
+      assert ids.("blocked") == ["bd-blocked"]
+      assert ws["backlog_count"] == 2
+      refute Map.has_key?(ws, "review_parked")
+    end
+
+    test "an unreadable lifecycle read is marked, not omitted" do
       stub_routes([
         {{"get", "/api/workspaces"},
-         {%{
-            "data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd", "config" => %{}}]
-          }, 200}},
+         {%{"data" => [%{"id" => "ws-1", "name" => "d", "prefix" => "bd", "config" => %{}}]}, 200}},
         {{"get", "/api/workers"}, {%{"data" => []}, 200}},
-        {{"get", "/api/issues/ready"}, {%{"data" => []}, 200}},
-        {{"get", "/api/issues"}, {%{"data" => []}, 200}},
-        {{"get", "/api/issues/review_parked"}, {%{"data" => parked}, 200}},
+        {{"get", "/api/issues/lifecycle"}, {%{"error" => "boom"}, 500}},
         {{"get", "/api/messages"}, {%{"data" => []}, 200}}
       ])
-    end
 
-    test "lists review-parked tasks with their reason and age" do
-      parked_since = DateTime.utc_now() |> DateTime.add(-7200, :second) |> DateTime.to_iso8601()
-
-      stub_with_parked([
-        %{
-          "id" => "bd-010",
-          "title" => "guard class C",
-          "status" => "in_progress",
-          "review_park_reason" => "inconclusive",
-          "review_parked_at" => parked_since,
-          "workspace_id" => "ws-1"
-        }
-      ])
-
-      {out, _err, exit_code} = capture(fn -> Prime.run([]) end)
-      assert exit_code == 0
-
-      assert out =~ "== Review parked (1) =="
-      assert out =~ "bd-010"
-      assert out =~ "guard class C"
-      assert out =~ "inconclusive"
-      assert out =~ "2h ago"
-    end
-
-    test "omits the section entirely when nothing is parked" do
-      stub_with_parked([])
-
-      {out, _err, exit_code} = capture(fn -> Prime.run([]) end)
-      assert exit_code == 0
-      refute out =~ "Review parked"
-    end
-
-    test "--json includes the review-parked list" do
-      parked_since = DateTime.utc_now() |> DateTime.add(-60, :second) |> DateTime.to_iso8601()
-
-      stub_with_parked([
-        %{
-          "id" => "bd-011",
-          "title" => "verdict guard",
-          "status" => "in_progress",
-          "review_park_reason" => "verdict_guard_exhausted",
-          "review_parked_at" => parked_since,
-          "workspace_id" => "ws-1"
-        }
-      ])
-
-      {out, _err, exit_code} = capture(fn -> Prime.run(["--json"]) end)
-      assert exit_code == 0
-
-      assert {:ok, decoded} = Jason.decode(out)
-      assert [%{"review_parked" => [%{"id" => "bd-011"}]}] = decoded["workspaces"]
+      {out, _err, 0} = capture(fn -> Prime.run([]) end)
+      assert out =~ "== Tickets =="
+      assert out =~ "(error:"
     end
   end
 
@@ -173,7 +255,13 @@ defmodule ArbiterCli.Cmd.PrimeTest do
           }
         ],
         [
-          %{"id" => "bd-002", "priority" => 1, "issue_type" => "bug", "title" => "Fix the thing"}
+          %{
+            "id" => "bd-002",
+            "priority" => 1,
+            "issue_type" => "bug",
+            "title" => "Fix the thing",
+            "column" => "ready"
+          }
         ]
       )
 
@@ -188,7 +276,7 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       assert out =~ "bd-001"
       assert out =~ "step=implement"
 
-      assert out =~ "== Ready issues (1) =="
+      assert out =~ "== Ready (1) =="
       assert out =~ "bd-002"
       assert out =~ "Fix the thing"
     end
@@ -433,7 +521,7 @@ defmodule ArbiterCli.Cmd.PrimeTest do
 
       assert out =~ "== Active workers =="
       assert out =~ "(none)"
-      assert out =~ "== Ready issues =="
+      assert out =~ "== Ready =="
     end
 
     test "renders the Global Coordinator Inbox section when there is unread mail" do
@@ -577,7 +665,7 @@ defmodule ArbiterCli.Cmd.PrimeTest do
 
       # Surfaced within the workspace block, before the work list.
       orders_at = :binary.match(out, "== Standing Orders ==") |> elem(0)
-      ready_at = :binary.match(out, "== Ready issues ==") |> elem(0)
+      ready_at = :binary.match(out, "== Needs attention") |> elem(0)
       assert orders_at < ready_at
     end
 
@@ -631,7 +719,7 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       # Repo-scoped block comes after the global one, still ahead of the work list.
       global_at = :binary.match(out, "== Standing Orders ==") |> elem(0)
       repo_at = :binary.match(out, "== Standing Orders — client ==") |> elem(0)
-      ready_at = :binary.match(out, "== Ready issues ==") |> elem(0)
+      ready_at = :binary.match(out, "== Needs attention") |> elem(0)
       assert global_at < repo_at
       assert repo_at < ready_at
     end

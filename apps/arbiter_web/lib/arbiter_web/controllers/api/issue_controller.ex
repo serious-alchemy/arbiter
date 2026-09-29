@@ -34,8 +34,10 @@ defmodule ArbiterWeb.Api.IssueController do
   alias Arbiter.Tasks.Dependencies
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Issue.Changes.CreateUpstream
+  alias Arbiter.Tasks.Lifecycle.Projection
   alias Arbiter.Tasks.Verification
   alias Arbiter.Usage.Estimate
+  alias Arbiter.Workers.Current
   require Ash.Query
 
   action_fallback(ArbiterWeb.Api.FallbackController)
@@ -68,6 +70,15 @@ defmodule ArbiterWeb.Api.IssueController do
     render(conn, :index, issues: issues)
   end
 
+  # bd-6fkgvo: every open ticket in a workspace with its lifecycle projection
+  # (state, column, step, blocked_by, attention), epics excluded as on the
+  # board, in dispatch order — what `arb prime` groups into its sections.
+  def lifecycle(conn, %{"workspace_id" => ws_id}) when is_binary(ws_id) and ws_id != "" do
+    render(conn, :lifecycle, tickets: Projection.open(ws_id))
+  end
+
+  def lifecycle(conn, _params), do: unprocessable(conn, "workspace_id is required")
+
   # bd-9zuvbh: every task the ReviewGate parked. A park is a flag, not a status,
   # so this cannot be expressed as `?status=`; it gets its own route the way
   # `ready` does.
@@ -91,18 +102,38 @@ defmodule ArbiterWeb.Api.IssueController do
       # bd-1defgu: same reasoning for dependency edges — `arb issue show` was
       # write-only for them; the read already existed
       # (`Arbiter.Tasks.Dependencies.list/1`), it just wasn't reachable here.
+      # bd-6fkgvo: and where the ticket is in the lifecycle (its projection)
+      # and what its current run is doing, which `arb issue show` prints.
       {:ok, issue} ->
         {:ok, dependencies} = Dependencies.list(issue_id: id)
+        live = live_workers()
 
         render(conn, :show,
           issue: issue,
           estimate: Estimate.payload(issue),
           epic_rollup: Estimate.epic_cost_rollup(issue),
-          dependencies: dependencies
+          dependencies: dependencies,
+          lifecycle: Projection.view(issue, workers: live),
+          current_run: current_run(id, live)
         )
 
       {:error, _} = err ->
         err
+    end
+  end
+
+  defp live_workers do
+    Arbiter.Worker.list_children()
+  rescue
+    _ -> []
+  catch
+    :exit, _ -> []
+  end
+
+  defp current_run(id, live) do
+    case Current.show(id, live: live, limit: 1) do
+      %{current: current} -> current
+      nil -> nil
     end
   end
 

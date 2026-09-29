@@ -94,6 +94,7 @@ defmodule Arbiter.Tasks.Issue do
   require Logger
 
   alias Arbiter.Tasks.Issue.Changes.Transition
+  alias Arbiter.Tasks.Lifecycle.Projection
 
   @statuses ~w(open in_progress awaiting_verification closed)a
   @lifecycle_states Arbiter.Tasks.Lifecycle.states()
@@ -1006,15 +1007,22 @@ defmodule Arbiter.Tasks.Issue do
     Phoenix.PubSub.broadcast(Arbiter.PubSub, "tasks", {:task_lifecycle, event, issue})
 
     if ws_id = Map.get(issue, :workspace_id) do
-      Arbiter.Events.broadcast(ws_id, "task_state", %{
-        task_id: Map.get(issue, :id),
-        event: to_string(event),
-        status: to_string(Map.get(issue, :status) || ""),
-        # bd-842qio: the stored lifecycle state beside the legacy status.
-        # `close_reason` is null unless the ticket is closed.
-        state: to_string(Map.get(issue, :state) || ""),
-        close_reason: close_reason_string(Map.get(issue, :close_reason))
-      })
+      Arbiter.Events.broadcast(
+        ws_id,
+        "task_state",
+        issue
+        |> event_lifecycle()
+        |> Map.merge(%{
+          task_id: Map.get(issue, :id),
+          event: to_string(event),
+          # Legacy, kept for one release beside `state` / `column` (bd-6fkgvo).
+          status: to_string(Map.get(issue, :status) || ""),
+          # bd-842qio: the stored lifecycle state beside the legacy status.
+          # `close_reason` is null unless the ticket is closed.
+          state: to_string(Map.get(issue, :state) || ""),
+          close_reason: close_reason_string(Map.get(issue, :close_reason))
+        })
+      )
     end
 
     :ok
@@ -1024,6 +1032,21 @@ defmodule Arbiter.Tasks.Issue do
 
   defp close_reason_string(nil), do: nil
   defp close_reason_string(reason), do: to_string(reason)
+
+  # bd-6fkgvo: the ticket's column and attention, as every other surface reads
+  # them. Projected from the row and its blockers only: this runs inside the
+  # write, whose caller may be a worker, and reading the live runs would call
+  # that worker back.
+  defp event_lifecycle(issue) do
+    view = Projection.view(issue, workers: [])
+
+    %{
+      column: view.column && to_string(view.column),
+      attention: Projection.attention_payload(view.attention)
+    }
+  rescue
+    _ -> %{column: nil, attention: nil}
+  end
 
   attributes do
     attribute :id, :string do

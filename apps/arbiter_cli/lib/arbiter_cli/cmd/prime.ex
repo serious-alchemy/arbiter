@@ -19,19 +19,26 @@ defmodule ArbiterCli.Cmd.Prime do
        c. Per-repo Standing Orders — one section per repo carrying orders in
           `config.repo_paths.<repo>.standing_orders`. Omitted per repo when
           empty.
-       d. Active workers — task_id, status, current_step, runtime, scoped to
-          this workspace.
-       e. Ready tasks — `Issue.ready/1` view (the board's Ready column), scoped to this workspace.
-       f. Awaiting verification — merged tasks flagged `verify_after_deploy`
-          that are parked until someone restarts the server and observes the
-          new path, each with the age of the wait (bd-9so315). Omitted when
-          empty. These are the coordinator's: nothing else will clear them.
-       g. Review parked — tasks the ReviewGate parked (bd-9zuvbh): a terminal
-          no-verdict state that used to fail the run. Each row names the park
-          reason and the age of the wait. The run was NOT failed and the branch
-          is intact — a human re-runs the review, merges by hand, or closes it,
-          and any of those clears the park. Omitted when empty.
-       h. Coordinator Inbox — unread messages for this workspace's coordinator.
+       d. The tickets, in lifecycle order (bd-6fkgvo), from
+          `GET /api/issues/lifecycle` — every open ticket with its state,
+          column, step, blockers and attention, in dispatch order. Each ticket
+          appears in exactly one section:
+            1. Needs attention — every ticket with attention, the
+               coordinator's first, then the operator's, each with its reason.
+               The routine verification wait (a Verifying ticket whose
+               attention is still the coordinator's `awaiting_verification`)
+               is not listed here: that is what the Verifying section is.
+            2. In progress — with its step.
+            3. Merging — with its step and PR.
+            4. Verifying — merged, waiting for someone to restart the server
+               and observe the new path, with the age of the wait.
+            5. Ready — in dispatch order.
+            6. Blocked — with the blockers it is waiting on.
+            7. Backlog — a count.
+          Epics stay off, as on the board.
+       e. Active workers — the live runs: ticket, run kind and state, step,
+          scoped to this workspace.
+       f. Coordinator Inbox — unread messages for this workspace's coordinator.
           Omitted when empty.
 
   ## Standing Orders are data, not code
@@ -61,9 +68,15 @@ defmodule ArbiterCli.Cmd.Prime do
             "standing_orders": [...],
             "repo_standing_orders": {"<repo>": [...]},
             "rig_standing_orders": {"<repo>": [...]},  // deprecated alias, dual-emitted
-            "workers": [...],
+            "needs_attention": [...],
+            "in_progress": [...],
+            "merging": [...],
+            "verifying": [...],
+            "awaiting_verification": [...],  // deprecated alias of verifying
             "ready": [...],
-            "awaiting_verification": [...],
+            "blocked": [...],
+            "backlog_count": 3,
+            "workers": [...],
             "coordinator_inbox": [...]
           }
         ]
@@ -111,14 +124,22 @@ defmodule ArbiterCli.Cmd.Prime do
       repo_standing_orders: repo_standing_orders,
       rig_standing_orders: repo_standing_orders,
       workers: unwrap(ws_section.workers),
-      ready: unwrap(ws_section.ready),
-      awaiting_verification: unwrap(ws_section.awaiting_verification),
-      review_parked: unwrap(ws_section.review_parked),
       coordinator_inbox: unwrap(ws_section.coordinator_inbox)
     }
+    |> Map.merge(tickets_to_json(ws_section.tickets))
   end
 
   defp workspace_to_json({:error, msg}), do: %{"error" => msg}
+
+  defp tickets_to_json({:ok, sections}) do
+    sections
+    |> Map.put(:backlog_count, length(sections.backlog))
+    |> Map.delete(:backlog)
+    # Deprecated alias for one release: the section used to be keyed so.
+    |> Map.put(:awaiting_verification, sections.verifying)
+  end
+
+  defp tickets_to_json({:error, msg}), do: %{tickets: %{"error" => msg}}
 
   defp unwrap({:ok, val}), do: val
   defp unwrap({:error, msg}), do: %{"error" => msg}
@@ -164,9 +185,7 @@ defmodule ArbiterCli.Cmd.Prime do
       standing_orders: gather_standing_orders(ws),
       repo_standing_orders: gather_repo_standing_orders(ws),
       workers: gather_workers(ws_id),
-      ready: gather_ready(ws_id),
-      awaiting_verification: gather_awaiting_verification(ws_id),
-      review_parked: gather_review_parked(ws_id),
+      tickets: gather_tickets(ws_id),
       coordinator_inbox: gather_coordinator_inbox(ws_id)
     }
   end
@@ -216,40 +235,60 @@ defmodule ArbiterCli.Cmd.Prime do
     end
   end
 
-  defp gather_ready(ws_id) do
-    case Client.get("/api/issues/ready", workspace_id: ws_id) do
-      {:ok, %{"data" => list}} -> {:ok, list}
-      {:ok, _} -> {:ok, []}
+  # bd-6fkgvo: every open ticket in the workspace, projected (state, column,
+  # step, blockers, attention) and in dispatch order, grouped into the
+  # lifecycle sections.
+  defp gather_tickets(ws_id) do
+    case Client.get("/api/issues/lifecycle", workspace_id: ws_id) do
+      {:ok, %{"data" => list}} -> {:ok, group_tickets(list)}
+      {:ok, _} -> {:ok, group_tickets([])}
       {:error, %Client.Error{} = err} -> {:error, err.message}
     end
   end
 
-  # bd-9so315: tasks parked post-merge until someone restarts the server and
-  # observes the new path. Oldest wait first — the one most likely to have been
-  # forgotten leads.
-  defp gather_awaiting_verification(ws_id) do
-    case Client.get("/api/issues", workspace_id: ws_id, status: "awaiting_verification") do
-      {:ok, %{"data" => list}} ->
-        {:ok, Enum.sort_by(list, &(&1["awaiting_verification_at"] || ""))}
+  @columns %{
+    "in_progress" => :in_progress,
+    "merging" => :merging,
+    "verifying" => :verifying,
+    "ready" => :ready,
+    "blocked" => :blocked,
+    "backlog" => :backlog
+  }
 
-      {:ok, _} ->
-        {:ok, []}
+  # Each ticket lands in exactly one section: attention wins over the column
+  # (except the routine verification wait, which is the Verifying section),
+  # and a ticket with no column this surface shows (closed) lands nowhere.
+  # Order within a section is the server's dispatch order, but for Needs
+  # attention, which leads with the coordinator's items.
+  defp group_tickets(list) do
+    empty = Map.new([:needs_attention | Map.values(@columns)], &{&1, []})
 
-      {:error, %Client.Error{} = err} ->
-        {:error, err.message}
-    end
+    list
+    |> Enum.reduce(empty, fn t, acc ->
+      case section(t) do
+        nil -> acc
+        key -> Map.update!(acc, key, &[t | &1])
+      end
+    end)
+    |> Map.new(fn {key, tickets} -> {key, Enum.reverse(tickets)} end)
+    |> Map.update!(:needs_attention, fn tickets ->
+      Enum.sort_by(tickets, &owner_rank(get_in(&1, ["attention", "owner"])))
+    end)
   end
 
-  # bd-9zuvbh: tasks the ReviewGate parked (class C) — a terminal no-verdict
-  # state that used to fail the run. Ordered oldest-park-first by the API, so
-  # the one most likely to have been forgotten leads.
-  defp gather_review_parked(ws_id) do
-    case Client.get("/api/issues/review_parked", workspace_id: ws_id) do
-      {:ok, %{"data" => list}} -> {:ok, list}
-      {:ok, _} -> {:ok, []}
-      {:error, %Client.Error{} = err} -> {:error, err.message}
-    end
+  defp section(%{"attention" => %{} = attention} = t) do
+    if routine_verification?(t, attention), do: :verifying, else: :needs_attention
   end
+
+  defp section(t), do: Map.get(@columns, t["column"])
+
+  defp routine_verification?(t, attention) do
+    t["column"] == "verifying" and attention["cause"] == "awaiting_verification" and
+      attention["owner"] == "coordinator"
+  end
+
+  defp owner_rank("coordinator"), do: 0
+  defp owner_rank(_operator), do: 1
 
   defp gather_coordinator_inbox(ws_id) do
     case Client.get("/api/messages", to_ref: "coordinator", workspace_id: ws_id, unread: "true") do
@@ -282,12 +321,9 @@ defmodule ArbiterCli.Cmd.Prime do
 
     maybe_emit_standing_orders_section(ws_section.standing_orders)
     emit_repo_standing_orders_sections(ws_section.repo_standing_orders)
+    emit_ticket_sections(ws_section.tickets)
     emit_workers_section(ws_section.workers, "worker")
     IO.puts("")
-    emit_ready_section(ws_section.ready, "issue")
-    IO.puts("")
-    maybe_emit_awaiting_verification(ws_section.awaiting_verification)
-    maybe_emit_review_parked(ws_section.review_parked)
     maybe_emit_coordinator_inbox(ws_section.coordinator_inbox)
   end
 
@@ -498,80 +534,83 @@ defmodule ArbiterCli.Cmd.Prime do
     IO.puts("  (error: #{msg})")
   end
 
-  defp emit_ready_section({:ok, []}, issue) do
-    IO.puts("== Ready #{issue}s ==")
+  # ---- the lifecycle sections (bd-6fkgvo) --------------------------------
+
+  defp emit_ticket_sections({:ok, sections}) do
+    emit_section("Needs attention", sections.needs_attention, &attention_line/1)
+    emit_section("In progress", sections.in_progress, &in_progress_line/1)
+    emit_section("Merging", sections.merging, &merging_line/1)
+    emit_section("Verifying", sections.verifying, &verifying_line/1)
+
+    if sections.verifying != [] do
+      IO.puts(
+        "  → restart the server, observe each, then: " <>
+          ~s(arb issue verify <id> --observed "<evidence>")
+      )
+
+      IO.puts("")
+    end
+
+    emit_section("Ready", sections.ready, &ready_line/1)
+    emit_section("Blocked", sections.blocked, &blocked_line/1)
+    IO.puts("== Backlog (#{length(sections.backlog)}) ==")
+    IO.puts("")
+  end
+
+  defp emit_ticket_sections({:error, msg}) do
+    IO.puts("== Tickets ==")
+    IO.puts("  (error: #{msg})")
+    IO.puts("")
+  end
+
+  defp emit_section(title, [], _line) do
+    IO.puts("== #{title} ==")
     IO.puts("  (none)")
-  end
-
-  defp emit_ready_section({:ok, list}, issue) do
-    IO.puts("== Ready #{issue}s (#{length(list)}) ==")
-
-    Enum.each(list, fn i ->
-      IO.puts("  #{i["id"]}  P#{i["priority"]}  #{i["issue_type"]}  #{truncate(i["title"], 80)}")
-    end)
-  end
-
-  defp emit_ready_section({:error, msg}, issue) do
-    IO.puts("== Ready #{issue}s ==")
-    IO.puts("  (error: #{msg})")
-  end
-
-  # Omitted entirely when nothing is parked — the common case, and the section
-  # is only worth the coordinator's attention when it is non-empty.
-  defp maybe_emit_awaiting_verification({:ok, []}), do: :ok
-
-  defp maybe_emit_awaiting_verification({:ok, list}) do
-    IO.puts("== Awaiting verification (#{length(list)}) ==")
-
-    Enum.each(list, fn i ->
-      IO.puts(
-        "  #{i["id"]}  #{truncate(i["title"], 70)}#{age_suffix(i["awaiting_verification_at"])}"
-      )
-    end)
-
-    IO.puts(
-      "  → restart the server, observe each, then: " <>
-        ~s(arb issue verify <id> --observed "<evidence>")
-    )
-
     IO.puts("")
   end
 
-  defp maybe_emit_awaiting_verification({:error, msg}) do
-    IO.puts("== Awaiting verification ==")
-    IO.puts("  (error: #{msg})")
+  defp emit_section(title, tickets, line) do
+    IO.puts("== #{title} (#{length(tickets)}) ==")
+    Enum.each(tickets, &IO.puts("  " <> line.(&1)))
     IO.puts("")
   end
 
-  # Omitted when nothing is parked — the healthy case. When it is non-empty it
-  # is the most actionable thing on the page: each row is a finished piece of
-  # work sitting one human decision from merging.
-  defp maybe_emit_review_parked({:ok, []}), do: :ok
+  # `bd-1  coordinator  <reason>  — <title> (in_progress, 5m ago)`
+  defp attention_line(t) do
+    a = t["attention"]
+    note = if blank?(a["note"]), do: "", else: " [note: #{truncate(a["note"], 60)}]"
 
-  defp maybe_emit_review_parked({:ok, list}) do
-    IO.puts("== Review parked (#{length(list)}) ==")
-
-    Enum.each(list, fn i ->
-      reason = i["review_park_reason"] || "unknown"
-
-      IO.puts(
-        "  #{i["id"]}  [#{reason}]  #{truncate(i["title"], 60)}#{age_suffix(i["review_parked_at"])}"
-      )
-    end)
-
-    IO.puts(
-      "  → the run was NOT failed; the branch is intact. Re-run the review " <>
-        "(arb worker resume <id>), merge by hand, or close it."
-    )
-
-    IO.puts("")
+    "#{t["id"]}  #{a["owner"]}  #{a["reason"]}#{note}  — #{truncate(t["title"], 60)}" <>
+      " (#{t["column"]}#{age_suffix_inline(a["since"])})"
   end
 
-  defp maybe_emit_review_parked({:error, msg}) do
-    IO.puts("== Review parked ==")
-    IO.puts("  (error: #{msg})")
-    IO.puts("")
+  defp in_progress_line(t),
+    do: "#{t["id"]}  step=#{t["step"] || "-"}  P#{t["priority"]}  #{truncate(t["title"], 70)}"
+
+  defp merging_line(t) do
+    pr = if blank?(t["pr_ref"]), do: "", else: "  PR #{t["pr_ref"]}"
+    "#{t["id"]}  step=#{t["step"] || "-"}#{pr}  #{truncate(t["title"], 60)}"
   end
+
+  defp verifying_line(t),
+    do: "#{t["id"]}  #{truncate(t["title"], 70)}#{age_suffix(t["awaiting_verification_at"])}"
+
+  defp ready_line(t),
+    do: "#{t["id"]}  P#{t["priority"]}  #{t["issue_type"]}  #{truncate(t["title"], 80)}"
+
+  defp blocked_line(t) do
+    "#{t["id"]}  P#{t["priority"]}  #{truncate(t["title"], 60)}  ← waiting on " <>
+      Enum.join(List.wrap(t["blocked_by"]), ", ")
+  end
+
+  defp age_suffix_inline(iso) do
+    case age_suffix(iso) do
+      "" -> ""
+      " (" <> rest -> ", " <> String.trim_trailing(rest, ")")
+    end
+  end
+
+  defp blank?(v), do: v in [nil, ""]
 
   defp truncate(nil, _), do: ""
 

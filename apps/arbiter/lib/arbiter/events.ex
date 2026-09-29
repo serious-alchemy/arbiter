@@ -58,7 +58,7 @@ defmodule Arbiter.Events do
   | `review_gate`      | A review_gate escalation requires coordinator ruling           |
   | `worker_failed`| A worker stops unexpectedly (status → failed)         |
   | `worker_done`  | A worker completes (status → completed)               |
-  | `task_state`    | Any task FSM transition (noisier — opt-in only)         |
+  | `task_state`    | Any task FSM transition (noisier — opt-in only). Carries `state`, `column`, `attention` and `close_reason`, and the legacy `status` for one release (bd-6fkgvo) |
   | `external_review` | An ExternalReview lifecycle transition (running/completed/failed) |
   | `loop_proposal`  | A loop-engineering proposal is recorded / reinforced / promoted / applied / rejected (opt-in only) |
   | `quota_gate_bypass` | A quota gate is bypassed via explicit override (force_quota) |

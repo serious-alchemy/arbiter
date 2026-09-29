@@ -143,8 +143,14 @@ defmodule Arbiter.MCP.Catalog do
       name: "task_show",
       tiers: @both,
       description:
-        "Read one task (id, title, status, description, acceptance, and child-progress " <>
-          "`child_closed`/`child_total` over its `parent_of` children). A worker reads its " <>
+        "Read one task: id, title, description, acceptance, child-progress " <>
+          "`child_closed`/`child_total` over its `parent_of` children, and where it is in " <>
+          "the lifecycle — `state` (backlog | queued | active | merging | verifying | " <>
+          "closed), `column` (backlog | blocked | ready | in_progress | merging | verifying " <>
+          "| closed), `step` (the computed step inside In progress or Merging, else null), " <>
+          "`blocked_by` (unsatisfied gating blockers), `attention` ({owner, waiting_on, " <>
+          "reason, cause, since, note} or null) and `close_reason`. The legacy `status` " <>
+          "rides along for one release; read `state`/`column` instead. A worker reads its " <>
           "own task (the `id` argument may be omitted); a coordinator must pass the `id`. " <>
           "Pass `full: true` to include review fields (notes, qa_notes, deployment_notes, " <>
           "pr_body, pr_ref, tracker_ref, target_branch, repo, auto_close, " <>
@@ -183,9 +189,11 @@ defmodule Arbiter.MCP.Catalog do
       name: "task_ready",
       tiers: [:coordinator],
       description:
-        "List ready tasks in the workspace — exactly the board's Ready column: queued " <>
-          "(refined) tasks with no unsatisfied gating edge. A blocker that has merged and " <>
-          "is awaiting verification no longer blocks. Backlog tasks are never listed.",
+        "List the tickets in the Ready column, in dispatch order (priority, rank, age): " <>
+          "state `queued` with no unsatisfied gating blocker. A blocker that is Verifying " <>
+          "(merged, awaiting its verification) no longer blocks. Backlog, Blocked and " <>
+          "epics are never listed. Each carries `state`, `column`, `step`, `blocked_by` " <>
+          "and `attention`.",
       input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
       handler: &Tools.task_ready/2
     },
@@ -340,8 +348,8 @@ defmodule Arbiter.MCP.Catalog do
             "description" =>
               "Set true when your diff's only execution context is the long-lived server — " <>
                 "env/config plumbing, a doctor/health probe, a capture or ingest path, " <>
-                "anything a green test suite cannot prove is live. The merge then parks the " <>
-                "task at `awaiting_verification` instead of closing it, and the coordinator " <>
+                "anything a green test suite cannot prove is live. The merge then moves the " <>
+                "task to Verifying (state `verifying`) instead of closing it, and the coordinator " <>
                 "restarts and observes the new path once before it closes."
           }
         },
@@ -358,7 +366,7 @@ defmodule Arbiter.MCP.Catalog do
         "Create a task in the workspace. `title` is required; optional `description`, " <>
           "`acceptance`, `priority`, `difficulty`, `issue_type`, `auto_close`, " <>
           "`tracker_type`, …. The task is always created in the coordinator's own workspace. " <>
-          "Created tasks land in the board's Backlog (`refined: false`), not its Ready queue, " <>
+          "Created tasks land in the Backlog column (state `backlog`), not Ready, " <>
           "and stay there until a human promotes them from the task detail page. " <>
           "The board scheduler (Autopilot) is the only dispatcher, and it promotes from " <>
           "Ready only, so a task filed here waits for that promotion. bd-7mbrlg: filing a `bug`/`feature`/`chore` with no " <>
@@ -410,8 +418,8 @@ defmodule Arbiter.MCP.Catalog do
           "verify_after_deploy" => %{
             "type" => "boolean",
             "description" =>
-              "When true, merging this task's PR does NOT close it: the task parks at " <>
-                "`awaiting_verification` and the coordinator is notified to restart the " <>
+              "When true, merging this task's PR does NOT close it: the task moves to " <>
+                "Verifying (state `verifying`) and the coordinator is notified to restart the " <>
                 "server and observe the new path once, then record the result with " <>
                 "`task_verify`. Set it for any change whose only execution context is the " <>
                 "long-lived server (env/config plumbing, a doctor probe, a capture/ingest " <>
@@ -489,8 +497,8 @@ defmodule Arbiter.MCP.Catalog do
           "verify_after_deploy" => %{
             "type" => "boolean",
             "description" =>
-              "When true, merging this task's PR does NOT close it: the task parks at " <>
-                "`awaiting_verification` and the coordinator is notified to restart the " <>
+              "When true, merging this task's PR does NOT close it: the task moves to " <>
+                "Verifying (state `verifying`) and the coordinator is notified to restart the " <>
                 "server and observe the new path once, then record the result with " <>
                 "`task_verify`. Set it for any change whose only execution context is the " <>
                 "long-lived server (env/config plumbing, a doctor probe, a capture/ingest " <>
@@ -566,7 +574,7 @@ defmodule Arbiter.MCP.Catalog do
       name: "task_verify",
       tiers: @coordinator,
       description:
-        "Record the restart-and-observe result for a task parked at `awaiting_verification` " <>
+        "Record the restart-and-observe result for a task in Verifying (state `verifying`) " <>
           "(bd-9so315). Pass exactly one of `observed` or `failed`, whose value is the " <>
           "evidence — what you actually saw on the running server. `observed` closes the " <>
           "task; `failed` reopens it for another attempt. The evidence is persisted on the " <>
@@ -597,8 +605,9 @@ defmodule Arbiter.MCP.Catalog do
       name: "task_promote",
       tiers: @coordinator,
       description:
-        "Promote a task from Backlog to Ready (set `refined: true`) via the `:promote_to_ready` action. " <>
-          "Coordinator only. Idempotent by design — promoting an already-refined task is a no-op success, " <>
+        "Promote a task from Backlog to the queue (state `backlog` → `queued`: column Ready, or " <>
+          "Blocked while a gating blocker is open) via the `promote` transition. " <>
+          "Coordinator only. Idempotent by design — promoting an already-queued task is a no-op success, " <>
           "not an error. bd-7mbrlg: a `bug`/`feature`/`chore` with blank `acceptance` is refused unless " <>
           "you pass `acceptance_waived` with a reason (`task`/`decision`/`epic` are exempt; D0 work is " <>
           "auto-waived). **Promote last.** Autopilot can claim a task within seconds of it going " <>
@@ -626,10 +635,10 @@ defmodule Arbiter.MCP.Catalog do
       name: "task_demote",
       tiers: @coordinator,
       description:
-        "Demote a task from Ready back to Backlog (set `refined: false`) via the `:return_to_backlog` action. " <>
+        "Demote a queued task (column Ready or Blocked) back to Backlog via the `demote` transition. " <>
           "Coordinator only. Idempotent by design — demoting an already-backlog task is a no-op success, " <>
-          "not an error. A task can only be demoted if it has no live worker and its status is `:open` " <>
-          "(undispatched). Refuses to demote tasks that are `:in_progress`, `:awaiting_verification`, or `:closed` " <>
+          "not an error. A task can only be demoted if it has no live worker and its state is `queued` " <>
+          "(undispatched). Refuses to demote tasks that are In progress, Merging, Verifying or Closed " <>
           "with a clear reason — demoting those would orphan the worker or undo completed work.",
       input_schema: %{
         "type" => "object",
@@ -825,8 +834,8 @@ defmodule Arbiter.MCP.Catalog do
         "Dispatch a worker to work a task in the workspace. Requires a `can_dispatch` coordinator " <>
           "token and is depth-limited (the dispatch-recursion guardrail). Omitting `provider` " <>
           "resolves the worker from the workspace's `agent.type` config (first healthy provider via " <>
-          "ProviderPool). Pass `provider` to override; set `no_agent: true` to park the task " <>
-          "in_progress without spawning a worker (hand-off / manual-attach workflows).",
+          "ProviderPool). Pass `provider` to override; set `no_agent: true` to move the task " <>
+          "to In progress without spawning a worker (hand-off / manual-attach workflows).",
       input_schema: %{
         "type" => "object",
         "properties" => %{
@@ -848,7 +857,7 @@ defmodule Arbiter.MCP.Catalog do
           "no_agent" => %{
             "type" => "boolean",
             "description" =>
-              "Dry dispatch — park the task in_progress without spawning a worker. Use for hand-off / manual-attach workflows."
+              "Dry dispatch — move the task to In progress without spawning a worker. Use for hand-off / manual-attach workflows."
           },
           "with_claude" => %{
             "type" => "boolean",
@@ -1494,15 +1503,32 @@ defmodule Arbiter.MCP.Catalog do
       name: "task_list",
       tiers: @coordinator,
       description:
-        "List tasks in the workspace with optional filters. `status` (open | in_progress | closed), " <>
-          "`priority` (integer 0–4), and `issue_type` (task | bug | feature | epic | chore | decision) " <>
-          "are all optional. Returns matching tasks in the coordinator's workspace.",
+        "List tasks in the workspace with optional filters: `state` (backlog | queued | " <>
+          "active | merging | verifying | closed), `column` (backlog | blocked | ready | " <>
+          "in_progress | merging | verifying | closed), `priority` (integer 0–4) and " <>
+          "`issue_type` (task | bug | feature | epic | chore | decision). Each task carries " <>
+          "`state`, `column`, `step`, `blocked_by` and `attention`. The legacy `status` " <>
+          "filter still works for one release; prefer `state` or `column`.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
+          "state" => %{
+            "type" => "string",
+            "description" =>
+              "Filter by stored lifecycle state: backlog | queued | active | merging | " <>
+                "verifying | closed."
+          },
+          "column" => %{
+            "type" => "string",
+            "description" =>
+              "Filter by board column: backlog | blocked | ready | in_progress | merging | " <>
+                "verifying | closed. Blocked and Ready split `queued` by its gating edges."
+          },
           "status" => %{
             "type" => "string",
-            "description" => "Filter by status: open | in_progress | closed."
+            "description" =>
+              "Deprecated (one release): legacy status open | in_progress | " <>
+                "awaiting_verification | closed. Use `state` or `column`."
           },
           "priority" => %{
             "type" => "integer",

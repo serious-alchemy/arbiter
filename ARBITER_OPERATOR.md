@@ -3,7 +3,10 @@
 Operating knowledge for the coordinator seat. Generic — applies to any Arbiter
 install. Update it as you learn.
 
-Run `arb prime` at the start of every session.
+Run `arb prime` at the start of every session. It prints each workspace's
+tickets in lifecycle order — Needs attention, In progress, Merging, Verifying,
+Ready, Blocked, and a Backlog count — so the first section is always the work
+that is waiting on someone (see §1a).
 
 ---
 
@@ -11,14 +14,70 @@ Run `arb prime` at the start of every session.
 
 You coordinate; the workers execute. Core loop:
 
-1. File an issue with crisp acceptance criteria, difficulty, and priority.
-2. Dispatch to a repo (`arb dispatch <id> [<repo>]`).
-3. Monitor — `arb prime` / `arb worker show <id>` / `arb worker list`.
+1. File an issue with crisp acceptance criteria, difficulty, and priority. It
+   starts in **Backlog**; `arb promote <id>` queues it (Ready, or Blocked while a
+   gating blocker is open).
+2. Dispatch to a repo (`arb dispatch <id> [<repo>]`), or let Autopilot take the
+   head of Ready. The ticket moves to **In progress**.
+3. Monitor — `arb prime` / `arb worker show <id>` / `arb worker list`. Work the
+   **Needs attention** section first.
 4. Review gate (pre-merge) escalates for your judgment; decide, don't
-   rubber-stamp.
-5. Merge and close the issue (or let close-on-merge handle it).
+   rubber-stamp. A ReviewGate park is attention on the ticket (cause names the
+   park reason), not a place.
+5. The ticket moves to **Merging** when its PR opens, then **Closed** on merge
+   — or **Verifying** first when it was flagged `verify_after_deploy`.
 
 External comms (GitHub, Slack) stay in normal professional voice.
+
+## 1a. Ticket lifecycle vocabulary
+
+Every surface — the board, `arb prime`, `arb issue show`, MCP `task_show` /
+`task_list` / `task_ready`, and the `task_state` event — gives the same answer
+about where a ticket is. Use these terms. The legacy `status` field and the
+old Backlog/Ready flag still ride along for one release, but nothing should
+read them: they are being removed.
+
+**State** — the one stored field: `backlog`, `queued`, `active`, `merging`,
+`verifying`, `closed`.
+
+**Column** — the state as the board shows it:
+
+| state | column |
+|---|---|
+| `backlog` | Backlog |
+| `queued` | **Blocked** (a gating blocker is still open) or **Ready** |
+| `active` | In progress |
+| `merging` | Merging |
+| `verifying` | Verifying |
+| `closed` | Closed (with a `close_reason`) |
+
+A blocker that is Verifying (merged, waiting on its verification) no longer
+blocks its dependents. Epics stay off the board and out of Ready.
+
+**Step** — computed, never stored, and only inside two columns:
+
+- In progress: `implementing`, `in_review`, `addressing_review`, `fixing_ci`,
+  `resolving_conflict`.
+- Merging: `waiting_ci`, `in_merge_queue`, `behind_base`, `merge_blocked`.
+
+**Attention** — an overlay, not a column: `{owner, waiting_on, reason}`. The
+ticket keeps its column. The coordinator owns everything the fleet can act on;
+an item reaches the operator only by an explicit hand-off (`arb issue handoff
+<id> --note …`) or an expired limit. Attention clears by itself when the ticket's
+state moves on.
+
+**Where to look for what:**
+
+| you want | read |
+|---|---|
+| what is waiting on someone | `arb prime` → Needs attention (coordinator's first, then operator's) |
+| what is working | In progress, with its step |
+| what has a PR open | Merging, with its step and PR |
+| what needs a restart-and-observe | Verifying → `arb issue verify <id> --observed "…"` |
+| what dispatches next | Ready, in dispatch order (`arb ready`, MCP `task_ready`) |
+| why a queued ticket isn't moving | Blocked, with its blockers |
+| one ticket | `arb issue show <id>` — State (column), Step, Attention, Close reason, PR + merge status, Current run |
+| a filtered list | MCP `task_list` with `state` or `column` |
 
 ## 2. Operating Pitfalls — Quick Reference
 
@@ -500,11 +559,19 @@ may not yet be in the inbox:
 arb worker list        # list all active and recently-completed workers
 ```
 
-Look for:
-- **status=failed** — A worker stopped with an error. Check `arb show <task-id>`
-  for the reason and decide whether to retry or escalate.
-- **status=running** — Expected; the worker is working.
-- **status=success** — Work completed; ready for the next phase (review, merge).
+Each run is labelled in the run vocabulary — its kind (`implement`, `review`,
+`fix_pass`, `conflict`) and its state (`starting`, `working`, `waiting`,
+`finished` with an outcome). A run never describes its ticket: read the ticket's
+column and attention for that. Look for:
+- **finished (failed)** / **finished (interrupted)** — A run stopped without
+  succeeding. With nothing else live on the ticket, the ticket carries
+  `run_crashed` attention and shows in `arb prime`'s Needs attention. Check
+  `arb issue show <task-id>` for the reason and resume or close.
+- **waiting** — On a question (answer it; the ticket carries
+  `run_asked_question` attention) or on the review gate (the machine's turn).
+- **starting** / **working** — Expected; the run is working.
+- **finished (succeeded)** — The attempt is done; the ticket has moved on
+  (Merging, Verifying or Closed).
 
 Catch failures early — don't wait for them to be reported upstream.
 
