@@ -1180,7 +1180,8 @@ defmodule Arbiter.Worker.Worktree do
     tracked? = Enum.any?(changes, &(not String.starts_with?(&1, "?? ")))
 
     [
-      tracked? && {"uncommitted changes", git_text(path, ["diff", "HEAD", "--" | @patch_pathspec])},
+      tracked? &&
+        {"uncommitted changes", git_text(path, ["diff", "HEAD", "--" | @patch_pathspec])},
       untracked != [] && {"untracked files", untracked_patch(path, untracked)},
       unpushed > 0 &&
         {"unpushed commits",

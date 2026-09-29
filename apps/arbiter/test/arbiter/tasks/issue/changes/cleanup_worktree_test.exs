@@ -62,7 +62,10 @@ defmodule Arbiter.Tasks.Issue.Changes.CleanupWorktreeTest do
     {:ok, task} =
       Ash.create(
         Issue,
-        Map.merge(%{title: "cw #{System.unique_integer([:positive])}", workspace_id: ws.id}, attrs)
+        Map.merge(
+          %{title: "cw #{System.unique_integer([:positive])}", workspace_id: ws.id},
+          attrs
+        )
       )
 
     {:ok, task} = Ash.update(task, %{status: :in_progress})

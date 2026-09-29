@@ -140,6 +140,8 @@ defmodule Arbiter.Application do
       # never on the sweep that first notices it. See
       # Arbiter.Sessions.OrphanReaper.
       Arbiter.Sessions.OrphanReaper,
+      # bd-9iv4qd: reclaims worktree-root leaves whose gitdir is gone.
+      Arbiter.Worker.WorktreeSweeper,
       # Deletes a session's persisted raw transcript once it has been :ended
       # past the retention window (phase 9, RFC §11). See
       # Arbiter.Sessions.TranscriptRetention.
