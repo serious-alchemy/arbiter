@@ -253,6 +253,7 @@ defmodule Arbiter.Worker.NotesGateTest do
 
     test "defaults to 2: a second send-back is attempted before escalating", %{ws: ws} do
       task = new_task(ws)
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, Arbiter.Events.pubsub_topic(ws.id))
       # No `notes_nudge_cap` meta override — the cap comes from config/default.
       pid = start_worker(task, %{})
       :ok = signal_done_session(pid, "ng-cap-default")
@@ -269,6 +270,25 @@ defmodule Arbiter.Worker.NotesGateTest do
       escalation = notes_gate_escalation(ws, task)
       assert escalation
       assert escalation.body =~ "tried 2/2 send-back attempt(s)"
+
+      # bd-4qjl0q AC6: the exhausted budget is counted on the events stream.
+      assert_receive {:event, %{topic: "gate_cap_hit", gate: "notes_gate"} = event}
+      assert event.task_id == task.id
+      assert event.rounds == 2
+      assert event.cap == 2
+    end
+
+    test "a respawn failure is not a cap hit and emits no gate_cap_hit", %{ws: ws} do
+      task = new_task(ws)
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, Arbiter.Events.pubsub_topic(ws.id))
+      # No real session → no stashed spawn args → the send-back cannot relaunch.
+      pid = start_worker(task, %{})
+
+      send(pid, {:__claude_session_done__, "arb " <> "done"})
+
+      wait_until(fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end)
+      assert {:respawn_failed, _} = Worker.state(pid).meta.notes_gate_detail
+      refute_received {:event, %{topic: "gate_cap_hit"}}
     end
 
     test "notes_gate.nudge_cap = 1 preserves the single send-back", %{ws: ws} do

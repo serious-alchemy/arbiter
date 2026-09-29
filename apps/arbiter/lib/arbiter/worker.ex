@@ -5157,6 +5157,7 @@ defmodule Arbiter.Worker do
 
     record_commit_gate_note(state, reason, why, summary)
     escalate_commit_gate(state, subject, summary)
+    if why == :cap_exhausted, do: emit_gate_cap_hit(state, :commit_gate, :commit_nudge_attempts)
 
     meta =
       (state.meta || %{})
@@ -5164,6 +5165,26 @@ defmodule Arbiter.Worker do
       |> Map.put(:commit_gate_detail, why)
 
     fail_now(%State{state | meta: meta}, failure_reason)
+  end
+
+  # bd-4qjl0q: a gate escalating because its send-back budget ran out is a cap
+  # hit — counted on the events stream alongside the ReviewGate's round cap, so
+  # "how often does the cap fire, and what did the coordinator decide after"
+  # is answerable from `gate_cap_hit` + `gate_resolved` events.
+  defp emit_gate_cap_hit(%State{meta: meta} = state, gate, attempts_key) do
+    cap =
+      case gate do
+        :notes_gate -> notes_nudge_cap(state)
+        :commit_gate -> commit_nudge_cap(meta)
+      end
+
+    Arbiter.ReviewGate.Resolutions.cap_hit(%{
+      workspace_id: state.workspace_id,
+      task_id: state.task_id,
+      gate: gate,
+      rounds: (meta && Map.get(meta, attempts_key)) || 0,
+      cap: cap
+    })
   end
 
   defp commit_gate_failure_metadata(:uncommitted),
@@ -5319,6 +5340,7 @@ defmodule Arbiter.Worker do
   defp park_notes_gate(%State{} = state, why) do
     summary = notes_gate_summary(state, why)
     escalate_notes_gate(state, summary)
+    if why == :cap_exhausted, do: emit_gate_cap_hit(state, :notes_gate, :notes_nudge_attempts)
 
     meta = Map.put(state.meta || %{}, :notes_gate_detail, why)
     fail_now(%State{state | meta: meta}, notes_gate_failure_reason(meta))

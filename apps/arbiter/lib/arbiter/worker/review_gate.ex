@@ -1913,6 +1913,16 @@ defmodule Arbiter.Worker.ReviewGate do
       "ReviewGate: task=#{state.task_id} not converged after #{max} round(s); escalating with transcript"
     )
 
+    # bd-4qjl0q: count the cap hit. Observation only — the cap and the
+    # convergence routing above/below are unchanged.
+    Arbiter.ReviewGate.Resolutions.cap_hit(%{
+      workspace_id: state.workspace_id,
+      task_id: state.task_id,
+      gate: :review_gate,
+      rounds: round,
+      cap: max
+    })
+
     {:done, finish(state, terminal_reject_verdict(state))}
   end
 

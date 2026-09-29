@@ -69,6 +69,40 @@ defmodule Arbiter.ReviewGate.Resolutions do
     end
   end
 
+  @doc """
+  Emit a `gate_cap_hit` event: `gate` escalated `task_id` because its round /
+  send-back budget ran out after `rounds` of `cap`. Counting these is what lets
+  the cap be tuned by evidence — pair them with `gate_resolved` events to see
+  what the coordinator decided after each one.
+
+  Best-effort and never raises: it runs on a gate's terminal path. A nil
+  workspace is a no-op (the events stream is workspace-scoped).
+  """
+  @spec cap_hit(%{
+          workspace_id: String.t() | nil,
+          task_id: String.t(),
+          gate: atom(),
+          rounds: non_neg_integer(),
+          cap: non_neg_integer()
+        }) :: :ok
+  def cap_hit(%{workspace_id: ws_id, task_id: task_id, gate: gate, rounds: rounds, cap: cap})
+      when is_binary(ws_id) do
+    Arbiter.Events.broadcast(ws_id, "gate_cap_hit", %{
+      task_id: task_id,
+      gate: Atom.to_string(gate),
+      rounds: rounds,
+      cap: cap
+    })
+
+    :ok
+  rescue
+    e ->
+      Logger.warning("gate_cap_hit event for task=#{task_id} not emitted: #{Exception.message(e)}")
+      :ok
+  end
+
+  def cap_hit(_), do: :ok
+
   @doc "Every resolution recorded for `task_id`, oldest first."
   @spec list(String.t()) :: [Resolution.t()]
   def list(task_id) when is_binary(task_id) do
