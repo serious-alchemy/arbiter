@@ -6,9 +6,9 @@ defmodule ArbiterCli.MainTest do
   @issues %{"data" => [%{"id" => "bd-1", "title" => "T", "status" => "open"}]}
 
   describe "arb <resource> <verb>" do
-    test "issue list dispatches to the issue resource" do
+    test "ticket list dispatches to the ticket resource" do
       stub_get("/api/issues", @issues)
-      {out, _err, code} = capture(fn -> Main.main(["issue", "list"]) end)
+      {out, _err, code} = capture(fn -> Main.main(["ticket", "list"]) end)
       assert code == 0
       assert out =~ "bd-1"
     end
@@ -27,6 +27,83 @@ defmodule ArbiterCli.MainTest do
 
       assert code == 0
       assert out =~ "bd-1"
+    end
+  end
+
+  describe "arb ticket, and arb issue as its deprecated alias (bd-4jojpw)" do
+    @deprecation "arb: note: `arb issue` is deprecated; use `arb ticket` (same subcommands).\n"
+
+    # Every request answers 200 with a small record, so each verb gets as far
+    # down its real path as a generic body allows — and a raise is recorded
+    # rather than failing the test, since it must merely be the same raise.
+    defp stub_echo do
+      Req.Test.stub(Process.get(:bd2_stub_name), fn conn ->
+        Req.Test.json(conn, %{
+          "id" => "bd-1",
+          "title" => "T",
+          "status" => "open",
+          "data" => [],
+          "task" => %{"id" => "bd-1"},
+          "worker" => %{},
+          "machine" => %{}
+        })
+      end)
+    end
+
+    defp run_cli(argv) do
+      stub_echo()
+
+      capture(fn ->
+        try do
+          Main.main(argv)
+        rescue
+          e in ArbiterCli.Output.Halt -> reraise e, __STACKTRACE__
+          e -> IO.puts("raised: " <> Exception.message(e))
+        end
+      end)
+    end
+
+    test "arb ticket <verb> behaves exactly like arb issue <verb>, minus one deprecation line" do
+      for verb <- ArbiterCli.Cmd.Issue.subcommands(),
+          args <- [[], ["bd-1"], ["bd-1", "--json"]] do
+        {t_out, t_err, t_code} = run_cli(["ticket", verb | args])
+        {i_out, i_err, i_code} = run_cli(["issue", verb | args])
+
+        label = "arb {ticket,issue} #{Enum.join([verb | args], " ")}"
+        assert i_out == t_out, label
+        assert i_code == t_code, label
+        assert i_err == @deprecation <> t_err, label
+        refute t_err =~ "deprecated", label
+      end
+    end
+
+    test "arb ticket list reaches the list endpoint with no note" do
+      stub_get("/api/issues", @issues)
+      {out, err, code} = capture(fn -> Main.main(["ticket", "list"]) end)
+      assert code == 0
+      assert out =~ "bd-1"
+      assert err == ""
+    end
+
+    test "arb issue list still works and prints exactly one deprecation line on stderr" do
+      stub_get("/api/issues", @issues)
+      {out, err, code} = capture(fn -> Main.main(["issue", "list"]) end)
+      assert code == 0
+      assert out =~ "bd-1"
+      assert err == @deprecation
+    end
+
+    test "arb ticket with no subcommand names the ticket resource" do
+      {_out, err, code} = capture(fn -> Main.main(["ticket"]) end)
+      assert code == 1
+      assert err =~ "ticket requires a subcommand"
+    end
+
+    test "arb ticket --help documents the ticket grammar" do
+      {out, _err, code} = capture(fn -> Main.main(["ticket", "--help"]) end)
+      assert code == 0
+      assert out =~ "arb ticket list"
+      refute out =~ "arb issue list"
     end
   end
 
@@ -54,7 +131,7 @@ defmodule ArbiterCli.MainTest do
           }, 200}}
       ])
 
-      {_out, _err, code} = capture(fn -> Main.main(["-w", "myws", "issue", "list"]) end)
+      {_out, _err, code} = capture(fn -> Main.main(["-w", "myws", "ticket", "list"]) end)
       assert code == 0
       assert System.get_env("ARB_WORKSPACE") == "myws"
     end
@@ -71,7 +148,7 @@ defmodule ArbiterCli.MainTest do
       ])
 
       {_out, _err, code} =
-        capture(fn -> Main.main(["--workspace", "myws", "issue", "list"]) end)
+        capture(fn -> Main.main(["--workspace", "myws", "ticket", "list"]) end)
 
       assert code == 0
       assert System.get_env("ARB_WORKSPACE") == "myws"
@@ -92,7 +169,7 @@ defmodule ArbiterCli.MainTest do
       ])
 
       {_out, _err, code} =
-        capture(fn -> Main.main(["-w", "other", "issue", "list"]) end)
+        capture(fn -> Main.main(["-w", "other", "ticket", "list"]) end)
 
       assert code == 0
       assert System.get_env("ARB_WORKSPACE") == "other"
@@ -110,7 +187,7 @@ defmodule ArbiterCli.MainTest do
       ])
 
       {_out, _err, code} =
-        capture(fn -> Main.main(["issue", "list", "-w", "myws"]) end)
+        capture(fn -> Main.main(["ticket", "list", "-w", "myws"]) end)
 
       assert code == 0
       assert System.get_env("ARB_WORKSPACE") == "myws"
@@ -126,7 +203,7 @@ defmodule ArbiterCli.MainTest do
       ])
 
       {_out, err, code} =
-        capture(fn -> Main.main(["-w", "unknown-name", "issue", "list", "--tracker"]) end)
+        capture(fn -> Main.main(["-w", "unknown-name", "ticket", "list", "--tracker"]) end)
 
       assert code != 0
       assert err =~ "unknown-name"
@@ -134,13 +211,13 @@ defmodule ArbiterCli.MainTest do
   end
 
   describe "legacy flat commands" do
-    test "arb list runs arb issue list and prints a migration note" do
+    test "arb list runs arb ticket list and prints a migration note" do
       stub_get("/api/issues", @issues)
 
       {out, err, code} = capture(fn -> Main.main(["list"]) end)
       assert code == 0
       assert out =~ "bd-1"
-      assert err =~ "`arb list` is now `arb issue list`"
+      assert err =~ "`arb list` is now `arb ticket list`"
     end
 
     test "arb update with no id redirects to server deploy" do

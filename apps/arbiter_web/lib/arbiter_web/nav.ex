@@ -42,7 +42,7 @@ defmodule ArbiterWeb.Nav do
         label: "Work",
         items: [
           %{
-            label: cap_plural("issue"),
+            label: cap_plural("ticket"),
             href: ~p"/tasks",
             icon: "hero-clipboard-document-list",
             badge: nil

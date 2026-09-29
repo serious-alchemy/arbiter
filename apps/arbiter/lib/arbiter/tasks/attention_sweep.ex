@@ -18,7 +18,7 @@ defmodule Arbiter.Tasks.AttentionSweep do
 
   A promotion sets the owner to `:operator` with the note "coordinator did not
   resolve within <limit>" (`Arbiter.Tasks.Attention.promote/3`), which the
-  ticket's attention, `task_show` and the dashboard show, and announces
+  ticket's attention, `ticket_show` and the dashboard show, and announces
   `promoted` on the `inbox` topic. A derived item seen for the first time is
   announced `raised` — nothing else raised it — so the coordinator wakes for it
   as for a stored one.

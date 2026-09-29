@@ -31,7 +31,7 @@ defmodule ArbiterCli.Cmd.PromoteTest do
   test "promote requires id" do
     {_out, err, exit_code} = capture(fn -> Promote.run([]) end)
     assert exit_code == 1
-    assert err =~ "requires an issue id"
+    assert err =~ "requires a ticket id"
   end
 
   test "promoting an already-refined task succeeds as a no-op" do

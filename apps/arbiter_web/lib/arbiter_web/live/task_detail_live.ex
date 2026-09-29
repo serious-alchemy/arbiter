@@ -221,7 +221,7 @@ defmodule ArbiterWeb.TaskDetailLive do
      |> assign(:parent_refs, [])
      |> assign(:children_by_status, nil)
      |> assign(:epic_cost_rollup, nil)
-     |> assign(:issue_label, "issue")
+     |> assign(:issue_label, "ticket")
      |> assign(:worker_label, "worker")
      |> assign(:workspace_label, "workspace")
      |> assign(:rig_label, "repo")
@@ -742,7 +742,7 @@ defmodule ArbiterWeb.TaskDetailLive do
          assign(
            socket,
            :rel_error,
-           "Search for an #{socket.assigns.issue_label} to link, or paste its id."
+           "Search for a #{socket.assigns.issue_label} to link, or paste its id."
          )}
 
       _ ->
@@ -2219,10 +2219,10 @@ defmodule ArbiterWeb.TaskDetailLive do
           <div class="flex items-center gap-2 min-w-0 text-[11.5px] font-[family-name:var(--font-mono)] text-[var(--text-label)]">
             <.link
               navigate={~p"/tasks"}
-              title="Up to the issues index"
+              title="Up to the tickets index"
               class="hover:text-[var(--text-title)] transition-colors"
             >
-              Board / Issues /
+              Board / Tickets /
             </.link>
             <code class="text-[var(--text-title)]">{@task_id}</code>
             <ArbiterWeb.CoreComponents.Core.copy_id id={@task_id} />
@@ -2652,7 +2652,7 @@ defmodule ArbiterWeb.TaskDetailLive do
                       title={
                         if(@review_summary.run_id,
                           do: "Open this round's reviewer run in RUNS",
-                          else: "The run for this round is no longer on this issue's roster"
+                          else: "The run for this round is no longer on this ticket's roster"
                         )
                       }
                       class={[
@@ -2784,7 +2784,7 @@ defmodule ArbiterWeb.TaskDetailLive do
                   icon="hero-cpu-chip"
                   detail={"arb dispatch #{@task_id}"}
                 >
-                  No runs of this kind on this issue yet.
+                  No runs of this kind on this ticket yet.
                 </ArbiterWeb.CoreComponents.Feedback.empty_state>
 
                 <div :for={r <- @visible_runs} class="flex flex-col">
@@ -3018,10 +3018,10 @@ defmodule ArbiterWeb.TaskDetailLive do
                     the new path once, then record what you saw:
                   </p>
                   <code class="block text-[11px] text-[var(--text-label)]" phx-no-curly-interpolation>
-                    arb issue verify {@task_id} --observed "&lt;evidence&gt;"
+                    arb ticket verify {@task_id} --observed "&lt;evidence&gt;"
                   </code>
                   <code class="block text-[11px] text-[var(--text-label)]" phx-no-curly-interpolation>
-                    arb issue verify {@task_id} --failed "&lt;evidence&gt;"
+                    arb ticket verify {@task_id} --failed "&lt;evidence&gt;"
                   </code>
                 </div>
               </.panel>
@@ -3770,7 +3770,7 @@ defmodule ArbiterWeb.TaskDetailLive do
               value={@rel_query}
               autocomplete="off"
               phx-debounce="150"
-              placeholder={"Search by id or title — or paste an #{@issue_label} id"}
+              placeholder={"Search by id or title — or paste a #{@issue_label} id"}
             />
 
             <div
@@ -4147,7 +4147,7 @@ defmodule ArbiterWeb.TaskDetailLive do
         class="pl-6 text-[11px] text-[var(--text-secondary)]"
       >
         merged; waiting on someone to verify it — it no longer blocks this ticket.
-        <code class="ml-1 text-[10.5px]">arb issue verify {@entry.issue_id}</code>
+        <code class="ml-1 text-[10.5px]">arb ticket verify {@entry.issue_id}</code>
       </p>
       <details
         :if={present?(@entry.edge.notes) || present?(@entry.edge.created_by)}
@@ -4349,12 +4349,12 @@ defmodule ArbiterWeb.TaskDetailLive do
     do:
       "Worker spend: this epic's own agent sessions (almost always none) plus every direct " <>
         "child's, across every bucket. Excludes coordinator session overhead, which is metered " <>
-        "per session and belongs to no single issue."
+        "per session and belongs to no single ticket."
 
   defp spend_figure_title(_issue_type),
     do:
-      "Worker spend: this issue's agent sessions and their review / fix-pass rounds. Excludes " <>
-        "coordinator session overhead, which is metered per session and belongs to no single issue."
+      "Worker spend: this ticket's agent sessions and their review / fix-pass rounds. Excludes " <>
+        "coordinator session overhead, which is metered per session and belongs to no single ticket."
 
   # `Estimate: $3.00–$8.00 (p90 $9.00) · difficulty+type, n=77`. Basis and n
   # ride along always, not just on the coarse rungs: a `global, n=11` range and
@@ -4388,7 +4388,7 @@ defmodule ArbiterWeb.TaskDetailLive do
       "Past the p75 of what this epic's children cost together (#{money(est.p75)}) — informational."
 
   defp spend_chip_title(%{state: :running_high, estimate: est}),
-    do: "Past the p75 of what issues like this cost (#{money(est.p75)}) — informational."
+    do: "Past the p75 of what tickets like this cost (#{money(est.p75)}) — informational."
 
   defp spend_chip_title(%{state: :over_budget, estimate: %{basis: @epic_estimate_basis} = est}),
     do:
@@ -4397,7 +4397,7 @@ defmodule ArbiterWeb.TaskDetailLive do
 
   defp spend_chip_title(%{state: :over_budget, estimate: est}),
     do:
-      "Past the p90 of what issues like this cost (#{money(est.p90)}). " <>
+      "Past the p90 of what tickets like this cost (#{money(est.p90)}). " <>
         "Nothing has been stopped; the coordinator has been told once."
 
   defp spend_chip_title(_budget), do: nil
@@ -4685,9 +4685,9 @@ defmodule ArbiterWeb.TaskDetailLive do
     |> Enum.map(fn {line, number} -> %{time: to_string(number), role: "out", text: line} end)
   end
 
-  defp run_count_summary([]), do: "No runs on this issue yet."
-  defp run_count_summary([_one]), do: "1 run on this issue"
-  defp run_count_summary(runs), do: "#{length(runs)} runs on this issue"
+  defp run_count_summary([]), do: "No runs on this ticket yet."
+  defp run_count_summary([_one]), do: "1 run on this ticket"
+  defp run_count_summary(runs), do: "#{length(runs)} runs on this ticket"
 
   # `9 total · 1 running · $3.42` — the three numbers that decide whether the
   # roster is worth opening. Spend is only shown once something has cost

@@ -106,7 +106,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
 
       {:ok, view, html} = live_workspace(conn, ws.id)
 
-      assert html =~ "does not rename existing issue IDs"
+      assert html =~ "does not rename existing ticket IDs"
 
       html =
         view

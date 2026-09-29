@@ -107,7 +107,7 @@ defmodule Arbiter.Worker.PromptBuilderTest do
            prove is live: env/config plumbing that has to reach a spawned worker,
            a `doctor`/health probe, a capture or ingest path, code whose first real
            run is inside the running Phoenix process. Set the flag by calling the
-           `task_update_progress` MCP tool with `verify_after_deploy: true`, and say
+           `ticket_update_progress` MCP tool with `verify_after_deploy: true`, and say
            in your `notes` what to look at after a restart and what a working result
            looks like.
 
@@ -128,7 +128,7 @@ defmodule Arbiter.Worker.PromptBuilderTest do
 
            If the repo has a PR template (`.github/pull_request_template.md`), FILL it
            rather than discard it. Persist the finished body verbatim by calling the
-           `task_update_progress` MCP tool with its `pr_body` argument set to the full
+           `ticket_update_progress` MCP tool with its `pr_body` argument set to the full
            PR body (Markdown). Use the MCP tool, which is available in this session —
            do NOT shell out to the `arb` CLI for this.
 
@@ -254,7 +254,7 @@ defmodule Arbiter.Worker.PromptBuilderTest do
            Your job:
              1. Do the investigation / ops work the directive describes.
              2. Write your findings to the directive's `notes` field by calling the
-                `task_update_progress` MCP tool with its `notes` argument (Markdown is
+                `ticket_update_progress` MCP tool with its `notes` argument (Markdown is
                 fine). Make it self-contained: what you investigated, what you found,
                 and any recommendation or conclusion the coordinator needs — they read it
                 via `arb show bd-golden1` and the dashboard.
@@ -262,7 +262,7 @@ defmodule Arbiter.Worker.PromptBuilderTest do
            A notes gate enforces this: if you print `arb done` while `notes` is still
            blank, you will be reprompted to write your findings before the directive
            can close. Do NOT shell out to the `arb` CLI for the notes — use the
-           `task_update_progress` MCP tool.
+           `ticket_update_progress` MCP tool.
 
            Coordination: at the start of each step, check your mailbox by running
 
@@ -571,7 +571,7 @@ defmodule Arbiter.Worker.PromptBuilderTest do
       prompt = PromptBuilder.prompt_for_task(task(%{}), [])
 
       assert prompt =~ "verify_after_deploy"
-      assert prompt =~ "task_update_progress"
+      assert prompt =~ "ticket_update_progress"
       assert prompt =~ "long-lived server"
     end
 
@@ -582,7 +582,7 @@ defmodule Arbiter.Worker.PromptBuilderTest do
     end
   end
 
-  # bd-8ssxap: a task reopened by `task_verify failed` was redispatched with no
+  # bd-8ssxap: a task reopened by `ticket_verify failed` was redispatched with no
   # mention of the recorded evidence — the worker had no way to know its prior
   # (already-merged) attempt didn't actually fix the bug, and just re-submitted
   # the same work.

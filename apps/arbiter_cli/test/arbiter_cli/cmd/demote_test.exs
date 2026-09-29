@@ -31,7 +31,7 @@ defmodule ArbiterCli.Cmd.DemoteTest do
   test "demote requires id" do
     {_out, err, exit_code} = capture(fn -> Demote.run([]) end)
     assert exit_code == 1
-    assert err =~ "requires an issue id"
+    assert err =~ "requires a ticket id"
   end
 
   test "demoting an already-backlog task succeeds as a no-op" do

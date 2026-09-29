@@ -1,8 +1,8 @@
 defmodule Arbiter.MCP.Tools.Task do
   @moduledoc """
-  `Arbiter.MCP.Tools` handlers for reading and mutating tasks: `task_show` /
-  `task_ready` / `task_update_progress` / `task_create` / `task_update` /
-  `task_close` / `task_reopen` / `task_verify` / `task_sync_upstream_close` / `dep_add` /
+  `Arbiter.MCP.Tools` handlers for reading and mutating tasks: `ticket_show` /
+  `ticket_ready` / `ticket_update_progress` / `ticket_create` / `ticket_update` /
+  `ticket_close` / `ticket_reopen` / `ticket_verify` / `ticket_sync_upstream_close` / `dep_add` /
   `dep_remove`. Split out of `Arbiter.MCP.Tools` (see its moduledoc) — called
   back into for the generic arg/serialization helpers it still owns.
   """
@@ -44,7 +44,7 @@ defmodule Arbiter.MCP.Tools.Task do
   # promotion so the rule travels with the action, not just the docs.
   @edges_before_promote "Edges before promote: Autopilot can claim this task within seconds " <>
                           "of it going Ready, so every parent_of child and depends_on edge it " <>
-                          "needs must already exist. Promote last. If this is your bound issue " <>
+                          "needs must already exist. Promote last. If this is your bound ticket " <>
                           "in a refine session, promote it last of all — promoting it ends the " <>
                           "session and revokes your token immediately, stranding any child not " <>
                           "yet promoted."
@@ -131,7 +131,7 @@ defmodule Arbiter.MCP.Tools.Task do
 
   @doc """
   The worker's one write: record `notes` / `qa_notes` / `deployment_notes` /
-  `pr_body` on its own task (the structured replacement for `arb issue update
+  `pr_body` on its own task (the structured replacement for `arb ticket update
   <id> --qa-notes …`). It cannot flip status, reprioritize, or touch another
   task. Coordinator: the same narrow write against any task in its workspace.
   """
@@ -173,7 +173,7 @@ defmodule Arbiter.MCP.Tools.Task do
   bound issue and must be the bound issue or one of its descendants, so a refine
   token cannot file a task outside its subtree. The parent is authorized *before*
   the task is created — a refused create leaves nothing behind. The same
-  `refine_field_gate/2` that narrows `task_update` also runs here, so a refine
+  `refine_field_gate/2` that narrows `ticket_update` also runs here, so a refine
   session cannot set on create (`tracker_ref`, `target_branch`, …)
   what it would be refused on update.
   """
@@ -290,12 +290,12 @@ defmodule Arbiter.MCP.Tools.Task do
         " — the task is filed with no parent; attach it with dep_add rather than filing it again"
       end
 
-    "task #{issue.id} was created, but the parent_of edge from #{parent_id} failed: " <>
+    "ticket #{issue.id} was created, but the parent_of edge from #{parent_id} failed: " <>
       inspect(reason) <> recovery
   end
 
   # bd-7mbrlg: non-blocking heads-up at filing time — the task is created
-  # either way, but `task_promote` will later refuse it without `acceptance`
+  # either way, but `ticket_promote` will later refuse it without `acceptance`
   # or an explicit `acceptance_waived` reason.
   defp with_ac_warning(result, %Issue{} = issue) do
     if Issue.gated_type?(issue.issue_type) and blank?(issue.acceptance) do
@@ -351,7 +351,7 @@ defmodule Arbiter.MCP.Tools.Task do
   @doc """
   Update a task in the scope's workspace (status / priority / title / …).
   Coordinator only. The `:closed` status is rejected here — closing goes through
-  `task_close`, which runs the close FSM + teardown. Backs onto the task's
+  `ticket_close`, which runs the close FSM + teardown. Backs onto the task's
   `:update` action.
   """
   @spec task_update(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
@@ -470,7 +470,7 @@ defmodule Arbiter.MCP.Tools.Task do
 
   @doc """
   Move a task from Ready (refined: true) back to Backlog (refined: false).
-  Inverse of `task_promote`. Coordinator only, and idempotent.
+  Inverse of `ticket_promote`. Coordinator only, and idempotent.
 
   A task can only be demoted if:
   1. It has no live worker
@@ -500,7 +500,7 @@ defmodule Arbiter.MCP.Tools.Task do
   Reorder a task inside its workspace's rank order (bd-djapyj): the space
   `board/scheduler.ex` and Autopilot dispatch read (priority, then rank,
   then age). Coordinator only. Backs onto the `:set_rank` action, the same
-  one the CLI (`arb issue rank`) and REST (`PATCH /api/issues/:id/rank`)
+  one the CLI (`arb ticket rank`) and REST (`PATCH /api/issues/:id/rank`)
   use. Exactly one of `top`, `bottom`, `before_id`, `after_id` is required.
   Never changes priority — ranking before/after a task in a different
   priority band only orders within rank, it does not move the task into

@@ -4416,7 +4416,7 @@ defmodule Arbiter.Worker do
   # deliverable is a findings summary in the directive's `notes`, not a code
   # change. The notes gate is the task-type analogue of the commit gate: it
   # refuses to let `arb done` close the directive while `notes` is blank, and
-  # reprompts the worker to write its findings via the `task_update_progress`
+  # reprompts the worker to write its findings via the `ticket_update_progress`
   # MCP tool.
   #
   # Returns `:ok` to proceed, or `{:gate, :blank}` to divert. A DB read failure
@@ -4536,7 +4536,7 @@ defmodule Arbiter.Worker do
 
     Do EXACTLY this, then print `arb done` again on its own line:
 
-      1. Call the `task_update_progress` MCP tool with its `notes` argument set
+      1. Call the `ticket_update_progress` MCP tool with its `notes` argument set
          to your findings / results summary for this directive (Markdown is fine).
       2. Make it self-contained: what you investigated, what you found, and any
          recommendation or conclusion the coordinator needs — they read it via
@@ -4989,7 +4989,7 @@ defmodule Arbiter.Worker do
       2. If the task cannot be finished without the denied action, say so in
          your findings: what you could not do, and why.
       3. Record your findings or results in the task's `notes` with the
-         `task_update_progress` MCP tool (`arb` is also allowed).
+         `ticket_update_progress` MCP tool (`arb` is also allowed).
 
     Then finish the remaining work and print `arb done` on its own line.
     """
@@ -5348,7 +5348,7 @@ defmodule Arbiter.Worker do
     #{detail_blurb}#{notes_gate_denial_blurb(meta)}
 
     The directive cannot close without its findings. Re-dispatch it and ensure
-    the worker writes its results to `notes` via the `task_update_progress` MCP
+    the worker writes its results to `notes` via the `ticket_update_progress` MCP
     tool before completing.
     """
     |> String.trim()
@@ -7176,7 +7176,7 @@ defmodule Arbiter.Worker do
       * re-run the review (`arb worker resume #{task_id}`) — the gate starts
         fresh and the park clears on its own;
       * #{park_merge_advice(state, push_state)}
-      * reject it (`arb issue close #{task_id}`), which also clears the park.
+      * reject it (`arb ticket close #{task_id}`), which also clears the park.
 
     Full round history: `review_gate_rounds_list` for #{task_id}.
 

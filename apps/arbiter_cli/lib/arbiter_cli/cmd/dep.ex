@@ -101,7 +101,7 @@ defmodule ArbiterCli.Cmd.Dep do
     case positional do
       [] -> list_workspace(opts, mode)
       [issue] -> list_issue(issue, opts, mode)
-      _ -> Output.die("dep list takes at most one argument: an issue id")
+      _ -> Output.die("dep list takes at most one argument: a ticket id")
     end
   end
 

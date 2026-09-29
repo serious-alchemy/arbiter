@@ -491,8 +491,8 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
                     </:control>
                   </.setting_row>
                   <.setting_row
-                    name="Issue prefix"
-                    consequence="new issue IDs get this prefix; it does not rename existing issue IDs"
+                    name="Ticket prefix"
+                    consequence="new ticket IDs get this prefix; it does not rename existing ticket IDs"
                   >
                     <:control>
                       <Forms.input
@@ -506,8 +506,8 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
                     </:control>
                   </.setting_row>
                   <.toggle_row
-                    name="Auto-dispatch ready issues"
-                    consequence="Ready issues promote themselves each scheduler tick, within slot, dependency, file-overlap and quota limits; install-wide"
+                    name="Auto-dispatch ready tickets"
+                    consequence="Ready tickets promote themselves each scheduler tick, within slot, dependency, file-overlap and quota limits; install-wide"
                     checked={@autodispatch == true}
                     disabled={is_nil(@autodispatch)}
                     click="toggle_autodispatch"

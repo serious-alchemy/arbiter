@@ -2,7 +2,7 @@ defmodule Arbiter.Tasks.Lifecycle.Projection do
   @moduledoc """
   The impure edge of `Arbiter.Tasks.Lifecycle.View` for every surface that is
   not the board (ticket lifecycle 10/13, bd-6fkgvo): `arb prime`,
-  `arb issue show`, MCP `task_show` / `task_list` / `task_ready` and
+  `arb ticket show`, MCP `ticket_show` / `ticket_list` / `ticket_ready` and
   `GET /api/issues/lifecycle`.
 
   `Lifecycle.view/2` is pure; this module does the reads it needs, once per

@@ -124,7 +124,7 @@ defmodule ArbiterWeb.WorkspaceDetailAsyncTest do
   end
 
   describe "the auto-dispatch switch" do
-    @switch ~s(button[role="switch"][aria-label="Auto-dispatch ready issues"])
+    @switch ~s(button[role="switch"][aria-label="Auto-dispatch ready tickets"])
 
     setup do
       :meck.new(Autopilot, [:passthrough, :no_link])

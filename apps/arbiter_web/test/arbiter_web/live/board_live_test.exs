@@ -246,12 +246,12 @@ defmodule ArbiterWeb.BoardLiveTest do
 
       assert has_element?(
                view,
-               ~s(div[id="card-#{task.id}"] button[type="button"][aria-label="Copy issue id #{task.id}"])
+               ~s(div[id="card-#{task.id}"] button[type="button"][aria-label="Copy ticket id #{task.id}"])
              )
 
       refute has_element?(
                view,
-               ~s(div[id="card-#{task.id}"] a button[type="button"][aria-label="Copy issue id #{task.id}"])
+               ~s(div[id="card-#{task.id}"] a button[type="button"][aria-label="Copy ticket id #{task.id}"])
              )
     end
   end

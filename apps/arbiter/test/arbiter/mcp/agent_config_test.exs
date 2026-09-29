@@ -49,8 +49,8 @@ defmodule Arbiter.MCP.AgentConfigTest do
       tools = config["mcpServers"]["arbiter"]["includeTools"]
 
       assert is_list(tools)
-      assert "task_show" in tools
-      assert "task_update_progress" in tools
+      assert "ticket_show" in tools
+      assert "ticket_update_progress" in tools
       assert "inbox_check" in tools
       assert "message_send" in tools
       assert "workspace_show" in tools
@@ -63,9 +63,9 @@ defmodule Arbiter.MCP.AgentConfigTest do
 
     test "accepts a custom include_tools list" do
       config =
-        Gemini.config_map(mcp_url: "u", scope_token: "t", include_tools: ["task_show"])
+        Gemini.config_map(mcp_url: "u", scope_token: "t", include_tools: ["ticket_show"])
 
-      assert config["mcpServers"]["arbiter"]["includeTools"] == ["task_show"]
+      assert config["mcpServers"]["arbiter"]["includeTools"] == ["ticket_show"]
     end
 
     test "honours a custom server_name" do
@@ -148,7 +148,7 @@ defmodule Arbiter.MCP.AgentConfigTest do
 
       # agy names the client-side allowlist `enabledTools`; the upstream gemini
       # CLI names it `includeTools`. Neither accepts the other's key.
-      assert "task_show" in server["enabledTools"]
+      assert "ticket_show" in server["enabledTools"]
       refute Map.has_key?(server, "includeTools")
       refute Map.has_key?(server, "httpUrl")
     end
@@ -252,7 +252,7 @@ defmodule Arbiter.MCP.AgentConfigTest do
       assert scope.task_id == "bd-88"
 
       assert is_list(server["includeTools"])
-      assert "task_show" in server["includeTools"]
+      assert "ticket_show" in server["includeTools"]
     end
 
     test "writes a .codex/config.toml for the :codex provider", %{dir: dir} do

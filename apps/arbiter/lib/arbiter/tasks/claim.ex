@@ -119,7 +119,7 @@ defmodule Arbiter.Tasks.Claim do
       bd-2wilou drift case — a close that never propagated upstream) →
       `{:drift, task_id, reason}`. This is report-only: `apply_plan/3` never
       writes anything for a `:drift` action, since fixing it means re-closing
-      upstream (`task_sync_upstream_close`), not touching the local task.
+      upstream (`ticket_sync_upstream_close`), not touching the local task.
       Only closes that were *meant* to propagate are eligible: a close carries
       a recorded `close_upstream_expected` (bd-bsco7f), and for rows predating
       that, `pr_ref`'s presence stands in (bd-83ojwi). `:task`-type and
@@ -533,7 +533,7 @@ defmodule Arbiter.Tasks.Claim do
   end
 
   # Report-only: a `:drift` action never writes to the local task. Fixing
-  # drift means propagating the close upstream (`task_sync_upstream_close`),
+  # drift means propagating the close upstream (`ticket_sync_upstream_close`),
   # not mutating the task that's already correctly closed locally.
   defp apply_action(_workspace, {:drift, task_id, _reason} = action) do
     case Ash.get(Issue, task_id) do

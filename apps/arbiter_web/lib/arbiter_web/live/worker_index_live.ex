@@ -41,7 +41,7 @@ defmodule ArbiterWeb.WorkerIndexLive do
       socket
       |> assign(:now, DateTime.utc_now())
       |> assign(:worker_label, "worker")
-      |> assign(:issue_label, "issue")
+      |> assign(:issue_label, "ticket")
       |> assign(:filters, @filters)
       |> assign(:workers_raw, [])
       |> assign(:workers, [])

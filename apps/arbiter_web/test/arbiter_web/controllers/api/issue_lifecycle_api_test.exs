@@ -1,7 +1,7 @@
 defmodule ArbiterWeb.Api.IssueLifecycleApiTest do
   @moduledoc """
   bd-6fkgvo (ticket lifecycle 10/13): the REST reads `arb prime` and
-  `arb issue show` render — `GET /api/issues/lifecycle` (every open ticket in
+  `arb ticket show` render — `GET /api/issues/lifecycle` (every open ticket in
   a workspace, projected, in dispatch order) and the projection plus the
   current run on `GET /api/issues/:id`.
   """

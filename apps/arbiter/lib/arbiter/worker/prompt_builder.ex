@@ -313,7 +313,7 @@ defmodule Arbiter.Worker.PromptBuilder do
 
   # bd-5lc99r: briefing for a `task` issue type — non-reviewable ops/research/
   # spike work. The deliverable is a findings/results summary written to the
-  # directive's `notes` field via the `task_update_progress` MCP tool, NOT a code
+  # directive's `notes` field via the `ticket_update_progress` MCP tool, NOT a code
   # change, commit, or PR. The notes gate (Arbiter.Worker) blocks `arb done`
   # until `notes` is non-blank, so this prompt frames the whole job around
   # producing those findings and deliberately omits the commit/push/PR-body
@@ -349,7 +349,7 @@ defmodule Arbiter.Worker.PromptBuilder do
     Your job:
       1. Do the investigation / ops work the directive describes.
       2. Write your findings to the directive's `notes` field by calling the
-         `task_update_progress` MCP tool with its `notes` argument (Markdown is
+         `ticket_update_progress` MCP tool with its `notes` argument (Markdown is
          fine). Make it self-contained: what you investigated, what you found,
          and any recommendation or conclusion the coordinator needs — they read it
          via `arb show #{task.id}` and the dashboard.
@@ -357,7 +357,7 @@ defmodule Arbiter.Worker.PromptBuilder do
     A notes gate enforces this: if you print `arb done` while `notes` is still
     blank, you will be reprompted to write your findings before the directive
     can close. Do NOT shell out to the `arb` CLI for the notes — use the
-    `task_update_progress` MCP tool.
+    `ticket_update_progress` MCP tool.
     #{completion_notes_step(task)}
     Coordination: at the start of each step, check your mailbox by running
 
@@ -434,7 +434,7 @@ defmodule Arbiter.Worker.PromptBuilder do
   # Test plan reflects what actually passed, not what the spec hoped for. If
   # the repo ships a PR template we fill it rather than discard it (GitHub
   # injects the bare template only when the body is empty — the empty-body
-  # incident #3606). Persisted via the `task_update_progress` MCP tool
+  # incident #3606). Persisted via the `ticket_update_progress` MCP tool
   # (`pr_body` field), which the MergeQueue reads back as `pr_body`. We use the
   # MCP tool rather than the `arb` escript so completion never depends on
   # `~/.local/bin/arb` being present (it is transiently deleted by test runs).
@@ -463,7 +463,7 @@ defmodule Arbiter.Worker.PromptBuilder do
 
     If the repo has a PR template (`.github/pull_request_template.md`), FILL it
     rather than discard it. Persist the finished body verbatim by calling the
-    `task_update_progress` MCP tool with its `pr_body` argument set to the full
+    `ticket_update_progress` MCP tool with its `pr_body` argument set to the full
     PR body (Markdown). Use the MCP tool, which is available in this session —
     do NOT shell out to the `arb` CLI for this.
 
@@ -482,7 +482,7 @@ defmodule Arbiter.Worker.PromptBuilder do
     POST-MERGE VERIFICATION — this task is already flagged
     `verify_after_deploy`. When its PR merges it will NOT close: it parks at
     `awaiting verification` until the coordinator restarts the server, observes
-    the new path, and records what they saw (`arb issue verify #{id}
+    the new path, and records what they saw (`arb ticket verify #{id}
     --observed "<evidence>"`). Make that observation easy: say in your `notes`
     or PR body exactly what to look at, and what a working result looks like.
     """
@@ -496,7 +496,7 @@ defmodule Arbiter.Worker.PromptBuilder do
     prove is live: env/config plumbing that has to reach a spawned worker,
     a `doctor`/health probe, a capture or ingest path, code whose first real
     run is inside the running Phoenix process. Set the flag by calling the
-    `task_update_progress` MCP tool with `verify_after_deploy: true`, and say
+    `ticket_update_progress` MCP tool with `verify_after_deploy: true`, and say
     in your `notes` what to look at after a restart and what a working result
     looks like.
 
@@ -514,9 +514,9 @@ defmodule Arbiter.Worker.PromptBuilder do
   # recent `role: :review` row directly (this worker tier can query the Ash
   # resource even though `review_gate_rounds_list` itself is coordinator-only)
   # and surface its findings here, so the re-dispatched worker sees them
-  # immediately in its prompt without having to call task_show or gh pr view
+  # immediately in its prompt without having to call ticket_show or gh pr view
   # first.
-  # bd-8ssxap: `task_verify failed` reopens the task but leaves `pr_ref` cleared
+  # bd-8ssxap: `ticket_verify failed` reopens the task but leaves `pr_ref` cleared
   # and `verification_outcome`/`verification_evidence` in place (they only
   # reset on the *next* `:await_verification`, see Issue's moduledoc) — so this
   # stays true across the whole redispatch until a fresh merge is verified.
@@ -603,7 +603,7 @@ defmodule Arbiter.Worker.PromptBuilder do
   # work includes producing the gated completion notes the tracker requires
   # before it will transition the ticket forward. We make this an explicit,
   # non-optional step in the worker's prompt and tell it exactly how to
-  # persist the notes on the task (the `task_update_progress` MCP tool), so the
+  # persist the notes on the task (the `ticket_update_progress` MCP tool), so the
   # downstream tracker-sync has the fields to push. We use the MCP tool rather
   # than the `arb` escript so completion never depends on `~/.local/bin/arb`
   # being present (it is transiently deleted by test runs — bd-53xrmi). Untracked
@@ -621,7 +621,7 @@ defmodule Arbiter.Worker.PromptBuilder do
       This task is backed by an external tracker ticket. Before you finish, you
       MUST produce its completion notes and persist them on the task — the
       tracker gates the ticket's forward transition until both are filled. Call
-      the `task_update_progress` MCP tool (available in this session) with these
+      the `ticket_update_progress` MCP tool (available in this session) with these
       arguments:
 
         * `qa_notes` — What QA should verify: the user-facing behaviour to

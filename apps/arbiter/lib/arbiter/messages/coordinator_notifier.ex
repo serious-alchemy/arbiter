@@ -1353,8 +1353,8 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
           mr_ref && "PR/MR: #{mr_ref}",
           restart_line,
           "Record the result:",
-          "  arb issue verify #{task_id} --observed \"<what you saw on the running server>\"",
-          "  arb issue verify #{task_id} --failed   \"<what was still wrong>\"",
+          "  arb ticket verify #{task_id} --observed \"<what you saw on the running server>\"",
+          "  arb ticket verify #{task_id} --failed   \"<what was still wrong>\"",
           "`--observed` closes the task and persists the evidence; `--failed` " <>
             "persists it and reopens the task for another attempt."
         ]
@@ -1652,7 +1652,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
        when is_list(names) and names != [] do
     "The task has not produced a value for required tracker field(s): " <>
       "#{Enum.join(names, ", ")}. Populate them on the task " <>
-      "(e.g. `arb issue update <id> --qa-notes ... --deployment-notes ...`) and re-run the sync."
+      "(e.g. `arb ticket update <id> --qa-notes ... --deployment-notes ...`) and re-run the sync."
   end
 
   # Provider explicitly rejected the payload (field-validation gate, required

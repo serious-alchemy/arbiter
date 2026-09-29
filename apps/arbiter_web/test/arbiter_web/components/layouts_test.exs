@@ -50,7 +50,7 @@ defmodule ArbiterWeb.LayoutsTest do
 
       assert entries == [
                {"Board", "/"},
-               {"Issues", "/tasks"},
+               {"Tickets", "/tasks"},
                {"Epics", "/epics"},
                {"Merge queues", "/merge_queue"},
                {"Workers", "/workers"},
@@ -80,12 +80,12 @@ defmodule ArbiterWeb.LayoutsTest do
       refute html =~ "top-nav-mobile-menu"
     end
 
-    test "the Epics entry links to /epics and sits directly after Issues" do
+    test "the Epics entry links to /epics and sits directly after Tickets" do
       html = render_app()
 
       assert html =~ ~s(href="/epics")
 
-      {issues, _} = :binary.match(html, "Issues")
+      {issues, _} = :binary.match(html, "Tickets")
       {epics, _} = :binary.match(html, "Epics")
       {workers, _} = :binary.match(html, "Workers")
 

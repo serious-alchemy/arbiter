@@ -35,26 +35,26 @@ Before accepting an "empty" or "no work" verdict, inspect the worktree
 yourself: `git status`, `git log <base>..HEAD`, and look at the actual files.
 Verify the *reviewer's* diff, not just the implementer's claim.
 
-## A gate-FAILED issue can still have an open, mergeable PR
+## A gate-FAILED ticket can still have an open, mergeable PR
 
 The work flow opens a PR independently of whether the review gate passed.
-So a gate-FAILED issue is not automatically "no PR exists" — check
-`gh pr list` for the issue's branch before writing the work off as lost. If
+So a gate-FAILED ticket is not automatically "no PR exists" — check
+`gh pr list` for the ticket's branch before writing the work off as lost. If
 a PR is there and mergeable, the salvage path is: review it yourself, merge
-it, then close the issue manually (close-on-merge won't fire since the gate
+it, then close the ticket manually (close-on-merge won't fire since the gate
 never passed).
 
-## No PR means no review — and that's correct for research-only issues
+## No PR means no review — and that's correct for research-only tickets
 
-ReviewGate only engages when a worker actually opens a PR. An issue filed
+ReviewGate only engages when a worker actually opens a PR. A ticket filed
 with `issue_type: task` for research/investigation ("trace this and report
 back," a spike, a diagnosis-only assignment) is expected to close with
 `pr_ref: nil` and **no ReviewGate verdict at all** — that's a clean
 completion, not a stalled or skipped review. Don't escalate or go looking
-for a missing review on these; read the task's `notes` for the findings
+for a missing review on these; read the ticket's `notes` for the findings
 instead.
 
-This cuts the other way too: if a `bug`/`feature`/`chore` issue closes with
+This cuts the other way too: if a `bug`/`feature`/`chore` ticket closes with
 no PR and no diff, that's the "empty branch" failure mode above, not a
 legitimate no-review completion — `issue_type` is the signal for which case
 you're actually looking at.

@@ -250,7 +250,7 @@ defmodule ArbiterWeb.CoreComponents.CoreTest do
       html = render_component(&copy_id/1, %{id: "bd-5l88o5"})
 
       assert html =~ ~s(type="button")
-      assert html =~ ~s(aria-label="Copy issue id bd-5l88o5")
+      assert html =~ ~s(aria-label="Copy ticket id bd-5l88o5")
       assert html =~ ~s(data-copy-value="bd-5l88o5")
     end
 

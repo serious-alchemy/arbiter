@@ -3,7 +3,7 @@
     <header>
       <h1 class="text-3xl font-bold mb-2">Arbiter</h1>
       <p class="text-base-content/70">
-        An Ash + Phoenix umbrella for issue tracking, worker orchestration,
+        An Ash + Phoenix umbrella for ticket tracking, worker orchestration,
         and operational dashboards.
       </p>
     </header>
@@ -13,27 +13,27 @@
       <dl class="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-2 text-sm">
         <dt class="font-semibold">{@issues_label}</dt>
         <dd>
-          Issues and dependencies modelled as Ash resources backed by
+          Tickets and dependencies modelled as Ash resources backed by
           Postgres. A task can parent others via <code>parent_of</code> edges,
           rolling up child progress. Audit history is captured via <code>ash_paper_trail</code>.
         </dd>
 
         <dt class="font-semibold">{@workers_label}</dt>
         <dd>
-          Workflow runners — long-lived processes that walk an issue through its
+          Workflow runners — long-lived processes that walk a ticket through its
           steps (merge queue, code review, deployment, etc.) and broadcast
           lifecycle events.
         </dd>
 
         <dt class="font-semibold">{@domains_label}</dt>
         <dd>
-          Per-team scoping: issue prefix, tracker integration (GitHub / Jira /
+          Per-team scoping: ticket prefix, tracker integration (GitHub / Jira /
           none), and repo paths.
         </dd>
 
         <dt class="font-semibold">REST API</dt>
         <dd>
-          JSON endpoints under <code>/api</code> for issues, dependencies,
+          JSON endpoints under <code>/api</code> for tickets, dependencies,
           workspaces, and worker dispatches. Used by the CLI and external
           integrations.
         </dd>
@@ -51,11 +51,11 @@
       <ul class="list-disc list-inside text-sm space-y-1">
         <li>
           <.link navigate={~p"/"} class="link link-hover">Dashboard</.link>
-          — live view of workspaces, repos, active workers, and recent issues.
+          — live view of workspaces, repos, active workers, and recent tickets.
         </li>
         <li>
           <.link navigate={~p"/audit"} class="link link-hover">Audit log</.link>
-          — the 500 most recent issue changes with filtering and CSV export.
+          — the 500 most recent ticket changes with filtering and CSV export.
         </li>
       </ul>
     </section>

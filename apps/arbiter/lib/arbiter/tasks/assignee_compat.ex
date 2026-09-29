@@ -2,7 +2,7 @@ defmodule Arbiter.Tasks.AssigneeCompat do
   @moduledoc """
   bd-1ozks5: the local `Issue.assignee` field was removed (Arbiter is a
   single-user app; the column was unused). For one release, every surface
-  that used to accept `assignee` (MCP `task_create`/`task_update`, the REST
+  that used to accept `assignee` (MCP `ticket_create`/`ticket_update`, the REST
   API, `arb create`/`arb update --assignee`) keeps accepting the key rather
   than failing an existing coordinator prompt or script, and just ignores
   it. This module is the single place that decides whether an input map

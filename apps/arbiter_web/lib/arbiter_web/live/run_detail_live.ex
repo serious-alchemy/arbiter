@@ -29,7 +29,7 @@ defmodule ArbiterWeb.RunDetailLive do
       socket
       |> assign(:run_id, id)
       |> assign(:worker_label, "worker")
-      |> assign(:issue_label, "issue")
+      |> assign(:issue_label, "ticket")
       |> assign(:repo_label, "repo")
       |> assign(:workspace_label, "workspace")
       |> assign(:run, nil)

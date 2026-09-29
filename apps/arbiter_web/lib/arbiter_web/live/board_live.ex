@@ -140,7 +140,7 @@ defmodule ArbiterWeb.BoardLive do
       |> assign(:workspace, "all")
       |> assign(:expanded, MapSet.new())
       |> assign(:columns, @columns)
-      |> assign(:issue_label, "issue")
+      |> assign(:issue_label, "ticket")
       |> assign(:workspaces, [])
       |> assign(:board, Snapshot.empty(now))
       |> assign(:alerts, [])
@@ -700,7 +700,7 @@ defmodule ArbiterWeb.BoardLive do
     ~H"""
     <span
       data-over-budget
-      title="worker spend is past the p90 of what issues like this cost — excludes coordinator session overhead"
+      title="worker spend is past the p90 of what tickets like this cost — excludes coordinator session overhead"
       aria-label="over budget"
       class="hero-banknotes"
       style="width: 11px; height: 11px; background-color: var(--arb-fail);"

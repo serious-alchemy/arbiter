@@ -230,7 +230,7 @@ defmodule ArbiterCli.Cmd.Review do
     machine = payload["machine"] || %{}
 
     IO.puts("Review dispatched:")
-    IO.puts("  Issue:     #{task["id"]} — #{task["title"]}")
+    IO.puts("  Ticket:    #{task["id"]} — #{task["title"]}")
     IO.puts("  Status:   #{task["status"]}")
     IO.puts("  Worker:  #{worker["pid"]}")
     IO.puts("  Machine:  #{machine["id"]} #{machine["pid"]}")

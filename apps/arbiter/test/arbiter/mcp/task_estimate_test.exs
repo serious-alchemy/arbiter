@@ -1,6 +1,6 @@
 defmodule Arbiter.MCP.TaskEstimateTest do
   @moduledoc """
-  bd-3j4ch4 AC5: `task_show` carries the cost estimate, so a coordinator
+  bd-3j4ch4 AC5: `ticket_show` carries the cost estimate, so a coordinator
   sizing work sees the range without a second tool call.
   """
 

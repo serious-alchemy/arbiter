@@ -534,8 +534,8 @@ defmodule Arbiter.Tasks.ClaimTest do
   end
 
   # bd-9dwbvt: the claim/sync creation paths' slice of "every issue carries a
-  # repo". `arb issue claim` and the `tracker_claim` MCP tool both land on
-  # `Claim.claim/3`; `tracker_sync` / `arb issue sync` land on
+  # repo". `arb ticket claim` and the `tracker_claim` MCP tool both land on
+  # `Claim.claim/3`; `tracker_sync` / `arb ticket sync` land on
   # `Claim.plan/1` + `apply_plan/2`, which claims through the same function.
   describe "claim/3 and apply_plan/2 — repo resolution (bd-9dwbvt)" do
     defp repo_ws!(repo_paths, extra_config \\ %{}) do

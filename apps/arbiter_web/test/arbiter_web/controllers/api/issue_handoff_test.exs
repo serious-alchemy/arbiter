@@ -2,7 +2,7 @@ defmodule ArbiterWeb.Api.IssueHandoffTest do
   @moduledoc """
   bd-8nlez1: `POST /api/issues/:id/handoff` and `/handback` — the REST side
   of the coordinator's hand-off and the operator's hand-back
-  (`arb issue handoff` / `arb issue handback`).
+  (`arb ticket handoff` / `arb ticket handback`).
   """
   use ArbiterWeb.ConnCase, async: false
 

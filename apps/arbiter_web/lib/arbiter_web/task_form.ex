@@ -48,7 +48,7 @@ defmodule ArbiterWeb.TaskForm do
   absent — the `:update` action's `GuardStatus` change refuses transitions
   involving `:closed`, which is what the separate close action (with a reason)
   is for. So is `:awaiting_verification`, whose exits both carry evidence
-  (`arb issue verify`).
+  (`arb ticket verify`).
 
   Pass the task's `current` status to keep it selectable when it is one of
   those non-editable states (bd-9so315): a `<select>` whose value is not among

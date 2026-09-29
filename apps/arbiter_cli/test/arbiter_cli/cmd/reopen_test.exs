@@ -31,7 +31,7 @@ defmodule ArbiterCli.Cmd.ReopenTest do
   test "reopen requires id" do
     {_out, err, exit_code} = capture(fn -> Reopen.run([]) end)
     assert exit_code == 1
-    assert err =~ "requires an issue id"
+    assert err =~ "requires a ticket id"
   end
 
   test "reopen of a non-closed task surfaces the friendly FSM reason" do

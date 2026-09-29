@@ -8,8 +8,8 @@ defmodule Arbiter.Tasks.Issue.Changes.ResolveRepo do
   else its `default_repo`, else a validation error on the `:repo` field naming
   the configured keys.
 
-  Every creation path — `task_create`, `arb issue create` (via
-  `POST /api/issues`), `tracker_claim` / `arb issue claim`, `tracker_sync`'s
+  Every creation path — `ticket_create`, `arb ticket create` (via
+  `POST /api/issues`), `tracker_claim` / `arb ticket claim`, `tracker_sync`'s
   auto-claim, the dashboard create form, PRPatrol follow-ups and
   ExternalReview engagements — goes through `Ash.create(Issue, …)`, so this
   one hook covers all of them rather than each re-deriving the rule.

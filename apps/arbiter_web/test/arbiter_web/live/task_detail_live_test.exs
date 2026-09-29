@@ -206,7 +206,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       assert html =~ "awaiting_verification"
-      assert html =~ "arb issue verify"
+      assert html =~ "arb ticket verify"
     end
 
     test "a recorded verdict shows the outcome and the evidence", %{conn: conn, ws: ws} do
@@ -230,7 +230,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
 
       {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
-      refute html =~ "arb issue verify"
+      refute html =~ "arb ticket verify"
     end
   end
 
@@ -1080,10 +1080,10 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
 
       {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
-      assert html =~ "Board / Issues /"
+      assert html =~ "Board / Tickets /"
       assert html =~ task.id
       assert html =~ "Back to board"
-      assert html =~ ~s(aria-label="Copy issue id #{task.id}")
+      assert html =~ ~s(aria-label="Copy ticket id #{task.id}")
     end
 
     test "acceptance criteria render as one real checkbox per line",
@@ -1395,7 +1395,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       assert html =~ "main run line one"
       assert html =~ "main run line two"
       # Still on the task detail page — nothing navigated away.
-      assert html =~ "Board / Issues /"
+      assert html =~ "Board / Tickets /"
 
       # Clicking the open row collapses it.
       html = view |> element(~s([phx-value-run="#{main.id}"])) |> render_click()
@@ -1485,7 +1485,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
 
       {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
-      assert html =~ "No runs of this kind on this issue yet."
+      assert html =~ "No runs of this kind on this ticket yet."
     end
 
     # The roster covers the review gate's `#review` runs as well as the
@@ -1613,7 +1613,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       assert html =~ "CURRENT RUN"
-      assert html =~ "2 runs on this issue"
+      assert html =~ "2 runs on this ticket"
     end
 
     test "machine state, relationships and skills each render in the rail",
@@ -1912,7 +1912,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       assert has_element?(view, "#rel-blocked-by [data-role=awaiting-verification-chip]")
       assert blocked_by =~ "awaiting verification"
       assert blocked_by =~ "waiting on someone to verify"
-      assert blocked_by =~ "arb issue verify #{blocker.id}"
+      assert blocked_by =~ "arb ticket verify #{blocker.id}"
       # bd-6zapbl: verifying unblocks dependents, so the hint must not say
       # the edge still holds this ticket back.
       refute blocked_by =~ "blocks until verified"
@@ -2377,7 +2377,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       # The latest round's own run row, expanded in place — no navigation.
       assert html =~ "round 2 reviewer transcript"
       refute html =~ "round 1 reviewer transcript"
-      assert html =~ "Board / Issues /"
+      assert html =~ "Board / Tickets /"
     end
 
     test "the deep link clears a role filter that would be hiding the row",

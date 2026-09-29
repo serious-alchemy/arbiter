@@ -629,7 +629,7 @@ defmodule Arbiter.Sessions.ProvisioningTest do
       session = launch!()
       instructions = session.id |> Layout.instructions_path() |> File.read!()
 
-      assert instructions =~ "task_create"
+      assert instructions =~ "ticket_create"
       assert instructions =~ "Research discipline"
       # The worktree recipe is present but no longer the standing workflow.
       assert instructions =~ "worktree add"

@@ -194,7 +194,7 @@ defmodule Arbiter.MCP.ToolsTest do
       refute Map.has_key?(data, :auto_close)
     end
 
-    # bd-9zuvbh: `task_show` is the coordinator's main surface, so the reason a
+    # bd-9zuvbh: `ticket_show` is the coordinator's main surface, so the reason a
     # ReviewGate-parked task is sitting still has to be readable there.
     test "full: true carries the ReviewGate park", ctx do
       {:ok, :claimed, _} = Arbiter.Tasks.ReviewPark.park(ctx.task.id, :verdict_guard_exhausted)
@@ -220,7 +220,7 @@ defmodule Arbiter.MCP.ToolsTest do
     end
 
     # bd-1defgu: the domain-layer read (`Dependencies.list/1`) existed but
-    # wasn't reachable from `task_show` — a worker/coordinator had to open the
+    # wasn't reachable from `ticket_show` — a worker/coordinator had to open the
     # DB to see an edge it could already create/delete via dep_add/dep_remove.
     test "full: true includes the task's dependency edges", ctx do
       {:ok, other} = Ash.create(Issue, %{title: "conflicts with me", workspace_id: ctx.ws.id})
@@ -1235,7 +1235,7 @@ defmodule Arbiter.MCP.ToolsTest do
 
   # bd-9so315 — post-merge verification surface.
   describe "verify_after_deploy flag over MCP" do
-    test "task_create accepts it", ctx do
+    test "ticket_create accepts it", ctx do
       assert {:ok, data} =
                Tools.task_create(ctx.coordinator, %{
                  "title" => "flagged",
@@ -1246,7 +1246,7 @@ defmodule Arbiter.MCP.ToolsTest do
       assert created.verify_after_deploy == true
     end
 
-    test "task_update sets and clears it", ctx do
+    test "ticket_update sets and clears it", ctx do
       assert {:ok, _} =
                Tools.task_update(ctx.coordinator, %{
                  "id" => ctx.task.id,
@@ -1271,7 +1271,7 @@ defmodule Arbiter.MCP.ToolsTest do
       assert Ash.get!(Issue, ctx.task.id).verify_after_deploy == true
     end
 
-    test "task_show full view reports the flag and the verification state", ctx do
+    test "ticket_show full view reports the flag and the verification state", ctx do
       # bd-842qio: only work in progress parks for verification.
       {:ok, task} =
         Ash.update(ctx.task, %{verify_after_deploy: true, status: :in_progress}, action: :update)
@@ -1507,7 +1507,7 @@ defmodule Arbiter.MCP.ToolsTest do
   end
 
   describe "parent/child grouping via dep_add parent_of + auto_close" do
-    test "task_create accepts auto_close and task_update can toggle it", ctx do
+    test "ticket_create accepts auto_close and task_update can toggle it", ctx do
       assert {:ok, parent} =
                Tools.task_create(ctx.coordinator, %{
                  "title" => "epic",
@@ -2924,7 +2924,7 @@ defmodule Arbiter.MCP.ToolsTest do
       assert reloaded.tracker_type == :none
     end
 
-    test "task_show includes tracker_context_ref and tracker_context_type in full view (bd-2eo4cg)",
+    test "ticket_show includes tracker_context_ref and tracker_context_type in full view (bd-2eo4cg)",
          ctx do
       {:ok, task} =
         Ash.update(ctx.task, %{tracker_context_type: :jira, tracker_context_ref: "AX-18004"},
@@ -5825,7 +5825,7 @@ defmodule Arbiter.MCP.ToolsTest do
 
     # bd-45tkhq: an unscoped `worker_list` from a workspace-agnostic
     # coordinator silently resolves to a guessed default workspace the same
-    # way `task_create` does above. When a worker is genuinely live in a
+    # way `ticket_create` does above. When a worker is genuinely live in a
     # *different* workspace, that guess returns `count: 0` — indistinguishable
     # from "nothing is running" — unless the response says which workspace it
     # scoped to.
@@ -6084,13 +6084,13 @@ defmodule Arbiter.MCP.ToolsTest do
 
   describe "Catalog.call/3 dispatch" do
     test "routes an authorized call to its handler and returns structured data", ctx do
-      assert {:ok, data} = Catalog.call(ctx.worker, "task_show", %{})
+      assert {:ok, data} = Catalog.call(ctx.worker, "ticket_show", %{})
       assert data.id == ctx.task.id
     end
 
     test "maps a handler not-found into a tool error (not a JSON-RPC error)", ctx do
       assert {:tool_error, message} =
-               Catalog.call(ctx.coordinator, "task_show", %{"id" => "bd-does-not-exist"})
+               Catalog.call(ctx.coordinator, "ticket_show", %{"id" => "bd-does-not-exist"})
 
       assert message =~ "not found"
     end

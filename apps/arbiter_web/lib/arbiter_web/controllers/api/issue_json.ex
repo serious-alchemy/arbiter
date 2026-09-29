@@ -15,10 +15,10 @@ defmodule ArbiterWeb.Api.IssueJSON do
   # bd-3j4ch4: the single-issue read carries a cost estimate (or an explicit
   # null — "no estimate yet" has to be distinguishable from "$0").
   # bd-18vl9q: and the epic cost rollup, null for a non-epic issue.
-  # bd-1defgu: and the issue's dependency edges — `arb issue show` was
+  # bd-1defgu: and the issue's dependency edges — `arb ticket show` was
   # write-only for them before.
   # bd-6fkgvo: and the ticket's lifecycle projection (column, step,
-  # blocked_by, attention) and its current run, for `arb issue show`.
+  # blocked_by, attention) and its current run, for `arb ticket show`.
   def show(
         %{issue: issue, estimate: estimate, epic_rollup: epic_rollup, dependencies: deps} =
           assigns

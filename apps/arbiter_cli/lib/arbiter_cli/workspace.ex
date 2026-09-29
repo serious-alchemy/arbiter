@@ -22,7 +22,7 @@ defmodule ArbiterCli.Workspace do
   arg list, returning `{name_or_nil, remaining_argv}`.
 
   Workspace selection is a cross-cutting concern resolved centrally via
-  `ARB_WORKSPACE` (see `resolve/0`), but the individual `arb issue *`
+  `ARB_WORKSPACE` (see `resolve/0`), but the individual `arb ticket *`
   subcommands each parse their own switches and would otherwise swallow a
   `--workspace` flag as an unknown boolean. Extracting it here — before the
   subcommand's own `OptionParser` runs — lets the flag override the active

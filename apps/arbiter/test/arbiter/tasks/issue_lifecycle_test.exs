@@ -420,7 +420,7 @@ defmodule Arbiter.Tasks.IssueLifecycleTest do
   end
 
   # Forces an arbitrary absolute rank to exercise scheduler ordering. The real
-  # reordering door is the `:set_rank` action (bd-djapyj, `arb issue rank`),
+  # reordering door is the `:set_rank` action (bd-djapyj, `arb ticket rank`),
   # but it only supports relative moves (top/bottom/before/after), not
   # setting an arbitrary absolute value — raw SQL is still the right tool
   # here.

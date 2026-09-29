@@ -51,7 +51,7 @@ defmodule ArbiterCli.OutputTest do
       refute out =~ "Notes:"
     end
 
-    # bd-1defgu: `arb issue show` gains a Dependencies section — the edge was
+    # bd-1defgu: `arb ticket show` gains a Dependencies section — the edge was
     # only visible via `arb dep add`'s own output before.
     test "renders a Dependencies section when the issue carries edges" do
       issue = %{

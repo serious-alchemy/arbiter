@@ -2,8 +2,8 @@ defmodule Arbiter.Tasks.Rank do
   @moduledoc """
   The one entry point for reordering a ticket inside its workspace's rank
   order (bd-djapyj) — the space `board/scheduler.ex` and `board/autopilot.ex`
-  read (priority, then rank, then age). The CLI (`arb issue rank`), the API
-  (`PATCH /api/issues/:id/rank`) and the MCP `task_rank` tool all call
+  read (priority, then rank, then age). The CLI (`arb ticket rank`), the API
+  (`PATCH /api/issues/:id/rank`) and the MCP `ticket_rank` tool all call
   `move/2` rather than running `Ash.update(issue, args, action: :set_rank)`
   themselves.
 

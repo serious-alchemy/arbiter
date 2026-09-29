@@ -627,7 +627,7 @@ defmodule Arbiter.Workers.Reconciler do
     body =
       "Task #{task_id} has an open PR (#{pr_ref}) but no live worker, and its workspace has " <>
         "no patrol coverage to re-establish monitoring automatically.\n" <>
-        "Action: verify the PR is ready to merge, then run `arb issue dispatch #{task_id}` to re-drive " <>
+        "Action: verify the PR is ready to merge, then run `arb ticket dispatch #{task_id}` to re-drive " <>
         "or manually merge and close the task."
 
     {subject, body}
@@ -640,7 +640,7 @@ defmodule Arbiter.Workers.Reconciler do
       "Task #{task_id} was in_progress with no live worker after a restart, and could not be " <>
         "auto-resumed (#{inspect(reason)} — e.g. the worktree was cleaned up or the repo is " <>
         "unresolvable).\n" <>
-        "Action: inspect the task state, then run `arb issue dispatch #{task_id}` to re-drive from scratch."
+        "Action: inspect the task state, then run `arb ticket dispatch #{task_id}` to re-drive from scratch."
 
     {subject, body}
   end

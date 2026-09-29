@@ -1,6 +1,6 @@
 defmodule Arbiter.Tasks.IssueReadyTest do
   @moduledoc """
-  bd-6zapbl: `Issue.ready/1` — and so `task_ready`, `GET /api/issues/ready`,
+  bd-6zapbl: `Issue.ready/1` — and so `ticket_ready`, `GET /api/issues/ready`,
   `arb ready` and `arb prime`'s "Ready issues" — returns exactly the tickets
   whose `Lifecycle.view/2` column is `:ready`.
   """

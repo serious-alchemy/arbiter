@@ -1,9 +1,9 @@
 defmodule ArbiterCli.Cmd.Handoff do
   @moduledoc """
-  `arb issue handoff <id> --note "<what you need>"` — hand a ticket's attention
+  `arb ticket handoff <id> --note "<what you need>"` — hand a ticket's attention
   to the operator (the coordinator's hand-off; the note is required).
 
-  `arb issue handback <id> [--note "<what changed>"]` — hand it back to the
+  `arb ticket handback <id> [--note "<what changed>"]` — hand it back to the
   coordinator (the operator's answer to a hand-off or to an item promoted
   past its limit). The coordinator gets a fresh time limit and resume budget.
 
@@ -43,10 +43,10 @@ defmodule ArbiterCli.Cmd.Handoff do
   end
 
   defp parse_id([id], _verb), do: id
-  defp parse_id([], verb), do: Output.die("#{verb} requires an issue id")
+  defp parse_id([], verb), do: Output.die("#{verb} requires a ticket id")
 
   defp parse_id(_, verb),
-    do: Output.die("#{verb} takes exactly one positional argument: the issue id")
+    do: Output.die("#{verb} takes exactly one positional argument: the ticket id")
 
   defp blank?(nil), do: true
   defp blank?(s), do: String.trim(s) == ""

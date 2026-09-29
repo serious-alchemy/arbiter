@@ -436,7 +436,7 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
     end
   end
 
-  # bd-9dwbvt: `arb issue create` / `arb create` post here, so this is the CLI's
+  # bd-9dwbvt: `arb ticket create` / `arb create` post here, so this is the CLI's
   # slice of "every issue carries a repo".
   describe "POST /api/issues — repo resolution (bd-9dwbvt)" do
     defp repo_ws!(config) do
@@ -504,7 +504,7 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
     end
 
     # bd-842qio: the stored lifecycle state beside the legacy status — what
-    # `arb issue show --json` prints.
+    # `arb ticket show --json` prints.
     test "carries the lifecycle state, close_reason and rank", %{conn: conn, ws: ws} do
       {:ok, issue} = Ash.create(Issue, %{title: "show my state", workspace_id: ws.id})
 
@@ -566,7 +566,7 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
       assert %{"error" => %{"type" => "not_found"}} = json_response(conn, 404)
     end
 
-    # bd-1defgu: `arb issue show` was write-only for dependency edges — you
+    # bd-1defgu: `arb ticket show` was write-only for dependency edges — you
     # could `arb dep add` one onto this task and never see it again short of
     # opening the DB.
     test "includes the issue's dependency edges", %{conn: conn, ws: ws} do
@@ -593,7 +593,7 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
       assert body["dependencies"] == []
     end
 
-    # bd-3j4ch4 AC5: `arb issue show` renders the cost estimate, and this is
+    # bd-3j4ch4 AC5: `arb ticket show` renders the cost estimate, and this is
     # where it gets the numbers from.
     test "carries the cost estimate when the ledger has enough history", %{conn: conn, ws: ws} do
       for cost <- Enum.map(1..10, &(&1 * 1.0)) do
@@ -647,7 +647,7 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
       assert body["estimate"] == nil
     end
 
-    # bd-18vl9q AC3: `arb issue show` renders the epic cost rollup for an
+    # bd-18vl9q AC3: `arb ticket show` renders the epic cost rollup for an
     # `:epic` issue.
     test "carries the epic cost rollup for an epic", %{conn: conn, ws: ws} do
       {:ok, epic} = Ash.create(Issue, %{title: "an epic", workspace_id: ws.id, issue_type: :epic})

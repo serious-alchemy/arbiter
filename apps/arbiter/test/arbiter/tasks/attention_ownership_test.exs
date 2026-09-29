@@ -73,11 +73,11 @@ defmodule Arbiter.Tasks.AttentionOwnershipTest do
       assert %{owner: :operator, note: "needs a credential only you have"} =
                Attention.current(issue)
 
-      assert {:ok, slim} = Catalog.call(ctx.coordinator, "task_show", %{"id" => ctx.task.id})
+      assert {:ok, slim} = Catalog.call(ctx.coordinator, "ticket_show", %{"id" => ctx.task.id})
       assert slim.attention.note == "needs a credential only you have"
 
       assert {:ok, shown} =
-               Catalog.call(ctx.coordinator, "task_show", %{"id" => ctx.task.id, "full" => true})
+               Catalog.call(ctx.coordinator, "ticket_show", %{"id" => ctx.task.id, "full" => true})
 
       assert shown.attention_owner == "operator"
       assert shown.attention_note == "needs a credential only you have"

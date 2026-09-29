@@ -30,7 +30,7 @@ defmodule ArbiterCli.Cmd.ShowTest do
   test "missing id argument exits non-zero" do
     {_out, err, exit_code} = capture(fn -> Show.run([]) end)
     assert exit_code == 1
-    assert err =~ "requires an issue id"
+    assert err =~ "requires a ticket id"
   end
 
   test "404 surfaces server message and exits with code 4" do

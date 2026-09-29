@@ -6,24 +6,27 @@ defmodule ArbiterCli.Main do
 
   ## Resources
 
-      arb issue list      [--status ...] [--type ...] [--priority ...] [--labels ...] [--tracker]
-      arb issue show      <id>
-      arb issue create    <title> [--description ...] [--priority ...] [--type ...]
+      arb ticket list     [--status ...] [--type ...] [--priority ...] [--labels ...] [--tracker]
+      arb ticket show     <id>
+      arb ticket create   <title> [--description ...] [--priority ...] [--type ...]
                                   [--deps id1,id2] [--labels a,b] [--parent <parent-id>]
                                   [--auto-close]
-      arb issue update    <id> [--title ...] [--priority N] [--difficulty N] [--status s]
+      arb ticket update   <id> [--title ...] [--priority N] [--difficulty N] [--status s]
                                   [--description d] [--append-notes text]
                                   [--qa-notes text] [--deployment-notes text]
                                   [--pr-body text]
-      arb issue close     <id> [--reason ...]
-      arb issue reopen    <id>
-      arb issue verify    <id> --observed "<evidence>" | --failed "<evidence>"
+      arb ticket close    <id> [--reason ...]
+      arb ticket reopen   <id>
+      arb ticket verify   <id> --observed "<evidence>" | --failed "<evidence>"
                                   record the post-merge restart-and-observe result
-                                  for a task parked at awaiting_verification
-      arb issue claim     <ref> [--force] [--repo <repo>]
-      arb issue sync      [--dry]
-      arb issue ready
-      arb issue dispatch  <id> [<repo>] [--with-claude] [--model <name>] [--force]
+                                  for a ticket parked at awaiting_verification
+      arb ticket claim    <ref> [--force] [--repo <repo>]
+      arb ticket sync     [--dry]
+      arb ticket ready
+      arb ticket dispatch <id> [<repo>] [--with-claude] [--model <name>] [--force]
+
+                                  `arb issue …` is a deprecated alias for `arb ticket …`:
+                                  it still runs, and prints a one-line note on stderr.
 
       arb worker list
       arb worker show     <task-id>
@@ -136,14 +139,14 @@ defmodule ArbiterCli.Main do
   # form. Each still runs (we dispatch to the new handler) but prints a
   # one-line note pointing at the new grammar.
   @legacy %{
-    "list" => {"issue", ["list"]},
-    "show" => {"issue", ["show"]},
-    "create" => {"issue", ["create"]},
-    "close" => {"issue", ["close"]},
-    "reopen" => {"issue", ["reopen"]},
-    "claim" => {"issue", ["claim"]},
-    "sync" => {"issue", ["sync"]},
-    "ready" => {"issue", ["ready"]},
+    "list" => {"ticket", ["list"]},
+    "show" => {"ticket", ["show"]},
+    "create" => {"ticket", ["create"]},
+    "close" => {"ticket", ["close"]},
+    "reopen" => {"ticket", ["reopen"]},
+    "claim" => {"ticket", ["claim"]},
+    "sync" => {"ticket", ["sync"]},
+    "ready" => {"ticket", ["ready"]},
     "resume" => {"worker", ["resume"]},
     "review" => {"worker", ["review"]},
     "start" => {"server", ["start"]},
@@ -221,13 +224,13 @@ defmodule ArbiterCli.Main do
     end
   end
 
-  # `arb update` was dual-mode: an id edits an issue, a bare/flag-first call
+  # `arb update` was dual-mode: an id edits a ticket, a bare/flag-first call
   # deploys. Split it across the two new homes.
   defp legacy_redirect("update", args) do
     if deploy_invocation?(args) do
       {:ok, "server", ["deploy" | args], "server deploy"}
     else
-      {:ok, "issue", ["update" | args], "issue update"}
+      {:ok, "ticket", ["update" | args], "ticket update"}
     end
   end
 
@@ -242,11 +245,19 @@ defmodule ArbiterCli.Main do
   end
 
   # A bare verb, or one whose first token is a flag, is a deploy. The moment a
-  # positional appears (the issue id) it's an edit.
+  # positional appears (the ticket id) it's an edit.
   defp deploy_invocation?([]), do: true
   defp deploy_invocation?([first | _]), do: String.starts_with?(first, "-")
 
-  defp dispatch_known("issue", args), do: ArbiterCli.Cmd.Issue.run(args)
+  defp dispatch_known("ticket", args), do: ArbiterCli.Cmd.Issue.run(args)
+
+  # bd-4jojpw: `issue` was renamed `ticket`. The old resource name keeps working
+  # for one release, with a single note on stderr so `--json` stdout stays clean.
+  defp dispatch_known("issue", args) do
+    IO.puts(:stderr, "arb: note: `arb issue` is deprecated; use `arb ticket` (same subcommands).")
+    ArbiterCli.Cmd.Issue.run(args)
+  end
+
   defp dispatch_known("worker", args), do: ArbiterCli.Cmd.Worker.run(args)
   defp dispatch_known("repo", args), do: ArbiterCli.Cmd.Repo.run(args)
   defp dispatch_known("dep", args), do: ArbiterCli.Cmd.Dep.run(args)
@@ -266,9 +277,9 @@ defmodule ArbiterCli.Main do
   defp dispatch_known("skill", args), do: ArbiterCli.Cmd.Skill.run(args)
   defp dispatch_known("account", args), do: ArbiterCli.Cmd.Account.run(args)
   defp dispatch_known("session", args), do: ArbiterCli.Cmd.Session.run(args)
-  # Top-level shortcut: `arb dispatch <id>` == `arb issue dispatch <id>`.
+  # Top-level shortcut: `arb dispatch <id>` == `arb ticket dispatch <id>`.
   defp dispatch_known("dispatch", args), do: ArbiterCli.Cmd.Issue.run(["dispatch" | args])
-  # Top-level shortcut: `arb verify <id>` == `arb issue verify <id>`.
+  # Top-level shortcut: `arb verify <id>` == `arb ticket verify <id>`.
   defp dispatch_known("verify", args), do: ArbiterCli.Cmd.Issue.run(["verify" | args])
   defp dispatch_known("prime", args), do: ArbiterCli.Cmd.Prime.run(args)
   defp dispatch_known("where", args), do: ArbiterCli.Cmd.Where.run(args)

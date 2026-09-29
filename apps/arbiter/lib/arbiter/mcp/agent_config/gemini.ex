@@ -96,14 +96,14 @@ defmodule Arbiter.MCP.AgentConfig.Gemini do
       {"mcpServers": {"arbiter": {
         "httpUrl": "http://127.0.0.1:4848/mcp",
         "headers": {"Authorization": "Bearer <scope-token>"},
-        "includeTools": ["task_show", ...]}}}
+        "includeTools": ["ticket_show", ...]}}}
 
   `agy` (`mcp_config.json`) — `serverUrl`, `enabledTools`:
 
       {"mcpServers": {"arbiter": {
         "serverUrl": "http://127.0.0.1:4848/mcp",
         "headers": {"Authorization": "Bearer <scope-token>"},
-        "enabledTools": ["task_show", ...]}}}
+        "enabledTools": ["ticket_show", ...]}}}
 
   Both keys were confirmed live: agy connects on `serverUrl` and sends the
   `headers` verbatim, and `enabledTools` really filters — a server advertising
@@ -128,8 +128,8 @@ defmodule Arbiter.MCP.AgentConfig.Gemini do
   # token is permitted to call (see Arbiter.MCP.Scope and the tool catalog in
   # docs/mcp-server-design.md §3).
   @worker_tools ~w(
-    task_show
-    task_update_progress
+    ticket_show
+    ticket_update_progress
     inbox_check
     message_send
     notify_list

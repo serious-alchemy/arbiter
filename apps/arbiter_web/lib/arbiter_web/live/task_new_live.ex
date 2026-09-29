@@ -9,7 +9,7 @@ defmodule ArbiterWeb.TaskNewLive do
 
   That sameness now includes where the issue lands: `refined` defaults to
   `false`, so a task filed here starts in the board's Backlog column exactly
-  as `arb create` and `task_create` do (bd-b5wyjd). The form deliberately has
+  as `arb create` and `ticket_create` do (bd-b5wyjd). The form deliberately has
   no "file this straight into Ready" affordance — the flash names Backlog and
   the redirect drops the operator on the detail page, where the *Move to
   Ready* button is.
@@ -73,7 +73,7 @@ defmodule ArbiterWeb.TaskNewLive do
     {:noreply, submit_create(socket, socket.assigns.form_params, true)}
   end
 
-  # Keeps the footer's live `arb issue create` preview in sync as the operator
+  # Keeps the footer's live `arb ticket create` preview in sync as the operator
   # types. No validation or I/O here — that's what "create" does on submit.
   #
   # Editing the title clears the duplicate warning (and any stale validation
@@ -254,7 +254,7 @@ defmodule ArbiterWeb.TaskNewLive do
 
   defp validate_workspace(errors, params) do
     case TaskForm.trimmed(params["workspace_id"]) do
-      nil -> Map.put(errors, :workspace_id, "Pick a workspace to file this issue in.")
+      nil -> Map.put(errors, :workspace_id, "Pick a workspace to file this ticket in.")
       _ -> errors
     end
   end
@@ -315,19 +315,19 @@ defmodule ArbiterWeb.TaskNewLive do
     end
   end
 
-  # The footer's live equivalent of what's typed, as `arb issue create` would
+  # The footer's live equivalent of what's typed, as `arb ticket create` would
   # be invoked — the only cross-reference point between the dashboard and the
   # CLI, so the flag mapping has to be exact. `--workspace` is always shown
-  # (not just when it deviates from a default): `arb issue`'s own default
+  # (not just when it deviates from a default): `arb ticket`'s own default
   # resolution (the workspace literally named "default", or the sole
   # workspace if unambiguous — see `ArbiterCli.Workspace.resolve/0`) does not
   # match this form's default (alphabetically first), so omitting it would
   # make the previewed command file into the wrong workspace on any
-  # multi-workspace install. `acceptance` has no `arb issue create` flag at
+  # multi-workspace install. `acceptance` has no `arb ticket create` flag at
   # all — surfaced as a separate note below the command instead of silently
   # dropped.
   #
-  # Deviation from the reference mock (`arb issue create "<title>" --priority
+  # Deviation from the reference mock (`arb ticket create "<title>" --priority
   # 2`, unconditionally): flags whose typed value matches the server default
   # are omitted here so the command shown is the minimal one that reproduces
   # the create, and an empty title renders as `''` rather than `…`.
@@ -335,7 +335,7 @@ defmodule ArbiterWeb.TaskNewLive do
     title = TaskForm.trimmed(params["title"]) || ""
     workspace_name = workspace_name_for(TaskForm.trimmed(params["workspace_id"]), workspaces)
 
-    ["arb issue create", shell_quote(title)]
+    ["arb ticket create", shell_quote(title)]
     |> maybe_flag("--type", TaskForm.trimmed(params["issue_type"]), "feature")
     |> maybe_flag("--priority", TaskForm.trimmed(params["priority"]), "2")
     |> maybe_flag("--difficulty", TaskForm.trimmed(params["difficulty"]), nil)
@@ -420,7 +420,7 @@ defmodule ArbiterWeb.TaskNewLive do
       <div class="p-4 sm:p-6 max-w-[900px] mx-auto flex flex-col gap-4">
         <div>
           <h1 class="m-0 font-[600] text-[24px] leading-[1.2] tracking-[-0.025em] text-[var(--text-title)]">
-            Create an issue
+            Create a ticket
           </h1>
           <p class="mt-[6px] text-[12.5px] leading-[1.55] text-[var(--text-secondary)] max-w-[var(--measure-prose)]">
             Writes through the same action the CLI and MCP tools use, so tracker mirroring and id generation apply identically. A duplicate title is advisory, not fatal.
@@ -565,7 +565,7 @@ defmodule ArbiterWeb.TaskNewLive do
                   size={14}
                   color="var(--arb-attention)"
                 />
-                {dup_count(@create_dup)} issues already have a similar title — file it anyway?
+                {dup_count(@create_dup)} tickets already have a similar title — file it anyway?
               </span>
               <ul class="m-0 pl-[18px] flex flex-col gap-[3px] list-disc">
                 <li
@@ -614,7 +614,7 @@ defmodule ArbiterWeb.TaskNewLive do
 
         <%!-- Live equivalent of what's typed, run against the CLI directly.
              The only cross-reference point between the dashboard and
-             `arb` — the flag mapping must match `arb issue create` exactly. --%>
+             `arb` — the flag mapping must match `arb ticket create` exactly. --%>
         <div
           :if={@workspaces.ok? and @workspaces.result != []}
           id="task-new-cli-preview"
@@ -630,7 +630,7 @@ defmodule ArbiterWeb.TaskNewLive do
           :if={TaskForm.trimmed(@form_params["acceptance"])}
           class="font-[family-name:var(--font-mono)] text-[11px] text-[var(--text-label)]"
         >
-          Acceptance isn't set by `arb issue create` — there's no CLI flag for it.
+          Acceptance isn't set by `arb ticket create` — there's no CLI flag for it.
         </p>
 
         <ArbiterWeb.CoreComponents.Navigation.back_link />

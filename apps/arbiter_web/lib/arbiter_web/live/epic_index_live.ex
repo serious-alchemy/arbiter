@@ -359,7 +359,7 @@ defmodule ArbiterWeb.EpicIndexLive do
           icon="hero-rectangle-stack"
           title="Epics"
           count={@total_count}
-          subtitle="Parent issues and how their children are moving. Epics are deliberately absent from the board — this is where they live."
+          subtitle="Parent tickets and how their children are moving. Epics are deliberately absent from the board — this is where they live."
         >
           <:actions>
             <ArbiterWeb.CoreComponents.Feedback.live_badge live={@live} />

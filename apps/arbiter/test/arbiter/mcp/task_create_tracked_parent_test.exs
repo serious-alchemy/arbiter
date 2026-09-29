@@ -1,6 +1,6 @@
 defmodule Arbiter.MCP.TaskCreateTrackedParentTest do
   @moduledoc """
-  #1973 through `task_create`: the refine split of `VR-19083` minted
+  #1973 through `ticket_create`: the refine split of `VR-19083` minted
   `VR-19092..94` because the child create never told `Issue.create` who its
   parent was. Covers the coordinator path (parent-aware default, explicit
   `tracker_type` still mints) and the refine path (always context-only, even
@@ -77,7 +77,7 @@ defmodule Arbiter.MCP.TaskCreateTrackedParentTest do
       parent = tracked_parent(ws)
 
       assert {:ok, %{id: id, parent_id: parent_id}} =
-               Catalog.call(coordinator(ws), "task_create", %{
+               Catalog.call(coordinator(ws), "ticket_create", %{
                  "title" => "slice one",
                  "parent_id" => parent.id
                })
@@ -106,7 +106,7 @@ defmodule Arbiter.MCP.TaskCreateTrackedParentTest do
       parent = tracked_parent(ws)
 
       assert {:ok, %{id: id}} =
-               Catalog.call(coordinator(ws), "task_create", %{
+               Catalog.call(coordinator(ws), "ticket_create", %{
                  "title" => "slice minted on purpose",
                  "parent_id" => parent.id,
                  "tracker_type" => "jira"
@@ -129,7 +129,7 @@ defmodule Arbiter.MCP.TaskCreateTrackedParentTest do
       ids =
         for title <- ["slice a", "slice b", "slice c"] do
           assert {:ok, %{id: id}} =
-                   Catalog.call(refine(ws, parent), "task_create", %{"title" => title})
+                   Catalog.call(refine(ws, parent), "ticket_create", %{"title" => title})
 
           id
         end
@@ -149,7 +149,7 @@ defmodule Arbiter.MCP.TaskCreateTrackedParentTest do
       parent = tracked_parent(ws)
 
       assert {:ok, %{id: id}} =
-               Catalog.call(refine(ws, parent), "task_create", %{"title" => "refined slice"})
+               Catalog.call(refine(ws, parent), "ticket_create", %{"title" => "refined slice"})
 
       child = Ash.get!(Issue, id)
       assert child.tracker_type == :none

@@ -221,7 +221,7 @@ defmodule Arbiter.Board.AutopilotIntegrationTest do
     assert first_filed.rank < ranked_ahead.rank
 
     # Forces an arbitrary absolute rank. The real reordering door is the
-    # `:set_rank` action (bd-djapyj, `arb issue rank`); it only supports
+    # `:set_rank` action (bd-djapyj, `arb ticket rank`); it only supports
     # relative moves (top/bottom/before/after), not an arbitrary absolute
     # value, so raw SQL is still the right tool for this ordering test.
     Ecto.Adapters.SQL.query!(Arbiter.Repo, "UPDATE issues SET rank = ? WHERE id = ?", [

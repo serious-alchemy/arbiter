@@ -196,7 +196,7 @@ defmodule ArbiterWeb.TaskDetailBudgetTest do
       assert figure =~ "Excludes coordinator session overhead"
       # An epic's tooltip talks about the epic's children, not a single
       # issue's own sessions — that is the standalone-path wording.
-      refute figure =~ "this issue's agent sessions"
+      refute figure =~ "this ticket's agent sessions"
 
       estimate = view |> element("#task-spend-estimate") |> render()
       assert estimate =~ "Estimate:"
@@ -240,7 +240,7 @@ defmodule ArbiterWeb.TaskDetailBudgetTest do
       assert has_element?(view, "#task-spend-chip[data-state=over_budget]")
     end
 
-    test "the over-budget chip on an epic refers to its children, not 'issues like this'",
+    test "the over-budget chip on an epic refers to its children, not 'tickets like this'",
          %{conn: conn, ws: ws} do
       epic = epic!(ws)
       ready = ready_child!(ws, epic, %{difficulty: 2})
@@ -251,7 +251,7 @@ defmodule ArbiterWeb.TaskDetailBudgetTest do
       assert has_element?(view, "#task-spend-chip[data-state=over_budget]")
       title = view |> element("#task-spend-chip") |> render()
       assert title =~ "this epic&#39;s children"
-      refute title =~ "issues like this"
+      refute title =~ "tickets like this"
     end
   end
 

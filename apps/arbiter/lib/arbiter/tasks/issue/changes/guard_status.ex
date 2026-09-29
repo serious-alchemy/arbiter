@@ -83,7 +83,7 @@ defmodule Arbiter.Tasks.Issue.Changes.GuardStatus do
           field: :status,
           message:
             "Issue is awaiting post-merge verification. Record a verdict " <>
-              "(`arb issue verify`) instead of changing status via :update."
+              "(`arb ticket verify`) instead of changing status via :update."
         )
 
       # open ⇄ in_progress allowed

@@ -10,7 +10,7 @@ defmodule Arbiter.Tasks.Issue.Changes.FollowLegacyStatus do
 
     * a requeue, `in_progress → open` — `Arbiter.Worker.AuthDeath` and the
       board's drag back to Ready;
-    * an operator's status edit — `arb update --status`, MCP `task_update`
+    * an operator's status edit — `arb update --status`, MCP `ticket_update`
       and the task page's edit form;
     * a manual dispatch of a Backlog ticket (`Arbiter.Worker.Dispatch`), which
       bypasses the Ready queue until bd-asxw4e puts it behind `--force`;

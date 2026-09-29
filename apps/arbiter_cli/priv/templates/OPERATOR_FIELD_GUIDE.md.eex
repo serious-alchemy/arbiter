@@ -23,10 +23,10 @@ than describing what you should do, give them the CLI form.
 
 You coordinate; the fleet executes. Core loop:
 
-1. File an issue with crisp acceptance criteria, difficulty, and priority
-   (`mcp__arbiter__task_create`; CLI: `arb issue create`).
+1. File a ticket with crisp acceptance criteria, difficulty, and priority
+   (`mcp__arbiter__ticket_create`; CLI: `arb ticket create`).
 2. Dispatch to a repo (`mcp__arbiter__worker_dispatch(task_id, repo,
-   provider: "claude")`; CLI: `arb issue dispatch <id> [<repo>] --provider
+   provider: "claude")`; CLI: `arb ticket dispatch <id> [<repo>] --provider
    claude`).
 3. Monitor — `mcp__arbiter__worker_list` (CLI: `arb worker list`), `arb
    prime` (composite session briefing, CLI-only — no single MCP
@@ -41,7 +41,7 @@ You coordinate; the fleet executes. Core loop:
    internal `monitor` component.
 4. ReviewGate (pre-merge review gate) escalates for your judgment; decide,
    don't rubber-stamp (`docs/reviewgate.md`).
-5. Merge and close the issue (`mcp__arbiter__task_close`; CLI: `arb issue
+5. Merge and close the ticket (`mcp__arbiter__ticket_close`; CLI: `arb ticket
    close`) — or let close-on-merge handle it.
 
 External comms (GitHub, Slack) stay in normal professional voice.
@@ -51,9 +51,9 @@ External comms (GitHub, Slack) stay in normal professional voice.
 The pitfalls that burn a coordinator most often. Check these first; each
 links to the runbook with the full story.
 
-- [ ] **Concurrency** — keep parallel issues FILE-DISJOINT. Tasks that touch
+- [ ] **Concurrency** — keep parallel tickets FILE-DISJOINT. Tickets that touch
       the same file (especially a CLI verb list, command-alias map, or
-      router) **will collide at merge**. Serialize those issues.
+      router) **will collide at merge**. Serialize those tickets.
 - [ ] **Config** — use `mcp__arbiter__workspace_config_get` /
       `workspace_config_set` / `workspace_config_unset` (CLI:
       `arb config get/set/unset`) only. **Never** send partial config via
@@ -77,10 +77,10 @@ links to the runbook with the full story.
       Check the quota gauge first (`mcp__arbiter__quota_get`; CLI: `arb
       quota`). See `docs/quota-and-auth.md`.
 
-## 3. Issue Intake — Claim & Create
+## 3. Ticket Intake — Claim & Create
 
-When taking in new issues locally, **always set difficulty immediately
-after intake**. Both intake paths create issues without prompting for
+When taking in new tickets locally, **always set difficulty immediately
+after intake**. Both intake paths create tickets without prompting for
 difficulty, and the field defaults to unset. Difficulty drives the model
 tier and thinking budget — set it before dispatching to avoid under-scoped
 work.
@@ -90,23 +90,23 @@ MCP first:
 ```
 # Option A: Claim an existing upstream issue
 mcp__arbiter__tracker_claim(ref: "42")
-mcp__arbiter__task_update(id: "<id>", difficulty: <n>)
+mcp__arbiter__ticket_update(id: "<id>", difficulty: <n>)
 
-# Option B: Create a new local issue
-mcp__arbiter__task_create(title: "Fix widget crash on startup", description: "...")
-mcp__arbiter__task_update(id: "<id>", difficulty: <n>)
+# Option B: Create a new local ticket
+mcp__arbiter__ticket_create(title: "Fix widget crash on startup", description: "...")
+mcp__arbiter__ticket_update(id: "<id>", difficulty: <n>)
 ```
 
 CLI fallback:
 
 ```bash
 # Option A: Claim an existing upstream issue
-arb issue claim 42
-arb issue update <id> --difficulty <n>
+arb ticket claim 42
+arb ticket update <id> --difficulty <n>
 
-# Option B: Create a new local issue
-arb issue create "Fix widget crash on startup" --description "..."
-arb issue update <id> --difficulty <n>
+# Option B: Create a new local ticket
+arb ticket create "Fix widget crash on startup" --description "..."
+arb ticket update <id> --difficulty <n>
 ```
 
 Difficulty scale (D0–D5):
@@ -129,7 +129,7 @@ of six questions before being cut off, which is why the tier now sits behind a
 level nothing rates automatically: trackers, story-point buckets and the
 autonomous loop all stop at D4.
 
-## 4. File Issues Well
+## 4. File Tickets Well
 
 - **Crisp acceptance criteria** — reference real files and line numbers.
 - **DIFFICULTY (D0–D5)** — drives the model + thinking budget routed to the
@@ -140,18 +140,18 @@ autonomous loop all stop at D4.
 - Set `target_branch` when it is not the workspace default.
 
 Drop a one-line difficulty justification in the description so reviewers can
-sanity-check your call. Both `mcp__arbiter__task_create` and `arb issue
+sanity-check your call. Both `mcp__arbiter__ticket_create` and `arb ticket
 create` accept difficulty/priority inline — no follow-up update needed at
 filing time.
 
 ## 5. Concurrency Discipline
 
-Parallel workers are good. **Keep concurrent issues FILE-DISJOINT.**
+Parallel workers are good. **Keep concurrent tickets FILE-DISJOINT.**
 
-Issues that touch the same file — especially the CLI verb list,
+Tickets that touch the same file — especially the CLI verb list,
 command-alias map, or the router — **will collide at merge**. An
 auto-conflict-resolver may help, but do not rely on it. Serialize those
-issues: `conflicts_with` as a mutex, plus a `depends_on` chain for order
+tickets: `conflicts_with` as a mutex, plus a `depends_on` chain for order
 (`mcp__arbiter__dep_add`; CLI: `arb dep add`).
 
 ## 6. Freshness
@@ -199,10 +199,10 @@ itself is CLI/infra-only, no MCP equivalent.
 - A PR marked CLEAN/MERGEABLE means no merge conflict, **not** an empty diff.
   Read the real `git diff origin/<base>...<branch> --stat` before calling
   work "empty" or "failed".
-- Close-on-merge can miss on out-of-band merges — close the issue manually
-  if it stalls (`mcp__arbiter__task_close`; CLI: `arb issue close`).
+- Close-on-merge can miss on out-of-band merges — close the ticket manually
+  if it stalls (`mcp__arbiter__ticket_close`; CLI: `arb ticket close`).
 - A server restart wipes in-memory worker registrations (idle shells vanish);
-  persisted issues survive.
+  persisted tickets survive.
 
 More on diagnosing a stuck or misbehaving worker: `docs/worktrees-and-workers.md`.
 
@@ -214,7 +214,7 @@ judgment.
 Read the full implementer↔reviewer transcript before deciding. Do not assume
 the worst on a stalled exchange; do not rubber-stamp because a round ran.
 Decide for yourself. Edge cases (self-approval blocks, "empty branch"
-verdicts that aren't actually empty, gate-failed issues with a live mergeable
+verdicts that aren't actually empty, gate-failed tickets with a live mergeable
 PR) are in `docs/reviewgate.md`.
 
 ## 11. Watch Efficiently
@@ -231,8 +231,8 @@ Never hardcode model names. Route via abstract tiers:
 
 | Tier | Use |
 |------|-----|
-| economy | Cheap, fast, simple tasks |
-| standard | Most issues (default) |
+| economy | Cheap, fast, simple tickets |
+| standard | Most tickets (default) |
 | premium | Hard / correctness-critical work |
 
 Plus thinking budget: `none / low / medium / high`. Resolved per adapter at
@@ -250,11 +250,12 @@ are in `docs/quota-and-auth.md`.
 PR/MR tracker-side: fetches the diff and posts findings + verdict via the
 configured tracker API. The PR author needs **no** Arbiter setup.
 
-For a ticketed review with the issue's acceptance criteria in context, prefer
-a **local** task (`tracker_type: none`) with the criteria pasted in and
-`pr_ref` set, then review that task — full context, zero upstream write-back.
-Never claim a coworker's ticket just to get a review task; `tracker_claim` is
-assignment-as-claim and risks writing back to their upstream issue.
+For a review with the tracker issue's acceptance criteria in context, prefer
+a **local** ticket (`tracker_type: none`) with the criteria pasted in and
+`pr_ref` set, then review that ticket — full context, zero upstream write-back.
+Never claim a coworker's tracker issue just to get a review ticket;
+`tracker_claim` is assignment-as-claim and risks writing back to their
+upstream issue.
 
 ## 14. Lanes & Merge Posture
 

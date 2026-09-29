@@ -1,6 +1,6 @@
 defmodule ArbiterCli.Cmd.Verify do
   @moduledoc """
-  `arb issue verify <id> --observed "<evidence>" | --failed "<evidence>"`
+  `arb ticket verify <id> --observed "<evidence>" | --failed "<evidence>"`
 
   Records the post-merge restart-and-observe result for a task parked at
   `awaiting_verification` (bd-9so315).
@@ -10,8 +10,8 @@ defmodule ArbiterCli.Cmd.Verify do
   until someone restarts and looks. The task waits here until you say what you
   saw.
 
-      arb issue verify bd-9so315 --observed "restarted 14:02; GET /api/doctor now reports 3 repos"
-      arb issue verify bd-9so315 --failed   "after restart capture_source still reads headers"
+      arb ticket verify bd-9so315 --observed "restarted 14:02; GET /api/doctor now reports 3 repos"
+      arb ticket verify bd-9so315 --failed   "after restart capture_source still reads headers"
 
   `--observed` closes the task. `--failed` reopens it for another attempt, with
   a fresh PR. Either way the evidence text is persisted on the task, so "this
@@ -34,8 +34,8 @@ defmodule ArbiterCli.Cmd.Verify do
       id =
         case rest do
           [id] -> id
-          [] -> Output.die("verify requires an issue id", usage_hint())
-          _ -> Output.die("verify takes exactly one positional argument: the issue id")
+          [] -> Output.die("verify requires a ticket id", usage_hint())
+          _ -> Output.die("verify takes exactly one positional argument: the ticket id")
         end
 
       {outcome, evidence} = verdict!(opts)
@@ -67,6 +67,6 @@ defmodule ArbiterCli.Cmd.Verify do
   end
 
   defp usage_hint do
-    ~s(e.g. `arb issue verify bd-9so315 --observed "restarted; the new path fires"`)
+    ~s(e.g. `arb ticket verify bd-9so315 --observed "restarted; the new path fires"`)
   end
 end

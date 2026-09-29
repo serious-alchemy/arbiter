@@ -484,9 +484,9 @@ defmodule Arbiter.Agents.Claude.ConfigDir do
     If an `arbiter` MCP server is connected this session, prefer its typed tools
     over shelling out to `arb` for these structured operations:
 
-    - read your task → `task_show`
+    - read your task → `ticket_show`
     - check your mailbox → `inbox_check` (this marks the mail read, like `arb inbox`)
-    - record progress / completion notes → `task_update_progress`
+    - record progress / completion notes → `ticket_update_progress`
       (`notes` / `qa_notes` / `deployment_notes` — your own task only)
     - inspect your workspace config → `workspace_show`
 

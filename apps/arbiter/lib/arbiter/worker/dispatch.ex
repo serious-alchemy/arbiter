@@ -1106,7 +1106,7 @@ defmodule Arbiter.Worker.Dispatch do
   # When the task raced to `:closed` and the worker is still alive, atomically
   # reopen it (`:reopen` → `:in_progress`) so the live worker is realigned rather
   # than orphaned — the same recovery the operator had to perform by hand
-  # (`task_reopen`). Otherwise the task is returned unchanged. Public (`@doc
+  # (`ticket_reopen`). Otherwise the task is returned unchanged. Public (`@doc
   # false`) so the invariant is unit-testable in isolation.
   @doc false
   @spec realign_task_if_orphaned(String.t(), pid() | nil) ::

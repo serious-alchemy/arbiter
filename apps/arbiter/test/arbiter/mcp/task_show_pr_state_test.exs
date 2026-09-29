@@ -1,6 +1,6 @@
 defmodule Arbiter.MCP.TaskShowPrStateTest do
   @moduledoc """
-  bd-741sid: `task_show` is the coordinator's main surface, and the ticket now
+  bd-741sid: `ticket_show` is the coordinator's main surface, and the ticket now
   owns its open PR — so the full view carries the PR's URL, the forge's last
   answer and when it was read, and the `pr_closed` cause, as
   `GET /api/issues/:id` does.

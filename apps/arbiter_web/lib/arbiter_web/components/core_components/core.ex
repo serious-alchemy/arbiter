@@ -212,7 +212,7 @@ defmodule ArbiterWeb.CoreComponents.Core do
       id={@dom_id || "copy-id-#{@id}"}
       phx-hook=".CopyId"
       data-copy-value={@id}
-      aria-label={"Copy issue id #{@id}"}
+      aria-label={"Copy ticket id #{@id}"}
       class={[
         "copy-id-btn inline-flex items-center justify-center rounded-[4px] p-[3px]",
         "text-[var(--text-label)] hover:text-[var(--text-title)] hover:bg-[var(--arb-panel-alt)]",

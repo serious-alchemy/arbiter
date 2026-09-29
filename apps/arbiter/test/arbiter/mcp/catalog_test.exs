@@ -8,15 +8,15 @@ defmodule Arbiter.MCP.CatalogTest do
   @coordinator %Scope{tier: :coordinator, workspace_id: "w"}
 
   # The both-tier tools a worker may also reach.
-  @both_tier ~w(task_show inbox_check task_update_progress workspace_show quota_get
+  @both_tier ~w(ticket_show inbox_check ticket_update_progress workspace_show quota_get
                 message_send notify_list workspace_config_get workspace_config_overview)
 
   # Coordinator-only tools; never visible to a worker.
-  @coordinator_only ~w(task_ready task_create task_update task_close task_reopen task_verify
-                       task_sync_upstream_close dep_add dep_remove
+  @coordinator_only ~w(ticket_ready ticket_create ticket_update ticket_close ticket_reopen ticket_verify
+                       ticket_sync_upstream_close dep_add dep_remove
                        worker_dispatch
                        worker_resume worker_review worker_stop worker_list worker_show worker_runs
-                       worker_log task_list
+                       worker_log ticket_list
                        tracker_claim tracker_sync workspace_list usage_summarize coordinator_inbox
                        coordinator_inbox_clear
                        workspace_config_set workspace_config_unset
@@ -27,8 +27,8 @@ defmodule Arbiter.MCP.CatalogTest do
 
   # Tools that resolve/authorize a workspace and thus expose the optional
   # `workspace` param. The skill_* tools scope to a workspace (bd-9j6is7).
-  @workspace_resolving_tools ~w(task_ready coordinator_inbox coordinator_inbox_clear workspace_show
-                                quota_get task_create worker_list task_list usage_summarize notify_list
+  @workspace_resolving_tools ~w(ticket_ready coordinator_inbox coordinator_inbox_clear workspace_show
+                                quota_get ticket_create worker_list ticket_list usage_summarize notify_list
                                 tracker_claim tracker_sync worker_review workspace_config_get
                                 workspace_config_overview workspace_config_set workspace_config_unset
                                 external_review_list skill_create skill_update skill_list skill_get
@@ -79,7 +79,8 @@ defmodule Arbiter.MCP.CatalogTest do
       for tool <- @both_tier, do: assert(tool in names)
       for tool <- @coordinator_only, do: assert(tool in names)
 
-      assert length(names) == length(Catalog.all())
+      # Every canonical tool, plus one deprecated `task_*` alias per renamed tool (bd-4jojpw).
+      assert length(names) == length(Catalog.all()) + map_size(Catalog.legacy_aliases())
     end
 
     test "every tool declares an object input schema" do
@@ -122,7 +123,7 @@ defmodule Arbiter.MCP.CatalogTest do
     end
 
     test "a worker calling a coordinator-only tool is a JSON-RPC not-permitted error" do
-      assert {:rpc_error, -32_003, message} = Catalog.call(@worker, "task_ready", %{})
+      assert {:rpc_error, -32_003, message} = Catalog.call(@worker, "ticket_ready", %{})
       assert message =~ "not permitted"
     end
 

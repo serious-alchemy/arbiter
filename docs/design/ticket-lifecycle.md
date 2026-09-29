@@ -249,7 +249,7 @@ It left no null state and no rank out of creation order.
 
 The `task_state` event and the PubSub `"tasks"` message carry `state` and
 `close_reason` beside `status`, and so do `GET /api/issues/:id` (so
-`arb issue show --json`) and MCP `task_show` in its full view.
+`arb ticket show --json`) and MCP `ticket_show` in its full view.
 
 ### The overlap
 
@@ -260,7 +260,7 @@ it in bd-36ytcl):
   `close_reason` and `rank` outright. But a few writers still set `status`
   directly, for moves the table has no transition for: a requeue (in_progress
   → open, from `Worker.AuthDeath` and the board's drag back to Ready), an
-  operator's status edit (`arb update --status`, MCP `task_update`, the task
+  operator's status edit (`arb update --status`, MCP `ticket_update`, the task
   page), and `:return_to_backlog` on an in-progress ticket whose worker
   already stopped (bd-2098). `Changes.FollowLegacyStatus` re-derives `state`
   from the row by the backfill rule, so the two never disagree. It is the only
@@ -296,7 +296,7 @@ everything it would otherwise have to read arrives in `ctx`: `:blocked_by`
 | board (`Board.Snapshot.derive/1`) | worker-first card builders, `queueable?` | `Lifecycle.board_column/2` per ticket; each builder only builds for its own column |
 | epic mini-board (`Snapshot.classify_columns/3`) | `column_for/3` | the same `board_column/2` |
 | `/epics` rollup (`EpicRollup`) | `bucket/1`, status only | the same `board_column/2`, given the child's live author workers |
-| `Issue.ready/1` (`task_ready`, `GET /api/issues/ready`, `arb ready`, `arb prime`) | open + no open blocker, ignoring `refined` | exactly the tickets whose column is `:ready` |
+| `Issue.ready/1` (`ticket_ready`, `GET /api/issues/ready`, `arb ready`, `arb prime`) | open + no open blocker, ignoring `refined` | exactly the tickets whose column is `:ready` |
 
 `Arbiter.Board.ColumnAgreementTest` runs one ticket per state × {no worker,
 live author, completed author row, failed author row} through the first three
@@ -458,7 +458,7 @@ the `pr_closed` cause (`attention_cause`, `attention_detail`,
 | `meta.awaiting_review_resume_attempts` | `merge_watch.auto_resumes` |
 | the ReviewGate round in `meta` | `review_gate_state` |
 
-`GET /api/issues/:id` (so `arb issue show --json`) and MCP `task_show` (full)
+`GET /api/issues/:id` (so `arb ticket show --json`) and MCP `ticket_show` (full)
 carry `merger_url`, `merger_status`, `merger_checked_at` and the attention
 fields.
 
@@ -720,14 +720,14 @@ attention (a transition, a run restart, a cleared park), and raising a
 different cause drops it.
 
 - **Hand-off.** MCP `ticket_handoff(id, note)`, `POST /api/issues/:id/handoff`,
-  `arb issue handoff <id> --note …`. The note is required; the ticket must have
+  `arb ticket handoff <id> --note …`. The note is required; the ticket must have
   attention now, not already the operator's.
 - **Hand-back.** MCP `ticket_handback(id, note?)`, `POST /api/issues/:id/handback`,
-  `arb issue handback <id>`, and the *Hand back to coordinator* button on the
+  `arb ticket handback <id>`, and the *Hand back to coordinator* button on the
   task page's attention strip. The coordinator gets a fresh clock and a fresh
   attempt budget.
 
-`task_show` returns the stored fields (full view) and the computed `attention`
+`ticket_show` returns the stored fields (full view) and the computed `attention`
 map (both views).
 
 ### Limits
@@ -884,10 +884,10 @@ Watchdog, the clock — and `payload/1` is the one JSON shape of a view:
 | surface | reads |
 |---|---|
 | `GET /api/issues/lifecycle?workspace_id=` | `Projection.open/2`: every open, non-epic ticket, projected, in dispatch order |
-| `GET /api/issues/:id` (so `arb issue show`) | `Projection.view/2`, plus `current_run` (`Workers.Current`, kind/state/outcome/phase) |
-| MCP `task_show` | the payload, plus `close_reason`, on both views |
-| MCP `task_list` | new `state` and `column` filters; each row carries the payload |
-| MCP `task_ready` | `Projection.open/2`, column `:ready` only, dispatch order |
+| `GET /api/issues/:id` (so `arb ticket show`) | `Projection.view/2`, plus `current_run` (`Workers.Current`, kind/state/outcome/phase) |
+| MCP `ticket_show` | the payload, plus `close_reason`, on both views |
+| MCP `ticket_list` | new `state` and `column` filters; each row carries the payload |
+| MCP `ticket_ready` | `Projection.open/2`, column `:ready` only, dispatch order |
 | `task_state` event | `column` and `attention`, beside `state`, `close_reason` and the legacy `status` |
 
 ### `arb prime`

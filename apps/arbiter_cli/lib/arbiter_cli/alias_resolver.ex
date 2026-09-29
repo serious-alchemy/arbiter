@@ -3,8 +3,8 @@ defmodule ArbiterCli.AliasResolver do
   Resolves the user-typed first token (a **resource** or top-level command)
   against the canonical command surface.
 
-  The CLI uses an `arb <resource> <verb>` grammar (e.g. `arb issue list`,
-  `arb worker stop`). The resources are plain base terms — `issue`,
+  The CLI uses an `arb <resource> <verb>` grammar (e.g. `arb ticket list`,
+  `arb worker stop`). The resources are plain base terms — `ticket`,
   `worker`, `repo`. This module resolves that first token to its canonical
   form.
 
@@ -14,14 +14,14 @@ defmodule ArbiterCli.AliasResolver do
     2. Otherwise, return `{:unknown, suggestions}` — a list of close-by known
        verbs ranked by string distance.
 
-  (Legacy flat-command redirects — e.g. `arb list` → `arb issue list` — live
+  (Legacy flat-command redirects — e.g. `arb list` → `arb ticket list` — live
   in `ArbiterCli.Main`, not here.)
   """
 
   # The canonical command surface: resources, plus the flat meta commands that
   # carry no resource ambiguity, plus `dispatch` (the top-level shortcut for
-  # `issue dispatch`).
-  @known_verbs ~w(issue worker repo dep config server workspace message usage loop queue scheduler quota breaker install mcp skill session account dispatch verify prime where init help version self-update upgrade preflip-gate)
+  # `ticket dispatch`; `issue` is the deprecated alias of `ticket`).
+  @known_verbs ~w(ticket issue worker repo dep config server workspace message usage loop queue scheduler quota breaker install mcp skill session account dispatch verify prime where init help version self-update upgrade preflip-gate)
 
   @doc "The set of canonical resources/commands that arb dispatches to."
   @spec known_verbs() :: [String.t()]

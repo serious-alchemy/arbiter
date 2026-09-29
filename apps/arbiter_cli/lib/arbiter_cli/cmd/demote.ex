@@ -1,6 +1,6 @@
 defmodule ArbiterCli.Cmd.Demote do
   @moduledoc """
-  `arb issue demote <id>` — demote a task from Ready to Backlog.
+  `arb ticket demote <id>` — demote a task from Ready to Backlog.
 
   Wraps `POST /api/issues/:id/demote`, which runs the `:return_to_backlog` action:
   it sets `refined: false`, moving the task from Ready back to Backlog.
@@ -36,8 +36,8 @@ defmodule ArbiterCli.Cmd.Demote do
   defp parse_id(rest) do
     case rest do
       [id] -> id
-      [] -> Output.die("demote requires an issue id")
-      _ -> Output.die("demote takes exactly one positional argument: the issue id")
+      [] -> Output.die("demote requires a ticket id")
+      _ -> Output.die("demote takes exactly one positional argument: the ticket id")
     end
   end
 

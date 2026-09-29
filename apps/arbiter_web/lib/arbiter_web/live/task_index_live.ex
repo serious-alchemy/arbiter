@@ -83,7 +83,7 @@ defmodule ArbiterWeb.TaskIndexLive do
     # render reads nothing and draws a loading state (bd-y9civj).
     socket =
       socket
-      |> assign(:issue_label, "issue")
+      |> assign(:issue_label, "ticket")
       |> assign(:filter_tabs, @filter_tabs)
       |> assign(:sort_options, Enum.map(@sorts, &{@sort_labels[&1], Atom.to_string(&1)}))
       |> assign(:issue_types, @issue_types)

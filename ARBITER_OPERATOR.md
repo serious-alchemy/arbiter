@@ -14,7 +14,7 @@ that is waiting on someone (see §1a).
 
 You coordinate; the workers execute. Core loop:
 
-1. File an issue with crisp acceptance criteria, difficulty, and priority. It
+1. File a ticket with crisp acceptance criteria, difficulty, and priority. It
    starts in **Backlog**; `arb promote <id>` queues it (Ready, or Blocked while a
    gating blocker is open).
 2. Dispatch to a repo (`arb dispatch <id> [<repo>]`), or let Autopilot take the
@@ -31,8 +31,9 @@ External comms (GitHub, Slack) stay in normal professional voice.
 
 ## 1a. Ticket lifecycle vocabulary
 
-Every surface — the board, `arb prime`, `arb issue show`, MCP `task_show` /
-`task_list` / `task_ready`, and the `task_state` event — gives the same answer
+A unit of work is a **ticket** (formerly *issue*; `arb issue` and the `task_*`
+MCP tools remain as deprecated aliases for one release). Every surface — the board, `arb prime`, `arb ticket show`, MCP `ticket_show` /
+`ticket_list` / `ticket_ready`, and the `task_state` event — gives the same answer
 about where a ticket is. Use these terms. The legacy `status` field and the
 old Backlog/Ready flag still ride along for one release, but nothing should
 read them: they are being removed.
@@ -62,7 +63,7 @@ blocks its dependents. Epics stay off the board and out of Ready.
 
 **Attention** — an overlay, not a column: `{owner, waiting_on, reason}`. The
 ticket keeps its column. The coordinator owns everything the fleet can act on;
-an item reaches the operator only by an explicit hand-off (`arb issue handoff
+an item reaches the operator only by an explicit hand-off (`arb ticket handoff
 <id> --note …`) or an expired limit. Attention clears by itself when the ticket's
 state moves on.
 
@@ -73,27 +74,27 @@ state moves on.
 | what is waiting on someone | `arb prime` → Needs attention (coordinator's first, then operator's) |
 | what is working | In progress, with its step |
 | what has a PR open | Merging, with its step and PR |
-| what needs a restart-and-observe | Verifying → `arb issue verify <id> --observed "…"` |
-| what dispatches next | Ready, in dispatch order (`arb ready`, MCP `task_ready`) |
+| what needs a restart-and-observe | Verifying → `arb ticket verify <id> --observed "…"` |
+| what dispatches next | Ready, in dispatch order (`arb ready`, MCP `ticket_ready`) |
 | why a queued ticket isn't moving | Blocked, with its blockers |
-| one ticket | `arb issue show <id>` — State (column), Step, Attention, Close reason, PR + merge status, Current run |
-| a filtered list | MCP `task_list` with `state` or `column` |
+| one ticket | `arb ticket show <id>` — State (column), Step, Attention, Close reason, PR + merge status, Current run |
+| a filtered list | MCP `ticket_list` with `state` or `column` |
 
 ## 2. Operating Pitfalls — Quick Reference
 
 The six most-burned-by operating pitfalls. Check these first:
 
-- [ ] **Concurrency** — keep concurrent tasks FILE-DISJOINT. Tasks that touch the same file (especially CLI verb list, command-alias map, or router) **will collide at merge**. The auto-conflict-resolver helps, but do not rely on it. Serialize those tasks.
+- [ ] **Concurrency** — keep concurrent tickets FILE-DISJOINT. Tickets that touch the same file (especially CLI verb list, command-alias map, or router) **will collide at merge**. The auto-conflict-resolver helps, but do not rely on it. Serialize those tickets.
 - [ ] **Config** — use `arb config get/set/unset` only. **Never** send partial config via raw API PATCH — it replaces the whole map and **silently clobbers** siblings (`repo_paths`, tracker, merge config, vernacular).
 - [ ] **Deploy** — before restarting the server, check for active workers (`arb prime` or `arb worker list`). **Restarting the server KILLS all in-flight workers and abandons their work.**
 - [ ] **Freshness** — keep repos current. Workers branch from the repo's base branch. A stale repo means stale, possibly regressed state for every new worker.
 - [ ] **Verify** — a worker can show "running" while its subprocess is dead. **Check the port/log, not just status.** A PR marked CLEAN/MERGEABLE means no merge conflict, **not** an empty diff.
 - [ ] **ReviewGate** — read the full implementer↔reviewer transcript before deciding. Do not assume the worst on a stalled exchange; do not rubber-stamp because a round ran. **Decide for yourself.**
 
-## 3. Issue Intake — Claim & Create
+## 3. Ticket Intake — Claim & Create
 
-When taking in new issues locally via `arb claim` or `arb create`, **always
-set difficulty immediately after intake**. Both commands create tasks without
+When taking in new tickets locally via `arb claim` or `arb create`, **always
+set difficulty immediately after intake**. Both commands create tickets without
 prompting for difficulty, and the field defaults to unset. Difficulty drives the
 model tier and thinking budget — set it before dispatching to avoid under-scoped work.
 
@@ -104,7 +105,7 @@ Workflow:
 arb claim 42
 arb update <task-id> --difficulty <n>
 
-# Option B: Create a new local task
+# Option B: Create a new local ticket
 arb create "Fix widget crash on startup" --description "..."
 arb update <task-id> --difficulty <n>
 ```
@@ -129,9 +130,9 @@ of six questions before being cut off, which is why the tier now sits behind a
 level nothing rates automatically: trackers, story-point buckets and the
 autonomous loop all stop at D4.
 
-### Repo is required on every issue (bd-9dwbvt)
+### Repo is required on every ticket (bd-9dwbvt)
 
-Every issue carries a repo from the moment it is created. You rarely type it:
+Every ticket carries a repo from the moment it is created. You rarely type it:
 creation resolves one in this order:
 
 ```
@@ -145,15 +146,15 @@ explicit --repo  →  the workspace's only repo  →  the workspace's default_re
   or set the default once: `arb config set default_repo <key>`.
 - A `--repo` that is not a configured `repo_paths` key is rejected at create
   time rather than persisted for dispatch to fail on later.
-- A workspace with no `repo_paths` at all still creates issues with a null
+- A workspace with no `repo_paths` at all still creates tickets with a null
   repo — there is nothing to resolve against.
 
-This applies to every creation path: `arb create` / `arb issue create`,
-`task_create`, `arb claim` / `tracker_claim`, `arb sync` / `tracker_sync`
+This applies to every creation path: `arb create` / `arb ticket create`,
+`ticket_create`, `arb claim` / `tracker_claim`, `arb sync` / `tracker_sync`
 auto-claim, the dashboard create form, and worker-filed follow-ups. Epics,
-decisions and `task`-type issues are not exempt.
+decisions and `task`-type tickets are not exempt.
 
-Issues filed before this are backfilled with
+Tickets filed before this are backfilled with
 `mix arbiter.backfill_issue_repos` on a dev/source install (dry-run by
 default, `--apply` to write; re-running it is a no-op), or on a release
 install with no Mix toolchain:
@@ -164,7 +165,7 @@ install with no Mix toolchain:
 It prints, per workspace, how many rows it set and how many it left null. See
 "Data backfills on a release install" in section 8 for the other four.
 
-## 4. File Issues Well
+## 4. File Tickets Well
 
 - **Crisp acceptance criteria** — reference real files and line numbers.
 - **DIFFICULTY (D0–D5)** — drives the model + thinking budget routed to the
@@ -179,11 +180,11 @@ sanity-check your call.
 
 ## 5. Concurrency Discipline
 
-Parallel workers are good. **Keep concurrent tasks FILE-DISJOINT.**
+Parallel workers are good. **Keep concurrent tickets FILE-DISJOINT.**
 
-Tasks that touch the same file — especially the CLI verb list,
+Tickets that touch the same file — especially the CLI verb list,
 command-alias map, or the router — **will collide at merge**. The
-auto-conflict-resolver helps, but do not rely on it. Serialize those tasks.
+auto-conflict-resolver helps, but do not rely on it. Serialize those tickets.
 
 ## 6. Freshness
 
@@ -372,7 +373,7 @@ fail against the pre-#1036 signature: a ~30-call burst ~1/min (~2,200/hr idle).
 
 This is the live measurement `bd-4brb2j` asked for and could not satisfy; it can
 only run against a real deployment, not from a worker worktree. Record the
-samples on the PR / task.
+samples on the PR / ticket.
 
 ## 9. Trust State, But Verify
 
@@ -381,7 +382,7 @@ samples on the PR / task.
 - A PR marked CLEAN/MERGEABLE means no merge conflict, **not** an empty diff.
   Read the real `git diff origin/main...<branch>` before calling work "empty"
   or "failed".
-- Close-on-merge can miss on out-of-band merges — close the issue manually if it
+- Close-on-merge can miss on out-of-band merges — close the ticket manually if it
   stalls.
 
 ## 10. Review Gate
@@ -404,8 +405,8 @@ Never hardcode model names. Route via abstract tiers:
 
 | Tier | Use |
 |------|-----|
-| economy | Cheap, fast, simple tasks |
-| standard | Most issues (default) |
+| economy | Cheap, fast, simple tickets |
+| standard | Most tickets (default) |
 | premium | Hard / correctness-critical work |
 
 Plus thinking budget: `none / low / medium / high`. Resolved per adapter at
@@ -416,12 +417,12 @@ crashes the worker at launch with no useful error.
 
 ## 13. Review Capability
 
-`arb review <id>` reviews the PR/MR linked to an Arbiter task: fetches the diff
+`arb review <id>` reviews the PR/MR linked to an Arbiter ticket: fetches the diff
 and posts findings + verdict. The PR author needs **no** Arbiter setup.
 
 `arb review --pr <url|number> [--repo <checkout>] [--workspace <ref>]` reviews an
 **external / non-arbiter PR** — one the fleet never opened (a coworker's PR) —
-with no task and no branch. It constructs a merge-request ref through the
+with no ticket and no branch. It constructs a merge-request ref through the
 workspace's **MR provider** (the `config["merge"]["strategy"]` adapter —
 github/gitlab, *not* the issue tracker, so a Jira-tracked workspace still reviews
 its GitHub PRs) and runs the CodeReview adapter workflow: read diff → post inline
@@ -452,7 +453,7 @@ local infra repo with no git remote in a workspace that merges via GitHub:
 arb config set merge.repos.mesaana.strategy direct
 ```
 
-Its tasks then merge locally (`git merge --no-ff` in the checkout; with no
+Its tickets then merge locally (`git merge --no-ff` in the checkout; with no
 `origin` the push is skipped), and it gets no PR patrol, review patrol or
 merged-PR finalizer. The other repos keep opening GitHub PRs. The reverse also
 works: in a `direct` workspace, set `merge.repos.<repo>.strategy github` plus
@@ -484,7 +485,7 @@ for reference (these terms are retired; use the current terms listed below):
 | Sling | Dispatch |
 | Campaign / Strike Force | Batch |
 | Fleet | The set of active workers |
-| Directive | Task / issue |
+| Directive | Ticket |
 | Summons | Work prompt |
 
 ## 16. Active Monitoring — Coordinator Inbox
@@ -499,7 +500,7 @@ Check the coordinator inbox with:
 
 ```bash
 arb message inbox              # check all unread messages
-arb message inbox <task-id>   # check messages for a specific task
+arb message inbox <task-id>   # check messages for a specific ticket
 ```
 
 Or use the continuous monitor (recommended while workers are in flight):
@@ -566,7 +567,7 @@ column and attention for that. Look for:
 - **finished (failed)** / **finished (interrupted)** — A run stopped without
   succeeding. With nothing else live on the ticket, the ticket carries
   `run_crashed` attention and shows in `arb prime`'s Needs attention. Check
-  `arb issue show <task-id>` for the reason and resume or close.
+  `arb ticket show <task-id>` for the reason and resume or close.
 - **waiting** — On a question (answer it; the ticket carries
   `run_asked_question` attention) or on the review gate (the machine's turn).
 - **starting** / **working** — Expected; the run is working.
@@ -586,9 +587,9 @@ failures operational-vs-agent-quality by allowlist (so our own deploy restarts
 don't dominate), corroborates each `failure_reason` against the transcript
 (the label lies — context-exhaustion hides behind "rate-limited"/"crashed"
 labels), and emits a report with a suggested destination per finding (skill /
-repo `CLAUDE.md` / per-task override). It **writes nothing** but the report and
+repo `CLAUDE.md` / per-ticket override). It **writes nothing** but the report and
 one cost-ledger row — you read it and decide. Evidence bar for any fleet-wide
-change: ≥ 3 incidents across ≥ 2 tasks; a single incident is a per-task
+change: ≥ 3 incidents across ≥ 2 tickets; a single incident is a per-ticket
 override. Full guide: `docs/loop-review.md`.
 
 ## 18. Run archives & retention
@@ -618,11 +619,11 @@ cannot catch a key a subprocess happened to print. Archives are written `0600`
 and the root `0700`. Don't sync it to shared storage or back it up with weaker
 access control than the host account. Full guide: `docs/session-archive.md`.
 
-## 19. Reading the usage ledger — not all spend is a task
+## 19. Reading the usage ledger — not all spend is a ticket
 
 `usage_events` records every model round-trip Arbiter dispatches. Until
-bd-adyhvn it could only attribute spend to a **task**: `task_id` was `NOT NULL`,
-so the two largest task-less spenders wrote nothing at all.
+bd-adyhvn it could only attribute spend to a **ticket**: `task_id` was `NOT NULL`,
+so the two largest ticket-less spenders wrote nothing at all.
 
 Every row now carries a `source` discriminator:
 
@@ -630,23 +631,23 @@ Every row now carries a `source` discriminator:
 | --- | --- | --- |
 | `task` | always set | `Arbiter.Worker` / `Dispatch` — real worker sessions |
 | `probe` | never set | **historical only** — `Arbiter.Quota.RefreshProbe` was deleted in bd-atyrrq; no longer written |
-| `preflight` | set when a task is being gated | `Arbiter.Agents.Preflight` — the auth check before every dispatch and resume |
+| `preflight` | set when a ticket is being gated | `Arbiter.Agents.Preflight` — the auth check before every dispatch and resume |
 | `coordinator_session` | never set | a browser-hosted coordinator session |
 | `terminal_session` | never set | an interactive terminal session |
 | `maintenance` | never set | scheduled internal passes (e.g. `arb loop analyze`) |
 
-Start a spend review with the split, not the task list:
+Start a spend review with the split, not the ticket list:
 
     arb usage --by source --since 7d      # the whole bill
-    arb usage --by task   --since 7d      # the task-attributed part of it
+    arb usage --by task   --since 7d      # the ticket-attributed part of it
     arb usage events --source probe --since 24h
 
-`--by task` deliberately **drops** task-less rows rather than bucketing them
+`--by task` deliberately **drops** ticket-less rows rather than bucketing them
 under a placeholder, so it shows no phantom or sentinel ids. Every other
 grouping (`--by day`, `--by source`, `--by workspace`, `--by provider`,
 `--by model`) counts all rows, so nothing is lost — the two views just answer
 different questions. `--by task` still totals less than `--by day`; that gap is
-the task-less spend, and it is real.
+the ticket-less spend, and it is real.
 
 ### Measurement consequence — older figures understate consumption
 

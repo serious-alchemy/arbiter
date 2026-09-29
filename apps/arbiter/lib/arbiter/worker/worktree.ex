@@ -378,7 +378,7 @@ defmodule Arbiter.Worker.Worktree do
   @doc """
   If `branch_name` already exists — either as a live worktree, or merely as a
   branch ref left behind after its worktree was torn down (`:await_verification`
-  runs `CleanupWorktree` the moment a PR merges, well before a `task_verify
+  runs `CleanupWorktree` the moment a PR merges, well before a `ticket_verify
   failed` reopen can redispatch onto it) — reset it to `origin/<base_branch>`
   so a redispatch starts clean instead of reusing a branch with nothing left
   to contribute (bd-8ssxap). Two independent signals trigger the reset:

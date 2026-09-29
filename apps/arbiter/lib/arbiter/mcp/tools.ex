@@ -5,8 +5,8 @@ defmodule Arbiter.MCP.Tools do
   `arb` subcommands take) and returns plain, JSON-friendly maps.
 
   Phase 1 ships the read tools plus the one narrowed worker write
-  (`task_update_progress`); Phase 2 adds the coordinator-only mutating tools —
-  `task_create` / `task_update` / `task_close` / `task_reopen`, `dep_add` /
+  (`ticket_update_progress`); Phase 2 adds the coordinator-only mutating tools —
+  `ticket_create` / `ticket_update` / `ticket_close` / `ticket_reopen`, `dep_add` /
   `dep_remove` (grouping/epics use a `parent_of` edge), the `worker_*` lifecycle family
   (`worker_dispatch` / `worker_resume` / `worker_review` / `worker_stop` /
   `worker_list`), `message_send`, `notify_list`, the `tracker_*` bridge
@@ -37,9 +37,9 @@ defmodule Arbiter.MCP.Tools do
 
     * `Arbiter.MCP.Tools.Skills` — `skill_*`
     * `Arbiter.MCP.Tools.LoopPending` — `loop_pending_*`
-    * `Arbiter.MCP.Tools.Task` — `task_show` / `task_ready` / `task_update_progress` /
-      `task_create` / `task_update` / `task_close` / `task_reopen` /
-      `task_sync_upstream_close` / `dep_add` / `dep_remove`
+    * `Arbiter.MCP.Tools.Task` — `ticket_show` / `ticket_ready` / `ticket_update_progress` /
+      `ticket_create` / `ticket_update` / `ticket_close` / `ticket_reopen` /
+      `ticket_sync_upstream_close` / `dep_add` / `dep_remove`
     * `Arbiter.MCP.Tools.Workspace` — `workspace_show` / `workspace_config_*` /
       `installation_config_*`
     * `Arbiter.MCP.Tools.Messaging` — `inbox_check` / `coordinator_inbox` /
@@ -127,7 +127,7 @@ defmodule Arbiter.MCP.Tools do
   asymmetry is intentional (Option 3 in bd-bs5b12): each transport follows its own
   convention for consistency within that transport. Optional `limit` (default 20,
   max 200), `status` filter, and `workspace` (resolved the same way as
-  `worker_list`/`task_ready` — explicit arg, then the installation default).
+  `worker_list`/`ticket_ready` — explicit arg, then the installation default).
   """
   @spec external_review_list(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def external_review_list(%Scope{} = scope, args) do
@@ -1302,8 +1302,8 @@ defmodule Arbiter.MCP.Tools do
     * **`:parent_of` — both endpoints must be in the subtree.** `parent_of` is
       the very relation `Scope.subtree_member?/2` walks, so a one-endpoint rule
       would be self-extending: `dep_add(bound_issue, any_issue, :parent_of)`
-      adopts `any_issue` into the subtree, and the next `task_update` /
-      `task_promote` on it then passes `authorize_subtree/2`. Repeat and a
+      adopts `any_issue` into the subtree, and the next `ticket_update` /
+      `ticket_promote` on it then passes `authorize_subtree/2`. Repeat and a
       refine token reaches every issue in the workspace — including promoting
       it to Ready, where Autopilot can claim it, which is exactly what
       `can_dispatch: false` exists to prevent. Requiring both endpoints keeps
@@ -1813,7 +1813,7 @@ defmodule Arbiter.MCP.Tools do
       awaiting_verification_at: iso(i.awaiting_verification_at),
       verification_outcome: to_str(i.verification_outcome),
       verification_evidence: i.verification_evidence,
-      # bd-9zuvbh: the ReviewGate park (class C). `task_show` is the
+      # bd-9zuvbh: the ReviewGate park (class C). `ticket_show` is the
       # coordinator's main surface, so the reason a finished task is sitting
       # still has to be readable there and not only in `arb prime`.
       review_park_reason: i.review_park_reason,

@@ -1,6 +1,6 @@
 # Arbiter
 
-**Arbiter** is an AI-driven issue tracker and autonomous coding agent harness. It coordinates work across your projects through a CLI (`arb`), MCP tools for a coordinator agent, and a LiveView dashboard. Tasks are tracked as **issues**, dispatched to **worker** agents for autonomous execution in isolated git worktrees, and merged through a **ReviewGate** and **merge queue** for code quality and safety.
+**Arbiter** is an AI-driven ticket tracker and autonomous coding agent harness. It coordinates work across your projects through a CLI (`arb`), MCP tools for a coordinator agent, and a LiveView dashboard. Tasks are tracked as **tickets**, dispatched to **worker** agents for autonomous execution in isolated git worktrees, and merged through a **ReviewGate** and **merge queue** for code quality and safety.
 
 ## Prerequisites
 
@@ -47,15 +47,15 @@ Re-run `arb install cli` any time you pull changes to `apps/arbiter_cli`.
 
 ## Architecture
 
-**Workspaces** — isolated coordination scopes. A workspace holds a set of issues, dispatch policies, and tooling configuration. An installation can run multiple workspaces side by side, each with its own repos, tracker, and merge settings.
+**Workspaces** — isolated coordination scopes. A workspace holds a set of tickets, dispatch policies, and tooling configuration. An installation can run multiple workspaces side by side, each with its own repos, tracker, and merge settings.
 
-**Repos** — registered git repositories. Workers check out code on repos to work on issues.
+**Repos** — registered git repositories. Workers check out code on repos to work on tickets.
 
-**Issues** — tasks to be worked. Can be tracked in an external system (Jira, GitHub, Linear) or managed locally. Status flows from creation through ready → in_progress → done.
+**Tickets** — tasks to be worked (formerly *issues*; `arb issue` and the `task_*` MCP tools remain as deprecated aliases for one release). Can be tracked in an external system (Jira, GitHub, Linear) or managed locally. Status flows from creation through ready → in_progress → done.
 
-**Workers** — autonomous agents spawned via Claude Code (or future adapters) to work an issue. Each worker receives an issue, works it in an isolated git worktree, and reports completion with a PR or notes. Their full transcript is retained for audit and learning.
+**Workers** — autonomous agents spawned via Claude Code (or future adapters) to work a ticket. Each worker receives a ticket, works it in an isolated git worktree, and reports completion with a PR or notes. Their full transcript is retained for audit and learning.
 
-**ReviewGate** — optional quality checkpoint. A second Claude agent reviews the worker's work before merging. Can be disabled per-issue.
+**ReviewGate** — optional quality checkpoint. A second Claude agent reviews the worker's work before merging. Can be disabled per-ticket.
 
 **Merge queue** — batches approved changes and applies them to the repo in sequence. Handles merge conflicts, CI status checks, and rollback on failure.
 
@@ -69,11 +69,11 @@ Re-run `arb install cli` any time you pull changes to `apps/arbiter_cli`.
 
 ## Coordinating via MCP
 
-The primary integration path for a coordinator agent (e.g. a dedicated Claude Code session) is the `arbiter` MCP server, which exposes tools like `task_show`, `task_create`, `task_list`, `worker_dispatch`, `worker_resume`, `worker_review`, `worker_list`, `worker_log`, `inbox_check`, `message_send`, `notify_list`, `workspace_show`, `workspace_config_get/set`, `quota_get`, `run_log_list`, `transcript_capture_stats`, and `usage_summarize`, plus whole tool categories beyond one-off issue dispatch:
+The primary integration path for a coordinator agent (e.g. a dedicated Claude Code session) is the `arbiter` MCP server, which exposes tools like `ticket_show`, `ticket_create`, `ticket_list`, `worker_dispatch`, `worker_resume`, `worker_review`, `worker_list`, `worker_log`, `inbox_check`, `message_send`, `notify_list`, `workspace_show`, `workspace_config_get/set`, `quota_get`, `run_log_list`, `transcript_capture_stats`, and `usage_summarize`, plus whole tool categories beyond one-off ticket dispatch:
 
 - **Skills** — `skill_list`/`skill_get`/`skill_create`/`skill_update`/`skill_delete` for managing reusable skill content.
-- **Dependencies + scheduler** — `dep_add`/`dep_remove`/`dep_list` to wire issues together with `depends_on`/`blocks`/`conflicts_with` edges, and `scheduler_pause`/`scheduler_resume`/`scheduler_status` to control the board scheduler (Autopilot) that auto-dispatches Ready cards in edge order. A pause stops new board dispatches only — fix passes, conflict resolvers and review rounds already under way keep running — so `scheduler_status` reports a drain state (`running` / `draining` with what is in flight / `quiescent`, the only safe restart point); `arb scheduler pause && arb scheduler wait` blocks until it is safe to restart. Chains of issues run by declaring the edges, not by building a separate graph object.
-- **ExternalReview** — `external_review_list`, `external_review_show`, `external_review_transcript`, `review_greenlight` for inspecting and unblocking worktree-backed external code review. `external_review_transcript` is `worker_log`'s counterpart for a review: the prompt it was given, the raw transcript its reviewer emitted, and every tool call paired with its result — keyed on the review record id, since an external review is not task-linked.
+- **Dependencies + scheduler** — `dep_add`/`dep_remove`/`dep_list` to wire tickets together with `depends_on`/`blocks`/`conflicts_with` edges, and `scheduler_pause`/`scheduler_resume`/`scheduler_status` to control the board scheduler (Autopilot) that auto-dispatches Ready cards in edge order. A pause stops new board dispatches only — fix passes, conflict resolvers and review rounds already under way keep running — so `scheduler_status` reports a drain state (`running` / `draining` with what is in flight / `quiescent`, the only safe restart point); `arb scheduler pause && arb scheduler wait` blocks until it is safe to restart. Chains of tickets run by declaring the edges, not by building a separate graph object.
+- **ExternalReview** — `external_review_list`, `external_review_show`, `external_review_transcript`, `review_greenlight` for inspecting and unblocking worktree-backed external code review. `external_review_transcript` is `worker_log`'s counterpart for a review: the prompt it was given, the raw transcript its reviewer emitted, and every tool call paired with its result — keyed on the review record id, since an external review is not ticket-linked.
 
 See `apps/arbiter/lib/arbiter/mcp/catalog.ex` for the full, current catalog and which tier (worker vs. coordinator) can call each tool.
 
@@ -130,13 +130,13 @@ Visit the dashboard's **Workspace** page and configure:
 
 Or edit `config/dev.exs` directly and restart the server, or use `arb config set`.
 
-### 3. Dispatch your first issue
+### 3. Dispatch your first ticket
 
-Create and dispatch an issue via the dashboard or CLI:
+Create and dispatch a ticket via the dashboard or CLI:
 
 ```sh
-arb issue create "Fix typo in README"
-arb issue dispatch <id> my-project
+arb ticket create "Fix typo in README"
+arb ticket dispatch <id> my-project
 ```
 
 Watch the worker in the dashboard, or tail the transcript:
@@ -374,7 +374,7 @@ needs a credential of its own: a setup token (`claude setup-token`) or an
 `ANTHROPIC_API_KEY`. Arbiter **never** copies your own
 `~/.claude/.credentials.json` into a worker — Claude rotates that login's refresh
 token on every refresh, so a second holder locks one of you out. A Claude
-dispatch for a workspace with no credential is refused and held (its tasks stay
+dispatch for a workspace with no credential is refused and held (its tickets stay
 Ready), the coordinator gets one escalation naming the fix, and
 `arb server doctor`'s "claude worker credentials" check lists every such
 workspace. The supported path is
@@ -506,7 +506,7 @@ names are listed.
 ## Initialize your coordinator session
 
 A **coordinator** is a dedicated Claude Code session that directs work across
-a workspace — creating and dispatching issues, reviewing worker output, and
+a workspace — creating and dispatching tickets, reviewing worker output, and
 resolving escalations — typically via the MCP tools above. It has its own
 working directory with persistent memory and a notes folder.
 
@@ -556,13 +556,13 @@ commands you'll reach for most.
 | Command | Purpose |
 |---------|---------|
 | `arb prime` | Mission briefing — run at session start to check workspace status |
-| `arb issue list` | List issues in the workspace |
-| `arb issue show <id>` | View an issue's details and history |
-| `arb issue create <title>` | Create a new issue |
-| `arb issue dispatch <id> [repo]` | Dispatch a worker to work on an issue |
+| `arb ticket list` | List tickets in the workspace |
+| `arb ticket show <id>` | View a ticket's details and history |
+| `arb ticket create <title>` | Create a new ticket |
+| `arb ticket dispatch <id> [repo]` | Dispatch a worker to work on a ticket |
 | `arb worker list` | List running and completed workers |
 | `arb worker log <task-id>` | Read a worker's full transcript (durable) |
-| `arb worker review <task-id>` | Dispatch a review-only worker against a task |
+| `arb worker review <task-id>` | Dispatch a review-only worker against a ticket |
 | `arb message inbox` | Read (and mark read) the coordinator's escalation mailbox |
 | `arb server start` | Boot the stack (no-op if already up) |
 | `arb server deploy [--version vX.Y.Z]` | Deploy an OTP release from GitHub Releases (auto-rollback on failure, refused across a migration) |
@@ -574,7 +574,7 @@ commands you'll reach for most.
 All commands accept `--help` and `--json` for structured output. Pre-`<resource> <verb>`
 flat commands from earlier CLI versions (`arb list`, `arb start`, `arb doctor`, …) still
 run — they print a one-line note pointing at the new form. (`arb dispatch <id>` is a
-permanent top-level shortcut for `arb issue dispatch <id>`, not a legacy alias.)
+permanent top-level shortcut for `arb ticket dispatch <id>`, not a legacy alias.)
 
 ## Documentation
 

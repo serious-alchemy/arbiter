@@ -300,7 +300,7 @@ defmodule ArbiterWeb.WorkspaceDetail.PolicyConfigComponent do
             <.mobile_group title="Tracker, merge & routing">
               <.setting_row
                 name="Tracker type"
-                consequence="which tracker issues sync to; none keeps them local to Arbiter"
+                consequence="which tracker tickets sync to; none keeps them local to Arbiter"
               >
                 <:control>
                   <Forms.select
@@ -388,7 +388,7 @@ defmodule ArbiterWeb.WorkspaceDetail.PolicyConfigComponent do
 
               <.setting_row
                 name="ReviewGate max rounds"
-                consequence="the gate stops after this many rounds and hands the issue back unmerged; blank scales it by difficulty"
+                consequence="the gate stops after this many rounds and hands the ticket back unmerged; blank scales it by difficulty"
               >
                 <:control>
                   <Forms.input
@@ -671,7 +671,7 @@ defmodule ArbiterWeb.WorkspaceDetail.PolicyConfigComponent do
           icon="hero-link-slash"
           detail="tracker.type is none"
         >
-          No tracker is configured — pick one under Policy and issues will sync to it.
+          No tracker is configured — pick one under Policy and tickets will sync to it.
         </Feedback.empty_state>
       </div>
     </div>

@@ -92,10 +92,10 @@ defmodule ArbiterCli.Cmd.RankTest do
     assert body["priority_band_size"] == 2
   end
 
-  test "requires an issue id" do
+  test "requires a ticket id" do
     {_out, err, exit_code} = capture(fn -> Rank.run(["--top"]) end)
     assert exit_code == 1
-    assert err =~ "requires an issue id"
+    assert err =~ "requires a ticket id"
   end
 
   test "requires exactly one of --top/--bottom/--before/--after" do
