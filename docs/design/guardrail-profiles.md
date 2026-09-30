@@ -151,8 +151,8 @@ The same `/run/user/1000` directory also exposes:
 - the ssh-agent socket (`/run/user/1000/gcr/ssh`).
 
 This escape undermines what bd-5gvqgc and bd-3s82pf promise. It was
-escalated to the coordinator on 2026-09-30 (message `6d00e2e2`). It is
-ticket **G1**.
+escalated to the coordinator on 2026-09-30 (message `6d00e2e2`), who filed
+it as **bd-7o08mj** (P0). It is **G1** in the plan.
 
 **Fix, verified.** Add `--tmpfs /run/user/1000 --tmpfs /run/dbus --tmpfs
 /run/systemd/resolve` to the argv. Inside the jail, `systemd-run` then fails
@@ -208,7 +208,8 @@ as well.
   endpoint's `secret_key_base`, which `config/runtime.exs:28` reads from the
   env). With it, a worker can forge any scope token.
 
-Escalated on 2026-09-30 (message `7ea3e0a8`). This is ticket **G2**.
+Escalated on 2026-09-30 (message `7ea3e0a8`) and filed as **bd-7r0qrj**
+(P1). It is **G2** in the plan.
 
 ### 2.4 Every worker gets every provider's credential
 
@@ -247,6 +248,10 @@ This design introduces exactly that sandbox for workers. A jailed worker has
 no route to host loopback, and §4.4's bridge authenticates it as its own
 worker scope. So the trust assumption stops applying to jailed workers. It
 still holds for the operator's shell and for coordinator sessions.
+
+Since this was reported, it has been filed as **bd-8381tk** (P1). That
+ticket removes anonymous coordinator minting for everyone, and requires
+operator proof for write-capable tiers.
 
 ## 3. Profile shape
 
@@ -767,15 +772,20 @@ already rewrite `agent.security` through `workspace_config_set`. This design
 proposes:
 
 - no MCP tool, at any tier, can promote, raise authority or loosen a cap;
-- `arb trust promote <subject> --to <tier> --reason …` requires an
-  interactive TTY confirmation (typing the subject key) and records
-  `actor: operator`;
+- `arb trust promote <subject> --to <tier> --reason …` requires **operator
+  proof** and records `actor: operator`;
 - the coordinator's standing orders forbid it.
 
+Operator proof is the mechanism bd-8381tk is building for write-capable
+tokens, such as a peer-credential socket. Operator-only actions here should
+reuse it: promotion, loosening a cap or authority, and grants whose binding
+says `grant_by: operator`. Until it lands, the stopgap is an interactive TTY
+confirmation (typing the subject key).
+
 That stops workers: once jailed, they reach neither host loopback nor a TTY.
-It also stops accidents. It does **not** stop a coordinator session that
-deliberately drives a TTY as the same Unix user. A real operator credential
-(for example, a WebAuthn-confirmed dashboard action) is an open question
+It also stops accidents. On a single-UID host, bd-8381tk has to resolve
+whether any proof can separate the operator from a coordinator session
+driving the same user's shell. Until it does, that stays an open question
 (§11).
 
 ### 6.5 The Loop computes the record
@@ -928,8 +938,8 @@ before it. Each ticket's type is one of:
 | # | Title | D | Depends on | Type |
 |---|---|---|---|---|
 | **Phase 0: close the existing reach gaps** | | | | |
-| G1 | Jail: hide the D-Bus session and system buses, the systemd user manager and resolved's varlink socket from jailed workers. Re-expose only the ssh-agent socket, at a private path, so git push keeps working until G16. Give agy a Secret-Service-only filtered bus where `xdg-dbus-proxy` exists, and file-seeded credentials elsewhere. A doctor self-test proves `systemd-run --user` fails inside | 3 | — | jail |
-| G2 | Worker env becomes an allowlist. Stop passing server secrets (`ARBITER_CLOAK_KEY`, `SECRET_KEY_BASE`, `GITHUB_TOKEN`, API keys) and other providers' credentials. Pass only the spawned adapter's own credential and declared `worker_env` vars. Add a doctor check | 3 | — | env |
+| G1 | **Filed as bd-7o08mj (P0).** Jail: hide the D-Bus session and system buses, the systemd user manager and resolved's varlink socket from jailed workers. Re-expose only the ssh-agent socket, at a private path, so git push keeps working until G16. Give agy a Secret-Service-only filtered bus where `xdg-dbus-proxy` exists, and file-seeded credentials elsewhere. A doctor self-test proves `systemd-run --user` fails inside | 3 | — | jail |
+| G2 | **Filed as bd-7r0qrj (P1).** Worker env becomes an allowlist. Stop passing server secrets (`ARBITER_CLOAK_KEY`, `SECRET_KEY_BASE`, `GITHUB_TOKEN`, API keys) and other providers' credentials. Pass only the spawned adapter's own credential and declared `worker_env` vars. Add a doctor check | 3 | — | env |
 | G3 | Jail: hide sensitive read paths (credential dirs, the install DB, the durable log root, other workspaces' repo paths and worktree roots) | 2 | G1 | jail |
 | **Phase 1: egress** | | | | |
 | G4 | Spike: run claude, agy and codex behind `--unshare-net` plus the proxy in learn mode, on the laptop and on the RHEL 8 EC2. Record the infra host set per CLI, whether proxy env is honoured (Bun, agy, Rust), keyring and auth behaviour, and each workspace's loopback test dependencies. Needs operator-approved quota | 2 | G1 | net (spike) |
@@ -937,7 +947,7 @@ before it. Each ticket's type is one of:
 | G6 | agy jail network mode: `--unshare-net`, in-namespace socat bridges (proxy, Arbiter, fixed-destination tunnels), proxy env, git-over-SSH `ProxyCommand` in the jail's `GIT_SSH_COMMAND` | 3 | G1, G4, G5 | jail + net |
 | G7 | Claude under the jail, for the first time, with network mode. Covers the `CLAUDE_CONFIG_DIR` bind, token env, and the MCP and `arb` bridges | 3 | G6 | jail + net |
 | G8 | Codex under the jail with network mode. Fold into bd-99emmd or run as its sibling | 3 | G6, bd-99emmd | jail + net |
-| G9 | Arbiter bridge identity: every request arriving through a worker bridge is that worker's scope and never anonymous loopback. Token minting is refused through a bridge | 3 | G6 | net |
+| G9 | Arbiter bridge identity: every request arriving through a worker bridge is that worker's scope and never anonymous loopback. Token minting is refused through a bridge. bd-8381tk (filed, P1) removes anonymous coordinator minting for everyone; this ticket covers only the jailed worker's bridge | 3 | G6, bd-8381tk | net |
 | G10 | `SecurityPolicy` `sandbox.egress` (`open`/`allowlist`/`none`) and `sandbox.allow_hosts`, with their layering. Posture fields and the doctor "egress jail" self-test against a local stand-in | 2 | G5, G6 | config + net |
 | **Phase 2: profiles and ticket permissions** | | | | |
 | G11 | `Arbiter.Guardrails`: tier bundles (code plus app env), the `guardrail_subjects` table, the workspace `guardrails` block with `ValidateConfig`, pure `effective/3` and `floor/2` wired after `SecurityPolicy.resolve/3`, and `egress_confinement/1`. Loosening edits to `guardrails.*` and `agent.security` become operator-only; the coordinator keeps tighten-only edits. Doctor checks | 3 | G10 | config |
@@ -948,7 +958,7 @@ before it. Each ticket's type is one of:
 | G16 | Scoped git and tracker credentials: a per-repo deploy key (or repo-scoped GitHub App token through a credential helper) replaces the operator's agent for pushes, and a repo-scoped tracker token for `tracker_write`. No worker ever gets `gist` or `delete_repo` | 3 | G14 | env + jail |
 | **Phase 3: earned trust** | | | | |
 | G17 | Guardrail event capture: parse Claude `permission_denials`, turn agy's in-session permission-check failures into per-run events, link `egress_events`, add a transcript tool-input scan for hidden-channel attempts, and record fabricated-evidence and self-grant events, all in `guardrail_events` | 2 | G5, G9 | loop + schema |
-| G18 | `Loop.SubjectStats` (shared with bd-9ck2a7) and `Loop.Trust`: records, automatic suspension and demotion with coordinator confirm or dismiss, the operator-only `trust_promotion` PendingWrite kind, `arb trust show` / `arb trust promote` (TTY confirmation, refused over MCP), and a dashboard view | 3 | G11, G17 | loop |
+| G18 | `Loop.SubjectStats` (shared with bd-9ck2a7) and `Loop.Trust`: records, automatic suspension and demotion with coordinator confirm or dismiss, the operator-only `trust_promotion` PendingWrite kind, `arb trust show` / `arb trust promote` (bd-8381tk's operator proof, with TTY confirmation as the fallback; refused over MCP), and a dashboard view | 3 | G11, G17, bd-8381tk | loop |
 | G19 | Per-tier spend caps: token and wall-clock caps that park and escalate for `quarantine`/`probation`, and BudgetPatrol paging for higher tiers. Calibrated from the ledger | 2 | G11 | routing |
 | **Phase 4: operator configuration** (actions, not worker tickets) | | | | |
 | G20 | Assign the initial tiers (§3.1 proposal) and declare account data agreements. Write the vstim bindings (`prod_read`, `prod_ssh`, broker `secrets:`) and the emricare tonic `phi_data` defaults. Opt workspaces into `egress: allowlist` after a learn-mode week. Only then attach agy for non-prod vstim tickets | — | G13, G14, G10 | operator |
@@ -978,9 +988,11 @@ before it. Each ticket's type is one of:
 ## 11. Open questions
 
 1. **A real operator credential.** On a single-user host, "operator-only"
-   holds against workers but not against a coordinator session that
-   deliberately drives a TTY (§6.4). Is a WebAuthn-confirmed dashboard
-   action worth building?
+   holds against workers but not necessarily against a coordinator session
+   driving the same user's shell (§6.4). bd-8381tk is choosing the proof
+   mechanism for write-capable tokens. Does it also need to separate the
+   operator from the coordinator, for example with a WebAuthn-confirmed
+   dashboard action?
 2. **PHI agreements.** Which accounts may hold `phi_data` is a compliance
    decision for the operator, outside Arbiter. The design only records it.
 3. **Infra host sets per CLI,** and whether agy's and Codex's own HTTP stacks

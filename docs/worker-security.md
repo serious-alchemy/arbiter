@@ -255,8 +255,8 @@ building this spawn's argv.
   names why); a real `arb server doctor` self-test that runs the probe
   itself is bd-8xy1mf.
 
-**Open escape, not accepted** (found 2026-09-30 by bd-8apkz6; fix proposed as
-G1 in [design/guardrail-profiles.md](design/guardrail-profiles.md) §2.1):
+**Open escape, not accepted** (found 2026-09-30 by bd-8apkz6; the fix is
+filed as bd-7o08mj, see [design/guardrail-profiles.md](design/guardrail-profiles.md) §2.1):
 `--ro-bind / /` leaves `/run/user/$UID/bus` and
 `/run/user/$UID/systemd/private` reachable. A jailed process can therefore run
 an unjailed command through `systemd-run --user`, which writes anywhere and
