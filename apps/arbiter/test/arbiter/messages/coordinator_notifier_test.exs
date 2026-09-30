@@ -355,6 +355,23 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
       assert body =~ "fix the failing checks"
     end
 
+    test "ci_failed wording does not claim the checks are required (bd-d2p7gr)" do
+      for reason <- [:ci_failed, :ci_failed_external] do
+        ws = uniq("ws")
+
+        assert :ok =
+                 CoordinatorNotifier.merge_blocked(
+                   %{task_id: uniq("bd"), workspace_id: ws},
+                   "#7",
+                   reason
+                 )
+
+        body = only_merge_escalation(ws).body
+        assert body =~ "CI checks are failing"
+        refute body =~ "required CI checks"
+      end
+    end
+
     test "a coverage-unknown park says what it is and how to clear it (bd-df3zlo)" do
       ws = uniq("ws")
       task_id = uniq("bd")
