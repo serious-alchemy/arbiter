@@ -100,6 +100,8 @@ defmodule Arbiter.Release.UpdateCheck do
     state = %{
       result: %{@empty | enabled: true},
       etag: nil,
+      task: nil,
+      waiters: [],
       repo: Keyword.get_lazy(opts, :repo, fn -> env("ARB_RELEASE_REPO") end),
       running: Keyword.get_lazy(opts, :running_version, &Arbiter.Version.app_version/0),
       interval_ms: Keyword.get(opts, :interval_ms, interval_ms()),
@@ -121,19 +123,43 @@ defmodule Arbiter.Release.UpdateCheck do
   @impl true
   def handle_call(:state, _from, state), do: {:reply, state.result, state}
 
-  def handle_call(:check_now, _from, state) do
-    state = run_check(state)
-    {:reply, state.result, state}
+  # The HTTP fetch runs in a separate process so `state/1` stays answerable
+  # while GitHub is slow; `check_now/1` callers wait in `:waiters`.
+  def handle_call(:check_now, from, state) do
+    {:noreply, state |> start_check() |> Map.update!(:waiters, &[from | &1])}
   end
 
   @impl true
   def handle_info(:check, state) do
-    state = run_check(state)
     Process.send_after(self(), :check, jitter(state.interval_ms))
-    {:noreply, state}
+    {:noreply, start_check(state)}
+  end
+
+  def handle_info({:checked, ref, new_state}, %{task: {_pid, ref, mon}} = state) do
+    Process.demonitor(mon, [:flush])
+    {:noreply, finish_check(%{state | task: nil}, new_state)}
+  end
+
+  def handle_info({:DOWN, mon, :process, _pid, reason}, %{task: {_, _, mon}} = state) do
+    state = record_error(%{state | task: nil}, "update check exited: " <> inspect(reason))
+    {:noreply, finish_check(state, state)}
   end
 
   def handle_info(_, state), do: {:noreply, state}
+
+  defp start_check(%{task: nil} = state) do
+    parent = self()
+    ref = make_ref()
+    {:ok, pid} = Task.start(fn -> send(parent, {:checked, ref, run_check(state)}) end)
+    %{state | task: {pid, ref, Process.monitor(pid)}}
+  end
+
+  defp start_check(state), do: state
+
+  defp finish_check(state, %{result: result, etag: etag}) do
+    Enum.each(state.waiters, &GenServer.reply(&1, result))
+    %{state | result: result, etag: etag, waiters: []}
+  end
 
   # ── checking ──────────────────────────────────────────────────────────────
 

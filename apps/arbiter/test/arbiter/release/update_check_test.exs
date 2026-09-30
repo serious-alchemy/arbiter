@@ -55,6 +55,31 @@ defmodule Arbiter.Release.UpdateCheckTest do
       name
     end
 
+    test "state/1 answers promptly while a check is in flight" do
+      name = :"uc_slow_#{System.unique_integer([:positive])}"
+      test_pid = self()
+
+      Req.Test.stub(name, fn conn ->
+        send(test_pid, {:in_flight, self()})
+
+        receive do
+          :release -> Req.Test.json(conn, %{"tag_name" => "v0.3.0", "html_url" => "u"})
+        end
+      end)
+
+      start_check(name, running_version: "0.2.0")
+      caller = Task.async(fn -> UpdateCheck.check_now(name) end)
+      assert_receive {:in_flight, plug_pid}
+
+      state = UpdateCheck.state(name)
+      assert state.enabled
+      refute state.update_available?
+
+      send(plug_pid, :release)
+      assert %{update_available?: true, latest: "v0.3.0"} = Task.await(caller)
+      assert %{update_available?: true} = UpdateCheck.state(name)
+    end
+
     test "records an available update" do
       name = :"uc_ok_#{System.unique_integer([:positive])}"
 
