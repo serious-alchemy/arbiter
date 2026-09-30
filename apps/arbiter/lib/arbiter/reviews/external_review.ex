@@ -1312,10 +1312,8 @@ defmodule Arbiter.Reviews.ExternalReview do
   # skips creation, so a transient DB blip can't spawn a duplicate engagement.
   defp existing_engagement(mr_ref, ws_id) do
     Issue
-    |> Ash.Query.filter(
-      review_only == true and source_pr == ^mr_ref and state != :closed and
-        workspace_id == ^ws_id
-    )
+    |> Issue.only_engagements()
+    |> Ash.Query.filter(source_pr == ^mr_ref and state != :closed and workspace_id == ^ws_id)
     |> Ash.read!()
     |> List.first()
   rescue

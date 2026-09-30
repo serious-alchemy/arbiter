@@ -58,7 +58,9 @@ overlay on the state rather than another state.
   derived, never stored.
 - **`rank`** is the manual order inside a priority band. Backlog and Ready sort
   by priority, then rank, and Autopilot dispatches in the same order. Dragging
-  a card across priority bands changes its priority.
+  a card across priority bands changes its priority. Promoting a ticket to
+  Ready re-ranks it last in its workspace (`Changes.RankOnPromote`), so
+  promotion order is dispatch order; an idempotent re-promote does not move it.
 
 ## 2. Transitions
 
@@ -203,7 +205,8 @@ Ash resource snapshots are stale) adds:
 - `state` — non-null, default `backlog`;
 - `close_reason` — nullable;
 - `rank` — non-null, default 0. A new ticket is ranked one step past the
-  highest rank in its workspace (`Changes.AssignRank`), so it sorts after
+  highest rank in its workspace (`Changes.AssignRank`; a Backlog → Ready
+  promotion takes the same next rank), so it sorts after
   every ticket with its priority. Ranks run per workspace rather than per band
   so that a priority change keeps creation order, exactly as the old
   priority-then-age order did. They are spaced 1024 apart, so drag-to-rank can

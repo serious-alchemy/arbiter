@@ -539,7 +539,10 @@ defmodule ArbiterWeb.BoardLive do
     Process.flag(:trap_exit, true)
     running? = scheduler_running?()
     paused? = not running? or scheduler_paused?()
-    board = Snapshot.load(now: DateTime.utc_now(), paused: paused?)
+
+    board =
+      Snapshot.load(now: DateTime.utc_now(), paused: paused?, exclude_engagements?: true)
+
     exit_if_view_gone()
     alerts = load_alerts()
     exit_if_view_gone()

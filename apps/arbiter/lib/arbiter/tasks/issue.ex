@@ -659,6 +659,7 @@ defmodule Arbiter.Tasks.Issue do
 
       change {Arbiter.Tasks.Issue.Changes.RequireAcceptanceCriteria, []}
       change {Transition, transition: :promote, idempotent: true}
+      change {Arbiter.Tasks.Issue.Changes.RankOnPromote, []}
 
       # `after_transaction` (post-commit), not `after_action`: bd-cvfjms's
       # `Arbiter.Sessions.RefineLifecycle` reacts to this broadcast from a
@@ -728,6 +729,7 @@ defmodule Arbiter.Tasks.Issue do
 
       change {Arbiter.Tasks.Issue.Changes.RequireAcceptanceCriteria, []}
       change {Transition, transition: :promote}
+      change {Arbiter.Tasks.Issue.Changes.RankOnPromote, []}
 
       change fn changeset, _context ->
         Ash.Changeset.after_transaction(changeset, fn
@@ -1133,7 +1135,9 @@ defmodule Arbiter.Tasks.Issue do
       description """
       Manual order inside a priority band: Backlog and Ready sort by priority,
       then rank. A new ticket is ranked after every ticket in its workspace
-      (`Changes.AssignRank`).
+      (`Changes.AssignRank`), and so is a ticket promoted to Ready
+      (`Changes.RankOnPromote`): promotion order is dispatch order within a
+      band. `:set_rank` reorders it afterwards.
       """
     end
 
@@ -1902,6 +1906,36 @@ defmodule Arbiter.Tasks.Issue do
     calculate :child_closed, :integer, Arbiter.Tasks.Issue.Calcs.ChildClosed do
       public? true
     end
+
+    # THE review-engagement predicate (bd-crk6tb): `review_only == true and
+    # not is_nil(source_pr)`. Neither half alone is an engagement — a
+    # `worker_review <task>` dispatch stamps `review_only` with a nil
+    # `source_pr`, and a PRPatrol author-side follow-up carries `source_pr`
+    # with `review_only == false`. `review_only` is nullable, so the `if`
+    # collapses SQL's unknown into `false`: the result is always a strict
+    # boolean and `== false` filters never lose a NULL row. Query through
+    # `exclude_engagements/1` / `only_engagements/1`; do not hand-roll it.
+    calculate :engagement?,
+              :boolean,
+              expr(if(review_only == true and not is_nil(source_pr), do: true, else: false)) do
+      public? true
+    end
+  end
+
+  @doc """
+  Narrow an `Issue` query (or the resource itself) to ordinary tickets — every
+  row that is NOT a review engagement. The one call every issue *list* runs
+  through; engagements surface on `/reviews` instead.
+  """
+  @spec exclude_engagements(Ash.Query.t() | module()) :: Ash.Query.t()
+  def exclude_engagements(query) do
+    Ash.Query.filter(query, engagement? == false)
+  end
+
+  @doc "Narrow an `Issue` query (or the resource itself) to review engagements only."
+  @spec only_engagements(Ash.Query.t() | module()) :: Ash.Query.t()
+  def only_engagements(query) do
+    Ash.Query.filter(query, engagement? == true)
   end
 
   @doc "Every attention cause (`Arbiter.Tasks.Lifecycle.Attention.causes/0`)."

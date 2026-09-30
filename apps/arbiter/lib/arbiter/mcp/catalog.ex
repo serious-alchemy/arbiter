@@ -1580,7 +1580,9 @@ defmodule Arbiter.MCP.Catalog do
         "List tickets in the workspace with optional filters: `state` (backlog | queued | " <>
           "active | merging | verifying | closed), `column` (backlog | blocked | ready | " <>
           "in_progress | merging | verifying | closed), `priority` (integer 0–4) and " <>
-          "`issue_type` (task | research | bug | feature | epic | chore | decision). Each ticket carries " <>
+          "`issue_type` (task | research | bug | feature | epic | chore | decision) and `engagements` " <>
+          "(all | exclude | only — ReviewPatrol review engagements, i.e. review_only tickets with a " <>
+          "source_pr; default all, so nothing is hidden unless you ask). Each ticket carries " <>
           "`state`, `column`, `step`, `blocked_by` and `attention`.",
       input_schema: %{
         "type" => "object",
@@ -1605,6 +1607,12 @@ defmodule Arbiter.MCP.Catalog do
             "type" => "string",
             "description" =>
               "Filter by type: task | research | bug | feature | epic | chore | decision."
+          },
+          "engagements" => %{
+            "type" => "string",
+            "description" =>
+              "ReviewPatrol review engagements (review_only with a source_pr): all (default) | " <>
+                "exclude | only. A worker_review task or a PR follow-up is not an engagement."
           }
         },
         "additionalProperties" => false
