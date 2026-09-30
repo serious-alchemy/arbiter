@@ -25,6 +25,8 @@ defmodule Arbiter.Providers.Pause do
   alias Arbiter.Accounts.ProviderAccount
   alias Arbiter.Settings
 
+  require Ash.Query
+
   @providers ~w(claude codex antigravity)
 
   @type entry :: %{
@@ -113,6 +115,32 @@ defmodule Arbiter.Providers.Pause do
       end
     end
   end
+
+  @doc """
+  Stop the live workers running on a paused target (`arb provider pause
+  --stop-running`). Pausing never does this by itself. Returns the task ids
+  that were stopped.
+  """
+  @spec stop_running(String.t()) :: [String.t()]
+  def stop_running(ref) do
+    case resolve(ref) do
+      {:ok, target, _label} ->
+        Arbiter.Workers.Run
+        |> Ash.Query.filter(is_nil(completed_at) and not is_nil(task_id))
+        |> Ash.read!()
+        |> Enum.filter(&run_on_target?(&1, target))
+        |> Enum.map(& &1.task_id)
+        |> Enum.uniq()
+        |> Enum.filter(&(Arbiter.Worker.whereis(&1) != nil))
+        |> Enum.filter(&(Arbiter.Worker.stop(&1, :normal, 10_000) == :ok))
+
+      _ ->
+        []
+    end
+  end
+
+  defp run_on_target?(run, "account:" <> id), do: run.provider_account_id == id
+  defp run_on_target?(run, code), do: normalize(run.provider) == code
 
   @doc "JSON-friendly view of `list/0`."
   @spec to_json([entry()]) :: [map()]

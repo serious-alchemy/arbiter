@@ -47,6 +47,8 @@ defmodule ArbiterWeb.Api.QuotaController do
     * `gemini` / `antigravity` — the persisted per-model Cloud Code Assist
       snapshot (bd-57ukgb), each `null` until that CLI is authenticated and
       probed on this host.
+    * `paused_providers` — every provider / account an operator paused
+      (`arb provider pause`, bd-5ef587) with who, when and why.
     * `held_dispatches` — every dispatch the workspace's quota gate is holding
       (`Arbiter.Workflows.DispatchQueue.serialize_held/1`): the task, what it
       will do when it drains (a ReviewGate fix round, a resume, a dispatch),
@@ -118,7 +120,8 @@ defmodule ArbiterWeb.Api.QuotaController do
           antigravity: Quota.CloudCode.serialize_latest(accounts["antigravity"], "antigravity"),
           gemini_credentials_expired:
             Arbiter.Agents.CredentialWatchdog.expired?(Arbiter.Agents.Gemini),
-          held_dispatches: held_dispatches(ws_id)
+          held_dispatches: held_dispatches(ws_id),
+          paused_providers: Arbiter.Providers.Pause.to_json()
         )
 
       {:error, message} ->

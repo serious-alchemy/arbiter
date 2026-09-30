@@ -100,6 +100,7 @@ defmodule ArbiterCli.Cmd.Quota do
   defp emit(data, :json, _params), do: IO.puts(Jason.encode!(data))
 
   defp emit(data, :text, params) do
+    ArbiterCli.Cmd.Provider.emit_paused(data["paused_providers"])
     emit_via_workspace(data, params)
     emit_policy(data, params)
     emit_claude(data)
