@@ -72,6 +72,7 @@ defmodule Arbiter.Board.Snapshot do
   """
 
   alias Arbiter.Accounts.Concurrency
+  alias Arbiter.Agents.ProviderRouting
   alias Arbiter.Board.FileScope
   alias Arbiter.Board.Scheduler
   alias Arbiter.Tasks.EdgeGate
@@ -312,7 +313,9 @@ defmodule Arbiter.Board.Snapshot do
 
   Options mirror `derive/1`'s inputs and override what would otherwise be
   read: `:now`, `:slots_total`, `:quota`, `:paused`,
-  `:issues`, `:workers`, `:changed_files`, `:workspace_id`. Every read is
+  `:issues`, `:workers`, `:changed_files`, `:workspace_id`; `:routing_opts` is
+  handed to `Arbiter.Agents.ProviderRouting.availability/3` when the
+  workspace routes by most quota. Every read is
   best-effort — a board that renders seven columns beats one that raises.
 
   **Workspace-level scoping:** `slots_total` and `quota` are computed for the
@@ -339,6 +342,10 @@ defmodule Arbiter.Board.Snapshot do
     ref_issues = reference_issues(deps, issues)
     workers = Keyword.get_lazy(opts, :workers, &load_workers/0)
 
+    # One "who can take this?" evaluation feeds both the slot count and the
+    # hold (bd-3fvue3), so a pass reads each candidate's quota and headroom once.
+    routing_opts = routing_opts(workspace, opts)
+
     derive(%{
       issues: issues,
       workers: workers,
@@ -352,8 +359,15 @@ defmodule Arbiter.Board.Snapshot do
       now: now,
       slots_total:
         Keyword.get(opts, :slots_total) ||
-          effective_max_concurrent(workspace || workspace_id, SlotGate.slots_used(issues)),
-      quota: Keyword.get_lazy(opts, :quota, fn -> quota_hold(workspace || workspace_id) end),
+          effective_max_concurrent(
+            workspace || workspace_id,
+            SlotGate.slots_used(issues),
+            routing_opts
+          ),
+      quota:
+        Keyword.get_lazy(opts, :quota, fn ->
+          quota_hold(workspace || workspace_id, routing_opts)
+        end),
       paused: Keyword.get(opts, :paused, false),
       watchdog_live: Keyword.get_lazy(opts, :watchdog_live, fn -> watchdog_live(issues) end),
       over_budget: Keyword.get_lazy(opts, :over_budget, fn -> Budget.over_budget_ids(issues) end)
@@ -443,18 +457,31 @@ defmodule Arbiter.Board.Snapshot do
 
   When workspace_id is nil, returns the system max: a fleet-wide board is not
   scoped to any one account.
+
+  **Under `routing.provider_selection: most_quota`** (bd-3fvue3) dispatch does
+  not run on the default provider's account but on whichever implementer
+  candidate `Arbiter.Agents.ProviderRouting` picks, so the account term is the
+  **sum** of the available candidates' headroom
+  (`ProviderRouting.availability/3` — the same candidate set and drop reasons
+  dispatch uses), and `already_counted` defaults to the workspace's live workers
+  on those candidates' providers. With no candidate available dispatch falls
+  back to the pre-routing provider, and so does this.
+
+  Options: `:routing` (an `availability/3` result, or `nil` for "not routed", to
+  reuse one already read) and `:routing_opts` (forwarded to `availability/3`).
   """
   @spec effective_max_concurrent(
           String.t() | Arbiter.Tasks.Workspace.t() | nil,
-          non_neg_integer() | nil
+          non_neg_integer() | nil,
+          keyword()
         ) :: non_neg_integer()
-  def effective_max_concurrent(workspace_or_id, already_counted \\ nil)
+  def effective_max_concurrent(workspace_or_id, already_counted \\ nil, opts \\ [])
 
-  def effective_max_concurrent(nil, _already_counted) do
+  def effective_max_concurrent(nil, _already_counted, _opts) do
     system_max_concurrent()
   end
 
-  def effective_max_concurrent(%Arbiter.Tasks.Workspace{} = ws, already_counted) do
+  def effective_max_concurrent(%Arbiter.Tasks.Workspace{} = ws, already_counted, opts) do
     workspace_id = ws.id
     system_max = system_max_concurrent()
 
@@ -464,26 +491,79 @@ defmodule Arbiter.Board.Snapshot do
         _ -> system_max
       end
 
-    provider = Arbiter.Quota.default_provider(ws)
+    {headroom, live_count} =
+      case routed_availability(ws, opts) do
+        %{capacity: capacity, available: available} ->
+          {capacity, fn -> routed_live_count(workspace_id, available) end}
 
-    already_counted =
-      already_counted || Concurrency.workspace_live_count(workspace_id, provider)
+        nil ->
+          provider = Arbiter.Quota.default_provider(ws)
 
-    Concurrency.clamp(base, Concurrency.headroom(workspace_id, provider), already_counted)
+          {Concurrency.headroom(workspace_id, provider),
+           fn -> Concurrency.workspace_live_count(workspace_id, provider) end}
+      end
+
+    Concurrency.clamp(base, headroom, already_counted || live_count.())
   rescue
     _ -> system_max_concurrent()
   end
 
-  def effective_max_concurrent(workspace_id, already_counted) when is_binary(workspace_id) do
+  def effective_max_concurrent(workspace_id, already_counted, opts)
+      when is_binary(workspace_id) do
     case safe_workspace(workspace_id) do
       %Arbiter.Tasks.Workspace{} = ws ->
-        effective_max_concurrent(ws, already_counted)
+        effective_max_concurrent(ws, already_counted, opts)
 
       nil ->
         system_max_concurrent()
     end
   rescue
     _ -> system_max_concurrent()
+  end
+
+  # The workspace's live workers on every provider its available candidates run.
+  defp routed_live_count(workspace_id, available) do
+    available
+    |> Enum.map(& &1.account.provider)
+    |> Enum.uniq()
+    |> Enum.map(&Concurrency.workspace_live_count(workspace_id, &1))
+    |> Enum.sum()
+  end
+
+  # `ProviderRouting.availability/3` for a most-quota workspace that has at
+  # least one candidate to dispatch to; `nil` otherwise — routing off, no
+  # implementer attachment, or every candidate dropped (dispatch then goes
+  # ahead on the pre-routing provider, and so does the board). `:routing` in
+  # `opts` short-circuits the read.
+  defp routed_availability(ws, opts) do
+    view =
+      case Keyword.fetch(opts, :routing) do
+        {:ok, view} -> view
+        :error -> read_routing(ws, opts)
+      end
+
+    case view do
+      %{available: [_ | _]} -> view
+      _ -> nil
+    end
+  end
+
+  defp read_routing(ws, opts) do
+    if ProviderRouting.enabled?(ws),
+      do: ProviderRouting.availability(ws, nil, Keyword.get(opts, :routing_opts, []))
+  rescue
+    _ -> nil
+  end
+
+  # `load/1`'s options for the two board-wide reads, with the routing read done
+  # once and shared. Nothing is read when both are overridden.
+  defp routing_opts(workspace, opts) do
+    if Keyword.get(opts, :slots_total) && Keyword.has_key?(opts, :quota) do
+      [routing: nil]
+    else
+      routing_opts = Keyword.get(opts, :routing_opts, [])
+      [routing: workspace && read_routing(workspace, routing_opts: routing_opts)]
+    end
   end
 
   defp workspace_config_max(%Arbiter.Tasks.Workspace{} = ws) do
@@ -520,11 +600,27 @@ defmodule Arbiter.Board.Snapshot do
   `Arbiter.Board.Autopilot` must not keep promoting a card only to have it
   refused. This is what stops a reopened auth-failed task from being
   re-attempted every tick while credentials are dead.
+
+  **Under `routing.provider_selection: most_quota`** (bd-3fvue3) the default
+  provider is not what a dispatch runs on: `Arbiter.Agents.ProviderRouting`
+  sends it to the implementer account with headroom. The workspace is therefore
+  held only when **no** implementer candidate is available — each is
+  quota-held, out of auth, circuit-broken, at capacity or otherwise dropped, as
+  `ProviderRouting.availability/3` decides — and then by the default-provider
+  read above, since a dispatch with no available candidate goes ahead on the
+  pre-routing provider. While one candidate can take a ticket this is `:ok`
+  even if the default provider is paced, so Autopilot promotes the card and
+  dispatch routes it. `opts` are `effective_max_concurrent/3`'s.
   """
-  @spec quota_hold(String.t() | Arbiter.Tasks.Workspace.t() | nil) :: Scheduler.quota()
-  def quota_hold(workspace_or_id \\ nil) do
+  @spec quota_hold(String.t() | Arbiter.Tasks.Workspace.t() | nil, keyword()) ::
+          Scheduler.quota()
+  def quota_hold(workspace_or_id \\ nil, opts \\ []) do
     workspace = safe_workspace(workspace_or_id) || safe_workspace(default_workspace_id())
-    auth_hold(workspace) || quota_window_hold(workspace)
+
+    case routed_availability(workspace, opts) do
+      nil -> auth_hold(workspace) || quota_window_hold(workspace)
+      _routed -> :ok
+    end
   end
 
   # The board's read of the hold is `AuthHold.held/2`, which fails open: the
