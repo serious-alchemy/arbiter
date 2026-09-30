@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Fake `codex login --device-auth` / `codex login status` (spike bd-29ycw1).
+# Mode via FAKE_LOGIN_MODE. Renders nothing while "polling".
+mode="${FAKE_LOGIN_MODE:-success}"
+delay="${FAKE_LOGIN_DELAY:-0.2}"
+trap 'exit 130' TERM INT
+done_flag=""
+trap 'done_flag=1' USR1
+
+if [ "$1" = "login" ] && [ "$2" = "status" ]; then
+  if [ -n "$CODEX_HOME" ] && [ -f "$CODEX_HOME/auth.json" ]; then
+    printf 'Logged in using ChatGPT\n'; exit 0
+  fi
+  printf 'Not logged in\n'; exit 1
+fi
+
+cat <<'OUT'
+Welcome to Codex [v0.153.4]
+OpenAI's command-line coding agent
+
+Follow these steps to sign in with ChatGPT using device code authorization:
+
+1. Open this link in your browser and sign in to your account
+   https://auth.openai.com/codex/device
+
+2. Enter this one-time code (expires in 15 minutes)
+   ABCD-12345
+
+Continue only if you started this login in Codex. If a website or another person gave you this code, cancel.
+OUT
+
+if [ "$mode" = "hang" ]; then
+  while true; do sleep 0.1; done
+fi
+
+# Poll silently until the delay elapses or SIGUSR1 arrives.
+ticks=$(awk "BEGIN{print int($delay*10)}")
+i=0
+while [ -z "$done_flag" ] && [ "$i" -lt "$ticks" ]; do
+  sleep 0.1; i=$((i+1))
+done
+
+if [ "$mode" = "failure" ]; then
+  printf 'Error: device code login failed\n' >&2
+  exit 1
+fi
+if [ -n "$CODEX_HOME" ]; then
+  mkdir -p "$CODEX_HOME" && printf '{}' > "$CODEX_HOME/auth.json"
+fi
+exit 0
