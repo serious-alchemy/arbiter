@@ -177,6 +177,7 @@ defmodule Arbiter.Worker.Dispatch do
          :ok <- ensure_not_awaiting_review(task, opts),
          :ok <- ensure_no_live_agent_session(task_id, opts),
          opts = route_implementer(task, opts),
+         :ok <- maybe_pause_gate(task, opts),
          :ok <- maybe_quota_gate(task, opts),
          :ok <- ensure_migrations_up_to_date(),
          {:ok, opts} <- maybe_resolve_repo_for_real_work(task, opts),
@@ -1308,6 +1309,65 @@ defmodule Arbiter.Worker.Dispatch do
     if routed && Keyword.get(opts, :agent_type) == routed,
       do: Keyword.drop(opts, [:agent_type, :provider_fallback]),
       else: opts
+  end
+
+  # bd-5ef587: a paused provider (or the paused account this dispatch would be
+  # metered under) is held with "held — <provider> paused: <reason>", as a
+  # quota hold is; the drain releases it once routing can pick another
+  # candidate or the pause is lifted. Routing has already dropped paused
+  # accounts, so this only bites when nothing else can take the work, or on the
+  # unrouted (legacy) path. Fails open only when the pause cannot be looked up:
+  # once found, a hold that cannot be recorded refuses the dispatch.
+  defp maybe_pause_gate(%Issue{workspace_id: ws_id} = task, opts) when is_binary(ws_id) do
+    # Deliberately NOT bypassed by `skip_quota_gate`: the drain replay and MCP
+    # `force_quota` override a quota hold, never an operator's pause.
+    case lookup_pause(task, ws_id, opts) do
+      nil ->
+        :ok
+
+      {provider, pause} ->
+        phrase = "held — #{provider} paused: #{pause.reason || "no reason given"}"
+
+        case safe_pause_hold(ws_id, task.id, opts, phrase, provider) do
+          :ok -> {:error, {:quota_held, task.id}}
+          _ -> {:error, {:provider_paused, provider, phrase}}
+        end
+    end
+  end
+
+  defp maybe_pause_gate(_task, _opts), do: :ok
+
+  defp lookup_pause(task, ws_id, opts) do
+    workspace = load_workspace(task)
+    provider = quota_gate_provider(task, workspace, opts)
+
+    case pause_for_dispatch(ws_id, provider, opts) do
+      nil -> nil
+      pause -> {provider, pause}
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp safe_pause_hold(ws_id, task_id, opts, phrase, provider) do
+    DispatchQueue.hold(ws_id, task_id, unroute(opts), %{phrase: phrase}, provider)
+  rescue
+    _ -> :error
+  catch
+    :exit, _ -> :error
+  end
+
+  defp pause_for_dispatch(ws_id, provider, opts) do
+    Arbiter.Providers.Pause.for_provider(provider) ||
+      if is_nil(Keyword.get(opts, :routing_decision)) do
+        case safe_gate_account(ws_id, provider) do
+          %Arbiter.Accounts.ProviderAccount{} = account ->
+            Arbiter.Providers.Pause.for_account(account)
+
+          _ ->
+            nil
+        end
+      end
   end
 
   defp maybe_quota_gate(%Issue{workspace_id: ws_id} = task, opts) do

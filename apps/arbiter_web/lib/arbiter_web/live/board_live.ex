@@ -145,6 +145,7 @@ defmodule ArbiterWeb.BoardLive do
       |> assign(:workspaces, [])
       |> assign(:board, Snapshot.empty(now))
       |> assign(:alerts, [])
+      |> assign(:paused_providers, [])
       |> assign(:lane_open, true)
       |> assign(:lane_coordinator, false)
       |> assign(:scheduler_running, false)
@@ -197,6 +198,11 @@ defmodule ArbiterWeb.BoardLive do
       when kind in ["alert", "attention"],
       do: {:noreply, refresh_board(socket)}
 
+  # bd-5ef587: a provider paused or resumed — the banner's input.
+  def handle_info({:event, %{topic: topic}}, socket)
+      when topic in ["provider_paused", "provider_resumed"],
+      do: {:noreply, refresh_board(socket)}
+
   def handle_info(:tick, socket), do: {:noreply, assign(socket, :now, DateTime.utc_now())}
 
   def handle_info(_msg, socket), do: {:noreply, socket}
@@ -206,6 +212,7 @@ defmodule ArbiterWeb.BoardLive do
     socket
     |> assign(:board, loaded.board)
     |> assign(:alerts, loaded.alerts)
+    |> assign(:paused_providers, loaded.paused_providers)
     |> assign(:scheduler_running, loaded.scheduler_running)
     |> assign(:system_cap, loaded.system_cap)
     |> assign(:system_cap_override?, loaded.system_cap_override?)
@@ -586,6 +593,7 @@ defmodule ArbiterWeb.BoardLive do
     %{
       board: board,
       alerts: alerts,
+      paused_providers: Arbiter.Providers.Pause.list(),
       scheduler_running: running?,
       workspaces: workspaces,
       system_cap: Snapshot.system_max_concurrent(),
@@ -975,6 +983,20 @@ defmodule ArbiterWeb.BoardLive do
                   board limited to {@board.slots_total} by workspace/account cap
                 </span>
               </form>
+
+              <.link
+                :if={@board_loaded? and @paused_providers != []}
+                id="board-paused-providers"
+                navigate={~p"/providers"}
+                title={
+                  Enum.map_join(@paused_providers, "; ", fn p ->
+                    "#{Arbiter.Providers.Pause.label(p.target)}: #{p.reason || "no reason given"} (by #{p.by || "unknown"})"
+                  end)
+                }
+                class="px-2 py-[3px] rounded-[var(--radius-chip)] border border-solid border-[var(--arb-fail-edge)] text-[10px] font-medium font-[family-name:var(--font-mono)] uppercase tracking-[0.08em] text-[var(--arb-fail-text)]"
+              >
+                {length(@paused_providers)} provider(s) paused
+              </.link>
 
               <%!-- Until the first read lands there is no scheduler state to
                    show, and a "paused" guess would be a claim. --%>

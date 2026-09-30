@@ -919,6 +919,34 @@ defmodule Arbiter.Worker.WatchdogTest do
       refute Map.get(StubFixPassDispatcher.last_args(), :outside_diff_files)
     end
 
+    test "a paused provider neither spends the fix-pass budget nor parks the PR (bd-5ef587)" do
+      task_id = new_task_id()
+
+      StubFixPassDispatcher.reply_with(
+        {:error, {:provider_paused, :codex, "held — codex paused: jail escape"}}
+      )
+
+      StubMerger.queue_get("!cfpause", [
+        %{status: :open, approved: true, block_reason: :ci_failed}
+      ])
+
+      wpid =
+        start_watchdog(task_id, "!cfpause",
+          auto_merge: true,
+          max_fix_passes: 1,
+          fix_pass_history: fn _task_id, _mr_ref -> 0 end,
+          fix_pass_dispatcher: StubFixPassDispatcher,
+          interval_ms: 15
+        )
+
+      # Well past max_fix_passes polls: the pass is asked for every poll, yet
+      # the PR is never parked at the fix-pass cap.
+      wait_until(fn -> StubFixPassDispatcher.call_count() >= 3 end)
+      state = :sys.get_state(wpid)
+      assert state.fix_passes_dispatched == 0
+      refute state.park_reason == :ci_failed
+    end
+
     test "retry_auto_resolve/1 grants one more pass past the per-task cap" do
       task_id = new_task_id()
 
@@ -1222,6 +1250,32 @@ defmodule Arbiter.Worker.WatchdogTest do
       assert_receive {:resolve_called, args}, 1_000
       assert args.task_id == task_id
       assert args.pr_ref == "!c1"
+    end
+
+    test "a paused provider neither counts an attempt nor escalates (bd-5ef587)" do
+      task_id = new_task_id()
+
+      StubConflictResolver.arm(task_id, self(),
+        result: {:error, {:provider_paused, :codex, "held — codex paused: jail escape"}}
+      )
+
+      StubMerger.queue_get("!cpause", [%{status: :open, approved: true, block_reason: :conflict}])
+
+      wpid =
+        start_watchdog(task_id, "!cpause",
+          workspace: test_workspace(),
+          auto_merge: false,
+          conflict_resolver: StubConflictResolver,
+          max_conflict_attempts: 1,
+          interval_ms: 15
+        )
+
+      assert_receive {:resolve_called, %{task_id: ^task_id}}, 1_000
+      assert_receive {:resolve_called, %{task_id: ^task_id}}, 1_000
+      refute_receive {:escalate_called, ^task_id, _, _, _}, 100
+      state = :sys.get_state(wpid)
+      refute state.conflict_escalated
+      assert state.conflict_attempts == 0
     end
 
     test "after max_conflict_attempts rebase passes it escalates with the attempt count" do

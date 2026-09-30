@@ -99,7 +99,7 @@ defmodule Arbiter.Events do
     resource Record
   end
 
-  @valid_topics ~w(inbox review_gate worker_failed worker_done worker_phase task_state external_review loop_proposal quota_gate_bypass slot_cap_override coverage_shadow gate_cap_hit gate_resolved)
+  @valid_topics ~w(inbox review_gate worker_failed worker_done worker_phase task_state external_review loop_proposal quota_gate_bypass slot_cap_override coverage_shadow gate_cap_hit gate_resolved provider_paused provider_resumed)
 
   @doc "All valid topic name strings accepted by the `subscribe=` query parameter."
   def valid_topics, do: @valid_topics

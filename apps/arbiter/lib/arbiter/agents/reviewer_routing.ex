@@ -40,6 +40,8 @@ defmodule Arbiter.Agents.ReviewerRouting do
     * `auth_expired` — `Arbiter.Agents.AuthHold` is open or
       `Arbiter.Agents.CredentialWatchdog` holds the credential expired;
     * `circuit_broken` — `Arbiter.Agents.ProviderPool.healthy?/1` is false;
+    * `paused` — the account or its provider is paused (`Arbiter.Providers.Pause`,
+      `arb provider pause`); a fallback trigger like `quota_held`;
     * `quota_held` — the workspace's quota gate would hold it (paced
       included), the same check provider routing makes (bd-40pzpj).
 
@@ -102,7 +104,7 @@ defmodule Arbiter.Agents.ReviewerRouting do
   # Drop reasons that may push a pass back into the implementer's own family.
   # `timed_out` is deliberately absent — see the moduledoc.
   @fallback_triggers ~w(unconfigured write_confinement_none disabled merged
-                        auth_expired circuit_broken quota_held)
+                        auth_expired circuit_broken quota_held paused)
 
   @type selection :: %{
           provider: atom(),
@@ -500,6 +502,20 @@ defmodule Arbiter.Agents.ReviewerRouting do
   defp check_account(%{account: %ProviderAccount{merged_into_id: into}}, _ctx)
        when not is_nil(into),
        do: {:drop, "merged", "merged into #{into}"}
+
+  defp check_account(%{account: %ProviderAccount{} = account} = entry, _ctx) do
+    case Arbiter.Providers.Pause.for_account(account) do
+      nil -> {:ok, entry}
+      pause -> {:drop, "paused", pause.reason || "paused by #{pause.by || "the operator"}"}
+    end
+  end
+
+  defp check_account(%{account: nil, agent_type: type} = entry, _ctx) do
+    case Arbiter.Providers.Pause.for_provider(type) do
+      nil -> {:ok, entry}
+      pause -> {:drop, "paused", pause.reason}
+    end
+  end
 
   defp check_account(entry, _ctx), do: {:ok, entry}
 

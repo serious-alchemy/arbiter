@@ -481,6 +481,25 @@ defmodule Arbiter.Quota.GateProviderTest do
       assert DispatchQueue.held?(workspace.id, task.id)
     end
 
+    test "a paused provider holds the dispatch: held — codex paused: <reason> (bd-5ef587)", %{
+      workspace: workspace,
+      task: task
+    } do
+      {:ok, _} = Arbiter.Providers.Pause.pause("codex", reason: "jail escape", by: "test")
+
+      assert {:error, {:quota_held, held_id}} =
+               Arbiter.Worker.Dispatch.dispatch(task.id, force: true, start_driver: false)
+
+      assert held_id == task.id
+      assert Worker.whereis(task.id) == nil
+      assert DispatchQueue.held?(workspace.id, task.id)
+
+      assert Enum.any?(
+               DispatchQueue.state(DispatchQueueSupervisor.whereis(workspace.id)).items,
+               &(DispatchQueue.reason_text(&1.reason) == "held — codex paused: jail escape")
+             )
+    end
+
     test "a healthy Codex snapshot lets the dispatch through", %{
       workspace: workspace,
       task: task
