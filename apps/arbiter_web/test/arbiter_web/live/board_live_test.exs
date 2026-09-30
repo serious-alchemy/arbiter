@@ -184,6 +184,38 @@ defmodule ArbiterWeb.BoardLiveTest do
       refute has_element?(view, ~s(#board-column-ready [id="card-#{task.id}"]))
     end
 
+    # bd-crk6tb: a review engagement (`review_only == true and source_pr` set) is
+    # long-lived review babysitting, not work on the board — it lives on /reviews.
+    # Neither half alone makes one, so the two look-alikes must still render.
+    test "a review engagement is not a card, but its look-alikes are", %{conn: conn, ws: ws} do
+      engagement =
+        issue(ws, "Review engagement: 7", %{
+          tracker_type: :none,
+          review_only: true,
+          source_pr: "7"
+        })
+
+      worker_review = issue(ws, "worker review pass", %{review_only: true})
+      follow_up = issue(ws, "author follow-up", %{tracker_type: :none, source_pr: "8"})
+
+      {:ok, view, _html} = live_board(conn)
+
+      refute has_element?(view, ~s([id="card-#{engagement.id}"]))
+      assert has_element?(view, ~s(#board-column-ready [id="card-#{worker_review.id}"]))
+      assert has_element?(view, ~s(#board-column-ready [id="card-#{follow_up.id}"]))
+    end
+
+    test "a closed engagement does not reach the Closed column either", %{conn: conn, ws: ws} do
+      engagement =
+        issue(ws, "Review engagement: 9", %{tracker_type: :none, review_only: true, source_pr: "9"})
+
+      {:ok, _} = Ash.update(engagement, %{}, action: :close)
+
+      {:ok, view, _html} = live_board(conn)
+
+      refute has_element?(view, ~s([id="card-#{engagement.id}"]))
+    end
+
     # bd-38of5i (design bd-2s901b §4): Closed-today was the one column an epic
     # could still reach. It is a rollup of the children below it, not a piece
     # of work that landed.

@@ -315,7 +315,9 @@ defmodule Arbiter.Board.Snapshot do
   read: `:now`, `:slots_total`, `:quota`, `:paused`,
   `:issues`, `:workers`, `:changed_files`, `:workspace_id`; `:routing_opts` is
   handed to `Arbiter.Agents.ProviderRouting.availability/3` when the
-  workspace routes by most quota. Every read is
+  workspace routes by most quota. `:exclude_engagements?` (default `false`)
+  leaves review engagements (`Arbiter.Tasks.Issue.engagement?`) off the read;
+  the operator's board sets it, the Autopilot does not. Every read is
   best-effort — a board that renders seven columns beats one that raises.
 
   **Workspace-level scoping:** `slots_total` and `quota` are computed for the
@@ -336,7 +338,10 @@ defmodule Arbiter.Board.Snapshot do
     # and parent edges for the others.
     deps = dependency_rows(opts)
 
-    issues = Keyword.get_lazy(opts, :issues, fn -> load_issues(now) end)
+    issues =
+      Keyword.get_lazy(opts, :issues, fn ->
+        load_issues(now, exclude_engagements?: Keyword.get(opts, :exclude_engagements?, false))
+      end)
     # `load_issues/1` skips long-closed issues, but an edge may still point at
     # one (a satisfied blocker, a closed child, a closed parent epic).
     ref_issues = reference_issues(deps, issues)
@@ -1547,14 +1552,23 @@ defmodule Arbiter.Board.Snapshot do
 
   # ---- reads ---------------------------------------------------------------
 
+  # `exclude_engagements?: true` drops review engagements (bd-crk6tb) — the
+  # operator's board is about work; engagements live on /reviews. Off by
+  # default: the Autopilot reads this same snapshot to schedule, and what it
+  # can see is not a presentation choice.
   @doc false
-  def load_issues(now \\ nil) do
+  def load_issues(now \\ nil, opts \\ []) do
     now = now || DateTime.utc_now()
     cutoff = DateTime.add(now, -24, :hour)
 
     require Ash.Query
 
     Arbiter.Tasks.Issue
+    |> then(fn q ->
+      if Keyword.get(opts, :exclude_engagements?, false),
+        do: Arbiter.Tasks.Issue.exclude_engagements(q),
+        else: q
+    end)
     |> Ash.Query.select(@needed_issue_fields)
     |> Ash.Query.filter(
       state != :closed or

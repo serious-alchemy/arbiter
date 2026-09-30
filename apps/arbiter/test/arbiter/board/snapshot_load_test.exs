@@ -391,6 +391,43 @@ defmodule Arbiter.Board.SnapshotLoadTest do
     end
   end
 
+  describe "load_issues/2 :exclude_engagements? (bd-crk6tb)" do
+    setup %{ws: ws} do
+      mk = fn title, attrs ->
+        Ash.create!(Issue, Map.merge(%{title: title, tracker_type: :none, workspace_id: ws.id}, attrs))
+      end
+
+      %{
+        engagement: mk.("engagement", %{review_only: true, source_pr: "7"}),
+        worker_review: mk.("worker review", %{review_only: true}),
+        follow_up: mk.("follow up", %{source_pr: "8"})
+      }
+    end
+
+    defp loaded_ids(opts),
+      do: nil |> Snapshot.load_issues(opts) |> MapSet.new(& &1.id)
+
+    test "drops only the engagement when on", ctx do
+      ids = loaded_ids(exclude_engagements?: true)
+
+      refute ctx.engagement.id in ids
+      assert ctx.worker_review.id in ids
+      assert ctx.follow_up.id in ids
+    end
+
+    test "the default read still carries engagements (the Autopilot's view)", ctx do
+      assert ctx.engagement.id in loaded_ids([])
+    end
+
+    test "load/1 threads the option through to the board's issue read", ctx do
+      board = Snapshot.load(workspace_id: ctx.engagement.workspace_id, exclude_engagements?: true)
+      ids = MapSet.new(board.backlog, & &1.id)
+
+      refute ctx.engagement.id in ids
+      assert ctx.follow_up.id in ids
+    end
+  end
+
   defp spend!(task_id, cost, ws) do
     {:ok, ev} =
       Ash.create(Arbiter.Usage.Event, %{

@@ -561,10 +561,8 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   # per-patrol repo override.
   defp open_engagements(workspace_id, repo) do
     Issue
-    |> Ash.Query.filter(
-      review_only == true and not is_nil(source_pr) and state != :closed and
-        workspace_id == ^workspace_id
-    )
+    |> Issue.only_engagements()
+    |> Ash.Query.filter(state != :closed and workspace_id == ^workspace_id)
     |> Ash.read!()
     |> Enum.filter(fn %Issue{source_pr: ref} -> PatrolRepoScope.ref_matches_repo?(ref, repo) end)
   rescue
