@@ -45,8 +45,11 @@ defmodule ArbiterWeb.Api.ServerControllerTest do
       # Deterministic regardless of this test-runner host's real ssh setup
       # (bd-5d5mrs): the "ssh" sub-key is covered by its own describe block.
       Application.put_env(:arbiter, :worker_jail_ssh_available, true)
+      Application.put_env(:arbiter, :worker_jail_escape_available, true)
 
       on_exit(fn ->
+        Application.delete_env(:arbiter, :worker_jail_escape_available)
+
         case prev do
           nil -> Application.delete_env(:arbiter, :worker_jail_available)
           v -> Application.put_env(:arbiter, :worker_jail_available, v)
@@ -68,7 +71,19 @@ defmodule ArbiterWeb.Api.ServerControllerTest do
 
       resp = conn |> get("/api/server/agy_write_jail") |> json_response(200)
 
-      assert resp == %{"available" => true, "ssh" => %{"available" => true}}
+      assert %{"available" => true, "ssh" => %{"available" => true}} = resp
+      assert resp["escape"] == %{"available" => true}
+    end
+
+    # bd-7o08mj
+    test "reports escape available: false when a jail escape vector is reachable", %{conn: conn} do
+      Application.put_env(:arbiter, :worker_jail_available, true)
+      Application.put_env(:arbiter, :worker_jail_escape_available, false)
+
+      resp = conn |> get("/api/server/agy_write_jail") |> json_response(200)
+
+      assert resp["escape"]["available"] == false
+      assert resp["escape"]["message"] =~ "escape vector"
     end
 
     test "reports available: false with cause/message/fix when it can't", %{conn: conn} do

@@ -516,7 +516,8 @@ defmodule Arbiter.Agents.Gemini do
                worktree: Keyword.get(opts, :worktree) || Keyword.get(opts, :worktree_path),
                home: ConfigDir.path(opts),
                writable_paths: Map.get(policy.sandbox, :writable_paths, []),
-               worktree_readonly: review_dispatch?(policy)
+               worktree_readonly: review_dispatch?(policy),
+               keyring: ConfigDir.keyring_available?()
              ) do
           {:ok, argv} -> {:ok, argv}
           {:error, reason} -> jail_unavailable(mode, command, reason)

@@ -90,7 +90,10 @@ defmodule ArbiterWeb.Api.ServerController do
   def agy_write_jail(conn, _params) do
     json(
       conn,
-      Map.put(jail_diagnosis(Jail.diagnose()), :ssh, jail_diagnosis(Jail.diagnose_ssh()))
+      jail_diagnosis(Jail.diagnose())
+      |> Map.put(:ssh, jail_diagnosis(Jail.diagnose_ssh()))
+      |> Map.put(:escape, jail_diagnosis(Jail.diagnose_escape()))
+      |> Map.put(:dbus_proxy, Jail.dbus_proxy())
     )
   end
 
