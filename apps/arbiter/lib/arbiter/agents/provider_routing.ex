@@ -518,6 +518,25 @@ defmodule Arbiter.Agents.ProviderRouting do
     })
   end
 
+  @doc """
+  Refuse to start a pass on a paused provider/account (bd-5ef587). The legacy
+  resolvers hand back the paused original when nothing else is available, so
+  every direct `Worker.start` caller checks the resolved provider here.
+  """
+  @spec ensure_unpaused(atom(), String.t() | nil) ::
+          :ok | {:error, {:provider_paused, atom(), String.t()}}
+  def ensure_unpaused(provider, ws_id) do
+    case Arbiter.Providers.Pause.blocking(provider, ws_id) do
+      nil ->
+        :ok
+
+      pause ->
+        {:error,
+         {:provider_paused, provider,
+          "held — #{provider} paused: #{pause.reason || "no reason given"}"}}
+    end
+  end
+
   # ---- legacy --------------------------------------------------------------
 
   defp legacy(task_id, workspace, opts) do

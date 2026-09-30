@@ -576,11 +576,13 @@ defmodule Arbiter.Workflows.DispatchQueue do
       |> Enum.split_with(fn item ->
         provider = item_provider(item)
         quota = Map.get(snapshots, provider)
-        gate_opts = [account: Map.get(accounts, provider)]
+        account = Map.get(accounts, provider)
+        gate_opts = [account: account]
 
-        case gate.check(nil, quota, state.workspace, gate_opts) do
-          {:hold, _} -> false
-          _allow_or_overage -> true
+        # bd-5ef587: a pause outlives quota headroom — keep the item queued.
+        cond do
+          paused?(provider, account) -> false
+          true -> not match?({:hold, _}, gate.check(nil, quota, state.workspace, gate_opts))
         end
       end)
 
@@ -588,6 +590,12 @@ defmodule Arbiter.Workflows.DispatchQueue do
     # `{:requeue, item}` back for any that fail, so nothing is dropped.
     _ = spawn_drain(state, to_dispatch)
     %{state | items: on_hold ++ keep}
+  end
+
+  defp paused?(provider, account) do
+    Arbiter.Providers.Pause.for_provider(provider) != nil or
+      match?(%Arbiter.Accounts.ProviderAccount{}, account) and
+        Arbiter.Providers.Pause.for_account(account) != nil
   end
 
   defp preflight_held?(%{retry_not_before: %DateTime{} = at}, now),

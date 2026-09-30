@@ -91,4 +91,22 @@ defmodule Arbiter.Providers.PauseTest do
     assert {:ok, _} = Pause.resume("claude", by: "cli")
     assert_receive {:event, %{topic: "provider_resumed", target: "claude"}}
   end
+
+  test "ensure_unpaused refuses a provider- or account-paused pass with the hold phrase" do
+    ws =
+      Ash.create!(Arbiter.Tasks.Workspace, %{
+        name: "pz-#{System.unique_integer([:positive])}",
+        prefix: "pz#{System.unique_integer([:positive])}",
+        config: %{}
+      })
+
+    alias Arbiter.Agents.ProviderRouting
+    assert :ok = ProviderRouting.ensure_unpaused(:codex, ws.id)
+    assert {:ok, _} = Pause.pause("codex", reason: "jail escape", by: "cli")
+
+    assert {:error, {:provider_paused, :codex, "held — codex paused: jail escape"}} =
+             ProviderRouting.ensure_unpaused(:codex, ws.id)
+
+    assert :ok = ProviderRouting.ensure_unpaused(:claude, ws.id)
+  end
 end

@@ -258,7 +258,11 @@ defmodule ArbiterWeb.ProvidersLive do
   # from every routing decision; running workers are left alone here (the
   # `--stop-running` lever is CLI / MCP only).
   def handle_event("pause_provider", %{"ref" => ref} = params, socket) do
-    reason = params |> Map.get("reason", "") |> String.trim()
+    reason =
+      case params |> Map.get("reason", "") |> String.trim() do
+        "" -> nil
+        text -> text
+      end
 
     case Arbiter.Providers.Pause.pause(ref, reason: reason, by: "dashboard") do
       {:ok, _} ->
@@ -744,16 +748,28 @@ defmodule ArbiterWeb.ProvidersLive do
                 >
                   {health_label(row.health)}
                 </span>
-                <button
+                <form
                   :if={not Map.has_key?(@pauses, "account:#{row.account.id}")}
-                  id={"pause-account-#{row.account.id}"}
-                  type="button"
-                  phx-click="pause_provider"
-                  phx-value-ref={row.account.id}
-                  class="text-[11px] px-2 py-0.5 rounded-[var(--radius-chip)] border border-[var(--border-default)] text-[var(--arb-text-muted)] hover:text-[var(--text-title)]"
+                  id={"pause-account-form-#{row.account.id}"}
+                  phx-submit="pause_provider"
+                  class="flex items-center gap-1"
                 >
-                  Pause
-                </button>
+                  <input type="hidden" name="ref" value={row.account.id} />
+                  <input
+                    id={"pause-account-reason-#{row.account.id}"}
+                    type="text"
+                    name="reason"
+                    placeholder="Reason"
+                    class="text-[11px] px-2 py-0.5 w-28 rounded-[var(--radius-chip)] border border-[var(--border-default)] bg-transparent"
+                  />
+                  <button
+                    id={"pause-account-#{row.account.id}"}
+                    type="submit"
+                    class="text-[11px] px-2 py-0.5 rounded-[var(--radius-chip)] border border-[var(--border-default)] text-[var(--arb-text-muted)] hover:text-[var(--text-title)]"
+                  >
+                    Pause
+                  </button>
+                </form>
                 <button
                   :if={Map.has_key?(@pauses, "account:#{row.account.id}")}
                   id={"resume-account-#{row.account.id}"}

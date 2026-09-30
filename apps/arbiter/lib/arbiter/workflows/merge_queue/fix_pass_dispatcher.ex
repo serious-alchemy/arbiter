@@ -143,6 +143,7 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
   defp start_pass(task, context, args) do
     with {:ok, worktree_path} <- create_worktree(context),
          {provider, fallback_reason, decision} <- resolve_pass_provider(task, context),
+         :ok <- ProviderRouting.ensure_unpaused(provider, task.workspace_id),
          {:ok, worker_pid} <-
            start_worker(task, context, worktree_path, provider, {fallback_reason, decision}),
          {:ok, _port} <- start_agent(worker_pid, worktree_path, context, args, provider) do

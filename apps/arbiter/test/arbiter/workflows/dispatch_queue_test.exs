@@ -222,6 +222,38 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
     end
   end
 
+  describe "provider pause (bd-5ef587)" do
+    test "a pause-held item is kept by the drain while the pause is active" do
+      Application.put_env(:arbiter, :test_dispatch_pid, self())
+      on_exit(fn -> Application.delete_env(:arbiter, :test_dispatch_pid) end)
+
+      ws = make_workspace(%{})
+      pid = start_queue(ws, dispatcher: RecordingDispatcher, auto_subscribe: false)
+      task = make_task(ws)
+
+      {:ok, _} = Arbiter.Providers.Pause.pause("claude", reason: "jail escape", by: "test")
+
+      # Even with the quota gate bypassed (the drain's own flag), the pause holds.
+      assert {:error, {:quota_held, _}} =
+               Dispatch.dispatch(task.id,
+                 force: true,
+                 start_driver: false,
+                 skip_quota_gate: true
+               )
+
+      assert length(DispatchQueue.state(pid).items) == 1
+
+      :ok = DispatchQueue.drain(pid)
+      refute_receive {:dispatched, _, _}, 100
+      assert length(DispatchQueue.state(pid).items) == 1
+
+      {:ok, _} = Arbiter.Providers.Pause.resume("claude", by: "test")
+      :ok = DispatchQueue.drain(pid)
+      assert_receive {:dispatched, task_id, _opts}
+      assert task_id == task.id
+    end
+  end
+
   describe ":continue — proceeds past the cap and alerts once per crossing" do
     test "dispatch spawns a worker, records overage, alerts exactly once" do
       Application.put_env(:arbiter, :test_notifier_pid, self())

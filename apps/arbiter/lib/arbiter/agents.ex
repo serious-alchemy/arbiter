@@ -300,16 +300,23 @@ defmodule Arbiter.Agents do
         else
           case fallback_for_workspace(workspace, orig) do
             {:ok, fallback} ->
-              {fallback, "fell back from #{orig}: credentials flagged expired"}
+              {fallback, "fell back from #{orig}: #{unavailable_cause(orig)}"}
 
             :error ->
               {orig,
-               "no provider available: #{orig} credentials flagged expired and no alternative adapter is available; retrying #{orig}"}
+               "no provider available: #{orig} #{unavailable_cause(orig)} and no alternative adapter is available; retrying #{orig}"}
           end
         end
 
       nil ->
         {default_agent_type(workspace), nil}
+    end
+  end
+
+  defp unavailable_cause(provider) do
+    case Arbiter.Providers.Pause.for_provider(provider) do
+      nil -> "credentials flagged expired"
+      pause -> "paused: #{pause.reason || "no reason given"}"
     end
   end
 

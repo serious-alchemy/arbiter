@@ -2863,7 +2863,10 @@ defmodule Arbiter.Worker.ReviewGate do
     case load_workspace(state.workspace_id) do
       %Workspace{} = ws ->
         policy = session_security_policy(ws, state, :reviewer)
-        ws |> Agents.reviewer_pool() |> Enum.filter(&strict_eligible_reviewer?(&1, policy))
+        ws
+        |> Agents.reviewer_pool()
+        |> Enum.reject(&reviewer_paused?(&1, state))
+        |> Enum.filter(&strict_eligible_reviewer?(&1, policy))
 
       _ ->
         []
@@ -4545,7 +4548,8 @@ defmodule Arbiter.Worker.ReviewGate do
     # (e.g. the CredentialWatchdog flagging a provider between calls).
     revision = resolve_revision(state, role)
 
-    with {:ok, pid} <- start_worker_process(state, id, role, revision),
+    with :ok <- ensure_revision_unpaused(state, revision),
+         {:ok, pid} <- start_worker_process(state, id, role, revision),
          :ok <- start_worker_session(state, pid, role, prompt, command, revision) do
       _ = Worker.advance(pid, step_for(role))
       {:ok, pid}
@@ -4575,6 +4579,11 @@ defmodule Arbiter.Worker.ReviewGate do
   end
 
   defp resolve_revision(_state, :reviewer), do: nil
+
+  defp ensure_revision_unpaused(state, {provider, _reason, _decision}),
+    do: ProviderRouting.ensure_unpaused(provider, state.workspace_id)
+
+  defp ensure_revision_unpaused(_state, _), do: :ok
 
   defp start_worker_process(state, id, role, revision) do
     case Worker.start(
@@ -4863,15 +4872,37 @@ defmodule Arbiter.Worker.ReviewGate do
   # instead of silently substituting an unconfigured `:claude`.
   defp adapter_for(state, %Workspace{} = ws, :reviewer, _revision) do
     policy = session_security_policy(ws, state, :reviewer)
-    preferred = Agents.reviewer_type(ws)
-    pool = Agents.reviewer_pool(ws)
+    configured = Agents.reviewer_type(ws)
 
-    case Agents.strict_eligible_provider(preferred, policy, pool) do
-      {:ok, eligible} ->
-        {:ok, {Agents.for_type(eligible), :review_agent}}
+    # bd-5ef587: a paused reviewer provider/account is dropped from the pool;
+    # the pass re-routes to the next unpaused reviewer, or is refused with the
+    # pause's hold phrase when none is left.
+    pool = ws |> Agents.reviewer_pool() |> Enum.reject(&reviewer_paused?(&1, state))
+    preferred = if configured in pool, do: configured, else: List.first(pool)
 
-      {:error, :ineligible} ->
-        {:error, Dispatch.strict_write_confinement_error(preferred, policy, ws, repo: state.repo)}
+    cond do
+      is_nil(preferred) ->
+        {:error, reviewer_paused_error(configured, state)}
+
+      true ->
+        case Agents.strict_eligible_provider(preferred, policy, pool) do
+          {:ok, eligible} ->
+            {:ok, {Agents.for_type(eligible), :review_agent}}
+
+          {:error, :ineligible} ->
+            {:error,
+             Dispatch.strict_write_confinement_error(preferred, policy, ws, repo: state.repo)}
+        end
+    end
+  end
+
+  defp reviewer_paused?(type, state),
+    do: Arbiter.Providers.Pause.blocking(type, state.workspace_id) != nil
+
+  defp reviewer_paused_error(type, state) do
+    case ProviderRouting.ensure_unpaused(type, state.workspace_id) do
+      {:error, _} = error -> elem(error, 1)
+      :ok -> {:provider_paused, type, "held — #{type} paused"}
     end
   end
 

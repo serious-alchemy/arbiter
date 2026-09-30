@@ -1318,24 +1318,22 @@ defmodule Arbiter.Worker.Dispatch do
   # accounts, so this only bites when nothing else can take the work, or on the
   # unrouted (legacy) path. Fails open like the quota gate.
   defp maybe_pause_gate(%Issue{workspace_id: ws_id} = task, opts) when is_binary(ws_id) do
-    if Keyword.get(opts, :skip_quota_gate, false) == true do
-      :ok
-    else
-      workspace = load_workspace(task)
-      provider = quota_gate_provider(task, workspace, opts)
+    # Deliberately NOT bypassed by `skip_quota_gate`: the drain replay and MCP
+    # `force_quota` override a quota hold, never an operator's pause.
+    workspace = load_workspace(task)
+    provider = quota_gate_provider(task, workspace, opts)
 
-      case pause_for_dispatch(ws_id, provider, opts) do
-        nil ->
-          :ok
+    case pause_for_dispatch(ws_id, provider, opts) do
+      nil ->
+        :ok
 
-        pause ->
-          phrase = "held — #{provider} paused: #{pause.reason || "no reason given"}"
+      pause ->
+        phrase = "held — #{provider} paused: #{pause.reason || "no reason given"}"
 
-          case DispatchQueue.hold(ws_id, task.id, unroute(opts), %{phrase: phrase}, provider) do
-            :ok -> {:error, {:quota_held, task.id}}
-            {:error, _} -> :ok
-          end
-      end
+        case DispatchQueue.hold(ws_id, task.id, unroute(opts), %{phrase: phrase}, provider) do
+          :ok -> {:error, {:quota_held, task.id}}
+          {:error, _} -> :ok
+        end
     end
   rescue
     _ -> :ok

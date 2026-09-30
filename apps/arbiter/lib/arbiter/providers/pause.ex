@@ -60,6 +60,31 @@ defmodule Arbiter.Providers.Pause do
     end
   end
 
+  @doc """
+  The pause that blocks `provider` for workspace `ws_id`: its provider-wide
+  pause, else the pause on the account the workspace meters it under. Fails
+  open (`nil`) when the account cannot be resolved.
+  """
+  @spec blocking(atom() | String.t() | nil, String.t() | nil) :: entry() | nil
+  def blocking(provider, ws_id) do
+    for_provider(provider) || account_pause(provider, ws_id)
+  end
+
+  defp account_pause(provider, ws_id) when is_binary(ws_id) and not is_nil(provider) do
+    atom = if is_binary(provider), do: String.to_existing_atom(provider), else: provider
+
+    case Arbiter.Accounts.Resolver.get(Arbiter.Quota.account_id(ws_id, atom)) do
+      %ProviderAccount{} = account -> for_account(account)
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  defp account_pause(_provider, _ws_id), do: nil
+
   @spec provider_paused?(atom() | String.t() | nil) :: boolean()
   def provider_paused?(provider), do: for_provider(provider) != nil
 
