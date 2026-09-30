@@ -24,18 +24,21 @@ defmodule ArbiterCli.Cmd.Provider do
       IO.puts(@moduledoc)
     else
       case Output.drop_json(argv) do
-        ["pause" | rest] -> pause(rest, Output.mode(argv))
-        ["resume" | rest] -> resume(rest, Output.mode(argv))
-        ["list" | _] -> list(Output.mode(argv))
-        _ -> usage()
+        ["pause" | rest] ->
+          pause(rest, Output.mode(argv))
+
+        ["resume" | rest] ->
+          resume(rest, Output.mode(argv))
+
+        ["list" | _] ->
+          list(Output.mode(argv))
+
+        _ ->
+          IO.puts(:stderr, "arb: unknown provider subcommand")
+          IO.puts(:stderr, "Run `arb provider --help` for usage.")
+          Output.halt(2)
       end
     end
-  end
-
-  defp usage do
-    IO.puts(:stderr, "arb: unknown provider subcommand")
-    IO.puts(:stderr, "Run `arb provider --help` for usage.")
-    Output.halt(2)
   end
 
   defp pause(argv, mode) do

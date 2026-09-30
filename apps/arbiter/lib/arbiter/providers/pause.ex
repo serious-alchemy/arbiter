@@ -144,7 +144,7 @@ defmodule Arbiter.Providers.Pause do
   defp run_on_target?(run, code), do: normalize(run.provider) == code
 
   @doc "JSON-friendly view of `list/0`."
-  @spec to_json([entry()]) :: [map()]
+  @spec to_json([entry()] | nil) :: [map()]
   def to_json(entries \\ nil) do
     Enum.map(entries || list(), fn e ->
       %{
