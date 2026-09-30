@@ -55,6 +55,7 @@ defmodule Arbiter.Agents.Codex do
   alias Arbiter.Agents.Codex.Config
   alias Arbiter.Agents.Codex.Stream
   alias Arbiter.Agents.SecurityPolicy
+  alias Arbiter.Worker.StopReason
 
   @done_regex ~r/\barb done\b/
 
@@ -196,6 +197,81 @@ defmodule Arbiter.Agents.Codex do
   end
 
   defp tmpfile_path?(path), do: Path.basename(path) |> String.starts_with?(@prompt_tmp_prefix)
+
+  @impl true
+  def auth_probe(opts \\ []) do
+    # Zero-quota auth probe (bd-2r42bq):
+    # If an API key is configured (alternative backend: direct OpenAI API, Ollama,
+    # or Responses-API backend), ChatGPT auth.json is not used.
+    # Otherwise, probe via Arbiter.Quota.Codex.probe_auth/1 (wham/usage GET) which
+    # checks token validity without burning model turns or 30-day budget quota.
+    case resolve_executable() do
+      {:ok, _path} ->
+        if api_key_configured?(opts), do: :ok, else: probe_chatgpt_usage(opts)
+
+      {:error, {:executable_not_found, exec}} ->
+        {:error,
+         %StopReason{
+           category: :crashed,
+           summary: "agent CLI not found on PATH (#{exec})",
+           remediation: "Install / fix the agent CLI on the host before dispatching."
+         }}
+    end
+  end
+
+  defp api_key_configured?(opts) do
+    case Keyword.get(opts, :api_key) || Config.resolve_api_key() do
+      key when is_binary(key) and key != "" -> true
+      _ -> false
+    end
+  end
+
+  defp probe_chatgpt_usage(opts) do
+    case Arbiter.Quota.Codex.probe_auth(opts) do
+      {:ok, 200, _body} ->
+        :ok
+
+      {:ok, 401, _body} ->
+        {:error,
+         %StopReason{
+           category: :auth_expired,
+           summary: "Codex auth expired (401 from usage API)",
+           remediation: "Run `codex login` on the host to authenticate."
+         }}
+
+      {:error, :no_access_token} ->
+        {:error,
+         %StopReason{
+           category: :auth_expired,
+           summary: "Codex CLI not authenticated (~/.codex/auth.json lacks access token)",
+           remediation: "Run `codex login` on the host to authenticate."
+         }}
+
+      {:error, :enoent} ->
+        {:error,
+         %StopReason{
+           category: :auth_expired,
+           summary: "Codex CLI not authenticated (~/.codex/auth.json not found)",
+           remediation: "Run `codex login` on the host to authenticate."
+         }}
+
+      {:ok, status, _body} ->
+        {:warn,
+         %StopReason{
+           category: :preflight_timeout,
+           summary: "Codex usage probe returned HTTP #{status}",
+           remediation: "Check ChatGPT API status."
+         }}
+
+      {:error, reason} ->
+        {:warn,
+         %StopReason{
+           category: :preflight_timeout,
+           summary: "Codex usage probe could not reach endpoint: #{inspect(reason)}",
+           remediation: "Check network connectivity."
+         }}
+    end
+  end
 
   @impl true
   def auth_probe_argv(_opts \\ []) do

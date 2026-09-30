@@ -382,6 +382,24 @@ defmodule Arbiter.Quota.Codex do
     end
   end
 
+  @doc """
+  Probe Codex authentication using the usage API endpoint (`wham/usage`).
+
+  Performs a zero-quota check against the operator's Codex login credentials.
+  Returns:
+    * `{:ok, 200, body}` when authenticated successfully;
+    * `{:ok, 401, body}` when credentials are expired or invalid;
+    * `{:ok, status, body}` for other HTTP response statuses;
+    * `{:error, reason}` on network errors, missing `auth.json`, or absence of an access token.
+  """
+  @spec probe_auth(keyword()) :: {:ok, pos_integer(), term()} | {:error, term()}
+  def probe_auth(opts \\ []) do
+    case resolve_credentials(opts) do
+      {:ok, creds} -> request_usage(creds, opts)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   defp resolve_credentials(opts) do
     case Keyword.get(opts, :credentials) do
       %{access_token: token} = creds when is_binary(token) and token != "" ->

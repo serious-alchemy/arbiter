@@ -199,4 +199,36 @@ defmodule Arbiter.Quota.CodexTest do
       assert {:error, _} = Codex.read_credentials(auth_path: "/nope/auth.json")
     end
   end
+
+  describe "probe_auth/1" do
+    setup do
+      Application.put_env(:arbiter, :codex_quota_http_stub, true)
+      on_exit(fn -> Application.delete_env(:arbiter, :codex_quota_http_stub) end)
+      :ok
+    end
+
+    test "returns {:ok, 200, body} on valid credentials" do
+      Req.Test.stub(@stub_name, fn conn ->
+        assert ["Bearer tok-abc"] = Plug.Conn.get_req_header(conn, "authorization")
+        Req.Test.json(conn, @usage_body)
+      end)
+
+      assert {:ok, 200, body} = Codex.probe_auth(credentials: creds())
+      assert is_map(body)
+    end
+
+    test "returns {:ok, 401, body} on expired credentials" do
+      Req.Test.stub(@stub_name, fn conn ->
+        conn
+        |> Plug.Conn.put_status(401)
+        |> Req.Test.json(%{"error" => "expired"})
+      end)
+
+      assert {:ok, 401, _} = Codex.probe_auth(credentials: creds())
+    end
+
+    test "returns {:error, :enoent} when auth_path is missing" do
+      assert {:error, :enoent} = Codex.probe_auth(auth_path: "/nonexistent/auth.json")
+    end
+  end
 end

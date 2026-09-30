@@ -243,6 +243,75 @@ defmodule Arbiter.Agents.CodexTest do
     end
   end
 
+  describe "auth_probe/1" do
+    setup do
+      Application.put_env(:arbiter, :codex_quota_http_stub, true)
+      Codex.Config.clear()
+      prev_key = System.get_env("OPENAI_API_KEY")
+      System.delete_env("OPENAI_API_KEY")
+
+      tmp =
+        Path.join(System.tmp_dir!(), "arbiter-codex-probe-#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(tmp)
+      old_path = System.get_env("PATH") || ""
+      System.put_env("PATH", tmp)
+
+      codex = Path.join(tmp, "codex")
+      File.write!(codex, "#!/bin/sh\nexit 0\n")
+      File.chmod!(codex, 0o755)
+
+      on_exit(fn ->
+        Application.delete_env(:arbiter, :codex_quota_http_stub)
+        Codex.Config.clear()
+
+        case prev_key do
+          nil -> System.delete_env("OPENAI_API_KEY")
+          v -> System.put_env("OPENAI_API_KEY", v)
+        end
+
+        System.put_env("PATH", old_path)
+        File.rm_rf!(tmp)
+      end)
+
+      {:ok, codex: codex}
+    end
+
+    test "returns :ok when usage API returns 200" do
+      Req.Test.stub(Arbiter.Quota.Codex.HTTP, fn conn ->
+        Req.Test.json(conn, %{"plan_type" => "plus"})
+      end)
+
+      assert :ok = Codex.auth_probe(credentials: %{access_token: "tok-123", account_id: nil})
+    end
+
+    test "returns {:error, :auth_expired} when usage API returns 401" do
+      Req.Test.stub(Arbiter.Quota.Codex.HTTP, fn conn ->
+        conn
+        |> Plug.Conn.put_status(401)
+        |> Req.Test.json(%{"error" => "expired"})
+      end)
+
+      assert {:error, reason} =
+               Codex.auth_probe(credentials: %{access_token: "tok-123", account_id: nil})
+
+      assert reason.category == :auth_expired
+      assert reason.remediation =~ "codex login"
+    end
+
+    test "returns :ok without calling usage API when api_key is provided (backend-neutral)" do
+      # If an API key is set, it does not attempt ChatGPT wham/usage with missing token
+      assert :ok = Codex.auth_probe(api_key: "sk-proj-test-key")
+    end
+
+    test "returns {:error, :crashed} when codex binary is not on PATH" do
+      System.put_env("PATH", "/nonexistent/bin")
+      assert {:error, reason} = Codex.auth_probe([])
+      assert reason.category == :crashed
+      assert reason.summary =~ "agent CLI not found on PATH"
+    end
+  end
+
   describe "prompt_tmpfile/1 and splice_prompt/2" do
     test "prompt_tmpfile/1 extracts the temp file path for stdin-mode argv" do
       argv = [
