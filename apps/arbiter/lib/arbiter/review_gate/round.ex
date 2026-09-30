@@ -83,6 +83,16 @@ defmodule Arbiter.ReviewGate.Round do
                           it — a question `reviewer_model` cannot answer,
                           because a timed-out pass usually has no usage row and
                           therefore no model.
+    * `reviewer_family` / `implementer_family`
+                        — bd-a1ke2c: under `review_agent.cross_family`, the model
+                          family (`Arbiter.Agents.ModelFamily`) that ran a
+                          `:review` pass and the implementer family it had to
+                          differ from. Nil when cross-family review is off.
+    * `same_family_fallback` / `same_family_fallback_reason`
+                        — true, with which families were unavailable and why,
+                          when no other family could review and the pass ran in
+                          the implementer's own family. False on an ordinary
+                          cross-family pass; nil when cross-family review is off.
     * `cost_usd`        — USD cost of this pass. Nil when not captured.
     * `criteria_total`  — number of acceptance criteria the reviewer addressed
                           in its per-criterion CRITERIA breakdown (bd-4yhv4x).
@@ -189,6 +199,10 @@ defmodule Arbiter.ReviewGate.Round do
         :reviewer_model,
         :reviewer_tier,
         :reviewer_provider,
+        :reviewer_family,
+        :implementer_family,
+        :same_family_fallback,
+        :same_family_fallback_reason,
         :cost_usd,
         :criteria_total,
         :criteria_unmet,
@@ -274,6 +288,31 @@ defmodule Arbiter.ReviewGate.Round do
       public? true
       constraints max_length: 64, trim?: true
       description "Provider that ran a :review pass. Nil for :impl rows and pre-review rows."
+    end
+
+    # bd-a1ke2c: the cross-family audit trail. Written for every `:review` pass
+    # under `review_agent.cross_family`; nil otherwise (and on `:impl` rows).
+    attribute :reviewer_family, :string do
+      public? true
+      constraints max_length: 64, trim?: true
+      description "Model family that ran a :review pass under cross-family review. Nil otherwise."
+    end
+
+    attribute :implementer_family, :string do
+      public? true
+      constraints max_length: 64, trim?: true
+      description "The implementer's model family the reviewer had to differ from. Nil when unknown."
+    end
+
+    attribute :same_family_fallback, :boolean do
+      public? true
+
+      description "True when the reviewer shares the implementer's family because no other was available."
+    end
+
+    attribute :same_family_fallback_reason, :string do
+      public? true
+      description "Which families were unavailable, and why, on a same-family fallback."
     end
 
     attribute :cost_usd, :float do

@@ -437,6 +437,14 @@ defmodule Arbiter.Tasks.Issue do
       accept [:implementer_account_id, :implementer_family]
     end
 
+    # bd-a1ke2c: the reviewer-family pin, set at the task's first review pass
+    # under `review_agent.cross_family`. Written only by
+    # `Arbiter.Agents.ReviewerRouting`; no lifecycle broadcast.
+    update :pin_reviewer do
+      require_atomic? false
+      accept [:reviewer_family]
+    end
+
     # bd-djapyj: reorder a ticket inside its workspace's rank order — the
     # space `board/scheduler.ex` and `board/autopilot.ex` read (priority,
     # then rank, then age). `rank` is deliberately not in `:update`'s
@@ -1838,6 +1846,20 @@ defmodule Arbiter.Tasks.Issue do
       constraints max_length: 64, trim?: true
 
       description "Model family of the pinned implementer account (`Arbiter.Agents.ModelFamily`)."
+    end
+
+    attribute :reviewer_family, :string do
+      allow_nil? true
+      public? true
+      constraints max_length: 64, trim?: true
+
+      description """
+      The model family pinned for this task's ReviewGate reviewer (bd-a1ke2c),
+      set at the first review pass under `review_agent.cross_family`. Every
+      later review pass — every round, a post-approval re-review, a
+      print-timeout rotation — reviews in this family while it is available.
+      `nil` when cross-family review never ran on the task.
+      """
     end
 
     attribute :pending_merge, :map do

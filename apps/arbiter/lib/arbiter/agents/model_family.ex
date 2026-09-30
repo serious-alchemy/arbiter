@@ -36,6 +36,20 @@ defmodule Arbiter.Agents.ModelFamily do
   (`Arbiter.Agents.ProviderConfig`). `model_for_tier/3` resolves it the same
   way the adapter will at spawn, so routing can know the model — and so the
   pool — before it picks an account.
+
+  ## The reviewer tier → model map (bd-a1ke2c)
+
+  A cross-family reviewer (`review_agent.cross_family`,
+  `Arbiter.Agents.ReviewerRouting`) runs its family's **strongest reviewer
+  tier** for the task's difficulty. The tier starts as the ReviewGate's own
+  reviewer tier (the task's tier bumped one step, bd-3xultf) and is then
+  raised to the family's reviewer floor here, `reviewer_tier/2`; the concrete
+  model is that tier through the same adapter map as above
+  (`model_for_tier/3`). Today only Google has a floor: its economy/standard
+  tiers are flash models, fine for implementation but not for judging another
+  family's work, so a Google reviewer always runs `premium` — agy's
+  `gemini-3.1-pro-high`, the gemini CLI's `gemini-2.5-pro` — at `high`
+  effort (`reviewer_thinking/2`) unless the workspace configured one.
   """
 
   alias Arbiter.Agents.Claude.Config, as: ClaudeConfig
@@ -45,6 +59,10 @@ defmodule Arbiter.Agents.ModelFamily do
 
   @type family :: :anthropic | :google | :openai | :xai | :local
   @type t :: %{family: family() | nil, pool: String.t() | nil}
+
+  @reviewer_tier_floor %{google: "premium"}
+  @reviewer_thinking %{google: "high"}
+  @tier_ladder ~w(economy standard premium)
 
   @agy_gemini_pool "antigravity:gemini_models"
   @agy_claude_gpt_pool "antigravity:claude_and_gpt_models"
@@ -101,6 +119,39 @@ defmodule Arbiter.Agents.ModelFamily do
   end
 
   def model_for_tier(_provider, _tier, _agent_config), do: nil
+
+  @doc """
+  The tier a `family` reviewer runs for a task whose reviewer tier is `tier`:
+  `tier` raised to the family's reviewer floor (see the moduledoc). A tier off
+  the economy → premium ladder (e.g. agy's `flagship`) is left alone.
+  """
+  @spec reviewer_tier(family() | nil, String.t() | nil) :: String.t() | nil
+  def reviewer_tier(family, tier) do
+    case Map.get(@reviewer_tier_floor, family) do
+      nil -> tier
+      floor -> higher_tier(tier, floor)
+    end
+  end
+
+  defp higher_tier(tier, floor) do
+    case {Enum.find_index(@tier_ladder, &(&1 == tier)), Enum.find_index(@tier_ladder, &(&1 == floor))} do
+      {nil, _} when is_binary(tier) and tier != "" -> tier
+      {nil, _} -> floor
+      {t, f} when t >= f -> tier
+      _ -> floor
+    end
+  end
+
+  @doc """
+  The reasoning effort a `family` reviewer runs at: the workspace's own
+  `thinking` when it set one, else the family's reviewer default (Google:
+  `"high"`), else `nil` (the CLI default).
+  """
+  @spec reviewer_thinking(family() | nil, String.t() | nil) :: String.t() | nil
+  def reviewer_thinking(_family, thinking) when is_binary(thinking) and thinking != "",
+    do: thinking
+
+  def reviewer_thinking(family, _thinking), do: Map.get(@reviewer_thinking, family)
 
   defp builtin(provider) when is_atom(provider) and not is_nil(provider),
     do: builtin(Atom.to_string(provider))
