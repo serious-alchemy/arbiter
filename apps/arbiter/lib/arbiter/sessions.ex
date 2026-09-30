@@ -292,7 +292,13 @@ defmodule Arbiter.Sessions do
          {:ok, session} <- get(id) do
       runner = runner(opts)
 
-      run(runner, "tmux", ["-S", session.tmux_socket, "kill-session", "-t", Naming.tmux_session(session)])
+      run(runner, "tmux", [
+        "-S",
+        session.tmux_socket,
+        "kill-session",
+        "-t",
+        Naming.tmux_session(session)
+      ])
 
       run(runner, "systemctl", ["--user", "stop", session.scope_unit])
 

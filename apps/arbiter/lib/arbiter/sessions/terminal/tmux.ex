@@ -75,7 +75,14 @@ defmodule Arbiter.Sessions.Terminal.Tmux do
 
     args =
       base(session) ++
-        ["pipe-pane", "-O", "-t", Naming.tmux_session(session), "cat >> #{shell_quote(path)}", ";"] ++
+        [
+          "pipe-pane",
+          "-O",
+          "-t",
+          Naming.tmux_session(session),
+          "cat >> #{shell_quote(path)}",
+          ";"
+        ] ++
         cursor_args(session) ++
         [";"] ++
         capture_args(session, lines)
@@ -96,7 +103,8 @@ defmodule Arbiter.Sessions.Terminal.Tmux do
   @impl true
   def streaming?(%Session{} = session, opts \\ []) do
     args =
-      base(session) ++ ["display-message", "-p", "-t", Naming.tmux_session(session), "\#{pane_pipe}"]
+      base(session) ++
+        ["display-message", "-p", "-t", Naming.tmux_session(session), "\#{pane_pipe}"]
 
     case run(args, opts) do
       {out, 0} -> String.trim(out) == "1"
@@ -106,7 +114,9 @@ defmodule Arbiter.Sessions.Terminal.Tmux do
 
   @impl true
   def snapshot(%Session{} = session, opts \\ []) do
-    args = base(session) ++ cursor_args(session) ++ [";"] ++ capture_args(session, snapshot_lines(opts))
+    args =
+      base(session) ++
+        cursor_args(session) ++ [";"] ++ capture_args(session, snapshot_lines(opts))
 
     case run(args, opts) do
       {out, 0} -> {:ok, finalize_capture(out)}
