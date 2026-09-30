@@ -131,13 +131,14 @@ defmodule Arbiter.Providers.Pause do
         |> Enum.filter(&run_on_target?(&1, target))
         |> Enum.map(& &1.task_id)
         |> Enum.uniq()
-        |> Enum.filter(&(Arbiter.Worker.whereis(&1) != nil))
-        |> Enum.filter(&(Arbiter.Worker.stop(&1, :normal, 10_000) == :ok))
+        |> Enum.filter(&(Arbiter.Worker.whereis(&1) != nil and stopped?(&1)))
 
       _ ->
         []
     end
   end
+
+  defp stopped?(task_id), do: Arbiter.Worker.stop(task_id, :normal, 10_000) == :ok
 
   defp run_on_target?(run, "account:" <> id), do: run.provider_account_id == id
   defp run_on_target?(run, code), do: normalize(run.provider) == code
