@@ -2863,6 +2863,7 @@ defmodule Arbiter.Worker.ReviewGate do
     case load_workspace(state.workspace_id) do
       %Workspace{} = ws ->
         policy = session_security_policy(ws, state, :reviewer)
+
         ws
         |> Agents.reviewer_pool()
         |> Enum.reject(&reviewer_paused?(&1, state))
@@ -4880,29 +4881,17 @@ defmodule Arbiter.Worker.ReviewGate do
     pool = ws |> Agents.reviewer_pool() |> Enum.reject(&reviewer_paused?(&1, state))
     preferred = if configured in pool, do: configured, else: List.first(pool)
 
-    cond do
-      is_nil(preferred) ->
-        {:error, reviewer_paused_error(configured, state)}
+    if is_nil(preferred) do
+      {:error, reviewer_paused_error(configured, state)}
+    else
+      case Agents.strict_eligible_provider(preferred, policy, pool) do
+        {:ok, eligible} ->
+          {:ok, {Agents.for_type(eligible), :review_agent}}
 
-      true ->
-        case Agents.strict_eligible_provider(preferred, policy, pool) do
-          {:ok, eligible} ->
-            {:ok, {Agents.for_type(eligible), :review_agent}}
-
-          {:error, :ineligible} ->
-            {:error,
-             Dispatch.strict_write_confinement_error(preferred, policy, ws, repo: state.repo)}
-        end
-    end
-  end
-
-  defp reviewer_paused?(type, state),
-    do: Arbiter.Providers.Pause.blocking(type, state.workspace_id) != nil
-
-  defp reviewer_paused_error(type, state) do
-    case ProviderRouting.ensure_unpaused(type, state.workspace_id) do
-      {:error, _} = error -> elem(error, 1)
-      :ok -> {:provider_paused, type, "held — #{type} paused"}
+        {:error, :ineligible} ->
+          {:error,
+           Dispatch.strict_write_confinement_error(preferred, policy, ws, repo: state.repo)}
+      end
     end
   end
 
@@ -4930,6 +4919,16 @@ defmodule Arbiter.Worker.ReviewGate do
 
       {:error, :ineligible} ->
         {:error, Dispatch.strict_write_confinement_error(provider, policy, ws, repo: state.repo)}
+    end
+  end
+
+  defp reviewer_paused?(type, state),
+    do: Arbiter.Providers.Pause.blocking(type, state.workspace_id) != nil
+
+  defp reviewer_paused_error(type, state) do
+    case ProviderRouting.ensure_unpaused(type, state.workspace_id) do
+      {:error, _} = error -> elem(error, 1)
+      :ok -> {:provider_paused, type, "held — #{type} paused"}
     end
   end
 

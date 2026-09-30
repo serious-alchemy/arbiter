@@ -580,10 +580,8 @@ defmodule Arbiter.Workflows.DispatchQueue do
         gate_opts = [account: account]
 
         # bd-5ef587: a pause outlives quota headroom — keep the item queued.
-        cond do
-          paused?(provider, account) -> false
-          true -> not match?({:hold, _}, gate.check(nil, quota, state.workspace, gate_opts))
-        end
+        not paused?(provider, account) and
+          not match?({:hold, _}, gate.check(nil, quota, state.workspace, gate_opts))
       end)
 
     # Optimistically remove the to-dispatch intents now; the drain Task casts
@@ -594,8 +592,8 @@ defmodule Arbiter.Workflows.DispatchQueue do
 
   defp paused?(provider, account) do
     Arbiter.Providers.Pause.for_provider(provider) != nil or
-      match?(%Arbiter.Accounts.ProviderAccount{}, account) and
-        Arbiter.Providers.Pause.for_account(account) != nil
+      (match?(%Arbiter.Accounts.ProviderAccount{}, account) and
+         Arbiter.Providers.Pause.for_account(account) != nil)
   end
 
   defp preflight_held?(%{retry_not_before: %DateTime{} = at}, now),

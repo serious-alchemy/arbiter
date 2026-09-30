@@ -519,6 +519,7 @@ defmodule ArbiterWeb.ProvidersLiveTest do
       {:ok, view, _html} = live_providers(conn)
 
       refute has_element?(view, "#account-#{account.id}-paused")
+
       view
       |> form("#pause-account-form-#{account.id}", %{"reason" => "  "})
       |> render_submit()
