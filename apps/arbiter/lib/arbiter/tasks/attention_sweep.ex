@@ -21,7 +21,17 @@ defmodule Arbiter.Tasks.AttentionSweep do
   ticket's attention, `ticket_show` and the dashboard show, and announces
   `promoted` on the `inbox` topic. A derived item seen for the first time is
   announced `raised` — nothing else raised it — so the coordinator wakes for it
-  as for a stored one.
+  as for a stored one. The first sweep of a process is a baseline, not news
+  (bd-9jipdh): the items it finds were there before this boot, so it records
+  their clocks without announcing them, and only items that appear after it
+  raise. Otherwise every restart would re-raise every ticket awaiting
+  verification.
+
+  An `awaiting_verification` item is exempt from the time limit: it waits on
+  a restart-and-observe, which the coordinator cannot hurry and the operator
+  cannot do any faster, so promoting it after 4 h only moves noise into the
+  operator's swimlane. It has no verify-specific window; it stays with the
+  coordinator until the verification is recorded.
 
   `run/1` is one sweep, with an injectable clock (`:now`) and first-seen map
   (`:seen`), and is what the tests drive. Only the primary instance sweeps.
@@ -56,7 +66,9 @@ defmodule Arbiter.Tasks.AttentionSweep do
   @doc """
   One sweep. Opts: `:now` (default now), `:seen` (the first-seen clock of the
   derived items, from the previous sweep; default empty), and the
-  `Attention.items/1` opts (`:workers`, `:issues`, `:workspace_id`).
+  `Attention.items/1` opts (`:workers`, `:issues`, `:workspace_id`), and
+  `:announce` (default `true`; `false` records first-seen clocks without
+  announcing — the boot baseline).
 
   Returns the promoted ticket ids and the `seen` map for the next sweep.
   """
@@ -71,7 +83,7 @@ defmodule Arbiter.Tasks.AttentionSweep do
       |> Keyword.merge(owner: :coordinator, now: now)
       |> Attention.items()
 
-    seen = track(items, seen, now)
+    seen = track(items, seen, now, Keyword.get(opts, :announce, true))
     limits = limits_by_workspace(items)
 
     promoted =
@@ -97,6 +109,9 @@ defmodule Arbiter.Tasks.AttentionSweep do
           (ticket.attention_resume_attempts || 0) >= limits.max_resumes ->
         "coordinator did not resolve within #{limits.max_resumes} resume attempts"
 
+      attention.cause == :awaiting_verification ->
+        nil
+
       limits.minutes > 0 and
           DateTime.diff(now, clock_start(item, seen, now), :second) >= limits.minutes * 60 ->
         "coordinator did not resolve within #{AttentionLimits.describe_minutes(limits.minutes)}"
@@ -117,6 +132,7 @@ defmodule Arbiter.Tasks.AttentionSweep do
       interval_ms:
         Keyword.get(opts, :interval_ms, Keyword.get(cfg, :interval_ms, @default_interval_ms)),
       seen: %{},
+      primed?: false,
       primary?: Keyword.get(opts, :primary?, &Arbiter.SingleInstance.primary?/0),
       clock: Keyword.get(opts, :clock, &DateTime.utc_now/0)
     }
@@ -127,15 +143,16 @@ defmodule Arbiter.Tasks.AttentionSweep do
 
   @impl true
   def handle_info(:sweep, state) do
-    seen =
+    state =
       if state.primary?.() do
-        run(seen: state.seen, now: state.clock.()).seen
+        %{seen: seen} = run(seen: state.seen, now: state.clock.(), announce: state.primed?)
+        %{state | seen: seen, primed?: true}
       else
-        state.seen
+        state
       end
 
     schedule(state.interval_ms)
-    {:noreply, %{state | seen: seen}}
+    {:noreply, state}
   rescue
     e ->
       Logger.warning("AttentionSweep: sweep failed: #{Exception.message(e)}")
@@ -151,7 +168,7 @@ defmodule Arbiter.Tasks.AttentionSweep do
 
   # The first-seen clock of the derived items still listed; a stored item
   # carries its own `since`. A derived item new to the map is announced.
-  defp track(items, seen, now) do
+  defp track(items, seen, now, announce?) do
     Map.new(items |> Enum.filter(&is_nil(&1.attention.since)), fn item ->
       key = {item.ticket_id, item.attention.cause}
 
@@ -160,7 +177,7 @@ defmodule Arbiter.Tasks.AttentionSweep do
           {key, at}
 
         :error ->
-          Attention.announce(item.ticket, :raised, item.attention)
+          if announce?, do: Attention.announce(item.ticket, :raised, item.attention)
           {key, now}
       end
     end)
