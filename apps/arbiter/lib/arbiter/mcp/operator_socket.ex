@@ -177,31 +177,38 @@ defmodule Arbiter.MCP.OperatorSocket do
 
   # ---- one connection -------------------------------------------------------
 
+  # The peer is judged before its request is parsed, but the request line is
+  # read on every path before replying. If the server replied and closed first,
+  # a client whose send landed after the close would get `:closed` and never
+  # see the reason.
   defp serve(sock, authorize) do
-    response =
+    {peer, verdict} =
       case peercred(sock) do
-        {:ok, peer} -> authorized_request(sock, peer, authorize)
-        {:error, reason} -> refusal(reason, nil)
+        {:ok, peer} -> {peer, OperatorProof.authorize(peer, authorize)}
+        {:error, reason} -> {nil, {:error, reason}}
+      end
+
+    line = :gen_tcp.recv(sock, 0, @recv_timeout)
+
+    response =
+      case verdict do
+        :ok -> request_response(line, peer)
+        {:error, reason} -> refusal(reason, peer)
       end
 
     _ = :gen_tcp.send(sock, [Jason.encode!(response), "\n"])
     :gen_tcp.close(sock)
   end
 
-  defp authorized_request(sock, peer, authorize) do
-    case OperatorProof.authorize(peer, authorize) do
-      :ok ->
-        with {:ok, line} <- :gen_tcp.recv(sock, 0, @recv_timeout),
-             {:ok, %{} = request} <- Jason.decode(line) do
-          handle_request(request, peer)
-        else
-          _ -> error("malformed request: send one JSON object per line", "bad_request")
-        end
-
-      {:error, reason} ->
-        refusal(reason, peer)
+  defp request_response({:ok, line}, peer) do
+    case Jason.decode(line) do
+      {:ok, %{} = request} -> handle_request(request, peer)
+      _ -> error("malformed request: send one JSON object per line", "bad_request")
     end
   end
+
+  defp request_response({:error, _}, _peer),
+    do: error("malformed request: send one JSON object per line", "bad_request")
 
   defp peercred(sock) do
     case :inet.getopts(sock, [{:raw, @sol_socket, @so_peercred, 12}]) do

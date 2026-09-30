@@ -64,6 +64,22 @@ defmodule Arbiter.MCP.OperatorSocketTest do
       assert resp["error"]["message"] =~ "started by the Arbiter server"
     end
 
+    test "the refusal waits for the request, so a slow client still reads the reason", %{
+      path: path
+    } do
+      start!(path, server_cgroup: nil)
+
+      {:ok, sock} = :gen_tcp.connect({:local, path}, 0, [:binary, packet: :line, active: false])
+      # Nothing is sent yet, so nothing may come back and the socket stays open.
+      # Replying and closing first let a client's later send fail with :closed
+      # and lose the reason.
+      assert {:error, :timeout} = :gen_tcp.recv(sock, 0, 300)
+      :ok = :gen_tcp.send(sock, ~s({"op":"mint"}\n))
+      {:ok, line} = :gen_tcp.recv(sock, 0, 5_000)
+
+      assert %{"error" => %{"reason" => "spawned_by_arbiter"}} = Jason.decode!(line)
+    end
+
     test "the server connecting to itself is refused", %{path: path} do
       start!(path, server_cgroup: nil)
 
