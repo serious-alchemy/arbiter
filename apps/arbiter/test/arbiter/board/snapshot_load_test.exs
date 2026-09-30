@@ -394,7 +394,10 @@ defmodule Arbiter.Board.SnapshotLoadTest do
   describe "load_issues/2 :exclude_engagements? (bd-crk6tb)" do
     setup %{ws: ws} do
       mk = fn title, attrs ->
-        Ash.create!(Issue, Map.merge(%{title: title, tracker_type: :none, workspace_id: ws.id}, attrs))
+        Ash.create!(
+          Issue,
+          Map.merge(%{title: title, tracker_type: :none, workspace_id: ws.id}, attrs)
+        )
       end
 
       %{

@@ -342,6 +342,7 @@ defmodule Arbiter.Board.Snapshot do
       Keyword.get_lazy(opts, :issues, fn ->
         load_issues(now, exclude_engagements?: Keyword.get(opts, :exclude_engagements?, false))
       end)
+
     # `load_issues/1` skips long-closed issues, but an edge may still point at
     # one (a satisfied blocker, a closed child, a closed parent epic).
     ref_issues = reference_issues(deps, issues)

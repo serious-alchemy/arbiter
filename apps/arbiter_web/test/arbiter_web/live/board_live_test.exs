@@ -207,7 +207,11 @@ defmodule ArbiterWeb.BoardLiveTest do
 
     test "a closed engagement does not reach the Closed column either", %{conn: conn, ws: ws} do
       engagement =
-        issue(ws, "Review engagement: 9", %{tracker_type: :none, review_only: true, source_pr: "9"})
+        issue(ws, "Review engagement: 9", %{
+          tracker_type: :none,
+          review_only: true,
+          source_pr: "9"
+        })
 
       {:ok, _} = Ash.update(engagement, %{}, action: :close)
 

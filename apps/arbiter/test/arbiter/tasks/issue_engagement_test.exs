@@ -22,7 +22,10 @@ defmodule Arbiter.Tasks.IssueEngagementTest do
   end
 
   defp issue!(ws, title, attrs) do
-    Ash.create!(Issue, Map.merge(%{title: title, tracker_type: :none, workspace_id: ws.id}, attrs))
+    Ash.create!(
+      Issue,
+      Map.merge(%{title: title, tracker_type: :none, workspace_id: ws.id}, attrs)
+    )
   end
 
   setup do
@@ -40,13 +43,18 @@ defmodule Arbiter.Tasks.IssueEngagementTest do
   defp ids(query), do: query |> Ash.read!() |> MapSet.new(& &1.id)
 
   test "exclude_engagements/1 drops only the conjunction", ctx do
-    got = Issue |> Issue.exclude_engagements() |> Ash.Query.filter(workspace_id == ^ctx.ws.id) |> ids()
+    got =
+      Issue
+      |> Issue.exclude_engagements()
+      |> Ash.Query.filter(workspace_id == ^ctx.ws.id)
+      |> ids()
 
     assert got == MapSet.new([ctx.worker_review.id, ctx.follow_up.id, ctx.plain.id])
   end
 
   test "only_engagements/1 keeps only the conjunction", ctx do
-    got = Issue |> Issue.only_engagements() |> Ash.Query.filter(workspace_id == ^ctx.ws.id) |> ids()
+    got =
+      Issue |> Issue.only_engagements() |> Ash.Query.filter(workspace_id == ^ctx.ws.id) |> ids()
 
     assert got == MapSet.new([ctx.engagement.id])
   end
@@ -55,7 +63,12 @@ defmodule Arbiter.Tasks.IssueEngagementTest do
     # `review_only` is nullable; a NULL must behave as false, not as SQL unknown.
     Arbiter.Repo.query!("UPDATE issues SET review_only = NULL WHERE id = ?", [ctx.follow_up.id])
 
-    got = Issue |> Issue.exclude_engagements() |> Ash.Query.filter(workspace_id == ^ctx.ws.id) |> ids()
+    got =
+      Issue
+      |> Issue.exclude_engagements()
+      |> Ash.Query.filter(workspace_id == ^ctx.ws.id)
+      |> ids()
+
     assert ctx.follow_up.id in got
   end
 
