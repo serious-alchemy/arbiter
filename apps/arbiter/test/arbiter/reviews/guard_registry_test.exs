@@ -30,6 +30,13 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
   # its function is how a freeze rots. A new entry here is a deliberate,
   # reviewable act; that is the point.
   @non_guard_sites [
+    # --- watchdog.ex ---
+    {Arbiter.Worker.Watchdog, :dispatch_ci_fix_pass, 4,
+     "bd-5ef587: `{:provider_paused, …}` holds the pass (no attempt spent, no escalation) " <>
+       "until the operator lifts the pause — an operator safety stop, not a guard"},
+    {Arbiter.Worker.Watchdog, :spawn_conflict_resolver, 1,
+     "bd-5ef587: `{:provider_paused, …}` holds the pass (no attempt spent, no escalation) " <>
+       "until the operator lifts the pause — an operator safety stop, not a guard"},
     # --- review_gate.ex ---
     {Arbiter.Worker.ReviewGate, :persist_message, 4,
      "thread persistence: mails the review thread, not an escalation"},
