@@ -66,6 +66,30 @@
         <dt class="font-semibold">Arbiter</dt>
         <dd>{@app_version} · {@git_sha}</dd>
       </dl>
+      <div
+        :if={@update.update_available?}
+        id="update-available"
+        role="status"
+        class="alert alert-info mb-4 text-sm"
+      >
+        <.icon name="hero-arrow-up-circle" class="size-5 shrink-0" />
+        <div>
+          <p class="font-semibold">Update available: {@update.latest}</p>
+          <p>
+            <a
+              :if={@update.release_url}
+              id="update-release-link"
+              href={@update.release_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              class="link link-hover"
+            >
+              Release notes
+            </a>
+            · deploy with <code id="update-deploy-command">arb server deploy</code>
+          </p>
+        </div>
+      </div>
       <p class="text-sm">
         Elixir {System.version()} · Phoenix {Application.spec(:phoenix, :vsn)} · LiveView {Application.spec(
           :phoenix_live_view,

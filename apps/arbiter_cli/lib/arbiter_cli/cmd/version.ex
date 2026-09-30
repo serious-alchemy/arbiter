@@ -55,6 +55,7 @@ defmodule ArbiterCli.Cmd.Version do
         IO.puts("  sha:       #{server["sha"]}")
         IO.puts("  built-at:  #{server["built_at"]}")
         IO.puts("  booted-at: #{server["booted_at"]}")
+        print_update(server["update"])
 
         if sha_mismatch?(cli.sha, server["sha"]) do
           IO.puts("")
@@ -73,6 +74,19 @@ defmodule ArbiterCli.Cmd.Version do
         IO.puts("  (error: #{msg})")
     end
   end
+
+  defp print_update(%{"update_available" => true} = update) do
+    IO.puts("")
+    IO.puts("UPDATE AVAILABLE: #{update["latest"]}")
+    if update["release_url"], do: IO.puts("  release notes: #{update["release_url"]}")
+    IO.puts("  deploy with:   arb server deploy")
+  end
+
+  defp print_update(%{"error" => err}) when is_binary(err) do
+    IO.puts("  update check: failed (#{err})")
+  end
+
+  defp print_update(_), do: :ok
 
   defp emit_json(cli, server_result) do
     {server_data, mismatch} =
