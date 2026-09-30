@@ -43,6 +43,10 @@ defmodule ArbiterCli.Client do
     """
     defstruct [:kind, :status, :body, :message, :hint]
 
+    # `:operator_proof` — the server's operator socket refused to mint
+    # (bd-8381tk); `message` is the server's reason. `:no_token` — a mint
+    # against a remote `ARB_HOST` with no token to authenticate it.
+    #
     # `:no_session_token` — inside an Arbiter session (`ARB_SESSION_ID` set)
     # with no usable token: no `ARB_TOKEN` override and no readable
     # `$ARB_SESSION_ROOT/mcp_token` file. The request is refused before it is
@@ -99,9 +103,25 @@ defmodule ArbiterCli.Client do
   def delete(path, params \\ []), do: request(:delete, path, params: params)
 
   defp request(method, path, opts) do
-    with {:ok, token} <- resolve_token() do
+    with {:ok, token} <- do_resolve_token() do
       do_request(method, path, token, opts)
     end
+  end
+
+  @doc """
+  The token a request would carry: `{:ok, token}`, `{:ok, nil}` for an
+  unauthenticated loopback call, or `{:error, %Error{kind: :no_session_token}}`
+  inside a session that has none. `ArbiterCli.Cmd.Mcp.mint_token/1` uses it to
+  choose between the HTTP route (the caller has a token) and the operator
+  socket (it doesn't).
+  """
+  @spec resolve_token() :: {:ok, String.t() | nil} | {:error, Error.t()}
+  def resolve_token, do: do_resolve_token()
+
+  @doc "Whether `ARB_HOST` names this machine's loopback interface."
+  @spec loopback_host?() :: boolean()
+  def loopback_host? do
+    URI.parse(base_url()).host in ["127.0.0.1", "localhost", "::1", "[::1]"]
   end
 
   # Outside a session: `ARB_TOKEN` or nothing (unauthenticated — the loopback
@@ -113,7 +133,7 @@ defmodule ArbiterCli.Client do
   # inside a session would ride the same unauthenticated-loopback path the
   # operator's own shell relies on and mint a token more powerful than the
   # session's own.
-  defp resolve_token do
+  defp do_resolve_token do
     case System.get_env("ARB_SESSION_ID") do
       session_id when is_binary(session_id) and session_id != "" ->
         case token() do

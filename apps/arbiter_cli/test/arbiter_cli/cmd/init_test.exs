@@ -475,9 +475,11 @@ defmodule ArbiterCli.Cmd.InitTest do
     test "does not report .mcp.json as drift or leak the minted coordinator token" do
       stub_routes([
         {{"get", "/api/workspaces"},
-         {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "emr"}]}, 200}},
-        {{"post", "/api/mcp/tokens"}, {%{"token" => "REAL-LIVE-TOKEN-abc123"}, 201}}
+         {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "emr"}]}, 200}}
       ])
+
+      # bd-8381tk: the token comes over the operator socket, not anonymous HTTP.
+      ArbiterCli.FakeOperatorSocket.start!(%{"token" => "REAL-LIVE-TOKEN-abc123"})
 
       dir = tmp_dir()
 
