@@ -5533,6 +5533,31 @@ defmodule Arbiter.MCP.ToolsTest do
   end
 
   describe "review_gate_rounds_list/2 (bd-aqyjuc)" do
+    test "exposes the reviewer family, implementer family and any same-family fallback (bd-a1ke2c)",
+         ctx do
+      {:ok, _} =
+        Ash.create(Arbiter.ReviewGate.Round, %{
+          task_id: ctx.task.id,
+          round: 1,
+          role: :review,
+          verdict: :approve,
+          reviewer_provider: "claude",
+          reviewer_family: "anthropic",
+          implementer_family: "anthropic",
+          same_family_fallback: true,
+          same_family_fallback_reason: "no other model family available: google (gemini: quota_held)",
+          converged: true
+        })
+
+      assert {:ok, %{rounds: [round]}} =
+               Tools.review_gate_rounds_list(ctx.coordinator, %{"task_id" => ctx.task.id})
+
+      assert round.reviewer_family == "anthropic"
+      assert round.implementer_family == "anthropic"
+      assert round.same_family_fallback == true
+      assert round.same_family_fallback_reason =~ "quota_held"
+    end
+
     test "returns rounds for a task, oldest-first, distinguishing round-1 reject from round-2 approve",
          ctx do
       {:ok, _r1} =

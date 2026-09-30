@@ -97,6 +97,15 @@ defmodule ArbiterCli.ConfigSchema do
                           provider only, so it never leaks to another.
       security        map — see "security" below; layered under agent.security
                       (workspace-level override of the install-wide default)
+      cross_family    (review_agent only) bool — the ReviewGate reviewer's model
+                      family must differ from the implementer's (bd-a1ke2c).
+                      Every review pass (rounds, re-reviews, print-timeout
+                      rotation) uses one family per task, picked by most quota
+                      left among review_agent.type's other families at that
+                      family's reviewer tier (Arbiter.Agents.ModelFamily). A
+                      same-family review only when every other family is
+                      unconfigured, quota-held, auth-expired or circuit-broken
+                      — immediately, and recorded on the round. (default: false)
 
     security  (map, nested at agent.security)
       CANONICAL PATH: agent.security.permissions.mode

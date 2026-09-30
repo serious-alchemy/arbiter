@@ -381,6 +381,12 @@ defmodule Arbiter.MCP.Tools do
       reviewer_model: r.reviewer_model,
       reviewer_tier: r.reviewer_tier,
       reviewer_provider: r.reviewer_provider,
+      # bd-a1ke2c: under `review_agent.cross_family`, who reviewed whom, and a
+      # same-family fallback with its reason — never silent.
+      reviewer_family: r.reviewer_family,
+      implementer_family: r.implementer_family,
+      same_family_fallback: r.same_family_fallback,
+      same_family_fallback_reason: r.same_family_fallback_reason,
       cost_usd: r.cost_usd,
       converged: r.converged,
       inserted_at: iso(r.inserted_at)

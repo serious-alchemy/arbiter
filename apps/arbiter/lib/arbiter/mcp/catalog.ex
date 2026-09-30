@@ -1447,6 +1447,9 @@ defmodule Arbiter.MCP.Catalog do
           "or implementer pass, oldest-first. Each row carries the round number, role " <>
           "(review/impl), verdict (approve/request_changes, nil for impl), findings text, " <>
           "finding count, the model that ran the pass, its cost, and whether it converged — " <>
+          "and, under `review_agent.cross_family` (bd-a1ke2c), the reviewer's model family, " <>
+          "the implementer's, and `same_family_fallback` with its reason when no other family " <>
+          "was available — " <>
           "so a round-1 rejection followed by a round-2 approval is visible as two distinct " <>
           "rows instead of collapsing into the ticket's terminal outcome. Backfill is out of " <>
           "scope; rows only exist for ReviewGate runs from 2026-07-28 onward.",
