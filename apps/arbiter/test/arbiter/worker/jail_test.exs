@@ -273,8 +273,10 @@ defmodule Arbiter.Worker.JailTest do
           File.regular?(f) do
         assert {f, f} in flag_pairs(argv, "--ro-bind")
 
-        assert index_of(argv, ["--ro-bind", f, f]) >
-                 index_of(argv, ["--tmpfs", "/run/systemd/resolve"])
+        assert Enum.find_index(argv, &(&1 == f)) >
+                 Enum.find_index(argv, &(&1 == "/run/systemd/resolve"))
+
+        index_of(argv, ["--tmpfs", "/run/systemd/resolve"])
       end
     end
 
