@@ -157,7 +157,7 @@ defmodule ArbiterWeb.RunDetailLiveTest do
 
       # Use LazyHTML to verify the provider icon is present
       doc = LazyHTML.from_fragment(html)
-      claude_icons = LazyHTML.filter(doc, "svg[aria-label=\"Claude\"]")
+      claude_icons = LazyHTML.query(doc, "svg[aria-label=\"Claude\"]")
       assert Enum.count(claude_icons) > 0, "Claude provider icon should be present"
 
       # Check that the display name is shown
@@ -182,7 +182,13 @@ defmodule ArbiterWeb.RunDetailLiveTest do
 
       # Should not show any provider icon
       doc = LazyHTML.from_fragment(html)
-      icons = LazyHTML.filter(doc, "svg[aria-label]")
+      # (the app shell carries its own "arbiter" logo svgs, so match provider labels only)
+      icons =
+        LazyHTML.query(
+          doc,
+          ~s(svg[aria-label="Claude"], svg[aria-label="Codex"], svg[aria-label="Antigravity"], svg[aria-label="Ollama"], svg[aria-label="Unknown provider"])
+        )
+
       assert Enum.count(icons) == 0, "No provider icon should render for nil provider"
     end
 
@@ -198,7 +204,7 @@ defmodule ArbiterWeb.RunDetailLiveTest do
 
       # Use LazyHTML to verify the correct provider icon
       doc = LazyHTML.from_fragment(html)
-      codex_icons = LazyHTML.filter(doc, "svg[aria-label=\"Codex\"]")
+      codex_icons = LazyHTML.query(doc, "svg[aria-label=\"Codex\"]")
       assert Enum.count(codex_icons) > 0, "Codex provider icon should be present"
       assert html =~ "Codex"
 
@@ -213,7 +219,7 @@ defmodule ArbiterWeb.RunDetailLiveTest do
       {:ok, _view, html} = live_run(conn, gemini_run.id)
 
       doc = LazyHTML.from_fragment(html)
-      gemini_icons = LazyHTML.filter(doc, "svg[aria-label=\"Antigravity\"]")
+      gemini_icons = LazyHTML.query(doc, "svg[aria-label=\"Antigravity\"]")
       assert Enum.count(gemini_icons) > 0, "Antigravity (gemini) provider icon should be present"
       assert html =~ "Antigravity"
     end

@@ -3074,8 +3074,8 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
 
       # Use LazyHTML to verify the provider icons are present
       doc = LazyHTML.from_fragment(html)
-      claude_icons = LazyHTML.filter(doc, "svg[aria-label=\"Claude\"]")
-      codex_icons = LazyHTML.filter(doc, "svg[aria-label=\"Codex\"]")
+      claude_icons = LazyHTML.query(doc, "svg[aria-label=\"Claude\"]")
+      codex_icons = LazyHTML.query(doc, "svg[aria-label=\"Codex\"]")
 
       assert Enum.count(claude_icons) > 0, "Claude provider icon should be present"
       assert Enum.count(codex_icons) > 0, "Codex provider icon should be present"
@@ -3102,11 +3102,11 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, view, html} = live_task(conn, ~p"/tasks/#{task.id}")
 
       # Click to expand the run's transcript
-      html = view |> element(~s(button[phx-value-run="#{run.id}"])) |> render_click()
+      html = render_click(view, "toggle_run", %{"run" => run.id})
 
       # The expanded header should show the provider icon and model
       doc = LazyHTML.from_fragment(html)
-      claude_icons = LazyHTML.filter(doc, "svg[aria-label=\"Claude\"]")
+      claude_icons = LazyHTML.query(doc, "svg[aria-label=\"Claude\"]")
       assert Enum.count(claude_icons) > 0, "Claude provider icon should appear in expanded header"
       assert html =~ "claude-opus"
     end
@@ -3132,7 +3132,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
 
       doc = LazyHTML.from_fragment(html)
       # Should not have any provider icon SVGs in the run row
-      icons = LazyHTML.filter(doc, "#panel-runs svg[aria-label]")
+      icons = LazyHTML.query(doc, "#panel-runs svg[aria-label]")
       assert Enum.count(icons) == 0, "No provider icon should render for runs without a provider"
     end
   end

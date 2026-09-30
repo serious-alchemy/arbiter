@@ -387,7 +387,7 @@ defmodule ArbiterWeb.CoreComponents.DomainTest do
         """)
 
       doc = LazyHTML.from_fragment(html)
-      assert Enum.count(LazyHTML.filter(doc, "svg[aria-label=\"Claude\"]")) > 0
+      assert Enum.count(LazyHTML.query(doc, "svg[aria-label=\"Claude\"]")) > 0
     end
 
     test "omits the provider icon when provider is nil" do
@@ -404,7 +404,7 @@ defmodule ArbiterWeb.CoreComponents.DomainTest do
         """)
 
       doc = LazyHTML.from_fragment(html)
-      assert Enum.count(LazyHTML.filter(doc, "svg[aria-label]")) == 0
+      assert Enum.count(LazyHTML.query(doc, "svg[aria-label]")) == 0
     end
 
     test "omits the provider icon when provider is not given" do
@@ -420,7 +420,7 @@ defmodule ArbiterWeb.CoreComponents.DomainTest do
         """)
 
       doc = LazyHTML.from_fragment(html)
-      assert Enum.count(LazyHTML.filter(doc, "svg[aria-label]")) == 0
+      assert Enum.count(LazyHTML.query(doc, "svg[aria-label]")) == 0
     end
   end
 

@@ -342,11 +342,11 @@ defmodule ArbiterWeb.RunIndexLiveTest do
 
     doc = LazyHTML.from_fragment(html)
     # Claude run should show the claude provider icon
-    claude_icons = LazyHTML.filter(doc, "svg[aria-label=\"Claude\"]")
+    claude_icons = LazyHTML.query(doc, "svg[aria-label=\"Claude\"]")
     assert Enum.count(claude_icons) > 0
 
     # Codex run should show the codex provider icon
-    codex_icons = LazyHTML.filter(doc, "svg[aria-label=\"Codex\"]")
+    codex_icons = LazyHTML.query(doc, "svg[aria-label=\"Codex\"]")
     assert Enum.count(codex_icons) > 0
 
     # Verify the icons are within the runs-history container
