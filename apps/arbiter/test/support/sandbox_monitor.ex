@@ -34,7 +34,10 @@ defmodule Arbiter.Test.SandboxMonitor do
     queued PubSub echo to handle when the test ended (ExUnit exits the test
     process with `:shutdown`, and `Phoenix.LiveView.Channel` does not trap
     exits). The owner is the test that just finished and is about to hand the
-    connection back anyway, so no test observes the loss.
+    connection back anyway, so no *other* test observes the loss — but that
+    test's own `on_exit` callbacks run after the kill, and any DB read in one
+    of them (e.g. `Worker.stop/2` by task id) sees the dead proxy: a raise,
+    or an exit from the checkout (bd-jw7cb0).
 
   The discriminator is whether any test process registered with `track/3` was
   still alive when the disconnect fired.

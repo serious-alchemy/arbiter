@@ -280,7 +280,9 @@ defmodule Arbiter.Board.Autopilot do
     * `:debounce_ms` — how long a reactive trigger waits before running a
       pass, coalescing a burst into one; defaults to the app env (300ms).
     * `:topics` — PubSub topics to subscribe to for reactive triggers;
-      defaults to `["tasks", "events"]`. Tests can pass `[]` (no reactive
+      defaults to the app env's `:topics`, else `["tasks", "events"]`. The
+      test env sets `topics: []` for the VM-global instance (bd-jw7cb0).
+      Tests can pass `[]` (no reactive
       triggers, drive with `send/2` or `tick/2` instead) or private topic
       names to exercise the real `Phoenix.PubSub.subscribe/2` path without
       picking up unrelated broadcasts from other tests.
@@ -412,7 +414,7 @@ defmodule Arbiter.Board.Autopilot do
         :error -> initial_paused_state()
       end
 
-    topics = Keyword.get(opts, :topics, default_topics())
+    topics = Keyword.get_lazy(opts, :topics, &configured_topics/0)
     Enum.each(topics, &Phoenix.PubSub.subscribe(Arbiter.PubSub, &1))
 
     state = %{
@@ -950,6 +952,15 @@ defmodule Arbiter.Board.Autopilot do
     :arbiter
     |> Application.get_env(:board_autopilot, [])
     |> Keyword.get(:interval_ms, @default_interval_ms)
+  end
+
+  # `[]` in the test env: `interval_ms: :never` alone does not stop a resumed
+  # autopilot from planning — every lifecycle broadcast would, dispatching a
+  # test's Ready fixtures from this VM-global process (bd-jw7cb0).
+  defp configured_topics do
+    :arbiter
+    |> Application.get_env(:board_autopilot, [])
+    |> Keyword.get(:topics, default_topics())
   end
 
   defp configured_debounce_ms do
