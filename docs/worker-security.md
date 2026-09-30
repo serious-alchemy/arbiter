@@ -747,8 +747,9 @@ isolated `HOME`'s symlinked passthrough of `.ssh` / `.arbiter`, and
 `/proc/<server pid>/environ` of any same-UID process outside a PID namespace).
 With `ARBITER_CLOAK_KEY` in `arbiter.env` that is the same break as before, just
 one `cat` away. Closing it is file-level isolation, not env hygiene: the jail
-(bd-7o08mj masks `/run`; hiding `~/.arbiter` is its follow-up) and the
-guardrail-profile work (bd-8apkz6). Until then treat any worker with shell
+(bd-7o08mj masks `/run`; bd-8381tk masks `arbiter.env` and the release
+cookie for jailed workers, see below; the rest of `~/.arbiter` is follow-up)
+and the guardrail-profile work (bd-8apkz6). Until then treat any worker with shell
 access as able to reach everything the operator's account can read.
 
 ## Where the posture is surfaced
