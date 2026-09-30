@@ -5247,6 +5247,52 @@ defmodule Arbiter.MCP.ToolsTest do
       refute Enum.any?(tasks, &(&1.id == foreign.id))
     end
 
+    # bd-crk6tb decision: `task_list` is an API other agents consume, so the
+    # default stays inclusive and hiding is an explicit `engagements` param.
+    test "engagements: default and `all` keep review engagements, `exclude` drops them, `only` isolates them",
+         ctx do
+      {:ok, eng} =
+        Ash.create(Issue, %{
+          title: "Review engagement: 7",
+          workspace_id: ctx.ws.id,
+          tracker_type: :none,
+          review_only: true,
+          source_pr: "7"
+        })
+
+      {:ok, worker_review} =
+        Ash.create(Issue, %{title: "worker review", workspace_id: ctx.ws.id, review_only: true})
+
+      {:ok, follow_up} =
+        Ash.create(Issue, %{
+          title: "pr follow-up",
+          workspace_id: ctx.ws.id,
+          tracker_type: :none,
+          source_pr: "8"
+        })
+
+      ids = fn args ->
+        {:ok, %{tasks: tasks}} = Tools.task_list(ctx.coordinator, args)
+        MapSet.new(tasks, & &1.id)
+      end
+
+      for args <- [%{}, %{"engagements" => "all"}] do
+        assert MapSet.subset?(MapSet.new([eng.id, worker_review.id, follow_up.id]), ids.(args))
+      end
+
+      excluded = ids.(%{"engagements" => "exclude"})
+      refute eng.id in excluded
+      assert worker_review.id in excluded
+      assert follow_up.id in excluded
+
+      assert ids.(%{"engagements" => "only"}) == MapSet.new([eng.id])
+
+      assert {:error, {:invalid, msg}} =
+               Tools.task_list(ctx.coordinator, %{"engagements" => "bogus"})
+
+      assert msg =~ "engagements"
+    end
+
     test "rejects an invalid state value", ctx do
       assert {:error, {:invalid, msg}} =
                Tools.task_list(ctx.coordinator, %{"state" => "bogus"})

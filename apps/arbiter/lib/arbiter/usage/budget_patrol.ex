@@ -26,6 +26,10 @@ defmodule Arbiter.Usage.BudgetPatrol do
   table, not in this process. A task whose total keeps climbing is not paged
   again: the second page would say exactly what the first said.
 
+  A task awaiting verification with no live worker is not paged either, and
+  its open alert is cleared: it has merged, so its spend cannot grow
+  (bd-9jipdh).
+
   A closed task is never paged, however far over it ran (it is done — that is
   calibration-report material, design §6), and neither is one with no estimate
   at all: `:insufficient_data` has no p90 to be over.
@@ -155,7 +159,9 @@ defmodule Arbiter.Usage.BudgetPatrol do
         over =
           Enum.filter(issues, fn issue ->
             spend = spends[issue.id]
-            total(spend) > 0.0 and over_budget?(issue, spend, states, opts)
+
+            total(spend) > 0.0 and spend_can_grow?(issue, states) and
+              over_budget?(issue, spend, states, opts)
           end)
 
         # bd-7gt8rm: every open task was just assessed, so an alert for a task
@@ -169,6 +175,13 @@ defmodule Arbiter.Usage.BudgetPatrol do
       :ok
   catch
     :exit, _ -> :ok
+  end
+
+  # A task awaiting verification with no live worker has merged and stopped:
+  # its spend is final, so an overrun is calibration material, not a page
+  # (bd-9jipdh). Left out of `over`, its alert is cleared by `budget_recovered/1`.
+  defp spend_can_grow?(issue, states) do
+    Arbiter.Tasks.Lifecycle.state_of(issue) != :verifying or Map.has_key?(states, issue.id)
   end
 
   # Assess one task with spend; raise (or refresh) its alert when it is over.

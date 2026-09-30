@@ -37,6 +37,69 @@ defmodule ArbiterWeb.TaskIndexLiveTest do
     assert html =~ ~s(id="tasks")
   end
 
+  describe "review engagements (bd-crk6tb)" do
+    # An engagement is `review_only == true and not is_nil(source_pr)`; it lives
+    # on /reviews, never in the list. The two half-matches are ordinary work.
+    defp engagement_fixtures(ws) do
+      {:ok, eng} =
+        Ash.create(Issue, %{
+          title: "Review engagement: 7",
+          tracker_type: :none,
+          review_only: true,
+          source_pr: "7",
+          workspace_id: ws.id
+        })
+
+      {:ok, worker_review} =
+        Ash.create(Issue, %{title: "worker-review-task", review_only: true, workspace_id: ws.id})
+
+      {:ok, follow_up} =
+        Ash.create(Issue, %{
+          title: "prpatrol-follow-up",
+          tracker_type: :none,
+          source_pr: "8",
+          workspace_id: ws.id
+        })
+
+      {eng, worker_review, follow_up}
+    end
+
+    test "an engagement is hidden under every state tab, including All", %{conn: conn, ws: ws} do
+      {eng, _wr, _fu} = engagement_fixtures(ws)
+      {:ok, _} = Ash.update(eng, %{}, action: :close)
+      {eng2, _wr, _fu} = engagement_fixtures(ws)
+
+      for path <- [
+            ~p"/tasks",
+            ~p"/tasks?#{%{state: :all}}",
+            ~p"/tasks?#{%{state: :closed}}",
+            ~p"/tasks?#{%{state: :backlog}}",
+            ~p"/tasks?#{%{state: :active}}"
+          ] do
+        {:ok, view, _html} = live_tasks(conn, path)
+        refute has_element?(view, ~s(a[href="/tasks/#{eng.id}"])), path
+        refute has_element?(view, ~s(a[href="/tasks/#{eng2.id}"])), path
+      end
+    end
+
+    test "a worker_review task and a PRPatrol follow-up still appear", %{conn: conn, ws: ws} do
+      {_eng, worker_review, follow_up} = engagement_fixtures(ws)
+
+      {:ok, view, _html} = live_tasks(conn, ~p"/tasks")
+
+      assert has_element?(view, ~s(a[href="/tasks/#{worker_review.id}"]))
+      assert has_element?(view, ~s(a[href="/tasks/#{follow_up.id}"]))
+    end
+
+    test "an engagement's own detail page still renders", %{conn: conn, ws: ws} do
+      {eng, _wr, _fu} = engagement_fixtures(ws)
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{eng.id}")
+      html = render_async(view, @async_timeout)
+      assert html =~ "Review engagement: 7"
+    end
+  end
+
   test "the closed filter narrows to closed directives only", %{conn: conn, ws: ws} do
     {:ok, _open} = Ash.create(Issue, %{title: "still-open", workspace_id: ws.id})
     {:ok, to_close} = Ash.create(Issue, %{title: "now-closed", workspace_id: ws.id})

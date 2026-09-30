@@ -524,11 +524,17 @@ defmodule Arbiter.MCP.Tools do
 
   # ---- task_list ----------------------------------------------------------
 
+  @engagement_modes [:all, :exclude, :only]
+
   @doc """
   List tasks in the scope's workspace with optional filters. Coordinator only.
   Accepts optional `state` and `column` (the lifecycle vocabulary, bd-6fkgvo),
-  `priority` and `issue_type` filters. Always scoped to
-  the coordinator's workspace. Each task carries its projection
+  `priority` and `issue_type` filters, and `engagements` (`all` | `exclude` |
+  `only`, default `all`) for ReviewPatrol review engagements
+  (`Arbiter.Tasks.Issue.engagement?`). The default stays inclusive — this is an
+  API other agents consume, so no existing caller silently loses rows; the
+  operator-facing lists hide engagements unconditionally (bd-crk6tb). Always
+  scoped to the coordinator's workspace. Each task carries its projection
   (`Arbiter.Tasks.Lifecycle.Projection`): `state`, `column`, `step`,
   `blocked_by` and `attention`.
   """
@@ -538,10 +544,12 @@ defmodule Arbiter.MCP.Tools do
          {:ok, state} <- optional_enum(args, "state", Lifecycle.states()),
          {:ok, column} <- optional_enum(args, "column", Projection.columns()),
          {:ok, issue_type} <- optional_enum(args, "issue_type", Issue.issue_types()),
-         {:ok, priority} <- optional_integer(args, "priority") do
+         {:ok, priority} <- optional_integer(args, "priority"),
+         {:ok, engagements} <- optional_enum(args, "engagements", @engagement_modes) do
       issues =
         Issue
         |> Ash.Query.filter(workspace_id == ^ws_id)
+        |> filter_engagements(engagements)
         |> maybe_filter_state(state)
         |> maybe_filter_column_states(column)
         |> maybe_filter_issue_type(issue_type)
@@ -562,6 +570,10 @@ defmodule Arbiter.MCP.Tools do
 
   defp maybe_filter_state(query, nil), do: query
   defp maybe_filter_state(query, state), do: Ash.Query.filter(query, state == ^state)
+
+  defp filter_engagements(query, :exclude), do: Issue.exclude_engagements(query)
+  defp filter_engagements(query, :only), do: Issue.only_engagements(query)
+  defp filter_engagements(query, _all), do: query
 
   # The stored states the column can come from; the projection decides.
   defp maybe_filter_column_states(query, nil), do: query
