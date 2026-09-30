@@ -78,7 +78,9 @@ defmodule ArbiterWeb.SessionTranscriptController do
   # what the file path is then built from.
   defp session_id(id) when is_binary(id) do
     with {:ok, uuid} <- Ecto.UUID.cast(id),
-         {:ok, session} <- Sessions.get(uuid) do
+         {:ok, %{kind: :coordinator} = session} <- Sessions.get(uuid) do
+      # A :login session (bd-98oj3s) is hidden from this API like every list
+      # surface: it 404s exactly as an unknown id does.
       {:ok, session.id}
     else
       _ -> :error

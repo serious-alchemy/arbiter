@@ -180,6 +180,36 @@ defmodule Arbiter.Usage.BudgetPatrolTest do
       assert [] = alerts(ws)
     end
 
+    test "a restart does not re-raise or re-announce an alert that is already open", %{ws: ws} do
+      task = open_issue!(ws, %{difficulty: 2, issue_type: :feature})
+      event!(task.id, ws, %{cost_usd: 40.0})
+      assert :ok = BudgetPatrol.sweep(now: @now)
+      assert [alert] = alerts(ws)
+
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, Arbiter.Events.pubsub_topic(ws.id))
+
+      # A boot is a fresh patrol process running its first sweep.
+      pid = start_supervised!({BudgetPatrol, name: nil, enabled: false})
+      assert :ok = BudgetPatrol.poll(pid)
+
+      assert [same] = all_alerts(ws)
+      assert same.id == alert.id
+      refute_receive {:event, %{topic: "inbox", kind: "alert", event: "raised"}}, 100
+    end
+
+    test "a finished task awaiting verification with no worker is not alerted, and its alert clears",
+         %{ws: ws} do
+      task = open_issue!(ws, %{difficulty: 2, issue_type: :feature})
+      event!(task.id, ws, %{cost_usd: 40.0})
+      assert :ok = BudgetPatrol.sweep(now: @now)
+      assert [_] = alerts(ws)
+
+      _ = Arbiter.LifecycleFixtures.put_state!(Ash.get!(Issue, task.id), :verifying)
+      assert :ok = BudgetPatrol.sweep(now: @now, workers: [])
+
+      assert alerts(ws) == []
+    end
+
     test "a task under p90 is not alerted", %{ws: ws} do
       task = open_issue!(ws, %{difficulty: 2, issue_type: :feature})
       event!(task.id, ws, %{cost_usd: 8.5})

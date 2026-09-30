@@ -238,10 +238,18 @@ defmodule Arbiter.Sessions do
     end
   end
 
-  @doc "Every session, newest first. `list(status: :running)` filters by status."
+  @doc """
+  Every session, newest first. `list(status: :running)` filters by status.
+
+  `:login` sessions (bd-98oj3s) are **excluded** unless asked for:
+  `include_kinds:` names the kinds to return and defaults to `[:coordinator]`, so
+  every list surface (Sessions page, dock, usage sweep) hides them without
+  knowing they exist.
+  """
   @spec list(keyword()) :: [Session.t()]
   def list(opts \\ []) do
-    query = Ash.Query.sort(Session, started_at: :desc)
+    kinds = Keyword.get(opts, :include_kinds, [:coordinator])
+    query = Session |> Ash.Query.filter(kind in ^kinds) |> Ash.Query.sort(started_at: :desc)
 
     query =
       case Keyword.get(opts, :status) do
@@ -284,7 +292,13 @@ defmodule Arbiter.Sessions do
          {:ok, session} <- get(id) do
       runner = runner(opts)
 
-      run(runner, "tmux", ["-S", session.tmux_socket, "kill-session", "-t", Naming.tmux_session()])
+      run(runner, "tmux", [
+        "-S",
+        session.tmux_socket,
+        "kill-session",
+        "-t",
+        Naming.tmux_session(session)
+      ])
 
       run(runner, "systemctl", ["--user", "stop", session.scope_unit])
 
@@ -643,7 +657,9 @@ defmodule Arbiter.Sessions do
       name: Keyword.get(opts, :name),
       auth_mode: Keyword.get(opts, :auth_mode, :seeded_credentials),
       remote_control: Keyword.get(opts, :remote_control, false),
-      can_dispatch: Keyword.get(opts, :can_dispatch, false)
+      can_dispatch: Keyword.get(opts, :can_dispatch, false),
+      kind: Keyword.get(opts, :kind, :coordinator),
+      login_account: Keyword.get(opts, :login_account)
     })
   end
 
@@ -709,7 +725,7 @@ defmodule Arbiter.Sessions do
         "new-session",
         "-d",
         "-s",
-        Naming.tmux_session(),
+        Naming.tmux_session(session),
         "-x",
         to_string(cols),
         "-y",
