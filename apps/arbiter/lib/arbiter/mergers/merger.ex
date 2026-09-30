@@ -463,6 +463,9 @@ defmodule Arbiter.Mergers.Merger do
 
     * `:changes_requested` — the same boolean `list_review_feedback/1` returns:
       the latest verdict (per reviewer) settles on CHANGES_REQUESTED.
+    * `:latest_review_id` — the same handle `list_review_feedback/1` returns
+      (the latest CHANGES_REQUESTED review's id); PRPatrol records it so a
+      follow-up that already addressed that review is not re-filed.
     * `:review_threads` — the **unresolved** review threads, exactly as
       `list_open_review_threads/1` would return them (already normalized to
       `t:review_thread/0`).
@@ -474,6 +477,7 @@ defmodule Arbiter.Mergers.Merger do
   """
   @type pr_signals :: %{
           required(:changes_requested) => boolean(),
+          optional(:latest_review_id) => term() | nil,
           required(:review_threads) => [review_thread()],
           required(:required_check_failures) => [failing_check()]
         }

@@ -51,6 +51,12 @@ defmodule Arbiter.Workflows.PRPatrol do
   Before dispatching, PRPatrol queries `Issue` for open tasks with that
   combination — if one exists, the PR has already been handled this cycle.
 
+  A follow-up also records the fingerprint of the trigger it was filed for in
+  `last_seen_comment_id` (`review:<id>` of the latest CHANGES_REQUESTED review, or
+  a hash of the unresolved thread ids + last comment ids). Once it closes
+  `:completed`, that trigger is consumed: the same fingerprint files nothing more
+  (bd-9uyoy0), and only new activity re-arms the patrol.
+
   `source_pr` is deliberately NOT `tracker_ref`: `tracker_ref` is the field
   `Arbiter.Trackers.Sync` treats as a writable tracker item to push task
   lifecycle state onto, and a PR number is not a workable tracker issue —
@@ -430,8 +436,12 @@ defmodule Arbiter.Workflows.PRPatrol do
            signals,
            Workspace.pr_patrol_our_login(state.workspace)
          ) do
-      {reason, extra_protocol} when is_binary(reason) ->
-        file_follow_up(mr, pr_number, state, reason, extra_protocol)
+      {reason, extra_protocol, fingerprint} when is_binary(reason) ->
+        if handled?(pr_number, state.workspace_id, fingerprint) do
+          {state, false}
+        else
+          file_follow_up(mr, pr_number, state, reason, extra_protocol, fingerprint)
+        end
 
       _ ->
         {state, false}
@@ -448,7 +458,7 @@ defmodule Arbiter.Workflows.PRPatrol do
   # nobody has written yet — is bounded too. Keyed on repo + PR number (both
   # stable identifiers, never scrubbed), so two different PRs never share a
   # budget.
-  defp file_follow_up(mr, pr_number, state, reason, extra_protocol) do
+  defp file_follow_up(mr, pr_number, state, reason, extra_protocol, fingerprint) do
     result =
       CircuitBreaker.guard(
         :pr_patrol_follow_up,
@@ -457,11 +467,10 @@ defmodule Arbiter.Workflows.PRPatrol do
           workspace_id: state.workspace_id,
           detail:
             "PRPatrol kept filing follow-up tasks for #{state.repo}##{pr_number}. " <>
-              "Each one was closed or lost before it could finish, so the patrol " <>
-              "filed another. No more will be filed for this PR until the breaker " <>
-              "closes or you reset it."
+              "#{close_reason_summary(pr_number, state.workspace_id)} No more will be " <>
+              "filed for this PR until the breaker closes or you reset it."
         ],
-        fn -> create_follow_up(mr, state, reason, extra_protocol) end
+        fn -> create_follow_up(mr, state, reason, extra_protocol, fingerprint) end
       )
 
     case result do
@@ -757,64 +766,138 @@ defmodule Arbiter.Workflows.PRPatrol do
   # `our_login` (`Workspace.pr_patrol_our_login/1`) excludes threads we've
   # already answered from the unresolved-thread count (bd-45x4yo) — see
   # `reject_answered_threads/2`.
+  #
+  # The third tuple element is the trigger's fingerprint (bd-9uyoy0): the
+  # identity of the specific review / thread state that made the PR actionable,
+  # or nil when there is none to key on. See `handled?/3`.
   defp actionable_reason(adapter, mr_ref, signals, our_login) do
     cond do
-      changes_requested_signal?(adapter, mr_ref, signals) ->
-        {"at least one review with state=CHANGES_REQUESTED", ""}
+      (cr = changes_requested_trigger(adapter, mr_ref, signals)) != :none ->
+        {:changes_requested, fingerprint} = cr
+        {"at least one review with state=CHANGES_REQUESTED", "", fingerprint}
 
-      (n = open_review_thread_count(adapter, mr_ref, signals, our_login)) > 0 ->
-        {"#{n} unresolved review thread(s) / inline review comment(s)", ""}
+      (threads = open_review_threads(adapter, mr_ref, signals, our_login)) != [] ->
+        {"#{length(threads)} unresolved review thread(s) / inline review comment(s)", "",
+         threads_fingerprint(threads)}
 
       (names = required_check_failure_names(adapter, mr_ref, signals)) != [] ->
         {"#{length(names)} required check(s) failing: #{Enum.join(names, ", ")}",
-         CIFailureFollowUp.instructions(names)}
+         CIFailureFollowUp.instructions(names), nil}
 
       true ->
         nil
     end
   end
 
-  # CHANGES_REQUESTED: from the batched signals when present, else the per-PR
-  # `list_review_feedback/1` fallback.
-  defp changes_requested_signal?(_adapter, _mr_ref, %{changes_requested: cr})
-       when is_boolean(cr),
-       do: cr
+  # CHANGES_REQUESTED: from the batched signals when present, else ONE per-PR
+  # `list_review_feedback/1` read. Returns `{:changes_requested, fingerprint}` —
+  # the fingerprint is the latest CHANGES_REQUESTED review's id (nil when the
+  # forge gave none, which leaves the trigger unfingerprinted, never consumed) —
+  # or `:none`.
+  defp changes_requested_trigger(_adapter, _mr_ref, %{changes_requested: cr} = signals)
+       when is_boolean(cr) do
+    if cr,
+      do: {:changes_requested, review_fingerprint(Map.get(signals, :latest_review_id))},
+      else: :none
+  end
 
-  defp changes_requested_signal?(adapter, mr_ref, _no_batch),
-    do: changes_requested?(adapter, mr_ref)
-
-  defp changes_requested?(adapter, mr_ref) do
+  defp changes_requested_trigger(adapter, mr_ref, _no_batch) do
     case adapter.list_review_feedback(mr_ref) do
-      {:ok, %{changes_requested: true}} -> true
-      _ -> false
+      {:ok, %{changes_requested: true} = feedback} ->
+        {:changes_requested, review_fingerprint(Map.get(feedback, :latest_review_id))}
+
+      _ ->
+        :none
     end
   end
 
-  # Count of unresolved review threads that still need a response: from the
+  defp review_fingerprint(nil), do: nil
+  defp review_fingerprint(id), do: "review:#{id}"
+
+  # Identity of the unresolved-thread set: each thread id with its last comment
+  # id, so a new comment on a thread (or a newly unresolved thread) changes it.
+  defp threads_fingerprint(threads) do
+    entries =
+      threads
+      |> Enum.map(fn thread ->
+        last = thread |> Map.get(:comments) |> List.wrap() |> List.last()
+        "#{thread.id}@#{last && last[:id]}"
+      end)
+      |> Enum.sort()
+
+    "threads:" <> Base.encode16(:crypto.hash(:sha256, Enum.join(entries, ",")), case: :lower)
+  end
+
+  # bd-9uyoy0: a follow-up that closed `:completed` has consumed the trigger it
+  # was filed for (`last_seen_comment_id` holds its fingerprint). CHANGES_REQUESTED
+  # stays the reviewer's latest verdict until they re-review, so without this the
+  # patrol re-files an identical follow-up every time the previous one closes.
+  # Only new activity — a new review id, a new/changed thread — changes the
+  # fingerprint and re-arms it. A nil fingerprint is never consumed.
+  defp handled?(_pr_number, _workspace_id, nil), do: false
+
+  defp handled?(pr_number, workspace_id, fingerprint) do
+    ref = to_string(pr_number)
+
+    Issue
+    |> Ash.Query.filter(
+      workspace_id == ^workspace_id and source_pr == ^ref and state == :closed and
+        close_reason == :completed and last_seen_comment_id == ^fingerprint
+    )
+    |> Ash.read!()
+    |> Enum.any?()
+  end
+
+  # bd-9uyoy0: what the breaker's counted follow-ups actually closed as, so the
+  # escalation points the operator at the real cause (trigger re-arming vs a
+  # lost worker) rather than always claiming they were closed or lost.
+  defp close_reason_summary(pr_number, workspace_id) do
+    ref = to_string(pr_number)
+
+    counts =
+      Issue
+      |> Ash.Query.filter(workspace_id == ^workspace_id and source_pr == ^ref)
+      |> Ash.read!()
+      |> Enum.frequencies_by(fn issue ->
+        if issue.state == :closed, do: to_string(issue.close_reason || "unknown"), else: "open"
+      end)
+
+    case counts |> Enum.sort() |> Enum.map_join(", ", fn {k, n} -> "#{k} ×#{n}" end) do
+      "" ->
+        "No follow-up close reasons were recorded."
+
+      listed ->
+        "Follow-ups filed for this PR by close reason: #{listed}. Tasks closed " <>
+          "`completed` finished their work, so the trigger kept re-arming; " <>
+          "any other reason means the task was lost or closed before it could finish."
+    end
+  end
+
+  # Unresolved review threads that still need a response: from the
   # batched signals when present, else the per-PR `list_open_review_threads/1`
   # fallback. Threads we've already answered (`reject_answered_threads/2`) are
   # excluded regardless of source.
-  defp open_review_thread_count(_adapter, _mr_ref, %{review_threads: threads}, our_login)
+  defp open_review_threads(_adapter, _mr_ref, %{review_threads: threads}, our_login)
        when is_list(threads),
-       do: threads |> reject_answered_threads(our_login) |> length()
+       do: reject_answered_threads(threads, our_login)
 
-  defp open_review_thread_count(adapter, mr_ref, _no_batch, our_login),
-    do: open_review_thread_count(adapter, mr_ref, our_login)
+  defp open_review_threads(adapter, mr_ref, _no_batch, our_login),
+    do: open_review_threads(adapter, mr_ref, our_login)
 
   # The count of unresolved review threads, via the adapter's optional
   # `list_open_review_threads/1` primitive. Adapters without a thread surface
   # (e.g. Direct) don't export it — treat that as zero.
-  defp open_review_thread_count(adapter, mr_ref, our_login) do
+  defp open_review_threads(adapter, mr_ref, our_login) do
     if function_exported?(adapter, :list_open_review_threads, 1) do
       case adapter.list_open_review_threads(mr_ref) do
         {:ok, threads} when is_list(threads) ->
-          threads |> reject_answered_threads(our_login) |> length()
+          reject_answered_threads(threads, our_login)
 
         _ ->
-          0
+          []
       end
     else
-      0
+      []
     end
   end
 
@@ -933,7 +1016,13 @@ defmodule Arbiter.Workflows.PRPatrol do
     :exit, _ -> false
   end
 
-  defp create_follow_up(%{number: number, title: title, url: url}, state, reason, extra_protocol) do
+  defp create_follow_up(
+         %{number: number, title: title, url: url},
+         state,
+         reason,
+         extra_protocol,
+         fingerprint
+       ) do
     issue_title = "PR ##{number}: #{title} needs follow-up"
 
     description =
@@ -976,6 +1065,8 @@ defmodule Arbiter.Workflows.PRPatrol do
         # dedup instead — see the module's Dedup section (bd-ci2jl2).
         tracker_type: :none,
         source_pr: to_string(number),
+        # bd-9uyoy0: the trigger this follow-up was filed for — see `handled?/3`.
+        last_seen_comment_id: fingerprint,
         workspace_id: state.workspace_id,
         # bd-9dwbvt: a follow-up belongs to the PR's repo. `state.repo` is the
         # forge slug the patrol runs against; `configured_key/2` maps it back
