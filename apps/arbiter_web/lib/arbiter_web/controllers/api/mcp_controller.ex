@@ -15,9 +15,8 @@ defmodule ArbiterWeb.Api.McpController do
   use ArbiterWeb, :controller
 
   alias Arbiter.MCP
-  alias Arbiter.MCP.Scope
+  alias Arbiter.MCP.{OperatorSocket, Scope}
 
-  @default_ttl 30 * 24 * 60 * 60
 
   action_fallback ArbiterWeb.Api.FallbackController
 
@@ -69,7 +68,7 @@ defmodule ArbiterWeb.Api.McpController do
   result is a widening.
   """
   def mint_token(conn, params) do
-    ttl = parse_ttl(Map.get(params, "ttl"))
+    ttl = OperatorSocket.parse_ttl(Map.get(params, "ttl"))
 
     case conn.assigns[:mcp_scope] do
       # bd-8381tk: loopback is not an identity. Every worker shares this host
@@ -208,16 +207,4 @@ defmodule ArbiterWeb.Api.McpController do
     |> put_status(:unprocessable_entity)
     |> json(%{"error" => %{"message" => "token is required"}})
   end
-
-  defp parse_ttl(nil), do: @default_ttl
-  defp parse_ttl(n) when is_integer(n) and n > 0, do: n
-
-  defp parse_ttl(s) when is_binary(s) do
-    case Integer.parse(s) do
-      {n, ""} when n > 0 -> n
-      _ -> @default_ttl
-    end
-  end
-
-  defp parse_ttl(_), do: @default_ttl
 end
