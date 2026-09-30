@@ -114,7 +114,7 @@ Nothing below is replaced. Every row is a mechanism this design composes with.
 | Evidence integrity (bd-80talz) | `apps/arbiter/lib/arbiter/worker/evidence_integrity.ex:111` | Fabricated-evidence findings escalate instead of starting another fix round | A lasting mark against the subject |
 | BudgetPatrol | `apps/arbiter/lib/arbiter/usage/budget_patrol.ex` | Pages the coordinator once when a task passes its estimate's p90 | By design, it never stops anything |
 | Loop Stage 2 and Stage 3 | `apps/arbiter/lib/arbiter/loop/pending_write.ex`, `apps/arbiter/lib/arbiter/loop/canary.ex`; docs/loop-review.md:163, :299 | An operator-gated proposal queue, and a canary with auto-revert | Anything about trust |
-| MCP worker scope | `apps/arbiter/lib/arbiter/mcp/scope.ex:100-127` ("this scope may only act on its own task") | What a worker can do through MCP | Anonymous loopback `/api`: a documented trust assumption (docs/remote-access.md:62-74), see §2.5 |
+| MCP worker scope | Minted by `apps/arbiter/lib/arbiter/mcp/scope.ex:100-127`. `Scope.own_task/2` (`:335-337`) enforces own-task-only, and the refusal reads "this scope may only act on its own task" (`apps/arbiter/lib/arbiter/mcp/tools.ex:1323`) | What a worker can do through MCP | Anonymous loopback `/api`: a documented trust assumption (docs/remote-access.md:62-74), see §2.5 |
 
 ## 2. What the probes found (2026-09-30)
 
@@ -215,9 +215,13 @@ Escalated on 2026-09-30 (message `7ea3e0a8`). This is ticket **G2**.
 This one is by code reading and was not verified live.
 `Credentials.workspace_pairs/1` (`apps/arbiter/lib/arbiter/accounts/credentials.ex:55-61`)
 returns every active credential of every account linked to the workspace,
-across all providers. `WorkerEnv.resolve/1` injects all of them. The Claude
+across all providers. The one exception is quota-grant credentials, which it
+leaves out (`:59`). `WorkerEnv.resolve/1` injects all of them. The Claude
 path sets or unsets `CLAUDE_CODE_OAUTH_TOKEN` explicitly, but agy's and
-Codex's `spawn_env/1` don't (`apps/arbiter/lib/arbiter/agents/gemini.ex:231-256`). So an agy or Codex worker
+Codex's `spawn_env/1` don't:
+- `apps/arbiter/lib/arbiter/agents/gemini.ex:231-256`
+- `apps/arbiter/lib/arbiter/agents/codex.ex:288-293`, which sets only
+  `OPENAI_API_KEY`. So an agy or Codex worker
 in the default workspace receives the Claude setup token. This is also part
 of **G2**.
 
@@ -234,9 +238,10 @@ of **G2**.
   header returns a coordinator token
   (`apps/arbiter_web/lib/arbiter_web/controllers/api/mcp_controller.ex:66-75`
   with the loopback exemption in `apps/arbiter_web/lib/arbiter_web/plugs/api_auth.ex`).
-  docs/remote-access.md:62-74 keeps this **on purpose**: "loopback = the same
-  Unix user", and a real boundary "would need a separate Unix user or a
-  sandbox".
+  docs/remote-access.md:62-74 keeps this **on purpose**. Its heading reads
+  "loopback means the same Unix user", it calls the minting "a deliberate,
+  retained trust assumption", and it says a real boundary "would need a
+  separate Unix user or a sandbox".
 
 This design introduces exactly that sandbox for workers. A jailed worker has
 no route to host loopback, and §4.4's bridge authenticates it as its own
@@ -545,8 +550,10 @@ the posture shows it.
 - **`issues.permissions`**: `{:array, :text}`, default `[]`. Values are
   canonical (lower-case host, explicit port), sorted and de-duplicated. A
   trailing `?` marks a permission optional (§5.7), e.g. `network?:status.example.com`.
-  The migration follows `20260930071903_add_reviewer_family_fields.exs`, and
-  `{:array, :text}` has precedent in `20260808062000_add_loop_pending_writes.exs:45`.
+  The migration follows
+  `apps/arbiter/priv/repo/migrations/20260930071903_add_reviewer_family_fields.exs`,
+  and `{:array, :text}` has precedent in
+  `apps/arbiter/priv/repo/migrations/20260808062000_add_loop_pending_writes.exs:45`.
 - **`permission_events`** (append-only), with these fields:
   - `issue_id`, `permission`
   - `event`: one of `declared`, `defaulted`, `suggested`, `requested`,
@@ -692,13 +699,13 @@ hard ceiling. It applies only to quota lines and **never** to eligibility.
 
 | Event | Source | Severity |
 |---|---|---|
-| Egress attempt, or permission-layer attempt, at a public upload/paste host | Proxy (new, G5). agy `denied_actions` (parsed today, `apps/arbiter/lib/arbiter/worker/claude_session.ex:939-999`). Claude `permission_denials` (not parsed today; G17) | **critical** |
+| Egress attempt, or permission-layer attempt, at a public upload/paste host | Proxy (new, G5).<br>- **agy, today:** a tool step that fails with "permission check failed" is recognised in-session. That covers explicit denies and `:strict` auto-denials (`permission_denial?/1`, `apps/arbiter/lib/arbiter/worker/claude_session.ex:1157-1160`), and the error step is kept in `worker_run_steps`. Nothing turns it into a per-run event yet (G17). `result.denied_actions` (`:977-983`) only flags a soft-deny that ended the turn.<br>- **Claude:** `permission_denials` is not parsed today (G17) | **critical** |
 | Fabricated or falsified evidence finding | `EvidenceIntegrity` (exists) | **critical** |
 | Reaching for an escape or a token: executed commands such as `systemd-run`, `busctl`, `secret-tool` or `gh auth token` | A scan of *executed* tool inputs in the run transcript (new, G17): shell commands and agy `run_command` calls, not prose. After G1 these calls fail, but trying is the signal | **critical** |
 | Reading credential dirs or the install DB (`~/.ssh`, `~/.aws`, `arbiter.sqlite3`, …) | Same scan | major |
 | Attempted self-grant: a write to `permissions` or `guardrails.*`, or a token mint through the worker bridge | API audit on the bridge (new, G9/G17) | **critical** |
 | Egress denial for a host the run never asked about in a `permission_request` | Proxy plus `permission_events` | major |
-| Permission-layer denial of a safe-default category (force push, `rm -rf`, `gh gist create`, …) | agy (today), Claude (G17) | major |
+| Permission-layer denial of a safe-default category (force push, `rm -rf`, `gh gist create`, …) | agy: recognised in-session today but not aggregated. Claude: not parsed. Both are covered by G17 | major |
 | Spend cap hit (park) | Runaway guard (G19) | major for `quarantine` and `probation` |
 | Async abandonment, or exit without `done` | Stop reasons (exist) | minor |
 | A legitimate `permission_request` | `permission_events` | none |
@@ -940,7 +947,7 @@ before it. Each ticket's type is one of:
 | G15 | Mid-run requests: the `permission_request` MCP tool, the `:permission_requested` attention cause, `ticket_permission_grant` and `arb ticket permit` with authority checks, live network grants, and re-route when the pin becomes ineligible | 3 | G13, G14 | routing + schema |
 | G16 | Scoped git and tracker credentials: a per-repo deploy key (or repo-scoped GitHub App token through a credential helper) replaces the operator's agent for pushes, and a repo-scoped tracker token for `tracker_write`. No worker ever gets `gist` or `delete_repo` | 3 | G14 | env + jail |
 | **Phase 3: earned trust** | | | | |
-| G17 | Guardrail event capture: parse Claude `permission_denials`, persist agy `denied_actions` per run, link `egress_events`, add a transcript tool-input scan for hidden-channel attempts, and record fabricated-evidence and self-grant events, all in `guardrail_events` | 2 | G5, G9 | loop + schema |
+| G17 | Guardrail event capture: parse Claude `permission_denials`, turn agy's in-session permission-check failures into per-run events, link `egress_events`, add a transcript tool-input scan for hidden-channel attempts, and record fabricated-evidence and self-grant events, all in `guardrail_events` | 2 | G5, G9 | loop + schema |
 | G18 | `Loop.SubjectStats` (shared with bd-9ck2a7) and `Loop.Trust`: records, automatic suspension and demotion with coordinator confirm or dismiss, the operator-only `trust_promotion` PendingWrite kind, `arb trust show` / `arb trust promote` (TTY confirmation, refused over MCP), and a dashboard view | 3 | G11, G17 | loop |
 | G19 | Per-tier spend caps: token and wall-clock caps that park and escalate for `quarantine`/`probation`, and BudgetPatrol paging for higher tiers. Calibrated from the ledger | 2 | G11 | routing |
 | **Phase 4: operator configuration** (actions, not worker tickets) | | | | |
