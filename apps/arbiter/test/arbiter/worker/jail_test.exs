@@ -1161,8 +1161,9 @@ defmodule Arbiter.Worker.JailTest do
   defp pids_in_ns(ns) do
     "/proc"
     |> File.ls!()
-    |> Enum.filter(&(&1 =~ ~r/^\d+$/))
-    |> Enum.filter(fn pid -> File.read_link("/proc/#{pid}/ns/pid") == {:ok, ns} end)
+    |> Enum.filter(fn pid ->
+      pid =~ ~r/^\d+$/ and File.read_link("/proc/#{pid}/ns/pid") == {:ok, ns}
+    end)
   end
 
   # External OS processes give no message to wait on; poll with a bound.
