@@ -14,6 +14,12 @@ defmodule Arbiter.Usage.EstimateCache do
   Backed by a `:public` ETS table owned by this GenServer with read_concurrency: true.
   The computation itself runs in the calling process, preserving any DB sandbox
   connection in tests.
+
+  `config :arbiter, #{inspect(__MODULE__)}, enabled: false` makes `fetch/2`
+  compute every time. The test suite sets it: a memo shared by the whole VM
+  hands one test's sample to the next, and a sandbox rollback deletes the rows
+  without invalidating it, so an "empty ledger" test read the previous test's
+  rolled-back fixtures (bd-jw7cb0).
   """
   use GenServer
 
@@ -36,6 +42,10 @@ defmodule Arbiter.Usage.EstimateCache do
   """
   @spec fetch(keyword(), (-> any())) :: any()
   def fetch(opts, compute) do
+    if enabled?(), do: memoized(opts, compute), else: compute.()
+  end
+
+  defp memoized(opts, compute) do
     key = cache_key(opts)
     now = System.monotonic_time(:millisecond)
 
@@ -61,6 +71,10 @@ defmodule Arbiter.Usage.EstimateCache do
     :ok
   rescue
     ArgumentError -> :ok
+  end
+
+  defp enabled? do
+    :arbiter |> Application.get_env(__MODULE__, []) |> Keyword.get(:enabled, true)
   end
 
   defp cache_key(opts) do

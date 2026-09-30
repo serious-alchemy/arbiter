@@ -473,7 +473,9 @@ defmodule Arbiter.WorkerTest do
       # Shared mode so the separately-spawned Worker GenServer can use the
       # connection too.
       owner = Ecto.Adapters.SQL.Sandbox.start_owner!(Arbiter.Repo, shared: true)
-      on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(owner) end)
+      # Not `Sandbox.stop_owner/1`: that leaves the pool shared to a dead owner
+      # for a moment, and the next test's worker reads through it (bd-jw7cb0).
+      on_exit(fn -> Arbiter.DataCase.stop_sandbox_owner(owner) end)
 
       task_id = new_task_id()
 

@@ -88,7 +88,7 @@ defmodule ArbiterWeb.BoardLifecycleLiveTest do
 
   defp live_board(conn) do
     {:ok, view, _html} = live(conn, "/")
-    render_async(view, @async_timeout)
+    render_async_settled(view, @async_timeout)
     view
   end
 
@@ -302,7 +302,7 @@ defmodule ArbiterWeb.BoardLifecycleLiveTest do
       # The clear is announced on the workspace's event stream; once the view
       # has handled that message, its refresh is the async read to wait on.
       _ = :sys.get_state(view.pid)
-      render_async(view, @async_timeout)
+      render_async_settled(view, @async_timeout)
 
       refute has_element?(view, "#lane-alert-#{alert.id}")
     end
@@ -370,7 +370,7 @@ defmodule ArbiterWeb.BoardLifecycleLiveTest do
       assert card_order(view, "ready") == [a.id, b.id, c.id]
 
       render_hook(view, "reorder", %{"id" => c.id, "column" => "ready", "before_id" => a.id})
-      render_async(view, @async_timeout)
+      render_async_settled(view, @async_timeout)
 
       assert card_order(view, "ready") == [c.id, a.id, b.id]
       assert reload(c).rank < reload(a).rank
@@ -386,7 +386,7 @@ defmodule ArbiterWeb.BoardLifecycleLiveTest do
       assert card_order(view, "backlog") == [a.id, b.id]
 
       render_hook(view, "reorder", %{"id" => a.id, "column" => "backlog", "after_id" => b.id})
-      render_async(view, @async_timeout)
+      render_async_settled(view, @async_timeout)
 
       assert card_order(view, "backlog") == [b.id, a.id]
       assert card_order(live_board(conn), "backlog") == [b.id, a.id]
@@ -400,7 +400,7 @@ defmodule ArbiterWeb.BoardLifecycleLiveTest do
       view = live_board(conn)
 
       render_hook(view, "reorder", %{"id" => p2.id, "column" => "ready", "after_id" => p1a.id})
-      render_async(view, @async_timeout)
+      render_async_settled(view, @async_timeout)
 
       assert reload(p2).priority == 1
       assert card_order(view, "ready") == [p1a.id, p2.id, p1b.id]
@@ -413,7 +413,7 @@ defmodule ArbiterWeb.BoardLifecycleLiveTest do
 
       view = live_board(conn)
       render_hook(view, "reorder", %{"id" => c.id, "column" => "ready", "before_id" => a.id})
-      render_async(view, @async_timeout)
+      render_async_settled(view, @async_timeout)
 
       displayed = card_order(view, "ready")
       assert displayed == [c.id, a.id, b.id]
@@ -446,7 +446,7 @@ defmodule ArbiterWeb.BoardLifecycleLiveTest do
   describe "column drags" do
     defp drag(view, id, from, to) do
       render_hook(view, "drag", %{"id" => id, "from" => from, "to" => to})
-      render_async(view, @async_timeout)
+      render_async_settled(view, @async_timeout)
     end
 
     test "Backlog → Ready promotes", %{conn: conn, ws: ws} do

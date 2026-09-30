@@ -79,6 +79,44 @@ defmodule ArbiterWeb.ConnCase do
     end
   end
 
+  @render_async_settled_rounds 10
+
+  @doc """
+  `Phoenix.LiveViewTest.render_async/2`, repeated until the view has no async
+  task left running (bd-jw7cb0).
+
+  `render_async/2` only awaits the tasks already running when it is called. A
+  view whose `handle_async/3` can start another read — `ArbiterWeb.BoardLive`
+  re-reads once when a refresh was asked for while its read was out, which is
+  exactly what a drag's own lifecycle broadcast does — can still be rendering
+  the older read when `render_async/2` returns.
+
+  Gives up after `@render_async_settled_rounds` rounds: a view that keeps
+  starting reads (a polling tick) never settles, and that should fail here,
+  by name, rather than at ExUnit's per-test timeout.
+  """
+  def render_async_settled(view, timeout \\ 5_000),
+    do: render_async_settled(view, timeout, @render_async_settled_rounds)
+
+  defp render_async_settled(view, timeout, rounds_left) do
+    html = Phoenix.LiveViewTest.render_async(view, timeout)
+
+    case Phoenix.LiveView.Channel.async_pids(view.pid) do
+      {:ok, []} ->
+        html
+
+      {:ok, running} when rounds_left <= 1 ->
+        ExUnit.Assertions.flunk(
+          "render_async_settled/2: the view still had #{length(running)} async task(s) " <>
+            "running after #{@render_async_settled_rounds} rounds of render_async/2 — " <>
+            "it keeps starting new reads and never settles"
+        )
+
+      {:ok, _running} ->
+        render_async_settled(view, timeout, rounds_left - 1)
+    end
+  end
+
   @doc """
   Mounts `/workers/:task_id` and waits for it to finish loading (bd-c5m9b5).
 

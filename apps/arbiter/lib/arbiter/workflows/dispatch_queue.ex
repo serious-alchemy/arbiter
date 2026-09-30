@@ -1087,6 +1087,10 @@ defmodule Arbiter.Workflows.DispatchQueue do
   defp priority_of(%Issue{priority: p}) when is_integer(p), do: p
   defp priority_of(_task), do: 2
 
+  # A read that exits is as unreadable as one that raises: a checkout against a
+  # pool (or, under test, a sandbox proxy) that is gone exits with `:noproc`,
+  # and `cancel/2` runs on `Worker.stop/2`'s way to stopping a worker, which
+  # must not die of a lookup that was only ever best-effort (bd-jw7cb0).
   defp load_task(task_id) do
     case Ash.get(Issue, task_id) do
       {:ok, %Issue{} = task} -> task
@@ -1094,6 +1098,8 @@ defmodule Arbiter.Workflows.DispatchQueue do
     end
   rescue
     _ -> nil
+  catch
+    :exit, _ -> nil
   end
 
   # The id of the task's own newest run (not a ReviewGate reviewer's, which

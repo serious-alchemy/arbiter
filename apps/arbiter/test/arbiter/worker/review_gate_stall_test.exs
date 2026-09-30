@@ -89,6 +89,11 @@ defmodule Arbiter.Worker.ReviewGateStallTest do
       # matches, so the `:DOWN` falls through to the catch-all — and the gate
       # is dead with no reviewer in flight.
       :sys.replace_state(pid, fn s -> %{s | meta: Map.delete(s.meta, :review_gate_ref)} end)
+      # Between callbacks first (bd-jw7cb0): the gate is still launching its
+      # reviewer, and a gate killed mid-query takes the test's sandbox
+      # connection with it — the author's park and this test's own reads then
+      # fail with OwnershipError. Suspended, it dies holding nothing.
+      :sys.suspend(gate, 5_000)
       Process.exit(gate, :kill)
 
       wait_finished(pid)
