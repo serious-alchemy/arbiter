@@ -701,6 +701,13 @@ cannot open the live database; it is never the server's value.)
 credential is dropped even when the workspace is linked to several accounts
 (`WorkerEnv.resolve/1` still resolves all of them; `SpawnEnv` filters). A spawn
 with no provider is treated as `claude`.
+The filter is applied **at the source** as well as by name: `WorkerEnv.resolve/2`
+asks `Credentials.workspace_pairs/2` for only the accounts whose
+`ProviderAccount.provider` matches the worker (`gemini` ↔ `antigravity`;
+an unknown provider matches nothing), so a credential stored under a
+non-standard `env_var` (e.g. a Codex key named `MY_CUSTOM_CODEX_KEY`, or a
+numbered pool variant) still never reaches another provider's worker. The
+name-based drop stays as defence in depth for ambient and `worker_env` pairs.
 
 **Every agent-CLI spawn** goes through it: implement (`ClaudeSession.start/1`),
 review, fix, conflict, the preflight auth probe, the ReviewGate's
@@ -722,6 +729,14 @@ quota probes (`CloudCode` agy usage, `GrantRefresher`).
   (`Gemini.ConfigDir.keyring_available?/0`); without the bus a keyring host's
   agy worker is unauthenticated. No other provider receives it.
 * **`MIX_ENV` is not inherited**; a worker's `mix` picks its own.
+* **Agent-CLI config vars set in the server's env are no longer inherited.**
+  An install that exported any of these in `~/.arbiter/arbiter.env` and relied
+  on workers picking them up loses that behaviour silently: `ANTHROPIC_BASE_URL`,
+  `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CONFIG_DIR` (when
+  worker config isolation is off; with isolation on, Arbiter sets its own),
+  `CODEX_HOME`, and `XDG_RUNTIME_DIR`. To keep one, set it per workspace in
+  `worker_env` — that is now the only route, and it applies to every provider's
+  worker in that workspace.
 
 ### Residual risk: same UID, same filesystem
 
