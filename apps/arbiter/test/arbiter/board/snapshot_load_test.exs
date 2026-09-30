@@ -207,6 +207,190 @@ defmodule Arbiter.Board.SnapshotLoadTest do
     }
   end
 
+  describe "slim snapshot loading (bd-3d1zge)" do
+    test "skips issues closed longer ago than 24h", %{ws: ws} do
+      now = DateTime.utc_now()
+      old_time = DateTime.add(now, -48, :hour)
+      recent_time = DateTime.add(now, -2, :hour)
+
+      {:ok, old_issue} = Ash.create(Issue, %{title: "Old closed issue", workspace_id: ws.id})
+      {:ok, _} = Ash.update(old_issue, %{close_upstream: false}, action: :close)
+
+      import Ecto.Query
+
+      from(i in "issues", where: i.id == ^old_issue.id)
+      |> Arbiter.Repo.update_all(set: [closed_at: old_time, updated_at: old_time])
+
+      {:ok, recent_issue} =
+        Ash.create(Issue, %{title: "Recent closed issue", workspace_id: ws.id})
+
+      {:ok, _} = Ash.update(recent_issue, %{close_upstream: false}, action: :close)
+
+      from(i in "issues", where: i.id == ^recent_issue.id)
+      |> Arbiter.Repo.update_all(set: [closed_at: recent_time, updated_at: recent_time])
+
+      # Verify load_issues query filters out old closed issues at the DB level
+      loaded_issues = Snapshot.load_issues(now)
+      loaded_ids = Enum.map(loaded_issues, & &1.id)
+      assert recent_issue.id in loaded_ids
+      refute old_issue.id in loaded_ids
+
+      # Verify unselected heavy fields are not loaded
+      sample = Enum.find(loaded_issues, &(&1.id == recent_issue.id))
+      assert match?(%Ash.NotLoaded{}, sample.pr_body)
+      assert match?(%Ash.NotLoaded{}, sample.posted_findings)
+
+      snapshot = Snapshot.load(workspace_id: ws.id, now: now)
+
+      closed_ids = Enum.map(snapshot.closed_today, & &1.id)
+      assert recent_issue.id in closed_ids
+      refute old_issue.id in closed_ids
+    end
+
+    test "another workspace's blocked ticket stays blocked without :workspace_id", %{ws: ws} do
+      {:ok, other_ws} =
+        Ash.create(Workspace, %{
+          name: "other-ws-#{System.unique_integer([:positive])}",
+          prefix: "oth#{System.unique_integer([:positive])}"
+        })
+
+      {:ok, ws_task1} =
+        Ash.create(Issue, %{title: "WS task 1", workspace_id: ws.id, acceptance: "- crit"})
+
+      {:ok, ws_task2} =
+        Ash.create(Issue, %{title: "WS task 2", workspace_id: ws.id, acceptance: "- crit"})
+
+      {:ok, ws_task2} = Ash.update(ws_task2, %{}, action: :promote_to_ready)
+      {:ok, _} = Dependencies.add(ws_task1.id, ws_task2.id, :blocks)
+
+      {:ok, other_task1} =
+        Ash.create(Issue, %{title: "Other 1", workspace_id: other_ws.id, acceptance: "- crit"})
+
+      {:ok, other_task2} =
+        Ash.create(Issue, %{title: "Other 2", workspace_id: other_ws.id, acceptance: "- crit"})
+
+      {:ok, other_task2} = Ash.update(other_task2, %{}, action: :promote_to_ready)
+      {:ok, _} = Dependencies.add(other_task1.id, other_task2.id, :blocks)
+
+      for opts <- [[], [workspace_id: ws.id]] do
+        snapshot = Snapshot.load(opts)
+
+        for {blocked, blocker} <- [{ws_task2, ws_task1}, {other_task2, other_task1}] do
+          card = Enum.find(snapshot.blocked, &(&1.id == blocked.id))
+          assert card, "#{blocked.title} should be blocked with opts #{inspect(opts)}"
+          assert blocker.id in card.blocked_by
+        end
+      end
+    end
+
+    test "a blocker closed long ago still satisfies; long-closed children/epics still count",
+         %{ws: ws} do
+      now = DateTime.utc_now()
+      old = DateTime.add(now, -48, :hour)
+
+      {:ok, blocker} = Ash.create(Issue, %{title: "Old blocker", workspace_id: ws.id})
+
+      {:ok, blocked} =
+        Ash.create(Issue, %{title: "Waiting", workspace_id: ws.id, acceptance: "- c"})
+
+      {:ok, blocked} = Ash.update(blocked, %{}, action: :promote_to_ready)
+      {:ok, _} = Dependencies.add(blocker.id, blocked.id, :blocks)
+
+      {:ok, epic} =
+        Ash.create(Issue, %{title: "Old epic", workspace_id: ws.id, issue_type: :epic})
+
+      {:ok, done_child} = Ash.create(Issue, %{title: "Old child", workspace_id: ws.id})
+      {:ok, open_child} = Ash.create(Issue, %{title: "Open child", workspace_id: ws.id})
+      {:ok, _} = Dependencies.add(epic.id, done_child.id, :parent_of)
+      {:ok, _} = Dependencies.add(epic.id, open_child.id, :parent_of)
+
+      for i <- [blocker, done_child, epic] do
+        {:ok, _} = Ash.update(i, %{close_upstream: false}, action: :close)
+      end
+
+      import Ecto.Query
+
+      from(i in "issues", where: i.id in ^[blocker.id, done_child.id, epic.id])
+      |> Arbiter.Repo.update_all(set: [closed_at: old, updated_at: old])
+
+      loaded_ids = Enum.map(Snapshot.load_issues(now), & &1.id)
+      refute blocker.id in loaded_ids
+
+      snapshot = Snapshot.load(now: now)
+
+      refute Enum.any?(snapshot.blocked, &(&1.id == blocked.id))
+
+      card = Enum.find(snapshot.backlog, &(&1.id == open_child.id))
+      assert %{parent: %{id: epic_id, child_total: 2, child_closed: 1}} = card
+      assert epic_id == epic.id
+    end
+
+    test "derive/1 produces identical output with full issue vs slim issue fixture" do
+      now = ~U[2026-09-01 12:00:00Z]
+
+      full_issue = %{
+        id: "task-1",
+        title: "Test Task",
+        priority: 1,
+        rank: 10,
+        state: :active,
+        difficulty: 2,
+        issue_type: :feature,
+        workspace_id: "ws-1",
+        created_at: ~U[2026-09-01 10:00:00Z],
+        updated_at: ~U[2026-09-01 11:00:00Z],
+        closed_at: nil,
+        close_reason: nil,
+        pr_ref: "123",
+        merger_url: nil,
+        merger_status: nil,
+        merge_watch: nil,
+        pending_merge: nil,
+        awaiting_verification_at: nil,
+        attention_cause: nil,
+        attention_detail: nil,
+        attention_since: nil,
+        attention_owner: nil,
+        attention_owner_cause: nil,
+        attention_note: nil,
+        attention_owner_since: nil,
+        description: "Some description touching lib/foo.ex",
+        acceptance: "acceptance criteria",
+        notes: "some notes",
+        # Extra heavy fields that should not affect derive/1
+        posted_findings: %{"findings" => ["huge", "data"]},
+        settled_threads: ["t1", "t2"],
+        review_gate_state: %{"large" => "map"},
+        verification_evidence: "huge evidence text",
+        pr_body: "huge pr body content",
+        qa_notes: "huge qa notes",
+        deployment_notes: "deployment notes"
+      }
+
+      slim_fields = Snapshot.needed_issue_fields()
+      slim_issue = Map.take(full_issue, slim_fields)
+
+      full_input = %{
+        issues: [full_issue],
+        workers: [],
+        blocked_by: %{},
+        parent_of: [],
+        conflicts_with: [],
+        changed_files: %{},
+        now: now,
+        slots_total: 4,
+        quota: :ok,
+        paused: false,
+        watchdog_live: MapSet.new(),
+        over_budget: MapSet.new()
+      }
+
+      slim_input = %{full_input | issues: [slim_issue]}
+
+      assert Snapshot.derive(full_input) == Snapshot.derive(slim_input)
+    end
+  end
+
   defp spend!(task_id, cost, ws) do
     {:ok, ev} =
       Ash.create(Arbiter.Usage.Event, %{

@@ -114,6 +114,7 @@ defmodule Arbiter.Usage.Event do
 
       change after_action(fn _changeset, record, _context ->
                Arbiter.Quota.SpendCache.invalidate()
+               Arbiter.Usage.EstimateCache.invalidate()
                {:ok, record}
              end)
 
@@ -176,6 +177,7 @@ defmodule Arbiter.Usage.Event do
 
       change after_action(fn _changeset, record, _context ->
                Arbiter.Quota.SpendCache.invalidate()
+               Arbiter.Usage.EstimateCache.invalidate()
                {:ok, record}
              end)
 
