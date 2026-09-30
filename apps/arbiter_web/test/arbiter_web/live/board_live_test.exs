@@ -137,6 +137,21 @@ defmodule ArbiterWeb.BoardLiveTest do
     task
   end
 
+  describe "paused providers (bd-5ef587)" do
+    test "a banner chip appears once a provider is paused and clears on resume", %{conn: conn} do
+      {:ok, view, _html} = live_board(conn)
+      refute has_element?(view, "#board-paused-providers")
+
+      {:ok, _} = Arbiter.Providers.Pause.pause("codex", reason: "jail escape", by: "test")
+      render_async(view, @async_timeout)
+      assert has_element?(view, "#board-paused-providers")
+
+      {:ok, _} = Arbiter.Providers.Pause.resume("codex", by: "test")
+      render_async(view, @async_timeout)
+      refute has_element?(view, "#board-paused-providers")
+    end
+  end
+
   describe "columns" do
     test "renders the seven lifecycle columns", %{conn: conn} do
       {:ok, view, html} = live_board(conn)

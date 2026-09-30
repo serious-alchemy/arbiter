@@ -376,6 +376,12 @@ defmodule ArbiterCli.Cmd.Prime do
     IO.puts("")
   end
 
+  defp emit_scheduler({:error, msg}) do
+    IO.puts("== Scheduler ==")
+    IO.puts("  (unavailable: #{msg})")
+    IO.puts("")
+  end
+
   # bd-5ef587: a paused provider is dropped from all routing — the coordinator
   # must see who paused it, when and why before it plans any dispatch.
   defp emit_paused_providers([_ | _] = rows) do
@@ -390,12 +396,6 @@ defmodule ArbiterCli.Cmd.Prime do
   end
 
   defp emit_paused_providers(_), do: :ok
-
-  defp emit_scheduler({:error, msg}) do
-    IO.puts("== Scheduler ==")
-    IO.puts("  (unavailable: #{msg})")
-    IO.puts("")
-  end
 
   defp maybe_emit_global_coordinator_inbox({:ok, []}), do: :ok
 
