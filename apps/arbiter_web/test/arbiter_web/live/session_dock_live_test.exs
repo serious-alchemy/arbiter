@@ -91,6 +91,19 @@ defmodule ArbiterWeb.SessionDockLiveTest do
     dock
   end
 
+  describe "login sessions are hidden (bd-98oj3s)" do
+    test "the roster omits a :login session", %{conn: conn} do
+      coord = launch!()
+      login = launch!(kind: :login, login_account: "acct")
+
+      {_view, dock} = dock(conn)
+      open_roster(dock)
+
+      assert has_element?(dock, "#session-dock-open-#{coord.id}")
+      refute has_element?(dock, "#session-dock-open-#{login.id}")
+    end
+  end
+
   describe "the shell" do
     test "renders on every dashboard page in live_session :default", %{conn: conn} do
       for path <- ["/", "/tasks", "/sessions", "/workers", "/usage", "/epics"] do

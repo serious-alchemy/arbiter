@@ -25,6 +25,23 @@ defmodule ArbiterWeb.SessionTranscriptControllerTest do
 
   defp off_box(conn), do: %{conn | remote_ip: {203, 0, 113, 7}}
 
+  describe "login sessions (bd-98oj3s)" do
+    test "the transcript and JSONL endpoints 404 for a :login session", %{conn: conn} do
+      {:ok, login} =
+        Sessions.launch(
+          runner: NoopRunner,
+          ensure_reader: false,
+          kind: :login,
+          login_account: "acct"
+        )
+
+      :ok = Transcript.append(login.id, "secret")
+
+      assert get(conn, ~p"/sessions/#{login.id}/transcript").status == 404
+      assert get(conn, ~p"/sessions/#{login.id}/jsonl").status == 404
+    end
+  end
+
   describe "GET /sessions/:id/transcript" do
     test "serves the whole raw transcript", %{conn: conn, session: session} do
       :ok = Transcript.append(session.id, String.duplicate("z", 4096))

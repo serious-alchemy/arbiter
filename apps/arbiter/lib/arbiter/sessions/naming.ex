@@ -72,6 +72,37 @@ defmodule Arbiter.Sessions.Naming do
     end
   end
 
+  @doc """
+  Socket path of a `:login` session (bd-98oj3s): `<socket_dir>/arb-login-<account>-<nonce>.sock`.
+
+  Deliberately **not** `session-*.sock`, so the coordinator adoption sweep's
+  glob, the orphan reaper and the operator's own tmux never see it. One socket
+  (one tmux server) per login session, so ending one cannot take another's
+  server down with its systemd scope.
+  """
+  @spec login_socket_path(String.t(), String.t()) :: {:ok, String.t()} | {:error, :no_runtime_dir}
+  def login_socket_path(id, account) when is_binary(id) and is_binary(account) do
+    case socket_dir() do
+      {:ok, dir} -> {:ok, Path.join(dir, login_name(account, id) <> ".sock")}
+      error -> error
+    end
+  end
+
+  @doc "`arb-login-<account>-<nonce>`: the tmux session name (and socket basename) of a login session."
+  @spec login_name(String.t(), String.t()) :: String.t()
+  def login_name(account, id) when is_binary(account) and is_binary(id) do
+    slug =
+      account
+      |> String.downcase()
+      |> String.replace(~r/[^a-z0-9]+/, "-")
+      |> String.trim("-")
+      |> String.slice(0, 32)
+      |> String.trim("-")
+
+    nonce = id |> String.replace("-", "") |> String.slice(0, 8)
+    "arb-login-#{slug}-#{nonce}"
+  end
+
   @doc "The directory holding every session socket."
   @spec socket_dir() :: {:ok, String.t()} | {:error, :no_runtime_dir}
   def socket_dir do
@@ -150,6 +181,16 @@ defmodule Arbiter.Sessions.Naming do
   """
   @spec tmux_session() :: String.t()
   def tmux_session, do: @tmux_session
+
+  @doc """
+  The tmux session name for a particular row: `arb-login-<account>-<nonce>` for
+  a `:login` session (bd-98oj3s), otherwise the constant `coord`.
+  """
+  @spec tmux_session(map()) :: String.t()
+  def tmux_session(%{kind: :login, login_account: account, id: id}) when is_binary(account),
+    do: login_name(account, id)
+
+  def tmux_session(_session), do: @tmux_session
 
   # `XDG_RUNTIME_DIR` is set for every systemd user session, which is the only
   # environment a session can launch in (`systemd-run --user` needs the user
