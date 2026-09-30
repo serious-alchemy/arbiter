@@ -2,6 +2,7 @@ defmodule Arbiter.Quota.OAuthUsageTest do
   # async: false — the 429 cooldown lives in :persistent_term (VM-global).
   use ExUnit.Case, async: false
 
+  alias Arbiter.Quota.CloudProbe
   alias Arbiter.Quota.OAuthUsage
 
   defp stub(fun), do: Req.Test.stub(OAuthUsage.HTTP, fun)
@@ -94,6 +95,132 @@ defmodule Arbiter.Quota.OAuthUsageTest do
       on_exit(fn -> File.rm_rf!(tmp) end)
 
       assert {:error, :no_credentials} = OAuthUsage.fetch(source_dir: tmp)
+    end
+  end
+
+  # #1876: the cooldown used to be a fixed 180 s against CloudProbe's 300 s
+  # cadence, so it expired before the next scheduled poll and never suppressed
+  # one. `:now_ms` pins the monotonic clock the cooldown is set and checked
+  # against, so a test can stand at "the next poll" without waiting for it.
+  describe "fetch/1 — the 429 cooldown outlasts a CloudProbe cycle (#1876)" do
+    defp rate_limited(retry_after \\ nil) do
+      stub(fn conn ->
+        conn =
+          if retry_after,
+            do: Plug.Conn.put_resp_header(conn, "retry-after", retry_after),
+            else: conn
+
+        Plug.Conn.send_resp(conn, 429, "")
+      end)
+    end
+
+    # A stub that reports every request it serves, so a test can tell a
+    # client-side backoff apart from a real call.
+    defp counting_ok do
+      test_pid = self()
+
+      stub(fn conn ->
+        send(test_pid, :network_call)
+        Req.Test.json(conn, %{})
+      end)
+    end
+
+    defp fetch_at(now_ms), do: OAuthUsage.fetch(token: "test-token", now_ms: now_ms)
+
+    defp never_called do
+      stub(fn _conn -> flunk("a suppressed poll must not reach the network") end)
+    end
+
+    test "the cooldown lapses: a fetch well past it reaches the network again" do
+      t0 = System.monotonic_time(:millisecond)
+      rate_limited()
+      assert {:error, :rate_limited} = fetch_at(t0)
+
+      counting_ok()
+      assert {:ok, _usage} = fetch_at(t0 + :timer.hours(2))
+      assert_received :network_call
+    end
+
+    test "a 429 at t0 makes the poll at t0 + interval back off, without an HTTP call" do
+      t0 = System.monotonic_time(:millisecond)
+      rate_limited()
+      assert {:error, :rate_limited} = fetch_at(t0)
+
+      never_called()
+      assert {:error, {:backoff, 429}} = fetch_at(t0 + CloudProbe.interval_ms())
+    end
+
+    test "only that one poll: the poll after it reaches the network" do
+      t0 = System.monotonic_time(:millisecond)
+      rate_limited()
+      assert {:error, :rate_limited} = fetch_at(t0)
+
+      counting_ok()
+      assert {:ok, _usage} = fetch_at(t0 + 2 * CloudProbe.interval_ms())
+      assert_received :network_call
+    end
+
+    test "the default cooldown follows the configured CloudProbe cadence" do
+      prior = Application.get_env(:arbiter, :cloud_quota_probe)
+      on_exit(fn -> Application.put_env(:arbiter, :cloud_quota_probe, prior) end)
+      Application.put_env(:arbiter, :cloud_quota_probe, enabled: false, interval_ms: 900_000)
+
+      t0 = System.monotonic_time(:millisecond)
+      rate_limited()
+      assert {:error, :rate_limited} = fetch_at(t0)
+
+      never_called()
+      assert {:error, {:backoff, 429}} = fetch_at(t0 + 900_000)
+    end
+
+    test "a 429 carrying Retry-After sets the cooldown from that header" do
+      t0 = System.monotonic_time(:millisecond)
+      rate_limited("1800")
+      assert {:error, :rate_limited} = fetch_at(t0)
+
+      never_called()
+      assert {:error, {:backoff, 429}} = fetch_at(t0 + 1_799_000)
+
+      counting_ok()
+      assert {:ok, _usage} = fetch_at(t0 + 1_800_000)
+      assert_received :network_call
+    end
+
+    # docs/oauth-usage-ratelimit.md: this endpoint sends `retry-after: 0` on a
+    # 429 whose bucket has not refilled — it is not an invitation to retry.
+    test "a Retry-After shorter than the default cooldown never shortens it" do
+      t0 = System.monotonic_time(:millisecond)
+      rate_limited("0")
+      assert {:error, :rate_limited} = fetch_at(t0)
+
+      never_called()
+      assert {:error, {:backoff, 429}} = fetch_at(t0 + CloudProbe.interval_ms())
+    end
+
+    test "a Retry-After past the cap is capped" do
+      t0 = System.monotonic_time(:millisecond)
+      rate_limited("86400")
+      assert {:error, :rate_limited} = fetch_at(t0)
+
+      never_called()
+      assert {:error, {:backoff, 429}} = fetch_at(t0 + OAuthUsage.max_cooldown_ms() - 1_000)
+
+      counting_ok()
+      assert {:ok, _usage} = fetch_at(t0 + OAuthUsage.max_cooldown_ms())
+      assert_received :network_call
+    end
+
+    test "a Retry-After that is not delay-seconds falls back to the default cooldown" do
+      t0 = System.monotonic_time(:millisecond)
+      rate_limited("Wed, 21 Oct 2026 07:28:00 GMT")
+      assert {:error, :rate_limited} = fetch_at(t0)
+
+      never_called()
+      assert {:error, {:backoff, 429}} = fetch_at(t0 + CloudProbe.interval_ms())
+
+      counting_ok()
+      assert {:ok, _usage} = fetch_at(t0 + OAuthUsage.cooldown_ms())
+      assert_received :network_call
     end
   end
 

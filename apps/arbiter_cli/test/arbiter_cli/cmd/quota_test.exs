@@ -275,6 +275,70 @@ defmodule ArbiterCli.Cmd.QuotaTest do
       refute out =~ "last succeeded"
     end
 
+    # bd-2wnkoq: in the 19-hour incident this STALE wording was the most useful
+    # diagnostic there was — keep it verbatim, and also say how old the
+    # snapshot is rather than leaving the reader to subtract timestamps.
+    test "the captured-at line states the snapshot's age and keeps the STALE wording verbatim" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => Map.merge(@snapshot, %{"stale" => true, "captured_age_seconds" => 68_580})
+        }
+      })
+
+      {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "captured at:           2026-06-23T20:20:06Z (19h 3m ago) ⚠️ STALE"
+
+      assert out =~
+               "STALE (older than the gate trusts — the 5h gate fails open; " <>
+                 "a 7d hold stays in force)"
+    end
+
+    test "a fresh snapshot's age is shown too" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => Map.merge(@snapshot, %{"stale" => false, "captured_age_seconds" => 42})
+        }
+      })
+
+      {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "captured at:           2026-06-23T20:20:06Z (42s ago)\n"
+    end
+
+    test "a days-old snapshot's age reads in days" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" =>
+            Map.merge(@snapshot, %{"stale" => true, "captured_age_seconds" => 3 * 86_400 + 7_200})
+        }
+      })
+
+      {out, _err, _code} = capture(fn -> ArbiterCli.Cmd.Quota.run([]) end)
+      assert out =~ "(3d 2h ago)"
+    end
+
+    test "works the age out from captured_at when the server does not send it" do
+      captured_at =
+        DateTime.utc_now()
+        |> DateTime.add(-(2 * 3_600 + 30 * 60 + 10), :second)
+        |> DateTime.truncate(:second)
+        |> DateTime.to_iso8601()
+
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => Map.merge(@snapshot, %{"stale" => true, "captured_at" => captured_at})
+        }
+      })
+
+      {out, _err, _code} = capture(fn -> ArbiterCli.Cmd.Quota.run([]) end)
+      assert out =~ "#{captured_at} (2h 30m ago)"
+    end
+
     test "no STALE label on a fresh snapshot" do
       stub_get("/api/quota", %{
         "data" => %{"workspace_id" => "ws-1", "claude" => Map.put(@snapshot, "stale", false)}

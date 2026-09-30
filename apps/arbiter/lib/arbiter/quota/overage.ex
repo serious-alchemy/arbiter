@@ -15,8 +15,9 @@ defmodule Arbiter.Quota.Overage do
   overage figure, and the window comes from the account's snapshot.
 
   The window is `[reset_5h_at - 5h, now]` — i.e. spend since the current 5h
-  window opened. When the snapshot carries no `reset_5h_at`, we fall back to the
-  trailing 5 hours from now.
+  window opened. When the snapshot carries no `reset_5h_at`, or one that has
+  already passed (a stale snapshot whose window closed, bd-2wnkoq), we fall
+  back to the trailing 5 hours from now — see `window_start/2`.
   """
 
   alias Arbiter.Accounts.ProviderAccount
@@ -65,25 +66,37 @@ defmodule Arbiter.Quota.Overage do
   defp account_id(_), do: nil
 
   @doc """
-  Start of the current 5h window as a `DateTime`. Derived from the snapshot's
-  primary-window reset (the window opens 5h before it resets); falls back to
-  `now - 5h`.
+  Start of the current 5h window as a `DateTime`, as of `now` (default
+  `DateTime.utc_now/0`). Derived from the snapshot's primary-window reset
+  while that reset is still ahead of `now` (the window opens 5h before it
+  resets); otherwise the trailing `now - 5h`.
+
+  A reset at or before `now` means the window it describes has **closed** —
+  the snapshot is stale, and the current window's reset is unknown. Deriving
+  the start from it would stretch "the current 5h window" back to one that
+  ended hours ago and sum all the spend since (bd-2wnkoq), so that case takes
+  the same trailing-5h approximation as a snapshot with no reset at all.
 
   Accepts a normalized `Arbiter.Quota.Gate.Snapshot` (any provider) as well as a
   raw `AnthropicQuota` row. The 5h span is Anthropic's; for Codex / Google —
   which have no paid-overage passthrough — this is only ever the accounting
   window for the alert figure, so the trailing-5h approximation is deliberate.
   """
-  @spec window_start(Snapshot.t() | AnthropicQuota.t() | nil) :: DateTime.t()
-  def window_start(%AnthropicQuota{reset_5h_at: %DateTime{} = reset}) do
-    DateTime.add(reset, -@five_hours_seconds, :second)
+  @spec window_start(Snapshot.t() | AnthropicQuota.t() | nil, DateTime.t()) :: DateTime.t()
+  def window_start(quota, now \\ DateTime.utc_now())
+
+  def window_start(%AnthropicQuota{reset_5h_at: %DateTime{} = reset}, now),
+    do: from_reset(reset, now)
+
+  def window_start(%Snapshot{reset_at: %DateTime{} = reset}, now), do: from_reset(reset, now)
+
+  def window_start(_quota, now), do: trailing(now)
+
+  defp from_reset(reset, now) do
+    if DateTime.after?(reset, now),
+      do: DateTime.add(reset, -@five_hours_seconds, :second),
+      else: trailing(now)
   end
 
-  def window_start(%Snapshot{reset_at: %DateTime{} = reset}) do
-    DateTime.add(reset, -@five_hours_seconds, :second)
-  end
-
-  def window_start(_quota) do
-    DateTime.add(DateTime.utc_now(), -@five_hours_seconds, :second)
-  end
+  defp trailing(now), do: DateTime.add(now, -@five_hours_seconds, :second)
 end

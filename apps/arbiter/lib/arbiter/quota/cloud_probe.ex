@@ -41,9 +41,11 @@ defmodule Arbiter.Quota.CloudProbe do
       three workspaces sharing one plan still produce one fetch, but two
       workspaces on two different accounts now produce two, each
       authenticated with that account's own credential. Its 5 min cadence is
-      the endpoint's own per-account budget; the gate absorbs a missed poll by
-      trusting a polled row for 600s (`Arbiter.Quota.Gate.staleness_threshold_seconds/1`)
-      rather than by polling harder.
+      the endpoint's own per-account budget; the gate absorbs a 429 — and the
+      next poll, which `Arbiter.Quota.OAuthUsage`'s cooldown suppresses — by
+      trusting a polled row for 1200 s
+      (`Arbiter.Quota.Gate.staleness_threshold_seconds/1`) rather than by
+      polling harder.
 
       bd-5xuneh originally de-duplicated this call by grouping workspaces on
       `ConfigDir.oauth_token/1` and passing that token explicitly, on the
@@ -248,13 +250,29 @@ defmodule Arbiter.Quota.CloudProbe do
   @spec state(GenServer.server()) :: map()
   def state(server \\ __MODULE__), do: GenServer.call(server, :state)
 
+  @doc """
+  The poll cadence the application's probe runs at: `config :arbiter,
+  :cloud_quota_probe` `:interval_ms`, default #{@default_interval_ms} ms
+  (anything but a positive integer reads as the default).
+
+  `Arbiter.Quota.OAuthUsage` sizes its 429 cooldown off this, so a cooldown
+  always outlasts one scheduled poll (#1876).
+  """
+  @spec interval_ms() :: pos_integer()
+  def interval_ms do
+    case cfg(:interval_ms, [], @default_interval_ms) do
+      ms when is_integer(ms) and ms > 0 -> ms
+      _ -> @default_interval_ms
+    end
+  end
+
   # ---- GenServer callbacks -----------------------------------------------
 
   @impl true
   def init(opts) do
     state = %State{
       enabled: cfg(:enabled, opts, true),
-      interval_ms: cfg(:interval_ms, opts, @default_interval_ms),
+      interval_ms: Keyword.get_lazy(opts, :interval_ms, &interval_ms/0),
       refresh_fun: Keyword.get(opts, :refresh_fun) || default_refresh_fun(self()),
       oauth_opts: Keyword.get(opts, :oauth_opts, []),
       credential_watchdog: Keyword.get(opts, :credential_watchdog, CredentialWatchdog),

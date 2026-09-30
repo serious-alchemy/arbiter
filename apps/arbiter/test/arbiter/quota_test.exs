@@ -207,6 +207,23 @@ defmodule Arbiter.QuotaTest do
       assert serialized.oauth_poll_fresh == true
     end
 
+    # bd-2wnkoq: `arb quota` states how old the snapshot is. The server does
+    # the arithmetic, so the age does not depend on the CLI host's clock.
+    test "includes the snapshot's age in seconds" do
+      ws = workspace!()
+      {:ok, _} = Quota.capture(ws.id, @headers)
+      account_id = quota_account_id!(ws.id)
+      captured_at = DateTime.utc_now() |> DateTime.add(-3_725, :second)
+
+      {:ok, _} =
+        Arbiter.Repo.query(
+          "UPDATE anthropic_quotas SET captured_at = ? WHERE provider_account_id = ? AND provider = 'claude'",
+          [captured_at, account_id]
+        )
+
+      assert Quota.serialize(account_id).captured_age_seconds in 3_724..3_730
+    end
+
     test "oauth_poll_fresh is false when nothing has ever polled" do
       ws = workspace!()
       {:ok, _} = Quota.capture(ws.id, @headers)

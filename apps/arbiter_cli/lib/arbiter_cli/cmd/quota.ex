@@ -333,7 +333,7 @@ defmodule ArbiterCli.Cmd.Quota do
     captured_at_str = q["captured_at"] || "—"
     stale_indicator = stale_indicator(q, captured_at_str)
 
-    IO.puts("  captured at:           #{captured_at_str}#{stale_indicator}")
+    IO.puts("  captured at:           #{captured_at_str}#{age_suffix(q)}#{stale_indicator}")
     IO.puts("  source:                #{capture_source_label(q["capture_source"])}")
     IO.puts("  gating dispatch:       #{gating_line(q)}")
     IO.puts("")
@@ -371,6 +371,34 @@ defmodule ArbiterCli.Cmd.Quota do
   end
 
   defp emit_credentials_expired_line(_expired, _login_hint), do: :ok
+
+  # bd-2wnkoq: how old the snapshot is, not just when it was taken. The
+  # server's own arithmetic (`captured_age_seconds`) when it sends it, else
+  # this host's clock against `captured_at` (an older server).
+  defp age_suffix(q) do
+    case snapshot_age_seconds(q) do
+      nil -> ""
+      seconds -> " (#{format_age(seconds)} ago)"
+    end
+  end
+
+  defp snapshot_age_seconds(%{"captured_age_seconds" => seconds})
+       when is_integer(seconds) and seconds >= 0,
+       do: seconds
+
+  defp snapshot_age_seconds(%{"captured_at" => at}) when is_binary(at) do
+    case DateTime.from_iso8601(at) do
+      {:ok, dt, _offset} -> max(DateTime.diff(DateTime.utc_now(), dt, :second), 0)
+      _ -> nil
+    end
+  end
+
+  defp snapshot_age_seconds(_q), do: nil
+
+  defp format_age(s) when s < 60, do: "#{s}s"
+  defp format_age(s) when s < 3_600, do: "#{div(s, 60)}m"
+  defp format_age(s) when s < 86_400, do: "#{div(s, 3_600)}h #{div(rem(s, 3_600), 60)}m"
+  defp format_age(s), do: "#{div(s, 86_400)}d #{div(rem(s, 86_400), 3_600)}h"
 
   # bd-b7umwj: staleness is scoped per window, and the two windows go
   # opposite ways — say which is which rather than the old blanket

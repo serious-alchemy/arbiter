@@ -149,5 +149,16 @@ defmodule Arbiter.ApplicationTest do
       assert accounts_ix < optimize_ix
       assert optimize_ix < reconcile_ix
     end
+
+    # bd-2wnkoq: the quota staleness alert runs on its own timer, as its own
+    # child — not inside CloudProbe, whose silence is what it has to catch.
+    test "the quota staleness watch is supervised as its own child, in every env" do
+      for auto_start? <- [true, false] do
+        ids = Application.children(auto_start?: auto_start?) |> Enum.map(&child_id/1)
+
+        assert Arbiter.Quota.StalenessWatch in ids
+        assert Arbiter.Quota.CloudProbe in ids
+      end
+    end
   end
 end
