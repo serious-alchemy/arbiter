@@ -255,11 +255,23 @@ building this spawn's argv.
   names why); a real `arb server doctor` self-test that runs the probe
   itself is bd-8xy1mf.
 
+**Open escape, not accepted** (found 2026-09-30 by bd-8apkz6; fix proposed as
+G1 in [design/guardrail-profiles.md](design/guardrail-profiles.md) §2.1):
+`--ro-bind / /` leaves `/run/user/$UID/bus` and
+`/run/user/$UID/systemd/private` reachable. A jailed process can therefore run
+an unjailed command through `systemd-run --user`, which writes anywhere and
+has full network. This was reproduced with `Jail.argv/2`'s own output.
+systemd-resolved's varlink socket also answers DNS from inside the jail.
+Hiding `/run/user/$UID`, `/run/dbus` and `/run/systemd/resolve` with
+`--tmpfs` closes both.
+
 **Known, accepted gaps** (the threat model is a misdirected same-user agent,
 not a hostile kernel exploit):
 
 * The network is shared: `arb`, MCP and `git push` need it.
-  `sandbox.network: false` is still only the tool-level deny.
+  `sandbox.network: false` is still only the tool-level deny. The
+  enforcement design is
+  [design/guardrail-profiles.md](design/guardrail-profiles.md) §4.
 * Reads are not restricted.
 * The main `.git` stays writable, so a jailed worker can still write sibling
   worktrees' refs (the same as without the jail).

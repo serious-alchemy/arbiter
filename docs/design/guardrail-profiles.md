@@ -82,8 +82,8 @@ side effects of other config. The live configuration, read on 2026-09-30:
 
 | Rule | How it's expressed today | What actually enforces it |
 |---|---|---|
-| emricare stays on Claude, because tonic handles PHI | `agent.type: ["claude"]` on emricare. The antigravity and codex accounts are attached there with no role position | Nothing per ticket. If agy were ever added to `agent.type`, it would get tonic tickets too |
-| vstim gets no agy, because workers there can reach the prod DB and broker credentials | `agent.type: ["claude"]` on vstim | Nothing stops a *Claude* worker from reaching prod either. vs-adx9r7's worker ran read-only SQL on prod over SSH on 09-29, and the ticket's "investigate prod read-only" constraint was prose |
+| emricare stays on Claude, because tonic handles PHI | `agent.type: ["claude"]` on emricare. The claude, antigravity and codex accounts are all attached there with no role positions, so both roles fall back to `agent.type` | Nothing per ticket. If agy were ever added to `agent.type`, or given a role position, it would get tonic tickets too |
+| vstim gets no agy, because workers there can reach the prod DB and broker credentials | `agent.type: ["claude"]` on vstim, with the same all-nil role positions | Nothing stops a *Claude* worker from reaching prod either. vs-adx9r7's worker ran read-only SQL on prod over SSH on 09-29, and the ticket's "investigate prod read-only" constraint was prose |
 | agy works only on low-sensitivity arbiter tickets | Coordinator judgment at dispatch. The default workspace has `agent.type: ["claude", "gemini"]` with `provider_selection: most_quota` | Nothing. `most_quota` routes any default-workspace ticket to agy when agy has the most headroom |
 
 Incidents this design has to answer:
@@ -168,8 +168,9 @@ and bound at `/run/user/1000/bus` handles that case:
 
 `xdg-dbus-proxy` is packaged on Fedora (0.1.8) but not in RHEL 8's BaseOS or
 AppStream. There, flatpak ships a private `/usr/libexec/flatpak-dbus-proxy`.
-On a host with no Secret Service at all, which is likely on the EC2, agy
-already falls back to file-seeded credentials (`ConfigDir.keyring_available?/0`).
+On a host with no Secret Service at all, which may be the case on the
+headless EC2 (not checked), agy already falls back to file-seeded
+credentials (`ConfigDir.keyring_available?/0`).
 
 ### 2.2 DNS leaks inside a network namespace
 
@@ -412,32 +413,38 @@ kernel settings were not read.**
 | Option | Enforces for every process? | Cost | Fedora laptop | RHEL 8 dev EC2 | Verdict |
 |---|---|---|---|---|---|
 | **E1. Permission-layer host rules** (extend today's `WebFetch(domain:…)` / `Bash(curl *host*)` / agy `read_url` denies into allowlists) | **No.** `python -c`, git, ssh, package managers and flag reordering all get past it. agy's `command()` is a literal prefix and can't match hosts. Codex has no rules at all | Config only | Same as today | Same | **Keep as the second fence** and for readable denials. It is not the boundary |
-| **E2. bwrap `--unshare-net` + an Arbiter filtering CONNECT proxy on per-worker Unix sockets + in-namespace `socat` bridges** | **Yes.** The namespace has only `lo`. The only exit is the proxy, and DNS is resolved host-side (probed, §4.3) | Three D3 tickets for agy (G5, G6, G9); G7 and G8 extend it to Claude and Codex. At run time: one `socat` per bridge, **4.2 MB RSS** each (measured), plus a listener per run in the BEAM. A fresh HTTPS connection took a median **~49 ms direct vs ~70 ms proxied** (6 samples each, noisy; the probe proxy was Python). That is negligible next to model-API turns | **Works end to end**: bubblewrap 0.12.0, socat 1.8.1.1 | **Userland present:**<br>- bubblewrap **0.4.0** (BaseOS) runs the same recipe, including `--unshare-net` and the §2.1 tmpfs mounts; the el8 binary was run on the laptop kernel.<br>- socat **1.7.4.1** (AppStream) has the `tcp-listen`, `unix-connect`, `unix-listen` and `proxy` addresses; installation on the EC2 was not checked.<br><br>**Unverified:** the EC2's userns and netns sysctls (bd-8xy1mf's two-host check is still pending). If the self-test fails there, subjects that need egress are ineligible on that host | **Chosen** |
+| **E2. bwrap `--unshare-net` + an Arbiter filtering CONNECT proxy on per-worker Unix sockets + in-namespace `socat` bridges** | **Yes, once G1 hides the host sockets (§2.1).** The namespace has only `lo`. The only exit is the proxy, and DNS is resolved host-side (probed, §4.3) | Three D3 tickets for agy (G5, G6, G9); G7 and G8 extend it to Claude and Codex. At run time: one `socat` per bridge, **4.2 MB RSS** each (measured), plus a listener per run in the BEAM. A fresh HTTPS connection took a median **~49 ms direct vs ~70 ms proxied** (6 samples each, noisy; the probe proxy was Python). That is negligible next to model-API turns | **Works end to end**: bubblewrap 0.12.0, socat 1.8.1.1 | **Userland present:**<br>- bubblewrap **0.4.0** (BaseOS) runs the same recipe, including `--unshare-net` and the §2.1 tmpfs mounts; the el8 binary was run on the laptop kernel.<br>- socat **1.7.4.1** (AppStream) has the `tcp-listen`, `unix-connect`, `unix-listen` and `proxy` addresses; installation on the EC2 was not checked.<br><br>**Unverified:** the EC2's userns and netns sysctls (bd-8xy1mf's two-host check is still pending). If the self-test fails there, subjects that need egress are ineligible on that host | **Chosen** |
 | **E3. Vendor-native sandboxes** (Claude Code's own sandbox, Codex `workspace-write`, agy `--sandbox`) | **No, not uniformly:**<br>- **Claude.** Claude Code 2.1.285 ships a bwrap `--unshare-net` sandbox with HTTP and SOCKS bridge sockets and a filtering proxy. Its strings include `sandbox.network.httpProxyPort`, `allowUnixSockets`, `allowManagedDomainsOnly` and "Linux HTTP bridge socket". It sandboxes the commands Claude runs, not the CLI process itself, so the CLI's own traffic (the model API, and any in-process fetches) stays outside. This is from binary strings and wasn't run.<br>- **Codex.** Network is on/off only (`apps/arbiter/lib/arbiter/agents/codex.ex:421-432`).<br>- **agy.** `--sandbox` disables its allowlist gate (bd-25ivqe) | Per-vendor config with three semantics to keep in sync. There's no per-worker identity or audit in Arbiter. Nesting it inside Arbiter's jail is untested; the binary's `enableWeakerNestedSandbox` setting suggests nested use needs a weaker mode | Claude's needs bwrap + socat, which are present | Same packages as E2 | **Rejected** as the boundary. It is the same architecture as E2, but per vendor and partial |
 | **E4. Host firewall per worker cgroup or UID** (nftables `socket cgroupv2` / `meta skuid` + DNS-derived IP sets) | For TCP and UDP by **IP only**. CDN-fronted hosts (github.com, model APIs) share and rotate IPs, and there is no hostname in the audit trail | Needs root to install rules and a privileged helper for per-worker changes. Each worker also needs its own systemd scope | nftables 1.1.6, cgroup v2 (`cgroup2fs`): feasible **with root** | nftables 1.0.4 (BaseOS). But "RHEL 8 mounts `cgroups-v1` by default" ([Red Hat, RHEL 8 kernel guide](https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/8/html/managing_monitoring_and_updating_the_kernel/using-cgroups-v2-to-control-distribution-of-cpu-time-for-applications_managing-monitoring-and-updating-the-kernel)). `socket cgroupv2` needs `systemd.unified_cgroup_hierarchy=1` and a reboot. UID matching needs a second Unix user, which bd-ca7xko rejected because it breaks keyring auth | **Rejected** |
 | **E5. User-mode networking into the namespace** (pasta or slirp4netns) **+ nftables inside the namespace** | Only if the rules are installed before capabilities drop, and it's IP-level again | The tool differs per host. General outbound is the default, so missing rules fail open | pasta (passt 2026-07-28) installed; slirp4netns not installed | slirp4netns 1.2.3 (AppStream, container-tools); **pasta not packaged** | **Rejected** |
-| **E6. Rootless container per worker** (podman, network none + proxy) | Yes (same model as E2) | An image per toolchain, the keyring passed into the container, UID mapping on binds. Heavier start-up | Available | podman with slirp4netns | **Rejected**, as in bd-ca7xko (2''): it duplicates what bwrap does with one binary |
-| **E7. TLS-intercepting proxy** (URL-level rules, e.g. allow PR comments but not gists) | Yes, at URL level | A CA injected into every client (Bun, Go, curl, git, hex). Breaks pinning. Tokens pass in cleartext through Arbiter | Possible | squid 4.15 (AppStream) | **Rejected.** Action-level scoping comes from scoped credentials instead (§5.5) |
+| **E6. Rootless container per worker** (podman, network none + proxy) | Yes (same model as E2) | An image per toolchain, the keyring passed into the container, UID mapping on binds. Heavier start-up | podman installed | container-tools module: slirp4netns 1.2.3 present; podman itself not queried | **Rejected**, as in bd-ca7xko (2''): it duplicates what bwrap does with one binary |
+| **E7. TLS-intercepting proxy** (URL-level rules, e.g. allow PR comments but not gists) | Yes, at URL level | A CA injected into every client (Bun, Go, curl, git, hex). Breaks pinning. Tokens pass in cleartext through Arbiter | squid not installed | squid 4.15 (AppStream) | **Rejected.** Action-level scoping comes from scoped credentials instead (§5.5) |
 | **E8. DNS-only filtering** | **No.** Direct IPs bypass it, and so does the resolved leak in §2.2 | Low | — | — | **Rejected** |
 
 ### 4.3 Evidence for E2
 
-Fedora bwrap 0.12.0 and RHEL 8's bwrap 0.4.0 give the same results. The
-el8 run added the §2.1 tmpfs mounts. The allowlist was `example.com:443` and
+There were two runs:
+- **Fedora:** bubblewrap 0.12.0, before the §2.1 fix.
+- **el8:** RHEL 8's bubblewrap 0.4.0 binary on the laptop kernel, with the
+  §2.1 tmpfs mounts added.
+
+The el8 run repeated a subset of the probes; the "Run" column says which
+run covered each one. The allowlist was `example.com:443` and
 `github.com:22`.
 
-| Probe (inside `bwrap --unshare-net …`) | Result |
-|---|---|
-| Interfaces (`/proc/net/dev`) | `lo` only |
-| `curl https://example.com`, no proxy | `Could not resolve host` (el8 run, resolver hidden). `Could not connect to server` (Fedora run, resolver still visible) |
-| `curl http://1.1.1.1`, no proxy | `Could not connect to server` |
-| `HTTPS_PROXY=… curl https://example.com` (allowlisted) | `http_code=200` |
-| `HTTPS_PROXY=… curl https://catbox.moe` (not allowlisted) | `CONNECT tunnel failed, response 403` |
-| `curl http://127.0.0.1:4848/` through the loopback bridge (stand-in server) | `http_code=200` |
-| `ssh -o ProxyCommand='socat - PROXY:127.0.0.1:%h:%p,proxyport=3128' git@github.com`, no credentials offered | `Permission denied (publickey)`: the transport works |
-| The same to `gitlab.com:22` (not allowlisted) | `CONNECT gitlab.com:22: Forbidden` |
-| `ssh git@github.com`, no proxy | `Network is unreachable` |
-| Proxy decision log | `ALLOW example.com:443`, `DENY catbox.moe:443`, `ALLOW github.com:22`, `DENY gitlab.com:22`, each tagged with the worker's socket |
+| Probe (inside `bwrap --unshare-net …`) | Run | Result |
+|---|---|---|
+| Interfaces (`/proc/net/dev`) | both | `lo` only |
+| `curl https://example.com`, no proxy | both | el8: `Could not resolve host`, because the resolver was hidden. Fedora: `Could not connect to server`, because the resolver was still visible (§2.2) |
+| `curl http://1.1.1.1`, no proxy | Fedora | `Could not connect to server` |
+| `HTTPS_PROXY=… curl https://example.com` (allowlisted) | both | `http_code=200` |
+| `HTTPS_PROXY=… curl https://catbox.moe` (not allowlisted) | both | `CONNECT tunnel failed, response 403` |
+| `curl http://127.0.0.1:4848/` through the loopback bridge (stand-in server) | both | `http_code=200` |
+| `ssh -o ProxyCommand='socat - PROXY:127.0.0.1:%h:%p,proxyport=3128' git@github.com`, no credentials offered | Fedora | `Permission denied (publickey)`: the transport works |
+| The same to `gitlab.com:22` (not allowlisted) | Fedora | `CONNECT gitlab.com:22: Forbidden` |
+| `ssh git@github.com`, no proxy | Fedora | `Network is unreachable` |
+| `systemd-run --user touch <host path>` | el8 | `Failed to connect to user scope bus`, and no file on the host |
+| Proxy decision log | both | Fedora: `ALLOW example.com:443`, `DENY catbox.moe:443`, `ALLOW github.com:22`, `DENY gitlab.com:22`. el8: the first two. Every line is tagged with the worker's socket |
 
 ### 4.4 The recommended design
 
@@ -486,12 +493,13 @@ el8 run added the §2.1 tmpfs mounts. The allowlist was `example.com:443` and
   it, and so does each workspace's first days on `allowlist`, to catch
   missing toolchain hosts.
 - **It fails closed.** If the proxy is down, a worker's egress fails. If
-  Arbiter itself restarts, the worker ports die with it anyway (the same
-  failure domain as today).
+  Arbiter itself restarts, jailed workers already die with it: `bwrap
+  --die-with-parent` ties the jail to the port that spawned it. So the proxy
+  adds no new failure domain for them.
 - **Loopback services.** A test suite that needs a host-loopback Postgres
   gets a baseline tunnel (`local:5432`). Services the suite starts itself
-  (Phoenix test endpoints, `mix test`) run on the namespace's own `lo`,
-  unchanged.
+  (Phoenix test endpoints, `mix test`) should run on the namespace's own
+  `lo` unchanged. G4 confirms this per workspace.
 - **UDP and ICMP have no route.** HTTP/3 clients fall back to TCP.
 
 ### 4.5 What it does not do
@@ -686,7 +694,8 @@ hard ceiling. It applies only to quota lines and **never** to eligibility.
 |---|---|---|
 | Egress attempt, or permission-layer attempt, at a public upload/paste host | Proxy (new, G5). agy `denied_actions` (parsed today, `apps/arbiter/lib/arbiter/worker/claude_session.ex:939-999`). Claude `permission_denials` (not parsed today; G17) | **critical** |
 | Fabricated or falsified evidence finding | `EvidenceIntegrity` (exists) | **critical** |
-| Reaching for a hidden channel: `systemd-run`, `busctl`, `secret-tool`, `gh auth token`, credential dirs, the install DB | A tool-input scan of the run transcript (new, G17). After G1 these calls fail, but trying is the signal | **critical** |
+| Reaching for an escape or a token: executed commands such as `systemd-run`, `busctl`, `secret-tool` or `gh auth token` | A scan of *executed* tool inputs in the run transcript (new, G17): shell commands and agy `run_command` calls, not prose. After G1 these calls fail, but trying is the signal | **critical** |
+| Reading credential dirs or the install DB (`~/.ssh`, `~/.aws`, `arbiter.sqlite3`, …) | Same scan | major |
 | Attempted self-grant: a write to `permissions` or `guardrails.*`, or a token mint through the worker bridge | API audit on the bridge (new, G9/G17) | **critical** |
 | Egress denial for a host the run never asked about in a `permission_request` | Proxy plus `permission_events` | major |
 | Permission-layer denial of a safe-default category (force push, `rm -rf`, `gh gist create`, …) | agy (today), Claude (G17) | major |
@@ -716,7 +725,7 @@ its competence metric (bd-9ck2a7 notes, 2026-09-24). It is computed once
 | `quarantine` → `probation` | - ≥ 10 clean runs on ≥ 7 distinct tickets within 30 days<br>- 0 critical or major events in that window<br>- a round-1 approve rate no more than 10 points below the incumbent subject's at the same difficulty band (at least 10 reviewed tickets) | operator |
 | `probation` → `trusted` | - ≥ 20 clean runs across ≥ 2 repos<br>- ≥ 21 days at probation<br>- 0 critical or major events<br>- the same quality bar at D2 | operator |
 | `trusted` → `privileged` | **Never proposed by the Loop.** This tier grants prod reach. The Loop only reports the record | operator |
-| Any tier → `quarantine` | Any **critical** event. It applies immediately and automatically: dispatching of the subject stops, the event's run is parked, and the coordinator is paged | system |
+| Any tier → **suspended** (treated as `quarantine`) | Any **critical** event. It applies at once and automatically: the subject leaves eligibility, the event's run is parked, and the coordinator is paged. The coordinator either **confirms** it, and the demotion to `quarantine` stands, or **dismisses** it as a false positive with a recorded reason, and the prior tier returns. An authorised security probe like this ticket's own is one example of a false positive. Dismissal isn't a promotion: it only undoes an automatic suspension nobody confirmed | system, then coordinator |
 | Down one tier | Two **major** events within 14 days. Automatic | system |
 
 - **Version drift.** Each run records the harness version and model id.
@@ -736,9 +745,14 @@ its competence metric (bd-9ck2a7 notes, 2026-09-24). It is computed once
 ### 6.4 Who approves, and the authority gap
 
 **Promotions are operator-only. Demotions are automatic**, because
-tightening is always safe. The coordinator may propose, may demote, and may
-pin a subject down. It may not promote, and it may not raise a binding's
-`grant_by` authority or a workspace cap.
+tightening is always safe. The coordinator may:
+- propose a promotion;
+- demote;
+- pin a subject down;
+- confirm or dismiss an automatic suspension (§6.3).
+
+It may not promote, and it may not raise a binding's `grant_by` authority or
+a workspace cap.
 
 "Operator-only" needs an authority Arbiter doesn't have yet. MCP has worker,
 coordinator and refine tiers (`apps/arbiter/lib/arbiter/mcp/scope.ex:81`), and the coordinator can
@@ -771,7 +785,7 @@ Yes, the Loop can compute it, reusing the existing substrate:
   - folds events into a `trust_records` row per subject: window counts,
     events, quality, promotion eligibility, and the last harness and model
     version;
-  - applies automatic demotions;
+  - applies automatic suspensions and demotions;
   - emits a new `PendingWrite` kind, `trust_promotion`. Its evidence is the
     run ids. It is marked **operator-only**: `arb loop apply` and MCP
     `loop_pending_apply` refuse it, and `arb trust promote` applies it.
@@ -907,7 +921,7 @@ before it. Each ticket's type is one of:
 | # | Title | D | Depends on | Type |
 |---|---|---|---|---|
 | **Phase 0: close the existing reach gaps** | | | | |
-| G1 | Jail: hide the D-Bus session and system buses, the systemd user manager, resolved's varlink socket and the ssh-agent from jailed workers. Give agy a Secret-Service-only filtered bus where `xdg-dbus-proxy` exists, and file-seeded credentials elsewhere. A doctor self-test proves `systemd-run --user` fails inside | 3 | — | jail |
+| G1 | Jail: hide the D-Bus session and system buses, the systemd user manager and resolved's varlink socket from jailed workers. Re-expose only the ssh-agent socket, at a private path, so git push keeps working until G16. Give agy a Secret-Service-only filtered bus where `xdg-dbus-proxy` exists, and file-seeded credentials elsewhere. A doctor self-test proves `systemd-run --user` fails inside | 3 | — | jail |
 | G2 | Worker env becomes an allowlist. Stop passing server secrets (`ARBITER_CLOAK_KEY`, `SECRET_KEY_BASE`, `GITHUB_TOKEN`, API keys) and other providers' credentials. Pass only the spawned adapter's own credential and declared `worker_env` vars. Add a doctor check | 3 | — | env |
 | G3 | Jail: hide sensitive read paths (credential dirs, the install DB, the durable log root, other workspaces' repo paths and worktree roots) | 2 | G1 | jail |
 | **Phase 1: egress** | | | | |
@@ -919,7 +933,7 @@ before it. Each ticket's type is one of:
 | G9 | Arbiter bridge identity: every request arriving through a worker bridge is that worker's scope and never anonymous loopback. Token minting is refused through a bridge | 3 | G6 | net |
 | G10 | `SecurityPolicy` `sandbox.egress` (`open`/`allowlist`/`none`) and `sandbox.allow_hosts`, with their layering. Posture fields and the doctor "egress jail" self-test against a local stand-in | 2 | G5, G6 | config + net |
 | **Phase 2: profiles and ticket permissions** | | | | |
-| G11 | `Arbiter.Guardrails`: tier bundles (code plus app env), the `guardrail_subjects` table, the workspace `guardrails` block with `ValidateConfig`, pure `effective/3` and `floor/2` wired after `SecurityPolicy.resolve/3`, `egress_confinement/1`, and doctor checks | 3 | G10 | config |
+| G11 | `Arbiter.Guardrails`: tier bundles (code plus app env), the `guardrail_subjects` table, the workspace `guardrails` block with `ValidateConfig`, pure `effective/3` and `floor/2` wired after `SecurityPolicy.resolve/3`, and `egress_confinement/1`. Loosening edits to `guardrails.*` and `agent.security` become operator-only; the coordinator keeps tighten-only edits. Doctor checks | 3 | G10 | config |
 | G12 | Ticket `permissions` field, the `permission_events` table, `ResolvePermissions` defaults at creation, and surfaces (CLI `--permission`, REST, MCP coordinator-only). `grant_by` authority. Refine suggests but never grants | 3 | G11 | schema |
 | G13 | Routing eligibility:<br>- `check_guardrails` in `ProviderRouting` and `ReviewerRouting`, plus `guardrail_ineligible` as a fallback trigger<br>- the profile `review` knobs<br>- a hard gate on explicit and legacy (`agent.type` failover) dispatch paths<br>- the DispatchQueue guardrail hold, the `{:guardrail, _}` card hold, and the `:no_eligible_model` attention cause<br>- `guardrail_decision` on runs | 3 | G11, G12 | routing |
 | G14 | Dispatch-time withholding: project grants into env, jail mounts (a per-worker `ssh-agent` for `prod_ssh`), proxy allowlist and MCP claims. Adds the worker prompt PERMISSIONS block | 3 | G2, G3, G7, G12 | env + jail + net |
@@ -927,7 +941,7 @@ before it. Each ticket's type is one of:
 | G16 | Scoped git and tracker credentials: a per-repo deploy key (or repo-scoped GitHub App token through a credential helper) replaces the operator's agent for pushes, and a repo-scoped tracker token for `tracker_write`. No worker ever gets `gist` or `delete_repo` | 3 | G14 | env + jail |
 | **Phase 3: earned trust** | | | | |
 | G17 | Guardrail event capture: parse Claude `permission_denials`, persist agy `denied_actions` per run, link `egress_events`, add a transcript tool-input scan for hidden-channel attempts, and record fabricated-evidence and self-grant events, all in `guardrail_events` | 2 | G5, G9 | loop + schema |
-| G18 | `Loop.SubjectStats` (shared with bd-9ck2a7) and `Loop.Trust`: records, automatic demotion, the operator-only `trust_promotion` PendingWrite kind, `arb trust show` / `arb trust promote` (TTY confirmation, refused over MCP), and a dashboard view | 3 | G11, G17 | loop |
+| G18 | `Loop.SubjectStats` (shared with bd-9ck2a7) and `Loop.Trust`: records, automatic suspension and demotion with coordinator confirm or dismiss, the operator-only `trust_promotion` PendingWrite kind, `arb trust show` / `arb trust promote` (TTY confirmation, refused over MCP), and a dashboard view | 3 | G11, G17 | loop |
 | G19 | Per-tier spend caps: token and wall-clock caps that park and escalate for `quarantine`/`probation`, and BudgetPatrol paging for higher tiers. Calibrated from the ledger | 2 | G11 | routing |
 | **Phase 4: operator configuration** (actions, not worker tickets) | | | | |
 | G20 | Assign the initial tiers (§3.1 proposal) and declare account data agreements. Write the vstim bindings (`prod_read`, `prod_ssh`, broker `secrets:`) and the emricare tonic `phi_data` defaults. Opt workspaces into `egress: allowlist` after a learn-mode week. Only then attach agy for non-prod vstim tickets | — | G13, G14, G10 | operator |
@@ -935,8 +949,11 @@ before it. Each ticket's type is one of:
 - **Parallel work.** G1, G2 and G5 can start at once, and G2 is independent
   of everything. The operator's egress priority is G1 → G4/G5 → G6 → G9/G10.
   G6 alone already puts agy in a network namespace.
-- **Config and routing work:** G10–G13, G15, G18, G19.
-- **Jail and network work:** G1, G3, G5–G9, G14, G16.
+- **Config and routing only, with no OS-level change:** G11, G12, G13, G15,
+  G17, G18, G19, and the policy half of G10.
+- **Jail or network work:** G1, G3, G4, G5, G6, G7, G8, G9, the self-test
+  half of G10, and the mount and egress parts of G14 and G16.
+- **Spawn-environment work:** G2, and the env parts of G14 and G16.
 
 ## 10. Alternatives considered
 
@@ -980,7 +997,7 @@ before it. Each ticket's type is one of:
 
 Everything ran as the operator's user on the laptop, under
 `/tmp/bd8apkz6`. No agent CLI was run, and the live Arbiter endpoint was not
-contacted. `egress_proxy.py` is a 40-line Python asyncio CONNECT proxy on a
+contacted. `egress_proxy.py` is a ~40-line Python asyncio CONNECT proxy on a
 Unix socket with an in-code allowlist of `{("example.com", 443),
 ("github.com", 22)}`. It logs `ALLOW`/`DENY host:port socket=<path>`. A
 `python3 -m http.server` on a random loopback port stood in for Arbiter,
