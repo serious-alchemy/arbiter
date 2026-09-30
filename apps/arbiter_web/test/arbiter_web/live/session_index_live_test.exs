@@ -73,6 +73,18 @@ defmodule ArbiterWeb.SessionIndexLiveTest do
     ev
   end
 
+  describe "login sessions are hidden (bd-98oj3s)" do
+    test "a :login session never appears in the sessions list", %{conn: conn} do
+      coord = launch!()
+      login = launch!(kind: :login, login_account: "acct")
+
+      {:ok, view, _html} = live_sessions!(conn)
+
+      assert has_element?(view, "#session-#{coord.id}")
+      refute has_element?(view, "#session-#{login.id}")
+    end
+  end
+
   describe "an ended row's transcript action (bd-3tf4oo)" do
     test "an ended session's action says View transcript", %{conn: conn} do
       session = launch!()

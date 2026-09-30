@@ -75,10 +75,17 @@ defmodule Arbiter.Sessions.Terminal.Tmux do
 
     args =
       base(session) ++
-        ["pipe-pane", "-O", "-t", Naming.tmux_session(), "cat >> #{shell_quote(path)}", ";"] ++
-        cursor_args() ++
+        [
+          "pipe-pane",
+          "-O",
+          "-t",
+          Naming.tmux_session(session),
+          "cat >> #{shell_quote(path)}",
+          ";"
+        ] ++
+        cursor_args(session) ++
         [";"] ++
-        capture_args(lines)
+        capture_args(session, lines)
 
     case run(args, opts) do
       {out, 0} -> {:ok, %{snapshot: finalize_capture(out)}}
@@ -89,14 +96,15 @@ defmodule Arbiter.Sessions.Terminal.Tmux do
   @impl true
   def stop_stream(%Session{} = session, opts \\ []) do
     # A bare `pipe-pane` closes the current pipe (it does not open a new one).
-    _ = run_quiet(base(session) ++ ["pipe-pane", "-t", Naming.tmux_session()], opts)
+    _ = run_quiet(base(session) ++ ["pipe-pane", "-t", Naming.tmux_session(session)], opts)
     :ok
   end
 
   @impl true
   def streaming?(%Session{} = session, opts \\ []) do
     args =
-      base(session) ++ ["display-message", "-p", "-t", Naming.tmux_session(), "\#{pane_pipe}"]
+      base(session) ++
+        ["display-message", "-p", "-t", Naming.tmux_session(session), "\#{pane_pipe}"]
 
     case run(args, opts) do
       {out, 0} -> String.trim(out) == "1"
@@ -106,7 +114,9 @@ defmodule Arbiter.Sessions.Terminal.Tmux do
 
   @impl true
   def snapshot(%Session{} = session, opts \\ []) do
-    args = base(session) ++ cursor_args() ++ [";"] ++ capture_args(snapshot_lines(opts))
+    args =
+      base(session) ++
+        cursor_args(session) ++ [";"] ++ capture_args(session, snapshot_lines(opts))
 
     case run(args, opts) do
       {out, 0} -> {:ok, finalize_capture(out)}
@@ -121,7 +131,7 @@ defmodule Arbiter.Sessions.Terminal.Tmux do
     |> Enum.reduce_while(:ok, fn chunk, :ok ->
       args =
         base(session) ++
-          ["send-keys", "-t", Naming.tmux_session(), "-H"] ++
+          ["send-keys", "-t", Naming.tmux_session(session), "-H"] ++
           for(<<byte <- chunk>>, do: Base.encode16(<<byte>>, case: :lower))
 
       case run_quiet(args, opts) do
@@ -139,7 +149,7 @@ defmodule Arbiter.Sessions.Terminal.Tmux do
         [
           "resize-window",
           "-t",
-          Naming.tmux_session(),
+          Naming.tmux_session(session),
           "-x",
           Integer.to_string(cols),
           "-y",
@@ -155,7 +165,7 @@ defmodule Arbiter.Sessions.Terminal.Tmux do
   @impl true
   def geometry(%Session{} = session, opts \\ []) do
     format = "\#{pane_width}\t\#{pane_height}\t\#{pane_title}"
-    args = base(session) ++ ["display-message", "-p", "-t", Naming.tmux_session(), format]
+    args = base(session) ++ ["display-message", "-p", "-t", Naming.tmux_session(session), format]
 
     case run(args, opts) do
       {out, 0} -> parse_geometry(out)
@@ -167,7 +177,7 @@ defmodule Arbiter.Sessions.Terminal.Tmux do
   def alive?(%Session{} = session, opts \\ []) do
     match?(
       {_out, 0},
-      run_quiet(base(session) ++ ["has-session", "-t", Naming.tmux_session()], opts)
+      run_quiet(base(session) ++ ["has-session", "-t", Naming.tmux_session(session)], opts)
     )
   end
 
@@ -175,16 +185,16 @@ defmodule Arbiter.Sessions.Terminal.Tmux do
 
   defp base(%Session{tmux_socket: socket}), do: ["-S", socket]
 
-  defp capture_args(lines) do
-    ["capture-pane", "-p", "-e", "-S", "-#{lines}", "-t", Naming.tmux_session()]
+  defp capture_args(session, lines) do
+    ["capture-pane", "-p", "-e", "-S", "-#{lines}", "-t", Naming.tmux_session(session)]
   end
 
   # 0-based, relative to the top of the pane's *visible* area — the same frame
   # `capture-pane`'s un-scrolled-back lines land in, so a CUP built from these
   # coordinates addresses the right row once xterm has replayed the capture.
-  defp cursor_args do
+  defp cursor_args(session) do
     format = @cursor_prefix <> "\#{cursor_x}\t\#{cursor_y}" <> @cursor_suffix
-    ["display-message", "-p", "-t", Naming.tmux_session(), format]
+    ["display-message", "-p", "-t", Naming.tmux_session(session), format]
   end
 
   # Splits the `cursor_args/0` prefix off the front of a combined capture,
