@@ -1121,7 +1121,16 @@ defmodule Arbiter.Worker.Jail do
   @doc "`escape_probe/0` as a diagnosis (`nil` when no vector is reachable)."
   @spec diagnose_escape() :: diagnosis() | nil
   def diagnose_escape do
-    case escape_probe() do
+    # `:worker_jail_escape_available` overrides the real probe (tests, as
+    # `:worker_jail_ssh_available` does for ssh).
+    result =
+      case Application.get_env(:arbiter, :worker_jail_escape_available) do
+        nil -> escape_probe()
+        true -> :ok
+        false -> {:error, {:escape_reachable, ["(forced by :worker_jail_escape_available)"]}}
+      end
+
+    case result do
       :ok ->
         nil
 
