@@ -774,43 +774,51 @@ defmodule Arbiter.Workflows.PRPatrol do
   # unresolved thread or a failing required check.
   defp actionable_reason(adapter, mr_ref, signals, our_login, handled?) do
     [
-      fn ->
-        case changes_requested_trigger(adapter, mr_ref, signals) do
-          {:changes_requested, fingerprint} ->
-            {"at least one review with state=CHANGES_REQUESTED", "", fingerprint}
-
-          :none ->
-            nil
-        end
-      end,
-      fn ->
-        case open_review_threads(adapter, mr_ref, signals, our_login) do
-          [] ->
-            nil
-
-          threads ->
-            {"#{length(threads)} unresolved review thread(s) / inline review comment(s)", "",
-             threads_fingerprint(threads)}
-        end
-      end,
-      fn ->
-        case required_check_failure_names(adapter, mr_ref, signals) do
-          [] ->
-            nil
-
-          names ->
-            {"#{length(names)} required check(s) failing: #{Enum.join(names, ", ")}",
-             CIFailureFollowUp.instructions(names), nil}
-        end
-      end
+      fn -> review_trigger(adapter, mr_ref, signals) end,
+      fn -> thread_trigger(adapter, mr_ref, signals, our_login) end,
+      fn -> check_trigger(adapter, mr_ref, signals) end
     ]
     |> Enum.find_value(fn trigger ->
       case trigger.() do
-        nil -> nil
-        {_reason, _extra, nil} = found -> found
-        {_reason, _extra, fingerprint} = found -> if handled?.(fingerprint), do: nil, else: found
+        {_reason, _extra, fingerprint} = found when not is_nil(fingerprint) ->
+          if handled?.(fingerprint), do: nil, else: found
+
+        other ->
+          other
       end
     end)
+  end
+
+  defp review_trigger(adapter, mr_ref, signals) do
+    case changes_requested_trigger(adapter, mr_ref, signals) do
+      {:changes_requested, fingerprint} ->
+        {"at least one review with state=CHANGES_REQUESTED", "", fingerprint}
+
+      :none ->
+        nil
+    end
+  end
+
+  defp thread_trigger(adapter, mr_ref, signals, our_login) do
+    case open_review_threads(adapter, mr_ref, signals, our_login) do
+      [] ->
+        nil
+
+      threads ->
+        {"#{length(threads)} unresolved review thread(s) / inline review comment(s)", "",
+         threads_fingerprint(threads)}
+    end
+  end
+
+  defp check_trigger(adapter, mr_ref, signals) do
+    case required_check_failure_names(adapter, mr_ref, signals) do
+      [] ->
+        nil
+
+      names ->
+        {"#{length(names)} required check(s) failing: #{Enum.join(names, ", ")}",
+         CIFailureFollowUp.instructions(names), nil}
+    end
   end
 
   # CHANGES_REQUESTED: from the batched signals when present, else ONE per-PR
