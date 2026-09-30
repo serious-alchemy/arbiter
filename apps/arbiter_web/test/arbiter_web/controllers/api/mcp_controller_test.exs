@@ -5,8 +5,8 @@ defmodule ArbiterWeb.Api.McpControllerTest do
   A minted token must never exceed the caller that minted it: same
   `session_id` (so it's revoked when the session ends), same-or-narrower
   workspace binding, `can_dispatch` no greater than the caller's. Anonymous
-  loopback callers (no bearer token — the zero-setup `arb` / `arb init` path)
-  keep minting full-power coordinator tokens, unchanged.
+  loopback callers get nothing at all (bd-8381tk): the operator's
+  `arb mcp token mint` proves who it is over `Arbiter.MCP.OperatorSocket`.
   """
   use ArbiterWeb.ConnCase, async: true
 
@@ -17,36 +17,29 @@ defmodule ArbiterWeb.Api.McpControllerTest do
     Ash.create!(Session, Map.merge(%{cwd: "/tmp/mcp-controller-test-cwd"}, Map.new(attrs)))
   end
 
-  describe "anonymous loopback (no caller token)" do
-    test "mints a full-power, workspace-agnostic coordinator token", %{conn: conn} do
-      resp = conn |> post("/api/mcp/tokens", %{}) |> json_response(200)
+  describe "anonymous loopback (no caller token) — bd-8381tk" do
+    # Every worker runs on this host, so "loopback" proves nothing about who is
+    # asking. An anonymous request must not get a token of any tier, however it
+    # narrows itself: the operator mints over the peer-checked operator socket
+    # (`Arbiter.MCP.OperatorSocket`) instead.
+    for params <- [
+          %{},
+          %{"workspace_id" => "ws-1", "can_dispatch" => false},
+          %{"can_dispatch" => "false", "ttl" => 60}
+        ] do
+      test "is refused with 403 and no token for #{inspect(params)}", %{conn: conn} do
+        body = conn |> post("/api/mcp/tokens", unquote(Macro.escape(params))) |> json_response(403)
 
-      assert {:ok, scope} = Scope.from_token(resp["token"])
-      assert scope.tier == :coordinator
-      assert scope.workspace_id == nil
-      assert scope.session_id == nil
-      assert scope.can_dispatch == true
+        refute Map.has_key?(body, "token")
+        assert body["error"]["message"] =~ "arb mcp token mint"
+      end
     end
 
-    test "may still narrow itself via workspace_id / can_dispatch params", %{conn: conn} do
-      resp =
-        conn
-        |> post("/api/mcp/tokens", %{"workspace_id" => "ws-1", "can_dispatch" => false})
-        |> json_response(200)
+    test "verify stays anonymous — it grants nothing", %{conn: conn} do
+      token = Scope.mint_coordinator(nil)
 
-      assert {:ok, scope} = Scope.from_token(resp["token"])
-      assert scope.workspace_id == "ws-1"
-      assert scope.can_dispatch == false
-    end
-
-    test "a form-encoded can_dispatch=\"false\" string narrows, not upgrades", %{conn: conn} do
-      resp =
-        conn
-        |> post("/api/mcp/tokens", %{"can_dispatch" => "false"})
-        |> json_response(200)
-
-      assert {:ok, scope} = Scope.from_token(resp["token"])
-      assert scope.can_dispatch == false
+      assert %{"valid" => true, "tier" => "coordinator"} =
+               conn |> post("/api/mcp/tokens/verify", %{"token" => token}) |> json_response(200)
     end
   end
 
@@ -180,6 +173,19 @@ defmodule ArbiterWeb.Api.McpControllerTest do
 
       assert {:ok, scope} = Scope.from_token(resp["token"])
       assert scope.workspace_id == "ws-2"
+    end
+
+    test "a form-encoded can_dispatch=\"false\" string narrows, not upgrades", %{conn: conn} do
+      caller_token = Scope.mint_coordinator(nil)
+
+      resp =
+        conn
+        |> put_req_header("authorization", "Bearer #{caller_token}")
+        |> post("/api/mcp/tokens", %{"can_dispatch" => "false"})
+        |> json_response(200)
+
+      assert {:ok, scope} = Scope.from_token(resp["token"])
+      assert scope.can_dispatch == false
     end
   end
 end
