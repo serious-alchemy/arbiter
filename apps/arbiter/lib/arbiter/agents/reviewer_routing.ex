@@ -196,7 +196,8 @@ defmodule Arbiter.Agents.ReviewerRouting do
 
     {outcome, reason} =
       if pinned,
-        do: {"repicked", "pinned reviewer family #{pinned} unavailable; re-picked #{best.family}"},
+        do:
+          {"repicked", "pinned reviewer family #{pinned} unavailable; re-picked #{best.family}"},
         else: {"selected", nil}
 
     {:ok, selection(best, ctx, outcome, false, reason)}
@@ -218,7 +219,9 @@ defmodule Arbiter.Agents.ReviewerRouting do
 
       same != [] ->
         [best | _] = same
-        {:ok, selection(best, ctx, "same_family_fallback", true, fallback_reason(ctx, others_dropped))}
+
+        {:ok,
+         selection(best, ctx, "same_family_fallback", true, fallback_reason(ctx, others_dropped))}
 
       true ->
         no_candidate(ctx)
@@ -424,7 +427,9 @@ defmodule Arbiter.Agents.ReviewerRouting do
         tier = ModelFamily.reviewer_tier(family, ctx.tier)
 
         model =
-          if tier == ctx.tier, do: base, else: ModelFamily.model_for_tier(provider, tier, ctx.block)
+          if tier == ctx.tier,
+            do: base,
+            else: ModelFamily.model_for_tier(provider, tier, ctx.block)
 
         {model, tier, ModelFamily.classify(provider, model).family}
     end
@@ -459,8 +464,11 @@ defmodule Arbiter.Agents.ReviewerRouting do
     ]
     |> Enum.reduce_while({:ok, entry}, fn check, {:ok, entry} ->
       case check.(entry, ctx) do
-        {:ok, entry} -> {:cont, {:ok, entry}}
-        {:drop, reason, detail} -> {:halt, {:drop, Map.merge(entry, %{reason: reason, detail: detail})}}
+        {:ok, entry} ->
+          {:cont, {:ok, entry}}
+
+        {:drop, reason, detail} ->
+          {:halt, {:drop, Map.merge(entry, %{reason: reason, detail: detail})}}
       end
     end)
   end
@@ -472,12 +480,17 @@ defmodule Arbiter.Agents.ReviewerRouting do
   end
 
   defp check_adapter(%{type: nil}, _ctx), do: {:drop, "unconfigured", "no agent adapter"}
-  defp check_adapter(entry, _ctx), do: {:ok, Map.put(entry, :adapter, Agents.for_type(entry.type))}
+
+  defp check_adapter(entry, _ctx),
+    do: {:ok, Map.put(entry, :adapter, Agents.for_type(entry.type))}
 
   defp check_confinement(%{type: type} = entry, ctx) do
     case Agents.strict_eligible_provider(type, ctx.security, [], explicit: true) do
-      {:ok, _} -> {:ok, entry}
-      {:error, :ineligible} -> {:drop, "write_confinement_none", "cannot confine writes under :strict"}
+      {:ok, _} ->
+        {:ok, entry}
+
+      {:error, :ineligible} ->
+        {:drop, "write_confinement_none", "cannot confine writes under :strict"}
     end
   end
 

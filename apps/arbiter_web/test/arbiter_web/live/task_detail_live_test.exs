@@ -2289,7 +2289,8 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
         reviewer_family: "anthropic",
         implementer_family: "anthropic",
         same_family_fallback: true,
-        same_family_fallback_reason: "no other model family available: google (gemini: circuit_broken)"
+        same_family_fallback_reason:
+          "no other model family available: google (gemini: circuit_broken)"
       })
 
       {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")

@@ -134,7 +134,8 @@ defmodule Arbiter.Agents.ModelFamily do
   end
 
   defp higher_tier(tier, floor) do
-    case {Enum.find_index(@tier_ladder, &(&1 == tier)), Enum.find_index(@tier_ladder, &(&1 == floor))} do
+    case {Enum.find_index(@tier_ladder, &(&1 == tier)),
+          Enum.find_index(@tier_ladder, &(&1 == floor))} do
       {nil, _} when is_binary(tier) and tier != "" -> tier
       {nil, _} -> floor
       {t, f} when t >= f -> tier

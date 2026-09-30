@@ -6999,6 +6999,7 @@ defmodule Arbiter.Worker do
          park_reason
        ) do
     rounds = Map.get(meta || %{}, :review_gate_rounds)
+
     block =
       format_review_gate_note(verdict, findings, rounds, park_reason, task_id) <>
         reviewer_family_note(task_id)

@@ -207,7 +207,10 @@ defmodule Arbiter.Agents.ReviewerRoutingTest do
 
       # Codex has the most headroom on the first pass, so openai is pinned.
       first = opts([{gemini, agy_quota(70.0)}, {codex, codex_quota(10.0)}])
-      assert {:ok, %{family: :openai, outcome: "selected"}} = ReviewerRouting.select(ws, task, first)
+
+      assert {:ok, %{family: :openai, outcome: "selected"}} =
+               ReviewerRouting.select(ws, task, first)
+
       assert Ash.get!(Issue, task.id).reviewer_family == "openai"
 
       # Now Gemini has more room — but the task's reviewer family stays openai.
@@ -286,7 +289,11 @@ defmodule Arbiter.Agents.ReviewerRoutingTest do
     end
 
     test "codex has more headroom than gemini → openai reviews", c do
-      pairs = [{c.gemini, agy_quota(60.0)}, {c.codex, codex_quota(5.0)}, {c.claude, claude_quota(0.0)}]
+      pairs = [
+        {c.gemini, agy_quota(60.0)},
+        {c.codex, codex_quota(5.0)},
+        {c.claude, claude_quota(0.0)}
+      ]
 
       assert {:ok, sel} = ReviewerRouting.select(c.ws, task!(c.ws, "anthropic"), opts(pairs))
       assert sel.family == :openai
@@ -294,7 +301,11 @@ defmodule Arbiter.Agents.ReviewerRoutingTest do
     end
 
     test "gemini has more headroom than codex → google reviews", c do
-      pairs = [{c.gemini, agy_quota(5.0)}, {c.codex, codex_quota(60.0)}, {c.claude, claude_quota(0.0)}]
+      pairs = [
+        {c.gemini, agy_quota(5.0)},
+        {c.codex, codex_quota(60.0)},
+        {c.claude, claude_quota(0.0)}
+      ]
 
       assert {:ok, sel} = ReviewerRouting.select(c.ws, task!(c.ws, "anthropic"), opts(pairs))
       assert sel.family == :google
@@ -302,7 +313,11 @@ defmodule Arbiter.Agents.ReviewerRoutingTest do
     end
 
     test "the implementer's own family never wins on headroom", c do
-      pairs = [{c.gemini, agy_quota(50.0)}, {c.codex, codex_quota(50.0)}, {c.claude, claude_quota(0.0)}]
+      pairs = [
+        {c.gemini, agy_quota(50.0)},
+        {c.codex, codex_quota(50.0)},
+        {c.claude, claude_quota(0.0)}
+      ]
 
       assert {:ok, sel} = ReviewerRouting.select(c.ws, task!(c.ws, "anthropic"), opts(pairs))
       refute sel.family == :anthropic

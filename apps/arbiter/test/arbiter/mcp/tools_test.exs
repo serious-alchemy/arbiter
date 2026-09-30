@@ -5545,7 +5545,8 @@ defmodule Arbiter.MCP.ToolsTest do
           reviewer_family: "anthropic",
           implementer_family: "anthropic",
           same_family_fallback: true,
-          same_family_fallback_reason: "no other model family available: google (gemini: quota_held)",
+          same_family_fallback_reason:
+            "no other model family available: google (gemini: quota_held)",
           converged: true
         })
 

@@ -338,7 +338,11 @@ defmodule Arbiter.Worker.ReviewGateCrossFamilyTest do
 
       assert [
                %Round{verdict: :timed_out, reviewer_family: "google"},
-               %Round{verdict: :approve, reviewer_family: "anthropic", implementer_family: "openai"}
+               %Round{
+                 verdict: :approve,
+                 reviewer_family: "anthropic",
+                 implementer_family: "openai"
+               }
              ] = review_rounds(task.id)
     end
   end

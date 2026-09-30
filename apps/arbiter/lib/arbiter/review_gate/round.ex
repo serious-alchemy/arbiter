@@ -301,6 +301,7 @@ defmodule Arbiter.ReviewGate.Round do
     attribute :implementer_family, :string do
       public? true
       constraints max_length: 64, trim?: true
+
       description "The implementer's model family the reviewer had to differ from. Nil when unknown."
     end
 
