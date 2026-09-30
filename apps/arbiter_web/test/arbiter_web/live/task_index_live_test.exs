@@ -94,7 +94,8 @@ defmodule ArbiterWeb.TaskIndexLiveTest do
     test "an engagement's own detail page still renders", %{conn: conn, ws: ws} do
       {eng, _wr, _fu} = engagement_fixtures(ws)
 
-      {:ok, _view, html} = live(conn, ~p"/tasks/#{eng.id}")
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{eng.id}")
+      html = render_async(view, @async_timeout)
       assert html =~ "Review engagement: 7"
     end
   end
