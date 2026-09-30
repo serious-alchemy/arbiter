@@ -55,6 +55,7 @@ defmodule Arbiter.Agents.Codex do
   alias Arbiter.Agents.Codex.Config
   alias Arbiter.Agents.Codex.Stream
   alias Arbiter.Agents.SecurityPolicy
+  alias Arbiter.Worker.StopReason
 
   @done_regex ~r/\barb done\b/
 
@@ -198,11 +199,79 @@ defmodule Arbiter.Agents.Codex do
   defp tmpfile_path?(path), do: Path.basename(path) |> String.starts_with?(@prompt_tmp_prefix)
 
   @impl true
+  def auth_probe(opts \\ []) do
+    # Zero-quota auth probe (bd-2r42bq):
+    # If an API key is configured (alternative backend: direct OpenAI API, Ollama,
+    # or Responses-API backend), ChatGPT auth.json is not used; fall back to
+    # the argv probe (`auth_probe_argv/1`) so the key/backend is validated. That
+    # turn is billed to the key's backend, not the ChatGPT 30-day budget.
+    # Otherwise, probe via Arbiter.Quota.Codex.probe_auth/1 (wham/usage GET) which
+    # checks token validity without burning model turns or 30-day budget quota.
+    case resolve_executable() do
+      {:ok, _path} ->
+        if api_key_configured?(opts), do: :skipped, else: probe_chatgpt_usage(opts)
+
+      {:error, {:executable_not_found, exec}} ->
+        {:error,
+         %StopReason{
+           category: :crashed,
+           summary: "agent CLI not found on PATH (#{exec})",
+           remediation: "Install / fix the agent CLI on the host before dispatching."
+         }}
+    end
+  end
+
+  defp api_key_configured?(opts) do
+    case Keyword.get(opts, :api_key) do
+      key when is_binary(key) and key != "" -> true
+      _ -> Config.api_key_configured?()
+    end
+  end
+
+  defp probe_chatgpt_usage(opts) do
+    case Arbiter.Quota.Codex.probe_auth(opts) do
+      {:ok, 200, _body} ->
+        :ok
+
+      # A 401 only means the access token was stale when read: nothing in
+      # Arbiter refreshes it, the `codex` CLI does that itself. Marking Codex
+      # expired here would refuse every dispatch, so no CLI would ever run to
+      # refresh it. Defer to the argv probe (which refreshes the token, and only
+      # spends a turn when the token really is stale).
+      {:ok, 401, _body} ->
+        :skipped
+
+      # No ChatGPT login on disk: the CLI may be pointed at a keyless or
+      # non-OpenAI backend (Ollama, custom `model_provider`/`base_url`), which
+      # never reads auth.json. Defer to the argv probe so the CLI itself
+      # decides; a genuinely unauthenticated CLI still fails there.
+      {:error, reason} when reason in [:no_access_token, :enoent] ->
+        :skipped
+
+      {:ok, status, _body} ->
+        {:warn,
+         %StopReason{
+           category: :preflight_timeout,
+           summary: "Codex usage probe returned HTTP #{status}",
+           remediation: "Check ChatGPT API status."
+         }}
+
+      {:error, reason} ->
+        {:warn,
+         %StopReason{
+           category: :preflight_timeout,
+           summary: "Codex usage probe could not reach endpoint: #{inspect(reason)}",
+           remediation: "Check network connectivity."
+         }}
+    end
+  end
+
+  @impl true
   def auth_probe_argv(_opts \\ []) do
     # Cheapest auth check: a one-word `codex exec` round-trip under a read-only
     # sandbox. A missing/expired ChatGPT login or bad key exits non-zero, which
     # Arbiter.Worker.StopReason classifies.
-    case resolve_executable() do
+    case resolve_argv_probe_executable() do
       {:ok, codex} ->
         argv =
           ["sh", "-c", @inline_prompt_script, "sh", codex, "exec"] ++
@@ -375,6 +444,17 @@ defmodule Arbiter.Agents.Codex do
     case resolved_model(opts) do
       nil -> []
       model when is_binary(model) -> ["-m", model]
+    end
+  end
+
+  # The argv probe is a real model turn. Config can disable it (test env does)
+  # so an unstubbed Preflight.check(Codex, ...) fails closed instead of exec'ing
+  # the operator's real `codex` on their quota.
+  defp resolve_argv_probe_executable do
+    if Application.get_env(:arbiter, :codex_argv_probe, true) do
+      resolve_executable()
+    else
+      {:error, {:executable_not_found, "codex (argv probe disabled by :codex_argv_probe)"}}
     end
   end
 

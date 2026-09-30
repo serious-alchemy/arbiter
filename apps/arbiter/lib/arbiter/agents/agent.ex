@@ -178,6 +178,29 @@ defmodule Arbiter.Agents.Agent do
   @callback security_enforced?() :: boolean()
 
   @doc """
+  Direct auth and liveness probe for the adapter (bd-2r42bq).
+
+  When implemented, `Arbiter.Agents.Preflight.check/2` invokes this callback
+  before attempting to spawn an external process via `auth_probe_argv/1`. This
+  allows adapters that can verify credentials via an API call (such as
+  Codex's zero-quota `wham/usage` probe) to avoid executing a model turn or
+  spawning subprocesses.
+
+  Answers:
+    * `:ok` — credentials and environment are healthy and authenticated;
+    * `{:warn, %StopReason{}}` — non-fatal warning (e.g. transient upstream error);
+    * `{:error, %StopReason{}}` — authentication failed or CLI unavailable;
+    * `:skipped` — direct probe declined; fall back to `auth_probe_argv/1`.
+
+  Optional — adapters that omit it fall through to `auth_probe_argv/1`.
+  """
+  @callback auth_probe(opts :: keyword()) ::
+              :ok
+              | {:warn, Arbiter.Worker.StopReason.t()}
+              | {:error, Arbiter.Worker.StopReason.t()}
+              | :skipped
+
+  @doc """
   Argv for a cheap auth pre-flight probe — a single round-trip that verifies the
   CLI can authenticate (bd-awi4nw). Returns `{:ok, argv}`, or `{:error, reason}`
   when the CLI can't be resolved.
@@ -274,6 +297,7 @@ defmodule Arbiter.Agents.Agent do
   @optional_callbacks [
     spawn_env: 1,
     security_enforced?: 0,
+    auth_probe: 1,
     auth_probe_argv: 1,
     resolved_model: 1,
     async_tool_instruction: 0,

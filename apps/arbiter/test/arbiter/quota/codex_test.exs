@@ -86,8 +86,9 @@ defmodule Arbiter.Quota.CodexTest do
 
   describe "fetch/2 — happy path" do
     setup do
+      prev_http_stub = Application.get_env(:arbiter, :codex_quota_http_stub)
       Application.put_env(:arbiter, :codex_quota_http_stub, true)
-      on_exit(fn -> Application.delete_env(:arbiter, :codex_quota_http_stub) end)
+      on_exit(fn -> restore_env(:codex_quota_http_stub, prev_http_stub) end)
       :ok
     end
 
@@ -138,8 +139,9 @@ defmodule Arbiter.Quota.CodexTest do
 
   describe "fetch/2 — degrade path" do
     setup do
+      prev_http_stub = Application.get_env(:arbiter, :codex_quota_http_stub)
       Application.put_env(:arbiter, :codex_quota_http_stub, true)
-      on_exit(fn -> Application.delete_env(:arbiter, :codex_quota_http_stub) end)
+      on_exit(fn -> restore_env(:codex_quota_http_stub, prev_http_stub) end)
       :ok
     end
 
@@ -198,5 +200,122 @@ defmodule Arbiter.Quota.CodexTest do
     test "errors when the file is absent" do
       assert {:error, _} = Codex.read_credentials(auth_path: "/nope/auth.json")
     end
+
+    test "honours CODEX_HOME when auth_path option is not provided" do
+      tmp_dir =
+        Path.join(System.tmp_dir!(), "codex_home_test_#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(tmp_dir)
+      auth_file = Path.join(tmp_dir, "auth.json")
+
+      File.write!(
+        auth_file,
+        Jason.encode!(%{
+          "tokens" => %{"access_token" => "CH_TOKEN", "account_id" => "CH_ACCT"}
+        })
+      )
+
+      prev_home = System.get_env("CODEX_HOME")
+      prev_cfg = Application.get_env(:arbiter, :codex_quota)
+
+      # Temporarily clear the test config override so default_auth_path/0 is evaluated
+      Application.put_env(:arbiter, :codex_quota, [])
+      System.put_env("CODEX_HOME", tmp_dir)
+
+      on_exit(fn ->
+        case prev_home do
+          nil -> System.delete_env("CODEX_HOME")
+          v -> System.put_env("CODEX_HOME", v)
+        end
+
+        case prev_cfg do
+          nil -> Application.delete_env(:arbiter, :codex_quota)
+          v -> Application.put_env(:arbiter, :codex_quota, v)
+        end
+
+        File.rm_rf(tmp_dir)
+      end)
+
+      assert {:ok, %{access_token: "CH_TOKEN", account_id: "CH_ACCT"}} =
+               Codex.read_credentials([])
+    end
   end
+
+  describe "probe_auth/1" do
+    setup do
+      prev_http_stub = Application.get_env(:arbiter, :codex_quota_http_stub)
+      Application.put_env(:arbiter, :codex_quota_http_stub, true)
+      on_exit(fn -> restore_env(:codex_quota_http_stub, prev_http_stub) end)
+      :ok
+    end
+
+    test "returns {:ok, 200, body} on valid credentials" do
+      Req.Test.stub(@stub_name, fn conn ->
+        assert ["Bearer tok-abc"] = Plug.Conn.get_req_header(conn, "authorization")
+        Req.Test.json(conn, @usage_body)
+      end)
+
+      assert {:ok, 200, body} = Codex.probe_auth(credentials: creds())
+      assert is_map(body)
+    end
+
+    test "returns {:ok, 401, body} on expired credentials" do
+      Req.Test.stub(@stub_name, fn conn ->
+        conn
+        |> Plug.Conn.put_status(401)
+        |> Req.Test.json(%{"error" => "expired"})
+      end)
+
+      assert {:ok, 401, _} = Codex.probe_auth(credentials: creds())
+    end
+
+    test "returns {:error, :enoent} when auth_path is missing" do
+      assert {:error, :enoent} = Codex.probe_auth(auth_path: "/nonexistent/auth.json")
+    end
+
+    test "reads credentials from CODEX_HOME when not specified" do
+      tmp_dir =
+        Path.join(System.tmp_dir!(), "codex_home_probe_#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(tmp_dir)
+      auth_file = Path.join(tmp_dir, "auth.json")
+
+      File.write!(
+        auth_file,
+        Jason.encode!(%{
+          "tokens" => %{"access_token" => "CH_TOKEN", "account_id" => "CH_ACCT"}
+        })
+      )
+
+      prev_home = System.get_env("CODEX_HOME")
+      prev_cfg = Application.get_env(:arbiter, :codex_quota)
+
+      Application.put_env(:arbiter, :codex_quota, [])
+      System.put_env("CODEX_HOME", tmp_dir)
+
+      on_exit(fn ->
+        case prev_home do
+          nil -> System.delete_env("CODEX_HOME")
+          v -> System.put_env("CODEX_HOME", v)
+        end
+
+        case prev_cfg do
+          nil -> Application.delete_env(:arbiter, :codex_quota)
+          v -> Application.put_env(:arbiter, :codex_quota, v)
+        end
+
+        File.rm_rf(tmp_dir)
+      end)
+
+      Req.Test.stub(@stub_name, fn conn ->
+        assert ["Bearer CH_TOKEN"] = Plug.Conn.get_req_header(conn, "authorization")
+        Req.Test.json(conn, @usage_body)
+      end)
+
+      assert {:ok, 200, _} = Codex.probe_auth([])
+    end
+  end
+
+  defp restore_env(key, nil), do: Application.delete_env(:arbiter, key)
+  defp restore_env(key, val), do: Application.put_env(:arbiter, key, val)
 end

@@ -162,6 +162,58 @@ defmodule Arbiter.Agents.PreflightTest do
     end
   end
 
+  describe "check/2 with direct auth_probe/1 (bd-2r42bq)" do
+    defmodule DirectProbeAdapter do
+      @moduledoc false
+      def provider, do: "directprobe"
+
+      def auth_probe(opts) do
+        case Keyword.get(opts, :status) do
+          :fail ->
+            {:error,
+             %Arbiter.Worker.StopReason{
+               category: :auth_expired,
+               summary: "Direct probe auth expired",
+               remediation: "Re-login"
+             }}
+
+          :skip ->
+            :skipped
+
+          _ ->
+            :ok
+        end
+      end
+
+      def auth_probe_argv(_opts), do: {:ok, ["sh", "-c", "echo fallback; exit 0"]}
+    end
+
+    test "calls auth_probe/1 directly and returns :ok without spawning OS process" do
+      assert :ok = Preflight.check(DirectProbeAdapter, status: :ok)
+    end
+
+    test "returns {:error, reason} directly from auth_probe/1" do
+      assert {:error, reason} = Preflight.check(DirectProbeAdapter, status: :fail)
+      assert reason.category == :auth_expired
+      assert reason.summary =~ "Direct probe auth expired"
+    end
+
+    test "falls back to auth_probe_argv/1 when auth_probe/1 returns :skipped" do
+      assert :ok = Preflight.check(DirectProbeAdapter, status: :skip)
+    end
+
+    test "probe_command override bypasses auth_probe/1" do
+      assert {:error, reason} =
+               Preflight.check(DirectProbeAdapter,
+                 status: :ok,
+                 probe_command: ["sh", "-c", "echo '401 Unauthorized'; exit 1"],
+                 probe_env: []
+               )
+
+      assert reason.category == :auth_expired
+    end
+  end
+
   describe "check/2 with an unprobeable adapter" do
     defmodule NoProbeAdapter do
       # An adapter that doesn't implement auth_probe_argv/1.
