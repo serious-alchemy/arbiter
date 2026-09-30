@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Fake `claude auth login` (spike bd-29ycw1). Mode via FAKE_LOGIN_MODE.
+# Invoked as `claude auth login` or `claude auth status --json`.
+mode="${FAKE_LOGIN_MODE:-success}"
+trap 'exit 130' TERM INT
+
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  if [ -n "$CLAUDE_CONFIG_DIR" ] && [ -f "$CLAUDE_CONFIG_DIR/.credentials.json" ]; then
+    printf '{"loggedIn": true}\n'
+  else
+    printf '{"loggedIn": false}\n'; exit 1
+  fi
+  exit 0
+fi
+
+url='https://claude.com/cai/oauth/authorize?code=true&client_id=FAKE&state=FAKE'
+printf 'Opening browser to sign in…\n'
+# OSC-8 hyperlink: ESC ] 8 ; ; URL ESC \ text ESC ] 8 ; ; ESC \
+printf "If the browser didn't open, visit: \033]8;;%s\033\\\\%s\033]8;;\033\\\\\n" "$url" "$url"
+# No trailing newline on the prompt.
+printf 'Paste code here if prompted > '
+
+# Never finishes, whatever is typed (for timeout tests).
+if [ "$mode" = "hang" ]; then
+  while true; do sleep 0.1; done
+fi
+
+# Does not exit on stdin EOF: keep waiting for a line.
+until IFS= read -r -t 1 line; do :; done
+
+printf '\n'
+if [ "$mode" = "failure" ]; then
+  printf 'Login failed: Invalid code\n'
+  exit 1
+fi
+if [ -n "$CLAUDE_CONFIG_DIR" ]; then
+  mkdir -p "$CLAUDE_CONFIG_DIR" && printf '{}' > "$CLAUDE_CONFIG_DIR/.credentials.json"
+fi
+printf 'Login successful.\n'
+exit 0
