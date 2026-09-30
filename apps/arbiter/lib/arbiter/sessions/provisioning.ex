@@ -190,6 +190,11 @@ defmodule Arbiter.Sessions.Provisioning do
   @spec mint_token(Session.t(), keyword()) :: String.t()
   def mint_token(session, opts \\ [])
 
+  # bd-98oj3s: a login session is unprivileged — never issued a token.
+  def mint_token(%Session{kind: :login} = session, _opts) do
+    raise ArgumentError, "session #{session.id} is a :login session; it is issued no MCP token"
+  end
+
   def mint_token(%Session{issue_id: issue_id, workspace_id: workspace_id} = session, opts)
       when is_binary(issue_id) and issue_id != "" and is_binary(workspace_id) and
              workspace_id != "" do
@@ -523,7 +528,7 @@ defmodule Arbiter.Sessions.Provisioning do
     home = Layout.home_dir(session.id)
     path = Path.join(home, AgyConfigDir.mcp_config_path())
 
-    if Keyword.get(opts, :mcp, MCP.enabled?()) do
+    if Keyword.get(opts, :mcp, MCP.enabled?()) and session.kind != :login do
       token = mint_session_token(session, opts)
 
       config =
@@ -554,7 +559,7 @@ defmodule Arbiter.Sessions.Provisioning do
   defp write_mcp_config(session, cwd, paths, opts) do
     path = Path.join(cwd, ClaudeMCP.filename())
 
-    if Keyword.get(opts, :mcp, MCP.enabled?()) do
+    if Keyword.get(opts, :mcp, MCP.enabled?()) and session.kind != :login do
       token = mint_session_token(session, opts)
 
       # Same discipline as `write_secret/2`: the file exists at 0600 *before*
@@ -761,7 +766,7 @@ defmodule Arbiter.Sessions.Provisioning do
     # is enough — a plain arbiter restart, or a client that briefly detached,
     # must not reap a session that is otherwise fine.
     SOCKET=#{shell_quote(session.tmux_socket)}
-    TMUX_SESSION=#{shell_quote(Naming.tmux_session())}
+    TMUX_SESSION=#{shell_quote(Naming.tmux_session(session))}
     HEARTBEAT=#{shell_quote(heartbeat)}
     GRACE=#{deadman_grace_seconds(opts)}
     POLL=#{deadman_poll_seconds(opts)}

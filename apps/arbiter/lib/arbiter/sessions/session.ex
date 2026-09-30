@@ -33,6 +33,13 @@ defmodule Arbiter.Sessions.Session do
       schema change. An `:agy` row is held to mode B with no Remote Control
       (see `validations`): its credential is the operator's own Google grant,
       and Remote Control's bridge verification reads Claude Code's JSONL.
+    * `kind` — `:coordinator` (the default: today's behaviour) or `:login`
+      (bd-98oj3s, the dashboard login relay). A `:login` session is
+      **unprivileged and hidden**: `Arbiter.Sessions.list/1` omits it unless
+      asked (`include_kinds: [:login]`), it is never issued an MCP token (its row
+      is born with `mcp_token_revoked_at` set, and `can_dispatch` is forced off),
+      and it runs on its own tmux socket under `arb-login-<account>-<nonce>`
+      names (`Arbiter.Sessions.Naming`). `login_account` is required for it.
     * `workspace_id` — **nullable on purpose**. `nil` means a cross-workspace
       session, which is the coordinator's normal shape (decision 6: a
       workspace-agnostic coordinator token). A bound session is one deliberately
@@ -119,6 +126,11 @@ defmodule Arbiter.Sessions.Session do
   @providers ~w(claude_code agy)a
   @auth_modes ~w(seeded_credentials oauth_token)a
   @statuses ~w(starting running ended)a
+  @kinds ~w(coordinator login)a
+
+  @doc "Session kinds."
+  @spec kinds() :: [atom()]
+  def kinds, do: @kinds
 
   @doc "Providers a session may run."
   @spec providers() :: [atom()]
@@ -142,6 +154,7 @@ defmodule Arbiter.Sessions.Session do
       # The adoption sweep's read ("every row that isn't ended") and the
       # dashboard's list.
       index [:status]
+      index [:kind]
       # The ledger join (`usage_events/1`) and the rollover lookup.
       index [:provider_session_id]
       # The refine binding (bd-1lszsc): the lookup "is there a live refine
@@ -172,7 +185,9 @@ defmodule Arbiter.Sessions.Session do
         :auth_mode,
         :remote_control,
         :can_dispatch,
-        :name
+        :name,
+        :kind,
+        :login_account
       ]
 
       # The OS handles and the §9.1 scaffold paths are both functions of the
@@ -184,7 +199,10 @@ defmodule Arbiter.Sessions.Session do
       change fn changeset, _context ->
         id = Ash.Changeset.get_attribute(changeset, :id) || Ash.UUID.generate()
 
-        case Naming.socket_path(id) do
+        kind = Ash.Changeset.get_attribute(changeset, :kind)
+        account = Ash.Changeset.get_attribute(changeset, :login_account)
+
+        case socket_for(kind, id, account) do
           {:ok, socket} ->
             changeset
             |> Ash.Changeset.force_change_attribute(:id, id)
@@ -193,6 +211,7 @@ defmodule Arbiter.Sessions.Session do
             |> Ash.Changeset.force_change_attribute(:root_dir, Layout.session_dir(id))
             |> default_attribute(:cwd, fn -> Layout.workspace_dir(id) end)
             |> config_dir_for_provider(id)
+            |> unprivileged_if_login(kind)
 
           {:error, :no_runtime_dir} ->
             Ash.Changeset.add_error(changeset,
@@ -349,6 +368,18 @@ defmodule Arbiter.Sessions.Session do
   end
 
   validations do
+    validate fn changeset, _context ->
+      account = Ash.Changeset.get_attribute(changeset, :login_account)
+
+      case {Ash.Changeset.get_attribute(changeset, :kind), account} do
+        {:login, a} when not is_binary(a) or a == "" ->
+          {:error, field: :login_account, message: "is required for a :login session"}
+
+        _ ->
+          :ok
+      end
+    end
+
     # agy (bd-7xuvfl) has neither of Claude Code's alternative auth postures:
     # its grant is the operator's own Google login (keyring or copied files,
     # `Arbiter.Agents.Gemini.ConfigDir`), which is mode B by definition, and
@@ -409,6 +440,24 @@ defmodule Arbiter.Sessions.Session do
       public? true
       default :claude_code
       constraints one_of: @providers
+    end
+
+    attribute :kind, :atom do
+      allow_nil? false
+      public? true
+      default :coordinator
+      constraints one_of: @kinds
+
+      description """
+      `:coordinator` (default) or `:login` (bd-98oj3s). A login session is hidden
+      from every ordinary list, holds no MCP token and cannot dispatch.
+      """
+    end
+
+    attribute :login_account, :string do
+      public? true
+      constraints max_length: 255, trim?: true
+      description "The provider account a :login session signs in; nil for a coordinator."
     end
 
     attribute :workspace_id, :string do
@@ -545,6 +594,25 @@ defmodule Arbiter.Sessions.Session do
     create_timestamp :inserted_at
     update_timestamp :updated_at
   end
+
+  defp socket_for(:login, id, account) when is_binary(account) and account != "",
+    do: Naming.login_socket_path(id, account)
+
+  # A :login row without an account fails its own validation; any socket will do
+  # until then.
+  defp socket_for(:login, id, _account), do: Naming.socket_path(id)
+  defp socket_for(_coordinator, id, _account), do: Naming.socket_path(id)
+
+  # A login session is unprivileged (bd-98oj3s): no dispatch, and its MCP token
+  # is revoked from birth so no token carrying its id can ever verify
+  # (`Arbiter.MCP.Scope.from_token/1` reads `mcp_token_revoked_at`).
+  defp unprivileged_if_login(changeset, :login) do
+    changeset
+    |> Ash.Changeset.force_change_attribute(:can_dispatch, false)
+    |> Ash.Changeset.force_change_attribute(:mcp_token_revoked_at, DateTime.utc_now())
+  end
+
+  defp unprivileged_if_login(changeset, _kind), do: changeset
 
   # Force `attribute` to `fun.()` unless the caller supplied a non-blank value.
   # A provider with no config dir (agy) gets `nil` even when a caller passed
