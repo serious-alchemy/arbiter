@@ -159,6 +159,7 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Agents
   alias Arbiter.Agents.ProviderPool
   alias Arbiter.Agents.ProviderRouting
+  alias Arbiter.Agents.ReviewerRouting
   alias Arbiter.Agents.Routing
   alias Arbiter.Agents.Routing.ByDifficulty
   alias Arbiter.Agents.SecurityPolicy
@@ -851,6 +852,13 @@ defmodule Arbiter.Worker.ReviewGate do
       # `dispatch_next_review/2` — a fresh diff is a fresh chance for a provider
       # that timed out on the previous one.
       reviewer_timeouts: [],
+      # bd-a1ke2c: under `review_agent.cross_family`, the current reviewer
+      # pass's `ReviewerRouting` selection — the provider, family, model and
+      # tier it runs and the audit fields its round row records. Re-chosen at
+      # every reviewer launch the print-timeout rotation has not pinned; nil
+      # whenever cross-family review is off, which leaves every path below
+      # exactly as it was.
+      reviewer_selection: nil,
       # bd-a22hib: the CURRENT review round's own detached checkout,
       # `%{path:, head_sha:}` — provisioned by `provision_review_checkout/1`
       # at the pushed head right before the round's first reviewer pass, shared
@@ -2781,11 +2789,64 @@ defmodule Arbiter.Worker.ReviewGate do
     else
       state = record_reviewer_timeout(state, reason)
 
-      case next_reviewer_provider(state, pool) do
-        nil -> {:done, escalate_pool_exhausted(state, pool)}
-        next -> rotate_reviewer(state, next, pool)
+      case next_reviewer(state, pool) do
+        {nil, _selection} -> {:done, escalate_pool_exhausted(state, pool)}
+        {next, selection} -> rotate_reviewer(state, next, pool, selection)
       end
     end
+  end
+
+  # bd-a1ke2c: under cross-family review the rotation asks `ReviewerRouting`
+  # again with this round's timed-out providers excluded, so it can only land
+  # in an eligible family — a timeout is never a same-family fallback trigger.
+  # Off, it is bd-3hb4ih's configured-order walk, untouched.
+  defp next_reviewer(%{reviewer_selection: %{}} = state, _pool) do
+    tried = state.reviewer_timeouts |> Enum.map(& &1.provider) |> Enum.reject(&is_nil/1)
+
+    case select_reviewer(state, tried) do
+      {:ok, selection} -> {selection.provider, selection}
+      _ -> {nil, nil}
+    end
+  end
+
+  defp next_reviewer(state, pool), do: {next_reviewer_provider(state, pool), nil}
+
+  # ---- cross-family reviewer routing (bd-a1ke2c) --------------------------
+
+  # Every reviewer pass the print-timeout rotation has not pinned asks
+  # `ReviewerRouting` for its reviewer: a family other than the implementer's,
+  # the task's pinned one while it is available, most quota left, with a
+  # recorded same-family fallback. `:off` (the workspace has not opted in, or
+  # there is no workspace) and a fixture-argv gate leave `reviewer_selection`
+  # nil, which is today's resolution exactly.
+  defp route_reviewer_pass(%{reviewer_provider: nil} = state, :reviewer, nil) do
+    case select_reviewer(state, []) do
+      {:ok, selection} -> %{state | reviewer_selection: selection}
+      _ -> %{state | reviewer_selection: nil}
+    end
+  end
+
+  defp route_reviewer_pass(state, _role, _command), do: state
+
+  defp select_reviewer(state, exclude) do
+    with %Workspace{} = ws <- load_workspace(state.workspace_id),
+         true <- ReviewerRouting.enabled?(ws) do
+      ReviewerRouting.select(ws, state.task_id,
+        tier: reviewer_model_tier(ws.config, state.task_id),
+        exclude: exclude,
+        security: session_security_policy(ws, state, :reviewer)
+      )
+    else
+      _ -> :off
+    end
+  rescue
+    e ->
+      Logger.warning(
+        "ReviewGate: cross-family reviewer routing crashed for task=#{state.task_id}: " <>
+          Exception.message(e)
+      )
+
+      :off
   end
 
   # The reviewer role's configured provider pool for this workspace, in
@@ -2860,7 +2921,7 @@ defmodule Arbiter.Worker.ReviewGate do
   # verdict re-prompt budget are all untouched, and the pass is handed the
   # IDENTICAL prompt (`state.current_prompt`) so the rotated reviewer judges the
   # same diff the timed-out one was asked about.
-  defp rotate_reviewer(state, next, pool) when is_binary(state.current_prompt) do
+  defp rotate_reviewer(state, next, pool, selection) when is_binary(state.current_prompt) do
     stop_worker(state)
 
     prior = reviewer_provider_for(state)
@@ -2879,7 +2940,12 @@ defmodule Arbiter.Worker.ReviewGate do
         note
       )
 
-    rotated = %{state | reviewer_provider: next}
+    rotated = %{
+      state
+      | reviewer_provider: next,
+        reviewer_selection: selection || state.reviewer_selection
+    }
+
     id = provider_rotation_id(rotated, next)
 
     case launch_worker(rotated, id, :reviewer, state.current_prompt, state.command) do
@@ -2904,7 +2970,8 @@ defmodule Arbiter.Worker.ReviewGate do
 
   # No prompt to replay (nothing has been launched yet) — there is no "same
   # diff" to hand a second provider, so concede rather than invent one.
-  defp rotate_reviewer(state, _next, pool), do: {:done, escalate_pool_exhausted(state, pool)}
+  defp rotate_reviewer(state, _next, pool, _selection),
+    do: {:done, escalate_pool_exhausted(state, pool)}
 
   # Every provider in the pool has hit its own print-timeout on this round.
   # Stop rotating and page the coordinator ONCE (class C: a liveness failure of
@@ -2958,9 +3025,24 @@ defmodule Arbiter.Worker.ReviewGate do
     own print-timeout), reduce what the review has to do (a smaller diff, fewer rounds
     of context), or add a provider to `review_agent.type` whose CLI has no fixed
     print-mode wall. The reviewer pool as configured is: #{Enum.map_join(pool, ", ", &provider_label/1)}.
+    #{cross_family_rotation_note(state)}
     """
     |> String.trim()
   end
+
+  # bd-a1ke2c: with cross-family review on, "every provider" means every one in
+  # an eligible family — say why the implementer's own family was not tried.
+  defp cross_family_rotation_note(%{reviewer_selection: %{} = sel}) do
+    """
+
+    `review_agent.cross_family` is on: providers in the implementer's model family
+    (#{sel.implementer_family || "unknown"}) are not rotated into on a timeout — a
+    timeout is not a same-family fallback trigger — so the rotation stopped once
+    every eligible family had timed out.
+    """
+  end
+
+  defp cross_family_rotation_note(_state), do: ""
 
   defp timeout_roster(%{reviewer_timeouts: []}), do: "  (none recorded)"
 
@@ -2986,6 +3068,10 @@ defmodule Arbiter.Worker.ReviewGate do
   # claiming the workspace's configured reviewer for an argv that bypassed the
   # adapter entirely would be a lie.
   defp reviewer_provider_for(%{reviewer_provider: provider})
+       when is_atom(provider) and not is_nil(provider),
+       do: provider
+
+  defp reviewer_provider_for(%{reviewer_selection: %{provider: provider}})
        when is_atom(provider) and not is_nil(provider),
        do: provider
 
@@ -3720,6 +3806,12 @@ defmodule Arbiter.Worker.ReviewGate do
         state |> reviewer_provider_for() |> provider_string()
       end
 
+    # bd-a1ke2c: the cross-family audit trail, on the same rows.
+    family_attrs =
+      if role == :review and is_binary(state.current_id),
+        do: reviewer_family_attrs(Map.get(state, :reviewer_selection)),
+        else: %{}
+
     attrs =
       %{
         task_id: state.task_id,
@@ -3737,6 +3829,7 @@ defmodule Arbiter.Worker.ReviewGate do
         commit_gate: commit_gate
       }
       |> Map.merge(review_outcome_attrs(role, verdict, findings, state))
+      |> Map.merge(family_attrs)
 
     case Ash.create(Round, attrs) do
       {:ok, _row} ->
@@ -3814,6 +3907,22 @@ defmodule Arbiter.Worker.ReviewGate do
   # workspace (e.g. a workspace-less ad-hoc ReviewGate run).
   defp provider_string(nil), do: nil
   defp provider_string(provider) when is_atom(provider), do: Atom.to_string(provider)
+
+  defp reviewer_family_attrs(%{} = sel) do
+    %{
+      reviewer_family: family_string(sel.family),
+      implementer_family: family_string(sel.implementer_family),
+      same_family_fallback: sel.same_family_fallback,
+      same_family_fallback_reason: if(sel.same_family_fallback, do: sel.fallback_reason)
+    }
+  end
+
+  defp reviewer_family_attrs(_selection), do: %{}
+
+  defp family_string(nil), do: nil
+  defp family_string(family) when is_atom(family), do: Atom.to_string(family)
+
+  defp reviewer_tier_for(%{reviewer_selection: %{tier: tier}}) when is_binary(tier), do: tier
 
   defp reviewer_tier_for(state) do
     case load_workspace(state.workspace_id) do
@@ -4371,7 +4480,7 @@ defmodule Arbiter.Worker.ReviewGate do
     # `spawn_worker/5` — hands the adapter this pass's value instead of the
     # previous pass's `state.timeout_ms`.
     timeout_ms = resolve_timeout_ms(state.workspace_id, state.timeout_override_ms)
-    state = %{state | timeout_ms: timeout_ms}
+    state = %{state | timeout_ms: timeout_ms} |> route_reviewer_pass(role, command)
 
     case guarded_spawn_worker(state, id, role, prompt, command) do
       {:ok, pid} ->
@@ -4665,7 +4774,9 @@ defmodule Arbiter.Worker.ReviewGate do
     # the operator's `~/.gemini`. Adapters that don't recognise it ignore
     # it.
     agent_opts =
-      agent_opts_for_role(ws, role_atom, state.task_id, adapter) ++
+      (ws
+       |> agent_opts_for_role(role_atom, state.task_id, adapter)
+       |> apply_reviewer_selection(state, role)) ++
         [
           security: session_security_policy(ws, state, role),
           workspace: ws,
@@ -4731,6 +4842,14 @@ defmodule Arbiter.Worker.ReviewGate do
   # default and the only state a single-provider workspace ever reaches)
   # resolves exactly as before.
   defp adapter_for(%{reviewer_provider: provider}, _ws, :reviewer, _revision)
+       when is_atom(provider) and not is_nil(provider),
+       do: {:ok, {Agents.for_type(provider), :review_agent}}
+
+  # bd-a1ke2c: a cross-family pass runs the adapter `ReviewerRouting` chose.
+  # Its candidates are already filtered for `:strict` write confinement, and
+  # its pre-routing fallback goes through `Agents.strict_eligible_provider/4`
+  # exactly like the clause below.
+  defp adapter_for(%{reviewer_selection: %{provider: provider}}, _ws, :reviewer, _revision)
        when is_atom(provider) and not is_nil(provider),
        do: {:ok, {Agents.for_type(provider), :review_agent}}
 
@@ -4842,6 +4961,19 @@ defmodule Arbiter.Worker.ReviewGate do
       config: config
     ]
   end
+
+  # bd-a1ke2c: a cross-family reviewer runs its family's reviewer tier and
+  # model (`ReviewerRouting`, `ModelFamily.reviewer_tier/2`) — the model is
+  # passed explicitly so what spawns is exactly what the family was judged on.
+  defp apply_reviewer_selection(opts, %{reviewer_selection: %{} = sel}, :reviewer) do
+    Keyword.merge(opts,
+      model: sel.model || Keyword.get(opts, :model),
+      model_tier: sel.tier || Keyword.get(opts, :model_tier),
+      thinking: sel.thinking || Keyword.get(opts, :thinking)
+    )
+  end
+
+  defp apply_reviewer_selection(opts, _state, _role), do: opts
 
   defp apply_agent_type_override(%{type: type} = choice, type), do: choice
 
