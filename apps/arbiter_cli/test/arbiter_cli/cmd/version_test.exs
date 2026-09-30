@@ -87,4 +87,37 @@ defmodule ArbiterCli.Cmd.VersionTest do
     assert payload["server"]["status"] == "unreachable"
     assert payload["sha_mismatch"] == nil
   end
+
+  test "announces a newer release when the server reports one" do
+    update = %{
+      "update_available" => true,
+      "latest" => "v0.3.0",
+      "release_url" => "https://example.test/r/v0.3.0"
+    }
+
+    stub_get("/api/version", Map.put(matching_server_version(), "update", update))
+
+    {out, _err, 0} = capture(fn -> Version.run([]) end)
+    assert out =~ "UPDATE AVAILABLE: v0.3.0"
+    assert out =~ "arb server deploy"
+    assert out =~ "https://example.test/r/v0.3.0"
+  end
+
+  test "surfaces a failed update check without the banner" do
+    update = %{"update_available" => false, "error" => "GitHub Releases API returned HTTP 403"}
+    stub_get("/api/version", Map.put(matching_server_version(), "update", update))
+
+    {out, _err, 0} = capture(fn -> Version.run([]) end)
+    refute out =~ "UPDATE AVAILABLE"
+    assert out =~ "update check: failed"
+  end
+
+  test "--json passes the update block through" do
+    update = %{"update_available" => true, "latest" => "v0.3.0"}
+    stub_get("/api/version", Map.put(matching_server_version(), "update", update))
+
+    {out, _err, 0} = capture(fn -> Version.run(["--json"]) end)
+    assert {:ok, payload} = Jason.decode(String.trim(out))
+    assert payload["server"]["update"]["latest"] == "v0.3.0"
+  end
 end

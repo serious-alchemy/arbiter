@@ -5,5 +5,7 @@ config :arbiter_web, ArbiterWeb.Endpoint, cache_static_manifest: "priv/static/ca
 # Do not print debug messages in production
 config :logger, level: :info
 
+config :arbiter, :update_check, enabled: true
+
 # Runtime production configuration, including reading
 # of environment variables, is done on config/runtime.exs.
