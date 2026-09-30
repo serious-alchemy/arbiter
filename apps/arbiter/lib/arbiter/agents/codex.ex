@@ -203,7 +203,8 @@ defmodule Arbiter.Agents.Codex do
     # Zero-quota auth probe (bd-2r42bq):
     # If an API key is configured (alternative backend: direct OpenAI API, Ollama,
     # or Responses-API backend), ChatGPT auth.json is not used; fall back to
-    # the argv probe (`auth_probe_argv/1`) so the key/backend is validated.
+    # the argv probe (`auth_probe_argv/1`) so the key/backend is validated. That
+    # turn is billed to the key's backend, not the ChatGPT 30-day budget.
     # Otherwise, probe via Arbiter.Quota.Codex.probe_auth/1 (wham/usage GET) which
     # checks token validity without burning model turns or 30-day budget quota.
     case resolve_executable() do
@@ -240,21 +241,12 @@ defmodule Arbiter.Agents.Codex do
            remediation: "Run `codex login` on the host to authenticate."
          }}
 
-      {:error, :no_access_token} ->
-        {:error,
-         %StopReason{
-           category: :auth_expired,
-           summary: "Codex CLI not authenticated (auth.json lacks access token)",
-           remediation: "Run `codex login` on the host to authenticate."
-         }}
-
-      {:error, :enoent} ->
-        {:error,
-         %StopReason{
-           category: :auth_expired,
-           summary: "Codex CLI not authenticated (auth.json not found)",
-           remediation: "Run `codex login` on the host to authenticate."
-         }}
+      # No ChatGPT login on disk: the CLI may be pointed at a keyless or
+      # non-OpenAI backend (Ollama, custom `model_provider`/`base_url`), which
+      # never reads auth.json. Defer to the argv probe so the CLI itself
+      # decides; a genuinely unauthenticated CLI still fails there.
+      {:error, reason} when reason in [:no_access_token, :enoent] ->
+        :skipped
 
       {:ok, status, _body} ->
         {:warn,

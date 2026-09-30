@@ -343,6 +343,32 @@ defmodule Arbiter.Agents.CodexTest do
       assert :ok = Codex.auth_probe([])
     end
 
+    test "returns :skipped for a keyless backend with no ChatGPT auth.json (Ollama-style)" do
+      dir =
+        Path.join(
+          System.tmp_dir!(),
+          "arbiter_codex_keyless_#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(dir)
+      prev_cfg = Application.get_env(:arbiter, :codex_quota)
+      Application.put_env(:arbiter, :codex_quota, auth_path: Path.join(dir, "auth.json"))
+
+      on_exit(fn ->
+        case prev_cfg do
+          nil -> Application.delete_env(:arbiter, :codex_quota)
+          v -> Application.put_env(:arbiter, :codex_quota, v)
+        end
+
+        File.rm_rf(dir)
+      end)
+
+      assert :skipped = Codex.auth_probe([])
+
+      File.write!(Path.join(dir, "auth.json"), Jason.encode!(%{"OPENAI_API_KEY" => nil}))
+      assert :skipped = Codex.auth_probe([])
+    end
+
     test "returns {:error, :crashed} when codex binary is not on PATH" do
       System.put_env("PATH", "/nonexistent/bin")
       assert {:error, reason} = Codex.auth_probe([])
