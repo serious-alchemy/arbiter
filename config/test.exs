@@ -22,6 +22,8 @@ config :arbiter, Arbiter.Repo,
       "arbiter_test_#{test_db_partition}.sqlite3"
     ),
   journal_mode: :wal,
+  cache_size: -64_000,
+  temp_store: :memory,
   # SQLite allows only one writer at a time, and a *second* class of failure
   # is invisible to `busy_timeout`: under WAL, a connection that began its
   # read snapshot before another connection committed a write cannot silently

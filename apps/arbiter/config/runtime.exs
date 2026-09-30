@@ -8,5 +8,7 @@ if config_env() == :prod do
   config :arbiter, Arbiter.Repo,
     database: database_path,
     journal_mode: :wal,
+    cache_size: -64_000,
+    temp_store: :memory,
     busy_timeout: 5000
 end
