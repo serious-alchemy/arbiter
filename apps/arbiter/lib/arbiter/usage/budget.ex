@@ -41,9 +41,13 @@ defmodule Arbiter.Usage.Budget do
   one task's own running total, and all of it counts.
   """
 
+  import Ecto.Query
+
+  alias Arbiter.Repo
   alias Arbiter.Tasks.Issue
   alias Arbiter.Usage.Estimate
   alias Arbiter.Usage.Event
+  alias Arbiter.Usage.LedgerRow
 
   require Ash.Expr
   require Ash.Query
@@ -354,6 +358,8 @@ defmodule Arbiter.Usage.Budget do
   Best-effort: a failed ledger read costs the board its cost flags, not its
   columns.
   """
+  @budget_window_days 60
+
   @spec over_budget_ids([Issue.t() | map()], keyword()) :: [String.t()]
   def over_budget_ids(issues, opts \\ []) when is_list(issues) do
     open = Enum.filter(issues, &open?/1)
@@ -364,7 +370,7 @@ defmodule Arbiter.Usage.Budget do
 
       open ->
         sample = Keyword.get_lazy(opts, :sample, fn -> Estimate.sample(opts) end)
-        spends = spend_by_task(Enum.map(open, & &1.id), opts)
+        spends = open_task_spends(Enum.map(open, & &1.id), opts)
         opts = Keyword.put(opts, :sample, sample)
 
         open
@@ -380,6 +386,35 @@ defmodule Arbiter.Usage.Budget do
     error ->
       Logger.warning("Usage.Budget.over_budget_ids failed: #{Exception.message(error)}")
       []
+  end
+
+  defp open_task_spends(task_ids, opts) do
+    now = Keyword.get(opts, :now) || DateTime.utc_now()
+    window = Keyword.get(opts, :window_days, @budget_window_days)
+    since = Keyword.get(opts, :since, DateTime.add(now, -window, :day))
+    wanted = MapSet.new(task_ids)
+
+    from(e in LedgerRow,
+      where: e.source == "task",
+      where: e.occurred_at >= ^since,
+      where: not is_nil(e.cost_usd) and e.cost_usd > 0.0,
+      group_by: [e.base_task_id, e.task_id],
+      select: {e.base_task_id, e.task_id, sum(e.cost_usd)}
+    )
+    |> Repo.all()
+    |> Enum.reduce(%{}, fn {base, tid, cost}, acc ->
+      case fold_event_id(%{base_task_id: base, task_id: tid}) do
+        task_id when is_binary(task_id) ->
+          if MapSet.member?(wanted, task_id) do
+            Map.update(acc, task_id, money(cost), &money(&1 + cost))
+          else
+            acc
+          end
+
+        _ ->
+          acc
+      end
+    end)
   end
 
   # The board hands `derive/1` plain maps in its pure tests and `%Issue{}`

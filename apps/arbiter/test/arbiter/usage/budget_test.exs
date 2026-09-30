@@ -325,5 +325,24 @@ defmodule Arbiter.Usage.BudgetTest do
 
       refute task.id in Budget.over_budget_ids([task], now: @now)
     end
+
+    test "aggregates spend with synthetic suffixes and respects time bound", %{ws: ws} do
+      task1 = open_issue!(ws, %{difficulty: 2, issue_type: :feature})
+      # p90 is ~9.0 from seeded_history!
+      # Split across base, review, and impl events: 4.0 + 4.0 + 3.0 = 11.0 > 9.0 -> over budget
+      event!(task1.id, %{cost_usd: 4.0, occurred_at: @now})
+      event!(task1.id <> "#review", %{cost_usd: 4.0, base_task_id: task1.id, occurred_at: @now})
+      event!(task1.id <> "#impl1", %{cost_usd: 3.0, base_task_id: nil, occurred_at: @now})
+
+      # task2 has spend older than 60-day window, so its recent spend is inside range
+      task2 = open_issue!(ws, %{difficulty: 2, issue_type: :feature})
+      old_time = DateTime.add(@now, -70, :day)
+      event!(task2.id, %{cost_usd: 20.0, occurred_at: old_time})
+      event!(task2.id, %{cost_usd: 2.0, occurred_at: @now})
+
+      flagged = Budget.over_budget_ids([task1, task2], now: @now)
+      assert task1.id in flagged
+      refute task2.id in flagged
+    end
   end
 end

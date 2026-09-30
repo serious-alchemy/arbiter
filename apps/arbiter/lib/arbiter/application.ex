@@ -215,6 +215,9 @@ defmodule Arbiter.Application do
       # decorated `list_latest_for_workspace/2` result is memoized in
       # (bd-4p6pw7 round 2) — see that module's docs.
       Arbiter.Quota.QuotaCache,
+      # Owns the ETS table memoizing `Arbiter.Usage.Estimate.sample/1`
+      # (bd-3d1zge) — see that module's docs.
+      Arbiter.Usage.EstimateCache,
       # The board's Ready queue drains itself (bd-bqyeqa). Paused unless the
       # install opts in with `config :arbiter, :board_autopilot, enabled: true`
       # — auto-dispatch spends money, so an upgrade must not discover it by

@@ -29,6 +29,7 @@ defmodule Arbiter.DataCase do
 
   setup tags do
     Arbiter.DataCase.setup_sandbox(tags)
+    Arbiter.Usage.EstimateCache.invalidate()
     :ok
   end
 
