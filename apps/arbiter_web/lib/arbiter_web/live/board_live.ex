@@ -67,6 +67,7 @@ defmodule ArbiterWeb.BoardLive do
 
   alias Arbiter.Board.Autopilot
   alias Arbiter.Board.Snapshot
+  alias Arbiter.Settings
   alias Arbiter.Tasks.EdgeGate
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Rank
@@ -147,6 +148,8 @@ defmodule ArbiterWeb.BoardLive do
       |> assign(:lane_open, true)
       |> assign(:lane_coordinator, false)
       |> assign(:scheduler_running, false)
+      |> assign(:system_cap, nil)
+      |> assign(:system_cap_override?, false)
       |> assign(:board_loaded?, false)
       |> assign(:board_error, nil)
       |> assign(:board_loading?, false)
@@ -204,6 +207,8 @@ defmodule ArbiterWeb.BoardLive do
     |> assign(:board, loaded.board)
     |> assign(:alerts, loaded.alerts)
     |> assign(:scheduler_running, loaded.scheduler_running)
+    |> assign(:system_cap, loaded.system_cap)
+    |> assign(:system_cap_override?, loaded.system_cap_override?)
     |> assign(:workspaces, loaded.workspaces)
     |> assign(:now, loaded.board.now)
     |> assign(:board_loaded?, true)
@@ -278,6 +283,25 @@ defmodule ArbiterWeb.BoardLive do
 
       _ ->
         {:noreply, socket}
+    end
+  end
+
+  # ---- the install-wide concurrency cap ---------------------------------------
+
+  # A blank value clears the override (back to the app-env / built-in default);
+  # anything but a positive whole number is refused before the setter sees it.
+  def handle_event("set_system_cap", params, socket) do
+    with {:ok, value} <- parse_cap(Map.get(params, "max")),
+         {:ok, _} <- Settings.set_conductor_system_max_concurrent(value) do
+      {:noreply, refresh_board(socket)}
+    else
+      _ ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "Scheduler concurrency must be a whole number of 1 or more (or blank for the default)."
+         )}
     end
   end
 
@@ -518,6 +542,16 @@ defmodule ArbiterWeb.BoardLive do
     |> start_async(:board, fn -> load_board() end)
   end
 
+  defp parse_cap(raw) when is_binary(raw) do
+    case raw |> String.trim() |> then(&{&1, Integer.parse(&1)}) do
+      {"", _} -> {:ok, nil}
+      {_, {n, ""}} when n > 0 -> {:ok, n}
+      _ -> :error
+    end
+  end
+
+  defp parse_cap(_), do: :error
+
   defp worker_debounce_ms,
     do: Application.get_env(:arbiter_web, :board_worker_debounce_ms, 500)
 
@@ -549,7 +583,14 @@ defmodule ArbiterWeb.BoardLive do
     workspaces = load_workspaces()
     exit_if_view_gone()
 
-    %{board: board, alerts: alerts, scheduler_running: running?, workspaces: workspaces}
+    %{
+      board: board,
+      alerts: alerts,
+      scheduler_running: running?,
+      workspaces: workspaces,
+      system_cap: Snapshot.system_max_concurrent(),
+      system_cap_override?: is_integer(Settings.conductor_system_max_concurrent())
+    }
   end
 
   defp exit_if_view_gone do
@@ -892,6 +933,48 @@ defmodule ArbiterWeb.BoardLive do
                 class="hidden sm:inline-block w-[260px] h-[6px] rounded-[var(--radius-pill)] bg-[var(--border-default)] animate-pulse"
               >
               </span>
+
+              <form
+                :if={@board_loaded?}
+                id="board-concurrency-form"
+                phx-submit="set_system_cap"
+                class="hidden sm:flex items-center gap-1.5"
+              >
+                <span
+                  id="board-concurrency"
+                  data-override={to_string(@system_cap_override?)}
+                  title="Install-wide scheduler concurrency cap. Leave blank to use the default."
+                  class="flex items-center gap-1.5 text-[11px] text-[var(--text-label)] font-[family-name:var(--font-mono)]"
+                >
+                  <label for="board-concurrency-input">max concurrent</label>
+                  <input
+                    id="board-concurrency-input"
+                    name="max"
+                    type="text"
+                    inputmode="numeric"
+                    autocomplete="off"
+                    value={if(@system_cap_override?, do: @system_cap, else: "")}
+                    placeholder={to_string(@system_cap)}
+                    class="w-12 px-1.5 py-[2px] rounded-[var(--radius-chip)] border border-solid border-[var(--border-default)] bg-transparent text-[11px] text-[var(--text-primary)]"
+                  />
+                  <span :if={not @system_cap_override?}>(default)</span>
+                  <button
+                    id="board-concurrency-save"
+                    type="submit"
+                    class="cursor-pointer px-1.5 py-[2px] rounded-[var(--radius-chip)] border border-solid border-[var(--border-default)] text-[10px] uppercase tracking-[0.08em] hover:text-[var(--text-primary)] transition-colors"
+                  >
+                    save
+                  </button>
+                </span>
+                <span
+                  :if={@board.slots_total < @system_cap}
+                  id="board-concurrency-limited"
+                  title="A workspace or provider-account cap is lower than the scheduler cap."
+                  class="text-[10px] text-[var(--arb-attention)] font-[family-name:var(--font-mono)]"
+                >
+                  board limited to {@board.slots_total} by workspace/account cap
+                </span>
+              </form>
 
               <%!-- Until the first read lands there is no scheduler state to
                    show, and a "paused" guess would be a claim. --%>
