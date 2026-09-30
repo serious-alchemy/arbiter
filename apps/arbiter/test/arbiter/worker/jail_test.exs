@@ -233,6 +233,58 @@ defmodule Arbiter.Worker.JailTest do
     end
   end
 
+  describe "escape-vector masks (bd-7o08mj)" do
+    @masks ["/run/user/4242", "/run/dbus", "/run/systemd/resolve"]
+
+    defp masked(argv), do: for(["--tmpfs", p] <- Enum.chunk_every(argv, 2, 1), do: p)
+
+    test "every jail mode masks the runtime dir, the system bus and resolved" do
+      base = %{bwrap: "bwrap", worktree: "/w/wt", mask_paths: @masks}
+
+      for spec <- [
+            base,
+            Map.put(base, :worktree_readonly, true),
+            Map.put(base, :writable_paths, ["/opt/cache"])
+          ] do
+        argv = Jail.argv(spec, ["agy"])
+        for m <- @masks, do: assert(m in masked(argv))
+        # after the read-only root, before the command
+        assert index_of_flag(argv, "/run/dbus") > index_of_flag(argv, "/")
+      end
+    end
+
+    test "the default masks resolve the uid at runtime and only name existing paths" do
+      {:ok, %{uid: uid}} = File.stat("/proc/self")
+      masks = Jail.mask_paths()
+
+      assert Enum.all?(masks, &File.dir?/1)
+      assert Enum.all?(masks, &(&1 in ["/run/user/#{uid}", "/run/dbus", "/run/systemd/resolve"]))
+      argv = Jail.argv(%{bwrap: "bwrap", worktree: "/w"}, ["true"])
+      assert masked(argv) -- ["/tmp", "/dev/shm"] == masks
+    end
+
+    test "a keyring socket is bound over the bus path after the masks, read-only" do
+      argv =
+        Jail.argv(
+          %{
+            bwrap: "bwrap",
+            worktree: "/w",
+            mask_paths: @masks,
+            keyring_socket: "/host/proxy.sock",
+            keyring_bus_path: "/run/user/4242/bus"
+          },
+          ["true"]
+        )
+
+      assert {"/host/proxy.sock", "/run/user/4242/bus"} in flag_pairs(argv, "--ro-bind")
+
+      assert index_of(argv, ["--ro-bind", "/host/proxy.sock", "/run/user/4242/bus"]) >
+               index_of_flag(argv, "/run/systemd/resolve")
+    end
+
+    defp index_of_flag(argv, path), do: Enum.find_index(argv, &(&1 == path))
+  end
+
   describe "writable_paths/1" do
     test "expands ~, drops relative and blank entries, dedupes" do
       home = System.user_home!()
@@ -936,6 +988,67 @@ defmodule Arbiter.Worker.JailTest do
 
       assert wait_until(fn -> pids_in_ns(ns) == [] end),
              "processes survived in the jail's pid namespace: #{inspect(pids_in_ns(ns))}"
+    end
+  end
+
+  describe "real bwrap: escape vectors (bd-7o08mj)" do
+    if @probe != :ok do
+      @describetag skip: "bwrap write jail unavailable on this host: #{inspect(@probe)}"
+    end
+
+    @describetag :bwrap
+
+    test "systemd-run --user fails, no host write lands, name resolution fails under --unshare-net",
+         %{base: base} do
+      host_marker = Path.join(base, "escape-marker")
+      wt = Path.join(base, "escape-wt")
+      File.mkdir_p!(wt)
+      # `base` is outside the worktree, so the jail mounts it read-only.
+      script = """
+      command -v systemd-run >/dev/null && systemd-run --user --wait --collect touch "$M" >/dev/null 2>&1 && echo SYSTEMD_RUN_OK
+      touch "$M" 2>/dev/null && echo DIRECT_WRITE_OK
+      getent hosts example.com >/dev/null 2>&1 && echo RESOLVED
+      exit 0
+      """
+
+      {:ok, [bwrap | args]} = Jail.wrap(["sh", "-c", script], worktree: wt)
+      {pre, [dashdash | cmd]} = Enum.split_while(args, &(&1 != "--"))
+
+      {out, 0} =
+        System.cmd(bwrap, pre ++ ["--unshare-net", dashdash | cmd],
+          stderr_to_stdout: true,
+          env: [{"M", host_marker}]
+        )
+
+      refute out =~ "SYSTEMD_RUN_OK"
+      refute out =~ "DIRECT_WRITE_OK"
+      refute out =~ "RESOLVED"
+      refute File.exists?(host_marker)
+    end
+
+    test "keyring: true binds a filtered proxy bus; systemd-run still fails (needs xdg-dbus-proxy + a session bus)",
+         %{base: base} do
+      bus = System.get_env("DBUS_SESSION_BUS_ADDRESS") || ""
+
+      if is_nil(Jail.dbus_proxy()) or not String.starts_with?(bus, "unix:path=") do
+        :ok
+      else
+        wt = Path.join(base, "proxy-wt")
+        File.mkdir_p!(wt)
+
+        script =
+          ~s(systemd-run --user true >/dev/null 2>&1 && echo SYSTEMD_RUN_OK; test -S "${DBUS_SESSION_BUS_ADDRESS#unix:path=}" && echo BUS_PRESENT; exit 0)
+
+        {:ok, [exec | args]} = Jail.wrap(["sh", "-c", script], worktree: wt, keyring: true)
+        {out, 0} = System.cmd(exec, args, stderr_to_stdout: true)
+        assert out =~ "BUS_PRESENT"
+        refute out =~ "SYSTEMD_RUN_OK"
+      end
+    end
+
+    test "escape_probe/0 reports no reachable vector" do
+      assert Jail.escape_probe() == :ok
+      assert Jail.diagnose_escape() == nil
     end
   end
 

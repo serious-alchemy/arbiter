@@ -38,6 +38,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       check_security_defaults(),
       check_legacy_safe_defaults_key(),
       check_agy_write_jail(),
+      check_agy_jail_escape(),
       check_agy_ssh_transport(),
       check_claude_worker_credentials(),
       check_provider_accounts(),
@@ -653,6 +654,50 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       _ ->
         %Result{
           name: "agy ssh transport",
+          status: :ok,
+          detail: "server unreachable or predates this check — skipping",
+          fatal: false,
+          blocks_readiness: false
+        }
+    end
+  end
+
+  # bd-7o08mj: the jail's `--ro-bind / /` exposes the session bus, systemd's
+  # private socket, resolved's varlink socket, ssh-agent and keyring, any of
+  # which lets a jailed process act outside the jail. `Jail.diagnose_escape/0`
+  # (the payload's `escape` key) probes them inside a real jail; any reachable
+  # vector is a FAIL. `dbus_proxy` is informational: without xdg-dbus-proxy
+  # agy cannot use the keyring inside the jail (it fails closed).
+  defp check_agy_jail_escape do
+    case Client.get("/api/server/agy_write_jail") do
+      {:ok, %{"escape" => %{"available" => true}} = body} ->
+        proxy =
+          case Map.get(body, "dbus_proxy") do
+            path when is_binary(path) -> "xdg-dbus-proxy: #{path}"
+            _ -> "xdg-dbus-proxy not installed (keyring unavailable inside the jail)"
+          end
+
+        %Result{
+          name: "agy jail escape vectors",
+          status: :ok,
+          detail: "no session bus, systemd, resolver or agent socket reachable; #{proxy}",
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      {:ok, %{"escape" => %{"available" => false, "message" => message} = esc}} ->
+        %Result{
+          name: "agy jail escape vectors",
+          status: :fail,
+          detail: message,
+          hint: Map.get(esc, "fix") || "See Arbiter.Worker.Jail.mask_paths/0 (bd-7o08mj).",
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      _ ->
+        %Result{
+          name: "agy jail escape vectors",
           status: :ok,
           detail: "server unreachable or predates this check — skipping",
           fatal: false,
