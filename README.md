@@ -78,11 +78,17 @@ The primary integration path for a coordinator agent (e.g. a dedicated Claude Co
 
 See `apps/arbiter/lib/arbiter/mcp/catalog.ex` for the full, current catalog and which tier (worker vs. coordinator) can call each tool.
 
-To mint a token for a coordinator to use:
+To mint a token for a coordinator to use, run this on the server host from
+your own shell:
 
 ```sh
 arb mcp token mint --tier coordinator
 ```
+
+It proves you are the operator over the server's local operator socket. The
+server refuses anonymous `POST /api/mcp/tokens`, and it refuses any process
+it spawned itself (workers, reviewers, sessions). See
+[docs/worker-security.md](docs/worker-security.md#operator-proof-for-token-minting-bd-8381tk).
 
 The server speaks MCP over **Streamable HTTP** at `http://127.0.0.1:4848/mcp`,
 so configure a client with `"type": "http"` (Claude Code), `httpUrl` (Gemini
@@ -322,7 +328,8 @@ By default, `arb` talks to a local server on `http://127.0.0.1:4848` (loopback).
    # or export ARB_HOST="https://arbiter.example.com" for HTTPS
    ```
 
-2. **Mint a token** on the server:
+2. **Mint a token** on the server, in a shell on the server host (for
+   example `ssh <host> arb mcp token mint --tier coordinator`):
 
    ```sh
    arb mcp token mint --tier coordinator

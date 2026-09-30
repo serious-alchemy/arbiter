@@ -761,6 +761,182 @@ access as able to reach everything the operator's account can read.
   object with `provider`, `policy_enforced`, and the full policy summary. This
   is the single source of truth both surfaces read.
 
+## Operator proof for token minting (bd-8381tk)
+
+### The problem
+
+`POST /api/mcp/tokens` used to hand a **coordinator** token to any anonymous
+caller on loopback (`ArbiterWeb.Plugs.ApiAuth` lets loopback through without
+a bearer token). Every worker runs on the server's host, so any worker could
+make itself coordinator with one `curl`: dispatch, config writes, closing
+tickets, installation config. `/mcp` itself always required a bearer token,
+so this endpoint was the way in.
+
+The hard part is that workers run **as the operator's own Unix user**.
+Whatever proof is chosen has to separate two processes with the same uid.
+
+### Options considered
+
+| Option | Why not (alone) |
+|---|---|
+| Operator secret in a 0600 file that the CLI reads | Same uid, so the worker reads it too. The jail doesn't restrict reads, and Claude workers are unjailed. A `Read` deny rule is permission-layer only (`python -c open(...)` walks past it). Worse, `arb mcp token mint` run *inside* a worker would read the file automatically. |
+| One-time pairing token | Has to be stored somewhere the operator's later commands can read, which is the same-uid problem again. Also adds a setup step to every install. |
+| Unix socket with an `SO_PEERCRED` **uid** check | The uid is identical for the operator and every worker, so on its own it proves nothing. |
+| **Unix socket + `SO_PEERCRED` pid + where that process came from** | **Chosen.** See below. |
+
+### The mechanism
+
+What *does* differ between the operator and a worker is where the process
+came from. Everything Arbiter runs is started by the server's own BEAM:
+`beam.smp` → `erl_child_setup` → the agent CLI → its shell → the tools it
+runs. The operator's terminal or ssh session is not. Under systemd,
+everything the server starts also inherits its service cgroup
+(`…/app.slice/arbiter.service`). The operator's shell lives in a terminal
+scope or an ssh `session-N.scope`.
+
+`Arbiter.MCP.OperatorSocket` listens on a Unix domain socket (only when the
+HTTP endpoint serves). For each connection it reads `SO_PEERCRED`: the
+connecting process's pid and uid, recorded by the kernel at `connect()` and
+not forgeable by the client. `Arbiter.MCP.OperatorProof.authorize/2` then
+requires all of:
+
+1. **the server's uid** (the socket is also 0600 in a 0700 directory);
+2. **not descended from the server**: the parent chain is walked through
+   `/proc/<pid>/stat`, and reaching the server's own OS pid means refusal;
+3. **not inside the server's service cgroup**, when the server runs as a
+   `.service` unit. This catches a double-forked orphan that
+   `systemd --user` has adopted, which check 2 alone misses. A dev server
+   run from a terminal shares that terminal's scope, so the check is skipped
+   there.
+
+Anything unreadable fails closed. No secret is exchanged: running from the
+operator's own shell *is* the proof. The request line is read before any
+reply, and every mint and refusal is logged with the peer pid.
+
+Socket path, shared by the server and `arb`:
+`/run/user/<uid>/arbiter/operator-<port>.sock`, or
+`~/.arbiter/run/operator-<port>.sock` on a host without a per-user runtime
+dir. `<port>` is the HTTP port, so a dev server and the release don't
+collide. `ARB_OPERATOR_SOCKET` overrides the path on both sides. Keep an
+override **outside** every worker-writable path: the jail's writable binds
+come after its masks and would re-expose it. Set
+`config :arbiter, Arbiter.MCP.OperatorSocket, enabled: false` to switch the
+listener off. Tokens can then only be minted by a caller that already holds
+one.
+
+### Who mints what, now
+
+| Caller | Path | Result |
+|---|---|---|
+| Anonymous loopback `POST /api/mcp/tokens` (any worker's `curl`) | HTTP | **403, no token, any tier.** Anonymous minting is removed outright rather than kept at a read-only tier: no caller needed it. |
+| Operator: `arb mcp token mint`, `arb init` (no `ARB_TOKEN`) | operator socket | coordinator token (may narrow via `workspace_id`, `can_dispatch`, `ttl`) |
+| Operator on another machine | `ssh <host> arb mcp token mint` (socket on the server host), or `ARB_TOKEN` + HTTP | as above |
+| Holder of a token (`ARB_TOKEN`, a session's own `arb`) | bearer HTTP | capped at the caller's authority (bd-5b5hq7). Worker and refine callers get 403. |
+| Workers and reviewers | minted by the server at dispatch (`Scope.mint_worker`) | unchanged, never self-served |
+| Arbiter coordinator/refine sessions | minted by the server at provisioning (`Scope.mint_session` / `mint_refine`) | unchanged |
+| `arb mcp token mint` run inside a worker or session | operator socket | refused: `spawned_by_arbiter` (or `in_arbiter_cgroup`) |
+
+### What the jail adds
+
+For agy under `Arbiter.Worker.Jail` the refusal is not the only barrier. The
+socket isn't reachable at all:
+
+* `/run/user/<uid>` is already a `--tmpfs` (bd-7o08mj), so the default
+  socket directory doesn't exist inside the jail. `mask_paths/0` also masks
+  the fallback or override directory, because a socket on a read-only bind is
+  still connectable.
+* `systemd-run --user` fails (the bus is masked), so a jailed worker can't
+  leave `arbiter.service` either.
+* `Jail.secret_files/0` binds `/dev/null` over the two files that would skip
+  the proof entirely: `~/.arbiter/arbiter.env` (it holds `SECRET_KEY_BASE`,
+  the MCP signing key, so a reader could sign their own coordinator token)
+  and `$RELEASE_ROOT/releases/COOKIE` (the Erlang distribution cookie, which
+  gives `bin/arbiter rpc` into the server). The bind sits on a `nodev`
+  mount, so reads fail with `EACCES`.
+
+### Verified live (2026-09-30)
+
+These checks ran from a real worker of the live release. The listener was
+the real `OperatorSocket` running this branch's code, with its policy's
+server pid set to the live Arbiter BEAM. The client was the real `arb`
+escript built from this branch:
+
+* **This worker's shell** (descendant of the live server BEAM): refused,
+  `spawned_by_arbiter`.
+* **The same shell after a `setsid -f` double fork** (parent is now
+  `systemd --user`): refused, `in_arbiter_cgroup`.
+* **Inside the real `Jail.argv`**: `arb` gets `enoent` for the socket,
+  `systemd-run --user` can't reach a bus, and both secret files read
+  `Permission denied`.
+* **A transient `systemd-run --user` service** (outside the server's tree and
+  cgroup, which is where the operator's shell sits): got a coordinator token,
+  and `Scope.from_token/1` decoded it as `tier: :coordinator`.
+
+### Same-UID reasoning: what this does and does not buy
+
+* **Jailed workers (agy): a real boundary for minting.** They can't reach the
+  socket, can't leave the cgroup through the bus, and can't read the signing
+  key or the cookie.
+* **Unjailed workers (Claude today): a guardrail against the paths an agent
+  actually takes**: `arb mcp token mint`, `curl` to the HTTP route, a script
+  that connects to the socket, a backgrounded or double-forked child. They
+  are **not** a hard boundary. A same-uid process with full host access can
+  still escape on purpose: run itself as a transient unit with
+  `systemd-run --user` (the last demo above is exactly that), move itself to
+  another cgroup under the user's delegated subtree, `ptrace` the operator's
+  shell (`kernel.yama.ptrace_scope` was 0 on the host this was verified on), or read
+  `~/.arbiter/arbiter.env` directly and sign its own token. Closing that
+  takes the OS jail for Claude workers (G7 in
+  [design/guardrail-profiles.md](design/guardrail-profiles.md)), or a
+  separate Unix user.
+* **The operator versus a coordinator session they started themselves** (a
+  Claude Code session in their own terminal) is not separated. That session
+  is operator-delegated. Arbiter-provisioned sessions are separated: their
+  processes descend from the server.
+
+### Known open gaps (not fixed here)
+
+* **Erlang distribution.** The release runs with distribution on (the
+  `mix release` default). epmd and the node listen on all interfaces, and
+  `releases/COOKIE` is mode 0644. An unjailed worker can
+  `bin/arbiter rpc` into the server and skip every token check. This has been
+  reported to the coordinator as its own issue. The jail's cookie mask covers
+  jailed workers only.
+* **The anonymous loopback REST surface.** Every other `/api` route
+  (dispatch, `PATCH /api/workspaces/:id/config`, issue close, loop apply) is
+  still coordinator-equivalent without a token. Workers' own `arb` relies on
+  it. Scoping it means giving workers a worker token for `arb` and
+  tier-checking every controller. See docs/remote-access.md.
+* **pid reuse between `connect()` and the `/proc` walk** is theoretically
+  possible. A reused pid would belong to a process the attacker doesn't
+  control, and a worker-spawned reuser would still be caught by the cgroup
+  check.
+
+### Migration
+
+* Existing `.mcp.json` files keep working. Tokens that were already minted
+  are still validly signed until they expire (30 days by default) or the
+  signing key rotates.
+* To refresh an `arb init` checkout's token, run `arb init --force` in that
+  checkout **from your own shell**, or mint with `arb mcp token mint --json`
+  and replace the `Authorization: Bearer …` value in `.mcp.json`. An
+  `arb init` run from inside a worker or session now writes the
+  `REPLACE_WITH_COORDINATOR_TOKEN` placeholder instead of a real token.
+* Scripts that minted with a bare `curl -X POST /api/mcp/tokens` must switch
+  to `arb mcp token mint --json | jq -r .token`, run on the server host.
+* Tokens may already have been minted by workers through the old anonymous
+  route, so rotate the signing key once after deploying. This invalidates
+  every outstanding token:
+  1. Generate a new key (`openssl rand -base64 64 | tr -d '\n'`) and replace
+     `SECRET_KEY_BASE` in `~/.arbiter/arbiter.env`. If
+     `config :arbiter, Arbiter.MCP, secret:` is set, rotate that instead;
+     it takes precedence for token signing.
+  2. `systemctl --user restart arbiter`.
+  3. Re-mint every coordinator token (`arb mcp token mint`, `arb init
+     --force`) and update each `.mcp.json` and `ARB_TOKEN`. Running
+     Arbiter sessions hold tokens signed with the old key, so restart them.
+     Workers get fresh tokens at their next dispatch.
+
 ## Related: the durable log root is secret-bearing
 
 Worker output — including each run's archived session JSONL — lands in
