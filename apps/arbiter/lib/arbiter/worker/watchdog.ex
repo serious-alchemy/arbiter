@@ -3202,6 +3202,16 @@ defmodule Arbiter.Worker.Watchdog do
       {:ok, %{deferred: true}} ->
         reschedule(queue_pass(%{state | last_block_reason: :ci_failed}, :fix_pass))
 
+      # bd-5ef587: the provider is paused. Nothing ran, so the pass spends no
+      # attempt and no fix-pass budget; the next poll asks again (or re-routes).
+      {:error, {:provider_paused, _provider, phrase}} ->
+        Logger.warning(
+          "Worker.Watchdog: fix pass for task=#{state.task_id} mr=#{state.mr_ref} not " <>
+            "dispatched — #{phrase}"
+        )
+
+        reschedule(%{state | last_block_reason: :ci_failed})
+
       _ ->
         reschedule(%{
           state
@@ -3607,6 +3617,16 @@ defmodule Arbiter.Worker.Watchdog do
             conflict_resolver_pid: if(is_pid(pid), do: pid, else: nil),
             conflict_branch: Map.get(info, :branch) || state.conflict_branch
         }
+
+      # bd-5ef587: the provider is paused — hold, neither counting an attempt
+      # nor escalating/latching, so auto-resolve resumes once it is lifted.
+      {:error, {:provider_paused, _provider, phrase}} ->
+        Logger.warning(
+          "Worker.Watchdog: conflict-resolve pass for task=#{state.task_id} " <>
+            "mr=#{state.mr_ref} not dispatched — #{phrase}"
+        )
+
+        state
 
       {:error, reason} ->
         Logger.warning(

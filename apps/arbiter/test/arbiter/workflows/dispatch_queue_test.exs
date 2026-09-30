@@ -254,6 +254,55 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
     end
   end
 
+  describe "provider pause re-route (bd-5ef587)" do
+    alias Arbiter.Accounts.{ProviderAccount, WorkspaceProviderAccount}
+
+    defp allow!(ws, provider, position) do
+      account =
+        Ash.create!(ProviderAccount, %{
+          provider: provider,
+          slug: "#{provider}-#{System.unique_integer([:positive])}"
+        })
+
+      Ash.create!(WorkspaceProviderAccount, %{
+        workspace_id: ws.id,
+        provider: provider,
+        provider_account_id: account.id,
+        implementer_position: position
+      })
+
+      account
+    end
+
+    test "a pause-held item drains once routing lands on another unpaused provider" do
+      Application.put_env(:arbiter, :test_dispatch_pid, self())
+      on_exit(fn -> Application.delete_env(:arbiter, :test_dispatch_pid) end)
+
+      ws = make_workspace(%{"routing" => %{"provider_selection" => "most_quota"}})
+      allow!(ws, :claude, 0)
+      allow!(ws, :codex, 1)
+      pid = start_queue(ws, dispatcher: RecordingDispatcher, auto_subscribe: false)
+      task = make_task(ws)
+
+      {:ok, _} = Arbiter.Providers.Pause.pause("codex", reason: "jail escape", by: "test")
+      {:ok, _} = Arbiter.Providers.Pause.pause("claude", reason: "also", by: "test")
+
+      :ok = DispatchQueue.hold(ws.id, task.id, [], "held — codex paused: jail escape", :codex)
+
+      # Every candidate is paused: nothing to re-route to, the item stays.
+      :ok = DispatchQueue.drain(pid)
+      refute_receive {:dispatched, _, _}, 100
+      assert length(DispatchQueue.state(pid).items) == 1
+
+      # Claude comes back while codex stays paused: the item is released.
+      {:ok, _} = Arbiter.Providers.Pause.resume("claude", by: "test")
+      :ok = DispatchQueue.drain(pid)
+      assert_receive {:dispatched, task_id, _opts}
+      assert task_id == task.id
+      assert Arbiter.Providers.Pause.for_provider(:codex) != nil
+    end
+  end
+
   describe ":continue — proceeds past the cap and alerts once per crossing" do
     test "dispatch spawns a worker, records overage, alerts exactly once" do
       Application.put_env(:arbiter, :test_notifier_pid, self())

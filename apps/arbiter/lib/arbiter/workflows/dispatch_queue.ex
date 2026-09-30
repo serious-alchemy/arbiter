@@ -579,15 +579,48 @@ defmodule Arbiter.Workflows.DispatchQueue do
         account = Map.get(accounts, provider)
         gate_opts = [account: account]
 
-        # bd-5ef587: a pause outlives quota headroom — keep the item queued.
-        not paused?(provider, account) and
+        # bd-5ef587: a pause outlives quota headroom. A paused item is released
+        # only when routing now lands on a different, unpaused, ungated
+        # provider; otherwise it stays queued until the pause is lifted.
+        if paused?(provider, account) do
+          reroutable?(state, gate, item)
+        else
           not match?({:hold, _}, gate.check(nil, quota, state.workspace, gate_opts))
+        end
       end)
 
     # Optimistically remove the to-dispatch intents now; the drain Task casts
     # `{:requeue, item}` back for any that fail, so nothing is dropped.
     _ = spawn_drain(state, to_dispatch)
     %{state | items: on_hold ++ keep}
+  end
+
+  # bd-5ef587: would a replay of this pause-held item route to another
+  # provider that is neither paused nor quota-gated? A caller-forced provider
+  # (`:agent_type` / `:agent_adapter`) is never re-routed.
+  defp reroutable?(%State{} = state, gate, %{task_id: task_id, opts: opts} = item) do
+    with nil <- Keyword.get(opts, :agent_type),
+         nil <- Keyword.get(opts, :agent_adapter),
+         {:ok, %Issue{} = task} <- Ash.get(Issue, task_id),
+         {alt, _reason, _decision} <-
+           Arbiter.Agents.ProviderRouting.implementer_provider(
+             task,
+             state.workspace,
+             Keyword.get(opts, :routing_role, :resume)
+           ),
+         true <- alt != item_provider(item) do
+      account = safe_account(state, alt)
+
+      not paused?(alt, account) and
+        not match?(
+          {:hold, _},
+          gate.check(nil, safe_latest(state, alt), state.workspace, account: account)
+        )
+    else
+      _ -> false
+    end
+  rescue
+    _ -> false
   end
 
   defp paused?(provider, account) do

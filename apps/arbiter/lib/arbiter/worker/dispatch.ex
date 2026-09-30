@@ -1312,34 +1312,50 @@ defmodule Arbiter.Worker.Dispatch do
   end
 
   # bd-5ef587: a paused provider (or the paused account this dispatch would be
-  # metered under) is held with "held — <provider> paused: <reason>" — exactly
-  # as a quota hold is, so a drain re-routes it once another candidate exists
-  # (`unroute/1`) or the pause is lifted. Routing has already dropped paused
+  # metered under) is held with "held — <provider> paused: <reason>", as a
+  # quota hold is; the drain releases it once routing can pick another
+  # candidate or the pause is lifted. Routing has already dropped paused
   # accounts, so this only bites when nothing else can take the work, or on the
-  # unrouted (legacy) path. Fails open like the quota gate.
+  # unrouted (legacy) path. Fails open only when the pause cannot be looked up:
+  # once found, a hold that cannot be recorded refuses the dispatch.
   defp maybe_pause_gate(%Issue{workspace_id: ws_id} = task, opts) when is_binary(ws_id) do
     # Deliberately NOT bypassed by `skip_quota_gate`: the drain replay and MCP
     # `force_quota` override a quota hold, never an operator's pause.
+    case lookup_pause(task, ws_id, opts) do
+      nil ->
+        :ok
+
+      {provider, pause} ->
+        phrase = "held — #{provider} paused: #{pause.reason || "no reason given"}"
+
+        case safe_pause_hold(ws_id, task.id, opts, phrase, provider) do
+          :ok -> {:error, {:quota_held, task.id}}
+          _ -> {:error, {:provider_paused, provider, phrase}}
+        end
+    end
+  end
+
+  defp maybe_pause_gate(_task, _opts), do: :ok
+
+  defp lookup_pause(task, ws_id, opts) do
     workspace = load_workspace(task)
     provider = quota_gate_provider(task, workspace, opts)
 
     case pause_for_dispatch(ws_id, provider, opts) do
-      nil ->
-        :ok
-
-      pause ->
-        phrase = "held — #{provider} paused: #{pause.reason || "no reason given"}"
-
-        case DispatchQueue.hold(ws_id, task.id, unroute(opts), %{phrase: phrase}, provider) do
-          :ok -> {:error, {:quota_held, task.id}}
-          {:error, _} -> :ok
-        end
+      nil -> nil
+      pause -> {provider, pause}
     end
   rescue
-    _ -> :ok
+    _ -> nil
   end
 
-  defp maybe_pause_gate(_task, _opts), do: :ok
+  defp safe_pause_hold(ws_id, task_id, opts, phrase, provider) do
+    DispatchQueue.hold(ws_id, task_id, unroute(opts), %{phrase: phrase}, provider)
+  rescue
+    _ -> :error
+  catch
+    :exit, _ -> :error
+  end
 
   defp pause_for_dispatch(ws_id, provider, opts) do
     Arbiter.Providers.Pause.for_provider(provider) ||
