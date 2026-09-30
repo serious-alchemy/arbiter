@@ -370,7 +370,7 @@ defmodule Arbiter.Usage.Budget do
 
       open ->
         sample = Keyword.get_lazy(opts, :sample, fn -> Estimate.sample(opts) end)
-        spends = open_task_spends(Enum.map(open, & &1.id), opts)
+        spends = open_task_spends(open, opts)
         opts = Keyword.put(opts, :sample, sample)
 
         open
@@ -388,11 +388,24 @@ defmodule Arbiter.Usage.Budget do
       []
   end
 
-  defp open_task_spends(task_ids, opts) do
+  # The ledger scan is bounded to the older of the rolling `:window_days`
+  # window and the oldest open task's `created_at`: no spend can predate the
+  # task it belongs to, so this returns exactly what an unbounded scan would
+  # while a fleet of young tasks still reads only the recent window. `:since`
+  # overrides both.
+  defp open_task_spends(open, opts) do
     now = Keyword.get(opts, :now) || DateTime.utc_now()
     window = Keyword.get(opts, :window_days, @budget_window_days)
-    since = Keyword.get(opts, :since, DateTime.add(now, -window, :day))
-    wanted = MapSet.new(task_ids)
+    floor = DateTime.add(now, -window, :day)
+
+    since =
+      Keyword.get(opts, :since) ||
+        case oldest_created_at(open) do
+          %DateTime{} = oldest -> Enum.min([oldest, floor], DateTime)
+          nil -> floor
+        end
+
+    wanted = MapSet.new(open, & &1.id)
 
     from(e in LedgerRow,
       where: e.source == "task",
@@ -415,6 +428,14 @@ defmodule Arbiter.Usage.Budget do
           acc
       end
     end)
+  end
+
+  defp oldest_created_at(open) do
+    stamps = Enum.map(open, &Map.get(&1, :created_at))
+
+    if Enum.all?(stamps, &match?(%DateTime{}, &1)),
+      do: Enum.min(stamps, DateTime),
+      else: nil
   end
 
   # The board hands `derive/1` plain maps in its pure tests and `%Issue{}`

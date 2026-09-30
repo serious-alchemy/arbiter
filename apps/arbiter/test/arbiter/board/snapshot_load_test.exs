@@ -247,7 +247,7 @@ defmodule Arbiter.Board.SnapshotLoadTest do
       refute old_issue.id in closed_ids
     end
 
-    test "dependency read is scoped to workspace", %{ws: ws} do
+    test "another workspace's blocked ticket stays blocked without :workspace_id", %{ws: ws} do
       {:ok, other_ws} =
         Ash.create(Workspace, %{
           name: "other-ws-#{System.unique_integer([:positive])}",
@@ -264,40 +264,65 @@ defmodule Arbiter.Board.SnapshotLoadTest do
       {:ok, _} = Dependencies.add(ws_task1.id, ws_task2.id, :blocks)
 
       {:ok, other_task1} =
-        Ash.create(Issue, %{
-          title: "Other task 1",
-          workspace_id: other_ws.id,
-          acceptance: "- crit"
-        })
+        Ash.create(Issue, %{title: "Other 1", workspace_id: other_ws.id, acceptance: "- crit"})
 
       {:ok, other_task2} =
-        Ash.create(Issue, %{
-          title: "Other task 2",
-          workspace_id: other_ws.id,
-          acceptance: "- crit"
-        })
+        Ash.create(Issue, %{title: "Other 2", workspace_id: other_ws.id, acceptance: "- crit"})
 
       {:ok, other_task2} = Ash.update(other_task2, %{}, action: :promote_to_ready)
       {:ok, _} = Dependencies.add(other_task1.id, other_task2.id, :blocks)
 
-      # 1. Dependency rows scoped to ws.id
-      ws_deps = Snapshot.dependency_rows(workspace_id: ws.id)
-      ws_dep_from_ids = Enum.map(ws_deps, & &1.from_issue_id)
-      assert ws_task1.id in ws_dep_from_ids
-      refute other_task1.id in ws_dep_from_ids
+      for opts <- [[], [workspace_id: ws.id]] do
+        snapshot = Snapshot.load(opts)
 
-      # 2. Dependency rows unscoped (no workspace_id)
-      all_deps = Snapshot.dependency_rows([])
-      all_dep_from_ids = Enum.map(all_deps, & &1.from_issue_id)
-      assert ws_task1.id in all_dep_from_ids
-      assert other_task1.id in all_dep_from_ids
+        for {blocked, blocker} <- [{ws_task2, ws_task1}, {other_task2, other_task1}] do
+          card = Enum.find(snapshot.blocked, &(&1.id == blocked.id))
+          assert card, "#{blocked.title} should be blocked with opts #{inspect(opts)}"
+          assert blocker.id in card.blocked_by
+        end
+      end
+    end
 
-      snapshot = Snapshot.load(workspace_id: ws.id)
+    test "a blocker closed long ago still satisfies; long-closed children/epics still count",
+         %{ws: ws} do
+      now = DateTime.utc_now()
+      old = DateTime.add(now, -48, :hour)
 
-      # ws_task2 is blocked by ws_task1
-      blocked_card = Enum.find(snapshot.blocked, &(&1.id == ws_task2.id))
-      assert blocked_card
-      assert ws_task1.id in blocked_card.blocked_by
+      {:ok, blocker} = Ash.create(Issue, %{title: "Old blocker", workspace_id: ws.id})
+
+      {:ok, blocked} =
+        Ash.create(Issue, %{title: "Waiting", workspace_id: ws.id, acceptance: "- c"})
+
+      {:ok, blocked} = Ash.update(blocked, %{}, action: :promote_to_ready)
+      {:ok, _} = Dependencies.add(blocker.id, blocked.id, :blocks)
+
+      {:ok, epic} =
+        Ash.create(Issue, %{title: "Old epic", workspace_id: ws.id, issue_type: :epic})
+
+      {:ok, done_child} = Ash.create(Issue, %{title: "Old child", workspace_id: ws.id})
+      {:ok, open_child} = Ash.create(Issue, %{title: "Open child", workspace_id: ws.id})
+      {:ok, _} = Dependencies.add(epic.id, done_child.id, :parent_of)
+      {:ok, _} = Dependencies.add(epic.id, open_child.id, :parent_of)
+
+      for i <- [blocker, done_child, epic] do
+        {:ok, _} = Ash.update(i, %{close_upstream: false}, action: :close)
+      end
+
+      import Ecto.Query
+
+      from(i in "issues", where: i.id in ^[blocker.id, done_child.id, epic.id])
+      |> Arbiter.Repo.update_all(set: [closed_at: old, updated_at: old])
+
+      loaded_ids = Enum.map(Snapshot.load_issues(now), & &1.id)
+      refute blocker.id in loaded_ids
+
+      snapshot = Snapshot.load(now: now)
+
+      refute Enum.any?(snapshot.blocked, &(&1.id == blocked.id))
+
+      card = Enum.find(snapshot.backlog, &(&1.id == open_child.id))
+      assert %{parent: %{id: epic_id, child_total: 2, child_closed: 1}} = card
+      assert epic_id == epic.id
     end
 
     test "derive/1 produces identical output with full issue vs slim issue fixture" do

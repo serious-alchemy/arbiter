@@ -183,7 +183,9 @@ defmodule Arbiter.Board.Snapshot do
     over_budget = over_budget_set(Map.get(input, :over_budget))
 
     issues_by_id = Map.new(issues, &{&1.id, &1})
-    parents = parent_refs(parent_of, issues_by_id)
+    # Edge endpoints outside `issues` (long-closed): resolve parent chips only.
+    ref_by_id = Map.new(Map.get(input, :ref_issues, []), &{&1.id, &1})
+    parents = parent_refs(parent_of, Map.merge(ref_by_id, issues_by_id))
 
     {authors, gate_workers} =
       Enum.split_with(workers, &(worker_role(&1) not in [:reviewer, :implementer]))
@@ -326,21 +328,23 @@ defmodule Arbiter.Board.Snapshot do
     workspace = safe_workspace(Keyword.get(opts, :workspace_id) || default_workspace_id())
     workspace_id = (workspace && workspace.id) || Keyword.get(opts, :workspace_id)
 
-    # Pass workspace_id to dependency_rows if present in opts or resolved from default
-    deps_opts =
-      if workspace_id,
-        do: Keyword.put_new(opts, :workspace_id, workspace_id),
-        else: opts
-
-    deps = dependency_rows(deps_opts)
+    # The board spans every workspace (`load_issues/1` is unscoped), so the
+    # edge read is too: narrowing it to one workspace drops gating, conflict
+    # and parent edges for the others.
+    deps = dependency_rows(opts)
 
     issues = Keyword.get_lazy(opts, :issues, fn -> load_issues(now) end)
+    # `load_issues/1` skips long-closed issues, but an edge may still point at
+    # one (a satisfied blocker, a closed child, a closed parent epic).
+    ref_issues = reference_issues(deps, issues)
     workers = Keyword.get_lazy(opts, :workers, &load_workers/0)
 
     derive(%{
       issues: issues,
       workers: workers,
-      blocked_by: Keyword.get_lazy(opts, :blocked_by, fn -> blockers_from(deps, issues) end),
+      blocked_by:
+        Keyword.get_lazy(opts, :blocked_by, fn -> blockers_from(deps, issues ++ ref_issues) end),
+      ref_issues: ref_issues,
       parent_of: Keyword.get_lazy(opts, :parent_of, fn -> parent_of_from(deps) end),
       conflicts_with:
         Keyword.get_lazy(opts, :conflicts_with, fn -> EdgeGate.conflict_pairs(deps) end),
@@ -1491,26 +1495,30 @@ defmodule Arbiter.Board.Snapshot do
     _ -> []
   end
 
-  defp load_dependencies(opts) do
-    case Keyword.get(opts, :workspace_id) do
-      ws_id when is_binary(ws_id) and ws_id != "" ->
-        require Ash.Query
+  defp load_dependencies(_opts), do: Ash.read!(Arbiter.Tasks.Dependency)
 
-        case Ash.Type.UUID.cast_input(ws_id, []) do
-          {:ok, uuid} ->
-            Arbiter.Tasks.Dependency
-            |> Ash.Query.filter(
-              from_issue.workspace_id == ^uuid or to_issue.workspace_id == ^uuid
-            )
-            |> Ash.read!()
+  @ref_chunk 500
 
-          _ ->
-            Ash.read!(Arbiter.Tasks.Dependency)
-        end
+  # Issues that dependency rows point at but `issues` did not load, read with
+  # only the fields the gate and chips need.
+  defp reference_issues(deps, issues) do
+    require Ash.Query
 
-      _ ->
-        Ash.read!(Arbiter.Tasks.Dependency)
-    end
+    loaded = MapSet.new(issues, & &1.id)
+
+    deps
+    |> Enum.flat_map(&[&1.from_issue_id, &1.to_issue_id])
+    |> Enum.uniq()
+    |> Enum.reject(&MapSet.member?(loaded, &1))
+    |> Enum.chunk_every(@ref_chunk)
+    |> Enum.flat_map(fn ids ->
+      Arbiter.Tasks.Issue
+      |> Ash.Query.select(@needed_issue_fields)
+      |> Ash.Query.filter(id in ^ids)
+      |> Ash.read!()
+    end)
+  rescue
+    _ -> []
   end
 
   # bd-38of5i: `{parent_id, child_id}` for every `:parent_of` row. The board
