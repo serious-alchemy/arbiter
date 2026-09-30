@@ -77,6 +77,16 @@ defmodule Arbiter.Agents.ProviderRouting do
   With no candidate available the dispatch goes ahead exactly as it would
   have without routing, and the decision says so (`outcome: "no_candidate"`).
 
+  ## One "who can take this?" for every surface
+
+  `availability/3` is the single candidate/availability computation. `select/4`
+  (dispatch) is built on it, and so are the board's Autopilot hold and slot
+  arithmetic (bd-3fvue3): `Arbiter.Board.Snapshot.quota_hold/2` holds a
+  most-quota workspace only when no candidate is available, and
+  `effective_max_concurrent/3` sums the available candidates' account headroom.
+  The per-card hold display (bd-1qjv3j) reads the same function (per ticket, so
+  its model tier and pin apply) instead of re-deriving the drop reasons.
+
   ## The decision record
 
   `select/4` returns a JSON-safe, string-keyed map the run stores in
@@ -149,7 +159,45 @@ defmodule Arbiter.Agents.ProviderRouting do
   """
   @spec evaluate(Workspace.t(), Issue.t() | nil, keyword()) :: decision()
   def evaluate(%Workspace{} = ws, task, opts \\ []) do
-    ws |> run_evaluation(task, opts) |> elem(0)
+    ws |> availability(task, opts) |> Map.fetch!(:record)
+  end
+
+  @doc """
+  "Who can take this?" — the one candidate/availability computation, shared by
+  every surface that asks it (bd-3fvue3): `select/4` at dispatch, the board's
+  Autopilot hold and slot arithmetic (`Arbiter.Board.Snapshot.quota_hold/2`,
+  `effective_max_concurrent/3`) and the per-card hold display (bd-1qjv3j).
+  None of them re-derives the candidate set or the drop reasons.
+
+  Takes `evaluate/3`'s options. `task` may be `nil` for a board-wide question
+  that is not about one ticket (the model tier is then the workspace default).
+
+    * `:record` — the decision map `evaluate/3` returns;
+    * `:available` — the ranked available entries, best first; each carries its
+      `:account`, `:agent_type`, `:model`, `:family`, `:headroom` (quota) and
+      `:capacity` (`Concurrency.account_headroom/3`: a positive integer, or
+      `:unlimited`);
+    * `:dropped` — the dropped entries, each with a `:reason` and `:detail`;
+    * `:capacity` — how many more workers the available candidates can take
+      between them: the sum of their `:capacity`, `:unlimited` when any of them
+      is unbounded, `0` with none available.
+  """
+  @spec availability(Workspace.t(), Issue.t() | nil, keyword()) :: %{
+          record: decision(),
+          available: [map()],
+          dropped: [map()],
+          capacity: non_neg_integer() | :unlimited
+        }
+  def availability(%Workspace{} = ws, task, opts \\ []) do
+    {record, available, dropped} = run_evaluation(ws, task, opts)
+    %{record: record, available: available, dropped: dropped, capacity: total_capacity(available)}
+  end
+
+  defp total_capacity(available) do
+    Enum.reduce_while(available, 0, fn
+      %{capacity: :unlimited}, _sum -> {:halt, :unlimited}
+      %{capacity: n}, sum -> {:cont, sum + n}
+    end)
   end
 
   # The record, plus the available (ranked) and dropped entries behind it.
@@ -608,7 +656,7 @@ defmodule Arbiter.Agents.ProviderRouting do
   defp check_capacity(%{account: account} = entry, ctx) do
     case Concurrency.account_headroom(account, ctx.ws, capacity_opts(ctx)) do
       0 -> {:drop, "at_capacity", "no concurrency slot left (max_concurrent / share)"}
-      _ -> {:ok, entry}
+      capacity -> {:ok, Map.put(entry, :capacity, capacity)}
     end
   end
 

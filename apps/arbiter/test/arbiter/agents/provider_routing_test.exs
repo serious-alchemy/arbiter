@@ -378,6 +378,66 @@ defmodule Arbiter.Agents.ProviderRoutingTest do
 
   # ---- AC4: ranking ---------------------------------------------------------
 
+  describe "availability/3 (bd-3fvue3)" do
+    test "is what evaluate/3 records, plus each candidate's capacity and their sum" do
+      ws = workspace!()
+      claude = account!(:claude, "cap", %{max_concurrent: 2})
+      codex = account!(:codex, "cap", %{max_concurrent: 3})
+      allow!(ws, claude, 0)
+      allow!(ws, codex, 1)
+      author_worker!(ws, "cap-worker", "claude")
+
+      o = opts([{claude, claude_quota(0.1)}, {codex, codex_quota(10.0)}], now: now())
+      view = ProviderRouting.availability(ws, nil, o)
+
+      assert view.record == ProviderRouting.evaluate(ws, nil, o)
+      assert view.available |> Enum.map(& &1.capacity) |> Enum.sort() == [1, 3]
+      assert view.dropped == []
+      assert view.capacity == 4
+    end
+
+    test "a dropped candidate's capacity does not count" do
+      ws = workspace!()
+      claude = account!(:claude, "open", %{max_concurrent: 2})
+
+      held =
+        account!(:codex, "held", %{
+          max_concurrent: 4,
+          quota_config: %{"throttle_threshold" => 0.5}
+        })
+
+      allow!(ws, claude, 0)
+      allow!(ws, held, 1)
+
+      view =
+        ProviderRouting.availability(
+          ws,
+          nil,
+          opts([{claude, claude_quota(0.1)}, {held, codex_quota(60.0)}])
+        )
+
+      assert [%{reason: "quota_held"} = dropped] = view.dropped
+      assert dropped.account.id == held.id
+      assert view.capacity == 2
+    end
+
+    test "is :unlimited when any available candidate has no ceiling, 0 with none available" do
+      ws = workspace!()
+      free = account!(:claude, "free")
+      allow!(ws, free, 0)
+
+      assert ProviderRouting.availability(ws, nil, opts([])).capacity == :unlimited
+
+      none = workspace!()
+      parked = account!(:claude, "parked", %{enabled: false})
+      allow!(none, parked, 0)
+
+      view = ProviderRouting.availability(none, nil, opts([]))
+      assert view.available == []
+      assert view.capacity == 0
+    end
+  end
+
   describe "ranking by headroom (AC4)" do
     test "the account with the most headroom against its threshold wins" do
       ws = workspace!()
