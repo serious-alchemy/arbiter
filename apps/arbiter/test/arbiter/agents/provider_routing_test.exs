@@ -213,6 +213,24 @@ defmodule Arbiter.Agents.ProviderRoutingTest do
       assert reasons(decision)[parked.slug] == "disabled"
     end
 
+    test "a paused account is dropped with reason paused (bd-5ef587)", %{ws: ws} do
+      paused = account!(:codex, "paused")
+      allow!(ws, paused, 1)
+      {:ok, _} = Arbiter.Providers.Pause.pause(paused.id, reason: "jail escape", by: "test")
+
+      decision = ProviderRouting.evaluate(ws, task!(ws), opts([]))
+      assert reasons(decision)[paused.slug] == "paused"
+    end
+
+    test "a paused provider drops every account on it", %{ws: ws} do
+      a = account!(:codex, "a")
+      allow!(ws, a, 1)
+      {:ok, _} = Arbiter.Providers.Pause.pause("codex", reason: "x", by: "test")
+
+      decision = ProviderRouting.evaluate(ws, task!(ws), opts([]))
+      assert reasons(decision)[a.slug] == "paused"
+    end
+
     test "a merged account is dropped", %{ws: ws, healthy: healthy} do
       merged = account!(:codex, "merged", %{merged_into_id: healthy.id})
       allow!(ws, merged, 1)

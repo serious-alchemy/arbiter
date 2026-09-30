@@ -254,7 +254,8 @@ defmodule Arbiter.Agents do
 
   @doc """
   Check whether an agent provider is currently available to run.
-  Returns false if the adapter is unknown or its credentials are flagged expired.
+  Returns false if the adapter is unknown, its credentials are flagged expired,
+  or the provider is paused (`Arbiter.Providers.Pause`).
   """
   @spec provider_available?(atom()) :: boolean()
   def provider_available?(provider) when is_atom(provider) do
@@ -263,7 +264,8 @@ defmodule Arbiter.Agents do
         false
 
       adapter ->
-        not Arbiter.Agents.CredentialWatchdog.expired?(adapter)
+        not Arbiter.Agents.CredentialWatchdog.expired?(adapter) and
+          not Arbiter.Providers.Pause.provider_paused?(provider)
     end
   end
 

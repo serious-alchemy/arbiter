@@ -49,6 +49,8 @@ defmodule Arbiter.Agents.ProviderRouting do
     * `write_confinement_none` — the scope is `:strict` and the adapter's
       `write_confinement/1` (bd-1abj7u) is `:none`. An adapter that does not
       implement the callback answers `:none`;
+    * `paused` — the account or its provider is paused (`Arbiter.Providers.Pause`,
+      `arb provider pause`), with the operator's reason as the detail;
     * `quota_held` — the workspace's `Arbiter.Quota.Gate` would hold a
       dispatch on this account's snapshot (account ∧ workspace policy, paced
       included) for the model it would run.
@@ -619,6 +621,20 @@ defmodule Arbiter.Agents.ProviderRouting do
   defp check_account(%{account: %ProviderAccount{merged_into_id: into}}, _ctx)
        when not is_nil(into),
        do: {:drop, "merged", "merged into #{into}"}
+
+  defp check_account(%{account: %ProviderAccount{} = account} = entry, _ctx) do
+    case Arbiter.Providers.Pause.for_account(account) do
+      nil -> {:ok, entry}
+      pause -> {:drop, "paused", pause.reason || "paused by #{pause.by || "the operator"}"}
+    end
+  end
+
+  defp check_account(%{account: nil, agent_type: type} = entry, _ctx) do
+    case Arbiter.Providers.Pause.for_provider(type) do
+      nil -> {:ok, entry}
+      pause -> {:drop, "paused", pause.reason}
+    end
+  end
 
   defp check_account(entry, _ctx), do: {:ok, entry}
 

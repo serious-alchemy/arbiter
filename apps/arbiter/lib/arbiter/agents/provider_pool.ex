@@ -79,10 +79,14 @@ defmodule Arbiter.Agents.ProviderPool do
 
   @doc """
   Returns `true` if `provider` is currently healthy (not in the cooldown
-  window). Always returns `true` when the GenServer is not running.
+  window and not paused by the operator). Always returns `true` when the GenServer is not running.
   """
   @spec healthy?(atom()) :: boolean()
   def healthy?(provider) when is_atom(provider) do
+    not Arbiter.Providers.Pause.provider_paused?(provider) and breaker_closed?(provider)
+  end
+
+  defp breaker_closed?(provider) do
     case table_up?() && :ets.lookup(@table, provider) do
       false -> true
       [] -> true
@@ -93,15 +97,17 @@ defmodule Arbiter.Agents.ProviderPool do
   @doc """
   Picks the first healthy provider from `providers`.
 
-  When no provider is healthy (all exhausted), falls back to the first entry
-  in the list so the system degrades gracefully rather than stalling.
-  Returns `nil` only when `providers` is empty.
+  When no provider is healthy (all exhausted), falls back to the first
+  *unpaused* entry so the system degrades gracefully rather than stalling — a
+  paused provider (`Arbiter.Providers.Pause`) is never picked. Returns `nil`
+  when `providers` is empty or every one is paused.
   """
   @spec pick([atom()]) :: atom() | nil
   def pick([]), do: nil
 
   def pick(providers) when is_list(providers) do
-    Enum.find(providers, &healthy?/1) || List.first(providers)
+    Enum.find(providers, &healthy?/1) ||
+      Enum.find(providers, &(not Arbiter.Providers.Pause.provider_paused?(&1)))
   end
 
   # ---- GenServer callbacks -------------------------------------------------
