@@ -183,7 +183,9 @@ defmodule Arbiter.Board.Snapshot do
     over_budget = over_budget_set(Map.get(input, :over_budget))
 
     issues_by_id = Map.new(issues, &{&1.id, &1})
-    parents = parent_refs(parent_of, issues_by_id)
+    # Edge endpoints outside `issues` (long-closed): resolve parent chips only.
+    ref_by_id = Map.new(Map.get(input, :ref_issues, []), &{&1.id, &1})
+    parents = parent_refs(parent_of, Map.merge(ref_by_id, issues_by_id))
 
     {authors, gate_workers} =
       Enum.split_with(workers, &(worker_role(&1) not in [:reviewer, :implementer]))
@@ -271,6 +273,40 @@ defmodule Arbiter.Board.Snapshot do
     Map.put(board, :attention, attention_items(board))
   end
 
+  @needed_issue_fields [
+    :id,
+    :title,
+    :priority,
+    :rank,
+    :state,
+    :difficulty,
+    :issue_type,
+    :workspace_id,
+    :created_at,
+    :updated_at,
+    :closed_at,
+    :close_reason,
+    :pr_ref,
+    :merger_url,
+    :merger_status,
+    :merge_watch,
+    :pending_merge,
+    :awaiting_verification_at,
+    :attention_cause,
+    :attention_detail,
+    :attention_since,
+    :attention_owner,
+    :attention_owner_cause,
+    :attention_note,
+    :attention_owner_since,
+    :description,
+    :acceptance,
+    :notes
+  ]
+
+  @doc false
+  def needed_issue_fields, do: @needed_issue_fields
+
   @doc """
   Read the world and derive the board.
 
@@ -288,33 +324,36 @@ defmodule Arbiter.Board.Snapshot do
   """
   @spec load(keyword()) :: t()
   def load(opts \\ []) do
-    issues = Keyword.get_lazy(opts, :issues, &load_issues/0)
-    workers = Keyword.get_lazy(opts, :workers, &load_workers/0)
-    workspace_id = Keyword.get(opts, :workspace_id) || default_workspace_id()
+    now = Keyword.get(opts, :now) || DateTime.utc_now()
+    workspace = safe_workspace(Keyword.get(opts, :workspace_id) || default_workspace_id())
+    workspace_id = (workspace && workspace.id) || Keyword.get(opts, :workspace_id)
 
-    # One read of the dependency rows feeds both derived inputs — the gating
-    # blockers and (bd-38of5i) the `parent_of` pairs. Skipped entirely when the
-    # caller supplied both, which is how the pure tests stay repo-free.
+    # The board spans every workspace (`load_issues/1` is unscoped), so the
+    # edge read is too: narrowing it to one workspace drops gating, conflict
+    # and parent edges for the others.
     deps = dependency_rows(opts)
+
+    issues = Keyword.get_lazy(opts, :issues, fn -> load_issues(now) end)
+    # `load_issues/1` skips long-closed issues, but an edge may still point at
+    # one (a satisfied blocker, a closed child, a closed parent epic).
+    ref_issues = reference_issues(deps, issues)
+    workers = Keyword.get_lazy(opts, :workers, &load_workers/0)
 
     derive(%{
       issues: issues,
       workers: workers,
-      blocked_by: Keyword.get_lazy(opts, :blocked_by, fn -> blockers_from(deps, issues) end),
+      blocked_by:
+        Keyword.get_lazy(opts, :blocked_by, fn -> blockers_from(deps, issues ++ ref_issues) end),
+      ref_issues: ref_issues,
       parent_of: Keyword.get_lazy(opts, :parent_of, fn -> parent_of_from(deps) end),
       conflicts_with:
         Keyword.get_lazy(opts, :conflicts_with, fn -> EdgeGate.conflict_pairs(deps) end),
       changed_files: Keyword.get(opts, :changed_files, %{}),
-      now: Keyword.get(opts, :now) || DateTime.utc_now(),
-      # `derive/1` subtracts the used slots from this total, and the account
-      # term folded in below is a headroom expressed in the caller's own frame
-      # — so the two have to agree on what "used" means. Since bd-asxw4e that
-      # is the tickets In progress: hand it the same count `derive/1` will
-      # subtract.
+      now: now,
       slots_total:
         Keyword.get(opts, :slots_total) ||
-          effective_max_concurrent(workspace_id, SlotGate.slots_used(issues)),
-      quota: Keyword.get_lazy(opts, :quota, fn -> quota_hold(workspace_id) end),
+          effective_max_concurrent(workspace || workspace_id, SlotGate.slots_used(issues)),
+      quota: Keyword.get_lazy(opts, :quota, fn -> quota_hold(workspace || workspace_id) end),
       paused: Keyword.get(opts, :paused, false),
       watchdog_live: Keyword.get_lazy(opts, :watchdog_live, fn -> watchdog_live(issues) end),
       over_budget: Keyword.get_lazy(opts, :over_budget, fn -> Budget.over_budget_ids(issues) end)
@@ -405,24 +444,27 @@ defmodule Arbiter.Board.Snapshot do
   When workspace_id is nil, returns the system max: a fleet-wide board is not
   scoped to any one account.
   """
-  @spec effective_max_concurrent(String.t() | nil, non_neg_integer() | nil) ::
-          non_neg_integer()
-  def effective_max_concurrent(workspace_id, already_counted \\ nil)
+  @spec effective_max_concurrent(
+          String.t() | Arbiter.Tasks.Workspace.t() | nil,
+          non_neg_integer() | nil
+        ) :: non_neg_integer()
+  def effective_max_concurrent(workspace_or_id, already_counted \\ nil)
 
   def effective_max_concurrent(nil, _already_counted) do
     system_max_concurrent()
   end
 
-  def effective_max_concurrent(workspace_id, already_counted) when is_binary(workspace_id) do
+  def effective_max_concurrent(%Arbiter.Tasks.Workspace{} = ws, already_counted) do
+    workspace_id = ws.id
     system_max = system_max_concurrent()
 
     base =
-      case workspace_config_max(workspace_id) do
+      case workspace_config_max(ws) do
         n when is_integer(n) and n > 0 -> min(n, system_max)
         _ -> system_max
       end
 
-    provider = Arbiter.Quota.default_provider(workspace_id)
+    provider = Arbiter.Quota.default_provider(ws)
 
     already_counted =
       already_counted || Concurrency.workspace_live_count(workspace_id, provider)
@@ -432,13 +474,20 @@ defmodule Arbiter.Board.Snapshot do
     _ -> system_max_concurrent()
   end
 
-  # Read the workspace's `conductor.max_concurrent` config key, if set. The key
-  # name is historical (bd-a14qd1); it is the board scheduler's per-workspace cap.
-  defp workspace_config_max(workspace_id) do
-    case Ash.get(Arbiter.Tasks.Workspace, workspace_id) do
-      {:ok, ws} -> Arbiter.Tasks.Workspace.max_concurrent(ws)
-      _ -> nil
+  def effective_max_concurrent(workspace_id, already_counted) when is_binary(workspace_id) do
+    case safe_workspace(workspace_id) do
+      %Arbiter.Tasks.Workspace{} = ws ->
+        effective_max_concurrent(ws, already_counted)
+
+      nil ->
+        system_max_concurrent()
     end
+  rescue
+    _ -> system_max_concurrent()
+  end
+
+  defp workspace_config_max(%Arbiter.Tasks.Workspace{} = ws) do
+    Arbiter.Tasks.Workspace.max_concurrent(ws)
   rescue
     _ -> nil
   end
@@ -472,18 +521,17 @@ defmodule Arbiter.Board.Snapshot do
   refused. This is what stops a reopened auth-failed task from being
   re-attempted every tick while credentials are dead.
   """
-  @spec quota_hold(String.t() | nil) :: Scheduler.quota()
-  def quota_hold(workspace_id \\ nil) do
-    workspace_id = workspace_id || default_workspace_id()
-    auth_hold(workspace_id) || quota_window_hold(workspace_id)
+  @spec quota_hold(String.t() | Arbiter.Tasks.Workspace.t() | nil) :: Scheduler.quota()
+  def quota_hold(workspace_or_id \\ nil) do
+    workspace = safe_workspace(workspace_or_id) || safe_workspace(default_workspace_id())
+    auth_hold(workspace) || quota_window_hold(workspace)
   end
 
   # The board's read of the hold is `AuthHold.held/2`, which fails open: the
   # dispatch guard's own fail-closed read is the backstop, and a board must
   # not paint a hold that is not there.
-  defp auth_hold(ws_id) when is_binary(ws_id) do
-    with %Arbiter.Tasks.Workspace{} = workspace <- safe_workspace(ws_id),
-         adapter when is_atom(adapter) <- Arbiter.Agents.for_workspace(workspace),
+  defp auth_hold(%Arbiter.Tasks.Workspace{} = workspace) do
+    with adapter when is_atom(adapter) <- Arbiter.Agents.for_workspace(workspace),
          %{provider: provider, deaths: deaths} <- Arbiter.Agents.AuthHold.held(adapter) do
       {:hold, "#{provider} auth hold (#{deaths} consecutive auth deaths)"}
     else
@@ -493,12 +541,12 @@ defmodule Arbiter.Board.Snapshot do
     _ -> nil
   end
 
-  defp auth_hold(_ws_id), do: nil
+  defp auth_hold(_), do: nil
 
-  defp quota_window_hold(workspace_id) do
-    with ws_id when is_binary(ws_id) <- workspace_id,
-         workspace <- safe_workspace(ws_id),
-         false <- Arbiter.Quota.continue_mode?(workspace),
+  defp quota_window_hold(%Arbiter.Tasks.Workspace{} = workspace) do
+    ws_id = workspace.id
+
+    with false <- Arbiter.Quota.continue_mode?(workspace),
          provider <- quota_provider(workspace),
          account <- quota_account(ws_id, provider),
          snapshot when not is_nil(snapshot) <- latest_quota(account, provider) do
@@ -509,6 +557,8 @@ defmodule Arbiter.Board.Snapshot do
   rescue
     _ -> :ok
   end
+
+  defp quota_window_hold(_), do: :ok
 
   # ---- shared column classification -----------------------------------------
 
@@ -1401,8 +1451,21 @@ defmodule Arbiter.Board.Snapshot do
 
   # ---- reads ---------------------------------------------------------------
 
-  defp load_issues do
-    Ash.read!(Arbiter.Tasks.Issue)
+  @doc false
+  def load_issues(now \\ nil) do
+    now = now || DateTime.utc_now()
+    cutoff = DateTime.add(now, -24, :hour)
+
+    require Ash.Query
+
+    Arbiter.Tasks.Issue
+    |> Ash.Query.select(@needed_issue_fields)
+    |> Ash.Query.filter(
+      state != :closed or
+        closed_at >= ^cutoff or
+        (is_nil(closed_at) and (updated_at >= ^cutoff or is_nil(updated_at)))
+    )
+    |> Ash.read!()
   rescue
     _ -> []
   end
@@ -1415,12 +1478,45 @@ defmodule Arbiter.Board.Snapshot do
     :exit, _ -> []
   end
 
-  defp dependency_rows(opts) do
+  @doc false
+  def dependency_rows(opts) do
     if Enum.all?([:blocked_by, :parent_of, :conflicts_with], &Keyword.has_key?(opts, &1)) do
       []
     else
-      Ash.read!(Arbiter.Tasks.Dependency)
+      case Keyword.get(opts, :deps) do
+        deps when is_list(deps) ->
+          deps
+
+        _ ->
+          load_dependencies(opts)
+      end
     end
+  rescue
+    _ -> []
+  end
+
+  defp load_dependencies(_opts), do: Ash.read!(Arbiter.Tasks.Dependency)
+
+  @ref_chunk 500
+
+  # Issues that dependency rows point at but `issues` did not load, read with
+  # only the fields the gate and chips need.
+  defp reference_issues(deps, issues) do
+    require Ash.Query
+
+    loaded = MapSet.new(issues, & &1.id)
+
+    deps
+    |> Enum.flat_map(&[&1.from_issue_id, &1.to_issue_id])
+    |> Enum.uniq()
+    |> Enum.reject(&MapSet.member?(loaded, &1))
+    |> Enum.chunk_every(@ref_chunk)
+    |> Enum.flat_map(fn ids ->
+      Arbiter.Tasks.Issue
+      |> Ash.Query.select(@needed_issue_fields)
+      |> Ash.Query.filter(id in ^ids)
+      |> Ash.read!()
+    end)
   rescue
     _ -> []
   end
@@ -1449,7 +1545,9 @@ defmodule Arbiter.Board.Snapshot do
     _ -> nil
   end
 
-  defp safe_workspace(ws_id) do
+  defp safe_workspace(%Arbiter.Tasks.Workspace{} = ws), do: ws
+
+  defp safe_workspace(ws_id) when is_binary(ws_id) do
     case Ash.get(Arbiter.Tasks.Workspace, ws_id) do
       {:ok, ws} -> ws
       _ -> nil
@@ -1458,8 +1556,10 @@ defmodule Arbiter.Board.Snapshot do
     _ -> nil
   end
 
+  defp safe_workspace(_), do: nil
+
   defp quota_provider(workspace) do
-    if workspace, do: Arbiter.Quota.default_provider(workspace), else: :claude
+    Arbiter.Quota.default_provider(workspace)
   end
 
   defp latest_quota(nil, _provider), do: nil

@@ -142,6 +142,8 @@ defmodule Arbiter.Application do
       Arbiter.Sessions.OrphanReaper,
       # bd-9iv4qd: reclaims worktree-root leaves whose gitdir is gone.
       Arbiter.Worker.WorktreeSweeper,
+      # Periodically runs PRAGMA optimize on SQLite repos (bd-2zjtca).
+      Arbiter.Repo.OptimizeSweeper,
       # Deletes a session's persisted raw transcript once it has been :ended
       # past the retention window (phase 9, RFC §11). See
       # Arbiter.Sessions.TranscriptRetention.
@@ -215,6 +217,9 @@ defmodule Arbiter.Application do
       # decorated `list_latest_for_workspace/2` result is memoized in
       # (bd-4p6pw7 round 2) — see that module's docs.
       Arbiter.Quota.QuotaCache,
+      # Owns the ETS table memoizing `Arbiter.Usage.Estimate.sample/1`
+      # (bd-3d1zge) — see that module's docs.
+      Arbiter.Usage.EstimateCache,
       # The board's Ready queue drains itself (bd-bqyeqa). Paused unless the
       # install opts in with `config :arbiter, :board_autopilot, enabled: true`
       # — auto-dispatch spends money, so an upgrade must not discover it by
@@ -294,6 +299,7 @@ defmodule Arbiter.Application do
       Arbiter.Boot.Migrator,
       Arbiter.Boot.ConfigMigrator,
       Arbiter.Boot.ProviderAccounts,
+      Arbiter.Boot.Optimize,
       Supervisor.child_spec(
         {Task,
          fn ->

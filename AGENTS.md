@@ -114,7 +114,25 @@ custom classes must fully style the input
 ## Mix guidelines
 
 - Read the docs and options before using tasks (by using `mix help task_name`)
-- To debug test failures, run tests in a specific file with `mix test test/my_test.exs` or run all previously failed tests with `mix test --failed`
+- **Testing in this umbrella repo:**
+  - This is an umbrella repository (`apps/arbiter`, `apps/arbiter_web`, `apps/arbiter_cli`, `apps/arbiter_release_env`).
+  - **Never pass a file path to `mix test` from the umbrella root** (e.g. `mix test apps/arbiter/test/...` or `mix test test/...`), because Mix will ignore the path filter and run the entire ~8,900-test suite across all child apps.
+  - **To run a single test file:** change into the app's directory first:
+    ```bash
+    cd apps/<app> && mix test test/<path>_test.exs
+    ```
+    Add `:<line>` to target a single test (e.g. `cd apps/arbiter && mix test test/arbiter/accounts/enablement_test.exs:10`).
+  - **To re-run failures:** run `mix test --failed` inside the specific app directory (`cd apps/<app> && mix test --failed`).
+  - **App responsibilities:**
+    - `apps/arbiter`: Core domain, database/Ecto schemas, background workers, and business logic.
+    - `apps/arbiter_web`: Phoenix web endpoint, LiveView interfaces, controllers, and channels.
+    - `apps/arbiter_cli`: Command-line interface (`arb` escript).
+    - `apps/arbiter_release_env`: Runtime release environment configuration.
+  - **Full-suite and precommit commands:**
+    - Run `mix precommit` and `mix audit` from the **umbrella repo root**.
+    - Note that the full test suite runs thousands of tests and takes ~5–10 minutes; do **not** run the full suite as your first check when iterating on specific changes. Use the single-file recipe above.
+  - **Test helper scripts:**
+    - Scripts like `scripts/session-restart-survival.sh` run specific excluded integration test suites (e.g. systemd user session survival); they are not for running arbitrary individual test files.
 - `mix deps.clean --all` is **almost never needed**. **Avoid** using it unless you have good reason
 
 ## Test guidelines

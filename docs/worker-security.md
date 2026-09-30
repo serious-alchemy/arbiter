@@ -600,7 +600,9 @@ a prefix, were both refused). If that is ever bypassed (a shell command, a
 future agy change), the jail answers `read-only file system`
 (`Arbiter.Worker.JailTest`). On 2026-09-29, agy 1.2.13 was probe-verified under
 `:strict` (bd-9xiwu1 / chore-68), confirming that writes outside the worktree
-and denied tool calls are correctly blocked. `:auto` and `:bypass` do not get
+and denied tool calls are correctly blocked. On 2026-09-30: on v0.2.2, agy under
+`:strict` made Arbiter MCP calls (bd-cy4ls6) and an agy review reached a verdict
+(bd-cwe9n2). `:auto` and `:bypass` do not get
 the working set: `always-proceed` never consults `allow`.
 
 ### Credentials are untouched by the `$HOME` redirect

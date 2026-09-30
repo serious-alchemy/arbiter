@@ -66,6 +66,7 @@ defmodule Arbiter.Usage.Estimate do
   """
 
   alias Arbiter.Tasks.Issue
+  alias Arbiter.Usage.EstimateCache
   alias Arbiter.Usage.Event
 
   require Ash.Query
@@ -529,6 +530,14 @@ defmodule Arbiter.Usage.Estimate do
   """
   @spec sample(keyword()) :: [task_cost()]
   def sample(opts \\ []) do
+    if Keyword.get(opts, :cached, true) do
+      EstimateCache.fetch(opts, fn -> do_sample(opts) end)
+    else
+      do_sample(opts)
+    end
+  end
+
+  defp do_sample(opts) do
     now = Keyword.get(opts, :now) || DateTime.utc_now()
     window = Keyword.get(opts, :window_days, @window_days)
     since = DateTime.add(now, -window, :day)

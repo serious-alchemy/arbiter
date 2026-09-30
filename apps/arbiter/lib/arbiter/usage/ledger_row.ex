@@ -18,6 +18,7 @@ defmodule Arbiter.Usage.LedgerRow do
   @primary_key false
   schema "usage_events" do
     field :task_id, :string
+    field :base_task_id, :string
     field :source, :string
     field :session_id, :string
     field :provider_account_id, Ecto.UUID
