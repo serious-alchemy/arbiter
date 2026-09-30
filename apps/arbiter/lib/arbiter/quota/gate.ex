@@ -83,6 +83,54 @@ defmodule Arbiter.Quota.Gate do
   consulted only when a worker is about to *start*, so a running worker is
   never interrupted by a paced line it has pushed utilization past.
 
+  ## Staleness, and when a stale 7d hold lifts (bd-b7umwj, bd-2wnkoq)
+
+  The two windows age differently (`stale?/1`, `long_window_stale?/1`):
+
+    * the **primary** (5h) window fails open once its snapshot is older than
+      `staleness_threshold_seconds/1` for its source (1200 s for a polled
+      row), or once its `reset_at` has passed — a held fleet makes no traffic,
+      and this is how it gets a fresh reading (bd-y0yup0);
+    * a **long-window** (7d) hold does not fail open on age: the provider
+      still accepts requests at `allowed_warning`, so a let-through dispatch
+      would run for hours against the very budget the hold protects
+      (bd-b7umwj).
+
+  That made it look as if "a 7d hold cannot lift without a fresh polled
+  snapshot" — a trap, since the poll is the thing that is broken when the
+  snapshot goes stale. The chosen answer is that a 7d hold on a snapshot
+  nobody refreshes is **sticky but bounded**. It lifts at the first of:
+
+    1. a fresh poll showing the long window cleared;
+    2. the long window's own reset — the snapshot's `secondary_reset_at`
+       (Anthropic `reset_7d_at`, Codex `weekly_reset_at`) passing, never more
+       than seven days after the reading — after which the reading describes
+       a closed window and no longer binds, fresh poll or not;
+    3. with no reset time reported, the reading turning seven days old.
+
+  So the worst case is bounded by `secondary_reset_at`, and it is not
+  silent: once the snapshot is older than its alert threshold,
+  `Arbiter.Quota.StalenessWatch` raises an operator alert that says whether a
+  7d hold is in force and when it lifts.
+
+  Escape hatches, for an operator who cannot wait for the reset:
+
+    * **Restore the poll** — the real fix. The `quota_poll_failing` alert, or
+      the `operator_login_lapsed` / `quota_grant_failing` escalation, names
+      the credential and the command that logs it in again; the next poll
+      lifts a hold its fresh reading no longer supports.
+    * **Dispatch past it** — `arb config set quota.on_exhaustion continue
+      --workspace <ws>` puts that workspace on `Arbiter.Quota.Gate.Continue`,
+      which never holds: past-plan dispatch runs as paid overage, recorded and
+      alerted, not stopped. Set it back to `throttle` once the poll is healthy.
+    * **Raise the ceiling** — for a utilization hold, a higher
+      `weekly_threshold`; for an `allowed_warning` hold,
+      `weekly_warning_policy: ignore`. The account's `quota_config` is a floor
+      a workspace may only tighten, so the account side may need it too
+      (`arb account set <ref> --weekly-threshold F`, and `arb config set
+      quota.weekly_threshold F` for the workspace). A 7d `rejected` is the
+      provider refusing requests; no ceiling lifts that.
+
   ## The pace verdict (bd-clzkvp)
 
   Both utilization rules are decided by `Arbiter.Quota.Pace.evaluate/4`,
@@ -115,10 +163,10 @@ defmodule Arbiter.Quota.Gate do
   @builtin_window_seconds %{"5h" => 18_000, "7d" => 604_800, "weekly" => 604_800}
 
   # Staleness thresholds, per `capture_source` — see
-  # `staleness_threshold_seconds/1` for why the polled source gets twice the
-  # margin of the header capture.
+  # `staleness_threshold_seconds/1` for why the polled source gets four times
+  # the margin of the header capture.
   @default_staleness_threshold_seconds 300
-  @default_polled_staleness_threshold_seconds 600
+  @default_polled_staleness_threshold_seconds 1_200
   # Mirrors `Arbiter.Quota.oauth_poll_source/0`. Inlined rather than called
   # because it is matched in a function head, and a compile-time reference to
   # the domain module from here would be a compile dependency in the wrong
@@ -704,7 +752,7 @@ defmodule Arbiter.Quota.Gate do
       5h, Codex session, Google representative model), so `utilization` /
       `status` no longer reflect the current window.
     * `captured_at` is older than the staleness threshold for the snapshot's
-      own `capture_source` (300 s for proxy header capture, 600 s for a
+      own `capture_source` (300 s for proxy header capture, 1200 s for a
       `/api/oauth/usage` poll — see `staleness_threshold_seconds/1`) — the
       snapshot is too old to trust for dispatch decisions even if the window
       hasn't rolled yet. After `/limit-reset` or other API state changes, the
@@ -715,12 +763,14 @@ defmodule Arbiter.Quota.Gate do
   gate mean by "too old to trust" — `Arbiter.Loop.Scarcity` uses it to refuse
   to calibrate, and `arb quota` prints it as `STALE`.
 
-  Staleness fails open **for the primary window only**: `over_cap?/2` and
-  `in_overage?/2` drop the primary signals of a stale snapshot. If the
+  Staleness fails open **for the primary window only**: `over_cap?/2` /
+  `gating_window/2` drop the primary rules of a stale snapshot. If the
   workspace is still genuinely exhausted, at most one dispatch attempt per
   staleness window (default 5 min) will be let through before the gate
   re-captures the real `rejected` status and starts holding again (the clock
-  resets on the captured_at timestamp).
+  resets on the captured_at timestamp). `in_overage?/2` is deliberately
+  narrower: an age-stale reading that shows the cap reached keeps counting
+  as overage until its window resets (see its doc).
 
   The **long** window does not fail open on age — see `long_window_stale?/1`.
   """
@@ -776,6 +826,10 @@ defmodule Arbiter.Quota.Gate do
   reading older than the long window's own length (#{@long_window_seconds}s /
   7 days — both Anthropic's 7d and Codex's weekly window) stops binding,
   since by then the window must have rolled at least once.
+
+  When the poll itself is what broke, the hold still lifts at the window's
+  reset — see "Staleness, and when a stale 7d hold lifts" in the moduledoc,
+  which also lists the operator's escape hatches (bd-2wnkoq).
   """
   @spec long_window_stale?(quota_source()) :: boolean()
   def long_window_stale?(quota), do: quota |> Snapshot.normalize() |> snapshot_long_stale?()
@@ -853,19 +907,29 @@ defmodule Arbiter.Quota.Gate do
   Header capture rides on traffic the fleet is making anyway, so a gap in it
   means the fleet went quiet — 300 s is a fine trip-wire. The
   `/api/oauth/usage` poll is different: that endpoint's account-wide budget is
-  roughly **one request per 5 minutes**, which is exactly the 300 s threshold,
-  so a single 429 (the endpoint 429s readily, and
-  `Arbiter.Quota.OAuthUsage` then sits out a 180 s cooldown) would age the row
-  past the threshold and fail the primary window **open** — the fleet would
-  dispatch straight into a cap it had just measured.
+  roughly **one request per 5 minutes**, which is exactly
+  `Arbiter.Quota.CloudProbe`'s 300 s cadence, and it 429s readily. A 429 costs
+  **two** polls: the rejected one, and the next scheduled one, which
+  `Arbiter.Quota.OAuthUsage`'s cooldown (one cycle plus 30 s, or a longer
+  `Retry-After`) suppresses on purpose so a rate-limited poll backs off instead
+  of hammering the endpoint (#1876). The next successful poll then lands about
+  three cycles — ~900 s — after the last one. With any threshold under that, a
+  single 429 would age the row past it and fail the primary window **open**:
+  the fleet would dispatch straight into a cap it had just measured.
 
   A polled row therefore gets #{@default_polled_staleness_threshold_seconds} s
-  (`:polled_staleness_threshold_seconds` app-env): two whole missed polls of
-  margin, so it takes a sustained outage rather than one 429 to lose the gate.
-  Raising the threshold was chosen over polling faster (e.g. every 240 s)
-  because polling faster *spends* more of the same scarce budget to buy the
-  margin, and with a 180 s cooldown after a 429 the next successful poll can
-  still land ~480 s after the last one — more requests, and still no margin.
+  (`:polled_staleness_threshold_seconds` app-env): four poll cycles, which
+  covers the rejected poll, the suppressed one and the poll that lands, plus a
+  whole cycle of slack for scheduling drift and request latency. It takes a
+  sustained outage (a second 429 in a row, or a lapsed credential) rather than
+  one 429 to lose the gate. Trusting a polled row for longer only ever keeps
+  the primary rules — holds and past-plan detection — in force for longer; a
+  stale row fails open, so a longer threshold can never let through a dispatch
+  a shorter one would have held. Raising the threshold was chosen over polling
+  faster (e.g. every 240 s) because polling faster *spends* more of the same
+  scarce budget to buy the margin — and makes a 429, and the poll it costs,
+  more likely. A blackout longer than this margin is what
+  `Arbiter.Quota.StalenessWatch` alerts on.
 
   Anything other than the poll marker — the proxy's `"headers"`, `nil` on
   legacy rows, and every non-Anthropic provider (Codex / Google, which carry
@@ -1172,10 +1236,42 @@ defmodule Arbiter.Quota.Gate do
   `"allowed_warning"` is not overage either; only an outright long-window
   reject is (bd-1tuxv8).
 
-  Staleness is scoped per window exactly as in `gating_window/2` (bd-b7umwj):
-  a stale primary window drops the `overage_status` / primary `status` signals
-  (fail open), while a long-window reject keeps counting until
-  `long_window_stale?/1` says otherwise.
+  ## Staleness: detection does not fail open like the gate (bd-2wnkoq)
+
+  A long-window reject keeps counting until `long_window_stale?/1` says
+  otherwise, exactly as in `gating_window/2` (bd-b7umwj). The primary window
+  is **not** scoped like the gate's, by decision:
+
+    * A past-plan primary reading counts while the snapshot is fresh, as
+      before.
+    * On a snapshot that is stale only by **age**, a reading that shows the
+      cap *reached* — `overage_status == "in_overage"`, or a past-plan
+      `status` other than the `allowed_warning` tier (`"rejected"`, Codex
+      `"limit_reached"`) — keeps counting **until that window's `reset_at`
+      passes**.
+    * Everything else fails open as the gate does: the window has rolled
+      (`reset_at` passed — the reading describes a closed window), there is
+      no `reset_at` to bound the reading, or the reading is `allowed_warning`
+      (a burn-rate warning that clears by itself as the window elapses).
+
+  Why not simply mirror the gate: the gate fails open on age so a held fleet,
+  which makes no traffic, gets one dispatch through to re-capture a real
+  reading (bd-y0yup0). This function holds nothing, so there is nothing to
+  recover from, and usage inside one window only accumulates — a cap reached
+  at 14:00 is still reached at 14:30 unless the window reset in between.
+  Dropping the signal on age was not a neutral fail-open, either: `Continue`
+  then answered `:allow`, and `Arbiter.Worker.Dispatch` reads an `:allow`
+  over a snapshot as "not past the cap" and **clears the overage alert** —
+  so a lapsed poll silently cleared the alert and stopped the overage
+  accounting mid-window, while the fleet kept paying overage.
+
+  What stays undetected is a cap crossed **after** the snapshot went stale:
+  a stale `"allowed"` reading cannot show it, nor can one whose window has
+  rolled. That blind spot is accepted because it cannot be closed without a
+  fresh reading, and it is covered by `Arbiter.Quota.StalenessWatch` — the
+  compensating control: once the snapshot's `captured_at` is older than its
+  alert threshold, it raises an operator alert (whether or not anything
+  reports a poll failure) saying quota accounting is blind and for how long.
   """
   @spec in_overage?(quota_source(), policy()) :: boolean()
   def in_overage?(quota, _policy) do
@@ -1184,17 +1280,46 @@ defmodule Arbiter.Quota.Gate do
         false
 
       %Snapshot{} = snapshot ->
-        primary_overage?(snapshot) or long_window_overage?(snapshot)
+        now = DateTime.utc_now()
+        primary_overage?(snapshot, now) or long_window_overage?(snapshot, now)
     end
   end
 
-  defp primary_overage?(%Snapshot{} = s) do
-    not snapshot_stale?(s) and
-      (s.overage_status == "in_overage" or status_not_allowed?(s.status))
+  @doc """
+  The primary-window half of `in_overage?/2` on its own: whether the
+  snapshot's primary window shows past-plan usage that `in_overage?/2`
+  counts, staleness rules included. `Arbiter.Quota.StalenessWatch` uses it to
+  say whether a stale snapshot's last 5h reading is still being counted.
+  """
+  @spec primary_in_overage?(quota_source()) :: boolean()
+  def primary_in_overage?(quota) do
+    case Snapshot.normalize(quota) do
+      nil -> false
+      %Snapshot{} = snapshot -> primary_overage?(snapshot, DateTime.utc_now())
+    end
   end
 
-  defp long_window_overage?(%Snapshot{} = s) do
-    not snapshot_long_stale?(s) and secondary_rejected?(s.secondary_status)
+  defp primary_overage?(%Snapshot{} = s, now) do
+    past_plan?(s) and (not snapshot_stale?(s, now) or cap_reached_this_window?(s, now))
+  end
+
+  defp past_plan?(%Snapshot{} = s),
+    do: s.overage_status == "in_overage" or status_not_allowed?(s.status)
+
+  # A cap that was *reached* stays reached until the window it was reached in
+  # resets — usage inside one window only accumulates. Not the
+  # `allowed_warning` tier, a burn-rate warning that clears by itself as the
+  # window elapses; and not a reading with no `reset_at` to bound it.
+  defp cap_reached_this_window?(%Snapshot{reset_at: %DateTime{} = reset_at} = s, now) do
+    DateTime.after?(reset_at, now) and
+      (s.overage_status == "in_overage" or
+         (status_not_allowed?(s.status) and s.status != "allowed_warning"))
+  end
+
+  defp cap_reached_this_window?(%Snapshot{}, _now), do: false
+
+  defp long_window_overage?(%Snapshot{} = s, now) do
+    not snapshot_long_stale?(s, now) and secondary_rejected?(s.secondary_status)
   end
 
   defp status_not_allowed?(status) when is_binary(status), do: status != "allowed"

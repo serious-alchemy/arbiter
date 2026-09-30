@@ -392,6 +392,53 @@ defmodule Arbiter.Quota.CloudProbeTest do
       assert log =~ ws.id
     end
 
+    # #1876: the 429 cooldown used to be a fixed 180 s against this probe's
+    # 300 s cadence, so it lapsed before the next poll and never suppressed
+    # one. Driven through the probe itself — the path production polls on —
+    # one probe cycle per scheduled poll, with the monotonic clock the
+    # cooldown reads pinned by `oauth_opts[:now_ms]`.
+    test "a 429 suppresses the next scheduled poll, and only that one (#1876)", context do
+      Req.Test.set_req_test_to_shared(context)
+      on_exit(fn -> Arbiter.Quota.OAuthUsage.reset_cooldown!("cooldown-token") end)
+      workspace_with_token!("cooldown", "irrelevant")
+      test_pid = self()
+
+      Req.Test.stub(Arbiter.Quota.OAuthUsage.HTTP, fn conn ->
+        send(test_pid, :oauth_call_made)
+        Plug.Conn.send_resp(conn, 429, "")
+      end)
+
+      poll_at = fn now_ms ->
+        pid =
+          start_probe(
+            enabled: true,
+            interval_ms: 3_600_000,
+            refresh_fun: fn _ws_id -> :ok end,
+            oauth_opts: [token: "cooldown-token", now_ms: now_ms]
+          )
+
+        CloudProbe.probe(pid)
+        wait_until(fn -> CloudProbe.state(pid).oauth_consecutive_failures == 1 end)
+        :ok = stop_supervised(CloudProbe)
+      end
+
+      t0 = System.monotonic_time(:millisecond)
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        # The poll at t0 is rate-limited.
+        poll_at.(t0)
+        assert_received :oauth_call_made
+
+        # The next scheduled poll backs off without sending a request...
+        poll_at.(t0 + CloudProbe.interval_ms())
+        refute_received :oauth_call_made
+
+        # ...and the one after it goes out again.
+        poll_at.(t0 + 2 * CloudProbe.interval_ms())
+        assert_received :oauth_call_made
+      end)
+    end
+
     # bd-7gt8rm: the outage is a system alert, not a coordinator escalation —
     # one per outage, and cleared by the next successful poll.
     test "raises one quota-poll alert at the consecutive-failure threshold and clears it on the next success",
@@ -1479,6 +1526,35 @@ defmodule Arbiter.Quota.CloudProbeTest do
 
       CloudProbe.probe(pid)
       assert %{probe_count: 1} = CloudProbe.state(pid)
+    end
+  end
+
+  # #1876: `Arbiter.Quota.OAuthUsage` sizes its 429 cooldown off this, so the
+  # cooldown outlasts the cadence the application's own probe really runs at.
+  describe "interval_ms/0" do
+    setup do
+      prior = Application.get_env(:arbiter, :cloud_quota_probe)
+
+      on_exit(fn ->
+        if prior,
+          do: Application.put_env(:arbiter, :cloud_quota_probe, prior),
+          else: Application.delete_env(:arbiter, :cloud_quota_probe)
+      end)
+
+      :ok
+    end
+
+    test "is the configured :cloud_quota_probe interval" do
+      Application.put_env(:arbiter, :cloud_quota_probe, enabled: false, interval_ms: 600_000)
+      assert CloudProbe.interval_ms() == 600_000
+    end
+
+    test "defaults to five minutes when none (or nonsense) is configured" do
+      Application.put_env(:arbiter, :cloud_quota_probe, enabled: false)
+      assert CloudProbe.interval_ms() == 300_000
+
+      Application.put_env(:arbiter, :cloud_quota_probe, enabled: false, interval_ms: "soon")
+      assert CloudProbe.interval_ms() == 300_000
     end
   end
 end

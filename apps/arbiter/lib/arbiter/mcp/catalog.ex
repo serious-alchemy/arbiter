@@ -2262,8 +2262,9 @@ defmodule Arbiter.MCP.Catalog do
       description:
         "List the active system alerts: problems with the installation that are not " <>
           "tied to a ticket — `credential_expired` (per adapter and detection source), " <>
-          "`quota_poll_failing`, `overage_alert` (per workspace and provider) and " <>
-          "`budget_exceeded` (per ticket). Each carries `kind`, `key`, `subject`, " <>
+          "`quota_poll_failing`, `quota_snapshot_stale` (per Claude account: quota " <>
+          "accounting blind, the 5h gate failing open), `overage_alert` (per workspace " <>
+          "and provider) and `budget_exceeded` (per ticket). Each carries `kind`, `key`, `subject`, " <>
           "`detail`, `owner` (always `operator`), `raised_at`, `last_raised_at`, " <>
           "`raise_count` and `cleared_at`. An alert clears by itself when its condition " <>
           "does, so the list is exactly what is still wrong. Optional `workspace`, " <>

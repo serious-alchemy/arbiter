@@ -2,12 +2,13 @@ defmodule Arbiter.Alerts.SystemAlert do
   @moduledoc """
   One system-alert episode (ticket lifecycle 8/13, bd-7gt8rm): a problem with
   the installation rather than a ticket — a credential that expired, the quota
-  poll failing, overage spend past its alert threshold, a task's worker spend
-  past its budget.
+  poll failing, the quota snapshot gone stale (bd-2wnkoq), overage spend past
+  its alert threshold, a task's worker spend past its budget.
 
     * `kind` — what the alert is about (`kinds/0`).
     * `key` — which one of that kind: an adapter and source, an account-wide
-      poll, a workspace, a task. At most one row per `(kind, key)` is active
+      poll, a provider account's snapshot, a workspace, a task. At most one
+      row per `(kind, key)` is active
       (uncleared) at a time; the partial unique index enforces it.
     * `workspace_id` — where the alert is shown and announced. Metadata only:
       it is not part of the dedupe.
@@ -27,7 +28,13 @@ defmodule Arbiter.Alerts.SystemAlert do
     domain: Arbiter.Alerts,
     data_layer: AshSqlite.DataLayer
 
-  @kinds [:budget_exceeded, :credential_expired, :overage_alert, :quota_poll_failing]
+  @kinds [
+    :budget_exceeded,
+    :credential_expired,
+    :overage_alert,
+    :quota_poll_failing,
+    :quota_snapshot_stale
+  ]
   @owners [:operator, :coordinator]
 
   @doc "Every system-alert kind."

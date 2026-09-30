@@ -798,9 +798,11 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   This poll is the *only* thing that refreshes Claude's quota snapshot for an
   idle fleet (bd-atyrrq); a silent, sustained failure here means the dispatch
   gate is running on a snapshot that only gets staler, and a 7d hold — once
-  engaged — cannot lift without a fresh polled row (bd-b7umwj). `arb quota`
-  used to be the only way a human would notice (see the PR #1607 write-up);
-  this is the automated backstop.
+  engaged — stays in force until the 7d window's own reset or a fresh poll
+  showing it cleared (bd-b7umwj; see "Staleness" in `Arbiter.Quota.Gate`).
+  `arb quota` used to be the only way a human would notice (see the PR #1607
+  write-up); this is the automated backstop for the poll, and
+  `quota_snapshot_stale/2` the one for the snapshot itself.
 
   `snapshot` carries `:workspace_id` — any workspace touched by the failed
   poll group is representative, since the poll itself is account-wide, not
@@ -817,8 +819,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
         [
           "`Arbiter.Quota.CloudProbe`'s `/api/oauth/usage` poll has failed " <>
             "#{failures} consecutive cycles: #{describe_reason(reason)}.",
-          "The dispatch gate is now running on an aging snapshot. The 5h rule fails " <>
-            "open on age, but a 7d hold cannot lift without a fresh polled snapshot.",
+          "The dispatch gate is now running on an aging snapshot: #{aging_snapshot_impact()}",
           "Check `arb quota` for the last successful poll's source and timestamp, and " <>
             "confirm the account-wide OAuth token this install polls with (the operator's " <>
             "`~/.claude/.credentials.json`, not a workspace token) is still valid. " <>
@@ -838,6 +839,181 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   """
   @spec quota_poll_recovered() :: :ok
   def quota_poll_recovered, do: clear_alert(:quota_poll_failing, @quota_poll_alert_key)
+
+  @doc """
+  Raise a stale Claude quota snapshot as a system alert (bd-2wnkoq): quota
+  accounting for one provider account has been blind for longer than
+  `Arbiter.Quota.StalenessWatch`'s threshold.
+
+  Fired by `Arbiter.Quota.StalenessWatch`, which reads the persisted snapshot
+  on its own timer — never from `Arbiter.Quota.CloudProbe`'s poll path. That
+  is the point of it: `quota_poll_failing/3`, `operator_login_lapsed/3` and
+  `quota_grant_failing/3` are all raised by a component *reporting a
+  failure*, and this one by the snapshot's *state*, so it still fires when
+  nothing reports anything. One expired token once left the gate on a
+  nineteen-hour-old snapshot with every one of those alarms silent.
+
+  **One alert per account and episode**, keyed by the account: while it is
+  active a repeat refreshes its detail — the age keeps growing — instead of
+  adding a second, and `quota_snapshot_recovered/1` clears it once a fresh
+  snapshot lands, so a later lapse opens a fresh episode. An install with one
+  Claude account (the usual case) has at most one.
+
+  `snapshot` carries `:workspace_id`, a workspace on the account (where the
+  alert is shown and announced). `info` is the watch's assessment:
+
+    * `:account_id`, `:account` (its `provider:slug` label), `:workspaces`
+      (the names metered under it);
+    * `:captured_at`, `:age_seconds`, `:capture_source` — the snapshot's;
+      `:threshold_seconds` — the age the alert trips at;
+    * `:last_poll_at` — when the `/api/oauth/usage` poll last succeeded, if
+      that is newer than `:captured_at` (the poll works, but has not carried
+      the 5h figure the gate reads), else nil;
+    * `:cap_reached_until` — the reset of a 5h window whose last reading
+      showed the cap reached, which `Arbiter.Quota.Gate.in_overage?/2` keeps
+      counting until then; else nil;
+    * `:long_window` — `%{label, utilization, status, reset_at,
+      reset_in_seconds, rolled?, hold}`, where `hold` is `%{workspaces,
+      reason}` while a long-window hold is in force and nil otherwise; nil
+      for a provider with no long window.
+
+  Best-effort, returns `:ok`.
+  """
+  @spec quota_snapshot_stale(map(), map()) :: :ok
+  def quota_snapshot_stale(%{workspace_id: ws_id}, %{account_id: account_id} = info)
+      when is_binary(ws_id) and is_binary(account_id) do
+    raise_alert(
+      :quota_snapshot_stale,
+      quota_snapshot_alert_key(account_id),
+      ws_id,
+      "Anthropic quota snapshot stale — accounting blind since " <>
+        "#{iso(info.captured_at)} (#{info.account})",
+      quota_snapshot_stale_detail(info)
+    )
+  rescue
+    e ->
+      Logger.warning(
+        "CoordinatorNotifier.quota_snapshot_stale/2 could not build the alert: " <>
+          Exception.message(e)
+      )
+
+      :ok
+  end
+
+  def quota_snapshot_stale(_snapshot, _info), do: :ok
+
+  @doc """
+  Clear the staleness alert of every account not in `still_stale` — the
+  account ids `Arbiter.Quota.StalenessWatch`'s check just found stale
+  (bd-2wnkoq). So a fresh snapshot clears its account's alert, and so does
+  an account that no longer has a snapshot or a workspace to check.
+  Best-effort, returns `:ok`.
+  """
+  @spec quota_snapshot_recovered([String.t()]) :: :ok
+  def quota_snapshot_recovered(still_stale) when is_list(still_stale) do
+    keep = Enum.map(still_stale, &quota_snapshot_alert_key/1)
+    _ = Alerts.clear_except(:quota_snapshot_stale, keep)
+    :ok
+  rescue
+    e ->
+      Logger.warning(
+        "CoordinatorNotifier.quota_snapshot_recovered/1 raised: #{Exception.message(e)}"
+      )
+
+      :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp quota_snapshot_alert_key(account_id), do: "claude:#{account_id}"
+
+  defp quota_snapshot_stale_detail(info) do
+    captured = iso(info.captured_at)
+
+    [
+      "Quota accounting has been blind for #{span(info.age_seconds)}: the latest " <>
+        "Claude quota snapshot for account #{info.account} was captured at #{captured} " <>
+        "(source: #{snapshot_source_label(info.capture_source)}), and this alert trips at " <>
+        "#{span(info.threshold_seconds)}." <> last_poll_note(info.last_poll_at),
+      "The 5h gate is failing open — no 5h hold engages — and so is 5h overage detection: " <>
+        "a 5h cap crossed since #{captured} is not detected, recorded or alerted." <>
+        cap_reached_note(info.cap_reached_until),
+      long_window_line(info.long_window, captured),
+      "This alert reads the snapshot itself, so it fires whether or not anything reports a " <>
+        "poll failure. For the cause, check `arb quota` (source and last poll) and any " <>
+        "quota_poll_failing alert or quota-grant escalation. It clears by itself when a " <>
+        "fresh snapshot lands." <> workspaces_note(info.workspaces)
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join("\n")
+  end
+
+  defp snapshot_source_label("oauth_poll"), do: "/api/oauth/usage poll"
+  defp snapshot_source_label("headers"), do: "proxy rate-limit headers"
+  defp snapshot_source_label(_), do: "unrecorded"
+
+  defp last_poll_note(%DateTime{} = at),
+    do:
+      " The /api/oauth/usage poll last succeeded at #{iso(at)}, but has not carried the " <>
+        "aggregate 5h figure the gate reads since the snapshot."
+
+  defp last_poll_note(_), do: ""
+
+  defp cap_reached_note(%DateTime{} = reset_at),
+    do:
+      " The last reading showed the 5h cap reached, so dispatch in that window keeps being " <>
+        "recorded as overage until it resets at #{iso(reset_at)}."
+
+  defp cap_reached_note(_), do: ""
+
+  defp long_window_line(nil, _captured), do: nil
+
+  defp long_window_line(%{hold: %{workspaces: workspaces, reason: reason}} = window, _captured) do
+    "#{window.label} hold: IN FORCE for #{Enum.join(workspaces, ", ")} (#{reason}). It is " <>
+      "sticky on a stale snapshot: it #{long_window_lift(window)}. To dispatch past it " <>
+      "sooner, as paid overage: `arb config set quota.on_exhaustion continue --workspace <ws>`."
+  end
+
+  defp long_window_line(%{rolled?: true, reset_at: %DateTime{} = reset_at} = window, _captured) do
+    "#{window.label} hold: none in force — the last #{window.label} reading is past its own " <>
+      "reset (#{iso(reset_at)}) too, so it no longer binds."
+  end
+
+  defp long_window_line(%{rolled?: true} = window, _captured) do
+    "#{window.label} hold: none in force — the last #{window.label} reading is over 7 days " <>
+      "old and reported no reset time, so it no longer binds."
+  end
+
+  defp long_window_line(window, captured) do
+    "#{window.label} hold: none in force (last reading #{whole_percent(window.utilization)} " <>
+      "used, status #{window.status || "—"}). A #{window.label} cap crossed since " <>
+      "#{captured} cannot be seen either."
+  end
+
+  defp long_window_lift(%{reset_at: %DateTime{} = at, reset_in_seconds: secs} = window),
+    do:
+      "lifts when the #{window.label} window resets at #{iso(at)} " <>
+        "(in #{span(max(secs, 0))}), or sooner if a fresh poll shows it cleared"
+
+  defp long_window_lift(window),
+    do:
+      "lifts when a fresh poll shows it cleared, or once the reading is 7 days old (no " <>
+        "#{window.label} reset time was reported)"
+
+  # A stale spell or a 7d reset can be days away; "125h 29m" reads worse
+  # than "5d 5h".
+  defp span(seconds) when seconds >= 86_400,
+    do: "#{div(seconds, 86_400)}d #{div(rem(seconds, 86_400), 3_600)}h"
+
+  defp span(seconds), do: format_duration(seconds)
+
+  defp whole_percent(n) when is_number(n), do: "#{round(n * 100)}%"
+  defp whole_percent(_), do: "—"
+
+  defp workspaces_note([_ | _] = names),
+    do: " Workspaces on this account: #{Enum.join(names, ", ")}."
+
+  defp workspaces_note(_), do: ""
 
   @doc """
   Escalate a `/api/oauth/usage` polling outage whose cause is the operator's
@@ -880,9 +1056,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
           "Fix: run `claude` on the Arbiter host (log in if prompted) to refresh " <>
             "`~/.claude/.credentials.json`; the next poll recovers on its own.",
           "Workers are not affected — they run on their own setup token, not this file. " <>
-            "Until then the " <>
-            "dispatch gate runs on an aging snapshot: the 5h rule fails open on age, and a 7d " <>
-            "hold cannot lift without a fresh polled snapshot."
+            "Until then the dispatch gate runs on an aging snapshot: #{aging_snapshot_impact()}"
         ]
         |> Enum.join("\n")
 
@@ -984,9 +1158,17 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
 
   defp quota_grant_impact(_cause),
     do:
-      "Until then the dispatch gate runs on an aging snapshot: the 5h rule fails open on " <>
-        "age, and a 7d hold cannot lift without a fresh polled snapshot. Workers are not " <>
-        "affected — they never use this grant."
+      "Until then the dispatch gate runs on an aging snapshot: #{aging_snapshot_impact()} " <>
+        "Workers are not affected — they never use this grant."
+
+  # What a snapshot nobody is refreshing does to the gate — shared by every
+  # page about the poll going blind. bd-2wnkoq: a 7d hold is sticky but not
+  # stuck; it is bounded by the 7d window's own reset
+  # (`Arbiter.Quota.Gate.long_window_stale?/1`).
+  defp aging_snapshot_impact,
+    do:
+      "the 5h rule fails open on age, and a 7d hold stays in force until the 7d window " <>
+        "resets (`arb quota` shows when) or a fresh poll shows it cleared."
 
   @doc """
   Escalate a card that Autopilot cannot get out of Ready (bd-a40f4q).

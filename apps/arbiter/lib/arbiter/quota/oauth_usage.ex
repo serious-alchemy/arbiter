@@ -11,11 +11,11 @@ defmodule Arbiter.Quota.OAuthUsage do
   `seven_day_opus`, ...) and the account's `extra_usage` overage spend.
 
   See `Arbiter.Quota.Gate.staleness_threshold_seconds/1` for why a row written
-  from here gets twice the staleness margin of a header-captured one: this
-  endpoint's budget is roughly one request per 5 minutes per account, and the
-  180s cooldown below means a single 429 costs more than one poll. For
-  rate-limit characteristics and documented behavior, see
-  `docs/oauth-usage-ratelimit.md`.
+  from here gets four times the staleness margin of a header-captured one:
+  this endpoint's budget is roughly one request per 5 minutes per account, and
+  the cooldown below makes a single 429 cost two polls — the rejected one and
+  the next, which it suppresses. For rate-limit characteristics and documented
+  behavior, see `docs/oauth-usage-ratelimit.md`.
 
   ## Auth
 
@@ -29,11 +29,27 @@ defmodule Arbiter.Quota.OAuthUsage do
   ## Rate limiting
 
   This specific endpoint 429s far more readily than normal `/v1/messages`
-  traffic. On a 429 we start a 180s cooldown for that token (mirroring
-  9router's `open-sse/services/usage/claude.js`) — `fetch/1` skips the call
-  and returns `{:error, {:backoff, 429}}` until it lapses, so a hot polling
-  loop can never hammer this endpoint into a harder ban. The header-capture
-  aggregate figures are entirely unaffected by this cooldown.
+  traffic. On a 429 we start a cooldown for that token (or account, see
+  `fetch/1`) — `fetch/1` skips the call and returns `{:error, {:backoff, 429}}`
+  until it lapses, so a hot polling loop can never hammer this endpoint into a
+  harder ban. The header-capture aggregate figures are entirely unaffected by
+  this cooldown.
+
+  The cooldown is sized to actually suppress something (#1876). It used to be
+  a fixed 180 s (mirroring 9router's `open-sse/services/usage/claude.js`),
+  which lapsed before `Arbiter.Quota.CloudProbe`'s next 300 s poll and so never
+  skipped one. It is now:
+
+    * by default, `cooldown_ms/0` — one CloudProbe cycle plus 30 s, so a 429
+      suppresses the next scheduled poll and only that one;
+    * when the 429 carries a delay-seconds `Retry-After`, that delay — but
+      never less than the default (the endpoint sends `retry-after: 0` on
+      429s it has not recovered from) and never more than `max_cooldown_ms/0`
+      (one hour, the longest wait it has been seen to ask for).
+
+  A suppressed poll leaves the last snapshot to age, which is what the polled
+  staleness margin in `Arbiter.Quota.Gate.staleness_threshold_seconds/1` is
+  sized for; a longer blackout trips `Arbiter.Quota.StalenessWatch`'s alert.
 
   ## Cadence
 
@@ -61,7 +77,18 @@ defmodule Arbiter.Quota.OAuthUsage do
   @stub_name __MODULE__.HTTP
   @anthropic_version "2023-06-01"
   @anthropic_beta "oauth-2025-04-20"
-  @cooldown_ms 180_000
+
+  # #1876: the default 429 cooldown is one `Arbiter.Quota.CloudProbe` cycle
+  # plus this much slack, so it outlasts the next scheduled poll even when the
+  # 429 landed a few seconds into its own cycle. A fixed 180 s cooldown against
+  # the 300 s cadence lapsed before the next poll and never suppressed one.
+  @cooldown_slack_ms 30_000
+
+  # The most a `Retry-After` may stretch the cooldown to: the longest value
+  # this endpoint has been seen to send (the setup token's per-token lockout,
+  # `docs/oauth-usage-ratelimit.md`). A longer one would silence the poll, and
+  # so blind the gate, for longer than any observed upstream wait.
+  @max_cooldown_ms 3_600_000
 
   # Mirrors the `warningThresholds` table shipped in Anthropic's own Claude
   # Code CLI v2.1.269 (bd-3uwku6 / bd-3x0na3): burn-rate-ahead-of-schedule
@@ -108,21 +135,24 @@ defmodule Arbiter.Quota.OAuthUsage do
       `Arbiter.Quota.capture_oauth_usage/2` always passes this once it knows
       the account. Omitted (or blank), the cooldown falls back to the
       pre-P6 per-token key.
+    * `:now_ms` — the `System.monotonic_time(:millisecond)` reading to check
+      and start the cooldown against (tests), instead of the real clock.
 
-  Returns `{:error, {:backoff, last_status}}` without making a request when
-  this token (or account, see `:provider_account_id` above) 429'd within the
-  last 180s — `last_status` is the HTTP status that triggered the cooldown,
-  so a caller can log the actual upstream response behind a client-side skip
-  rather than a bare "rate limited" that looks identical to a fresh 429.
-  Never raises.
+  Returns `{:error, {:backoff, last_status}}` without making a request while
+  this token (or account, see `:provider_account_id` above) is cooling down
+  from a 429 — see "Rate limiting" above for how long that lasts.
+  `last_status` is the HTTP status that triggered the cooldown, so a caller
+  can log the actual upstream response behind a client-side skip rather than
+  a bare "rate limited" that looks identical to a fresh 429. Never raises.
   """
   @spec fetch(keyword()) :: {:ok, usage()} | {:error, term()}
   def fetch(opts \\ []) do
     with {:ok, token} <- fetch_token(opts) do
       key = cooldown_key(opts, token)
+      now_ms = Keyword.get_lazy(opts, :now_ms, fn -> System.monotonic_time(:millisecond) end)
 
-      case cooling_down_status(key) do
-        nil -> request(token, key, opts)
+      case cooling_down_status(key, now_ms) do
+        nil -> request(token, key, now_ms, opts)
         status -> {:error, {:backoff, status}}
       end
     end
@@ -159,7 +189,7 @@ defmodule Arbiter.Quota.OAuthUsage do
 
   # ---- HTTP ----------------------------------------------------------------
 
-  defp request(token, cooldown_key, opts) do
+  defp request(token, cooldown_key, now_ms, opts) do
     base = Keyword.get(opts, :base_url, @default_base_url)
 
     full_opts =
@@ -180,8 +210,8 @@ defmodule Arbiter.Quota.OAuthUsage do
       {:ok, %Req.Response{status: 200, body: body}} ->
         {:ok, parse_usage(body)}
 
-      {:ok, %Req.Response{status: 429}} ->
-        set_cooldown(cooldown_key, 429)
+      {:ok, %Req.Response{status: 429} = resp} ->
+        set_cooldown(cooldown_key, 429, now_ms + cooldown_for(resp))
         {:error, :rate_limited}
 
       {:ok, %Req.Response{status: status}} ->
@@ -342,6 +372,43 @@ defmodule Arbiter.Quota.OAuthUsage do
 
   # ---- 429 cooldown --------------------------------------------------------
 
+  @doc """
+  The default 429 cooldown: one `Arbiter.Quota.CloudProbe.interval_ms/0`
+  cycle plus 30 s, so a 429 always suppresses the next scheduled poll — and
+  only that one: the poll after it goes out as normal (#1876).
+  """
+  @spec cooldown_ms() :: pos_integer()
+  def cooldown_ms, do: Arbiter.Quota.CloudProbe.interval_ms() + @cooldown_slack_ms
+
+  @doc """
+  The cap on a `Retry-After`-derived cooldown: #{div(@max_cooldown_ms, 60_000)} minutes.
+  """
+  @spec max_cooldown_ms() :: pos_integer()
+  def max_cooldown_ms, do: @max_cooldown_ms
+
+  # A delay-seconds `Retry-After` can only lengthen the cooldown — up to
+  # `max_cooldown_ms/0` — never shorten it below `cooldown_ms/0`: this
+  # endpoint sends `retry-after: 0` on 429s whose bucket has not refilled
+  # (`docs/oauth-usage-ratelimit.md`). An HTTP-date form, which Anthropic has
+  # not been seen to send, is ignored like a missing header.
+  defp cooldown_for(%Req.Response{} = resp) do
+    default = cooldown_ms()
+
+    case retry_after_ms(resp) do
+      nil -> default
+      ms -> ms |> min(@max_cooldown_ms) |> max(default)
+    end
+  end
+
+  defp retry_after_ms(resp) do
+    with [value | _] <- Req.Response.get_header(resp, "retry-after"),
+         {seconds, ""} when seconds >= 0 <- Integer.parse(String.trim(value)) do
+      seconds * 1_000
+    else
+      _ -> nil
+    end
+  end
+
   defp cooldown_key(opts, token) do
     case Keyword.get(opts, :provider_account_id) do
       id when is_binary(id) and id != "" -> {:arbiter_oauth_usage_cooldown, :account, id}
@@ -351,18 +418,18 @@ defmodule Arbiter.Quota.OAuthUsage do
 
   # Returns the HTTP status that triggered the still-active cooldown, or
   # `nil` when not cooling down (never started, or lapsed).
-  defp cooling_down_status(key) do
+  defp cooling_down_status(key, now_ms) do
     case :persistent_term.get(key, nil) do
       nil ->
         nil
 
       {until, status} ->
-        if System.monotonic_time(:millisecond) < until, do: status, else: nil
+        if now_ms < until, do: status, else: nil
     end
   end
 
-  defp set_cooldown(key, status) do
-    :persistent_term.put(key, {System.monotonic_time(:millisecond) + @cooldown_ms, status})
+  defp set_cooldown(key, status, until_ms) do
+    :persistent_term.put(key, {until_ms, status})
   end
 
   @doc false

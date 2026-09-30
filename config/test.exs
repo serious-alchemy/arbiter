@@ -257,6 +257,10 @@ config :arbiter, :cloud_quota_probe, enabled: false
 # refresher's tests start their own instance with a fake CLI.
 config :arbiter, :quota_grant_refresher, enabled: false
 
+# The staleness watch's tests start their own instance; the application's must
+# never raise alerts from whatever snapshots a test happens to seed.
+config :arbiter, :quota_staleness_watch, enabled: false
+
 # bd-4f6opo: `arb loop analyze --discover` makes a real model call. Refuse it
 # suite-wide; tests that exercise the pass inject their own `:invoker`.
 config :arbiter, :loop_discovery_invoker, :disabled

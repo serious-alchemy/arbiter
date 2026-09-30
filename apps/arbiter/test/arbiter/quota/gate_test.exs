@@ -87,6 +87,16 @@ defmodule Arbiter.Quota.GateTest do
 
       assert Gate.staleness_threshold_seconds() == 300
     end
+
+    # #1876: a 429 costs the rejected poll and the one its cooldown suppresses,
+    # so a polled row has to be trusted past three 300 s cycles.
+    test "a polled row's threshold defaults to 1200 (four poll cycles)" do
+      Application.put_env(:arbiter, :quota, [])
+      on_exit(fn -> restore_quota_env() end)
+
+      assert Gate.staleness_threshold_seconds("oauth_poll") == 1_200
+      assert Gate.staleness_threshold_seconds("headers") == 300
+    end
   end
 
   # bd-4fbpto: `oauth_captured_at` advances on every successful poll, even a
@@ -118,7 +128,7 @@ defmodule Arbiter.Quota.GateTest do
     end
 
     test "an oauth_captured_at older than the polled threshold is not fresh" do
-      very_old = DateTime.utc_now() |> DateTime.add(-700, :second)
+      very_old = DateTime.utc_now() |> DateTime.add(-1_300, :second)
       assert Gate.oauth_poll_fresh?(quota(%{oauth_captured_at: DateTime.utc_now()}))
       refute Gate.oauth_poll_fresh?(quota(%{oauth_captured_at: very_old}))
     end
@@ -366,6 +376,23 @@ defmodule Arbiter.Quota.GateTest do
     test "stale snapshot (reset_5h_at in the past) → :allow, no overage tag" do
       stale = stale_quota(%{status_5h: "rejected", overage_status: "in_overage"})
       assert Gate.Continue.check(nil, stale, ws(%{}), []) == :allow
+    end
+
+    # bd-2wnkoq: an aged reading whose window has not reset yet still shows
+    # a reached cap — keep recording it (an `:allow` here would also make
+    # `Dispatch` clear the overage alert while the account is still in overage).
+    test "age-stale snapshot whose window is still open → still tags overage" do
+      aged =
+        quota(%{
+          status_5h: "rejected",
+          overage_status: "in_overage",
+          reset_5h_at: DateTime.add(DateTime.utc_now(), 3_600, :second),
+          captured_at: DateTime.add(DateTime.utc_now(), -7_200, :second)
+        })
+
+      assert Gate.stale?(aged)
+      assert {:overage, spend} = Gate.Continue.check(nil, aged, ws(%{}), [])
+      assert is_float(spend)
     end
 
     # Regression (reviewer round 1, finding 2): at/over the throttle threshold

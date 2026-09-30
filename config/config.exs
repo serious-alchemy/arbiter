@@ -89,6 +89,12 @@ config :arbiter,
 # Per-workspace overrides live in `workspace.config["quota"]`; precedence is
 # per-workspace > this global default > the hardcoded `:throttle`. Set
 # `:gate` to a module to hard-override the gate (kill switch / tests).
+#
+# Staleness (optional overrides): `staleness_threshold_seconds` (default 300)
+# and `polled_staleness_threshold_seconds` (default 1200) are how old a
+# header-captured / polled snapshot the gate still trusts before the 5h window
+# fails open; `stale_alert_threshold_seconds` (default 1800) is when
+# `Arbiter.Quota.StalenessWatch` raises the "quota accounting is blind" alert.
 config :arbiter, :quota,
   on_exhaustion: :throttle,
   throttle_threshold: 0.85,
@@ -119,6 +125,14 @@ config :arbiter, :cloud_quota_probe, enabled: true, interval_ms: 300_000
 # it just before its access token expires — `Arbiter.Quota.GrantRefresher`
 # (bd-b632tz). A no-op until an account has such a credential.
 config :arbiter, :quota_grant_refresher, enabled: true, interval_ms: 60_000
+
+# Raises an operator alert when a Claude account's persisted quota snapshot is
+# older than `:quota` `:stale_alert_threshold_seconds` (default 1800 s, never
+# below the gate's own staleness margin) — quota accounting is blind and the 5h
+# gate fails open — independent of whether anything reports a poll failure.
+# Clears itself when a fresh snapshot lands. `Arbiter.Quota.StalenessWatch`
+# (bd-2wnkoq).
+config :arbiter, :quota_staleness_watch, enabled: true, interval_ms: 60_000
 
 # Install-wide default worker security posture (the floor every spawn
 # inherits before per-domain workspace overrides). The hardcoded safe baseline

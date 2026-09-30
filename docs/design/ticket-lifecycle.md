@@ -791,7 +791,7 @@ escalation message:
 
 | field | |
 |---|---|
-| `kind` | `credential_expired`, `quota_poll_failing`, `overage_alert`, `budget_exceeded` |
+| `kind` | `credential_expired`, `quota_poll_failing`, `quota_snapshot_stale`, `overage_alert`, `budget_exceeded` |
 | `key` | which one of the kind (below) |
 | `workspace_id` | where it is shown and announced; not part of the dedupe |
 | `subject`, `detail` | the headline and the full explanation |
@@ -810,13 +810,15 @@ re-raise on every check.
 
 ### Producers and their clears
 
-The four producers in `CoordinatorNotifier` raise an alert and no longer post
-an escalation. Each has a hook where its condition is seen healthy again.
+The four producers in `CoordinatorNotifier` that used to escalate now raise an
+alert instead, and `quota_snapshot_stale` (bd-2wnkoq) was born one. Each has a
+hook where its condition is seen healthy again.
 
 | kind | key | raised by | cleared when |
 |---|---|---|---|
 | `credential_expired` | adapter and detection source | `CredentialWatchdog` (probe, worker deaths, the usage poll) | the same source succeeds again (`credential_restored/3`) |
 | `quota_poll_failing` | `anthropic_oauth_usage` (account-wide) | `Quota.CloudProbe` at the failure threshold | any successful poll (`quota_poll_recovered/0`) |
+| `quota_snapshot_stale` | `claude:<account id>` | `Quota.StalenessWatch` (bd-2wnkoq), on its own timer, every check while a Claude account's snapshot is older than `:stale_alert_threshold_seconds` — whether or not anything reports a poll failure | the next check finds that account's snapshot fresh, gone, or the account no longer linked to a workspace (`quota_snapshot_recovered/1`); a check that cannot read the snapshots clears nothing |
 | `overage_alert` | workspace and provider | `DispatchQueue` on a threshold crossing | the windowed spend is back under the threshold, the threshold is raised or removed (the queue re-reads it on each record), or the gate allows a dispatch on that provider outside overage |
 | `budget_exceeded` | task | `Usage.BudgetPatrol`, every sweep while over | the sweep finds the task no longer over its p90 (the estimate moved) or no longer open; a failed sweep clears nothing |
 

@@ -24,7 +24,9 @@ defmodule Arbiter.Quota.Gate.Continue do
   proceeds — the contract is cap + alert, never stop.
 
   Fails open on a `nil` (or unrecognized) snapshot — plain `:allow`, no overage
-  tag.
+  tag. A stale snapshot is judged by `Gate.in_overage?/2`: a reading that
+  shows the cap reached keeps tagging overage until its window resets, even
+  once it is too old for the gate to hold on (bd-2wnkoq).
   """
 
   @behaviour Arbiter.Quota.Gate

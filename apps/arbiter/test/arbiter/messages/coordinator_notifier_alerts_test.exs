@@ -367,4 +367,237 @@ defmodule Arbiter.Messages.CoordinatorNotifierAlertsTest do
       assert [%{key: ^over}] = Alerts.active(kind: :budget_exceeded)
     end
   end
+
+  # bd-2wnkoq: these used to say a 7d hold "cannot lift without a fresh polled
+  # snapshot". It can: the hold is bounded by the 7d window's own reset
+  # (`Arbiter.Quota.Gate.long_window_stale?/1`). Say when it lifts.
+  describe "the poll-failure pages say when a 7d hold lifts" do
+    defp escalation_body(ws) do
+      assert [msg] = Message.inbox(Message.coordinator_ref(), workspace_id: ws)
+      msg.body
+    end
+
+    @lifts "a 7d hold stays in force until the 7d window resets"
+
+    test "quota_poll_failing" do
+      CoordinatorNotifier.quota_poll_failing(%{workspace_id: uniq("ws")}, 3, :timeout)
+
+      detail = only_alert(:quota_poll_failing).detail
+      assert detail =~ @lifts
+      refute detail =~ "cannot lift"
+    end
+
+    test "operator_login_lapsed" do
+      ws = uniq("ws")
+      CoordinatorNotifier.operator_login_lapsed(%{workspace_id: ws}, 3, :no_credentials)
+
+      body = escalation_body(ws)
+      assert body =~ @lifts
+      refute body =~ "cannot lift"
+    end
+
+    test "quota_grant_failing" do
+      ws = uniq("ws")
+
+      CoordinatorNotifier.quota_grant_failing(
+        %{workspace_id: ws},
+        "/tmp/quota-claude/.credentials.json",
+        {:poll_failing, 3, {:http_error, 401}}
+      )
+
+      body = escalation_body(ws)
+      assert body =~ @lifts
+      refute body =~ "cannot lift"
+    end
+  end
+
+  # bd-2wnkoq: an alert about the quota snapshot's *state* — keyed on how old
+  # it is, not on anything reporting a poll failure.
+  describe "quota_snapshot_stale / quota_snapshot_recovered" do
+    defp stale_info(overrides \\ %{}) do
+      Map.merge(
+        %{
+          account_id: "acct-1",
+          account: "claude:default",
+          workspaces: ["default", "vstim"],
+          captured_at: ~U[2026-09-17 00:29:42Z],
+          age_seconds: 19 * 3_600 + 3 * 60,
+          threshold_seconds: 1_800,
+          capture_source: "oauth_poll",
+          last_poll_at: nil,
+          cap_reached_until: nil,
+          long_window: %{
+            label: "7d",
+            utilization: 0.45,
+            status: "allowed",
+            reset_at: ~U[2026-09-20 00:00:00Z],
+            reset_in_seconds: 71 * 3_600,
+            rolled?: false,
+            hold: nil
+          }
+        },
+        overrides
+      )
+    end
+
+    defp held_7d(info) do
+      put_in(info.long_window.hold, %{
+        workspaces: ["default"],
+        reason: "7d quota 0.96 ≥ 0.90"
+      })
+    end
+
+    test "raises one operator alert saying how long quota accounting has been blind" do
+      ws = uniq("ws")
+
+      assert :ok = CoordinatorNotifier.quota_snapshot_stale(%{workspace_id: ws}, stale_info())
+
+      alert = only_alert(:quota_snapshot_stale)
+      assert alert.owner == :operator
+      assert alert.workspace_id == ws
+      assert alert.key == "claude:acct-1"
+      assert alert.subject =~ "claude:default"
+      assert alert.subject =~ "2026-09-17T00:29:42Z"
+      assert alert.detail =~ "blind for 19h 3m"
+      assert alert.detail =~ "5h gate is failing open"
+      assert alert.detail =~ "5h overage detection"
+      assert alert.detail =~ "/api/oauth/usage poll"
+      no_mail(ws)
+    end
+
+    test "says a 7d hold is in force, and when it lifts" do
+      CoordinatorNotifier.quota_snapshot_stale(%{workspace_id: uniq("ws")}, held_7d(stale_info()))
+
+      alert = only_alert(:quota_snapshot_stale)
+      assert alert.detail =~ "7d hold: IN FORCE for default (7d quota 0.96 ≥ 0.90)"
+      assert alert.detail =~ "lifts when the 7d window resets at 2026-09-20T00:00:00Z (in 2d 23h)"
+    end
+
+    test "a blind spell of a day or more reads in days" do
+      CoordinatorNotifier.quota_snapshot_stale(
+        %{workspace_id: uniq("ws")},
+        stale_info(%{age_seconds: 50 * 3_600 + 7 * 60})
+      )
+
+      assert only_alert(:quota_snapshot_stale).detail =~ "blind for 2d 2h:"
+    end
+
+    test "says when no 7d hold is in force" do
+      CoordinatorNotifier.quota_snapshot_stale(%{workspace_id: uniq("ws")}, stale_info())
+
+      alert = only_alert(:quota_snapshot_stale)
+      assert alert.detail =~ "7d hold: none in force"
+      assert alert.detail =~ "45%"
+      refute alert.detail =~ "IN FORCE"
+    end
+
+    test "says a rolled 7d reading no longer binds, with or without a reset time" do
+      rolled = %{
+        label: "7d",
+        utilization: 0.96,
+        status: "allowed_warning",
+        reset_at: ~U[2026-09-16 00:00:00Z],
+        reset_in_seconds: 0,
+        rolled?: true,
+        hold: nil
+      }
+
+      CoordinatorNotifier.quota_snapshot_stale(
+        %{workspace_id: uniq("ws")},
+        stale_info(%{long_window: rolled})
+      )
+
+      assert only_alert(:quota_snapshot_stale).detail =~
+               "7d hold: none in force — the last 7d reading is past its own reset " <>
+                 "(2026-09-16T00:00:00Z)"
+
+      CoordinatorNotifier.quota_snapshot_stale(
+        %{workspace_id: uniq("ws")},
+        stale_info(%{long_window: %{rolled | reset_at: nil, reset_in_seconds: nil}})
+      )
+
+      assert only_alert(:quota_snapshot_stale).detail =~
+               "7d hold: none in force — the last 7d reading is over 7 days old"
+    end
+
+    test "is best-effort: an assessment it cannot format raises nothing and returns :ok" do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert :ok =
+                   CoordinatorNotifier.quota_snapshot_stale(
+                     %{workspace_id: uniq("ws")},
+                     %{account_id: "acct-1"}
+                   )
+        end)
+
+      assert log =~ "could not build the alert"
+      assert Alerts.active() == []
+    end
+
+    test "says when the last reading showed the 5h cap reached in a window still open" do
+      info = stale_info(%{cap_reached_until: ~U[2026-09-17 02:00:00Z]})
+      CoordinatorNotifier.quota_snapshot_stale(%{workspace_id: uniq("ws")}, info)
+
+      alert = only_alert(:quota_snapshot_stale)
+      assert alert.detail =~ "2026-09-17T02:00:00Z"
+      assert alert.detail =~ "keeps being recorded as overage"
+    end
+
+    test "says the poll is succeeding when it is, but not carrying the 5h figure" do
+      info = stale_info(%{last_poll_at: ~U[2026-09-17 19:30:00Z]})
+      CoordinatorNotifier.quota_snapshot_stale(%{workspace_id: uniq("ws")}, info)
+
+      alert = only_alert(:quota_snapshot_stale)
+      assert alert.detail =~ "last succeeded at 2026-09-17T19:30:00Z"
+    end
+
+    test "a repeat refreshes the account's one alert instead of stacking" do
+      ws = uniq("ws")
+      CoordinatorNotifier.quota_snapshot_stale(%{workspace_id: ws}, stale_info())
+      first = only_alert(:quota_snapshot_stale)
+
+      CoordinatorNotifier.quota_snapshot_stale(
+        %{workspace_id: ws},
+        stale_info(%{age_seconds: 20 * 3_600})
+      )
+
+      alert = only_alert(:quota_snapshot_stale)
+      assert alert.id == first.id
+      assert alert.raise_count == 2
+      assert alert.detail =~ "blind for 20h"
+    end
+
+    test "quota_snapshot_recovered clears every account not still stale" do
+      ws = uniq("ws")
+      CoordinatorNotifier.quota_snapshot_stale(%{workspace_id: ws}, stale_info())
+
+      CoordinatorNotifier.quota_snapshot_stale(
+        %{workspace_id: ws},
+        stale_info(%{account_id: "acct-2", account: "claude:other"})
+      )
+
+      assert :ok = CoordinatorNotifier.quota_snapshot_recovered(["acct-2"])
+
+      assert [%{key: "claude:acct-2"}] = Alerts.active(kind: :quota_snapshot_stale)
+    end
+
+    test "a later stale episode opens a new alert" do
+      ws = uniq("ws")
+      CoordinatorNotifier.quota_snapshot_stale(%{workspace_id: ws}, stale_info())
+      first = only_alert(:quota_snapshot_stale)
+
+      CoordinatorNotifier.quota_snapshot_recovered([])
+      assert Ash.get!(Arbiter.Alerts.SystemAlert, first.id).cleared_at
+      assert Alerts.active(kind: :quota_snapshot_stale) == []
+
+      CoordinatorNotifier.quota_snapshot_stale(%{workspace_id: ws}, stale_info())
+      second = only_alert(:quota_snapshot_stale)
+      refute second.id == first.id
+    end
+
+    test "with no workspace raises nothing" do
+      assert :ok = CoordinatorNotifier.quota_snapshot_stale(%{workspace_id: nil}, stale_info())
+      assert Alerts.active() == []
+    end
+  end
 end

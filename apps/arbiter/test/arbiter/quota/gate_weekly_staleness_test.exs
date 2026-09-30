@@ -216,7 +216,12 @@ defmodule Arbiter.Quota.GateWeeklyStalenessTest do
       assert Gate.in_overage?(q, ws())
     end
 
-    test "an age-stale 5h reject still fails open" do
+    # bd-2wnkoq: detection is not the gate. Age-based fail-open exists so a
+    # held fleet can re-capture a reading (bd-y0yup0); `in_overage?/2` holds
+    # nothing, and usage inside one window only accumulates, so a reached cap
+    # is still reached until the window resets. Dropping it on age cleared the
+    # overage alert and stopped the overage accounting mid-window.
+    test "an age-stale 5h reject still counts until its own window resets" do
       q =
         aged_incident_quota(%{
           status_5h: "rejected",
@@ -225,7 +230,85 @@ defmodule Arbiter.Quota.GateWeeklyStalenessTest do
           status_7d: "allowed"
         })
 
+      assert Gate.stale?(q), "the snapshot must genuinely be age-stale for this to mean anything"
+      assert Gate.in_overage?(q, ws())
+    end
+
+    test "an age-stale in_overage status alone still counts" do
+      q =
+        aged_incident_quota(%{
+          status_5h: "allowed",
+          overage_status: "in_overage",
+          utilization_7d: 0.10,
+          status_7d: "allowed"
+        })
+
+      assert Gate.in_overage?(q, ws())
+    end
+
+    test "a reached cap stops counting once its 5h window has rolled" do
+      q =
+        aged_incident_quota(%{
+          status_5h: "rejected",
+          overage_status: "in_overage",
+          reset_5h_at: ago(60),
+          utilization_7d: 0.10,
+          status_7d: "allowed"
+        })
+
       refute Gate.in_overage?(q, ws())
+    end
+
+    # `allowed_warning` is a burn-rate tier: it clears by itself as the window
+    # elapses, so a stale one is not carried past the gate's trust.
+    test "an age-stale 5h allowed_warning still fails open" do
+      q =
+        aged_incident_quota(%{
+          status_5h: "allowed_warning",
+          utilization_7d: 0.10,
+          status_7d: "allowed"
+        })
+
+      refute Gate.in_overage?(q, ws())
+      assert Gate.in_overage?(%{q | captured_at: DateTime.utc_now()}, ws())
+    end
+
+    test "an age-stale reject with no reset time to bound it still fails open" do
+      q =
+        aged_incident_quota(%{
+          status_5h: "rejected",
+          reset_5h_at: nil,
+          utilization_7d: 0.10,
+          status_7d: "allowed"
+        })
+
+      refute Gate.in_overage?(q, ws())
+    end
+
+    test "primary_in_overage?/1 is in_overage?/2's primary half alone" do
+      capped = aged_incident_quota(%{status_5h: "rejected", status_7d: "allowed"})
+      assert Gate.primary_in_overage?(capped)
+
+      # A 7d reject is overage, but not the primary window's.
+      weekly_only = aged_incident_quota(%{status_5h: "allowed", status_7d: "rejected"})
+      assert Gate.in_overage?(weekly_only, ws())
+      refute Gate.primary_in_overage?(weekly_only)
+
+      refute Gate.primary_in_overage?(nil)
+    end
+
+    test "Codex: an age-stale limit_reached counts until the session resets" do
+      q = %CodexQuota{
+        provider_account_id: "acct-x",
+        provider: "codex",
+        captured_at: ago(@staleness_seconds + 60),
+        session_used_percent: 100.0,
+        limit_reached: true,
+        session_reset_at: ahead(1_800)
+      }
+
+      assert Gate.in_overage?(q, ws())
+      refute Gate.in_overage?(%{q | session_reset_at: ago(60)}, ws())
     end
   end
 
