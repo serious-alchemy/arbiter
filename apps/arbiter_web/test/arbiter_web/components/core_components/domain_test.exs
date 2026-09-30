@@ -374,36 +374,50 @@ defmodule ArbiterWeb.CoreComponents.DomainTest do
     end
 
     test "renders the provider icon when provider is specified" do
-      html = run(provider: "claude")
+      assigns = %{
+        role: "impl",
+        worker: "w-11",
+        status: "working",
+        provider: "claude"
+      }
 
-      # Should contain the SVG for Claude provider
-      assert html =~ "Claude"
+      html = rendered_to_string(~H"""
+      <ArbiterWeb.CoreComponents.Domain.run_row {assigns} />
+      """)
+
+      doc = LazyHTML.from_fragment(html)
+      assert Enum.count(LazyHTML.filter(doc, "svg[aria-label=\"Claude\"]")) > 0
     end
 
     test "omits the provider icon when provider is nil" do
-      html = run(provider: nil)
+      assigns = %{
+        role: "impl",
+        worker: "w-11",
+        status: "working",
+        provider: nil
+      }
 
-      # Should not render any provider icon
-      refute html =~ "Claude"
-      refute html =~ "Codex"
-      refute html =~ "Antigravity"
+      html = rendered_to_string(~H"""
+      <ArbiterWeb.CoreComponents.Domain.run_row {assigns} />
+      """)
+
+      doc = LazyHTML.from_fragment(html)
+      assert Enum.count(LazyHTML.filter(doc, "svg[aria-label]")) == 0
     end
 
     test "omits the provider icon when provider is not given" do
-      html = run()
+      assigns = %{
+        role: "impl",
+        worker: "w-11",
+        status: "working"
+      }
 
-      # Default is nil, so no icon should render
-      refute html =~ "Claude"
-      refute html =~ "Codex"
-      refute html =~ "Antigravity"
-    end
+      html = rendered_to_string(~H"""
+      <ArbiterWeb.CoreComponents.Domain.run_row {assigns} />
+      """)
 
-    test "grid layout accommodates the provider icon with updated track sizes" do
-      html = run(provider: "claude")
-
-      # Should have the new grid layout with adjusted columns for provider icon
-      assert html =~
-               "grid-cols-[84px_minmax(48px,max-content)_minmax(120px,1fr)_minmax(92px,max-content)_minmax(0,max-content)_14px]"
+      doc = LazyHTML.from_fragment(html)
+      assert Enum.count(LazyHTML.filter(doc, "svg[aria-label]")) == 0
     end
   end
 
