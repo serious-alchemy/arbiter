@@ -275,13 +275,38 @@ defmodule Arbiter.Worker.JailTest do
 
         assert Enum.find_index(argv, &(&1 == f)) >
                  Enum.find_index(argv, &(&1 == "/run/systemd/resolve"))
-
-        index_of(argv, ["--tmpfs", "/run/systemd/resolve"])
       end
     end
 
     test "keyring_usable?/0 needs both the proxy binary and a session bus" do
-      assert Jail.keyring_usable?() == (Jail.dbus_proxy() != nil and Jail.keyring_usable?())
+      old_env = Application.fetch_env(:arbiter, :xdg_dbus_proxy)
+      old_bus = System.get_env("DBUS_SESSION_BUS_ADDRESS")
+
+      on_exit(fn ->
+        case old_env do
+          {:ok, v} -> Application.put_env(:arbiter, :xdg_dbus_proxy, v)
+          :error -> Application.delete_env(:arbiter, :xdg_dbus_proxy)
+        end
+
+        if old_bus,
+          do: System.put_env("DBUS_SESSION_BUS_ADDRESS", old_bus),
+          else: System.delete_env("DBUS_SESSION_BUS_ADDRESS")
+      end)
+
+      sock = Path.join(System.tmp_dir!(), "kr-#{System.unique_integer([:positive])}.sock")
+      File.write!(sock, "")
+      on_exit(fn -> File.rm(sock) end)
+
+      System.put_env("DBUS_SESSION_BUS_ADDRESS", "unix:path=" <> sock)
+      Application.put_env(:arbiter, :xdg_dbus_proxy, "/bin/sh")
+      assert Jail.keyring_usable?()
+
+      Application.put_env(:arbiter, :xdg_dbus_proxy, nil)
+      refute Jail.keyring_usable?()
+
+      Application.put_env(:arbiter, :xdg_dbus_proxy, "/bin/sh")
+      System.delete_env("DBUS_SESSION_BUS_ADDRESS")
+      refute Jail.keyring_usable?()
     end
 
     test "a keyring socket is bound over the bus path after the masks, read-only" do

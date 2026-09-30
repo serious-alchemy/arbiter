@@ -195,6 +195,8 @@ defmodule Arbiter.Worker.Jail do
   under `:home` on the host, so call it just before spawning. Does not check
   `available?/0`; the caller decides whether a jail is required.
   """
+  @keyring_sentinel "@KEYRING_SOCK@"
+
   @spec wrap([String.t()], keyword()) :: {:ok, [String.t()]} | {:error, term()}
   def wrap(command, opts) when is_list(command) and is_list(opts) do
     with {:ok, worktree} <- fetch_worktree(opts),
@@ -210,13 +212,19 @@ defmodule Arbiter.Worker.Jail do
         worktree_readonly: Keyword.get(opts, :worktree_readonly, false)
       }
 
-      {:ok, argv(spec, command) |> maybe_keyring_proxy(keyring_proxy(opts))}
+      proxy = keyring_proxy(opts)
+
+      spec =
+        if proxy,
+          do:
+            Map.merge(spec, %{keyring_socket: @keyring_sentinel, keyring_bus_path: keyring_bus()}),
+          else: spec
+
+      {:ok, argv(spec, command) |> maybe_keyring_proxy(proxy)}
     end
   end
 
   # ---- filtered keyring bus (bd-7o08mj) ----------------------------------
-
-  @keyring_sentinel "@KEYRING_SOCK@"
 
   # `keyring: true` asks for Secret Service (agy's credential store) inside
   # the jail. The raw session bus stays masked either way; the only bus the
@@ -226,7 +234,7 @@ defmodule Arbiter.Worker.Jail do
   # closed: the jail runs with no bus at all.
   defp keyring_proxy(opts) do
     with true <- Keyword.get(opts, :keyring, false),
-         proxy when is_binary(proxy) <- System.find_executable("xdg-dbus-proxy"),
+         proxy when is_binary(proxy) <- dbus_proxy(),
          upstream when is_binary(upstream) <- session_bus_socket() do
       %{proxy: proxy, upstream: upstream}
     else
@@ -234,9 +242,17 @@ defmodule Arbiter.Worker.Jail do
     end
   end
 
-  @doc "Path of `xdg-dbus-proxy` on this host, or `nil` (optional dependency)."
+  @doc """
+  Path of `xdg-dbus-proxy` on this host, or `nil` (optional dependency).
+  The `:arbiter, :xdg_dbus_proxy` app env overrides the lookup (tests).
+  """
   @spec dbus_proxy() :: String.t() | nil
-  def dbus_proxy, do: System.find_executable("xdg-dbus-proxy")
+  def dbus_proxy do
+    case Application.fetch_env(:arbiter, :xdg_dbus_proxy) do
+      {:ok, path} -> path
+      :error -> System.find_executable("xdg-dbus-proxy")
+    end
+  end
 
   @doc """
   True when a filtered keyring bus can actually be offered inside the jail:
@@ -262,14 +278,8 @@ defmodule Arbiter.Worker.Jail do
   defp maybe_keyring_proxy(argv, nil), do: argv
 
   defp maybe_keyring_proxy([bwrap | rest], %{proxy: proxy, upstream: upstream}) do
-    bus = Path.join(runtime_dir() || "/run/user/0", "bus")
-
-    # Re-enter argv/2's output with the bind spliced in just after the masks
-    # (bwrap applies options in order; the bind must follow the tmpfs).
-    rest =
-      rest
-      |> splice_keyring(bus)
-
+    # `argv/2` already emitted the `--ro-bind @KEYRING_SOCK@ <bus>` after the
+    # masks; the wrapper script swaps the sentinel for the real socket.
     script = ~S"""
     proxy=$1; up=$2; shift 2
     # SIGKILL teardown skips the EXIT trap, so also sweep stale dirs here.
@@ -284,41 +294,17 @@ defmodule Arbiter.Worker.Jail do
     i=0
     while [ ! -S "$d/bus" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i+1)); done
     [ -S "$d/bus" ] || { echo "xdg-dbus-proxy did not come up" >&2; exit 125; }
-    n=$#
+    n=$#; seen=0
     while [ "$n" -gt 0 ]; do
       a=$1; shift; n=$((n-1))
-      [ "$a" = "@KEYRING_SOCK@" ] && a="$d/bus"
+      [ "$a" = "--" ] && seen=1
+      [ "$seen" = 0 ] && [ "$a" = "@KEYRING_SOCK@" ] && a="$d/bus"
       set -- "$@" "$a"
     done
     "$@"
     """
 
     ["sh", "-c", script, "sh", proxy, upstream, bwrap | rest]
-  end
-
-  # Insert `--ro-bind @KEYRING_SOCK@ <bus>` and the bus address env right
-  # after the last mask `--tmpfs` (before any bind that could sit under it).
-  defp splice_keyring(args, bus) do
-    idx =
-      args
-      |> Enum.chunk_every(2, 1, :discard)
-      |> Enum.with_index()
-      |> Enum.filter(fn {pair, _} -> match?(["--tmpfs", _], pair) end)
-      |> List.last()
-      |> elem(1)
-
-    {head, tail} = Enum.split(args, idx + 2)
-
-    head ++
-      [
-        "--ro-bind",
-        @keyring_sentinel,
-        bus,
-        "--setenv",
-        "DBUS_SESSION_BUS_ADDRESS",
-        "unix:path=" <> bus
-      ] ++
-      tail
   end
 
   @doc """
@@ -397,8 +383,21 @@ defmodule Arbiter.Worker.Jail do
     # The one sanctioned way back to a bus: a proxy socket filtered to
     # org.freedesktop.secrets, bound over the masked bus path.
     case Map.get(spec, :keyring_socket) do
-      nil -> mask
-      sock -> mask ++ ["--ro-bind", sock, keyring_bus_path(spec)]
+      nil ->
+        mask
+
+      sock ->
+        bus = keyring_bus_path(spec)
+
+        mask ++
+          [
+            "--ro-bind",
+            sock,
+            bus,
+            "--setenv",
+            "DBUS_SESSION_BUS_ADDRESS",
+            "unix:path=" <> bus
+          ]
     end
   end
 
@@ -417,8 +416,9 @@ defmodule Arbiter.Worker.Jail do
     end
   end
 
-  defp keyring_bus_path(spec),
-    do: Map.get(spec, :keyring_bus_path) || Path.join(runtime_dir(), "bus")
+  defp keyring_bus_path(spec), do: Map.get(spec, :keyring_bus_path) || keyring_bus()
+
+  defp keyring_bus, do: Path.join(runtime_dir() || "/run/user/0", "bus")
 
   defp git_args(nil, _worktree), do: []
 
