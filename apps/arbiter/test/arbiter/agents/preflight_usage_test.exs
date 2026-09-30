@@ -108,7 +108,22 @@ defmodule Arbiter.Agents.PreflightUsageTest do
   test "Codex preflight check is zero-quota and writes no preflight usage rows" do
     prev_http_stub = Application.get_env(:arbiter, :codex_quota_http_stub)
     Application.put_env(:arbiter, :codex_quota_http_stub, true)
-    on_exit(fn -> restore_env(:codex_quota_http_stub, prev_http_stub) end)
+
+    tmp =
+      Path.join(System.tmp_dir!(), "arbiter-pf-codex-#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(tmp)
+    codex = Path.join(tmp, "codex")
+    File.write!(codex, "#!/bin/sh\nexit 0\n")
+    File.chmod!(codex, 0o755)
+    old_path = System.get_env("PATH") || ""
+    System.put_env("PATH", tmp <> ":" <> old_path)
+
+    on_exit(fn ->
+      restore_env(:codex_quota_http_stub, prev_http_stub)
+      System.put_env("PATH", old_path)
+      File.rm_rf!(tmp)
+    end)
 
     Req.Test.stub(Arbiter.Quota.Codex.HTTP, fn conn ->
       Req.Test.json(conn, %{"plan_type" => "plus"})

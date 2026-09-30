@@ -271,7 +271,7 @@ defmodule Arbiter.Agents.Codex do
     # Cheapest auth check: a one-word `codex exec` round-trip under a read-only
     # sandbox. A missing/expired ChatGPT login or bad key exits non-zero, which
     # Arbiter.Worker.StopReason classifies.
-    case resolve_executable() do
+    case resolve_argv_probe_executable() do
       {:ok, codex} ->
         argv =
           ["sh", "-c", @inline_prompt_script, "sh", codex, "exec"] ++
@@ -444,6 +444,17 @@ defmodule Arbiter.Agents.Codex do
     case resolved_model(opts) do
       nil -> []
       model when is_binary(model) -> ["-m", model]
+    end
+  end
+
+  # The argv probe is a real model turn. Config can disable it (test env does)
+  # so an unstubbed Preflight.check(Codex, ...) fails closed instead of exec'ing
+  # the operator's real `codex` on their quota.
+  defp resolve_argv_probe_executable do
+    if Application.get_env(:arbiter, :codex_argv_probe, true) do
+      resolve_executable()
+    else
+      {:error, {:executable_not_found, "codex (argv probe disabled by :codex_argv_probe)"}}
     end
   end
 

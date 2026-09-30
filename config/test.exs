@@ -280,6 +280,10 @@ config :arbiter, :cloud_code_quota, enabled: false
 config :arbiter, :codex_quota, auth_path: "/nonexistent/codex/auth.json"
 config :arbiter, :codex_quota_http_stub, true
 
+# The Codex argv auth probe is a real model turn on the operator's quota. Fail
+# closed in test: tests that need the argv shape opt in via Application.put_env.
+config :arbiter, :codex_argv_probe, false
+
 # `Arbiter.Quota.CloudCode.antigravity/1` shells out to the `agy` CLI by
 # name/path via `:agy_cmd` (default `"agy"`, resolved with
 # `System.find_executable/1`). Point the default at a name that can never

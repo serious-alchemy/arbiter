@@ -234,7 +234,15 @@ defmodule Arbiter.Agents.CodexTest do
       codex = Path.join(tmp, "codex")
       File.write!(codex, "#!/bin/sh\nexit 0\n")
       File.chmod!(codex, 0o755)
+      prev_probe = Application.get_env(:arbiter, :codex_argv_probe)
+      Application.put_env(:arbiter, :codex_argv_probe, true)
+      on_exit(fn -> restore_env(:codex_argv_probe, prev_probe) end)
       {:ok, codex: codex}
+    end
+
+    test "fails closed when the argv probe is disabled" do
+      Application.put_env(:arbiter, :codex_argv_probe, false)
+      assert {:error, {:executable_not_found, _}} = Codex.auth_probe_argv([])
     end
 
     test "returns a cheap `codex exec` round-trip", %{codex: codex} do
