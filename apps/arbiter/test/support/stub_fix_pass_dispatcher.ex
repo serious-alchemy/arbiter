@@ -14,8 +14,14 @@ defmodule Arbiter.Test.StubFixPassDispatcher do
 
   def reset do
     ensure_started()
-    Agent.update(@name, fn _ -> %{calls: []} end)
+    Agent.update(@name, fn _ -> %{calls: [], reply: nil} end)
     :ok
+  end
+
+  @doc "Make every following `dispatch/1` return `reply` (default: `{:ok, %{stub: true}}`)."
+  def reply_with(reply) do
+    ensure_started()
+    Agent.update(@name, &Map.put(&1, :reply, reply))
   end
 
   @doc "How many times `dispatch/1` was called."
@@ -33,8 +39,10 @@ defmodule Arbiter.Test.StubFixPassDispatcher do
   @impl true
   def dispatch(args) do
     ensure_started()
-    Agent.update(@name, fn s -> %{s | calls: [args | s.calls]} end)
-    {:ok, %{stub: true}}
+
+    Agent.get_and_update(@name, fn s ->
+      {s[:reply] || {:ok, %{stub: true}}, %{s | calls: [args | s.calls]}}
+    end)
   end
 
   defp ensure_started do
