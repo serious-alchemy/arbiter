@@ -23,6 +23,7 @@ defmodule Arbiter.Loop.Discovery.ClaudeInvoker do
 
   alias Arbiter.Agents.Claude.ConfigDir
   alias Arbiter.Worker.ReleaseEnv
+  alias Arbiter.Worker.SpawnEnv
 
   @default_timeout_s 300
 
@@ -57,7 +58,7 @@ defmodule Arbiter.Loop.Discovery.ClaudeInvoker do
     try do
       File.write!(prompt_file, prompt)
       shell = Enum.map_join(argv(path), " ", &sh_quote/1) <> " < " <> sh_quote(prompt_file)
-      env = ConfigDir.env(Keyword.get(opts, :workspace_id))
+      env = SpawnEnv.cmd_env(ConfigDir.env(Keyword.get(opts, :workspace_id)), "claude")
 
       case ReleaseEnv.cmd("sh", ["-c", shell], env: env, cd: dir, stderr_to_stdout: true) do
         {output, 0} -> parse_stream(output)

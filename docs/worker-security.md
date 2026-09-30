@@ -651,6 +651,91 @@ answers `false`. The REST `security_posture.policy_enforced` field reports each
 adapter's own answer, so operators can see whether the declared posture is
 actually being enforced by the running adapter.
 
+## The worker environment is an allowlist (bd-7r0qrj, GitHub #143)
+
+A worker child used to **inherit the server's whole OS environment** (`Port.open`
+/ `System.cmd` only *extend* it) and then had every linked provider account's
+credential added on top. A Claude worker could see `ARBITER_CLOAK_KEY`,
+`SECRET_KEY_BASE`, `DATABASE_PATH`, `SSH_AUTH_SOCK`, `DBUS_SESSION_BUS_ADDRESS`
+and the Codex/Gemini keys. `ARBITER_CLOAK_KEY` plus a readable
+`~/.arbiter/arbiter.sqlite3` decrypts every workspace secret and provider
+credential; `SECRET_KEY_BASE` is the default MCP token signing key.
+
+`Arbiter.Worker.SpawnEnv` is now the single builder. The child starts from an
+**empty** environment (every inherited name that is not allowlisted is
+explicitly unset) and receives only:
+
+1. **The allowlist**, copied from the server's env: `PATH`, `HOME`, `USER`,
+   `LOGNAME`, `SHELL`; `LANG`, `LANGUAGE`, `LC_*`, `TERM`, `COLORTERM`,
+   `NO_COLOR`, `TZ`; `TMPDIR`/`TEMP`/`TMP`; `XDG_CONFIG_HOME`, `XDG_DATA_HOME`,
+   `XDG_CACHE_HOME`, `XDG_STATE_HOME`, `XDG_CONFIG_DIRS`, `XDG_DATA_DIRS`;
+   toolchain homes (`MIX_HOME`, `MIX_ARCHIVES`, `HEX_HOME`, `HEX_MIRROR`,
+   `REBAR_CACHE_DIR`, `ERL_AFLAGS`, `ELIXIR_ERL_OPTIONS`, `MISE_DATA_DIR`,
+   `MISE_CONFIG_DIR`, `MISE_CACHE_DIR`, `MISE_STATE_DIR`,
+   `MISE_TRUSTED_CONFIG_PATHS`, `ASDF_DATA_DIR`, `CARGO_HOME`, `RUSTUP_HOME`,
+   `GOPATH`, `GOROOT`, `GOMODCACHE`, `NPM_CONFIG_CACHE`); `gh`/`glab`/`git`
+   config locations (`GH_CONFIG_DIR`, `GLAB_CONFIG_DIR`, `GH_HOST`,
+   `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`, `GIT_CONFIG_NOSYSTEM`); TLS/egress
+   (`SSL_CERT_FILE`, `SSL_CERT_DIR`, `NODE_EXTRA_CA_CERTS`, `CURL_CA_BUNDLE`,
+   `REQUESTS_CA_BUNDLE`, `HTTP(S)_PROXY`, `ALL_PROXY`, `NO_PROXY` and their
+   lowercase forms); and the `arb` CLI's non-secret endpoints (`ARB_HOST`,
+   `ARB_WORKSPACE`). Adding a name needs a reason in the `@exact` comment.
+2. **The caller's explicit pairs**: the adapter's `spawn_env/1` (its own
+   provider's credential, the isolated `HOME` / `CLAUDE_CONFIG_DIR`), the
+   workspace's user-defined `worker_env` (this is where a per-workspace
+   `GH_TOKEN` / `GITLAB_TOKEN` comes from), the task-scoped dev-server
+   `DATABASE_PATH` / `PORT` (`DevServerEnv`), and `ARB_WORKER_BEAD_ID`.
+
+**Never reaches a worker:** `ARBITER_*` (including `ARBITER_CLOAK_KEY`),
+`SECRET_KEY_BASE`, `DATABASE_PATH` / `DATABASE_URL` *of the server*,
+`RELEASE_*` / `ROOTDIR` / `BINDIR`, `MIX_ENV`, `SSH_AUTH_SOCK`,
+`XDG_RUNTIME_DIR`, and anything else in `~/.arbiter/arbiter.env` that is not
+listed above. (`DATABASE_PATH` is still *set* in a worker, but to a per-task
+throwaway sqlite file under the temp dir so a worker-started `mix phx.server`
+cannot open the live database; it is never the server's value.)
+
+**Credentials are per provider.** A `claude` worker may hold
+`CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_*`; a `codex` worker `OPENAI_API_KEY` /
+`CODEX_API_KEY`; a `gemini` (agy) worker `GEMINI_API_KEY` /
+`GOOGLE_GENAI_API_KEY` / `ANTIGRAVITY_API_KEY`. Any *other* provider's
+credential is dropped even when the workspace is linked to several accounts
+(`WorkerEnv.resolve/1` still resolves all of them; `SpawnEnv` filters). A spawn
+with no provider is treated as `claude`.
+
+**Every agent-CLI spawn** goes through it: implement (`ClaudeSession.start/1`),
+review, fix, conflict, the preflight auth probe, the ReviewGate's
+`Checks.invoke_reviewer`, `ReviewReply`, the Loop discovery invoker, and the
+quota probes (`CloudCode` agy usage, `GrantRefresher`).
+`spawn_env_test.exs` pins the inventory.
+
+### Decisions worth knowing
+
+* **`SSH_AUTH_SOCK` is dropped.** git over ssh must use a key file readable in
+  `~/.ssh` (passphrase-less, same UID — see the residual risk below), a
+  per-repo deploy key, or — preferred — https with a `GH_TOKEN` /
+  `GITLAB_TOKEN` set in the workspace's `worker_env`. A workspace that truly
+  needs the operator's agent can put `SSH_AUTH_SOCK` in its `worker_env`
+  explicitly; that is an opt-in per workspace, not a default.
+* **`DBUS_SESSION_BUS_ADDRESS` is dropped, with one exception**: an agy
+  (`gemini`) worker gets it when the session bus socket exists, because agy
+  keeps its own Google grant in the freedesktop Secret Service
+  (`Gemini.ConfigDir.keyring_available?/0`); without the bus a keyring host's
+  agy worker is unauthenticated. No other provider receives it.
+* **`MIX_ENV` is not inherited**; a worker's `mix` picks its own.
+
+### Residual risk: same UID, same filesystem
+
+Environment scrubbing removes the secrets handed over *for free*. A worker still
+runs as the operator's UID, so it can **read `~/.arbiter/arbiter.env` and
+`~/.arbiter/arbiter.sqlite3` directly** (and `~/.ssh`, `~/.config/gh`, the agy
+isolated `HOME`'s symlinked passthrough of `.ssh` / `.arbiter`, and
+`/proc/<server pid>/environ` of any same-UID process outside a PID namespace).
+With `ARBITER_CLOAK_KEY` in `arbiter.env` that is the same break as before, just
+one `cat` away. Closing it is file-level isolation, not env hygiene: the jail
+(bd-7o08mj masks `/run`; hiding `~/.arbiter` is its follow-up) and the
+guardrail-profile work (bd-8apkz6). Until then treat any worker with shell
+access as able to reach everything the operator's account can read.
+
 ## Where the posture is surfaced
 
 * **`arb prime`** — a `security:` block in the active-workspace section (mode,
