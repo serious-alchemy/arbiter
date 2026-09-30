@@ -11,6 +11,8 @@ defmodule Arbiter.Tasks.Issue.Changes.AssignRank do
   drag-to-rank (bd-79w1fs) can drop a ticket between two neighbours by writing
   one row instead of renumbering the band.
 
+  Promotion to Ready re-ranks the same way (`Changes.RankOnPromote`).
+
   Two creates racing in one workspace can draw the same rank. That is harmless:
   a tie falls back to creation order.
   """
@@ -37,7 +39,12 @@ defmodule Arbiter.Tasks.Issue.Changes.AssignRank do
     end)
   end
 
-  defp next_rank(workspace_id) do
+  @doc """
+  The rank one step past the highest in `workspace_id` — where a new ticket
+  lands, and where a ticket promoted to Ready lands (`RankOnPromote`).
+  """
+  @spec next_rank(Ecto.UUID.t()) :: integer()
+  def next_rank(workspace_id) do
     highest =
       Arbiter.Tasks.Issue
       |> Ash.Query.filter(workspace_id == ^workspace_id)
