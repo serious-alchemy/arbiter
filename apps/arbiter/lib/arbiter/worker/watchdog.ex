@@ -2879,47 +2879,53 @@ defmodule Arbiter.Worker.Watchdog do
   # distinct "still parked" heartbeat — deliberately in tension with the #1226
   # dedupe, at a cadence three orders of magnitude below the once-a-minute flood
   # that motivated it (bd-5mzzww / #1448 ask 4).
+  #
+  # The reason compared and reported is the *effective* one
+  # (`effective_park_reason/2`), so a worker's "external" verdict on an
+  # already-escalated `:ci_failed` block changes the reason and re-escalates once.
   defp debounce_escalate_block(state, raw_reason) do
     reason = effective_park_reason(state, raw_reason)
-    do_debounce_escalate_block(state, reason)
-  end
 
-  defp do_debounce_escalate_block(%{last_block_reason: reason} = state, reason) do
-    if park_heartbeat_due?(state) do
-      polls = state.poll_count - state.last_block_escalated_poll
+    cond do
+      state.last_block_reason == reason and park_heartbeat_due?(state) ->
+        polls = state.poll_count - state.last_block_escalated_poll
 
-      Logger.warning(
-        "Worker.Watchdog: still parked (#{reason}) for task=#{state.task_id} " <>
-          "mr=#{state.mr_ref} after #{polls} poll(s) with no state change; " <>
-          "re-pinging coordinator"
-      )
-
-      safe(fn ->
-        Arbiter.Messages.CoordinatorNotifier.merge_park_heartbeat(
-          snapshot(state),
-          state.mr_ref,
-          reason,
-          polls
+        Logger.warning(
+          "Worker.Watchdog: still parked (#{reason}) for task=#{state.task_id} " <>
+            "mr=#{state.mr_ref} after #{polls} poll(s) with no state change; " <>
+            "re-pinging coordinator"
         )
-      end)
 
-      %{state | last_block_escalated_poll: state.poll_count}
-    else
-      state
+        safe(fn ->
+          Arbiter.Messages.CoordinatorNotifier.merge_park_heartbeat(
+            snapshot(state),
+            state.mr_ref,
+            reason,
+            polls
+          )
+        end)
+
+        %{state | last_block_escalated_poll: state.poll_count}
+
+      state.last_block_reason == reason ->
+        state
+
+      true ->
+        Logger.warning(
+          "Worker.Watchdog: merge blocked (#{reason}) for task=#{state.task_id} " <>
+            "mr=#{state.mr_ref}; escalating to coordinator"
+        )
+
+        safe(fn ->
+          Arbiter.Messages.CoordinatorNotifier.merge_blocked(
+            snapshot(state),
+            state.mr_ref,
+            reason
+          )
+        end)
+
+        %{state | last_block_reason: reason, last_block_escalated_poll: state.poll_count}
     end
-  end
-
-  defp do_debounce_escalate_block(state, reason) do
-    Logger.warning(
-      "Worker.Watchdog: merge blocked (#{reason}) for task=#{state.task_id} " <>
-        "mr=#{state.mr_ref}; escalating to coordinator"
-    )
-
-    safe(fn ->
-      Arbiter.Messages.CoordinatorNotifier.merge_blocked(snapshot(state), state.mr_ref, reason)
-    end)
-
-    %{state | last_block_reason: reason, last_block_escalated_poll: state.poll_count}
   end
 
   defp park_heartbeat_due?(%{park_heartbeat_polls: n}) when not is_integer(n) or n <= 0, do: false
