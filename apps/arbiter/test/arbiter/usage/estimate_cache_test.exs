@@ -5,8 +5,18 @@ defmodule Arbiter.Usage.EstimateCacheTest do
   alias Arbiter.Usage.EstimateCache
   alias Arbiter.Usage.Event
 
+  # config/test.exs turns the memo off for the rest of the suite (bd-jw7cb0).
+  # This module is async: false, so nothing else runs while it is back on.
   setup do
+    previous = Application.get_env(:arbiter, EstimateCache)
+    Application.put_env(:arbiter, EstimateCache, enabled: true)
     EstimateCache.invalidate()
+
+    on_exit(fn ->
+      EstimateCache.invalidate()
+      Application.put_env(:arbiter, EstimateCache, previous)
+    end)
+
     :ok
   end
 
@@ -79,6 +89,14 @@ defmodule Arbiter.Usage.EstimateCacheTest do
       })
 
     # Cache must now be invalidated, so query count > 0
+    assert query_count(fn -> Estimate.sample(now: now) end) > 0
+  end
+
+  test "enabled: false computes every call" do
+    Application.put_env(:arbiter, EstimateCache, enabled: false)
+    now = DateTime.utc_now()
+    _ = Estimate.sample(now: now)
+
     assert query_count(fn -> Estimate.sample(now: now) end) > 0
   end
 end
