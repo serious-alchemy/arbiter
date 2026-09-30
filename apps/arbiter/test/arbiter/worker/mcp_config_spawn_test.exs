@@ -68,6 +68,24 @@ defmodule Arbiter.Worker.MCPConfigSpawnTest do
     %{sandbox: sandbox, ws: ws}
   end
 
+  # The prompt only offers the `arb` CLI fallback to a session that positively
+  # has no Arbiter MCP tools, so a failed config write must say so.
+  test "inject_config flags a failed write with mcp_tools?: false, a good write does not",
+       %{sandbox: sandbox, ws: ws} do
+    {:ok, task} = Ash.create(Issue, %{title: "no mcp", workspace_id: ws.id})
+    opts = [repo: "test/repo", agent_type: :claude]
+
+    missing = Path.join(sandbox.worktree_root, "does-not-exist-#{task.id}")
+    assert Dispatch.inject_mcp_config(task, missing, opts) == [mcp_tools?: false]
+
+    good = Dispatch.inject_mcp_config(task, sandbox.repo, opts)
+    assert Keyword.has_key?(good, :mcp_config)
+    refute Keyword.has_key?(good, :mcp_tools?)
+
+    # No worktree → skipped, not flagged.
+    assert Dispatch.inject_mcp_config(task, nil, opts) == []
+  end
+
   test "a CI fix pass writes a fresh worker token and passes it via --mcp-config",
        %{sandbox: sandbox, ws: ws} do
     {:ok, task} = Ash.create(Issue, %{title: "fix ci", workspace_id: ws.id})

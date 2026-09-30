@@ -814,4 +814,39 @@ defmodule Arbiter.Worker.PromptBuilderTest do
       assert review =~ Arbiter.Worker.EvidenceIntegrity.reviewer_block()
     end
   end
+
+  # A session with no Arbiter MCP tools (agy with no isolated $HOME, a failed
+  # config write) is handed the `arb` CLI fallback instead of a tool it lacks
+  # plus a ban on the CLI — that combination deadlocked the notes gate.
+  describe "no Arbiter MCP tools (mcp_tools?: false)" do
+    test "work prompt persists the PR body and flag through the arb CLI" do
+      prompt = PromptBuilder.prompt_for_task(task(%{}), mcp_tools?: false)
+
+      assert prompt =~ "arb ticket update bd-golden1 --pr-body"
+      assert prompt =~ "arb ticket update bd-golden1 --verify-after-deploy"
+      refute prompt =~ "MCP tool with its `pr_body`"
+      refute prompt =~ "do NOT shell out to the `arb` CLI"
+    end
+
+    test "research prompt records findings through the arb CLI" do
+      prompt = PromptBuilder.prompt_for_task(task(%{issue_type: :research}), mcp_tools?: false)
+
+      assert prompt =~ "arb ticket update bd-golden1 --append-notes"
+      refute prompt =~ "Do NOT shell out to the `arb` CLI"
+    end
+
+    test "task prompt records the outcome through the arb CLI" do
+      prompt = PromptBuilder.prompt_for_task(task(%{issue_type: :task}), mcp_tools?: false)
+
+      assert prompt =~ "arb ticket update bd-golden1 --append-notes"
+      refute prompt =~ "Do NOT shell out to the `arb` CLI"
+    end
+
+    test "sessions with MCP tools (default or true) are unchanged" do
+      default = PromptBuilder.prompt_for_task(task(%{}), [])
+      assert default == PromptBuilder.prompt_for_task(task(%{}), mcp_tools?: true)
+      assert default =~ "do NOT shell out to the `arb` CLI"
+      refute default =~ "arb ticket update"
+    end
+  end
 end
