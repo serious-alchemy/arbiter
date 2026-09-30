@@ -696,6 +696,9 @@ defmodule Arbiter.Quota do
       representative_claim: q.representative_claim,
       overage_status: q.overage_status,
       captured_at: iso(q.captured_at),
+      # bd-2wnkoq: how old the snapshot is, computed here so `arb quota` reads
+      # the same whatever the CLI host's clock says. nil before any capture.
+      captured_age_seconds: age_seconds(q.captured_at),
       stale: Arbiter.Quota.Gate.stale?(q),
       # bd-4fbpto: `stale` alone can't distinguish "nothing has succeeded in a
       # while" from "the poll is fine, it just hasn't landed a usable 5h figure
@@ -1537,4 +1540,10 @@ defmodule Arbiter.Quota do
 
   defp iso(nil), do: nil
   defp iso(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
+
+  # `Kernel.max/2` spelled out: `use Ash.Domain` defines a `max` aggregate here.
+  defp age_seconds(%DateTime{} = at),
+    do: Kernel.max(DateTime.diff(DateTime.utc_now(), at, :second), 0)
+
+  defp age_seconds(_), do: nil
 end

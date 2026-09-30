@@ -13,6 +13,7 @@ defmodule Arbiter.Quota.OAuthPrimaryCaptureTest do
 
   alias Arbiter.Quota
   alias Arbiter.Quota.AnthropicQuota
+  alias Arbiter.Quota.CloudProbe
   alias Arbiter.Quota.Gate
   alias Arbiter.Quota.Overage
   alias Arbiter.Tasks.Workspace
@@ -332,12 +333,37 @@ defmodule Arbiter.Quota.OAuthPrimaryCaptureTest do
       assert Gate.stale?(%{aged | capture_source: nil})
     end
 
-    test "a polled row does go stale after two missed polls" do
+    # #1876: a 429 now costs two polls — the rejected one and the next, which
+    # its cooldown suppresses — so the next successful poll can land three
+    # cycles after the last. One 429 must not be enough to fail the 5h gate
+    # open.
+    test "a polled row survives a 429 and the poll its cooldown suppresses" do
       ws = workspace!()
       quota = poll!(ws)
 
-      aged = %{quota | captured_at: DateTime.add(DateTime.utc_now(), -601, :second)}
-      assert Gate.stale?(aged)
+      three_cycles = div(3 * CloudProbe.interval_ms(), 1_000)
+
+      aged = %{
+        quota
+        | captured_at: DateTime.add(DateTime.utc_now(), -(three_cycles + 60), :second)
+      }
+
+      refute Gate.stale?(aged)
+    end
+
+    test "a polled row does go stale after a sustained outage (1200 s)" do
+      ws = workspace!()
+      quota = poll!(ws)
+
+      refute Gate.stale?(%{
+               quota
+               | captured_at: DateTime.add(DateTime.utc_now(), -1_190, :second)
+             })
+
+      assert Gate.stale?(%{
+               quota
+               | captured_at: DateTime.add(DateTime.utc_now(), -1_201, :second)
+             })
     end
 
     test "the polled threshold is configurable" do

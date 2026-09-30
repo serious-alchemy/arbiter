@@ -30,8 +30,10 @@ during quota polling integration.
   with 429.
 
 - **`retry-after: 0` header is uninformative.** Do not trust it for cooldown
-  timing. `Arbiter.Quota.OAuthUsage` uses a fixed 180s cooldown instead (see
-  `@cooldown_ms` in that module).
+  timing. `Arbiter.Quota.OAuthUsage` never lets a `Retry-After` shorten its
+  cooldown below the default (one CloudProbe cycle plus 30 s, `cooldown_ms/0`);
+  a longer delay-seconds value does lengthen it, up to one hour
+  (`max_cooldown_ms/0`) — see "Implications" below.
 
 ## Dedicated quota grant (bd-b632tz)
 
@@ -191,9 +193,24 @@ once per cycle per provider account (not per-workspace), authenticating with
 the account's dedicated quota grant when it has one, and otherwise with the
 operator's credentials-file token. Only these interactive-login grants work.
 
-When a 429 occurs, `Arbiter.Quota.OAuthUsage.fetch/1` cools down for 180s; during
-this window, the gate's staleness margin absorbs the missed poll without losing
-visibility into quota state (see `Arbiter.Quota.Gate.staleness_threshold_seconds/1`).
+When a 429 occurs, `Arbiter.Quota.OAuthUsage.fetch/1` cools down so that the
+next scheduled CloudProbe poll is skipped rather than sent into the same empty
+bucket (#1876 — the old fixed 180s cooldown lapsed before the 300s poll and
+never skipped anything):
+
+- by default for one poll cycle plus 30s (`cooldown_ms/0`, 330s at the default
+  cadence) — the poll after the skipped one goes out as normal;
+- for a delay-seconds `Retry-After` longer than that, for the header's delay,
+  capped at one hour (`max_cooldown_ms/0`, the longest wait this endpoint has
+  been seen to ask for — the setup token's `Retry-After: 3600`).
+
+A 429 therefore costs two polls, and the next successful poll can land about
+900s after the last one. The gate's staleness margin for a polled row
+(1200s, `Arbiter.Quota.Gate.staleness_threshold_seconds/1`) absorbs that
+without failing the 5h window open. A longer blackout — a second 429 in a row,
+a long `Retry-After`, a lapsed credential — ages the snapshot past that
+margin; once it is older than 30 minutes, `Arbiter.Quota.StalenessWatch`
+raises an operator alert that quota accounting is blind.
 
 The header-capture source (`anthropic-ratelimit-unified-*` from worker responses)
 continues unaffected by endpoint 429s, but only provides aggregate figures and

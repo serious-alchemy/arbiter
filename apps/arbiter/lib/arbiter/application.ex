@@ -209,6 +209,11 @@ defmodule Arbiter.Application do
       # before it expires, so CloudProbe keeps polling `/api/oauth/usage`
       # with no interactive session (bd-b632tz).
       Arbiter.Quota.GrantRefresher,
+      # Alerts when the Claude quota snapshot itself has gone stale — quota
+      # accounting blind, the 5h gate failing open — on its own timer, so it
+      # still fires when CloudProbe has stopped reporting anything
+      # (bd-2wnkoq).
+      Arbiter.Quota.StalenessWatch,
       # Owns the ETS table `Arbiter.Quota.provider_spend/1` and
       # `workspace_spend/1` read their memoized 30-day ledger aggregates
       # from (bd-4p6pw7) — see that module's docs.
