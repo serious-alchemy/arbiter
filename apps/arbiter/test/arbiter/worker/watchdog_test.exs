@@ -2695,6 +2695,29 @@ defmodule Arbiter.Worker.WatchdogTest do
       assert {:error, :not_parked_on_ci_failed} = Watchdog.mark_ci_external(task_id, "infra")
     end
 
+    test "accepts a :ci_failed block the merge poll escalated without an exhausted-park (lt-20r7zu)" do
+      # A human-merge lane escalates the block through the debounced path, which
+      # records `last_block_reason` but never sets `park_reason`. The tool must
+      # read that same block, not only `park_reason`.
+      task_id = new_task_id()
+      StubMerger.queue_get("!ce6", [%{status: :open, approved: true, block_reason: :ci_failed}])
+
+      wpid =
+        start_watchdog(task_id, "!ce6",
+          auto_merge: false,
+          interval_ms: 15,
+          workspace: test_workspace()
+        )
+
+      wait_until(fn -> :sys.get_state(wpid).last_block_reason == :ci_failed end)
+      assert :sys.get_state(wpid).park_reason == nil
+
+      assert :ok = Watchdog.mark_ci_external(task_id, "smoke never passes on any branch")
+
+      # The next poll re-escalates under the external reason.
+      wait_until(fn -> :sys.get_state(wpid).last_block_reason == :ci_failed_external end)
+    end
+
     test "no watchdog for the task is :not_found" do
       assert {:error, :not_found} =
                Watchdog.mark_ci_external("nope-#{System.unique_integer()}", "infra")

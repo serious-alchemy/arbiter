@@ -1725,11 +1725,11 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
 
   defp block_label(:conflict), do: "merge conflict with the base branch"
   defp block_label(:behind_base), do: "branch is behind the base branch"
-  defp block_label(:ci_failed), do: "required CI checks are failing"
+  defp block_label(:ci_failed), do: "CI checks are failing"
 
   defp block_label(:ci_failed_external),
     do:
-      "required CI checks are failing for reasons outside this branch " <>
+      "CI checks are failing for reasons outside this branch " <>
         "(reported as broken infrastructure, not this diff)"
 
   defp block_label(:needs_approval), do: "required approval is missing"
