@@ -263,6 +263,25 @@ defmodule Arbiter.Worker.JailTest do
       assert masked(argv) -- ["/tmp", "/dev/shm"] == masks
     end
 
+    test "masking /run/systemd/resolve re-binds the plain resolv.conf files read-only" do
+      argv =
+        Jail.argv(%{bwrap: "bwrap", worktree: "/w", mask_paths: ["/run/systemd/resolve"]}, [
+          "true"
+        ])
+
+      for f <- ["/run/systemd/resolve/stub-resolv.conf", "/run/systemd/resolve/resolv.conf"],
+          File.regular?(f) do
+        assert {f, f} in flag_pairs(argv, "--ro-bind")
+
+        assert index_of(argv, ["--ro-bind", f, f]) >
+                 index_of(argv, ["--tmpfs", "/run/systemd/resolve"])
+      end
+    end
+
+    test "keyring_usable?/0 needs both the proxy binary and a session bus" do
+      assert Jail.keyring_usable?() == (Jail.dbus_proxy() != nil and Jail.keyring_usable?())
+    end
+
     test "a keyring socket is bound over the bus path after the masks, read-only" do
       argv =
         Jail.argv(

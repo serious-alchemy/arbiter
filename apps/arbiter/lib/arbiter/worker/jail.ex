@@ -238,6 +238,16 @@ defmodule Arbiter.Worker.Jail do
   @spec dbus_proxy() :: String.t() | nil
   def dbus_proxy, do: System.find_executable("xdg-dbus-proxy")
 
+  @doc """
+  True when a filtered keyring bus can actually be offered inside the jail:
+  a proxy binary *and* an upstream session bus socket. Callers that decide
+  whether to rely on the keyring (vs. copying credential files) must use this,
+  not merely "a session bus exists" — otherwise a missing proxy masks the bus
+  with no credentials copied and the worker cannot authenticate.
+  """
+  @spec keyring_usable?() :: boolean()
+  def keyring_usable?, do: dbus_proxy() != nil and session_bus_socket() != nil
+
   defp session_bus_socket do
     case System.get_env("DBUS_SESSION_BUS_ADDRESS") do
       "unix:path=" <> rest ->
@@ -262,7 +272,11 @@ defmodule Arbiter.Worker.Jail do
 
     script = ~S"""
     proxy=$1; up=$2; shift 2
-    d=$(mktemp -d) || exit 125
+    # SIGKILL teardown skips the EXIT trap, so also sweep stale dirs here.
+    r=${TMPDIR:-/tmp}/arbiter-keyring-proxy
+    mkdir -p "$r" && chmod 700 "$r" || exit 125
+    find "$r" -mindepth 1 -maxdepth 1 -type d -mmin +60 -exec rm -rf {} + 2>/dev/null
+    d=$(mktemp -d "$r/run.XXXXXX") || exit 125
     "$proxy" "unix:path=$up" "$d/bus" --filter --talk=org.freedesktop.secrets &
     p=$!
     trap 'kill $p 2>/dev/null; rm -rf "$d"' EXIT
@@ -343,13 +357,32 @@ defmodule Arbiter.Worker.Jail do
   """
   @spec mask_paths() :: [String.t()]
   def mask_paths do
-    [runtime_dir(), "/run/dbus", "/run/systemd/resolve"]
-    |> Enum.filter(&(is_binary(&1) and File.dir?(&1)))
+    [
+      runtime_dir(),
+      System.get_env("XDG_RUNTIME_DIR"),
+      bus_dir(),
+      "/run/dbus",
+      "/run/systemd/resolve"
+    ]
+    |> Enum.filter(&(is_binary(&1) and Path.type(&1) == :absolute and File.dir?(&1)))
+    |> Enum.map(&Path.expand/1)
+    |> Enum.reject(&(&1 in ["/", "/tmp", "/run", "/dev/shm"]))
+    |> Enum.uniq()
+  end
+
+  # Directory holding the session bus socket named by the environment, when
+  # it lives somewhere other than the conventional runtime dir.
+  defp bus_dir do
+    case session_bus_socket() do
+      nil -> nil
+      sock -> Path.dirname(sock)
+    end
   end
 
   # Resolved at runtime, never hard-coded to 1000. `XDG_RUNTIME_DIR` is what
   # the bus address points into, but the conventional `/run/user/<uid>` is
-  # masked as well so an unset/forged variable cannot leave it exposed.
+  # masked as well so an unset/forged variable cannot leave it exposed
+  # (`mask_paths/0` adds `XDG_RUNTIME_DIR` and the bus socket's directory).
   defp runtime_dir do
     case File.stat("/proc/self") do
       {:ok, %{uid: uid}} -> "/run/user/#{uid}"
@@ -359,13 +392,28 @@ defmodule Arbiter.Worker.Jail do
 
   defp mask_args(spec) do
     masks = Map.get(spec, :mask_paths) || mask_paths()
-    mask = Enum.flat_map(masks, &["--tmpfs", &1])
+    mask = Enum.flat_map(masks, &["--tmpfs", &1]) ++ resolv_conf_args(masks)
 
     # The one sanctioned way back to a bus: a proxy socket filtered to
     # org.freedesktop.secrets, bound over the masked bus path.
     case Map.get(spec, :keyring_socket) do
       nil -> mask
       sock -> mask ++ ["--ro-bind", sock, keyring_bus_path(spec)]
+    end
+  end
+
+  # /etc/resolv.conf is a symlink into /run/systemd/resolve on resolved hosts;
+  # blanking the dir would break DNS for the (networked) worker. Put the two
+  # plain-text files back read-only: the varlink sockets stay hidden, and the
+  # stub address they name is ordinary UDP/TCP.
+  @resolv_files ["/run/systemd/resolve/stub-resolv.conf", "/run/systemd/resolve/resolv.conf"]
+  defp resolv_conf_args(masks) do
+    if "/run/systemd/resolve" in masks do
+      @resolv_files
+      |> Enum.filter(&File.regular?/1)
+      |> Enum.flat_map(&["--ro-bind", &1, &1])
+    else
+      []
     end
   end
 
