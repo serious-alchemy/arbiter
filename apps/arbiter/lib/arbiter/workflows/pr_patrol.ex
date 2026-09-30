@@ -434,14 +434,11 @@ defmodule Arbiter.Workflows.PRPatrol do
            adapter,
            mr_ref,
            signals,
-           Workspace.pr_patrol_our_login(state.workspace)
+           Workspace.pr_patrol_our_login(state.workspace),
+           &handled?(pr_number, state.workspace_id, &1)
          ) do
       {reason, extra_protocol, fingerprint} when is_binary(reason) ->
-        if handled?(pr_number, state.workspace_id, fingerprint) do
-          {state, false}
-        else
-          file_follow_up(mr, pr_number, state, reason, extra_protocol, fingerprint)
-        end
+        file_follow_up(mr, pr_number, state, reason, extra_protocol, fingerprint)
 
       _ ->
         {state, false}
@@ -770,23 +767,50 @@ defmodule Arbiter.Workflows.PRPatrol do
   # The third tuple element is the trigger's fingerprint (bd-9uyoy0): the
   # identity of the specific review / thread state that made the PR actionable,
   # or nil when there is none to key on. See `handled?/3`.
-  defp actionable_reason(adapter, mr_ref, signals, our_login) do
-    cond do
-      (cr = changes_requested_trigger(adapter, mr_ref, signals)) != :none ->
-        {:changes_requested, fingerprint} = cr
-        {"at least one review with state=CHANGES_REQUESTED", "", fingerprint}
+  #
+  # `handled?` says whether a fingerprint was already consumed by a completed
+  # follow-up. Triggers are tried in priority order and a consumed one is
+  # skipped, so a consumed CHANGES_REQUESTED review never hides a newly
+  # unresolved thread or a failing required check.
+  defp actionable_reason(adapter, mr_ref, signals, our_login, handled?) do
+    [
+      fn ->
+        case changes_requested_trigger(adapter, mr_ref, signals) do
+          {:changes_requested, fingerprint} ->
+            {"at least one review with state=CHANGES_REQUESTED", "", fingerprint}
 
-      (threads = open_review_threads(adapter, mr_ref, signals, our_login)) != [] ->
-        {"#{length(threads)} unresolved review thread(s) / inline review comment(s)", "",
-         threads_fingerprint(threads)}
+          :none ->
+            nil
+        end
+      end,
+      fn ->
+        case open_review_threads(adapter, mr_ref, signals, our_login) do
+          [] ->
+            nil
 
-      (names = required_check_failure_names(adapter, mr_ref, signals)) != [] ->
-        {"#{length(names)} required check(s) failing: #{Enum.join(names, ", ")}",
-         CIFailureFollowUp.instructions(names), nil}
+          threads ->
+            {"#{length(threads)} unresolved review thread(s) / inline review comment(s)", "",
+             threads_fingerprint(threads)}
+        end
+      end,
+      fn ->
+        case required_check_failure_names(adapter, mr_ref, signals) do
+          [] ->
+            nil
 
-      true ->
-        nil
-    end
+          names ->
+            {"#{length(names)} required check(s) failing: #{Enum.join(names, ", ")}",
+             CIFailureFollowUp.instructions(names), nil}
+        end
+      end
+    ]
+    |> Enum.find_value(fn trigger ->
+      case trigger.() do
+        nil -> nil
+        {_reason, _extra, nil} = found -> found
+        {_reason, _extra, fingerprint} = found -> if handled?.(fingerprint), do: nil, else: found
+      end
+    end)
   end
 
   # CHANGES_REQUESTED: from the batched signals when present, else ONE per-PR
@@ -867,7 +891,7 @@ defmodule Arbiter.Workflows.PRPatrol do
         "No follow-up close reasons were recorded."
 
       listed ->
-        "Follow-ups filed for this PR by close reason: #{listed}. Tasks closed " <>
+        "All follow-ups ever filed for this PR (not only the breaker window), by close reason: #{listed}. Tasks closed " <>
           "`completed` finished their work, so the trigger kept re-arming; " <>
           "any other reason means the task was lost or closed before it could finish."
     end

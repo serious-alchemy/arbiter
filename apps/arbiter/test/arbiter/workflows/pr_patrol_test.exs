@@ -1934,6 +1934,66 @@ defmodule Arbiter.Workflows.PRPatrolTest do
       assert length(tasks_for_repo()) == 2
     end
 
+    test "a consumed CHANGES_REQUESTED review does not hide a newly unresolved thread",
+         %{ws: ws} do
+      threads = :counters.new(1, [])
+
+      stub(fn conn ->
+        cond do
+          conn.request_path == "/repos/owner/repo/pulls" ->
+            Req.Test.json(conn, [%{"number" => 5152, "title" => "t", "html_url" => "x"}])
+
+          conn.request_path == "/repos/owner/repo/pulls/5152/reviews" ->
+            Req.Test.json(conn, [
+              %{"id" => 900, "state" => "CHANGES_REQUESTED", "user" => %{"login" => "alice"}}
+            ])
+
+          conn.request_path == "/repos/owner/repo/pulls/5152/comments" ->
+            Req.Test.json(conn, [])
+
+          conn.request_path == "/graphql" ->
+            nodes =
+              if :counters.get(threads, 1) == 0,
+                do: [],
+                else: [
+                  %{
+                    "id" => "T1",
+                    "isResolved" => false,
+                    "comments" => %{
+                      "nodes" => [%{"id" => "C1", "author" => %{"login" => "bob"}}]
+                    }
+                  }
+                ]
+
+            Req.Test.json(conn, %{
+              "data" => %{
+                "repository" => %{
+                  "pullRequest" => %{"reviewThreads" => %{"nodes" => nodes}}
+                }
+              }
+            })
+
+          true ->
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
+        end
+      end)
+
+      {pid, name} = start_patrol(ws)
+
+      :ok = PRPatrol.tick(name)
+      assert [first] = tasks_for_repo()
+      {:ok, _} = Ash.update(first, %{close_reason: :completed}, action: :close)
+
+      force_retry_now(pid, 5152)
+      :ok = PRPatrol.tick(name)
+      assert length(tasks_for_repo()) == 1
+
+      :counters.put(threads, 1, 1)
+      force_retry_now(pid, 5152)
+      :ok = PRPatrol.tick(name)
+      assert length(tasks_for_repo()) == 2
+    end
+
     test "the breaker escalation names the close reasons of the follow-ups it counted",
          %{ws: ws} do
       prior_cb = Application.get_env(:arbiter, :circuit_breaker, [])
