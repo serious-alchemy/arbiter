@@ -55,9 +55,15 @@ defmodule Arbiter.Quota.Codex do
 
   @stub_name __MODULE__.HTTP
   @default_usage_url "https://chatgpt.com/backend-api/wham/usage"
-  @default_auth_path "~/.codex/auth.json"
   @default_provider "codex"
   @request_timeout_ms 15_000
+
+  defp default_auth_path do
+    case System.get_env("CODEX_HOME") do
+      dir when is_binary(dir) and dir != "" -> Path.join(dir, "auth.json")
+      _ -> "~/.codex/auth.json"
+    end
+  end
 
   @type window :: %{
           used: float(),
@@ -382,6 +388,24 @@ defmodule Arbiter.Quota.Codex do
     end
   end
 
+  @doc """
+  Probe Codex authentication using the usage API endpoint (`wham/usage`).
+
+  Performs a zero-quota check against the operator's Codex login credentials.
+  Returns:
+    * `{:ok, 200, body}` when authenticated successfully;
+    * `{:ok, 401, body}` when credentials are expired or invalid;
+    * `{:ok, status, body}` for other HTTP response statuses;
+    * `{:error, reason}` on network errors, missing `auth.json`, or absence of an access token.
+  """
+  @spec probe_auth(keyword()) :: {:ok, pos_integer(), term()} | {:error, term()}
+  def probe_auth(opts \\ []) do
+    case resolve_credentials(opts) do
+      {:ok, creds} -> request_usage(creds, opts)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   defp resolve_credentials(opts) do
     case Keyword.get(opts, :credentials) do
       %{access_token: token} = creds when is_binary(token) and token != "" ->
@@ -393,7 +417,7 @@ defmodule Arbiter.Quota.Codex do
   end
 
   defp auth_path(opts) do
-    (Keyword.get(opts, :auth_path) || cfg(:auth_path, @default_auth_path))
+    (Keyword.get(opts, :auth_path) || cfg(:auth_path, default_auth_path()))
     |> Path.expand()
   end
 

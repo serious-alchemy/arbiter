@@ -234,12 +234,153 @@ defmodule Arbiter.Agents.CodexTest do
       codex = Path.join(tmp, "codex")
       File.write!(codex, "#!/bin/sh\nexit 0\n")
       File.chmod!(codex, 0o755)
+      prev_probe = Application.get_env(:arbiter, :codex_argv_probe)
+      Application.put_env(:arbiter, :codex_argv_probe, true)
+      on_exit(fn -> restore_env(:codex_argv_probe, prev_probe) end)
       {:ok, codex: codex}
+    end
+
+    test "fails closed when the argv probe is disabled" do
+      Application.put_env(:arbiter, :codex_argv_probe, false)
+      assert {:error, {:executable_not_found, _}} = Codex.auth_probe_argv([])
     end
 
     test "returns a cheap `codex exec` round-trip", %{codex: codex} do
       assert {:ok, argv} = Codex.auth_probe_argv([])
       assert ["sh", "-c", _script, "sh", ^codex, "exec" | _rest] = argv
+    end
+  end
+
+  describe "auth_probe/1" do
+    setup do
+      prev_http_stub = Application.get_env(:arbiter, :codex_quota_http_stub)
+      Application.put_env(:arbiter, :codex_quota_http_stub, true)
+      Codex.Config.clear()
+      prev_key = System.get_env("OPENAI_API_KEY")
+      System.delete_env("OPENAI_API_KEY")
+
+      tmp =
+        Path.join(System.tmp_dir!(), "arbiter-codex-probe-#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(tmp)
+      old_path = System.get_env("PATH") || ""
+      System.put_env("PATH", tmp)
+
+      codex = Path.join(tmp, "codex")
+      File.write!(codex, "#!/bin/sh\nexit 0\n")
+      File.chmod!(codex, 0o755)
+
+      on_exit(fn ->
+        restore_env(:codex_quota_http_stub, prev_http_stub)
+        Codex.Config.clear()
+
+        case prev_key do
+          nil -> System.delete_env("OPENAI_API_KEY")
+          v -> System.put_env("OPENAI_API_KEY", v)
+        end
+
+        System.put_env("PATH", old_path)
+        File.rm_rf!(tmp)
+      end)
+
+      {:ok, codex: codex}
+    end
+
+    test "returns :ok when usage API returns 200" do
+      Req.Test.stub(Arbiter.Quota.Codex.HTTP, fn conn ->
+        Req.Test.json(conn, %{"plan_type" => "plus"})
+      end)
+
+      assert :ok = Codex.auth_probe(credentials: %{access_token: "tok-123", account_id: nil})
+    end
+
+    test "returns :skipped (defers to argv probe, no hard expiry) when usage API returns 401" do
+      Req.Test.stub(Arbiter.Quota.Codex.HTTP, fn conn ->
+        conn
+        |> Plug.Conn.put_status(401)
+        |> Req.Test.json(%{"error" => "expired"})
+      end)
+
+      # A stale access token must not lock Codex out: the CLI refreshes it.
+      assert :skipped =
+               Codex.auth_probe(credentials: %{access_token: "tok-123", account_id: nil})
+    end
+
+    test "returns :skipped without calling usage API when api_key is provided (falls back to argv probe)" do
+      # If an API key is set, it falls back to auth_probe_argv so the key/backend is validated
+      assert :skipped = Codex.auth_probe(api_key: "sk-proj-test-key")
+    end
+
+    test "honours CODEX_HOME for ChatGPT auth in auth_probe" do
+      home_dir =
+        Path.join(System.tmp_dir!(), "arbiter_codex_home_#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(home_dir)
+
+      File.write!(
+        Path.join(home_dir, "auth.json"),
+        Jason.encode!(%{"tokens" => %{"access_token" => "tok-codex-home"}})
+      )
+
+      prev_home = System.get_env("CODEX_HOME")
+      prev_cfg = Application.get_env(:arbiter, :codex_quota)
+
+      Application.put_env(:arbiter, :codex_quota, [])
+      System.put_env("CODEX_HOME", home_dir)
+
+      on_exit(fn ->
+        case prev_home do
+          nil -> System.delete_env("CODEX_HOME")
+          v -> System.put_env("CODEX_HOME", v)
+        end
+
+        case prev_cfg do
+          nil -> Application.delete_env(:arbiter, :codex_quota)
+          v -> Application.put_env(:arbiter, :codex_quota, v)
+        end
+
+        File.rm_rf(home_dir)
+      end)
+
+      Req.Test.stub(Arbiter.Quota.Codex.HTTP, fn conn ->
+        assert ["Bearer tok-codex-home"] = Plug.Conn.get_req_header(conn, "authorization")
+        Req.Test.json(conn, %{"plan_type" => "plus"})
+      end)
+
+      assert :ok = Codex.auth_probe([])
+    end
+
+    test "returns :skipped for a keyless backend with no ChatGPT auth.json (Ollama-style)" do
+      dir =
+        Path.join(
+          System.tmp_dir!(),
+          "arbiter_codex_keyless_#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(dir)
+      prev_cfg = Application.get_env(:arbiter, :codex_quota)
+      Application.put_env(:arbiter, :codex_quota, auth_path: Path.join(dir, "auth.json"))
+
+      on_exit(fn ->
+        case prev_cfg do
+          nil -> Application.delete_env(:arbiter, :codex_quota)
+          v -> Application.put_env(:arbiter, :codex_quota, v)
+        end
+
+        File.rm_rf(dir)
+      end)
+
+      assert :skipped = Codex.auth_probe([])
+
+      File.write!(Path.join(dir, "auth.json"), Jason.encode!(%{"OPENAI_API_KEY" => nil}))
+      assert :skipped = Codex.auth_probe([])
+    end
+
+    test "returns {:error, :crashed} when codex binary is not on PATH" do
+      System.put_env("PATH", "/nonexistent/bin")
+      assert {:error, reason} = Codex.auth_probe([])
+      assert reason.category == :crashed
+      assert reason.summary =~ "agent CLI not found on PATH"
     end
   end
 
@@ -367,4 +508,7 @@ defmodule Arbiter.Agents.CodexTest do
              ]
     end
   end
+
+  defp restore_env(key, nil), do: Application.delete_env(:arbiter, key)
+  defp restore_env(key, val), do: Application.put_env(:arbiter, key, val)
 end

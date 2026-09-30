@@ -102,39 +102,44 @@ defmodule Arbiter.Agents.PreflightUsageTest do
     assert Event |> Ash.Query.filter(source == :preflight) |> Ash.read!() == []
   end
 
-  # bd-96mn8i round 5 finding 1: every test above replays a hand-built or
-  # verbatim-captured fixture through `probe_command:` — proof that the
-  # PARSER matches codex's `turn.completed` shape, but not proof that a real
-  # `codex exec` invocation reaches that parser end to end. This is that
-  # proof: no `probe_command:` override, so `Preflight.check/2` falls
-  # through to `Codex.auth_probe_argv/1` and spawns the actual installed
-  # `codex` CLI (bd-96mn8i round 3 review finding 1). Opt-in (`:live_codex_cli`,
-  # excluded by default in `test/test_helper.exs`) because it spends real
-  # quota against whatever account this host is logged into:
-  #
-  #     mix test --include live_codex_cli test/arbiter/agents/preflight_usage_test.exs
-  #
-  # Skips (not fails) when this host has no codex CLI on PATH — an
-  # environment gap, not a red suite.
-  @tag :live_codex_cli
-  test "a live codex exec round-trip writes a preflight row with real, non-zero tokens" do
-    if System.find_executable("codex") do
-      assert :ok =
-               Preflight.check(Arbiter.Agents.Codex,
-                 usage_workspace_id: "ws-pf-live-codex",
-                 timeout_ms: 60_000
-               )
+  # bd-2r42bq: Preflight.check/2 for Codex now routes to zero-quota `auth_probe/1`
+  # (wham/usage API probe) instead of spawning a real model turn on the operator's
+  # 30-day quota. When no external OS process is spawned, no usage row is written.
+  test "Codex preflight check is zero-quota and writes no preflight usage rows" do
+    prev_http_stub = Application.get_env(:arbiter, :codex_quota_http_stub)
+    Application.put_env(:arbiter, :codex_quota_http_stub, true)
 
-      [ev] =
-        Event
-        |> Ash.Query.filter(source == :preflight and workspace_id == "ws-pf-live-codex")
-        |> Ash.read!()
+    tmp =
+      Path.join(System.tmp_dir!(), "arbiter-pf-codex-#{System.unique_integer([:positive])}")
 
-      assert ev.provider == "codex"
-      assert is_integer(ev.tokens_in) and ev.tokens_in > 0
-      assert is_integer(ev.tokens_out) and ev.tokens_out > 0
-    else
-      IO.puts("SKIP: no codex CLI on PATH on this host — live round-trip not exercised")
-    end
+    File.mkdir_p!(tmp)
+    codex = Path.join(tmp, "codex")
+    File.write!(codex, "#!/bin/sh\nexit 0\n")
+    File.chmod!(codex, 0o755)
+    old_path = System.get_env("PATH") || ""
+    System.put_env("PATH", tmp <> ":" <> old_path)
+
+    on_exit(fn ->
+      restore_env(:codex_quota_http_stub, prev_http_stub)
+      System.put_env("PATH", old_path)
+      File.rm_rf!(tmp)
+    end)
+
+    Req.Test.stub(Arbiter.Quota.Codex.HTTP, fn conn ->
+      Req.Test.json(conn, %{"plan_type" => "plus"})
+    end)
+
+    assert :ok =
+             Preflight.check(Arbiter.Agents.Codex,
+               credentials: %{access_token: "tok-test", account_id: nil},
+               usage_workspace_id: "ws-pf-zero-quota"
+             )
+
+    assert Event
+           |> Ash.Query.filter(source == :preflight and workspace_id == "ws-pf-zero-quota")
+           |> Ash.read!() == []
   end
+
+  defp restore_env(key, nil), do: Application.delete_env(:arbiter, key)
+  defp restore_env(key, val), do: Application.put_env(:arbiter, key, val)
 end

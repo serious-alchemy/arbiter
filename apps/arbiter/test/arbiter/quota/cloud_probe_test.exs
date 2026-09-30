@@ -1182,11 +1182,12 @@ defmodule Arbiter.Quota.CloudProbeTest do
 
       original_codex_cfg = Application.get_env(:arbiter, :codex_quota, [])
       Application.put_env(:arbiter, :codex_quota, auth_path: auth_path)
+      prev_http_stub = Application.get_env(:arbiter, :codex_quota_http_stub)
       Application.put_env(:arbiter, :codex_quota_http_stub, true)
 
       on_exit(fn ->
         Application.put_env(:arbiter, :codex_quota, original_codex_cfg)
-        Application.delete_env(:arbiter, :codex_quota_http_stub)
+        restore_env(:codex_quota_http_stub, prev_http_stub)
       end)
 
       Req.Test.stub(Arbiter.Quota.Codex.HTTP, fn conn ->
@@ -1557,4 +1558,7 @@ defmodule Arbiter.Quota.CloudProbeTest do
       assert CloudProbe.interval_ms() == 300_000
     end
   end
+
+  defp restore_env(key, nil), do: Application.delete_env(:arbiter, key)
+  defp restore_env(key, val), do: Application.put_env(:arbiter, key, val)
 end
