@@ -92,6 +92,34 @@ defmodule Arbiter.Tasks.IssueProgressTest do
       assert Issue.maybe_auto_close(parent).state == :backlog
     end
 
+    test "auto_close parent created with zero children returns with open state", %{ws: ws} do
+      {:ok, parent} =
+        Ash.create(Issue, %{title: "epic", auto_close: true, workspace_id: ws.id})
+
+      assert parent.state == :backlog
+    end
+
+    test "auto_close parent stays open when first child is attached if child is open", %{ws: ws} do
+      {:ok, parent} =
+        Ash.create(Issue, %{title: "epic", auto_close: true, workspace_id: ws.id})
+
+      {:ok, child} = Ash.create(Issue, %{title: "child", workspace_id: ws.id})
+
+      child_of(parent, child)
+
+      parent = Ash.get!(Issue, parent.id)
+      assert parent.state == :backlog
+    end
+
+    test "auto_close parent has child_total = 0 when created with no children", %{ws: ws} do
+      {:ok, parent} =
+        Ash.create(Issue, %{title: "epic", auto_close: true, workspace_id: ws.id})
+
+      parent = Ash.load!(parent, [:child_total, :child_closed])
+      assert parent.child_total == 0
+      assert parent.child_closed == 0
+    end
+
     test "closing a child cascades up a chain of auto_close ancestors", %{ws: ws} do
       {:ok, grandparent} =
         Ash.create(Issue, %{title: "grandparent", auto_close: true, workspace_id: ws.id})
