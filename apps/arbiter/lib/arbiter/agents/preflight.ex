@@ -144,7 +144,7 @@ defmodule Arbiter.Agents.Preflight do
 
   alias Arbiter.Usage
   alias Arbiter.Worker.OsProcess
-  alias Arbiter.Worker.ReleaseEnv
+  alias Arbiter.Worker.SpawnEnv
   alias Arbiter.Worker.StopReason
 
   @default_timeout_ms 30_000
@@ -319,7 +319,7 @@ defmodule Arbiter.Agents.Preflight do
           # tools enabled, rooted in the live hot-reloading checkout, is one
           # curious turn away from writing there.
           {:cd, probe_cwd()}
-        ] ++ env_opt(env)
+        ] ++ env_opt(env, adapter)
       )
 
     started_at = System.monotonic_time(:millisecond)
@@ -505,11 +505,20 @@ defmodule Arbiter.Agents.Preflight do
   # signature of bd-4hkzn3 for any BEAM the CLI's own hooks might start). The
   # scrub is applied here rather than at the two `env` sources so it covers
   # both the adapter's `spawn_env/1` and a caller-supplied `:probe_env`.
-  defp env_opt(pairs) do
-    case ReleaseEnv.port_env(pairs) do
+  #
+  # bd-7r0qrj: the probe is a real agent turn, so it gets the same allowlisted
+  # env as a worker of that provider (`SpawnEnv` folds the release scrub in).
+  defp env_opt(pairs, adapter) do
+    case SpawnEnv.port_env(pairs, adapter_provider(adapter)) do
       [] -> []
       merged -> [{:env, env_charlists(merged)}]
     end
+  end
+
+  defp adapter_provider(adapter) do
+    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :provider, 0),
+      do: adapter.provider(),
+      else: nil
   end
 
   defp env_charlists(pairs) do

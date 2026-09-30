@@ -80,8 +80,8 @@ defmodule Arbiter.Worker.WorkerEnv do
   and burns a run. A workspace with no provider credential configured at all
   is untouched and never raises.
   """
-  @spec resolve(String.t() | nil) :: {[{String.t(), String.t()}], [String.t()]}
-  def resolve(task_id) do
+  @spec resolve(String.t() | nil, keyword()) :: {[{String.t(), String.t()}], [String.t()]}
+  def resolve(task_id, opts \\ []) do
     case workspace_for(task_id) do
       %Workspace{} = ws ->
         workspace_pairs =
@@ -105,7 +105,7 @@ defmodule Arbiter.Worker.WorkerEnv do
           end
 
         {pairs, secret_values} =
-          apply_provider_accounts(ws, workspace_pairs, workspace_secrets)
+          apply_provider_accounts(ws, workspace_pairs, workspace_secrets, opts)
 
         warn_if_degraded(task_id, ws, pairs)
         {pairs, secret_values}
@@ -117,16 +117,42 @@ defmodule Arbiter.Worker.WorkerEnv do
 
   # Credential vars are swapped for the account's — the only source since the
   # P13 flip removed `:provider_accounts_enabled` (bd-9gqj8e).
-  defp apply_provider_accounts(%Workspace{} = ws, pairs, secrets) do
-    account_pairs = Credentials.workspace_pairs(ws.id)
+  #
+  # bd-7r0qrj: with `provider: "claude" | "codex" | "gemini" | nil` in `opts` the
+  # *pairs* carry only that provider's accounts' credentials (`nil` = claude,
+  # like `SpawnEnv`); without it, all of them (the redaction/inspection
+  # callers). The redaction list and the dropped-credential guard always see
+  # every account, so a filtered spawn still redacts the others and never
+  # mistakes a filtered credential for a dropped one.
+  defp apply_provider_accounts(%Workspace{} = ws, pairs, secrets, opts) do
+    all_account_pairs = Credentials.workspace_pairs(ws.id)
     {credential_pairs, plain_pairs} = split_credential_pairs(pairs)
 
-    ensure_no_credential_dropped!(ws, credential_pairs, account_pairs)
+    ensure_no_credential_dropped!(ws, credential_pairs, all_account_pairs)
 
-    {plain_pairs ++ account_pairs,
+    {plain_pairs ++ spawn_account_pairs(ws, all_account_pairs, opts),
      drop_credential_secrets(secrets, credential_pairs) ++
-       Enum.map(account_pairs, fn {_var, secret} -> secret end)}
+       Enum.map(all_account_pairs, fn {_var, secret} -> secret end)}
   end
+
+  defp spawn_account_pairs(%Workspace{} = ws, all_account_pairs, opts) do
+    case Keyword.fetch(opts, :provider) do
+      {:ok, provider} -> Credentials.workspace_pairs(ws.id, account_provider(provider))
+      :error -> all_account_pairs
+    end
+  end
+
+  # The adapter names the agy worker "gemini"; its accounts are `antigravity`.
+  defp account_provider(nil), do: :claude
+
+  defp account_provider(provider) when is_atom(provider),
+    do: account_provider(Atom.to_string(provider))
+
+  defp account_provider("gemini"), do: :antigravity
+  defp account_provider("claude"), do: :claude
+  defp account_provider("codex"), do: :codex
+  # An unknown provider matches no account: fail closed rather than hand it all.
+  defp account_provider(_other), do: :none
 
   defp split_credential_pairs(pairs) do
     credential_keys = Census.credential_keys()

@@ -307,9 +307,11 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
     for {rel, _count} <- @port_open_allowlist do
       body = File.read!(Path.join(@repo_root, rel))
 
-      assert body =~ "ReleaseEnv.port_env(",
-             "#{rel} opens a port but no longer calls ReleaseEnv.port_env/1 — " <>
-               "the release-env scrub was dropped from a spawn path."
+      # bd-7r0qrj: `SpawnEnv.port_env/2` is the allowlisting superset — it
+      # routes through `ReleaseEnv.port_env/1` itself.
+      assert body =~ "ReleaseEnv.port_env(" or body =~ "SpawnEnv.port_env(",
+             "#{rel} opens a port but no longer calls ReleaseEnv.port_env/1 " <>
+               "or SpawnEnv.port_env/2 — the release-env scrub was dropped from a spawn path."
     end
   end
 
@@ -344,8 +346,8 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
     for {rel, :scrubbed} <- @inventory do
       body = File.read!(Path.join(@repo_root, rel))
 
-      assert body =~ "ReleaseEnv",
-             "#{rel} is classified :scrubbed but does not reference ReleaseEnv."
+      assert body =~ "ReleaseEnv" or body =~ "SpawnEnv",
+             "#{rel} is classified :scrubbed but does not reference ReleaseEnv or SpawnEnv."
     end
   end
 
