@@ -188,6 +188,25 @@ defmodule Arbiter.Agents.Preflight do
     timeout = timeout_ms(adapter, opts)
     opts = Keyword.put(opts, :timeout_ms, timeout)
 
+    if Keyword.has_key?(opts, :probe_command) do
+      run_argv_probe(adapter, opts, timeout)
+    else
+      run_auth_probe(adapter, opts, timeout)
+    end
+  end
+
+  defp run_auth_probe(adapter, opts, timeout) do
+    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :auth_probe, 1) do
+      case adapter.auth_probe(opts) do
+        :skipped -> run_argv_probe(adapter, opts, timeout)
+        result -> result
+      end
+    else
+      run_argv_probe(adapter, opts, timeout)
+    end
+  end
+
+  defp run_argv_probe(adapter, opts, timeout) do
     case resolve_argv(adapter, opts) do
       {:ok, argv} -> run(adapter, argv, opts, timeout)
       :skipped -> :skipped

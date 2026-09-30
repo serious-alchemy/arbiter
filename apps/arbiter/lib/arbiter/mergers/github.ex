@@ -2041,7 +2041,7 @@ defmodule Arbiter.Mergers.Github do
   defp batch_pr_block(%{palias: palias, number: number}) do
     """
         #{palias}: pullRequest(number: #{number}) {
-          reviews(last: 100) { nodes { state author { login } } }
+          reviews(last: 100) { nodes { databaseId state author { login } } }
           reviewThreads(first: 100) {
             nodes {
               id
@@ -2153,6 +2153,7 @@ defmodule Arbiter.Mergers.Github do
   defp extract_pr_signals(node) do
     %{
       changes_requested: batch_changes_requested?(node),
+      latest_review_id: batch_latest_review_id(node),
       review_threads: batch_review_threads(node),
       required_check_failures: batch_required_check_failures(node)
     }
@@ -2161,15 +2162,26 @@ defmodule Arbiter.Mergers.Github do
   # Normalize the GraphQL reviews (`author { login }`) to the REST shape
   # `changes_requested?/1` expects (`user.login`), then reuse it verbatim — same
   # latest-verdict-per-reviewer semantics as `list_review_feedback/1`.
-  defp batch_changes_requested?(node) do
+  defp batch_changes_requested?(node), do: node |> batch_reviews() |> changes_requested?()
+
+  # bd-9uyoy0: the same debounce handle `list_review_feedback/1` reports (the
+  # REST `id`, which is GraphQL's `databaseId`), so the fallback and batched
+  # paths fingerprint a review identically.
+  defp batch_latest_review_id(node),
+    do: node |> batch_reviews() |> latest_changes_requested_id()
+
+  defp batch_reviews(node) do
     node
     |> get_in(["reviews", "nodes"])
     |> List.wrap()
     |> Enum.reject(&is_nil/1)
     |> Enum.map(fn r ->
-      %{"state" => Map.get(r, "state"), "user" => %{"login" => get_in(r, ["author", "login"])}}
+      %{
+        "id" => Map.get(r, "databaseId"),
+        "state" => Map.get(r, "state"),
+        "user" => %{"login" => get_in(r, ["author", "login"])}
+      }
     end)
-    |> changes_requested?()
   end
 
   # Same unresolved-thread filter + normalization as `list_open_review_threads/1`.
