@@ -91,8 +91,7 @@ defmodule Arbiter.Tasks.AttentionSweepBootTest do
 
     assert id == task.id
 
-    refute_receive {:event,
-                    %{topic: "inbox", kind: "attention", event: "raised", task_id: ^id}},
+    refute_receive {:event, %{topic: "inbox", kind: "attention", event: "raised", task_id: ^id}},
                    100
   end
 
