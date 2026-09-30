@@ -141,4 +141,115 @@ defmodule Arbiter.Board.AutopilotConfigTest do
       end
     end
   end
+
+  # bd-jw7cb0: `interval_ms: :never` only stops the fallback tick. Since the
+  # reactive triggers (#1999), a resumed autopilot also runs a pass on every
+  # "tasks" lifecycle broadcast and every worker_done/worker_failed event — so
+  # the suite's VM-global autopilot, resumed by the board LiveView tests,
+  # dispatched those tests' own Ready fixtures behind their backs and escalated
+  # the failures from a DB connection whose owner had already exited.
+  describe "reactive subscriptions from app config (bd-jw7cb0)" do
+    # Moved here from `Arbiter.Board.AutopilotTest` (async): it now has to clear
+    # the test env's own `topics: []` to reach the production default.
+    test "with no :topics anywhere, a task closing runs a pass over the real default topics" do
+      saved_config = Application.get_env(:arbiter, :board_autopilot, :not_set)
+      test = self()
+
+      try do
+        Application.put_env(:arbiter, :board_autopilot, enabled: false, interval_ms: :never)
+
+        {:ok, pid} =
+          Autopilot.start_link(
+            name: nil,
+            interval_ms: :never,
+            debounce_ms: 20,
+            paused: false,
+            follow_up: false,
+            snapshot: fn opts -> board("bd-1", opts[:paused]) end,
+            dispatch: fn id -> send(test, {:dispatched, id}) && {:ok, %{task_id: id}} end
+          )
+
+        assert Enum.sort(Registry.keys(Arbiter.PubSub, pid)) ==
+                 Enum.sort(Autopilot.default_topics())
+
+        Phoenix.PubSub.broadcast(
+          Arbiter.PubSub,
+          "tasks",
+          {:task_lifecycle, :closed, %{id: "bd-2"}}
+        )
+
+        assert_receive {:dispatched, "bd-1"}, 500
+      after
+        restore_config(saved_config)
+      end
+    end
+
+    test "topics in config replaces the default subscriptions" do
+      saved_config = Application.get_env(:arbiter, :board_autopilot, :not_set)
+      topic = "autopilot-config-#{System.unique_integer([:positive])}"
+      test = self()
+
+      try do
+        Application.put_env(:arbiter, :board_autopilot, topics: [topic])
+
+        {:ok, pid} =
+          Autopilot.start_link(
+            name: nil,
+            paused: false,
+            interval_ms: :never,
+            debounce_ms: 0,
+            snapshot: fn opts ->
+              send(test, {:board_read, self()})
+              board(nil, opts[:paused])
+            end
+          )
+
+        assert Registry.keys(Arbiter.PubSub, pid) == [topic]
+
+        Phoenix.PubSub.broadcast(Arbiter.PubSub, topic, {:task_lifecycle, :promoted, %{}})
+        assert_receive {:board_read, ^pid}, 1_000
+      after
+        restore_config(saved_config)
+      end
+    end
+
+    test "topics: [] means a resumed autopilot never runs a pass on its own" do
+      saved_config = Application.get_env(:arbiter, :board_autopilot, :not_set)
+      test = self()
+
+      try do
+        Application.put_env(:arbiter, :board_autopilot, topics: [])
+
+        {:ok, pid} =
+          Autopilot.start_link(
+            name: nil,
+            paused: false,
+            interval_ms: :never,
+            debounce_ms: 0,
+            snapshot: fn opts ->
+              send(test, {:board_read, self()})
+              board(nil, opts[:paused])
+            end
+          )
+
+        assert Registry.keys(Arbiter.PubSub, pid) == []
+        send(pid, {:task_lifecycle, :promoted, %{}})
+        _ = :sys.get_state(pid)
+        # The trigger itself still works when it does arrive; there is just
+        # nothing subscribed to deliver it.
+        assert_receive {:board_read, ^pid}, 1_000
+      after
+        restore_config(saved_config)
+      end
+    end
+
+    test "the suite's global autopilot subscribes to nothing" do
+      # What every LiveView test that calls `Autopilot.resume(Autopilot)` relies
+      # on: resumed, it still cannot react to that test's fixtures.
+      assert Registry.keys(Arbiter.PubSub, Process.whereis(Autopilot)) == []
+    end
+  end
+
+  defp restore_config(:not_set), do: Application.delete_env(:arbiter, :board_autopilot)
+  defp restore_config(saved), do: Application.put_env(:arbiter, :board_autopilot, saved)
 end

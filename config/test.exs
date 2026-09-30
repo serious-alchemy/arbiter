@@ -291,8 +291,13 @@ config :arbiter, :credential_watchdog, enabled: false
 
 # The board's auto-dispatcher (bd-bqyeqa). Off and never ticking under test:
 # a test that resumes the scheduler is exercising the switch, not asking for a
-# real worker to be spawned fifteen seconds later.
-config :arbiter, :board_autopilot, enabled: false, interval_ms: :never
+# real worker to be spawned fifteen seconds later. `topics: []` is the other
+# half of "never": the reactive triggers plan on every "tasks" lifecycle
+# broadcast and worker_done/worker_failed event, so a resumed global autopilot
+# dispatched the board tests' own Ready fixtures and escalated the failures
+# from a connection whose sandbox owner had already exited (bd-jw7cb0). Tests
+# that exercise the triggers start their own instance with `:topics`.
+config :arbiter, :board_autopilot, enabled: false, interval_ms: :never, topics: []
 
 # Coordinator sessions (bd-bpt0ag). The session socket directory is derived
 # from `XDG_RUNTIME_DIR`, which is a real tmpfs on the dogfood host — point it

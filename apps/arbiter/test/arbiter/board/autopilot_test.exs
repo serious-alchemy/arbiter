@@ -649,29 +649,6 @@ defmodule Arbiter.Board.AutopilotTest do
       assert Autopilot.default_topics() == ["tasks", "events"]
     end
 
-    test "a task closing runs a pass over the real default topics, with no :topics override" do
-      # `start/1` always injects a `:topics` default of its own (usually `[]`,
-      # to keep the rest of this suite isolated from real broadcasts), so it
-      # cannot be used here — this test needs `init/1`'s own default, meaning
-      # no `:topics` key at all in the opts `Autopilot.start_link/1` sees.
-      test = self()
-
-      {:ok, _pid} =
-        Autopilot.start_link(
-          name: nil,
-          interval_ms: :never,
-          debounce_ms: 20,
-          paused: false,
-          follow_up: false,
-          snapshot: fn opts -> board("bd-1", opts[:paused]) end,
-          dispatch: fn id -> send(test, {:dispatched, id}) && {:ok, %{task_id: id}} end
-        )
-
-      Phoenix.PubSub.broadcast(Arbiter.PubSub, "tasks", {:task_lifecycle, :closed, %{id: "bd-2"}})
-
-      assert_receive {:dispatched, "bd-1"}, 500
-    end
-
     test "a task closing runs a pass when delivered over real PubSub" do
       topic = "autopilot-test-tasks-#{System.unique_integer([:positive])}"
       _pid = start(paused: false, topics: [topic])
