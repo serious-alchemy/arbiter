@@ -299,9 +299,48 @@ defmodule Arbiter.Agents.CodexTest do
       assert reason.remediation =~ "codex login"
     end
 
-    test "returns :ok without calling usage API when api_key is provided (backend-neutral)" do
-      # If an API key is set, it does not attempt ChatGPT wham/usage with missing token
-      assert :ok = Codex.auth_probe(api_key: "sk-proj-test-key")
+    test "returns :skipped without calling usage API when api_key is provided (falls back to argv probe)" do
+      # If an API key is set, it falls back to auth_probe_argv so the key/backend is validated
+      assert :skipped = Codex.auth_probe(api_key: "sk-proj-test-key")
+    end
+
+    test "honours CODEX_HOME for ChatGPT auth in auth_probe" do
+      home_dir =
+        Path.join(System.tmp_dir!(), "arbiter_codex_home_#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(home_dir)
+
+      File.write!(
+        Path.join(home_dir, "auth.json"),
+        Jason.encode!(%{"tokens" => %{"access_token" => "tok-codex-home"}})
+      )
+
+      prev_home = System.get_env("CODEX_HOME")
+      prev_cfg = Application.get_env(:arbiter, :codex_quota)
+
+      Application.put_env(:arbiter, :codex_quota, [])
+      System.put_env("CODEX_HOME", home_dir)
+
+      on_exit(fn ->
+        case prev_home do
+          nil -> System.delete_env("CODEX_HOME")
+          v -> System.put_env("CODEX_HOME", v)
+        end
+
+        case prev_cfg do
+          nil -> Application.delete_env(:arbiter, :codex_quota)
+          v -> Application.put_env(:arbiter, :codex_quota, v)
+        end
+
+        File.rm_rf(home_dir)
+      end)
+
+      Req.Test.stub(Arbiter.Quota.Codex.HTTP, fn conn ->
+        assert ["Bearer tok-codex-home"] = Plug.Conn.get_req_header(conn, "authorization")
+        Req.Test.json(conn, %{"plan_type" => "plus"})
+      end)
+
+      assert :ok = Codex.auth_probe([])
     end
 
     test "returns {:error, :crashed} when codex binary is not on PATH" do

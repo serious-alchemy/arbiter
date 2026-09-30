@@ -271,7 +271,10 @@ config :arbiter, :cloud_code_quota, enabled: false
 # exists so surface tests (quota_get / GET /api/quota) get the graceful no-op
 # and make no real network call. Tests exercising the live path inject
 # `credentials:`/`auth_path:` and enable the Req.Test stub explicitly.
+# Also default HTTP stubbing to true in test so any unstubbed usage probe fails
+# closed against the Req.Test stub instead of hitting the live network.
 config :arbiter, :codex_quota, auth_path: "/nonexistent/codex/auth.json"
+config :arbiter, :codex_quota_http_stub, true
 
 # `Arbiter.Quota.CloudCode.antigravity/1` shells out to the `agy` CLI by
 # name/path via `:agy_cmd` (default `"agy"`, resolved with
