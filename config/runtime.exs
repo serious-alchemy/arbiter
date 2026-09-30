@@ -17,6 +17,8 @@ if config_env() != :test do
   config :arbiter, Arbiter.Repo,
     database: database_path,
     journal_mode: :wal,
+    cache_size: -64_000,
+    temp_store: :memory,
     busy_timeout: 5000,
     pool_size: String.to_integer(System.get_env("POOL_SIZE") || "5")
 end

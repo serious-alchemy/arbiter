@@ -142,6 +142,8 @@ defmodule Arbiter.Application do
       Arbiter.Sessions.OrphanReaper,
       # bd-9iv4qd: reclaims worktree-root leaves whose gitdir is gone.
       Arbiter.Worker.WorktreeSweeper,
+      # Periodically runs PRAGMA optimize on SQLite repos (bd-2zjtca).
+      Arbiter.Repo.OptimizeSweeper,
       # Deletes a session's persisted raw transcript once it has been :ended
       # past the retention window (phase 9, RFC §11). See
       # Arbiter.Sessions.TranscriptRetention.
@@ -294,6 +296,7 @@ defmodule Arbiter.Application do
       Arbiter.Boot.Migrator,
       Arbiter.Boot.ConfigMigrator,
       Arbiter.Boot.ProviderAccounts,
+      Arbiter.Boot.Optimize,
       Supervisor.child_spec(
         {Task,
          fn ->

@@ -133,6 +133,21 @@ defmodule Arbiter.ApplicationTest do
       refute Arbiter.SingleInstance in ids
       refute Arbiter.Boot.Migrator in ids
       refute Arbiter.Boot.ConfigMigrator in ids
+      refute Arbiter.Boot.Optimize in ids
+    end
+
+    test "the boot optimize hook runs after provider accounts and before workspace tasks" do
+      ids = Application.children(auto_start?: true) |> Enum.map(&child_id/1)
+
+      assert Arbiter.Boot.Optimize in ids
+      assert Arbiter.Repo.OptimizeSweeper in ids
+
+      accounts_ix = Enum.find_index(ids, &(&1 == Arbiter.Boot.ProviderAccounts))
+      optimize_ix = Enum.find_index(ids, &(&1 == Arbiter.Boot.Optimize))
+      reconcile_ix = Enum.find_index(ids, &(&1 == :reconcile_boot_task))
+
+      assert accounts_ix < optimize_ix
+      assert optimize_ix < reconcile_ix
     end
   end
 end
