@@ -1227,6 +1227,50 @@ defmodule ArbiterWeb.BoardLiveTest do
       refute_held_load()
     end
 
+    # bd-81vbzg: worker lifecycle broadcasts are trailing-debounced. The test
+    # config sets the window to 0 (refresh immediately); this one widens it.
+    test "a burst of worker lifecycle broadcasts is one refresh, after the window", %{
+      conn: conn,
+      ws: ws
+    } do
+      previous = Application.get_env(:arbiter_web, :board_worker_debounce_ms)
+      Application.put_env(:arbiter_web, :board_worker_debounce_ms, 300)
+
+      on_exit(fn ->
+        if previous,
+          do: Application.put_env(:arbiter_web, :board_worker_debounce_ms, previous),
+          else: Application.delete_env(:arbiter_web, :board_worker_debounce_ms)
+      end)
+
+      {:ok, view, _html} = live(conn, "/")
+      render_async(view, @async_timeout)
+
+      test = self()
+
+      on_board_load(fn opts ->
+        send(test, :board_read)
+        :meck.passthrough([opts])
+      end)
+
+      for _ <- 1..10 do
+        Phoenix.PubSub.broadcast(Arbiter.PubSub, "workers", {:worker_lifecycle, :updated, %{}})
+      end
+
+      settle(view)
+      refute_received :board_read
+
+      assert_receive :board_read, 2_000
+      render_async(view, @async_timeout)
+      refute_receive :board_read, 400
+      assert has_element?(view, ~s(#board[data-state="loaded"]))
+
+      # A task event is not debounced, and the board still reflects it.
+      task = issue(ws, "created after the burst")
+      assert_receive :board_read, 2_000
+      render_async(view, @async_timeout)
+      assert has_element?(view, "#card-#{task.id}")
+    end
+
     # bd-81vbzg's concern from the other side: a burst of broadcasts during a
     # slow read is one more read, not one each — and the LiveView answers
     # while the read is out.

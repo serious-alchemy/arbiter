@@ -1161,7 +1161,7 @@ defmodule Arbiter.Worker do
     Phoenix.PubSub.broadcast(
       Arbiter.PubSub,
       "workers",
-      {:worker_lifecycle, event, snapshot(state)}
+      {:worker_lifecycle, event, lifecycle_snapshot(state)}
     )
 
     :ok
@@ -7622,6 +7622,14 @@ defmodule Arbiter.Worker do
       run_id: s.run_id,
       meta: s.meta
     }
+  end
+
+  # The lifecycle broadcast goes to every open dashboard tab, and `output_lines`
+  # (up to 1000 lines) is the bulk of `meta`. No subscriber reads it — the
+  # transcript has its own `:worker_output` stream and the run row.
+  defp lifecycle_snapshot(%State{} = s) do
+    snap = snapshot(s)
+    %{snap | meta: Map.delete(snap.meta || %{}, :output_lines)}
   end
 
   # ---- merge-request review internals ------------------------------------

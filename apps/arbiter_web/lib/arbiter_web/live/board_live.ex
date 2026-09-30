@@ -151,6 +151,7 @@ defmodule ArbiterWeb.BoardLive do
       |> assign(:board_error, nil)
       |> assign(:board_loading?, false)
       |> assign(:board_stale?, false)
+      |> assign(:worker_refresh_timer, nil)
 
     {:ok, if(live?, do: refresh_board(socket), else: socket)}
   end
@@ -161,8 +162,25 @@ defmodule ArbiterWeb.BoardLive do
   def handle_info({:task_lifecycle, _event, _issue}, socket),
     do: {:noreply, refresh_board(socket)}
 
-  def handle_info({:worker_lifecycle, _event, _snapshot}, socket),
-    do: {:noreply, refresh_board(socket)}
+  # bd-81vbzg: workers broadcast often and every tab refreshes on each one
+  # (a ~280ms read). The first broadcast arms a trailing timer; the rest of
+  # the burst rides on it, and the one refresh reads the final state.
+  def handle_info({:worker_lifecycle, _event, _snapshot}, socket) do
+    case {worker_debounce_ms(), socket.assigns.worker_refresh_timer} do
+      {0, _} ->
+        {:noreply, refresh_board(socket)}
+
+      {_, timer} when not is_nil(timer) ->
+        {:noreply, socket}
+
+      {ms, nil} ->
+        timer = Process.send_after(self(), :worker_refresh_due, ms)
+        {:noreply, assign(socket, :worker_refresh_timer, timer)}
+    end
+  end
+
+  def handle_info(:worker_refresh_due, socket),
+    do: {:noreply, socket |> assign(:worker_refresh_timer, nil) |> refresh_board()}
 
   def handle_info({:board_dispatched, _task_id}, socket),
     do: {:noreply, refresh_board(socket)}
@@ -499,6 +517,9 @@ defmodule ArbiterWeb.BoardLive do
     |> assign(:board_stale?, false)
     |> start_async(:board, fn -> load_board() end)
   end
+
+  defp worker_debounce_ms,
+    do: Application.get_env(:arbiter_web, :board_worker_debounce_ms, 500)
 
   defp board_read_done(socket) do
     socket = assign(socket, :board_loading?, false)
