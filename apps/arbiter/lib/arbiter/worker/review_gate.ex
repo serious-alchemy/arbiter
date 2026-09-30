@@ -754,6 +754,14 @@ defmodule Arbiter.Worker.ReviewGate do
       # re-reads each of these passes' durable transcripts fresh before giving
       # up — see `recover_verdict_from_scans/1`.
       verdict_scans: [],
+      # bd-cwe9n2: agy commands a headless soft-deny refused across this gate's
+      # reviewer passes (named in a no-verdict escalation), whether the pass
+      # that just exited was ended by one, and how many times the gate has
+      # waited for the reviewer Worker to resume the conversation instead of
+      # scoring the cut-short turn.
+      denied_commands: [],
+      denial_pending: false,
+      denial_defers: 0,
       # The short HEAD SHA of the branch at the time the current reviewer was
       # spawned. Set by handle_continue(:spawn_reviewer) and updated by
       # finish_revise/1 after each revise round. Used to:
@@ -1428,12 +1436,41 @@ defmodule Arbiter.Worker.ReviewGate do
 
   # Capture output only from the worker we're currently waiting on; a late line
   # from a prior (stopped) reviewer/implementer must not contaminate this pass.
+  # bd-cwe9n2: how many times a denial-ended reviewer turn is waited out (the
+  # reviewer Worker resumes the same agy conversation, capped by its own
+  # `resume_cap`) before the pass is scored as it stands.
+  @max_denial_defers 3
+
   @impl true
   def handle_info({:worker_output, id, line}, %{current_id: id} = state) do
     {:noreply, %{state | lines: [line | state.lines]}}
   end
 
   def handle_info({:worker_output, _other, _line}, state), do: {:noreply, state}
+
+  # bd-cwe9n2: the reviewer's turn was ended by a headless permission soft-deny.
+  # Sent just ahead of that pass's `:worker_exited`.
+  def handle_info({:worker_denied, id, command}, %{current_id: id} = state) do
+    denied =
+      if is_binary(command) and command != "",
+        do: Enum.uniq(state.denied_commands ++ [command]),
+        else: state.denied_commands
+
+    {:noreply, %{state | denied_commands: denied, denial_pending: true}}
+  end
+
+  def handle_info({:worker_denied, _other, _command}, state), do: {:noreply, state}
+
+  # The reviewer Worker could not resume the denied conversation: stop waiting
+  # for it and score what the pass produced.
+  def handle_info({:worker_resume_abandoned, id}, %{current_id: id, phase: :reviewing} = state) do
+    handle_info(
+      {:worker_exited, id, 0},
+      %{state | denial_pending: true, denial_defers: @max_denial_defers}
+    )
+  end
+
+  def handle_info({:worker_resume_abandoned, _other}, state), do: {:noreply, state}
 
   # The current worker's subprocess exited — its transcript is complete. Dispatch
   # by phase: a finished reviewer yields a verdict (or a re-prompt / a revise); a
@@ -1570,6 +1607,19 @@ defmodule Arbiter.Worker.ReviewGate do
     {verdict, _source} = parse_verdict(lines, run_id, "reviewer task=#{state.current_id}")
 
     case verdict do
+      # bd-cwe9n2: agy ended the reviewer's turn on a denied command, so the
+      # missing verdict is not the reviewer's conclusion. The reviewer Worker
+      # resumes the same conversation with a "carry on without it" prompt; its
+      # output keeps arriving on this topic and the resumed session's exit
+      # lands back here.
+      :no_verdict when state.denial_pending and state.denial_defers < @max_denial_defers ->
+        Logger.info(
+          "ReviewGate: reviewer for task=#{state.task_id} ended on a denied command " <>
+            "(#{inspect(List.last(state.denied_commands))}); waiting for the resumed session"
+        )
+
+        {:reprompt, %{state | denial_pending: false, denial_defers: state.denial_defers + 1}}
+
       :no_verdict ->
         case classify_stop(status, state.lines) do
           # bd-3hb4ih: a print-timeout is the one infra failure a DIFFERENT
@@ -3060,21 +3110,32 @@ defmodule Arbiter.Worker.ReviewGate do
   # asserting receipt unconditionally (finding: several existing paths reach
   # this with 0 live and 0 durable lines, where the old fixed wording claimed
   # the opposite of the truth).
-  defp no_verdict_scan_message(%{verdict_scan: %{memory: 0, durable: durable}} = state)
+  # bd-cwe9n2: the final no-verdict escalation names the commands the policy
+  # refused, so the operator is not left with a bare "inconclusive".
+  defp denied_commands_note(%{denied_commands: [_ | _] = cmds}) do
+    " Denied by the permission policy during the review: " <>
+      Enum.map_join(cmds, ", ", &"`#{&1}`") <> "."
+  end
+
+  defp denied_commands_note(_state), do: ""
+
+  defp no_verdict_scan_message(state), do: scan_message(state) <> denied_commands_note(state)
+
+  defp scan_message(%{verdict_scan: %{memory: 0, durable: durable}} = state)
        when durable in [0, nil] do
     "Reviewer produced no captured output at all (0 live line(s), " <>
       durable_count_desc(durable) <>
       "), even after a verdict re-prompt. " <> transcript_location_note(state)
   end
 
-  defp no_verdict_scan_message(%{verdict_scan: %{memory: memory, durable: durable}} = state) do
+  defp scan_message(%{verdict_scan: %{memory: memory, durable: durable}} = state) do
     "Reviewer output was received (#{memory} live line(s), " <>
       durable_count_desc(durable) <>
       ") but no parseable VERDICT line was found in it, even after a verdict re-prompt. " <>
       transcript_location_note(state)
   end
 
-  defp no_verdict_scan_message(state) do
+  defp scan_message(state) do
     "Reviewer output was received but no parseable VERDICT line was found in it (checked " <>
       "both the live capture and the durable transcript), even after a verdict re-prompt. " <>
       transcript_location_note(state)
@@ -4323,6 +4384,7 @@ defmodule Arbiter.Worker.ReviewGate do
              current_id: id,
              attempt: attempt,
              lines: [],
+             denial_pending: false,
              current_prompt: prompt,
              timeout_ms: timeout_ms
          }}

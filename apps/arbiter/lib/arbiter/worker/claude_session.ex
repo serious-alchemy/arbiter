@@ -1679,6 +1679,16 @@ defmodule Arbiter.Worker.ClaudeSession do
         buf -> process_line(%{session | line_buf: ""}, buf)
       end
 
+    # bd-cwe9n2: tell a ReviewGate reviewer's owner that this exit was a headless
+    # soft-deny, ahead of the exit itself, so it waits for the Worker's resume
+    # instead of scoring the cut-short turn as "no verdict".
+    if denial_ended_turn?(session),
+      do:
+        broadcast(
+          session,
+          {:worker_denied, session.task_id, Map.get(session, :denied_command_line)}
+        )
+
     broadcast(session, {:worker_exited, session.task_id, status})
     close_durable(session)
     %{session | exit_status: status, exited_at: DateTime.utc_now()}
