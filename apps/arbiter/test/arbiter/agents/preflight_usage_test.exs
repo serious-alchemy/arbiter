@@ -106,8 +106,9 @@ defmodule Arbiter.Agents.PreflightUsageTest do
   # (wham/usage API probe) instead of spawning a real model turn on the operator's
   # 30-day quota. When no external OS process is spawned, no usage row is written.
   test "Codex preflight check is zero-quota and writes no preflight usage rows" do
+    prev_http_stub = Application.get_env(:arbiter, :codex_quota_http_stub)
     Application.put_env(:arbiter, :codex_quota_http_stub, true)
-    on_exit(fn -> Application.delete_env(:arbiter, :codex_quota_http_stub) end)
+    on_exit(fn -> restore_env(:codex_quota_http_stub, prev_http_stub) end)
 
     Req.Test.stub(Arbiter.Quota.Codex.HTTP, fn conn ->
       Req.Test.json(conn, %{"plan_type" => "plus"})
@@ -123,4 +124,7 @@ defmodule Arbiter.Agents.PreflightUsageTest do
            |> Ash.Query.filter(source == :preflight and workspace_id == "ws-pf-zero-quota")
            |> Ash.read!() == []
   end
+
+  defp restore_env(key, nil), do: Application.delete_env(:arbiter, key)
+  defp restore_env(key, val), do: Application.put_env(:arbiter, key, val)
 end

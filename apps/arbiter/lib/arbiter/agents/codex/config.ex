@@ -119,6 +119,26 @@ defmodule Arbiter.Agents.Codex.Config do
     end
   end
 
+  @doc """
+  Side-effect-free check for whether an API key is configured. Unlike
+  `resolve_api_key/0` it does not advance the `api_keys` rotation counter.
+  """
+  @spec api_key_configured?() :: boolean()
+  def api_key_configured? do
+    {:ok, cfg} = resolve()
+
+    key =
+      case cfg.api_keys do
+        [] ->
+          resolve_ref(cfg.credentials_ref, cfg.raw) || ambient_api_key()
+
+        [first | _] ->
+          resolve_ref(first, cfg.raw)
+      end
+
+    is_binary(key) and key != ""
+  end
+
   @doc "Return the active model name as a string, or `nil` if unset."
   @spec active_model() :: String.t() | nil
   def active_model do

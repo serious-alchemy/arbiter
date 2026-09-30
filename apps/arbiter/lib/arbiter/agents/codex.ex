@@ -222,9 +222,9 @@ defmodule Arbiter.Agents.Codex do
   end
 
   defp api_key_configured?(opts) do
-    case Keyword.get(opts, :api_key) || Config.resolve_api_key() do
+    case Keyword.get(opts, :api_key) do
       key when is_binary(key) and key != "" -> true
-      _ -> false
+      _ -> Config.api_key_configured?()
     end
   end
 
@@ -233,13 +233,13 @@ defmodule Arbiter.Agents.Codex do
       {:ok, 200, _body} ->
         :ok
 
+      # A 401 only means the access token was stale when read: nothing in
+      # Arbiter refreshes it, the `codex` CLI does that itself. Marking Codex
+      # expired here would refuse every dispatch, so no CLI would ever run to
+      # refresh it. Defer to the argv probe (which refreshes the token, and only
+      # spends a turn when the token really is stale).
       {:ok, 401, _body} ->
-        {:error,
-         %StopReason{
-           category: :auth_expired,
-           summary: "Codex auth expired (401 from usage API)",
-           remediation: "Run `codex login` on the host to authenticate."
-         }}
+        :skipped
 
       # No ChatGPT login on disk: the CLI may be pointed at a keyless or
       # non-OpenAI backend (Ollama, custom `model_provider`/`base_url`), which

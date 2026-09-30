@@ -86,8 +86,9 @@ defmodule Arbiter.Quota.CodexTest do
 
   describe "fetch/2 — happy path" do
     setup do
+      prev_http_stub = Application.get_env(:arbiter, :codex_quota_http_stub)
       Application.put_env(:arbiter, :codex_quota_http_stub, true)
-      on_exit(fn -> Application.delete_env(:arbiter, :codex_quota_http_stub) end)
+      on_exit(fn -> restore_env(:codex_quota_http_stub, prev_http_stub) end)
       :ok
     end
 
@@ -138,8 +139,9 @@ defmodule Arbiter.Quota.CodexTest do
 
   describe "fetch/2 — degrade path" do
     setup do
+      prev_http_stub = Application.get_env(:arbiter, :codex_quota_http_stub)
       Application.put_env(:arbiter, :codex_quota_http_stub, true)
-      on_exit(fn -> Application.delete_env(:arbiter, :codex_quota_http_stub) end)
+      on_exit(fn -> restore_env(:codex_quota_http_stub, prev_http_stub) end)
       :ok
     end
 
@@ -241,8 +243,9 @@ defmodule Arbiter.Quota.CodexTest do
 
   describe "probe_auth/1" do
     setup do
+      prev_http_stub = Application.get_env(:arbiter, :codex_quota_http_stub)
       Application.put_env(:arbiter, :codex_quota_http_stub, true)
-      on_exit(fn -> Application.delete_env(:arbiter, :codex_quota_http_stub) end)
+      on_exit(fn -> restore_env(:codex_quota_http_stub, prev_http_stub) end)
       :ok
     end
 
@@ -312,4 +315,7 @@ defmodule Arbiter.Quota.CodexTest do
       assert {:ok, 200, _} = Codex.probe_auth([])
     end
   end
+
+  defp restore_env(key, nil), do: Application.delete_env(:arbiter, key)
+  defp restore_env(key, val), do: Application.put_env(:arbiter, key, val)
 end

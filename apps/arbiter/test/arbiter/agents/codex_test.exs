@@ -245,6 +245,7 @@ defmodule Arbiter.Agents.CodexTest do
 
   describe "auth_probe/1" do
     setup do
+      prev_http_stub = Application.get_env(:arbiter, :codex_quota_http_stub)
       Application.put_env(:arbiter, :codex_quota_http_stub, true)
       Codex.Config.clear()
       prev_key = System.get_env("OPENAI_API_KEY")
@@ -262,7 +263,7 @@ defmodule Arbiter.Agents.CodexTest do
       File.chmod!(codex, 0o755)
 
       on_exit(fn ->
-        Application.delete_env(:arbiter, :codex_quota_http_stub)
+        restore_env(:codex_quota_http_stub, prev_http_stub)
         Codex.Config.clear()
 
         case prev_key do
@@ -285,18 +286,16 @@ defmodule Arbiter.Agents.CodexTest do
       assert :ok = Codex.auth_probe(credentials: %{access_token: "tok-123", account_id: nil})
     end
 
-    test "returns {:error, :auth_expired} when usage API returns 401" do
+    test "returns :skipped (defers to argv probe, no hard expiry) when usage API returns 401" do
       Req.Test.stub(Arbiter.Quota.Codex.HTTP, fn conn ->
         conn
         |> Plug.Conn.put_status(401)
         |> Req.Test.json(%{"error" => "expired"})
       end)
 
-      assert {:error, reason} =
+      # A stale access token must not lock Codex out: the CLI refreshes it.
+      assert :skipped =
                Codex.auth_probe(credentials: %{access_token: "tok-123", account_id: nil})
-
-      assert reason.category == :auth_expired
-      assert reason.remediation =~ "codex login"
     end
 
     test "returns :skipped without calling usage API when api_key is provided (falls back to argv probe)" do
@@ -501,4 +500,7 @@ defmodule Arbiter.Agents.CodexTest do
              ]
     end
   end
+
+  defp restore_env(key, nil), do: Application.delete_env(:arbiter, key)
+  defp restore_env(key, val), do: Application.put_env(:arbiter, key, val)
 end
