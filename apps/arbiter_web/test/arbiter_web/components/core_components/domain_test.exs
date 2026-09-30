@@ -288,7 +288,7 @@ defmodule ArbiterWeb.CoreComponents.DomainTest do
 
     test "lays the row out on the handoff's six-track grid" do
       assert run() =~
-               "grid-cols-[84px_48px_minmax(120px,1fr)_minmax(92px,max-content)_minmax(0,max-content)_14px]"
+               "grid-cols-[84px_minmax(48px,max-content)_minmax(120px,1fr)_minmax(92px,max-content)_minmax(0,max-content)_14px]"
     end
 
     test "renders the worker id and the outcome" do
@@ -371,6 +371,39 @@ defmodule ArbiterWeb.CoreComponents.DomainTest do
 
     test "accepts a click handler through the global rest" do
       assert run(selected: false, "phx-click": "select_run") =~ ~s(phx-click="select_run")
+    end
+
+    test "renders the provider icon when provider is specified" do
+      html = run(provider: "claude")
+
+      # Should contain the SVG for Claude provider
+      assert html =~ "Claude"
+    end
+
+    test "omits the provider icon when provider is nil" do
+      html = run(provider: nil)
+
+      # Should not render any provider icon
+      refute html =~ "Claude"
+      refute html =~ "Codex"
+      refute html =~ "Antigravity"
+    end
+
+    test "omits the provider icon when provider is not given" do
+      html = run()
+
+      # Default is nil, so no icon should render
+      refute html =~ "Claude"
+      refute html =~ "Codex"
+      refute html =~ "Antigravity"
+    end
+
+    test "grid layout accommodates the provider icon with updated track sizes" do
+      html = run(provider: "claude")
+
+      # Should have the new grid layout with adjusted columns for provider icon
+      assert html =~
+               "grid-cols-[84px_minmax(48px,max-content)_minmax(120px,1fr)_minmax(92px,max-content)_minmax(0,max-content)_14px]"
     end
   end
 

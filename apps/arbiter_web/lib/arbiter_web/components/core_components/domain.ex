@@ -25,6 +25,8 @@ defmodule ArbiterWeb.CoreComponents.Domain do
   import ArbiterWeb.CoreComponents.Data,
     only: [priority_tag: 1, type_tag: 1, difficulty_meter: 1, status_chip: 1]
 
+  import ArbiterWeb.CoreComponents.ProviderIcon, only: [provider_icon: 1]
+
   @doc """
   A dashboard counter: an uppercase mono eyebrow, one big tabular number,
   and an optional mono note beneath it.
@@ -450,6 +452,7 @@ defmodule ArbiterWeb.CoreComponents.Domain do
   attr :tokens, :string, default: nil, doc: "accepted but NOT rendered — see the expanded header"
   attr :duration, :string, default: nil
   attr :cost, :string, default: nil
+  attr :provider, :string, default: nil, doc: "e.g. 'claude', 'codex', 'gemini', 'ollama'"
   attr :selected, :boolean, default: false
   attr :expanded, :boolean, default: false, doc: "rotates the chevron upright"
   attr :class, :any, default: nil
@@ -470,8 +473,9 @@ defmodule ArbiterWeb.CoreComponents.Domain do
           # outcome takes the slack. The status track is a minmax, not a fixed
           # 92px:
           # a long status ("interrupted", "handed_off") overruns a fixed track
-          # straight into the metrics cell.
-          "grid grid-cols-[84px_48px_minmax(120px,1fr)_minmax(92px,max-content)_minmax(0,max-content)_14px]",
+          # straight into the metrics cell. The worker cell is now minmax to
+          # accommodate the provider icon.
+          "grid grid-cols-[84px_minmax(48px,max-content)_minmax(120px,1fr)_minmax(92px,max-content)_minmax(0,max-content)_14px]",
           "gap-[10px] items-center min-h-[var(--row-control)] px-3",
           "rounded-[var(--radius-field)] border border-solid",
           "border-l-[length:var(--border-accent-width)]",
@@ -485,9 +489,16 @@ defmodule ArbiterWeb.CoreComponents.Domain do
     >
       <.type_tag type={run_row_role_label(@role)} class="justify-self-start" />
 
-      <span class="font-medium text-[11px] text-[var(--text-secondary)] whitespace-nowrap font-[family-name:var(--font-mono)]">
-        {@worker}
-      </span>
+      <div class="flex items-center gap-1.5 justify-self-start">
+        <span class="font-medium text-[11px] text-[var(--text-secondary)] whitespace-nowrap font-[family-name:var(--font-mono)]">
+          {@worker}
+        </span>
+        <.provider_icon
+          :if={@provider}
+          provider={@provider}
+          class="size-3.5 shrink-0 text-[var(--text-label)]"
+        />
+      </div>
 
       <span class="flex items-baseline gap-2 min-w-0">
         <span

@@ -226,6 +226,22 @@ defmodule ArbiterWeb.RunDetailLive do
                   <% end %>
                 </span>
               </div>
+
+              <div class="flex flex-col gap-2 px-3 py-2 rounded-[var(--radius-field)] border border-[var(--border-default)] bg-[var(--arb-panel-alt)]">
+                <span class="text-[10.5px] text-[var(--text-label)] font-medium font-[family-name:var(--font-mono)]">
+                  PROVIDER
+                </span>
+                <div class="flex items-center gap-1.5">
+                  <.provider_icon :if={@run.provider} provider={@run.provider} class="size-4" />
+                  <span class="text-[12px] font-medium text-[var(--text-title)]">
+                    <%= if @run.provider do %>
+                      {ArbiterWeb.CoreComponents.ProviderIcon.display_name(@run.provider)}
+                    <% else %>
+                      unknown
+                    <% end %>
+                  </span>
+                </div>
+              </div>
             </div>
 
             <%!-- ── Live worker link ────────────────────────────────── --%>
