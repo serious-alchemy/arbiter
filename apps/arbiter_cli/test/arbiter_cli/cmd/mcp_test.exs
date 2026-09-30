@@ -22,7 +22,10 @@ defmodule ArbiterCli.Cmd.McpTest do
   }
 
   setup do
-    saved = for k <- ~w(ARB_TOKEN ARB_HOST ARB_SESSION_ID ARB_OPERATOR_SOCKET), do: {k, System.get_env(k)}
+    saved =
+      for k <- ~w(ARB_TOKEN ARB_HOST ARB_SESSION_ID ARB_OPERATOR_SOCKET),
+          do: {k, System.get_env(k)}
+
     Enum.each(saved, fn {k, _} -> System.delete_env(k) end)
 
     on_exit(fn ->
@@ -44,7 +47,9 @@ defmodule ArbiterCli.Cmd.McpTest do
       assert code == 0
       assert out =~ "TOKEN-FROM-SOCKET"
       assert err =~ "tier:         coordinator"
-      assert_received {:operator_request, %{"op" => "mint", "tier" => "coordinator", "ttl" => 600}}
+
+      assert_received {:operator_request,
+                       %{"op" => "mint", "tier" => "coordinator", "ttl" => 600}}
     end
 
     test "--json prints the server's response" do
@@ -57,7 +62,8 @@ defmodule ArbiterCli.Cmd.McpTest do
     test "a refusal is reported with the server's reason" do
       FakeOperatorSocket.start!(%{
         "error" => %{
-          "message" => "operator proof refused: the connecting process was started by the Arbiter server",
+          "message" =>
+            "operator proof refused: the connecting process was started by the Arbiter server",
           "reason" => "spawned_by_arbiter"
         }
       })

@@ -11,7 +11,9 @@ defmodule ArbiterCli.FakeOperatorSocket do
 
   @doc "Start the fake. Returns its socket path."
   def start!(response) do
-    dir = Path.join(System.tmp_dir!(), "fops-#{System.pid()}-#{System.unique_integer([:positive])}")
+    dir =
+      Path.join(System.tmp_dir!(), "fops-#{System.pid()}-#{System.unique_integer([:positive])}")
+
     File.mkdir_p!(dir)
     path = Path.join(dir, "op.sock")
     on_exit(fn -> File.rm_rf!(dir) end)

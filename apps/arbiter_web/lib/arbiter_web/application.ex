@@ -13,19 +13,20 @@ defmodule ArbiterWeb.Application do
 
     warn_if_bound_off_loopback()
 
-    children = [
-      ArbiterWeb.Telemetry,
-      # Outbound HTTP pool for the Anthropic proxy (bd-5boun6) — forwards Claude
-      # CLI traffic to api.anthropic.com and streams SSE responses back.
-      {Finch, name: ArbiterWeb.Finch},
-      # Routes Arbiter.MCP session ids → their open GET /mcp SSE streams so
-      # server-initiated messages reach the right client (ArbiterWeb.MCP.Session).
-      {Registry, keys: :unique, name: ArbiterWeb.MCP.Session.registry()},
-      # Start a worker by calling: ArbiterWeb.Worker.start_link(arg)
-      # {ArbiterWeb.Worker, arg},
-      # Start to serve requests, typically the last entry
-      ArbiterWeb.Endpoint
-    ] ++ operator_socket_children()
+    children =
+      [
+        ArbiterWeb.Telemetry,
+        # Outbound HTTP pool for the Anthropic proxy (bd-5boun6) — forwards Claude
+        # CLI traffic to api.anthropic.com and streams SSE responses back.
+        {Finch, name: ArbiterWeb.Finch},
+        # Routes Arbiter.MCP session ids → their open GET /mcp SSE streams so
+        # server-initiated messages reach the right client (ArbiterWeb.MCP.Session).
+        {Registry, keys: :unique, name: ArbiterWeb.MCP.Session.registry()},
+        # Start a worker by calling: ArbiterWeb.Worker.start_link(arg)
+        # {ArbiterWeb.Worker, arg},
+        # Start to serve requests, typically the last entry
+        ArbiterWeb.Endpoint
+      ] ++ operator_socket_children()
 
     # See https://hexdocs.pm/elixir/Supervisor.html
     # for other strategies and supported options

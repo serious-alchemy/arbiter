@@ -28,7 +28,8 @@ defmodule ArbiterWeb.Api.McpControllerTest do
           %{"can_dispatch" => "false", "ttl" => 60}
         ] do
       test "is refused with 403 and no token for #{inspect(params)}", %{conn: conn} do
-        body = conn |> post("/api/mcp/tokens", unquote(Macro.escape(params))) |> json_response(403)
+        body =
+          conn |> post("/api/mcp/tokens", unquote(Macro.escape(params))) |> json_response(403)
 
         refute Map.has_key?(body, "token")
         assert body["error"]["message"] =~ "arb mcp token mint"

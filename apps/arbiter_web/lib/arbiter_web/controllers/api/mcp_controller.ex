@@ -17,7 +17,6 @@ defmodule ArbiterWeb.Api.McpController do
   alias Arbiter.MCP
   alias Arbiter.MCP.{OperatorSocket, Scope}
 
-
   action_fallback ArbiterWeb.Api.FallbackController
 
   @doc """

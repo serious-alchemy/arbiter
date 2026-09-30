@@ -367,7 +367,9 @@ defmodule Arbiter.Worker.Jail do
   end
 
   defp drop_nested(paths) do
-    Enum.reject(paths, fn p -> Enum.any?(paths, &(&1 != p and String.starts_with?(p, &1 <> "/"))) end)
+    Enum.reject(paths, fn p ->
+      Enum.any?(paths, &(&1 != p and String.starts_with?(p, &1 <> "/")))
+    end)
   end
 
   @doc """

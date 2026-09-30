@@ -31,7 +31,12 @@ defmodule Arbiter.MCP.OperatorProofTest do
   }
 
   setup do
-    root = Path.join(System.tmp_dir!(), "opproof-#{System.pid()}-#{System.unique_integer([:positive])}")
+    root =
+      Path.join(
+        System.tmp_dir!(),
+        "opproof-#{System.pid()}-#{System.unique_integer([:positive])}"
+      )
+
     on_exit(fn -> File.rm_rf!(root) end)
 
     for {pid, {ppid, cgroup}} <- @tree do
@@ -124,7 +129,9 @@ defmodule Arbiter.MCP.OperatorProofTest do
 
   describe "real processes (this VM plays the server)" do
     test "a child process of this VM is refused" do
-      port = Port.open({:spawn_executable, System.find_executable("sleep")}, [:binary, args: ["30"]])
+      port =
+        Port.open({:spawn_executable, System.find_executable("sleep")}, [:binary, args: ["30"]])
+
       {:os_pid, child} = Port.info(port, :os_pid)
       on_exit(fn -> System.cmd("kill", [Integer.to_string(child)]) end)
 
@@ -138,7 +145,9 @@ defmodule Arbiter.MCP.OperatorProofTest do
       outside = ppid_of(String.to_integer(System.pid()))
 
       assert :ok =
-               OperatorProof.authorize(%{pid: outside, uid: own_uid(), gid: 0}, server_cgroup: nil)
+               OperatorProof.authorize(%{pid: outside, uid: own_uid(), gid: 0},
+                 server_cgroup: nil
+               )
     end
   end
 

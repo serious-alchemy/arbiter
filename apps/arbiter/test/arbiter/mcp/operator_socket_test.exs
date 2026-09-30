@@ -21,7 +21,9 @@ defmodule Arbiter.MCP.OperatorSocketTest do
 
   # Short and private: sun_path is 108 bytes, and /tmp is shared between workers.
   setup do
-    dir = Path.join(System.tmp_dir!(), "ops-#{System.pid()}-#{System.unique_integer([:positive])}")
+    dir =
+      Path.join(System.tmp_dir!(), "ops-#{System.pid()}-#{System.unique_integer([:positive])}")
+
     on_exit(fn -> File.rm_rf!(dir) end)
     {:ok, dir: dir, path: Path.join([dir, "arbiter", "op.sock"])}
   end
@@ -32,7 +34,9 @@ defmodule Arbiter.MCP.OperatorSocketTest do
 
   # An unrelated OS process: the client below is not its descendant.
   defp unrelated_pid do
-    port = Port.open({:spawn_executable, System.find_executable("sleep")}, [:binary, args: ["60"]])
+    port =
+      Port.open({:spawn_executable, System.find_executable("sleep")}, [:binary, args: ["60"]])
+
     {:os_pid, pid} = Port.info(port, :os_pid)
     on_exit(fn -> System.cmd("kill", [Integer.to_string(pid)]) end)
     pid
@@ -121,7 +125,9 @@ defmodule Arbiter.MCP.OperatorSocketTest do
     end
 
     test "rejects other tiers and unknown ops", %{path: path} do
-      assert %{"error" => %{"message" => msg}} = os_client(path, %{"op" => "mint", "tier" => "worker"})
+      assert %{"error" => %{"message" => msg}} =
+               os_client(path, %{"op" => "mint", "tier" => "worker"})
+
       assert msg =~ "coordinator"
 
       assert %{"error" => %{"message" => "unknown op" <> _}} = os_client(path, %{"op" => "nope"})

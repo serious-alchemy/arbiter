@@ -49,7 +49,11 @@ defmodule Arbiter.MCP.OperatorProof do
 
   @type peer :: %{pid: integer(), uid: integer(), gid: integer()}
   @type reason ::
-          :foreign_uid | :unknown_peer | :peer_unreadable | :spawned_by_arbiter | :in_arbiter_cgroup
+          :foreign_uid
+          | :unknown_peer
+          | :peer_unreadable
+          | :spawned_by_arbiter
+          | :in_arbiter_cgroup
 
   # Deeper than any real process tree; bounds the walk against a /proc loop.
   @max_depth 256
@@ -198,6 +202,7 @@ defmodule Arbiter.MCP.OperatorProof do
     do: {:error, :spawned_by_arbiter}
 
   defp check_ancestry(_proc, pid, _server_pid, _depth) when pid in [0, 1], do: :ok
+
   defp check_ancestry(_proc, _pid, _server_pid, depth) when depth > @max_depth,
     do: {:error, :peer_unreadable}
 
