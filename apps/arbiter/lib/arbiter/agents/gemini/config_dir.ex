@@ -279,11 +279,10 @@ defmodule Arbiter.Agents.Gemini.ConfigDir do
   """
   @spec keyring_available?() :: boolean()
   def keyring_available? do
-    case System.get_env("DBUS_SESSION_BUS_ADDRESS") do
-      "unix:path=" <> rest -> rest |> String.split(",") |> hd() |> File.exists?()
-      addr when is_binary(addr) and addr != "" -> true
-      _ -> false
-    end
+    # The jail masks the raw session bus and only offers a filtered
+    # xdg-dbus-proxy one, so a keyring without the proxy is unusable for a
+    # jailed worker: fall back to copying credentials instead.
+    Arbiter.Worker.Jail.keyring_usable?()
   end
 
   @doc "The worker memory written into the isolated HOME's `.gemini/GEMINI.md`."

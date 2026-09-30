@@ -195,6 +195,8 @@ defmodule Arbiter.Worker.Jail do
   under `:home` on the host, so call it just before spawning. Does not check
   `available?/0`; the caller decides whether a jail is required.
   """
+  @keyring_sentinel "@KEYRING_SOCK@"
+
   @spec wrap([String.t()], keyword()) :: {:ok, [String.t()]} | {:error, term()}
   def wrap(command, opts) when is_list(command) and is_list(opts) do
     with {:ok, worktree} <- fetch_worktree(opts),
@@ -210,8 +212,99 @@ defmodule Arbiter.Worker.Jail do
         worktree_readonly: Keyword.get(opts, :worktree_readonly, false)
       }
 
-      {:ok, argv(spec, command)}
+      proxy = keyring_proxy(opts)
+
+      spec =
+        if proxy,
+          do:
+            Map.merge(spec, %{keyring_socket: @keyring_sentinel, keyring_bus_path: keyring_bus()}),
+          else: spec
+
+      {:ok, argv(spec, command) |> maybe_keyring_proxy(proxy)}
     end
+  end
+
+  # ---- filtered keyring bus (bd-7o08mj) ----------------------------------
+
+  # `keyring: true` asks for Secret Service (agy's credential store) inside
+  # the jail. The raw session bus stays masked either way; the only bus the
+  # worker can see is an `xdg-dbus-proxy` socket that `--talk`s to
+  # `org.freedesktop.secrets` and nothing else (so `systemd-run` fails with
+  # ServiceUnknown). No proxy binary / no upstream bus ⇒ `nil` ⇒ fail
+  # closed: the jail runs with no bus at all.
+  defp keyring_proxy(opts) do
+    with true <- Keyword.get(opts, :keyring, false),
+         proxy when is_binary(proxy) <- dbus_proxy(),
+         upstream when is_binary(upstream) <- session_bus_socket() do
+      %{proxy: proxy, upstream: upstream}
+    else
+      _ -> nil
+    end
+  end
+
+  @doc """
+  Path of `xdg-dbus-proxy` on this host, or `nil` (optional dependency).
+  The `:arbiter, :xdg_dbus_proxy` app env overrides the lookup (tests).
+  """
+  @spec dbus_proxy() :: String.t() | nil
+  def dbus_proxy do
+    case Application.fetch_env(:arbiter, :xdg_dbus_proxy) do
+      {:ok, path} -> path
+      :error -> System.find_executable("xdg-dbus-proxy")
+    end
+  end
+
+  @doc """
+  True when a filtered keyring bus can actually be offered inside the jail:
+  a proxy binary *and* an upstream session bus socket. Callers that decide
+  whether to rely on the keyring (vs. copying credential files) must use this,
+  not merely "a session bus exists" — otherwise a missing proxy masks the bus
+  with no credentials copied and the worker cannot authenticate.
+  """
+  @spec keyring_usable?() :: boolean()
+  def keyring_usable?, do: dbus_proxy() != nil and session_bus_socket() != nil
+
+  defp session_bus_socket do
+    case System.get_env("DBUS_SESSION_BUS_ADDRESS") do
+      "unix:path=" <> rest ->
+        sock = rest |> String.split(",") |> hd()
+        if File.exists?(sock), do: sock
+
+      _ ->
+        nil
+    end
+  end
+
+  defp maybe_keyring_proxy(argv, nil), do: argv
+
+  defp maybe_keyring_proxy([bwrap | rest], %{proxy: proxy, upstream: upstream}) do
+    # `argv/2` already emitted the `--ro-bind @KEYRING_SOCK@ <bus>` after the
+    # masks; the wrapper script swaps the sentinel for the real socket.
+    script = ~S"""
+    proxy=$1; up=$2; shift 2
+    # SIGKILL teardown skips the EXIT trap, so also sweep stale dirs here.
+    r=${TMPDIR:-/tmp}/arbiter-keyring-proxy
+    mkdir -p "$r" && chmod 700 "$r" || exit 125
+    find "$r" -mindepth 1 -maxdepth 1 -type d -mmin +60 -exec rm -rf {} + 2>/dev/null
+    d=$(mktemp -d "$r/run.XXXXXX") || exit 125
+    "$proxy" "unix:path=$up" "$d/bus" --filter --talk=org.freedesktop.secrets &
+    p=$!
+    trap 'kill $p 2>/dev/null; rm -rf "$d"' EXIT
+    trap 'exit 143' TERM INT HUP
+    i=0
+    while [ ! -S "$d/bus" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i+1)); done
+    [ -S "$d/bus" ] || { echo "xdg-dbus-proxy did not come up" >&2; exit 125; }
+    n=$#; seen=0
+    while [ "$n" -gt 0 ]; do
+      a=$1; shift; n=$((n-1))
+      [ "$a" = "--" ] && seen=1
+      [ "$seen" = 0 ] && [ "$a" = "@KEYRING_SOCK@" ] && a="$d/bus"
+      set -- "$@" "$a"
+    done
+    "$@"
+    """
+
+    ["sh", "-c", script, "sh", proxy, upstream, bwrap | rest]
   end
 
   @doc """
@@ -225,6 +318,7 @@ defmodule Arbiter.Worker.Jail do
     Enum.concat([
       [bwrap, "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc"],
       ["--tmpfs", "/tmp", "--tmpfs", "/dev/shm"],
+      mask_args(spec),
       Enum.flat_map(Map.get(spec, :writable_paths, []), &["--bind-try", &1, &1]),
       if(Map.get(spec, :worktree_readonly, false), do: ro_bind(worktree), else: bind(worktree)),
       if(home, do: bind(home) ++ ["--setenv", "HOME", home], else: []),
@@ -234,6 +328,97 @@ defmodule Arbiter.Worker.Jail do
       command
     ])
   end
+
+  @doc """
+  The host paths the jail blanks with a `--tmpfs` (bd-7o08mj): the user's
+  runtime dir (`/run/user/<uid>`: session bus, `systemd/private`, ssh-agent,
+  keyring sockets), `/run/dbus` (system bus) and `/run/systemd/resolve`
+  (systemd-resolved's 0666 varlink socket). `--ro-bind / /` otherwise hands
+  all of them to the jailed process, and `systemd-run --user` over the bus
+  runs an unjailed command on the host (writes and network).
+
+  Only paths that exist on the host are listed: bwrap cannot create a mount
+  point under the read-only root, and a path that is absent is no vector.
+  `spec.mask_paths` overrides the detection (tests).
+  """
+  @spec mask_paths() :: [String.t()]
+  def mask_paths do
+    [
+      runtime_dir(),
+      System.get_env("XDG_RUNTIME_DIR"),
+      bus_dir(),
+      "/run/dbus",
+      "/run/systemd/resolve"
+    ]
+    |> Enum.filter(&(is_binary(&1) and Path.type(&1) == :absolute and File.dir?(&1)))
+    |> Enum.map(&Path.expand/1)
+    |> Enum.reject(&(&1 in ["/", "/tmp", "/run", "/dev/shm"]))
+    |> Enum.uniq()
+  end
+
+  # Directory holding the session bus socket named by the environment, when
+  # it lives somewhere other than the conventional runtime dir.
+  defp bus_dir do
+    case session_bus_socket() do
+      nil -> nil
+      sock -> Path.dirname(sock)
+    end
+  end
+
+  # Resolved at runtime, never hard-coded to 1000. `XDG_RUNTIME_DIR` is what
+  # the bus address points into, but the conventional `/run/user/<uid>` is
+  # masked as well so an unset/forged variable cannot leave it exposed
+  # (`mask_paths/0` adds `XDG_RUNTIME_DIR` and the bus socket's directory).
+  defp runtime_dir do
+    case File.stat("/proc/self") do
+      {:ok, %{uid: uid}} -> "/run/user/#{uid}"
+      _ -> nil
+    end
+  end
+
+  defp mask_args(spec) do
+    masks = Map.get(spec, :mask_paths) || mask_paths()
+    mask = Enum.flat_map(masks, &["--tmpfs", &1]) ++ resolv_conf_args(masks)
+
+    # The one sanctioned way back to a bus: a proxy socket filtered to
+    # org.freedesktop.secrets, bound over the masked bus path.
+    case Map.get(spec, :keyring_socket) do
+      nil ->
+        mask
+
+      sock ->
+        bus = keyring_bus_path(spec)
+
+        mask ++
+          [
+            "--ro-bind",
+            sock,
+            bus,
+            "--setenv",
+            "DBUS_SESSION_BUS_ADDRESS",
+            "unix:path=" <> bus
+          ]
+    end
+  end
+
+  # /etc/resolv.conf is a symlink into /run/systemd/resolve on resolved hosts;
+  # blanking the dir would break DNS for the (networked) worker. Put the two
+  # plain-text files back read-only: the varlink sockets stay hidden, and the
+  # stub address they name is ordinary UDP/TCP.
+  @resolv_files ["/run/systemd/resolve/stub-resolv.conf", "/run/systemd/resolve/resolv.conf"]
+  defp resolv_conf_args(masks) do
+    if "/run/systemd/resolve" in masks do
+      @resolv_files
+      |> Enum.filter(&File.regular?/1)
+      |> Enum.flat_map(&["--ro-bind", &1, &1])
+    else
+      []
+    end
+  end
+
+  defp keyring_bus_path(spec), do: Map.get(spec, :keyring_bus_path) || keyring_bus()
+
+  defp keyring_bus, do: Path.join(runtime_dir() || "/run/user/0", "bus")
 
   defp git_args(nil, _worktree), do: []
 
@@ -924,6 +1109,90 @@ defmodule Arbiter.Worker.Jail do
       after
         File.rm_rf(scratch)
       end
+    end
+  end
+
+  @doc """
+  Run the escape-vector check for real (uncached), inside this module's own
+  jail argv (bd-7o08mj): none of the host's control sockets may be reachable —
+  the user's session bus and `systemd/private`, the system bus,
+  systemd-resolved's varlink socket, the ssh-agent / keyring sockets — and
+  `systemd-run --user` (when installed) must fail. `:ok` when everything is
+  hidden; `{:error, {:escape_reachable, [vector]}}` otherwise.
+  """
+  @spec escape_probe() :: :ok | {:error, term()}
+  def escape_probe do
+    with {:ok, bwrap} <- find_bwrap() do
+      scratch =
+        Path.join(probe_root(), "escape-#{System.pid()}-#{System.unique_integer([:positive])}")
+
+      try do
+        :ok = File.mkdir_p(scratch)
+
+        script = """
+        rd=/run/user/$(id -u)
+        for p in "$rd/bus" "$rd/systemd/private" "$rd/gcr/ssh" "$rd/keyring" \
+                 /run/dbus/system_bus_socket /run/systemd/resolve/io.systemd.Resolve; do
+          [ -e "$p" ] && echo "reachable:$p"
+        done
+        if command -v systemd-run >/dev/null 2>&1 &&
+           systemd-run --user --wait --collect true >/dev/null 2>&1; then
+          echo "reachable:systemd-run --user"
+        fi
+        exit 0
+        """
+
+        %{bwrap: bwrap, worktree: scratch}
+        |> argv(["sh", "-c", script])
+        |> run_bounded()
+        |> judge_escape_probe()
+      rescue
+        e -> {:error, {:probe_raised, Exception.message(e)}}
+      after
+        File.rm_rf(scratch)
+      end
+    end
+  end
+
+  defp judge_escape_probe(:timeout), do: {:error, :probe_timeout}
+  defp judge_escape_probe({:raised, msg}), do: {:error, {:bwrap_failed, msg}}
+
+  defp judge_escape_probe({out, 0}) do
+    case for "reachable:" <> v <- String.split(out, "\n", trim: true), do: v do
+      [] -> :ok
+      vectors -> {:error, {:escape_reachable, vectors}}
+    end
+  end
+
+  defp judge_escape_probe({out, status}), do: {:error, {:bwrap_failed, status, String.trim(out)}}
+
+  @doc "`escape_probe/0` as a diagnosis (`nil` when no vector is reachable)."
+  @spec diagnose_escape() :: diagnosis() | nil
+  def diagnose_escape do
+    # `:worker_jail_escape_available` overrides the real probe (tests, as
+    # `:worker_jail_ssh_available` does for ssh).
+    result =
+      case Application.get_env(:arbiter, :worker_jail_escape_available) do
+        nil -> escape_probe()
+        true -> :ok
+        false -> {:error, {:escape_reachable, ["(forced by :worker_jail_escape_available)"]}}
+      end
+
+    case result do
+      :ok ->
+        nil
+
+      {:error, {:escape_reachable, vectors}} ->
+        %{
+          cause: :other,
+          message: "jail escape vector(s) reachable: " <> Enum.join(vectors, ", "),
+          fix:
+            "The jail argv must mask /run/user/<uid>, /run/dbus and /run/systemd/resolve " <>
+              "(Arbiter.Worker.Jail.mask_paths/0); this build's jail does not."
+        }
+
+      {:error, reason} ->
+        explain(reason)
     end
   end
 

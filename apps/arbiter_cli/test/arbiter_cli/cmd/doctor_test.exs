@@ -158,7 +158,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     assert exit_code == 0
     assert {:ok, %{"ok" => true, "checks" => checks}} = Jason.decode(String.trim(out))
     assert is_list(checks)
-    assert length(checks) == 16
+    assert length(checks) == 17
   end
 
   test "version mismatch is non-fatal (exit 0 but shows [fail])" do
@@ -1088,6 +1088,48 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
       assert exit_code == 0
       assert out =~ "[ ok ] agy ssh transport"
+    end
+  end
+
+  describe "agy jail escape vectors (bd-7o08mj)" do
+    defp escape_routes(jail_body) do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/agy_write_jail"}, {jail_body, 200}}
+      ])
+    end
+
+    test "ok when no escape vector is reachable" do
+      escape_routes(%{"available" => true, "escape" => %{"available" => true}})
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] agy jail escape vectors"
+      assert out =~ "xdg-dbus-proxy not installed"
+    end
+
+    test "FAILs with the vectors named when one is reachable" do
+      escape_routes(%{
+        "available" => true,
+        "escape" => %{
+          "available" => false,
+          "message" => "jail escape vector(s) reachable: systemd-run --user",
+          "fix" => "mask /run/user/<uid>"
+        }
+      })
+
+      {out, _err, _exit_code} = capture(fn -> Doctor.run([]) end)
+      assert out =~ "[fail] agy jail escape vectors"
+      assert out =~ "systemd-run --user"
+      assert out =~ "mask /run/user/<uid>"
+    end
+
+    test "ok (skipped) when the server predates the escape key" do
+      escape_routes(%{"available" => true})
+      {out, _err, _exit_code} = capture(fn -> Doctor.run([]) end)
+      assert out =~ "[ ok ] agy jail escape vectors"
     end
   end
 
