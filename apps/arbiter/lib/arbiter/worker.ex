@@ -6999,7 +6999,10 @@ defmodule Arbiter.Worker do
          park_reason
        ) do
     rounds = Map.get(meta || %{}, :review_gate_rounds)
-    block = format_review_gate_note(verdict, findings, rounds, park_reason, task_id)
+
+    block =
+      format_review_gate_note(verdict, findings, rounds, park_reason, task_id) <>
+        reviewer_family_note(task_id)
 
     with {:ok, task} <- Ash.get(Arbiter.Tasks.Issue, task_id) do
       notes =
@@ -7108,6 +7111,37 @@ defmodule Arbiter.Worker do
 
     build_review_gate_note(header, pointer, findings, rounds)
   end
+
+  # bd-a1ke2c: under `review_agent.cross_family`, name which model family
+  # reviewed which — and flag a same-family fallback loudly, with its reason,
+  # so it never reads like an ordinary review. Read off the latest `:review`
+  # round that recorded a family; "" when cross-family review never ran.
+  defp reviewer_family_note(task_id) when is_binary(task_id) do
+    require Ash.Query
+
+    Arbiter.ReviewGate.Round
+    |> Ash.Query.filter(task_id == ^task_id and role == :review and not is_nil(reviewer_family))
+    |> Ash.Query.sort(inserted_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> case do
+      [round] ->
+        fallback =
+          if round.same_family_fallback,
+            do: " — SAME-FAMILY FALLBACK: #{round.same_family_fallback_reason}",
+            else: ""
+
+        " — reviewer: #{round.reviewer_family} (#{round.reviewer_provider || "unknown"}) · " <>
+          "implementer: #{round.implementer_family || "unknown"}#{fallback}"
+
+      [] ->
+        ""
+    end
+  rescue
+    _ -> ""
+  end
+
+  defp reviewer_family_note(_task_id), do: ""
 
   # Best-effort lookup of the most recent `:review` round's verdict for a
   # commit-gate park note — the durable record of what the reviewer actually

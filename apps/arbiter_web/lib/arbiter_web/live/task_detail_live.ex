@@ -2172,8 +2172,29 @@ defmodule ArbiterWeb.TaskDetailLive do
       label: review_verdict_label(verdict),
       # Only offer the deep link when the round's own run is actually on this
       # page's roster — `run_id` is best-effort and can be nil or aged out.
-      run_id: if(run_id && Enum.any?(runs, &(&1.id == run_id)), do: run_id)
+      run_id: if(run_id && Enum.any?(runs, &(&1.id == run_id)), do: run_id),
+      family: review_family(reviews)
     }
+  end
+
+  # bd-a1ke2c: under `review_agent.cross_family`, which model family reviewed
+  # which — read off the latest reviewer pass that recorded one. A same-family
+  # fallback carries its reason so it is never silent. nil when cross-family
+  # review never ran on this task.
+  defp review_family(reviews) do
+    case reviews |> Enum.filter(& &1.reviewer_family) |> List.last() do
+      nil ->
+        nil
+
+      round ->
+        %{
+          reviewer: round.reviewer_family,
+          provider: round.reviewer_provider,
+          implementer: round.implementer_family || "unknown",
+          fallback?: round.same_family_fallback == true,
+          reason: round.same_family_fallback_reason
+        }
+    end
   end
 
   defp review_round_noun(1), do: "round"
@@ -2682,6 +2703,26 @@ defmodule ArbiterWeb.TaskDetailLive do
                         {@review_summary.label}
                       </span>
                     </button>
+                    <p
+                      :if={@review_summary.family}
+                      id="review-family"
+                      class="text-[11.5px] font-[family-name:var(--font-mono)] text-[var(--text-secondary)]"
+                    >
+                      reviewer {@review_summary.family.reviewer}
+                      <span :if={@review_summary.family.provider}>
+                        ({@review_summary.family.provider})
+                      </span>
+                      <span class="text-[var(--text-label)]">·</span>
+                      implementer {@review_summary.family.implementer}
+                    </p>
+                    <p
+                      :if={@review_summary.family && @review_summary.family.fallback?}
+                      id="review-same-family-fallback"
+                      class="text-[11.5px] leading-snug text-[var(--arb-attention)]"
+                    >
+                      Same-family fallback: {@review_summary.family.reason ||
+                        "no other model family was available"}
+                    </p>
                   </div>
 
                   <div :if={@prior_mr_refs != []} class="flex flex-col gap-1">

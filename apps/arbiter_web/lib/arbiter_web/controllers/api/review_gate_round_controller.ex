@@ -52,6 +52,11 @@ defmodule ArbiterWeb.Api.ReviewGateRoundController do
       # CLI's own wall, then the verdict row naming the one that answered)
       # without re-reading transcripts.
       reviewer_provider: r.reviewer_provider,
+      # bd-a1ke2c: the cross-family audit trail (nil when it is off).
+      reviewer_family: r.reviewer_family,
+      implementer_family: r.implementer_family,
+      same_family_fallback: r.same_family_fallback,
+      same_family_fallback_reason: r.same_family_fallback_reason,
       cost_usd: r.cost_usd,
       converged: r.converged,
       inserted_at: iso(r.inserted_at)

@@ -110,6 +110,7 @@ defmodule Arbiter.Agents.ProviderRouting do
   alias Arbiter.Agents.CredentialWatchdog
   alias Arbiter.Agents.ModelFamily
   alias Arbiter.Agents.ProviderPool
+  alias Arbiter.Agents.ReviewerRouting
   alias Arbiter.Agents.Routing
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Quota.Headroom
@@ -232,7 +233,8 @@ defmodule Arbiter.Agents.ProviderRouting do
   and the caller keeps its pre-routing resolution.
 
   Options: those of `evaluate/3`, plus `:override` (an explicit adapter
-  type), `:reviewer_family` (default: the task's latest review run's) and
+  type), `:reviewer_family` (default: the task's cross-family reviewer pin
+  (bd-a1ke2c), else its latest review run's) and
   `:pin` (default `true`).
   """
   @spec select(Workspace.t(), Issue.t(), role(), keyword()) ::
@@ -393,7 +395,7 @@ defmodule Arbiter.Agents.ProviderRouting do
   end
 
   defp fallback(base, entries, task, why, opts) do
-    reviewer = Keyword.get_lazy(opts, :reviewer_family, fn -> reviewer_family(task.id) end)
+    reviewer = Keyword.get_lazy(opts, :reviewer_family, fn -> reviewer_family(task) end)
     others = Enum.reject(entries, &(reviewer && &1.family == reviewer))
 
     {pool, excluded} =
@@ -703,7 +705,13 @@ defmodule Arbiter.Agents.ProviderRouting do
     end)
   end
 
-  defp reviewer_family(task_id) do
+  # bd-a1ke2c: the task's cross-family reviewer pin, when it has one, is the
+  # family every later review pass uses; otherwise the latest review run's.
+  defp reviewer_family(%Issue{reviewer_family: pinned, id: task_id}) do
+    ReviewerRouting.known_family(pinned) || latest_reviewer_family(task_id)
+  end
+
+  defp latest_reviewer_family(task_id) do
     Run
     |> Ash.Query.filter(base_task_id == ^task_id and kind == :review)
     |> Ash.Query.sort(started_at: :desc)
