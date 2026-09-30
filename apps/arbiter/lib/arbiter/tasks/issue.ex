@@ -659,6 +659,7 @@ defmodule Arbiter.Tasks.Issue do
 
       change {Arbiter.Tasks.Issue.Changes.RequireAcceptanceCriteria, []}
       change {Transition, transition: :promote, idempotent: true}
+      change {Arbiter.Tasks.Issue.Changes.RankOnPromote, []}
 
       # `after_transaction` (post-commit), not `after_action`: bd-cvfjms's
       # `Arbiter.Sessions.RefineLifecycle` reacts to this broadcast from a
@@ -728,6 +729,7 @@ defmodule Arbiter.Tasks.Issue do
 
       change {Arbiter.Tasks.Issue.Changes.RequireAcceptanceCriteria, []}
       change {Transition, transition: :promote}
+      change {Arbiter.Tasks.Issue.Changes.RankOnPromote, []}
 
       change fn changeset, _context ->
         Ash.Changeset.after_transaction(changeset, fn
@@ -1133,7 +1135,9 @@ defmodule Arbiter.Tasks.Issue do
       description """
       Manual order inside a priority band: Backlog and Ready sort by priority,
       then rank. A new ticket is ranked after every ticket in its workspace
-      (`Changes.AssignRank`).
+      (`Changes.AssignRank`), and so is a ticket promoted to Ready
+      (`Changes.RankOnPromote`): promotion order is dispatch order within a
+      band. `:set_rank` reorders it afterwards.
       """
     end
 
