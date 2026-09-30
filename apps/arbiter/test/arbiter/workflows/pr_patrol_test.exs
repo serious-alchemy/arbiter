@@ -1877,6 +1877,175 @@ defmodule Arbiter.Workflows.PRPatrolTest do
       assert hd(trips).body =~ "pr_patrol_follow_up"
     end
 
+    # bd-9uyoy0 (lt-b43wy2): a follow-up that closed `:completed` has consumed
+    # the review that triggered it. CHANGES_REQUESTED stays the latest verdict
+    # until the human re-reviews, so without a record of what was handled the
+    # patrol re-files an identical follow-up every time the previous one closes.
+    test "a completed follow-up consumes its CHANGES_REQUESTED review; a new review re-arms",
+         %{ws: ws} do
+      review_id = :counters.new(1, [])
+      :counters.put(review_id, 1, 777)
+
+      stub(fn conn ->
+        cond do
+          conn.request_path == "/repos/owner/repo/pulls" ->
+            Req.Test.json(conn, [%{"number" => 5150, "title" => "stuck", "html_url" => "x"}])
+
+          conn.request_path == "/repos/owner/repo/pulls/5150/reviews" ->
+            Req.Test.json(conn, [
+              %{
+                "id" => :counters.get(review_id, 1),
+                "state" => "CHANGES_REQUESTED",
+                "user" => %{"login" => "alice"}
+              }
+            ])
+
+          conn.request_path == "/repos/owner/repo/pulls/5150/comments" ->
+            Req.Test.json(conn, [])
+
+          true ->
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
+        end
+      end)
+
+      {pid, name} = start_patrol(ws)
+
+      complete_all = fn ->
+        for t <- tasks_for_repo(), t.state != :closed do
+          {:ok, _} = Ash.update(t, %{close_reason: :completed}, action: :close)
+        end
+      end
+
+      :ok = PRPatrol.tick(name)
+      assert [first] = tasks_for_repo()
+      assert first.last_seen_comment_id =~ "777"
+      complete_all.()
+
+      for _ <- 1..3 do
+        force_retry_now(pid, 5150)
+        :ok = PRPatrol.tick(name)
+      end
+
+      assert length(tasks_for_repo()) == 1
+
+      :counters.put(review_id, 1, 778)
+      force_retry_now(pid, 5150)
+      :ok = PRPatrol.tick(name)
+      assert length(tasks_for_repo()) == 2
+    end
+
+    test "a consumed CHANGES_REQUESTED review does not hide a newly unresolved thread",
+         %{ws: ws} do
+      threads = :counters.new(1, [])
+
+      stub(fn conn ->
+        cond do
+          conn.request_path == "/repos/owner/repo/pulls" ->
+            Req.Test.json(conn, [%{"number" => 5152, "title" => "t", "html_url" => "x"}])
+
+          conn.request_path == "/repos/owner/repo/pulls/5152/reviews" ->
+            Req.Test.json(conn, [
+              %{"id" => 900, "state" => "CHANGES_REQUESTED", "user" => %{"login" => "alice"}}
+            ])
+
+          conn.request_path == "/repos/owner/repo/pulls/5152/comments" ->
+            Req.Test.json(conn, [])
+
+          conn.request_path == "/graphql" ->
+            nodes =
+              if :counters.get(threads, 1) == 0,
+                do: [],
+                else: [
+                  %{
+                    "id" => "T1",
+                    "isResolved" => false,
+                    "comments" => %{
+                      "nodes" => [%{"id" => "C1", "author" => %{"login" => "bob"}}]
+                    }
+                  }
+                ]
+
+            Req.Test.json(conn, %{
+              "data" => %{
+                "repository" => %{
+                  "pullRequest" => %{"reviewThreads" => %{"nodes" => nodes}}
+                }
+              }
+            })
+
+          true ->
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
+        end
+      end)
+
+      {pid, name} = start_patrol(ws)
+
+      :ok = PRPatrol.tick(name)
+      assert [first] = tasks_for_repo()
+      {:ok, _} = Ash.update(first, %{close_reason: :completed}, action: :close)
+
+      force_retry_now(pid, 5152)
+      :ok = PRPatrol.tick(name)
+      assert length(tasks_for_repo()) == 1
+
+      :counters.put(threads, 1, 1)
+      force_retry_now(pid, 5152)
+      :ok = PRPatrol.tick(name)
+      assert length(tasks_for_repo()) == 2
+    end
+
+    test "the breaker escalation names the close reasons of the follow-ups it counted",
+         %{ws: ws} do
+      prior_cb = Application.get_env(:arbiter, :circuit_breaker, [])
+
+      Application.put_env(
+        :arbiter,
+        :circuit_breaker,
+        Keyword.put(prior_cb, :pr_patrol_follow_up, limit: 2, window_ms: 60_000)
+      )
+
+      on_exit(fn -> Application.put_env(:arbiter, :circuit_breaker, prior_cb) end)
+      Arbiter.CircuitBreaker.reset_all()
+      on_exit(&Arbiter.CircuitBreaker.reset_all/0)
+
+      # No review id, so nothing can be consumed — the breaker is what stops it.
+      stub(fn conn ->
+        cond do
+          conn.request_path == "/repos/owner/repo/pulls" ->
+            Req.Test.json(conn, [%{"number" => 5151, "title" => "loops", "html_url" => "x"}])
+
+          conn.request_path == "/repos/owner/repo/pulls/5151/reviews" ->
+            Req.Test.json(conn, [%{"state" => "CHANGES_REQUESTED"}])
+
+          conn.request_path == "/repos/owner/repo/pulls/5151/comments" ->
+            Req.Test.json(conn, [])
+
+          true ->
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
+        end
+      end)
+
+      {pid, name} = start_patrol(ws)
+
+      Enum.each(1..5, fn _ ->
+        for t <- tasks_for_repo(), t.state != :closed do
+          {:ok, _} = Ash.update(t, %{close_reason: :completed}, action: :close)
+        end
+
+        force_retry_now(pid, 5151)
+        :ok = PRPatrol.tick(name)
+      end)
+
+      [trip] =
+        Arbiter.Messages.Message
+        |> Ash.Query.filter(workspace_id == ^ws.id and kind == :escalation)
+        |> Ash.read!()
+        |> Enum.filter(&(&1.subject =~ "circuit breaker tripped"))
+
+      assert trip.body =~ "completed"
+      refute trip.body =~ "closed or lost before it could finish"
+    end
+
     # If the give-up escalation itself fails to persist on the bounding
     # attempt, the PR must NOT be marked `given_up` — otherwise `backing_off?/2`
     # blocks it unconditionally and the coordinator is never told anything
