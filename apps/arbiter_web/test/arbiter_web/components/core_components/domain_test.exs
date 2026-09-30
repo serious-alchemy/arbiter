@@ -381,9 +381,10 @@ defmodule ArbiterWeb.CoreComponents.DomainTest do
         provider: "claude"
       }
 
-      html = rendered_to_string(~H"""
-      <ArbiterWeb.CoreComponents.Domain.run_row {assigns} />
-      """)
+      html =
+        rendered_to_string(~H"""
+        <ArbiterWeb.CoreComponents.Domain.run_row {assigns} />
+        """)
 
       doc = LazyHTML.from_fragment(html)
       assert Enum.count(LazyHTML.filter(doc, "svg[aria-label=\"Claude\"]")) > 0
@@ -397,9 +398,10 @@ defmodule ArbiterWeb.CoreComponents.DomainTest do
         provider: nil
       }
 
-      html = rendered_to_string(~H"""
-      <ArbiterWeb.CoreComponents.Domain.run_row {assigns} />
-      """)
+      html =
+        rendered_to_string(~H"""
+        <ArbiterWeb.CoreComponents.Domain.run_row {assigns} />
+        """)
 
       doc = LazyHTML.from_fragment(html)
       assert Enum.count(LazyHTML.filter(doc, "svg[aria-label]")) == 0
@@ -412,9 +414,10 @@ defmodule ArbiterWeb.CoreComponents.DomainTest do
         status: "working"
       }
 
-      html = rendered_to_string(~H"""
-      <ArbiterWeb.CoreComponents.Domain.run_row {assigns} />
-      """)
+      html =
+        rendered_to_string(~H"""
+        <ArbiterWeb.CoreComponents.Domain.run_row {assigns} />
+        """)
 
       doc = LazyHTML.from_fragment(html)
       assert Enum.count(LazyHTML.filter(doc, "svg[aria-label]")) == 0

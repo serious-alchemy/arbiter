@@ -3033,7 +3033,10 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
   end
 
   describe "provider icons on runs (bd-7he5xm)" do
-    test "renders provider icons in the run roster when runs have providers", %{conn: conn, ws: ws} do
+    test "renders provider icons in the run roster when runs have providers", %{
+      conn: conn,
+      ws: ws
+    } do
       {:ok, task} = Ash.create(Issue, %{title: "with-provider-runs", workspace_id: ws.id})
 
       {:ok, _claude_run} =

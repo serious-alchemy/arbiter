@@ -143,11 +143,12 @@ defmodule ArbiterWeb.RunDetailLiveTest do
 
   describe "provider icon display (bd-7he5xm)" do
     test "shows the provider icon and display name when run has a provider", %{conn: conn} do
-      r = run(%{
-        task_id: "bd-provider-display",
-        task_title: "provider-display-run",
-        provider: "claude"
-      })
+      r =
+        run(%{
+          task_id: "bd-provider-display",
+          task_title: "provider-display-run",
+          provider: "claude"
+        })
 
       {:ok, _view, html} = live_run(conn, r.id)
 
@@ -164,11 +165,12 @@ defmodule ArbiterWeb.RunDetailLiveTest do
     end
 
     test "shows 'unknown' when run has no provider", %{conn: conn} do
-      r = run(%{
-        task_id: "bd-no-provider-detail",
-        task_title: "no-provider-run",
-        provider: nil
-      })
+      r =
+        run(%{
+          task_id: "bd-no-provider-detail",
+          task_title: "no-provider-run",
+          provider: nil
+        })
 
       {:ok, _view, html} = live_run(conn, r.id)
 
@@ -185,11 +187,12 @@ defmodule ArbiterWeb.RunDetailLiveTest do
     end
 
     test "displays different provider icons correctly", %{conn: conn} do
-      codex_run = run(%{
-        task_id: "bd-codex-detail",
-        task_title: "codex-run",
-        provider: "codex"
-      })
+      codex_run =
+        run(%{
+          task_id: "bd-codex-detail",
+          task_title: "codex-run",
+          provider: "codex"
+        })
 
       {:ok, _view, html} = live_run(conn, codex_run.id)
 
@@ -200,11 +203,12 @@ defmodule ArbiterWeb.RunDetailLiveTest do
       assert html =~ "Codex"
 
       # Test with gemini/Antigravity
-      gemini_run = run(%{
-        task_id: "bd-gemini-detail",
-        task_title: "gemini-run",
-        provider: "gemini"
-      })
+      gemini_run =
+        run(%{
+          task_id: "bd-gemini-detail",
+          task_title: "gemini-run",
+          provider: "gemini"
+        })
 
       {:ok, _view, html} = live_run(conn, gemini_run.id)
 
