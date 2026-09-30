@@ -102,7 +102,7 @@ defmodule Arbiter.DataCase do
       drain_task_supervisor(Arbiter.Quota.CloudProbeSupervisor)
       drain_task_supervisor(Arbiter.TaskSupervisor)
       settle_sandbox(pid)
-      Ecto.Adapters.SQL.Sandbox.stop_owner(pid)
+      stop_sandbox_owner(pid)
     end)
 
     on_exit(&stop_leaked_dynamic_children/0)
@@ -216,6 +216,34 @@ defmodule Arbiter.DataCase do
     safely(fn -> Ecto.Adapters.SQL.Sandbox.allow(Arbiter.Repo, owner, self()) end)
     safely(fn -> Arbiter.Repo.query!("SELECT 1") end)
     :ok
+  end
+
+  @doc """
+  Stops an owner from `Ecto.Adapters.SQL.Sandbox.start_owner!/2`, and returns
+  only once the pool has stopped handing that owner's connection out.
+
+  `Sandbox.stop_owner/1` just kills the owner, which is an `Agent`. A shared
+  pool only goes back to `:manual` two asynchronous hops later: the owner's
+  `DBConnection.Ownership.Proxy` sees it die and exits, then the ownership
+  manager handles the proxy's `:DOWN`. Until then the manager still redirects
+  every process to that proxy, and a query that reaches it after the owner has
+  died exits with `{:shutdown, "owner #PID<…> exited"}`. That is what failed
+  `Arbiter.WorkerTest` on CI (bd-jw7cb0): a plain `ExUnit.Case` test ran right
+  after a shared-owner test, and its worker's `init` read the task through
+  the dead owner's proxy. A worker queried in `:manual` mode instead gets the
+  `OwnershipError` its best-effort reads already swallow.
+
+  So the owner checks its own connection in first. The manager handles that
+  checkin synchronously and unshares in the same call. It's a no-op for an
+  owner that isn't shared, and harmless if the owner is already gone.
+  """
+  @spec stop_sandbox_owner(pid()) :: :ok
+  def stop_sandbox_owner(owner) do
+    safely(fn ->
+      Agent.get(owner, fn _ -> Ecto.Adapters.SQL.Sandbox.checkin(Arbiter.Repo) end)
+    end)
+
+    Ecto.Adapters.SQL.Sandbox.stop_owner(owner)
   end
 
   defp safely(fun) do
