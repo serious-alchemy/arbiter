@@ -1,7 +1,8 @@
 defmodule ArbiterWeb.TaskIndexLive do
   @moduledoc """
-  Index of every directive (task) at `/tasks` — the "See all" target for the
-  dashboard's current-only recent-directives section.
+  Index of every directive (task) at `/tasks`. Review engagements
+  (`Issue.engagement?`) are not directives and are never listed — they live on
+  `/reviews`; `/tasks/:id` still resolves one.
 
   Lists all directives with a lifecycle-state filter (all / backlog / queued /
   active / merging / verifying / closed), a text search, and a combinable set of
@@ -265,8 +266,11 @@ defmodule ArbiterWeb.TaskIndexLive do
 
   @doc false
   def load_tasks(f, page) do
+    # Review engagements are never listed here, under any state tab — they
+    # live on /reviews (bd-crk6tb). `/tasks/:id` still resolves them.
     query =
       Issue
+      |> Issue.exclude_engagements()
       |> filter_by_state(f.state)
       |> filter_by_query(f.q)
       |> filter_by_workspace(f.workspace)
@@ -294,6 +298,7 @@ defmodule ArbiterWeb.TaskIndexLive do
   # Elixir; the `select` at least keeps every other Issue column off the wire.
   defp load_repos do
     Issue
+    |> Issue.exclude_engagements()
     |> Ash.Query.select([:repo])
     |> Ash.read!()
     |> Enum.map(& &1.repo)

@@ -1,7 +1,17 @@
 defmodule ArbiterWeb.ReviewIndexLive do
   @moduledoc """
-  LiveView at `/reviews` — the external-review audit ledger (bd-4jllkg,
-  bd-amtjxk). Read-only visibility for `worker_review(pr:)` /
+  LiveView at `/reviews` — the one place review engagements and the
+  external-review audit ledger appear (bd-4jllkg, bd-amtjxk, bd-crk6tb).
+
+  Two sections share the workspace filter:
+
+    * **Engagements** — the ReviewPatrol babysitting rows
+      (`Issue.only_engagements/1`), hidden from every ticket list. Open ones
+      are the table; closed ones are the historical record, collapsed. Each
+      row shows the PR, `review_automation` mode, `review_count`,
+      `last_reviewed_at`, its run count / latest run (the ledger joined via
+      `Record.engagement_id`) and links to `/tasks/:id`.
+    * **Run history** — the ledger below. Read-only visibility for `worker_review(pr:)` /
   `arb review --pr` runs, which are not task-linked and previously had no
   UI beyond the transient `/events?subscribe=external_review` stream.
 
@@ -43,7 +53,7 @@ defmodule ArbiterWeb.ReviewIndexLive do
   alias Arbiter.Events
   alias Arbiter.Reviews.Record
   alias Arbiter.Reviews.Transcript
-  alias Arbiter.Tasks.Workspace
+  alias Arbiter.Tasks.{Issue, Workspace}
   alias ArbiterWeb.CoreComponents.{Core, Data, Feedback, Forms, Navigation}
   alias ArbiterWeb.Paging
   require Ash.Query
@@ -52,6 +62,8 @@ defmodule ArbiterWeb.ReviewIndexLive do
   @statuses Record.statuses()
   @status_strings Enum.map(@statuses, &Atom.to_string/1)
   @status_options Enum.map(@statuses, &{Atom.to_string(&1), Atom.to_string(&1)})
+  @open_engagement_limit 200
+  @closed_engagement_limit 50
 
   @impl true
   def mount(_params, _session, socket) do
@@ -75,6 +87,9 @@ defmodule ArbiterWeb.ReviewIndexLive do
       |> assign(:records_loading?, false)
       |> assign(:records_stale?, false)
       |> assign(:records_error, nil)
+      |> assign(:engagements, %{open: [], closed: [], runs: %{}})
+      |> assign(:engagements_loaded?, false)
+      |> assign(:engagements_error, nil)
 
     socket = if live?, do: fetch_workspaces(socket), else: socket
 
@@ -87,6 +102,12 @@ defmodule ArbiterWeb.ReviewIndexLive do
     status = if params["status"] in @status_strings, do: params["status"]
     page = Paging.parse_page(params)
 
+    # Engagements depend on the workspace filter only, so status/page
+    # patches don't re-read them.
+    engagements_stale? =
+      not socket.assigns.engagements_loaded? or
+        Map.get(socket.assigns, :workspace_id) != workspace_id
+
     socket =
       socket
       |> assign(:workspace_id, workspace_id)
@@ -95,7 +116,13 @@ defmodule ArbiterWeb.ReviewIndexLive do
 
     # The dead render reads nothing and draws a loading state; the query
     # only runs once the socket is connected (bd-blnnu3).
-    socket = if connected?(socket), do: fetch_records(socket), else: socket
+    socket =
+      if connected?(socket) do
+        socket = fetch_records(socket)
+        if engagements_stale?, do: fetch_engagements(socket), else: socket
+      else
+        socket
+      end
 
     {:noreply, socket}
   end
@@ -216,6 +243,19 @@ defmodule ArbiterWeb.ReviewIndexLive do
     |> records_read_done()
   end
 
+  def handle_async(:engagements, {:ok, result}, socket) do
+    {:noreply,
+     socket
+     |> assign(:engagements, result)
+     |> assign(:engagements_loaded?, true)
+     |> assign(:engagements_error, nil)}
+  end
+
+  def handle_async(:engagements, {:exit, reason}, socket) do
+    Logger.error("ReviewIndexLive: loading engagements failed: #{inspect(reason)}")
+    {:noreply, assign(socket, :engagements_error, describe_exit(reason))}
+  end
+
   def handle_async(:transcript, {:ok, result}, socket) do
     {:noreply,
      socket
@@ -265,6 +305,64 @@ defmodule ArbiterWeb.ReviewIndexLive do
     Workspace
     |> Ash.Query.sort(name: :asc)
     |> Ash.read!()
+  end
+
+  # `start_async/3` under a name that is already running supersedes it, so a
+  # burst of workspace-filter changes settles on the last one.
+  defp fetch_engagements(socket) do
+    workspace_id = socket.assigns.workspace_id
+    start_async(socket, :engagements, fn -> run_engagements_load(workspace_id) end)
+  end
+
+  defp run_engagements_load(workspace_id) do
+    Process.flag(:trap_exit, true)
+    result = __MODULE__.load_engagements(workspace_id)
+
+    receive do
+      {:EXIT, _view, _reason} -> exit(:shutdown)
+    after
+      0 -> result
+    end
+  end
+
+  @doc false
+  def load_engagements(workspace_id) do
+    base =
+      Issue
+      |> Issue.only_engagements()
+      |> filter_workspace(workspace_id)
+      |> Ash.Query.sort(last_reviewed_at: :desc_nils_last)
+
+    open =
+      base
+      |> Ash.Query.filter(state != :closed)
+      |> Ash.Query.limit(@open_engagement_limit)
+      |> Ash.read!()
+
+    closed =
+      base
+      |> Ash.Query.filter(state == :closed)
+      |> Ash.Query.limit(@closed_engagement_limit)
+      |> Ash.read!()
+
+    %{open: open, closed: closed, runs: engagement_runs(Enum.map(open ++ closed, & &1.id))}
+  end
+
+  # The ledger joined to engagements via `Record.engagement_id`: run count and
+  # latest start per engagement. Only the two columns needed are selected —
+  # the row's `raw` payload would dominate the read.
+  defp engagement_runs([]), do: %{}
+
+  defp engagement_runs(ids) do
+    Record
+    |> Ash.Query.filter(engagement_id in ^ids)
+    |> Ash.Query.select([:engagement_id, :started_at])
+    |> Ash.read!()
+    |> Enum.group_by(& &1.engagement_id)
+    |> Map.new(fn {id, runs} ->
+      {id,
+       %{count: length(runs), latest: runs |> Enum.map(& &1.started_at) |> Enum.max(DateTime)}}
+    end)
   end
 
   # A refresh requested while one is already in flight marks the page stale
@@ -618,6 +716,67 @@ defmodule ArbiterWeb.ReviewIndexLive do
           </button>
         </div>
 
+        <section id="engagements" class="space-y-2">
+          <h2 class="text-sm font-semibold uppercase tracking-[0.06em] text-base-content/70">
+            Engagements
+          </h2>
+
+          <div
+            :if={@engagements_error}
+            id="engagements-error"
+            role="alert"
+            class="px-3 py-2.5 rounded-[var(--radius-field)] border border-solid border-[var(--arb-fail-edge)] bg-[var(--arb-fail-wash)] text-[12px] text-[var(--arb-fail-text)]"
+          >
+            Could not load engagements: {@engagements_error}
+          </div>
+
+          <div
+            :if={not @engagements_loaded? and is_nil(@engagements_error)}
+            id="engagements-loading"
+            aria-label="Loading engagements"
+            class="h-[34px] rounded-[var(--radius-field)] border border-solid border-[var(--border-strong)] bg-[var(--surface-card)] animate-pulse"
+          >
+          </div>
+
+          <div :if={@engagements_loaded? and @engagements.open == []} id="engagements-empty">
+            <Feedback.empty_state icon="hero-inbox" detail="No open review engagements.">
+              Nothing here
+            </Feedback.empty_state>
+          </div>
+
+          <div
+            :if={@engagements.open != []}
+            id="engagements-table"
+            class="w-full overflow-x-auto"
+            role="table"
+          >
+            <.engagement_header />
+            <.engagement_row
+              :for={eng <- @engagements.open}
+              engagement={eng}
+              run={@engagements.runs[eng.id]}
+            />
+          </div>
+
+          <details :if={@engagements.closed != []} id="closed-engagements" class="w-full">
+            <summary class="cursor-pointer text-[12px] text-base-content/60">
+              Closed engagements ({length(@engagements.closed)})
+            </summary>
+            <div class="w-full overflow-x-auto mt-2" role="table">
+              <.engagement_header />
+              <.engagement_row
+                :for={eng <- @engagements.closed}
+                engagement={eng}
+                run={@engagements.runs[eng.id]}
+              />
+            </div>
+          </details>
+        </section>
+
+        <h2 class="text-sm font-semibold uppercase tracking-[0.06em] text-base-content/70">
+          Run history
+        </h2>
+
         <div
           id="reviews-panel"
           data-state={records_state(@records_loaded?, @records_error)}
@@ -854,6 +1013,65 @@ defmodule ArbiterWeb.ReviewIndexLive do
   end
 
   # ---- view helpers ----
+
+  defp engagement_header(assigns) do
+    ~H"""
+    <div
+      class="grid items-center gap-3 h-[30px] px-[14px] bg-[var(--arb-chrome)]"
+      style="grid-template-columns: minmax(80px,1fr) 110px 70px 150px 70px 110px 90px;"
+      role="row"
+    >
+      <span
+        :for={label <- ~w(PR Automation Reviews Last\ reviewed Runs Latest\ run Task)}
+        class="text-[10.5px] uppercase tracking-[0.06em] font-[family-name:var(--font-mono)] text-[var(--text-label)]"
+        role="columnheader"
+      >
+        {label}
+      </span>
+    </div>
+    """
+  end
+
+  attr :engagement, :map, required: true
+  attr :run, :map, default: nil
+
+  defp engagement_row(assigns) do
+    ~H"""
+    <div
+      id={"engagement-row-#{@engagement.id}"}
+      class="grid items-center gap-3 min-h-[34px] px-[14px] border-b border-[var(--arb-line-soft)] hover:bg-[var(--arb-raised-hover)]"
+      style="grid-template-columns: minmax(80px,1fr) 110px 70px 150px 70px 110px 90px;"
+      role="row"
+    >
+      <span data-role="source-pr" class="text-[12px] font-[family-name:var(--font-mono)] truncate">
+        {@engagement.source_pr}
+      </span>
+      <span data-role="automation" class="text-[12px]">
+        {format_maybe(@engagement.review_automation)}
+      </span>
+      <span data-role="review-count" class="text-[12px]">{@engagement.review_count || 0}</span>
+      <span data-role="last-reviewed" class="text-[12px]">
+        {format_minute(@engagement.last_reviewed_at)}
+      </span>
+      <span data-role="run-count" class="text-[12px]">{if @run, do: @run.count, else: 0}</span>
+      <span data-role="latest-run" class="text-[12px]">
+        {format_day(@run && @run.latest)}
+      </span>
+      <.link
+        navigate={~p"/tasks/#{@engagement.id}"}
+        class="text-[12px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
+      >
+        Task &rarr;
+      </.link>
+    </div>
+    """
+  end
+
+  defp format_minute(nil), do: "—"
+  defp format_minute(%DateTime{} = dt), do: Calendar.strftime(dt, "%Y-%m-%d %H:%M")
+
+  defp format_day(nil), do: "—"
+  defp format_day(%DateTime{} = dt), do: Calendar.strftime(dt, "%Y-%m-%d")
 
   defp records_state(_loaded?, error) when not is_nil(error), do: "error"
   defp records_state(true, nil), do: "loaded"

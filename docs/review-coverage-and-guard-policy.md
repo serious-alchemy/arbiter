@@ -208,12 +208,12 @@ inventory cannot silently rot.
 
 | # | Guard | Anchor | Protects against | Misfire mode | On failure | Patches |
 |---|---|---|---|---|---|---|
-| R1 | Head-advance detection | `apps/arbiter/lib/arbiter/workflows/review_patrol.ex:918` (`maybe_record_head_sha`) | Re-reviewing an unchanged PR | Shares `last_reviewed_sha` with the merge guard — **the same column, different meaning** (engagement cursor vs merge authorisation) | — | 2 |
-| R2 | CI-settle gate | `apps/arbiter/lib/arbiter/workflows/review_patrol.ex:2437` (`ci_settled?`) | Reviewing mid-pipeline | A never-settling pipeline defers forever (no bound) | Skip this tick | 1 |
-| R3 | Debounce window | `apps/arbiter/lib/arbiter/workflows/review_patrol.ex:2442` (`debounced?`) | Review spam on rapid pushes | Delays a genuine re-review | Skip this tick | 1 |
-| R4 | Per-PR review cap | `apps/arbiter/lib/arbiter/workflows/review_patrol.ex:971` (`review_capped?`), handler `apps/arbiter/lib/arbiter/workflows/review_patrol.ex:990` (`handle_review_cap`) | bd-ahvk03: unbounded review spend on one PR | A busy PR freezes until a human intervenes | **Fail-closed, one escalation**, frozen | 2 |
-| R5 | Atomic escalation claim | `apps/arbiter/lib/arbiter/workflows/review_patrol.ex:1018` (`claim_review_cap_escalation`) | bd-4po0nv: 7 identical escalations in ~3s | — | — | 1 |
-| R6 | Relevance gate | `apps/arbiter/lib/arbiter/workflows/review_patrol.ex:1080` (`gate_on_relevance`) | Re-reviewing irrelevant new commits | A relevant change judged irrelevant | Skip | 1 |
+| R1 | Head-advance detection | `apps/arbiter/lib/arbiter/workflows/review_patrol.ex:916` (`maybe_record_head_sha`) | Re-reviewing an unchanged PR | Shares `last_reviewed_sha` with the merge guard — **the same column, different meaning** (engagement cursor vs merge authorisation) | — | 2 |
+| R2 | CI-settle gate | `apps/arbiter/lib/arbiter/workflows/review_patrol.ex:2435` (`ci_settled?`) | Reviewing mid-pipeline | A never-settling pipeline defers forever (no bound) | Skip this tick | 1 |
+| R3 | Debounce window | `apps/arbiter/lib/arbiter/workflows/review_patrol.ex:2440` (`debounced?`) | Review spam on rapid pushes | Delays a genuine re-review | Skip this tick | 1 |
+| R4 | Per-PR review cap | `apps/arbiter/lib/arbiter/workflows/review_patrol.ex:969` (`review_capped?`), handler `apps/arbiter/lib/arbiter/workflows/review_patrol.ex:988` (`handle_review_cap`) | bd-ahvk03: unbounded review spend on one PR | A busy PR freezes until a human intervenes | **Fail-closed, one escalation**, frozen | 2 |
+| R5 | Atomic escalation claim | `apps/arbiter/lib/arbiter/workflows/review_patrol.ex:1016` (`claim_review_cap_escalation`) | bd-4po0nv: 7 identical escalations in ~3s | — | — | 1 |
+| R6 | Relevance gate | `apps/arbiter/lib/arbiter/workflows/review_patrol.ex:1078` (`gate_on_relevance`) | Re-reviewing irrelevant new commits | A relevant change judged irrelevant | Skip | 1 |
 | P1 | Dispatch-attempt bound | `apps/arbiter/lib/arbiter/workflows/pr_patrol.ex:130` (`max_dispatch_attempts`), recorded at `apps/arbiter/lib/arbiter/workflows/pr_patrol.ex:531` (`record_dispatch_failure`) | bd-7rxwzc: 22 tickets for one PR in ~28h | A transient repo-resolution outage permanently gives up on a PR | **Fail-closed, one final escalation, `given_up`** — the reference implementation of the policy in §5 | 2 |
 | P2 | Give-up blocking | `apps/arbiter/lib/arbiter/workflows/pr_patrol.ex:512` (`backing_off?`) | A given-up PR resuming after backoff | Requires human/config intervention | Unconditional block | 1 |
 | P3 | Re-escalation throttle | `apps/arbiter/lib/arbiter/workflows/pr_patrol.ex:540` (`escalate_dispatch_failure`) | bd-dtpjlf: silence after the first page | Hourly re-page on a known-broken repo | ≤1/hour, plus one unconditional final | 1 |
@@ -229,7 +229,7 @@ Counting the 64 rows above:
 
 * **Four independent implementations of "has this commit been reviewed?"** —
   W1–W6, M1–M6, R1, and ExternalReview's baseline write
-  (`apps/arbiter/lib/arbiter/reviews/external_review.ex:1418`
+  (`apps/arbiter/lib/arbiter/reviews/external_review.ex:1416`
   (`last_reviewed_sha`)). Two of them (Watchdog, MergeQueue) are hand-maintained
   mirrors, and M1 is already missing W2, W4 and W5.
 * **One column, two meanings.** `last_reviewed_sha` is simultaneously
@@ -378,7 +378,7 @@ below calls it and nothing writes coverage any other way:
 | ReviewGate clean approve | `apps/arbiter/lib/arbiter/worker/review_gate.ex:4284` (`stamp_reviewed_head`) writes `last_reviewed_sha` | `Coverage.record(kind: :reviewed, round: state.round, net_diff_id: …)` — **and the write is no longer best-effort**: a failed write must page, because a silently-missing row *is* the #1585 stall |
 | ReviewGate verdict guards | — | nothing (a `fail_closed` is a reject) |
 | ReviewPatrol post-review | `last_reviewed_sha: head` on the engagement | `Coverage.record(kind: :reviewed, source: :review_patrol)` on the **authoring task**, plus the engagement cursor as today |
-| ExternalReview baseline | `apps/arbiter/lib/arbiter/reviews/external_review.ex:1418` (`last_reviewed_sha`) | `Coverage.record(kind: :reviewed, source: :external_review)` when the external verdict is an approval; cursor only otherwise |
+| ExternalReview baseline | `apps/arbiter/lib/arbiter/reviews/external_review.ex:1416` (`last_reviewed_sha`) | `Coverage.record(kind: :reviewed, source: :external_review)` when the external verdict is an approval; cursor only otherwise |
 | Watchdog fleet push (update-branch / rebase) | `apps/arbiter/lib/arbiter/worker/watchdog.ex:5376` (`clear_reviewed_latch`) suspends the guard | `Coverage.record(kind: :mechanical, …)` **only if** the fingerprint matches; otherwise nothing is recorded and the new head is honestly uncovered |
 | Watchdog CI `fix_pass` | `apps/arbiter/lib/arbiter/worker/watchdog.ex:2962` (`clear_reviewed_latch`) — merges unguarded | nothing. A `fix_pass` changes content by construction, so its head is `:uncovered` and routes to a scoped re-review. **This closes the hole in §2.6.** **P7 ✅ (bd-60r6wp / #1738)** |
 | MergeQueue conflict resolver push | `apps/arbiter/lib/arbiter/workflows/merge_queue.ex:1764` (`clear_reviewed_latch`) | fingerprint test; a conflict resolution that wrote content is uncovered, exactly as `NetDiff`'s moduledoc already argues **P7 ✅ (bd-60r6wp / #1738)** |

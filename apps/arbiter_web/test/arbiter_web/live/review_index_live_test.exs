@@ -39,6 +39,134 @@ defmodule ArbiterWeb.ReviewIndexLiveTest do
     record
   end
 
+  # bd-crk6tb: engagements (`review_only` with a `source_pr`) are hidden from
+  # every ticket list, so /reviews is the one place they appear.
+  defp engagement!(ws, source_pr, attrs \\ %{}) do
+    {:ok, issue} =
+      Ash.create(Issue, %{
+        title: "Review engagement: #{source_pr}",
+        tracker_type: :none,
+        source_pr: source_pr,
+        workspace_id: ws.id
+      })
+
+    {:ok, issue} =
+      Ash.update(issue, Map.merge(%{review_only: true}, attrs), action: :update)
+
+    issue
+  end
+
+  describe "engagements (bd-crk6tb)" do
+    test "lists an open engagement with its mode, review count, last review and task link",
+         %{conn: conn, ws: ws} do
+      reviewed_at = ~U[2026-09-01 10:30:00Z]
+
+      eng =
+        engagement!(ws, "77", %{
+          review_automation: :report_only,
+          review_count: 3,
+          last_reviewed_at: reviewed_at
+        })
+
+      {:ok, view, _html} = live_reviews(conn, "/reviews")
+
+      row = "#engagement-row-#{eng.id}"
+      assert has_element?(view, "#engagements-table #{row}")
+      assert has_element?(view, "#{row} [data-role=source-pr]", "77")
+      assert has_element?(view, "#{row} [data-role=automation]", "report_only")
+      assert has_element?(view, "#{row} [data-role=review-count]", "3")
+      assert has_element?(view, "#{row} [data-role=last-reviewed]", "2026-09-01 10:30")
+      assert has_element?(view, ~s(#{row} a[href="/tasks/#{eng.id}"]))
+    end
+
+    test "shows the workspace's run history joined to the engagement via engagement_id",
+         %{conn: conn, ws: ws} do
+      eng = engagement!(ws, "78")
+
+      older =
+        record!(ws, %{pr: "78", engagement_id: eng.id, started_at: ~U[2026-09-01 09:00:00Z]})
+
+      newer =
+        record!(ws, %{pr: "78", engagement_id: eng.id, started_at: ~U[2026-09-02 09:00:00Z]})
+
+      {:ok, view, _html} = live_reviews(conn, "/reviews")
+
+      row = "#engagement-row-#{eng.id}"
+      assert has_element?(view, "#{row} [data-role=run-count]", "2")
+      assert has_element?(view, "#{row} [data-role=latest-run]", "2026-09-02")
+      # The same runs stay in the run-history ledger below.
+      assert has_element?(view, "#review-row-#{older.id}")
+      assert has_element?(view, "#review-row-#{newer.id}")
+    end
+
+    test "closed engagements are listed apart from the open ones", %{conn: conn, ws: ws} do
+      open = engagement!(ws, "79")
+      closed = engagement!(ws, "80")
+      {:ok, _} = Ash.update(closed, %{}, action: :close)
+
+      {:ok, view, _html} = live_reviews(conn, "/reviews")
+
+      assert has_element?(view, "#engagements-table #engagement-row-#{open.id}")
+      refute has_element?(view, "#engagements-table #engagement-row-#{closed.id}")
+      assert has_element?(view, "#closed-engagements #engagement-row-#{closed.id}")
+    end
+
+    test "tickets that merely look like engagements are not listed", %{conn: conn, ws: ws} do
+      {:ok, worker_review} =
+        Ash.create(Issue, %{title: "worker review", review_only: true, workspace_id: ws.id})
+
+      {:ok, follow_up} =
+        Ash.create(Issue, %{
+          title: "follow up",
+          tracker_type: :none,
+          source_pr: "81",
+          workspace_id: ws.id
+        })
+
+      {:ok, view, _html} = live_reviews(conn, "/reviews")
+
+      refute has_element?(view, "#engagement-row-#{worker_review.id}")
+      refute has_element?(view, "#engagement-row-#{follow_up.id}")
+    end
+
+    test "the workspace filter scopes engagements and their run history", %{conn: conn, ws: ws} do
+      {:ok, other_ws} =
+        Ash.create(Workspace, %{
+          name: "rev-eng-other-#{System.unique_integer([:positive])}",
+          prefix: "re"
+        })
+
+      mine = engagement!(ws, "82")
+      theirs = engagement!(other_ws, "83")
+
+      {:ok, view, _html} = live_reviews(conn, "/reviews")
+      assert has_element?(view, "#engagement-row-#{mine.id}")
+      assert has_element?(view, "#engagement-row-#{theirs.id}")
+
+      view
+      |> element("form")
+      |> render_change(%{"workspace_id" => ws.id, "status" => ""})
+
+      render_async(view, @async_timeout)
+
+      assert has_element?(view, "#engagement-row-#{mine.id}")
+      refute has_element?(view, "#engagement-row-#{theirs.id}")
+    end
+
+    test "with no engagements the section shows an empty state", %{conn: conn} do
+      {:ok, view, _html} = live_reviews(conn, "/reviews")
+
+      assert has_element?(view, "#engagements-empty")
+      refute has_element?(view, "#engagements-table")
+    end
+
+    test "the Reviews nav entry is in the rail", %{conn: conn} do
+      {:ok, view, _html} = live_reviews(conn, "/reviews")
+
+      assert has_element?(view, ~s(#nav-rail a[aria-current="page"][href="/reviews"]))
+    end
+  end
+
   describe "mount" do
     test "renders the header and filters when there are no records", %{conn: conn} do
       {:ok, _view, html} = live_reviews(conn, "/reviews")
