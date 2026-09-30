@@ -50,6 +50,7 @@ defmodule Arbiter.Worker.SpawnEnv do
       dev server cannot touch the live database or port.
   """
 
+  alias Arbiter.Agents.Gemini.ConfigDir, as: GeminiConfigDir
   alias Arbiter.Worker.ReleaseEnv
 
   # Why each entry is here: a worker runs real toolchains (`mise`-shimmed
@@ -146,7 +147,7 @@ defmodule Arbiter.Worker.SpawnEnv do
   defp bus_names("gemini"), do: if(bus_reachable?(), do: ["DBUS_SESSION_BUS_ADDRESS"], else: [])
   defp bus_names(_), do: []
 
-  defp bus_reachable?, do: Arbiter.Agents.Gemini.ConfigDir.keyring_available?()
+  defp bus_reachable?, do: GeminiConfigDir.keyring_available?()
 
   defp normalize_provider(nil), do: "claude"
   defp normalize_provider(provider) when is_atom(provider), do: Atom.to_string(provider)

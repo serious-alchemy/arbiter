@@ -68,7 +68,10 @@ defmodule Arbiter.Worker.SpawnEnvSpawnTest do
           {:antigravity, :api_key, "ANTIGRAVITY_API_KEY", "own-antigravity-key"}
         ] do
       account =
-        Ash.create!(ProviderAccount, %{provider: provider, slug: "se-#{System.unique_integer([:positive])}"})
+        Ash.create!(ProviderAccount, %{
+          provider: provider,
+          slug: "se-#{System.unique_integer([:positive])}"
+        })
 
       {:ok, _} =
         Accounts.rotate_credential(account.id, %{kind: kind, env_var: env_var, secret: secret})

@@ -137,7 +137,9 @@ defmodule Arbiter.Worker.SpawnEnvTest do
     end
 
     test "the operator's D-Bus address is forwarded only to agy, and only when the bus exists" do
-      bus = Path.join(System.tmp_dir!(), "arb_spawn_env_bus_#{System.unique_integer([:positive])}")
+      bus =
+        Path.join(System.tmp_dir!(), "arb_spawn_env_bus_#{System.unique_integer([:positive])}")
+
       File.write!(bus, "")
       on_exit(fn -> File.rm(bus) end)
       System.put_env("DBUS_SESSION_BUS_ADDRESS", "unix:path=" <> bus)
