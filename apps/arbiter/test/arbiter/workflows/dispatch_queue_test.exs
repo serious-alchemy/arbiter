@@ -1011,4 +1011,46 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
       occurred_at: DateTime.utc_now() |> DateTime.truncate(:second)
     })
   end
+
+  # bd-jw7cb0: `Worker.stop/2` by task id asks `cancel/2` first, which reads the
+  # task. A Repo read can *exit* rather than raise — a checkout against a pool
+  # or sandbox proxy that is gone exits with `:noproc` — and `load_task/1` only
+  # rescued. Under test that is every `on_exit(fn -> Worker.stop(id) end)` in a
+  # LiveView test, run after ExUnit killed the view mid-query and took the
+  # sandbox proxy with it; the exit failed the test from its own teardown.
+  describe "cancel/2 when the task read exits (bd-jw7cb0)" do
+    setup do
+      :meck.new(Ash, [:passthrough, :no_link])
+      on_exit(fn -> :meck.unload(Ash) end)
+    end
+
+    # Only this test process's reads exit — the process calling `cancel/2`, as
+    # the `on_exit` process was on CI. The worker's own reads still go through.
+    defp task_reads_exit! do
+      test = self()
+
+      :meck.expect(Ash, :get, fn
+        Issue, _id when self() == test ->
+          exit({:noproc, {DBConnection.Holder, :checkout, [test, []]}})
+
+        resource, id ->
+          :meck.passthrough([resource, id])
+      end)
+    end
+
+    test "reads as nothing held, like a read that raised" do
+      task_reads_exit!()
+      assert DispatchQueue.cancel("bd-unreadable", "the task was stopped") == false
+    end
+
+    test "does not stop Worker.stop/2 from stopping the worker" do
+      task_id = "bd-unreadable-#{System.unique_integer([:positive])}"
+      {:ok, pid} = Worker.start(task_id: task_id, repo: "test/repo")
+      ref = Process.monitor(pid)
+      task_reads_exit!()
+
+      assert :ok = Worker.stop(task_id, :normal)
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}
+    end
+  end
 end

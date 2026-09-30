@@ -2,6 +2,7 @@ defmodule Arbiter.EventsTest do
   use Arbiter.DataCase, async: true
 
   alias Arbiter.Events
+  alias Arbiter.Events.Record
   alias Arbiter.Tasks.Workspace
 
   setup do
@@ -90,18 +91,34 @@ defmodule Arbiter.EventsTest do
       assert Enum.map(replayed, & &1["task_id"]) == ["bd-ts"]
     end
 
+    # The rows are what replay reads, so they are seeded in bulk rather than
+    # through limit + 1 `broadcast/3` calls (bd-jw7cb0): one by one, under the
+    # async suite, those held the single `pool_size: 1` sandbox connection for
+    # 10s+ — long enough for DBConnection's queue to shed whichever async
+    # test's checkout was queued behind it (`:queue_timeout`).
     test "truncates at replay_limit/0 and reports truncated?: true", %{ws: ws} do
       limit = Events.replay_limit()
+      now = DateTime.utc_now()
 
-      for i <- 1..(limit + 1) do
-        Events.broadcast(ws.id, "worker_done", %{task_id: "bd-#{i}"})
-      end
+      %Ash.BulkResult{status: :success} =
+        1..(limit + 1)
+        |> Enum.map(fn i ->
+          %{
+            workspace_id: ws.id,
+            topic: "worker_done",
+            payload: %{topic: "worker_done", task_id: "bd-#{i}", at: DateTime.to_iso8601(now)},
+            occurred_at: now
+          }
+        end)
+        |> Ash.bulk_create(Record, :create, return_errors?: true, stop_on_error?: true)
 
       %{events: replayed, truncated?: truncated?} =
         Events.replay(ws.id, ["worker_done"], {:cursor, 0})
 
       assert length(replayed) == limit
       assert truncated? == true
+      assert List.first(replayed)["task_id"] == "bd-1"
+      assert List.last(replayed)["task_id"] == "bd-#{limit}"
     end
   end
 

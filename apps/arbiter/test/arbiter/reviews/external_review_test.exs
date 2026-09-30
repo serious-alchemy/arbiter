@@ -201,6 +201,74 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
     end
   end
 
+  # bd-a1ke2c: cross-family review constrains the ReviewGate reviewer against
+  # the fleet implementer. A human-authored external PR has no fleet
+  # implementer, so `worker_review` of one must run exactly as before — the
+  # workspace's own reviewer, at once, with nothing pinned or recorded.
+  describe "review/1 — exempt from review_agent.cross_family (bd-a1ke2c)" do
+    setup do
+      System.put_env(@env_var, "test-token")
+      on_exit(fn -> System.delete_env(@env_var) end)
+      on_exit(fn -> :ets.delete_all_objects(:arbiter_provider_circuit_breakers) end)
+      :ok
+    end
+
+    test "an external PR review runs unchanged in a cross-family workspace" do
+      ws = github_ws("er-xfam")
+
+      config =
+        Map.put(ws.config, "review_agent", %{"type" => ["claude"], "cross_family" => true})
+
+      Ash.update!(ws, %{config: config})
+
+      # The only other family is unavailable: were the rule applied, this is a
+      # same-family fallback that would be recorded somewhere.
+      Arbiter.Agents.ProviderPool.mark_exhausted(:gemini)
+
+      Req.Test.stub(Arbiter.Mergers.Github.HTTP, fn conn ->
+        cond do
+          "application/vnd.github.v3.diff" in Plug.Conn.get_req_header(conn, "accept") ->
+            conn
+            |> Plug.Conn.put_resp_header("content-type", "text/plain")
+            |> Plug.Conn.resp(200, "diff --git a/x.ex b/x.ex\n+ok\n")
+
+          true ->
+            conn
+            |> Plug.Conn.put_resp_header("content-type", "application/json")
+            |> Plug.Conn.resp(200, Jason.encode!(%{"id" => 1}))
+        end
+      end)
+
+      test = self()
+
+      runner = fn _diff, _state ->
+        send(test, :reviewed)
+        {:ok, []}
+      end
+
+      assert {:ok, %{verdict: :approve}} =
+               ExternalReview.review(pr: "octo/widget#7", check_runner: runner, follow_up: true)
+
+      assert_received :reviewed
+
+      engagements =
+        Issue
+        |> Ash.Query.filter(workspace_id == ^ws.id)
+        |> Ash.read!()
+
+      assert engagements != []
+
+      for engagement <- engagements do
+        assert engagement.reviewer_family == nil
+        assert Arbiter.Agents.ReviewerRouting.implementer_family(engagement) == nil
+
+        assert Arbiter.ReviewGate.Round
+               |> Ash.Query.filter(task_id == ^engagement.id)
+               |> Ash.read!() == []
+      end
+    end
+  end
+
   describe "review/1 — scope: repo (bd-5xsp25)" do
     setup do
       System.put_env(@env_var, "test-token")

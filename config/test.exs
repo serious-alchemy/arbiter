@@ -296,8 +296,21 @@ config :arbiter, :credential_watchdog, enabled: false
 
 # The board's auto-dispatcher (bd-bqyeqa). Off and never ticking under test:
 # a test that resumes the scheduler is exercising the switch, not asking for a
-# real worker to be spawned fifteen seconds later.
-config :arbiter, :board_autopilot, enabled: false, interval_ms: :never
+# real worker to be spawned fifteen seconds later. `topics: []` is the other
+# half of "never": the reactive triggers plan on every "tasks" lifecycle
+# broadcast and worker_done/worker_failed event, so a resumed global autopilot
+# dispatched the board tests' own Ready fixtures and escalated the failures
+# from a connection whose sandbox owner had already exited (bd-jw7cb0). Tests
+# that exercise the triggers start their own instance with `:topics`.
+config :arbiter, :board_autopilot, enabled: false, interval_ms: :never, topics: []
+
+# `Estimate.sample/1`'s memo is one ETS table for the whole VM. A sandbox
+# rollback deletes a test's usage rows but not the sample cached from them, so
+# for up to 60s every later test (and every concurrent async one) read them:
+# the "empty ledger" calibration and issue-estimate tests failed whenever a
+# fixture-heavy test ran just before them (bd-jw7cb0). The cache's own test
+# turns it back on.
+config :arbiter, Arbiter.Usage.EstimateCache, enabled: false
 
 # Coordinator sessions (bd-bpt0ag). The session socket directory is derived
 # from `XDG_RUNTIME_DIR`, which is a real tmpfs on the dogfood host — point it

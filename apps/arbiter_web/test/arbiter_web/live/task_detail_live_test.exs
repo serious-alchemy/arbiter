@@ -2260,6 +2260,53 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       round
     end
 
+    test "names the reviewer and implementer families under cross-family review (bd-a1ke2c)",
+         %{conn: conn, task: task} do
+      round!(task, %{
+        round: 1,
+        verdict: :approve,
+        converged: true,
+        reviewer_provider: "gemini",
+        reviewer_family: "google",
+        implementer_family: "anthropic",
+        same_family_fallback: false
+      })
+
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
+
+      assert has_element?(view, "#review-family", "google")
+      assert has_element?(view, "#review-family", "anthropic")
+      refute has_element?(view, "#review-same-family-fallback")
+    end
+
+    test "a same-family fallback is flagged with its reason (bd-a1ke2c)",
+         %{conn: conn, task: task} do
+      round!(task, %{
+        round: 1,
+        verdict: :approve,
+        converged: true,
+        reviewer_provider: "claude",
+        reviewer_family: "anthropic",
+        implementer_family: "anthropic",
+        same_family_fallback: true,
+        same_family_fallback_reason:
+          "no other model family available: google (gemini: circuit_broken)"
+      })
+
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
+
+      assert has_element?(view, "#review-same-family-fallback", "circuit_broken")
+    end
+
+    test "shows no family line when cross-family review never ran", %{conn: conn, task: task} do
+      round!(task, %{round: 1, verdict: :approve, converged: true, reviewer_provider: "claude"})
+
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
+
+      assert has_element?(view, "#review-round-summary")
+      refute has_element?(view, "#review-family")
+    end
+
     test "renders round count and the latest round's verdict", %{conn: conn, task: task} do
       r1 = review_run(task, 1)
       r2 = review_run(task, 2)

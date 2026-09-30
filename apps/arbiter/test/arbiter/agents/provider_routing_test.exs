@@ -710,6 +710,32 @@ defmodule Arbiter.Agents.ProviderRoutingTest do
       assert fallback.decision["excluded_family"] == nil
     end
 
+    test "the task's pinned cross-family reviewer family is excluded first (bd-a1ke2c)", %{
+      ws: ws,
+      claude: claude,
+      codex: codex,
+      agy: agy
+    } do
+      task = task!(ws)
+      assert {:ok, _} = ProviderRouting.select(ws, task, :main, opts([{codex, codex_quota(5.0)}]))
+
+      task
+      |> Ash.Changeset.for_update(:pin_reviewer, %{reviewer_family: "anthropic"})
+      |> Ash.update!()
+
+      pairs = [
+        {codex, codex_quota(99.0)},
+        {claude, claude_quota(0.0)},
+        {agy, agy_quota(50.0, 0.0)}
+      ]
+
+      assert {:ok, fallback} =
+               ProviderRouting.select(ws, Ash.get!(Issue, task.id), :conflict, opts(pairs))
+
+      assert fallback.account.id == agy.id
+      assert fallback.decision["excluded_family"] == "anthropic"
+    end
+
     test "the reviewer's family is read off the task's latest review run", %{
       ws: ws,
       claude: claude,

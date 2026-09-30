@@ -23,6 +23,8 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
       `Arbiter.Agents.valid_agent_types/0` (`"claude"`, `"gemini"`, `"codex"`),
       OR a non-empty list of such strings (multi-provider pool).
     * If `"agent.config"` / `"review_agent.config"` is present, it must be a map.
+    * If `"review_agent.cross_family"` is present, it must be a boolean
+      (bd-a1ke2c).
     * If `"routing"` is present, it must be a map.
     * If `"routing.policy"` is present, it must be one of the values in
       `Arbiter.Agents.Routing.valid_policies/0` (`"static"`, `"by_priority"`,
@@ -82,6 +84,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     |> validate_merge(Map.get(config, "merge"))
     |> validate_agent_block("agent", Map.get(config, "agent"))
     |> validate_agent_block("review_agent", Map.get(config, "review_agent"))
+    |> validate_cross_family(Map.get(config, "review_agent"))
     |> validate_routing(Map.get(config, "routing"))
     |> validate_review_gate(Map.get(config, "review_gate"))
     |> validate_notes_gate(Map.get(config, "notes_gate"))
@@ -345,6 +348,17 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
 
   # bd-40pzpj: `most_quota` routes the implementer to the attached account
   # with the most quota headroom; `failover` (or unset) is today's behaviour.
+  # bd-a1ke2c: `review_agent.cross_family` is a plain on/off switch.
+  defp validate_cross_family(changeset, %{"cross_family" => value})
+       when not is_boolean(value) and not is_nil(value) do
+    Changeset.add_error(changeset,
+      field: :config,
+      message: "review_agent.cross_family must be true or false; got: #{inspect(value)}"
+    )
+  end
+
+  defp validate_cross_family(changeset, _review_agent), do: changeset
+
   defp validate_provider_selection(changeset, nil), do: changeset
 
   defp validate_provider_selection(changeset, selection) do

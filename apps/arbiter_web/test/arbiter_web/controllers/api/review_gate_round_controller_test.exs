@@ -19,6 +19,29 @@ defmodule ArbiterWeb.Api.ReviewGateRoundControllerTest do
   end
 
   describe "GET /api/review_gate_rounds" do
+    test "carries the cross-family audit fields (bd-a1ke2c)", %{conn: conn} do
+      task_id = "bd-rest-xfam-#{System.unique_integer([:positive])}"
+
+      insert_round!(%{
+        task_id: task_id,
+        round: 1,
+        verdict: :approve,
+        reviewer_provider: "gemini",
+        reviewer_family: "google",
+        implementer_family: "anthropic",
+        same_family_fallback: false,
+        converged: true
+      })
+
+      conn = get(conn, ~p"/api/review_gate_rounds", %{task_id: task_id})
+      {:ok, %{"data" => [r]}} = Jason.decode(conn.resp_body)
+
+      assert r["reviewer_family"] == "google"
+      assert r["implementer_family"] == "anthropic"
+      assert r["same_family_fallback"] == false
+      assert r["same_family_fallback_reason"] == nil
+    end
+
     test "returns rounds for a task, oldest-first", %{conn: conn} do
       task_id = "bd-rest-flow-#{System.unique_integer([:positive])}"
 
