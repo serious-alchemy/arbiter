@@ -64,6 +64,7 @@ defmodule Arbiter.Workflows.ReviewReply do
   alias Arbiter.Agents.Claude.Config, as: ClaudeConfig
   alias Arbiter.Mergers
   alias Arbiter.Worker.ReleaseEnv
+  alias Arbiter.Worker.SpawnEnv
 
   require Logger
 
@@ -288,7 +289,7 @@ defmodule Arbiter.Workflows.ReviewReply do
   # inherit the release's ROOTDIR/BINDIR/RELEASE_*.
   # sobelow_skip ["CI.System"]
   defp run_claude([cmd | args] = argv) do
-    case ReleaseEnv.cmd(cmd, args) do
+    case ReleaseEnv.cmd(cmd, args, env: SpawnEnv.cmd_env([], "claude")) do
       {output, 0} -> {:ok, output}
       {output, code} -> {:error, {:claude_failed, code, String.trim(output)}}
     end

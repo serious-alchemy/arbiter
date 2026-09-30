@@ -229,7 +229,8 @@ defmodule Arbiter.Worker.ClaudeSession do
 
       # One workspace load serves both halves (bd-62d3jh): the pairs go into the
       # child's env, the secret values into the session's redaction list.
-      {worker_env, redact_values} = Arbiter.Worker.WorkerEnv.resolve(task_id)
+      {worker_env, redact_values} =
+        Arbiter.Worker.WorkerEnv.resolve(task_id, provider: Keyword.get(opts, :provider))
 
       # bd-2zigo1: the install-wide CLAUDE_CODE_OAUTH_TOKEN (and any
       # ANTHROPIC_API_KEY) travel in via the caller-explicit `:env` opt
@@ -1833,15 +1834,22 @@ defmodule Arbiter.Worker.ClaudeSession do
       end
 
     dev_server_clean = Arbiter.Worker.DevServerEnv.pairs(task_id)
+    provider = Keyword.get(opts, :provider)
 
+    # bd-7r0qrj: the child starts from an EMPTY environment — `SpawnEnv` unsets
+    # every inherited var that is not on its allowlist (so the server's
+    # ARBITER_CLOAK_KEY / SECRET_KEY_BASE / DATABASE_PATH / SSH_AUTH_SOCK never
+    # reach it) and drops any other provider's credential from these pairs.
+    # Release cleanup (bd-4hkzn3) is folded into `SpawnEnv.port_env/2`.
     case task_id do
       id when is_binary(id) and id != "" ->
-        Arbiter.Worker.ReleaseEnv.port_env(
-          dev_server_clean ++ worker_env ++ base ++ [{"ARB_WORKER_BEAD_ID", id}]
+        Arbiter.Worker.SpawnEnv.port_env(
+          dev_server_clean ++ worker_env ++ base ++ [{"ARB_WORKER_BEAD_ID", id}],
+          provider
         )
 
       _ ->
-        Arbiter.Worker.ReleaseEnv.port_env(base)
+        Arbiter.Worker.SpawnEnv.port_env(base, provider)
     end
   end
 end

@@ -77,6 +77,7 @@ defmodule ArbiterWeb.ProvidersLive do
       |> assign(:attach_form, nil)
       |> assign(:attach_error, nil)
       |> assign(:rows, [])
+      |> assign(:pauses, %{})
       |> assign(:workspace_options, [])
       |> assign(:providers_loaded?, false)
       |> assign(:providers_loading?, false)
@@ -93,6 +94,7 @@ defmodule ArbiterWeb.ProvidersLive do
   def handle_async(:providers, {:ok, data}, socket) do
     socket
     |> assign(:rows, data.rows)
+    |> assign(:pauses, data.pauses)
     |> assign(:workspace_options, data.workspace_options)
     |> assign(:providers_loaded?, true)
     |> assign(:providers_error, nil)
@@ -252,6 +254,37 @@ defmodule ArbiterWeb.ProvidersLive do
     end
   end
 
+  # bd-5ef587: pause / resume a provider or one account. A pause is dropped
+  # from every routing decision; running workers are left alone here (the
+  # `--stop-running` lever is CLI / MCP only).
+  def handle_event("pause_provider", %{"ref" => ref} = params, socket) do
+    reason =
+      case params |> Map.get("reason", "") |> String.trim() do
+        "" -> nil
+        text -> text
+      end
+
+    case Arbiter.Providers.Pause.pause(ref, reason: reason, by: "dashboard") do
+      {:ok, _} ->
+        {:noreply, socket |> put_flash(:info, "Paused #{ref}.") |> fetch_providers()}
+
+      {:error, error} ->
+        {:noreply,
+         socket |> put_flash(:error, "Could not pause: #{inspect(error)}") |> fetch_providers()}
+    end
+  end
+
+  def handle_event("resume_provider", %{"ref" => ref}, socket) do
+    case Arbiter.Providers.Pause.resume(ref, by: "dashboard") do
+      {:ok, _} ->
+        {:noreply, socket |> put_flash(:info, "Resumed #{ref}.") |> fetch_providers()}
+
+      {:error, error} ->
+        {:noreply,
+         socket |> put_flash(:error, "Could not resume: #{inspect(error)}") |> fetch_providers()}
+    end
+  end
+
   def handle_event("retry_providers", _params, socket),
     do: {:noreply, socket |> assign(:providers_error, nil) |> fetch_providers()}
 
@@ -275,6 +308,13 @@ defmodule ArbiterWeb.ProvidersLive do
     {:noreply, if(socket.assigns.providers_stale?, do: fetch_providers(socket), else: socket)}
   end
 
+  # The pause that applies to an account: its own, else its provider's.
+  defp account_pause(pauses, account),
+    do: Map.get(pauses, "account:#{account.id}") || Map.get(pauses, to_string(account.provider))
+
+  defp pause_at(%{at: %DateTime{} = at}), do: ", " <> Calendar.strftime(at, "%Y-%m-%d %H:%M UTC")
+  defp pause_at(_), do: ""
+
   defp load_error({%{__exception__: true} = error, _stacktrace}), do: Exception.message(error)
   defp load_error(reason), do: Exception.format_exit(reason)
 
@@ -286,6 +326,7 @@ defmodule ArbiterWeb.ProvidersLive do
   defp load_providers do
     %{
       rows: Overview.list([]),
+      pauses: Map.new(Arbiter.Providers.Pause.list(), &{&1.target, &1}),
       workspace_options: Overview.workspace_options()
     }
   end
@@ -540,6 +581,50 @@ defmodule ArbiterWeb.ProvidersLive do
           </div>
 
           <div
+            :if={@providers_loaded?}
+            id="provider-pauses"
+            class="flex flex-wrap items-start gap-3 px-3 py-2.5 rounded-[var(--radius-field)] border border-solid border-[var(--border-default)] bg-[var(--surface-chrome)]"
+          >
+            <div
+              :if={@pauses != %{}}
+              id="provider-pause-banner"
+              role="status"
+              class="basis-full text-[12px] text-[var(--arb-fail-text)]"
+            >
+              <span class="font-medium">Paused — dropped from all routing:</span>
+              <span :for={{target, p} <- Enum.sort(@pauses)} id={"pause-entry-#{target}"} class="ml-2">
+                {Arbiter.Providers.Pause.label(target)} — {p.reason || "no reason given"} (by {p.by ||
+                  "unknown"}{pause_at(p)})
+              </span>
+            </div>
+            <form
+              :for={provider <- ["claude", "codex", "antigravity"]}
+              id={"pause-provider-#{provider}"}
+              phx-submit={
+                if Map.has_key?(@pauses, provider), do: "resume_provider", else: "pause_provider"
+              }
+              class="flex items-center gap-1.5 text-[12px]"
+            >
+              <input type="hidden" name="ref" value={provider} />
+              <span class="font-[family-name:var(--font-mono)]">{provider}</span>
+              <input
+                :if={not Map.has_key?(@pauses, provider)}
+                type="text"
+                name="reason"
+                placeholder="reason"
+                class="h-[22px] px-1.5 text-[11px] rounded-[var(--radius-field)] border border-solid border-[var(--border-default)] bg-[var(--surface-panel)]"
+              />
+              <button
+                type="submit"
+                id={"pause-toggle-#{provider}"}
+                class="text-[11px] px-2 py-0.5 rounded-[var(--radius-chip)] border border-[var(--border-default)] text-[var(--arb-text-muted)] hover:text-[var(--text-title)] cursor-pointer"
+              >
+                {if Map.has_key?(@pauses, provider), do: "Resume", else: "Pause"}
+              </button>
+            </form>
+          </div>
+
+          <div
             :if={not @providers_loaded? and is_nil(@providers_error)}
             id="providers-loading"
             aria-label="Loading provider accounts"
@@ -645,6 +730,14 @@ defmodule ArbiterWeb.ProvidersLive do
                   parked
                 </span>
                 <span
+                  :if={pause = account_pause(@pauses, row.account)}
+                  id={"account-#{row.account.id}-paused"}
+                  title={pause.reason}
+                  class="text-[11px] px-2 py-0.5 rounded-[var(--radius-chip)] border border-[var(--arb-fail-edge)] text-[var(--arb-fail-text)]"
+                >
+                  paused
+                </span>
+                <span
                   id={"account-#{row.account.id}-health"}
                   data-health={row.health.state}
                   title={health_title(row.account)}
@@ -655,6 +748,38 @@ defmodule ArbiterWeb.ProvidersLive do
                 >
                   {health_label(row.health)}
                 </span>
+                <form
+                  :if={not Map.has_key?(@pauses, "account:#{row.account.id}")}
+                  id={"pause-account-form-#{row.account.id}"}
+                  phx-submit="pause_provider"
+                  class="flex items-center gap-1"
+                >
+                  <input type="hidden" name="ref" value={row.account.id} />
+                  <input
+                    id={"pause-account-reason-#{row.account.id}"}
+                    type="text"
+                    name="reason"
+                    placeholder="Reason"
+                    class="text-[11px] px-2 py-0.5 w-28 rounded-[var(--radius-chip)] border border-[var(--border-default)] bg-transparent"
+                  />
+                  <button
+                    id={"pause-account-#{row.account.id}"}
+                    type="submit"
+                    class="text-[11px] px-2 py-0.5 rounded-[var(--radius-chip)] border border-[var(--border-default)] text-[var(--arb-text-muted)] hover:text-[var(--text-title)]"
+                  >
+                    Pause
+                  </button>
+                </form>
+                <button
+                  :if={Map.has_key?(@pauses, "account:#{row.account.id}")}
+                  id={"resume-account-#{row.account.id}"}
+                  type="button"
+                  phx-click="resume_provider"
+                  phx-value-ref={row.account.id}
+                  class="text-[11px] px-2 py-0.5 rounded-[var(--radius-chip)] border border-[var(--border-default)] text-[var(--arb-text-muted)] hover:text-[var(--text-title)]"
+                >
+                  Resume
+                </button>
                 <button
                   id={"delete-account-#{row.account.id}"}
                   type="button"

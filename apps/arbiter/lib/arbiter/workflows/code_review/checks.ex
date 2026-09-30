@@ -68,6 +68,7 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
   alias Arbiter.Agents.Claude.ConfigDir
   alias Arbiter.Agents.Claude.Security
   alias Arbiter.Worker.ReleaseEnv
+  alias Arbiter.Worker.SpawnEnv
   alias Arbiter.Workflows.ReviewPatrol.ThreadMemory
 
   require Logger
@@ -331,7 +332,11 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
   # bd-2oelme: the release-var cleanup used to be hand-rolled here; it now
   # comes from `ReleaseEnv.cmd/3`, the single shared helper every BEAM/agent
   # spawn routes through, so this site can't drift from the others.
-  defp build_invoke_env(workspace), do: ConfigDir.env(workspace)
+  #
+  # bd-7r0qrj: allowlisted — the reviewer CLI must not inherit the server's
+  # secrets or another provider's credential.
+  defp build_invoke_env(workspace),
+    do: SpawnEnv.cmd_env(ConfigDir.env(workspace), "claude")
 
   # POSIX single-quote escaping: wraps s in single quotes and escapes any
   # embedded single quote as '\''. Safe for arbitrary printable characters.

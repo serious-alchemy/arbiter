@@ -53,7 +53,8 @@ defmodule Arbiter.Settings.Installation do
     :credential_watchdog_recovery_interval_ms,
     :board_autopilot_paused,
     :board_autopilot_paused_at,
-    :board_autopilot_paused_by
+    :board_autopilot_paused_by,
+    :provider_pauses
   ]
 
   actions do
@@ -124,6 +125,13 @@ defmodule Arbiter.Settings.Installation do
       allow_nil? true
 
       description ~s[Who/what last changed board_autopilot_paused, where known (e.g. "mcp", "api", "dashboard").]
+    end
+
+    attribute :provider_pauses, :map do
+      public? true
+      allow_nil? true
+
+      description ~s[Provider / account pauses (bd-5ef587): %{target => %{"reason", "by", "at"}}, target being a provider code ("claude") or "account:<id>". nil = nothing paused.]
     end
 
     create_timestamp :created_at

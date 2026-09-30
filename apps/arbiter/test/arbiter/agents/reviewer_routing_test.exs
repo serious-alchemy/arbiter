@@ -276,6 +276,47 @@ defmodule Arbiter.Agents.ReviewerRoutingTest do
 
   # ---- AC3: most quota left, the family's reviewer tier ----------------------
 
+  describe "paused providers (bd-5ef587)" do
+    test "a paused account is dropped with reason paused, and the pass re-routes" do
+      ws = workspace!(["gemini", "codex"])
+      gemini = account!(:antigravity, "g")
+      codex = account!(:codex, "c")
+      allow_reviewer!(ws, gemini, 0)
+      allow_reviewer!(ws, codex, 1)
+      {:ok, _} = Arbiter.Providers.Pause.pause(gemini.id, reason: "jail escape", by: "test")
+
+      assert {:ok, sel} =
+               ReviewerRouting.select(
+                 ws,
+                 task!(ws, "anthropic"),
+                 opts([{gemini, agy_quota(0.0)}, {codex, codex_quota(50.0)}])
+               )
+
+      assert sel.provider == :codex
+      refute sel.same_family_fallback
+      assert Enum.any?(sel.record["dropped"], &(&1["reason"] == "paused"))
+    end
+
+    test "paused counts like quota_held: the only other family paused → recorded same-family fallback" do
+      ws = workspace!(["claude", "codex"])
+      claude = account!(:claude, "a")
+      codex = account!(:codex, "c")
+      allow_reviewer!(ws, claude, 0)
+      allow_reviewer!(ws, codex, 1)
+      {:ok, _} = Arbiter.Providers.Pause.pause("codex", reason: "x", by: "test")
+
+      assert {:ok, sel} =
+               ReviewerRouting.select(
+                 ws,
+                 task!(ws, "anthropic"),
+                 opts([{claude, claude_quota(0.0)}, {codex, codex_quota(0.0)}])
+               )
+
+      assert sel.same_family_fallback
+      assert sel.fallback_reason =~ "paused"
+    end
+  end
+
   describe "among eligible families, the most quota left wins (AC3)" do
     setup do
       ws = workspace!(["gemini", "codex", "claude"])

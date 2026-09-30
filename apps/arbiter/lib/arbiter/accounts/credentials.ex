@@ -52,15 +52,27 @@ defmodule Arbiter.Accounts.Credentials do
   absence is fatal.
   """
   @spec workspace_pairs(String.t() | nil) :: [pair()]
-  def workspace_pairs(workspace_id) when is_binary(workspace_id) and workspace_id != "" do
+  def workspace_pairs(workspace_id), do: workspace_pairs(workspace_id, :all)
+
+  @doc """
+  `workspace_pairs/1` restricted to the accounts of one provider
+  (`:claude | :codex | :antigravity`) — the source-side half of "a worker
+  receives only its own provider's credential" (bd-7r0qrj). It filters on the
+  owning `ProviderAccount.provider`, not on the credential's free-form
+  `env_var`, so a credential stored under any name still stays with its own
+  provider's workers. `:all` is the unrestricted form.
+  """
+  @spec workspace_pairs(String.t() | nil, atom()) :: [pair()]
+  def workspace_pairs(workspace_id, provider)
+      when is_binary(workspace_id) and workspace_id != "" do
     workspace_id
-    |> account_ids()
+    |> account_ids(provider)
     |> active_credentials()
     |> Enum.reject(&quota_grant?/1)
     |> Enum.flat_map(&pair/1)
   end
 
-  def workspace_pairs(_), do: []
+  def workspace_pairs(_, _provider), do: []
 
   @doc """
   The workspace's active credential for `env_var` (e.g.
@@ -275,22 +287,28 @@ defmodule Arbiter.Accounts.Credentials do
   # `Arbiter.Tasks.Workspace` has a `uuid_v7_primary_key`. Answer "no
   # accounts" without asking the data layer, which would reject the value and
   # bury a one-line miss in a page of Ash filter error.
-  defp account_ids(ws_id) when is_binary(ws_id) do
+  defp account_ids(ws_id, provider) when is_binary(ws_id) do
     case Ash.Type.UUID.cast_input(ws_id, []) do
-      {:ok, _uuid} -> read_account_ids(ws_id)
+      {:ok, _uuid} -> read_account_ids(ws_id, provider)
       _ -> []
     end
   end
 
-  defp read_account_ids(ws_id) do
+  defp read_account_ids(ws_id, provider) do
     WorkspaceProviderAccount
     |> Ash.Query.filter(workspace_id == ^ws_id)
     |> Ash.Query.load(:provider_account)
     |> Ash.read()
     |> case do
       {:ok, links} ->
-        for %WorkspaceProviderAccount{provider_account: %ProviderAccount{enabled: true, id: id}} <-
-              links,
+        for %WorkspaceProviderAccount{
+              provider_account: %ProviderAccount{
+                enabled: true,
+                id: id,
+                provider: account_provider
+              }
+            } <- links,
+            provider in [:all, account_provider],
             do: id
 
       {:error, error} ->

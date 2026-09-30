@@ -512,4 +512,46 @@ defmodule ArbiterWeb.ProvidersLiveTest do
       assert html =~ account.id
     end
   end
+
+  describe "pause controls (bd-5ef587)" do
+    test "an account can be paused and resumed from the page", %{conn: conn} do
+      account = account!(:claude, "pause-me")
+      {:ok, view, _html} = live_providers(conn)
+
+      refute has_element?(view, "#account-#{account.id}-paused")
+
+      view
+      |> form("#pause-account-form-#{account.id}", %{"reason" => "  "})
+      |> render_submit()
+
+      render_async(view, @async_timeout)
+
+      assert %{reason: nil} = Arbiter.Providers.Pause.for_account(account)
+      assert has_element?(view, "#account-#{account.id}-paused")
+      assert has_element?(view, "#provider-pause-banner")
+
+      view |> element("#resume-account-#{account.id}") |> render_click()
+      render_async(view, @async_timeout)
+
+      assert Arbiter.Providers.Pause.for_account(account) == nil
+      refute has_element?(view, "#account-#{account.id}-paused")
+    end
+
+    test "a provider pause with a reason marks its accounts paused", %{conn: conn} do
+      account = account!(:codex, "cx-pause")
+      {:ok, view, _html} = live_providers(conn)
+
+      view
+      |> form("#pause-provider-codex", %{"reason" => "jail escape"})
+      |> render_submit()
+
+      render_async(view, @async_timeout)
+
+      assert %{reason: "jail escape", by: "dashboard"} =
+               Arbiter.Providers.Pause.for_account(account)
+
+      assert has_element?(view, "#account-#{account.id}-paused")
+      assert has_element?(view, "#pause-toggle-codex", "Resume")
+    end
+  end
 end

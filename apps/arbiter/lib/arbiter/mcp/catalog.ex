@@ -83,6 +83,8 @@ defmodule Arbiter.MCP.Catalog do
   | `scheduler_pause` | coordinator | `Arbiter.Board.Autopilot.pause/2` (persisted, bd-pgi97m) |
   | `scheduler_resume` | coordinator | `Arbiter.Board.Autopilot.resume/2` (persisted, bd-pgi97m) |
   | `scheduler_status` | coordinator | `Arbiter.Board.Drain.status/1` |
+  | `provider_pause` | coordinator | `Arbiter.Providers.Pause.pause/2` (persisted, bd-5ef587) |
+  | `provider_resume` | coordinator | `Arbiter.Providers.Pause.resume/2` |
   | `alert_list` | coordinator | `Arbiter.Alerts.active/1` (system alerts, bd-7gt8rm) |
   | `breaker_list` | coordinator | `Arbiter.CircuitBreaker.list/1` + `call_sites/0` |
   | `breaker_reset` | coordinator | `Arbiter.CircuitBreaker.reset/1` / `reset_all/1` |
@@ -2261,6 +2263,55 @@ defmodule Arbiter.MCP.Catalog do
           "server restart. Coordinator only.",
       input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
       handler: &Tools.scheduler_status/2
+    },
+
+    # ---- provider pause/resume (bd-5ef587) ---------------------------------
+    %{
+      name: "provider_pause",
+      tiers: @coordinator,
+      description:
+        "Pause a provider (claude, codex, antigravity) or one provider account (id, " <>
+          "`provider:slug` or slug): it is dropped from every routing decision — " <>
+          "implementer, reviewer, failover, resume, fix and conflict passes — with reason " <>
+          "`paused`, and held dispatches say `held — <provider> paused: <reason>`. Running " <>
+          "workers keep running unless `stop_running` is true. Persisted. Coordinator only.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "ref" => %{
+            "type" => "string",
+            "description" => "Provider, account id, `provider:slug` or slug."
+          },
+          "reason" => %{
+            "type" => "string",
+            "description" => "Why — shown on the board and in holds."
+          },
+          "stop_running" => %{
+            "type" => "boolean",
+            "description" => "Also stop workers running on it."
+          }
+        },
+        "required" => ["ref"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.provider_pause/2
+    },
+    %{
+      name: "provider_resume",
+      tiers: @coordinator,
+      description: "Resume a paused provider or provider account. Coordinator only.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "ref" => %{
+            "type" => "string",
+            "description" => "Provider, account id, `provider:slug` or slug."
+          }
+        },
+        "required" => ["ref"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.provider_resume/2
     },
 
     # ---- system alerts (bd-7gt8rm) -------------------------------------------

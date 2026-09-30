@@ -1310,6 +1310,43 @@ defmodule Arbiter.MCP.Tools do
     Arbiter.Board.Drain.status() |> Arbiter.Board.Drain.to_json()
   end
 
+  # ---- provider pause/resume (bd-5ef587) ---------------------------------
+
+  @doc """
+  Pause a provider or one provider account (`ref`: `claude`, `codex`,
+  `antigravity`, an account id, `provider:slug` or a bare slug): it is dropped
+  from every routing decision with reason `paused`. Running workers keep
+  running unless `stop_running` is true. Persisted. Coordinator only.
+  """
+  @spec provider_pause(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def provider_pause(%Scope{} = _scope, args) do
+    with {:ok, ref} <- require_string(args, "ref"),
+         {:ok, entry} <-
+           Arbiter.Providers.Pause.pause(ref, reason: fetch_string(args, "reason"), by: "mcp") do
+      stopped =
+        if args["stop_running"] == true, do: Arbiter.Providers.Pause.stop_running(ref), else: []
+
+      Logger.info("[provider_pause] #{entry.target} paused")
+      {:ok, %{paused: Arbiter.Providers.Pause.to_json(), stopped: stopped}}
+    else
+      {:error, {_, _} = err} -> {:error, err}
+      {:error, reason} -> {:error, {:invalid, "pause failed: #{inspect(reason)}"}}
+    end
+  end
+
+  @doc "Resume a paused provider or account. Coordinator only."
+  @spec provider_resume(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def provider_resume(%Scope{} = _scope, args) do
+    with {:ok, ref} <- require_string(args, "ref"),
+         {:ok, entry} <- Arbiter.Providers.Pause.resume(ref, by: "mcp") do
+      Logger.info("[provider_resume] #{entry.target} resumed")
+      {:ok, %{paused: Arbiter.Providers.Pause.to_json()}}
+    else
+      {:error, {_, _} = err} -> {:error, err}
+      {:error, reason} -> {:error, {:invalid, "resume failed: #{inspect(reason)}"}}
+    end
+  end
+
   # ---- shared resolution / fetch -----------------------------------------
 
   # Resolve + authorize the target task id for this scope from the named arg

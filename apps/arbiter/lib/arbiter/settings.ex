@@ -176,6 +176,18 @@ defmodule Arbiter.Settings do
     end
   end
 
+  @doc """
+  The persisted provider / account pauses (`Arbiter.Providers.Pause`), as
+  `%{target => %{"reason", "by", "at"}}`. Never raises — any read failure is
+  treated as "nothing paused".
+  """
+  @spec provider_pauses() :: %{optional(String.t()) => map()}
+  def provider_pauses, do: read_setting(:provider_pauses) || %{}
+
+  @doc "Replace the persisted provider / account pause map."
+  @spec set_provider_pauses(map()) :: {:ok, map()} | {:error, term()}
+  def set_provider_pauses(map) when is_map(map), do: write_setting(:provider_pauses, map)
+
   # ---- singleton plumbing --------------------------------------------------
 
   # Reads never raise: a missing table (not-yet-migrated install) or any other

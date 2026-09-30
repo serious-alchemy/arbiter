@@ -6,9 +6,11 @@ defmodule Arbiter.Worker.DevServerEnv do
   collides with the live coordinator-facing `arbiter.service` instance
   (bd-bzsqbu, bd-b49kqb).
 
-  Every worker `Port.open` inherits the coordinator's own OS environment
-  verbatim, including whatever `DATABASE_PATH`/`PORT` it was started with —
-  there is no isolation today without this override. Without it, a
+  Worker children no longer inherit the coordinator's OS environment
+  (`Arbiter.Worker.SpawnEnv` allowlists it, bd-7r0qrj), so the live
+  `DATABASE_PATH`/`PORT` never reach them; these pairs are the only values a
+  worker's dev server sees. Historically (bd-bzsqbu) every worker inherited
+  them verbatim, and without an override a
   worker-started dev server silently points at the live, shared database
   AND binds the coordinator's own HTTP port (`config/dev.exs` reads `PORT`,
   defaulting to 4848 — the same port `arbiter.service` uses). A worker

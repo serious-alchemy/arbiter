@@ -72,6 +72,7 @@ defmodule Arbiter.Quota.CloudCode do
 
   alias Arbiter.Quota.GoogleQuota
   alias Arbiter.Worker.ReleaseEnv
+  alias Arbiter.Worker.SpawnEnv
 
   # Normalized base — the provider only hands us a fraction, not raw units, so
   # we mirror 9router's arbitrary 1000-unit base for used/total. Percentage is
@@ -615,12 +616,16 @@ defmodule Arbiter.Quota.CloudCode do
     task =
       Task.async(fn ->
         try do
-          ReleaseEnv.cmd("/bin/sh", [
-            "-c",
-            ~s(exec timeout -k 1 #{timeout_s} "$0" #{Enum.join(@agy_usage_args, " ")} >"$1" 2>/dev/null </dev/null),
-            path,
-            tmp
-          ])
+          ReleaseEnv.cmd(
+            "/bin/sh",
+            [
+              "-c",
+              ~s(exec timeout -k 1 #{timeout_s} "$0" #{Enum.join(@agy_usage_args, " ")} >"$1" 2>/dev/null </dev/null),
+              path,
+              tmp
+            ],
+            env: SpawnEnv.cmd_env([], "gemini")
+          )
         rescue
           _ -> {"", 1}
         catch

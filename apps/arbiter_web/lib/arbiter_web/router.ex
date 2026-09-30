@@ -187,6 +187,11 @@ defmodule ArbiterWeb.Router do
     put("/skills/:id", SkillController, :update)
     delete("/skills/:id", SkillController, :delete)
 
+    # Provider / account pause (bd-5ef587) — backs `arb provider pause|resume|list`.
+    get("/providers/paused", ProviderPauseController, :index)
+    post("/providers/pause", ProviderPauseController, :pause)
+    post("/providers/resume", ProviderPauseController, :resume)
+
     # Provider accounts (P11, `docs/provider-account-design.md` §2.5) —
     # backs `arb account list|show|create|attach|rotate|merge|delete`.
     get("/accounts", AccountController, :index)

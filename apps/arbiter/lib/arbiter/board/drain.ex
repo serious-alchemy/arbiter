@@ -256,7 +256,8 @@ defmodule Arbiter.Board.Drain do
       in_flight: Enum.map(status.in_flight, &entry_json/1),
       slots_used: Map.get(status, :slots_used, 0),
       slot_holders: Map.get(status, :slot_holders, []),
-      checked_at: status.checked_at
+      checked_at: status.checked_at,
+      paused_providers: Arbiter.Providers.Pause.to_json()
     }
   end
 

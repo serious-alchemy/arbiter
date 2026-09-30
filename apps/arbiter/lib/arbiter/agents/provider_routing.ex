@@ -49,6 +49,8 @@ defmodule Arbiter.Agents.ProviderRouting do
     * `write_confinement_none` — the scope is `:strict` and the adapter's
       `write_confinement/1` (bd-1abj7u) is `:none`. An adapter that does not
       implement the callback answers `:none`;
+    * `paused` — the account or its provider is paused (`Arbiter.Providers.Pause`,
+      `arb provider pause`), with the operator's reason as the detail;
     * `quota_held` — the workspace's `Arbiter.Quota.Gate` would hold a
       dispatch on this account's snapshot (account ∧ workspace policy, paced
       included) for the model it would run.
@@ -516,6 +518,25 @@ defmodule Arbiter.Agents.ProviderRouting do
     })
   end
 
+  @doc """
+  Refuse to start a pass on a paused provider/account (bd-5ef587). The legacy
+  resolvers hand back the paused original when nothing else is available, so
+  every direct `Worker.start` caller checks the resolved provider here.
+  """
+  @spec ensure_unpaused(atom(), String.t() | nil) ::
+          :ok | {:error, {:provider_paused, atom(), String.t()}}
+  def ensure_unpaused(provider, ws_id) do
+    case Arbiter.Providers.Pause.blocking(provider, ws_id) do
+      nil ->
+        :ok
+
+      pause ->
+        {:error,
+         {:provider_paused, provider,
+          "held — #{provider} paused: #{pause.reason || "no reason given"}"}}
+    end
+  end
+
   # ---- legacy --------------------------------------------------------------
 
   defp legacy(task_id, workspace, opts) do
@@ -619,6 +640,20 @@ defmodule Arbiter.Agents.ProviderRouting do
   defp check_account(%{account: %ProviderAccount{merged_into_id: into}}, _ctx)
        when not is_nil(into),
        do: {:drop, "merged", "merged into #{into}"}
+
+  defp check_account(%{account: %ProviderAccount{} = account} = entry, _ctx) do
+    case Arbiter.Providers.Pause.for_account(account) do
+      nil -> {:ok, entry}
+      pause -> {:drop, "paused", pause.reason || "paused by #{pause.by || "the operator"}"}
+    end
+  end
+
+  defp check_account(%{account: nil, agent_type: type} = entry, _ctx) do
+    case Arbiter.Providers.Pause.for_provider(type) do
+      nil -> {:ok, entry}
+      pause -> {:drop, "paused", pause.reason}
+    end
+  end
 
   defp check_account(entry, _ctx), do: {:ok, entry}
 

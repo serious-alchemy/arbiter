@@ -73,6 +73,7 @@ defmodule Arbiter.Quota.GrantRefresher do
   alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Quota.GrantFile
   alias Arbiter.Worker.ReleaseEnv
+  alias Arbiter.Worker.SpawnEnv
 
   @default_interval_ms 60_000
   @default_refresh_window_ms 4 * 60_000
@@ -93,11 +94,6 @@ defmodule Arbiter.Quota.GrantRefresher do
     "--tools",
     ""
   ]
-
-  # Anything that would make the CLI authenticate some other way than the
-  # grant file in `CLAUDE_CONFIG_DIR` — and so skip refreshing it.
-  @stripped_env ~w(CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
-                   ANTHROPIC_BASE_URL CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX)
 
   @agent_instruction_files ~w(.git CLAUDE.md AGENTS.md)
 
@@ -349,9 +345,11 @@ defmodule Arbiter.Quota.GrantRefresher do
       exe ->
         timeout_s = max(1, ceil(state.cli_timeout_ms / 1000))
 
-        env =
-          [{"CLAUDE_CONFIG_DIR", GrantFile.config_dir(path)}] ++
-            Enum.map(@stripped_env, &{&1, nil})
+        # bd-7r0qrj: anything that would make the CLI authenticate some other
+        # way than the grant file in `CLAUDE_CONFIG_DIR` (an inherited
+        # CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_* / Bedrock / Vertex var) skips the
+        # refresh; the allowlist drops all of those, so only the dir is added.
+        env = SpawnEnv.cmd_env([{"CLAUDE_CONFIG_DIR", GrantFile.config_dir(path)}], "claude")
 
         task =
           Task.async(fn ->
