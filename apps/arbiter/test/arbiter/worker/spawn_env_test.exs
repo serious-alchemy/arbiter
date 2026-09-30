@@ -144,6 +144,18 @@ defmodule Arbiter.Worker.SpawnEnvTest do
       on_exit(fn -> File.rm(bus) end)
       System.put_env("DBUS_SESSION_BUS_ADDRESS", "unix:path=" <> bus)
 
+      # The keyring bus is only offered when a proxy binary exists too; CI has
+      # no xdg-dbus-proxy, so pin one rather than depend on the host.
+      old_proxy = Application.fetch_env(:arbiter, :xdg_dbus_proxy)
+      Application.put_env(:arbiter, :xdg_dbus_proxy, "/bin/sh")
+
+      on_exit(fn ->
+        case old_proxy do
+          {:ok, v} -> Application.put_env(:arbiter, :xdg_dbus_proxy, v)
+          :error -> Application.delete_env(:arbiter, :xdg_dbus_proxy)
+        end
+      end)
+
       agy = "gemini" |> then(&SpawnEnv.port_env([], &1)) |> child_env()
       assert agy["DBUS_SESSION_BUS_ADDRESS"] == "unix:path=" <> bus
 
