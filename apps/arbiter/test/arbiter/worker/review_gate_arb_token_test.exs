@@ -24,7 +24,13 @@ defmodule Arbiter.Worker.ReviewGateArbTokenTest do
     tmp = Path.join(System.tmp_dir!(), "rg_arb_token-#{System.unique_integer([:positive])}")
     repo = Path.join(tmp, "repo")
     File.mkdir_p!(repo)
-    on_exit(fn -> File.rm_rf!(tmp) end)
+    on_exit(fn ->
+      # Allow any child processes spawned by the worker to finish writing to tmp.
+      # The worker's on_exit above waits for the worker to terminate, but
+      # child processes may still be cleaning up or writing files.
+      # Retry with backoff to handle races with async writes.
+      retry_rm_rf(tmp)
+    end)
 
     {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", repo])
     {_, 0} = git(["config", "user.email", "repo@example.com"], repo)
@@ -80,7 +86,20 @@ defmodule Arbiter.Worker.ReviewGateArbTokenTest do
         }
       )
 
-    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+    on_exit(fn ->
+      # Monitor the worker and wait for it to terminate before exiting.
+      # This ensures child processes spawned by the worker (ReviewGate, Tasks, etc.)
+      # have fully stopped before tmp is removed by the setup's on_exit.
+      if Process.alive?(pid) do
+        ref = Process.monitor(pid)
+        GenServer.stop(pid, :normal)
+        receive do
+          {:DOWN, ^ref, :process, ^pid, _} -> :ok
+        after
+          5_000 -> :ok
+        end
+      end
+    end)
     :ok = Worker.advance(pid, :claude)
     send(pid, {:__claude_session_done__, "arb done"})
 
@@ -114,6 +133,20 @@ defmodule Arbiter.Worker.ReviewGateArbTokenTest do
       true ->
         Process.sleep(25)
         do_wait(fun, deadline)
+    end
+  end
+
+  defp retry_rm_rf(path, attempt \\ 1, max_attempts \\ 10) do
+    case File.rm_rf(path) do
+      {:ok, _} ->
+        :ok
+
+      _ ->
+        if attempt < max_attempts do
+          delay = min(attempt * 50, 500)
+          Process.sleep(delay)
+          retry_rm_rf(path, attempt + 1, max_attempts)
+        end
     end
   end
 end
