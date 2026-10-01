@@ -24,10 +24,21 @@ defmodule Arbiter.Settings do
   alias Arbiter.Settings.Installation
   alias Arbiter.Settings.SchedulerChange
 
+  @topic "installation_settings"
+
   resources do
     resource Installation
     resource SchedulerChange
   end
+
+  @doc """
+  The PubSub topic every persisted write announces itself on, as
+  `{:installation_settings_changed, field}`. A page that mirrors a setting (the
+  board's concurrency cap, `/settings`) subscribes so a change made anywhere —
+  the dashboard, REST, the CLI, MCP — shows without a manual refresh.
+  """
+  @spec topic() :: String.t()
+  def topic, do: @topic
 
   @doc """
   The install-wide worker concurrency ceiling override, or `nil` if unset
@@ -317,8 +328,15 @@ defmodule Arbiter.Settings do
   defp write_setting(field, value) do
     with {:ok, row} <- get_or_create_singleton(),
          {:ok, updated} <- Ash.update(row, %{field => value}, action: :update) do
+      announce(field)
       {:ok, Map.fetch!(updated, field)}
     end
+  end
+
+  defp announce(field) do
+    Phoenix.PubSub.broadcast(Arbiter.PubSub, @topic, {:installation_settings_changed, field})
+  rescue
+    _ -> :ok
   end
 
   defp singleton do

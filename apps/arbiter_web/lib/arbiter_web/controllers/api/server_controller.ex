@@ -71,21 +71,7 @@ defmodule ArbiterWeb.Api.ServerController do
     end
   end
 
-  def bind_address(conn, _params) do
-    ip =
-      :arbiter_web
-      |> Application.get_env(ArbiterWeb.Endpoint, [])
-      |> Keyword.get(:http, [])
-      |> Keyword.get(:ip)
-
-    json(conn, %{
-      ip: format_ip(ip),
-      loopback: ArbiterWeb.Loopback.loopback?(ip)
-    })
-  end
-
-  defp format_ip(nil), do: nil
-  defp format_ip(ip), do: ip |> :inet.ntoa() |> to_string()
+  def bind_address(conn, _params), do: json(conn, ArbiterWeb.InstallationSettings.bind_address())
 
   def agy_write_jail(conn, _params) do
     json(
