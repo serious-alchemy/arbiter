@@ -3056,11 +3056,13 @@ defmodule Arbiter.Worker.Dispatch do
     if Arbiter.MCP.inject_config?() do
       provider = resolve_mcp_provider(task, opts)
 
-      write_opts = [
-        mcp_url: Arbiter.MCP.server_url(),
-        scope_token: token,
-        server_name: Arbiter.MCP.server_name()
-      ]
+      write_opts =
+        [
+          mcp_url: Arbiter.MCP.server_url(),
+          scope_token: token,
+          server_name: Arbiter.MCP.server_name()
+        ]
+        |> maybe_add_codex_bearer_token_env_var(provider)
 
       result = Arbiter.MCP.AgentConfig.write(provider, worktree_path, write_opts)
       _ = surface_unsupported_mcp_config(task, provider, result)
@@ -3075,6 +3077,14 @@ defmodule Arbiter.Worker.Dispatch do
       Logger.warning("Arbiter.Worker.Dispatch: MCP config injection failed: #{inspect(e)}")
       :skipped
   end
+
+  # For Codex, default to env-var mode (bearer_token_env_var) to keep the token off disk.
+  # Callers must set this env var in the spawn's environment.
+  defp maybe_add_codex_bearer_token_env_var(write_opts, :codex) do
+    Keyword.put(write_opts, :bearer_token_env_var, "ARBITER_MCP_TOKEN")
+  end
+
+  defp maybe_add_codex_bearer_token_env_var(write_opts, _provider), do: write_opts
 
   @doc """
   Mint a worker scope token for `task`, write the provider's MCP config into

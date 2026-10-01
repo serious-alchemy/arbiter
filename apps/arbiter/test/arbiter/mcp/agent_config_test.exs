@@ -103,12 +103,14 @@ defmodule Arbiter.MCP.AgentConfigTest do
         )
 
       assert toml =~ "[mcp_servers.arbiter]"
-      assert toml =~ "[mcp_servers.arbiter.http_headers]"
-      # The token is NOT inlined; instead, an env var reference is used
+      # When bearer_token_env_var is set, Codex uses its own key expansion, not http_headers
+      refute toml =~ "[mcp_servers.arbiter.http_headers]"
+      refute toml =~ "http_headers"
+      # The token is NOT inlined; instead, Codex's bearer_token_env_var expansion is used
       refute toml =~ "Bearer tok-c1-envvar"
       refute toml =~ "tok-c1-envvar"
-      # The env var name is in the config
-      assert toml =~ ~s(Authorization = "${ARBITER_MCP_TOKEN}")
+      # The env var name is in the config under bearer_token_env_var (Codex expands at runtime)
+      assert toml =~ ~s(bearer_token_env_var = "ARBITER_MCP_TOKEN")
     end
   end
 
@@ -321,27 +323,17 @@ defmodule Arbiter.MCP.AgentConfigTest do
   end
 
   # bd-6mo6be: Worker-side verification — after Codex is spawned, run `codex mcp list --json`
-  # from the worker's context to confirm http_headers was actually loaded (not headers).
-  # This catches the G3 gap regression where the wrong key is silently ignored.
+  # from the worker's context to confirm the auth config was actually loaded and is correct.
+  # This catches regressions like the G3 gap where the wrong key is silently ignored.
   describe "Codex.verify_config_loaded/2 (worker-side verification)" do
-    setup do
-      tmp = Path.join(System.tmp_dir!(), "codex-verify-#{System.unique_integer([:positive])}")
-      File.mkdir_p!(tmp)
-      on_exit(fn -> File.rm_rf(tmp) end)
-      {:ok, worktree: tmp}
-    end
-
-    test "detects http_headers when config_toml writes http_headers correctly", %{worktree: wt} do
-      token = Scope.mint_worker(%{id: "bd-6mo6be-v1", workspace_id: "ws-v1"}, "shipyard")
-      :ok = Codex.write_mcp_config(wt, mcp_url: "http://127.0.0.1:4848/mcp", scope_token: token)
-
-      # Simulate codex mcp list --json output with http_headers present
+    test "detects http_headers.Authorization when inline auth is configured" do
+      # Simulate codex mcp list --json output with http_headers present (inline auth mode)
       result =
-        Codex.verify_config_loaded(wt, %{
+        Codex.verify_config_loaded(%{
           "mcp_servers" => %{
             "arbiter" => %{
               "url" => "http://127.0.0.1:4848/mcp",
-              "http_headers" => %{"Authorization" => "Bearer tok-test-v1"}
+              "http_headers" => %{"Authorization" => "Bearer tok-test-inline"}
             }
           }
         })
@@ -349,40 +341,89 @@ defmodule Arbiter.MCP.AgentConfigTest do
       assert result == :ok
     end
 
-    test "rejects when http_headers is missing", %{worktree: wt} do
-      token = Scope.mint_worker(%{id: "bd-6mo6be-v2", workspace_id: "ws-v2"}, "shipyard")
-      :ok = Codex.write_mcp_config(wt, mcp_url: "http://127.0.0.1:4848/mcp", scope_token: token)
-
-      # Simulate codex mcp list --json output WITHOUT http_headers (the bug)
+    test "detects bearer_token_env_var when env-based auth is configured" do
+      # Simulate codex mcp list --json output with bearer_token_env_var (env-based auth mode)
       result =
-        Codex.verify_config_loaded(wt, %{
-          "mcp_servers" => %{
-            "arbiter" => %{
-              "url" => "http://127.0.0.1:4848/mcp"
-              # http_headers is missing — config was not loaded
-            }
-          }
-        })
-
-      assert {:error, _reason} = result
-    end
-
-    test "rejects when Authorization header is missing from http_headers", %{worktree: wt} do
-      token = Scope.mint_worker(%{id: "bd-6mo6be-v3", workspace_id: "ws-v3"}, "shipyard")
-      :ok = Codex.write_mcp_config(wt, mcp_url: "http://127.0.0.1:4848/mcp", scope_token: token)
-
-      # http_headers is present but has no Authorization
-      result =
-        Codex.verify_config_loaded(wt, %{
+        Codex.verify_config_loaded(%{
           "mcp_servers" => %{
             "arbiter" => %{
               "url" => "http://127.0.0.1:4848/mcp",
-              "http_headers" => %{}
+              "bearer_token_env_var" => "ARBITER_MCP_TOKEN"
             }
           }
         })
 
-      assert {:error, _reason} = result
+      assert result == :ok
+    end
+
+    test "respects custom server_name parameter" do
+      result =
+        Codex.verify_config_loaded(
+          %{
+            "mcp_servers" => %{
+              "custom_server" => %{
+                "url" => "http://127.0.0.1:4848/mcp",
+                "http_headers" => %{"Authorization" => "Bearer tok-custom"}
+              }
+            }
+          },
+          server_name: "custom_server"
+        )
+
+      assert result == :ok
+    end
+
+    test "rejects when server is not configured" do
+      result =
+        Codex.verify_config_loaded(%{
+          "mcp_servers" => %{
+            # "arbiter" is missing entirely
+          }
+        })
+
+      assert {:error, :server_not_configured} = result
+    end
+
+    test "rejects when no authentication is configured" do
+      result =
+        Codex.verify_config_loaded(%{
+          "mcp_servers" => %{
+            "arbiter" => %{
+              "url" => "http://127.0.0.1:4848/mcp"
+              # Neither http_headers nor bearer_token_env_var
+            }
+          }
+        })
+
+      assert {:error, :no_authentication_configured} = result
+    end
+
+    test "rejects when Authorization header is empty" do
+      result =
+        Codex.verify_config_loaded(%{
+          "mcp_servers" => %{
+            "arbiter" => %{
+              "url" => "http://127.0.0.1:4848/mcp",
+              "http_headers" => %{"Authorization" => ""}
+            }
+          }
+        })
+
+      assert {:error, :authorization_header_empty} = result
+    end
+
+    test "rejects when http_headers exists but has no Authorization" do
+      result =
+        Codex.verify_config_loaded(%{
+          "mcp_servers" => %{
+            "arbiter" => %{
+              "url" => "http://127.0.0.1:4848/mcp",
+              "http_headers" => %{"X-Custom" => "value"}
+            }
+          }
+        })
+
+      assert {:error, :no_authentication_configured} = result
     end
   end
 

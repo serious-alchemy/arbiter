@@ -66,10 +66,10 @@ defmodule Arbiter.MCP.AgentConfig.Codex do
 
   Requires `:mcp_url` and `:scope_token`. Optional:
   - `:server_name` — defaults to `"arbiter"`.
-  - `:bearer_token_env_var` — if set, uses an environment variable name
+  - `:bearer_token_env_var` — if set, uses Codex's env-var expansion
     instead of embedding the token inline. E.g., `bearer_token_env_var: "ARBITER_MCP_TOKEN"`
-    will write `Authorization = "${ARBITER_MCP_TOKEN}"` instead of the token value.
-    Callers must set this env var in the spawn's environment.
+    will write `bearer_token_env_var = "ARBITER_MCP_TOKEN"` (Codex expands it at runtime).
+    Callers must set this env var in the spawn's environment. This keeps the token off disk.
   """
   @spec config_toml(keyword()) :: String.t()
   def config_toml(opts) do
@@ -78,22 +78,24 @@ defmodule Arbiter.MCP.AgentConfig.Codex do
     name = Keyword.get(opts, :server_name, "arbiter")
     env_var = Keyword.get(opts, :bearer_token_env_var)
 
-    auth_value =
-      if env_var do
-        # Use environment variable placeholder
-        "${#{env_var}}"
-      else
-        # Use inline token (default)
-        "Bearer " <> token
-      end
+    if env_var do
+      # Use bearer_token_env_var for env-based token expansion (Codex expands at runtime).
+      # This keeps the token off disk.
+      """
+      [mcp_servers.#{name}]
+      url = #{inspect(url)}
+      bearer_token_env_var = #{inspect(env_var)}
+      """
+    else
+      # Use inline token in http_headers (default, for backward compat).
+      """
+      [mcp_servers.#{name}]
+      url = #{inspect(url)}
 
-    """
-    [mcp_servers.#{name}]
-    url = #{inspect(url)}
-
-    [mcp_servers.#{name}.http_headers]
-    Authorization = #{inspect(auth_value)}
-    """
+      [mcp_servers.#{name}.http_headers]
+      Authorization = #{inspect("Bearer " <> token)}
+      """
+    end
   end
 
   @doc """
@@ -166,36 +168,57 @@ defmodule Arbiter.MCP.AgentConfig.Codex do
 
   This is a **worker-side check** that runs in the spawned Codex process context.
   It parses the JSON output from `codex mcp list --json` and verifies that
-  the `http_headers` with Authorization is present for the arbiter server.
+  authentication (via `bearer_token_env_var` or `http_headers.Authorization`) is
+  configured for the named MCP server.
 
-  Returns `:ok` if the config was loaded correctly, `{:error, reason}` otherwise.
+  Requires `:server_name` (default `"arbiter"`). Returns `:ok` if the config was
+  loaded correctly, `{:error, reason}` otherwise.
 
   ## Why this is needed
 
   Codex has reports of silent config failures: it starts without error but the
   MCP config may not be loaded (or loaded incorrectly). The `verify_connection/1`
   function tests the endpoint from the coordinator's perspective and cannot detect
-  whether the *worker's* loaded config contains the Authorization header.
+  whether the *worker's* loaded config is present and correct.
 
-  This function catches the G3 gap regression: if code accidentally writes `headers`
-  instead of `http_headers`, the token would be silently dropped on the worker side
-  and every MCP call would get a 401 Unauthorized.
+  This function catches regressions like the G3 gap: if code accidentally writes
+  the wrong config key (e.g., old `headers` instead of current `http_headers`),
+  the token would be silently dropped on the worker side and every MCP call
+  would get a 401 Unauthorized.
 
   ## Example
 
   From the worker's context, after Codex is spawned:
 
       $ codex mcp list --json > /tmp/codex-mcp-list.json
-      $ Arbiter.MCP.AgentConfig.Codex.verify_config_loaded("/path/to/worktree", Jason.decode!(File.read!(...)))
+      $ Arbiter.MCP.AgentConfig.Codex.verify_config_loaded(
+          Jason.decode!(File.read!("/tmp/codex-mcp-list.json")),
+          server_name: "arbiter"
+        )
       :ok
   """
-  @spec verify_config_loaded(String.t(), map()) :: :ok | {:error, atom()}
-  def verify_config_loaded(worktree, codex_mcp_list_json)
-      when is_binary(worktree) and is_map(codex_mcp_list_json) do
-    case get_in(codex_mcp_list_json, ["mcp_servers", "arbiter", "http_headers", "Authorization"]) do
-      nil -> {:error, :http_headers_missing}
-      "" -> {:error, :authorization_header_empty}
-      _auth_header -> :ok
+  @spec verify_config_loaded(map(), keyword()) :: :ok | {:error, atom()}
+  def verify_config_loaded(codex_mcp_list_json, opts \\ [])
+      when is_map(codex_mcp_list_json) do
+    server_name = Keyword.get(opts, :server_name, "arbiter")
+
+    # Check for bearer_token_env_var (env-based auth) or http_headers.Authorization (inline auth)
+    has_bearer_env = !is_nil(get_in(codex_mcp_list_json, ["mcp_servers", server_name, "bearer_token_env_var"]))
+    has_auth_header = !is_nil(get_in(codex_mcp_list_json, ["mcp_servers", server_name, "http_headers", "Authorization"]))
+
+    cond do
+      is_nil(get_in(codex_mcp_list_json, ["mcp_servers", server_name])) ->
+        {:error, :server_not_configured}
+
+      has_bearer_env ->
+        :ok
+
+      has_auth_header ->
+        auth_value = get_in(codex_mcp_list_json, ["mcp_servers", server_name, "http_headers", "Authorization"])
+        if auth_value == "", do: {:error, :authorization_header_empty}, else: :ok
+
+      true ->
+        {:error, :no_authentication_configured}
     end
   end
 
