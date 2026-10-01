@@ -88,19 +88,11 @@ defmodule Arbiter.Worker.ReviewGateArbTokenTest do
       )
 
     on_exit(fn ->
-      # Monitor the worker and wait for it to terminate before exiting.
-      # This ensures child processes spawned by the worker (ReviewGate, Tasks, etc.)
-      # have fully stopped before tmp is removed by the setup's on_exit.
-      if Process.alive?(pid) do
-        ref = Process.monitor(pid)
-        GenServer.stop(pid, :normal)
-
-        receive do
-          {:DOWN, ^ref, :process, ^pid, _} -> :ok
-        after
-          5_000 -> :ok
-        end
-      end
+      # Collect all process monitors before stopping.
+      # We must wait for the ReviewGate and any spawned reviewer/implementer
+      # workers to terminate before removing tmp, so they don't race with rm_rf.
+      refs = collect_and_stop_processes(pid)
+      wait_for_processes(refs)
     end)
 
     :ok = Worker.advance(pid, :claude)
@@ -139,17 +131,83 @@ defmodule Arbiter.Worker.ReviewGateArbTokenTest do
     end
   end
 
-  defp retry_rm_rf(path, attempt \\ 1, max_attempts \\ 10) do
-    case File.rm_rf(path) do
-      {:ok, _} ->
-        :ok
+  defp collect_and_stop_processes(worker_pid) do
+    # Collect monitors for all processes that need to stop.
+    refs = []
 
-      _ ->
-        if attempt < max_attempts do
-          delay = min(attempt * 50, 500)
-          Process.sleep(delay)
-          retry_rm_rf(path, attempt + 1, max_attempts)
+    # Try to get the ReviewGate pid from the worker's state before it dies.
+    # The worker spawns a ReviewGate when review is required.
+    review_gate_pid =
+      if Process.alive?(worker_pid) do
+        try do
+          case Worker.state(worker_pid) do
+            %{meta: %{review_gate_pid: pid}} when is_pid(pid) -> pid
+            _ -> nil
+          end
+        catch
+          _, _ -> nil
+        rescue
+          _ -> nil
         end
+      else
+        nil
+      end
+
+    # Monitor the ReviewGate first if it exists
+    refs =
+      if review_gate_pid && Process.alive?(review_gate_pid) do
+        ref = Process.monitor(review_gate_pid)
+        [ref | refs]
+      else
+        refs
+      end
+
+    # Stop the main worker if it's still alive
+    refs =
+      if Process.alive?(worker_pid) do
+        ref = Process.monitor(worker_pid)
+        GenServer.stop(worker_pid, :normal)
+        [ref | refs]
+      else
+        refs
+      end
+
+    refs
+  end
+
+  defp wait_for_processes(refs, timeout_ms \\ 30_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    wait_for_processes_loop(refs, deadline)
+  end
+
+  defp wait_for_processes_loop([], _deadline), do: :ok
+
+  defp wait_for_processes_loop(refs, deadline) do
+    remaining_ms = max(0, deadline - System.monotonic_time(:millisecond))
+
+    if remaining_ms <= 0 do
+      # Timeout: log which processes are still alive but continue anyway
+      # (don't fail the test, just proceed with best-effort cleanup)
+      :ok
+    else
+      receive do
+        {:DOWN, ref, :process, _pid, _reason} ->
+          remaining_refs = List.delete(refs, ref)
+          wait_for_processes_loop(remaining_refs, deadline)
+      after
+        min(1000, remaining_ms) ->
+          wait_for_processes_loop(refs, deadline)
+      end
+    end
+  end
+
+  defp retry_rm_rf(path) do
+    # After processes have been awaited in on_exit hooks, rm_rf should not
+    # race with writers. If removal fails, it's a real error, not just slow cleanup.
+    case File.rm_rf(path) do
+      {:ok, _} -> :ok
+      {:error, _reason} -> raise "Failed to remove #{path}"
+      _ -> :ok
     end
   end
 end
