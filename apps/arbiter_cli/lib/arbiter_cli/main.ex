@@ -95,6 +95,11 @@ defmodule ArbiterCli.Main do
       arb loop apply      <id> | all [--state proposed]
       arb loop reject     <id> [--reason "..."]
 
+      arb settings get    [key] [--json]          install-wide settings (not workspace config)
+      arb settings set    <key> <value>
+      arb settings unset  <key>
+      arb settings schema [--json]
+
       arb scheduler pause|resume|status
       arb scheduler wait  [--timeout SECS] [--interval SECS]
       arb provider pause <provider|account-ref> [--reason TEXT] [--stop-running]
@@ -280,6 +285,7 @@ defmodule ArbiterCli.Main do
   defp dispatch_known("repo", args), do: ArbiterCli.Cmd.Repo.run(args)
   defp dispatch_known("dep", args), do: ArbiterCli.Cmd.Dep.run(args)
   defp dispatch_known("config", args), do: ArbiterCli.Cmd.Config.run(args)
+  defp dispatch_known("settings", args), do: ArbiterCli.Cmd.Settings.run(args)
   defp dispatch_known("server", args), do: ArbiterCli.Cmd.Server.run(args)
   defp dispatch_known("workspace", args), do: ArbiterCli.Cmd.Workspace.run(args)
   defp dispatch_known("message", args), do: ArbiterCli.Cmd.Message.run(args)

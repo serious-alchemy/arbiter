@@ -14,14 +14,7 @@ defmodule Arbiter.MCP.Tools.Workspace do
   alias Arbiter.Tasks.AttentionLimits
   alias Arbiter.Tasks.Workspace
 
-  @install_settings_keys ~w(
-    conductor_system_max_concurrent
-    credential_watchdog_adapters
-    credential_watchdog_interval_ms
-    credential_watchdog_recovery_interval_ms
-    quota_providers_shown
-    quota_providers_hidden
-  )
+  @install_settings_keys Arbiter.Settings.Registry.keys()
 
   # ---- workspace_show -----------------------------------------------------
 
@@ -191,15 +184,7 @@ defmodule Arbiter.MCP.Tools.Workspace do
   """
   @spec installation_config_get(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def installation_config_get(%Scope{} = _scope, args) do
-    settings = %{
-      conductor_system_max_concurrent: Arbiter.Settings.conductor_system_max_concurrent(),
-      credential_watchdog_adapters: Arbiter.Settings.credential_watchdog_adapters(),
-      credential_watchdog_interval_ms: Arbiter.Settings.credential_watchdog_interval_ms(),
-      credential_watchdog_recovery_interval_ms:
-        Arbiter.Settings.credential_watchdog_recovery_interval_ms(),
-      quota_providers_shown: Arbiter.Settings.quota_providers_shown(),
-      quota_providers_hidden: Arbiter.Settings.quota_providers_hidden()
-    }
+    settings = Arbiter.Settings.Registry.overrides()
 
     case Tools.fetch_string(args, "key") do
       nil ->
@@ -242,8 +227,8 @@ defmodule Arbiter.MCP.Tools.Workspace do
   def installation_config_set(%Scope{} = _scope, args) do
     with {:ok, key} <- Tools.require_string(args, "key"),
          :ok <- validate_install_key(key),
-         {:ok, value} <- require_install_value(key, args),
-         {:ok, updated} <- put_install_setting(key, value) do
+         {:ok, raw} <- require_install_value(key, args),
+         {:ok, updated} <- Arbiter.Settings.Registry.put(key, raw) do
       {:ok, %{key: key, value: updated}}
     end
   end
@@ -251,111 +236,10 @@ defmodule Arbiter.MCP.Tools.Workspace do
   defp validate_install_key(key) when key in @install_settings_keys, do: :ok
   defp validate_install_key(key), do: {:error, {:invalid, "unknown installation setting: #{key}"}}
 
-  # Pre-existing complexity 10 — baselined when bd-4x2yhq first
-  # wired Credo up. Thresholds stay at the tool's own default so new
-  # code is held to it; see the note in .credo.exs.
-  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
-  defp require_install_value("credential_watchdog_adapters", args) do
-    valid = Arbiter.Agents.valid_agent_types()
-
-    case Map.fetch(args, "value") do
-      {:ok, nil} ->
-        {:ok, nil}
-
-      {:ok, names} when is_list(names) ->
-        if Enum.all?(names, &(is_binary(&1) and &1 in valid)) do
-          {:ok, names}
-        else
-          {:error,
-           {:invalid, "value must be a list of agent types (#{Enum.join(valid, ", ")}) or null"}}
-        end
-
-      {:ok, other} ->
-        # Attempt to unwrap stringified JSON before failing validation
-        unwrapped = Tools.unwrap_stringified_json(other, [:list])
-
-        if is_list(unwrapped) and Enum.all?(unwrapped, &(is_binary(&1) and &1 in valid)) do
-          {:ok, unwrapped}
-        else
-          {:error, {:invalid, "value must be a list of agent type strings or null"}}
-        end
-
-      :error ->
-        {:error, {:invalid, "value is required"}}
-    end
-  end
-
-  defp require_install_value(key, args)
-       when key in ~w(quota_providers_shown quota_providers_hidden) do
-    valid = Arbiter.Quota.Visibility.provider_codes()
-
-    invalid =
-      {:invalid, "value must be a list of quota providers (#{Enum.join(valid, ", ")}) or null"}
-
-    case Map.fetch(args, "value") do
-      {:ok, nil} ->
-        {:ok, nil}
-
-      {:ok, value} ->
-        codes = if is_list(value), do: value, else: Tools.unwrap_stringified_json(value, [:list])
-
-        if is_list(codes) and Enum.all?(codes, &(is_binary(&1) and &1 in valid)),
-          do: {:ok, codes},
-          else: {:error, invalid}
-
-      :error ->
-        {:error, {:invalid, "value is required"}}
-    end
-  end
-
   defp require_install_value(_key, args) do
     case Map.fetch(args, "value") do
-      {:ok, nil} ->
-        {:ok, nil}
-
-      {:ok, n} when is_integer(n) and n > 0 ->
-        {:ok, n}
-
-      {:ok, other} ->
-        # Attempt to unwrap stringified JSON before failing validation
-        unwrapped = Tools.unwrap_stringified_json(other, [:integer])
-
-        if is_integer(unwrapped) and unwrapped > 0 do
-          {:ok, unwrapped}
-        else
-          {:error, {:invalid, "value must be a positive integer or null"}}
-        end
-
-      :error ->
-        {:error, {:invalid, "value is required"}}
-    end
-  end
-
-  defp put_install_setting(key, value) do
-    result =
-      case key do
-        "conductor_system_max_concurrent" ->
-          Arbiter.Settings.set_conductor_system_max_concurrent(value)
-
-        "credential_watchdog_adapters" ->
-          Arbiter.Settings.set_credential_watchdog_adapters(value)
-
-        "credential_watchdog_interval_ms" ->
-          Arbiter.Settings.set_credential_watchdog_interval_ms(value)
-
-        "credential_watchdog_recovery_interval_ms" ->
-          Arbiter.Settings.set_credential_watchdog_recovery_interval_ms(value)
-
-        "quota_providers_shown" ->
-          Arbiter.Settings.set_quota_providers_shown(value)
-
-        "quota_providers_hidden" ->
-          Arbiter.Settings.set_quota_providers_hidden(value)
-      end
-
-    case result do
-      {:ok, updated} -> {:ok, updated}
-      {:error, reason} -> {:error, {:invalid, inspect(reason)}}
+      {:ok, raw} -> {:ok, raw}
+      :error -> {:error, {:invalid, "value is required"}}
     end
   end
 

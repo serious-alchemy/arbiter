@@ -285,6 +285,10 @@ defmodule ArbiterWeb.Router do
     get("/breakers", BreakerController, :index)
     post("/breakers/reset", BreakerController, :reset)
 
+    # Install-wide runtime settings (`arb settings`)
+    get("/installation/config", InstallationConfigController, :show)
+    patch("/installation/config", InstallationConfigController, :update)
+
     # Board scheduler (autopilot) operations
     post("/scheduler/pause", SchedulerController, :pause)
     post("/scheduler/resume", SchedulerController, :resume)

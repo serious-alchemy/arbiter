@@ -297,6 +297,13 @@ defmodule Arbiter.Agents.CredentialWatchdog do
     end
   end
 
+  @doc "The settings-free default for `:interval_ms` / `:recovery_interval_ms` (app env, else hardcoded)."
+  @spec default_interval_ms(:interval_ms | :recovery_interval_ms) :: pos_integer()
+  def default_interval_ms(:interval_ms), do: app_env(:interval_ms) || @default_interval_ms
+
+  def default_interval_ms(:recovery_interval_ms),
+    do: app_env(:recovery_interval_ms) || @default_recovery_interval_ms
+
   @doc "The normal poll interval (ms), resolved live. See `probe_adapters/1`."
   @spec poll_interval_ms(keyword()) :: pos_integer()
   def poll_interval_ms(opts \\ []),
