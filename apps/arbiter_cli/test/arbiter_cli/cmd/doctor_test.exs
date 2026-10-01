@@ -158,7 +158,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     assert exit_code == 0
     assert {:ok, %{"ok" => true, "checks" => checks}} = Jason.decode(String.trim(out))
     assert is_list(checks)
-    assert length(checks) == 17
+    assert length(checks) == 18
   end
 
   test "version mismatch is non-fatal (exit 0 but shows [fail])" do
@@ -1573,6 +1573,55 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       {out, _err, _exit_code} = capture(fn -> Doctor.run([]) end)
       assert out =~ "[ ok ] provider accounts"
       assert out =~ "could not check"
+    end
+  end
+
+  describe "erlang distribution check (bd-51m9ba)" do
+    @describetag :tmp_dir
+
+    defp green_routes do
+      [
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+      ]
+    end
+
+    test "an exposed epmd and a world-readable cookie fail doctor with exit 1", %{tmp_dir: dir} do
+      tcp = Path.join(dir, "tcp")
+
+      File.write!(tcp, [
+        "  sl  local_address rem_address   st\n",
+        "  27: 00000000:1111 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 7 1 0 100 0 0 10 0\n"
+      ])
+
+      cookie = Path.join(dir, "COOKIE")
+      File.write!(cookie, "secret")
+      File.chmod!(cookie, 0o644)
+
+      Process.put(:bd2_distribution_probe,
+        proc_net: [tcp],
+        epmd_port: nil,
+        epmd_listen_port: 4369,
+        cookie_paths: [cookie]
+      )
+
+      stub_routes(green_routes())
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 1
+      assert out =~ "[fail] erlang distribution is loopback-only"
+      assert out =~ "epmd listens on 0.0.0.0:4369"
+      assert out =~ "#{cookie} is 0644"
+    end
+
+    test "is part of every doctor run and green when nothing is exposed" do
+      stub_routes(green_routes())
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] erlang distribution is loopback-only"
     end
   end
 end

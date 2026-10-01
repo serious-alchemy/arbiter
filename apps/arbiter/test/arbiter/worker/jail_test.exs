@@ -331,6 +331,31 @@ defmodule Arbiter.Worker.JailTest do
     defp index_of_flag(argv, path), do: Enum.find_index(argv, &(&1 == path))
   end
 
+  describe "release cookie mask (bd-51m9ba)" do
+    test "each secret file is shadowed read-only by /dev/null, after the root bind" do
+      cookie = "/h/.arbiter/release.cookie"
+
+      argv =
+        Jail.argv(%{bwrap: "bwrap", worktree: "/w", mask_paths: [], secret_files: [cookie]}, [
+          "true"
+        ])
+
+      assert {"/dev/null", cookie} in flag_pairs(argv, "--ro-bind")
+      assert Enum.find_index(argv, &(&1 == cookie)) > Enum.find_index(argv, &(&1 == "/"))
+    end
+
+    test "secret_files/1 lists the data home's per-install cookie only when it exists", %{
+      base: base
+    } do
+      assert Jail.secret_files(base) == []
+
+      cookie = Path.join(base, "release.cookie")
+      File.write!(cookie, "secret")
+
+      assert Jail.secret_files(base) == [cookie]
+    end
+  end
+
   describe "writable_paths/1" do
     test "expands ~, drops relative and blank entries, dedupes" do
       home = System.user_home!()
@@ -1090,6 +1115,23 @@ defmodule Arbiter.Worker.JailTest do
         assert out =~ "BUS_PRESENT"
         refute out =~ "SYSTEMD_RUN_OK"
       end
+    end
+
+    test "a masked release cookie reads as empty inside the jail", %{base: base} do
+      wt = Path.join(base, "cookie-wt")
+      File.mkdir_p!(wt)
+      cookie = Path.join(base, "release.cookie")
+      File.write!(cookie, "SECRETCOOKIE")
+
+      [bwrap | args] =
+        Jail.argv(
+          %{bwrap: "bwrap", worktree: wt, mask_paths: Jail.mask_paths(), secret_files: [cookie]},
+          ["sh", "-c", ~s(cat "$0"; echo; echo done), cookie]
+        )
+
+      {out, 0} = System.cmd(System.find_executable(bwrap), args, stderr_to_stdout: true)
+      assert out =~ "done"
+      refute out =~ "SECRETCOOKIE"
     end
 
     test "escape_probe/0 reports no reachable vector" do

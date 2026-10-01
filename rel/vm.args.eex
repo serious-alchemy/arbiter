@@ -1,0 +1,18 @@
+## Customize flags given to the VM: https://www.erlang.org/doc/man/erl.html
+## -mode/-name/-sname/-setcookie are configured via env vars, do not set them here
+
+## bd-51m9ba: distribution listens on loopback only. Anyone holding the cookie
+## who reaches this port runs arbitrary code in the server, so it must never
+## bind a routable address. env.sh pairs this with ERL_EPMD_ADDRESS=127.0.0.1
+## and a node name on 127.0.0.1.
+-kernel inet_dist_use_interface {127,0,0,1}
+
+## Increase number of concurrent ports/sockets
+##+Q 65536
+
+## Tweak GC to run more often
+##-env ERL_FULLSWEEP_AFTER 10
+
+## Enable deployment without epmd
+## (requires changing both vm.args and remote.vm.args)
+##-start_epmd false -erl_epmd_port 6789

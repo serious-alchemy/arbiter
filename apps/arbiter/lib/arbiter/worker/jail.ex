@@ -51,7 +51,8 @@ defmodule Arbiter.Worker.Jail do
   ## Known, accepted gaps
 
     * The network is shared: `arb`, MCP and `git push` need it.
-    * Reads are not restricted.
+    * Reads are not restricted, except for `secret_files/0` (the release's
+      Erlang distribution cookie), which is shadowed by `/dev/null`.
     * Refs in the common dir are shared, so sibling worktrees' branches can
       still be written (the same as without the jail).
     * `git config --local` fails with `EBUSY` (git renames a lockfile over the
@@ -171,7 +172,9 @@ defmodule Arbiter.Worker.Jail do
           optional(:git) => git() | nil,
           optional(:writable_paths) => [String.t()],
           optional(:env) => [{String.t(), String.t()}],
-          optional(:worktree_readonly) => boolean()
+          optional(:worktree_readonly) => boolean(),
+          optional(:mask_paths) => [String.t()],
+          optional(:secret_files) => [String.t()]
         }
 
   @doc """
@@ -323,6 +326,7 @@ defmodule Arbiter.Worker.Jail do
       if(Map.get(spec, :worktree_readonly, false), do: ro_bind(worktree), else: bind(worktree)),
       if(home, do: bind(home) ++ ["--setenv", "HOME", home], else: []),
       git_args(Map.get(spec, :git), worktree),
+      secret_args(spec),
       Enum.flat_map(Map.get(spec, :env, []), fn {k, v} -> ["--setenv", k, v] end),
       ["--unshare-pid", "--die-with-parent", "--new-session", "--chdir", worktree, "--"],
       command
@@ -354,6 +358,43 @@ defmodule Arbiter.Worker.Jail do
     |> Enum.map(&Path.expand/1)
     |> Enum.reject(&(&1 in ["/", "/tmp", "/run", "/dev/shm"]))
     |> Enum.uniq()
+  end
+
+  @doc """
+  Files the jail shadows read-only with `/dev/null` (bd-51m9ba): secrets that
+  `--ro-bind / /` would otherwise hand to the jailed process. Today that is
+  the release's per-install Erlang distribution cookie,
+  `<data-home>/release.cookie` (created by the release's `env.sh`; the data
+  home is `ARB_DATA_HOME`, default `~/.arbiter`). The jail shares the host's
+  network, so with the cookie a jailed process could reach epmd on loopback
+  and `rpc` arbitrary code into the server.
+
+  Only existing regular files are listed: bwrap cannot create a mount point
+  under the read-only root, and an absent file is no vector. The binds come
+  after every writable bind, so no `writable_paths` entry re-exposes them.
+  `spec.secret_files` overrides the detection (tests).
+  """
+  @spec secret_files() :: [String.t()]
+  def secret_files, do: secret_files(release_data_home())
+
+  @spec secret_files(String.t() | nil) :: [String.t()]
+  def secret_files(nil), do: []
+
+  def secret_files(data_home) do
+    Enum.filter([Path.join(data_home, "release.cookie")], &File.regular?/1)
+  end
+
+  defp release_data_home do
+    case {System.get_env("ARB_DATA_HOME"), System.user_home()} do
+      {dir, _} when is_binary(dir) and dir != "" -> Path.expand(dir)
+      {_, home} when is_binary(home) -> Path.join(home, ".arbiter")
+      _ -> nil
+    end
+  end
+
+  defp secret_args(spec) do
+    files = Map.get(spec, :secret_files) || secret_files()
+    Enum.flat_map(files, &["--ro-bind", "/dev/null", &1])
   end
 
   # Directory holding the session bus socket named by the environment, when
@@ -1117,8 +1158,9 @@ defmodule Arbiter.Worker.Jail do
   jail argv (bd-7o08mj): none of the host's control sockets may be reachable —
   the user's session bus and `systemd/private`, the system bus,
   systemd-resolved's varlink socket, the ssh-agent / keyring sockets — and
-  `systemd-run --user` (when installed) must fail. `:ok` when everything is
-  hidden; `{:error, {:escape_reachable, [vector]}}` otherwise.
+  `systemd-run --user` (when installed) must fail, and the release's
+  distribution cookie (`secret_files/0`) must read back empty. `:ok` when
+  everything is hidden; `{:error, {:escape_reachable, [vector]}}` otherwise.
   """
   @spec escape_probe() :: :ok | {:error, term()}
   def escape_probe do
@@ -1135,6 +1177,9 @@ defmodule Arbiter.Worker.Jail do
                  /run/dbus/system_bus_socket /run/systemd/resolve/io.systemd.Resolve; do
           [ -e "$p" ] && echo "reachable:$p"
         done
+        for c in "$@"; do
+          [ -s "$c" ] && echo "reachable:$c"
+        done
         if command -v systemd-run >/dev/null 2>&1 &&
            systemd-run --user --wait --collect true >/dev/null 2>&1; then
           echo "reachable:systemd-run --user"
@@ -1143,7 +1188,7 @@ defmodule Arbiter.Worker.Jail do
         """
 
         %{bwrap: bwrap, worktree: scratch}
-        |> argv(["sh", "-c", script])
+        |> argv(["sh", "-c", script, "sh" | secret_files()])
         |> run_bounded()
         |> judge_escape_probe()
       rescue
@@ -1188,7 +1233,8 @@ defmodule Arbiter.Worker.Jail do
           message: "jail escape vector(s) reachable: " <> Enum.join(vectors, ", "),
           fix:
             "The jail argv must mask /run/user/<uid>, /run/dbus and /run/systemd/resolve " <>
-              "(Arbiter.Worker.Jail.mask_paths/0); this build's jail does not."
+              "(Arbiter.Worker.Jail.mask_paths/0) and shadow the release cookie " <>
+              "(Arbiter.Worker.Jail.secret_files/0); this build's jail does not."
         }
 
       {:error, reason} ->

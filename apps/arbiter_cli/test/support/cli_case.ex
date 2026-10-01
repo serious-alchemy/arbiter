@@ -41,6 +41,10 @@ defmodule ArbiterCli.CliCase do
           retry: false
         )
 
+        # The distribution check reads the host's sockets, epmd and cookie
+        # files; point it at nothing so doctor verdicts stay hermetic.
+        Process.put(:bd2_distribution_probe, proc_net: [], epmd_port: nil, cookie_paths: [])
+
         :ok
       end
     end
