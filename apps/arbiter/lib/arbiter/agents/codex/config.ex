@@ -24,6 +24,7 @@ defmodule Arbiter.Agents.Codex.Config do
 
   @pdict_key {__MODULE__, :active_workspace_config}
   @pdict_workspace_key {__MODULE__, :active_workspace_id}
+  @pdict_detected_plan_key {__MODULE__, :detected_plan}
   @rotation_key {__MODULE__, :api_key_rotation_index}
 
   @type t :: %{
@@ -100,6 +101,8 @@ defmodule Arbiter.Agents.Codex.Config do
   @spec clear() :: :ok
   def clear do
     Process.delete(@pdict_key)
+    Process.delete(@pdict_workspace_key)
+    Process.delete(@pdict_detected_plan_key)
     Process.delete(@rotation_key)
     :ok
   end
@@ -210,12 +213,25 @@ defmodule Arbiter.Agents.Codex.Config do
   end
 
   # Detect the account's plan by checking config, then querying latest quota if available.
+  # Results are cached in the pdict to avoid repeated database lookups.
   defp detect_plan(raw) when is_map(raw) do
-    # First, check if plan_type is already in the config
     case Map.get(raw, "plan_type") do
       p when is_binary(p) and p != "" -> p
-      _ -> detect_plan_from_quota()
+      _ -> detect_plan_from_quota_cached()
     end
+  end
+
+  defp detect_plan_from_quota_cached do
+    case Process.get(@pdict_detected_plan_key) do
+      {:cached, plan} -> plan
+      nil -> detect_plan_from_quota_uncached()
+    end
+  end
+
+  defp detect_plan_from_quota_uncached do
+    plan = detect_plan_from_quota()
+    Process.put(@pdict_detected_plan_key, {:cached, plan})
+    plan
   end
 
   # Try to detect plan from the latest CodexQuota for this workspace
