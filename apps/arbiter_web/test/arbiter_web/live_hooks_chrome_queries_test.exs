@@ -106,6 +106,18 @@ defmodule ArbiterWeb.LiveHooksChromeQueriesTest do
       assert has_element?(view, ~s(#nav-rail a[href="/epics"] [data-role="nav-badge"]), "1")
     end
 
+    test "retyping an epic away from :epic drops the badge", %{conn: conn, ws: ws} do
+      {:ok, epic} = Ash.create(Issue, %{title: "retype", workspace_id: ws.id, issue_type: :epic})
+      {:ok, view, _html} = live(conn, ~p"/tasks")
+      render_async(view)
+      assert has_element?(view, ~s(#nav-rail a[href="/epics"] [data-role="nav-badge"]), "1")
+
+      {:ok, _} = Ash.update(epic, %{issue_type: :task})
+      _ = render(view)
+
+      refute has_element?(view, ~s(#nav-rail a[href="/epics"] [data-role="nav-badge"]))
+    end
+
     test "a connected mount reads workspaces at most twice", %{conn: conn} do
       # The first mount warms `QuotaCache`, whose cold fill legitimately reads
       # workspaces to decide which providers are in use. Before bd-cixhhs a

@@ -174,10 +174,10 @@ defmodule ArbiterWeb.LiveHooks do
 
     socket =
       if connected?(socket) do
-        Phoenix.PubSub.subscribe(Arbiter.PubSub, "tasks")
+        Phoenix.PubSub.subscribe(Arbiter.PubSub, Arbiter.Tasks.Issue.epics_topic())
 
         attach_hook(socket, :open_epics_updates, :handle_info, fn
-          {:task_lifecycle, _event, %{issue_type: :epic}}, socket ->
+          {:epic_lifecycle, _event, _issue}, socket ->
             {:cont, assign(socket, :open_epic_count, Arbiter.Tasks.open_epic_count())}
 
           _msg, socket ->
