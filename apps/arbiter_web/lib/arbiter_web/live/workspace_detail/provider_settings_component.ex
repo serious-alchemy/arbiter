@@ -656,8 +656,10 @@ defmodule ArbiterWeb.WorkspaceDetail.ProviderSettingsComponent do
                 id="routing-reviewer-note"
                 class="m-0 font-[family-name:var(--font-mono)] text-[11px] text-[var(--text-label)]"
               >
-                Reviewer: always follows its own order (review_agent.type / the reviewer accounts), never most_quota.<%= if @cross_family? do %>
-                  Cross-family review is on, so the reviewer's model family must differ from the implementer's.
+                <%= if @cross_family? do %>
+                  Reviewer: cross-family routing — candidates outside the implementer's model family, held or expired ones dropped, ranked by quota headroom (order breaks ties); falls back to the implementer's family only when no other family is available.
+                <% else %>
+                  Reviewer: first healthy entry in its own order (review_agent.type / reviewer accounts); routing.provider_selection does not apply.
                 <% end %>
               </p>
             </div>

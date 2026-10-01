@@ -216,11 +216,14 @@ defmodule ArbiterWeb.WorkspaceProviderSettingsLiveTest do
       ws = workspace!()
       view = open(conn, ws)
       assert has_element?(view, "#routing-reviewer-note")
-      refute has_element?(view, "#routing-reviewer-note", "differ")
+      assert has_element?(view, "#routing-reviewer-note", "own order")
+      refute has_element?(view, "#routing-reviewer-note", "headroom")
 
       ws2 = workspace!(%{"review_agent" => %{"cross_family" => true}})
       view2 = open(conn, ws2)
-      assert has_element?(view2, "#routing-reviewer-note", "differ")
+      assert has_element?(view2, "#routing-reviewer-note", "headroom")
+      refute has_element?(view2, "#routing-reviewer-note", "own order")
+      refute has_element?(view2, "#routing-reviewer-note", "never most_quota")
     end
 
     test "lists each implementer candidate's headroom or drop reason" do
