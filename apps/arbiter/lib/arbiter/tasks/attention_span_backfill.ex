@@ -219,8 +219,11 @@ defmodule Arbiter.Tasks.AttentionSpanBackfill do
   # ---- escalations ----------------------------------------------------------
 
   defp load_escalations(since) do
-    kinds = for kind <- EscalationKind.ticket_kinds(), EscalationKind.cause(kind), do: kind
-    placeholders = Enum.map_join(2..(length(kinds) + 1)//1, ", ", &"?#{&1}")
+    causes =
+      for kind <- EscalationKind.ticket_kinds(),
+          cause = EscalationKind.cause(kind),
+          into: %{},
+          do: {Atom.to_string(kind), Atom.to_string(cause)}
 
     %{rows: rows} =
       Repo.query!(
@@ -228,16 +231,17 @@ defmodule Arbiter.Tasks.AttentionSpanBackfill do
         SELECT task_ref, escalation_kind, inserted_at, resolved_at
         FROM messages
         WHERE kind = 'escalation' AND task_ref IS NOT NULL AND inserted_at >= ?1
-          AND escalation_kind IN (#{placeholders})
+          AND escalation_kind IS NOT NULL
         ORDER BY task_ref, inserted_at
         """,
-        [iso(since) | Enum.map(kinds, &Atom.to_string/1)]
+        [iso(since)]
       )
 
-    for [ticket_id, kind, inserted_at, resolved_at] <- rows do
+    for [ticket_id, kind, inserted_at, resolved_at] <- rows,
+        cause = Map.get(causes, kind) do
       %{
         ticket_id: ticket_id,
-        cause: kind |> String.to_existing_atom() |> EscalationKind.cause() |> Atom.to_string(),
+        cause: cause,
         from: parse!(inserted_at),
         to: parse(resolved_at)
       }

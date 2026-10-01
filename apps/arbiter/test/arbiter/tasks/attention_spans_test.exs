@@ -307,6 +307,24 @@ defmodule Arbiter.Tasks.AttentionSpansTest do
       assert %{inserted: 0} = AttentionSpanBackfill.backfill(apply?: true)
     end
 
+    test "an escalation whose kind records no cause is not a span", ctx do
+      queued = put_state!(reload(ctx.task), :queued)
+
+      {:ok, _} =
+        Escalation.post(%{
+          kind: :agent_raised,
+          task_ref: queued.id,
+          workspace_id: ctx.ws.id,
+          subject: "a question",
+          body: "the agent asked for help"
+        })
+
+      wipe_spans()
+
+      assert %{escalations: 0, inserted: 0} = AttentionSpanBackfill.backfill(apply?: true)
+      assert spans(ctx.task) == []
+    end
+
     test "an escalation that raised a stored cause is not counted twice", ctx do
       {:ok, _} =
         Escalation.post(%{
