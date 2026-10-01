@@ -139,6 +139,49 @@ defmodule Arbiter.Accounts.ConcurrencyTest do
     end
   end
 
+  describe "a ticket's parked primary does not double-count (bd-dp0p58)" do
+    test "primary plus its impl pass counts as 1; board shows 2 slots at max_concurrent=2" do
+      ws = workspace!("conc-parked")
+      account = account!(:claude, "conc-parked")
+      link!(ws, :claude, account)
+      {:ok, _} = Ash.update(account, %{max_concurrent: 2})
+
+      fake_worker(ws.id, "claude", key: "bd-parked")
+      fake_worker(ws.id, "claude", key: "bd-parked#review#impl1")
+
+      assert Concurrency.live_count(account) == 1
+      assert Concurrency.workspace_live_count(ws.id, "claude") == 1
+      headroom = Concurrency.headroom(ws.id, :claude)
+      assert headroom == 1
+      assert Concurrency.clamp(4, headroom, 1) == 2
+    end
+
+    test "lone primary, other tickets, and concurrent sub-workers still count individually" do
+      ws = workspace!("conc-parked-2")
+      account = account!(:claude, "conc-parked-2")
+      link!(ws, :claude, account)
+
+      fake_worker(ws.id, "claude", key: "bd-a")
+      assert Concurrency.live_count(account) == 1
+
+      fake_worker(ws.id, "claude", key: "bd-b")
+      fake_worker(ws.id, "claude", key: "bd-b#review")
+      fake_worker(ws.id, "claude", key: "bd-b:fixpass")
+      # bd-a (1) + bd-b's two sub-workers (2); bd-b's parked primary is not counted.
+      assert Concurrency.live_count(account) == 3
+    end
+
+    test "a task id that is a bare prefix of another is not its primary" do
+      ws = workspace!("conc-parked-3")
+      account = account!(:claude, "conc-parked-3")
+      link!(ws, :claude, account)
+
+      fake_worker(ws.id, "claude", key: "bd-1")
+      fake_worker(ws.id, "claude", key: "bd-12:fixpass")
+      assert Concurrency.live_count(account) == 2
+    end
+  end
+
   describe "a real Arbiter.Worker registers its own dispatch" do
     test "counts toward the account, and stops counting when killed" do
       ws = workspace!("real-worker")
@@ -241,8 +284,8 @@ defmodule Arbiter.Accounts.ConcurrencyTest do
       account = account!(:claude, "hr-exclude", %{max_concurrent: 2})
       link!(ws, :claude, account)
 
-      fake_worker(ws.id, "claude", key: "bd-own")
       fake_worker(ws.id, "claude", key: "bd-own#review")
+      fake_worker(ws.id, "claude", key: "bd-own:fixpass")
       assert Concurrency.account_headroom(account, ws) == 0
       assert Concurrency.account_headroom(account, ws, exclude_task: "bd-own") == 2
 
