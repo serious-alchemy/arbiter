@@ -37,6 +37,14 @@ defmodule ArbiterWeb.ApiPolicy do
       task**, with only the progress fields (`notes`, `qa_notes`,
       `deployment_notes`, `pr_body`, `verify_after_deploy`) — the REST twin
       of the `ticket_update_progress` MCP tool.
+    * `:issue_create` — coordinator; or a worker filing a follow-up as a
+      child of **its own task** (`parent_id`), in its own workspace, with only
+      descriptive fields. `arb create <title> --parent <own id>` is how a
+      worker defers review-thread work and cites the filed key (bd-7ezcqb).
+      A new ticket starts in Backlog, so nothing a worker files dispatches.
+    * `:dependency_add` — coordinator; or a worker adding the `parent_of`
+      edge from its own task to a ticket in its workspace that has no parent
+      yet — the second half of `arb create --parent`.
     * `:mailbox` — coordinator; or a worker reading its own mailbox
       (`to_ref` must be its own task).
     * `:message_send` — coordinator; or a worker. `MessageController.create/2`
@@ -59,6 +67,8 @@ defmodule ArbiterWeb.ApiPolicy do
           | :issue_read
           | :workspace_list
           | :issue_progress
+          | :issue_create
+          | :dependency_add
           | :mailbox
           | :message_send
           | :message_mark_read
@@ -67,12 +77,18 @@ defmodule ArbiterWeb.ApiPolicy do
   # `@progress_fields ++ @progress_flags`). "id" is the path param.
   @progress_params ~w(id notes qa_notes deployment_notes pr_body verify_after_deploy)
 
+  # What a worker may set on a follow-up it files (`arb create`'s descriptive
+  # flags). No `repo` / `target_branch` / `tracker_ref` / `auto_close` /
+  # `verify_after_deploy`: where and how work ships stays coordinator authority.
+  @worker_create_params ~w(title description acceptance workspace_id parent_id issue_type
+                           priority difficulty skip_upstream_create force)
+
   @policies %{
     # ---- issues -----------------------------------------------------------
     {:get, "/api/issues/ready"} => :coordinator,
     {:get, "/api/issues/lifecycle"} => :coordinator,
     {:get, "/api/issues"} => :coordinator,
-    {:post, "/api/issues"} => :coordinator,
+    {:post, "/api/issues"} => :issue_create,
     {:get, "/api/issues/:id"} => :issue_read,
     {:patch, "/api/issues/:id"} => :issue_progress,
     {:put, "/api/issues/:id"} => :issue_progress,
@@ -88,7 +104,7 @@ defmodule ArbiterWeb.ApiPolicy do
 
     # ---- dependencies -----------------------------------------------------
     {:get, "/api/dependencies"} => :coordinator,
-    {:post, "/api/dependencies"} => :coordinator,
+    {:post, "/api/dependencies"} => :dependency_add,
     {:get, "/api/dependencies/:issue_id"} => :issue_read,
     {:delete, "/api/dependencies/:from/:to"} => :coordinator,
 
@@ -240,6 +256,8 @@ defmodule ArbiterWeb.ApiPolicy do
       when policy in [
              :issue_read,
              :issue_progress,
+             :issue_create,
+             :dependency_add,
              :mailbox,
              :message_send,
              :message_mark_read
@@ -268,6 +286,40 @@ defmodule ArbiterWeb.ApiPolicy do
           "may only set progress fields (notes, qa_notes, deployment_notes, pr_body, " <>
             "verify_after_deploy), not #{Enum.join(extra, ", ")}"
         )
+
+      true ->
+        :ok
+    end
+  end
+
+  def authorize(:issue_create, %Scope{tier: :worker} = scope, params) do
+    extra = params |> Map.keys() |> Enum.reject(&(&1 in @worker_create_params))
+
+    cond do
+      params["parent_id"] != scope.task_id ->
+        forbidden(scope, "may only file a ticket as a child of its own task (parent_id)")
+
+      params["workspace_id"] != scope.workspace_id ->
+        forbidden(scope, "may only file a ticket in its own workspace")
+
+      extra != [] ->
+        forbidden(scope, "may not set #{Enum.join(extra, ", ")} on a ticket it files")
+
+      true ->
+        :ok
+    end
+  end
+
+  def authorize(:dependency_add, %Scope{tier: :worker} = scope, params) do
+    cond do
+      params["from_issue_id"] != scope.task_id or params["type"] != "parent_of" ->
+        forbidden(scope, "may only add a parent_of edge from its own task")
+
+      not issue_in_workspace?(params["to_issue_id"], scope.workspace_id) ->
+        forbidden(scope, "may only adopt a ticket in its own workspace")
+
+      has_parent?(params["to_issue_id"]) ->
+        forbidden(scope, "may only adopt a ticket that has no parent yet")
 
       true ->
         :ok
@@ -306,4 +358,14 @@ defmodule ArbiterWeb.ApiPolicy do
   end
 
   defp issue_in_workspace?(_issue_id, _workspace_id), do: false
+
+  defp has_parent?(issue_id) do
+    case Arbiter.Tasks.Dependencies.list(issue_id: issue_id) do
+      {:ok, deps} ->
+        Enum.any?(deps, &(&1.edge.type == :parent_of and &1.edge.to_issue_id == issue_id))
+
+      _ ->
+        true
+    end
+  end
 end

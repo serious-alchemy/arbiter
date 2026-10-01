@@ -66,7 +66,12 @@ defmodule ArbiterWeb.ApiTierTest do
             ctx.worker_token
             |> as()
             |> put_req_header("content-type", "application/json")
-            |> Phoenix.ConnTest.dispatch(@endpoint, route.verb, concrete(route.path, ctx.task.id), "{}")
+            |> Phoenix.ConnTest.dispatch(
+              @endpoint,
+              route.verb,
+              concrete(route.path, ctx.task.id),
+              "{}"
+            )
 
           {route.verb, route.path, conn.status}
         end
@@ -76,7 +81,10 @@ defmodule ArbiterWeb.ApiTierTest do
     end
 
     test "cannot close, dispatch, or write workspace config", ctx do
-      assert ctx.worker_token |> as() |> post("/api/issues/#{ctx.task.id}/close") |> json_response(403)
+      assert ctx.worker_token
+             |> as()
+             |> post("/api/issues/#{ctx.task.id}/close")
+             |> json_response(403)
 
       assert ctx.worker_token
              |> as()
@@ -111,8 +119,15 @@ defmodule ArbiterWeb.ApiTierTest do
     end
 
     test "reads tickets in its own workspace, not another's", ctx do
-      assert ctx.worker_token |> as() |> get("/api/issues/#{ctx.sibling.id}") |> json_response(200)
-      assert ctx.worker_token |> as() |> get("/api/issues/#{ctx.foreign.id}") |> json_response(403)
+      assert ctx.worker_token
+             |> as()
+             |> get("/api/issues/#{ctx.sibling.id}")
+             |> json_response(200)
+
+      assert ctx.worker_token
+             |> as()
+             |> get("/api/issues/#{ctx.foreign.id}")
+             |> json_response(403)
 
       assert ctx.worker_token
              |> as()
@@ -158,8 +173,73 @@ defmodule ArbiterWeb.ApiTierTest do
           workspace_id: ctx.ws.id
         })
 
-      assert ctx.worker_token |> as() |> post("/api/messages/#{mine.id}/read") |> json_response(200)
-      assert ctx.worker_token |> as() |> post("/api/messages/#{theirs.id}/read") |> json_response(403)
+      assert ctx.worker_token
+             |> as()
+             |> post("/api/messages/#{mine.id}/read")
+             |> json_response(200)
+
+      assert ctx.worker_token
+             |> as()
+             |> post("/api/messages/#{theirs.id}/read")
+             |> json_response(403)
+    end
+
+    # bd-7ezcqb: a worker that defers review-thread work must file the
+    # follow-up and cite its key, via `arb create <title> --parent <own id>`
+    # (a create carrying `parent_id`, then the `parent_of` edge). That stays
+    # possible — but only as a Backlog child of its own task, in its own
+    # workspace.
+    test "files a follow-up as a child of its own task", ctx do
+      conn =
+        ctx.worker_token
+        |> as()
+        |> post("/api/issues", %{
+          title: "deferred follow-up",
+          workspace_id: ctx.ws.id,
+          parent_id: ctx.task.id,
+          issue_type: "feature"
+        })
+
+      child = json_response(conn, 201)
+      assert child["state"] == "backlog"
+
+      conn =
+        ctx.worker_token
+        |> as()
+        |> post("/api/dependencies", %{
+          from_issue_id: ctx.task.id,
+          to_issue_id: child["id"],
+          type: "parent_of"
+        })
+
+      assert json_response(conn, 201)
+    end
+
+    test "cannot file a ticket that is not its own child, or into another workspace", ctx do
+      for body <- [
+            %{title: "orphan", workspace_id: ctx.ws.id},
+            %{title: "adopted", workspace_id: ctx.ws.id, parent_id: ctx.sibling.id},
+            %{title: "abroad", workspace_id: ctx.other_ws.id, parent_id: ctx.task.id},
+            %{title: "pinned", workspace_id: ctx.ws.id, parent_id: ctx.task.id, repo: "x"}
+          ] do
+        assert ctx.worker_token |> as() |> post("/api/issues", body) |> json_response(403),
+               inspect(body)
+      end
+    end
+
+    test "cannot add edges other than parent_of from its own task to an unparented ticket", ctx do
+      {:ok, parented} = Ash.create(Issue, %{title: "has a parent", workspace_id: ctx.ws.id})
+      {:ok, _} = Arbiter.Tasks.Dependencies.add(ctx.sibling.id, parented.id, :parent_of)
+
+      for body <- [
+            %{from_issue_id: ctx.sibling.id, to_issue_id: ctx.task.id, type: "parent_of"},
+            %{from_issue_id: ctx.task.id, to_issue_id: ctx.sibling.id, type: "blocks"},
+            %{from_issue_id: ctx.task.id, to_issue_id: ctx.foreign.id, type: "parent_of"},
+            %{from_issue_id: ctx.task.id, to_issue_id: parented.id, type: "parent_of"}
+          ] do
+        assert ctx.worker_token |> as() |> post("/api/dependencies", body) |> json_response(403),
+               inspect(body)
+      end
     end
 
     test "sends mail as itself, pinned to its own workspace — never as the coordinator", ctx do
@@ -188,18 +268,37 @@ defmodule ArbiterWeb.ApiTierTest do
     end
 
     test "reads tickets in its workspace", ctx do
-      assert ctx.refine_token |> as() |> get("/api/issues/#{ctx.sibling.id}") |> json_response(200)
-      assert ctx.refine_token |> as() |> get("/api/issues/#{ctx.foreign.id}") |> json_response(403)
+      assert ctx.refine_token
+             |> as()
+             |> get("/api/issues/#{ctx.sibling.id}")
+             |> json_response(200)
+
+      assert ctx.refine_token
+             |> as()
+             |> get("/api/issues/#{ctx.foreign.id}")
+             |> json_response(403)
     end
 
     test "writes nothing over REST (its writes are subtree-gated MCP tools)", ctx do
       allowed =
-        for route <- write_routes_with([:coordinator, :dispatch, :issue_progress]) do
+        for route <-
+              write_routes_with([
+                :coordinator,
+                :dispatch,
+                :issue_progress,
+                :issue_create,
+                :dependency_add
+              ]) do
           conn =
             ctx.refine_token
             |> as()
             |> put_req_header("content-type", "application/json")
-            |> Phoenix.ConnTest.dispatch(@endpoint, route.verb, concrete(route.path, ctx.task.id), "{}")
+            |> Phoenix.ConnTest.dispatch(
+              @endpoint,
+              route.verb,
+              concrete(route.path, ctx.task.id),
+              "{}"
+            )
 
           {route.verb, route.path, conn.status}
         end
@@ -213,7 +312,11 @@ defmodule ArbiterWeb.ApiTierTest do
     test "without can_dispatch cannot dispatch, review or resume", ctx do
       token = Scope.mint_coordinator(nil, can_dispatch: false)
 
-      for path <- ["/api/workers/dispatch", "/api/workers/review", "/api/workers/#{ctx.task.id}/resume"] do
+      for path <- [
+            "/api/workers/dispatch",
+            "/api/workers/review",
+            "/api/workers/#{ctx.task.id}/resume"
+          ] do
         conn = token |> as() |> post(path, %{task_id: ctx.task.id})
         assert json_response(conn, 403)["error"]["message"] =~ "can_dispatch", path
       end

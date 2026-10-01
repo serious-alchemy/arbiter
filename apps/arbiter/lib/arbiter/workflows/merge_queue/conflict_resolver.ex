@@ -568,10 +568,11 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
           )
 
         session_opts =
-          [
-            owner: worker_pid,
-            worktree_path: worktree_path
-          ]
+          # bd-asawcq: the worker token doubles as the agent's ARB_TOKEN.
+          ([
+             owner: worker_pid,
+             worktree_path: worktree_path
+           ] ++ Keyword.take(mcp_opts, [:arb_token]))
           |> add_command_or_prompt(context, args, worktree_path, provider, mcp_opts)
 
         case ClaudeSession.start(session_opts) do

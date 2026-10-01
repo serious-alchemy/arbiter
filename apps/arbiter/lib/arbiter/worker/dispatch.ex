@@ -2837,7 +2837,13 @@ defmodule Arbiter.Worker.Dispatch do
                 # bd-9rdwe4: `prompt:` alongside `command:` plays no role in argv
                 # resolution (that's `command:`'s job) — it's carried purely so
                 # `Arbiter.Worker` can persist what this worker was actually told.
-                {:ok, base ++ [command: argv, prompt: prompt, env: env] ++ session_meta}
+                #
+                # bd-asawcq: `:arb_token` (from `inject_mcp_config/3`) becomes the
+                # agent's ARB_TOKEN, so its own `arb` authenticates as this task.
+                {:ok,
+                 base ++
+                   [command: argv, prompt: prompt, env: env] ++
+                   session_meta ++ Keyword.take(opts, [:arb_token])}
 
               {:error, reason} ->
                 {:error, reason}
@@ -3026,10 +3032,11 @@ defmodule Arbiter.Worker.Dispatch do
     end
   end
 
-  # Write the per-spawn Arbiter.MCP config into the worktree (bd-dem49g). Mints a
-  # narrow `:worker`-tier scope token bound to this task/repo/workspace and hands
-  # it to the agent-specific config adapter (Phase 1: Claude `.mcp.json`). The
-  # token *is* the worker's capability — it can only read/progress its own task.
+  # Write the per-spawn Arbiter.MCP config into the worktree (bd-dem49g). Hands
+  # the narrow `:worker`-tier scope token `inject_mcp_config/3` minted (bound to
+  # this task/repo/workspace) to the agent-specific config adapter (Phase 1:
+  # Claude `.mcp.json`). The token *is* the worker's capability — it can only
+  # read/progress its own task.
   #
   # Gated by `Arbiter.MCP.inject_config?/0` (off in test by default) and fully
   # best-effort: a missing signing secret or write failure is logged and swallowed
@@ -3041,19 +3048,12 @@ defmodule Arbiter.Worker.Dispatch do
   #
   # Returns `{provider, write_result}` when it attempted a write, `:skipped`
   # otherwise.
-  defp maybe_write_mcp_config(_task, nil, _opts), do: :skipped
+  defp maybe_write_mcp_config(_task, nil, _opts, _token), do: :skipped
+  defp maybe_write_mcp_config(_task, _worktree_path, _opts, nil), do: :skipped
 
-  defp maybe_write_mcp_config(%Issue{} = task, worktree_path, opts)
+  defp maybe_write_mcp_config(%Issue{} = task, worktree_path, opts, token)
        when is_binary(worktree_path) do
     if Arbiter.MCP.inject_config?() do
-      # `:depth` carries the dispatch-recursion depth (Phase 2 guardrail): a worker
-      # slung *by a coordinator* via `worker_dispatch` is minted one level deeper, so
-      # a chain of dispatches is tracked. Defaults to 0 for a plain operator dispatch.
-      token =
-        Arbiter.MCP.Scope.mint_worker(task, Keyword.get(opts, :repo),
-          depth: Keyword.get(opts, :depth, 0)
-        )
-
       provider = resolve_mcp_provider(task, opts)
 
       write_opts = [
@@ -3082,9 +3082,16 @@ defmodule Arbiter.Worker.Dispatch do
 
   Returns `[mcp_config: path]` when a Claude `.mcp.json` was written — callers
   merge that into the adapter opts so `Arbiter.Agents.Claude.default_argv/2`
-  passes it with `--mcp-config` — and `[]` otherwise (injection disabled, no
-  isolated worktree, another provider, a failed write). Best-effort: never
-  raises, never blocks a spawn.
+  passes it with `--mcp-config` — and no `:mcp_config` otherwise (injection
+  disabled, no isolated worktree, another provider, a failed write).
+  Best-effort: never raises, never blocks a spawn.
+
+  Also returns `arb_token: token`, the same worker token, whether or not a
+  config file was written (bd-asawcq). `/api` needs a bearer token, so the
+  spawn sets it as the agent's `ARB_TOKEN` (`Arbiter.Worker.ClaudeSession`'s
+  `:arb_token` opt) and the worker's own `arb` (`arb inbox`, `arb message`,
+  `arb ticket update`) authenticates as that one task — never as the
+  coordinator.
 
   Every spawn path that hands an agent an isolated worktree must call this
   (bd-7e8ezw). `FixPassDispatcher` used to skip it, so a CI fix pass ran with
@@ -3096,7 +3103,30 @@ defmodule Arbiter.Worker.Dispatch do
   """
   @spec inject_mcp_config(Issue.t(), Path.t() | nil, keyword()) :: keyword()
   def inject_mcp_config(%Issue{} = task, worktree_path, opts) do
-    case maybe_write_mcp_config(task, worktree_path, opts) do
+    token = mint_worker_token(task, opts)
+    mcp_config_opts(task, worktree_path, opts, token) ++ arb_token_opts(token)
+  end
+
+  defp arb_token_opts(nil), do: []
+  defp arb_token_opts(token), do: [arb_token: token]
+
+  # `:depth` carries the dispatch-recursion depth (Phase 2 guardrail): a worker
+  # slung *by a coordinator* via `worker_dispatch` is minted one level deeper, so
+  # a chain of dispatches is tracked. Defaults to 0 for a plain operator dispatch.
+  # A missing signing secret is logged and swallowed: never blocks a spawn.
+  defp mint_worker_token(%Issue{} = task, opts) do
+    Arbiter.MCP.Scope.mint_worker(task, Keyword.get(opts, :repo),
+      depth: Keyword.get(opts, :depth, 0)
+    )
+  rescue
+    e ->
+      require Logger
+      Logger.warning("Arbiter.Worker.Dispatch: minting the worker token failed: #{inspect(e)}")
+      nil
+  end
+
+  defp mcp_config_opts(task, worktree_path, opts, token) do
+    case maybe_write_mcp_config(task, worktree_path, opts, token) do
       {:claude, :ok} ->
         [mcp_config: Path.join(worktree_path, Arbiter.MCP.AgentConfig.Claude.filename())]
 
