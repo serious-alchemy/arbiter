@@ -203,8 +203,13 @@ defmodule Arbiter.MCP.AgentConfig.Codex do
     server_name = Keyword.get(opts, :server_name, "arbiter")
 
     # Check for bearer_token_env_var (env-based auth) or http_headers.Authorization (inline auth)
-    has_bearer_env = !is_nil(get_in(codex_mcp_list_json, ["mcp_servers", server_name, "bearer_token_env_var"]))
-    has_auth_header = !is_nil(get_in(codex_mcp_list_json, ["mcp_servers", server_name, "http_headers", "Authorization"]))
+    has_bearer_env =
+      !is_nil(get_in(codex_mcp_list_json, ["mcp_servers", server_name, "bearer_token_env_var"]))
+
+    has_auth_header =
+      !is_nil(
+        get_in(codex_mcp_list_json, ["mcp_servers", server_name, "http_headers", "Authorization"])
+      )
 
     cond do
       is_nil(get_in(codex_mcp_list_json, ["mcp_servers", server_name])) ->
@@ -214,7 +219,14 @@ defmodule Arbiter.MCP.AgentConfig.Codex do
         :ok
 
       has_auth_header ->
-        auth_value = get_in(codex_mcp_list_json, ["mcp_servers", server_name, "http_headers", "Authorization"])
+        auth_value =
+          get_in(codex_mcp_list_json, [
+            "mcp_servers",
+            server_name,
+            "http_headers",
+            "Authorization"
+          ])
+
         if auth_value == "", do: {:error, :authorization_header_empty}, else: :ok
 
       true ->

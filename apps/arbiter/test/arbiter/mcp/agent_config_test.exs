@@ -376,9 +376,10 @@ defmodule Arbiter.MCP.AgentConfigTest do
     test "rejects when server is not configured" do
       result =
         Codex.verify_config_loaded(%{
-          "mcp_servers" => %{
-            # "arbiter" is missing entirely
-          }
+          "mcp_servers" =>
+            %{
+              # "arbiter" is missing entirely
+            }
         })
 
       assert {:error, :server_not_configured} = result
