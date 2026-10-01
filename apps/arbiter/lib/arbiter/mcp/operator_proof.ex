@@ -181,12 +181,7 @@ defmodule Arbiter.MCP.OperatorProof do
     entries =
       contents
       |> String.split("\n", trim: true)
-      |> Enum.flat_map(fn line ->
-        case String.split(line, ":", parts: 3) do
-          [id, controllers, path] -> [{id, controllers, path}]
-          _ -> []
-        end
-      end)
+      |> Enum.flat_map(&cgroup_entry/1)
 
     unified = Enum.find_value(entries, fn {id, c, p} -> id == "0" and c == "" and p end)
     v1 = Enum.find_value(entries, fn {_id, c, p} -> c == "name=systemd" and p end)
@@ -195,6 +190,13 @@ defmodule Arbiter.MCP.OperatorProof do
       is_binary(unified) and unified != "/" -> unified
       is_binary(v1) -> v1
       true -> unified
+    end
+  end
+
+  defp cgroup_entry(line) do
+    case String.split(line, ":", parts: 3) do
+      [id, controllers, path] -> [{id, controllers, path}]
+      _ -> []
     end
   end
 
