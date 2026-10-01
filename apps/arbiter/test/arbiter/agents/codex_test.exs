@@ -79,8 +79,10 @@ defmodule Arbiter.Agents.CodexTest do
     end
 
     test "resolves a :model_tier to a concrete model via the default tier map" do
-      assert Codex.resolved_model(model_tier: "premium") == "gpt-5-codex"
-      assert Codex.resolved_model(model_tier: "economy") == "gpt-5-codex-mini"
+      assert Codex.resolved_model(model_tier: "premium") == "gpt-5.6-terra"
+      assert Codex.resolved_model(model_tier: "standard") == "gpt-5.6-terra"
+      assert Codex.resolved_model(model_tier: "economy") == "gpt-5.6-luna"
+      assert Codex.resolved_model(model_tier: "flagship") == "gpt-5.6-terra"
     end
 
     test "returns nil when nothing is configured (CLI picks its own default)" do
@@ -163,6 +165,34 @@ defmodule Arbiter.Agents.CodexTest do
       refute "--dangerously-bypass-approvals-and-sandbox" in argv
     end
 
+    test "declares the MCP server via -c overrides so project trust is irrelevant", %{tmp: tmp} do
+      _codex = stub_codex(tmp)
+      prior = Application.get_env(:arbiter, Arbiter.MCP)
+      Application.put_env(:arbiter, Arbiter.MCP, Keyword.put(prior || [], :inject_config, true))
+
+      on_exit(fn ->
+        if prior,
+          do: Application.put_env(:arbiter, Arbiter.MCP, prior),
+          else: Application.delete_env(:arbiter, Arbiter.MCP)
+      end)
+
+      assert {:ok, argv} = Codex.default_argv("the prompt", arb_token: "tok")
+      overrides = for ["-c", v] <- Enum.chunk_every(argv, 2, 1), do: v
+      name = Arbiter.MCP.server_name()
+
+      assert "mcp_servers.#{name}.url=#{inspect(Arbiter.MCP.server_url())}" in overrides
+      assert "mcp_servers.#{name}.bearer_token_env_var=\"ARBITER_MCP_TOKEN\"" in overrides
+      # the token itself never lands in argv
+      refute Enum.any?(argv, &(is_binary(&1) and &1 =~ "tok\""))
+    end
+
+    test "no MCP -c overrides without a worker token", %{tmp: tmp} do
+      _codex = stub_codex(tmp)
+
+      assert {:ok, argv} = Codex.default_argv("the prompt", [])
+      refute Enum.any?(argv, &(is_binary(&1) and &1 =~ "mcp_servers."))
+    end
+
     test "passes through `:model` opt as `-m <name>`", %{tmp: tmp} do
       _codex = stub_codex(tmp)
 
@@ -215,6 +245,27 @@ defmodule Arbiter.Agents.CodexTest do
 
     test "returns [] when no api key is configured (ambient ChatGPT auth via CODEX_HOME)" do
       assert Codex.spawn_env([]) == []
+    end
+  end
+
+  describe "spawn_env/1 arb_token" do
+    test "adds ARBITER_MCP_TOKEN when :arb_token is a non-empty string" do
+      assert {"ARBITER_MCP_TOKEN", "tok-1"} in Codex.spawn_env(
+               api_key: "sk-x",
+               arb_token: "tok-1"
+             )
+    end
+
+    test "omits ARBITER_MCP_TOKEN for nil or empty :arb_token" do
+      refute Enum.any?(
+               Codex.spawn_env(api_key: "sk-x", arb_token: nil),
+               &(elem(&1, 0) == "ARBITER_MCP_TOKEN")
+             )
+
+      refute Enum.any?(
+               Codex.spawn_env(api_key: "sk-x", arb_token: ""),
+               &(elem(&1, 0) == "ARBITER_MCP_TOKEN")
+             )
     end
   end
 
@@ -507,6 +558,32 @@ defmodule Arbiter.Agents.CodexTest do
                "sess-123",
                "continue prompt"
              ]
+    end
+  end
+
+  # Test config points the codex home at a nonexistent dir, so the backend is
+  # :unknown and nothing is validated — see Codex.ModelCatalogTest for that.
+  describe "Config.model_for_tier/1 with no codex home" do
+    setup do
+      on_exit(fn -> Codex.Config.clear() end)
+      :ok
+    end
+
+    test "a tier_models override takes precedence over the built-in defaults" do
+      Codex.Config.put_active(%{
+        "tier_models" => %{"economy" => "custom-mini", "flagship" => "custom-pro"}
+      })
+
+      assert Codex.Config.model_for_tier("economy") == "custom-mini"
+      assert Codex.Config.model_for_tier("flagship") == "custom-pro"
+      assert Codex.Config.model_for_tier("standard") == "gpt-5.6-terra"
+    end
+
+    test "falls back to the built-in defaults" do
+      Codex.Config.put_active(%{})
+
+      assert Codex.Config.model_for_tier("economy") == "gpt-5.6-luna"
+      assert Codex.Config.model_for_tier("flagship") == "gpt-5.6-terra"
     end
   end
 

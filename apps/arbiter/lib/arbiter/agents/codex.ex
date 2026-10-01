@@ -88,10 +88,10 @@ defmodule Arbiter.Agents.Codex do
   def default_argv(prompt, opts \\ []) when is_binary(prompt) do
     case resolve_executable() do
       {:ok, codex} ->
-        flags =
-          sandbox_argv(security_policy(opts)) ++ model_flag(opts)
-
-        build_argv(codex, prompt, flags)
+        with {:ok, model_flags} <- model_flag(opts) do
+          flags = sandbox_argv(security_policy(opts)) ++ model_flags ++ mcp_argv(opts)
+          build_argv(codex, prompt, flags)
+        end
 
       {:error, _} = err ->
         err
@@ -286,10 +286,24 @@ defmodule Arbiter.Agents.Codex do
 
   @impl true
   def spawn_env(opts \\ []) do
-    case Keyword.get(opts, :api_key) || Config.resolve_api_key() do
-      key when is_binary(key) and key != "" -> [{"OPENAI_API_KEY", key}]
-      _ -> []
-    end
+    env = []
+
+    # Set OPENAI_API_KEY for auth
+    env =
+      case Keyword.get(opts, :api_key) || Config.resolve_api_key() do
+        key when is_binary(key) and key != "" -> [{"OPENAI_API_KEY", key} | env]
+        _ -> env
+      end
+
+    # Set ARBITER_MCP_TOKEN for the MCP server bearer_token_env_var (if using env-var mode).
+    # The token is minted as a worker scope token in dispatch and passed via :arb_token.
+    env =
+      case Keyword.get(opts, :arb_token) do
+        token when is_binary(token) and token != "" -> [{"ARBITER_MCP_TOKEN", token} | env]
+        _ -> env
+      end
+
+    Enum.reverse(env)
   end
 
   @impl true
@@ -424,6 +438,32 @@ defmodule Arbiter.Agents.Codex do
 
   defp sandbox_argv(_policy), do: ["--dangerously-bypass-approvals-and-sandbox"]
 
+  # Codex only loads `<worktree>/.codex/config.toml` when the project is trusted
+  # in `$CODEX_HOME/config.toml`, so MCP was silently absent in untrusted repos.
+  # `-c` overrides apply regardless of trust. The bearer stays off argv: it is
+  # read from `ARBITER_MCP_TOKEN` (see `spawn_env/1`).
+  @doc false
+  def mcp_argv(opts) do
+    case Keyword.get(opts, :arb_token) do
+      token when is_binary(token) and token != "" ->
+        if Arbiter.MCP.inject_config?() do
+          name = Arbiter.MCP.server_name()
+
+          [
+            "-c",
+            "mcp_servers.#{name}.url=#{inspect(Arbiter.MCP.server_url())}",
+            "-c",
+            "mcp_servers.#{name}.bearer_token_env_var=\"ARBITER_MCP_TOKEN\""
+          ]
+        else
+          []
+        end
+
+      _ ->
+        []
+    end
+  end
+
   # workspace-write disables network by default; opt back in when the policy's
   # sandbox allows it (workers need it for git push / package installs).
   defp network_config(%SecurityPolicy{sandbox: %{network: true}}),
@@ -440,10 +480,20 @@ defmodule Arbiter.Agents.Codex do
     end
   end
 
+  # Tier-map models are already validated (and substituted) by
+  # `Config.model_for_tier/1`. A model the caller named explicitly is not
+  # silently swapped: one the account provably cannot call fails the dispatch
+  # here, before a doomed spawn.
   defp model_flag(opts) do
     case resolved_model(opts) do
-      nil -> []
-      model when is_binary(model) -> ["-m", model]
+      nil ->
+        {:ok, []}
+
+      model when is_binary(model) ->
+        case Config.validate_model(model) do
+          :ok -> {:ok, ["-m", model]}
+          {:error, why} -> {:error, {:model_unavailable, model, why}}
+        end
     end
   end
 

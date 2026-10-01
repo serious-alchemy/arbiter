@@ -280,6 +280,10 @@ config :arbiter, :cloud_code_quota, enabled: false
 config :arbiter, :codex_quota, auth_path: "/nonexistent/codex/auth.json"
 config :arbiter, :codex_quota_http_stub, true
 
+# Codex model pre-flight reads models_cache.json / auth.json / config.toml from
+# the codex home; never let a test read the operator's real ~/.codex.
+config :arbiter, :codex_model_catalog, codex_home: "/nonexistent/codex-home"
+
 # The Codex argv auth probe is a real model turn on the operator's quota. Fail
 # closed in test: tests that need the argv shape opt in via Application.put_env.
 config :arbiter, :codex_argv_probe, false

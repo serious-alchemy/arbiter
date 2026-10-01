@@ -163,6 +163,8 @@ defmodule Arbiter.Loop.FailureClassifier do
     # soft-deny. The policy did its job; nothing about the agent's work is
     # implied, so it is operational (a policy/allowlist question).
     permission_denied: {:operational, :permission_denied},
+    # bd-2s755v: the CLI's account rejected its `-m` model before any work.
+    model_unavailable: {:operational, :model_unavailable},
     # Commit-gate parks (bd-apwfmy). Not `StopReason` categories — the
     # subprocess exited cleanly and the *work* is what failed — but they share
     # the column because they are the run's typed terminal cause, and they are

@@ -309,7 +309,9 @@ defmodule Arbiter.Worker.ReviewGate do
     :spawn_exec_failed,
     :stream_schema_drift,
     :agent_print_timeout,
-    :killed
+    :killed,
+    # bd-2s755v: a re-prompt sends the same rejected `-m` model.
+    :model_unavailable
   ]
 
   @verdict_approve ~r/^\s*VERDICT:\s*APPROVE\b/im
@@ -4867,7 +4869,7 @@ defmodule Arbiter.Worker.ReviewGate do
           workspace: ws,
           worktree_path: session_cwd(state, role),
           timeout_ms: state.timeout_ms
-        ]
+        ] ++ arb_token_opts(state, role)
 
     session_model = resolved_model_for(adapter, agent_opts)
 

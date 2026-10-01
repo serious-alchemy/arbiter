@@ -1381,6 +1381,47 @@ defmodule Arbiter.Worker.DispatchTest do
       refute File.exists?(Path.join(result.worktree_path, ".mcp.json"))
     end
 
+    test "codex dispatch puts ARBITER_MCP_TOKEN in the spawn env (bd-6mo6be)",
+         %{ws: ws, tmp: tmp} do
+      claude_file = Path.join(tmp, "claude-argv.txt")
+      env_file = Path.join(tmp, "codex-env.txt")
+      :ok = stub_claude_on_path(tmp, claude_file)
+
+      stub_dir = Path.join(tmp, "stub-bin")
+      File.mkdir_p!(stub_dir)
+      stub = Path.join(stub_dir, "codex")
+      File.write!(stub, "#!/bin/sh\necho \"$ARBITER_MCP_TOKEN\" >> #{env_file}\nexit 0\n")
+      File.chmod!(stub, 0o755)
+      old_path = System.get_env("PATH") || ""
+      System.put_env("PATH", "#{stub_dir}:#{old_path}")
+      on_exit(fn -> System.put_env("PATH", old_path) end)
+
+      repo = seed_repo!(tmp, "codex-env-repo")
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "codex-env-wt"))
+      put_app_env(:arbiter, :repo_paths, %{"codexenv/repo" => repo})
+      enable_mcp_injection!()
+
+      {:ok, task} = Ash.create(Issue, %{title: "codex env task", workspace_id: ws.id})
+
+      {:ok, result} =
+        Dispatch.dispatch(task.id,
+          force: true,
+          repo: "codexenv/repo",
+          start_driver: false,
+          start_claude: true,
+          agent_type: :codex,
+          preflight: false
+        )
+
+      _ = wait_for_argv!(env_file)
+      token = env_file |> File.read!() |> String.trim()
+      assert token != ""
+
+      toml = File.read!(Path.join(result.worktree_path, ".codex/config.toml"))
+      assert toml =~ ~s(bearer_token_env_var = "ARBITER_MCP_TOKEN")
+      refute toml =~ token
+    end
+
     test "codex dispatch runs a post-spawn MCP connect check and logs loudly on failure (bd-bi5t54)",
          %{ws: ws, tmp: tmp} do
       claude_file = Path.join(tmp, "claude-argv.txt")

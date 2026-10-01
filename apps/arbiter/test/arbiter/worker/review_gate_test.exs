@@ -71,6 +71,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
   @hang Path.expand("../../fixtures/review_hang.sh", __DIR__)
   @auth_expired Path.expand("../../fixtures/review_auth_expired.sh", __DIR__)
   @quota_exhausted Path.expand("../../fixtures/review_quota_exhausted.sh", __DIR__)
+  @model_unavailable Path.expand("../../fixtures/review_model_unavailable.sh", __DIR__)
   @session_limit Path.expand("../../fixtures/review_session_limit.sh", __DIR__)
   @print_timeout Path.expand("../../fixtures/review_print_timeout.sh", __DIR__)
   @long_findings Path.expand("../../fixtures/review_long_findings.sh", __DIR__)
@@ -2310,6 +2311,51 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
       refute Enum.any?(runs, &(&1.task_id == reprompt_id)),
              "did not expect a re-prompt run row for a quota-exhaustion crash"
+    end
+
+    # bd-2s755v: a Codex reviewer whose `-m` model the account rejects (400/404)
+    # fails identically on every re-prompt.
+    test "a reviewer whose model the account rejects escalates with the real reason, no re-prompt",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      branch = "feature/rev-model-unavailable"
+      :ok = seed_feature_branch(repo, branch)
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{task.id}",
+        review_required: true,
+        worktree_path: repo,
+        review_command: [@model_unavailable],
+        review_timeout_ms: 5_000
+      }
+
+      {:ok, pid} =
+        Worker.start(task_id: task.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        6_000
+      )
+
+      assert merge_commit_count(repo) == 0
+
+      escalation =
+        Enum.find(Message.inbox("admiral", workspace_id: ws.id), &(&1.directive_ref == task.id))
+
+      assert escalation, "expected an escalation for the task"
+      assert escalation.body =~ "gpt-5.4-mini"
+
+      reprompt_id = ReviewGate.reviewer_task_id(task.id) <> "#v2"
+
+      refute Enum.any?(Ash.read!(Arbiter.Workers.Run), &(&1.task_id == reprompt_id)),
+             "did not expect a re-prompt run row for a rejected model"
     end
 
     # bd-1xss5z: agy's own internal --print-timeout fires mid-review and agy

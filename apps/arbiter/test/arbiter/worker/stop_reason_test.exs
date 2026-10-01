@@ -944,4 +944,46 @@ defmodule Arbiter.Worker.StopReasonTest do
                StopReason.label(StopReason.classify(nil, []))
     end
   end
+
+  describe "classify/3 — Codex model unavailable (bd-2s755v)" do
+    # The `turn.failed` event a ChatGPT free account's `codex exec` emitted
+    # for `-m gpt-5.4-mini` (from a 2026-09-08 rollout on the arbiter host).
+    @real_400 ~s({"type":"turn.failed","error":{"message":"{\\"type\\":\\"error\\",\\"status\\":400,\\"error\\":{\\"type\\":\\"invalid_request_error\\",\\"message\\":\\"The 'gpt-5.4-mini' model is not supported when using Codex with a ChatGPT account.\\"}}"}})
+
+    defp rendered(json) do
+      json
+      |> Jason.decode!()
+      |> Arbiter.Agents.Codex.Stream.format_event()
+      |> Enum.map(fn {line, _} -> line end)
+    end
+
+    test "the real 400 for a model a ChatGPT account cannot use" do
+      reason = StopReason.classify(1, rendered(@real_400), "codex")
+
+      assert reason.category == :model_unavailable
+      assert reason.summary =~ "gpt-5.4-mini"
+      assert reason.remediation =~ "tier_models"
+      assert StopReason.label(reason) =~ "model unavailable"
+    end
+
+    test "the 404 for a listed model the plan cannot call" do
+      lines = [
+        "⚠ codex: unexpected status 404 Not Found: The model `gpt-5.5` does not exist " <>
+          "or you do not have access to it."
+      ]
+
+      reason = StopReason.classify(1, lines, "codex")
+      assert reason.category == :model_unavailable
+      assert reason.summary =~ "gpt-5.5"
+    end
+
+    test "a clean exit is not a model failure" do
+      refute StopReason.classify(0, rendered(@real_400), "codex").category == :model_unavailable
+    end
+
+    test "the text inside a tool result is not the session's own failure" do
+      lines = ["⏴ " <> hd(rendered(@real_400))]
+      refute StopReason.classify(1, lines, "codex").category == :model_unavailable
+    end
+  end
 end

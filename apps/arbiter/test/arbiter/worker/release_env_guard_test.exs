@@ -83,6 +83,8 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
     @release_env_source => :helper,
     "apps/arbiter/lib/arbiter/worker/claude_session.ex" => :scrubbed,
     "apps/arbiter/lib/arbiter/agents/preflight.ex" => :scrubbed,
+    # bd-6mo6be: worker-side `codex mcp list --json` check, via `ReleaseEnv.cmd/3`.
+    "apps/arbiter/lib/arbiter/mcp/agent_config/codex.ex" => :scrubbed,
     "apps/arbiter/lib/arbiter/worker/worktree.ex" => :scrubbed,
     "apps/arbiter/lib/arbiter/workflows/code_review/checks.ex" => :scrubbed,
     "apps/arbiter/lib/arbiter/workflows/review_reply.ex" => :scrubbed,
