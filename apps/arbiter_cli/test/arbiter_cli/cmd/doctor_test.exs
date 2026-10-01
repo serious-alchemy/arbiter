@@ -620,7 +620,9 @@ defmodule ArbiterCli.Cmd.DoctorTest do
            [] ->
              conn
              |> Plug.Conn.put_status(401)
-             |> Req.Test.json(%{"error" => %{"message" => "Authorization: Bearer <token> required"}})
+             |> Req.Test.json(%{
+               "error" => %{"message" => "Authorization: Bearer <token> required"}
+             })
 
            _ ->
              {body, status} = accepted

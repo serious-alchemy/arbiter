@@ -1294,7 +1294,10 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   # The status a probe was *served* with, or nil when the server refused it
   # (401/403) or could not be asked at all.
   defp accepted_status({:ok, _body}), do: 200
-  defp accepted_status({:error, %Client.Error{kind: :http, status: s}}) when s in [401, 403], do: nil
+
+  defp accepted_status({:error, %Client.Error{kind: :http, status: s}}) when s in [401, 403],
+    do: nil
+
   defp accepted_status({:error, %Client.Error{kind: :http, status: s}}) when s in 200..499, do: s
   defp accepted_status({:error, _}), do: nil
 

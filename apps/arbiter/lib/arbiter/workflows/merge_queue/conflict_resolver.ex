@@ -567,8 +567,8 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
             agent_type: provider
           )
 
+        # bd-asawcq: the worker token doubles as the agent's ARB_TOKEN.
         session_opts =
-          # bd-asawcq: the worker token doubles as the agent's ARB_TOKEN.
           ([
              owner: worker_pid,
              worktree_path: worktree_path

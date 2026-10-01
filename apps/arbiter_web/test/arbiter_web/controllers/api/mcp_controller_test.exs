@@ -47,7 +47,10 @@ defmodule ArbiterWeb.Api.McpControllerTest do
 
       assert %{"valid" => true, "tier" => "coordinator"} =
                Phoenix.ConnTest.build_conn()
-               |> put_req_header("authorization", "Bearer #{Scope.mint_worker(%{id: "bd-v", workspace_id: "ws-v"})}")
+               |> put_req_header(
+                 "authorization",
+                 "Bearer #{Scope.mint_worker(%{id: "bd-v", workspace_id: "ws-v"})}"
+               )
                |> post("/api/mcp/tokens/verify", %{"token" => token})
                |> json_response(200)
     end

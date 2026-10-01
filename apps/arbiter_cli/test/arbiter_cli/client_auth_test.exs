@@ -18,7 +18,9 @@ defmodule ArbiterCli.ClientAuthTest do
 
   setup do
     # A worker shell exports its own ARB_TOKEN; these tests decide it.
-    saved = Map.new(~w(ARB_TOKEN ARB_HOST ARB_SESSION_ID ARB_SESSION_ROOT), &{&1, System.get_env(&1)})
+    saved =
+      Map.new(~w(ARB_TOKEN ARB_HOST ARB_SESSION_ID ARB_SESSION_ROOT), &{&1, System.get_env(&1)})
+
     Enum.each(Map.keys(saved), &System.delete_env/1)
 
     on_exit(fn ->
@@ -37,7 +39,11 @@ defmodule ArbiterCli.ClientAuthTest do
     owner = self()
 
     Req.Test.stub(Process.get(:bd2_stub_name), fn conn ->
-      send(owner, {:auth, conn.method, conn.request_path, Plug.Conn.get_req_header(conn, "authorization")})
+      send(
+        owner,
+        {:auth, conn.method, conn.request_path, Plug.Conn.get_req_header(conn, "authorization")}
+      )
+
       conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"data" => []})
     end)
   end
@@ -79,7 +85,11 @@ defmodule ArbiterCli.ClientAuthTest do
 
       Req.Test.stub(Process.get(:bd2_stub_name), fn conn ->
         n = Agent.get_and_update(calls, &{&1, &1 + 1})
-        send(owner, {:auth, conn.method, conn.request_path, Plug.Conn.get_req_header(conn, "authorization")})
+
+        send(
+          owner,
+          {:auth, conn.method, conn.request_path, Plug.Conn.get_req_header(conn, "authorization")}
+        )
 
         if n == 0 do
           conn
@@ -98,7 +108,10 @@ defmodule ArbiterCli.ClientAuthTest do
 
     test "a refused mint sends the request unauthenticated and explains a 401" do
       FakeOperatorSocket.start!(%{
-        "error" => %{"message" => "operator proof refused: spawned by arbiter", "reason" => "spawned_by_arbiter"}
+        "error" => %{
+          "message" => "operator proof refused: spawned by arbiter",
+          "reason" => "spawned_by_arbiter"
+        }
       })
 
       Req.Test.stub(Process.get(:bd2_stub_name), fn conn ->
@@ -181,7 +194,9 @@ defmodule ArbiterCli.ClientAuthTest do
     requests = run_verbs()
 
     assert length(requests) >= length(@verbs)
-    assert Enum.all?(requests, fn {_, _, auth} -> auth == ["Bearer minted-tok"] end), inspect(requests)
+
+    assert Enum.all?(requests, fn {_, _, auth} -> auth == ["Bearer minted-tok"] end),
+           inspect(requests)
   end
 
   test "every verb authenticates with ARB_TOKEN when it is set" do
@@ -193,6 +208,8 @@ defmodule ArbiterCli.ClientAuthTest do
 
     refute_receive {:operator_request, _}
     assert length(requests) >= length(@verbs)
-    assert Enum.all?(requests, fn {_, _, auth} -> auth == ["Bearer explicit-tok"] end), inspect(requests)
+
+    assert Enum.all?(requests, fn {_, _, auth} -> auth == ["Bearer explicit-tok"] end),
+           inspect(requests)
   end
 end

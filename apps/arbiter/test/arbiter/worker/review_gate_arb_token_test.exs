@@ -90,7 +90,8 @@ defmodule Arbiter.Worker.ReviewGateArbTokenTest do
 
     assert File.read!(reviewer_file) == "<unset>"
 
-    assert {:ok, %Scope{tier: :worker, task_id: task_id, workspace_id: ws_id, can_dispatch: false}} =
+    assert {:ok,
+            %Scope{tier: :worker, task_id: task_id, workspace_id: ws_id, can_dispatch: false}} =
              Scope.from_token(File.read!(implementer_file))
 
     assert task_id == task.id
