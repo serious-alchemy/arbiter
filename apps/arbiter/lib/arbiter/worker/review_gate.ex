@@ -171,7 +171,6 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Reviews.ConflictResolution
   alias Arbiter.Reviews.ConflictReview
   alias Arbiter.Reviews.Coverage
-  alias Arbiter.Reviews.Coverage.Entry, as: CoverageEntry
   alias Arbiter.Reviews.PushState
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
@@ -5789,7 +5788,7 @@ defmodule Arbiter.Worker.ReviewGate do
          {:ok, head} <- reviewed_head(state),
          true <- head == info.head or {:error, :head_moved},
          {:ok, net_diff_id} <- coverage_net_diff_id(state),
-         %CoverageEntry{id: parent} <-
+         %{id: parent} <-
            Enum.find(Coverage.for_mr(mr_ref), &(&1.head_sha == info.approved)) ||
              {:error, :no_approved_row},
          {:ok, _entry} <-
