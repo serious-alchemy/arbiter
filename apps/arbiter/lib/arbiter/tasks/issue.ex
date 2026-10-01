@@ -298,8 +298,20 @@ defmodule Arbiter.Tasks.Issue do
       # Best-effort; no-op when neither field changed or no tracker.
       change {Arbiter.Tasks.Issue.Changes.SyncFields, []}
 
-      change after_action(fn _, issue, _ ->
+      change after_action(fn changeset, issue, _ ->
                Arbiter.Tasks.Issue.broadcast_lifecycle(:updated, issue)
+
+               # An epic retyped away from `:epic` no longer matches the
+               # `:epic` check in `broadcast_lifecycle/2`, but the epic
+               # badge still has to drop it (bd-cixhhs).
+               if Map.get(changeset.data, :issue_type) == :epic and issue.issue_type != :epic do
+                 Phoenix.PubSub.broadcast(
+                   Arbiter.PubSub,
+                   Arbiter.Tasks.Issue.epics_topic(),
+                   {:epic_lifecycle, :updated, issue}
+                 )
+               end
+
                {:ok, issue}
              end)
     end
@@ -1012,10 +1024,23 @@ defmodule Arbiter.Tasks.Issue do
     end
   end
 
+  @epics_topic "tasks:epics"
+
+  @doc """
+  PubSub topic carrying only epic lifecycle events (as `{:epic_lifecycle, event, issue}`),
+  plus an epic's retype away from `:epic`. Chrome that only needs the open-epic
+  count subscribes here so it doesn't double-subscribe a page to `"tasks"`.
+  """
+  def epics_topic, do: @epics_topic
+
   @doc false
   def broadcast_lifecycle(event, issue)
       when event in [:created, :updated, :closed, :reopened, :awaiting_verification] do
     Phoenix.PubSub.broadcast(Arbiter.PubSub, "tasks", {:task_lifecycle, event, issue})
+
+    if Map.get(issue, :issue_type) == :epic do
+      Phoenix.PubSub.broadcast(Arbiter.PubSub, @epics_topic, {:epic_lifecycle, event, issue})
+    end
 
     if ws_id = Map.get(issue, :workspace_id) do
       Arbiter.Events.broadcast(
