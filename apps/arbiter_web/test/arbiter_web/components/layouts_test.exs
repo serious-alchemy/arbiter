@@ -57,6 +57,7 @@ defmodule ArbiterWeb.LayoutsTest do
                {"Run history", "/workers/history"},
                {"Sessions", "/sessions"},
                {"Usage", "/usage"},
+               {"Reports", "/reports"},
                {"Reviews", "/reviews"},
                {"Audit", "/audit"},
                {"Workspaces", "/workspaces"},

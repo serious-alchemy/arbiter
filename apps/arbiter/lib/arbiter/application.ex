@@ -228,7 +228,9 @@ defmodule Arbiter.Application do
       Arbiter.Quota.QuotaCache,
       # Owns the ETS table memoizing `Arbiter.Usage.Estimate.sample/1`
       # (bd-3d1zge) — see that module's docs.
-      Arbiter.Usage.EstimateCache
+      Arbiter.Usage.EstimateCache,
+      # Owns the ETS table memoizing `/reports` results (bd-an8t0e).
+      Arbiter.Reports.Cache
     ] ++
       resume_gate(auto_start?) ++
       [
