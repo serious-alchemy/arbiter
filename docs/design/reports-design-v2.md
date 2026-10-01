@@ -331,6 +331,22 @@ transaction, using `changeset.data.state` for `from_state`. Plus `:create`
 Idempotent no-op transitions (`promote_to_ready` on an already-queued ticket)
 write nothing, because `state` did not change.
 
+> **As built (bd-5gkqdr):** the writer is two SQLite triggers on `issues`
+> (`AFTER INSERT`, `AFTER UPDATE OF state WHEN OLD.state IS NOT NEW.state`),
+> not an `after_action`. AshSqlite opens no transaction around an action
+> (`can?(_, :transact)` is false), so an `after_action` insert would be a
+> separate write: a failing insert could not roll the transition back, and
+> wrapping the action in `Repo.transaction` would hold SQLite's write lock
+> across `StopWorker`, the tracker HTTP sync and the pre-commit broadcasts. A
+> trigger runs inside the state write's own statement. It names the transition
+> by its `(from, to)` pair — unique in the lifecycle table, so the legacy doors
+> record the transition they apply (`promote_to_ready` → `promote`, `pr_closed`
+> → `return_to_work`); an off-table pair from a raw write is `unnamed`. `at` is
+> `created_at` / `updated_at` (else the DB clock), clamped to be no earlier than
+> the ticket's previous row; ties order by `rowid`. The Dolt importer and any
+> raw writer are covered with no code of their own. `origin` stays null on live
+> rows — no transition action takes `change_origin` today.
+
 **Backfill.** Feasible and cheap: §3 — the whole replay is ~0.1 s for 15 K
 versions. It produces rows with `source: "backfill"`, `at = version_inserted_at`,
 and an unknown `origin`. Era-A transitions that the paper trail stamped with

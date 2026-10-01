@@ -38,6 +38,9 @@ defmodule Arbiter.Tasks do
     resource Arbiter.Tasks.Dependency.Version
     # bd-cq1wsp: one row per stretch of a ticket's attention, for reports.
     resource Arbiter.Tasks.AttentionSpan
+    # One row per change of a ticket's lifecycle state (bd-5gkqdr), written by
+    # triggers on `issues`; the history every report reads.
+    resource Arbiter.Tasks.TicketTransition
   end
 
   require Ash.Query

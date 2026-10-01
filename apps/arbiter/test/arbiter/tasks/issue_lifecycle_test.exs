@@ -9,7 +9,8 @@ defmodule Arbiter.Tasks.IssueLifecycleTest do
 
   require Ash.Query
 
-  alias Arbiter.Tasks.{Issue, Lifecycle, Workspace}
+  alias Arbiter.Tasks.{Issue, Lifecycle, TicketTransition, Workspace}
+  alias Arbiter.TicketTransitionsInvariant
 
   # The ticket's transition table, spelled out here rather than read from
   # `Lifecycle`, so the enumeration below checks the actions against the
@@ -103,14 +104,24 @@ defmodule Arbiter.Tasks.IssueLifecycleTest do
           for from <- @states, to <- @states, {transition, ^to} <- @targets do
             issue = in_state(ws, from, %{issue_type: unquote(issue_type)})
 
+            before = TicketTransition.for_ticket!(issue.id)
+
             outcome =
               case Ash.update(issue, %{}, action: transition) do
-                {:ok, %Issue{state: ^to}} ->
+                {:ok, %Issue{state: ^to} = moved} ->
+                  # bd-5gkqdr: exactly one transition row, naming the move.
+                  assert [row] = TicketTransition.for_ticket!(issue.id) -- before
+
+                  assert {row.transition, row.from_state, row.to_state} ==
+                           {"#{transition}", from, to}
+
+                  assert row.at == moved.updated_at
                   :ok
 
                 {:error, %Ash.Error.Invalid{}} ->
                   # Refused, and nothing was written.
                   assert reload(issue).state == from
+                  assert TicketTransition.for_ticket!(issue.id) == before
                   :error
 
                 other ->
@@ -127,6 +138,10 @@ defmodule Arbiter.Tasks.IssueLifecycleTest do
 
         # 6 from-states × the 9 (transition, target) pairs.
         assert length(results) == 54
+
+        # bd-5gkqdr (AC3): every ticket the matrix walked ends its transition
+        # history in the state it is stored in.
+        assert TicketTransitionsInvariant.assert_holds!(ws.id) == 54
       end
     end
 
@@ -321,6 +336,26 @@ defmodule Arbiter.Tasks.IssueLifecycleTest do
 
       {:ok, renamed} = Ash.update(merging, %{title: "renamed", pr_ref: nil})
       assert renamed.state == :merging
+    end
+
+    test "every door keeps the transition history ending in the stored state (bd-5gkqdr)",
+         %{ws: ws} do
+      {:ok, _} = ws |> ticket() |> Ash.update(%{}, action: :promote_to_ready)
+      {:ok, q} = ws |> in_state(:queued) |> Ash.update(%{}, action: :promote_to_ready)
+      {:ok, _} = Ash.update(q, %{}, action: :return_to_backlog)
+      {:ok, _} = ws |> in_state(:merging) |> Ash.update(%{}, action: :return_to_backlog)
+      {:ok, _} = ws |> in_state(:active) |> Ash.update(%{}, action: :requeue)
+      {:ok, _} = Issue.start_work(ticket(ws))
+      {:ok, _} = ws |> in_state(:merging) |> Ash.update(%{detail: "gone"}, action: :pr_closed)
+      {:ok, _} = ws |> in_state(:active) |> Ash.update(%{}, action: :pr_closed)
+      {:ok, _} = ws |> in_state(:merging) |> Ash.update(%{title: "renamed"})
+
+      {:ok, _} =
+        ws
+        |> in_state(:verifying, %{verify_after_deploy: true})
+        |> Arbiter.Tasks.Verification.observed("restarted; it works")
+
+      assert TicketTransitionsInvariant.assert_holds!(ws.id) == 9
     end
   end
 

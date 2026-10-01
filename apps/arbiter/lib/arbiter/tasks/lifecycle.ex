@@ -62,6 +62,11 @@ defmodule Arbiter.Tasks.Lifecycle do
     * `:create`, which always lands in `:backlog`;
     * the rows written around Ash — the lifecycle migration's backfill and
       the Dolt importer (`Arbiter.Tasks.DoltImport.Mapper`).
+
+  Every one of them leaves a `ticket_transitions` row
+  (`Arbiter.Tasks.TicketTransition`, bd-5gkqdr): triggers on `issues` record
+  each change of `state` in the same statement, naming it by its `(from, to)`
+  pair in this table.
   """
 
   @states [:backlog, :queued, :active, :merging, :verifying, :closed]

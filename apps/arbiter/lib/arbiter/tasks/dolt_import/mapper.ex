@@ -159,6 +159,9 @@ defmodule Arbiter.Tasks.DoltImport.Mapper do
       # notion of a refined ticket). Ecto.insert_all needs the raw DB type, so
       # the atom goes in as a string. `rank` stays at the column's 0 — an
       # imported ticket predates everything created here.
+      # bd-5gkqdr: the insert trigger on `issues` writes this row's creation
+      # `ticket_transitions` row (`nil → state`, at `created_at`), and the
+      # update trigger records every state `status_sync/2` moves.
       state: Atom.to_string(state_for(status)),
       close_reason: if(status == :closed, do: "completed"),
       priority: parse_priority(row["priority"]),
