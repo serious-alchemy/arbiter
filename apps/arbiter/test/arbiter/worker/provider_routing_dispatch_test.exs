@@ -215,8 +215,8 @@ defmodule Arbiter.Worker.ProviderRoutingDispatchTest do
     end
 
     for {difficulty, codex_model, claude_model} <- [
-          {1, "gpt-5-codex-mini", "haiku"},
-          {4, "gpt-5-codex", "opus"}
+          {1, "gpt-5.6-luna", "haiku"},
+          {4, "gpt-5.6-terra", "opus"}
         ] do
       test "D#{difficulty}: the tier's model is spawned within whichever family wins", %{
         sandbox: sandbox
