@@ -3031,4 +3031,109 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       refute has_element?(view, "#refine-session-transcript-link")
     end
   end
+
+  describe "provider icons on runs (bd-7he5xm)" do
+    test "renders provider icons in the run roster when runs have providers", %{
+      conn: conn,
+      ws: ws
+    } do
+      {:ok, task} = Ash.create(Issue, %{title: "with-provider-runs", workspace_id: ws.id})
+
+      {:ok, _claude_run} =
+        Ash.create(Run, %{
+          task_id: task.id,
+          task_title: task.title,
+          repo: "arbiter",
+          workspace_id: ws.id,
+          started_at: DateTime.add(DateTime.utc_now(), -120, :second),
+          completed_at: DateTime.utc_now(),
+          state: :finished,
+          outcome: :succeeded,
+          role: "impl",
+          provider: "claude"
+        })
+
+      {:ok, _codex_run} =
+        Ash.create(Run, %{
+          task_id: task.id,
+          task_title: task.title,
+          repo: "arbiter",
+          workspace_id: ws.id,
+          started_at: DateTime.add(DateTime.utc_now(), -60, :second),
+          completed_at: DateTime.utc_now(),
+          state: :finished,
+          outcome: :succeeded,
+          role: "review",
+          provider: "codex"
+        })
+
+      {:ok, view, html} = live_task(conn, ~p"/tasks/#{task.id}")
+
+      # Check that panel-runs exists
+      assert html =~ ~s(id="panel-runs")
+
+      # Use LazyHTML to verify the provider icons are present
+      doc = LazyHTML.from_fragment(html)
+      claude_icons = LazyHTML.query(doc, "svg[aria-label=\"Claude\"]")
+      codex_icons = LazyHTML.query(doc, "svg[aria-label=\"Codex\"]")
+
+      assert Enum.count(claude_icons) > 0, "Claude provider icon should be present"
+      assert Enum.count(codex_icons) > 0, "Codex provider icon should be present"
+    end
+
+    test "shows provider icon and name in expanded transcript header", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "expanded-transcript", workspace_id: ws.id})
+
+      {:ok, run} =
+        Ash.create(Run, %{
+          task_id: task.id,
+          task_title: task.title,
+          repo: "arbiter",
+          workspace_id: ws.id,
+          model: "claude-opus",
+          started_at: DateTime.add(DateTime.utc_now(), -120, :second),
+          completed_at: DateTime.utc_now(),
+          state: :finished,
+          outcome: :succeeded,
+          role: "impl",
+          provider: "claude"
+        })
+
+      {:ok, view, html} = live_task(conn, ~p"/tasks/#{task.id}")
+
+      # Click to expand the run's transcript
+      html = render_click(view, "toggle_run", %{"run" => run.id})
+
+      # The expanded header should show the provider icon and model
+      doc = LazyHTML.from_fragment(html)
+      claude_icons = LazyHTML.query(doc, "svg[aria-label=\"Claude\"]")
+      assert Enum.count(claude_icons) > 0, "Claude provider icon should appear in expanded header"
+      assert html =~ "claude-opus"
+    end
+
+    test "omits provider icon for runs without a provider", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "no-provider-run", workspace_id: ws.id})
+
+      {:ok, _run} =
+        Ash.create(Run, %{
+          task_id: task.id,
+          task_title: task.title,
+          repo: "arbiter",
+          workspace_id: ws.id,
+          started_at: DateTime.add(DateTime.utc_now(), -120, :second),
+          completed_at: DateTime.utc_now(),
+          state: :finished,
+          outcome: :succeeded,
+          role: "impl",
+          provider: nil
+        })
+
+      {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
+
+      doc = LazyHTML.from_fragment(html)
+      # Should not have any provider icon SVGs in the run row
+      icons = LazyHTML.query(doc, "#panel-runs svg[aria-label]")
+      assert Enum.count(icons) == 0, "No provider icon should render for runs without a provider"
+    end
+  end
 end

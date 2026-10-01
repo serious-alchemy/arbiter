@@ -2846,6 +2846,7 @@ defmodule ArbiterWeb.TaskDetailLive do
                     outcome={run_outcome(r, @live_run_id, @live_run_lines)}
                     duration={humanize_run_duration(r.started_at, r.completed_at)}
                     cost={run_cost_label(Map.get(@usage_by_run, r.id))}
+                    provider={r.provider}
                     selected={@expanded_run == r.id}
                     expanded={@expanded_run == r.id}
                     class="cursor-pointer"
@@ -2871,7 +2872,10 @@ defmodule ArbiterWeb.TaskDetailLive do
                         dom_id={"copy-id-run-#{r.id}"}
                       />
                       <span :if={present?(r.repo)}>{r.repo}</span>
-                      <span :if={present?(r.model)}>{r.model}</span>
+                      <span :if={present?(r.model)} class="flex items-center gap-1.5">
+                        <.provider_icon :if={r.provider} provider={r.provider} class="size-3.5" />
+                        {r.model}
+                      </span>
                       <span>{length(lines)} lines</span>
                       <span>started {format_started(r.started_at)}</span>
                       <span :if={run_failed?(r)} class="text-[var(--arb-fail-text)]">

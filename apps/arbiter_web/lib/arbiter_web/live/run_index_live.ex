@@ -314,6 +314,7 @@ defmodule ArbiterWeb.RunIndexLive do
                     status={ArbiterWeb.StatusHelpers.run_status(r)}
                     duration={humanize_duration(r.started_at, r.completed_at)}
                     role={ArbiterWeb.StatusHelpers.run_role(r)}
+                    provider={r.provider}
                     selected={false}
                     expanded={false}
                     class="cursor-pointer hover:bg-[var(--surface-raised)]"

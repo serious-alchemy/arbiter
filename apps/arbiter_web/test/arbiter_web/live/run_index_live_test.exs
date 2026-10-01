@@ -312,4 +312,46 @@ defmodule ArbiterWeb.RunIndexLiveTest do
 
     assert render_async(view, @async_timeout) =~ "freshly-finished"
   end
+
+  test "renders the provider icon next to runs with a provider", %{conn: conn} do
+    run(%{
+      task_id: "bd-claude-run",
+      task_title: "claude-run",
+      state: :finished,
+      outcome: :succeeded,
+      provider: "claude"
+    })
+
+    run(%{
+      task_id: "bd-codex-run",
+      task_title: "codex-run",
+      state: :finished,
+      outcome: :succeeded,
+      provider: "codex"
+    })
+
+    run(%{
+      task_id: "bd-no-provider",
+      task_title: "no-provider",
+      state: :finished,
+      outcome: :succeeded,
+      provider: nil
+    })
+
+    {:ok, _view, html} = live_runs(conn, ~p"/workers/history")
+
+    doc = LazyHTML.from_fragment(html)
+    # Claude run should show the claude provider icon
+    claude_icons = LazyHTML.query(doc, "svg[aria-label=\"Claude\"]")
+    assert Enum.count(claude_icons) > 0
+
+    # Codex run should show the codex provider icon
+    codex_icons = LazyHTML.query(doc, "svg[aria-label=\"Codex\"]")
+    assert Enum.count(codex_icons) > 0
+
+    # Verify the icons are within the runs-history container
+    assert html =~ "claude-run"
+    assert html =~ "codex-run"
+    assert html =~ "no-provider"
+  end
 end

@@ -140,4 +140,88 @@ defmodule ArbiterWeb.RunDetailLiveTest do
       refute has_element?(view, "#run-detail-loading")
     end
   end
+
+  describe "provider icon display (bd-7he5xm)" do
+    test "shows the provider icon and display name when run has a provider", %{conn: conn} do
+      r =
+        run(%{
+          task_id: "bd-provider-display",
+          task_title: "provider-display-run",
+          provider: "claude"
+        })
+
+      {:ok, _view, html} = live_run(conn, r.id)
+
+      # Check that the PROVIDER card is present
+      assert html =~ "PROVIDER"
+
+      # Use LazyHTML to verify the provider icon is present
+      doc = LazyHTML.from_fragment(html)
+      claude_icons = LazyHTML.query(doc, "svg[aria-label=\"Claude\"]")
+      assert Enum.count(claude_icons) > 0, "Claude provider icon should be present"
+
+      # Check that the display name is shown
+      assert html =~ "Claude"
+    end
+
+    test "shows 'unknown' when run has no provider", %{conn: conn} do
+      r =
+        run(%{
+          task_id: "bd-no-provider-detail",
+          task_title: "no-provider-run",
+          provider: nil
+        })
+
+      {:ok, _view, html} = live_run(conn, r.id)
+
+      # Check that the PROVIDER card is present
+      assert html =~ "PROVIDER"
+
+      # Should show "unknown" for nil provider
+      assert html =~ "unknown"
+
+      # Should not show any provider icon
+      doc = LazyHTML.from_fragment(html)
+      # (the app shell carries its own "arbiter" logo svgs, so match provider labels only)
+      icons =
+        LazyHTML.query(
+          doc,
+          ~s(svg[aria-label="Claude"], svg[aria-label="Codex"], svg[aria-label="Antigravity"], svg[aria-label="Ollama"], svg[aria-label="Unknown provider"])
+        )
+
+      assert Enum.count(icons) == 0, "No provider icon should render for nil provider"
+    end
+
+    test "displays different provider icons correctly", %{conn: conn} do
+      codex_run =
+        run(%{
+          task_id: "bd-codex-detail",
+          task_title: "codex-run",
+          provider: "codex"
+        })
+
+      {:ok, _view, html} = live_run(conn, codex_run.id)
+
+      # Use LazyHTML to verify the correct provider icon
+      doc = LazyHTML.from_fragment(html)
+      codex_icons = LazyHTML.query(doc, "svg[aria-label=\"Codex\"]")
+      assert Enum.count(codex_icons) > 0, "Codex provider icon should be present"
+      assert html =~ "Codex"
+
+      # Test with gemini/Antigravity
+      gemini_run =
+        run(%{
+          task_id: "bd-gemini-detail",
+          task_title: "gemini-run",
+          provider: "gemini"
+        })
+
+      {:ok, _view, html} = live_run(conn, gemini_run.id)
+
+      doc = LazyHTML.from_fragment(html)
+      gemini_icons = LazyHTML.query(doc, "svg[aria-label=\"Antigravity\"]")
+      assert Enum.count(gemini_icons) > 0, "Antigravity (gemini) provider icon should be present"
+      assert html =~ "Antigravity"
+    end
+  end
 end

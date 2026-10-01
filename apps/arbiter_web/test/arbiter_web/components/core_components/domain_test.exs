@@ -288,7 +288,7 @@ defmodule ArbiterWeb.CoreComponents.DomainTest do
 
     test "lays the row out on the handoff's six-track grid" do
       assert run() =~
-               "grid-cols-[84px_48px_minmax(120px,1fr)_minmax(92px,max-content)_minmax(0,max-content)_14px]"
+               "grid-cols-[84px_minmax(48px,max-content)_minmax(120px,1fr)_minmax(92px,max-content)_minmax(0,max-content)_14px]"
     end
 
     test "renders the worker id and the outcome" do
@@ -371,6 +371,56 @@ defmodule ArbiterWeb.CoreComponents.DomainTest do
 
     test "accepts a click handler through the global rest" do
       assert run(selected: false, "phx-click": "select_run") =~ ~s(phx-click="select_run")
+    end
+
+    test "renders the provider icon when provider is specified" do
+      assigns = %{
+        role: "impl",
+        worker: "w-11",
+        status: "working",
+        provider: "claude"
+      }
+
+      html =
+        rendered_to_string(~H"""
+        <ArbiterWeb.CoreComponents.Domain.run_row {assigns} />
+        """)
+
+      doc = LazyHTML.from_fragment(html)
+      assert Enum.count(LazyHTML.query(doc, "svg[aria-label=\"Claude\"]")) > 0
+    end
+
+    test "omits the provider icon when provider is nil" do
+      assigns = %{
+        role: "impl",
+        worker: "w-11",
+        status: "working",
+        provider: nil
+      }
+
+      html =
+        rendered_to_string(~H"""
+        <ArbiterWeb.CoreComponents.Domain.run_row {assigns} />
+        """)
+
+      doc = LazyHTML.from_fragment(html)
+      assert Enum.count(LazyHTML.query(doc, "svg[aria-label]")) == 0
+    end
+
+    test "omits the provider icon when provider is not given" do
+      assigns = %{
+        role: "impl",
+        worker: "w-11",
+        status: "working"
+      }
+
+      html =
+        rendered_to_string(~H"""
+        <ArbiterWeb.CoreComponents.Domain.run_row {assigns} />
+        """)
+
+      doc = LazyHTML.from_fragment(html)
+      assert Enum.count(LazyHTML.query(doc, "svg[aria-label]")) == 0
     end
   end
 
