@@ -111,6 +111,10 @@ defmodule ArbiterWeb.Router do
       # health and cost per account.
       live("/providers", ProvidersLive)
 
+      # Install-wide settings (bd-3tnoi9): scheduler cap and autopilot, the
+      # credential watchdog, theme, and a read-only About.
+      live("/settings", SettingsLive)
+
       # The loop-engineering proposal queue (bd-9j2g3x). Read + decide only —
       # nothing here applies itself.
       live("/loop", LoopProposalIndexLive)

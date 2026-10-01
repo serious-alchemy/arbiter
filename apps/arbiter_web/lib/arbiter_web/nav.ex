@@ -118,7 +118,8 @@ defmodule ArbiterWeb.Nav do
             icon: "hero-sparkles",
             badge: nil
           },
-          %{label: "Loop", href: ~p"/loop", icon: "hero-arrow-path", badge: nil}
+          %{label: "Loop", href: ~p"/loop", icon: "hero-arrow-path", badge: nil},
+          %{label: "Settings", href: ~p"/settings", icon: "hero-cog-6-tooth", badge: nil}
         ]
       }
     ]

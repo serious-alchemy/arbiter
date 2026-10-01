@@ -75,6 +75,51 @@ defmodule ArbiterWeb.BoardConcurrencyLiveTest do
     assert has_element?(view, "#board-concurrency[data-override='false']")
   end
 
+  test "a cap saved on /settings shows on the board without a refresh", %{conn: conn} do
+    board = mount_board(conn)
+    {:ok, settings, _html} = live(conn, "/settings")
+    refute slots(board) =~ "of 4"
+
+    settings
+    |> form("#settings-concurrency-form", %{"value" => "4"})
+    |> render_submit()
+
+    render_async(board, @async_timeout)
+    assert slots(board) =~ "of 4"
+    assert has_element?(board, "#board-concurrency[data-override='true']")
+  end
+
+  test "a cap saved on the board shows on /settings without a refresh", %{conn: conn} do
+    board = mount_board(conn)
+    {:ok, settings, _html} = live(conn, "/settings")
+    assert has_element?(settings, "#settings-concurrency[data-override='false']")
+
+    submit(board, "6")
+
+    assert has_element?(settings, "#settings-concurrency[data-override='true']")
+    assert has_element?(settings, "#settings-concurrency-effective", "6")
+  end
+
+  test "the board and /settings refuse the same bad value the same way", %{conn: conn} do
+    {:ok, 5} = Settings.set_conductor_system_max_concurrent(5)
+    {:ok, settings, _html} = live(conn, "/settings")
+
+    settings |> form("#settings-concurrency-form", %{"value" => "0"}) |> render_submit()
+
+    assert has_element?(
+             settings,
+             "#settings-concurrency-field",
+             ArbiterWeb.InstallationSettings.int_error()
+           )
+
+    assert Settings.conductor_system_max_concurrent() == 5
+
+    board = mount_board(conn)
+    html = board |> form("#board-concurrency-form", %{"max" => "0"}) |> render_submit()
+    assert html =~ ArbiterWeb.InstallationSettings.int_error()
+    assert Settings.conductor_system_max_concurrent() == 5
+  end
+
   for bad <- ["0", "-2", "abc", "2.5"] do
     test "rejects #{inspect(bad)} and writes nothing", %{conn: conn} do
       {:ok, _} = Settings.set_conductor_system_max_concurrent(5)
