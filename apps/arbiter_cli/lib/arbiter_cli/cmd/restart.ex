@@ -327,7 +327,8 @@ defmodule ArbiterCli.Cmd.Restart do
   @doc """
   Abort with a helpful error when any workers are actively working, unless
   `force` is true. Safe to call when the server is down: a connection error
-  means no workers can be running.
+  means no workers can be running. A server that answers 401/403 is up and
+  might have workers, so that aborts too (bd-asawcq).
 
   Shared with `arb update` (deploy) and `arb install-service`.
   """
@@ -354,6 +355,16 @@ defmodule ArbiterCli.Cmd.Restart do
               "\nPass --force to override."
           )
         end
+
+      # bd-asawcq: the server is up but refused to say (no usable token). That
+      # is "could not tell", not "nobody is working" — fail closed.
+      {:error, %Client.Error{kind: :http, status: status} = err}
+      when status in [401, 403] and not force ->
+        Output.die(
+          "could not check for active workers: #{err.message}",
+          (err.hint || "") <>
+            "\nRestarting without that check could kill in-flight work. Pass --force to override."
+        )
 
       _ ->
         # Server unreachable or unexpected response — no active workers possible.

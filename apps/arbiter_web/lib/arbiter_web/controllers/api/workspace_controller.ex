@@ -19,8 +19,20 @@ defmodule ArbiterWeb.Api.WorkspaceController do
 
   def index(conn, _params) do
     case Ash.read(Workspace) do
-      {:ok, workspaces} -> render(conn, :index, workspaces: workspaces)
+      {:ok, workspaces} -> render(conn, :index, workspaces: visible(workspaces, conn))
       {:error, _} = err -> err
+    end
+  end
+
+  # bd-asawcq: a worker or refine token is bound to one workspace and sees
+  # only that one (`arb message` resolves `ARB_WORKSPACE` through this list).
+  defp visible(workspaces, conn) do
+    case conn.assigns[:mcp_scope] do
+      %Arbiter.MCP.Scope{tier: tier, workspace_id: ws_id} when tier in [:worker, :refine] ->
+        Enum.filter(workspaces, &(&1.id == ws_id))
+
+      _ ->
+        workspaces
     end
   end
 

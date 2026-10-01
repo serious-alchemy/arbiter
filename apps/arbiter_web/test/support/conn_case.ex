@@ -51,7 +51,22 @@ defmodule ArbiterWeb.ConnCase do
   setup tags do
     Arbiter.DataCase.setup_sandbox(tags)
 
-    {:ok, conn: Phoenix.ConnTest.build_conn()}
+    {:ok, conn: coordinator_conn()}
+  end
+
+  @doc """
+  A conn carrying a coordinator-tier bearer token — the default `conn` every
+  test gets. `/api` requires a token (bd-asawcq), and `arb` always sends
+  one, so this is what a real API caller looks like. The header is inert on
+  browser routes. A test about anonymous or narrower callers builds its own
+  with `Phoenix.ConnTest.build_conn/0`.
+  """
+  def coordinator_conn do
+    Phoenix.ConnTest.build_conn()
+    |> Plug.Conn.put_req_header(
+      "authorization",
+      "Bearer " <> Arbiter.MCP.Scope.mint_coordinator(nil)
+    )
   end
 
   @doc """

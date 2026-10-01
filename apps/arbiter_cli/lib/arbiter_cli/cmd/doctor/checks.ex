@@ -35,6 +35,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       check_versions(),
       check_migrations(),
       check_bind_address(),
+      check_anonymous_api(),
       Distribution.check(),
       check_restart_safety(),
       check_security_defaults(),
@@ -1241,6 +1242,64 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
         }
     end
   end
+
+  # bd-asawcq: loopback is not an identity — every worker runs on this host as
+  # the operator's own user — so `/api` must refuse a caller with no token, on
+  # loopback exactly like off it. Probe it with requests that change nothing
+  # even on a server that lets them through: a config PATCH of `{}` on a
+  # workspace that does not exist (an open server answers 404/422), and a read
+  # of every workspace's tickets. Anything but 401/403 means the request got
+  # past auth: fatal, so `arb doctor` exits 1. Not readiness-blocking — a
+  # deploy rolling back over it would land on a build with the same hole. A
+  # server this cannot reach is the reachability check's failure, not this
+  # one's.
+  @anonymous_probes [
+    {:patch, "/api/workspaces/arb-doctor-anonymous-probe/config", [json: %{}]},
+    {:get, "/api/issues", [params: [limit: 1]]}
+  ]
+
+  @doc false
+  @spec check_anonymous_api() :: Result.t()
+  def check_anonymous_api do
+    accepted =
+      for {method, path, opts} <- @anonymous_probes,
+          status = accepted_status(Client.anonymous(method, path, opts)),
+          do: "#{method |> to_string() |> String.upcase()} #{path} → #{status}"
+
+    result = %Result{
+      name: "anonymous /api access refused",
+      status: :ok,
+      detail: "a request without a bearer token gets 401",
+      fatal: true,
+      blocks_readiness: false
+    }
+
+    case accepted do
+      [] ->
+        result
+
+      _ ->
+        %{
+          result
+          | status: :fail,
+            detail: "served without a token: " <> Enum.join(accepted, ", "),
+            hint:
+              "Any process on this host — every worker included — can drive this server " <>
+                "with a plain curl. Upgrade the server (bd-asawcq); `/api` must answer " <>
+                "401 without `Authorization: Bearer <token>`."
+        }
+    end
+  end
+
+  # The status a probe was *served* with, or nil when the server refused it
+  # (401/403) or could not be asked at all.
+  defp accepted_status({:ok, _body}), do: 200
+
+  defp accepted_status({:error, %Client.Error{kind: :http, status: s}}) when s in [401, 403],
+    do: nil
+
+  defp accepted_status({:error, %Client.Error{kind: :http, status: s}}) when s in 200..499, do: s
+  defp accepted_status({:error, _}), do: nil
 
   # bd-9fgg04: "is it safe to restart?" is the question doctor is reached for.
   # Informational like the bind-address check — never fatal, never blocks

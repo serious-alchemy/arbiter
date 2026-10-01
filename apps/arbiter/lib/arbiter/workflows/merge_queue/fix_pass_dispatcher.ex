@@ -395,8 +395,10 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
             agent_type: provider
           )
 
+        # bd-asawcq: the worker token doubles as the agent's ARB_TOKEN.
         session_opts =
-          [owner: worker_pid, worktree_path: worktree_path]
+          ([owner: worker_pid, worktree_path: worktree_path] ++
+             Keyword.take(mcp_opts, [:arb_token]))
           |> add_command_or_prompt(context, args, worktree_path, provider, mcp_opts)
 
         case ClaudeSession.start(session_opts) do

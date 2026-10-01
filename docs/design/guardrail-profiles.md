@@ -243,6 +243,10 @@ of **G2**.
   "loopback means the same Unix user", it calls the minting "a deliberate,
   retained trust assumption", and it says a real boundary "would need a
   separate Unix user or a sandbox".
+  *Update:* bd-8381tk removed anonymous minting, and bd-asawcq removed
+  anonymous loopback access to the rest of `/api` (only `GET /api/version`
+  and `GET /api/server/migrations` remain). See
+  [worker-security.md](../worker-security.md#bearer-tokens-on-every-api-route-bd-asawcq).
 
 This design introduces exactly that sandbox for workers. A jailed worker has
 no route to host loopback, and §4.4's bridge authenticates it as its own

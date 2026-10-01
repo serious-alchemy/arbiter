@@ -35,8 +35,9 @@ defmodule ArbiterWeb.Api.McpController do
 
   ## No anonymous minting (bd-8381tk)
 
-  An anonymous loopback call (no `Authorization` header, let through by
-  `ArbiterWeb.Plugs.ApiAuth`) is refused with 403, whatever it asks for.
+  An anonymous call (no `Authorization` header) is refused, whatever it asks
+  for: `ArbiterWeb.Plugs.ApiAuth` answers 401 before it gets here
+  (bd-asawcq), and the 403 below stays as a second line.
   Loopback only proves "same host", and every worker runs on this host as
   the operator's Unix user, so it cannot tell the operator from a worker.
   An unauthenticated caller gets no tier at all. The operator mints

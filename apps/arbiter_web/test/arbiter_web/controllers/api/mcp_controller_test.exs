@@ -21,26 +21,38 @@ defmodule ArbiterWeb.Api.McpControllerTest do
     # Every worker runs on this host, so "loopback" proves nothing about who is
     # asking. An anonymous request must not get a token of any tier, however it
     # narrows itself: the operator mints over the peer-checked operator socket
-    # (`Arbiter.MCP.OperatorSocket`) instead.
+    # (`Arbiter.MCP.OperatorSocket`) instead. Since bd-asawcq the `/api`
+    # pipeline refuses it (401) before the controller is reached.
+    setup do
+      {:ok, conn: Phoenix.ConnTest.build_conn()}
+    end
+
     for params <- [
           %{},
           %{"workspace_id" => "ws-1", "can_dispatch" => false},
           %{"can_dispatch" => "false", "ttl" => 60}
         ] do
-      test "is refused with 403 and no token for #{inspect(params)}", %{conn: conn} do
+      test "is refused with 401 and no token for #{inspect(params)}", %{conn: conn} do
         body =
-          conn |> post("/api/mcp/tokens", unquote(Macro.escape(params))) |> json_response(403)
+          conn |> post("/api/mcp/tokens", unquote(Macro.escape(params))) |> json_response(401)
 
         refute Map.has_key?(body, "token")
         assert body["error"]["message"] =~ "arb mcp token mint"
       end
     end
 
-    test "verify stays anonymous — it grants nothing", %{conn: conn} do
+    test "verify needs a token too (bd-asawcq)", %{conn: conn} do
       token = Scope.mint_coordinator(nil)
+      assert conn |> post("/api/mcp/tokens/verify", %{"token" => token}) |> json_response(401)
 
       assert %{"valid" => true, "tier" => "coordinator"} =
-               conn |> post("/api/mcp/tokens/verify", %{"token" => token}) |> json_response(200)
+               Phoenix.ConnTest.build_conn()
+               |> put_req_header(
+                 "authorization",
+                 "Bearer #{Scope.mint_worker(%{id: "bd-v", workspace_id: "ws-v"})}"
+               )
+               |> post("/api/mcp/tokens/verify", %{"token" => token})
+               |> json_response(200)
     end
   end
 
