@@ -337,7 +337,9 @@ defmodule Arbiter.Quota.Codex do
   @spec view(CodexQuota.t()) :: map()
   def view(%CodexQuota{} = row) do
     weekly_pct = row.weekly_used_percent
-    secondary_label = if not is_nil(weekly_pct) and not is_nil(row.weekly_reset_at), do: "weekly", else: nil
+
+    secondary_label =
+      if not is_nil(weekly_pct) and not is_nil(row.weekly_reset_at), do: "weekly", else: nil
 
     Arbiter.Quota.blank_view(row.provider)
     |> Map.merge(%{
