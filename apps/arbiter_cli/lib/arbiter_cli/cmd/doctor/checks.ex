@@ -6,8 +6,8 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   """
 
   alias ArbiterCli.{Client, SchedulerState, Workspace}
-  alias ArbiterCli.Cmd.Start
   alias ArbiterCli.Cmd.Doctor.Distribution
+  alias ArbiterCli.Cmd.Start
 
   defmodule Result do
     @moduledoc false
