@@ -25,14 +25,6 @@ defmodule Arbiter.Worker.ReviewGateArbTokenTest do
     repo = Path.join(tmp, "repo")
     File.mkdir_p!(repo)
 
-    on_exit(fn ->
-      # Allow any child processes spawned by the worker to finish writing to tmp.
-      # The worker's on_exit above waits for the worker to terminate, but
-      # child processes may still be cleaning up or writing files.
-      # Retry with backoff to handle races with async writes.
-      retry_rm_rf(tmp)
-    end)
-
     {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", repo])
     {_, 0} = git(["config", "user.email", "repo@example.com"], repo)
     {_, 0} = git(["config", "user.name", "Repo"], repo)
@@ -163,7 +155,7 @@ defmodule Arbiter.Worker.ReviewGateArbTokenTest do
       if is_pid(review_gate_pid) do
         gate_ref = Process.monitor(review_gate_pid)
         # Stop the gate gracefully. If it's already dead, the monitor will catch it.
-        catch_exit(fn -> GenServer.stop(review_gate_pid, :normal) end)
+        safe_stop_process(fn -> GenServer.stop(review_gate_pid, :normal) end)
         [gate_ref | refs]
       else
         refs
@@ -176,7 +168,7 @@ defmodule Arbiter.Worker.ReviewGateArbTokenTest do
           case :sys.get_state(review_gate_pid) do
             %{reviewer_pid: pid} when is_pid(pid) ->
               ref = Process.monitor(pid)
-              catch_exit(fn -> GenServer.stop(pid, :normal) end)
+              safe_stop_process(fn -> GenServer.stop(pid, :normal) end)
               ref
 
             _ ->
@@ -195,12 +187,12 @@ defmodule Arbiter.Worker.ReviewGateArbTokenTest do
 
     # Stop the main worker gracefully if still alive.
     # The monitor will catch the exit regardless.
-    catch_exit(fn -> GenServer.stop(worker_pid, :normal) end)
+    safe_stop_process(fn -> GenServer.stop(worker_pid, :normal) end)
 
     refs
   end
 
-  defp catch_exit(fun) do
+  defp safe_stop_process(fun) do
     try do
       fun.()
     rescue
