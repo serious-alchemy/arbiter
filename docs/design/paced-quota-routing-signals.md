@@ -652,6 +652,13 @@ so the router spends it. Both cases fall out of `J` with no special handling.
 | `quota.pace_exempt_priority` | Workspace | Absent (inherits the account's) | No: it can only narrow the account's value | Operator or coordinator |
 | `routing.defer_to_reset` | Workspace | Off | No: it only holds | Operator or coordinator |
 
+**Own or effective priority (bd-1d1yaj).** An epic floor gives a ticket an
+*effective* priority above its own ([epic-aware scheduling §6.4](epic-aware-scheduling.md#64-routing-and-the-quota-gate-own-or-effective)).
+`w(priority)` (§4.1) and the P0 pace exemption with its board hold (§4.2) read
+the ticket's **own** priority, because they spend headroom or loosen a line.
+Defer-until-reset (§4.3) reads the **effective** priority, because it only
+holds.
+
 ## 5. Multi-pool providers
 
 ### 5.1 A pool, and its headroom
