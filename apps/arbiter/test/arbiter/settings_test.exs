@@ -110,7 +110,9 @@ defmodule Arbiter.SettingsTest do
 
       # What a boot before the migration sees: the resource selects a column
       # the table does not have yet.
-      Arbiter.Repo.query!("ALTER TABLE installation_settings DROP COLUMN board_autopilot_paused_at")
+      Arbiter.Repo.query!(
+        "ALTER TABLE installation_settings DROP COLUMN board_autopilot_paused_at"
+      )
 
       assert {:error, _} = Settings.read_board_autopilot_status()
       assert %{paused: nil} = Settings.board_autopilot_status()
