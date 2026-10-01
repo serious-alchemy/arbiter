@@ -226,5 +226,4 @@ defmodule Arbiter.Worker.ReviewGateArbTokenTest do
       end
     end
   end
-
 end
