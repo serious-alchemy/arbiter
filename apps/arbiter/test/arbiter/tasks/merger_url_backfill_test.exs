@@ -61,7 +61,9 @@ defmodule Arbiter.Tasks.MergerUrlBackfillTest do
     {updated, []} = MergerUrlBackfill.apply!(plan)
     assert bad.id in updated
 
-    assert Ash.get!(Issue, bad.id).merger_url == "https://gitlab.com/grp/proj/-/merge_requests/298"
+    assert Ash.get!(Issue, bad.id).merger_url ==
+             "https://gitlab.com/grp/proj/-/merge_requests/298"
+
     assert Ash.get!(Issue, good.id).merger_url == "https://gitlab.com/grp/proj/-/merge_requests/1"
     assert MergerUrlBackfill.plan() == []
   end
@@ -76,6 +78,7 @@ defmodule Arbiter.Tasks.MergerUrlBackfillTest do
       assert {[], []} = MergerUrlBackfill.apply!(MergerUrlBackfill.plan())
     end)
 
-    assert Ash.get!(Issue, bad.id).merger_url == "https://gitlab.com/68258632/-/merge_requests/298"
+    assert Ash.get!(Issue, bad.id).merger_url ==
+             "https://gitlab.com/68258632/-/merge_requests/298"
   end
 end
