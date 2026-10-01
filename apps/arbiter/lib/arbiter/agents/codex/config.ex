@@ -35,9 +35,15 @@ defmodule Arbiter.Agents.Codex.Config do
   # where that flat key is shared — via the Codex-scoped
   # `agent.config["codex"]["tier_models"]` (merged at `put_active/2`; see
   # `Arbiter.Agents.ProviderConfig`). The values are model ids the
-  # `codex --model` flag accepts. Codex's coding-tuned model is the same across
-  # tiers today (only the reasoning `effort` differs); the map exists so a
-  # workspace can pin cheaper/pricier ids without an adapter change.
+  # `codex --model` flag accepts.
+  #
+  # NOTE: These defaults target OpenAI's Codex API with models assumed available
+  # on paid/enterprise plans. Free-tier ChatGPT accounts have a different model
+  # set (gpt-5.4-mini, gpt-5.5); non-OpenAI backends (e.g., Codex+Ollama) have
+  # completely different model names. Workspaces must override these defaults
+  # via agent.config["codex"]["tier_models"] if the default models are not
+  # available on their account. This is planned for D1 (plan-aware defaults with
+  # validation at pre-flight); currently it is not automatic.
   @default_tier_models %{
     "economy" => "gpt-5.6-luna",
     "standard" => "gpt-5.6-terra",
