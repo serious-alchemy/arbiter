@@ -402,6 +402,13 @@ defmodule Arbiter.Worker.Watchdog do
   # `:park_heartbeat_polls` or workspace config["merge"]["park_heartbeat_polls"].
   @default_park_heartbeat_polls 720
 
+  # bd-6mkyd1: `:blocked_other` is what an adapter reports when the forge says
+  # BLOCKED/UNKNOWN but names no concrete cause — GitHub does this briefly while
+  # it recomputes mergeability (e.g. a CLA check run still queued right after CI
+  # completes). It must be seen on this many consecutive polls (~1 min at the
+  # default interval) before it is paged; reasons with a concrete cause page at once.
+  @default_transient_block_polls 2
+
   # Registry suffix the Watchdog itself registers under, so an external caller
   # (CLI / MCP tool / dashboard) can find the Watchdog for a task by task_id
   # alone and message it directly — needed for `retry_auto_resolve/1` (bd-bspakl).
@@ -487,6 +494,7 @@ defmodule Arbiter.Worker.Watchdog do
           | {:auto_resume_dispatcher, module()}
           | {:merge_fail_notify_threshold, pos_integer()}
           | {:park_heartbeat_polls, non_neg_integer()}
+          | {:transient_block_polls, pos_integer()}
 
   @type opts :: [opt()]
 
@@ -1210,6 +1218,9 @@ defmodule Arbiter.Worker.Watchdog do
 
     auto_resolve_conflict = resolve_auto_resolve_conflict(opts, workspace)
 
+    transient_block_polls =
+      Keyword.get(opts, :transient_block_polls, @default_transient_block_polls)
+
     park_heartbeat_polls =
       Keyword.get(opts, :park_heartbeat_polls) ||
         park_heartbeat_from_workspace(workspace) ||
@@ -1532,6 +1543,10 @@ defmodule Arbiter.Worker.Watchdog do
       # immediately, exactly as before).
       park_heartbeat_polls: park_heartbeat_polls,
       last_block_escalated_poll: 0,
+      # bd-6mkyd1: consecutive polls that have reported `:blocked_other`, and the
+      # count at which it is believed. See `debounce_escalate_block/2`.
+      transient_block_polls: transient_block_polls,
+      blocked_other_streak: 0,
       # A worker's "this CI failure is infrastructure, not my diff" verdict
       # (bd-5mzzww ask 3), set via `mark_ci_external/2`. Scoped to the
       # current `:ci_failed` episode: cleared the moment the block reason
@@ -2811,6 +2826,7 @@ defmodule Arbiter.Worker.Watchdog do
         state = %{
           state
           | last_block_reason: nil,
+            blocked_other_streak: 0,
             auto_resolve_attempts: 0,
             max_auto_resolve_attempts: state.base_max_auto_resolve_attempts,
             unresolved_escalated: false,
@@ -2887,7 +2903,16 @@ defmodule Arbiter.Worker.Watchdog do
   defp debounce_escalate_block(state, raw_reason) do
     reason = effective_park_reason(state, raw_reason)
 
+    # bd-6mkyd1: a first-seen `:blocked_other` is held back until it has been
+    # reported on `transient_block_polls` consecutive polls.
+    streak = if reason == :blocked_other, do: state.blocked_other_streak + 1, else: 0
+    state = %{state | blocked_other_streak: streak}
+
     cond do
+      reason == :blocked_other and state.last_block_reason != :blocked_other and
+          streak < state.transient_block_polls ->
+        state
+
       state.last_block_reason == reason and park_heartbeat_due?(state) ->
         polls = state.poll_count - state.last_block_escalated_poll
 

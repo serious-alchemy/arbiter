@@ -2855,6 +2855,83 @@ defmodule Arbiter.Worker.WatchdogTest do
     end
   end
 
+  describe "transient :blocked_other debounce (bd-6mkyd1)" do
+    test "a one-poll :blocked_other that then clears merges without escalating" do
+      task_id = new_task_id()
+
+      StubMerger.queue_get("!tb1", [
+        %{status: :open, approved: true, block_reason: :blocked_other},
+        %{status: :open, approved: true, block_reason: nil}
+      ])
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          start_watchdog(task_id, "!tb1", auto_merge: true)
+          assert_merged(task_id)
+        end)
+
+      refute log =~ "merge blocked"
+    end
+
+    test "a :blocked_other that persists past the bound still escalates" do
+      task_id = new_task_id()
+
+      StubMerger.queue_get("!tb2", [
+        %{status: :open, approved: true, block_reason: :blocked_other}
+      ])
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          start_watchdog(task_id, "!tb2", auto_merge: false, transient_block_polls: 3)
+          wait_until(fn -> StubMerger.get_count("!tb2") >= 6 end, 2_000)
+        end)
+
+      assert log =~ "merge blocked (blocked_other)"
+    end
+
+    test "a :blocked_other seen fewer times than the bound does not escalate" do
+      task_id = new_task_id()
+
+      StubMerger.queue_get("!tb3", [
+        %{status: :open, approved: true, block_reason: :blocked_other},
+        %{status: :open, approved: true, block_reason: :blocked_other},
+        %{status: :open, approved: true, block_reason: nil}
+      ])
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          start_watchdog(task_id, "!tb3", auto_merge: true, transient_block_polls: 3)
+          assert_merged(task_id)
+        end)
+
+      refute log =~ "merge blocked"
+    end
+
+    test "blocks with a concrete cause still escalate on the first poll" do
+      for reason <- [:ci_failed, :draft, :needs_approval, :conflict] do
+        task_id = new_task_id()
+        mr = "!tb4-#{reason}"
+
+        StubMerger.queue_get(mr, [
+          %{status: :open, approved: true, block_reason: reason}
+        ])
+
+        log =
+          ExUnit.CaptureLog.capture_log(fn ->
+            start_watchdog(task_id, mr,
+              auto_merge: false,
+              auto_resolve_conflict: false,
+              transient_block_polls: 100
+            )
+
+            wait_until(fn -> StubMerger.get_count(mr) >= 2 end, 2_000)
+          end)
+
+        assert log =~ "merge blocked (#{reason})"
+      end
+    end
+  end
+
   describe "park heartbeat (bd-5mzzww / #1448 ask 4)" do
     test "re-pages a non-auto-resolvable park on the heartbeat cadence instead of latching silent" do
       # The once-per-episode dedupe (#1226) is right for avoiding an escalation
