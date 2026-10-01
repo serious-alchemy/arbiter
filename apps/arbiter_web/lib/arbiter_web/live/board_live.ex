@@ -1205,7 +1205,7 @@ defmodule ArbiterWeb.BoardLive do
             :if={not @board_loaded? and is_nil(@board_error)}
             id="board-loading"
             aria-label="Loading the board"
-            class="flex overflow-x-auto snap-x snap-mandatory gap-px bg-[var(--arb-line-soft)] min-h-[560px] 2xl:grid 2xl:grid-cols-7"
+            class="flex overflow-x-auto snap-x snap-mandatory gap-px bg-[var(--arb-line-soft)] min-h-[560px] 2xl:grid 2xl:grid-cols-[repeat(7,minmax(16rem,1fr))]"
           >
             <div
               :for={column <- @columns}
@@ -1235,7 +1235,7 @@ defmodule ArbiterWeb.BoardLive do
             :if={@board_loaded?}
             id="board-columns"
             phx-hook=".BoardDrag"
-            class="flex overflow-x-auto snap-x snap-mandatory gap-px bg-[var(--arb-line-soft)] min-h-[560px] 2xl:grid 2xl:grid-cols-7"
+            class="flex overflow-x-auto snap-x snap-mandatory gap-px bg-[var(--arb-line-soft)] min-h-[560px] 2xl:grid 2xl:grid-cols-[repeat(7,minmax(16rem,1fr))]"
           >
             <div
               :for={column <- @columns}
@@ -1339,7 +1339,15 @@ defmodule ArbiterWeb.BoardLive do
             })
 
             el.addEventListener("dragover", (e) => {
-              if (this.dragging) e.preventDefault()
+              if (!this.dragging) return
+              e.preventDefault()
+
+              // The row scrolls sideways: nudge it when the cursor nears an
+              // edge so a column that starts off-screen can be reached.
+              const box = el.getBoundingClientRect()
+              const EDGE = 64
+              if (e.clientX < box.left + EDGE) el.scrollLeft -= 24
+              else if (e.clientX > box.right - EDGE) el.scrollLeft += 24
             })
 
             el.addEventListener("drop", (e) => {

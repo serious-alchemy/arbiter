@@ -212,6 +212,7 @@ async function run(page, cdp, sessionId) {
   check("no storage: toggling still works", !(await lane(page)).errored, "collapsed, no phx-error")
 
   // 5. The drag hook, with real drag events.
+  await layout(page, cdp, sessionId)
   if (READY.length === 3 && BACKLOG) await drags(page)
 
   check("no console errors", consoleErrors.length === 0, consoleErrors.slice(0, 3).join(" | ") || "none")
@@ -237,6 +238,42 @@ function dragScript(id, target, half) {
     card.dispatchEvent(new DragEvent("dragend", at))
     return true
   })()`
+}
+
+// The columns keep a minimum width: where seven of them don't fit (a 1560px
+// viewport stands in for a wide one with the session dock open beside the
+// board) the row scrolls, never the page; on a wide screen they fill it.
+function LAYOUT() { return `(() => {
+  const row = document.querySelector("#board-columns")
+  const cols = Array.from(row.children).map((c) => c.getBoundingClientRect().width)
+  const root = document.documentElement
+  return JSON.stringify({
+    count: cols.length,
+    min: Math.min(...cols),
+    rowScrolls: row.scrollWidth > row.clientWidth + 1,
+    pageScrolls: root.scrollWidth > root.clientWidth + 1,
+    rem: parseFloat(getComputedStyle(root).fontSize)
+  })
+})()` }
+
+async function layout(page, cdp, sessionId) {
+  const metrics = (width) =>
+    cdp.send("Emulation.setDeviceMetricsOverride", { width, height: 900, deviceScaleFactor: 1, mobile: false }, sessionId)
+
+  await metrics(1560)
+  await page.settle()
+  let l = JSON.parse(await page.eval(LAYOUT()))
+  check("layout: with too little room every column keeps its minimum width", l.count === 7 && l.min >= 16 * l.rem - 1, JSON.stringify(l))
+  check("layout: the columns row scrolls horizontally", l.rowScrolls, JSON.stringify(l))
+  check("layout: the page does not scroll horizontally", !l.pageScrolls, JSON.stringify(l))
+
+  await metrics(2400)
+  await page.settle()
+  l = JSON.parse(await page.eval(LAYOUT()))
+  check("layout: on a wide screen the columns fill the width with no scrollbar", !l.rowScrolls && !l.pageScrolls, JSON.stringify(l))
+
+  await cdp.send("Emulation.clearDeviceMetricsOverride", {}, sessionId)
+  await page.settle()
 }
 
 async function drags(page) {
