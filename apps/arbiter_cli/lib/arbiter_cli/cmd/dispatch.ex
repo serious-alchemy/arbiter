@@ -1,6 +1,6 @@
 defmodule ArbiterCli.Cmd.Dispatch do
   @moduledoc """
-  `arb dispatch <task-id> [<repo>] [--provider claude|gemini|codex | --no-agent] [--model <name>] [--force] [--force-quota]`
+  `arb dispatch <task-id> [<repo>] [--provider claude|gemini|codex | --no-agent] [--model <name>] [--force] [--over-cap] [--force-quota]`
   — spawn a worker to work on a task.
 
   POSTs to `/api/workers/dispatch`. The server transitions the task to
@@ -32,6 +32,12 @@ defmodule ArbiterCli.Cmd.Dispatch do
                      blocked by open dependencies. Without it the server
                      refuses such a dispatch and says why. The bypass is
                      recorded as a `dispatch_forced` event.
+    --over-cap       dispatch even though the provider account the run would
+                     use has no free slot (its `max_concurrent`, or this
+                     workspace's share, is reached). Without it the server
+                     refuses with the account, its cap and the runs holding
+                     it. The override is recorded as an `account_cap_override`
+                     event. Independent of `--force`.
     --force-quota    ADVANCED: bypass the quota gate for this dispatch. Use only
                      when the gate holds despite judged-important work. Requires
                      explicit authorization; the quota gate protects against
@@ -49,6 +55,7 @@ defmodule ArbiterCli.Cmd.Dispatch do
     no_agent: :boolean,
     model: :string,
     force: :boolean,
+    over_cap: :boolean,
     force_quota: :boolean
   ]
 
@@ -93,6 +100,7 @@ defmodule ArbiterCli.Cmd.Dispatch do
         |> maybe_put("repo", repo)
         |> maybe_put("model", model)
         |> maybe_put("force", if(opts[:force], do: true))
+        |> maybe_put("over_cap", if(opts[:over_cap], do: true))
         |> maybe_put("force_quota", if(opts[:force_quota], do: true))
 
       case Client.post("/api/workers/dispatch", body) do

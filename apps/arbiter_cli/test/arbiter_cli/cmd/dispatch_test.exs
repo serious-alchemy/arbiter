@@ -124,6 +124,19 @@ defmodule ArbiterCli.Cmd.DispatchTest do
       assert body["force"] == true
     end
 
+    # bd-8suxac: a full provider account refuses a dispatch unless overridden.
+    test "--over-cap sends over_cap: true, and is not --force" do
+      stub_dispatch_capture()
+
+      {_out, _err, code} =
+        capture(fn -> ArbiterCli.Cmd.Dispatch.run(["gte-017", "--over-cap"]) end)
+
+      assert code == 0
+      assert_receive {:body, body}
+      assert body["over_cap"] == true
+      refute Map.has_key?(body, "force")
+    end
+
     test "without --force the request body omits the force key" do
       stub_dispatch_capture()
 

@@ -828,12 +828,16 @@ defmodule Arbiter.MCP.Tools.Worker do
   # `with_claude`) forces that agent via `agent_type`; `no_agent: true` parks the
   # task `:active` (hand-off path); otherwise the workspace's `agent.type`
   # config is used to pick the first healthy provider.
-  defp worker_dispatch_opts(scope, args) do
-    with {:ok, force} <- Tools.fetch_bool(args, "force", false) do
+  defp worker_dispatch_opts(%Scope{tier: tier} = scope, args) do
+    with {:ok, force} <- Tools.fetch_bool(args, "force", false),
+         {:ok, over_cap} <- Tools.fetch_bool(args, "over_cap", false) do
       scope
       |> dispatch_opts(args)
       # bd-asxw4e: dispatch a Backlog or Blocked ticket anyway (recorded).
       |> Keyword.put(:force, force)
+      # bd-8suxac: go over a full provider account's cap (recorded).
+      |> Keyword.put(:force_slot, over_cap)
+      |> Keyword.put(:slot_override_actor, actor_string(tier))
       |> Keyword.put(:dispatched_by, "mcp")
       |> with_provider(args)
     end
@@ -955,6 +959,10 @@ defmodule Arbiter.MCP.Tools.Worker do
   # bd-92mx1m: the task released its slot and the cap is full.
   defp dispatch_error_message({:slot_cap_full, info}),
     do: Arbiter.Worker.ResumeSlot.refusal_message(info)
+
+  # bd-8suxac: a fresh dispatch onto a provider account with no free slot.
+  defp dispatch_error_message({:account_at_capacity, info}),
+    do: Arbiter.Accounts.Admission.refusal_message(info)
 
   defp dispatch_error_message(other), do: "dispatch failed: #{inspect(other)}"
 

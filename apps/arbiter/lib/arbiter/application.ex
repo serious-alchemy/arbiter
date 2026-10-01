@@ -68,6 +68,10 @@ defmodule Arbiter.Application do
       # (a dispatch still provisioning, a PR review/reply shelling out to the
       # agent CLI) registers here for its duration — see Arbiter.Board.Drain.
       {Registry, keys: :unique, name: Arbiter.Board.Drain.Registry},
+      # bd-8suxac: a dispatch admitted against its provider account's
+      # `max_concurrent`, counted from admission until its worker registers —
+      # see Arbiter.Accounts.Admission.
+      {Registry, keys: :unique, name: Arbiter.Accounts.Admission.Registry},
       {DynamicSupervisor, strategy: :one_for_one, name: Arbiter.Worker.Supervisor},
       {DynamicSupervisor, strategy: :one_for_one, name: Arbiter.Worker.WatchdogSupervisor},
       {Registry, keys: :unique, name: Arbiter.Workflows.MachineRegistry},

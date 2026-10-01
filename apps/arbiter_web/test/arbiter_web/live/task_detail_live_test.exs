@@ -1018,6 +1018,55 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       assert Ash.get!(Issue, task.id).state == :backlog
     end
 
+    # bd-8suxac: the provider account the run would use has no free slot.
+    test "a dispatch onto a full provider account is refused with the reason",
+         %{conn: conn, ws: ws} do
+      account =
+        Ash.create!(Arbiter.Accounts.ProviderAccount, %{
+          provider: :claude,
+          slug: "td-full-#{System.unique_integer([:positive])}",
+          max_concurrent: 1
+        })
+
+      Ash.create!(Arbiter.Accounts.WorkspaceProviderAccount, %{
+        workspace_id: ws.id,
+        provider: :claude,
+        provider_account_id: account.id
+      })
+
+      {:ok, holder} = Ash.create(Issue, %{title: "holder", workspace_id: ws.id})
+      test = self()
+
+      pid =
+        spawn(fn ->
+          send(test, {:held, Arbiter.Accounts.Admission.admit(holder, :claude)})
+
+          receive do
+            :release -> :ok
+          end
+        end)
+
+      on_exit(fn -> send(pid, :release) end)
+      assert_receive {:held, {:ok, :admitted}}, 5_000
+
+      task = ready_issue(ws, "account full")
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
+      view |> element(~s(button[phx-click="open_dispatch"])) |> render_click()
+
+      view
+      |> form("#task-dispatch-form", %{
+        "dispatch" => %{"provider" => "claude", "repo" => "", "acknowledge" => "true"}
+      })
+      |> render_submit()
+
+      html = render_async(view)
+
+      assert html =~ "has no free slot"
+      assert html =~ holder.id
+      refute html =~ "account_at_capacity"
+      assert Ash.get!(Issue, task.id).state == :queued
+    end
+
     # The dropdown must not offer a repo `Dispatch` would then reject with
     # {:repo_not_found, repo} — after the operator has already acknowledged the
     # credit spend. `Dispatch.all_available_repos/1` is the single source of
