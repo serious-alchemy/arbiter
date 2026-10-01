@@ -515,6 +515,19 @@ defmodule Arbiter.Messages.Message do
   def topic(workspace_id) when is_binary(workspace_id), do: "messages:" <> workspace_id
 
   @doc """
+  The topic every workspace's message events are *also* broadcast on, for a
+  subscriber (the coordinator drawer) that watches all of them: one
+  subscription, no read of `workspaces` to learn the ids, and a workspace
+  created later is covered without a re-subscribe.
+  """
+  def all_topic, do: "messages:*"
+
+  defp broadcast_both(workspace_id, payload) do
+    Phoenix.PubSub.broadcast(Arbiter.PubSub, topic(workspace_id), payload)
+    Phoenix.PubSub.broadcast(Arbiter.PubSub, all_topic(), payload)
+  end
+
+  @doc """
   Broadcast `{:new_message, message}` on the message's workspace topic.
 
   Silent-on-failure (the PubSub registry may be down in tests) but leaves a
@@ -522,7 +535,7 @@ defmodule Arbiter.Messages.Message do
   `Arbiter.Worker.broadcast_lifecycle/2`.
   """
   def broadcast_new(%{workspace_id: ws_id} = message) when is_binary(ws_id) do
-    Phoenix.PubSub.broadcast(Arbiter.PubSub, topic(ws_id), {:new_message, message})
+    broadcast_both(ws_id, {:new_message, message})
 
     if Map.get(message, :to_ref) in @coordinator_refs do
       Arbiter.Events.broadcast(ws_id, "inbox", %{
@@ -557,7 +570,7 @@ defmodule Arbiter.Messages.Message do
   reintroduce it one layer up. Silent-on-failure, mirroring `broadcast_new/1`.
   """
   def broadcast_updated(%{workspace_id: ws_id} = message) when is_binary(ws_id) do
-    Phoenix.PubSub.broadcast(Arbiter.PubSub, topic(ws_id), {:new_message, message})
+    broadcast_both(ws_id, {:new_message, message})
     :ok
   rescue
     e ->
@@ -576,7 +589,7 @@ defmodule Arbiter.Messages.Message do
   on-failure, mirroring `broadcast_new/1`.
   """
   def broadcast_read(%{workspace_id: ws_id} = message) when is_binary(ws_id) do
-    Phoenix.PubSub.broadcast(Arbiter.PubSub, topic(ws_id), {:message_read, message})
+    broadcast_both(ws_id, {:message_read, message})
     :ok
   rescue
     e ->
@@ -596,11 +609,7 @@ defmodule Arbiter.Messages.Message do
   `broadcast_new/1`.
   """
   def broadcast_cleared(workspace_id) when is_binary(workspace_id) do
-    Phoenix.PubSub.broadcast(
-      Arbiter.PubSub,
-      topic(workspace_id),
-      {:mailbox_cleared, workspace_id}
-    )
+    broadcast_both(workspace_id, {:mailbox_cleared, workspace_id})
 
     :ok
   rescue

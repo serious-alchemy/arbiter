@@ -31,6 +31,16 @@ defmodule ArbiterWeb.TaskDetailAsyncTest do
     {:ok, ws: ws, task: task}
   end
 
+  defp release_header_loaders do
+    receive do
+      {:read_header, loader} ->
+        send(loader, :release)
+        release_header_loaders()
+    after
+      200 -> :ok
+    end
+  end
+
   defp mock_loaders do
     :meck.new(TaskDetailLive, [:passthrough, :no_link])
     on_exit(fn -> :meck.unload(TaskDetailLive) end)
@@ -274,8 +284,14 @@ defmodule ArbiterWeb.TaskDetailAsyncTest do
       {:ok, _} = Ash.update(task, %{title: "renamed mid-load"})
       assert_receive {:read_header, fresh_loader}, @async_timeout
 
+      # One `Ash.update` broadcasts more than one `:task_lifecycle`, and each
+      # one while the header loads restarts it, cancelling the loader before
+      # it. Which of the loaders is still alive depends on how fast the view
+      # drains its mailbox, so release every loader that reports instead of
+      # naming two of them (bd-cixhhs: a faster chrome mount exposed it).
       send(stale_loader, :release)
       send(fresh_loader, :release)
+      release_header_loaders()
       html = render_task(view)
 
       assert html =~ "renamed mid-load"

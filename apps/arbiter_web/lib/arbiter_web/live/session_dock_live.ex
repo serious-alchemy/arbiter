@@ -668,13 +668,13 @@ defmodule ArbiterWeb.SessionDockLive do
   # rendered from — anything else that lands here is not this view's business.
   def handle_info(_message, socket), do: {:noreply, socket}
 
-  # The mount's read (bd-6mfl0s). A lifecycle broadcast or a click may have
+  # The mount's reads (bd-6mfl0s). A lifecycle broadcast or a click may have
   # re-read the sessions inline while this was out: that list is the newer
-  # one, so it stands. The launcher's workspaces are not read here — it
-  # re-reads them on the way open (`toggle_launch`), and every page already
-  # reads `workspaces` for its own chrome (bd-cixhhs).
+  # one, so it stands and only the workspaces are taken from here.
   @impl true
-  def handle_async(:load, {:ok, sessions}, socket) do
+  def handle_async(:load, {:ok, {sessions, workspaces}}, socket) do
+    socket = assign(socket, :workspaces, workspaces)
+
     if socket.assigns.load_state == :loaded,
       do: {:noreply, socket},
       else: {:noreply, put_sessions(socket, sessions)}
@@ -754,7 +754,7 @@ defmodule ArbiterWeb.SessionDockLive do
     receive do
       {:EXIT, _view, _reason} -> exit(:shutdown)
     after
-      0 -> sessions
+      0 -> {sessions, SessionIndexLive.workspaces()}
     end
   end
 

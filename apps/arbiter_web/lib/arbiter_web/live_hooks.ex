@@ -81,8 +81,8 @@ defmodule ArbiterWeb.LiveHooks do
 
   Lifted off `BoardLive` (bd-3kgb0e) so the coordinator's mailbox — the
   upward channel of `arb inbox` / `arb msg` — surfaces from the AppShell
-  drawer on every screen instead of only the board. Subscribes to every
-  workspace's message topic and assigns `:coordinator_inbox` (unread) and
+  drawer on every screen instead of only the board. Subscribes to the
+  all-workspaces message topic (`Message.all_topic/0`) and assigns `:coordinator_inbox` (unread) and
   `:coordinator_outstanding_count` (seen but not cleared) same as the old
   `BoardLive.refresh_coordinator_inbox/1`. Also owns the drawer's two
   actions (`coordinator_mark_read`, `coordinator_clear`) via a
@@ -91,9 +91,9 @@ defmodule ArbiterWeb.LiveHooks do
   different, per-worker mailbox) avoid a collision.
 
   `:coordinator_inbox` is a `Phoenix.LiveView.AsyncResult` (bd-adewb4), loaded
-  the same way as `:quotas` — the workspaces read and both mailbox reads run in
+  the same way as `:quotas` — both mailbox reads run in
   `start_async/3` on the connected mount, the drawer says "loading" until they
-  land and shows an inline error if they fail. The message topics are joined
+  land and shows an inline error if they fail. The message topic is joined
   when the load returns; the re-reads a click or a broadcast trigger stay
   inline and write into the same `AsyncResult`.
   """
@@ -313,7 +313,7 @@ defmodule ArbiterWeb.LiveHooks do
     end
   end
 
-  # The drawer's Retry. Before the topics are joined (the mount's load failed)
+  # The drawer's Retry. Before the topic is joined (the mount's load failed)
   # it is that load again; after, the inline re-read a broadcast would do.
   defp retry_coordinator_inbox(socket) do
     cond do
@@ -330,15 +330,15 @@ defmodule ArbiterWeb.LiveHooks do
     end
   end
 
-  # The mailbox topics are joined once the load has named the workspaces. A
+  # The mailbox topic is joined once the load lands. A
   # click (mark read / clear) may already have re-read the mailbox inline while
   # this was out: that read is the newer one, so it stands.
   defp handle_coordinator_inbox_async(
          @coordinator_inbox_async,
-         {:ok, {workspace_ids, inbox, outstanding}},
+         {:ok, {inbox, outstanding}},
          socket
        ) do
-    socket = subscribe_coordinator_inbox(socket, workspace_ids)
+    socket = subscribe_coordinator_inbox(socket)
 
     if socket.assigns.coordinator_inbox.ok?,
       do: {:halt, socket},
@@ -369,18 +369,9 @@ defmodule ArbiterWeb.LiveHooks do
 
   defp load_coordinator_inbox_in_task do
     Process.flag(:trap_exit, true)
-
-    workspace_ids =
-      try do
-        Arbiter.Tasks.Workspace |> Ash.read!() |> Enum.map(& &1.id)
-      rescue
-        _ -> []
-      end
-
-    exit_if_view_gone()
     {inbox, outstanding} = read_coordinator_inbox()
     exit_if_view_gone()
-    {workspace_ids, inbox, outstanding}
+    {inbox, outstanding}
   end
 
   defp exit_if_view_gone do
@@ -410,15 +401,11 @@ defmodule ArbiterWeb.LiveHooks do
     end
   end
 
-  defp subscribe_coordinator_inbox(
-         %{assigns: %{_coordinator_inbox_subscribed?: true}} = socket,
-         _
-       ),
-       do: socket
+  defp subscribe_coordinator_inbox(%{assigns: %{_coordinator_inbox_subscribed?: true}} = socket),
+    do: socket
 
-  defp subscribe_coordinator_inbox(socket, workspace_ids) do
-    for ws_id <- workspace_ids,
-        do: Phoenix.PubSub.subscribe(Arbiter.PubSub, Message.topic(ws_id))
+  defp subscribe_coordinator_inbox(socket) do
+    Phoenix.PubSub.subscribe(Arbiter.PubSub, Message.all_topic())
 
     socket
     |> assign(:_coordinator_inbox_subscribed?, true)
