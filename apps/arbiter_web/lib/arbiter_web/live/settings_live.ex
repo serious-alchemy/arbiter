@@ -275,13 +275,15 @@ defmodule ArbiterWeb.SettingsLive do
           </dl>
           <p class="m-0 mt-4 text-[12px] text-[var(--text-label)]">
             Directories and the bind address are set at deploy time and stay read-only here.
-            Provider accounts and credentials live on <.link
+            Provider accounts and credentials live on the
+            <.link
               id="settings-providers-link"
               navigate={~p"/providers"}
               class="text-[var(--accent-primary)] hover:underline"
             >
               Providers
-            </.link>.
+            </.link>
+            page.
           </p>
         </Core.panel>
       </div>
