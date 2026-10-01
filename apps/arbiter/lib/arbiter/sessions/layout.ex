@@ -108,8 +108,8 @@ defmodule Arbiter.Sessions.Layout do
   (`Arbiter.Sessions.Provisioning`). `ArbiterCli.Client` reads this file when
   `ARB_SESSION_ID` is set and no `ARB_TOKEN` override is present, so `arb`
   run from inside a session authenticates with the session's own —
-  deliberately limited, revocable — token instead of falling back to
-  unauthenticated loopback access and minting a full-power one (bd-5b5hq7).
+  deliberately limited, revocable — token instead of falling back to the
+  operator socket and minting a full-power one (bd-5b5hq7, bd-asawcq).
   """
   @spec mcp_token_path(String.t()) :: String.t()
   def mcp_token_path(id), do: Path.join(session_dir(id), "mcp_token")
