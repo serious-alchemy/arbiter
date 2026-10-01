@@ -184,24 +184,20 @@ defmodule Arbiter.MCP.AgentConfig.Codex do
         {:error, :server_not_configured}
 
       server ->
-        transport = server["transport"] || %{}
-        auth = get_in(transport, ["http_headers", "Authorization"])
-
-        cond do
-          is_binary(transport["bearer_token_env_var"]) ->
-            :ok
-
-          auth in [nil, ""] and is_map(transport["http_headers"]) ->
-            {:error, :authorization_header_empty}
-
-          is_binary(auth) ->
-            :ok
-
-          true ->
-            {:error, :no_authentication_configured}
-        end
+        transport_auth(server["transport"] || %{})
     end
   end
+
+  defp transport_auth(%{"bearer_token_env_var" => var}) when is_binary(var), do: :ok
+
+  defp transport_auth(%{"http_headers" => %{} = headers}) do
+    case headers["Authorization"] do
+      auth when is_binary(auth) and auth != "" -> :ok
+      _ -> {:error, :authorization_header_empty}
+    end
+  end
+
+  defp transport_auth(_transport), do: {:error, :no_authentication_configured}
 
   @doc """
   Run `codex mcp list --json` from the worker's point of view (`:cwd` = the
