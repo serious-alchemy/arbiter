@@ -435,10 +435,25 @@ defmodule ArbiterCli.Cmd.Start do
   # dictionary. `System.cmd/3` spawns the executable directly, without a
   # shell, so the argument list cannot be reinterpreted as syntax.
   # sobelow_skip ["CI.System"]
+  #
+  # bd-asawcq: under `mix test` (`test_helper.exs` sets `:forbid_real_cmds`)
+  # an unstubbed call raises instead, unless the test opts in for its own
+  # stand-in executables (`:bd2_allow_real_cmd`). A restart test without a stub once ran
+  # the real `lsof -ti tcp:4848` + `kill -TERM` from a worker and took down
+  # the live coordinator's server.
   def run_cmd(cmd, args, opts) do
     case Process.get(:bd2_cmd_runner) do
-      fun when is_function(fun, 3) -> fun.(cmd, args, opts)
-      _ -> ReleaseEnv.cmd(cmd, args, opts)
+      fun when is_function(fun, 3) ->
+        fun.(cmd, args, opts)
+
+      _ ->
+        if Application.get_env(:arbiter_cli, :forbid_real_cmds, false) and
+             not Process.get(:bd2_allow_real_cmd, false) do
+          raise "refusing to run `#{cmd}` for real under mix test: stub it with " <>
+                  "Process.put(:bd2_cmd_runner, fn cmd, args, opts -> ... end)"
+        end
+
+        ReleaseEnv.cmd(cmd, args, opts)
     end
   end
 

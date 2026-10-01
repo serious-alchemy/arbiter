@@ -389,7 +389,7 @@ defmodule ArbiterWeb.Api.WorkspaceControllerTest do
 
       conn =
         patch(
-          build_conn() |> put_req_header("accept", "application/json"),
+          coordinator_conn() |> put_req_header("accept", "application/json"),
           ~p"/api/workspaces/#{ws.id}",
           %{secrets: %{"keep" => nil}}
         )

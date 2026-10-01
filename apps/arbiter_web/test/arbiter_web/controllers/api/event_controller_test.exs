@@ -12,7 +12,9 @@ defmodule ArbiterWeb.Api.EventControllerTest do
 
   setup do
     {:ok, ws} = Ash.create(Workspace, %{name: "evt-ctrl-ws", prefix: "ec"})
-    {:ok, ws: ws}
+    # `/events` owns its own auth; start from no Authorization header at all,
+    # not ConnCase's default coordinator `/api` token.
+    {:ok, ws: ws, conn: Phoenix.ConnTest.build_conn()}
   end
 
   defp launch_session!(opts \\ []) do

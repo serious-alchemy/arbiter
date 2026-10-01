@@ -158,7 +158,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     assert exit_code == 0
     assert {:ok, %{"ok" => true, "checks" => checks}} = Jason.decode(String.trim(out))
     assert is_list(checks)
-    assert length(checks) == 18
+    assert length(checks) == 19
   end
 
   test "version mismatch is non-fatal (exit 0 but shows [fail])" do
@@ -596,6 +596,98 @@ defmodule ArbiterCli.Cmd.DoctorTest do
   # login" — a server bound off-loopback exposes unauthenticated pages to
   # anyone who can reach the port. This check warns (never fails the exit
   # code) when that's the case.
+
+  # bd-asawcq: `/api` refuses anonymous callers on loopback too. Doctor proves
+  # it with harmless anonymous probes and fails if the server takes them.
+  describe "anonymous /api access check" do
+    @probe_write "/api/workspaces/arb-doctor-anonymous-probe/config"
+
+    defp anon_green_routes do
+      [
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+      ]
+    end
+
+    # Answers like the server: 401 for a request with no Authorization header,
+    # `accepted` for one that carries a token (the probe must never send one).
+    defp probe_route(method, path, accepted) do
+      {{method, path},
+       fn conn ->
+         case Plug.Conn.get_req_header(conn, "authorization") do
+           [] ->
+             conn
+             |> Plug.Conn.put_status(401)
+             |> Req.Test.json(%{
+               "error" => %{"message" => "Authorization: Bearer <token> required"}
+             })
+
+           _ ->
+             {body, status} = accepted
+             conn |> Plug.Conn.put_status(status) |> Req.Test.json(body)
+         end
+       end}
+    end
+
+    test "green when the server refuses the anonymous probes, and they carry no token" do
+      # A token is on hand (minted over the operator socket, or ARB_TOKEN in
+      # a worker shell); the probes must still go out without one.
+      ArbiterCli.FakeOperatorSocket.start!(%{"token" => "operator-tok", "tier" => "coordinator"})
+
+      stub_routes(
+        anon_green_routes() ++
+          [
+            probe_route("patch", @probe_write, {%{"error" => "not found"}, 404}),
+            probe_route("get", "/api/issues", {%{"data" => []}, 200})
+          ]
+      )
+
+      result = Checks.check_anonymous_api()
+      assert result.status == :ok
+      assert result.name == "anonymous /api access refused"
+    end
+
+    test "fails, fatally, when an anonymous loopback write is accepted" do
+      stub_routes(
+        anon_green_routes() ++
+          [
+            # A validation error means the request got past auth.
+            {{"patch", @probe_write}, {%{"error" => %{"message" => "invalid"}}, 422}},
+            probe_route("get", "/api/issues", {%{"data" => []}, 200})
+          ]
+      )
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+
+      assert exit_code == 1
+      assert out =~ "[fail] anonymous /api access refused"
+      assert out =~ "PATCH #{@probe_write} → 422"
+    end
+
+    test "fails when an anonymous read of every workspace's tickets is accepted" do
+      stub_routes(
+        anon_green_routes() ++
+          [
+            probe_route("patch", @probe_write, {%{}, 404}),
+            {{"get", "/api/issues"}, {%{"data" => []}, 200}}
+          ]
+      )
+
+      result = Checks.check_anonymous_api()
+      assert result.status == :fail
+      assert result.fatal
+      refute result.blocks_readiness
+      assert result.detail =~ "GET /api/issues → 200"
+    end
+
+    test "an unreachable server is left to the reachability check" do
+      stub_transport_error(:patch, @probe_write, :econnrefused)
+
+      assert Checks.check_anonymous_api().status == :ok
+    end
+  end
 
   describe "bind address check" do
     test "loopback bind is green" do

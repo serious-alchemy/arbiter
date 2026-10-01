@@ -36,7 +36,20 @@ defmodule Arbiter.Worker.MCPConfigSpawnTest do
     # guard refuses a spawn with no credential of its own.
     claude_credential_env!()
 
-    sandbox = TestSandbox.provision!("mcp-config-spawn")
+    # The claude stub also records the ARB_TOKEN it was spawned with
+    # (bd-asawcq), before its argv line so a test that waits for the argv
+    # line can read both.
+    sandbox =
+      TestSandbox.provision!("mcp-config-spawn",
+        stub: %{
+          "claude" => """
+          echo "claude-env ARB_TOKEN=${ARB_TOKEN}" >> "$(dirname "$0")/../cli-calls.log"
+          echo "claude $@" >> "$(dirname "$0")/../cli-calls.log"
+          echo "arb done"
+          exit 0
+          """
+        }
+      )
 
     put_app_env(:arbiter, :worktree_root, sandbox.worktree_root)
     put_app_env(:arbiter, :repo_paths, %{"test/repo" => sandbox.repo})
@@ -76,14 +89,40 @@ defmodule Arbiter.Worker.MCPConfigSpawnTest do
     opts = [repo: "test/repo", agent_type: :claude]
 
     missing = Path.join(sandbox.worktree_root, "does-not-exist-#{task.id}")
-    assert Dispatch.inject_mcp_config(task, missing, opts) == [mcp_tools?: false]
+    failed = Dispatch.inject_mcp_config(task, missing, opts)
+    assert failed[:mcp_tools?] == false
+    refute Keyword.has_key?(failed, :mcp_config)
 
     good = Dispatch.inject_mcp_config(task, sandbox.repo, opts)
     assert Keyword.has_key?(good, :mcp_config)
     refute Keyword.has_key?(good, :mcp_tools?)
 
     # No worktree → skipped, not flagged.
-    assert Dispatch.inject_mcp_config(task, nil, opts) == []
+    skipped = Dispatch.inject_mcp_config(task, nil, opts)
+    refute Keyword.has_key?(skipped, :mcp_config)
+    refute Keyword.has_key?(skipped, :mcp_tools?)
+  end
+
+  # bd-asawcq: `/api` needs a bearer token, so the worker's own `arb` gets
+  # its worker token as ARB_TOKEN — the same one its MCP config carries —
+  # whether or not an MCP config could be written (agy with no isolated
+  # `$HOME`, a review with no worktree).
+  test "inject_config hands back the worker token for ARB_TOKEN, written or not",
+       %{sandbox: sandbox, ws: ws} do
+    {:ok, task} = Ash.create(Issue, %{title: "arb token", workspace_id: ws.id})
+    opts = [repo: "test/repo", agent_type: :claude]
+    task_id = task.id
+
+    good = Dispatch.inject_mcp_config(task, sandbox.repo, opts)
+    assert {:ok, %Scope{tier: :worker, task_id: ^task_id}} = Scope.from_token(good[:arb_token])
+    assert_mcp_token!(good[:mcp_config], good[:arb_token])
+
+    missing = Path.join(sandbox.worktree_root, "does-not-exist-#{task.id}")
+
+    for wt <- [missing, nil] do
+      out = Dispatch.inject_mcp_config(task, wt, opts)
+      assert {:ok, %Scope{tier: :worker, task_id: ^task_id}} = Scope.from_token(out[:arb_token])
+    end
   end
 
   test "a CI fix pass writes a fresh worker token and passes it via --mcp-config",
@@ -109,6 +148,7 @@ defmodule Arbiter.Worker.MCPConfigSpawnTest do
 
     assert File.read!(sandbox.log) =~ "--mcp-config #{config_path}"
     assert_valid_worker_token!(config_path, task.id)
+    assert_spawned_with_arb_token!(sandbox, config_path)
   end
 
   test "a merge-conflict resolver writes a fresh worker token and passes it via --mcp-config",
@@ -145,6 +185,7 @@ defmodule Arbiter.Worker.MCPConfigSpawnTest do
 
     assert File.read!(sandbox.log) =~ "--mcp-config #{config_path}"
     assert_valid_worker_token!(config_path, task.id)
+    assert_spawned_with_arb_token!(sandbox, config_path)
   end
 
   test "a fresh work dispatch passes its injected config via --mcp-config",
@@ -166,6 +207,7 @@ defmodule Arbiter.Worker.MCPConfigSpawnTest do
 
     assert File.read!(sandbox.log) =~ "--mcp-config #{config_path}"
     assert_valid_worker_token!(config_path, task.id)
+    assert_spawned_with_arb_token!(sandbox, config_path)
   end
 
   defp assert_valid_worker_token!(config_path, task_id) do
@@ -173,6 +215,21 @@ defmodule Arbiter.Worker.MCPConfigSpawnTest do
       config_path |> File.read!() |> Jason.decode!()
 
     assert {:ok, %Scope{tier: :worker, task_id: ^task_id}} = Scope.from_token(token)
+  end
+
+  defp assert_mcp_token!(config_path, token) do
+    %{"mcpServers" => %{"arbiter" => %{"headers" => %{"Authorization" => "Bearer " <> written}}}} =
+      config_path |> File.read!() |> Jason.decode!()
+
+    assert written == token
+  end
+
+  defp assert_spawned_with_arb_token!(sandbox, config_path) do
+    # A dispatch may spawn the agent more than once (a follow-up turn after
+    # the first exits); every spawn carries the worker token.
+    tokens = for "claude-env ARB_TOKEN=" <> token <- TestSandbox.calls(sandbox), do: token
+    assert tokens != []
+    Enum.each(tokens, &assert_mcp_token!(config_path, &1))
   end
 
   defp claude_called?(sandbox),

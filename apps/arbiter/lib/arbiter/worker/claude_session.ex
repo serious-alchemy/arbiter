@@ -1871,6 +1871,17 @@ defmodule Arbiter.Worker.ClaudeSession do
   # caller-explicit `:env` (agent auth) and the always-last ARB_WORKER_BEAD_ID
   # guard, so a user var can never clobber the agent's auth or the
   # self-recursion guard.
+  # bd-asawcq: `/api` needs a bearer token, so the agent's own `arb` gets the
+  # worker token its dispatch minted (`Dispatch.inject_mcp_config/3`) as
+  # ARB_TOKEN. After `worker_env`, so a workspace var can't swap in another
+  # identity; the server's own ARB_TOKEN is never inherited (`SpawnEnv`).
+  defp arb_token_pair(opts) do
+    case Keyword.get(opts, :arb_token) do
+      token when is_binary(token) and token != "" -> [{"ARB_TOKEN", token}]
+      _ -> []
+    end
+  end
+
   defp env_pairs(opts, task_id, worker_env) do
     base =
       case Keyword.fetch(opts, :env) do
@@ -1892,7 +1903,8 @@ defmodule Arbiter.Worker.ClaudeSession do
     case task_id do
       id when is_binary(id) and id != "" ->
         Arbiter.Worker.SpawnEnv.port_env(
-          dev_server_clean ++ worker_env ++ base ++ [{"ARB_WORKER_BEAD_ID", id}],
+          dev_server_clean ++
+            worker_env ++ base ++ arb_token_pair(opts) ++ [{"ARB_WORKER_BEAD_ID", id}],
           provider
         )
 

@@ -12,6 +12,8 @@ defmodule ArbiterCli.Cmd.Doctor do
     5. Do the CLI and server report the same version?
     6. Are database migrations up to date?
     7. Is the server bound to a loopback address? (the dashboard has no login)
+       And does `/api` refuse a caller with no bearer token? (`[fail]` and
+       exit 1 when an anonymous write or cross-workspace read is served)
     8. Is Erlang distribution loopback-only, with an owner-only cookie?
        (epmd + the release node's listener; `[fail]` and exit 1 otherwise)
     9. Is it safe to restart? (the scheduler drain state — `[fail]` while a

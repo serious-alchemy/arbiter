@@ -347,7 +347,7 @@ By default, `arb` talks to a local server on `http://127.0.0.1:4848` (loopback).
    arb prime
    ```
 
-- **Local loopback** (`ARB_HOST` unset or `http://127.0.0.1:4848`) requires no `ARB_TOKEN` — the server exempts localhost.
+- **Local loopback** (`ARB_HOST` unset or `http://127.0.0.1:4848`) needs no `ARB_TOKEN` from your own shell: `arb` mints a short-lived token over the operator socket for each invocation (bd-asawcq). The server itself no longer exempts localhost; a bare `curl` to `/api` gets 401.
 - **Remote access** requires both `ARB_HOST` and `ARB_TOKEN`, *and* the server
   must be reachable at that address in the first place — since the server now
   binds loopback-only by default (above), that means either `ARB_BIND_ADDRESS`

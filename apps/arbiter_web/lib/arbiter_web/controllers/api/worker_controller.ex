@@ -74,25 +74,19 @@ defmodule ArbiterWeb.Api.WorkerController do
     end
   end
 
-  # This endpoint is loopback-exempt from auth (`ArbiterWeb.Plugs.ApiAuth`) —
-  # the operator's own `arb dispatch` calls it with no token at all, and that
-  # keeps working unchanged (`conn.assigns[:mcp_scope]` is `nil` for a
-  # genuinely anonymous caller). But a caller that *did* present a token —
-  # notably a session's own `arb`, which now always does (bd-5b5hq7) — must
-  # not be able to dispatch a worker through this REST route when its token's
-  # `can_dispatch` is false. Without this, `Arbiter.MCP.Tools.ensure_can_dispatch/1`
-  # (the same guardrail on the `worker_dispatch` MCP tool) would be pure
-  # theater: a session denied dispatch over MCP could just curl this loopback
-  # route with its own (still valid) token instead.
+  # Who may dispatch, review or resume is decided before this runs, by
+  # `ArbiterWeb.ApiPolicy`'s `:dispatch` rule: a coordinator-tier token with
+  # `can_dispatch`, the same guardrail as `Arbiter.MCP.Tools.ensure_can_dispatch/1`
+  # on the MCP tools, so a session denied dispatch over MCP cannot curl these
+  # routes with its own token instead (bd-5b5hq7). This repeats it in the
+  # controller as defense in depth. An anonymous caller never reaches here
+  # since bd-asawcq; if one somehow did, it is refused, not waved through.
   defp ensure_dispatch_allowed(conn) do
     case conn.assigns[:mcp_scope] do
-      nil ->
+      %Arbiter.MCP.Scope{tier: :coordinator, can_dispatch: true} ->
         :ok
 
-      %Arbiter.MCP.Scope{can_dispatch: true} ->
-        :ok
-
-      %Arbiter.MCP.Scope{} ->
+      _ ->
         {:error, {:unauthorized, "this token may not dispatch (can_dispatch is not set)"}}
     end
   end

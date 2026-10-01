@@ -31,7 +31,10 @@ defmodule Arbiter.Worker.SpawnEnvSpawnTest do
     "ARBITER_SESSIONS_ROOT" => "/leak/sessions",
     "CLAUDE_CODE_OAUTH_TOKEN" => "leak-server-claude",
     "OPENAI_API_KEY" => "leak-server-openai",
-    "GEMINI_API_KEY" => "leak-server-gemini"
+    "GEMINI_API_KEY" => "leak-server-gemini",
+    # bd-asawcq: an operator who exported a coordinator ARB_TOKEN into the
+    # server's environment must not hand it to every worker.
+    "ARB_TOKEN" => "leak-server-arb-token"
   }
 
   @leaked_values Map.values(@server_env)
@@ -88,7 +91,7 @@ defmodule Arbiter.Worker.SpawnEnvSpawnTest do
 
   # Spawn `provider`'s stub worker the way Dispatch does (adapter `spawn_env/1`
   # as the caller-explicit :env) and return the child's environment as a map.
-  defp spawn_child_env!(ctx, adapter, provider, ws, adapter_opts \\ []) do
+  defp spawn_child_env!(ctx, adapter, provider, ws, adapter_opts \\ [], session_opts \\ []) do
     {:ok, task} = Ash.create(Issue, %{title: "t", workspace_id: ws.id})
 
     {:ok, pid} =
@@ -102,11 +105,13 @@ defmodule Arbiter.Worker.SpawnEnvSpawnTest do
 
     {:ok, _port} =
       ClaudeSession.start(
-        owner: pid,
-        worktree_path: ctx.tmp_dir,
-        command: [ctx.dumper, dump],
-        provider: provider,
-        env: adapter.spawn_env([workspace: ws, worktree_path: ctx.tmp_dir] ++ adapter_opts)
+        [
+          owner: pid,
+          worktree_path: ctx.tmp_dir,
+          command: [ctx.dumper, dump],
+          provider: provider,
+          env: adapter.spawn_env([workspace: ws, worktree_path: ctx.tmp_dir] ++ adapter_opts)
+        ] ++ session_opts
       )
 
     wait_for_file!(dump)
@@ -160,6 +165,16 @@ defmodule Arbiter.Worker.SpawnEnvSpawnTest do
     refute Map.has_key?(env, "CODEX_API_KEY")
     refute Map.has_key?(env, "GEMINI_API_KEY")
     refute Map.has_key?(env, "ANTIGRAVITY_API_KEY")
+  end
+
+  test "a worker gets its own task's ARB_TOKEN, never the server's (bd-asawcq)", ctx do
+    ws = linked_workspace!()
+    env = spawn_child_env!(ctx, Claude, "claude", ws, [], arb_token: "the-worker-token")
+
+    assert env["ARB_TOKEN"] == "the-worker-token"
+
+    without = spawn_child_env!(ctx, Claude, "claude", ws)
+    refute Map.has_key?(without, "ARB_TOKEN")
   end
 
   test "a Codex worker gets its own key and no Claude or Gemini credential", ctx do

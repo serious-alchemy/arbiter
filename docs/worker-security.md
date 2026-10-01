@@ -839,8 +839,9 @@ service's cgroup and is restarted with it. Doctor reports one that wasn't.
 ### The problem
 
 `POST /api/mcp/tokens` used to hand a **coordinator** token to any anonymous
-caller on loopback (`ArbiterWeb.Plugs.ApiAuth` lets loopback through without
-a bearer token). Every worker runs on the server's host, so any worker could
+caller on loopback (`ArbiterWeb.Plugs.ApiAuth` then let loopback through
+without a bearer token; since bd-asawcq it no longer does, see "Bearer tokens
+on every `/api` route" below). Every worker runs on the server's host, so any worker could
 make itself coordinator with one `curl`: dispatch, config writes, closing
 tickets, installation config. `/mcp` itself always required a bearer token,
 so this endpoint was the way in.
@@ -912,7 +913,7 @@ one.
 
 | Caller | Path | Result |
 |---|---|---|
-| Anonymous loopback `POST /api/mcp/tokens` (any worker's `curl`) | HTTP | **403, no token, any tier.** Anonymous minting is removed outright rather than kept at a read-only tier: no caller needed it. |
+| Anonymous loopback `POST /api/mcp/tokens` (any worker's `curl`) | HTTP | **401, no token, any tier** (403 from bd-8381tk until bd-asawcq moved the refusal into `ApiAuth`). Anonymous minting is removed outright rather than kept at a read-only tier: no caller needed it. |
 | Operator: `arb mcp token mint`, `arb init` (no `ARB_TOKEN`) | operator socket | coordinator token (may narrow via `workspace_id`, `can_dispatch`, `ttl`) |
 | Operator on another machine | `ssh <host> arb mcp token mint` (socket on the server host), or `ARB_TOKEN` + HTTP | as above |
 | Holder of a token (`ARB_TOKEN`, a session's own `arb`) | bearer HTTP | capped at the caller's authority (bd-5b5hq7). Worker and refine callers get 403. |
@@ -1002,11 +1003,6 @@ escript built from this branch:
   cookie (bd-51m9ba, see "The server's Erlang distribution" above). An
   unjailed same-UID worker can still read that cookie and `bin/arbiter rpc`
   into the server; the jail's cookie mask covers jailed workers only.
-* **The anonymous loopback REST surface.** Every other `/api` route
-  (dispatch, `PATCH /api/workspaces/:id/config`, issue close, loop apply) is
-  still coordinator-equivalent without a token. Workers' own `arb` relies on
-  it. Scoping it means giving workers a worker token for `arb` and
-  tier-checking every controller. See docs/remote-access.md.
 * **pid reuse between `connect()` and the `/proc` walk** is theoretically
   possible. A reused pid would belong to a process the attacker doesn't
   control, and a worker-spawned reuser would still be caught by the cgroup
@@ -1036,6 +1032,97 @@ escript built from this branch:
      --force`) and update each `.mcp.json` and `ARB_TOKEN`. Running
      Arbiter sessions hold tokens signed with the old key, so restart them.
      Workers get fresh tokens at their next dispatch.
+
+## Bearer tokens on every `/api` route (bd-asawcq)
+
+### The problem
+
+bd-8381tk closed anonymous **minting**, but `ArbiterWeb.Plugs.ApiAuth` still
+let any loopback caller with no `Authorization` header through to every other
+`/api` route. Loopback is not an identity: every worker runs on this host as
+the operator's Unix user. So any worker's plain `curl` could dispatch, PATCH
+workspace config, close or reopen tickets, apply Loop proposals, pause the
+scheduler or read every workspace's tickets. On live v0.2.6 an anonymous
+`GET /api/issues/<id>` answered 200, and an anonymous
+`PATCH /api/workspaces/default/config` answered 422, a validation error, so
+the request had got past auth.
+
+### The mechanism
+
+* **No anonymous loopback.** `ApiAuth` authenticates first. A request with
+  no `Authorization` header reaches only routes `ArbiterWeb.ApiPolicy`
+  classifies `:anonymous`; everything else answers **401**, on loopback
+  exactly like off it. A header that is present but expired, revoked or
+  malformed is 401 too. It is never downgraded to anonymous.
+* **Per-route tier and scope.** `ArbiterWeb.ApiPolicy` is one explicit table
+  keyed by verb and router pattern, with no implicit default: a route
+  missing from it is refused 403. A valid token the route's policy refuses
+  is **403**. The checks mirror the MCP tools: dispatch needs a
+  coordinator token with `can_dispatch` (like `worker_dispatch`); a
+  worker token may read tickets in its own workspace, update **its own**
+  task's progress fields (like `ticket_update_progress`), file a follow-up as
+  a child of its own task, read its own mailbox and send mail as itself. It
+  can do nothing else. A refine token gets read-only access over REST, since
+  its writes exist only as subtree-gated MCP tools.
+* **Anonymous routes, and why.** Only two, both read-only and free of
+  secrets and workspace data:
+
+  | Route | Why it stays anonymous |
+  |---|---|
+  | `GET /api/version` | Version and build sha. `arb server deploy`/`arb update` poll it across a restart, and `arb doctor` compares it before any token exists. |
+  | `GET /api/server/migrations` | Pending-migration count only. Deploy readiness and `arb doctor` read it the same way. |
+
+  Every other route, the other `/api/server/*` health reads included, needs a
+  token: they name credential paths, accounts and repos.
+* **`arb` always sends a token.** `ArbiterCli.Client` uses `ARB_TOKEN` when
+  set. Inside an Arbiter session it uses the session's own token
+  (bd-5b5hq7). Otherwise, against this machine's server, it mints a
+  one-hour coordinator token over the operator socket on its first request
+  and reuses it for the rest of the invocation, re-minting once if it
+  expires mid-run. The token lives only in that process's memory, never on
+  disk where a same-user worker could read it. Every `arb` verb keeps
+  working from the operator's own shell with no setup. If the socket
+  refuses, which it does for a worker or a session without its own token,
+  the request goes out without a token and the 401's hint says why.
+* **Workers carry their own token.** Every agent spawn that works a task
+  (dispatch, CI fix pass, conflict resolver, ReviewGate's revise-round
+  implementer) gets the task's worker-tier token as `ARB_TOKEN`. It is the
+  same token as its `.mcp.json`, so its `arb inbox`, `arb message` and
+  `arb ticket update` authenticate as that one task. A ReviewGate reviewer
+  gets none: it only reads the diff and prints a verdict. The server's own
+  `ARB_TOKEN`, if the operator exported one, is never inherited
+  (`Arbiter.Worker.SpawnEnv`).
+* **The dashboard is unaffected.** It is the `:browser` pipeline plus the
+  LiveView socket and calls the domain in-process, so it sends no bearer
+  token and needs none. `/events` and `/mcp` already did their own token
+  checks.
+* **`arb doctor` checks it.** The "anonymous /api access refused" check
+  sends two probes with no token: `PATCH /api/workspaces/<nonexistent>/config`
+  with `{}`, and `GET /api/issues`. Neither changes anything, even on a
+  server that lets them through. Anything but 401/403 fails the check and
+  exits 1.
+
+`ArbiterWeb.ApiPolicyTest` iterates the router. A new `/api` route with no
+entry in the table fails it, and so does any write route an anonymous loopback
+request isn't refused on. `ArbiterWeb.ApiTierTest` covers the tier and scope
+checks.
+
+### What this does and does not buy
+
+The same-UID limits from bd-8381tk apply unchanged. A worker that escapes
+its spawn tree on purpose (a transient `systemd-run --user` unit) can still
+mint over the operator socket, and an unjailed one can read
+`~/.arbiter/arbiter.env` and sign its own token. What is gone is the
+zero-effort path: a worker's `curl`, or its own `arb` with `ARB_TOKEN`
+unset, is no longer coordinator-equivalent.
+
+### Migration
+
+* Scripts that `curl` `/api` without a token must send
+  `Authorization: Bearer $(arb mcp token mint --json | jq -r .token)`, run on
+  the server host.
+* An `arb` older than this release still works from the operator's shell
+  only with `ARB_TOKEN` set. Upgrade it alongside the server.
 
 ## Related: the durable log root is secret-bearing
 
