@@ -38,6 +38,44 @@ defmodule Arbiter.Accounts.Concurrency do
   cap on a *shared* ceiling, first-come-first-served between workspaces, not a
   reservation of slots held open for a quiet workspace.
 
+  ## Which runs count toward the cap (bd-35gvrj)
+
+  Occupancy is **every `Arbiter.Worker` process registered**, whatever the
+  role — each one stamps `put_dispatch/3` in `init/1`, so there is no path to
+  forget:
+
+    * the implementer, fresh from `Dispatch.dispatch/2` (Autopilot, the
+      DispatchQueue, `arb dispatch`);
+    * a **resumed** implementer — the boot reconciler's mid-flight resume,
+      `arb worker resume`, a Watchdog auto-resume (all `Dispatch.resume/2`);
+    * fix passes and merge-queue conflict-resolution passes (their own
+      `<task>:fixpass` / `<task>:conflict` registry keys);
+    * ReviewGate reviewer workers (`<task>#review…` keys), counted against the
+      provider they were dispatched with.
+
+  Not counted, because they are not workers in the registry: an external PR
+  review (`Arbiter.Reviews.ExternalReview`), a ReviewPatrol re-review or
+  author reply, and the operator's own interactive sessions.
+
+  Two things keep that count from under-reading when the registry is briefly
+  incomplete, which is the only way the cap can be overshot by a dispatch:
+
+    * **Boot.** The registry starts empty, and the reconciler re-fills it one
+      resume at a time. `Arbiter.Boot.ResumeGate` keeps Autopilot from
+      planning until that sweep returns.
+    * **A resume in flight.** `Dispatch.resume/2` stops the prior worker
+      before the new one registers. Autopilot does not plan while any
+      dispatch/resume is pending (`Arbiter.Board.Drain.dispatch_pending?/0`).
+
+  ## Resumes are never refused by the cap
+
+  A resume of an `:active` ticket passes `Arbiter.Worker.ResumeSlot` uncapped
+  (stranding work is worse than overshooting), so resumes alone can exceed
+  `max_concurrent` — the operator lowered it while workers ran, say. They
+  still resume; `account_headroom/3` is then `0` (it floors at zero, never
+  negative), and `Arbiter.Board.Autopilot` dispatches nothing new until
+  occupancy drops below the cap again.
+
   ## Both terms are opt-in, and `nil` means "no constraint"
 
   `max_concurrent` migrates to `nil` (§4.4) and `share` has never been
