@@ -120,6 +120,7 @@ defmodule Arbiter.Release do
     * `:issue_repos` → `Arbiter.Tasks.RepoBackfill.plan/0` + `apply!/1`
       (`:apply?`)
     * `:run_steps` → `Arbiter.Workers.StepBackfill.backfill/1`
+    * `:gitlab_mr_links` → `Arbiter.Tasks.MergerUrlBackfill` (rewrites numeric-id GitLab MR links)
       (`:apply?`, `:repo`, `:since`, `:until`, `:limit`)
     * `:task_statuses` → `Arbiter.Tasks.StatusBackfill.proposals/1` +
       `apply!/1` (`:apply?`, `:branch`, `:repo_path`) — `:repo_path` defaults
@@ -187,6 +188,34 @@ defmodule Arbiter.Release do
     else
       IO.puts(banner("issue repos", false, opts[:hint]))
       emit_issue_repos_report(plan, :dry_run)
+      plan
+    end
+  end
+
+  def backfill(:gitlab_mr_links, opts) do
+    start_release_repo!()
+    apply? = Keyword.get(opts, :apply?, false)
+    plan = Arbiter.Tasks.MergerUrlBackfill.plan()
+
+    IO.puts(banner("gitlab MR links", apply?, opts[:hint]))
+
+    for e <- plan do
+      IO.puts("#{e.issue_id}: #{e.old_url} -> #{e.new_url || "(unresolved, left alone)"}")
+    end
+
+    unresolved = Enum.count(plan, &is_nil(&1.new_url))
+
+    if apply? do
+      {updated, errors} = Arbiter.Tasks.MergerUrlBackfill.apply!(plan)
+
+      IO.puts(
+        "\nUpdated #{length(updated)}, unresolved #{unresolved}, write failures #{length(errors)}."
+      )
+
+      for {id, reason} <- errors, do: IO.puts(:stderr, "  #{id}: #{reason}")
+      {updated, errors}
+    else
+      IO.puts("\n#{length(plan) - unresolved} would update, #{unresolved} unresolved.")
       plan
     end
   end
