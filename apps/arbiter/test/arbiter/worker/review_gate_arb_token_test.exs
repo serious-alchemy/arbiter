@@ -55,11 +55,11 @@ defmodule Arbiter.Worker.ReviewGateArbTokenTest do
     {:ok, task} =
       Ash.create(Issue, %{title: "arb token", workspace_id: ws.id, issue_type: :feature})
 
-    %{repo: repo, ws: ws, task: put_state!(task, :active)}
+    %{repo: repo, ws: ws, task: put_state!(task, :active), tmp: tmp}
   end
 
   test "the implementer pass gets its task's worker token; the reviewer gets none",
-       %{repo: repo, ws: ws, task: task} do
+       %{repo: repo, ws: ws, task: task, tmp: tmp} do
     {:ok, pid} =
       Worker.start(
         task_id: task.id,
