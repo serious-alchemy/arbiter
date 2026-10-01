@@ -12,11 +12,15 @@ defmodule Arbiter.Worker.ReviewGateArbTokenTest do
   import Arbiter.LifecycleFixtures, only: [put_state!: 2]
 
   alias Arbiter.MCP.Scope
+  alias Arbiter.ProcessTeardown
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Worker
+  alias Arbiter.Worker.ReviewGate
 
   @reviewer Path.expand("../../fixtures/review_record_arb_token.sh", __DIR__)
   @implementer Path.expand("../../fixtures/revise_record_arb_token.sh", __DIR__)
+
+  @teardown_ms 15_000
 
   defp git(args, repo), do: System.cmd("git", ["-C", repo | args], stderr_to_stdout: true)
 
@@ -24,6 +28,7 @@ defmodule Arbiter.Worker.ReviewGateArbTokenTest do
     tmp = Path.join(System.tmp_dir!(), "rg_arb_token-#{System.unique_integer([:positive])}")
     repo = Path.join(tmp, "repo")
     File.mkdir_p!(repo)
+    on_exit(fn -> File.rm_rf!(tmp) end)
 
     {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", repo])
     {_, 0} = git(["config", "user.email", "repo@example.com"], repo)
@@ -55,11 +60,11 @@ defmodule Arbiter.Worker.ReviewGateArbTokenTest do
     {:ok, task} =
       Ash.create(Issue, %{title: "arb token", workspace_id: ws.id, issue_type: :feature})
 
-    %{repo: repo, ws: ws, task: put_state!(task, :active), tmp: tmp}
+    %{repo: repo, ws: ws, task: put_state!(task, :active)}
   end
 
   test "the implementer pass gets its task's worker token; the reviewer gets none",
-       %{repo: repo, ws: ws, task: task, tmp: tmp} do
+       %{repo: repo, ws: ws, task: task} do
     {:ok, pid} =
       Worker.start(
         task_id: task.id,
@@ -79,17 +84,8 @@ defmodule Arbiter.Worker.ReviewGateArbTokenTest do
         }
       )
 
-    on_exit(fn ->
-      # Collect all process monitors before stopping.
-      # We must wait for the ReviewGate and any spawned reviewer/implementer
-      # workers to terminate before removing tmp, so they don't race with rm_rf.
-      refs = collect_and_stop_processes(pid)
-      wait_for_processes(refs)
-      # All processes have exited; the external commands they ran are done.
-      # rm_rf should now succeed without races.
-      File.rm_rf(tmp)
-    end)
-
+    # Runs before setup's `File.rm_rf!(tmp)` (on_exit is LIFO).
+    on_exit(fn -> stop_review_tree(pid, task.id) end)
     :ok = Worker.advance(pid, :claude)
     send(pid, {:__claude_session_done__, "arb done"})
 
@@ -126,105 +122,45 @@ defmodule Arbiter.Worker.ReviewGateArbTokenTest do
     end
   end
 
-  defp collect_and_stop_processes(worker_pid) do
-    # Collect monitors for all processes that need to stop.
-    refs = []
+  # Everything this test starts that writes under tmp: the author worker, the
+  # ReviewGate it spawns (git fetch/checkout into tmp/worktrees), and the gate's
+  # reviewer/implementer pass workers, each of which owns the port running a
+  # fixture script. `Worker.terminate/2` SIGKILLs a pass's OS process tree and
+  # confirms it exited, so a pass's :DOWN means its script is gone too.
+  #
+  # Order matters: the gate first, so it cannot launch another pass; then the
+  # author, so nothing can start another gate; only then list the passes.
+  defp stop_review_tree(author, task_id) do
+    author_ref = Process.monitor(author)
 
-    # Monitor the main worker first to avoid a race: if we check Process.alive?
-    # and then call GenServer.stop between them, stop will fail with :noproc.
-    # Instead, monitor first, then stop, then the monitor will catch any exit.
-    worker_ref = Process.monitor(worker_pid)
-    refs = [worker_ref | refs]
+    case Worker.state(author) do
+      %{meta: %{review_gate_pid: gate}} when is_pid(gate) ->
+        gate_ref = Process.monitor(gate)
+        :ok = ProcessTeardown.stop(gate, @teardown_ms)
+        assert_receive {:DOWN, ^gate_ref, :process, ^gate, _}, @teardown_ms
 
-    # Try to get the ReviewGate pid from the worker's state.
-    # The worker spawns a ReviewGate when review is required.
-    review_gate_pid =
-      try do
-        case Worker.state(worker_pid) do
-          %{meta: %{review_gate_pid: pid}} when is_pid(pid) -> pid
-          _ -> nil
-        end
-      rescue
-        _ -> nil
-      catch
-        _, _ -> nil
-      end
-
-    # Monitor and stop the ReviewGate if it exists.
-    refs =
-      if is_pid(review_gate_pid) do
-        gate_ref = Process.monitor(review_gate_pid)
-        # Stop the gate gracefully. If it's already dead, the monitor will catch it.
-        safe_stop_process(fn -> GenServer.stop(review_gate_pid, :normal) end)
-        [gate_ref | refs]
-      else
-        refs
-      end
-
-    # Try to extract and monitor the reviewer process from ReviewGate state.
-    reviewer_ref =
-      if is_pid(review_gate_pid) do
-        try do
-          case :sys.get_state(review_gate_pid) do
-            %{reviewer_pid: pid} when is_pid(pid) ->
-              ref = Process.monitor(pid)
-              safe_stop_process(fn -> GenServer.stop(pid, :normal) end)
-              ref
-
-            _ ->
-              nil
-          end
-        rescue
-          _ -> nil
-        catch
-          _, _ -> nil
-        end
-      else
-        nil
-      end
-
-    refs = if reviewer_ref, do: [reviewer_ref | refs], else: refs
-
-    # Stop the main worker gracefully if still alive.
-    # The monitor will catch the exit regardless.
-    safe_stop_process(fn -> GenServer.stop(worker_pid, :normal) end)
-
-    refs
-  end
-
-  defp safe_stop_process(fun) do
-    try do
-      fun.()
-    rescue
-      _ -> :ok
-    catch
-      :exit, _ -> :ok
+      _no_gate_yet ->
+        :ok
     end
-  end
 
-  defp wait_for_processes(refs, timeout_ms \\ 30_000) do
-    deadline = System.monotonic_time(:millisecond) + timeout_ms
-    wait_for_processes_loop(refs, deadline)
-  end
+    :ok = ProcessTeardown.stop_child(Arbiter.Worker.Supervisor, author, @teardown_ms)
+    assert_receive {:DOWN, ^author_ref, :process, ^author, _}, @teardown_ms
 
-  defp wait_for_processes_loop([], _deadline), do: :ok
+    prefix = ReviewGate.reviewer_task_id(task_id)
 
-  defp wait_for_processes_loop(refs, deadline) do
-    remaining_ms = max(0, deadline - System.monotonic_time(:millisecond))
-
-    if remaining_ms <= 0 do
-      # Timeout: processes did not terminate. This is a real failure, not silent cleanup.
-      raise "Timed out waiting for processes to terminate: #{inspect(refs)}"
-    else
-      receive do
-        {:DOWN, ref, :process, _pid, _reason} ->
-          remaining_refs = List.delete(refs, ref)
-          wait_for_processes_loop(remaining_refs, deadline)
-      after
-        min(1000, remaining_ms) ->
-          wait_for_processes_loop(refs, deadline)
+    passes =
+      for {key, pass} <- Worker.Registry.all(), String.starts_with?(key, prefix) do
+        {Process.monitor(pass), pass}
       end
-    end
-  end
 
+    for {_ref, pass} <- passes do
+      :ok = ProcessTeardown.stop_child(Arbiter.Worker.Supervisor, pass, @teardown_ms)
+    end
+
+    for {ref, pass} <- passes do
+      assert_receive {:DOWN, ^ref, :process, ^pass, _}, @teardown_ms
+    end
+
+    :ok
+  end
 end
