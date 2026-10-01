@@ -54,6 +54,101 @@ defmodule Arbiter.Board.AutopilotConfigTest do
     pid
   end
 
+  describe "persisted pause state unreadable at boot (bd-c3b30g)" do
+    import ExUnit.CaptureLog
+
+    # A read that fails until the test releases it — Autopilot starts before
+    # `Boot.Migrator`, so on a pending installation_settings migration the real
+    # read errors until the migration lands.
+    defp flaky_read(failures, status) do
+      {:ok, counter} = Agent.start_link(fn -> failures end)
+
+      fn ->
+        case Agent.get_and_update(counter, fn n -> {n, max(n - 1, 0)} end) do
+          0 -> {:ok, status}
+          _ -> {:error, {:no_such_column, "board_autopilot_paused_at"}}
+        end
+      end
+    end
+
+    setup do
+      saved = Application.get_env(:arbiter, :board_autopilot, :not_set)
+      Application.delete_env(:arbiter, :board_autopilot)
+
+      on_exit(fn ->
+        if saved == :not_set,
+          do: Application.delete_env(:arbiter, :board_autopilot),
+          else: Application.put_env(:arbiter, :board_autopilot, saved)
+      end)
+    end
+
+    test "warns, and adopts the persisted unpaused state once the read works" do
+      status = %{paused: false, changed_at: ~U[2026-10-01 01:28:03Z], changed_by: "api"}
+      test = self()
+
+      log =
+        capture_log(fn ->
+          pid =
+            start(
+              read_status: flaky_read(1, status),
+              state_retry_ms: 10,
+              snapshot: fn opts -> board(nil, opts[:paused]) end
+            )
+
+          # Boot fell back to the safe default, which is what v0.2.7 shipped.
+          send(test, {:booted, Autopilot.paused?(pid)})
+
+          :ok = wait_until(fn -> Autopilot.paused?(pid) == false end)
+          send(test, {:status, Autopilot.status(pid)})
+        end)
+
+      assert_received {:booted, true}
+      assert_received {:status, %{paused?: false, changed_by: "api"}}
+      assert log =~ "could not read the persisted paused state at boot"
+    end
+
+    test "an unreadable row raises a coordinator-visible notice after repeated failures" do
+      test = self()
+
+      capture_log(fn ->
+        start(
+          read_status: fn -> {:error, :boom} end,
+          state_retry_ms: 5,
+          notify_unreadable: fn reason -> send(test, {:notified, reason}) end
+        )
+
+        assert_receive {:notified, :boom}, 2_000
+      end)
+    end
+
+    test "an explicit pause/resume during the retry window is not overridden" do
+      status = %{paused: true, changed_at: nil, changed_by: nil}
+
+      capture_log(fn ->
+        pid = start(read_status: flaky_read(2, status), state_retry_ms: 60_000)
+        :ok = Autopilot.resume(pid)
+        assert false === Autopilot.paused?(pid)
+        send(pid, :reload_paused_state)
+        _ = :sys.get_state(pid)
+        assert false === Autopilot.paused?(pid)
+      end)
+    end
+
+    test "nothing persisted is not an error: config default, no retry" do
+      pid = start(read_status: fn -> {:ok, %{paused: nil, changed_at: nil, changed_by: nil}} end)
+      assert true === Autopilot.paused?(pid)
+      assert %{state_load: :settled} = :sys.get_state(pid)
+    end
+
+    defp wait_until(fun, tries \\ 200) do
+      cond do
+        fun.() -> :ok
+        tries == 0 -> flunk("condition never held")
+        true -> Process.sleep(10) && wait_until(fun, tries - 1)
+      end
+    end
+  end
+
   describe "boot-time defaults from app config" do
     test "with no :board_autopilot config, autopilot starts paused" do
       # Save the current config

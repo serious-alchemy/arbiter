@@ -1224,6 +1224,9 @@ defmodule Arbiter.Quota do
   Each view also carries `gate_policy` — `gate_policy/2` for its account and
   this workspace — so the quota bars can colour by the gate's own thresholds
   (bd-clzkvp). It holds structs, so `serialize_view/1` leaves it out.
+
+  A caller that already holds the `Workspace` row passes it as `workspace:`
+  and the policy is built from it instead of a second read of `workspaces`.
   """
   @spec list_latest_for_workspace(String.t() | nil, keyword()) :: [map()]
   def list_latest_for_workspace(workspace_id, opts \\ []) do
@@ -1232,7 +1235,10 @@ defmodule Arbiter.Quota do
         []
 
       views ->
-        workspace = workspace_id && safe_workspace(workspace_id)
+        workspace =
+          Keyword.get_lazy(opts, :workspace, fn ->
+            workspace_id && safe_workspace(workspace_id)
+          end)
 
         Enum.map(views, fn view ->
           view
@@ -1445,8 +1451,21 @@ defmodule Arbiter.Quota do
   """
   @spec default_workspace_id() :: {:ok, String.t()} | {:error, term()}
   def default_workspace_id do
+    case default_workspace() do
+      {:ok, %Workspace{id: id}} -> {:ok, id}
+      error -> error
+    end
+  end
+
+  @doc """
+  The installation default workspace itself — `default_workspace_id/0`'s rule,
+  but handing back the row the one read already loaded, so a caller that also
+  needs the workspace's config does not read `workspaces` a second time.
+  """
+  @spec default_workspace() :: {:ok, Workspace.t()} | {:error, term()}
+  def default_workspace do
     case Ash.read!(Workspace) do
-      [%Workspace{id: id}] -> {:ok, id}
+      [%Workspace{} = ws] -> {:ok, ws}
       [] -> {:error, :no_workspaces}
       many -> default_named(many)
     end
@@ -1456,7 +1475,7 @@ defmodule Arbiter.Quota do
 
   defp default_named(workspaces) do
     case Enum.find(workspaces, &(&1.name == "default")) do
-      %Workspace{id: id} -> {:ok, id}
+      %Workspace{} = ws -> {:ok, ws}
       nil -> {:error, :ambiguous_workspace}
     end
   end
@@ -1471,10 +1490,8 @@ defmodule Arbiter.Quota do
   """
   @spec default_workspace_on_exhaustion() :: :throttle | :continue
   def default_workspace_on_exhaustion do
-    with {:ok, ws_id} <- default_workspace_id(),
-         {:ok, workspace} <- Ash.get(Workspace, ws_id) do
-      Workspace.quota_on_exhaustion(workspace)
-    else
+    case default_workspace() do
+      {:ok, workspace} -> Workspace.quota_on_exhaustion(workspace)
       _ -> Workspace.quota_on_exhaustion(nil)
     end
   end

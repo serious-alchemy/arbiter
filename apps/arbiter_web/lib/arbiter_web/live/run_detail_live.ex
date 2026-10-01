@@ -102,6 +102,8 @@ defmodule ArbiterWeb.RunDetailLive do
       flash={@flash}
       current_path={@current_path}
       quotas={@quotas}
+      quota_on_exhaustion={@quota_on_exhaustion}
+      open_epic_count={@open_epic_count}
       live={@live}
       coordinator_inbox={@coordinator_inbox}
       coordinator_outstanding_count={@coordinator_outstanding_count}

@@ -50,7 +50,8 @@ defmodule ArbiterWeb.Layouts do
 
   attr(:quota_on_exhaustion, :any,
     default: nil,
-    doc: "override for tests/specimens; real callers omit it and get the installation default"
+    doc:
+      "the installation default workspace's mode, from ArbiterWeb.LiveHooks' :quota assign; nil until it loads"
   )
 
   attr(:coordinator_inbox, :any,
@@ -71,28 +72,18 @@ defmodule ArbiterWeb.Layouts do
 
   attr(:open_epic_count, :integer,
     default: nil,
-    doc: "override for tests/specimens; real callers omit it and the nav counts open epics itself"
+    doc:
+      "the Epics nav badge, from ArbiterWeb.LiveHooks' :open_epics assign; nil renders no badge"
   )
 
   slot(:inner_block, required: true)
 
   def app(assigns) do
-    # Fetched once per render rather than threaded through every LiveView's
-    # `<Layouts.app quotas={@quotas} ...>` call site (bd-l4epbc) — the quota
-    # bars only ever show the installation default workspace regardless of
-    # which page is open, same as `@quotas` itself (`ArbiterWeb.LiveHooks`).
-    # `quota_on_exhaustion` defaults to nil via `attr/3`, so a real caller
-    # (who never passes it) still falls through to the DB-backed default;
-    # only tests/specimens override it to dodge the DB round-trip.
-    #
-    # It only words the bars, so it is only read when there are bars to draw
-    # (bd-adewb4): not on the dead render, whose quota is still loading, and
-    # not on the re-render the loaded quota triggers when there is none — nor
-    # when every shown provider is still a "no data yet" placeholder
-    # (bd-i2gwwn), which has no bar to word.
-    # That re-render comes moments after mount, and a LiveView torn down
-    # while it is inside this read drops the test suite's one sandbox
-    # connection (bd-5scl0c).
+    # Nothing here touches the DB: this renders on every page and on every
+    # re-render, so the values arrive as assigns from `ArbiterWeb.LiveHooks`
+    # (`:quota` loads `quota_on_exhaustion`, `:open_epics` keeps
+    # `open_epic_count` fresh off PubSub) and are passed in by the page
+    # (bd-cixhhs). A caller that omits them gets the global default / no badge.
     assigns =
       assigns
       |> assign(:quotas, as_async(assigns.quotas))
@@ -101,22 +92,8 @@ defmodule ArbiterWeb.Layouts do
     assigns =
       assign(
         assigns,
-        :quota_on_exhaustion,
-        if(quota_readings?(assigns.quotas),
-          do: assigns.quota_on_exhaustion || Arbiter.Quota.default_workspace_on_exhaustion(),
-          else: assigns.quota_on_exhaustion
-        )
-      )
-
-    # Same lazy-read shape as `quota_on_exhaustion` above: the nav's open-epic
-    # badge (bd-2wmxt5) is global chrome, so threading it through all eleven
-    # LiveViews' `<Layouts.app ...>` call sites would buy nothing. Tests and
-    # specimens that render the layout outside a DB sandbox pass the count in.
-    assigns =
-      assign(
-        assigns,
         :groups,
-        ArbiterWeb.Nav.groups(assigns.open_epic_count || Arbiter.Tasks.open_epic_count())
+        ArbiterWeb.Nav.groups(assigns.open_epic_count)
       )
 
     assigns =
@@ -775,11 +752,6 @@ defmodule ArbiterWeb.Layouts do
 
   defp quota_bars?(%AsyncResult{ok?: true, result: [_ | _]}), do: true
   defp quota_bars?(%AsyncResult{}), do: false
-
-  defp quota_readings?(%AsyncResult{ok?: true, result: quotas}) when is_list(quotas),
-    do: Enum.any?(quotas, &(not quota_no_data?(&1)))
-
-  defp quota_readings?(%AsyncResult{}), do: false
 
   # The loaded messages; none until the first load lands. A failed re-read
   # keeps the last list in the result, but the drawer and the trigger show

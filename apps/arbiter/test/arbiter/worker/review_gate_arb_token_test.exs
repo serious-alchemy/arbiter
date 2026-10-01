@@ -12,11 +12,15 @@ defmodule Arbiter.Worker.ReviewGateArbTokenTest do
   import Arbiter.LifecycleFixtures, only: [put_state!: 2]
 
   alias Arbiter.MCP.Scope
+  alias Arbiter.ProcessTeardown
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Worker
+  alias Arbiter.Worker.ReviewGate
 
   @reviewer Path.expand("../../fixtures/review_record_arb_token.sh", __DIR__)
   @implementer Path.expand("../../fixtures/revise_record_arb_token.sh", __DIR__)
+
+  @teardown_ms 15_000
 
   defp git(args, repo), do: System.cmd("git", ["-C", repo | args], stderr_to_stdout: true)
 
@@ -80,7 +84,8 @@ defmodule Arbiter.Worker.ReviewGateArbTokenTest do
         }
       )
 
-    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+    # Runs before setup's `File.rm_rf!(tmp)` (on_exit is LIFO).
+    on_exit(fn -> stop_review_tree(pid, task.id) end)
     :ok = Worker.advance(pid, :claude)
     send(pid, {:__claude_session_done__, "arb done"})
 
@@ -115,5 +120,56 @@ defmodule Arbiter.Worker.ReviewGateArbTokenTest do
         Process.sleep(25)
         do_wait(fun, deadline)
     end
+  end
+
+  # Everything this test starts that writes under tmp: the author worker, the
+  # ReviewGate it spawns (git fetch/checkout into tmp/worktrees), and the gate's
+  # reviewer/implementer pass workers, each of which owns the port running a
+  # fixture script. `Worker.terminate/2` SIGKILLs a pass's OS process tree and
+  # confirms it exited, so a pass's :DOWN means its script is gone too.
+  #
+  # Order matters: the gate first, so it cannot launch another pass; then the
+  # author, so nothing can start another gate; only then list the passes.
+  defp stop_review_tree(author, task_id) do
+    author_ref = Process.monitor(author)
+
+    # A dead author answers no call; fall through to the pass sweep regardless,
+    # so a crashed author cannot leave running passes behind for rm_rf! to race.
+    state =
+      try do
+        Worker.state(author)
+      catch
+        :exit, _ -> :no_author
+      end
+
+    case state do
+      %{meta: %{review_gate_pid: gate}} when is_pid(gate) ->
+        gate_ref = Process.monitor(gate)
+        :ok = ProcessTeardown.stop(gate, @teardown_ms)
+        assert_receive {:DOWN, ^gate_ref, :process, ^gate, _}, @teardown_ms
+
+      _no_gate ->
+        :ok
+    end
+
+    :ok = ProcessTeardown.stop_child(Arbiter.Worker.Supervisor, author, @teardown_ms)
+    assert_receive {:DOWN, ^author_ref, :process, ^author, _}, @teardown_ms
+
+    prefix = ReviewGate.reviewer_task_id(task_id)
+
+    passes =
+      for {key, pass} <- Worker.Registry.all(), String.starts_with?(key, prefix) do
+        {Process.monitor(pass), pass}
+      end
+
+    for {_ref, pass} <- passes do
+      :ok = ProcessTeardown.stop_child(Arbiter.Worker.Supervisor, pass, @teardown_ms)
+    end
+
+    for {ref, pass} <- passes do
+      assert_receive {:DOWN, ^ref, :process, ^pass, _}, @teardown_ms
+    end
+
+    :ok
   end
 end
