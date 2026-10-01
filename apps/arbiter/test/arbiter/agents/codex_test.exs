@@ -88,78 +88,6 @@ defmodule Arbiter.Agents.CodexTest do
     test "returns nil when nothing is configured (CLI picks its own default)" do
       assert Codex.resolved_model([]) == nil
     end
-
-    test "paid-tier accounts resolve to gpt-5.6 models by default" do
-      # Paid-tier ChatGPT accounts have access to gpt-5.6-luna and gpt-5.6-terra.
-      # These are the default tier models for paid-tier and enterprise accounts.
-      defaults = Codex.Config.default_tier_models()
-
-      # Verify the paid-tier defaults
-      assert defaults["economy"] == "gpt-5.6-luna"
-      assert defaults["standard"] == "gpt-5.6-terra"
-      assert defaults["premium"] == "gpt-5.6-terra"
-      assert defaults["flagship"] == "gpt-5.6-terra"
-
-      # All tiers resolve correctly with the defaults
-      assert Codex.resolved_model(model_tier: "economy") == "gpt-5.6-luna"
-      assert Codex.resolved_model(model_tier: "standard") == "gpt-5.6-terra"
-      assert Codex.resolved_model(model_tier: "premium") == "gpt-5.6-terra"
-      assert Codex.resolved_model(model_tier: "flagship") == "gpt-5.6-terra"
-    end
-
-    test "free-tier defaults when provided via tier_models override" do
-      # Free-tier ChatGPT accounts only have access to gpt-5.4-mini and gpt-5.5.
-      # Tier resolution returns these models when configured via tier_models override.
-      free_tier_config = %{
-        "tier_models" => %{
-          "economy" => "gpt-5.4-mini",
-          "standard" => "gpt-5.5",
-          "premium" => "gpt-5.5",
-          "flagship" => "gpt-5.5"
-        }
-      }
-
-      Codex.Config.put_active(free_tier_config)
-
-      # All tiers should resolve to free-tier models
-      assert Codex.resolved_model(model_tier: "economy") == "gpt-5.4-mini"
-      assert Codex.resolved_model(model_tier: "standard") == "gpt-5.5"
-      assert Codex.resolved_model(model_tier: "premium") == "gpt-5.5"
-      assert Codex.resolved_model(model_tier: "flagship") == "gpt-5.5"
-    end
-
-    test "plan-aware defaults assume paid when plan cannot be determined" do
-      # When no plan_type is set and no quota is available,
-      # default to paid-tier models (conservative approach)
-      empty_config = %{}
-
-      defaults = Codex.Config.plan_aware_defaults(empty_config)
-      assert defaults["economy"] == "gpt-5.6-luna"
-      assert defaults["standard"] == "gpt-5.6-terra"
-      assert defaults["premium"] == "gpt-5.6-terra"
-      assert defaults["flagship"] == "gpt-5.6-terra"
-    end
-
-    test "backend neutrality: non-OpenAI backends can override via tier_models" do
-      # Codex+Ollama or other Responses-API backends should not be forced
-      # onto OpenAI model names. They override via agent.config["tier_models"]
-      ollama_config = %{
-        "tier_models" => %{
-          "economy" => "ollama-mini",
-          "standard" => "ollama-full",
-          "premium" => "ollama-full",
-          "flagship" => "ollama-full"
-        }
-      }
-
-      Codex.Config.put_active(ollama_config)
-
-      # Override should take precedence over any defaults
-      assert Codex.Config.model_for_tier("economy") == "ollama-mini"
-      assert Codex.Config.model_for_tier("standard") == "ollama-full"
-      assert Codex.Config.model_for_tier("premium") == "ollama-full"
-      assert Codex.Config.model_for_tier("flagship") == "ollama-full"
-    end
   end
 
   describe "default_argv/2 executable resolution" do
@@ -584,40 +512,28 @@ defmodule Arbiter.Agents.CodexTest do
     end
   end
 
-  describe "plan detection and tier model selection" do
+  # Test config points the codex home at a nonexistent dir, so the backend is
+  # :unknown and nothing is validated — see Codex.ModelCatalogTest for that.
+  describe "Config.model_for_tier/1 with no codex home" do
     setup do
       on_exit(fn -> Codex.Config.clear() end)
       :ok
     end
 
-    test "tier_models override takes precedence over built-in defaults" do
-      # Workspace config overrides should take precedence over any defaults,
-      # allowing backends like Codex+Ollama to provide their own models
-      overrides = %{
-        "tier_models" => %{
-          "economy" => "custom-mini",
-          "standard" => "custom-std",
-          "premium" => "custom-pro",
-          "flagship" => "custom-pro"
-        }
-      }
-
-      Codex.Config.put_active(overrides)
+    test "a tier_models override takes precedence over the built-in defaults" do
+      Codex.Config.put_active(%{
+        "tier_models" => %{"economy" => "custom-mini", "flagship" => "custom-pro"}
+      })
 
       assert Codex.Config.model_for_tier("economy") == "custom-mini"
-      assert Codex.Config.model_for_tier("standard") == "custom-std"
-      assert Codex.Config.model_for_tier("premium") == "custom-pro"
       assert Codex.Config.model_for_tier("flagship") == "custom-pro"
+      assert Codex.Config.model_for_tier("standard") == "gpt-5.6-terra"
     end
 
-    test "paid-tier models are default when plan cannot be determined" do
-      # When no provider account is found and quota is not available,
-      # conservatively default to paid-tier models
+    test "falls back to the built-in defaults" do
       Codex.Config.put_active(%{})
 
       assert Codex.Config.model_for_tier("economy") == "gpt-5.6-luna"
-      assert Codex.Config.model_for_tier("standard") == "gpt-5.6-terra"
-      assert Codex.Config.model_for_tier("premium") == "gpt-5.6-terra"
       assert Codex.Config.model_for_tier("flagship") == "gpt-5.6-terra"
     end
   end

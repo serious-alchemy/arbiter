@@ -12,8 +12,9 @@ defmodule Arbiter.Agents.Codex.Config do
   disk.
   """
 
-  require Ash.Query
+  require Logger
 
+  alias Arbiter.Agents.Codex.ModelCatalog
   alias Arbiter.Agents.CredentialsRef
   alias Arbiter.Agents.ProviderConfig
   alias Arbiter.Tasks.Workspace
@@ -24,8 +25,7 @@ defmodule Arbiter.Agents.Codex.Config do
 
   @pdict_key {__MODULE__, :active_workspace_config}
   @pdict_workspace_key {__MODULE__, :active_workspace_id}
-  @pdict_detected_plan_key {__MODULE__, :detected_plan}
-  @pdict_backend_key {__MODULE__, :detected_backend}
+  @pdict_context_key {__MODULE__, :model_validation_context}
   @rotation_key {__MODULE__, :api_key_rotation_index}
 
   @type t :: %{
@@ -39,33 +39,19 @@ defmodule Arbiter.Agents.Codex.Config do
   # `agent.config["tier_models"]` (string keys), or — in a multi-provider pool
   # where that flat key is shared — via the Codex-scoped
   # `agent.config["codex"]["tier_models"]` (merged at `put_active/2`; see
-  # `Arbiter.Agents.ProviderConfig`). The values are model ids the
-  # `codex --model` flag accepts.
+  # `Arbiter.Agents.ProviderConfig`).
   #
-  # Economy, standard, and premium tiers have distinct models (gpt-5.6-luna vs
-  # gpt-5.6-terra). Flagship shares the premium model since no distinct flagship
-  # variant exists on OpenAI's Codex API; it is a routing-tier concept for
-  # difficulty-based dispatch and can override per-workspace.
-  #
-  # These defaults are plan-aware: free-tier accounts (limited to gpt-5.4-mini
-  # and gpt-5.5) receive free-tier models; paid-tier and enterprise accounts
-  # receive gpt-5.6-luna and gpt-5.6-terra. The plan type is determined by
-  # reading the workspace's provider account's plan field.
-  #
-  # Non-OpenAI backends (e.g., Codex+Ollama) are not forced onto OpenAI model
-  # names; they override via agent.config["codex"]["tier_models"].
-  @default_tier_models_paid %{
+  # Both models were probed working on a ChatGPT free account (bd-7tgosa) and
+  # are listed in its models_cache.json. `flagship` shares premium's model:
+  # no larger Codex model is callable on that account. Whatever this map or
+  # an override resolves to is still checked by `Codex.ModelCatalog` for the
+  # active account's plan and catalog (see `model_for_tier/1`), and none of it
+  # applies to a custom `model_provider` backend.
+  @default_tier_models %{
     "economy" => "gpt-5.6-luna",
     "standard" => "gpt-5.6-terra",
     "premium" => "gpt-5.6-terra",
     "flagship" => "gpt-5.6-terra"
-  }
-
-  @default_tier_models_free %{
-    "economy" => "gpt-5.4-mini",
-    "standard" => "gpt-5.5",
-    "premium" => "gpt-5.5",
-    "flagship" => "gpt-5.5"
   }
 
   @doc "Set the active Codex agent config for the current process."
@@ -80,6 +66,7 @@ defmodule Arbiter.Agents.Codex.Config do
   def put_active(nil, _role) do
     Process.delete(@pdict_key)
     Process.delete(@pdict_workspace_key)
+    Process.delete(@pdict_context_key)
     :ok
   end
 
@@ -91,13 +78,14 @@ defmodule Arbiter.Agents.Codex.Config do
 
     Process.put(@pdict_key, CredentialsRef.embed_secrets(raw, Workspace.secrets_map(workspace)))
     Process.put(@pdict_workspace_key, workspace_id)
-    Process.delete(@pdict_detected_plan_key)
-    Process.delete(@pdict_backend_key)
+    Process.delete(@pdict_context_key)
     :ok
   end
 
   def put_active(%{} = raw, _role) do
     Process.put(@pdict_key, ProviderConfig.apply_overrides(raw, @provider))
+    Process.delete(@pdict_workspace_key)
+    Process.delete(@pdict_context_key)
     :ok
   end
 
@@ -106,8 +94,7 @@ defmodule Arbiter.Agents.Codex.Config do
   def clear do
     Process.delete(@pdict_key)
     Process.delete(@pdict_workspace_key)
-    Process.delete(@pdict_detected_plan_key)
-    Process.delete(@pdict_backend_key)
+    Process.delete(@pdict_context_key)
     Process.delete(@rotation_key)
     :ok
   end
@@ -178,14 +165,16 @@ defmodule Arbiter.Agents.Codex.Config do
   end
 
   @doc """
-  Resolve an abstract `model_tier` (`"economy"` | `"standard"` | `"premium"`)
-  to a concrete Codex model name. Returns `nil` for an unknown / nil tier — the
-  adapter falls back to the CLI default. Workspace config can override the
-  mapping under `agent.config["tier_models"]`.
+  Resolve an abstract `model_tier` (`"economy"` | `"standard"` | `"premium"` |
+  `"flagship"`) to a concrete Codex model name. Returns `nil` for an unknown /
+  nil tier — the adapter then sends no `-m` and the CLI uses its own default.
+  Workspace config can override the mapping under `agent.config["tier_models"]`.
 
-  Defaults are plan-aware: free-tier accounts receive gpt-5.5, paid-tier and
-  enterprise accounts receive gpt-5.6-luna/terra. The plan type is stored in
-  the workspace config after auth-probe detection.
+  The resolved model is checked against the active account (see
+  `Arbiter.Agents.Codex.ModelCatalog`). One the account provably cannot call
+  is replaced, with a warning, by the tier's built-in default or else the
+  catalog's top listed model. On a custom `model_provider` backend the
+  OpenAI built-ins never apply: only an explicit override resolves.
   """
   @spec model_for_tier(String.t() | nil) :: String.t() | nil
   def model_for_tier(nil), do: nil
@@ -193,109 +182,58 @@ defmodule Arbiter.Agents.Codex.Config do
 
   def model_for_tier(tier) when is_binary(tier) do
     {:ok, cfg} = resolve()
-    overrides = stringy_map(Map.get(cfg.raw, "tier_models"))
+    ctx = validation_context()
+    default = if ctx.backend == :custom, do: nil, else: Map.get(@default_tier_models, tier)
 
-    case Map.get(overrides, tier) || Map.get(plan_aware_defaults(cfg.raw), tier) do
-      m when is_binary(m) and m != "" -> m
-      _ -> nil
+    case Map.get(stringy_map(Map.get(cfg.raw, "tier_models")), tier) || default do
+      nil -> nil
+      model -> usable_for_tier(tier, model, default, ctx)
     end
   end
 
   def model_for_tier(_), do: nil
 
   @doc """
-  Built-in default tier → model map, adjusted for the account's plan type.
-
-  Attempts to determine the plan from:
-  1. `plan_type` in the workspace config (if explicitly set)
-  2. The latest CodexQuota for this workspace's provider account (if available)
-  3. Defaults to `:paid` if plan cannot be determined
+  Pre-flight check of a concrete model against the active account. `:ok`
+  when usable or when nothing proves otherwise (missing/stale catalog,
+  non-ChatGPT backend).
   """
-  @spec plan_aware_defaults(map()) :: map()
-  def plan_aware_defaults(raw) when is_map(raw) do
-    plan = detect_plan(raw)
-    if plan == "free", do: @default_tier_models_free, else: @default_tier_models_paid
-  end
+  @spec validate_model(String.t()) :: :ok | {:error, String.t()}
+  def validate_model(model) when is_binary(model),
+    do: ModelCatalog.check(model, validation_context())
 
-  # Detect the account's plan by querying the provider account or latest quota.
-  # Results are cached in the pdict to avoid repeated database lookups.
-  defp detect_plan(_raw) do
-    detect_plan_from_quota_cached()
-  end
+  @doc "Built-in default tier → model map (testing / introspection)."
+  def default_tier_models, do: @default_tier_models
 
-  defp detect_plan_from_quota_cached do
-    case Process.get(@pdict_detected_plan_key) do
-      {:cached, plan} -> plan
-      nil -> detect_plan_from_quota_uncached()
+  defp usable_for_tier(tier, model, default, ctx) do
+    case ModelCatalog.usable(model, List.wrap(default), ctx) do
+      ^model ->
+        model
+
+      substitute ->
+        {:error, why} = ModelCatalog.check(model, ctx)
+
+        Logger.warning(
+          "Codex tier #{tier}: model #{model} #{why}; using #{substitute || "the CLI default"}"
+        )
+
+        substitute
     end
   end
 
-  defp detect_plan_from_quota_uncached do
-    plan = detect_plan_from_quota()
-    Process.put(@pdict_detected_plan_key, {:cached, plan})
-    plan
-  end
+  # Computed once per `put_active/2`: it reads the codex home and, on the
+  # ChatGPT backend, the account's quota snapshot.
+  defp validation_context do
+    case Process.get(@pdict_context_key) do
+      nil ->
+        ctx = ModelCatalog.context(Process.get(@pdict_workspace_key), api_key_configured?())
+        Process.put(@pdict_context_key, ctx)
+        ctx
 
-  # Try to detect plan from the provider account or latest CodexQuota
-  defp detect_plan_from_quota do
-    with workspace_id when not is_nil(workspace_id) <- Process.get(@pdict_workspace_key),
-         {:ok, workspace} <- fetch_workspace(workspace_id),
-         provider_acct_id <- get_provider_account_id(workspace),
-         provider_acct_id when not is_nil(provider_acct_id) <- provider_acct_id do
-      # Try the provider account's plan field first
-      case Arbiter.Accounts.ProviderAccount |> Ash.get(provider_acct_id) do
-        {:ok, acct} when is_binary(acct.plan) and acct.plan != "" ->
-          acct.plan
-
-        _ ->
-          # Fall back to latest quota if account plan is not set
-          case fetch_latest_quota(provider_acct_id) do
-            {:ok, quota} when is_binary(quota.plan) and quota.plan != "" -> quota.plan
-            _ -> nil
-          end
-      end
-    else
-      _ -> nil
-    end
-  rescue
-    _ -> nil
-  end
-
-  defp fetch_workspace(ws_id) do
-    case Workspace |> Ash.Query.filter(id == ^ws_id) |> Ash.read_one() do
-      {:ok, workspace} -> {:ok, workspace}
-      _ -> :error
+      ctx ->
+        ctx
     end
   end
-
-  defp get_provider_account_id(workspace) do
-    # Query WorkspaceProviderAccount to find the codex account for this workspace
-    case Arbiter.Accounts.WorkspaceProviderAccount
-         |> Ash.Query.filter(workspace_id == ^workspace.id and provider == :codex)
-         |> Ash.Query.load(:provider_account)
-         |> Ash.read_one() do
-      {:ok, wpa} when not is_nil(wpa) -> wpa.provider_account_id
-      _ -> nil
-    end
-  rescue
-    _ -> nil
-  end
-
-  defp fetch_latest_quota(provider_acct_id) do
-    case Arbiter.Quota.CodexQuota
-         |> Ash.Query.filter(provider_account_id == ^provider_acct_id)
-         |> Ash.Query.sort(captured_at: :desc)
-         |> Ash.Query.limit(1)
-         |> Ash.read_one() do
-      {:ok, quota} -> {:ok, quota}
-      _ -> :error
-    end
-  rescue
-    _ -> :error
-  end
-
-  @doc "Built-in default tier → model map for paid-tier accounts (testing / introspection)."
-  def default_tier_models, do: @default_tier_models_paid
 
   # ---- Internals --------------------------------------------------------
 

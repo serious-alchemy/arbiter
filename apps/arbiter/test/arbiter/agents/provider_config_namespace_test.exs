@@ -142,10 +142,10 @@ defmodule Arbiter.Agents.ProviderConfigNamespaceTest do
     end
   end
 
-  describe "free-tier Codex model override" do
-    test "a codex-scoped tier_models override for free tier models" do
-      # Free-tier ChatGPT accounts only have access to gpt-5.4-mini and gpt-5.5.
-      # This test verifies that a Codex-scoped override can provide free-tier models.
+  describe "codex-scoped tier_models override" do
+    test "resolves for Codex and leaves Claude/Gemini on their defaults" do
+      # No codex home in test, so the override is not validated here; the
+      # account-level checks are covered by Codex.ModelCatalogTest.
       config = %{
         "codex" => %{
           "tier_models" => %{
@@ -161,7 +161,7 @@ defmodule Arbiter.Agents.ProviderConfigNamespaceTest do
       Claude.Config.put_active(config)
       Gemini.Config.put_active(config)
 
-      # Codex sees its scoped override with free-tier models.
+      # Codex sees its scoped override.
       assert Codex.Config.model_for_tier("economy") == "gpt-5.4-mini"
       assert Codex.Config.model_for_tier("standard") == "gpt-5.5"
       assert Codex.Config.model_for_tier("premium") == "gpt-5.5"
@@ -174,7 +174,7 @@ defmodule Arbiter.Agents.ProviderConfigNamespaceTest do
       assert Gemini.Config.model_for_tier("standard") ==
                Gemini.Config.default_tier_models()["standard"]
 
-      # Verify that free-tier models do not appear in Claude/Gemini tiers.
+      # The Codex override does not leak into Claude/Gemini tiers.
       refute Claude.Config.model_for_tier("economy") == "gpt-5.4-mini"
       refute Gemini.Config.model_for_tier("economy") == "gpt-5.4-mini"
     end

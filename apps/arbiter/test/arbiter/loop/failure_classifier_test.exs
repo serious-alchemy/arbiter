@@ -329,6 +329,14 @@ defmodule Arbiter.Loop.FailureClassifierTest do
       assert r.evidence == :stop_category
     end
 
+    test "model_unavailable is conclusive operational" do
+      r = FC.classify(nil, [], stop_category: :model_unavailable)
+
+      assert r.class == :operational
+      assert r.subcategory == :model_unavailable
+      assert r.evidence == :stop_category
+    end
+
     test "a string category (as read back off the DB column) is accepted" do
       r = FC.classify("server restarted", [], stop_category: "context_thrash")
       assert r.class == :agent_quality
