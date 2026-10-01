@@ -73,9 +73,20 @@ defmodule Arbiter.Umbrella.MixProject do
       arbiter: [
         applications: [arbiter: :permanent, arbiter_web: :permanent],
         include_executables_for: [:unix],
-        version: @version
+        version: @version,
+        steps: [:assemble, &restrict_cookie/1]
       ]
     ]
+  end
+
+  # bd-51m9ba: Mix writes releases/COOKIE world-readable. The release never
+  # uses it (rel/env.sh.eex exports a per-install cookie from
+  # <data-home>/release.cookie instead, because this file ships inside the
+  # published tarball), but it is still an Erlang cookie, so it leaves the
+  # build owner-only. env.sh re-tightens it on every start too.
+  defp restrict_cookie(release) do
+    File.chmod!(Path.join(release.path, "releases/COOKIE"), 0o600)
+    release
   end
 
   # Dependencies can be Hex packages:

@@ -752,6 +752,78 @@ cookie for jailed workers, see below; the rest of `~/.arbiter` is follow-up)
 and the guardrail-profile work (bd-8apkz6). Until then treat any worker with shell
 access as able to reach everything the operator's account can read.
 
+## The server's Erlang distribution (bd-51m9ba, GitHub #156)
+
+The release keeps Erlang distribution on so the operator can still run
+`~/.arbiter/current/bin/arbiter rpc '…'` / `remote` (e.g. to disable a
+provider account). Distribution is a code-execution channel: anyone who
+holds the cookie and can reach epmd and the node's listener runs arbitrary
+code in the server, with no MCP token or scope check in the way. Before this
+fix epmd and the node listened on `0.0.0.0`, the node was an sname, and the
+cookie was the world-readable `releases/COOKIE` that ships inside the
+published tarball, so it was the same for every install.
+
+What the release does now (`rel/env.sh.eex`, `rel/vm.args.eex`,
+`rel/remote.vm.args.eex`, `restrict_cookie/1` in the root `mix.exs`):
+
+* **Loopback only.** `env.sh` exports `ERL_EPMD_ADDRESS=127.0.0.1`, which an
+  inherited value cannot override, and makes the node a long name,
+  `arbiter@127.0.0.1` (`RELEASE_DISTRIBUTION=name`). `vm.args` and
+  `remote.vm.args` pin `-kernel inet_dist_use_interface {127,0,0,1}`. An sname
+  is not an option: it resolves the host name, often to a LAN address, where a
+  loopback-only epmd does not answer and `rpc` would break.
+* **A per-install cookie.** `env.sh` creates `<data-home>/release.cookie`
+  (`ARB_DATA_HOME`, default `~/.arbiter`): 32 random bytes, hex-encoded, under
+  `umask 077`, published atomically with `ln`. It exports that file's contents
+  as `RELEASE_COOKIE` and runs `chmod 600` on it at every invocation. The
+  server, `rpc`, `remote` and `stop` all read the same file, so the operator's
+  `rpc` works from the same UID unchanged. An operator-set `RELEASE_COOKIE`
+  still wins. If the file can neither be read nor created, the node gets a
+  throwaway cookie and a warning on stderr. It never falls back to the
+  bundled cookie: losing `rpc` is the safe failure.
+* **The bundled `releases/COOKIE` is 0600** after the build
+  (`restrict_cookie/1`) and after every start (`env.sh`), even though nothing
+  uses it any more.
+* **The agy jail shadows the cookie.** `Arbiter.Worker.Jail.secret_files/0`
+  binds `/dev/null` over `<data-home>/release.cookie` (alongside the
+  bundled `releases/COOKIE` and `arbiter.env`, bd-8381tk) after every writable
+  bind. The jail shares the host network, so without this a jailed worker
+  could read the cookie and reach epmd over loopback. The jail's escape probe,
+  which runs behind `arb doctor`'s "agy jail escape" check, now fails if the
+  cookie reads back non-empty. `RELEASE_COOKIE` is not in the worker env
+  allowlist (bd-7r0qrj), and the jail's own PID namespace keeps
+  `/proc/<server>/environ` out of reach.
+* **`arb doctor` checks it.** The "erlang distribution is loopback-only" check
+  (`ArbiterCli.Cmd.Doctor.Distribution`) reads `/proc/net/tcp{,6}` for
+  listeners on epmd's port and on the `arbiter` node's port, which it gets from
+  epmd's `NAMES` reply. It also stats `<data-home>/release.cookie` and
+  `<data-home>/current/releases/COOKIE`. It reports each bind address and mode
+  it saw and fails (exit 1) on a non-loopback listener or a group- or
+  world-readable cookie. It never blocks deploy readiness.
+
+An epmd that was already running keeps its old binding: `ERL_EPMD_ADDRESS`
+only applies when epmd starts. Under the systemd unit epmd lives in the
+service's cgroup and is restarted with it. Doctor reports one that wasn't.
+
+### Residual risk: same UID, and the command line
+
+* **An unjailed same-UID worker can still get in.** Claude workers are not
+  jailed today. They run as the operator's UID, so they can `cat` the 0600
+  `~/.arbiter/release.cookie` or read `RELEASE_COOKIE` from
+  `/proc/<server pid>/environ`, then run `bin/arbiter rpc` over loopback. File
+  modes and loopback binding do nothing against the same UID. Closing this
+  needs worker read-masking: G3, hiding sensitive read paths
+  (`bd-3q2djr`), and G7, running Claude under the jail (`bd-d2o3xb`). Until
+  both land, treat an unjailed worker as able to run code in the server.
+* **The cookie appears in the server's command line.** Mix's release script
+  passes it as `--cookie`, which becomes `beam.smp … -setcookie <cookie>`.
+  Any local user can see it with `ps` unless `/proc` is mounted with
+  `hidepid=2`. Distribution is loopback-only now, so this matters only for
+  other accounts on the same host. A jailed worker is not affected: it has its
+  own PID namespace. Taking the cookie off argv means replacing Mix's
+  `bin/arbiter` launcher, which is follow-up work. On a shared host, mount
+  `/proc` with `hidepid=2`.
+
 ## Where the posture is surfaced
 
 * **`arb prime`** — a `security:` block in the active-workspace section (mode,
@@ -860,11 +932,12 @@ socket isn't reachable at all:
   still connectable.
 * `systemd-run --user` fails (the bus is masked), so a jailed worker can't
   leave `arbiter.service` either.
-* `Jail.secret_files/0` binds `/dev/null` over the two files that would skip
+* `Jail.secret_files/0` binds `/dev/null` over the files that would skip
   the proof entirely: `~/.arbiter/arbiter.env` (it holds `SECRET_KEY_BASE`,
   the MCP signing key, so a reader could sign their own coordinator token)
-  and `$RELEASE_ROOT/releases/COOKIE` (the Erlang distribution cookie, which
-  gives `bin/arbiter rpc` into the server). The bind sits on a `nodev`
+  and the Erlang distribution cookies, `<data-home>/release.cookie` (the
+  per-install one, bd-51m9ba) and `$RELEASE_ROOT/releases/COOKIE` (the
+  bundled one), which give `bin/arbiter rpc` into the server. The bind sits on a `nodev`
   mount, so reads fail with `EACCES`.
 
 ### Verified live (2026-09-30)
@@ -925,12 +998,10 @@ escript built from this branch:
 
 ### Known open gaps (not fixed here)
 
-* **Erlang distribution.** The release runs with distribution on (the
-  `mix release` default). epmd and the node listen on all interfaces, and
-  `releases/COOKIE` is mode 0644. An unjailed worker can
-  `bin/arbiter rpc` into the server and skip every token check. This has been
-  reported to the coordinator as its own issue. The jail's cookie mask covers
-  jailed workers only.
+* **Erlang distribution** is now loopback-only with a per-install 0600
+  cookie (bd-51m9ba, see "The server's Erlang distribution" above). An
+  unjailed same-UID worker can still read that cookie and `bin/arbiter rpc`
+  into the server; the jail's cookie mask covers jailed workers only.
 * **The anonymous loopback REST surface.** Every other `/api` route
   (dispatch, `PATCH /api/workspaces/:id/config`, issue close, loop apply) is
   still coordinator-equivalent without a token. Workers' own `arb` relies on
