@@ -62,7 +62,12 @@ defmodule ArbiterCli.Cmd.Doctor.DistributionTest do
     cookie = cookie!(dir, "release.cookie", 0o600)
 
     result =
-      check(proc_net: [tcp, tcp6], epmd_port: epmd_port, epmd_listen_port: 4369, cookie_paths: [cookie])
+      check(
+        proc_net: [tcp, tcp6],
+        epmd_port: epmd_port,
+        epmd_listen_port: 4369,
+        cookie_paths: [cookie]
+      )
 
     Task.await(serve)
     assert %Result{status: :ok, fatal: true, blocks_readiness: false} = result

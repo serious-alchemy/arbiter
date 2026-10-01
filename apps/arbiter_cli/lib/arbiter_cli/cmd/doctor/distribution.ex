@@ -228,17 +228,23 @@ defmodule ArbiterCli.Cmd.Doctor.Distribution do
   defp node_port(port) do
     opts = [:binary, active: false, packet: :raw]
 
-    with {:ok, sock} <- :gen_tcp.connect({127, 0, 0, 1}, port, opts, @epmd_timeout_ms) do
-      try do
-        with :ok <- :gen_tcp.send(sock, <<1::16, 110>>),
-             {:ok, <<_epmd_port::32, names::binary>>} <- recv_all(sock, <<>>) do
-          find_node(names)
-        else
-          _ -> nil
+    case :gen_tcp.connect({127, 0, 0, 1}, port, opts, @epmd_timeout_ms) do
+      {:ok, sock} ->
+        try do
+          names_port(sock)
+        after
+          :gen_tcp.close(sock)
         end
-      after
-        :gen_tcp.close(sock)
-      end
+
+      {:error, _} ->
+        nil
+    end
+  end
+
+  defp names_port(sock) do
+    with :ok <- :gen_tcp.send(sock, <<1::16, 110>>),
+         {:ok, <<_epmd_port::32, names::binary>>} <- recv_all(sock, <<>>) do
+      find_node(names)
     else
       _ -> nil
     end
@@ -264,7 +270,9 @@ defmodule ArbiterCli.Cmd.Doctor.Distribution do
   # -- cookies ---------------------------------------------------------------
 
   defp cookie_modes(paths) do
-    for path <- paths, {:ok, %File.Stat{mode: mode}} <- [File.stat(path)], do: {path, mode &&& 0o777}
+    for path <- paths,
+        {:ok, %File.Stat{mode: mode}} <- [File.stat(path)],
+        do: {path, mode &&& 0o777}
   end
 
   defp octal(mode), do: mode |> Integer.to_string(8) |> String.pad_leading(4, "0")

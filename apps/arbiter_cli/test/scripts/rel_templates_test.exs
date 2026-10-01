@@ -18,7 +18,8 @@ defmodule ArbiterCli.Scripts.RelTemplatesTest do
 
   @moduletag :tmp_dir
 
-  defp render(name), do: EEx.eval_file(Path.join(@rel, name <> ".eex"), assigns: [release: @release])
+  defp render(name),
+    do: EEx.eval_file(Path.join(@rel, name <> ".eex"), assigns: [release: @release])
 
   # A fake release root holding the rendered env.sh and a bundled COOKIE the
   # way the published tarball ships it (0644, same bytes for every install).
@@ -47,7 +48,9 @@ defmodule ArbiterCli.Scripts.RelTemplatesTest do
 
     base = %{"PATH" => System.get_env("PATH")}
     env = Map.merge(base, env)
-    args = ["-i" | Enum.map(env, fn {k, v} -> "#{k}=#{v}" end)] ++ ["sh", "-c", script, "sh", root]
+
+    args =
+      ["-i" | Enum.map(env, fn {k, v} -> "#{k}=#{v}" end)] ++ ["sh", "-c", script, "sh", root]
 
     {out, status} = System.cmd("env", args, stderr_to_stdout: true)
     {parse(out), out, status}
@@ -159,7 +162,10 @@ defmodule ArbiterCli.Scripts.RelTemplatesTest do
       data = Path.join(dir, "data")
 
       {vars, _out, 0} =
-        source_env(release_root!(dir), %{"HOME" => Path.join(dir, "home"), "ARB_DATA_HOME" => data})
+        source_env(release_root!(dir), %{
+          "HOME" => Path.join(dir, "home"),
+          "ARB_DATA_HOME" => data
+        })
 
       assert File.read!(Path.join(data, "release.cookie")) == vars["RELEASE_COOKIE"]
       refute File.exists?(Path.join(dir, "home/.arbiter/release.cookie"))
@@ -184,7 +190,10 @@ defmodule ArbiterCli.Scripts.RelTemplatesTest do
       on_exit(fn -> File.chmod(data, 0o700) end)
 
       {vars, out, 0} =
-        source_env(release_root!(dir), %{"HOME" => Path.join(dir, "home"), "ARB_DATA_HOME" => data})
+        source_env(release_root!(dir), %{
+          "HOME" => Path.join(dir, "home"),
+          "ARB_DATA_HOME" => data
+        })
 
       assert vars["RELEASE_COOKIE"] =~ ~r/\A[0-9a-f]{64}\z/
       assert out =~ "throwaway"
