@@ -145,7 +145,7 @@ defmodule Arbiter.Agents.ProviderConfigNamespaceTest do
   describe "free-tier Codex model override" do
     test "codex-scoped free-tier tier_models override resolves correctly for all tiers" do
       # Free-tier ChatGPT accounts only have gpt-5.4-mini and gpt-5.5 available.
-      # Premium/plus accounts have gpt-5-codex and gpt-5-codex-mini.
+      # The default tier models are gpt-5.6-luna (economy) and gpt-5.6-terra (standard/premium).
       # This override allows free-tier workspaces to dispatch to Codex without
       # requesting unavailable models (bd-2pkwjf).
       config = %{

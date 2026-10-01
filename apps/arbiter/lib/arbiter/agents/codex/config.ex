@@ -39,9 +39,10 @@ defmodule Arbiter.Agents.Codex.Config do
   # tiers today (only the reasoning `effort` differs); the map exists so a
   # workspace can pin cheaper/pricier ids without an adapter change.
   @default_tier_models %{
-    "economy" => "gpt-5-codex-mini",
-    "standard" => "gpt-5-codex",
-    "premium" => "gpt-5-codex"
+    "economy" => "gpt-5.6-luna",
+    "standard" => "gpt-5.6-terra",
+    "premium" => "gpt-5.6-terra",
+    "flagship" => "gpt-5.6-terra"
   }
 
   @doc "Set the active Codex agent config for the current process."

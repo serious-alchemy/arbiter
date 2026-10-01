@@ -79,8 +79,10 @@ defmodule Arbiter.Agents.CodexTest do
     end
 
     test "resolves a :model_tier to a concrete model via the default tier map" do
-      assert Codex.resolved_model(model_tier: "premium") == "gpt-5-codex"
-      assert Codex.resolved_model(model_tier: "economy") == "gpt-5-codex-mini"
+      assert Codex.resolved_model(model_tier: "premium") == "gpt-5.6-terra"
+      assert Codex.resolved_model(model_tier: "standard") == "gpt-5.6-terra"
+      assert Codex.resolved_model(model_tier: "economy") == "gpt-5.6-luna"
+      assert Codex.resolved_model(model_tier: "flagship") == "gpt-5.6-terra"
     end
 
     test "returns nil when nothing is configured (CLI picks its own default)" do
