@@ -124,6 +124,25 @@ defmodule Arbiter.ApplicationTest do
       refute Arbiter.Boot.ProviderAccounts in Application.children(auto_start?: false)
     end
 
+    test "the ticket_transitions backfill runs after the migrators and before the queues" do
+      # bd-d8fi92: it replays history into a table the migrator creates, and
+      # must finish before anything that could write live rows starts.
+      ids = Application.children(auto_start?: true) |> Enum.map(&child_id/1)
+
+      backfill_ix = Enum.find_index(ids, &(&1 == Arbiter.Boot.TicketTransitions))
+      accounts_ix = Enum.find_index(ids, &(&1 == Arbiter.Boot.ProviderAccounts))
+
+      assert backfill_ix
+      assert Enum.find_index(ids, &(&1 == Arbiter.Boot.Migrator)) < backfill_ix
+      assert accounts_ix < backfill_ix
+
+      for later <- [:reconcile_boot_task, :merge_queue_boot_task, :dispatch_queue_boot_task] do
+        assert backfill_ix < Enum.find_index(ids, &(&1 == later))
+      end
+
+      refute Arbiter.Boot.TicketTransitions in Application.children(auto_start?: false)
+    end
+
     test "the gated boot tasks are absent when auto_start? is false (the test-env default)" do
       ids = Application.children(auto_start?: false) |> Enum.map(&child_id/1)
 

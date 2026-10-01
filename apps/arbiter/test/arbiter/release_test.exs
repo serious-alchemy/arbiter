@@ -142,6 +142,38 @@ defmodule Arbiter.ReleaseTest do
       assert report.inserted == 0
     end
 
+    test ":ticket_transitions runs without Mix and reports on an empty corpus" do
+      report = Release.backfill(:ticket_transitions, [])
+
+      assert report.apply? == false
+      assert report.pending == 0
+      assert report.inserted == 0
+    end
+
+    test ":ticket_transitions is a dry run by default and writes with apply?: true" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{name: "release-tt-#{System.unique_integer([:positive])}", prefix: "rtt"})
+
+      issue = Ash.create!(Issue, %{title: "t", workspace_id: ws.id, acceptance: "- ok"})
+      Arbiter.Repo.query!("DELETE FROM ticket_transitions WHERE ticket_id = ?", [issue.id])
+
+      output =
+        ExUnit.CaptureIO.capture_io(fn ->
+          assert %{pending: 1, planned: 1, inserted: 0} = Release.backfill(:ticket_transitions)
+        end)
+
+      assert output =~ "DRY RUN"
+      assert output =~ "mismatches"
+      assert Arbiter.Tasks.TicketTransition.for_ticket!(issue.id) == []
+
+      ExUnit.CaptureIO.capture_io(fn ->
+        assert %{inserted: 1} = Release.backfill(:ticket_transitions, apply?: true)
+      end)
+
+      assert [%{source: "backfill", to_state: :backlog}] =
+               Arbiter.Tasks.TicketTransition.for_ticket!(issue.id)
+    end
+
     test ":issue_repos dry run reports the plan and writes nothing" do
       {:ok, ws} =
         Ash.create(Workspace, %{
