@@ -229,6 +229,19 @@ defmodule Arbiter.Tasks.TicketTransitionTest do
     end
   end
 
+  # SQLite drops a table's triggers with the table, so a later migration that
+  # rebuilds `issues` (create-copy-drop-rename) would silently stop the
+  # history. This fails it instead.
+  test "both writer triggers are installed on issues" do
+    %{rows: rows} =
+      Repo.query!(
+        "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'issues' ORDER BY name"
+      )
+
+    assert ["ticket_transitions_on_issue_insert", "ticket_transitions_on_issue_state_update"] --
+             List.flatten(rows) == []
+  end
+
   test "deleting a ticket keeps its history", %{ws: ws} do
     issue = ticket(ws)
     Repo.query!("DELETE FROM issues_versions WHERE version_source_id = ?", [issue.id])
