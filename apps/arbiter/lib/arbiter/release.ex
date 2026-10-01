@@ -120,8 +120,9 @@ defmodule Arbiter.Release do
     * `:issue_repos` → `Arbiter.Tasks.RepoBackfill.plan/0` + `apply!/1`
       (`:apply?`)
     * `:run_steps` → `Arbiter.Workers.StepBackfill.backfill/1`
-    * `:gitlab_mr_links` → `Arbiter.Tasks.MergerUrlBackfill` (rewrites numeric-id GitLab MR links)
       (`:apply?`, `:repo`, `:since`, `:until`, `:limit`)
+    * `:gitlab_mr_links` → `Arbiter.Tasks.MergerUrlBackfill` (rewrites
+      numeric-id GitLab MR links; `:apply?`)
     * `:task_statuses` → `Arbiter.Tasks.StatusBackfill.proposals/1` +
       `apply!/1` (`:apply?`, `:branch`, `:repo_path`) — `:repo_path` defaults
       to `File.cwd!()`, which under `bin/arbiter eval` is wherever the
@@ -194,6 +195,8 @@ defmodule Arbiter.Release do
 
   def backfill(:gitlab_mr_links, opts) do
     start_release_repo!()
+    # Path resolution calls the GitLab API through Req (Finch pool).
+    {:ok, _} = Application.ensure_all_started(:req)
     apply? = Keyword.get(opts, :apply?, false)
     plan = Arbiter.Tasks.MergerUrlBackfill.plan()
 
