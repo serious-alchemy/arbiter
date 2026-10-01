@@ -25,6 +25,7 @@ defmodule Arbiter.Agents.Codex.Config do
   @pdict_key {__MODULE__, :active_workspace_config}
   @pdict_workspace_key {__MODULE__, :active_workspace_id}
   @pdict_detected_plan_key {__MODULE__, :detected_plan}
+  @pdict_backend_key {__MODULE__, :detected_backend}
   @rotation_key {__MODULE__, :api_key_rotation_index}
 
   @type t :: %{
@@ -47,11 +48,12 @@ defmodule Arbiter.Agents.Codex.Config do
   # difficulty-based dispatch and can override per-workspace.
   #
   # These defaults are plan-aware: free-tier accounts (limited to gpt-5.4-mini
-  # and gpt-5.5) receive those models; paid-tier and enterprise accounts receive
-  # gpt-5.6-luna and gpt-5.6-terra. The plan type is detected at auth-probe time
-  # and stored in the workspace config. Non-OpenAI backends (e.g., Codex+Ollama)
-  # are not forced onto OpenAI model names; they override via
-  # agent.config["codex"]["tier_models"].
+  # and gpt-5.5) receive free-tier models; paid-tier and enterprise accounts
+  # receive gpt-5.6-luna and gpt-5.6-terra. The plan type is determined by
+  # reading the workspace's provider account's plan field.
+  #
+  # Non-OpenAI backends (e.g., Codex+Ollama) are not forced onto OpenAI model
+  # names; they override via agent.config["codex"]["tier_models"].
   @default_tier_models_paid %{
     "economy" => "gpt-5.6-luna",
     "standard" => "gpt-5.6-terra",
@@ -60,7 +62,7 @@ defmodule Arbiter.Agents.Codex.Config do
   }
 
   @default_tier_models_free %{
-    "economy" => "gpt-5.5",
+    "economy" => "gpt-5.4-mini",
     "standard" => "gpt-5.5",
     "premium" => "gpt-5.5",
     "flagship" => "gpt-5.5"
@@ -89,6 +91,8 @@ defmodule Arbiter.Agents.Codex.Config do
 
     Process.put(@pdict_key, CredentialsRef.embed_secrets(raw, Workspace.secrets_map(workspace)))
     Process.put(@pdict_workspace_key, workspace_id)
+    Process.delete(@pdict_detected_plan_key)
+    Process.delete(@pdict_backend_key)
     :ok
   end
 
@@ -103,6 +107,7 @@ defmodule Arbiter.Agents.Codex.Config do
     Process.delete(@pdict_key)
     Process.delete(@pdict_workspace_key)
     Process.delete(@pdict_detected_plan_key)
+    Process.delete(@pdict_backend_key)
     Process.delete(@rotation_key)
     :ok
   end
@@ -212,13 +217,10 @@ defmodule Arbiter.Agents.Codex.Config do
     if plan == "free", do: @default_tier_models_free, else: @default_tier_models_paid
   end
 
-  # Detect the account's plan by checking config, then querying latest quota if available.
+  # Detect the account's plan by querying the provider account or latest quota.
   # Results are cached in the pdict to avoid repeated database lookups.
-  defp detect_plan(raw) when is_map(raw) do
-    case Map.get(raw, "plan_type") do
-      p when is_binary(p) and p != "" -> p
-      _ -> detect_plan_from_quota_cached()
-    end
+  defp detect_plan(_raw) do
+    detect_plan_from_quota_cached()
   end
 
   defp detect_plan_from_quota_cached do
@@ -234,18 +236,29 @@ defmodule Arbiter.Agents.Codex.Config do
     plan
   end
 
-  # Try to detect plan from the latest CodexQuota for this workspace
+  # Try to detect plan from the provider account or latest CodexQuota
   defp detect_plan_from_quota do
     with workspace_id when not is_nil(workspace_id) <- Process.get(@pdict_workspace_key),
          {:ok, workspace} <- fetch_workspace(workspace_id),
          provider_acct_id <- get_provider_account_id(workspace),
-         provider_acct_id when not is_nil(provider_acct_id) <- provider_acct_id,
-         {:ok, quota} <- fetch_latest_quota(provider_acct_id),
-         plan when is_binary(plan) and plan != "" <- quota.plan do
-      plan
+         provider_acct_id when not is_nil(provider_acct_id) <- provider_acct_id do
+      # Try the provider account's plan field first
+      case Arbiter.Accounts.ProviderAccount |> Ash.get(provider_acct_id) do
+        {:ok, acct} when is_binary(acct.plan) and acct.plan != "" ->
+          acct.plan
+
+        _ ->
+          # Fall back to latest quota if account plan is not set
+          case fetch_latest_quota(provider_acct_id) do
+            {:ok, quota} when is_binary(quota.plan) and quota.plan != "" -> quota.plan
+            _ -> nil
+          end
+      end
     else
       _ -> nil
     end
+  rescue
+    _ -> nil
   end
 
   defp fetch_workspace(ws_id) do
@@ -256,17 +269,13 @@ defmodule Arbiter.Agents.Codex.Config do
   end
 
   defp get_provider_account_id(workspace) do
-    # For now, assume the workspace uses the default provider account
-    # In a multi-provider setup, this would need to be more sophisticated
-    # For Codex, we look for a linked provider account
-    case Ash.load(workspace, :provider_accounts) do
-      {:ok, ws} ->
-        ws.provider_accounts
-        |> Enum.find(&(&1.provider_name == "codex"))
-        |> then(&(&1 && &1.id))
-
-      _ ->
-        nil
+    # Query WorkspaceProviderAccount to find the codex account for this workspace
+    case Arbiter.Accounts.WorkspaceProviderAccount
+         |> Ash.Query.filter(workspace_id == ^workspace.id and provider == :codex)
+         |> Ash.Query.load(:provider_account)
+         |> Ash.read_one() do
+      {:ok, wpa} when not is_nil(wpa) -> wpa.provider_account_id
+      _ -> nil
     end
   rescue
     _ -> nil

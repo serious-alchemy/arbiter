@@ -143,18 +143,26 @@ defmodule Arbiter.Agents.ProviderConfigNamespaceTest do
   end
 
   describe "free-tier Codex model override" do
-    test "plan-aware defaults return free-tier models when plan_type is set" do
-      # Free-tier ChatGPT accounts only have gpt-5.4-mini and gpt-5.5 available.
-      # When plan_type is detected and stored in the config, plan-aware defaults
-      # return free-tier models (gpt-5.5) instead of the paid-tier defaults.
-      config = %{"plan_type" => "free"}
+    test "a codex-scoped tier_models override for free tier models" do
+      # Free-tier ChatGPT accounts only have access to gpt-5.4-mini and gpt-5.5.
+      # This test verifies that a Codex-scoped override can provide free-tier models.
+      config = %{
+        "codex" => %{
+          "tier_models" => %{
+            "economy" => "gpt-5.4-mini",
+            "standard" => "gpt-5.5",
+            "premium" => "gpt-5.5",
+            "flagship" => "gpt-5.5"
+          }
+        }
+      }
 
       Codex.Config.put_active(config)
       Claude.Config.put_active(config)
       Gemini.Config.put_active(config)
 
-      # Codex resolves to free-tier models via plan-aware defaults.
-      assert Codex.Config.model_for_tier("economy") == "gpt-5.5"
+      # Codex sees its scoped override with free-tier models.
+      assert Codex.Config.model_for_tier("economy") == "gpt-5.4-mini"
       assert Codex.Config.model_for_tier("standard") == "gpt-5.5"
       assert Codex.Config.model_for_tier("premium") == "gpt-5.5"
       assert Codex.Config.model_for_tier("flagship") == "gpt-5.5"
@@ -167,8 +175,8 @@ defmodule Arbiter.Agents.ProviderConfigNamespaceTest do
                Gemini.Config.default_tier_models()["standard"]
 
       # Verify that free-tier models do not appear in Claude/Gemini tiers.
-      refute Claude.Config.model_for_tier("economy") == "gpt-5.5"
-      refute Gemini.Config.model_for_tier("economy") == "gpt-5.5"
+      refute Claude.Config.model_for_tier("economy") == "gpt-5.4-mini"
+      refute Gemini.Config.model_for_tier("economy") == "gpt-5.4-mini"
     end
   end
 end
