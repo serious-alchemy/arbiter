@@ -479,6 +479,58 @@ defmodule ArbiterWeb.QuotaHelpersTest do
   end
 
   # bd-i2gwwn: the status-bar chip's rings.
+  describe "Arbiter.Quota.Codex.view/1" do
+    alias Arbiter.Quota.Codex
+    alias Arbiter.Quota.CodexQuota
+
+    test "session-only snapshot (nil weekly) produces single-window view" do
+      now = DateTime.utc_now() |> DateTime.truncate(:second)
+
+      row = %CodexQuota{
+        provider_account_id: "acc-1",
+        provider: "codex",
+        plan: "free",
+        session_used_percent: 30.0,
+        session_reset_at: DateTime.add(now, 3600),
+        weekly_used_percent: nil,
+        weekly_reset_at: nil,
+        captured_at: now
+      }
+
+      view = Codex.view(row)
+
+      assert view.utilization_5h == 0.30
+      assert view.reset_5h_at == DateTime.add(now, 3600)
+      assert view.utilization_7d == nil
+      assert view.reset_7d_at == nil
+      assert view.primary_label == "session"
+      assert view.secondary_label == nil
+    end
+
+    test "zero weekly snapshot (0.0 weekly) produces two-window view" do
+      now = DateTime.utc_now() |> DateTime.truncate(:second)
+
+      row = %CodexQuota{
+        provider_account_id: "acc-1",
+        provider: "codex",
+        plan: "free",
+        session_used_percent: 50.0,
+        session_reset_at: DateTime.add(now, 3600),
+        weekly_used_percent: 0.0,
+        weekly_reset_at: DateTime.add(now, 604_800),
+        captured_at: now
+      }
+
+      view = Codex.view(row)
+
+      assert view.utilization_5h == 0.50
+      assert view.utilization_7d == 0.0
+      assert view.reset_7d_at == DateTime.add(now, 604_800)
+      assert view.primary_label == "session"
+      assert view.secondary_label == "weekly"
+    end
+  end
+
   describe "quota_rings/1, quota_ring_summary/2" do
     @flat %{policy: {nil, nil}, enforcing?: true}
 

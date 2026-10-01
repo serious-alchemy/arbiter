@@ -50,13 +50,15 @@ defmodule ArbiterWeb.QuotaFixtures do
   end
 
   @doc """
-  Upserts a Codex `CodexQuota` row on `ws`'s Codex account with a session
-  window. Options: `:session_used_percent` (default 30.0), `:weekly_used_percent`
-  (default 0.0, set to nil to hide the weekly window).
+  Upserts a Codex `CodexQuota` row on `ws`'s Codex account. By default includes
+  both session and weekly windows. Options: `:session_used_percent` (default 30.0),
+  `:weekly_used_percent` (default 0.0). Set `:weekly_used_percent` to nil for a
+  session-only snapshot (no weekly window).
   """
   def codex_quota!(ws, opts \\ []) do
     {:ok, account_id} = Quota.ensure_account_id(ws.id, "codex")
     now = DateTime.utc_now() |> DateTime.truncate(:second)
+    weekly_pct = Keyword.get(opts, :weekly_used_percent, 0.0)
 
     Quota.CodexQuota
     |> Ash.Changeset.for_create(:upsert, %{
@@ -66,8 +68,8 @@ defmodule ArbiterWeb.QuotaFixtures do
       limit_reached: false,
       session_used_percent: Keyword.get(opts, :session_used_percent, 30.0),
       session_reset_at: DateTime.add(now, 3600),
-      weekly_used_percent: Keyword.get(opts, :weekly_used_percent, 0.0),
-      weekly_reset_at: DateTime.add(now, 604_800),
+      weekly_used_percent: weekly_pct,
+      weekly_reset_at: if(is_number(weekly_pct), do: DateTime.add(now, 604_800), else: nil),
       captured_at: now
     })
     |> Ash.create!()

@@ -36,11 +36,7 @@ defmodule ArbiterWeb.QuotaTopbarTest do
     do: {:ok, _} = Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", u5}])
 
   defp codex!(ws),
-    do:
-      {:ok, _} =
-        Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.5"}],
-          provider: "codex"
-        )
+    do: codex_quota!(ws)
 
   # Reads the row afresh: patching a stale struct back to its own config is a
   # no-op write.
@@ -126,6 +122,19 @@ defmodule ArbiterWeb.QuotaTopbarTest do
 
       {:ok, usage, _html} = live(conn, "/usage")
       assert render_async(usage, @async_wait) =~ "Codex"
+    end
+
+    test "codex with session-only quota renders only the inner ring", %{conn: conn, ws: ws} do
+      configure!(ws, ["claude", "codex"])
+      claude!(ws)
+      codex_quota!(ws, weekly_used_percent: nil)
+
+      {:ok, view, _html} = live(conn, "/")
+      render_async(view, @async_wait)
+
+      # Should have the inner ring (5h/session) but not the outer ring (7d/weekly)
+      assert has_element?(view, "#quota-ring-codex-5h")
+      refute has_element?(view, "#quota-ring-codex-7d")
     end
 
     test "the override forces a provider on and off", %{conn: conn, ws: ws} do

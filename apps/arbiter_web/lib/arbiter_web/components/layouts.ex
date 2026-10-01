@@ -558,12 +558,16 @@ defmodule ArbiterWeb.Layouts do
       class={["relative flex-none size-[32px]", @state == :stale && "opacity-60"]}
     >
       <svg data-ring-svg viewBox="0 0 32 32" class="absolute inset-0 size-full" aria-hidden="true">
-        <.quota_ring
-          id={"quota-ring-#{@quota.provider}-7d"}
-          position="outer"
-          r={14.5}
-          ring={@rings.outer}
-        />
+        <%!-- Only skip outer ring for truly single-window providers (Codex with session-only).
+             Antigravity without data has nil secondary_label but still needs the outer ring for UI consistency. --%>
+        <%= if @quota.secondary_label || @quota.primary_label == "used" do %>
+          <.quota_ring
+            id={"quota-ring-#{@quota.provider}-7d"}
+            position="outer"
+            r={14.5}
+            ring={@rings.outer}
+          />
+        <% end %>
         <.quota_ring
           id={"quota-ring-#{@quota.provider}-5h"}
           position="inner"
