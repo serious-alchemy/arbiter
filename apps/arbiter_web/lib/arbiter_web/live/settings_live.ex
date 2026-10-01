@@ -41,8 +41,6 @@ defmodule ArbiterWeb.SettingsLive do
     "recovery" => "credential_watchdog_recovery_interval_ms"
   }
 
-  @adapters_key "credential_watchdog_adapters"
-
   @impl true
   def mount(_params, _session, socket) do
     if connected?(socket) do
