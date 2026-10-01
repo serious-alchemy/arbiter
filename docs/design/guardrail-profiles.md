@@ -4,7 +4,8 @@
 [worker-security](../worker-security.md),
 [agy `:strict` write isolation](agy-strict-write-isolation.md) (bd-ca7xko), bd-1abj7u,
 bd-5gvqgc, bd-3s82pf, bd-40pzpj, bd-a1ke2c, bd-80talz · **Reconciles with:**
-bd-9ck2a7 (quota- and capability-aware routing; queued, no document yet),
+bd-9ck2a7 (quota- and capability-aware routing:
+[paced-quota-routing-signals](paced-quota-routing-signals.md)),
 bd-99emmd (Codex deny categories) · **Status:** proposed 2026-09-30. Nothing
 here is implemented. The ticket plan is in
 [§9](#9-rollout-and-ticket-plan).
