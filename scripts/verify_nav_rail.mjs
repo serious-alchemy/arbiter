@@ -205,6 +205,33 @@ async function joined(page, what) {
   )
 }
 
+// The theme control (bd-1wufag): which variant is showing, where it sits, and
+// whether it is inside the rail and clear of the session dock strip.
+async function theme(page) {
+  return JSON.parse(
+    await page.eval(`(() => {
+      const rail = document.getElementById("nav-rail").getBoundingClientRect()
+      const vis = (el) => {
+        if (!el) return null
+        const r = el.getBoundingClientRect()
+        return r.width > 0 && r.height > 0 ? { l: r.left, r: r.right, t: r.top, b: r.bottom } : null
+      }
+      const full = vis(document.querySelector("#theme-toggle [data-role=theme-full]"))
+      const cycleBtn = [...document.querySelectorAll("#theme-toggle [data-role=theme-cycle] button")].find((b) => vis(b))
+      const cycle = vis(cycleBtn)
+      const box = full || cycle
+      return JSON.stringify({
+        full: !!full,
+        cycle: !!cycle,
+        label: cycleBtn && cycleBtn.getAttribute("aria-label"),
+        inBar: !!document.querySelector("#app-status-bar #theme-toggle"),
+        fits: !!box && box.l >= rail.left - 0.5 && box.r <= rail.right + 0.5 && box.b <= rail.bottom + 0.5 && box.t >= rail.top,
+        bottomGap: box ? rail.bottom - box.b : null
+      })
+    })()`)
+  )
+}
+
 async function clickOn(page, selector) {
   const at = await center(page, selector)
   if (!at) throw new Error(`nothing to click at ${selector}`)
@@ -261,6 +288,13 @@ async function run(page) {
   )
   check("status-bar-holds-no-links", s0.barLinks === 0, `links/navs in the bar=${s0.barLinks}`)
 
+  const t0 = await theme(page)
+  check(
+    "collapsed-theme-control-is-one-unclipped-cycling-button-in-the-rail-footer",
+    !t0.inBar && !t0.full && t0.cycle && t0.fits && /^Theme: system/.test(t0.label || ""),
+    `inBar=${t0.inBar} full=${t0.full} cycle=${t0.cycle} fits=${t0.fits} label=${t0.label} gap-above-strip=${t0.bottomGap}`
+  )
+
   // -- hover float -------------------------------------------------------------
 
   await page.mouseMove(RAIL / 2, NAV_HEIGHT + 200)
@@ -276,6 +310,45 @@ async function run(page) {
     same(s1.inset, RAIL) && same(s1.mainPad, RAIL) && same(s1.firstLeft, s0.firstLeft),
     `inset=${s1.inset} main padding-left=${s1.mainPad} content left ${s0.firstLeft} -> ${s1.firstLeft}`
   )
+
+  const t1 = await theme(page)
+  check(
+    "hover-expanded-theme-control-is-the-full-three-way-toggle",
+    t1.full && !t1.cycle && t1.fits,
+    `full=${t1.full} cycle=${t1.cycle} fits=${t1.fits}`
+  )
+  // The cycle button is the keyboard/touch path: a pointer over the rail
+  // widens it and swaps in the pill, so drive it by keyboard, as a user would.
+  await page.mouseMove(WIDE / 2, HEIGHT / 2)
+  await page.settle(700)
+  const themeNow = async () =>
+    JSON.parse(
+      await page.eval(`JSON.stringify({ attr: document.documentElement.getAttribute("data-theme"), stored: localStorage.getItem("phx:theme"), inToggle: !!document.activeElement.closest("#theme-toggle [data-role=theme-cycle]") })`)
+    )
+  for (let i = 0; i < 80; i++) {
+    if ((await themeNow()).inToggle) break
+    await page.key("Tab", "Tab", 9)
+  }
+  const seen = []
+  for (const next of ["light", "dark", "system"]) {
+    await page.key("Enter", "Enter", 13, "\r")
+    await page.settle(300)
+    seen.push({ next, ...(await themeNow()), ...(await theme(page)) })
+  }
+  check(
+    "collapsed-cycle-button-walks-light-dark-system-and-persists",
+    seen.every((x) => x.attr === (x.next === "system" ? null : x.next) && x.stored === (x.next === "system" ? null : x.next)) &&
+      /^Theme: light/.test(seen[0].label) && /^Theme: dark/.test(seen[1].label) && /^Theme: system/.test(seen[2].label),
+    JSON.stringify(seen.map((x) => [x.next, x.attr, x.stored, x.label]))
+  )
+  check(
+    "collapsed-cycle-button-keeps-keyboard-focus-between-presses",
+    seen.every((x) => x.inToggle),
+    JSON.stringify(seen.map((x) => x.inToggle))
+  )
+  await page.eval("document.activeElement.blur()")
+  await page.mouseMove(WIDE / 2, HEIGHT / 2)
+  await page.settle(700)
 
   // -- pin ---------------------------------------------------------------------
 
@@ -293,6 +366,12 @@ async function run(page) {
     s2.attr === "pinned" && same(s2.inset, RAIL_EXPANDED) && same(s2.mainPad, RAIL_EXPANDED) &&
       same(s2.firstLeft, s0.firstLeft + (RAIL_EXPANDED - RAIL)),
     `data-nav-rail=${s2.attr} inset=${s2.inset} main padding-left=${s2.mainPad} content left ${s0.firstLeft} -> ${s2.firstLeft}`
+  )
+  const tp = await theme(page)
+  check(
+    "pinned-theme-control-is-the-full-toggle-above-the-strip",
+    tp.full && !tp.cycle && tp.fits && tp.bottomGap >= 0,
+    `full=${tp.full} cycle=${tp.cycle} fits=${tp.fits} gap-above-strip=${tp.bottomGap}`
   )
   check(
     "the-pin-is-stored-and-pressed",
@@ -390,6 +469,17 @@ async function run(page) {
     `open=${n1.open} display=${n1.railDisplay} width=${n1.railWidth} backdrop=${n1.backdrop} main padding-left=${n1.mainPad} aria-expanded=${n1.expanded}`
   )
 
+  const tn = await theme(page)
+  await clickOn(page, "#theme-toggle [data-role=theme-full] button[data-phx-theme=dark]")
+  await page.settle(300)
+  const dk = await page.eval(`document.documentElement.getAttribute("data-theme") + "/" + localStorage.getItem("phx:theme")`)
+  check(
+    "overlay-theme-control-is-the-full-toggle-and-works",
+    tn.full && !tn.cycle && tn.fits && dk === "dark/dark",
+    `full=${tn.full} cycle=${tn.cycle} fits=${tn.fits} after-click=${dk}`
+  )
+  await page.eval(`localStorage.removeItem("phx:theme"); document.documentElement.removeAttribute("data-theme")`)
+
   await page.click(NARROW - 40, HEIGHT / 2)
   await page.settle(400)
   const n2 = await state(page)
@@ -477,6 +567,13 @@ function pageDriver(cdp, sessionId) {
 
     async mouseMove(x, y) {
       await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y }, sessionId)
+    },
+
+    // A trusted key press (keyboard, no pointer involved).
+    async key(key, code, vk, text) {
+      const base = { key, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk }
+      await cdp.send("Input.dispatchKeyEvent", { type: text ? "keyDown" : "rawKeyDown", text, ...base }, sessionId)
+      await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", ...base }, sessionId)
     },
 
     // A trusted click: pointer there first, so `:hover` is what a real

@@ -53,6 +53,14 @@ defmodule Arbiter.Accounts.Concurrency do
     * ReviewGate reviewer workers (`<task>#review…` keys), counted against the
       provider they were dispatched with.
 
+  **One ticket's agent counts once (bd-dp0p58).** During a ReviewGate fix round
+  the primary worker is parked with no agent while its sub-worker runs. A
+  primary with a live sub-worker (`owned_by?/2`) is therefore *not* counted;
+  the sub-workers are. Truly concurrent agents still count individually —
+  separate tickets always do, and a ticket's reviewer and fix pass running at
+  the same time count as 2, since each is a real provider process. A primary
+  with no live sub-worker counts as 1.
+
   Not counted, because they are not workers in the registry: an external PR
   review (`Arbiter.Reviews.ExternalReview`), a ReviewPatrol re-review or
   author reply, and the operator's own interactive sessions.
@@ -124,6 +132,7 @@ defmodule Arbiter.Accounts.Concurrency do
         exclude = Keyword.get(opts, :exclude_task)
 
         WorkerRegistry.live_dispatches()
+        |> without_parked_primaries()
         |> Enum.filter(&Map.has_key?(workspace_ids, &1.workspace_id))
         |> Enum.reject(
           &(is_binary(exclude) and WorkerRegistry.owned_by?(&1.registry_key, exclude))
@@ -158,6 +167,7 @@ defmodule Arbiter.Accounts.Concurrency do
 
       code ->
         WorkerRegistry.live_dispatches()
+        |> without_parked_primaries()
         |> Enum.filter(&(&1.workspace_id == workspace_id))
         |> count_matching(code)
     end
@@ -245,6 +255,19 @@ defmodule Arbiter.Accounts.Concurrency do
       {:ok, links} -> Map.new(links, &{&1.workspace_id, true})
       _ -> %{}
     end
+  end
+
+  # A primary worker whose own sub-worker (`<task>:fixpass`, `<task>:conflict`,
+  # `<task>#review…`) is live is parked on the review gate with no agent
+  # process: `Worker.start/1` refuses a second *active* worker per task, and a
+  # sub-pass only runs alongside a primary that is waiting (bd-8tjcms). Counting
+  # it as well double-counts the ticket's one agent (bd-dp0p58).
+  defp without_parked_primaries(dispatches) do
+    keys = Enum.map(dispatches, & &1.registry_key)
+
+    Enum.reject(dispatches, fn %{registry_key: key} ->
+      Enum.any?(keys, &(&1 != key and WorkerRegistry.owned_by?(&1, key)))
+    end)
   end
 
   # `Arbiter.Quota.provider_code/1` resolves `"gemini"` by probing PATH, so

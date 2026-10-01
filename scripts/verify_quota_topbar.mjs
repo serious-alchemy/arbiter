@@ -167,7 +167,7 @@ function stateScript() {
       hairlines: o.querySelectorAll("[data-ring-hairline]").length,
       label: o.getAttribute("aria-label")
     })),
-    chrome: ["appshell-live", "coordinator-inbox-trigger", "theme-toggle"].map((id) => ({
+    chrome: ["appshell-live", "coordinator-inbox-trigger"].map((id) => ({
       id,
       shown: shown(document.getElementById(id)),
       rect: rect(document.getElementById(id))

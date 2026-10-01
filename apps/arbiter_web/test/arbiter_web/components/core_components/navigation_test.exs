@@ -166,6 +166,29 @@ defmodule ArbiterWeb.CoreComponents.NavigationTest do
       assert html =~ "rail-footer"
     end
 
+    test "pins the footer below the scrolling groups and centres it when collapsed" do
+      assigns = %{groups: @rail_groups}
+
+      html =
+        render_component(
+          fn assigns ->
+            ~H"""
+            <.sidebar_nav groups={@groups} expanded={false}>
+              <:footer><ArbiterWeb.Layouts.theme_toggle /></:footer>
+            </.sidebar_nav>
+            """
+          end,
+          assigns
+        )
+
+      footer = html |> LazyHTML.from_fragment() |> LazyHTML.query("nav > div:last-child")
+      assert [cls] = LazyHTML.attribute(footer, "class")
+      assert cls =~ "flex-none"
+      assert cls =~ "justify-center"
+      assert LazyHTML.query(footer, "#theme-toggle [data-role=theme-cycle]") |> Enum.count() == 1
+      assert LazyHTML.query(footer, "#theme-toggle [data-role=theme-full]") |> Enum.count() == 1
+    end
+
     defp badge_item(count) do
       %{label: "Epics", href: "/epics", icon: "hero-rectangle-stack", badge: count}
     end
