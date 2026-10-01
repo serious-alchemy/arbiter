@@ -646,7 +646,7 @@ defmodule Arbiter.Board.Snapshot do
   # rather than the default provider's phrase alone. `nil` without a dropped
   # candidate to name.
   defp dropped_summary([_ | _] = dropped) do
-    dropped |> Enum.map(&dropped_phrase/1) |> Enum.join("; ")
+    Enum.map_join(dropped, "; ", &dropped_phrase/1)
   end
 
   defp dropped_summary(_), do: nil
