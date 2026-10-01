@@ -28,6 +28,16 @@ defmodule Arbiter.MCP.OperatorProof do
        below it, is refused. A dev server run from a terminal shares the
        terminal's scope with the operator's shell, so this check is skipped
        there and only check 2 applies.
+    4. **Not inside an Arbiter session's scope.** Interactive sessions
+       (coordinator, refine, login) are launched by
+       `systemd-run --user --scope --unit=arb-session-<id>` running a tmux
+       server that daemonizes. Their processes therefore descend from
+       `systemd --user`, not the server, and sit in a sibling cgroup of
+       `arbiter.service`, so checks 2 and 3 both miss them. A peer whose
+       cgroup path has a segment starting with
+       `Arbiter.Sessions.Naming.unit_prefix/0` is refused. This check runs
+       whether or not the server has a service cgroup (dev servers launch
+       sessions the same way).
 
   Anything unreadable fails closed: a peer whose `/proc` entry disappears
   mid-walk, a pid of 0, a host without `/proc`.
@@ -43,9 +53,13 @@ defmodule Arbiter.MCP.OperatorProof do
   script that connects to the socket. But it runs as the operator with full
   host access, so it could still escape deliberately with
   `systemd-run --user --scope` or by moving itself to another cgroup. For
-  such a worker this is a guardrail, not a hard boundary. See
+  such a worker this is a guardrail, not a hard boundary. The same holds for
+  an Arbiter session's processes (check 4): they are unjailed, so one that
+  re-launches itself into another unit on purpose gets past the check. See
   docs/worker-security.md, "Operator proof for token minting".
   """
+
+  alias Arbiter.Sessions.Naming
 
   @type peer :: %{pid: integer(), uid: integer(), gid: integer()}
   @type reason ::
@@ -54,6 +68,7 @@ defmodule Arbiter.MCP.OperatorProof do
           | :peer_unreadable
           | :spawned_by_arbiter
           | :in_arbiter_cgroup
+          | :in_session_scope
 
   # Deeper than any real process tree; bounds the walk against a /proc loop.
   @max_depth 256
@@ -66,7 +81,8 @@ defmodule Arbiter.MCP.OperatorProof do
     * `:server_pid`: the server's OS pid (`System.pid/0`)
     * `:server_uid`: the server's uid
     * `:server_cgroup`: the server's dedicated service cgroup, or `nil` to skip
-      check 3 (`dedicated_cgroup/1` of `/proc/self/cgroup`)
+      check 3 (`dedicated_cgroup/1` of `/proc/self/cgroup`). Check 4 runs
+      either way.
     * `:proc_root`: `"/proc"`
   """
   @spec authorize(peer(), keyword()) :: :ok | {:error, reason()}
@@ -83,9 +99,11 @@ defmodule Arbiter.MCP.OperatorProof do
         {:error, :unknown_peer}
 
       true ->
-        with :ok <- check_ancestry(proc, pid, server_pid, 0) do
+        with :ok <- check_ancestry(proc, pid, server_pid, 0),
+             {:ok, peer_cgroup} <- peer_cgroup(proc, pid),
+             :ok <- check_session_scope(peer_cgroup) do
           server_cgroup = Keyword.get_lazy(opts, :server_cgroup, fn -> own_cgroup(proc) end)
-          check_cgroup(proc, pid, server_cgroup)
+          check_service_cgroup(peer_cgroup, server_cgroup)
         end
     end
   end
@@ -103,6 +121,11 @@ defmodule Arbiter.MCP.OperatorProof do
     do:
       "the connecting process is inside the Arbiter server's service cgroup, where every " <>
         "worker it spawns runs"
+
+  def describe(:in_session_scope),
+    do:
+      "the connecting process is inside an Arbiter session's scope; a session uses the " <>
+        "token the server minted for it at provisioning"
 
   def describe(:peer_unreadable),
     do: "the connecting process could not be inspected through /proc, so it is refused"
@@ -228,21 +251,32 @@ defmodule Arbiter.MCP.OperatorProof do
     end
   end
 
-  defp check_cgroup(_proc, _pid, nil), do: :ok
-
-  defp check_cgroup(proc, pid, server_cgroup) do
+  # The peer's cgroup path, or nil when the file has no usable line. An
+  # unreadable file fails closed.
+  defp peer_cgroup(proc, pid) do
     case File.read(Path.join([proc, Integer.to_string(pid), "cgroup"])) do
-      {:ok, contents} ->
-        peer = cgroup_path(contents)
-
-        if peer == server_cgroup or
-             (is_binary(peer) and String.starts_with?(peer, server_cgroup <> "/")),
-           do: {:error, :in_arbiter_cgroup},
-           else: :ok
-
-      {:error, _} ->
-        {:error, :peer_unreadable}
+      {:ok, contents} -> {:ok, cgroup_path(contents)}
+      {:error, _} -> {:error, :peer_unreadable}
     end
+  end
+
+  defp check_session_scope(nil), do: :ok
+
+  defp check_session_scope(peer_cgroup) do
+    prefix = Naming.unit_prefix()
+
+    if peer_cgroup |> String.split("/") |> Enum.any?(&String.starts_with?(&1, prefix)),
+      do: {:error, :in_session_scope},
+      else: :ok
+  end
+
+  defp check_service_cgroup(_peer_cgroup, nil), do: :ok
+
+  defp check_service_cgroup(peer_cgroup, server_cgroup) do
+    if peer_cgroup == server_cgroup or
+         (is_binary(peer_cgroup) and String.starts_with?(peer_cgroup, server_cgroup <> "/")),
+       do: {:error, :in_arbiter_cgroup},
+       else: :ok
   end
 
   defp own_cgroup(proc) do

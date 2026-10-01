@@ -12,6 +12,7 @@ defmodule Arbiter.MCP.OperatorProofTest do
   @uid 1000
   @server 500
   @service "/user.slice/user-1000.slice/user@1000.service/app.slice/arbiter.service"
+  @session "/user.slice/user-1000.slice/user@1000.service/app.slice/arb-session-0197abc.scope"
   @terminal "/user.slice/user-1000.slice/user@1000.service/app.slice/app-org.gnome.Terminal.slice/vte-spawn-1.scope"
 
   # pid => {ppid, cgroup}
@@ -25,6 +26,11 @@ defmodule Arbiter.MCP.OperatorProofTest do
     # a worker's double-forked orphan: reparented to systemd --user, but still
     # inside the service's cgroup
     503 => {400, @service},
+    # an Arbiter-provisioned session: `systemd-run --user --scope` + a tmux
+    # server that daemonized, so its parent is systemd --user and its cgroup
+    # is a sibling of the service's
+    700 => {400, @session},
+    701 => {700, @session},
     # the operator's terminal
     600 => {400, @terminal},
     601 => {600, @terminal}
@@ -69,11 +75,36 @@ defmodule Arbiter.MCP.OperatorProofTest do
     assert {:error, :in_arbiter_cgroup} = OperatorProof.authorize(peer(503), opts)
   end
 
-  test "without a dedicated service cgroup only ancestry is checked", %{opts: opts} do
+  test "without a dedicated service cgroup the service-cgroup check is skipped", %{opts: opts} do
     opts = Keyword.put(opts, :server_cgroup, nil)
 
     assert :ok = OperatorProof.authorize(peer(503), opts)
     assert {:error, :spawned_by_arbiter} = OperatorProof.authorize(peer(502), opts)
+    assert :ok = OperatorProof.authorize(peer(601), opts)
+  end
+
+  test "a process inside an Arbiter session's scope is refused", %{opts: opts} do
+    assert {:error, :in_session_scope} = OperatorProof.authorize(peer(700), opts)
+    assert {:error, :in_session_scope} = OperatorProof.authorize(peer(701), opts)
+  end
+
+  test "the session-scope check runs without a dedicated service cgroup", %{opts: opts} do
+    opts = Keyword.put(opts, :server_cgroup, nil)
+    assert {:error, :in_session_scope} = OperatorProof.authorize(peer(701), opts)
+  end
+
+  test "a session scope matches on cgroup v1's name=systemd hierarchy too", %{opts: opts} do
+    File.write!(
+      Path.join([opts[:proc_root], "701", "cgroup"]),
+      "12:pids:/user.slice\n1:name=systemd:#{@session}\n0::/\n"
+    )
+
+    assert {:error, :in_session_scope} = OperatorProof.authorize(peer(701), opts)
+  end
+
+  test "a peer whose cgroup is unreadable fails closed", %{opts: opts} do
+    File.rm!(Path.join([opts[:proc_root], "601", "cgroup"]))
+    assert {:error, :peer_unreadable} = OperatorProof.authorize(peer(601), opts)
   end
 
   test "a different Unix user is refused", %{opts: opts} do
@@ -142,12 +173,72 @@ defmodule Arbiter.MCP.OperatorProofTest do
     test "a process outside this VM's tree passes the ancestry check" do
       # This test process's own OS parent is outside the VM, so it stands in
       # for the operator's shell when the "server" is this VM.
+      # When the suite itself runs inside an Arbiter session, the session
+      # check (rightly) refuses it instead.
       outside = ppid_of(String.to_integer(System.pid()))
+      in_session? = "/proc/#{outside}/cgroup" |> File.read!() |> String.contains?("arb-session-")
+      expected = if in_session?, do: {:error, :in_session_scope}, else: :ok
 
-      assert :ok =
-               OperatorProof.authorize(%{pid: outside, uid: own_uid(), gid: 0},
-                 server_cgroup: nil
-               )
+      assert OperatorProof.authorize(%{pid: outside, uid: own_uid(), gid: 0}, server_cgroup: nil) ==
+               expected
+    end
+  end
+
+  describe "a real session scope (this VM plays the server)" do
+    # Opt-in (`--include live_systemd`): spawns a real transient
+    # `arb-session-*` scope, the same `systemd-run --user --scope --unit=`
+    # shape `Arbiter.Sessions.launch_argv/2` uses, with a daemonized child
+    # standing in for the tmux server. That child's parent is not this VM
+    # and its cgroup is not this VM's, so only the session check can refuse it.
+    @describetag :live_systemd
+    @describetag :tmp_dir
+
+    test "a daemonized process inside an arb-session-* scope is refused", %{tmp_dir: tmp} do
+      unit = Arbiter.Sessions.Naming.unit_arg("opproof-#{System.unique_integer([:positive])}")
+      pidfile = Path.join(tmp, "pid")
+      # In a script file because systemd-run expands `$` in its own argv.
+      script = Path.join(tmp, "child.sh")
+
+      File.write!(
+        script,
+        "exec </dev/null >/dev/null 2>&1\necho $$ > '#{pidfile}'\nexec sleep 30\n"
+      )
+
+      on_exit(fn -> System.cmd("systemctl", ["--user", "stop", unit <> ".scope"]) end)
+
+      {_, 0} =
+        System.cmd("systemd-run", [
+          "--user",
+          "--scope",
+          "--quiet",
+          "--collect",
+          "--unit=#{unit}",
+          "setsid",
+          "-f",
+          "sh",
+          script
+        ])
+
+      pid = wait_for_pid(pidfile, 50)
+      refute ppid_of(pid) == String.to_integer(System.pid())
+
+      assert {:error, :in_session_scope} =
+               OperatorProof.authorize(%{pid: pid, uid: own_uid(), gid: 0}, server_cgroup: nil)
+    end
+  end
+
+  defp wait_for_pid(_pidfile, 0), do: flunk("the daemonized child never wrote its pid")
+
+  defp wait_for_pid(pidfile, tries) do
+    case File.read(pidfile) do
+      {:ok, body} when body != "" ->
+        body |> String.trim() |> String.to_integer()
+
+      _ ->
+        # A file the child writes after the fork: there is no process of ours
+        # to monitor, so poll briefly.
+        Process.sleep(20)
+        wait_for_pid(pidfile, tries - 1)
     end
   end
 

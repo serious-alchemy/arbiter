@@ -337,7 +337,7 @@ defmodule Arbiter.Agents.SecurityPolicy do
   `ArbiterWeb.Api.McpController.mint_token/2`, which caps a bearer caller at
   its own authority and refuses anonymous callers outright, and
   `Arbiter.MCP.OperatorSocket`, which refuses any process the server spawned
-  (bd-8381tk).
+  and any process inside a session's `arb-session-<id>` scope (bd-8381tk).
   """
   @spec interactive_session_base() :: t()
   def interactive_session_base do

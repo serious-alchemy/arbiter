@@ -88,7 +88,7 @@ defmodule ArbiterCli.OperatorSocket do
   end
 
   defp hint(%{"reason" => reason})
-       when reason in ["spawned_by_arbiter", "in_arbiter_cgroup"] do
+       when reason in ["spawned_by_arbiter", "in_arbiter_cgroup", "in_session_scope"] do
     "only the operator mints coordinator tokens, from their own shell. Workers and " <>
       "sessions get their token from the server at dispatch (see docs/worker-security.md)."
   end

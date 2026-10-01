@@ -805,10 +805,21 @@ requires all of:
 2. **not descended from the server**: the parent chain is walked through
    `/proc/<pid>/stat`, and reaching the server's own OS pid means refusal;
 3. **not inside the server's service cgroup**, when the server runs as a
-   `.service` unit. This catches a double-forked orphan that
+   `.service` unit (the release). This catches a double-forked orphan that
    `systemd --user` has adopted, which check 2 alone misses. A dev server
    run from a terminal shares that terminal's scope, so the check is skipped
-   there.
+   there, and a dev server's worker that double-forks gets past checks 2
+   and 3 (see the same-UID limits below);
+4. **not inside an Arbiter session's scope.** Coordinator, refine and login
+   sessions are launched as
+   `systemd-run --user --scope --unit=arb-session-<id> … tmux new-session -d`
+   (`Arbiter.Sessions.launch_argv/2`). The tmux server daemonizes, so its
+   processes descend from `systemd --user`, not the server, and their
+   cgroup `…/app.slice/arb-session-<id>.scope` is a *sibling* of
+   `arbiter.service`. Checks 2 and 3 both miss them by design (that is how
+   sessions survive a server restart). So a peer whose cgroup path has any
+   segment starting with `arb-session-` (`Arbiter.Sessions.Naming.unit_prefix/0`)
+   is refused, `in_session_scope`. This check runs on dev servers too.
 
 Anything unreadable fails closed. No secret is exchanged: running from the
 operator's own shell *is* the proof. The request line is read before any
@@ -835,7 +846,8 @@ one.
 | Holder of a token (`ARB_TOKEN`, a session's own `arb`) | bearer HTTP | capped at the caller's authority (bd-5b5hq7). Worker and refine callers get 403. |
 | Workers and reviewers | minted by the server at dispatch (`Scope.mint_worker`) | unchanged, never self-served |
 | Arbiter coordinator/refine sessions | minted by the server at provisioning (`Scope.mint_session` / `mint_refine`) | unchanged |
-| `arb mcp token mint` run inside a worker or session | operator socket | refused: `spawned_by_arbiter` (or `in_arbiter_cgroup`) |
+| `arb mcp token mint` (or a raw socket client) run inside a worker | operator socket | refused: `spawned_by_arbiter`, or `in_arbiter_cgroup` for a double-forked orphan (release / systemd unit only; on a dev server an orphan passes) |
+| `arb mcp token mint` (or a raw socket client, with `ARB_SESSION_ID`/`ARB_TOKEN` cleared) run inside an Arbiter session | operator socket | refused: `in_session_scope` |
 
 ### What the jail adds
 
@@ -869,6 +881,14 @@ escript built from this branch:
 * **Inside the real `Jail.argv`**: `arb` gets `enoent` for the socket,
   `systemd-run --user` can't reach a bus, and both secret files read
   `Permission denied`.
+* **A daemonized process inside a real `arb-session-*` scope**, the
+  `systemd-run --user --scope --unit=arb-session-<id>` shape sessions use,
+  with a `setsid -f` child standing in for the tmux server (its parent is
+  not the BEAM and its cgroup is not the BEAM's): refused,
+  `in_session_scope`. This is the opt-in test
+  `mix test --include live_systemd test/arbiter/mcp/operator_proof_test.exs`
+  in `apps/arbiter`, run from a worker with `XDG_RUNTIME_DIR` set. It calls
+  `OperatorProof.authorize/2` directly, not through the socket.
 * **A transient `systemd-run --user` service** (outside the server's tree and
   cgroup, which is where the operator's shell sits): got a coordinator token,
   and `Scope.from_token/1` decoded it as `tier: :coordinator`.
@@ -892,8 +912,16 @@ escript built from this branch:
   separate Unix user.
 * **The operator versus a coordinator session they started themselves** (a
   Claude Code session in their own terminal) is not separated. That session
-  is operator-delegated. Arbiter-provisioned sessions are separated: their
-  processes descend from the server.
+  is operator-delegated. Arbiter-provisioned sessions are separated by
+  check 4: their processes run in an `arb-session-<id>.scope`, and the
+  socket refuses that scope. Sessions are unjailed, so this is the same kind
+  of guardrail as for unjailed workers: a session process that re-launches
+  itself into a differently named unit on purpose gets past it.
+* **A dev server's double-forked orphan is not refused.** Check 3 only
+  applies when the server runs as a `.service` unit. A worker of a dev
+  server (`mix phx.server` from a terminal) that runs `setsid -f` ends up
+  reparented to `systemd --user` in the terminal's own scope, so it passes
+  checks 2 and 3. Run the release as `arbiter.service` for the full check.
 
 ### Known open gaps (not fixed here)
 
