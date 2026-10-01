@@ -57,7 +57,7 @@ defmodule Arbiter.Agents.Codex do
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Worker.StopReason
 
-  @done_regex ~r/\barb done\b/
+  @done_regex ~r/(?:\A|\n)[^\p{L}\p{N}\n]*arb done[^\p{L}\p{N}]*\z/u
 
   # See Arbiter.Agents.Claude for the MAX_ARG_STRLEN rationale. Codex reads its
   # prompt from stdin when the positional is `-`, so an oversize prompt goes to

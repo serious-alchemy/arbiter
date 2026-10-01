@@ -20,7 +20,7 @@ defmodule Arbiter.Agents.Gemini do
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Worker.Jail
 
-  @done_regex ~r/\barb done\b/
+  @done_regex ~r/(?:\A|\n)[^\p{L}\p{N}\n]*arb done[^\p{L}\p{N}]*\z/u
 
   # The gemini-cli's own default model (`DEFAULT_GEMINI_MODEL`) — what the CLI
   # runs when we pass no `--model`. Used only to stamp the usage ledger /
