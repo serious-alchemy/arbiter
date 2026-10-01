@@ -4671,7 +4671,7 @@ defmodule Arbiter.Worker.ReviewGate do
   defp start_worker_session(state, pid, role, prompt, command, revision) do
     case build_session_opts(state, pid, role, prompt, command, revision) do
       {:ok, session_opts} ->
-        case ClaudeSession.start(session_opts) do
+        case ClaudeSession.start(session_opts ++ arb_token_opts(state, role)) do
           {:ok, _port} -> :ok
           {:error, reason} -> {:error, {:worker_session_failed, reason}}
         end
@@ -4688,6 +4688,25 @@ defmodule Arbiter.Worker.ReviewGate do
   # (model + api keys), and the implementer role honors the worker `agent`
   # block. A workspace-less ReviewGate (ad-hoc run) falls back to today's
   # behaviour — `ClaudeSession`'s built-in default argv, no model flag.
+  # bd-asawcq: `/api` needs a bearer token. A revise-round implementer works
+  # the task like its first-round worker (`arb ticket update`, `arb message`),
+  # so it gets the same narrow worker-tier token as its ARB_TOKEN — never a
+  # coordinator one. The reviewer only reads the diff and prints a verdict; it
+  # gets none. A missing signing secret never blocks the spawn.
+  defp arb_token_opts(%{task_id: task_id, workspace_id: ws_id} = state, :implementer)
+       when is_binary(task_id) and is_binary(ws_id) do
+    [
+      arb_token:
+        Arbiter.MCP.Scope.mint_worker(%{id: task_id, workspace_id: ws_id}, Map.get(state, :repo))
+    ]
+  rescue
+    e ->
+      Logger.warning("ReviewGate: minting the implementer's worker token failed: #{inspect(e)}")
+      []
+  end
+
+  defp arb_token_opts(_state, _role), do: []
+
   defp build_session_opts(state, pid, role, prompt, command, revision) when is_list(command) do
     # bd-9rdwe4: `command:` wins argv resolution, but `prompt:` is still carried
     # so the pass records what the agent was actually told
