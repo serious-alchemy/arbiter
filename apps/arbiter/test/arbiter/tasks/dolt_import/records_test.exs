@@ -11,8 +11,9 @@ defmodule Arbiter.Tasks.DoltImport.RecordsTest do
   use Arbiter.DataCase, async: false
 
   alias Arbiter.Repo
-  alias Arbiter.Tasks.{Dependency, Issue, Workspace}
+  alias Arbiter.Tasks.{Dependency, Issue, TicketTransition, Workspace}
   alias Arbiter.Tasks.DoltImport.Mapper
+  alias Arbiter.TicketTransitionsInvariant
 
   require Ash.Query
 
@@ -85,6 +86,54 @@ defmodule Arbiter.Tasks.DoltImport.RecordsTest do
     {sql, params} = Mapper.status_sync(%{"id" => queued.id, "status" => "open"}, now)
     assert %{num_rows: 0} = Repo.query!(sql, params)
     assert Ash.get!(Issue, queued.id).state == :queued
+  end
+
+  # bd-5gkqdr: the importer writes `issues` around Ash, and its rows still get
+  # their transition history — the creation row at the Dolt `created_at`, and a
+  # row for every state a `--sync-status` refresh moves.
+  test "issue_record/3 rows get a creation row in the state they land in",
+       %{ws: ws, now: now} do
+    rows = [
+      %{
+        "id" => "dlt-hist1",
+        "title" => "o",
+        "status" => "open",
+        "created_at" => "2026-05-19 19:21:46.123456"
+      },
+      %{"id" => "dlt-hist2", "title" => "d", "status" => "closed"}
+    ]
+
+    {2, _} = Repo.insert_all("issues", Enum.map(rows, &Mapper.issue_record(&1, ws.id, now)))
+
+    assert [open] = TicketTransition.for_ticket!("dlt-hist1")
+    assert {open.from_state, open.to_state, open.transition} == {nil, :backlog, "create"}
+    assert open.at == ~U[2026-05-19 19:21:46.123456Z]
+    assert open.workspace_id == ws.id
+
+    assert [closed] = TicketTransition.for_ticket!("dlt-hist2")
+    assert {closed.to_state, closed.close_reason, closed.at} == {:closed, :completed, now}
+
+    TicketTransitionsInvariant.assert_holds!(ws.id)
+  end
+
+  test "status_sync/2 writes a row per state it moves, and none when in step",
+       %{ws: ws, now: now} do
+    row = %{"id" => "dlt-hist3", "title" => "s", "status" => "open"}
+    {1, _} = Repo.insert_all("issues", [Mapper.issue_record(row, ws.id, now)])
+
+    sync = fn status ->
+      {sql, params} = Mapper.status_sync(%{"id" => "dlt-hist3", "status" => status}, now)
+      Repo.query!(sql, params)
+    end
+
+    sync.("in_progress")
+    sync.("in_progress")
+    sync.("closed")
+
+    assert Enum.map(TicketTransition.for_ticket!("dlt-hist3"), &{&1.from_state, &1.to_state}) ==
+             [{nil, :backlog}, {:backlog, :active}, {:active, :closed}]
+
+    TicketTransitionsInvariant.assert_holds!(ws.id)
   end
 
   test "dependency_record/3 rows bulk-inserted around Ash are fetchable by id",

@@ -12,6 +12,12 @@ defmodule Arbiter.Tasks.Issue.Changes.Transition do
   commit — the ticket's open escalations (`Changes.ClearAttention`). An action that raises its own cause declares
   that change after this one.
 
+  The state history (bd-5gkqdr) is not written here: a trigger on `issues`
+  appends the `Arbiter.Tasks.TicketTransition` row inside the state write's own
+  statement, because AshSqlite opens no transaction this change could share. A
+  failing insert therefore fails the action and leaves the ticket where it
+  was; an idempotent no-op changes no `state` and writes no row.
+
   The target attributes are written at change time, so the changes declared
   after this one (`SyncTracker`, `StopWorker`, …) see the new state. A refusal
   is raised from a `before_action` hook instead, so a guard declared ahead of
