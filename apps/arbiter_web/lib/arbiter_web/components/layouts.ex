@@ -182,7 +182,6 @@ defmodule ArbiterWeb.Layouts do
         />
         <ArbiterWeb.CoreComponents.Feedback.live_badge id="appshell-live" live={@live} />
         <.coordinator_inbox_trigger inbox={@coordinator_inbox} />
-        <.theme_toggle />
       </div>
     </header>
 
@@ -218,7 +217,9 @@ defmodule ArbiterWeb.Layouts do
       phx-hook="NavRail"
       class="nav-rail fixed left-0 top-[var(--nav-height)] bottom-[var(--session-dock-strip-height)] z-20"
     >
-      <.sidebar_nav groups={@groups} current_path={@current_path} expanded={true} />
+      <.sidebar_nav groups={@groups} current_path={@current_path} expanded={true}>
+        <:footer><.theme_toggle /></:footer>
+      </.sidebar_nav>
     </div>
 
     <%!-- The room the page's two fixed edges are taking, each zero unless
@@ -853,48 +854,94 @@ defmodule ArbiterWeb.Layouts do
   @doc """
   Provides dark vs light theme toggle based on themes defined in app.css.
 
+  Lives in the nav rail footer. Two variants share the one `#theme-toggle`
+  root and `app.css` picks between them: `theme-full` is the three-way pill
+  (expanded, pinned and overlay rail); `theme-cycle` is a single 28px button
+  for the collapsed 56px rail, where the pill would clip. The cycle variant is
+  three buttons, one per mode, of which CSS shows the one for the current
+  `html[data-theme]` (none = system). Each carries the *next* mode in
+  `data-phx-theme`, so the existing `phx:set-theme` handler needs no change.
+
   See <head> in root.html.heex which applies the theme before page load.
   """
   attr :id, :string, default: "theme-toggle"
 
   def theme_toggle(assigns) do
     ~H"""
-    <div
-      id={@id}
-      class="relative flex items-center rounded-[var(--radius-pill)] border border-solid border-[var(--border-default)] bg-[var(--surface-chrome)]"
-    >
-      <div class="absolute inset-y-[2px] left-[2px] w-[calc(33.333%-2px)] rounded-[var(--radius-pill)] bg-[var(--surface-card)] transition-[left] duration-200 [[data-theme=light]_&]:left-[calc(33.333%+1px)] [[data-theme=dark]_&]:left-[calc(66.666%-1px)]" />
-
-      <button
-        class="relative flex p-[7px] cursor-pointer w-1/3 justify-center"
-        phx-click={JS.dispatch("phx:set-theme")}
-        data-phx-theme="system"
-        aria-label="Match system theme"
+    <div id={@id} class="flex items-center">
+      <div
+        data-role="theme-full"
+        class="relative flex items-center rounded-[var(--radius-pill)] border border-solid border-[var(--border-default)] bg-[var(--surface-chrome)]"
       >
-        <ArbiterWeb.CoreComponents.Core.icon
-          name="hero-computer-desktop-micro"
-          color="var(--text-secondary)"
-        />
-      </button>
+        <div class="absolute inset-y-[2px] left-[2px] w-[calc(33.333%-2px)] rounded-[var(--radius-pill)] bg-[var(--surface-card)] transition-[left] duration-200 [[data-theme=light]_&]:left-[calc(33.333%+1px)] [[data-theme=dark]_&]:left-[calc(66.666%-1px)]" />
 
-      <button
-        class="relative flex p-[7px] cursor-pointer w-1/3 justify-center"
-        phx-click={JS.dispatch("phx:set-theme")}
-        data-phx-theme="light"
-        aria-label="Light theme"
-      >
-        <ArbiterWeb.CoreComponents.Core.icon name="hero-sun-micro" color="var(--text-secondary)" />
-      </button>
+        <button
+          class="relative flex p-[7px] cursor-pointer w-1/3 justify-center"
+          phx-click={JS.dispatch("phx:set-theme")}
+          data-phx-theme="system"
+          aria-label="Match system theme"
+        >
+          <ArbiterWeb.CoreComponents.Core.icon
+            name="hero-computer-desktop-micro"
+            color="var(--text-secondary)"
+          />
+        </button>
 
-      <button
-        class="relative flex p-[7px] cursor-pointer w-1/3 justify-center"
-        phx-click={JS.dispatch("phx:set-theme")}
-        data-phx-theme="dark"
-        aria-label="Dark theme"
-      >
-        <ArbiterWeb.CoreComponents.Core.icon name="hero-moon-micro" color="var(--text-secondary)" />
-      </button>
+        <button
+          class="relative flex p-[7px] cursor-pointer w-1/3 justify-center"
+          phx-click={JS.dispatch("phx:set-theme")}
+          data-phx-theme="light"
+          aria-label="Light theme"
+        >
+          <ArbiterWeb.CoreComponents.Core.icon name="hero-sun-micro" color="var(--text-secondary)" />
+        </button>
+
+        <button
+          class="relative flex p-[7px] cursor-pointer w-1/3 justify-center"
+          phx-click={JS.dispatch("phx:set-theme")}
+          data-phx-theme="dark"
+          aria-label="Dark theme"
+        >
+          <ArbiterWeb.CoreComponents.Core.icon name="hero-moon-micro" color="var(--text-secondary)" />
+        </button>
+      </div>
+
+      <div data-role="theme-cycle" class="hidden items-center">
+        <button
+          class={[cycle_class(), "flex [[data-theme=light]_&]:hidden [[data-theme=dark]_&]:hidden"]}
+          phx-click={JS.dispatch("phx:set-theme")}
+          data-phx-theme="light"
+          aria-label="Theme: system. Switch to light."
+        >
+          <ArbiterWeb.CoreComponents.Core.icon
+            name="hero-computer-desktop-micro"
+            color="var(--text-secondary)"
+          />
+        </button>
+
+        <button
+          class={[cycle_class(), "hidden [[data-theme=light]_&]:flex"]}
+          phx-click={JS.dispatch("phx:set-theme")}
+          data-phx-theme="dark"
+          aria-label="Theme: light. Switch to dark."
+        >
+          <ArbiterWeb.CoreComponents.Core.icon name="hero-sun-micro" color="var(--text-secondary)" />
+        </button>
+
+        <button
+          class={[cycle_class(), "hidden [[data-theme=dark]_&]:flex"]}
+          phx-click={JS.dispatch("phx:set-theme")}
+          data-phx-theme="system"
+          aria-label="Theme: dark. Switch to system."
+        >
+          <ArbiterWeb.CoreComponents.Core.icon name="hero-moon-micro" color="var(--text-secondary)" />
+        </button>
+      </div>
     </div>
     """
   end
+
+  defp cycle_class,
+    do:
+      "size-7 items-center justify-center cursor-pointer rounded-[var(--radius-pill)] border border-solid border-[var(--border-default)] bg-[var(--surface-chrome)]"
 end
