@@ -130,20 +130,50 @@ defmodule Arbiter.Settings do
           changed_by: String.t() | nil
         }
   def board_autopilot_status do
-    case singleton() do
-      %Installation{} = row ->
-        %{
-          paused: row.board_autopilot_paused,
-          changed_at: row.board_autopilot_paused_at,
-          changed_by: row.board_autopilot_paused_by
-        }
+    case read_board_autopilot_status() do
+      {:ok, status} -> status
+      {:error, _reason} -> unset_autopilot_status()
+    end
+  end
 
-      nil ->
-        %{paused: nil, changed_at: nil, changed_by: nil}
+  @doc """
+  Like `board_autopilot_status/0`, but tells "nothing persisted" (`{:ok,
+  %{paused: nil, ...}}`) apart from "could not read" (`{:error, reason}`) — a
+  schema that is not migrated yet, a missing connection. `Arbiter.Board.Autopilot`
+  needs the difference: an unreadable row must not be mistaken for the
+  config default. Never raises.
+  """
+  @spec read_board_autopilot_status() ::
+          {:ok,
+           %{
+             paused: boolean() | nil,
+             changed_at: DateTime.t() | nil,
+             changed_by: String.t() | nil
+           }}
+          | {:error, term()}
+  def read_board_autopilot_status do
+    case Ash.read(Installation) do
+      {:ok, [row | _]} ->
+        {:ok,
+         %{
+           paused: row.board_autopilot_paused,
+           changed_at: row.board_autopilot_paused_at,
+           changed_by: row.board_autopilot_paused_by
+         }}
+
+      {:ok, []} ->
+        {:ok, unset_autopilot_status()}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   rescue
-    _ -> %{paused: nil, changed_at: nil, changed_by: nil}
+    e -> {:error, e}
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
   end
+
+  defp unset_autopilot_status, do: %{paused: nil, changed_at: nil, changed_by: nil}
 
   @doc """
   Persist the `Arbiter.Board.Autopilot` pause state, stamping when it changed

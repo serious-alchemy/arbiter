@@ -219,6 +219,12 @@ defmodule Arbiter.Board.Autopilot do
 
   require Logger
 
+  # bd-c3b30g: re-read cadence for a pause state that was unreadable at boot,
+  # the read that first warns the coordinator, and the give-up bound.
+  @state_retry_ms 5_000
+  @state_retry_notify_after 3
+  @state_retry_max 60
+
   @topic "board"
   @tasks_topic "tasks"
   @events_topic "events"
@@ -422,11 +428,16 @@ defmodule Arbiter.Board.Autopilot do
     interval = Keyword.get(opts, :interval_ms, configured_interval_ms())
     debounce = Keyword.get(opts, :debounce_ms, configured_debounce_ms())
 
-    {paused?, changed_at, changed_by} =
+    read_status = Keyword.get(opts, :read_status, &Arbiter.Settings.read_board_autopilot_status/0)
+    retry_ms = Keyword.get(opts, :state_retry_ms, @state_retry_ms)
+
+    {{paused?, changed_at, changed_by}, state_load} =
       case Keyword.fetch(opts, :paused) do
-        {:ok, explicit} -> {explicit, nil, nil}
-        :error -> initial_paused_state()
+        {:ok, explicit} -> {{explicit, nil, nil}, :settled}
+        :error -> initial_paused_state(read_status)
       end
+
+    if state_load != :settled, do: Process.send_after(self(), :reload_paused_state, retry_ms)
 
     topics = Keyword.get_lazy(opts, :topics, &configured_topics/0)
     Enum.each(topics, &Phoenix.PubSub.subscribe(Arbiter.PubSub, &1))
@@ -458,7 +469,15 @@ defmodule Arbiter.Board.Autopilot do
       failures: %{},
       # bd-92mx1m: automatic resumes waiting for a free slot, oldest first:
       # [%{task_id:, kind:, opts:}]. See "Deferred resumes go first" above.
-      deferred_resumes: []
+      deferred_resumes: [],
+      # The persisted pause state could not be read at boot (the schema may
+      # still be migrating — Autopilot starts before `Boot.Migrator`), so
+      # `paused?` is only the safe default for now and is re-read until it can
+      # be: `:settled` or `{:retrying, failed_reads}`.
+      state_load: state_load,
+      read_status: read_status,
+      state_retry_ms: retry_ms,
+      notify_unreadable: Keyword.get(opts, :notify_unreadable, &default_notify_unreadable/1)
     }
 
     schedule(interval)
@@ -514,10 +533,37 @@ defmodule Arbiter.Board.Autopilot do
         state
       end
 
-    {:reply, :ok, state}
+    # An operator's explicit choice outranks whatever the persisted row said.
+    {:reply, :ok, %{state | state_load: :settled}}
   end
 
   @impl true
+  def handle_info(:reload_paused_state, %{state_load: {:retrying, failed}} = state) do
+    case state.read_status.() do
+      {:ok, status} ->
+        {:noreply, adopt_persisted(state, status)}
+
+      {:error, reason} ->
+        failed = failed + 1
+
+        Logger.warning(
+          "board autopilot: persisted paused state still unreadable " <>
+            "(attempt #{failed}): #{inspect(reason)}"
+        )
+
+        if failed == @state_retry_notify_after, do: notify_unreadable(state, reason)
+
+        if failed < @state_retry_max do
+          Process.send_after(self(), :reload_paused_state, state.state_retry_ms)
+          {:noreply, %{state | state_load: {:retrying, failed}}}
+        else
+          {:noreply, %{state | state_load: :settled}}
+        end
+    end
+  end
+
+  def handle_info(:reload_paused_state, state), do: {:noreply, state}
+
   def handle_info(:tick, state) do
     {_outcome, state} = run_pass(state)
     schedule(state.interval_ms)
@@ -1008,17 +1054,77 @@ defmodule Arbiter.Board.Autopilot do
     |> Kernel.!()
   end
 
-  # No persisted value (fresh install, or a read failure already swallowed by
-  # `Arbiter.Settings`) falls back to the app-env default, with no recorded
-  # change — that is the config's default, not something an operator chose.
-  defp initial_paused_state do
-    case Arbiter.Settings.board_autopilot_status() do
-      %{paused: paused?} = status when is_boolean(paused?) ->
-        {status.paused, status.changed_at, status.changed_by}
+  # No persisted value (fresh install) falls back to the app-env default, with
+  # no recorded change — that is the config's default, not something an
+  # operator chose. A row that cannot be *read* is different: the default is
+  # only a safe stand-in (bd-c3b30g — v0.2.7 booted paused over a persisted
+  # `paused = false` because this ran before the migration finished), so it is
+  # logged loudly and re-read by `:reload_paused_state`.
+  defp initial_paused_state(read_status) do
+    case read_status.() do
+      {:ok, %{paused: paused?} = status} when is_boolean(paused?) ->
+        {{paused?, status.changed_at, status.changed_by}, :settled}
 
-      _ ->
-        {configured_paused?(), nil, nil}
+      {:ok, _unset} ->
+        {{configured_paused?(), nil, nil}, :settled}
+
+      {:error, reason} ->
+        Logger.warning(
+          "board autopilot: could not read the persisted paused state at boot " <>
+            "(#{inspect(reason)}); starting #{if configured_paused?(), do: "paused", else: "running"} " <>
+            "by config default and retrying"
+        )
+
+        {{configured_paused?(), nil, nil}, {:retrying, 1}}
     end
+  end
+
+  defp adopt_persisted(state, %{paused: paused?} = status) when is_boolean(paused?) do
+    if paused? != state.paused? do
+      Logger.warning(
+        "board autopilot: persisted paused state is now readable; " <>
+          "switching to paused=#{paused?}"
+      )
+
+      announce({:board_scheduler, if(paused?, do: :paused, else: :resumed)})
+    end
+
+    %{
+      state
+      | paused?: paused?,
+        paused_changed_at: status.changed_at,
+        paused_changed_by: status.changed_by,
+        state_load: :settled
+    }
+  end
+
+  defp adopt_persisted(state, _unset), do: %{state | state_load: :settled}
+
+  defp notify_unreadable(state, reason) do
+    state.notify_unreadable.(reason)
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  # Coordinator-visible: a system escalation in each workspace's mailbox.
+  defp default_notify_unreadable(reason) do
+    {:ok, workspaces} = Ash.read(Arbiter.Tasks.Workspace)
+
+    Enum.each(workspaces, fn ws ->
+      Arbiter.Messages.Escalation.post(%{
+        kind: :autopilot_state_unreadable,
+        from_ref: "autopilot",
+        workspace_id: ws.id,
+        subject: "board autopilot: persisted paused state is unreadable",
+        body:
+          "The board autopilot could not read its persisted paused/running state and is " <>
+            "running on the config default (paused unless `board_autopilot.enabled`), " <>
+            "not the state an operator last set. Check `arb scheduler status` and " <>
+            "resume it if it should be running.\n\nError: #{inspect(reason)}"
+      })
+    end)
   end
 
   # Best-effort: the in-memory pause/resume must always take effect even if

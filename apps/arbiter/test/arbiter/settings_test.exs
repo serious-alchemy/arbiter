@@ -105,6 +105,19 @@ defmodule Arbiter.SettingsTest do
   end
 
   describe "board_autopilot_status/0 + set_board_autopilot_paused/2" do
+    test "a schema missing a column is an error, not 'nothing persisted' (bd-c3b30g)" do
+      assert {:ok, _} = Settings.set_board_autopilot_paused(false, "api")
+
+      # What a boot before the migration sees: the resource selects a column
+      # the table does not have yet.
+      Arbiter.Repo.query!(
+        "ALTER TABLE installation_settings DROP COLUMN board_autopilot_paused_at"
+      )
+
+      assert {:error, _} = Settings.read_board_autopilot_status()
+      assert %{paused: nil} = Settings.board_autopilot_status()
+    end
+
     test "returns nil paused/changed_at/changed_by when no override has been set" do
       assert Settings.board_autopilot_status() == %{paused: nil, changed_at: nil, changed_by: nil}
     end
