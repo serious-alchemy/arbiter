@@ -479,6 +479,12 @@ defmodule Arbiter.Quota.GateProviderTest do
       assert reloaded.state == :backlog
       assert Worker.whereis(task.id) == nil
       assert DispatchQueue.held?(workspace.id, task.id)
+
+      # AC5 (bd-1qjv3j): the queued hold's reason names the account held.
+      assert Enum.any?(
+               DispatchQueue.state(DispatchQueueSupervisor.whereis(workspace.id)).items,
+               &(DispatchQueue.reason_text(&1.reason) =~ "codex:")
+             )
     end
 
     test "a paused provider holds the dispatch: held — codex paused: <reason> (bd-5ef587)", %{

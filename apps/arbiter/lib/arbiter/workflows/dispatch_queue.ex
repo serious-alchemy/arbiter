@@ -383,7 +383,7 @@ defmodule Arbiter.Workflows.DispatchQueue do
 
   @doc """
   The operator-facing wording of a gate's hold reason: the phrase
-  `Arbiter.Quota.Gate.Throttle` attaches (`"7d quota 0.91 ≥ 0.90"`), else
+  `Arbiter.Quota.Gate.Throttle` attaches (`"7d quota 91% ≥ 90%"`), else
   the window it names, else the term itself.
   """
   @spec reason_text(term()) :: String.t()

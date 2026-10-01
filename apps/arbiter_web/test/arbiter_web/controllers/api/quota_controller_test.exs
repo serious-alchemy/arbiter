@@ -132,7 +132,7 @@ defmodule ArbiterWeb.Api.QuotaControllerTest do
 
     resp = conn |> get("/api/quota") |> json_response(200)
     assert resp["data"]["claude"]["gating_window"] == "7d"
-    assert resp["data"]["claude"]["gating_reason"] == "7d quota 0.91 ≥ 0.90"
+    assert resp["data"]["claude"]["gating_reason"] == "claude:default 7d 91% ≥ 90%"
   end
 
   test "reports no gating window when both windows have headroom", %{conn: conn, ws: ws} do

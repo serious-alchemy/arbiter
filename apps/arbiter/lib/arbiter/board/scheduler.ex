@@ -118,6 +118,7 @@ defmodule Arbiter.Board.Scheduler do
           optional(:conflict_claims) => conflict_claims() | [String.t()],
           optional(:slots_free) => integer(),
           optional(:quota) => quota(),
+          optional(:card_quota) => %{optional(String.t()) => quota()},
           optional(:paused) => boolean()
         }
 
@@ -163,6 +164,9 @@ defmodule Arbiter.Board.Scheduler do
     board = %{
       paused: Map.get(input, :paused) == true,
       quota: Map.get(input, :quota),
+      # Per-ticket quota verdicts (a ticket's own routing candidates), which
+      # take precedence over the board-wide `quota` for that card.
+      card_quota: Map.get(input, :card_quota) || %{},
       slots_free: Map.get(input, :slots_free, 0)
     }
 
@@ -235,6 +239,8 @@ defmodule Arbiter.Board.Scheduler do
   defp ticket(card), do: Map.put_new(card, :state, :queued)
 
   defp ctx(card, board, acc) do
+    board = Map.put(board, :quota, Map.get(board.card_quota, card.id, board.quota))
+
     Map.merge(board, %{
       blocked_by: Map.get(card, :blocked_by),
       conflicts_with: Map.get(card, :conflicts_with),

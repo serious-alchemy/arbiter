@@ -233,6 +233,7 @@ defmodule Arbiter.Board.Snapshot do
         conflict_claims: conflict_claims(authors, gate_workers, issues, worked, now),
         slots_free: slots_free,
         quota: quota,
+        card_quota: Map.get(input, :card_quota, %{}),
         paused: paused?
       })
 
@@ -373,6 +374,12 @@ defmodule Arbiter.Board.Snapshot do
       quota:
         Keyword.get_lazy(opts, :quota, fn ->
           quota_hold(workspace || workspace_id, routing_opts)
+        end),
+      card_quota:
+        Keyword.get_lazy(opts, :card_quota, fn ->
+          if Keyword.has_key?(opts, :quota),
+            do: %{},
+            else: ticket_quota_holds(workspace, issues, opts)
         end),
       paused: Keyword.get(opts, :paused, false),
       watchdog_live: Keyword.get_lazy(opts, :watchdog_live, fn -> watchdog_live(issues) end),
@@ -542,15 +549,16 @@ defmodule Arbiter.Board.Snapshot do
   # ahead on the pre-routing provider, and so does the board). `:routing` in
   # `opts` short-circuits the read.
   defp routed_availability(ws, opts) do
-    view =
-      case Keyword.fetch(opts, :routing) do
-        {:ok, view} -> view
-        :error -> read_routing(ws, opts)
-      end
-
-    case view do
-      %{available: [_ | _]} -> view
+    case routing_view(ws, opts) do
+      %{available: [_ | _]} = view -> view
       _ -> nil
+    end
+  end
+
+  defp routing_view(ws, opts) do
+    case Keyword.fetch(opts, :routing) do
+      {:ok, view} -> view
+      :error -> read_routing(ws, opts)
     end
   end
 
@@ -624,10 +632,82 @@ defmodule Arbiter.Board.Snapshot do
     workspace = safe_workspace(workspace_or_id) || safe_workspace(default_workspace_id())
 
     case routed_availability(workspace, opts) do
-      nil -> auth_hold(workspace) || quota_window_hold(workspace)
-      _routed -> :ok
+      nil ->
+        fallback_hold(workspace, routing_view(workspace, opts))
+
+      _routed ->
+        :ok
     end
   end
+
+  # The reason when no candidate can take the work: every dropped candidate,
+  # named — `claude:default 7d 20% ≥ paced 20% …; codex:work at capacity …` —
+  # so the operator sees each held account and why the others can't help,
+  # rather than the default provider's phrase alone. `nil` without a dropped
+  # candidate to name.
+  defp dropped_summary([_ | _] = dropped) do
+    Enum.map_join(dropped, "; ", &dropped_phrase/1)
+  end
+
+  defp dropped_summary(_), do: nil
+
+  defp dropped_phrase(%{reason: "quota_held", detail: detail}) when is_binary(detail), do: detail
+
+  defp dropped_phrase(%{reason: reason} = entry) do
+    label =
+      case entry.account do
+        %{provider: provider, slug: slug} -> "#{provider}:#{slug}"
+        _ -> to_string(entry.agent_type)
+      end
+
+    base = "#{label} #{reason |> to_string() |> String.replace("_", " ")}"
+    if is_binary(entry[:detail]), do: "#{base} (#{entry.detail})", else: base
+  end
+
+  # The hold for a workspace where no candidate is available: the default
+  # provider's own hold (auth, then window) with its reason widened to name
+  # every dropped candidate. Still `:ok` when the default provider isn't held.
+  defp fallback_hold(workspace, view) do
+    case auth_hold(workspace) || quota_window_hold(workspace) do
+      {:hold, reason} ->
+        {:hold, (view && dropped_summary(view.dropped)) || reason}
+
+      other ->
+        other
+    end
+  end
+
+  # Per-ticket holds (bd-1qjv3j): each Ready ticket's own routing candidates —
+  # its `by_difficulty`/`by_priority` tier, its agent config — decide whether it
+  # is held, not the nil-task evaluation the workspace-level hold uses. A ticket
+  # with an available candidate is `:ok` even when a sibling's candidates are
+  # all held. Every queued non-epic ticket appears; routing-off workspaces yield
+  # `%{}`.
+  defp ticket_quota_holds(%Arbiter.Tasks.Workspace{} = workspace, issues, opts) do
+    if ProviderRouting.enabled?(workspace) do
+      routing_opts = Keyword.get(opts, :routing_opts, [])
+
+      issues
+      |> Enum.filter(&(Lifecycle.state_of(&1) == :queued and not epic?(&1)))
+      |> Map.new(fn issue ->
+        view = ProviderRouting.availability(workspace, issue, routing_opts)
+
+        verdict =
+          case view do
+            %{available: [_ | _]} -> :ok
+            _ -> fallback_hold(workspace, view)
+          end
+
+        {issue.id, verdict}
+      end)
+    else
+      %{}
+    end
+  rescue
+    _ -> %{}
+  end
+
+  defp ticket_quota_holds(_, _, _), do: %{}
 
   # The board's read of the hold is `AuthHold.held/2`, which fails open: the
   # dispatch guard's own fail-closed read is the backstop, and a board must
@@ -1694,7 +1774,7 @@ defmodule Arbiter.Board.Snapshot do
   # first clears when the window resets, the second clears if you raise the
   # ceiling. A 7d hold is a third: it clears at the weekly reset, days away, so
   # `Arbiter.Quota.Gate.hold_phrase/2` labels it with the window explicitly
-  # (`7d quota 0.91 ≥ 0.90`) rather than reusing the 5h wording (bd-1tuxv8).
+  # (`7d quota 91% ≥ 90%`) rather than reusing the 5h wording (bd-1tuxv8).
   defp describe_quota(snapshot, policy) do
     case Arbiter.Quota.Gate.hold_phrase(snapshot, policy) do
       nil -> :ok
