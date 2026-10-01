@@ -93,6 +93,23 @@ defmodule Arbiter.MCP.AgentConfigTest do
       assert toml =~ "[mcp_servers.fleet.http_headers]"
       refute toml =~ "[mcp_servers.fleet.headers]"
     end
+
+    test "supports bearer_token_env_var to keep token off disk (bd-6mo6be)" do
+      toml =
+        Codex.config_toml(
+          mcp_url: "http://127.0.0.1:4848/mcp",
+          scope_token: "tok-c1-envvar",
+          bearer_token_env_var: "ARBITER_MCP_TOKEN"
+        )
+
+      assert toml =~ "[mcp_servers.arbiter]"
+      assert toml =~ "[mcp_servers.arbiter.http_headers]"
+      # The token is NOT inlined; instead, an env var reference is used
+      refute toml =~ "Bearer tok-c1-envvar"
+      refute toml =~ "tok-c1-envvar"
+      # The env var name is in the config
+      assert toml =~ ~s(Authorization = "${ARBITER_MCP_TOKEN}")
+    end
   end
 
   # bd-m8geh4: `.gemini/settings.json` is the UPSTREAM `gemini` CLI's config
@@ -303,6 +320,69 @@ defmodule Arbiter.MCP.AgentConfigTest do
     end
   end
 
+  # bd-6mo6be: Worker-side verification — after Codex is spawned, run `codex mcp list --json`
+  # from the worker's context to confirm http_headers was actually loaded (not headers).
+  # This catches the G3 gap regression where the wrong key is silently ignored.
+  describe "Codex.verify_config_loaded/2 (worker-side verification)" do
+    setup do
+      tmp = Path.join(System.tmp_dir!(), "codex-verify-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(tmp)
+      on_exit(fn -> File.rm_rf(tmp) end)
+      {:ok, worktree: tmp}
+    end
+
+    test "detects http_headers when config_toml writes http_headers correctly", %{worktree: wt} do
+      token = Scope.mint_worker(%{id: "bd-6mo6be-v1", workspace_id: "ws-v1"}, "shipyard")
+      :ok = Codex.write_mcp_config(wt, mcp_url: "http://127.0.0.1:4848/mcp", scope_token: token)
+
+      # Simulate codex mcp list --json output with http_headers present
+      result = Codex.verify_config_loaded(wt, %{
+        "mcp_servers" => %{
+          "arbiter" => %{
+            "url" => "http://127.0.0.1:4848/mcp",
+            "http_headers" => %{"Authorization" => "Bearer tok-test-v1"}
+          }
+        }
+      })
+
+      assert result == :ok
+    end
+
+    test "rejects when http_headers is missing", %{worktree: wt} do
+      token = Scope.mint_worker(%{id: "bd-6mo6be-v2", workspace_id: "ws-v2"}, "shipyard")
+      :ok = Codex.write_mcp_config(wt, mcp_url: "http://127.0.0.1:4848/mcp", scope_token: token)
+
+      # Simulate codex mcp list --json output WITHOUT http_headers (the bug)
+      result = Codex.verify_config_loaded(wt, %{
+        "mcp_servers" => %{
+          "arbiter" => %{
+            "url" => "http://127.0.0.1:4848/mcp"
+            # http_headers is missing — config was not loaded
+          }
+        }
+      })
+
+      assert {:error, _reason} = result
+    end
+
+    test "rejects when Authorization header is missing from http_headers", %{worktree: wt} do
+      token = Scope.mint_worker(%{id: "bd-6mo6be-v3", workspace_id: "ws-v3"}, "shipyard")
+      :ok = Codex.write_mcp_config(wt, mcp_url: "http://127.0.0.1:4848/mcp", scope_token: token)
+
+      # http_headers is present but has no Authorization
+      result = Codex.verify_config_loaded(wt, %{
+        "mcp_servers" => %{
+          "arbiter" => %{
+            "url" => "http://127.0.0.1:4848/mcp",
+            "http_headers" => %{}
+          }
+        }
+      })
+
+      assert {:error, _reason} = result
+    end
+  end
+
   # bd-9q966y: regression tests — injected agent-config must never be committable
   # via `git add -A` on a contributor repo that does NOT have .mcp.json in its
   # tracked .gitignore.
@@ -405,30 +485,6 @@ defmodule Arbiter.MCP.AgentConfigTest do
       assert exclude_content =~ ".codex/"
     end
 
-    # bd-6mo6be: Codex 0.153.4 reads [mcp_servers.*.http_headers], not [mcp_servers.*.headers].
-    # The old schema is silently ignored, dropping the bearer token and causing 401s on every MCP call.
-    # This test verifies the fix writes the correct key. End-to-end verification requires running
-    # `codex mcp list --json` from the worker context to inspect the loaded config.
-    # Probe verification: echo 'headers="test"' > /tmp/test.toml && codex mcp list --json /tmp/test.toml
-    # returns http_headers: null; change to 'http_headers="test"' and it returns the value.
-    test "write/3 for :codex writes http_headers (not headers) in config.toml", %{repo: repo} do
-      token = Scope.mint_worker(%{id: "bd-6mo6be", workspace_id: "ws-test"}, "shipyard")
-
-      assert :ok =
-               AgentConfig.write(:codex, repo,
-                 mcp_url: "http://127.0.0.1:4848/mcp",
-                 scope_token: token
-               )
-
-      path = Path.join([repo, ".codex", "config.toml"])
-      assert File.exists?(path)
-
-      content = File.read!(path)
-      # Codex 0.153.4 only recognizes http_headers, not headers
-      assert content =~ "[mcp_servers.arbiter.http_headers]"
-      refute content =~ "[mcp_servers.arbiter.headers]"
-      assert content =~ "Bearer "
-    end
 
     test "add_to_git_exclude/2 is idempotent — duplicate entries are not appended", %{repo: repo} do
       AgentConfig.add_to_git_exclude(repo, [".mcp.json"])
