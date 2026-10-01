@@ -501,8 +501,7 @@ defmodule ArbiterWeb.SettingsLive do
           phx-click="toggle_autopilot"
           data-confirm={
             unless @autopilot.paused?,
-              do:
-                "Pause the scheduler? Ready cards will stop being promoted until it is resumed."
+              do: "Pause the scheduler? Ready cards will stop being promoted until it is resumed."
           }
         >
           {if @autopilot.paused?, do: "Resume", else: "Pause"}
