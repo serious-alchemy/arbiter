@@ -336,6 +336,7 @@ defmodule Arbiter.Tasks.Issue do
       change set_attribute(:attention_cause, :awaiting_verification)
       change set_attribute(:attention_since, &DateTime.utc_now/0)
       change {Arbiter.Tasks.Issue.Changes.AnnounceAttention, []}
+      change {Arbiter.Tasks.Issue.Changes.RecordAttentionSpan, []}
 
       # Same teardown as `:close`: the worker finished and its PR merged, so
       # leaving the agent + worktree alive for the whole verification window
@@ -397,6 +398,7 @@ defmodule Arbiter.Tasks.Issue do
       change set_attribute(:attention_detail, nil)
       change set_attribute(:attention_since, &DateTime.utc_now/0)
       change {Arbiter.Tasks.Issue.Changes.AnnounceAttention, []}
+      change {Arbiter.Tasks.Issue.Changes.RecordAttentionSpan, []}
 
       change after_action(fn _, issue, _ ->
                Arbiter.Tasks.Issue.broadcast_lifecycle(:updated, issue)
@@ -880,6 +882,7 @@ defmodule Arbiter.Tasks.Issue do
       change set_attribute(:attention_detail, arg(:detail))
       change set_attribute(:attention_since, &DateTime.utc_now/0)
       change {Arbiter.Tasks.Issue.Changes.AnnounceAttention, []}
+      change {Arbiter.Tasks.Issue.Changes.RecordAttentionSpan, []}
 
       change after_action(fn _, issue, _ ->
                Arbiter.Tasks.Issue.broadcast_lifecycle(:updated, issue)
@@ -931,6 +934,7 @@ defmodule Arbiter.Tasks.Issue do
       end
 
       change {Arbiter.Tasks.Issue.Changes.AnnounceAttention, []}
+      change {Arbiter.Tasks.Issue.Changes.RecordAttentionSpan, []}
 
       change after_action(fn _, issue, _ ->
                Arbiter.Tasks.Issue.broadcast_lifecycle(:updated, issue)
@@ -993,6 +997,7 @@ defmodule Arbiter.Tasks.Issue do
       change set_attribute(:attention_owner_cause, arg(:cause))
       change set_attribute(:attention_note, arg(:note))
       change set_attribute(:attention_owner_since, &DateTime.utc_now/0)
+      change {Arbiter.Tasks.Issue.Changes.RecordAttentionSpan, []}
 
       change fn changeset, _context ->
         if Ash.Changeset.get_argument(changeset, :owner) == :coordinator,
