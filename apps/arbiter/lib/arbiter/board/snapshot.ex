@@ -233,6 +233,7 @@ defmodule Arbiter.Board.Snapshot do
         conflict_claims: conflict_claims(authors, gate_workers, issues, worked, now),
         slots_free: slots_free,
         quota: quota,
+        card_quota: Map.get(input, :card_quota, %{}),
         paused: paused?
       })
 
@@ -373,6 +374,12 @@ defmodule Arbiter.Board.Snapshot do
       quota:
         Keyword.get_lazy(opts, :quota, fn ->
           quota_hold(workspace || workspace_id, routing_opts)
+        end),
+      card_quota:
+        Keyword.get_lazy(opts, :card_quota, fn ->
+          if Keyword.has_key?(opts, :quota),
+            do: %{},
+            else: ticket_quota_holds(workspace, issues, opts)
         end),
       paused: Keyword.get(opts, :paused, false),
       watchdog_live: Keyword.get_lazy(opts, :watchdog_live, fn -> watchdog_live(issues) end),
@@ -626,30 +633,81 @@ defmodule Arbiter.Board.Snapshot do
 
     case routed_availability(workspace, opts) do
       nil ->
-        auth_hold(workspace) || all_held_reason(workspace, opts) || quota_window_hold(workspace)
+        fallback_hold(workspace, routing_view(workspace, opts))
 
       _routed ->
         :ok
     end
   end
 
-  # Under most-quota routing with every candidate quota-held, the reason names
-  # each held account (`claude:default 7d 20% ≥ paced 20% …; codex:work …`)
-  # rather than the default provider alone. `nil` unless there is at least one
-  # candidate and every one of them was dropped for quota.
-  defp all_held_reason(%Arbiter.Tasks.Workspace{} = workspace, opts) do
-    case routing_view(workspace, opts) do
-      %{available: [], dropped: [_ | _] = dropped} ->
-        if Enum.all?(dropped, &(&1.reason == "quota_held")) do
-          {:hold, dropped |> Enum.map(& &1.detail) |> Enum.reject(&is_nil/1) |> Enum.join("; ")}
-        end
+  # The reason when no candidate can take the work: every dropped candidate,
+  # named — `claude:default 7d 20% ≥ paced 20% …; codex:work at capacity …` —
+  # so the operator sees each held account and why the others can't help,
+  # rather than the default provider's phrase alone. `nil` without a dropped
+  # candidate to name.
+  defp dropped_summary([_ | _] = dropped) do
+    dropped |> Enum.map(&dropped_phrase/1) |> Enum.join("; ")
+  end
 
-      _ ->
-        nil
+  defp dropped_summary(_), do: nil
+
+  defp dropped_phrase(%{reason: "quota_held", detail: detail}) when is_binary(detail), do: detail
+
+  defp dropped_phrase(%{reason: reason} = entry) do
+    label =
+      case entry.account do
+        %{provider: provider, slug: slug} -> "#{provider}:#{slug}"
+        _ -> to_string(entry.agent_type)
+      end
+
+    base = "#{label} #{reason |> to_string() |> String.replace("_", " ")}"
+    if is_binary(entry[:detail]), do: "#{base} (#{entry.detail})", else: base
+  end
+
+  # The hold for a workspace where no candidate is available: the default
+  # provider's own hold (auth, then window) with its reason widened to name
+  # every dropped candidate. Still `:ok` when the default provider isn't held.
+  defp fallback_hold(workspace, view) do
+    case auth_hold(workspace) || quota_window_hold(workspace) do
+      {:hold, reason} ->
+        {:hold, (view && dropped_summary(view.dropped)) || reason}
+
+      other ->
+        other
     end
   end
 
-  defp all_held_reason(_, _), do: nil
+  # Per-ticket holds (bd-1qjv3j): each Ready ticket's own routing candidates —
+  # its `by_difficulty`/`by_priority` tier, its agent config — decide whether it
+  # is held, not the nil-task evaluation the workspace-level hold uses. A ticket
+  # with an available candidate is `:ok` even when a sibling's candidates are
+  # all held. Only tickets whose verdict differs from the workspace-level one
+  # appear; routing-off workspaces yield `%{}`.
+  defp ticket_quota_holds(%Arbiter.Tasks.Workspace{} = workspace, issues, opts) do
+    if ProviderRouting.enabled?(workspace) do
+      routing_opts = Keyword.get(opts, :routing_opts, [])
+
+      issues
+      |> Enum.filter(&(Lifecycle.state_of(&1) == :queued and not epic?(&1)))
+      |> Map.new(fn issue ->
+        view = ProviderRouting.availability(workspace, issue, routing_opts)
+
+        verdict =
+          case view do
+            %{available: [_ | _]} -> :ok
+            _ -> fallback_hold(workspace, view)
+          end
+
+        {issue.id, verdict}
+      end)
+    else
+      %{}
+    end
+  rescue
+    _ -> %{}
+  end
+
+  defp ticket_quota_holds(_, _, _), do: %{}
 
   # The board's read of the hold is `AuthHold.held/2`, which fails open: the
   # dispatch guard's own fail-closed read is the backstop, and a board must
