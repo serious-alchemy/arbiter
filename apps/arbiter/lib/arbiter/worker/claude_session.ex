@@ -111,12 +111,13 @@ defmodule Arbiter.Worker.ClaudeSession do
   # reviewer emitted no verdict. Lower this and the fallback still holds; remove
   # the durable transcript and it does not.
   @line_cap 1000
-  # bd-7a0pi8: anchor the marker to end-of-line. `\barb done` still rejects the
-  # "arb doneness" substring; the trailing `[^\p{L}\p{N}]*$` requires the marker
-  # to be the last token (only whitespace/punctuation/decoration may follow), so
-  # a worker narrating "I'll print arb done once the tests pass" no longer trips
-  # a premature, false completion.
-  @done_regex ~r/\barb done[^\p{L}\p{N}]*$/u
+  # bd-7a0pi8 / bd-c27m5o: the marker must be a line on its own (only
+  # whitespace/punctuation/decoration around it). The per-line check sees one line; the split-delta safety
+  # net sees a rolling buffer, so the anchor is "start of buffer or after a
+  # newline" and "end of buffer". Prose that merely mentions the marker
+  # ("I'll print `arb done` once…", a doc sentence ending in `arb done`) never
+  # trips a premature completion.
+  @done_regex ~r/(?:\A|\n)[^\p{L}\p{N}\n]*arb done[^\p{L}\p{N}]*\z/u
 
   @typedoc "Accepted options for `start/1`."
   @type opt ::
@@ -436,9 +437,14 @@ defmodule Arbiter.Worker.ClaudeSession do
         end)
 
       :error ->
+        # The raw fallback exists for non-stream-json children (echo scripts,
+        # stray stderr). A line that LOOKS like JSON but failed to decode or
+        # normalise is a stream-json event we couldn't parse (a truncated tool
+        # result, an unknown envelope) — never the agent speaking, so it must
+        # not arm the sentinel (bd-c27m5o).
         session
         |> note_agy_denial_notice(line)
-        |> emit_line(line, true)
+        |> emit_line(line, not json_shaped?(line))
     end
   end
 
@@ -1427,6 +1433,8 @@ defmodule Arbiter.Worker.ClaudeSession do
   # or an `{"id":…,"msg":{…}}` protocol wrapper — down to the inner payload
   # (which carries its own `"type"`). Claude/Gemini events never match those
   # wrapper clauses, so this is a no-op for them.
+  defp json_shaped?(line), do: String.starts_with?(String.trim_leading(line), "{")
+
   defp decode_event(line) do
     with "{" <> _ <- String.trim_leading(line),
          {:ok, obj} when is_map(obj) <- Jason.decode(line),

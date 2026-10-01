@@ -40,7 +40,8 @@ defmodule Arbiter.Agents.CodexTest do
     end
 
     test "done_sentinel/0 matches `arb done` on a word boundary" do
-      assert Regex.match?(Codex.done_sentinel(), "all set — arb done")
+      assert Regex.match?(Codex.done_sentinel(), "work finished\narb done")
+      refute Regex.match?(Codex.done_sentinel(), "all set — arb done")
       refute Regex.match?(Codex.done_sentinel(), "arb doneness")
     end
 

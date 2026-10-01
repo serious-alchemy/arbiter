@@ -45,6 +45,18 @@ defmodule ArbiterCli.CliCase do
         # files; point it at nothing so doctor verdicts stay hermetic.
         Process.put(:bd2_distribution_probe, proc_net: [], epmd_port: nil, cookie_paths: [])
 
+        # `arb restart` refuses to signal anything when an `arbiter.service`
+        # unit file exists on disk (bd-3t973v); never read the host's unit
+        # dirs from a test.
+        Process.put(:bd2_unit_dirs, [])
+
+        # Stubbed listener pids are fake; `arb restart` reads their cmdline
+        # before signalling (bd-3t973v). Default them to a dev `mix phx.server`;
+        # tests of the refusal paths override this.
+        Process.put(:bd2_proc_cmdline, fn _pid ->
+          {:ok, ["beam.smp", "-extra", "--no-halt", "mix", "phx.server"]}
+        end)
+
         # Never the host's real operator socket (bd-8381tk): on the operator's
         # machine that would mint a live coordinator token from a test run.
         # `ArbiterCli.FakeOperatorSocket.start!/1` repoints this.

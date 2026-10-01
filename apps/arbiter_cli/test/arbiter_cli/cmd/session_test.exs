@@ -16,6 +16,10 @@ defmodule ArbiterCli.Cmd.SessionTest do
   alias ArbiterCli.Cmd.Session
 
   setup do
+    # These tests run a stand-in `systemctl` from a scratch dir on PATH, never
+    # the host's: opt in to the real spawn for exactly that.
+    Process.put(:bd2_allow_real_cmd, true)
+
     prior_path = System.get_env("PATH")
     prior_runtime_dir = System.get_env("XDG_RUNTIME_DIR")
 

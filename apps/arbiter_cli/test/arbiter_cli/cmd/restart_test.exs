@@ -45,7 +45,7 @@ defmodule ArbiterCli.Cmd.RestartTest do
 
       case cmd do
         "systemctl" ->
-          {"", 1}
+          {"No files found for arbiter.service.\n", 1}
 
         "lsof" ->
           if Process.get(:terminated), do: {"", 1}, else: {Enum.join(pids, "\n") <> "\n", 0}
@@ -119,7 +119,7 @@ defmodule ArbiterCli.Cmd.RestartTest do
 
       Process.put(:bd2_cmd_runner, fn cmd, _args, _opts ->
         case cmd do
-          "systemctl" -> {"", 1}
+          "systemctl" -> {"No files found for arbiter.service.\n", 1}
           # No listener on the port.
           "lsof" -> {"", 1}
           "sh" -> stub_get("/api/workspaces", @green) && {"", 0}
@@ -154,7 +154,7 @@ defmodule ArbiterCli.Cmd.RestartTest do
 
         case {cmd, args} do
           {"systemctl", _} ->
-            {"", 1}
+            {"No files found for arbiter.service.\n", 1}
 
           {"kill", ["-KILL" | _]} ->
             Process.put(:killed, true)
@@ -195,7 +195,7 @@ defmodule ArbiterCli.Cmd.RestartTest do
 
         case cmd do
           "systemctl" ->
-            {"", 1}
+            {"No files found for arbiter.service.\n", 1}
 
           "lsof" ->
             raise ErlangError, original: :enoent
@@ -236,7 +236,7 @@ defmodule ArbiterCli.Cmd.RestartTest do
         send(test_pid, {:cmd, cmd, args})
 
         case cmd do
-          "systemctl" -> {"", 1}
+          "systemctl" -> {"No files found for arbiter.service.\n", 1}
           "lsof" -> raise ErlangError, original: :enoent
           "ss" -> raise ErlangError, original: :enoent
           "pgrep" -> {"9999\n", 0}
@@ -262,7 +262,7 @@ defmodule ArbiterCli.Cmd.RestartTest do
 
       Process.put(:bd2_cmd_runner, fn cmd, _args, _opts ->
         case cmd do
-          "systemctl" -> {"", 1}
+          "systemctl" -> {"No files found for arbiter.service.\n", 1}
           "lsof" -> raise ErlangError, original: :enoent
           "ss" -> {"", 1}
           "pgrep" -> {"", 1}
@@ -289,7 +289,7 @@ defmodule ArbiterCli.Cmd.RestartTest do
       Process.put(:bd2_cmd_runner, fn cmd, _args, _opts ->
         case cmd do
           "systemctl" ->
-            {"", 1}
+            {"No files found for arbiter.service.\n", 1}
 
           "lsof" ->
             if Process.get(:terminated), do: {"", 1}, else: {"7\n", 0}
@@ -366,7 +366,7 @@ defmodule ArbiterCli.Cmd.RestartTest do
 
       Process.put(:bd2_cmd_runner, fn cmd, _args, _opts ->
         case cmd do
-          "systemctl" -> {"", 1}
+          "systemctl" -> {"No files found for arbiter.service.\n", 1}
           "lsof" -> {"", 1}
           "sh" -> stub_get("/api/workspaces", @green) && {"", 0}
           _ -> {"", 0}
@@ -387,7 +387,7 @@ defmodule ArbiterCli.Cmd.RestartTest do
 
       Process.put(:bd2_cmd_runner, fn cmd, _args, _opts ->
         case cmd do
-          "systemctl" -> {"", 1}
+          "systemctl" -> {"No files found for arbiter.service.\n", 1}
           "lsof" -> {"", 1}
           "sh" -> stub_get("/api/workspaces", @green) && {"", 0}
           _ -> {"", 0}
@@ -405,7 +405,7 @@ defmodule ArbiterCli.Cmd.RestartTest do
 
       Process.put(:bd2_cmd_runner, fn cmd, _args, _opts ->
         case cmd do
-          "systemctl" -> {"", 1}
+          "systemctl" -> {"No files found for arbiter.service.\n", 1}
           "lsof" -> {"", 1}
           "sh" -> stub_get("/api/workspaces", @green) && {"", 0}
           _ -> {"", 0}
@@ -432,7 +432,7 @@ defmodule ArbiterCli.Cmd.RestartTest do
         send(test_pid, {:cmd, cmd, args, opts})
 
         case cmd do
-          "systemctl" -> {"", 1}
+          "systemctl" -> {"No files found for arbiter.service.\n", 1}
           "lsof" -> {"", 1}
           "sh" -> stub_get("/api/workspaces", @green) && {"", 0}
           _ -> {"", 0}
@@ -463,7 +463,7 @@ defmodule ArbiterCli.Cmd.RestartTest do
         send(test_pid, {:cmd, cmd, args, opts})
 
         case cmd do
-          "systemctl" -> {"", 1}
+          "systemctl" -> {"No files found for arbiter.service.\n", 1}
           "lsof" -> {"", 1}
           "sh" -> stub_get("/api/workspaces", @green) && {"", 0}
           _ -> {"", 0}
@@ -500,7 +500,7 @@ defmodule ArbiterCli.Cmd.RestartTest do
 
       Process.put(:bd2_cmd_runner, fn cmd, _args, _opts ->
         case cmd do
-          "systemctl" -> {"", 1}
+          "systemctl" -> {"No files found for arbiter.service.\n", 1}
           "lsof" -> {"", 1}
           "sh" -> stub_get("/api/workspaces", @green) && {"", 0}
           _ -> {"", 0}
@@ -511,6 +511,224 @@ defmodule ArbiterCli.Cmd.RestartTest do
 
       assert code == 0
       assert out =~ "Arbiter Phoenix restarted"
+    end
+  end
+
+  # bd-3t973v: a worker once ran this very command with no cmd runner stub and
+  # SIGTERMed the live release BEAM found on :4848. These tests pin the layers
+  # that now make that impossible.
+  describe "unstubbed command runner (bd-3t973v)" do
+    @tag :tmp_dir
+    test "arb restart with no stub raises instead of running lsof, kill or systemctl",
+         %{tmp_dir: tmp} do
+      # Decoy executables first on PATH: if the guard ever lets a spawn through,
+      # they leave a marker instead of touching the host.
+      bin = Path.join(tmp, "bin")
+      File.mkdir_p!(bin)
+      marker = Path.join(tmp, "executed")
+
+      for name <- ~w(lsof kill systemctl ss pgrep sh mix) do
+        path = Path.join(bin, name)
+        File.write!(path, "#!/bin/sh\necho #{name} >> #{marker}\nexit 1\n")
+        File.chmod!(path, 0o755)
+      end
+
+      prior_path = System.get_env("PATH")
+      System.put_env("PATH", bin <> ":" <> prior_path)
+      on_exit(fn -> System.put_env("PATH", prior_path) end)
+
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@green, 200}},
+        {{"get", "/api/workers"}, {@no_workers, 200}}
+      ])
+
+      Process.delete(:bd2_cmd_runner)
+
+      assert_raise RuntimeError, ~r/refusing to run `systemctl` for real/, fn ->
+        capture(fn -> Restart.run([]) end)
+      end
+
+      refute File.exists?(marker)
+    end
+  end
+
+  describe "fail closed when systemd is in play (bd-3t973v)" do
+    setup do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@green, 200}},
+        {{"get", "/api/workers"}, {@no_workers, 200}}
+      ])
+
+      :ok
+    end
+
+    defp stub_systemctl(result) do
+      test_pid = self()
+
+      Process.put(:bd2_cmd_runner, fn cmd, args, _opts ->
+        send(test_pid, {:cmd, cmd, args})
+
+        case cmd do
+          "systemctl" -> result.()
+          "lsof" -> {"4242\n", 0}
+          _ -> {"", 0}
+        end
+      end)
+    end
+
+    test "systemctl unreachable (no bus) refuses instead of falling back to lsof/kill" do
+      stub_systemctl(fn ->
+        {"Failed to connect to user scope bus via local transport: No medium found\n", 1}
+      end)
+
+      {_out, err, code} = capture(fn -> Restart.run([]) end)
+
+      assert code == 1
+      assert err =~ "could not reach systemd"
+      refute_received {:cmd, "lsof", _}
+      refute_received {:cmd, "kill", _}
+      refute_received {:cmd, "sh", _}
+    end
+
+    test "systemctl raising for a reason other than a missing binary refuses" do
+      stub_systemctl(fn -> raise ErlangError, original: :eacces end)
+
+      {_out, err, code} = capture(fn -> Restart.run([]) end)
+
+      assert code == 1
+      assert err =~ "could not reach systemd"
+      refute_received {:cmd, "kill", _}
+    end
+
+    @tag :tmp_dir
+    test "an arbiter.service unit file on disk refuses even when systemctl says not found",
+         %{tmp_dir: tmp} do
+      File.write!(Path.join(tmp, "arbiter.service"), "[Service]\n")
+      Process.put(:bd2_unit_dirs, [tmp])
+      stub_systemctl(fn -> {"No files found for arbiter.service.\n", 1} end)
+
+      {_out, err, code} = capture(fn -> Restart.run([]) end)
+
+      assert code == 1
+      assert err =~ "arbiter.service"
+      refute_received {:cmd, "lsof", _}
+      refute_received {:cmd, "kill", _}
+    end
+
+    test "systemctl not installed and no unit file falls back to the dev path" do
+      stub_systemctl(fn -> raise ErlangError, original: :enoent end)
+
+      Process.put(:bd2_proc_cmdline, fn _pid ->
+        {:ok, ["beam.smp", "-extra", "mix", "phx.server"]}
+      end)
+
+      {_out, _err, code} = capture(fn -> Restart.run([]) end)
+
+      assert code == 0
+      assert_received {:cmd, "kill", ["-TERM", "4242"]}
+    end
+  end
+
+  describe "never signal a process that is not a dev mix phx.server (bd-3t973v)" do
+    setup do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@green, 200}},
+        {{"get", "/api/workers"}, {@no_workers, 200}}
+      ])
+
+      stub_lifecycle(["31337"])
+      :ok
+    end
+
+    @release_cmdline [
+      "/home/u/.arbiter/releases/v0.2.6/erts-16.4/bin/beam.smp",
+      "--",
+      "-root",
+      "/home/u/.arbiter/releases/v0.2.6",
+      "-noshell",
+      "-s",
+      "elixir",
+      "start_cli",
+      "-mode",
+      "embedded",
+      "-name",
+      "arbiter@127.0.0.1",
+      "-config",
+      "/home/u/.arbiter/releases/v0.2.6/releases/0.2.6/sys",
+      "-boot",
+      "/home/u/.arbiter/releases/v0.2.6/releases/0.2.6/start",
+      "-extra",
+      "--no-halt"
+    ]
+
+    test "a release BEAM on the port is refused: no TERM, no KILL, no start" do
+      Process.put(:bd2_proc_cmdline, fn "31337" -> {:ok, @release_cmdline} end)
+
+      {_out, err, code} = capture(fn -> Restart.run([]) end)
+
+      assert code == 1
+      assert err =~ "release"
+      assert_received {:cmd, "lsof", _}
+      refute_received {:cmd, "kill", _}
+      refute_received {:cmd, "sh", _}
+    end
+
+    test "bin/arbiter launched with phx.server in its args is still refused" do
+      Process.put(:bd2_proc_cmdline, fn _ ->
+        {:ok, ["/home/u/.arbiter/current/bin/arbiter", "eval", "phx.server"]}
+      end)
+
+      {_out, err, code} = capture(fn -> Restart.run([]) end)
+
+      assert code == 1
+      assert err =~ "release"
+      refute_received {:cmd, "kill", _}
+    end
+
+    test "an unreadable cmdline is refused (cannot prove it is a dev server)" do
+      Process.put(:bd2_proc_cmdline, fn _ -> {:error, :enoent} end)
+
+      {_out, err, code} = capture(fn -> Restart.run([]) end)
+
+      assert code == 1
+      assert err =~ "cannot prove"
+      refute_received {:cmd, "kill", _}
+    end
+
+    test "an unrelated process on the port is refused" do
+      Process.put(:bd2_proc_cmdline, fn _ -> {:ok, ["/usr/bin/nginx", "-g", "daemon off;"]} end)
+
+      {_out, err, code} = capture(fn -> Restart.run([]) end)
+
+      assert code == 1
+      assert err =~ "cannot prove"
+      refute_received {:cmd, "kill", _}
+    end
+
+    test "one non-dev pid among several blocks signalling all of them" do
+      stub_lifecycle(["1", "2"])
+
+      Process.put(:bd2_proc_cmdline, fn
+        "1" -> {:ok, ["beam.smp", "-extra", "mix", "phx.server"]}
+        "2" -> {:ok, @release_cmdline}
+      end)
+
+      {_out, _err, code} = capture(fn -> Restart.run([]) end)
+
+      assert code == 1
+      refute_received {:cmd, "kill", _}
+    end
+
+    test "a dev `mix phx.server` BEAM is still stopped" do
+      Process.put(:bd2_proc_cmdline, fn "31337" ->
+        {:ok,
+         ["/usr/lib/erlang/erts-15/bin/beam.smp", "-extra", "--no-halt", "mix", "phx.server"]}
+      end)
+
+      {_out, _err, code} = capture(fn -> Restart.run([]) end)
+
+      assert code == 0
+      assert_received {:cmd, "kill", ["-TERM", "31337"]}
     end
   end
 

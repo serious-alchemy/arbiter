@@ -87,7 +87,7 @@ defmodule ArbiterCli.Cmd.ServerTest do
         case {cmd, args} do
           # No systemd unit installed — fall back to the SIGTERM+sh path.
           {"systemctl", ["--user", "cat", "arbiter.service"]} ->
-            {"", 1}
+            {"No files found for arbiter.service.\n", 1}
 
           # Nothing listening on the port (already down).
           {"lsof", _} ->
@@ -117,7 +117,7 @@ defmodule ArbiterCli.Cmd.ServerTest do
       Process.put(:bd2_cmd_runner, fn cmd, args, _opts ->
         case {cmd, args} do
           {"systemctl", ["--user", "cat", "arbiter.service"]} ->
-            {"", 1}
+            {"No files found for arbiter.service.\n", 1}
 
           {"lsof", _} ->
             {"", 1}
@@ -165,7 +165,7 @@ defmodule ArbiterCli.Cmd.ServerTest do
       Process.put(:bd2_cmd_runner, fn cmd, args, _opts ->
         case {cmd, args} do
           {"systemctl", ["--user", "cat", "arbiter.service"]} ->
-            {"", 1}
+            {"No files found for arbiter.service.\n", 1}
 
           {"lsof", _} ->
             {"", 1}
@@ -207,16 +207,35 @@ defmodule ArbiterCli.Cmd.ServerTest do
         send(test_pid, {:cmd, cmd, args})
 
         case {cmd, args} do
-          {"git", ["rev-parse", "--abbrev-ref", "HEAD"]} -> {"main\n", 0}
-          {"git", ["status", "--porcelain"]} -> {"", 0}
-          {"git", ["rev-parse", "HEAD"]} -> {"aaaaaaa\n", 0}
-          {"git", ["pull", "--ff-only"]} -> {"Already up to date.\n", 0}
-          {"git", ["log" | _]} -> {"", 0}
-          {"git", ["diff" | _]} -> {"", 0}
-          {"systemctl", ["--user", "cat", "arbiter.service"]} -> {"", 1}
-          {"lsof", _} -> {"", 1}
-          {"sh", _} -> {"", 0}
-          _ -> {"", 0}
+          {"git", ["rev-parse", "--abbrev-ref", "HEAD"]} ->
+            {"main\n", 0}
+
+          {"git", ["status", "--porcelain"]} ->
+            {"", 0}
+
+          {"git", ["rev-parse", "HEAD"]} ->
+            {"aaaaaaa\n", 0}
+
+          {"git", ["pull", "--ff-only"]} ->
+            {"Already up to date.\n", 0}
+
+          {"git", ["log" | _]} ->
+            {"", 0}
+
+          {"git", ["diff" | _]} ->
+            {"", 0}
+
+          {"systemctl", ["--user", "cat", "arbiter.service"]} ->
+            {"No files found for arbiter.service.\n", 1}
+
+          {"lsof", _} ->
+            {"", 1}
+
+          {"sh", _} ->
+            {"", 0}
+
+          _ ->
+            {"", 0}
         end
       end)
 
