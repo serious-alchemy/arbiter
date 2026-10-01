@@ -190,7 +190,8 @@ defmodule Arbiter.MCP.AgentConfig.Codex do
       :ok
   """
   @spec verify_config_loaded(String.t(), map()) :: :ok | {:error, atom()}
-  def verify_config_loaded(worktree, codex_mcp_list_json) when is_binary(worktree) and is_map(codex_mcp_list_json) do
+  def verify_config_loaded(worktree, codex_mcp_list_json)
+      when is_binary(worktree) and is_map(codex_mcp_list_json) do
     case get_in(codex_mcp_list_json, ["mcp_servers", "arbiter", "http_headers", "Authorization"]) do
       nil -> {:error, :http_headers_missing}
       "" -> {:error, :authorization_header_empty}

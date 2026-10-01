@@ -336,14 +336,15 @@ defmodule Arbiter.MCP.AgentConfigTest do
       :ok = Codex.write_mcp_config(wt, mcp_url: "http://127.0.0.1:4848/mcp", scope_token: token)
 
       # Simulate codex mcp list --json output with http_headers present
-      result = Codex.verify_config_loaded(wt, %{
-        "mcp_servers" => %{
-          "arbiter" => %{
-            "url" => "http://127.0.0.1:4848/mcp",
-            "http_headers" => %{"Authorization" => "Bearer tok-test-v1"}
+      result =
+        Codex.verify_config_loaded(wt, %{
+          "mcp_servers" => %{
+            "arbiter" => %{
+              "url" => "http://127.0.0.1:4848/mcp",
+              "http_headers" => %{"Authorization" => "Bearer tok-test-v1"}
+            }
           }
-        }
-      })
+        })
 
       assert result == :ok
     end
@@ -353,14 +354,15 @@ defmodule Arbiter.MCP.AgentConfigTest do
       :ok = Codex.write_mcp_config(wt, mcp_url: "http://127.0.0.1:4848/mcp", scope_token: token)
 
       # Simulate codex mcp list --json output WITHOUT http_headers (the bug)
-      result = Codex.verify_config_loaded(wt, %{
-        "mcp_servers" => %{
-          "arbiter" => %{
-            "url" => "http://127.0.0.1:4848/mcp"
-            # http_headers is missing — config was not loaded
+      result =
+        Codex.verify_config_loaded(wt, %{
+          "mcp_servers" => %{
+            "arbiter" => %{
+              "url" => "http://127.0.0.1:4848/mcp"
+              # http_headers is missing — config was not loaded
+            }
           }
-        }
-      })
+        })
 
       assert {:error, _reason} = result
     end
@@ -370,14 +372,15 @@ defmodule Arbiter.MCP.AgentConfigTest do
       :ok = Codex.write_mcp_config(wt, mcp_url: "http://127.0.0.1:4848/mcp", scope_token: token)
 
       # http_headers is present but has no Authorization
-      result = Codex.verify_config_loaded(wt, %{
-        "mcp_servers" => %{
-          "arbiter" => %{
-            "url" => "http://127.0.0.1:4848/mcp",
-            "http_headers" => %{}
+      result =
+        Codex.verify_config_loaded(wt, %{
+          "mcp_servers" => %{
+            "arbiter" => %{
+              "url" => "http://127.0.0.1:4848/mcp",
+              "http_headers" => %{}
+            }
           }
-        }
-      })
+        })
 
       assert {:error, _reason} = result
     end
@@ -484,7 +487,6 @@ defmodule Arbiter.MCP.AgentConfigTest do
       exclude_content = File.read!(Path.join([repo, ".git", "info", "exclude"]))
       assert exclude_content =~ ".codex/"
     end
-
 
     test "add_to_git_exclude/2 is idempotent — duplicate entries are not appended", %{repo: repo} do
       AgentConfig.add_to_git_exclude(repo, [".mcp.json"])
