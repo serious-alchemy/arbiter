@@ -81,10 +81,17 @@ defmodule Arbiter.Tasks.Lifecycle.HistoryTest do
       test "in_progress with #{label} is #{expected}" do
         versions =
           legacy(@pre_cutover, %{}, [
-            v("update", later(@pre_cutover, 60), Map.put(unquote(Macro.escape(extra)), "status", "in_progress"))
+            v(
+              "update",
+              later(@pre_cutover, 60),
+              Map.put(unquote(Macro.escape(extra)), "status", "in_progress")
+            )
           ])
 
-        assert pairs(replay(versions, @pre_cutover)) == [{nil, :queued}, {:queued, unquote(expected)}]
+        assert pairs(replay(versions, @pre_cutover)) == [
+                 {nil, :queued},
+                 {:queued, unquote(expected)}
+               ]
       end
     end
 
@@ -107,7 +114,12 @@ defmodule Arbiter.Tasks.Lifecycle.HistoryTest do
                {:merging, :active}
              ]
 
-      assert Enum.map(result.transitions, & &1.at) == [t, later(t, 60), later(t, 120), later(t, 180)]
+      assert Enum.map(result.transitions, & &1.at) == [
+               t,
+               later(t, 60),
+               later(t, 120),
+               later(t, 180)
+             ]
     end
 
     test "awaiting_verification is verifying; closed is closed with close_reason completed" do
@@ -129,17 +141,23 @@ defmodule Arbiter.Tasks.Lifecycle.HistoryTest do
                {:verifying, :closed}
              ]
 
-      assert %{transition: "legacy:close", close_reason: :completed} = List.last(result.transitions)
+      assert %{transition: "legacy:close", close_reason: :completed} =
+               List.last(result.transitions)
+
       assert result.state == :closed
     end
 
     test "a version that changes nothing state-bearing emits nothing" do
-      versions = legacy(@pre_cutover, %{}, [v("update", later(@pre_cutover, 5), %{"notes" => "x"})])
+      versions =
+        legacy(@pre_cutover, %{}, [v("update", later(@pre_cutover, 5), %{"notes" => "x"})])
+
       assert pairs(replay(versions, @pre_cutover)) == [{nil, :queued}]
     end
 
     test "a status already in force emits nothing (no self-transition)" do
-      versions = legacy(@pre_cutover, %{}, [v("update", later(@pre_cutover, 5), %{"status" => "open"})])
+      versions =
+        legacy(@pre_cutover, %{}, [v("update", later(@pre_cutover, 5), %{"status" => "open"})])
+
       assert pairs(replay(versions, @pre_cutover)) == [{nil, :queued}]
     end
   end
@@ -154,7 +172,11 @@ defmodule Arbiter.Tasks.Lifecycle.HistoryTest do
           v("reopen", later(t, 120), %{"status" => "open"})
         ])
 
-      assert pairs(replay(versions, t)) == [{nil, :queued}, {:queued, :closed}, {:closed, :queued}]
+      assert pairs(replay(versions, t)) == [
+               {nil, :queued},
+               {:queued, :closed},
+               {:closed, :queued}
+             ]
     end
 
     test "a legacy reopen of a ticket whose refined was still false lands in backlog" do
@@ -210,7 +232,11 @@ defmodule Arbiter.Tasks.Lifecycle.HistoryTest do
 
       versions =
         legacy(t, %{}, [
-          v("start", later(t, 60), %{"status" => "in_progress", "pr_ref" => "#3", "state" => "active"})
+          v("start", later(t, 60), %{
+            "status" => "in_progress",
+            "pr_ref" => "#3",
+            "state" => "active"
+          })
         ])
 
       result = replay(versions, t)
@@ -273,7 +299,10 @@ defmodule Arbiter.Tasks.Lifecycle.HistoryTest do
       versions =
         legacy(t, %{}, [
           v("update", later(t, 60), %{"status" => "in_progress", "pr_ref" => "#2"}),
-          v("close", later(@state_cutover, 3600), %{"state" => "closed", "close_reason" => "completed"})
+          v("close", later(@state_cutover, 3600), %{
+            "state" => "closed",
+            "close_reason" => "completed"
+          })
         ])
 
       result = replay(versions, t)
@@ -335,7 +364,11 @@ defmodule Arbiter.Tasks.Lifecycle.HistoryTest do
     test "an unknown state is reported and moves nothing" do
       t = @post_cutover
 
-      versions = [v("create", t, %{"state" => "backlog"}), v("x", later(t, 10), %{"state" => "limbo"})]
+      versions = [
+        v("create", t, %{"state" => "backlog"}),
+        v("x", later(t, 10), %{"state" => "limbo"})
+      ]
+
       result = replay(versions, t)
 
       assert pairs(result) == [{nil, :backlog}]

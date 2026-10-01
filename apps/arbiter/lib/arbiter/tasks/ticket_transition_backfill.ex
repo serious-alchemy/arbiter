@@ -126,7 +126,10 @@ defmodule Arbiter.Tasks.TicketTransitionBackfill do
   @spec backfill(keyword()) :: result()
   def backfill(opts \\ []) do
     apply? = Keyword.get(opts, :apply?, false)
-    cutovers = Map.merge(cutovers(), Map.new(Keyword.take(opts, [:refined_cutover, :state_cutover])))
+
+    cutovers =
+      Map.merge(cutovers(), Map.new(Keyword.take(opts, [:refined_cutover, :state_cutover])))
+
     pending = load_pending()
 
     result = %{
@@ -160,10 +163,13 @@ defmodule Arbiter.Tasks.TicketTransitionBackfill do
   @spec cutovers() :: %{refined_cutover: DateTime.t() | nil, state_cutover: DateTime.t() | nil}
   def cutovers do
     %{rows: rows} =
-      Repo.query!("SELECT version, inserted_at FROM schema_migrations WHERE version IN (?1, ?2)", [
-        @refined_migration,
-        @state_migration
-      ])
+      Repo.query!(
+        "SELECT version, inserted_at FROM schema_migrations WHERE version IN (?1, ?2)",
+        [
+          @refined_migration,
+          @state_migration
+        ]
+      )
 
     applied = Map.new(rows, fn [version, at] -> {version, parse(at)} end)
 
@@ -332,7 +338,8 @@ defmodule Arbiter.Tasks.TicketTransitionBackfill do
       FROM issues i
       """)
 
-    planned = Map.new(plans, fn plan -> {plan.ticket.id, plan.rows |> Enum.map(& &1.at) |> min_at()} end)
+    planned =
+      Map.new(plans, fn plan -> {plan.ticket.id, plan.rows |> Enum.map(& &1.at) |> min_at()} end)
 
     tickets =
       for [id, created_at, first_at] <- rows do
@@ -398,7 +405,9 @@ defmodule Arbiter.Tasks.TicketTransitionBackfill do
     end
 
     for %{banded: b, created: c} = d <- result.cfd, b != c do
-      Logger.warning("TicketTransitionBackfill: CFD on #{d.day}: #{b} tickets banded, #{c} created")
+      Logger.warning(
+        "TicketTransitionBackfill: CFD on #{d.day}: #{b} tickets banded, #{c} created"
+      )
     end
 
     Logger.info(

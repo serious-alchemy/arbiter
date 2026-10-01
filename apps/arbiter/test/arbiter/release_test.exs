@@ -152,7 +152,10 @@ defmodule Arbiter.ReleaseTest do
 
     test ":ticket_transitions is a dry run by default and writes with apply?: true" do
       {:ok, ws} =
-        Ash.create(Workspace, %{name: "release-tt-#{System.unique_integer([:positive])}", prefix: "rtt"})
+        Ash.create(Workspace, %{
+          name: "release-tt-#{System.unique_integer([:positive])}",
+          prefix: "rtt"
+        })
 
       issue = Ash.create!(Issue, %{title: "t", workspace_id: ws.id, acceptance: "- ok"})
       Arbiter.Repo.query!("DELETE FROM ticket_transitions WHERE ticket_id = ?", [issue.id])

@@ -272,7 +272,9 @@ defmodule Arbiter.Tasks.TicketTransitionBackfillTest do
   end
 
   describe "the reconcile check" do
-    test "a replay that ends off the stored state is logged and closed by a reconcile row", %{ws: ws} do
+    test "a replay that ends off the stored state is logged and closed by a reconcile row", %{
+      ws: ws
+    } do
       id =
         historic(ws, "active", at("2026-07-01T10:00:00Z"), [
           {"create", at("2026-07-01T10:00:00Z"), %{"status" => "open"}}
@@ -302,7 +304,9 @@ defmodule Arbiter.Tasks.TicketTransitionBackfillTest do
       assert rows(id) == []
     end
 
-    test "a ticket with no paper trail gets one row into its stored state at created_at", %{ws: ws} do
+    test "a ticket with no paper trail gets one row into its stored state at created_at", %{
+      ws: ws
+    } do
       id = historic(ws, "backlog", at("2026-07-01T10:00:00Z"), [])
 
       capture_log(fn -> run(apply?: true) end)
