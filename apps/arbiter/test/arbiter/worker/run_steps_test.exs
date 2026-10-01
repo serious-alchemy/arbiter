@@ -65,6 +65,17 @@ defmodule Arbiter.Worker.RunStepsTest do
     }
   end
 
+  test "tool_use blocks bump the per-segment :tool_call_count (bd-5hvl7q)" do
+    session =
+      new_session("bd-count")
+      |> feed([
+        assistant_tool_use("t1", "Read", %{"file_path" => "/x"}),
+        assistant_tool_use("t2", "Bash", %{"command" => "mix test"})
+      ])
+
+    assert session.tool_call_count == 2
+  end
+
   test "a matched tool_use/tool_result pair writes exactly one row, correlated by tool_use_id" do
     task_id = "bd-runsteps-#{System.unique_integer([:positive])}"
     run_id = Ash.UUID.generate()
