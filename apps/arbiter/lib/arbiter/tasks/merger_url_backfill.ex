@@ -68,7 +68,6 @@ defmodule Arbiter.Tasks.MergerUrlBackfill do
   end
 
   @doc "True for `https://<host>/<digits>/-/merge_requests/<iid>`."
-  @spec numeric_url?(term()) :: boolean()
   def numeric_url?(url) when is_binary(url), do: Regex.match?(@numeric_url, url)
   def numeric_url?(_), do: false
 
@@ -76,8 +75,7 @@ defmodule Arbiter.Tasks.MergerUrlBackfill do
     [_, _host, iid] = Regex.run(@numeric_url, issue.merger_url)
     url = Mergers.link_for_workspace(issue.workspace, "!" <> iid, issue.repo)
 
-    new_url =
-      if is_binary(url) and url != "" and not numeric_url?(url), do: url, else: nil
+    new_url = if url == "" or numeric_url?(url), do: nil, else: url
 
     %{issue_id: issue.id, old_url: issue.merger_url, new_url: new_url}
   rescue
