@@ -192,14 +192,14 @@ defmodule ArbiterCli.Cmd.QuotaTest do
             Map.merge(@snapshot, %{
               "utilization_7d" => 0.91,
               "gating_window" => "7d",
-              "gating_reason" => "7d quota 0.91 ≥ 0.90"
+              "gating_reason" => "7d quota 91% ≥ 90%"
             })
         }
       })
 
       {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Quota.run([]) end)
       assert code == 0
-      assert out =~ "gating dispatch:       7d — 7d quota 0.91 ≥ 0.90"
+      assert out =~ "gating dispatch:       7d — 7d quota 91% ≥ 90%"
     end
 
     # bd-b7umwj: the STALE label used to read "dispatches may be incorrectly
@@ -216,7 +216,7 @@ defmodule ArbiterCli.Cmd.QuotaTest do
               "utilization_7d" => 0.96,
               "status_7d" => "allowed_warning",
               "gating_window" => "7d",
-              "gating_reason" => "7d quota 0.96 ≥ 0.90"
+              "gating_reason" => "7d quota 96% ≥ 90%"
             })
         }
       })
@@ -228,7 +228,7 @@ defmodule ArbiterCli.Cmd.QuotaTest do
       assert out =~ "7d hold stays in force"
       refute out =~ "incorrectly held"
       # And the 7d hold is still reported as gating, stale snapshot or not.
-      assert out =~ "gating dispatch:       7d — 7d quota 0.96 ≥ 0.90"
+      assert out =~ "gating dispatch:       7d — 7d quota 96% ≥ 90%"
     end
 
     # bd-4fbpto: STALE alone can't distinguish "the poll is fine, it just

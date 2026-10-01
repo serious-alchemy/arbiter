@@ -117,6 +117,17 @@ defmodule Arbiter.Board.SnapshotMostQuotaTest do
     %{claude: claude, codex: codex}
   end
 
+  defp claude_slug(ws) do
+    ws.id
+    |> then(
+      &(Ash.read!(WorkspaceProviderAccount, authorize?: false)
+        |> Enum.filter(fn w -> w.workspace_id == &1 and w.provider == :claude end))
+    )
+    |> hd()
+    |> Map.fetch!(:provider_account_id)
+    |> then(&Ash.get!(ProviderAccount, &1).slug)
+  end
+
   # ---- the hold -------------------------------------------------------------
 
   describe "quota_hold/2" do
@@ -133,7 +144,10 @@ defmodule Arbiter.Board.SnapshotMostQuotaTest do
       Ash.update!(codex, %{quota_config: %{"throttle_threshold" => 0.5}})
       codex_used!(codex, 60.0)
 
-      assert {:hold, _reason} = Snapshot.quota_hold(ws.id)
+      assert {:hold, reason} = Snapshot.quota_hold(ws.id)
+      # Every held account is named, not just the default provider's.
+      assert reason =~ "claude:#{claude_slug(ws)}"
+      assert reason =~ "codex:#{codex.slug}"
     end
 
     test "holds when the only available-looking candidate is out of capacity and the rest are held" do

@@ -337,7 +337,8 @@ defmodule Arbiter.Quota.GateWeeklyStalenessTest do
 
       # The board/Autopilot promotion seam (`Board.Snapshot.quota_hold/1`) sees
       # the hold, so Autopilot never even offers the task for dispatch...
-      assert {:hold, "7d quota 0.96 ≥ 0.90"} = Arbiter.Board.Snapshot.quota_hold(workspace.id)
+      assert {:hold, "claude:default 7d 96% ≥ 90%"} =
+               Arbiter.Board.Snapshot.quota_hold(workspace.id)
 
       # ...and the dispatch path Autopilot calls (`Dispatch.dispatch/1`) holds
       # it anyway, which is the choke point that actually matters.
@@ -350,7 +351,7 @@ defmodule Arbiter.Quota.GateWeeklyStalenessTest do
       assert reloaded.state == :backlog
       assert Worker.whereis(task.id) == nil
 
-      assert %{gating_window: "7d", gating_reason: "7d quota 0.96 ≥ 0.90"} =
+      assert %{gating_window: "7d", gating_reason: "claude:default 7d 96% ≥ 90%"} =
                Arbiter.Quota.serialize(quota_account_id!(workspace.id))
     end
   end

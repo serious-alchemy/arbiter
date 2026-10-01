@@ -542,15 +542,16 @@ defmodule Arbiter.Board.Snapshot do
   # ahead on the pre-routing provider, and so does the board). `:routing` in
   # `opts` short-circuits the read.
   defp routed_availability(ws, opts) do
-    view =
-      case Keyword.fetch(opts, :routing) do
-        {:ok, view} -> view
-        :error -> read_routing(ws, opts)
-      end
-
-    case view do
-      %{available: [_ | _]} -> view
+    case routing_view(ws, opts) do
+      %{available: [_ | _]} = view -> view
       _ -> nil
+    end
+  end
+
+  defp routing_view(ws, opts) do
+    case Keyword.fetch(opts, :routing) do
+      {:ok, view} -> view
+      :error -> read_routing(ws, opts)
     end
   end
 
@@ -624,10 +625,31 @@ defmodule Arbiter.Board.Snapshot do
     workspace = safe_workspace(workspace_or_id) || safe_workspace(default_workspace_id())
 
     case routed_availability(workspace, opts) do
-      nil -> auth_hold(workspace) || quota_window_hold(workspace)
-      _routed -> :ok
+      nil ->
+        auth_hold(workspace) || all_held_reason(workspace, opts) || quota_window_hold(workspace)
+
+      _routed ->
+        :ok
     end
   end
+
+  # Under most-quota routing with every candidate quota-held, the reason names
+  # each held account (`claude:default 7d 20% ≥ paced 20% …; codex:work …`)
+  # rather than the default provider alone. `nil` unless there is at least one
+  # candidate and every one of them was dropped for quota.
+  defp all_held_reason(%Arbiter.Tasks.Workspace{} = workspace, opts) do
+    case routing_view(workspace, opts) do
+      %{available: [], dropped: [_ | _] = dropped} ->
+        if Enum.all?(dropped, &(&1.reason == "quota_held")) do
+          {:hold, dropped |> Enum.map(& &1.detail) |> Enum.reject(&is_nil/1) |> Enum.join("; ")}
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp all_held_reason(_, _), do: nil
 
   # The board's read of the hold is `AuthHold.held/2`, which fails open: the
   # dispatch guard's own fail-closed read is the backstop, and a board must
@@ -1694,7 +1716,7 @@ defmodule Arbiter.Board.Snapshot do
   # first clears when the window resets, the second clears if you raise the
   # ceiling. A 7d hold is a third: it clears at the weekly reset, days away, so
   # `Arbiter.Quota.Gate.hold_phrase/2` labels it with the window explicitly
-  # (`7d quota 0.91 ≥ 0.90`) rather than reusing the 5h wording (bd-1tuxv8).
+  # (`7d quota 91% ≥ 90%`) rather than reusing the 5h wording (bd-1tuxv8).
   defp describe_quota(snapshot, policy) do
     case Arbiter.Quota.Gate.hold_phrase(snapshot, policy) do
       nil -> :ok

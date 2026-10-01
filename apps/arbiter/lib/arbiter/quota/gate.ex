@@ -1155,7 +1155,7 @@ defmodule Arbiter.Quota.Gate do
   leads with the window label, because "wait ~3 hours" and "wait until Sunday"
   are very different operator instructions:
 
-      blocked — 7d quota 0.91 ≥ 0.90
+      blocked — 7d quota 91% ≥ 90%
       blocked — 7d quota exhausted (status=rejected)
       blocked — 7d quota allowed_warning (weekly_warning_policy: hold)
 
@@ -1171,46 +1171,72 @@ defmodule Arbiter.Quota.Gate do
   @doc "Same as `hold_phrase/2`, but forwards `opts` to `gating_window/3` (bd-7qj58o)."
   @spec hold_phrase(quota_source(), policy(), keyword()) :: String.t() | nil
   def hold_phrase(quota, policy, opts) do
-    quota |> gating_window(policy, opts) |> phrase()
-  end
-
-  defp phrase(nil), do: nil
-
-  defp phrase(%{window: window, signal: :status, status: status}) do
-    if primary_window?(window) do
-      "quota exhausted"
-    else
-      "#{window} quota exhausted (status=#{status})"
+    case gating_window(quota, policy, opts) do
+      nil -> nil
+      binding -> phrase(binding, account_label(policy, opts))
     end
   end
 
-  defp phrase(%{
-         window: window,
-         signal: :utilization,
-         mode: :paced,
-         utilization: u,
-         threshold: t,
-         elapsed: e
-       }) do
-    if primary_window?(window) do
-      "quota ahead of pace (#{percent(u)} of window used, paced ceiling #{percent(t)}, " <>
-        "#{percent(e)} elapsed)"
-    else
-      "#{window} quota #{frac(u)} ≥ paced #{frac(t)} (#{percent(e)} elapsed)"
+  # `provider:slug` of the account being held (`claude:default`), so a hold
+  # says which account's quota it is. `nil` when no persisted account is known.
+  defp account_label(policy, opts) do
+    case Keyword.get(opts, :account) || policy_account(policy) do
+      %{provider: provider, slug: slug} when not is_nil(provider) and is_binary(slug) ->
+        "#{provider}:#{slug}"
+
+      _ ->
+        nil
     end
   end
 
-  defp phrase(%{window: window, signal: :utilization, utilization: u, threshold: t}) do
-    if primary_window?(window) do
-      "quota near exhaustion (#{percent(u)} of window used, ceiling #{percent(t)})"
-    else
-      "#{window} quota #{frac(u)} ≥ #{frac(t)}"
+  defp policy_account({account, _workspace}), do: account
+  defp policy_account(account), do: account
+
+  defp phrase(binding, label) do
+    window = binding.window
+
+    case {binding, primary_window?(window), label} do
+      {%{signal: :status}, true, _} ->
+        prefix(label, "quota exhausted")
+
+      {%{signal: :status, status: s}, false, nil} ->
+        "#{window} quota exhausted (status=#{s})"
+
+      {%{signal: :status, status: s}, false, l} ->
+        "#{l} #{window} exhausted (status=#{s})"
+
+      {%{signal: :warning, status: s}, _, nil} ->
+        "#{window} quota #{s} (weekly_warning_policy: hold)"
+
+      {%{signal: :warning, status: s}, _, l} ->
+        "#{l} #{window} #{s} (weekly_warning_policy: hold)"
+
+      {%{signal: :utilization}, true, _} ->
+        prefix(label, primary_utilization(binding))
+
+      {%{signal: :utilization}, false, _} ->
+        "#{long_head(label, window)} #{long_utilization(binding)}"
     end
   end
 
-  defp phrase(%{window: window, signal: :warning, status: status}) do
-    "#{window} quota #{status} (weekly_warning_policy: hold)"
+  defp prefix(nil, text), do: text
+  defp prefix(label, text), do: "#{label} #{text}"
+
+  defp long_head(nil, window), do: "#{window} quota"
+  defp long_head(label, window), do: "#{label} #{window}"
+
+  defp primary_utilization(%{mode: :paced, utilization: u, threshold: t, elapsed: e}) do
+    "quota ahead of pace (#{percent(u)} of window used, paced ceiling #{percent(t)}, " <>
+      "#{percent(e)} elapsed)"
   end
+
+  defp primary_utilization(%{utilization: u, threshold: t}),
+    do: "quota near exhaustion (#{percent(u)} of window used, ceiling #{percent(t)})"
+
+  defp long_utilization(%{mode: :paced, utilization: u, threshold: t, elapsed: e}),
+    do: "#{percent(u)} ≥ paced #{percent(t)} (#{percent(e)} elapsed)"
+
+  defp long_utilization(%{utilization: u, threshold: t}), do: "#{percent(u)} ≥ #{percent(t)}"
 
   # The long windows are the ones the secondary mapping names; everything else
   # ("5h", "session", "used", "primary") is the short/primary window.
@@ -1218,9 +1244,6 @@ defmodule Arbiter.Quota.Gate do
 
   defp percent(n) when is_number(n), do: "#{round(n * 100)}%"
   defp percent(_), do: "—"
-
-  defp frac(n) when is_number(n), do: :erlang.float_to_binary(n * 1.0, decimals: 2)
-  defp frac(_), do: "—"
 
   @doc """
   Whether the snapshot indicates *genuine past-plan usage* — Anthropic's
