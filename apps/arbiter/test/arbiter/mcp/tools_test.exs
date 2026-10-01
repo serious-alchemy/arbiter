@@ -2478,6 +2478,8 @@ defmodule Arbiter.MCP.ToolsTest do
         Arbiter.Settings.set_credential_watchdog_adapters(nil)
         Arbiter.Settings.set_credential_watchdog_interval_ms(nil)
         Arbiter.Settings.set_credential_watchdog_recovery_interval_ms(nil)
+        Arbiter.Settings.set_quota_providers_shown(nil)
+        Arbiter.Settings.set_quota_providers_hidden(nil)
       end)
 
       :ok
@@ -2487,7 +2489,9 @@ defmodule Arbiter.MCP.ToolsTest do
       conductor_system_max_concurrent: nil,
       credential_watchdog_adapters: nil,
       credential_watchdog_interval_ms: nil,
-      credential_watchdog_recovery_interval_ms: nil
+      credential_watchdog_recovery_interval_ms: nil,
+      quota_providers_shown: nil,
+      quota_providers_hidden: nil
     }
 
     test "returns the full settings map when no key is given (worker tier)", ctx do
@@ -2651,6 +2655,57 @@ defmodule Arbiter.MCP.ToolsTest do
 
       assert msg =~ "value"
     end
+
+    # bd-i2gwwn: the quota-provider visibility override.
+    test "coordinator can force quota providers on and off, and clear them", ctx do
+      assert {:ok, %{value: ["antigravity"]}} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "quota_providers_shown",
+                 "value" => ["antigravity"]
+               })
+
+      assert {:ok, %{value: ["claude"]}} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "quota_providers_hidden",
+                 "value" => ["claude"]
+               })
+
+      assert {:ok, %{value: ["claude"], settings: settings}} =
+               Tools.installation_config_get(ctx.worker, %{"key" => "quota_providers_hidden"})
+
+      assert settings.quota_providers_shown == ["antigravity"]
+      assert Arbiter.Quota.Visibility.rule([], ["antigravity"], ["claude"], []) == ["antigravity"]
+
+      assert {:ok, %{value: nil}} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "quota_providers_hidden",
+                 "value" => nil
+               })
+
+      assert Arbiter.Settings.quota_providers_hidden() == nil
+    end
+
+    test "quota provider overrides take quota provider codes, not agent types", ctx do
+      assert {:error, {:invalid, msg}} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "quota_providers_shown",
+                 "value" => ["gemini"]
+               })
+
+      assert msg =~ "antigravity"
+
+      assert {:error, {:invalid, _}} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "credential_watchdog_adapters",
+                 "value" => ["antigravity"]
+               })
+
+      assert {:ok, %{value: ["codex"]}} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "quota_providers_shown",
+                 "value" => ~s(["codex"])
+               })
+    end
   end
 
   describe "installation config tools — catalog visibility" do
@@ -2703,7 +2758,7 @@ defmodule Arbiter.MCP.ToolsTest do
       # Verify array items are constrained to known agent types
       array_schema = Enum.find(one_of, &(&1["type"] == "array"))
       items_enum = array_schema["items"]["enum"]
-      assert items_enum == ["claude", "gemini", "codex"]
+      assert items_enum == ["claude", "gemini", "codex", "antigravity"]
     end
 
     test "native integer value round-trips successfully (coordinator)", ctx do

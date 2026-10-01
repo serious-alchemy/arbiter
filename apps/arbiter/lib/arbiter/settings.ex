@@ -188,6 +188,67 @@ defmodule Arbiter.Settings do
   @spec set_provider_pauses(map()) :: {:ok, map()} | {:error, term()}
   def set_provider_pauses(map) when is_map(map), do: write_setting(:provider_pauses, map)
 
+  @doc """
+  Quota provider codes forced onto the status bar's quota chip and `/usage`'s
+  rate limits (bd-i2gwwn, `Arbiter.Quota.Visibility`), or `nil` when unset —
+  auto-detect. Never raises.
+  """
+  @spec quota_providers_shown() :: [String.t()] | nil
+  def quota_providers_shown, do: read_setting(:quota_providers_shown)
+
+  @doc """
+  Quota provider codes forced off both surfaces, or `nil` when unset. Wins
+  over `quota_providers_shown/0`. Never raises.
+  """
+  @spec quota_providers_hidden() :: [String.t()] | nil
+  def quota_providers_hidden, do: read_setting(:quota_providers_hidden)
+
+  @doc """
+  Both quota-provider overrides from one read, as `%{shown:, hidden:}` (each
+  `nil` when unset). Never raises.
+  """
+  @spec quota_provider_overrides() :: %{shown: [String.t()] | nil, hidden: [String.t()] | nil}
+  def quota_provider_overrides do
+    case singleton() do
+      %Installation{} = row ->
+        %{shown: row.quota_providers_shown, hidden: row.quota_providers_hidden}
+
+      nil ->
+        %{shown: nil, hidden: nil}
+    end
+  rescue
+    _ -> %{shown: nil, hidden: nil}
+  end
+
+  @doc """
+  Force providers onto the quota surfaces. Each entry must be one of
+  `Arbiter.Quota.Visibility.provider_codes/0`; `nil` clears the override.
+  Takes effect on the next page load — the cached top-bar quota is dropped.
+  """
+  @spec set_quota_providers_shown([String.t()] | nil) ::
+          {:ok, [String.t()] | nil} | {:error, term()}
+  def set_quota_providers_shown(codes), do: write_quota_providers(:quota_providers_shown, codes)
+
+  @doc "Force providers off the quota surfaces; see `set_quota_providers_shown/1`."
+  @spec set_quota_providers_hidden([String.t()] | nil) ::
+          {:ok, [String.t()] | nil} | {:error, term()}
+  def set_quota_providers_hidden(codes), do: write_quota_providers(:quota_providers_hidden, codes)
+
+  defp write_quota_providers(field, codes) when is_nil(codes) or is_list(codes) do
+    valid = Arbiter.Quota.Visibility.provider_codes()
+
+    if is_nil(codes) or Enum.all?(codes, &(&1 in valid)) do
+      with {:ok, value} <- write_setting(field, codes && Enum.uniq(codes)) do
+        Arbiter.Quota.QuotaCache.invalidate_all()
+        {:ok, value}
+      end
+    else
+      {:error, :invalid_value}
+    end
+  end
+
+  defp write_quota_providers(_field, _codes), do: {:error, :invalid_value}
+
   # ---- singleton plumbing --------------------------------------------------
 
   # Reads never raise: a missing table (not-yet-migrated install) or any other

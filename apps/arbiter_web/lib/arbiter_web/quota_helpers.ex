@@ -363,6 +363,198 @@ defmodule ArbiterWeb.QuotaHelpers do
     end
   end
 
+  @doc """
+  Whether `view` is a provider the installation uses but has no snapshot for
+  yet — the `no_data: true` placeholder `Arbiter.Quota.Visibility` lists.
+  """
+  def quota_no_data?(view), do: Map.get(view, :no_data, false) == true
+
+  @doc """
+  The two rings of a provider's object in the status-bar quota chip
+  (bd-i2gwwn): `%{inner: ring, outer: ring}`, inner the 5h (primary) window
+  and outer the 7d (secondary) one.
+
+  Each ring is `%{window, label, group, pct, state, elapsed_pct, status}`:
+
+    * `pct` — utilisation, 0-100 (`nil` with no reading);
+    * `state` — `quota_pace/3`'s colour as a ring state: `:ok`,
+      `:approaching`, `:holding` (red, including paid overage), `:sampling`;
+      or `:stale` (a preserved last-good reading, any pace) and `:no_data`
+      (no snapshot, or no reading for this window);
+    * `elapsed_pct` — the hairline, from `quota_elapsed_pct_5h/2` /
+      `quota_elapsed_pct_7d/2`, so `nil` for anything outside
+      `@fixed_window_providers` (Codex);
+    * `status` — the state in words, for the object's `aria-label`.
+
+  Antigravity has two bucket groups per window (`quota_antigravity_groups/1`),
+  both gated, so each ring takes the tighter of the two — the worse pace
+  state, then the higher utilisation — and names its `group`.
+  """
+  def quota_rings(view) do
+    candidates = ring_candidates(view)
+
+    %{
+      inner: ring(view, "5h", Map.get(candidates, "5h", [])),
+      outer: ring(view, "7d", Map.get(candidates, "7d", []))
+    }
+  end
+
+  defp ring_candidates(view) do
+    windows =
+      case view do
+        %{provider: "antigravity"} ->
+          for group <- quota_antigravity_groups(view),
+              w <- group.windows,
+              do: Map.put(w, :group, group.label)
+
+        _ ->
+          []
+      end
+
+    windows = if windows == [], do: quota_windows(view), else: windows
+    Enum.group_by(windows, & &1.window)
+  end
+
+  defp ring(view, window, candidates) do
+    readings = Enum.filter(candidates, &is_number(&1.utilization))
+
+    if quota_no_data?(view) or readings == [] do
+      no_data_ring(window, List.first(candidates))
+    else
+      readings
+      |> Enum.map(&reading_ring(view, &1))
+      |> Enum.max_by(&{ring_severity(&1.pace_state), &1.utilization})
+      |> Map.delete(:utilization)
+    end
+  end
+
+  defp no_data_ring(window, candidate) do
+    %{
+      window: window,
+      label: (candidate && candidate.label) || window,
+      group: nil,
+      pct: nil,
+      state: :no_data,
+      pace_state: :none,
+      elapsed_pct: nil,
+      status: "no data yet"
+    }
+  end
+
+  defp reading_ring(view, bar) do
+    bar =
+      Map.merge(bar, %{provider: view.provider, overage_status: Map.get(view, :overage_status)})
+
+    pace = quota_pace(bar, Map.get(view, :gate_policy))
+    stale? = Map.get(view, :message) != nil
+
+    elapsed_pct =
+      if bar.window == "5h",
+        do: quota_elapsed_pct_5h(view.provider, bar.reset_at),
+        else: quota_elapsed_pct_7d(view.provider, bar.reset_at)
+
+    %{
+      window: bar.window,
+      label: bar.label,
+      group: Map.get(bar, :group),
+      pct: quota_pct(bar.utilization),
+      utilization: bar.utilization,
+      state: if(stale?, do: :stale, else: ring_state(pace.state)),
+      pace_state: pace.state,
+      elapsed_pct: elapsed_pct,
+      status: if(stale?, do: "stale reading", else: ring_status(pace, bar.overage_status))
+    }
+  end
+
+  defp ring_state(:green), do: :ok
+  defp ring_state(:amber), do: :approaching
+  defp ring_state(:red), do: :holding
+  defp ring_state(:grey), do: :sampling
+
+  defp ring_severity(:red), do: 3
+  defp ring_severity(:amber), do: 2
+  defp ring_severity(:green), do: 1
+  defp ring_severity(_grey), do: 0
+
+  defp ring_status(_pace, "in_overage"), do: "in paid overage"
+  defp ring_status(%{holding: :enforcing}, _overage), do: "holding dispatch"
+
+  defp ring_status(%{holding: :not_enforcing}, _overage),
+    do: "over paced ceiling, gate not enforcing"
+
+  defp ring_status(%{state: :amber}, _overage), do: "approaching ceiling"
+  defp ring_status(%{state: :grey}, _overage), do: "sampling"
+  defp ring_status(_pace, _overage), do: "on pace"
+
+  # The object's state as a whole: stale or no data when the reading is, else
+  # its worse ring.
+  @doc false
+  def quota_object_state(view, %{inner: inner, outer: outer}) do
+    cond do
+      quota_no_data?(view) or (inner.state == :no_data and outer.state == :no_data) -> :no_data
+      Map.get(view, :message) != nil -> :stale
+      true -> [inner, outer] |> Enum.reject(&(&1.state == :no_data)) |> worst_ring_state()
+    end
+  end
+
+  defp worst_ring_state(rings), do: Enum.max_by(rings, &ring_severity(&1.pace_state)).state
+
+  @doc """
+  A provider object's `aria-label`: both windows' utilisation and status in
+  words — `"Claude: 5h 38%, on pace; 7d 41%, on pace"`, or
+  `"Antigravity: no data yet"` — so colour is never the only signal. A ring
+  with no reading reads `"<label> no data"`; a single-window view leaves its
+  empty outer ring out.
+  """
+  def quota_ring_summary(view, %{inner: inner, outer: outer} = rings) do
+    name = quota_provider_label(view.provider)
+
+    if quota_object_state(view, rings) == :no_data do
+      "#{name}: no data yet"
+    else
+      windows =
+        [inner, outer]
+        |> Enum.reject(&(&1.state == :no_data and &1.window == "7d" and single_window?(view)))
+        |> Enum.map_join("; ", &ring_phrase/1)
+
+      "#{name}: #{windows}"
+    end
+  end
+
+  defp single_window?(view), do: Map.get(view, :secondary_label, "7d") == nil
+
+  defp ring_phrase(%{state: :no_data, label: label}), do: "#{label} no data"
+
+  defp ring_phrase(%{group: nil} = ring), do: "#{ring.label} #{ring.pct}%, #{ring.status}"
+
+  defp ring_phrase(ring), do: "#{ring.label} #{ring.pct}% (#{ring.group}), #{ring.status}"
+
+  @doc """
+  A provider object's hover `title`: `quota_ring_summary/2`, then a stale
+  reading's message.
+  """
+  def quota_ring_title(view, rings) do
+    quota_bar_title([
+      quota_ring_summary(view, rings),
+      Map.get(view, :message) && "stale reading: #{view.message}"
+    ])
+  end
+
+  @doc """
+  The arc colour for a ring `state` (bd-i2gwwn). The verdict, not the provider
+  hue — the logo in the middle already says which provider it is. `nil` for
+  `:no_data`, which draws no arc.
+  """
+  def quota_ring_stroke(:ok), do: "var(--arb-live)"
+  def quota_ring_stroke(:approaching), do: "var(--arb-attention)"
+  def quota_ring_stroke(:holding), do: "var(--arb-fail)"
+  def quota_ring_stroke(state) when state in [:sampling, :stale], do: "var(--arb-done)"
+  def quota_ring_stroke(:no_data), do: nil
+
+  @doc "The `provider_icon/1` provider for a quota provider code (Antigravity draws as `gemini`)."
+  def quota_icon_provider("antigravity"), do: "gemini"
+  def quota_icon_provider(provider), do: provider
+
   defp antigravity_group_windows(models, group) do
     for {window, bucket_window, label} <- [{"5h", "5h", "5h"}, {"7d", "weekly", "weekly"}],
         %{} = reading <- [

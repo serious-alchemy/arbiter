@@ -292,9 +292,15 @@ defmodule ArbiterWeb.Api.QuotaControllerTest do
         provider: "codex"
       )
 
+    # bd-i2gwwn: the raw view. Neither the dashboard's visibility rule (the
+    # workspace runs only the default claude) nor its override applies here.
+    {:ok, _} = Arbiter.Settings.set_quota_providers_hidden(["claude"])
+    assert Arbiter.Quota.Visibility.providers() == []
+
     resp = conn |> get("/api/quota") |> json_response(200)
     providers = resp["data"]["quotas"] |> Enum.map(& &1["provider"]) |> Enum.sort()
     assert providers == ["claude", "codex"]
+    assert resp["data"]["claude"]["utilization_5h"] == 0.24
   end
 
   describe "P5: keyed by provider account (docs/provider-account-design.md §6)" do

@@ -81,6 +81,19 @@ defmodule Arbiter.Quota.QuotaCache do
     ArgumentError -> :ok
   end
 
+  @doc """
+  Drops every cached entry — what a change to which providers are shown at
+  all (`Arbiter.Quota.Visibility`'s install-wide override) must invalidate.
+  Safe to call before the table exists.
+  """
+  @spec invalidate_all() :: :ok
+  def invalidate_all do
+    :ets.delete_all_objects(@table)
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
   @doc "Every workspace this account's quota view is shown on (P5) — what a capture on that account must invalidate."
   @spec invalidate_for_account(String.t()) :: :ok
   def invalidate_for_account(account_id) do

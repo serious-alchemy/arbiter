@@ -105,7 +105,7 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
   # They are separate tasks so a slow scheduler never holds the page — until
   # it answers, `@autodispatch` is `nil` and the switch is disabled.
   @impl true
-  def mount(%{"id" => id}, _session, socket) do
+  def mount(%{"id" => id} = params, _session, socket) do
     socket =
       socket
       |> assign(:workspace_id, id)
@@ -113,7 +113,7 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
       |> assign(:not_found, false)
       |> assign(:workspace_error, nil)
       |> assign(:details_error, nil)
-      |> assign(:section, "repos")
+      |> assign(:section, initial_section(params))
       |> assign(:sections, @sections)
       |> assign(:autodispatch, nil)
       |> assign(:autodispatch_error?, false)
@@ -193,6 +193,11 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
   defp describe_exit(reason), do: Exception.format_exit(reason)
 
   # ---- rail ----
+
+  # `?section=<slug>` opens the page on that section — the deep link `/usage`'s
+  # "No providers configured" empty state uses (bd-i2gwwn).
+  defp initial_section(%{"section" => slug}) when slug in @section_slugs, do: slug
+  defp initial_section(_params), do: "repos"
 
   @impl true
   def handle_event("section", %{"section" => slug}, socket) when slug in @section_slugs do
