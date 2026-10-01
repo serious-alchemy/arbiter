@@ -129,7 +129,7 @@ defmodule Arbiter.Quota.GateWeeklyTest do
     test "the hold phrase names the 7d window and both numbers" do
       q = quota(%{utilization_7d: 0.91, status_7d: "allowed"})
 
-      assert Gate.hold_phrase(q, ws()) == "7d quota 0.91 ≥ 0.90"
+      assert Gate.hold_phrase(q, ws()) == "7d quota 91% ≥ 90%"
     end
   end
 
@@ -278,7 +278,8 @@ defmodule Arbiter.Quota.GateWeeklyTest do
           DateTime.add(DateTime.utc_now(), 3 * 86_400, :second) |> DateTime.truncate(:second)
       })
 
-      assert {:hold, "7d quota 0.91 ≥ 0.90"} = Arbiter.Board.Snapshot.quota_hold(workspace.id)
+      assert {:hold, "claude:default 7d 91% ≥ 90%"} =
+               Arbiter.Board.Snapshot.quota_hold(workspace.id)
 
       plan =
         Arbiter.Board.Scheduler.plan(%{
@@ -287,7 +288,7 @@ defmodule Arbiter.Quota.GateWeeklyTest do
           slots_free: 4
         })
 
-      assert Enum.any?(plan.entries, &(&1.reason == "blocked — 7d quota 0.91 ≥ 0.90"))
+      assert Enum.any?(plan.entries, &(&1.reason == "blocked — claude:default 7d 91% ≥ 90%"))
     end
 
     test "a 5h hold still reads with the 5h wording", %{workspace: workspace} do
@@ -315,7 +316,7 @@ defmodule Arbiter.Quota.GateWeeklyTest do
           DateTime.add(DateTime.utc_now(), 3 * 86_400, :second) |> DateTime.truncate(:second)
       })
 
-      assert %{gating_window: "7d", gating_reason: "7d quota 0.91 ≥ 0.90"} =
+      assert %{gating_window: "7d", gating_reason: "claude:default 7d 91% ≥ 90%"} =
                Arbiter.Quota.serialize(quota_account_id!(workspace.id))
     end
 

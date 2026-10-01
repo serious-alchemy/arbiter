@@ -132,6 +132,7 @@ defmodule Arbiter.Board.Drain do
           in_flight: [entry()],
           slots_used: non_neg_integer(),
           slot_holders: [String.t()],
+          quota_hold: String.t() | nil,
           checked_at: DateTime.t()
         }
 
@@ -182,7 +183,9 @@ defmodule Arbiter.Board.Drain do
     * `:supervisor` — the worker supervisor (default `Arbiter.Worker.Supervisor`).
     * `:registry` — the `track/3` registry (default `Arbiter.Board.Drain.Registry`).
     * `:tickets` — the tickets to count slots among (default: every `:active`
-      ticket in the repo).
+      ticket in the repo);
+    * `:quota_hold` — the board-wide hold reason (`nil` for none; default:
+      `Arbiter.Board.Snapshot.quota_hold/0`).
 
   `slots_used` / `slot_holders` (bd-asxw4e) are the dispatch cap's count —
   the tickets In progress, by `Arbiter.Tasks.SlotGate.slot_holders/1`, the
@@ -226,8 +229,21 @@ defmodule Arbiter.Board.Drain do
       in_flight: in_flight,
       slots_used: length(slot_holders),
       slot_holders: slot_holders,
+      quota_hold: Keyword.get_lazy(opts, :quota_hold, &quota_hold/0),
       checked_at: DateTime.utc_now()
     }
+  end
+
+  # The board-wide quota/auth hold in the account-qualified wording the board
+  # card uses (bd-1qjv3j): `nil` when nothing is held. An unreadable hold reads
+  # as none — the drain verdict does not depend on it.
+  defp quota_hold do
+    case Arbiter.Board.Snapshot.quota_hold() do
+      {:hold, reason} -> reason
+      _ -> nil
+    end
+  rescue
+    _ -> nil
   end
 
   # An unreadable table reads as no holders rather than failing the status —
@@ -256,6 +272,7 @@ defmodule Arbiter.Board.Drain do
       in_flight: Enum.map(status.in_flight, &entry_json/1),
       slots_used: Map.get(status, :slots_used, 0),
       slot_holders: Map.get(status, :slot_holders, []),
+      quota_hold: Map.get(status, :quota_hold),
       checked_at: status.checked_at,
       paused_providers: Arbiter.Providers.Pause.to_json()
     }

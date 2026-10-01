@@ -372,6 +372,7 @@ defmodule ArbiterCli.Cmd.Prime do
     IO.puts("== Scheduler ==")
     IO.puts("  " <> SchedulerState.headline(body))
     Enum.each(SchedulerState.entry_lines(body), &IO.puts("    " <> &1))
+    emit_quota_hold(body["quota_hold"])
     emit_paused_providers(body["paused_providers"])
     IO.puts("")
   end
@@ -381,6 +382,11 @@ defmodule ArbiterCli.Cmd.Prime do
     IO.puts("  (unavailable: #{msg})")
     IO.puts("")
   end
+
+  # bd-1qjv3j: the board-wide quota/auth hold, account-qualified, so a coordinator
+  # sees which provider account is held before it plans a dispatch.
+  defp emit_quota_hold(reason) when is_binary(reason), do: IO.puts("  held — #{reason}")
+  defp emit_quota_hold(_), do: :ok
 
   # bd-5ef587: a paused provider is dropped from all routing — the coordinator
   # must see who paused it, when and why before it plans any dispatch.
