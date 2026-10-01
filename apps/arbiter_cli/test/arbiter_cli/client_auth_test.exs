@@ -148,6 +148,29 @@ defmodule ArbiterCli.ClientAuthTest do
     end
   end
 
+  describe "an expired ARB_TOKEN" do
+    test "is not retried or replaced by a minted one: its 401 stands" do
+      FakeOperatorSocket.start!(@minted)
+      System.put_env("ARB_TOKEN", "stale-tok")
+      owner = self()
+
+      Req.Test.stub(Process.get(:bd2_stub_name), fn conn ->
+        send(
+          owner,
+          {:auth, conn.method, conn.request_path, Plug.Conn.get_req_header(conn, "authorization")}
+        )
+
+        conn
+        |> Plug.Conn.put_status(401)
+        |> Req.Test.json(%{"error" => %{"message" => "Bearer token expired"}})
+      end)
+
+      assert {:error, %Client.Error{status: 401}} = Client.get("/api/issues")
+      refute_receive {:operator_request, _}
+      assert [{"GET", "/api/issues", ["Bearer stale-tok"]}] = auths()
+    end
+  end
+
   describe "a remote ARB_HOST" do
     test "never mints over this machine's socket" do
       FakeOperatorSocket.start!(@minted)

@@ -125,23 +125,31 @@ defmodule ArbiterCli.Client do
 
   defp request(method, path, opts) do
     with {:ok, token} <- request_token() do
-      case do_request(method, path, token, opts) do
-        # A minted token outlived its TTL in a long-running invocation: drop
-        # it, mint a fresh one, and retry this one request once.
-        {:error, %Error{status: 401, message: "Bearer token expired"}} when token != nil ->
-          if minted_token() == token do
-            forget_minted_token()
-
-            with {:ok, fresh} <- request_token(), do: do_request(method, path, fresh, opts)
-          else
-            do_request(method, path, token, opts)
-          end
-
-        result ->
-          result
-      end
+      method
+      |> do_request(path, token, opts)
+      |> retry_if_minted_expired(token, method, path, opts)
     end
   end
+
+  # A minted token outlived its TTL in a long-running invocation: drop it,
+  # mint a fresh one, and retry this one request once. The caller's own
+  # expired `ARB_TOKEN` is theirs to replace; its 401 stands.
+  defp retry_if_minted_expired(
+         {:error, %Error{status: 401, message: "Bearer token expired"}} = expired,
+         token,
+         method,
+         path,
+         opts
+       ) do
+    if token != nil and minted_token() == token do
+      forget_minted_token()
+      with {:ok, fresh} <- request_token(), do: do_request(method, path, fresh, opts)
+    else
+      expired
+    end
+  end
+
+  defp retry_if_minted_expired(result, _token, _method, _path, _opts), do: result
 
   # The token a request carries: the caller's own (`resolve_token/0`), or —
   # with none, against this machine's server — one minted over the operator
