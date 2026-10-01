@@ -153,10 +153,13 @@ defmodule Arbiter.Worker.ReviewGateArbTokenTest do
         nil
       end
 
-    # Monitor the ReviewGate first if it exists
+    # Monitor and stop the ReviewGate first if it exists.
+    # We must stop it before the worker so its child processes (reviewer/implementer)
+    # receive the stop signal and can clean up.
     refs =
       if review_gate_pid && Process.alive?(review_gate_pid) do
         ref = Process.monitor(review_gate_pid)
+        GenServer.stop(review_gate_pid, :normal)
         [ref | refs]
       else
         refs
@@ -186,9 +189,8 @@ defmodule Arbiter.Worker.ReviewGateArbTokenTest do
     remaining_ms = max(0, deadline - System.monotonic_time(:millisecond))
 
     if remaining_ms <= 0 do
-      # Timeout: log which processes are still alive but continue anyway
-      # (don't fail the test, just proceed with best-effort cleanup)
-      :ok
+      # Timeout: processes did not terminate. This is a real failure, not silent cleanup.
+      raise "Timed out waiting for processes to terminate: #{inspect(refs)}"
     else
       receive do
         {:DOWN, ref, :process, _pid, _reason} ->
@@ -201,9 +203,24 @@ defmodule Arbiter.Worker.ReviewGateArbTokenTest do
     end
   end
 
-  defp retry_rm_rf(path) do
-    # After processes have been awaited in on_exit hooks, rm_rf should not
-    # race with writers. If removal fails, it's a real error, not just slow cleanup.
-    File.rm_rf(path)
+  defp retry_rm_rf(path, attempt \\ 1, max_attempts \\ 10) do
+    # After processes have been awaited in on_exit hooks, rm_rf should succeed.
+    # Retry with backoff in case of transient lock contention, but raise on final failure.
+    result = File.rm_rf(path)
+
+    case result do
+      {:ok, _files} ->
+        :ok
+
+      _ ->
+        if attempt < max_attempts do
+          # Exponential backoff: 50ms, 100ms, 200ms, 400ms, 800ms...
+          backoff_ms = 50 * Integer.pow(2, attempt - 1)
+          Process.sleep(backoff_ms)
+          retry_rm_rf(path, attempt + 1, max_attempts)
+        else
+          raise "Failed to remove #{path} after #{max_attempts} attempts: #{inspect(result)}"
+        end
+    end
   end
 end
