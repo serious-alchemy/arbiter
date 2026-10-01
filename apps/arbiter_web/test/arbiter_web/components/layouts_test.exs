@@ -344,15 +344,19 @@ defmodule ArbiterWeb.LayoutsTest do
       sha = Arbiter.Version.git_sha()
       expected_title = "Arbiter v#{version} (#{sha})"
 
-      # Check the wordmark (visible on sm and up)
-      wordmark_spans = doc |> LazyHTML.query(~s(span[aria-label="Arbiter"]))
-      assert Enum.count(wordmark_spans) >= 1
+      # Get all brandmark spans within the status bar
+      brandmark_spans = doc |> LazyHTML.query(~s(#app-status-bar span[aria-label="Arbiter"]))
+      assert Enum.count(brandmark_spans) == 2,
+             "Expected exactly 2 brandmark spans, got #{Enum.count(brandmark_spans)}"
 
-      # Verify at least one brandmark span has the title
-      titles = wordmark_spans |> Enum.map(&(LazyHTML.attribute(&1, "title") || []))
+      # Verify both spans have the correct title
+      Enum.each(brandmark_spans, fn span ->
+        span_class = LazyHTML.attribute(span, "class") || []
+        span_title = LazyHTML.attribute(span, "title") || []
 
-      assert Enum.any?(titles, &(expected_title in &1)),
-             "Expected title '#{expected_title}' not found in any brandmark span. Got: #{inspect(titles)}"
+        assert expected_title in span_title,
+               "Expected title '#{expected_title}' in span with class #{inspect(span_class)}, got: #{inspect(span_title)}"
+      end)
     end
   end
 
