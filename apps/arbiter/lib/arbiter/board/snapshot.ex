@@ -437,6 +437,11 @@ defmodule Arbiter.Board.Snapshot do
     }
   end
 
+  @doc "The install-wide worker ceiling with no `Arbiter.Settings` override: app env, else the hardcoded default."
+  @spec default_system_max_concurrent() :: pos_integer()
+  def default_system_max_concurrent,
+    do: Application.get_env(:arbiter, :conductor_system_max_concurrent, @default_system_max)
+
   @doc """
   The install-wide worker ceiling — the runtime `Arbiter.Settings` override,
   else app env, else #{@default_system_max}. (The `conductor_` prefix on the

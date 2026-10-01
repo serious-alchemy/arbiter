@@ -1,0 +1,58 @@
+defmodule ArbiterWeb.Api.InstallationConfigController do
+  @moduledoc """
+  REST access to the install-wide runtime settings — the REST twin of the
+  `installation_config_get` / `installation_config_set` MCP tools and of
+  `arb settings`. Key list, validation and storage all live in
+  `Arbiter.Settings.Registry`, so the three surfaces cannot drift.
+
+  Routes:
+
+    * `GET /api/installation/config` — every key as `{key, type, description,
+      allowed, value, override, overridden, default}`; `?key=` narrows to one.
+      `value` is what is in force, `override` the raw persisted value
+      (`null` = none; for the list keys `[]` is a real value, distinct from
+      `null`), `default` what applies with no override.
+    * `PATCH /api/installation/config` — body `{"key": ..., "value": ...}`;
+      `"value": null` clears the override. An invalid value is a 422 and
+      nothing is written.
+
+  Both routes are coordinator-tier only (`ArbiterWeb.ApiPolicy`): the MCP set
+  tool is coordinator-only, and `/api/server/*` and `/api/scheduler/*` read
+  the same way, so REST is no weaker. Workers still read through the MCP tool.
+  """
+
+  use ArbiterWeb, :controller
+
+  alias Arbiter.Settings.Registry
+
+  action_fallback(ArbiterWeb.Api.FallbackController)
+
+  def show(conn, %{"key" => key}) do
+    case Registry.describe(key) do
+      nil -> {:error, :not_found}
+      item -> json(conn, %{data: item})
+    end
+  end
+
+  def show(conn, _params), do: json(conn, %{data: Registry.all()})
+
+  def update(conn, %{"key" => key} = params) when is_binary(key) do
+    with true <-
+           Map.has_key?(params, "value") || {:invalid, "value is required (use null to clear)"},
+         {:ok, _} <- Registry.put(key, Map.get(params, "value")) do
+      json(conn, %{data: Registry.describe(key)})
+    else
+      {:invalid, message} -> invalid(conn, message)
+      {:error, {:invalid, message}} -> invalid(conn, message)
+    end
+  end
+
+  def update(conn, _params), do: invalid(conn, "key is required")
+
+  # Same message the MCP tool returns as `{:invalid, message}`.
+  defp invalid(conn, message) do
+    conn
+    |> put_status(:unprocessable_entity)
+    |> json(%{error: %{type: "validation_error", message: message, details: %{}}})
+  end
+end
