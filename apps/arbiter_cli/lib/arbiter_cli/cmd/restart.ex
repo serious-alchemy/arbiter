@@ -101,11 +101,13 @@ defmodule ArbiterCli.Cmd.Restart do
     was_running = Doctor.reachable?()
 
     actions =
-      if systemd_managed?() do
-        [restart_via_systemd()]
-      else
-        port = api_port()
-        [stop_phoenix(port), Start.start_phoenix(root)]
+      case systemd_state() do
+        :managed ->
+          [restart_via_systemd()]
+
+        :unmanaged ->
+          port = api_port()
+          [stop_phoenix(port), Start.start_phoenix(root)]
       end
 
     case Start.wait_until_green(Start.attempts_for(timeout_ms)) do
@@ -114,16 +116,94 @@ defmodule ArbiterCli.Cmd.Restart do
     end
   end
 
-  # Returns true when the arbiter.service systemd user unit is present (active
-  # or not). Uses `systemctl --user cat` as a probe — exit 0 means the unit
-  # file is known to systemd regardless of its current state.
-  defp systemd_managed? do
+  # bd-3t973v: the non-systemd path SIGTERMs whatever listens on the API port,
+  # so reaching it must mean "systemd is positively not in charge" — never
+  # "systemd could not be asked". A worker shell has no XDG_RUNTIME_DIR / D-Bus,
+  # `systemctl --user cat` failed there, and the old `rescue _ -> false` read
+  # that as "no unit" and went on to kill the live release BEAM.
+  #
+  #   * `:managed`   — `systemctl --user cat` exit 0: the unit exists.
+  #   * `:unmanaged` — systemctl says the unit does not exist (or systemctl is
+  #     not installed at all) AND no `arbiter.service` file is on disk.
+  #   * anything else (bus unreachable, odd exit, unexpected error, or a unit
+  #     file on disk that systemctl denies) aborts via `Output.die/2`.
+  #
+  # An unstubbed-runner guard error from `run_cmd/3` is deliberately NOT
+  # rescued here: under test it must surface, not read as "not managed".
+  defp systemd_state do
+    case probe_systemd() do
+      :managed ->
+        :managed
+
+      :not_found ->
+        refuse_if_unit_file_on_disk!()
+        :unmanaged
+
+      {:unreachable, why} ->
+        Output.die(
+          "could not reach systemd to find out whether arbiter.service is installed (#{why})",
+          "Refusing to fall back to signalling whatever listens on the API port: if " <>
+            "arbiter.service manages the server, that kills the live release.\n" <>
+            "Run `arb restart` from a normal login shell (XDG_RUNTIME_DIR / D-Bus set), " <>
+            "or `systemctl --user restart arbiter.service` directly."
+        )
+    end
+  end
+
+  defp probe_systemd do
     case run_cmd("systemctl", ["--user", "cat", "arbiter.service"], stderr_to_stdout: true) do
-      {_out, 0} -> true
-      _ -> false
+      {_out, 0} ->
+        :managed
+
+      {out, code} ->
+        if Regex.match?(~r/No files found|could not be found|not-found/i, out) do
+          :not_found
+        else
+          {:unreachable, "systemctl exited #{code}: #{String.trim(out)}"}
+        end
     end
   rescue
-    _ -> false
+    e in ErlangError ->
+      # systemctl is not installed (macOS, minimal container): there is no
+      # systemd to be in charge. Anything else is "could not ask".
+      if e.original == :enoent,
+        do: :not_found,
+        else: {:unreachable, "could not run systemctl: #{inspect(e.original)}"}
+  end
+
+  defp refuse_if_unit_file_on_disk! do
+    case Enum.find(unit_dirs(), &File.exists?(Path.join(&1, "arbiter.service"))) do
+      nil ->
+        :ok
+
+      dir ->
+        Output.die(
+          "#{Path.join(dir, "arbiter.service")} exists, but systemctl does not manage it from here",
+          "Refusing to signal whatever listens on the API port: the unit owns the server. " <>
+            "Use `systemctl --user restart arbiter.service` from a login shell."
+        )
+    end
+  end
+
+  # Where `arb install-service` (and packages) put the unit. The
+  # `:bd2_unit_dirs` seam lets tests point at a scratch dir.
+  defp unit_dirs do
+    case Process.get(:bd2_unit_dirs) do
+      dirs when is_list(dirs) ->
+        dirs
+
+      _ ->
+        config_home =
+          System.get_env("XDG_CONFIG_HOME") || Path.join(System.user_home!(), ".config")
+
+        [
+          Path.join(config_home, "systemd/user"),
+          "/etc/systemd/user",
+          "/etc/systemd/system",
+          "/usr/lib/systemd/user",
+          "/usr/lib/systemd/system"
+        ]
+    end
   end
 
   # Delegate the full stop+start cycle to systemd. Returns an action tuple.
@@ -159,6 +239,7 @@ defmodule ArbiterCli.Cmd.Restart do
         {:phoenix_stop, :not_running, nil}
 
       pids ->
+        verify_dev_servers!(port, pids)
         Start.log_text("Stopping Phoenix on port #{port} (SIGTERM to #{Enum.join(pids, ", ")})…")
         signal(pids, "TERM")
 
@@ -176,6 +257,7 @@ defmodule ArbiterCli.Cmd.Restart do
   # pids may already be gone) and SIGKILL whatever remains.
   defp escalate(port, original_pids) do
     remaining = listeners(port)
+    verify_dev_servers!(port, remaining)
     Start.log_text("Phoenix did not exit cleanly; escalating to SIGKILL…")
     if remaining != [], do: signal(remaining, "KILL")
 
@@ -188,6 +270,87 @@ defmodule ArbiterCli.Cmd.Restart do
           "could not free port #{port}; a process is still listening",
           "Find and stop it manually (e.g. `lsof -ti tcp:#{port}` then `kill`)."
         )
+    end
+  end
+
+  # bd-3t973v: a port number is not an identity. Before any signal, prove every
+  # pid is a dev `mix phx.server` (its cmdline carries a `phx.server` argument)
+  # and not a release BEAM. Fails closed: an unreadable cmdline, an unrelated
+  # process, or ANY non-dev pid in the set aborts before anything is signalled.
+  defp verify_dev_servers!(_port, []), do: :ok
+
+  defp verify_dev_servers!(port, pids) do
+    verdicts = Enum.map(pids, &{&1, classify_pid(&1)})
+
+    case Enum.reject(verdicts, fn {_pid, v} -> v == :dev_server end) do
+      [] ->
+        :ok
+
+      refused ->
+        detail =
+          Enum.map_join(refused, "\n", fn {pid, v} -> "  pid #{pid}: #{describe_verdict(v)}" end)
+
+        Output.die(
+          "refusing to signal what listens on port #{port}: cannot prove it is a dev `mix phx.server`",
+          detail <>
+            "\nA release (`bin/arbiter`) is restarted with `systemctl --user restart arbiter.service` " <>
+            "or `arb release deploy`, never by signalling it. Nothing was signalled."
+        )
+    end
+  end
+
+  @doc false
+  # Pure classifier over a cmdline argv, exposed for tests.
+  @spec classify_argv([String.t()]) :: :dev_server | :release | :unknown
+  def classify_argv(argv) do
+    cond do
+      release_argv?(argv) -> :release
+      "phx.server" in argv -> :dev_server
+      true -> :unknown
+    end
+  end
+
+  # What a release BEAM looks like in /proc/<pid>/cmdline: launched through
+  # `bin/arbiter`, or a `beam.smp` booted from `releases/<vsn>/start` with
+  # embedded mode / a release `sys` config (see the real argv in
+  # `restart_test.exs`). A system Erlang's `erts-*/bin/beam.smp` alone is NOT
+  # a release marker — a dev `mix phx.server` runs on one.
+  defp release_argv?(argv) do
+    Enum.any?(argv, fn arg ->
+      Path.basename(arg) == "arbiter" and Path.basename(Path.dirname(arg)) == "bin"
+    end) or
+      Enum.any?(argv, &Regex.match?(~r{/releases/[^/]+/(start|start_clean|sys|vm\.args)$}, &1)) or
+      embedded_mode?(argv)
+  end
+
+  defp embedded_mode?(argv) do
+    argv |> Enum.chunk_every(2, 1, :discard) |> Enum.any?(&(&1 == ["-mode", "embedded"]))
+  end
+
+  defp classify_pid(pid) do
+    case proc_cmdline(pid) do
+      {:ok, argv} -> classify_argv(argv)
+      {:error, reason} -> {:unreadable, reason}
+    end
+  end
+
+  defp describe_verdict(:release), do: "a release BEAM (bin/arbiter / releases/<vsn>)"
+  defp describe_verdict(:unknown), do: "not a `mix phx.server` process"
+  defp describe_verdict({:unreadable, r}), do: "cmdline unreadable (#{inspect(r)})"
+
+  # /proc/<pid>/cmdline is NUL-separated argv. The `:bd2_proc_cmdline` seam
+  # lets tests supply fake pids' argv.
+  defp proc_cmdline(pid) do
+    case Process.get(:bd2_proc_cmdline) do
+      fun when is_function(fun, 1) ->
+        fun.(pid)
+
+      _ ->
+        case File.read("/proc/#{pid}/cmdline") do
+          {:ok, ""} -> {:error, :empty}
+          {:ok, raw} -> {:ok, String.split(raw, <<0>>, trim: true)}
+          {:error, _} = err -> err
+        end
     end
   end
 

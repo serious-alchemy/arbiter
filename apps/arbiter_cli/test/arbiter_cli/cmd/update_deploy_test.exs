@@ -73,7 +73,7 @@ defmodule ArbiterCli.Cmd.UpdateDeployTest do
         # ---- reused restart lifecycle ----
         # Simulate no systemd service installed — restart falls back to sh.
         {"systemctl", ["--user", "cat", "arbiter.service"]} ->
-          {"", 1}
+          {"No files found for arbiter.service.\n", 1}
 
         {"lsof", _} ->
           if Process.get(:terminated), do: {"", 1}, else: {"4242\n", 0}
@@ -318,7 +318,7 @@ defmodule ArbiterCli.Cmd.UpdateDeployTest do
             {~s({"migrations_applied":0,"status":"ok"}), 0}
 
           {"systemctl", ["--user", "cat", "arbiter.service"]} ->
-            {"", 1}
+            {"No files found for arbiter.service.\n", 1}
 
           {"lsof", _} ->
             if Process.get(:terminated), do: {"", 1}, else: {"7\n", 0}

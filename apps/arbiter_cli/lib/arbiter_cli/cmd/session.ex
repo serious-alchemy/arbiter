@@ -26,6 +26,7 @@ defmodule ArbiterCli.Cmd.Session do
   """
 
   alias Arbiter.Worker.ReleaseEnv
+  alias ArbiterCli.Cmd.Start
   alias ArbiterCli.Output
 
   @unit_prefix "arb-session-"
@@ -54,7 +55,7 @@ defmodule ArbiterCli.Cmd.Session do
   # ---- list -----------------------------------------------------------------
 
   defp list(_args, mode) do
-    case System.cmd(
+    case Start.run_cmd(
            "systemctl",
            ["--user", "list-units", @unit_prefix <> "*", "--no-legend", "--plain"],
            stderr_to_stdout: true
