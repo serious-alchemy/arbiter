@@ -274,6 +274,25 @@ defmodule Arbiter.Agents.Gemini do
   # 84% of a Gemini 5h window on one D1. So: launch, end the turn, resume on
   # the message. The version is named in the text so the next agy upgrade that
   # changes this is visibly out of date rather than silently wrong.
+  # bd-buefg4: bd-2zjtca (agy D1, 6648 s / 3.19M tokens) read one 355-line file
+  # in full 50 times, ~15 back to back with no edit between — every full
+  # `view_file` re-adds the whole file to context. `Gemini.RereadDetector`
+  # watches for it; this is the prompt-side half.
+  @doc "The agy-only file-reading rule rendered in the work prompt."
+  @spec file_reading_instruction() :: String.t()
+  def file_reading_instruction do
+    """
+    *** READING FILES: every full `view_file` re-adds the whole file to your
+    context and costs tokens and time on every later turn.
+      * Do NOT re-read a file you have already read unless you have edited it
+        since, or you need a different line range. Trust what you saw.
+      * Once you know where you are working, `view_file` a line range
+        (`StartLine`/`EndLine`), not the whole file.
+      * Search first: `grep`/`grep_search` for the symbol or text, then read
+        only the lines around the hit.
+    """
+  end
+
   @impl true
   def async_tool_instruction do
     async_tool_instruction(

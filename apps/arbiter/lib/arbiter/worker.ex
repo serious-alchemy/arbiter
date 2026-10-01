@@ -3011,6 +3011,14 @@ defmodule Arbiter.Worker do
           # bd-7wymls: the full denied line, so the notes-gate escalation can
           # show what was actually run and whether it was a bootstrap command.
           |> maybe_put(:denied_command_line, Map.get(session, :denied_command_line))
+          # bd-buefg4: how many times the agy repeated-full-read detector fired.
+          |> maybe_put(
+            :reread_alerts,
+            case Arbiter.Worker.ClaudeSession.reread_alerts(session) do
+              0 -> nil
+              n -> n
+            end
+          )
           # bd-1eb6fc: task ids from an agy `manage_task status` check whose
           # last-known result was RUNNING — read by `on_claude_done/1` to note
           # (not block) an `arb done` that fired while one was outstanding.

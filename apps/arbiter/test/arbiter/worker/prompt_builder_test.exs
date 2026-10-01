@@ -657,6 +657,33 @@ defmodule Arbiter.Worker.PromptBuilderTest do
     end
   end
 
+  describe "agy file-reading rule (bd-buefg4)" do
+    test "the gemini work prompt tells agy not to re-read, to use line ranges and to search first" do
+      prompt =
+        PromptBuilder.prompt_for_task(task(%{}),
+          worktree_path: "/tmp/wt-gemini",
+          adapter: Arbiter.Agents.Gemini
+        )
+
+      assert prompt =~ "READING FILES"
+      assert prompt =~ "Do NOT re-read a file"
+      assert prompt =~ "StartLine"
+      assert prompt =~ "Search first"
+      # still ahead of the completion protocol
+      assert :binary.match(prompt, "READING FILES") <
+               :binary.match(prompt, "When you are completely done")
+    end
+
+    test "the claude work prompt does not carry it" do
+      for adapter <- [Arbiter.Agents.Claude, Arbiter.Agents.Codex] do
+        prompt =
+          PromptBuilder.prompt_for_task(task(%{}), worktree_path: "/tmp/wt", adapter: adapter)
+
+        refute prompt =~ "READING FILES"
+      end
+    end
+  end
+
   describe "adapter-aware async tools prompt (bd-937r5u)" do
     test "gemini worker prompt contains no Claude tools and never instructs polling" do
       work_prompt =
