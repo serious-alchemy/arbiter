@@ -353,11 +353,13 @@ defmodule ArbiterCli.Cmd.Init do
 
   # Mint a long-lived coordinator-tier scope token for the MCP config.
   # Returns the token string on success, or a placeholder on failure (server
-  # unreachable at init time). The operator can re-run `arb init --force` once
-  # the server is up to replace the placeholder with a real token.
+  # unreachable at init time, or the operator socket refused: `arb init` run
+  # from inside a worker or session, bd-8381tk). The operator can re-run
+  # `arb init --force` from their own shell once the server is up to replace
+  # the placeholder with a real token.
   defp mint_coordinator_token do
     # 30-day TTL — same as the CLI default for coordinator tokens.
-    case Client.post("/api/mcp/tokens", %{"ttl" => 2_592_000}) do
+    case ArbiterCli.Cmd.Mcp.mint_token(%{"ttl" => 2_592_000}) do
       {:ok, %{"token" => token}} -> token
       _ -> "REPLACE_WITH_COORDINATOR_TOKEN"
     end

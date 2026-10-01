@@ -258,9 +258,107 @@ defmodule Arbiter.Worker.JailTest do
       masks = Jail.mask_paths()
 
       assert Enum.all?(masks, &File.dir?/1)
-      assert Enum.all?(masks, &(&1 in ["/run/user/#{uid}", "/run/dbus", "/run/systemd/resolve"]))
+
+      assert Enum.all?(
+               masks,
+               &(&1 in [
+                   "/run/user/#{uid}",
+                   "/run/dbus",
+                   "/run/systemd/resolve",
+                   Arbiter.MCP.OperatorProof.socket_dir()
+                 ])
+             )
+
       argv = Jail.argv(%{bwrap: "bwrap", worktree: "/w"}, ["true"])
       assert masked(argv) -- ["/tmp", "/dev/shm"] == masks
+    end
+
+    test "the operator socket's directory is masked when nothing above it is (bd-8381tk)" do
+      dir = Path.join(System.tmp_dir!(), "jail-opsock-#{System.pid()}")
+      File.mkdir_p!(dir)
+      old = System.get_env("ARB_OPERATOR_SOCKET")
+      System.put_env("ARB_OPERATOR_SOCKET", Path.join(dir, "operator.sock"))
+
+      on_exit(fn ->
+        if old,
+          do: System.put_env("ARB_OPERATOR_SOCKET", old),
+          else: System.delete_env("ARB_OPERATOR_SOCKET")
+
+        File.rm_rf!(dir)
+      end)
+
+      assert dir in Jail.mask_paths()
+    end
+
+    test "a path under another mask is not masked twice (bd-8381tk)" do
+      {:ok, %{uid: uid}} = File.stat("/proc/self")
+      runtime = "/run/user/#{uid}"
+      old = System.get_env("ARB_OPERATOR_SOCKET")
+
+      on_exit(fn ->
+        if old,
+          do: System.put_env("ARB_OPERATOR_SOCKET", old),
+          else: System.delete_env("ARB_OPERATOR_SOCKET")
+      end)
+
+      if File.dir?(runtime) do
+        # the socket dir itself need not exist: its parent's tmpfs hides it
+        System.put_env("ARB_OPERATOR_SOCKET", Path.join([runtime, "arbiter", "operator.sock"]))
+        masks = Jail.mask_paths()
+        assert runtime in masks
+        refute Enum.any?(masks, &String.starts_with?(&1, runtime <> "/"))
+      end
+    end
+
+    test "the server's secret files are hidden behind /dev/null (bd-8381tk)" do
+      secret = "/h/.arbiter/arbiter.env"
+
+      argv =
+        Jail.argv(
+          %{
+            bwrap: "bwrap",
+            worktree: "/w",
+            mask_paths: [],
+            writable_paths: ["/h/.arbiter"],
+            secret_files: [secret]
+          },
+          ["true"]
+        )
+
+      assert {"/dev/null", secret} in flag_pairs(argv, "--ro-bind")
+      # after every writable bind, so no writable_paths entry can re-open it
+      assert Enum.find_index(argv, &(&1 == secret)) >
+               Enum.find_index(argv, &(&1 == "/h/.arbiter"))
+    end
+
+    test "secret_files/0 names the server env file and the release cookie that exist" do
+      dir = Path.join(System.tmp_dir!(), "jail-secrets-#{System.pid()}")
+      File.mkdir_p!(Path.join(dir, "releases"))
+      File.write!(Path.join(dir, "arbiter.env"), "SECRET_KEY_BASE=x\n")
+      File.write!(Path.join([dir, "releases", "COOKIE"]), "cookie")
+      old_dir = Application.fetch_env(:arbiter, :data_dir)
+      old_root = System.get_env("RELEASE_ROOT")
+      Application.put_env(:arbiter, :data_dir, dir)
+      System.put_env("RELEASE_ROOT", dir)
+
+      on_exit(fn ->
+        case old_dir do
+          {:ok, v} -> Application.put_env(:arbiter, :data_dir, v)
+          :error -> Application.delete_env(:arbiter, :data_dir)
+        end
+
+        if old_root,
+          do: System.put_env("RELEASE_ROOT", old_root),
+          else: System.delete_env("RELEASE_ROOT")
+
+        File.rm_rf!(dir)
+      end)
+
+      assert Enum.sort(Jail.secret_files()) ==
+               Enum.sort([Path.join(dir, "arbiter.env"), Path.join([dir, "releases", "COOKIE"])])
+
+      File.rm!(Path.join(dir, "arbiter.env"))
+      assert Jail.secret_files() == [Path.join([dir, "releases", "COOKIE"])]
     end
 
     test "masking /run/systemd/resolve re-binds the plain resolv.conf files read-only" do

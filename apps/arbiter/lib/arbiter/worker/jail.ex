@@ -323,6 +323,7 @@ defmodule Arbiter.Worker.Jail do
       if(Map.get(spec, :worktree_readonly, false), do: ro_bind(worktree), else: bind(worktree)),
       if(home, do: bind(home) ++ ["--setenv", "HOME", home], else: []),
       git_args(Map.get(spec, :git), worktree),
+      secret_args(spec),
       Enum.flat_map(Map.get(spec, :env, []), fn {k, v} -> ["--setenv", k, v] end),
       ["--unshare-pid", "--die-with-parent", "--new-session", "--chdir", worktree, "--"],
       command
@@ -337,6 +338,13 @@ defmodule Arbiter.Worker.Jail do
   all of them to the jailed process, and `systemd-run --user` over the bus
   runs an unjailed command on the host (writes and network).
 
+  Also masked: the operator socket's directory
+  (`Arbiter.MCP.OperatorProof.socket_dir/0`, bd-8381tk). Its default home is
+  under `/run/user/<uid>`, which is already covered. Its fallback
+  (`~/.arbiter/run`) or an `ARB_OPERATOR_SOCKET` override is not, and a Unix
+  socket on a read-only bind is still connectable. A path under another mask
+  is dropped, because the parent's tmpfs already hides it.
+
   Only paths that exist on the host are listed: bwrap cannot create a mount
   point under the read-only root, and a path that is absent is no vector.
   `spec.mask_paths` overrides the detection (tests).
@@ -348,12 +356,56 @@ defmodule Arbiter.Worker.Jail do
       System.get_env("XDG_RUNTIME_DIR"),
       bus_dir(),
       "/run/dbus",
-      "/run/systemd/resolve"
+      "/run/systemd/resolve",
+      Arbiter.MCP.OperatorProof.socket_dir()
     ]
     |> Enum.filter(&(is_binary(&1) and Path.type(&1) == :absolute and File.dir?(&1)))
     |> Enum.map(&Path.expand/1)
     |> Enum.reject(&(&1 in ["/", "/tmp", "/run", "/dev/shm"]))
     |> Enum.uniq()
+    |> drop_nested()
+  end
+
+  defp drop_nested(paths) do
+    Enum.reject(paths, fn p ->
+      Enum.any?(paths, &(&1 != p and String.starts_with?(p, &1 <> "/")))
+    end)
+  end
+
+  @doc """
+  Files holding the server's own secrets, which the jail replaces with
+  `/dev/null` (bd-8381tk). The jail doesn't restrict reads otherwise, and
+  either file lets a worker skip the operator proof entirely:
+
+    * `<data_dir>/arbiter.env`, the release's `EnvironmentFile`. It carries
+      `SECRET_KEY_BASE`, the MCP token signing key, so a worker that reads it
+      can sign its own coordinator token.
+    * `$RELEASE_ROOT/releases/COOKIE`, the Erlang distribution cookie. With
+      it, a worker can `bin/arbiter rpc` straight into the server.
+
+  Only files that exist are listed. `spec.secret_files` overrides the
+  detection (tests).
+  """
+  @spec secret_files() :: [String.t()]
+  def secret_files do
+    data_dir = Application.get_env(:arbiter, :data_dir, Path.expand("~/.arbiter"))
+
+    release_cookie =
+      case System.get_env("RELEASE_ROOT") do
+        root when is_binary(root) and root != "" -> Path.join([root, "releases", "COOKIE"])
+        _ -> nil
+      end
+
+    [Path.join(data_dir, "arbiter.env"), release_cookie]
+    |> Enum.filter(&(is_binary(&1) and File.regular?(&1)))
+    |> Enum.map(&Path.expand/1)
+    |> Enum.uniq()
+  end
+
+  # Last of the binds, so no writable path, HOME or git bind can re-open one.
+  defp secret_args(spec) do
+    (Map.get(spec, :secret_files) || secret_files())
+    |> Enum.flat_map(&["--ro-bind", "/dev/null", &1])
   end
 
   # Directory holding the session bus socket named by the environment, when

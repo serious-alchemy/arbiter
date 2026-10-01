@@ -29,6 +29,14 @@ defmodule Arbiter.Sessions.Naming do
   @tmux_session "coord"
   @pipe_suffix ".out"
 
+  @doc """
+  The prefix every session scope unit's name starts with. Also how
+  `Arbiter.MCP.OperatorProof` recognizes a session's processes in their
+  cgroup path (bd-8381tk).
+  """
+  @spec unit_prefix() :: String.t()
+  def unit_prefix, do: @unit_prefix
+
   @doc "The `--unit=` argument for `systemd-run`, without the `.scope` suffix."
   @spec unit_arg(String.t()) :: String.t()
   def unit_arg(id) when is_binary(id), do: @unit_prefix <> id
