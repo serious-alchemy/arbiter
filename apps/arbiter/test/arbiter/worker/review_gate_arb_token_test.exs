@@ -93,6 +93,9 @@ defmodule Arbiter.Worker.ReviewGateArbTokenTest do
       # workers to terminate before removing tmp, so they don't race with rm_rf.
       refs = collect_and_stop_processes(pid)
       wait_for_processes(refs)
+      # All processes have exited; the external commands they ran are done.
+      # rm_rf should now succeed without races.
+      File.rm_rf(tmp)
     end)
 
     :ok = Worker.advance(pid, :claude)
@@ -135,14 +138,49 @@ defmodule Arbiter.Worker.ReviewGateArbTokenTest do
     # Collect monitors for all processes that need to stop.
     refs = []
 
-    # Try to get the ReviewGate pid from the worker's state before it dies.
+    # Monitor the main worker first to avoid a race: if we check Process.alive?
+    # and then call GenServer.stop between them, stop will fail with :noproc.
+    # Instead, monitor first, then stop, then the monitor will catch any exit.
+    worker_ref = Process.monitor(worker_pid)
+    refs = [worker_ref | refs]
+
+    # Try to get the ReviewGate pid from the worker's state.
     # The worker spawns a ReviewGate when review is required.
     review_gate_pid =
-      if Process.alive?(worker_pid) do
+      try do
+        case Worker.state(worker_pid) do
+          %{meta: %{review_gate_pid: pid}} when is_pid(pid) -> pid
+          _ -> nil
+        end
+      rescue
+        _ -> nil
+      catch
+        _, _ -> nil
+      end
+
+    # Monitor and stop the ReviewGate if it exists.
+    refs =
+      if is_pid(review_gate_pid) do
+        gate_ref = Process.monitor(review_gate_pid)
+        # Stop the gate gracefully. If it's already dead, the monitor will catch it.
+        catch_exit(fn -> GenServer.stop(review_gate_pid, :normal) end)
+        [gate_ref | refs]
+      else
+        refs
+      end
+
+    # Try to extract and monitor the reviewer process from ReviewGate state.
+    reviewer_ref =
+      if is_pid(review_gate_pid) do
         try do
-          case Worker.state(worker_pid) do
-            %{meta: %{review_gate_pid: pid}} when is_pid(pid) -> pid
-            _ -> nil
+          case :sys.get_state(review_gate_pid) do
+            %{reviewer_pid: pid} when is_pid(pid) ->
+              ref = Process.monitor(pid)
+              catch_exit(fn -> GenServer.stop(pid, :normal) end)
+              ref
+
+            _ ->
+              nil
           end
         rescue
           _ -> nil
@@ -153,29 +191,23 @@ defmodule Arbiter.Worker.ReviewGateArbTokenTest do
         nil
       end
 
-    # Monitor and stop the ReviewGate first if it exists.
-    # We must stop it before the worker so its child processes (reviewer/implementer)
-    # receive the stop signal and can clean up.
-    refs =
-      if review_gate_pid && Process.alive?(review_gate_pid) do
-        ref = Process.monitor(review_gate_pid)
-        GenServer.stop(review_gate_pid, :normal)
-        [ref | refs]
-      else
-        refs
-      end
+    refs = if reviewer_ref, do: [reviewer_ref | refs], else: refs
 
-    # Stop the main worker if it's still alive
-    refs =
-      if Process.alive?(worker_pid) do
-        ref = Process.monitor(worker_pid)
-        GenServer.stop(worker_pid, :normal)
-        [ref | refs]
-      else
-        refs
-      end
+    # Stop the main worker gracefully if still alive.
+    # The monitor will catch the exit regardless.
+    catch_exit(fn -> GenServer.stop(worker_pid, :normal) end)
 
     refs
+  end
+
+  defp catch_exit(fun) do
+    try do
+      fun.()
+    rescue
+      _ -> :ok
+    catch
+      :exit, _ -> :ok
+    end
   end
 
   defp wait_for_processes(refs, timeout_ms \\ 30_000) do
@@ -203,24 +235,4 @@ defmodule Arbiter.Worker.ReviewGateArbTokenTest do
     end
   end
 
-  defp retry_rm_rf(path, attempt \\ 1, max_attempts \\ 10) do
-    # After processes have been awaited in on_exit hooks, rm_rf should succeed.
-    # Retry with backoff in case of transient lock contention, but raise on final failure.
-    result = File.rm_rf(path)
-
-    case result do
-      {:ok, _files} ->
-        :ok
-
-      _ ->
-        if attempt < max_attempts do
-          # Exponential backoff: 50ms, 100ms, 200ms, 400ms, 800ms...
-          backoff_ms = 50 * Integer.pow(2, attempt - 1)
-          Process.sleep(backoff_ms)
-          retry_rm_rf(path, attempt + 1, max_attempts)
-        else
-          raise "Failed to remove #{path} after #{max_attempts} attempts: #{inspect(result)}"
-        end
-    end
-  end
 end
