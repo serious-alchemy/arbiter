@@ -1093,7 +1093,7 @@ defmodule ArbiterWeb.BoardLiveTest do
 
       # Seven columns need the room: the board-columns container switches from
       # a horizontal scroller to a seven-track grid at 2xl.
-      assert html =~ "2xl:grid 2xl:grid-cols-7"
+      assert html =~ "2xl:grid 2xl:grid-cols-[repeat(7,minmax(16rem,1fr))]"
 
       # Each column must have 2xl:w-auto so grid tracks stretch to fill width
       assert html =~ "2xl:w-auto"
