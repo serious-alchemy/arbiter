@@ -264,7 +264,8 @@ defmodule ArbiterWeb.QuotaTopbarTest do
       assert has_element?(view, "#quota-chip.h-\\[36px\\]")
       assert has_element?(view, "#appshell-live")
       assert has_element?(view, "#coordinator-inbox-trigger")
-      assert has_element?(view, "#theme-toggle")
+      refute has_element?(view, "#app-status-bar #theme-toggle")
+      assert has_element?(view, "#nav-rail #theme-toggle")
     end
 
     test "the ring arc is utilisation; claude and antigravity have the elapsed hairline, codex none",

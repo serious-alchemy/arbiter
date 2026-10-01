@@ -434,6 +434,20 @@ html:not([data-nav-rail="pinned"]) .nav-rail [phx-click="toggle-nav-pin"] > span
     opacity: 0;
   }
 
+  /* The theme control (bd-1wufag): the 80px pill would clip in the 56px
+     column, so the collapsed rail swaps it for the single cycling button.
+     The cycle variant also stays while it holds keyboard focus, because
+     focusing it widens the rail and would otherwise hide the focused node. */
+  html:not([data-nav-rail="pinned"]) .nav-rail:not(:hover):not(:has(:focus-visible)) [data-role="theme-full"],
+  .nav-rail:has([data-role="theme-cycle"] :focus-visible) [data-role="theme-full"] {
+    display: none;
+  }
+
+  html:not([data-nav-rail="pinned"]) .nav-rail:not(:hover):not(:has(:focus-visible)) [data-role="theme-cycle"],
+  .nav-rail:has([data-role="theme-cycle"] :focus-visible) [data-role="theme-cycle"] {
+    display: flex;
+  }
+
   /* The badge rides the icon corner, as in the collapsed component. */
   html:not([data-nav-rail="pinned"]) .nav-rail:not(:hover):not(:has(:focus-visible)) a > [data-role="nav-badge"] {
     position: absolute;

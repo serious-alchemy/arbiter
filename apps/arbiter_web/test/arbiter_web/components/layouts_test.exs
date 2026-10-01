@@ -149,7 +149,7 @@ defmodule ArbiterWeb.LayoutsTest do
       assert bar |> LazyHTML.text() =~ "arbiter"
       assert bar |> LazyHTML.query("#appshell-live") |> Enum.count() == 1
       assert bar |> LazyHTML.query("#coordinator-inbox-trigger") |> Enum.count() == 1
-      assert bar |> LazyHTML.query("[data-phx-theme]") |> Enum.count() == 3
+      assert bar |> LazyHTML.query("[data-phx-theme], #theme-toggle") |> Enum.count() == 0
       # One ring object per provider in the chip; one 5h + 7d bar pair per
       # provider in its popover (bd-i2gwwn).
       assert bar |> LazyHTML.query("#quota-chip [data-ring-provider]") |> Enum.count() == 2
@@ -311,6 +311,32 @@ defmodule ArbiterWeb.LayoutsTest do
       assert html =~ ~s(data-phx-theme="light")
       assert html =~ ~s(data-phx-theme="dark")
       assert html =~ "phx:set-theme"
+    end
+
+    test "lives in the nav rail footer, not the status bar or a menu item" do
+      html = render_app()
+      doc = LazyHTML.from_fragment(html)
+
+      assert doc |> LazyHTML.query("#app-status-bar #theme-toggle") |> Enum.count() == 0
+
+      assert doc |> LazyHTML.query("#nav-rail nav > div:last-child #theme-toggle") |> Enum.count() ==
+               1
+
+      assert doc |> LazyHTML.query("#nav-rail a #theme-toggle") |> Enum.count() == 0
+    end
+
+    test "carries a collapsed-rail cycling variant that exposes the current mode" do
+      doc = render_app() |> LazyHTML.from_fragment()
+      cycle = LazyHTML.query(doc, "#theme-toggle [data-role=theme-cycle] button[data-phx-theme]")
+
+      assert cycle |> LazyHTML.attribute("data-phx-theme") |> Enum.sort() ==
+               ["dark", "light", "system"]
+
+      labels = LazyHTML.attribute(cycle, "aria-label")
+      assert Enum.all?(labels, &(&1 =~ "Theme:"))
+
+      assert LazyHTML.query(doc, "#theme-toggle [data-role=theme-full] button[data-phx-theme]")
+             |> Enum.count() == 3
     end
 
     test "is restyled onto design tokens, not the old daisyUI classes" do
