@@ -23,7 +23,10 @@ defmodule Arbiter.Accounts.Admission do
   the time its dispatch runs). With no headroom left on the account the
   dispatch is refused with `{:account_at_capacity, info}` — `force: true`
   (`Dispatch`'s `:force_slot`) goes over, and the override is recorded as an
-  `account_cap_override` event. Not admissions, and so never refused here (see
+  `account_cap_override` event. Autopilot plans headroom on the workspace's
+  default provider while this checks the account the ticket routes to, so it
+  can be refused here too; it holds the card briefly and does not page
+  (`Arbiter.Board.Autopilot`). Not admissions, and so never refused here (see
   `Arbiter.Accounts.Concurrency`'s moduledoc for how each still counts):
 
     * resumes and re-dispatches of a ticket already In progress

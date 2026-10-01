@@ -244,6 +244,16 @@ defmodule Arbiter.Board.Autopilot do
   # workspace, naming the fix).
   @dispatch_escalated_errors [:setup_token_missing]
 
+  # Dispatch error shapes that clear on their own and so never page.
+  # `:account_at_capacity` (bd-8suxac): `Arbiter.Accounts.Admission` refused
+  # the card because the provider account *this ticket* routes to is full. The
+  # board plans headroom on the workspace's default provider, so it can see a
+  # free slot the ticket's own account does not have; the refusal lifts the
+  # moment a run on that account ends. Held for `@account_cap_retry_ms` rather
+  # than re-attempted on every reactive pass.
+  @self_clearing_dispatch_errors [:account_at_capacity]
+  @account_cap_retry_ms 15_000
+
   # How many consecutive same-shape failures a non-deterministic error (a
   # quota gate, a network blip) gets before Autopilot escalates it too.
   @dispatch_failure_retry_threshold 3
@@ -941,6 +951,9 @@ defmodule Arbiter.Board.Autopilot do
   defp escalate_dispatch_failure?(shape, _count) when shape in @dispatch_escalated_errors,
     do: false
 
+  defp escalate_dispatch_failure?(shape, _count) when shape in @self_clearing_dispatch_errors,
+    do: false
+
   defp escalate_dispatch_failure?(shape, _count) when shape in @deterministic_dispatch_errors,
     do: true
 
@@ -954,6 +967,11 @@ defmodule Arbiter.Board.Autopilot do
   # Delegates to `Arbiter.Worker.PreflightHold`, the policy shared with
   # `Arbiter.Workflows.DispatchQueue`'s held-intent drain — see that module's
   # doc for why a single policy backs both callers.
+  # bd-8suxac: a full account is held briefly — a slot frees when any run on
+  # it ends, which no reset time predicts.
+  defp preflight_retry_not_before({:account_at_capacity, _info}, _count, now),
+    do: DateTime.add(now, @account_cap_retry_ms, :millisecond)
+
   defp preflight_retry_not_before(reason, count, now),
     do: Arbiter.Worker.PreflightHold.retry_not_before(reason, count, now)
 
