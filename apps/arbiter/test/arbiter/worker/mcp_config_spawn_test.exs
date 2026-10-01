@@ -144,7 +144,7 @@ defmodule Arbiter.Worker.MCPConfigSpawnTest do
     TestSandbox.own!(sandbox, pid)
 
     config_path = Path.join(wt, ".mcp.json")
-    wait_until(fn -> claude_called?(sandbox) end)
+    wait_until(fn -> claude_logged?(sandbox, "--mcp-config #{config_path}") end)
 
     assert File.read!(sandbox.log) =~ "--mcp-config #{config_path}"
     assert_valid_worker_token!(config_path, task.id)
@@ -181,7 +181,7 @@ defmodule Arbiter.Worker.MCPConfigSpawnTest do
     TestSandbox.own!(sandbox, pid)
 
     config_path = Path.join(wt, ".mcp.json")
-    wait_until(fn -> claude_called?(sandbox) end)
+    wait_until(fn -> claude_logged?(sandbox, "--mcp-config #{config_path}") end)
 
     assert File.read!(sandbox.log) =~ "--mcp-config #{config_path}"
     assert_valid_worker_token!(config_path, task.id)
@@ -203,7 +203,7 @@ defmodule Arbiter.Worker.MCPConfigSpawnTest do
     TestSandbox.own!(sandbox, result.worker_pid)
 
     config_path = Path.join(result.worktree_path, ".mcp.json")
-    wait_until(fn -> claude_called?(sandbox) end)
+    wait_until(fn -> claude_logged?(sandbox, "--mcp-config #{config_path}") end)
 
     assert File.read!(sandbox.log) =~ "--mcp-config #{config_path}"
     assert_valid_worker_token!(config_path, task.id)
@@ -232,8 +232,11 @@ defmodule Arbiter.Worker.MCPConfigSpawnTest do
     Enum.each(tokens, &assert_mcp_token!(config_path, &1))
   end
 
-  defp claude_called?(sandbox),
-    do: Enum.any?(TestSandbox.calls(sandbox), &String.starts_with?(&1, "claude "))
+  # Waits for the text the test goes on to assert, not merely for a spawn: the
+  # argv is multi-line and under full-suite load the assertion once read the
+  # log before the `--mcp-config` flag was in it (seen once in `mix precommit`).
+  defp claude_logged?(sandbox, text),
+    do: File.exists?(sandbox.log) and File.read!(sandbox.log) =~ text
 
   defp wait_until(fun, timeout \\ 10_000) do
     deadline = System.monotonic_time(:millisecond) + timeout
