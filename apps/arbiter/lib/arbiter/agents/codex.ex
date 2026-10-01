@@ -88,10 +88,9 @@ defmodule Arbiter.Agents.Codex do
   def default_argv(prompt, opts \\ []) when is_binary(prompt) do
     case resolve_executable() do
       {:ok, codex} ->
-        flags =
-          sandbox_argv(security_policy(opts)) ++ model_flag(opts)
-
-        build_argv(codex, prompt, flags)
+        with {:ok, model_flags} <- model_flag(opts) do
+          build_argv(codex, prompt, sandbox_argv(security_policy(opts)) ++ model_flags)
+        end
 
       {:error, _} = err ->
         err
@@ -440,10 +439,20 @@ defmodule Arbiter.Agents.Codex do
     end
   end
 
+  # Tier-map models are already validated (and substituted) by
+  # `Config.model_for_tier/1`. A model the caller named explicitly is not
+  # silently swapped: one the account provably cannot call fails the dispatch
+  # here, before a doomed spawn.
   defp model_flag(opts) do
     case resolved_model(opts) do
-      nil -> []
-      model when is_binary(model) -> ["-m", model]
+      nil ->
+        {:ok, []}
+
+      model when is_binary(model) ->
+        case Config.validate_model(model) do
+          :ok -> {:ok, ["-m", model]}
+          {:error, why} -> {:error, {:model_unavailable, model, why}}
+        end
     end
   end
 

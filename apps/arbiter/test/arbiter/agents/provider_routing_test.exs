@@ -562,8 +562,8 @@ defmodule Arbiter.Agents.ProviderRoutingTest do
 
   describe "difficulty picks the model within the chosen family" do
     for {difficulty, claude_model, codex_model} <- [
-          {1, "haiku", "gpt-5-codex-mini"},
-          {4, "opus", "gpt-5-codex"}
+          {1, "haiku", "gpt-5.6-luna"},
+          {4, "opus", "gpt-5.6-terra"}
         ] do
       test "D#{difficulty} resolves the tier's model in whichever family wins" do
         ws = workspace!(put_in(@most_quota, ["routing", "policy"], "by_difficulty"))

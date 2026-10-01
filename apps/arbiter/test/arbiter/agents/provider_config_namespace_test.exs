@@ -142,18 +142,17 @@ defmodule Arbiter.Agents.ProviderConfigNamespaceTest do
     end
   end
 
-  describe "free-tier Codex model override" do
-    test "codex-scoped free-tier tier_models override resolves correctly for all tiers" do
-      # Free-tier ChatGPT accounts only have gpt-5.4-mini and gpt-5.5 available.
-      # Premium/plus accounts have gpt-5-codex and gpt-5-codex-mini.
-      # This override allows free-tier workspaces to dispatch to Codex without
-      # requesting unavailable models (bd-2pkwjf).
+  describe "codex-scoped tier_models override" do
+    test "resolves for Codex and leaves Claude/Gemini on their defaults" do
+      # No codex home in test, so the override is not validated here; the
+      # account-level checks are covered by Codex.ModelCatalogTest.
       config = %{
         "codex" => %{
           "tier_models" => %{
             "economy" => "gpt-5.4-mini",
             "standard" => "gpt-5.5",
-            "premium" => "gpt-5.5"
+            "premium" => "gpt-5.5",
+            "flagship" => "gpt-5.5"
           }
         }
       }
@@ -162,10 +161,11 @@ defmodule Arbiter.Agents.ProviderConfigNamespaceTest do
       Claude.Config.put_active(config)
       Gemini.Config.put_active(config)
 
-      # Codex resolves to free-tier models.
+      # Codex sees its scoped override.
       assert Codex.Config.model_for_tier("economy") == "gpt-5.4-mini"
       assert Codex.Config.model_for_tier("standard") == "gpt-5.5"
       assert Codex.Config.model_for_tier("premium") == "gpt-5.5"
+      assert Codex.Config.model_for_tier("flagship") == "gpt-5.5"
 
       # Claude and Gemini are unaffected — they see their own built-in defaults.
       assert Claude.Config.model_for_tier("standard") ==
@@ -174,7 +174,7 @@ defmodule Arbiter.Agents.ProviderConfigNamespaceTest do
       assert Gemini.Config.model_for_tier("standard") ==
                Gemini.Config.default_tier_models()["standard"]
 
-      # Verify that free-tier models do not appear in Claude/Gemini tiers.
+      # The Codex override does not leak into Claude/Gemini tiers.
       refute Claude.Config.model_for_tier("economy") == "gpt-5.4-mini"
       refute Gemini.Config.model_for_tier("economy") == "gpt-5.4-mini"
     end

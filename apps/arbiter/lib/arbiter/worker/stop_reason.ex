@@ -187,6 +187,7 @@ defmodule Arbiter.Worker.StopReason do
           | :missing_worktree
           | :workspace_destroyed
           | :spawn_failed
+          | :model_unavailable
 
   @type t :: %__MODULE__{
           category: category(),
@@ -348,6 +349,16 @@ defmodule Arbiter.Worker.StopReason do
   # status says about the run is not trustworthy.
   @schema_drift_signature ~r/unrecognized[ _]stream[ _]event/i
 
+  # bd-2s755v: the model the CLI was started with does not exist for this
+  # account. Real Codex texts: the 400 "The 'gpt-5.4-mini' model is not
+  # supported when using Codex with a ChatGPT account." and the 404 "The model
+  # `gpt-5.5` does not exist or you do not have access to it". The named
+  # group captures the model id for the summary.
+  @model_unavailable_signature ~r/
+      the[ ]['`"]?(?<a>[\w.:\/-]+)['`"]?[ ]model[ ]is[ ]not[ ]supported[ ]when[ ]using[ ]codex
+    | the[ ]model[ ]['`"]?(?<b>[\w.:\/-]+)['`"]?[ ]does[ ]not[ ]exist[ ]or[ ]you[ ]do[ ]not[ ]have[ ]access
+  /ix
+
   # bd-1xss5z: agy's own fixed wording when its `--print-timeout` fires
   # mid-turn. Matched loosely ("print timeout" ... "returning partial
   # output", tolerating the reported duration in between) rather than the
@@ -460,6 +471,23 @@ defmodule Arbiter.Worker.StopReason do
             "Deterministic for this task's file set — retrying identically will fail the " <>
               "same way. Re-dispatch on a 1M-context model (e.g. claude-sonnet-5[1m]), or " <>
               "narrow reads with grep + bounded offset/limit ranges instead of whole-file reads.",
+          exit_status: exit_status,
+          signal: signal
+        }
+
+      # bd-2s755v: deterministic — every retry sends the same `-m` and gets
+      # the same rejection, before any work. Non-zero exit only: a run that
+      # exited cleanly merely mentioned the text.
+      exit_status != 0 and Regex.match?(@model_unavailable_signature, haystack) ->
+        model = unavailable_model(haystack)
+
+        %__MODULE__{
+          category: :model_unavailable,
+          summary: "the account cannot use model #{model} (rejected before any work)",
+          remediation:
+            "Re-dispatching repeats the rejection. Point the workspace's Codex " <>
+              "`tier_models` (agent.config.codex.tier_models) or the requested --model at a " <>
+              "model this account's ~/.codex/models_cache.json lists and its plan can call.",
           exit_status: exit_status,
           signal: signal
         }
@@ -802,6 +830,7 @@ defmodule Arbiter.Worker.StopReason do
         :missing_worktree -> "no worktree provisioned (nothing to integrate)"
         :workspace_destroyed -> "workspace destroyed mid-run (worktree gone from disk)"
         :spawn_failed -> "spawn failed (dispatch error after worker registration)"
+        :model_unavailable -> "model unavailable for this account"
       end
 
     case reason.exit_status do
@@ -882,6 +911,13 @@ defmodule Arbiter.Worker.StopReason do
   # genuine failure is unaffected (see the "still classifies" tests in
   # `stop_reason_test.exs`).
   @tool_result_prefix "⏴ "
+
+  defp unavailable_model(haystack) do
+    case Regex.named_captures(@model_unavailable_signature, haystack) do
+      %{"a" => a, "b" => b} -> if a == "", do: b, else: a
+      _ -> "(unknown)"
+    end
+  end
 
   defp signature_haystack(output_lines) do
     output_lines

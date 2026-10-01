@@ -79,8 +79,10 @@ defmodule Arbiter.Agents.CodexTest do
     end
 
     test "resolves a :model_tier to a concrete model via the default tier map" do
-      assert Codex.resolved_model(model_tier: "premium") == "gpt-5-codex"
-      assert Codex.resolved_model(model_tier: "economy") == "gpt-5-codex-mini"
+      assert Codex.resolved_model(model_tier: "premium") == "gpt-5.6-terra"
+      assert Codex.resolved_model(model_tier: "standard") == "gpt-5.6-terra"
+      assert Codex.resolved_model(model_tier: "economy") == "gpt-5.6-luna"
+      assert Codex.resolved_model(model_tier: "flagship") == "gpt-5.6-terra"
     end
 
     test "returns nil when nothing is configured (CLI picks its own default)" do
@@ -507,6 +509,32 @@ defmodule Arbiter.Agents.CodexTest do
                "sess-123",
                "continue prompt"
              ]
+    end
+  end
+
+  # Test config points the codex home at a nonexistent dir, so the backend is
+  # :unknown and nothing is validated — see Codex.ModelCatalogTest for that.
+  describe "Config.model_for_tier/1 with no codex home" do
+    setup do
+      on_exit(fn -> Codex.Config.clear() end)
+      :ok
+    end
+
+    test "a tier_models override takes precedence over the built-in defaults" do
+      Codex.Config.put_active(%{
+        "tier_models" => %{"economy" => "custom-mini", "flagship" => "custom-pro"}
+      })
+
+      assert Codex.Config.model_for_tier("economy") == "custom-mini"
+      assert Codex.Config.model_for_tier("flagship") == "custom-pro"
+      assert Codex.Config.model_for_tier("standard") == "gpt-5.6-terra"
+    end
+
+    test "falls back to the built-in defaults" do
+      Codex.Config.put_active(%{})
+
+      assert Codex.Config.model_for_tier("economy") == "gpt-5.6-luna"
+      assert Codex.Config.model_for_tier("flagship") == "gpt-5.6-terra"
     end
   end
 

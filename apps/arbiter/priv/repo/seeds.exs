@@ -24,7 +24,21 @@ case existing do
         name: default_name,
         description: "Default workspace shipped at boot. No external tracker.",
         config: %{
-          "tracker" => %{"type" => "none"}
+          "tracker" => %{"type" => "none"},
+          # Read by Arbiter.Agents.Codex.Config (Codex-scoped, so other
+          # providers in a pool keep their own tier maps).
+          "agent" => %{
+            "config" => %{
+              "codex" => %{
+                "tier_models" => %{
+                  "economy" => "gpt-5.6-luna",
+                  "standard" => "gpt-5.6-terra",
+                  "premium" => "gpt-5.6-terra",
+                  "flagship" => "gpt-5.6-terra"
+                }
+              }
+            }
+          }
         }
       })
 
