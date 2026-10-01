@@ -71,8 +71,16 @@ defmodule Arbiter.Skills.MaterializerTest do
       assert exclude =~ ".agents/skills/"
     end
 
-    test "codex (and any other/unknown provider) keeps the .claude/skills default", %{tmp: tmp} do
-      assert {:ok, ["tdd"]} = Materializer.materialize(tmp, [resolved("tdd", "# TDD")], :codex)
+    test "codex writes nothing — it reads no skills dir; skills go inline in the prompt", %{
+      tmp: tmp
+    } do
+      assert {:ok, []} = Materializer.materialize(tmp, [resolved("tdd", "# TDD")], :codex)
+      refute File.exists?(Path.join(tmp, ".claude"))
+      refute File.exists?(Path.join(tmp, ".agents"))
+    end
+
+    test "an unknown provider keeps the .claude/skills default", %{tmp: tmp} do
+      assert {:ok, ["tdd"]} = Materializer.materialize(tmp, [resolved("tdd", "# TDD")], nil)
       assert File.read!(Path.join(tmp, ".claude/skills/tdd/SKILL.md")) == "# TDD"
     end
 
@@ -92,8 +100,7 @@ defmodule Arbiter.Skills.MaterializerTest do
       assert Materializer.skills_dir(:gemini) == Path.join(".agents", "skills")
     end
 
-    test "any other provider (codex, nil, unknown) falls back to .claude/skills" do
-      assert Materializer.skills_dir(:codex) == Path.join(".claude", "skills")
+    test "any other provider (nil, unknown) falls back to .claude/skills" do
       assert Materializer.skills_dir(nil) == Path.join(".claude", "skills")
     end
   end

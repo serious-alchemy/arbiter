@@ -2506,8 +2506,8 @@ defmodule Arbiter.Worker.Dispatch do
             # Resolve the layered effective skill set and materialize ONLY it
             # into the isolated worktree (bd-d5hy7y), under a provider-aware
             # directory resolved the same way as the MCP config write above
-            # (bd-bbbxvp / agy-parity T8): `.claude/skills` for claude/codex,
-            # `.agents/skills` for gemini. Threaded onto opts so the work
+            # (bd-bbbxvp / agy-parity T8): `.claude/skills` for claude,
+            # `.agents/skills` for gemini, nothing for codex (inlined). Threaded onto opts so the work
             # prompt can auto-invoke always-on skills and advertise
             # situational ones (DECISION C). No-op without a worktree (review /
             # task-type dispatch) — skills only ever land in an isolated tree.
@@ -3326,6 +3326,9 @@ defmodule Arbiter.Worker.Dispatch do
   # verified live to discover NOTHING worktree-local in `--print` (headless)
   # mode, including a `.agents/skills/<name>/SKILL.md` planted for that exact
   # probe. So only the non-agy Gemini-family CLI counts as discoverable.
+  # `:codex` reads no skills directory at all (bd-89z02x), so it takes the
+  # inline path too.
+  defp skills_discoverable?(:codex, _opts), do: false
   defp skills_discoverable?(:gemini, opts), do: GeminiMCP.cli_flavour(opts) == :gemini
   defp skills_discoverable?(_provider, _opts), do: true
 
