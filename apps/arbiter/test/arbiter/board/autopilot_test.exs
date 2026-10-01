@@ -207,6 +207,43 @@ defmodule Arbiter.Board.AutopilotTest do
       refute_receive {:escalated, _, _, _}, 50
     end
 
+    # bd-8suxac: the board plans headroom on the workspace's default provider,
+    # but `Admission` checks the account this ticket routes to. A refusal there
+    # clears the moment a run on that account ends — never a `dispatch_stuck`
+    # page, and a short hold rather than a retry on every pass.
+    test "an account-at-capacity refusal holds briefly and never escalates" do
+      test = self()
+      {:ok, clock} = Agent.start_link(fn -> DateTime.utc_now() end)
+
+      info = %{task_id: "bd-1", account: "codex:work", cap: 1, holders: ["bd-9"]}
+
+      pid =
+        start(
+          paused: false,
+          now: fn -> Agent.get(clock, & &1) end,
+          dispatch: fn id ->
+            send(test, {:dispatch_attempt, id})
+            {:error, {:account_at_capacity, info}}
+          end,
+          escalate: fn id, reason, attempts -> send(test, {:escalated, id, reason, attempts}) end
+        )
+
+      assert {:error, {:account_at_capacity, ^info}} = Autopilot.tick(pid)
+      assert_receive {:dispatch_attempt, "bd-1"}
+
+      assert {:held, "bd-1", held_until} = Autopilot.tick(pid)
+      assert DateTime.diff(held_until, Agent.get(clock, & &1), :second) in 1..60
+      refute_receive {:dispatch_attempt, _}, 50
+
+      for _ <- 1..5 do
+        Agent.update(clock, fn now -> DateTime.add(now, 120, :second) end)
+        Autopilot.tick(pid)
+        assert_receive {:dispatch_attempt, "bd-1"}
+      end
+
+      refute_receive {:escalated, _, _, _}, 50
+    end
+
     # A successful dispatch clears whatever failure history the card had, so
     # a later, unrelated failure gets its own fresh escalation rather than
     # being silently swallowed by a stale latch.

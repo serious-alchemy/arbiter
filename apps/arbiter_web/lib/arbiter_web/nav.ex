@@ -89,6 +89,12 @@ defmodule ArbiterWeb.Nav do
         items: [
           %{label: "Usage", href: ~p"/usage", icon: "hero-chart-bar", badge: nil},
           %{
+            label: "Reports",
+            href: ~p"/reports",
+            icon: "hero-chart-bar-square",
+            badge: nil
+          },
+          %{
             label: "Reviews",
             href: ~p"/reviews",
             icon: "hero-clipboard-document-check",

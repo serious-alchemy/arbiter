@@ -62,6 +62,7 @@ defmodule Arbiter.Worker.Dispatch do
   NOT attempted because the user may want to inspect what happened).
   """
 
+  alias Arbiter.Accounts.Admission
   alias Arbiter.Agents
   alias Arbiter.Agents.Claude.CredentialCheck
   alias Arbiter.Agents.Gemini.Config, as: GeminiConfig
@@ -168,7 +169,16 @@ defmodule Arbiter.Worker.Dispatch do
     Drain.track(:dispatch_pending, %{task_id: task_id}, fn -> do_dispatch(task_id, opts) end)
   end
 
+  # bd-8suxac: an account admission (`ensure_account_capacity/2`) reserves its
+  # slot from this process until the dispatch returns — by then the worker,
+  # if one started, is registered and counted in its place.
   defp do_dispatch(task_id, opts) do
+    dispatch_steps(task_id, opts)
+  after
+    Admission.release(task_id)
+  end
+
+  defp dispatch_steps(task_id, opts) do
     opts = normalize_opts(opts)
 
     with {:ok, task} <- load_task(task_id),
@@ -179,6 +189,7 @@ defmodule Arbiter.Worker.Dispatch do
          opts = route_implementer(task, opts),
          :ok <- maybe_pause_gate(task, opts),
          :ok <- maybe_quota_gate(task, opts),
+         :ok <- ensure_account_capacity(task, opts),
          :ok <- ensure_migrations_up_to_date(),
          {:ok, opts} <- maybe_resolve_repo_for_real_work(task, opts),
          :ok <- maybe_preflight(task, opts),
@@ -1492,6 +1503,49 @@ defmodule Arbiter.Worker.Dispatch do
   # with: the `:agent_adapter` test seam, then an explicit `:agent_type`
   # override, then the workspace's routing policy. Falls back to :claude — the
   # historical (Anthropic-only) behaviour — if resolution raises.
+  # bd-8suxac: a fresh admission must find headroom on the provider account it
+  # will run on — the routed account when routing picked one, else the one the
+  # workspace is metered under for the resolved provider. Asked by every
+  # caller, Autopilot included (its plan can be stale by now); `force_slot`
+  # goes over the cap, recorded. See `Arbiter.Accounts.Admission`.
+  defp ensure_account_capacity(%Issue{} = task, opts) do
+    if fresh_admission?(task, opts) do
+      provider = quota_gate_provider(task, load_workspace(task), opts)
+
+      case Admission.admit(task, provider, admission_opts(opts)) do
+        {:ok, _admitted} -> :ok
+        {:error, _} = refused -> refused
+      end
+    else
+      :ok
+    end
+  end
+
+  # Not admissions: a ticket already In progress (a re-dispatch or resume of
+  # work holding its slot — `ResumeSlot`'s rule), a resume, a review, and a
+  # ReviewGate synthetic id.
+  defp fresh_admission?(%Issue{id: id, state: state}, opts) do
+    state != :active and
+      Keyword.get(opts, :resume) != true and
+      Keyword.get(opts, :review) != true and
+      Arbiter.Worker.ReviewGate.base_task_id(id) == id
+  end
+
+  defp admission_opts(opts) do
+    admission = [
+      force: Keyword.get(opts, :force_slot) == true,
+      actor: Keyword.get(opts, :slot_override_actor) || Keyword.get(opts, :dispatched_by)
+    ]
+
+    case Keyword.get(opts, :routing_decision) do
+      %{"account_id" => account_id} when is_binary(account_id) ->
+        Keyword.put(admission, :account, Arbiter.Accounts.Resolver.get(account_id))
+
+      _ ->
+        admission
+    end
+  end
+
   defp quota_gate_provider(%Issue{} = task, workspace, opts) do
     case Keyword.get(opts, :agent_adapter) do
       mod when is_atom(mod) and not is_nil(mod) ->

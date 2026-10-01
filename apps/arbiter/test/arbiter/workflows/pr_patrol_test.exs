@@ -1407,6 +1407,76 @@ defmodule Arbiter.Workflows.PRPatrolTest do
     end
   end
 
+  describe "tick/1 — the provider account is full (bd-8suxac)" do
+    # The 2026-10-01 incident: four follow-ups forced straight out of Backlog
+    # onto a `max_concurrent=2` account that already had two live runs.
+    test "the follow-up is left Ready for Autopilot, not forced over the cap or failed",
+         %{ws: ws} do
+      account =
+        Ash.create!(Arbiter.Accounts.ProviderAccount, %{
+          provider: :claude,
+          slug: "pp-full-#{System.unique_integer([:positive])}",
+          max_concurrent: 1
+        })
+
+      Ash.create!(Arbiter.Accounts.WorkspaceProviderAccount, %{
+        workspace_id: ws.id,
+        provider: :claude,
+        provider_account_id: account.id
+      })
+
+      # Another ticket's admitted dispatch holds the account's one slot.
+      {:ok, holder_issue} = Ash.create(Issue, %{title: "holder", workspace_id: ws.id})
+      test = self()
+
+      holder =
+        spawn(fn ->
+          send(test, {:held, Arbiter.Accounts.Admission.admit(holder_issue, :claude)})
+
+          receive do
+            :release -> :ok
+          end
+        end)
+
+      on_exit(fn -> send(holder, :release) end)
+      assert_receive {:held, {:ok, :admitted}}, 5_000
+      assert Arbiter.Accounts.Concurrency.live_count(account) == 1
+
+      stub(
+        signals_stub(
+          pulls: [pull(77, title: "needs work", html_url: "https://gh/pr/77")],
+          nodes: %{
+            77 =>
+              pr_node(
+                reviews: [%{"state" => "CHANGES_REQUESTED", "author" => %{"login" => "alice"}}]
+              )
+          }
+        )
+      )
+
+      {_pid, name} = start_patrol(ws)
+      :ok = PRPatrol.tick(name)
+
+      [task] = tasks_for_repo()
+      assert task.source_pr == "77"
+      # Not started over the cap...
+      refute is_pid(Worker.whereis(task.id))
+      assert Arbiter.Accounts.Concurrency.live_count(account) == 1
+      # ...and not treated as a failure: it waits in Ready, where Autopilot
+      # admits it once a slot frees.
+      assert task.state == :queued
+
+      assert [] =
+               Arbiter.Messages.Message
+               |> Ash.Query.filter(to_ref == "coordinator" and directive_ref == ^task.id)
+               |> Ash.read!()
+
+      # The next tick does not file a second follow-up for the same PR.
+      :ok = PRPatrol.tick(name)
+      assert [_one] = tasks_for_repo()
+    end
+  end
+
   describe "tick/1 — repeated dispatch failure backs off (bd-49ajyt)" do
     # A persistently-failing follow-up dispatch must escalate ONCE and then
     # back off — not re-file + re-dispatch + re-escalate every single tick

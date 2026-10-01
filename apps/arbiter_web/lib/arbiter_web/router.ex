@@ -88,6 +88,7 @@ defmodule ArbiterWeb.Router do
       live("/", BoardLive)
       live("/audit", AuditLogLive)
       live("/usage", UsageLive)
+      live("/reports", ReportsLive)
       live("/reviews", ReviewIndexLive)
 
       # Entity index pages (list everything, filterable + paged) and their
