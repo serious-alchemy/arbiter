@@ -3221,6 +3221,8 @@ defmodule Arbiter.Worker.Dispatch do
 
       case Codex.check_worker_config(worktree_path,
              env: worker_env,
+             cli_args:
+               Arbiter.Agents.Codex.mcp_argv(arb_token: Keyword.fetch!(write_opts, :scope_token)),
              server_name: Keyword.get(write_opts, :server_name, "arbiter")
            ) do
         :ok ->
