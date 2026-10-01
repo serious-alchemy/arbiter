@@ -405,6 +405,31 @@ defmodule Arbiter.MCP.AgentConfigTest do
       assert exclude_content =~ ".codex/"
     end
 
+    # bd-6mo6be: Codex 0.153.4 reads [mcp_servers.*.http_headers], not [mcp_servers.*.headers].
+    # The old schema is silently ignored, dropping the bearer token and causing 401s on every MCP call.
+    # This test verifies the fix writes the correct key. End-to-end verification requires running
+    # `codex mcp list --json` from the worker context to inspect the loaded config.
+    # Probe verification: echo 'headers="test"' > /tmp/test.toml && codex mcp list --json /tmp/test.toml
+    # returns http_headers: null; change to 'http_headers="test"' and it returns the value.
+    test "write/3 for :codex writes http_headers (not headers) in config.toml", %{repo: repo} do
+      token = Scope.mint_worker(%{id: "bd-6mo6be", workspace_id: "ws-test"}, "shipyard")
+
+      assert :ok =
+               AgentConfig.write(:codex, repo,
+                 mcp_url: "http://127.0.0.1:4848/mcp",
+                 scope_token: token
+               )
+
+      path = Path.join([repo, ".codex", "config.toml"])
+      assert File.exists?(path)
+
+      content = File.read!(path)
+      # Codex 0.153.4 only recognizes http_headers, not headers
+      assert content =~ "[mcp_servers.arbiter.http_headers]"
+      refute content =~ "[mcp_servers.arbiter.headers]"
+      assert content =~ "Bearer "
+    end
+
     test "add_to_git_exclude/2 is idempotent — duplicate entries are not appended", %{repo: repo} do
       AgentConfig.add_to_git_exclude(repo, [".mcp.json"])
       AgentConfig.add_to_git_exclude(repo, [".mcp.json"])

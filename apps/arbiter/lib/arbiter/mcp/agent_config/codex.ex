@@ -75,6 +75,17 @@ defmodule Arbiter.MCP.AgentConfig.Codex do
   This check exists because Codex MCP support has reports of silent connect
   failures — it starts without error but never connects. A `200` here
   confirms the channel is open.
+
+  ## Limitations
+
+  This function tests the MCP endpoint from the coordinator's perspective
+  with the spawn token. It cannot detect whether Codex actually loaded the
+  `http_headers` from the generated `config.toml` — that requires running
+  `codex mcp list --json` from the worker's context to inspect the loaded
+  configuration. See bd-6mo6be for the full context: `headers` (old) vs
+  `http_headers` (current, correct) is silently dropped if written to the
+  wrong key, so end-to-end verification on the worker side is critical
+  for catching config regressions.
   """
   @spec verify_connection(keyword()) :: :ok | {:error, term()}
   def verify_connection(opts) do
