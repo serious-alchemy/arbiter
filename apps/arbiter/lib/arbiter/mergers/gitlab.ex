@@ -631,48 +631,58 @@ defmodule Arbiter.Mergers.Gitlab do
   # ---- Internals: project path resolution --------------------------------
 
   # Resolves a project_id to a valid browser URL path (namespace/project).
-  # If project_id is numeric, fetches the project details via API to get the
-  # path_with_namespace; otherwise returns project_id as-is (already a path).
-  # Caches the resolved path in the process dict to avoid repeated API calls.
+  # A non-numeric project_id is already a path. A numeric one is looked up via
+  # the API (`path_with_namespace`) and the result cached durably in
+  # `:persistent_term`, keyed by host + project_id, so it is shared across
+  # processes. Failures are never cached and never fall back to the numeric id:
+  # `https://<host>/<digits>/-/merge_requests/N` is a 404.
   defp resolve_project_path(cfg) do
-    cache_key = {:gitlab_project_path, cfg.host, cfg.project_id}
+    project_id = to_string(cfg.project_id)
 
-    case Process.get(cache_key) do
+    case Integer.parse(project_id) do
+      {_num, ""} -> resolve_numeric_project_path(cfg, project_id)
+      _ -> {:ok, project_id}
+    end
+  end
+
+  defp resolve_numeric_project_path(cfg, project_id) do
+    cache_key = {:gitlab_project_path, cfg.host, project_id}
+
+    case :persistent_term.get(cache_key, nil) do
       path when is_binary(path) ->
         {:ok, path}
 
       nil ->
-        case resolve_and_cache_project_path(cfg, cache_key) do
-          {:ok, path} -> {:ok, path}
-          :error -> {:ok, cfg.project_id}
+        case fetch_project_path(cfg) do
+          {:ok, path} ->
+            :persistent_term.put(cache_key, path)
+            {:ok, path}
+
+          {:error, reason} ->
+            Logger.warning(
+              "GitLab: could not resolve path_with_namespace for project #{project_id} " <>
+                "on #{cfg.host} (#{inspect(reason)}); not building a numeric-id MR link"
+            )
+
+            :error
         end
     end
   end
 
-  defp resolve_and_cache_project_path(cfg, cache_key) do
-    # Only fetch if project_id is purely numeric
-    case Integer.parse(cfg.project_id) do
-      {_num, ""} ->
-        # project_id is numeric, fetch the path from API
-        try do
-          case request(cfg, :get, "", []) do
-            {:ok, %Req.Response{status: status, body: %{"path_with_namespace" => path}}}
-            when status in 200..299 and is_binary(path) ->
-              Process.put(cache_key, path)
-              {:ok, path}
+  defp fetch_project_path(cfg) do
+    case request(cfg, :get, "", []) do
+      {:ok, %Req.Response{status: status, body: %{"path_with_namespace" => path}}}
+      when status in 200..299 and is_binary(path) and path != "" ->
+        {:ok, path}
 
-            _ ->
-              :error
-          end
-        rescue
-          _ -> :error
-        end
+      {:ok, %Req.Response{status: status}} ->
+        {:error, {:http_status, status}}
 
-      _ ->
-        # project_id is not numeric (already a path), return as-is
-        Process.put(cache_key, cfg.project_id)
-        {:ok, cfg.project_id}
+      other ->
+        {:error, other}
     end
+  rescue
+    e -> {:error, e}
   end
 
   # ---- Internals: ref handling --------------------------------------------

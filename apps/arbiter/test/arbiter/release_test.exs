@@ -22,6 +22,15 @@ defmodule Arbiter.ReleaseTest do
                            )
                            |> Enum.at(1)
 
+  describe "backfill(:gitlab_mr_links)" do
+    test "starts :req so the GitLab path lookup has its Finch pool under bin/arbiter eval" do
+      [_, body] =
+        Regex.run(~r/def backfill\(:gitlab_mr_links, opts\) do(.*?)\n  end/s, @release_source)
+
+      assert body =~ "ensure_all_started(:req)"
+    end
+  end
+
   describe "start_release_repo!/0" do
     test "is a no-op when the repo is already started (as it is under the test sandbox)" do
       assert Release.start_release_repo!() == :ok

@@ -304,7 +304,7 @@ defmodule Arbiter.Worker.PromptBuilder do
     to stop without having printed `arb done`, keep working.
 
     #{work_async_tools_section(adapter)}
-
+    #{file_reading_section(adapter)}\
     When you are completely done, print the line:
 
         arb done
@@ -313,6 +313,13 @@ defmodule Arbiter.Worker.PromptBuilder do
     will mark the task complete when it sees that marker.
     """
   end
+
+  # bd-buefg4: agy-only. Claude's Read tool already tells the model about
+  # offset/limit and its context handling does not exhibit the loop.
+  defp file_reading_section(Arbiter.Agents.Gemini),
+    do: "\n" <> Arbiter.Agents.Gemini.file_reading_instruction() <> "\n"
+
+  defp file_reading_section(_adapter), do: "\n"
 
   # A session whose provider could not be handed the Arbiter MCP server (agy with
   # no isolated `$HOME`, a failed config write — `Dispatch.inject_mcp_config/3`
