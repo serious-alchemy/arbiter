@@ -102,6 +102,31 @@ defmodule Arbiter.Worker.ReviewGate do
   own continuity is the prior implementer↔reviewer thread carried in
   `rereview_prompt/1`.
 
+  ## Conflict-resolution review (bd-954ym8 / #134)
+
+  Main moving under an approved PR forces a rebase or merge, and that head is
+  not a new piece of work to judge. Before paying for a reviewer the gate asks
+  `Arbiter.Reviews.ConflictResolution` what the head adds over a commit the PR
+  already has coverage for, once the target branch's own changes are accounted
+  for:
+
+    * **clean integration** — covered by that approval with a `:mechanical`
+      coverage row and the reviewed-SHA stamp, no round, reported as an APPROVE
+      that names why;
+    * **hand-resolved conflicts only** — a *scoped* round, recorded as
+      `role: :conflict_review`, at the standard tier on a short timeout, shown
+      just the conflicted regions (both sides and the resolution). The reviewer
+      is chosen by the same cross-family routing as any pass, so it differs
+      from the family that resolved. Its APPROVE covers the head like any other;
+      a REQUEST_CHANGES goes through the ordinary revise loop and the fixed head
+      is reviewed in full;
+    * **anything else** (a hunk that is neither the target's nor inside a
+      conflicted region, a fix commit, git unable to say) — the ordinary review.
+
+  `Arbiter.Reviews.ConflictReview` counts all of it (`review_gate_rounds_list`
+  reports the counts); `review_gate.conflict_review: false` turns the path off
+  for a workspace.
+
   ## Verdict protocol
 
   The reviewer emits, on its own line:
