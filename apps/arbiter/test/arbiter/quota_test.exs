@@ -544,6 +544,7 @@ defmodule Arbiter.QuotaTest do
         plan: "plus",
         session_used_percent: 42.0,
         weekly_used_percent: 8.0,
+        weekly_reset_at: DateTime.utc_now() |> DateTime.add(86_400) |> DateTime.truncate(:second),
         captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
       })
 

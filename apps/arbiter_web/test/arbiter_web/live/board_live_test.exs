@@ -982,6 +982,22 @@ defmodule ArbiterWeb.BoardLiveTest do
       assert render_async(view, @async_timeout) =~ "scheduler paused"
     end
 
+    test "pausing asks for confirmation; resuming does not", %{conn: conn} do
+      :ok = Autopilot.resume()
+      {:ok, view, _html} = live_board(conn)
+      render_async(view, @async_timeout)
+
+      assert has_element?(view, "#board-scheduler-toggle[data-confirm]")
+
+      view |> element("#board-scheduler-toggle") |> render_click()
+      render_async(view, @async_timeout)
+
+      refute has_element?(view, "#board-scheduler-toggle[data-confirm]")
+
+      assert [%{paused: true, actor: "operator", surface: "dashboard"} | _] =
+               Arbiter.Settings.scheduler_changes()
+    end
+
     test "scheduler toggle button has cursor-pointer class", %{conn: conn} do
       {:ok, view, _html} = live_board(conn)
 

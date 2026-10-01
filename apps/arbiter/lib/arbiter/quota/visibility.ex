@@ -18,7 +18,7 @@ defmodule Arbiter.Quota.Visibility do
     and `quota_providers_hidden` (`Arbiter.Settings`, settable with the
     `installation_config_set` MCP tool). Both default to unset: auto-detect.
     Off wins over on.
-  * **Hidden** — `Arbiter.Quota.hidden_providers/0` (Codex, pending parity)
+  * **Hidden** — `Arbiter.Quota.hidden_providers/0`
     wins over everything, the override included. Dropping a provider from
     that list is the whole change to start showing it.
 

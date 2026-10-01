@@ -1259,8 +1259,8 @@ defmodule Arbiter.MCP.Tools do
   Persisted, so it survives a server restart. Coordinator only.
   """
   @spec scheduler_pause(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def scheduler_pause(%Scope{} = _scope, _args) do
-    case Arbiter.Board.Autopilot.pause(Arbiter.Board.Autopilot, "mcp") do
+  def scheduler_pause(%Scope{} = scope, _args) do
+    case Arbiter.Board.Autopilot.pause(Arbiter.Board.Autopilot, mcp_actor(scope)) do
       :ok ->
         Logger.info("[scheduler_pause] autopilot paused")
         {:ok, scheduler_status_data()}
@@ -1282,8 +1282,8 @@ defmodule Arbiter.MCP.Tools do
   restart. Coordinator only.
   """
   @spec scheduler_resume(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def scheduler_resume(%Scope{} = _scope, _args) do
-    case Arbiter.Board.Autopilot.resume(Arbiter.Board.Autopilot, "mcp") do
+  def scheduler_resume(%Scope{} = scope, _args) do
+    case Arbiter.Board.Autopilot.resume(Arbiter.Board.Autopilot, mcp_actor(scope)) do
       :ok ->
         Logger.info("[scheduler_resume] autopilot resumed")
         {:ok, scheduler_status_data()}
@@ -1317,6 +1317,8 @@ defmodule Arbiter.MCP.Tools do
     :exit, reason ->
       {:error, {:invalid, "status check failed: process error #{inspect(reason)}"}}
   end
+
+  defp mcp_actor(scope), do: {Arbiter.PaperTrail.actor_label(scope), "mcp"}
 
   # bd-9fgg04: the one drain-state definition, shared with the REST endpoint.
   defp scheduler_status_data do
