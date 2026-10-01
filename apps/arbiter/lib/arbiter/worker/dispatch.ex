@@ -2769,7 +2769,7 @@ defmodule Arbiter.Worker.Dispatch do
             agent_opts =
               agent_opts_from_choice(choice) ++
                 [security: policy, workspace: workspace, worktree_path: worktree_path] ++
-                Keyword.take(opts, [:mcp_config])
+                Keyword.take(opts, [:mcp_config, :arb_token])
 
             tracker_context = fetch_tracker_context(task, workspace)
 
@@ -3066,7 +3066,7 @@ defmodule Arbiter.Worker.Dispatch do
 
       result = Arbiter.MCP.AgentConfig.write(provider, worktree_path, write_opts)
       _ = surface_unsupported_mcp_config(task, provider, result)
-      _ = maybe_verify_codex_mcp_connection(task, provider, result, write_opts)
+      _ = maybe_verify_codex_mcp_connection(task, provider, result, write_opts, worktree_path)
       {provider, result}
     else
       :skipped
@@ -3194,7 +3194,13 @@ defmodule Arbiter.Worker.Dispatch do
   # after a successful write so that failure surfaces as a loud log line
   # immediately, instead of only showing up later as a credential-watchdog
   # false positive that requires live debugging to explain (bd-bi5t54).
-  defp maybe_verify_codex_mcp_connection(%Issue{id: task_id}, :codex, :ok, write_opts) do
+  defp maybe_verify_codex_mcp_connection(
+         %Issue{id: task_id},
+         :codex,
+         :ok,
+         write_opts,
+         worktree_path
+       ) do
     Task.Supervisor.start_child(Arbiter.Worker.MCPVerifySupervisor, fn ->
       require Logger
 
@@ -3209,12 +3215,29 @@ defmodule Arbiter.Worker.Dispatch do
               " — .codex/config.toml was written but the session may never reach Arbiter's MCP server"
           )
       end
+
+      worker_env = [{"ARBITER_MCP_TOKEN", Keyword.fetch!(write_opts, :scope_token)}]
+
+      case Codex.check_worker_config(worktree_path,
+             env: worker_env,
+             server_name: Keyword.get(write_opts, :server_name, "arbiter")
+           ) do
+        :ok ->
+          :ok
+
+        {:error, reason} ->
+          Logger.error(
+            "Arbiter.Worker.Dispatch: Codex worker-side MCP config check failed for task=#{task_id}: " <>
+              inspect(reason)
+          )
+      end
     end)
 
     :ok
   end
 
-  defp maybe_verify_codex_mcp_connection(_task, _provider, _write_result, _write_opts), do: :ok
+  defp maybe_verify_codex_mcp_connection(_task, _provider, _write_result, _write_opts, _wt),
+    do: :ok
 
   # Resolve the layered effective skill set for this dispatch (workspace → repo
   # → per-task, with opt-out and code-awareness — see `Arbiter.Skills.Selection`).
