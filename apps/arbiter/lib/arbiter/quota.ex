@@ -111,14 +111,12 @@ defmodule Arbiter.Quota do
   # Trailing window over which per-provider spend is summed for the cost figure.
   @cost_window_days 30
 
-  # Providers hidden from the status-bar quota chip and `/usage` pending
-  # parity (bd-1nyedk, bd-dcvo3n, bd-bi5t54) — see `ArbiterWeb.LiveHooks`'s
-  # `:quota` moduledoc section for the full story. `Arbiter.Quota.Visibility`
-  # applies it last, over auto-detection and the install-wide override alike,
-  # so showing Codex once it has parity is deleting it from this list.
+  # Providers hidden from the status-bar quota chip and `/usage`. Empty since
+  # all providers with sufficient parity are now shown. `Arbiter.Quota.Visibility`
+  # applies this list last, over auto-detection and the install-wide override alike.
   # `GET /api/quota`, `arb quota` and `quota_get` never read it — they still
   # report every provider, hidden or not.
-  @hidden_providers ["codex"]
+  @hidden_providers []
 
   @doc """
   Quota provider codes hidden from the status bar and `/usage` — see

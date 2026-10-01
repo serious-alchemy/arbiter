@@ -13,12 +13,11 @@ defmodule ArbiterWeb.QuotaTopbarBrowserTest do
   `ConnCase` has no layout engine and doesn't run `JS` commands.
 
   So this boots the real endpoint on a real port, seeds Claude, Antigravity
-  and Codex quotas on a default workspace that runs all three — Codex shown
-  through `with_hidden_providers([])`, since it stays hidden until parity —
-  and drives `scripts/verify_quota_topbar.mjs` against it, then re-runs its
-  fit checks with the override hiding one and then two providers. Skipped, not
-  failed, where there is no Chromium (the script exits `3`) or no
-  esbuild/tailwind binary. Set `ARB_QUOTA_SHOTS=<dir>` to also get PNGs.
+  and Codex quotas on a default workspace that runs all three, and drives
+  `scripts/verify_quota_topbar.mjs` against it, then re-runs its fit checks
+  with the override hiding one and then two providers. Skipped, not failed,
+  where there is no Chromium (the script exits `3`) or no esbuild/tailwind
+  binary. Set `ARB_QUOTA_SHOTS=<dir>` to also get PNGs.
   """
   # async: false — Bandit's connection processes need the shared sandbox
   # connection to read the seeded quotas, and the listener binds a real port.
@@ -45,7 +44,6 @@ defmodule ArbiterWeb.QuotaTopbarBrowserTest do
         config: %{"agent" => %{"type" => ["claude", "gemini", "codex"]}}
       })
 
-    with_hidden_providers([])
     now = DateTime.to_unix(DateTime.utc_now())
 
     {:ok, _} =
@@ -58,10 +56,7 @@ defmodule ArbiterWeb.QuotaTopbarBrowserTest do
 
     antigravity_quota!(ws)
 
-    {:ok, _} =
-      Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.30"}],
-        provider: "codex"
-      )
+    codex_quota!(ws, session_used_percent: 30.0)
 
     case build_assets() do
       :ok ->

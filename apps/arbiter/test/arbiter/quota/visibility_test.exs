@@ -2,8 +2,7 @@ defmodule Arbiter.Quota.VisibilityTest do
   @moduledoc """
   bd-i2gwwn: the one "which providers does this installation use" rule the
   status-bar quota chip and `/usage` both read — auto-detected from provider
-  settings, overridable install-wide, minus the providers hidden pending
-  parity (Codex).
+  settings, overridable install-wide.
   """
   use Arbiter.DataCase, async: false
 
@@ -131,12 +130,12 @@ defmodule Arbiter.Quota.VisibilityTest do
       assert Visibility.providers() == ["antigravity"]
     end
 
-    test "codex stays hidden even when detected or forced on" do
+    test "codex is shown when detected or forced on" do
       workspace!("default", %{"agent" => %{"type" => ["claude", "codex"]}})
       {:ok, _} = Settings.set_quota_providers_shown(["codex"])
 
       assert "codex" in Visibility.detected()
-      refute "codex" in Visibility.providers()
+      assert "codex" in Visibility.providers()
     end
   end
 

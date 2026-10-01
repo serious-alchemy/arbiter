@@ -40,12 +40,6 @@ defmodule ArbiterWeb.LiveHooks do
   renders inline as an error. `{:quota_updated, ...}` broadcasts merge into the
   loaded result, joined once the load has named the workspace.
 
-  **Temporary:** Codex is filtered from the quota list pending a fix: its
-  dispatch is broken (bd-1nyedk, bd-dcvo3n, bd-bi5t54), and showing quota
-  bars for a broken provider implies it's dispatchable when it isn't. Once
-  dispatch is fixed, remove it from `Arbiter.Quota.hidden_providers/0`'s
-  `@hidden_providers` and this comment.
-
   The upstream Gemini CLI (`gemini_cli`) used to be hidden here too
   (bd-5r6cdy); the provider itself is gone now (bd-ac53wz).
 
