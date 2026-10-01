@@ -598,6 +598,56 @@ defmodule Arbiter.Agents.CodexTest do
     end
   end
 
+  describe "plan detection and tier model selection" do
+    setup do
+      on_exit(fn -> Codex.Config.clear() end)
+      :ok
+    end
+
+    test "plan-aware defaults work without quota when plan_type is explicit" do
+      # When plan_type is set in config, plan-aware defaults work immediately
+      # without needing to query quota
+      Codex.Config.put_active(%{"plan_type" => "free"})
+
+      assert Codex.Config.model_for_tier("economy") == "gpt-5.5"
+      assert Codex.Config.model_for_tier("standard") == "gpt-5.5"
+      assert Codex.Config.model_for_tier("premium") == "gpt-5.5"
+      assert Codex.Config.model_for_tier("flagship") == "gpt-5.5"
+    end
+
+    test "tier_models override takes precedence over plan-aware defaults" do
+      # Workspace config overrides should take precedence over any defaults,
+      # allowing backends like Codex+Ollama to provide their own models
+      overrides = %{
+        "tier_models" => %{
+          "economy" => "custom-mini",
+          "standard" => "custom-std",
+          "premium" => "custom-pro",
+          "flagship" => "custom-pro"
+        },
+        "plan_type" => "free"
+      }
+
+      Codex.Config.put_active(overrides)
+
+      assert Codex.Config.model_for_tier("economy") == "custom-mini"
+      assert Codex.Config.model_for_tier("standard") == "custom-std"
+      assert Codex.Config.model_for_tier("premium") == "custom-pro"
+      assert Codex.Config.model_for_tier("flagship") == "custom-pro"
+    end
+
+    test "paid-tier models are default when plan cannot be determined" do
+      # When no plan_type is set and quota is not available,
+      # conservatively default to paid-tier models
+      Codex.Config.put_active(%{})
+
+      assert Codex.Config.model_for_tier("economy") == "gpt-5.6-luna"
+      assert Codex.Config.model_for_tier("standard") == "gpt-5.6-terra"
+      assert Codex.Config.model_for_tier("premium") == "gpt-5.6-terra"
+      assert Codex.Config.model_for_tier("flagship") == "gpt-5.6-terra"
+    end
+  end
+
   defp restore_env(key, nil), do: Application.delete_env(:arbiter, key)
   defp restore_env(key, val), do: Application.put_env(:arbiter, key, val)
 end
