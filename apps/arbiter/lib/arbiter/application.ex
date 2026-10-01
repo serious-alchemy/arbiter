@@ -266,6 +266,12 @@ defmodule Arbiter.Application do
   #     and, on a fresh primary, join each workspace to `<provider>:default`.
   #     Synchronous and after the migrators, so every later child dispatches
   #     against the joins. See Arbiter.Accounts.Enablement and bd-cvvb02.
+  #   * ticket_transitions: replay the paper trail into `ticket_transitions`
+  #     for every ticket whose history predates the live triggers (one indexed
+  #     query once done). Primary-gated, synchronous, never fatal; after the
+  #     migrator that creates the table and before the queues, so no dispatch
+  #     writes a live row mid-replay. See Arbiter.Tasks.TicketTransitionBackfill
+  #     and bd-d8fi92.
   #   * reconcile: sweep orphaned :running worker_runs left behind by a node
   #     that died mid-run. Runs once after Repo + Worker.Registry are online —
   #     but ONLY on the primary instance, so a transient/duplicate boot can't
@@ -308,6 +314,7 @@ defmodule Arbiter.Application do
       Arbiter.Boot.Migrator,
       Arbiter.Boot.ConfigMigrator,
       Arbiter.Boot.ProviderAccounts,
+      Arbiter.Boot.TicketTransitions,
       Arbiter.Boot.Optimize,
       Supervisor.child_spec(
         {Task,

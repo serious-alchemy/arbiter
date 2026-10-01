@@ -126,6 +126,13 @@ defmodule Arbiter.Release do
     * `:attention_spans` → `Arbiter.Tasks.AttentionSpanBackfill.backfill/1`
       (`:apply?`, `:since`) — the one-off `ticket_attention_spans` backfill
       (bd-cq1wsp); idempotent
+    * `:ticket_transitions` → `Arbiter.Tasks.TicketTransitionBackfill.backfill/1`
+      (`:apply?`, `:refined_cutover`, `:state_cutover`, `:cfd_days`) — replays
+      the paper trail into `ticket_transitions` (bd-d8fi92); idempotent. The
+      primary instance also applies it on every boot
+      (`Arbiter.Boot.TicketTransitions`), so by hand it is mostly the dry
+      run's check: mismatches, unmapped values, illegal transitions and the
+      CFD invariant on sample days
     * `:task_statuses` → `Arbiter.Tasks.StatusBackfill.proposals/1` +
       `apply!/1` (`:apply?`, `:branch`, `:repo_path`) — `:repo_path` defaults
       to `File.cwd!()`, which under `bin/arbiter eval` is wherever the
@@ -264,6 +271,52 @@ defmodule Arbiter.Release do
     already present:   #{result.existing}
     #{String.pad_trailing(if(apply?, do: "inserted", else: "would insert") <> ":", 19)}#{if apply?, do: result.inserted, else: result.planned}
     """)
+
+    result
+  end
+
+  def backfill(:ticket_transitions, opts) do
+    start_release_repo!()
+    apply? = Keyword.get(opts, :apply?, false)
+
+    result =
+      opts
+      |> Keyword.take([:apply?, :refined_cutover, :state_cutover, :cfd_days])
+      |> Arbiter.Tasks.TicketTransitionBackfill.backfill()
+
+    IO.puts(banner("ticket transitions", apply?, opts[:hint]))
+
+    IO.puts("""
+
+    tickets:              #{result.tickets}
+    pending:              #{result.pending}
+    versions replayed:    #{result.versions}
+    #{String.pad_trailing(if(apply?, do: "inserted", else: "would insert") <> ":", 22)}#{if apply?, do: result.inserted, else: result.planned}
+    mismatches:           #{length(result.mismatches)}
+    unmapped values:      #{length(result.unmapped)}
+    illegal transitions:  #{length(result.illegal)}
+    raced / failed:       #{result.raced} / #{result.failed}
+    refined cutover:      #{inspect(result.cutovers.refined_cutover)}
+    state cutover:        #{inspect(result.cutovers.state_cutover)}
+    """)
+
+    for m <- Enum.take(result.mismatches, 20),
+        do: IO.puts("  mismatch #{m.ticket_id}: replayed #{m.replayed}, stored #{m.stored}")
+
+    for u <- Enum.take(result.unmapped, 20),
+        do: IO.puts("  unmapped #{u.ticket_id}: #{u.key} #{inspect(u.value)}")
+
+    for t <- Enum.take(result.illegal, 20),
+        do: IO.puts("  illegal  #{t.ticket_id}: #{t.from_state} -> #{t.to_state}")
+
+    unless result.cfd == [] do
+      IO.puts("\nCFD invariant (tickets banded = tickets created):")
+
+      for d <- result.cfd do
+        mark = if d.banded == d.created, do: "ok", else: "MISMATCH"
+        IO.puts("  #{d.day}  #{d.banded} / #{d.created}  #{mark}")
+      end
+    end
 
     result
   end
