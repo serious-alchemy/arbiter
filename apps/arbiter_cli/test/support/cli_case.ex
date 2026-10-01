@@ -41,6 +41,10 @@ defmodule ArbiterCli.CliCase do
           retry: false
         )
 
+        # The distribution check reads the host's sockets, epmd and cookie
+        # files; point it at nothing so doctor verdicts stay hermetic.
+        Process.put(:bd2_distribution_probe, proc_net: [], epmd_port: nil, cookie_paths: [])
+
         # Never the host's real operator socket (bd-8381tk): on the operator's
         # machine that would mint a live coordinator token from a test run.
         # `ArbiterCli.FakeOperatorSocket.start!/1` repoints this.

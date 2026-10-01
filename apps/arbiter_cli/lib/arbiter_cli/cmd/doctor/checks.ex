@@ -6,6 +6,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   """
 
   alias ArbiterCli.{Client, SchedulerState, Workspace}
+  alias ArbiterCli.Cmd.Doctor.Distribution
 
   defmodule Result do
     @moduledoc false
@@ -34,6 +35,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       check_versions(),
       check_migrations(),
       check_bind_address(),
+      Distribution.check(),
       check_restart_safety(),
       check_security_defaults(),
       check_legacy_safe_defaults_key(),

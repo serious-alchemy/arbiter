@@ -51,7 +51,9 @@ defmodule Arbiter.Worker.Jail do
   ## Known, accepted gaps
 
     * The network is shared: `arb`, MCP and `git push` need it.
-    * Reads are not restricted.
+    * Reads are not restricted, except for `secret_files/0` (the server's
+      env file and Erlang distribution cookie), which are shadowed by
+      `/dev/null`.
     * Refs in the common dir are shared, so sibling worktrees' branches can
       still be written (the same as without the jail).
     * `git config --local` fails with `EBUSY` (git renames a lockfile over the
@@ -171,7 +173,9 @@ defmodule Arbiter.Worker.Jail do
           optional(:git) => git() | nil,
           optional(:writable_paths) => [String.t()],
           optional(:env) => [{String.t(), String.t()}],
-          optional(:worktree_readonly) => boolean()
+          optional(:worktree_readonly) => boolean(),
+          optional(:mask_paths) => [String.t()],
+          optional(:secret_files) => [String.t()]
         }
 
   @doc """
@@ -374,17 +378,24 @@ defmodule Arbiter.Worker.Jail do
 
   @doc """
   Files holding the server's own secrets, which the jail replaces with
-  `/dev/null` (bd-8381tk). The jail doesn't restrict reads otherwise, and
-  either file lets a worker skip the operator proof entirely:
+  `/dev/null` (bd-8381tk, bd-51m9ba). The jail doesn't restrict reads
+  otherwise, and each of these lets a worker skip the operator proof
+  entirely:
 
     * `<data_dir>/arbiter.env`, the release's `EnvironmentFile`. It carries
       `SECRET_KEY_BASE`, the MCP token signing key, so a worker that reads it
       can sign its own coordinator token.
-    * `$RELEASE_ROOT/releases/COOKIE`, the Erlang distribution cookie. With
-      it, a worker can `bin/arbiter rpc` straight into the server.
+    * `<data-home>/release.cookie`, the per-install Erlang distribution
+      cookie the release's `env.sh` creates (the data home is the `:data_dir`
+      app env when set, else `ARB_DATA_HOME`, default `~/.arbiter`). The jail
+      shares the host's network, so with the cookie a worker could reach
+      epmd on loopback and `bin/arbiter rpc` straight into the server.
+    * `$RELEASE_ROOT/releases/COOKIE`, the build-time cookie, for a release
+      that predates the per-install one.
 
-  Only files that exist are listed. `spec.secret_files` overrides the
-  detection (tests).
+  Only existing regular files are listed: bwrap cannot create a mount point
+  under the read-only root, and an absent file is no vector.
+  `spec.secret_files` overrides the detection (tests).
   """
   @spec secret_files() :: [String.t()]
   def secret_files do
@@ -398,8 +409,32 @@ defmodule Arbiter.Worker.Jail do
 
     [Path.join(data_dir, "arbiter.env"), release_cookie]
     |> Enum.filter(&(is_binary(&1) and File.regular?(&1)))
+    |> Enum.concat(secret_files(release_data_home()))
     |> Enum.map(&Path.expand/1)
     |> Enum.uniq()
+  end
+
+  @doc """
+  The per-install distribution cookie under `data_home`, when it exists
+  (bd-51m9ba). See `secret_files/0`.
+  """
+  @spec secret_files(String.t() | nil) :: [String.t()]
+  def secret_files(nil), do: []
+
+  def secret_files(data_home) do
+    Enum.filter([Path.join(data_home, "release.cookie")], &File.regular?/1)
+  end
+
+  # Where env.sh keeps the per-install cookie. An explicit `:data_dir` wins
+  # so tests that repoint it stay hermetic.
+  defp release_data_home do
+    case {Application.fetch_env(:arbiter, :data_dir), System.get_env("ARB_DATA_HOME"),
+          System.user_home()} do
+      {{:ok, dir}, _, _} when is_binary(dir) -> Path.expand(dir)
+      {_, dir, _} when is_binary(dir) and dir != "" -> Path.expand(dir)
+      {_, _, home} when is_binary(home) -> Path.join(home, ".arbiter")
+      _ -> nil
+    end
   end
 
   # Last of the binds, so no writable path, HOME or git bind can re-open one.
@@ -1169,8 +1204,9 @@ defmodule Arbiter.Worker.Jail do
   jail argv (bd-7o08mj): none of the host's control sockets may be reachable —
   the user's session bus and `systemd/private`, the system bus,
   systemd-resolved's varlink socket, the ssh-agent / keyring sockets — and
-  `systemd-run --user` (when installed) must fail. `:ok` when everything is
-  hidden; `{:error, {:escape_reachable, [vector]}}` otherwise.
+  `systemd-run --user` (when installed) must fail, and the release's
+  distribution cookie (`secret_files/0`) must read back empty. `:ok` when
+  everything is hidden; `{:error, {:escape_reachable, [vector]}}` otherwise.
   """
   @spec escape_probe() :: :ok | {:error, term()}
   def escape_probe do
@@ -1187,6 +1223,9 @@ defmodule Arbiter.Worker.Jail do
                  /run/dbus/system_bus_socket /run/systemd/resolve/io.systemd.Resolve; do
           [ -e "$p" ] && echo "reachable:$p"
         done
+        for c in "$@"; do
+          [ -s "$c" ] && echo "reachable:$c"
+        done
         if command -v systemd-run >/dev/null 2>&1 &&
            systemd-run --user --wait --collect true >/dev/null 2>&1; then
           echo "reachable:systemd-run --user"
@@ -1195,7 +1234,7 @@ defmodule Arbiter.Worker.Jail do
         """
 
         %{bwrap: bwrap, worktree: scratch}
-        |> argv(["sh", "-c", script])
+        |> argv(["sh", "-c", script, "sh" | secret_files()])
         |> run_bounded()
         |> judge_escape_probe()
       rescue
@@ -1240,7 +1279,8 @@ defmodule Arbiter.Worker.Jail do
           message: "jail escape vector(s) reachable: " <> Enum.join(vectors, ", "),
           fix:
             "The jail argv must mask /run/user/<uid>, /run/dbus and /run/systemd/resolve " <>
-              "(Arbiter.Worker.Jail.mask_paths/0); this build's jail does not."
+              "(Arbiter.Worker.Jail.mask_paths/0) and shadow the release cookie " <>
+              "(Arbiter.Worker.Jail.secret_files/0); this build's jail does not."
         }
 
       {:error, reason} ->
