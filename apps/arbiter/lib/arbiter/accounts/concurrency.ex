@@ -65,9 +65,10 @@ defmodule Arbiter.Accounts.Concurrency do
   review (`Arbiter.Reviews.ExternalReview`), a ReviewPatrol re-review or
   author reply, and the operator's own interactive sessions.
 
-  Also counted: a dispatch **admitted** onto the account whose worker has not
-  registered yet (`Arbiter.Accounts.Admission`, bd-8suxac). Once its worker
-  registers under the task id, the worker is what counts.
+  Also counted: a dispatch **admitted** onto the account whose worker does not
+  count yet (`Arbiter.Accounts.Admission`, bd-8suxac). Once its worker has
+  stamped its dispatch context under the task id (in `Worker.init/1`, after
+  its name registers), the worker is what counts.
 
   ## Who is refused at the cap (bd-8suxac)
 
@@ -90,7 +91,7 @@ defmodule Arbiter.Accounts.Concurrency do
       before the new one registers. Autopilot does not plan while any
       dispatch/resume is pending (`Arbiter.Board.Drain.dispatch_pending?/0`).
     * **A fresh dispatch in flight.** Its admission reserves the slot until
-      its worker has registered, and admissions on one account serialize, so
+      its worker counts in its place, and admissions on one account serialize, so
       a burst of them can take no more than the headroom.
 
   ## Resumes are never refused by the cap
@@ -150,7 +151,7 @@ defmodule Arbiter.Accounts.Concurrency do
 
   @doc """
   The registry keys `live_count/2` counts on `account`: each live worker and
-  each admitted dispatch whose worker has not registered yet
+  each admitted dispatch whose worker does not count yet
   (`Arbiter.Accounts.Admission`). A refusal names them.
   """
   @spec holders(ProviderAccount.t(), keyword()) :: [String.t()]
@@ -292,15 +293,18 @@ defmodule Arbiter.Accounts.Concurrency do
   end
 
   # Everything holding a slot on some account: the live workers, less parked
-  # primaries, plus every admitted dispatch (bd-8suxac) whose worker has not
-  # registered under its task id yet. Once it has, the worker is the one
-  # counted — whether or not it has stamped its dispatch context yet.
+  # primaries, plus every admitted dispatch (bd-8suxac) whose worker does not
+  # count yet. A worker counts only once `Worker.init/1` has stamped its
+  # dispatch context — its name registers before `init/1` runs, and the run-row
+  # insert ahead of the stamp can take a while — so the reservation keeps
+  # counting until then. `Dispatch` releases it after `Worker.start/1` returns,
+  # by which point `init/1` has stamped: the slot is never counted by neither.
   defp occupants do
     dispatches = WorkerRegistry.live_dispatches()
-    registered = MapSet.new(WorkerRegistry.all(), fn {key, _pid} -> key end)
+    counted = MapSet.new(dispatches, & &1.registry_key)
 
     pending =
-      Enum.reject(Admission.pending(), &MapSet.member?(registered, &1.registry_key))
+      Enum.reject(Admission.pending(), &MapSet.member?(counted, &1.registry_key))
 
     without_parked_primaries(dispatches) ++ pending
   end

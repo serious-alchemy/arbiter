@@ -353,6 +353,48 @@ defmodule Arbiter.Worker.DispatchAccountAdmissionTest do
       Enum.each(held, fn {pid, _} -> send(pid, :release) end)
     end
 
+    test "it keeps counting while its worker is registered but has not stamped its context",
+         ctx do
+      %{ws: ws, account: account} = ctx
+      issue = backlog!(ws, "registered, init still running")
+
+      {holder, result} = hold_admission(issue)
+      assert {:ok, :admitted} = result
+      assert Concurrency.live_count(account) == 1
+
+      # A worker's `{:via, Registry, …}` name registers before `Worker.init/1`
+      # runs; its dispatch context is stamped only after the run-row insert.
+      test = self()
+
+      worker =
+        spawn(fn ->
+          {:ok, _} = Registry.register(Arbiter.Worker.Registry, issue.id, nil)
+          send(test, {:registered, self()})
+
+          receive do
+            :stamp ->
+              Arbiter.Worker.Registry.put_dispatch(issue.id, ws.id, "claude")
+              send(test, {:stamped, self()})
+          end
+
+          receive do
+            :stop -> :ok
+          end
+        end)
+
+      assert_receive {:registered, ^worker}, 5_000
+      assert Concurrency.live_count(account) == 1
+      assert Concurrency.headroom(ws.id, :claude) == 1
+
+      send(worker, :stamp)
+      assert_receive {:stamped, ^worker}, 5_000
+      # Stamped: the worker counts, the reservation no longer does.
+      assert Concurrency.live_count(account) == 1
+
+      send(holder, :release)
+      send(worker, :stop)
+    end
+
     test "an admission that has registered its worker counts once, not twice", ctx do
       %{ws: ws, account: account} = ctx
       issue = backlog!(ws, "registered")

@@ -36,15 +36,17 @@ defmodule Arbiter.Accounts.Admission do
 
   ## An admission counts before its worker exists
 
-  `Concurrency.live_count/2` is registry-derived: a worker counts once it has
-  registered. A dispatch between the gate and `Worker.start/1` (resolving a
-  repo, provisioning a worktree) would otherwise be invisible to the next
-  check, and a burst of checks would each see the same free slot. So an
-  admission **reserves**: it registers the task in `#{inspect(__MODULE__)}.Registry`
+  `Concurrency.live_count/2` is registry-derived: a worker counts once
+  `Worker.init/1` has stamped its dispatch context on its registry entry. A
+  dispatch between the gate and that stamp (resolving a repo, provisioning a
+  worktree, the worker's own run-row insert) would otherwise be invisible to
+  the next check, and a burst of checks would each see the same free slot. So
+  an admission **reserves**: it registers the task in `#{inspect(__MODULE__)}.Registry`
   from the dispatching process, and `live_count/2` counts each reservation
-  whose task has no registered worker yet. The reservation dies with that
+  whose task has no context-stamped worker yet. The reservation dies with that
   process, and `Dispatch` releases it when the dispatch returns, by which
-  point the worker (if any) is registered and counted instead.
+  point `Worker.start/1` has returned — `init/1` has stamped — and the worker
+  (if any) is counted instead.
 
   The check and the reservation run under one lock per account
   (`:global.trans/3`, local node only), so concurrent admissions on one
