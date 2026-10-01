@@ -586,6 +586,32 @@ defmodule ArbiterWeb.BoardLiveTest do
     end
   end
 
+  describe "the quota hold reason names the account (bd-1qjv3j)" do
+    test "a Ready card says which account is held, in percentages", %{conn: conn, ws: ws} do
+      issue(ws, "held for quota")
+
+      {:ok, account_id} = Arbiter.Quota.ensure_account_id(ws.id, "claude")
+      now = DateTime.utc_now() |> DateTime.truncate(:second)
+
+      Ash.create!(Arbiter.Quota.AnthropicQuota, %{
+        provider_account_id: account_id,
+        provider: "claude",
+        utilization_5h: 0.1,
+        status_5h: "allowed",
+        reset_5h_at: DateTime.add(now, 3600, :second),
+        utilization_7d: 0.95,
+        status_7d: "allowed",
+        reset_7d_at: DateTime.add(now, 3 * 86_400, :second),
+        captured_at: now
+      })
+
+      slug = Arbiter.Accounts.Resolver.get(account_id).slug
+      {:ok, _view, html} = live_board(conn)
+
+      assert html =~ "held — claude:#{slug} 7d 95% ≥ 90%"
+    end
+  end
+
   describe "the Ready column: return to Backlog" do
     test "a Ready card offers the demote button", %{conn: conn, ws: ws} do
       task = issue(ws, "ready now")

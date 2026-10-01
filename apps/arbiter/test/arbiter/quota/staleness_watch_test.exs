@@ -178,7 +178,8 @@ defmodule Arbiter.Quota.StalenessWatchTest do
       StalenessWatch.check_now(start_watch())
 
       assert [alert] = stale_alerts()
-      assert alert.detail =~ "7d hold: IN FORCE for #{ws.name} (7d quota 0.96 ≥ 0.90)"
+      assert alert.detail =~ "7d hold: IN FORCE for #{ws.name} (claude:sw-"
+      assert alert.detail =~ " 7d 96% ≥ 90%)"
 
       assert alert.detail =~
                "lifts when the 7d window resets at #{DateTime.to_iso8601(reset_7d)}"

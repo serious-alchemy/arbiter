@@ -443,7 +443,7 @@ defmodule Arbiter.Messages.CoordinatorNotifierAlertsTest do
     defp held_7d(info) do
       put_in(info.long_window.hold, %{
         workspaces: ["default"],
-        reason: "7d quota 0.96 ≥ 0.90"
+        reason: "7d quota 96% ≥ 90%"
       })
     end
 
@@ -469,7 +469,7 @@ defmodule Arbiter.Messages.CoordinatorNotifierAlertsTest do
       CoordinatorNotifier.quota_snapshot_stale(%{workspace_id: uniq("ws")}, held_7d(stale_info()))
 
       alert = only_alert(:quota_snapshot_stale)
-      assert alert.detail =~ "7d hold: IN FORCE for default (7d quota 0.96 ≥ 0.90)"
+      assert alert.detail =~ "7d hold: IN FORCE for default (7d quota 96% ≥ 90%)"
       assert alert.detail =~ "lifts when the 7d window resets at 2026-09-20T00:00:00Z (in 2d 23h)"
     end
 

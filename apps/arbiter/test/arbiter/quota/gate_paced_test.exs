@@ -353,7 +353,7 @@ defmodule Arbiter.Quota.GatePacedTest do
   describe "hold_phrase/3" do
     test "long window names the paced line and elapsed" do
       q = long(0.62, 0.55)
-      assert Gate.hold_phrase(q, paced(), now: @now) == "7d quota 0.62 ≥ paced 0.55 (55% elapsed)"
+      assert Gate.hold_phrase(q, paced(), now: @now) == "7d quota 62% ≥ paced 55% (55% elapsed)"
     end
 
     test "primary window says it is ahead of pace" do
@@ -367,7 +367,26 @@ defmodule Arbiter.Quota.GatePacedTest do
       assert Gate.hold_phrase(primary(0.9, 0.5), account(%{}), now: @now) ==
                "quota near exhaustion (90% of window used, ceiling 85%)"
 
-      assert Gate.hold_phrase(long(0.91, 0.5), account(%{}), now: @now) == "7d quota 0.91 ≥ 0.90"
+      assert Gate.hold_phrase(long(0.91, 0.5), account(%{}), now: @now) == "7d quota 91% ≥ 90%"
+    end
+
+    test "an account with a slug is named in every phrase" do
+      acct = %ProviderAccount{
+        provider: :claude,
+        slug: "default",
+        quota_config: %{"threshold_mode" => "paced"}
+      }
+
+      assert Gate.hold_phrase(long(0.62, 0.55), acct, now: @now) ==
+               "claude:default 7d 62% ≥ paced 55% (55% elapsed)"
+
+      assert Gate.hold_phrase(primary(0.4, 0.3), acct, now: @now) ==
+               "claude:default quota ahead of pace (40% of window used, paced ceiling 35%, 30% elapsed)"
+
+      assert Gate.hold_phrase(long(0.62, 0.55), %Workspace{id: "w", config: %{}},
+               now: @now,
+               account: acct
+             ) == "claude:default 7d 62% ≥ paced 55% (55% elapsed)"
     end
   end
 

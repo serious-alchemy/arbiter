@@ -11,7 +11,7 @@ defmodule Arbiter.Quota.Gate.Throttle do
   The hold reason is `Arbiter.Quota.Gate.gating_window/2`'s map — which window
   bound, which signal in it (`:status` / `:utilization` / `:warning`), the
   numbers — plus a `:phrase` carrying the operator-facing wording, so the queue
-  state and the logs say `7d quota 0.91 ≥ 0.90` rather than just "quota"
+  state and the logs say `7d quota 91% ≥ 90%` rather than just "quota"
   (bd-1tuxv8).
 
   Provider-neutral (bd-2mpo3f): the snapshot may be an `AnthropicQuota`,
