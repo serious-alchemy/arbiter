@@ -340,6 +340,25 @@ defmodule Arbiter.Tasks.TicketTransitionBackfillTest do
       assert rows(issue.id) == before
     end
 
+    test "the real paper trail stamps a transition's version after its live row, so the cut is exact",
+         %{ws: ws} do
+      # A ticket from before the triggers (its paper trail, no rows), then a
+      # real promote through Ash once they are live.
+      issue = Ash.create!(Issue, %{title: "t", workspace_id: ws.id, acceptance: "- ok"})
+      Repo.query!("DELETE FROM ticket_transitions WHERE ticket_id = ?", [issue.id])
+      {:ok, _} = Ash.update(issue, %{}, action: :promote_to_ready)
+
+      result = run(apply?: true)
+
+      assert result.pending == 1
+      assert result.mismatches == []
+
+      assert rows(issue.id) == [
+               {nil, :backlog, "create", "backfill"},
+               {:backlog, :queued, "promote", "live"}
+             ]
+    end
+
     test "a ticket that transitioned live before the backfill ran gets only the history before its first live row",
          %{ws: ws} do
       id =
