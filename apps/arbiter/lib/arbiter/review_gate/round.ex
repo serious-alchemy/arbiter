@@ -43,7 +43,13 @@ defmodule Arbiter.ReviewGate.Round do
                           task that went through a fix round reads as two
                           consecutive passes instead of two interleaved
                           round-1..3 sequences.
-    * `role`           — `:review` (a reviewer pass) or `:impl` (an implementer
+    * `role`           — `:review` (a reviewer pass), `:conflict_review` (a scoped,
+                          standard-tier pass over only the hand-resolved conflict
+                          hunks of a head that integrates the target branch into
+                          an approved commit — bd-954ym8; its verdict is APPROVE /
+                          REQUEST_CHANGES like a `:review` row's, but it is kept
+                          apart so the rounds list and cost reports can tell the
+                          cheap pass from a full one) or `:impl` (an implementer
                           revise pass).
     * `verdict`        — `:approve`, `:request_changes` or `:timed_out` for a
                           `:review` row; always nil for `:impl` (implementers
@@ -165,7 +171,7 @@ defmodule Arbiter.ReviewGate.Round do
     domain: Arbiter.ReviewGate,
     data_layer: AshSqlite.DataLayer
 
-  @roles ~w(review impl)a
+  @roles ~w(review impl conflict_review)a
   @verdicts ~w(approve request_changes timed_out)a
   @commit_gates ~w(reprompted escalated_uncommitted escalated_no_changes
                    advanced_non_file_fix escalated_no_changes_after_non_file_fix)a
@@ -248,7 +254,8 @@ defmodule Arbiter.ReviewGate.Round do
       allow_nil? false
       public? true
       constraints one_of: @roles
-      description ":review (reviewer pass) or :impl (implementer revise pass)."
+
+      description ":review (reviewer pass), :impl (implementer revise pass) or :conflict_review (a scoped review of hand-resolved conflict hunks, bd-954ym8)."
     end
 
     attribute :verdict, :atom do

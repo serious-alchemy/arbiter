@@ -5579,6 +5579,45 @@ defmodule Arbiter.MCP.ToolsTest do
   end
 
   describe "review_gate_rounds_list/2 (bd-aqyjuc)" do
+    test "shows a scoped conflict review as its own role and reports the counters (bd-954ym8)",
+         ctx do
+      {:ok, _} =
+        Ash.create(Arbiter.ReviewGate.Round, %{
+          task_id: ctx.task.id,
+          round: 1,
+          role: :conflict_review,
+          verdict: :approve,
+          reviewer_tier: "standard",
+          converged: true
+        })
+
+      :ok =
+        Arbiter.Reviews.ConflictReview.record("auto_cover", %{
+          task_id: ctx.task.id,
+          workspace_id: ctx.ws.id
+        })
+
+      :ok =
+        Arbiter.Reviews.ConflictReview.record("scoped_review", %{
+          task_id: ctx.task.id,
+          workspace_id: ctx.ws.id
+        })
+
+      :ok =
+        Arbiter.Reviews.ConflictReview.record("fallback", %{
+          task_id: ctx.task.id,
+          workspace_id: ctx.ws.id
+        })
+
+      assert {:ok, %{rounds: [round], conflict_review: %{task: counts, fleet: fleet}}} =
+               Tools.review_gate_rounds_list(ctx.coordinator, %{"task_id" => ctx.task.id})
+
+      assert round.role == :conflict_review
+      assert round.reviewer_tier == "standard"
+      assert %{"auto_cover" => 1, "scoped_review" => 1, "fallback" => 1} = counts
+      assert fleet["auto_cover"] >= 1
+    end
+
     test "exposes the reviewer family, implementer family and any same-family fallback (bd-a1ke2c)",
          ctx do
       {:ok, _} =

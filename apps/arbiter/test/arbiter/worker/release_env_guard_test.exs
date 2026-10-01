@@ -112,6 +112,7 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
     "apps/arbiter/lib/arbiter/mergers/direct.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/mergers/gitlab.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/mergers/local_compare.ex" => :pure_tool,
+    "apps/arbiter/lib/arbiter/reviews/conflict_resolution.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/mergers/github/repo_resolver.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/mergers/net_diff.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/reviews/checkout.ex" => :pure_tool,

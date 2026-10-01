@@ -57,6 +57,10 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
      "bd-203cl5: pages when an APPROVE's review-coverage row could not be written " <>
        "(§3.3). It refuses nothing — the approval stands, last_reviewed_sha is " <>
        "stamped and the merge proceeds — and is bounded by the bd-5jr49o breaker"},
+    {Arbiter.Worker.ReviewGate, :record_mechanical_coverage, 2,
+     "bd-954ym8: records the `:mechanical` row a clean integration of the target implies; " <>
+       "its {:error, _} (head moved, no approval row, unrecordable) answers 'cannot cover', " <>
+       "and the head is reviewed in full — it refuses nothing, the opposite of a guard"},
     {Arbiter.Worker.ReviewGate, :coverage_net_diff_id, 1,
      "bd-203cl5: computes net_diff_id for the coverage row; its {:error, _} means " <>
        "'no fingerprint'. bd-aq81qz: a `:no_net_diff` answer is now also consumed by " <>

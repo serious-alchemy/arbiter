@@ -55,6 +55,7 @@ defmodule Arbiter.MCP.Tools do
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.MCP.Scope
   alias Arbiter.ReviewGate.Resolutions
+  alias Arbiter.Reviews.ConflictReview
   alias Arbiter.Tasks.Claim
   alias Arbiter.Tasks.Dependency
   alias Arbiter.Tasks.Issue
@@ -285,6 +286,11 @@ defmodule Arbiter.MCP.Tools do
   Omitting it preserves the original full-history behavior; `total_count`
   always reports how many rounds exist regardless of `limit`.
 
+  bd-954ym8: a scoped review of a hand-resolved merge/rebase conflict is its
+  own `role: "conflict_review"` row, and `conflict_review` counts, for this
+  ticket and fleet-wide, the clean rebases auto-covered with no round, the
+  scoped reviews, and the fallbacks to a full review.
+
   bd-4qjl0q: also returns the coordinator's recorded answer to a gate
   escalation — `resolution` (the latest, or nil) and `resolutions` (all,
   oldest-first) — plus `outcome`: `"converged"`, `"resolved"`,
@@ -321,6 +327,13 @@ defmodule Arbiter.MCP.Tools do
          rounds: rounds,
          count: length(rounds),
          total_count: length(all_rounds),
+         # bd-954ym8: how much of this ticket's re-review the conflict-resolution
+         # path saved — auto-covered clean rebases, scoped reviews of resolved
+         # conflicts, and fallbacks to a full review — beside the fleet totals.
+         conflict_review: %{
+           task: ConflictReview.report(task_id),
+           fleet: ConflictReview.report()
+         },
          outcome: Resolutions.outcome(all_rounds, resolutions),
          resolution: List.last(serialized_resolutions),
          resolutions: serialized_resolutions
