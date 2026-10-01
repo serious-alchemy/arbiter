@@ -91,7 +91,11 @@ defmodule ArbiterWeb.LiveHooksTest do
     end
 
     test "on_mount(:quota) shows codex when available", %{conn: conn} do
-      ws = Ash.create!(Arbiter.Tasks.Workspace, %{name: "default", config: %{"agent" => %{"type" => ["claude", "codex"]}}})
+      ws =
+        Ash.create!(Arbiter.Tasks.Workspace, %{
+          name: "default",
+          config: %{"agent" => %{"type" => ["claude", "codex"]}}
+        })
 
       # Capture a normal provider and codex
       {:ok, _} =
@@ -112,7 +116,11 @@ defmodule ArbiterWeb.LiveHooksTest do
     test "on_mount(:quota) loads all configured providers with their quotas", %{
       conn: conn
     } do
-      ws = Ash.create!(Arbiter.Tasks.Workspace, %{name: "default", config: %{"agent" => %{"type" => ["claude", "codex"]}}})
+      ws =
+        Ash.create!(Arbiter.Tasks.Workspace, %{
+          name: "default",
+          config: %{"agent" => %{"type" => ["claude", "codex"]}}
+        })
 
       {:ok, _} =
         Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.25"}],
