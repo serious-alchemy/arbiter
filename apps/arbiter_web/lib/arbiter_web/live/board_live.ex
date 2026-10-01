@@ -625,8 +625,8 @@ defmodule ArbiterWeb.BoardLive do
   # the operator with a board and a flash, not a dead LiveView.
   defp toggle_scheduler do
     if scheduler_paused?(),
-      do: Autopilot.resume(Autopilot, "dashboard"),
-      else: Autopilot.pause(Autopilot, "dashboard")
+      do: Autopilot.resume(Autopilot, {"operator", "dashboard"}),
+      else: Autopilot.pause(Autopilot, {"operator", "dashboard"})
   rescue
     e -> {:error, e}
   catch
@@ -1007,6 +1007,11 @@ defmodule ArbiterWeb.BoardLive do
                 id="board-scheduler-toggle"
                 type="button"
                 phx-click="toggle_scheduler"
+                data-confirm={
+                  unless @board.paused,
+                    do:
+                      "Pause the scheduler? Ready cards will stop being promoted until it is resumed."
+                }
                 title={
                   if @board.paused,
                     do: "The queue is not draining. Resume to let the scheduler dispatch.",

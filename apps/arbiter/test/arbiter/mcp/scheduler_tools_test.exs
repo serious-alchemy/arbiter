@@ -67,9 +67,26 @@ defmodule Arbiter.MCP.SchedulerToolsTest do
       assert {:ok, data} = Tools.scheduler_pause(ctx.coordinator, %{})
 
       assert data.paused == true
-      assert data.changed_by == "mcp"
+      assert data.changed_by == "coordinator via mcp"
       assert %DateTime{} = data.changed_at
       assert Autopilot.paused?() == true
+    end
+
+    test "audits the pause and notifies the coordinator, naming the actor", ctx do
+      :ok = Autopilot.resume()
+
+      assert {:ok, _} = Tools.scheduler_pause(ctx.coordinator, %{})
+
+      assert [%{paused: true, actor: "coordinator", surface: "mcp"} | _] =
+               Arbiter.Settings.scheduler_changes()
+
+      assert [msg | _] =
+               Arbiter.Messages.Message
+               |> Ash.read!()
+               |> Enum.filter(&(&1.escalation_kind == :scheduler_paused))
+
+      assert msg.subject =~ "coordinator"
+      assert msg.body =~ "mcp"
     end
 
     test "returns current state when already paused", ctx do
@@ -90,7 +107,7 @@ defmodule Arbiter.MCP.SchedulerToolsTest do
       assert {:ok, data} = Tools.scheduler_resume(ctx.coordinator, %{})
 
       assert data.paused == false
-      assert data.changed_by == "mcp"
+      assert data.changed_by == "coordinator via mcp"
       assert %DateTime{} = data.changed_at
       assert Autopilot.paused?() == false
     end
