@@ -2900,24 +2900,19 @@ defmodule Arbiter.Worker.Watchdog do
   # The reason compared and reported is the *effective* one
   # (`effective_park_reason/2`), so a worker's "external" verdict on an
   # already-escalated `:ci_failed` block changes the reason and re-escalates once.
-  defp debounce_escalate_block(state, :blocked_other = raw_reason) do
-    streak = state.blocked_other_streak + 1
-    state = %{state | blocked_other_streak: streak}
-
-    if state.last_block_reason != :blocked_other and streak < state.transient_block_polls do
-      state
-    else
-      do_debounce_escalate_block(state, raw_reason)
-    end
-  end
-
-  defp debounce_escalate_block(state, raw_reason),
-    do: do_debounce_escalate_block(%{state | blocked_other_streak: 0}, raw_reason)
-
-  defp do_debounce_escalate_block(state, raw_reason) do
+  defp debounce_escalate_block(state, raw_reason) do
     reason = effective_park_reason(state, raw_reason)
 
+    # bd-6mkyd1: a first-seen `:blocked_other` is held back until it has been
+    # reported on `transient_block_polls` consecutive polls.
+    streak = if reason == :blocked_other, do: state.blocked_other_streak + 1, else: 0
+    state = %{state | blocked_other_streak: streak}
+
     cond do
+      reason == :blocked_other and state.last_block_reason != :blocked_other and
+          streak < state.transient_block_polls ->
+        state
+
       state.last_block_reason == reason and park_heartbeat_due?(state) ->
         polls = state.poll_count - state.last_block_escalated_poll
 
