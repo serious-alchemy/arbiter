@@ -19,6 +19,8 @@ defmodule Arbiter.MCP.Tools.Workspace do
     credential_watchdog_adapters
     credential_watchdog_interval_ms
     credential_watchdog_recovery_interval_ms
+    quota_providers_shown
+    quota_providers_hidden
   )
 
   # ---- workspace_show -----------------------------------------------------
@@ -194,7 +196,9 @@ defmodule Arbiter.MCP.Tools.Workspace do
       credential_watchdog_adapters: Arbiter.Settings.credential_watchdog_adapters(),
       credential_watchdog_interval_ms: Arbiter.Settings.credential_watchdog_interval_ms(),
       credential_watchdog_recovery_interval_ms:
-        Arbiter.Settings.credential_watchdog_recovery_interval_ms()
+        Arbiter.Settings.credential_watchdog_recovery_interval_ms(),
+      quota_providers_shown: Arbiter.Settings.quota_providers_shown(),
+      quota_providers_hidden: Arbiter.Settings.quota_providers_hidden()
     }
 
     case Tools.fetch_string(args, "key") do
@@ -225,6 +229,11 @@ defmodule Arbiter.MCP.Tools.Workspace do
       probes nothing.
     * `credential_watchdog_interval_ms` / `credential_watchdog_recovery_interval_ms`
       — positive integers.
+    * `quota_providers_shown` / `quota_providers_hidden` — lists of quota
+      provider codes (`claude`, `codex`, `antigravity`) forced onto / off the
+      status bar's quota chip and `/usage` (bd-i2gwwn,
+      `Arbiter.Quota.Visibility`); `null` is auto-detect. Takes effect on the
+      next page load.
 
   The Watchdog keys take effect on its next poll cycle (bd-ajgve2). No restart
   is required for any of them.
@@ -276,6 +285,29 @@ defmodule Arbiter.MCP.Tools.Workspace do
     end
   end
 
+  defp require_install_value(key, args)
+       when key in ~w(quota_providers_shown quota_providers_hidden) do
+    valid = Arbiter.Quota.Visibility.provider_codes()
+
+    invalid =
+      {:invalid, "value must be a list of quota providers (#{Enum.join(valid, ", ")}) or null"}
+
+    case Map.fetch(args, "value") do
+      {:ok, nil} ->
+        {:ok, nil}
+
+      {:ok, value} ->
+        codes = if is_list(value), do: value, else: Tools.unwrap_stringified_json(value, [:list])
+
+        if is_list(codes) and Enum.all?(codes, &(is_binary(&1) and &1 in valid)),
+          do: {:ok, codes},
+          else: {:error, invalid}
+
+      :error ->
+        {:error, {:invalid, "value is required"}}
+    end
+  end
+
   defp require_install_value(_key, args) do
     case Map.fetch(args, "value") do
       {:ok, nil} ->
@@ -313,6 +345,12 @@ defmodule Arbiter.MCP.Tools.Workspace do
 
         "credential_watchdog_recovery_interval_ms" ->
           Arbiter.Settings.set_credential_watchdog_recovery_interval_ms(value)
+
+        "quota_providers_shown" ->
+          Arbiter.Settings.set_quota_providers_shown(value)
+
+        "quota_providers_hidden" ->
+          Arbiter.Settings.set_quota_providers_hidden(value)
       end
 
     case result do

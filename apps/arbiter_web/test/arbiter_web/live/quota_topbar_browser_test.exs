@@ -1,19 +1,24 @@
 defmodule ArbiterWeb.QuotaTopbarBrowserTest do
   @moduledoc """
-  The status bar's quota rows in a real browser at real viewports (bd-gukyy1).
+  The status bar's quota chip in a real browser at real viewports (bd-i2gwwn,
+  was bd-gukyy1's stacked rows).
 
-  `ArbiterWeb.QuotaTopbarTest` proves the markup — a row per provider, two bars
-  each, the chrome still rendered. It cannot show that a second stacked row
-  actually fits inside the 46px status bar, or that the live badge, inbox
-  trigger and theme toggle still fit beside the bars at `lg` without overlap
-  or overflow, or that the provider hues resolve distinctly in both themes.
-  `ConnCase` has no layout engine.
+  `ArbiterWeb.QuotaTopbarTest` proves the markup — a ring object per shown
+  provider, the popover's bars, the ARIA. It cannot show that the 36px chip
+  fits inside the 46px status bar at one height for one, two and three
+  providers, that the wordmark, live badge, inbox trigger and theme toggle
+  still fit beside it at `lg` and `xl` without overlap or overflow, that the
+  ring colours resolve in both themes, or that the popover opens and closes on
+  a click, Enter, a tap, Escape and an outside click and stays in the viewport.
+  `ConnCase` has no layout engine and doesn't run `JS` commands.
 
-  So this boots the real endpoint on a real port, seeds a Claude and an
-  Antigravity quota on the default workspace, and drives
-  `scripts/verify_quota_topbar.mjs` against it. Skipped, not failed, where
-  there is no Chromium (the script exits `3`) or no esbuild/tailwind binary.
-  Set `ARB_QUOTA_SHOTS=<dir>` to also get PNGs of the status bar.
+  So this boots the real endpoint on a real port, seeds Claude, Antigravity
+  and Codex quotas on a default workspace that runs all three — Codex shown
+  through `with_hidden_providers([])`, since it stays hidden until parity —
+  and drives `scripts/verify_quota_topbar.mjs` against it, then re-runs its
+  fit checks with the override hiding one and then two providers. Skipped, not
+  failed, where there is no Chromium (the script exits `3`) or no
+  esbuild/tailwind binary. Set `ARB_QUOTA_SHOTS=<dir>` to also get PNGs.
   """
   # async: false — Bandit's connection processes need the shared sandbox
   # connection to read the seeded quotas, and the listener binds a real port.
@@ -31,22 +36,48 @@ defmodule ArbiterWeb.QuotaTopbarBrowserTest do
 
   @listener_id :quota_topbar_listener
 
-  test "claude and antigravity rows stack inside the status bar and the chrome still fits" do
+  test "the quota chip fits the status bar for 1-3 providers and its popover works" do
     node = System.find_executable("node") || flunk("node is required by the :browser tag")
 
-    ws = Ash.create!(Workspace, %{name: "default"})
+    ws =
+      Ash.create!(Workspace, %{
+        name: "default",
+        config: %{"agent" => %{"type" => ["claude", "gemini", "codex"]}}
+      })
+
+    with_hidden_providers([])
+    now = DateTime.to_unix(DateTime.utc_now())
 
     {:ok, _} =
       Arbiter.Quota.capture(ws.id, [
         {"anthropic-ratelimit-unified-5h-utilization", "0.42"},
-        {"anthropic-ratelimit-unified-7d-utilization", "0.18"}
+        {"anthropic-ratelimit-unified-5h-reset", to_string(now + 9_000)},
+        {"anthropic-ratelimit-unified-7d-utilization", "0.18"},
+        {"anthropic-ratelimit-unified-7d-reset", to_string(now + 302_400)}
       ])
 
     antigravity_quota!(ws)
 
+    {:ok, _} =
+      Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.30"}],
+        provider: "codex"
+      )
+
     case build_assets() do
-      :ok -> drive(node)
-      {:skipped, why} -> IO.puts("\n[skipped] #{why}")
+      :ok ->
+        port = start_listener!()
+        start_patch_ticker!(ws)
+
+        if drive(node, port, ["--expect", "claude,antigravity,codex"]) == :ran do
+          {:ok, _} = Arbiter.Settings.set_quota_providers_hidden(["codex"])
+          drive(node, port, ["--expect", "claude,antigravity", "--full", "0"])
+
+          {:ok, _} = Arbiter.Settings.set_quota_providers_hidden(["antigravity", "codex"])
+          drive(node, port, ["--expect", "claude", "--full", "0"])
+        end
+
+      {:skipped, why} ->
+        IO.puts("\n[skipped] #{why}")
     end
   end
 
@@ -67,9 +98,7 @@ defmodule ArbiterWeb.QuotaTopbarBrowserTest do
     end
   end
 
-  defp drive(node) do
-    port = start_listener!()
-
+  defp drive(node, port, args) do
     shots =
       case System.get_env("ARB_QUOTA_SHOTS") do
         nil -> []
@@ -81,7 +110,7 @@ defmodule ArbiterWeb.QuotaTopbarBrowserTest do
         node,
         # `localhost`, not `127.0.0.1`: Phoenix checks the LiveView socket's
         # Origin against the endpoint's configured host.
-        [@script, "--url", "http://localhost:#{port}", "--seconds", "30"] ++ shots,
+        [@script, "--url", "http://localhost:#{port}", "--seconds", "30"] ++ args ++ shots,
         cd: @root,
         stderr_to_stdout: true
       )
@@ -93,14 +122,44 @@ defmodule ArbiterWeb.QuotaTopbarBrowserTest do
     case status do
       3 ->
         IO.puts("\n[skipped] " <> String.trim(output))
+        :skipped
 
       0 ->
         assert output =~ "RESULT: PASS"
         refute output =~ ": FAIL"
+        :ran
 
       _other ->
         flunk("verify_quota_topbar.mjs failed:\n\n#{output}")
     end
+  end
+
+  # A changing Claude reading broadcast every 150ms, so the page is re-rendered
+  # under the script while it holds the popover open — the claim that the
+  # `JS`-opened popover survives a server patch. Broadcast only, no DB.
+  defp start_patch_ticker!(ws) do
+    [claude] =
+      ws.id
+      |> Arbiter.Quota.list_latest_for_workspace()
+      |> Enum.filter(&(&1.provider == "claude"))
+
+    start_supervised!(
+      {Task,
+       fn ->
+         Stream.iterate(1, &(rem(&1, 60) + 1))
+         |> Enum.each(fn n ->
+           view = %{claude | utilization_5h: n / 100}
+
+           Phoenix.PubSub.broadcast(
+             Arbiter.PubSub,
+             "quota:#{ws.id}",
+             {:quota_updated, ws.id, view}
+           )
+
+           Process.sleep(150)
+         end)
+       end}
+    )
   end
 
   # `port: 0` lets the kernel pick; the bound port is read back off Thousand

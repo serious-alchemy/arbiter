@@ -54,7 +54,9 @@ defmodule Arbiter.Settings.Installation do
     :board_autopilot_paused,
     :board_autopilot_paused_at,
     :board_autopilot_paused_by,
-    :provider_pauses
+    :provider_pauses,
+    :quota_providers_shown,
+    :quota_providers_hidden
   ]
 
   actions do
@@ -132,6 +134,20 @@ defmodule Arbiter.Settings.Installation do
       allow_nil? true
 
       description ~s[Provider / account pauses (bd-5ef587): %{target => %{"reason", "by", "at"}}, target being a provider code ("claude") or "account:<id>". nil = nothing paused.]
+    end
+
+    attribute :quota_providers_shown, {:array, :string} do
+      public? true
+      allow_nil? true
+
+      description "Quota provider codes forced onto the status bar and /usage (bd-i2gwwn); nil = auto-detect."
+    end
+
+    attribute :quota_providers_hidden, {:array, :string} do
+      public? true
+      allow_nil? true
+
+      description "Quota provider codes forced off the status bar and /usage (bd-i2gwwn); wins over shown. nil = auto-detect."
     end
 
     create_timestamp :created_at

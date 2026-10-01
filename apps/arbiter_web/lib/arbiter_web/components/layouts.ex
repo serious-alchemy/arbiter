@@ -87,7 +87,9 @@ defmodule ArbiterWeb.Layouts do
     #
     # It only words the bars, so it is only read when there are bars to draw
     # (bd-adewb4): not on the dead render, whose quota is still loading, and
-    # not on the re-render the loaded quota triggers when there is none.
+    # not on the re-render the loaded quota triggers when there is none — nor
+    # when every shown provider is still a "no data yet" placeholder
+    # (bd-i2gwwn), which has no bar to word.
     # That re-render comes moments after mount, and a LiveView torn down
     # while it is inside this read drops the test suite's one sandbox
     # connection (bd-5scl0c).
@@ -100,7 +102,7 @@ defmodule ArbiterWeb.Layouts do
       assign(
         assigns,
         :quota_on_exhaustion,
-        if(quota_bars?(assigns.quotas),
+        if(quota_readings?(assigns.quotas),
           do: assigns.quota_on_exhaustion || Arbiter.Quota.default_workspace_on_exhaustion(),
           else: assigns.quota_on_exhaustion
         )
@@ -157,23 +159,22 @@ defmodule ArbiterWeb.Layouts do
       </span>
 
       <div class="ml-auto flex flex-none items-center gap-2 sm:gap-4">
-        <%!-- One row per provider, stacked (bd-gukyy1): the label, then its
-              windows side by side — the shape one provider always had,
-              repeated downward so a second provider costs height (the bar
-              has room for two ~12px rows) rather than width the live badge,
-              inbox trigger and theme toggle need at `lg`. --%>
-        <%!-- Loaded off the mount (bd-adewb4): a placeholder the height of
-              one provider row until it lands, an inline notice if it fails. --%>
+        <%!-- The quota chip (bd-i2gwwn): one object per provider the
+              installation uses — its logo inside two concentric rings, the
+              5h window inner and the 7d outer — in a single 36px control
+              whose height doesn't change with the provider count (each
+              provider costs 38px of width, not a row of height). It opens
+              the popover with the full bars. Loaded off the mount
+              (bd-adewb4): a chip-sized placeholder until it lands, an inline
+              notice if it fails. --%>
         <div
           :if={@quotas.loading}
           id="quota-topbar-loading"
           role="status"
           aria-label="Loading quota"
-          class="max-lg:hidden flex items-center gap-2"
+          class="max-sm:hidden flex flex-none items-center gap-[6px] h-[36px] px-[6px] rounded-[var(--radius-field)] border border-solid border-[var(--border-default)]"
         >
-          <span class="min-w-[72px] h-[6px] rounded-[var(--radius-pill)] bg-[var(--border-default)] animate-pulse">
-          </span>
-          <span class="w-[96px] h-[6px] rounded-[var(--radius-pill)] bg-[var(--border-default)] animate-pulse">
+          <span class="size-[32px] rounded-full border-[2.5px] border-solid border-[var(--border-default)] animate-pulse">
           </span>
         </div>
         <button
@@ -182,46 +183,18 @@ defmodule ArbiterWeb.Layouts do
           id="quota-topbar-error"
           phx-click="quota_retry"
           title={"Could not load quota: #{async_error(@quotas.failed)} — click to retry"}
-          class="max-lg:hidden flex items-center gap-1.5 px-2 h-[22px] rounded-[var(--radius-field)] cursor-pointer border border-solid border-[var(--arb-fail-edge)] bg-[var(--arb-fail-wash)] text-[10.5px] font-[family-name:var(--font-mono)] text-[var(--arb-fail-text)] transition-colors duration-150 hover:bg-[var(--surface-chrome)]"
+          class="max-sm:hidden flex items-center gap-1.5 px-2 h-[22px] rounded-[var(--radius-field)] cursor-pointer border border-solid border-[var(--arb-fail-edge)] bg-[var(--arb-fail-wash)] text-[10.5px] font-[family-name:var(--font-mono)] text-[var(--arb-fail-text)] transition-colors duration-150 hover:bg-[var(--surface-chrome)]"
         >
           <ArbiterWeb.CoreComponents.Core.icon
             name="hero-exclamation-triangle-micro"
             class="size-3.5 shrink-0"
           /> quota unavailable
         </button>
-        <div
+        <.quota_chip
           :if={quota_bars?(@quotas)}
-          id="quota-topbar"
-          class="max-lg:hidden grid grid-cols-[auto_auto_auto] items-center gap-x-3 gap-y-[3px]"
-        >
-          <%!-- A subgrid row, so each window column lines up across
-                providers however wide one row's label or note is. --%>
-          <div
-            :for={quota <- @quotas.result}
-            id={"quota-topbar-#{quota.provider}"}
-            class="col-span-3 grid grid-cols-subgrid items-center"
-          >
-            <span class="flex-none min-w-[72px] text-[9.5px] uppercase tracking-[0.08em] leading-none text-[var(--text-label)] font-[family-name:var(--font-mono)]">
-              {quota_provider_label(quota.provider)}
-            </span>
-            <.quota_bar
-              :for={w <- quota_windows(quota)}
-              id={"quota-topbar-#{quota.provider}-#{w.window}"}
-              provider={quota.provider}
-              show_label={false}
-              window={w.window}
-              label={w.label}
-              utilization={w.utilization}
-              reset_at={w.reset_at}
-              overage_status={quota.overage_status}
-              representative_claim={quota.representative_claim}
-              stale_message={quota.message}
-              gate_policy={Map.get(quota, :gate_policy)}
-              label_width={34}
-              on_exhaustion={@quota_on_exhaustion}
-            />
-          </div>
-        </div>
+          quotas={@quotas.result}
+          on_exhaustion={@quota_on_exhaustion}
+        />
         <ArbiterWeb.CoreComponents.Feedback.live_badge id="appshell-live" live={@live} />
         <.coordinator_inbox_trigger inbox={@coordinator_inbox} />
         <.theme_toggle />
@@ -493,6 +466,307 @@ defmodule ArbiterWeb.Layouts do
     """
   end
 
+  # ---- the quota chip (bd-i2gwwn) -------------------------------------------
+  #
+  # Interaction: a disclosure, not a hover card. The chip is a real <button>
+  # (focusable, Enter/Space) carrying `aria-expanded` + `aria-controls`; a
+  # click or tap toggles the popover, and a click/tap anywhere outside the
+  # chip-and-popover (`phx-click-away`) or Escape (`phx-window-keydown`)
+  # closes it. Touch is the same as mouse — a tap is a click and there is no
+  # hover-only content, so nothing needs a second gesture. The commands are
+  # client-side `JS`, so opening costs no round trip, and LiveView keeps what
+  # they set across server patches (a quota broadcast doesn't shut it).
+  #
+  # Anchoring: the popover hangs from the chip's right edge, below the bar —
+  # the right-hand cluster (live badge, inbox, theme toggle) sits beside the
+  # chip in the bar, so a popover under the bar can't cover them — and is
+  # capped at the viewport width minus the bar's padding.
+
+  attr :quotas, :list, required: true
+  attr :on_exhaustion, :any, default: nil
+
+  defp quota_chip(assigns) do
+    ~H"""
+    <div
+      id="quota-topbar"
+      class="relative flex-none max-sm:hidden"
+      phx-click-away={close_quota_popover()}
+      phx-window-keydown={close_quota_popover()}
+      phx-key="Escape"
+    >
+      <button
+        type="button"
+        id="quota-chip"
+        aria-expanded="false"
+        aria-controls="quota-popover"
+        phx-click={toggle_quota_popover()}
+        class="flex items-center gap-[6px] h-[36px] px-[6px] rounded-[var(--radius-field)] cursor-pointer border border-solid border-[var(--border-default)] bg-[var(--surface-chrome)] transition-[background-color,border-color] duration-150 hover:bg-[var(--arb-raised-hover)] hover:border-[var(--border-strong)] aria-expanded:bg-[var(--arb-raised-hover)] aria-expanded:border-[var(--border-strong)] focus-visible:outline-none focus-visible:shadow-[var(--ring-focus)]"
+      >
+        <.quota_ring_object :for={quota <- @quotas} quota={quota} />
+      </button>
+      <div
+        id="quota-popover"
+        role="region"
+        aria-label="Quota by provider"
+        class="hidden absolute right-0 top-[calc(100%+6px)] z-30 w-[360px] max-w-[calc(100vw-24px)] max-h-[calc(100vh-var(--nav-height)-24px)] overflow-y-auto flex flex-col p-[12px] rounded-[var(--radius-panel)] border border-solid border-[var(--border-default)] bg-[var(--surface-chrome)] shadow-[var(--shadow-float)]"
+      >
+        <.quota_popover_entry
+          :for={quota <- @quotas}
+          quota={quota}
+          on_exhaustion={@on_exhaustion}
+        />
+        <p class="m-0 mt-[10px] pt-[8px] border-t border-solid border-[var(--border-default)] text-[10.5px] leading-[1.5] text-[var(--text-secondary)]">
+          Rings: inner 5h, outer 7d. The hairline is elapsed time.
+        </p>
+      </div>
+    </div>
+    """
+  end
+
+  defp toggle_quota_popover do
+    JS.toggle_attribute({"aria-expanded", "true", "false"}, to: "#quota-chip")
+    |> JS.toggle(
+      to: "#quota-popover",
+      in:
+        {"transition ease-out duration-150", "opacity-0 -translate-y-1",
+         "opacity-100 translate-y-0"},
+      out: {"transition ease-in duration-100", "opacity-100", "opacity-0"},
+      time: 150
+    )
+  end
+
+  defp close_quota_popover do
+    JS.set_attribute({"aria-expanded", "false"}, to: "#quota-chip")
+    |> JS.hide(
+      to: "#quota-popover",
+      transition: {"transition ease-in duration-100", "opacity-100", "opacity-0"},
+      time: 100
+    )
+  end
+
+  # One provider: the logo in the middle of an inner 5h and an outer 7d ring,
+  # in a 32px box (2px inside the 36px chip). Strokes are 2.5px with a 1px
+  # gap, leaving a 19.5px hole for the 13px logo. The `title`/`aria-label`
+  # say both windows in words, so the colour is never the only signal.
+  attr :quota, :map, required: true
+
+  defp quota_ring_object(assigns) do
+    rings = quota_rings(assigns.quota)
+    state = quota_object_state(assigns.quota, rings)
+
+    assigns =
+      assign(assigns,
+        rings: rings,
+        state: state,
+        summary: quota_ring_summary(assigns.quota, rings),
+        title: quota_ring_title(assigns.quota, rings)
+      )
+
+    ~H"""
+    <span
+      id={"quota-ring-#{@quota.provider}"}
+      data-ring-provider={@quota.provider}
+      data-ring-state={ring_state_attr(@state)}
+      role="img"
+      aria-label={@summary}
+      title={@title}
+      class={["relative flex-none size-[32px]", @state == :stale && "opacity-60"]}
+    >
+      <svg data-ring-svg viewBox="0 0 32 32" class="absolute inset-0 size-full" aria-hidden="true">
+        <.quota_ring
+          id={"quota-ring-#{@quota.provider}-7d"}
+          position="outer"
+          r={14.5}
+          ring={@rings.outer}
+        />
+        <.quota_ring
+          id={"quota-ring-#{@quota.provider}-5h"}
+          position="inner"
+          r={11.0}
+          ring={@rings.inner}
+        />
+      </svg>
+      <span
+        data-ring-logo
+        class="absolute inset-0 flex items-center justify-center pointer-events-none"
+      >
+        <.provider_icon
+          provider={quota_icon_provider(@quota.provider)}
+          class="size-[13px]"
+          aria-hidden="true"
+        />
+      </span>
+    </span>
+    """
+  end
+
+  attr :id, :string, required: true
+  attr :position, :string, required: true
+  attr :r, :float, required: true
+  attr :ring, :map, required: true
+
+  # The track, the utilisation arc from 12 o'clock clockwise (`pathLength`
+  # 100, so the dash is the percentage), and the elapsed-time hairline across
+  # the stroke. No data draws a dashed track and no arc.
+  defp quota_ring(assigns) do
+    ~H"""
+    <g
+      id={@id}
+      data-ring-window={@position}
+      data-ring-state={ring_state_attr(@ring.state)}
+      data-ring-pct={@ring.pct}
+    >
+      <circle
+        cx="16"
+        cy="16"
+        r={@r}
+        fill="none"
+        stroke-width="2.5"
+        pathLength="100"
+        stroke-dasharray={@ring.state == :no_data && "2 3"}
+        style={
+          if(@ring.state == :no_data,
+            do: "stroke: var(--arb-done); stroke-opacity: 0.6;",
+            else: "stroke: var(--border-default);"
+          )
+        }
+      />
+      <circle
+        :if={@ring.state != :no_data}
+        data-ring-arc
+        cx="16"
+        cy="16"
+        r={@r}
+        fill="none"
+        stroke-width="2.5"
+        pathLength="100"
+        stroke-dasharray={"#{@ring.pct} 100"}
+        transform="rotate(-90 16 16)"
+        style={"stroke: #{quota_ring_stroke(@ring.state)};"}
+        class="transition-[stroke-dasharray,stroke] duration-[var(--dur-bar)] ease-[var(--arb-ease-out)]"
+      />
+      <line
+        :if={@ring.elapsed_pct}
+        data-ring-hairline
+        x1="16"
+        x2="16"
+        y1={16 - @r - 1.5}
+        y2={16 - @r + 1.5}
+        stroke-width="1"
+        transform={"rotate(#{@ring.elapsed_pct * 3.6} 16 16)"}
+        style="stroke: var(--text-title); stroke-opacity: 0.55;"
+      />
+    </g>
+    """
+  end
+
+  defp ring_state_attr(state), do: state |> Atom.to_string() |> String.replace("_", "-")
+
+  # The popover's entry for one provider: the logo and name, then both windows
+  # as the full `quota_bar/1` (pace hairline, percentage, reset or burn-rate
+  # note), Antigravity's two bucket groups each as their own pair, and a note
+  # under any window near or over its ceiling.
+  attr :quota, :map, required: true
+  attr :on_exhaustion, :any, default: nil
+
+  defp quota_popover_entry(assigns) do
+    assigns = assign(assigns, :groups, popover_groups(assigns.quota))
+
+    ~H"""
+    <section
+      id={"quota-popover-#{@quota.provider}"}
+      class="flex flex-col gap-[7px] py-[10px] first:pt-0 border-t first:border-t-0 border-solid border-[var(--border-default)]"
+    >
+      <div class="flex items-center gap-[7px]">
+        <.provider_icon provider={quota_icon_provider(@quota.provider)} class="size-4" />
+        <span class="text-[12px] font-medium text-[var(--text-title)]">
+          {quota_provider_label(@quota.provider)}
+        </span>
+      </div>
+      <%= cond do %>
+        <% quota_no_data?(@quota) -> %>
+          <ArbiterWeb.CoreComponents.Feedback.quota_no_data />
+        <% @groups != [] -> %>
+          <div
+            :for={group <- @groups}
+            id={"quota-popover-#{@quota.provider}-#{group.group}"}
+            class="flex flex-col gap-[5px]"
+          >
+            <span class="text-[10px] leading-none text-[var(--text-secondary)] font-[family-name:var(--font-mono)]">
+              {group.label}
+            </span>
+            <.quota_popover_window
+              :for={w <- group.windows}
+              id={"quota-popover-#{@quota.provider}-#{group.group}-#{w.window}"}
+              quota={@quota}
+              w={w}
+              on_exhaustion={@on_exhaustion}
+            />
+          </div>
+        <% true -> %>
+          <.quota_popover_window
+            :for={w <- quota_windows(@quota)}
+            id={"quota-popover-#{@quota.provider}-#{w.window}"}
+            quota={@quota}
+            w={w}
+            on_exhaustion={@on_exhaustion}
+          />
+      <% end %>
+    </section>
+    """
+  end
+
+  defp popover_groups(%{provider: "antigravity"} = quota), do: quota_antigravity_groups(quota)
+  defp popover_groups(_quota), do: []
+
+  attr :id, :string, required: true
+  attr :quota, :map, required: true
+  attr :w, :map, required: true
+  attr :on_exhaustion, :any, default: nil
+
+  defp quota_popover_window(assigns) do
+    bar =
+      Map.merge(assigns.w, %{
+        provider: assigns.quota.provider,
+        overage_status: assigns.quota.overage_status
+      })
+
+    pace = quota_pace(bar, Map.get(assigns.quota, :gate_policy))
+
+    assigns =
+      assign(assigns,
+        pace_note: assigns.quota.message == nil && quota_hold_text(pace, assigns.w.utilization)
+      )
+
+    ~H"""
+    <div class="flex flex-col gap-[3px]">
+      <.quota_bar
+        id={@id}
+        provider={@quota.provider}
+        show_label={false}
+        window={@w.window}
+        label={@w.label}
+        utilization={@w.utilization}
+        reset_at={@w.reset_at}
+        overage_status={@quota.overage_status}
+        representative_claim={@quota.representative_claim}
+        stale_message={@quota.message}
+        gate_policy={Map.get(@quota, :gate_policy)}
+        label_width={44}
+        width={140}
+        on_exhaustion={@on_exhaustion}
+      />
+      <p
+        :if={@pace_note}
+        data-quota-pace-note
+        class="m-0 pl-[51px] text-[10px] leading-[1.4] text-[var(--text-secondary)] font-[family-name:var(--font-mono)]"
+      >
+        {@pace_note} · {quota_reset_text(@w.reset_at)}
+      </p>
+    </div>
+    """
+  end
+
   # `ArbiterWeb.LiveHooks` loads both off the mount (bd-adewb4), so a
   # LiveView hands over `AsyncResult`s; a plain list (a specimen, a test, a
   # dead controller render) is already loaded.
@@ -501,6 +775,11 @@ defmodule ArbiterWeb.Layouts do
 
   defp quota_bars?(%AsyncResult{ok?: true, result: [_ | _]}), do: true
   defp quota_bars?(%AsyncResult{}), do: false
+
+  defp quota_readings?(%AsyncResult{ok?: true, result: quotas}) when is_list(quotas),
+    do: Enum.any?(quotas, &(not quota_no_data?(&1)))
+
+  defp quota_readings?(%AsyncResult{}), do: false
 
   # The loaded messages; none until the first load lands. A failed re-read
   # keeps the last list in the result, but the drawer and the trigger show

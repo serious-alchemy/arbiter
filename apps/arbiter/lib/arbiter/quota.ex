@@ -111,19 +111,23 @@ defmodule Arbiter.Quota do
   # Trailing window over which per-provider spend is summed for the cost figure.
   @cost_window_days 30
 
-  # Providers `ArbiterWeb.LiveHooks`'s `:quota` hook hides from the top bar
-  # pending fix (bd-1nyedk, bd-dcvo3n, bd-bi5t54) — see that
-  # module's `:quota` moduledoc section for the full story. Named here, not
-  # only there, so `list_latest/2`'s `:exclude_providers` option (bd-4p6pw7)
-  # can drop a hidden account's view *before* `decorate_view/2` spends a
-  # cache lookup on it, rather than filtering the fully-decorated list after
-  # the fact. `GET /api/quota` and `arb quota` do not pass this option — they
-  # still report every provider, hidden or not.
+  # Providers hidden from the status-bar quota chip and `/usage` pending
+  # parity (bd-1nyedk, bd-dcvo3n, bd-bi5t54) — see `ArbiterWeb.LiveHooks`'s
+  # `:quota` moduledoc section for the full story. `Arbiter.Quota.Visibility`
+  # applies it last, over auto-detection and the install-wide override alike,
+  # so showing Codex once it has parity is deleting it from this list.
+  # `GET /api/quota`, `arb quota` and `quota_get` never read it — they still
+  # report every provider, hidden or not.
   @hidden_providers ["codex"]
 
-  @doc "Quota provider codes `ArbiterWeb.LiveHooks` hides from the top bar — see `@hidden_providers`."
+  @doc """
+  Quota provider codes hidden from the status bar and `/usage` — see
+  `@hidden_providers`. The `:arbiter, :quota_hidden_providers` app env
+  replaces the list, for tests that exercise a provider still hidden here.
+  """
   @spec hidden_providers() :: [String.t()]
-  def hidden_providers, do: @hidden_providers
+  def hidden_providers,
+    do: Application.get_env(:arbiter, :quota_hidden_providers, @hidden_providers)
 
   # ---- dispatch gate (bd-7cd38f) -----------------------------------------
 
@@ -1172,7 +1176,7 @@ defmodule Arbiter.Quota do
 
   `:exclude_providers` (default `[]`) drops a view whose provider is in the
   list before decoration — so a caller that never wants a given provider
-  (`ArbiterWeb.LiveHooks`'s `:quota` hook, `@hidden_providers`) doesn't pay
+  (`Arbiter.Quota.Visibility`, for the providers it doesn't show) doesn't pay
   even the memoized cache lookup for it. `GET /api/quota` and `arb quota`
   pass none, and keep showing every provider.
   """
