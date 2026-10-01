@@ -60,7 +60,10 @@ defmodule Arbiter.Worker.DoneDetectionTest do
     end
 
     test "an undecodable JSON fragment ending in the marker is not done" do
-      feed(session(), [~s({"type":"user","message":{"content":[{"type":"tool_result","content":"arb done)])
+      feed(session(), [
+        ~s({"type":"user","message":{"content":[{"type":"tool_result","content":"arb done)
+      ])
+
       refute done?()
     end
 
