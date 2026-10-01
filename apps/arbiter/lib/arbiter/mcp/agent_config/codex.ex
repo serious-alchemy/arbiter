@@ -48,6 +48,8 @@ defmodule Arbiter.MCP.AgentConfig.Codex do
 
   @behaviour Arbiter.MCP.AgentConfig
 
+  alias Arbiter.Worker.ReleaseEnv
+
   @dirname ".codex"
   @filename "config.toml"
   @connect_timeout_ms 5_000
@@ -216,7 +218,7 @@ defmodule Arbiter.MCP.AgentConfig.Codex do
 
     with exe when is_binary(exe) <- exe || {:error, :codex_not_found},
          {out, 0} <-
-           System.cmd(exe, ["mcp", "list", "--json"],
+           ReleaseEnv.cmd(exe, ["mcp", "list", "--json"],
              cd: worktree,
              env: env,
              stderr_to_stdout: false
