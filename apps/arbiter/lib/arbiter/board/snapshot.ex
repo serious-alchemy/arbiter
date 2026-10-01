@@ -681,8 +681,8 @@ defmodule Arbiter.Board.Snapshot do
   # its `by_difficulty`/`by_priority` tier, its agent config — decide whether it
   # is held, not the nil-task evaluation the workspace-level hold uses. A ticket
   # with an available candidate is `:ok` even when a sibling's candidates are
-  # all held. Only tickets whose verdict differs from the workspace-level one
-  # appear; routing-off workspaces yield `%{}`.
+  # all held. Every queued non-epic ticket appears; routing-off workspaces yield
+  # `%{}`.
   defp ticket_quota_holds(%Arbiter.Tasks.Workspace{} = workspace, issues, opts) do
     if ProviderRouting.enabled?(workspace) do
       routing_opts = Keyword.get(opts, :routing_opts, [])
