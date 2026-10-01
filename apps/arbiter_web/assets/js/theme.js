@@ -35,7 +35,18 @@ applyStoredPin(document, navRailStorage(window));
     (e) => e.key === "phx:theme" && setTheme(e.newValue || "system"),
   );
 
-  window.addEventListener("phx:set-theme", (e) =>
-    setTheme(e.target.dataset.phxTheme),
-  );
+  window.addEventListener("phx:set-theme", (e) => {
+    const cycle = e.target.closest && e.target.closest("[data-role=theme-cycle]");
+    const hadFocus = cycle && document.activeElement === e.target;
+
+    setTheme(e.target.dataset.phxTheme);
+
+    // The cycle control shows one button per mode, picked by CSS from
+    // data-theme; the pressed one just hid itself, so hand focus to the one
+    // that replaced it or a keyboard user falls out of the rail.
+    if (hadFocus) {
+      const next = [...cycle.querySelectorAll("button")].find((b) => b.offsetParent !== null);
+      if (next) next.focus();
+    }
+  });
 })();

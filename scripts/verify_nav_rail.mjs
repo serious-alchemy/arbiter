@@ -317,16 +317,21 @@ async function run(page) {
     t1.full && !t1.cycle && t1.fits,
     `full=${t1.full} cycle=${t1.cycle} fits=${t1.fits}`
   )
-  // A trusted click on the cycle button changes the theme exactly as the pill did.
+  // The cycle button is the keyboard/touch path: a pointer over the rail
+  // widens it and swaps in the pill, so drive it by keyboard, as a user would.
   await page.mouseMove(WIDE / 2, HEIGHT / 2)
   await page.settle(700)
   const themeNow = async () =>
     JSON.parse(
-      await page.eval(`JSON.stringify({ attr: document.documentElement.getAttribute("data-theme"), stored: localStorage.getItem("phx:theme") })`)
+      await page.eval(`JSON.stringify({ attr: document.documentElement.getAttribute("data-theme"), stored: localStorage.getItem("phx:theme"), inToggle: !!document.activeElement.closest("#theme-toggle [data-role=theme-cycle]") })`)
     )
+  for (let i = 0; i < 80; i++) {
+    if ((await themeNow()).inToggle) break
+    await page.key("Tab", "Tab", 9)
+  }
   const seen = []
   for (const next of ["light", "dark", "system"]) {
-    await clickOn(page, `#theme-toggle [data-role=theme-cycle] button[data-phx-theme=${next}]`)
+    await page.key("Enter", "Enter", 13, "\r")
     await page.settle(300)
     seen.push({ next, ...(await themeNow()), ...(await theme(page)) })
   }
@@ -336,6 +341,14 @@ async function run(page) {
       /^Theme: light/.test(seen[0].label) && /^Theme: dark/.test(seen[1].label) && /^Theme: system/.test(seen[2].label),
     JSON.stringify(seen.map((x) => [x.next, x.attr, x.stored, x.label]))
   )
+  check(
+    "collapsed-cycle-button-keeps-keyboard-focus-between-presses",
+    seen.every((x) => x.inToggle),
+    JSON.stringify(seen.map((x) => x.inToggle))
+  )
+  await page.eval("document.activeElement.blur()")
+  await page.mouseMove(WIDE / 2, HEIGHT / 2)
+  await page.settle(700)
 
   // -- pin ---------------------------------------------------------------------
 
@@ -554,6 +567,13 @@ function pageDriver(cdp, sessionId) {
 
     async mouseMove(x, y) {
       await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y }, sessionId)
+    },
+
+    // A trusted key press (keyboard, no pointer involved).
+    async key(key, code, vk, text) {
+      const base = { key, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk }
+      await cdp.send("Input.dispatchKeyEvent", { type: text ? "keyDown" : "rawKeyDown", text, ...base }, sessionId)
+      await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", ...base }, sessionId)
     },
 
     // A trusted click: pointer there first, so `:hover` is what a real
