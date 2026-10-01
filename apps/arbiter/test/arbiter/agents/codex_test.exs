@@ -220,6 +220,27 @@ defmodule Arbiter.Agents.CodexTest do
     end
   end
 
+  describe "spawn_env/1 arb_token" do
+    test "adds ARBITER_MCP_TOKEN when :arb_token is a non-empty string" do
+      assert {"ARBITER_MCP_TOKEN", "tok-1"} in Codex.spawn_env(
+               api_key: "sk-x",
+               arb_token: "tok-1"
+             )
+    end
+
+    test "omits ARBITER_MCP_TOKEN for nil or empty :arb_token" do
+      refute Enum.any?(
+               Codex.spawn_env(api_key: "sk-x", arb_token: nil),
+               &(elem(&1, 0) == "ARBITER_MCP_TOKEN")
+             )
+
+      refute Enum.any?(
+               Codex.spawn_env(api_key: "sk-x", arb_token: ""),
+               &(elem(&1, 0) == "ARBITER_MCP_TOKEN")
+             )
+    end
+  end
+
   describe "auth_probe_argv/1" do
     setup do
       tmp =

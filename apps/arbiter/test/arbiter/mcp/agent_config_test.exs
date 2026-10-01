@@ -75,19 +75,42 @@ defmodule Arbiter.MCP.AgentConfigTest do
   end
 
   describe "Codex.config_toml/1" do
-    test "produces a valid TOML with mcp_servers section" do
+    test "produces a valid TOML with mcp_servers section using http_headers (G3)" do
       toml = Codex.config_toml(mcp_url: "http://127.0.0.1:4848/mcp", scope_token: "tok-c1")
 
       assert toml =~ "[mcp_servers.arbiter]"
       assert toml =~ ~s(url = "http://127.0.0.1:4848/mcp")
-      assert toml =~ "[mcp_servers.arbiter.headers]"
+      # codex 0.153.4 reads http_headers, not headers (G3 gap analysis)
+      assert toml =~ "[mcp_servers.arbiter.http_headers]"
       assert toml =~ ~s(Authorization = "Bearer tok-c1")
+      # Must not have the old schema that codex ignores
+      refute toml =~ "[mcp_servers.arbiter.headers]"
     end
 
     test "honours a custom server_name" do
       toml = Codex.config_toml(mcp_url: "u", scope_token: "t", server_name: "fleet")
       assert toml =~ "[mcp_servers.fleet]"
-      assert toml =~ "[mcp_servers.fleet.headers]"
+      assert toml =~ "[mcp_servers.fleet.http_headers]"
+      refute toml =~ "[mcp_servers.fleet.headers]"
+    end
+
+    test "supports bearer_token_env_var to keep token off disk (bd-6mo6be)" do
+      toml =
+        Codex.config_toml(
+          mcp_url: "http://127.0.0.1:4848/mcp",
+          scope_token: "tok-c1-envvar",
+          bearer_token_env_var: "ARBITER_MCP_TOKEN"
+        )
+
+      assert toml =~ "[mcp_servers.arbiter]"
+      # When bearer_token_env_var is set, Codex uses its own key expansion, not http_headers
+      refute toml =~ "[mcp_servers.arbiter.http_headers]"
+      refute toml =~ "http_headers"
+      # The token is NOT inlined; instead, Codex's bearer_token_env_var expansion is used
+      refute toml =~ "Bearer tok-c1-envvar"
+      refute toml =~ "tok-c1-envvar"
+      # The env var name is in the config under bearer_token_env_var (Codex expands at runtime)
+      assert toml =~ ~s(bearer_token_env_var = "ARBITER_MCP_TOKEN")
     end
   end
 
@@ -270,6 +293,8 @@ defmodule Arbiter.MCP.AgentConfigTest do
       content = File.read!(path)
       assert content =~ "[mcp_servers.arbiter]"
       assert content =~ "http://127.0.0.1:4848/mcp"
+      # codex 0.153.4 reads http_headers, not headers (G3)
+      assert content =~ "[mcp_servers.arbiter.http_headers]"
       assert content =~ "Bearer "
     end
 
@@ -294,6 +319,105 @@ defmodule Arbiter.MCP.AgentConfigTest do
     test "adapter_for/1 returns nil for unknown providers" do
       assert AgentConfig.adapter_for(:nonsense_provider_xyz) == nil
       assert AgentConfig.adapter_for(nil) == nil
+    end
+  end
+
+  # bd-6mo6be: worker-side verification. The fixtures below are real
+  # `codex mcp list --json` output (codex-cli 0.153.4, CODEX_HOME=<tmp>).
+  defp codex_list(transport_overrides) do
+    transport =
+      Map.merge(
+        %{
+          "type" => "streamable_http",
+          "url" => "http://127.0.0.1:4848/mcp",
+          "bearer_token_env_var" => nil,
+          "http_headers" => nil,
+          "env_http_headers" => nil,
+          "http_headers_helper" => nil
+        },
+        transport_overrides
+      )
+
+    [
+      %{
+        "name" => "arbiter",
+        "enabled" => true,
+        "disabled_reason" => nil,
+        "transport" => transport,
+        "auth_status" => "bearer_token"
+      }
+    ]
+  end
+
+  describe "Codex.verify_config_loaded/2 (worker-side verification)" do
+    test "accepts transport.http_headers.Authorization" do
+      list = codex_list(%{"http_headers" => %{"Authorization" => "Bearer t"}})
+      assert Codex.verify_config_loaded(list) == :ok
+    end
+
+    test "accepts transport.bearer_token_env_var" do
+      list = codex_list(%{"bearer_token_env_var" => "ARBITER_MCP_TOKEN"})
+      assert Codex.verify_config_loaded(list) == :ok
+    end
+
+    test "rejects the dropped `headers` key (http_headers: null)" do
+      assert {:error, :no_authentication_configured} = Codex.verify_config_loaded(codex_list(%{}))
+    end
+
+    test "rejects an empty Authorization header" do
+      list = codex_list(%{"http_headers" => %{"Authorization" => ""}})
+      assert {:error, :authorization_header_empty} = Codex.verify_config_loaded(list)
+    end
+
+    test "respects server_name and reports a missing server" do
+      assert {:error, :server_not_configured} = Codex.verify_config_loaded([])
+
+      assert {:error, :server_not_configured} =
+               Codex.verify_config_loaded(codex_list(%{}), server_name: "other")
+    end
+  end
+
+  describe "Codex.check_worker_config/2" do
+    @tag :tmp_dir
+    test "runs codex mcp list --json in the worktree and checks the env var", %{tmp_dir: tmp} do
+      json =
+        Jason.encode!(codex_list(%{"bearer_token_env_var" => "ARBITER_MCP_TOKEN"}))
+
+      exe = Path.join(tmp, "codex")
+      File.write!(exe, "#!/bin/sh\ncat <<'EOF'\n#{json}\nEOF\n")
+      File.chmod!(exe, 0o755)
+
+      assert :ok =
+               Codex.check_worker_config(tmp,
+                 executable: exe,
+                 env: [{"ARBITER_MCP_TOKEN", "tok"}]
+               )
+
+      assert {:error, {:bearer_token_env_var_unset, "ARBITER_MCP_TOKEN"}} =
+               Codex.check_worker_config(tmp, executable: exe, env: [])
+    end
+
+    @tag :tmp_dir
+    test "surfaces a non-array / failing codex", %{tmp_dir: tmp} do
+      exe = Path.join(tmp, "codex")
+      File.write!(exe, "#!/bin/sh\nexit 3\n")
+      File.chmod!(exe, 0o755)
+
+      assert {:error, {:codex_mcp_list_failed, 3}} =
+               Codex.check_worker_config(tmp, executable: exe)
+    end
+  end
+
+  describe "Codex.config_toml/1 env-var mode" do
+    test "needs no scope_token and writes no token" do
+      toml =
+        Codex.config_toml(
+          mcp_url: "http://x/mcp",
+          bearer_token_env_var: "ARBITER_MCP_TOKEN"
+        )
+
+      assert toml =~ ~s(bearer_token_env_var = "ARBITER_MCP_TOKEN")
+      refute toml =~ "Bearer"
     end
   end
 

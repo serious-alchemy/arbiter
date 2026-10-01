@@ -285,10 +285,24 @@ defmodule Arbiter.Agents.Codex do
 
   @impl true
   def spawn_env(opts \\ []) do
-    case Keyword.get(opts, :api_key) || Config.resolve_api_key() do
-      key when is_binary(key) and key != "" -> [{"OPENAI_API_KEY", key}]
-      _ -> []
-    end
+    env = []
+
+    # Set OPENAI_API_KEY for auth
+    env =
+      case Keyword.get(opts, :api_key) || Config.resolve_api_key() do
+        key when is_binary(key) and key != "" -> [{"OPENAI_API_KEY", key} | env]
+        _ -> env
+      end
+
+    # Set ARBITER_MCP_TOKEN for the MCP server bearer_token_env_var (if using env-var mode).
+    # The token is minted as a worker scope token in dispatch and passed via :arb_token.
+    env =
+      case Keyword.get(opts, :arb_token) do
+        token when is_binary(token) and token != "" -> [{"ARBITER_MCP_TOKEN", token} | env]
+        _ -> env
+      end
+
+    Enum.reverse(env)
   end
 
   @impl true
