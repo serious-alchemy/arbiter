@@ -11,10 +11,18 @@ defmodule ArbiterCli.Cmd.Restart do
 
   What it does:
 
-    1. **Stop the running server.** Find the OS process listening on the API
-       port (derived from `ARB_HOST`) via `lsof` and send it `SIGTERM` for a
-       clean BEAM shutdown. If the port hasn't freed within a grace window,
-       escalate to `SIGKILL`.
+    1. **Stop the running server.** If the `arbiter.service` user unit is
+       present, delegate to `systemctl --user restart`. Otherwise find the OS
+       process listening on the API port (derived from `ARB_HOST`) via `lsof`
+       and send it `SIGTERM` for a clean BEAM shutdown. If the port hasn't
+       freed within a grace window, escalate to `SIGKILL`.
+
+       The signalling path **fails closed** (bd-3t973v): it aborts if systemd
+       cannot be asked about the unit (no bus, unexpected error) or an
+       `arbiter.service` file exists on disk, and it only signals a pid whose
+       `/proc/<pid>/cmdline` proves a dev `mix phx.server` — never a release
+       BEAM (`bin/arbiter`, `releases/<vsn>/start`), an unrelated process, or
+       one whose cmdline can't be read.
     2. **Wait for the port to free**, so the fresh server doesn't trip over an
        "address already in use".
     3. **Start Phoenix** detached (reusing `arb start`'s launcher), inheriting
