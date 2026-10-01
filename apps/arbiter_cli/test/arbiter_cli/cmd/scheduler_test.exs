@@ -70,6 +70,29 @@ defmodule ArbiterCli.Cmd.SchedulerTest do
       assert out =~ "5m"
     end
 
+    test "shows when and by whom the pause state last changed" do
+      stub_get("/api/scheduler/status", %{
+        body("quiescent")
+        | "changed_by" => "operator via dashboard"
+      })
+
+      {out, _err, 0} = capture(fn -> Scheduler.run(["status"]) end)
+
+      assert out =~ "Last changed: #{@now} by operator via dashboard"
+    end
+
+    test "says so when no change was ever recorded" do
+      stub_get("/api/scheduler/status", %{
+        body("quiescent")
+        | "changed_by" => nil,
+          "changed_at" => nil
+      })
+
+      {out, _err, 0} = capture(fn -> Scheduler.run(["status"]) end)
+
+      assert out =~ "Last changed: unknown"
+    end
+
     test "paused and quiescent says safe to restart" do
       stub_get("/api/scheduler/status", body("quiescent"))
 

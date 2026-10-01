@@ -245,8 +245,8 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
       guarded(
         fn ->
           if on?,
-            do: Autopilot.pause(Autopilot, "dashboard"),
-            else: Autopilot.resume(Autopilot, "dashboard")
+            do: Autopilot.pause(Autopilot, {"operator", "dashboard"}),
+            else: Autopilot.resume(Autopilot, {"operator", "dashboard"})
 
           true
         end,
@@ -522,6 +522,11 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
                     checked={@autodispatch == true}
                     disabled={is_nil(@autodispatch)}
                     click="toggle_autodispatch"
+                    data-confirm={
+                      if @autodispatch == true,
+                        do:
+                          "Pause the scheduler? Ready cards will stop being promoted until it is resumed."
+                    }
                   />
                 </.rows>
                 <p

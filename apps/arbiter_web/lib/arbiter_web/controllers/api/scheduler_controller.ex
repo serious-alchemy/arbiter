@@ -23,10 +23,10 @@ defmodule ArbiterWeb.Api.SchedulerController do
   Pause the board autopilot.
 
   Returns the `status/2` body on success — `"paused": true`, `"changed_by":
-  "api"`, and the drain state (a pause usually lands in `draining`).
+  "coordinator via api"`, and the drain state (a pause usually lands in `draining`).
   """
-  def pause(conn, _params) do
-    case Autopilot.pause(Autopilot, "api") do
+  def pause(conn, params) do
+    case Autopilot.pause(Autopilot, actor(conn, params)) do
       :ok ->
         json(conn, status_json())
 
@@ -45,10 +45,10 @@ defmodule ArbiterWeb.Api.SchedulerController do
   Resume the board autopilot.
 
   Returns the `status/2` body on success — `"paused": false`, `"changed_by":
-  "api"`, and the drain state.
+  "coordinator via api"`, and the drain state.
   """
-  def resume(conn, _params) do
-    case Autopilot.resume(Autopilot, "api") do
+  def resume(conn, params) do
+    case Autopilot.resume(Autopilot, actor(conn, params)) do
       :ok ->
         json(conn, status_json())
 
@@ -80,6 +80,13 @@ defmodule ArbiterWeb.Api.SchedulerController do
   catch
     :exit, reason ->
       {:error, {:invalid_request, "status check failed: process error #{inspect(reason)}"}}
+  end
+
+  # bd-cl6zjn: `arb scheduler` says `"surface": "cli"`; any other caller is the
+  # bare API. The actor is the token's scope (`coordinator`, ...).
+  defp actor(conn, params) do
+    surface = if params["surface"] == "cli", do: "cli", else: "api"
+    {Arbiter.PaperTrail.actor_label(conn.assigns[:mcp_scope]) || "unknown", surface}
   end
 
   defp status_json, do: Drain.status() |> Drain.to_json()

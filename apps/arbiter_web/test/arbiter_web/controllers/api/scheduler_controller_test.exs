@@ -45,11 +45,36 @@ defmodule ArbiterWeb.Api.SchedulerControllerTest do
 
       conn = post(conn, "/api/scheduler/pause")
 
-      assert %{"paused" => true, "changed_by" => "api", "changed_at" => changed_at} =
+      assert %{
+               "paused" => true,
+               "changed_by" => "coordinator via api",
+               "changed_at" => changed_at
+             } =
                json_response(conn, 200)
 
       assert is_binary(changed_at)
       assert Autopilot.paused?() == true
+    end
+  end
+
+  describe "surface attribution (bd-cl6zjn)" do
+    test "the CLI's pause is recorded as cli, and audited", %{conn: conn} do
+      :ok = Autopilot.resume()
+
+      conn = post(conn, "/api/scheduler/pause", %{"surface" => "cli"})
+
+      assert %{"changed_by" => "coordinator via cli"} = json_response(conn, 200)
+
+      assert [%{paused: true, actor: "coordinator", surface: "cli"} | _] =
+               Arbiter.Settings.scheduler_changes()
+    end
+
+    test "a resume is audited with its surface", %{conn: conn} do
+      :ok = Autopilot.pause()
+
+      post(conn, "/api/scheduler/resume")
+
+      assert [%{paused: false, surface: "api"} | _] = Arbiter.Settings.scheduler_changes()
     end
   end
 
@@ -60,7 +85,11 @@ defmodule ArbiterWeb.Api.SchedulerControllerTest do
 
       conn = post(conn, "/api/scheduler/resume")
 
-      assert %{"paused" => false, "changed_by" => "api", "changed_at" => changed_at} =
+      assert %{
+               "paused" => false,
+               "changed_by" => "coordinator via api",
+               "changed_at" => changed_at
+             } =
                json_response(conn, 200)
 
       assert is_binary(changed_at)

@@ -22,9 +22,11 @@ defmodule Arbiter.Settings do
   use Ash.Domain
 
   alias Arbiter.Settings.Installation
+  alias Arbiter.Settings.SchedulerChange
 
   resources do
     resource Installation
+    resource SchedulerChange
   end
 
   @doc """
@@ -204,6 +206,24 @@ defmodule Arbiter.Settings do
          changed_by: updated.board_autopilot_paused_by
        }}
     end
+  end
+
+  @doc """
+  Append an audit row for a scheduler pause (`paused?` true) or resume
+  (bd-cl6zjn): `actor` who asked, `surface` where from.
+  """
+  @spec record_scheduler_change(boolean(), String.t() | nil, String.t() | nil) ::
+          {:ok, SchedulerChange.t()} | {:error, term()}
+  def record_scheduler_change(paused?, actor, surface) when is_boolean(paused?) do
+    Ash.create(SchedulerChange, %{paused: paused?, actor: actor, surface: surface})
+  end
+
+  @doc """
+  The scheduler pause/resume audit rows, newest first.
+  """
+  @spec scheduler_changes() :: [SchedulerChange.t()]
+  def scheduler_changes do
+    SchedulerChange |> Ash.read!() |> Enum.sort_by(& &1.at, {:desc, DateTime})
   end
 
   @doc """

@@ -189,6 +189,63 @@ defmodule Arbiter.Agents.Codex.StreamTest do
       assert line =~ "model stream disconnected"
     end
 
+    test "a structured usage_limit_reached turn.failed emits a normalized quota line with the reset epoch" do
+      inner =
+        Jason.encode!(%{
+          "type" => "error",
+          "status" => 429,
+          "error" => %{
+            "type" => "usage_limit_reached",
+            "message" => "The usage limit has been reached",
+            "plan_type" => "free",
+            "resets_at" => 1_790_000_000
+          }
+        })
+
+      event = %{"type" => "turn.failed", "error" => %{"message" => inner}}
+
+      lines = event |> Stream.format_event() |> Enum.map(&elem(&1, 0))
+      assert "usage limit reached|1790000000" in lines
+
+      assert %{category: :quota_exhausted, retry_after: %DateTime{} = at} =
+               Arbiter.Worker.StopReason.classify(1, lines, "codex")
+
+      assert DateTime.to_unix(at) == 1_790_000_000
+    end
+
+    test "free-tier plain-text usage-limit wording is normalized without a reset time" do
+      msg =
+        "You've hit your usage limit. Upgrade to Plus to continue using Codex " <>
+          "(https://chatgpt.com/explore/plus), or try again at Oct 2nd, 2026 3:04 PM."
+
+      event = %{"type" => "turn.failed", "error" => %{"message" => msg}}
+      lines = event |> Stream.format_event() |> Enum.map(&elem(&1, 0))
+      assert "usage limit reached" in lines
+
+      assert Arbiter.Worker.StopReason.classify(1, lines, "codex").category == :quota_exhausted
+    end
+
+    test "a rotated refresh token turn.failed classifies as auth_expired with codex login remediation" do
+      msg =
+        "Your access token could not be refreshed because your refresh token was already used. " <>
+          "Please log out and sign in again."
+
+      event = %{"type" => "turn.failed", "error" => %{"message" => msg}}
+      lines = event |> Stream.format_event() |> Enum.map(&elem(&1, 0))
+
+      reason = Arbiter.Worker.StopReason.classify(1, lines, "codex")
+      assert reason.category == :auth_expired
+      assert reason.remediation =~ "codex login"
+    end
+
+    test "an unrelated turn.failed stays a plain failure line" do
+      event = %{"type" => "turn.failed", "error" => %{"message" => "model stream disconnected"}}
+      assert [{_, false}] = Stream.format_event(event)
+
+      assert Arbiter.Worker.StopReason.classify(1, ["⚠ codex turn failed: boom"], "codex").category ==
+               :crashed
+    end
+
     test "item.completed agent_message is the only class that arms completion" do
       event = %{
         "type" => "item.completed",

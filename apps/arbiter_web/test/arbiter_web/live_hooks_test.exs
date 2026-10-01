@@ -2,6 +2,7 @@ defmodule ArbiterWeb.LiveHooksTest do
   use ArbiterWeb.ConnCase
 
   import Phoenix.LiveViewTest
+  import ArbiterWeb.QuotaFixtures
 
   defp query_count(fun) do
     ref = make_ref()
@@ -89,56 +90,51 @@ defmodule ArbiterWeb.LiveHooksTest do
       assert warm <= 3
     end
 
-    test "on_mount(:quota) filters hidden providers at mount time", %{conn: conn} do
-      ws = Ash.create!(Arbiter.Tasks.Workspace, %{name: "default"})
+    test "on_mount(:quota) shows codex when available", %{conn: conn} do
+      ws =
+        Ash.create!(Arbiter.Tasks.Workspace, %{
+          name: "default",
+          config: %{"agent" => %{"type" => ["claude", "codex"]}}
+        })
 
-      # Capture a normal provider and a hidden provider (codex)
+      # Capture a normal provider and codex
       {:ok, _} =
         Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.25"}],
           provider: "claude"
         )
 
-      {:ok, _} =
-        Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.50"}],
-          provider: "codex"
-        )
+      codex_quota!(ws, session_used_percent: 50.0)
 
       {:ok, view, _html} = live(conn, ~p"/")
       html = render_async(view)
 
-      # Claude should be present, Codex should be filtered out
+      # Both Claude and Codex should be present
       assert html =~ "Claude"
-      refute html =~ "Codex"
+      assert html =~ "Codex"
     end
 
-    test "on_mount(:quota) handle_info returns :halt and does not crash for hidden providers", %{
+    test "on_mount(:quota) loads all configured providers with their quotas", %{
       conn: conn
     } do
-      ws = Ash.create!(Arbiter.Tasks.Workspace, %{name: "default"})
+      ws =
+        Ash.create!(Arbiter.Tasks.Workspace, %{
+          name: "default",
+          config: %{"agent" => %{"type" => ["claude", "codex"]}}
+        })
 
       {:ok, _} =
         Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.25"}],
           provider: "claude"
         )
 
+      codex_quota!(ws, session_used_percent: 80.0)
+
       {:ok, view, _html} = live(conn, ~p"/")
       html = render_async(view)
+
+      # Both configured providers should be shown
       assert html =~ "Claude"
-      refute html =~ "Codex"
-
-      # Broadcast a codex update. If handle_info returned {:cont, socket},
-      # this would propagate to the parent LiveView and cause it to crash
-      # (since it doesn't implement handle_info/2 for quota_updated).
-      # Returning {:halt, socket} prevents the crash.
-      {:ok, _} =
-        Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.80"}],
-          provider: "codex"
-        )
-
-      # Render the view to confirm it is still alive and has not crashed,
-      # and that Codex is still not rendered.
-      html2 = render(view)
-      refute html2 =~ "Codex"
+      assert html =~ "Codex"
     end
 
     test "on_mount(:quota) no longer filters antigravity at mount time (bd-gukyy1)", %{conn: conn} do
