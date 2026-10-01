@@ -9,7 +9,7 @@ defmodule Arbiter.MCP.AgentConfig.Codex do
       [mcp_servers.arbiter]
       url = "http://127.0.0.1:4848/mcp"
 
-      [mcp_servers.arbiter.headers]
+      [mcp_servers.arbiter.http_headers]
       Authorization = "Bearer <scope-token>"
 
   ## Post-spawn connect check
@@ -58,7 +58,7 @@ defmodule Arbiter.MCP.AgentConfig.Codex do
     [mcp_servers.#{name}]
     url = #{inspect(url)}
 
-    [mcp_servers.#{name}.headers]
+    [mcp_servers.#{name}.http_headers]
     Authorization = #{inspect("Bearer " <> token)}
     """
   end

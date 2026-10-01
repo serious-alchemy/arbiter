@@ -75,19 +75,23 @@ defmodule Arbiter.MCP.AgentConfigTest do
   end
 
   describe "Codex.config_toml/1" do
-    test "produces a valid TOML with mcp_servers section" do
+    test "produces a valid TOML with mcp_servers section using http_headers (G3)" do
       toml = Codex.config_toml(mcp_url: "http://127.0.0.1:4848/mcp", scope_token: "tok-c1")
 
       assert toml =~ "[mcp_servers.arbiter]"
       assert toml =~ ~s(url = "http://127.0.0.1:4848/mcp")
-      assert toml =~ "[mcp_servers.arbiter.headers]"
+      # codex 0.153.4 reads http_headers, not headers (G3 gap analysis)
+      assert toml =~ "[mcp_servers.arbiter.http_headers]"
       assert toml =~ ~s(Authorization = "Bearer tok-c1")
+      # Must not have the old schema that codex ignores
+      refute toml =~ "[mcp_servers.arbiter.headers]"
     end
 
     test "honours a custom server_name" do
       toml = Codex.config_toml(mcp_url: "u", scope_token: "t", server_name: "fleet")
       assert toml =~ "[mcp_servers.fleet]"
-      assert toml =~ "[mcp_servers.fleet.headers]"
+      assert toml =~ "[mcp_servers.fleet.http_headers]"
+      refute toml =~ "[mcp_servers.fleet.headers]"
     end
   end
 
@@ -270,6 +274,8 @@ defmodule Arbiter.MCP.AgentConfigTest do
       content = File.read!(path)
       assert content =~ "[mcp_servers.arbiter]"
       assert content =~ "http://127.0.0.1:4848/mcp"
+      # codex 0.153.4 reads http_headers, not headers (G3)
+      assert content =~ "[mcp_servers.arbiter.http_headers]"
       assert content =~ "Bearer "
     end
 
