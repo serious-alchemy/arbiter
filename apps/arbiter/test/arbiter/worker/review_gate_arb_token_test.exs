@@ -133,13 +133,22 @@ defmodule Arbiter.Worker.ReviewGateArbTokenTest do
   defp stop_review_tree(author, task_id) do
     author_ref = Process.monitor(author)
 
-    case Worker.state(author) do
+    # A dead author answers no call; fall through to the pass sweep regardless,
+    # so a crashed author cannot leave running passes behind for rm_rf! to race.
+    state =
+      try do
+        Worker.state(author)
+      catch
+        :exit, _ -> :no_author
+      end
+
+    case state do
       %{meta: %{review_gate_pid: gate}} when is_pid(gate) ->
         gate_ref = Process.monitor(gate)
         :ok = ProcessTeardown.stop(gate, @teardown_ms)
         assert_receive {:DOWN, ^gate_ref, :process, ^gate, _}, @teardown_ms
 
-      _no_gate_yet ->
+      _no_gate ->
         :ok
     end
 
