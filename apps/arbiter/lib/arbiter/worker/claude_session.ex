@@ -93,6 +93,7 @@ defmodule Arbiter.Worker.ClaudeSession do
 
   alias Arbiter.Agents.Claude.ConfigDir
   alias Arbiter.Agents.Claude.Security
+  alias Arbiter.Agents.Gemini.RereadDetector
   alias Arbiter.Worker
   alias Arbiter.Worker.OutputLog
   alias Arbiter.Worker.StepSummary
@@ -424,6 +425,7 @@ defmodule Arbiter.Worker.ClaudeSession do
           |> capture_steps(event)
           |> track_async_tasks(event)
           |> track_agy_denials(event)
+          |> track_agy_rereads(event)
           |> scan_split_done(event)
           |> buffer_gemini_display(event)
 
@@ -984,6 +986,52 @@ defmodule Arbiter.Worker.ClaudeSession do
   end
 
   defp track_agy_denials(session, _event), do: session
+
+  # bd-buefg4: agy re-reads whole files compulsively (bd-2zjtca: one file 50×,
+  # 3.19M tokens). Feed each tool call's ACTIVE half (DONE would double count)
+  # to `RereadDetector`; an alert is a transcript line, a warning and a counter
+  # in run meta. It never blocks — agy has no hook to refuse a call and a
+  # headless session has no channel to message the model mid-turn.
+  defp track_agy_rereads(%{provider: "gemini"} = session, %{
+         "event" => "step_update",
+         "step_update" => %{"step_type" => "tool", "state" => "ACTIVE"} = step
+       }) do
+    detector = Map.get(session, :reread_detector) || RereadDetector.new()
+
+    {detector, alerts} =
+      RereadDetector.observe(
+        detector,
+        step["tool_name"],
+        get_in(step, ["tool_info", "parameters"])
+      )
+
+    Enum.reduce(alerts, Map.put(session, :reread_detector, detector), fn alert, acc ->
+      Logger.warning(
+        "[#{acc.task_id}] agy re-read #{alert.path} in full #{alert.count} times with no edit in between"
+      )
+
+      emit_line(
+        acc,
+        "⚠ agy re-read #{alert.path} in full #{alert.count} times with no edit in between — " <>
+          "read a line range or grep instead",
+        false
+      )
+    end)
+  end
+
+  defp track_agy_rereads(session, _event), do: session
+
+  @doc """
+  How many repeated-full-file-read alerts `track_agy_rereads/2` has raised on
+  this session (bd-buefg4). Always `0` for a non-agy provider.
+  """
+  @spec reread_alerts(map()) :: non_neg_integer()
+  def reread_alerts(%{} = session) do
+    case Map.get(session, :reread_detector) do
+      nil -> 0
+      detector -> RereadDetector.total(detector)
+    end
+  end
 
   # The stderr half of the detection above. Only a raw, non-JSON line can
   # reach this — a tool's output always arrives inside a JSON `step_update`
