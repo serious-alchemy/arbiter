@@ -452,6 +452,25 @@ defmodule Arbiter.Worker.JailTest do
 
       assert Jail.secret_files(base) == [cookie]
     end
+
+    test "secret_files/0 adds the per-install cookie under the data dir", %{base: base} do
+      old_dir = Application.fetch_env(:arbiter, :data_dir)
+      Application.put_env(:arbiter, :data_dir, base)
+
+      on_exit(fn ->
+        case old_dir do
+          {:ok, v} -> Application.put_env(:arbiter, :data_dir, v)
+          :error -> Application.delete_env(:arbiter, :data_dir)
+        end
+      end)
+
+      File.write!(Path.join(base, "arbiter.env"), "SECRET_KEY_BASE=x\n")
+      cookie = Path.join(base, "release.cookie")
+      File.write!(cookie, "secret")
+
+      assert cookie in Jail.secret_files()
+      assert Path.join(base, "arbiter.env") in Jail.secret_files()
+    end
   end
 
   describe "writable_paths/1" do

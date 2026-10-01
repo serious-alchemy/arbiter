@@ -51,8 +51,9 @@ defmodule Arbiter.Worker.Jail do
   ## Known, accepted gaps
 
     * The network is shared: `arb`, MCP and `git push` need it.
-    * Reads are not restricted, except for `secret_files/0` (the release's
-      Erlang distribution cookie), which is shadowed by `/dev/null`.
+    * Reads are not restricted, except for `secret_files/0` (the server's
+      env file and Erlang distribution cookie), which are shadowed by
+      `/dev/null`.
     * Refs in the common dir are shared, so sibling worktrees' branches can
       still be written (the same as without the jail).
     * `git config --local` fails with `EBUSY` (git renames a lockfile over the
@@ -377,17 +378,24 @@ defmodule Arbiter.Worker.Jail do
 
   @doc """
   Files holding the server's own secrets, which the jail replaces with
-  `/dev/null` (bd-8381tk). The jail doesn't restrict reads otherwise, and
-  either file lets a worker skip the operator proof entirely:
+  `/dev/null` (bd-8381tk, bd-51m9ba). The jail doesn't restrict reads
+  otherwise, and each of these lets a worker skip the operator proof
+  entirely:
 
     * `<data_dir>/arbiter.env`, the release's `EnvironmentFile`. It carries
       `SECRET_KEY_BASE`, the MCP token signing key, so a worker that reads it
       can sign its own coordinator token.
-    * `$RELEASE_ROOT/releases/COOKIE`, the Erlang distribution cookie. With
-      it, a worker can `bin/arbiter rpc` straight into the server.
+    * `<data-home>/release.cookie`, the per-install Erlang distribution
+      cookie the release's `env.sh` creates (the data home is the `:data_dir`
+      app env when set, else `ARB_DATA_HOME`, default `~/.arbiter`). The jail
+      shares the host's network, so with the cookie a worker could reach
+      epmd on loopback and `bin/arbiter rpc` straight into the server.
+    * `$RELEASE_ROOT/releases/COOKIE`, the build-time cookie, for a release
+      that predates the per-install one.
 
-  Only files that exist are listed. `spec.secret_files` overrides the
-  detection (tests).
+  Only existing regular files are listed: bwrap cannot create a mount point
+  under the read-only root, and an absent file is no vector.
+  `spec.secret_files` overrides the detection (tests).
   """
   @spec secret_files() :: [String.t()]
   def secret_files do
@@ -401,33 +409,15 @@ defmodule Arbiter.Worker.Jail do
 
     [Path.join(data_dir, "arbiter.env"), release_cookie]
     |> Enum.filter(&(is_binary(&1) and File.regular?(&1)))
+    |> Enum.concat(secret_files(release_data_home()))
     |> Enum.map(&Path.expand/1)
     |> Enum.uniq()
   end
 
-  # Last of the binds, so no writable path, HOME or git bind can re-open one.
-  defp secret_args(spec) do
-    (Map.get(spec, :secret_files) || secret_files())
-    |> Enum.flat_map(&["--ro-bind", "/dev/null", &1])
-  end
-
   @doc """
-  Files the jail shadows read-only with `/dev/null` (bd-51m9ba): secrets that
-  `--ro-bind / /` would otherwise hand to the jailed process. Today that is
-  the release's per-install Erlang distribution cookie,
-  `<data-home>/release.cookie` (created by the release's `env.sh`; the data
-  home is `ARB_DATA_HOME`, default `~/.arbiter`). The jail shares the host's
-  network, so with the cookie a jailed process could reach epmd on loopback
-  and `rpc` arbitrary code into the server.
-
-  Only existing regular files are listed: bwrap cannot create a mount point
-  under the read-only root, and an absent file is no vector. The binds come
-  after every writable bind, so no `writable_paths` entry re-exposes them.
-  `spec.secret_files` overrides the detection (tests).
+  The per-install distribution cookie under `data_home`, when it exists
+  (bd-51m9ba). See `secret_files/0`.
   """
-  @spec secret_files() :: [String.t()]
-  def secret_files, do: secret_files(release_data_home())
-
   @spec secret_files(String.t() | nil) :: [String.t()]
   def secret_files(nil), do: []
 
@@ -435,17 +425,22 @@ defmodule Arbiter.Worker.Jail do
     Enum.filter([Path.join(data_home, "release.cookie")], &File.regular?/1)
   end
 
+  # Where env.sh keeps the per-install cookie. An explicit `:data_dir` wins
+  # so tests that repoint it stay hermetic.
   defp release_data_home do
-    case {System.get_env("ARB_DATA_HOME"), System.user_home()} do
-      {dir, _} when is_binary(dir) and dir != "" -> Path.expand(dir)
-      {_, home} when is_binary(home) -> Path.join(home, ".arbiter")
+    case {Application.fetch_env(:arbiter, :data_dir), System.get_env("ARB_DATA_HOME"),
+          System.user_home()} do
+      {{:ok, dir}, _, _} when is_binary(dir) -> Path.expand(dir)
+      {_, dir, _} when is_binary(dir) and dir != "" -> Path.expand(dir)
+      {_, _, home} when is_binary(home) -> Path.join(home, ".arbiter")
       _ -> nil
     end
   end
 
+  # Last of the binds, so no writable path, HOME or git bind can re-open one.
   defp secret_args(spec) do
-    files = Map.get(spec, :secret_files) || secret_files()
-    Enum.flat_map(files, &["--ro-bind", "/dev/null", &1])
+    (Map.get(spec, :secret_files) || secret_files())
+    |> Enum.flat_map(&["--ro-bind", "/dev/null", &1])
   end
 
   # Directory holding the session bus socket named by the environment, when

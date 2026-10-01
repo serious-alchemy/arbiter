@@ -785,7 +785,8 @@ What the release does now (`rel/env.sh.eex`, `rel/vm.args.eex`,
   (`restrict_cookie/1`) and after every start (`env.sh`), even though nothing
   uses it any more.
 * **The agy jail shadows the cookie.** `Arbiter.Worker.Jail.secret_files/0`
-  binds `/dev/null` over `<data-home>/release.cookie` after every writable
+  binds `/dev/null` over `<data-home>/release.cookie` (alongside the
+  bundled `releases/COOKIE` and `arbiter.env`, bd-8381tk) after every writable
   bind. The jail shares the host network, so without this a jailed worker
   could read the cookie and reach epmd over loopback. The jail's escape probe,
   which runs behind `arb doctor`'s "agy jail escape" check, now fails if the
@@ -931,11 +932,12 @@ socket isn't reachable at all:
   still connectable.
 * `systemd-run --user` fails (the bus is masked), so a jailed worker can't
   leave `arbiter.service` either.
-* `Jail.secret_files/0` binds `/dev/null` over the two files that would skip
+* `Jail.secret_files/0` binds `/dev/null` over the files that would skip
   the proof entirely: `~/.arbiter/arbiter.env` (it holds `SECRET_KEY_BASE`,
   the MCP signing key, so a reader could sign their own coordinator token)
-  and `$RELEASE_ROOT/releases/COOKIE` (the Erlang distribution cookie, which
-  gives `bin/arbiter rpc` into the server). The bind sits on a `nodev`
+  and the Erlang distribution cookies, `<data-home>/release.cookie` (the
+  per-install one, bd-51m9ba) and `$RELEASE_ROOT/releases/COOKIE` (the
+  bundled one), which give `bin/arbiter rpc` into the server. The bind sits on a `nodev`
   mount, so reads fail with `EACCES`.
 
 ### Verified live (2026-09-30)
@@ -996,12 +998,10 @@ escript built from this branch:
 
 ### Known open gaps (not fixed here)
 
-* **Erlang distribution.** The release runs with distribution on (the
-  `mix release` default). epmd and the node listen on all interfaces, and
-  `releases/COOKIE` is mode 0644. An unjailed worker can
-  `bin/arbiter rpc` into the server and skip every token check. This has been
-  reported to the coordinator as its own issue. The jail's cookie mask covers
-  jailed workers only.
+* **Erlang distribution** is now loopback-only with a per-install 0600
+  cookie (bd-51m9ba, see "The server's Erlang distribution" above). An
+  unjailed same-UID worker can still read that cookie and `bin/arbiter rpc`
+  into the server; the jail's cookie mask covers jailed workers only.
 * **The anonymous loopback REST surface.** Every other `/api` route
   (dispatch, `PATCH /api/workspaces/:id/config`, issue close, loop apply) is
   still coordinator-equivalent without a token. Workers' own `arb` relies on
