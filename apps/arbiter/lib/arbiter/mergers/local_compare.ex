@@ -44,6 +44,7 @@ defmodule Arbiter.Mergers.LocalCompare do
   require Logger
 
   alias Arbiter.Mergers.NetDiff
+  alias Arbiter.Reviews.ConflictResolution
   alias Arbiter.Tasks.RepoConfig
   alias Arbiter.Tasks.Workspace
 
@@ -158,6 +159,23 @@ defmodule Arbiter.Mergers.LocalCompare do
         {_out, 1} -> {:ok, false}
         {out, code} -> {:error, {:git_failed, code, String.trim(out)}}
       end
+    end
+  end
+
+  @doc """
+  What `head` adds over the approved commits once the target is accounted for
+  (`Arbiter.Reviews.ConflictResolution.classify/4`), in `repo_path`, after
+  fetching `base` and any commit the checkout lacks. `base` is read as
+  `origin/<base>` when that resolves, else as given. `{:error, _}` is "could
+  not tell" and is never `:clean`.
+  """
+  @spec classify_integration(String.t() | nil, String.t(), [String.t()], String.t()) ::
+          {:ok, ConflictResolution.outcome()} | {:error, term()}
+  def classify_integration(repo_path, base, approved, head) when is_list(approved) do
+    with {:ok, repo} <- usable_repo(repo_path),
+         :ok <- refresh(repo, base, [head | approved]),
+         {:ok, base_rev} <- resolve_base(repo, base) do
+      {:ok, ConflictResolution.classify(repo, approved, head, base_rev)}
     end
   end
 

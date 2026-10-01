@@ -299,6 +299,7 @@ defmodule Arbiter.Worker.Watchdog do
   alias Arbiter.Mergers
   alias Arbiter.Mergers.LocalCompare
   alias Arbiter.Mergers.PendingMerge
+  alias Arbiter.Reviews.ConflictReview
   alias Arbiter.Reviews.Coverage
   alias Arbiter.Reviews.CoverageShadow
   alias Arbiter.Tasks.PullRequest
@@ -4592,6 +4593,16 @@ defmodule Arbiter.Worker.Watchdog do
     do: {:merge, sha, clear_coverage_wait(state)}
 
   defp apply_coverage_decision(state, {:uncovered, reason}, head) do
+    case cover_clean_integration(state, head) do
+      :covered -> {:merge, head, clear_coverage_wait(state)}
+      :no -> refuse_uncovered_head(state, reason, head)
+    end
+  end
+
+  defp apply_coverage_decision(state, {:unknown, reason}, head),
+    do: wait_for_coverage(state, reason, head)
+
+  defp refuse_uncovered_head(state, reason, head) do
     Logger.warning(
       "Worker.Watchdog: refusing auto-merge for task=#{state.task_id} mr=#{state.mr_ref}; " <>
         "no review covers head #{head} (#{reason}) — merging would integrate commits no " <>
@@ -4600,9 +4611,6 @@ defmodule Arbiter.Worker.Watchdog do
 
     {:stale, reviewed_sha(state) || head, head, clear_coverage_wait(state)}
   end
-
-  defp apply_coverage_decision(state, {:unknown, reason}, head),
-    do: wait_for_coverage(state, reason, head)
 
   # AC4. `{:unknown, _}` is a pause, and a pause needs a bound: wait it out for
   # `@coverage_unknown_grace_polls`, then park — one page, no further merge
@@ -4715,6 +4723,85 @@ defmodule Arbiter.Worker.Watchdog do
 
   defp restore_poll_ceiling(%{coverage_park_poll: poll} = state),
     do: %{state | max_polls: state.base_max_polls, poll_count: poll, coverage_park_poll: nil}
+
+  # bd-954ym8 / #134. Is `head` the approved commit plus a clean integration of
+  # the PR's base branch? Decided by `Arbiter.Reviews.ConflictResolution` in the
+  # task's checkout (never the forge's compare: the question is about trees).
+  # Only a `:clean` answer covers, and covering writes the `:mechanical` row
+  # that says why — derived from the approval it rests on — plus a counter
+  # event, before the merge is authorised. A hand-resolved conflict, any
+  # authored content, a head or approved commit git cannot resolve, a repo we
+  # cannot reach and a row that will not persist all answer `:no`: the head
+  # takes the ordinary route back to review, where the ReviewGate gives a
+  # resolution its scoped round.
+  defp cover_clean_integration(%{mr_base_ref: base} = state, head)
+       when is_binary(base) and base != "" and is_binary(head) do
+    with {:ok, coverage} <- safe_coverage(state),
+         approved when approved != [] <- approved_heads(state, coverage, head),
+         {:ok, {:clean, info}} <-
+           LocalCompare.classify_integration(local_repo(state), base, approved, head),
+         %{id: parent} <- Enum.find(coverage, &(&1.head_sha == info.approved)),
+         {:ok, [diff], _source} <- compare_diffs(state, base, [head]),
+         fingerprint when is_binary(fingerprint) <- Mergers.NetDiff.fingerprint(diff),
+         {:ok, _entry} <-
+           Coverage.record(%{
+             task_id: state.task_id,
+             mr_ref: state.mr_ref,
+             head_sha: head,
+             base_ref: base,
+             net_diff_id: fingerprint,
+             kind: :mechanical,
+             source: :watchdog,
+             derived_from: parent
+           }) do
+      reason =
+        "head #{head} is exactly the approved commit #{info.approved} with #{base} " <>
+          "integrated (no conflicted region, no other change): covered by that approval, " <>
+          "no review round"
+
+      Logger.info("Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} #{reason}; merging")
+
+      ConflictReview.record("auto_cover", %{
+        task_id: state.task_id,
+        workspace_id: workspace_id(state),
+        mr_ref: state.mr_ref,
+        head: head,
+        site: "watchdog",
+        approved: info.approved,
+        reason: reason
+      })
+
+      :covered
+    else
+      _ -> :no
+    end
+  rescue
+    e ->
+      Logger.warning(
+        "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} clean-integration check " <>
+          "crashed (#{Exception.message(e)}); treating the head as unreviewed"
+      )
+
+      :no
+  catch
+    :exit, _ -> :no
+  end
+
+  defp cover_clean_integration(_state, _head), do: :no
+
+  # The commits an approval stands on, newest first: every coverage row, plus
+  # the recorded reviewed SHA when no row names it (a flag-off workspace).
+  defp approved_heads(state, coverage, head) do
+    rows =
+      coverage
+      |> Enum.sort_by(&DateTime.to_unix(&1.covered_at, :microsecond), :desc)
+      |> Enum.map(& &1.head_sha)
+
+    ([reviewed_sha(state)] ++ rows)
+    |> Enum.filter(&is_binary/1)
+    |> Enum.uniq()
+    |> Enum.reject(&(&1 == head))
+  end
 
   # P7 (bd-60r6wp / #1738, §4.5 / AC2). The legacy guard just authorised a
   # merge on `base_merge_only?/3`'s content-equality proof — a clean rebase or
@@ -4984,6 +5071,13 @@ defmodule Arbiter.Worker.Watchdog do
         )
 
         record_content_equal_coverage(state, live)
+        {:merge, live, %{state | reviewed_sha: live}}
+
+      # bd-954ym8 / #134: a head that is exactly the approved commit with the
+      # target integrated (no conflict, no other change) — which the net-diff
+      # equality above cannot see once the integration shifted a hunk's
+      # context. Covered by the approval; no review round.
+      cover_clean_integration(state, live) == :covered ->
         {:merge, live, %{state | reviewed_sha: live}}
 
       true ->

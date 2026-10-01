@@ -135,6 +135,13 @@ defmodule Arbiter.ReleaseTest do
       assert report.inserted == 0
     end
 
+    test ":attention_spans runs without Mix and reports on an empty corpus" do
+      report = Release.backfill(:attention_spans, [])
+
+      assert report.versions == 0
+      assert report.inserted == 0
+    end
+
     test ":issue_repos dry run reports the plan and writes nothing" do
       {:ok, ws} =
         Ash.create(Workspace, %{

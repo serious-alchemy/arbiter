@@ -1447,7 +1447,9 @@ defmodule Arbiter.MCP.Catalog do
       description:
         "List internal ReviewGate round outcomes for a ticket (bd-aqyjuc): one row per reviewer " <>
           "or implementer pass, oldest-first. Each row carries the round number, role " <>
-          "(review/impl), verdict (approve/request_changes, nil for impl), findings text, " <>
+          "(review/impl, or conflict_review for a scoped review of hand-resolved merge/rebase " <>
+          "conflicts — bd-954ym8, which also returns `conflict_review` counts of auto-covered " <>
+          "clean rebases, scoped reviews and fallbacks to a full review), verdict (approve/request_changes, nil for impl), findings text, " <>
           "finding count, the model that ran the pass, its cost, and whether it converged — " <>
           "and, under `review_agent.cross_family` (bd-a1ke2c), the reviewer's model family, " <>
           "the implementer's, and `same_family_fallback` with its reason when no other family " <>

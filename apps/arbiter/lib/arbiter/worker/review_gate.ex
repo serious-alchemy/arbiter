@@ -102,6 +102,31 @@ defmodule Arbiter.Worker.ReviewGate do
   own continuity is the prior implementer↔reviewer thread carried in
   `rereview_prompt/1`.
 
+  ## Conflict-resolution review (bd-954ym8 / #134)
+
+  Main moving under an approved PR forces a rebase or merge, and that head is
+  not a new piece of work to judge. Before paying for a reviewer the gate asks
+  `Arbiter.Reviews.ConflictResolution` what the head adds over a commit the PR
+  already has coverage for, once the target branch's own changes are accounted
+  for:
+
+    * **clean integration** — covered by that approval with a `:mechanical`
+      coverage row and the reviewed-SHA stamp, no round, reported as an APPROVE
+      that names why;
+    * **hand-resolved conflicts only** — a *scoped* round, recorded as
+      `role: :conflict_review`, at the standard tier on a short timeout, shown
+      just the conflicted regions (both sides and the resolution). The reviewer
+      is chosen by the same cross-family routing as any pass, so it differs
+      from the family that resolved. Its APPROVE covers the head like any other;
+      a REQUEST_CHANGES goes through the ordinary revise loop and the fixed head
+      is reviewed in full;
+    * **anything else** (a hunk that is neither the target's nor inside a
+      conflicted region, a fix commit, git unable to say) — the ordinary review.
+
+  `Arbiter.Reviews.ConflictReview` counts all of it (`review_gate_rounds_list`
+  reports the counts); `review_gate.conflict_review: false` turns the path off
+  for a workspace.
+
   ## Verdict protocol
 
   The reviewer emits, on its own line:
@@ -168,6 +193,8 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.ReviewGate.Round
   alias Arbiter.Reviews.Checkout
+  alias Arbiter.Reviews.ConflictResolution
+  alias Arbiter.Reviews.ConflictReview
   alias Arbiter.Reviews.Coverage
   alias Arbiter.Reviews.PushState
   alias Arbiter.Tasks.Issue
@@ -783,6 +810,15 @@ defmodule Arbiter.Worker.ReviewGate do
       # fingerprints the whole `diff_range/1`, because that row has to describe
       # everything the PR would merge.
       delta_base_sha: nil,
+      # bd-954ym8 / #134: the `Arbiter.Reviews.ConflictResolution` info (the
+      # approved commit, the target commits and every hand-resolved conflict
+      # region) while this round is a SCOPED conflict-resolution review —
+      # nil for every ordinary round. Set once at reviewer spawn by
+      # `conflict_path/1`, read by `review_prompt/1`, the reviewer tier and
+      # timeout, the verdict guards and the round row's `role`, and cleared
+      # when the next round starts: a head the resolution review sent back is
+      # reviewed in full after the fix.
+      conflict_review: nil,
       # bd-6r8caj: the findings still open against this work, carried across
       # rounds with stable `F<round>.<n>` ids. A round that rejects appends its
       # own findings and drops the ones the round dispositioned as addressed or
@@ -941,7 +977,11 @@ defmodule Arbiter.Worker.ReviewGate do
         escalate_pre_review(state, reason, :empty_diff)
 
       :ok ->
-        state |> with_delta_scope() |> launch_first_reviewer()
+        case conflict_path(state) do
+          {:covered, state} -> {:stop, :normal, state}
+          {:scoped, state} -> launch_first_reviewer(state)
+          {:full, state} -> state |> with_delta_scope() |> launch_first_reviewer()
+        end
     end
   end
 
@@ -1702,6 +1742,13 @@ defmodule Arbiter.Worker.ReviewGate do
     gap = approval_gap(state, findings)
 
     cond do
+      # bd-954ym8: a scoped conflict review has no acceptance criteria to
+      # break down and no earlier findings to disposition — it judges only
+      # the resolved hunks, so the criteria and gap guards (which exist for
+      # a whole-branch review) do not apply to its APPROVE.
+      conflict_round?(state) ->
+        finalize_approval(state, verdict, findings)
+
       ReviewFindings.gap?(gap) ->
         run_verdict_guard(:unaddressed_findings, state, findings, gap)
 
@@ -2406,6 +2453,9 @@ defmodule Arbiter.Worker.ReviewGate do
         # so a provider that timed out on the previous one starts even again.
         reviewer_provider: nil,
         reviewer_timeouts: [],
+        # bd-954ym8: only the first round of a head is the scoped conflict
+        # review; whatever it sent back is reviewed in full after the fix.
+        conflict_review: nil,
         restarted_on_remote_head: Keyword.get(opts, :restarted_on_remote_head)
     }
 
@@ -2832,7 +2882,7 @@ defmodule Arbiter.Worker.ReviewGate do
     with %Workspace{} = ws <- load_workspace(state.workspace_id),
          true <- ReviewerRouting.enabled?(ws) do
       ReviewerRouting.select(ws, state.task_id,
-        tier: reviewer_model_tier(ws.config, state.task_id),
+        tier: round_reviewer_tier(state, ws.config),
         exclude: exclude,
         security: session_security_policy(ws, state, :reviewer)
       )
@@ -3822,7 +3872,7 @@ defmodule Arbiter.Worker.ReviewGate do
         run_id: run_id,
         round: state.round,
         fix_round_attempt: Map.get(state, :fix_round_attempt, 0),
-        role: role,
+        role: row_role(state, role),
         verdict: verdict,
         findings: findings,
         reviewer_model: reviewer_model,
@@ -3837,6 +3887,7 @@ defmodule Arbiter.Worker.ReviewGate do
 
     case Ash.create(Round, attrs) do
       {:ok, _row} ->
+        note_conflict_round_outcome(state, role, verdict)
         :ok
 
       {:error, reason} ->
@@ -3930,7 +3981,7 @@ defmodule Arbiter.Worker.ReviewGate do
 
   defp reviewer_tier_for(state) do
     case load_workspace(state.workspace_id) do
-      %Workspace{config: config} -> reviewer_model_tier(config, state.task_id)
+      %Workspace{config: config} -> round_reviewer_tier(state, config)
       _ -> nil
     end
   end
@@ -4483,7 +4534,11 @@ defmodule Arbiter.Worker.ReviewGate do
     # (not after) so `build_session_opts/5` — invoked from inside
     # `spawn_worker/5` — hands the adapter this pass's value instead of the
     # previous pass's `state.timeout_ms`.
-    timeout_ms = resolve_timeout_ms(state.workspace_id, state.timeout_override_ms)
+    timeout_ms =
+      state.workspace_id
+      |> resolve_timeout_ms(state.timeout_override_ms)
+      |> round_timeout_ms(state, role)
+
     state = %{state | timeout_ms: timeout_ms} |> route_reviewer_pass(role, command)
 
     case guarded_spawn_worker(state, id, role, prompt, command) do
@@ -4805,6 +4860,7 @@ defmodule Arbiter.Worker.ReviewGate do
     agent_opts =
       (ws
        |> agent_opts_for_role(role_atom, state.task_id, adapter)
+       |> apply_conflict_tier(state, role)
        |> apply_reviewer_selection(state, role)) ++
         [
           security: session_security_policy(ws, state, role),
@@ -5251,6 +5307,9 @@ defmodule Arbiter.Worker.ReviewGate do
   Public so it can be inspected in tests.
   """
   @spec review_prompt(map()) :: String.t()
+  def review_prompt(%{conflict_review: %{} = info} = state),
+    do: conflict_review_prompt(state, info)
+
   def review_prompt(state) do
     task = load_task(state.task_id)
 
@@ -5618,6 +5677,280 @@ defmodule Arbiter.Worker.ReviewGate do
     do: delta_guidance(state, covered)
 
   defp scope_guidance(state), do: pr_review_block(state) <> diff_guidance(state)
+
+  # ---- conflict-resolution review (bd-954ym8 / #134) ------------------------
+  #
+  # Main moving under an approved PR forces a rebase or a merge, and that head
+  # used to cost a whole review round although nothing the reviewer judged had
+  # changed. `Arbiter.Reviews.ConflictResolution` says what the head adds over
+  # the approved commit once the target's own changes are accounted for, and
+  # the gate acts on the three answers *before* a reviewer is paid for:
+  #
+  #   * clean       — the head IS the mechanical integration. Cover it with a
+  #                   `:mechanical` coverage row and the reviewed-SHA stamp
+  #                   (the same two writes an APPROVE makes) and report the
+  #                   approval with no round at all.
+  #   * resolution  — only collided regions were hand-resolved. Review just
+  #                   those: a `:conflict_review` round at the standard tier
+  #                   with a short timeout, shown the regions and nothing else.
+  #   * otherwise   — authored content (or git could not say): the ordinary
+  #                   review, exactly as before. Every doubt lands here.
+  #
+  # Skipped — silently, the ordinary review — whenever there is nothing to
+  # classify against: no worktree on the task branch, no covered head for the
+  # PR (a first review), or the head is already covered.
+  @conflict_review_tier "standard"
+  @conflict_review_timeout_ms 5 * 60 * 1000
+
+  defp conflict_path(state) do
+    with true <- conflict_review_enabled?(state),
+         wt when is_binary(wt) <- Map.get(state, :worktree_path),
+         true <- worktree_on_expected_branch?(state),
+         [_ | _] = covered <- Coverage.covered_heads(coverage_mr_ref(state)),
+         {:ok, head} <- reviewed_head(state),
+         false <- head in covered do
+      target = conflict_target_ref(wt, state.target_branch)
+
+      case ConflictResolution.classify(wt, covered, head, target) do
+        {:clean, info} -> cover_clean_integration(state, info)
+        {:resolution, info} -> start_conflict_review(state, info)
+        {_authored_or_unknown, reason} -> conflict_fallback(state, head, reason)
+      end
+    else
+      _ -> {:full, state}
+    end
+  rescue
+    e ->
+      Logger.warning(
+        "ReviewGate: conflict classification crashed for task=#{state.task_id} " <>
+          "(reviewing in full): #{Exception.message(e)}"
+      )
+
+      {:full, state}
+  end
+
+  # On by default; `review_gate.conflict_review: false` returns a workspace to
+  # a full review of every head that follows an approval.
+  defp conflict_review_enabled?(state) do
+    case load_workspace(state.workspace_id) do
+      %Workspace{config: config} ->
+        get_in(config || %{}, ["review_gate", "conflict_review"]) != false
+
+      _ ->
+        true
+    end
+  end
+
+  # The gate merges `origin/<target>` into the branch before it gets here
+  # (`prepare_branch_for_review/1`), so that is the tip the head integrates.
+  defp conflict_target_ref(wt, target) do
+    remote = "origin/" <> target
+
+    case git_out(wt, ["rev-parse", "--verify", "--quiet", remote]) do
+      {:ok, _} -> remote
+      :error -> target
+    end
+  end
+
+  defp conflict_review_attrs(state, head) do
+    %{
+      task_id: state.task_id,
+      workspace_id: state.workspace_id,
+      mr_ref: coverage_mr_ref(state),
+      head: head,
+      site: "review_gate"
+    }
+  end
+
+  defp conflict_fallback(state, head, reason) do
+    label = ConflictResolution.reason_label(reason)
+
+    Logger.info(
+      "ReviewGate: task=#{state.task_id} head #{head} carries content beyond integrating " <>
+        "`#{state.target_branch}` into the approved commit (#{label}); reviewing in full"
+    )
+
+    ConflictReview.record("fallback", Map.put(conflict_review_attrs(state, head), :reason, label))
+    {:full, state}
+  end
+
+  defp start_conflict_review(state, info) do
+    regions = info.files |> Enum.map(&length(&1.regions)) |> Enum.sum()
+
+    Logger.info(
+      "ReviewGate: task=#{state.task_id} head #{info.head} is the approved commit " <>
+        "#{info.approved} plus `#{state.target_branch}` with #{regions} hand-resolved conflict " <>
+        "region(s) in #{length(info.files)} file(s); running a scoped conflict review"
+    )
+
+    ConflictReview.record(
+      "scoped_review",
+      state
+      |> conflict_review_attrs(info.head)
+      |> Map.merge(%{approved: info.approved, files: Enum.map(info.files, & &1.path)})
+    )
+
+    {:scoped, %{state | conflict_review: info}}
+  end
+
+  defp cover_clean_integration(state, info) do
+    case record_mechanical_coverage(state, info) do
+      :ok ->
+        stamp_reviewed_head(state)
+
+        reason =
+          "head #{info.head} is exactly the approved commit #{info.approved} with " <>
+            "`#{state.target_branch}` integrated (no conflicted region, no other change): " <>
+            "covered by that approval, no review round"
+
+        Logger.info("ReviewGate: task=#{state.task_id} auto-covered — #{reason}")
+
+        ConflictReview.record(
+          "auto_cover",
+          state
+          |> conflict_review_attrs(info.head)
+          |> Map.merge(%{approved: info.approved, reason: reason})
+        )
+
+        {:covered, finish(state, {:approve, "VERDICT: APPROVE\n#{reason}"})}
+
+      {:error, why} ->
+        conflict_fallback(state, info.head, {:coverage_unrecordable, why})
+    end
+  end
+
+  # The `:mechanical` row derived from the approval's own row. Every way this
+  # can fail answers `{:error, _}` and the head is reviewed in full: a cover
+  # that could not be recorded would leave the merge guard refusing a head the
+  # gate had just told the author was approved.
+  defp record_mechanical_coverage(state, info) do
+    mr_ref = coverage_mr_ref(state)
+
+    with {:ok, task_id} <- present(Map.get(state, :task_id), :no_task_id),
+         {:ok, mr_ref} <- present(mr_ref, :no_mr_ref),
+         {:ok, base_ref} <- present(Map.get(state, :target_branch), :no_base_ref),
+         {:ok, head} <- reviewed_head(state),
+         true <- head == info.head or {:error, :head_moved},
+         {:ok, net_diff_id} <- coverage_net_diff_id(state),
+         %{id: parent} <-
+           Enum.find(Coverage.for_mr(mr_ref), &(&1.head_sha == info.approved)) ||
+             {:error, :no_approved_row},
+         {:ok, _entry} <-
+           coverage_writer().(%{
+             task_id: task_id,
+             mr_ref: mr_ref,
+             head_sha: head,
+             base_ref: base_ref,
+             net_diff_id: net_diff_id,
+             kind: :mechanical,
+             source: :review_gate,
+             derived_from: parent
+           }) do
+      :ok
+    else
+      {:error, why} -> {:error, why}
+      other -> {:error, other}
+    end
+  rescue
+    e -> {:error, {:exception, Exception.message(e)}}
+  end
+
+  defp conflict_round?(state), do: is_map(Map.get(state, :conflict_review))
+
+  # A conflict round's rows carry their own role so the rounds list and cost
+  # reports can tell the cheap pass from a full review. Only reviewer rows move;
+  # the implementer's revise passes stay `:impl`.
+  defp row_role(state, :review),
+    do: if(conflict_round?(state), do: :conflict_review, else: :review)
+
+  defp row_role(_state, role), do: role
+
+  defp note_conflict_round_outcome(state, :review, verdict)
+       when verdict in [:approve, :request_changes] do
+    if conflict_round?(state) do
+      outcome = if verdict == :approve, do: "scoped_approved", else: "scoped_rejected"
+      ConflictReview.record(outcome, conflict_review_attrs(state, state.conflict_review.head))
+    end
+
+    :ok
+  end
+
+  defp note_conflict_round_outcome(_state, _role, _verdict), do: :ok
+
+  defp round_reviewer_tier(state, config) do
+    if conflict_round?(state),
+      do: @conflict_review_tier,
+      else: reviewer_model_tier(config, state.task_id)
+  end
+
+  # The short budget applies to the reviewer's passes of a conflict round only,
+  # never the revise implementer's, and never over an explicit override.
+  defp round_timeout_ms(ms, %{timeout_override_ms: nil} = state, :reviewer) do
+    if conflict_round?(state), do: min(ms, @conflict_review_timeout_ms), else: ms
+  end
+
+  defp round_timeout_ms(ms, _state, _role), do: ms
+
+  defp apply_conflict_tier(opts, state, :reviewer) do
+    if conflict_round?(state),
+      do: Keyword.put(opts, :model_tier, @conflict_review_tier),
+      else: opts
+  end
+
+  defp apply_conflict_tier(opts, _state, _role), do: opts
+
+  defp conflict_review_prompt(state, info) do
+    task = load_task(state.task_id)
+
+    """
+    You are a REVIEWER worker — a ReviewGate running a SCOPED CONFLICT-RESOLUTION
+    REVIEW. You did NOT write this code and you did NOT resolve these conflicts.
+
+    Task: #{state.task_id}
+    Title: #{task.title}
+
+    Branch `#{state.branch}` was reviewed and APPROVED at commit `#{info.approved}`.
+    Since then `#{state.target_branch}` moved, and integrating it collided with the
+    approved change in the regions below. Someone resolved those collisions by hand;
+    the result is head `#{info.head}`.
+
+    Everything OUTSIDE these regions has been machine-verified: it is exactly the
+    approved change plus `#{state.target_branch}`'s own commits, byte for byte. Do
+    NOT review it, and do NOT raise findings about code outside the regions below.
+    #{head_sha_instruction(state)}#{review_checkout_block(state)}
+    The conflicted regions — the TARGET side, the BRANCH side (the approved change)
+    and the RESOLUTION chosen — are:
+
+    #{ConflictResolution.render(info)}
+    Judge ONLY whether each RESOLUTION preserves the intent of BOTH sides, or breaks
+    something: does it drop a change either side made, apply one twice, keep a
+    name/signature/call the other side removed or renamed, or leave code that no
+    longer compiles or type-checks? You may read the surrounding code in your
+    checkout (`git show #{info.head}:<path>`) to judge, and the approved change with
+    `git diff #{info.base_old}..#{info.approved}`.
+
+    *** ABSOLUTE RULE: DO NOT boot the app. No `mix phx.server`, no `iex -S mix`,
+    no `mix run`. (Reading files and running `git` is fine.)
+
+    #{async_tool_block(state)}
+
+    #{EvidenceIntegrity.reviewer_block()}
+    When you have decided, print your verdict on its own line, EXACTLY one of:
+
+        VERDICT: APPROVE
+        VERDICT: REQUEST_CHANGES
+
+    APPROVE means every resolution preserves both sides' intent. If you
+    REQUEST_CHANGES you MUST follow the verdict with an ENUMERATED list of concrete
+    findings — each with a severity, a `file:line` location, and a suggested fix. No
+    CRITERIA breakdown is needed for this scoped review. Output only structured
+    review content — no roleplay persona, character, or theatrical flourish.
+
+    Then print, on a line by itself:
+
+        arb done
+    """
+  end
 
   # ---- P7: delta-scoped re-review (bd-60r6wp / #1738, §4.5) ----------------
   #

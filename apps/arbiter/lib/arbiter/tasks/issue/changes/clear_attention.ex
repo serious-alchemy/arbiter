@@ -24,6 +24,7 @@ defmodule Arbiter.Tasks.Issue.Changes.ClearAttention do
   use Ash.Resource.Change
 
   alias Arbiter.Messages.Message
+  alias Arbiter.Tasks.Issue.Changes.RecordAttentionSpan
   alias Ash.Changeset
 
   @fields [
@@ -53,6 +54,7 @@ defmodule Arbiter.Tasks.Issue.Changes.ClearAttention do
 
     changeset
     |> Changeset.force_change_attributes(fields)
+    |> RecordAttentionSpan.record()
     |> resolve_after_commit()
   end
 

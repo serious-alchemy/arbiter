@@ -123,6 +123,9 @@ defmodule Arbiter.Release do
       (`:apply?`, `:repo`, `:since`, `:until`, `:limit`)
     * `:gitlab_mr_links` → `Arbiter.Tasks.MergerUrlBackfill` (rewrites
       numeric-id GitLab MR links; `:apply?`)
+    * `:attention_spans` → `Arbiter.Tasks.AttentionSpanBackfill.backfill/1`
+      (`:apply?`, `:since`) — the one-off `ticket_attention_spans` backfill
+      (bd-cq1wsp); idempotent
     * `:task_statuses` → `Arbiter.Tasks.StatusBackfill.proposals/1` +
       `apply!/1` (`:apply?`, `:branch`, `:repo_path`) — `:repo_path` defaults
       to `File.cwd!()`, which under `bin/arbiter eval` is wherever the
@@ -240,6 +243,26 @@ defmodule Arbiter.Release do
     no session id:     #{result.no_session_id}
     unreadable file:   #{result.unreadable}
     write failures:    #{result.failed}
+    """)
+
+    result
+  end
+
+  def backfill(:attention_spans, opts) do
+    start_release_repo!()
+    apply? = Keyword.get(opts, :apply?, false)
+
+    result = Arbiter.Tasks.AttentionSpanBackfill.backfill(opts)
+
+    IO.puts(banner("attention spans", apply?, opts[:hint]))
+
+    IO.puts("""
+
+    versions read:     #{result.versions}
+    escalations read:  #{result.escalations}
+    spans rebuilt:     #{result.spans}
+    already present:   #{result.existing}
+    #{String.pad_trailing(if(apply?, do: "inserted", else: "would insert") <> ":", 19)}#{if apply?, do: result.inserted, else: result.planned}
     """)
 
     result

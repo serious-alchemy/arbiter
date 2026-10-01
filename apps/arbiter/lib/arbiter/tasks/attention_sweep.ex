@@ -33,6 +33,13 @@ defmodule Arbiter.Tasks.AttentionSweep do
   operator's swimlane. It has no verify-specific window; it stays with the
   coordinator until the verification is recorded.
 
+  Each sweep also records the derived items as attention spans (bd-cq1wsp,
+  `Arbiter.Tasks.AttentionSpans.sync_derived/3`): it reads every owner's items,
+  opens a span for a derived one on first sight and closes it once the item is
+  gone. Those spans live in the database, so unlike the first-seen clock they
+  survive a restart. The baseline sweep records them too — the span opens at
+  the first sighting this process could make.
+
   `run/1` is one sweep, with an injectable clock (`:now`) and first-seen map
   (`:seen`), and is what the tests drive. Only the primary instance sweeps.
 
@@ -49,6 +56,7 @@ defmodule Arbiter.Tasks.AttentionSweep do
 
   alias Arbiter.Tasks.Attention
   alias Arbiter.Tasks.AttentionLimits
+  alias Arbiter.Tasks.AttentionSpans
   alias Arbiter.Tasks.Workspace
 
   @default_interval_ms 60_000
@@ -77,12 +85,15 @@ defmodule Arbiter.Tasks.AttentionSweep do
     now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
     seen = Keyword.get(opts, :seen, %{})
 
-    items =
+    all_items =
       opts
       |> Keyword.take([:workers, :issues, :workspace_id])
-      |> Keyword.merge(owner: :coordinator, now: now)
+      |> Keyword.merge(now: now)
       |> Attention.items()
 
+    AttentionSpans.sync_derived(all_items, span_scope(opts), now)
+
+    items = Enum.filter(all_items, &(&1.attention.owner == :coordinator))
     seen = track(items, seen, now, Keyword.get(opts, :announce, true))
     limits = limits_by_workspace(items)
 
@@ -165,6 +176,15 @@ defmodule Arbiter.Tasks.AttentionSweep do
   defp schedule(ms), do: Process.send_after(self(), :sweep, ms)
 
   # ---- sweep ----------------------------------------------------------------
+
+  # What this sweep read, so the span sync closes only what it looked at.
+  defp span_scope(opts) do
+    cond do
+      issues = Keyword.get(opts, :issues) -> {:tickets, Enum.map(issues, & &1.id)}
+      ws_id = Keyword.get(opts, :workspace_id) -> {:workspace, ws_id}
+      true -> :all
+    end
+  end
 
   # The first-seen clock of the derived items still listed; a stored item
   # carries its own `since`. A derived item new to the map is announced.

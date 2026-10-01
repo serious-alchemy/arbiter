@@ -41,6 +41,11 @@ defmodule ArbiterWeb.Api.EventController do
     * gate_resolved  — the coordinator recorded its answer to a gate escalation
                        (bd-4qjl0q): `task_id`, `gate`, `decision`, `actor`,
                        `round` (opt-in only — pass subscribe=...,gate_resolved)
+    * conflict_review — a head after an approved commit was classified by the
+                       conflict-resolution review path (bd-954ym8): `outcome`
+                       (auto_cover / scoped_review / scoped_approved /
+                       scoped_rejected / fallback), `task_id`, `head`
+                       (opt-in only — pass subscribe=...,conflict_review)
 
   Wire format: one newline-terminated JSON object per event. A bare newline
   is sent every 30 seconds on idle connections as a keepalive. Every event
