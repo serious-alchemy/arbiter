@@ -73,6 +73,7 @@ defmodule ArbiterWeb.Api.MessageController do
     attrs =
       params
       |> Map.take(~w(kind from_ref to_ref subject body task_ref directive_ref workspace_id))
+      |> pin_worker_sender(conn.assigns[:mcp_scope])
       |> coerce_kind()
       |> Message.hand_written()
       |> mark_unverified_origin()
@@ -87,6 +88,22 @@ defmodule ArbiterWeb.Api.MessageController do
         err
     end
   end
+
+  # bd-asawcq: a worker token sends as its own task, into its own workspace,
+  # whatever the body claims — the REST twin of the `message_send` MCP tool's
+  # envelope. A worker cannot direct (`arb message <task> <text>` sends
+  # `kind: direction` from "coordinator"), so a direction becomes a flag.
+  defp pin_worker_sender(attrs, %Arbiter.MCP.Scope{tier: :worker} = scope) do
+    attrs
+    |> Map.put("from_ref", scope.task_id)
+    |> Map.put("workspace_id", scope.workspace_id)
+    |> Map.update("kind", "flag", fn
+      kind when kind in [nil, "direction"] -> "flag"
+      kind -> kind
+    end)
+  end
+
+  defp pin_worker_sender(attrs, _scope), do: attrs
 
   # bd-2nbu7a / #15: `arb` defaults to http://127.0.0.1:4848, so an agent CLI in
   # a throwaway sandbox on this host (test fixture, nested install) posts to the

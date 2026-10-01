@@ -204,7 +204,14 @@ defmodule ArbiterWeb.PostMergeVerificationSocketTest do
 
   defp request!(method, url, body \\ nil) do
     opts =
-      [method: method, url: url, retry: false, receive_timeout: 10_000] ++
+      [
+        method: method,
+        url: url,
+        retry: false,
+        receive_timeout: 10_000,
+        # `/api` needs a token (bd-asawcq), as the operator's `arb` sends one.
+        auth: {:bearer, Arbiter.MCP.Scope.mint_coordinator(nil)}
+      ] ++
         if(body, do: [json: body], else: [])
 
     Req.request!(opts)

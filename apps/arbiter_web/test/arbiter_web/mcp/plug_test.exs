@@ -5,7 +5,10 @@ defmodule ArbiterWeb.MCP.PlugTest do
   alias Arbiter.Tasks.Workspace
   alias Arbiter.MCP.Scope
 
-  setup %{conn: conn} do
+  setup do
+    # `/mcp` owns its own auth; start from no Authorization header at all,
+    # not ConnCase's default coordinator `/api` token.
+    conn = Phoenix.ConnTest.build_conn()
     {:ok, ws} = Ash.create(Workspace, %{name: "mcp-plug-ws", prefix: "mcpw"})
     {:ok, task} = Ash.create(Issue, %{title: "plug task", workspace_id: ws.id})
 

@@ -4,7 +4,14 @@ defmodule ArbiterWeb.Plugs.ApiAuthTest do
   alias Arbiter.MCP.Scope
 
   # A stable API route we can hit to test auth without caring about business logic.
+  # It is one of the two `:anonymous` routes (`ArbiterWeb.ApiPolicy`).
   @test_path "/api/version"
+
+  # These tests are about who the caller is, so start from no Authorization
+  # header at all rather than ConnCase's default coordinator token.
+  setup do
+    {:ok, conn: Phoenix.ConnTest.build_conn()}
+  end
 
   defp loopback_conn(conn) do
     %{conn | remote_ip: {127, 0, 0, 1}}
@@ -120,6 +127,48 @@ defmodule ArbiterWeb.Plugs.ApiAuthTest do
       conn = conn |> non_loopback_conn() |> with_bearer(token) |> get(@test_path)
       assert conn.status == 200
       assert %Scope{tier: :coordinator} = conn.assigns[:mcp_scope]
+    end
+  end
+
+  # bd-asawcq: the exact requests the coordinator confirmed on live v0.2.6
+  # went through with no token at all.
+  describe "anonymous loopback outside the :anonymous routes" do
+    test "a ticket read is 401", %{conn: conn} do
+      conn = conn |> loopback_conn() |> get("/api/issues/bd-9ck2a7")
+      assert json_response(conn, 401)["error"]["message"] =~ "Bearer"
+    end
+
+    test "a workspace config PATCH is 401, not a validation error", %{conn: conn} do
+      conn = conn |> loopback_conn() |> patch("/api/workspaces/default/config", %{})
+      assert json_response(conn, 401)["error"]["message"] =~ "Bearer"
+    end
+
+    test "an IPv6 loopback dispatch is 401", %{conn: conn} do
+      conn = conn |> loopback_ipv6_conn() |> post("/api/workers/dispatch", %{task_id: "bd-x"})
+      assert conn.status == 401
+    end
+  end
+
+  describe "a valid token the route's policy refuses" do
+    test "is 403 with the API error shape", %{conn: conn} do
+      token = Scope.mint_worker(%{id: "bd-w", workspace_id: "ws-w"})
+
+      conn =
+        conn
+        |> loopback_conn()
+        |> with_bearer(token)
+        |> post("/api/scheduler/pause", %{})
+
+      assert json_response(conn, 403)["error"]["message"] =~ "worker-tier"
+    end
+  end
+
+  # The browser dashboard is not behind `:api`: it is served by the
+  # `:browser` pipeline (session + CSRF), and needs no bearer token.
+  describe "the browser dashboard" do
+    test "renders without any token, over loopback", %{conn: conn} do
+      conn = conn |> loopback_conn() |> get("/")
+      assert html_response(conn, 200)
     end
   end
 end

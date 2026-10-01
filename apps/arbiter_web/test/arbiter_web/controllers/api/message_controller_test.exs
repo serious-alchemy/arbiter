@@ -123,7 +123,7 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
       data = json_response(conn, 200)["data"]
       assert Enum.all?(data, &(&1["kind"] == "notification"))
 
-      conn = get(build_conn(), ~p"/api/messages", %{to_ref: "bd-1"})
+      conn = get(coordinator_conn(), ~p"/api/messages", %{to_ref: "bd-1"})
       data = json_response(conn, 200)["data"]
       assert [%{"body" => "for bd-1"}] = data
     end
