@@ -945,7 +945,7 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
         %{
           "type" => "message",
           "role" => "assistant",
-          "content" => "all good now arb ",
+          "content" => "all good now\narb ",
           "delta" => true
         },
         %{"type" => "message", "role" => "assistant", "content" => "done\n", "delta" => true}
@@ -1245,7 +1245,7 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
           "step_update" => %{
             "step_type" => "agent_response",
             "state" => "IN_PROGRESS",
-            "text_delta" => "all good now arb do"
+            "text_delta" => "all good now\narb do"
           }
         },
         %{

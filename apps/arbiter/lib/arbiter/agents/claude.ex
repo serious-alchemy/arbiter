@@ -52,7 +52,7 @@ defmodule Arbiter.Agents.Claude do
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Worker.ClaudeSession
 
-  @done_regex ~r/\barb done\b/
+  @done_regex ~r/(?:\A|\n)[^\p{L}\p{N}\n]*arb done[^\p{L}\p{N}]*\z/u
 
   # Linux enforces MAX_ARG_STRLEN = 131_072 bytes as a *per-argument* limit on
   # execve() (stricter than overall ARG_MAX). A prompt element that exceeds

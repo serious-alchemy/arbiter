@@ -209,7 +209,9 @@ defmodule Arbiter.Board.Autopilot do
 
   use GenServer
 
+  alias Arbiter.Board.Drain
   alias Arbiter.Board.Snapshot
+  alias Arbiter.Boot.ResumeGate
   alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Tasks.Issue
   alias Arbiter.Workflows.MergeQueue.ConflictResolver
@@ -313,6 +315,18 @@ defmodule Arbiter.Board.Autopilot do
   """
   @spec tick(GenServer.server(), timeout()) :: outcome()
   def tick(server \\ __MODULE__, timeout \\ 5_000), do: GenServer.call(server, :tick, timeout)
+
+  @doc """
+  The boot reconcile sweep has finished (`Arbiter.Boot.ResumeGate`): plan now.
+  A no-op when no autopilot is running.
+  """
+  @spec resumes_settled(GenServer.server()) :: :ok
+  def resumes_settled(server \\ __MODULE__) do
+    case GenServer.whereis(server) do
+      nil -> :ok
+      pid -> send(pid, :resumes_settled) && :ok
+    end
+  end
 
   @doc """
   The board as this process sees it, with `:paused` set from its own state so
@@ -513,6 +527,8 @@ defmodule Arbiter.Board.Autopilot do
   # A reactive trigger's debounce elapsed (or a dispatch completion asked for
   # an immediate pass by sending this with no timer behind it). Either way,
   # this is the one place a reactively-requested pass actually runs.
+  def handle_info(:resumes_settled, state), do: {:noreply, request_plan(state)}
+
   def handle_info(:run_plan, state) do
     {_outcome, state} = run_pass(%{state | plan_timer: nil})
     {:noreply, state}
@@ -649,7 +665,23 @@ defmodule Arbiter.Board.Autopilot do
   # still changing.
   defp promote(%{dispatching: %{id: id}} = state), do: {{:busy, id}, state}
 
+  # bd-35gvrj: a provider account's cap is read from the live worker registry,
+  # so a pass may only plan against a registry that is complete. Not complete
+  # while the boot reconciler is still re-attaching the runs the restart cut
+  # off (`Arbiter.Boot.ResumeGate`), nor while a resume or dispatch somebody
+  # else started is between stopping/provisioning and registering its worker
+  # (`Drain.dispatch_pending?/0`; e.g. `arb worker resume`, which stops the
+  # prior worker before the new one registers — the account would read one
+  # slot freer than it is). Hold, and look again shortly.
   defp promote(state) do
+    if ResumeGate.open?() and not Drain.dispatch_pending?() do
+      plan(state)
+    else
+      {:idle, request_plan(state)}
+    end
+  end
+
+  defp plan(state) do
     {read_status, snapshot} = read_board(state, [])
     state = if read_status == :ok, do: prune_failures(state, snapshot), else: state
 

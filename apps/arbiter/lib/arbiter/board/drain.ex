@@ -168,6 +168,16 @@ defmodule Arbiter.Board.Drain do
     end
   end
 
+  @doc """
+  Whether any `Arbiter.Worker.Dispatch` dispatch or resume is between starting
+  and returning — the window in which its worker may not be registered yet, so
+  `Arbiter.Accounts.Concurrency.live_count/1` under-reports (bd-35gvrj).
+  """
+  @spec dispatch_pending?() :: boolean()
+  def dispatch_pending? do
+    Enum.any?(tracked_entries(@registry), &(&1.kind == :dispatch_pending))
+  end
+
   defp register(key, value) do
     match?({:ok, _}, Registry.register(@registry, key, value))
   rescue

@@ -389,6 +389,37 @@ defmodule Arbiter.Worker.CommitGateTest do
       assert snap.meta.failure_reason == :no_commits_at_completion
     end
 
+    # bd-c27m5o: a done signal while the ORIGINAL agent process is still alive
+    # must never launch a nudge agent into the same worktree.
+    test "the nudge is not launched while the original agent is still alive",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      path = provision_worktree(repo, "bd-gate/#{task.id}")
+      File.write!(Path.join(path, "half_done.txt"), "still being written\n")
+
+      pid = start_worker(task, repo, path, %{commit_nudge_cap: 1})
+
+      {:ok, port} =
+        Arbiter.Worker.ClaudeSession.start(
+          owner: pid,
+          worktree_path: path,
+          command: ["sh", "-c", "sleep 30"]
+        )
+
+      {:os_pid, os_pid} = Port.info(port, :os_pid)
+
+      send(pid, {:__claude_session_done__, "arb done"})
+      _ = :sys.get_state(pid)
+
+      snap = Worker.state(pid)
+      refute snap.state == :finished
+      assert Map.get(snap.meta, :commit_nudge_attempts, 0) == 0
+      assert map_size(:sys.get_state(pid).claude_sessions) == 1
+
+      assert {_, 0} =
+               System.cmd("kill", ["-0", Integer.to_string(os_pid)], stderr_to_stdout: true)
+    end
+
     test "a review-only worker (reviewer) completes despite zero commits (bd-40j98i)",
          %{repo: repo, ws: ws} do
       # Reviewers operate in review-only mode (meta[:review_only] = true) and

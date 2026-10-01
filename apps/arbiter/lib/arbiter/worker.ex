@@ -4199,14 +4199,33 @@ defmodule Arbiter.Worker do
     if attempts >= cap do
       park_commit_gate(state, reason, :cap_exhausted)
     else
-      case respawn_with_commit_nudge(state, reason) do
-        {:ok, new_state} ->
-          new_state
+      # bd-c27m5o: never launch a nudge agent into a worktree whose original
+      # agent is still running (a done signal can be a false positive, or the
+      # agent may simply still be wrapping up). The run stays live with
+      # `:done_seen` stamped; when the process exits, `on_agent_stopped/3`
+      # re-enters `on_claude_done/1` and the gate is re-evaluated against a
+      # worktree nobody is writing to.
+      if any_session_live?(state) do
+        Logger.info(
+          "Worker: task=#{state.task_id} commit gate tripped (#{reason}) but the agent " <>
+            "is still running; deferring the nudge until it exits"
+        )
 
-        {:error, why} ->
-          park_commit_gate(state, reason, {:respawn_failed, why})
+        state
+      else
+        case respawn_with_commit_nudge(state, reason) do
+          {:ok, new_state} ->
+            new_state
+
+          {:error, why} ->
+            park_commit_gate(state, reason, {:respawn_failed, why})
+        end
       end
     end
+  end
+
+  defp any_session_live?(%State{claude_sessions: sessions}) do
+    Enum.any?(sessions, fn {_port, session} -> is_nil(Map.get(session, :exit_status)) end)
   end
 
   # Build a nudge prompt + port_args from the stashed claude_spawn and relaunch

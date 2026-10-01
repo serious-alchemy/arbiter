@@ -116,8 +116,9 @@ defmodule Arbiter.Tasks.TicketTransition do
 
       description """
       `create`, a `Arbiter.Tasks.Lifecycle.transitions/0` name, `unnamed` for a
-      raw write outside the lifecycle table, or `legacy:<action>` for a
-      backfilled pre-lifecycle row.
+      raw write outside the lifecycle table, `legacy:<action>` for a
+      backfilled pre-lifecycle row, or `reconcile` for the backfill's row that
+      closes a replay ending off the stored state.
       """
     end
 
