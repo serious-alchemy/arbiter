@@ -60,7 +60,7 @@ defmodule ArbiterCli.Cmd.Scheduler do
   end
 
   defp pause(mode) do
-    case Client.post("/api/scheduler/pause", %{}) do
+    case Client.post("/api/scheduler/pause", %{"surface" => "cli"}) do
       {:ok, body} ->
         if mode == :json do
           IO.puts(Jason.encode!(body))
@@ -76,7 +76,7 @@ defmodule ArbiterCli.Cmd.Scheduler do
   end
 
   defp resume(mode) do
-    case Client.post("/api/scheduler/resume", %{}) do
+    case Client.post("/api/scheduler/resume", %{"surface" => "cli"}) do
       {:ok, body} ->
         if mode == :json do
           IO.puts(Jason.encode!(body))
@@ -96,6 +96,7 @@ defmodule ArbiterCli.Cmd.Scheduler do
           IO.puts(Jason.encode!(body))
         else
           IO.puts("Board scheduler is #{SchedulerState.headline(body)}.")
+          emit_changed(body)
           emit_slots(body)
           emit_entries(body)
         end
@@ -183,6 +184,14 @@ defmodule ArbiterCli.Cmd.Scheduler do
     if ctx.mode == :json, do: IO.puts(Jason.encode!(body)), else: IO.puts(text)
     if code != 0, do: Output.halt(code)
   end
+
+  # bd-cl6zjn: when and by whom the pause state last changed, so a pause nobody
+  # remembers making can be traced.
+  defp emit_changed(%{"changed_at" => at, "changed_by" => by})
+       when is_binary(at) or is_binary(by),
+       do: IO.puts("Last changed: #{at || "unknown time"} by #{by || "unknown"}")
+
+  defp emit_changed(_body), do: IO.puts("Last changed: unknown (no pause or resume recorded)")
 
   # bd-asxw4e: the dispatch cap's count, the same one the board header shows.
   defp emit_slots(%{"slots_used" => used} = body) when is_integer(used) do

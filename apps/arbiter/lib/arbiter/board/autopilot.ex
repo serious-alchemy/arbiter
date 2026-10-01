@@ -305,6 +305,9 @@ defmodule Arbiter.Board.Autopilot do
     * `:resume` — seam for tests; a 3-arity `(task_id, kind, opts)` that
       replays a deferred resume. Defaults to `Dispatch.resume/2` /
       `resume_session/2` (bd-92mx1m).
+    * `:notify_paused` — seam for tests; a 2-arity `(actor, surface)` that
+      tells the coordinator's mailbox about a pause (bd-cl6zjn). Defaults to an
+      escalation per workspace.
     * `:escalate` — seam for tests; defaults to `default_escalate/3`, which
       posts through `Arbiter.Messages.CoordinatorNotifier.dispatch_stuck/3`.
   """
@@ -348,14 +351,20 @@ defmodule Arbiter.Board.Autopilot do
   identifying the caller (e.g. `"mcp"`, `"api"`, `"dashboard"`) — is recorded
   alongside the change for `status/2`, when known.
   """
-  @spec pause(GenServer.server(), String.t() | nil) :: :ok
+  @typedoc """
+  Who changed the pause state: free text, or `{actor, surface}` (bd-cl6zjn),
+  which is recorded as `"actor via surface"` and audited with both parts.
+  """
+  @type actor :: String.t() | {String.t(), String.t()} | nil
+
+  @spec pause(GenServer.server(), actor()) :: :ok
   def pause(server \\ __MODULE__, by \\ nil), do: GenServer.call(server, {:paused, true, by})
 
   @doc """
   Start promoting again. The next tick may dispatch. Persisted so a restart
   comes back resumed. See `pause/2` for `by`.
   """
-  @spec resume(GenServer.server(), String.t() | nil) :: :ok
+  @spec resume(GenServer.server(), actor()) :: :ok
   def resume(server \\ __MODULE__, by \\ nil), do: GenServer.call(server, {:paused, false, by})
 
   @spec paused?(GenServer.server(), timeout()) :: boolean()
@@ -477,7 +486,8 @@ defmodule Arbiter.Board.Autopilot do
       state_load: state_load,
       read_status: read_status,
       state_retry_ms: retry_ms,
-      notify_unreadable: Keyword.get(opts, :notify_unreadable, &default_notify_unreadable/1)
+      notify_unreadable: Keyword.get(opts, :notify_unreadable, &default_notify_unreadable/1),
+      notify_paused: Keyword.get(opts, :notify_paused, &default_notify_paused/2)
     }
 
     schedule(interval)
@@ -526,9 +536,11 @@ defmodule Arbiter.Board.Autopilot do
   def handle_call({:paused, paused?, by}, _from, state) do
     state =
       if paused? != state.paused? do
-        persist_paused(paused?, by)
+        {label, actor, surface} = actor_parts(by)
+        persist_paused(paused?, label)
+        record_change(state, paused?, actor, surface)
         announce({:board_scheduler, if(paused?, do: :paused, else: :resumed)})
-        %{state | paused?: paused?, paused_changed_at: state.now.(), paused_changed_by: by}
+        %{state | paused?: paused?, paused_changed_at: state.now.(), paused_changed_by: label}
       else
         state
       end
@@ -1099,6 +1111,50 @@ defmodule Arbiter.Board.Autopilot do
   end
 
   defp adopt_persisted(state, _unset), do: %{state | state_load: :settled}
+
+  defp actor_parts({actor, surface}) when is_binary(actor) and is_binary(surface),
+    do: {"#{actor} via #{surface}", actor, surface}
+
+  defp actor_parts(by) when is_binary(by), do: {by, by, by}
+  defp actor_parts(nil), do: {nil, nil, nil}
+
+  # bd-cl6zjn: every pause/resume leaves an audit row, and a pause also lands
+  # in the coordinator's mailbox so a silent one gets noticed. Best-effort —
+  # the in-memory change must take effect whatever the database says.
+  defp record_change(state, paused?, actor, surface) do
+    case Arbiter.Settings.record_scheduler_change(paused?, actor, surface) do
+      {:ok, _} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("board autopilot: audit write failed: #{inspect(reason)}")
+    end
+
+    if paused?, do: state.notify_paused.(actor || "unknown", surface)
+  rescue
+    e -> Logger.warning("board autopilot: audit/notice failed: #{inspect(e)}")
+  catch
+    :exit, reason ->
+      Logger.warning("board autopilot: audit/notice failed: process error #{inspect(reason)}")
+  end
+
+  defp default_notify_paused(actor, surface) do
+    {:ok, workspaces} = Ash.read(Arbiter.Tasks.Workspace)
+
+    Enum.each(workspaces, fn ws ->
+      Arbiter.Messages.Escalation.post(%{
+        kind: :scheduler_paused,
+        from_ref: "autopilot",
+        workspace_id: ws.id,
+        subject: "board scheduler paused by #{actor}",
+        body:
+          "The board scheduler was paused by #{actor}" <>
+            if(surface && surface != actor, do: " (via #{surface})", else: "") <>
+            ". It will not promote Ready cards until resumed — " <>
+            "`arb scheduler resume` if that was not intended."
+      })
+    end)
+  end
 
   defp notify_unreadable(state, reason) do
     state.notify_unreadable.(reason)

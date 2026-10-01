@@ -91,6 +91,7 @@ defmodule Arbiter.Messages.EscalationKind do
     :quota_grant_failing,
     :quota_poll_failing,
     :review_patrol_rate_limited,
+    :scheduler_paused,
     :setup_token_missing
   ]
 
