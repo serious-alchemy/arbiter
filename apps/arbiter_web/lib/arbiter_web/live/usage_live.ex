@@ -577,6 +577,25 @@ defmodule ArbiterWeb.UsageLive do
                       Could not load rate limits.
                     </p>
                   </:failed>
+                  <%!-- The providers the installation uses
+                        (`Arbiter.Quota.Visibility`, bd-i2gwwn) — the same
+                        list the status bar's chip shows. --%>
+                  <div
+                    :if={quotas == []}
+                    id="usage-quota-empty"
+                    class="flex flex-col gap-[4px] text-[12px] text-[var(--text-secondary)]"
+                  >
+                    <p class="m-0 font-medium text-[var(--text-title)]">No providers configured</p>
+                    <p class="m-0 leading-[1.5]">
+                      This installation has no provider whose quota to show.
+                      <.link
+                        navigate={provider_setup_path(@quota_workspace_id)}
+                        class="text-[var(--accent-primary)] underline-offset-2 hover:underline"
+                      >
+                        Set up providers
+                      </.link>
+                    </p>
+                  </div>
                   <div
                     :for={quota <- quotas}
                     id={"usage-quota-#{quota.provider}"}
@@ -589,8 +608,10 @@ defmodule ArbiterWeb.UsageLive do
                         (bd-gukyy1); anything else — including an antigravity
                         row with no parseable buckets — is the view's own
                         primary/secondary windows. --%>
-                    <%= case usage_quota_groups(quota) do %>
-                      <% [] -> %>
+                    <%= case {quota_no_data?(quota), usage_quota_groups(quota)} do %>
+                      <% {true, _groups} -> %>
+                        <Feedback.quota_no_data />
+                      <% {false, []} -> %>
                         <div class="flex flex-col gap-[6px]">
                           <.usage_quota_bar
                             :for={w <- quota_windows(quota)}
@@ -598,7 +619,7 @@ defmodule ArbiterWeb.UsageLive do
                             w={w}
                           />
                         </div>
-                      <% groups -> %>
+                      <% {false, groups} -> %>
                         <div
                           :for={group <- groups}
                           id={"usage-quota-#{quota.provider}-#{group.group}"}
@@ -706,6 +727,11 @@ defmodule ArbiterWeb.UsageLive do
     />
     """
   end
+
+  defp provider_setup_path(ws_id) when is_binary(ws_id),
+    do: ~p"/workspaces/#{ws_id}?section=providers"
+
+  defp provider_setup_path(_ws_id), do: ~p"/workspaces"
 
   defp usage_quota_groups(%{provider: "antigravity"} = quota), do: quota_antigravity_groups(quota)
   defp usage_quota_groups(_quota), do: []

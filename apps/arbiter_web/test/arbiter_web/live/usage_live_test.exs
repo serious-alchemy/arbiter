@@ -8,8 +8,14 @@ defmodule ArbiterWeb.UsageLiveTest do
   alias Arbiter.Usage.Event
 
   setup do
+    # Claude and Antigravity in use, so the Rate limits panel shows both
+    # (`Arbiter.Quota.Visibility`, bd-i2gwwn).
     {:ok, ws} =
-      Ash.create(Workspace, %{name: "usage-#{System.unique_integer([:positive])}", prefix: "usg"})
+      Ash.create(Workspace, %{
+        name: "usage-#{System.unique_integer([:positive])}",
+        prefix: "usg",
+        config: %{"agent" => %{"type" => ["claude", "gemini"]}}
+      })
 
     {:ok, ws: ws}
   end

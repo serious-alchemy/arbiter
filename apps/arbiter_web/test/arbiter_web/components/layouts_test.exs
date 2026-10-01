@@ -150,9 +150,10 @@ defmodule ArbiterWeb.LayoutsTest do
       assert bar |> LazyHTML.query("#appshell-live") |> Enum.count() == 1
       assert bar |> LazyHTML.query("#coordinator-inbox-trigger") |> Enum.count() == 1
       assert bar |> LazyHTML.query("[data-phx-theme]") |> Enum.count() == 3
-      # One 5h + 7d pair per provider.
-      assert bar |> LazyHTML.text() |> String.split("5h") |> length() == 3
-      assert bar |> LazyHTML.text() |> String.split("7d") |> length() == 3
+      # One ring object per provider in the chip; one 5h + 7d bar pair per
+      # provider in its popover (bd-i2gwwn).
+      assert bar |> LazyHTML.query("#quota-chip [data-ring-provider]") |> Enum.count() == 2
+      assert bar |> LazyHTML.query("#quota-popover [data-quota-bar]") |> Enum.count() == 4
 
       assert bar |> LazyHTML.query("nav, a[href]") |> Enum.to_list() == []
     end

@@ -361,6 +361,29 @@ defmodule ArbiterWeb.CoreComponents.Feedback do
     """
   end
 
+  @doc """
+  The "no data yet" line for a provider the installation uses but has no quota
+  snapshot for (bd-i2gwwn) — a just-configured provider, before the first
+  capture lands. Shown where its bars would be, in the status-bar popover and
+  on `/usage`, so the provider reads as pending rather than missing.
+  """
+  attr :class, :any, default: nil
+
+  def quota_no_data(assigns) do
+    ~H"""
+    <p
+      data-quota-no-data
+      class={[
+        "m-0 flex items-center gap-[6px] text-[11px] leading-[1.45] text-[var(--text-secondary)]",
+        @class
+      ]}
+    >
+      <.icon name="hero-clock-micro" size={12} class="flex-none text-[var(--text-label)]" />
+      <span>No data yet — waiting for the first quota capture.</span>
+    </p>
+    """
+  end
+
   defp quota_elapsed_pct(%{window: "5h", provider: provider, reset_at: reset_at}),
     do: quota_elapsed_pct_5h(provider, reset_at)
 

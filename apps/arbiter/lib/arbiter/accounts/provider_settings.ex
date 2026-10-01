@@ -97,9 +97,17 @@ defmodule Arbiter.Accounts.ProviderSettings do
   config fallback. See the module doc for each `source`.
   """
   @spec effective(Workspace.t(), role()) :: resolved()
-  def effective(%Workspace{} = ws, role) when role in @roles do
-    links = links(ws.id)
+  def effective(%Workspace{} = ws, role) when role in @roles,
+    do: effective(ws, role, links(ws.id))
 
+  @doc """
+  `effective/2` over links the caller already holds — every
+  `WorkspaceProviderAccount` of `ws`, with `:provider_account` loaded — so a
+  caller resolving many workspaces (`Arbiter.Quota.Visibility`) reads the links
+  once rather than per workspace and role.
+  """
+  @spec effective(Workspace.t(), role(), [WorkspaceProviderAccount.t()]) :: resolved()
+  def effective(%Workspace{} = ws, role, links) when role in @roles and is_list(links) do
     case allowed(links, role) do
       [] -> fallback(ws, role, links)
       rows -> %{role: role, source: :attached, candidates: Enum.map(rows, &candidate/1)}
@@ -217,7 +225,7 @@ defmodule Arbiter.Accounts.ProviderSettings do
 
   defp fallback(ws, :reviewer, links) do
     case configured_types(ws, :reviewer) do
-      [] -> %{effective(ws, :implementer) | role: :reviewer, source: :implementer}
+      [] -> %{effective(ws, :implementer, links) | role: :reviewer, source: :implementer}
       types -> fallback_result(:reviewer, :review_agent_type, types, links)
     end
   end
