@@ -335,6 +335,27 @@ defmodule ArbiterWeb.LayoutsTest do
     end
   end
 
+  describe "app/1 — brandmark tooltip" do
+    test "the wordmark and icon brandmarks have title tooltips showing the app version and git sha" do
+      html = render_app()
+      doc = html |> LazyHTML.from_fragment()
+
+      version = Arbiter.Version.app_version()
+      sha = Arbiter.Version.git_sha()
+      expected_title = "Arbiter v#{version} (#{sha})"
+
+      # Check the wordmark (visible on sm and up)
+      wordmark_spans = doc |> LazyHTML.query(~s(span[aria-label="Arbiter"]))
+      assert Enum.count(wordmark_spans) >= 1
+
+      # Verify at least one brandmark span has the title
+      titles = wordmark_spans |> Enum.map(&(LazyHTML.attribute(&1, "title") || []))
+
+      assert Enum.any?(titles, &(expected_title in &1)),
+             "Expected title '#{expected_title}' not found in any brandmark span. Got: #{inspect(titles)}"
+    end
+  end
+
   describe "app/1 — flash" do
     test "renders flash via the toast group, not the old flash_group" do
       html = render_app(%{flash: %{"info" => "Saved"}})
