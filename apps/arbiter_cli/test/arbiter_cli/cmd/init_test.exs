@@ -393,6 +393,12 @@ defmodule ArbiterCli.Cmd.InitTest do
   end
 
   describe "--diff mode" do
+    # `diff -u` is a pure read-only text tool; opt in to the real spawn.
+    setup do
+      Process.put(:bd2_allow_real_cmd, true)
+      :ok
+    end
+
     test "reports all files as new when the target dir is empty" do
       stub_install()
       dir = tmp_dir()

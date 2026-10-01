@@ -7,6 +7,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
 
   alias ArbiterCli.{Client, SchedulerState, Workspace}
   alias ArbiterCli.Cmd.Doctor.Distribution
+  alias ArbiterCli.Cmd.Start
 
   defmodule Result do
     @moduledoc false
@@ -252,7 +253,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       false
     else
       # Check if cli_sha is an ancestor of server_sha in git
-      case System.cmd("git", ["merge-base", "--is-ancestor", clean_cli, clean_server],
+      case Start.run_cmd("git", ["merge-base", "--is-ancestor", clean_cli, clean_server],
              stderr_to_stdout: true
            ) do
         {_, 0} -> true

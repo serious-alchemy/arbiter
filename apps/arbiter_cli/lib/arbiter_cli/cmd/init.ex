@@ -84,7 +84,7 @@ defmodule ArbiterCli.Cmd.Init do
   to a generic install-path hint.
   """
 
-  alias ArbiterCli.{Client, Output, Workspace}
+  alias ArbiterCli.{Client, Cmd.Start, Output, Workspace}
 
   require EEx
 
@@ -290,7 +290,7 @@ defmodule ArbiterCli.Cmd.Init do
 
     try do
       {out, _status} =
-        System.cmd(
+        Start.run_cmd(
           "diff",
           ["-u", "--label", "template", "--label", "local", rendered_path, local_path],
           stderr_to_stdout: true
