@@ -144,10 +144,10 @@ defmodule Arbiter.Worker.ReviewGateArbTokenTest do
             %{meta: %{review_gate_pid: pid}} when is_pid(pid) -> pid
             _ -> nil
           end
-        catch
-          _, _ -> nil
         rescue
           _ -> nil
+        catch
+          _, _ -> nil
         end
       else
         nil
@@ -204,10 +204,6 @@ defmodule Arbiter.Worker.ReviewGateArbTokenTest do
   defp retry_rm_rf(path) do
     # After processes have been awaited in on_exit hooks, rm_rf should not
     # race with writers. If removal fails, it's a real error, not just slow cleanup.
-    case File.rm_rf(path) do
-      {:ok, _} -> :ok
-      {:error, _reason} -> raise "Failed to remove #{path}"
-      _ -> :ok
-    end
+    File.rm_rf(path)
   end
 end
