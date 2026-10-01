@@ -23,6 +23,7 @@ defmodule ArbiterWeb.WorkspaceDetail.ProviderSettingsComponent do
 
   alias Arbiter.Accounts
   alias Arbiter.Accounts.ProviderSettings
+  alias Arbiter.Agents.ProviderRouting
   alias Arbiter.Tasks.Workspace
   alias ArbiterWeb.CoreComponents.Core
   alias ArbiterWeb.CoreComponents.Forms
@@ -50,7 +51,40 @@ defmodule ArbiterWeb.WorkspaceDetail.ProviderSettingsComponent do
     |> assign(:attachments, ProviderSettings.attachments(ws))
     |> assign(:accounts, Enum.filter(Accounts.list_accounts(), & &1.enabled))
     |> assign(:account_labels, account_labels(ws, agent_types))
+    |> assign(:strategy, strategy(ws))
+    |> assign(:ranking, ranking(ws, Map.get(socket.assigns, :routing_opts, [])))
+    |> assign(:cross_family?, cfg(ws, ["review_agent", "cross_family"]) == true)
   end
+
+  defp strategy(ws),
+    do: if(ProviderRouting.enabled?(ws), do: "most_quota", else: "failover")
+
+  # The live most-quota decision a dispatch would make now (no ticket: the
+  # workspace's default model tier), or nil while the strategy is failover.
+  defp ranking(ws, opts) do
+    if ProviderRouting.enabled?(ws) do
+      %{available: available, dropped: dropped} = ProviderRouting.availability(ws, nil, opts)
+
+      Enum.map(available, &ranking_row(&1, :available)) ++
+        Enum.map(dropped, &ranking_row(&1, :dropped))
+    end
+  end
+
+  defp ranking_row(entry, :available) do
+    %{
+      account: entry.account,
+      status: "available",
+      detail: headroom_text(entry[:headroom])
+    }
+  end
+
+  defp ranking_row(entry, :dropped),
+    do: %{account: entry.account, status: entry.reason, detail: entry[:detail]}
+
+  defp headroom_text(%{headroom: h} = hr) when is_number(h),
+    do: "#{Float.round(h * 100, 1)}% headroom#{hr[:window] && " on #{hr.window}"}"
+
+  defp headroom_text(_), do: "no quota reading yet"
 
   defp role_view(ws, {role, config_key, label, consequence}) do
     resolved = ProviderSettings.effective(ws, role)
@@ -93,6 +127,25 @@ defmodule ArbiterWeb.WorkspaceDetail.ProviderSettingsComponent do
       {:noreply, socket |> assign(:provider_error, nil) |> load()}
     else
       {:error, reason} -> {:noreply, assign(socket, :provider_error, describe(reason))}
+    end
+  end
+
+  # ---- routing strategy: routing.provider_selection ----
+
+  def handle_event("set_strategy", %{"provider_selection" => value}, socket)
+      when value in ["failover", "most_quota"] do
+    {patch, unset} =
+      case value do
+        "failover" -> {%{}, ["routing.provider_selection"]}
+        other -> {%{"routing" => %{"provider_selection" => other}}, []}
+      end
+
+    case patch_config(socket.assigns.workspace, patch, unset) do
+      {:ok, updated} ->
+        {:noreply, socket |> apply_workspace(updated) |> assign(:provider_error, nil) |> load()}
+
+      {:error, msg} ->
+        {:noreply, assign(socket, :provider_error, msg)}
     end
   end
 
@@ -241,6 +294,14 @@ defmodule ArbiterWeb.WorkspaceDetail.ProviderSettingsComponent do
     ids = MapSet.new(attached, & &1.account.id)
     Enum.reject(accounts, &MapSet.member?(ids, &1.id))
   end
+
+  defp strategy_options,
+    do: [
+      {"failover",
+       "the order above decides: the first healthy provider wins. A quota-held provider still counts as healthy."},
+      {"most_quota",
+       "the attached implementer account with the most headroom against its pace wins; the order only breaks ties."}
+    ]
 
   defp cap_text(nil), do: "∞"
   defp cap_text(n), do: Integer.to_string(n)
@@ -527,6 +588,83 @@ defmodule ArbiterWeb.WorkspaceDetail.ProviderSettingsComponent do
             account_labels={@account_labels}
           />
         <% end %>
+
+        <.setting_row
+          name="Implementer routing"
+          consequence="routing.provider_selection — how a dispatch picks among the implementer accounts above"
+        >
+          <:below>
+            <div class="flex flex-col gap-2">
+              <.form
+                for={%{}}
+                id="routing-strategy-form"
+                phx-change="set_strategy"
+                phx-target={@myself}
+                class="flex flex-col gap-1"
+              >
+                <label
+                  :for={{value, text} <- strategy_options()}
+                  class="flex items-start gap-2 font-[family-name:var(--font-mono)] text-[11px] text-[var(--arb-text-body)]"
+                >
+                  <input
+                    type="radio"
+                    name="provider_selection"
+                    value={value}
+                    checked={@strategy == value}
+                    class="mt-[2px]"
+                  />
+                  <span>
+                    <span class="font-semibold">{value}</span>
+                    <span id={"routing-help-#{value}"} class="text-[var(--text-label)]">
+                      — {text}
+                    </span>
+                  </span>
+                </label>
+              </.form>
+              <ul
+                :if={@ranking}
+                id="routing-ranking"
+                class="m-0 flex flex-col gap-1 p-0 font-[family-name:var(--font-mono)] text-[11px]"
+              >
+                <li class="text-[10px] uppercase tracking-[0.06em] text-[var(--text-label)]">
+                  next ticket goes to the first available, best headroom first
+                </li>
+                <li
+                  :for={{row, idx} <- Enum.with_index(@ranking)}
+                  data-account={row.account.id}
+                  data-status={row.status}
+                  class="flex items-center gap-2 rounded-[var(--radius-field)] border border-solid border-[var(--border-default)] bg-[var(--surface-card)] px-2 py-1"
+                >
+                  <span class="w-4 text-[var(--text-label)]">{idx + 1}</span>
+                  <span class="flex-1 truncate">{row.account.provider}:{row.account.slug}</span>
+                  <span class={[
+                    "rounded-[var(--radius-chip)] px-[6px] py-[1px] text-[10px]",
+                    if(row.status == "available",
+                      do: "bg-[var(--arb-live-wash)] text-[var(--arb-live)]",
+                      else: "bg-[var(--arb-attention-wash)] text-[var(--arb-attention)]"
+                    )
+                  ]}>
+                    {row.status}
+                  </span>
+                  <span class="text-[var(--text-label)]">{row.detail}</span>
+                </li>
+                <li :if={@ranking == []} class="text-[var(--text-label)]">
+                  No implementer accounts attached — dispatch falls back to agent.type.
+                </li>
+              </ul>
+              <p
+                id="routing-reviewer-note"
+                class="m-0 font-[family-name:var(--font-mono)] text-[11px] text-[var(--text-label)]"
+              >
+                <%= if @cross_family? do %>
+                  Reviewer: cross-family routing — candidates outside the implementer's model family, held or expired ones dropped, ranked by quota headroom (order breaks ties); falls back to the implementer's family only when no other family is available.
+                <% else %>
+                  Reviewer: first healthy entry in its own order (review_agent.type / reviewer accounts); routing.provider_selection does not apply.
+                <% end %>
+              </p>
+            </div>
+          </:below>
+        </.setting_row>
 
         <.setting_row
           name="Concurrency share"
