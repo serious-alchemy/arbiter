@@ -49,6 +49,24 @@ defmodule ArbiterWeb.QuotaFixtures do
     |> Ash.create!()
   end
 
+  @doc """
+  Overrides `Arbiter.Quota.hidden_providers/0` for the rest of the test —
+  `[]` shows Codex, so the three-provider layout can be exercised before
+  Codex reaches parity (bd-i2gwwn). Restores the previous value on exit.
+  """
+  def with_hidden_providers(providers) do
+    previous = Application.fetch_env(:arbiter, :quota_hidden_providers)
+    Application.put_env(:arbiter, :quota_hidden_providers, providers)
+    Arbiter.Quota.QuotaCache.invalidate_all()
+
+    ExUnit.Callbacks.on_exit(fn ->
+      case previous do
+        {:ok, value} -> Application.put_env(:arbiter, :quota_hidden_providers, value)
+        :error -> Application.delete_env(:arbiter, :quota_hidden_providers)
+      end
+    end)
+  end
+
   defp bucket(model_id, remaining, reset_at),
     do: %{"model_id" => model_id, "remaining_percentage" => remaining, "reset_at" => reset_at}
 end

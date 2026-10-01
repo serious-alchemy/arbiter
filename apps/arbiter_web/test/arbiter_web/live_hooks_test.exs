@@ -31,6 +31,9 @@ defmodule ArbiterWeb.LiveHooksTest do
     count
   end
 
+  # Claude and Antigravity both in use, so both are shown (bd-i2gwwn).
+  @claude_and_agy %{"agent" => %{"type" => ["claude", "gemini"]}}
+
   describe "on_mount(:quota) filters via production code in live_hooks.ex" do
     test "on_mount invokes production code that filters hidden providers", %{conn: conn} do
       # Create a workspace — on_mount uses default workspace if it exists
@@ -139,7 +142,7 @@ defmodule ArbiterWeb.LiveHooksTest do
     end
 
     test "on_mount(:quota) no longer filters antigravity at mount time (bd-gukyy1)", %{conn: conn} do
-      ws = Ash.create!(Arbiter.Tasks.Workspace, %{name: "default"})
+      ws = Ash.create!(Arbiter.Tasks.Workspace, %{name: "default", config: @claude_and_agy})
 
       # Capture a normal provider and antigravity
       {:ok, _} =
@@ -162,7 +165,7 @@ defmodule ArbiterWeb.LiveHooksTest do
     end
 
     test "on_mount(:quota) handle_info applies antigravity broadcasts (bd-gukyy1)", %{conn: conn} do
-      ws = Ash.create!(Arbiter.Tasks.Workspace, %{name: "default"})
+      ws = Ash.create!(Arbiter.Tasks.Workspace, %{name: "default", config: @claude_and_agy})
 
       {:ok, _} =
         Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.25"}],
@@ -170,9 +173,10 @@ defmodule ArbiterWeb.LiveHooksTest do
         )
 
       {:ok, view, _html} = live(conn, ~p"/")
-      html = render_async(view)
-      assert html =~ "Claude"
-      refute html =~ "Antigravity"
+      render_async(view)
+      assert has_element?(view, "#quota-ring-claude")
+      # Used but not captured yet (bd-i2gwwn): listed, with no data.
+      assert has_element?(view, "#quota-ring-antigravity[data-ring-state=no-data]")
 
       # Broadcast an antigravity update
       {:ok, _} =
@@ -180,8 +184,38 @@ defmodule ArbiterWeb.LiveHooksTest do
           provider: "antigravity"
         )
 
-      html2 = render(view)
-      assert html2 =~ "Antigravity"
+      assert has_element?(view, "#quota-ring-antigravity-5h[data-ring-pct='80']")
+    end
+
+    # bd-i2gwwn: the load and the broadcasts follow `Arbiter.Quota.Visibility`.
+    test "on_mount(:quota) drops a provider the installation doesn't use, load and broadcast",
+         %{conn: conn} do
+      ws =
+        Ash.create!(Arbiter.Tasks.Workspace, %{
+          name: "default",
+          config: %{"agent" => %{"type" => "claude"}}
+        })
+
+      {:ok, _} =
+        Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.50"}],
+          provider: "antigravity"
+        )
+
+      assert {:ok, ws_id, [%{provider: "claude", no_data: true}]} =
+               ArbiterWeb.LiveHooks.load_quotas()
+
+      assert ws_id == ws.id
+
+      {:ok, view, _html} = live(conn, ~p"/")
+      render_async(view, 2_000)
+
+      {:ok, _} =
+        Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.60"}],
+          provider: "antigravity"
+        )
+
+      assert has_element?(view, "#quota-ring-claude")
+      refute has_element?(view, "#quota-ring-antigravity")
     end
   end
 
@@ -193,7 +227,7 @@ defmodule ArbiterWeb.LiveHooksTest do
     alias Arbiter.Quota.QuotaCache
 
     setup do
-      ws = Ash.create!(Arbiter.Tasks.Workspace, %{name: "default"})
+      ws = Ash.create!(Arbiter.Tasks.Workspace, %{name: "default", config: @claude_and_agy})
 
       {:ok, _} =
         Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.25"}],
@@ -230,7 +264,7 @@ defmodule ArbiterWeb.LiveHooksTest do
       html = conn |> get(~p"/") |> html_response(200)
 
       assert has?(html, "#quota-topbar-loading")
-      refute has?(html, "#quota-topbar-claude")
+      refute has?(html, "#quota-ring-claude")
       assert has?(html, "#coordinator-mailbox-loading")
       refute has?(html, "#coordinator-mailbox-empty")
 
@@ -243,11 +277,11 @@ defmodule ArbiterWeb.LiveHooksTest do
 
       assert has?(html, "#quota-topbar-loading")
       assert has?(html, "#coordinator-mailbox-loading")
-      refute has?(html, "#quota-topbar-claude")
+      refute has?(html, "#quota-ring-claude")
 
       render_async(view)
 
-      assert has_element?(view, "#quota-topbar-claude")
+      assert has_element?(view, "#quota-ring-claude")
       refute has_element?(view, "#quota-topbar-loading")
       assert has_element?(view, "#coordinator-mailbox-empty")
       refute has_element?(view, "#coordinator-mailbox-loading")
@@ -288,8 +322,8 @@ defmodule ArbiterWeb.LiveHooksTest do
           provider: "antigravity"
         )
 
-      assert has_element?(view, "#quota-topbar-claude")
-      assert has_element?(view, "#quota-topbar-antigravity")
+      assert has_element?(view, "#quota-ring-claude")
+      assert has_element?(view, "#quota-ring-antigravity-5h[data-ring-pct='50']")
     end
 
     test "coordinator mail broadcast after the load lands in the drawer", %{conn: conn, ws: ws} do
@@ -317,7 +351,7 @@ defmodule ArbiterWeb.LiveHooksTest do
     alias Arbiter.Quota.QuotaCache
 
     setup do
-      ws = Ash.create!(Arbiter.Tasks.Workspace, %{name: "default"})
+      ws = Ash.create!(Arbiter.Tasks.Workspace, %{name: "default", config: @claude_and_agy})
 
       {:ok, _} =
         Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.25"}],
@@ -353,7 +387,7 @@ defmodule ArbiterWeb.LiveHooksTest do
 
       render_async(view)
       refute has_element?(view, "#quota-topbar-error")
-      assert has_element?(view, "#quota-topbar-claude")
+      assert has_element?(view, "#quota-ring-claude")
     end
 
     @tag :capture_log

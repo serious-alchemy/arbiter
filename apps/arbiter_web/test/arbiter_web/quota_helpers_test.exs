@@ -477,4 +477,103 @@ defmodule ArbiterWeb.QuotaHelpersTest do
                "45% quota used · 33% of window elapsed (2.3d into 7d)"
     end
   end
+
+  # bd-i2gwwn: the status-bar chip's rings.
+  describe "quota_rings/1, quota_ring_summary/2" do
+    @flat %{policy: {nil, nil}, enforcing?: true}
+
+    defp view(attrs) do
+      "claude"
+      |> Arbiter.Quota.blank_view()
+      |> Map.merge(%{gate_policy: @flat, captured_at: DateTime.utc_now()})
+      |> Map.merge(attrs)
+    end
+
+    test "paid overage reds the ring and says so" do
+      v = view(%{utilization_5h: 1.0, utilization_7d: 0.5, overage_status: "in_overage"})
+      rings = quota_rings(v)
+
+      assert rings.inner.state == :holding
+      assert rings.inner.status == "in paid overage"
+      assert quota_ring_stroke(rings.inner.state) == "var(--arb-fail)"
+    end
+
+    test "a window with no reading is a no-data ring, named as such" do
+      v = view(%{utilization_5h: 0.3})
+      rings = quota_rings(v)
+
+      assert rings.outer.state == :no_data
+      assert rings.outer.pct == nil
+      assert quota_ring_stroke(:no_data) == nil
+      assert quota_ring_summary(v, rings) =~ "; 7d no data"
+    end
+
+    test "a single-window view leaves its empty outer ring out of the label" do
+      v =
+        "antigravity"
+        |> Arbiter.Quota.blank_view()
+        |> Map.merge(%{
+          gate_policy: @flat,
+          utilization_5h: 0.6,
+          primary_label: "used",
+          secondary_label: nil
+        })
+
+      rings = quota_rings(v)
+      assert rings.outer.state == :no_data
+      assert quota_ring_summary(v, rings) =~ ~r/^Antigravity: used 60%, [a-z ,]+$/
+    end
+
+    test "a no-data placeholder reads 'no data yet' on both rings" do
+      v =
+        "claude" |> Arbiter.Quota.blank_view() |> Map.merge(%{no_data: true, gate_policy: @flat})
+
+      rings = quota_rings(v)
+
+      assert quota_no_data?(v)
+      assert rings.inner.state == :no_data and rings.outer.state == :no_data
+      assert quota_ring_summary(v, rings) == "Claude: no data yet"
+    end
+
+    test "antigravity rings take the more-constrained bucket group, per window" do
+      reset = DateTime.utc_now() |> DateTime.add(3600) |> DateTime.to_iso8601()
+
+      models = [
+        %{"model_id" => "gemini_models_5h", "remaining_percentage" => 90.0, "reset_at" => reset},
+        %{
+          "model_id" => "gemini_models_weekly",
+          "remaining_percentage" => 50.0,
+          "reset_at" => reset
+        },
+        %{
+          "model_id" => "claude_and_gpt_models_5h",
+          "remaining_percentage" => 20.0,
+          "reset_at" => reset
+        },
+        %{
+          "model_id" => "claude_and_gpt_models_weekly",
+          "remaining_percentage" => 95.0,
+          "reset_at" => reset
+        }
+      ]
+
+      v =
+        "antigravity"
+        |> Arbiter.Quota.blank_view()
+        |> Map.merge(%{gate_policy: @flat, models: models})
+
+      rings = quota_rings(v)
+      assert {rings.inner.pct, rings.inner.group} == {80, "Claude and GPT models"}
+      assert {rings.outer.pct, rings.outer.group} == {50, "Gemini Models"}
+    end
+
+    test "a stale reading is a neutral stale ring, whatever the pace" do
+      v = view(%{utilization_5h: 0.99, utilization_7d: 0.99, message: "agy unreachable"})
+      rings = quota_rings(v)
+
+      assert rings.inner.state == :stale
+      assert quota_ring_stroke(:stale) == "var(--arb-done)"
+      assert quota_ring_title(v, rings) =~ "stale reading: agy unreachable"
+    end
+  end
 end

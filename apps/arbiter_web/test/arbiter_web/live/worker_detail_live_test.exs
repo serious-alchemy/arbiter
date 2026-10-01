@@ -108,7 +108,16 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       {:ok, _view, html} = live_worker(conn, task.id)
 
       assert html =~ "Unknown provider"
-      refute html =~ ~s(aria-label="Claude")
+
+      # The status bar's quota chip draws the installation's Claude logo
+      # (bd-i2gwwn); the worker's own provider must not be Claude.
+      doc = LazyHTML.from_fragment(html)
+      claude_logos = doc |> LazyHTML.query(~s(svg[aria-label="Claude"])) |> Enum.count()
+
+      chip_logos =
+        doc |> LazyHTML.query(~s(#quota-topbar svg[aria-label="Claude"])) |> Enum.count()
+
+      assert claude_logos == chip_logos
     end
 
     test "shows the provider's display name and logo when meta has one", %{conn: conn, ws: ws} do

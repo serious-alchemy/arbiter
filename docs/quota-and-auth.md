@@ -213,6 +213,77 @@ remains is cost and noise on the Watchdog's poll rather than a correctness
 problem. Making the probe non-agentic (a deny-all tool posture, or dropping the
 model round-trip entirely) is follow-up work.
 
+## Which providers the dashboard shows (bd-i2gwwn)
+
+The status bar's quota chip and the `/usage` "Rate limits" panel show only the
+providers this installation uses. Both read one list —
+`ArbiterWeb.LiveHooks.load_quotas/0` → `Arbiter.Quota.Visibility` — so they
+can't disagree. A provider is shown iff
+
+    (detected OR forced on) AND NOT forced off AND NOT in Quota.hidden_providers/0
+
+- **Detected** — named by `ProviderSettings.effective/2` for the implementer
+  or reviewer role on any workspace: the attached accounts (counted only while
+  the account is enabled, not soft-deleted and not merged away), else
+  `agent.type` / `review_agent.type`, else the `claude` default an
+  unconfigured workspace runs.
+- **Not** detection signals: a quota snapshot row (the CloudProbe polls every
+  logged-in CLI, used or not), a bare workspace↔account link with no role
+  position (the probe's write path provisions one for every snapshot it
+  stores), or whether a CLI is on the server's PATH.
+- **The override** — two install-wide settings, both unset (auto-detect) by
+  default, set with the `installation_config_set` MCP tool (coordinator) and
+  read with `installation_config_get`:
+  - `quota_providers_shown` — quota provider codes (`claude`, `codex`,
+    `antigravity`) to show even if not detected;
+  - `quota_providers_hidden` — codes to hide even if detected. Hidden wins
+    over shown. `null` clears either.
+  A change drops the cached top-bar quota, so it lands on the next page load.
+- **Hidden pending parity** — `Arbiter.Quota.hidden_providers/0` (Codex)
+  wins over everything, the override included. Showing Codex is deleting it
+  from `@hidden_providers` in `apps/arbiter/lib/arbiter/quota.ex`.
+
+A shown provider with no snapshot yet appears as "no data yet" (dashed rings,
+a popover line) rather than disappearing. With nothing shown, the chip is
+gone and `/usage` says "No providers configured" with a link to the default
+workspace's Providers section.
+
+`GET /api/quota`, `arb quota` and the `quota_get` MCP tool are the raw view:
+none of this applies to them, and they still report every captured provider.
+
+### The chip
+
+One 36px chip; one 32px object per shown provider — the provider's logo in
+the middle of two concentric rings, **inner = the 5h window, outer = the 7d
+window** (Antigravity: 5h / weekly; Codex: session / weekly). The arc is
+utilisation. The colour is the dispatch gate's pace verdict for that window
+(`QuotaHelpers.quota_pace/3`, the same math the bars use): green
+(`--arb-live`) on pace, amber (`--arb-attention`) approaching the ceiling, red
+(`--arb-fail`) at or over it or in paid overage; neutral `--arb-done` while
+sampling. A stale reading (one `agy` couldn't refresh) is neutral and muted;
+no data is a dashed track with no arc. The provider hue isn't used — the logo
+already names the provider. Each object's `aria-label`/`title` states both
+windows' utilisation and status in words.
+
+Antigravity's two bucket groups are both gated, so each of its rings shows the
+tighter group for that window (worse verdict, then higher utilisation), named
+in the label; the popover shows both groups.
+
+The hairline across each ring is elapsed time, drawn only for fixed-window
+providers (Claude, Antigravity). **Codex gets none until parity**: its "5h"
+slot is a session reset, not a fixed-duration window, so there is no honest
+elapsed fraction to draw — its colour comes from the gate's flat ceilings.
+
+The chip is a disclosure: click, tap, Enter or Space toggles a popover with
+each provider's windows as full bars (hairline, percentage, reset or burn-rate
+note, and a line when near or over the ceiling); a second click, Escape or a
+click/tap anywhere outside closes it. There is no hover-only content, so touch
+behaves like a mouse. It shows from `sm` (640px) up — it fits beside the
+wordmark, live badge, inbox trigger and theme toggle at `lg` and `xl` with
+three providers — and hides below `sm`.
+`ArbiterWeb.QuotaTopbarBrowserTest` (`--include browser`) checks the fit for
+one, two and three providers and the popover interaction in Chromium.
+
 ## Out of scope here
 
 Two follow-ups were filed instead of folded in:

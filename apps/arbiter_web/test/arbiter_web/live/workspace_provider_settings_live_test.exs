@@ -67,6 +67,22 @@ defmodule ArbiterWeb.WorkspaceProviderSettingsLiveTest do
     assert has_element?(view, "#provider-settings")
   end
 
+  # bd-i2gwwn: `/usage`'s "No providers configured" empty state links here.
+  test "?section=providers opens straight on the Providers section", %{conn: conn} do
+    ws = workspace!()
+    {:ok, view, _html} = live(conn, "/workspaces/#{ws.id}?section=providers")
+    render_async(view)
+
+    assert has_element?(
+             view,
+             ~s(#ws-rail button[phx-value-section=providers][aria-selected=true])
+           )
+
+    {:ok, view, _html} = live(conn, "/workspaces/#{ws.id}?section=bogus")
+    render_async(view)
+    assert has_element?(view, ~s(#ws-rail button[phx-value-section=repos][aria-selected=true]))
+  end
+
   test "with nothing attached, shows the config fallback as the effective setting", %{conn: conn} do
     ws = workspace!(%{"agent" => %{"type" => ["codex", "claude"]}})
     view = open(conn, ws)

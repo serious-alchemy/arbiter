@@ -25,9 +25,13 @@ defmodule ArbiterWeb.LiveHooks do
 
   ## `:quota`
 
-  Loads the latest quota snapshot for every tracked provider on the default
-  workspace and assigns the list as `:quotas` on the socket (`[]` when
-  nothing has been captured yet).
+  Loads the latest quota snapshot on the default workspace for every provider
+  the installation uses and assigns the list as `:quotas` on the socket. Which
+  providers those are is `Arbiter.Quota.Visibility`'s rule (bd-i2gwwn) — the
+  one rule the status bar's quota chip and `/usage` share, because both read
+  this list. A shown provider with no snapshot yet is in the list as a
+  `no_data: true` view; nothing shown is `[]`. The default workspace's id is
+  assigned as `:quota_workspace_id` (`nil` until the load lands).
 
   `:quotas` is a `Phoenix.LiveView.AsyncResult` (bd-adewb4): the hook runs on
   every page, so the load (a workspaces read plus up to 18-20 queries on a
@@ -39,7 +43,8 @@ defmodule ArbiterWeb.LiveHooks do
   **Temporary:** Codex is filtered from the quota list pending a fix: its
   dispatch is broken (bd-1nyedk, bd-dcvo3n, bd-bi5t54), and showing quota
   bars for a broken provider implies it's dispatchable when it isn't. Once
-  dispatch is fixed, remove it from @hidden_providers and this comment.
+  dispatch is fixed, remove it from `Arbiter.Quota.hidden_providers/0`'s
+  `@hidden_providers` and this comment.
 
   The upstream Gemini CLI (`gemini_cli`) used to be hidden here too
   (bd-5r6cdy); the provider itself is gone now (bd-ac53wz).
@@ -93,12 +98,6 @@ defmodule ArbiterWeb.LiveHooks do
 
   require Logger
 
-  # Providers hidden from the UI pending fix; see module docstring for
-  # context. Derived from `Arbiter.Quota.hidden_providers/0` (bd-4p6pw7
-  # round 2, finding 2) rather than duplicated by hand, so the two can't
-  # drift apart.
-  @hidden_providers Arbiter.Quota.hidden_providers()
-
   @coordinator_ref Message.coordinator_ref()
 
   # `start_async/3` keys. Namespaced: they share the host LiveView's async key
@@ -143,7 +142,10 @@ defmodule ArbiterWeb.LiveHooks do
   end
 
   def on_mount(:quota, _params, _session, socket) do
-    socket = assign(socket, :quotas, AsyncResult.loading())
+    socket =
+      socket
+      |> assign(:quotas, AsyncResult.loading())
+      |> assign(:quota_workspace_id, nil)
 
     socket =
       if connected?(socket) do
@@ -190,13 +192,13 @@ defmodule ArbiterWeb.LiveHooks do
   end
 
   @doc """
-  The top bar's quota load: the default workspace's id and its decorated,
-  hidden-provider-filtered quota list, via `QuotaCache`. `{:ok, nil, []}` when
-  there is no default workspace to read.
+  The top bar's quota load: the default workspace's id and its decorated quota
+  list narrowed to the providers the installation uses
+  (`Arbiter.Quota.Visibility.list_latest_for_workspace/1`), via `QuotaCache`.
+  `{:ok, nil, []}` when there is no default workspace to read.
 
-  `:exclude_providers` drops a hidden provider's view before it's decorated
-  with spend (bd-4p6pw7), rather than filtering the fully decorated list after
-  the fact.
+  An unshown provider's view is dropped before it's decorated with spend
+  (bd-4p6pw7), rather than filtering the fully decorated list after the fact.
 
   The whole decorated result is memoized by `QuotaCache` (bd-4p6pw7 round 2,
   finding 1): `list_latest_for_workspace/2` still reads a `Workspace`, its
@@ -209,11 +211,9 @@ defmodule ArbiterWeb.LiveHooks do
   def load_quotas do
     case Arbiter.Quota.default_workspace_id() do
       {:ok, ws_id} ->
-        opts = [exclude_providers: @hidden_providers]
-
         quotas =
-          Arbiter.Quota.QuotaCache.fetch(ws_id, opts, fn ->
-            Arbiter.Quota.list_latest_for_workspace(ws_id, opts)
+          Arbiter.Quota.QuotaCache.fetch(ws_id, [visible: true], fn ->
+            Arbiter.Quota.Visibility.list_latest_for_workspace(ws_id)
           end)
 
         {:ok, ws_id, quotas}
@@ -229,14 +229,14 @@ defmodule ArbiterWeb.LiveHooks do
   # one, the same window the synchronous read-then-subscribe always had.
   defp handle_quota_async(@quotas_async, {:ok, {:ok, ws_id, quotas}}, socket) do
     socket =
-      if ws_id && is_nil(socket.assigns[:_quota_workspace_id]),
+      if ws_id && is_nil(socket.assigns[:quota_workspace_id]),
         do: subscribe_quota(socket, ws_id),
         else: socket
 
     {:halt,
      socket
      |> assign(:quotas, AsyncResult.ok(socket.assigns.quotas, quotas))
-     |> assign(:_quota_workspace_id, ws_id)}
+     |> assign(:quota_workspace_id, ws_id)}
   end
 
   # Said inline in the top bar rather than as a crash: the chrome is on every
@@ -438,33 +438,30 @@ defmodule ArbiterWeb.LiveHooks do
   end
 
   # A broadcast merges into the loaded list, kept as the `AsyncResult` it
-  # arrived in. Skip updates for hidden providers to prevent re-introduction
-  # via PubSub. The topic is only joined once the load succeeded, so the
-  # result is always a list here.
+  # arrived in. The load already lists every provider shown — one with no
+  # snapshot yet as a `no_data` view the first capture replaces — so an
+  # update for a provider not in the list is one the installation doesn't
+  # show (bd-i2gwwn), and is dropped rather than re-introduced via PubSub. The
+  # topic is only joined once the load succeeded, so the result is always a
+  # list here.
   defp merge_quota_update(socket, quota) do
     %AsyncResult{result: quotas} = async = socket.assigns.quotas
 
-    if quota.provider in @hidden_providers or not is_list(quotas) do
-      socket
+    if is_list(quotas) and Enum.any?(quotas, &(&1.provider == quota.provider)) do
+      assign(socket, :quotas, AsyncResult.ok(async, replace_quota(quotas, quota)))
     else
-      assign(socket, :quotas, AsyncResult.ok(async, upsert_quota(quotas, quota)))
+      socket
     end
   end
 
-  # Replace the list entry matching `quota.provider`, or append it when this
-  # is the first snapshot seen for that provider.
-  defp upsert_quota(quotas, quota) do
-    if Enum.any?(quotas, &(&1.provider == quota.provider)) do
-      Enum.map(quotas, fn
-        %{provider: provider} = existing when provider == quota.provider ->
-          preserve_cost(existing, quota)
+  defp replace_quota(quotas, quota) do
+    Enum.map(quotas, fn
+      %{provider: provider} = existing when provider == quota.provider ->
+        preserve_cost(existing, quota)
 
-        existing ->
-          existing
-      end)
-    else
-      quotas ++ [quota]
-    end
+      existing ->
+        existing
+    end)
   end
 
   # Live broadcast views don't carry `cost_usd` (it's a read-path add-on from the
