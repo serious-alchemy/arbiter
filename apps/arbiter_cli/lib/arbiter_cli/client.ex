@@ -114,6 +114,15 @@ defmodule ArbiterCli.Client do
   @spec delete(String.t(), keyword()) :: {:ok, any()} | {:error, Error.t()}
   def delete(path, params \\ []), do: request(:delete, path, params: params)
 
+  @doc """
+  A request that deliberately carries **no** token, whatever `ARB_TOKEN` or
+  the operator socket would give it. Only for `arb doctor`'s probe that the
+  server refuses anonymous callers (bd-asawcq) — every other caller wants
+  `get/2` and friends.
+  """
+  @spec anonymous(atom(), String.t(), keyword()) :: {:ok, any()} | {:error, Error.t()}
+  def anonymous(method, path, opts \\ []), do: do_request(method, path, nil, opts)
+
   defp request(method, path, opts) do
     with {:ok, token} <- request_token() do
       case do_request(method, path, token, opts) do
