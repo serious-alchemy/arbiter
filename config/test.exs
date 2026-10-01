@@ -323,6 +323,7 @@ config :arbiter, :board_autopilot, enabled: false, interval_ms: :never, topics: 
 # fixture-heavy test ran just before them (bd-jw7cb0). The cache's own test
 # turns it back on.
 config :arbiter, Arbiter.Usage.EstimateCache, enabled: false
+config :arbiter, Arbiter.Reports.Cache, enabled: false
 
 # Coordinator sessions (bd-bpt0ag). The session socket directory is derived
 # from `XDG_RUNTIME_DIR`, which is a real tmpfs on the dogfood host — point it

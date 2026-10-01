@@ -1,0 +1,71 @@
+defmodule ArbiterWeb.ReportsLiveTest do
+  use ArbiterWeb.ConnCase, async: false
+
+  import Phoenix.LiveViewTest
+
+  alias Arbiter.Tasks.{Issue, Workspace}
+
+  setup do
+    {:ok, ws} =
+      Ash.create(Workspace, %{name: "rep-#{System.unique_integer([:positive])}", prefix: "rep"})
+
+    {:ok, ws: ws}
+  end
+
+  defp issue!(ws, attrs) do
+    {:ok, issue} = Ash.create(Issue, Map.merge(%{title: "t", workspace_id: ws.id}, attrs))
+    issue
+  end
+
+  test "renders the shell with filters and the empty state when nothing matches", %{conn: conn} do
+    {:ok, view, _html} = live(conn, ~p"/reports?difficulty=5")
+    _ = render_async(view)
+
+    assert has_element?(view, "#reports-page")
+    assert has_element?(view, "#reports-filters select[name='filters[workspace]']")
+    assert has_element?(view, "#reports-range")
+    assert has_element?(view, "#reports-empty")
+    refute has_element?(view, "#reports-created-chart")
+  end
+
+  test "shows the loading state on the dead render", %{conn: conn} do
+    html = conn |> get(~p"/reports") |> html_response(200)
+    assert html =~ "reports-loading"
+  end
+
+  test "renders tiles and the created-per-week chart for matching tickets", %{conn: conn, ws: ws} do
+    issue!(ws, %{difficulty: 3})
+    issue!(ws, %{difficulty: 3})
+
+    {:ok, view, _html} = live(conn, ~p"/reports?workspace=#{ws.id}")
+    _ = render_async(view)
+
+    assert has_element?(view, "#reports-tile-total [data-role=value]", "2")
+    assert has_element?(view, "#reports-created-chart rect[data-value='2']")
+    assert has_element?(view, "#reports-as-of")
+    refute has_element?(view, "#reports-empty")
+  end
+
+  test "changing a filter patches the URL and re-queries", %{conn: conn, ws: ws} do
+    issue!(ws, %{difficulty: 3})
+    issue!(ws, %{difficulty: 1})
+
+    {:ok, view, _html} = live(conn, ~p"/reports?workspace=#{ws.id}")
+    _ = render_async(view)
+    assert has_element?(view, "#reports-tile-total [data-role=value]", "2")
+
+    view
+    |> form("#reports-filters", filters: %{workspace: ws.id, difficulty: "3"})
+    |> render_change()
+
+    assert_patch(view, ~p"/reports?#{%{workspace: ws.id, difficulty: "3", range: "30d"}}")
+    _ = render_async(view)
+    assert has_element?(view, "#reports-tile-total [data-role=value]", "1")
+  end
+
+  test "an unknown range or type in the URL falls back instead of crashing", %{conn: conn} do
+    {:ok, view, _html} = live(conn, ~p"/reports?range=bogus&type=nope&difficulty=99")
+    _ = render_async(view)
+    assert has_element?(view, "#reports-page")
+  end
+end
