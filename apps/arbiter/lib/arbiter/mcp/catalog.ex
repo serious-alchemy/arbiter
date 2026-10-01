@@ -887,6 +887,14 @@ defmodule Arbiter.MCP.Catalog do
                 "Without it such a dispatch is refused with the reason. The bypass is recorded as a " <>
                 "`dispatch_forced` event. Defaults to false."
           },
+          "over_cap" => %{
+            "type" => "boolean",
+            "description" =>
+              "Dispatch even though the provider account this run would use has no free slot " <>
+                "(its `max_concurrent`, or this workspace's share, is reached). Without it such a " <>
+                "dispatch is refused with the account, its cap and the runs holding it. The " <>
+                "override is recorded as an `account_cap_override` event. Defaults to false."
+          },
           "force_quota" => %{
             "type" => "boolean",
             "description" =>

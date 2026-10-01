@@ -530,8 +530,32 @@ defmodule Arbiter.Workflows.PRPatrol do
       {:error, {:quota_held, _task_id}} ->
         clear_dispatch_failure(pr_number, state)
 
+      {:error, {:account_at_capacity, info}} ->
+        queue_for_autopilot(task, pr_number, state, info)
+
       {:error, reason} ->
         record_dispatch_failure(task, pr_number, state, reason)
+    end
+  end
+
+  # bd-8suxac: the provider account has no free slot. Forcing the follow-up
+  # over the cap is what breached it on 2026-10-01, and failing it would close
+  # it and page the coordinator for a condition that clears on its own. So it
+  # goes to Ready instead, and Autopilot — the one dispatcher that waits for a
+  # slot — admits it when one frees. The open ticket keeps `deduped?/2` from
+  # filing a second one meanwhile.
+  defp queue_for_autopilot(task, pr_number, state, info) do
+    case Ash.update(task, %{}, action: :promote_to_ready) do
+      {:ok, _ready} ->
+        Logger.info(
+          "PRPatrol: #{task.id} (#{state.repo}##{pr_number}) left Ready for Autopilot — " <>
+            Arbiter.Accounts.Admission.refusal_message(info)
+        )
+
+        clear_dispatch_failure(pr_number, state)
+
+      {:error, error} ->
+        record_dispatch_failure(task, pr_number, state, {:account_at_capacity, error})
     end
   end
 

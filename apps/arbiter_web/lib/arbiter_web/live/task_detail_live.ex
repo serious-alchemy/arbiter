@@ -1001,6 +1001,10 @@ defmodule ArbiterWeb.TaskDetailLive do
   defp dispatch_failure({:not_dispatchable, task_id, hold}),
     do: Dispatch.refusal_message(task_id, hold)
 
+  # bd-8suxac: the provider account the run would use has no free slot.
+  defp dispatch_failure({:account_at_capacity, info}),
+    do: Arbiter.Accounts.Admission.refusal_message(info)
+
   defp dispatch_failure(reason), do: inspect(reason)
 
   # ---- data ----

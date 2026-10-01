@@ -121,6 +121,14 @@ defmodule ArbiterWeb.Api.WorkerController do
           "task is already awaiting review; the Watchdog will close it on MR merge",
           %{task_id: task_id}}}
 
+      # bd-8suxac: the provider account the run would use has no free slot. A
+      # 409, like a resume at a full cap: the request is fine, the fleet's
+      # state refuses it. `over_cap` (`arb dispatch --over-cap`) overrides.
+      {:error, {:account_at_capacity, info}} ->
+        {:error,
+         {:conflict, Arbiter.Accounts.Admission.refusal_message(info),
+          %{task_id: task_id, account: info.account, cap: info.cap, holders: info.holders}}}
+
       # bd-2aslx6 (#1428): a second agent-spawning dispatch onto a task whose
       # worker is mid-session used to silently open a second paid CLI inside the
       # same worker run. It is now refused, with a message that names the live
@@ -542,6 +550,9 @@ defmodule ArbiterWeb.Api.WorkerController do
       |> maybe_add_skip_quota_gate(params["force_quota"])
       # bd-asxw4e: dispatch a Backlog or Blocked ticket anyway (recorded).
       |> Keyword.put(:force, truthy(params["force"]) == true)
+      # bd-8suxac: go over a full provider account's cap (recorded).
+      |> Keyword.put(:force_slot, truthy(params["over_cap"]) == true)
+      |> Keyword.put(:slot_override_actor, "api")
       |> Keyword.put(:dispatched_by, "http_api")
 
     with {:ok, worker_opts} <- worker_dispatch_opts(params) do

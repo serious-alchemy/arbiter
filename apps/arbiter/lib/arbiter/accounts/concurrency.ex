@@ -65,7 +65,22 @@ defmodule Arbiter.Accounts.Concurrency do
   review (`Arbiter.Reviews.ExternalReview`), a ReviewPatrol re-review or
   author reply, and the operator's own interactive sessions.
 
-  Two things keep that count from under-reading when the registry is briefly
+  Also counted: a dispatch **admitted** onto the account whose worker has not
+  registered yet (`Arbiter.Accounts.Admission`, bd-8suxac). Once its worker
+  registers under the task id, the worker is what counts.
+
+  ## Who is refused at the cap (bd-8suxac)
+
+  Counting is not enforcing. The board's plan enforces the cap for Autopilot;
+  every other fresh admission through `Dispatch.dispatch/2` — `arb dispatch`,
+  MCP `worker_dispatch`, the dashboard, a PRPatrol follow-up, a DispatchQueue
+  replay, and Autopilot's own dispatch once more — passes
+  `Arbiter.Accounts.Admission.admit/3`, which refuses it with no headroom left
+  unless it is explicitly overridden (recorded). A PRPatrol follow-up that is
+  refused waits in Ready for Autopilot. Resumes and a ticket's follow-up roles
+  are counted but never refused (below).
+
+  Three things keep that count from under-reading when the registry is briefly
   incomplete, which is the only way the cap can be overshot by a dispatch:
 
     * **Boot.** The registry starts empty, and the reconciler re-fills it one
@@ -74,6 +89,9 @@ defmodule Arbiter.Accounts.Concurrency do
     * **A resume in flight.** `Dispatch.resume/2` stops the prior worker
       before the new one registers. Autopilot does not plan while any
       dispatch/resume is pending (`Arbiter.Board.Drain.dispatch_pending?/0`).
+    * **A fresh dispatch in flight.** Its admission reserves the slot until
+      its worker has registered, and admissions on one account serialize, so
+      a burst of them can take no more than the headroom.
 
   ## Resumes are never refused by the cap
 
@@ -95,6 +113,7 @@ defmodule Arbiter.Accounts.Concurrency do
 
   require Ash.Query
 
+  alias Arbiter.Accounts.Admission
   alias Arbiter.Accounts.ProviderAccount
   alias Arbiter.Accounts.Resolver
   alias Arbiter.Accounts.WorkspaceProviderAccount
@@ -122,34 +141,42 @@ defmodule Arbiter.Accounts.Concurrency do
   in-flight work on the account rather than adding to it.
   """
   @spec live_count(ProviderAccount.t() | String.t() | nil, keyword()) :: non_neg_integer()
-  def live_count(%ProviderAccount{id: id, provider: provider}, opts) do
-    case linked_workspace_ids(id) do
-      workspace_ids when map_size(workspace_ids) == 0 ->
-        0
-
-      workspace_ids ->
-        code = Atom.to_string(provider)
-        exclude = Keyword.get(opts, :exclude_task)
-
-        WorkerRegistry.live_dispatches()
-        |> without_parked_primaries()
-        |> Enum.filter(&Map.has_key?(workspace_ids, &1.workspace_id))
-        |> Enum.reject(
-          &(is_binary(exclude) and WorkerRegistry.owned_by?(&1.registry_key, exclude))
-        )
-        |> count_matching(code)
-    end
-  rescue
-    # A ceiling that cannot be read must not stop dispatch: an unreadable
-    # count reads as "nothing is running", which leaves the headroom at its
-    # maximum rather than holding the fleet.
-    _ -> 0
-  end
+  def live_count(%ProviderAccount{} = account, opts), do: account |> holders(opts) |> length()
 
   def live_count(account_id, opts) when is_binary(account_id),
     do: account_id |> Resolver.get() |> live_count(opts)
 
   def live_count(_, _opts), do: 0
+
+  @doc """
+  The registry keys `live_count/2` counts on `account`: each live worker and
+  each admitted dispatch whose worker has not registered yet
+  (`Arbiter.Accounts.Admission`). A refusal names them.
+  """
+  @spec holders(ProviderAccount.t(), keyword()) :: [String.t()]
+  def holders(%ProviderAccount{id: id, provider: provider}, opts \\ []) do
+    case linked_workspace_ids(id) do
+      workspace_ids when map_size(workspace_ids) == 0 ->
+        []
+
+      workspace_ids ->
+        code = Atom.to_string(provider)
+        exclude = Keyword.get(opts, :exclude_task)
+
+        occupants()
+        |> Enum.filter(&Map.has_key?(workspace_ids, &1.workspace_id))
+        |> Enum.reject(
+          &(is_binary(exclude) and WorkerRegistry.owned_by?(&1.registry_key, exclude))
+        )
+        |> filter_matching(code)
+        |> Enum.map(& &1.registry_key)
+    end
+  rescue
+    # A ceiling that cannot be read must not stop dispatch: an unreadable
+    # count reads as "nothing is running", which leaves the headroom at its
+    # maximum rather than holding the fleet.
+    _ -> []
+  end
 
   @doc """
   `live_count/1` narrowed to one workspace: the live workers *this* workspace
@@ -166,10 +193,10 @@ defmodule Arbiter.Accounts.Concurrency do
         0
 
       code ->
-        WorkerRegistry.live_dispatches()
-        |> without_parked_primaries()
+        occupants()
         |> Enum.filter(&(&1.workspace_id == workspace_id))
-        |> count_matching(code)
+        |> filter_matching(code)
+        |> length()
     end
   rescue
     _ -> 0
@@ -192,14 +219,21 @@ defmodule Arbiter.Accounts.Concurrency do
   def account_headroom(nil, _workspace, _opts), do: :unlimited
 
   def account_headroom(%ProviderAccount{} = account, workspace, opts) do
-    share = Resolver.share(workspace_id(workspace), account.provider)
-
-    case ceiling(account.max_concurrent, share) do
+    case limit(account, workspace) do
       nil -> :unlimited
       limit -> max(0, limit - live_count(account, opts))
     end
   rescue
     _ -> :unlimited
+  end
+
+  @doc """
+  `min(a.max_concurrent, share(ws, a))` — the ceiling `account_headroom/3`
+  subtracts the live count from — or `nil` when neither term is set.
+  """
+  @spec limit(ProviderAccount.t(), Workspace.t() | String.t() | nil) :: non_neg_integer() | nil
+  def limit(%ProviderAccount{} = account, workspace) do
+    ceiling(account.max_concurrent, Resolver.share(workspace_id(workspace), account.provider))
   end
 
   @doc """
@@ -257,6 +291,20 @@ defmodule Arbiter.Accounts.Concurrency do
     end
   end
 
+  # Everything holding a slot on some account: the live workers, less parked
+  # primaries, plus every admitted dispatch (bd-8suxac) whose worker has not
+  # registered under its task id yet. Once it has, the worker is the one
+  # counted — whether or not it has stamped its dispatch context yet.
+  defp occupants do
+    dispatches = WorkerRegistry.live_dispatches()
+    registered = MapSet.new(WorkerRegistry.all(), fn {key, _pid} -> key end)
+
+    pending =
+      Enum.reject(Admission.pending(), &MapSet.member?(registered, &1.registry_key))
+
+    without_parked_primaries(dispatches) ++ pending
+  end
+
   # A primary worker whose own sub-worker (`<task>:fixpass`, `<task>:conflict`,
   # `<task>#review…`) is live is parked on the review gate with no agent
   # process: `Worker.start/1` refuses a second *active* worker per task, and a
@@ -273,14 +321,14 @@ defmodule Arbiter.Accounts.Concurrency do
   # `Arbiter.Quota.provider_code/1` resolves `"gemini"` by probing PATH, so
   # each distinct provider string (and each workspace whose dispatch named
   # none) is resolved once per call rather than once per worker.
-  defp count_matching(dispatches, code) do
-    {count, _cache} =
-      Enum.reduce(dispatches, {0, %{}}, fn dispatch, {count, cache} ->
+  defp filter_matching(dispatches, code) do
+    {matching, _cache} =
+      Enum.reduce(dispatches, {[], %{}}, fn dispatch, {matching, cache} ->
         {resolved, cache} = resolve_code(dispatch, cache)
-        {if(resolved == code, do: count + 1, else: count), cache}
+        {if(resolved == code, do: [dispatch | matching], else: matching), cache}
       end)
 
-    count
+    Enum.reverse(matching)
   end
 
   defp resolve_code(%{provider: nil, workspace_id: ws_id}, cache) do
