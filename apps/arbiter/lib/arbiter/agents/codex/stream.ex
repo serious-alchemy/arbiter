@@ -217,7 +217,7 @@ defmodule Arbiter.Agents.Codex.Stream do
   def format_event(%{"type" => "turn.completed"} = event), do: [{turn_summary(event), false}]
 
   def format_event(%{"type" => "turn.failed"} = event) do
-    [{"⚠ codex turn failed: #{truncate(error_message(event["error"]), 200)}", false}]
+    failure_lines("⚠ codex turn failed: ", event["error"])
   end
 
   def format_event(%{"type" => phase, "item" => item})
@@ -274,7 +274,7 @@ defmodule Arbiter.Agents.Codex.Stream do
   end
 
   def format_event(%{"type" => "error"} = event) do
-    [{"⚠ codex: #{truncate(to_string(event["message"] || "error"), 200)}", false}]
+    failure_lines("⚠ codex: ", event["message"] || "error")
   end
 
   def format_event(%{"type" => "task_complete"} = event), do: [{result_summary(event), false}]
@@ -444,6 +444,71 @@ defmodule Arbiter.Agents.Codex.Stream do
       end
 
     Enum.join(parts, " · ")
+  end
+
+  # bd-1l07jx: the human line is truncated and prefixed, so Worker.StopReason
+  # (whose quota signature is line-anchored) could never see the usage-limit
+  # wording and the run landed in `:crashed`. Alongside it, emit a normalized
+  # signal line in the vocabulary StopReason already parses: `usage limit
+  # reached|<epoch>` (epoch from the structured `resets_at`, else
+  # `resets_in_seconds`) or bare `usage limit reached`. Auth failures are
+  # normalized to a line StopReason's auth signature matches. Keyed on the
+  # error *shape* (`usage_limit_reached`, plus the free-tier wording), not on
+  # the backend, so a Codex pointed at another Responses-API backend that
+  # relays the same error type works too.
+  defp failure_lines(prefix, error) do
+    message = error_message(error)
+    human = {prefix <> truncate(message, 200), false}
+
+    case failure_signal(message, error) do
+      {:quota, nil} -> [human, {"usage limit reached", false}]
+      {:quota, epoch} -> [human, {"usage limit reached|#{epoch}", false}]
+      :auth -> [human, {"codex authentication error: " <> truncate(message, 160), false}]
+      nil -> [human]
+    end
+  end
+
+  defp failure_signal(message, error) do
+    detail = decode_error_detail(message, error)
+
+    cond do
+      detail["type"] == "usage_limit_reached" or detail["code"] == "usage_limit_reached" ->
+        {:quota, reset_epoch(detail)}
+
+      message =~ ~r/hit your usage limit|usage limit (has been )?reached/i ->
+        {:quota, reset_epoch(detail)}
+
+      message =~
+          ~r/refresh token (was )?already (used|been used)|log ?out and sign in again|refresh token.{0,30}(expired|revoked|invalid)|\b401\b|unauthorized|not logged in/i ->
+        :auth
+
+      true ->
+        nil
+    end
+  end
+
+  # The error message is frequently itself a JSON document
+  # (`{"type":"error","status":429,"error":{"type":"usage_limit_reached",...}}`);
+  # fall back to the map form of `error` when the CLI already structured it.
+  defp decode_error_detail(message, error) do
+    case Jason.decode(message) do
+      {:ok, %{"error" => inner}} when is_map(inner) -> inner
+      {:ok, %{} = decoded} -> decoded
+      _ -> if is_map(error), do: error, else: %{}
+    end
+  end
+
+  defp reset_epoch(detail) do
+    cond do
+      is_integer(detail["resets_at"]) ->
+        detail["resets_at"]
+
+      is_integer(detail["resets_in_seconds"]) ->
+        System.os_time(:second) + detail["resets_in_seconds"]
+
+      true ->
+        nil
+    end
   end
 
   defp error_message(%{"message" => m}) when is_binary(m) and m != "", do: m
