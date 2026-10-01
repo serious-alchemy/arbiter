@@ -11,6 +11,9 @@ defmodule ArbiterWeb.Application do
     # the currently-checked-out commit, not a stale compile-time value.
     Application.put_env(:arbiter_web, :runtime_git_sha, resolve_git_sha())
 
+    # Initialize the version tooltip cache for efficient access in layouts
+    ArbiterWeb.VersionHelper.init_cache()
+
     warn_if_bound_off_loopback()
 
     children =
