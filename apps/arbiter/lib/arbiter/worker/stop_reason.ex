@@ -214,6 +214,9 @@ defmodule Arbiter.Worker.StopReason do
     | (oauth|token|credentials?|session)[^\n]{0,40}(expired|invalid|revoked)
     | please[ _](run|sign|log)[ _-]?in
     | \/login\b
+    | refresh[ _]token[^\n]{0,40}already[ _]used
+    | log[ _]?out[ _]and[ _]sign[ _]in[ _]again
+    | codex[ _]authentication[ _]error
   /ix
 
   # bd-3hr6g2: the Claude CLI's own plan usage-limit message, distinct from a
@@ -479,8 +482,9 @@ defmodule Arbiter.Worker.StopReason do
           summary: "agent could not authenticate (credentials expired or invalid)",
           remediation:
             "Re-authenticate the agent CLI (Claude: refresh ~/.claude/.credentials.json " <>
-              "via `claude` login; Gemini: refresh GEMINI_API_KEY / re-run `gemini` auth), " <>
-              "then re-dispatch.",
+              "via `claude` login; Gemini: refresh GEMINI_API_KEY / re-run `gemini` auth; " <>
+              "Codex: run `codex login` to re-seed auth.json — a rotated refresh token " <>
+              "cannot be reused), then re-dispatch.",
           exit_status: exit_status,
           signal: signal
         }
