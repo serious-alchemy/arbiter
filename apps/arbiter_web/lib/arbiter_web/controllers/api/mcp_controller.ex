@@ -4,18 +4,18 @@ defmodule ArbiterWeb.Api.McpController do
 
   Routes:
 
-    * `POST /api/mcp/tokens`        — :mint_token   Mint a coordinator scope token
+    * `POST /api/mcp/tokens`        — :mint_token   Mint a coordinator scope token (bearer callers only)
     * `POST /api/mcp/tokens/verify` — :verify_token Decode + verify a scope token
 
-  These endpoints are used by `arb mcp token mint` and `arb mcp token verify`.
+  `arb mcp token verify` uses the verify route. `arb mcp token mint` uses the
+  mint route only when it already holds a token (`ARB_TOKEN`, or a session's
+  own). Otherwise it goes through `Arbiter.MCP.OperatorSocket`.
   """
 
   use ArbiterWeb, :controller
 
   alias Arbiter.MCP
-  alias Arbiter.MCP.Scope
-
-  @default_ttl 30 * 24 * 60 * 60
+  alias Arbiter.MCP.{OperatorSocket, Scope}
 
   action_fallback ArbiterWeb.Api.FallbackController
 
@@ -33,15 +33,18 @@ defmodule ArbiterWeb.Api.McpController do
     - `can_dispatch` (optional, default `true`) — whether the minted token may
       dispatch. Ignored (forced to `false`) when it would exceed the caller.
 
-  ## Caller-inheritance guardrail (bd-5b5hq7)
+  ## No anonymous minting (bd-8381tk)
 
-  An anonymous loopback call (no `Authorization` header — the zero-setup
-  `arb` / `arb init` path, `ArbiterWeb.Plugs.ApiAuth`) mints an unrestricted
-  token by default: workspace-agnostic, `can_dispatch: true`, no
-  `session_id`. It may still narrow itself via the `workspace_id` /
-  `can_dispatch` params below — narrowing is always safe with no caller to
-  compare against, only widening would be a problem, and there is no wider
-  place to widen from.
+  An anonymous loopback call (no `Authorization` header, let through by
+  `ArbiterWeb.Plugs.ApiAuth`) is refused with 403, whatever it asks for.
+  Loopback only proves "same host", and every worker runs on this host as
+  the operator's Unix user, so it cannot tell the operator from a worker.
+  An unauthenticated caller gets no tier at all. The operator mints
+  over `Arbiter.MCP.OperatorSocket` (`arb mcp token mint`, `arb init`), which
+  checks the peer's credentials and refuses any process Arbiter spawned. See
+  docs/worker-security.md, "Operator proof for token minting".
+
+  ## Caller-inheritance guardrail (bd-5b5hq7)
 
   A call that presents a bearer token (`conn.assigns[:mcp_scope]`, set by
   `ApiAuth` whenever one was given, loopback or not) can only mint a token
@@ -64,17 +67,25 @@ defmodule ArbiterWeb.Api.McpController do
   result is a widening.
   """
   def mint_token(conn, params) do
-    ttl = parse_ttl(Map.get(params, "ttl"))
+    ttl = OperatorSocket.parse_ttl(Map.get(params, "ttl"))
 
     case conn.assigns[:mcp_scope] do
+      # bd-8381tk: loopback is not an identity. Every worker shares this host
+      # and Unix user, so an anonymous loopback caller could be any of them.
+      # No tier is safe to hand out here (the only tier this endpoint mints is
+      # coordinator); the operator proves who they are over the peer-checked
+      # operator socket instead (`Arbiter.MCP.OperatorSocket`).
       nil ->
-        workspace_id = nilable_param(params, "workspace_id")
-        can_dispatch = narrow_can_dispatch(true, Map.get(params, "can_dispatch"))
-
-        token =
-          Scope.mint_coordinator(workspace_id, can_dispatch: can_dispatch, max_age: ttl)
-
-        respond_token(conn, token, ttl)
+        conn
+        |> put_status(:forbidden)
+        |> json(%{
+          "error" => %{
+            "message" =>
+              "anonymous token minting is disabled: run `arb mcp token mint` on the " <>
+                "server host (it proves operator identity over the local operator " <>
+                "socket), or present an existing coordinator token as Authorization: Bearer"
+          }
+        })
 
       %Scope{tier: :worker} ->
         conn
@@ -195,16 +206,4 @@ defmodule ArbiterWeb.Api.McpController do
     |> put_status(:unprocessable_entity)
     |> json(%{"error" => %{"message" => "token is required"}})
   end
-
-  defp parse_ttl(nil), do: @default_ttl
-  defp parse_ttl(n) when is_integer(n) and n > 0, do: n
-
-  defp parse_ttl(s) when is_binary(s) do
-    case Integer.parse(s) do
-      {n, ""} when n > 0 -> n
-      _ -> @default_ttl
-    end
-  end
-
-  defp parse_ttl(_), do: @default_ttl
 end

@@ -251,7 +251,11 @@ still holds for the operator's shell and for coordinator sessions.
 
 Since this was reported, it has been filed as **bd-8381tk** (P1). That
 ticket removes anonymous coordinator minting for everyone, and requires
-operator proof for write-capable tiers.
+operator proof for write-capable tiers. **Landed:** anonymous minting now gets
+403. The operator's proof is `Arbiter.MCP.OperatorSocket`, a Unix socket
+whose peer is identified by `SO_PEERCRED` and refused if it descends from
+the server or sits in its service cgroup. See
+[../worker-security.md](../worker-security.md#operator-proof-for-token-minting-bd-8381tk).
 
 ## 3. Profile shape
 

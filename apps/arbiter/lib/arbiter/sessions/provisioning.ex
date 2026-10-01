@@ -606,10 +606,10 @@ defmodule Arbiter.Sessions.Provisioning do
   # The session's own event monitor (bd-aqafdr): a `curl -K` loop over
   # `/events` that reads its bearer token from a mode-0600 curl config
   # instead of a header flag, so the token never lands on `monitor.sh`'s own
-  # argv, and never calls `arb mcp token mint` (that route is the
-  # unauthenticated loopback mint a session must not escalate through,
-  # bd-5b5hq7 — the session's own already-scoped, revocable token is reused
-  # instead). Armed by the `SessionStart` hook
+  # argv, and never calls `arb mcp token mint` (a session must not escalate
+  # through it, bd-5b5hq7, and the operator socket refuses a session's
+  # processes anyway, bd-8381tk — the session's own already-scoped, revocable
+  # token is reused instead). Armed by the `SessionStart` hook
   # (`Arbiter.Agents.Claude.ConfigDir.Interactive`); the agent runs it via
   # the Monitor tool, never background Bash (an infinite loop never exits,
   # so `run_in_background` never notifies).

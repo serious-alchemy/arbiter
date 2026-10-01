@@ -8,11 +8,18 @@ defmodule ArbiterCli.Cmd.Mcp do
           installation (pass `--workspace` / a `workspace` param per call to
           target a specific one). Default TTL: 2592000 seconds (30 days).
 
+          Run it on the server host from your own shell: with no ARB_TOKEN it
+          proves operator identity over the server's local operator socket,
+          which refuses any process Arbiter itself started (workers,
+          sessions). With ARB_TOKEN set it mints over HTTP, capped at that
+          token's own authority. From another machine:
+          `ssh <host> arb mcp token mint`.
+
       arb mcp token verify <token> [--json]
           Decode and display the claims from a scope token (expiry, tier, workspace).
   """
 
-  alias ArbiterCli.{Client, Output}
+  alias ArbiterCli.{Client, OperatorSocket, Output}
 
   @default_ttl 2_592_000
 
@@ -67,10 +74,48 @@ defmodule ArbiterCli.Cmd.Mcp do
       ttl = opts[:ttl] || @default_ttl
 
       # Coordinator tokens are workspace-agnostic — no workspace is bound at mint.
-      case Client.post("/api/mcp/tokens", %{"ttl" => ttl}) do
+      case mint_token(%{"ttl" => ttl}) do
         {:ok, resp} -> emit_mint(resp, mode)
         {:error, err} -> Output.die(err)
       end
+    end
+  end
+
+  @doc """
+  Mint a coordinator token (bd-8381tk), shared by `arb mcp token mint` and
+  `arb init`.
+
+    * With a token of its own (`ARB_TOKEN`, or a session's own token): the
+      bearer-authenticated `POST /api/mcp/tokens`. The server caps the result
+      at the caller's authority, so a session still gets only a session token.
+    * Without one, against a loopback `ARB_HOST`: the server's local operator
+      socket (`ArbiterCli.OperatorSocket`), which checks the caller's peer
+      credentials. The anonymous HTTP route is refused by the server.
+    * Without one, against a remote `ARB_HOST`: refused here, because that
+      server's socket is on the other machine.
+  """
+  @spec mint_token(map()) :: {:ok, map()} | {:error, Client.Error.t()}
+  def mint_token(params) do
+    case Client.resolve_token() do
+      {:ok, token} when is_binary(token) and token != "" ->
+        Client.post("/api/mcp/tokens", params)
+
+      {:ok, _none} ->
+        if Client.loopback_host?() do
+          OperatorSocket.mint(params)
+        else
+          {:error,
+           %Client.Error{
+             kind: :no_token,
+             message: "minting against a remote server (#{Client.base_url()}) needs a token",
+             hint:
+               "run `ssh <host> arb mcp token mint` on the server host, " <>
+                 "or set ARB_TOKEN to a coordinator token you already hold"
+           }}
+        end
+
+      {:error, err} ->
+        {:error, err}
     end
   end
 
