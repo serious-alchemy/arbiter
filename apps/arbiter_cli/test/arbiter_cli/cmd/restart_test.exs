@@ -340,11 +340,20 @@ defmodule ArbiterCli.Cmd.RestartTest do
          {%{"error" => %{"message" => "Authorization: Bearer <token> required"}}, 401}}
       ])
 
+      # Never the real systemctl / lsof / kill: record anything it tries.
+      test_pid = self()
+
+      Process.put(:bd2_cmd_runner, fn cmd, args, _opts ->
+        send(test_pid, {:ran, cmd, args})
+        {"", 1}
+      end)
+
       {_out, err, code} = capture(fn -> Restart.run([]) end)
 
       assert code == 1
       assert err =~ "could not check for active workers"
       assert err =~ "--force"
+      refute_received {:ran, _, _}
     end
 
     test "--force proceeds even when workers are active" do

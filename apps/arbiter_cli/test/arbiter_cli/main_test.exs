@@ -222,7 +222,9 @@ defmodule ArbiterCli.MainTest do
 
     test "arb update with no id redirects to server deploy" do
       # We only assert the redirect note; deploy will fail fast without a root,
-      # which is fine — the routing is what we're checking.
+      # which is fine — the routing is what we're checking. Every command it
+      # would run fails, so it never touches this checkout's git for real.
+      Process.put(:bd2_cmd_runner, fn _cmd, _args, _opts -> {"stubbed", 1} end)
       {_out, err, _code} = capture(fn -> Main.main(["update"]) end)
       assert err =~ "`arb update` is now `arb server deploy`"
     end

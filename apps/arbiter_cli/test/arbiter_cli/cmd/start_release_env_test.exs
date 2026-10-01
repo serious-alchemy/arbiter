@@ -18,6 +18,9 @@ defmodule ArbiterCli.Cmd.StartReleaseEnvTest do
     tmp = Path.join(System.tmp_dir!(), "arb_cli_relenv_#{System.unique_integer([:positive])}")
     File.mkdir_p!(tmp)
     on_exit(fn -> File.rm_rf(tmp) end)
+    # These exercise the real spawn, against stand-in executables in `tmp`
+    # only — the one explicit opt-out of the test-env guard.
+    Process.put(:bd2_allow_real_cmd, true)
     {:ok, tmp: tmp}
   end
 
