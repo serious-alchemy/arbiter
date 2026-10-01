@@ -41,6 +41,11 @@ defmodule ArbiterCli.CliCase do
           retry: false
         )
 
+        # Never the host's real operator socket (bd-8381tk): on the operator's
+        # machine that would mint a live coordinator token from a test run.
+        # `ArbiterCli.FakeOperatorSocket.start!/1` repoints this.
+        Process.put(:bd2_operator_socket, "/nonexistent/arb-test-operator.sock")
+
         :ok
       end
     end

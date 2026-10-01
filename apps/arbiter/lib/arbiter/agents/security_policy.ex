@@ -332,12 +332,12 @@ defmodule Arbiter.Agents.SecurityPolicy do
   It also denies `Bash(arb mcp token mint:*)` (bd-5b5hq7). A session's own MCP
   token is already deliberately weaker than a full coordinator token —
   `can_dispatch: false` by default, possibly workspace-bound, and revoked when
-  the session ends — and unauthenticated loopback minting plus `arb` on PATH
-  would otherwise let the session trade up for a full-power token just by
-  running the CLI. This is a guardrail against *casual* escalation, not a
-  sandbox: the same-user threat model means a determined session could still
-  reach the API directly. See the server-side caller-inheritance guard in
-  `ArbiterWeb.Api.McpController.mint_token/2` for the actual boundary.
+  the session ends. The rule stops the session from even trying to trade up
+  for a full-power token by running the CLI. The server-side boundaries are
+  `ArbiterWeb.Api.McpController.mint_token/2`, which caps a bearer caller at
+  its own authority and refuses anonymous callers outright, and
+  `Arbiter.MCP.OperatorSocket`, which refuses any process the server spawned
+  and any process inside a session's `arb-session-<id>` scope (bd-8381tk).
   """
   @spec interactive_session_base() :: t()
   def interactive_session_base do
