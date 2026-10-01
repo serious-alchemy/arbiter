@@ -205,7 +205,8 @@ defmodule Arbiter.MCP.AgentConfig.Codex do
 
   When the config uses `bearer_token_env_var`, also confirms that variable is
   non-empty in `:env`. Options: `:cwd`, `:env` (list of `{name, value}`),
-  `:server_name`, `:executable` (defaults to `codex` on PATH).
+  `:server_name`, `:cli_args` (global `-c` overrides, as the spawn passes
+  them), `:executable` (defaults to `codex` on PATH).
   """
   @spec check_worker_config(String.t(), keyword()) :: :ok | {:error, term()}
   def check_worker_config(worktree, opts) do
@@ -214,7 +215,7 @@ defmodule Arbiter.MCP.AgentConfig.Codex do
 
     with exe when is_binary(exe) <- exe || {:error, :codex_not_found},
          {out, 0} <-
-           ReleaseEnv.cmd(exe, ["mcp", "list", "--json"],
+           ReleaseEnv.cmd(exe, Keyword.get(opts, :cli_args, []) ++ ["mcp", "list", "--json"],
              cd: worktree,
              env: env,
              stderr_to_stdout: false

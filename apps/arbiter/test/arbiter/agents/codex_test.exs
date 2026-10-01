@@ -165,6 +165,34 @@ defmodule Arbiter.Agents.CodexTest do
       refute "--dangerously-bypass-approvals-and-sandbox" in argv
     end
 
+    test "declares the MCP server via -c overrides so project trust is irrelevant", %{tmp: tmp} do
+      _codex = stub_codex(tmp)
+      prior = Application.get_env(:arbiter, Arbiter.MCP)
+      Application.put_env(:arbiter, Arbiter.MCP, Keyword.put(prior || [], :inject_config, true))
+
+      on_exit(fn ->
+        if prior,
+          do: Application.put_env(:arbiter, Arbiter.MCP, prior),
+          else: Application.delete_env(:arbiter, Arbiter.MCP)
+      end)
+
+      assert {:ok, argv} = Codex.default_argv("the prompt", arb_token: "tok")
+      overrides = for ["-c", v] <- Enum.chunk_every(argv, 2, 1), do: v
+      name = Arbiter.MCP.server_name()
+
+      assert "mcp_servers.#{name}.url=#{inspect(Arbiter.MCP.server_url())}" in overrides
+      assert "mcp_servers.#{name}.bearer_token_env_var=\"ARBITER_MCP_TOKEN\"" in overrides
+      # the token itself never lands in argv
+      refute Enum.any?(argv, &(is_binary(&1) and &1 =~ "tok\""))
+    end
+
+    test "no MCP -c overrides without a worker token", %{tmp: tmp} do
+      _codex = stub_codex(tmp)
+
+      assert {:ok, argv} = Codex.default_argv("the prompt", [])
+      refute Enum.any?(argv, &(is_binary(&1) and &1 =~ "mcp_servers."))
+    end
+
     test "passes through `:model` opt as `-m <name>`", %{tmp: tmp} do
       _codex = stub_codex(tmp)
 

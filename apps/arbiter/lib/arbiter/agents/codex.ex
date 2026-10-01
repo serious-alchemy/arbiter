@@ -89,7 +89,8 @@ defmodule Arbiter.Agents.Codex do
     case resolve_executable() do
       {:ok, codex} ->
         with {:ok, model_flags} <- model_flag(opts) do
-          build_argv(codex, prompt, sandbox_argv(security_policy(opts)) ++ model_flags)
+          flags = sandbox_argv(security_policy(opts)) ++ model_flags ++ mcp_argv(opts)
+          build_argv(codex, prompt, flags)
         end
 
       {:error, _} = err ->
@@ -436,6 +437,32 @@ defmodule Arbiter.Agents.Codex do
   end
 
   defp sandbox_argv(_policy), do: ["--dangerously-bypass-approvals-and-sandbox"]
+
+  # Codex only loads `<worktree>/.codex/config.toml` when the project is trusted
+  # in `$CODEX_HOME/config.toml`, so MCP was silently absent in untrusted repos.
+  # `-c` overrides apply regardless of trust. The bearer stays off argv: it is
+  # read from `ARBITER_MCP_TOKEN` (see `spawn_env/1`).
+  @doc false
+  def mcp_argv(opts) do
+    case Keyword.get(opts, :arb_token) do
+      token when is_binary(token) and token != "" ->
+        if Arbiter.MCP.inject_config?() do
+          name = Arbiter.MCP.server_name()
+
+          [
+            "-c",
+            "mcp_servers.#{name}.url=#{inspect(Arbiter.MCP.server_url())}",
+            "-c",
+            "mcp_servers.#{name}.bearer_token_env_var=\"ARBITER_MCP_TOKEN\""
+          ]
+        else
+          []
+        end
+
+      _ ->
+        []
+    end
+  end
 
   # workspace-write disables network by default; opt back in when the policy's
   # sandbox allows it (workers need it for git push / package installs).
