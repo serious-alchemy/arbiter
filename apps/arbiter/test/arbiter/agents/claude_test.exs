@@ -22,7 +22,8 @@ defmodule Arbiter.Agents.ClaudeTest do
     end
 
     test "done_sentinel/0 matches `arb done`" do
-      assert Regex.match?(Claude.done_sentinel(), "I am done — arb done")
+      assert Regex.match?(Claude.done_sentinel(), "work finished\narb done")
+      refute Regex.match?(Claude.done_sentinel(), "I am done — arb done")
       refute Regex.match?(Claude.done_sentinel(), "arb doneness")
     end
   end
