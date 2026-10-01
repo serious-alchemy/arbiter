@@ -113,7 +113,7 @@ defmodule ArbiterWeb.QuotaTopbarTest do
       refute has_element?(usage, "#overage-indicator")
     end
 
-    test "codex stays hidden even when the installation runs it", %{conn: conn, ws: ws} do
+    test "codex is shown when the installation runs it", %{conn: conn, ws: ws} do
       configure!(ws, ["claude", "codex"])
       claude!(ws)
       codex!(ws)
@@ -121,11 +121,11 @@ defmodule ArbiterWeb.QuotaTopbarTest do
       {:ok, view, _html} = live(conn, "/")
       html = render_async(view, @async_wait)
 
-      assert rings(view) == ["claude"]
-      refute html =~ "Codex"
+      assert rings(view) == ["claude", "codex"]
+      assert html =~ "Codex"
 
       {:ok, usage, _html} = live(conn, "/usage")
-      refute render_async(usage, @async_wait) =~ "Codex"
+      assert render_async(usage, @async_wait) =~ "Codex"
     end
 
     test "the override forces a provider on and off", %{conn: conn, ws: ws} do

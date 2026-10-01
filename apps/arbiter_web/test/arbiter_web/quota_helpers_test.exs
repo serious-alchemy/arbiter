@@ -575,5 +575,57 @@ defmodule ArbiterWeb.QuotaHelpersTest do
       assert quota_ring_stroke(:stale) == "var(--arb-done)"
       assert quota_ring_title(v, rings) =~ "stale reading: agy unreachable"
     end
+
+    test "codex with only session data (no weekly) renders one ring" do
+      v =
+        "codex"
+        |> Arbiter.Quota.blank_view()
+        |> Map.merge(%{
+          gate_policy: @flat,
+          utilization_5h: 0.27,
+          reset_5h_at: DateTime.utc_now() |> DateTime.add(3600),
+          utilization_7d: nil,
+          reset_7d_at: nil,
+          primary_label: "session",
+          secondary_label: nil,
+          captured_at: DateTime.utc_now()
+        })
+
+      rings = quota_rings(v)
+
+      assert rings.inner.state == :ok
+      assert rings.inner.pct == 27
+      assert rings.inner.label == "session"
+      assert rings.outer.state == :no_data
+      assert quota_ring_summary(v, rings) =~ "session 27%, on pace"
+      refute quota_ring_summary(v, rings) =~ "7d"
+    end
+
+    test "codex with zero weekly data shows only session ring" do
+      v =
+        "codex"
+        |> Arbiter.Quota.blank_view()
+        |> Map.merge(%{
+          gate_policy: @flat,
+          utilization_5h: 0.50,
+          reset_5h_at: DateTime.utc_now() |> DateTime.add(3600),
+          utilization_7d: nil,
+          reset_7d_at: nil,
+          primary_label: "session",
+          secondary_label: nil,
+          captured_at: DateTime.utc_now()
+        })
+
+      rings = quota_rings(v)
+
+      # Inner ring should be the session window
+      assert rings.inner.label == "session"
+      assert rings.inner.pct == 50
+      # Outer ring should be no_data, not rendered in summary
+      assert rings.outer.state == :no_data
+      summary = quota_ring_summary(v, rings)
+      assert summary =~ "Codex: session 50%"
+      refute summary =~ "no data"
+    end
   end
 end

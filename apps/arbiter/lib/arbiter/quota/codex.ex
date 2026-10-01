@@ -329,22 +329,25 @@ defmodule Arbiter.Quota.Codex do
   @doc """
   Map a stored `CodexQuota` row to the uniform two-window quota view shape the
   topbar / `/usage` page render (bd-ajh7bd). Codex's session window fills the
-  primary ("5h") slot and the weekly window the secondary ("7d") slot; the used
+  primary ("5h") slot; the weekly window is shown only when it has data. The used
   percents (0-100) are rescaled to the 0-1 fraction the view uses.
   """
   @spec view(CodexQuota.t()) :: map()
   def view(%CodexQuota{} = row) do
+    weekly_pct = row.weekly_used_percent
+    secondary_label = if is_number(weekly_pct) and weekly_pct > 0, do: "weekly", else: nil
+
     Arbiter.Quota.blank_view(row.provider)
     |> Map.merge(%{
       provider_account_id: row.provider_account_id,
       utilization_5h: fraction(row.session_used_percent),
       reset_5h_at: row.session_reset_at,
-      utilization_7d: fraction(row.weekly_used_percent),
-      reset_7d_at: row.weekly_reset_at,
+      utilization_7d: if(secondary_label, do: fraction(weekly_pct), else: nil),
+      reset_7d_at: if(secondary_label, do: row.weekly_reset_at, else: nil),
       captured_at: row.captured_at,
       plan: row.plan,
       primary_label: "session",
-      secondary_label: "weekly"
+      secondary_label: secondary_label
     })
   end
 
