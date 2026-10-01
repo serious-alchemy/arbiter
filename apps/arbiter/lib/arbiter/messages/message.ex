@@ -815,6 +815,21 @@ defmodule Arbiter.Messages.Message do
     Ash.read!(query)
   end
 
+  @doc """
+  How many messages `outstanding/2` would return — a `COUNT`, for callers (the
+  coordinator drawer's badge) that need the figure and not the rows.
+  """
+  @spec outstanding_count(String.t(), keyword()) :: non_neg_integer()
+  def outstanding_count(to_ref, opts \\ []) when is_binary(to_ref) do
+    refs = ref_variants(to_ref)
+
+    __MODULE__
+    |> Ash.Query.filter(to_ref in ^refs and kind in ^@mailbox_kinds)
+    |> outstanding_filter(Keyword.get(opts, :reader))
+    |> scope_workspace(opts)
+    |> Ash.count!()
+  end
+
   defp outstanding_filter(query, nil) do
     Ash.Query.filter(query, not is_nil(read_at) and is_nil(cleared_at))
   end

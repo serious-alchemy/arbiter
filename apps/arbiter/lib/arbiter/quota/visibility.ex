@@ -133,15 +133,21 @@ defmodule Arbiter.Quota.Visibility do
   its install-default `gate_policy`) for a shown provider that has no snapshot
   row yet.
   """
-  @spec list_latest_for_workspace(String.t() | nil) :: [map()]
-  def list_latest_for_workspace(workspace_id) do
+  @spec list_latest_for_workspace(String.t() | nil, keyword()) :: [map()]
+  def list_latest_for_workspace(workspace_id, opts \\ []) do
     case providers() do
       [] ->
         []
 
       visible ->
         excluded = provider_codes() -- visible
-        views = Quota.list_latest_for_workspace(workspace_id, exclude_providers: excluded)
+
+        views =
+          Quota.list_latest_for_workspace(
+            workspace_id,
+            Keyword.put(opts, :exclude_providers, excluded)
+          )
+
         by_provider = Map.new(views, &{&1.provider, &1})
 
         Enum.map(visible, fn provider ->

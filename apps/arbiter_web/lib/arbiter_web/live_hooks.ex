@@ -55,6 +55,14 @@ defmodule ArbiterWeb.LiveHooks do
   so it is shown again (bd-gukyy1); a reading `agy` couldn't refresh carries a
   `message` and renders muted as stale rather than as a current figure.
 
+  ## `:open_epics`
+
+  Assigns `:open_epic_count` — the Epics nav badge — read once on mount and
+  re-counted only when a `"tasks"` lifecycle event concerns an epic, so
+  `Layouts.app` renders it from an assign instead of counting per render
+  (bd-cixhhs). Likewise `:quota` assigns `:quota_on_exhaustion` alongside the
+  quota load, off the same single workspace read.
+
   ## `:loopback`
 
   Assigns `:loopback?` — whether the browser on the other end is on this box.
@@ -146,6 +154,7 @@ defmodule ArbiterWeb.LiveHooks do
       socket
       |> assign(:quotas, AsyncResult.loading())
       |> assign(:quota_workspace_id, nil)
+      |> assign(:quota_on_exhaustion, nil)
 
     socket =
       if connected?(socket) do
@@ -153,6 +162,27 @@ defmodule ArbiterWeb.LiveHooks do
         |> attach_hook(:quota_async, :handle_async, &handle_quota_async/3)
         |> attach_hook(:quota_events, :handle_event, &handle_quota_event/3)
         |> start_async(@quotas_async, &load_quotas_in_task/0)
+      else
+        socket
+      end
+
+    {:cont, socket}
+  end
+
+  def on_mount(:open_epics, _params, _session, socket) do
+    socket = assign(socket, :open_epic_count, Arbiter.Tasks.open_epic_count())
+
+    socket =
+      if connected?(socket) do
+        Phoenix.PubSub.subscribe(Arbiter.PubSub, "tasks")
+
+        attach_hook(socket, :open_epics_updates, :handle_info, fn
+          {:task_lifecycle, _event, %{issue_type: :epic}}, socket ->
+            {:cont, assign(socket, :open_epic_count, Arbiter.Tasks.open_epic_count())}
+
+          _msg, socket ->
+            {:cont, socket}
+        end)
       else
         socket
       end
@@ -209,17 +239,27 @@ defmodule ArbiterWeb.LiveHooks do
   """
   @spec load_quotas() :: {:ok, String.t() | nil, [map()]}
   def load_quotas do
-    case Arbiter.Quota.default_workspace_id() do
-      {:ok, ws_id} ->
+    {:ok, ws_id, quotas, _on_exhaustion} = load_chrome_quota()
+    {:ok, ws_id, quotas}
+  end
+
+  # `load_quotas/0` plus the default workspace's `on_exhaustion` mode, which the
+  # bars' pace label words itself by. The workspace row is read once and both
+  # come off it, so `Layouts.app` never has to look it up while rendering.
+  defp load_chrome_quota do
+    case Arbiter.Quota.default_workspace() do
+      {:ok, workspace} ->
+        ws_id = workspace.id
+
         quotas =
           Arbiter.Quota.QuotaCache.fetch(ws_id, [visible: true], fn ->
-            Arbiter.Quota.Visibility.list_latest_for_workspace(ws_id)
+            Arbiter.Quota.Visibility.list_latest_for_workspace(ws_id, workspace: workspace)
           end)
 
-        {:ok, ws_id, quotas}
+        {:ok, ws_id, quotas, Arbiter.Tasks.Workspace.quota_on_exhaustion(workspace)}
 
       _ ->
-        {:ok, nil, []}
+        {:ok, nil, [], Arbiter.Tasks.Workspace.quota_on_exhaustion(nil)}
     end
   end
 
@@ -227,7 +267,7 @@ defmodule ArbiterWeb.LiveHooks do
   # mount. The quota topic is joined once the load names the workspace — a
   # capture between the task's read and the subscribe is picked up by the next
   # one, the same window the synchronous read-then-subscribe always had.
-  defp handle_quota_async(@quotas_async, {:ok, {:ok, ws_id, quotas}}, socket) do
+  defp handle_quota_async(@quotas_async, {:ok, {:ok, ws_id, quotas, on_exhaustion}}, socket) do
     socket =
       if ws_id && is_nil(socket.assigns[:quota_workspace_id]),
         do: subscribe_quota(socket, ws_id),
@@ -236,7 +276,8 @@ defmodule ArbiterWeb.LiveHooks do
     {:halt,
      socket
      |> assign(:quotas, AsyncResult.ok(socket.assigns.quotas, quotas))
-     |> assign(:quota_workspace_id, ws_id)}
+     |> assign(:quota_workspace_id, ws_id)
+     |> assign(:quota_on_exhaustion, on_exhaustion)}
   end
 
   # Said inline in the top bar rather than as a crash: the chrome is on every
@@ -321,7 +362,7 @@ defmodule ArbiterWeb.LiveHooks do
   # flight finishes, and the task goes before it starts another (bd-6mfl0s).
   defp load_quotas_in_task do
     Process.flag(:trap_exit, true)
-    result = load_quotas()
+    result = load_chrome_quota()
     exit_if_view_gone()
     result
   end
@@ -382,12 +423,24 @@ defmodule ArbiterWeb.LiveHooks do
     socket
     |> assign(:_coordinator_inbox_subscribed?, true)
     |> attach_hook(:coordinator_inbox_updates, :handle_info, fn
-      {:new_message, _message}, socket -> {:cont, refresh_coordinator_inbox(socket)}
-      {:message_read, _message}, socket -> {:cont, refresh_coordinator_inbox(socket)}
+      {:new_message, message}, socket -> {:cont, maybe_refresh_for(socket, message)}
+      {:message_read, message}, socket -> {:cont, maybe_refresh_for(socket, message)}
       {:mailbox_cleared, _workspace_id}, socket -> {:cont, refresh_coordinator_inbox(socket)}
       _msg, socket -> {:cont, socket}
     end)
   end
+
+  # The workspace topic carries every workspace's mail — worker-to-worker
+  # mailbox traffic included — and the drawer only shows the coordinator's. A
+  # message addressed elsewhere cannot change either figure, so it costs no
+  # re-read.
+  defp maybe_refresh_for(socket, %{to_ref: to_ref}) when is_binary(to_ref) do
+    if to_ref in Message.coordinator_refs(),
+      do: refresh_coordinator_inbox(socket),
+      else: socket
+  end
+
+  defp maybe_refresh_for(socket, _message), do: refresh_coordinator_inbox(socket)
 
   # Two figures, not one: pending (unread — never seen) and outstanding (seen
   # but not cleared — still owes an action). Reading no longer empties the
@@ -406,13 +459,13 @@ defmodule ArbiterWeb.LiveHooks do
 
   defp read_coordinator_inbox do
     {Message.inbox(@coordinator_ref, @reader_opts),
-     Message.outstanding(@coordinator_ref, @reader_opts)}
+     Message.outstanding_count(@coordinator_ref, @reader_opts)}
   end
 
-  defp put_coordinator_inbox(socket, inbox, outstanding) do
+  defp put_coordinator_inbox(socket, inbox, outstanding_count) do
     socket
     |> assign(:coordinator_inbox, AsyncResult.ok(socket.assigns.coordinator_inbox, inbox))
-    |> assign(:coordinator_outstanding_count, length(outstanding))
+    |> assign(:coordinator_outstanding_count, outstanding_count)
   end
 
   defp fail_coordinator_inbox(socket, reason) do
