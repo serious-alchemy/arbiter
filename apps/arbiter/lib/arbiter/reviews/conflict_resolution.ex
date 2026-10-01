@@ -360,13 +360,11 @@ defmodule Arbiter.Reviews.ConflictResolution do
     total = length(head_lines)
     limit = total - length(last)
 
-    cond do
-      limit < length(first) or not starts_with?(head_lines, first) or
-          not ends_with?(head_lines, last) ->
-        {:authored, {:outside_conflict, [path]}}
-
-      true ->
-        walk(middle, head_lines, length(first), limit, [], path)
+    if limit < length(first) or not starts_with?(head_lines, first) or
+         not ends_with?(head_lines, last) do
+      {:authored, {:outside_conflict, [path]}}
+    else
+      walk(middle, head_lines, length(first), limit, [], path)
     end
   end
 
