@@ -267,6 +267,23 @@ async function layout(page, cdp, sessionId) {
   check("layout: the columns row scrolls horizontally", l.rowScrolls, JSON.stringify(l))
   check("layout: the page does not scroll horizontally", !l.pageScrolls, JSON.stringify(l))
 
+  // Dragging near the row's right edge must scroll it despite scroll snapping.
+  const scrolled = await page.eval(`(() => {
+    const row = document.querySelector("#board-columns")
+    const card = document.querySelector("[data-card]")
+    if (!card) return "no-card"
+    const box = row.getBoundingClientRect()
+    const at = { bubbles: true, cancelable: true, dataTransfer: new DataTransfer(), clientX: box.right - 10, clientY: box.top + 100 }
+    row.scrollLeft = 0
+    card.dispatchEvent(new DragEvent("dragstart", at))
+    for (let i = 0; i < 10; i++) row.dispatchEvent(new DragEvent("dragover", at))
+    const moved = row.scrollLeft
+    card.dispatchEvent(new DragEvent("dragend", at))
+    row.scrollLeft = 0
+    return moved > 0 && row.style.scrollSnapType === "" ? "scrolled" : "stuck at " + moved
+  })()`)
+  if (scrolled !== "no-card") check("layout: dragging near the right edge auto-scrolls the row", scrolled === "scrolled", scrolled)
+
   await metrics(2400)
   await page.settle()
   l = JSON.parse(await page.eval(LAYOUT()))

@@ -1334,6 +1334,9 @@ defmodule ArbiterWeb.BoardLive do
               const card = e.target.closest("[data-card]")
               if (!card) return
               this.dragging = {id: card.dataset.card, from: card.dataset.column}
+              // Mandatory snapping re-snaps every programmatic scroll back to
+              // the current column edge, so edge auto-scroll needs it off.
+              el.style.scrollSnapType = "none"
               e.dataTransfer.effectAllowed = "move"
               try { e.dataTransfer.setData("text/plain", card.dataset.card) } catch (_) {}
             })
@@ -1350,9 +1353,16 @@ defmodule ArbiterWeb.BoardLive do
               else if (e.clientX > box.right - EDGE) el.scrollLeft += 24
             })
 
+            // dragend also fires for a cancelled drag, which never drops.
+            el.addEventListener("dragend", () => {
+              this.dragging = null
+              el.style.scrollSnapType = ""
+            })
+
             el.addEventListener("drop", (e) => {
               const drag = this.dragging
               this.dragging = null
+              el.style.scrollSnapType = ""
               if (!drag) return
               e.preventDefault()
 
