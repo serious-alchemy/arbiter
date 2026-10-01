@@ -24,50 +24,14 @@ case existing do
         name: default_name,
         description: "Default workspace shipped at boot. No external tracker.",
         config: %{
-          "tracker" => %{"type" => "none"},
-          "agent" => %{
-            "config" => %{
-              "codex" => %{
-                "tier_models" => %{
-                  "economy" => "gpt-5.6-luna",
-                  "standard" => "gpt-5.6-terra",
-                  "premium" => "gpt-5.6-terra",
-                  "flagship" => "gpt-5.6-terra"
-                }
-              }
-            }
-          }
+          "tracker" => %{"type" => "none"}
         }
       })
 
     IO.puts("✓ Seeded default workspace")
 
-  %Workspace{config: config} = ws ->
-    # Idempotent update: if the workspace exists but lacks Codex tier model
-    # overrides, add them. This allows existing installs to benefit from the
-    # plan-aware defaults without manually updating each workspace.
-    case get_in(config || %{}, ["agent", "config", "codex", "tier_models"]) do
-      nil ->
-        updated_config =
-          config
-          |> update_in(["agent", "config"], &(&1 || %{}))
-          |> update_in(["agent", "config", "codex"], &(&1 || %{}))
-          |> put_in(
-            ["agent", "config", "codex", "tier_models"],
-            %{
-              "economy" => "gpt-5.6-luna",
-              "standard" => "gpt-5.6-terra",
-              "premium" => "gpt-5.6-terra",
-              "flagship" => "gpt-5.6-terra"
-            }
-          )
-
-        {:ok, _} = Ash.update(ws, %{config: updated_config})
-        IO.puts("✓ Updated default workspace with Codex tier models")
-
-      %{} ->
-        IO.puts("• Default workspace already has Codex tier models; skipping")
-    end
+  %Workspace{} ->
+    IO.puts("• Default workspace already exists; skipping")
 end
 
 Arbiter.Skills.Seeds.seed!()

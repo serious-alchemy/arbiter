@@ -129,6 +129,51 @@ defmodule Arbiter.Agents.CodexTest do
       assert Codex.resolved_model(model_tier: "premium") == "gpt-5.5"
       assert Codex.resolved_model(model_tier: "flagship") == "gpt-5.5"
     end
+
+    test "plan-aware defaults handle config-only override (workspace sets plan_type)" do
+      # When a workspace explicitly sets plan_type in its config,
+      # plan-aware defaults should use that to select the right tier map
+      paid_config = %{"plan_type" => "paid"}
+
+      paid_defaults = Codex.Config.plan_aware_defaults(paid_config)
+      assert paid_defaults["economy"] == "gpt-5.6-luna"
+      assert paid_defaults["standard"] == "gpt-5.6-terra"
+      assert paid_defaults["premium"] == "gpt-5.6-terra"
+      assert paid_defaults["flagship"] == "gpt-5.6-terra"
+    end
+
+    test "plan-aware defaults assume paid when plan cannot be determined" do
+      # When no plan_type is set and no quota is available,
+      # default to paid-tier models (conservative approach)
+      empty_config = %{}
+
+      defaults = Codex.Config.plan_aware_defaults(empty_config)
+      assert defaults["economy"] == "gpt-5.6-luna"
+      assert defaults["standard"] == "gpt-5.6-terra"
+      assert defaults["premium"] == "gpt-5.6-terra"
+      assert defaults["flagship"] == "gpt-5.6-terra"
+    end
+
+    test "backend neutrality: non-OpenAI backends can override via tier_models" do
+      # Codex+Ollama or other Responses-API backends should not be forced
+      # onto OpenAI model names. They override via agent.config["tier_models"]
+      ollama_config = %{
+        "tier_models" => %{
+          "economy" => "ollama-mini",
+          "standard" => "ollama-full",
+          "premium" => "ollama-full",
+          "flagship" => "ollama-full"
+        }
+      }
+
+      Codex.Config.put_active(ollama_config)
+
+      # Override should take precedence over any defaults
+      assert Codex.Config.model_for_tier("economy") == "ollama-mini"
+      assert Codex.Config.model_for_tier("standard") == "ollama-full"
+      assert Codex.Config.model_for_tier("premium") == "ollama-full"
+      assert Codex.Config.model_for_tier("flagship") == "ollama-full"
+    end
   end
 
   describe "default_argv/2 executable resolution" do

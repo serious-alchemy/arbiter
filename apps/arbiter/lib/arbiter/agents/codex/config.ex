@@ -12,6 +12,8 @@ defmodule Arbiter.Agents.Codex.Config do
   disk.
   """
 
+  require Ash.Query
+
   alias Arbiter.Agents.CredentialsRef
   alias Arbiter.Agents.ProviderConfig
   alias Arbiter.Tasks.Workspace
@@ -21,6 +23,7 @@ defmodule Arbiter.Agents.Codex.Config do
   @provider "codex"
 
   @pdict_key {__MODULE__, :active_workspace_config}
+  @pdict_workspace_key {__MODULE__, :active_workspace_id}
   @rotation_key {__MODULE__, :api_key_rotation_index}
 
   @type t :: %{
@@ -73,16 +76,18 @@ defmodule Arbiter.Agents.Codex.Config do
   @spec put_active(Workspace.t() | map() | nil, :agent | :review_agent) :: :ok
   def put_active(nil, _role) do
     Process.delete(@pdict_key)
+    Process.delete(@pdict_workspace_key)
     :ok
   end
 
-  def put_active(%Workspace{config: config} = workspace, role)
+  def put_active(%Workspace{config: config, id: workspace_id} = workspace, role)
       when role in [:agent, :review_agent] do
     raw =
       (get_in(config || %{}, [Atom.to_string(role), "config"]) || %{})
       |> ProviderConfig.apply_overrides(@provider)
 
     Process.put(@pdict_key, CredentialsRef.embed_secrets(raw, Workspace.secrets_map(workspace)))
+    Process.put(@pdict_workspace_key, workspace_id)
     :ok
   end
 
@@ -190,13 +195,78 @@ defmodule Arbiter.Agents.Codex.Config do
 
   def model_for_tier(_), do: nil
 
-  @doc "Built-in default tier → model map, adjusted for the account's plan type."
+  @doc """
+  Built-in default tier → model map, adjusted for the account's plan type.
+
+  Attempts to determine the plan from:
+  1. `plan_type` in the workspace config (if explicitly set)
+  2. The latest CodexQuota for this workspace's provider account (if available)
+  3. Defaults to `:paid` if plan cannot be determined
+  """
   @spec plan_aware_defaults(map()) :: map()
   def plan_aware_defaults(raw) when is_map(raw) do
+    plan = detect_plan(raw)
+    if plan == "free", do: @default_tier_models_free, else: @default_tier_models_paid
+  end
+
+  # Detect the account's plan by checking config, then querying latest quota if available.
+  defp detect_plan(raw) when is_map(raw) do
+    # First, check if plan_type is already in the config
     case Map.get(raw, "plan_type") do
-      "free" -> @default_tier_models_free
-      _ -> @default_tier_models_paid
+      p when is_binary(p) and p != "" -> p
+      _ -> detect_plan_from_quota()
     end
+  end
+
+  # Try to detect plan from the latest CodexQuota for this workspace
+  defp detect_plan_from_quota do
+    with workspace_id when not is_nil(workspace_id) <- Process.get(@pdict_workspace_key),
+         {:ok, workspace} <- fetch_workspace(workspace_id),
+         provider_acct_id <- get_provider_account_id(workspace),
+         provider_acct_id when not is_nil(provider_acct_id) <- provider_acct_id,
+         {:ok, quota} <- fetch_latest_quota(provider_acct_id),
+         plan when is_binary(plan) and plan != "" <- quota.plan do
+      plan
+    else
+      _ -> nil
+    end
+  end
+
+  defp fetch_workspace(ws_id) do
+    case Workspace |> Ash.Query.filter(id == ^ws_id) |> Ash.read_one() do
+      {:ok, workspace} -> {:ok, workspace}
+      _ -> :error
+    end
+  end
+
+  defp get_provider_account_id(workspace) do
+    # For now, assume the workspace uses the default provider account
+    # In a multi-provider setup, this would need to be more sophisticated
+    # For Codex, we look for a linked provider account
+    case Ash.load(workspace, :provider_accounts) do
+      {:ok, ws} ->
+        ws.provider_accounts
+        |> Enum.find(&(&1.provider_name == "codex"))
+        |> then(&(&1 && &1.id))
+
+      _ ->
+        nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp fetch_latest_quota(provider_acct_id) do
+    case Arbiter.Quota.CodexQuota
+         |> Ash.Query.filter(provider_account_id == ^provider_acct_id)
+         |> Ash.Query.sort(captured_at: :desc)
+         |> Ash.Query.limit(1)
+         |> Ash.read_one() do
+      {:ok, quota} -> {:ok, quota}
+      _ -> :error
+    end
+  rescue
+    _ -> :error
   end
 
   @doc "Built-in default tier → model map for paid-tier accounts (testing / introspection)."
