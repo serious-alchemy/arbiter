@@ -372,6 +372,7 @@ defmodule ArbiterWeb.LayoutsTest do
 
       # Get all brandmark spans within the status bar
       brandmark_spans = doc |> LazyHTML.query(~s(#app-status-bar span[aria-label="Arbiter"]))
+
       assert Enum.count(brandmark_spans) == 2,
              "Expected exactly 2 brandmark spans, got #{Enum.count(brandmark_spans)}"
 
