@@ -170,4 +170,119 @@ defmodule ArbiterWeb.WorkspaceProviderSettingsLiveTest do
 
     refute has_element?(view, "#adopt-implementer")
   end
+
+  describe "routing strategy (bd-adlvm6)" do
+    defp strategy(view) do
+      view
+      |> render()
+      |> LazyHTML.from_document()
+      |> LazyHTML.query("#routing-strategy-form input[type=radio][checked]")
+      |> LazyHTML.attribute("value")
+      |> List.first()
+    end
+
+    test "defaults to failover; selecting most_quota persists routing.provider_selection", %{
+      conn: conn
+    } do
+      ws = workspace!()
+      view = open(conn, ws)
+
+      assert strategy(view) == "failover"
+      assert has_element?(view, "#routing-help-failover", "healthy")
+      assert has_element?(view, "#routing-help-most_quota")
+      refute has_element?(view, "#routing-ranking")
+
+      view
+      |> form("#routing-strategy-form", %{"provider_selection" => "most_quota"})
+      |> render_change()
+
+      assert Ash.get!(Workspace, ws.id).config["routing"]["provider_selection"] == "most_quota"
+      assert strategy(view) == "most_quota"
+      assert has_element?(view, "#routing-ranking")
+
+      view
+      |> form("#routing-strategy-form", %{"provider_selection" => "failover"})
+      |> render_change()
+
+      assert get_in(Ash.get!(Workspace, ws.id).config, ["routing", "provider_selection"]) in [
+               nil,
+               "failover"
+             ]
+
+      refute has_element?(view, "#routing-ranking")
+    end
+
+    test "states the reviewer's selection behaviour", %{conn: conn} do
+      ws = workspace!()
+      view = open(conn, ws)
+      assert has_element?(view, "#routing-reviewer-note")
+      refute has_element?(view, "#routing-reviewer-note", "differ")
+
+      ws2 = workspace!(%{"review_agent" => %{"cross_family" => true}})
+      view2 = open(conn, ws2)
+      assert has_element?(view2, "#routing-reviewer-note", "differ")
+    end
+
+    test "lists each implementer candidate's headroom or drop reason" do
+      ws =
+        workspace!(%{"routing" => %{"provider_selection" => "most_quota"}})
+
+      held = account!(:claude, "held")
+      free = account!(:codex, "free")
+      link!(ws, held, %{implementer_position: 1})
+      link!(ws, free, %{implementer_position: 2})
+
+      now = DateTime.utc_now() |> DateTime.truncate(:second)
+
+      quota = fn
+        %{id: id} when id == held.id ->
+          %Arbiter.Quota.AnthropicQuota{
+            provider: "claude",
+            utilization_5h: 0.99,
+            reset_5h_at: DateTime.add(now, 9_000),
+            status_5h: "allowed",
+            utilization_7d: 0.0,
+            reset_7d_at: DateTime.add(now, 302_400),
+            status_7d: "allowed",
+            captured_at: now
+          }
+
+        _ ->
+          %Arbiter.Quota.CodexQuota{
+            provider: "codex",
+            session_used_percent: 1.0,
+            session_reset_at: DateTime.add(now, 3_600),
+            weekly_used_percent: 0.0,
+            weekly_reset_at: DateTime.add(now, 302_400),
+            limit_reached: false,
+            captured_at: now
+          }
+      end
+
+      html =
+        render_component(ArbiterWeb.WorkspaceDetail.ProviderSettingsComponent,
+          id: "provider-settings-section",
+          section: "providers",
+          workspace: Ash.get!(Workspace, ws.id),
+          agent_types: ["claude", "codex"],
+          routing_opts: [quota_fun: quota]
+        )
+
+      doc = LazyHTML.from_fragment(html)
+
+      assert Enum.count(
+               LazyHTML.query(
+                 doc,
+                 ~s(#routing-ranking [data-account="#{free.id}"][data-status=available])
+               )
+             ) == 1
+
+      assert Enum.count(
+               LazyHTML.query(
+                 doc,
+                 ~s(#routing-ranking [data-account="#{held.id}"][data-status=quota_held])
+               )
+             ) == 1
+    end
+  end
 end
