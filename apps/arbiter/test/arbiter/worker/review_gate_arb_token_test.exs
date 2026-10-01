@@ -24,6 +24,7 @@ defmodule Arbiter.Worker.ReviewGateArbTokenTest do
     tmp = Path.join(System.tmp_dir!(), "rg_arb_token-#{System.unique_integer([:positive])}")
     repo = Path.join(tmp, "repo")
     File.mkdir_p!(repo)
+
     on_exit(fn ->
       # Allow any child processes spawned by the worker to finish writing to tmp.
       # The worker's on_exit above waits for the worker to terminate, but
@@ -93,6 +94,7 @@ defmodule Arbiter.Worker.ReviewGateArbTokenTest do
       if Process.alive?(pid) do
         ref = Process.monitor(pid)
         GenServer.stop(pid, :normal)
+
         receive do
           {:DOWN, ^ref, :process, ^pid, _} -> :ok
         after
@@ -100,6 +102,7 @@ defmodule Arbiter.Worker.ReviewGateArbTokenTest do
         end
       end
     end)
+
     :ok = Worker.advance(pid, :claude)
     send(pid, {:__claude_session_done__, "arb done"})
 
