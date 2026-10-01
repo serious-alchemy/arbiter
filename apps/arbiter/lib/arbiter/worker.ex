@@ -4678,7 +4678,15 @@ defmodule Arbiter.Worker do
       if reason.category == :quota_exhausted and quota_wait_exceeds_max?(reason.retry_after) do
         {:fail, :quota_wait_exceeds_max}
       else
-        resume_decision(reason.category, session_id, attempts, cap, prev_fp, cur_fp)
+        resume_decision(
+          reason.category,
+          session_id,
+          attempts,
+          cap,
+          prev_fp,
+          cur_fp,
+          Map.get(session, :tool_call_count, 0)
+        )
       end
 
     case decision do
@@ -4741,12 +4749,12 @@ defmodule Arbiter.Worker do
   # no-progress) is unit-testable without spawning a session. Returns `:resume`
   # or `{:fail, why}`.
   @doc false
-  def resume_decision(category, session_id, attempts, cap, prev_fp, cur_fp) do
+  def resume_decision(category, session_id, attempts, cap, prev_fp, cur_fp, tool_calls \\ 0) do
     cond do
       category not in @resumable_stop_categories -> {:fail, :not_resumable_category}
       is_nil(session_id) -> {:fail, :no_session_id}
       attempts >= cap -> {:fail, :cap_exhausted}
-      no_progress?(category, attempts, prev_fp, cur_fp) -> {:fail, :no_progress}
+      no_progress?(category, attempts, prev_fp, cur_fp, tool_calls) -> {:fail, :no_progress}
       true -> :resume
     end
   end
@@ -4762,15 +4770,23 @@ defmodule Arbiter.Worker do
   # still sitting in the worktree — the exact loss this bug is about
   # (emr-20e8kp, runs beeaac80… then 5b372d81…). Exempt it; the hard attempt
   # cap above still bounds the retries.
-  defp no_progress?(:async_wait_abandoned, _attempts, _prev_fp, _cur_fp), do: false
+  defp no_progress?(:async_wait_abandoned, _attempts, _prev_fp, _cur_fp, _calls), do: false
 
   # bd-7wymls: same reasoning — a turn ended by a denial says nothing about
   # whether the agent is stuck, and a notes-only (task-type) run legitimately
   # never touches the worktree. The hard cap still bounds it.
-  defp no_progress?(:permission_denied, _attempts, _prev_fp, _cur_fp), do: false
+  defp no_progress?(:permission_denied, _attempts, _prev_fp, _cur_fp, _calls), do: false
 
-  defp no_progress?(_category, attempts, prev_fp, cur_fp),
-    do: attempts > 0 and not is_nil(prev_fp) and cur_fp == prev_fp
+  # bd-5hvl7q: an unchanged fingerprint alone is not "no progress" — a segment
+  # that read files, launched a build or investigated writes nothing to the
+  # worktree yet did real work. Progress is therefore (fingerprint changed) OR
+  # (the segment issued at least one tool call). Only a segment that did
+  # neither — it exited without touching a single tool — is stuck. This does
+  # not reopen the infinite-resume loop: the hard attempt cap in
+  # resume_decision/7 is checked first and bounds every category regardless of
+  # activity; the guard only decides whether to stop *earlier* than the cap.
+  defp no_progress?(_category, attempts, prev_fp, cur_fp, tool_calls),
+    do: attempts > 0 and not is_nil(prev_fp) and cur_fp == prev_fp and tool_calls < 1
 
   # Re-spawn Claude against the SAME session id with a continue prompt chosen by
   # the classified stop category (bd-606zlr — a terse "keep going" for most

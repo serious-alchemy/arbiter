@@ -1226,7 +1226,12 @@ defmodule Arbiter.Worker.ClaudeSession do
     }
 
     pending = Map.get(session, :pending_tool_calls, %{})
-    Map.put(session, :pending_tool_calls, Map.put(pending, id, entry))
+
+    # bd-5hvl7q: per-segment activity count (a resume builds a fresh session),
+    # read by the worker's no-progress resume guard.
+    session
+    |> Map.put(:pending_tool_calls, Map.put(pending, id, entry))
+    |> Map.update(:tool_call_count, 1, &(&1 + 1))
   end
 
   defp remember_tool_use(_block, session), do: session

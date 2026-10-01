@@ -27,6 +27,23 @@ defmodule Arbiter.Worker.ResumeTest do
                Worker.resume_decision(:exited_without_done, "sid", 1, 3, "same", "same")
     end
 
+    test "a segment that made tool calls but changed no files is NOT no-progress (bd-5hvl7q)" do
+      # Read files / launched a long command, committed nothing: fingerprint is
+      # identical but the segment demonstrably worked.
+      assert :resume =
+               Worker.resume_decision(:exited_without_done, "sid", 1, 3, "same", "same", 7)
+    end
+
+    test "a segment with zero tool calls and an unchanged worktree is still caught (bd-5hvl7q)" do
+      assert {:fail, :no_progress} =
+               Worker.resume_decision(:exited_without_done, "sid", 1, 3, "same", "same", 0)
+    end
+
+    test "tool-call activity never bypasses the hard cap (bd-5hvl7q)" do
+      assert {:fail, :cap_exhausted} =
+               Worker.resume_decision(:exited_without_done, "sid", 3, 3, "same", "same", 50)
+    end
+
     test "the no-progress guard does NOT fire on the first attempt" do
       # attempts == 0: even if fingerprints coincide, give the session one shot.
       assert :resume = Worker.resume_decision(:exited_without_done, "sid", 0, 3, "x", "x")
