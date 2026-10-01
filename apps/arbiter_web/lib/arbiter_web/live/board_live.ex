@@ -71,16 +71,13 @@ defmodule ArbiterWeb.BoardLive do
   alias Arbiter.Tasks.EdgeGate
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Rank
+  alias ArbiterWeb.InstallationSettings
 
   @tasks_topic "tasks"
   @workers_topic "workers"
 
   # How many cards a column shows before it collapses into an "N more" row.
   @column_limit 8
-
-  # Every call this LiveView makes out to another process is bounded. Nothing
-  # on the render path may hang the operator's only view of the fleet.
-  @scheduler_call_timeout_ms 2_000
 
   @columns [
     %{key: "backlog", label: "Backlog", board_key: :backlog, tone: nil},
@@ -118,6 +115,8 @@ defmodule ArbiterWeb.BoardLive do
       Phoenix.PubSub.subscribe(Arbiter.PubSub, @tasks_topic)
       Phoenix.PubSub.subscribe(Arbiter.PubSub, @workers_topic)
       Phoenix.PubSub.subscribe(Arbiter.PubSub, Autopilot.topic())
+      # The concurrency cap is also editable on /settings, REST and the CLI.
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, Settings.topic())
       # System alerts and attention changes are announced on the event stream
       # (`inbox` topic), not the tasks topic — the global copy carries every
       # workspace's, which is what an all-workspaces board wants.
@@ -190,6 +189,10 @@ defmodule ArbiterWeb.BoardLive do
     do: {:noreply, refresh_board(socket)}
 
   def handle_info({:board_scheduler, _state}, socket),
+    do: {:noreply, refresh_board(socket)}
+
+  # The cap (or the watchdog) changed somewhere else — /settings, REST, the CLI.
+  def handle_info({:installation_settings_changed, _field}, socket),
     do: {:noreply, refresh_board(socket)}
 
   # A system alert raised or cleared, or a ticket's attention raised, moved or
@@ -297,18 +300,15 @@ defmodule ArbiterWeb.BoardLive do
 
   # A blank value clears the override (back to the app-env / built-in default);
   # anything but a positive whole number is refused before the setter sees it.
+  # The parsing and saving are `ArbiterWeb.InstallationSettings`', shared with
+  # /settings.
   def handle_event("set_system_cap", params, socket) do
-    with {:ok, value} <- parse_cap(Map.get(params, "max")),
-         {:ok, _} <- Settings.set_conductor_system_max_concurrent(value) do
-      {:noreply, refresh_board(socket)}
-    else
-      _ ->
-        {:noreply,
-         put_flash(
-           socket,
-           :error,
-           "Scheduler concurrency must be a whole number of 1 or more (or blank for the default)."
-         )}
+    case InstallationSettings.save_int("conductor_system_max_concurrent", params["max"]) do
+      {:ok, _} ->
+        {:noreply, refresh_board(socket)}
+
+      {:error, message} ->
+        {:noreply, put_flash(socket, :error, "Scheduler concurrency: #{message}")}
     end
   end
 
@@ -317,17 +317,16 @@ defmodule ArbiterWeb.BoardLive do
   # One switch for the whole install, because there is one scheduler. Pausing
   # leaves in-flight work alone — it only stops the queue draining.
   def handle_event("toggle_scheduler", _params, socket) do
-    if scheduler_running?() do
-      case toggle_scheduler() do
+    if InstallationSettings.scheduler_running?() do
+      case InstallationSettings.toggle_scheduler() do
         :ok ->
           {:noreply, refresh_board(socket)}
 
-        {:error, _reason} ->
-          {:noreply,
-           put_flash(socket, :error, "The board scheduler didn't answer — try that again.")}
+        {:error, reason} ->
+          {:noreply, put_flash(socket, :error, InstallationSettings.scheduler_error(reason))}
       end
     else
-      {:noreply, put_flash(socket, :error, "The board scheduler isn't running on this install.")}
+      {:noreply, put_flash(socket, :error, InstallationSettings.scheduler_error(:not_running))}
     end
   end
 
@@ -549,16 +548,6 @@ defmodule ArbiterWeb.BoardLive do
     |> start_async(:board, fn -> load_board() end)
   end
 
-  defp parse_cap(raw) when is_binary(raw) do
-    case raw |> String.trim() |> then(&{&1, Integer.parse(&1)}) do
-      {"", _} -> {:ok, nil}
-      {_, {n, ""}} when n > 0 -> {:ok, n}
-      _ -> :error
-    end
-  end
-
-  defp parse_cap(_), do: :error
-
   defp worker_debounce_ms,
     do: Application.get_env(:arbiter_web, :board_worker_debounce_ms, 500)
 
@@ -578,8 +567,8 @@ defmodule ArbiterWeb.BoardLive do
   # flight finishes, and the task goes before it starts another.
   defp load_board do
     Process.flag(:trap_exit, true)
-    running? = scheduler_running?()
-    paused? = not running? or scheduler_paused?()
+    running? = InstallationSettings.scheduler_running?()
+    paused? = not running? or InstallationSettings.scheduler_paused?()
 
     board =
       Snapshot.load(now: DateTime.utc_now(), paused: paused?, exclude_engagements?: true)
@@ -611,38 +600,6 @@ defmodule ArbiterWeb.BoardLive do
 
   defp load_error({%{__exception__: true} = error, _stacktrace}), do: Exception.message(error)
   defp load_error(reason), do: Exception.format_exit(reason)
-
-  defp scheduler_running? do
-    Autopilot.running?(Autopilot)
-  rescue
-    _ -> false
-  catch
-    :exit, _ -> false
-  end
-
-  # Bounded and exit-safe for the same reason the read is: the switch is on the
-  # board, and a scheduler that has just died or is slow to answer must leave
-  # the operator with a board and a flash, not a dead LiveView.
-  defp toggle_scheduler do
-    if scheduler_paused?(),
-      do: Autopilot.resume(Autopilot, {"operator", "dashboard"}),
-      else: Autopilot.pause(Autopilot, {"operator", "dashboard"})
-  rescue
-    e -> {:error, e}
-  catch
-    :exit, reason -> {:error, {:exit, reason}}
-  end
-
-  # A short budget and a caught exit, because this is on the render path: a
-  # scheduler that cannot answer promptly is treated as one that is not
-  # draining the queue, which is the reading that under-promises.
-  defp scheduler_paused? do
-    Autopilot.paused?(Autopilot, @scheduler_call_timeout_ms)
-  rescue
-    _ -> true
-  catch
-    :exit, _ -> true
-  end
 
   # The swimlane's system alerts. Their failure is not the board's: a lane
   # without alerts still shows every ticket's attention.

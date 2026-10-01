@@ -3,6 +3,25 @@ defmodule Arbiter.SettingsTest do
 
   alias Arbiter.Settings
 
+  describe "change broadcast" do
+    test "every persisted write announces itself on Settings.topic/0" do
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, Settings.topic())
+
+      assert {:ok, 4} = Settings.set_conductor_system_max_concurrent(4)
+      assert_receive {:installation_settings_changed, :conductor_system_max_concurrent}
+
+      assert {:ok, []} = Settings.set_credential_watchdog_adapters([])
+      assert_receive {:installation_settings_changed, :credential_watchdog_adapters}
+    end
+
+    test "a rejected write announces nothing" do
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, Settings.topic())
+
+      assert {:error, :invalid_value} = Settings.set_conductor_system_max_concurrent(0)
+      refute_receive {:installation_settings_changed, _}, 50
+    end
+  end
+
   describe "conductor_system_max_concurrent/0" do
     test "returns nil when no override has been set" do
       assert Settings.conductor_system_max_concurrent() == nil
