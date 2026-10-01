@@ -8,8 +8,18 @@ defmodule ArbiterCli.Client do
 
     * `ARB_HOST` env var overrides the base URL (default `http://127.0.0.1:4848`)
     * `ARB_TOKEN` env var sets a Bearer token for authentication. Required for
-      remote access (ARB_HOST pointing to a different server). Not needed for
-      local loopback access — unless `ARB_SESSION_ID` is set, see below.
+      remote access (ARB_HOST pointing to a different server). A dispatched
+      worker's environment carries its own worker-tier token here.
+    * With no `ARB_TOKEN` and no session, against this machine's server, the
+      client mints a coordinator token over the operator socket
+      (`ArbiterCli.OperatorSocket`, bd-8381tk) the first time it needs one,
+      and reuses it for the rest of the invocation (bd-asawcq). `/api` has no
+      anonymous loopback access any more (only `GET /api/version` and
+      `GET /api/server/migrations`), so this is how every verb keeps working
+      from the operator's own shell. The token lives only in this process's
+      memory — never on disk, where a same-user worker could read it. If the
+      socket refuses (a worker or session without its own token) the request
+      goes out unauthenticated and the server's 401 says why.
     * `ARB_SESSION_ID` — set by every Arbiter session's `launch.sh`
       (`Arbiter.Sessions.Provisioning`), absent everywhere else (the
       operator's own shell, a Claude Code session opened against a plain
@@ -29,6 +39,8 @@ defmodule ArbiterCli.Client do
 
       Process.put(:bd2_req_options, plug: {Req.Test, MyStub})
   """
+
+  alias ArbiterCli.OperatorSocket
 
   defmodule Error do
     @moduledoc """
@@ -103,15 +115,72 @@ defmodule ArbiterCli.Client do
   def delete(path, params \\ []), do: request(:delete, path, params: params)
 
   defp request(method, path, opts) do
-    with {:ok, token} <- do_resolve_token() do
-      do_request(method, path, token, opts)
+    with {:ok, token} <- request_token() do
+      case do_request(method, path, token, opts) do
+        # A minted token outlived its TTL in a long-running invocation: drop
+        # it, mint a fresh one, and retry this one request once.
+        {:error, %Error{status: 401, message: "Bearer token expired"}} when token != nil ->
+          if minted_token() == token do
+            forget_minted_token()
+
+            with {:ok, fresh} <- request_token(), do: do_request(method, path, fresh, opts)
+          else
+            do_request(method, path, token, opts)
+          end
+
+        result ->
+          result
+      end
     end
   end
 
+  # The token a request carries: the caller's own (`resolve_token/0`), or —
+  # with none, against this machine's server — one minted over the operator
+  # socket, cached for the rest of the invocation.
+  defp request_token do
+    case do_resolve_token() do
+      {:ok, token} when is_binary(token) and token != "" -> {:ok, token}
+      {:ok, _none} -> {:ok, if(loopback_host?(), do: operator_token())}
+      {:error, _} = err -> err
+    end
+  end
+
+  # One hour comfortably covers any single invocation (and an expired one is
+  # re-minted above), while a token that somehow leaked from this process's
+  # memory goes stale quickly.
+  @minted_ttl 3600
+
+  defp operator_token do
+    case minted_token() do
+      nil ->
+        case OperatorSocket.mint(%{"ttl" => @minted_ttl}) do
+          {:ok, %{"token" => token}} ->
+            Process.put(minted_key(), token)
+            Process.delete(:bd2_mint_error)
+            token
+
+          # Not cached: a server that was down a moment ago (a deploy's
+          # restart) may be up for the next request.
+          {:error, %Error{} = err} ->
+            Process.put(:bd2_mint_error, err)
+            nil
+        end
+
+      token ->
+        token
+    end
+  end
+
+  defp minted_token, do: Process.get(minted_key())
+  defp forget_minted_token, do: Process.delete(minted_key())
+  defp minted_key, do: {:bd2_minted_token, OperatorSocket.path(), base_url()}
+
   @doc """
-  The token a request would carry: `{:ok, token}`, `{:ok, nil}` for an
-  unauthenticated loopback call, or `{:error, %Error{kind: :no_session_token}}`
-  inside a session that has none. `ArbiterCli.Cmd.Mcp.mint_token/1` uses it to
+  The caller's **own** credential: `{:ok, token}` (`ARB_TOKEN`, or a
+  session's token), `{:ok, nil}` when it has none, or
+  `{:error, %Error{kind: :no_session_token}}` inside a session that has none.
+  A request with `{:ok, nil}` here still authenticates, with a token minted
+  over the operator socket. `ArbiterCli.Cmd.Mcp.mint_token/1` uses this to
   choose between the HTTP route (the caller has a token) and the operator
   socket (it doesn't).
   """
@@ -124,15 +193,14 @@ defmodule ArbiterCli.Client do
     URI.parse(base_url()).host in ["127.0.0.1", "localhost", "::1", "[::1]"]
   end
 
-  # Outside a session: `ARB_TOKEN` or nothing (unauthenticated — the loopback
-  # default). Inside a session (`ARB_SESSION_ID` set): `ARB_TOKEN` still wins
+  # Outside a session: `ARB_TOKEN` or nothing (`request_token/0` then mints
+  # over the operator socket). Inside a session (`ARB_SESSION_ID` set): `ARB_TOKEN` still wins
   # if the operator set one, otherwise the session's own token file — and if
   # neither exists, refuse rather than ever send the request unauthenticated
   # (bd-5b5hq7). A session's `arb` is on PATH with `ARB_TOKEN` unset by
-  # default; without this, `arb mcp token mint --tier coordinator` run from
-  # inside a session would ride the same unauthenticated-loopback path the
-  # operator's own shell relies on and mint a token more powerful than the
-  # session's own.
+  # default; without this, its `arb` would fall through to the operator
+  # socket (which refuses a session scope, but must never be the fallback for
+  # a process that has a narrower token of its own).
   defp do_resolve_token do
     case System.get_env("ARB_SESSION_ID") do
       session_id when is_binary(session_id) and session_id != "" ->
@@ -286,14 +354,7 @@ defmodule ArbiterCli.Client do
   defp auth_headers(token), do: [{"authorization", "Bearer #{token}"}]
 
   defp http_error(401, %{"error" => %{"message" => msg} = err}) do
-    %Error{
-      kind: :http,
-      status: 401,
-      body: err,
-      message: msg,
-      hint:
-        "set ARB_TOKEN — remote arb requires a token (mint one with `arb mcp token mint --tier coordinator`)"
-    }
+    %Error{kind: :http, status: 401, body: err, message: msg, hint: unauthorized_hint()}
   end
 
   defp http_error(401, body) do
@@ -302,8 +363,7 @@ defmodule ArbiterCli.Client do
       status: 401,
       body: body,
       message: "HTTP 401 (Unauthorized)",
-      hint:
-        "set ARB_TOKEN — remote arb requires a token (mint one with `arb mcp token mint --tier coordinator`)"
+      hint: unauthorized_hint()
     }
   end
 
@@ -323,6 +383,20 @@ defmodule ArbiterCli.Client do
       body: body,
       message: "HTTP #{status}"
     }
+  end
+
+  # Why a request went out without a token, when it did: the operator socket
+  # refused or was unreachable (bd-asawcq).
+  defp unauthorized_hint do
+    case Process.get(:bd2_mint_error) do
+      %Error{message: message} ->
+        "no ARB_TOKEN, and minting one over the operator socket failed: #{message}. " <>
+          "Run arb from your own shell on the server host, or set ARB_TOKEN to a token you hold."
+
+      nil ->
+        "set ARB_TOKEN — remote arb requires a token (mint one on the server host with " <>
+          "`arb mcp token mint`)"
+    end
   end
 
   # Test hook: a test can stuff Req options (e.g. `plug: {Req.Test, MyStub}`)

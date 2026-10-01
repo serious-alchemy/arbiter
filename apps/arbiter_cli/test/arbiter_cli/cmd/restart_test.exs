@@ -331,6 +331,22 @@ defmodule ArbiterCli.Cmd.RestartTest do
       assert err =~ "--force"
     end
 
+    # bd-asawcq: `/api/workers` needs a token now. A 401/403 is "could not
+    # tell", not "nobody is working" — restarting on that would kill live work.
+    test "refuses to restart when the active-worker check is unauthorized (no --force)" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@green, 200}},
+        {{"get", "/api/workers"},
+         {%{"error" => %{"message" => "Authorization: Bearer <token> required"}}, 401}}
+      ])
+
+      {_out, err, code} = capture(fn -> Restart.run([]) end)
+
+      assert code == 1
+      assert err =~ "could not check for active workers"
+      assert err =~ "--force"
+    end
+
     test "--force proceeds even when workers are active" do
       stub_routes([
         {{"get", "/api/workspaces"}, {@green, 200}},
