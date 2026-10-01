@@ -42,19 +42,24 @@ defmodule Arbiter.Agents.Codex.Config do
   # variant exists on OpenAI's Codex API; it is a routing-tier concept for
   # difficulty-based dispatch and can override per-workspace.
   #
-  # NOTE: These defaults target OpenAI's Codex API with models available on
-  # paid-tier and enterprise plans. Free-tier ChatGPT accounts only have access
-  # to gpt-5.4-mini and gpt-5.5; non-OpenAI backends (e.g., Codex+Ollama) have
-  # completely different model names. Workspaces must override these defaults
-  # via agent.config["codex"]["tier_models"] if the default models are not
-  # available on their account. D1 will add plan-aware defaults with pre-flight
-  # validation against available models; until then, manual per-workspace overrides
-  # are required for accounts that cannot use the paid-tier models.
-  @default_tier_models %{
+  # These defaults are plan-aware: free-tier accounts (limited to gpt-5.4-mini
+  # and gpt-5.5) receive those models; paid-tier and enterprise accounts receive
+  # gpt-5.6-luna and gpt-5.6-terra. The plan type is detected at auth-probe time
+  # and stored in the workspace config. Non-OpenAI backends (e.g., Codex+Ollama)
+  # are not forced onto OpenAI model names; they override via
+  # agent.config["codex"]["tier_models"].
+  @default_tier_models_paid %{
     "economy" => "gpt-5.6-luna",
     "standard" => "gpt-5.6-terra",
     "premium" => "gpt-5.6-terra",
     "flagship" => "gpt-5.6-terra"
+  }
+
+  @default_tier_models_free %{
+    "economy" => "gpt-5.5",
+    "standard" => "gpt-5.5",
+    "premium" => "gpt-5.5",
+    "flagship" => "gpt-5.5"
   }
 
   @doc "Set the active Codex agent config for the current process."
@@ -164,6 +169,10 @@ defmodule Arbiter.Agents.Codex.Config do
   to a concrete Codex model name. Returns `nil` for an unknown / nil tier — the
   adapter falls back to the CLI default. Workspace config can override the
   mapping under `agent.config["tier_models"]`.
+
+  Defaults are plan-aware: free-tier accounts receive gpt-5.5, paid-tier and
+  enterprise accounts receive gpt-5.6-luna/terra. The plan type is stored in
+  the workspace config after auth-probe detection.
   """
   @spec model_for_tier(String.t() | nil) :: String.t() | nil
   def model_for_tier(nil), do: nil
@@ -173,7 +182,7 @@ defmodule Arbiter.Agents.Codex.Config do
     {:ok, cfg} = resolve()
     overrides = stringy_map(Map.get(cfg.raw, "tier_models"))
 
-    case Map.get(overrides, tier) || Map.get(@default_tier_models, tier) do
+    case Map.get(overrides, tier) || Map.get(plan_aware_defaults(cfg.raw), tier) do
       m when is_binary(m) and m != "" -> m
       _ -> nil
     end
@@ -181,8 +190,17 @@ defmodule Arbiter.Agents.Codex.Config do
 
   def model_for_tier(_), do: nil
 
-  @doc "Built-in default tier → model map (testing / introspection)."
-  def default_tier_models, do: @default_tier_models
+  @doc "Built-in default tier → model map, adjusted for the account's plan type."
+  @spec plan_aware_defaults(map()) :: map()
+  def plan_aware_defaults(raw) when is_map(raw) do
+    case Map.get(raw, "plan_type") do
+      "free" -> @default_tier_models_free
+      _ -> @default_tier_models_paid
+    end
+  end
+
+  @doc "Built-in default tier → model map for paid-tier accounts (testing / introspection)."
+  def default_tier_models, do: @default_tier_models_paid
 
   # ---- Internals --------------------------------------------------------
 

@@ -143,30 +143,18 @@ defmodule Arbiter.Agents.ProviderConfigNamespaceTest do
   end
 
   describe "free-tier Codex model override" do
-    test "codex-scoped free-tier tier_models override resolves correctly for all tiers" do
+    test "plan-aware defaults return free-tier models when plan_type is set" do
       # Free-tier ChatGPT accounts only have gpt-5.4-mini and gpt-5.5 available.
-      # The default tier models in config.ex are gpt-5.6-luna (economy) and gpt-5.6-terra
-      # (standard/premium/flagship), which are only available on paid-tier and enterprise
-      # accounts. This test demonstrates that free-tier workspaces must override the
-      # defaults via agent.config["codex"]["tier_models"] to use models their account
-      # actually has access to (bd-2s755v).
-      config = %{
-        "codex" => %{
-          "tier_models" => %{
-            "economy" => "gpt-5.4-mini",
-            "standard" => "gpt-5.5",
-            "premium" => "gpt-5.5",
-            "flagship" => "gpt-5.5"
-          }
-        }
-      }
+      # When plan_type is detected and stored in the config, plan-aware defaults
+      # return free-tier models (gpt-5.5) instead of the paid-tier defaults.
+      config = %{"plan_type" => "free"}
 
       Codex.Config.put_active(config)
       Claude.Config.put_active(config)
       Gemini.Config.put_active(config)
 
-      # Codex resolves to free-tier models.
-      assert Codex.Config.model_for_tier("economy") == "gpt-5.4-mini"
+      # Codex resolves to free-tier models via plan-aware defaults.
+      assert Codex.Config.model_for_tier("economy") == "gpt-5.5"
       assert Codex.Config.model_for_tier("standard") == "gpt-5.5"
       assert Codex.Config.model_for_tier("premium") == "gpt-5.5"
       assert Codex.Config.model_for_tier("flagship") == "gpt-5.5"
@@ -179,8 +167,8 @@ defmodule Arbiter.Agents.ProviderConfigNamespaceTest do
                Gemini.Config.default_tier_models()["standard"]
 
       # Verify that free-tier models do not appear in Claude/Gemini tiers.
-      refute Claude.Config.model_for_tier("economy") == "gpt-5.4-mini"
-      refute Gemini.Config.model_for_tier("economy") == "gpt-5.4-mini"
+      refute Claude.Config.model_for_tier("economy") == "gpt-5.5"
+      refute Gemini.Config.model_for_tier("economy") == "gpt-5.5"
     end
   end
 end

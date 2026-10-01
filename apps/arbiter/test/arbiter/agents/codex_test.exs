@@ -89,15 +89,12 @@ defmodule Arbiter.Agents.CodexTest do
       assert Codex.resolved_model([]) == nil
     end
 
-    test "default tier models are available on paid-tier and enterprise accounts" do
-      # The default tier models (gpt-5.6-luna, gpt-5.6-terra) are available on
-      # paid-tier and enterprise ChatGPT accounts. Free-tier accounts (which only
-      # have gpt-5.4-mini and gpt-5.5) must override via agent.config["codex"]["tier_models"].
-      # bd-2s755v: Future D1 work will add plan-aware defaults with pre-flight
-      # validation against the account's available models.
+    test "paid-tier accounts resolve to gpt-5.6 models by default" do
+      # Paid-tier ChatGPT accounts have access to gpt-5.6-luna and gpt-5.6-terra.
+      # These are the default tier models for paid-tier and enterprise accounts.
       defaults = Codex.Config.default_tier_models()
 
-      # Verify the defaults are set
+      # Verify the paid-tier defaults
       assert defaults["economy"] == "gpt-5.6-luna"
       assert defaults["standard"] == "gpt-5.6-terra"
       assert defaults["premium"] == "gpt-5.6-terra"
@@ -108,6 +105,29 @@ defmodule Arbiter.Agents.CodexTest do
       assert Codex.resolved_model(model_tier: "standard") == "gpt-5.6-terra"
       assert Codex.resolved_model(model_tier: "premium") == "gpt-5.6-terra"
       assert Codex.resolved_model(model_tier: "flagship") == "gpt-5.6-terra"
+    end
+
+    test "free-tier accounts fall back to gpt-5.5 when plan_type is set" do
+      # Free-tier ChatGPT accounts only have access to gpt-5.4-mini and gpt-5.5.
+      # When plan_type is detected and stored in the config, tier resolution
+      # returns free-tier models instead of the paid-tier defaults.
+      free_tier_config = %{"plan_type" => "free"}
+
+      # Plan-aware defaults should return free-tier models
+      free_defaults = Codex.Config.plan_aware_defaults(free_tier_config)
+      assert free_defaults["economy"] == "gpt-5.5"
+      assert free_defaults["standard"] == "gpt-5.5"
+      assert free_defaults["premium"] == "gpt-5.5"
+      assert free_defaults["flagship"] == "gpt-5.5"
+
+      # Simulate free-tier workspace config
+      Codex.Config.put_active(free_tier_config)
+
+      # All tiers should resolve to gpt-5.5 for free-tier
+      assert Codex.resolved_model(model_tier: "economy") == "gpt-5.5"
+      assert Codex.resolved_model(model_tier: "standard") == "gpt-5.5"
+      assert Codex.resolved_model(model_tier: "premium") == "gpt-5.5"
+      assert Codex.resolved_model(model_tier: "flagship") == "gpt-5.5"
     end
   end
 
