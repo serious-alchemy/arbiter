@@ -77,7 +77,9 @@ defmodule Arbiter.Usage.EventIndexPlanTest do
 
     ids = fn q -> q |> Ash.read!() |> Enum.map(& &1.id) |> Enum.sort() end
 
-    assert ids.(Ash.Query.filter(Event, provider_account_id == ^acct)) == Enum.sort([old.id, a.id])
+    assert ids.(Ash.Query.filter(Event, provider_account_id == ^acct)) ==
+             Enum.sort([old.id, a.id])
+
     assert ids.(Ash.Query.filter(Event, occurred_at >= ^since)) == Enum.sort([a.id, b.id])
 
     assert ids.(Ash.Query.filter(Event, provider_account_id == ^acct and occurred_at >= ^since)) ==
