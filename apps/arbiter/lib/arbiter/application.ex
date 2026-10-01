@@ -228,14 +228,24 @@ defmodule Arbiter.Application do
       Arbiter.Quota.QuotaCache,
       # Owns the ETS table memoizing `Arbiter.Usage.Estimate.sample/1`
       # (bd-3d1zge) — see that module's docs.
-      Arbiter.Usage.EstimateCache,
-      # The board's Ready queue drains itself (bd-bqyeqa). Paused unless the
-      # install opts in with `config :arbiter, :board_autopilot, enabled: true`
-      # — auto-dispatch spends money, so an upgrade must not discover it by
-      # finding four agents running.
-      Arbiter.Board.Autopilot
-    ] ++ boot_tasks(auto_start?)
+      Arbiter.Usage.EstimateCache
+    ] ++
+      resume_gate(auto_start?) ++
+      [
+        # The board's Ready queue drains itself (bd-bqyeqa). Paused unless the
+        # install opts in with `config :arbiter, :board_autopilot, enabled: true`
+        # — auto-dispatch spends money, so an upgrade must not discover it by
+        # finding four agents running.
+        Arbiter.Board.Autopilot
+      ] ++ boot_tasks(auto_start?)
   end
+
+  # bd-35gvrj: closed before Autopilot can plan, reopened by the boot reconcile
+  # task once it has re-registered the runs the restart cut off. Only when boot
+  # tasks run at all — otherwise nothing would ever open it. See
+  # Arbiter.Boot.ResumeGate.
+  defp resume_gate(true), do: [Arbiter.Boot.ResumeGate]
+  defp resume_gate(false), do: []
 
   # The gated boot children. The two `Task` children each MUST carry a distinct
   # explicit `:id` — without one they both collapse to the default `:Task` id
@@ -266,6 +276,12 @@ defmodule Arbiter.Application do
   #     and, on a fresh primary, join each workspace to `<provider>:default`.
   #     Synchronous and after the migrators, so every later child dispatches
   #     against the joins. See Arbiter.Accounts.Enablement and bd-cvvb02.
+  #   * ticket_transitions: replay the paper trail into `ticket_transitions`
+  #     for every ticket whose history predates the live triggers (one indexed
+  #     query once done). Primary-gated, synchronous, never fatal; after the
+  #     migrator that creates the table and before the queues, so no dispatch
+  #     writes a live row mid-replay. See Arbiter.Tasks.TicketTransitionBackfill
+  #     and bd-d8fi92.
   #   * reconcile: sweep orphaned :running worker_runs left behind by a node
   #     that died mid-run. Runs once after Repo + Worker.Registry are online —
   #     but ONLY on the primary instance, so a transient/duplicate boot can't
@@ -278,6 +294,10 @@ defmodule Arbiter.Application do
   #     (bd-741sid) and hands the rest to the patrols.
   #     Escalates each to the coordinator only when neither can watch it.
   #     bd-crqku8.
+  #   * resume gate (bd-35gvrj): holds Autopilot's dispatching until the
+  #     reconcile task above has re-registered the resumed runs; the account
+  #     concurrency cap is counted from the live registry, which is empty at
+  #     boot. See Arbiter.Boot.ResumeGate.
   #   * session_adoption: reconcile the `sessions` table against the coordinator
   #     sessions systemd and tmux still have running (bd-bpt0ag, RFC §4.6). This
   #     is the ONLY thing that reconnects Arbiter to a session after a restart —
@@ -308,15 +328,19 @@ defmodule Arbiter.Application do
       Arbiter.Boot.Migrator,
       Arbiter.Boot.ConfigMigrator,
       Arbiter.Boot.ProviderAccounts,
+      Arbiter.Boot.TicketTransitions,
       Arbiter.Boot.Optimize,
       Supervisor.child_spec(
         {Task,
          fn ->
            primary? = Arbiter.SingleInstance.primary?()
-           Arbiter.Workers.Reconciler.reconcile_orphaned_runs(primary?: primary?)
-           Arbiter.Workers.Reconciler.reconcile_shutdown_casualties(primary?: primary?)
-           Arbiter.Workers.Reconciler.reconcile_open_pr_tasks(primary?: primary?)
-           Arbiter.Workers.Reconciler.reconcile_resumable_tasks(primary?: primary?)
+
+           Arbiter.Boot.ResumeGate.sweep(fn ->
+             Arbiter.Workers.Reconciler.reconcile_orphaned_runs(primary?: primary?)
+             Arbiter.Workers.Reconciler.reconcile_shutdown_casualties(primary?: primary?)
+             Arbiter.Workers.Reconciler.reconcile_open_pr_tasks(primary?: primary?)
+             Arbiter.Workers.Reconciler.reconcile_resumable_tasks(primary?: primary?)
+           end)
          end},
         id: :reconcile_boot_task,
         restart: :temporary

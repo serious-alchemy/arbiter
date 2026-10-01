@@ -258,6 +258,34 @@ in Elixir (tested, with the `Lifecycle` table next to it) beats a second copy in
 SQL. A migration that calls application modules is the pattern this repo
 avoids.
 
+> **As built (bd-d8fi92):** `Arbiter.Tasks.Lifecycle.History.replay/2` (pure)
+> and `Arbiter.Tasks.TicketTransitionBackfill`, applied on every primary boot
+> by `Arbiter.Boot.TicketTransitions` (after `Boot.ProviderAccounts`, before
+> the queues) and by hand via `Release.backfill(:ticket_transitions)` (dry run
+> by default) or `mix arbiter.backfill_ticket_transitions`. Three refinements:
+>
+> - **Tickets the triggers already cover.** The bd-5gkqdr triggers can ship
+>   (and write live rows) before this backfill runs, so "no rows" is not the
+>   test. A ticket is done once its history has a start — a `create` row or a
+>   backfilled row. A ticket with only live rows gets the replay of the
+>   versions *before* its first live row, which must end in that row's
+>   `from_state`; the trigger's `at` precedes the paper trail's version for the
+>   same write, so the cut is exact.
+> - **A second per-install cutover.** Versions at or after the `state`
+>   migration (`20260927184052`) that carry no `state` derive nothing: from
+>   then on `state` is the stored truth, so a `record_pr` on an `active` ticket
+>   is not an `open_pr`.
+> - **The reconcile row** is named `reconcile`, stamped at the replay's last
+>   transition (or `created_at` for a ticket with no paper trail, so it still
+>   enters the history at its creation). The creation row is stamped
+>   `min(create version, created_at)`, as the live trigger stamps `created_at`.
+>
+> Against a backup-API snapshot of the live DB on 2026-10-01 (1,460 tickets,
+> 7,057 state-relevant versions): 0 mismatches, 0 unmapped values, 0 illegal
+> era-B/C transitions; 6,230 rows; the CFD invariant held on 07-01 (164),
+> 08-01 (420), 08-24 (601), 09-15 (950), 09-27 (1,292), 09-30 (1,442) and
+> 10-01 (1,460); a second run planned and inserted 0.
+
 ### 3.5 What the implementation ticket must prove
 
 1. ExUnit fixtures for each era and for the cutover seed: one ticket per
