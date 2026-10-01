@@ -65,6 +65,7 @@ defmodule Arbiter.Events do
   | `slot_cap_override` | A resume of a task that released its slot went over a full concurrency cap via explicit `force` (bd-92mx1m) |
   | `coverage_shadow` | P3 shadow mode: the review-coverage predicate and the `last_reviewed_sha` merge guard were compared on a guarded-merge decision (opt-in only) |
   | `gate_cap_hit`  | A gate escalated because its round / send-back budget ran out (bd-4qjl0q). Carries `task_id`, `gate`, `rounds` and `cap` (opt-in only) |
+  | `conflict_review` | A head that followed an approved commit was classified by the conflict-resolution review path (bd-954ym8): `outcome` is `auto_cover` / `scoped_review` / `scoped_approved` / `scoped_rejected` / `fallback` (opt-in only) |
   | `gate_resolved` | The coordinator recorded its answer to a gate escalation (bd-4qjl0q). Carries `task_id`, `gate`, `decision`, `actor`, `round` (opt-in only) |
 
   ## Broadcast hooks
@@ -84,6 +85,7 @@ defmodule Arbiter.Events do
     * `Arbiter.Worker.ReviewGate` (round cap) and `Arbiter.Worker` (notes /
       commit gate send-back cap) → `:gate_cap_hit`
     * `Arbiter.ReviewGate.Resolutions.record/1` → `:gate_resolved`
+    * `Arbiter.Reviews.ConflictReview.record/2` → `:conflict_review`
 
   All broadcasts are best-effort: PubSub failures are logged at debug and swallowed.
   """
@@ -99,7 +101,7 @@ defmodule Arbiter.Events do
     resource Record
   end
 
-  @valid_topics ~w(inbox review_gate worker_failed worker_done worker_phase task_state external_review loop_proposal quota_gate_bypass slot_cap_override coverage_shadow gate_cap_hit gate_resolved provider_paused provider_resumed)
+  @valid_topics ~w(inbox review_gate worker_failed worker_done worker_phase task_state external_review loop_proposal quota_gate_bypass slot_cap_override coverage_shadow gate_cap_hit gate_resolved provider_paused provider_resumed conflict_review)
 
   @doc "All valid topic name strings accepted by the `subscribe=` query parameter."
   def valid_topics, do: @valid_topics
