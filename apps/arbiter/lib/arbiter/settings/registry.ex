@@ -118,10 +118,7 @@ defmodule Arbiter.Settings.Registry do
   """
   @spec put(key(), term()) :: {:ok, term()} | {:error, error()}
   def put(key, raw) do
-    with {:ok, value} <- cast_for_put(key, raw),
-         {:ok, updated} <- write(key, value) do
-      {:ok, updated}
-    end
+    with {:ok, value} <- cast_for_put(key, raw), do: write(key, value)
   end
 
   defp cast_for_put(key, raw) do
@@ -203,5 +200,5 @@ defmodule Arbiter.Settings.Registry do
 
   @doc "`%{key_atom => override}` — what `installation_config_get` returns as `settings`."
   @spec overrides() :: %{atom() => term()}
-  def overrides, do: Map.new(@keys, &{String.to_atom(&1), override(&1)})
+  def overrides, do: Map.new(@keys, &{String.to_existing_atom(&1), override(&1)})
 end
