@@ -88,6 +88,27 @@ defmodule Arbiter.Agents.CodexTest do
     test "returns nil when nothing is configured (CLI picks its own default)" do
       assert Codex.resolved_model([]) == nil
     end
+
+    test "default tier models are available on paid-tier and enterprise accounts" do
+      # The default tier models (gpt-5.6-luna, gpt-5.6-terra) are available on
+      # paid-tier and enterprise ChatGPT accounts. Free-tier accounts (which only
+      # have gpt-5.4-mini and gpt-5.5) must override via agent.config["codex"]["tier_models"].
+      # bd-2s755v: Future D1 work will add plan-aware defaults with pre-flight
+      # validation against the account's available models.
+      defaults = Codex.Config.default_tier_models()
+
+      # Verify the defaults are set
+      assert defaults["economy"] == "gpt-5.6-luna"
+      assert defaults["standard"] == "gpt-5.6-terra"
+      assert defaults["premium"] == "gpt-5.6-terra"
+      assert defaults["flagship"] == "gpt-5.6-terra"
+
+      # All tiers resolve correctly with the defaults
+      assert Codex.resolved_model(model_tier: "economy") == "gpt-5.6-luna"
+      assert Codex.resolved_model(model_tier: "standard") == "gpt-5.6-terra"
+      assert Codex.resolved_model(model_tier: "premium") == "gpt-5.6-terra"
+      assert Codex.resolved_model(model_tier: "flagship") == "gpt-5.6-terra"
+    end
   end
 
   describe "default_argv/2 executable resolution" do

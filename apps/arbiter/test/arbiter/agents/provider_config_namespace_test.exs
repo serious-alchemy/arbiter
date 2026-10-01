@@ -144,17 +144,19 @@ defmodule Arbiter.Agents.ProviderConfigNamespaceTest do
 
   describe "free-tier Codex model override" do
     test "codex-scoped free-tier tier_models override resolves correctly for all tiers" do
-      # Free-tier ChatGPT accounts only have gpt-5.4-mini and gpt-5.5 available,
-      # but the default tier models are gpt-5.6-luna (economy) and gpt-5.6-terra
-      # (standard/premium/flagship). This test demonstrates that free-tier workspaces
-      # can override the defaults via agent.config["codex"]["tier_models"] to use
-      # models their account actually has access to (bd-2pkwjf).
+      # Free-tier ChatGPT accounts only have gpt-5.4-mini and gpt-5.5 available.
+      # The default tier models in config.ex are gpt-5.6-luna (economy) and gpt-5.6-terra
+      # (standard/premium/flagship), which are only available on paid-tier and enterprise
+      # accounts. This test demonstrates that free-tier workspaces must override the
+      # defaults via agent.config["codex"]["tier_models"] to use models their account
+      # actually has access to (bd-2s755v).
       config = %{
         "codex" => %{
           "tier_models" => %{
             "economy" => "gpt-5.4-mini",
             "standard" => "gpt-5.5",
-            "premium" => "gpt-5.5"
+            "premium" => "gpt-5.5",
+            "flagship" => "gpt-5.5"
           }
         }
       }
@@ -167,6 +169,7 @@ defmodule Arbiter.Agents.ProviderConfigNamespaceTest do
       assert Codex.Config.model_for_tier("economy") == "gpt-5.4-mini"
       assert Codex.Config.model_for_tier("standard") == "gpt-5.5"
       assert Codex.Config.model_for_tier("premium") == "gpt-5.5"
+      assert Codex.Config.model_for_tier("flagship") == "gpt-5.5"
 
       # Claude and Gemini are unaffected — they see their own built-in defaults.
       assert Claude.Config.model_for_tier("standard") ==
