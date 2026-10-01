@@ -121,6 +121,8 @@ defmodule Arbiter.Release do
       (`:apply?`)
     * `:run_steps` → `Arbiter.Workers.StepBackfill.backfill/1`
       (`:apply?`, `:repo`, `:since`, `:until`, `:limit`)
+    * `:gitlab_mr_links` → `Arbiter.Tasks.MergerUrlBackfill` (rewrites
+      numeric-id GitLab MR links; `:apply?`)
     * `:task_statuses` → `Arbiter.Tasks.StatusBackfill.proposals/1` +
       `apply!/1` (`:apply?`, `:branch`, `:repo_path`) — `:repo_path` defaults
       to `File.cwd!()`, which under `bin/arbiter eval` is wherever the
@@ -187,6 +189,36 @@ defmodule Arbiter.Release do
     else
       IO.puts(banner("issue repos", false, opts[:hint]))
       emit_issue_repos_report(plan, :dry_run)
+      plan
+    end
+  end
+
+  def backfill(:gitlab_mr_links, opts) do
+    start_release_repo!()
+    # Path resolution calls the GitLab API through Req (Finch pool).
+    {:ok, _} = Application.ensure_all_started(:req)
+    apply? = Keyword.get(opts, :apply?, false)
+    plan = Arbiter.Tasks.MergerUrlBackfill.plan()
+
+    IO.puts(banner("gitlab MR links", apply?, opts[:hint]))
+
+    for e <- plan do
+      IO.puts("#{e.issue_id}: #{e.old_url} -> #{e.new_url || "(unresolved, left alone)"}")
+    end
+
+    unresolved = Enum.count(plan, &is_nil(&1.new_url))
+
+    if apply? do
+      {updated, errors} = Arbiter.Tasks.MergerUrlBackfill.apply!(plan)
+
+      IO.puts(
+        "\nUpdated #{length(updated)}, unresolved #{unresolved}, write failures #{length(errors)}."
+      )
+
+      for {id, reason} <- errors, do: IO.puts(:stderr, "  #{id}: #{reason}")
+      {updated, errors}
+    else
+      IO.puts("\n#{length(plan) - unresolved} would update, #{unresolved} unresolved.")
       plan
     end
   end

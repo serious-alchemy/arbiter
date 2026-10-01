@@ -21,6 +21,10 @@ defmodule Arbiter.Mergers.GitlabTest do
       "default_reviewers" => [7]
     })
 
+    for {:gitlab_project_path, _, _} = key <- Enum.map(:persistent_term.get(), &elem(&1, 0)) do
+      :persistent_term.erase(key)
+    end
+
     on_exit(fn ->
       Config.clear()
       System.delete_env(@env_var)
@@ -1086,8 +1090,86 @@ defmodule Arbiter.Mergers.GitlabTest do
   end
 
   describe "link_for/1" do
-    test "builds a best-effort MR URL from host and project_id" do
-      assert Gitlab.link_for(@ref) == "https://gitlab.com/12345/-/merge_requests/42"
+    test "returns \"\" and warns rather than emit a numeric-id URL when the path lookup fails" do
+      stub(fn conn -> Plug.Conn.send_resp(conn, 500, "boom") end)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert Gitlab.link_for(@ref) == ""
+        end)
+
+      assert log =~ "path_with_namespace"
+      assert log =~ "12345"
+    end
+
+    test "does not cache a failed lookup" do
+      stub(fn conn -> Plug.Conn.send_resp(conn, 500, "boom") end)
+      ExUnit.CaptureLog.capture_log(fn -> assert Gitlab.link_for(@ref) == "" end)
+
+      stub(fn conn -> Req.Test.json(conn, %{"path_with_namespace" => "g/p"}) end)
+      assert Gitlab.link_for(@ref) == "https://gitlab.com/g/p/-/merge_requests/42"
+    end
+
+    test "the resolved path is cached across processes (one fetch)" do
+      test_pid = self()
+
+      stub(fn conn ->
+        send(test_pid, :fetched)
+        Req.Test.json(conn, %{"path_with_namespace" => "g/p"})
+      end)
+
+      expected = "https://gitlab.com/g/p/-/merge_requests/42"
+      assert Gitlab.link_for(@ref) == expected
+      assert_received :fetched
+
+      # A fresh process has no Req stub ownership and no pdict cache: only a
+      # durable cache can answer.
+      url =
+        Task.async(fn ->
+          Config.put_active(%{
+            "host" => @host,
+            "project_id" => @project,
+            "credentials_ref" => "env:#{@env_var}"
+          })
+
+          Gitlab.link_for(@ref)
+        end)
+        |> Task.await()
+
+      assert url == expected
+      refute_received :fetched
+    end
+
+    test "uses the repo's own project_id (merge.repos.<repo>) for the link" do
+      stub(fn conn ->
+        path =
+          case conn.request_path do
+            "/api/v4/projects/55399962" -> "emricare/tonic"
+            "/api/v4/projects/81204390" -> "emricare/tonic_device"
+          end
+
+        Req.Test.json(conn, %{"path_with_namespace" => path})
+      end)
+
+      ws = %Arbiter.Tasks.Workspace{
+        config: %{
+          "merge" => %{
+            "strategy" => "gitlab",
+            "config" => %{
+              "host" => @host,
+              "project_id" => 55_399_962,
+              "credentials_ref" => "env:#{@env_var}"
+            },
+            "repos" => %{"tonic_device" => %{"config" => %{"project_id" => 81_204_390}}}
+          }
+        }
+      }
+
+      assert Arbiter.Mergers.link_for_workspace(ws, @ref, "tonic_device") ==
+               "https://gitlab.com/emricare/tonic_device/-/merge_requests/42"
+
+      assert Arbiter.Mergers.link_for_workspace(ws, @ref, "tonic") ==
+               "https://gitlab.com/emricare/tonic/-/merge_requests/42"
     end
 
     test "resolves numeric project_id to namespace/project path for correct URL" do
