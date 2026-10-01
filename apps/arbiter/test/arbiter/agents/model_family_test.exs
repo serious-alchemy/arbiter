@@ -62,8 +62,8 @@ defmodule Arbiter.Agents.ModelFamilyTest do
     test "each family resolves a tier through its adapter's built-in map" do
       assert ModelFamily.model_for_tier(:claude, "economy", %{}) == "haiku"
       assert ModelFamily.model_for_tier(:claude, "premium", %{}) == "opus"
-      assert ModelFamily.model_for_tier(:codex, "economy", %{}) == "gpt-5-codex-mini"
-      assert ModelFamily.model_for_tier(:codex, "premium", %{}) == "gpt-5-codex"
+      assert ModelFamily.model_for_tier(:codex, "economy", %{}) == "gpt-5.6-luna"
+      assert ModelFamily.model_for_tier(:codex, "premium", %{}) == "gpt-5.6-terra"
       assert ModelFamily.model_for_tier(:antigravity, "premium", %{}) == "gemini-3.1-pro-high"
 
       assert ModelFamily.model_for_tier(:antigravity, "flagship", %{}) ==
