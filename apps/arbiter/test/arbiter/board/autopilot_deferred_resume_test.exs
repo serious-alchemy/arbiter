@@ -41,6 +41,8 @@ defmodule Arbiter.Board.AutopilotDeferredResumeTest do
       topics: [],
       follow_up: false,
       paused: false,
+      # VM-global gate (`Drain`, `ResumeGate`) that concurrent async tests mutate.
+      registry_settled?: fn -> true end,
       snapshot: fn _ -> board(Agent.get(free, & &1)) end,
       dispatch: fn id ->
         send(test, {:dispatched, id})

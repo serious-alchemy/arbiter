@@ -668,8 +668,33 @@ defmodule Arbiter.Worker.DispatchTest do
       File.mkdir_p!(tmp)
 
       on_exit(fn -> File.rm_rf!(tmp) end)
+      # Registered after the rm_rf, so it runs first (on_exit is LIFO).
+      on_exit(&await_mcp_verify_tasks/0)
 
       %{tmp: tmp}
+    end
+
+    # A codex dispatch fires `Codex.verify_connection/1` and
+    # `Codex.check_worker_config/2` off the dispatch path (bd-bi5t54), and the
+    # second one runs the stubbed `codex` CLI inside the worktree under `tmp`,
+    # which appends to the argv file there. Deleting `tmp` while that runs races
+    # its writes ("could not remove files and directories recursively ... file
+    # already exists"), so teardown waits for those tasks to exit first.
+    defp await_mcp_verify_tasks do
+      refs =
+        for pid <- Task.Supervisor.children(Arbiter.Worker.MCPVerifySupervisor) do
+          {Process.monitor(pid), pid}
+        end
+
+      for {ref, pid} <- refs do
+        receive do
+          {:DOWN, ^ref, :process, ^pid, _reason} -> :ok
+        after
+          10_000 -> flunk("MCP verify task #{inspect(pid)} did not exit")
+        end
+      end
+
+      :ok
     end
 
     # Build a `claude`-named shim on PATH that writes its argv (one per line) to

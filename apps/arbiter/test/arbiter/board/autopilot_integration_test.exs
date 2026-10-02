@@ -277,6 +277,9 @@ defmodule Arbiter.Board.AutopilotIntegrationTest do
           [
             name: nil,
             interval_ms: :never,
+            # The test env skips the persisted-state read by default (config/test.exs);
+            # a restart is exactly what these tests exercise, so read it for real.
+            read_status: &Arbiter.Settings.read_board_autopilot_status/0,
             snapshot: &Snapshot.load/1,
             dispatch: fn id -> send(test, {:dispatched, id}) && {:ok, %{task_id: id}} end
           ],
