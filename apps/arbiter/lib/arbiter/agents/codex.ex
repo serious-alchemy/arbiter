@@ -112,7 +112,11 @@ defmodule Arbiter.Agents.Codex do
           policy = security_policy(opts)
           flags = sandbox_argv(policy, opts) ++ model_flags ++ mcp_argv(opts)
 
-          with {:ok, argv} <- build_argv(codex, prompt, flags) do
+          # bd-btcdrf: refuse a backend with no implementation for every Codex
+          # spawn (implementer, strict reviewer included), not just the ones
+          # `maybe_jail_reviewer/3` wraps under bwrap.
+          with {:ok, _sandbox} <- Sandbox.module(policy),
+               {:ok, argv} <- build_argv(codex, prompt, flags) do
             maybe_jail_reviewer(argv, policy, opts)
           end
         end

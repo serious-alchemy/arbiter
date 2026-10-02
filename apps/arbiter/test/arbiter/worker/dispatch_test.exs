@@ -2319,6 +2319,41 @@ defmodule Arbiter.Worker.DispatchTest do
       refute File.exists?(gemini_file)
     end
 
+    # bd-btcdrf: a sandbox.backend with no implementation is refused at the
+    # dispatch gate for every provider, before anything is spawned.
+    test "sandbox.backend: podman refuses a claude dispatch before any spawn", %{ws: ws, tmp: tmp} do
+      claude_file = Path.join(tmp, "claude-argv.txt")
+      :ok = stub_claude_on_path(tmp, claude_file)
+
+      repo = seed_repo!(tmp, "podman-claude-repo")
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "podman-claude-wt"))
+      put_app_env(:arbiter, :repo_paths, %{"pc/repo" => repo})
+
+      {:ok, ws} =
+        Ash.update(ws, %{
+          config: %{
+            "agent" => %{
+              "type" => "claude",
+              "security" => %{"sandbox" => %{"backend" => "podman"}}
+            }
+          }
+        })
+
+      {:ok, task} = Ash.create(Issue, %{title: "podman refusal", workspace_id: ws.id})
+
+      assert {:error, {:claude_start_failed, {:sandbox_backend_unavailable, :podman, message}}} =
+               Dispatch.dispatch(task.id,
+                 force: true,
+                 repo: "pc/repo",
+                 start_driver: false,
+                 start_claude: true,
+                 preflight: false
+               )
+
+      assert message =~ "podman"
+      refute File.exists?(claude_file)
+    end
+
     test "a :bypass dispatch to gemini is unaffected by the strict gate", %{ws: ws, tmp: tmp} do
       claude_file = Path.join(tmp, "claude-argv.txt")
       gemini_file = Path.join(tmp, "gemini-argv.txt")

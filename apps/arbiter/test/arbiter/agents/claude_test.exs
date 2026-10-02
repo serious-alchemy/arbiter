@@ -195,6 +195,23 @@ defmodule Arbiter.Agents.ClaudeTest do
       assert "Bash(docker:*)" in settings_json(argv)["permissions"]["deny"]
     end
 
+    # bd-btcdrf: Claude has no jail wrap point yet, but a backend with no
+    # implementation must refuse the spawn instead of running it unconfined.
+    test "backend: podman refuses the spawn in every mode, never an unjailed argv" do
+      for mode <- ["strict", "auto", "bypass"] do
+        policy =
+          Arbiter.Agents.SecurityPolicy.merge(Arbiter.Agents.SecurityPolicy.base(), %{
+            "permissions" => %{"mode" => mode},
+            "sandbox" => %{"backend" => "podman"}
+          })
+
+        assert {:error, {:sandbox_backend_unavailable, :podman, message}} =
+                 Claude.default_argv("the prompt", security: policy)
+
+        assert message =~ "podman"
+      end
+    end
+
     test "bypass mode emits --dangerously-skip-permissions with --settings deny list" do
       policy =
         Arbiter.Agents.SecurityPolicy.merge(Arbiter.Agents.SecurityPolicy.base(), %{

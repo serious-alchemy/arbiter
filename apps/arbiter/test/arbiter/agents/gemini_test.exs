@@ -188,6 +188,16 @@ defmodule Arbiter.Agents.GeminiTest do
       assert Gemini.write_jail_warning(policy(:bypass, %{enabled: false})) == nil
     end
 
+    test "write_confinement/1 is :none and the warning says dispatch is refused under podman" do
+      podman = policy(:bypass, %{backend: :podman})
+
+      assert Gemini.write_confinement(podman) == :none
+      assert Gemini.write_jail_warning(podman) =~ "podman"
+      assert Gemini.write_jail_warning(podman) =~ "refused in every mode"
+      # Unchanged for the default backend.
+      assert Gemini.write_confinement(policy(:strict)) == :os_jail
+    end
+
     test "write_jail_warning/1 is nil for the upstream gemini CLI (nothing to jail)", %{bin: bin} do
       Application.put_env(:arbiter, :worker_jail_available, false)
       File.rm!(Path.join(bin, "agy"))
@@ -555,6 +565,42 @@ defmodule Arbiter.Agents.GeminiTest do
                  security: policy(:bypass, %{backend: :podman}),
                  worktree_path: worktree
                )
+    end
+  end
+
+  describe "backend: podman on the upstream gemini CLI (bd-btcdrf)" do
+    setup do
+      tmp =
+        Path.join(
+          System.tmp_dir!(),
+          "arbiter-gemini-podman-#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(tmp)
+      File.write!(Path.join(tmp, "gemini"), "#!/bin/sh\nexit 0\n")
+      File.chmod!(Path.join(tmp, "gemini"), 0o755)
+      old_path = System.get_env("PATH")
+      System.put_env("PATH", tmp)
+
+      on_exit(fn ->
+        System.put_env("PATH", old_path)
+        File.rm_rf!(tmp)
+      end)
+
+      :ok
+    end
+
+    test "is refused in every mode, though the upstream CLI is never jailed" do
+      for mode <- [:strict, :bypass, :auto] do
+        policy =
+          SecurityPolicy.merge(SecurityPolicy.base(), %{
+            permissions: %{mode: mode},
+            sandbox: %{backend: :podman}
+          })
+
+        assert {:error, {:sandbox_backend_unavailable, :podman, _}} =
+                 Arbiter.Agents.Gemini.default_argv("p", security: policy)
+      end
     end
   end
 

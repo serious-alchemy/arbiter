@@ -135,11 +135,13 @@ defmodule Arbiter.Agents.Gemini do
   # (`jail_blocker/1` refuses it, see `default_argv/2`'s `maybe_jail/4`), so
   # the warning text must not claim writes just run unconfined there — that's
   # only true outside `:strict` (bd-8xy1mf).
-  defp jail_unavailable_effect(%SecurityPolicy{permissions: %{mode: :strict}}),
-    do: ":strict dispatches of agy are refused"
-
-  defp jail_unavailable_effect(_policy),
-    do: "writes are not confined to the worktree outside :strict"
+  defp jail_unavailable_effect(%SecurityPolicy{} = policy) do
+    case {Sandbox.module(policy), policy.permissions.mode} do
+      {{:error, _}, _mode} -> "agy dispatches are refused in every mode"
+      {_, :strict} -> ":strict dispatches of agy are refused"
+      _ -> "writes are not confined to the worktree outside :strict"
+    end
+  end
 
   # `jail_blocker/1`'s own reasons (sandbox off, isolated HOME off) are already
   # human strings; `{:jail_probe_failed, reason}` wraps a raw `Jail.status/0`
@@ -172,7 +174,10 @@ defmodule Arbiter.Agents.Gemini do
 
         # The jail sits between `sh` and the CLI, so the element before `-p`
         # is still the CLI and `splice_prompt/2` (resume, nudge) is unchanged.
-        with {:ok, command} <- maybe_jail(type, inner, opts, policy) do
+        # bd-btcdrf: a backend with no implementation refuses both CLIs, the
+        # upstream `gemini` (which `maybe_jail/4` never wraps) included.
+        with {:ok, _sandbox} <- Sandbox.module(policy),
+             {:ok, command} <- maybe_jail(type, inner, opts, policy) do
           {:ok, ["sh", "-c", ~s(exec "$@" < /dev/null), "sh" | command]}
         end
 
@@ -652,6 +657,10 @@ defmodule Arbiter.Agents.Gemini do
   # already resolves through.
   defp jail_blocker(%SecurityPolicy{} = policy) do
     cond do
+      match?({:error, _}, Sandbox.module(policy)) ->
+        {:error,
+         "sandbox.backend #{SecurityPolicy.sandbox_backend(policy)} is not implemented yet"}
+
       not jail_eligible?(policy) ->
         {:error, "sandbox.enabled is false or sandbox.filesystem is not :worktree"}
 

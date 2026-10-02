@@ -666,15 +666,25 @@ defmodule Arbiter.Agents.CodexTest do
                Codex.default_argv("p", security: podman, worktree_path: ctx.worktree)
     end
 
-    test "backend: podman leaves a spawn that was never jailed alone", ctx do
-      bypass =
+    test "backend: podman refuses a spawn that bwrap would never have jailed", ctx do
+      # An implementer (no `Write` deny) and a strict reviewer (already
+      # `-s read-only`) are not wrapped under bwrap; selecting podman must still
+      # refuse them rather than run them unconfined.
+      implementer =
         SecurityPolicy.merge(SecurityPolicy.base(), %{
           permissions: %{mode: :bypass},
           sandbox: %{backend: :podman}
         })
 
-      assert {:ok, ["sh", "-c", _, "sh", _codex, "exec" | _]} =
-               Codex.default_argv("p", security: bypass, worktree_path: ctx.worktree)
+      strict_reviewer =
+        SecurityPolicy.merge(review_policy(:strict), %{sandbox: %{backend: :podman}})
+
+      for policy <- [implementer, strict_reviewer] do
+        assert {:error, {:sandbox_backend_unavailable, :podman, message}} =
+                 Codex.default_argv("p", security: policy, worktree_path: ctx.worktree)
+
+        assert message =~ "podman"
+      end
     end
 
     defp tail_from_dashes(argv), do: Enum.drop_while(argv, &(&1 != "--"))
