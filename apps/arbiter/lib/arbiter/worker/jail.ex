@@ -50,7 +50,8 @@ defmodule Arbiter.Worker.Jail do
 
   ## Known, accepted gaps
 
-    * The network is shared: `arb`, MCP and `git push` need it.
+    * The network is shared unless the caller asks for network mode with
+      `:network` (below); agy does (bd-cfktou). Codex's reviewer jail does not.
     * Reads are not restricted, except for `secret_files/0` (the server's
       env file and Erlang distribution cookie), which are shadowed by
       `/dev/null`.
@@ -107,6 +108,24 @@ defmodule Arbiter.Worker.Jail do
   Claude workers do not go through this module at all — `Arbiter.Agents.
   Claude` never calls `Jail.wrap/2`, so they are not affected by, or fixed
   by, any of the above.
+
+  ## Network mode (bd-cfktou, G6)
+
+  `wrap/2`'s `:network` option (`[proxy_socket: path, bridges: [{port,
+  socket}]]`, as `Arbiter.Worker.Egress.JailRun.start/1` returns it) adds
+  `--unshare-net`: the namespace has only `lo`, UDP and ICMP have no route,
+  and nothing resolves (the resolver sockets are masked). The socket dir is
+  blanked with a `--tmpfs` and only this run's sockets are `--ro-bind`ed back.
+  Before the command runs, a small `sh` wrapper starts one `socat` per
+  listener (`127.0.0.1:3128` to the proxy socket, `127.0.0.1:<port>` to each
+  bridge) and waits for them to bind, exiting 125 if one doesn't, so a spawn
+  never runs without the bridge it was promised. The env gets
+  `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY` (and lowercase), `NO_PROXY` for
+  loopback, and `GIT_SSH_COMMAND` gains a `ProxyCommand` through the proxy.
+  `wrap/2` refuses (`{:egress_socket_missing, path}`, `:socat_not_found`,
+  `{:duplicate_bridge_port, ports}`) rather than build a jail with a bridge
+  missing. `network_status/0` / `network_probe/0` / `diagnose_network/0` are
+  the host-capability side, surfaced to `arb server doctor` as `network`.
 
   ## Teardown
 

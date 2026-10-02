@@ -265,13 +265,46 @@ systemd-resolved's varlink socket also answers DNS from inside the jail.
 Hiding `/run/user/$UID`, `/run/dbus` and `/run/systemd/resolve` with
 `--tmpfs` closes both.
 
+**Network mode (bd-cfktou, G6).** agy's jail also runs with `--unshare-net`:
+the namespace has only `lo`, with no route for UDP or ICMP, and the resolver
+sockets are hidden, so nothing resolves inside. The only way out is a
+per-run set of Unix sockets under `Egress.socket_dir/0` (the directory is
+blanked with a `--tmpfs`, and only that run's own sockets are bound back),
+each reached by an in-namespace `socat` on loopback:
+
+| In the jail | Goes to |
+|---|---|
+| `127.0.0.1:3128` (`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`) | the run's filtering CONNECT proxy (`Arbiter.Worker.Egress`) |
+| `127.0.0.1:<Arbiter port>` (4848 by default) | Arbiter's endpoint, so `arb` and the MCP URL are unchanged |
+| `127.0.0.1:<port>` per fixed tunnel | one fixed `host:port` |
+| `ssh` (git over SSH) | `GIT_SSH_COMMAND` carries `-o 'ProxyCommand socat - PROXY:127.0.0.1:%h:%p,proxyport=3128'`, so the proxy sees `github.com:22` |
+
+`NO_PROXY=127.0.0.1,localhost,::1` keeps loopback URLs (the Arbiter bridge,
+a test server in the namespace) off the proxy. The proxy's baseline is the
+adapter's infra hosts plus the host of each git remote in the worktree.
+
+The proxy and bridges live and die with the worker. A spawn whose proxy
+cannot start (or whose `socat` is missing at spawn time) **fails** with
+`{:egress_unavailable, reason}` in every mode; it never runs on the shared
+network. `Jail.network_status/0` is the host check behind the doctor line:
+if it fails, agy gets the filesystem jail on the shared network as before and
+a warning is logged. `config :arbiter, :worker_jail_network, false` switches
+network mode off.
+
 **Known, accepted gaps** (the threat model is a misdirected same-user agent,
 not a hostile kernel exploit):
 
-* The network is shared: `arb`, MCP and `git push` need it.
+* The network is shared **on a host without network mode** (no `socat`, or
+  no network namespaces; `arb server doctor` fails "agy jail network" there).
+  Where network mode works (below) the jail has no shared network at all.
   `sandbox.network: false` is still only the tool-level deny. The
   enforcement design is
   [design/guardrail-profiles.md](design/guardrail-profiles.md) §4.
+* The proxy runs in **learn mode**: only public-upload hosts are refused
+  today. Every other decision is logged to `egress_events` and allowed,
+  until agy's authenticated host set is recorded and an enforcing mode can be
+  switched on (G10). The first live probe of agy (bd-cfktou) stopped at the
+  OAuth prompt, so that set is not recorded yet.
 * Reads are not restricted.
 * The main `.git` stays writable, so a jailed worker can still write sibling
   worktrees' refs (the same as without the jail).

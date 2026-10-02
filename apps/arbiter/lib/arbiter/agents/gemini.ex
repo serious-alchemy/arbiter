@@ -37,12 +37,14 @@ defmodule Arbiter.Agents.Gemini do
   # always threads one through.
   @probe_prompt "ping"
 
-  # `Jail.wrap/2` network-side refusals: these must fail the spawn.
-  @egress_errors [:egress_socket_missing, :duplicate_bridge_port]
-
-  # The hosts agy itself needs from inside the jail (bd-cfktou). Recorded from
-  # a learn-mode run; see `egress_infra/0`.
-  @egress_infra []
+  # The proxy baseline for an agy jail (bd-cfktou): the hosts seen as CONNECTs
+  # from a real jailed `agy -p` run in learn mode, 2026-10-02 (agy 1.2.14), plus
+  # the ticket's git remote, which `JailRun` adds. That run stopped at the
+  # OAuth prompt (no credential is seeded in the worker shell it ran from), so
+  # the hosts an authenticated turn needs (model API, token refresh) are NOT
+  # recorded yet: the proxy runs in learn mode, which logs them to
+  # `egress_events` instead of denying, until they are.
+  @egress_infra ["antigravity-unleash.goog:443", "play.googleapis.com:443"]
   @probe_timeout_fraction_pct 80
   @probe_fallback_watchdog_ms 120_000
 
@@ -569,17 +571,22 @@ defmodule Arbiter.Agents.Gemini do
       {:ok, argv} ->
         {:ok, argv}
 
-      # The network side of the jail is not optional once it was asked for.
-      {:error, reason} when is_tuple(reason) and elem(reason, 0) in @egress_errors ->
-        {:error, {:egress_unavailable, reason}}
-
-      {:error, :socat_not_found} ->
-        {:error, {:egress_unavailable, :socat_not_found}}
+      {:error, reason} when network != nil ->
+        if egress_error?(reason),
+          # The network side of the jail is not optional once it was asked for.
+          do: {:error, {:egress_unavailable, reason}},
+          else: jail_unavailable(mode, command, reason)
 
       {:error, reason} ->
         jail_unavailable(mode, command, reason)
     end
   end
+
+  defp egress_error?({tag, _}) when tag in [:egress_socket_missing, :duplicate_bridge_port],
+    do: true
+
+  defp egress_error?(:socat_not_found), do: true
+  defp egress_error?(_), do: false
 
   # bd-cfktou (G6): the jail runs in a network namespace whose only way out is
   # this run's proxy and bridges. `{:ok, nil}` means "no network mode": the

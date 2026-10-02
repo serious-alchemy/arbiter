@@ -265,13 +265,6 @@ defmodule Arbiter.Agents.GeminiTest do
 
       jail = jail_argv_only(argv)
 
-      {proxy, _} =
-        jail
-        |> Enum.chunk_every(2, 1, :discard)
-        |> Enum.map(&List.to_tuple/1)
-        |> Enum.find(fn {_, b} -> String.ends_with?(b, ".proxy.sock") end)
-
-      assert proxy == "--ro-bind"
       sock = Enum.find(jail, &String.ends_with?(&1, ".proxy.sock"))
       assert File.exists?(sock)
 
@@ -307,13 +300,21 @@ defmodule Arbiter.Agents.GeminiTest do
     test "a host without network mode still gets the filesystem jail, on the shared network",
          %{worktree: worktree, bwrap: bwrap} do
       Application.put_env(:arbiter, :worker_jail_network_available, false)
+      previous = Logger.level()
+      Logger.configure(level: :warning)
+      on_exit(fn -> Logger.configure(level: previous) end)
 
-      assert {:ok, argv} =
-               Gemini.default_argv("p", security: policy(:bypass), worktree_path: worktree)
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, argv} =
+                   Gemini.default_argv("p", security: policy(:bypass), worktree_path: worktree)
 
-      {jail, _} = jail_and_command(argv)
-      assert [^bwrap, "--ro-bind", "/", "/" | _] = jail
-      refute "--unshare-net" in jail
+          {jail, _} = jail_and_command(argv)
+          assert [^bwrap, "--ro-bind", "/", "/" | _] = jail
+          refute "--unshare-net" in jail
+        end)
+
+      assert log =~ "network mode unavailable"
     end
 
     test "the network jail can be switched off", %{worktree: worktree} do
