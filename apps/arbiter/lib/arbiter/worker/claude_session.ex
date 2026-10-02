@@ -1828,7 +1828,7 @@ defmodule Arbiter.Worker.ClaudeSession do
   # redaction list separately. Only known credential var names are scrubbed
   # here; non-secret pairs (`CLAUDE_CONFIG_DIR`, `ANTHROPIC_BASE_URL`) are
   # left alone.
-  @credential_env_keys ~w(CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY)
+  @credential_env_keys ~w(CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY OPENAI_API_KEY)
 
   defp credential_env_values(opts) do
     from_opts =
