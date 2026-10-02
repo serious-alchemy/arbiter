@@ -198,6 +198,27 @@ clears `worker_runs.output_lines` once `<run_id>.log` exists, and
 file keeps its column — it is the only copy — and git-shaped steps, plus the last
 8 steps of every `fix_pass` run, keep theirs, because `Arbiter.Loop.Corpus` reads
 them. The run pages fall back to the
-transcript tail. `mix arbiter.offload_run_output` (dry by default) runs a pass
-by hand; run `VACUUM` once to give the freed pages back to the OS. The policy
-and the alternatives that were rejected are in the module's `@moduledoc`.
+transcript tail. The policy and the alternatives that were rejected are in the
+module's `@moduledoc`.
+
+**The sweeper ships OFF** (operator ruling, bd-16ljft): a fresh install, or one
+with the setting unset, never sweeps. The operator switch is the installation
+setting `output_offload_enabled`, read on every tick, so it needs no restart:
+
+    arb settings set output_offload_enabled true     # on  (also: /settings)
+    arb settings unset output_offload_enabled        # back to off
+
+The coordinator can do the same with the MCP tool `installation_config_set`
+(`key: "output_offload_enabled"`, `value: true`, or `null` to unset).
+
+Preview first. Mix is absent from releases, so on a release use the eval entry
+point — the default is a dry run that writes nothing and prints, per table, the
+rows and bytes it would clear plus the runs kept because no on-disk file exists:
+
+    bin/arbiter eval 'Arbiter.Release.offload_report()'
+    bin/arbiter eval 'Arbiter.Release.offload_report(apply: true)'   # one manual sweep
+
+`mix arbiter.offload_run_output` (dry by default) is the Mix equivalent. After a
+real sweep run `VACUUM` once to give the freed pages back to the OS. The
+`config :arbiter, :output_offload, enabled:` app-env option is a test override
+only (`false` hard-disables the sweeper, as in the suite).

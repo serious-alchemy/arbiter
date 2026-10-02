@@ -57,8 +57,20 @@ defmodule Arbiter.Workers.OutputOffload do
   ## Operating it
 
   `Arbiter.Workers.OutputOffload` is a supervised sweeper (daily, primary
-  instance only); `mix arbiter.offload_run_output` runs one pass by hand and is
-  dry by default. The sweep is idempotent and re-runnable.
+  instance only) that **ships OFF** (operator ruling, bd-16ljft): it sweeps
+  nothing until the installation setting `output_offload_enabled` is `true`
+  (`arb settings set output_offload_enabled true`, `/settings`, or the coordinator
+  MCP tool `installation_config_set` with value `true`/`null`). The setting
+  is read on every tick, so flipping it needs no restart; unsetting turns it
+  back off.
+
+  To see what it would do first, run the dry-run report on a release:
+
+      bin/arbiter eval 'Arbiter.Release.offload_report()'              # writes nothing
+      bin/arbiter eval 'Arbiter.Release.offload_report(apply: true)'   # one manual sweep
+
+  `mix arbiter.offload_run_output` is the Mix equivalent (dry by default). The
+  sweep is idempotent and re-runnable.
 
   SQLite does **not** shrink the file when rows are cleared — the freed pages
   are reused by new writes, which is what stops growth. To return the space to
@@ -69,7 +81,8 @@ defmodule Arbiter.Workers.OutputOffload do
 
   Via `config :arbiter, :output_offload`:
 
-    * `:enabled`          — master switch (default `true`; `false` in test).
+    * `:enabled`          — test override. Unset (the normal case) defers to
+                            the installation setting; `true` / `false` force it.
     * `:interval_ms`      — sweep cadence (default 24 h).
     * `:initial_delay_ms` — delay before the first sweep after boot (10 min).
     * `:retention_days`   — age of `completed_at` / `occurred_at` past which a
@@ -281,12 +294,12 @@ defmodule Arbiter.Workers.OutputOffload do
   @impl true
   def init(opts) do
     state = %{
-      enabled: cfg_opt(:enabled, opts, true),
+      override: cfg_opt(:enabled, opts, nil),
       interval_ms: cfg_opt(:interval_ms, opts, @default_interval_ms),
       primary?: Keyword.get(opts, :primary?, &SingleInstance.primary?/0)
     }
 
-    if state.enabled do
+    if state.override != false do
       Process.send_after(
         self(),
         :sweep,
@@ -299,12 +312,17 @@ defmodule Arbiter.Workers.OutputOffload do
 
   @impl true
   def handle_info(:sweep, state) do
-    if state.primary?.(), do: run_sweep()
+    if enabled?(state) and state.primary?.(), do: run_sweep()
     Process.send_after(self(), :sweep, state.interval_ms)
     {:noreply, state}
   end
 
   def handle_info(_msg, state), do: {:noreply, state}
+
+  # Off unless an operator switched it on (bd-16ljft). Read on every tick, so
+  # flipping the installation setting takes effect with no restart.
+  defp enabled?(%{override: nil}), do: Arbiter.Settings.output_offload_enabled() == true
+  defp enabled?(%{override: override}), do: override == true
 
   defp run_sweep do
     report = sweep()

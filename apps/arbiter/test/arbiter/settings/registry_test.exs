@@ -6,7 +6,7 @@ defmodule Arbiter.Settings.RegistryTest do
 
   @keys ~w(conductor_system_max_concurrent credential_watchdog_adapters
            credential_watchdog_interval_ms credential_watchdog_recovery_interval_ms
-           quota_providers_shown quota_providers_hidden)
+           quota_providers_shown quota_providers_hidden output_offload_enabled)
 
   test "keys/0 lists every installation setting" do
     assert Registry.keys() == @keys
@@ -27,6 +27,21 @@ defmodule Arbiter.Settings.RegistryTest do
       assert {:ok, ["claude"]} = Registry.cast("credential_watchdog_adapters", "[\"claude\"]")
       assert {:ok, nil} = Registry.cast("credential_watchdog_adapters", nil)
       assert {:error, _} = Registry.cast("credential_watchdog_adapters", ["bogus"])
+    end
+  end
+
+  describe "output_offload_enabled" do
+    test "is a boolean that defaults to off and is distinct from null" do
+      assert {:ok, true} = Registry.cast("output_offload_enabled", true)
+      assert {:ok, false} = Registry.cast("output_offload_enabled", "false")
+      assert {:ok, nil} = Registry.cast("output_offload_enabled", nil)
+      assert {:error, _} = Registry.cast("output_offload_enabled", "yes")
+
+      assert Registry.describe("output_offload_enabled").value == false
+      assert {:ok, true} = Registry.put("output_offload_enabled", true)
+      assert Registry.describe("output_offload_enabled").value == true
+      assert {:ok, nil} = Registry.put("output_offload_enabled", nil)
+      assert Registry.describe("output_offload_enabled").overridden == false
     end
   end
 

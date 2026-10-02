@@ -24,6 +24,9 @@ defmodule Arbiter.Settings.Installation do
       — Watchdog poll intervals. `nil` falls back to the
       `:arbiter, :credential_watchdog` application env, else the Watchdog's
       hardcoded defaults (5 minutes / 1 minute).
+    * `:output_offload_enabled` — operator switch for
+      `Arbiter.Workers.OutputOffload`, read on every tick. `nil` and `false`
+      both mean off; only `true` sweeps.
     * `:board_autopilot_paused` — `Arbiter.Board.Autopilot`'s pause flag.
       `nil` means "no persisted value — fall back to the
       `:arbiter, :board_autopilot, enabled:` application env, else paused".
@@ -56,7 +59,8 @@ defmodule Arbiter.Settings.Installation do
     :board_autopilot_paused_by,
     :provider_pauses,
     :quota_providers_shown,
-    :quota_providers_hidden
+    :quota_providers_hidden,
+    :output_offload_enabled
   ]
 
   actions do
@@ -148,6 +152,13 @@ defmodule Arbiter.Settings.Installation do
       allow_nil? true
 
       description "Quota provider codes forced off the status bar and /usage (bd-i2gwwn); wins over shown. nil = auto-detect."
+    end
+
+    attribute :output_offload_enabled, :boolean do
+      public? true
+      allow_nil? true
+
+      description "Whether the OutputOffload sweeper runs (bd-16ljft); nil / false = off, only true sweeps."
     end
 
     create_timestamp :created_at

@@ -152,4 +152,19 @@ defmodule Arbiter.MCP.CatalogTest do
       end
     end
   end
+
+  describe "installation_config_set schema" do
+    test "key enum matches Settings.Registry.keys/0 and accepts booleans" do
+      tool = Enum.find(Catalog.all(), &(&1.name == "installation_config_set"))
+      enum = tool.input_schema["properties"]["key"]["enum"]
+
+      assert Enum.sort(enum) ==
+               Enum.sort(Enum.map(Arbiter.Settings.Registry.keys(), &to_string/1))
+
+      assert "output_offload_enabled" in enum
+
+      one_of = tool.input_schema["properties"]["value"]["oneOf"]
+      assert Enum.any?(one_of, &(&1["type"] == "boolean"))
+    end
+  end
 end

@@ -80,6 +80,47 @@ defmodule Arbiter.Release do
   defp format_config_result(r), do: "#{r.workspace}: #{inspect(r.status)}"
 
   @doc """
+  Report what `Arbiter.Workers.OutputOffload` would clear — or, with
+  `apply: true`, clear it once, by hand (bd-16ljft). The release-runnable
+  counterpart of `mix arbiter.offload_run_output`, as Mix is absent from
+  releases:
+
+      bin/arbiter eval 'Arbiter.Release.offload_report()'
+      bin/arbiter eval 'Arbiter.Release.offload_report(apply: true)'
+
+  The default is a dry run and writes nothing. It reports rows and bytes it
+  would clear per table (`lines_*` = `worker_runs.output_lines`, `steps_*` =
+  `worker_run_steps.output_summary`) and how many runs are kept because no
+  on-disk copy exists (`lines_no_file`, `steps_runs_no_file`). Prints a summary
+  and returns the `t:Arbiter.Workers.OutputOffload.report/0` map.
+
+  Options: `:apply` (default `false`), `:retention_days`, and `:start` (default
+  `true`; `false` when the repo is already running, e.g. in tests). Starts only
+  the repo, never the full tree, so it is safe beside a live server — but an
+  `apply: true` run takes the single SQLite writer, so prefer it with the
+  server stopped or idle.
+  """
+  @spec offload_report(keyword()) :: Arbiter.Workers.OutputOffload.report()
+  def offload_report(opts \\ []) do
+    if Keyword.get(opts, :start, true), do: start_release_repo!()
+    apply? = Keyword.get(opts, :apply, false)
+
+    sweep_opts = [apply?: apply?] ++ Keyword.take(opts, [:retention_days])
+    report = Arbiter.Workers.OutputOffload.sweep(sweep_opts)
+    verb = if apply?, do: "cleared", else: "would clear"
+
+    IO.puts("""
+    output offload (#{if apply?, do: "APPLIED", else: "dry run — nothing written"}):
+      worker_runs.output_lines:         #{verb} #{report.lines_offloaded} rows (#{report.lines_bytes} B); \
+    #{report.lines_no_file} kept (no .log on disk)
+      worker_run_steps.output_summary:  #{verb} #{report.steps_offloaded} rows (#{report.steps_bytes} B); \
+    #{report.steps_runs_no_file} runs kept (no archive on disk)\
+    """)
+
+    report
+  end
+
+  @doc """
   Rollback a migration for the given repo to the specified version.
 
   Called via `bin/arbiter eval "Arbiter.Release.rollback(Arbiter.Repo, version)"`.
