@@ -811,6 +811,47 @@ defmodule Arbiter.MCP.ToolsTest do
     end
   end
 
+  describe "serialize_workspace/1 egress posture (bd-5yydxh)" do
+    test "reports the effective egress level per workspace and per repo override" do
+      ws = %Arbiter.Tasks.Workspace{
+        id: Ecto.UUID.generate(),
+        name: "eg",
+        config: %{
+          "agent" => %{
+            "security" => %{
+              "sandbox" => %{"egress" => "allowlist"},
+              "repos" => %{
+                "tonic" => %{"sandbox" => %{"egress" => "none"}},
+                "plain" => %{"permissions" => %{"mode" => "strict"}}
+              }
+            }
+          }
+        }
+      }
+
+      security = Tools.serialize_workspace(ws).security
+
+      assert security["egress"] == "allowlist"
+
+      assert security["repos"] == %{
+               "tonic" => %{"egress" => "none"},
+               "plain" => %{"egress" => "allowlist"}
+             }
+    end
+
+    test "defaults to open with no repo overrides" do
+      security =
+        Tools.serialize_workspace(%Arbiter.Tasks.Workspace{
+          id: Ecto.UUID.generate(),
+          name: "d",
+          config: %{}
+        }).security
+
+      assert security["egress"] == "open"
+      assert security["repos"] == %{}
+    end
+  end
+
   describe "quota_get/2" do
     test "returns null claude quota before anything is captured", ctx do
       assert {:ok, %{claude: nil} = payload} = Tools.quota_get(ctx.worker, %{})

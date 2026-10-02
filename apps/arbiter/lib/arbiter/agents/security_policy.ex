@@ -34,7 +34,9 @@ defmodule Arbiter.Agents.SecurityPolicy do
           filesystem: :worktree | :none,
           network: boolean(),
           writable_paths: [String.t()],  # extra paths writable inside the OS jail
-          egress_tunnels: [String.t()]   # "LOCAL:HOST:PORT" host services bridged into the jail netns
+          egress_tunnels: [String.t()],  # "LOCAL:HOST:PORT" host services bridged into the jail netns
+          egress: :open | :allowlist | :none, # how much of the network a jailed run can reach
+          allow_hosts: [String.t()]      # operator baseline "host:port" entries for the egress proxy
         }
       }
 
@@ -47,6 +49,42 @@ defmodule Arbiter.Agents.SecurityPolicy do
   `"5432:127.0.0.1:5432"`) once the jail has no shared network. Malformed
   entries are dropped; the layers union, like `writable_paths`. Read it with
   `egress_tunnels/1`.
+
+  ### `sandbox.egress` and `sandbox.allow_hosts` (bd-5yydxh)
+
+  The policy half of network egress enforcement
+  (`docs/design/guardrail-profiles.md` §4.4 and §7.2). `egress` is how much of
+  the network a jailed run can reach:
+
+    * `:open` (the default) — no host filtering. Nothing changes for a
+      workspace that does not opt in.
+    * `:allowlist` — only the run's allowlist: infra, toolchain, extras and
+      ticket grants (see below).
+    * `:none` — infra and toolchain only, so the agent keeps its model API and
+      the ticket's git remote and the build can still fetch its dependencies,
+      and nothing else, ticket grants included.
+
+  The four host classes and the levels they are reachable at
+  (`egress_classes/1`, `egress_class_allowed?/2`):
+
+  | Class | Contents | Reachable at |
+  |---|---|---|
+  | `:infra` | The adapter's API hosts, Arbiter, the ticket's git remote | `:none`, `:allowlist` |
+  | `:toolchain` | Registries the build needs (`allow_host_class/1`) | `:none`, `:allowlist` |
+  | `:extras` | Every other `allow_hosts` entry | `:allowlist` |
+  | `:grants` | A ticket's `network:` grants | `:allowlist` |
+
+  `allow_hosts` is the operator-written baseline: exact `host:port`, a leading
+  `*.` allowed (`Arbiter.Worker.Egress.Policy.normalize_baseline/1`). It is
+  classified per entry, so one list feeds both `:toolchain` and `:extras`.
+  `egress_baseline/2` is what the proxy gets.
+
+  Layering follows `permissions.mode`'s layers (installation, workspace, repo,
+  dispatch) but is a separate field: `egress` is a scalar the highest layer
+  replaces, `allow_hosts` unions like `allow` and `deny`. Setting `mode` never
+  moves `egress`. The tighten-only guardrail floor that composes both is G11.
+  Unknown values are ignored on resolve (the inherited level survives) and
+  refused on write by `Arbiter.Tasks.Workspace.Changes.ValidateConfig`.
 
   ### `permissions.mode`
 
@@ -189,6 +227,8 @@ defmodule Arbiter.Agents.SecurityPolicy do
 
   @type mode :: :auto | :strict | :bypass
   @type filesystem :: :worktree | :none
+  @type egress :: :open | :allowlist | :none
+  @type egress_class :: :infra | :toolchain | :extras | :grants
 
   @type t :: %__MODULE__{
           permissions: %{
@@ -203,11 +243,37 @@ defmodule Arbiter.Agents.SecurityPolicy do
             filesystem: filesystem(),
             network: boolean(),
             writable_paths: [String.t()],
-            egress_tunnels: [String.t()]
+            egress_tunnels: [String.t()],
+            egress: egress(),
+            allow_hosts: [String.t()]
           }
         }
 
   @valid_modes [:auto, :strict, :bypass]
+  # Loosest first, so `:open` is the default and a "tighter" level sorts later.
+  @valid_egress [:open, :allowlist, :none]
+  # Design §4.4: which host classes each level can reach.
+  @egress_classes %{
+    open: [:infra, :toolchain, :extras, :grants],
+    allowlist: [:infra, :toolchain, :extras, :grants],
+    none: [:infra, :toolchain]
+  }
+  # Registries a build fetches from. An `allow_hosts` entry on one of these
+  # (or a subdomain) is `:toolchain`; everything else is `:extras`.
+  @toolchain_hosts ~w(
+    hex.pm
+    repo.hex.pm
+    builds.hex.pm
+    registry.npmjs.org
+    pypi.org
+    files.pythonhosted.org
+    crates.io
+    index.crates.io
+    static.crates.io
+    proxy.golang.org
+    sum.golang.org
+    rubygems.org
+  )
   @valid_filesystems [:worktree, :none]
   @safe_default_categories [
     :no_destructive_fs,
@@ -275,6 +341,10 @@ defmodule Arbiter.Agents.SecurityPolicy do
   @spec valid_filesystems() :: [filesystem()]
   def valid_filesystems, do: @valid_filesystems
 
+  @doc "Valid `sandbox.egress` atoms, loosest first."
+  @spec valid_egress_levels() :: [egress()]
+  def valid_egress_levels, do: @valid_egress
+
   @doc "The baseline destructive-op categories an adapter must deny by default."
   @spec safe_default_categories() :: [atom()]
   def safe_default_categories, do: @safe_default_categories
@@ -315,7 +385,9 @@ defmodule Arbiter.Agents.SecurityPolicy do
         filesystem: :worktree,
         network: true,
         writable_paths: [],
-        egress_tunnels: []
+        egress_tunnels: [],
+        egress: :open,
+        allow_hosts: []
       }
     }
   end
@@ -627,9 +699,108 @@ defmodule Arbiter.Agents.SecurityPolicy do
           |> get(:egress_tunnels)
           |> list_of_strings()
           |> Enum.filter(&match?({:ok, _}, parse_tunnel(&1)))
+        ),
+      egress: parse_egress(get(raw, :egress), Map.get(base, :egress, :open)),
+      allow_hosts:
+        union(
+          Map.get(base, :allow_hosts, []),
+          raw |> get(:allow_hosts) |> list_of_strings() |> Enum.filter(&valid_allow_host?/1)
         )
     }
   end
+
+  @doc """
+  `%{repo => level}`: the effective `sandbox.egress` (as a string) for every
+  repo with an `agent.security.repos.<repo>` override. A repo with no override
+  resolves like the workspace, so it is not listed.
+  """
+  @spec repo_egress(term()) :: %{String.t() => String.t()}
+  def repo_egress(workspace) do
+    repos =
+      case workspace do
+        %{config: %{} = config} -> get_in(config, ["agent", "security", "repos"])
+        _ -> nil
+      end
+
+    if is_map(repos) do
+      Map.new(repos, fn {repo, _override} ->
+        {repo, workspace |> resolve(%{}, repo) |> egress() |> Atom.to_string()}
+      end)
+    else
+      %{}
+    end
+  end
+
+  @doc """
+  The host classes reachable at `egress` (design §4.4). `:open` is not
+  filtered at all, so every class is reachable.
+  """
+  @spec egress_classes(egress()) :: [egress_class()]
+  def egress_classes(egress) when egress in @valid_egress, do: Map.fetch!(@egress_classes, egress)
+
+  @doc "True when a host in `class` is reachable at `egress`."
+  @spec egress_class_allowed?(egress(), egress_class()) :: boolean()
+  def egress_class_allowed?(egress, class), do: class in egress_classes(egress)
+
+  @doc "True when `egress` filters hosts at all (`:allowlist` and `:none`), false for `:open`."
+  @spec egress_filtered?(egress()) :: boolean()
+  def egress_filtered?(egress) when egress in @valid_egress, do: egress != :open
+
+  @doc """
+  The class of one operator `allow_hosts` entry: `:toolchain` for a package
+  registry (or a subdomain, or a `*.` wildcard over one), `:extras` otherwise.
+  """
+  @spec allow_host_class(String.t()) :: :toolchain | :extras
+  def allow_host_class(entry) when is_binary(entry) do
+    host =
+      entry
+      |> String.trim()
+      |> String.replace_prefix("*.", "")
+      |> String.split(":")
+      |> List.first()
+      |> String.downcase()
+      |> String.trim_trailing(".")
+
+    if Enum.any?(@toolchain_hosts, &(host == &1 or String.ends_with?(host, "." <> &1))),
+      do: :toolchain,
+      else: :extras
+  end
+
+  @doc """
+  The baseline `host:port` list the egress proxy should run with for `policy`:
+  `infra` (always, at `:allowlist` and `:none`) plus the `allow_hosts` entries
+  whose class the level reaches. `:unfiltered` at `:open`, where the proxy is
+  not the boundary.
+  """
+  @spec egress_baseline(t(), [String.t()]) :: [String.t()] | :unfiltered
+  def egress_baseline(%__MODULE__{sandbox: sandbox}, infra) do
+    egress = Map.get(sandbox, :egress, :open)
+
+    if egress_filtered?(egress) do
+      hosts =
+        Enum.filter(
+          Map.get(sandbox, :allow_hosts, []),
+          &egress_class_allowed?(egress, allow_host_class(&1))
+        )
+
+      union(infra, hosts)
+    else
+      :unfiltered
+    end
+  end
+
+  @doc "True when `policy`'s egress level honours a ticket's `network:` grants."
+  @spec grants_allowed?(t()) :: boolean()
+  def grants_allowed?(%__MODULE__{sandbox: sandbox}),
+    do: egress_class_allowed?(Map.get(sandbox, :egress, :open), :grants)
+
+  @doc "The resolved `sandbox.egress` of `policy` (`:open` when unset)."
+  @spec egress(t()) :: egress()
+  def egress(%__MODULE__{sandbox: sandbox}), do: Map.get(sandbox, :egress, :open)
+
+  # An `allow_hosts` entry the proxy would accept as a baseline.
+  defp valid_allow_host?(entry),
+    do: match?({:ok, _}, Arbiter.Worker.Egress.Policy.normalize_baseline([entry]))
 
   @doc """
   The policy's `sandbox.egress_tunnels` as `{local_port, host, port}` tuples,
@@ -673,12 +844,15 @@ defmodule Arbiter.Agents.SecurityPolicy do
       "deny" => p.permissions.deny,
       "safe_defaults" => Enum.map(p.permissions.safe_defaults, &Atom.to_string/1),
       "safe_defaults_exclude" => Enum.map(p.permissions.safe_defaults_exclude, &Atom.to_string/1),
+      "egress" => p |> egress() |> Atom.to_string(),
       "sandbox" => %{
         "enabled" => p.sandbox.enabled,
         "filesystem" => Atom.to_string(p.sandbox.filesystem),
         "network" => p.sandbox.network,
         "writable_paths" => Map.get(p.sandbox, :writable_paths, []),
-        "egress_tunnels" => Map.get(p.sandbox, :egress_tunnels, [])
+        "egress_tunnels" => Map.get(p.sandbox, :egress_tunnels, []),
+        "egress" => p.sandbox |> Map.get(:egress, :open) |> Atom.to_string(),
+        "allow_hosts" => Map.get(p.sandbox, :allow_hosts, [])
       }
     }
   end
@@ -695,8 +869,10 @@ defmodule Arbiter.Agents.SecurityPolicy do
       Atom.to_string(p.permissions.mode),
       "fs=#{p.sandbox.filesystem}",
       "net=#{if p.sandbox.network, do: "on", else: "tools-off"}",
+      egress_part(egress(p)),
       "#{deny_count} #{if deny_count == 1, do: "deny", else: "denies"}"
     ]
+    |> Enum.reject(&is_nil/1)
     |> Enum.join(" · ")
   end
 
@@ -725,6 +901,18 @@ defmodule Arbiter.Agents.SecurityPolicy do
   defp parse_mode(value, fallback) do
     case to_atom(value) do
       m when m in @valid_modes -> m
+      _ -> fallback
+    end
+  end
+
+  defp egress_part(:open), do: nil
+  defp egress_part(level), do: "egress=#{level}"
+
+  defp parse_egress(nil, fallback), do: fallback
+
+  defp parse_egress(value, fallback) do
+    case to_atom(value) do
+      e when e in @valid_egress -> e
       _ -> fallback
     end
   end
