@@ -47,10 +47,10 @@ defmodule Arbiter.Worker.Egress.JailRun do
     with {:ok, arb_port} <- arbiter_endpoint(url) do
       # {bridge name, loopback port inside the jail, host target}
       specs =
-        [{:arb, arb_port, {"127.0.0.1", arb_port}}] ++
+        [{"arb", arb_port, {"127.0.0.1", arb_port}}] ++
           (tunnels
            |> Enum.with_index(1)
-           |> Enum.map(fn {{local, host, port}, i} -> {:"t#{i}", local, {host, port}} end))
+           |> Enum.map(fn {{local, host, port}, i} -> {"t#{i}", local, {host, port}} end))
 
       start_opts =
         [
