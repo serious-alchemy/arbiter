@@ -250,6 +250,8 @@ defmodule Arbiter.Quota.Codex do
         }
         |> put_window(:session_used_percent, :session_reset_at, session)
         |> put_window(:weekly_used_percent, :weekly_reset_at, weekly)
+        |> put_minutes(:session_window_minutes, session)
+        |> put_minutes(:weekly_window_minutes, weekly)
 
       {:ok, attrs}
     end
@@ -278,6 +280,22 @@ defmodule Arbiter.Quota.Codex do
     attrs
     |> Map.put(used_key, used_percent(win))
     |> Map.put(reset_key, reset_at(win))
+  end
+
+  # The window's length, stored as whole minutes. `wham/usage` reports
+  # `limit_window_seconds`; `window_minutes` is accepted as an alias. Omitted
+  # when absent or non-positive so the upsert leaves the column as it was.
+  defp put_minutes(attrs, _key, nil), do: attrs
+
+  defp put_minutes(attrs, key, win) do
+    seconds = get_any(win, ["limit_window_seconds", "window_seconds"])
+    minutes = get_any(win, ["window_minutes", "limit_window_minutes"])
+
+    cond do
+      is_number(seconds) and seconds > 0 -> Map.put(attrs, key, round(seconds / 60))
+      is_number(minutes) and minutes > 0 -> Map.put(attrs, key, round(minutes))
+      true -> attrs
+    end
   end
 
   defp used_percent(win) do

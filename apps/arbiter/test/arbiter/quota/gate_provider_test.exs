@@ -155,6 +155,29 @@ defmodule Arbiter.Quota.GateProviderTest do
       assert s.status != "allowed"
     end
 
+    test "Codex labels windows from their stored length; free's 30d window paces" do
+      s = Snapshot.normalize(codex_quota(%{session_window_minutes: 43_200}))
+      assert s.window_label == "30d"
+      assert Gate.window_seconds(s.window_label) == 2_592_000
+
+      s =
+        Snapshot.normalize(
+          codex_quota(%{session_window_minutes: 300, weekly_window_minutes: 10_080})
+        )
+
+      assert {s.window_label, s.secondary_window_label} == {"5h", "weekly"}
+
+      s = Snapshot.normalize(codex_quota(%{session_window_minutes: 90}))
+      assert s.window_label == "90m"
+      assert Gate.window_seconds("90m") == 5_400
+    end
+
+    test "Codex with no stored length keeps the legacy session/weekly labels" do
+      s = Snapshot.normalize(codex_quota(%{}))
+      assert {s.window_label, s.secondary_window_label} == {"session", "weekly"}
+      assert Gate.window_seconds("session") == nil
+    end
+
     test "Google maps the representative used-percent onto the primary slot" do
       s = Snapshot.normalize(google_quota(%{used_percent: 95.0, reset_at: ahead(600)}))
 
