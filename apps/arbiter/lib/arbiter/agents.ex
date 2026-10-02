@@ -306,23 +306,7 @@ defmodule Arbiter.Agents do
   def resolve_revision_provider(task_id, workspace, constraint \\ nil) when is_binary(task_id) do
     case Arbiter.Workers.Run.latest_authoring_provider(task_id) do
       orig when is_atom(orig) and not is_nil(orig) ->
-        cond do
-          not ProviderConstraint.allows?(constraint, orig) ->
-            constrained_fallback(workspace, orig, constraint)
-
-          provider_available?(orig) ->
-            {orig, nil}
-
-          true ->
-            case fallback_for_workspace(workspace, orig, constraint) do
-              {:ok, fallback} ->
-                {fallback, "fell back from #{orig}: #{unavailable_cause(orig)}"}
-
-              :error ->
-                {orig,
-                 "no provider available: #{orig} #{unavailable_cause(orig)} and no alternative adapter is available; retrying #{orig}"}
-            end
-        end
+        resolve_authoring_provider(orig, workspace, constraint)
 
       nil ->
         default = default_agent_type(workspace)
@@ -331,6 +315,26 @@ defmodule Arbiter.Agents do
           {default, nil}
         else
           constrained_fallback(workspace, default, constraint)
+        end
+    end
+  end
+
+  defp resolve_authoring_provider(orig, workspace, constraint) do
+    cond do
+      not ProviderConstraint.allows?(constraint, orig) ->
+        constrained_fallback(workspace, orig, constraint)
+
+      provider_available?(orig) ->
+        {orig, nil}
+
+      true ->
+        case fallback_for_workspace(workspace, orig, constraint) do
+          {:ok, fallback} ->
+            {fallback, "fell back from #{orig}: #{unavailable_cause(orig)}"}
+
+          :error ->
+            {orig,
+             "no provider available: #{orig} #{unavailable_cause(orig)} and no alternative adapter is available; retrying #{orig}"}
         end
     end
   end

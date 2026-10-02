@@ -298,14 +298,12 @@ defmodule Arbiter.Agents.ProviderConstraint do
   end
 
   defp full(workspace, providers) do
-    providers
-    |> Enum.map(fn provider ->
+    Enum.map_join(providers, "; ", fn provider ->
       case account_for(workspace, provider) do
         %{provider: p, slug: slug} -> "#{p}:#{slug} at capacity"
         _ -> "#{provider} at capacity"
       end
     end)
-    |> Enum.join("; ")
   end
 
   defp account_for(%Workspace{id: ws_id}, provider), do: Resolver.account(ws_id, provider)

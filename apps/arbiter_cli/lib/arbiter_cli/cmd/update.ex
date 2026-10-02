@@ -112,8 +112,8 @@ defmodule ArbiterCli.Cmd.Update do
 
   alias ArbiterCli.ArgParser
   alias ArbiterCli.{Client, Cmd.Doctor, Cmd.Migrate, Cmd.Restart, Cmd.Start, Output}
-  alias ArbiterCli.ProviderConstraintFlags
   alias ArbiterCli.Cmd.Update.{Formatter, Git}
+  alias ArbiterCli.ProviderConstraintFlags
 
   # The branch `arb update` fast-forwards. Matches the repo's integration
   # branch (`main`); a deploy is always a pull of merged work into it.

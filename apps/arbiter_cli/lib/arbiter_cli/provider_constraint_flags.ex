@@ -39,6 +39,17 @@ defmodule ArbiterCli.ProviderConstraintFlags do
     excluded = values(opts, :exclude_provider)
     clear? = opts[:clear_provider_constraint] == true
 
+    reject_conflicts!(required, excluded, clear?)
+
+    cond do
+      required != [] -> %{"provider_constraint" => %{"require" => required}}
+      excluded != [] -> %{"provider_constraint" => %{"exclude" => excluded}}
+      clear? -> %{"provider_constraint" => nil}
+      true -> %{}
+    end
+  end
+
+  defp reject_conflicts!(required, excluded, clear?) do
     cond do
       required != [] and excluded != [] ->
         Output.die("--require-provider and --exclude-provider are mutually exclusive")
@@ -49,17 +60,8 @@ defmodule ArbiterCli.ProviderConstraintFlags do
             "--exclude-provider"
         )
 
-      required != [] ->
-        %{"provider_constraint" => %{"require" => required}}
-
-      excluded != [] ->
-        %{"provider_constraint" => %{"exclude" => excluded}}
-
-      clear? ->
-        %{"provider_constraint" => nil}
-
       true ->
-        %{}
+        :ok
     end
   end
 

@@ -734,8 +734,9 @@ defmodule Arbiter.Board.Snapshot do
   # Only constrained tickets are evaluated; everything else yields no entry.
   defp ticket_constraint_holds(%Arbiter.Tasks.Workspace{} = workspace, issues, opts) do
     issues
-    |> Enum.filter(&(Lifecycle.state_of(&1) == :queued and not epic?(&1)))
-    |> Enum.filter(&ProviderConstraint.from/1)
+    |> Enum.filter(
+      &(Lifecycle.state_of(&1) == :queued and not epic?(&1) and ProviderConstraint.from(&1))
+    )
     |> Map.new(fn issue ->
       case ProviderConstraint.pick(workspace, issue, opts) do
         {:ok, _provider} -> {issue.id, :ok}

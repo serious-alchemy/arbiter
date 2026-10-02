@@ -438,8 +438,8 @@ defmodule Arbiter.MCP.Catalog do
           "provider_constraint" => %{
             "type" => ["object", "null"],
             "description" =>
-              "Where this ticket's IMPLEMENTER may run (bd-13pqcp): `{\"require\": [\"claude\"]}` " <>
-                "(only those providers) or `{\"exclude\": [\"gemini\"]}` (anything but those) — " <>
+              ~s|Where this ticket's IMPLEMENTER may run (bd-13pqcp): `{"require": ["claude"]}` | <>
+                ~s|(only those providers) or `{"exclude": ["gemini"]}` (anything but those) — | <>
                 "one key, never both. Providers are adapter types (claude, gemini, codex); " <>
                 "`agy` is accepted as `gemini`, the adapter that runs it. Honoured by every " <>
                 "dispatch path (Autopilot, routing, failover, resume, fix and conflict passes); " <>
@@ -542,8 +542,8 @@ defmodule Arbiter.MCP.Catalog do
           "provider_constraint" => %{
             "type" => ["object", "null"],
             "description" =>
-              "Where this ticket's IMPLEMENTER may run (bd-13pqcp): `{\"require\": [\"claude\"]}` " <>
-                "(only those providers) or `{\"exclude\": [\"gemini\"]}` (anything but those) — " <>
+              ~s|Where this ticket's IMPLEMENTER may run (bd-13pqcp): `{"require": ["claude"]}` | <>
+                ~s|(only those providers) or `{"exclude": ["gemini"]}` (anything but those) — | <>
                 "one key, never both. Providers are adapter types (claude, gemini, codex); " <>
                 "`agy` is accepted as `gemini`, the adapter that runs it. Honoured by every " <>
                 "dispatch path (Autopilot, routing, failover, resume, fix and conflict passes); " <>
