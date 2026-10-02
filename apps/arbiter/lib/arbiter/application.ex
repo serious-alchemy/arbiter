@@ -122,6 +122,10 @@ defmodule Arbiter.Application do
       # left unresolved past its workspace's limit to the operator. Disabled in
       # test, where tests drive `AttentionSweep.run/1` with their own clock.
       Arbiter.Tasks.AttentionSweep,
+      # bd-b1b3mp (ES8): once a day, tells the coordinator which unblocked
+      # Backlog leaves of floored / in-progress epics have sat over 24h.
+      # Read-only — it never promotes. Disabled in test.
+      Arbiter.Tasks.BacklogTailDigest,
       # Prunes `Arbiter.Events.Record` rows past the retention window
       # (bd-73bfml) so the durable log backing `GET /events?since=` doesn't
       # grow without bound. See `Arbiter.Events.Retention` for config.

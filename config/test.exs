@@ -235,6 +235,9 @@ config :arbiter, :loop_canary_ticker, enabled: false
 # drive `Arbiter.Usage.BudgetPatrol.sweep/1` synchronously.
 config :arbiter, :budget_patrol, enabled: false
 
+# bd-b1b3mp: tests call `Arbiter.Tasks.BacklogTailDigest.sweep/1` directly.
+config :arbiter, :backlog_tail_digest, enabled: false
+
 # bd-8nlez1: tests drive `Arbiter.Tasks.AttentionSweep.run/1` with their own clock.
 config :arbiter, :attention_sweep, enabled: false
 
