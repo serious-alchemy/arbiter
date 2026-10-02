@@ -158,7 +158,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     assert exit_code == 0
     assert {:ok, %{"ok" => true, "checks" => checks}} = Jason.decode(String.trim(out))
     assert is_list(checks)
-    assert length(checks) == 19
+    assert length(checks) == 20
   end
 
   test "version mismatch is non-fatal (exit 0 but shows [fail])" do
@@ -1222,6 +1222,49 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       escape_routes(%{"available" => true})
       {out, _err, _exit_code} = capture(fn -> Doctor.run([]) end)
       assert out =~ "[ ok ] agy jail escape vectors"
+    end
+  end
+
+  describe "agy jail network mode (bd-cfktou)" do
+    defp network_routes(jail_body) do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/agy_write_jail"}, {jail_body, 200}}
+      ])
+    end
+
+    test "ok when the host can run the jail in a network namespace" do
+      network_routes(%{"available" => true, "network" => %{"available" => true}})
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] agy jail network"
+    end
+
+    test "FAILs with the cause and fix when it cannot, without blocking readiness" do
+      network_routes(%{
+        "available" => true,
+        "network" => %{
+          "available" => false,
+          "cause" => "socat_missing",
+          "message" => "no `socat` on PATH",
+          "fix" => "Install socat"
+        }
+      })
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[fail] agy jail network"
+      assert out =~ "no `socat` on PATH"
+      assert out =~ "Install socat"
+    end
+
+    test "ok (skipped) when the server predates the network key" do
+      network_routes(%{"available" => true})
+      {out, _err, _exit_code} = capture(fn -> Doctor.run([]) end)
+      assert out =~ "[ ok ] agy jail network"
     end
   end
 

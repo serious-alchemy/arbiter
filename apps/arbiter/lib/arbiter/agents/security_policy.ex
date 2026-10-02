@@ -33,9 +33,20 @@ defmodule Arbiter.Agents.SecurityPolicy do
           enabled: boolean(),
           filesystem: :worktree | :none,
           network: boolean(),
-          writable_paths: [String.t()]  # extra paths writable inside the OS jail
+          writable_paths: [String.t()],  # extra paths writable inside the OS jail
+          egress_tunnels: [String.t()]   # "LOCAL:HOST:PORT" host services bridged into the jail netns
         }
       }
+
+  `egress_tunnels` (bd-cfktou) only matters where the worker's jail runs in
+  its own network namespace (agy's network mode, see
+  `Arbiter.Worker.Egress.JailRun`): each `"LOCAL:HOST:PORT"` entry makes
+  `127.0.0.1:LOCAL` inside the jail reach `HOST:PORT` from the host, by a
+  fixed-destination bridge (the destination is not the agent's to choose). It is
+  how a workspace keeps a host-loopback service its tests need (say Postgres,
+  `"5432:127.0.0.1:5432"`) once the jail has no shared network. Malformed
+  entries are dropped; the layers union, like `writable_paths`. Read it with
+  `egress_tunnels/1`.
 
   ### `permissions.mode`
 
@@ -191,7 +202,8 @@ defmodule Arbiter.Agents.SecurityPolicy do
             enabled: boolean(),
             filesystem: filesystem(),
             network: boolean(),
-            writable_paths: [String.t()]
+            writable_paths: [String.t()],
+            egress_tunnels: [String.t()]
           }
         }
 
@@ -302,7 +314,8 @@ defmodule Arbiter.Agents.SecurityPolicy do
         enabled: true,
         filesystem: :worktree,
         network: true,
-        writable_paths: []
+        writable_paths: [],
+        egress_tunnels: []
       }
     }
   end
@@ -606,8 +619,44 @@ defmodule Arbiter.Agents.SecurityPolicy do
       filesystem: parse_filesystem(get(raw, :filesystem), base.filesystem),
       network: parse_bool(get(raw, :network), base.network),
       writable_paths:
-        union(Map.get(base, :writable_paths, []), list_of_strings(get(raw, :writable_paths)))
+        union(Map.get(base, :writable_paths, []), list_of_strings(get(raw, :writable_paths))),
+      egress_tunnels:
+        union(
+          Map.get(base, :egress_tunnels, []),
+          raw
+          |> get(:egress_tunnels)
+          |> list_of_strings()
+          |> Enum.filter(&match?({:ok, _}, parse_tunnel(&1)))
+        )
     }
+  end
+
+  @doc """
+  The policy's `sandbox.egress_tunnels` as `{local_port, host, port}` tuples,
+  the shape `Arbiter.Worker.Egress.JailRun` takes.
+  """
+  @spec egress_tunnels(t()) :: [{:inet.port_number(), String.t(), :inet.port_number()}]
+  def egress_tunnels(%__MODULE__{sandbox: sandbox}) do
+    sandbox
+    |> Map.get(:egress_tunnels, [])
+    |> Enum.flat_map(fn entry ->
+      case parse_tunnel(entry) do
+        {:ok, tunnel} -> [tunnel]
+        :error -> []
+      end
+    end)
+  end
+
+  # "LOCAL:HOST:PORT", ports 1..65535, a host with no `:` or whitespace.
+  defp parse_tunnel(entry) do
+    with [local, host, port] <- String.split(entry, ":"),
+         {local, ""} when local in 1..65_535 <- Integer.parse(local),
+         {port, ""} when port in 1..65_535 <- Integer.parse(port),
+         true <- host != "" and not String.match?(host, ~r/\s/) do
+      {:ok, {local, host, port}}
+    else
+      _ -> :error
+    end
   end
 
   # ---- summary (for prime / dashboard / REST) ----------------------------
@@ -628,7 +677,8 @@ defmodule Arbiter.Agents.SecurityPolicy do
         "enabled" => p.sandbox.enabled,
         "filesystem" => Atom.to_string(p.sandbox.filesystem),
         "network" => p.sandbox.network,
-        "writable_paths" => Map.get(p.sandbox, :writable_paths, [])
+        "writable_paths" => Map.get(p.sandbox, :writable_paths, []),
+        "egress_tunnels" => Map.get(p.sandbox, :egress_tunnels, [])
       }
     }
   end

@@ -163,7 +163,12 @@ defmodule Arbiter.Worker.Egress.Connection do
 
   defp connect_any(addrs, port, timeout) do
     Enum.reduce_while(addrs, {:error, :no_address}, fn addr, _acc ->
-      case :gen_tcp.connect(addr, port, [:binary, packet: :raw, active: false], timeout) do
+      case :gen_tcp.connect(
+             addr,
+             port,
+             [:binary, packet: :raw, active: false, exit_on_close: false],
+             timeout
+           ) do
         {:ok, sock} -> {:halt, {:ok, sock}}
         {:error, _} = err -> {:cont, err}
       end
@@ -171,31 +176,63 @@ defmodule Arbiter.Worker.Egress.Connection do
   end
 
   defp splice(client, upstream, rest) do
-    with :ok <- :gen_tcp.send(client, "HTTP/1.1 200 Connection Established\r\n\r\n"),
-         :ok <- send_initial(upstream, rest) do
-      relay = spawn_link(fn -> pipe(upstream, client) end)
+    case :gen_tcp.send(client, "HTTP/1.1 200 Connection Established\r\n\r\n") do
+      :ok ->
+        relay(client, upstream, rest)
+
+      {:error, _} ->
+        :gen_tcp.close(client)
+        :gen_tcp.close(upstream)
+    end
+  end
+
+  @doc false
+  # Splices `client` and `upstream` until both directions have ended, then
+  # closes both. `rest` is any bytes already read from `client` that belong
+  # upstream. Shared with `Arbiter.Worker.Egress.Forward`.
+  #
+  # An end-of-stream from one side is passed on as a half-close
+  # (`shutdown(:write)`) and the other direction keeps flowing, so a client
+  # that sends its request and then closes its write side (`socat`, `nc`) still
+  # gets its reply. Both sockets must have been opened with
+  # `exit_on_close: false` for that. A failed write means the peer is gone and
+  # ends both directions.
+  @spec relay(port(), port(), binary()) :: :ok
+  def relay(client, upstream, rest \\ "") do
+    if send_initial(upstream, rest) == :ok do
+      parent = self()
+      back = spawn_link(fn -> send(parent, {:relay_done, self(), pipe(upstream, client)}) end)
       pipe(client, upstream)
-      Process.unlink(relay)
-      Process.exit(relay, :kill)
+
+      receive do
+        {:relay_done, ^back, _} -> :ok
+      end
     end
 
     :gen_tcp.close(client)
     :gen_tcp.close(upstream)
+    :ok
   end
 
   defp send_initial(_upstream, ""), do: :ok
   defp send_initial(upstream, data), do: :gen_tcp.send(upstream, data)
 
-  # Either direction ending closes both sockets, which unblocks the other
-  # direction's `recv`.
   defp pipe(from, to) do
-    with {:ok, data} <- :gen_tcp.recv(from, 0),
-         :ok <- :gen_tcp.send(to, data) do
-      pipe(from, to)
-    else
-      _ ->
-        :gen_tcp.close(from)
-        :gen_tcp.close(to)
+    case :gen_tcp.recv(from, 0) do
+      {:ok, data} ->
+        case :gen_tcp.send(to, data) do
+          :ok ->
+            pipe(from, to)
+
+          {:error, _} ->
+            :gen_tcp.close(from)
+            :gen_tcp.close(to)
+            :aborted
+        end
+
+      {:error, _} ->
+        _ = :gen_tcp.shutdown(to, :write)
+        :eof
     end
   end
 

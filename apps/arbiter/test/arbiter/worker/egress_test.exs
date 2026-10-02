@@ -396,6 +396,69 @@ defmodule Arbiter.Worker.EgressTest do
     end
   end
 
+  describe "bridges and owner (bd-cfktou)" do
+    test "a bridge splices its socket to a fixed host:port, with no policy in between", %{
+      dir: dir,
+      port: port,
+      run_id: run_id
+    } do
+      start!(run_id, dir, bridges: [arb: {"127.0.0.1", port}])
+      path = Egress.bridge_path(run_id, :arb, dir)
+      assert Path.basename(path) == "#{run_id}.arb.sock"
+      assert File.exists?(path)
+
+      sock = client(path)
+      :ok = :gen_tcp.send(sock, "hello")
+      assert {:ok, "hello"} = recv_n(sock, 5, "")
+      :gen_tcp.close(sock)
+
+      assert events(run_id) == []
+      Egress.stop_run(run_id)
+      refute File.exists?(path)
+    end
+
+    test "an unreachable bridge target closes the client instead of hanging", %{
+      dir: dir,
+      run_id: run_id
+    } do
+      {:ok, l} = :gen_tcp.listen(0, ip: {127, 0, 0, 1})
+      {:ok, dead} = :inet.port(l)
+      :gen_tcp.close(l)
+
+      start!(run_id, dir, bridges: [t1: {"127.0.0.1", dead}])
+      sock = client(Egress.bridge_path(run_id, :t1, dir))
+      assert {:error, :closed} = :gen_tcp.recv(sock, 0, 2_000)
+    end
+
+    test "a bridge name that is not a plain token fails the start", %{dir: dir, run_id: run_id} do
+      assert {:error, {:invalid_bridge, "../x"}} =
+               Egress.start_run(run_id, dir: dir, bridges: [{"../x", {"127.0.0.1", 1}}])
+
+      refute Egress.running?(run_id)
+    end
+
+    test "the run stops when its owner exits and removes every socket", %{
+      dir: dir,
+      port: port,
+      run_id: run_id
+    } do
+      owner = spawn(fn -> Process.sleep(:infinity) end)
+
+      proxy = start!(run_id, dir, owner: owner, bridges: [arb: {"127.0.0.1", port}])
+      bridge = Egress.bridge_path(run_id, :arb, dir)
+      assert File.exists?(proxy) and File.exists?(bridge)
+
+      [{sup, _}] = Registry.lookup(Arbiter.Worker.Egress.Registry, {run_id, :sup})
+      ref = Process.monitor(sup)
+      Process.exit(owner, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^sup, _}, 2_000
+
+      refute Egress.running?(run_id)
+      refute File.exists?(proxy)
+      refute File.exists?(bridge)
+    end
+  end
+
   defp recv_n(_sock, n, acc) when n <= 0, do: {:ok, acc}
 
   defp recv_n(sock, n, acc) do
