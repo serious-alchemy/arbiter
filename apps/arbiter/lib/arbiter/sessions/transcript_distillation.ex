@@ -9,8 +9,8 @@ defmodule Arbiter.Sessions.TranscriptDistillation do
 
   alias Arbiter.Loop.Discovery.ClaudeInvoker
   alias Arbiter.Sessions.Layout
-  alias Arbiter.Sessions.TranscriptReplay
   alias Arbiter.Sessions.Memory.Frontmatter
+  alias Arbiter.Sessions.TranscriptReplay
   alias Arbiter.Usage.Event
 
   @default_max_bytes 100_000

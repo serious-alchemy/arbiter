@@ -1,11 +1,11 @@
 defmodule Arbiter.Sessions.TranscriptDistillationTest do
   use Arbiter.DataCase, async: false
 
-  alias Arbiter.Sessions.TranscriptDistillation
   alias Arbiter.Sessions.Layout
-  alias Arbiter.Sessions.Memory.Promotion
   alias Arbiter.Sessions.Memory.Frontmatter
+  alias Arbiter.Sessions.Memory.Promotion
   alias Arbiter.Sessions.Transcript
+  alias Arbiter.Sessions.TranscriptDistillation
   alias Arbiter.Usage.Event
 
   @moduletag :tmp_dir
