@@ -211,4 +211,51 @@ defmodule ArbiterWeb.ReportsLiveTest do
       assert has_element?(view, "#reports-flow-chart rect[data-total='1']")
     end
   end
+
+  describe "epic burn-up" do
+    test "is absent until an epic is picked, then charts scope and done", %{conn: conn, ws: ws} do
+      epic = issue!(ws, %{issue_type: :epic, title: "the epic"})
+      child = issue!(ws, %{difficulty: 2})
+      issue!(ws, %{difficulty: 2})
+
+      Ash.create!(Arbiter.Tasks.Dependency, %{
+        from_issue_id: epic.id,
+        to_issue_id: child.id,
+        type: :parent_of
+      })
+
+      {:ok, view, _html} = live(conn, ~p"/reports?workspace=#{ws.id}")
+      _ = render_async(view)
+      refute has_element?(view, "#reports-burn-up")
+
+      {:ok, view, _html} = live(conn, ~p"/reports?workspace=#{ws.id}&epic=#{epic.id}")
+      _ = render_async(view)
+
+      assert has_element?(view, "#reports-burn-up")
+      assert has_element?(view, "#reports-burn-up-chart path[data-role=scope]")
+      assert has_element?(view, "#reports-burn-up-chart path[data-role=done]")
+
+      assert has_element?(
+               view,
+               "#reports-burn-up-chart circle[data-role=scope-mark][data-value='1']"
+             )
+
+      assert has_element?(
+               view,
+               "#reports-burn-up-weighted-chart circle[data-role=scope-mark][data-value='2']"
+             )
+
+      assert has_element?(view, "#reports-burn-up-scope [data-role=value]", "1")
+    end
+
+    test "an epic with no children says so", %{conn: conn, ws: ws} do
+      epic = issue!(ws, %{issue_type: :epic, title: "empty"})
+      issue!(ws, %{difficulty: 2})
+
+      {:ok, view, _html} = live(conn, ~p"/reports?workspace=#{ws.id}&epic=#{epic.id}")
+      _ = render_async(view)
+
+      assert has_element?(view, "#reports-burn-up-empty")
+    end
+  end
 end
