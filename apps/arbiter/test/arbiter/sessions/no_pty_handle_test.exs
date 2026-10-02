@@ -107,8 +107,19 @@ defmodule Arbiter.Sessions.NoPtyHandleTest do
   #
   # The exemption is kept as narrow as it can be: this file, and only literal
   # `System.cmd("git", ...)` calls — never a shell, never a variable command.
+  #
+  # The memory staleness checker (bd-19qve3) is exempt on the same terms.
+  # `Arbiter.Sessions.Memory.Staleness` reads committed trees with
+  # `git cat-file` / `git grep` to verify a memory's citations, and it runs only
+  # in the background `Arbiter.Sessions.Memory.Checker` and in an explicit
+  # promotion/restore call. It never runs during a session launch: amendment 3
+  # of its design moved verification off the mount path, and
+  # `Arbiter.Sessions.Memory.mount/2` only reads stored verdicts. It spawns no
+  # PTY and holds no handle. Its tests verify against real fixture
+  # repositories, which a stubbed runner would replace.
   @non_runner_spawn_sites %{
-    "apps/arbiter/lib/arbiter/sessions/repo_checkout.ex" => ~s|System.cmd("git",|
+    "apps/arbiter/lib/arbiter/sessions/repo_checkout.ex" => ~s|System.cmd("git",|,
+    "apps/arbiter/lib/arbiter/sessions/memory/staleness.ex" => ~s|System.cmd("git",|
   }
 
   test "the only spawn in the session path is the synchronous runner" do
