@@ -173,6 +173,8 @@ defmodule Arbiter.Worker.Jail do
 
   require Logger
 
+  @behaviour Arbiter.Worker.Sandbox
+
   alias Arbiter.Worker.ReleaseEnv
 
   @toolchain_dir ".arbiter-jail"
@@ -234,6 +236,7 @@ defmodule Arbiter.Worker.Jail do
   """
   @keyring_sentinel "@KEYRING_SOCK@"
 
+  @impl Arbiter.Worker.Sandbox
   @spec wrap([String.t()], keyword()) :: {:ok, [String.t()]} | {:error, term()}
   def wrap(command, opts) when is_list(command) and is_list(opts) do
     with {:ok, worktree} <- fetch_worktree(opts),
@@ -1090,6 +1093,14 @@ defmodule Arbiter.Worker.Jail do
 
   # ---- availability ------------------------------------------------------
 
+  @doc """
+  Nothing to release: `--die-with-parent` and `--unshare-pid` take the jail
+  down with the process the port spawned (see "Teardown" in the moduledoc).
+  """
+  @impl Arbiter.Worker.Sandbox
+  @spec teardown(term()) :: :ok
+  def teardown(_run), do: :ok
+
   @doc "Whether this host can jail a worker (`status/0` is `:ok`)."
   @spec available?() :: boolean()
   def available?, do: status() == :ok
@@ -1099,6 +1110,7 @@ defmodule Arbiter.Worker.Jail do
   `:worker_jail_available` override wins; otherwise the first call runs
   `probe/0` and the answer is cached until `reset/0`.
   """
+  @impl Arbiter.Worker.Sandbox
   @spec status() :: :ok | {:error, term()}
   def status do
     case Application.get_env(:arbiter, :worker_jail_available) do
@@ -1139,6 +1151,7 @@ defmodule Arbiter.Worker.Jail do
   Independent of `status/0`: a host can jail writes while a network namespace
   or `socat` is missing.
   """
+  @impl Arbiter.Worker.Sandbox
   @spec network_status() :: :ok | {:error, term()}
   def network_status do
     case Application.get_env(:arbiter, :worker_jail_network_available) do

@@ -5,6 +5,7 @@ defmodule Arbiter.Agents.GeminiTest do
 
   alias Arbiter.Agents.Gemini
   alias Arbiter.Agents.SecurityPolicy
+  alias Arbiter.Worker.Jail
 
   # A jailed spawn needs the worker pid its egress run is bound to (bd-cfktou);
   # the test process stands in for it unless a test names another.
@@ -499,6 +500,61 @@ defmodule Arbiter.Agents.GeminiTest do
 
       assert {:error, {:write_jail_unavailable, _}} =
                default_argv("p", security: policy(:strict), worktree_path: worktree)
+    end
+
+    # bd-btcdrf (P2): the spawn goes through `Arbiter.Worker.Sandbox`; the
+    # default backend (bwrap) must leave the argv exactly what `Jail.wrap/2`
+    # builds for the same command and options.
+    test "with the default backend the jailed argv is byte-identical to a direct Jail.wrap/2",
+         %{worktree: worktree} do
+      Application.put_env(:arbiter, :worker_jail_network, false)
+
+      for mode <- [:strict, :bypass, :auto] do
+        pol = policy(mode, %{writable_paths: ["/opt/extra"]})
+        assert pol.sandbox.backend == :bwrap
+
+        assert {:ok, argv} = default_argv("the prompt", security: pol, worktree_path: worktree)
+        assert ["sh", "-c", ~s(exec "$@" < /dev/null), "sh" | jailed] = argv
+        {_jail, ["--" | command]} = Enum.split_while(jailed, &(&1 != "--"))
+
+        assert {:ok, ^jailed} =
+                 Jail.wrap(command,
+                   worktree: worktree,
+                   home: Arbiter.Agents.Gemini.ConfigDir.path(worktree_path: worktree),
+                   writable_paths: ["/opt/extra"],
+                   worktree_readonly: false,
+                   keyring: Arbiter.Agents.Gemini.ConfigDir.keyring_available?()
+                 )
+
+        # An explicit `backend: :bwrap` is the same policy as the default.
+        explicit = policy(mode, %{writable_paths: ["/opt/extra"], backend: :bwrap})
+
+        assert {:ok, ^argv} =
+                 default_argv("the prompt", security: explicit, worktree_path: worktree)
+      end
+    end
+
+    test "backend: podman refuses agy in every mode and never spawns it unjailed", %{
+      worktree: worktree
+    } do
+      for mode <- [:strict, :bypass, :auto] do
+        assert {:error, {:sandbox_backend_unavailable, :podman, message}} =
+                 default_argv("p",
+                   security: policy(mode, %{backend: :podman}),
+                   worktree_path: worktree
+                 )
+
+        assert message =~ "podman"
+      end
+
+      # Even a host that cannot jail at all does not fall back to unjailed.
+      Application.put_env(:arbiter, :worker_jail_available, false)
+
+      assert {:error, {:sandbox_backend_unavailable, :podman, _}} =
+               default_argv("p",
+                 security: policy(:bypass, %{backend: :podman}),
+                 worktree_path: worktree
+               )
     end
   end
 

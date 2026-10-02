@@ -31,6 +31,9 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
       `"allowlist"`, `"none"`); a typo would otherwise read as the inherited
       level without a word (bd-5yydxh). Its `"allow_hosts"` must be a list of
       `host:port` entries the egress proxy accepts as a baseline.
+    * If `"agent.security.sandbox.backend"` (or a per-repo override) is present,
+      it must be one of `Arbiter.Agents.SecurityPolicy.valid_sandbox_backends/0`
+      (`"bwrap"`, `"podman"`) (bd-btcdrf).
     * If `"routing"` is present, it must be a map.
     * If `"routing.policy"` is present, it must be one of the values in
       `Arbiter.Agents.Routing.valid_policies/0` (`"static"`, `"by_priority"`,
@@ -346,8 +349,8 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     Changeset.add_error(changeset, field: :config, message: "#{label} must be a map")
   end
 
-  # bd-5yydxh: `agent.security.sandbox.{egress,allow_hosts}`, workspace-wide
-  # and under `agent.security.repos.<repo>`. Only these two keys are checked;
+  # bd-5yydxh: `agent.security.sandbox.{egress,allow_hosts,backend}`, workspace-wide
+  # and under `agent.security.repos.<repo>`. Only these keys are checked;
   # the rest of the security block stays lenient (SecurityPolicy ignores what
   # it does not understand).
   defp validate_agent_security(changeset, %{"security" => %{} = security}) do
@@ -373,6 +376,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     changeset
     |> validate_egress_level(Map.get(sandbox, "egress"), label)
     |> validate_allow_hosts(Map.get(sandbox, "allow_hosts"), label)
+    |> validate_sandbox_backend(Map.get(sandbox, "backend"), label)
   end
 
   defp validate_sandbox_egress(changeset, _block, _label), do: changeset
@@ -390,6 +394,23 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
         message:
           "#{label}.sandbox.egress must be one of #{Enum.map_join(valid, ", ", &Atom.to_string/1)}; " <>
             "got: #{inspect(level)}"
+      )
+    end
+  end
+
+  defp validate_sandbox_backend(changeset, nil, _label), do: changeset
+
+  defp validate_sandbox_backend(changeset, backend, label) do
+    valid = Arbiter.Agents.SecurityPolicy.valid_sandbox_backends()
+
+    if is_binary(backend) and backend in Enum.map(valid, &Atom.to_string/1) do
+      changeset
+    else
+      Changeset.add_error(changeset,
+        field: :config,
+        message:
+          "#{label}.sandbox.backend must be one of #{Enum.map_join(valid, ", ", &Atom.to_string/1)}; " <>
+            "got: #{inspect(backend)}"
       )
     end
   end
