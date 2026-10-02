@@ -104,6 +104,33 @@ defmodule ArbiterWeb.ReportsLiveTest do
     end
   end
 
+  test "cost section shows metered dollars and marks unmetered providers", %{conn: conn, ws: ws} do
+    issue = issue!(ws, %{difficulty: 2})
+    {:ok, issue} = Ash.update(issue, %{close_upstream: false}, action: :close)
+
+    for {provider, cost} <- [{"claude", 4.0}, {"gemini", nil}] do
+      {:ok, _} =
+        Ash.create(Arbiter.Usage.Event, %{
+          task_id: issue.id,
+          source: :task,
+          step: :work,
+          workspace_id: ws.id,
+          occurred_at: DateTime.utc_now(),
+          provider: provider,
+          model: "m",
+          cost_usd: cost
+        })
+    end
+
+    {:ok, view, _html} = live(conn, ~p"/reports?workspace=#{ws.id}")
+    _ = render_async(view)
+
+    assert has_element?(view, "#reports-cost-d-2")
+    assert has_element?(view, "#reports-cost-d-2", "$4.00")
+    assert has_element?(view, "#reports-cost-d-2", "unmetered")
+    assert has_element?(view, "#reports-cost-overhead")
+  end
+
   describe "cumulative flow and stage dwell" do
     defp promote!(issue) do
       {:ok, issue} = Ash.update(issue, %{}, action: :promote)
