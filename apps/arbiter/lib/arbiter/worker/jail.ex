@@ -50,7 +50,8 @@ defmodule Arbiter.Worker.Jail do
 
   ## Known, accepted gaps
 
-    * The network is shared: `arb`, MCP and `git push` need it.
+    * The network is shared unless the caller asks for network mode with
+      `:network` (below); agy does (bd-cfktou). Codex's reviewer jail does not.
     * Reads are not restricted, except for `secret_files/0` (the server's
       env file and Erlang distribution cookie), which are shadowed by
       `/dev/null`.
@@ -107,6 +108,24 @@ defmodule Arbiter.Worker.Jail do
   Claude workers do not go through this module at all — `Arbiter.Agents.
   Claude` never calls `Jail.wrap/2`, so they are not affected by, or fixed
   by, any of the above.
+
+  ## Network mode (bd-cfktou, G6)
+
+  `wrap/2`'s `:network` option (`[proxy_socket: path, bridges: [{port,
+  socket}]]`, as `Arbiter.Worker.Egress.JailRun.start/1` returns it) adds
+  `--unshare-net`: the namespace has only `lo`, UDP and ICMP have no route,
+  and nothing resolves (the resolver sockets are masked). The socket dir is
+  blanked with a `--tmpfs` and only this run's sockets are `--ro-bind`ed back.
+  Before the command runs, a small `sh` wrapper starts one `socat` per
+  listener (`127.0.0.1:3128` to the proxy socket, `127.0.0.1:<port>` to each
+  bridge) and waits for them to bind, exiting 125 if one doesn't, so a spawn
+  never runs without the bridge it was promised. The env gets
+  `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY` (and lowercase), `NO_PROXY` for
+  loopback, and `GIT_SSH_COMMAND` gains a `ProxyCommand` through the proxy.
+  `wrap/2` refuses (`{:egress_socket_missing, path}`, `:socat_not_found`,
+  `{:duplicate_bridge_port, ports}`) rather than build a jail with a bridge
+  missing. `network_status/0` / `network_probe/0` / `diagnose_network/0` are
+  the host-capability side, surfaced to `arb server doctor` as `network`.
 
   ## Teardown
 
@@ -175,8 +194,22 @@ defmodule Arbiter.Worker.Jail do
           optional(:env) => [{String.t(), String.t()}],
           optional(:worktree_readonly) => boolean(),
           optional(:mask_paths) => [String.t()],
-          optional(:secret_files) => [String.t()]
+          optional(:secret_files) => [String.t()],
+          optional(:network) => network() | nil
         }
+
+  # bd-cfktou (G6): network mode. `proxy_socket` is the run's G5 proxy socket
+  # (bridged to `127.0.0.1:proxy_port` in the namespace); each `bridges` entry
+  # is `{loopback_port, host_unix_socket}`.
+  @type network :: %{
+          proxy_socket: String.t(),
+          proxy_port: :inet.port_number(),
+          bridges: [{:inet.port_number(), String.t()}],
+          socat: String.t()
+        }
+
+  @proxy_port 3128
+  @no_proxy "127.0.0.1,localhost,::1"
 
   @doc """
   Wrap `command` (an argv list, executable first) in the jail.
@@ -205,15 +238,19 @@ defmodule Arbiter.Worker.Jail do
   def wrap(command, opts) when is_list(command) and is_list(opts) do
     with {:ok, worktree} <- fetch_worktree(opts),
          {:ok, git} <- git(worktree),
-         {:ok, toolchain_env} <- prepare_toolchain(Keyword.get(opts, :home)) do
+         {:ok, toolchain_env} <- prepare_toolchain(Keyword.get(opts, :home)),
+         {:ok, network} <- network_spec(Keyword.get(opts, :network)) do
       spec = %{
         bwrap: bwrap_path(),
         worktree: worktree,
         home: Keyword.get(opts, :home),
         git: git,
         writable_paths: writable_paths(Keyword.get(opts, :writable_paths, [])),
-        env: ssh_env() ++ toolchain_env ++ Keyword.get(opts, :env, []),
-        worktree_readonly: Keyword.get(opts, :worktree_readonly, false)
+        env:
+          network_env(network) ++
+            ssh_env(network) ++ toolchain_env ++ Keyword.get(opts, :env, []),
+        worktree_readonly: Keyword.get(opts, :worktree_readonly, false),
+        network: network
       }
 
       proxy = keyring_proxy(opts)
@@ -226,6 +263,64 @@ defmodule Arbiter.Worker.Jail do
 
       {:ok, argv(spec, command) |> maybe_keyring_proxy(proxy)}
     end
+  end
+
+  # `network:` is `[proxy_socket: path, bridges: [{port, socket}], proxy_port:,
+  # socat:]` (the last two optional), as `Arbiter.Agents.Gemini` builds it from
+  # a started `Arbiter.Worker.Egress` run. Every socket must exist and `socat`
+  # must be installed, or the spawn is refused: a jail asked for network mode
+  # never degrades to a shared network.
+  defp network_spec(nil), do: {:ok, nil}
+
+  defp network_spec(network) when is_list(network) or is_map(network) do
+    network = Map.new(network)
+    proxy = Map.get(network, :proxy_socket)
+    bridges = Map.get(network, :bridges, [])
+
+    missing =
+      Enum.find(
+        [proxy | Enum.map(bridges, &elem(&1, 1))],
+        &(not is_binary(&1) or not exists?(&1))
+      )
+
+    socat = Map.get(network, :socat) || System.find_executable("socat")
+
+    ports = [Map.get(network, :proxy_port, @proxy_port) | Enum.map(bridges, &elem(&1, 0))]
+
+    cond do
+      is_nil(proxy) ->
+        {:error, {:egress_socket_missing, nil}}
+
+      ports != Enum.uniq(ports) ->
+        {:error, {:duplicate_bridge_port, Enum.uniq(ports -- Enum.uniq(ports))}}
+
+      missing != nil ->
+        {:error, {:egress_socket_missing, missing}}
+
+      is_nil(socat) ->
+        {:error, :socat_not_found}
+
+      true ->
+        {:ok,
+         %{
+           proxy_socket: proxy,
+           proxy_port: Map.get(network, :proxy_port, @proxy_port),
+           bridges: bridges,
+           socat: socat
+         }}
+    end
+  end
+
+  defp exists?(path), do: match?({:ok, _}, File.lstat(path))
+
+  defp network_env(nil), do: []
+
+  defp network_env(%{proxy_port: port}) do
+    url = "http://127.0.0.1:#{port}"
+
+    for name <- ~w(HTTPS_PROXY HTTP_PROXY ALL_PROXY), var <- [name, String.downcase(name)] do
+      {var, url}
+    end ++ [{"NO_PROXY", @no_proxy}, {"no_proxy", @no_proxy}]
   end
 
   # ---- filtered keyring bus (bd-7o08mj) ----------------------------------
@@ -323,6 +418,7 @@ defmodule Arbiter.Worker.Jail do
       [bwrap, "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc"],
       ["--tmpfs", "/tmp", "--tmpfs", "/dev/shm"],
       mask_args(spec),
+      network_args(Map.get(spec, :network)),
       Enum.flat_map(Map.get(spec, :writable_paths, []), &["--bind-try", &1, &1]),
       if(Map.get(spec, :worktree_readonly, false), do: ro_bind(worktree), else: bind(worktree)),
       if(home, do: bind(home) ++ ["--setenv", "HOME", home], else: []),
@@ -330,8 +426,67 @@ defmodule Arbiter.Worker.Jail do
       secret_args(spec),
       Enum.flat_map(Map.get(spec, :env, []), fn {k, v} -> ["--setenv", k, v] end),
       ["--unshare-pid", "--die-with-parent", "--new-session", "--chdir", worktree, "--"],
-      command
+      network_command(Map.get(spec, :network), command)
     ])
+  end
+
+  # ---- network mode (bd-cfktou, G6) --------------------------------------
+
+  # `--unshare-net` leaves the namespace with `lo` only (bwrap brings it up);
+  # UDP and ICMP have no route. The egress socket dir is blanked and only this
+  # run's own sockets are bound back, so a jailed process can't connect to a
+  # sibling run's proxy (whose policy and grants are not its own).
+  defp network_args(nil), do: []
+
+  defp network_args(%{proxy_socket: proxy, bridges: bridges}) do
+    sockets = [proxy | Enum.map(bridges, &elem(&1, 1))]
+
+    ["--unshare-net", "--tmpfs", Path.dirname(proxy)] ++ Enum.flat_map(sockets, &ro_bind/1)
+  end
+
+  # One `socat` per listener, started before the agent: 127.0.0.1:<port> to the
+  # run's Unix socket. Each exits with the namespace (the agent is pid 1 after
+  # the `exec`, and pid 1 leaving kills everything in a pid namespace). A
+  # listener that dies or never binds aborts the spawn with 125: running
+  # without a bridge would mean running without Arbiter or without the proxy.
+  @network_script ~S"""
+  socat=$1; shift
+  pids=; ports=
+  while [ "$1" != "--" ]; do
+    "$socat" "TCP-LISTEN:$1,bind=127.0.0.1,fork,reuseaddr" "UNIX-CONNECT:$2" &
+    pids="$pids $!"; ports="$ports $1"; shift 2
+  done
+  shift
+  for port in $ports; do
+    hex=$(printf '%04X' "$port"); i=0
+    until grep -qi "^ *[0-9]*: 0100007F:$hex 00000000:0000 0A" /proc/net/tcp; do
+      i=$((i+1))
+      for pid in $pids; do kill -0 "$pid" 2>/dev/null || i=100; done
+      if [ "$i" -ge 50 ]; then
+        echo "arbiter jail: bridge on 127.0.0.1:$port did not come up" >&2
+        exit 125
+      fi
+      sleep 0.1
+    done
+  done
+  for pid in $pids; do
+    kill -0 "$pid" 2>/dev/null || { echo "arbiter jail: a bridge exited at start-up" >&2; exit 125; }
+  done
+  exec "$@"
+  """
+
+  defp network_command(nil, command), do: command
+
+  defp network_command(
+         %{proxy_port: proxy_port, proxy_socket: proxy, bridges: bridges, socat: socat},
+         command
+       ) do
+    listeners =
+      Enum.flat_map([{proxy_port, proxy} | bridges], fn {port, sock} ->
+        [to_string(port), sock]
+      end)
+
+    ["sh", "-c", @network_script, "sh", socat] ++ listeners ++ ["--" | command]
   end
 
   @doc """
@@ -683,10 +838,10 @@ defmodule Arbiter.Worker.Jail do
   # bd-5d5mrs: the default `GIT_SSH_COMMAND` for `wrap/2` — logged so a
   # jailed worker's transport is visible, not a surprise like agy's own
   # `ssh -F /dev/null` workaround.
-  defp ssh_env do
+  defp ssh_env(network) do
     case ssh_shadow_config() do
       {:ok, nil} ->
-        []
+        ssh_command(nil, network)
 
       {:ok, path} ->
         Logger.info(
@@ -695,7 +850,7 @@ defmodule Arbiter.Worker.Jail do
             "#{ssh_config_path()}, bd-5d5mrs)"
         )
 
-        [{"GIT_SSH_COMMAND", "ssh -F #{path}"}]
+        ssh_command("ssh -F #{path}", network)
 
       {:error, reason} ->
         Logger.warning(
@@ -704,9 +859,24 @@ defmodule Arbiter.Worker.Jail do
             "ownership check (bd-5d5mrs)"
         )
 
-        []
+        ssh_command(nil, network)
     end
   end
+
+  # In network mode there is no route to a git remote, so ssh goes through the
+  # run's proxy (bd-cfktou): `ProxyCommand` hands `%h:%p` to the loopback
+  # bridge as a `CONNECT`, and the proxy's policy decides. The `-o` wins over
+  # a per-host `ProxyCommand` in the mirrored config, so a host entry can't
+  # route around it.
+  defp ssh_command(base, nil), do: if(base, do: [{"GIT_SSH_COMMAND", base}], else: [])
+
+  defp ssh_command(base, %{proxy_port: port}) do
+    proxy = "-o 'ProxyCommand socat - PROXY:127.0.0.1:%h:%p,proxyport=#{port}'"
+    [{"GIT_SSH_COMMAND", command_with(base, proxy)}]
+  end
+
+  defp command_with(nil, proxy), do: "ssh #{proxy}"
+  defp command_with(base, proxy), do: "#{base} #{proxy}"
 
   @doc """
   Materialize a self-owned mirror of the system ssh config (the
@@ -956,8 +1126,140 @@ defmodule Arbiter.Worker.Jail do
   def reset do
     _ = :persistent_term.erase({__MODULE__, :status})
     _ = :persistent_term.erase({__MODULE__, :ssh_status})
+    _ = :persistent_term.erase({__MODULE__, :network_status})
     :ok
   end
+
+  @doc """
+  `:ok` when network mode (`wrap/2`'s `:network`) works on this host right
+  now, `{:error, reason}` otherwise (bd-cfktou). The
+  `:worker_jail_network_available` override wins; otherwise the first call
+  runs `network_probe/0` and the answer is cached until `reset/0`.
+
+  Independent of `status/0`: a host can jail writes while a network namespace
+  or `socat` is missing.
+  """
+  @spec network_status() :: :ok | {:error, term()}
+  def network_status do
+    case Application.get_env(:arbiter, :worker_jail_network_available) do
+      true ->
+        :ok
+
+      false ->
+        {:error, :disabled_by_config}
+
+      _ ->
+        case :persistent_term.get({__MODULE__, :network_status}, :unprobed) do
+          :unprobed ->
+            result = network_probe()
+            :persistent_term.put({__MODULE__, :network_status}, result)
+            result
+
+          cached ->
+            cached
+        end
+    end
+  end
+
+  @doc """
+  Run the network-mode check for real (uncached): `socat` is installed, and a
+  jail built with `:network` (a dummy proxy socket, no bridges besides the
+  proxy's own) starts its `socat`, then shows `lo` as the only interface with
+  no route. `:ok` or `{:error, reason}`; never raises.
+  """
+  @spec network_probe() :: :ok | {:error, term()}
+  def network_probe do
+    with {:ok, bwrap} <- find_bwrap(),
+         socat when is_binary(socat) <-
+           System.find_executable("socat") || {:error, :socat_not_found} do
+      scratch =
+        Path.join(probe_root(), "net-#{System.pid()}-#{System.unique_integer([:positive])}")
+
+      try do
+        :ok = File.mkdir_p(Path.join(scratch, "run"))
+        proxy = Path.join([scratch, "run", "proxy.sock"])
+        :ok = File.write(proxy, "")
+
+        {:ok, network} = network_spec(proxy_socket: proxy, bridges: [], socat: socat)
+
+        script = ~S"""
+        awk -F'[: ]+' 'NR>2 {print "if:" $2}' /proc/net/dev
+        echo "routes:$(awk 'NR>1' /proc/net/route | wc -l)"
+        """
+
+        %{bwrap: bwrap, worktree: scratch, network: network}
+        |> argv(["sh", "-c", script])
+        |> run_bounded()
+        |> judge_network_probe()
+      rescue
+        e -> {:error, {:probe_raised, Exception.message(e)}}
+      after
+        File.rm_rf(scratch)
+      end
+    end
+  end
+
+  defp judge_network_probe(:timeout), do: {:error, :probe_timeout}
+  defp judge_network_probe({:raised, msg}), do: {:error, {:bwrap_failed, msg}}
+
+  defp judge_network_probe({out, 0}) do
+    lines = out |> String.split("\n", trim: true) |> Enum.map(&String.trim/1)
+
+    case Enum.filter(lines, &String.starts_with?(&1, "if:")) -- ["if:lo"] do
+      [] -> if("routes:0" in lines, do: :ok, else: {:error, {:netns_leaks, out}})
+      extra -> {:error, {:netns_leaks, Enum.join(extra, ", ")}}
+    end
+  end
+
+  defp judge_network_probe({out, status}), do: {:error, {:netns_failed, status, String.trim(out)}}
+
+  @doc "`nil` when `network_status/0` is `:ok`, else a cause + fix for `arb server doctor`."
+  @spec diagnose_network() :: diagnosis() | nil
+  def diagnose_network do
+    case network_status() do
+      :ok -> nil
+      {:error, reason} -> explain_network(reason)
+    end
+  end
+
+  @doc "Categorize a `network_status/0` error `reason` into a cause + fix."
+  @spec explain_network(term()) :: diagnosis()
+  def explain_network(:socat_not_found) do
+    %{
+      cause: :socat_missing,
+      message: "no `socat` on PATH: the jail's network mode bridges its loopback with it",
+      fix: "Install socat (`dnf install socat` / `apt install socat`)."
+    }
+  end
+
+  def explain_network({:netns_failed, status, out}) do
+    %{
+      cause: :netns_unavailable,
+      message: "bwrap could not start a network namespace (exit #{status}): #{out}",
+      fix:
+        "Check that unprivileged user namespaces and network namespaces are allowed " <>
+          "(user.max_user_namespaces, kernel.unprivileged_userns_clone, AppArmor)."
+    }
+  end
+
+  def explain_network({:netns_leaks, what}) do
+    %{
+      cause: :netns_unavailable,
+      message: "the jail's network namespace is not isolated: #{what}",
+      fix: "Run bwrap with --unshare-net; this host's bwrap did not isolate the namespace."
+    }
+  end
+
+  def explain_network(:disabled_by_config) do
+    %{
+      cause: :other,
+      message:
+        "network mode probing is disabled by the `:arbiter, :worker_jail_network_available` override",
+      fix: "Unset that override to let the real probe run."
+    }
+  end
+
+  def explain_network(reason), do: explain(reason)
 
   @doc """
   `:ok` when `ssh -G` can parse the mirror `ssh_shadow_config/0` builds,

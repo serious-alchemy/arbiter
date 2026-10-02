@@ -3,7 +3,8 @@ defmodule Arbiter.Worker.Egress.Supervisor do
   The long-lived parts of `Arbiter.Worker.Egress`: the grant cache, the
   registry that maps a run id to its proxy processes, and the dynamic
   supervisor those per-run proxies start under. Idle until something calls
-  `Arbiter.Worker.Egress.start_run/2`; nothing does yet (G6 wires it).
+  `Arbiter.Worker.Egress.start_run/2`: `Arbiter.Worker.Egress.JailRun` does,
+  once per jailed agy run (G6, bd-cfktou).
   """
   use Supervisor
 

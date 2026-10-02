@@ -10,6 +10,11 @@ defmodule Arbiter.Worker.Egress.Listener do
   removed first; on terminate the socket is closed and the file removed, so a
   stopped (or dead) proxy leaves nothing to connect to and egress fails
   closed.
+
+  A listener built with a `:handler` (`fun(socket)`, run in the connection's
+  own process) serves something other than the CONNECT proxy: the fixed-target
+  bridges `Arbiter.Worker.Egress.Forward` runs for a jailed run's Arbiter
+  endpoint and tunnels.
   """
   use GenServer
 
@@ -24,7 +29,8 @@ defmodule Arbiter.Worker.Egress.Listener do
   def init(opts) do
     Process.flag(:trap_exit, true)
     path = Keyword.fetch!(opts, :socket_path)
-    ctx = Keyword.fetch!(opts, :context)
+    ctx = Keyword.get(opts, :context)
+    handler = Keyword.get(opts, :handler) || fn socket -> Connection.run(socket, ctx) end
     task_sup = Keyword.fetch!(opts, :task_supervisor)
 
     _ = File.rm(path)
@@ -33,13 +39,14 @@ defmodule Arbiter.Worker.Egress.Listener do
       :binary,
       packet: :raw,
       active: false,
+      exit_on_close: false,
       backlog: 128,
       ifaddr: {:local, String.to_charlist(path)}
     ]
 
     with {:ok, listen} <- :gen_tcp.listen(0, listen_opts),
          :ok <- File.chmod(path, 0o600) do
-      acceptor = spawn_link(fn -> accept_loop(listen, task_sup, ctx) end)
+      acceptor = spawn_link(fn -> accept_loop(listen, task_sup, handler) end)
       {:ok, %{listen: listen, path: path, acceptor: acceptor}}
     else
       {:error, reason} -> {:stop, {:listen_failed, reason}}
@@ -64,13 +71,13 @@ defmodule Arbiter.Worker.Egress.Listener do
     :ok
   end
 
-  defp accept_loop(listen, task_sup, ctx) do
+  defp accept_loop(listen, task_sup, handler) do
     case :gen_tcp.accept(listen) do
       {:ok, socket} ->
         {:ok, pid} =
           Task.Supervisor.start_child(task_sup, fn ->
             receive do
-              :go -> Connection.run(socket, ctx)
+              :go -> handler.(socket)
             end
           end)
 
@@ -79,7 +86,7 @@ defmodule Arbiter.Worker.Egress.Listener do
           {:error, _} -> :gen_tcp.close(socket)
         end
 
-        accept_loop(listen, task_sup, ctx)
+        accept_loop(listen, task_sup, handler)
 
       {:error, :closed} ->
         :ok

@@ -19,7 +19,8 @@ defmodule Arbiter.Agents.SecurityPolicyTest do
                enabled: true,
                filesystem: :worktree,
                network: true,
-               writable_paths: []
+               writable_paths: [],
+               egress_tunnels: []
              }
     end
 
@@ -144,6 +145,40 @@ defmodule Arbiter.Agents.SecurityPolicyTest do
       p = SecurityPolicy.resolve(ws)
       # Canonical path should win over the alt paths
       assert p.permissions.mode == :auto
+    end
+  end
+
+  describe "sandbox.egress_tunnels (bd-cfktou)" do
+    test "layers union, malformed entries are dropped, egress_tunnels/1 parses them" do
+      ws = %Workspace{
+        config: %{
+          "agent" => %{
+            "security" => %{
+              "sandbox" => %{"egress_tunnels" => ["5432:127.0.0.1:5432", "bad", "0:h:1", 3]},
+              "repos" => %{
+                "device" => %{
+                  "sandbox" => %{
+                    "egress_tunnels" => ["6379:cache.internal:6379", "5432:127.0.0.1:5432"]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
+      p = SecurityPolicy.resolve(ws, nil, "device")
+
+      assert p.sandbox.egress_tunnels == ["5432:127.0.0.1:5432", "6379:cache.internal:6379"]
+
+      assert SecurityPolicy.egress_tunnels(p) ==
+               [{5432, "127.0.0.1", 5432}, {6379, "cache.internal", 6379}]
+
+      assert SecurityPolicy.summary(p)["sandbox"]["egress_tunnels"] == p.sandbox.egress_tunnels
+    end
+
+    test "none by default" do
+      assert SecurityPolicy.egress_tunnels(SecurityPolicy.base()) == []
     end
   end
 

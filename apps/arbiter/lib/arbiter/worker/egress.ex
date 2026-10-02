@@ -3,9 +3,9 @@ defmodule Arbiter.Worker.Egress do
   The host-side filtering CONNECT proxy for jailed workers (bd-aspkyr, G5;
   `docs/design/guardrail-profiles.md` §4.4).
 
-  **Not wired to any worker yet.** Nothing calls `start_run/2` in production;
-  G6 (bd-cfktou) starts one per jailed run and bridges the socket into the
-  jail's network namespace.
+  `Arbiter.Agents.Gemini` starts one per jailed agy run (G6, bd-cfktou); the
+  jail bridges each socket into its network namespace with `socat`
+  (`Arbiter.Worker.Jail`, `:network`).
 
   One proxy per run, listening on its own Unix socket (`<run>.proxy.sock`).
   The socket a request arrives on identifies the run and, through the run
@@ -25,6 +25,14 @@ defmodule Arbiter.Worker.Egress do
   in the operator-written `:baseline`; ticket grants never wildcard; the
   `:no_public_upload` hosts denied even when granted unless the workspace
   `:safe_defaults_exclude` lifts them.
+
+  ## Bridges and the owner
+
+  `:bridges` adds a fixed-target socket per entry, `<run>.<name>.sock`, that
+  splices to one `host:port` with no policy (`Arbiter.Worker.Egress.Forward`):
+  the run's Arbiter endpoint and its fixed-destination tunnels. `:owner` is
+  the process the run lives and dies with (the worker): when it exits the
+  proxy and every bridge stop and their socket files go.
 
   ## Live grants
 
@@ -69,6 +77,8 @@ defmodule Arbiter.Worker.Egress do
           | {:dir, Path.t()}
           | {:allow_local_dial, boolean()}
           | {:dial_timeout, timeout()}
+          | {:bridges, [{atom() | String.t(), {String.t(), :inet.port_number()}}]}
+          | {:owner, pid()}
 
   @doc """
   Starts the proxy for `run_id` and returns its socket path.
@@ -86,6 +96,10 @@ defmodule Arbiter.Worker.Egress do
     * `:allow_local_dial`: let the proxy dial loopback/link-local addresses.
       Default `false`.
     * `:dial_timeout`: per-address connect timeout, ms. Default 10_000.
+    * `:bridges`: `[{name, {host, port}}]`, each a fixed-target socket at
+      `bridge_path/3`. `name` is 1-16 lowercase letters or digits.
+    * `:owner`: a pid; the run stops when it exits. Default: not monitored,
+      the caller stops the run.
   """
   @spec start_run(String.t(), [start_opt()]) :: {:ok, Path.t()} | {:error, term()}
   def start_run(run_id, opts \\ []) when is_binary(run_id) do
@@ -95,6 +109,7 @@ defmodule Arbiter.Worker.Egress do
     with :ok <- validate_run_id(run_id),
          :ok <- validate_path(path),
          {:ok, baseline} <- Policy.normalize_baseline(Keyword.get(opts, :baseline, [])),
+         {:ok, bridges} <- normalize_bridges(run_id, dir, Keyword.get(opts, :bridges, [])),
          :ok <- File.mkdir_p(dir),
          :ok <- File.chmod(dir, 0o700) do
       context = %{
@@ -111,7 +126,16 @@ defmodule Arbiter.Worker.Egress do
       spec = %{
         id: {RunSupervisor, run_id},
         start:
-          {RunSupervisor, :start_link, [[run_id: run_id, socket_path: path, context: context]]},
+          {RunSupervisor, :start_link,
+           [
+             [
+               run_id: run_id,
+               socket_path: path,
+               context: context,
+               bridges: bridges,
+               owner: Keyword.get(opts, :owner)
+             ]
+           ]},
         type: :supervisor,
         restart: :temporary
       }
@@ -136,13 +160,22 @@ defmodule Arbiter.Worker.Egress do
     :ok
   end
 
-  @doc "True while `run_id` has a proxy running."
+  @doc "True while `run_id` has a proxy running (its supervisor is alive)."
   @spec running?(String.t()) :: boolean()
-  def running?(run_id), do: Registry.lookup(@registry, {run_id, :sup}) != []
+  def running?(run_id) do
+    # The Registry drops a dead process's entry asynchronously, so a lookup
+    # right after the run's supervisor exits can still return its pid.
+    Enum.any?(Registry.lookup(@registry, {run_id, :sup}), fn {pid, _} -> Process.alive?(pid) end)
+  end
 
   @doc "A run's proxy socket path under `dir`: `<dir>/<run_id>.proxy.sock`."
   @spec socket_path(String.t(), Path.t()) :: Path.t()
   def socket_path(run_id, dir \\ socket_dir()), do: Path.join(dir, run_id <> ".proxy.sock")
+
+  @doc "A run's bridge socket path under `dir`: `<dir>/<run_id>.<name>.sock`."
+  @spec bridge_path(String.t(), atom() | String.t(), Path.t()) :: Path.t()
+  def bridge_path(run_id, name, dir \\ socket_dir()),
+    do: Path.join(dir, "#{run_id}.#{name}.sock")
 
   @doc "The default directory for proxy sockets."
   @spec socket_dir() :: Path.t()
@@ -157,6 +190,34 @@ defmodule Arbiter.Worker.Egress do
 
   defp validate_run_id(run_id) do
     if Regex.match?(~r/\A[A-Za-z0-9_-]{1,64}\z/, run_id), do: :ok, else: {:error, :invalid_run_id}
+  end
+
+  defp normalize_bridges(run_id, dir, bridges) do
+    Enum.reduce_while(bridges, {:ok, []}, fn
+      {name, {host, port}}, {:ok, acc} when is_binary(host) and port in 1..65_535 ->
+        path = bridge_path(run_id, name, dir)
+
+        cond do
+          not Regex.match?(~r/\A[a-z0-9]{1,16}\z/, to_string(name)) ->
+            {:halt, {:error, {:invalid_bridge, to_string(name)}}}
+
+          to_string(name) == "proxy" ->
+            {:halt, {:error, {:invalid_bridge, "proxy"}}}
+
+          byte_size(path) > @max_socket_path ->
+            {:halt, {:error, :socket_path_too_long}}
+
+          true ->
+            {:cont, {:ok, [%{name: to_string(name), path: path, host: host, port: port} | acc]}}
+        end
+
+      other, _ ->
+        {:halt, {:error, {:invalid_bridge, inspect(other)}}}
+    end)
+    |> case do
+      {:ok, acc} -> {:ok, Enum.reverse(acc)}
+      error -> error
+    end
   end
 
   defp validate_path(path) do
