@@ -46,9 +46,11 @@ defmodule ArbiterWeb.Api.ServerControllerTest do
       # (bd-5d5mrs): the "ssh" sub-key is covered by its own describe block.
       Application.put_env(:arbiter, :worker_jail_ssh_available, true)
       Application.put_env(:arbiter, :worker_jail_escape_available, true)
+      Application.put_env(:arbiter, :worker_jail_network_available, true)
 
       on_exit(fn ->
         Application.delete_env(:arbiter, :worker_jail_escape_available)
+        Application.delete_env(:arbiter, :worker_jail_network_available)
 
         case prev do
           nil -> Application.delete_env(:arbiter, :worker_jail_available)
@@ -84,6 +86,20 @@ defmodule ArbiterWeb.Api.ServerControllerTest do
 
       assert resp["escape"]["available"] == false
       assert resp["escape"]["message"] =~ "escape vector"
+    end
+
+    # bd-cfktou: network mode (--unshare-net + socat) is its own diagnosis.
+    test "reports network available: true, or false with cause/message/fix", %{conn: conn} do
+      Application.put_env(:arbiter, :worker_jail_available, true)
+
+      resp = conn |> get("/api/server/agy_write_jail") |> json_response(200)
+      assert resp["network"] == %{"available" => true}
+
+      Application.put_env(:arbiter, :worker_jail_network_available, false)
+      resp = conn |> get("/api/server/agy_write_jail") |> json_response(200)
+      assert resp["network"]["available"] == false
+      assert is_binary(resp["network"]["cause"])
+      assert is_binary(resp["network"]["message"])
     end
 
     test "reports available: false with cause/message/fix when it can't", %{conn: conn} do

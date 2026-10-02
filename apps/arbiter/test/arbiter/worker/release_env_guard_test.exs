@@ -104,6 +104,8 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
     # bd-5gvqgc: the write-jail probe runs the configured bwrap (a path, so
     # not a literal) around `sh`; `git rev-parse` is the only other spawn.
     "apps/arbiter/lib/arbiter/worker/jail.ex" => :scrubbed,
+    # bd-cfktou: reads the worktree's git remotes with `git config`; nothing else.
+    "apps/arbiter/lib/arbiter/worker/egress/jail_run.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/single_instance.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/version.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/worker.ex" => :pure_tool,
