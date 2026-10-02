@@ -81,6 +81,7 @@ defmodule Arbiter.Tasks.Lifecycle.View do
   alias Arbiter.Worker.Phase
   alias Arbiter.Worker.ReviewCi
   alias Arbiter.Worker.Watchdog
+  alias Arbiter.Workflows.DispatchQueue
 
   @type column ::
           :backlog | :blocked | :ready | :in_progress | :merging | :verifying | :closed
@@ -374,12 +375,34 @@ defmodule Arbiter.Tasks.Lifecycle.View do
     authors = author_runs(runs, id)
 
     cond do
-      Enum.any?(runs, &(run_class(&1) == :running)) -> :live
-      match?(%{state: :waiting}, primary(runs, id)) -> :question
-      authors != [] and Enum.all?(authors, &(run_class(&1) == :waiting)) -> :failed
-      authors == [] and Map.has_key?(ctx, :runs) and orphaned?(ticket, ctx) -> :orphaned
-      true -> nil
+      Enum.any?(runs, &(run_class(&1) == :running)) ->
+        :live
+
+      match?(%{state: :waiting}, primary(runs, id)) ->
+        :question
+
+      authors != [] and Enum.all?(authors, &(run_class(&1) == :waiting)) ->
+        held_or(:failed, ticket, ctx)
+
+      authors == [] and Map.has_key?(ctx, :runs) and orphaned?(ticket, ctx) ->
+        held_or(:orphaned, ticket, ctx)
+
+      true ->
+        nil
     end
+  end
+
+  # bd-zkmvia: a ticket whose next round the quota gate is holding has no run
+  # on purpose and resumes by itself — it is not a crash. `ctx.held` wins; else
+  # the workspace's DispatchQueue is asked, only once a crash is the verdict.
+  defp held_or(fact, ticket, ctx) do
+    held =
+      case Map.fetch(ctx, :held) do
+        {:ok, held} -> held == true
+        :error -> DispatchQueue.held?(Map.get(ticket, :workspace_id), Map.get(ticket, :id))
+      end
+
+    if held, do: :held, else: fact
   end
 
   # The block that reads as `:merge_blocked` in `merging_step/2`: a conflict,
