@@ -341,6 +341,20 @@ defmodule ArbiterWeb.EpicIndexLiveTest do
       refute has_element?(view, "#epic-#{e.id} [data-role='needs-you-chips']")
       refute has_element?(view, "#epic-#{busy.id}-chip-idle")
     end
+
+    test "unblocked Backlog leaves show a ready-to-promote chip (bd-b1b3mp)",
+         %{conn: conn, ws: ws} do
+      e = epic(ws, "tail-epic")
+      child(ws, e, "b1", :backlog)
+
+      none = epic(ws, "no-tail-epic")
+      child(ws, none, "r1", :ready)
+
+      {:ok, view, _html} = live_epics!(conn, ~p"/epics")
+
+      assert has_element?(view, "#epic-#{e.id}-chip-ready-to-promote", "1 ready to promote")
+      refute has_element?(view, "#epic-#{none.id}-chip-ready-to-promote")
+    end
   end
 
   describe "filters" do

@@ -57,6 +57,11 @@ defmodule Arbiter.Tasks.EpicRollup do
   when it is a child of the epic. A paused Autopilot is a deliberate operator act,
   not a rule here either.
 
+  `ready_to_promote` (bd-b1b3mp, ES8) counts the unblocked Backlog leaves —
+  children in the `:backlog` bucket that are not epics and are held by no
+  open gating edge. It is a visibility field only; promotion stays the
+  operator's call.
+
   `blocked_children` and `idle_with_ready_work` stay on the rollup as
   informational counts — the page still shows them as neutral chips — they
   just no longer drive the attention style on their own.
@@ -97,6 +102,7 @@ defmodule Arbiter.Tasks.EpicRollup do
           closed: non_neg_integer(),
           percent_complete: non_neg_integer(),
           blocked_children: non_neg_integer(),
+          ready_to_promote: non_neg_integer(),
           awaiting_verification: non_neg_integer(),
           idle_with_ready_work: boolean(),
           needs_you: boolean(),
@@ -192,6 +198,9 @@ defmodule Arbiter.Tasks.EpicRollup do
     blocked_children = Enum.count(children, &MapSet.member?(ctx.blocked, &1.id))
     idle? = counts.running == 0 and counts.ready > 0
 
+    ready_to_promote =
+      Enum.count(children, &promotable_backlog?(&1, ctx))
+
     {needs_you, reasons} = needs_you_signal(children, ctx)
 
     %{
@@ -201,12 +210,20 @@ defmodule Arbiter.Tasks.EpicRollup do
       closed: counts.closed,
       percent_complete: percent(counts.closed, total),
       blocked_children: blocked_children,
+      ready_to_promote: ready_to_promote,
       awaiting_verification: counts.waiting,
       idle_with_ready_work: idle?,
       needs_you: needs_you,
       needs_you_reasons: reasons,
       last_child_activity_at: last_activity(children)
     }
+  end
+
+  # bd-b1b3mp (ES8): an unblocked Backlog leaf — the work an operator could
+  # promote today. Display only; nothing promotes it automatically.
+  defp promotable_backlog?(child, ctx) do
+    child.issue_type != :epic and bucket(child, ctx) == :backlog and
+      not MapSet.member?(ctx.blocked, child.id)
   end
 
   # The board's column for this child (bd-6zapbl). Blockers only split Blocked

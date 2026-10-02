@@ -78,6 +78,7 @@ defmodule Arbiter.Messages.EscalationKind do
   ]
 
   @system_kinds [
+    :backlog_tail_digest,
     :autopilot_state_unreadable,
     :budget_exceeded,
     :circuit_breaker_tripped,

@@ -576,7 +576,10 @@ defmodule ArbiterWeb.EpicIndexLive do
         </div>
 
         <div
-          :if={@row.rollup.blocked_children > 0 or @row.rollup.idle_with_ready_work}
+          :if={
+            @row.rollup.blocked_children > 0 or @row.rollup.idle_with_ready_work or
+              @row.rollup.ready_to_promote > 0
+          }
           class="flex flex-wrap items-center gap-1.5"
           data-role="info-chips"
         >
@@ -593,6 +596,14 @@ defmodule ArbiterWeb.EpicIndexLive do
             class="badge badge-ghost text-[9.5px] font-[family-name:var(--font-mono)]"
           >
             queued
+          </span>
+          <span
+            :if={@row.rollup.ready_to_promote > 0}
+            id={"epic-#{@row.epic.id}-chip-ready-to-promote"}
+            class="badge badge-ghost text-[9.5px] font-[family-name:var(--font-mono)]"
+            title="Unblocked Backlog leaves you could promote to Ready"
+          >
+            {@row.rollup.ready_to_promote} ready to promote
           </span>
         </div>
       </div>
