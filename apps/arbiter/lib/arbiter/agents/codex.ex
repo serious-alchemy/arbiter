@@ -110,7 +110,7 @@ defmodule Arbiter.Agents.Codex do
       {:ok, codex} ->
         with {:ok, model_flags} <- model_flag(opts) do
           policy = security_policy(opts)
-          flags = sandbox_argv(policy, opts) ++ model_flags ++ mcp_argv(opts)
+          flags = sandbox_argv(policy, opts) ++ model_flags ++ effort_argv(opts) ++ mcp_argv(opts)
 
           # bd-btcdrf: refuse a backend with no implementation for every Codex
           # spawn (implementer, strict reviewer included), not just the ones
@@ -533,6 +533,21 @@ defmodule Arbiter.Agents.Codex do
   # `-s` is rejected by `codex exec resume` ("unexpected argument '-s'"), but
   # `-c` is accepted by both `exec` and `exec resume`, so express the sandbox
   # as a config override to keep resume working under :strict/:auto.
+  # The routing thinking level → `-c model_reasoning_effort="<level>"`. A config
+  # override, so it is backend-neutral (any Responses-API `model_provider`).
+  # "none"/nil/unknown emit nothing: the operator's config.toml effort stands.
+  @effort_levels ~w(low medium high xhigh max)
+
+  defp effort_argv(opts) do
+    case Keyword.get(opts, :thinking) do
+      level when level in @effort_levels ->
+        ["-c", "model_reasoning_effort=#{inspect(level)}"]
+
+      _ ->
+        []
+    end
+  end
+
   defp sandbox_mode_config(mode), do: ["-c", "sandbox_mode=#{inspect(mode)}"]
 
   # Codex only loads `<worktree>/.codex/config.toml` when the project is trusted
