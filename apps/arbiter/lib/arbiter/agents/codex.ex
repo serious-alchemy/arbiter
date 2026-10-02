@@ -110,7 +110,7 @@ defmodule Arbiter.Agents.Codex do
       {:ok, codex} ->
         with {:ok, model_flags} <- model_flag(opts) do
           policy = security_policy(opts)
-          flags = sandbox_argv(policy, opts) ++ model_flags ++ mcp_argv(opts)
+          flags = sandbox_argv(policy, opts) ++ model_flags ++ effort_argv(opts) ++ mcp_argv(opts)
 
           # bd-btcdrf: refuse a backend with no implementation for every Codex
           # spawn (implementer, strict reviewer included), not just the ones
@@ -129,7 +129,11 @@ defmodule Arbiter.Agents.Codex do
   # Base `codex exec` flags shared by every spawn: JSON event stream + tolerate
   # linked worktrees (whose `.git` is a file, which Codex's repo check can trip
   # on). Callers append sandbox + model flags, then the `--`/prompt tail.
-  @base_exec_flags ["--json", "--skip-git-repo-check"]
+  # `--ignore-user-config` (bd-4vgxwi, G5 stopgap) stops workers inheriting the
+  # operator's `$CODEX_HOME/config.toml` (model, effort, profiles, personal MCP
+  # servers); auth still comes from CODEX_HOME. Everything the worker needs
+  # (model, effort, MCP, sandbox) is therefore passed explicitly below.
+  @base_exec_flags ["--json", "--skip-git-repo-check", "--ignore-user-config"]
   @inline_prompt_script ~s(exec "$@" < /dev/null)
   @stdin_prompt_script ~s(f="$1"; shift; exec "$@" < "$f")
 
@@ -555,6 +559,22 @@ defmodule Arbiter.Agents.Codex do
         else
           []
         end
+
+      _ ->
+        []
+    end
+  end
+
+  # Reasoning effort is set explicitly because the operator's config no longer
+  # supplies it; with no `:thinking` opt the Codex default applies.
+  @doc false
+  def effort_argv(opts) do
+    case Keyword.get(opts, :thinking) do
+      level when level in ["minimal", "low", "medium", "high"] ->
+        ["-c", "model_reasoning_effort=#{inspect(level)}"]
+
+      level when level in [:minimal, :low, :medium, :high] ->
+        ["-c", "model_reasoning_effort=#{inspect(Atom.to_string(level))}"]
 
       _ ->
         []

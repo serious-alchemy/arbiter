@@ -126,6 +126,18 @@ defmodule Arbiter.Agents.CodexTest do
       end
     end
 
+    test "ignores the operator's ~/.codex config and sets effort explicitly", %{tmp: tmp} do
+      stub_codex(tmp)
+
+      assert {:ok, argv} = Codex.default_argv("p", thinking: "high")
+      assert "--ignore-user-config" in argv
+      assert "model_reasoning_effort=\"high\"" in argv
+
+      assert {:ok, argv} = Codex.default_argv("p", [])
+      assert "--ignore-user-config" in argv
+      refute Enum.any?(argv, &String.starts_with?(&1, "model_reasoning_effort"))
+    end
+
     test "builds a `codex exec --json` invocation wrapped for closed stdin", %{tmp: tmp} do
       codex = stub_codex(tmp)
 
