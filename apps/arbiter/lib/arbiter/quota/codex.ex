@@ -52,6 +52,7 @@ defmodule Arbiter.Quota.Codex do
   require Ash.Query
 
   alias Arbiter.Quota.CodexQuota
+  alias Arbiter.Quota.Gate.Snapshot
 
   @stub_name __MODULE__.HTTP
   @default_usage_url "https://chatgpt.com/backend-api/wham/usage"
@@ -250,6 +251,8 @@ defmodule Arbiter.Quota.Codex do
         }
         |> put_window(:session_used_percent, :session_reset_at, session)
         |> put_window(:weekly_used_percent, :weekly_reset_at, weekly)
+        |> put_minutes(:session_window_minutes, session)
+        |> put_minutes(:weekly_window_minutes, weekly)
 
       {:ok, attrs}
     end
@@ -278,6 +281,22 @@ defmodule Arbiter.Quota.Codex do
     attrs
     |> Map.put(used_key, used_percent(win))
     |> Map.put(reset_key, reset_at(win))
+  end
+
+  # The window's length, stored as whole minutes. `wham/usage` reports
+  # `limit_window_seconds`; `window_minutes` is accepted as an alias. Omitted
+  # when absent or non-positive so the upsert leaves the column as it was.
+  defp put_minutes(attrs, _key, nil), do: attrs
+
+  defp put_minutes(attrs, key, win) do
+    seconds = get_any(win, ["limit_window_seconds", "window_seconds"])
+    minutes = get_any(win, ["window_minutes", "limit_window_minutes"])
+
+    cond do
+      is_number(seconds) and seconds > 0 -> Map.put(attrs, key, round(seconds / 60))
+      is_number(minutes) and minutes > 0 -> Map.put(attrs, key, round(minutes))
+      true -> attrs
+    end
   end
 
   defp used_percent(win) do
@@ -339,7 +358,9 @@ defmodule Arbiter.Quota.Codex do
     weekly_pct = row.weekly_used_percent
 
     secondary_label =
-      if not is_nil(weekly_pct) and not is_nil(row.weekly_reset_at), do: "weekly", else: nil
+      if not is_nil(weekly_pct) and not is_nil(row.weekly_reset_at),
+        do: Snapshot.codex_window_label(row.weekly_window_minutes, "weekly"),
+        else: nil
 
     Arbiter.Quota.blank_view(row.provider)
     |> Map.merge(%{
@@ -350,7 +371,7 @@ defmodule Arbiter.Quota.Codex do
       reset_7d_at: if(secondary_label, do: row.weekly_reset_at, else: nil),
       captured_at: row.captured_at,
       plan: row.plan,
-      primary_label: "session",
+      primary_label: Snapshot.codex_window_label(row.session_window_minutes, "session"),
       secondary_label: secondary_label
     })
   end
