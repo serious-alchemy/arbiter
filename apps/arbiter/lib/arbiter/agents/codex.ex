@@ -48,14 +48,34 @@ defmodule Arbiter.Agents.Codex do
   real kernel jail (Landlock/seccomp on Linux), stronger than Claude's
   permission-level guard, but the category-level deny contract is not
   expressible, hence the honest `false`.
+
+  ## Read-only reviewer (G12, bd-yoiv39)
+
+  Codex ignores the reviewer's `Edit`/`Write` deny list, and `:bypass` hands it
+  full access, so a Codex reviewer could write to the branch it is reviewing.
+  `-s read-only` is not the answer: it also cuts the network, which the
+  reviewer needs for `gh`. A review dispatch (the policy carries the
+  `Write` deny that `Dispatch.review_security_policy/2` adds) is therefore
+  wrapped in `Arbiter.Worker.Jail`'s bwrap jail with the worktree `--ro-bind`ed
+  and the network shared, the same posture agy's reviewer gets. `$CODEX_HOME`
+  stays writable (session rollouts, token refresh). Codex's own sandbox flags
+  are untouched inside the jail; the kernel is the enforcement. A host that
+  can't jail falls back to the unwrapped argv with a warning, as agy does
+  outside `:strict`. The jail is keyed on the policy and worktree only, never
+  on the model backend, so a Codex+Ollama / Responses-API reviewer is confined
+  identically.
   """
 
   @behaviour Arbiter.Agents.Agent
 
   alias Arbiter.Agents.Codex.Config
   alias Arbiter.Agents.Codex.Stream
+  alias Arbiter.Agents.Codex.ModelCatalog
   alias Arbiter.Agents.SecurityPolicy
+  alias Arbiter.Worker.Jail
   alias Arbiter.Worker.StopReason
+
+  require Logger
 
   @done_regex ~r/(?:\A|\n)[^\p{L}\p{N}\n]*arb done[^\p{L}\p{N}]*\z/u
 
@@ -89,8 +109,12 @@ defmodule Arbiter.Agents.Codex do
     case resolve_executable() do
       {:ok, codex} ->
         with {:ok, model_flags} <- model_flag(opts) do
-          flags = sandbox_argv(security_policy(opts)) ++ model_flags ++ mcp_argv(opts)
-          build_argv(codex, prompt, flags)
+          policy = security_policy(opts)
+          flags = sandbox_argv(policy) ++ model_flags ++ mcp_argv(opts)
+
+          with {:ok, argv} <- build_argv(codex, prompt, flags) do
+            maybe_jail_reviewer(argv, policy, opts)
+          end
         end
 
       {:error, _} = err ->
@@ -142,7 +166,9 @@ defmodule Arbiter.Agents.Codex do
   # worker unlink the file once the spawned port exits.
   @doc false
   def prompt_tmpfile(argv) when is_list(argv) do
-    case Enum.at(argv, 4) do
+    {_jail, inner} = split_jail(argv)
+
+    case Enum.at(inner, 4) do
       path when is_binary(path) -> if tmpfile_path?(path), do: path, else: nil
       _ -> nil
     end
@@ -153,12 +179,14 @@ defmodule Arbiter.Agents.Codex do
   # `{:error, :no_print_slot}` when `argv` has no `--` flag at all.
   @doc false
   def splice_prompt(argv, insert) when is_list(argv) and is_list(insert) do
-    case Enum.find_index(argv, &(&1 == "--")) do
+    {jail, inner} = split_jail(argv)
+
+    case Enum.find_index(inner, &(&1 == "--")) do
       nil ->
         {:error, :no_print_slot}
 
       dash_idx ->
-        {head, ["--" | _tail]} = Enum.split(argv, dash_idx)
+        {head, ["--" | _tail]} = Enum.split(inner, dash_idx)
 
         {head, new_tail} =
           case insert do
@@ -192,9 +220,63 @@ defmodule Arbiter.Agents.Codex do
               {head, new_tail}
           end
 
-        {:ok, head ++ ["--"] ++ new_tail}
+        {:ok, jail ++ head ++ ["--"] ++ new_tail}
     end
   end
+
+  # A jailed argv (`maybe_jail_reviewer/3`) is `bwrap ... -- <sh wrapper>`; the
+  # prompt helpers address the wrapper's own positions and its own `--`, so
+  # peel the bwrap prefix off first. An unjailed argv has an empty prefix.
+  defp split_jail(["sh" | _] = argv), do: {[], argv}
+
+  defp split_jail(argv) do
+    case Enum.find_index(argv, &(&1 == "--")) do
+      nil -> {[], argv}
+      idx -> Enum.split(argv, idx + 1)
+    end
+  end
+
+  # A review dispatch is the one carrying the `Write` deny (see
+  # `Dispatch.review_security_policy/2`); `strict` is already `-s read-only`.
+  defp maybe_jail_reviewer(argv, %SecurityPolicy{permissions: %{mode: :strict}}, _opts),
+    do: {:ok, argv}
+
+  defp maybe_jail_reviewer(argv, %SecurityPolicy{permissions: permissions}, opts) do
+    worktree = Keyword.get(opts, :worktree) || Keyword.get(opts, :worktree_path)
+
+    if "Write" in Map.get(permissions, :deny, []) and is_binary(worktree) do
+      jail_reviewer(argv, worktree)
+    else
+      {:ok, argv}
+    end
+  end
+
+  defp jail_reviewer(argv, worktree) do
+    result =
+      with :ok <- Jail.status() do
+        Jail.wrap(argv,
+          worktree: worktree,
+          worktree_readonly: true,
+          writable_paths: [ModelCatalog.codex_home() | prompt_tmpfiles(argv)]
+        )
+      end
+
+    case result do
+      {:ok, jailed} ->
+        {:ok, jailed}
+
+      {:error, reason} ->
+        Logger.warning(
+          "codex reviewer write jail unavailable (#{inspect(reason)}); running unconfined"
+        )
+
+        {:ok, argv}
+    end
+  end
+
+  # An oversize prompt lives in a host /tmp file, and the jail's /tmp is a
+  # private tmpfs, so it has to be bound through.
+  defp prompt_tmpfiles(argv), do: List.wrap(prompt_tmpfile(argv))
 
   defp tmpfile_path?(path), do: Path.basename(path) |> String.starts_with?(@prompt_tmp_prefix)
 
