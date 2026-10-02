@@ -1,78 +1,33 @@
 name: CI
 
+# Cache scoping: GitHub lets a run restore caches saved on its own ref or on
+# the default branch, never on a sibling PR ref. Nothing used to run on main,
+# so no cache existed there and every PR started cold (and saved its own
+# per-PR copy, pushing storage over the 10 GB quota). Now only the `push` to
+# main run SAVES caches (the "Save ..." steps are gated on
+# github.event_name == 'push'); PR runs only restore, falling back to main's.
 on:
   pull_request:
+  push:
+    branches: [main]
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Never cancel a main run: it is the one that seeds the caches.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # Arbiter's merger (apps/arbiter/lib/arbiter/mergers/github.ex) does not
-  # honor GitHub's "required check" designation — it reads every check run's
-  # conclusion on the PR head SHA uniformly (map_check_run_status/1) and, if
-  # any is non-success, reports pipeline: :failed. The Watchdog then treats
-  # that as :ci_failed: it dispatches a fix-pass acolyte, and once auto-resolve
-  # attempts are exhausted, parks the worker indefinitely. So "non-required"
-  # has no meaning to Arbiter — any job in this workflow must be able to stay
-  # green, or it will block merges outright. This job (compile/deps/format) is
-  # reliably green on main as of this writing, and is exactly what would have
-  # caught both incidents that motivated this workflow: a repo-wide format
-  # drift (PR #1135) and a warnings-as-error violation on main (#1131). Wall
-  # clock has not yet been measured on a warm cache; record it here once a
-  # second run on this branch (or a follow-up PR) restores the cache.
-  lint:
-    name: mix precommit (compile, deps, format)
-    runs-on: ubuntu-latest
-    env:
-      MIX_ENV: test
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Erlang/Elixir
-        uses: erlef/setup-beam@v1
-        with:
-          otp-version: "28.5"
-          elixir-version: "1.19.4"
-
-      - name: Restore deps/build cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            deps
-            _build
-          key: ${{ runner.os }}-otp28.5-elixir1.19.4-mix-${{ hashFiles('**/mix.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-otp28.5-elixir1.19.4-mix-
-
-      - name: Install hex/rebar
-        run: |
-          mix local.hex --force
-          mix local.rebar --force
-
-      - name: Fetch dependencies
-        run: mix deps.get
-
-      # `mix precommit`'s `format` step rewrites files in place, which is the
-      # right thing for a worker about to commit but the wrong thing here: CI
-      # must fail on a violation, not silently fix it. Run the same checks the
-      # alias runs (mix.exs `precommit`), swapping in `format --check-formatted`.
-      - name: Compile (warnings as errors)
-        run: mix compile --warnings-as-errors
-
-      - name: Check for unused dependencies
-        run: |
-          mix deps.unlock --unused
-          git diff --exit-code mix.lock
-
-      - name: Check formatting
-        run: mix format --check-formatted
-
   # Static analysis + security scan: the umbrella-root `mix audit` alias
   # (see mix.exs), which runs deps.unlock --check-unused, format
   # --check-formatted, compile --warnings-as-errors, credo --strict, sobelow
   # per app, and dialyzer.
+  #
+  # This job also subsumes the former `lint` job (mix precommit: compile
+  # --warnings-as-errors, deps.unlock --check-unused, format check): the
+  # `audit` alias already runs all three, so `lint` only repeated them. It
+  # also raced `test` to save the identical MIX_ENV=test `-mix-` cache key.
+  # Merged rather than re-keyed because that removes a runner and a cold
+  # compile instead of just de-duplicating the cache.
   #
   # Same constraint as every other job here: the merger reads this check
   # run's conclusion and blocks the merge on anything but success, so this
@@ -100,7 +55,8 @@ jobs:
           elixir-version: "1.19.4"
 
       - name: Restore deps/build cache
-        uses: actions/cache@v4
+        id: cache1
+        uses: actions/cache/restore@v4
         with:
           path: |
             deps
@@ -119,7 +75,8 @@ jobs:
       # the umbrella root AND all three child apps (`../../priv/plts`), so
       # there is exactly one PLT here, not three.
       - name: Restore dialyzer PLT
-        uses: actions/cache@v4
+        id: cache2
+        uses: actions/cache/restore@v4
         with:
           path: priv/plts
           key: ${{ runner.os }}-otp28.5-elixir1.19.4-plt-${{ hashFiles('**/mix.lock') }}
@@ -136,6 +93,22 @@ jobs:
 
       - name: mix audit
         run: mix audit
+
+      - name: Save deps/build cache
+        if: ${{ !cancelled() && github.event_name == 'push' && steps.cache1.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-otp28.5-elixir1.19.4-audit-${{ hashFiles('**/mix.lock') }}
+
+      - name: Save dialyzer PLT
+        if: ${{ !cancelled() && github.event_name == 'push' && steps.cache2.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: priv/plts
+          key: ${{ runner.os }}-otp28.5-elixir1.19.4-plt-${{ hashFiles('**/mix.lock') }}
 
   # NOTE: there was deliberately NO `mix test` job here for a while.
   #
@@ -202,7 +175,8 @@ jobs:
           elixir-version: "1.19.4"
 
       - name: Restore deps/build cache
-        uses: actions/cache@v4
+        id: cache3
+        uses: actions/cache/restore@v4
         with:
           path: |
             deps
@@ -226,3 +200,12 @@ jobs:
 
       - name: Run tests
         run: mix test
+
+      - name: Save deps/build cache
+        if: ${{ !cancelled() && github.event_name == 'push' && steps.cache3.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-otp28.5-elixir1.19.4-mix-${{ hashFiles('**/mix.lock') }}
