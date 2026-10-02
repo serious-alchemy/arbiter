@@ -160,7 +160,12 @@ defmodule Arbiter.Quota.Gate do
   # Built-in window lengths by snapshot window label — the second step of
   # `window_seconds/2`. Codex "session" (a session reset, not a fixed-length
   # window) and Antigravity's collapsed "used" (no time window) are absent.
-  @builtin_window_seconds %{"5h" => 18_000, "7d" => 604_800, "weekly" => 604_800}
+  @builtin_window_seconds %{
+    "5h" => 18_000,
+    "7d" => 604_800,
+    "weekly" => 604_800,
+    "30d" => 2_592_000
+  }
 
   # Staleness thresholds, per `capture_source` — see
   # `staleness_threshold_seconds/1` for why the polled source gets four times
@@ -514,7 +519,8 @@ defmodule Arbiter.Quota.Gate do
 
     1. the account's `quota_config["window_seconds"][label]` — custom
        contracts and non-standard tiers;
-    2. the built-in table: `"5h"` → 18_000, `"7d"` / `"weekly"` → 604_800;
+    2. the built-in table: `"5h"` → 18_000, `"7d"` / `"weekly"` → 604_800,
+       `"30d"` → 2_592_000 (Codex free); a `"<n>m"` label is n minutes;
     3. `nil` — Codex `"session"` (a session reset, not a fixed-length window)
        and Antigravity's collapsed `"used"` (no time window) by default.
 
@@ -529,8 +535,23 @@ defmodule Arbiter.Quota.Gate do
   """
   @spec window_seconds(String.t() | nil, ProviderAccount.t() | nil) :: pos_integer() | nil
   def window_seconds(label, account \\ nil) do
-    account_window_seconds(account, label) || Map.get(@builtin_window_seconds, label)
+    account_window_seconds(account, label) || Map.get(@builtin_window_seconds, label) ||
+      minutes_label_seconds(label)
   end
+
+  # A `"<n>m"` label (a Codex window of a length with no named label, derived
+  # from the stored `window_minutes` — bd-7lkvb6) is n minutes long.
+  defp minutes_label_seconds(label) when is_binary(label) do
+    case Regex.run(~r/\A(\d+)m\z/, label) do
+      [_, n] -> n |> String.to_integer() |> Kernel.*(60) |> positive_or_nil()
+      _ -> nil
+    end
+  end
+
+  defp minutes_label_seconds(_), do: nil
+
+  defp positive_or_nil(n) when n > 0, do: n
+  defp positive_or_nil(_), do: nil
 
   defp account_window_seconds(account, label) do
     case account |> account_config() |> Map.get("window_seconds") do
@@ -1240,7 +1261,7 @@ defmodule Arbiter.Quota.Gate do
 
   # The long windows are the ones the secondary mapping names; everything else
   # ("5h", "session", "used", "primary") is the short/primary window.
-  defp primary_window?(window), do: window not in ["7d", "weekly"]
+  defp primary_window?(window), do: window not in ["7d", "weekly", "30d"]
 
   defp percent(n) when is_number(n), do: "#{round(n * 100)}%"
   defp percent(_), do: "—"

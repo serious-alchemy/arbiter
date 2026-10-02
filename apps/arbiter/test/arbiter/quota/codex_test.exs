@@ -66,6 +66,38 @@ defmodule Arbiter.Quota.CodexTest do
       assert attrs.session_used_percent == 100.0
     end
 
+    test "persists limit_window_seconds per window as window minutes" do
+      body = %{
+        "rate_limit" => %{
+          "primary_window" => %{"used_percent" => 1.0, "limit_window_seconds" => 18_000},
+          "secondary_window" => %{"used_percent" => 2.0, "window_minutes" => 10_080}
+        }
+      }
+
+      assert {:ok, attrs} = Codex.normalize(body)
+      assert attrs.session_window_minutes == 300
+      assert attrs.weekly_window_minutes == 10_080
+    end
+
+    test "view/1 labels windows from stored length so the bar can pace" do
+      row = %Arbiter.Quota.CodexQuota{
+        provider: "codex",
+        session_used_percent: 40.0,
+        session_window_minutes: 43_200,
+        session_reset_at: DateTime.utc_now()
+      }
+
+      view = Codex.view(row)
+      assert view.primary_label == "30d"
+      assert Arbiter.Quota.Gate.window_seconds("30d", nil) == 2_592_000
+      assert Codex.view(%{row | session_window_minutes: nil}).primary_label == "session"
+    end
+
+    test "omits window minutes when the endpoint reports no length" do
+      assert {:ok, attrs} = Codex.normalize(@usage_body)
+      refute Map.has_key?(attrs, :session_window_minutes)
+    end
+
     test "is a no-op when no window data is present" do
       assert Codex.normalize(%{"plan_type" => "plus"}) == :noop
       assert Codex.normalize(%{}) == :noop

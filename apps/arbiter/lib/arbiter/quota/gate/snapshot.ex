@@ -155,18 +155,34 @@ defmodule Arbiter.Quota.Gate.Snapshot do
       status: if(q.limit_reached == true, do: "limit_reached"),
       reset_at: q.session_reset_at,
       captured_at: q.captured_at,
-      window_label: "session",
+      window_label: codex_window_label(q.session_window_minutes, "session"),
       secondary_utilization: fraction(q.weekly_used_percent),
       # Codex reports one `limit_reached` flag for the account, not per window;
       # it is already carried on the primary window, so the weekly window gates
       # on utilization alone.
       secondary_status: nil,
       secondary_reset_at: q.weekly_reset_at,
-      secondary_window_label: "weekly"
+      secondary_window_label: codex_window_label(q.weekly_window_minutes, "weekly")
     }
   end
 
   def normalize(_other, _opts), do: nil
+
+  # Label a Codex window from its stored length (bd-7lkvb6) so
+  # `Gate.window_seconds/2` can resolve it: Plus's 5h and weekly windows and
+  # free's single 30-day window get the labels the built-in table knows; any
+  # other length becomes "<n>m", which `window_seconds/2` also parses. No
+  # stored length (a row captured before the columns existed) keeps `fallback`.
+  @doc false
+  @spec codex_window_label(integer() | nil, String.t()) :: String.t()
+  def codex_window_label(minutes, _fallback) when minutes == 300, do: "5h"
+  def codex_window_label(minutes, _fallback) when minutes == 10_080, do: "weekly"
+  def codex_window_label(minutes, _fallback) when minutes == 43_200, do: "30d"
+
+  def codex_window_label(minutes, _fallback) when is_integer(minutes) and minutes > 0,
+    do: "#{minutes}m"
+
+  def codex_window_label(_minutes, fallback), do: fallback
 
   # The pre-bd-7qj58o representative-used-percent projection: a single
   # collapsed "worst of everything" figure with no secondary window. Still
