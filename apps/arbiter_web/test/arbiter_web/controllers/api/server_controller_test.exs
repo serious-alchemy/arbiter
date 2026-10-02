@@ -282,4 +282,35 @@ defmodule ArbiterWeb.Api.ServerControllerTest do
       end
     end
   end
+
+  # bd-5yydxh (G10): the doctor's "egress jail" self-test. The jail-presence
+  # half is the `:worker_jail_network_available` override, so these run the
+  # real proxy and local stand-in on any host.
+  describe "GET /api/server/egress_jail" do
+    setup do
+      on_exit(fn -> Application.delete_env(:arbiter, :worker_jail_network_available) end)
+      :ok
+    end
+
+    test "reports available with 1 allow and 1 deny when the jail and proxy work", %{conn: conn} do
+      Application.put_env(:arbiter, :worker_jail_network_available, true)
+
+      resp = conn |> get("/api/server/egress_jail") |> json_response(200)
+
+      assert resp["available"] == true
+      assert resp["allowed"] == 1
+      assert resp["denied"] == 1
+    end
+
+    test "reports cause, message and fix when the jail prerequisites are missing", %{conn: conn} do
+      Application.put_env(:arbiter, :worker_jail_network_available, false)
+
+      resp = conn |> get("/api/server/egress_jail") |> json_response(200)
+
+      assert resp["available"] == false
+      assert is_binary(resp["cause"])
+      assert is_binary(resp["message"])
+      assert Map.has_key?(resp, "fix")
+    end
+  end
 end

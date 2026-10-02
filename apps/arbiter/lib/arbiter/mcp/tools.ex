@@ -1991,7 +1991,14 @@ defmodule Arbiter.MCP.Tools do
       description: ws.description,
       prefix: ws.prefix,
       config: ws.config || %{},
-      security: SecurityPolicy.summary(SecurityPolicy.resolve(ws))
+      security:
+        ws
+        |> SecurityPolicy.resolve()
+        |> SecurityPolicy.summary()
+        |> Map.put(
+          "repos",
+          Map.new(SecurityPolicy.repo_egress(ws), fn {r, e} -> {r, %{"egress" => e}} end)
+        )
     }
   end
 

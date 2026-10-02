@@ -44,6 +44,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       check_agy_write_jail(),
       check_agy_jail_escape(),
       check_agy_jail_network(),
+      check_egress_jail(),
       check_agy_ssh_transport(),
       check_tmux(),
       check_claude_worker_credentials(),
@@ -741,6 +742,47 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       _ ->
         %Result{
           name: "agy jail network",
+          status: :ok,
+          detail: "server unreachable or predates this check — skipping",
+          fatal: false,
+          blocks_readiness: false
+        }
+    end
+  end
+
+  # bd-5yydxh (G10, design §7.3): `egress: allowlist` / `none` are only as good
+  # as the host's ability to run the egress jail. The server runs the
+  # self-test: `bwrap --unshare-net` and `socat` present, a proxy listener up,
+  # and against a local stand-in (no internet) 1 allow and 1 deny.
+  # `Arbiter.Worker.Egress.SelfTest` via `/api/server/egress_jail`. A FAIL is
+  # non-fatal: `egress: open`, the default, does not need it.
+  defp check_egress_jail do
+    case Client.get("/api/server/egress_jail") do
+      {:ok, %{"available" => true} = body} ->
+        %Result{
+          name: "egress jail",
+          status: :ok,
+          detail:
+            "bwrap --unshare-net and socat present; proxy listener up; self-test against a " <>
+              "local stand-in saw #{Map.get(body, "allowed", 1)} allow and " <>
+              "#{Map.get(body, "denied", 1)} deny",
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      {:ok, %{"available" => false, "message" => message} = body} ->
+        %Result{
+          name: "egress jail",
+          status: :fail,
+          detail: "`egress: allowlist` / `none` cannot be enforced on this host: #{message}",
+          hint: Map.get(body, "fix") || "See Arbiter.Worker.Egress.SelfTest (bd-5yydxh).",
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      _ ->
+        %Result{
+          name: "egress jail",
           status: :ok,
           detail: "server unreachable or predates this check — skipping",
           fatal: false,

@@ -20,7 +20,9 @@ defmodule Arbiter.Agents.SecurityPolicyTest do
                filesystem: :worktree,
                network: true,
                writable_paths: [],
-               egress_tunnels: []
+               egress_tunnels: [],
+               egress: :open,
+               allow_hosts: []
              }
     end
 
@@ -179,6 +181,214 @@ defmodule Arbiter.Agents.SecurityPolicyTest do
 
     test "none by default" do
       assert SecurityPolicy.egress_tunnels(SecurityPolicy.base()) == []
+    end
+  end
+
+  describe "sandbox.egress and sandbox.allow_hosts (bd-5yydxh, G10)" do
+    defp egress_ws(security, repos \\ nil) do
+      security = if repos, do: Map.put(security, "repos", repos), else: security
+      %Workspace{config: %{"agent" => %{"security" => security}}}
+    end
+
+    test "the default is open with no allow_hosts, so an unconfigured workspace is unchanged" do
+      p = SecurityPolicy.resolve(%Workspace{config: %{}})
+
+      assert p.sandbox.egress == :open
+      assert p.sandbox.allow_hosts == []
+      assert SecurityPolicy.resolve(nil).sandbox.egress == :open
+    end
+
+    test "valid_egress_levels/0 lists the three levels, loosest first" do
+      assert SecurityPolicy.valid_egress_levels() == [:open, :allowlist, :none]
+    end
+
+    test "installation (app env) -> workspace -> repo -> dispatch: egress is replaced by the highest layer" do
+      prev = Application.get_env(:arbiter, :worker_security_policy)
+
+      on_exit(fn ->
+        if prev,
+          do: Application.put_env(:arbiter, :worker_security_policy, prev),
+          else: Application.delete_env(:arbiter, :worker_security_policy)
+      end)
+
+      Application.put_env(:arbiter, :worker_security_policy, %{sandbox: %{egress: :allowlist}})
+
+      ws = %Workspace{config: %{}}
+      assert SecurityPolicy.resolve(ws).sandbox.egress == :allowlist
+
+      ws =
+        egress_ws(%{"sandbox" => %{"egress" => "none"}}, %{
+          "tonic" => %{"sandbox" => %{"egress" => "open"}}
+        })
+
+      assert SecurityPolicy.resolve(ws).sandbox.egress == :none
+      assert SecurityPolicy.resolve(ws, %{}, "tonic").sandbox.egress == :open
+      assert SecurityPolicy.resolve(ws, %{}, "other").sandbox.egress == :none
+
+      assert SecurityPolicy.resolve(ws, %{"sandbox" => %{"egress" => "allowlist"}}, "tonic").sandbox.egress ==
+               :allowlist
+    end
+
+    test "allow_hosts union across installation, workspace, repo and dispatch, de-duplicated" do
+      ws =
+        egress_ws(
+          %{"sandbox" => %{"allow_hosts" => ["repo.hex.pm:443", "builds.hex.pm:443"]}},
+          %{
+            "tonic" => %{
+              "sandbox" => %{"allow_hosts" => ["repo.hex.pm:443", "*.example.org:443"]}
+            }
+          }
+        )
+
+      assert SecurityPolicy.resolve(ws).sandbox.allow_hosts == [
+               "repo.hex.pm:443",
+               "builds.hex.pm:443"
+             ]
+
+      assert SecurityPolicy.resolve(ws, %{}, "tonic").sandbox.allow_hosts ==
+               ["repo.hex.pm:443", "builds.hex.pm:443", "*.example.org:443"]
+
+      assert SecurityPolicy.resolve(
+               ws,
+               %{"sandbox" => %{"allow_hosts" => ["api.x.io:443"]}},
+               "tonic"
+             ).sandbox.allow_hosts ==
+               ["repo.hex.pm:443", "builds.hex.pm:443", "*.example.org:443", "api.x.io:443"]
+    end
+
+    test "egress is independent of security.mode: setting one never moves the other" do
+      ws =
+        egress_ws(%{
+          "permissions" => %{"mode" => "strict"},
+          "sandbox" => %{"egress" => "allowlist"}
+        })
+
+      p = SecurityPolicy.resolve(ws)
+      assert {p.permissions.mode, p.sandbox.egress} == {:strict, :allowlist}
+
+      p = SecurityPolicy.resolve(ws, %{"permissions" => %{"mode" => "bypass"}})
+      assert {p.permissions.mode, p.sandbox.egress} == {:bypass, :allowlist}
+
+      p = SecurityPolicy.resolve(ws, %{"sandbox" => %{"egress" => "open"}})
+      assert {p.permissions.mode, p.sandbox.egress} == {:strict, :open}
+    end
+
+    test "an unknown egress value is ignored: the inherited level survives" do
+      ws =
+        egress_ws(%{"sandbox" => %{"egress" => "allowlist"}}, %{
+          "r" => %{"sandbox" => %{"egress" => "alowlist"}}
+        })
+
+      assert SecurityPolicy.resolve(ws, %{}, "r").sandbox.egress == :allowlist
+
+      assert SecurityPolicy.merge(SecurityPolicy.base(), %{sandbox: %{egress: 3}}).sandbox.egress ==
+               :open
+    end
+
+    test "malformed allow_hosts entries are dropped, valid ones kept" do
+      p =
+        SecurityPolicy.merge(SecurityPolicy.base(), %{
+          "sandbox" => %{
+            "allow_hosts" => [
+              "repo.hex.pm:443",
+              "no-port",
+              "bad host:1",
+              "",
+              7,
+              "*.hex.pm:443",
+              "*:443"
+            ]
+          }
+        })
+
+      assert p.sandbox.allow_hosts == ["repo.hex.pm:443", "*.hex.pm:443"]
+    end
+
+    test "summary/1 reports egress and allow_hosts" do
+      p =
+        SecurityPolicy.merge(SecurityPolicy.base(), %{
+          sandbox: %{egress: :none, allow_hosts: ["repo.hex.pm:443"]}
+        })
+
+      sandbox = SecurityPolicy.summary(p)["sandbox"]
+
+      assert sandbox["egress"] == "none"
+      assert SecurityPolicy.summary(p)["egress"] == "none"
+      assert sandbox["allow_hosts"] == ["repo.hex.pm:443"]
+      assert SecurityPolicy.summary(SecurityPolicy.base())["sandbox"]["egress"] == "open"
+    end
+
+    test "repo_egress/1 gives the effective level for every repo override" do
+      ws =
+        egress_ws(
+          %{"sandbox" => %{"egress" => "allowlist"}},
+          %{"a" => %{"sandbox" => %{"egress" => "none"}}, "b" => %{}}
+        )
+
+      assert SecurityPolicy.repo_egress(ws) == %{"a" => "none", "b" => "allowlist"}
+      assert SecurityPolicy.repo_egress(%Workspace{config: %{}}) == %{}
+      assert SecurityPolicy.repo_egress(nil) == %{}
+    end
+
+    test "one_line/1 names a non-open egress level and stays silent for open" do
+      refute SecurityPolicy.one_line(SecurityPolicy.base()) =~ "egress"
+
+      p = SecurityPolicy.merge(SecurityPolicy.base(), %{sandbox: %{egress: :allowlist}})
+      assert SecurityPolicy.one_line(p) =~ "egress=allowlist"
+    end
+  end
+
+  describe "egress host classes (bd-5yydxh, design 4.4)" do
+    test "infra and toolchain are reachable at none and allowlist; extras and grants only at allowlist" do
+      assert SecurityPolicy.egress_classes(:none) == [:infra, :toolchain]
+      assert SecurityPolicy.egress_classes(:allowlist) == [:infra, :toolchain, :extras, :grants]
+
+      assert SecurityPolicy.egress_class_allowed?(:none, :infra)
+      assert SecurityPolicy.egress_class_allowed?(:none, :toolchain)
+      refute SecurityPolicy.egress_class_allowed?(:none, :extras)
+      refute SecurityPolicy.egress_class_allowed?(:none, :grants)
+      assert SecurityPolicy.egress_class_allowed?(:allowlist, :grants)
+    end
+
+    test "open is not filtered by host class: every class is reachable" do
+      assert SecurityPolicy.egress_classes(:open) == [:infra, :toolchain, :extras, :grants]
+      refute SecurityPolicy.egress_filtered?(:open)
+      assert SecurityPolicy.egress_filtered?(:allowlist)
+      assert SecurityPolicy.egress_filtered?(:none)
+    end
+
+    test "allow_host_class/1 puts registries in toolchain and anything else in extras" do
+      assert SecurityPolicy.allow_host_class("repo.hex.pm:443") == :toolchain
+      assert SecurityPolicy.allow_host_class("builds.hex.pm:443") == :toolchain
+      assert SecurityPolicy.allow_host_class("*.hex.pm:443") == :toolchain
+      assert SecurityPolicy.allow_host_class("api.example.com:443") == :extras
+      assert SecurityPolicy.allow_host_class("repo.hex.pm.evil.test:443") == :extras
+    end
+
+    test "egress_baseline/2: infra always, allow_hosts filtered by the level's classes" do
+      base = fn egress ->
+        SecurityPolicy.merge(SecurityPolicy.base(), %{
+          sandbox: %{egress: egress, allow_hosts: ["repo.hex.pm:443", "api.example.com:443"]}
+        })
+      end
+
+      infra = ["api.anthropic.com:443"]
+
+      assert SecurityPolicy.egress_baseline(base.(:none), infra) ==
+               ["api.anthropic.com:443", "repo.hex.pm:443"]
+
+      assert SecurityPolicy.egress_baseline(base.(:allowlist), infra) ==
+               ["api.anthropic.com:443", "repo.hex.pm:443", "api.example.com:443"]
+
+      assert SecurityPolicy.egress_baseline(base.(:open), infra) == :unfiltered
+    end
+
+    test "ticket grants are honoured only at allowlist" do
+      none = SecurityPolicy.merge(SecurityPolicy.base(), %{sandbox: %{egress: :none}})
+      allowlist = SecurityPolicy.merge(SecurityPolicy.base(), %{sandbox: %{egress: :allowlist}})
+
+      assert SecurityPolicy.grants_allowed?(allowlist)
+      refute SecurityPolicy.grants_allowed?(none)
     end
   end
 

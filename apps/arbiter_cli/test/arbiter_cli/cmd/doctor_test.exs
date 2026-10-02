@@ -1268,6 +1268,51 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     end
   end
 
+  describe "egress jail self-test (bd-5yydxh)" do
+    defp egress_routes(egress_resp, status \\ 200) do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/agy_write_jail"}, {%{"available" => true}, 200}},
+        {{"get", "/api/server/egress_jail"}, {egress_resp, status}}
+      ])
+    end
+
+    test "ok, naming 1 allow and 1 deny, when the proxy and jail work" do
+      egress_routes(%{"available" => true, "allowed" => 1, "denied" => 1})
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] egress jail"
+      assert out =~ "1 allow"
+      assert out =~ "1 deny"
+    end
+
+    test "FAILs naming the missing package, without blocking readiness" do
+      egress_routes(%{
+        "available" => false,
+        "cause" => "socat_missing",
+        "message" => "no `socat` on PATH: the jail's network mode bridges its loopback with it",
+        "fix" => "Install socat (`dnf install socat` / `apt install socat`)."
+      })
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[fail] egress jail"
+      assert out =~ "no `socat` on PATH"
+      assert out =~ "dnf install socat"
+    end
+
+    test "ok (skipped) when the server predates the endpoint" do
+      egress_routes(%{"error" => "not found"}, 404)
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] egress jail"
+      assert out =~ "skipping"
+    end
+  end
+
   describe "account/workspace quota policy check (bd-c7ll4t)" do
     test "green when no workspace configures its own quota settings" do
       stub_routes([
