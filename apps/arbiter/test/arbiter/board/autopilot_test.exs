@@ -39,6 +39,9 @@ defmodule Arbiter.Board.AutopilotTest do
       interval_ms: :never,
       debounce_ms: 20,
       topics: [],
+      # The registry gate reads VM-global state (`Drain`, `ResumeGate`) that
+      # concurrent async tests mutate; this suite is about the pass itself.
+      registry_settled?: fn -> true end,
       snapshot: fn opts -> board("bd-1", opts[:paused]) end
     ]
 
@@ -69,6 +72,34 @@ defmodule Arbiter.Board.AutopilotTest do
 
       _ ->
         flunk("autopilot never returned to idle")
+    end
+  end
+
+  describe "isolation from other tests' dispatches" do
+    # `Arbiter.Board.Drain` is one registry for the whole VM, so a concurrent
+    # async test mid-`Dispatch.dispatch/2` used to make every pass here report
+    # `:idle` (the registry is "incomplete") and the test's dispatch never ran.
+    test "a dispatch pending elsewhere in the VM does not hold this autopilot's pass" do
+      test = self()
+
+      {:ok, other} =
+        Task.start_link(fn ->
+          Arbiter.Board.Drain.track(:dispatch_pending, %{task_id: "bd-elsewhere"}, fn ->
+            send(test, :other_pending)
+
+            receive do
+              :release -> :ok
+            end
+          end)
+        end)
+
+      assert_receive :other_pending
+      pid = start(paused: false)
+
+      assert {:ok, "bd-1"} = Autopilot.tick(pid)
+      assert_receive {:dispatched, "bd-1"}
+
+      send(other, :release)
     end
   end
 
