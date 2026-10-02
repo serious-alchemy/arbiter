@@ -154,14 +154,12 @@ defmodule Arbiter.Sessions.Memory.Staleness do
   defp valid_module_citations?(body, checkouts) do
     root_segments = get_all_root_segments(checkouts)
 
-    citations = Regex.scan(~r/(`)?\b([A-Z][a-zA-Z0-9_]*(?:\.[A-Z][a-zA-Z0-9_]*)+)\b(`)?/, body)
+    citations = Regex.scan(~r/\b([A-Z][a-zA-Z0-9_]*(?:\.[A-Z][a-zA-Z0-9_]*)+)\b/, body)
 
-    Enum.all?(citations, fn [_, left_tick, module_name | rest] ->
-      right_tick = List.first(rest) || ""
-      in_backticks = left_tick == "`" and right_tick == "`"
+    Enum.all?(citations, fn [_, module_name] ->
       root = module_name |> String.split(".") |> hd()
 
-      if MapSet.member?(root_segments, root) or in_backticks do
+      if MapSet.member?(root_segments, root) do
         escaped = String.replace(module_name, ".", "\\.")
 
         Enum.any?(checkouts, fn checkout ->

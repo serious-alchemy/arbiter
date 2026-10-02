@@ -60,7 +60,9 @@ defmodule Arbiter.Sessions.Memory.StalenessTest do
       assert {:error, :stale, _} = Staleness.check_memory(path, primary_checkout: checkout)
     end
 
-    test "identifies stale project memory with invalid module name", %{memory_root: root} do
+    test "identifies stale project memory with invalid workspace-rooted module name", %{
+      memory_root: root
+    } do
       checkout = Path.join(root, "checkout")
       File.mkdir_p!(Path.join(checkout, "lib"))
       File.write!(Path.join(checkout, "lib/short.ex"), "defmodule Short do\nend\n")
@@ -76,7 +78,7 @@ defmodule Arbiter.Sessions.Memory.StalenessTest do
           root,
           "proj.md",
           "project",
-          "Look at Missing.Module",
+          "Look at Short.Missing",
           "workspace_id: ws1\n"
         )
 
@@ -106,7 +108,7 @@ defmodule Arbiter.Sessions.Memory.StalenessTest do
       assert {:ok, _} = Staleness.check_memory(path, primary_checkout: checkout)
     end
 
-    test "quarantines when missing prefix-matched module or backtick module", %{memory_root: root} do
+    test "ignores dependency modules in backticks like `Ecto.Changeset`", %{memory_root: root} do
       checkout = Path.join(root, "checkout")
       File.mkdir_p!(Path.join(checkout, "lib"))
       File.write!(Path.join(checkout, "lib/short.ex"), "defmodule Short do\nend\n")
@@ -122,11 +124,11 @@ defmodule Arbiter.Sessions.Memory.StalenessTest do
           root,
           "proj.md",
           "project",
-          "Look at `Ecto.Changeset` or Short.Missing",
+          "Look at `Ecto.Changeset`",
           "workspace_id: ws1\n"
         )
 
-      assert {:error, :stale, _} = Staleness.check_memory(path, primary_checkout: checkout)
+      assert {:ok, _} = Staleness.check_memory(path, primary_checkout: checkout)
     end
 
     test "returns :ok for project memory with valid file:line and module", %{memory_root: root} do

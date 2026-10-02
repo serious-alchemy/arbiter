@@ -97,6 +97,36 @@ defmodule Arbiter.Sessions.MemoryTest do
       assert File.ls!(project_dir) == []
     end
 
+    test "valid project memory is mounted", %{memory_root: root} do
+      checkout = Path.join(root, "checkout")
+      File.mkdir_p!(Path.join(checkout, "lib"))
+      File.write!(Path.join(checkout, "lib/short.ex"), "defmodule Short do\nend\n")
+
+      System.cmd("git", ["init"], cd: checkout)
+      System.cmd("git", ["add", "."], cd: checkout)
+      System.cmd("git", ["config", "user.email", "test@test.com"], cd: checkout)
+      System.cmd("git", ["config", "user.name", "Test"], cd: checkout)
+      System.cmd("git", ["commit", "-m", "init"], cd: checkout)
+
+      write_memory!(root, "proj.md", "project", "  workspace_id: ws-arbiter\n")
+      # Overwrite body to include a valid citation
+      File.write!(Path.join(root, "proj.md"), """
+      ---
+      name: proj
+      type: project
+      workspace_id: ws-arbiter
+      ---
+
+      This is a good citation: lib/short.ex:1
+      """)
+
+      s = session("sess-valid", "ws-arbiter")
+      :ok = Memory.mount(s, memory_root: root, primary_checkout: checkout)
+
+      project_dir = Path.join(Layout.memory_shared_dir(s.id), "project")
+      assert File.ls!(project_dir) == ["proj.md"]
+    end
+
     test "project memory without resolvable checkout is still mounted", %{memory_root: root} do
       write_memory!(root, "proj.md", "project", "  workspace_id: ws-unknown\n")
       # Give it citations so it would fail IF it could resolve the checkout

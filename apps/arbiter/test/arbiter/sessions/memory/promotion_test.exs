@@ -58,6 +58,77 @@ defmodule Arbiter.Sessions.Memory.PromotionTest do
       assert File.exists?(Path.join(mem_root, "cand.md"))
     end
 
+    test "promotes a project candidate and adds verified_sha", %{
+      sessions_root: sessions_root,
+      memory_root: mem_root
+    } do
+      checkout = Path.join(mem_root, "checkout")
+      File.mkdir_p!(Path.join(checkout, "lib"))
+      File.write!(Path.join(checkout, "lib/short.ex"), "defmodule Short do\nend\n")
+
+      System.cmd("git", ["init"], cd: checkout)
+      System.cmd("git", ["add", "."], cd: checkout)
+      System.cmd("git", ["config", "user.email", "test@test.com"], cd: checkout)
+      System.cmd("git", ["config", "user.name", "Test"], cd: checkout)
+      System.cmd("git", ["commit", "-m", "init"], cd: checkout)
+
+      {head_sha, 0} = System.cmd("git", ["-C", checkout, "rev-parse", "HEAD"])
+      head_sha = String.trim(head_sha)
+
+      content = """
+      ---
+      name: proj
+      type: project
+      ---
+
+      This is a good citation: lib/short.ex:1
+      """
+
+      path = write_candidate!(sessions_root, "session-1", "proj.md", content)
+
+      assert :ok == Promotion.promote(path, memory_root: mem_root, primary_checkout: checkout)
+
+      assert not File.exists?(path)
+      promoted_path = Path.join(mem_root, "proj.md")
+      assert File.exists?(promoted_path)
+
+      promoted_content = File.read!(promoted_path)
+      assert promoted_content =~ "verified_sha: #{head_sha}"
+    end
+
+    test "refuses to promote project candidate with broken citation", %{
+      sessions_root: sessions_root,
+      memory_root: mem_root
+    } do
+      checkout = Path.join(mem_root, "checkout")
+      File.mkdir_p!(Path.join(checkout, "lib"))
+      File.write!(Path.join(checkout, "lib/short.ex"), "defmodule Short do\nend\n")
+
+      System.cmd("git", ["init"], cd: checkout)
+      System.cmd("git", ["add", "."], cd: checkout)
+      System.cmd("git", ["config", "user.email", "test@test.com"], cd: checkout)
+      System.cmd("git", ["config", "user.name", "Test"], cd: checkout)
+      System.cmd("git", ["commit", "-m", "init"], cd: checkout)
+
+      content = """
+      ---
+      name: proj
+      type: project
+      ---
+
+      This is a bad citation: lib/short.ex:100
+      """
+
+      path = write_candidate!(sessions_root, "session-1", "proj.md", content)
+
+      assert {:error, :stale} ==
+               Promotion.promote(path, memory_root: mem_root, primary_checkout: checkout)
+
+      # candidate is unchanged
+      assert File.exists?(path)
+      assert not File.exists?(Path.join(mem_root, "proj.md"))
+    end
+
     test "returns :exists if trying to overwrite without overwrite option", %{
       sessions_root: sessions_root,
       memory_root: mem_root
@@ -119,7 +190,7 @@ defmodule Arbiter.Sessions.Memory.PromotionTest do
                MemoryPending.memory_pending_apply(%Scope{tier: :worker}, %{"path" => path})
     end
 
-    test "memory_pending_apply rejects path escape", %{sessions_root: root} do
+    test "memory_pending_apply rejects path escape", %{sessions_root: _root} do
       assert {:error, {:invalid_arguments, _}} =
                MemoryPending.memory_pending_apply(%Scope{tier: :worker}, %{
                  "path" => "/tmp/bad.md"

@@ -91,7 +91,7 @@ defmodule Arbiter.Sessions.Memory.Promotion do
                     Staleness.get_checkouts_sha(checkouts)
                 end
 
-              if sha and sha != "" do
+              if is_binary(sha) and sha != "" do
                 prepend_verified_sha(safe_path, sha)
               end
             end
