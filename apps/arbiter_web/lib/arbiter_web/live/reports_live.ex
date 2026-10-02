@@ -18,7 +18,7 @@ defmodule ArbiterWeb.ReportsLive do
 
   use ArbiterWeb, :live_view
 
-  alias Arbiter.Reports.Cache
+  alias Arbiter.Reports.{Cache, Throughput}
   alias Arbiter.Tasks.{Issue, Workspace}
   alias ArbiterWeb.Charts
   alias ArbiterWeb.CoreComponents.Feedback
@@ -158,7 +158,8 @@ defmodule ArbiterWeb.ReportsLive do
       total: length(rows),
       closed: Enum.count(rows, &(&1.state == :closed)),
       open: Enum.count(rows, &(&1.state != :closed)),
-      weekly: weekly
+      weekly: weekly,
+      throughput: Throughput.load(filters)
     }
   end
 
@@ -290,12 +291,133 @@ defmodule ArbiterWeb.ReportsLive do
                 points={report.weekly}
               />
             </section>
+            <.throughput_section throughput={report.throughput} />
           </div>
         </.async_result>
       </div>
     </Layouts.app>
     """
   end
+
+  attr :throughput, :map, required: true
+
+  defp throughput_section(assigns) do
+    t = assigns.throughput
+    ranks = Throughput.weights() |> Enum.sort() |> Enum.map(&elem(&1, 0))
+
+    series =
+      Enum.map(ranks, &%{key: &1, label: "D#{&1}"}) ++ [%{key: :unrated, label: "Unrated"}]
+
+    assigns =
+      assign(assigns,
+        series: series,
+        stacked:
+          Enum.map(t.weekly, fn w ->
+            %{key: Date.to_iso8601(w.week), label: week_label(w.week), values: counts(w.counts)}
+          end),
+        weighted: Enum.map(t.weekly, &week_point(&1, :weighted)),
+        moving: Enum.map(t.weekly, &week_point(&1, :moving_avg)),
+        weights: Enum.sort(Throughput.weights()),
+        unrated_weight: Throughput.unrated_weight(),
+        cutover: Throughput.era_cutover()
+      )
+
+    ~H"""
+    <section id="reports-throughput" class="flex flex-col gap-4">
+      <div class="flex flex-col gap-2">
+        <h2 class="text-[13px] font-medium">Throughput: tickets closed per week, by difficulty</h2>
+        <Charts.stacked_bar
+          id="reports-throughput-chart"
+          title="Completed tickets per week by difficulty"
+          points={@stacked}
+          series={@series}
+        />
+      </div>
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div class="flex flex-col gap-2">
+          <h2 class="text-[13px] font-medium">Weighted size per week</h2>
+          <Charts.step_line
+            id="reports-weighted-chart"
+            title="Weighted size closed per week"
+            points={@weighted}
+          />
+        </div>
+        <div class="flex flex-col gap-2">
+          <h2 class="text-[13px] font-medium">Weighted size, 4-week moving average</h2>
+          <Charts.step_line
+            id="reports-moving-chart"
+            title="Weighted size, 4-week moving average"
+            color="var(--arb-attention)"
+            points={@moving}
+          />
+        </div>
+      </div>
+      <p id="reports-weighting-policy" class="text-[12px] text-[var(--text-secondary)]">
+        Weighted size = Σ weight per ticket. Weights:
+        <span :for={{d, w} <- @weights} class="font-[family-name:var(--font-mono)]">
+          D{d} = {w}{if d < 4, do: ",", else: ""}
+        </span>
+        · unrated (no difficulty) = {@unrated_weight}, as the ticket estimate treats it.
+        Weeks start Monday (UTC); reopened tickets count in the week they last closed.
+      </p>
+
+      <div class="flex flex-col gap-2">
+        <h2 class="text-[13px] font-medium">Lead time (created → closed, in days)</h2>
+        <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
+          <Charts.stat_tile id="reports-lead-n" label="Tickets" value={@throughput.lead.n} />
+          <Charts.stat_tile
+            id="reports-lead-p50"
+            label="P50"
+            value={days(@throughput.lead.p50_hours)}
+          />
+          <Charts.stat_tile
+            id="reports-lead-p90"
+            label="P90"
+            value={days(@throughput.lead.p90_hours)}
+          />
+        </div>
+        <Charts.histogram
+          id="reports-lead-chart"
+          title="Lead time distribution"
+          buckets={@throughput.lead.buckets}
+          unit="d"
+        />
+        <p id="reports-lead-era" class="text-[12px] text-[var(--text-secondary)]">
+          Lifecycle changed on {Date.to_iso8601(@cutover)} (before it, <code>queued</code>
+          meant "open"). Closed before: n={@throughput.lead.eras.before.n},
+          P50 {days(@throughput.lead.eras.before.p50_hours)}, P90 {days(
+            @throughput.lead.eras.before.p90_hours
+          )}.
+          Closed since: n={@throughput.lead.eras.after.n},
+          P50 {days(@throughput.lead.eras.after.p50_hours)}, P90 {days(
+            @throughput.lead.eras.after.p90_hours
+          )}.
+          Percentiles are nearest-rank.
+        </p>
+      </div>
+    </section>
+    """
+  end
+
+  defp week_label(week), do: Calendar.strftime(week, "%b %d")
+
+  defp week_point(w, field) do
+    %{
+      key: Date.to_iso8601(w.week),
+      label: week_label(w.week),
+      value: Float.round(w[field] * 1.0, 2)
+    }
+  end
+
+  defp counts(counts) do
+    Map.new(counts, fn
+      {nil, n} -> {:unrated, n}
+      {d, n} -> {d, n}
+    end)
+  end
+
+  defp days(nil), do: "—"
+  defp days(hours), do: "#{Float.round(hours / 24, 1)}d"
 
   attr :field, Phoenix.HTML.FormField, required: true
   attr :label, :string, required: true
