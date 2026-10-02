@@ -2135,7 +2135,11 @@ defmodule Arbiter.Worker do
         provider_for(Map.get(usage, :model) || Map.get(session, :model))
 
     cond do
-      # Non-Claude adapters have their own on-stream usage; nothing to read here.
+      # bd-agsn2b: codex rollouts are readable too, via their own locator.
+      provider == "codex" ->
+        reconcile_codex_usage_from_disk(usage, session, state)
+
+      # Other non-Claude adapters have their own on-stream usage; nothing to read here.
       provider not in [nil, "claude"] ->
         usage
 
@@ -2181,6 +2185,44 @@ defmodule Arbiter.Worker do
       )
 
       usage
+  end
+
+  # Codex counterpart: a run killed before `turn.completed` has no stream
+  # usage, but the CLI's rollout under `$CODEX_HOME` carries cumulative
+  # `token_count` totals, found by thread id and windowed to this port's start
+  # (`codex exec resume` appends to the same file). Tokens only — codex is
+  # metered, so cost stays whatever the stream said.
+  defp reconcile_codex_usage_from_disk(usage, session, %State{} = state) do
+    session_id = Map.get(usage, :session_id)
+    config_dir = Map.get(state.meta || %{}, :config_dir)
+
+    with true <- is_nil(Map.get(usage, :tokens_in)),
+         {:ok, totals} <-
+           Arbiter.Usage.CodexSessionFile.usage_for(config_dir, session_id,
+             since: Map.get(session, :started_at)
+           ),
+         true <- is_integer(totals.tokens_in) do
+      Logger.info(
+        "Worker.record_usage_event: reconciled codex usage from on-disk rollout " <>
+          "for task=#{state.task_id} thread=#{session_id}"
+      )
+
+      usage
+      |> Map.put(:tokens_in, totals.tokens_in)
+      |> Map.put(:tokens_out, totals.tokens_out)
+      |> Map.put(:cache_read_tokens, totals.cache_read_tokens)
+      |> Map.put(:raw, codex_reconciled_raw(Map.get(usage, :raw), totals.raw))
+    else
+      _ -> usage
+    end
+  end
+
+  defp codex_reconciled_raw(existing, info) do
+    base = if is_map(existing), do: existing, else: %{}
+
+    base
+    |> Map.put("arb_usage_source", %{"reconciled_from" => "codex_rollout"})
+    |> Map.put_new("rollout_token_info", info)
   end
 
   # Overlay deduped on-disk token totals onto the (token-less) usage map. Model
@@ -2611,7 +2653,8 @@ defmodule Arbiter.Worker do
       backfill_run_fields(run_id, %{provider: to_string(provider)}, task_id)
     end
 
-    if config_dir && run_id && Map.get(session_config, :provider) in [nil, "claude", "gemini"] do
+    if config_dir && run_id &&
+         Map.get(session_config, :provider) in [nil, "claude", "gemini", "codex"] do
       backfill_run_fields(run_id, %{config_dir: config_dir}, task_id)
     end
   end
@@ -3186,6 +3229,15 @@ defmodule Arbiter.Worker do
     end
   end
 
+  # bd-agsn2b: a codex spawn's config root is its `$CODEX_HOME` (rollouts live
+  # under `<home>/sessions/...`). Same last-wins scan, then the CLI's own default.
+  defp effective_config_dir(%{env: env}, "codex") when is_list(env) do
+    case env |> Enum.reverse() |> List.keyfind("CODEX_HOME", 0) do
+      {_k, dir} when is_binary(dir) and dir != "" -> dir
+      _ -> Arbiter.Usage.CodexSessionFile.home_dir()
+    end
+  end
+
   defp effective_config_dir(%{env: env}, _provider) when is_list(env) do
     case env |> Enum.reverse() |> List.keyfind("CLAUDE_CONFIG_DIR", 0) do
       {_k, dir} when is_binary(dir) and dir != "" -> dir
@@ -3194,6 +3246,7 @@ defmodule Arbiter.Worker do
   end
 
   defp effective_config_dir(_port_args, "gemini"), do: inherited_home_dir()
+  defp effective_config_dir(_port_args, "codex"), do: Arbiter.Usage.CodexSessionFile.home_dir()
   defp effective_config_dir(_port_args, _provider), do: inherited_config_dir()
 
   defp inherited_config_dir do
