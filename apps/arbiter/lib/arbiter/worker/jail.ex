@@ -248,7 +248,7 @@ defmodule Arbiter.Worker.Jail do
         worktree: worktree,
         home: Keyword.get(opts, :home),
         git: git,
-        writable_paths: writable_paths(Keyword.get(opts, :writable_paths, [])),
+        writable_paths: run_tmp_paths() ++ writable_paths(Keyword.get(opts, :writable_paths, [])),
         env:
           network_env(network) ++
             ssh_env(network) ++ toolchain_env ++ Keyword.get(opts, :env, []),
@@ -265,6 +265,21 @@ defmodule Arbiter.Worker.Jail do
           else: spec
 
       {:ok, argv(spec, command) |> maybe_keyring_proxy(proxy)}
+    end
+  end
+
+  # bd-5ad4ch: every spawn's TMPDIR lives under the worker temp root, which sits
+  # outside the worktree and the jail home, so under `--ro-bind / /` it would be
+  # read-only. The run's dir doesn't exist yet when the argv is built, so the
+  # root is bound writable (created here so `--bind-try` has something to bind).
+  @doc false
+  @spec run_tmp_paths() :: [String.t()]
+  def run_tmp_paths do
+    root = Arbiter.Config.Paths.worker_tmp_root()
+
+    case File.mkdir_p(root) do
+      :ok -> [root]
+      {:error, _} -> []
     end
   end
 

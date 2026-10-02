@@ -893,16 +893,6 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
     }
   end
 
-  # bd-80ecol: every workspace that runs Claude with no setup token (or API
-  # key) of its own. Such a workspace used to fall back to a copy of the
-  # operator's `.credentials.json` (mode B) — a second holder of a refresh
-  # token Claude rotates on every refresh, so either side's refresh locked the
-  # other out. Its Claude dispatch is now held instead, which is an
-  # operator-actionable failure (non-zero exit) but says nothing about whether
-  # the server itself is healthy, so it never blocks deploy readiness.
-  # bd-c99hys: the dashboard login relay runs each provider CLI's login in a
-  # hidden tmux session. A host without tmux cannot log an account in from the
-  # dashboard, but nothing else breaks, so this FAILs without blocking readiness.
   # bd-5ad4ch: the per-run worker TMPDIR root must be disk-backed and small.
   defp check_worker_tmp do
     case Client.get("/api/server/worker_tmp") do
@@ -950,6 +940,16 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
     end
   end
 
+  # bd-80ecol: every workspace that runs Claude with no setup token (or API
+  # key) of its own. Such a workspace used to fall back to a copy of the
+  # operator's `.credentials.json` (mode B) — a second holder of a refresh
+  # token Claude rotates on every refresh, so either side's refresh locked the
+  # other out. Its Claude dispatch is now held instead, which is an
+  # operator-actionable failure (non-zero exit) but says nothing about whether
+  # the server itself is healthy, so it never blocks deploy readiness.
+  # bd-c99hys: the dashboard login relay runs each provider CLI's login in a
+  # hidden tmux session. A host without tmux cannot log an account in from the
+  # dashboard, but nothing else breaks, so this FAILs without blocking readiness.
   defp check_tmux do
     case Client.get("/api/server/tmux") do
       {:ok, %{"available" => true} = tmux} ->

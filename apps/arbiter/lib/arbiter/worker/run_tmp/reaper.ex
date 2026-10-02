@@ -40,7 +40,16 @@ defmodule Arbiter.Worker.RunTmp.Reaper do
   @impl true
   def handle_info({:DOWN, ref, :process, _pid, _reason}, %{refs: refs} = state) do
     {{_owner, dirs}, refs} = Map.pop(refs, ref, {nil, []})
-    Enum.each(dirs, &RunTmp.remove/1)
+
+    # A raise here would restart the reaper and forget every live run's dir.
+    Enum.each(dirs, fn dir ->
+      try do
+        RunTmp.remove(dir)
+      rescue
+        _ -> :ok
+      end
+    end)
+
     {:noreply, %{state | refs: refs}}
   end
 

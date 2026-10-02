@@ -1576,7 +1576,6 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     end
   end
 
-  # bd-c99hys: the dashboard login relay drives each provider CLI's login inside
   describe "worker temp dir check" do
     defp worker_tmp_routes(body) do
       [
@@ -1622,6 +1621,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     end
   end
 
+  # bd-c99hys: the dashboard login relay drives each provider CLI's login inside
   # a hidden tmux session, so a host without tmux cannot log an account in.
   describe "tmux check" do
     defp tmux_routes(body) do

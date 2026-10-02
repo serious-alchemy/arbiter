@@ -535,6 +535,7 @@ defmodule Arbiter.Agents.Gemini.Security do
   defp strict_working_set(%SecurityPolicy{permissions: %{mode: :strict}} = policy, worktree) do
     writable =
       [worktree_path(worktree), "/tmp"] ++
+        Jail.run_tmp_paths() ++
         Jail.writable_paths(Map.get(policy.sandbox, :writable_paths, []))
 
     @strict_work_allow ++ for(path <- writable, is_binary(path), do: "write_file(#{path})")
