@@ -152,7 +152,8 @@ defmodule Arbiter.Agents.CodexTest do
 
       strict = SecurityPolicy.merge(SecurityPolicy.base(), %{permissions: %{mode: :strict}})
       assert {:ok, argv} = Codex.default_argv("the prompt", security: strict)
-      assert chunk_after(argv, "-s") == "read-only"
+      assert ~s(sandbox_mode="read-only") in argv
+      refute "-s" in argv
       refute "--dangerously-bypass-approvals-and-sandbox" in argv
     end
 
@@ -161,7 +162,8 @@ defmodule Arbiter.Agents.CodexTest do
 
       auto = SecurityPolicy.merge(SecurityPolicy.base(), %{permissions: %{mode: :auto}})
       assert {:ok, argv} = Codex.default_argv("the prompt", security: auto)
-      assert chunk_after(argv, "-s") == "workspace-write"
+      assert ~s(sandbox_mode="workspace-write") in argv
+      refute "-s" in argv
       refute "--dangerously-bypass-approvals-and-sandbox" in argv
     end
 
@@ -669,6 +671,29 @@ defmodule Arbiter.Agents.CodexTest do
                "--",
                "nudge prompt"
              ]
+    end
+
+    test "resume argv keeps the sandbox as -c sandbox_mode, never -s (exec resume rejects -s)" do
+      argv = [
+        "sh",
+        "-c",
+        "exec \"$@\" < /dev/null",
+        "sh",
+        "/path/to/codex",
+        "exec",
+        "--json",
+        "-c",
+        ~s(sandbox_mode="workspace-write"),
+        "--",
+        "original prompt"
+      ]
+
+      assert {:ok, resumed} = Codex.splice_prompt(argv, ["--resume", "sess-123", "go on"])
+
+      assert ["exec", "resume", "--json", "-c", ~s(sandbox_mode="workspace-write"), "--" | _] =
+               Enum.drop_while(resumed, &(&1 != "exec"))
+
+      refute "-s" in resumed
     end
 
     test "splice_prompt/2 rebuilds argv for resume" do

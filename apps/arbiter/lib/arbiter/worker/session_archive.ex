@@ -97,6 +97,15 @@ defmodule Arbiter.Worker.SessionArchive do
   `:no_config_dir` still means exactly what it always did: no config root was
   ever recorded for this run, full stop.
 
+  ## Codex runs (bd-agsn2b)
+
+  A codex worker's `config_dir` is its effective `$CODEX_HOME` (else
+  `~/.codex`). When neither the Claude nor the agy locator hits,
+  `Arbiter.Usage.CodexSessionFile.locate/2` finds
+  `<config_dir>/sessions/YYYY/MM/DD/rollout-<ts>-<thread_id>.jsonl` by the
+  thread id (the run's `session_id`). The rollout is JSONL, so it is redacted
+  and archived exactly like a Claude session (no subagents).
+
   ### Redaction doesn't apply to the SQLite branch
 
   The JSONL redaction described above is a verbatim byte-for-byte string
@@ -119,6 +128,7 @@ defmodule Arbiter.Worker.SessionArchive do
 
   alias Arbiter.Redaction
   alias Arbiter.Usage.ClaudeSessionFile
+  alias Arbiter.Usage.CodexSessionFile
   alias Arbiter.Usage.GeminiSessionFile
   alias Arbiter.Worker.OutputLog
 
@@ -386,8 +396,18 @@ defmodule Arbiter.Worker.SessionArchive do
       :not_found ->
         case GeminiSessionFile.locate(config_dir, session_id) do
           {:ok, path} -> do_archive_db(run_id, path)
-          :not_found -> {:ok, blank(run_id, :no_session_file)}
+          :not_found -> locate_and_archive_codex(run_id, config_dir, session_id, opts)
         end
+    end
+  end
+
+  # Codex rollouts are line-oriented JSONL like Claude's, so they take the
+  # redacting `do_archive/3` path. `config_dir` is the codex home
+  # (`$CODEX_HOME`, else `~/.codex`) and the file is found by thread id.
+  defp locate_and_archive_codex(run_id, config_dir, session_id, opts) do
+    case CodexSessionFile.locate(config_dir, session_id) do
+      {:ok, path} -> do_archive(run_id, path, Keyword.get(opts, :redact_values) || [])
+      :not_found -> {:ok, blank(run_id, :no_session_file)}
     end
   end
 

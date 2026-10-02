@@ -511,14 +511,20 @@ defmodule Arbiter.Agents.Codex do
     do: ["--dangerously-bypass-approvals-and-sandbox"]
 
   # :strict — read-only sandbox; the agent can inspect but not mutate.
-  defp sandbox_argv(%SecurityPolicy{permissions: %{mode: :strict}}), do: ["-s", "read-only"]
+  defp sandbox_argv(%SecurityPolicy{permissions: %{mode: :strict}}),
+    do: sandbox_mode_config("read-only")
 
   # :auto — workspace-write; re-enable network so the worker can push / install.
   defp sandbox_argv(%SecurityPolicy{permissions: %{mode: :auto}} = policy) do
-    ["-s", "workspace-write"] ++ network_config(policy)
+    sandbox_mode_config("workspace-write") ++ network_config(policy)
   end
 
   defp sandbox_argv(_policy), do: ["--dangerously-bypass-approvals-and-sandbox"]
+
+  # `-s` is rejected by `codex exec resume` ("unexpected argument '-s'"), but
+  # `-c` is accepted by both `exec` and `exec resume`, so express the sandbox
+  # as a config override to keep resume working under :strict/:auto.
+  defp sandbox_mode_config(mode), do: ["-c", "sandbox_mode=#{inspect(mode)}"]
 
   # Codex only loads `<worktree>/.codex/config.toml` when the project is trusted
   # in `$CODEX_HOME/config.toml`, so MCP was silently absent in untrusted repos.

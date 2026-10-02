@@ -150,6 +150,53 @@ defmodule Arbiter.Worker.DiskUsageReconcileTest do
     assert ev.cost_note == ClaudeSessionFile.no_cost_note()
   end
 
+  # bd-agsn2b: the codex counterpart. A codex run killed before `turn.completed`
+  # (only `thread.started` reached the stream) is reconciled from the rollout
+  # `$CODEX_HOME/sessions/.../rollout-<ts>-<thread_id>.jsonl`.
+  test "a killed codex run's tokens are reconciled from its rollout by thread id" do
+    task_id = "bd-codexdisk-#{System.unique_integer([:positive])}"
+    thread_id = "019f95ae-#{System.unique_integer([:positive])}"
+    cwd = tmp_dir!("codexdisk-cwd")
+    codex_home = tmp_dir!("codexdisk-home")
+
+    dir = Path.join([codex_home, "sessions", "2026", "09", "29"])
+    File.mkdir_p!(dir)
+    at = DateTime.utc_now() |> DateTime.add(600, :second) |> DateTime.to_iso8601()
+
+    File.write!(
+      Path.join(dir, "rollout-2026-09-29T10-00-00-#{thread_id}.jsonl"),
+      ~s({"timestamp":"#{at}","type":"session_meta","payload":{"session_id":"#{thread_id}","timestamp":"#{at}"}}\n) <>
+        ~s({"timestamp":"#{at}","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":900,"cached_input_tokens":400,"output_tokens":33}}}}\n)
+    )
+
+    {:ok, pid} = Worker.start(task_id: task_id, repo: "arbiter", workspace_id: "ws-codexdisk")
+
+    stdout_path = Path.join(cwd, "stdout.jsonl")
+
+    File.write!(
+      stdout_path,
+      Jason.encode!(%{"type" => "thread.started", "thread_id" => thread_id}) <> "\n"
+    )
+
+    {:ok, _port} =
+      ClaudeSession.start(
+        owner: pid,
+        worktree_path: cwd,
+        command: ["cat", stdout_path],
+        provider: "codex",
+        env: [{"CODEX_HOME", codex_home}]
+      )
+
+    :ok = wait_until(fn -> events_for(task_id) != [] end)
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+
+    assert [ev] = events_for(task_id)
+    assert ev.tokens_in == 900
+    assert ev.tokens_out == 33
+    assert ev.cache_read_tokens == 400
+    assert ev.raw["arb_usage_source"]["reconciled_from"] == "codex_rollout"
+  end
+
   defp wait_until(fun, timeout_ms \\ 3000, step_ms \\ 20) do
     deadline = System.monotonic_time(:millisecond) + timeout_ms
     do_wait(fun, deadline, step_ms)
