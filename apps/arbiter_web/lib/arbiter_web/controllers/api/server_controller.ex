@@ -48,11 +48,17 @@ defmodule ArbiterWeb.Api.ServerController do
       `Arbiter.Mergers.RoutingCheck.report/0`): a forge strategy with no
       `origin` remote, or an `origin` that is not the effective
       `owner/repo`. `arb server doctor` lists them with the fix.
+    * `GET /api/server/tmux` — whether `tmux` is installed on this host
+      (bd-c99hys, `Arbiter.Accounts.LoginRunner.tmux_diagnosis/0`). The dashboard
+      login relay runs each provider CLI's login in a hidden tmux session, so
+      without it no account can be logged in or re-authenticated.
+      `arb server doctor` reports it with the install hint.
   """
 
   use ArbiterWeb, :controller
 
   alias Arbiter.Accounts.Enablement
+  alias Arbiter.Accounts.LoginRunner
   alias Arbiter.Agents.Claude.CredentialCheck
   alias Arbiter.Mergers.RoutingCheck
   alias Arbiter.Worker.Egress.SelfTest
@@ -131,6 +137,8 @@ defmodule ArbiterWeb.Api.ServerController do
         end)
     })
   end
+
+  def tmux(conn, _params), do: json(conn, LoginRunner.tmux_diagnosis())
 
   def merge_routing(conn, _params) do
     repos = Enum.map(RoutingCheck.report(), &routing_entry/1)

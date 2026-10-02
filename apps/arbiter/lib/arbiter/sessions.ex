@@ -99,6 +99,7 @@ defmodule Arbiter.Sessions do
           remote_control: boolean(),
           can_dispatch: boolean(),
           provision: boolean(),
+          command: String.t(),
           cols: pos_integer(),
           rows: pos_integer(),
           runner: module(),
@@ -148,6 +149,10 @@ defmodule Arbiter.Sessions do
     * `:remote_control` — recorded; phase 8 acts on it.
     * `:provision` — `false` skips provisioning (the phase-1 shape, used by the
       lifecycle tests that assert only the command). Default `true`.
+    * `:command` — the pane's shell-command string, in place of the provider's
+      payload (`Arbiter.Sessions.Provider.command/1`). The login relay
+      (`Arbiter.Accounts.LoginRunner`, bd-c99hys) uses it to run a provider
+      CLI's own login instead of an agent.
     * `:cols` / `:rows` — initial pane geometry (default #{@default_cols}x#{@default_rows}).
     * `:runner` — command runner module, for tests. See `Arbiter.Sessions.Runner`.
     * `:ensure_reader` — `false` skips the eager `Arbiter.Sessions.Stream.ensure_reader/2`
@@ -732,7 +737,7 @@ defmodule Arbiter.Sessions do
         to_string(rows),
         "-c",
         session.cwd
-      ] ++ env_args ++ [Provider.command(session)]
+      ] ++ env_args ++ [Keyword.get(opts, :command) || Provider.command(session)]
 
     {"systemd-run", args}
   end

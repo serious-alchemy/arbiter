@@ -5,6 +5,7 @@ defmodule Arbiter.Application do
 
   use Application
 
+  alias Arbiter.Accounts.LoginRunner.Sweep, as: LoginSweep
   alias Arbiter.Workflows.DispatchQueueSupervisor
   alias Arbiter.Workflows.MergedPRFinalizerSupervisor
   alias Arbiter.Workflows.MergeQueueSupervisor
@@ -165,6 +166,12 @@ defmodule Arbiter.Application do
       # systemd scope, which is the property phases 1-2 exist to protect.
       {Registry, keys: :unique, name: Arbiter.Sessions.Stream.Registry},
       {DynamicSupervisor, strategy: :one_for_one, name: Arbiter.Sessions.Stream.Supervisor},
+      # Dashboard login relay (bd-c99hys): one supervised `LoginRunner` per
+      # in-flight provider-account login, registered by account so a second
+      # login for the same account is refused. `:temporary` children — a login
+      # is never restarted (its tmux session and one-time codes are gone).
+      {Registry, keys: :unique, name: Arbiter.Accounts.LoginRunner.Registry},
+      {DynamicSupervisor, strategy: :one_for_one, name: Arbiter.Accounts.LoginRunner.Supervisor},
       # Post-spawn connectivity probe for Codex's `.codex/config.toml` MCP config
       # (bd-bi5t54). Codex MCP support has reports of *silent* connect failures —
       # it starts without error but never reaches the MCP server — so a worker
@@ -359,6 +366,7 @@ defmodule Arbiter.Application do
          fn ->
            primary? = Arbiter.SingleInstance.primary?()
            Arbiter.Sessions.Adoption.sweep_on_boot(primary?: primary?)
+           LoginSweep.sweep_on_boot(primary?: primary?)
          end},
         id: :session_adoption_boot_task,
         restart: :temporary

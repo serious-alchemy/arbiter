@@ -245,6 +245,7 @@ defmodule ArbiterWeb.Router do
     get("/server/claude_credentials", ServerController, :claude_credentials)
     get("/server/provider_accounts", ServerController, :provider_accounts)
     get("/server/merge_routing", ServerController, :merge_routing)
+    get("/server/tmux", ServerController, :tmux)
 
     # Usage ledger (per-session tokens / cost / duration; rollups)
     get("/usage", UsageController, :summarize)
