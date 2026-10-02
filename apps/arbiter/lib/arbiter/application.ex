@@ -234,7 +234,10 @@ defmodule Arbiter.Application do
       # (bd-3d1zge) — see that module's docs.
       Arbiter.Usage.EstimateCache,
       # Owns the ETS table memoizing `/reports` results (bd-an8t0e).
-      Arbiter.Reports.Cache
+      Arbiter.Reports.Cache,
+      # The egress proxy's grant cache, registry and per-run supervisor
+      # (bd-aspkyr). Idle: nothing starts a proxy until G6 wires it.
+      Arbiter.Worker.Egress.Supervisor
     ] ++
       resume_gate(auto_start?) ++
       [
