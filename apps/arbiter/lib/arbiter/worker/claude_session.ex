@@ -96,6 +96,7 @@ defmodule Arbiter.Worker.ClaudeSession do
   alias Arbiter.Agents.Gemini.RereadDetector
   alias Arbiter.Worker
   alias Arbiter.Worker.OutputLog
+  alias Arbiter.Worker.RunTmp
   alias Arbiter.Worker.StepSummary
   alias Arbiter.Workers.RunStep
 
@@ -258,11 +259,23 @@ defmodule Arbiter.Worker.ClaudeSession do
           argv: argv
         )
 
+      # bd-5ad4ch: every spawn gets its own disk-backed TMPDIR, removed by the
+      # owning worker's exit (RunTmp.Reaper) (`Arbiter.Worker.RunTmp`).
+      tmp_dir =
+        case RunTmp.create(task_id) do
+          {:ok, dir} ->
+            :ok = RunTmp.Reaper.track(owner, dir)
+            dir
+
+          {:error, _} ->
+            nil
+        end
+
       port_args = %{
         exec: exec,
         argv: argv,
         cd: worktree_path,
-        env: env_pairs(opts, task_id, worker_env)
+        env: env_pairs(opts, task_id, worker_env, tmp_dir)
       }
 
       GenServer.call(owner, {:__claude_session_open__, port_args, session_config})
@@ -1895,7 +1908,7 @@ defmodule Arbiter.Worker.ClaudeSession do
     end
   end
 
-  defp env_pairs(opts, task_id, worker_env) do
+  defp env_pairs(opts, task_id, worker_env, tmp_dir) do
     base =
       case Keyword.fetch(opts, :env) do
         {:ok, list} when is_list(list) -> list
@@ -1917,12 +1930,14 @@ defmodule Arbiter.Worker.ClaudeSession do
       id when is_binary(id) and id != "" ->
         Arbiter.Worker.SpawnEnv.port_env(
           dev_server_clean ++
-            worker_env ++ base ++ arb_token_pair(opts) ++ [{"ARB_WORKER_BEAD_ID", id}],
+            worker_env ++
+            base ++
+            RunTmp.env_pairs(tmp_dir) ++ arb_token_pair(opts) ++ [{"ARB_WORKER_BEAD_ID", id}],
           provider
         )
 
       _ ->
-        Arbiter.Worker.SpawnEnv.port_env(base, provider)
+        Arbiter.Worker.SpawnEnv.port_env(base ++ RunTmp.env_pairs(tmp_dir), provider)
     end
   end
 end

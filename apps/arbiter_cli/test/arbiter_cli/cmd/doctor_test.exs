@@ -1577,6 +1577,51 @@ defmodule ArbiterCli.Cmd.DoctorTest do
   end
 
   # bd-c99hys: the dashboard login relay drives each provider CLI's login inside
+  describe "worker temp dir check" do
+    defp worker_tmp_routes(body) do
+      [
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/worker_tmp"}, {body, 200}}
+      ]
+    end
+
+    test "warns when the temp root is on tmpfs" do
+      stub_routes(worker_tmp_routes(%{"root" => "/tmp/w", "fstype" => "tmpfs", "tmpfs" => true}))
+
+      result = Enum.find(Checks.run(), &(&1.name == "worker temp dir"))
+      assert result.status == :warn
+      assert result.detail =~ "RAM-backed"
+      refute result.blocks_readiness
+    end
+
+    test "warns when the temp root is over its size threshold" do
+      stub_routes(
+        worker_tmp_routes(%{
+          "root" => "/d/w",
+          "tmpfs" => false,
+          "over_threshold" => true,
+          "size_bytes" => 9,
+          "threshold_bytes" => 5
+        })
+      )
+
+      result = Enum.find(Checks.run(), &(&1.name == "worker temp dir"))
+      assert result.status == :warn
+    end
+
+    test "is ok for a small disk-backed root" do
+      stub_routes(
+        worker_tmp_routes(%{"root" => "/d/w", "tmpfs" => false, "over_threshold" => false})
+      )
+
+      result = Enum.find(Checks.run(), &(&1.name == "worker temp dir"))
+      assert result.status == :ok
+    end
+  end
+
   # a hidden tmux session, so a host without tmux cannot log an account in.
   describe "tmux check" do
     defp tmux_routes(body) do

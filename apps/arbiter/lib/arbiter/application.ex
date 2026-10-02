@@ -159,6 +159,9 @@ defmodule Arbiter.Application do
       Arbiter.Sessions.OrphanReaper,
       # bd-9iv4qd: reclaims worktree-root leaves whose gitdir is gone.
       Arbiter.Worker.WorktreeSweeper,
+      # bd-5ad4ch: removes per-run TMPDIRs orphaned by runs that died with the server.
+      Arbiter.Worker.RunTmp.Reaper,
+      Arbiter.Worker.RunTmp.Sweeper,
       # Periodically runs PRAGMA optimize on SQLite repos (bd-2zjtca).
       Arbiter.Repo.OptimizeSweeper,
       # Deletes a session's persisted raw transcript once it has been :ended

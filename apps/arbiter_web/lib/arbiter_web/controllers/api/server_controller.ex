@@ -138,6 +138,9 @@ defmodule ArbiterWeb.Api.ServerController do
     })
   end
 
+  # bd-5ad4ch: where per-run worker TMPDIRs live, and whether that is RAM.
+  def worker_tmp(conn, _params), do: json(conn, Arbiter.Worker.RunTmp.diagnosis())
+
   def tmux(conn, _params), do: json(conn, LoginRunner.tmux_diagnosis())
 
   def merge_routing(conn, _params) do

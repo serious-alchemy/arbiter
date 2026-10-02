@@ -71,7 +71,7 @@ defmodule Arbiter.Test.SessionEnv do
     File.mkdir_p!(overrides[:primary_checkout])
     File.mkdir_p!(overrides[:sessions_credentials_source])
     File.mkdir_p!(overrides[:sessions_agy_source_home])
-    ExUnit.Callbacks.on_exit(fn -> File.rm_rf(base) end)
+    ExUnit.Callbacks.on_exit(fn -> Arbiter.Worker.RunTmp.force_rm_rf(base) end)
 
     override(overrides)
   end
