@@ -522,41 +522,6 @@ defmodule Arbiter.Sessions.TranscriptDistillation do
     usage = if is_map(usage), do: usage, else: %{}
     cost = usage[:cost_usd]
     cap = ctx.cfg[:max_cost_usd]
-
-    attrs = %{
-      task_id: nil,
-      source: :maintenance,
-      step: :transcript_distillation,
-      provider: "claude",
-      model: usage[:model] || @pass_label,
-      workspace_id: ctx.session.workspace_id,
-      cost_usd: cost,
-      tokens_in: usage[:tokens_in] || 0,
-      tokens_out: usage[:tokens_out] || 0,
-      cache_creation_tokens: usage[:cache_creation_tokens] || 0,
-      cache_read_tokens: usage[:cache_read_tokens] || 0,
-      duration_ms: usage[:duration_ms] || elapsed,
-      occurred_at: ctx.now,
-      raw: %{
-        kind: "transcript_distillation_pass",
-        distilled_session_id: ctx.session_id,
-        source_transcript: ctx.source,
-        turn_range: "#{ctx.window.first_turn}-#{ctx.window.last_turn}",
-        max_cost_usd: cap,
-        cli_result: usage[:subtype]
-      }
-    }
-
-    event_id =
-      case Ash.create(Event, attrs) do
-        {:ok, event} ->
-          event.id
-
-        {:error, error} ->
-          Logger.warning("TranscriptDistillation: cost row not recorded: #{inspect(error)}")
-          nil
-      end
-
     over? = is_number(cost) and cost > cap
 
     if over? do
@@ -565,8 +530,50 @@ defmodule Arbiter.Sessions.TranscriptDistillation do
       )
     end
 
-    %{usage_event_id: event_id, cost_usd: cost, max_cost_usd: cap, over_budget?: over?}
+    %{
+      usage_event_id: record_event(usage, elapsed, ctx),
+      cost_usd: cost,
+      max_cost_usd: cap,
+      over_budget?: over?
+    }
   end
+
+  defp record_event(usage, elapsed, ctx) do
+    attrs = %{
+      task_id: nil,
+      source: :maintenance,
+      step: :transcript_distillation,
+      provider: "claude",
+      model: usage[:model] || @pass_label,
+      workspace_id: ctx.session.workspace_id,
+      cost_usd: usage[:cost_usd],
+      tokens_in: tokens(usage, :tokens_in),
+      tokens_out: tokens(usage, :tokens_out),
+      cache_creation_tokens: tokens(usage, :cache_creation_tokens),
+      cache_read_tokens: tokens(usage, :cache_read_tokens),
+      duration_ms: usage[:duration_ms] || elapsed,
+      occurred_at: ctx.now,
+      raw: %{
+        kind: "transcript_distillation_pass",
+        distilled_session_id: ctx.session_id,
+        source_transcript: ctx.source,
+        turn_range: "#{ctx.window.first_turn}-#{ctx.window.last_turn}",
+        max_cost_usd: ctx.cfg[:max_cost_usd],
+        cli_result: usage[:subtype]
+      }
+    }
+
+    case Ash.create(Event, attrs) do
+      {:ok, event} ->
+        event.id
+
+      {:error, error} ->
+        Logger.warning("TranscriptDistillation: cost row not recorded: #{inspect(error)}")
+        nil
+    end
+  end
+
+  defp tokens(usage, key), do: usage[key] || 0
 
   # ---- vetting -------------------------------------------------------------------
 
