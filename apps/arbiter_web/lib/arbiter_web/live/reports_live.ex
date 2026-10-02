@@ -18,7 +18,7 @@ defmodule ArbiterWeb.ReportsLive do
 
   use ArbiterWeb, :live_view
 
-  alias Arbiter.Reports.{Cache, Throughput}
+  alias Arbiter.Reports.{Cache, Cost, Throughput}
   alias Arbiter.Tasks.{Issue, Workspace}
   alias ArbiterWeb.Charts
   alias ArbiterWeb.CoreComponents.Feedback
@@ -159,7 +159,8 @@ defmodule ArbiterWeb.ReportsLive do
       closed: Enum.count(rows, &(&1.state == :closed)),
       open: Enum.count(rows, &(&1.state != :closed)),
       weekly: weekly,
-      throughput: Throughput.load(filters)
+      throughput: Throughput.load(filters),
+      cost: Cost.load(filters)
     }
   end
 
@@ -292,6 +293,7 @@ defmodule ArbiterWeb.ReportsLive do
               />
             </section>
             <.throughput_section throughput={report.throughput} />
+            <.cost_section cost={report.cost} />
           </div>
         </.async_result>
       </div>
@@ -398,6 +400,88 @@ defmodule ArbiterWeb.ReportsLive do
     </section>
     """
   end
+
+  attr :cost, :map, required: true
+
+  defp cost_section(assigns) do
+    ~H"""
+    <section id="reports-cost" class="flex flex-col gap-3">
+      <h2 class="text-[13px] font-medium">Cost per ticket, by difficulty and provider</h2>
+      <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
+        <Charts.stat_tile
+          id="reports-cost-overhead"
+          label="Coordinator overhead"
+          value={dollars(@cost.overhead.cost_usd)}
+          note={overhead_note(@cost.overhead)}
+        />
+      </div>
+      <div class="overflow-x-auto">
+        <table id="reports-cost-table" class="w-full text-[12px] font-[family-name:var(--font-mono)]">
+          <thead>
+            <tr class="text-left text-[var(--text-label)]">
+              <th class="py-1 pr-3">Difficulty</th>
+              <th class="pr-3">Provider / model / account</th>
+              <th class="pr-3 text-right">Tickets</th>
+              <th class="pr-3 text-right">P25</th>
+              <th class="pr-3 text-right">Median</th>
+              <th class="pr-3 text-right">P75</th>
+              <th class="pr-3 text-right">P90</th>
+              <th class="text-right">Total</th>
+            </tr>
+          </thead>
+          <tbody :for={row <- @cost.difficulties} id={"reports-cost-d-#{row.difficulty || "unrated"}"}>
+            <tr class="border-t border-[var(--border-strong)] font-semibold">
+              <td class="py-1 pr-3">
+                {if row.difficulty, do: "D#{row.difficulty}", else: "Unrated"}
+              </td>
+              <td class="pr-3">all providers</td>
+              <td class="pr-3 text-right">{row.priced_tickets}/{row.tickets}</td>
+              <td class="pr-3 text-right">{dollars(row.p25)}</td>
+              <td class="pr-3 text-right">{dollars(row.median)}</td>
+              <td class="pr-3 text-right">{dollars(row.p75)}</td>
+              <td class="pr-3 text-right">{dollars(row.p90)}</td>
+              <td class="text-right">{dollars(row.cost_usd)}</td>
+            </tr>
+            <tr :for={p <- row.providers} class="text-[var(--text-secondary)]">
+              <td></td>
+              <td class="pr-3">{p.provider || "?"} / {p.model || "?"} / {p.account_id || "-"}</td>
+              <td class="pr-3 text-right">{p.priced_tickets}/{p.tickets}</td>
+              <%= if p.metered? do %>
+                <td class="pr-3 text-right">{dollars(p.p25)}</td>
+                <td class="pr-3 text-right">{dollars(p.median)}</td>
+                <td class="pr-3 text-right">{dollars(p.p75)}</td>
+                <td class="pr-3"></td>
+                <td class="text-right">{dollars(p.cost_usd)}</td>
+              <% else %>
+                <td colspan="4" class="pr-3 text-right">
+                  unmetered · {p.unmetered_rows} rows · {tokens(p.tokens)}
+                </td>
+                <td class="text-right">—</td>
+              <% end %>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p id="reports-cost-note" class="text-[12px] text-[var(--text-secondary)]">
+        Closed tickets, rolling {@cost.window_days}-day window, recency weighted — the same population and
+        percentiles as the ticket estimate, so the range filter does not apply here. Rework rounds fold
+        into the ticket. Only Claude reports dollars; unmetered providers show tokens where reported and
+        are never counted as $0.
+      </p>
+    </section>
+    """
+  end
+
+  defp dollars(nil), do: "—"
+  defp dollars(value), do: "$" <> :erlang.float_to_binary(value * 1.0, decimals: 2)
+
+  defp tokens(nil), do: "no tokens"
+  defp tokens(n), do: "#{n} tokens"
+
+  defp overhead_note(%{share: nil, rows: rows}), do: "#{rows} coordinator rows"
+
+  defp overhead_note(%{share: share}),
+    do: "#{Float.round(share * 100, 1)}% of priced spend; no ticket owns it"
 
   defp week_label(week), do: Calendar.strftime(week, "%b %d")
 
