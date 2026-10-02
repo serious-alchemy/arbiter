@@ -82,14 +82,14 @@ defmodule Arbiter.Tasks.Lifecycle.Attention do
     * `:run` — `:question` (the primary author run asked one), `:failed`
       (every author run finished without succeeding), `:orphaned` (no run
       at all past the dispatch grace), `:live` (a run on the ticket is still
-      live) or nil;
+      live), `:held` (the quota gate is holding its next round) or nil;
     * `:block` — the PR's effective block reason, or nil;
     * `:watchdog_alive` — whether the ticket's Watchdog is running (nil when
       unknown).
   """
   @type facts :: %{
           optional(:state) => atom() | nil,
-          optional(:run) => :question | :failed | :orphaned | :live | nil,
+          optional(:run) => :question | :failed | :orphaned | :live | :held | nil,
           optional(:block) => atom() | nil,
           optional(:watchdog_alive) => boolean() | nil
         }

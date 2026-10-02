@@ -151,6 +151,22 @@ defmodule Arbiter.Tasks.LifecycleAttentionTest do
                view(ticket(:active), %{runs: []}).attention
     end
 
+    test "a run held for quota is not a crash, whether its worker row is failed or gone" do
+      failed = [run(%{state: :finished, outcome: :failed})]
+
+      assert view(ticket(:active), %{runs: failed, held: true}).attention == nil
+      assert view(ticket(:active), %{runs: [], held: true}).attention == nil
+    end
+
+    test "a crash with no hold still raises run_crashed" do
+      failed = [run(%{state: :finished, outcome: :failed})]
+
+      assert %{cause: :run_crashed} =
+               view(ticket(:active), %{runs: failed, held: false}).attention
+
+      assert %{cause: :run_crashed} = view(ticket(:active), %{runs: [], held: false}).attention
+    end
+
     test "an active ticket with no runs read is not called orphaned" do
       assert view(ticket(:active)).attention == nil
     end
