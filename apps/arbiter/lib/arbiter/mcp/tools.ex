@@ -2102,7 +2102,7 @@ defmodule Arbiter.MCP.Tools do
   defdelegate loop_pending_diff(scope, args), to: Arbiter.MCP.Tools.LoopPending
   defdelegate loop_pending_apply(scope, args), to: Arbiter.MCP.Tools.LoopPending
   defdelegate loop_pending_reject(scope, args), to: Arbiter.MCP.Tools.LoopPending
-  
+
   defdelegate memory_pending_list(scope, args), to: Arbiter.MCP.Tools.MemoryPending
   defdelegate memory_pending_diff(scope, args), to: Arbiter.MCP.Tools.MemoryPending
   defdelegate memory_pending_apply(scope, args), to: Arbiter.MCP.Tools.MemoryPending

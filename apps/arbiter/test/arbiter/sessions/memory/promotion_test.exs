@@ -16,6 +16,7 @@ defmodule Arbiter.Sessions.Memory.PromotionTest do
     prior_memory = Application.get_env(:arbiter, :memory_root)
     Application.put_env(:arbiter, :sessions_root, sessions_root)
     Application.put_env(:arbiter, :memory_root, memory_root)
+
     on_exit(fn ->
       restore(:sessions_root, prior_sessions)
       restore(:memory_root, prior_memory)
@@ -49,16 +50,16 @@ defmodule Arbiter.Sessions.Memory.PromotionTest do
 
     test "promotes a candidate memory", %{sessions_root: sessions_root, memory_root: mem_root} do
       path = write_candidate!(sessions_root, "session-1", "cand.md", "Content")
-      
+
       assert :ok == Promotion.promote(path, memory_root: mem_root)
-      
+
       assert not File.exists?(path)
       assert File.exists?(Path.join(mem_root, "cand.md"))
     end
 
     test "rejects a candidate memory", %{sessions_root: root} do
       path = write_candidate!(root, "session-1", "cand.md", "Content")
-      
+
       assert :ok == Promotion.reject(path)
       assert not File.exists?(path)
     end

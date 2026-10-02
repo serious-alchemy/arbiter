@@ -19,6 +19,7 @@ defmodule Arbiter.Sessions.Memory.StalenessTest do
 
     #{body}
     """)
+
     Path.join(root, filename)
   end
 
@@ -39,7 +40,14 @@ defmodule Arbiter.Sessions.Memory.StalenessTest do
       File.mkdir_p!(Path.join(checkout, "lib"))
       File.write!(Path.join(checkout, "lib/short.ex"), "defmodule Short do\nend\n")
 
-      path = write_memory!(root, "proj.md", "project", "Look at lib/short.ex:10", "  workspace_id: ws1\n")
+      path =
+        write_memory!(
+          root,
+          "proj.md",
+          "project",
+          "Look at lib/short.ex:10",
+          "  workspace_id: ws1\n"
+        )
 
       assert {:error, :quarantined} = Staleness.check_memory(path, primary_checkout: checkout)
 
@@ -53,7 +61,14 @@ defmodule Arbiter.Sessions.Memory.StalenessTest do
       File.mkdir_p!(Path.join(checkout, "lib"))
       File.write!(Path.join(checkout, "lib/short.ex"), "defmodule Short do\nend\n")
 
-      path = write_memory!(root, "proj.md", "project", "Look at lib/short.ex:2", "  workspace_id: ws1\n")
+      path =
+        write_memory!(
+          root,
+          "proj.md",
+          "project",
+          "Look at lib/short.ex:2",
+          "  workspace_id: ws1\n"
+        )
 
       assert :ok = Staleness.check_memory(path, primary_checkout: checkout)
       assert File.exists?(path)

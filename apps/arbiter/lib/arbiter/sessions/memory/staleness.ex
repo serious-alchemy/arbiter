@@ -16,7 +16,8 @@ defmodule Arbiter.Sessions.Memory.Staleness do
 
     if frontmatter[:type] in ["project", "reference"] do
       body = read_body(path)
-      if valid_citations?(body, checkout) do
+
+      if is_nil(checkout) or valid_citations?(body, checkout) do
         :ok
       else
         quarantine(path)
@@ -39,7 +40,9 @@ defmodule Arbiter.Sessions.Memory.Staleness do
           {:ok, content} ->
             line_count = length(String.split(content, "\n"))
             line <= line_count
-          _ -> false
+
+          _ ->
+            false
         end
       else
         false
@@ -103,7 +106,9 @@ defmodule Arbiter.Sessions.Memory.Staleness do
         else
           _ -> contents
         end
-      _ -> ""
+
+      _ ->
+        ""
     end
   end
 end
