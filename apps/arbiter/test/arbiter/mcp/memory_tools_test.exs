@@ -19,7 +19,9 @@ defmodule Arbiter.MCP.MemoryToolsTest do
   alias Arbiter.Sessions.Layout
   alias Arbiter.Sessions.Memory.Checker
   alias Arbiter.Sessions.Memory.Frontmatter
+  alias Arbiter.Sessions.Memory.Promotion
   alias Arbiter.Tasks.Workspace
+  alias Arbiter.Worker.SessionArchive
 
   @moduletag :tmp_dir
 
@@ -103,7 +105,7 @@ defmodule Arbiter.MCP.MemoryToolsTest do
     end
 
     test "worker and refine tokens cannot reach any memory tool" do
-      for scope <- [@worker, @refine], tool <- @writes ++ @reads do
+      for scope <- [@worker, @refine], tool <- @writes ++ @reads ++ ["memory_distill"] do
         assert {:rpc_error, @not_permitted, _} = Catalog.call(scope, tool, %{}),
                "#{scope.tier} reached #{tool}"
       end
@@ -197,6 +199,108 @@ defmodule Arbiter.MCP.MemoryToolsTest do
 
       assert {:ok, %{memory: "stale.md", status: "ok"}} =
                Catalog.call(@coordinator, "memory_quarantine_restore", %{"name" => name})
+    end
+  end
+
+  describe "memory_distill (bd-avt4lt)" do
+    @distill_sid "0199cccc-0000-7000-8000-000000000014"
+    @proposal %{
+      "name" => "rebase-not-merge",
+      "description" => "The operator rebases feature branches",
+      "type" => "feedback",
+      "turn_range" => [1, 1],
+      "body" => "Rebase onto main; never merge main in."
+    }
+
+    setup %{tmp_dir: tmp_dir} do
+      keys = [:output_log_root, :transcript_distillation_invoker, :transcript_distillation]
+      prior = Map.new(keys, &{&1, Application.fetch_env(:arbiter, &1)})
+      Application.put_env(:arbiter, :output_log_root, Path.join(tmp_dir, "logs"))
+
+      on_exit(fn ->
+        for {key, value} <- prior do
+          case value do
+            {:ok, value} -> Application.put_env(:arbiter, key, value)
+            :error -> Application.delete_env(:arbiter, key)
+          end
+        end
+      end)
+
+      path = SessionArchive.path_for(@distill_sid)
+      File.mkdir_p!(Path.dirname(path))
+      turn = %{"type" => "user", "message" => %{"content" => "Always rebase, never merge."}}
+      File.write!(path, :zlib.gzip(Jason.encode!(turn) <> "\n"))
+      :ok
+    end
+
+    defp distill_invoker!(proposals) do
+      test = self()
+
+      Application.put_env(:arbiter, :transcript_distillation_invoker, fn _prompt, opts ->
+        send(test, {:invoked, opts})
+        reply = Jason.encode!(%{"candidates" => proposals})
+        {:ok, reply, %{model: "claude-test", cost_usd: 0.01}}
+      end)
+    end
+
+    test "queues candidates that memory_pending_list then shows" do
+      distill_invoker!([@proposal])
+
+      assert {:ok, %{candidates: [%{id: id, turn_range: "1-1"}], rejected: [], cost: cost}} =
+               Catalog.call(@coordinator, "memory_distill", %{"session_id" => @distill_sid})
+
+      assert is_binary(cost.usage_event_id)
+
+      assert {:ok, %{candidates: [%{id: ^id, type: "feedback"}]}} =
+               Catalog.call(@coordinator, "memory_pending_list", %{})
+    end
+
+    test "is refused for a session token, which spends and queues nothing" do
+      distill_invoker!([@proposal])
+
+      assert {:rpc_error, @not_permitted, message} =
+               Catalog.call(@session, "memory_distill", %{"session_id" => @distill_sid})
+
+      assert message =~ "session"
+      refute_received {:invoked, _}
+      assert Promotion.list_candidates() == []
+    end
+
+    test "its bounds can lower the configured caps, never raise them" do
+      distill_invoker!([@proposal, Map.put(@proposal, "name", "second")])
+
+      Application.put_env(:arbiter, :transcript_distillation,
+        max_cost_usd: 0.4,
+        max_candidates: 5
+      )
+
+      assert {:ok, %{candidates: [_], rejected: [%{reason: "over_candidate_cap"}]}} =
+               Catalog.call(@coordinator, "memory_distill", %{
+                 "session_id" => @distill_sid,
+                 "max_cost_usd" => 100,
+                 "max_candidates" => 1
+               })
+
+      assert_received {:invoked, opts}
+      assert opts[:max_budget_usd] == 0.4
+    end
+
+    test "says why a pass was refused" do
+      distill_invoker!([@proposal])
+
+      refusals = [
+        {%{"session_id" => "0199dddd-0000-7000-8000-000000000000"}, "no archived transcript"},
+        {%{}, "session_id"},
+        {%{"session_id" => @distill_sid, "max_cost_usd" => "lots"}, "max_cost_usd"},
+        {%{"session_id" => @distill_sid, "max_candidates" => 0}, "max_candidates"}
+      ]
+
+      for {args, expected} <- refusals do
+        assert {:tool_error, message} = Catalog.call(@coordinator, "memory_distill", args)
+        assert message =~ expected
+      end
+
+      refute_received {:invoked, _}
     end
   end
 end

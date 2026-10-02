@@ -25,7 +25,8 @@ defmodule Arbiter.MCP.CatalogTest do
                        loop_propose_routing loop_canary_status breaker_list breaker_reset
                        alert_list
                        memory_pending_list memory_pending_diff memory_pending_apply
-                       memory_pending_reject memory_quarantine_list memory_quarantine_restore)
+                       memory_pending_reject memory_quarantine_list memory_quarantine_restore
+                       memory_distill)
 
   # Tools that resolve/authorize a workspace and thus expose the optional
   # `workspace` param. The skill_* tools scope to a workspace (bd-9j6is7).

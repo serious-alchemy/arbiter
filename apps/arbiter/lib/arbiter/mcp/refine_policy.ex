@@ -170,6 +170,7 @@ defmodule Arbiter.MCP.RefinePolicy do
     "memory_pending_reject" => @deny_reason_memory,
     "memory_quarantine_list" => @deny_reason_memory,
     "memory_quarantine_restore" => @deny_reason_memory,
+    "memory_distill" => @deny_reason_memory,
 
     # tracker
     "tracker_claim" => @deny_reason_tracker,

@@ -4,8 +4,11 @@ defmodule Arbiter.MCP.Tools.MemoryPending do
   quarantine (bd-19qve3, RFC §9.4 phase 13): `memory_pending_list` /
   `memory_pending_diff` / `memory_pending_apply` / `memory_pending_reject`,
   modelled on `loop_pending_*`, plus `memory_quarantine_list` /
-  `memory_quarantine_restore`. The domain logic lives in
-  `Arbiter.Sessions.Memory.Promotion` and `Arbiter.Sessions.Memory.Quarantine`.
+  `memory_quarantine_restore`, and `memory_distill` (bd-avt4lt, phase 14),
+  which proposes candidates from an ended session's transcript. The domain
+  logic lives in `Arbiter.Sessions.Memory.Promotion`,
+  `Arbiter.Sessions.Memory.Quarantine` and
+  `Arbiter.Sessions.TranscriptDistillation`.
 
   ## Who may write
 
@@ -18,6 +21,11 @@ defmodule Arbiter.MCP.Tools.MemoryPending do
   promotes them, its own or another session's, and never clears a rejection or
   a quarantine. The read tools stay open to session tokens: reading the queue
   changes nothing.
+
+  `memory_distill` is plain-coordinator only as well. It never touches the
+  shared layer, but it spends model budget and reads another session's
+  transcript. Its optional bounds can lower the configured caps
+  (`Arbiter.Sessions.TranscriptDistillation.settings/0`), never raise them.
   """
 
   alias Arbiter.Config.Paths
@@ -26,6 +34,7 @@ defmodule Arbiter.MCP.Tools.MemoryPending do
   alias Arbiter.PaperTrail
   alias Arbiter.Sessions.Memory.Promotion
   alias Arbiter.Sessions.Memory.Quarantine
+  alias Arbiter.Sessions.TranscriptDistillation
 
   @states %{"pending" => :pending, "rejected" => :rejected}
 
@@ -105,6 +114,23 @@ defmodule Arbiter.MCP.Tools.MemoryPending do
     end
   end
 
+  @doc """
+  One transcript distillation pass over an ended session: candidates go into
+  the queue above, nothing reaches the shared layer. Plain coordinator token
+  only.
+  """
+  @spec memory_distill(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def memory_distill(%Scope{} = scope, args) do
+    with :ok <- authorize_distill(scope),
+         {:ok, session_id} <- Tools.require_string(args, "session_id"),
+         {:ok, opts} <- distill_opts(args) do
+      case TranscriptDistillation.run(session_id, opts) do
+        {:ok, result} -> {:ok, serialize_distillation(result)}
+        {:error, reason} -> {:error, distill_error(session_id, reason)}
+      end
+    end
+  end
+
   # ---- authorization ---------------------------------------------------------
 
   defp authorize_write(%Scope{tier: :coordinator, session_id: nil}), do: :ok
@@ -120,6 +146,19 @@ defmodule Arbiter.MCP.Tools.MemoryPending do
     {:error, {:unauthorized, "the shared memory layer is coordinator/operator only, not #{tier}"}}
   end
 
+  defp authorize_distill(%Scope{tier: :coordinator, session_id: nil}), do: :ok
+
+  defp authorize_distill(%Scope{tier: :coordinator}) do
+    {:error,
+     {:unauthorized,
+      "a session token cannot run transcript distillation: it spends model budget and reads " <>
+        "another session's transcript, so it is coordinator/operator only"}}
+  end
+
+  defp authorize_distill(%Scope{tier: tier}) do
+    {:error, {:unauthorized, "transcript distillation is coordinator/operator only, not #{tier}"}}
+  end
+
   # ---- arguments and errors ----------------------------------------------------
 
   defp state_arg(args) do
@@ -128,6 +167,97 @@ defmodule Arbiter.MCP.Tools.MemoryPending do
       _ -> {:error, {:invalid, "`state` must be one of: pending, rejected"}}
     end
   end
+
+  defp distill_opts(args) do
+    settings = TranscriptDistillation.settings()
+
+    with {:ok, max_bytes} <- positive_integer(args, "max_bytes"),
+         {:ok, from_turn} <- positive_integer(args, "from_turn"),
+         {:ok, max_candidates} <- positive_integer(args, "max_candidates"),
+         {:ok, max_cost_usd} <- positive_number(args, "max_cost_usd") do
+      {:ok,
+       [
+         max_bytes: lower(max_bytes, settings[:max_bytes]),
+         from_turn: from_turn,
+         max_candidates: lower(max_candidates, settings[:max_candidates]),
+         max_cost_usd: lower(max_cost_usd, settings[:max_cost_usd])
+       ]}
+    end
+  end
+
+  # A caller may tighten a configured cap, never loosen it.
+  defp lower(nil, _configured), do: nil
+  defp lower(value, configured), do: min(value, configured)
+
+  defp positive_integer(args, key) do
+    case Tools.optional_integer(args, key) do
+      {:ok, n} when is_nil(n) or n > 0 -> {:ok, n}
+      {:ok, _n} -> {:error, {:invalid, "`#{key}` must be a positive integer"}}
+      error -> error
+    end
+  end
+
+  defp positive_number(args, key) do
+    case Map.get(args, key) do
+      nil -> {:ok, nil}
+      n when is_number(n) and n > 0 -> {:ok, n}
+      _ -> {:error, {:invalid, "`#{key}` must be a positive number"}}
+    end
+  end
+
+  defp serialize_distillation(result) do
+    %{
+      session_id: result.session_id,
+      source_transcript: result.source_transcript,
+      window: result.window,
+      candidates: Enum.map(result.candidates, &Map.take(&1, [:id, :name, :type, :turn_range])),
+      count: length(result.candidates),
+      rejected: Enum.map(result.rejected, &%{&1 | reason: reason_text(&1.reason)}),
+      cost: %{
+        usage_event_id: result.cost.usage_event_id,
+        cost_usd: result.cost.cost_usd,
+        max_cost_usd: result.cost.max_cost_usd,
+        over_budget: result.cost.over_budget?
+      }
+    }
+  end
+
+  defp reason_text(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp reason_text(reason), do: inspect(reason)
+
+  defp distill_error(_id, :invalid_session_id),
+    do: {:invalid, "`session_id` must be a session id, as the sessions list shows it"}
+
+  defp distill_error(id, :no_archived_transcript) do
+    {:not_found,
+     "session #{id} has no archived transcript: a session is archived when it ends, and only a " <>
+       "Claude Code session has one"}
+  end
+
+  defp distill_error(id, :empty_transcript),
+    do: {:invalid, "session #{id}'s transcript has no conversation turns to distill"}
+
+  defp distill_error(_id, :model_calls_disabled),
+    do: {:unavailable, "transcript distillation model calls are disabled on this server"}
+
+  defp distill_error(_id, {:budget_exhausted, spend}) do
+    {:budget_exhausted,
+     "transcript distillation has spent $#{spend.spent_usd} in the last 24 hours; another pass " <>
+       "of up to $#{spend.max_cost_usd} would pass the $#{spend.daily_budget_usd} daily budget"}
+  end
+
+  defp distill_error(id, :unsafe_candidates_dir),
+    do: {:invalid, "session #{id}'s candidate space is not a plain directory; refusing to write"}
+
+  defp distill_error(_id, :unparseable_model_output) do
+    {:model_error,
+     "the model's reply held no candidates JSON; the pass was metered and queued nothing"}
+  end
+
+  defp distill_error(_id, {:invalid_option, key}),
+    do: {:invalid, "transcript distillation is misconfigured: `#{key}` is not a valid bound"}
+
+  defp distill_error(_id, reason), do: {:system_error, inspect(reason)}
 
   defp promotion_error(id, :invalid_id),
     do:

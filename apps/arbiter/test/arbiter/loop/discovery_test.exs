@@ -211,6 +211,7 @@ defmodule Arbiter.Loop.DiscoveryTest do
           %{"type" => "assistant", "message" => %{}},
           %{
             "type" => "result",
+            "subtype" => "success",
             "result" => "{\"candidates\": []}",
             "total_cost_usd" => 0.12,
             "duration_ms" => 4200,
@@ -234,7 +235,8 @@ defmodule Arbiter.Loop.DiscoveryTest do
                cache_creation_tokens: 2000,
                cache_read_tokens: 300,
                cost_usd: 0.12,
-               duration_ms: 4200
+               duration_ms: 4200,
+               subtype: "success"
              }
     end
 
