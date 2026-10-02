@@ -69,6 +69,9 @@ defmodule Arbiter.Release.UpdateCheckTest do
 
       start_check(name, running_version: "0.2.0")
       caller = Task.async(fn -> UpdateCheck.check_now(name) end)
+      # The plug runs in a Task the checker spawns, so on a loaded CI box the
+      # message can take longer than assert_receive's 100ms default to arrive.
+      # Wait on the signal itself, with a bound only so a real hang fails.
       assert_receive {:in_flight, plug_pid}, 5_000
 
       state = UpdateCheck.state(name)

@@ -326,7 +326,16 @@ config :arbiter, :credential_watchdog, enabled: false
 # dispatched the board tests' own Ready fixtures and escalated the failures
 # from a connection whose sandbox owner had already exited (bd-jw7cb0). Tests
 # that exercise the triggers start their own instance with `:topics`.
-config :arbiter, :board_autopilot, enabled: false, interval_ms: :never, topics: []
+#
+# `read_persisted_state?: false`: the app-supervised instance boots before any
+# test checks out a sandbox connection, so its boot read of the persisted pause
+# state can only fail and then retry ("still unreadable (attempt N)") every few
+# seconds for the whole run. Tests that exercise the read pass `:read_status`.
+config :arbiter, :board_autopilot,
+  enabled: false,
+  interval_ms: :never,
+  topics: [],
+  read_persisted_state?: false
 
 # `Estimate.sample/1`'s memo is one ETS table for the whole VM. A sandbox
 # rollback deletes a test's usage rows but not the sample cached from them, so

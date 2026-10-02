@@ -146,10 +146,18 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
   # the `:snapshot` GenServer.call the same way a real Worker would, reporting
   # the given run `state` (and `outcome`, once finished). Defaults to
   # `:working` — a genuinely active worker.
+  #
+  # Supervised by the test, `:temporary`, rather than linked with an `on_exit`
+  # `if Process.alive?(pid), do: GenServer.stop(pid)`: a task's `:close`
+  # after-action reaps the worker (see below), and the test process's exit takes
+  # a linked one down with it, so that check-then-stop raced both and failed
+  # the test in teardown with "no process".
   defp register_live_worker(task_id, state \\ :working, outcome \\ nil) do
-    {:ok, pid} = FakeWorker.start_link(task_id, %{state: state, outcome: outcome})
-    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
-    pid
+    start_supervised!(%{
+      id: {FakeWorker, task_id},
+      start: {FakeWorker, :start_link, [task_id, %{state: state, outcome: outcome}]},
+      restart: :temporary
+    })
   end
 
   # Minimal GitHub PR GET stub — returns merged or open.

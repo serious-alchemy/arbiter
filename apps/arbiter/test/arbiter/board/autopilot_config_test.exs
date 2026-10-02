@@ -54,6 +54,20 @@ defmodule Arbiter.Board.AutopilotConfigTest do
     pid
   end
 
+  describe "the app-supervised instance under test" do
+    # It boots before any test owns a sandbox connection, so a boot read of the
+    # persisted state could only fail and then retry every 5s, logging "still
+    # unreadable" through the whole suite.
+    test "does not read (and so never retries) the persisted pause state" do
+      assert %{state_load: :settled} = :sys.get_state(Autopilot)
+    end
+
+    test "an instance given no :read_status skips the DB read in the test env" do
+      pid = start([])
+      assert %{state_load: :settled} = :sys.get_state(pid)
+    end
+  end
+
   describe "persisted pause state unreadable at boot (bd-c3b30g)" do
     import ExUnit.CaptureLog
 

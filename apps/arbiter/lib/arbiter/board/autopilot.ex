@@ -321,6 +321,11 @@ defmodule Arbiter.Board.Autopilot do
     * `:resume` — seam for tests; a 3-arity `(task_id, kind, opts)` that
       replays a deferred resume. Defaults to `Dispatch.resume/2` /
       `resume_session/2` (bd-92mx1m).
+    * `:registry_settled?` — seam for tests; a 0-arity function answering
+      whether the worker registry is complete enough to plan against. Defaults
+      to `ResumeGate.open?/0 and not Drain.dispatch_pending?/0`, both of which
+      read VM-global state, so a test that runs concurrently with others (and
+      is not about that gate) overrides it.
     * `:notify_paused` — seam for tests; a 2-arity `(actor, surface)` that
       tells the coordinator's mailbox about a pause (bd-cl6zjn). Defaults to an
       escalation per workspace.
@@ -453,7 +458,7 @@ defmodule Arbiter.Board.Autopilot do
     interval = Keyword.get(opts, :interval_ms, configured_interval_ms())
     debounce = Keyword.get(opts, :debounce_ms, configured_debounce_ms())
 
-    read_status = Keyword.get(opts, :read_status, &Arbiter.Settings.read_board_autopilot_status/0)
+    read_status = Keyword.get_lazy(opts, :read_status, &default_read_status/0)
     retry_ms = Keyword.get(opts, :state_retry_ms, @state_retry_ms)
 
     {{paused?, changed_at, changed_by}, state_load} =
@@ -503,7 +508,8 @@ defmodule Arbiter.Board.Autopilot do
       read_status: read_status,
       state_retry_ms: retry_ms,
       notify_unreadable: Keyword.get(opts, :notify_unreadable, &default_notify_unreadable/1),
-      notify_paused: Keyword.get(opts, :notify_paused, &default_notify_paused/2)
+      notify_paused: Keyword.get(opts, :notify_paused, &default_notify_paused/2),
+      registry_settled?: Keyword.get(opts, :registry_settled?, &registry_settled?/0)
     }
 
     schedule(interval)
@@ -748,12 +754,14 @@ defmodule Arbiter.Board.Autopilot do
   # prior worker before the new one registers — the account would read one
   # slot freer than it is). Hold, and look again shortly.
   defp promote(state) do
-    if ResumeGate.open?() and not Drain.dispatch_pending?() do
+    if state.registry_settled?.() do
       plan(state)
     else
       {:idle, request_plan(state)}
     end
   end
+
+  defp registry_settled?, do: ResumeGate.open?() and not Drain.dispatch_pending?()
 
   defp plan(state) do
     {read_status, snapshot} = read_board(state, [])
@@ -1078,6 +1086,18 @@ defmodule Arbiter.Board.Autopilot do
     :arbiter
     |> Application.get_env(:board_autopilot, [])
     |> Keyword.get(:topics, default_topics())
+  end
+
+  # `read_persisted_state?: false` in the test env: the app-supervised instance
+  # boots before any test owns a sandbox connection, so its boot read can only
+  # fail (or queue behind the suite's pool), and the retry loop would then log
+  # "still unreadable" every few seconds for the life of the run.
+  defp default_read_status do
+    if :arbiter
+       |> Application.get_env(:board_autopilot, [])
+       |> Keyword.get(:read_persisted_state?, true),
+       do: &Arbiter.Settings.read_board_autopilot_status/0,
+       else: fn -> {:ok, %{paused: nil, changed_at: nil, changed_by: nil}} end
   end
 
   defp configured_debounce_ms do
