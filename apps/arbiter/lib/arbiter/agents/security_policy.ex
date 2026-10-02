@@ -202,7 +202,8 @@ defmodule Arbiter.Agents.SecurityPolicy do
             enabled: boolean(),
             filesystem: filesystem(),
             network: boolean(),
-            writable_paths: [String.t()]
+            writable_paths: [String.t()],
+            egress_tunnels: [String.t()]
           }
         }
 
