@@ -76,6 +76,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
 
   use Ash.Resource.Change
 
+  alias Arbiter.Worker.Egress.Policy, as: EgressPolicy
   alias Ash.Changeset
 
   @impl true
@@ -419,7 +420,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
   end
 
   defp valid_allow_host?(entry) when is_binary(entry),
-    do: match?({:ok, _}, Arbiter.Worker.Egress.Policy.normalize_baseline([entry]))
+    do: match?({:ok, _}, EgressPolicy.normalize_baseline([entry]))
 
   defp valid_allow_host?(_), do: false
 

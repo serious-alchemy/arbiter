@@ -221,6 +221,7 @@ defmodule Arbiter.Agents.SecurityPolicy do
   """
 
   alias Arbiter.Tasks.RepoConfig
+  alias Arbiter.Worker.Egress.Policy, as: EgressPolicy
 
   @enforce_keys [:permissions, :sandbox]
   defstruct [:permissions, :sandbox]
@@ -800,7 +801,7 @@ defmodule Arbiter.Agents.SecurityPolicy do
 
   # An `allow_hosts` entry the proxy would accept as a baseline.
   defp valid_allow_host?(entry),
-    do: match?({:ok, _}, Arbiter.Worker.Egress.Policy.normalize_baseline([entry]))
+    do: match?({:ok, _}, EgressPolicy.normalize_baseline([entry]))
 
   @doc """
   The policy's `sandbox.egress_tunnels` as `{local_port, host, port}` tuples,
