@@ -46,5 +46,12 @@ defmodule Arbiter.Agents.ModelDisplayTest do
     test "maps agy's GPT-OSS catalogue" do
       assert ModelDisplay.short("gpt-oss-120b") == "GPT-OSS"
     end
+
+    test "maps Codex gpt-* ids" do
+      assert ModelDisplay.short("gpt-5.5") == "GPT-5.5"
+      assert ModelDisplay.short("gpt-5-codex") == "GPT-5 Codex"
+      assert ModelDisplay.short("gpt-5.1-codex-mini") == "GPT-5.1 Codex Mini"
+      assert ModelDisplay.short("gpt-4o-2024-08-06") == "GPT-4o"
+    end
   end
 end
