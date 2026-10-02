@@ -1,0 +1,586 @@
+# Rootless podman as a worker sandbox backend: decision
+
+**Task:** bd-jk49nc (decision spike, GitHub #203) · **Builds on:**
+[guardrail-profiles](guardrail-profiles.md) (bd-8apkz6),
+[agy `:strict` write isolation](agy-strict-write-isolation.md) (bd-ca7xko),
+bd-5gvqgc, bd-3s82pf · **Status:** proposed 2026-10-02. Nothing here is
+implemented. No production code or config changed; the measurements ran
+against scratch clones under `/tmp`. The ticket plan is in
+[§7.3](#73-ticket-breakdown).
+
+## Decision
+
+1. **Containers: yes, as a second backend behind `sandbox.backend: bwrap |
+   podman`, and used first for the providers that have no jail at all, Claude
+   and Codex (G7, G8).** agy stays on bwrap, where G6 has already shipped and
+   where its Secret Service keyring auth is easier to serve. A container is
+   default-deny for files, env, sockets, processes and users, and the
+   incident list that motivated this spike (bd-7o08mj, bd-7r0qrj, bd-51m9ba,
+   bd-3t973v) is exactly what a default-deny boundary removes by construction.
+   It is not a replacement for the policy layer (G11 to G19), the egress proxy
+   (G5) or the bridge identity work (G9); all of those are needed either way.
+2. **Not before the RHEL 8 EC2 is checked.** Everything below was measured
+   on the Fedora 44 laptop (podman 5.8.7, crun, netavark, pasta, SELinux
+   enforcing). The EC2 would run podman 4.9.4 with slirp4netns, fuse-overlayfs
+   and, by default on RHEL 8, cgroups v1 (package inventory from Rocky 8.10,
+   [§2.4](#24-the-rhel-8-ec2)). The first ticket is a doctor-style feasibility
+   probe there (P1). If it fails, G7 and G8 proceed on bwrap as planned and
+   this document becomes the record of why not.
+3. **Per-repo dev images: yes, but keyed by toolchain, not by repo.** One
+   shared base image (OS, git, build tools, `procps`, `socat`, the provider
+   CLIs and `arb`), plus a thin toolchain layer per distinct `(Erlang, Elixir,
+   Node)` tuple. Arbiter and vstim today want the same tuple, so they share an
+   image; tonic wants a different one. A repo maps to an image through its
+   `.arbiter/Containerfile` (toolchain only, built from the default branch,
+   never from a worker's branch). Mise-at-start and a fat image are worse
+   ([§2.1](#21-the-unit-of-an-image)).
+4. **"Just mount the worktree?" No. Mount a private clone, not the
+   registered worktree.** The exact set ([§3.2](#32-the-recommended-mount-set)):
+   - the worker's own checkout **with its own `.git` directory**, read-write;
+   - the main repo's `objects/` directory, **read-only**, reached through
+     `objects/info/alternates` (`:O`, so no SELinux relabel of the host
+     checkout);
+   - a per-run HOME, a per-run deps cache copy, and a per-run `CLAUDE_CONFIG_DIR`
+     (all read-write, all private);
+   - an optional per-run bridge socket directory and an optional deploy-key
+     secret.
+
+   Nothing else from the host is visible. A *registered* worktree needs eight
+   mounts including the shared `refs/` and `logs/` read-write, and the probe
+   showed that lets the worker rewrite a sibling worktree's branch.
+5. **The measured cost is small where it matters.** A warm container starts
+   in about 0.25 s against about 0.01 s for bwrap; a fresh image pays a
+   one-off 3.5 to 6 s the first time a UID-mapped run uses it. Against a
+   workload of minutes per ticket that is noise. Toolchain times (deps
+   compile, `mix test`) matched bwrap within run-to-run variation
+   ([§6](#6-measurements)).
+6. **What it does not fix:** SELinux makes host-owned sockets unreachable
+   from `container_t`, so the Arbiter and proxy bridges need
+   `--security-opt label=disable`, which drops the SELinux half of the
+   isolation (the user namespace, capability drop and mount namespace
+   remain). That trade-off is the main open question
+   ([§5.3](#53-selinux-and-the-bridge-sockets)).
+
+## Why
+
+The question (operator, 2026-10-01) was whether a container would be simpler
+and safer than the bwrap jail plus its growing list of masks. The answer
+splits:
+
+- **Safer: yes.** `Jail.argv/2` starts from `--ro-bind / /` and subtracts
+  (`mask_args`, `secret_files`, the keyring proxy, the ssh shadow config, the
+  `/run/user`, `/run/dbus` and resolver tmpfs masks). Every incident in the
+  list was a path or socket the denylist had not named yet. A container starts
+  from an empty root and adds, so an unnamed path is invisible, not exposed.
+- **Simpler: partly.** The masks, G3 and the G2-style env allowlist mostly
+  disappear for container workers. What replaces them is image lifecycle,
+  git layout, credential seeding and SELinux handling. Those are new surface,
+  and several have sharp edges (all found while probing, listed in
+  [Appendix A](#appendix-a-probes)).
+- **Claude runs unjailed today.** `claude.ex` documents `write_confinement:
+  :permission_layer` and never calls `Jail.wrap`; the worker that wrote this
+  document was itself one (`--dangerously-skip-permissions`, operator UID).
+  The biggest exposure is therefore the provider that carries most of the
+  load, which is why G7 is the right first customer.
+
+## 1. Prior art
+
+Containers were considered twice and rejected both times on the same
+grounds, which were about cost for a single new binary, not about security.
+
+| Where | Verdict | Reason given |
+|---|---|---|
+| [agy-strict-write-isolation.md](agy-strict-write-isolation.md), option 2'' (bd-ca7xko) | "No, for now" | "High: image per toolchain, keyring over D-Bus into the container, UID mapping on bind mounts. Heavier start-up per spawn. Duplicates what bwrap does with one binary." |
+| [guardrail-profiles.md §4.2](guardrail-profiles.md), E6 | Rejected, "as in bd-ca7xko (2'')" | "An image per toolchain, the keyring passed into the container, UID mapping on binds. Heavier start-up." Recorded for the RHEL 8 column: "podman itself not queried" |
+| bd-5gvqgc, bd-3s82pf (the bwrap jail and its default-on rollout) | Not considered | Both took bd-ca7xko's decision as given. |
+
+Those rejections were scoped to **agy** and to **egress**, when the open
+problem was one write-escape in one provider. Three things have changed:
+
+1. The jail grew from one escape fix into a denylist of masks, and the week's
+   incidents were all denylist misses.
+2. The next two jail tickets (G7, G8) put the two largest providers behind
+   the same denylist, so the denylist's maintenance cost multiplies.
+3. The probes here answer the original objections with numbers: UID mapping
+   is one flag (`--userns=keep-id`), start-up is 0.25 s, and the keyring
+   objection is real but only applies to agy, which this proposal leaves on
+   bwrap.
+
+## 2. Per-repo dev images (the operator's first question)
+
+### 2.1 The unit of an image
+
+| Option | Shape | For | Against | Verdict |
+|---|---|---|---|---|
+| **A. One image per repo** | `arbiter-dev/arbiter`, `.../vstim`, `.../tonic`, ... | Simple mental model; each repo owns its file | Arbiter and vstim want the same Erlang 28.2 and Elixir 1.19.4, so two identical builds. The CLIs and OS layer are duplicated and drift apart. Three of five repos are not BEAM repos at all (see 2.3) | **Close, but wrong unit** |
+| **B. Shared base + toolchain layer per distinct tuple** | `base` (OS, git, procps, socat, CLIs) → `beam-1.19.4-28.2`, `beam-1.17.3-27.1.2`, `nix`, `kube` | One CLI/OS surface to patch; identical toolchains built once; layers cache | Needs a mapping from repo to tuple (a config line) | **Chosen** |
+| **C. Shared base + mise installs from `.tool-versions` at container start** | One image; the worker pays the install each run | No image per toolchain to track | Only tonic has a `.tool-versions`. Arbiter and vstim take versions from the *global* `~/.config/mise/config.toml` (elixir 1.19.4, erlang 28.2) and Arbiter's CI pins OTP 28.5, so three sources disagree already. Installing Erlang at start is minutes per run unless precompiled (not measured). Needs network at start, which `--network=none` forbids | Rejected |
+| **D. One fat image with every runtime** | Everything, all versions | One build | ~GBs; one CVE rebuilds all; every worker gets every tool (reach the profile design wants to withhold, G14) | Rejected |
+
+Measured sizes (Debian 12 `hexpm/elixir` base, `build-essential`, `git`,
+`procps`, `bc`, `socat`, `sqlite3`, `nodejs`, `npm`): the image is **777 MB**
+and the `claude` binary adds **244 MB**. The base pull took 5.3 s; building
+the apt layer took 49 to 66 s; the `claude` layer 6.8 s.
+
+### 2.2 Where the definition lives
+
+Split it by who can be trusted with the content:
+
+| Concern | Lives in | Why |
+|---|---|---|
+| Toolchain: base image reference, `apt` packages, runtime versions | **The repo**: `.arbiter/Containerfile` (optional; Arbiter ships a default generated from the repo's pin file) | It versions with the code that needs it and is reviewed in the same PR as a version bump |
+| Everything that decides **reach**: mounts, network policy, which secrets, env, the tier | **Arbiter config** (workspace and profile layers, G11) | Repo content is worker-writable. A worker on a branch can edit the file |
+| Which provider CLIs are present | **Arbiter**: a base-image layer or a read-only versioned CLI dir | `claude` shipped three versions in four days (2.1.285 to 2.1.287); baking it into every per-repo layer forces rebuilds |
+
+**Rule:** an image is built only from the **default branch's** copy of
+`.arbiter/Containerfile`, by Arbiter, never from a worker's branch. A worker
+that edits the file changes nothing until a human merges it. The build itself
+runs unprivileged and with the network, so it is a supply-chain surface
+(`hexpm/elixir` and the apt mirrors); pin the base by digest, as tonic already
+does for `pgsty/silo`.
+
+tonic already has two image pipelines to reuse: `registry.gitlab.com/emricare/tonic/build_base:1.17.3`
+and `test_runner:1.17.3` (its Dockerfile and `.gitlab-ci.yml`). vstim keeps
+`Dockerfile.worker` and `ci/docker_files/`.
+
+### 2.3 What each repo needs
+
+Read from the repos on the laptop on 2026-10-02.
+
+| Repo | Runtimes | Services for tests | Notes |
+|---|---|---|---|
+| **arbiter** (umbrella: `arbiter`, `arbiter_web`, `arbiter_cli`, `arbiter_release_env`) | Elixir 1.19.4, Erlang 28.2 (global mise config; `mix.exs` says `~> 1.15`; CI pins OTP **28.5**). Node for assets (esbuild and tailwind binaries come from `mix`). C toolchain for `exqlite` | **None.** SQLite. `compose.yml` has a Postgres on 5433 for dev only; tests do not use it | In-container tests need `procps` (`pgrep`, used by `OsProcess` and `teardown_test.exs`), `git`, `tmux`/systemd tests are excluded by tag. `mdex_native` downloads a precompiled NIF at build, which needs network at *image* build time |
+| **vstim** (`~/dev/trading/vstim`) | Elixir `~> 1.18` (Dockerfile.worker: 1.19.4-erlang-28.2), Node (`assets/package.json`) | **Postgres 15** (compose) / **16** (`.gitlab-ci.yml`, `postgres:16-alpine`), nginx for dev only | No `.tool-versions`. Workers can reach prod through SSH today (vs-adx9r7, guardrail-profiles); under a container that reach disappears unless G14 grants it |
+| **emricare/tonic** | Elixir **1.17.3**, Erlang **27.1.2** (`.tool-versions`); Node via assets | **Postgres 15** and an S3-compatible store (`pgsty/silo`) per `docker-compose.yml` | PHI repo; its own CI image `test_runner:1.17.3`. Pinned compose uses a bind of `../tonic_database` and `../db_socket` outside the repo |
+| **emricare/tonic_device** | **Nix** (NixOS modules, `tests/` as Nix VM tests, `hosts/`, `secrets/` with age keys) | Nix VM tests need KVM and `/dev/kvm`, which a default container does not have | Not a BEAM repo. Needs a `nix` image; may be a poor fit for rootless containers (nested virtualisation, `secrets/`) |
+| **mesaana** | Kubernetes manifests (`infra/`, `namespaces/`); `kubectl`, `helm` | None for tests | Mostly docs and manifests; the container's value here is withholding cluster credentials |
+
+CLIs the base image needs: `claude` (a 244 MB dynamically linked bun binary;
+ran on glibc 2.36 without change), `codex`, `agy`, `grok` (no adapter exists:
+only a disabled login recipe in `accounts/login_recipes.ex`), `gh`, `glab`
+and `arb`. `arb` is an **escript**, so the image needs Erlang (it already
+has it for BEAM repos, but the `kube` and `nix` images would need it too).
+
+### 2.4 Build, rebuild and versioning, laptop and EC2
+
+- **Tag by content, not by name.** `arbiter-dev/<toolchain>:<hash12>` where
+  the hash covers the Containerfile, the pin file, and the base-image digest.
+  A changed `.tool-versions` (or the mise config line, or the Containerfile)
+  changes the hash; an unchanged one reuses the image.
+- **Lazy build with single-flight** at dispatch: if the tag is missing, one
+  build runs and the dispatch waits (build is 1 to 2 minutes when the base is
+  cached). The probe's first build including the apt layer was 66 s.
+- **Lockfile changes do not rebuild the image.** `mix.lock` changes the *deps
+  cache*, which lives outside the image ([§3.3](#33-deps-and-build-caches)).
+- **Weekly base refresh** for OS security updates, plus `podman image prune`
+  of tags older than two refreshes.
+- **Laptop:** rootless podman is installed and already pulls `hexpm`, `debian`
+  and `ubi` images. **EC2 (RHEL 8):** unverified. From the Rocky 8.10 package
+  inventory (`container-tools:rhel8`): podman **4.9.4**, crun 1.14.3,
+  fuse-overlayfs 1.13, netavark 1.10.3, slirp4netns 1.2.3, skopeo 1.14.6,
+  socat 1.7.4.1. **Not packaged:** `passt`/`pasta`, `xdg-dbus-proxy`.
+  Consequences:
+  - Use `--network=none` plus the socket bridge (§5), which needs neither
+    pasta nor slirp4netns.
+  - Rootless overlay on a 4.18 kernel needs `fuse-overlayfs`, which is
+    slower on many small files (`_build`, `deps`). Not measured.
+  - RHEL 8 mounts cgroups v1 by default, so rootless `--memory` and
+    `--pids-limit` may be unavailable. Not measured.
+  - `/etc/subuid` and `/etc/subgid` entries must exist for the user.
+  - The two-host check bd-8xy1mf did for bwrap must be repeated for podman (P1).
+
+## 3. The mount strategy (the operator's second question)
+
+### 3.1 What a worktree actually is
+
+A linked worktree's `.git` is a **file**: `gitdir:
+<main>/.git/worktrees/<name>`. That directory holds the per-worktree `HEAD`,
+`index` and `commondir`; everything else (objects, refs, config, hooks,
+packed-refs, reflogs) lives in the **common dir**. Mounting only the
+worktree directory therefore gives a checkout that is not a repository:
+`fatal: not a git repository` (reproduced).
+
+Today's bwrap jail binds the **entire common dir read-write**, with `hooks`,
+`config` and `worktrees` read-only (`Jail.git_args/2`). That is already wider
+than the worker needs: any jailed process can rewrite any branch ref.
+
+### 3.2 The recommended mount set
+
+Three layouts were built and run on scratch repos (a bare stand-in for the
+main repo, never the live checkout). `git commit` and `git push` were run
+inside rootless containers in each.
+
+| Layout | Mounts | Writable that is not the worker's | Probe result |
+|---|---|---|---|
+| **A. Registered worktree, minimal** | worktree rw; `common/worktrees/<name>` rw; `common/refs` rw; `common/logs` rw; `common/objects` ro (or `GIT_OBJECT_DIRECTORY` + `GIT_ALTERNATE_OBJECT_DIRECTORIES`); `HEAD`, `config`, `packed-refs` ro | **Every ref**, so every sibling worktree's branch | Commit works only with all eight. Missing `logs/` fails the commit; missing the objects redirect fails with "unable to create". **`git update-ref refs/heads/<sibling>` succeeded** from inside. Deleting a packed ref failed only because `packed-refs` was read-only |
+| **B. Private clone, shared objects read-only (`git clone --shared`)** | worktree incl. its own `.git` rw; `main/objects` ro | **None** | Commit, `git cat-file` of history, and `git push` to a mounted bare remote all worked; writing into the shared objects returned EROFS |
+| **C. Private clone, own object store (`git clone --no-hardlinks --bare`)** | one rw directory | None | Works trivially. Costs 0.10 s and 37 MB for this repo (pack is 33 MB, 980 branches); `--shared` costs 0.18 to 0.33 s and 428 KB. `--local` (hardlinks) is **rejected**: a worker could chmod and overwrite a shared object file in place, and it fails across filesystems anyway |
+
+**Recommended: layout B.** The mount set, per worker:
+
+| Mount | Mode | Notes |
+|---|---|---|
+| `<worker checkout>` → same absolute path | rw | Contains its own `.git/` directory. The `.git` gitdir has `objects/info/alternates` pointing at the main repo's objects |
+| `<main>/.git/objects` → same absolute path | **ro, `:O`** | Overlay mount: readable with no SELinux relabel of the main checkout, writes (there are none, git writes to the private store) land in a throwaway upper layer |
+| per-run HOME | rw | A fresh directory; holds `.mix`, `.hex`, caches, the provider config dir |
+| per-run deps cache copy | rw | Seeded from the image-keyed cache ([§3.3](#33-deps-and-build-caches)); lives inside the checkout (`deps/`, `_build/`) |
+| per-run bridge dir | rw | One unix socket per bridge (proxy, Arbiter) from `Egress.JailRun`; `:z`-free thanks to `label=disable` ([§5.3](#53-selinux-and-the-bridge-sockets)) |
+| deploy key | ro (`--secret`) | Only when the ticket declares a push grant (G16) |
+
+Not mounted, so not visible: `~/.ssh`, `~/.arbiter` (the install DB, cookie,
+`arbiter.env`), `/run/user/$UID` (the D-Bus and keyring sockets), the
+resolver socket, the main checkout's working files, other worktrees, other
+workspaces' repos, and the host environment. This is what G3 lists as masks.
+
+**What layout B costs Arbiter.** Arbiter creates worktrees with `git worktree
+add` (`worktree.ex:100`, `:283`, `:586`) and cleans with `worktree remove` and
+`prune` (`:611`, `:639`, `:1058`); `Reviews.Checkout` and `Sessions.RepoCheckout`
+add detached worktrees too. A worker branch in layout B is **not** known to the
+main repo until it is fetched back (`git -C <main> fetch <checkout>
+<branch>:<branch>`, or the worker's own push). So:
+
+- worktree creation becomes `git clone --shared --no-checkout` + alternates +
+  checkout, still on the host, still before spawn;
+- cleanup becomes `rm` of the checkout (no `worktree remove` or `prune`);
+- anything that reads worker commits from the main repo (ReviewGate diffs,
+  MergeQueue, PrimarySync) needs a sync-back step after the run, or reads from
+  the checkout path as it already mostly does;
+- the main repo must not `git gc --prune` objects a live worker still
+  borrows. Objects reachable from `origin/main` are safe; the risk is a
+  rewritten history while a worker is mid-run. Mitigation: set
+  `gc.pruneExpire` generously on the main repo, and give each worker a ref in
+  the main repo (`refs/arbiter/workers/<id>`) while it runs so its base stays
+  reachable.
+
+This is the largest single item in the plan (P5, D4). Layout A avoids it at
+the price of cross-worktree ref writes. The decision gate for P5 is whether the
+sync-back is smaller than it looks once `Worktree` (1,700+ lines) is read in
+full. This spike did not read it that far.
+
+### 3.3 Deps and `_build` caches
+
+Measured: building deps from nothing took **201 to 221 s**; with a warm
+cache, **17 to 18 s** ([§6](#6-measurements)). A cache is essential.
+
+- **Seeded per-worker copies, not a shared writable volume.** A shared named
+  volume mounted read-write into every worker is a persistence path: one
+  worker can leave a poisoned `_build` that the next worker (or the operator,
+  if the volume is ever bound back to the host) executes. `Jail`'s own comment
+  makes the same point about `~/.mix/archives`. `Worktree.seed_compiled_deps/2`
+  already does the safe thing (`cp -a --reflink=auto` per worktree); bd-5tncmq
+  generalises it beyond Mix.
+- **Key it by `(lockfile hash, image tag)`.** The cache is **ABI-bound to the
+  image**: it contains NIFs (`exqlite`, `mdex_native`) built against a given
+  libc and OTP. A cache seeded from the operator's host `_build` (Fedora,
+  glibc 2.42) into a Debian 12 container (glibc 2.36) is not guaranteed to
+  load. A host-built `_build` did let `epic_floor_test.exs` pass in the
+  container (7 tests, 0 failures), but the run took 72 s against 17 s warm, so
+  mix recompiled something; which part was not isolated. **Produce the cache
+  inside the image** with a seed job (`mix deps.get && mix deps.compile`) run
+  when the lockfile hash is new, and copy from there.
+- **Hex and Mix homes stay per run**, as `Jail.toolchain_env/1` does today.
+
+### 3.4 SELinux on Fedora
+
+All measured with SELinux **enforcing**.
+
+| Mount flag | Effect on the host | Verdict |
+|---|---|---|
+| none | Container gets `Permission denied` on `user_home_t` files (reproduced: `unable to open object pack directory`) | Unusable |
+| `:Z` | **Relabels the host path** with a private MCS pair. Observed: `container_file_t:s0:c143,c959` on the worker's checkout and home | Fine for per-worker private dirs that only that container touches. **Never** on a path the host or other workers share |
+| `:z` | Relabels the host path `container_file_t` with a shared label | Works (objects read OK) but permanently changes the main checkout's labels. Avoid on the main `.git` |
+| `:O` (overlay) | **No relabel**, reads work, writes are discarded. Verified on a fresh, never-labelled bare repo: label unchanged afterwards | **Use for the shared read-only objects** |
+| `--security-opt label=disable` | The container runs unconfined by SELinux; no relabel needed anywhere | Needed for host unix sockets ([§5.3](#53-selinux-and-the-bridge-sockets)) |
+
+Host effect of `:Z`: the host's own unconfined processes (Arbiter, git, the
+sweeper) read and delete `container_file_t` files without trouble, so cleanup
+works. Two workers with different MCS pairs cannot read each other's
+directories, which is a feature.
+
+## 4. What each provider CLI needs
+
+Source for current behavior: `agents/*.ex`, `worker/spawn_env.ex`,
+`worker/dispatch.ex` (read-only survey, 2026-10-02).
+
+| Provider | Today | Needs in a container | Measured here |
+|---|---|---|---|
+| **Claude** | `claude --print …`, env from `SpawnEnv` (empty by default, allowlist). `CLAUDE_CONFIG_DIR` is an Arbiter-owned dir seeded with `settings.json` and `CLAUDE.md`. Auth is `CLAUDE_CODE_OAUTH_TOKEN` from the provider account. **Not jailed** | The binary in the image, a per-run `CLAUDE_CONFIG_DIR`, the token as an inherited env var (`-e NAME`, no value on argv, so `ps` shows nothing), `.mcp.json` in the checkout | **Ran end to end.** A completely empty `CLAUDE_CONFIG_DIR` with only the token worked for `claude -p` |
+| **Codex** | `codex exec …`; Arbiter **never sets `CODEX_HOME`**, so a non-review worker reads the operator's `~/.codex/auth.json` directly. Jailed only for reviews, with the network shared | A per-run `CODEX_HOME` seeded with a copy of the ChatGPT login (`auth.json`) | Not run. Risk: a copied ChatGPT refresh token rotates, so concurrent copies can invalidate each other (the same shape as the Claude CLI rotating a seeded `.credentials.json` regardless of the token env, observed earlier) |
+| **agy** | Jailed under bwrap, auth through the freedesktop Secret Service over a filtered D-Bus (`xdg-dbus-proxy`) or, when no keyring, file-copied `oauth_creds.json` into an isolated HOME | Either a D-Bus proxy socket mounted in (SELinux blocks `connectto` unless `label=disable`) or the file-seeded credentials the adapter already supports | Not run; **guardrail-profiles open question 5 stays open.** `xdg-dbus-proxy` is not packaged on RHEL 8. Recommend leaving agy on bwrap |
+| **grok** | **No adapter.** Only a disabled login recipe (`GROK_HOME`, `auth.json`) | A per-run `GROK_HOME` when an adapter exists. Memory records that grok deletes `auth.json` after a rejected refresh | Not applicable |
+| **MCP and `arb` to Arbiter** | URL `http://127.0.0.1:4848/mcp`, `Authorization: Bearer <worker token>` in `.mcp.json`; the same token is `ARB_TOKEN`; `ARB_HOST` defaults to `127.0.0.1:4848` | A bridge to the host's loopback ([§5](#5-network)) | Verified: with host loopback mapped in, `GET /api/version` → **200** and `GET /api/issues/bd-jk49nc` without a token → **401**, so bd-asawcq holds from inside a container |
+| **`git push`** | `SSH_AUTH_SOCK` is dropped by `SpawnEnv`; pushes use key files in `~/.ssh` or `GH_TOKEN`/`GITLAB_TOKEN` from workspace `worker_env`. The agy jail forwards `GIT_SSH_COMMAND` with a shadow ssh config | A key or token the container is *given*. There is no `~/.ssh` | See below |
+
+**Push credentials: G16's scoped key versus agent forwarding.** Mounting the
+operator's ssh-agent socket gives every key and fails under SELinux for the
+same `connectto` reason as the bridges. G16 (a per-repo deploy key delivered
+as a `podman run --secret` file, mounted read-only at `/run/secrets/…`, or a
+per-run `ssh-agent` loaded with just that key) is strictly better, and a
+container makes it *enforceable*: with no `~/.ssh` and no agent, the deploy
+key is the only credential that exists. Under `--network=none`, `git push`
+reaches the remote through the proxy bridge with the `ProxyCommand socat`
+`GIT_SSH_COMMAND` that `Jail.ssh_env/1` already builds.
+
+## 5. Network
+
+### 5.1 The two designs
+
+| Design | Mechanism | Result in the probe | Verdict |
+|---|---|---|---|
+| **N1. `--network=none` + proxy socket** | The container has only `lo`. A host unix socket (Arbiter's filtering CONNECT proxy, G5) is mounted in; `socat` inside listens on `127.0.0.1:3128` and forwards to it; `HTTPS_PROXY` points there | Direct `curl` to the model API: **fails** (000). Via the bridge: allowed host **404** (reached the API), denied host **000** and the proxy logged `ALLOW api.anthropic.com` / `DENY catbox.moe`. `/proc/net/dev` shows only `lo` | **Chosen.** Identical to G5/G6; independent of pasta and slirp4netns, so it works on RHEL 8 |
+| **N2. pasta or slirp4netns + an egress allowlist** | User-mode networking with outbound open, rules added inside | `--network=pasta`: `api.anthropic.com` reachable (404), host loopback and gateway **not** reachable by default. `--network=pasta:--map-host-loopback,<ip>` makes Arbiter reachable, **but maps every host loopback service**: Arbiter (4848) and **epmd (4369)** were both reachable | **Rejected.** Fail-open by default, IP-level rules, mapping exposes all loopback services, `pasta` is not packaged on RHEL 8, `slirp4netns` is not installed on the laptop |
+
+N1 is the same security model as guardrail-profiles §4.2 E2 with a
+different kernel primitive: both give the process a namespace with `lo` only,
+and the only exit is a socket Arbiter owns. `Egress.JailRun` already produces
+the proxy socket and the `arb` bridge socket for bwrap; for podman the same
+sockets are mounted into the container, and the `socat` wrapper runs in the
+container instead of under bwrap. G5, G9, G10 and G17 do not change.
+
+### 5.2 Reaching Arbiter
+
+With N1, `127.0.0.1:4848` inside the container is the bridge listener; the
+socat in the container forwards it to a per-run unix socket that
+`Egress.JailRun` already creates (`arb` bridge), and Arbiter terminates it as
+that worker's identity. Anonymous loopback is not available (bd-asawcq),
+so the worker presents its own bearer token from `.mcp.json` and
+`ARB_TOKEN`. `host.containers.internal` is not used.
+
+### 5.3 SELinux and the bridge sockets
+
+A container running as `container_t` cannot `connect()` to a unix socket
+whose **listener** is an unconfined host process. The file label is
+irrelevant (relabelling the socket directory with `:Z` did not help); the
+denial is on the listener's domain. Reproduced:
+
+- default label: `socat … connect(, AF=1 "/proxy/p.sock", 15): Permission denied`;
+- `--security-opt label=disable`: the same command works (see the N1 row).
+
+Options, in order of preference:
+
+1. **`label=disable` for this container** and rely on the user namespace
+   (`--userns=keep-id`), `--cap-drop=all`, `--security-opt no-new-privileges`,
+   the read-only rootfs and the mount namespace. It removes the SELinux
+   container-escape layer, not the mount, PID, user and network namespaces.
+2. Run the proxy and the bridge listeners in a **sidecar container** with the
+   same MCS category (`label=level:s0:c<N>,c<M>`), so the connect is
+   container-to-container. More moving parts.
+3. Ship a small custom SELinux module allowing `container_t` →
+   `unconfined_t` `connectto`. Needs root and one more host-state item.
+
+**On RHEL 8 the SELinux mode is unknown**; `label=disable` is a no-op if it
+is permissive or disabled. This is a P1 probe item.
+
+## 6. Measurements
+
+Host: Fedora 44, kernel 7.2.7, podman 5.8.7 (crun, netavark, overlay),
+bubblewrap 0.12, SELinux enforcing, 2026-10-02. One run per cell (no
+repetition for the long stages); the machine was running the live coordinator
+and other workers throughout, so differences under about 10 percent are noise.
+
+### 6.1 Start-up
+
+| Measurement | bwrap | podman |
+|---|---|---|
+| Start, run `true`, warm (5 samples) | **10 to 14 ms** (`--ro-bind / /`, `--unshare-pid --unshare-net`) | **233 to 267 ms** (`podman run --rm`) |
+| Same with `--userns=keep-id --read-only --cap-drop=all --no-new-privileges --network=none` | n/a | 341 to 375 ms (2 samples, after the first) |
+| Same with real mounts (`:Z`, network none) | n/a | 245 to 251 ms (4 samples) |
+| `--network=pasta`, warm | n/a | 270 to 306 ms |
+| `elixir -e 'IO.puts 1'` (BEAM boot inside) | 260 ms host (3 samples) | 472 to 531 ms |
+| **Cold: first `keep-id` run of a never-run image** | n/a | **5.9 s** (the 777 MB image), **3.5 s** (a fresh derived image). Podman chowns the image layers for the UID mapping once per image id. The same image run without `keep-id`: 0.20 s |
+| Image build, apt layer + users | n/a | 66 s first, 49 s with the base cached; base pull 5.3 s |
+
+### 6.2 Toolchain stages (Arbiter, `MIX_ENV=test`, `test/arbiter/tasks`, 1,013 tests)
+
+The bwrap column is the **real `Arbiter.Worker.Jail.wrap/2` argv** (fresh
+clone, fresh per-worker HOME, per-worker `HEX_HOME`/`MIX_HOME`). The podman
+column is the image above with a fresh clone and fresh HOME. "No cache" means
+no `deps/` and no `_build/`; "warm" means the second run in the same
+directory.
+
+| Stage | bwrap, no cache | podman, no cache | bwrap, warm | podman, warm |
+|---|---|---|---|---|
+| `mix local.hex`/`rebar` | 1.9 s | 1.9 s | 2.8 s | 0.9 s |
+| `mix deps.get` | 3.8 s | 4.7 s | 3.9 s | 2.7 s |
+| `mix deps.compile` | **221.0 s** | **201.0 s** | 18.3 s | 16.6 s |
+| `mix compile` | 6.2 s | 2.0 s | 2.1 s | 2.1 s |
+| `mix test` stage (compile + run) | 78.3 s | 67.3 s | 73.8 s | 68.7 s |
+| ... of which ExUnit "Finished in" | 29.2 s | 18.5 s | 25.0 s | 19.3 s |
+| **Total wall** | **311.3 s** | **280.9 s** | **101.0 s** | **91.3 s** |
+| Result | 1,013 tests, 0 failures | 1,013 tests, 0 failures | same | same |
+
+Read it as **parity, not a win**. The cache is worth about 210 s in both
+(201 to 221 s → 17 to 18 s for deps), the container is not slower, and the
+apparent 10 percent edge for podman is inside the noise given the single runs
+and a concurrently busy host. The first container run failed one test:
+`TeardownTest` shells out to `pgrep`, and the image lacked `procps`. Adding
+it fixed it; the lesson is that **the image must carry the whole tool surface
+the test suite invokes**, and that gap is only found by running the suite.
+
+### 6.3 One real Claude run in a rootless container
+
+A real `claude -p` (version 2.1.287, `--model haiku` to keep quota small,
+`--dangerously-skip-permissions`, as workers run) inside the container, on a
+scratch clone of this branch with its remote removed (no push possible) on a
+scratch branch, with warm deps. The task: run `mix test
+test/arbiter/tasks/epic_floor_test.exs`, write the count to
+`PODMAN_PROBE.txt`, `git add` and commit.
+
+| Measure | Result |
+|---|---|
+| Container flags | `--userns=keep-id --read-only --tmpfs /tmp --cap-drop=all --security-opt no-new-privileges --network=pasta`, token as an inherited env var, fresh empty `CLAUDE_CONFIG_DIR` |
+| Wall clock, `podman run` start to exit | **69.3 s** |
+| Claude's own `duration_ms` / `duration_api_ms` | 60,775 ms / 6,648 ms |
+| Turns | 4 |
+| Cost reported | $0.0531 |
+| Outcome | Result line `epic_floor_test: 7 tests, 0 failures`; the commit `probe: podman container run` exists on the scratch branch and the file holds that line |
+| What was and was **not** isolated | Files, env, process and UID namespaces: yes. Network: this run used `--network=pasta` (open egress) for simplicity; the `--network=none` + proxy design was proved separately with a stand-in proxy (§5.1), **not** with Claude itself |
+
+**What this does not measure.** There is no matching *unjailed* Claude run:
+Claude is not under bwrap today (G7 is unbuilt), so the bwrap comparison is
+the toolchain table above. No agy or Codex run was made. No EC2 measurement
+exists. Scratch artefacts stayed under `/tmp/jk49` and the images are local
+tags `localhost/arb-dev-spike:*`; nothing was pushed.
+
+### 6.4 Kill semantics (found while measuring)
+
+`OsProcess` kills a worker's process tree with `pgrep -P` and `kill -KILL`.
+For a container that is not enough:
+
+- `kill -KILL` on the `podman run` client left the container **running** (it
+  needed `podman rm -f <name>`);
+- `kill -TERM` on the client left a container whose PID 1 is `sleep` running
+  (PID 1 ignores signals it has no handler for);
+- with `--init` the same `SIGTERM` stopped and removed it.
+
+So the backend must name every container (`--name arb-<run>`), run with
+`--init` and `--rm`, and the watchdog and `StopWorker` must use `podman kill`
+or `podman rm -f` by name.
+
+## 7. Fit with Arbiter
+
+### 7.1 Can it slot into `Arbiter.Worker.Jail`?
+
+Mostly yes. `Jail.wrap/2` returns an argv list that the adapters splice the
+CLI into; `gemini.ex:570` and `codex.ex:257` just use the result. Constraints
+the survey found:
+
+- **No `sandbox.backend` key exists.** `SecurityPolicy`'s `sandbox` map
+  (`enabled`, `filesystem`, `network`, `writable_paths`, `egress_tunnels`) is
+  where it belongs, with `merge_sandbox` taking the most restrictive layer
+  value like the other fields.
+- **Claude is not wired to the jail at all.** `claude.ex`'s `default_argv`
+  and `ClaudeSession.start` (which uses `Port.open({:spawn_executable, …})`
+  and `System.find_executable`) need a wrap point; with a container the
+  executable is resolved **inside the image**, not on the host `PATH`.
+- **Adapters assume the CLI's position in the argv** (`splice_prompt`,
+  `split_jail`). The podman argv must keep one stable `--` boundary.
+- **The prompt tmpfile** (`/tmp` plus `< "$f"` for oversize prompts) must be
+  inside a mount.
+- **Doctor** (`diagnose`, `diagnose_network`, `explain_*`) gains a podman
+  branch: `podman` present, `/etc/subuid` entry, user namespaces, SELinux mode
+  and a real `podman run` probe.
+
+The right shape is a small behaviour, `Arbiter.Worker.Sandbox`
+(`status/0`, `wrap/2`, `teardown/1`), with `Jail` (bwrap) and a new
+`Container` module as implementations, chosen per provider by policy. An
+estimate for the new module's argv builder is a few hundred lines; the jail's
+masks, secret files, resolver tmpfs, keyring proxy and ssh shadow config
+(roughly the 500 to 660 and 840 to 1060 line ranges of `jail.ex`) are not
+needed for it, but they do stay for agy.
+
+### 7.2 What happens to each guardrail ticket
+
+| Ticket | Title | Today | Under this plan |
+|---|---|---|---|
+| **bd-7o08mj** (G1) | Hide D-Bus, systemd, resolver | closed | Unchanged; keeps protecting agy on bwrap. For containers it holds by construction |
+| **bd-7r0qrj** (G2) | Worker env allowlist | closed | Unchanged for bwrap and for unjailed providers. For containers the env is **only what is passed with `-e`** |
+| **bd-3q2djr** (G3) | Hide sensitive read paths | backlog | **Shrinks to agy-on-bwrap only.** For containers there is nothing to hide: only the mounts exist. Keep it small and do it for agy; the doctor "cannot read the install DB" self-test is reused as a container probe |
+| **bd-cfktou** (G6) | agy network mode | verifying | **Remains** (agy on bwrap). Its `Egress.JailRun` sockets and in-namespace `socat` bridge are reused as-is by the container backend, so G6 is on the critical path of this plan, not obsoleted by it |
+| **bd-d2o3xb** (G7) | Claude under the jail | backlog | **Re-scoped: Claude under the podman backend** (P7). Same goals (config-dir bind, token env, MCP and `arb` bridges), different primitive. Do not build bwrap masks for Claude |
+| **bd-50d5j6** (G8) | Codex under the jail | backlog | **Re-scoped: Codex under podman**, folded with bd-99emmd as the original ticket suggested. Adds a per-run `CODEX_HOME` |
+| **bd-ld8qde** (G14) | Dispatch-time withholding | backlog | **Shrinks, and inverts.** Withholding is the default; G14 becomes "add exactly the declared grants" (extra `-e`, `--secret`, a proxy allowlist entry). The "hide what is undeclared" half disappears for containers. D4 → D3 |
+| **bd-9cygoo** (G16) | Scoped git and tracker credentials | backlog | **Remains and becomes enforceable.** Without `~/.ssh` or an agent in the container, the deploy key is the only push credential. Deliver it with `--secret`, not an agent socket (SELinux, and an agent holds every key). The operator still has to create the per-repo deploy keys or the GitHub App |
+| bd-8xy1mf | Doctor probe for bwrap on both hosts | closed | **Repeat for podman** (P1) |
+| G4, G5, G9, G10, G11 to G13, G15, G17 to G19 | Spike, `Egress`, bridge identity, config, routing, trust | various | **Unchanged.** Policy and the proxy are backend-independent |
+| bd-5tncmq | Generalise dep seeding | backlog | **Gains a requirement:** the cache is keyed by image tag as well as lockfile (ABI) |
+
+### 7.3 Ticket breakdown
+
+All are children of bd-1e80nw. Order is by dependency; D is the estimated
+difficulty.
+
+| # | Title | D | Depends on |
+|---|---|---|---|
+| **P1** | **Spike/doctor: rootless podman on the RHEL 8 EC2.** `/etc/subuid`, `user.max_user_namespaces`, SELinux mode, cgroup version, podman 4.9 with `fuse-overlayfs`, first-run `keep-id` cost, `label=disable` socket bridge, `--init` kill. Repeat the laptop probes. **Go/no-go gate for the rest** | 2 | none |
+| P2 | `sandbox.backend: bwrap \| podman` key in `SecurityPolicy` (layering by most-restrictive), plus the `Arbiter.Worker.Sandbox` behaviour with `Jail` as the first implementation. No behavior change by default | 3 | none |
+| P3 | `Arbiter.Worker.Container`: a pure argv builder like `Jail.argv/2` (`--name`, `--init`, `--rm`, `--userns=keep-id`, `--read-only`, `--cap-drop=all`, `no-new-privileges`, tmpfs, explicit `-e NAME` allowlist, mounts, label policy), a doctor probe and teardown by name | 3 | P1, P2 |
+| P4 | Image lifecycle: `.arbiter/Containerfile` or a generated default, content-hash tags, single-flight lazy build from the **default branch**, weekly base refresh, prune, `arb image list/build`. Provider CLIs in the base image or a versioned read-only CLI dir | 3 | P3 |
+| P5 | Git layout B: private `--shared` clone with read-only `:O` alternates, sync-back into the main repo, a pinned base ref against gc, cleanup and sweeper changes, ReviewGate and MergeQueue reads. **The riskiest item** | 4 | P3 |
+| P6 | Image-keyed deps cache: seed job inside the image, per-worker `cp --reflink` copy, key `(lockfile hash, image tag)`. Extend bd-5tncmq | 3 | P4 |
+| P7 | **Claude under the container backend** (replaces G7 bd-d2o3xb): config dir, token env, `.mcp.json`, `arb`, proxy and Arbiter bridges via G5's sockets, wrap point in `ClaudeSession` | 3 | P3, P5, G5 |
+| P8 | **Codex under the container backend** (replaces G8 bd-50d5j6, with bd-99emmd): per-run `CODEX_HOME`, refresh-token rotation handling | 3 | P7 |
+| P9 | Deploy-key delivery as `--secret` (the body of G16 bd-9cygoo and the per-run-agent part of G14) | 3 | P7 |
+| P10 | Test services: a per-worker pod with a Postgres sidecar on the pod's `lo` for vstim and tonic (Postgres 15/16, plus an S3 store for tonic). Optional; arbiter needs none | 3 | P7 |
+| P11 | Re-plan the six tickets in [§7.2](#72-what-happens-to-each-guardrail-ticket): re-scope G7 and G8, shrink G3 and G14, annotate G6 and G16 | 1 | this decision |
+
+**What to do first.** P1 and P2 are independent and cheap, and P1 decides
+whether the rest proceeds. P5 should start with a day reading `Worktree`,
+`CleanupWorktree`, `ReviewGate` and `MergeQueue` for what they assume about
+worktree registration, because the D4 estimate rests on that.
+
+## 8. Risks and alternatives
+
+| Risk or alternative | Assessment |
+|---|---|
+| **Two backends to maintain** | Real cost. Mitigated by the behaviour boundary (P2) and by giving each backend disjoint providers: bwrap keeps agy, podman gets Claude and Codex. If agy later moves to file-seeded credentials, bwrap can be retired |
+| **`label=disable`** | Gives up the SELinux layer for the bridge-using containers. The remaining isolation is the user, mount, PID and network namespaces and dropped capabilities. A sidecar listener removes the need (§5.3, option 2) at a complexity cost |
+| **Rootless container escapes** | A container is not a VM. A kernel namespace bug breaks it as it breaks bwrap. No stronger claim is made than "default-deny and fewer moving parts" |
+| **Image supply chain** | New: a worker image is built from public bases with network. Pin by digest, build from the default branch, never from a worker's branch |
+| **Extending bwrap to Claude and Codex instead** | Cheaper to start (no images) but multiplies the denylist across the two largest providers and leaves the same incident class open. This is the main alternative; P1 is the gate between them |
+| **Docker/Podman daemon, VM-based sandboxes** | Rejected without probing: a daemon is root-adjacent, and a VM adds boot time and image weight without a need the container does not meet |
+| **Worker UID / separate Unix user** | Already rejected in [guardrail-profiles §10](guardrail-profiles.md): breaks same-user keyring auth and needs group-writable worktrees |
+
+## 9. Open questions
+
+1. Is `label=disable` acceptable for Claude and Codex containers, or is the
+   sidecar-listener variant worth its complexity? (P1 will show the EC2's
+   SELinux mode, which may make it moot.)
+2. Can agy's file-seeded credentials work everywhere (guardrail-profiles
+   open question 5)? If yes, agy could join the container backend and bwrap
+   could be retired.
+3. How large is P5 really? The estimate is D4; it should be re-estimated after
+   the reading day.
+4. Rootless overlay on RHEL 8 (`fuse-overlayfs`): is `_build`/`deps`
+   copy-and-compile throughput acceptable? Not measured.
+5. Does the per-worker image need `gh` and `glab` at all once G16 gives
+   workers a repo-scoped tracker token?
+
+## Appendix A: probes
+
+Everything ran 2026-10-02 on the Fedora laptop under `/tmp/jk49`
+(scratch clones of this branch, stand-in bare repos; the live checkout and
+`~/.arbiter` were never mounted or relabelled). Findings in one place:
+
+| Probe | Result |
+|---|---|
+| Registered-worktree mount without `common/` | `fatal: not a git repository` |
+| Layout A (all eight mounts) | commit works; `git update-ref refs/heads/<sibling>` **succeeded**; deleting a packed ref failed (`packed-refs.lock` unwritable) |
+| Layout A without `logs/` | `unable to create directory for '…/logs/refs/heads/…'` |
+| Layout B, objects `:ro` without relabel | `unable to open object pack directory: Permission denied` |
+| Layout B, objects `:ro,z` | works; **relabels** the objects dir `container_file_t` |
+| Layout B, `label=disable` | works; push to a mounted bare remote worked; write to shared objects: EROFS |
+| Layout B, objects `:O` on a never-labelled repo | works; **host label unchanged** |
+| Unix socket from host to `container_t` | `Permission denied` on `connect()` |
+| Same with `label=disable` | works |
+| `--network=none` + `socat` bridge to a stand-in CONNECT proxy | allowed host 404 (reached), denied host 000, direct 000, only `lo` |
+| `--network=pasta` | open egress; host loopback/gateway not reachable |
+| `--network=pasta:--map-host-loopback,<ip>` | Arbiter (4848) and **epmd (4369)** both reachable; unauthenticated `/api/issues/…` → 401 |
+| `slirp4netns` | not installed on the laptop |
+| Image without `procps` | `TeardownTest` fails (`System.cmd("pgrep")` → `:enoent`) |
+| First `keep-id` run of a new image id | 3.5 to 5.9 s once |
+| `kill -KILL` / `kill -TERM` of the `podman run` client | container survives; `--init` fixes TERM; `podman rm -f <name>` needed |
+| Host-built `_build` reused in the Debian container | test passed, 72 s (recompile suspected, not isolated) |
+| Credentials | The Claude token was passed as an inherited env var and never written to a file, a commit or these notes |
+
+Per-image sizes and build times are in §2.1 and §6.1.
