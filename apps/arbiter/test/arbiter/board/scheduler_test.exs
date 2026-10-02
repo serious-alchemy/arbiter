@@ -355,7 +355,7 @@ defmodule Arbiter.Board.SchedulerTest do
           }
         )
 
-      assert %{state: :blocked, reason: "blocked — provider constraint (exclude gemini" <> _} =
+      assert %{state: :blocked, reason: "held — provider constraint (exclude gemini" <> _} =
                reason(plan, "bd-1")
 
       # A card's own block never advances the queue: bd-2 is next in line.
