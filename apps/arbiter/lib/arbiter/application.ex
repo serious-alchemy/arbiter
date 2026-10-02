@@ -125,6 +125,10 @@ defmodule Arbiter.Application do
       # (bd-73bfml) so the durable log backing `GET /events?since=` doesn't
       # grow without bound. See `Arbiter.Events.Retention` for config.
       Arbiter.Events.Retention,
+      # Clears `worker_runs.output_lines` / `worker_run_steps.output_summary`
+      # for old runs once their on-disk transcript / session archive is
+      # verified present (bd-6jcebm). See `Arbiter.Workers.OutputOffload`.
+      Arbiter.Workers.OutputOffload,
       # Meters the coordinator's OWN Claude Code sessions (bd-be804c) by
       # sweeping the session JSONLs the CLI writes to disk, and writing the
       # per-session delta as `source: :coordinator_session`. Inert until an
