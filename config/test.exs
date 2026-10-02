@@ -246,6 +246,10 @@ config :arbiter, :attention_sweep, enabled: false
 # `Arbiter.Events.Retention.sweep/1` synchronously.
 config :arbiter, :events_retention, enabled: false
 
+# bd-6jcebm: no background output-offload sweep in the suite — tests drive
+# `Arbiter.Workers.OutputOffload.sweep/1` synchronously.
+config :arbiter, :output_offload, enabled: false
+
 # bd-be804c: no background sweep of anyone's ~/.claude in the suite — the tests
 # drive `Arbiter.Sessions.UsageIngest.ingest/1` synchronously against fixtures.
 config :arbiter, :coordinator_session_ingest, enabled: false

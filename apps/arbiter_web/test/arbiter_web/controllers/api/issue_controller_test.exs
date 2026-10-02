@@ -976,6 +976,101 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
     end
   end
 
+  describe "PATCH /api/issues/:id/floor" do
+    # ES2 (bd-3e7inj): the REST surface of `:set_floor`.
+    test "sets a floor on an epic and reports it on the ticket", %{conn: conn, ws: ws} do
+      {:ok, epic} = Ash.create(Issue, %{title: "e", workspace_id: ws.id, issue_type: :epic})
+
+      conn = patch(conn, ~p"/api/issues/#{epic.id}/floor", %{"floor_priority" => 1})
+
+      assert %{"floor_priority" => 1, "priority" => priority} = json_response(conn, 200)
+      assert priority == epic.priority
+      assert Ash.get!(Issue, epic.id).floor_priority == 1
+    end
+
+    test "accepts P-notation and clears with null or none", %{conn: conn, ws: ws} do
+      {:ok, epic} = Ash.create(Issue, %{title: "e", workspace_id: ws.id, issue_type: :epic})
+
+      assert %{"floor_priority" => 3} =
+               conn
+               |> patch(~p"/api/issues/#{epic.id}/floor", %{"floor_priority" => "P3"})
+               |> json_response(200)
+
+      assert %{"floor_priority" => nil} =
+               conn
+               |> patch(~p"/api/issues/#{epic.id}/floor", %{"floor_priority" => nil})
+               |> json_response(200)
+
+      assert Ash.get!(Issue, epic.id).floor_priority == nil
+
+      {:ok, _} = Ash.update(epic, %{floor_priority: 2}, action: :set_floor)
+
+      assert %{"floor_priority" => nil} =
+               conn
+               |> patch(~p"/api/issues/#{epic.id}/floor", %{"floor_priority" => "none"})
+               |> json_response(200)
+    end
+
+    test "rejects a floor on a non-epic", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "t", workspace_id: ws.id})
+
+      conn = patch(conn, ~p"/api/issues/#{task.id}/floor", %{"floor_priority" => 1})
+
+      assert %{"error" => %{"type" => "validation_error"}} = json_response(conn, 422)
+      assert Ash.get!(Issue, task.id).floor_priority == nil
+    end
+
+    test "rejects P0, P4 and junk", %{conn: conn, ws: ws} do
+      {:ok, epic} = Ash.create(Issue, %{title: "e", workspace_id: ws.id, issue_type: :epic})
+
+      for bad <- [0, 4, "P0", "banana", 1.5] do
+        conn = patch(conn, ~p"/api/issues/#{epic.id}/floor", %{"floor_priority" => bad})
+        assert json_response(conn, 400)["error"]["type"] == "invalid_request"
+      end
+
+      assert Ash.get!(Issue, epic.id).floor_priority == nil
+    end
+
+    test "requires the floor_priority key", %{conn: conn, ws: ws} do
+      {:ok, epic} = Ash.create(Issue, %{title: "e", workspace_id: ws.id, issue_type: :epic})
+
+      conn = patch(conn, ~p"/api/issues/#{epic.id}/floor", %{})
+      assert json_response(conn, 400)["error"]["type"] == "invalid_request"
+    end
+
+    test "404s for an unknown ticket", %{conn: conn} do
+      conn = patch(conn, ~p"/api/issues/bd-nope00/floor", %{"floor_priority" => 1})
+      assert json_response(conn, 404)
+    end
+
+    test "is refused for a worker-tier token", %{conn: conn, ws: ws} do
+      {:ok, epic} = Ash.create(Issue, %{title: "e", workspace_id: ws.id, issue_type: :epic})
+      {:ok, task} = Ash.create(Issue, %{title: "t", workspace_id: ws.id})
+      token = Arbiter.MCP.Scope.mint_worker(task)
+
+      conn =
+        conn
+        |> put_req_header("authorization", "Bearer " <> token)
+        |> patch(~p"/api/issues/#{epic.id}/floor", %{"floor_priority" => 1})
+
+      assert json_response(conn, 403)
+      assert Ash.get!(Issue, epic.id).floor_priority == nil
+    end
+
+    test "a change is in the paper trail", %{conn: conn, ws: ws} do
+      require Ash.Query
+      {:ok, epic} = Ash.create(Issue, %{title: "e", workspace_id: ws.id, issue_type: :epic})
+      patch(conn, ~p"/api/issues/#{epic.id}/floor", %{"floor_priority" => 2})
+
+      assert [%{changes: %{"floor_priority" => 2}}] =
+               Issue.Version
+               |> Ash.Query.filter(
+                 version_source_id == ^epic.id and version_action_name == :set_floor
+               )
+               |> Ash.read!()
+    end
+  end
+
   describe "PATCH /api/issues/:id/rank" do
     test "top moves a ticket ahead of every other ticket in the workspace", %{conn: conn, ws: ws} do
       {:ok, a} = Ash.create(Issue, %{title: "a", workspace_id: ws.id})

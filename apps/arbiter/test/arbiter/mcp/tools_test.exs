@@ -2041,6 +2041,100 @@ defmodule Arbiter.MCP.ToolsTest do
     end
   end
 
+  describe "epic_floor/2" do
+    # ES2 (bd-3e7inj): the MCP surface of `:set_floor`.
+    setup ctx do
+      {:ok, epic} =
+        Ash.create(Issue, %{title: "epic", workspace_id: ctx.ws.id, issue_type: :epic})
+
+      {:ok, epic: epic}
+    end
+
+    test "sets and clears a floor", ctx do
+      assert {:ok, %{id: id, floor_priority: 1}} =
+               Tools.epic_floor(ctx.coordinator, %{"id" => ctx.epic.id, "floor_priority" => 1})
+
+      assert id == ctx.epic.id
+      assert Ash.get!(Issue, ctx.epic.id).floor_priority == 1
+
+      assert {:ok, %{floor_priority: nil}} =
+               Tools.epic_floor(ctx.coordinator, %{"id" => ctx.epic.id, "floor_priority" => nil})
+
+      assert Ash.get!(Issue, ctx.epic.id).floor_priority == nil
+    end
+
+    test "accepts P-notation and none", ctx do
+      assert {:ok, %{floor_priority: 2}} =
+               Tools.epic_floor(ctx.coordinator, %{"id" => ctx.epic.id, "floor_priority" => "P2"})
+
+      assert {:ok, %{floor_priority: nil}} =
+               Tools.epic_floor(ctx.coordinator, %{
+                 "id" => ctx.epic.id,
+                 "floor_priority" => "none"
+               })
+    end
+
+    test "does not touch the epic's own priority", ctx do
+      assert {:ok, %{priority: priority}} =
+               Tools.epic_floor(ctx.coordinator, %{"id" => ctx.epic.id, "floor_priority" => 1})
+
+      assert priority == ctx.epic.priority
+    end
+
+    test "rejects a non-epic", ctx do
+      assert {:error, {:invalid, message}} =
+               Tools.epic_floor(ctx.coordinator, %{"id" => ctx.task.id, "floor_priority" => 1})
+
+      assert message =~ "epic"
+    end
+
+    test "rejects P0, P4 and junk, and a missing floor_priority key", ctx do
+      for bad <- [0, 4, "P0", "banana"] do
+        assert {:error, {:invalid, _}} =
+                 Tools.epic_floor(ctx.coordinator, %{"id" => ctx.epic.id, "floor_priority" => bad})
+      end
+
+      assert {:error, {:invalid, _}} = Tools.epic_floor(ctx.coordinator, %{"id" => ctx.epic.id})
+      assert Ash.get!(Issue, ctx.epic.id).floor_priority == nil
+    end
+
+    test "cannot reach an epic in another workspace (not-found)", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "floor-other", prefix: "fo"})
+
+      {:ok, foreign} =
+        Ash.create(Issue, %{title: "f", workspace_id: other_ws.id, issue_type: :epic})
+
+      assert {:error, {:not_found, _}} =
+               Tools.epic_floor(ctx.coordinator, %{"id" => foreign.id, "floor_priority" => 1})
+    end
+
+    test "is a coordinator-tier tool: a worker neither sees nor can call it", ctx do
+      assert "epic_floor" in Enum.map(Arbiter.MCP.Catalog.visible(ctx.coordinator), & &1.name)
+      refute "epic_floor" in Enum.map(Arbiter.MCP.Catalog.visible(ctx.worker), & &1.name)
+
+      assert {:rpc_error, -32003, message} =
+               Arbiter.MCP.Catalog.call(ctx.worker, "epic_floor", %{
+                 "id" => ctx.epic.id,
+                 "floor_priority" => 1
+               })
+
+      assert message =~ "not permitted for a worker"
+      assert Ash.get!(Issue, ctx.epic.id).floor_priority == nil
+    end
+
+    test "a coordinator call lands in the paper trail", ctx do
+      require Ash.Query
+      {:ok, _} = Tools.epic_floor(ctx.coordinator, %{"id" => ctx.epic.id, "floor_priority" => 3})
+
+      assert [%{changes: %{"floor_priority" => 3}}] =
+               Issue.Version
+               |> Ash.Query.filter(
+                 version_source_id == ^ctx.epic.id and version_action_name == :set_floor
+               )
+               |> Ash.read!()
+    end
+  end
+
   describe "notify_list/2" do
     test "lists recent notifications scoped to the workspace (both tiers)", ctx do
       {:ok, _} = Message.notify(%{workspace_id: ctx.ws.id, body: "a worker finished"})

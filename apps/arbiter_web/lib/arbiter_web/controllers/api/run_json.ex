@@ -52,7 +52,7 @@ defmodule ArbiterWeb.Api.RunJSON do
   defp detail(%Run{} = r) do
     summary(r)
     |> Map.merge(%{
-      output_lines: r.output_lines || [],
+      output_lines: Arbiter.Workers.OutputOffload.output_lines(r),
       inserted_at: iso(r.inserted_at),
       updated_at: iso(r.updated_at)
     })

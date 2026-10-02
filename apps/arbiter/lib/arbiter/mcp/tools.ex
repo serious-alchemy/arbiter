@@ -1907,6 +1907,7 @@ defmodule Arbiter.MCP.Tools do
       state: to_str(i.state),
       close_reason: to_str(i.close_reason),
       priority: i.priority,
+      floor_priority: i.floor_priority,
       difficulty: i.difficulty,
       issue_type: to_str(i.issue_type),
       auto_close: i.auto_close,
@@ -2123,6 +2124,7 @@ defmodule Arbiter.MCP.Tools do
   defdelegate task_promote(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate task_demote(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate task_rank(scope, args), to: Arbiter.MCP.Tools.Task
+  defdelegate epic_floor(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate ticket_handoff(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate ticket_handback(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate task_sync_upstream_close(scope, args), to: Arbiter.MCP.Tools.Task

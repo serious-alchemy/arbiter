@@ -97,6 +97,7 @@ defmodule ArbiterWeb.ApiPolicy do
     {:post, "/api/issues/:id/promote"} => :coordinator,
     {:post, "/api/issues/:id/demote"} => :coordinator,
     {:patch, "/api/issues/:id/rank"} => :coordinator,
+    {:patch, "/api/issues/:id/floor"} => :coordinator,
     {:post, "/api/issues/:id/verify"} => :coordinator,
     {:post, "/api/issues/:id/resolve"} => :coordinator,
     {:post, "/api/issues/:id/handoff"} => :coordinator,

@@ -294,6 +294,9 @@ defmodule Arbiter.Tasks.Issue do
       # doesn't immediately re-trip on the next tick (bd-1atwts).
       change {Arbiter.Tasks.Issue.Changes.RecordCircuitBreakerClear, []}
 
+      # A floor only means something on an epic: retyping one away clears it.
+      change {Arbiter.Tasks.Issue.Changes.ClearFloorOnRetype, []}
+
       # Propagate title/description changes to the linked external tracker.
       # Best-effort; no-op when neither field changed or no tracker.
       change {Arbiter.Tasks.Issue.Changes.SyncFields, []}
@@ -488,6 +491,26 @@ defmodule Arbiter.Tasks.Issue do
       argument :after_id, :string, allow_nil?: true
 
       change {Arbiter.Tasks.Issue.Changes.SetRank, []}
+    end
+
+    # ES2: the only writer of `floor_priority`. Epic-only, 1..3 or nil to
+    # clear; `Changes.SetFloor` refuses a worker/refine-tier actor. The paper
+    # trail records the action name and the new value.
+    update :set_floor do
+      require_atomic? false
+      accept []
+
+      argument :floor_priority, :integer do
+        allow_nil? true
+        constraints min: 1, max: 3
+      end
+
+      change {Arbiter.Tasks.Issue.Changes.SetFloor, []}
+
+      change after_action(fn _changeset, issue, _ ->
+               Arbiter.Tasks.Issue.broadcast_lifecycle(:updated, issue)
+               {:ok, issue}
+             end)
     end
 
     update :close do
@@ -1220,6 +1243,20 @@ defmodule Arbiter.Tasks.Issue do
       # explicitly to get a non-reviewable workflow.
       default :feature
       constraints one_of: @issue_types
+    end
+
+    attribute :floor_priority, :integer do
+      public? true
+      constraints min: 1, max: 3
+
+      description """
+      Epic priority floor (ES2, `docs/design/epic-aware-scheduling.md` §6.2).
+      `nil` means no floor, so the schedule is exactly today's. 1..3 only: an
+      incident (P0) must always beat a floor. Only an epic carries one, and it
+      is set only by `:set_floor`, never by `:create` or `:update`; a board
+      drag or `arb ticket update --priority` never sets it. The epic's own
+      `priority` is unrelated and is not a scheduling input.
+      """
     end
 
     attribute :auto_close, :boolean do

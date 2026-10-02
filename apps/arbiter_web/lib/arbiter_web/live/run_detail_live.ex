@@ -265,7 +265,7 @@ defmodule ArbiterWeb.RunDetailLive do
           <Domain.log_stream
             id="run-transcript"
             live={false}
-            lines={build_log_lines(@run.output_lines || [])}
+            lines={build_log_lines(Arbiter.Workers.OutputOffload.output_lines(@run))}
             max_height="28rem"
           />
         <% end %>
