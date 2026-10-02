@@ -18,7 +18,7 @@ defmodule ArbiterWeb.ReportsLive do
 
   use ArbiterWeb, :live_view
 
-  alias Arbiter.Reports.{BurnUp, Cache, Cost, Epics, Flow, Throughput}
+  alias Arbiter.Reports.{BurnUp, Cache, Cost, Epics, Flow, ReviewHealth, Throughput}
   alias Arbiter.Tasks.{Issue, Workspace}
   alias ArbiterWeb.Charts
   alias ArbiterWeb.CoreComponents.Feedback
@@ -174,6 +174,7 @@ defmodule ArbiterWeb.ReportsLive do
       throughput: Throughput.load(filters),
       cost: Cost.load(filters),
       flow: Flow.load(filters),
+      review_health: ReviewHealth.load(filters),
       burn_up: BurnUp.load(filters["epic"], filters["range"])
     }
   end
@@ -319,6 +320,7 @@ defmodule ArbiterWeb.ReportsLive do
             <.throughput_section throughput={report.throughput} />
             <.cost_section cost={report.cost} />
             <.flow_section flow={report.flow} />
+            <.review_health_section health={report.review_health} />
           </div>
         </.async_result>
       </div>
@@ -681,6 +683,192 @@ defmodule ArbiterWeb.ReportsLive do
     """
   end
 
+  attr :health, :map, required: true
+
+  defp review_health_section(assigns) do
+    h = assigns.health
+    outcome_series = [:converged, :resolved, :not_converged]
+
+    assigns =
+      assign(assigns,
+        empty?: h.verdicts.review_rows == 0 and h.resolutions == [],
+        rounds_points: rounds_points(h.rounds),
+        first_pass_points:
+          for(w <- h.first_pass_weekly, w.rate != nil, do: week_point(w, :rate, 100)),
+        outcome_series: Enum.map(outcome_series, &%{key: &1, label: outcome_label(&1)}),
+        outcome_points:
+          Enum.map(h.outcomes_weekly, fn w ->
+            %{key: Date.to_iso8601(w.week), label: week_label(w.week), values: w.counts}
+          end)
+      )
+
+    ~H"""
+    <section id="reports-reviewgate" class="flex flex-col gap-4">
+      <h2 class="text-[13px] font-medium">ReviewGate health</h2>
+      <div :if={@empty?} id="reports-rg-empty" class="text-[12.5px]">
+        No ReviewGate rounds in this range.
+      </div>
+      <div :if={!@empty?} class="flex flex-col gap-4">
+        <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <Charts.stat_tile
+            id="reports-rg-first-pass"
+            label="First-pass approve"
+            value={pct(@health.first_pass.rate)}
+            note={"#{@health.first_pass.approved} of #{@health.first_pass.n} round-1 reviews"}
+          />
+          <Charts.stat_tile
+            id="reports-rg-cycles"
+            label="Gate cycles"
+            value={@health.cycles}
+          />
+          <Charts.stat_tile
+            id="reports-rg-timed-out"
+            label="Timed out"
+            value={pct(@health.verdicts.timed_out_rate)}
+            note={"#{@health.verdicts.timed_out} of #{@health.verdicts.review_rows} reviews"}
+          />
+          <Charts.stat_tile
+            id="reports-rg-unmet"
+            label="Approve, criteria unmet"
+            value={@health.verdicts.approve_unmet}
+            note={"of #{@health.verdicts.approve} approvals"}
+          />
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div class="flex flex-col gap-2">
+            <h3 class="text-[12.5px] font-medium">Review rounds per gate cycle</h3>
+            <Charts.bar
+              id="reports-rg-rounds-chart"
+              title="Gate cycles by number of review rounds"
+              points={@rounds_points}
+            />
+          </div>
+          <div class="flex flex-col gap-2">
+            <h3 class="text-[12.5px] font-medium">First-pass approve rate per week (%)</h3>
+            <Charts.step_line
+              id="reports-rg-first-pass-chart"
+              title="First-pass approve rate per week"
+              points={@first_pass_points}
+            />
+          </div>
+        </div>
+
+        <div class="flex flex-col gap-2">
+          <h3 class="text-[12.5px] font-medium">How each gate argument ended, per week</h3>
+          <Charts.stacked_bar
+            id="reports-rg-outcomes-chart"
+            title="Gate outcomes per week"
+            points={@outcome_points}
+            series={@outcome_series}
+          />
+          <p id="reports-rg-outcome-note" class="text-[12px] text-[var(--text-secondary)]">
+            Converged: the last review approved. Resolved: the coordinator ended the argument with a
+            recorded decision. Not converged: nothing has answered the last non-approving review yet.
+            Each ticket is counted in the week of its last gate activity.
+          </p>
+        </div>
+
+        <div class="flex flex-col gap-2">
+          <h3 class="text-[12.5px] font-medium">Coordinator resolutions</h3>
+          <div :if={@health.resolutions == []} id="reports-rg-resolutions-empty" class="text-[12px]">
+            None recorded.
+          </div>
+          <table
+            :if={@health.resolutions != []}
+            id="reports-rg-resolutions-table"
+            class="text-[12px] font-[family-name:var(--font-mono)]"
+          >
+            <thead>
+              <tr class="text-left text-[var(--text-label)]">
+                <th class="py-1 pr-4">Decision</th>
+                <th class="pr-4">Actor</th>
+                <th class="text-right">Count</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr :for={r <- @health.resolutions} data-decision={r.decision}>
+                <td class="py-0.5 pr-4">{r.decision}</td>
+                <td class="pr-4">{r.actor}</td>
+                <td class="text-right">{r.count}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="flex flex-col gap-2">
+          <h3 class="text-[12.5px] font-medium">Review cost by reviewer</h3>
+          <div class="overflow-x-auto">
+            <table
+              id="reports-rg-providers-table"
+              class="w-full text-[12px] font-[family-name:var(--font-mono)]"
+            >
+              <thead>
+                <tr class="text-left text-[var(--text-label)]">
+                  <th class="py-1 pr-3">Provider</th>
+                  <th class="pr-3">Model</th>
+                  <th class="pr-3">Family</th>
+                  <th class="pr-3 text-right">Passes</th>
+                  <th class="pr-3 text-right">Priced</th>
+                  <th class="text-right">Cost</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr :for={r <- @health.providers.rows}>
+                  <td class="py-0.5 pr-3">{r.provider || "?"}</td>
+                  <td class="pr-3">{r.model || "?"}</td>
+                  <td class="pr-3">{r.family || "—"}</td>
+                  <td class="pr-3 text-right">{r.passes}</td>
+                  <td class="pr-3 text-right">{r.priced}</td>
+                  <td class="text-right">{dollars(r.cost_usd)}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p id="reports-rg-fallback" class="text-[12px] text-[var(--text-secondary)]">
+            Same-family fallback: {@health.providers.fallback.fallbacks} of {@health.providers.fallback.passes} cross-family reviews ({pct(
+              @health.providers.fallback.rate
+            )}).
+          </p>
+          <p id="reports-rg-provider-note" class="text-[12px] text-[var(--text-secondary)]">
+            Provider charts start {Date.to_iso8601(@health.providers.since)}: before it the reviewer's
+            provider was not recorded on most rows. Cost sums priced passes only; a pass with no cost
+            is never counted as $0.
+          </p>
+        </div>
+        <p id="reports-rg-first-pass-note" class="text-[12px] text-[var(--text-secondary)]">
+          First-pass rate = round-1 approvals / round-1 review passes (a timed-out pass counts as not
+          approved). Rounds per cycle are per fix-round attempt, dated by the cycle's last review.
+          Weeks start Monday (UTC).
+        </p>
+      </div>
+    </section>
+    """
+  end
+
+  # Cycles by round count, 1 … 4 and "5+", all shown so the axis does not jump.
+  defp rounds_points(rounds) do
+    counts =
+      Enum.reduce(rounds, %{}, fn %{rounds: n, count: c}, acc ->
+        Map.update(acc, min(n, 5), c, &(&1 + c))
+      end)
+
+    for n <- 1..5 do
+      %{
+        key: n,
+        label:
+          if(n == 5, do: "5+ rounds", else: "#{n} #{if n == 1, do: "round", else: "rounds"}"),
+        value: Map.get(counts, n, 0)
+      }
+    end
+  end
+
+  defp outcome_label(:not_converged), do: "Not converged"
+  defp outcome_label(outcome), do: outcome |> Atom.to_string() |> String.capitalize()
+
+  defp pct(nil), do: "—"
+  defp pct(rate), do: "#{round(rate * 100)}%"
+
   defp dollars(nil), do: "—"
   defp dollars(value), do: "$" <> :erlang.float_to_binary(value * 1.0, decimals: 2)
 
@@ -710,11 +898,11 @@ defmodule ArbiterWeb.ReportsLive do
 
   defp week_label(week), do: Calendar.strftime(week, "%b %d")
 
-  defp week_point(w, field) do
+  defp week_point(w, field, scale \\ 1) do
     %{
       key: Date.to_iso8601(w.week),
       label: week_label(w.week),
-      value: Float.round(w[field] * 1.0, 2)
+      value: Float.round(w[field] * scale * 1.0, 2)
     }
   end
 
