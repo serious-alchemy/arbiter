@@ -929,6 +929,65 @@ defmodule Arbiter.Worker.DispatchTest do
       refute File.exists?(Path.join(wt, ".claude/skills/gemini-canary/SKILL.md"))
     end
 
+    # bd-89z02x: codex reads no skills directory, so a codex dispatch must
+    # write nothing to disk and inline the always-on body in the prompt it is
+    # actually handed (the provider -> `skills_materialized?` mapping).
+    test "codex dispatch writes no skills dir and inlines the skill in the prompt",
+         %{tmp: tmp} do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "skill-codex-ws",
+          prefix: "skx",
+          config: %{"skills" => %{"workspace" => ["codex-canary", "codex-situational"]}}
+        })
+
+      {:ok, _} =
+        Arbiter.Skills.create_skill(%{
+          name: "codex-canary",
+          body: "# Codex canary\nINLINE-CANARY-BODY",
+          activation_mode: :always_on
+        })
+
+      {:ok, _} =
+        Arbiter.Skills.create_skill(%{
+          name: "codex-situational",
+          body: "# Situational",
+          activation_mode: :situational
+        })
+
+      codex_file = Path.join(tmp, "codex-skill-argv.txt")
+      :ok = stub_named_on_path(tmp, "codex", codex_file)
+
+      repo = seed_repo!(tmp, "codexskillrepo")
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "codex-skill-wt"))
+      put_app_env(:arbiter, :repo_paths, %{"cs/repo" => repo})
+
+      {:ok, task} =
+        Ash.create(Issue, %{title: "codex skill work", workspace_id: ws.id, issue_type: :feature})
+
+      {:ok, result} =
+        Dispatch.dispatch(task.id,
+          force: true,
+          repo: "cs/repo",
+          agent_type: :codex,
+          start_driver: false,
+          start_claude: true,
+          preflight: false
+        )
+
+      wt = result.worktree_path
+      assert is_binary(wt)
+
+      argv = wait_for_argv!(codex_file)
+      prompt = Enum.join(argv, "\n")
+
+      assert prompt =~ "INLINE-CANARY-BODY"
+      refute prompt =~ "available in this worktree"
+      refute prompt =~ "/codex-situational"
+      refute File.exists?(Path.join(wt, ".claude/skills/codex-canary/SKILL.md"))
+      refute File.exists?(Path.join(wt, ".agents/skills"))
+    end
+
     # bd-d5hy7y: an always-on skill is auto-invoked in the worker prompt, while a
     # situational one is advertised but not forced.
     test "work prompt auto-invokes always-on skills and advertises situational ones",

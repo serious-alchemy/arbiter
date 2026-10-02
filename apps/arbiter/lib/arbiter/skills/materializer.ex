@@ -43,9 +43,9 @@ defmodule Arbiter.Skills.Materializer do
 
     * `:gemini` (agy/Antigravity) — `.agents/skills`, agy's documented
       workspace discovery path.
-    * everything else (`:claude`, `:codex`, `nil`) — `.claude/skills`, the
-      historical default. Codex has no skills convention of its own yet, so
-      it is deliberately left on Claude's path rather than invented here.
+    * everything else (`:claude`, `nil`) — `.claude/skills`, the historical
+      default. `:codex` never reaches this: `materialize/3` writes nothing for
+      it, because Codex reads no skills directory (bd-89z02x).
   """
   @spec skills_dir(atom()) :: String.t()
   def skills_dir(provider \\ :claude)
@@ -66,6 +66,10 @@ defmodule Arbiter.Skills.Materializer do
   def materialize(worktree, resolved, provider \\ :claude)
   def materialize(nil, _resolved, _provider), do: {:ok, []}
   def materialize(_worktree, [], _provider), do: {:ok, []}
+  # Codex reads no skills directory and has no `/skill` slash commands
+  # (bd-89z02x / G16): writing `.claude/skills` would be dead files. Its skills
+  # reach it inline via `prompt_section(_, false)` instead.
+  def materialize(_worktree, _resolved, :codex), do: {:ok, []}
 
   def materialize(worktree, resolved, provider) when is_binary(worktree) and is_list(resolved) do
     dir = skills_dir(provider)
