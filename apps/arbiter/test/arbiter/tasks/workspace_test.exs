@@ -690,6 +690,36 @@ defmodule Arbiter.Tasks.WorkspaceTest do
       assert Exception.message(err) =~ "agent.security.repos.tonic.sandbox.egress"
     end
 
+    test "accepts each sandbox.backend, workspace-wide and per repo" do
+      for backend <- ["bwrap", "podman"] do
+        assert {:ok, _} =
+                 Ash.create(Workspace, %{
+                   name: "be-ok-#{System.unique_integer([:positive])}",
+                   config: security_config(%{"backend" => backend}, %{"backend" => backend})
+                 })
+      end
+    end
+
+    test "rejects an unknown sandbox.backend, naming the key and the valid backends" do
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{
+                 name: "be-bad1",
+                 config: security_config(%{"backend" => "docker"})
+               })
+
+      message = Exception.message(err)
+      assert message =~ "agent.security.sandbox.backend must be one of"
+      assert message =~ "bwrap, podman"
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{
+                 name: "be-bad2",
+                 config: security_config(%{}, %{"backend" => 3})
+               })
+
+      assert Exception.message(err) =~ "agent.security.repos.tonic.sandbox.backend"
+    end
+
     test "rejects malformed allow_hosts, naming the offending entry" do
       for bad <- [["no-port"], ["bad host:443"], ["*:443"], [7], "repo.hex.pm:443"] do
         assert {:error, %Ash.Error.Invalid{} = err} =

@@ -94,6 +94,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Worker.ResumeContext
   alias Arbiter.Worker.ResumeSlot
   alias Arbiter.Worker.RunProvenance
+  alias Arbiter.Worker.Sandbox
   alias Arbiter.Worker.StopReason
   alias Arbiter.Worker.TargetBranch
   alias Arbiter.Worker.Watchdog
@@ -2802,11 +2803,15 @@ defmodule Arbiter.Worker.Dispatch do
         # caller. Automatic routing (`agent_type` nil) instead tries the next
         # configured provider in `Agents.agent_pool/1` and only refuses when
         # none of them can confine writes.
-        case Agents.strict_eligible_provider(choice.type, policy, Agents.agent_pool(workspace),
+        #
+        # bd-btcdrf: a `sandbox.backend` with no implementation is refused here,
+        # before any provider is chosen or a worktree session built, so the
+        # operator sees it at dispatch rather than as a late spawn error.
+        case sandbox_checked_provider(choice.type, policy, Agents.agent_pool(workspace),
                explicit: not is_nil(agent_type)
              ) do
           {:error, :ineligible} ->
-            {:error, strict_write_confinement_error(choice.type, policy, workspace, opts)}
+            {:error, ineligible_provider_error(choice.type, policy, workspace, opts)}
 
           {:ok, effective_type} ->
             choice = apply_agent_type_override(choice, effective_type)
@@ -3070,6 +3075,23 @@ defmodule Arbiter.Worker.Dispatch do
        "anywhere the host user can (see docs/design/agy-strict-write-isolation.md). " <>
        "Use claude for this dispatch instead, or install bubblewrap once the OS jail " <>
        "(bd-5gvqgc) ships and makes #{provider_type} :strict-eligible."}
+  end
+
+  defp sandbox_checked_provider(preferred, policy, pool, opts) do
+    case Sandbox.module(policy) do
+      {:ok, _sandbox} -> Agents.strict_eligible_provider(preferred, policy, pool, opts)
+      {:error, _refusal} -> {:error, :ineligible}
+    end
+  end
+
+  # Why `sandbox_checked_provider/4` found no eligible provider: a sandbox
+  # backend with no implementation (every provider is refused), else the
+  # `:strict` write-confinement gap.
+  defp ineligible_provider_error(provider_type, policy, workspace, opts) do
+    case Sandbox.module(policy) do
+      {:error, refusal} -> refusal
+      {:ok, _sandbox} -> strict_write_confinement_error(provider_type, policy, workspace, opts)
+    end
   end
 
   defp mode_source_label(:dispatch_override), do: "this dispatch's own override"

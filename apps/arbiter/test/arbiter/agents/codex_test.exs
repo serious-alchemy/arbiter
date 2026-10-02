@@ -3,6 +3,7 @@ defmodule Arbiter.Agents.CodexTest do
 
   alias Arbiter.Agents.Codex
   alias Arbiter.Agents.SecurityPolicy
+  alias Arbiter.Worker.Jail
 
   # bd-24qzhd: OPENAI_API_KEY is a worker_env provider credential (see
   # Arbiter.Accounts.Census's allow-list), so it is routinely present in the
@@ -619,6 +620,71 @@ defmodule Arbiter.Agents.CodexTest do
       assert {:ok, resumed} = Codex.splice_prompt(argv, ["--resume", "sess-1", "go"])
       assert Enum.take(Enum.drop_while(resumed, &(&1 != "exec")), 2) == ["exec", "resume"]
       assert Enum.take(resumed, -2) == ["sess-1", "go"]
+    end
+
+    # bd-btcdrf (P2): the default backend leaves the reviewer's jailed argv
+    # exactly what `Jail.wrap/2` builds around the unjailed argv.
+    test "with the default backend the jailed argv is byte-identical to a direct Jail.wrap/2",
+         ctx do
+      for mode <- [:bypass, :auto] do
+        pol = review_policy(mode)
+        assert pol.sandbox.backend == :bwrap
+
+        Application.put_env(:arbiter, :worker_jail_available, false)
+
+        {:ok, unjailed} =
+          Codex.default_argv("review it", security: pol, worktree_path: ctx.worktree)
+
+        Application.put_env(:arbiter, :worker_jail_available, true)
+
+        {:ok, jailed} =
+          Codex.default_argv("review it", security: pol, worktree_path: ctx.worktree)
+
+        assert {:ok, ^jailed} =
+                 Jail.wrap(unjailed,
+                   worktree: ctx.worktree,
+                   worktree_readonly: true,
+                   writable_paths: [ctx.codex_home]
+                 )
+
+        assert hd(jailed) =~ "bwrap"
+      end
+    end
+
+    test "backend: podman refuses a reviewer dispatch, never falling back to unjailed", ctx do
+      podman =
+        SecurityPolicy.merge(review_policy(:bypass), %{sandbox: %{backend: :podman}})
+
+      assert {:error, {:sandbox_backend_unavailable, :podman, message}} =
+               Codex.default_argv("p", security: podman, worktree_path: ctx.worktree)
+
+      assert message =~ "podman"
+
+      Application.put_env(:arbiter, :worker_jail_available, false)
+
+      assert {:error, {:sandbox_backend_unavailable, :podman, _}} =
+               Codex.default_argv("p", security: podman, worktree_path: ctx.worktree)
+    end
+
+    test "backend: podman refuses a spawn that bwrap would never have jailed", ctx do
+      # An implementer (no `Write` deny) and a strict reviewer (already
+      # `-s read-only`) are not wrapped under bwrap; selecting podman must still
+      # refuse them rather than run them unconfined.
+      implementer =
+        SecurityPolicy.merge(SecurityPolicy.base(), %{
+          permissions: %{mode: :bypass},
+          sandbox: %{backend: :podman}
+        })
+
+      strict_reviewer =
+        SecurityPolicy.merge(review_policy(:strict), %{sandbox: %{backend: :podman}})
+
+      for policy <- [implementer, strict_reviewer] do
+        assert {:error, {:sandbox_backend_unavailable, :podman, message}} =
+                 Codex.default_argv("p", security: policy, worktree_path: ctx.worktree)
+
+        assert message =~ "podman"
+      end
     end
 
     defp tail_from_dashes(argv), do: Enum.drop_while(argv, &(&1 != "--"))

@@ -51,6 +51,7 @@ defmodule Arbiter.Agents.Claude do
   alias Arbiter.Agents.Claude.Security
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Worker.ClaudeSession
+  alias Arbiter.Worker.Sandbox
 
   @done_regex ~r/(?:\A|\n)[^\p{L}\p{N}\n]*arb done[^\p{L}\p{N}]*\z/u
 
@@ -93,15 +94,20 @@ defmodule Arbiter.Agents.Claude do
       {:ok, claude} ->
         policy = security_policy(opts)
 
-        flags =
-          model_flag(opts) ++
-            thinking_flag(opts) ++
-            Security.permission_argv(policy) ++
-            Security.settings_argv(policy) ++
-            mcp_config_flag(opts) ++
-            stream_flags()
+        # bd-btcdrf: Claude has no jail wrap point today, but a selected sandbox
+        # backend with no implementation must still refuse the spawn rather than
+        # run it unconfined while the operator believes it is contained.
+        with {:ok, _sandbox} <- Sandbox.module(policy) do
+          flags =
+            model_flag(opts) ++
+              thinking_flag(opts) ++
+              Security.permission_argv(policy) ++
+              Security.settings_argv(policy) ++
+              mcp_config_flag(opts) ++
+              stream_flags()
 
-        build_argv(claude, prompt, flags)
+          build_argv(claude, prompt, flags)
+        end
 
       {:error, _} = err ->
         err
