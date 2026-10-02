@@ -266,4 +266,20 @@ defmodule ArbiterWeb.Api.ServerControllerTest do
       refute Enum.any?(resp["problems"], &(&1["workspace_id"] == ws.id and &1["repo"] == "infra"))
     end
   end
+
+  # bd-c99hys: `arb server doctor` reports whether tmux is installed, since the
+  # dashboard login relay runs each provider CLI login inside it.
+  describe "GET /api/server/tmux" do
+    test "reports availability, path and version from the host", %{conn: conn} do
+      resp = conn |> get("/api/server/tmux") |> json_response(200)
+
+      if System.find_executable("tmux") do
+        assert %{"available" => true, "path" => path, "version" => "tmux" <> _} = resp
+        assert path == System.find_executable("tmux")
+      else
+        assert %{"available" => false, "message" => _, "fix" => fix} = resp
+        assert fix =~ "tmux"
+      end
+    end
+  end
 end

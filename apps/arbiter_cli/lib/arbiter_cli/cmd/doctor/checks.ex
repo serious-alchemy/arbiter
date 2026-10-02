@@ -45,6 +45,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       check_agy_jail_escape(),
       check_agy_jail_network(),
       check_agy_ssh_transport(),
+      check_tmux(),
       check_claude_worker_credentials(),
       check_provider_accounts(),
       check_account_policy_binding(),
@@ -856,6 +857,45 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   # other out. Its Claude dispatch is now held instead, which is an
   # operator-actionable failure (non-zero exit) but says nothing about whether
   # the server itself is healthy, so it never blocks deploy readiness.
+  # bd-c99hys: the dashboard login relay runs each provider CLI's login in a
+  # hidden tmux session. A host without tmux cannot log an account in from the
+  # dashboard, but nothing else breaks, so this FAILs without blocking readiness.
+  defp check_tmux do
+    case Client.get("/api/server/tmux") do
+      {:ok, %{"available" => true} = tmux} ->
+        %Result{
+          name: "tmux",
+          status: :ok,
+          detail:
+            "installed (#{Map.get(tmux, "version") || "unknown version"}) — the dashboard " <>
+              "login relay can run provider logins",
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      {:ok, %{"available" => false} = tmux} ->
+        %Result{
+          name: "tmux",
+          status: :fail,
+          detail:
+            "#{Map.get(tmux, "message") || "tmux is not installed"}: the dashboard cannot log " <>
+              "in or re-authenticate a provider account",
+          hint: Map.get(tmux, "fix") || "Install tmux.",
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      _ ->
+        %Result{
+          name: "tmux",
+          status: :ok,
+          detail: "server unreachable or predates this check — skipping",
+          fatal: false,
+          blocks_readiness: false
+        }
+    end
+  end
+
   defp check_claude_worker_credentials do
     case Client.get("/api/server/claude_credentials") do
       {:ok, %{"checked" => checked, "missing" => []}} ->

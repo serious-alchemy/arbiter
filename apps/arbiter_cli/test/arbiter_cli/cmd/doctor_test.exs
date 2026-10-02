@@ -158,7 +158,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     assert exit_code == 0
     assert {:ok, %{"ok" => true, "checks" => checks}} = Jason.decode(String.trim(out))
     assert is_list(checks)
-    assert length(checks) == 20
+    assert length(checks) == 21
   end
 
   test "version mismatch is non-fatal (exit 0 but shows [fail])" do
@@ -1528,6 +1528,59 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       {out, _err, _exit_code} = capture(fn -> Doctor.run([]) end)
       assert out =~ "[ ok ] claude worker credentials"
       assert out =~ "could not check"
+    end
+  end
+
+  # bd-c99hys: the dashboard login relay drives each provider CLI's login inside
+  # a hidden tmux session, so a host without tmux cannot log an account in.
+  describe "tmux check" do
+    defp tmux_routes(body) do
+      [
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/tmux"}, {body, 200}}
+      ]
+    end
+
+    test "reports tmux present, with its version" do
+      stub_routes(
+        tmux_routes(%{"available" => true, "path" => "/usr/bin/tmux", "version" => "tmux 3.4"})
+      )
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] tmux"
+      assert out =~ "tmux 3.4"
+    end
+
+    test "reports tmux missing, informationally, with the fix" do
+      stub_routes(
+        tmux_routes(%{
+          "available" => false,
+          "message" => "tmux is not installed",
+          "fix" => "Install tmux (e.g. `sudo dnf install tmux`)"
+        })
+      )
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[fail] tmux"
+      assert out =~ "tmux is not installed"
+      assert out =~ "sudo dnf install tmux"
+
+      result = Enum.find(Checks.run(), &(&1.name == "tmux"))
+      refute result.blocks_readiness
+    end
+
+    test "skips quietly when the server predates the endpoint" do
+      stub_routes(tmux_routes(%{}) |> List.keydelete({"get", "/api/server/tmux"}, 0))
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] tmux"
+      assert out =~ "predates this check"
     end
   end
 
