@@ -543,12 +543,15 @@ defmodule Arbiter.Quota.Gate do
   # from the stored `window_minutes` — bd-7lkvb6) is n minutes long.
   defp minutes_label_seconds(label) when is_binary(label) do
     case Regex.run(~r/\A(\d+)m\z/, label) do
-      [_, n] -> if (m = String.to_integer(n)) > 0, do: m * 60
+      [_, n] -> n |> String.to_integer() |> Kernel.*(60) |> positive_or_nil()
       _ -> nil
     end
   end
 
   defp minutes_label_seconds(_), do: nil
+
+  defp positive_or_nil(n) when n > 0, do: n
+  defp positive_or_nil(_), do: nil
 
   defp account_window_seconds(account, label) do
     case account |> account_config() |> Map.get("window_seconds") do
