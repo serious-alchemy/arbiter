@@ -563,6 +563,17 @@ defmodule Arbiter.Sessions.TranscriptDistillationTest do
       assert [%{model: "transcript-distillation-pass"}] = Ash.read!(Event)
     end
 
+    test "a call the CLI reports as failed is metered, and its own error returned" do
+      archive!(conversation())
+      failed = %{model: nil, cost_usd: 0.0, subtype: "success", is_error: true}
+
+      assert {:error, {:model_error, "Not logged in · Please run /login"}} =
+               distill(invoker: invoker("Not logged in · Please run /login", failed))
+
+      assert [%{cost_usd: +0.0}] = Ash.read!(Event)
+      refute File.exists?(candidates_dir())
+    end
+
     test "an unparseable reply is still metered, and queues nothing" do
       archive!(conversation())
 

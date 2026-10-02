@@ -236,7 +236,8 @@ defmodule Arbiter.Loop.DiscoveryTest do
                cache_read_tokens: 300,
                cost_usd: 0.12,
                duration_ms: 4200,
-               subtype: "success"
+               subtype: "success",
+               is_error: false
              }
     end
 

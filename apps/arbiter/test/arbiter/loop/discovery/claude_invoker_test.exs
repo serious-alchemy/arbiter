@@ -50,7 +50,18 @@ defmodule Arbiter.Loop.Discovery.ClaudeInvokerTest do
         ~s({"type":"result","subtype":"error_max_budget_usd","is_error":true,) <>
           ~s("total_cost_usd":0.3,"usage":{}}\n)
 
-      assert {:ok, "", %{subtype: "error_max_budget_usd", cost_usd: 0.3}} =
+      assert {:ok, "", %{subtype: "error_max_budget_usd", is_error: true, cost_usd: 0.3}} =
+               ClaudeInvoker.parse_stream(stream)
+    end
+
+    # What the real CLI emits with no credential: a "success" subtype that is
+    # an error, with the error text where the reply would be.
+    test "reports is_error, which a failed call can carry under a success subtype" do
+      stream =
+        ~s({"type":"result","subtype":"success","is_error":true,) <>
+          ~s("result":"Not logged in · Please run /login","total_cost_usd":0}\n)
+
+      assert {:ok, "Not logged in · Please run /login", %{subtype: "success", is_error: true}} =
                ClaudeInvoker.parse_stream(stream)
     end
   end

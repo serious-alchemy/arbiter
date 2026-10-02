@@ -255,6 +255,10 @@ defmodule Arbiter.MCP.Tools.MemoryPending do
   defp distill_error(id, :unsafe_candidates_dir),
     do: {:invalid, "session #{id}'s candidate space is not a plain directory; refusing to write"}
 
+  defp distill_error(_id, {:model_error, text}) do
+    {:model_error, "the model call failed: #{text}. The pass was metered and queued nothing"}
+  end
+
   defp distill_error(_id, :unparseable_model_output) do
     {:model_error,
      "the model's reply held no candidates JSON; the pass was metered and queued nothing"}

@@ -285,6 +285,15 @@ defmodule Arbiter.MCP.MemoryToolsTest do
       assert opts[:max_budget_usd] == 0.4
     end
 
+    test "passes on the CLI's own error when the model call failed" do
+      Application.put_env(:arbiter, :transcript_distillation_invoker, fn _prompt, _opts ->
+        {:ok, "Not logged in · Please run /login", %{cost_usd: 0.0, is_error: true}}
+      end)
+
+      assert {:tool_error, "the model call failed: Not logged in · Please run /login." <> _} =
+               Catalog.call(@coordinator, "memory_distill", %{"session_id" => @distill_sid})
+    end
+
     test "says why a pass was refused" do
       distill_invoker!([@proposal])
 

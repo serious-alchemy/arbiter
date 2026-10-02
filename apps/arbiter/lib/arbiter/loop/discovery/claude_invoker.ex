@@ -116,10 +116,12 @@ defmodule Arbiter.Loop.Discovery.ClaudeInvoker do
   end
 
   @doc """
-  Parse `stream-json` output: the `result` event's text, token counts, cost
-  and `subtype` (`"success"`, or why the CLI stopped, such as
-  `"error_max_budget_usd"`), and the `system/init` event's model.
-  `{:error, :no_result_event}` when the stream never produced a result.
+  Parse `stream-json` output: the `result` event's text, token counts, cost,
+  `subtype` (`"success"`, or why the CLI stopped, such as
+  `"error_max_budget_usd"`) and `is_error`, and the `system/init` event's
+  model. `{:error, :no_result_event}` when the stream never produced a
+  result. A failed call can still say `"success"`: with no credential the CLI
+  reports `is_error: true` and puts its error text where the reply would be.
   """
   @spec parse_stream(String.t()) :: {:ok, String.t(), map()} | {:error, :no_result_event}
   def parse_stream(output) when is_binary(output) do
@@ -155,7 +157,8 @@ defmodule Arbiter.Loop.Discovery.ClaudeInvoker do
            cache_read_tokens: int(u["cache_read_input_tokens"]),
            cost_usd: result["total_cost_usd"],
            duration_ms: result["duration_ms"],
-           subtype: result["subtype"]
+           subtype: result["subtype"],
+           is_error: result["is_error"] == true
          }}
     end
   end

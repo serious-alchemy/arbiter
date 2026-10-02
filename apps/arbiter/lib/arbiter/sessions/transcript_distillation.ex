@@ -165,9 +165,10 @@ defmodule Arbiter.Sessions.TranscriptDistillation do
   `{:invalid_option, key}`, `:model_calls_disabled`, `:no_archived_transcript`,
   `:unsafe_candidates_dir`, `{:budget_exhausted, spend}`, `:empty_transcript`,
   `{:empty_window, total_turns}`, `{:unreadable_transcript, why}`), for a
-  failed model call (the invoker's own reason), or for an
-  `:unparseable_model_output`. A reply that came back is metered before it is
-  parsed, so even an unparseable one is in the ledger.
+  failed model call (the invoker's own reason, or `{:model_error, text}` when
+  the CLI reports its call as an error), or for an `:unparseable_model_output`.
+  A reply that came back is metered before it is parsed, so even a failed or
+  unparseable one is in the ledger.
   """
   @spec run(String.t(), keyword()) :: {:ok, result()} | {:error, term()}
   def run(session_id, opts \\ []) when is_binary(session_id) do
@@ -484,7 +485,8 @@ defmodule Arbiter.Sessions.TranscriptDistillation do
       {:ok, text, usage} when is_binary(text) ->
         cost = meter(usage, elapsed, ctx)
 
-        with {:ok, proposals} <- Discovery.parse_candidates(text) do
+        with :ok <- check_call(text, usage),
+             {:ok, proposals} <- Discovery.parse_candidates(text) do
           {accepted, rejected} = vet_all(proposals, ctx)
           {written, failed} = write_all(accepted, ctx)
           log_pass(ctx, written, rejected ++ failed, cost)
@@ -507,6 +509,14 @@ defmodule Arbiter.Sessions.TranscriptDistillation do
         {:error, {:unexpected_reply, other}}
     end
   end
+
+  # The CLI can report a failed call (no credential, a budget stop) as a
+  # result whose text is its own error. That is the answer to give, not
+  # "unparseable".
+  defp check_call(text, %{is_error: true}),
+    do: {:error, {:model_error, text |> String.trim() |> String.slice(0, 500)}}
+
+  defp check_call(_text, _usage), do: :ok
 
   defp invoke(invoker, prompt, ctx) do
     invoker.(prompt,
