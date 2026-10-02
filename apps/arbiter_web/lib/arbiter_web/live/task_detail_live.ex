@@ -497,6 +497,7 @@ defmodule ArbiterWeb.TaskDetailLive do
           repo: TaskForm.trimmed(params["repo"])
         }
         |> put_given(:issue_type, params["issue_type"])
+        |> put_provider_constraint(params)
 
       case Ash.update(task, attrs) do
         {:ok, _updated} ->
@@ -916,8 +917,45 @@ defmodule ArbiterWeb.TaskDetailLive do
     end
   end
 
+  # bd-13pqcp: the provider constraint is a mode (none / require / exclude) and
+  # a comma list; "none" — or a mode with no providers — clears it. The
+  # resource canonicalizes and validates (unknown provider, `agy` → `gemini`).
+  # A form that carries neither field leaves the constraint as it is.
+  defp put_provider_constraint(attrs, %{"provider_mode" => mode} = params)
+       when mode in ["", "require", "exclude"] do
+    case {mode, TaskForm.trimmed(params["provider_list"])} do
+      {"", _} -> Map.put(attrs, :provider_constraint, nil)
+      {_mode, nil} -> Map.put(attrs, :provider_constraint, nil)
+      {mode, list} -> Map.put(attrs, :provider_constraint, %{mode => list})
+    end
+  end
+
+  defp put_provider_constraint(attrs, _params), do: attrs
+
   # Only send an enum-ish field when the form actually supplied one — a
   # partial POST must not blank out `issue_type`.
+  # The edit modal's initial mode / list, from what was typed else what is stored.
+  defp provider_mode(edit_params, task),
+    do: TaskForm.value(edit_params, "provider_mode", stored_constraint(task) |> elem(0))
+
+  defp provider_list(edit_params, task),
+    do: TaskForm.value(edit_params, "provider_list", stored_constraint(task) |> elem(1))
+
+  defp stored_constraint(%Issue{provider_constraint: %{"require" => list}}),
+    do: {"require", Enum.join(list, ", ")}
+
+  defp stored_constraint(%Issue{provider_constraint: %{"exclude" => list}}),
+    do: {"exclude", Enum.join(list, ", ")}
+
+  defp stored_constraint(_task), do: {"", ""}
+
+  defp provider_constraint_label(%Issue{} = task) do
+    case stored_constraint(task) do
+      {"", _} -> nil
+      {mode, list} -> "#{mode} #{list}"
+    end
+  end
+
   defp put_given(attrs, key, value) do
     case TaskForm.trimmed(value) do
       nil -> attrs
@@ -1030,6 +1068,10 @@ defmodule ArbiterWeb.TaskDetailLive do
   # bd-8suxac: the provider account the run would use has no free slot.
   defp dispatch_failure({:account_at_capacity, info}),
     do: Arbiter.Accounts.Admission.refusal_message(info)
+
+  # bd-13pqcp: the ticket's provider constraint refused the dispatch.
+  defp dispatch_failure({:provider_constraint, _provider, phrase}),
+    do: "#{phrase} — edit the ticket's provider constraint, or wait for an eligible account."
 
   defp dispatch_failure(reason), do: inspect(reason)
 
@@ -2391,6 +2433,16 @@ defmodule ArbiterWeb.TaskDetailLive do
             <span class="text-[11px] font-[family-name:var(--font-mono)] text-[var(--text-label)]">
               {difficulty_label(@task.difficulty)}
             </span>
+            <%!-- bd-13pqcp: where this ticket's implementer may run. Absent when
+                 unconstrained. --%>
+            <span
+              :if={provider_constraint_label(@task)}
+              id="task-provider-constraint"
+              title="Provider constraint: only these providers may run this ticket's implementer. The reviewer is not constrained."
+              class="badge badge-sm badge-outline font-mono"
+            >
+              {provider_constraint_label(@task)}
+            </span>
             <%!-- Age, not wall-clock: "opened 2d ago · updated 41m ago" is the
                  question an operator actually asks of a header. --%>
             <span class="text-[11px] font-[family-name:var(--font-mono)] text-[var(--text-label)] tabular-nums">
@@ -3645,6 +3697,21 @@ defmodule ArbiterWeb.TaskDetailLive do
               label="Target branch (optional)"
               value={TaskForm.value(@edit_params, "target_branch", @task.target_branch || "")}
               placeholder="defaults to the repo's main"
+            />
+            <%!-- bd-13pqcp: where the implementer may run. The reviewer is not
+                 constrained; `agy` means `gemini`. --%>
+            <.input
+              type="select"
+              name="task[provider_mode]"
+              label="Provider constraint"
+              options={[{"None", ""}, {"Require only…", "require"}, {"Exclude…", "exclude"}]}
+              value={provider_mode(@edit_params, @task)}
+            />
+            <.input
+              name="task[provider_list]"
+              label="Providers (claude, gemini/agy, codex)"
+              value={provider_list(@edit_params, @task)}
+              placeholder="e.g. agy, codex"
             />
             <%!-- Full width: with the state gone from the form this is the
                  odd one out of the half-width fields. --%>

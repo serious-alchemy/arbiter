@@ -227,6 +227,36 @@ defmodule ArbiterWeb.ApiTierTest do
       end
     end
 
+    # bd-13pqcp: where a ticket may run is coordinator/operator authority — a
+    # worker may not file a follow-up with a constraint, nor set one on its
+    # own task, nor loosen the one it was given.
+    test "cannot set a provider constraint, on a follow-up or on its own task", ctx do
+      constraint = %{exclude: ["claude"]}
+
+      assert ctx.worker_token
+             |> as()
+             |> post("/api/issues", %{
+               title: "constrained follow-up",
+               workspace_id: ctx.ws.id,
+               parent_id: ctx.task.id,
+               provider_constraint: constraint
+             })
+             |> json_response(403)
+
+      assert ctx.worker_token
+             |> as()
+             |> patch("/api/issues/#{ctx.task.id}", %{provider_constraint: constraint})
+             |> json_response(403)
+
+      assert Ash.get!(Issue, ctx.task.id).provider_constraint == nil
+
+      # …whereas the progress fields it is allowed still work.
+      assert ctx.worker_token
+             |> as()
+             |> patch("/api/issues/#{ctx.task.id}", %{notes: "progress"})
+             |> json_response(200)
+    end
+
     test "cannot add edges other than parent_of from its own task to an unparented ticket", ctx do
       {:ok, parented} = Ash.create(Issue, %{title: "has a parent", workspace_id: ctx.ws.id})
       {:ok, _} = Arbiter.Tasks.Dependencies.add(ctx.sibling.id, parented.id, :parent_of)

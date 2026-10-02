@@ -1636,6 +1636,12 @@ defmodule Arbiter.MCP.Tools do
   def coerce_field(:boolean, "false"), do: {:ok, false}
   def coerce_field(:boolean, _), do: {:error, "must be a boolean"}
 
+  # bd-13pqcp: a JSON object (`provider_constraint`); `null` clears it. The
+  # resource's `NormalizeProviderConstraint` validates the keys and providers.
+  def coerce_field(:map, nil), do: {:ok, nil}
+  def coerce_field(:map, v) when is_map(v), do: {:ok, v}
+  def coerce_field(:map, _), do: {:error, "must be an object"}
+
   def coerce_field({:enum, allowed}, v) do
     case to_allowed_atom(v, allowed) do
       {:ok, atom} -> {:ok, atom}
@@ -1912,6 +1918,8 @@ defmodule Arbiter.MCP.Tools do
       issue_type: to_str(i.issue_type),
       auto_close: i.auto_close,
       verify_after_deploy: i.verify_after_deploy,
+      # bd-13pqcp: `%{"require" => [..]}` / `%{"exclude" => [..]}`, or nil.
+      provider_constraint: i.provider_constraint,
       awaiting_verification_at: iso(i.awaiting_verification_at),
       verification_outcome: to_str(i.verification_outcome),
       verification_evidence: i.verification_evidence,

@@ -964,6 +964,14 @@ defmodule Arbiter.MCP.Tools.Worker do
   defp dispatch_error_message({:account_at_capacity, info}),
     do: Arbiter.Accounts.Admission.refusal_message(info)
 
+  # bd-13pqcp: the ticket's provider constraint refused the provider (or left
+  # none eligible with capacity). The phrase already reads `held — provider
+  # constraint (<detail>)`.
+  defp dispatch_error_message({:provider_constraint, _provider, phrase}),
+    do:
+      "#{phrase} — the ticket never runs on an excluded provider; wait for an eligible " <>
+        "account to free up, or change the ticket's constraint (`ticket_update`)"
+
   defp dispatch_error_message(other), do: "dispatch failed: #{inspect(other)}"
 
   # bd-8lq2g7: `{:worker_active, …}` is rendered from the /2 arity so the message

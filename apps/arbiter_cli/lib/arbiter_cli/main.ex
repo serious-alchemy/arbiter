@@ -11,10 +11,13 @@ defmodule ArbiterCli.Main do
       arb ticket create   <title> [--description ...] [--priority ...] [--type ...]
                                   [--deps id1,id2] [--labels a,b] [--parent <parent-id>]
                                   [--auto-close]
+                                  [--require-provider p | --exclude-provider p]
       arb ticket update   <id> [--title ...] [--priority N] [--difficulty N]
                                   [--description d] [--append-notes text]
                                   [--qa-notes text] [--deployment-notes text]
                                   [--pr-body text]
+                                  [--require-provider p | --exclude-provider p |
+                                   --clear-provider-constraint]
       arb ticket close    <id> [--reason ...]
       arb ticket reopen   <id>
       arb ticket verify   <id> --observed "<evidence>" | --failed "<evidence>"

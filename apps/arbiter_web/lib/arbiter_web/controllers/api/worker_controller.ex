@@ -129,6 +129,14 @@ defmodule ArbiterWeb.Api.WorkerController do
          {:conflict, Arbiter.Accounts.Admission.refusal_message(info),
           %{task_id: task_id, account: info.account, cap: info.cap, holders: info.holders}}}
 
+      # bd-13pqcp: the ticket's provider constraint leaves no eligible provider
+      # (or the one named is excluded). A 409 — the request is fine, the ticket's
+      # own rule refuses it; edit or clear the constraint, or wait for capacity.
+      {:error, {:provider_constraint, provider, phrase}} ->
+        {:error,
+         {:conflict, "#{phrase} — dispatch refused; it never runs on an excluded provider",
+          %{task_id: task_id, provider: provider && to_string(provider)}}}
+
       # bd-2aslx6 (#1428): a second agent-spawning dispatch onto a task whose
       # worker is mid-session used to silently open a second paid CLI inside the
       # same worker run. It is now refused, with a message that names the live
@@ -332,6 +340,12 @@ defmodule ArbiterWeb.Api.WorkerController do
     do:
       {:invalid_request, Arbiter.Worker.Dispatch.worker_active_message(status, task_id),
        %{task_id: task_id}}
+
+  # bd-13pqcp: the ticket's provider constraint refused the resume's provider.
+  defp resume_error({:provider_constraint, provider, phrase}, task_id),
+    do:
+      {:conflict, "#{phrase} — resume refused; it never runs on an excluded provider",
+       %{task_id: task_id, provider: provider && to_string(provider)}}
 
   # bd-92mx1m: the task released its slot and the cap is full. A 409 — the
   # request is fine, the fleet's state refuses it — naming the cap and the

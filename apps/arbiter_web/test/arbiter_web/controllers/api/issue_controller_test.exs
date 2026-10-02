@@ -1278,4 +1278,67 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
       assert %{"error" => %{"type" => "not_found"}} = json_response(conn, 404)
     end
   end
+
+  # bd-13pqcp: the per-ticket provider constraint over REST.
+  describe "provider_constraint" do
+    test "POST /api/issues sets it, canonicalized, and PATCH changes and clears it", %{
+      conn: conn,
+      ws: ws
+    } do
+      created =
+        conn
+        |> post(~p"/api/issues", %{
+          title: "no agy here",
+          workspace_id: ws.id,
+          provider_constraint: %{exclude: ["agy"]}
+        })
+        |> json_response(201)
+
+      assert created["provider_constraint"] == %{"exclude" => ["gemini"]}
+
+      patched =
+        conn
+        |> patch(~p"/api/issues/#{created["id"]}", %{provider_constraint: %{require: "claude"}})
+        |> json_response(200)
+
+      assert patched["provider_constraint"] == %{"require" => ["claude"]}
+
+      cleared =
+        conn
+        |> patch(~p"/api/issues/#{created["id"]}", %{provider_constraint: %{}})
+        |> json_response(200)
+
+      assert cleared["provider_constraint"] == nil
+
+      shown = conn |> get(~p"/api/issues/#{created["id"]}") |> json_response(200)
+      assert shown["provider_constraint"] == nil
+    end
+
+    test "an unknown provider, or both keys, is a validation error", %{conn: conn, ws: ws} do
+      for constraint <- [
+            %{require: ["nope"]},
+            %{require: ["claude"], exclude: ["codex"]},
+            %{prefer: ["claude"]}
+          ] do
+        conn =
+          post(conn, ~p"/api/issues", %{
+            title: "bad constraint",
+            workspace_id: ws.id,
+            provider_constraint: constraint
+          })
+
+        assert json_response(conn, 422), inspect(constraint)
+      end
+    end
+
+    test "an unconstrained ticket reports null", %{conn: conn, ws: ws} do
+      created =
+        conn
+        |> post(~p"/api/issues", %{title: "plain", workspace_id: ws.id})
+        |> json_response(201)
+
+      assert Map.has_key?(created, "provider_constraint")
+      assert created["provider_constraint"] == nil
+    end
+  end
 end

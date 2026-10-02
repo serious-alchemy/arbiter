@@ -244,6 +244,40 @@ defmodule Arbiter.Board.AutopilotTest do
       refute_receive {:escalated, _, _, _}, 50
     end
 
+    # bd-13pqcp: a dispatch the ticket's provider constraint refused (a stale
+    # plan — the board holds such a card itself) is held briefly like a full
+    # account, and never pages.
+    test "a provider-constraint refusal holds briefly and never escalates" do
+      test = self()
+      {:ok, clock} = Agent.start_link(fn -> DateTime.utc_now() end)
+      phrase = "held — provider constraint (exclude gemini: no allowed provider has a free slot)"
+
+      pid =
+        start(
+          paused: false,
+          now: fn -> Agent.get(clock, & &1) end,
+          dispatch: fn id ->
+            send(test, {:dispatch_attempt, id})
+            {:error, {:provider_constraint, nil, phrase}}
+          end,
+          escalate: fn id, reason, attempts -> send(test, {:escalated, id, reason, attempts}) end
+        )
+
+      assert {:error, {:provider_constraint, nil, ^phrase}} = Autopilot.tick(pid)
+      assert_receive {:dispatch_attempt, "bd-1"}
+
+      assert {:held, "bd-1", held_until} = Autopilot.tick(pid)
+      assert DateTime.diff(held_until, Agent.get(clock, & &1), :second) in 1..60
+
+      for _ <- 1..5 do
+        Agent.update(clock, fn now -> DateTime.add(now, 120, :second) end)
+        Autopilot.tick(pid)
+        assert_receive {:dispatch_attempt, "bd-1"}
+      end
+
+      refute_receive {:escalated, _, _, _}, 50
+    end
+
     # A successful dispatch clears whatever failure history the card had, so
     # a later, unrelated failure gets its own fresh escalation rather than
     # being silently swallowed by a stale latch.

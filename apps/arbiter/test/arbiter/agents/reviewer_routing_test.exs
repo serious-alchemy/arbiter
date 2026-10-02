@@ -564,4 +564,36 @@ defmodule Arbiter.Agents.ReviewerRoutingTest do
       assert sel.fallback_reason =~ "no reviewer available"
     end
   end
+
+  # ---- bd-13pqcp: the implementer's provider constraint is not the reviewer's --
+
+  describe "a per-ticket provider constraint does not constrain the reviewer (bd-13pqcp)" do
+    test "require claude (the implementer's) still gets a Google reviewer — the cross-family rule decides" do
+      ws = workspace!(["claude", "gemini"])
+
+      task =
+        ws
+        |> task!("anthropic")
+        |> Ash.update!(%{provider_constraint: %{"require" => ["claude"]}})
+
+      assert task.provider_constraint == %{"require" => ["claude"]}
+
+      assert {:ok, sel} = ReviewerRouting.select(ws, task, opts())
+      assert sel.agent_type == "gemini"
+      assert sel.implementer_family == :anthropic
+      refute sel.same_family_fallback
+    end
+
+    test "exclude gemini (the implementer's) still lets gemini review" do
+      ws = workspace!(["claude", "gemini"])
+
+      task =
+        ws
+        |> task!("anthropic")
+        |> Ash.update!(%{provider_constraint: %{"exclude" => ["gemini"]}})
+
+      assert {:ok, sel} = ReviewerRouting.select(ws, task, opts())
+      assert sel.agent_type == "gemini"
+    end
+  end
 end
