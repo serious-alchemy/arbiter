@@ -303,7 +303,13 @@ defmodule Arbiter.Board.Snapshot do
     :attention_owner_since,
     :description,
     :acceptance,
-    :notes
+    :notes,
+    # bd-cut6uv: the ReviewGate's `ci_wait` marker lives in here, and a ticket
+    # waiting on CI releases its slot (`Arbiter.Tasks.SlotGate.holds_slot?/1`) and
+    # reads `awaiting_ci` on its card. The scheduler counts slots from the same
+    # rows, so it has to see the marker too. A small map (the round state, not
+    # the findings).
+    :review_gate_state
   ]
 
   @doc false
@@ -849,7 +855,13 @@ defmodule Arbiter.Board.Snapshot do
   # its column and wears the marker.
   defp with_view(card, views) do
     view = Map.get(views, card.id, %{})
-    Map.merge(card, %{step: Map.get(view, :step), attention: Map.get(view, :attention)})
+
+    Map.merge(card, %{
+      step: Map.get(view, :step),
+      attention: Map.get(view, :attention),
+      # bd-cut6uv: the head the ticket's ReviewGate is waiting on CI for, if any.
+      ci_wait: Map.get(view, :ci_wait)
+    })
   end
 
   # The Needs-attention swimlane (bd-79w1fs): every card on the board whose

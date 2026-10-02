@@ -357,10 +357,10 @@ defmodule Arbiter.Board.SnapshotLoadTest do
         description: "Some description touching lib/foo.ex",
         acceptance: "acceptance criteria",
         notes: "some notes",
+        review_gate_state: %{"branch" => "feature/x"},
         # Extra heavy fields that should not affect derive/1
         posted_findings: %{"findings" => ["huge", "data"]},
         settled_threads: ["t1", "t2"],
-        review_gate_state: %{"large" => "map"},
         verification_evidence: "huge evidence text",
         pr_body: "huge pr body content",
         qa_notes: "huge qa notes",

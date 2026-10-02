@@ -76,7 +76,11 @@ defmodule Arbiter.Test.StubMerger do
     Agent.get(@name, fn s -> Map.get(s, :submitted_reviews, []) end)
   end
 
-  @doc "Queue the sequence of `get/1` result maps returned for `ref`."
+  @doc """
+  Queue the sequence of `get/1` result maps returned for `ref`. An entry may be
+  a 0-arity function, called each time it is reached, returning a result map or
+  `{:error, reason}`.
+  """
   def queue_get(ref, results) when is_list(results) do
     ensure_started()
     Agent.update(@name, fn s -> put_in(s, [:gets, ref], results) end)
@@ -195,6 +199,11 @@ defmodule Arbiter.Test.StubMerger do
           [] -> {%{}, s}
         end
       end)
+
+    # A queued 0-arity function is called each time it is reached, so a test
+    # can answer from live state (e.g. the real tip of a bare origin branch)
+    # instead of a head it had to know up front (bd-cut6uv).
+    result = if is_function(result, 0), do: result.(), else: result
 
     # A queued `{:error, reason}` is returned verbatim, so a case can drive the
     # transport failures the real adapter surfaces (`%Mergers.Github.Error{kind:

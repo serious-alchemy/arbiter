@@ -25,6 +25,49 @@ defmodule Arbiter.Worker.ReviewVerification do
 
   def partial?(_), do: false
 
+  # The reason after `VERIFICATION: PARTIAL` (an em dash, hyphen or colon
+  # separates it; the line ends it).
+  @partial_line ~r/^\s*VERIFICATION:\s*PARTIAL\b[ \t]*[—–:-]*[ \t]*(.*)$/im
+
+  # A reason that names the full test suite (or "the tests" wholesale) as what
+  # was not run.
+  @full_suite_reason ~r/\b(test[ ]suite|the[ ]suite|full[ ]suite|mix[ ]test|tests)\b/i
+
+  # Words that mean the reviewer left SOMETHING ELSE unconfirmed, or tried and
+  # failed rather than chose not to run the suite. Any of them keeps the
+  # disclosure a real PARTIAL.
+  @other_gap_reason ~r/\b(build|compil\w*|dialyzer|credo|lint\w*|format\w*|precommit|sobelow|audit|migrat\w*|could ?n[o']?t|unable|cannot|can't|unverified|not verified|did ?n[o']?t verify|abandon\w*|timed[ -]?out|time[ -]?out|finding|criteri\w*|diff|file|line|behaviou?r)\b/i
+
+  @doc """
+  Whether EVERY `VERIFICATION: PARTIAL` disclosure in `findings` is only about
+  the full test suite not having been run (bd-cut6uv).
+
+  With CI green on the reviewed SHA the reviewer is told not to run the suite
+  (`Arbiter.Worker.ReviewCi.green_block/1`), and saying so is not a verification
+  gap — re-running the whole review for it cost ~20 reviews in 24h. The test is
+  deliberately narrow so it fails toward the re-prompt: the reason must name the
+  suite (or the tests) and must name nothing else the reviewer left unconfirmed
+  — no build, no lint, no finding, no "could not". A bare `PARTIAL` with no
+  reason, a reason about anything else, or one that mixes the suite with
+  another gap is NOT suite-only, and the caller treats it as partial.
+  """
+  @spec partial_only_full_suite?(String.t() | nil) :: boolean()
+  def partial_only_full_suite?(findings) when is_binary(findings) do
+    case Regex.scan(@partial_line, findings) do
+      [] -> false
+      lines -> Enum.all?(lines, fn [_, reason] -> suite_only_reason?(reason) end)
+    end
+  end
+
+  def partial_only_full_suite?(_), do: false
+
+  defp suite_only_reason?(reason) do
+    reason = String.trim(reason)
+
+    reason != "" and Regex.match?(@full_suite_reason, reason) and
+      not Regex.match?(@other_gap_reason, reason)
+  end
+
   @doc """
   Whether the findings text carries a per-criterion CRITERIA breakdown at all —
   i.e. at least one `- [MET] / [NOT MET] / [N/A]` line. Distinguishes "the

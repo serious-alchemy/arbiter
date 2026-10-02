@@ -47,12 +47,24 @@ defmodule Arbiter.Accounts.ConcurrencyTest do
         {:ok, _} = Registry.register(WorkerRegistry, key, nil)
         :ok = WorkerRegistry.put_dispatch(key, workspace_id, provider)
         send(test, {:registered, self()})
-        receive do: (:stop -> :ok)
+        fake_worker_loop(key, workspace_id, provider)
       end)
 
     assert_receive {:registered, ^pid}
     on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :kill) end)
     pid
+  end
+
+  defp fake_worker_loop(key, workspace_id, provider) do
+    receive do
+      :stop ->
+        :ok
+
+      {:rewrite, from, opts} ->
+        :ok = WorkerRegistry.put_dispatch(key, workspace_id, provider, opts)
+        send(from, {:rewritten, self()})
+        fake_worker_loop(key, workspace_id, provider)
+    end
   end
 
   defp kill!(pid) do
@@ -169,6 +181,34 @@ defmodule Arbiter.Accounts.ConcurrencyTest do
       fake_worker(ws.id, "claude", key: "bd-b:fixpass")
       # bd-a (1) + bd-b's two sub-workers (2); bd-b's parked primary is not counted.
       assert Concurrency.live_count(account) == 3
+    end
+
+    # bd-cut6uv: a worker whose ReviewGate is waiting on CI has no agent live and
+    # releases its hold on the account; it counts again when the wait ends.
+    test "a worker that released its hold is not counted until it takes it back" do
+      ws = workspace!("conc-released")
+      account = account!(:claude, "conc-released")
+      link!(ws, :claude, account)
+
+      pid = fake_worker(ws.id, "claude", key: "bd-released")
+      other = fake_worker(ws.id, "claude", key: "bd-held")
+      assert Concurrency.live_count(account) == 2
+
+      # `put_dispatch/4` rewrites the caller's own entry, so the worker does it.
+      rewrite = fn pid, opts ->
+        send(pid, {:rewrite, self(), opts})
+        assert_receive {:rewritten, ^pid}
+      end
+
+      rewrite.(pid, released: true)
+      assert Concurrency.live_count(account) == 1
+      assert Concurrency.holders(account) == ["bd-held"]
+      assert Concurrency.workspace_live_count(ws.id, "claude") == 1
+
+      rewrite.(pid, released: false)
+      assert Concurrency.live_count(account) == 2
+
+      _ = other
     end
 
     test "a task id that is a bare prefix of another is not its primary" do

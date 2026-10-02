@@ -306,9 +306,15 @@ defmodule Arbiter.Accounts.Concurrency do
     pending =
       Enum.reject(Admission.pending(), &MapSet.member?(counted, &1.registry_key))
 
-    without_parked_primaries(dispatches) ++ pending
+    counted = dispatches |> without_parked_primaries() |> Enum.reject(& &1.released)
+    counted ++ pending
   end
 
+  # A worker that released its hold (`Arbiter.Worker.Registry.put_dispatch/4`,
+  # `released: true`) is not counted: its ReviewGate is waiting for CI before it
+  # dispatches a reviewer (bd-cut6uv), so no agent is live for the ticket and the
+  # account is free for other work. It counts again the moment the wait ends.
+  #
   # A primary worker whose own sub-worker (`<task>:fixpass`, `<task>:conflict`,
   # `<task>#review…`) is live is parked on the review gate with no agent
   # process: `Worker.start/1` refuses a second *active* worker per task, and a

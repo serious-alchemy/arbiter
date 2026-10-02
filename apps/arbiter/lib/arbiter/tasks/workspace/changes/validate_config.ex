@@ -32,6 +32,9 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     * If `"routing.provider_selection"` is present, it must be one of
       `Arbiter.Agents.ProviderRouting.valid_selections/0` (`"failover"`,
       `"most_quota"`).
+    * If `"review.require_ci_green"` (or a per-repo
+      `"review.repos.<repo>.require_ci_green"`) is present, it must be a boolean
+      or `"true"` / `"false"` (bd-cut6uv).
     * If `"review_gate"` is present, it must be a map.
     * If `"review_gate.max_rounds"` is present, it must be a positive integer.
     * If `"review_gate.timeout_ms"` is present, it must be a positive integer.
@@ -87,6 +90,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     |> validate_cross_family(Map.get(config, "review_agent"))
     |> validate_routing(Map.get(config, "routing"))
     |> validate_review_gate(Map.get(config, "review_gate"))
+    |> validate_review(Map.get(config, "review"))
     |> validate_notes_gate(Map.get(config, "notes_gate"))
     |> validate_conductor(Map.get(config, "conductor"))
     |> validate_review_automation(Map.get(config, "review_automation"))
@@ -393,6 +397,53 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
               "routing.policy must be one of #{Enum.join(valid_policies, ", ")}; got: #{inspect(policy)}"
           )
         end
+    end
+  end
+
+  # bd-cut6uv: only `require_ci_green` is checked here; the rest of the `review`
+  # block (`required`, `rounds`) has always been read leniently.
+  defp validate_review(changeset, %{} = review) do
+    changeset
+    |> validate_boolean_setting(review, "require_ci_green", "review.require_ci_green")
+    |> validate_review_repos(Map.get(review, "repos"))
+  end
+
+  defp validate_review(changeset, _), do: changeset
+
+  defp validate_review_repos(changeset, %{} = repos) do
+    Enum.reduce(repos, changeset, fn
+      {repo, %{} = entry}, acc ->
+        validate_boolean_setting(
+          acc,
+          entry,
+          "require_ci_green",
+          "review.repos.#{repo}.require_ci_green"
+        )
+
+      {repo, _other}, acc ->
+        Changeset.add_error(acc, field: :config, message: "review.repos.#{repo} must be a map")
+    end)
+  end
+
+  defp validate_review_repos(changeset, nil), do: changeset
+
+  defp validate_review_repos(changeset, _) do
+    Changeset.add_error(changeset, field: :config, message: "review.repos must be a map")
+  end
+
+  defp validate_boolean_setting(changeset, map, key, label) do
+    case Map.fetch(map, key) do
+      :error ->
+        changeset
+
+      {:ok, v} when is_boolean(v) or v in ["true", "false"] ->
+        changeset
+
+      {:ok, v} ->
+        Changeset.add_error(changeset,
+          field: :config,
+          message: "#{label} must be true or false; got: #{inspect(v)}"
+        )
     end
   end
 

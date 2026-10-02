@@ -603,6 +603,47 @@ defmodule Arbiter.Tasks.WorkspaceTest do
     end
   end
 
+  describe "review.require_ci_green validation (bd-cut6uv)" do
+    test "accepts booleans and their JSON strings, workspace-wide and per repo" do
+      for value <- [true, false, "true", "false"] do
+        assert {:ok, _} =
+                 Ash.create(Workspace, %{
+                   name: "rcg-ok-#{System.unique_integer([:positive])}",
+                   config: %{
+                     "review" => %{
+                       "require_ci_green" => value,
+                       "repos" => %{"mesaana" => %{"require_ci_green" => value}}
+                     }
+                   }
+                 })
+      end
+    end
+
+    test "rejects anything else, naming the key" do
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{
+                 name: "rcg-bad1",
+                 config: %{"review" => %{"require_ci_green" => "yes"}}
+               })
+
+      assert Exception.message(err) =~ "review.require_ci_green must be true or false"
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{
+                 name: "rcg-bad2",
+                 config: %{"review" => %{"repos" => %{"mesaana" => %{"require_ci_green" => 1}}}}
+               })
+
+      assert Exception.message(err) =~ "review.repos.mesaana.require_ci_green"
+
+      assert {:error, %Ash.Error.Invalid{}} =
+               Ash.create(Workspace, %{
+                 name: "rcg-bad3",
+                 config: %{"review" => %{"repos" => "mesaana"}}
+               })
+    end
+  end
+
   describe "review_gate_max_fix_rounds/1 (bd-a9zb7w)" do
     test "returns integer when set as integer" do
       {:ok, ws} =
