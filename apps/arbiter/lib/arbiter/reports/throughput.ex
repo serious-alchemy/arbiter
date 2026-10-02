@@ -27,6 +27,7 @@ defmodule Arbiter.Reports.Throughput do
 
   require Ash.Query
 
+  alias Arbiter.Reports.Epics
   alias Arbiter.Tasks.Issue
 
   @weights %{0 => 0.5, 1 => 1, 2 => 2, 3 => 3, 4 => 4}
@@ -84,6 +85,9 @@ defmodule Arbiter.Reports.Throughput do
 
       {"difficulty", d}, q ->
         Ash.Query.filter(q, difficulty == ^String.to_integer(d))
+
+      {"epic", epic}, q ->
+        Ash.Query.filter(q, id in ^Epics.child_ids(epic))
 
       {"range", "all"}, q ->
         q

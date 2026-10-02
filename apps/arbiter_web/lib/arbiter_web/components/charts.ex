@@ -9,8 +9,8 @@ defmodule ArbiterWeb.Charts do
   Data contract: a list of points per series.
 
     * `bar/1`, `area/1`, `step_line/1` — `%{key: term, label: String.t(), value: number}`
-    * `stacked_bar/1` — `%{key:, label:, values: %{series_key => number}}` plus `series`,
-      a list of `%{key:, label:}`
+    * `stacked_bar/1`, `stacked_area/1` — `%{key:, label:, values: %{series_key => number}}`
+      plus `series`, a list of `%{key:, label:}` (stacked bottom-up in list order)
     * `histogram/1` — `%{from: number, to: number, count: number}`
 
   An empty point list renders an `data-empty` placeholder, never a blank axis.
@@ -181,6 +181,112 @@ defmodule ArbiterWeb.Charts do
     <.legend :if={@n > 0} id={"#{@id}-legend"} series={@series} />
     """
   end
+
+  # ---- stacked area ----
+
+  attr :id, :string, required: true
+  attr :points, :list, required: true
+  attr :series, :list, required: true
+  attr :title, :string, required: true
+  attr :empty, :string, default: "No data for these filters."
+
+  def stacked_area(assigns) do
+    n = length(assigns.points)
+    totals = Enum.map(assigns.points, fn p -> p.values |> Map.values() |> Enum.sum() end)
+    max = max_of(totals)
+
+    # `tops[i]` is the running total after each series, bottom-up, so band `s`
+    # lies between `tops[s - 1]` and `tops[s]` at every point.
+    tops =
+      Enum.map(assigns.points, fn p ->
+        assigns.series
+        |> Enum.scan(0, fn s, acc -> acc + Map.get(p.values, s.key, 0) end)
+      end)
+
+    bands =
+      assigns.series
+      |> Enum.with_index()
+      |> Enum.map(fn {s, si} ->
+        upper =
+          tops
+          |> Enum.with_index()
+          |> Enum.map(fn {t, i} -> {label_x(i, n), y_at(t, si, max)} end)
+
+        lower =
+          tops
+          |> Enum.with_index()
+          |> Enum.map(fn {t, i} -> {label_x(i, n), y_at(t, si - 1, max)} end)
+
+        %{
+          key: s.key,
+          label: s.label,
+          color: series_color(si),
+          d: "M" <> polyline_xy(upper) <> " L" <> polyline_xy(Enum.reverse(lower)) <> " Z"
+        }
+      end)
+
+    columns =
+      assigns.points
+      |> Enum.with_index()
+      |> Enum.map(fn {p, i} ->
+        {x, w} = column(i, n)
+
+        %{
+          key: p.key,
+          x: x,
+          w: w,
+          total: Enum.at(totals, i),
+          title:
+            "#{p.label}: " <>
+              Enum.map_join(assigns.series, ", ", &"#{&1.label} #{Map.get(p.values, &1.key, 0)}"),
+          attrs: Map.new(assigns.series, &{"data-series-#{&1.key}", Map.get(p.values, &1.key, 0)})
+        }
+      end)
+
+    assigns =
+      assign(assigns, bands: bands, columns: columns, max: max, n: n, plot_h: plot_h(), top: @top)
+
+    ~H"""
+    <.frame id={@id} kind="stacked_area" title={@title} empty={@empty} n={@n} max={@max}>
+      <path
+        :for={b <- @bands}
+        data-role="band"
+        data-series={b.key}
+        d={b.d}
+        fill={b.color}
+        fill-opacity="0.85"
+        stroke={b.color}
+        stroke-width="1"
+      >
+        <title>{b.label}</title>
+      </path>
+      <rect
+        :for={c <- @columns}
+        data-role="column"
+        data-key={c.key}
+        data-total={c.total}
+        {c.attrs}
+        x={c.x}
+        y={@top}
+        width={c.w}
+        height={@plot_h}
+        fill="transparent"
+        class="arb-chart-mark"
+      >
+        <title>{c.title}</title>
+      </rect>
+      <.x_labels points={@points} />
+    </.frame>
+    <.legend :if={@n > 0} id={"#{@id}-legend"} series={@series} />
+    """
+  end
+
+  # Height of the stack after series `si` (-1 = the baseline).
+  defp y_at(_tops, -1, _max), do: @top + plot_h()
+  defp y_at(tops, si, max), do: @top + plot_h() - scale(Enum.at(tops, si), max)
+
+  defp polyline_xy(coords),
+    do: Enum.map_join(coords, " L", fn {x, y} -> "#{fmt(x)},#{fmt(y)}" end)
 
   # ---- area ----
 
@@ -453,7 +559,8 @@ defmodule ArbiterWeb.Charts do
   defp label_every(n), do: max(ceil(n / 12), 1)
 
   defp max_of(values), do: values |> Enum.max(fn -> 0 end) |> max(0) |> nonzero()
-  defp nonzero(0), do: 1
+  # `0.0` too: an all-zero float series (dwell medians) must not divide by zero.
+  defp nonzero(v) when v == 0, do: 1
   defp nonzero(v), do: v
 
   defp scale(v, max), do: v / max * plot_h()
