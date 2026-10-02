@@ -463,6 +463,61 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       assert Ash.get!(Issue, task.id).repo == nil
     end
 
+    # bd-13pqcp: the per-ticket provider constraint, set and cleared from the page.
+    test "the edit modal sets, shows and clears the provider constraint", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "constrain me", workspace_id: ws.id})
+
+      {:ok, view, html} = live_task(conn, ~p"/tasks/#{task.id}")
+      refute html =~ ~s(id="task-provider-constraint")
+
+      view |> element(~s(button[phx-click="open_edit"])) |> render_click()
+
+      html =
+        view
+        |> form("#task-edit-form", %{
+          "task" => %{
+            "title" => "constrain me",
+            "provider_mode" => "exclude",
+            "provider_list" => "agy, codex"
+          }
+        })
+        |> render_submit()
+
+      assert Ash.get!(Issue, task.id).provider_constraint == %{"exclude" => ["gemini", "codex"]}
+      assert html =~ ~s(id="task-provider-constraint")
+      assert has_element?(view, "#task-provider-constraint", "exclude gemini, codex")
+
+      # The modal opens on what is stored, and "no constraint" clears it.
+      view |> element(~s(button[phx-click="open_edit"])) |> render_click()
+      assert has_element?(view, ~s(#task-edit-form select[name="task[provider_mode]"]))
+      assert has_element?(view, ~s(#task-edit-form input[name="task[provider_list]"]))
+
+      view
+      |> form("#task-edit-form", %{"task" => %{"provider_mode" => "", "provider_list" => ""}})
+      |> render_submit()
+
+      assert Ash.get!(Issue, task.id).provider_constraint == nil
+      refute has_element?(view, "#task-provider-constraint")
+    end
+
+    test "an unknown provider is refused and the modal stays open", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "keep-constraint", workspace_id: ws.id})
+
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
+      view |> element(~s(button[phx-click="open_edit"])) |> render_click()
+
+      html =
+        view
+        |> form("#task-edit-form", %{
+          "task" => %{"provider_mode" => "require", "provider_list" => "nope"}
+        })
+        |> render_submit()
+
+      assert html =~ "unknown provider"
+      assert html =~ ~s(id="task-edit-modal")
+      assert Ash.get!(Issue, task.id).provider_constraint == nil
+    end
+
     test "a blank title is refused and the modal stays open", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "keep-me", workspace_id: ws.id})
 

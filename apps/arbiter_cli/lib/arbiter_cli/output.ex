@@ -219,6 +219,7 @@ defmodule ArbiterCli.Output do
         {"Current run", current_run_label(issue["current_run"])},
         {"Priority", issue["priority"]},
         {"Difficulty", difficulty_label(issue["difficulty"])},
+        {"Providers", provider_constraint_label(issue["provider_constraint"])},
         {"Estimate", estimate_label(issue["estimate"])},
         {"Type", issue["issue_type"]},
         {"Backlog", backlog_label(issue)},
@@ -313,6 +314,16 @@ defmodule ArbiterCli.Output do
 
   defp money(n) when is_number(n), do: "$" <> :erlang.float_to_binary(n / 1, decimals: 2)
   defp money(_), do: "?"
+
+  # bd-13pqcp: the ticket's provider constraint, as `require claude` /
+  # `exclude gemini, codex`; nothing when it has none.
+  defp provider_constraint_label(%{"require" => [_ | _] = list}),
+    do: "require " <> Enum.join(list, ", ")
+
+  defp provider_constraint_label(%{"exclude" => [_ | _] = list}),
+    do: "exclude " <> Enum.join(list, ", ")
+
+  defp provider_constraint_label(_), do: nil
 
   defp difficulty_label(nil), do: nil
   defp difficulty_label(n) when is_integer(n) and n in 0..5, do: "D#{n}"

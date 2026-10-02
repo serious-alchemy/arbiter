@@ -97,6 +97,8 @@ defmodule ArbiterWeb.Api.IssueJSON do
       issue_type: to_string_atom(issue.issue_type),
       auto_close: issue.auto_close,
       verify_after_deploy: issue.verify_after_deploy,
+      # bd-13pqcp: `%{"require" => [..]}` / `%{"exclude" => [..]}`, or null.
+      provider_constraint: issue.provider_constraint,
       awaiting_verification_at: iso(issue.awaiting_verification_at),
       verification_outcome: to_string_atom(issue.verification_outcome),
       verification_evidence: issue.verification_evidence,

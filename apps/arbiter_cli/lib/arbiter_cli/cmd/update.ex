@@ -79,6 +79,14 @@ defmodule ArbiterCli.Cmd.Update do
   it, and the coordinator restarts and observes the new path before recording
   the result with `arb ticket verify`.
 
+  `--require-provider <p>` / `--exclude-provider <p>` (bd-13pqcp) constrain where
+  the ticket's implementer may run — only those providers, or anything but those
+  (repeatable, comma lists; `claude`, `gemini`, `codex`, `agy` = `gemini`) — and
+  `--clear-provider-constraint` drops it. A ticket carries one of the two. Every
+  dispatch path honours it (Autopilot, routing, failover, resume, fix and
+  conflict passes); with no allowed provider free the ticket is held, never run
+  on an excluded one. The reviewer is not constrained. Coordinator/operator only.
+
   `--resume-review` clears a ReviewPatrol engagement's per-engagement circuit
   breaker (`circuit_breaker_tripped` + `circuit_breaker_reason`, bd-1atwts),
   letting the engagement post again after a coordinator has adjudicated a
@@ -104,6 +112,7 @@ defmodule ArbiterCli.Cmd.Update do
 
   alias ArbiterCli.ArgParser
   alias ArbiterCli.{Client, Cmd.Doctor, Cmd.Migrate, Cmd.Restart, Cmd.Start, Output}
+  alias ArbiterCli.ProviderConstraintFlags
   alias ArbiterCli.Cmd.Update.{Formatter, Git}
 
   # The branch `arb update` fast-forwards. Matches the repo's integration
@@ -131,6 +140,9 @@ defmodule ArbiterCli.Cmd.Update do
     verify_after_deploy: :boolean,
     json: :boolean
   ]
+
+  # bd-13pqcp: `--require-provider` / `--exclude-provider` / `--clear-provider-constraint`.
+  @all_edit_switches @edit_switches ++ ProviderConstraintFlags.switches()
 
   @deploy_switches [json: :boolean, timeout: :integer, force: :boolean]
 
@@ -286,7 +298,7 @@ defmodule ArbiterCli.Cmd.Update do
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp do_edit_issue(argv) do
     refuse_status_flag!(argv)
-    {opts, rest, mode} = ArgParser.parse(argv, switches: @edit_switches)
+    {opts, rest, mode} = ArgParser.parse(argv, switches: @all_edit_switches)
 
     id =
       case rest do
@@ -321,6 +333,7 @@ defmodule ArbiterCli.Cmd.Update do
       |> maybe_append_notes(opts[:append_notes], existing)
       |> maybe_resume_review(opts[:resume_review])
       |> put_bool_if("verify_after_deploy", opts[:verify_after_deploy])
+      |> Map.merge(ProviderConstraintFlags.payload(opts))
 
     if map_size(payload) == 0 and is_nil(opts[:assignee]) do
       Output.die(

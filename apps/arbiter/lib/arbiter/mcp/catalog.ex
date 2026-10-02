@@ -435,6 +435,24 @@ defmodule Arbiter.MCP.Catalog do
                 "path) — the class that merges green and is found broken hours later. " <>
                 "Default false."
           },
+          "provider_constraint" => %{
+            "type" => ["object", "null"],
+            "description" =>
+              "Where this ticket's IMPLEMENTER may run (bd-13pqcp): `{\"require\": [\"claude\"]}` " <>
+                "(only those providers) or `{\"exclude\": [\"gemini\"]}` (anything but those) — " <>
+                "one key, never both. Providers are adapter types (claude, gemini, codex); " <>
+                "`agy` is accepted as `gemini`, the adapter that runs it. Honoured by every " <>
+                "dispatch path (Autopilot, routing, failover, resume, fix and conflict passes); " <>
+                "when no allowed provider has capacity the ticket is held — " <>
+                "`held — provider constraint (<detail>)` — and never falls back to an excluded " <>
+                "provider. The reviewer is not constrained. Pass `null` or `{}` to clear. " <>
+                "Coordinator only.",
+            "properties" => %{
+              "require" => %{"type" => "array", "items" => %{"type" => "string"}},
+              "exclude" => %{"type" => "array", "items" => %{"type" => "string"}}
+            },
+            "additionalProperties" => false
+          },
           "assignee" => %{
             "type" => "string",
             "description" =>
@@ -520,6 +538,24 @@ defmodule Arbiter.MCP.Catalog do
                 "long-lived server (env/config plumbing, a doctor probe, a capture/ingest " <>
                 "path) — the class that merges green and is found broken hours later. " <>
                 "Default false."
+          },
+          "provider_constraint" => %{
+            "type" => ["object", "null"],
+            "description" =>
+              "Where this ticket's IMPLEMENTER may run (bd-13pqcp): `{\"require\": [\"claude\"]}` " <>
+                "(only those providers) or `{\"exclude\": [\"gemini\"]}` (anything but those) — " <>
+                "one key, never both. Providers are adapter types (claude, gemini, codex); " <>
+                "`agy` is accepted as `gemini`, the adapter that runs it. Honoured by every " <>
+                "dispatch path (Autopilot, routing, failover, resume, fix and conflict passes); " <>
+                "when no allowed provider has capacity the ticket is held — " <>
+                "`held — provider constraint (<detail>)` — and never falls back to an excluded " <>
+                "provider. The reviewer is not constrained. Pass `null` or `{}` to clear. " <>
+                "Coordinator only.",
+            "properties" => %{
+              "require" => %{"type" => "array", "items" => %{"type" => "string"}},
+              "exclude" => %{"type" => "array", "items" => %{"type" => "string"}}
+            },
+            "additionalProperties" => false
           },
           "assignee" => %{
             "type" => "string",

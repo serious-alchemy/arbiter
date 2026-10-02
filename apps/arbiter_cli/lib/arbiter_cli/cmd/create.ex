@@ -131,6 +131,18 @@ defmodule ArbiterCli.Cmd.Create do
   so a newly created task lands in Backlog and cannot be dispatched in the
   window before its edges land.
 
+  ## --require-provider / --exclude-provider (bd-13pqcp)
+
+  Constrain where the ticket's implementer may run: `--require-provider claude`
+  (only that provider) or `--exclude-provider agy` (anything but). Both repeat
+  and take comma lists; providers are adapter types (`claude`, `gemini`,
+  `codex`), and `agy` means `gemini`. A ticket carries one of the two, never
+  both. Honoured by every dispatch path (Autopilot, routing, failover, resume,
+  fix and conflict passes): when no allowed provider has capacity the ticket is
+  held (`held — provider constraint (...)`) and never falls back to an excluded
+  one. The reviewer is not constrained. Coordinator/operator only — a worker
+  token is refused.
+
   `--labels` is accepted for interface parity with `bd` but the current Issue
   resource has no `labels` field; the value is reported back in a warning
   unless `--json` is set. The `labels` field is not yet part of the Issue resource.
@@ -142,7 +154,7 @@ defmodule ArbiterCli.Cmd.Create do
   passes it doesn't break.
   """
 
-  alias ArbiterCli.{Client, Output, Workspace}
+  alias ArbiterCli.{Client, Output, ProviderConstraintFlags, Workspace}
 
   @switches [
     description: :string,
@@ -167,6 +179,9 @@ defmodule ArbiterCli.Cmd.Create do
     json: :boolean
   ]
 
+  # bd-13pqcp: `--require-provider` / `--exclude-provider` (repeatable).
+  @all_switches @switches ++ ProviderConstraintFlags.switches()
+
   # Pre-existing complexity 12 — baselined when bd-4x2yhq first
   # wired Credo up. Thresholds stay at the tool's own default so new
   # code is held to it; see the note in .credo.exs.
@@ -175,7 +190,7 @@ defmodule ArbiterCli.Cmd.Create do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      {opts, rest, _invalid} = OptionParser.parse(argv, switches: @switches)
+      {opts, rest, _invalid} = OptionParser.parse(argv, switches: @all_switches)
       mode = if opts[:json], do: :json, else: :text
 
       title =
@@ -211,6 +226,8 @@ defmodule ArbiterCli.Cmd.Create do
     ignored =
       [
         {"--difficulty", opts[:difficulty]},
+        {"--require-provider", opts[:require_provider]},
+        {"--exclude-provider", opts[:exclude_provider]},
         {"--deps", opts[:deps]},
         {"--parent", opts[:parent]},
         {"--tracker-ref", opts[:tracker_ref]},
@@ -246,6 +263,8 @@ defmodule ArbiterCli.Cmd.Create do
   end
 
   defp run_task_create(opts, _rest, title, skip_upstream?, mode) do
+    # Refuse contradictory provider flags before any request.
+    constraint = ProviderConstraintFlags.payload(opts)
     workspace_id = Workspace.id_or_halt()
     force? = opts[:force] == true
 
@@ -268,6 +287,7 @@ defmodule ArbiterCli.Cmd.Create do
       |> maybe_put_flag("verify_after_deploy", opts[:verify_after_deploy] == true)
       |> maybe_put_flag("skip_upstream_create", skip_upstream?)
       |> maybe_put_flag("force", force?)
+      |> Map.merge(constraint)
 
     if opts[:labels] && mode == :text do
       IO.puts(
