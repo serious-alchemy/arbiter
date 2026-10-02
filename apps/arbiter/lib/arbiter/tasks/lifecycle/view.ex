@@ -80,8 +80,8 @@ defmodule Arbiter.Tasks.Lifecycle.View do
   alias Arbiter.Worker
   alias Arbiter.Worker.Phase
   alias Arbiter.Worker.ReviewCi
-  alias Arbiter.Workflows.DispatchQueue
   alias Arbiter.Worker.Watchdog
+  alias Arbiter.Workflows.DispatchQueue
 
   @type column ::
           :backlog | :blocked | :ready | :in_progress | :merging | :verifying | :closed
