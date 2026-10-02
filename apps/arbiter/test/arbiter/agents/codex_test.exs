@@ -438,6 +438,148 @@ defmodule Arbiter.Agents.CodexTest do
     end
   end
 
+  # G12 (bd-yoiv39): Codex ignores the reviewer's Edit/Write deny list, so a
+  # review dispatch under :bypass could write to the branch. The reviewer runs
+  # inside Jail's bwrap jail with the worktree --ro-bind (network stays shared
+  # for `gh`) instead of `-s read-only`, which would cut the network.
+  describe "read-only reviewer jail (G12)" do
+    setup do
+      base =
+        Path.join(
+          System.tmp_dir!(),
+          "codex-jail-#{System.pid()}-#{System.unique_integer([:positive])}"
+        )
+
+      bin = Path.join(base, "bin")
+      worktree = Path.join(base, "wt")
+      codex_home = Path.join(base, "codex-home")
+      File.mkdir_p!(bin)
+      File.mkdir_p!(worktree)
+
+      for name <- ~w(codex bwrap) do
+        File.write!(Path.join(bin, name), "#!/bin/sh\nexit 0\n")
+        File.chmod!(Path.join(bin, name), 0o755)
+      end
+
+      keys = ~w(worker_jail_available worker_jail_bwrap codex_model_catalog)a
+      prev = Map.new(keys, &{&1, Application.get_env(:arbiter, &1)})
+      old_path = System.get_env("PATH")
+
+      Application.put_env(:arbiter, :worker_jail_available, true)
+      Application.put_env(:arbiter, :worker_jail_bwrap, Path.join(bin, "bwrap"))
+      Application.put_env(:arbiter, :codex_model_catalog, codex_home: codex_home)
+      System.put_env("PATH", bin)
+
+      on_exit(fn ->
+        System.put_env("PATH", old_path)
+        Enum.each(prev, fn {k, v} -> restore_env(k, v) end)
+        File.rm_rf!(base)
+      end)
+
+      {:ok, worktree: worktree, codex: Path.join(bin, "codex"), codex_home: codex_home}
+    end
+
+    defp review_policy(mode),
+      do:
+        SecurityPolicy.merge(SecurityPolicy.base(), %{
+          permissions: %{mode: mode, deny: ["Edit", "Write", "NotebookEdit"]}
+        })
+
+    test "a :bypass review dispatch runs jailed with the worktree read-only", ctx do
+      assert {:ok, argv} =
+               Codex.default_argv("review it",
+                 security: review_policy(:bypass),
+                 worktree_path: ctx.worktree
+               )
+
+      assert hd(argv) =~ "bwrap"
+      assert chunk_after(argv, "--ro-bind") == "/"
+
+      assert Enum.chunk_every(argv, 3, 1, :discard)
+             |> Enum.member?(["--ro-bind", ctx.worktree, ctx.worktree])
+
+      refute Enum.chunk_every(argv, 3, 1, :discard)
+             |> Enum.member?(["--bind", ctx.worktree, ctx.worktree])
+
+      # CODEX_HOME stays writable so the CLI can persist its session/auth.
+      assert Enum.chunk_every(argv, 3, 1, :discard)
+             |> Enum.member?(["--bind-try", ctx.codex_home, ctx.codex_home])
+
+      # Network is NOT unshared: the reviewer needs `gh`.
+      refute "--unshare-net" in argv
+      assert ["--", "sh", "-c", _, "sh", codex, "exec" | _] = tail_from_dashes(argv)
+      assert codex == ctx.codex
+      assert "--dangerously-bypass-approvals-and-sandbox" in argv
+      assert List.last(argv) == "review it"
+    end
+
+    test "a :auto review dispatch is jailed too", ctx do
+      assert {:ok, argv} =
+               Codex.default_argv("p",
+                 security: review_policy(:auto),
+                 worktree_path: ctx.worktree
+               )
+
+      assert hd(argv) =~ "bwrap"
+    end
+
+    test "an implementer (no Write deny) is not jailed", ctx do
+      bypass = SecurityPolicy.merge(SecurityPolicy.base(), %{permissions: %{mode: :bypass}})
+
+      assert {:ok, ["sh", "-c", _, "sh", _codex, "exec" | _]} =
+               Codex.default_argv("p", security: bypass, worktree_path: ctx.worktree)
+    end
+
+    test "a review dispatch with no worktree is not jailed" do
+      assert {:ok, ["sh" | _]} = Codex.default_argv("p", security: review_policy(:bypass))
+    end
+
+    test "a host that can't jail falls back to the unjailed argv", ctx do
+      Application.put_env(:arbiter, :worker_jail_available, false)
+
+      assert {:ok, ["sh", "-c", _, "sh", _codex, "exec" | _]} =
+               Codex.default_argv("p",
+                 security: review_policy(:bypass),
+                 worktree_path: ctx.worktree
+               )
+    end
+
+    test "an oversize prompt's tmpfile is reachable inside the jail and found by prompt_tmpfile/1",
+         ctx do
+      big = String.duplicate("x", 140_000)
+
+      assert {:ok, argv} =
+               Codex.default_argv(big,
+                 security: review_policy(:bypass),
+                 worktree_path: ctx.worktree
+               )
+
+      tmp = Codex.prompt_tmpfile(argv)
+      assert is_binary(tmp)
+      assert Enum.chunk_every(argv, 3, 1, :discard) |> Enum.member?(["--bind-try", tmp, tmp])
+      File.rm(tmp)
+    end
+
+    test "splice_prompt/2 splices after codex's `--`, not bwrap's", ctx do
+      assert {:ok, argv} =
+               Codex.default_argv("old",
+                 security: review_policy(:bypass),
+                 worktree_path: ctx.worktree
+               )
+
+      assert {:ok, spliced} = Codex.splice_prompt(argv, ["nudge"])
+      assert hd(spliced) =~ "bwrap"
+      assert List.last(spliced) == "nudge"
+      refute "old" in spliced
+
+      assert {:ok, resumed} = Codex.splice_prompt(argv, ["--resume", "sess-1", "go"])
+      assert Enum.take(Enum.drop_while(resumed, &(&1 != "exec")), 2) == ["exec", "resume"]
+      assert Enum.take(resumed, -2) == ["sess-1", "go"]
+    end
+
+    defp tail_from_dashes(argv), do: Enum.drop_while(argv, &(&1 != "--"))
+  end
+
   describe "prompt_tmpfile/1 and splice_prompt/2" do
     test "prompt_tmpfile/1 extracts the temp file path for stdin-mode argv" do
       argv = [
