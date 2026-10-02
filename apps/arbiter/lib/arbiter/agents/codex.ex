@@ -69,8 +69,8 @@ defmodule Arbiter.Agents.Codex do
   @behaviour Arbiter.Agents.Agent
 
   alias Arbiter.Agents.Codex.Config
-  alias Arbiter.Agents.Codex.Stream
   alias Arbiter.Agents.Codex.ModelCatalog
+  alias Arbiter.Agents.Codex.Stream
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Worker.Jail
   alias Arbiter.Worker.StopReason
