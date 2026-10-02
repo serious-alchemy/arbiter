@@ -212,8 +212,12 @@ defmodule Arbiter.Worker.Egress.SelfTest do
            ),
          :ok <- :gen_tcp.send(sock, "CONNECT #{authority} HTTP/1.1\r\nHost: #{authority}\r\n\r\n") do
       case read_head(sock, "") do
-        {:ok, head, rest} -> {status(head), sock, rest}
-        {:error, reason} -> :gen_tcp.close(sock) && {:error, reason}
+        {:ok, head, rest} ->
+          {status(head), sock, rest}
+
+        {:error, reason} ->
+          :gen_tcp.close(sock)
+          {:error, reason}
       end
     end
   end
