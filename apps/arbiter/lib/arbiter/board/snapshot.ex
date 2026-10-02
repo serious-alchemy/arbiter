@@ -35,9 +35,10 @@ defmodule Arbiter.Board.Snapshot do
     * **Closed · last 24h** — `:closed` tickets closed in the last 24 hours
       (rolling window, keyed on `closed_at`), each with its `close_reason`.
 
-  Backlog, Blocked and Ready are in manual order: priority, then the persisted
-  `rank`, then age (`Scheduler.order/1`) — the order Autopilot dispatches
-  Ready in. In progress, Merging and Verifying are longest-wait first; Closed
+  Backlog, Blocked and Ready are in one order, `Scheduler.order/1`'s: effective
+  priority (own priority lifted by an epic's floor), pinned, finish-first
+  class, open leaves, own priority, the persisted `rank`, then age — the order
+  Autopilot dispatches Ready in (`docs/design/epic-aware-scheduling.md` §4). In progress, Merging and Verifying are longest-wait first; Closed
   is newest-closed first.
 
   Every card carries the ticket's computed `step` (In progress and Merging;
@@ -75,6 +76,8 @@ defmodule Arbiter.Board.Snapshot do
   alias Arbiter.Agents.ProviderConstraint
   alias Arbiter.Agents.ProviderRouting
   alias Arbiter.Board.FileScope
+  alias Arbiter.Board.QueueOrder
+  alias Arbiter.Board.ReadySince
   alias Arbiter.Board.Scheduler
   alias Arbiter.Tasks.EdgeGate
   alias Arbiter.Tasks.Lifecycle
@@ -151,9 +154,15 @@ defmodule Arbiter.Board.Snapshot do
   `:now`, `:slots_total`, `:quota` and `:paused`. Every key has a sane
   default, so a caller may pass only what it has.
 
-  The Ready queue is in `Arbiter.Board.Scheduler.order/1`'s order — priority,
-  then the persisted `rank`, then age (bd-asxw4e) — the same order Autopilot
-  dispatches in.
+  The epic-aware order (ES3) also reads `:scheduling` (the
+  `Arbiter.Board.QueueOrder.settings/1` overrides: `:epic_floors_enabled`,
+  `:max_lifted_in_flight`, `:finish_first`, `:finish_first_max_wait_hours`) and
+  `:ready_since` (`Arbiter.Board.ReadySince`, id → when it became Ready). With
+  neither, no floor set and finish-first off, the order is today's.
+
+  The Ready queue is in `Arbiter.Board.Scheduler.order/1`'s order — effective
+  priority first, then the tiebreaks down to `rank` and age (bd-asxw4e) — the
+  same order Autopilot dispatches in.
   """
   @spec derive(map()) :: t()
   def derive(input) when is_map(input) do
@@ -187,6 +196,20 @@ defmodule Arbiter.Board.Snapshot do
     issues_by_id = Map.new(issues, &{&1.id, &1})
     # Edge endpoints outside `issues` (long-closed): resolve parent chips only.
     ref_by_id = Map.new(Map.get(input, :ref_issues, []), &{&1.id, &1})
+
+    # ES3: what the order key reads beyond a card's own fields — epic floors,
+    # the finish-first class, the lift cap. Resolved once over every ticket
+    # the edges reach, long-closed ones included.
+    order_ctx =
+      QueueOrder.build(
+        Map.values(Map.merge(ref_by_id, issues_by_id)),
+        parent_of,
+        slots_total,
+        Map.get(input, :scheduling),
+        Map.get(input, :ready_since),
+        now
+      )
+
     parents = parent_refs(parent_of, Map.merge(ref_by_id, issues_by_id))
 
     {authors, gate_workers} =
@@ -229,7 +252,7 @@ defmodule Arbiter.Board.Snapshot do
     # by its dependencies, which `Scheduler.plan/1` would skip over anyway.
     plan =
       Scheduler.plan(%{
-        ready: ready_cards(issues, columns, conflicts),
+        ready: ready_cards(issues, columns, conflicts, order_ctx),
         running: in_flight(authors, issues_by_id, changed),
         conflict_claims: conflict_claims(authors, gate_workers, issues, worked, now),
         slots_free: slots_free,
@@ -247,8 +270,8 @@ defmodule Arbiter.Board.Snapshot do
     end
 
     board = %{
-      backlog: issues |> backlog_cards(columns) |> decorate.(over_budget),
-      blocked: issues |> blocked_cards(columns, views) |> decorate.(over_budget),
+      backlog: issues |> backlog_cards(columns, order_ctx) |> decorate.(over_budget),
+      blocked: issues |> blocked_cards(columns, views, order_ctx) |> decorate.(over_budget),
       ready:
         Enum.map(plan.entries, fn entry ->
           %{entry | card: with_view(entry.card, views)}
@@ -282,6 +305,7 @@ defmodule Arbiter.Board.Snapshot do
     :title,
     :priority,
     :rank,
+    :floor_priority,
     :state,
     :difficulty,
     :issue_type,
@@ -362,6 +386,9 @@ defmodule Arbiter.Board.Snapshot do
     # hold (bd-3fvue3), so a pass reads each candidate's quota and headroom once.
     routing_opts = routing_opts(workspace, opts)
 
+    scheduling =
+      QueueOrder.settings(Keyword.get_lazy(opts, :scheduling, &Arbiter.Settings.scheduling/0))
+
     derive(%{
       issues: issues,
       workers: workers,
@@ -371,6 +398,8 @@ defmodule Arbiter.Board.Snapshot do
       parent_of: Keyword.get_lazy(opts, :parent_of, fn -> parent_of_from(deps) end),
       conflicts_with:
         Keyword.get_lazy(opts, :conflicts_with, fn -> EdgeGate.conflict_pairs(deps) end),
+      scheduling: scheduling,
+      ready_since: ready_since(opts, scheduling, issues, ref_issues, deps),
       changed_files: Keyword.get(opts, :changed_files, %{}),
       now: now,
       slots_total:
@@ -398,6 +427,14 @@ defmodule Arbiter.Board.Snapshot do
       watchdog_live: Keyword.get_lazy(opts, :watchdog_live, fn -> watchdog_live(issues) end),
       over_budget: Keyword.get_lazy(opts, :over_budget, fn -> Budget.over_budget_ids(issues) end)
     })
+  end
+
+  # ES3: Ready-since only feeds finish-first's aging escape, so the
+  # `ticket_transitions` read is skipped while that is off.
+  defp ready_since(opts, scheduling, issues, ref_issues, deps) do
+    Keyword.get_lazy(opts, :ready_since, fn ->
+      if scheduling.finish_first, do: ReadySince.load(issues, ref_issues, deps), else: %{}
+    end)
   end
 
   @doc """
@@ -953,21 +990,29 @@ defmodule Arbiter.Board.Snapshot do
   # bd-79w1fs: Backlog, Blocked and Ready are all in manual order — priority,
   # then the persisted `rank`, then age (`Scheduler.order/1`), the same order
   # Autopilot dispatches Ready in. Dragging within a column rewrites `rank`.
-  defp backlog_cards(issues, columns) do
+  #
+  # ES3: all three read the §4 key (`Scheduler.order/1`). Only a Ready card can
+  # age out of the finish-first tiebreak, so Backlog and Blocked cards are
+  # annotated without a Ready-since.
+  defp backlog_cards(issues, columns, order_ctx) do
+    ctx = %{order_ctx | ready_since: %{}}
+
     issues
     |> Enum.filter(&in_column?(columns, &1.id, :backlog))
-    |> Enum.map(&queue_card/1)
+    |> Enum.map(&queue_card(&1, ctx))
     |> Scheduler.order()
   end
 
   # A Blocked card says what it waits on: its unsatisfied gating blockers, as
   # `Lifecycle.view/2` read them.
-  defp blocked_cards(issues, columns, views) do
+  defp blocked_cards(issues, columns, views, order_ctx) do
+    ctx = %{order_ctx | ready_since: %{}}
+
     issues
     |> Enum.filter(&in_column?(columns, &1.id, :blocked))
     |> Enum.map(fn issue ->
       Map.put(
-        queue_card(issue),
+        queue_card(issue, ctx),
         :blocked_by,
         views |> Map.fetch!(issue.id) |> Map.get(:blocked_by)
       )
@@ -976,12 +1021,12 @@ defmodule Arbiter.Board.Snapshot do
   end
 
   # In no particular order: `Scheduler.plan/1` orders the queue.
-  defp ready_cards(issues, columns, conflicts) do
+  defp ready_cards(issues, columns, conflicts, order_ctx) do
     issues
     |> Enum.filter(&in_column?(columns, &1.id, :ready))
     |> Enum.map(fn issue ->
       issue
-      |> queue_card()
+      |> queue_card(order_ctx)
       |> Map.merge(%{
         scope: FileScope.declared_paths(issue),
         blocked_by: [],
@@ -991,17 +1036,20 @@ defmodule Arbiter.Board.Snapshot do
     end)
   end
 
-  defp queue_card(issue) do
-    %{
-      id: issue.id,
-      title: Map.get(issue, :title),
-      priority: Map.get(issue, :priority),
-      rank: Map.get(issue, :rank),
-      difficulty: Map.get(issue, :difficulty),
-      issue_type: Map.get(issue, :issue_type),
-      workspace_id: Map.get(issue, :workspace_id),
-      created_at: created_at(issue)
-    }
+  defp queue_card(issue, order_ctx) do
+    QueueOrder.annotate(
+      %{
+        id: issue.id,
+        title: Map.get(issue, :title),
+        priority: Map.get(issue, :priority),
+        rank: Map.get(issue, :rank),
+        difficulty: Map.get(issue, :difficulty),
+        issue_type: Map.get(issue, :issue_type),
+        workspace_id: Map.get(issue, :workspace_id),
+        created_at: created_at(issue)
+      },
+      order_ctx
+    )
   end
 
   # ---- in progress ----------------------------------------------------------

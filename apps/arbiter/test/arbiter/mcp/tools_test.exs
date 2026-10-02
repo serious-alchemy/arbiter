@@ -2616,6 +2616,10 @@ defmodule Arbiter.MCP.ToolsTest do
         Arbiter.Settings.set_quota_providers_shown(nil)
         Arbiter.Settings.set_quota_providers_hidden(nil)
         Arbiter.Settings.set_output_offload_enabled(nil)
+        Arbiter.Settings.set_scheduling_epic_floors_enabled(nil)
+        Arbiter.Settings.set_scheduling_max_lifted_in_flight(nil)
+        Arbiter.Settings.set_scheduling_finish_first(nil)
+        Arbiter.Settings.set_scheduling_finish_first_max_wait_hours(nil)
       end)
 
       :ok
@@ -2628,8 +2632,35 @@ defmodule Arbiter.MCP.ToolsTest do
       credential_watchdog_recovery_interval_ms: nil,
       quota_providers_shown: nil,
       quota_providers_hidden: nil,
-      output_offload_enabled: nil
+      output_offload_enabled: nil,
+      scheduling_epic_floors_enabled: nil,
+      scheduling_max_lifted_in_flight: nil,
+      scheduling_finish_first: nil,
+      scheduling_finish_first_max_wait_hours: nil
     }
+
+    test "the coordinator tunes finish-first but not the operator-only floor switches", ctx do
+      assert {:ok, %{value: true}} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "scheduling_finish_first",
+                 "value" => true
+               })
+
+      assert {:ok, %{value: 12}} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "scheduling_finish_first_max_wait_hours",
+                 "value" => 12
+               })
+
+      for key <- ~w(scheduling_epic_floors_enabled scheduling_max_lifted_in_flight) do
+        assert {:error, {:unauthorized, msg}} =
+                 Tools.installation_config_set(ctx.coordinator, %{"key" => key, "value" => 1})
+
+        assert msg =~ "operator-only"
+      end
+
+      assert Arbiter.Settings.scheduling_max_lifted_in_flight() == nil
+    end
 
     test "returns the full settings map when no key is given (worker tier)", ctx do
       assert {:ok, data} = Tools.installation_config_get(ctx.worker, %{})

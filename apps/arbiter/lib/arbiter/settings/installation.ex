@@ -27,6 +27,11 @@ defmodule Arbiter.Settings.Installation do
     * `:output_offload_enabled` — operator switch for
       `Arbiter.Workers.OutputOffload`, read on every tick. `nil` and `false`
       both mean off; only `true` sweeps.
+    * `:scheduling_epic_floors_enabled` / `:scheduling_max_lifted_in_flight` /
+      `:scheduling_finish_first` / `:scheduling_finish_first_max_wait_hours` —
+      the epic-aware Ready order (`docs/design/epic-aware-scheduling.md` §6.6,
+      read by `Arbiter.Board.Snapshot`). `nil` means the default: floors on,
+      lift cap `max(slots_total - 1, 1)`, finish-first off, 24 hour aging.
     * `:board_autopilot_paused` — `Arbiter.Board.Autopilot`'s pause flag.
       `nil` means "no persisted value — fall back to the
       `:arbiter, :board_autopilot, enabled:` application env, else paused".
@@ -60,7 +65,11 @@ defmodule Arbiter.Settings.Installation do
     :provider_pauses,
     :quota_providers_shown,
     :quota_providers_hidden,
-    :output_offload_enabled
+    :output_offload_enabled,
+    :scheduling_epic_floors_enabled,
+    :scheduling_max_lifted_in_flight,
+    :scheduling_finish_first,
+    :scheduling_finish_first_max_wait_hours
   ]
 
   actions do
@@ -159,6 +168,36 @@ defmodule Arbiter.Settings.Installation do
       allow_nil? true
 
       description "Whether the OutputOffload sweeper runs (bd-16ljft); nil / false = off, only true sweeps."
+    end
+
+    attribute :scheduling_epic_floors_enabled, :boolean do
+      public? true
+      allow_nil? true
+
+      description "Kill switch for epic priority floors (ES3); nil / true = floors apply, false ignores every floor."
+    end
+
+    attribute :scheduling_max_lifted_in_flight, :integer do
+      public? true
+      allow_nil? true
+      constraints min: 1
+
+      description "Most :active tickets an epic floor may have lifted at once (ES3); nil = max(slots_total - 1, 1)."
+    end
+
+    attribute :scheduling_finish_first, :boolean do
+      public? true
+      allow_nil? true
+
+      description "Finish-first tiebreak inside a priority band (ES3); nil / false = off."
+    end
+
+    attribute :scheduling_finish_first_max_wait_hours, :integer do
+      public? true
+      allow_nil? true
+      constraints min: 1
+
+      description "Hours a card may wait Ready and unblocked before it escapes the finish-first tiebreak (ES3); nil = 24."
     end
 
     create_timestamp :created_at

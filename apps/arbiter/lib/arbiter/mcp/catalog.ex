@@ -1909,6 +1909,10 @@ defmodule Arbiter.MCP.Catalog do
           "until parity); they take effect on the next page load. " <>
           "`output_offload_enabled` (boolean; the output-offload sweeper ships OFF, `true` " <>
           "turns it on, `null` back off) takes effect on the sweeper's next tick. " <>
+          "`scheduling_finish_first` (boolean) and `scheduling_finish_first_max_wait_hours` " <>
+          "(positive integer) tune the epic-aware Ready order's finish-first tiebreak " <>
+          "(null = off / 24h); `scheduling_epic_floors_enabled` and " <>
+          "`scheduling_max_lifted_in_flight` are operator-only and refused here. " <>
           "No restart required. Returns `{key, value}`.",
       input_schema: %{
         "type" => "object",
@@ -1922,7 +1926,11 @@ defmodule Arbiter.MCP.Catalog do
               "credential_watchdog_recovery_interval_ms",
               "quota_providers_shown",
               "quota_providers_hidden",
-              "output_offload_enabled"
+              "output_offload_enabled",
+              "scheduling_epic_floors_enabled",
+              "scheduling_max_lifted_in_flight",
+              "scheduling_finish_first",
+              "scheduling_finish_first_max_wait_hours"
             ],
             "description" => "Setting name (e.g. \"conductor_system_max_concurrent\"). Required."
           },
@@ -1940,11 +1948,14 @@ defmodule Arbiter.MCP.Catalog do
                 "minimum" => 1,
                 "description" =>
                   "Positive integer for conductor_system_max_concurrent, " <>
-                    "credential_watchdog_interval_ms, or credential_watchdog_recovery_interval_ms."
+                    "credential_watchdog_interval_ms, credential_watchdog_recovery_interval_ms, " <>
+                    "scheduling_max_lifted_in_flight or scheduling_finish_first_max_wait_hours."
               },
               %{
                 "type" => "boolean",
-                "description" => "true/false for output_offload_enabled."
+                "description" =>
+                  "true/false for output_offload_enabled, scheduling_finish_first or " <>
+                    "scheduling_epic_floors_enabled."
               },
               %{
                 "type" => "array",

@@ -121,6 +121,96 @@ defmodule Arbiter.Board.SnapshotLoadTest do
     end
   end
 
+  # ES3 (bd-73uipb): `load/1` is the half that reads the floors, the installation
+  # settings and `ticket_transitions`; `derive/1`'s tests stub all three.
+  describe "the epic-aware order is read from the database" do
+    defp queued(ws, title, priority, parent \\ nil) do
+      {:ok, created} =
+        Ash.create(Issue, %{
+          title: title,
+          workspace_id: ws.id,
+          priority: priority,
+          acceptance: "- it works"
+        })
+
+      {:ok, issue} = Ash.update(created, %{}, action: :promote_to_ready)
+      if parent, do: {:ok, _} = Dependencies.add(parent.id, issue.id, :parent_of)
+      issue
+    end
+
+    setup %{ws: ws} do
+      on_exit(fn ->
+        Arbiter.Settings.set_scheduling_epic_floors_enabled(nil)
+        Arbiter.Settings.set_scheduling_finish_first(nil)
+        Arbiter.Settings.set_scheduling_finish_first_max_wait_hours(nil)
+        Arbiter.Settings.set_scheduling_max_lifted_in_flight(nil)
+      end)
+
+      {:ok, epic} = Ash.create(Issue, %{title: "Epic", workspace_id: ws.id, issue_type: :epic})
+      {:ok, epic} = Ash.update(epic, %{floor_priority: 1}, action: :set_floor)
+
+      %{epic: epic}
+    end
+
+    defp ready_ids(snapshot), do: Enum.map(snapshot.ready, & &1.id)
+
+    test "a floor lifts the epic's child over an own-P2 parentless ticket", %{ws: ws, epic: epic} do
+      plain = queued(ws, "plain", 2)
+      child = queued(ws, "child", 4, epic)
+
+      snapshot = Snapshot.load(workspace_id: ws.id)
+
+      assert ready_ids(snapshot) == [child.id, plain.id]
+
+      assert %{effective_priority: 1, priority: 4, priority_via: via, priority_lift: :applied} =
+               Enum.find(snapshot.ready, &(&1.id == child.id)).card
+
+      assert via == epic.id
+    end
+
+    test "the kill switch setting turns every floor off", %{ws: ws, epic: epic} do
+      plain = queued(ws, "plain", 2)
+      child = queued(ws, "child", 4, epic)
+
+      {:ok, false} = Arbiter.Settings.set_scheduling_epic_floors_enabled(false)
+
+      snapshot = Snapshot.load(workspace_id: ws.id)
+      assert ready_ids(snapshot) == [plain.id, child.id]
+      assert Enum.find(snapshot.ready, &(&1.id == child.id)).card.priority_lift == nil
+    end
+
+    test "finish-first reads Ready-since from ticket_transitions", %{ws: ws} do
+      {:ok, parent} =
+        Ash.create(Issue, %{title: "Open epic", workspace_id: ws.id, issue_type: :epic})
+
+      {:ok, done} = Ash.create(Issue, %{title: "done leaf", workspace_id: ws.id})
+      {:ok, _} = Dependencies.add(parent.id, done.id, :parent_of)
+      {:ok, _} = Ash.update(done, %{close_upstream: false}, action: :close)
+
+      child = queued(ws, "child of an epic in progress", 2, parent)
+      parentless = queued(ws, "parentless", 2)
+
+      {:ok, true} = Arbiter.Settings.set_scheduling_finish_first(true)
+
+      # Fresh: the in-progress epic's child goes first.
+      snapshot = Snapshot.load(workspace_id: ws.id)
+      assert ready_ids(snapshot) == [child.id, parentless.id]
+      assert Enum.find(snapshot.ready, &(&1.id == child.id)).card.finish_class == 1
+
+      # The parentless card has been Ready for 30h: it escapes the tiebreak.
+      old = DateTime.add(DateTime.utc_now(), -30 * 3600)
+
+      Arbiter.Repo.query!(
+        "UPDATE ticket_transitions SET at = ?1 WHERE ticket_id = ?2 AND to_state = 'queued'",
+        [DateTime.to_iso8601(old), parentless.id]
+      )
+
+      snapshot = Snapshot.load(workspace_id: ws.id)
+      assert ready_ids(snapshot) == [parentless.id, child.id]
+      assert Enum.find(snapshot.ready, &(&1.id == parentless.id)).card.finish_class == 0
+    end
+  end
+
   # bd-8j9i9p (design bd-9jj5lf §3): `load/1` is where the ledger question is
   # actually asked. `derive/1`'s own tests cover the flag's shape; these cover
   # that the real read reaches the right answer.

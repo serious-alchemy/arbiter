@@ -64,6 +64,35 @@ defmodule Arbiter.Settings.Registry do
         "Run the daily output-offload sweeper, which clears worker_runs.output_lines and " <>
           "worker_run_steps.output_summary once the durable on-disk copy exists; null/false = off. " <>
           "Takes effect on its next tick."
+    },
+    %{
+      key: "scheduling_epic_floors_enabled",
+      type: "boolean",
+      description:
+        "Kill switch for epic priority floors: false ignores every floor; null/true = floors " <>
+          "apply (a no-op until an epic has one). Takes effect on the next scheduler tick."
+    },
+    %{
+      key: "scheduling_max_lifted_in_flight",
+      type: "positive_integer",
+      description:
+        "Most in-progress tickets an epic floor may have lifted at once; past it every other " <>
+          "lifted card is ordered by its own priority. null = max(slots_total - 1, 1). " <>
+          "Takes effect on the next scheduler tick."
+    },
+    %{
+      key: "scheduling_finish_first",
+      type: "boolean",
+      description:
+        "Finish-first tiebreak inside a priority band: children of in-progress epics go first, " <>
+          "fewest open leaves first; null/false = off. Takes effect on the next scheduler tick."
+    },
+    %{
+      key: "scheduling_finish_first_max_wait_hours",
+      type: "positive_integer",
+      description:
+        "Hours a card may wait Ready and unblocked before it escapes the finish-first " <>
+          "tiebreak; null = 24. Takes effect on the next scheduler tick."
     }
   ]
 
@@ -160,6 +189,17 @@ defmodule Arbiter.Settings.Registry do
 
   defp write("output_offload_enabled", v), do: wrap(Settings.set_output_offload_enabled(v))
 
+  defp write("scheduling_epic_floors_enabled", v),
+    do: wrap(Settings.set_scheduling_epic_floors_enabled(v))
+
+  defp write("scheduling_max_lifted_in_flight", v),
+    do: wrap(Settings.set_scheduling_max_lifted_in_flight(v))
+
+  defp write("scheduling_finish_first", v), do: wrap(Settings.set_scheduling_finish_first(v))
+
+  defp write("scheduling_finish_first_max_wait_hours", v),
+    do: wrap(Settings.set_scheduling_finish_first_max_wait_hours(v))
+
   defp wrap({:ok, updated}), do: {:ok, updated}
   defp wrap({:error, reason}), do: {:error, {:invalid, inspect(reason)}}
 
@@ -177,6 +217,13 @@ defmodule Arbiter.Settings.Registry do
 
   def override("output_offload_enabled"), do: Settings.output_offload_enabled()
 
+  def override("scheduling_epic_floors_enabled"), do: Settings.scheduling_epic_floors_enabled()
+  def override("scheduling_max_lifted_in_flight"), do: Settings.scheduling_max_lifted_in_flight()
+  def override("scheduling_finish_first"), do: Settings.scheduling_finish_first()
+
+  def override("scheduling_finish_first_max_wait_hours"),
+    do: Settings.scheduling_finish_first_max_wait_hours()
+
   @doc "The value in force with no override (app env, else hardcoded); `nil` = auto-detect."
   @spec default(key()) :: term()
   def default("conductor_system_max_concurrent"), do: Snapshot.default_system_max_concurrent()
@@ -191,6 +238,15 @@ defmodule Arbiter.Settings.Registry do
     do: CredentialWatchdog.default_interval_ms(:recovery_interval_ms)
 
   def default("output_offload_enabled"), do: false
+
+  def default("scheduling_epic_floors_enabled"), do: true
+  def default("scheduling_finish_first"), do: false
+
+  def default("scheduling_finish_first_max_wait_hours"),
+    do: Settings.default_finish_first_max_wait_hours()
+
+  # nil = max(slots_total - 1, 1), which depends on the board.
+  def default("scheduling_max_lifted_in_flight"), do: nil
 
   def default(key) when key in ["quota_providers_shown", "quota_providers_hidden"], do: nil
 

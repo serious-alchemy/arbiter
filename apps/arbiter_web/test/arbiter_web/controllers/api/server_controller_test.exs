@@ -267,6 +267,23 @@ defmodule ArbiterWeb.Api.ServerControllerTest do
     end
   end
 
+  describe "GET /api/server/worker_tmp" do
+    test "reports the worker temp root, its filesystem and size", %{conn: conn} do
+      resp = conn |> get("/api/server/worker_tmp") |> json_response(200)
+
+      assert %{
+               "root" => root,
+               "tmpfs" => tmpfs,
+               "size_bytes" => size,
+               "threshold_bytes" => threshold,
+               "over_threshold" => over
+             } = resp
+
+      assert is_binary(root) and is_boolean(tmpfs) and is_boolean(over)
+      assert is_integer(size) and is_integer(threshold)
+    end
+  end
+
   # bd-c99hys: `arb server doctor` reports whether tmux is installed, since the
   # dashboard login relay runs each provider CLI login inside it.
   describe "GET /api/server/tmux" do

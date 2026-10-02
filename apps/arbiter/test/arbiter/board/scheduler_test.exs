@@ -337,6 +337,65 @@ defmodule Arbiter.Board.SchedulerTest do
     end
   end
 
+  describe "order/1: the epic-aware key (ES3)" do
+    @t0 ~U[2026-10-02 10:00:00Z]
+
+    defp qcard(id, attrs) do
+      Map.merge(%{id: id, priority: 2, rank: 1024, created_at: @t0}, Map.new(attrs))
+    end
+
+    defp ids(cards), do: Enum.map(cards, & &1.id)
+
+    test "cards with none of the new fields sort exactly as {priority, rank, created_at}" do
+      cards =
+        for {id, p, r, mins} <- [
+              {"a", 2, 2048, 0},
+              {"b", 1, 9999, 5},
+              {"c", 2, 1024, 3},
+              {"d", 2, 1024, 1},
+              {"e", 4, 1, 0},
+              {"f", 0, 3, 9},
+              {"g", 2, nil, 2}
+            ] do
+          qcard(id, priority: p, rank: r, created_at: DateTime.add(@t0, mins * 60))
+        end
+
+      today =
+        Enum.sort_by(cards, &{&1.priority, &1.rank || :none, DateTime.to_unix(&1.created_at)})
+
+      assert ids(Scheduler.order(cards)) == ids(today)
+      assert ids(Scheduler.order(Enum.reverse(cards))) == ids(today)
+    end
+
+    test "effective priority outranks own priority and rank" do
+      lifted = qcard("lifted", priority: 4, rank: 9999, effective_priority: 1)
+      own = qcard("own", priority: 1, rank: 1)
+
+      assert ids(Scheduler.order([lifted, own])) == ["own", "lifted"]
+
+      assert ids(Scheduler.order([own, qcard("p2", priority: 2), lifted])) == [
+               "own",
+               "lifted",
+               "p2"
+             ]
+    end
+
+    test "pinned, then finish class, then open leaves, then own priority, then rank" do
+      base = [effective_priority: 1]
+
+      cards = [
+        qcard("rank", base ++ [priority: 2, rank: 5, finish_class: 2]),
+        qcard("own3", base ++ [priority: 3, rank: 1, finish_class: 1, open_leaves: 2]),
+        qcard("own2", base ++ [priority: 2, rank: 9, finish_class: 1, open_leaves: 2]),
+        qcard("few", base ++ [priority: 4, rank: 9, finish_class: 1, open_leaves: 1]),
+        qcard("aged", base ++ [priority: 4, rank: 9, finish_class: 0]),
+        qcard("pinned", base ++ [priority: 4, rank: 9, finish_class: 2, rank_pinned: true])
+      ]
+
+      assert ids(Scheduler.order(cards)) == ~w(pinned aged few own2 own3 rank)
+    end
+  end
+
   describe "entries" do
     test "cards with nothing to order them by keep the order given" do
       plan = plan(ready: [card("bd-3"), card("bd-1"), card("bd-2")])

@@ -193,10 +193,21 @@ defmodule Arbiter.Board.Scheduler do
   def plan(_), do: %{promote: nil, entries: []}
 
   @doc """
-  The Ready queue's order (bd-asxw4e): priority, then `rank` (the manual order
-  inside a priority band, `docs/design/ticket-lifecycle.md` §1), then
-  `created_at`, oldest first. The sort is stable, so cards that carry none of
-  the three keep the order they were given in.
+  The queue's order (bd-asxw4e; `docs/design/epic-aware-scheduling.md` §4),
+  ascending on
+
+      {effective_priority, pinned, finish_class, open_leaves, priority, rank, created_at}
+
+  `effective_priority` is `min(own, epic floors)` (`Arbiter.Board.QueueOrder`);
+  `pinned` is `0` for a card an operator dragged within its band
+  (`rank_pinned: true`), else `1`; `finish_class` and `open_leaves` are the
+  finish-first tiebreak; `rank` is the manual order inside a band
+  (`docs/design/ticket-lifecycle.md` §1); then `created_at`, oldest first.
+
+  A card that carries none of the new fields reads `effective_priority ==
+  priority`, unpinned, class `0` and `0` open leaves, so the order collapses
+  to today's `{priority, rank, created_at}`. The sort is stable, so cards that
+  carry none of the keys keep the order they were given in.
   """
   @spec order([card()]) :: [card()]
   def order(cards) when is_list(cards), do: Enum.sort_by(cards, &order_key/1)
@@ -204,7 +215,17 @@ defmodule Arbiter.Board.Scheduler do
   # A missing key sorts after every present one (an atom outranks any number
   # in term order), so an unranked card never jumps a ranked one.
   defp order_key(card) do
-    {Map.get(card, :priority) || :none, Map.get(card, :rank) || :none, created_key(card)}
+    priority = Map.get(card, :priority) || :none
+
+    {
+      Map.get(card, :effective_priority) || priority,
+      if(Map.get(card, :rank_pinned) == true, do: 0, else: 1),
+      Map.get(card, :finish_class) || 0,
+      Map.get(card, :open_leaves) || 0,
+      priority,
+      Map.get(card, :rank) || :none,
+      created_key(card)
+    }
   end
 
   defp created_key(%{created_at: %DateTime{} = at}), do: DateTime.to_unix(at, :microsecond)

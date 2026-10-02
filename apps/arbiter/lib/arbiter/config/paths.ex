@@ -80,6 +80,16 @@ defmodule Arbiter.Config.Paths do
   end
 
   @doc """
+  Root holding one per-run `TMPDIR` for each worker/agent child
+  (`Arbiter.Worker.RunTmp`). Disk-backed under the scratch root, never `/tmp`
+  (tmpfs, i.e. RAM, on the dogfood host).
+  """
+  @spec worker_tmp_root() :: String.t()
+  def worker_tmp_root do
+    resolve("ARBITER_WORKER_TMP_ROOT", :worker_tmp_root, Path.join(scratch_root(), "worker-tmp"))
+  end
+
+  @doc """
   Root holding the shared memory layers a coordinator session mounts
   read-only (RFC §9.4, `Arbiter.Sessions.Memory`).
 

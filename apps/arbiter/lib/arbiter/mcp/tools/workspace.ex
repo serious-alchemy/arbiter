@@ -16,6 +16,11 @@ defmodule Arbiter.MCP.Tools.Workspace do
 
   @install_settings_keys Arbiter.Settings.Registry.keys()
 
+  # `docs/design/epic-aware-scheduling.md` §6.6: the operator alone decides how
+  # much of the fleet a floor may take, so the coordinator's MCP door refuses
+  # these two (REST and `arb settings` carry the operator's token).
+  @operator_only_install_keys ~w(scheduling_epic_floors_enabled scheduling_max_lifted_in_flight)
+
   # ---- workspace_show -----------------------------------------------------
 
   @doc """
@@ -222,6 +227,13 @@ defmodule Arbiter.MCP.Tools.Workspace do
     * `output_offload_enabled` — boolean; the output-offload sweeper
       (`Arbiter.Workers.OutputOffload`) ships OFF, `true` turns it on, `null`
       back off. Takes effect on the sweeper's next tick.
+    * `scheduling_finish_first` (boolean) and
+      `scheduling_finish_first_max_wait_hours` (positive integer) — the
+      finish-first tiebreak inside a priority band and its aging escape
+      (`docs/design/epic-aware-scheduling.md` §6.6). `null` is off / 24 hours.
+    * `scheduling_epic_floors_enabled` (boolean kill switch) and
+      `scheduling_max_lifted_in_flight` (positive integer lift cap) —
+      **operator only**: refused here, set through `arb settings` or REST.
 
   The Watchdog keys take effect on its next poll cycle (bd-ajgve2). No restart
   is required for any of them.
@@ -230,6 +242,7 @@ defmodule Arbiter.MCP.Tools.Workspace do
   def installation_config_set(%Scope{} = _scope, args) do
     with {:ok, key} <- Tools.require_string(args, "key"),
          :ok <- validate_install_key(key),
+         :ok <- reject_operator_only_key(key),
          {:ok, raw} <- require_install_value(key, args),
          {:ok, updated} <- Arbiter.Settings.Registry.put(key, raw) do
       {:ok, %{key: key, value: updated}}
@@ -238,6 +251,11 @@ defmodule Arbiter.MCP.Tools.Workspace do
 
   defp validate_install_key(key) when key in @install_settings_keys, do: :ok
   defp validate_install_key(key), do: {:error, {:invalid, "unknown installation setting: #{key}"}}
+
+  defp reject_operator_only_key(key) when key in @operator_only_install_keys,
+    do: {:error, {:unauthorized, "#{key} is operator-only — set it with `arb settings`"}}
+
+  defp reject_operator_only_key(_key), do: :ok
 
   defp require_install_value(_key, args) do
     case Map.fetch(args, "value") do

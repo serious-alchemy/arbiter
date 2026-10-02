@@ -201,6 +201,12 @@ defmodule Arbiter.Worker.PromptBuilder do
     (e.g. $HOME/dev/arbiter/...). Writing to the main repo corrupts
     Phoenix hot-reload and cascades to kill every other running worker.
     Always use relative paths or paths rooted at #{worktree_path}.
+
+    TEMP FILES — Arbiter gave this run its own scratch directory, exported as
+    $TMPDIR (also $TMP and $TEMP) and removed when the run ends. Put every
+    temporary file or directory there (`mktemp` already honors it). Do NOT
+    invent `/tmp/<name>` directories: /tmp is RAM-backed and nothing cleans
+    them up.
     """
   end
 
