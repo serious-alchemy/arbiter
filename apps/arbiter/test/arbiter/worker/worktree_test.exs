@@ -1652,6 +1652,16 @@ end
       assert {:ok, true} = Worktree.has_injected_config_in_commits?(wt, "main")
     end
 
+    test "returns false when a tracked .codex/ file is merely modified", %{repo: repo} do
+      {:ok, wt} = Worktree.create(repo, "feature/tracked-codex", "main")
+      File.mkdir_p!(Path.join(wt, ".codex"))
+      :ok = commit(wt, ".codex/prompts.md", "v1\n", "track codex file")
+      {base, 0} = System.cmd("git", ["-C", wt, "rev-parse", "HEAD"])
+      :ok = commit(wt, ".codex/prompts.md", "v2\n", "edit tracked codex file")
+
+      assert {:ok, false} = Worktree.has_injected_config_in_commits?(wt, String.trim(base))
+    end
+
     test "returns true when a .codex/ file is in the committed diff", %{repo: repo} do
       {:ok, wt} = Worktree.create(repo, "feature/secret-codex", "main")
       File.mkdir_p!(Path.join(wt, ".codex"))

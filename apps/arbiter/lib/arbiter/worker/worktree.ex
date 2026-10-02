@@ -936,14 +936,17 @@ defmodule Arbiter.Worker.Worktree do
   `base_ref` later gained its own (unrelated) commit touching one of these
   paths, every branch forked before it would false-trip on a diff it never
   produced — exactly what a reviewer's `base...HEAD` (three-dot) compare
-  avoids. Fails open on any git error so a transient hiccup does not strand
+  avoids. Only *added* paths count (`--diff-filter=A`): a target repo that
+  legitimately tracks its own `.codex/*` (bd-9q25ck) has those paths at the
+  merge-base, so a worker editing them is not an injected-config leak.
+  Fails open on any git error so a transient hiccup does not strand
   a completion.
   """
   @spec has_injected_config_in_commits?(path(), String.t()) ::
           {:ok, boolean()} | {:error, error_reason()}
   def has_injected_config_in_commits?(path, base_ref \\ "main") when is_binary(path) do
     with base when is_binary(base) <- merge_base(path, base_ref),
-         {:ok, output} <- run_git(["diff", "--name-only", base <> "..HEAD", "--"], cd: path) do
+         {:ok, output} <- run_git(["diff", "--name-only", "--diff-filter=A", base <> "..HEAD", "--"], cd: path) do
       changed = String.split(output, "\n", trim: true)
       found? = Enum.any?(changed, &injected_config_path?/1)
       {:ok, found?}
