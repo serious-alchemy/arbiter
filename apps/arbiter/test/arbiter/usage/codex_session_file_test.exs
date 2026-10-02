@@ -190,4 +190,123 @@ defmodule Arbiter.Usage.CodexSessionFileTest do
       assert Path.basename(path) == "rollout-nodur.jsonl"
     end
   end
+
+  describe "locate/2" do
+    test "finds the rollout by thread id under any date directory" do
+      home = tmp_dir()
+      sid = "019f95ae-0000-7000-8000-000000000001"
+
+      path =
+        write_named!(
+          home,
+          "2026/09/21",
+          "rollout-2026-09-21T12-23-15-#{sid}.jsonl",
+          sid,
+          10,
+          2,
+          3
+        )
+
+      _other =
+        write_named!(
+          home,
+          "2026/09/21",
+          "rollout-2026-09-21T12-24-00-other-sid.jsonl",
+          "other-sid",
+          1,
+          0,
+          1
+        )
+
+      assert {:ok, ^path} = SessionFile.locate(home, sid)
+    end
+
+    test ":not_found for a missing thread id, blank inputs, or wildcard ids" do
+      home = tmp_dir()
+      write_named!(home, "2026/09/21", "rollout-2026-09-21T12-23-15-abc.jsonl", "abc", 1, 0, 1)
+
+      assert :not_found = SessionFile.locate(home, "zzz")
+      assert :not_found = SessionFile.locate(home, "*")
+      assert :not_found = SessionFile.locate(home, "")
+      assert :not_found = SessionFile.locate(nil, "abc")
+      assert :not_found = SessionFile.locate(home <> "-missing", "abc")
+    end
+  end
+
+  describe "usage_for/3" do
+    test "reads the last cumulative token_count for the thread" do
+      home = tmp_dir()
+      sid = "thread-1"
+
+      write_named!(
+        home,
+        "2026/09/21",
+        "rollout-2026-09-21T12-23-15-#{sid}.jsonl",
+        sid,
+        100,
+        40,
+        7
+      )
+
+      assert {:ok, %{tokens_in: 100, tokens_out: 7, cache_read_tokens: 40}} =
+               SessionFile.usage_for(home, sid)
+    end
+
+    test "with :since subtracts the totals already reached before the window" do
+      home = tmp_dir()
+      sid = "thread-2"
+      dir = Path.join([home, "sessions", "2026", "09", "21"])
+      File.mkdir_p!(dir)
+
+      tc = fn ts, i, o ->
+        ~s({"timestamp":"#{ts}","type":"event_msg","payload":{"type":"token_count",) <>
+          ~s("info":{"total_token_usage":{"input_tokens":#{i},"cached_input_tokens":0,"output_tokens":#{o}}}}})
+      end
+
+      File.write!(
+        Path.join(dir, "rollout-x-#{sid}.jsonl"),
+        Enum.join(
+          [
+            ~s({"timestamp":"2026-09-21T10:00:00Z","type":"session_meta","payload":{"session_id":"#{sid}","timestamp":"2026-09-21T10:00:00Z"}}),
+            tc.("2026-09-21T10:01:00Z", 100, 10),
+            tc.("2026-09-21T11:01:00Z", 150, 25)
+          ],
+          "\n"
+        ) <> "\n"
+      )
+
+      since = ~U[2026-09-21 11:00:00Z]
+
+      assert {:ok, %{tokens_in: 50, tokens_out: 15}} =
+               SessionFile.usage_for(home, sid, since: since)
+    end
+
+    test ":not_found when there is no rollout, and when it carries no token_count" do
+      home = tmp_dir()
+      assert :not_found = SessionFile.usage_for(home, "nope")
+
+      dir = Path.join([home, "sessions", "2026", "09", "21"])
+      File.mkdir_p!(dir)
+
+      File.write!(
+        Path.join(dir, "rollout-x-empty.jsonl"),
+        ~s({"type":"session_meta","payload":{}}\n)
+      )
+
+      assert :not_found = SessionFile.usage_for(home, "empty")
+    end
+  end
+
+  defp write_named!(home, date_path, name, sid, i, c, o) do
+    dir = Path.join([home, "sessions", date_path])
+    File.mkdir_p!(dir)
+    path = Path.join(dir, name)
+
+    File.write!(
+      path,
+      Enum.join(rollout_lines(sid, "2026-09-21T12:23:15Z", i, c, o), "\n") <> "\n"
+    )
+
+    path
+  end
 end

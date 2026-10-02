@@ -171,6 +171,64 @@ defmodule Arbiter.Usage.CodexSessionFile do
     end
   end
 
+  @doc """
+  Locate the rollout of codex thread `thread_id` under the codex home
+  `home` (`<home>/sessions/YYYY/MM/DD/rollout-<timestamp>-<thread-id>.jsonl`).
+
+  The filename ends in the thread id the live stream's `thread.started` event
+  reports (the worker's run `session_id`), so — unlike a probe, which has to
+  correlate by time — a worker run is found exactly. Returns `{:ok, path}` or
+  `:not_found` (blank input, pruned file, or an id that is not a plain
+  token — it is spliced into a glob, so wildcard characters are refused).
+  """
+  @spec locate(String.t() | nil, String.t() | nil) :: {:ok, String.t()} | :not_found
+  def locate(home, thread_id)
+      when is_binary(home) and home != "" and is_binary(thread_id) and thread_id != "" do
+    if Regex.match?(~r/\A[A-Za-z0-9_-]+\z/, thread_id) do
+      [home, "sessions", "*", "*", "*", "rollout-*#{thread_id}.jsonl"]
+      |> Path.join()
+      |> Path.wildcard()
+      |> Enum.sort()
+      |> List.last()
+      |> case do
+        nil -> :not_found
+        path -> {:ok, path}
+      end
+    else
+      :not_found
+    end
+  end
+
+  def locate(_home, _thread_id), do: :not_found
+
+  @doc """
+  Token totals for thread `thread_id`, read from its on-disk rollout — the
+  reconciliation source for a run killed before `turn.completed` reached the
+  stream parser.
+
+  `token_count` lines are cumulative per thread, and `codex exec resume`
+  appends to the same file, so `since: %DateTime{}` subtracts the last totals
+  recorded before that instant, leaving only this run's own consumption.
+  Returns `{:ok, totals}` or `:not_found` when no rollout exists or it carries
+  no `token_count` line.
+  """
+  @spec usage_for(String.t() | nil, String.t() | nil, keyword()) ::
+          {:ok, totals()} | :not_found
+  def usage_for(home, thread_id, opts \\ []) do
+    since = Keyword.get(opts, :since)
+
+    with {:ok, path} <- locate(home, thread_id),
+         {:ok, io} <- File.open(path, [:read, :binary]) do
+      try do
+        io |> token_counts() |> window(since)
+      after
+        File.close(io)
+      end
+    else
+      _ -> :not_found
+    end
+  end
+
   # ---- internals ---------------------------------------------------------
 
   defp last_token_count(io) do
@@ -219,6 +277,66 @@ defmodule Arbiter.Usage.CodexSessionFile do
        do: payload
 
   defp token_count_payload(_event), do: nil
+
+  # `[{timestamp | nil, totals}]` for every token_count line, in file order.
+  defp token_counts(io) do
+    io
+    |> IO.stream(:line)
+    |> Enum.flat_map(fn line ->
+      with {:ok, event} <- decode(line),
+           %{} = payload <- token_count_payload(event) do
+        fields = Arbiter.Agents.Codex.Stream.usage_fields(payload, nil)
+        [{parse_ts(event["timestamp"]), fields}]
+      else
+        _ -> []
+      end
+    end)
+  end
+
+  defp window([], _since), do: :not_found
+
+  defp window(entries, since) do
+    {_ts, last} = List.last(entries)
+
+    before =
+      case since do
+        %DateTime{} ->
+          entries
+          |> Enum.filter(fn {ts, _} ->
+            match?(%DateTime{}, ts) and DateTime.compare(ts, since) == :lt
+          end)
+          |> List.last()
+
+        _ ->
+          nil
+      end
+
+    base = if before, do: elem(before, 1), else: %{}
+
+    {:ok,
+     %{
+       tokens_in: delta(last, base, :tokens_in),
+       tokens_out: delta(last, base, :tokens_out),
+       cache_read_tokens: delta(last, base, :cache_read_tokens),
+       raw: Map.get(last, :raw)
+     }}
+  end
+
+  defp delta(last, base, key) do
+    case Map.get(last, key) do
+      n when is_number(n) -> max(n - (Map.get(base, key) || 0), 0)
+      _ -> nil
+    end
+  end
+
+  defp parse_ts(ts) when is_binary(ts) do
+    case DateTime.from_iso8601(ts) do
+      {:ok, dt, _} -> dt
+      _ -> nil
+    end
+  end
+
+  defp parse_ts(_), do: nil
 
   defp first_line(path) do
     case File.open(path, [:read, :binary]) do

@@ -203,6 +203,36 @@ defmodule Arbiter.Worker.SessionArchiveTest do
     end
   end
 
+  describe "archive/3 — codex rollout (bd-agsn2b)" do
+    test "archives and redacts the rollout found by thread id under the codex home", ctx do
+      sid = "019f95ae-1111-7000-8000-000000000002"
+      dir = Path.join([ctx.config_dir, "sessions", "2026", "09", "29"])
+      File.mkdir_p!(dir)
+
+      File.write!(
+        Path.join(dir, "rollout-2026-09-29T10-00-00-#{sid}.jsonl"),
+        ~s({"k":"s3cret-token"}\n)
+      )
+
+      assert {:ok, report} =
+               SessionArchive.archive(ctx.run_id, ctx.config_dir, sid,
+                 redact_values: ["s3cret-token"]
+               )
+
+      assert report.status == :ok
+      assert report.redacted == true
+      body = gunzip_at!(SessionArchive.path_for(ctx.run_id))
+      refute body =~ "s3cret-token"
+    end
+
+    test "reports :no_session_file when no rollout carries the thread id", ctx do
+      File.mkdir_p!(ctx.config_dir)
+
+      assert {:ok, %{status: :no_session_file}} =
+               SessionArchive.archive(ctx.run_id, ctx.config_dir, "missing")
+    end
+  end
+
   describe "archive/3 — agy conversation db (bd-6nupvc T9)" do
     test "archives the raw db unredacted when no Claude JSONL exists at the same coordinates",
          ctx do
