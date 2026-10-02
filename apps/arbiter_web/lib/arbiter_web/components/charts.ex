@@ -11,6 +11,7 @@ defmodule ArbiterWeb.Charts do
     * `bar/1`, `area/1`, `step_line/1` — `%{key: term, label: String.t(), value: number}`
     * `stacked_bar/1`, `stacked_area/1` — `%{key:, label:, values: %{series_key => number}}`
       plus `series`, a list of `%{key:, label:}` (stacked bottom-up in list order)
+    * `burn_up/1` — `%{key:, label:, scope: n, done: n}` (two step lines)
     * `histogram/1` — `%{from: number, to: number, count: number}`
 
   An empty point list renders an `data-empty` placeholder, never a blank axis.
@@ -382,6 +383,116 @@ defmodule ArbiterWeb.Charts do
       <.x_labels points={@points} />
     </.frame>
     """
+  end
+
+  # ---- burn-up ----
+
+  attr :id, :string, required: true
+  attr :points, :list, required: true, doc: "%{key:, label:, scope: n, done: n}"
+  attr :title, :string, required: true
+  attr :empty, :string, default: "No data for these filters."
+
+  def burn_up(assigns) do
+    n = length(assigns.points)
+    max = max_of(Enum.map(assigns.points, & &1.scope))
+
+    scope = Enum.map(assigns.points, &{&1.scope, &1})
+    done = Enum.map(assigns.points, &{&1.done, &1})
+    scope_xy = step_xy(scope, n, max)
+    done_xy = step_xy(done, n, max)
+
+    # The open remainder: between the scope line and the done line.
+    remainder =
+      case {scope_xy, done_xy} do
+        {[], _} ->
+          ""
+
+        _ ->
+          "M" <>
+            polyline_xy(Enum.map(scope_xy, fn {x, y, _} -> {x, y} end)) <>
+            " L" <>
+            polyline_xy(done_xy |> Enum.reverse() |> Enum.map(fn {x, y, _} -> {x, y} end)) <> " Z"
+      end
+
+    assigns =
+      assign(assigns,
+        n: n,
+        max: max,
+        scope_xy: scope_xy,
+        done_xy: done_xy,
+        scope_d: step_path(scope_xy),
+        done_d: step_path(done_xy),
+        remainder: remainder,
+        today_x: if(n > 0, do: label_x(n - 1, n)),
+        top: @top,
+        base: @top + plot_h(),
+        series: [%{key: "scope", label: "Scope"}, %{key: "done", label: "Done"}]
+      )
+
+    ~H"""
+    <.frame id={@id} kind="burn_up" title={@title} empty={@empty} n={@n} max={@max}>
+      <path data-role="remainder" d={@remainder} fill="var(--arb-info)" fill-opacity="0.12" />
+      <path
+        data-role="scope"
+        d={@scope_d}
+        fill="none"
+        stroke="var(--arb-info)"
+        stroke-width="2"
+      />
+      <path data-role="done" d={@done_d} fill="none" stroke="var(--arb-live)" stroke-width="2" />
+      <line
+        data-role="today"
+        x1={@today_x}
+        x2={@today_x}
+        y1={@top}
+        y2={@base}
+        stroke="var(--border-strong)"
+        stroke-dasharray="3 3"
+      />
+      <circle
+        :for={{x, y, p} <- @scope_xy}
+        data-role="scope-mark"
+        data-key={p.key}
+        data-value={p.scope}
+        cx={x}
+        cy={y}
+        r="3"
+        fill="var(--arb-info)"
+        class="arb-chart-mark"
+      >
+        <title>{p.label}: scope {p.scope}</title>
+      </circle>
+      <circle
+        :for={{x, y, p} <- @done_xy}
+        data-role="done-mark"
+        data-key={p.key}
+        data-value={p.done}
+        cx={x}
+        cy={y}
+        r="3"
+        fill="var(--arb-live)"
+        class="arb-chart-mark"
+      >
+        <title>{p.label}: done {p.done}</title>
+      </circle>
+      <.x_labels points={@points} />
+    </.frame>
+    <.legend :if={@n > 0} id={"#{@id}-legend"} series={@series} />
+    """
+  end
+
+  defp step_xy(pairs, n, max) do
+    pairs
+    |> Enum.with_index()
+    |> Enum.map(fn {{v, p}, i} -> {label_x(i, n), @top + plot_h() - scale(v, max), p} end)
+  end
+
+  defp step_path([]), do: ""
+
+  defp step_path([{x0, y0, _} | rest]) do
+    Enum.reduce(rest, "M#{fmt(x0)},#{fmt(y0)}", fn {x, y, _}, acc ->
+      acc <> " H#{fmt(x)} V#{fmt(y)}"
+    end)
   end
 
   # ---- histogram ----
