@@ -285,4 +285,57 @@ defmodule ArbiterWeb.ReportsLiveTest do
       assert has_element?(view, "#reports-burn-up-empty")
     end
   end
+
+  describe "ReviewGate health" do
+    defp stamp!(table, id, at) do
+      Arbiter.Repo.query!("UPDATE #{table} SET inserted_at = ? WHERE id = ?", [at, id])
+    end
+
+    defp round!(task_id, at, attrs) do
+      {:ok, row} =
+        Ash.create(
+          Arbiter.ReviewGate.Round,
+          Map.merge(%{task_id: task_id, round: 1, fix_round_attempt: 0, role: :review}, attrs)
+        )
+
+      stamp!("review_gate_rounds", row.id, at)
+    end
+
+    test "renders first-pass rate, rounds, outcomes, providers, resolutions and the start note",
+         %{conn: conn, ws: ws} do
+      now = DateTime.utc_now()
+      recent = now |> DateTime.add(-86_400) |> DateTime.to_iso8601()
+      a = issue!(ws, %{}).id
+      b = issue!(ws, %{}).id
+
+      round!(a, recent, %{verdict: :approve, converged: true, reviewer_provider: "claude"})
+      round!(b, recent, %{verdict: :request_changes, reviewer_provider: "claude"})
+      round!(b, recent, %{round: 2, verdict: :approve, converged: true})
+
+      {:ok, _} =
+        Arbiter.ReviewGate.Resolutions.record(%{task_id: b, decision: :amend, reasoning: "ok"})
+
+      {:ok, view, _html} = live(conn, ~p"/reports?workspace=#{ws.id}")
+      _ = render_async(view)
+
+      assert has_element?(view, "#reports-reviewgate")
+      assert has_element?(view, "#reports-rg-first-pass", "50%")
+      assert has_element?(view, "#reports-rg-rounds-chart rect[data-key='1']")
+      assert has_element?(view, "#reports-rg-rounds-chart rect[data-key='2']")
+      assert has_element?(view, "#reports-rg-outcomes-chart")
+      assert has_element?(view, "#reports-rg-providers-table", "claude")
+      assert has_element?(view, "#reports-rg-resolutions-table", "amend")
+      assert has_element?(view, "#reports-rg-provider-note", "2026-09-20")
+    end
+
+    test "says so when there are no gate rounds", %{conn: conn, ws: ws} do
+      issue!(ws, %{})
+
+      {:ok, view, _html} = live(conn, ~p"/reports?workspace=#{ws.id}")
+      _ = render_async(view)
+
+      assert has_element?(view, "#reports-rg-empty")
+      refute has_element?(view, "#reports-rg-rounds-chart")
+    end
+  end
 end
