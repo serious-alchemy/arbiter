@@ -569,12 +569,19 @@ defmodule Arbiter.Agents.Codex do
   # supplies it; with no `:thinking` opt the Codex default applies.
   @doc false
   def effort_argv(opts) do
-    case Keyword.get(opts, :thinking) do
-      level when level in ["minimal", "low", "medium", "high"] ->
-        ["-c", "model_reasoning_effort=#{inspect(level)}"]
+    level =
+      case Keyword.get(opts, :thinking) do
+        l when is_atom(l) and not is_nil(l) -> Atom.to_string(l)
+        l -> l
+      end
 
-      level when level in [:minimal, :low, :medium, :high] ->
-        ["-c", "model_reasoning_effort=#{inspect(Atom.to_string(level))}"]
+    case level do
+      l when l in ["none", "minimal", "low", "medium", "high", "xhigh"] ->
+        ["-c", "model_reasoning_effort=#{inspect(l)}"]
+
+      # Routing's "max" has no Codex equivalent; clamp to the highest level.
+      "max" ->
+        ["-c", "model_reasoning_effort=\"xhigh\""]
 
       _ ->
         []

@@ -138,6 +138,32 @@ defmodule Arbiter.Agents.CodexTest do
       refute Enum.any?(argv, &String.starts_with?(&1, "model_reasoning_effort"))
     end
 
+    test "maps every routing effort level, atom or string", %{tmp: tmp} do
+      stub_codex(tmp)
+
+      for {given, want} <- [
+            {"xhigh", "xhigh"},
+            {:xhigh, "xhigh"},
+            {"none", "none"},
+            {:medium, "medium"},
+            {"max", "xhigh"}
+          ] do
+        assert {:ok, argv} = Codex.default_argv("p", thinking: given)
+        assert "model_reasoning_effort=#{inspect(want)}" in argv
+      end
+
+      assert {:ok, argv} = Codex.default_argv("p", thinking: "bogus")
+      refute Enum.any?(argv, &String.starts_with?(&1, "model_reasoning_effort"))
+    end
+
+    test "resumed argv keeps --ignore-user-config and effort", %{tmp: tmp} do
+      stub_codex(tmp)
+      assert {:ok, argv} = Codex.default_argv("p", thinking: "xhigh")
+      assert {:ok, resumed} = Codex.splice_prompt(argv, ["--resume", "sess-1", "go"])
+      assert "--ignore-user-config" in resumed
+      assert "model_reasoning_effort=\"xhigh\"" in resumed
+    end
+
     test "builds a `codex exec --json` invocation wrapped for closed stdin", %{tmp: tmp} do
       codex = stub_codex(tmp)
 
