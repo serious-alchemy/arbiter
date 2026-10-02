@@ -81,6 +81,9 @@ defmodule Arbiter.Sessions.Memory do
     by_type =
       root
       |> memory_files()
+      |> Enum.filter(fn path ->
+        Arbiter.Sessions.Memory.Staleness.check_memory(path, opts) == :ok
+      end)
       |> Enum.map(fn path -> {path, frontmatter(path)} end)
       |> Enum.group_by(fn {_path, fm} -> fm[:type] end)
 

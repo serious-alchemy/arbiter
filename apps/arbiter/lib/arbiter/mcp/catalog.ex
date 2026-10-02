@@ -2179,6 +2179,59 @@ defmodule Arbiter.MCP.Catalog do
       handler: &Tools.loop_pending_reject/2
     },
     %{
+      name: "memory_pending_list",
+      tiers: @coordinator,
+      description: "List queued memory promotion candidates written by sessions.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{},
+        "additionalProperties" => false
+      },
+      handler: &Tools.memory_pending_list/2
+    },
+    %{
+      name: "memory_pending_diff",
+      tiers: @coordinator,
+      description: "Read one queued memory candidate's content/diff.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "path" => %{"type" => "string", "description" => "Candidate path. Required."}
+        },
+        "required" => ["path"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.memory_pending_diff/2
+    },
+    %{
+      name: "memory_pending_apply",
+      tiers: @coordinator,
+      description: "Promote a queued memory candidate to the shared memory layer.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "path" => %{"type" => "string", "description" => "Candidate path. Required."}
+        },
+        "required" => ["path"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.memory_pending_apply/2
+    },
+    %{
+      name: "memory_pending_reject",
+      tiers: @coordinator,
+      description: "Reject and delete a queued memory candidate.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "path" => %{"type" => "string", "description" => "Candidate path. Required."}
+        },
+        "required" => ["path"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.memory_pending_reject/2
+    },
+    %{
       name: "loop_propose_routing",
       tiers: @coordinator,
       description:
