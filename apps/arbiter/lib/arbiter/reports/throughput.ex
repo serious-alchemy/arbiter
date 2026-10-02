@@ -178,10 +178,15 @@ defmodule Arbiter.Reports.Throughput do
     }
   end
 
-  # Nearest rank: the ceil(p·n)-th smallest value.
-  defp percentile([], _), do: nil
+  @doc """
+  Nearest rank: the ceil(p·n)-th smallest value of an ascending list (`nil`
+  for none). Shared with `Arbiter.Reports.Flow` so every report's P50/P90 is
+  one definition.
+  """
+  @spec percentile([number()], float()) :: float() | nil
+  def percentile([], _), do: nil
 
-  defp percentile(sorted, p) do
+  def percentile(sorted, p) do
     rank = max(ceil(p * length(sorted)), 1)
     sorted |> Enum.at(rank - 1) |> Kernel.*(1.0)
   end
