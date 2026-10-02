@@ -211,6 +211,11 @@ config :arbiter, :worktree_sweeper, enabled: false
 # `Arbiter.Sessions.TranscriptRetention.sweep/1` synchronously (§11, phase 9).
 config :arbiter, :sessions_transcript_retention, enabled: false
 
+# And the shared-memory staleness checker (bd-19qve3): tests call
+# `Arbiter.Sessions.Memory.Checker.run/1` directly, and a mount's nudge to the
+# app-supervised checker is a no-op.
+config :arbiter, :memory_checker, enabled: false
+
 # A small cap here keeps `TranscriptTest`'s size-cap test from materialising
 # a 100 MB default three times over (bd-5pelo2 round 4 finding 4).
 config :arbiter, :sessions_transcript, max_bytes: 1024
