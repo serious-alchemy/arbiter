@@ -344,4 +344,31 @@ defmodule Arbiter.Board.SchedulerTest do
       assert Enum.map(plan.entries, & &1.id) == ["bd-3", "bd-1", "bd-2"]
     end
   end
+
+  describe "a provider-constraint hold (bd-13pqcp)" do
+    test "a constrained card with no eligible provider is held by its own constraint and the next card goes" do
+      plan =
+        plan(
+          ready: [card("bd-1"), card("bd-2")],
+          card_constraint: %{
+            "bd-1" => {:hold, "exclude gemini: no allowed provider has a free slot"}
+          }
+        )
+
+      assert %{state: :blocked, reason: "blocked — provider constraint (exclude gemini" <> _} =
+               reason(plan, "bd-1")
+
+      # A card's own block never advances the queue: bd-2 is next in line.
+      assert plan.promote == "bd-2"
+      assert %{state: :next} = reason(plan, "bd-2")
+    end
+
+    test "a card whose constraint has an eligible provider, or none at all, is unaffected" do
+      plan = plan(ready: [card("bd-1")], card_constraint: %{"bd-1" => :ok})
+      assert plan.promote == "bd-1"
+
+      plan = plan(ready: [card("bd-1")])
+      assert plan.promote == "bd-1"
+    end
+  end
 end

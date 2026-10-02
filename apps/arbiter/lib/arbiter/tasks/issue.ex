@@ -172,7 +172,8 @@ defmodule Arbiter.Tasks.Issue do
         # report-only first pass, which posts nothing.
         :last_verdict,
         :last_verdict_sha,
-        :skills
+        :skills,
+        :provider_constraint
       ]
 
       # `review_count` / `review_cap_escalated` / `circuit_breaker_tripped` /
@@ -208,6 +209,7 @@ defmodule Arbiter.Tasks.Issue do
       # transition. `rank` puts it at the end of its workspace's order.
       change {Arbiter.Tasks.Issue.Changes.AssignRank, []}
       change {Arbiter.Tasks.Issue.Changes.InheritTrackerType, []}
+      change {Arbiter.Tasks.Issue.Changes.NormalizeProviderConstraint, []}
 
       # bd-9dwbvt: bind a repo at creation time — explicit, else the
       # workspace's only repo, else its `default_repo`, else a validation
@@ -265,7 +267,8 @@ defmodule Arbiter.Tasks.Issue do
         :circuit_breaker_tripped,
         :circuit_breaker_reason,
         :circuit_breaker_sha,
-        :skills
+        :skills,
+        :provider_constraint
       ]
 
       require_atomic? false
@@ -293,6 +296,7 @@ defmodule Arbiter.Tasks.Issue do
       # Watermark the head SHA on a circuit-breaker resume so the breaker
       # doesn't immediately re-trip on the next tick (bd-1atwts).
       change {Arbiter.Tasks.Issue.Changes.RecordCircuitBreakerClear, []}
+      change {Arbiter.Tasks.Issue.Changes.NormalizeProviderConstraint, []}
 
       # A floor only means something on an epic: retyping one away clears it.
       change {Arbiter.Tasks.Issue.Changes.ClearFloorOnRetype, []}
@@ -1917,6 +1921,20 @@ defmodule Arbiter.Tasks.Issue do
       constraints max_length: 64, trim?: true
 
       description "Model family of the pinned implementer account (`Arbiter.Agents.ModelFamily`)."
+    end
+
+    attribute :provider_constraint, :map do
+      allow_nil? true
+      public? true
+
+      description """
+      Which providers may run this ticket's implementer (bd-13pqcp):
+      `%{"require" => ["claude"]}` (only those) or `%{"exclude" => ["gemini"]}`
+      (anything but those) — one key, never both. Honoured by every path that
+      picks an implementer account (`Arbiter.Agents.ProviderConstraint`); the
+      reviewer is not constrained. `nil` — the default — is no constraint.
+      Set by the coordinator/operator only.
+      """
     end
 
     attribute :reviewer_family, :string do

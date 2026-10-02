@@ -814,4 +814,106 @@ defmodule Arbiter.Agents.ProviderRoutingTest do
       assert Ash.get!(Issue, task.id).implementer_account_id == nil
     end
   end
+
+  # ---- bd-13pqcp: the per-ticket provider constraint --------------------------
+
+  describe "a per-ticket provider constraint (bd-13pqcp)" do
+    setup do
+      ws = workspace!()
+      claude = account!(:claude, "k-claude")
+      codex = account!(:codex, "k-codex")
+      agy = account!(:antigravity, "k-agy")
+      allow!(ws, claude, 0)
+      allow!(ws, codex, 1)
+      allow!(ws, agy, 2)
+
+      # agy has by far the most headroom: unconstrained, it is the pick.
+      pairs = [
+        {claude, claude_quota(60.0)},
+        {codex, codex_quota(60.0)},
+        {agy, agy_quota(1.0, 1.0)}
+      ]
+
+      %{ws: ws, claude: claude, codex: codex, agy: agy, pairs: pairs}
+    end
+
+    test "an unconstrained ticket routes exactly as before (agy, the most headroom)", ctx do
+      assert {:ok, selection} =
+               ProviderRouting.select(ctx.ws, task!(ctx.ws), :main, opts(ctx.pairs))
+
+      assert selection.account.id == ctx.agy.id
+      refute Map.has_key?(selection.decision, "constraint")
+      assert Enum.all?(selection.decision["dropped"], &(&1["reason"] != "provider_constraint"))
+    end
+
+    test "exclude drops the excluded provider's account however much headroom it has", ctx do
+      task = task!(ctx.ws, %{provider_constraint: %{"exclude" => ["agy"]}})
+
+      assert {:ok, selection} = ProviderRouting.select(ctx.ws, task, :main, opts(ctx.pairs))
+      refute selection.account.id == ctx.agy.id
+      assert selection.agent_type in [:claude, :codex]
+
+      assert reasons(selection.decision)[ctx.agy.slug] == "provider_constraint"
+      assert selection.decision["constraint"] == "exclude gemini"
+      refute ctx.agy.slug in slugs(selection.decision["candidates"])
+    end
+
+    test "require keeps only the required provider", ctx do
+      task = task!(ctx.ws, %{provider_constraint: %{"require" => ["codex"]}})
+
+      assert {:ok, selection} = ProviderRouting.select(ctx.ws, task, :main, opts(ctx.pairs))
+      assert selection.account.id == ctx.codex.id
+      assert slugs(selection.decision["candidates"]) == [ctx.codex.slug]
+
+      assert reasons(selection.decision)[ctx.claude.slug] == "provider_constraint"
+      assert reasons(selection.decision)[ctx.agy.slug] == "provider_constraint"
+    end
+
+    test "the first routed dispatch pins an allowed account, never an excluded one", ctx do
+      task = task!(ctx.ws, %{provider_constraint: %{"exclude" => ["agy"]}})
+      assert {:ok, _} = ProviderRouting.select(ctx.ws, task, :main, opts(ctx.pairs))
+      refute Ash.get!(Issue, task.id).implementer_account_id == ctx.agy.id
+    end
+
+    test "a pin on a now-excluded account falls back to an allowed one (resume / fix / conflict)",
+         ctx do
+      task = task!(ctx.ws)
+      assert {:ok, first} = ProviderRouting.select(ctx.ws, task, :main, opts(ctx.pairs))
+      assert first.account.id == ctx.agy.id
+
+      {:ok, constrained} =
+        task.id
+        |> then(&Ash.get!(Issue, &1))
+        |> Ash.update(%{provider_constraint: %{"exclude" => ["agy"]}})
+
+      for role <- [:resume, :fix_pass, :conflict_resolver, :review_gate_implementer] do
+        assert {:ok, again} = ProviderRouting.select(ctx.ws, constrained, role, opts(ctx.pairs))
+        refute again.account.id == ctx.agy.id, "#{role} must not stay on the excluded pin"
+        assert again.decision["outcome"] == "fallback"
+        assert again.decision["fallback"] =~ "provider_constraint"
+      end
+    end
+
+    test "with no eligible account the selection is the legacy one and says why — it never lands on an excluded account",
+         ctx do
+      task = task!(ctx.ws, %{provider_constraint: %{"require" => ["gemini"]}})
+      # agy is the only allowed account, and it is parked.
+      Ash.update!(ctx.agy, %{enabled: false})
+
+      assert {:legacy, decision} = ProviderRouting.select(ctx.ws, task, :main, opts(ctx.pairs))
+      assert decision["outcome"] == "no_candidate"
+      assert decision["candidates"] == []
+      assert decision["constraint"] == "require gemini"
+      assert reasons(decision)[ctx.claude.slug] == "provider_constraint"
+      assert reasons(decision)[ctx.codex.slug] == "provider_constraint"
+    end
+
+    test "availability/3 — the board's and the card's read — sees the same drops", ctx do
+      task = task!(ctx.ws, %{provider_constraint: %{"exclude" => ["agy"]}})
+      view = ProviderRouting.availability(ctx.ws, task, opts(ctx.pairs))
+
+      assert Enum.all?(view.available, &(&1.account.id != ctx.agy.id))
+      assert Enum.any?(view.dropped, &(&1.reason == "provider_constraint"))
+    end
+  end
 end

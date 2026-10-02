@@ -215,6 +215,7 @@ defmodule Arbiter.Worker.ReviewGate do
   require Logger
 
   alias Arbiter.Agents
+  alias Arbiter.Agents.ProviderConstraint
   alias Arbiter.Agents.ProviderPool
   alias Arbiter.Agents.ProviderRouting
   alias Arbiter.Agents.ReviewerRouting
@@ -5155,8 +5156,15 @@ defmodule Arbiter.Worker.ReviewGate do
 
   defp resolve_revision(_state, :reviewer), do: nil
 
-  defp ensure_revision_unpaused(state, {provider, _reason, _decision}),
-    do: ProviderRouting.ensure_unpaused(provider, state.workspace_id)
+  # bd-13pqcp: an implementer round also refuses a provider the ticket's own
+  # constraint excludes (`resolve_revision/2` already steers away from it; this
+  # is the last word). The reviewer (`resolve_revision/2`'s `nil`) is not
+  # constrained.
+  defp ensure_revision_unpaused(state, {provider, _reason, _decision}) do
+    with :ok <- ProviderRouting.ensure_unpaused(provider, state.workspace_id) do
+      ProviderConstraint.check(state.task_id, provider)
+    end
+  end
 
   defp ensure_revision_unpaused(_state, _), do: :ok
 

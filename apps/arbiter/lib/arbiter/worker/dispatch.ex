@@ -66,6 +66,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Agents
   alias Arbiter.Agents.Claude.CredentialCheck
   alias Arbiter.Agents.Gemini.Config, as: GeminiConfig
+  alias Arbiter.Agents.ProviderConstraint
   alias Arbiter.Agents.ProviderRouting
   alias Arbiter.Agents.Routing
   alias Arbiter.Agents.SecurityPolicy
@@ -188,6 +189,7 @@ defmodule Arbiter.Worker.Dispatch do
          :ok <- ensure_not_awaiting_review(task, opts),
          :ok <- ensure_no_live_agent_session(task_id, opts),
          opts = route_implementer(task, opts),
+         :ok <- ensure_provider_constraint(task, opts),
          :ok <- maybe_pause_gate(task, opts),
          :ok <- maybe_quota_gate(task, opts),
          :ok <- ensure_account_capacity(task, opts),
@@ -985,7 +987,8 @@ defmodule Arbiter.Worker.Dispatch do
       ProviderRouting.enabled?(load_workspace(task)) ->
         resolve_resume_provider(task, opts, role)
 
-      not is_nil(session_provider) and Agents.provider_available?(session_provider) ->
+      not is_nil(session_provider) and Agents.provider_available?(session_provider) and
+          ProviderConstraint.allows?(task, session_provider) ->
         {session_provider, nil, nil}
 
       true ->
@@ -1301,7 +1304,63 @@ defmodule Arbiter.Worker.Dispatch do
           Keyword.put(opts, :routing_decision, decision)
       end
     else
+      constrain_unrouted(task, workspace, opts)
+    end
+  end
+
+  # bd-13pqcp: a workspace not routed by quota still picks its implementer from
+  # the `agent.type` pool (`Routing.choose/3`'s ProviderPool.pick), which knows
+  # nothing about the ticket. A constrained ticket picks from that pool
+  # filtered by its constraint instead, recorded like routing's own choice
+  # (`:routed_agent_type`, so a replay re-picks). A caller's explicit provider
+  # stands — `ensure_provider_constraint/2` refuses it if it violates — and an
+  # unconstrained ticket is untouched.
+  defp constrain_unrouted(task, workspace, opts) do
+    with constraint when not is_nil(constraint) <- ProviderConstraint.from(task),
+         nil <- caller_override(opts),
+         {:ok, provider} <- ProviderConstraint.pick(workspace, task) do
       opts
+      |> Keyword.put(:agent_type, provider)
+      |> Keyword.put(:routed_agent_type, provider)
+    else
+      _ -> opts
+    end
+  end
+
+  # bd-13pqcp: the ticket's provider constraint, as the last word before any
+  # state moves. The provider this dispatch will run on (routing's pick, a
+  # resume's resolution or a caller's override) must be allowed; and a
+  # fresh admission with no caller-named provider must have *some* eligible
+  # account with capacity, or it is held — `{:provider_constraint, provider,
+  # "held — provider constraint (<detail>)"}` — never run on an excluded
+  # provider. Reviews (a PR read; the reviewer is not constrained) and
+  # ReviewGate synthetic ids are not implementer dispatches.
+  defp ensure_provider_constraint(%Issue{} = task, opts) do
+    cond do
+      is_nil(ProviderConstraint.from(task)) -> :ok
+      Keyword.get(opts, :review, false) == true -> :ok
+      Arbiter.Worker.ReviewGate.base_task_id(task.id) != task.id -> :ok
+      true -> constraint_verdict(task, opts)
+    end
+  end
+
+  defp constraint_verdict(task, opts) do
+    workspace = load_workspace(task)
+
+    # A fresh admission that names no provider must have an eligible account
+    # (`ProviderConstraint.pick/3`, the read the board's card also uses); held
+    # with that reason when it does not, rather than refused on whatever
+    # provider the unrouted default would have been.
+    held =
+      if fresh_admission?(task, opts) and is_nil(caller_override(opts)),
+        do: ProviderConstraint.pick(workspace, task)
+
+    case held do
+      {:hold, detail} ->
+        {:error, {:provider_constraint, nil, ProviderConstraint.phrase(detail)}}
+
+      _ ->
+        ProviderConstraint.check(task, quota_gate_provider(task, workspace, opts))
     end
   end
 
@@ -2918,13 +2977,13 @@ defmodule Arbiter.Worker.Dispatch do
     end
   end
 
-  defp resolve_session_agent_type(opts, %Issue{id: id}, workspace) do
-    Keyword.get(opts, :agent_type) || revision_or_resume_provider(opts, id, workspace)
+  defp resolve_session_agent_type(opts, %Issue{id: id} = task, workspace) do
+    Keyword.get(opts, :agent_type) || revision_or_resume_provider(opts, task, id, workspace)
   end
 
-  defp revision_or_resume_provider(opts, id, workspace) do
+  defp revision_or_resume_provider(opts, task, id, workspace) do
     if Keyword.get(opts, :resume) || Arbiter.Worker.ReviewGate.base_task_id(id) != id do
-      elem(Agents.resolve_revision_provider(id, workspace), 0)
+      elem(Agents.resolve_revision_provider(id, workspace, ProviderConstraint.from(task)), 0)
     end
   end
 

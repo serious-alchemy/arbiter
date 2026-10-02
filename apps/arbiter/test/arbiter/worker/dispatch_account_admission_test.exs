@@ -409,4 +409,44 @@ defmodule Arbiter.Worker.DispatchAccountAdmissionTest do
       assert Concurrency.live_count(account) == 1
     end
   end
+
+  describe "a provider constraint (bd-13pqcp)" do
+    test "an account on an excluded provider is refused, reserves nothing, and force does not override it",
+         %{ws: ws, account: account} do
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "constrained",
+          workspace_id: ws.id,
+          provider_constraint: %{"exclude" => ["claude"]}
+        })
+
+      assert {:error, {:provider_constraint, :claude, phrase}} =
+               Admission.admit(task, :claude, account: account)
+
+      assert phrase =~ "held — provider constraint (exclude claude"
+
+      assert {:error, {:provider_constraint, :claude, _}} =
+               Admission.admit(task, :claude, account: account, force: true)
+
+      assert Admission.pending() |> Enum.all?(&(&1.registry_key != task.id))
+    end
+
+    test "an account on an allowed provider is admitted as before", %{ws: ws, account: account} do
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "constrained",
+          workspace_id: ws.id,
+          provider_constraint: %{"require" => ["claude"]}
+        })
+
+      assert {:ok, :admitted} = Admission.admit(task, :claude, account: account)
+      Admission.release(task.id)
+    end
+
+    test "a ticket without a constraint is admitted as before", %{ws: ws, account: account} do
+      task = backlog!(ws, "plain")
+      assert {:ok, :admitted} = Admission.admit(task, :claude, account: account)
+      Admission.release(task.id)
+    end
+  end
 end

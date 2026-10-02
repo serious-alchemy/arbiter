@@ -119,6 +119,7 @@ defmodule Arbiter.Board.Scheduler do
           optional(:slots_free) => integer(),
           optional(:quota) => quota(),
           optional(:card_quota) => %{optional(String.t()) => quota()},
+          optional(:card_constraint) => %{optional(String.t()) => :ok | {:hold, String.t()}},
           optional(:paused) => boolean()
         }
 
@@ -167,6 +168,10 @@ defmodule Arbiter.Board.Scheduler do
       # Per-ticket quota verdicts (a ticket's own routing candidates), which
       # take precedence over the board-wide `quota` for that card.
       card_quota: Map.get(input, :card_quota) || %{},
+      # bd-13pqcp: per-ticket provider-constraint verdicts — a ticket whose
+      # constraint leaves no eligible account is held on its own, which never
+      # advances the queue.
+      card_constraint: Map.get(input, :card_constraint) || %{},
       slots_free: Map.get(input, :slots_free, 0)
     }
 
@@ -245,6 +250,7 @@ defmodule Arbiter.Board.Scheduler do
       blocked_by: Map.get(card, :blocked_by),
       conflicts_with: Map.get(card, :conflicts_with),
       claimed: acc.mutex,
+      provider_constraint: Map.get(board.card_constraint, card.id),
       scope: scope_of(card),
       in_flight: claims(acc)
     })

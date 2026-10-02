@@ -33,6 +33,7 @@ defmodule Arbiter.Agents do
   alias Arbiter.Agents.Claude
   alias Arbiter.Agents.Codex
   alias Arbiter.Agents.Gemini
+  alias Arbiter.Agents.ProviderConstraint
   alias Arbiter.Agents.ProviderPool
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Tasks.Issue
@@ -289,27 +290,67 @@ defmodule Arbiter.Agents do
   provider (there is nothing else to spawn with), but the `fallback_reason`
   says plainly that no alternative was available, so the caller/coordinator
   isn't told a fallback succeeded when it didn't.
+
+  `constraint` (bd-13pqcp) is the ticket's `Arbiter.Agents.ProviderConstraint`.
+  A provider it does not allow is treated as unavailable: the resolution moves to
+  an allowed one, and with none, hands the excluded provider back under a reason
+  naming the constraint for the spawn site's `ProviderConstraint.check/2` to
+  refuse. `nil` (the default) is exactly the behaviour above.
   """
-  @spec resolve_revision_provider(String.t(), Workspace.t() | nil) ::
+  @spec resolve_revision_provider(
+          String.t(),
+          Workspace.t() | nil,
+          Arbiter.Agents.ProviderConstraint.t() | nil
+        ) ::
           {provider :: atom(), fallback_reason :: String.t() | nil}
-  def resolve_revision_provider(task_id, workspace) when is_binary(task_id) do
+  def resolve_revision_provider(task_id, workspace, constraint \\ nil) when is_binary(task_id) do
     case Arbiter.Workers.Run.latest_authoring_provider(task_id) do
       orig when is_atom(orig) and not is_nil(orig) ->
-        if provider_available?(orig) do
-          {orig, nil}
-        else
-          case fallback_for_workspace(workspace, orig) do
-            {:ok, fallback} ->
-              {fallback, "fell back from #{orig}: #{unavailable_cause(orig)}"}
+        cond do
+          not ProviderConstraint.allows?(constraint, orig) ->
+            constrained_fallback(workspace, orig, constraint)
 
-            :error ->
-              {orig,
-               "no provider available: #{orig} #{unavailable_cause(orig)} and no alternative adapter is available; retrying #{orig}"}
-          end
+          provider_available?(orig) ->
+            {orig, nil}
+
+          true ->
+            case fallback_for_workspace(workspace, orig, constraint) do
+              {:ok, fallback} ->
+                {fallback, "fell back from #{orig}: #{unavailable_cause(orig)}"}
+
+              :error ->
+                {orig,
+                 "no provider available: #{orig} #{unavailable_cause(orig)} and no alternative adapter is available; retrying #{orig}"}
+            end
         end
 
       nil ->
-        {default_agent_type(workspace), nil}
+        default = default_agent_type(workspace)
+
+        if ProviderConstraint.allows?(constraint, default) do
+          {default, nil}
+        else
+          constrained_fallback(workspace, default, constraint)
+        end
+    end
+  end
+
+  # bd-13pqcp: `orig` (the authoring provider, or the workspace default) is
+  # excluded by the ticket's provider constraint. Move to an allowed, available
+  # provider and say so; with none, hand `orig` back with a reason that names the
+  # constraint — the spawn site's `ProviderConstraint.check/2` then refuses it,
+  # so the work waits rather than running on an excluded provider.
+  defp constrained_fallback(workspace, orig, constraint) do
+    detail = ProviderConstraint.describe(constraint)
+
+    case fallback_for_workspace(workspace, orig, constraint) do
+      {:ok, fallback} ->
+        {fallback, "fell back from #{orig}: provider constraint (#{detail})"}
+
+      :error ->
+        {orig,
+         "no provider available: #{orig} is excluded by the provider constraint (#{detail}) " <>
+           "and no allowed adapter is available"}
     end
   end
 
@@ -323,20 +364,19 @@ defmodule Arbiter.Agents do
   defp default_agent_type(%Workspace{} = ws), do: agent_type(ws, :agent) || :claude
   defp default_agent_type(nil), do: :claude
 
-  defp fallback_for_workspace(%Workspace{} = ws, orig) do
+  defp fallback_for_workspace(%Workspace{} = ws, orig, constraint) do
     pool = configured_types(ws.config, :agent)
-    candidates = (pool ++ [:claude, :gemini, :codex]) |> Enum.uniq()
-
-    case Enum.find(candidates, fn t -> t != orig and provider_available?(t) end) do
-      nil -> :error
-      t -> {:ok, t}
-    end
+    first_available((pool ++ [:claude, :gemini, :codex]) |> Enum.uniq(), orig, constraint)
   end
 
-  defp fallback_for_workspace(nil, orig) do
-    candidates = [:claude, :gemini, :codex]
+  defp fallback_for_workspace(nil, orig, constraint),
+    do: first_available([:claude, :gemini, :codex], orig, constraint)
 
-    case Enum.find(candidates, fn t -> t != orig and provider_available?(t) end) do
+  defp first_available(candidates, orig, constraint) do
+    candidates
+    |> then(&ProviderConstraint.filter(constraint, &1))
+    |> Enum.find(fn t -> t != orig and provider_available?(t) end)
+    |> case do
       nil -> :error
       t -> {:ok, t}
     end
