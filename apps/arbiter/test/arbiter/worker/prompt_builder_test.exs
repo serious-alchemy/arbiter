@@ -55,6 +55,12 @@ defmodule Arbiter.Worker.PromptBuilderTest do
            Phoenix hot-reload and cascades to kill every other running worker.
            Always use relative paths or paths rooted at /tmp/wt-golden.
 
+           TEMP FILES — Arbiter gave this run its own scratch directory, exported as
+           $TMPDIR (also $TMP and $TEMP) and removed when the run ends. Put every
+           temporary file or directory there (`mktemp` already honors it). Do NOT
+           invent `/tmp/<name>` directories: /tmp is RAM-backed and nothing cleans
+           them up.
+
 
            PROCESS DISCIPLINE — if you start a local server or any other long-running
            process to verify your work (e.g. booting a dev server to check a page in

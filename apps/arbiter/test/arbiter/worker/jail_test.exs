@@ -562,6 +562,16 @@ defmodule Arbiter.Worker.JailTest do
       assert {base, base} in flag_pairs(argv, "--ro-bind")
     end
 
+    test "binds the worker temp root writable so a run's TMPDIR is usable (bd-5ad4ch)", %{
+      base: base
+    } do
+      root = Arbiter.Config.Paths.worker_tmp_root()
+
+      assert {:ok, argv} = Jail.wrap(["agy"], worktree: base)
+
+      assert {root, root} in flag_pairs(argv, "--bind-try")
+    end
+
     test "defaults to a writable worktree", %{base: base} do
       assert {:ok, argv} = Jail.wrap(["agy"], worktree: base)
 

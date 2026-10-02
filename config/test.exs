@@ -164,6 +164,8 @@ scratch_root =
 
 config :arbiter, :scratch_root, scratch_root
 config :arbiter, :worktree_root, Path.join(scratch_root, "worktrees-test")
+config :arbiter, :worker_tmp_root, Path.join(scratch_root, "worker-tmp-test")
+config :arbiter, :run_tmp_sweeper, enabled: false
 
 # bd-5gvqgc: never let the bwrap write-jail probe decide dispatch outcomes
 # under test — whether the host can jail must not flip the :strict gate's

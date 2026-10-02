@@ -126,7 +126,9 @@ defmodule Arbiter.Agents.Gemini.SecurityTest do
       # `/tmp` (bd-f8f9ln), and `/etc` stays denied under :strict the same
       # way it does under :bypass.
       assert "write_file(/etc)" in deny
-      assert Enum.filter(allow, &String.starts_with?(&1, "write_file(")) == ["write_file(/tmp)"]
+
+      assert Enum.filter(allow, &String.starts_with?(&1, "write_file(")) ==
+               ["write_file(/tmp)", "write_file(#{Arbiter.Config.Paths.worker_tmp_root()})"]
     end
 
     test "the bootstrap baseline is present alongside operator allow rules, not replaced by them" do
@@ -551,6 +553,7 @@ defmodule Arbiter.Agents.Gemini.SecurityTest do
                Enum.sort([
                  "write_file(#{@wt})",
                  "write_file(/tmp)",
+                 "write_file(#{Arbiter.Config.Paths.worker_tmp_root()})",
                  "write_file(#{Path.join(home, ".cache/shared-hex")})",
                  "write_file(/opt/tool-cache)"
                ])
@@ -578,7 +581,10 @@ defmodule Arbiter.Agents.Gemini.SecurityTest do
     end
 
     test "with no worktree in hand only /tmp is allowed for writes" do
-      assert write_allows(strict_allow(%{}, [])) == ["write_file(/tmp)"]
+      assert write_allows(strict_allow(%{}, [])) == [
+               "write_file(/tmp)",
+               "write_file(#{Arbiter.Config.Paths.worker_tmp_root()})"
+             ]
     end
   end
 

@@ -175,6 +175,7 @@ defmodule ArbiterWeb.ApiPolicy do
     {:get, "/api/server/provider_accounts"} => :coordinator,
     {:get, "/api/server/merge_routing"} => :coordinator,
     {:get, "/api/server/tmux"} => :coordinator,
+    {:get, "/api/server/worker_tmp"} => :coordinator,
 
     # ---- install-wide settings (the REST twin of installation_config_*) ------
     # Coordinator for both: `set` is coordinator-only over MCP, and reads match

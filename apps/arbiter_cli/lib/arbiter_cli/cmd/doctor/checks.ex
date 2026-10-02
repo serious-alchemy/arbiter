@@ -47,6 +47,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       check_egress_jail(),
       check_agy_ssh_transport(),
       check_tmux(),
+      check_worker_tmp(),
       check_claude_worker_credentials(),
       check_provider_accounts(),
       check_account_policy_binding(),
@@ -890,6 +891,53 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       fatal: strict?,
       blocks_readiness: false
     }
+  end
+
+  # bd-5ad4ch: the per-run worker TMPDIR root must be disk-backed and small.
+  defp check_worker_tmp do
+    case Client.get("/api/server/worker_tmp") do
+      {:ok, %{"tmpfs" => true} = body} ->
+        %Result{
+          name: "worker temp dir",
+          status: :warn,
+          detail:
+            "#{Map.get(body, "root")} is on #{Map.get(body, "fstype")} (RAM-backed): worker " <>
+              "scratch files consume memory",
+          hint: "Set ARBITER_WORKER_TMP_ROOT (or ARBITER_SCRATCH_ROOT) to a disk-backed path.",
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      {:ok, %{"over_threshold" => true} = body} ->
+        %Result{
+          name: "worker temp dir",
+          status: :warn,
+          detail:
+            "#{Map.get(body, "root")} holds #{Map.get(body, "size_bytes")} bytes " <>
+              "(warn threshold #{Map.get(body, "threshold_bytes")})",
+          hint: "Orphaned per-run temp dirs are swept at server boot; restart or remove them.",
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      {:ok, %{"root" => root}} ->
+        %Result{
+          name: "worker temp dir",
+          status: :ok,
+          detail: "#{root} is disk-backed and within its size threshold",
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      _ ->
+        %Result{
+          name: "worker temp dir",
+          status: :ok,
+          detail: "server unreachable or predates this check — skipping",
+          fatal: false,
+          blocks_readiness: false
+        }
+    end
   end
 
   # bd-80ecol: every workspace that runs Claude with no setup token (or API
