@@ -39,8 +39,14 @@ defmodule Arbiter.Workers.OutputOffload do
       the *input*) — the analytics (`Arbiter.Workers.StepStats`) never needed
       the output.
     * `output_summary` of **git-shaped steps** (`input_summary LIKE '%git%'`,
-      ~21 MB). `Arbiter.Loop.Corpus` reads exactly those to
-      tell whether a fix pass committed or pushed, across the whole corpus.
+      ~21 MB). `Arbiter.Loop.Corpus` reads those to tell whether a fix pass
+      committed or pushed, across the whole corpus.
+    * `output_summary` of the **last 8 steps of every `fix_pass` run**.
+      `Arbiter.Loop.Corpus.last_step_outputs/1` feeds them, unfiltered, to
+      `FixPassClassifier.final_summary/2`, which uses them to recognise
+      tool-result bodies in the transcript tail of older, untagged runs. Clearing
+      them would leak tool-result text into the summary the classifier sees.
+      Keep the `8` below in step with `@summary_step_outputs` in the corpus.
     * Everything within the retention window, so the fix-pass classifier and
       live dashboards see no change for recent runs.
 
@@ -230,7 +236,14 @@ defmodule Arbiter.Workers.OutputOffload do
     end
   end
 
-  @step_where "run_id = ?1 AND occurred_at < ?2 AND output_summary IS NOT NULL AND #{@git_free}"
+  # The last 8 steps (by `occurred_at`, as the corpus orders them) of a
+  # `fix_pass` run stay: `Arbiter.Loop.Corpus` reads their `output_summary`.
+  @fix_pass_tail "id NOT IN (SELECT id FROM worker_run_steps WHERE run_id = ?1 " <>
+                   "AND (SELECT kind FROM worker_runs WHERE id = ?1) = 'fix_pass' " <>
+                   "ORDER BY occurred_at DESC LIMIT 8)"
+
+  @step_where "run_id = ?1 AND occurred_at < ?2 AND output_summary IS NOT NULL " <>
+                "AND #{@git_free} AND #{@fix_pass_tail}"
 
   defp offload_run_steps(acc, run_id, cutoff, apply?) do
     %{rows: [[count, bytes]]} =

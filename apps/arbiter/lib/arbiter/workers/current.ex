@@ -183,7 +183,7 @@ defmodule Arbiter.Workers.Current do
       run: run,
       meta: %{
         model: run.model,
-        output_lines: Arbiter.Workers.OutputOffload.output_lines(run),
+        output_lines: run.output_lines || [],
         exit_status: run.exit_code,
         failure_reason: run.failure_reason,
         failure_summary: run.failure_summary

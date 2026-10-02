@@ -195,8 +195,9 @@ The archive is also what makes it safe to thin the SQLite file. After 14 days
 (`config :arbiter, :output_offload, retention_days:`), `Arbiter.Workers.OutputOffload`
 clears `worker_runs.output_lines` once `<run_id>.log` exists, and
 `worker_run_steps.output_summary` once `<run_id>.jsonl.gz` exists. A run with no
-file keeps its column — it is the only copy — and git-shaped steps keep theirs,
-because `Arbiter.Loop.Corpus` reads them. The run pages fall back to the
+file keeps its column — it is the only copy — and git-shaped steps, plus the last
+8 steps of every `fix_pass` run, keep theirs, because `Arbiter.Loop.Corpus` reads
+them. The run pages fall back to the
 transcript tail. `mix arbiter.offload_run_output` (dry by default) runs a pass
 by hand; run `VACUUM` once to give the freed pages back to the OS. The policy
 and the alternatives that were rejected are in the module's `@moduledoc`.

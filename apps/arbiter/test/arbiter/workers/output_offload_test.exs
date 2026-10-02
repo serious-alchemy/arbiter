@@ -166,6 +166,27 @@ defmodule Arbiter.Workers.OutputOffloadTest do
       assert reload(other).name == "Bash"
     end
 
+    test "keeps the last 8 steps of a fix_pass run, which the Loop corpus reads" do
+      fix = run!(%{kind: :fix_pass})
+      archive!(fix)
+
+      steps =
+        for i <- 1..10 do
+          step!(fix, %{occurred_at: DateTime.add(~U[2026-09-01 10:00:00.000000Z], i, :second)})
+        end
+
+      impl = run!(%{})
+      archive!(impl)
+      impl_steps = for _ <- 1..10, do: step!(impl)
+
+      OutputOffload.sweep(now: @now)
+
+      {old, kept} = Enum.split(steps, 2)
+      assert Enum.all?(old, &(reload(&1).output_summary == nil))
+      assert Enum.all?(kept, &(reload(&1).output_summary == "1 test, 0 failures"))
+      assert Enum.all?(impl_steps, &(reload(&1).output_summary == nil))
+    end
+
     test "leaves steps inside the retention window" do
       run = run!(%{})
       archive!(run)

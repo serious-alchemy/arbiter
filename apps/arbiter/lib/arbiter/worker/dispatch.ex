@@ -2981,7 +2981,9 @@ defmodule Arbiter.Worker.Dispatch do
   defp thrashed?(%Run{stop_category: category}) when is_binary(category), do: false
 
   defp thrashed?(%Run{} = run),
-    do: StopReason.classify(run.exit_code, run.output_lines || []).category == :context_thrash
+    do:
+      StopReason.classify(run.exit_code, Arbiter.Workers.OutputOffload.output_lines(run)).category ==
+        :context_thrash
 
   defp latest_failed_run(task_id) when is_binary(task_id) do
     Run
