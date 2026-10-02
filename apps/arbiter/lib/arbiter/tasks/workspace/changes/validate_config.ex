@@ -25,6 +25,12 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     * If `"agent.config"` / `"review_agent.config"` is present, it must be a map.
     * If `"review_agent.cross_family"` is present, it must be a boolean
       (bd-a1ke2c).
+    * If `"agent.security.sandbox.egress"` (or a per-repo
+      `"agent.security.repos.<repo>.sandbox.egress"`) is present, it must be one
+      of `Arbiter.Agents.SecurityPolicy.valid_egress_levels/0` (`"open"`,
+      `"allowlist"`, `"none"`); a typo would otherwise read as the inherited
+      level without a word (bd-5yydxh). Its `"allow_hosts"` must be a list of
+      `host:port` entries the egress proxy accepts as a baseline.
     * If `"routing"` is present, it must be a map.
     * If `"routing.policy"` is present, it must be one of the values in
       `Arbiter.Agents.Routing.valid_policies/0` (`"static"`, `"by_priority"`,
@@ -70,6 +76,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
 
   use Ash.Resource.Change
 
+  alias Arbiter.Worker.Egress.Policy, as: EgressPolicy
   alias Ash.Changeset
 
   @impl true
@@ -86,6 +93,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     |> validate_tracker(Map.get(config, "tracker"))
     |> validate_merge(Map.get(config, "merge"))
     |> validate_agent_block("agent", Map.get(config, "agent"))
+    |> validate_agent_security(Map.get(config, "agent"))
     |> validate_agent_block("review_agent", Map.get(config, "review_agent"))
     |> validate_cross_family(Map.get(config, "review_agent"))
     |> validate_routing(Map.get(config, "routing"))
@@ -337,6 +345,84 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
   defp validate_agent_block(changeset, label, _) do
     Changeset.add_error(changeset, field: :config, message: "#{label} must be a map")
   end
+
+  # bd-5yydxh: `agent.security.sandbox.{egress,allow_hosts}`, workspace-wide
+  # and under `agent.security.repos.<repo>`. Only these two keys are checked;
+  # the rest of the security block stays lenient (SecurityPolicy ignores what
+  # it does not understand).
+  defp validate_agent_security(changeset, %{"security" => %{} = security}) do
+    repos =
+      case Map.get(security, "repos") do
+        %{} = repos -> repos
+        _ -> %{}
+      end
+
+    repos
+    |> Enum.filter(fn {_repo, override} -> is_map(override) end)
+    |> Enum.reduce(
+      validate_sandbox_egress(changeset, security, "agent.security"),
+      fn {repo, override}, cs ->
+        validate_sandbox_egress(cs, override, "agent.security.repos.#{repo}")
+      end
+    )
+  end
+
+  defp validate_agent_security(changeset, _agent), do: changeset
+
+  defp validate_sandbox_egress(changeset, %{"sandbox" => %{} = sandbox}, label) do
+    changeset
+    |> validate_egress_level(Map.get(sandbox, "egress"), label)
+    |> validate_allow_hosts(Map.get(sandbox, "allow_hosts"), label)
+  end
+
+  defp validate_sandbox_egress(changeset, _block, _label), do: changeset
+
+  defp validate_egress_level(changeset, nil, _label), do: changeset
+
+  defp validate_egress_level(changeset, level, label) do
+    valid = Arbiter.Agents.SecurityPolicy.valid_egress_levels()
+
+    if is_binary(level) and level in Enum.map(valid, &Atom.to_string/1) do
+      changeset
+    else
+      Changeset.add_error(changeset,
+        field: :config,
+        message:
+          "#{label}.sandbox.egress must be one of #{Enum.map_join(valid, ", ", &Atom.to_string/1)}; " <>
+            "got: #{inspect(level)}"
+      )
+    end
+  end
+
+  defp validate_allow_hosts(changeset, nil, _label), do: changeset
+
+  defp validate_allow_hosts(changeset, hosts, label) when is_list(hosts) do
+    case Enum.find(hosts, &(not valid_allow_host?(&1))) do
+      nil ->
+        changeset
+
+      bad ->
+        Changeset.add_error(changeset,
+          field: :config,
+          message:
+            "#{label}.sandbox.allow_hosts entries must be host:port " <>
+              "(a leading *. wildcard is allowed); got: #{inspect(bad)}"
+        )
+    end
+  end
+
+  defp validate_allow_hosts(changeset, other, label) do
+    Changeset.add_error(changeset,
+      field: :config,
+      message:
+        "#{label}.sandbox.allow_hosts must be a list of host:port strings; got: #{inspect(other)}"
+    )
+  end
+
+  defp valid_allow_host?(entry) when is_binary(entry),
+    do: match?({:ok, _}, EgressPolicy.normalize_baseline([entry]))
+
+  defp valid_allow_host?(_), do: false
 
   defp validate_routing(changeset, nil), do: changeset
 

@@ -99,6 +99,7 @@ defmodule ArbiterWeb.Api.WorkspaceJSON do
           {repo,
            %{
              "mode" => Atom.to_string(repo_policy.permissions.mode),
+             "egress" => repo_policy |> SecurityPolicy.egress() |> Atom.to_string(),
              "write_jail_warning" => Agents.write_jail_warning(adapter, repo_policy)
            }}
         end)

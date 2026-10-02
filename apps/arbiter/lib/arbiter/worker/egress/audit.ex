@@ -13,6 +13,8 @@ defmodule Arbiter.Worker.Egress.Audit do
   alias Arbiter.Worker.Egress.{Event, Policy}
 
   @spec record(map(), {String.t(), integer()}, :allow | :deny, :allow | :deny, atom()) :: :ok
+  def record(%{audit: false}, _target, _decision, _policy_verdict, _reason), do: :ok
+
   def record(ctx, {host, port}, decision, policy_verdict, reason) do
     attrs = %{
       run_id: ctx.run_id,
