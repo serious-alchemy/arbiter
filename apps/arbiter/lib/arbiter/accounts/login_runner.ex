@@ -424,26 +424,27 @@ defmodule Arbiter.Accounts.LoginRunner do
   # is something for the operator to act on. Only before the paste: once the
   # code is relayed the screen is no longer a prompt.
   defp observe(%{status: status} = state, text) when status in [:starting, :awaiting_user] do
-    recipe = state.recipe
-    before = snapshot(state)
+    scanned = scan(state, text)
 
-    state = %{
+    cond do
+      state.status == :starting and ready?(scanned) -> transition(scanned, :awaiting_user)
+      state.status == :awaiting_user and snapshot(scanned) != snapshot(state) -> announce(scanned)
+      true -> scanned
+    end
+  end
+
+  defp observe(state, _text), do: state
+
+  defp scan(%{recipe: recipe} = state, text) do
+    %{
       state
       | url: LoginRecipe.extract_url(recipe, text) || state.url,
         device_code: LoginRecipe.extract_device_code(recipe, text) || state.device_code,
         needs_paste?: LoginRecipe.awaiting_code?(recipe, text)
     }
-
-    ready? = state.url != nil and (state.needs_paste? or state.device_code != nil)
-
-    cond do
-      state.status == :starting and ready? -> transition(state, :awaiting_user)
-      state.status == :awaiting_user and snapshot(state) != before -> announce(state)
-      true -> state
-    end
   end
 
-  defp observe(state, _text), do: state
+  defp ready?(state), do: state.url != nil and (state.needs_paste? or state.device_code != nil)
 
   # No-output flows (codex device-auth) print nothing when approval lands, so
   # ask the status command now and then while waiting.
@@ -678,6 +679,6 @@ defmodule Arbiter.Accounts.LoginRunner do
 
   defp broadcast(_state), do: :ok
 
-  defp describe(reason) when is_binary(reason), do: reason
+  defp describe(%{__exception__: true} = error), do: Exception.message(error)
   defp describe(reason), do: inspect(reason)
 end

@@ -5,6 +5,7 @@ defmodule Arbiter.Application do
 
   use Application
 
+  alias Arbiter.Accounts.LoginRunner.Sweep, as: LoginSweep
   alias Arbiter.Workflows.DispatchQueueSupervisor
   alias Arbiter.Workflows.MergedPRFinalizerSupervisor
   alias Arbiter.Workflows.MergeQueueSupervisor
@@ -365,7 +366,7 @@ defmodule Arbiter.Application do
          fn ->
            primary? = Arbiter.SingleInstance.primary?()
            Arbiter.Sessions.Adoption.sweep_on_boot(primary?: primary?)
-           Arbiter.Accounts.LoginRunner.Sweep.sweep_on_boot(primary?: primary?)
+           LoginSweep.sweep_on_boot(primary?: primary?)
          end},
         id: :session_adoption_boot_task,
         restart: :temporary
