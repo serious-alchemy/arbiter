@@ -301,6 +301,9 @@ defmodule Arbiter.Reports.ReviewHealth do
 
   # ---- helpers -----------------------------------------------------------
 
+  # Every `?` is a bound parameter; what is interpolated into `sql` is this
+  # module's own constant fragments and column names, never request input.
+  # sobelow_skip ["SQL.Query"]
   defp query(sql, params), do: Repo.query!(sql, params).rows
 
   defp week(column), do: String.replace(@week, "%COL%", column)
