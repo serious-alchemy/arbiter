@@ -69,7 +69,7 @@ defmodule Arbiter.Release.UpdateCheckTest do
 
       start_check(name, running_version: "0.2.0")
       caller = Task.async(fn -> UpdateCheck.check_now(name) end)
-      assert_receive {:in_flight, plug_pid}
+      assert_receive {:in_flight, plug_pid}, 5_000
 
       state = UpdateCheck.state(name)
       assert state.enabled

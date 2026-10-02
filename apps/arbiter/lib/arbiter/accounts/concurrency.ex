@@ -120,6 +120,7 @@ defmodule Arbiter.Accounts.Concurrency do
   alias Arbiter.Accounts.WorkspaceProviderAccount
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker.Registry, as: WorkerRegistry
+  alias Arbiter.Workflows.DispatchQueue
 
   @type headroom :: non_neg_integer() | :unlimited
 
@@ -306,8 +307,29 @@ defmodule Arbiter.Accounts.Concurrency do
     pending =
       Enum.reject(Admission.pending(), &MapSet.member?(counted, &1.registry_key))
 
-    counted = dispatches |> without_parked_primaries() |> Enum.reject(& &1.released)
+    counted =
+      dispatches
+      |> without_parked_primaries()
+      |> Enum.reject(& &1.released)
+      |> without_held_for_quota()
+
     counted ++ pending
+  end
+
+  # bd-zkmvia: a ticket whose next round the quota gate is holding
+  # (`Arbiter.Workflows.DispatchQueue`) has no agent running, and the hold can
+  # outlast hours: its lingering worker record holds no account slot. The
+  # round re-acquires one through admission when the hold drains.
+  defp without_held_for_quota(dispatches) do
+    held =
+      dispatches
+      |> Enum.map(& &1.workspace_id)
+      |> Enum.uniq()
+      |> Map.new(fn ws -> {ws, ws |> DispatchQueue.held_items() |> Enum.map(& &1.task_id)} end)
+
+    Enum.reject(dispatches, fn %{workspace_id: ws, registry_key: key} ->
+      Enum.any?(Map.get(held, ws, []), &WorkerRegistry.owned_by?(key, &1))
+    end)
   end
 
   # A worker that released its hold (`Arbiter.Worker.Registry.put_dispatch/4`,

@@ -136,6 +136,7 @@ defmodule Arbiter.Workflows.DispatchQueue do
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker
   alias Arbiter.Worker.PreflightHold
+  alias Arbiter.Worker.ResumeSlot
   alias Arbiter.Workers.Run
   alias Arbiter.Workflows.DispatchQueueSupervisor
 
@@ -416,6 +417,8 @@ defmodule Arbiter.Workflows.DispatchQueue do
     :exit, _ -> false
   end
 
+  def held?(_workspace_id, _task_id), do: false
+
   # ---- GenServer callbacks ------------------------------------------------
 
   @impl true
@@ -585,7 +588,8 @@ defmodule Arbiter.Workflows.DispatchQueue do
         if paused?(provider, account) do
           reroutable?(state, gate, item)
         else
-          not match?({:hold, _}, gate.check(nil, quota, state.workspace, gate_opts))
+          not match?({:hold, _}, gate.check(nil, quota, state.workspace, gate_opts)) and
+            slot_free?(state, item)
         end
       end)
 
@@ -593,6 +597,25 @@ defmodule Arbiter.Workflows.DispatchQueue do
     # `{:requeue, item}` back for any that fail, so nothing is dropped.
     _ = spawn_drain(state, to_dispatch)
     %{state | items: on_hold ++ keep}
+  end
+
+  # bd-zkmvia: a held round for an In-progress ticket holds no slot while it
+  # waits (`SlotGate.holds_slot?/1`), so replaying it is a new admission:
+  # headroom in the quota is not enough, the cap needs room too. The item is
+  # still queued here, so `ResumeSlot.admit/2` judges the ticket as not holding.
+  # Fails open: an unreadable ticket or cap must not strand the round.
+  defp slot_free?(%State{items: items}, %{task_id: task_id, opts: opts}) do
+    with true <- Keyword.get(opts, :review) != true,
+         {:ok, %Issue{state: :active} = task} <- Ash.get(Issue, task_id) do
+      # This process cannot ask itself (`held?/2` is a call), so it names the
+      # held tasks.
+      held_ids = Enum.map(items, & &1.task_id)
+      match?({:ok, _}, ResumeSlot.admit(task, origin: :automatic, held_ids: held_ids))
+    else
+      _ -> true
+    end
+  rescue
+    _ -> true
   end
 
   # bd-5ef587: would a replay of this pause-held item route to another
