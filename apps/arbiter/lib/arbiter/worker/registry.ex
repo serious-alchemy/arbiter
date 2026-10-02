@@ -49,14 +49,26 @@ defmodule Arbiter.Worker.Registry do
   long as the process does, so a crashed or killed worker releases its slot
   with no decrement call on any path.
 
+  `released: true` (bd-cut6uv) marks a worker that is parked on a machine with no
+  agent of its own — its ReviewGate is waiting for CI before it dispatches a
+  reviewer. `Arbiter.Accounts.Concurrency` does not count it while it is set, so
+  the account is free for other work; the worker clears it again
+  (`released: false`, the default) when the wait ends.
+
   Must be called *from* the registered process; `Registry.update_value/3` only
   lets an owner rewrite its own value. A non-owner (or an unregistered key) is
   a no-op rather than an error — the dispatch context is an optimisation for
   the ceiling, never something a worker's boot should die on.
   """
-  @spec put_dispatch(String.t(), String.t() | nil, atom() | String.t() | nil) :: :ok
-  def put_dispatch(registry_key, workspace_id, provider) when is_binary(registry_key) do
-    value = %{workspace_id: workspace_id, provider: normalize_provider(provider)}
+  @spec put_dispatch(String.t(), String.t() | nil, atom() | String.t() | nil, keyword()) :: :ok
+  def put_dispatch(registry_key, workspace_id, provider, opts \\ [])
+      when is_binary(registry_key) do
+    value = %{
+      workspace_id: workspace_id,
+      provider: normalize_provider(provider),
+      released: Keyword.get(opts, :released, false)
+    }
+
     Registry.update_value(__MODULE__, registry_key, fn _ -> value end)
     :ok
   rescue
@@ -71,7 +83,7 @@ defmodule Arbiter.Worker.Registry do
 
   @doc """
   Every **live** registry entry that recorded a dispatch context via
-  `put_dispatch/3`, as `%{registry_key:, pid:, workspace_id:, provider:}`.
+  `put_dispatch/3`, as `%{registry_key:, pid:, workspace_id:, provider:, released:}`.
 
   Entries whose process has already died are dropped here rather than by the
   caller: Registry's monitor-based cleanup is asynchronous, so a killed worker
@@ -83,16 +95,25 @@ defmodule Arbiter.Worker.Registry do
             registry_key: String.t(),
             pid: pid(),
             workspace_id: String.t() | nil,
-            provider: String.t() | nil
+            provider: String.t() | nil,
+            released: boolean()
           }
         ]
   def live_dispatches do
     __MODULE__
     |> Registry.select([{{:"$1", :"$2", :"$3"}, [], [{{:"$1", :"$2", :"$3"}}]}])
     |> Enum.flat_map(fn
-      {key, pid, %{workspace_id: ws_id, provider: provider}} ->
+      {key, pid, %{workspace_id: ws_id, provider: provider} = value} ->
         if Process.alive?(pid) do
-          [%{registry_key: key, pid: pid, workspace_id: ws_id, provider: provider}]
+          [
+            %{
+              registry_key: key,
+              pid: pid,
+              workspace_id: ws_id,
+              provider: provider,
+              released: Map.get(value, :released, false)
+            }
+          ]
         else
           []
         end

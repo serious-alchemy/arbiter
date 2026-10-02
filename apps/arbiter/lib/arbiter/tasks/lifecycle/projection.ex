@@ -103,8 +103,8 @@ defmodule Arbiter.Tasks.Lifecycle.Projection do
   end
 
   @doc """
-  A view as JSON: `state`, `column`, `step`, `blocked_by` and `attention`
-  (`attention_payload/1`), atoms as strings.
+  A view as JSON: `state`, `column`, `step`, `blocked_by`, `attention`
+  (`attention_payload/1`) and `ci_wait` (`ci_wait_payload/1`), atoms as strings.
   """
   @spec payload(View.t()) :: map()
   def payload(%{} = view) do
@@ -113,7 +113,24 @@ defmodule Arbiter.Tasks.Lifecycle.Projection do
       column: str(view.column),
       step: str(view.step),
       blocked_by: view.blocked_by,
-      attention: attention_payload(view.attention)
+      attention: attention_payload(view.attention),
+      ci_wait: ci_wait_payload(Map.get(view, :ci_wait))
+    }
+  end
+
+  @doc """
+  A ticket's ReviewGate CI wait (bd-cut6uv) as JSON — `sha`, `since` and the
+  `label` surfaces render (`waiting on CI <sha>`); nil when the ticket is not
+  waiting on CI.
+  """
+  @spec ci_wait_payload(map() | nil) :: map() | nil
+  def ci_wait_payload(nil), do: nil
+
+  def ci_wait_payload(%{sha: sha} = wait) do
+    %{
+      "sha" => sha,
+      "since" => Map.get(wait, :since),
+      "label" => Arbiter.Worker.ReviewCi.wait_label(wait)
     }
   end
 

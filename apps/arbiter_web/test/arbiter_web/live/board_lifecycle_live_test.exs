@@ -209,6 +209,40 @@ defmodule ArbiterWeb.BoardLifecycleLiveTest do
       assert has_element?(view, ~s(#card-#{merging.id}), "in merge queue")
     end
 
+    # bd-cut6uv: a ticket whose ReviewGate waits on CI is In progress but holds
+    # no slot, and its card says what it is waiting on.
+    test "an In progress card waiting on CI names the head and holds no slot",
+         %{conn: conn, ws: ws} do
+      waiting = active_issue(ws, "waiting on ci")
+      other = active_issue(ws, "working")
+      sha = "a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0"
+
+      # The author is parked on its review gate with no agent live.
+      {:ok, author} = Worker.start(task_id: waiting.id, repo: "r", workspace_id: ws.id)
+      on_exit(fn -> if Process.alive?(author), do: Worker.stop(author) end)
+
+      :sys.replace_state(author, fn s ->
+        %{s | state: :waiting, waiting_on: :review_gate}
+      end)
+
+      :ok =
+        Arbiter.Tasks.PullRequest.record_review_gate(waiting.id, %{
+          ci_wait: Arbiter.Worker.ReviewCi.marker(sha, 1, %{interval_ms: 60_000, max_polls: 30})
+        })
+
+      view = live_board(conn)
+
+      assert has_element?(view, ~s(#card-#{waiting.id} [data-step="awaiting_ci"]))
+
+      assert has_element?(
+               view,
+               ~s(#card-#{waiting.id}),
+               "waiting on CI #{String.slice(sha, 0, 12)}"
+             )
+
+      assert has_element?(view, ~s(#card-#{other.id} [data-step="implementing"]))
+    end
+
     test "a Closed card shows its close reason", %{conn: conn, ws: ws} do
       done = closed_issue(ws, "done", :completed)
       dropped = closed_issue(ws, "dropped", :wont_do)

@@ -165,6 +165,14 @@ defmodule ArbiterCli.ConfigSchema do
     review / review_gate  (map)
       required    bool — whether a review round gates completion
       max_rounds  positive integer — caps difficulty-derived round count (min wins)
+      require_ci_green  bool — (review only, bd-cut6uv) the ReviewGate waits for CI
+                  to be green on the exact head SHA before it dispatches a reviewer,
+                  and the reviewer skips the full test suite. Red CI re-runs the
+                  failed jobs once (green on the re-run is recorded as a flake),
+                  then goes to a fix pass; CI that never reports within
+                  merge.watchdog_max_polls falls back to a reviewer that runs the
+                  tests. Default: on for a github/gitlab merge strategy, off for
+                  direct. Per-repo override: review.repos.<repo>.require_ci_green.
 
     notes_gate  (map — the research-directive notes gate, bd-4qjl0q)
       nudge_cap   non-negative integer — send-backs a research worker gets for

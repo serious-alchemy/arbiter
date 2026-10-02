@@ -96,6 +96,7 @@ defmodule ArbiterWeb.BoardLive do
   @step_labels %{
     implementing: "implementing",
     in_review: "in review",
+    awaiting_ci: "waiting on CI",
     addressing_review: "addressing review",
     fixing_ci: "fixing CI",
     resolving_conflict: "resolving conflict",
@@ -770,6 +771,10 @@ defmodule ArbiterWeb.BoardLive do
   # The column's one line about the card (see the moduledoc).
   defp detail("blocked", card), do: EdgeGate.describe({:waiting_on, card.blocked_by})
   defp detail("ready", card), do: ready_reason(card.reason)
+
+  defp detail("in_progress", %{step: :awaiting_ci, ci_wait: %{sha: _} = wait}),
+    do: Arbiter.Worker.ReviewCi.wait_label(wait)
+
   defp detail(column, card) when column in ["in_progress", "merging"], do: step_label(card.step)
   defp detail("verifying", _card), do: "awaiting verification — restart & observe"
   defp detail("closed", card), do: close_reason_label(Map.get(card, :close_reason))

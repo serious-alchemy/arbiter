@@ -336,9 +336,13 @@ the ticket.
 
 ### Step
 
-- In progress: `implementing | in_review | addressing_review | fixing_ci |
-  resolving_conflict`, from `Arbiter.Worker.Phase` over the runs — a live
-  subordinate round wins, and `implementing` is the default.
+- In progress: `implementing | in_review | awaiting_ci | addressing_review |
+  fixing_ci | resolving_conflict`, from `Arbiter.Worker.Phase` over the runs — a
+  live subordinate round wins, and `implementing` is the default. `awaiting_ci`
+  (bd-cut6uv) is `in_review` while the ReviewGate holds its reviewer back until
+  CI is green on the head: the ticket carries a `ci_wait` marker
+  (`Arbiter.Worker.ReviewCi.waiting/2`), the card reads `waiting on CI <sha>`,
+  and the ticket holds no slot (below).
 - Merging: `behind_base` for a PR behind its base; `merge_blocked` for a
   conflict, red CI, a draft, or an approved PR the forge still refuses;
   `waiting_ci` while CI runs (or a deferred merge on record is `ci_pending`);
@@ -376,6 +380,7 @@ sharing its id; a ticket gets exactly one card.
 | parked on a human (`:waiting_on_you`) | **released** | held — `:active`, with attention |
 | open PR (`waiting_ci_merge`) | held | released — `:merging` |
 | `:unknown` liveness probe | held | whatever the state says |
+| ReviewGate waiting on CI before dispatching a reviewer (bd-cut6uv) | held | released — still `:active`, but `holds_slot?/1` skips a ticket with a live `ci_wait` marker |
 | merged, waiting on verification | released | released — `:verifying` |
 
 This replaces the operator's 2026-09-21 rule "another slot doesn't open until

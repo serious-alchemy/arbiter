@@ -44,6 +44,22 @@ defmodule ArbiterCli.OutputTest do
       assert out =~ "Build the thing"
     end
 
+    test "names a ReviewGate waiting on CI (bd-cut6uv)" do
+      issue = %{
+        "id" => "x",
+        "title" => "T",
+        "state" => "active",
+        "step" => "awaiting_ci",
+        "ci_wait" => %{"sha" => "a1b2c3d4e5f6a7b8", "label" => "waiting on CI a1b2c3d4e5f6"}
+      }
+
+      out = Output.format_issue_detail(issue)
+      assert out =~ "Step:         awaiting_ci"
+      assert out =~ "Review CI:    waiting on CI a1b2c3d4e5f6"
+
+      refute Output.format_issue_detail(%{issue | "ci_wait" => nil}) =~ "Review CI:"
+    end
+
     test "skips empty sections" do
       issue = %{"id" => "x", "title" => "T", "state" => "queued"}
       out = Output.format_issue_detail(issue)
