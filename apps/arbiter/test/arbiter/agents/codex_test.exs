@@ -285,6 +285,25 @@ defmodule Arbiter.Agents.CodexTest do
       assert chunk_after(argv, "-m") == "gpt-5-codex"
     end
 
+    test "routing `:thinking` level becomes -c model_reasoning_effort", %{tmp: tmp} do
+      _codex = stub_codex(tmp)
+
+      for level <- ~w(low medium high xhigh max) do
+        assert {:ok, argv} = Codex.default_argv("p", thinking: level)
+        overrides = for ["-c", v] <- Enum.chunk_every(argv, 2, 1), do: v
+        assert "model_reasoning_effort=\"#{level}\"" in overrides
+      end
+    end
+
+    test "no effort override for none/nil/unknown thinking", %{tmp: tmp} do
+      _codex = stub_codex(tmp)
+
+      for opts <- [[], [thinking: nil], [thinking: ""], [thinking: "none"], [thinking: "bogus"]] do
+        assert {:ok, argv} = Codex.default_argv("p", opts)
+        refute Enum.any?(argv, &(is_binary(&1) and &1 =~ "model_reasoning_effort"))
+      end
+    end
+
     test "large prompts are delivered via stdin, not spliced into argv", %{tmp: tmp} do
       codex = stub_codex(tmp)
 
