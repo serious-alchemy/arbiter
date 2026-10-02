@@ -129,7 +129,11 @@ defmodule Arbiter.Agents.Codex do
   # Base `codex exec` flags shared by every spawn: JSON event stream + tolerate
   # linked worktrees (whose `.git` is a file, which Codex's repo check can trip
   # on). Callers append sandbox + model flags, then the `--`/prompt tail.
-  @base_exec_flags ["--json", "--skip-git-repo-check"]
+  # `--ignore-user-config` (bd-4vgxwi, G5 stopgap) stops workers inheriting the
+  # operator's `$CODEX_HOME/config.toml` (model, effort, profiles, personal MCP
+  # servers); auth still comes from CODEX_HOME. Everything the worker needs
+  # (model, effort, MCP, sandbox) is therefore passed explicitly below.
+  @base_exec_flags ["--json", "--skip-git-repo-check", "--ignore-user-config"]
   @inline_prompt_script ~s(exec "$@" < /dev/null)
   @stdin_prompt_script ~s(f="$1"; shift; exec "$@" < "$f")
 
@@ -533,21 +537,6 @@ defmodule Arbiter.Agents.Codex do
   # `-s` is rejected by `codex exec resume` ("unexpected argument '-s'"), but
   # `-c` is accepted by both `exec` and `exec resume`, so express the sandbox
   # as a config override to keep resume working under :strict/:auto.
-  # The routing thinking level → `-c model_reasoning_effort="<level>"`. A config
-  # override, so it is backend-neutral (any Responses-API `model_provider`).
-  # "none"/nil/unknown emit nothing: the operator's config.toml effort stands.
-  @effort_levels ~w(low medium high xhigh max)
-
-  defp effort_argv(opts) do
-    case Keyword.get(opts, :thinking) do
-      level when level in @effort_levels ->
-        ["-c", "model_reasoning_effort=#{inspect(level)}"]
-
-      _ ->
-        []
-    end
-  end
-
   defp sandbox_mode_config(mode), do: ["-c", "sandbox_mode=#{inspect(mode)}"]
 
   # Codex only loads `<worktree>/.codex/config.toml` when the project is trusted
@@ -570,6 +559,29 @@ defmodule Arbiter.Agents.Codex do
         else
           []
         end
+
+      _ ->
+        []
+    end
+  end
+
+  # Reasoning effort is set explicitly because the operator's config no longer
+  # supplies it; with no `:thinking` opt the Codex default applies.
+  @doc false
+  def effort_argv(opts) do
+    level =
+      case Keyword.get(opts, :thinking) do
+        l when is_atom(l) and not is_nil(l) -> Atom.to_string(l)
+        l -> l
+      end
+
+    case level do
+      l when l in ["none", "minimal", "low", "medium", "high", "xhigh"] ->
+        ["-c", "model_reasoning_effort=#{inspect(l)}"]
+
+      # Routing's "max" has no Codex equivalent; clamp to the highest level.
+      "max" ->
+        ["-c", "model_reasoning_effort=\"xhigh\""]
 
       _ ->
         []

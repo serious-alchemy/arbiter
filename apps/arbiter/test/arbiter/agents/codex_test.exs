@@ -126,6 +126,44 @@ defmodule Arbiter.Agents.CodexTest do
       end
     end
 
+    test "ignores the operator's ~/.codex config and sets effort explicitly", %{tmp: tmp} do
+      stub_codex(tmp)
+
+      assert {:ok, argv} = Codex.default_argv("p", thinking: "high")
+      assert "--ignore-user-config" in argv
+      assert "model_reasoning_effort=\"high\"" in argv
+
+      assert {:ok, argv} = Codex.default_argv("p", [])
+      assert "--ignore-user-config" in argv
+      refute Enum.any?(argv, &String.starts_with?(&1, "model_reasoning_effort"))
+    end
+
+    test "maps every routing effort level, atom or string", %{tmp: tmp} do
+      stub_codex(tmp)
+
+      for {given, want} <- [
+            {"xhigh", "xhigh"},
+            {:xhigh, "xhigh"},
+            {"none", "none"},
+            {:medium, "medium"},
+            {"max", "xhigh"}
+          ] do
+        assert {:ok, argv} = Codex.default_argv("p", thinking: given)
+        assert "model_reasoning_effort=#{inspect(want)}" in argv
+      end
+
+      assert {:ok, argv} = Codex.default_argv("p", thinking: "bogus")
+      refute Enum.any?(argv, &String.starts_with?(&1, "model_reasoning_effort"))
+    end
+
+    test "resumed argv keeps --ignore-user-config and effort", %{tmp: tmp} do
+      stub_codex(tmp)
+      assert {:ok, argv} = Codex.default_argv("p", thinking: "xhigh")
+      assert {:ok, resumed} = Codex.splice_prompt(argv, ["--resume", "sess-1", "go"])
+      assert "--ignore-user-config" in resumed
+      assert "model_reasoning_effort=\"xhigh\"" in resumed
+    end
+
     test "builds a `codex exec --json` invocation wrapped for closed stdin", %{tmp: tmp} do
       codex = stub_codex(tmp)
 
@@ -245,25 +283,6 @@ defmodule Arbiter.Agents.CodexTest do
 
       assert {:ok, argv} = Codex.default_argv("the prompt", model: "gpt-5-codex")
       assert chunk_after(argv, "-m") == "gpt-5-codex"
-    end
-
-    test "routing `:thinking` level becomes -c model_reasoning_effort", %{tmp: tmp} do
-      _codex = stub_codex(tmp)
-
-      for level <- ~w(low medium high xhigh max) do
-        assert {:ok, argv} = Codex.default_argv("p", thinking: level)
-        overrides = for ["-c", v] <- Enum.chunk_every(argv, 2, 1), do: v
-        assert "model_reasoning_effort=\"#{level}\"" in overrides
-      end
-    end
-
-    test "no effort override for none/nil/unknown thinking", %{tmp: tmp} do
-      _codex = stub_codex(tmp)
-
-      for opts <- [[], [thinking: nil], [thinking: ""], [thinking: "none"], [thinking: "bogus"]] do
-        assert {:ok, argv} = Codex.default_argv("p", opts)
-        refute Enum.any?(argv, &(is_binary(&1) and &1 =~ "model_reasoning_effort"))
-      end
     end
 
     test "large prompts are delivered via stdin, not spliced into argv", %{tmp: tmp} do
