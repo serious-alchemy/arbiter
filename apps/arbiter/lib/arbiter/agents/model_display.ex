@@ -19,6 +19,7 @@ defmodule Arbiter.Agents.ModelDisplay do
   | `gemini-3.*-flash*` (agy) | Flash  |
   | `gemini-3.*-pro*` (agy)   | Pro    |
   | `gpt-oss*` (agy)    | GPT-OSS |
+  | `gpt-*` (Codex)     | GPT-5.5, GPT-5 Codex, … |
 
   The agy fork's own tier map (bd-d2yut8) resolves to Gemini 3.x ids with an
   effort suffix (`gemini-3.8-flash-low`, `gemini-3.1-pro-high`, …) — a fixed
@@ -75,5 +76,26 @@ defmodule Arbiter.Agents.ModelDisplay do
   end
 
   defp agy_family("gpt-oss" <> _), do: "GPT-OSS"
+
+  # Codex / OpenAI Responses-API ids (bd-9q25ck): `gpt-5.5`, `gpt-5-codex`,
+  # `gpt-5.1-codex-mini`. Keep the version and any alphabetic qualifier, drop
+  # date stamps and other numeric tails: `GPT-5.5`, `GPT-5 Codex`,
+  # `GPT-5.1 Codex Mini`. Matches on the id alone, so any backend serving a
+  # `gpt-*` id (Ollama, other Responses-API hosts) renders the same.
+  defp agy_family("gpt-" <> rest) do
+    case String.split(rest, "-", trim: true) do
+      [version | tail] ->
+        quals =
+          tail
+          |> Enum.filter(&String.match?(&1, ~r/^[a-z]+$/))
+          |> Enum.map(&String.capitalize/1)
+
+        Enum.join(["GPT-" <> version | quals], " ")
+
+      [] ->
+        nil
+    end
+  end
+
   defp agy_family(_model), do: nil
 end
