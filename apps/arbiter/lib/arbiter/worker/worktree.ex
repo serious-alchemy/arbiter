@@ -946,7 +946,8 @@ defmodule Arbiter.Worker.Worktree do
           {:ok, boolean()} | {:error, error_reason()}
   def has_injected_config_in_commits?(path, base_ref \\ "main") when is_binary(path) do
     with base when is_binary(base) <- merge_base(path, base_ref),
-         {:ok, output} <- run_git(["diff", "--name-only", "--diff-filter=A", base <> "..HEAD", "--"], cd: path) do
+         {:ok, output} <-
+           run_git(["diff", "--name-only", "--diff-filter=A", base <> "..HEAD", "--"], cd: path) do
       changed = String.split(output, "\n", trim: true)
       found? = Enum.any?(changed, &injected_config_path?/1)
       {:ok, found?}
