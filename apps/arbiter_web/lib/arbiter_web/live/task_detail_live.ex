@@ -917,8 +917,6 @@ defmodule ArbiterWeb.TaskDetailLive do
     end
   end
 
-  # Only send an enum-ish field when the form actually supplied one — a
-  # partial POST must not blank out `issue_type`.
   # bd-13pqcp: the provider constraint is a mode (none / require / exclude) and
   # a comma list; "none" — or a mode with no providers — clears it. The
   # resource canonicalizes and validates (unknown provider, `agy` → `gemini`).
@@ -934,6 +932,8 @@ defmodule ArbiterWeb.TaskDetailLive do
 
   defp put_provider_constraint(attrs, _params), do: attrs
 
+  # Only send an enum-ish field when the form actually supplied one — a
+  # partial POST must not blank out `issue_type`.
   # The edit modal's initial mode / list, from what was typed else what is stored.
   defp provider_mode(edit_params, task),
     do: TaskForm.value(edit_params, "provider_mode", stored_constraint(task) |> elem(0))

@@ -299,6 +299,10 @@ defmodule Arbiter.Board.Scheduler do
   defp phrase({:conflicts_with, peer} = hold, mutex),
     do: "blocked — #{Lifecycle.describe_hold(hold)} (#{Map.get(mutex, peer, @unlabelled_state)})"
 
+  # bd-13pqcp: a provider-constraint hold reads `held — provider constraint (…)`.
+  defp phrase({:provider_constraint, _detail} = hold, _mutex),
+    do: "held — " <> Lifecycle.describe_hold(hold)
+
   defp phrase(hold, _mutex), do: "blocked — " <> Lifecycle.describe_hold(hold)
 
   # A bare list of ids is accepted so a caller that has no states to report

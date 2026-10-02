@@ -218,6 +218,21 @@ defmodule Arbiter.Worker.ProviderConstraintDispatchTest do
       assert latest_run(task.id).provider == "claude"
     end
 
+    test "most_quota with no attached accounts: the pool's excluded head is skipped, not refused on every retry" do
+      ws =
+        workspace!(%{
+          "agent" => %{"type" => ["codex", "claude"]},
+          "routing" => %{"provider_selection" => "most_quota"}
+        })
+
+      task = task!(ws, %{provider_constraint: @exclude_codex})
+
+      {:ok, result} = Dispatch.dispatch(task.id, force: true, repo: "r", start_driver: false)
+
+      assert Worker.state(result.worker_pid).meta[:provider] == "claude"
+      assert latest_run(task.id).provider == "claude"
+    end
+
     test "a caller-named provider that violates the constraint is refused, not run" do
       %{ws: ws} = routed!()
       task = task!(ws, %{provider_constraint: @exclude_codex})

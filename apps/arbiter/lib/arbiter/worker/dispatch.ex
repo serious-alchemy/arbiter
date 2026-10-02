@@ -1301,7 +1301,11 @@ defmodule Arbiter.Worker.Dispatch do
           |> put_routing_decision(selection.decision)
 
         {:legacy, decision} ->
-          Keyword.put(opts, :routing_decision, decision)
+          # No routed candidates: the pool pick still applies, filtered by the
+          # ticket's constraint (bd-13pqcp), so dispatch and board agree.
+          opts
+          |> Keyword.put(:routing_decision, decision)
+          |> then(&constrain_unrouted(task, workspace, &1))
       end
     else
       constrain_unrouted(task, workspace, opts)
@@ -2866,7 +2870,12 @@ defmodule Arbiter.Worker.Dispatch do
         # bd-btcdrf: a `sandbox.backend` with no implementation is refused here,
         # before any provider is chosen or a worktree session built, so the
         # operator sees it at dispatch rather than as a late spawn error.
-        case sandbox_checked_provider(choice.type, policy, Agents.agent_pool(workspace),
+        #
+        # bd-13pqcp: the swap pool is filtered by the ticket's provider
+        # constraint, so a strict-policy swap never lands on an excluded one.
+        swap_pool = ProviderConstraint.filter(task, Agents.agent_pool(workspace))
+
+        case sandbox_checked_provider(choice.type, policy, swap_pool,
                explicit: not is_nil(agent_type)
              ) do
           {:error, :ineligible} ->

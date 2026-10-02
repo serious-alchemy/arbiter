@@ -115,7 +115,7 @@ defmodule Arbiter.Board.SnapshotProviderConstraintTest do
     ready = load_ready(ws, [stuck, issue("t-2", ws)])
 
     assert %{state: :blocked, reason: reason} = ready["t-1"]
-    assert reason =~ "provider constraint (exclude claude, gemini"
+    assert reason =~ "held — provider constraint (exclude claude, gemini"
     assert %{state: :next} = ready["t-2"]
   end
 
@@ -128,7 +128,7 @@ defmodule Arbiter.Board.SnapshotProviderConstraintTest do
 
     stuck = issue("t-1", ws, %{provider_constraint: %{"require" => ["claude"]}})
     assert %{"t-1" => %{state: :blocked, reason: reason}} = load_ready(ws, [stuck])
-    assert reason =~ "provider constraint (require claude"
+    assert reason =~ "held — provider constraint (require claude"
     assert reason =~ "at capacity"
   end
 
@@ -146,7 +146,7 @@ defmodule Arbiter.Board.SnapshotProviderConstraintTest do
     ready = load_ready(ws, [stuck, free])
 
     assert %{state: :blocked, reason: reason} = ready["t-1"]
-    assert reason =~ "provider constraint (require codex"
+    assert reason =~ "held — provider constraint (require codex"
     assert reason =~ "codex:#{codex.slug} at capacity"
     assert %{state: :next} = ready["t-2"]
   end
