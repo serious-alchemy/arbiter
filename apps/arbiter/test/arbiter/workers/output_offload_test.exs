@@ -199,28 +199,101 @@ defmodule Arbiter.Workers.OutputOffloadTest do
   end
 
   describe "supervised sweeper" do
+    setup do
+      on_exit(fn -> Arbiter.Settings.set_output_offload_enabled(nil) end)
+    end
+
+    defp tick(opts) do
+      pid =
+        start_supervised!(
+          {OutputOffload, opts ++ [name: nil, enabled: nil, initial_delay_ms: 3_600_000]},
+          id: make_ref()
+        )
+
+      send(pid, :sweep)
+      _ = :sys.get_state(pid)
+      pid
+    end
+
     test "runs the sweep itself on the primary instance, and not on a secondary" do
       run = run!(%{completed_at: ~U[2026-01-01 00:00:00.000000Z]})
       log!(run)
 
-      secondary =
-        start_supervised!(
-          {OutputOffload, name: nil, enabled: false, primary?: fn -> false end},
-          id: :secondary
-        )
-
-      send(secondary, :sweep)
-      _ = :sys.get_state(secondary)
+      tick(enabled: true, primary?: fn -> false end)
       assert reload(run).output_lines == ["a", "b"]
 
-      primary =
+      tick(enabled: true, primary?: fn -> true end)
+      assert reload(run).output_lines == []
+    end
+
+    test "never sweeps on a fresh install with no setting" do
+      assert Arbiter.Settings.output_offload_enabled() == nil
+      run = run!(%{completed_at: ~U[2026-01-01 00:00:00.000000Z]})
+      log!(run)
+
+      tick(primary?: fn -> true end)
+      assert reload(run).output_lines == ["a", "b"]
+    end
+
+    test "the installation setting turns it on, and unsetting turns it off, with no restart" do
+      run = run!(%{completed_at: ~U[2026-01-01 00:00:00.000000Z]})
+      log!(run)
+
+      pid =
         start_supervised!(
-          {OutputOffload, name: nil, enabled: false, primary?: fn -> true end},
-          id: :primary
+          {OutputOffload,
+           name: nil, enabled: nil, initial_delay_ms: 3_600_000, primary?: fn -> true end}
         )
 
-      send(primary, :sweep)
-      _ = :sys.get_state(primary)
+      {:ok, true} = Arbiter.Settings.set_output_offload_enabled(true)
+      {:ok, false} = Arbiter.Settings.set_output_offload_enabled(false)
+      send(pid, :sweep)
+      _ = :sys.get_state(pid)
+      assert reload(run).output_lines == ["a", "b"]
+
+      {:ok, true} = Arbiter.Settings.set_output_offload_enabled(true)
+      send(pid, :sweep)
+      _ = :sys.get_state(pid)
+      assert reload(run).output_lines == []
+
+      other = run!(%{completed_at: ~U[2026-01-01 00:00:00.000000Z]})
+      log!(other)
+      {:ok, nil} = Arbiter.Settings.set_output_offload_enabled(nil)
+      send(pid, :sweep)
+      _ = :sys.get_state(pid)
+      assert reload(other).output_lines == ["a", "b"]
+    end
+  end
+
+  describe "Arbiter.Release.offload_report/1" do
+    test "dry run reports per-table counts, bytes and kept-for-no-file, and writes nothing" do
+      with_log = run!(%{completed_at: ~U[2026-01-01 00:00:00.000000Z]})
+      no_log = run!(%{completed_at: ~U[2026-01-01 00:00:00.000000Z]})
+      log!(with_log)
+      step = step!(with_log, %{occurred_at: ~U[2026-01-01 00:00:00.000000Z]})
+      archive!(with_log)
+
+      report = Arbiter.Release.offload_report(start: false)
+
+      assert report.apply? == false
+      assert report.lines_offloaded == 1
+      assert report.lines_bytes == byte_size(~s(["a","b"]))
+      assert report.lines_no_file == 1
+      assert report.steps_offloaded == 1
+      assert report.steps_bytes == byte_size("1 test, 0 failures")
+      assert reload(with_log).output_lines == ["a", "b"]
+      assert reload(no_log).output_lines == ["a", "b"]
+      assert reload(step).output_summary == "1 test, 0 failures"
+    end
+
+    test "apply: true clears them" do
+      run = run!(%{completed_at: ~U[2026-01-01 00:00:00.000000Z]})
+      log!(run)
+
+      report = Arbiter.Release.offload_report(apply: true, start: false)
+
+      assert report.apply? == true
+      assert report.lines_offloaded == 1
       assert reload(run).output_lines == []
     end
   end

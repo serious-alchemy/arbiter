@@ -219,6 +219,9 @@ defmodule Arbiter.MCP.Tools.Workspace do
       status bar's quota chip and `/usage` (bd-i2gwwn,
       `Arbiter.Quota.Visibility`); `null` is auto-detect. Takes effect on the
       next page load.
+    * `output_offload_enabled` — boolean; the output-offload sweeper
+      (`Arbiter.Workers.OutputOffload`) ships OFF, `true` turns it on, `null`
+      back off. Takes effect on the sweeper's next tick.
 
   The Watchdog keys take effect on its next poll cycle (bd-ajgve2). No restart
   is required for any of them.

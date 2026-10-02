@@ -56,6 +56,14 @@ defmodule Arbiter.Settings.Registry do
       type: "quota_provider_list",
       description:
         "Quota providers forced off the quota surfaces (wins over shown); null = auto-detect."
+    },
+    %{
+      key: "output_offload_enabled",
+      type: "boolean",
+      description:
+        "Run the daily output-offload sweeper, which clears worker_runs.output_lines and " <>
+          "worker_run_steps.output_summary once the durable on-disk copy exists; null/false = off. " <>
+          "Takes effect on its next tick."
     }
   ]
 
@@ -87,6 +95,8 @@ defmodule Arbiter.Settings.Registry do
   def cast(key, _raw), do: {:error, "unknown installation setting: #{key}"}
 
   defp do_cast(_type, nil), do: {:ok, nil}
+  defp do_cast("boolean", b) when is_boolean(b), do: {:ok, b}
+  defp do_cast("boolean", _), do: {:error, "value must be true, false or null"}
   defp do_cast("positive_integer", n) when is_integer(n) and n > 0, do: {:ok, n}
 
   defp do_cast("positive_integer", _),
@@ -105,8 +115,13 @@ defmodule Arbiter.Settings.Registry do
 
   defp unwrap(raw) when is_binary(raw) do
     case Jason.decode(String.trim(raw)) do
-      {:ok, decoded} when is_integer(decoded) or is_list(decoded) or is_nil(decoded) -> decoded
-      _ -> raw
+      {:ok, decoded}
+      when is_integer(decoded) or is_list(decoded) or is_nil(decoded) or
+             is_boolean(decoded) ->
+        decoded
+
+      _ ->
+        raw
     end
   end
 
@@ -143,6 +158,8 @@ defmodule Arbiter.Settings.Registry do
   defp write("quota_providers_shown", v), do: wrap(Settings.set_quota_providers_shown(v))
   defp write("quota_providers_hidden", v), do: wrap(Settings.set_quota_providers_hidden(v))
 
+  defp write("output_offload_enabled", v), do: wrap(Settings.set_output_offload_enabled(v))
+
   defp wrap({:ok, updated}), do: {:ok, updated}
   defp wrap({:error, reason}), do: {:error, {:invalid, inspect(reason)}}
 
@@ -158,6 +175,8 @@ defmodule Arbiter.Settings.Registry do
   def override("quota_providers_shown"), do: Settings.quota_providers_shown()
   def override("quota_providers_hidden"), do: Settings.quota_providers_hidden()
 
+  def override("output_offload_enabled"), do: Settings.output_offload_enabled()
+
   @doc "The value in force with no override (app env, else hardcoded); `nil` = auto-detect."
   @spec default(key()) :: term()
   def default("conductor_system_max_concurrent"), do: Snapshot.default_system_max_concurrent()
@@ -170,6 +189,8 @@ defmodule Arbiter.Settings.Registry do
 
   def default("credential_watchdog_recovery_interval_ms"),
     do: CredentialWatchdog.default_interval_ms(:recovery_interval_ms)
+
+  def default("output_offload_enabled"), do: false
 
   def default(key) when key in ["quota_providers_shown", "quota_providers_hidden"], do: nil
 

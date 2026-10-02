@@ -2615,6 +2615,7 @@ defmodule Arbiter.MCP.ToolsTest do
         Arbiter.Settings.set_credential_watchdog_recovery_interval_ms(nil)
         Arbiter.Settings.set_quota_providers_shown(nil)
         Arbiter.Settings.set_quota_providers_hidden(nil)
+        Arbiter.Settings.set_output_offload_enabled(nil)
       end)
 
       :ok
@@ -2626,7 +2627,8 @@ defmodule Arbiter.MCP.ToolsTest do
       credential_watchdog_interval_ms: nil,
       credential_watchdog_recovery_interval_ms: nil,
       quota_providers_shown: nil,
-      quota_providers_hidden: nil
+      quota_providers_hidden: nil,
+      output_offload_enabled: nil
     }
 
     test "returns the full settings map when no key is given (worker tier)", ctx do
@@ -2872,18 +2874,19 @@ defmodule Arbiter.MCP.ToolsTest do
              "value property must declare a type (via 'type', 'oneOf', or 'anyOf') so MCP clients send native types, not JSON strings"
     end
 
-    test "schema permits native integer, array, and null types for value", ctx do
+    test "schema permits native integer, boolean, array, and null types for value", ctx do
       tool = Enum.find(Catalog.visible(ctx.coordinator), &(&1.name == "installation_config_set"))
       value_schema = tool.input_schema["properties"]["value"]
 
-      # Verify oneOf contains the three expected type schemas
+      # Verify oneOf contains the four expected type schemas
       one_of = value_schema["oneOf"]
       assert one_of != nil
-      assert length(one_of) == 3
+      assert length(one_of) == 4
 
       types = Enum.map(one_of, & &1["type"])
       assert "null" in types
       assert "integer" in types
+      assert "boolean" in types
       assert "array" in types
 
       # Verify integer has minimum constraint
