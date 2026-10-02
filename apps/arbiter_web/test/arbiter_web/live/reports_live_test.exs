@@ -13,7 +13,12 @@ defmodule ArbiterWeb.ReportsLiveTest do
   end
 
   defp issue!(ws, attrs) do
-    {:ok, issue} = Ash.create(Issue, Map.merge(%{title: "t", workspace_id: ws.id}, attrs))
+    {:ok, issue} =
+      Ash.create(
+        Issue,
+        Map.merge(%{title: "t", workspace_id: ws.id, acceptance: "- it works"}, attrs)
+      )
+
     issue
   end
 
@@ -96,6 +101,114 @@ defmodule ArbiterWeb.ReportsLiveTest do
       assert has_element?(view, "#reports-lead-p90")
       assert has_element?(view, "#reports-lead-era")
       assert has_element?(view, "#reports-weighting-policy", "unrated")
+    end
+  end
+
+  describe "cumulative flow and stage dwell" do
+    defp promote!(issue) do
+      {:ok, issue} = Ash.update(issue, %{}, action: :promote)
+      issue
+    end
+
+    defp start!(issue) do
+      {:ok, issue} = Ash.update(issue, %{}, action: :start)
+      issue
+    end
+
+    test "renders the flow chart with one column whose bands sum to the tickets created",
+         %{conn: conn, ws: ws} do
+      issue!(ws, %{difficulty: 1})
+      ws |> issue!(%{difficulty: 1}) |> promote!()
+      ws |> issue!(%{difficulty: 3}) |> promote!() |> start!()
+
+      {:ok, view, _html} = live(conn, ~p"/reports?workspace=#{ws.id}")
+      _ = render_async(view)
+
+      assert has_element?(view, "#reports-flow")
+      assert has_element?(view, "#reports-flow-chart rect[data-role=column][data-total='3']")
+      assert has_element?(view, "#reports-flow-chart rect[data-series-backlog='1']")
+      assert has_element?(view, "#reports-flow-chart rect[data-series-queued='1']")
+      assert has_element?(view, "#reports-flow-chart rect[data-series-active='1']")
+      assert has_element?(view, "#reports-flow-chart path[data-series='closed']")
+      assert has_element?(view, "#reports-flow-cutover")
+    end
+
+    test "renders stage dwell for closed tickets: tiles, per-difficulty chart, per-stage table",
+         %{conn: conn, ws: ws} do
+      for d <- [1, 3] do
+        ws |> issue!(%{difficulty: d}) |> promote!() |> start!() |> close!()
+      end
+
+      {:ok, view, _html} = live(conn, ~p"/reports?workspace=#{ws.id}")
+      _ = render_async(view)
+
+      assert has_element?(view, "#reports-dwell-n [data-role=value]", "2")
+      assert has_element?(view, "#reports-dwell-queued-closed-p50")
+      assert has_element?(view, "#reports-dwell-first-pr-p50")
+      # Both tickets were started and closed within the same instant, so every
+      # segment is zero-height and only the difficulty labels are drawn;
+      # per-segment values are covered by Arbiter.Reports.FlowTest.
+      assert has_element?(view, "#reports-dwell-chart text", "D1")
+      assert has_element?(view, "#reports-dwell-chart text", "D3")
+      assert has_element?(view, "#reports-dwell-table tr[data-stage=active]")
+      assert has_element?(view, "#reports-dwell-table tr[data-stage=verifying]")
+    end
+
+    test "with no closed tickets the dwell section says so instead of drawing empty charts",
+         %{conn: conn, ws: ws} do
+      issue!(ws, %{difficulty: 1})
+
+      {:ok, view, _html} = live(conn, ~p"/reports?workspace=#{ws.id}")
+      _ = render_async(view)
+
+      assert has_element?(view, "#reports-dwell-empty")
+      refute has_element?(view, "#reports-dwell-chart")
+    end
+
+    test "the epic filter narrows the flow to the epic's children", %{conn: conn, ws: ws} do
+      epic = issue!(ws, %{issue_type: :epic, title: "the epic"})
+      child = issue!(ws, %{difficulty: 2})
+      issue!(ws, %{difficulty: 2})
+      issue!(ws, %{difficulty: 2})
+
+      Ash.create!(Arbiter.Tasks.Dependency, %{
+        from_issue_id: epic.id,
+        to_issue_id: child.id,
+        type: :parent_of
+      })
+
+      {:ok, view, _html} = live(conn, ~p"/reports?workspace=#{ws.id}")
+      _ = render_async(view)
+      assert has_element?(view, "#reports-flow-chart rect[data-total='3']")
+
+      assert has_element?(
+               view,
+               "#reports-filters select[name='filters[epic]'] option",
+               "the epic"
+             )
+
+      view
+      |> form("#reports-filters", filters: %{workspace: ws.id, epic: epic.id})
+      |> render_change()
+
+      assert_patch(
+        view,
+        ~p"/reports?#{%{workspace: ws.id, epic: epic.id, range: "30d"}}"
+      )
+
+      _ = render_async(view)
+      assert has_element?(view, "#reports-flow-chart rect[data-total='1']")
+      refute has_element?(view, "#reports-flow-chart rect[data-total='3']")
+      assert has_element?(view, "#reports-tile-total [data-role=value]", "1")
+    end
+
+    test "an epic id that is not an epic falls back to any", %{conn: conn, ws: ws} do
+      issue!(ws, %{difficulty: 2})
+
+      {:ok, view, _html} = live(conn, ~p"/reports?workspace=#{ws.id}&epic=bd-nope")
+      _ = render_async(view)
+
+      assert has_element?(view, "#reports-flow-chart rect[data-total='1']")
     end
   end
 end
