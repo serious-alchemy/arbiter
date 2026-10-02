@@ -707,7 +707,7 @@ defmodule Arbiter.MCP.Catalog do
         "Set or clear an epic's priority floor via the `:set_floor` action " <>
           "(`docs/design/epic-aware-scheduling.md` §6.2). Coordinator only (the operator's and the " <>
           "coordinator's tokens); a worker cannot call it. `floor_priority` is required: 1..3 " <>
-          "(or \"P1\"..\"P3\") sets the floor, `null` or \"none\" clears it. P0 is never a " <>
+          "(or the strings `P1`..`P3`) sets the floor, `null` or `none` clears it. P0 is never a " <>
           "floor. Only an epic can carry one — any other ticket is rejected. The epic's own " <>
           "`priority` is unrelated and is not changed.",
       input_schema: %{
@@ -717,7 +717,7 @@ defmodule Arbiter.MCP.Catalog do
           "floor_priority" => %{
             "type" => ["integer", "string", "null"],
             "description" =>
-              "1..3 or \"P1\"..\"P3\" to set the floor; null or \"none\" to clear it. Required."
+              "1..3 or P1..P3 to set the floor; null or none to clear it. Required."
           }
         },
         "required" => ["id", "floor_priority"],
