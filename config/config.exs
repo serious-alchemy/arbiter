@@ -244,6 +244,13 @@ config :arbiter, :sessions_transcript,
 # See `Arbiter.Sessions.TranscriptRetention` moduledoc for the sweep cadence.
 config :arbiter, :sessions_transcript_retention, interval_ms: 6 * 60 * 60_000
 
+# Shared-memory staleness checker (bd-19qve3, RFC §9.4 phase 13). See
+# `Arbiter.Sessions.Memory.Checker` moduledoc for what a pass does.
+config :arbiter, :memory_checker,
+  interval_ms: 15 * 60_000,
+  initial_delay_ms: 30_000,
+  max_age_ms: 24 * 60 * 60_000
+
 # Import environment specific config. This must remain at the bottom
 # of this file so it overrides the configuration defined above.
 import_config "#{config_env()}.exs"
