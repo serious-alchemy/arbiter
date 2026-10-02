@@ -2,7 +2,6 @@ defmodule Arbiter.Sessions.Memory.StalenessTest do
   use ExUnit.Case, async: false
 
   alias Arbiter.Sessions.Memory.Staleness
-  alias Arbiter.Config.Paths
 
   @moduletag :tmp_dir
 
@@ -13,8 +12,7 @@ defmodule Arbiter.Sessions.Memory.StalenessTest do
     ---
     name: #{Path.rootname(filename)}
     description: fixture
-    metadata:
-      type: #{type}
+    type: #{type}
     #{extra}---
 
     #{body}
@@ -30,15 +28,25 @@ defmodule Arbiter.Sessions.Memory.StalenessTest do
   end
 
   describe "check_memory/2" do
-    test "returns :ok for user/feedback memories without checking", %{memory_root: root} do
+    test "returns :ok for user/feedback/reference memories without checking", %{memory_root: root} do
       path = write_memory!(root, "user.md", "user", "Some content about user")
       assert Staleness.check_memory(path) == :ok
+      
+      path2 = write_memory!(root, "ref.md", "reference", "Look at example.com:443")
+      assert Staleness.check_memory(path2) == :ok
     end
 
-    test "quarantines project memory with invalid file:line", %{memory_root: root} do
+    test "identifies stale project memory with invalid file:line", %{memory_root: root} do
       checkout = Path.join(root, "checkout")
       File.mkdir_p!(Path.join(checkout, "lib"))
       File.write!(Path.join(checkout, "lib/short.ex"), "defmodule Short do\nend\n")
+
+      # Initialize a dummy git repo so `git grep` and `git rev-parse HEAD` don't crash
+      System.cmd("git", ["init"], cd: checkout)
+      System.cmd("git", ["add", "."], cd: checkout)
+      System.cmd("git", ["config", "user.email", "test@test.com"], cd: checkout)
+      System.cmd("git", ["config", "user.name", "Test"], cd: checkout)
+      System.cmd("git", ["commit", "-m", "init"], cd: checkout)
 
       path =
         write_memory!(
@@ -46,32 +54,88 @@ defmodule Arbiter.Sessions.Memory.StalenessTest do
           "proj.md",
           "project",
           "Look at lib/short.ex:10",
-          "  workspace_id: ws1\n"
+          "workspace_id: ws1\n"
         )
 
-      assert {:error, :quarantined} = Staleness.check_memory(path, primary_checkout: checkout)
-
-      assert not File.exists?(path)
-      quarantine_path = Path.join([root, "quarantined", "proj.md"])
-      assert File.exists?(quarantine_path)
+      assert {:error, :stale} = Staleness.check_memory(path, primary_checkout: checkout)
     end
 
-    test "returns :ok for project memory with valid file:line", %{memory_root: root} do
+    test "identifies stale project memory with invalid module name", %{memory_root: root} do
       checkout = Path.join(root, "checkout")
       File.mkdir_p!(Path.join(checkout, "lib"))
       File.write!(Path.join(checkout, "lib/short.ex"), "defmodule Short do\nend\n")
+
+      System.cmd("git", ["init"], cd: checkout)
+      System.cmd("git", ["add", "."], cd: checkout)
+      System.cmd("git", ["config", "user.email", "test@test.com"], cd: checkout)
+      System.cmd("git", ["config", "user.name", "Test"], cd: checkout)
+      System.cmd("git", ["commit", "-m", "init"], cd: checkout)
 
       path =
         write_memory!(
           root,
           "proj.md",
           "project",
-          "Look at lib/short.ex:2",
-          "  workspace_id: ws1\n"
+          "Look at Missing.Module",
+          "workspace_id: ws1\n"
+        )
+
+      assert {:error, :stale} = Staleness.check_memory(path, primary_checkout: checkout)
+    end
+
+    test "returns :ok for project memory with valid file:line and module", %{memory_root: root} do
+      checkout = Path.join(root, "checkout")
+      File.mkdir_p!(Path.join(checkout, "lib"))
+      File.write!(Path.join(checkout, "lib/short.ex"), "defmodule Short.Module do\nend\n")
+
+      System.cmd("git", ["init"], cd: checkout)
+      System.cmd("git", ["add", "."], cd: checkout)
+      System.cmd("git", ["config", "user.email", "test@test.com"], cd: checkout)
+      System.cmd("git", ["config", "user.name", "Test"], cd: checkout)
+      System.cmd("git", ["commit", "-m", "init"], cd: checkout)
+
+      path =
+        write_memory!(
+          root,
+          "proj.md",
+          "project",
+          "Look at lib/short.ex:2 and Short.Module",
+          "workspace_id: ws1\n"
         )
 
       assert :ok = Staleness.check_memory(path, primary_checkout: checkout)
-      assert File.exists?(path)
+    end
+  end
+
+  describe "sweep/2" do
+    test "quarantines stale memories", %{memory_root: root} do
+      checkout = Path.join(root, "checkout")
+      File.mkdir_p!(Path.join(checkout, "lib"))
+      File.write!(Path.join(checkout, "lib/short.ex"), "defmodule Short do\nend\n")
+      
+      System.cmd("git", ["init"], cd: checkout)
+      System.cmd("git", ["add", "."], cd: checkout)
+      System.cmd("git", ["config", "user.email", "test@test.com"], cd: checkout)
+      System.cmd("git", ["config", "user.name", "Test"], cd: checkout)
+      System.cmd("git", ["commit", "-m", "init"], cd: checkout)
+
+      path =
+        write_memory!(
+          root,
+          "proj.md",
+          "project",
+          "Look at lib/short.ex:10",
+          "workspace_id: ws1\n"
+        )
+
+      Staleness.sweep(root, primary_checkout: checkout)
+
+      assert not File.exists?(path)
+      quarantine_path = Path.join([root, "quarantined", "proj.md"])
+      assert File.exists?(quarantine_path)
+      
+      content = File.read!(quarantine_path)
+      assert content =~ "quarantine_reason:"
     end
   end
 end

@@ -2,7 +2,8 @@ defmodule Arbiter.Sessions.Memory.PromotionTest do
   use ExUnit.Case, async: false
 
   alias Arbiter.Sessions.Memory.Promotion
-  alias Arbiter.Config.Paths
+  alias Arbiter.MCP.Tools.MemoryPending
+  alias Arbiter.MCP.Scope
 
   @moduletag :tmp_dir
 
@@ -56,12 +57,67 @@ defmodule Arbiter.Sessions.Memory.PromotionTest do
       assert not File.exists?(path)
       assert File.exists?(Path.join(mem_root, "cand.md"))
     end
+    
+    test "returns :exists if trying to overwrite without overwrite option", %{sessions_root: sessions_root, memory_root: mem_root} do
+      path = write_candidate!(sessions_root, "session-1", "cand.md", "Content")
+      File.write!(Path.join(mem_root, "cand.md"), "Existing content")
+      
+      assert {:error, :exists} = Promotion.promote(path, memory_root: mem_root)
+      
+      assert :ok == Promotion.promote(path, memory_root: mem_root, overwrite: true)
+    end
 
     test "rejects a candidate memory", %{sessions_root: root} do
       path = write_candidate!(root, "session-1", "cand.md", "Content")
 
       assert :ok == Promotion.reject(path)
       assert not File.exists?(path)
+    end
+    
+    test "diff returns correct simulated diff", %{sessions_root: root, memory_root: mem_root} do
+      path = write_candidate!(root, "session-1", "cand.md", "New Content")
+      File.write!(Path.join(mem_root, "cand.md"), "Old Content")
+      
+      assert {:ok, diff} = Promotion.diff(path, memory_root: mem_root)
+      assert diff =~ "Old Content"
+      assert diff =~ "New Content"
+    end
+    
+    test "path-escape rejection on promote/reject/diff", %{sessions_root: root} do
+      path = Path.join(root, "session-1/memory/candidates/../../../../etc/passwd")
+      assert {:error, :invalid_path} = Promotion.promote(path)
+      assert {:error, :invalid_path} = Promotion.reject(path)
+      assert {:error, :invalid_path} = Promotion.diff(path)
+      
+      bad_path2 = "/tmp/some_other_file.md"
+      assert {:error, :invalid_path} = Promotion.promote(bad_path2)
+    end
+  end
+  
+  describe "MCP handlers" do
+    test "memory_pending_list", %{sessions_root: root} do
+      write_candidate!(root, "session-1", "cand1.md", "Content 1")
+      assert {:ok, %{count: 1}} = MemoryPending.memory_pending_list(%Scope{tier: :worker}, %{})
+    end
+    
+    test "memory_pending_diff", %{sessions_root: root, memory_root: mem_root} do
+      path = write_candidate!(root, "session-1", "cand.md", "New Content")
+      assert {:ok, %{diff: diff}} = MemoryPending.memory_pending_diff(%Scope{tier: :worker}, %{"path" => path})
+      assert diff == "New Content"
+    end
+    
+    test "memory_pending_apply", %{sessions_root: root, memory_root: mem_root} do
+      path = write_candidate!(root, "session-1", "cand.md", "Content")
+      assert {:ok, %{status: "promoted"}} = MemoryPending.memory_pending_apply(%Scope{tier: :worker}, %{"path" => path})
+    end
+    
+    test "memory_pending_apply rejects path escape", %{sessions_root: root} do
+      assert {:error, {:invalid_arguments, _}} = MemoryPending.memory_pending_apply(%Scope{tier: :worker}, %{"path" => "/tmp/bad.md"})
+    end
+    
+    test "memory_pending_reject", %{sessions_root: root} do
+      path = write_candidate!(root, "session-1", "cand.md", "Content")
+      assert {:ok, %{status: "rejected"}} = MemoryPending.memory_pending_reject(%Scope{tier: :worker}, %{"path" => path})
     end
   end
 end
