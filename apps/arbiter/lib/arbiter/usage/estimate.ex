@@ -636,7 +636,9 @@ defmodule Arbiter.Usage.Estimate do
   # Exponential decay with a #{@half_life_days}-day half-life: today's spend
   # counts double what a month-old task's does, and the 60-day edge fades to
   # a quarter rather than dropping off a cliff.
-  defp recency_weight(%DateTime{} = occurred_at, %DateTime{} = now) do
+  @doc false
+  @spec recency_weight(DateTime.t(), DateTime.t()) :: float()
+  def recency_weight(%DateTime{} = occurred_at, %DateTime{} = now) do
     age_days = max(DateTime.diff(now, occurred_at, :second) / 86_400, 0.0)
     :math.pow(0.5, age_days / @half_life_days)
   end
