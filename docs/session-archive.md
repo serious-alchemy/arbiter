@@ -208,6 +208,9 @@ setting `output_offload_enabled`, read on every tick, so it needs no restart:
     arb settings set output_offload_enabled true     # on  (also: /settings)
     arb settings unset output_offload_enabled        # back to off
 
+The coordinator can do the same with the MCP tool `installation_config_set`
+(`key: "output_offload_enabled"`, `value: true`, or `null` to unset).
+
 Preview first. Mix is absent from releases, so on a release use the eval entry
 point — the default is a dry run that writes nothing and prints, per table, the
 rows and bytes it would clear plus the runs kept because no on-disk file exists:

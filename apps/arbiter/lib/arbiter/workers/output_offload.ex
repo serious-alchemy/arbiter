@@ -59,7 +59,8 @@ defmodule Arbiter.Workers.OutputOffload do
   `Arbiter.Workers.OutputOffload` is a supervised sweeper (daily, primary
   instance only) that **ships OFF** (operator ruling, bd-16ljft): it sweeps
   nothing until the installation setting `output_offload_enabled` is `true`
-  (`arb settings set output_offload_enabled true`, or `/settings`). The setting
+  (`arb settings set output_offload_enabled true`, `/settings`, or the coordinator
+  MCP tool `installation_config_set` with value `true`/`null`). The setting
   is read on every tick, so flipping it needs no restart; unsetting turns it
   back off.
 

@@ -64,7 +64,7 @@ defmodule Arbiter.MCP.Catalog do
   | `workspace_config_set` | coordinator | `Ash.update(ws, …, action: :patch_config)` deep-merge |
   | `workspace_config_unset` | coordinator | `Ash.update(ws, …, action: :patch_config)` unset |
   | `installation_config_get` | worker, coordinator | `Arbiter.Settings` getters (concurrency ceiling + credential watchdog + quota-provider visibility) |
-  | `installation_config_set` | coordinator | `Arbiter.Settings` setters (concurrency ceiling + credential watchdog + quota-provider visibility) |
+  | `installation_config_set` | coordinator | `Arbiter.Settings` setters (concurrency ceiling + credential watchdog + quota-provider visibility + output-offload sweeper switch) |
   | `skill_create` | coordinator | `Arbiter.Skills.create_skill/1` |
   | `skill_update` | coordinator | `Arbiter.Skills.update_skill/2` |
   | `skill_delete` | coordinator | `Arbiter.Skills.delete_skill/1` |
@@ -1871,6 +1871,8 @@ defmodule Arbiter.MCP.Catalog do
           ~s["antigravity") force a provider onto / off the status-bar quota chip and /usage ] <>
           "on top of auto-detection (hidden wins; null = auto-detect; codex stays hidden " <>
           "until parity); they take effect on the next page load. " <>
+          "`output_offload_enabled` (boolean; the output-offload sweeper ships OFF, `true` " <>
+          "turns it on, `null` back off) takes effect on the sweeper's next tick. " <>
           "No restart required. Returns `{key, value}`.",
       input_schema: %{
         "type" => "object",
@@ -1883,7 +1885,8 @@ defmodule Arbiter.MCP.Catalog do
               "credential_watchdog_interval_ms",
               "credential_watchdog_recovery_interval_ms",
               "quota_providers_shown",
-              "quota_providers_hidden"
+              "quota_providers_hidden",
+              "output_offload_enabled"
             ],
             "description" => "Setting name (e.g. \"conductor_system_max_concurrent\"). Required."
           },
@@ -1902,6 +1905,10 @@ defmodule Arbiter.MCP.Catalog do
                 "description" =>
                   "Positive integer for conductor_system_max_concurrent, " <>
                     "credential_watchdog_interval_ms, or credential_watchdog_recovery_interval_ms."
+              },
+              %{
+                "type" => "boolean",
+                "description" => "true/false for output_offload_enabled."
               },
               %{
                 "type" => "array",
