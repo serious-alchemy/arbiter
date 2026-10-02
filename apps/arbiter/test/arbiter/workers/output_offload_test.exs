@@ -176,4 +176,31 @@ defmodule Arbiter.Workers.OutputOffloadTest do
       assert reload(fresh).output_summary == "1 test, 0 failures"
     end
   end
+
+  describe "supervised sweeper" do
+    test "runs the sweep itself on the primary instance, and not on a secondary" do
+      run = run!(%{completed_at: ~U[2026-01-01 00:00:00.000000Z]})
+      log!(run)
+
+      secondary =
+        start_supervised!(
+          {OutputOffload, name: nil, enabled: false, primary?: fn -> false end},
+          id: :secondary
+        )
+
+      send(secondary, :sweep)
+      _ = :sys.get_state(secondary)
+      assert reload(run).output_lines == ["a", "b"]
+
+      primary =
+        start_supervised!(
+          {OutputOffload, name: nil, enabled: false, primary?: fn -> true end},
+          id: :primary
+        )
+
+      send(primary, :sweep)
+      _ = :sys.get_state(primary)
+      assert reload(run).output_lines == []
+    end
+  end
 end
