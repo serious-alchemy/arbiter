@@ -45,8 +45,8 @@ defmodule Arbiter.Reports.Flow do
 
   import Ecto.Query
 
-  alias Arbiter.Reports.{Epics, Throughput}
   alias Arbiter.Repo
+  alias Arbiter.Reports.{Epics, Throughput}
   alias Arbiter.Tasks.Lifecycle
 
   @states Lifecycle.states()
