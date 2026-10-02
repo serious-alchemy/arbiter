@@ -42,7 +42,8 @@ syntax.
     enabled: true,
     filesystem: :worktree | :none,
     network: true | false,
-    writable_paths: []          # extra writable paths inside the OS write jail
+    writable_paths: [],         # extra writable paths inside the OS write jail
+    egress_tunnels: []          # "LOCAL:HOST:PORT" host services bridged into the jail's netns
   }
 }
 ```
@@ -283,6 +284,16 @@ each reached by an in-namespace `socat` on loopback:
 a test server in the namespace) off the proxy. The proxy's baseline is the
 adapter's infra hosts plus the host of each git remote in the worktree.
 
+**Fixed tunnels.** A host-loopback service a workspace's tests need (say
+Postgres on the host's `127.0.0.1:5432`) is not reachable from the namespace's
+own `lo`. List it per workspace (or per repo) as
+`config["agent"]["security"]["sandbox"]["egress_tunnels"] = ["5432:127.0.0.1:5432"]`
+(`LOCAL:HOST:PORT`): the jail gets `127.0.0.1:5432` bridged to that one
+destination, on the host side, through a `t<n>` socket. The destination is
+fixed by operator config, not by the agent, and the layers union like
+`writable_paths`. Malformed entries are dropped. A local port that collides
+with the proxy (3128) or Arbiter bridge fails the spawn (`duplicate_bridge_port`).
+
 The proxy and bridges live and die with the worker. A spawn whose proxy
 cannot start (or whose `socat` is missing at spawn time) **fails** with
 `{:egress_unavailable, reason}` in every mode; it never runs on the shared
@@ -415,7 +426,7 @@ The hardcoded safe baseline lives in `Arbiter.Agents.SecurityPolicy.base/0`.
 `base/0` → `:worker_security_policy` app env → `workspace.config["agent"]["security"]`
 → `workspace.config["agent"]["security"]["repos"][repo]` (only when a repo name
 is passed) → per-dispatch override. `allow`/`deny`/`safe_defaults_exclude`
-and `sandbox.writable_paths` **union** across layers; `mode` and the other
+and `sandbox.writable_paths` / `sandbox.egress_tunnels` **union** across layers; `mode` and the other
 `sandbox` fields are **replaced** by the highest layer that sets them. `safe_defaults` itself is never set directly —
 it is always recomputed as `safe_default_categories() -- safe_defaults_exclude`
 after every layer is applied, so it always reflects the current default set

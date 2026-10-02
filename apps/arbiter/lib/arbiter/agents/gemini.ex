@@ -619,14 +619,15 @@ defmodule Arbiter.Agents.Gemini do
     end
   end
 
-  defp start_egress(opts, _policy) do
+  defp start_egress(opts, policy) do
     worktree = Keyword.get(opts, :worktree) || Keyword.get(opts, :worktree_path)
 
     case JailRun.start(
            owner: Keyword.get(opts, :owner),
            worktree: worktree,
            infra: @egress_infra,
-           tunnels: Keyword.get(opts, :egress_tunnels, [])
+           tunnels:
+             SecurityPolicy.egress_tunnels(policy) ++ Keyword.get(opts, :egress_tunnels, [])
          ) do
       {:ok, network, _run_id} -> {:ok, network}
       {:error, reason} -> {:error, {:egress_unavailable, reason}}

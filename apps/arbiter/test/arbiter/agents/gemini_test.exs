@@ -253,6 +253,25 @@ defmodule Arbiter.Agents.GeminiTest do
       assert arb_sock =~ ".arb.sock"
     end
 
+    test "a workspace's egress tunnel becomes a fixed-destination t1 bridge", %{
+      worktree: worktree
+    } do
+      assert {:ok, argv} =
+               Gemini.default_argv("p",
+                 security: policy(:bypass, %{egress_tunnels: ["5432:127.0.0.1:5432"]}),
+                 worktree_path: worktree
+               )
+
+      assert ["sh", "-c", ~s(exec "$@" < /dev/null), "sh" | rest] = argv
+
+      {_, ["--", "sh", "-c", _script, "sh", _socat | listeners]} =
+        Enum.split_while(rest, &(&1 != "--"))
+
+      # proxy, arb, then the tunnel: <local port> <host-side socket>
+      assert ["3128", _proxy, _arb_port, _arb_sock, "5432", tunnel_sock | _] = listeners
+      assert tunnel_sock =~ ".t1.sock"
+    end
+
     test "the egress run is started for the spawn's owner and ends with it", %{worktree: worktree} do
       owner = spawn(fn -> Process.sleep(:infinity) end)
 
