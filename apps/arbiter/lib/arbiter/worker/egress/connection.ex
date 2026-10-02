@@ -176,10 +176,11 @@ defmodule Arbiter.Worker.Egress.Connection do
   end
 
   defp splice(client, upstream, rest) do
-    with :ok <- :gen_tcp.send(client, "HTTP/1.1 200 Connection Established\r\n\r\n") do
-      relay(client, upstream, rest)
-    else
-      _ ->
+    case :gen_tcp.send(client, "HTTP/1.1 200 Connection Established\r\n\r\n") do
+      :ok ->
+        relay(client, upstream, rest)
+
+      {:error, _} ->
         :gen_tcp.close(client)
         :gen_tcp.close(upstream)
     end
