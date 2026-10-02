@@ -17,6 +17,10 @@ defmodule ArbiterWeb.Api.IssueController do
     * `PATCH  /api/issues/:id/rank`    — :rank (body: one of `top: true`,
       `bottom: true`, `before_id: <id>`, `after_id: <id>`) — reorders the
       ticket inside its workspace's rank order (bd-djapyj)
+    * `PATCH  /api/issues/:id/floor`   — :floor (body: `floor_priority` —
+      1..3, `"P1"`..`"P3"`, or `null` / `"none"` to clear) — sets an epic's
+      priority floor via `:set_floor` (ES2, bd-3e7inj). Coordinator tier;
+      a worker token is refused (403) by `ArbiterWeb.ApiPolicy`
     * `POST   /api/issues/:id/verify`  — :verify (body: `outcome` +
       `evidence`) — records the post-merge restart-and-observe result
       (bd-9so315)
@@ -336,6 +340,38 @@ defmodule ArbiterWeb.Api.IssueController do
     case forms do
       [form] -> {:ok, form}
       _ -> {:error, {:invalid_request, "give exactly one of: top, bottom, before_id, after_id"}}
+    end
+  end
+
+  @doc """
+  Set or clear an epic's priority floor (ES2, bd-3e7inj) through `:set_floor`.
+  The `floor_priority` key is required (`null` clears), so an empty body is a
+  400 rather than a silent clear. A non-epic is a 422. The caller's scope is
+  passed as the actor, so the action refuses a worker/refine token even if the
+  route policy is ever loosened.
+  """
+  def floor(conn, %{"id" => id} = params) do
+    with {:ok, raw} <- fetch_floor_param(params),
+         {:ok, floor} <- parse_floor(raw),
+         {:ok, issue} <- Ash.get(Issue, id),
+         {:ok, floored} <-
+           Ash.update(issue, %{floor_priority: floor},
+             action: :set_floor,
+             actor: conn.assigns[:mcp_scope]
+           ) do
+      render(conn, :show, issue: floored)
+    end
+  end
+
+  defp fetch_floor_param(%{"floor_priority" => raw}), do: {:ok, raw}
+
+  defp fetch_floor_param(_params),
+    do: {:error, {:invalid_request, "floor_priority is required (P1, P2, P3 or null to clear)"}}
+
+  defp parse_floor(raw) do
+    case Arbiter.Tasks.Floor.parse(raw) do
+      {:ok, floor} -> {:ok, floor}
+      {:error, message} -> {:error, {:invalid_request, message}}
     end
   end
 
