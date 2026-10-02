@@ -158,7 +158,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     assert exit_code == 0
     assert {:ok, %{"ok" => true, "checks" => checks}} = Jason.decode(String.trim(out))
     assert is_list(checks)
-    assert length(checks) == 22
+    assert length(checks) == 23
   end
 
   test "version mismatch is non-fatal (exit 0 but shows [fail])" do
