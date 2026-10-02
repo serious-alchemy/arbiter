@@ -54,6 +54,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   """
 
   alias Arbiter.Agents
+  alias Arbiter.Agents.ProviderConstraint
   alias Arbiter.Agents.ProviderRouting
   alias Arbiter.Mergers
   alias Arbiter.Messages.CoordinatorNotifier
@@ -202,6 +203,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
     # bd-5ef587: the pause is checked before any worktree is created.
     with {provider, fallback_reason, decision} <- resolve_pass_provider(task, context),
          :ok <- ProviderRouting.ensure_unpaused(provider, task.workspace_id),
+         :ok <- ProviderConstraint.check(task, provider),
          {:ok, worktree_path} <- create_worktree(context),
          {:ok, worker_pid} <-
            start_worker(task, context, worktree_path, provider, {fallback_reason, decision}),

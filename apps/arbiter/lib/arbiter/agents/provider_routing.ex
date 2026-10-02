@@ -29,6 +29,9 @@ defmodule Arbiter.Agents.ProviderRouting do
   A candidate is dropped, with its reason recorded, when any of these hold
   (checked in this order):
 
+    * `provider_constraint` — the ticket's own provider constraint
+      (`Arbiter.Agents.ProviderConstraint`, bd-13pqcp) does not allow the
+      account's provider; the detail is the constraint (`exclude gemini`);
     * `disabled` / `merged` — the account is parked or merged away;
     * `no_adapter` — its provider has no agent adapter;
     * `cli_unavailable` — an `antigravity` account on a host where the
@@ -111,6 +114,7 @@ defmodule Arbiter.Agents.ProviderRouting do
   alias Arbiter.Agents.AuthHold
   alias Arbiter.Agents.CredentialWatchdog
   alias Arbiter.Agents.ModelFamily
+  alias Arbiter.Agents.ProviderConstraint
   alias Arbiter.Agents.ProviderPool
   alias Arbiter.Agents.ReviewerRouting
   alias Arbiter.Agents.Routing
@@ -196,6 +200,14 @@ defmodule Arbiter.Agents.ProviderRouting do
     %{record: record, available: available, dropped: dropped, capacity: total_capacity(available)}
   end
 
+  # bd-13pqcp: a constrained ticket's record names its constraint.
+  defp put_constraint(record, task) do
+    case ProviderConstraint.describe(task) do
+      nil -> record
+      constraint -> Map.put(record, "constraint", constraint)
+    end
+  end
+
   defp total_capacity(available) do
     Enum.reduce_while(available, 0, fn
       %{capacity: :unlimited}, _sum -> {:halt, :unlimited}
@@ -217,13 +229,15 @@ defmodule Arbiter.Agents.ProviderRouting do
     available = available |> Enum.map(&elem(&1, 1)) |> rank()
     dropped = Enum.map(dropped, &elem(&1, 1))
 
-    record = %{
-      "mode" => "most_quota",
-      "candidates" => Enum.map(available, &candidate_record/1),
-      "dropped" => Enum.map(dropped, &drop_record/1),
-      "evaluated_at" => DateTime.to_iso8601(ctx.now),
-      "model_tier" => ctx.tier
-    }
+    record =
+      %{
+        "mode" => "most_quota",
+        "candidates" => Enum.map(available, &candidate_record/1),
+        "dropped" => Enum.map(dropped, &drop_record/1),
+        "evaluated_at" => DateTime.to_iso8601(ctx.now),
+        "model_tier" => ctx.tier
+      }
+      |> put_constraint(task)
 
     {record, available, dropped}
   end
@@ -286,16 +300,16 @@ defmodule Arbiter.Agents.ProviderRouting do
           {selection.agent_type, selection.decision["fallback"], selection.decision}
 
         {:legacy, decision} ->
-          {provider, fallback} = legacy_resolution(task.id, workspace, opts)
+          {provider, fallback} = legacy_resolution(task, workspace, opts)
           {provider, fallback, Map.put(decision, "agent_type", to_string(provider))}
       end
     else
-      legacy(task.id, workspace, opts)
+      legacy(task, workspace, opts)
     end
   rescue
     e ->
       Logger.warning("ProviderRouting: routing #{task.id} crashed: #{Exception.message(e)}")
-      legacy(task.id, workspace, opts)
+      legacy(task, workspace, opts)
   end
 
   @doc """
@@ -539,16 +553,38 @@ defmodule Arbiter.Agents.ProviderRouting do
 
   # ---- legacy --------------------------------------------------------------
 
-  defp legacy(task_id, workspace, opts) do
-    {provider, fallback} = legacy_resolution(task_id, workspace, opts)
+  defp legacy(task, workspace, opts) do
+    {provider, fallback} = legacy_resolution(task, workspace, opts)
     {provider, fallback, nil}
   end
 
-  defp legacy_resolution(task_id, workspace, opts) do
+  # The pre-routing resolution. bd-13pqcp: it honours the ticket's provider
+  # constraint too, so the no-candidate / routing-off paths cannot hand back an
+  # excluded provider while a constrained one is available. A caller's explicit
+  # `:override` is returned as given — the spawn site's
+  # `ProviderConstraint.check/2` is what refuses it if it violates.
+  defp legacy_resolution(task, workspace, opts) do
     case Keyword.get(opts, :override) do
-      override when is_atom(override) and not is_nil(override) -> {override, nil}
-      _ -> Agents.resolve_revision_provider(task_id, workspace)
+      override when is_atom(override) and not is_nil(override) ->
+        {override, nil}
+
+      _ ->
+        Agents.resolve_revision_provider(task_id_of(task), workspace, constraint_of(task))
     end
+  end
+
+  defp task_id_of(%Issue{id: id}), do: id
+  defp task_id_of(id) when is_binary(id), do: id
+
+  defp constraint_of(%Issue{} = task), do: ProviderConstraint.from(task)
+
+  defp constraint_of(id) when is_binary(id) do
+    case Ash.get(Issue, id) do
+      {:ok, %Issue{} = task} -> ProviderConstraint.from(task)
+      _ -> nil
+    end
+  rescue
+    _ -> nil
   end
 
   # ---- evaluation ------------------------------------------------------------
@@ -614,6 +650,7 @@ defmodule Arbiter.Agents.ProviderRouting do
 
   defp check(entry, ctx) do
     checks = [
+      &check_constraint/2,
       &check_account/2,
       &check_adapter/2,
       &check_cli/2,
@@ -633,6 +670,20 @@ defmodule Arbiter.Agents.ProviderRouting do
   end
 
   defp drop(entry, reason, detail), do: Map.merge(entry, %{reason: reason, detail: detail})
+
+  # bd-13pqcp: the ticket's own provider constraint — first, so the drop names
+  # it rather than whatever else would have dropped the account.
+  defp check_constraint(%{account: %ProviderAccount{provider: provider}} = entry, ctx) do
+    if ProviderConstraint.allows?(ctx.task, provider),
+      do: {:ok, entry},
+      else: {:drop, "provider_constraint", ProviderConstraint.describe(ctx.task)}
+  end
+
+  defp check_constraint(%{agent_type: type} = entry, ctx) do
+    if ProviderConstraint.allows?(ctx.task, type),
+      do: {:ok, entry},
+      else: {:drop, "provider_constraint", ProviderConstraint.describe(ctx.task)}
+  end
 
   defp check_account(%{account: %ProviderAccount{enabled: false}}, _ctx),
     do: {:drop, "disabled", nil}

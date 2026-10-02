@@ -38,6 +38,12 @@ defmodule Arbiter.MCP.Tools.Task do
   @refine_writable_fields ~w(title description acceptance notes qa_notes deployment_notes
                              issue_type difficulty priority repo verify_after_deploy)
 
+  # bd-13pqcp: `provider_constraint` (where a ticket may run) is deliberately in
+  # neither list above — not a worker's progress field, not a refine session's:
+  # like `repo` and `target_branch` it is coordinator authority. `ticket_create` /
+  # `ticket_update` are coordinator-tier tools, and `refine_field_gate/2`
+  # refuses it for a refine token.
+
   # bd-3uy2hn / coordinator doctrine: Autopilot can claim a task within seconds
   # of it becoming Ready, so any child or edge that must exist before work starts
   # has to exist *before* the promote, not after. Returned on every refine-tier
@@ -833,6 +839,7 @@ defmodule Arbiter.MCP.Tools.Task do
       {"issue_type", {:enum, Issue.issue_types()}},
       {"auto_close", :boolean},
       {"verify_after_deploy", :boolean},
+      {"provider_constraint", :map},
       {"tracker_type", {:enum, Issue.tracker_types()}},
       {"tracker_ref", :string},
       {"tracker_context_type", {:enum, Issue.tracker_types()}},
@@ -855,6 +862,7 @@ defmodule Arbiter.MCP.Tools.Task do
       {"issue_type", {:enum, Issue.issue_types()}},
       {"auto_close", :boolean},
       {"verify_after_deploy", :boolean},
+      {"provider_constraint", :map},
       {"tracker_type", {:enum, Issue.tracker_types()}},
       {"tracker_ref", :string},
       {"tracker_context_type", {:enum, Issue.tracker_types()}},

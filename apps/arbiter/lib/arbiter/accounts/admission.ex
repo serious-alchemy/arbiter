@@ -62,6 +62,7 @@ defmodule Arbiter.Accounts.Admission do
   alias Arbiter.Accounts.Concurrency
   alias Arbiter.Accounts.ProviderAccount
   alias Arbiter.Accounts.Resolver
+  alias Arbiter.Agents.ProviderConstraint
   alias Arbiter.Tasks.Issue
 
   require Logger
@@ -79,6 +80,7 @@ defmodule Arbiter.Accounts.Admission do
   @type result ::
           {:ok, :unlimited | :admitted | :forced}
           | {:error, {:account_at_capacity, info()}}
+          | {:error, {:provider_constraint, atom() | String.t() | nil, String.t()}}
 
   @doc """
   Admit `task` onto the account its workspace is metered under for `provider`.
@@ -91,13 +93,24 @@ defmodule Arbiter.Accounts.Admission do
   Options: `:force`, `:actor` (named in the override event), and `:account` —
   a `ProviderAccount` (or `nil`) the caller already resolved, e.g. the one a
   routing decision picked.
+
+  A ticket's provider constraint (`Arbiter.Agents.ProviderConstraint`,
+  bd-13pqcp) is checked before anything is counted or reserved: an account on
+  a provider the constraint does not allow is refused with
+  `{:error, {:provider_constraint, provider, phrase}}` — never reserved, and
+  not overridable by `force`, which goes over a *cap*, not over a ticket's
+  stated rule. `Dispatch` has already routed a constrained ticket to an
+  allowed provider, so this is the backstop for any caller that reaches
+  admission with another one.
   """
   @spec admit(Issue.t(), atom() | String.t() | nil, keyword()) :: result()
   def admit(%Issue{} = task, provider, opts \\ []) do
     account =
       Keyword.get_lazy(opts, :account, fn -> Resolver.account(task.workspace_id, provider) end)
 
-    admit_on(task, account, provider, opts)
+    with :ok <- ProviderConstraint.check(task, (account && account.provider) || provider) do
+      admit_on(task, account, provider, opts)
+    end
   rescue
     e ->
       Logger.warning("Admission: account check crashed for #{task.id}: #{Exception.message(e)}")
