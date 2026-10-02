@@ -196,11 +196,21 @@ defmodule Arbiter.Agents.ReviewerRouting do
   defp pick_other(ctx, [best | _], pinned) do
     if Keyword.get(ctx.opts, :pin, true), do: pin(ctx.task, best.family)
 
+    stale = ctx.task && stale_pin(ctx.task, ctx.implementer)
+
     {outcome, reason} =
-      if pinned,
-        do:
-          {"repicked", "pinned reviewer family #{pinned} unavailable; re-picked #{best.family}"},
-        else: {"selected", nil}
+      cond do
+        pinned ->
+          {"repicked", "pinned reviewer family #{pinned} unavailable; re-picked #{best.family}"}
+
+        stale ->
+          {"repicked",
+           "implementer family is now #{ctx.implementer}; pinned reviewer family #{stale} " <>
+             "no longer differs from it; re-picked #{best.family}"}
+
+        true ->
+          {"selected", nil}
+      end
 
     {:ok, selection(best, ctx, outcome, false, reason)}
   end
@@ -263,6 +273,14 @@ defmodule Arbiter.Agents.ReviewerRouting do
   end
 
   defp pinned_family(_task, _implementer), do: nil
+
+  # The recorded pin when the implementer has moved into that family.
+  defp stale_pin(%Issue{reviewer_family: pinned}, implementer)
+       when is_binary(pinned) and pinned != "" do
+    if pinned == family_string(implementer), do: pinned
+  end
+
+  defp stale_pin(_task, _implementer), do: nil
 
   defp pin(%Issue{reviewer_family: current} = task, family) do
     value = family_string(family)
@@ -340,6 +358,7 @@ defmodule Arbiter.Agents.ReviewerRouting do
       "mode" => "cross_family",
       "implementer_family" => family_string(ctx.implementer),
       "pinned_family" => ctx.task && ctx.task.reviewer_family,
+      "authoring_families" => ctx.authoring,
       "candidates" => Enum.map(ctx.available, &entry_record/1),
       "dropped" => Enum.map(ctx.dropped, &entry_record/1)
     }
@@ -368,6 +387,7 @@ defmodule Arbiter.Agents.ReviewerRouting do
       task: task,
       opts: opts,
       implementer: implementer_family(task),
+      authoring: authoring_record(task),
       tier: Keyword.get(opts, :tier),
       exclude: Keyword.get(opts, :exclude, []),
       block: reviewer_block(ws),
@@ -381,6 +401,17 @@ defmodule Arbiter.Agents.ReviewerRouting do
       dropped: []
     }
   end
+
+  # Oldest-first families that authored on the branch; only recorded when more
+  # than one did, so the audit shows a mixed-family branch.
+  defp authoring_record(%Issue{id: id}) do
+    case id |> authoring_families() |> Enum.reverse() do
+      [_, _ | _] = families -> Enum.map(families, &family_string/1)
+      _ -> nil
+    end
+  end
+
+  defp authoring_record(_task), do: nil
 
   defp reviewer_block(%Workspace{config: config}) do
     get_in(config || %{}, ["review_agent", "config"]) ||
@@ -563,34 +594,40 @@ defmodule Arbiter.Agents.ReviewerRouting do
   # ---- the implementer's family ------------------------------------------------
 
   @doc """
-  The implementer's model family for `task`: its bd-40pzpj pin, else the
-  family of its latest authoring run. `nil` when neither says.
+  The implementer's model family for `task`: the family of its latest
+  authoring run (implement / fix pass / conflict resolver) — the run actually
+  being reviewed — else its bd-40pzpj pin. `nil` when neither says.
+
+  The pin is only a fallback: a task re-dispatched to another provider keeps
+  its first-routed pin, so trusting it over the runs reviews the new
+  implementer's work against the old implementer's family (bd-avgph4).
   """
   @spec implementer_family(Issue.t() | nil) :: ModelFamily.family() | nil
   def implementer_family(%Issue{implementer_family: pinned} = task) do
-    known_family(pinned) || authoring_run_family(task.id)
+    case authoring_families(task.id) do
+      [latest | _] -> latest
+      [] -> known_family(pinned)
+    end
   end
 
   def implementer_family(_task), do: nil
 
-  defp authoring_run_family(task_id) do
+  # Families of the task's authoring runs, newest first, de-duplicated.
+  defp authoring_families(task_id) do
     Run
     |> Ash.Query.filter(
       (task_id == ^task_id or base_task_id == ^task_id) and
         kind in [:implement, :fix_pass, :conflict] and not is_nil(provider)
     )
     |> Ash.Query.sort(started_at: :desc)
-    |> Ash.Query.limit(1)
     |> Ash.read!()
-    |> case do
-      [%Run{} = run] ->
-        known_family(run.model_family) || ModelFamily.classify(run.provider, run.model).family
-
-      _ ->
-        nil
-    end
+    |> Enum.map(
+      &(known_family(&1.model_family) || ModelFamily.classify(&1.provider, &1.model).family)
+    )
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
   rescue
-    _ -> nil
+    _ -> []
   end
 
   @doc "A family atom for a recorded family string, or `nil` — never a new atom."

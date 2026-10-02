@@ -239,6 +239,62 @@ defmodule Arbiter.Agents.ReviewerRoutingTest do
     end
   end
 
+  describe "a provider switch mid-life (bd-avgph4)" do
+    defp run!(task, provider, kind, started_at) do
+      Ash.create!(Run, %{
+        task_id: task.id,
+        base_task_id: task.id,
+        repo: "trib/repo",
+        kind: kind,
+        provider: provider,
+        started_at: started_at
+      })
+    end
+
+    test "the implementer family is the latest authoring run's, not the stale pin" do
+      ws = workspace!(["claude", "gemini"])
+      task = task!(ws, "google")
+      run!(task, "antigravity", :implement, ahead(-600))
+      run!(task, "claude", :fix_pass, ahead(-60))
+
+      assert {:ok, sel} = ReviewerRouting.select(ws, Ash.get!(Issue, task.id), opts())
+      assert sel.implementer_family == :anthropic
+      assert sel.family == :google
+      refute sel.same_family_fallback
+    end
+
+    test "a re-dispatch to another family re-resolves and re-pins the reviewer, recording why" do
+      ws = workspace!(["claude", "gemini"])
+      task = task!(ws, "google")
+      run!(task, "antigravity", :implement, ahead(-600))
+
+      assert {:ok, %{family: :anthropic, outcome: "selected"}} =
+               ReviewerRouting.select(ws, Ash.get!(Issue, task.id), opts())
+
+      assert Ash.get!(Issue, task.id).reviewer_family == "anthropic"
+
+      run!(task, "claude", :implement, ahead(-60))
+
+      assert {:ok, sel} = ReviewerRouting.select(ws, Ash.get!(Issue, task.id), opts())
+      assert sel.implementer_family == :anthropic
+      assert sel.family == :google
+      assert sel.outcome == "repicked"
+      assert sel.fallback_reason =~ "implementer family"
+      assert sel.record["authoring_families"] == ["google", "anthropic"]
+      assert Ash.get!(Issue, task.id).reviewer_family == "google"
+    end
+
+    test "switching to the only configured family records a same-family fallback" do
+      ws = workspace!(["claude"])
+      task = task!(ws, "google")
+      run!(task, "claude", :implement, ahead(-60))
+
+      assert {:ok, sel} = ReviewerRouting.select(ws, Ash.get!(Issue, task.id), opts())
+      assert sel.implementer_family == :anthropic
+      assert sel.same_family_fallback
+    end
+  end
+
   # ---- AC2: family comes from the model, not the CLI ------------------------
 
   describe "family is keyed on the model, not the CLI (AC2)" do
