@@ -399,10 +399,7 @@ defmodule Arbiter.Board.Snapshot do
       conflicts_with:
         Keyword.get_lazy(opts, :conflicts_with, fn -> EdgeGate.conflict_pairs(deps) end),
       scheduling: scheduling,
-      ready_since:
-        Keyword.get_lazy(opts, :ready_since, fn ->
-          if scheduling.finish_first, do: ReadySince.load(issues, ref_issues, deps), else: %{}
-        end),
+      ready_since: ready_since(opts, scheduling, issues, ref_issues, deps),
       changed_files: Keyword.get(opts, :changed_files, %{}),
       now: now,
       slots_total:
@@ -430,6 +427,14 @@ defmodule Arbiter.Board.Snapshot do
       watchdog_live: Keyword.get_lazy(opts, :watchdog_live, fn -> watchdog_live(issues) end),
       over_budget: Keyword.get_lazy(opts, :over_budget, fn -> Budget.over_budget_ids(issues) end)
     })
+  end
+
+  # ES3: Ready-since only feeds finish-first's aging escape, so the
+  # `ticket_transitions` read is skipped while that is off.
+  defp ready_since(opts, scheduling, issues, ref_issues, deps) do
+    Keyword.get_lazy(opts, :ready_since, fn ->
+      if scheduling.finish_first, do: ReadySince.load(issues, ref_issues, deps), else: %{}
+    end)
   end
 
   @doc """
