@@ -54,6 +54,43 @@ defmodule ArbiterWeb.ChartsTest do
     assert attrs(html, "#s", "data-max") == ["5"]
   end
 
+  test "stacked_area stacks one band per series in order, with a hover column per point" do
+    series = [%{key: :closed, label: "Closed"}, %{key: :open, label: "Open"}]
+
+    points = [
+      %{key: "d1", label: "D1", values: %{closed: 1, open: 2}},
+      %{key: "d2", label: "D2", values: %{closed: 3, open: 1}}
+    ]
+
+    html =
+      render_component(&Charts.stacked_area/1,
+        id: "a",
+        title: "T",
+        points: points,
+        series: series
+      )
+
+    assert attrs(html, "#a[data-chart=stacked_area] path[data-role=band]", "data-series") ==
+             ~w(closed open)
+
+    assert attrs(html, "#a rect[data-role=column]", "data-key") == ~w(d1 d2)
+    assert attrs(html, "#a rect[data-role=column]", "data-total") == ~w(3 4)
+    assert attrs(html, "#a rect[data-key=d2]", "data-series-closed") == ["3"]
+    assert attrs(html, "#a rect[data-key=d2]", "data-series-open") == ["1"]
+    assert attrs(html, "#a", "data-max") == ["4"]
+    assert attrs(html, "#a-legend li", "data-series") == ~w(closed open)
+  end
+
+  test "an all-zero float series scales to the placeholder max instead of dividing by zero" do
+    series = [%{key: :a, label: "A"}]
+    points = [%{key: "k", label: "K", values: %{a: 0.0}}]
+
+    html =
+      render_component(&Charts.stacked_bar/1, id: "z", title: "T", points: points, series: series)
+
+    assert attrs(html, "#z", "data-max") == ["1"]
+  end
+
   test "area renders an area path, a line path and a marker per point" do
     html = render_component(&Charts.area/1, id: "a", title: "T", points: @weeks)
 
@@ -85,6 +122,7 @@ defmodule ArbiterWeb.ChartsTest do
     for {fun, extra} <- [
           {&Charts.bar/1, [points: []]},
           {&Charts.stacked_bar/1, [points: [], series: []]},
+          {&Charts.stacked_area/1, [points: [], series: []]},
           {&Charts.area/1, [points: []]},
           {&Charts.step_line/1, [points: []]},
           {&Charts.histogram/1, [buckets: []]}
