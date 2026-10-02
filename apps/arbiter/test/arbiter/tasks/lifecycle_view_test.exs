@@ -146,6 +146,38 @@ defmodule Arbiter.Tasks.LifecycleViewTest do
       assert %{step: :in_review} = view(ticket(:active), %{runs: [author, reviewer]})
     end
 
+    # bd-cut6uv: the ReviewGate is holding its reviewer back until CI is green
+    # on the head — in review, with nothing live and a marker on the ticket.
+    test "awaiting_ci: the ReviewGate waits on CI before dispatching a reviewer" do
+      marker =
+        Arbiter.Worker.ReviewCi.marker("a1b2c3d4e5f6a7b8", 2, %{
+          interval_ms: 60_000,
+          max_polls: 30
+        })
+
+      waiting = ticket(:active, %{review_gate_state: %{"ci_wait" => marker}})
+      author = run(:review_gate, %{agent_live: false})
+
+      assert %{step: :awaiting_ci, ci_wait: %{sha: "a1b2c3d4e5f6a7b8"}} =
+               view(waiting, %{runs: [author]})
+
+      # The marker only renames the in-review step: with a reviewer live (or no
+      # author waiting on the gate) the step is whatever it was.
+      reviewer =
+        run(:working, %{
+          task_id: "bd-t#review",
+          agent_live: true,
+          meta: %{role: :reviewer, reviews: "bd-t"}
+        })
+
+      assert %{step: :in_review} = view(waiting, %{runs: [author, reviewer]})
+      assert %{step: :implementing} = view(waiting)
+
+      # And it is an in-progress step only: a Merging ticket never reads it.
+      assert %{ci_wait: nil} =
+               view(ticket(:merging, %{review_gate_state: %{"ci_wait" => marker}}))
+    end
+
     test "addressing_review: an implementer round is applying findings" do
       author = run(:review_gate, %{agent_live: false})
 

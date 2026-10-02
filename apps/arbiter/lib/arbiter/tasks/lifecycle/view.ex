@@ -49,11 +49,14 @@ defmodule Arbiter.Tasks.Lifecycle.View do
 
   Computed for `:in_progress` and `:merging` only, `nil` elsewhere.
 
-    * in progress: `:implementing | :in_review | :addressing_review |
-      :fixing_ci | :resolving_conflict`, from the runs through
-      `Arbiter.Worker.Phase` — a live subordinate round names the step,
+    * in progress: `:implementing | :in_review | :awaiting_ci |
+      :addressing_review | :fixing_ci | :resolving_conflict`, from the runs
+      through `Arbiter.Worker.Phase` — a live subordinate round names the step,
       otherwise the author's own phase does, and a ticket with nothing more
-      specific on record is `:implementing`.
+      specific on record is `:implementing`. `:awaiting_ci` (bd-cut6uv) is
+      `:in_review` while the ReviewGate holds its reviewer back until CI is green
+      on the head (the ticket's `ci_wait` marker, `Arbiter.Worker.ReviewCi.waiting/2`):
+      no agent is live and the ticket holds no slot (`Arbiter.Tasks.SlotGate`).
     * merging: `:waiting_ci | :in_merge_queue | :behind_base |
       :merge_blocked`, from the merger status. A conflict, red CI or a draft
       blocks whatever the approval state; an approval-type block counts only
@@ -76,6 +79,7 @@ defmodule Arbiter.Tasks.Lifecycle.View do
   alias Arbiter.Tasks.PullRequest
   alias Arbiter.Worker
   alias Arbiter.Worker.Phase
+  alias Arbiter.Worker.ReviewCi
   alias Arbiter.Worker.Watchdog
 
   @type column ::
@@ -84,6 +88,7 @@ defmodule Arbiter.Tasks.Lifecycle.View do
   @type step ::
           :implementing
           | :in_review
+          | :awaiting_ci
           | :addressing_review
           | :fixing_ci
           | :resolving_conflict
@@ -97,7 +102,8 @@ defmodule Arbiter.Tasks.Lifecycle.View do
           column: column() | nil,
           step: step() | nil,
           blocked_by: [String.t()],
-          attention: Attention.t() | nil
+          attention: Attention.t() | nil,
+          ci_wait: %{sha: String.t(), since: String.t() | nil, round: term()} | nil
         }
 
   @type board_column :: :backlog | :ready | :running | :waiting | :closed
@@ -127,13 +133,15 @@ defmodule Arbiter.Tasks.Lifecycle.View do
     state = effective_state(ticket, runs)
     blocked_by = ctx |> Map.get(:blocked_by) |> List.wrap() |> Enum.uniq() |> Enum.sort()
     column = column(state, blocked_by)
+    ci_wait = if column == :in_progress, do: ReviewCi.waiting(ticket, ctx_now(ctx))
 
     %{
       state: state,
       column: column,
-      step: step(column, ticket, runs, ctx),
+      step: step(column, ticket, runs, ctx) |> awaiting_ci(ci_wait, runs),
       blocked_by: blocked_by,
-      attention: Attention.of(ticket, attention_facts(state, ticket, runs, ctx))
+      attention: Attention.of(ticket, attention_facts(state, ticket, runs, ctx)),
+      ci_wait: ci_wait
     }
   end
 
@@ -284,6 +292,16 @@ defmodule Arbiter.Tasks.Lifecycle.View do
   end
 
   # ---- step ---------------------------------------------------------------
+
+  # bd-cut6uv: a gate waiting on CI is `:in_review` with nothing live; the
+  # marker only renames that step, never a live round or an unrelated phase.
+  defp awaiting_ci(:in_review, %{sha: _}, runs) do
+    if Enum.any?(runs, &(Map.get(&1, :agent_live) == true)), do: :in_review, else: :awaiting_ci
+  end
+
+  defp awaiting_ci(step, _ci_wait, _runs), do: step
+
+  defp ctx_now(ctx), do: Map.get(ctx, :now) || DateTime.utc_now()
 
   defp step(:in_progress, ticket, runs, _ctx), do: active_step(Map.get(ticket, :id), runs)
   defp step(:merging, ticket, _runs, ctx), do: merging_step(ticket, ctx)

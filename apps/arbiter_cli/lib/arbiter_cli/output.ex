@@ -177,6 +177,7 @@ defmodule ArbiterCli.Output do
       Title:        <title>
       State:        <state> (<column>)
       Step:         <step>                  (In progress / Merging only)
+      Review CI:    waiting on CI <sha>     (the ReviewGate is waiting on CI; holds no slot)
       Attention:    <owner> — <reason>      (when the ticket has attention)
       Blocked by:   <ids>                   (Blocked only)
       Close reason: <close_reason>          (Closed only)
@@ -209,6 +210,7 @@ defmodule ArbiterCli.Output do
         # bd-6fkgvo: the lifecycle vocabulary.
         {"State", state_label(issue)},
         {"Step", issue["step"]},
+        {"Review CI", ci_wait_label(issue["ci_wait"])},
         {"Attention", attention_label(issue["attention"])},
         {"Blocked by", blocked_by_label(issue["blocked_by"])},
         {"Close reason", issue["close_reason"]},
@@ -362,6 +364,12 @@ defmodule ArbiterCli.Output do
   end
 
   defp attention_label(_), do: nil
+
+  # bd-cut6uv: the ReviewGate is holding its reviewer back until CI is green on
+  # this head. The server renders the label; an older server sends none.
+  defp ci_wait_label(%{"label" => label}) when is_binary(label), do: label
+  defp ci_wait_label(%{"sha" => sha}) when is_binary(sha), do: "waiting on CI " <> sha
+  defp ci_wait_label(_), do: nil
 
   defp blocked_by_label([_ | _] = ids), do: Enum.join(ids, ", ")
   defp blocked_by_label(_), do: nil

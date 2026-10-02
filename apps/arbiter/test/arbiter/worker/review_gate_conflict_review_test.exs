@@ -86,6 +86,80 @@ defmodule Arbiter.Worker.ReviewGateConflictReviewTest do
     assert conflict_event(task.id, "auto_cover")["reason"] =~ "no review round"
   end
 
+  # ---- CI-gated review (bd-cut6uv) ---------------------------------------------
+  #
+  # The conflict path has two outcomes, and CI gates the one that pays for a
+  # reviewer: a clean integration dispatches none (nothing for CI to gate — the
+  # merge is still held by the forge's own checks), a scoped conflict review is a
+  # reviewer like any other and waits for CI on the resolved head first.
+
+  describe "CI-gated review on the conflict path (bd-cut6uv)" do
+    @ci_opts [
+      ci_gate: true,
+      ci_adapter: Arbiter.Test.StubMerger,
+      ci_poll_ms: 25,
+      ci_max_polls: 200
+    ]
+
+    setup do
+      Arbiter.Test.StubMerger.reset()
+      :ok
+    end
+
+    test "a clean integration is covered with no reviewer, so CI is never consulted",
+         %{repo: repo, ws: ws, tmp: tmp} do
+      {_approved, wt, task} = approved_branch(repo, ws, tmp, "feature/ci-clean")
+      advance_main(repo, "other.ex", "main moved, nowhere near the feature\n")
+
+      gate = start_gate(task, ws, wt, "feature/ci-clean", [command: slow_reviewer()] ++ @ci_opts)
+      assert_gate_stops(gate)
+
+      assert rounds(task.id) == []
+      assert Arbiter.Test.StubMerger.get_count(@mr) == 0
+    end
+
+    test "a scoped conflict review waits for CI on the resolved head before it is dispatched",
+         %{repo: repo, ws: ws, tmp: tmp} do
+      {_approved, wt, task} = approved_branch(repo, ws, tmp, "feature/ci-resolved")
+
+      advance_main(
+        repo,
+        "shared.ex",
+        String.replace(@shared, "shared line 4", "shared line 4 (main)")
+      )
+
+      resolve_merge(wt, "shared.ex", "shared line 4 (main + feature)\n")
+      head = sha(wt, "HEAD")
+
+      {:ok, forge} = Agent.start_link(fn -> :running end)
+      on_exit(fn -> if Process.alive?(forge), do: Agent.stop(forge) end)
+
+      Arbiter.Test.StubMerger.queue_get(@mr, [
+        fn ->
+          %{head_sha: head, pipeline: Agent.get(forge, & &1)}
+        end
+      ])
+
+      gate =
+        start_gate(task, ws, wt, "feature/ci-resolved", [command: slow_reviewer()] ++ @ci_opts)
+
+      wait_until(fn -> Arbiter.Test.StubMerger.get_count(@mr) >= 3 end)
+      state = :sys.get_state(gate)
+      assert state.phase == :awaiting_ci
+      assert state.current_prompt == nil
+      assert rounds(task.id) == []
+
+      Agent.update(forge, fn _ -> :success end)
+      prompt = prompt_of(gate)
+
+      assert prompt =~ "SCOPED CONFLICT-RESOLUTION"
+      assert prompt =~ "CI passed on #{head}"
+
+      wait_until(fn -> Enum.any?(Coverage.for_mr(@mr), &(&1.head_sha == head)) end)
+      assert [%Round{role: :conflict_review, verdict: :approve}] = rounds(task.id)
+    end
+  end
+
   # ---- AC2 -------------------------------------------------------------------
 
   test "hand-resolved conflicts get a scoped conflict review, shown only the regions, and its APPROVE covers the head",

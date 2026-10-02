@@ -86,11 +86,19 @@ defmodule Arbiter.Tasks.SlotGate do
   bd-36ytcl: a ticket's step comes from `Arbiter.Tasks.Lifecycle.view/2`.) The stored state is what every surface shows,
   so the cap now cannot disagree with the board.
 
+  A ticket whose ReviewGate is holding its reviewer back until CI is green on
+  the head (bd-cut6uv, `Arbiter.Worker.ReviewCi.waiting/2`) is the one exception
+  to "`:active` holds a slot": it is still In progress on the board, but no agent
+  is live for it and it is waiting on a machine, exactly like a Merging PR waiting
+  on CI — so it releases its slot while it waits. The marker expires, so a gate
+  that died mid-wait cannot hold a ticket out of the count forever.
+
   Epics never hold a slot: they are never dispatched and never on the board.
   """
 
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Lifecycle
+  alias Arbiter.Worker.ReviewCi
 
   # The one run state that provably owns no agent: the run is over. A
   # snapshot of unknown liveness in any other state counts (see the moduledoc).
@@ -146,13 +154,14 @@ defmodule Arbiter.Tasks.SlotGate do
 
   @doc """
   Does this ticket hold a slot? True only for a ticket whose stored state is
-  `:active` and that is not an epic. See the moduledoc's "A slot is a ticket
-  In progress".
+  `:active`, that is not an epic and whose ReviewGate is not waiting on CI. See
+  the moduledoc's "A slot is a ticket In progress".
   """
   @spec holds_slot?(map()) :: boolean()
   def holds_slot?(ticket) when is_map(ticket) do
     Lifecycle.state_of(ticket) == :active and
-      Map.get(ticket, :issue_type) not in Issue.non_dispatchable_types()
+      Map.get(ticket, :issue_type) not in Issue.non_dispatchable_types() and
+      is_nil(ReviewCi.waiting(ticket))
   end
 
   def holds_slot?(_ticket), do: false

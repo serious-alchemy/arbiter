@@ -2884,6 +2884,22 @@ defmodule Arbiter.Worker do
 
   def handle_info({:__review_gate_probe__, _gate, _result}, state), do: {:noreply, state}
 
+  # bd-cut6uv: the ReviewGate tells its author when it starts and stops holding a
+  # reviewer back for CI. While it does, no agent is live for the ticket, so the
+  # author releases its hold on the provider account (`hold_account/2`); it takes
+  # it back the moment the wait ends, and `forget_review_gate/1` does too if the
+  # gate is gone.
+  def handle_info(
+        {:__review_gate_ci_wait__, waiting?},
+        %State{state: :waiting, waiting_on: :review_gate} = state
+      )
+      when is_boolean(waiting?) do
+    hold_account(state, not waiting?)
+    {:noreply, state}
+  end
+
+  def handle_info({:__review_gate_ci_wait__, _waiting?}, state), do: {:noreply, state}
+
   # bd-a9zb7w: decide (and, if warranted, dispatch) the implementer fix round for
   # a ReviewGate rejection this worker just parked on. Posted to self by
   # `park_rejected/4` so it lands after that call's reply, with the run already
@@ -6045,6 +6061,9 @@ defmodule Arbiter.Worker do
       verdict: nil,
       park_reason: nil,
       reconciled_from: nil,
+      # bd-cut6uv: a fresh gate has not waited on CI yet; a marker left by a gate
+      # that died mid-wait must not outlive it.
+      ci_wait: nil,
       merge_opts: persistable_merge_opts(meta)
     })
 
@@ -6123,6 +6142,13 @@ defmodule Arbiter.Worker do
         |> maybe_opt(:timeout_retries, Map.get(meta, :review_timeout_retries))
         |> maybe_opt(:rounds, resolve_review_rounds(state))
         |> maybe_opt(:pr_ref, Map.get(meta, :review_pr_ref))
+        # bd-cut6uv: test escape hatches over CI-gated review (see
+        # `Arbiter.Worker.ReviewCi`); unset in production, where the workspace's
+        # `review.require_ci_green` decides.
+        |> maybe_opt(:ci_gate, Map.get(meta, :review_ci_gate))
+        |> maybe_opt(:ci_adapter, Map.get(meta, :review_ci_adapter))
+        |> maybe_opt(:ci_poll_ms, Map.get(meta, :review_ci_poll_ms))
+        |> maybe_opt(:ci_max_polls, Map.get(meta, :review_ci_max_polls))
         # bd-6d3h8m: the fresh gate a fix round attaches restarts its own
         # round numbering at 1, so it needs to know which fix-round attempt it
         # is to tag its `Arbiter.ReviewGate.Round` rows distinguishably —
@@ -6237,6 +6263,13 @@ defmodule Arbiter.Worker do
     %State{state | meta: Map.delete(state.meta, :review_gate_stalled_since)}
   end
 
+  # bd-cut6uv: a gate holding its reviewer back until CI reports has nothing in
+  # flight by design — its own poll budget bounds the wait, so it is not stalled.
+  defp apply_review_gate_probe(%State{} = state, gate, %{phase: :awaiting_ci}) do
+    schedule_review_gate_liveness(state, gate)
+    %State{state | meta: Map.delete(state.meta, :review_gate_stalled_since)}
+  end
+
   defp apply_review_gate_probe(%State{meta: meta} = state, gate, result) do
     now = System.monotonic_time(:millisecond)
     since = Map.get(meta, :review_gate_stalled_since) || now
@@ -6298,7 +6331,22 @@ defmodule Arbiter.Worker do
       _ -> :ok
     end
 
+    hold_account(state, true)
+
     %State{state | meta: Map.drop(meta, [:review_gate_ref, :review_gate_stalled_since])}
+  end
+
+  # Count this worker on its provider account (`hold?: true`, the normal state)
+  # or release it (`false`) — bd-cut6uv. Rewrites the dispatch context `init/1`
+  # stamped; only the registered process can, which is why the gate asks its
+  # author rather than doing it.
+  defp hold_account(%State{} = state, hold?) do
+    PRegistry.put_dispatch(
+      state.registry_key,
+      effective_workspace_id(state),
+      provider(state.meta),
+      released: not hold?
+    )
   end
 
   # Apply a ReviewGate verdict to a run waiting on the review gate.
