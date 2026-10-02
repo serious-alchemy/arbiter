@@ -4,7 +4,7 @@ defmodule ArbiterWeb.ReportsLive do
   `docs/design/reports-design-v2.md` §7).
 
   Owns the page chrome every report reuses: the shared filter form (workspace,
-  repo, type, difficulty, range — held in the query string so a view is
+  repo, epic, type, difficulty, range — held in the query string so a view is
   linkable), the loading / empty / failed states, the "as of" stamp of the
   short-TTL `Arbiter.Reports.Cache`, and the `ArbiterWeb.Charts` components.
   Reports are computed in `start_async/3` on the connected mount and again on
@@ -18,7 +18,7 @@ defmodule ArbiterWeb.ReportsLive do
 
   use ArbiterWeb, :live_view
 
-  alias Arbiter.Reports.{Cache, Cost, Throughput}
+  alias Arbiter.Reports.{Cache, Cost, Epics, Flow, Throughput}
   alias Arbiter.Tasks.{Issue, Workspace}
   alias ArbiterWeb.Charts
   alias ArbiterWeb.CoreComponents.Feedback
@@ -36,6 +36,7 @@ defmodule ArbiterWeb.ReportsLive do
      |> assign(:page_title, "Reports")
      |> assign(:workspaces, load_workspaces())
      |> assign(:repos, load_repos())
+     |> assign(:epics, Epics.list())
      |> assign(:types_list, @types)
      |> assign(:difficulties_list, @difficulties)
      |> assign(:ranges_list, @ranges)
@@ -47,7 +48,7 @@ defmodule ArbiterWeb.ReportsLive do
 
   @impl true
   def handle_params(params, _uri, socket) do
-    filters = parse_filters(params)
+    filters = parse_filters(params, socket.assigns.epics)
 
     {:noreply,
      socket
@@ -59,12 +60,15 @@ defmodule ArbiterWeb.ReportsLive do
 
   @impl true
   def handle_event("filter", %{"filters" => params}, socket) do
-    {:noreply, push_patch(socket, to: ~p"/reports?#{query(parse_filters(params))}")}
+    filters = parse_filters(params, socket.assigns.epics)
+    {:noreply, push_patch(socket, to: ~p"/reports?#{query(filters)}")}
   end
 
   def handle_event("range", %{"option" => range}, socket) do
-    filters = Map.put(socket.assigns.filters, "range", range)
-    {:noreply, push_patch(socket, to: ~p"/reports?#{query(parse_filters(filters))}")}
+    filters =
+      socket.assigns.filters |> Map.put("range", range) |> parse_filters(socket.assigns.epics)
+
+    {:noreply, push_patch(socket, to: ~p"/reports?#{query(filters)}")}
   end
 
   @impl true
@@ -82,14 +86,22 @@ defmodule ArbiterWeb.ReportsLive do
   # ---- filters ----
 
   defp default_filters,
-    do: %{"workspace" => "", "repo" => "", "type" => "", "difficulty" => "", "range" => "30d"}
+    do: %{
+      "workspace" => "",
+      "repo" => "",
+      "epic" => "",
+      "type" => "",
+      "difficulty" => "",
+      "range" => "30d"
+    }
 
   # Unknown values collapse to "any" so a stale or hand-edited URL never
   # reaches a query (and `type` is never turned into an atom unchecked).
-  defp parse_filters(params) do
+  defp parse_filters(params, epics) do
     %{
       "workspace" => Map.get(params, "workspace", ""),
       "repo" => Map.get(params, "repo", ""),
+      "epic" => one_of(params, "epic", Enum.map(epics, & &1.id)),
       "type" => one_of(params, "type", @types),
       "difficulty" => one_of(params, "difficulty", @difficulties),
       "range" => one_of(params, "range", @ranges, "30d")
@@ -160,7 +172,8 @@ defmodule ArbiterWeb.ReportsLive do
       open: Enum.count(rows, &(&1.state != :closed)),
       weekly: weekly,
       throughput: Throughput.load(filters),
-      cost: Cost.load(filters)
+      cost: Cost.load(filters),
+      flow: Flow.load(filters)
     }
   end
 
@@ -180,6 +193,9 @@ defmodule ArbiterWeb.ReportsLive do
 
       {"difficulty", d}, q ->
         Ash.Query.filter(q, difficulty == ^String.to_integer(d))
+
+      {"epic", epic}, q ->
+        Ash.Query.filter(q, id in ^Epics.child_ids(epic))
 
       {"range", range}, q ->
         case range_cutoff(range) do
@@ -235,6 +251,11 @@ defmodule ArbiterWeb.ReportsLive do
               options={Enum.map(@workspaces, &{&1.name, &1.id})}
             />
             <.filter_select field={@form[:repo]} label="Repo" options={Enum.map(@repos, &{&1, &1})} />
+            <.filter_select
+              field={@form[:epic]}
+              label="Epic"
+              options={Enum.map(@epics, &{"#{&1.id} · #{&1.title}", &1.id})}
+            />
             <.filter_select
               field={@form[:type]}
               label="Type"
@@ -294,6 +315,7 @@ defmodule ArbiterWeb.ReportsLive do
             </section>
             <.throughput_section throughput={report.throughput} />
             <.cost_section cost={report.cost} />
+            <.flow_section flow={report.flow} />
           </div>
         </.async_result>
       </div>
@@ -472,6 +494,126 @@ defmodule ArbiterWeb.ReportsLive do
     """
   end
 
+  attr :flow, :map, required: true
+
+  defp flow_section(assigns) do
+    %{flow: flow, dwell: dwell} = assigns.flow
+    # Closed at the base, the backlog on top, as the design's CFD stacks them.
+    states = Enum.reverse(Flow.states())
+
+    assigns =
+      assign(assigns,
+        dwell: dwell,
+        states: states,
+        series: Enum.map(states, &%{key: &1, label: state_label(&1)}),
+        flow_points:
+          Enum.map(flow, fn p ->
+            %{
+              key: Date.to_iso8601(p.day),
+              label: Calendar.strftime(p.day, "%b %d"),
+              values: p.counts
+            }
+          end),
+        dwell_series: Enum.map(dwell.stages, &%{key: &1, label: state_label(&1)}),
+        dwell_points: Enum.map(dwell.by_difficulty, &dwell_point/1),
+        cutover: Throughput.era_cutover()
+      )
+
+    ~H"""
+    <section id="reports-flow" class="flex flex-col gap-4">
+      <div class="flex flex-col gap-2">
+        <h2 class="text-[13px] font-medium">Cumulative flow: tickets by state, per day</h2>
+        <Charts.stacked_area
+          id="reports-flow-chart"
+          title="Tickets in each lifecycle state at the end of each day"
+          points={@flow_points}
+          series={@series}
+        />
+        <p id="reports-flow-cutover" class="text-[12px] text-[var(--text-secondary)]">
+          Each day shows the state a ticket was in at its end, so the bands sum to the tickets
+          created by then; a reopened ticket steps back out of closed. Before {Date.to_iso8601(
+            @cutover
+          )} there was no backlog and <code>queued</code>
+          meant "open". The range sets the window; every matching ticket is counted from its
+          creation. Epics are not counted.
+        </p>
+      </div>
+
+      <div class="flex flex-col gap-2">
+        <h2 class="text-[13px] font-medium">Stage dwell: where a closed ticket's time goes</h2>
+        <div :if={@dwell.n == 0} id="reports-dwell-empty">
+          <Feedback.empty_state icon="hero-clock" detail="Widen the range or clear a filter.">
+            No completed tickets with a recorded history match these filters.
+          </Feedback.empty_state>
+        </div>
+        <div :if={@dwell.n > 0} class="flex flex-col gap-3">
+          <div class="grid grid-cols-2 sm:grid-cols-5 gap-3">
+            <Charts.stat_tile id="reports-dwell-n" label="Tickets" value={@dwell.n} />
+            <Charts.stat_tile
+              id="reports-dwell-queued-closed-p50"
+              label="Queued → closed P50"
+              value={hours(@dwell.queued_to_closed.p50_hours)}
+            />
+            <Charts.stat_tile
+              id="reports-dwell-queued-closed-p90"
+              label="Queued → closed P90"
+              value={hours(@dwell.queued_to_closed.p90_hours)}
+            />
+            <Charts.stat_tile
+              id="reports-dwell-first-pr-p50"
+              label="To first PR P50"
+              value={hours(@dwell.first_pr.p50_hours)}
+              note={"n=#{@dwell.first_pr.n}"}
+            />
+            <Charts.stat_tile
+              id="reports-dwell-first-pr-p90"
+              label="To first PR P90"
+              value={hours(@dwell.first_pr.p90_hours)}
+            />
+          </div>
+          <Charts.stacked_bar
+            id="reports-dwell-chart"
+            title="Median hours per stage by difficulty"
+            points={@dwell_points}
+            series={@dwell_series}
+          />
+          <table id="reports-dwell-table" class="text-[12.5px] w-full max-w-md">
+            <thead>
+              <tr class="text-left text-[var(--text-label)]">
+                <th class="font-medium py-1">Stage</th>
+                <th class="font-medium py-1">P50</th>
+                <th class="font-medium py-1">P90</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr :for={stage <- @dwell.stages} data-stage={stage}>
+                <td class="py-1">{state_label(stage)}</td>
+                <td class="py-1 font-[family-name:var(--font-mono)]">
+                  {hours(@dwell.overall[stage].p50_hours)}
+                </td>
+                <td class="py-1 font-[family-name:var(--font-mono)]">
+                  {hours(@dwell.overall[stage].p90_hours)}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+          <p id="reports-dwell-note" class="text-[12px] text-[var(--text-secondary)]">
+            Completed tickets closed in the range. A stage's dwell is the sum of every interval
+            the ticket spent in it, so a return to work or a reopen adds rather than overwrites;
+            time spent closed is not a stage. Percentiles are nearest-rank over all tickets in
+            the cohort, so a ticket that never merged counts as 0h merging. The chart stacks each
+            stage's median per difficulty, which need not add up to the ticket's lead time. Before {Date.to_iso8601(
+              @cutover
+            )} <code>queued</code>
+            meant "open", and in the older history <code>merging</code>
+            starts at the first PR reference, not at opening it.
+          </p>
+        </div>
+      </div>
+    </section>
+    """
+  end
+
   defp dollars(nil), do: "—"
   defp dollars(value), do: "$" <> :erlang.float_to_binary(value * 1.0, decimals: 2)
 
@@ -482,6 +624,22 @@ defmodule ArbiterWeb.ReportsLive do
 
   defp overhead_note(%{share: share}),
     do: "#{Float.round(share * 100, 1)}% of priced spend; no ticket owns it"
+
+  defp state_label(state), do: state |> Atom.to_string() |> String.capitalize()
+
+  defp dwell_point(%{difficulty: d, medians: medians}) do
+    key = if d == nil, do: "unrated", else: Integer.to_string(d)
+
+    %{
+      key: key,
+      label: if(d == nil, do: "Unrated", else: "D#{d}"),
+      values: Map.new(medians, fn {stage, h} -> {stage, Float.round((h || 0.0) * 1.0, 2)} end)
+    }
+  end
+
+  defp hours(nil), do: "—"
+  defp hours(h) when h < 48, do: "#{Float.round(h * 1.0, 1)}h"
+  defp hours(h), do: "#{Float.round(h / 24, 1)}d"
 
   defp week_label(week), do: Calendar.strftime(week, "%b %d")
 

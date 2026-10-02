@@ -27,6 +27,7 @@ defmodule Arbiter.Reports.Throughput do
 
   require Ash.Query
 
+  alias Arbiter.Reports.Epics
   alias Arbiter.Tasks.Issue
 
   @weights %{0 => 0.5, 1 => 1, 2 => 2, 3 => 3, 4 => 4}
@@ -84,6 +85,9 @@ defmodule Arbiter.Reports.Throughput do
 
       {"difficulty", d}, q ->
         Ash.Query.filter(q, difficulty == ^String.to_integer(d))
+
+      {"epic", epic}, q ->
+        Ash.Query.filter(q, id in ^Epics.child_ids(epic))
 
       {"range", "all"}, q ->
         q
@@ -178,10 +182,15 @@ defmodule Arbiter.Reports.Throughput do
     }
   end
 
-  # Nearest rank: the ceil(p·n)-th smallest value.
-  defp percentile([], _), do: nil
+  @doc """
+  Nearest rank: the ceil(p·n)-th smallest value of an ascending list (`nil`
+  for none). Shared with `Arbiter.Reports.Flow` so every report's P50/P90 is
+  one definition.
+  """
+  @spec percentile([number()], float()) :: float() | nil
+  def percentile([], _), do: nil
 
-  defp percentile(sorted, p) do
+  def percentile(sorted, p) do
     rank = max(ceil(p * length(sorted)), 1)
     sorted |> Enum.at(rank - 1) |> Kernel.*(1.0)
   end
