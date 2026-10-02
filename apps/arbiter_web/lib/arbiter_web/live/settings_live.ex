@@ -92,6 +92,23 @@ defmodule ArbiterWeb.SettingsLive do
     end
   end
 
+  def handle_event("set_output_offload", %{"mode" => mode}, socket)
+      when mode in ["on", "off", "default"] do
+    value = Map.fetch!(%{"on" => true, "off" => false, "default" => nil}, mode)
+
+    case Registry.put("output_offload_enabled", value) do
+      {:ok, stored} ->
+        {:noreply,
+         socket
+         |> clear_error("output_offload")
+         |> load()
+         |> put_flash(:info, saved_message("output_offload", stored))}
+
+      {:error, {:invalid, message}} ->
+        {:noreply, put_error(socket, "output_offload", message)}
+    end
+  end
+
   def handle_event("toggle_autopilot", _params, socket) do
     if InstallationSettings.scheduler_running?() do
       case InstallationSettings.toggle_scheduler() do
@@ -152,6 +169,12 @@ defmodule ArbiterWeb.SettingsLive do
   defp saved_message("adapters", nil), do: "Watchdog probes every adapter."
   defp saved_message("adapters", []), do: "Watchdog probes no adapter."
   defp saved_message("adapters", list), do: "Watchdog probes #{Enum.join(list, ", ")}."
+
+  defp saved_message("output_offload", true), do: "Output-offload sweeper switched on."
+  defp saved_message("output_offload", false), do: "Output-offload sweeper switched off."
+
+  defp saved_message("output_offload", nil),
+    do: "Output-offload sweeper reset to the default (off)."
 
   # `nil` (all, the default), `[]` (none) and a list (only these) are three
   # different settings — never collapse them.
@@ -230,6 +253,13 @@ defmodule ArbiterWeb.SettingsLive do
               error={@errors["recovery"]}
             />
           </div>
+        </Core.panel>
+
+        <Core.panel id="settings-retention" title="Run output retention" meta="output offload">
+          <.offload_row
+            setting={@settings["output_offload_enabled"]}
+            error={@errors["output_offload"]}
+          />
         </Core.panel>
 
         <Core.panel id="settings-appearance" title="Appearance">
@@ -383,6 +413,43 @@ defmodule ArbiterWeb.SettingsLive do
           Save
         </Core.button>
       </form>
+    </.row>
+    """
+  end
+
+  attr :setting, :map, required: true
+  attr :error, :string, default: nil
+
+  defp offload_row(assigns) do
+    ~H"""
+    <.row
+      id="output_offload"
+      label="Output-offload sweeper"
+      help="Daily, clears finished runs' stored output once its on-disk copy is verified. Off until switched on; preview first with `bin/arbiter eval 'Arbiter.Release.offload_report()'`."
+      setting={@setting}
+      effective={if @setting.value, do: "on", else: "off"}
+      default="off"
+    >
+      <div id="settings-output_offload-controls" class="flex flex-wrap items-start gap-2">
+        <Core.button
+          :for={{mode, label} <- [{"on", "Turn on"}, {"off", "Turn off"}, {"default", "Reset"}]}
+          id={"settings-output_offload-btn-#{mode}"}
+          type="button"
+          size="sm"
+          variant={if mode == "on", do: "primary", else: "secondary"}
+          phx-click="set_output_offload"
+          phx-value-mode={mode}
+        >
+          {label}
+        </Core.button>
+        <p
+          :if={@error}
+          id="settings-output_offload-error"
+          class="m-0 text-[11px] text-[var(--status-error)]"
+        >
+          {@error}
+        </p>
+      </div>
     </.row>
     """
   end

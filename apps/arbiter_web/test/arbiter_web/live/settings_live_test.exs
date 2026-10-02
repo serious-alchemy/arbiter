@@ -31,6 +31,7 @@ defmodule ArbiterWeb.SettingsLiveTest do
     {:ok, _} = Settings.set_credential_watchdog_adapters(nil)
     {:ok, _} = Settings.set_credential_watchdog_interval_ms(nil)
     {:ok, _} = Settings.set_credential_watchdog_recovery_interval_ms(nil)
+    {:ok, _} = Settings.set_output_offload_enabled(nil)
   end
 
   defp live_settings(conn) do
@@ -39,6 +40,26 @@ defmodule ArbiterWeb.SettingsLiveTest do
   end
 
   defp submit(view, form, params), do: view |> form(form, params) |> render_submit()
+
+  describe "output-offload switch" do
+    test "ships off, and the buttons turn it on, off and back to the default", %{conn: conn} do
+      view = live_settings(conn)
+      assert has_element?(view, "#settings-output_offload-effective", "off")
+      assert has_element?(view, "#settings-output_offload-source", "default")
+
+      view |> element("#settings-output_offload-btn-on") |> render_click()
+      assert Settings.output_offload_enabled() == true
+      assert has_element?(view, "#settings-output_offload-effective", "on")
+      assert has_element?(view, "#settings-output_offload-source", "override")
+
+      view |> element("#settings-output_offload-btn-off") |> render_click()
+      assert Settings.output_offload_enabled() == false
+
+      view |> element("#settings-output_offload-btn-default") |> render_click()
+      assert Settings.output_offload_enabled() == nil
+      assert has_element?(view, "#settings-output_offload-source", "default")
+    end
+  end
 
   describe "the route and the nav" do
     test "mounts under /settings", %{conn: conn} do

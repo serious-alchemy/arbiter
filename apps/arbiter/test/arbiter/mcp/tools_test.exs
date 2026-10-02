@@ -2615,6 +2615,7 @@ defmodule Arbiter.MCP.ToolsTest do
         Arbiter.Settings.set_credential_watchdog_recovery_interval_ms(nil)
         Arbiter.Settings.set_quota_providers_shown(nil)
         Arbiter.Settings.set_quota_providers_hidden(nil)
+        Arbiter.Settings.set_output_offload_enabled(nil)
       end)
 
       :ok
@@ -2626,7 +2627,8 @@ defmodule Arbiter.MCP.ToolsTest do
       credential_watchdog_interval_ms: nil,
       credential_watchdog_recovery_interval_ms: nil,
       quota_providers_shown: nil,
-      quota_providers_hidden: nil
+      quota_providers_hidden: nil,
+      output_offload_enabled: nil
     }
 
     test "returns the full settings map when no key is given (worker tier)", ctx do
