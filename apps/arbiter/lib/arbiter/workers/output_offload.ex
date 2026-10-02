@@ -179,26 +179,21 @@ defmodule Arbiter.Workers.OutputOffload do
         report
 
       _ ->
-        report =
-          Enum.reduce(rows, report, fn [id, bytes], acc ->
-            acc = %{acc | lines_scanned: acc.lines_scanned + 1}
-
-            if file_present?(OutputLog.path_for(id)) do
-              if apply?,
-                do: Repo.query!("UPDATE worker_runs SET output_lines = '[]' WHERE id = ?1", [id])
-
-              %{
-                acc
-                | lines_offloaded: acc.lines_offloaded + 1,
-                  lines_bytes: acc.lines_bytes + bytes
-              }
-            else
-              %{acc | lines_no_file: acc.lines_no_file + 1}
-            end
-          end)
+        report = Enum.reduce(rows, report, &offload_run_lines(&1, &2, apply?))
 
         [last_id, _] = List.last(rows)
         offload_lines(report, cutoff, apply?, last_id)
+    end
+  end
+
+  defp offload_run_lines([id, bytes], acc, apply?) do
+    acc = %{acc | lines_scanned: acc.lines_scanned + 1}
+
+    if file_present?(OutputLog.path_for(id)) do
+      if apply?, do: Repo.query!("UPDATE worker_runs SET output_lines = '[]' WHERE id = ?1", [id])
+      %{acc | lines_offloaded: acc.lines_offloaded + 1, lines_bytes: acc.lines_bytes + bytes}
+    else
+      %{acc | lines_no_file: acc.lines_no_file + 1}
     end
   end
 
