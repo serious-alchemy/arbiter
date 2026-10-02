@@ -49,6 +49,17 @@ defmodule Arbiter.Config.Paths do
   end
 
   @doc """
+  Root holding one dedicated CLI config dir per provider account
+  (`<accounts_root>/<provider>-<slug>/`), the dir a dashboard login runs its
+  CLI against (`Arbiter.Accounts.LoginRunner`, bd-c99hys). Credentials land
+  here by the CLI's own hand and are referenced, never copied.
+  """
+  @spec accounts_root() :: String.t()
+  def accounts_root do
+    resolve("ARBITER_ACCOUNTS_ROOT", :accounts_root, "~/.arbiter/accounts")
+  end
+
+  @doc """
   Root for **disposable sandbox scaffolding** whose lifetime is owned by a
   run, not by a cleaner (bd-b6noq9, #1930).
 
