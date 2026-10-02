@@ -43,6 +43,13 @@ defmodule Arbiter.Usage.Event do
               no task. Its own step so the loop's model draw is visible in
               the ledger it optimises, apart from the deterministic pass's
               zero-token `:other` row.
+  `:transcript_distillation` — one pass of
+              `Arbiter.Sessions.TranscriptDistillation` (bd-avt4lt), the model
+              call that proposes memory candidates from an ended session's
+              transcript: `source: :maintenance`, no task, and no `session_id`
+              (the distilled session is in `raw`), so the spend is not billed
+              to that session. Its own step so the pass's rolling daily budget
+              can be summed from the ledger.
 
   Every step's `workspace_id` is the *authoring task's* workspace, resolved
   from `Arbiter.Worker.ReviewGate.base_task_id/1` when the worker's own
@@ -81,7 +88,7 @@ defmodule Arbiter.Usage.Event do
     domain: Arbiter.Usage,
     data_layer: AshSqlite.DataLayer
 
-  @steps ~w(work review impl other loop_discovery)a
+  @steps ~w(work review impl other loop_discovery transcript_distillation)a
   @sources ~w(task probe preflight coordinator_session terminal_session maintenance)a
 
   sqlite do

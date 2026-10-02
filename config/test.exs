@@ -277,6 +277,9 @@ config :arbiter, :quota_staleness_watch, enabled: false
 # suite-wide; tests that exercise the pass inject their own `:invoker`.
 config :arbiter, :loop_discovery_invoker, :disabled
 
+# bd-avt4lt: transcript distillation is the same kind of model call. Same fence.
+config :arbiter, :transcript_distillation_invoker, :disabled
+
 # Disable direct Gemini CLI / Antigravity quota fetching in test — there are no
 # real Google credentials or endpoints to hit, so the quota surface stays a pure
 # DB read. Tests that exercise the fetch path pass `enabled: true` explicitly and
