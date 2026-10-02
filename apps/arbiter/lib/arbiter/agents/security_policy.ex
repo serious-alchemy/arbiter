@@ -247,6 +247,14 @@ defmodule Arbiter.Agents.SecurityPolicy do
     postimages.org
   )
 
+  # bd-aspkyr: hosts the egress proxy denies under `:no_public_upload` on top
+  # of the anonymous upload/paste list. `gist.github.com` is a public paste
+  # host that the permission layer reaches through `:no_gh_publish`; the proxy
+  # sees only the CONNECT host, so it must be named here. It is separate from
+  # `@public_upload_hosts` because every adapter derives a `WebFetch` /
+  # `read_url` deny from that list.
+  @egress_extra_denied_hosts ~w(gist.github.com)
+
   @doc "Valid `permissions.mode` atoms."
   @spec valid_modes() :: [mode()]
   def valid_modes, do: @valid_modes
@@ -265,6 +273,14 @@ defmodule Arbiter.Agents.SecurityPolicy do
   """
   @spec public_upload_hosts() :: [String.t()]
   def public_upload_hosts, do: @public_upload_hosts
+
+  @doc """
+  Every host the egress proxy (`Arbiter.Worker.Egress`) denies under
+  `:no_public_upload`: `public_upload_hosts/0` plus hosts only the proxy can
+  see (`gist.github.com`). Subdomains are covered too.
+  """
+  @spec egress_deny_hosts() :: [String.t()]
+  def egress_deny_hosts, do: @public_upload_hosts ++ @egress_extra_denied_hosts
 
   @doc """
   The hardcoded safe baseline: `bypass` mode (headless-safe — no interactive

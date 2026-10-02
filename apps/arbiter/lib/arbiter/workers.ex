@@ -19,5 +19,6 @@ defmodule Arbiter.Workers do
   resources do
     resource Arbiter.Workers.Run
     resource Arbiter.Workers.RunStep
+    resource Arbiter.Worker.Egress.Event
   end
 end
