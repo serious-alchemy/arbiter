@@ -43,6 +43,13 @@ defmodule Arbiter.Usage.Event do
               no task. Its own step so the loop's model draw is visible in
               the ledger it optimises, apart from the deterministic pass's
               zero-token `:other` row.
+  `:transcript_distillation` — one pass of
+              `Arbiter.Sessions.TranscriptDistillation` (bd-avt4lt), the model
+              call that proposes memory candidates from an ended session's
+              transcript: `source: :maintenance`, no task, and no `session_id`
+              (the distilled session is in `raw`), so the spend is not billed
+              to that session. Its own step so the pass's rolling daily budget
+              can be summed from the ledger.
 
   Every step's `workspace_id` is the *authoring task's* workspace, resolved
   from `Arbiter.Worker.ReviewGate.base_task_id/1` when the worker's own
@@ -63,7 +70,7 @@ defmodule Arbiter.Usage.Event do
   | `:preflight` | nil as of bd-2jgs2h (2026-09-18) | `Arbiter.Agents.Preflight` via the `CredentialWatchdog`'s task-less periodic probe — the sole live producer. Task-attributed rows predating bd-2jgs2h are historical: a per-dispatch / per-resume auth check used to write them before it was retired (see `Arbiter.Worker.Dispatch`'s moduledoc and `docs/quota-and-auth.md`) |
   | `:coordinator_session` | nil | a browser-hosted coordinator session (bd-cyxzvq), attributed by `session_id` |
   | `:terminal_session` | nil | an interactive terminal session, likewise by `session_id` |
-  | `:maintenance` | nil | Arbiter's own internal passes (the Loop analysis pass; formerly the synthetic `loop-analyze` task id) |
+  | `:maintenance` | nil | Arbiter's own internal passes (the Loop analysis pass and transcript distillation; formerly the synthetic `loop-analyze` task id) |
 
   A `nil` `task_id` is never a missing value — it means "this spend belongs to
   no task", which is why `Arbiter.Usage.summarize/1` drops those rows from
@@ -81,7 +88,7 @@ defmodule Arbiter.Usage.Event do
     domain: Arbiter.Usage,
     data_layer: AshSqlite.DataLayer
 
-  @steps ~w(work review impl other loop_discovery)a
+  @steps ~w(work review impl other loop_discovery transcript_distillation)a
   @sources ~w(task probe preflight coordinator_session terminal_session maintenance)a
 
   sqlite do

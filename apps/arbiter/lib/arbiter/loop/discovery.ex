@@ -376,13 +376,17 @@ defmodule Arbiter.Loop.Discovery do
   defp interpret({:ok, text, usage}, base, slice, history, bar, record) do
     cost = record.(usage)
 
-    case parse_candidates(text) do
-      {:ok, candidates} ->
-        %{accepted: acc, rejected: rej} = precheck(candidates, slice, history, bar)
-        %{base | status: :ok, candidates: acc, rejected: rej, cost: cost}
+    if Map.get(usage, :is_error) do
+      %{base | status: :error, error: "model error: #{text}", cost: cost}
+    else
+      case parse_candidates(text) do
+        {:ok, candidates} ->
+          %{accepted: acc, rejected: rej} = precheck(candidates, slice, history, bar)
+          %{base | status: :ok, candidates: acc, rejected: rej, cost: cost}
 
-      {:error, reason} ->
-        %{base | status: :error, error: inspect(reason), cost: cost}
+        {:error, reason} ->
+          %{base | status: :error, error: inspect(reason), cost: cost}
+      end
     end
   end
 

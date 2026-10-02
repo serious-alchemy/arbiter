@@ -2382,6 +2382,47 @@ defmodule Arbiter.MCP.Catalog do
       handler: &Tools.memory_quarantine_restore/2
     },
     %{
+      name: "memory_distill",
+      tiers: @coordinator,
+      description:
+        "Distill memory candidates from an ended session's archived transcript (RFC phase 14): " <>
+          "one bounded model pass that proposes candidates into the promotion queue " <>
+          "(memory_pending_list) and never writes the shared layer. Each candidate cites its " <>
+          "source transcript and turn range; ones that cannot be anchored or served are " <>
+          "dropped with a reason. Coordinator/operator only: refused for session tokens. Metered " <>
+          "on usage_events (step transcript_distillation) and capped per pass and per day by " <>
+          "server config; the optional bounds here can only lower those caps.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "session_id" => %{
+            "type" => "string",
+            "description" => "The ended session whose transcript to distill. Required."
+          },
+          "max_bytes" => %{
+            "type" => "integer",
+            "description" =>
+              "Transcript bytes the model may read: the newest turns, or from from_turn on."
+          },
+          "from_turn" => %{
+            "type" => "integer",
+            "description" => "Start the window at this turn instead of at the newest turns."
+          },
+          "max_candidates" => %{
+            "type" => "integer",
+            "description" => "Most candidates this pass may queue."
+          },
+          "max_cost_usd" => %{
+            "type" => "number",
+            "description" => "Dollar cap for this pass."
+          }
+        },
+        "required" => ["session_id"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.memory_distill/2
+    },
+    %{
       name: "loop_propose_routing",
       tiers: @coordinator,
       description:

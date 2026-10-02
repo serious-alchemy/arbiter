@@ -2129,6 +2129,7 @@ defmodule Arbiter.MCP.Tools do
   defdelegate memory_pending_reject(scope, args), to: Arbiter.MCP.Tools.MemoryPending
   defdelegate memory_quarantine_list(scope, args), to: Arbiter.MCP.Tools.MemoryPending
   defdelegate memory_quarantine_restore(scope, args), to: Arbiter.MCP.Tools.MemoryPending
+  defdelegate memory_distill(scope, args), to: Arbiter.MCP.Tools.MemoryPending
 
   defdelegate task_show(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate task_ready(scope, args), to: Arbiter.MCP.Tools.Task

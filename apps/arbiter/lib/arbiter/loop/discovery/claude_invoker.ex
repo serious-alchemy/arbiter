@@ -17,6 +17,14 @@ defmodule Arbiter.Loop.Discovery.ClaudeInvoker do
     * `:model` — passed as `--model` (default: the CLI's own default).
     * `:timeout_s` — wall-clock cap, via coreutils `timeout` when it is on
       `PATH` (default 300).
+
+  Per-call bounds a caller may pass in `invoke/2`'s opts (bd-avt4lt, used by
+  `Arbiter.Sessions.TranscriptDistillation`), each applied only when given:
+
+    * `:model` — overrides the configured model.
+    * `:max_budget_usd` — the CLI's own `--max-budget-usd` spend cap.
+    * `:max_output_tokens` — `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, the CLI's output
+      ceiling per response.
   """
 
   require Logger
@@ -57,27 +65,30 @@ defmodule Arbiter.Loop.Discovery.ClaudeInvoker do
 
     try do
       File.write!(prompt_file, prompt)
-      shell = Enum.map_join(argv(path), " ", &sh_quote/1) <> " < " <> sh_quote(prompt_file)
-      env = SpawnEnv.cmd_env(ConfigDir.env(Keyword.get(opts, :workspace_id)), "claude")
+      shell = Enum.map_join(argv(path, opts), " ", &sh_quote/1) <> " < " <> sh_quote(prompt_file)
+      extras = ConfigDir.env(Keyword.get(opts, :workspace_id)) ++ extra_env(opts)
+      env = SpawnEnv.cmd_env(extras, "claude")
 
       case ReleaseEnv.cmd("sh", ["-c", shell], env: env, cd: dir, stderr_to_stdout: true) do
-        {output, 0} -> parse_stream(output)
-        {_output, 124} -> {:error, {:timeout, timeout_s()}}
-        {output, code} -> {:error, {:claude_failed, code, output |> String.trim() |> tail()}}
+        {output, 0} ->
+          parse_stream(output)
+
+        {_output, 124} ->
+          {:error, {:timeout, timeout_s()}}
+
+        {output, code} ->
+          case parse_stream(output) do
+            {:ok, text, usage} -> {:ok, text, Map.put(usage, :is_error, true)}
+            _ -> {:error, {:claude_failed, code, output |> String.trim() |> tail()}}
+          end
       end
     after
       File.rm_rf(dir)
     end
   end
 
-  defp argv(path) do
-    model =
-      case config(:model) do
-        m when is_binary(m) and m != "" -> ["--model", m]
-        _ -> []
-      end
-
-    cmd = [path | @base_args ++ model]
+  defp argv(path, opts) do
+    cmd = [path | args(opts)]
 
     case System.find_executable("timeout") do
       nil -> cmd
@@ -85,10 +96,40 @@ defmodule Arbiter.Loop.Discovery.ClaudeInvoker do
     end
   end
 
+  @doc "The CLI arguments for one call, after the executable (see the moduledoc's opts)."
+  @spec args(keyword()) :: [String.t()]
+  def args(opts) do
+    model =
+      case Keyword.get(opts, :model) || config(:model) do
+        m when is_binary(m) and m != "" -> ["--model", m]
+        _ -> []
+      end
+
+    budget =
+      case Keyword.get(opts, :max_budget_usd) do
+        usd when is_number(usd) and usd > 0 -> ["--max-budget-usd", Float.to_string(usd * 1.0)]
+        _ -> []
+      end
+
+    @base_args ++ model ++ budget
+  end
+
+  @doc "Environment the call adds for the opts it was given (see the moduledoc)."
+  @spec extra_env(keyword()) :: [{String.t(), String.t()}]
+  def extra_env(opts) do
+    case Keyword.get(opts, :max_output_tokens) do
+      n when is_integer(n) and n > 0 -> [{"CLAUDE_CODE_MAX_OUTPUT_TOKENS", Integer.to_string(n)}]
+      _ -> []
+    end
+  end
+
   @doc """
-  Parse `stream-json` output: the `result` event's text, token counts and
-  cost, and the `system/init` event's model. `{:error, :no_result_event}` when
-  the stream never produced a result.
+  Parse `stream-json` output: the `result` event's text, token counts, cost,
+  `subtype` (`"success"`, or why the CLI stopped, such as
+  `"error_max_budget_usd"`) and `is_error`, and the `system/init` event's
+  model. `{:error, :no_result_event}` when the stream never produced a
+  result. A failed call can still say `"success"`: with no credential the CLI
+  reports `is_error: true` and puts its error text where the reply would be.
   """
   @spec parse_stream(String.t()) :: {:ok, String.t(), map()} | {:error, :no_result_event}
   def parse_stream(output) when is_binary(output) do
@@ -123,7 +164,9 @@ defmodule Arbiter.Loop.Discovery.ClaudeInvoker do
            cache_creation_tokens: int(u["cache_creation_input_tokens"]),
            cache_read_tokens: int(u["cache_read_input_tokens"]),
            cost_usd: result["total_cost_usd"],
-           duration_ms: result["duration_ms"]
+           duration_ms: result["duration_ms"],
+           subtype: result["subtype"],
+           is_error: result["is_error"] == true
          }}
     end
   end
