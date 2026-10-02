@@ -167,6 +167,33 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
       refute Enum.any?(lines, &String.contains?(&1, "sk-ant-oat-secret-value"))
       assert Enum.any?(lines, &String.contains?(&1, "[REDACTED]"))
     end
+
+    test "redacts an OPENAI_API_KEY carried in the caller-explicit :env from output (bd-d89n5f)" do
+      {pid, task_id} = start_worker()
+      cwd = tmp_dir!("cs-openai-redact")
+      topic = "worker:#{task_id}"
+
+      {:ok, _port} =
+        ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: ["sh", "-c", ~s(echo "key is $OPENAI_API_KEY"; echo arb done)],
+          env: [{"OPENAI_API_KEY", "sk-proj-secret-openai-key"}],
+          topic: topic
+        )
+
+      eventually(fn ->
+        case Worker.state(pid) do
+          %{meta: %{exit_status: status}} when not is_nil(status) -> status
+          _ -> nil
+        end
+      end)
+
+      lines = Worker.state(pid).meta.output_lines
+
+      refute Enum.any?(lines, &String.contains?(&1, "sk-proj-secret-openai-key"))
+      assert Enum.any?(lines, &String.contains?(&1, "[REDACTED]"))
+    end
   end
 
   describe "output streaming" do
