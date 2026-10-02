@@ -87,37 +87,13 @@ defmodule Arbiter.Tasks.EpicFloor do
           epic?(a),
           do: {id, depth, a}
 
-    {via, floor} =
-      epics
-      |> Enum.flat_map(fn {id, depth, a} ->
-        case floor_of(a) do
-          nil -> []
-          f -> [{f, depth, id}]
-        end
-      end)
-      |> Enum.min(fn -> nil end)
-      |> case do
-        nil -> {nil, nil}
-        {f, _depth, id} -> {id, f}
-      end
+    {via, floor} = winning_floor(epics)
 
     own = issue.priority
     effective = if floor, do: min(own, floor), else: own
     lifted? = effective < own
 
-    nearest =
-      case epics do
-        [] ->
-          nil
-
-        _ ->
-          min_depth = epics |> Enum.map(&elem(&1, 1)) |> Enum.min()
-
-          epics
-          |> Enum.filter(&(elem(&1, 1) == min_depth))
-          |> Enum.map(fn {id, _, _} -> id end)
-          |> Enum.min_by(fn id -> {length(open(leaves_of[id])), id} end)
-      end
+    nearest = nearest_epic(epics, leaves_of)
 
     {open_leaves, in_progress} =
       case nearest do
@@ -134,6 +110,32 @@ defmodule Arbiter.Tasks.EpicFloor do
       open_leaves: open_leaves,
       in_progress: in_progress
     }
+  end
+
+  defp winning_floor(epics) do
+    epics
+    |> Enum.flat_map(fn {id, depth, a} ->
+      case floor_of(a) do
+        nil -> []
+        f -> [{f, depth, id}]
+      end
+    end)
+    |> Enum.min(fn -> nil end)
+    |> case do
+      nil -> {nil, nil}
+      {f, _depth, id} -> {id, f}
+    end
+  end
+
+  defp nearest_epic([], _leaves_of), do: nil
+
+  defp nearest_epic(epics, leaves_of) do
+    min_depth = epics |> Enum.map(&elem(&1, 1)) |> Enum.min()
+
+    epics
+    |> Enum.filter(&(elem(&1, 1) == min_depth))
+    |> Enum.map(fn {id, _, _} -> id end)
+    |> Enum.min_by(fn id -> {length(open(leaves_of[id])), id} end)
   end
 
   # `[{id, depth}]` of the strict ancestors, breadth-first, depth-capped.
