@@ -77,7 +77,7 @@ defmodule Arbiter.Sessions.Memory.Promotion do
           | {:system_error, term()}
 
   @doc """
-  Every candidate in every session, oldest session directory first.
+  Every candidate in every session, ordered by session id, then file name.
 
   ## Options
 
