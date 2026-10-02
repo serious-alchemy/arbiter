@@ -68,4 +68,34 @@ defmodule ArbiterWeb.ReportsLiveTest do
     _ = render_async(view)
     assert has_element?(view, "#reports-page")
   end
+
+  describe "throughput & lead time" do
+    defp close!(issue) do
+      {:ok, _} = Ash.update(issue, %{close_upstream: false}, action: :close)
+    end
+
+    test "renders weekly bars, lead-time histogram, P50/P90 and the weighting policy",
+         %{conn: conn, ws: ws} do
+      for d <- [1, 1, nil] do
+        ws |> issue!(%{difficulty: d}) |> close!()
+      end
+
+      {:ok, view, _html} = live(conn, ~p"/reports?workspace=#{ws.id}")
+      _ = render_async(view)
+
+      assert has_element?(view, "#reports-throughput-chart rect[data-series='1'][data-value='2']")
+
+      assert has_element?(
+               view,
+               "#reports-throughput-chart rect[data-series='unrated'][data-value='1']"
+             )
+
+      assert has_element?(view, "#reports-weighted-chart")
+      assert has_element?(view, "#reports-lead-chart")
+      assert has_element?(view, "#reports-lead-p50")
+      assert has_element?(view, "#reports-lead-p90")
+      assert has_element?(view, "#reports-lead-era")
+      assert has_element?(view, "#reports-weighting-policy", "unrated")
+    end
+  end
 end
