@@ -167,6 +167,50 @@ defmodule Arbiter.Agents.CodexTest do
       refute "--dangerously-bypass-approvals-and-sandbox" in argv
     end
 
+    test ":auto adds the linked worktree's git common dir to writable_roots", %{
+      tmp: tmp,
+      old_path: old_path
+    } do
+      _codex = stub_codex(tmp)
+      link_git!(tmp, old_path)
+
+      main = Path.join(tmp, "main")
+      wt = Path.join(tmp, "wt")
+      File.mkdir_p!(main)
+      git!(main, ~w(init -q))
+      git!(main, ~w(-c user.email=a@b -c user.name=n commit -q --allow-empty -m init))
+      git!(main, ["worktree", "add", "-q", wt, "-b", "feat"])
+
+      auto = SecurityPolicy.merge(SecurityPolicy.base(), %{permissions: %{mode: :auto}})
+
+      assert {:ok, argv} = Codex.default_argv("the prompt", security: auto, worktree_path: wt)
+
+      common = Path.join(Path.expand(main), ".git")
+      assert "sandbox_workspace_write.writable_roots=[#{inspect(common)}]" in argv
+    end
+
+    test ":auto without a git worktree adds no writable_roots", %{tmp: tmp, old_path: old_path} do
+      _codex = stub_codex(tmp)
+      link_git!(tmp, old_path)
+
+      auto = SecurityPolicy.merge(SecurityPolicy.base(), %{permissions: %{mode: :auto}})
+      plain = Path.join(tmp, "plain")
+      File.mkdir_p!(plain)
+
+      assert {:ok, argv} = Codex.default_argv("p", security: auto, worktree_path: plain)
+      refute Enum.any?(argv, &(is_binary(&1) and &1 =~ "writable_roots"))
+      assert {:ok, argv} = Codex.default_argv("p", security: auto)
+      refute Enum.any?(argv, &(is_binary(&1) and &1 =~ "writable_roots"))
+    end
+
+    test ":strict never adds writable_roots", %{tmp: tmp} do
+      _codex = stub_codex(tmp)
+
+      strict = SecurityPolicy.merge(SecurityPolicy.base(), %{permissions: %{mode: :strict}})
+      assert {:ok, argv} = Codex.default_argv("p", security: strict, worktree_path: tmp)
+      refute Enum.any?(argv, &(is_binary(&1) and &1 =~ "writable_roots"))
+    end
+
     test "declares the MCP server via -c overrides so project trust is irrelevant", %{tmp: tmp} do
       _codex = stub_codex(tmp)
       prior = Application.get_env(:arbiter, Arbiter.MCP)
@@ -756,4 +800,19 @@ defmodule Arbiter.Agents.CodexTest do
 
   defp restore_env(key, nil), do: Application.delete_env(:arbiter, key)
   defp restore_env(key, val), do: Application.put_env(:arbiter, key, val)
+
+  # The stub-PATH tests only expose `tmp`; link the real git in so
+  # `git rev-parse --git-common-dir` resolves.
+  defp link_git!(tmp, old_path) do
+    git = System.find_executable("git") || find_in(old_path, "git")
+    File.ln_s!(git, Path.join(tmp, "git"))
+  end
+
+  defp find_in(path, bin) do
+    path |> String.split(":") |> Enum.map(&Path.join(&1, bin)) |> Enum.find(&File.exists?/1)
+  end
+
+  defp git!(dir, args) do
+    {_, 0} = System.cmd("git", args, cd: dir, stderr_to_stdout: true)
+  end
 end
