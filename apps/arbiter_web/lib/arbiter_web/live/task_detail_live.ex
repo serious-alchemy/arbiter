@@ -673,13 +673,6 @@ defmodule ArbiterWeb.TaskDetailLive do
     end
   end
 
-  defp floor_options do
-    [{"None", ""} | Enum.map(1..3, &{"P#{&1}", to_string(&1)})]
-  end
-
-  defp floor_flash(nil), do: "Epic priority floor cleared."
-  defp floor_flash(floor), do: "Epic priority floor set to P#{floor}."
-
   # ---- dispatch ----
   #
   # Dispatch spends real API credits, so the modal is the confirmation step:
@@ -900,6 +893,13 @@ defmodule ArbiterWeb.TaskDetailLive do
       title -> {:ok, title}
     end
   end
+
+  defp floor_options do
+    [{"None", ""} | Enum.map(1..3, &{"P#{&1}", to_string(&1)})]
+  end
+
+  defp floor_flash(nil), do: "Epic priority floor cleared."
+  defp floor_flash(floor), do: "Epic priority floor set to P#{floor}."
 
   defp fetch_priority(params, current) do
     case TaskForm.parse_int(params["priority"]) do
