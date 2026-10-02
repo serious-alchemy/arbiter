@@ -48,7 +48,7 @@ defmodule Arbiter.Sessions.Memory.Promotion do
       {:error, :invalid_path}
     else
       # Check if it starts with sessions_root and contains /memory/candidates/
-      if String.starts_with?(expanded_path, Path.expand(sessions_root)) and
+      if String.starts_with?(expanded_path, Path.expand(sessions_root) <> "/") and
            String.contains?(expanded_path, "/memory/candidates/") do
         {:ok, expanded_path}
       else
@@ -72,22 +72,27 @@ defmodule Arbiter.Sessions.Memory.Promotion do
       else
         File.mkdir_p!(memory_root)
 
-        # Run citation checks against workspace checkout's HEAD
+        # Run citation checks against workspace checkouts HEADs
         case Staleness.check_memory(safe_path, opts) do
-          {:error, :stale} ->
+          {:error, :stale, _sha} ->
             {:error, :stale}
 
-          :ok ->
-            # Actually we need to set verified_sha if it's a project memory.
-            # check_memory just validates citations. We need to parse and write verified_sha.
+          result ->
             fm = parse_frontmatter(safe_path)
 
             if fm[:type] == "project" do
-              checkout = Staleness.workspace_checkout(fm[:workspace_id], opts)
-              head_sha = get_head_sha(checkout)
+              sha =
+                case result do
+                  {:ok, s} when is_binary(s) ->
+                    s
 
-              if head_sha do
-                prepend_verified_sha(safe_path, head_sha)
+                  _ ->
+                    checkouts = Staleness.workspace_checkouts(fm[:workspace_id], opts)
+                    Staleness.get_checkouts_sha(checkouts)
+                end
+
+              if sha and sha != "" do
+                prepend_verified_sha(safe_path, sha)
               end
             end
 
@@ -145,15 +150,6 @@ defmodule Arbiter.Sessions.Memory.Promotion do
 
       _ ->
         %{}
-    end
-  end
-
-  defp get_head_sha(nil), do: nil
-
-  defp get_head_sha(checkout) do
-    case System.cmd("git", ["-C", checkout, "rev-parse", "HEAD"]) do
-      {sha, 0} -> String.trim(sha)
-      _ -> nil
     end
   end
 

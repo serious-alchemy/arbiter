@@ -31,7 +31,7 @@ defmodule Arbiter.Sessions.Memory.StalenessTest do
     test "returns :ok for user/feedback/reference memories without checking", %{memory_root: root} do
       path = write_memory!(root, "user.md", "user", "Some content about user")
       assert Staleness.check_memory(path) == :ok
-      
+
       path2 = write_memory!(root, "ref.md", "reference", "Look at example.com:443")
       assert Staleness.check_memory(path2) == :ok
     end
@@ -57,7 +57,7 @@ defmodule Arbiter.Sessions.Memory.StalenessTest do
           "workspace_id: ws1\n"
         )
 
-      assert {:error, :stale} = Staleness.check_memory(path, primary_checkout: checkout)
+      assert {:error, :stale, _} = Staleness.check_memory(path, primary_checkout: checkout)
     end
 
     test "identifies stale project memory with invalid module name", %{memory_root: root} do
@@ -80,7 +80,53 @@ defmodule Arbiter.Sessions.Memory.StalenessTest do
           "workspace_id: ws1\n"
         )
 
-      assert {:error, :stale} = Staleness.check_memory(path, primary_checkout: checkout)
+      assert {:error, :stale, _} = Staleness.check_memory(path, primary_checkout: checkout)
+    end
+
+    test "ignores dependency modules like Ecto.Changeset", %{memory_root: root} do
+      checkout = Path.join(root, "checkout")
+      File.mkdir_p!(Path.join(checkout, "lib"))
+      File.write!(Path.join(checkout, "lib/short.ex"), "defmodule Short.Module do\nend\n")
+
+      System.cmd("git", ["init"], cd: checkout)
+      System.cmd("git", ["add", "."], cd: checkout)
+      System.cmd("git", ["config", "user.email", "test@test.com"], cd: checkout)
+      System.cmd("git", ["config", "user.name", "Test"], cd: checkout)
+      System.cmd("git", ["commit", "-m", "init"], cd: checkout)
+
+      path =
+        write_memory!(
+          root,
+          "proj.md",
+          "project",
+          "Look at Ecto.Changeset without backticks",
+          "workspace_id: ws1\n"
+        )
+
+      assert {:ok, _} = Staleness.check_memory(path, primary_checkout: checkout)
+    end
+
+    test "quarantines when missing prefix-matched module or backtick module", %{memory_root: root} do
+      checkout = Path.join(root, "checkout")
+      File.mkdir_p!(Path.join(checkout, "lib"))
+      File.write!(Path.join(checkout, "lib/short.ex"), "defmodule Short do\nend\n")
+
+      System.cmd("git", ["init"], cd: checkout)
+      System.cmd("git", ["add", "."], cd: checkout)
+      System.cmd("git", ["config", "user.email", "test@test.com"], cd: checkout)
+      System.cmd("git", ["config", "user.name", "Test"], cd: checkout)
+      System.cmd("git", ["commit", "-m", "init"], cd: checkout)
+
+      path =
+        write_memory!(
+          root,
+          "proj.md",
+          "project",
+          "Look at `Ecto.Changeset` or Short.Missing",
+          "workspace_id: ws1\n"
+        )
+
+      assert {:error, :stale, _} = Staleness.check_memory(path, primary_checkout: checkout)
     end
 
     test "returns :ok for project memory with valid file:line and module", %{memory_root: root} do
@@ -103,7 +149,7 @@ defmodule Arbiter.Sessions.Memory.StalenessTest do
           "workspace_id: ws1\n"
         )
 
-      assert :ok = Staleness.check_memory(path, primary_checkout: checkout)
+      assert {:ok, _} = Staleness.check_memory(path, primary_checkout: checkout)
     end
   end
 
@@ -112,7 +158,7 @@ defmodule Arbiter.Sessions.Memory.StalenessTest do
       checkout = Path.join(root, "checkout")
       File.mkdir_p!(Path.join(checkout, "lib"))
       File.write!(Path.join(checkout, "lib/short.ex"), "defmodule Short do\nend\n")
-      
+
       System.cmd("git", ["init"], cd: checkout)
       System.cmd("git", ["add", "."], cd: checkout)
       System.cmd("git", ["config", "user.email", "test@test.com"], cd: checkout)
@@ -133,9 +179,10 @@ defmodule Arbiter.Sessions.Memory.StalenessTest do
       assert not File.exists?(path)
       quarantine_path = Path.join([root, "quarantined", "proj.md"])
       assert File.exists?(quarantine_path)
-      
+
       content = File.read!(quarantine_path)
       assert content =~ "quarantine_reason:"
+      assert content =~ "quarantine_sha:"
     end
   end
 end

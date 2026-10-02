@@ -4,8 +4,6 @@ defmodule Arbiter.Sessions.Memory.Staleness do
   them if they cite invalid `file:line` or modules.
   """
 
-  
-
   @doc """
   Checks a memory file for staleness against its workspace checkout.
   Returns `:ok` or `{:error, :stale}`. Does NOT quarantine.
@@ -15,23 +13,25 @@ defmodule Arbiter.Sessions.Memory.Staleness do
 
     # We only check project memories because only project memories are bound to a workspace checkout.
     if frontmatter[:type] == "project" do
-      case workspace_checkout(frontmatter[:workspace_id], opts) do
-        nil -> :ok
-        checkout ->
-          body = read_body(path)
-          verified_sha = frontmatter[:verified_sha]
-          
-          # We only need to check if we don't have a verified_sha or if the current HEAD differs
-          head_sha = get_head_sha(checkout)
-          if head_sha == nil or verified_sha == nil or verified_sha != head_sha do
-            if valid_citations?(body, checkout) do
-              :ok
-            else
-              {:error, :stale}
-            end
+      checkouts = workspace_checkouts(frontmatter[:workspace_id], opts)
+
+      if Enum.empty?(checkouts) do
+        :ok
+      else
+        body = read_body(path)
+        verified_sha = frontmatter[:verified_sha]
+
+        head_sha = get_checkouts_sha(checkouts)
+
+        if head_sha == "" or verified_sha == nil or verified_sha != head_sha do
+          if valid_citations?(body, checkouts) do
+            {:ok, head_sha}
           else
-            :ok
+            {:error, :stale, head_sha}
           end
+        else
+          {:ok, head_sha}
+        end
       end
     else
       :ok
@@ -46,19 +46,26 @@ defmodule Arbiter.Sessions.Memory.Staleness do
     quarantine_dir = Path.join(root, "quarantined")
     File.mkdir_p!(quarantine_dir)
     dest = Path.join(quarantine_dir, Path.basename(path))
-    
+
     # Prepend quarantine reason to the file before moving it
     body = read_body(path)
     fm = parse_frontmatter(path)
     fm_lines = Enum.map(fm, fn {k, v} -> "#{k}: #{v}" end)
     fm_lines = if sha, do: fm_lines ++ ["quarantine_sha: #{sha}"], else: fm_lines
     fm_lines = fm_lines ++ ["quarantine_reason: #{reason}"]
-    
+
     new_content = "---\n" <> Enum.join(fm_lines, "\n") <> "\n---\n\n" <> body
     File.write!(path, new_content)
-    
+
     File.rename!(path, dest)
     {:error, :quarantined}
+  end
+
+  def get_checkouts_sha(checkouts) do
+    checkouts
+    |> Enum.map(&get_head_sha/1)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join(",")
   end
 
   defp get_head_sha(checkout) do
@@ -68,60 +75,103 @@ defmodule Arbiter.Sessions.Memory.Staleness do
     end
   end
 
-  def workspace_checkout(workspace_id, opts) do
+  def workspace_checkouts(workspace_id, opts) do
     if checkout = Keyword.get(opts, :primary_checkout) do
-      checkout
+      [checkout]
     else
       if workspace_id do
         case Ash.get(Arbiter.Tasks.Workspace, workspace_id) do
           {:ok, ws} ->
             paths = ws.config["repo_paths"] || %{}
-            case Enum.to_list(paths) do
-              [{_, entry} | _] -> Arbiter.Tasks.RepoConfig.repo_path_from_config(entry)
-              _ -> nil
-            end
-          _ -> nil
+
+            Enum.map(paths, fn {_, entry} ->
+              Arbiter.Tasks.RepoConfig.repo_path_from_config(entry)
+            end)
+
+          _ ->
+            []
         end
       else
-        nil
+        []
       end
     end
   end
 
-  def valid_citations?(body, checkout) do
-    valid_file_citations?(body, checkout) and valid_module_citations?(body, checkout)
+  def valid_citations?(body, checkouts) do
+    valid_file_citations?(body, checkouts) and valid_module_citations?(body, checkouts)
   end
 
-  defp valid_file_citations?(body, checkout) do
+  defp valid_file_citations?(body, checkouts) do
     citations = Regex.scan(~r/(?:^|[\s"'\(`])((?:[\w\-\.]+\/)+[\w\-\.]+\.\w+):(\d+)/, body)
 
     Enum.all?(citations, fn [_, file, line_str] ->
       line = String.to_integer(line_str)
-      full_path = Path.join(checkout, file)
 
-      if File.exists?(full_path) do
-        case File.read(full_path) do
-          {:ok, content} ->
-            line_count = length(String.split(content, "\n"))
-            line <= line_count
+      Enum.any?(checkouts, fn checkout ->
+        full_path = Path.join(checkout, file)
 
-          _ ->
-            false
+        if File.exists?(full_path) do
+          case File.read(full_path) do
+            {:ok, content} ->
+              line_count = length(String.split(content, "\n"))
+              line <= line_count
+
+            _ ->
+              false
+          end
+        else
+          false
         end
-      else
-        false
-      end
+      end)
     end)
   end
 
-  defp valid_module_citations?(body, checkout) do
-    citations = Regex.scan(~r/(?:^|[\s"'\(`])([A-Z][a-zA-Z0-9_]*(?:\.[A-Z][a-zA-Z0-9_]*)+)/, body)
+  defp get_all_root_segments(checkouts) do
+    checkouts
+    |> Enum.map(&get_root_segments/1)
+    |> Enum.reduce(MapSet.new(), &MapSet.union/2)
+  end
 
-    Enum.all?(citations, fn [_, module_name] ->
-      # Use git grep to find defmodule Foo.Bar
-      case System.cmd("git", ["-C", checkout, "grep", "-q", "defmodule #{module_name}"]) do
-        {_, 0} -> true
-        _ -> false
+  defp get_root_segments(checkout) do
+    case System.cmd("git", ["-C", checkout, "grep", "-ohE", "defmodule [A-Z][a-zA-Z0-9_]*"]) do
+      {out, 0} ->
+        out
+        |> String.split("\n", trim: true)
+        |> Enum.map(fn line ->
+          case String.split(line, " ", parts: 2) do
+            ["defmodule", mod | _] -> mod |> String.split(".") |> hd()
+            _ -> nil
+          end
+        end)
+        |> Enum.reject(&is_nil/1)
+        |> MapSet.new()
+
+      _ ->
+        MapSet.new()
+    end
+  end
+
+  defp valid_module_citations?(body, checkouts) do
+    root_segments = get_all_root_segments(checkouts)
+
+    citations = Regex.scan(~r/(`)?\b([A-Z][a-zA-Z0-9_]*(?:\.[A-Z][a-zA-Z0-9_]*)+)\b(`)?/, body)
+
+    Enum.all?(citations, fn [_, left_tick, module_name | rest] ->
+      right_tick = List.first(rest) || ""
+      in_backticks = left_tick == "`" and right_tick == "`"
+      root = module_name |> String.split(".") |> hd()
+
+      if MapSet.member?(root_segments, root) or in_backticks do
+        escaped = String.replace(module_name, ".", "\\.")
+
+        Enum.any?(checkouts, fn checkout ->
+          case System.cmd("git", ["-C", checkout, "grep", "-qE", "defmodule #{escaped}( |,|$)"]) do
+            {_, 0} -> true
+            _ -> false
+          end
+        end)
+      else
+        true
       end
     end)
   end
@@ -181,12 +231,15 @@ defmodule Arbiter.Sessions.Memory.Staleness do
         |> Enum.filter(&String.ends_with?(&1, ".md"))
         |> Enum.each(fn file ->
           path = Path.join(memory_root, file)
+
           case check_memory(path, opts) do
-            {:error, :stale} -> quarantine(path, "Stale citations found during sweep")
+            {:error, :stale, sha} -> quarantine(path, "Stale citations found during sweep", sha)
             _ -> :ok
           end
         end)
-      _ -> :ok
+
+      _ ->
+        :ok
     end
   end
 end
