@@ -115,6 +115,9 @@ defmodule Arbiter.Release do
 
     * `:codex_usage` → `Arbiter.Usage.CodexUsageBackfill.backfill/1`
       (`:apply?`, `:since`, `:until`, `:limit`, `:tolerance_ms`)
+    * `:usage_base_task` → `Arbiter.Usage.BaseTaskBackfill.backfill/1`
+      (`:apply?`) — fills `usage_events.base_task_id` / `role` on old task rows
+
     * `:gemini_usage_note` → `Arbiter.Usage.GeminiUsageNote.backfill/1`
       (`:apply?`, `:since`, `:until`, `:limit`)
     * `:issue_repos` → `Arbiter.Tasks.RepoBackfill.plan/0` + `apply!/1`
@@ -162,6 +165,25 @@ defmodule Arbiter.Release do
     no token_count line:  #{result.no_token_count}
     unreadable file:      #{result.unreadable}
     write failures:        #{result.failed}
+    """)
+
+    result
+  end
+
+  def backfill(:usage_base_task, opts) do
+    start_release_repo!()
+    apply? = Keyword.get(opts, :apply?, false)
+
+    result = Arbiter.Usage.BaseTaskBackfill.backfill(opts)
+
+    IO.puts(banner("usage base_task_id / role", apply?, opts[:hint]))
+
+    IO.puts("""
+
+    task rows scanned:  #{result.scanned}
+    #{String.pad_trailing(if(apply?, do: "backfilled", else: "would backfill") <> ":", 20)}#{result.backfilled + result.would_backfill}
+    ext:* left null:    #{result.skipped_ext}
+    write failures:     #{result.failed}
     """)
 
     result
