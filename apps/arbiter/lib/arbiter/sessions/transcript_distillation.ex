@@ -164,9 +164,10 @@ defmodule Arbiter.Sessions.TranscriptDistillation do
   pass that was refused before the model call (`:invalid_session_id`,
   `{:invalid_option, key}`, `:model_calls_disabled`, `:no_archived_transcript`,
   `:unsafe_candidates_dir`, `{:budget_exhausted, spend}`, `:empty_transcript`,
-  `{:unreadable_transcript, why}`), for a failed model call (the invoker's own
-  reason), or for an `:unparseable_model_output`. A reply that came back is
-  metered before it is parsed, so even an unparseable one is in the ledger.
+  `{:empty_window, total_turns}`, `{:unreadable_transcript, why}`), for a
+  failed model call (the invoker's own reason), or for an
+  `:unparseable_model_output`. A reply that came back is metered before it is
+  parsed, so even an unparseable one is in the ledger.
   """
   @spec run(String.t(), keyword()) :: {:ok, result()} | {:error, term()}
   def run(session_id, opts \\ []) when is_binary(session_id) do
@@ -302,9 +303,10 @@ defmodule Arbiter.Sessions.TranscriptDistillation do
         add_line(line, acc, cfg)
       end)
 
-    case :queue.to_list(acc.window) do
-      [] -> {:error, :empty_transcript}
-      turns -> {:ok, turns, acc.total}
+    case {:queue.to_list(acc.window), acc.total} do
+      {[], 0} -> {:error, :empty_transcript}
+      {[], total} -> {:error, {:empty_window, total}}
+      {turns, total} -> {:ok, turns, total}
     end
   rescue
     e -> {:error, {:unreadable_transcript, Exception.message(e)}}
@@ -415,9 +417,12 @@ defmodule Arbiter.Sessions.TranscriptDistillation do
         utf8_prefix(binary_part(text, 0, limit)) <> " …[#{byte_size(text) - limit} more bytes]"
   end
 
-  # A byte cut can split a code point; drop the partial one.
+  # A byte cut can split a code point; keep only the valid prefix.
   defp utf8_prefix(bin) do
-    if String.valid?(bin), do: bin, else: utf8_prefix(binary_part(bin, 0, byte_size(bin) - 1))
+    case :unicode.characters_to_binary(bin) do
+      valid when is_binary(valid) -> valid
+      {_incomplete_or_error, valid, _rest} -> valid
+    end
   end
 
   defp window(turns, total) do
@@ -516,8 +521,9 @@ defmodule Arbiter.Sessions.TranscriptDistillation do
 
   # The pass's own draw, on its own step, in the Loop's shape: `source:
   # :maintenance` and no `session_id`, because this spend is not the distilled
-  # session's. Keying it on the session would bill the session for it and
-  # make this pass's model its `author_model` at promotion.
+  # session's. A row on the session's ledger key would be counted as the
+  # session's own spend, and its model would become the session's
+  # `author_model` at promotion. The distilled session is named in `raw`.
   defp meter(usage, elapsed, ctx) do
     usage = if is_map(usage), do: usage, else: %{}
     cost = usage[:cost_usd]

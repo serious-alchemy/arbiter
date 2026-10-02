@@ -237,6 +237,12 @@ defmodule Arbiter.MCP.Tools.MemoryPending do
   defp distill_error(id, :empty_transcript),
     do: {:invalid, "session #{id}'s transcript has no conversation turns to distill"}
 
+  defp distill_error(id, {:empty_window, total}) do
+    {:invalid,
+     "session #{id}'s transcript has #{total} turns, none with text to distill in the " <>
+       "requested window"}
+  end
+
   defp distill_error(_id, :model_calls_disabled),
     do: {:unavailable, "transcript distillation model calls are disabled on this server"}
 

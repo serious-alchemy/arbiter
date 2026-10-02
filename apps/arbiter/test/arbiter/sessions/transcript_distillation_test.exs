@@ -384,6 +384,22 @@ defmodule Arbiter.Sessions.TranscriptDistillationTest do
       assert result.window.last_turn < 10
     end
 
+    test "a :from_turn past the last turn is refused, saying how many turns there are" do
+      archive!(numbered(10))
+
+      assert {:error, {:empty_window, 10}} = distill(from_turn: 11, invoker: invoker(reply([])))
+      refute_received {:invoked, _, _}
+    end
+
+    test "a cut through a multi-byte character never leaves invalid UTF-8 in the prompt" do
+      archive!([user(String.duplicate("é", 5_000))])
+
+      assert {:ok, _} = distill(invoker: invoker(reply([])))
+      assert_received {:invoked, prompt, _opts}
+      assert String.valid?(prompt)
+      assert prompt =~ "more bytes]"
+    end
+
     test "renders roles and tool calls, and skips what is not conversation" do
       archive!([
         user("Remember: deploys go out on Tuesdays."),
@@ -564,6 +580,19 @@ defmodule Arbiter.Sessions.TranscriptDistillationTest do
       archive!(conversation())
 
       assert {:error, :timeout} = distill(invoker: fn _prompt, _opts -> {:error, :timeout} end)
+
+      assert Ash.read!(Event) == []
+      refute File.exists?(candidates_dir())
+    end
+
+    test "an invoker that raises or replies nonsense meters and queues nothing" do
+      archive!(conversation())
+
+      assert {:error, {:exception, "boom"}} =
+               distill(invoker: fn _prompt, _opts -> raise "boom" end)
+
+      assert {:error, {:unexpected_reply, :nonsense}} =
+               distill(invoker: fn _prompt, _opts -> :nonsense end)
 
       assert Ash.read!(Event) == []
       refute File.exists?(candidates_dir())
