@@ -5,7 +5,7 @@ and its one dispatch-eligibility predicate ([ticket lifecycle](ticket-lifecycle.
 §1–2; bd-asxw4e, bd-79w1fs), `ticket_transitions` (bd-5gkqdr, bd-d8fi92) ·
 **Reconciles with:** [paced quota routing signals](paced-quota-routing-signals.md)
 (bd-9ck2a7, epic bd-gfob09; R5, R7 bd-6bxv7h, R10 bd-3jshn8) · **Status:**
-proposed 2026-10-01. Nothing here is implemented. The ticket plan is in
+proposed 2026-10-01. ES1–ES3 are implemented (the §4 order key, the lift cap and the §6.6 settings except `scheduling_epic_wip_limit`, which ships with ES10); the rest is not. The ticket plan is in
 [§9](#9-phased-ticket-breakdown). The measurements are reproducible with
 [`epic-aware-scheduling/measure_epic_waits.py`](epic-aware-scheduling/measure_epic_waits.py)
 ([Appendix A](#appendix-a-method)).

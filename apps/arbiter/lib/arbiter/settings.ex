@@ -325,6 +325,87 @@ defmodule Arbiter.Settings do
 
   def set_output_offload_enabled(_), do: {:error, :invalid_value}
 
+  # ---- scheduling (ES3, docs/design/epic-aware-scheduling.md §6.6) ----------
+
+  @default_finish_first_max_wait_hours 24
+
+  @doc "The aging escape's default, in hours, when no override is set."
+  @spec default_finish_first_max_wait_hours() :: pos_integer()
+  def default_finish_first_max_wait_hours, do: @default_finish_first_max_wait_hours
+
+  @doc """
+  The scheduling settings in force, defaults applied:
+  `%{epic_floors_enabled: true, max_lifted_in_flight: nil, finish_first: false,
+  finish_first_max_wait_hours: 24}`. `max_lifted_in_flight: nil` means
+  `max(slots_total - 1, 1)`, which only the board knows. Never raises: an
+  unreadable row reads as no overrides.
+  """
+  @spec scheduling() :: %{
+          epic_floors_enabled: boolean(),
+          max_lifted_in_flight: pos_integer() | nil,
+          finish_first: boolean(),
+          finish_first_max_wait_hours: pos_integer()
+        }
+  def scheduling do
+    %{
+      epic_floors_enabled: scheduling_epic_floors_enabled() != false,
+      max_lifted_in_flight: scheduling_max_lifted_in_flight(),
+      finish_first: scheduling_finish_first() == true,
+      finish_first_max_wait_hours:
+        scheduling_finish_first_max_wait_hours() || @default_finish_first_max_wait_hours
+    }
+  end
+
+  @doc "The epic-floor kill switch override; `nil` = floors apply."
+  @spec scheduling_epic_floors_enabled() :: boolean() | nil
+  def scheduling_epic_floors_enabled, do: read_setting(:scheduling_epic_floors_enabled)
+
+  @doc "Persist the epic-floor kill switch; `nil` clears it (floors apply)."
+  @spec set_scheduling_epic_floors_enabled(boolean() | nil) ::
+          {:ok, boolean() | nil} | {:error, term()}
+  def set_scheduling_epic_floors_enabled(v) when is_nil(v) or is_boolean(v),
+    do: write_setting(:scheduling_epic_floors_enabled, v)
+
+  def set_scheduling_epic_floors_enabled(_), do: {:error, :invalid_value}
+
+  @doc "The lift cap override; `nil` = `max(slots_total - 1, 1)`."
+  @spec scheduling_max_lifted_in_flight() :: pos_integer() | nil
+  def scheduling_max_lifted_in_flight, do: read_setting(:scheduling_max_lifted_in_flight)
+
+  @doc "Persist the lift cap; `nil` clears it."
+  @spec set_scheduling_max_lifted_in_flight(pos_integer() | nil) ::
+          {:ok, pos_integer() | nil} | {:error, term()}
+  def set_scheduling_max_lifted_in_flight(n) when is_nil(n) or (is_integer(n) and n > 0),
+    do: write_setting(:scheduling_max_lifted_in_flight, n)
+
+  def set_scheduling_max_lifted_in_flight(_), do: {:error, :invalid_value}
+
+  @doc "The finish-first switch override; `nil` = off."
+  @spec scheduling_finish_first() :: boolean() | nil
+  def scheduling_finish_first, do: read_setting(:scheduling_finish_first)
+
+  @doc "Persist the finish-first switch; `nil` clears it (off)."
+  @spec set_scheduling_finish_first(boolean() | nil) ::
+          {:ok, boolean() | nil} | {:error, term()}
+  def set_scheduling_finish_first(v) when is_nil(v) or is_boolean(v),
+    do: write_setting(:scheduling_finish_first, v)
+
+  def set_scheduling_finish_first(_), do: {:error, :invalid_value}
+
+  @doc "The finish-first aging threshold override (hours); `nil` = #{@default_finish_first_max_wait_hours}."
+  @spec scheduling_finish_first_max_wait_hours() :: pos_integer() | nil
+  def scheduling_finish_first_max_wait_hours,
+    do: read_setting(:scheduling_finish_first_max_wait_hours)
+
+  @doc "Persist the finish-first aging threshold; `nil` clears it."
+  @spec set_scheduling_finish_first_max_wait_hours(pos_integer() | nil) ::
+          {:ok, pos_integer() | nil} | {:error, term()}
+  def set_scheduling_finish_first_max_wait_hours(n)
+      when is_nil(n) or (is_integer(n) and n > 0),
+      do: write_setting(:scheduling_finish_first_max_wait_hours, n)
+
+  def set_scheduling_finish_first_max_wait_hours(_), do: {:error, :invalid_value}
+
   # ---- singleton plumbing --------------------------------------------------
 
   # Reads never raise: a missing table (not-yet-migrated install) or any other
