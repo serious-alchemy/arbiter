@@ -22,7 +22,8 @@ defmodule Arbiter.Agents.SecurityPolicyTest do
                writable_paths: [],
                egress_tunnels: [],
                egress: :open,
-               allow_hosts: []
+               allow_hosts: [],
+               backend: :bwrap
              }
     end
 
@@ -335,6 +336,115 @@ defmodule Arbiter.Agents.SecurityPolicyTest do
 
       p = SecurityPolicy.merge(SecurityPolicy.base(), %{sandbox: %{egress: :allowlist}})
       assert SecurityPolicy.one_line(p) =~ "egress=allowlist"
+    end
+  end
+
+  describe "sandbox.backend (bd-btcdrf, P2)" do
+    defp backend_ws(security, repos \\ nil) do
+      security = if repos, do: Map.put(security, "repos", repos), else: security
+      %Workspace{config: %{"agent" => %{"security" => security}}}
+    end
+
+    setup do
+      prev = Application.get_env(:arbiter, :worker_security_policy)
+
+      on_exit(fn ->
+        if prev,
+          do: Application.put_env(:arbiter, :worker_security_policy, prev),
+          else: Application.delete_env(:arbiter, :worker_security_policy)
+      end)
+    end
+
+    test "the default is bwrap, so an unconfigured workspace is unchanged" do
+      assert SecurityPolicy.base().sandbox.backend == :bwrap
+      assert SecurityPolicy.resolve(%Workspace{config: %{}}).sandbox.backend == :bwrap
+      assert SecurityPolicy.resolve(nil).sandbox.backend == :bwrap
+      assert SecurityPolicy.sandbox_backend(SecurityPolicy.default()) == :bwrap
+    end
+
+    test "valid_sandbox_backends/0 lists the backends, loosest first" do
+      assert SecurityPolicy.valid_sandbox_backends() == [:bwrap, :podman]
+    end
+
+    test "a layer can raise bwrap to podman, as a string or an atom" do
+      assert SecurityPolicy.resolve(backend_ws(%{"sandbox" => %{"backend" => "podman"}})).sandbox.backend ==
+               :podman
+
+      assert SecurityPolicy.merge(SecurityPolicy.base(), %{sandbox: %{backend: :podman}}).sandbox.backend ==
+               :podman
+    end
+
+    test "most restrictive wins: no later layer can drop podman back to bwrap" do
+      Application.put_env(:arbiter, :worker_security_policy, %{sandbox: %{backend: :podman}})
+
+      ws =
+        backend_ws(%{"sandbox" => %{"backend" => "bwrap"}}, %{
+          "tonic" => %{"sandbox" => %{"backend" => "bwrap"}}
+        })
+
+      assert SecurityPolicy.resolve(ws).sandbox.backend == :podman
+
+      assert SecurityPolicy.resolve(ws, %{"sandbox" => %{"backend" => "bwrap"}}, "tonic").sandbox.backend ==
+               :podman
+    end
+
+    test "podman set at any one layer survives every layer above it" do
+      ws = backend_ws(%{}, %{"tonic" => %{"sandbox" => %{"backend" => "podman"}}})
+
+      assert SecurityPolicy.resolve(ws).sandbox.backend == :bwrap
+      assert SecurityPolicy.resolve(ws, %{}, "tonic").sandbox.backend == :podman
+      assert SecurityPolicy.resolve(ws, %{}, "other").sandbox.backend == :bwrap
+
+      ws = backend_ws(%{"sandbox" => %{"backend" => "podman"}})
+
+      assert SecurityPolicy.resolve(ws, %{"sandbox" => %{"backend" => "bwrap"}}).sandbox.backend ==
+               :podman
+    end
+
+    test "an unknown value is ignored, so the inherited backend survives" do
+      for bad <- ["docker", "", 3, nil, %{}, ["podman"]] do
+        p = SecurityPolicy.merge(SecurityPolicy.base(), %{"sandbox" => %{"backend" => bad}})
+        assert p.sandbox.backend == :bwrap
+
+        p =
+          SecurityPolicy.merge(SecurityPolicy.merge(p, %{sandbox: %{backend: :podman}}), %{
+            "sandbox" => %{"backend" => bad}
+          })
+
+        assert p.sandbox.backend == :podman
+      end
+    end
+
+    test "a policy struct without the key (built before it existed) reads as bwrap" do
+      legacy = %SecurityPolicy{
+        permissions: SecurityPolicy.base().permissions,
+        sandbox: Map.delete(SecurityPolicy.base().sandbox, :backend)
+      }
+
+      assert SecurityPolicy.sandbox_backend(legacy) == :bwrap
+
+      assert SecurityPolicy.merge(legacy, %{sandbox: %{backend: :podman}}).sandbox.backend ==
+               :podman
+    end
+
+    test "setting the backend never moves egress or mode, and vice versa" do
+      ws = backend_ws(%{"sandbox" => %{"backend" => "podman"}})
+      p = SecurityPolicy.resolve(ws)
+
+      assert p.sandbox.egress == :open
+      assert p.permissions.mode == SecurityPolicy.base().permissions.mode
+
+      p = SecurityPolicy.resolve(backend_ws(%{"sandbox" => %{"egress" => "none"}}))
+      assert p.sandbox.backend == :bwrap
+    end
+
+    test "summary/1 and one_line/1 surface a non-default backend only" do
+      assert SecurityPolicy.summary(SecurityPolicy.base())["sandbox"]["backend"] == "bwrap"
+
+      podman = SecurityPolicy.merge(SecurityPolicy.base(), %{sandbox: %{backend: :podman}})
+      assert SecurityPolicy.summary(podman)["sandbox"]["backend"] == "podman"
+      assert SecurityPolicy.one_line(podman) =~ "sandbox=podman"
+      refute SecurityPolicy.one_line(SecurityPolicy.base()) =~ "sandbox="
     end
   end
 

@@ -86,6 +86,21 @@ defmodule Arbiter.Agents.SecurityPolicy do
   Unknown values are ignored on resolve (the inherited level survives) and
   refused on write by `Arbiter.Tasks.Workspace.Changes.ValidateConfig`.
 
+  ### `sandbox.backend` (bd-btcdrf, P2)
+
+  Which OS sandbox a jailed worker runs in (`docs/design/podman-worker-containers.md`
+  §7.1): `:bwrap` (the default; `Arbiter.Worker.Jail`) or `:podman` (a rootless
+  container, not implemented yet). Every spawn path that jails goes through
+  `Arbiter.Worker.Sandbox`, which resolves the backend from this field.
+  `:podman` with no implementation is **refused**, not run unjailed.
+
+  Layering is **most-restrictive-wins** (`valid_sandbox_backends/0`, loosest
+  first): once any layer (installation, workspace, repo, dispatch) selects
+  `:podman`, no later layer can select `:bwrap` again. This differs from
+  `egress`, which the highest layer replaces. Unknown values are ignored on
+  resolve and refused on write by
+  `Arbiter.Tasks.Workspace.Changes.ValidateConfig`.
+
   ### `permissions.mode`
 
     * `:bypass` — the headless-safe default. The interactive permission
@@ -229,6 +244,7 @@ defmodule Arbiter.Agents.SecurityPolicy do
   @type mode :: :auto | :strict | :bypass
   @type filesystem :: :worktree | :none
   @type egress :: :open | :allowlist | :none
+  @type sandbox_backend :: :bwrap | :podman
   @type egress_class :: :infra | :toolchain | :extras | :grants
 
   @type t :: %__MODULE__{
@@ -246,13 +262,16 @@ defmodule Arbiter.Agents.SecurityPolicy do
             writable_paths: [String.t()],
             egress_tunnels: [String.t()],
             egress: egress(),
-            allow_hosts: [String.t()]
+            allow_hosts: [String.t()],
+            backend: sandbox_backend()
           }
         }
 
   @valid_modes [:auto, :strict, :bypass]
   # Loosest first, so `:open` is the default and a "tighter" level sorts later.
   @valid_egress [:open, :allowlist, :none]
+  # Loosest first, so a "tighter" backend sorts later and wins a merge (P2).
+  @valid_sandbox_backends [:bwrap, :podman]
   # Design §4.4: which host classes each level can reach.
   @egress_classes %{
     open: [:infra, :toolchain, :extras, :grants],
@@ -342,6 +361,10 @@ defmodule Arbiter.Agents.SecurityPolicy do
   @spec valid_filesystems() :: [filesystem()]
   def valid_filesystems, do: @valid_filesystems
 
+  @doc "Valid `sandbox.backend` atoms, loosest first (the last one wins a merge)."
+  @spec valid_sandbox_backends() :: [sandbox_backend()]
+  def valid_sandbox_backends, do: @valid_sandbox_backends
+
   @doc "Valid `sandbox.egress` atoms, loosest first."
   @spec valid_egress_levels() :: [egress()]
   def valid_egress_levels, do: @valid_egress
@@ -388,7 +411,8 @@ defmodule Arbiter.Agents.SecurityPolicy do
         writable_paths: [],
         egress_tunnels: [],
         egress: :open,
-        allow_hosts: []
+        allow_hosts: [],
+        backend: :bwrap
       }
     }
   end
@@ -706,8 +730,29 @@ defmodule Arbiter.Agents.SecurityPolicy do
         union(
           Map.get(base, :allow_hosts, []),
           raw |> get(:allow_hosts) |> list_of_strings() |> Enum.filter(&valid_allow_host?/1)
-        )
+        ),
+      backend: merge_backend(Map.get(base, :backend, :bwrap), get(raw, :backend))
     }
+  end
+
+  # Most restrictive wins: the later of the two in `@valid_sandbox_backends`.
+  # An unknown or absent raw value leaves the inherited backend alone.
+  defp merge_backend(base, raw) do
+    case parse_backend(raw) do
+      nil -> base
+      layer -> Enum.max_by([base, layer], &backend_rank/1)
+    end
+  end
+
+  defp backend_rank(backend), do: Enum.find_index(@valid_sandbox_backends, &(&1 == backend))
+
+  defp parse_backend(nil), do: nil
+
+  defp parse_backend(value) do
+    case to_atom(value) do
+      b when b in @valid_sandbox_backends -> b
+      _ -> nil
+    end
   end
 
   @doc """
@@ -795,6 +840,10 @@ defmodule Arbiter.Agents.SecurityPolicy do
   def grants_allowed?(%__MODULE__{sandbox: sandbox}),
     do: egress_class_allowed?(Map.get(sandbox, :egress, :open), :grants)
 
+  @doc "The resolved `sandbox.backend` of `policy` (`:bwrap` when unset)."
+  @spec sandbox_backend(t()) :: sandbox_backend()
+  def sandbox_backend(%__MODULE__{sandbox: sandbox}), do: Map.get(sandbox, :backend, :bwrap)
+
   @doc "The resolved `sandbox.egress` of `policy` (`:open` when unset)."
   @spec egress(t()) :: egress()
   def egress(%__MODULE__{sandbox: sandbox}), do: Map.get(sandbox, :egress, :open)
@@ -853,7 +902,8 @@ defmodule Arbiter.Agents.SecurityPolicy do
         "writable_paths" => Map.get(p.sandbox, :writable_paths, []),
         "egress_tunnels" => Map.get(p.sandbox, :egress_tunnels, []),
         "egress" => p.sandbox |> Map.get(:egress, :open) |> Atom.to_string(),
-        "allow_hosts" => Map.get(p.sandbox, :allow_hosts, [])
+        "allow_hosts" => Map.get(p.sandbox, :allow_hosts, []),
+        "backend" => p |> sandbox_backend() |> Atom.to_string()
       }
     }
   end
@@ -871,6 +921,7 @@ defmodule Arbiter.Agents.SecurityPolicy do
       "fs=#{p.sandbox.filesystem}",
       "net=#{if p.sandbox.network, do: "on", else: "tools-off"}",
       egress_part(egress(p)),
+      backend_part(sandbox_backend(p)),
       "#{deny_count} #{if deny_count == 1, do: "deny", else: "denies"}"
     ]
     |> Enum.reject(&is_nil/1)
@@ -905,6 +956,9 @@ defmodule Arbiter.Agents.SecurityPolicy do
       _ -> fallback
     end
   end
+
+  defp backend_part(:bwrap), do: nil
+  defp backend_part(backend), do: "sandbox=#{backend}"
 
   defp egress_part(:open), do: nil
   defp egress_part(level), do: "egress=#{level}"

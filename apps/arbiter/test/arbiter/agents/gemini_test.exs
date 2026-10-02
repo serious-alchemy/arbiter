@@ -5,6 +5,7 @@ defmodule Arbiter.Agents.GeminiTest do
 
   alias Arbiter.Agents.Gemini
   alias Arbiter.Agents.SecurityPolicy
+  alias Arbiter.Worker.Jail
 
   # A jailed spawn needs the worker pid its egress run is bound to (bd-cfktou);
   # the test process stands in for it unless a test names another.
@@ -185,6 +186,16 @@ defmodule Arbiter.Agents.GeminiTest do
     test "write_jail_warning/1 is nil when the policy opts the sandbox off (nothing to warn about)" do
       Application.put_env(:arbiter, :worker_jail_available, false)
       assert Gemini.write_jail_warning(policy(:bypass, %{enabled: false})) == nil
+    end
+
+    test "write_confinement/1 is :none and the warning says dispatch is refused under podman" do
+      podman = policy(:bypass, %{backend: :podman})
+
+      assert Gemini.write_confinement(podman) == :none
+      assert Gemini.write_jail_warning(podman) =~ "podman"
+      assert Gemini.write_jail_warning(podman) =~ "refused in every mode"
+      # Unchanged for the default backend.
+      assert Gemini.write_confinement(policy(:strict)) == :os_jail
     end
 
     test "write_jail_warning/1 is nil for the upstream gemini CLI (nothing to jail)", %{bin: bin} do
@@ -499,6 +510,97 @@ defmodule Arbiter.Agents.GeminiTest do
 
       assert {:error, {:write_jail_unavailable, _}} =
                default_argv("p", security: policy(:strict), worktree_path: worktree)
+    end
+
+    # bd-btcdrf (P2): the spawn goes through `Arbiter.Worker.Sandbox`; the
+    # default backend (bwrap) must leave the argv exactly what `Jail.wrap/2`
+    # builds for the same command and options.
+    test "with the default backend the jailed argv is byte-identical to a direct Jail.wrap/2",
+         %{worktree: worktree} do
+      Application.put_env(:arbiter, :worker_jail_network, false)
+
+      for mode <- [:strict, :bypass, :auto] do
+        pol = policy(mode, %{writable_paths: ["/opt/extra"]})
+        assert pol.sandbox.backend == :bwrap
+
+        assert {:ok, argv} = default_argv("the prompt", security: pol, worktree_path: worktree)
+        assert ["sh", "-c", ~s(exec "$@" < /dev/null), "sh" | jailed] = argv
+        {_jail, ["--" | command]} = Enum.split_while(jailed, &(&1 != "--"))
+
+        assert {:ok, ^jailed} =
+                 Jail.wrap(command,
+                   worktree: worktree,
+                   home: Arbiter.Agents.Gemini.ConfigDir.path(worktree_path: worktree),
+                   writable_paths: ["/opt/extra"],
+                   worktree_readonly: false,
+                   keyring: Arbiter.Agents.Gemini.ConfigDir.keyring_available?()
+                 )
+
+        # An explicit `backend: :bwrap` is the same policy as the default.
+        explicit = policy(mode, %{writable_paths: ["/opt/extra"], backend: :bwrap})
+
+        assert {:ok, ^argv} =
+                 default_argv("the prompt", security: explicit, worktree_path: worktree)
+      end
+    end
+
+    test "backend: podman refuses agy in every mode and never spawns it unjailed", %{
+      worktree: worktree
+    } do
+      for mode <- [:strict, :bypass, :auto] do
+        assert {:error, {:sandbox_backend_unavailable, :podman, message}} =
+                 default_argv("p",
+                   security: policy(mode, %{backend: :podman}),
+                   worktree_path: worktree
+                 )
+
+        assert message =~ "podman"
+      end
+
+      # Even a host that cannot jail at all does not fall back to unjailed.
+      Application.put_env(:arbiter, :worker_jail_available, false)
+
+      assert {:error, {:sandbox_backend_unavailable, :podman, _}} =
+               default_argv("p",
+                 security: policy(:bypass, %{backend: :podman}),
+                 worktree_path: worktree
+               )
+    end
+  end
+
+  describe "backend: podman on the upstream gemini CLI (bd-btcdrf)" do
+    setup do
+      tmp =
+        Path.join(
+          System.tmp_dir!(),
+          "arbiter-gemini-podman-#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(tmp)
+      File.write!(Path.join(tmp, "gemini"), "#!/bin/sh\nexit 0\n")
+      File.chmod!(Path.join(tmp, "gemini"), 0o755)
+      old_path = System.get_env("PATH")
+      System.put_env("PATH", tmp)
+
+      on_exit(fn ->
+        System.put_env("PATH", old_path)
+        File.rm_rf!(tmp)
+      end)
+
+      :ok
+    end
+
+    test "is refused in every mode, though the upstream CLI is never jailed" do
+      for mode <- [:strict, :bypass, :auto] do
+        policy =
+          SecurityPolicy.merge(SecurityPolicy.base(), %{
+            permissions: %{mode: mode},
+            sandbox: %{backend: :podman}
+          })
+
+        assert {:error, {:sandbox_backend_unavailable, :podman, _}} =
+                 Arbiter.Agents.Gemini.default_argv("p", security: policy)
+      end
     end
   end
 

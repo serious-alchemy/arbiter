@@ -20,6 +20,7 @@ defmodule Arbiter.Agents.Gemini do
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Worker.Egress.JailRun
   alias Arbiter.Worker.Jail
+  alias Arbiter.Worker.Sandbox
 
   require Logger
 
@@ -134,11 +135,13 @@ defmodule Arbiter.Agents.Gemini do
   # (`jail_blocker/1` refuses it, see `default_argv/2`'s `maybe_jail/4`), so
   # the warning text must not claim writes just run unconfined there — that's
   # only true outside `:strict` (bd-8xy1mf).
-  defp jail_unavailable_effect(%SecurityPolicy{permissions: %{mode: :strict}}),
-    do: ":strict dispatches of agy are refused"
-
-  defp jail_unavailable_effect(_policy),
-    do: "writes are not confined to the worktree outside :strict"
+  defp jail_unavailable_effect(%SecurityPolicy{} = policy) do
+    case {Sandbox.module(policy), policy.permissions.mode} do
+      {{:error, _}, _mode} -> "agy dispatches are refused in every mode"
+      {_, :strict} -> ":strict dispatches of agy are refused"
+      _ -> "writes are not confined to the worktree outside :strict"
+    end
+  end
 
   # `jail_blocker/1`'s own reasons (sandbox off, isolated HOME off) are already
   # human strings; `{:jail_probe_failed, reason}` wraps a raw `Jail.status/0`
@@ -171,7 +174,10 @@ defmodule Arbiter.Agents.Gemini do
 
         # The jail sits between `sh` and the CLI, so the element before `-p`
         # is still the CLI and `splice_prompt/2` (resume, nudge) is unchanged.
-        with {:ok, command} <- maybe_jail(type, inner, opts, policy) do
+        # bd-btcdrf: a backend with no implementation refuses both CLIs, the
+        # upstream `gemini` (which `maybe_jail/4` never wraps) included.
+        with {:ok, _sandbox} <- Sandbox.module(policy),
+             {:ok, command} <- maybe_jail(type, inner, opts, policy) do
           {:ok, ["sh", "-c", ~s(exec "$@" < /dev/null), "sh" | command]}
         end
 
@@ -545,15 +551,19 @@ defmodule Arbiter.Agents.Gemini do
 
   defp maybe_jail(:gemini, command, _opts, _policy), do: {:ok, command}
 
+  # bd-btcdrf: a sandbox backend with no implementation is a refusal in every
+  # mode, never the `jail_unavailable/3` fallback to running unjailed.
   defp maybe_jail(:agy, command, opts, %SecurityPolicy{permissions: %{mode: mode}} = policy) do
-    case jail_blocker(policy) do
-      :ok ->
-        with {:ok, network} <- egress_network(opts, policy) do
-          wrap_in_jail(command, opts, policy, mode, network)
-        end
+    with {:ok, _sandbox} <- Sandbox.module(policy) do
+      case jail_blocker(policy) do
+        :ok ->
+          with {:ok, network} <- egress_network(opts, policy) do
+            wrap_in_jail(command, opts, policy, mode, network)
+          end
 
-      {:error, reason} ->
-        jail_unavailable(mode, command, reason)
+        {:error, reason} ->
+          jail_unavailable(mode, command, reason)
+      end
     end
   end
 
@@ -567,7 +577,7 @@ defmodule Arbiter.Agents.Gemini do
         keyring: ConfigDir.keyring_available?()
       ] ++ if(network, do: [network: network], else: [])
 
-    case Jail.wrap(command, jail_opts) do
+    case Sandbox.wrap(policy, command, jail_opts) do
       {:ok, argv} ->
         {:ok, argv}
 
@@ -597,15 +607,15 @@ defmodule Arbiter.Agents.Gemini do
   # a fallback: running anyway would mean running on the shared network.
   defp egress_network(opts, policy) do
     with true <- Application.get_env(:arbiter, :worker_jail_network, true),
-         :ok <- network_host_status() do
+         :ok <- network_host_status(policy) do
       start_egress(opts, policy)
     else
       _ -> {:ok, nil}
     end
   end
 
-  defp network_host_status do
-    case Jail.network_status() do
+  defp network_host_status(policy) do
+    case Sandbox.network_status(policy) do
       :ok ->
         :ok
 
@@ -647,6 +657,10 @@ defmodule Arbiter.Agents.Gemini do
   # already resolves through.
   defp jail_blocker(%SecurityPolicy{} = policy) do
     cond do
+      match?({:error, _}, Sandbox.module(policy)) ->
+        {:error,
+         "sandbox.backend #{SecurityPolicy.sandbox_backend(policy)} is not implemented yet"}
+
       not jail_eligible?(policy) ->
         {:error, "sandbox.enabled is false or sandbox.filesystem is not :worktree"}
 
@@ -654,7 +668,8 @@ defmodule Arbiter.Agents.Gemini do
         {:error, "the isolated agy HOME (worker_isolate_config) is off"}
 
       true ->
-        with {:error, reason} <- Jail.status(), do: {:error, {:jail_probe_failed, reason}}
+        with {:error, reason} <- Sandbox.status(policy),
+             do: {:error, {:jail_probe_failed, reason}}
     end
   end
 
