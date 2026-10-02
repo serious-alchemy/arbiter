@@ -343,6 +343,12 @@ config :arbiter,
        :sessions_root,
        Path.join(System.tmp_dir!(), "arbiter-test-sessions-root")
 
+# Per-account login config dirs (bd-c99hys): under tmp, never the operator's
+# real `~/.arbiter/accounts`.
+config :arbiter,
+       :accounts_root,
+       Path.join(System.tmp_dir!(), "arbiter-test-accounts-root")
+
 config :arbiter, :primary_checkout, "/nonexistent/arbiter-primary-checkout"
 
 # Shared memory root (bd-6dkpf1, RFC §9.4). Same reasoning as :sessions_root
