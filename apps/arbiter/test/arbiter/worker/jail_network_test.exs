@@ -220,6 +220,53 @@ defmodule Arbiter.Worker.JailNetworkTest do
     end
   end
 
+  describe "network_status/0 and diagnose_network/0" do
+    setup do
+      prev = Application.get_env(:arbiter, :worker_jail_network_available)
+
+      on_exit(fn ->
+        if is_nil(prev),
+          do: Application.delete_env(:arbiter, :worker_jail_network_available),
+          else: Application.put_env(:arbiter, :worker_jail_network_available, prev)
+      end)
+    end
+
+    test "the override forces the answer without probing" do
+      Application.put_env(:arbiter, :worker_jail_network_available, true)
+      assert Jail.network_status() == :ok
+      assert Jail.diagnose_network() == nil
+
+      Application.put_env(:arbiter, :worker_jail_network_available, false)
+      assert {:error, :disabled_by_config} = Jail.network_status()
+      assert %{cause: :other, message: message} = Jail.diagnose_network()
+      assert message =~ "worker_jail_network_available"
+    end
+
+    test "explain_network/1 names the missing package for socat" do
+      assert %{cause: :socat_missing, message: message, fix: fix} =
+               Jail.explain_network(:socat_not_found)
+
+      assert message =~ "socat"
+      assert fix =~ "socat"
+    end
+
+    test "explain_network/1 turns a failed unshare into a cause and fix" do
+      assert %{cause: :netns_unavailable, fix: fix} =
+               Jail.explain_network({:netns_failed, 1, "bwrap: unshare: Operation not permitted"})
+
+      assert fix =~ "user namespaces"
+    end
+
+    @tag :bwrap
+    test "network_probe/0 runs a real --unshare-net jail with a bridge and sees only lo" do
+      if @probe != :ok or is_nil(@socat) do
+        :ok
+      else
+        assert Jail.network_probe() == :ok
+      end
+    end
+  end
+
   describe "real bwrap with a stand-in egress run" do
     if @probe != :ok or is_nil(@socat) do
       @describetag skip: "bwrap jail or socat unavailable on this host: #{inspect(@probe)}"

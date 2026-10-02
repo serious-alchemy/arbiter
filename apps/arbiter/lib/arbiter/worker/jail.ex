@@ -1107,8 +1107,140 @@ defmodule Arbiter.Worker.Jail do
   def reset do
     _ = :persistent_term.erase({__MODULE__, :status})
     _ = :persistent_term.erase({__MODULE__, :ssh_status})
+    _ = :persistent_term.erase({__MODULE__, :network_status})
     :ok
   end
+
+  @doc """
+  `:ok` when network mode (`wrap/2`'s `:network`) works on this host right
+  now, `{:error, reason}` otherwise (bd-cfktou). The
+  `:worker_jail_network_available` override wins; otherwise the first call
+  runs `network_probe/0` and the answer is cached until `reset/0`.
+
+  Independent of `status/0`: a host can jail writes while a network namespace
+  or `socat` is missing.
+  """
+  @spec network_status() :: :ok | {:error, term()}
+  def network_status do
+    case Application.get_env(:arbiter, :worker_jail_network_available) do
+      true ->
+        :ok
+
+      false ->
+        {:error, :disabled_by_config}
+
+      _ ->
+        case :persistent_term.get({__MODULE__, :network_status}, :unprobed) do
+          :unprobed ->
+            result = network_probe()
+            :persistent_term.put({__MODULE__, :network_status}, result)
+            result
+
+          cached ->
+            cached
+        end
+    end
+  end
+
+  @doc """
+  Run the network-mode check for real (uncached): `socat` is installed, and a
+  jail built with `:network` (a dummy proxy socket, no bridges besides the
+  proxy's own) starts its `socat`, then shows `lo` as the only interface with
+  no route. `:ok` or `{:error, reason}`; never raises.
+  """
+  @spec network_probe() :: :ok | {:error, term()}
+  def network_probe do
+    with {:ok, bwrap} <- find_bwrap(),
+         socat when is_binary(socat) <-
+           System.find_executable("socat") || {:error, :socat_not_found} do
+      scratch =
+        Path.join(probe_root(), "net-#{System.pid()}-#{System.unique_integer([:positive])}")
+
+      try do
+        :ok = File.mkdir_p(Path.join(scratch, "run"))
+        proxy = Path.join([scratch, "run", "proxy.sock"])
+        :ok = File.write(proxy, "")
+
+        {:ok, network} = network_spec(proxy_socket: proxy, bridges: [], socat: socat)
+
+        script = ~S"""
+        awk -F'[: ]+' 'NR>2 {print "if:" $2}' /proc/net/dev
+        echo "routes:$(awk 'NR>1' /proc/net/route | wc -l)"
+        """
+
+        %{bwrap: bwrap, worktree: scratch, network: network}
+        |> argv(["sh", "-c", script])
+        |> run_bounded()
+        |> judge_network_probe()
+      rescue
+        e -> {:error, {:probe_raised, Exception.message(e)}}
+      after
+        File.rm_rf(scratch)
+      end
+    end
+  end
+
+  defp judge_network_probe(:timeout), do: {:error, :probe_timeout}
+  defp judge_network_probe({:raised, msg}), do: {:error, {:bwrap_failed, msg}}
+
+  defp judge_network_probe({out, 0}) do
+    lines = out |> String.split("\n", trim: true) |> Enum.map(&String.trim/1)
+
+    case Enum.filter(lines, &String.starts_with?(&1, "if:")) -- ["if:lo"] do
+      [] -> if("routes:0" in lines, do: :ok, else: {:error, {:netns_leaks, out}})
+      extra -> {:error, {:netns_leaks, Enum.join(extra, ", ")}}
+    end
+  end
+
+  defp judge_network_probe({out, status}), do: {:error, {:netns_failed, status, String.trim(out)}}
+
+  @doc "`nil` when `network_status/0` is `:ok`, else a cause + fix for `arb server doctor`."
+  @spec diagnose_network() :: diagnosis() | nil
+  def diagnose_network do
+    case network_status() do
+      :ok -> nil
+      {:error, reason} -> explain_network(reason)
+    end
+  end
+
+  @doc "Categorize a `network_status/0` error `reason` into a cause + fix."
+  @spec explain_network(term()) :: diagnosis()
+  def explain_network(:socat_not_found) do
+    %{
+      cause: :socat_missing,
+      message: "no `socat` on PATH: the jail's network mode bridges its loopback with it",
+      fix: "Install socat (`dnf install socat` / `apt install socat`)."
+    }
+  end
+
+  def explain_network({:netns_failed, status, out}) do
+    %{
+      cause: :netns_unavailable,
+      message: "bwrap could not start a network namespace (exit #{status}): #{out}",
+      fix:
+        "Check that unprivileged user namespaces and network namespaces are allowed " <>
+          "(user.max_user_namespaces, kernel.unprivileged_userns_clone, AppArmor)."
+    }
+  end
+
+  def explain_network({:netns_leaks, what}) do
+    %{
+      cause: :netns_unavailable,
+      message: "the jail's network namespace is not isolated: #{what}",
+      fix: "Run bwrap with --unshare-net; this host's bwrap did not isolate the namespace."
+    }
+  end
+
+  def explain_network(:disabled_by_config) do
+    %{
+      cause: :other,
+      message:
+        "network mode probing is disabled by the `:arbiter, :worker_jail_network_available` override",
+      fix: "Unset that override to let the real probe run."
+    }
+  end
+
+  def explain_network(reason), do: explain(reason)
 
   @doc """
   `:ok` when `ssh -G` can parse the mirror `ssh_shadow_config/0` builds,

@@ -18,7 +18,10 @@ defmodule Arbiter.Agents.Gemini do
   alias Arbiter.Agents.Gemini.ConfigDir
   alias Arbiter.Agents.Gemini.Security
   alias Arbiter.Agents.SecurityPolicy
+  alias Arbiter.Worker.Egress.JailRun
   alias Arbiter.Worker.Jail
+
+  require Logger
 
   @done_regex ~r/(?:\A|\n)[^\p{L}\p{N}\n]*arb done[^\p{L}\p{N}]*\z/u
 
@@ -33,6 +36,13 @@ defmodule Arbiter.Agents.Gemini do
   # bare adapter call that names no watchdog, since `Arbiter.Agents.Preflight`
   # always threads one through.
   @probe_prompt "ping"
+
+  # `Jail.wrap/2` network-side refusals: these must fail the spawn.
+  @egress_errors [:egress_socket_missing, :duplicate_bridge_port]
+
+  # The hosts agy itself needs from inside the jail (bd-cfktou). Recorded from
+  # a learn-mode run; see `egress_infra/0`.
+  @egress_infra []
   @probe_timeout_fraction_pct 80
   @probe_fallback_watchdog_ms 120_000
 
@@ -137,6 +147,11 @@ defmodule Arbiter.Agents.Gemini do
       %{message: message, fix: nil} -> message
       %{message: message, fix: fix} -> "#{message} — #{fix}"
     end
+  end
+
+  defp jail_blocker_message({:jail_network, reason}) do
+    %{message: message, fix: fix} = Jail.explain_network(reason)
+    if fix, do: "#{message} — #{fix}", else: message
   end
 
   defp jail_blocker_message(reason) when is_binary(reason), do: reason
@@ -531,19 +546,83 @@ defmodule Arbiter.Agents.Gemini do
   defp maybe_jail(:agy, command, opts, %SecurityPolicy{permissions: %{mode: mode}} = policy) do
     case jail_blocker(policy) do
       :ok ->
-        case Jail.wrap(command,
-               worktree: Keyword.get(opts, :worktree) || Keyword.get(opts, :worktree_path),
-               home: ConfigDir.path(opts),
-               writable_paths: Map.get(policy.sandbox, :writable_paths, []),
-               worktree_readonly: review_dispatch?(policy),
-               keyring: ConfigDir.keyring_available?()
-             ) do
-          {:ok, argv} -> {:ok, argv}
-          {:error, reason} -> jail_unavailable(mode, command, reason)
+        with {:ok, network} <- egress_network(opts, policy) do
+          wrap_in_jail(command, opts, policy, mode, network)
         end
 
       {:error, reason} ->
         jail_unavailable(mode, command, reason)
+    end
+  end
+
+  defp wrap_in_jail(command, opts, policy, mode, network) do
+    jail_opts =
+      [
+        worktree: Keyword.get(opts, :worktree) || Keyword.get(opts, :worktree_path),
+        home: ConfigDir.path(opts),
+        writable_paths: Map.get(policy.sandbox, :writable_paths, []),
+        worktree_readonly: review_dispatch?(policy),
+        keyring: ConfigDir.keyring_available?()
+      ] ++ if(network, do: [network: network], else: [])
+
+    case Jail.wrap(command, jail_opts) do
+      {:ok, argv} ->
+        {:ok, argv}
+
+      # The network side of the jail is not optional once it was asked for.
+      {:error, reason} when is_tuple(reason) and elem(reason, 0) in @egress_errors ->
+        {:error, {:egress_unavailable, reason}}
+
+      {:error, :socat_not_found} ->
+        {:error, {:egress_unavailable, :socat_not_found}}
+
+      {:error, reason} ->
+        jail_unavailable(mode, command, reason)
+    end
+  end
+
+  # bd-cfktou (G6): the jail runs in a network namespace whose only way out is
+  # this run's proxy and bridges. `{:ok, nil}` means "no network mode": the
+  # operator switched it off (`:worker_jail_network`), or this host cannot
+  # (no `socat`, no netns), in which case the filesystem jail still applies, as
+  # it did before, and `arb server doctor` fails the host's network check.
+  # Once network mode applies, a proxy that cannot start is an error and never
+  # a fallback: running anyway would mean running on the shared network.
+  defp egress_network(opts, policy) do
+    with true <- Application.get_env(:arbiter, :worker_jail_network, true),
+         :ok <- network_host_status() do
+      start_egress(opts, policy)
+    else
+      _ -> {:ok, nil}
+    end
+  end
+
+  defp network_host_status do
+    case Jail.network_status() do
+      :ok ->
+        :ok
+
+      {:error, reason} = error ->
+        Logger.warning(
+          "agy jail: network mode unavailable (#{jail_blocker_message({:jail_network, reason})}); " <>
+            "running with the filesystem jail on the shared network"
+        )
+
+        error
+    end
+  end
+
+  defp start_egress(opts, _policy) do
+    worktree = Keyword.get(opts, :worktree) || Keyword.get(opts, :worktree_path)
+
+    case JailRun.start(
+           owner: Keyword.get(opts, :owner),
+           worktree: worktree,
+           infra: @egress_infra,
+           tunnels: Keyword.get(opts, :egress_tunnels, [])
+         ) do
+      {:ok, network, _run_id} -> {:ok, network}
+      {:error, reason} -> {:error, {:egress_unavailable, reason}}
     end
   end
 

@@ -40,13 +40,14 @@ defmodule Arbiter.Agents.GeminiTest do
       File.mkdir_p!(bin)
       File.mkdir_p!(worktree)
 
-      for name <- ~w(agy bwrap) do
+      for name <- ~w(agy bwrap socat) do
         File.write!(Path.join(bin, name), "#!/bin/sh\nexit 0\n")
         File.chmod!(Path.join(bin, name), 0o755)
       end
 
       keys =
-        ~w(worker_isolate_config worker_agy_home_root worker_jail_available worker_jail_bwrap)a
+        ~w(worker_isolate_config worker_agy_home_root worker_jail_available worker_jail_bwrap
+           worker_jail_network_available worker_jail_network)a
 
       prev = Map.new(keys, &{&1, Application.get_env(:arbiter, &1)})
       old_path = System.get_env("PATH")
@@ -54,6 +55,8 @@ defmodule Arbiter.Agents.GeminiTest do
       Application.put_env(:arbiter, :worker_isolate_config, true)
       Application.put_env(:arbiter, :worker_agy_home_root, Path.join(base, "homes"))
       Application.put_env(:arbiter, :worker_jail_available, true)
+      Application.put_env(:arbiter, :worker_jail_network_available, true)
+      Application.delete_env(:arbiter, :worker_jail_network)
       Application.put_env(:arbiter, :worker_jail_bwrap, Path.join(bin, "bwrap"))
       System.put_env("PATH", bin)
 
@@ -86,7 +89,22 @@ defmodule Arbiter.Agents.GeminiTest do
     defp jail_and_command(argv) do
       assert ["sh", "-c", ~s(exec "$@" < /dev/null), "sh" | rest] = argv
       {jail, ["--" | command]} = Enum.split_while(rest, &(&1 != "--"))
-      {jail, command}
+
+      # Network mode (bd-cfktou) starts the bridges in a small wrapper, then
+      # execs the real command after its own `--`.
+      case command do
+        ["sh", "-c", _script, "sh", _socat | listeners] ->
+          {_, ["--" | real]} = Enum.split_while(listeners, &(&1 != "--"))
+          {jail, real}
+
+        _ ->
+          {jail, command}
+      end
+    end
+
+    defp jail_argv_only(argv) do
+      {jail, _} = jail_and_command(argv)
+      jail
     end
 
     test "write_confinement/1 is :os_jail under :strict for agy on a jail-capable host" do
@@ -200,6 +218,111 @@ defmodule Arbiter.Agents.GeminiTest do
       assert [^agy, "-p", "the prompt" | _] = command
       refute "--sandbox" in command
       refute "--dangerously-skip-permissions" in command
+    end
+
+    # bd-cfktou (G6): agy's jail runs in a network namespace whose only way
+    # out is the run's proxy and bridges.
+    test "a jailed agy runs with --unshare-net, the proxy env and the loopback bridges", %{
+      worktree: worktree
+    } do
+      assert {:ok, argv} =
+               Gemini.default_argv("p", security: policy(:bypass), worktree_path: worktree)
+
+      jail = jail_argv_only(argv)
+      assert "--unshare-net" in jail
+
+      env =
+        jail
+        |> Enum.chunk_every(3, 1, :discard)
+        |> Enum.filter(&(hd(&1) == "--setenv"))
+        |> Map.new(fn [_, k, v] -> {k, v} end)
+
+      assert env["HTTPS_PROXY"] == "http://127.0.0.1:3128"
+      assert env["NO_PROXY"] =~ "127.0.0.1"
+      assert env["GIT_SSH_COMMAND"] =~ "ProxyCommand socat - PROXY:127.0.0.1:%h:%p,proxyport=3128"
+
+      assert ["sh", "-c", ~s(exec "$@" < /dev/null), "sh" | rest] = argv
+
+      {_, ["--", "sh", "-c", _script, "sh", socat | listeners]} =
+        Enum.split_while(rest, &(&1 != "--"))
+
+      assert Path.basename(socat) == "socat"
+      assert ["3128", proxy_sock, arb_port, arb_sock | _] = listeners
+      assert proxy_sock =~ ".proxy.sock"
+      assert String.to_integer(arb_port) > 0
+      assert arb_sock =~ ".arb.sock"
+    end
+
+    test "the egress run is started for the spawn's owner and ends with it", %{worktree: worktree} do
+      owner = spawn(fn -> Process.sleep(:infinity) end)
+
+      assert {:ok, argv} =
+               Gemini.default_argv("p",
+                 security: policy(:bypass),
+                 worktree_path: worktree,
+                 owner: owner
+               )
+
+      jail = jail_argv_only(argv)
+
+      {proxy, _} =
+        jail
+        |> Enum.chunk_every(2, 1, :discard)
+        |> Enum.map(&List.to_tuple/1)
+        |> Enum.find(fn {_, b} -> String.ends_with?(b, ".proxy.sock") end)
+
+      assert proxy == "--ro-bind"
+      sock = Enum.find(jail, &String.ends_with?(&1, ".proxy.sock"))
+      assert File.exists?(sock)
+
+      [{sup, _}] =
+        Registry.lookup(
+          Arbiter.Worker.Egress.Registry,
+          {Path.basename(sock, ".proxy.sock"), :sup}
+        )
+
+      ref = Process.monitor(sup)
+      Process.exit(owner, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^sup, _}, 2_000
+      refute File.exists?(sock)
+    end
+
+    test "a spawn whose egress cannot start is refused in every mode, never run on the shared network",
+         %{worktree: worktree} do
+      prev = Application.get_env(:arbiter, Arbiter.MCP)
+      Application.put_env(:arbiter, Arbiter.MCP, url: "https://arbiter.example.com/mcp")
+
+      on_exit(fn ->
+        if prev,
+          do: Application.put_env(:arbiter, Arbiter.MCP, prev),
+          else: Application.delete_env(:arbiter, Arbiter.MCP)
+      end)
+
+      for mode <- [:bypass, :auto, :strict] do
+        assert {:error, {:egress_unavailable, {:arbiter_endpoint, :not_loopback}}} =
+                 Gemini.default_argv("p", security: policy(mode), worktree_path: worktree)
+      end
+    end
+
+    test "a host without network mode still gets the filesystem jail, on the shared network",
+         %{worktree: worktree, bwrap: bwrap} do
+      Application.put_env(:arbiter, :worker_jail_network_available, false)
+
+      assert {:ok, argv} =
+               Gemini.default_argv("p", security: policy(:bypass), worktree_path: worktree)
+
+      {jail, _} = jail_and_command(argv)
+      assert [^bwrap, "--ro-bind", "/", "/" | _] = jail
+      refute "--unshare-net" in jail
+    end
+
+    test "the network jail can be switched off", %{worktree: worktree} do
+      Application.put_env(:arbiter, :worker_jail_network, false)
+
+      assert {:ok, argv} =
+               Gemini.default_argv("p", security: policy(:bypass), worktree_path: worktree)
+
+      refute "--unshare-net" in jail_argv_only(argv)
     end
 
     test "splice_prompt/2 still swaps the prompt and adds --conversation on a jailed argv", %{

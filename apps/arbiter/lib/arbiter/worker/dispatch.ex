@@ -2823,7 +2823,12 @@ defmodule Arbiter.Worker.Dispatch do
             # read a different HOME than the one the MCP config was written into.
             agent_opts =
               agent_opts_from_choice(choice) ++
-                [security: policy, workspace: workspace, worktree_path: worktree_path] ++
+                [
+                  security: policy,
+                  workspace: workspace,
+                  worktree_path: worktree_path,
+                  owner: worker_pid
+                ] ++
                 Keyword.take(opts, [:mcp_config, :arb_token])
 
             tracker_context = fetch_tracker_context(task, workspace)

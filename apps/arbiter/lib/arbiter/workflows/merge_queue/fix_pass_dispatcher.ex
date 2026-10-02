@@ -431,7 +431,8 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
         agent_opts =
           [
             workspace: context.workspace,
-            worktree_path: worktree_path
+            worktree_path: worktree_path,
+            owner: Keyword.get(opts, :owner)
           ] ++ mcp_opts
 
         case adapter.default_argv(prompt, agent_opts) do

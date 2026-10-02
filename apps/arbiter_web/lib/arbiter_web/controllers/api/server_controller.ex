@@ -19,6 +19,9 @@ defmodule ArbiterWeb.Api.ServerController do
       `Arbiter.Worker.Jail.diagnose_ssh/0`) — whether `ssh -G` can parse the
       jail's mirrored ssh config, since a host can jail writes fine while
       that regresses (a changed `/etc/ssh/ssh_config`, no `ssh` on `PATH`).
+      Its `network` key (bd-cfktou, `Arbiter.Worker.Jail.diagnose_network/0`)
+      is a third: whether the jail can run in a network namespace with its
+      `socat` bridges, which an agy spawn needs for its only route out.
     * `GET /api/server/claude_credentials` — every workspace that runs Claude
       with no setup token (or API key) of its own (bd-80ecol,
       `Arbiter.Agents.Claude.CredentialCheck.workspace_report/0`): the ones
@@ -79,6 +82,7 @@ defmodule ArbiterWeb.Api.ServerController do
       jail_diagnosis(Jail.diagnose())
       |> Map.put(:ssh, jail_diagnosis(Jail.diagnose_ssh()))
       |> Map.put(:escape, jail_diagnosis(Jail.diagnose_escape()))
+      |> Map.put(:network, jail_diagnosis(Jail.diagnose_network()))
       |> Map.put(:dbus_proxy, Jail.dbus_proxy())
     )
   end

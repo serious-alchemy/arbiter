@@ -43,6 +43,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       check_legacy_safe_defaults_key(),
       check_agy_write_jail(),
       check_agy_jail_escape(),
+      check_agy_jail_network(),
       check_agy_ssh_transport(),
       check_claude_worker_credentials(),
       check_provider_accounts(),
@@ -702,6 +703,43 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       _ ->
         %Result{
           name: "agy jail escape vectors",
+          status: :ok,
+          detail: "server unreachable or predates this check — skipping",
+          fatal: false,
+          blocks_readiness: false
+        }
+    end
+  end
+
+  # bd-cfktou (G6): an agy spawn runs in a network namespace whose only exit
+  # is the run's egress proxy and its `socat` bridges. A host with no `socat`
+  # or no network namespaces falls back to the filesystem jail on the shared
+  # network, so this FAILs (non-blocking) rather than staying quiet about it.
+  # `Jail.diagnose_network/0` via the payload's `network` key.
+  defp check_agy_jail_network do
+    case Client.get("/api/server/agy_write_jail") do
+      {:ok, %{"network" => %{"available" => true}}} ->
+        %Result{
+          name: "agy jail network",
+          status: :ok,
+          detail: "agy runs in a network namespace; its only route out is the egress proxy",
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      {:ok, %{"network" => %{"available" => false, "message" => message} = net}} ->
+        %Result{
+          name: "agy jail network",
+          status: :fail,
+          detail: "agy runs on the shared network: #{message}",
+          hint: Map.get(net, "fix") || "See Arbiter.Worker.Jail.network_probe/0 (bd-cfktou).",
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      _ ->
+        %Result{
+          name: "agy jail network",
           status: :ok,
           detail: "server unreachable or predates this check — skipping",
           fatal: false,
