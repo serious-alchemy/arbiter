@@ -98,9 +98,10 @@ defmodule Arbiter.Worker.Egress.Policy do
   def normalize_grant(raw) when is_binary(raw) do
     raw = String.replace_prefix(raw, "network:", "")
 
-    cond do
-      String.contains?(raw, "*") -> {:error, :wildcard_not_allowed}
-      true -> with {:ok, {:exact, h, p}} <- parse_entry(raw, false), do: {:ok, format(h, p)}
+    if String.contains?(raw, "*") do
+      {:error, :wildcard_not_allowed}
+    else
+      with {:ok, {:exact, h, p}} <- parse_entry(raw, false), do: {:ok, format(h, p)}
     end
   end
 
