@@ -37,7 +37,7 @@ defmodule Arbiter.Agents.Codex do
       `--dangerously-bypass-approvals-and-sandbox` — full access, no approval
       prompt to freeze a headless run. Mirrors Claude's
       `--dangerously-skip-permissions` default.
-    * `:auto`   → `-s workspace-write` (writes scoped to the worktree; network
+    * `:auto`   → `-s workspace-write` (writes scoped to the worktree + its git common dir; network
       re-enabled so workers can `git push` / install packages).
     * `:strict` → `-s read-only`.
 
@@ -89,7 +89,7 @@ defmodule Arbiter.Agents.Codex do
     case resolve_executable() do
       {:ok, codex} ->
         with {:ok, model_flags} <- model_flag(opts) do
-          flags = sandbox_argv(security_policy(opts)) ++ model_flags ++ mcp_argv(opts)
+          flags = sandbox_argv(security_policy(opts), opts) ++ model_flags ++ mcp_argv(opts)
           build_argv(codex, prompt, flags)
         end
 
@@ -425,19 +425,20 @@ defmodule Arbiter.Agents.Codex do
   defp normalize_event(_), do: :error
 
   # :bypass — no sandbox, no approval prompt (headless-safe default).
-  defp sandbox_argv(%SecurityPolicy{permissions: %{mode: :bypass}}),
+  defp sandbox_argv(%SecurityPolicy{permissions: %{mode: :bypass}}, _opts),
     do: ["--dangerously-bypass-approvals-and-sandbox"]
 
   # :strict — read-only sandbox; the agent can inspect but not mutate.
-  defp sandbox_argv(%SecurityPolicy{permissions: %{mode: :strict}}),
+  defp sandbox_argv(%SecurityPolicy{permissions: %{mode: :strict}}, _opts),
     do: sandbox_mode_config("read-only")
 
   # :auto — workspace-write; re-enable network so the worker can push / install.
-  defp sandbox_argv(%SecurityPolicy{permissions: %{mode: :auto}} = policy) do
-    sandbox_mode_config("workspace-write") ++ network_config(policy)
+  defp sandbox_argv(%SecurityPolicy{permissions: %{mode: :auto}} = policy, opts) do
+    sandbox_mode_config("workspace-write") ++
+      network_config(policy) ++ writable_roots_config(opts)
   end
 
-  defp sandbox_argv(_policy), do: ["--dangerously-bypass-approvals-and-sandbox"]
+  defp sandbox_argv(_policy, _opts), do: ["--dangerously-bypass-approvals-and-sandbox"]
 
   # `-s` is rejected by `codex exec resume` ("unexpected argument '-s'"), but
   # `-c` is accepted by both `exec` and `exec resume`, so express the sandbox
@@ -476,6 +477,37 @@ defmodule Arbiter.Agents.Codex do
     do: ["-c", "sandbox_workspace_write.network_access=true"]
 
   defp network_config(_policy), do: []
+
+  # In a linked worktree `.git` is a file pointing into the main repo's
+  # `.git/worktrees/<wt>`, which lies outside the workspace-write root, so
+  # `git add`/`commit` fail with "Read-only file system" on index.lock. Add the
+  # git common dir as a writable root. Skipped when the worktree is unknown or
+  # isn't a git checkout (nothing to add).
+  defp writable_roots_config(opts) do
+    case git_common_dir(Keyword.get(opts, :worktree_path)) do
+      nil -> []
+      dir -> ["-c", "sandbox_workspace_write.writable_roots=[#{inspect(dir)}]"]
+    end
+  end
+
+  defp git_common_dir(path) when is_binary(path) and path != "" do
+    if File.dir?(path) do
+      case System.cmd("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+             cd: path,
+             stderr_to_stdout: true
+           ) do
+        {out, 0} -> out |> String.trim() |> non_empty()
+        _ -> nil
+      end
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp git_common_dir(_), do: nil
+
+  defp non_empty(""), do: nil
+  defp non_empty(s), do: s
 
   # The resolved SecurityPolicy for this spawn; falls back to the install-wide
   # hardened default so a bare adapter call is still safe.
