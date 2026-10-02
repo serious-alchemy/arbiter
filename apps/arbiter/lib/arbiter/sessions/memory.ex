@@ -49,12 +49,28 @@ defmodule Arbiter.Sessions.Memory do
   since the last mount does not leave a dangling symlink behind. Never
   touches `memory/candidates/` — that is the session's own write space and
   outlives re-provisioning.
+
+  ## Only verified memory is served (phase 13, bd-19qve3)
+
+  A memory is mounted only when its stored staleness verdict
+  (`Arbiter.Sessions.Memory.Verdicts`) was made for its exact current bytes
+  and is not stale. `mount/2` **reads** that verdict and never verifies
+  anything itself, so a launch never waits on git or the ledger: the
+  verification runs in `Arbiter.Sessions.Memory.Checker`. A memory with no
+  current verdict, because it is new, was edited, or was never checked, is
+  left out and the checker is nudged, so it is served from the next mount
+  after its check. Quarantined memories live under `quarantined/`, which is
+  never read here (`Arbiter.Sessions.Memory.Quarantine`). The full design is in
+  `docs/design/memory-promotion-queue.md`.
   """
 
   require Logger
 
   alias Arbiter.Config.Paths
   alias Arbiter.Sessions.Layout
+  alias Arbiter.Sessions.Memory.Checker
+  alias Arbiter.Sessions.Memory.Frontmatter
+  alias Arbiter.Sessions.Memory.Verdicts
   alias Arbiter.Sessions.Session
 
   @shared_types ~w(user feedback reference)
@@ -78,17 +94,18 @@ defmodule Arbiter.Sessions.Memory do
     _ = File.rm_rf(shared_dir)
     File.mkdir_p!(shared_dir)
 
-    by_type =
+    {servable, pending} =
       root
-      |> memory_files()
-      |> Enum.filter(fn path ->
-        not match?(
-          {:error, :stale, _},
-          Arbiter.Sessions.Memory.Staleness.check_memory(path, opts)
-        )
-      end)
-      |> Enum.map(fn path -> {path, frontmatter(path)} end)
-      |> Enum.group_by(fn {_path, fm} -> fm[:type] end)
+      |> source_files()
+      |> Enum.map(fn path -> {path, read(path)} end)
+      |> Enum.split_with(fn {path, contents} -> servable?(root, path, contents) end)
+
+    if pending != [], do: Checker.request_check()
+
+    by_type =
+      servable
+      |> Enum.map(fn {path, contents} -> {path, Frontmatter.fields(contents)} end)
+      |> Enum.group_by(fn {_path, fm} -> fm["type"] end)
 
     Enum.each(@shared_types, fn type ->
       mount_type(shared_dir, type, paths(by_type, type))
@@ -101,6 +118,18 @@ defmodule Arbiter.Sessions.Memory do
 
     :ok
   end
+
+  defp read(path) do
+    case File.read(path) do
+      {:ok, contents} -> contents
+      {:error, _reason} -> nil
+    end
+  end
+
+  defp servable?(_root, _path, nil), do: false
+
+  defp servable?(root, path, contents),
+    do: Verdicts.servable?(root, Path.basename(path), contents)
 
   defp paths(by_type, type) do
     by_type |> Map.get(type, []) |> Enum.map(fn {path, _fm} -> path end)
@@ -129,15 +158,22 @@ defmodule Arbiter.Sessions.Memory do
 
   defp matching_project(files, workspace_id) do
     files
-    |> Enum.filter(fn {_path, fm} -> fm[:workspace_id] == workspace_id end)
+    |> Enum.filter(fn {_path, fm} -> fm["workspace_id"] == workspace_id end)
     |> Enum.map(fn {path, _fm} -> path end)
   end
 
-  defp memory_files(root) do
+  @doc """
+  The memory files the shared layer serves from: the regular top-level `*.md`
+  files of `root` (`quarantined/` and the `.verdicts/` sidecars are never
+  among them). `[]` for a missing or unreadable root.
+  """
+  @spec source_files(Path.t()) :: [Path.t()]
+  def source_files(root) do
     case File.ls(root) do
       {:ok, entries} ->
         entries
         |> Enum.filter(&String.ends_with?(&1, ".md"))
+        |> Enum.sort()
         |> Enum.map(&Path.join(root, &1))
         |> Enum.filter(&File.regular?/1)
 
@@ -146,55 +182,23 @@ defmodule Arbiter.Sessions.Memory do
     end
   end
 
-  # Line-based, not a real YAML parser: the frontmatter block here only ever
-  # carries a handful of flat/one-level-nested scalar keys, and pulling in a
-  # YAML dependency for two keys is more than this scaffold needs.
-  @frontmatter_delim "---"
+  @doc """
+  Replace `path` with `contents` in one step: write a sibling temp file, then
+  rename it over the target, so no reader ever sees a half-written memory.
+  """
+  @spec write_file_atomic(Path.t(), iodata()) :: :ok | {:error, File.posix()}
+  def write_file_atomic(path, contents) do
+    tmp =
+      Path.join(
+        Path.dirname(path),
+        ".#{Path.basename(path)}.tmp-#{System.unique_integer([:positive])}"
+      )
 
-  defp frontmatter(path) do
-    case File.read(path) do
-      {:ok, contents} -> parse_frontmatter(contents)
-      {:error, _reason} -> %{}
-    end
-  end
-
-  defp parse_frontmatter(contents) do
-    with [@frontmatter_delim | rest] <- String.split(contents, "\n"),
-         {:ok, block, _body} <- split_on_closing_delim(rest) do
-      block
-      |> Enum.map(&extract_key(&1, "type"))
-      |> Enum.reject(&is_nil/1)
-      |> case do
-        [] -> %{}
-        [type | _] -> %{type: type}
-      end
-      |> Map.merge(extract_workspace_id(block))
-    else
-      _ -> %{}
-    end
-  end
-
-  defp split_on_closing_delim(lines) do
-    case Enum.split_while(lines, &(&1 != @frontmatter_delim)) do
-      {block, [@frontmatter_delim | body]} -> {:ok, block, body}
-      _ -> :error
-    end
-  end
-
-  defp extract_key(line, key) do
-    case Regex.run(~r/^\s*#{key}:\s*(\S+)\s*$/, line) do
-      [_, value] -> value
-      nil -> nil
-    end
-  end
-
-  defp extract_workspace_id(block) do
-    block
-    |> Enum.map(&extract_key(&1, "workspace_id"))
-    |> Enum.reject(&is_nil/1)
-    |> case do
-      [] -> %{}
-      [id | _] -> %{workspace_id: id}
+    with :ok <- File.mkdir_p(Path.dirname(path)),
+         :ok <- File.write(tmp, contents),
+         {:error, _} = error <- File.rename(tmp, path) do
+      _ = File.rm(tmp)
+      error
     end
   end
 end

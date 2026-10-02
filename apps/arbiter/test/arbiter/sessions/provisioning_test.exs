@@ -278,6 +278,16 @@ defmodule Arbiter.Sessions.ProvisioningTest do
       """)
     end
 
+    # Phase 13 (bd-19qve3): a mount serves only memories the staleness checker
+    # has a current verdict for, so verify the fixtures before launching.
+    defp check_memory!(memory_root) do
+      Arbiter.Sessions.Memory.Checker.run(
+        memory_root: memory_root,
+        checkouts: [],
+        ticket_prefixes: []
+      )
+    end
+
     test "launch/1 mounts user/feedback/reference for a cross-workspace session, and no project",
          %{root: root} do
       memory_root = Path.join(root, "memory")
@@ -292,6 +302,7 @@ defmodule Arbiter.Sessions.ProvisioningTest do
         "  workspace_id: ws-arbiter\n"
       )
 
+      check_memory!(memory_root)
       session = launch!(memory_root: memory_root)
       shared = Layout.memory_shared_dir(session.id)
 
@@ -313,6 +324,7 @@ defmodule Arbiter.Sessions.ProvisioningTest do
 
       write_memory_fixture!(memory_root, "vstim-fact.md", "project", "  workspace_id: ws-vstim\n")
 
+      check_memory!(memory_root)
       session = launch!(memory_root: memory_root, workspace_id: "ws-vstim")
       shared = Layout.memory_shared_dir(session.id)
 

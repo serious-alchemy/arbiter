@@ -89,6 +89,7 @@ defmodule Arbiter.MCP.RefinePolicy do
   @deny_reason_ops "operational triage is outside a refine session's authority"
   @deny_reason_tracker "upstream tracker sync is coordinator authority"
   @deny_reason_scope "a refine session is bound to one workspace and one ticket"
+  @deny_reason_memory "the shared memory layer is coordinator authority"
 
   @deny %{
     # lifecycle / state
@@ -160,6 +161,14 @@ defmodule Arbiter.MCP.RefinePolicy do
     "loop_pending_reject" => @deny_reason_ops,
     "loop_propose_routing" => @deny_reason_ops,
     "loop_canary_status" => @deny_reason_ops,
+
+    # shared memory promotion / quarantine (bd-19qve3)
+    "memory_pending_list" => @deny_reason_memory,
+    "memory_pending_diff" => @deny_reason_memory,
+    "memory_pending_apply" => @deny_reason_memory,
+    "memory_pending_reject" => @deny_reason_memory,
+    "memory_quarantine_list" => @deny_reason_memory,
+    "memory_quarantine_restore" => @deny_reason_memory,
 
     # tracker
     "tracker_claim" => @deny_reason_tracker,

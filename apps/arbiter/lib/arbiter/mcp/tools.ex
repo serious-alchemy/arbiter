@@ -30,13 +30,14 @@ defmodule Arbiter.MCP.Tools do
   `Arbiter.MCP.Catalog`; these handlers enforce the *data-level* rules —
   own-task and workspace isolation — via `Arbiter.MCP.Scope`.
 
-  Most handlers live directly on this module, but six tool groups are split into
+  Most handlers live directly on this module, but seven tool groups are split into
   submodules to keep this file a manageable size — this module `defdelegate`s
   their public functions so `Arbiter.MCP.Catalog`'s `&Tools.function/2` captures
   and every existing caller keep working unchanged:
 
     * `Arbiter.MCP.Tools.Skills` — `skill_*`
     * `Arbiter.MCP.Tools.LoopPending` — `loop_pending_*`
+    * `Arbiter.MCP.Tools.MemoryPending` — `memory_pending_*` / `memory_quarantine_*`
     * `Arbiter.MCP.Tools.Task` — `ticket_show` / `ticket_ready` / `ticket_update_progress` /
       `ticket_create` / `ticket_update` / `ticket_close` / `ticket_reopen` /
       `ticket_sync_upstream_close` / `dep_add` / `dep_remove`
@@ -2103,12 +2104,15 @@ defmodule Arbiter.MCP.Tools do
   defdelegate loop_pending_apply(scope, args), to: Arbiter.MCP.Tools.LoopPending
   defdelegate loop_pending_reject(scope, args), to: Arbiter.MCP.Tools.LoopPending
 
+  defdelegate loop_propose_routing(scope, args), to: Arbiter.MCP.Tools.LoopPending
+  defdelegate loop_canary_status(scope, args), to: Arbiter.MCP.Tools.LoopPending
+
   defdelegate memory_pending_list(scope, args), to: Arbiter.MCP.Tools.MemoryPending
   defdelegate memory_pending_diff(scope, args), to: Arbiter.MCP.Tools.MemoryPending
   defdelegate memory_pending_apply(scope, args), to: Arbiter.MCP.Tools.MemoryPending
   defdelegate memory_pending_reject(scope, args), to: Arbiter.MCP.Tools.MemoryPending
-  defdelegate loop_propose_routing(scope, args), to: Arbiter.MCP.Tools.LoopPending
-  defdelegate loop_canary_status(scope, args), to: Arbiter.MCP.Tools.LoopPending
+  defdelegate memory_quarantine_list(scope, args), to: Arbiter.MCP.Tools.MemoryPending
+  defdelegate memory_quarantine_restore(scope, args), to: Arbiter.MCP.Tools.MemoryPending
 
   defdelegate task_show(scope, args), to: Arbiter.MCP.Tools.Task
   defdelegate task_ready(scope, args), to: Arbiter.MCP.Tools.Task

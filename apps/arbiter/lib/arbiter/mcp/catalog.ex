@@ -2181,10 +2181,16 @@ defmodule Arbiter.MCP.Catalog do
     %{
       name: "memory_pending_list",
       tiers: @coordinator,
-      description: "List queued memory promotion candidates written by sessions.",
+      description:
+        "List memory candidates that browser-hosted sessions wrote for the shared memory layer " <>
+          "(RFC §9.4 phase 13). `state: pending` (default) is the promotion queue; `state: rejected` " <>
+          "is the audit trail of rejected candidates, with reason and time. Each entry's `id` " <>
+          "(`<session-id>/<file>.md`) addresses it in memory_pending_diff/apply/reject.",
       input_schema: %{
         "type" => "object",
-        "properties" => %{},
+        "properties" => %{
+          "state" => %{"type" => "string", "enum" => ["pending", "rejected"]}
+        },
         "additionalProperties" => false
       },
       handler: &Tools.memory_pending_list/2
@@ -2192,13 +2198,19 @@ defmodule Arbiter.MCP.Catalog do
     %{
       name: "memory_pending_diff",
       tiers: @coordinator,
-      description: "Read one queued memory candidate's content/diff.",
+      description:
+        "Read one memory candidate in full: its content, a line diff against the shared memory it " <>
+          "would replace (null for a new one), and the citation verification promotion would run " <>
+          "(file:line anchors, modules, ticket ids; URLs are never fetched), so a refusal is visible first.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
-          "path" => %{"type" => "string", "description" => "Candidate path. Required."}
+          "id" => %{
+            "type" => "string",
+            "description" => "Candidate id from memory_pending_list. Required."
+          }
         },
-        "required" => ["path"],
+        "required" => ["id"],
         "additionalProperties" => false
       },
       handler: &Tools.memory_pending_diff/2
@@ -2206,13 +2218,25 @@ defmodule Arbiter.MCP.Catalog do
     %{
       name: "memory_pending_apply",
       tiers: @coordinator,
-      description: "Promote a queued memory candidate to the shared memory layer.",
+      description:
+        "Promote a memory candidate into the shared layer every future session mounts. Coordinator/" <>
+          "operator only: refused for session tokens. Verifies its citations against the workspace " <>
+          "checkout's HEAD first and refuses a stale one; records source_session, author_model, " <>
+          "promoted_by, promoted_at, verified_sha and anchors. Replacing an existing shared memory " <>
+          "needs `overwrite: true` (the old copy is kept).",
       input_schema: %{
         "type" => "object",
         "properties" => %{
-          "path" => %{"type" => "string", "description" => "Candidate path. Required."}
+          "id" => %{
+            "type" => "string",
+            "description" => "Candidate id from memory_pending_list. Required."
+          },
+          "overwrite" => %{
+            "type" => "boolean",
+            "description" => "Replace a shared memory of the same name. Default false."
+          }
         },
-        "required" => ["path"],
+        "required" => ["id"],
         "additionalProperties" => false
       },
       handler: &Tools.memory_pending_apply/2
@@ -2220,16 +2244,62 @@ defmodule Arbiter.MCP.Catalog do
     %{
       name: "memory_pending_reject",
       tiers: @coordinator,
-      description: "Reject and delete a queued memory candidate.",
+      description:
+        "Reject a memory candidate. Coordinator/operator only: refused for session tokens. The " <>
+          "candidate is marked with the reason, actor and time and kept for audit (never deleted); " <>
+          "memory_pending_list with `state: rejected` shows it.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
-          "path" => %{"type" => "string", "description" => "Candidate path. Required."}
+          "id" => %{
+            "type" => "string",
+            "description" => "Candidate id from memory_pending_list. Required."
+          },
+          "reason" => %{"type" => "string", "description" => "Why it was rejected. Required."}
         },
-        "required" => ["path"],
+        "required" => ["id", "reason"],
         "additionalProperties" => false
       },
       handler: &Tools.memory_pending_reject/2
+    },
+    %{
+      name: "memory_quarantine_list",
+      tiers: @coordinator,
+      description:
+        "List shared memories the staleness checker quarantined because a cited file, line, " <>
+          "module or ticket no longer resolves, with the reason, the SHA checked against and when. " <>
+          "Quarantined memories are never mounted into sessions.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{},
+        "additionalProperties" => false
+      },
+      handler: &Tools.memory_quarantine_list/2
+    },
+    %{
+      name: "memory_quarantine_restore",
+      tiers: @coordinator,
+      description:
+        "Re-verify a quarantined memory against the current HEAD and, if nothing is stale, serve it " <>
+          "again. Coordinator/operator only: refused for session tokens. Refuses while a citation is " <>
+          "still stale; fix the memory's citations first, or pass `reanchor: true` to accept code that " <>
+          "changed under a cited line and re-anchor every citation on the line it names now.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "name" => %{
+            "type" => "string",
+            "description" => "File name from memory_quarantine_list. Required."
+          },
+          "reanchor" => %{
+            "type" => "boolean",
+            "description" => "Re-anchor citations on their current lines. Default false."
+          }
+        },
+        "required" => ["name"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.memory_quarantine_restore/2
     },
     %{
       name: "loop_propose_routing",

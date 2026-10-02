@@ -156,6 +156,10 @@ defmodule Arbiter.Application do
       # past the retention window (phase 9, RFC §11). See
       # Arbiter.Sessions.TranscriptRetention.
       Arbiter.Sessions.TranscriptRetention,
+      # Verifies the shared memory layer's citations off the mount path and
+      # quarantines memories that no longer resolve (bd-19qve3, RFC §9.4
+      # phase 13). Disabled in test. See Arbiter.Sessions.Memory.Checker.
+      Arbiter.Sessions.Memory.Checker,
       # Terminal transport for browser-hosted coordinator sessions (bd-3ymdvi,
       # phase 4). One `Arbiter.Sessions.Stream` reader per *attached* session,
       # started on first attach and stopped when the last client leaves — so

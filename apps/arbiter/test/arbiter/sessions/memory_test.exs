@@ -5,19 +5,31 @@ defmodule Arbiter.Sessions.MemoryTest do
   Acceptance criteria 1 and 3 — provisioning mounts memory by
   `metadata.type`, `project` memories are filtered to the session's bound
   workspace, and a cross-workspace session receives none of them.
+
+  Phase 13 (bd-19qve3, amendment 3): a mount serves only memories whose
+  stored verdict is current and not stale, and never verifies anything itself.
+  The phase-12 cases therefore run the checker before mounting.
   """
   use ExUnit.Case, async: false
 
+  import Arbiter.Test.MemoryFixture, only: [checkout!: 1, commit!: 2]
+
   alias Arbiter.Sessions.Layout
   alias Arbiter.Sessions.Memory
+  alias Arbiter.Sessions.Memory.Checker
+  alias Arbiter.Sessions.Memory.Staleness
+  alias Arbiter.Sessions.Memory.Verdicts
   alias Arbiter.Sessions.Session
 
   @moduletag :tmp_dir
 
-  defp write_memory!(root, filename, type, extra \\ "") do
-    File.mkdir_p!(root)
+  @short "defmodule Short do\n  def hello, do: :world\nend\n"
 
-    File.write!(Path.join(root, filename), """
+  defp write_memory!(root, filename, type, extra \\ "", body \\ nil) do
+    File.mkdir_p!(root)
+    path = Path.join(root, filename)
+
+    File.write!(path, """
     ---
     name: #{Path.rootname(filename)}
     description: fixture
@@ -25,13 +37,21 @@ defmodule Arbiter.Sessions.MemoryTest do
       type: #{type}
     #{extra}---
 
-    Fixture body for #{filename}.
+    #{body || "Fixture body for #{filename}."}
     """)
+
+    path
+  end
+
+  defp check!(root, checkouts \\ []) do
+    Checker.run(memory_root: root, checkouts: checkouts, ticket_prefixes: [])
   end
 
   defp session(id, workspace_id \\ nil) do
     %Session{id: id, workspace_id: workspace_id}
   end
+
+  defp mounted(s, type), do: s.id |> Layout.memory_shared_dir() |> Path.join(type) |> File.ls!()
 
   setup %{tmp_dir: tmp_dir} do
     memory_root = Path.join(tmp_dir, "memory_root")
@@ -55,6 +75,7 @@ defmodule Arbiter.Sessions.MemoryTest do
       write_memory!(root, "user-fact.md", "user")
       write_memory!(root, "feedback-fact.md", "feedback")
       write_memory!(root, "reference-fact.md", "reference")
+      check!(root)
 
       s = session("sess-shared")
       :ok = Memory.mount(s, memory_root: root)
@@ -67,94 +88,14 @@ defmodule Arbiter.Sessions.MemoryTest do
                :ok
     end
 
-    test "stale project memory is not mounted", %{memory_root: root} do
-      checkout = Path.join(root, "checkout")
-      File.mkdir_p!(Path.join(checkout, "lib"))
-      File.write!(Path.join(checkout, "lib/short.ex"), "defmodule Short do\nend\n")
-
-      System.cmd("git", ["init"], cd: checkout)
-      System.cmd("git", ["add", "."], cd: checkout)
-      System.cmd("git", ["config", "user.email", "test@test.com"], cd: checkout)
-      System.cmd("git", ["config", "user.name", "Test"], cd: checkout)
-      System.cmd("git", ["commit", "-m", "init"], cd: checkout)
-
-      write_memory!(root, "proj.md", "project", "  workspace_id: ws-arbiter\n")
-      # Overwrite body to include an invalid citation
-      File.write!(Path.join(root, "proj.md"), """
-      ---
-      name: proj
-      type: project
-      workspace_id: ws-arbiter
-      ---
-
-      This is a bad citation: lib/short.ex:100
-      """)
-
-      s = session("sess-stale", "ws-arbiter")
-      :ok = Memory.mount(s, memory_root: root, primary_checkout: checkout)
-
-      project_dir = Path.join(Layout.memory_shared_dir(s.id), "project")
-      assert File.ls!(project_dir) == []
-    end
-
-    test "valid project memory is mounted", %{memory_root: root} do
-      checkout = Path.join(root, "checkout")
-      File.mkdir_p!(Path.join(checkout, "lib"))
-      File.write!(Path.join(checkout, "lib/short.ex"), "defmodule Short do\nend\n")
-
-      System.cmd("git", ["init"], cd: checkout)
-      System.cmd("git", ["add", "."], cd: checkout)
-      System.cmd("git", ["config", "user.email", "test@test.com"], cd: checkout)
-      System.cmd("git", ["config", "user.name", "Test"], cd: checkout)
-      System.cmd("git", ["commit", "-m", "init"], cd: checkout)
-
-      write_memory!(root, "proj.md", "project", "  workspace_id: ws-arbiter\n")
-      # Overwrite body to include a valid citation
-      File.write!(Path.join(root, "proj.md"), """
-      ---
-      name: proj
-      type: project
-      workspace_id: ws-arbiter
-      ---
-
-      This is a good citation: lib/short.ex:1
-      """)
-
-      s = session("sess-valid", "ws-arbiter")
-      :ok = Memory.mount(s, memory_root: root, primary_checkout: checkout)
-
-      project_dir = Path.join(Layout.memory_shared_dir(s.id), "project")
-      assert File.ls!(project_dir) == ["proj.md"]
-    end
-
-    test "project memory without resolvable checkout is still mounted", %{memory_root: root} do
-      write_memory!(root, "proj.md", "project", "  workspace_id: ws-unknown\n")
-      # Give it citations so it would fail IF it could resolve the checkout
-      File.write!(Path.join(root, "proj.md"), """
-      ---
-      name: proj
-      type: project
-      workspace_id: ws-unknown
-      ---
-
-      This is a bad citation: missing.ex:100
-      """)
-
-      s = session("sess-unresolvable", "ws-unknown")
-      :ok = Memory.mount(s, memory_root: root)
-
-      project_dir = Path.join(Layout.memory_shared_dir(s.id), "project")
-      assert File.ls!(project_dir) == ["proj.md"]
-    end
-
     test "cross-workspace session receives no project memories", %{memory_root: root} do
       write_memory!(root, "arbiter-internals.md", "project", "  workspace_id: ws-arbiter\n")
+      check!(root)
 
       s = session("sess-cross", nil)
       :ok = Memory.mount(s, memory_root: root)
 
-      project_dir = Path.join(Layout.memory_shared_dir(s.id), "project")
-      assert File.ls!(project_dir) == []
+      assert mounted(s, "project") == []
     end
 
     test "a bound session receives only its own workspace's project memories", %{
@@ -162,35 +103,38 @@ defmodule Arbiter.Sessions.MemoryTest do
     } do
       write_memory!(root, "arbiter-internals.md", "project", "  workspace_id: ws-arbiter\n")
       write_memory!(root, "vstim-fact.md", "project", "  workspace_id: ws-vstim\n")
+      check!(root)
 
       s = session("sess-vstim", "ws-vstim")
       :ok = Memory.mount(s, memory_root: root)
 
-      project_dir = Path.join(Layout.memory_shared_dir(s.id), "project")
-      assert File.ls!(project_dir) == ["vstim-fact.md"]
+      assert mounted(s, "project") == ["vstim-fact.md"]
     end
 
     test "shared types are still mounted for a workspace-bound session", %{memory_root: root} do
       write_memory!(root, "user-fact.md", "user")
       write_memory!(root, "arbiter-internals.md", "project", "  workspace_id: ws-arbiter\n")
+      check!(root)
 
       s = session("sess-bound-shared", "ws-vstim")
       :ok = Memory.mount(s, memory_root: root)
 
-      shared = Layout.memory_shared_dir(s.id)
-      assert File.ls!(Path.join(shared, "user")) == ["user-fact.md"]
-      assert File.ls!(Path.join(shared, "project")) == []
+      assert mounted(s, "user") == ["user-fact.md"]
+      assert mounted(s, "project") == []
     end
 
     test "re-mounting clears a stale symlink (idempotent re-provision)", %{memory_root: root} do
       write_memory!(root, "user-fact.md", "user")
+      check!(root)
       s = session("sess-idempotent")
 
       :ok = Memory.mount(s, memory_root: root)
+      assert mounted(s, "user") == ["user-fact.md"]
+
       File.rm!(Path.join(root, "user-fact.md"))
       :ok = Memory.mount(s, memory_root: root)
 
-      assert File.ls!(Path.join(Layout.memory_shared_dir(s.id), "user")) == []
+      assert mounted(s, "user") == []
     end
 
     test "a missing memory root is a no-op, not an error", %{memory_root: root} do
@@ -199,6 +143,98 @@ defmodule Arbiter.Sessions.MemoryTest do
 
       assert :ok = Memory.mount(s, memory_root: missing)
       assert File.dir?(Layout.memory_shared_dir(s.id))
+    end
+  end
+
+  describe "mount/2 serves only verified memory (bd-19qve3)" do
+    test "a valid project memory is mounted and a stale one is not", %{memory_root: root} do
+      checkout = checkout!(%{"lib/short.ex" => @short})
+      ws = "  workspace_id: ws-arbiter\n"
+      write_memory!(root, "good.md", "project", ws, "This is a good citation: lib/short.ex:2")
+      write_memory!(root, "bad.md", "project", ws, "This is a bad citation: lib/short.ex:100")
+      check!(root, [checkout])
+
+      s = session("sess-valid-stale", "ws-arbiter")
+      :ok = Memory.mount(s, memory_root: root)
+
+      assert mounted(s, "project") == ["good.md"]
+    end
+
+    test "a memory nobody has checked yet waits for the checker", %{memory_root: root} do
+      write_memory!(root, "user-fact.md", "user")
+      s = session("sess-unchecked")
+
+      :ok = Memory.mount(s, memory_root: root)
+      assert mounted(s, "user") == []
+
+      check!(root)
+      :ok = Memory.mount(s, memory_root: root)
+      assert mounted(s, "user") == ["user-fact.md"]
+    end
+
+    test "a stale verdict hides a memory even before the checker moves it", %{memory_root: root} do
+      path = write_memory!(root, "user-fact.md", "user")
+      {:ok, verdict} = Staleness.verify(path, checkouts: [])
+      :ok = Verdicts.write(root, "user-fact.md", %{verdict | status: :stale})
+
+      s = session("sess-stale-verdict")
+      :ok = Memory.mount(s, memory_root: root)
+
+      assert mounted(s, "user") == []
+    end
+
+    test "an edit after the check hides the memory until it is re-checked", %{memory_root: root} do
+      path = write_memory!(root, "user-fact.md", "user")
+      check!(root)
+      File.write!(path, File.read!(path) <> "An unverified edit.\n")
+
+      s = session("sess-edited")
+      :ok = Memory.mount(s, memory_root: root)
+      assert mounted(s, "user") == []
+
+      check!(root)
+      :ok = Memory.mount(s, memory_root: root)
+      assert mounted(s, "user") == ["user-fact.md"]
+    end
+
+    # Amendment 3: a launch reads the stored verdict and does no git work, so
+    # code that moved since the last checker pass is caught by the next pass,
+    # not by the launch.
+    test "mount reads the stored verdict and never re-verifies", %{memory_root: root} do
+      checkout = checkout!(%{"lib/short.ex" => @short, "README.md" => "r\n"})
+      ws = "  workspace_id: ws-arbiter\n"
+      write_memory!(root, "good.md", "project", ws, "See lib/short.ex:2")
+      check!(root, [checkout])
+
+      commit!(checkout, %{"lib/short.ex" => :delete})
+
+      s = session("sess-no-verify", "ws-arbiter")
+      :ok = Memory.mount(s, memory_root: root)
+      assert mounted(s, "project") == ["good.md"]
+
+      check!(root, [checkout])
+      :ok = Memory.mount(s, memory_root: root)
+      assert mounted(s, "project") == []
+    end
+
+    test "a project memory whose workspace has no checkout is unverified and still mounted", %{
+      memory_root: root
+    } do
+      write_memory!(
+        root,
+        "proj.md",
+        "project",
+        "  workspace_id: ws-unknown\n",
+        "See lib/missing.ex:100"
+      )
+
+      check!(root, [])
+
+      s = session("sess-unresolvable", "ws-unknown")
+      :ok = Memory.mount(s, memory_root: root)
+
+      assert {:ok, %{status: :unverified}} = Verdicts.read(root, "proj.md")
+      assert mounted(s, "project") == ["proj.md"]
     end
   end
 end
