@@ -43,7 +43,9 @@ syntax.
     filesystem: :worktree | :none,
     network: true | false,
     writable_paths: [],         # extra writable paths inside the OS write jail
-    egress_tunnels: []          # "LOCAL:HOST:PORT" host services bridged into the jail's netns
+    egress_tunnels: [],         # "LOCAL:HOST:PORT" host services bridged into the jail's netns
+    egress: :open | :allowlist | :none,  # how much of the network a jailed run reaches
+    allow_hosts: []             # operator baseline "host:port" entries for the egress proxy
   }
 }
 ```
@@ -294,6 +296,32 @@ fixed by operator config, not by the agent, and the layers union like
 `writable_paths`. Malformed entries are dropped. A local port that collides
 with the proxy (3128) or Arbiter bridge fails the spawn (`duplicate_bridge_port`).
 
+**Egress levels** (bd-5yydxh). `sandbox.egress` is `open` (the default: no host
+filtering, nothing changes for a workspace that does not opt in), `allowlist`
+or `none`. `sandbox.allow_hosts` is the operator-written baseline (exact
+`host:port`, a leading `*.` allowed). Which host classes each level reaches:
+
+| Class | Contents | Reachable at |
+|---|---|---|
+| infra | the adapter's API hosts, Arbiter, the ticket's git remote | `none`, `allowlist` |
+| toolchain | package registries (`repo.hex.pm`, `registry.npmjs.org`, …) among `allow_hosts` | `none`, `allowlist` |
+| extras | every other `allow_hosts` entry | `allowlist` |
+| ticket grants | a ticket's `network:` grants | `allowlist` |
+
+Both keys layer like the rest of `sandbox` (installation → workspace → repo →
+dispatch): `egress` is replaced by the highest layer that sets it, and is
+independent of `permissions.mode`. A value outside the three levels, or a
+malformed `allow_hosts` entry, is refused when the workspace config is written
+(`ValidateConfig`); on resolve it is ignored and the inherited level stands.
+The effective level is `egress` in the workspace `security_posture` (and in
+each `repos.<repo>` entry, and in MCP `workspace_show`). The policy half only:
+the proxy and the jail's network mode are what enforce it.
+
+`arb server doctor` has an **egress jail** check: `bwrap --unshare-net` and
+`socat` present, a proxy listener up, and against a loopback stand-in (no
+internet) one allow and one deny. When it fails, the hint names the missing
+package or the sysctl, as `Jail.explain/1` does.
+
 The proxy and bridges live and die with the worker. A spawn whose proxy
 cannot start (or whose `socat` is missing at spawn time) **fails** with
 `{:egress_unavailable, reason}` in every mode; it never runs on the shared
@@ -426,7 +454,7 @@ The hardcoded safe baseline lives in `Arbiter.Agents.SecurityPolicy.base/0`.
 `base/0` → `:worker_security_policy` app env → `workspace.config["agent"]["security"]`
 → `workspace.config["agent"]["security"]["repos"][repo]` (only when a repo name
 is passed) → per-dispatch override. `allow`/`deny`/`safe_defaults_exclude`
-and `sandbox.writable_paths` / `sandbox.egress_tunnels` **union** across layers; `mode` and the other
+and `sandbox.writable_paths` / `sandbox.egress_tunnels` / `sandbox.allow_hosts` **union** across layers; `mode` and the other
 `sandbox` fields are **replaced** by the highest layer that sets them. `safe_defaults` itself is never set directly —
 it is always recomputed as `safe_default_categories() -- safe_defaults_exclude`
 after every layer is applied, so it always reflects the current default set
