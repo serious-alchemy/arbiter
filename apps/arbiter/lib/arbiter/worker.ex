@@ -2134,11 +2134,16 @@ defmodule Arbiter.Worker do
       Map.get(session, :provider) ||
         provider_for(Map.get(usage, :model) || Map.get(session, :model))
 
-    cond do
-      # bd-agsn2b: codex rollouts are readable too, via their own locator.
-      provider == "codex" ->
-        reconcile_codex_usage_from_disk(usage, session, state)
+    # bd-agsn2b: codex rollouts are readable too, via their own locator.
+    if provider == "codex" do
+      reconcile_codex_usage_from_disk(usage, session, state)
+    else
+      reconcile_claude_usage_from_disk(usage, session, provider, state)
+    end
+  end
 
+  defp reconcile_claude_usage_from_disk(usage, session, provider, %State{} = state) do
+    cond do
       # Other non-Claude adapters have their own on-stream usage; nothing to read here.
       provider not in [nil, "claude"] ->
         usage
