@@ -51,6 +51,8 @@ defmodule Arbiter.Quota.CodexQuota do
         :session_reset_at,
         :weekly_used_percent,
         :weekly_reset_at,
+        :session_window_minutes,
+        :weekly_window_minutes,
         :limit_reached,
         :captured_at
       ]
@@ -82,6 +84,17 @@ defmodule Arbiter.Quota.CodexQuota do
     attribute :session_reset_at, :utc_datetime, public?: true
 
     attribute :weekly_used_percent, :float, public?: true
+
+    attribute :session_window_minutes, :integer do
+      public? true
+      description "Length of the primary window in minutes (nil = not reported)."
+    end
+
+    attribute :weekly_window_minutes, :integer do
+      public? true
+      description "Length of the secondary window in minutes (nil = not reported)."
+    end
+
     attribute :weekly_reset_at, :utc_datetime, public?: true
 
     attribute :limit_reached, :boolean, public?: true
