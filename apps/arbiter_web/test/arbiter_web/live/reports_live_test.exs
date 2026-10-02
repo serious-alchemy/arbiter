@@ -104,6 +104,33 @@ defmodule ArbiterWeb.ReportsLiveTest do
     end
   end
 
+  test "cost section shows metered dollars and marks unmetered providers", %{conn: conn, ws: ws} do
+    issue = issue!(ws, %{difficulty: 2})
+    {:ok, issue} = Ash.update(issue, %{close_upstream: false}, action: :close)
+
+    for {provider, cost} <- [{"claude", 4.0}, {"gemini", nil}] do
+      {:ok, _} =
+        Ash.create(Arbiter.Usage.Event, %{
+          task_id: issue.id,
+          source: :task,
+          step: :work,
+          workspace_id: ws.id,
+          occurred_at: DateTime.utc_now(),
+          provider: provider,
+          model: "m",
+          cost_usd: cost
+        })
+    end
+
+    {:ok, view, _html} = live(conn, ~p"/reports?workspace=#{ws.id}")
+    _ = render_async(view)
+
+    assert has_element?(view, "#reports-cost-d-2")
+    assert has_element?(view, "#reports-cost-d-2", "$4.00")
+    assert has_element?(view, "#reports-cost-d-2", "unmetered")
+    assert has_element?(view, "#reports-cost-overhead")
+  end
+
   describe "cumulative flow and stage dwell" do
     defp promote!(issue) do
       {:ok, issue} = Ash.update(issue, %{}, action: :promote)
@@ -209,6 +236,106 @@ defmodule ArbiterWeb.ReportsLiveTest do
       _ = render_async(view)
 
       assert has_element?(view, "#reports-flow-chart rect[data-total='1']")
+    end
+  end
+
+  describe "epic burn-up" do
+    test "is absent until an epic is picked, then charts scope and done", %{conn: conn, ws: ws} do
+      epic = issue!(ws, %{issue_type: :epic, title: "the epic"})
+      child = issue!(ws, %{difficulty: 2})
+      issue!(ws, %{difficulty: 2})
+
+      Ash.create!(Arbiter.Tasks.Dependency, %{
+        from_issue_id: epic.id,
+        to_issue_id: child.id,
+        type: :parent_of
+      })
+
+      {:ok, view, _html} = live(conn, ~p"/reports?workspace=#{ws.id}")
+      _ = render_async(view)
+      refute has_element?(view, "#reports-burn-up")
+
+      {:ok, view, _html} = live(conn, ~p"/reports?workspace=#{ws.id}&epic=#{epic.id}")
+      _ = render_async(view)
+
+      assert has_element?(view, "#reports-burn-up")
+      assert has_element?(view, "#reports-burn-up-chart path[data-role=scope]")
+      assert has_element?(view, "#reports-burn-up-chart path[data-role=done]")
+
+      assert has_element?(
+               view,
+               "#reports-burn-up-chart circle[data-role=scope-mark][data-value='1']"
+             )
+
+      assert has_element?(
+               view,
+               "#reports-burn-up-weighted-chart circle[data-role=scope-mark][data-value='2']"
+             )
+
+      assert has_element?(view, "#reports-burn-up-scope [data-role=value]", "1")
+    end
+
+    test "an epic with no children says so", %{conn: conn, ws: ws} do
+      epic = issue!(ws, %{issue_type: :epic, title: "empty"})
+      issue!(ws, %{difficulty: 2})
+
+      {:ok, view, _html} = live(conn, ~p"/reports?workspace=#{ws.id}&epic=#{epic.id}")
+      _ = render_async(view)
+
+      assert has_element?(view, "#reports-burn-up-empty")
+    end
+  end
+
+  describe "ReviewGate health" do
+    defp stamp!(table, id, at) do
+      Arbiter.Repo.query!("UPDATE #{table} SET inserted_at = ? WHERE id = ?", [at, id])
+    end
+
+    defp round!(task_id, at, attrs) do
+      {:ok, row} =
+        Ash.create(
+          Arbiter.ReviewGate.Round,
+          Map.merge(%{task_id: task_id, round: 1, fix_round_attempt: 0, role: :review}, attrs)
+        )
+
+      stamp!("review_gate_rounds", row.id, at)
+    end
+
+    test "renders first-pass rate, rounds, outcomes, providers, resolutions and the start note",
+         %{conn: conn, ws: ws} do
+      now = DateTime.utc_now()
+      recent = now |> DateTime.add(-86_400) |> DateTime.to_iso8601()
+      a = issue!(ws, %{}).id
+      b = issue!(ws, %{}).id
+
+      round!(a, recent, %{verdict: :approve, converged: true, reviewer_provider: "claude"})
+      round!(b, recent, %{verdict: :request_changes, reviewer_provider: "claude"})
+      round!(b, recent, %{round: 2, verdict: :approve, converged: true})
+
+      {:ok, _} =
+        Arbiter.ReviewGate.Resolutions.record(%{task_id: b, decision: :amend, reasoning: "ok"})
+
+      {:ok, view, _html} = live(conn, ~p"/reports?workspace=#{ws.id}")
+      _ = render_async(view)
+
+      assert has_element?(view, "#reports-reviewgate")
+      assert has_element?(view, "#reports-rg-first-pass", "50%")
+      assert has_element?(view, "#reports-rg-rounds-chart rect[data-key='1']")
+      assert has_element?(view, "#reports-rg-rounds-chart rect[data-key='2']")
+      assert has_element?(view, "#reports-rg-outcomes-chart")
+      assert has_element?(view, "#reports-rg-providers-table", "claude")
+      assert has_element?(view, "#reports-rg-resolutions-table", "amend")
+      assert has_element?(view, "#reports-rg-provider-note", "2026-09-20")
+    end
+
+    test "says so when there are no gate rounds", %{conn: conn, ws: ws} do
+      issue!(ws, %{})
+
+      {:ok, view, _html} = live(conn, ~p"/reports?workspace=#{ws.id}")
+      _ = render_async(view)
+
+      assert has_element?(view, "#reports-rg-empty")
+      refute has_element?(view, "#reports-rg-rounds-chart")
     end
   end
 end

@@ -158,7 +158,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     assert exit_code == 0
     assert {:ok, %{"ok" => true, "checks" => checks}} = Jason.decode(String.trim(out))
     assert is_list(checks)
-    assert length(checks) == 19
+    assert length(checks) == 22
   end
 
   test "version mismatch is non-fatal (exit 0 but shows [fail])" do
@@ -1225,6 +1225,94 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     end
   end
 
+  describe "agy jail network mode (bd-cfktou)" do
+    defp network_routes(jail_body) do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/agy_write_jail"}, {jail_body, 200}}
+      ])
+    end
+
+    test "ok when the host can run the jail in a network namespace" do
+      network_routes(%{"available" => true, "network" => %{"available" => true}})
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] agy jail network"
+    end
+
+    test "FAILs with the cause and fix when it cannot, without blocking readiness" do
+      network_routes(%{
+        "available" => true,
+        "network" => %{
+          "available" => false,
+          "cause" => "socat_missing",
+          "message" => "no `socat` on PATH",
+          "fix" => "Install socat"
+        }
+      })
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[fail] agy jail network"
+      assert out =~ "no `socat` on PATH"
+      assert out =~ "Install socat"
+    end
+
+    test "ok (skipped) when the server predates the network key" do
+      network_routes(%{"available" => true})
+      {out, _err, _exit_code} = capture(fn -> Doctor.run([]) end)
+      assert out =~ "[ ok ] agy jail network"
+    end
+  end
+
+  describe "egress jail self-test (bd-5yydxh)" do
+    defp egress_routes(egress_resp, status \\ 200) do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/agy_write_jail"}, {%{"available" => true}, 200}},
+        {{"get", "/api/server/egress_jail"}, {egress_resp, status}}
+      ])
+    end
+
+    test "ok, naming 1 allow and 1 deny, when the proxy and jail work" do
+      egress_routes(%{"available" => true, "allowed" => 1, "denied" => 1})
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] egress jail"
+      assert out =~ "1 allow"
+      assert out =~ "1 deny"
+    end
+
+    test "FAILs naming the missing package, without blocking readiness" do
+      egress_routes(%{
+        "available" => false,
+        "cause" => "socat_missing",
+        "message" => "no `socat` on PATH: the jail's network mode bridges its loopback with it",
+        "fix" => "Install socat (`dnf install socat` / `apt install socat`)."
+      })
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[fail] egress jail"
+      assert out =~ "no `socat` on PATH"
+      assert out =~ "dnf install socat"
+    end
+
+    test "ok (skipped) when the server predates the endpoint" do
+      egress_routes(%{"error" => "not found"}, 404)
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] egress jail"
+      assert out =~ "skipping"
+    end
+  end
+
   describe "account/workspace quota policy check (bd-c7ll4t)" do
     test "green when no workspace configures its own quota settings" do
       stub_routes([
@@ -1485,6 +1573,59 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       {out, _err, _exit_code} = capture(fn -> Doctor.run([]) end)
       assert out =~ "[ ok ] claude worker credentials"
       assert out =~ "could not check"
+    end
+  end
+
+  # bd-c99hys: the dashboard login relay drives each provider CLI's login inside
+  # a hidden tmux session, so a host without tmux cannot log an account in.
+  describe "tmux check" do
+    defp tmux_routes(body) do
+      [
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/tmux"}, {body, 200}}
+      ]
+    end
+
+    test "reports tmux present, with its version" do
+      stub_routes(
+        tmux_routes(%{"available" => true, "path" => "/usr/bin/tmux", "version" => "tmux 3.4"})
+      )
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] tmux"
+      assert out =~ "tmux 3.4"
+    end
+
+    test "reports tmux missing, informationally, with the fix" do
+      stub_routes(
+        tmux_routes(%{
+          "available" => false,
+          "message" => "tmux is not installed",
+          "fix" => "Install tmux (e.g. `sudo dnf install tmux`)"
+        })
+      )
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[fail] tmux"
+      assert out =~ "tmux is not installed"
+      assert out =~ "sudo dnf install tmux"
+
+      result = Enum.find(Checks.run(), &(&1.name == "tmux"))
+      refute result.blocks_readiness
+    end
+
+    test "skips quietly when the server predates the endpoint" do
+      stub_routes(tmux_routes(%{}) |> List.keydelete({"get", "/api/server/tmux"}, 0))
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] tmux"
+      assert out =~ "predates this check"
     end
   end
 

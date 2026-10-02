@@ -463,6 +463,61 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       assert Ash.get!(Issue, task.id).repo == nil
     end
 
+    # bd-13pqcp: the per-ticket provider constraint, set and cleared from the page.
+    test "the edit modal sets, shows and clears the provider constraint", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "constrain me", workspace_id: ws.id})
+
+      {:ok, view, html} = live_task(conn, ~p"/tasks/#{task.id}")
+      refute html =~ ~s(id="task-provider-constraint")
+
+      view |> element(~s(button[phx-click="open_edit"])) |> render_click()
+
+      html =
+        view
+        |> form("#task-edit-form", %{
+          "task" => %{
+            "title" => "constrain me",
+            "provider_mode" => "exclude",
+            "provider_list" => "agy, codex"
+          }
+        })
+        |> render_submit()
+
+      assert Ash.get!(Issue, task.id).provider_constraint == %{"exclude" => ["gemini", "codex"]}
+      assert html =~ ~s(id="task-provider-constraint")
+      assert has_element?(view, "#task-provider-constraint", "exclude gemini, codex")
+
+      # The modal opens on what is stored, and "no constraint" clears it.
+      view |> element(~s(button[phx-click="open_edit"])) |> render_click()
+      assert has_element?(view, ~s(#task-edit-form select[name="task[provider_mode]"]))
+      assert has_element?(view, ~s(#task-edit-form input[name="task[provider_list]"]))
+
+      view
+      |> form("#task-edit-form", %{"task" => %{"provider_mode" => "", "provider_list" => ""}})
+      |> render_submit()
+
+      assert Ash.get!(Issue, task.id).provider_constraint == nil
+      refute has_element?(view, "#task-provider-constraint")
+    end
+
+    test "an unknown provider is refused and the modal stays open", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "keep-constraint", workspace_id: ws.id})
+
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
+      view |> element(~s(button[phx-click="open_edit"])) |> render_click()
+
+      html =
+        view
+        |> form("#task-edit-form", %{
+          "task" => %{"provider_mode" => "require", "provider_list" => "nope"}
+        })
+        |> render_submit()
+
+      assert html =~ "unknown provider"
+      assert html =~ ~s(id="task-edit-modal")
+      assert Ash.get!(Issue, task.id).provider_constraint == nil
+    end
+
     test "a blank title is refused and the modal stays open", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "keep-me", workspace_id: ws.id})
 
@@ -2880,6 +2935,120 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
 
   # bd-18vl9q, design bd-9jj5lf §4: "$X spent · ~$Y-Z to go" on the epic
   # detail page.
+  describe "epic priority floor (ES2, bd-3e7inj)" do
+    setup %{ws: ws} do
+      {:ok, epic} =
+        Ash.create(Issue, %{
+          title: "the epic",
+          workspace_id: ws.id,
+          issue_type: :epic,
+          priority: 3
+        })
+
+      {:ok, epic: epic}
+    end
+
+    defp selected_floor(view) do
+      view
+      |> element("#epic-floor-select option[selected]")
+      |> render()
+      |> LazyHTML.from_fragment()
+      |> LazyHTML.attribute("value")
+      |> List.first()
+    end
+
+    test "an epic shows the floor control, none selected, beside its display-only priority",
+         %{conn: conn, epic: epic} do
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{epic.id}")
+
+      assert has_element?(view, "#panel-epic-floor")
+      assert has_element?(view, "#epic-floor-form")
+      assert has_element?(view, "#epic-floor-select option", "P1")
+      assert has_element?(view, "#epic-floor-select option", "P3")
+      refute has_element?(view, "#epic-floor-select option", "P0")
+      refute has_element?(view, "#epic-floor-select option", "P4")
+      assert selected_floor(view) == ""
+
+      assert has_element?(view, "#epic-own-priority", "epic priority (display only)")
+      assert has_element?(view, "#epic-own-priority", "P3")
+    end
+
+    test "choosing a floor sets it; choosing none clears it", %{conn: conn, epic: epic} do
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{epic.id}")
+
+      view |> form("#epic-floor-form", %{"epic_floor" => %{"floor" => "1"}}) |> render_change()
+
+      assert Ash.get!(Issue, epic.id).floor_priority == 1
+      assert selected_floor(view) == "1"
+
+      view |> form("#epic-floor-form", %{"epic_floor" => %{"floor" => ""}}) |> render_change()
+
+      assert Ash.get!(Issue, epic.id).floor_priority == nil
+      assert selected_floor(view) == ""
+    end
+
+    test "setting a floor never touches the epic's own priority", %{conn: conn, epic: epic} do
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{epic.id}")
+
+      view |> form("#epic-floor-form", %{"epic_floor" => %{"floor" => "2"}}) |> render_change()
+
+      assert Ash.get!(Issue, epic.id).priority == 3
+      assert has_element?(view, "#epic-own-priority", "P3")
+    end
+
+    test "an existing floor is preselected on load", %{conn: conn, epic: epic} do
+      {:ok, _} = Ash.update(epic, %{floor_priority: 2}, action: :set_floor)
+
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{epic.id}")
+
+      assert selected_floor(view) == "2"
+    end
+
+    test "the change is in the paper trail", %{conn: conn, epic: epic} do
+      require Ash.Query
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{epic.id}")
+
+      view |> form("#epic-floor-form", %{"epic_floor" => %{"floor" => "3"}}) |> render_change()
+
+      assert [%{changes: %{"floor_priority" => 3}}] =
+               Issue.Version
+               |> Ash.Query.filter(
+                 version_source_id == ^epic.id and version_action_name == :set_floor
+               )
+               |> Ash.read!()
+    end
+
+    test "a non-epic has no floor control", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "plain task", workspace_id: ws.id})
+
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
+
+      refute has_element?(view, "#panel-epic-floor")
+      refute has_element?(view, "#epic-floor-form")
+    end
+
+    test "a forged event against a non-epic is refused and changes nothing", %{
+      conn: conn,
+      ws: ws
+    } do
+      {:ok, task} = Ash.create(Issue, %{title: "plain task", workspace_id: ws.id})
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
+
+      html = render_hook(view, "set_floor", %{"epic_floor" => %{"floor" => "1"}})
+
+      assert html =~ "epic"
+      assert Ash.get!(Issue, task.id).floor_priority == nil
+    end
+
+    test "a forged out-of-range value is refused", %{conn: conn, epic: epic} do
+      {:ok, view, _html} = live_task(conn, ~p"/tasks/#{epic.id}")
+
+      render_hook(view, "set_floor", %{"epic_floor" => %{"floor" => "0"}})
+
+      assert Ash.get!(Issue, epic.id).floor_priority == nil
+    end
+  end
+
   describe "epic cost rollup" do
     test "shows spent, to-go, and the breakdown counts", %{conn: conn, ws: ws} do
       {:ok, epic} =

@@ -42,7 +42,10 @@ syntax.
     enabled: true,
     filesystem: :worktree | :none,
     network: true | false,
-    writable_paths: []          # extra writable paths inside the OS write jail
+    writable_paths: [],         # extra writable paths inside the OS write jail
+    egress_tunnels: [],         # "LOCAL:HOST:PORT" host services bridged into the jail's netns
+    egress: :open | :allowlist | :none,  # how much of the network a jailed run reaches
+    allow_hosts: []             # operator baseline "host:port" entries for the egress proxy
   }
 }
 ```
@@ -265,13 +268,82 @@ systemd-resolved's varlink socket also answers DNS from inside the jail.
 Hiding `/run/user/$UID`, `/run/dbus` and `/run/systemd/resolve` with
 `--tmpfs` closes both.
 
+**Network mode (bd-cfktou, G6).** agy's jail also runs with `--unshare-net`:
+the namespace has only `lo`, with no route for UDP or ICMP, and the resolver
+sockets are hidden, so nothing resolves inside. The only way out is a
+per-run set of Unix sockets under `Egress.socket_dir/0` (the directory is
+blanked with a `--tmpfs`, and only that run's own sockets are bound back),
+each reached by an in-namespace `socat` on loopback:
+
+| In the jail | Goes to |
+|---|---|
+| `127.0.0.1:3128` (`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`) | the run's filtering CONNECT proxy (`Arbiter.Worker.Egress`) |
+| `127.0.0.1:<Arbiter port>` (4848 by default) | Arbiter's endpoint, so `arb` and the MCP URL are unchanged |
+| `127.0.0.1:<port>` per fixed tunnel | one fixed `host:port` |
+| `ssh` (git over SSH) | `GIT_SSH_COMMAND` carries `-o 'ProxyCommand socat - PROXY:127.0.0.1:%h:%p,proxyport=3128'`, so the proxy sees `github.com:22` |
+
+`NO_PROXY=127.0.0.1,localhost,::1` keeps loopback URLs (the Arbiter bridge,
+a test server in the namespace) off the proxy. The proxy's baseline is the
+adapter's infra hosts plus the host of each git remote in the worktree.
+
+**Fixed tunnels.** A host-loopback service a workspace's tests need (say
+Postgres on the host's `127.0.0.1:5432`) is not reachable from the namespace's
+own `lo`. List it per workspace (or per repo) as
+`config["agent"]["security"]["sandbox"]["egress_tunnels"] = ["5432:127.0.0.1:5432"]`
+(`LOCAL:HOST:PORT`): the jail gets `127.0.0.1:5432` bridged to that one
+destination, on the host side, through a `t<n>` socket. The destination is
+fixed by operator config, not by the agent, and the layers union like
+`writable_paths`. Malformed entries are dropped. A local port that collides
+with the proxy (3128) or Arbiter bridge fails the spawn (`duplicate_bridge_port`).
+
+**Egress levels** (bd-5yydxh). `sandbox.egress` is `open` (the default: no host
+filtering, nothing changes for a workspace that does not opt in), `allowlist`
+or `none`. `sandbox.allow_hosts` is the operator-written baseline (exact
+`host:port`, a leading `*.` allowed). Which host classes each level reaches:
+
+| Class | Contents | Reachable at |
+|---|---|---|
+| infra | the adapter's API hosts, Arbiter, the ticket's git remote | `none`, `allowlist` |
+| toolchain | package registries (`repo.hex.pm`, `registry.npmjs.org`, …) among `allow_hosts` | `none`, `allowlist` |
+| extras | every other `allow_hosts` entry | `allowlist` |
+| ticket grants | a ticket's `network:` grants | `allowlist` |
+
+Both keys layer like the rest of `sandbox` (installation → workspace → repo →
+dispatch): `egress` is replaced by the highest layer that sets it, and is
+independent of `permissions.mode`. A value outside the three levels, or a
+malformed `allow_hosts` entry, is refused when the workspace config is written
+(`ValidateConfig`); on resolve it is ignored and the inherited level stands.
+The effective level is `egress` in the workspace `security_posture` (and in
+each `repos.<repo>` entry, and in MCP `workspace_show`). The policy half only:
+the proxy and the jail's network mode are what enforce it.
+
+`arb server doctor` has an **egress jail** check: `bwrap --unshare-net` and
+`socat` present, a proxy listener up, and against a loopback stand-in (no
+internet) one allow and one deny. When it fails, the hint names the missing
+package or the sysctl, as `Jail.explain/1` does.
+
+The proxy and bridges live and die with the worker. A spawn whose proxy
+cannot start (or whose `socat` is missing at spawn time) **fails** with
+`{:egress_unavailable, reason}` in every mode; it never runs on the shared
+network. `Jail.network_status/0` is the host check behind the doctor line:
+if it fails, agy gets the filesystem jail on the shared network as before and
+a warning is logged. `config :arbiter, :worker_jail_network, false` switches
+network mode off.
+
 **Known, accepted gaps** (the threat model is a misdirected same-user agent,
 not a hostile kernel exploit):
 
-* The network is shared: `arb`, MCP and `git push` need it.
+* The network is shared **on a host without network mode** (no `socat`, or
+  no network namespaces; `arb server doctor` fails "agy jail network" there).
+  Where network mode works (below) the jail has no shared network at all.
   `sandbox.network: false` is still only the tool-level deny. The
   enforcement design is
   [design/guardrail-profiles.md](design/guardrail-profiles.md) §4.
+* The proxy runs in **learn mode**: only public-upload hosts are refused
+  today. Every other decision is logged to `egress_events` and allowed,
+  until agy's authenticated host set is recorded and an enforcing mode can be
+  switched on (G10). The first live probe of agy (bd-cfktou) stopped at the
+  OAuth prompt, so that set is not recorded yet.
 * Reads are not restricted.
 * The main `.git` stays writable, so a jailed worker can still write sibling
   worktrees' refs (the same as without the jail).
@@ -382,7 +454,7 @@ The hardcoded safe baseline lives in `Arbiter.Agents.SecurityPolicy.base/0`.
 `base/0` → `:worker_security_policy` app env → `workspace.config["agent"]["security"]`
 → `workspace.config["agent"]["security"]["repos"][repo]` (only when a repo name
 is passed) → per-dispatch override. `allow`/`deny`/`safe_defaults_exclude`
-and `sandbox.writable_paths` **union** across layers; `mode` and the other
+and `sandbox.writable_paths` / `sandbox.egress_tunnels` / `sandbox.allow_hosts` **union** across layers; `mode` and the other
 `sandbox` fields are **replaced** by the highest layer that sets them. `safe_defaults` itself is never set directly —
 it is always recomputed as `safe_default_categories() -- safe_defaults_exclude`
 after every layer is applied, so it always reflects the current default set

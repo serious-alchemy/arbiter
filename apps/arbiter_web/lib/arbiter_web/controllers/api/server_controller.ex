@@ -19,6 +19,15 @@ defmodule ArbiterWeb.Api.ServerController do
       `Arbiter.Worker.Jail.diagnose_ssh/0`) — whether `ssh -G` can parse the
       jail's mirrored ssh config, since a host can jail writes fine while
       that regresses (a changed `/etc/ssh/ssh_config`, no `ssh` on `PATH`).
+      Its `network` key (bd-cfktou, `Arbiter.Worker.Jail.diagnose_network/0`)
+      is a third: whether the jail can run in a network namespace with its
+      `socat` bridges, which an agy spawn needs for its only route out.
+    * `GET /api/server/egress_jail` — the "egress jail" self-test (bd-5yydxh,
+      G10, `Arbiter.Worker.Egress.SelfTest`): `bwrap --unshare-net` and `socat`
+      present, a proxy listener up, and against a local stand-in (no internet)
+      one allow and one deny. Run on demand rather than cached, since it
+      starts a proxy. A failure carries the same `cause`/`message`/`fix` as the
+      jail diagnoses above.
     * `GET /api/server/claude_credentials` — every workspace that runs Claude
       with no setup token (or API key) of its own (bd-80ecol,
       `Arbiter.Agents.Claude.CredentialCheck.workspace_report/0`): the ones
@@ -39,13 +48,20 @@ defmodule ArbiterWeb.Api.ServerController do
       `Arbiter.Mergers.RoutingCheck.report/0`): a forge strategy with no
       `origin` remote, or an `origin` that is not the effective
       `owner/repo`. `arb server doctor` lists them with the fix.
+    * `GET /api/server/tmux` — whether `tmux` is installed on this host
+      (bd-c99hys, `Arbiter.Accounts.LoginRunner.tmux_diagnosis/0`). The dashboard
+      login relay runs each provider CLI's login in a hidden tmux session, so
+      without it no account can be logged in or re-authenticated.
+      `arb server doctor` reports it with the install hint.
   """
 
   use ArbiterWeb, :controller
 
   alias Arbiter.Accounts.Enablement
+  alias Arbiter.Accounts.LoginRunner
   alias Arbiter.Agents.Claude.CredentialCheck
   alias Arbiter.Mergers.RoutingCheck
+  alias Arbiter.Worker.Egress.SelfTest
   alias Arbiter.Worker.Jail
 
   def migrations(conn, _params) do
@@ -79,8 +95,22 @@ defmodule ArbiterWeb.Api.ServerController do
       jail_diagnosis(Jail.diagnose())
       |> Map.put(:ssh, jail_diagnosis(Jail.diagnose_ssh()))
       |> Map.put(:escape, jail_diagnosis(Jail.diagnose_escape()))
+      |> Map.put(:network, jail_diagnosis(Jail.diagnose_network()))
       |> Map.put(:dbus_proxy, Jail.dbus_proxy())
     )
+  end
+
+  # bd-5yydxh (G10): the "egress jail" self-test, run on demand. It starts a
+  # proxy against a local stand-in and expects 1 allow and 1 deny, so it is
+  # not a cached probe like the others.
+  def egress_jail(conn, _params) do
+    case SelfTest.run() do
+      {:ok, %{allowed: allowed, denied: denied}} ->
+        json(conn, %{available: true, allowed: allowed, denied: denied})
+
+      {:error, reason} ->
+        json(conn, jail_diagnosis(SelfTest.explain(reason)))
+    end
   end
 
   defp jail_diagnosis(nil), do: %{available: true}
@@ -107,6 +137,8 @@ defmodule ArbiterWeb.Api.ServerController do
         end)
     })
   end
+
+  def tmux(conn, _params), do: json(conn, LoginRunner.tmux_diagnosis())
 
   def merge_routing(conn, _params) do
     repos = Enum.map(RoutingCheck.report(), &routing_entry/1)

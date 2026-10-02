@@ -18,7 +18,11 @@ defmodule Arbiter.Agents.Gemini do
   alias Arbiter.Agents.Gemini.ConfigDir
   alias Arbiter.Agents.Gemini.Security
   alias Arbiter.Agents.SecurityPolicy
+  alias Arbiter.Worker.Egress.JailRun
   alias Arbiter.Worker.Jail
+  alias Arbiter.Worker.Sandbox
+
+  require Logger
 
   @done_regex ~r/(?:\A|\n)[^\p{L}\p{N}\n]*arb done[^\p{L}\p{N}]*\z/u
 
@@ -33,6 +37,15 @@ defmodule Arbiter.Agents.Gemini do
   # bare adapter call that names no watchdog, since `Arbiter.Agents.Preflight`
   # always threads one through.
   @probe_prompt "ping"
+
+  # The proxy baseline for an agy jail (bd-cfktou): the hosts seen as CONNECTs
+  # from a real jailed `agy -p` run in learn mode, 2026-10-02 (agy 1.2.14), plus
+  # the ticket's git remote, which `JailRun` adds. That run stopped at the
+  # OAuth prompt (no credential is seeded in the worker shell it ran from), so
+  # the hosts an authenticated turn needs (model API, token refresh) are NOT
+  # recorded yet: the proxy runs in learn mode, which logs them to
+  # `egress_events` instead of denying, until they are.
+  @egress_infra ["antigravity-unleash.goog:443", "play.googleapis.com:443"]
   @probe_timeout_fraction_pct 80
   @probe_fallback_watchdog_ms 120_000
 
@@ -122,11 +135,13 @@ defmodule Arbiter.Agents.Gemini do
   # (`jail_blocker/1` refuses it, see `default_argv/2`'s `maybe_jail/4`), so
   # the warning text must not claim writes just run unconfined there — that's
   # only true outside `:strict` (bd-8xy1mf).
-  defp jail_unavailable_effect(%SecurityPolicy{permissions: %{mode: :strict}}),
-    do: ":strict dispatches of agy are refused"
-
-  defp jail_unavailable_effect(_policy),
-    do: "writes are not confined to the worktree outside :strict"
+  defp jail_unavailable_effect(%SecurityPolicy{} = policy) do
+    case {Sandbox.module(policy), policy.permissions.mode} do
+      {{:error, _}, _mode} -> "agy dispatches are refused in every mode"
+      {_, :strict} -> ":strict dispatches of agy are refused"
+      _ -> "writes are not confined to the worktree outside :strict"
+    end
+  end
 
   # `jail_blocker/1`'s own reasons (sandbox off, isolated HOME off) are already
   # human strings; `{:jail_probe_failed, reason}` wraps a raw `Jail.status/0`
@@ -137,6 +152,11 @@ defmodule Arbiter.Agents.Gemini do
       %{message: message, fix: nil} -> message
       %{message: message, fix: fix} -> "#{message} — #{fix}"
     end
+  end
+
+  defp jail_blocker_message({:jail_network, reason}) do
+    %{message: message, fix: fix} = Jail.explain_network(reason)
+    if fix, do: "#{message} — #{fix}", else: message
   end
 
   defp jail_blocker_message(reason) when is_binary(reason), do: reason
@@ -154,7 +174,10 @@ defmodule Arbiter.Agents.Gemini do
 
         # The jail sits between `sh` and the CLI, so the element before `-p`
         # is still the CLI and `splice_prompt/2` (resume, nudge) is unchanged.
-        with {:ok, command} <- maybe_jail(type, inner, opts, policy) do
+        # bd-btcdrf: a backend with no implementation refuses both CLIs, the
+        # upstream `gemini` (which `maybe_jail/4` never wraps) included.
+        with {:ok, _sandbox} <- Sandbox.module(policy),
+             {:ok, command} <- maybe_jail(type, inner, opts, policy) do
           {:ok, ["sh", "-c", ~s(exec "$@" < /dev/null), "sh" | command]}
         end
 
@@ -528,22 +551,98 @@ defmodule Arbiter.Agents.Gemini do
 
   defp maybe_jail(:gemini, command, _opts, _policy), do: {:ok, command}
 
+  # bd-btcdrf: a sandbox backend with no implementation is a refusal in every
+  # mode, never the `jail_unavailable/3` fallback to running unjailed.
   defp maybe_jail(:agy, command, opts, %SecurityPolicy{permissions: %{mode: mode}} = policy) do
-    case jail_blocker(policy) do
-      :ok ->
-        case Jail.wrap(command,
-               worktree: Keyword.get(opts, :worktree) || Keyword.get(opts, :worktree_path),
-               home: ConfigDir.path(opts),
-               writable_paths: Map.get(policy.sandbox, :writable_paths, []),
-               worktree_readonly: review_dispatch?(policy),
-               keyring: ConfigDir.keyring_available?()
-             ) do
-          {:ok, argv} -> {:ok, argv}
-          {:error, reason} -> jail_unavailable(mode, command, reason)
-        end
+    with {:ok, _sandbox} <- Sandbox.module(policy) do
+      case jail_blocker(policy) do
+        :ok ->
+          with {:ok, network} <- egress_network(opts, policy) do
+            wrap_in_jail(command, opts, policy, mode, network)
+          end
+
+        {:error, reason} ->
+          jail_unavailable(mode, command, reason)
+      end
+    end
+  end
+
+  defp wrap_in_jail(command, opts, policy, mode, network) do
+    jail_opts =
+      [
+        worktree: Keyword.get(opts, :worktree) || Keyword.get(opts, :worktree_path),
+        home: ConfigDir.path(opts),
+        writable_paths: Map.get(policy.sandbox, :writable_paths, []),
+        worktree_readonly: review_dispatch?(policy),
+        keyring: ConfigDir.keyring_available?()
+      ] ++ if(network, do: [network: network], else: [])
+
+    case Sandbox.wrap(policy, command, jail_opts) do
+      {:ok, argv} ->
+        {:ok, argv}
+
+      {:error, reason} when network != nil ->
+        if egress_error?(reason),
+          # The network side of the jail is not optional once it was asked for.
+          do: {:error, {:egress_unavailable, reason}},
+          else: jail_unavailable(mode, command, reason)
 
       {:error, reason} ->
         jail_unavailable(mode, command, reason)
+    end
+  end
+
+  defp egress_error?({tag, _}) when tag in [:egress_socket_missing, :duplicate_bridge_port],
+    do: true
+
+  defp egress_error?(:socat_not_found), do: true
+  defp egress_error?(_), do: false
+
+  # bd-cfktou (G6): the jail runs in a network namespace whose only way out is
+  # this run's proxy and bridges. `{:ok, nil}` means "no network mode": the
+  # operator switched it off (`:worker_jail_network`), or this host cannot
+  # (no `socat`, no netns), in which case the filesystem jail still applies, as
+  # it did before, and `arb server doctor` fails the host's network check.
+  # Once network mode applies, a proxy that cannot start is an error and never
+  # a fallback: running anyway would mean running on the shared network.
+  defp egress_network(opts, policy) do
+    with true <- Application.get_env(:arbiter, :worker_jail_network, true),
+         :ok <- network_host_status(policy) do
+      start_egress(opts, policy)
+    else
+      _ -> {:ok, nil}
+    end
+  end
+
+  defp network_host_status(policy) do
+    case Sandbox.network_status(policy) do
+      :ok ->
+        :ok
+
+      {:error, reason} = error ->
+        Logger.warning(
+          "agy jail: network mode unavailable (#{jail_blocker_message({:jail_network, reason})}); " <>
+            "running with the filesystem jail on the shared network"
+        )
+
+        error
+    end
+  end
+
+  defp start_egress(opts, policy) do
+    worktree = Keyword.get(opts, :worktree) || Keyword.get(opts, :worktree_path)
+
+    case JailRun.start(
+           owner: Keyword.get(opts, :owner),
+           task_id: Keyword.get(opts, :task_id),
+           safe_defaults_exclude: policy.permissions.safe_defaults_exclude,
+           worktree: worktree,
+           infra: @egress_infra,
+           tunnels:
+             SecurityPolicy.egress_tunnels(policy) ++ Keyword.get(opts, :egress_tunnels, [])
+         ) do
+      {:ok, network, _run_id} -> {:ok, network}
+      {:error, reason} -> {:error, {:egress_unavailable, reason}}
     end
   end
 
@@ -558,6 +657,10 @@ defmodule Arbiter.Agents.Gemini do
   # already resolves through.
   defp jail_blocker(%SecurityPolicy{} = policy) do
     cond do
+      match?({:error, _}, Sandbox.module(policy)) ->
+        {:error,
+         "sandbox.backend #{SecurityPolicy.sandbox_backend(policy)} is not implemented yet"}
+
       not jail_eligible?(policy) ->
         {:error, "sandbox.enabled is false or sandbox.filesystem is not :worktree"}
 
@@ -565,7 +668,8 @@ defmodule Arbiter.Agents.Gemini do
         {:error, "the isolated agy HOME (worker_isolate_config) is off"}
 
       true ->
-        with {:error, reason} <- Jail.status(), do: {:error, {:jail_probe_failed, reason}}
+        with {:error, reason} <- Sandbox.status(policy),
+             do: {:error, {:jail_probe_failed, reason}}
     end
   end
 

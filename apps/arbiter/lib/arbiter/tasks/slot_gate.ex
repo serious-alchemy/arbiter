@@ -86,11 +86,25 @@ defmodule Arbiter.Tasks.SlotGate do
   bd-36ytcl: a ticket's step comes from `Arbiter.Tasks.Lifecycle.view/2`.) The stored state is what every surface shows,
   so the cap now cannot disagree with the board.
 
+  A ticket whose ReviewGate is holding its reviewer back until CI is green on
+  the head (bd-cut6uv, `Arbiter.Worker.ReviewCi.waiting/2`) is the one exception
+  to "`:active` holds a slot": it is still In progress on the board, but no agent
+  is live for it and it is waiting on a machine, exactly like a Merging PR waiting
+  on CI — so it releases its slot while it waits. The marker expires, so a gate
+  that died mid-wait cannot hold a ticket out of the count forever.
+
+  A ticket whose next round the quota gate is holding (`DispatchQueue`, phase
+  `held_for_quota`) is likewise waiting with no agent, possibly for hours on a
+  weekly pace: it releases its slot while held (bd-zkmvia). The drain checks
+  the cap again (`Arbiter.Worker.ResumeSlot.admit/2`) before replaying it.
+
   Epics never hold a slot: they are never dispatched and never on the board.
   """
 
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Lifecycle
+  alias Arbiter.Worker.ReviewCi
+  alias Arbiter.Workflows.DispatchQueue
 
   # The one run state that provably owns no agent: the run is over. A
   # snapshot of unknown liveness in any other state counts (see the moduledoc).
@@ -146,24 +160,41 @@ defmodule Arbiter.Tasks.SlotGate do
 
   @doc """
   Does this ticket hold a slot? True only for a ticket whose stored state is
-  `:active` and that is not an epic. See the moduledoc's "A slot is a ticket
-  In progress".
+  `:active`, that is not an epic and whose ReviewGate is not waiting on CI. See
+  the moduledoc's "A slot is a ticket In progress".
   """
-  @spec holds_slot?(map()) :: boolean()
-  def holds_slot?(ticket) when is_map(ticket) do
+  @spec holds_slot?(map(), keyword()) :: boolean()
+  def holds_slot?(ticket, opts \\ [])
+
+  def holds_slot?(ticket, opts) when is_map(ticket) do
     Lifecycle.state_of(ticket) == :active and
-      Map.get(ticket, :issue_type) not in Issue.non_dispatchable_types()
+      Map.get(ticket, :issue_type) not in Issue.non_dispatchable_types() and
+      is_nil(ReviewCi.waiting(ticket)) and not held_for_quota?(ticket, opts)
   end
 
-  def holds_slot?(_ticket), do: false
+  def holds_slot?(_ticket, _opts), do: false
+
+  # bd-zkmvia: a ticket whose next round the quota gate is holding
+  # (`Arbiter.Workflows.DispatchQueue`) has no agent and may wait hours; it
+  # releases its slot like a ticket waiting on CI, and re-takes it when the
+  # hold drains.
+  #
+  # `held_ids:` names the held tasks outright, for the one caller that cannot
+  # ask the queue (the queue itself, mid-drain).
+  defp held_for_quota?(ticket, opts) do
+    case Keyword.fetch(opts, :held_ids) do
+      {:ok, ids} -> Map.get(ticket, :id) in ids
+      :error -> DispatchQueue.held?(Map.get(ticket, :workspace_id), Map.get(ticket, :id))
+    end
+  end
 
   @doc """
   The ids of the tickets holding a slot, in the order given. `Arbiter.Worker.ResumeSlot`
   names them in a refusal; the board and `Arbiter.Board.Drain` report them.
   """
-  @spec slot_holders([map()]) :: [String.t()]
-  def slot_holders(tickets) when is_list(tickets) do
-    for ticket <- tickets, holds_slot?(ticket), uniq: true, do: Map.get(ticket, :id)
+  @spec slot_holders([map()], keyword()) :: [String.t()]
+  def slot_holders(tickets, opts \\ []) when is_list(tickets) do
+    for ticket <- tickets, holds_slot?(ticket, opts), uniq: true, do: Map.get(ticket, :id)
   end
 
   @doc "How many of `tickets` hold a slot — the dispatch cap's used count."

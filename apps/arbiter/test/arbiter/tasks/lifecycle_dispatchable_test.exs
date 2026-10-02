@@ -90,4 +90,21 @@ defmodule Arbiter.Tasks.LifecycleDispatchableTest do
       assert Lifecycle.describe_hold(:no_slot) == "no free worker slot"
     end
   end
+
+  describe "a provider-constraint hold (bd-13pqcp)" do
+    test "is the ticket's own hold, ahead of the board-wide ones" do
+      ctx = %{provider_constraint: {:hold, "exclude gemini: none free"}, paused: true}
+
+      assert Lifecycle.dispatchable(ticket(:queued), ctx) ==
+               {:held, {:provider_constraint, "exclude gemini: none free"}}
+
+      assert Lifecycle.describe_hold({:provider_constraint, "require claude"}) ==
+               "provider constraint (require claude)"
+    end
+
+    test ":ok, or a ctx that does not ask, is not held" do
+      assert Lifecycle.dispatchable(ticket(:queued), %{provider_constraint: :ok}) == :ok
+      assert Lifecycle.dispatchable(ticket(:queued), %{}) == :ok
+    end
+  end
 end

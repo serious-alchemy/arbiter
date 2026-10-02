@@ -85,6 +85,9 @@ defmodule Arbiter.Worker.ResumeSlot do
     * `:force` — override a full cap (human surfaces only); recorded.
     * `:actor` — who forced it, for the audit record.
     * `:slot_admitted` — the scheduler already admitted this resume.
+    * `:held_ids` — tasks the quota gate is holding, which hold no slot
+      (`SlotGate.holds_slot?/2`); the DispatchQueue passes it from inside its
+      own drain.
     * `:tickets` / `:cap` — seams: the tickets to count holders among and the
       effective cap, read from the repo and `Snapshot` when absent.
   """
@@ -94,11 +97,15 @@ defmodule Arbiter.Worker.ResumeSlot do
       Keyword.get(opts, :slot_admitted) == true ->
         {:ok, :admitted}
 
-      SlotGate.holds_slot?(task) ->
+      SlotGate.holds_slot?(task, slot_opts(opts)) ->
         {:ok, :held}
 
       true ->
-        holders = opts |> Keyword.get_lazy(:tickets, &tickets_in_progress/0) |> holders_but(task)
+        holders =
+          opts
+          |> Keyword.get_lazy(:tickets, &tickets_in_progress/0)
+          |> holders_but(task, slot_opts(opts))
+
         cap = Keyword.get_lazy(opts, :cap, fn -> cap_for(task, length(holders)) end)
         acquire(task, %{task_id: task.id, cap: cap, holders: holders}, opts)
     end
@@ -126,8 +133,10 @@ defmodule Arbiter.Worker.ResumeSlot do
 
   # A stale copy of the ticket being resumed in the list is not a holder: the
   # ticket itself was just judged not to hold a slot.
-  defp holders_but(tickets, %Issue{id: id}),
-    do: tickets |> SlotGate.slot_holders() |> List.delete(id)
+  defp holders_but(tickets, %Issue{id: id}, slot_opts),
+    do: tickets |> SlotGate.slot_holders(slot_opts) |> List.delete(id)
+
+  defp slot_opts(opts), do: Keyword.take(opts, [:held_ids])
 
   @doc """
   Was `task_id`'s latest main run cut off by a restart rather than ended on its

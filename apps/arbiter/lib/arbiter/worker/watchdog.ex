@@ -3230,7 +3230,7 @@ defmodule Arbiter.Worker.Watchdog do
 
       # bd-5ef587: the provider is paused. Nothing ran, so the pass spends no
       # attempt and no fix-pass budget; the next poll asks again (or re-routes).
-      {:error, {:provider_paused, _provider, phrase}} ->
+      {:error, {held, _provider, phrase}} when held in [:provider_paused, :provider_constraint] ->
         Logger.warning(
           "Worker.Watchdog: fix pass for task=#{state.task_id} mr=#{state.mr_ref} not " <>
             "dispatched — #{phrase}"
@@ -3646,7 +3646,7 @@ defmodule Arbiter.Worker.Watchdog do
 
       # bd-5ef587: the provider is paused — hold, neither counting an attempt
       # nor escalating/latching, so auto-resolve resumes once it is lifted.
-      {:error, {:provider_paused, _provider, phrase}} ->
+      {:error, {held, _provider, phrase}} when held in [:provider_paused, :provider_constraint] ->
         Logger.warning(
           "Worker.Watchdog: conflict-resolve pass for task=#{state.task_id} " <>
             "mr=#{state.mr_ref} not dispatched — #{phrase}"

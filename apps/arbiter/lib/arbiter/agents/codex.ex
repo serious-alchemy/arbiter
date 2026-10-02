@@ -72,7 +72,7 @@ defmodule Arbiter.Agents.Codex do
   alias Arbiter.Agents.Codex.ModelCatalog
   alias Arbiter.Agents.Codex.Stream
   alias Arbiter.Agents.SecurityPolicy
-  alias Arbiter.Worker.Jail
+  alias Arbiter.Worker.Sandbox
   alias Arbiter.Worker.StopReason
 
   require Logger
@@ -112,7 +112,11 @@ defmodule Arbiter.Agents.Codex do
           policy = security_policy(opts)
           flags = sandbox_argv(policy, opts) ++ model_flags ++ mcp_argv(opts)
 
-          with {:ok, argv} <- build_argv(codex, prompt, flags) do
+          # bd-btcdrf: refuse a backend with no implementation for every Codex
+          # spawn (implementer, strict reviewer included), not just the ones
+          # `maybe_jail_reviewer/3` wraps under bwrap.
+          with {:ok, _sandbox} <- Sandbox.module(policy),
+               {:ok, argv} <- build_argv(codex, prompt, flags) do
             maybe_jail_reviewer(argv, policy, opts)
           end
         end
@@ -241,36 +245,40 @@ defmodule Arbiter.Agents.Codex do
   defp maybe_jail_reviewer(argv, %SecurityPolicy{permissions: %{mode: :strict}}, _opts),
     do: {:ok, argv}
 
-  defp maybe_jail_reviewer(argv, %SecurityPolicy{permissions: permissions}, opts) do
+  defp maybe_jail_reviewer(argv, %SecurityPolicy{permissions: permissions} = policy, opts) do
     worktree = Keyword.get(opts, :worktree) || Keyword.get(opts, :worktree_path)
 
     if "Write" in Map.get(permissions, :deny, []) and is_binary(worktree) do
-      jail_reviewer(argv, worktree)
+      jail_reviewer(argv, policy, worktree)
     else
       {:ok, argv}
     end
   end
 
-  defp jail_reviewer(argv, worktree) do
-    result =
-      with :ok <- Jail.status() do
-        Jail.wrap(argv,
-          worktree: worktree,
-          worktree_readonly: true,
-          writable_paths: [ModelCatalog.codex_home() | prompt_tmpfiles(argv)]
-        )
+  defp jail_reviewer(argv, policy, worktree) do
+    # bd-btcdrf: a backend with no implementation refuses the spawn; only a
+    # host that cannot run the requested backend degrades to unconfined.
+    with {:ok, _sandbox} <- Sandbox.module(policy) do
+      result =
+        with :ok <- Sandbox.status(policy) do
+          Sandbox.wrap(policy, argv,
+            worktree: worktree,
+            worktree_readonly: true,
+            writable_paths: [ModelCatalog.codex_home() | prompt_tmpfiles(argv)]
+          )
+        end
+
+      case result do
+        {:ok, jailed} ->
+          {:ok, jailed}
+
+        {:error, reason} ->
+          Logger.warning(
+            "codex reviewer write jail unavailable (#{inspect(reason)}); running unconfined"
+          )
+
+          {:ok, argv}
       end
-
-    case result do
-      {:ok, jailed} ->
-        {:ok, jailed}
-
-      {:error, reason} ->
-        Logger.warning(
-          "codex reviewer write jail unavailable (#{inspect(reason)}); running unconfined"
-        )
-
-        {:ok, argv}
     end
   end
 

@@ -84,6 +84,52 @@ defmodule ArbiterWeb.Api.WorkspaceControllerTest do
       assert posture["write_confinement"] == "permission_layer"
     end
 
+    # bd-5yydxh (G10): the effective egress level, per workspace and per repo
+    # override. Defaults to `open`, so a workspace that never opts in reads open.
+    test "security_posture reports the effective egress level per workspace and repo", %{
+      conn: conn
+    } do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "egress-posture-ws",
+          prefix: "egp",
+          config: %{
+            "agent" => %{
+              "security" => %{
+                "sandbox" => %{"egress" => "allowlist", "allow_hosts" => ["repo.hex.pm:443"]},
+                "repos" => %{
+                  "tonic" => %{"sandbox" => %{"egress" => "none"}},
+                  "plain" => %{"permissions" => %{"mode" => "strict"}}
+                }
+              }
+            }
+          }
+        })
+
+      posture =
+        conn
+        |> get(~p"/api/workspaces/#{ws.id}")
+        |> json_response(200)
+        |> Map.fetch!("security_posture")
+
+      assert posture["egress"] == "allowlist"
+      assert posture["sandbox"]["allow_hosts"] == ["repo.hex.pm:443"]
+      assert posture["repos"]["tonic"]["egress"] == "none"
+      assert posture["repos"]["plain"]["egress"] == "allowlist"
+    end
+
+    test "security_posture egress is open for a workspace that does not opt in", %{conn: conn} do
+      {:ok, ws} = Ash.create(Workspace, %{name: "egress-default-ws", prefix: "egd"})
+
+      posture =
+        conn
+        |> get(~p"/api/workspaces/#{ws.id}")
+        |> json_response(200)
+        |> Map.fetch!("security_posture")
+
+      assert posture["egress"] == "open"
+    end
+
     # bd-1abj7u: agy/gemini enforces its own deny-list contract when config
     # isolation is on (`policy_enforced` can be true), but nothing today
     # verifiably confines its writes to the worktree — the posture must say

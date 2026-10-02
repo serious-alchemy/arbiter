@@ -34,6 +34,7 @@ defmodule Arbiter.MCP.Catalog do
   | `ticket_promote` | coordinator | `Ash.update(issue, …, action: :promote_to_ready)` |
   | `ticket_demote` | coordinator | `Ash.update(issue, …, action: :return_to_backlog)` |
   | `ticket_rank` | coordinator | `Ash.update(issue, …, action: :set_rank)` |
+  | `epic_floor` | coordinator | `Ash.update(issue, …, action: :set_floor)` (ES2, bd-3e7inj) |
   | `ticket_handoff` | coordinator | `Arbiter.Tasks.Attention.hand_off/3` to the operator (bd-8nlez1) |
   | `ticket_handback` | coordinator | `Arbiter.Tasks.Attention.hand_off/3` back to the coordinator (bd-8nlez1) |
   | `ticket_sync_upstream_close` | coordinator | `Ash.update(issue, …, action: :sync_upstream_close)` |
@@ -63,7 +64,7 @@ defmodule Arbiter.MCP.Catalog do
   | `workspace_config_set` | coordinator | `Ash.update(ws, …, action: :patch_config)` deep-merge |
   | `workspace_config_unset` | coordinator | `Ash.update(ws, …, action: :patch_config)` unset |
   | `installation_config_get` | worker, coordinator | `Arbiter.Settings` getters (concurrency ceiling + credential watchdog + quota-provider visibility) |
-  | `installation_config_set` | coordinator | `Arbiter.Settings` setters (concurrency ceiling + credential watchdog + quota-provider visibility) |
+  | `installation_config_set` | coordinator | `Arbiter.Settings` setters (concurrency ceiling + credential watchdog + quota-provider visibility + output-offload sweeper switch) |
   | `skill_create` | coordinator | `Arbiter.Skills.create_skill/1` |
   | `skill_update` | coordinator | `Arbiter.Skills.update_skill/2` |
   | `skill_delete` | coordinator | `Arbiter.Skills.delete_skill/1` |
@@ -434,6 +435,24 @@ defmodule Arbiter.MCP.Catalog do
                 "path) — the class that merges green and is found broken hours later. " <>
                 "Default false."
           },
+          "provider_constraint" => %{
+            "type" => ["object", "null"],
+            "description" =>
+              ~s|Where this ticket's IMPLEMENTER may run (bd-13pqcp): `{"require": ["claude"]}` | <>
+                ~s|(only those providers) or `{"exclude": ["gemini"]}` (anything but those) — | <>
+                "one key, never both. Providers are adapter types (claude, gemini, codex); " <>
+                "`agy` is accepted as `gemini`, the adapter that runs it. Honoured by every " <>
+                "dispatch path (Autopilot, routing, failover, resume, fix and conflict passes); " <>
+                "when no allowed provider has capacity the ticket is held — " <>
+                "`held — provider constraint (<detail>)` — and never falls back to an excluded " <>
+                "provider. The reviewer is not constrained. Pass `null` or `{}` to clear. " <>
+                "Coordinator only.",
+            "properties" => %{
+              "require" => %{"type" => "array", "items" => %{"type" => "string"}},
+              "exclude" => %{"type" => "array", "items" => %{"type" => "string"}}
+            },
+            "additionalProperties" => false
+          },
           "assignee" => %{
             "type" => "string",
             "description" =>
@@ -519,6 +538,24 @@ defmodule Arbiter.MCP.Catalog do
                 "long-lived server (env/config plumbing, a doctor probe, a capture/ingest " <>
                 "path) — the class that merges green and is found broken hours later. " <>
                 "Default false."
+          },
+          "provider_constraint" => %{
+            "type" => ["object", "null"],
+            "description" =>
+              ~s|Where this ticket's IMPLEMENTER may run (bd-13pqcp): `{"require": ["claude"]}` | <>
+                ~s|(only those providers) or `{"exclude": ["gemini"]}` (anything but those) — | <>
+                "one key, never both. Providers are adapter types (claude, gemini, codex); " <>
+                "`agy` is accepted as `gemini`, the adapter that runs it. Honoured by every " <>
+                "dispatch path (Autopilot, routing, failover, resume, fix and conflict passes); " <>
+                "when no allowed provider has capacity the ticket is held — " <>
+                "`held — provider constraint (<detail>)` — and never falls back to an excluded " <>
+                "provider. The reviewer is not constrained. Pass `null` or `{}` to clear. " <>
+                "Coordinator only.",
+            "properties" => %{
+              "require" => %{"type" => "array", "items" => %{"type" => "string"}},
+              "exclude" => %{"type" => "array", "items" => %{"type" => "string"}}
+            },
+            "additionalProperties" => false
           },
           "assignee" => %{
             "type" => "string",
@@ -698,6 +735,31 @@ defmodule Arbiter.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.task_rank/2
+    },
+    %{
+      name: "epic_floor",
+      tiers: @coordinator,
+      description:
+        "Set or clear an epic's priority floor via the `:set_floor` action " <>
+          "(`docs/design/epic-aware-scheduling.md` §6.2). Coordinator only (the operator's and the " <>
+          "coordinator's tokens); a worker cannot call it. `floor_priority` is required: 1..3 " <>
+          "(or the strings `P1`..`P3`) sets the floor, `null` or `none` clears it. P0 is never a " <>
+          "floor. Only an epic can carry one — any other ticket is rejected. The epic's own " <>
+          "`priority` is unrelated and is not changed.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "id" => %{"type" => "string", "description" => "Epic id (required)."},
+          "floor_priority" => %{
+            "type" => ["integer", "string", "null"],
+            "description" =>
+              "1..3 or P1..P3 to set the floor; null or none to clear it. Required."
+          }
+        },
+        "required" => ["id", "floor_priority"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.epic_floor/2
     },
     %{
       name: "ticket_handoff",
@@ -1845,6 +1907,8 @@ defmodule Arbiter.MCP.Catalog do
           ~s["antigravity") force a provider onto / off the status-bar quota chip and /usage ] <>
           "on top of auto-detection (hidden wins; null = auto-detect; codex stays hidden " <>
           "until parity); they take effect on the next page load. " <>
+          "`output_offload_enabled` (boolean; the output-offload sweeper ships OFF, `true` " <>
+          "turns it on, `null` back off) takes effect on the sweeper's next tick. " <>
           "No restart required. Returns `{key, value}`.",
       input_schema: %{
         "type" => "object",
@@ -1857,7 +1921,8 @@ defmodule Arbiter.MCP.Catalog do
               "credential_watchdog_interval_ms",
               "credential_watchdog_recovery_interval_ms",
               "quota_providers_shown",
-              "quota_providers_hidden"
+              "quota_providers_hidden",
+              "output_offload_enabled"
             ],
             "description" => "Setting name (e.g. \"conductor_system_max_concurrent\"). Required."
           },
@@ -1876,6 +1941,10 @@ defmodule Arbiter.MCP.Catalog do
                 "description" =>
                   "Positive integer for conductor_system_max_concurrent, " <>
                     "credential_watchdog_interval_ms, or credential_watchdog_recovery_interval_ms."
+              },
+              %{
+                "type" => "boolean",
+                "description" => "true/false for output_offload_enabled."
               },
               %{
                 "type" => "array",

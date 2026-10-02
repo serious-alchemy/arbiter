@@ -46,9 +46,11 @@ defmodule ArbiterWeb.Api.ServerControllerTest do
       # (bd-5d5mrs): the "ssh" sub-key is covered by its own describe block.
       Application.put_env(:arbiter, :worker_jail_ssh_available, true)
       Application.put_env(:arbiter, :worker_jail_escape_available, true)
+      Application.put_env(:arbiter, :worker_jail_network_available, true)
 
       on_exit(fn ->
         Application.delete_env(:arbiter, :worker_jail_escape_available)
+        Application.delete_env(:arbiter, :worker_jail_network_available)
 
         case prev do
           nil -> Application.delete_env(:arbiter, :worker_jail_available)
@@ -84,6 +86,20 @@ defmodule ArbiterWeb.Api.ServerControllerTest do
 
       assert resp["escape"]["available"] == false
       assert resp["escape"]["message"] =~ "escape vector"
+    end
+
+    # bd-cfktou: network mode (--unshare-net + socat) is its own diagnosis.
+    test "reports network available: true, or false with cause/message/fix", %{conn: conn} do
+      Application.put_env(:arbiter, :worker_jail_available, true)
+
+      resp = conn |> get("/api/server/agy_write_jail") |> json_response(200)
+      assert resp["network"] == %{"available" => true}
+
+      Application.put_env(:arbiter, :worker_jail_network_available, false)
+      resp = conn |> get("/api/server/agy_write_jail") |> json_response(200)
+      assert resp["network"]["available"] == false
+      assert is_binary(resp["network"]["cause"])
+      assert is_binary(resp["network"]["message"])
     end
 
     test "reports available: false with cause/message/fix when it can't", %{conn: conn} do
@@ -248,6 +264,53 @@ defmodule ArbiterWeb.Api.ServerControllerTest do
              )
 
       refute Enum.any?(resp["problems"], &(&1["workspace_id"] == ws.id and &1["repo"] == "infra"))
+    end
+  end
+
+  # bd-c99hys: `arb server doctor` reports whether tmux is installed, since the
+  # dashboard login relay runs each provider CLI login inside it.
+  describe "GET /api/server/tmux" do
+    test "reports availability, path and version from the host", %{conn: conn} do
+      resp = conn |> get("/api/server/tmux") |> json_response(200)
+
+      if System.find_executable("tmux") do
+        assert %{"available" => true, "path" => path, "version" => "tmux" <> _} = resp
+        assert path == System.find_executable("tmux")
+      else
+        assert %{"available" => false, "message" => _, "fix" => fix} = resp
+        assert fix =~ "tmux"
+      end
+    end
+  end
+
+  # bd-5yydxh (G10): the doctor's "egress jail" self-test. The jail-presence
+  # half is the `:worker_jail_network_available` override, so these run the
+  # real proxy and local stand-in on any host.
+  describe "GET /api/server/egress_jail" do
+    setup do
+      on_exit(fn -> Application.delete_env(:arbiter, :worker_jail_network_available) end)
+      :ok
+    end
+
+    test "reports available with 1 allow and 1 deny when the jail and proxy work", %{conn: conn} do
+      Application.put_env(:arbiter, :worker_jail_network_available, true)
+
+      resp = conn |> get("/api/server/egress_jail") |> json_response(200)
+
+      assert resp["available"] == true
+      assert resp["allowed"] == 1
+      assert resp["denied"] == 1
+    end
+
+    test "reports cause, message and fix when the jail prerequisites are missing", %{conn: conn} do
+      Application.put_env(:arbiter, :worker_jail_network_available, false)
+
+      resp = conn |> get("/api/server/egress_jail") |> json_response(200)
+
+      assert resp["available"] == false
+      assert is_binary(resp["cause"])
+      assert is_binary(resp["message"])
+      assert Map.has_key?(resp, "fix")
     end
   end
 end

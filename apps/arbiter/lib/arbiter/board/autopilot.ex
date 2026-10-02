@@ -251,7 +251,13 @@ defmodule Arbiter.Board.Autopilot do
   # free slot the ticket's own account does not have; the refusal lifts the
   # moment a run on that account ends. Held for `@account_cap_retry_ms` rather
   # than re-attempted on every reactive pass.
-  @self_clearing_dispatch_errors [:account_at_capacity]
+  #
+  # `:provider_constraint` (bd-13pqcp): the ticket's own provider constraint
+  # left no eligible account with capacity when the dispatch ran. The board
+  # holds such a card itself (`Arbiter.Board.Snapshot`), so this is a stale
+  # plan; it lifts when an eligible account frees or the constraint is edited,
+  # and is held as briefly as a full account.
+  @self_clearing_dispatch_errors [:account_at_capacity, :provider_constraint]
   @account_cap_retry_ms 15_000
 
   # How many consecutive same-shape failures a non-deterministic error (a
@@ -970,6 +976,9 @@ defmodule Arbiter.Board.Autopilot do
   # bd-8suxac: a full account is held briefly — a slot frees when any run on
   # it ends, which no reset time predicts.
   defp preflight_retry_not_before({:account_at_capacity, _info}, _count, now),
+    do: DateTime.add(now, @account_cap_retry_ms, :millisecond)
+
+  defp preflight_retry_not_before({:provider_constraint, _provider, _phrase}, _count, now),
     do: DateTime.add(now, @account_cap_retry_ms, :millisecond)
 
   defp preflight_retry_not_before(reason, count, now),

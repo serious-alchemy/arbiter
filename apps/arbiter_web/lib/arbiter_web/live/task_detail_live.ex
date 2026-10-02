@@ -74,6 +74,7 @@ defmodule ArbiterWeb.TaskDetailLive do
   alias Arbiter.Tasks.Dependencies
   alias Arbiter.Tasks.Dependency
   alias Arbiter.Tasks.DependencyGraph
+  alias Arbiter.Tasks.Floor
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Issue.Version
   alias Arbiter.Tasks.ParentRefs
@@ -249,6 +250,7 @@ defmodule ArbiterWeb.TaskDetailLive do
      |> assign(:repo_options, [])
      |> assign(:repo_assignment_options, [])
      |> assign(:priority_options, TaskForm.priority_options())
+     |> assign(:floor_options, floor_options())
      |> assign(:difficulty_options, TaskForm.difficulty_options())
      |> assign(:issue_type_options, TaskForm.issue_type_options())
      |> assign(:provider_options, provider_options())
@@ -495,6 +497,7 @@ defmodule ArbiterWeb.TaskDetailLive do
           repo: TaskForm.trimmed(params["repo"])
         }
         |> put_given(:issue_type, params["issue_type"])
+        |> put_provider_constraint(params)
 
       case Ash.update(task, attrs) do
         {:ok, _updated} ->
@@ -651,6 +654,23 @@ defmodule ArbiterWeb.TaskDetailLive do
 
       _ ->
         {:noreply, socket}
+    end
+  end
+
+  # ES2 (bd-3e7inj): the epic page's priority-floor control. The browser
+  # session is the operator, so no actor is passed; `:set_floor` still refuses a
+  # non-epic and anything outside 1..3, so a forged event changes nothing.
+  def handle_event("set_floor", %{"epic_floor" => %{"floor" => raw}}, socket) do
+    with %Issue{} = task <- socket.assigns.task,
+         {:ok, floor} <- Floor.parse(raw),
+         {:ok, _floored} <- Ash.update(task, %{floor_priority: floor}, action: :set_floor) do
+      {:noreply,
+       socket
+       |> put_flash(:info, floor_flash(floor))
+       |> refresh_all()}
+    else
+      nil -> {:noreply, socket}
+      {:error, err} -> {:noreply, put_flash(socket, :error, TaskForm.error_message(err))}
     end
   end
 
@@ -875,6 +895,13 @@ defmodule ArbiterWeb.TaskDetailLive do
     end
   end
 
+  defp floor_options do
+    [{"None", ""} | Enum.map(1..3, &{"P#{&1}", to_string(&1)})]
+  end
+
+  defp floor_flash(nil), do: "Epic priority floor cleared."
+  defp floor_flash(floor), do: "Epic priority floor set to P#{floor}."
+
   defp fetch_priority(params, current) do
     case TaskForm.parse_int(params["priority"]) do
       {:ok, nil} -> {:ok, current}
@@ -890,8 +917,45 @@ defmodule ArbiterWeb.TaskDetailLive do
     end
   end
 
+  # bd-13pqcp: the provider constraint is a mode (none / require / exclude) and
+  # a comma list; "none" — or a mode with no providers — clears it. The
+  # resource canonicalizes and validates (unknown provider, `agy` → `gemini`).
+  # A form that carries neither field leaves the constraint as it is.
+  defp put_provider_constraint(attrs, %{"provider_mode" => mode} = params)
+       when mode in ["", "require", "exclude"] do
+    case {mode, TaskForm.trimmed(params["provider_list"])} do
+      {"", _} -> Map.put(attrs, :provider_constraint, nil)
+      {_mode, nil} -> Map.put(attrs, :provider_constraint, nil)
+      {mode, list} -> Map.put(attrs, :provider_constraint, %{mode => list})
+    end
+  end
+
+  defp put_provider_constraint(attrs, _params), do: attrs
+
   # Only send an enum-ish field when the form actually supplied one — a
   # partial POST must not blank out `issue_type`.
+  # The edit modal's initial mode / list, from what was typed else what is stored.
+  defp provider_mode(edit_params, task),
+    do: TaskForm.value(edit_params, "provider_mode", stored_constraint(task) |> elem(0))
+
+  defp provider_list(edit_params, task),
+    do: TaskForm.value(edit_params, "provider_list", stored_constraint(task) |> elem(1))
+
+  defp stored_constraint(%Issue{provider_constraint: %{"require" => list}}),
+    do: {"require", Enum.join(list, ", ")}
+
+  defp stored_constraint(%Issue{provider_constraint: %{"exclude" => list}}),
+    do: {"exclude", Enum.join(list, ", ")}
+
+  defp stored_constraint(_task), do: {"", ""}
+
+  defp provider_constraint_label(%Issue{} = task) do
+    case stored_constraint(task) do
+      {"", _} -> nil
+      {mode, list} -> "#{mode} #{list}"
+    end
+  end
+
   defp put_given(attrs, key, value) do
     case TaskForm.trimmed(value) do
       nil -> attrs
@@ -1004,6 +1068,10 @@ defmodule ArbiterWeb.TaskDetailLive do
   # bd-8suxac: the provider account the run would use has no free slot.
   defp dispatch_failure({:account_at_capacity, info}),
     do: Arbiter.Accounts.Admission.refusal_message(info)
+
+  # bd-13pqcp: the ticket's provider constraint refused the dispatch.
+  defp dispatch_failure({:provider_constraint, _provider, phrase}),
+    do: "#{phrase} — edit the ticket's provider constraint, or wait for an eligible account."
 
   defp dispatch_failure(reason), do: inspect(reason)
 
@@ -2365,6 +2433,16 @@ defmodule ArbiterWeb.TaskDetailLive do
             <span class="text-[11px] font-[family-name:var(--font-mono)] text-[var(--text-label)]">
               {difficulty_label(@task.difficulty)}
             </span>
+            <%!-- bd-13pqcp: where this ticket's implementer may run. Absent when
+                 unconstrained. --%>
+            <span
+              :if={provider_constraint_label(@task)}
+              id="task-provider-constraint"
+              title="Provider constraint: only these providers may run this ticket's implementer. The reviewer is not constrained."
+              class="badge badge-sm badge-outline font-mono"
+            >
+              {provider_constraint_label(@task)}
+            </span>
             <%!-- Age, not wall-clock: "opened 2d ago · updated 41m ago" is the
                  question an operator actually asks of a header. --%>
             <span class="text-[11px] font-[family-name:var(--font-mono)] text-[var(--text-label)] tabular-nums">
@@ -3253,6 +3331,46 @@ defmodule ArbiterWeb.TaskDetailLive do
                 </div>
               </.panel>
 
+              <%!-- ES2 (bd-3e7inj, design §6.2): the epic's priority floor. A
+                   ticket under the epic is scheduled as min(own priority,
+                   floor). The epic's own `priority` is a separate, display-only
+                   field (it is not a scheduling input), shown next to the floor
+                   so the two are never confused. P0 is never a floor. --%>
+              <.panel
+                :if={@task.issue_type == :epic}
+                id="panel-epic-floor"
+                title="EPIC PRIORITY FLOOR"
+                class="order-5"
+              >
+                <.form
+                  for={%{}}
+                  as={:epic_floor}
+                  id="epic-floor-form"
+                  phx-change="set_floor"
+                  class="flex flex-wrap items-end gap-x-6 gap-y-2"
+                >
+                  <.input
+                    type="select"
+                    id="epic-floor-select"
+                    name="epic_floor[floor]"
+                    label="Floor"
+                    options={@floor_options}
+                    value={if(@task.floor_priority, do: to_string(@task.floor_priority), else: "")}
+                  />
+                  <p
+                    id="epic-own-priority"
+                    class="flex items-center gap-2 pb-2 text-[11.5px] text-[var(--text-label)]"
+                  >
+                    <span>epic priority (display only)</span>
+                    <.priority_tag priority={@task.priority} class="badge-sm font-mono" />
+                  </p>
+                </.form>
+                <p class="mt-1 text-[11.5px] text-[var(--text-label)]">
+                  The lowest priority this epic's children are scheduled at. A child's own
+                  priority, quota and routing never change. P0 is never a floor.
+                </p>
+              </.panel>
+
               <%!-- Design bd-9jj5lf §4 (bd-8h5iyc): the epic cost rollup —
                    "$X spent · ~$Y-Z to go" over closed children's actual
                    spend plus a defensible remaining estimate across every
@@ -3579,6 +3697,21 @@ defmodule ArbiterWeb.TaskDetailLive do
               label="Target branch (optional)"
               value={TaskForm.value(@edit_params, "target_branch", @task.target_branch || "")}
               placeholder="defaults to the repo's main"
+            />
+            <%!-- bd-13pqcp: where the implementer may run. The reviewer is not
+                 constrained; `agy` means `gemini`. --%>
+            <.input
+              type="select"
+              name="task[provider_mode]"
+              label="Provider constraint"
+              options={[{"None", ""}, {"Require only…", "require"}, {"Exclude…", "exclude"}]}
+              value={provider_mode(@edit_params, @task)}
+            />
+            <.input
+              name="task[provider_list]"
+              label="Providers (claude, gemini/agy, codex)"
+              value={provider_list(@edit_params, @task)}
+              placeholder="e.g. agy, codex"
             />
             <%!-- Full width: with the state gone from the form this is the
                  odd one out of the half-width fields. --%>

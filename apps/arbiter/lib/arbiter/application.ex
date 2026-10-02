@@ -5,6 +5,7 @@ defmodule Arbiter.Application do
 
   use Application
 
+  alias Arbiter.Accounts.LoginRunner.Sweep, as: LoginSweep
   alias Arbiter.Workflows.DispatchQueueSupervisor
   alias Arbiter.Workflows.MergedPRFinalizerSupervisor
   alias Arbiter.Workflows.MergeQueueSupervisor
@@ -121,10 +122,18 @@ defmodule Arbiter.Application do
       # left unresolved past its workspace's limit to the operator. Disabled in
       # test, where tests drive `AttentionSweep.run/1` with their own clock.
       Arbiter.Tasks.AttentionSweep,
+      # bd-b1b3mp (ES8): once a day, tells the coordinator which unblocked
+      # Backlog leaves of floored / in-progress epics have sat over 24h.
+      # Read-only — it never promotes. Disabled in test.
+      Arbiter.Tasks.BacklogTailDigest,
       # Prunes `Arbiter.Events.Record` rows past the retention window
       # (bd-73bfml) so the durable log backing `GET /events?since=` doesn't
       # grow without bound. See `Arbiter.Events.Retention` for config.
       Arbiter.Events.Retention,
+      # Clears `worker_runs.output_lines` / `worker_run_steps.output_summary`
+      # for old runs once their on-disk transcript / session archive is
+      # verified present (bd-6jcebm). See `Arbiter.Workers.OutputOffload`.
+      Arbiter.Workers.OutputOffload,
       # Meters the coordinator's OWN Claude Code sessions (bd-be804c) by
       # sweeping the session JSONLs the CLI writes to disk, and writing the
       # per-session delta as `source: :coordinator_session`. Inert until an
@@ -169,6 +178,12 @@ defmodule Arbiter.Application do
       # systemd scope, which is the property phases 1-2 exist to protect.
       {Registry, keys: :unique, name: Arbiter.Sessions.Stream.Registry},
       {DynamicSupervisor, strategy: :one_for_one, name: Arbiter.Sessions.Stream.Supervisor},
+      # Dashboard login relay (bd-c99hys): one supervised `LoginRunner` per
+      # in-flight provider-account login, registered by account so a second
+      # login for the same account is refused. `:temporary` children — a login
+      # is never restarted (its tmux session and one-time codes are gone).
+      {Registry, keys: :unique, name: Arbiter.Accounts.LoginRunner.Registry},
+      {DynamicSupervisor, strategy: :one_for_one, name: Arbiter.Accounts.LoginRunner.Supervisor},
       # Post-spawn connectivity probe for Codex's `.codex/config.toml` MCP config
       # (bd-bi5t54). Codex MCP support has reports of *silent* connect failures —
       # it starts without error but never reaches the MCP server — so a worker
@@ -238,7 +253,10 @@ defmodule Arbiter.Application do
       # (bd-3d1zge) — see that module's docs.
       Arbiter.Usage.EstimateCache,
       # Owns the ETS table memoizing `/reports` results (bd-an8t0e).
-      Arbiter.Reports.Cache
+      Arbiter.Reports.Cache,
+      # The egress proxy's grant cache, registry and per-run supervisor
+      # (bd-aspkyr). Idle: nothing starts a proxy until G6 wires it.
+      Arbiter.Worker.Egress.Supervisor
     ] ++
       resume_gate(auto_start?) ++
       [
@@ -360,6 +378,7 @@ defmodule Arbiter.Application do
          fn ->
            primary? = Arbiter.SingleInstance.primary?()
            Arbiter.Sessions.Adoption.sweep_on_boot(primary?: primary?)
+           LoginSweep.sweep_on_boot(primary?: primary?)
          end},
         id: :session_adoption_boot_task,
         restart: :temporary

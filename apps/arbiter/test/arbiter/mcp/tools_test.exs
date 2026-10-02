@@ -811,6 +811,47 @@ defmodule Arbiter.MCP.ToolsTest do
     end
   end
 
+  describe "serialize_workspace/1 egress posture (bd-5yydxh)" do
+    test "reports the effective egress level per workspace and per repo override" do
+      ws = %Arbiter.Tasks.Workspace{
+        id: Ecto.UUID.generate(),
+        name: "eg",
+        config: %{
+          "agent" => %{
+            "security" => %{
+              "sandbox" => %{"egress" => "allowlist"},
+              "repos" => %{
+                "tonic" => %{"sandbox" => %{"egress" => "none"}},
+                "plain" => %{"permissions" => %{"mode" => "strict"}}
+              }
+            }
+          }
+        }
+      }
+
+      security = Tools.serialize_workspace(ws).security
+
+      assert security["egress"] == "allowlist"
+
+      assert security["repos"] == %{
+               "tonic" => %{"egress" => "none"},
+               "plain" => %{"egress" => "allowlist"}
+             }
+    end
+
+    test "defaults to open with no repo overrides" do
+      security =
+        Tools.serialize_workspace(%Arbiter.Tasks.Workspace{
+          id: Ecto.UUID.generate(),
+          name: "d",
+          config: %{}
+        }).security
+
+      assert security["egress"] == "open"
+      assert security["repos"] == %{}
+    end
+  end
+
   describe "quota_get/2" do
     test "returns null claude quota before anything is captured", ctx do
       assert {:ok, %{claude: nil} = payload} = Tools.quota_get(ctx.worker, %{})
@@ -2000,6 +2041,100 @@ defmodule Arbiter.MCP.ToolsTest do
     end
   end
 
+  describe "epic_floor/2" do
+    # ES2 (bd-3e7inj): the MCP surface of `:set_floor`.
+    setup ctx do
+      {:ok, epic} =
+        Ash.create(Issue, %{title: "epic", workspace_id: ctx.ws.id, issue_type: :epic})
+
+      {:ok, epic: epic}
+    end
+
+    test "sets and clears a floor", ctx do
+      assert {:ok, %{id: id, floor_priority: 1}} =
+               Tools.epic_floor(ctx.coordinator, %{"id" => ctx.epic.id, "floor_priority" => 1})
+
+      assert id == ctx.epic.id
+      assert Ash.get!(Issue, ctx.epic.id).floor_priority == 1
+
+      assert {:ok, %{floor_priority: nil}} =
+               Tools.epic_floor(ctx.coordinator, %{"id" => ctx.epic.id, "floor_priority" => nil})
+
+      assert Ash.get!(Issue, ctx.epic.id).floor_priority == nil
+    end
+
+    test "accepts P-notation and none", ctx do
+      assert {:ok, %{floor_priority: 2}} =
+               Tools.epic_floor(ctx.coordinator, %{"id" => ctx.epic.id, "floor_priority" => "P2"})
+
+      assert {:ok, %{floor_priority: nil}} =
+               Tools.epic_floor(ctx.coordinator, %{
+                 "id" => ctx.epic.id,
+                 "floor_priority" => "none"
+               })
+    end
+
+    test "does not touch the epic's own priority", ctx do
+      assert {:ok, %{priority: priority}} =
+               Tools.epic_floor(ctx.coordinator, %{"id" => ctx.epic.id, "floor_priority" => 1})
+
+      assert priority == ctx.epic.priority
+    end
+
+    test "rejects a non-epic", ctx do
+      assert {:error, {:invalid, message}} =
+               Tools.epic_floor(ctx.coordinator, %{"id" => ctx.task.id, "floor_priority" => 1})
+
+      assert message =~ "epic"
+    end
+
+    test "rejects P0, P4 and junk, and a missing floor_priority key", ctx do
+      for bad <- [0, 4, "P0", "banana"] do
+        assert {:error, {:invalid, _}} =
+                 Tools.epic_floor(ctx.coordinator, %{"id" => ctx.epic.id, "floor_priority" => bad})
+      end
+
+      assert {:error, {:invalid, _}} = Tools.epic_floor(ctx.coordinator, %{"id" => ctx.epic.id})
+      assert Ash.get!(Issue, ctx.epic.id).floor_priority == nil
+    end
+
+    test "cannot reach an epic in another workspace (not-found)", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "floor-other", prefix: "fo"})
+
+      {:ok, foreign} =
+        Ash.create(Issue, %{title: "f", workspace_id: other_ws.id, issue_type: :epic})
+
+      assert {:error, {:not_found, _}} =
+               Tools.epic_floor(ctx.coordinator, %{"id" => foreign.id, "floor_priority" => 1})
+    end
+
+    test "is a coordinator-tier tool: a worker neither sees nor can call it", ctx do
+      assert "epic_floor" in Enum.map(Arbiter.MCP.Catalog.visible(ctx.coordinator), & &1.name)
+      refute "epic_floor" in Enum.map(Arbiter.MCP.Catalog.visible(ctx.worker), & &1.name)
+
+      assert {:rpc_error, -32003, message} =
+               Arbiter.MCP.Catalog.call(ctx.worker, "epic_floor", %{
+                 "id" => ctx.epic.id,
+                 "floor_priority" => 1
+               })
+
+      assert message =~ "not permitted for a worker"
+      assert Ash.get!(Issue, ctx.epic.id).floor_priority == nil
+    end
+
+    test "a coordinator call lands in the paper trail", ctx do
+      require Ash.Query
+      {:ok, _} = Tools.epic_floor(ctx.coordinator, %{"id" => ctx.epic.id, "floor_priority" => 3})
+
+      assert [%{changes: %{"floor_priority" => 3}}] =
+               Issue.Version
+               |> Ash.Query.filter(
+                 version_source_id == ^ctx.epic.id and version_action_name == :set_floor
+               )
+               |> Ash.read!()
+    end
+  end
+
   describe "notify_list/2" do
     test "lists recent notifications scoped to the workspace (both tiers)", ctx do
       {:ok, _} = Message.notify(%{workspace_id: ctx.ws.id, body: "a worker finished"})
@@ -2480,6 +2615,7 @@ defmodule Arbiter.MCP.ToolsTest do
         Arbiter.Settings.set_credential_watchdog_recovery_interval_ms(nil)
         Arbiter.Settings.set_quota_providers_shown(nil)
         Arbiter.Settings.set_quota_providers_hidden(nil)
+        Arbiter.Settings.set_output_offload_enabled(nil)
       end)
 
       :ok
@@ -2491,7 +2627,8 @@ defmodule Arbiter.MCP.ToolsTest do
       credential_watchdog_interval_ms: nil,
       credential_watchdog_recovery_interval_ms: nil,
       quota_providers_shown: nil,
-      quota_providers_hidden: nil
+      quota_providers_hidden: nil,
+      output_offload_enabled: nil
     }
 
     test "returns the full settings map when no key is given (worker tier)", ctx do
@@ -2737,18 +2874,19 @@ defmodule Arbiter.MCP.ToolsTest do
              "value property must declare a type (via 'type', 'oneOf', or 'anyOf') so MCP clients send native types, not JSON strings"
     end
 
-    test "schema permits native integer, array, and null types for value", ctx do
+    test "schema permits native integer, boolean, array, and null types for value", ctx do
       tool = Enum.find(Catalog.visible(ctx.coordinator), &(&1.name == "installation_config_set"))
       value_schema = tool.input_schema["properties"]["value"]
 
-      # Verify oneOf contains the three expected type schemas
+      # Verify oneOf contains the four expected type schemas
       one_of = value_schema["oneOf"]
       assert one_of != nil
-      assert length(one_of) == 3
+      assert length(one_of) == 4
 
       types = Enum.map(one_of, & &1["type"])
       assert "null" in types
       assert "integer" in types
+      assert "boolean" in types
       assert "array" in types
 
       # Verify integer has minimum constraint

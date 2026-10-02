@@ -1,8 +1,16 @@
 defmodule Arbiter.Agents.GeminiTest do
-  use ExUnit.Case, async: false
+  use Arbiter.DataCase, async: false
+
+  require Ash.Query
 
   alias Arbiter.Agents.Gemini
   alias Arbiter.Agents.SecurityPolicy
+  alias Arbiter.Worker.Jail
+
+  # A jailed spawn needs the worker pid its egress run is bound to (bd-cfktou);
+  # the test process stands in for it unless a test names another.
+  defp default_argv(prompt, opts),
+    do: Gemini.default_argv(prompt, Keyword.put_new(opts, :owner, self()))
 
   describe "behaviour" do
     test "module declares the Agent behaviour" do
@@ -40,13 +48,14 @@ defmodule Arbiter.Agents.GeminiTest do
       File.mkdir_p!(bin)
       File.mkdir_p!(worktree)
 
-      for name <- ~w(agy bwrap) do
+      for name <- ~w(agy bwrap socat) do
         File.write!(Path.join(bin, name), "#!/bin/sh\nexit 0\n")
         File.chmod!(Path.join(bin, name), 0o755)
       end
 
       keys =
-        ~w(worker_isolate_config worker_agy_home_root worker_jail_available worker_jail_bwrap)a
+        ~w(worker_isolate_config worker_agy_home_root worker_jail_available worker_jail_bwrap
+           worker_jail_network_available worker_jail_network)a
 
       prev = Map.new(keys, &{&1, Application.get_env(:arbiter, &1)})
       old_path = System.get_env("PATH")
@@ -54,6 +63,8 @@ defmodule Arbiter.Agents.GeminiTest do
       Application.put_env(:arbiter, :worker_isolate_config, true)
       Application.put_env(:arbiter, :worker_agy_home_root, Path.join(base, "homes"))
       Application.put_env(:arbiter, :worker_jail_available, true)
+      Application.put_env(:arbiter, :worker_jail_network_available, true)
+      Application.delete_env(:arbiter, :worker_jail_network)
       Application.put_env(:arbiter, :worker_jail_bwrap, Path.join(bin, "bwrap"))
       System.put_env("PATH", bin)
 
@@ -86,7 +97,22 @@ defmodule Arbiter.Agents.GeminiTest do
     defp jail_and_command(argv) do
       assert ["sh", "-c", ~s(exec "$@" < /dev/null), "sh" | rest] = argv
       {jail, ["--" | command]} = Enum.split_while(rest, &(&1 != "--"))
-      {jail, command}
+
+      # Network mode (bd-cfktou) starts the bridges in a small wrapper, then
+      # execs the real command after its own `--`.
+      case command do
+        ["sh", "-c", _script, "sh", _socat | listeners] ->
+          {_, ["--" | real]} = Enum.split_while(listeners, &(&1 != "--"))
+          {jail, real}
+
+        _ ->
+          {jail, command}
+      end
+    end
+
+    defp jail_argv_only(argv) do
+      {jail, _} = jail_and_command(argv)
+      jail
     end
 
     test "write_confinement/1 is :os_jail under :strict for agy on a jail-capable host" do
@@ -162,6 +188,16 @@ defmodule Arbiter.Agents.GeminiTest do
       assert Gemini.write_jail_warning(policy(:bypass, %{enabled: false})) == nil
     end
 
+    test "write_confinement/1 is :none and the warning says dispatch is refused under podman" do
+      podman = policy(:bypass, %{backend: :podman})
+
+      assert Gemini.write_confinement(podman) == :none
+      assert Gemini.write_jail_warning(podman) =~ "podman"
+      assert Gemini.write_jail_warning(podman) =~ "refused in every mode"
+      # Unchanged for the default backend.
+      assert Gemini.write_confinement(policy(:strict)) == :os_jail
+    end
+
     test "write_jail_warning/1 is nil for the upstream gemini CLI (nothing to jail)", %{bin: bin} do
       Application.put_env(:arbiter, :worker_jail_available, false)
       File.rm!(Path.join(bin, "agy"))
@@ -183,7 +219,7 @@ defmodule Arbiter.Agents.GeminiTest do
       bwrap: bwrap
     } do
       assert {:ok, argv} =
-               Gemini.default_argv("the prompt",
+               default_argv("the prompt",
                  security: policy(:strict, %{writable_paths: ["/opt/extra"]}),
                  worktree_path: worktree
                )
@@ -202,12 +238,168 @@ defmodule Arbiter.Agents.GeminiTest do
       refute "--dangerously-skip-permissions" in command
     end
 
+    # bd-cfktou (G6): agy's jail runs in a network namespace whose only way
+    # out is the run's proxy and bridges.
+    test "a jailed agy runs with --unshare-net, the proxy env and the loopback bridges", %{
+      worktree: worktree
+    } do
+      assert {:ok, argv} =
+               default_argv("p", security: policy(:bypass), worktree_path: worktree)
+
+      jail = jail_argv_only(argv)
+      assert "--unshare-net" in jail
+
+      env =
+        jail
+        |> Enum.chunk_every(3, 1, :discard)
+        |> Enum.filter(&(hd(&1) == "--setenv"))
+        |> Map.new(fn [_, k, v] -> {k, v} end)
+
+      assert env["HTTPS_PROXY"] == "http://127.0.0.1:3128"
+      assert env["NO_PROXY"] =~ "127.0.0.1"
+      assert env["GIT_SSH_COMMAND"] =~ "ProxyCommand socat - PROXY:127.0.0.1:%h:%p,proxyport=3128"
+
+      assert ["sh", "-c", ~s(exec "$@" < /dev/null), "sh" | rest] = argv
+
+      {_, ["--", "sh", "-c", _script, "sh", socat | listeners]} =
+        Enum.split_while(rest, &(&1 != "--"))
+
+      assert Path.basename(socat) == "socat"
+      assert ["3128", proxy_sock, arb_port, arb_sock | _] = listeners
+      assert proxy_sock =~ ".proxy.sock"
+      assert String.to_integer(arb_port) > 0
+      assert arb_sock =~ ".arb.sock"
+    end
+
+    test "a workspace's egress tunnel becomes a fixed-destination t1 bridge", %{
+      worktree: worktree
+    } do
+      assert {:ok, argv} =
+               default_argv("p",
+                 security: policy(:bypass, %{egress_tunnels: ["5432:127.0.0.1:5432"]}),
+                 worktree_path: worktree
+               )
+
+      assert ["sh", "-c", ~s(exec "$@" < /dev/null), "sh" | rest] = argv
+
+      {_, ["--", "sh", "-c", _script, "sh", _socat | listeners]} =
+        Enum.split_while(rest, &(&1 != "--"))
+
+      # proxy, arb, then the tunnel: <local port> <host-side socket>
+      assert ["3128", _proxy, _arb_port, _arb_sock, "5432", tunnel_sock | _] = listeners
+      assert tunnel_sock =~ ".t1.sock"
+    end
+
+    test "the spawn's task id keys the egress events its proxy records", %{worktree: worktree} do
+      assert {:ok, argv} =
+               default_argv("p",
+                 security: policy(:bypass),
+                 worktree_path: worktree,
+                 task_id: "bd-gem-task"
+               )
+
+      sock = argv |> jail_argv_only() |> Enum.find(&String.ends_with?(&1, ".proxy.sock"))
+      run_id = Path.basename(sock, ".proxy.sock")
+
+      {:ok, client} =
+        :gen_tcp.connect({:local, String.to_charlist(sock)}, 0, [:binary, active: false], 2_000)
+
+      :ok = :gen_tcp.send(client, "CONNECT catbox.moe:443 HTTP/1.1\r\n\r\n")
+      assert {:ok, "HTTP/1.1 403" <> _} = :gen_tcp.recv(client, 0, 2_000)
+      :gen_tcp.close(client)
+
+      assert [%{task_id: "bd-gem-task", host: "catbox.moe"}] =
+               Arbiter.Worker.Egress.Event
+               |> Ash.Query.filter(run_id == ^run_id)
+               |> Ash.read!()
+    end
+
+    test "a jailed spawn with no owner is refused rather than bound to the caller", %{
+      worktree: worktree
+    } do
+      assert {:error, {:egress_unavailable, :no_owner}} =
+               Gemini.default_argv("p", security: policy(:bypass), worktree_path: worktree)
+    end
+
+    test "the egress run is started for the spawn's owner and ends with it", %{worktree: worktree} do
+      owner = spawn(fn -> Process.sleep(:infinity) end)
+
+      assert {:ok, argv} =
+               default_argv("p",
+                 security: policy(:bypass),
+                 worktree_path: worktree,
+                 owner: owner
+               )
+
+      jail = jail_argv_only(argv)
+
+      sock = Enum.find(jail, &String.ends_with?(&1, ".proxy.sock"))
+      assert File.exists?(sock)
+
+      [{sup, _}] =
+        Registry.lookup(
+          Arbiter.Worker.Egress.Registry,
+          {Path.basename(sock, ".proxy.sock"), :sup}
+        )
+
+      ref = Process.monitor(sup)
+      Process.exit(owner, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^sup, _}, 2_000
+      refute File.exists?(sock)
+    end
+
+    test "a spawn whose egress cannot start is refused in every mode, never run on the shared network",
+         %{worktree: worktree} do
+      prev = Application.get_env(:arbiter, Arbiter.MCP)
+      Application.put_env(:arbiter, Arbiter.MCP, url: "https://arbiter.example.com/mcp")
+
+      on_exit(fn ->
+        if prev,
+          do: Application.put_env(:arbiter, Arbiter.MCP, prev),
+          else: Application.delete_env(:arbiter, Arbiter.MCP)
+      end)
+
+      for mode <- [:bypass, :auto, :strict] do
+        assert {:error, {:egress_unavailable, {:arbiter_endpoint, :not_loopback}}} =
+                 default_argv("p", security: policy(mode), worktree_path: worktree)
+      end
+    end
+
+    test "a host without network mode still gets the filesystem jail, on the shared network",
+         %{worktree: worktree, bwrap: bwrap} do
+      Application.put_env(:arbiter, :worker_jail_network_available, false)
+      previous = Logger.level()
+      Logger.configure(level: :warning)
+      on_exit(fn -> Logger.configure(level: previous) end)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, argv} =
+                   default_argv("p", security: policy(:bypass), worktree_path: worktree)
+
+          {jail, _} = jail_and_command(argv)
+          assert [^bwrap, "--ro-bind", "/", "/" | _] = jail
+          refute "--unshare-net" in jail
+        end)
+
+      assert log =~ "network mode unavailable"
+    end
+
+    test "the network jail can be switched off", %{worktree: worktree} do
+      Application.put_env(:arbiter, :worker_jail_network, false)
+
+      assert {:ok, argv} =
+               default_argv("p", security: policy(:bypass), worktree_path: worktree)
+
+      refute "--unshare-net" in jail_argv_only(argv)
+    end
+
     test "splice_prompt/2 still swaps the prompt and adds --conversation on a jailed argv", %{
       worktree: worktree,
       agy: agy
     } do
       {:ok, argv} =
-        Gemini.default_argv("first", security: policy(:strict), worktree_path: worktree)
+        default_argv("first", security: policy(:strict), worktree_path: worktree)
 
       {jail, _} = jail_and_command(argv)
 
@@ -224,7 +416,7 @@ defmodule Arbiter.Agents.GeminiTest do
          %{worktree: worktree, agy: agy, bwrap: bwrap} do
       for mode <- [:bypass, :auto] do
         assert {:ok, argv} =
-                 Gemini.default_argv("p", security: policy(mode), worktree_path: worktree)
+                 default_argv("p", security: policy(mode), worktree_path: worktree)
 
         {jail, command} = jail_and_command(argv)
         assert [^bwrap, "--ro-bind", "/", "/" | _] = jail
@@ -239,7 +431,7 @@ defmodule Arbiter.Agents.GeminiTest do
 
       for mode <- [:bypass, :auto] do
         assert {:ok, ["sh", "-c", _, "sh", ^agy, "-p", "p" | _]} =
-                 Gemini.default_argv("p", security: policy(mode), worktree_path: worktree)
+                 default_argv("p", security: policy(mode), worktree_path: worktree)
       end
     end
 
@@ -247,7 +439,7 @@ defmodule Arbiter.Agents.GeminiTest do
          %{worktree: worktree, agy: agy} do
       for mode <- [:bypass, :auto, :strict] do
         result =
-          Gemini.default_argv("p",
+          default_argv("p",
             security: policy(mode, %{enabled: false}),
             worktree_path: worktree
           )
@@ -270,7 +462,7 @@ defmodule Arbiter.Agents.GeminiTest do
         )
 
       assert {:ok, argv} =
-               Gemini.default_argv("p", security: review_policy, worktree_path: worktree)
+               default_argv("p", security: review_policy, worktree_path: worktree)
 
       {jail, _command} = jail_and_command(argv)
       refute ["--bind", worktree, worktree] in Enum.chunk_every(jail, 3, 1)
@@ -281,7 +473,7 @@ defmodule Arbiter.Agents.GeminiTest do
       worktree: worktree
     } do
       assert {:ok, argv} =
-               Gemini.default_argv("p", security: policy(:bypass), worktree_path: worktree)
+               default_argv("p", security: policy(:bypass), worktree_path: worktree)
 
       {jail, _command} = jail_and_command(argv)
       assert ["--bind", worktree, worktree] in Enum.chunk_every(jail, 3, 1)
@@ -294,18 +486,18 @@ defmodule Arbiter.Agents.GeminiTest do
       Application.put_env(:arbiter, :worker_jail_available, false)
 
       assert {:error, {:write_jail_unavailable, _reason}} =
-               Gemini.default_argv("p", security: policy(:strict), worktree_path: worktree)
+               default_argv("p", security: policy(:strict), worktree_path: worktree)
     end
 
     test "default_argv/2 under :strict fails closed with no worktree to confine to" do
       assert {:error, {:write_jail_unavailable, :no_worktree}} =
-               Gemini.default_argv("p", security: policy(:strict))
+               default_argv("p", security: policy(:strict))
     end
 
     test "default_argv/2 outside :strict with no worktree falls back unjailed rather than erroring",
          %{agy: agy} do
       assert {:ok, ["sh", "-c", _, "sh", ^agy, "-p", "p" | _]} =
-               Gemini.default_argv("p", security: policy(:bypass))
+               default_argv("p", security: policy(:bypass))
     end
 
     test "default_argv/2 under :strict refuses the upstream gemini CLI", %{
@@ -317,7 +509,98 @@ defmodule Arbiter.Agents.GeminiTest do
       File.chmod!(Path.join(bin, "gemini"), 0o755)
 
       assert {:error, {:write_jail_unavailable, _}} =
-               Gemini.default_argv("p", security: policy(:strict), worktree_path: worktree)
+               default_argv("p", security: policy(:strict), worktree_path: worktree)
+    end
+
+    # bd-btcdrf (P2): the spawn goes through `Arbiter.Worker.Sandbox`; the
+    # default backend (bwrap) must leave the argv exactly what `Jail.wrap/2`
+    # builds for the same command and options.
+    test "with the default backend the jailed argv is byte-identical to a direct Jail.wrap/2",
+         %{worktree: worktree} do
+      Application.put_env(:arbiter, :worker_jail_network, false)
+
+      for mode <- [:strict, :bypass, :auto] do
+        pol = policy(mode, %{writable_paths: ["/opt/extra"]})
+        assert pol.sandbox.backend == :bwrap
+
+        assert {:ok, argv} = default_argv("the prompt", security: pol, worktree_path: worktree)
+        assert ["sh", "-c", ~s(exec "$@" < /dev/null), "sh" | jailed] = argv
+        {_jail, ["--" | command]} = Enum.split_while(jailed, &(&1 != "--"))
+
+        assert {:ok, ^jailed} =
+                 Jail.wrap(command,
+                   worktree: worktree,
+                   home: Arbiter.Agents.Gemini.ConfigDir.path(worktree_path: worktree),
+                   writable_paths: ["/opt/extra"],
+                   worktree_readonly: false,
+                   keyring: Arbiter.Agents.Gemini.ConfigDir.keyring_available?()
+                 )
+
+        # An explicit `backend: :bwrap` is the same policy as the default.
+        explicit = policy(mode, %{writable_paths: ["/opt/extra"], backend: :bwrap})
+
+        assert {:ok, ^argv} =
+                 default_argv("the prompt", security: explicit, worktree_path: worktree)
+      end
+    end
+
+    test "backend: podman refuses agy in every mode and never spawns it unjailed", %{
+      worktree: worktree
+    } do
+      for mode <- [:strict, :bypass, :auto] do
+        assert {:error, {:sandbox_backend_unavailable, :podman, message}} =
+                 default_argv("p",
+                   security: policy(mode, %{backend: :podman}),
+                   worktree_path: worktree
+                 )
+
+        assert message =~ "podman"
+      end
+
+      # Even a host that cannot jail at all does not fall back to unjailed.
+      Application.put_env(:arbiter, :worker_jail_available, false)
+
+      assert {:error, {:sandbox_backend_unavailable, :podman, _}} =
+               default_argv("p",
+                 security: policy(:bypass, %{backend: :podman}),
+                 worktree_path: worktree
+               )
+    end
+  end
+
+  describe "backend: podman on the upstream gemini CLI (bd-btcdrf)" do
+    setup do
+      tmp =
+        Path.join(
+          System.tmp_dir!(),
+          "arbiter-gemini-podman-#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(tmp)
+      File.write!(Path.join(tmp, "gemini"), "#!/bin/sh\nexit 0\n")
+      File.chmod!(Path.join(tmp, "gemini"), 0o755)
+      old_path = System.get_env("PATH")
+      System.put_env("PATH", tmp)
+
+      on_exit(fn ->
+        System.put_env("PATH", old_path)
+        File.rm_rf!(tmp)
+      end)
+
+      :ok
+    end
+
+    test "is refused in every mode, though the upstream CLI is never jailed" do
+      for mode <- [:strict, :bypass, :auto] do
+        policy =
+          SecurityPolicy.merge(SecurityPolicy.base(), %{
+            permissions: %{mode: mode},
+            sandbox: %{backend: :podman}
+          })
+
+        assert {:error, {:sandbox_backend_unavailable, :podman, _}} =
+                 Arbiter.Agents.Gemini.default_argv("p", security: policy)
+      end
     end
   end
 
@@ -408,7 +691,7 @@ defmodule Arbiter.Agents.GeminiTest do
 
       try do
         assert {:error, {:executable_not_found, "agy or gemini"}} =
-                 Gemini.default_argv("hello", [])
+                 default_argv("hello", [])
       after
         System.put_env("PATH", old_path)
       end
@@ -423,7 +706,7 @@ defmodule Arbiter.Agents.GeminiTest do
       File.chmod!(gemini_stub, 0o755)
 
       # Default policy is :bypass — skip-permissions flag IS included.
-      assert {:ok, argv} = Gemini.default_argv("the prompt", [])
+      assert {:ok, argv} = default_argv("the prompt", [])
       assert ["sh", "-c", _exec, "sh", ^agy_stub, "-p", "the prompt" | rest] = argv
       assert "--dangerously-skip-permissions" in rest
       refute "--skip-trust" in rest
@@ -437,7 +720,7 @@ defmodule Arbiter.Agents.GeminiTest do
       bypass_policy =
         SecurityPolicy.merge(SecurityPolicy.base(), %{permissions: %{mode: :bypass}})
 
-      assert {:ok, argv} = Gemini.default_argv("the prompt", security: bypass_policy)
+      assert {:ok, argv} = default_argv("the prompt", security: bypass_policy)
       assert ["sh", "-c", _exec, "sh", ^agy_stub, "-p", "the prompt" | rest] = argv
       assert "--dangerously-skip-permissions" in rest
     end
@@ -448,7 +731,7 @@ defmodule Arbiter.Agents.GeminiTest do
       File.chmod!(gemini_stub, 0o755)
 
       # Default policy is :bypass — skip-trust IS included.
-      assert {:ok, argv} = Gemini.default_argv("the prompt", [])
+      assert {:ok, argv} = default_argv("the prompt", [])
       assert ["sh", "-c", _exec, "sh", ^gemini_stub, "-p", "the prompt" | rest] = argv
       assert "--skip-trust" in rest
       assert "-y" in rest
@@ -463,7 +746,7 @@ defmodule Arbiter.Agents.GeminiTest do
       bypass_policy =
         SecurityPolicy.merge(SecurityPolicy.base(), %{permissions: %{mode: :bypass}})
 
-      assert {:ok, argv} = Gemini.default_argv("the prompt", security: bypass_policy)
+      assert {:ok, argv} = default_argv("the prompt", security: bypass_policy)
       assert ["sh", "-c", _exec, "sh", ^gemini_stub, "-p", "the prompt" | rest] = argv
       assert "--skip-trust" in rest
       assert "-y" in rest
@@ -476,7 +759,7 @@ defmodule Arbiter.Agents.GeminiTest do
       File.write!(agy_stub, "#!/bin/sh\nexit 0\n")
       File.chmod!(agy_stub, 0o755)
 
-      assert {:ok, argv} = Gemini.default_argv("the prompt", model: "gemini-flash")
+      assert {:ok, argv} = default_argv("the prompt", model: "gemini-flash")
       assert ["sh", "-c", _exec, "sh", ^agy_stub, "-p", "the prompt" | rest] = argv
       assert "--model" in rest
       assert "gemini-flash" in rest
@@ -494,7 +777,7 @@ defmodule Arbiter.Agents.GeminiTest do
             {"premium", "gemini-3.1-pro-high"},
             {"flagship", "claude-opus-4-6-thinking"}
           ] do
-        {:ok, argv} = Gemini.default_argv("the prompt", model_tier: tier)
+        {:ok, argv} = default_argv("the prompt", model_tier: tier)
         assert "--model" in argv
         assert model in argv
       end
@@ -505,7 +788,7 @@ defmodule Arbiter.Agents.GeminiTest do
       File.write!(agy_stub, "#!/bin/sh\nexit 0\n")
       File.chmod!(agy_stub, 0o755)
 
-      {:ok, argv} = Gemini.default_argv("the prompt", [])
+      {:ok, argv} = default_argv("the prompt", [])
       refute "--model" in argv
     end
 
@@ -514,7 +797,7 @@ defmodule Arbiter.Agents.GeminiTest do
       File.write!(gemini_stub, "#!/bin/sh\nexit 0\n")
       File.chmod!(gemini_stub, 0o755)
 
-      assert {:ok, argv} = Gemini.default_argv("the prompt", model: "gemini-flash")
+      assert {:ok, argv} = default_argv("the prompt", model: "gemini-flash")
       assert ["sh", "-c", _exec, "sh", ^gemini_stub, "-p", "the prompt" | rest] = argv
       assert "--model" in rest
       assert "gemini-flash" in rest
@@ -531,7 +814,7 @@ defmodule Arbiter.Agents.GeminiTest do
             {"standard", "gemini-2.5-flash"},
             {"economy", "gemini-2.5-flash-lite"}
           ] do
-        {:ok, argv} = Gemini.default_argv("the prompt", model_tier: tier)
+        {:ok, argv} = default_argv("the prompt", model_tier: tier)
         assert "--model" in argv
         assert model in argv
       end
@@ -543,7 +826,7 @@ defmodule Arbiter.Agents.GeminiTest do
       File.chmod!(gemini_stub, 0o755)
 
       {:ok, argv} =
-        Gemini.default_argv("the prompt", model: "custom-model", model_tier: "economy")
+        default_argv("the prompt", model: "custom-model", model_tier: "economy")
 
       assert "custom-model" in argv
       refute "gemini-2.5-flash-lite" in argv
@@ -560,7 +843,7 @@ defmodule Arbiter.Agents.GeminiTest do
 
       on_exit(fn -> Gemini.Config.clear() end)
 
-      {:ok, argv} = Gemini.default_argv("the prompt", model_tier: "premium")
+      {:ok, argv} = default_argv("the prompt", model_tier: "premium")
       assert "gemini-ultra" in argv
       refute "gemini-2.5-pro" in argv
     end
@@ -570,7 +853,7 @@ defmodule Arbiter.Agents.GeminiTest do
       File.write!(agy_stub, "#!/bin/sh\nexit 0\n")
       File.chmod!(agy_stub, 0o755)
 
-      {:ok, argv} = Gemini.default_argv("the prompt", thinking: "high")
+      {:ok, argv} = default_argv("the prompt", thinking: "high")
       assert "--effort" in argv
       assert chunk_after(argv, "--effort") == "high"
     end
@@ -580,7 +863,7 @@ defmodule Arbiter.Agents.GeminiTest do
       File.write!(agy_stub, "#!/bin/sh\nexit 0\n")
       File.chmod!(agy_stub, 0o755)
 
-      {:ok, argv} = Gemini.default_argv("the prompt", thinking: "none")
+      {:ok, argv} = default_argv("the prompt", thinking: "none")
       refute "--effort" in argv
     end
 
@@ -590,7 +873,7 @@ defmodule Arbiter.Agents.GeminiTest do
       File.chmod!(agy_stub, 0o755)
 
       for level <- ["xhigh", "max"] do
-        {:ok, argv} = Gemini.default_argv("the prompt", thinking: level)
+        {:ok, argv} = default_argv("the prompt", thinking: level)
         assert chunk_after(argv, "--effort") == "high"
       end
     end
@@ -601,7 +884,7 @@ defmodule Arbiter.Agents.GeminiTest do
       File.chmod!(gemini_stub, 0o755)
 
       for level <- ["low", "medium", "high", "xhigh", "max"] do
-        {:ok, argv} = Gemini.default_argv("the prompt", thinking: level)
+        {:ok, argv} = default_argv("the prompt", thinking: level)
         refute "--effort" in argv
       end
     end
@@ -617,7 +900,7 @@ defmodule Arbiter.Agents.GeminiTest do
       # suffix must still omit --effort — the operator decision is "never
       # both", so the id's own suffix always wins and there is no way to
       # emit two conflicting effort signals.
-      {:ok, argv} = Gemini.default_argv("the prompt", model_tier: "premium", thinking: "low")
+      {:ok, argv} = default_argv("the prompt", model_tier: "premium", thinking: "low")
       assert "--model" in argv
       assert "gemini-3.1-pro-high" in argv
       refute "--effort" in argv
@@ -628,7 +911,7 @@ defmodule Arbiter.Agents.GeminiTest do
       File.write!(agy_stub, "#!/bin/sh\nexit 0\n")
       File.chmod!(agy_stub, 0o755)
 
-      {:ok, argv} = Gemini.default_argv("the prompt", model_tier: "flagship", thinking: "high")
+      {:ok, argv} = default_argv("the prompt", model_tier: "flagship", thinking: "high")
       assert "--model" in argv
       assert "claude-opus-4-6-thinking" in argv
       assert "--effort" in argv
@@ -647,7 +930,7 @@ defmodule Arbiter.Agents.GeminiTest do
 
       on_exit(fn -> Gemini.Config.clear() end)
 
-      {:ok, argv} = Gemini.default_argv("the prompt", thinking: "medium")
+      {:ok, argv} = default_argv("the prompt", thinking: "medium")
       assert "--thinking-budget" in argv
       assert "8192" in argv
     end
@@ -657,7 +940,7 @@ defmodule Arbiter.Agents.GeminiTest do
       File.write!(gemini_stub, "#!/bin/sh\nexit 0\n")
       File.chmod!(gemini_stub, 0o755)
 
-      assert {:ok, argv} = Gemini.default_argv("the prompt", [])
+      assert {:ok, argv} = default_argv("the prompt", [])
       assert ["sh", "-c", _exec, "sh", ^gemini_stub | rest] = argv
       assert "--output-format" in rest
       assert "stream-json" in rest
@@ -672,7 +955,7 @@ defmodule Arbiter.Agents.GeminiTest do
       File.write!(agy_stub, "#!/bin/sh\nexit 0\n")
       File.chmod!(agy_stub, 0o755)
 
-      assert {:ok, argv} = Gemini.default_argv("the prompt", [])
+      assert {:ok, argv} = default_argv("the prompt", [])
       assert "--output-format" in argv
       assert "stream-json" in argv
       assert chunk_after(argv, "--output-format") == "stream-json"
@@ -711,7 +994,7 @@ defmodule Arbiter.Agents.GeminiTest do
       File.write!(agy_stub, "#!/bin/sh\nexit 0\n")
       File.chmod!(agy_stub, 0o755)
 
-      {:ok, argv} = Gemini.default_argv("the prompt", timeout_ms: 1_800_000)
+      {:ok, argv} = default_argv("the prompt", timeout_ms: 1_800_000)
       assert "--print-timeout" in argv
       assert chunk_after(argv, "--print-timeout") == "1800s"
     end
@@ -721,7 +1004,7 @@ defmodule Arbiter.Agents.GeminiTest do
       File.write!(agy_stub, "#!/bin/sh\nexit 0\n")
       File.chmod!(agy_stub, 0o755)
 
-      {:ok, argv} = Gemini.default_argv("the prompt", [])
+      {:ok, argv} = default_argv("the prompt", [])
       refute "--print-timeout" in argv
     end
 
@@ -730,7 +1013,7 @@ defmodule Arbiter.Agents.GeminiTest do
       File.write!(gemini_stub, "#!/bin/sh\nexit 0\n")
       File.chmod!(gemini_stub, 0o755)
 
-      {:ok, argv} = Gemini.default_argv("the prompt", timeout_ms: 1_800_000)
+      {:ok, argv} = default_argv("the prompt", timeout_ms: 1_800_000)
       refute "--print-timeout" in argv
     end
   end
@@ -907,7 +1190,7 @@ defmodule Arbiter.Agents.GeminiTest do
     test ":auto emits neither flag — the generated settings carry the posture", %{agy: agy} do
       policy = SecurityPolicy.merge(SecurityPolicy.base(), %{permissions: %{mode: :auto}})
 
-      assert {:ok, argv} = Gemini.default_argv("p", security: policy)
+      assert {:ok, argv} = default_argv("p", security: policy)
       assert ["sh", "-c", _exec, "sh", ^agy, "-p", "p" | rest] = argv
       refute "--sandbox" in rest
       refute "--dangerously-skip-permissions" in rest

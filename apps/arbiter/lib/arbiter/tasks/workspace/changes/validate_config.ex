@@ -25,6 +25,15 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     * If `"agent.config"` / `"review_agent.config"` is present, it must be a map.
     * If `"review_agent.cross_family"` is present, it must be a boolean
       (bd-a1ke2c).
+    * If `"agent.security.sandbox.egress"` (or a per-repo
+      `"agent.security.repos.<repo>.sandbox.egress"`) is present, it must be one
+      of `Arbiter.Agents.SecurityPolicy.valid_egress_levels/0` (`"open"`,
+      `"allowlist"`, `"none"`); a typo would otherwise read as the inherited
+      level without a word (bd-5yydxh). Its `"allow_hosts"` must be a list of
+      `host:port` entries the egress proxy accepts as a baseline.
+    * If `"agent.security.sandbox.backend"` (or a per-repo override) is present,
+      it must be one of `Arbiter.Agents.SecurityPolicy.valid_sandbox_backends/0`
+      (`"bwrap"`, `"podman"`) (bd-btcdrf).
     * If `"routing"` is present, it must be a map.
     * If `"routing.policy"` is present, it must be one of the values in
       `Arbiter.Agents.Routing.valid_policies/0` (`"static"`, `"by_priority"`,
@@ -32,6 +41,9 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     * If `"routing.provider_selection"` is present, it must be one of
       `Arbiter.Agents.ProviderRouting.valid_selections/0` (`"failover"`,
       `"most_quota"`).
+    * If `"review.require_ci_green"` (or a per-repo
+      `"review.repos.<repo>.require_ci_green"`) is present, it must be a boolean
+      or `"true"` / `"false"` (bd-cut6uv).
     * If `"review_gate"` is present, it must be a map.
     * If `"review_gate.max_rounds"` is present, it must be a positive integer.
     * If `"review_gate.timeout_ms"` is present, it must be a positive integer.
@@ -67,6 +79,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
 
   use Ash.Resource.Change
 
+  alias Arbiter.Worker.Egress.Policy, as: EgressPolicy
   alias Ash.Changeset
 
   @impl true
@@ -83,10 +96,12 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     |> validate_tracker(Map.get(config, "tracker"))
     |> validate_merge(Map.get(config, "merge"))
     |> validate_agent_block("agent", Map.get(config, "agent"))
+    |> validate_agent_security(Map.get(config, "agent"))
     |> validate_agent_block("review_agent", Map.get(config, "review_agent"))
     |> validate_cross_family(Map.get(config, "review_agent"))
     |> validate_routing(Map.get(config, "routing"))
     |> validate_review_gate(Map.get(config, "review_gate"))
+    |> validate_review(Map.get(config, "review"))
     |> validate_notes_gate(Map.get(config, "notes_gate"))
     |> validate_conductor(Map.get(config, "conductor"))
     |> validate_review_automation(Map.get(config, "review_automation"))
@@ -334,6 +349,102 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     Changeset.add_error(changeset, field: :config, message: "#{label} must be a map")
   end
 
+  # bd-5yydxh: `agent.security.sandbox.{egress,allow_hosts,backend}`, workspace-wide
+  # and under `agent.security.repos.<repo>`. Only these keys are checked;
+  # the rest of the security block stays lenient (SecurityPolicy ignores what
+  # it does not understand).
+  defp validate_agent_security(changeset, %{"security" => %{} = security}) do
+    repos =
+      case Map.get(security, "repos") do
+        %{} = repos -> repos
+        _ -> %{}
+      end
+
+    repos
+    |> Enum.filter(fn {_repo, override} -> is_map(override) end)
+    |> Enum.reduce(
+      validate_sandbox_egress(changeset, security, "agent.security"),
+      fn {repo, override}, cs ->
+        validate_sandbox_egress(cs, override, "agent.security.repos.#{repo}")
+      end
+    )
+  end
+
+  defp validate_agent_security(changeset, _agent), do: changeset
+
+  defp validate_sandbox_egress(changeset, %{"sandbox" => %{} = sandbox}, label) do
+    changeset
+    |> validate_egress_level(Map.get(sandbox, "egress"), label)
+    |> validate_allow_hosts(Map.get(sandbox, "allow_hosts"), label)
+    |> validate_sandbox_backend(Map.get(sandbox, "backend"), label)
+  end
+
+  defp validate_sandbox_egress(changeset, _block, _label), do: changeset
+
+  defp validate_egress_level(changeset, nil, _label), do: changeset
+
+  defp validate_egress_level(changeset, level, label) do
+    valid = Arbiter.Agents.SecurityPolicy.valid_egress_levels()
+
+    if is_binary(level) and level in Enum.map(valid, &Atom.to_string/1) do
+      changeset
+    else
+      Changeset.add_error(changeset,
+        field: :config,
+        message:
+          "#{label}.sandbox.egress must be one of #{Enum.map_join(valid, ", ", &Atom.to_string/1)}; " <>
+            "got: #{inspect(level)}"
+      )
+    end
+  end
+
+  defp validate_sandbox_backend(changeset, nil, _label), do: changeset
+
+  defp validate_sandbox_backend(changeset, backend, label) do
+    valid = Arbiter.Agents.SecurityPolicy.valid_sandbox_backends()
+
+    if is_binary(backend) and backend in Enum.map(valid, &Atom.to_string/1) do
+      changeset
+    else
+      Changeset.add_error(changeset,
+        field: :config,
+        message:
+          "#{label}.sandbox.backend must be one of #{Enum.map_join(valid, ", ", &Atom.to_string/1)}; " <>
+            "got: #{inspect(backend)}"
+      )
+    end
+  end
+
+  defp validate_allow_hosts(changeset, nil, _label), do: changeset
+
+  defp validate_allow_hosts(changeset, hosts, label) when is_list(hosts) do
+    case Enum.find(hosts, &(not valid_allow_host?(&1))) do
+      nil ->
+        changeset
+
+      bad ->
+        Changeset.add_error(changeset,
+          field: :config,
+          message:
+            "#{label}.sandbox.allow_hosts entries must be host:port " <>
+              "(a leading *. wildcard is allowed); got: #{inspect(bad)}"
+        )
+    end
+  end
+
+  defp validate_allow_hosts(changeset, other, label) do
+    Changeset.add_error(changeset,
+      field: :config,
+      message:
+        "#{label}.sandbox.allow_hosts must be a list of host:port strings; got: #{inspect(other)}"
+    )
+  end
+
+  defp valid_allow_host?(entry) when is_binary(entry),
+    do: match?({:ok, _}, EgressPolicy.normalize_baseline([entry]))
+
+  defp valid_allow_host?(_), do: false
+
   defp validate_routing(changeset, nil), do: changeset
 
   defp validate_routing(changeset, routing) when is_map(routing) do
@@ -393,6 +504,53 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
               "routing.policy must be one of #{Enum.join(valid_policies, ", ")}; got: #{inspect(policy)}"
           )
         end
+    end
+  end
+
+  # bd-cut6uv: only `require_ci_green` is checked here; the rest of the `review`
+  # block (`required`, `rounds`) has always been read leniently.
+  defp validate_review(changeset, %{} = review) do
+    changeset
+    |> validate_boolean_setting(review, "require_ci_green", "review.require_ci_green")
+    |> validate_review_repos(Map.get(review, "repos"))
+  end
+
+  defp validate_review(changeset, _), do: changeset
+
+  defp validate_review_repos(changeset, %{} = repos) do
+    Enum.reduce(repos, changeset, fn
+      {repo, %{} = entry}, acc ->
+        validate_boolean_setting(
+          acc,
+          entry,
+          "require_ci_green",
+          "review.repos.#{repo}.require_ci_green"
+        )
+
+      {repo, _other}, acc ->
+        Changeset.add_error(acc, field: :config, message: "review.repos.#{repo} must be a map")
+    end)
+  end
+
+  defp validate_review_repos(changeset, nil), do: changeset
+
+  defp validate_review_repos(changeset, _) do
+    Changeset.add_error(changeset, field: :config, message: "review.repos must be a map")
+  end
+
+  defp validate_boolean_setting(changeset, map, key, label) do
+    case Map.fetch(map, key) do
+      :error ->
+        changeset
+
+      {:ok, v} when is_boolean(v) or v in ["true", "false"] ->
+        changeset
+
+      {:ok, v} ->
+        Changeset.add_error(changeset,
+          field: :config,
+          message: "#{label} must be true or false; got: #{inspect(v)}"
+        )
     end
   end
 

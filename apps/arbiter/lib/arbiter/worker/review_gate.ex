@@ -127,6 +127,39 @@ defmodule Arbiter.Worker.ReviewGate do
   reports the counts); `review_gate.conflict_review: false` turns the path off
   for a workspace.
 
+  ## CI-gated review (bd-cut6uv / #228)
+
+  With `review.require_ci_green` on — the default for a repo that merges through
+  GitHub or GitLab (`Arbiter.Worker.ReviewCi`) — the gate does not pay for a
+  reviewer until CI is green on the **exact head SHA** the reviewer is about to
+  read, and the reviewer is told not to run the full suite. Every door to a
+  reviewer goes through `ci_gate/2`:
+
+    * `launch_first_reviewer/1` — the opening review, a scoped conflict review,
+      and the first review of a fresh gate after a Worker fix round or a resume;
+    * `dispatch_next_review/2` — every later round of this gate's revise loop and
+      the restart on a head a third party pushed (`restart_on_remote_head/3`).
+
+  A clean integration covered by an earlier approval dispatches no reviewer, so
+  there is nothing for CI to gate. While it waits the gate is in phase
+  `:awaiting_ci`: no agent is spawned (the author's own session is over), a poll is
+  scheduled at the Watchdog's interval and bounded by the repo's
+  `merge.watchdog_max_polls`, and the ticket carries a `ci_wait` marker the board,
+  `arb ticket show` and the slot count read (`waiting on CI <sha>`, no slot).
+
+    * green on the head — the reviewer is dispatched, its prompt carries the CI
+      result, and a `VERIFICATION: PARTIAL` that is only about the full suite no
+      longer triggers the `:partial_verification` re-prompt;
+    * red — the failed jobs are re-run once; green on the re-run is a flake
+      (recorded, no fix pass), red again opens the same implementer round a
+      reviewer's REQUEST_CHANGES does, with the failing checks as findings, and
+      the fix's new head waits for CI before the next review;
+    * the branch gained a commit while waiting — the wait moves to the new head;
+      a green on any other commit is never green;
+    * CI never reports within the poll budget (or there is no PR, no CI, an
+      unreadable forge) — the review runs as it did before, the reviewer runs the
+      tests, and the reason is recorded on the thread and in the reviewer prompt.
+
   ## Verdict protocol
 
   The reviewer emits, on its own line:
@@ -182,6 +215,7 @@ defmodule Arbiter.Worker.ReviewGate do
   require Logger
 
   alias Arbiter.Agents
+  alias Arbiter.Agents.ProviderConstraint
   alias Arbiter.Agents.ProviderPool
   alias Arbiter.Agents.ProviderRouting
   alias Arbiter.Agents.ReviewerRouting
@@ -208,6 +242,7 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Worker.OutputLog
   alias Arbiter.Worker.PromptBuilder
   alias Arbiter.Worker.ResumeContext
+  alias Arbiter.Worker.ReviewCi
   alias Arbiter.Worker.ReviewFindings
   alias Arbiter.Worker.ReviewVerification
   alias Arbiter.Worker.RunProvenance
@@ -355,6 +390,10 @@ defmodule Arbiter.Worker.ReviewGate do
           | {:timeout_retries, non_neg_integer()}
           | {:rounds, pos_integer()}
           | {:pr_ref, String.t() | nil}
+          | {:ci_gate, boolean() | nil}
+          | {:ci_adapter, module() | nil}
+          | {:ci_poll_ms, pos_integer() | nil}
+          | {:ci_max_polls, pos_integer() | nil}
 
   @doc """
   Start a ReviewGate under `Arbiter.Worker.Supervisor`.
@@ -904,7 +943,33 @@ defmodule Arbiter.Worker.ReviewGate do
       # rotations), and removed by `release_review_checkout/1` the moment the
       # round ends. nil between rounds (the fix pass runs in `worktree_path`)
       # and for a gate with no branch worktree to check out from.
-      review_checkout: nil
+      review_checkout: nil,
+      # bd-cut6uv: CI-gated review. `ci_gate_override` / `ci_adapter` /
+      # `ci_poll_ms` / `ci_max_polls` are the test escape hatches over the
+      # workspace's `review.require_ci_green`, the repo's merger adapter and its
+      # poll budget (`Arbiter.Worker.ReviewCi`); nil leaves each to the config.
+      ci_gate_override: Keyword.get(opts, :ci_gate),
+      ci_adapter: Keyword.get(opts, :ci_adapter),
+      ci_poll_ms: Keyword.get(opts, :ci_poll_ms),
+      ci_max_polls: Keyword.get(opts, :ci_max_polls),
+      # The wait in progress (phase `:awaiting_ci`): `ReviewCi.wait/0` plus the
+      # token that identifies its poll timer. nil whenever no reviewer is being
+      # held back.
+      ci_wait: nil,
+      # Where the wait resumes when CI clears: `:first` (the gate's opening
+      # review) or `{:next, review_id}` (a later round). Set on every gate pass.
+      ci_entry: nil,
+      # What the wait resolved the forge, adapter and budget to, kept for its polls.
+      ci_ctx: nil,
+      # `%{sha:, url:}` once CI was read green on the head being reviewed. Set
+      # for the round that follows and cleared at the next one; it is what lets
+      # the reviewer skip the suite and what lets a suite-only PARTIAL pass.
+      ci_green: nil,
+      # Why the gate waited for CI and did not get a green result (so the
+      # reviewer runs the tests). nil when CI gated the round or the gate is off.
+      ci_fallback: nil,
+      # Times the wait moved to a newer head the branch had gained meanwhile.
+      ci_retargets: 0
     }
 
     Process.monitor(author)
@@ -987,15 +1052,28 @@ defmodule Arbiter.Worker.ReviewGate do
     end
   end
 
+  # bd-cut6uv: every reviewer this gate dispatches first waits for CI on the
+  # head it is about to review (`ci_gate/2`) — when `review.require_ci_green`
+  # applies. The gate has exactly two doors to a reviewer: this one (the opening
+  # review, a scoped conflict review, a re-run gate after a fix round) and
+  # `dispatch_next_review/2` (every later round, including the restart on a
+  # head a third party pushed). Both go through `ci_gate/2`.
   defp launch_first_reviewer(state) do
+    state |> ci_gate(:first) |> ci_reply()
+  end
+
+  defp launch_first_reviewer_after_ci(state) do
     case provision_review_checkout(state) do
       {:ok, state} ->
-        launch_first_reviewer_in_checkout(state)
+        state |> ci_verify_checkout(:first) |> launch_first_or_retarget()
 
       {:error, reason} ->
         escalate_pre_review(state, checkout_failure_message(state, reason), :reviewer_failed)
     end
   end
+
+  defp launch_first_or_retarget({:retarget, state}), do: state |> ci_gate(:first) |> ci_reply()
+  defp launch_first_or_retarget({:ok, state}), do: launch_first_reviewer_in_checkout(state)
 
   defp launch_first_reviewer_in_checkout(state) do
     case launch_worker(state, state.review_id, :reviewer, review_prompt(state), state.command) do
@@ -1022,6 +1100,396 @@ defmodule Arbiter.Worker.ReviewGate do
         )
     end
   end
+
+  # ---- CI-gated review (bd-cut6uv) ------------------------------------------
+  #
+  # Reviewers spent much of their time and quota running `mix test` and often
+  # could not finish inside their budget; the partial-verification guard then
+  # re-ran the whole review. CI minutes are close to free next to model quota, so
+  # when `review.require_ci_green` applies (`Arbiter.Worker.ReviewCi`) the gate
+  # waits for CI on the exact head SHA before it dispatches a reviewer, and tells
+  # the reviewer not to run the suite.
+  #
+  # Every way into a reviewer passes through here:
+  #
+  #   * the opening review, a scoped conflict review (`conflict_path/1`), and a
+  #     fresh gate after a Worker fix round / resume —
+  #     `launch_first_reviewer/1`, entry `:first`;
+  #   * every later round of this gate's revise loop, and the restart on a head a
+  #     third party pushed (`restart_on_remote_head/3`) —
+  #     `dispatch_next_review/2`, entry `{:next, review_id}`.
+  #
+  # (A clean integration covered by an earlier approval, `cover_clean_integration/2`,
+  # dispatches no reviewer at all, so there is nothing for CI to gate; the merge is
+  # still held by the forge's own checks and the Watchdog.) Re-prompts, timeout
+  # retries and provider rotations re-run a pass of a round whose CI was already
+  # read, on the same head, and do not wait again.
+  #
+  # While it waits the gate holds no agent: no reviewer is spawned, the author's own
+  # session is already over, and the ticket is marked `ci_wait` so the board names
+  # it and the slot count releases it.
+  @ci_max_retargets 3
+
+  # Returns
+  #   {:proceed, state}  dispatch the reviewer now (CI green, the gate off, or fallen back)
+  #   {:wait, state}     phase `:awaiting_ci`, a poll is scheduled
+  #   {:revise, state}   CI is red: the fix path launched an implementer
+  #   {:done, state}     CI is red with no round left: reported to the author
+  defp ci_gate(state, entry) do
+    state = %{state | ci_entry: entry, ci_green: nil, ci_fallback: nil, ci_wait: nil}
+
+    case ci_plan(state) do
+      :off -> {:proceed, state}
+      {:fallback, reason} -> {:proceed, ci_fall_back(state, reason)}
+      {:ok, ctx, sha} -> ci_poll(%{state | ci_ctx: ctx}, ReviewCi.new_wait(sha, ctx.budget))
+    end
+  end
+
+  defp ci_plan(state) do
+    workspace = load_workspace(state.workspace_id)
+
+    if ci_required?(state, workspace) do
+      with {:ok, sha} <- ci_target_sha(state),
+           {:ok, pr_ref} <- ci_pr_ref(state),
+           {:ok, adapter} <- ReviewCi.adapter(workspace, state.repo, state.ci_adapter) do
+        budget = ReviewCi.budget(workspace, state.repo)
+
+        budget = %{
+          interval_ms: state.ci_poll_ms || budget.interval_ms,
+          max_polls: state.ci_max_polls || budget.max_polls
+        }
+
+        {:ok, %{workspace: workspace, adapter: adapter, pr_ref: pr_ref, budget: budget}, sha}
+      else
+        {:error, why} -> {:fallback, why}
+      end
+    else
+      :off
+    end
+  end
+
+  defp ci_required?(%{ci_gate_override: override}, _workspace) when is_boolean(override),
+    do: override
+
+  defp ci_required?(state, workspace), do: ReviewCi.required?(workspace, state.repo)
+
+  defp ci_pr_ref(%{pr_ref: ref}) when is_binary(ref) and ref != "", do: {:ok, ref}
+
+  defp ci_pr_ref(_state),
+    do: {:error, "no PR to read CI from (the gate is reviewing the branch diff)."}
+
+  # The head the reviewer is about to read. That is the tip of the branch on
+  # origin — the review checkout is cut from it (`Checkout.provision_branch/3`) —
+  # so it is asked of origin, not taken from the worktree: a commit someone else
+  # pushed since our push is part of what would be reviewed, and CI has to vouch
+  # for it. Falls back to the pushed head when origin cannot be asked.
+  defp ci_target_sha(%{worktree_path: wt, branch: branch} = state) when is_binary(wt) do
+    with {:ok, out} <- git_out(wt, ["ls-remote", "origin", "refs/heads/" <> branch]),
+         [sha | _] <- String.split(out, ~r/\s+/, trim: true),
+         true <- String.length(sha) >= 40 do
+      {:ok, sha}
+    else
+      _ -> ci_pushed_sha(state)
+    end
+  end
+
+  defp ci_target_sha(state), do: ci_pushed_sha(state)
+
+  defp ci_pushed_sha(state) do
+    case pushed_head(state) do
+      {:ok, sha} -> {:ok, sha}
+      _ -> {:error, "the head to wait on could not be determined."}
+    end
+  end
+
+  # One reading of CI for the wait's head, and what to do about it.
+  defp ci_poll(state, wait) do
+    ctx = state.ci_ctx
+
+    {reading, result} =
+      ReviewCi.read(ctx.adapter, ctx.workspace, state.repo, ctx.pr_ref, wait.sha)
+
+    {state, wait, reading} = ci_retarget(state, wait, reading, result)
+    {action, wait} = ReviewCi.advance(wait, reading)
+    ci_act(state, wait, action, result)
+  end
+
+  # The forge reports a head other than the one waited on. If the branch on
+  # origin really did move on, wait on THAT head — the reviewer will read it —
+  # and judge this same reading against it. A forge that merely lags keeps the
+  # old target (and stays a mismatch, never green).
+  defp ci_retarget(state, wait, {:head_mismatch, _} = reading, result) do
+    with true <- state.ci_retargets < @ci_max_retargets,
+         {:ok, sha} <- ci_target_sha(state),
+         false <- ReviewCi.same_sha?(sha, wait.sha) do
+      Logger.info(
+        "ReviewGate: task=#{state.task_id} branch `#{state.branch}` moved from #{wait.sha} to " <>
+          "#{sha} while waiting on CI; waiting on the new head"
+      )
+
+      state =
+        record_thread(
+          %{state | ci_retargets: state.ci_retargets + 1},
+          :system,
+          "Round #{state.round}: waiting on CI for a newer head",
+          "The branch moved from #{wait.sha} to #{sha} while the gate waited on CI. The " <>
+            "reviewer will read the new head, so CI has to pass on it."
+        )
+
+      {state, ReviewCi.retarget(wait, sha), ReviewCi.classify(result, sha)}
+    else
+      _ -> {state, wait, reading}
+    end
+  end
+
+  defp ci_retarget(state, wait, reading, _result), do: {state, wait, reading}
+
+  defp ci_act(state, wait, :green, result) do
+    state = ci_end_wait(state)
+    {:proceed, %{state | ci_green: %{sha: wait.sha, url: Map.get(result, :url)}}}
+  end
+
+  # Red, re-run, green: nothing was wrong with the diff. Recorded as a flake, no
+  # fix pass, and the reviewer goes ahead on the green head.
+  defp ci_act(state, wait, {:flake, checks}, result) do
+    ReviewCi.record_flake(state.task_id, state.repo, checks, wait.sha)
+
+    Logger.info(
+      "ReviewGate: CI on #{wait.sha} for task=#{state.task_id} was red and went green on a " <>
+        "re-run with no code change; recorded as a flake, no fix pass"
+    )
+
+    state =
+      state
+      |> ci_end_wait()
+      |> record_thread(
+        :system,
+        "Round #{state.round}: CI flake",
+        "CI on #{wait.sha} was red. Its failed jobs were re-run once with no code change and " <>
+          "the head went green: recorded as a flake, no fix pass dispatched."
+      )
+
+    {:proceed, %{state | ci_green: %{sha: wait.sha, url: Map.get(result, :url)}}}
+  end
+
+  defp ci_act(state, wait, :wait, _result), do: {:wait, ci_schedule(state, wait)}
+
+  # First red on this head: re-run the failed jobs once before anyone is sent to
+  # fix anything. If that cannot be done, the failure is taken as real.
+  defp ci_act(state, wait, :rerun, _result) do
+    checks = ci_failing_checks(state)
+
+    case ci_rerun(state) do
+      :ok ->
+        Logger.info(
+          "ReviewGate: CI on #{wait.sha} for task=#{state.task_id} is red; " <>
+            "re-running the failed jobs once"
+        )
+
+        {:wait, ci_schedule(state, ReviewCi.rerun_started(wait, checks))}
+
+      {:error, why} ->
+        Logger.warning(
+          "ReviewGate: CI on #{wait.sha} for task=#{state.task_id} is red and could not be " <>
+            "re-run (#{why}); treating it as a real failure"
+        )
+
+        ci_fix(state, wait, checks, false)
+    end
+  end
+
+  defp ci_act(state, wait, :fix, _result) do
+    stored = if wait.rerun, do: wait.rerun.checks, else: []
+
+    checks =
+      case ci_failing_checks(state) do
+        [] -> stored
+        fresh -> fresh
+      end
+
+    ci_fix(state, wait, checks, not is_nil(wait.rerun))
+  end
+
+  defp ci_act(state, _wait, {:fallback, reason}, _result),
+    do: {:proceed, state |> ci_end_wait() |> ci_fall_back(reason)}
+
+  # Red CI the gate cannot clear by itself goes down the revise loop that already
+  # exists: the same implementer round a reviewer's REQUEST_CHANGES opens, with the
+  # failing checks as its findings. The new head then waits for CI again before
+  # the next review round. With no round left it is escalated like any
+  # non-convergence — and the Worker's own fix round takes it from there.
+  defp ci_fix(state, wait, checks, rerun?) do
+    state = state |> ci_end_wait() |> Map.put(:approval_gap_pending, nil)
+    findings = ReviewCi.failure_findings(wait.sha, state.ci_ctx.pr_ref, checks, rerun?)
+
+    Logger.warning(
+      "ReviewGate: CI is red on #{wait.sha} for task=#{state.task_id} " <>
+        "(round #{state.round}/#{state.max_rounds}); sending it down the fix path"
+    )
+
+    if state.round >= state.max_rounds do
+      state = record_enter_revise_thread(state, findings, :ci)
+      record_round(state, :review, :request_changes, findings, converged: false)
+      {:done, finish(state, terminal_reject_verdict(state))}
+    else
+      enter_revise(state, findings, :ci)
+    end
+  end
+
+  defp ci_fall_back(state, reason) do
+    note = ReviewCi.fallback_note(reason)
+
+    Logger.warning(
+      "ReviewGate: #{note} (task=#{state.task_id}, round #{state.round}); the reviewer runs the tests"
+    )
+
+    state =
+      record_thread(state, :system, "Round #{state.round}: CI did not gate this review", note)
+
+    %{state | ci_fallback: reason}
+  end
+
+  # Hold the reviewer back and poll again. Nothing is spawned and no timer but
+  # the poll is armed: this is the one place the gate sits between rounds with
+  # no agent, and it says so on the ticket (`ci_wait`) so the slot count and the
+  # board see it. The marker is rewritten only when what it says changes.
+  defp ci_schedule(state, wait) do
+    token = make_ref()
+    Process.send_after(self(), {:ci_poll, token}, state.ci_ctx.budget.interval_ms)
+    marked = {wait.sha, not is_nil(wait.rerun)}
+
+    already =
+      case state.ci_wait do
+        %{marked: ^marked} -> true
+        _ -> false
+      end
+
+    # The author's own provider account is free while no agent is live for the
+    # ticket (`Arbiter.Accounts.Concurrency`); it is told once, when the wait starts.
+    if is_nil(state.ci_wait), do: send(state.author, {:__review_gate_ci_wait__, true})
+
+    unless already do
+      extra = if wait.rerun, do: %{"rerun" => true}, else: %{}
+      marker = ReviewCi.marker(wait.sha, state.round, state.ci_ctx.budget, extra)
+      ReviewCi.put_marker(state.task_id, marker)
+    end
+
+    %{
+      state
+      | phase: :awaiting_ci,
+        current_id: nil,
+        ci_wait: %{wait: wait, token: token, marked: marked}
+    }
+  end
+
+  defp ci_end_wait(%{ci_wait: nil} = state), do: %{state | phase: :reviewing}
+
+  defp ci_end_wait(state) do
+    ReviewCi.put_marker(state.task_id, nil)
+    send(state.author, {:__review_gate_ci_wait__, false})
+    %{state | ci_wait: nil, phase: :reviewing}
+  end
+
+  # The review checkout is cut from origin AFTER CI was read. If the branch moved
+  # in between, CI did not vouch for what the reviewer is about to read: wait on
+  # the head that is actually there (bounded), or, past the bound, review without
+  # claiming CI.
+  defp ci_verify_checkout(
+         %{ci_green: %{sha: green}, review_checkout: %{head_sha: head}} = state,
+         _
+       ) do
+    cond do
+      ReviewCi.same_sha?(green, head) ->
+        {:ok, state}
+
+      state.ci_retargets < @ci_max_retargets ->
+        Logger.info(
+          "ReviewGate: task=#{state.task_id} review checkout is #{head} but CI was read on " <>
+            "#{green}; waiting on CI for the new head"
+        )
+
+        {:retarget, %{release_review_checkout(state) | ci_retargets: state.ci_retargets + 1}}
+
+      true ->
+        state = %{state | ci_green: nil}
+
+        {:ok,
+         ci_fall_back(
+           state,
+           "the branch kept moving: the review checkout is #{head} but CI was read on #{green}."
+         )}
+    end
+  end
+
+  defp ci_verify_checkout(state, _entry), do: {:ok, state}
+
+  # Where a finished wait goes next. `ci_entry` says which door it came in by.
+  defp ci_reply({:proceed, %{ci_entry: {:next, review_id}} = state}) do
+    case launch_next_reviewer(state, review_id) do
+      {:continue, state} -> {:noreply, state}
+      {:done, state} -> {:stop, :normal, state}
+    end
+  end
+
+  defp ci_reply({:proceed, state}), do: launch_first_reviewer_after_ci(state)
+  defp ci_reply({tag, state}) when tag in [:wait, :revise], do: {:noreply, state}
+  defp ci_reply({:done, state}), do: {:stop, :normal, state}
+
+  defp ci_next_reply({:proceed, state}, review_id), do: launch_next_reviewer(state, review_id)
+
+  defp ci_next_reply({tag, state}, _review_id) when tag in [:wait, :revise],
+    do: {:continue, state}
+
+  defp ci_next_reply({:done, state}, _review_id), do: {:done, state}
+
+  defp ci_failing_checks(%{ci_ctx: ctx} = state) do
+    fetch = fn ->
+      if Code.ensure_loaded?(ctx.adapter) and
+           function_exported?(ctx.adapter, :failing_check_logs, 1),
+         do: ctx.adapter.failing_check_logs(ctx.pr_ref),
+         else: {:ok, []}
+    end
+
+    case ReviewCi.call(ctx.workspace, state.repo, fetch) do
+      {:ok, {:ok, checks}} when is_list(checks) -> checks
+      _ -> []
+    end
+  end
+
+  defp ci_rerun(%{ci_ctx: ctx} = state) do
+    rerun = fn ->
+      if Code.ensure_loaded?(ctx.adapter) and function_exported?(ctx.adapter, :rerun_ci, 2),
+        do: ctx.adapter.rerun_ci(ctx.pr_ref, %{}),
+        else: {:error, "the adapter has no CI re-run"}
+    end
+
+    case ReviewCi.call(ctx.workspace, state.repo, rerun) do
+      {:ok, {:ok, _info}} -> :ok
+      {:ok, {:error, reason}} -> {:error, inspect(reason)}
+      {:error, why} -> {:error, why}
+    end
+  end
+
+  # What the reviewer is told about CI. Only a head CI was read on says so.
+  defp ci_prompt_block(state) do
+    green = Map.get(state, :ci_green)
+
+    cond do
+      is_map(green) and ci_green_matches_checkout?(state, green) ->
+        ReviewCi.green_block(green)
+
+      is_binary(Map.get(state, :ci_fallback)) ->
+        ReviewCi.fallback_block(state.ci_fallback)
+
+      true ->
+        ""
+    end
+  end
+
+  defp ci_green_matches_checkout?(%{review_checkout: %{head_sha: head}}, %{sha: sha}),
+    do: ReviewCi.same_sha?(sha, head)
+
+  defp ci_green_matches_checkout?(_state, _green), do: true
 
   # ---- bring the branch current with its target (bd-ased52) ---------------
 
@@ -1545,6 +2013,17 @@ defmodule Arbiter.Worker.ReviewGate do
   # A stale exit from an worker we've moved on from.
   def handle_info({:worker_exited, _other, _status}, state), do: {:noreply, state}
 
+  # bd-cut6uv: a poll of the CI wait. The token says which wait armed it: a
+  # poll for a wait that has since resolved (or been replaced) is ignored.
+  def handle_info(
+        {:ci_poll, token},
+        %{ci_wait: %{token: token, wait: wait}, reported?: false} = state
+      ) do
+    state |> ci_poll(wait) |> ci_reply()
+  end
+
+  def handle_info({:ci_poll, _stale}, state), do: {:noreply, state}
+
   # Timeouts are tagged with the {round, attempt} pair that scheduled them so
   # a stale timer from a prior pass can't escalate a pass that has already
   # advanced. `attempt` alone is not enough (bd-28u8v4): it resets to 0 at the
@@ -1625,6 +2104,13 @@ defmodule Arbiter.Worker.ReviewGate do
     # it. A gate killed outright (no `terminate/2`) is covered by the boot
     # sweep, `Arbiter.Reviews.Checkout.sweep_orphans/1`.
     _ = release_review_checkout(state)
+
+    # bd-cut6uv: a gate that ends mid-wait (the author went away, a crash) must
+    # not leave its ticket marked as waiting on CI.
+    if is_map(Map.get(state, :ci_wait)) do
+      send(state.author, {:__review_gate_ci_wait__, false})
+      safe(fn -> ReviewCi.put_marker(state.task_id, nil) end)
+    end
 
     :ok
   end
@@ -1775,7 +2261,7 @@ defmodule Arbiter.Worker.ReviewGate do
       not findings_present?(findings) ->
         maybe_reprompt(state, :empty_findings)
 
-      partial_verification?(findings) ->
+      partial_verification?(state, findings) ->
         run_verdict_guard(:partial_verification, state, findings)
 
       true ->
@@ -1861,7 +2347,23 @@ defmodule Arbiter.Worker.ReviewGate do
   # obviously-broken empty/no-verdict cases). `review_prompt/1` requires the
   # reviewer to mark this explicitly rather than silently flushing candidate
   # findings drafted before verification completed.
-  defp partial_verification?(findings), do: ReviewVerification.partial?(findings)
+  # bd-cut6uv: a PARTIAL disclosure that is only about the full suite is not a
+  # verification gap when CI was read green on the very commit the reviewer
+  # reviewed — the reviewer was told not to run it. Anything else it left
+  # unconfirmed, or a head CI did not vouch for, is still partial.
+  defp partial_verification?(state, findings) do
+    ReviewVerification.partial?(findings) and not ci_covers_partial?(state, findings)
+  end
+
+  defp ci_covers_partial?(state, findings) do
+    with %{sha: green} <- Map.get(state, :ci_green),
+         {:ok, reviewed} <- reviewed_head(state) do
+      ReviewCi.same_sha?(green, reviewed) and
+        ReviewVerification.partial_only_full_suite?(findings)
+    else
+      _ -> false
+    end
+  end
 
   # Whether a REQUEST_CHANGES verdict carries actionable findings. `findings`
   # spans from the `VERDICT:` line onward (see `findings_from/2`); strip that
@@ -2056,8 +2558,8 @@ defmodule Arbiter.Worker.ReviewGate do
   # then spawn a fresh implementer worker (same branch/worktree) to fix or rebut
   # each one. Returns `{:revise, state}` so the loop waits on the implementer, or
   # `{:done, state}` (escalated) if the implementer couldn't be spawned.
-  defp enter_revise(state, findings) do
-    state = record_thread(state, :reviewer, round_subject(state, "REQUEST_CHANGES"), findings)
+  defp enter_revise(state, findings, source \\ :reviewer) do
+    state = record_enter_revise_thread(state, findings, source)
 
     # The reviewer's subprocess has exited; stop its worker so it can't linger
     # (it may not have self-completed if it never printed `arb done`).
@@ -2076,6 +2578,14 @@ defmodule Arbiter.Worker.ReviewGate do
       :none -> launch_implementer(state, findings)
     end
   end
+
+  # The thread entry for the findings that open a revise round: a reviewer's
+  # own, or (bd-cut6uv) the ReviewGate's report that CI is red.
+  defp record_enter_revise_thread(state, findings, :reviewer),
+    do: record_thread(state, :reviewer, round_subject(state, "REQUEST_CHANGES"), findings)
+
+  defp record_enter_revise_thread(state, findings, :ci),
+    do: record_thread(state, :system, "Round #{state.round}: CI is red", findings)
 
   defp launch_implementer(state, findings) do
     impl_id = implementer_task_id(state.review_id, state.round)
@@ -2458,7 +2968,12 @@ defmodule Arbiter.Worker.ReviewGate do
         # bd-954ym8: only the first round of a head is the scoped conflict
         # review; whatever it sent back is reviewed in full after the fix.
         conflict_review: nil,
-        restarted_on_remote_head: Keyword.get(opts, :restarted_on_remote_head)
+        restarted_on_remote_head: Keyword.get(opts, :restarted_on_remote_head),
+        # bd-cut6uv: CI is per head, and a new round has a new head.
+        ci_green: nil,
+        ci_fallback: nil,
+        ci_wait: nil,
+        ci_retargets: 0
     }
 
     review_id = reviewer_round_id(next.review_id, next.round)
@@ -2472,14 +2987,17 @@ defmodule Arbiter.Worker.ReviewGate do
         {:done, escalate_pre_review_park(next, reason)}
 
       :ok ->
-        launch_next_reviewer(next, review_id)
+        next |> ci_gate({:next, review_id}) |> ci_next_reply(review_id)
     end
   end
 
   defp launch_next_reviewer(next, review_id) do
     case provision_review_checkout(next) do
       {:ok, next} ->
-        launch_next_reviewer_in_checkout(next, review_id)
+        case ci_verify_checkout(next, {:next, review_id}) do
+          {:ok, next} -> launch_next_reviewer_in_checkout(next, review_id)
+          {:retarget, next} -> next |> ci_gate({:next, review_id}) |> ci_next_reply(review_id)
+        end
 
       {:error, reason} ->
         message = checkout_failure_message(next, reason)
@@ -4638,8 +5156,15 @@ defmodule Arbiter.Worker.ReviewGate do
 
   defp resolve_revision(_state, :reviewer), do: nil
 
-  defp ensure_revision_unpaused(state, {provider, _reason, _decision}),
-    do: ProviderRouting.ensure_unpaused(provider, state.workspace_id)
+  # bd-13pqcp: an implementer round also refuses a provider the ticket's own
+  # constraint excludes (`resolve_revision/2` already steers away from it; this
+  # is the last word). The reviewer (`resolve_revision/2`'s `nil`) is not
+  # constrained.
+  defp ensure_revision_unpaused(state, {provider, _reason, _decision}) do
+    with :ok <- ProviderRouting.ensure_unpaused(provider, state.workspace_id) do
+      ProviderConstraint.check(state.task_id, provider)
+    end
+  end
 
   defp ensure_revision_unpaused(_state, _), do: :ok
 
@@ -4868,7 +5393,9 @@ defmodule Arbiter.Worker.ReviewGate do
           security: session_security_policy(ws, state, role),
           workspace: ws,
           worktree_path: session_cwd(state, role),
-          timeout_ms: state.timeout_ms
+          timeout_ms: state.timeout_ms,
+          owner: pid,
+          task_id: state.task_id
         ] ++ arb_token_opts(state, role)
 
     session_model = resolved_model_for(adapter, agent_opts)
@@ -5285,6 +5812,8 @@ defmodule Arbiter.Worker.ReviewGate do
       round: state.round,
       max_rounds: state.max_rounds,
       reviewer_alive: is_pid(state.reviewer_pid) and Process.alive?(state.reviewer_pid),
+      # bd-cut6uv: the head a reviewer is being held back for, while it is.
+      awaiting_ci: match?(%{wait: %{sha: _}}, state.ci_wait) && state.ci_wait.wait.sha,
       # bd-3hb4ih: the reviewer provider this round is pinned to (nil = the
       # workspace's own first choice) and the providers that have already timed
       # out in it, so a rotation in progress is visible without reading logs.
@@ -5349,7 +5878,7 @@ defmodule Arbiter.Worker.ReviewGate do
 
     #{async_tool_block(state)}
 
-    NOTE: If you run tests or any build command, wrap it with a hard timeout so
+    #{ci_prompt_block(state)}NOTE: If you run tests or any build command, wrap it with a hard timeout so
     a cold compilation pass cannot exhaust the reviewer session — e.g.
     `timeout 120 mix test`. If the command times out or fails to compile, issue
     your VERDICT based on the diff alone and note that live test verification
@@ -5936,7 +6465,7 @@ defmodule Arbiter.Worker.ReviewGate do
 
     #{async_tool_block(state)}
 
-    #{EvidenceIntegrity.reviewer_block()}
+    #{ci_prompt_block(state)}#{EvidenceIntegrity.reviewer_block()}
     When you have decided, print your verdict on its own line, EXACTLY one of:
 
         VERDICT: APPROVE

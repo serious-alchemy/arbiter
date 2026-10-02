@@ -72,6 +72,7 @@ defmodule Arbiter.Board.Snapshot do
   """
 
   alias Arbiter.Accounts.Concurrency
+  alias Arbiter.Agents.ProviderConstraint
   alias Arbiter.Agents.ProviderRouting
   alias Arbiter.Board.FileScope
   alias Arbiter.Board.Scheduler
@@ -234,6 +235,7 @@ defmodule Arbiter.Board.Snapshot do
         slots_free: slots_free,
         quota: quota,
         card_quota: Map.get(input, :card_quota, %{}),
+        card_constraint: Map.get(input, :card_constraint, %{}),
         paused: paused?
       })
 
@@ -283,6 +285,7 @@ defmodule Arbiter.Board.Snapshot do
     :state,
     :difficulty,
     :issue_type,
+    :provider_constraint,
     :workspace_id,
     :created_at,
     :updated_at,
@@ -303,7 +306,13 @@ defmodule Arbiter.Board.Snapshot do
     :attention_owner_since,
     :description,
     :acceptance,
-    :notes
+    :notes,
+    # bd-cut6uv: the ReviewGate's `ci_wait` marker lives in here, and a ticket
+    # waiting on CI releases its slot (`Arbiter.Tasks.SlotGate.holds_slot?/1`) and
+    # reads `awaiting_ci` on its card. The scheduler counts slots from the same
+    # rows, so it has to see the marker too. A small map (the round state, not
+    # the findings).
+    :review_gate_state
   ]
 
   @doc false
@@ -380,6 +389,10 @@ defmodule Arbiter.Board.Snapshot do
           if Keyword.has_key?(opts, :quota),
             do: %{},
             else: ticket_quota_holds(workspace, issues, opts)
+        end),
+      card_constraint:
+        Keyword.get_lazy(opts, :card_constraint, fn ->
+          ticket_constraint_holds(workspace, issues, opts)
         end),
       paused: Keyword.get(opts, :paused, false),
       watchdog_live: Keyword.get_lazy(opts, :watchdog_live, fn -> watchdog_live(issues) end),
@@ -714,6 +727,28 @@ defmodule Arbiter.Board.Snapshot do
 
   defp ticket_quota_holds(_, _, _), do: %{}
 
+  # bd-13pqcp: a Ready ticket carrying a provider constraint is held — by its
+  # own constraint, not the board's — when no provider the constraint allows
+  # has capacity (`ProviderConstraint.pick/3`, the one read dispatch also
+  # asks), so Autopilot plans past it instead of dispatching into a refusal.
+  # Only constrained tickets are evaluated; everything else yields no entry.
+  defp ticket_constraint_holds(%Arbiter.Tasks.Workspace{} = workspace, issues, opts) do
+    issues
+    |> Enum.filter(
+      &(Lifecycle.state_of(&1) == :queued and not epic?(&1) and ProviderConstraint.from(&1))
+    )
+    |> Map.new(fn issue ->
+      case ProviderConstraint.pick(workspace, issue, opts) do
+        {:ok, _provider} -> {issue.id, :ok}
+        {:hold, detail} -> {issue.id, {:hold, detail}}
+      end
+    end)
+  rescue
+    _ -> %{}
+  end
+
+  defp ticket_constraint_holds(_, _, _), do: %{}
+
   # The board's read of the hold is `AuthHold.held/2`, which fails open: the
   # dispatch guard's own fail-closed read is the backstop, and a board must
   # not paint a hold that is not there.
@@ -849,7 +884,13 @@ defmodule Arbiter.Board.Snapshot do
   # its column and wears the marker.
   defp with_view(card, views) do
     view = Map.get(views, card.id, %{})
-    Map.merge(card, %{step: Map.get(view, :step), attention: Map.get(view, :attention)})
+
+    Map.merge(card, %{
+      step: Map.get(view, :step),
+      attention: Map.get(view, :attention),
+      # bd-cut6uv: the head the ticket's ReviewGate is waiting on CI for, if any.
+      ci_wait: Map.get(view, :ci_wait)
+    })
   end
 
   # The Needs-attention swimlane (bd-79w1fs): every card on the board whose

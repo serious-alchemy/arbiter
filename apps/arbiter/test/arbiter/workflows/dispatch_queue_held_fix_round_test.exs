@@ -154,6 +154,62 @@ defmodule Arbiter.Workflows.DispatchQueueHeldFixRoundTest do
       assert Arbiter.Worker.Phase.label(current.phase) == "held for quota, will resume"
     end
 
+    test "raises no run_crashed attention, and holds no scheduler slot, while held (bd-zkmvia)",
+         %{ws: ws, task: task} do
+      start_queue(ws, RecordingDispatcher)
+      task = Ash.get!(Issue, task.id)
+
+      # Before the hold: the rejected ticket is In progress and holds a slot.
+      assert Arbiter.Tasks.SlotGate.holds_slot?(task)
+      assert Arbiter.Accounts.Concurrency.workspace_live_count(ws.id, :claude) == 1
+
+      over_cap(ws)
+      assert {:error, {:quota_held, _}} = fix_round(task)
+
+      # ...nor an account slot: the lingering worker record is not counted.
+      assert Arbiter.Accounts.Concurrency.workspace_live_count(ws.id, :claude) == 0
+      refute Arbiter.Tasks.SlotGate.holds_slot?(task)
+      assert Arbiter.Tasks.SlotGate.slots_used([task]) == 0
+      assert Arbiter.Tasks.Lifecycle.view(task, %{runs: [], held: true}).attention == nil
+      assert Arbiter.Tasks.Lifecycle.view(task, %{runs: []}).attention == nil
+    end
+
+    test "re-takes its slot when the hold is released", %{ws: ws, task: task} do
+      pid = start_queue(ws, RecordingDispatcher)
+      task = Ash.get!(Issue, task.id)
+      over_cap(ws)
+      assert {:error, {:quota_held, _}} = fix_round(task)
+      refute Arbiter.Tasks.SlotGate.holds_slot?(task)
+
+      headroom(ws)
+      drain_and_settle(pid)
+
+      assert Arbiter.Tasks.SlotGate.holds_slot?(task)
+    end
+
+    test "stays held at a full cap: the drain re-runs the admission check",
+         %{ws: ws, task: task} do
+      pid = start_queue(ws, RecordingDispatcher)
+      over_cap(ws)
+      assert {:error, {:quota_held, _}} = fix_round(task)
+
+      # Another ticket now fills the only slot.
+      Application.put_env(:arbiter, :conductor_system_max_concurrent, 1)
+      {:ok, other} = Ash.create(Issue, %{title: "took the slot", workspace_id: ws.id})
+      {:ok, %Issue{state: :active}} = Issue.start_work(other)
+
+      headroom(ws)
+      drain_and_settle(pid)
+      refute_received {:drained, _, _}
+      assert [%{task_id: id}] = DispatchQueue.state(pid).items
+      assert id == task.id
+
+      # The slot frees: the next drain releases it.
+      Application.put_env(:arbiter, :conductor_system_max_concurrent, 5)
+      drain_and_settle(pid)
+      assert_received {:drained, ^id, _opts}
+    end
+
     test "drains as the same fix round: round number, findings, prior run",
          %{ws: ws, task: task} do
       pid = start_queue(ws, RecordingDispatcher)

@@ -12,6 +12,7 @@ defmodule Arbiter.Test.SessionEnv do
 
   @keys [
     :sessions_root,
+    :accounts_root,
     :sessions_runtime_dir,
     :primary_checkout,
     :sessions_credentials_source,
@@ -60,6 +61,7 @@ defmodule Arbiter.Test.SessionEnv do
     overrides = [
       sessions_root: Path.join(base, "sessions"),
       sessions_runtime_dir: Path.join(base, "runtime"),
+      accounts_root: Path.join(base, "accounts"),
       primary_checkout: Path.join(base, "checkout"),
       sessions_credentials_source: Path.join(base, "operator"),
       sessions_agy_source_home: Path.join(base, "operator-home"),

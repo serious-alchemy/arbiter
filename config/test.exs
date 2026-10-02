@@ -240,6 +240,9 @@ config :arbiter, :loop_canary_ticker, enabled: false
 # drive `Arbiter.Usage.BudgetPatrol.sweep/1` synchronously.
 config :arbiter, :budget_patrol, enabled: false
 
+# bd-b1b3mp: tests call `Arbiter.Tasks.BacklogTailDigest.sweep/1` directly.
+config :arbiter, :backlog_tail_digest, enabled: false
+
 # bd-8nlez1: tests drive `Arbiter.Tasks.AttentionSweep.run/1` with their own clock.
 config :arbiter, :attention_sweep, enabled: false
 
@@ -247,6 +250,10 @@ config :arbiter, :attention_sweep, enabled: false
 # delete rows on a timer off the sandbox connection. Tests drive
 # `Arbiter.Events.Retention.sweep/1` synchronously.
 config :arbiter, :events_retention, enabled: false
+
+# bd-6jcebm: no background output-offload sweep in the suite — tests drive
+# `Arbiter.Workers.OutputOffload.sweep/1` synchronously.
+config :arbiter, :output_offload, enabled: false
 
 # bd-be804c: no background sweep of anyone's ~/.claude in the suite — the tests
 # drive `Arbiter.Sessions.UsageIngest.ingest/1` synchronously against fixtures.
@@ -347,6 +354,12 @@ config :arbiter,
 config :arbiter,
        :sessions_root,
        Path.join(System.tmp_dir!(), "arbiter-test-sessions-root")
+
+# Per-account login config dirs (bd-c99hys): under tmp, never the operator's
+# real `~/.arbiter/accounts`.
+config :arbiter,
+       :accounts_root,
+       Path.join(System.tmp_dir!(), "arbiter-test-accounts-root")
 
 config :arbiter, :primary_checkout, "/nonexistent/arbiter-primary-checkout"
 

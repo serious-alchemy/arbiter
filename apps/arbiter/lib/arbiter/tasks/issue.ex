@@ -172,7 +172,8 @@ defmodule Arbiter.Tasks.Issue do
         # report-only first pass, which posts nothing.
         :last_verdict,
         :last_verdict_sha,
-        :skills
+        :skills,
+        :provider_constraint
       ]
 
       # `review_count` / `review_cap_escalated` / `circuit_breaker_tripped` /
@@ -208,6 +209,7 @@ defmodule Arbiter.Tasks.Issue do
       # transition. `rank` puts it at the end of its workspace's order.
       change {Arbiter.Tasks.Issue.Changes.AssignRank, []}
       change {Arbiter.Tasks.Issue.Changes.InheritTrackerType, []}
+      change {Arbiter.Tasks.Issue.Changes.NormalizeProviderConstraint, []}
 
       # bd-9dwbvt: bind a repo at creation time — explicit, else the
       # workspace's only repo, else its `default_repo`, else a validation
@@ -265,7 +267,8 @@ defmodule Arbiter.Tasks.Issue do
         :circuit_breaker_tripped,
         :circuit_breaker_reason,
         :circuit_breaker_sha,
-        :skills
+        :skills,
+        :provider_constraint
       ]
 
       require_atomic? false
@@ -293,6 +296,10 @@ defmodule Arbiter.Tasks.Issue do
       # Watermark the head SHA on a circuit-breaker resume so the breaker
       # doesn't immediately re-trip on the next tick (bd-1atwts).
       change {Arbiter.Tasks.Issue.Changes.RecordCircuitBreakerClear, []}
+      change {Arbiter.Tasks.Issue.Changes.NormalizeProviderConstraint, []}
+
+      # A floor only means something on an epic: retyping one away clears it.
+      change {Arbiter.Tasks.Issue.Changes.ClearFloorOnRetype, []}
 
       # Propagate title/description changes to the linked external tracker.
       # Best-effort; no-op when neither field changed or no tracker.
@@ -488,6 +495,26 @@ defmodule Arbiter.Tasks.Issue do
       argument :after_id, :string, allow_nil?: true
 
       change {Arbiter.Tasks.Issue.Changes.SetRank, []}
+    end
+
+    # ES2: the only writer of `floor_priority`. Epic-only, 1..3 or nil to
+    # clear; `Changes.SetFloor` refuses a worker/refine-tier actor. The paper
+    # trail records the action name and the new value.
+    update :set_floor do
+      require_atomic? false
+      accept []
+
+      argument :floor_priority, :integer do
+        allow_nil? true
+        constraints min: 1, max: 3
+      end
+
+      change {Arbiter.Tasks.Issue.Changes.SetFloor, []}
+
+      change after_action(fn _changeset, issue, _ ->
+               Arbiter.Tasks.Issue.broadcast_lifecycle(:updated, issue)
+               {:ok, issue}
+             end)
     end
 
     update :close do
@@ -1222,6 +1249,20 @@ defmodule Arbiter.Tasks.Issue do
       constraints one_of: @issue_types
     end
 
+    attribute :floor_priority, :integer do
+      public? true
+      constraints min: 1, max: 3
+
+      description """
+      Epic priority floor (ES2, `docs/design/epic-aware-scheduling.md` §6.2).
+      `nil` means no floor, so the schedule is exactly today's. 1..3 only: an
+      incident (P0) must always beat a floor. Only an epic carries one, and it
+      is set only by `:set_floor`, never by `:create` or `:update`; a board
+      drag or `arb ticket update --priority` never sets it. The epic's own
+      `priority` is unrelated and is not a scheduling input.
+      """
+    end
+
     attribute :auto_close, :boolean do
       allow_nil? false
       public? true
@@ -1880,6 +1921,20 @@ defmodule Arbiter.Tasks.Issue do
       constraints max_length: 64, trim?: true
 
       description "Model family of the pinned implementer account (`Arbiter.Agents.ModelFamily`)."
+    end
+
+    attribute :provider_constraint, :map do
+      allow_nil? true
+      public? true
+
+      description """
+      Which providers may run this ticket's implementer (bd-13pqcp):
+      `%{"require" => ["claude"]}` (only those) or `%{"exclude" => ["gemini"]}`
+      (anything but those) — one key, never both. Honoured by every path that
+      picks an implementer account (`Arbiter.Agents.ProviderConstraint`); the
+      reviewer is not constrained. `nil` — the default — is no constraint.
+      Set by the coordinator/operator only.
+      """
     end
 
     attribute :reviewer_family, :string do

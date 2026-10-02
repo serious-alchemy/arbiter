@@ -310,6 +310,21 @@ defmodule Arbiter.Settings do
 
   defp write_quota_providers(_field, _codes), do: {:error, :invalid_value}
 
+  @doc """
+  Whether the operator switched the output-offload sweeper on, or `nil` if
+  never set. `nil` means off — the sweeper ships disabled (bd-16ljft).
+  """
+  @spec output_offload_enabled() :: boolean() | nil
+  def output_offload_enabled, do: read_setting(:output_offload_enabled)
+
+  @doc "Persist the output-offload switch; `nil` clears it (off)."
+  @spec set_output_offload_enabled(boolean() | nil) ::
+          {:ok, boolean() | nil} | {:error, term()}
+  def set_output_offload_enabled(v) when is_nil(v) or is_boolean(v),
+    do: write_setting(:output_offload_enabled, v)
+
+  def set_output_offload_enabled(_), do: {:error, :invalid_value}
+
   # ---- singleton plumbing --------------------------------------------------
 
   # Reads never raise: a missing table (not-yet-migrated install) or any other

@@ -91,10 +91,14 @@ defmodule ArbiterWeb.Api.IssueJSON do
       close_reason: to_string_atom(issue.close_reason),
       rank: issue.rank,
       priority: issue.priority,
+      # ES2: the epic priority floor (nil: none). Distinct from `priority`.
+      floor_priority: issue.floor_priority,
       difficulty: issue.difficulty,
       issue_type: to_string_atom(issue.issue_type),
       auto_close: issue.auto_close,
       verify_after_deploy: issue.verify_after_deploy,
+      # bd-13pqcp: `%{"require" => [..]}` / `%{"exclude" => [..]}`, or null.
+      provider_constraint: issue.provider_constraint,
       awaiting_verification_at: iso(issue.awaiting_verification_at),
       verification_outcome: to_string_atom(issue.verification_outcome),
       verification_evidence: issue.verification_evidence,

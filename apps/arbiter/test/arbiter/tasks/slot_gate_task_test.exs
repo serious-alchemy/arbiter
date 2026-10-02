@@ -30,6 +30,38 @@ defmodule Arbiter.Tasks.SlotGateTaskTest do
     test "a row with no stored state holds none" do
       refute SlotGate.holds_slot?(%{id: "l"})
     end
+
+    # bd-cut6uv: a ReviewGate holding its reviewer back until CI is green has no
+    # agent live — it is waiting on a machine, like a Merging PR waiting on CI.
+    test "an :active ticket whose ReviewGate is waiting on CI holds no slot" do
+      marker =
+        Arbiter.Worker.ReviewCi.marker("a1b2c3d4e5f6", 1, %{interval_ms: 60_000, max_polls: 30})
+
+      waiting = ticket("w", :active, %{review_gate_state: %{"ci_wait" => marker}})
+
+      refute SlotGate.holds_slot?(waiting)
+      assert SlotGate.slots_used([waiting, ticket("a", :active)]) == 1
+      assert SlotGate.slot_holders([waiting, ticket("a", :active)]) == ["a"]
+    end
+
+    test "a cleared, expired or malformed marker holds the slot as usual" do
+      cleared = ticket("c", :active, %{review_gate_state: %{"ci_wait" => nil}})
+      assert SlotGate.holds_slot?(cleared)
+
+      expired =
+        ticket("e", :active, %{
+          review_gate_state: %{
+            "ci_wait" => %{
+              "sha" => "a1b2c3d4e5f6",
+              "expires_at" => DateTime.to_iso8601(DateTime.add(DateTime.utc_now(), -60, :second))
+            }
+          }
+        })
+
+      assert SlotGate.holds_slot?(expired)
+      assert SlotGate.holds_slot?(ticket("m", :active, %{review_gate_state: %{"ci_wait" => %{}}}))
+      assert SlotGate.holds_slot?(ticket("n", :active, %{review_gate_state: nil}))
+    end
   end
 
   describe "slots_used/1 and slot_holders/1" do

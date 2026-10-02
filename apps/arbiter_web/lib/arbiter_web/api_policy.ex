@@ -97,6 +97,7 @@ defmodule ArbiterWeb.ApiPolicy do
     {:post, "/api/issues/:id/promote"} => :coordinator,
     {:post, "/api/issues/:id/demote"} => :coordinator,
     {:patch, "/api/issues/:id/rank"} => :coordinator,
+    {:patch, "/api/issues/:id/floor"} => :coordinator,
     {:post, "/api/issues/:id/verify"} => :coordinator,
     {:post, "/api/issues/:id/resolve"} => :coordinator,
     {:post, "/api/issues/:id/handoff"} => :coordinator,
@@ -169,9 +170,11 @@ defmodule ArbiterWeb.ApiPolicy do
     {:get, "/api/server/migrations"} => :anonymous,
     {:get, "/api/server/bind_address"} => :coordinator,
     {:get, "/api/server/agy_write_jail"} => :coordinator,
+    {:get, "/api/server/egress_jail"} => :coordinator,
     {:get, "/api/server/claude_credentials"} => :coordinator,
     {:get, "/api/server/provider_accounts"} => :coordinator,
     {:get, "/api/server/merge_routing"} => :coordinator,
+    {:get, "/api/server/tmux"} => :coordinator,
 
     # ---- install-wide settings (the REST twin of installation_config_*) ------
     # Coordinator for both: `set` is coordinator-only over MCP, and reads match

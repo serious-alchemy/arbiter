@@ -177,6 +177,7 @@ defmodule ArbiterCli.Output do
       Title:        <title>
       State:        <state> (<column>)
       Step:         <step>                  (In progress / Merging only)
+      Review CI:    waiting on CI <sha>     (the ReviewGate is waiting on CI; holds no slot)
       Attention:    <owner> — <reason>      (when the ticket has attention)
       Blocked by:   <ids>                   (Blocked only)
       Close reason: <close_reason>          (Closed only)
@@ -209,6 +210,7 @@ defmodule ArbiterCli.Output do
         # bd-6fkgvo: the lifecycle vocabulary.
         {"State", state_label(issue)},
         {"Step", issue["step"]},
+        {"Review CI", ci_wait_label(issue["ci_wait"])},
         {"Attention", attention_label(issue["attention"])},
         {"Blocked by", blocked_by_label(issue["blocked_by"])},
         {"Close reason", issue["close_reason"]},
@@ -217,6 +219,7 @@ defmodule ArbiterCli.Output do
         {"Current run", current_run_label(issue["current_run"])},
         {"Priority", issue["priority"]},
         {"Difficulty", difficulty_label(issue["difficulty"])},
+        {"Providers", provider_constraint_label(issue["provider_constraint"])},
         {"Estimate", estimate_label(issue["estimate"])},
         {"Type", issue["issue_type"]},
         {"Backlog", backlog_label(issue)},
@@ -312,6 +315,16 @@ defmodule ArbiterCli.Output do
   defp money(n) when is_number(n), do: "$" <> :erlang.float_to_binary(n / 1, decimals: 2)
   defp money(_), do: "?"
 
+  # bd-13pqcp: the ticket's provider constraint, as `require claude` /
+  # `exclude gemini, codex`; nothing when it has none.
+  defp provider_constraint_label(%{"require" => [_ | _] = list}),
+    do: "require " <> Enum.join(list, ", ")
+
+  defp provider_constraint_label(%{"exclude" => [_ | _] = list}),
+    do: "exclude " <> Enum.join(list, ", ")
+
+  defp provider_constraint_label(_), do: nil
+
   defp difficulty_label(nil), do: nil
   defp difficulty_label(n) when is_integer(n) and n in 0..5, do: "D#{n}"
   defp difficulty_label(other), do: to_string(other)
@@ -362,6 +375,12 @@ defmodule ArbiterCli.Output do
   end
 
   defp attention_label(_), do: nil
+
+  # bd-cut6uv: the ReviewGate is holding its reviewer back until CI is green on
+  # this head. The server renders the label; an older server sends none.
+  defp ci_wait_label(%{"label" => label}) when is_binary(label), do: label
+  defp ci_wait_label(%{"sha" => sha}) when is_binary(sha), do: "waiting on CI " <> sha
+  defp ci_wait_label(_), do: nil
 
   defp blocked_by_label([_ | _] = ids), do: Enum.join(ids, ", ")
   defp blocked_by_label(_), do: nil

@@ -43,7 +43,10 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       check_legacy_safe_defaults_key(),
       check_agy_write_jail(),
       check_agy_jail_escape(),
+      check_agy_jail_network(),
+      check_egress_jail(),
       check_agy_ssh_transport(),
+      check_tmux(),
       check_claude_worker_credentials(),
       check_provider_accounts(),
       check_account_policy_binding(),
@@ -710,6 +713,84 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
     end
   end
 
+  # bd-cfktou (G6): an agy spawn runs in a network namespace whose only exit
+  # is the run's egress proxy and its `socat` bridges. A host with no `socat`
+  # or no network namespaces falls back to the filesystem jail on the shared
+  # network, so this FAILs (non-blocking) rather than staying quiet about it.
+  # `Jail.diagnose_network/0` via the payload's `network` key.
+  defp check_agy_jail_network do
+    case Client.get("/api/server/agy_write_jail") do
+      {:ok, %{"network" => %{"available" => true}}} ->
+        %Result{
+          name: "agy jail network",
+          status: :ok,
+          detail: "agy runs in a network namespace; its only route out is the egress proxy",
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      {:ok, %{"network" => %{"available" => false, "message" => message} = net}} ->
+        %Result{
+          name: "agy jail network",
+          status: :fail,
+          detail: "agy runs on the shared network: #{message}",
+          hint: Map.get(net, "fix") || "See Arbiter.Worker.Jail.network_probe/0 (bd-cfktou).",
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      _ ->
+        %Result{
+          name: "agy jail network",
+          status: :ok,
+          detail: "server unreachable or predates this check — skipping",
+          fatal: false,
+          blocks_readiness: false
+        }
+    end
+  end
+
+  # bd-5yydxh (G10, design §7.3): `egress: allowlist` / `none` are only as good
+  # as the host's ability to run the egress jail. The server runs the
+  # self-test: `bwrap --unshare-net` and `socat` present, a proxy listener up,
+  # and against a local stand-in (no internet) 1 allow and 1 deny.
+  # `Arbiter.Worker.Egress.SelfTest` via `/api/server/egress_jail`. A FAIL is
+  # non-fatal: `egress: open`, the default, does not need it.
+  defp check_egress_jail do
+    case Client.get("/api/server/egress_jail") do
+      {:ok, %{"available" => true} = body} ->
+        %Result{
+          name: "egress jail",
+          status: :ok,
+          detail:
+            "bwrap --unshare-net and socat present; proxy listener up; self-test against a " <>
+              "local stand-in saw #{Map.get(body, "allowed", 1)} allow and " <>
+              "#{Map.get(body, "denied", 1)} deny",
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      {:ok, %{"available" => false, "message" => message} = body} ->
+        %Result{
+          name: "egress jail",
+          status: :fail,
+          detail: "`egress: allowlist` / `none` cannot be enforced on this host: #{message}",
+          hint: Map.get(body, "fix") || "See Arbiter.Worker.Egress.SelfTest (bd-5yydxh).",
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      _ ->
+        %Result{
+          name: "egress jail",
+          status: :ok,
+          detail: "server unreachable or predates this check — skipping",
+          fatal: false,
+          blocks_readiness: false
+        }
+    end
+  end
+
   defp host_jail_status do
     case Client.get("/api/server/agy_write_jail") do
       {:ok, %{"available" => true}} ->
@@ -818,6 +899,45 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   # other out. Its Claude dispatch is now held instead, which is an
   # operator-actionable failure (non-zero exit) but says nothing about whether
   # the server itself is healthy, so it never blocks deploy readiness.
+  # bd-c99hys: the dashboard login relay runs each provider CLI's login in a
+  # hidden tmux session. A host without tmux cannot log an account in from the
+  # dashboard, but nothing else breaks, so this FAILs without blocking readiness.
+  defp check_tmux do
+    case Client.get("/api/server/tmux") do
+      {:ok, %{"available" => true} = tmux} ->
+        %Result{
+          name: "tmux",
+          status: :ok,
+          detail:
+            "installed (#{Map.get(tmux, "version") || "unknown version"}) — the dashboard " <>
+              "login relay can run provider logins",
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      {:ok, %{"available" => false} = tmux} ->
+        %Result{
+          name: "tmux",
+          status: :fail,
+          detail:
+            "#{Map.get(tmux, "message") || "tmux is not installed"}: the dashboard cannot log " <>
+              "in or re-authenticate a provider account",
+          hint: Map.get(tmux, "fix") || "Install tmux.",
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      _ ->
+        %Result{
+          name: "tmux",
+          status: :ok,
+          detail: "server unreachable or predates this check — skipping",
+          fatal: false,
+          blocks_readiness: false
+        }
+    end
+  end
+
   defp check_claude_worker_credentials do
     case Client.get("/api/server/claude_credentials") do
       {:ok, %{"checked" => checked, "missing" => []}} ->

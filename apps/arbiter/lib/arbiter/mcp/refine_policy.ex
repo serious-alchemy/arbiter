@@ -99,6 +99,7 @@ defmodule Arbiter.MCP.RefinePolicy do
     "ticket_demote" => @deny_reason_lifecycle,
     "ticket_sync_upstream_close" => @deny_reason_lifecycle,
     "ticket_rank" => @deny_reason_scheduler,
+    "epic_floor" => @deny_reason_scheduler,
     "ticket_handoff" => @deny_reason_ops,
     "ticket_handback" => @deny_reason_ops,
 

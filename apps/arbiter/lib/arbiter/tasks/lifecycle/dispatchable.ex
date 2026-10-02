@@ -31,6 +31,8 @@ defmodule Arbiter.Tasks.Lifecycle.Dispatchable do
       `[{task_id, scope}]` for work already holding files;
     * `:paused` — the scheduler is paused;
     * `:quota` — `:ok`, or `{:hold, reason}`;
+    * `:provider_constraint` — `:ok`, or `{:hold, detail}`: the ticket's own
+      provider constraint (bd-13pqcp) leaves no eligible account with capacity;
     * `:slots_free` — free slots; absent means "not asked".
 
   ## Holds, in precedence order
@@ -46,6 +48,7 @@ defmodule Arbiter.Tasks.Lifecycle.Dispatchable do
   | `{:column, column}` | already past Ready (`:in_progress`, `:merging`, `:verifying`, `:closed`) |
   | `{:conflicts_with, id}` | a `:conflicts_with` counterpart is in flight |
   | `{:file_overlap, files, id}` | these declared files are in flight on `id` |
+  | `{:provider_constraint, detail}` | the ticket's provider constraint leaves no eligible account |
   | `:paused` | the scheduler is paused |
   | `{:quota, reason}` | a quota or auth hold |
   | `:no_slot` | no free worker slot |
@@ -60,6 +63,7 @@ defmodule Arbiter.Tasks.Lifecycle.Dispatchable do
           | {:blocked_by, [String.t()]}
           | {:conflicts_with, String.t()}
           | {:file_overlap, [String.t()], String.t()}
+          | {:provider_constraint, String.t()}
           | :paused
           | {:quota, String.t()}
           | :no_slot
@@ -79,7 +83,8 @@ defmodule Arbiter.Tasks.Lifecycle.Dispatchable do
   def dispatchable(ticket, ctx \\ %{}) when is_map(ticket) and is_map(ctx) do
     with :ok <- column_hold(View.view(ticket, Map.take(ctx, [:blocked_by, :runs]))),
          :ok <- mutex_hold(ctx),
-         :ok <- overlap_hold(ctx) do
+         :ok <- overlap_hold(ctx),
+         :ok <- provider_constraint_hold(ctx) do
       board_hold(ctx)
     end
   end
@@ -97,6 +102,7 @@ defmodule Arbiter.Tasks.Lifecycle.Dispatchable do
   def describe_hold({:file_overlap, files, task_id}),
     do: "#{name_files(files)} in flight on #{task_id}"
 
+  def describe_hold({:provider_constraint, detail}), do: "provider constraint (#{detail})"
   def describe_hold(:paused), do: "scheduler paused"
   def describe_hold({:quota, reason}), do: reason
   def describe_hold(:no_slot), do: "no free worker slot"
@@ -132,6 +138,13 @@ defmodule Arbiter.Tasks.Lifecycle.Dispatchable do
       end
     end)
   end
+
+  # A ticket's own block, like a mutex: it survives the board-wide holds
+  # clearing, and it does not hold the queue behind it.
+  defp provider_constraint_hold(%{provider_constraint: {:hold, detail}}),
+    do: {:held, {:provider_constraint, detail}}
+
+  defp provider_constraint_hold(_ctx), do: :ok
 
   defp board_hold(%{paused: true}), do: {:held, :paused}
   defp board_hold(%{quota: {:hold, reason}}), do: {:held, {:quota, reason}}

@@ -155,6 +155,7 @@ defmodule ArbiterWeb.Router do
     post("/issues/:id/promote", IssueController, :promote)
     post("/issues/:id/demote", IssueController, :demote)
     patch("/issues/:id/rank", IssueController, :rank)
+    patch("/issues/:id/floor", IssueController, :floor)
     post("/issues/:id/verify", IssueController, :verify)
     # bd-4qjl0q: record the coordinator's answer to a gate escalation.
     post("/issues/:id/resolve", IssueController, :resolve)
@@ -241,9 +242,11 @@ defmodule ArbiterWeb.Router do
     get("/server/migrations", ServerController, :migrations)
     get("/server/bind_address", ServerController, :bind_address)
     get("/server/agy_write_jail", ServerController, :agy_write_jail)
+    get("/server/egress_jail", ServerController, :egress_jail)
     get("/server/claude_credentials", ServerController, :claude_credentials)
     get("/server/provider_accounts", ServerController, :provider_accounts)
     get("/server/merge_routing", ServerController, :merge_routing)
+    get("/server/tmux", ServerController, :tmux)
 
     # Usage ledger (per-session tokens / cost / duration; rollups)
     get("/usage", UsageController, :summarize)

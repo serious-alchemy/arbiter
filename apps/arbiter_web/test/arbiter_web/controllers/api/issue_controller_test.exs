@@ -976,6 +976,101 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
     end
   end
 
+  describe "PATCH /api/issues/:id/floor" do
+    # ES2 (bd-3e7inj): the REST surface of `:set_floor`.
+    test "sets a floor on an epic and reports it on the ticket", %{conn: conn, ws: ws} do
+      {:ok, epic} = Ash.create(Issue, %{title: "e", workspace_id: ws.id, issue_type: :epic})
+
+      conn = patch(conn, ~p"/api/issues/#{epic.id}/floor", %{"floor_priority" => 1})
+
+      assert %{"floor_priority" => 1, "priority" => priority} = json_response(conn, 200)
+      assert priority == epic.priority
+      assert Ash.get!(Issue, epic.id).floor_priority == 1
+    end
+
+    test "accepts P-notation and clears with null or none", %{conn: conn, ws: ws} do
+      {:ok, epic} = Ash.create(Issue, %{title: "e", workspace_id: ws.id, issue_type: :epic})
+
+      assert %{"floor_priority" => 3} =
+               conn
+               |> patch(~p"/api/issues/#{epic.id}/floor", %{"floor_priority" => "P3"})
+               |> json_response(200)
+
+      assert %{"floor_priority" => nil} =
+               conn
+               |> patch(~p"/api/issues/#{epic.id}/floor", %{"floor_priority" => nil})
+               |> json_response(200)
+
+      assert Ash.get!(Issue, epic.id).floor_priority == nil
+
+      {:ok, _} = Ash.update(epic, %{floor_priority: 2}, action: :set_floor)
+
+      assert %{"floor_priority" => nil} =
+               conn
+               |> patch(~p"/api/issues/#{epic.id}/floor", %{"floor_priority" => "none"})
+               |> json_response(200)
+    end
+
+    test "rejects a floor on a non-epic", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "t", workspace_id: ws.id})
+
+      conn = patch(conn, ~p"/api/issues/#{task.id}/floor", %{"floor_priority" => 1})
+
+      assert %{"error" => %{"type" => "validation_error"}} = json_response(conn, 422)
+      assert Ash.get!(Issue, task.id).floor_priority == nil
+    end
+
+    test "rejects P0, P4 and junk", %{conn: conn, ws: ws} do
+      {:ok, epic} = Ash.create(Issue, %{title: "e", workspace_id: ws.id, issue_type: :epic})
+
+      for bad <- [0, 4, "P0", "banana", 1.5] do
+        conn = patch(conn, ~p"/api/issues/#{epic.id}/floor", %{"floor_priority" => bad})
+        assert json_response(conn, 400)["error"]["type"] == "invalid_request"
+      end
+
+      assert Ash.get!(Issue, epic.id).floor_priority == nil
+    end
+
+    test "requires the floor_priority key", %{conn: conn, ws: ws} do
+      {:ok, epic} = Ash.create(Issue, %{title: "e", workspace_id: ws.id, issue_type: :epic})
+
+      conn = patch(conn, ~p"/api/issues/#{epic.id}/floor", %{})
+      assert json_response(conn, 400)["error"]["type"] == "invalid_request"
+    end
+
+    test "404s for an unknown ticket", %{conn: conn} do
+      conn = patch(conn, ~p"/api/issues/bd-nope00/floor", %{"floor_priority" => 1})
+      assert json_response(conn, 404)
+    end
+
+    test "is refused for a worker-tier token", %{conn: conn, ws: ws} do
+      {:ok, epic} = Ash.create(Issue, %{title: "e", workspace_id: ws.id, issue_type: :epic})
+      {:ok, task} = Ash.create(Issue, %{title: "t", workspace_id: ws.id})
+      token = Arbiter.MCP.Scope.mint_worker(task)
+
+      conn =
+        conn
+        |> put_req_header("authorization", "Bearer " <> token)
+        |> patch(~p"/api/issues/#{epic.id}/floor", %{"floor_priority" => 1})
+
+      assert json_response(conn, 403)
+      assert Ash.get!(Issue, epic.id).floor_priority == nil
+    end
+
+    test "a change is in the paper trail", %{conn: conn, ws: ws} do
+      require Ash.Query
+      {:ok, epic} = Ash.create(Issue, %{title: "e", workspace_id: ws.id, issue_type: :epic})
+      patch(conn, ~p"/api/issues/#{epic.id}/floor", %{"floor_priority" => 2})
+
+      assert [%{changes: %{"floor_priority" => 2}}] =
+               Issue.Version
+               |> Ash.Query.filter(
+                 version_source_id == ^epic.id and version_action_name == :set_floor
+               )
+               |> Ash.read!()
+    end
+  end
+
   describe "PATCH /api/issues/:id/rank" do
     test "top moves a ticket ahead of every other ticket in the workspace", %{conn: conn, ws: ws} do
       {:ok, a} = Ash.create(Issue, %{title: "a", workspace_id: ws.id})
@@ -1181,6 +1276,69 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
       # Falls through to `GET /api/issues/:id` with a non-existent id.
       conn = get(conn, "/api/issues/review_parked")
       assert %{"error" => %{"type" => "not_found"}} = json_response(conn, 404)
+    end
+  end
+
+  # bd-13pqcp: the per-ticket provider constraint over REST.
+  describe "provider_constraint" do
+    test "POST /api/issues sets it, canonicalized, and PATCH changes and clears it", %{
+      conn: conn,
+      ws: ws
+    } do
+      created =
+        conn
+        |> post(~p"/api/issues", %{
+          title: "no agy here",
+          workspace_id: ws.id,
+          provider_constraint: %{exclude: ["agy"]}
+        })
+        |> json_response(201)
+
+      assert created["provider_constraint"] == %{"exclude" => ["gemini"]}
+
+      patched =
+        conn
+        |> patch(~p"/api/issues/#{created["id"]}", %{provider_constraint: %{require: "claude"}})
+        |> json_response(200)
+
+      assert patched["provider_constraint"] == %{"require" => ["claude"]}
+
+      cleared =
+        conn
+        |> patch(~p"/api/issues/#{created["id"]}", %{provider_constraint: %{}})
+        |> json_response(200)
+
+      assert cleared["provider_constraint"] == nil
+
+      shown = conn |> get(~p"/api/issues/#{created["id"]}") |> json_response(200)
+      assert shown["provider_constraint"] == nil
+    end
+
+    test "an unknown provider, or both keys, is a validation error", %{conn: conn, ws: ws} do
+      for constraint <- [
+            %{require: ["nope"]},
+            %{require: ["claude"], exclude: ["codex"]},
+            %{prefer: ["claude"]}
+          ] do
+        conn =
+          post(conn, ~p"/api/issues", %{
+            title: "bad constraint",
+            workspace_id: ws.id,
+            provider_constraint: constraint
+          })
+
+        assert json_response(conn, 422), inspect(constraint)
+      end
+    end
+
+    test "an unconstrained ticket reports null", %{conn: conn, ws: ws} do
+      created =
+        conn
+        |> post(~p"/api/issues", %{title: "plain", workspace_id: ws.id})
+        |> json_response(201)
+
+      assert Map.has_key?(created, "provider_constraint")
+      assert created["provider_constraint"] == nil
     end
   end
 end

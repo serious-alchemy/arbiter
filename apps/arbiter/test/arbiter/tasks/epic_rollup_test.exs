@@ -83,6 +83,23 @@ defmodule Arbiter.Tasks.EpicRollupTest do
       assert r.closed == 2
     end
 
+    test "ready_to_promote counts unblocked backlog leaves only (bd-b1b3mp)", ctx do
+      child(ctx.ws, ctx.epic, "free1", as: :backlog)
+      child(ctx.ws, ctx.epic, "free2", as: :backlog)
+      held = child(ctx.ws, ctx.epic, "held", as: :backlog)
+      child(ctx.ws, ctx.epic, "ready", as: :ready)
+      {:ok, sub} = Ash.create(Issue, %{title: "sub", workspace_id: ctx.ws.id, issue_type: :epic})
+      {:ok, _} = Dependencies.add(ctx.epic.id, sub.id, :parent_of)
+
+      {:ok, blocker} = Ash.create(Issue, %{title: "blocker", workspace_id: ctx.ws.id})
+      {:ok, _} = Dependencies.add(held.id, blocker.id, :depends_on)
+
+      r = rollup(ctx.epic)
+
+      assert r.counts.backlog == 4
+      assert r.ready_to_promote == 2
+    end
+
     test "an epic with no children rolls up to all zeroes", ctx do
       r = rollup(ctx.epic)
 
