@@ -126,6 +126,9 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
     # session's read-only grounding checkout. Same classification as
     # `reviews/checkout.ex`, which does the same thing for a PR head.
     "apps/arbiter/lib/arbiter/sessions/repo_checkout.ex" => :pure_tool,
+    # bd-19qve3: git only (rev-parse / cat-file / grep against a commit) to
+    # verify a shared memory's citations. Reads committed trees; runs no hooks.
+    "apps/arbiter/lib/arbiter/sessions/memory/staleness.ex" => :pure_tool,
     # bd-2jkrqu: git only (rev-parse / fetch / push / merge-base), which never
     # reads ROOTDIR or BINDIR.
     "apps/arbiter/lib/arbiter/reviews/push_state.ex" => :pure_tool,

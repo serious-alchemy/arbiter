@@ -1543,6 +1543,12 @@ no longer resolves, and transcript distillation. They appear in the phase table
 (§13) as their own children. This RFC builds only the scaffold: which layers
 mount, read vs write, and where candidates land.
 
+**Phase 13 (bd-19qve3)** builds the promotion queue and the staleness checker
+(the explicit `memory_pending_*` MCP tools, content-anchored citation checks
+run off the mount path, and quarantine instead of serve). That design, with
+the seven amendments from its review, is in
+[`docs/design/memory-promotion-queue.md`](design/memory-promotion-queue.md).
+
 ### 9.6 Status — phase 3 shipped (bd-aprlbb, #1684)
 
 Provisioning is wired into `Arbiter.Sessions.launch/1`: the row is written, the
