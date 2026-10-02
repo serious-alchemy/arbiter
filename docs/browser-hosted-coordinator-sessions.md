@@ -1549,6 +1549,27 @@ run off the mount path, and quarantine instead of serve). That design, with
 the seven amendments from its review, is in
 [`docs/design/memory-promotion-queue.md`](design/memory-promotion-queue.md).
 
+**Phase 14 (bd-avt4lt)** adds transcript distillation: a candidate generator,
+never a writer of the shared layer (Amendment 3.5).
+`Arbiter.Sessions.TranscriptDistillation` makes one bounded model pass over an
+ended session's archived JSONL (§11). It does not read the raw PTY stream,
+because Claude Code's TUI paints with cursor positioning, so that stream strips
+down to run-together redraws. The model answers in JSON, and Arbiter renders
+each candidate's frontmatter itself. It stamps `source_transcript` (the archive
+path) and a `turn_range` checked against the window of numbered turns the model
+was shown, and it drops anything it cannot anchor or that promotion would
+refuse. Candidates land in the session's own `memory/candidates/`, so they get
+the same `memory_pending_*` review as a session's own notes.
+
+Scope (`max_bytes`, `from_turn`) and budget (`max_candidates`,
+`max_output_tokens`, a per-pass `max_cost_usd` that the CLI enforces as
+`--max-budget-usd`, and a rolling `daily_budget_usd` checked before any call)
+come from `config :arbiter, :transcript_distillation`. Each pass is metered on
+its own `usage_events` row (step `transcript_distillation`, source
+`maintenance`), not on the distilled session. The coordinator triggers a pass
+with the `memory_distill` MCP tool, whose bounds can only lower the configured
+caps.
+
 ### 9.6 Status — phase 3 shipped (bd-aprlbb, #1684)
 
 Provisioning is wired into `Arbiter.Sessions.launch/1`: the row is written, the
@@ -1829,7 +1850,7 @@ Each phase is scoped to one child ticket.
 | 11 | **Pre-launch UI** | The §9.5 option set; guardrail defaults (`can_dispatch` off). | 3 | 2 |
 | 12 | **Memory candidate space** — *shipped (§9.6)* | Type-scoped mounts + per-session candidate dir (§9.4) — scaffold only. | 2 | 2 |
 | 13 | **Memory promotion + staleness checker** | *Separate ticket.* Promotion queue (`loop_pending_list`/`loop_pending_apply` as UI precedent), `file:line` verification, quarantine-not-serve. | 3 | 4 |
-| 14 | **Transcript distillation** | *Separate ticket, later.* Candidate generator only, never a direct writer (Amendment 3.5). Depends on 9 + 13. | 4 | 4 |
+| 14 | **Transcript distillation** — *shipped (§9.4, bd-avt4lt)* | Candidate generator only, never a direct writer (Amendment 3.5): `Arbiter.Sessions.TranscriptDistillation`, triggered by the `memory_distill` MCP tool. Depends on 9 + 13. | 4 | 4 |
 
 Phases 1–2 are the spine: if restart survival regresses, nothing else is worth
 having. Phases 13–14 are deliberately outside this RFC per Amendment 3's scope

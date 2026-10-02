@@ -70,7 +70,7 @@ defmodule Arbiter.Usage.Event do
   | `:preflight` | nil as of bd-2jgs2h (2026-09-18) | `Arbiter.Agents.Preflight` via the `CredentialWatchdog`'s task-less periodic probe — the sole live producer. Task-attributed rows predating bd-2jgs2h are historical: a per-dispatch / per-resume auth check used to write them before it was retired (see `Arbiter.Worker.Dispatch`'s moduledoc and `docs/quota-and-auth.md`) |
   | `:coordinator_session` | nil | a browser-hosted coordinator session (bd-cyxzvq), attributed by `session_id` |
   | `:terminal_session` | nil | an interactive terminal session, likewise by `session_id` |
-  | `:maintenance` | nil | Arbiter's own internal passes (the Loop analysis pass; formerly the synthetic `loop-analyze` task id) |
+  | `:maintenance` | nil | Arbiter's own internal passes (the Loop analysis pass and transcript distillation; formerly the synthetic `loop-analyze` task id) |
 
   A `nil` `task_id` is never a missing value — it means "this spend belongs to
   no task", which is why `Arbiter.Usage.summarize/1` drops those rows from

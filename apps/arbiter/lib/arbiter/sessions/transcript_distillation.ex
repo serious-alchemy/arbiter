@@ -237,18 +237,23 @@ defmodule Arbiter.Sessions.TranscriptDistillation do
   # writes at the shared layer, or anywhere else, so it is refused before any
   # money is spent. A directory that does not exist yet is created later.
   defp check_candidate_space(session_id) do
-    plain? =
-      [
-        Layout.session_dir(session_id),
-        Layout.memory_dir(session_id),
-        Layout.memory_candidates_dir(session_id)
-      ]
-      |> Enum.all?(fn path ->
-        match?({:ok, %File.Stat{type: :directory}}, File.lstat(path)) or
-          File.lstat(path) == {:error, :enoent}
-      end)
+    paths = [
+      Layout.session_dir(session_id),
+      Layout.memory_dir(session_id),
+      Layout.memory_candidates_dir(session_id)
+    ]
 
-    if plain?, do: :ok, else: {:error, :unsafe_candidates_dir}
+    if Enum.all?(paths, &plain_dir_or_absent?/1),
+      do: :ok,
+      else: {:error, :unsafe_candidates_dir}
+  end
+
+  defp plain_dir_or_absent?(path) do
+    case File.lstat(path) do
+      {:ok, %File.Stat{type: :directory}} -> true
+      {:error, :enoent} -> true
+      _ -> false
+    end
   end
 
   defp check_daily_budget(cfg, now) do
@@ -574,7 +579,7 @@ defmodule Arbiter.Sessions.TranscriptDistillation do
       |> Enum.reduce({[], []}, fn {proposal, index}, {accepted, rejected} ->
         case vet(proposal, ctx) do
           {:ok, candidate} when length(accepted) < cap ->
-            {[candidate | accepted], rejected}
+            {[Map.put(candidate, :index, index) | accepted], rejected}
 
           {:ok, _candidate} ->
             {accepted, [rejection(proposal, index, :over_candidate_cap) | rejected]}
@@ -719,6 +724,8 @@ defmodule Arbiter.Sessions.TranscriptDistillation do
 
   # ---- writing -------------------------------------------------------------------
 
+  # A failed write is reported with the rest of the dropped proposals rather
+  # than raised: the pass has already been paid for.
   defp write_all([], _ctx), do: {[], []}
 
   defp write_all(accepted, ctx) do
@@ -730,17 +737,13 @@ defmodule Arbiter.Sessions.TranscriptDistillation do
         {:error, reason} -> Enum.map(accepted, fn _ -> {:error, {:write_failed, reason}} end)
       end
 
-    accepted
-    |> Enum.zip(results)
-    |> Enum.with_index()
-    |> Enum.reduce({[], []}, fn
-      {{_candidate, {:ok, written}}, _index}, {ok, failed} ->
-        {[written | ok], failed}
+    written = for {:ok, candidate} <- results, do: candidate
 
-      {{candidate, {:error, reason}}, index}, {ok, failed} ->
-        {ok, [%{index: index, name: candidate.stem, reason: reason} | failed]}
-    end)
-    |> then(fn {ok, failed} -> {Enum.reverse(ok), Enum.reverse(failed)} end)
+    failed =
+      for {{:error, reason}, candidate} <- Enum.zip(results, accepted),
+          do: %{index: candidate.index, name: candidate.stem, reason: reason}
+
+    {written, failed}
   end
 
   # Exclusive create: never replaces a candidate the session (or an earlier

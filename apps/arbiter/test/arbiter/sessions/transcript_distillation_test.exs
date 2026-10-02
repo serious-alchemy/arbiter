@@ -590,6 +590,34 @@ defmodule Arbiter.Sessions.TranscriptDistillationTest do
       refute_received {:invoked, _, _}
     end
 
+    test "an archive that cannot be read is refused before any model call" do
+      path = archive!(conversation())
+      File.chmod!(path, 0o000)
+      on_exit(fn -> File.chmod(path, 0o600) end)
+
+      assert {:error, {:unreadable_transcript, _why}} = distill(invoker: invoker(reply([])))
+      refute_received {:invoked, _, _}
+    end
+
+    test "a candidate that cannot be written is reported, not raised" do
+      archive!(conversation())
+      memory_dir = Layout.memory_dir(@sid)
+      File.mkdir_p!(memory_dir)
+      File.chmod!(memory_dir, 0o500)
+      on_exit(fn -> File.chmod(memory_dir, 0o700) end)
+
+      proposals = [candidate(%{"type" => "opinion"}), candidate()]
+
+      assert {:ok, result} = distill(invoker: invoker(reply(proposals)))
+
+      assert result.candidates == []
+
+      assert [%{index: 0, reason: :invalid_type}, %{index: 1, reason: {:write_failed, :eacces}}] =
+               result.rejected
+
+      assert [_] = Ash.read!(Event)
+    end
+
     test "a malformed bound is refused, never silently ignored" do
       archive!(conversation())
       prior = Application.get_env(:arbiter, :transcript_distillation)

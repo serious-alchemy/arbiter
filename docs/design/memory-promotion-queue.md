@@ -256,8 +256,15 @@ Why a move rather than a frontmatter `status:` flag:
 | `memory_pending_reject` | **refused** | yes | `id`, `reason` (required) |
 | `memory_quarantine_list` | yes | yes | — |
 | `memory_quarantine_restore` | **refused** | yes | `name`, `reanchor` |
+| `memory_distill` (phase 14) | **refused** | yes | `session_id` (required), `max_bytes`, `from_turn`, `max_candidates`, `max_cost_usd` |
 
 Worker and refine tokens can call none of them.
+
+`memory_distill` (bd-avt4lt) fills the same queue from an ended session's
+archived transcript (`Arbiter.Sessions.TranscriptDistillation`). It never
+writes the shared layer, but it spends model budget and reads another session's
+transcript, so a session token is refused. Its bounds can lower the configured
+caps, never raise them.
 
 ## 7. Limitations (deliberate)
 
