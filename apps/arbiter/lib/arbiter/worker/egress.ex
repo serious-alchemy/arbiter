@@ -79,6 +79,7 @@ defmodule Arbiter.Worker.Egress do
           | {:dial_timeout, timeout()}
           | {:bridges, [{atom() | String.t(), {String.t(), :inet.port_number()}}]}
           | {:owner, pid()}
+          | {:audit, boolean()}
 
   @doc """
   Starts the proxy for `run_id` and returns its socket path.
@@ -100,6 +101,9 @@ defmodule Arbiter.Worker.Egress do
       `bridge_path/3`. `name` is 1-16 lowercase letters or digits.
     * `:owner`: a pid; the run stops when it exits. Default: not monitored,
       the caller stops the run.
+    * `:audit`: `false` skips the `egress_events` rows. For the doctor's
+      self-test (`Arbiter.Worker.Egress.SelfTest`), whose decisions are not a
+      worker's. Default `true`.
   """
   @spec start_run(String.t(), [start_opt()]) :: {:ok, Path.t()} | {:error, term()}
   def start_run(run_id, opts \\ []) when is_binary(run_id) do
@@ -120,6 +124,7 @@ defmodule Arbiter.Worker.Egress do
         safe_defaults_exclude: Keyword.get(opts, :safe_defaults_exclude, []),
         grants_loader: Keyword.get(opts, :grants, fn _ -> [] end),
         allow_local_dial: Keyword.get(opts, :allow_local_dial, false),
+        audit: Keyword.get(opts, :audit, true),
         dial_timeout: Keyword.get(opts, :dial_timeout, 10_000)
       }
 

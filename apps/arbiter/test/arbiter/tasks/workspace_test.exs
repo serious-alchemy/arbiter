@@ -644,6 +644,84 @@ defmodule Arbiter.Tasks.WorkspaceTest do
     end
   end
 
+  describe "agent.security.sandbox egress validation (bd-5yydxh)" do
+    defp security_config(sandbox, repo_sandbox \\ nil) do
+      security = %{"sandbox" => sandbox}
+
+      security =
+        if repo_sandbox,
+          do: Map.put(security, "repos", %{"tonic" => %{"sandbox" => repo_sandbox}}),
+          else: security
+
+      %{"agent" => %{"security" => security}}
+    end
+
+    test "accepts each egress level and well-formed allow_hosts, workspace-wide and per repo" do
+      for level <- ["open", "allowlist", "none"] do
+        assert {:ok, _} =
+                 Ash.create(Workspace, %{
+                   name: "eg-ok-#{System.unique_integer([:positive])}",
+                   config:
+                     security_config(
+                       %{"egress" => level, "allow_hosts" => ["repo.hex.pm:443", "*.hex.pm:443"]},
+                       %{"egress" => level, "allow_hosts" => ["db.internal:5432"]}
+                     )
+                 })
+      end
+    end
+
+    test "rejects an unknown egress level, naming the key and the valid levels" do
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{
+                 name: "eg-bad1",
+                 config: security_config(%{"egress" => "alowlist"})
+               })
+
+      message = Exception.message(err)
+      assert message =~ "agent.security.sandbox.egress must be one of"
+      assert message =~ "open, allowlist, none"
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{
+                 name: "eg-bad2",
+                 config: security_config(%{}, %{"egress" => 3})
+               })
+
+      assert Exception.message(err) =~ "agent.security.repos.tonic.sandbox.egress"
+    end
+
+    test "rejects malformed allow_hosts, naming the offending entry" do
+      for bad <- [["no-port"], ["bad host:443"], ["*:443"], [7], "repo.hex.pm:443"] do
+        assert {:error, %Ash.Error.Invalid{} = err} =
+                 Ash.create(Workspace, %{
+                   name: "eg-bad-hosts",
+                   config: security_config(%{"allow_hosts" => bad})
+                 })
+
+        assert Exception.message(err) =~ "agent.security.sandbox.allow_hosts"
+      end
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{
+                 name: "eg-bad-repo-hosts",
+                 config: security_config(%{}, %{"allow_hosts" => ["no-port"]})
+               })
+
+      assert Exception.message(err) =~ "agent.security.repos.tonic.sandbox.allow_hosts"
+    end
+
+    test "an update that sets a bad level is refused" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "eg-upd",
+          config: security_config(%{"egress" => "allowlist"})
+        })
+
+      assert {:error, %Ash.Error.Invalid{}} =
+               Ash.update(ws, %{config: security_config(%{"egress" => "everything"})})
+    end
+  end
+
   describe "review_gate_max_fix_rounds/1 (bd-a9zb7w)" do
     test "returns integer when set as integer" do
       {:ok, ws} =

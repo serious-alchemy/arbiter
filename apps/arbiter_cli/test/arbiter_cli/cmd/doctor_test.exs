@@ -158,7 +158,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     assert exit_code == 0
     assert {:ok, %{"ok" => true, "checks" => checks}} = Jason.decode(String.trim(out))
     assert is_list(checks)
-    assert length(checks) == 20
+    assert length(checks) == 21
   end
 
   test "version mismatch is non-fatal (exit 0 but shows [fail])" do
@@ -1265,6 +1265,51 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       network_routes(%{"available" => true})
       {out, _err, _exit_code} = capture(fn -> Doctor.run([]) end)
       assert out =~ "[ ok ] agy jail network"
+    end
+  end
+
+  describe "egress jail self-test (bd-5yydxh)" do
+    defp egress_routes(egress_resp, status \\ 200) do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/agy_write_jail"}, {%{"available" => true}, 200}},
+        {{"get", "/api/server/egress_jail"}, {egress_resp, status}}
+      ])
+    end
+
+    test "ok, naming 1 allow and 1 deny, when the proxy and jail work" do
+      egress_routes(%{"available" => true, "allowed" => 1, "denied" => 1})
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] egress jail"
+      assert out =~ "1 allow"
+      assert out =~ "1 deny"
+    end
+
+    test "FAILs naming the missing package, without blocking readiness" do
+      egress_routes(%{
+        "available" => false,
+        "cause" => "socat_missing",
+        "message" => "no `socat` on PATH: the jail's network mode bridges its loopback with it",
+        "fix" => "Install socat (`dnf install socat` / `apt install socat`)."
+      })
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[fail] egress jail"
+      assert out =~ "no `socat` on PATH"
+      assert out =~ "dnf install socat"
+    end
+
+    test "ok (skipped) when the server predates the endpoint" do
+      egress_routes(%{"error" => "not found"}, 404)
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] egress jail"
+      assert out =~ "skipping"
     end
   end
 
