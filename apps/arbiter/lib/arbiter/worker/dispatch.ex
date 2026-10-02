@@ -2507,10 +2507,11 @@ defmodule Arbiter.Worker.Dispatch do
             # into the isolated worktree (bd-d5hy7y), under a provider-aware
             # directory resolved the same way as the MCP config write above
             # (bd-bbbxvp / agy-parity T8): `.claude/skills` for claude,
-            # `.agents/skills` for gemini, nothing for codex (inlined). Threaded onto opts so the work
-            # prompt can auto-invoke always-on skills and advertise
-            # situational ones (DECISION C). No-op without a worktree (review /
-            # task-type dispatch) — skills only ever land in an isolated tree.
+            # `.agents/skills` for gemini, nothing for codex (inlined). Threaded
+            # onto opts so the work prompt can auto-invoke always-on skills and
+            # advertise situational ones (DECISION C). No-op without a worktree
+            # (review / task-type dispatch) — skills only ever land in an
+            # isolated tree.
             skills_provider = resolve_mcp_provider(task, opts)
             resolved_skills = resolve_skills(task, worktree_path, opts)
 
