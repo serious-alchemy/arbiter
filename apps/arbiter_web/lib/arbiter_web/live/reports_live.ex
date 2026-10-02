@@ -18,7 +18,7 @@ defmodule ArbiterWeb.ReportsLive do
 
   use ArbiterWeb, :live_view
 
-  alias Arbiter.Reports.{Cache, Cost, Epics, Flow, Throughput}
+  alias Arbiter.Reports.{BurnUp, Cache, Cost, Epics, Flow, Throughput}
   alias Arbiter.Tasks.{Issue, Workspace}
   alias ArbiterWeb.Charts
   alias ArbiterWeb.CoreComponents.Feedback
@@ -173,7 +173,8 @@ defmodule ArbiterWeb.ReportsLive do
       weekly: weekly,
       throughput: Throughput.load(filters),
       cost: Cost.load(filters),
-      flow: Flow.load(filters)
+      flow: Flow.load(filters),
+      burn_up: BurnUp.load(filters["epic"], filters["range"])
     }
   end
 
@@ -299,6 +300,8 @@ defmodule ArbiterWeb.ReportsLive do
             </Feedback.empty_state>
           </div>
 
+          <.burn_up_section :if={@filters["epic"] != ""} burn_up={report.burn_up} />
+
           <div :if={report.total > 0} class="flex flex-col gap-4">
             <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
               <Charts.stat_tile id="reports-tile-total" label="Tickets" value={report.total} />
@@ -423,6 +426,59 @@ defmodule ArbiterWeb.ReportsLive do
     """
   end
 
+  attr :burn_up, :list, required: true
+
+  defp burn_up_section(assigns) do
+    assigns =
+      assign(assigns,
+        count_points: burn_up_points(assigns.burn_up, :scope, :done),
+        weight_points: burn_up_points(assigns.burn_up, :scope_weight, :done_weight),
+        last: List.last(assigns.burn_up)
+      )
+
+    ~H"""
+    <section id="reports-burn-up" class="flex flex-col gap-3">
+      <h2 class="text-[13px] font-medium">Epic burn-up: scope and done</h2>
+      <div :if={@burn_up == []} id="reports-burn-up-empty" class="text-[12.5px]">
+        This epic has no children yet.
+      </div>
+      <div :if={@burn_up != []} class="flex flex-col gap-3">
+        <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <Charts.stat_tile id="reports-burn-up-scope" label="Scope" value={@last.scope} />
+          <Charts.stat_tile id="reports-burn-up-done" label="Done" value={@last.done} />
+          <Charts.stat_tile
+            id="reports-burn-up-scope-weight"
+            label="Scope (weighted)"
+            value={@last.scope_weight}
+          />
+          <Charts.stat_tile
+            id="reports-burn-up-done-weight"
+            label="Done (weighted)"
+            value={@last.done_weight}
+          />
+        </div>
+        <Charts.burn_up
+          id="reports-burn-up-chart"
+          title="Children added to the epic and children closed, per day"
+          points={@count_points}
+        />
+        <h3 class="text-[12.5px] font-medium">Weighted by difficulty</h3>
+        <Charts.burn_up
+          id="reports-burn-up-weighted-chart"
+          title="Difficulty-weighted scope and done, per day"
+          points={@weight_points}
+        />
+        <p id="reports-burn-up-note" class="text-[12px] text-[var(--text-secondary)]">
+          Direct children only. Scope is the epic's children by the day each was attached; done is
+          those whose latest transition is closed, so a reopened child steps the done line down.
+          Weights: D0 = 0.5, D1…D4 = 1…4, unrated = {Throughput.unrated_weight()}. The window opens
+          at the epic's creation. Children removed from the epic before 2026-09-15 stay in scope.
+        </p>
+      </div>
+    </section>
+    """
+  end
+
   attr :cost, :map, required: true
 
   defp cost_section(assigns) do
@@ -492,6 +548,17 @@ defmodule ArbiterWeb.ReportsLive do
       </p>
     </section>
     """
+  end
+
+  defp burn_up_points(burn_up, scope_key, done_key) do
+    Enum.map(burn_up, fn p ->
+      %{
+        key: Date.to_iso8601(p.day),
+        label: Calendar.strftime(p.day, "%b %d"),
+        scope: Map.fetch!(p, scope_key),
+        done: Map.fetch!(p, done_key)
+      }
+    end)
   end
 
   attr :flow, :map, required: true
