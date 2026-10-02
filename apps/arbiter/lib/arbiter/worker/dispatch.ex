@@ -2810,11 +2810,8 @@ defmodule Arbiter.Worker.Dispatch do
         case sandbox_checked_provider(choice.type, policy, Agents.agent_pool(workspace),
                explicit: not is_nil(agent_type)
              ) do
-          {:error, {:sandbox_backend_unavailable, _backend, _message} = refusal} ->
-            {:error, refusal}
-
           {:error, :ineligible} ->
-            {:error, strict_write_confinement_error(choice.type, policy, workspace, opts)}
+            {:error, ineligible_provider_error(choice.type, policy, workspace, opts)}
 
           {:ok, effective_type} ->
             choice = apply_agent_type_override(choice, effective_type)
@@ -3081,8 +3078,20 @@ defmodule Arbiter.Worker.Dispatch do
   end
 
   defp sandbox_checked_provider(preferred, policy, pool, opts) do
-    with {:ok, _sandbox} <- Sandbox.module(policy),
-         do: Agents.strict_eligible_provider(preferred, policy, pool, opts)
+    case Sandbox.module(policy) do
+      {:ok, _sandbox} -> Agents.strict_eligible_provider(preferred, policy, pool, opts)
+      {:error, _refusal} -> {:error, :ineligible}
+    end
+  end
+
+  # Why `sandbox_checked_provider/4` found no eligible provider: a sandbox
+  # backend with no implementation (every provider is refused), else the
+  # `:strict` write-confinement gap.
+  defp ineligible_provider_error(provider_type, policy, workspace, opts) do
+    case Sandbox.module(policy) do
+      {:error, refusal} -> refusal
+      {:ok, _sandbox} -> strict_write_confinement_error(provider_type, policy, workspace, opts)
+    end
   end
 
   defp mode_source_label(:dispatch_override), do: "this dispatch's own override"
