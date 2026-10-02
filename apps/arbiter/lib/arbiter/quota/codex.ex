@@ -357,7 +357,9 @@ defmodule Arbiter.Quota.Codex do
     weekly_pct = row.weekly_used_percent
 
     secondary_label =
-      if not is_nil(weekly_pct) and not is_nil(row.weekly_reset_at), do: "weekly", else: nil
+      if not is_nil(weekly_pct) and not is_nil(row.weekly_reset_at),
+        do: Arbiter.Quota.Gate.Snapshot.codex_window_label(row.weekly_window_minutes, "weekly"),
+        else: nil
 
     Arbiter.Quota.blank_view(row.provider)
     |> Map.merge(%{
@@ -368,7 +370,8 @@ defmodule Arbiter.Quota.Codex do
       reset_7d_at: if(secondary_label, do: row.weekly_reset_at, else: nil),
       captured_at: row.captured_at,
       plan: row.plan,
-      primary_label: "session",
+      primary_label:
+        Arbiter.Quota.Gate.Snapshot.codex_window_label(row.session_window_minutes, "session"),
       secondary_label: secondary_label
     })
   end

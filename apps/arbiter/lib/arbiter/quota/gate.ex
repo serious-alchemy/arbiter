@@ -1261,7 +1261,7 @@ defmodule Arbiter.Quota.Gate do
 
   # The long windows are the ones the secondary mapping names; everything else
   # ("5h", "session", "used", "primary") is the short/primary window.
-  defp primary_window?(window), do: window not in ["7d", "weekly"]
+  defp primary_window?(window), do: window not in ["7d", "weekly", "30d"]
 
   defp percent(n) when is_number(n), do: "#{round(n * 100)}%"
   defp percent(_), do: "—"
