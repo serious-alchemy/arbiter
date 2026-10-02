@@ -129,11 +129,7 @@ defmodule Arbiter.Workers.OutputOffload do
   durable transcript's tail. A run still working keeps its (empty) column: its
   `.log` is mid-write and the live feed owns that view.
   """
-  @spec output_lines(%{
-          :id => String.t(),
-          :state => atom() | String.t(),
-          :output_lines => [String.t()] | nil
-        }) :: [String.t()]
+  @spec output_lines(map()) :: [String.t()]
   def output_lines(%{output_lines: [_ | _] = lines}), do: lines
 
   def output_lines(%{id: id, state: state}) when state in [:finished, "finished"],
@@ -234,22 +230,23 @@ defmodule Arbiter.Workers.OutputOffload do
     end
   end
 
-  defp offload_run_steps(acc, run_id, cutoff, apply?) do
-    where =
-      "run_id = ?1 AND occurred_at < ?2 AND output_summary IS NOT NULL AND #{@git_free}"
+  @step_where "run_id = ?1 AND occurred_at < ?2 AND output_summary IS NOT NULL AND #{@git_free}"
 
+  defp offload_run_steps(acc, run_id, cutoff, apply?) do
     %{rows: [[count, bytes]]} =
       Repo.query!(
-        "SELECT count(*), coalesce(sum(length(output_summary)), 0) FROM worker_run_steps WHERE " <>
-          where,
+        """
+        SELECT count(*), coalesce(sum(length(output_summary)), 0)
+        FROM worker_run_steps WHERE #{@step_where}
+        """,
         [run_id, cutoff]
       )
 
     if apply? and count > 0 do
-      Repo.query!("UPDATE worker_run_steps SET output_summary = NULL WHERE " <> where, [
-        run_id,
-        cutoff
-      ])
+      Repo.query!(
+        "UPDATE worker_run_steps SET output_summary = NULL WHERE #{@step_where}",
+        [run_id, cutoff]
+      )
     end
 
     %{acc | steps_offloaded: acc.steps_offloaded + count, steps_bytes: acc.steps_bytes + bytes}
