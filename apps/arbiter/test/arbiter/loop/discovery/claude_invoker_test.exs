@@ -65,4 +65,38 @@ defmodule Arbiter.Loop.Discovery.ClaudeInvokerTest do
                ClaudeInvoker.parse_stream(stream)
     end
   end
+
+  describe "invoke/2" do
+    test "a non-zero exit whose output contains a result event with is_error: true and total_cost_usd > 0 is returned as ok so it can be metered" do
+      # Create a dummy claude script that emits a budget error and exits 1.
+      dir =
+        Path.join(System.tmp_dir!(), "claude_invoker_test_#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(dir)
+
+      dummy = Path.join(dir, "claude")
+
+      script = """
+      #!/bin/sh
+      echo '{"type":"result","subtype":"error_max_budget_usd","is_error":true,"total_cost_usd":0.3,"usage":{}}'
+      exit 1
+      """
+
+      File.write!(dummy, script)
+      File.chmod!(dummy, 0o755)
+
+      original_path = System.get_env("PATH")
+      System.put_env("PATH", "#{dir}:#{original_path}")
+
+      try do
+        assert {:ok, "", usage} = ClaudeInvoker.invoke("test prompt", [])
+        assert usage.is_error == true
+        assert usage.cost_usd == 0.3
+        assert usage.subtype == "error_max_budget_usd"
+      after
+        System.put_env("PATH", original_path)
+        File.rm_rf!(dir)
+      end
+    end
+  end
 end

@@ -42,7 +42,9 @@ defmodule Arbiter.Sessions.TranscriptDistillation do
       lands over the cap, the result reports it (`over_budget?`) and it is
       logged. Before calling the model, a pass refuses to start when the last
       24 hours of distillation spend plus its own cap would exceed
-      `:daily_budget_usd`.
+      `:daily_budget_usd`. Because passes are not serialized, concurrent calls
+      can pass this check and overshoot the daily budget by up to one per-pass
+      cap each.
     * **Provenance is stamped, not trusted.** The model returns JSON fields,
       and this module renders each candidate's frontmatter itself, so a reply
       cannot plant keys. Every candidate cites `source_transcript` (the

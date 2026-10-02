@@ -70,9 +70,17 @@ defmodule Arbiter.Loop.Discovery.ClaudeInvoker do
       env = SpawnEnv.cmd_env(extras, "claude")
 
       case ReleaseEnv.cmd("sh", ["-c", shell], env: env, cd: dir, stderr_to_stdout: true) do
-        {output, 0} -> parse_stream(output)
-        {_output, 124} -> {:error, {:timeout, timeout_s()}}
-        {output, code} -> {:error, {:claude_failed, code, output |> String.trim() |> tail()}}
+        {output, 0} ->
+          parse_stream(output)
+
+        {_output, 124} ->
+          {:error, {:timeout, timeout_s()}}
+
+        {output, code} ->
+          case parse_stream(output) do
+            {:ok, text, usage} -> {:ok, text, Map.put(usage, :is_error, true)}
+            _ -> {:error, {:claude_failed, code, output |> String.trim() |> tail()}}
+          end
       end
     after
       File.rm_rf(dir)

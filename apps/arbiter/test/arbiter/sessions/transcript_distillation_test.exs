@@ -574,6 +574,37 @@ defmodule Arbiter.Sessions.TranscriptDistillationTest do
       refute File.exists?(candidates_dir())
     end
 
+    test "a budget-stopped pass is recorded, and counts against the daily budget on the next call" do
+      archive!(conversation())
+
+      budget_stopped = %{
+        model: nil,
+        cost_usd: 1.0,
+        subtype: "error_max_budget_usd",
+        is_error: true
+      }
+
+      # First call hits the cap (e.g. 1.0) and stops.
+      assert {:error, {:model_error, "budget stop"}} =
+               distill(
+                 daily_budget_usd: 1.5,
+                 max_cost_usd: 1.0,
+                 invoker: invoker("budget stop", budget_stopped)
+               )
+
+      # The cost row is written
+      assert [%{cost_usd: 1.0, raw: %{"cli_result" => "error_max_budget_usd"}}] =
+               Ash.read!(Event)
+
+      # Second call refuses to start because spent (1.0) + max_cost_usd (1.0) > daily_budget_usd (1.5)
+      assert {:error, {:budget_exhausted, _}} =
+               distill(
+                 daily_budget_usd: 1.5,
+                 max_cost_usd: 1.0,
+                 invoker: invoker(reply([]))
+               )
+    end
+
     test "an unparseable reply is still metered, and queues nothing" do
       archive!(conversation())
 
