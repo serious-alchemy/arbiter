@@ -33,6 +33,11 @@ defmodule ArbiterCli.Main do
                                   `arb issue …` is a deprecated alias for `arb ticket …`:
                                   it still runs, and prints a one-line note on stderr.
 
+      arb epic floor      <id> P1|P2|P3|none
+                                  set or clear an epic's priority floor: its children
+                                  are scheduled as min(own priority, floor). Operator
+                                  and coordinator only; P0 is never a floor.
+
       arb worker list
       arb worker show     <task-id>
       arb worker log      <task-id>
@@ -281,6 +286,7 @@ defmodule ArbiterCli.Main do
     ArbiterCli.Cmd.Issue.run(args)
   end
 
+  defp dispatch_known("epic", args), do: ArbiterCli.Cmd.Epic.run(args)
   defp dispatch_known("worker", args), do: ArbiterCli.Cmd.Worker.run(args)
   defp dispatch_known("repo", args), do: ArbiterCli.Cmd.Repo.run(args)
   defp dispatch_known("dep", args), do: ArbiterCli.Cmd.Dep.run(args)

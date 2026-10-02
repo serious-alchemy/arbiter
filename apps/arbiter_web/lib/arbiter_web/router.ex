@@ -155,6 +155,7 @@ defmodule ArbiterWeb.Router do
     post("/issues/:id/promote", IssueController, :promote)
     post("/issues/:id/demote", IssueController, :demote)
     patch("/issues/:id/rank", IssueController, :rank)
+    patch("/issues/:id/floor", IssueController, :floor)
     post("/issues/:id/verify", IssueController, :verify)
     # bd-4qjl0q: record the coordinator's answer to a gate escalation.
     post("/issues/:id/resolve", IssueController, :resolve)

@@ -74,6 +74,7 @@ defmodule ArbiterWeb.TaskDetailLive do
   alias Arbiter.Tasks.Dependencies
   alias Arbiter.Tasks.Dependency
   alias Arbiter.Tasks.DependencyGraph
+  alias Arbiter.Tasks.Floor
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Issue.Version
   alias Arbiter.Tasks.ParentRefs
@@ -249,6 +250,7 @@ defmodule ArbiterWeb.TaskDetailLive do
      |> assign(:repo_options, [])
      |> assign(:repo_assignment_options, [])
      |> assign(:priority_options, TaskForm.priority_options())
+     |> assign(:floor_options, floor_options())
      |> assign(:difficulty_options, TaskForm.difficulty_options())
      |> assign(:issue_type_options, TaskForm.issue_type_options())
      |> assign(:provider_options, provider_options())
@@ -654,6 +656,23 @@ defmodule ArbiterWeb.TaskDetailLive do
     end
   end
 
+  # ES2 (bd-3e7inj): the epic page's priority-floor control. The browser
+  # session is the operator, so no actor is passed; `:set_floor` still refuses a
+  # non-epic and anything outside 1..3, so a forged event changes nothing.
+  def handle_event("set_floor", %{"epic_floor" => %{"floor" => raw}}, socket) do
+    with %Issue{} = task <- socket.assigns.task,
+         {:ok, floor} <- Floor.parse(raw),
+         {:ok, _floored} <- Ash.update(task, %{floor_priority: floor}, action: :set_floor) do
+      {:noreply,
+       socket
+       |> put_flash(:info, floor_flash(floor))
+       |> refresh_all()}
+    else
+      nil -> {:noreply, socket}
+      {:error, err} -> {:noreply, put_flash(socket, :error, TaskForm.error_message(err))}
+    end
+  end
+
   # ---- dispatch ----
   #
   # Dispatch spends real API credits, so the modal is the confirmation step:
@@ -874,6 +893,13 @@ defmodule ArbiterWeb.TaskDetailLive do
       title -> {:ok, title}
     end
   end
+
+  defp floor_options do
+    [{"None", ""} | Enum.map(1..3, &{"P#{&1}", to_string(&1)})]
+  end
+
+  defp floor_flash(nil), do: "Epic priority floor cleared."
+  defp floor_flash(floor), do: "Epic priority floor set to P#{floor}."
 
   defp fetch_priority(params, current) do
     case TaskForm.parse_int(params["priority"]) do
@@ -3251,6 +3277,46 @@ defmodule ArbiterWeb.TaskDetailLive do
                     collapsible={length(@children_by_column.closed) > 5}
                   />
                 </div>
+              </.panel>
+
+              <%!-- ES2 (bd-3e7inj, design §6.2): the epic's priority floor. A
+                   ticket under the epic is scheduled as min(own priority,
+                   floor). The epic's own `priority` is a separate, display-only
+                   field (it is not a scheduling input), shown next to the floor
+                   so the two are never confused. P0 is never a floor. --%>
+              <.panel
+                :if={@task.issue_type == :epic}
+                id="panel-epic-floor"
+                title="EPIC PRIORITY FLOOR"
+                class="order-5"
+              >
+                <.form
+                  for={%{}}
+                  as={:epic_floor}
+                  id="epic-floor-form"
+                  phx-change="set_floor"
+                  class="flex flex-wrap items-end gap-x-6 gap-y-2"
+                >
+                  <.input
+                    type="select"
+                    id="epic-floor-select"
+                    name="epic_floor[floor]"
+                    label="Floor"
+                    options={@floor_options}
+                    value={if(@task.floor_priority, do: to_string(@task.floor_priority), else: "")}
+                  />
+                  <p
+                    id="epic-own-priority"
+                    class="flex items-center gap-2 pb-2 text-[11.5px] text-[var(--text-label)]"
+                  >
+                    <span>epic priority (display only)</span>
+                    <.priority_tag priority={@task.priority} class="badge-sm font-mono" />
+                  </p>
+                </.form>
+                <p class="mt-1 text-[11.5px] text-[var(--text-label)]">
+                  The lowest priority this epic's children are scheduled at. A child's own
+                  priority, quota and routing never change. P0 is never a floor.
+                </p>
               </.panel>
 
               <%!-- Design bd-9jj5lf §4 (bd-8h5iyc): the epic cost rollup —

@@ -91,6 +91,8 @@ defmodule ArbiterWeb.Api.IssueJSON do
       close_reason: to_string_atom(issue.close_reason),
       rank: issue.rank,
       priority: issue.priority,
+      # ES2: the epic priority floor (nil: none). Distinct from `priority`.
+      floor_priority: issue.floor_priority,
       difficulty: issue.difficulty,
       issue_type: to_string_atom(issue.issue_type),
       auto_close: issue.auto_close,

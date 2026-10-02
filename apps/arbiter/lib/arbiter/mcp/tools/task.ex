@@ -533,6 +533,45 @@ defmodule Arbiter.MCP.Tools.Task do
     end
   end
 
+  # ---- epic_floor -------------------------------------------------------------
+
+  @doc """
+  Set or clear an epic's priority floor (ES2, bd-3e7inj;
+  `docs/design/epic-aware-scheduling.md` §6.2). Coordinator tier, which is
+  what both the operator's and the coordinator's tokens mint; a worker never
+  sees the tool. Backs onto `:set_floor` — the same action REST
+  (`PATCH /api/issues/:id/floor`), `arb epic floor` and the epic page use.
+  `floor_priority` is required: 1..3, `"P1"`..`"P3"`, or `null` / `"none"` to
+  clear. The epic's own `priority` is never touched.
+  """
+  @spec epic_floor(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def epic_floor(%Scope{} = scope, args) do
+    with {:ok, id} <- Tools.resolve_task_id(scope, args),
+         {:ok, issue} <- Tools.fetch_task(scope, args, id),
+         {:ok, raw} <- floor_arg(args),
+         {:ok, floor} <- parse_floor(raw) do
+      case Ash.update(issue, %{floor_priority: floor}, action: :set_floor, actor: scope) do
+        {:ok, floored} ->
+          {:ok, floored |> Tools.serialize_task_summary() |> Map.put(:floor_priority, floor)}
+
+        {:error, err} ->
+          {:error, {:invalid, Tools.ash_error_message(err)}}
+      end
+    end
+  end
+
+  defp floor_arg(%{"floor_priority" => raw}), do: {:ok, raw}
+
+  defp floor_arg(_args),
+    do: {:error, {:invalid, "floor_priority is required (P1, P2, P3 or null to clear)"}}
+
+  defp parse_floor(raw) do
+    case Arbiter.Tasks.Floor.parse(raw) do
+      {:ok, floor} -> {:ok, floor}
+      {:error, message} -> {:error, {:invalid, message}}
+    end
+  end
+
   # ---- ticket_handoff / ticket_handback -------------------------------------
 
   @doc """

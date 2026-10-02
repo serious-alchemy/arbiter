@@ -34,6 +34,7 @@ defmodule Arbiter.MCP.Catalog do
   | `ticket_promote` | coordinator | `Ash.update(issue, …, action: :promote_to_ready)` |
   | `ticket_demote` | coordinator | `Ash.update(issue, …, action: :return_to_backlog)` |
   | `ticket_rank` | coordinator | `Ash.update(issue, …, action: :set_rank)` |
+  | `epic_floor` | coordinator | `Ash.update(issue, …, action: :set_floor)` (ES2, bd-3e7inj) |
   | `ticket_handoff` | coordinator | `Arbiter.Tasks.Attention.hand_off/3` to the operator (bd-8nlez1) |
   | `ticket_handback` | coordinator | `Arbiter.Tasks.Attention.hand_off/3` back to the coordinator (bd-8nlez1) |
   | `ticket_sync_upstream_close` | coordinator | `Ash.update(issue, …, action: :sync_upstream_close)` |
@@ -698,6 +699,31 @@ defmodule Arbiter.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.task_rank/2
+    },
+    %{
+      name: "epic_floor",
+      tiers: @coordinator,
+      description:
+        "Set or clear an epic's priority floor via the `:set_floor` action " <>
+          "(`docs/design/epic-aware-scheduling.md` §6.2). Coordinator only (the operator's and the " <>
+          "coordinator's tokens); a worker cannot call it. `floor_priority` is required: 1..3 " <>
+          "(or the strings `P1`..`P3`) sets the floor, `null` or `none` clears it. P0 is never a " <>
+          "floor. Only an epic can carry one — any other ticket is rejected. The epic's own " <>
+          "`priority` is unrelated and is not changed.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "id" => %{"type" => "string", "description" => "Epic id (required)."},
+          "floor_priority" => %{
+            "type" => ["integer", "string", "null"],
+            "description" =>
+              "1..3 or P1..P3 to set the floor; null or none to clear it. Required."
+          }
+        },
+        "required" => ["id", "floor_priority"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.epic_floor/2
     },
     %{
       name: "ticket_handoff",
