@@ -29,7 +29,7 @@ defmodule Arbiter.MCP.Tools.MemoryPending do
 
   @states %{"pending" => :pending, "rejected" => :rejected}
 
-  @doc "Queued candidates (`state: \"pending\"`, the default) or rejected ones (`\"rejected\"`)."
+  @doc "Queued candidates (state `pending`, the default) or rejected ones (state `rejected`)."
   @spec memory_pending_list(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def memory_pending_list(%Scope{}, args) do
     with {:ok, state} <- state_arg(args) do

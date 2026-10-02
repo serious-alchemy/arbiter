@@ -160,6 +160,11 @@ defmodule Arbiter.Sessions.Memory.Checker do
 
         add(summary, :quarantined, {basename, name})
 
+      {:error, :changed} ->
+        # Rewritten since this pass read it (an overwriting promotion); its new
+        # bytes have no verdict, so they are not served until the next pass.
+        summary
+
       {:error, reason} ->
         Logger.error(
           "Arbiter.Sessions.Memory.Checker: could not quarantine #{basename}: #{inspect(reason)}"

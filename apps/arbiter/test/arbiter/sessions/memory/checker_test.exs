@@ -11,6 +11,7 @@ defmodule Arbiter.Sessions.Memory.CheckerTest do
 
   alias Arbiter.Sessions.Memory.Checker
   alias Arbiter.Sessions.Memory.Frontmatter
+  alias Arbiter.Sessions.Memory.Staleness
   alias Arbiter.Sessions.Memory.Verdicts
 
   @moduletag :tmp_dir
@@ -110,7 +111,7 @@ defmodule Arbiter.Sessions.Memory.CheckerTest do
       assert {:ok, verdict} = Verdicts.read(ctx.root, "good.md")
 
       assert verdict.content_sha256 ==
-               Arbiter.Sessions.Memory.Staleness.content_hash(File.read!(path))
+               Staleness.content_hash(File.read!(path))
     end
 
     test "decay tracks type: project and reference re-check past max age, feedback never does",

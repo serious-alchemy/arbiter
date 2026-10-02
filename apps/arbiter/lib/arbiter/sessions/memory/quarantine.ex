@@ -62,18 +62,36 @@ defmodule Arbiter.Sessions.Memory.Quarantine do
   Move `memory_root/basename` into quarantine and annotate it from `verdict`.
   Returns the name it was filed under, which is `basename` unless an earlier
   quarantine already holds that name.
+
+  Only the bytes the verdict judged are moved: if the file changed since (an
+  overwriting promotion landed mid-pass), this is `{:error, :changed}` and the
+  file stays where it is for the next check.
   """
   @spec quarantine(Path.t(), String.t(), Staleness.verdict()) ::
-          {:ok, String.t()} | {:error, term()}
+          {:ok, String.t()} | {:error, :changed | term()}
   def quarantine(memory_root, basename, verdict) do
+    source = Path.join(memory_root, basename)
     name = free_name(memory_root, basename, verdict.checked_at)
     target = Path.join(dir(memory_root), name)
 
-    with :ok <- File.mkdir_p(dir(memory_root)),
-         :ok <- File.rename(Path.join(memory_root, basename), target) do
+    with :ok <- unchanged(source, verdict),
+         :ok <- File.mkdir_p(dir(memory_root)),
+         :ok <- File.rename(source, target) do
       annotate(target, basename, verdict)
       Verdicts.delete(memory_root, basename)
       {:ok, name}
+    end
+  end
+
+  defp unchanged(path, verdict) do
+    case File.read(path) do
+      {:ok, contents} ->
+        if Staleness.content_hash(contents) == verdict.content_sha256,
+          do: :ok,
+          else: {:error, :changed}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 

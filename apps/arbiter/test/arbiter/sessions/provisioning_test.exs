@@ -14,6 +14,7 @@ defmodule Arbiter.Sessions.ProvisioningTest do
 
   alias Arbiter.Sessions
   alias Arbiter.Sessions.Layout
+  alias Arbiter.Sessions.Memory.Checker
   alias Arbiter.Sessions.Provisioning
   alias Arbiter.Test.SessionEnv
   alias Arbiter.Test.SessionRunnerStub
@@ -281,7 +282,7 @@ defmodule Arbiter.Sessions.ProvisioningTest do
     # Phase 13 (bd-19qve3): a mount serves only memories the staleness checker
     # has a current verdict for, so verify the fixtures before launching.
     defp check_memory!(memory_root) do
-      Arbiter.Sessions.Memory.Checker.run(
+      Checker.run(
         memory_root: memory_root,
         checkouts: [],
         ticket_prefixes: []

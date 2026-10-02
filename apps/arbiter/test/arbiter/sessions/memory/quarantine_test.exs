@@ -71,6 +71,20 @@ defmodule Arbiter.Sessions.Memory.QuarantineTest do
     assert is_binary(entry.quarantined_at)
   end
 
+  # A promotion with `overwrite` can replace a memory while a checker pass is
+  # judging its old bytes; the pass must not quarantine the new ones.
+  test "quarantine/3 moves only the bytes the verdict judged", ctx do
+    path = write_memory!(ctx.root, "racy.md", "project", "See lib/short.ex:99.")
+    verdict = Staleness.verify_contents(File.read!(path), ctx.opts)
+    assert verdict.status == :stale
+
+    File.write!(path, memory("project", "Replaced meanwhile: lib/short.ex:2."))
+
+    assert {:error, :changed} = Quarantine.quarantine(ctx.root, "racy.md", verdict)
+    assert File.regular?(path)
+    refute File.exists?(quarantined_path(ctx, "racy.md"))
+  end
+
   test "a quarantined memory is never mounted, beside a served one", ctx do
     quarantine!(ctx, "stale.md", "See lib/short.ex:99.")
     write_memory!(ctx.root, "good.md", "project", "See lib/short.ex:2.", workspace_id: "ws-1")
