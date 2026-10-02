@@ -85,6 +85,8 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
     "apps/arbiter/lib/arbiter/agents/preflight.ex" => :scrubbed,
     # bd-6mo6be: worker-side `codex mcp list --json` check, via `ReleaseEnv.cmd/3`.
     "apps/arbiter/lib/arbiter/mcp/agent_config/codex.ex" => :scrubbed,
+    # bd-8w5rn3: `git rev-parse --git-common-dir` to find the writable root.
+    "apps/arbiter/lib/arbiter/agents/codex.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/worker/worktree.ex" => :scrubbed,
     "apps/arbiter/lib/arbiter/workflows/code_review/checks.ex" => :scrubbed,
     "apps/arbiter/lib/arbiter/workflows/review_reply.ex" => :scrubbed,
