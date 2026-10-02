@@ -2827,7 +2827,8 @@ defmodule Arbiter.Worker.Dispatch do
                   security: policy,
                   workspace: workspace,
                   worktree_path: worktree_path,
-                  owner: worker_pid
+                  owner: worker_pid,
+                  task_id: task.id
                 ] ++
                 Keyword.take(opts, [:mcp_config, :arb_token])
 

@@ -4869,7 +4869,8 @@ defmodule Arbiter.Worker.ReviewGate do
           workspace: ws,
           worktree_path: session_cwd(state, role),
           timeout_ms: state.timeout_ms,
-          owner: pid
+          owner: pid,
+          task_id: state.task_id
         ] ++ arb_token_opts(state, role)
 
     session_model = resolved_model_for(adapter, agent_opts)

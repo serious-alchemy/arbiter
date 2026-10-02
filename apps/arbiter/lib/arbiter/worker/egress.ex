@@ -160,9 +160,13 @@ defmodule Arbiter.Worker.Egress do
     :ok
   end
 
-  @doc "True while `run_id` has a proxy running."
+  @doc "True while `run_id` has a proxy running (its supervisor is alive)."
   @spec running?(String.t()) :: boolean()
-  def running?(run_id), do: Registry.lookup(@registry, {run_id, :sup}) != []
+  def running?(run_id) do
+    # The Registry drops a dead process's entry asynchronously, so a lookup
+    # right after the run's supervisor exits can still return its pid.
+    Enum.any?(Registry.lookup(@registry, {run_id, :sup}), fn {pid, _} -> Process.alive?(pid) end)
+  end
 
   @doc "A run's proxy socket path under `dir`: `<dir>/<run_id>.proxy.sock`."
   @spec socket_path(String.t(), Path.t()) :: Path.t()

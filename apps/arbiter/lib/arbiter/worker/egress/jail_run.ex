@@ -30,7 +30,10 @@ defmodule Arbiter.Worker.Egress.JailRun do
   @doc """
   Starts (or finds) the run for `:owner` and returns `{:ok, network, run_id}`.
 
-  Options: `:owner` (default `self()`), `:worktree` (its git remotes),
+  Options: `:owner` (required: the worker pid the run lives and dies with; a
+  missing one is `{:error, :no_owner}`, because the caller of an adapter is
+  often a short-lived process whose exit would tear the proxy down mid-run),
+  `:worktree` (its git remotes),
   `:infra` (`host:port` entries), `:tunnels`, `:enforce` (default `false`:
   learn mode, see the note on `Arbiter.Worker.Egress`), `:task_id`,
   `:grants`, `:safe_defaults_exclude`, `:dir`, `:arbiter_url` (default
@@ -38,7 +41,13 @@ defmodule Arbiter.Worker.Egress.JailRun do
   """
   @spec start(keyword()) :: {:ok, keyword(), String.t()} | {:error, term()}
   def start(opts) do
-    owner = Keyword.get(opts, :owner) || self()
+    case Keyword.get(opts, :owner) do
+      owner when is_pid(owner) -> start(owner, opts)
+      _ -> {:error, :no_owner}
+    end
+  end
+
+  defp start(owner, opts) do
     dir = Keyword.get(opts, :dir) || Egress.socket_dir()
     run_id = run_id(owner)
     tunnels = Keyword.get(opts, :tunnels, [])

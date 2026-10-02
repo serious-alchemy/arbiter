@@ -412,6 +412,21 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
     end
   end
 
+  @doc false
+  # The adapter opts for this pass's agent spawn. `:owner` is the pass's worker
+  # (from the session opts): an agy adapter binds its egress run to it, so the
+  # proxy lives exactly as long as the pass (bd-cfktou). `:task_id` keys that
+  # run's `egress_events` rows.
+  @spec agent_opts(keyword(), map(), String.t(), keyword()) :: keyword()
+  def agent_opts(opts, context, worktree_path, mcp_opts) do
+    [
+      workspace: context.workspace,
+      worktree_path: worktree_path,
+      owner: Keyword.get(opts, :owner),
+      task_id: context.task.id
+    ] ++ mcp_opts
+  end
+
   defp add_command_or_prompt(opts, context, args, worktree_path, provider, mcp_opts) do
     case Map.get(args, :claude_command) do
       cmd when is_list(cmd) and cmd != [] ->
@@ -428,12 +443,7 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
         adapter = Agents.for_type(provider)
         prompt = prompt_for(context)
 
-        agent_opts =
-          [
-            workspace: context.workspace,
-            worktree_path: worktree_path,
-            owner: Keyword.get(opts, :owner)
-          ] ++ mcp_opts
+        agent_opts = agent_opts(opts, context, worktree_path, mcp_opts)
 
         case adapter.default_argv(prompt, agent_opts) do
           {:ok, argv} ->

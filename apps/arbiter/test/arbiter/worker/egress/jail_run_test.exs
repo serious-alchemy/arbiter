@@ -4,7 +4,9 @@ defmodule Arbiter.Worker.Egress.JailRunTest do
   hosts, the Arbiter endpoint bridge, the fixed tunnels, and the lifetime tie
   to the run's owner.
   """
-  use ExUnit.Case, async: false
+  use Arbiter.DataCase, async: false
+
+  require Ash.Query
 
   alias Arbiter.Worker.Egress
   alias Arbiter.Worker.Egress.JailRun
@@ -116,6 +118,41 @@ defmodule Arbiter.Worker.Egress.JailRunTest do
       Process.exit(owner, :kill)
       assert_receive {:DOWN, ^ref, :process, ^sup, _}, 2_000
       refute File.exists?(network[:proxy_socket])
+    end
+
+    test "a start without an owner is refused", %{dir: dir, repo: repo} do
+      assert {:error, :no_owner} =
+               JailRun.start(worktree: repo, dir: dir, arbiter_url: "http://127.0.0.1:4848/mcp")
+    end
+
+    test "events recorded for the run carry the task id", %{dir: dir, owner: owner, repo: repo} do
+      {:ok, network, run_id} =
+        JailRun.start(
+          owner: owner,
+          worktree: repo,
+          dir: dir,
+          task_id: "bd-egress1",
+          arbiter_url: "http://127.0.0.1:4848/mcp"
+        )
+
+      on_exit(fn -> Egress.stop_run(run_id) end)
+
+      {:ok, sock} =
+        :gen_tcp.connect(
+          {:local, String.to_charlist(network[:proxy_socket])},
+          0,
+          [:binary, active: false],
+          2_000
+        )
+
+      :ok = :gen_tcp.send(sock, "CONNECT catbox.moe:443 HTTP/1.1\r\n\r\n")
+      assert {:ok, "HTTP/1.1 403" <> _} = :gen_tcp.recv(sock, 0, 2_000)
+      :gen_tcp.close(sock)
+
+      assert [%{task_id: "bd-egress1", host: "catbox.moe", decision: :deny}] =
+               Arbiter.Worker.Egress.Event
+               |> Ash.Query.filter(run_id == ^run_id)
+               |> Ash.read!()
     end
 
     test "a second start for the same owner reuses the run", %{dir: dir, owner: owner, repo: repo} do
