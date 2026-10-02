@@ -179,6 +179,7 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
           worktree_path: cwd,
           command: ["sh", "-c", ~s(echo "key is $OPENAI_API_KEY"; echo arb done)],
           env: [{"OPENAI_API_KEY", "sk-proj-secret-openai-key"}],
+          provider: "codex",
           topic: topic
         )
 
