@@ -820,9 +820,56 @@ isolated `HOME`'s symlinked passthrough of `.ssh` / `.arbiter`, and
 With `ARBITER_CLOAK_KEY` in `arbiter.env` that is the same break as before, just
 one `cat` away. Closing it is file-level isolation, not env hygiene: the jail
 (bd-7o08mj masks `/run`; bd-8381tk masks `arbiter.env` and the release
-cookie for jailed workers, see below; the rest of `~/.arbiter` is follow-up)
+cookie for jailed workers, see below; bd-3q2djr hides the rest of `~/.arbiter`
+and the credential dirs from an agy worker, see "Hidden read paths" below)
 and the guardrail-profile work (bd-8apkz6). Until then treat any worker with shell
 access as able to reach everything the operator's account can read.
+
+## Hidden read paths in the agy jail (bd-3q2djr, G3)
+
+`--ro-bind / /` leaves every file the operator can read readable inside the
+jail. An agy worker (bwrap backend, the only one with a jail today) now gets
+a denylist on top: each directory below is blanked with `--tmpfs`, each file
+is shadowed with `/dev/null`, and only paths that exist on the host are listed
+(`Arbiter.Worker.Jail.Hide.paths/1`).
+
+| Class | Hidden |
+|---|---|
+| Credential dirs | `~/.claude`, `~/.codex`, `~/.gemini`, `~/.config/gh`, `~/.config/gcloud`, `~/.ssh`, `~/.aws`, `~/.kube`, `~/.docker`; files `~/.netrc`, `~/.pgpass`, `~/.git-credentials` |
+| The install | the data dir (`~/.arbiter`: `arbiter.sqlite3` and its WAL, `accounts.json`, releases), the configured DB path and its `-wal`/`-shm`/`-journal` when it lives elsewhere, the accounts and sessions roots |
+| Other workers | the durable output-log root, the worktree root (the worker's own worktree is bound back), the agy HOME root (other workers' `mcp_config.json` scope tokens; the own HOME is bound back), the Claude worker config dir (`.credentials.json`) |
+| Other workspaces | every workspace's `repo_paths` entry except the repo the worker's own worktree belongs to |
+
+A symlinked path is masked at its real location; the agy HOME's passthrough
+symlinks (`.ssh`, `.arbiter`, `.config`) resolve into the masks.
+
+**Left visible on purpose.** `~/.ssh` keeps `known_hosts`, `config`,
+`config.d` and the default identities (`id_rsa`, `id_ecdsa`, `id_ed25519`,
+`id_dsa`, and their `.pub`), read-only, because `git push` over the egress
+`ProxyCommand` needs them. A deploy key a `Host` block names is hidden.
+
+**Changes for jailed agy workers.**
+- `gh`: `~/.config/gh` is blanked, but `hosts.yml` and `config.yml` are bound
+  back read-only when `hosts.yml` has no `oauth_token` (a keyring-backed login
+  holds no secret there), so `gh pr view` / `diff` / `checks` keep working. If
+  `hosts.yml` holds a plaintext token the dir stays hidden and `gh` needs
+  `GH_TOKEN`/`GITHUB_TOKEN` in the workspace's `worker_env`.
+- Coordinator-side data under `~/.arbiter` is gone from their view.
+
+`config :arbiter, :worker_jail_unmask, ["~/.config/gh/hosts.yml"]` is the
+escape hatch: an entry equal to a hidden path unhides it; an entry beneath
+one is bound back read-only.
+
+Not hidden: everything else under `$HOME` (a denylist, not an allowlist: the
+`--tmpfs $HOME` alternative was set aside because it breaks `mise`, `mix`
+and any repo toolchain), and the per-worker `TMPDIR` root, which the jail
+binds writable as a whole.
+
+`arb server doctor` gains **agy jail hidden reads**: `Jail.reads_probe/0`
+runs a real jail with the live hide set and fails if the install DB, a
+credential dir, the log root, another worker's worktree or another
+workspace's repo can be read from inside
+(`GET /api/server/agy_write_jail`, key `reads`).
 
 ## The server's Erlang distribution (bd-51m9ba, GitHub #156)
 

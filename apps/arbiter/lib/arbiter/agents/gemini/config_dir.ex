@@ -351,6 +351,14 @@ defmodule Arbiter.Agents.Gemini.ConfigDir do
   @spec shadowed() :: [String.t()]
   def shadowed, do: @shadowed
 
+  @doc """
+  The directory holding every worker's isolated agy HOME. The jail hides it
+  (`Arbiter.Worker.Jail.Hide`): each HOME carries that worker's MCP scope
+  token, so the sibling HOMEs must not be readable from a worker.
+  """
+  @spec home_root() :: String.t()
+  def home_root, do: root()
+
   # ---- internals ---------------------------------------------------------
 
   defp root do
