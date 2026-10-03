@@ -8,6 +8,8 @@ defmodule ArbiterWeb.Api.MessageController do
                                        unread=true [pending: read_at & cleared_at
                                        both nil], outstanding=true [read, not
                                        cleared], limit [default 50])
+    * `GET  /api/messages/:id`       — :show (one message in full; a worker
+                                       token may read only its own task's mail)
     * `POST /api/messages`           — :create (body: kind, from_ref, to_ref,
                                        subject, body, task_ref (or the
                                        deprecated directive_ref alias),
@@ -66,6 +68,12 @@ defmodule ArbiterWeb.Api.MessageController do
         |> Ash.read!()
 
       render(conn, :index, messages: messages)
+    end
+  end
+
+  def show(conn, %{"id" => id}) do
+    with {:ok, message} <- Ash.get(Message, id) do
+      render(conn, :show, message: message)
     end
   end
 

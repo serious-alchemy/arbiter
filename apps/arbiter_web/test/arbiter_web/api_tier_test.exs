@@ -154,6 +154,44 @@ defmodule ArbiterWeb.ApiTierTest do
       assert ctx.worker_token |> as() |> get("/api/messages") |> json_response(403)
     end
 
+    test "reads a coordinator-sent message to its own task, by id and in the list", ctx do
+      {:ok, mine} =
+        Ash.create(Message, %{
+          kind: :info,
+          from_ref: "coordinator",
+          to_ref: ctx.task.id,
+          subject: "fix",
+          body: "do the thing in lib/a.ex",
+          workspace_id: ctx.ws.id
+        })
+
+      assert %{"id" => id, "body" => "do the thing in lib/a.ex"} =
+               ctx.worker_token |> as() |> get("/api/messages/#{mine.id}") |> json_response(200)
+
+      assert id == mine.id
+
+      assert %{"data" => [%{"id" => ^id, "body" => "do the thing in lib/a.ex"}]} =
+               ctx.worker_token
+               |> as()
+               |> get("/api/messages", %{to_ref: ctx.task.id, unread: "true"})
+               |> json_response(200)
+    end
+
+    test "a by-id read of another mailbox's message names the scope reason", ctx do
+      {:ok, theirs} =
+        Ash.create(Message, %{
+          kind: :info,
+          from_ref: "coordinator",
+          to_ref: ctx.sibling.id,
+          body: "not yours",
+          workspace_id: ctx.ws.id
+        })
+
+      body = ctx.worker_token |> as() |> get("/api/messages/#{theirs.id}") |> json_response(403)
+      assert inspect(body) =~ "may only read its own mailbox"
+      assert inspect(body) =~ ctx.task.id
+    end
+
     test "marks its own mail read, not another task's", ctx do
       {:ok, mine} =
         Ash.create(Message, %{

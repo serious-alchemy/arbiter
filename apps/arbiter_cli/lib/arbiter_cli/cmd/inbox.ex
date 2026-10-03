@@ -155,11 +155,7 @@ defmodule ArbiterCli.Cmd.Inbox do
         mail = Enum.filter(list, &(&1["kind"] in @mailbox_kinds))
         Enum.each(mail, &mark_read/1)
 
-        emit_list(
-          mail,
-          mode,
-          {"Unread mail for #{task_id} (#{length(mail)}):", "(no unread mail)"}
-        )
+        emit_task_mail(mail, mode, task_id)
 
       {:ok, _} ->
         emit_list([], mode, {"", "(no unread mail)"})
@@ -167,6 +163,29 @@ defmodule ArbiterCli.Cmd.Inbox do
       {:error, err} ->
         Output.die(err)
     end
+  end
+
+  # The worker path drains on fetch, so what is printed here is the only copy
+  # the worker will ever list: show every message in full (full id, sender,
+  # subject, whole body), not the triage gist the coordinator view uses.
+  defp emit_task_mail(mail, :json, _task_id), do: emit_list(mail, :json, nil)
+
+  defp emit_task_mail([], :text, _task_id), do: IO.puts("(no unread mail)")
+
+  defp emit_task_mail(mail, :text, task_id) do
+    IO.puts("Unread mail for #{task_id} (#{length(mail)}):")
+
+    Enum.each(mail, fn m ->
+      IO.puts("")
+      IO.puts("  " <> format_line(m))
+      IO.puts("  id: #{m["id"]}")
+
+      m["body"]
+      |> to_string()
+      |> String.trim()
+      |> String.split("\n")
+      |> Enum.each(&IO.puts("    " <> &1))
+    end)
   end
 
   # Best-effort acknowledgement. A failed read shouldn't abort the listing —
@@ -202,9 +221,18 @@ defmodule ArbiterCli.Cmd.Inbox do
       case Client.get("/api/messages", to_ref: @coordinator, limit: 50) do
         {:ok, %{"data" => list}} -> match_prefix(list, token)
         {:ok, _} -> {:error, "no coordinator message matches id #{inspect(token)}"}
+        {:error, %Client.Error{status: 403} = err} -> {:error, scope_refused(err, token)}
         {:error, err} -> Output.die(err)
       end
     end
+  end
+
+  # A worker token cannot list the coordinator mailbox to expand a short prefix.
+  # Say so and name the way out instead of surfacing a bare 403.
+  defp scope_refused(%Client.Error{message: message}, token) do
+    "#{message}. A worker token can read only its own task's mail and cannot expand " <>
+      "the short id #{inspect(token)}; pass the full message id (printed by " <>
+      "`arb inbox <task-id>`) to `arb inbox read`."
   end
 
   defp match_prefix(list, token) do
