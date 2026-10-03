@@ -243,6 +243,8 @@ def main():
     for p in range(5):
         summary(f"P{p} epic child", [r["wait"] for r in done if r["prio"] == p])
         summary(f"P{p} no parent", [w for q, w in loose if q == p])
+    # ES7 guard metric: the epic floor must not slow tickets that have no parent.
+    summary("GUARD: no parent, P1+P2", [w for q, w in loose if q in (1, 2)])
 
     print("\n2. Priority mix and floor lift by close position")
     for label, test in BUCKETS:
