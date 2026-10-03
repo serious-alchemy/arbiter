@@ -14,7 +14,9 @@ defmodule Arbiter.Agents.ModelFamily do
   | `antigravity` (agy)    | `gemini-*` / unknown   | `:google`    | `"antigravity:gemini_models"`         |
   | `antigravity` (agy)    | `claude-*`             | `:anthropic` | `"antigravity:claude_and_gpt_models"` |
   | `antigravity` (agy)    | `gpt-*`                | `:openai`    | `"antigravity:claude_and_gpt_models"` |
-  | `codex`                | any                    | `:openai`    | `"codex"`                             |
+  | `codex`                | `gpt-*` / `o<n>*` / unset | `:openai` | `"codex"`                             |
+  | `codex`                | `claude-*` / `gemini-*` / `grok-*` | their family | `"codex"`                |
+  | `codex`                | any other (Ollama etc.) | `:local`    | `"codex"`                             |
   | `grok` (later)         | any                    | `:xai`       | `"grok"`                              |
   | `ollama` (later)       | any                    | `:local`     | `"ollama"`                            |
 
@@ -73,7 +75,7 @@ defmodule Arbiter.Agents.ModelFamily do
     do: classify(Atom.to_string(provider), model)
 
   def classify("claude", _model), do: %{family: :anthropic, pool: "claude"}
-  def classify("codex", _model), do: %{family: :openai, pool: "codex"}
+  def classify("codex", model), do: %{family: codex_family(model), pool: "codex"}
   def classify("grok", _model), do: %{family: :xai, pool: "grok"}
   def classify("ollama", _model), do: %{family: :local, pool: "ollama"}
 
@@ -86,6 +88,25 @@ defmodule Arbiter.Agents.ModelFamily do
 
   def classify("gemini", model), do: %{family: model_family(model), pool: "gemini"}
   def classify(_provider, _model), do: %{family: nil, pool: nil}
+
+  # bd-5sfn7v: the Codex CLI is a Responses-API client, so the provider string
+  # says nothing about the model family — a custom `model_provider` backend
+  # (Ollama, ...) runs whatever model it names. No model (the CLI default on
+  # the ChatGPT/OpenAI backend) and OpenAI ids are `:openai`; a recognisable
+  # foreign id gets its own family; any other id is open-weights, `:local`.
+  defp codex_family(model) when is_binary(model) and model != "" do
+    case model do
+      "gpt-" <> _ -> :openai
+      "o" <> <<d, _::binary>> when d in ?0..?9 -> :openai
+      "codex-" <> _ -> :openai
+      "claude-" <> _ -> :anthropic
+      "gemini-" <> _ -> :google
+      "grok-" <> _ -> :xai
+      _ -> :local
+    end
+  end
+
+  defp codex_family(_model), do: :openai
 
   # agy's two pools split on the model id's prefix, exactly as
   # `Arbiter.Quota.Gate.Snapshot`'s bucket group does: `claude-*` / `gpt-*`
