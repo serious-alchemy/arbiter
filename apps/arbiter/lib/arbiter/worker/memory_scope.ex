@@ -32,6 +32,20 @@ defmodule Arbiter.Worker.MemoryScope do
   kernel OOM line (`task_memcg=…/arb-run-bd-xxxx-1a2b3c4d.scope`) maps back to
   a task and a run.
 
+  ## Tied to the server's unit
+
+  Being outside the service's cgroup also means systemd's `KillMode=control-group`
+  no longer sweeps the workers when the service stops or fails. A graceful stop
+  is covered by the Worker's own teardown, but a BEAM crash, a SIGKILL after
+  `TimeoutStopSec`, or the server itself being OOM-killed (`OOMPolicy=continue`)
+  would leave agents running into a worktree the boot-time resume then hands to a
+  *second* agent. So when the server runs as a user service, each scope also
+  gets `BindsTo=<unit> After=<unit>` (unit read from the server's own cgroup via
+  `Arbiter.Worker.MemoryScope.Diagnosis.service_unit/1`): whenever the service
+  leaves the active state, systemd stops its worker scopes with it. A server run
+  from a shell has no unit and no binding. `Restart=on-failure` still brings the
+  service back; the scopes do not outlive the instance that spawned them.
+
   ## Detecting the kill
 
   `systemd-run --scope` returns the command's own exit status, which for an OOM
@@ -75,6 +89,8 @@ defmodule Arbiter.Worker.MemoryScope do
 
   require Logger
 
+  alias Arbiter.Worker.MemoryScope.Diagnosis
+
   @default_max "40%"
   @disabled ~w(off none 0 infinity false disabled)
   @size_re ~r/\A\d+(\.\d+)?[KMGT]?\z/
@@ -82,6 +98,7 @@ defmodule Arbiter.Worker.MemoryScope do
   @probe_retry_ms 300_000
   @pt_key {__MODULE__, :probe}
   @outcome_timeout_ms 5_000
+  @probe_timeout_ms 15_000
 
   @type scope :: %{unit: String.t(), max: String.t()}
   @type probe :: %{escape?: boolean(), runtime_dir: String.t() | nil}
@@ -150,7 +167,9 @@ defmodule Arbiter.Worker.MemoryScope do
       {env, unset} = runtime_dir_env(Map.get(port_args, :env, []), probe.runtime_dir)
       inner = unset ++ [exec | rest]
 
-      args = scope_args(unit, max, task_id) ++ Enum.map(inner, &escape(&1, probe.escape?))
+      args =
+        scope_args(unit, max, task_id, service_unit(opts)) ++
+          Enum.map(inner, &escape(&1, probe.escape?))
 
       wrapped = %{
         port_args
@@ -263,7 +282,7 @@ defmodule Arbiter.Worker.MemoryScope do
 
   # ---- internals -----------------------------------------------------------
 
-  defp scope_args(unit, max, task_id) do
+  defp scope_args(unit, max, task_id, service_unit) do
     [
       "--user",
       "--scope",
@@ -276,7 +295,25 @@ defmodule Arbiter.Worker.MemoryScope do
       "MemorySwapMax=0",
       "-p",
       "OOMPolicy=kill"
-    ]
+    ] ++ bind_args(service_unit)
+  end
+
+  defp bind_args(nil), do: []
+  defp bind_args(unit), do: ["-p", "BindsTo=#{unit}", "-p", "After=#{unit}"]
+
+  # The user-manager service this server runs in, if any (see the moduledoc).
+  # `opts[:service_unit]` is the test seam (`nil` = not a service).
+  defp service_unit(opts) do
+    case Keyword.fetch(opts, :service_unit) do
+      {:ok, unit} ->
+        unit
+
+      :error ->
+        case Diagnosis.service_unit() do
+          %{name: name, manager: :user} -> name
+          _ -> nil
+        end
+    end
   end
 
   # `systemd-run` needs XDG_RUNTIME_DIR; the agent must not get it (see the
@@ -327,7 +364,19 @@ defmodule Arbiter.Worker.MemoryScope do
     end
   end
 
+  # Bounded like `outcome/1`: the probe runs inside the Worker's own process on
+  # the first spawn, and a wedged user manager must not be able to hang it.
   defp run_probe(max, opts) do
+    timeout = Keyword.get(opts, :probe_timeout_ms, @probe_timeout_ms)
+    task = Task.async(fn -> do_probe(max, opts) end)
+
+    case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do
+      {:ok, result} -> result
+      _ -> {:error, "systemd-run probe timed out after #{timeout}ms"}
+    end
+  end
+
+  defp do_probe(max, opts) do
     with :ok <- check_platform(opts),
          sd when is_binary(sd) <- systemd_run_path(opts) || {:error, "systemd-run not found"},
          runtime_dir <- runtime_dir(opts),
@@ -395,7 +444,7 @@ defmodule Arbiter.Worker.MemoryScope do
     unit = unit_name("probe")
 
     args =
-      ["--collect" | scope_args(unit, max, "probe")] ++
+      ["--collect" | scope_args(unit, max, "probe", nil)] ++
         [env_path(), "-u", "XDG_RUNTIME_DIR"] ++ inner
 
     case run_cmd(opts, sd, args,

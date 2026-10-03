@@ -41,7 +41,12 @@ defmodule Arbiter.Worker.MemoryScopeTest do
   end
 
   defp probe_opts(cmd),
-    do: [cmd: cmd, systemd_run: "/usr/bin/systemd-run", runtime_dir: "/run/user/1"]
+    do: [
+      cmd: cmd,
+      systemd_run: "/usr/bin/systemd-run",
+      runtime_dir: "/run/user/1",
+      service_unit: nil
+    ]
 
   defp port_args(env \\ []) do
     %{
@@ -104,6 +109,44 @@ defmodule Arbiter.Worker.MemoryScopeTest do
       assert wrapped.cd == "/tmp"
     end
 
+    test "binds the scope to the server's service unit so it cannot outlive it" do
+      {wrapped, _} =
+        MemoryScope.wrap(
+          port_args(),
+          "t",
+          Keyword.put(probe_opts(healthy_cmd(false)), :service_unit, "arbiter.service")
+        )
+
+      assert [_argv0 | args] = wrapped.argv
+      assert "BindsTo=arbiter.service" in args
+      assert "After=arbiter.service" in args
+
+      # The agent argv is still the tail, after the properties.
+      assert List.last(args) == "cost $5 and ${HOME}"
+    end
+
+    test "adds no binding when the server is not running as a service" do
+      {wrapped, _} = MemoryScope.wrap(port_args(), "t", probe_opts(healthy_cmd(false)))
+
+      refute Enum.any?(wrapped.argv, &String.starts_with?(&1, "BindsTo="))
+      refute Enum.any?(wrapped.argv, &String.starts_with?(&1, "After="))
+    end
+
+    test "the capability probe is never bound to the service" do
+      test_pid = self()
+
+      cmd = fn bin, args, opts ->
+        send(test_pid, {:probe_args, args})
+        healthy_cmd(false).(bin, args, opts)
+      end
+
+      opts = Keyword.put(probe_opts(cmd), :service_unit, "arbiter.service")
+      assert {_, %{}} = MemoryScope.wrap(port_args(), "t", opts)
+
+      assert_received {:probe_args, args}
+      refute Enum.any?(args, &String.contains?(&1, "BindsTo"))
+    end
+
     test "restores XDG_RUNTIME_DIR for systemd-run only" do
       {wrapped, _} =
         MemoryScope.wrap(
@@ -153,6 +196,17 @@ defmodule Arbiter.Worker.MemoryScopeTest do
       args = port_args()
 
       assert {^args, nil} = MemoryScope.wrap(args, "t", probe_opts(failing))
+    end
+
+    test "a wedged systemd-run probe times out instead of hanging the caller" do
+      hung = fn _bin, _args, _opts -> Process.sleep(:infinity) end
+      args = port_args()
+
+      opts = Keyword.put(probe_opts(hung), :probe_timeout_ms, 50)
+
+      assert {^args, nil} = MemoryScope.wrap(args, "t", opts)
+      assert {:error, reason} = MemoryScope.probe("12G", opts)
+      assert reason =~ "timed out"
     end
 
     test "treats a limit the user manager did not apply as unavailable" do

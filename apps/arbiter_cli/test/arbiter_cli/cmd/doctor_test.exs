@@ -1668,6 +1668,15 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       refute result.blocks_readiness
     end
 
+    test "an unreadable OOMPolicy is reported as unknown, not as OOMPolicy=stop" do
+      result = memory_result(memory_body(%{"oom_policy" => nil}))
+
+      assert result.status == :warn
+      assert result.detail =~ "could not read OOMPolicy for arbiter.service"
+      refute result.detail =~ "OOMPolicy=stop"
+      refute result.blocks_readiness
+    end
+
     test "says why an enabled cap is not in force" do
       result =
         memory_result(

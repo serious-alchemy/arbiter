@@ -36,6 +36,20 @@ When it happens the run is recorded **failed** with stop category
 keeps the answer: the scope goes `failed` with `Result=oom-kill`, which the
 Worker reads when the port exits and then `reset-failed`s.)
 
+### Scopes die with the service
+
+Because the scope is a sibling, systemd's `KillMode=control-group` no longer
+sweeps the workers when the service stops. A graceful stop is covered by the
+Worker's own teardown; a BEAM crash, a SIGKILL after `TimeoutStopSec`, or the
+server's own BEAM being OOM-killed (now survivable under `OOMPolicy=continue`)
+is not. Without more, those agents would keep running in their worktrees while
+the boot-time resume started a second agent in the same tree. So when the server
+runs as a user service, each scope is created with
+`BindsTo=<unit>` and `After=<unit>` (the unit is read from the server's own
+cgroup): the moment the service leaves the active state, systemd stops its
+worker scopes. A shell-launched server has no unit and no binding. The capability
+probe scope is never bound.
+
 ### Configuring the cap
 
 | Setting | Meaning |

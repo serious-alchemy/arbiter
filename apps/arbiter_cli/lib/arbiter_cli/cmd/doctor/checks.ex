@@ -960,21 +960,31 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
     end
   end
 
+  # `systemctl show` failed on the server (no binary, bus error): the policy is
+  # unknown, which is not the same claim as `OOMPolicy=stop`.
+  defp worker_memory_result(%{"oom_policy" => nil, "service_unit" => unit} = body) do
+    worker_memory_warn(
+      "could not read OOMPolicy for #{unit} (systemctl show failed on the server); " <>
+        "workers are #{cap_summary(body)}",
+      memory_hint(body)
+    )
+  end
+
   defp worker_memory_result(%{"oom_policy" => policy, "capped" => capped} = body) do
-    stop? = policy in [nil, "stop"]
+    stop? = policy == "stop"
     unit = Map.get(body, "service_unit")
 
     cond do
       stop? and not capped ->
         worker_memory_warn(
-          "#{unit} has OOMPolicy=#{policy || "stop"} and no per-worker memory cap " <>
+          "#{unit} has OOMPolicy=#{policy} and no per-worker memory cap " <>
             "(#{cap_summary(body)}): one runaway worker process gets the whole server stopped",
           memory_hint(body)
         )
 
       stop? ->
         worker_memory_warn(
-          "#{unit} has OOMPolicy=#{policy || "stop"}; workers are #{cap_summary(body)}, but " <>
+          "#{unit} has OOMPolicy=#{policy}; workers are #{cap_summary(body)}, but " <>
             "anything else the kernel OOM-kills inside the unit still stops the server",
           memory_hint(body)
         )
