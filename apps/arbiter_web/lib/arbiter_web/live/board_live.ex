@@ -467,15 +467,14 @@ defmodule ArbiterWeb.BoardLive do
       "clear the floor or order it within P#{floor}"
   end
 
-  # The unpinned cards above where the card landed, in its band. Pinning them
-  # with it keeps the order the operator produced: a pinned card sorts ahead of
-  # every unpinned one, so pinning the card alone would send a drop at the
-  # bottom of a band to its top.
+  # The cards above where the card landed, in its band, top first. They are
+  # pinned with it (see `settle_prefix/1`) to keep the order the operator
+  # produced: a pinned card sorts ahead of every unpinned one, so pinning the
+  # card alone would send a drop at the bottom of a band to its top.
   defp pin_prefix(order, card, band) do
     order
     |> Enum.take_while(&(&1.id != card.id))
-    |> Enum.filter(&(band_of(&1) == band and not Map.get(&1, :rank_pinned, false)))
-    |> Enum.map(& &1.id)
+    |> Enum.filter(&(band_of(&1) == band))
   end
 
   defp place(cards, card, where, target_id) do
@@ -504,19 +503,38 @@ defmodule ArbiterWeb.BoardLive do
   # Dropping into another band moves the ticket's own priority into that band
   # first, then ranks and pins it where it landed. A lifted card dropped in its
   # floor's band keeps its own priority: it is already there.
-  defp rerank(socket, card, band, rank_args, prefix_ids) do
-    with {:ok, issue} <- Ash.get(Issue, card.id),
-         {:ok, issue} <- reprioritise(issue, band_change(card, band)),
-         :ok <- pin_cards(prefix_ids),
-         {:ok, _ranked} <- rank(issue, rank_args) do
-      socket
-      |> then(fn socket ->
-        if is_integer(band) and band != band_of(card),
-          do: put_flash(socket, :info, "Moved #{card.id} to P#{band}."),
-          else: socket
+  #
+  # One transaction: the cards above are pinned (and, where their rank
+  # disagrees with the order shown, re-ranked) together with the dragged card's
+  # own move, so a refused move leaves none of it behind. Listeners hear about
+  # the new order only once it is committed.
+  defp rerank(socket, card, band, rank_args, prefix) do
+    result =
+      Arbiter.Repo.transaction(fn ->
+        with {:ok, issue} <- Ash.get(Issue, card.id),
+             {:ok, issue} <- reprioritise(issue, band_change(card, band)),
+             :ok <- settle_prefix(prefix),
+             {:ok, ranked} <- rank(issue, rank_args) do
+          ranked
+        else
+          {:error, err} -> Arbiter.Repo.rollback(err)
+        end
       end)
-      |> refresh_board()
-    else
+
+    case result do
+      {:ok, ranked} ->
+        # `:set_rank` announces nothing of its own; every other board, and
+        # Autopilot's next plan, should see the new order.
+        Issue.broadcast_lifecycle(:updated, ranked)
+
+        socket
+        |> then(fn socket ->
+          if is_integer(band) and band != band_of(card),
+            do: put_flash(socket, :info, "Moved #{card.id} to P#{band}."),
+            else: socket
+        end)
+        |> refresh_board()
+
       {:error, err} ->
         socket
         |> put_flash(:error, "Could not reorder #{card.id}: " <> error_message(err))
@@ -526,16 +544,45 @@ defmodule ArbiterWeb.BoardLive do
 
   defp band_change(card, band), do: if(band == band_of(card), do: card.priority, else: band)
 
-  defp pin_cards(ids) do
-    Enum.reduce_while(ids, :ok, fn id, :ok ->
-      with {:ok, issue} <- Ash.get(Issue, id),
-           {:ok, _} <- Ash.update(issue, %{pinned: true}, action: :set_rank_pinned) do
-        {:cont, :ok}
-      else
+  # Walks the cards above the drop, top first, so that every one of them is
+  # pinned and their ranks ascend in the order shown. A pin survives changes
+  # that put a card first in a new band without a drag (an own-priority edit,
+  # a floor set or cleared), so a pinned card's rank can disagree with its
+  # place; such a card, like any whose rank is not past the card shown above
+  # it in the same workspace, is ranked after that card. Rank is per
+  # workspace, so only same-workspace cards compare.
+  defp settle_prefix(prefix) do
+    prefix
+    |> Enum.reduce_while({:ok, %{}}, fn card, {:ok, last_by_ws} ->
+      case settle_card(card, Map.get(last_by_ws, card.workspace_id)) do
+        {:ok, settled} -> {:cont, {:ok, Map.put(last_by_ws, card.workspace_id, settled.id)}}
         {:error, _} = error -> {:halt, error}
       end
     end)
+    |> case do
+      {:ok, _last_by_ws} -> :ok
+      {:error, _} = error -> error
+    end
   end
+
+  defp settle_card(card, above_id) do
+    with {:ok, issue} <- Ash.get(Issue, card.id),
+         {:ok, above} <- fetch_above(above_id) do
+      cond do
+        above != nil and issue.rank <= above.rank ->
+          Rank.move(issue, %{after_id: above.id, pin: true})
+
+        issue.rank_pinned ->
+          {:ok, issue}
+
+        true ->
+          Ash.update(issue, %{pinned: true}, action: :set_rank_pinned)
+      end
+    end
+  end
+
+  defp fetch_above(nil), do: {:ok, nil}
+  defp fetch_above(id), do: Ash.get(Issue, id)
 
   defp reprioritise(%Issue{priority: same} = issue, same), do: {:ok, issue}
 
@@ -547,25 +594,8 @@ defmodule ArbiterWeb.BoardLive do
   # `rank_pinned`: the drag pins the card with its move. Alone in its
   # workspace (`nil` args) there is nothing to rank against, but it is still
   # pinned in its band.
-  defp rank(issue, nil) do
-    with {:ok, pinned} <- Ash.update(issue, %{pinned: true}, action: :set_rank_pinned) do
-      Issue.broadcast_lifecycle(:updated, pinned)
-      {:ok, pinned}
-    end
-  end
-
-  defp rank(issue, args) do
-    case Rank.move(issue, Map.put(args, :pin, true)) do
-      {:ok, ranked} ->
-        # `:set_rank` announces nothing of its own; every other board, and
-        # Autopilot's next plan, should see the new order.
-        Issue.broadcast_lifecycle(:updated, ranked)
-        {:ok, ranked}
-
-      error ->
-        error
-    end
-  end
+  defp rank(issue, nil), do: Ash.update(issue, %{pinned: true}, action: :set_rank_pinned)
+  defp rank(issue, args), do: Rank.move(issue, Map.put(args, :pin, true))
 
   defp error_message(err) when is_binary(err), do: err
   defp error_message(err), do: ArbiterWeb.TaskForm.error_message(err)

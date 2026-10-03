@@ -113,6 +113,51 @@ defmodule ArbiterWeb.BoardManualOrderTest do
       assert reload(a).rank_pinned
     end
 
+    test "a pinned card whose rank is stale after a priority edit keeps its place", %{
+      conn: conn,
+      ws: ws
+    } do
+      a = ready(ws, 2)
+      b = ready(ws, 2)
+      x = ready(ws, 3)
+      y = ready(ws, 3)
+
+      # X is pinned by a drag in the P3 band, so its rank sits past B's.
+      view = live_board(conn)
+      drag(view, x.id, "ready", "after_id", y.id)
+      assert reload(x).rank_pinned
+
+      # Editing X to P2 moves it first in the P2 band with its old rank.
+      {:ok, _} = Ash.update(reload(x), %{priority: 2})
+      assert card_order(live_board(conn), "ready") == [x.id, a.id, b.id, y.id]
+
+      view = live_board(conn)
+      drag(view, a.id, "ready", "after_id", b.id)
+
+      assert card_order(view, "ready") == [x.id, b.id, a.id, y.id]
+      assert card_order(live_board(conn), "ready") == [x.id, b.id, a.id, y.id]
+    end
+
+    test "a move that fails part-way leaves the cards above the drop unpinned", %{
+      conn: conn,
+      ws: ws
+    } do
+      a = ready(ws, 2)
+      b = ready(ws, 2)
+      c = ready(ws, 2)
+
+      view = live_board(conn)
+
+      # B vanishes after the board loaded: A is pinned first, then B's turn fails.
+      Arbiter.Repo.query!("PRAGMA defer_foreign_keys = ON")
+      Arbiter.Repo.query!("DELETE FROM issues WHERE id = ?1", [b.id])
+
+      drag(view, c.id, "ready", "after_id", b.id)
+
+      refute reload(a).rank_pinned
+      refute reload(c).rank_pinned
+    end
+
     test "a pinned card goes ahead of the finish-first tiebreak in its band", %{
       conn: conn,
       ws: ws,
