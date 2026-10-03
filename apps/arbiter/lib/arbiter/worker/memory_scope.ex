@@ -188,7 +188,8 @@ defmodule Arbiter.Worker.MemoryScope do
   defp query_outcome(%{unit: unit, max: max}, opts) do
     with ctl when is_binary(ctl) <- systemctl_path(opts),
          {out, 0} <-
-           cmd(opts).(
+           run_cmd(
+             opts,
              ctl,
              ["--user", "show", unit, "-p", "Result", "-p", "MemoryPeak"],
              stderr_to_stdout: true,
@@ -196,7 +197,7 @@ defmodule Arbiter.Worker.MemoryScope do
            ),
          %{"Result" => "oom-kill"} = props <- parse_show(out) do
       _ =
-        cmd(opts).(ctl, ["--user", "reset-failed", unit],
+        run_cmd(opts, ctl, ["--user", "reset-failed", unit],
           stderr_to_stdout: true,
           env: runtime_dir_pairs(opts)
         )
@@ -397,7 +398,7 @@ defmodule Arbiter.Worker.MemoryScope do
       ["--collect" | scope_args(unit, max, "probe")] ++
         [env_path(), "-u", "XDG_RUNTIME_DIR"] ++ inner
 
-    case cmd(opts).(sd, args,
+    case run_cmd(opts, sd, args,
            stderr_to_stdout: true,
            env: [{"XDG_RUNTIME_DIR", runtime_dir}]
          ) do
@@ -448,7 +449,16 @@ defmodule Arbiter.Worker.MemoryScope do
     end
   end
 
-  defp cmd(opts), do: Keyword.get(opts, :cmd, &System.cmd/3)
+  # The one place this feature spawns a process: `systemd-run` / `systemctl`,
+  # run through `ReleaseEnv.cmd/3` like every other non-literal command so a
+  # release's ROOTDIR/BINDIR never leaks into them. `opts[:cmd]` is the test seam.
+  @doc false
+  def run_cmd(opts, bin, args, cmd_opts) do
+    case Keyword.fetch(opts, :cmd) do
+      {:ok, fun} -> fun.(bin, args, cmd_opts)
+      :error -> Arbiter.Worker.ReleaseEnv.cmd(bin, args, cmd_opts)
+    end
+  end
 
   defp systemd_run_path(opts),
     do: Keyword.get(opts, :systemd_run) || binary(:systemd_run, "systemd-run")

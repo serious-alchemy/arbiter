@@ -114,7 +114,6 @@ defmodule Arbiter.Worker.MemoryScope.Diagnosis do
 
   defp unit_properties(%{name: name, manager: manager}, opts) do
     manager_args = if manager == :user, do: ["--user"], else: []
-    cmd = Keyword.get(opts, :cmd, &System.cmd/3)
 
     env =
       case MemoryScope.runtime_dir(opts) do
@@ -126,7 +125,10 @@ defmodule Arbiter.Worker.MemoryScope.Diagnosis do
 
     with ctl when is_binary(ctl) <- ctl,
          {out, 0} <-
-           cmd.(ctl, manager_args ++ ["show", name, "-p", "OOMPolicy", "-p", "MemoryMax"],
+           MemoryScope.run_cmd(
+             opts,
+             ctl,
+             manager_args ++ ["show", name, "-p", "OOMPolicy", "-p", "MemoryMax"],
              stderr_to_stdout: true,
              env: env
            ) do
