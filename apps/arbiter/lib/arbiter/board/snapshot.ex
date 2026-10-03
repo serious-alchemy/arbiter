@@ -256,6 +256,7 @@ defmodule Arbiter.Board.Snapshot do
         running: in_flight(authors, issues_by_id, changed),
         conflict_claims: conflict_claims(authors, gate_workers, issues, worked, now),
         slots_free: slots_free,
+        slot_note: Map.get(input, :slot_note),
         quota: quota,
         card_quota: Map.get(input, :card_quota, %{}),
         card_constraint: Map.get(input, :card_constraint, %{}),
@@ -387,6 +388,14 @@ defmodule Arbiter.Board.Snapshot do
     # hold (bd-3fvue3), so a pass reads each candidate's quota and headroom once.
     routing_opts = routing_opts(workspace, opts)
 
+    slots_total =
+      Keyword.get(opts, :slots_total) ||
+        effective_max_concurrent(
+          workspace || workspace_id,
+          SlotGate.slots_used(issues),
+          routing_opts
+        )
+
     scheduling =
       QueueOrder.settings(Keyword.get_lazy(opts, :scheduling, &Arbiter.Settings.scheduling/0))
 
@@ -403,13 +412,9 @@ defmodule Arbiter.Board.Snapshot do
       ready_since: ready_since(opts, scheduling, issues, ref_issues, deps),
       changed_files: Keyword.get(opts, :changed_files, %{}),
       now: now,
-      slots_total:
-        Keyword.get(opts, :slots_total) ||
-          effective_max_concurrent(
-            workspace || workspace_id,
-            SlotGate.slots_used(issues),
-            routing_opts
-          ),
+      slots_total: slots_total,
+      slot_note:
+        Keyword.get_lazy(opts, :slot_note, fn -> slot_note(workspace, issues, slots_total) end),
       quota:
         Keyword.get_lazy(opts, :quota, fn ->
           quota_hold(workspace || workspace_id, routing_opts)
@@ -479,6 +484,20 @@ defmodule Arbiter.Board.Snapshot do
 
   defp floored_epic?(issue),
     do: Map.get(issue, :issue_type) == :epic and is_integer(Map.get(issue, :floor_priority))
+
+  # bd-48prlb: why the board is full, named by the binding limit. Read only
+  # when no slot is free, so a board with room pays nothing for it.
+  defp slot_note(%Arbiter.Tasks.Workspace{} = workspace, issues, slots_total) do
+    used = SlotGate.slots_used(issues)
+
+    if used >= slots_total do
+      workspace
+      |> Arbiter.Accounts.SlotLimit.binding(used)
+      |> Arbiter.Accounts.SlotLimit.describe(SlotGate.slot_holders(issues))
+    end
+  end
+
+  defp slot_note(_workspace, _issues, _slots_total), do: nil
 
   # What `load/1` reads for `slots_total`, for the default workspace.
   defp slots_total(issues, opts) do

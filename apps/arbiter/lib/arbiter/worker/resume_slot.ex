@@ -55,6 +55,7 @@ defmodule Arbiter.Worker.ResumeSlot do
   a free slot (the Autopilot draining a deferred resume); it is not re-checked.
   """
 
+  alias Arbiter.Accounts.SlotLimit
   alias Arbiter.Board.Snapshot
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.SlotGate
@@ -64,7 +65,12 @@ defmodule Arbiter.Worker.ResumeSlot do
   require Logger
 
   @typedoc "What a refusal / deferral / override knows about the cap."
-  @type info :: %{task_id: String.t(), cap: non_neg_integer(), holders: [String.t()]}
+  @type info :: %{
+          required(:task_id) => String.t(),
+          required(:cap) => non_neg_integer(),
+          required(:holders) => [String.t()],
+          optional(:limit) => SlotLimit.t() | nil
+        }
 
   @type result ::
           {:ok, :held | :acquired | :forced | :admitted}
@@ -116,13 +122,25 @@ defmodule Arbiter.Worker.ResumeSlot do
   source of truth for MCP, the REST API (and so the CLI), and the dashboard.
   """
   @spec refusal_message(info()) :: String.t()
-  def refusal_message(%{task_id: task_id, cap: cap, holders: holders}) do
-    "no free worker slot to resume #{task_id}: the concurrency cap is #{cap} and " <>
-      "#{held_by(holders)}. #{task_id} is not In progress, so it holds no slot " <>
+  def refusal_message(%{task_id: task_id} = info) do
+    "no free worker slot to resume #{task_id}: #{limit_phrase(info)}. #{task_id} is not In progress, so it holds no slot " <>
       "and resuming it is a new admission. Wait for a slot to free, or " <>
       "resume with force (MCP `force: true`, `arb worker resume --force`) to go " <>
       "over the cap — the override is recorded."
   end
+
+  @doc """
+  Names the binding limit — the account ceiling, the workspace cap or the
+  install cap — and who is counted against it (bd-48prlb). Falls back to the
+  workspace-framed number when the binding limit is unknown. Shared by the
+  refusal and the deferred-resume log line.
+  """
+  @spec limit_phrase(info()) :: String.t()
+  def limit_phrase(%{limit: %{} = limit, holders: holders}),
+    do: SlotLimit.describe(limit, holders)
+
+  def limit_phrase(%{cap: cap, holders: holders}),
+    do: "the concurrency cap is #{cap} and #{held_by(holders)}"
 
   defp held_by([]), do: "no task is holding a slot (the cap itself is 0)"
 
@@ -164,6 +182,8 @@ defmodule Arbiter.Worker.ResumeSlot do
     do: {:ok, :acquired}
 
   defp acquire(task, info, opts) do
+    info = Map.put(info, :limit, limit_for(task, info))
+
     cond do
       Keyword.get(opts, :force) == true ->
         record_override(task, info, opts)
@@ -179,8 +199,7 @@ defmodule Arbiter.Worker.ResumeSlot do
 
   defp record_override(%Issue{workspace_id: ws_id}, info, opts) do
     Logger.warning(
-      "ResumeSlot: #{info.task_id} resumed over the concurrency cap (#{info.cap}, held by " <>
-        "#{inspect(info.holders)}) by force from #{inspect(Keyword.get(opts, :actor))}"
+      "ResumeSlot: #{info.task_id} resumed over the concurrency limit (#{limit_phrase(info)}) by force from #{inspect(Keyword.get(opts, :actor))}"
     )
 
     Arbiter.Events.broadcast(ws_id, "slot_cap_override", %{
@@ -201,6 +220,15 @@ defmodule Arbiter.Worker.ResumeSlot do
     |> Ash.read!()
   rescue
     _ -> []
+  end
+
+  defp limit_for(%Issue{workspace_id: ws_id}, %{holders: holders}) do
+    case Ash.get(Arbiter.Tasks.Workspace, ws_id) do
+      {:ok, ws} -> SlotLimit.binding(ws, length(holders))
+      _ -> nil
+    end
+  rescue
+    _ -> nil
   end
 
   # The same cap the board promotes against, for the task's own workspace. The
