@@ -28,7 +28,8 @@ defmodule Arbiter.Accounts.LoginRunner do
     5. decides success **only** from the recipe's status command run in the
        same env (`claude auth status --json`, `codex login status`), never from
        screen text, and then hands off via the `:on_success` callback (child 4,
-       bd-djh1yr, records the credential reference).
+       bd-djh1yr) — after `Arbiter.Accounts.LoginCompletion` has recorded the
+       credential reference, cleared the alerts and refreshed quota.
 
   ## Limits
 
@@ -55,6 +56,9 @@ defmodule Arbiter.Accounts.LoginRunner do
     * `:provider`, `:account` — required. `account` is the slug
       (`[A-Za-z0-9][A-Za-z0-9_-]*`).
     * `:topic` — the requester's private PubSub topic. No topic, no broadcasts.
+    * `:started_by` — who asked for the login, recorded in the Login history
+      (`Arbiter.Accounts.LoginRecord`). `:completion_opts` — test seams for
+      `Arbiter.Accounts.LoginCompletion.complete/2`.
     * `:on_success` — `fun/1` called with
       `%{login_id:, provider:, account:, config_dir:}` after the status command
       confirms the login. Exceptions are logged, never fatal.
@@ -66,6 +70,7 @@ defmodule Arbiter.Accounts.LoginRunner do
 
   use GenServer, restart: :temporary
 
+  alias Arbiter.Accounts.LoginCompletion
   alias Arbiter.Accounts.LoginRecipe
   alias Arbiter.Accounts.LoginRecipes
   alias Arbiter.Config.Paths
@@ -238,6 +243,9 @@ defmodule Arbiter.Accounts.LoginRunner do
       runner: Sessions.runner(opts),
       extra_env: Keyword.get(opts, :extra_env, []),
       on_success: Keyword.get(opts, :on_success),
+      started_by: Keyword.get(opts, :started_by),
+      started_at: DateTime.utc_now(),
+      completion_opts: Keyword.get(opts, :completion_opts, []),
       timeout_ms: Keyword.get(opts, :timeout_ms, @default_timeout_ms),
       poll_interval_ms: Keyword.get(opts, :poll_interval_ms, @default_poll_interval_ms),
       status_interval_ms: Keyword.get(opts, :status_interval_ms, @default_status_interval_ms),
@@ -620,6 +628,7 @@ defmodule Arbiter.Accounts.LoginRunner do
   defp finish_state(state, status, reason) do
     state = %{state | status: status, reason: reason}
     state = cleanup(state)
+    complete(state)
     if status == :succeeded, do: hand_off(state)
     Logger.info("login #{state.id} (#{state.provider}-#{state.account}): #{status}")
     broadcast(state)
@@ -640,6 +649,24 @@ defmodule Arbiter.Accounts.LoginRunner do
     end
 
     %{state | cleaned_up?: true}
+  end
+
+  # Child 4 (bd-djh1yr): record the credential by reference, clear the alerts,
+  # poke the quota poller, and write the Login history row. Never fatal.
+  defp complete(state) do
+    LoginCompletion.complete(
+      %{
+        login_id: state.id,
+        provider: state.provider,
+        account: state.account,
+        config_dir: state.config_dir,
+        started_by: state.started_by,
+        started_at: state.started_at
+      },
+      Keyword.merge(state.completion_opts, outcome: state.status, reason: state.reason)
+    )
+  rescue
+    e -> Logger.error("login #{state.id}: completion raised: #{Exception.message(e)}")
   end
 
   defp hand_off(%{on_success: fun} = state) when is_function(fun, 1) do

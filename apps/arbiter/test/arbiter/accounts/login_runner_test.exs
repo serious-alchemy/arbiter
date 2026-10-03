@@ -85,6 +85,62 @@ defmodule Arbiter.Accounts.LoginRunnerTest do
     session
   end
 
+  describe "completion (bd-djh1yr)" do
+    test "a verified login references the dedicated dir and writes a history row" do
+      test_pid = self()
+
+      %{id: id} =
+        start(:claude, "complete", :success,
+          started_by: "operator",
+          completion_opts: [
+            quota_refresh: fn account_id -> send(test_pid, {:poll, account_id}) end
+          ]
+        )
+
+      await_status(id, :awaiting_user)
+      assert :ok = LoginRunner.relay_paste(id, @secret)
+      await_status(id, :succeeded)
+
+      dir = Path.join(Arbiter.Config.Paths.accounts_root(), "claude-complete")
+      {:ok, account} = Arbiter.Accounts.get_account("claude:complete")
+
+      assert [credential] =
+               Arbiter.Accounts.ProviderCredential
+               |> Ash.read!()
+               |> Enum.filter(&(&1.provider_account_id == account.id and &1.active))
+               |> Ash.load!(:secret)
+
+      assert credential.secret == Path.join(dir, ".credentials.json")
+      assert_receive {:poll, account_id}
+      assert account_id == account.id
+
+      assert [record] =
+               Arbiter.Accounts.LoginRecord
+               |> Ash.read!()
+               |> Enum.filter(&(&1.account == "complete"))
+
+      assert record.outcome == :succeeded
+      assert record.started_by == "operator"
+      assert record.login_id == id
+      assert record.fingerprint =~ ~r/\A[0-9a-f]{12}\z/
+    end
+
+    test "a cancelled login is recorded with no fingerprint" do
+      %{id: id} = start(:claude, "cancelrec", :hang, started_by: "operator")
+      await_status(id, :awaiting_user)
+      assert :ok = LoginRunner.cancel(id)
+      await_status(id, :cancelled)
+
+      assert [record] =
+               Arbiter.Accounts.LoginRecord
+               |> Ash.read!()
+               |> Enum.filter(&(&1.account == "cancelrec"))
+
+      assert record.outcome == :cancelled
+      assert record.fingerprint == nil
+    end
+  end
+
   describe "paste-code flow (claude)" do
     test "reaches :awaiting_user with the URL and needs_paste?, then verifies and succeeds" do
       %{id: id} = start(:claude, "work", :success)
