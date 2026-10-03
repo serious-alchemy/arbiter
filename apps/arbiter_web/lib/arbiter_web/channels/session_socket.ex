@@ -37,6 +37,7 @@ defmodule ArbiterWeb.SessionSocket do
 
   alias Arbiter.MCP.Scope
   alias ArbiterWeb.Loopback
+  alias ArbiterWeb.Plugs.WorkerBridge
 
   channel "session:*", ArbiterWeb.SessionChannel
 
@@ -52,8 +53,12 @@ defmodule ArbiterWeb.SessionSocket do
   @impl true
   def id(_socket), do: nil
 
+  # bd-c1qq7l (G9): a connection that came through a jailed worker's Arbiter
+  # bridge is loopback by address only. It never gets a coordinator's terminal,
+  # whatever token it presents.
   defp authorized?(params, connect_info) do
-    Loopback.loopback?(peer_address(connect_info)) or valid_token?(params)
+    not WorkerBridge.bridged?(connect_info) and
+      (Loopback.loopback?(peer_address(connect_info)) or valid_token?(params))
   end
 
   defp peer_address(%{peer_data: %{address: address}}), do: address

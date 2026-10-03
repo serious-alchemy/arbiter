@@ -71,6 +71,18 @@ defmodule ArbiterWeb.Api.McpController do
     ttl = OperatorSocket.parse_ttl(Map.get(params, "ttl"))
 
     case conn.assigns[:mcp_scope] do
+      # bd-c1qq7l (G9): nothing a jailed worker can reach mints a token, not
+      # even a narrower one. Refused on the connection, before the scope is
+      # looked at, so it holds for any scope the bridge could carry.
+      _ when is_map_key(conn.assigns, :worker_bridge) ->
+        conn
+        |> put_status(:forbidden)
+        |> json(%{
+          "error" => %{
+            "message" => "token minting is refused through a worker's Arbiter bridge"
+          }
+        })
+
       # bd-8381tk: loopback is not an identity. Every worker shares this host
       # and Unix user, so an anonymous loopback caller could be any of them.
       # No tier is safe to hand out here (the only tier this endpoint mints is

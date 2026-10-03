@@ -638,6 +638,7 @@ defmodule Arbiter.Agents.Gemini do
     case JailRun.start(
            owner: Keyword.get(opts, :owner),
            task_id: Keyword.get(opts, :task_id),
+           arb_token: Keyword.get(opts, :arb_token),
            safe_defaults_exclude: policy.permissions.safe_defaults_exclude,
            worktree: worktree,
            infra: @egress_infra,

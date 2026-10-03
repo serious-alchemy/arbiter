@@ -60,7 +60,7 @@ defmodule Arbiter.Worker.Egress do
   """
 
   alias Arbiter.Config.Paths
-  alias Arbiter.Worker.Egress.{GrantCache, Policy, RunSupervisor}
+  alias Arbiter.Worker.Egress.{BridgeIdentity, GrantCache, Policy, RunSupervisor}
 
   @registry Arbiter.Worker.Egress.Registry
   @supervisor Arbiter.Worker.Egress.RunSupervisors
@@ -157,6 +157,8 @@ defmodule Arbiter.Worker.Egress do
   @doc "Stops `run_id`'s proxy: closes live tunnels and the socket, removes the file."
   @spec stop_run(String.t()) :: :ok
   def stop_run(run_id) do
+    BridgeIdentity.delete_run(run_id)
+
     case Registry.lookup(@registry, {run_id, :sup}) do
       [{pid, _}] -> _ = DynamicSupervisor.terminate_child(@supervisor, pid)
       [] -> :ok

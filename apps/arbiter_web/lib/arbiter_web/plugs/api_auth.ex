@@ -23,6 +23,12 @@ defmodule ArbiterWeb.Plugs.ApiAuth do
 
   Errors use the API error shape: `%{"error" => %{"message" => "..."}}`.
 
+  A request that arrived through a jailed worker's Arbiter bridge
+  (`ArbiterWeb.Plugs.WorkerBridge`, bd-c1qq7l) is authenticated as that
+  worker's own `:worker` scope, derived from the connection and the run. Any
+  `Authorization` header it carries is ignored, and a run with no usable scope
+  gets 401: it is never anonymous loopback.
+
   The decoded `%Scope{}` is assigned to `conn.assigns[:mcp_scope]` (`nil`
   only on an `:anonymous` route reached without a token), so controllers
   can narrow further — `ArbiterWeb.Api.McpController.mint_token/2` caps what
@@ -39,6 +45,7 @@ defmodule ArbiterWeb.Plugs.ApiAuth do
   alias Arbiter.MCP.Scope
   alias ArbiterWeb.ApiPolicy
   alias ArbiterWeb.Loopback
+  alias ArbiterWeb.Plugs.WorkerBridge
 
   @impl true
   def init(opts), do: opts
@@ -56,6 +63,19 @@ defmodule ArbiterWeb.Plugs.ApiAuth do
   end
 
   defp authenticate(%Plug.Conn{remote_ip: remote_ip} = conn) do
+    case WorkerBridge.identity(conn) do
+      {_run_id, {:ok, %Scope{} = scope}} ->
+        {:ok, scope}
+
+      {_run_id, {:error, _reason}} ->
+        {:error, :unauthenticated, "Worker bridge identity unavailable or expired"}
+
+      nil ->
+        authenticate_presented(conn, remote_ip)
+    end
+  end
+
+  defp authenticate_presented(conn, remote_ip) do
     case get_req_header(conn, "authorization") do
       ["Bearer " <> token] ->
         case Scope.from_token(String.trim(token)) do

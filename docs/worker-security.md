@@ -1116,6 +1116,36 @@ escript built from this branch:
   reparented to `systemd --user` in the terminal's own scope, so it passes
   checks 2 and 3. Run the release as `arbiter.service` for the full check.
 
+### The jailed worker's Arbiter bridge is the worker (bd-c1qq7l, G9)
+
+A jailed agy worker reaches Arbiter through `<run>.arb.sock`, a byte bridge to
+the server's loopback port. By address that is anonymous loopback, so the
+bridge's identity is recorded out of band instead:
+
+* `Egress.Forward` registers each connection it dials (its own local
+  `{address, port}`) with `Egress.BridgeIdentity` before relaying a byte. The
+  kernel guarantees nobody else holds that 4-tuple while it lives, so the
+  endpoint's `peer_data` for the connection can only be the bridge's.
+* `ArbiterWeb.Plugs.WorkerBridge`, the first plug in the endpoint, looks the
+  peer up. A hit assigns `:worker_bridge`: `ApiAuth` and the `/mcp` plug then
+  authenticate as the run's own `:worker` token (the one dispatch minted, kept
+  by `JailRun.start/1`) and **ignore** any `Authorization` header or `?token=`.
+  The token is decoded per request, so expiry and revocation apply. A run with
+  no usable worker token gets 401 on everything. It is never anonymous.
+* The scope's own rules do the rest: another task's or workspace's tickets
+  are 403, and coordinator tools are not visible.
+* `POST /api/mcp/tokens` is 403 for any bridged request, whatever scope it
+  carries. There is no MCP tool that mints a token.
+* A bridged request may only touch `/api` and `/mcp`. The dashboard, `/events`
+  and the `/proxy` routes get 403, and the `/session` socket refuses a bridged
+  peer (`SessionSocket.connect/3`).
+
+The coordinator, the operator socket and unjailed workers have no bridge
+connection, so none of this applies to them. Not covered: the `/live`
+WebSocket handshake (Phoenix dispatches sockets before the plug pipeline). It
+cannot mount a LiveView without the signed session token that only a rendered
+page carries, and the pages are refused.
+
 ### Known open gaps (not fixed here)
 
 * **Erlang distribution** is now loopback-only with a per-install 0600
