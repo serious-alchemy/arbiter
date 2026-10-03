@@ -199,7 +199,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
   def handle_event("stop", _params, socket) do
     flow_step = current_flow_step(socket.assigns[:snapshot])
 
-    case Worker.stop(socket.assigns.task_id, :normal) do
+    case Worker.operator_stop(socket.assigns.task_id) do
       :ok ->
         {:noreply,
          socket

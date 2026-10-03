@@ -330,6 +330,67 @@ defmodule Arbiter.WorkerRunPersistenceTest do
     assert run.output_lines == ["working", "arb done"]
   end
 
+  for provider <- ["claude", "agy"] do
+    test "an operator stop of a live #{provider} run records :interrupted/operator_stop, not :succeeded" do
+      task_id = "bd-opstop-#{unquote(provider)}-#{System.unique_integer([:positive])}"
+
+      {:ok, pid} =
+        Worker.start(
+          task_id: task_id,
+          repo: "arbiter",
+          workspace_id: "ws-runs",
+          meta: %{provider: unquote(provider)}
+        )
+
+      :ok = Worker.advance(pid, :run_claude)
+      assert [%{state: :working}] = runs_for(task_id)
+
+      :ok = Worker.operator_stop(task_id)
+
+      [run] = runs_for(task_id)
+      assert run.state == :finished
+      assert run.outcome == :interrupted
+      assert run.failure_reason == "operator_stop"
+      assert %DateTime{} = run.completed_at
+    end
+  end
+
+  test "an operator-stopped (:interrupted) run is not counted completed or failed by Loop analysis" do
+    row = fn outcome ->
+      %{
+        task_id: "bd-t",
+        kind: :implement,
+        role: "base",
+        outcome: outcome,
+        cost_usd: 0.0,
+        weighted_tokens: 0,
+        window_share_5h: 0.0,
+        converged?: outcome == :succeeded,
+        difficulty: nil,
+        difficulty_source: :issue,
+        model: "m",
+        model_tier: nil,
+        rejected?: false,
+        transcript_read?: false,
+        failure_reason: nil,
+        stop_category: nil,
+        repo: "r",
+        title: "t",
+        state: :finished,
+        max_round: 1,
+        findings: [],
+        terminal_lines: []
+      }
+    end
+
+    report =
+      Arbiter.Loop.Analysis.build_report([row.(:interrupted), row.(:succeeded)], label: "t")
+
+    assert report.totals.completed == 1
+    assert report.totals.failed == 0
+    assert report.totals.runs == 2
+  end
+
   test "terminate after an explicit completion does not double-write the Run row" do
     # complete_now/2 already stamped the row; terminate/2 must no-op so it does
     # not clobber the completed_at / exit fields written at completion time.
