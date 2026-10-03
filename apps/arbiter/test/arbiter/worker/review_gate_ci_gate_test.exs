@@ -667,7 +667,8 @@ defmodule Arbiter.Worker.ReviewGateCiGateTest do
       assert_receive {:DOWN, ^ref, :process, ^pid, _}, 5_000
     end
 
-    :ok
+    # The registry drops the killed author asynchronously; a restart starts empty.
+    wait_until(fn -> Worker.whereis(rig.task.id) == nil end)
   end
 
   defp stop_gate(gate) do

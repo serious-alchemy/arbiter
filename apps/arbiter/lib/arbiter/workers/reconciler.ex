@@ -437,10 +437,7 @@ defmodule Arbiter.Workers.Reconciler do
       # `reconcile_open_pr_tasks/1` restarts from the row. A revision runs with
       # its ticket In progress, so a cut-off run on a Merging ticket can only
       # be an implementer parked on its PR before bd-741sid, its work done.
-      |> Enum.reject(
-        &(&1.state == :merging or live_worker_for_issue?(&1) or review_only?(&1) or
-            ci_waiting?(&1))
-      )
+      |> Enum.reject(&skip_resume?/1)
       |> Enum.filter(&(is_nil(&1.pr_ref) or ResumeSlot.cut_off_by_restart?(&1.id)))
 
     {resumed, escalated} =
@@ -484,6 +481,12 @@ defmodule Arbiter.Workers.Reconciler do
 
       {:error, e}
   end
+
+  # bd-2gc809: a ticket waiting on CI is `reconcile_ci_waits/1`'s, not a resume.
+  defp skip_resume?(%Issue{} = issue),
+    do:
+      issue.state == :merging or review_only?(issue) or ci_waiting?(issue) or
+        live_worker_for_issue?(issue)
 
   # An orphaned at-work task is re-watchable (belongs to the patrol layer)
   # when it has an open PR of its own (pr_ref) or is a review-only engagement
