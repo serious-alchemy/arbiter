@@ -919,4 +919,14 @@ defmodule Arbiter.Agents.CodexTest do
   defp git!(dir, args) do
     {_, 0} = System.cmd("git", args, cd: dir, stderr_to_stdout: true)
   end
+
+  describe "async_tool_instruction timeout guidance" do
+    test "tells the worker to scope long commands under the command timeout" do
+      for text <- [Codex.async_tool_instruction(), Codex.async_tool_instruction("`arb done`")] do
+        assert text =~ "command timeout"
+        assert text =~ "single test file"
+        assert text =~ "do not attempt to background"
+      end
+    end
+  end
 end
