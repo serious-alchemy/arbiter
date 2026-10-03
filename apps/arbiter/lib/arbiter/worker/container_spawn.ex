@@ -131,8 +131,8 @@ defmodule Arbiter.Worker.ContainerSpawn do
       `:repo`, `:argv` (the inner argv, for an oversized prompt's temp file);
     * `:image` (a ready tag; else `config :arbiter, :worker_container_image`,
       else the repo's default-branch image from `Image.ensure/3`);
-    * `:podman`, `:claude_path` and `:arb_path` (host binaries; default found on
-      `PATH`), `:egress` (`(opts -> {:ok, network, run_id} | {:error, reason})`,
+    * `:podman`, `:claude_path` and `:arb_path` (host binaries; default found with
+      `:find_executable`, `System.find_executable/1`), `:egress` (`(opts -> {:ok, network, run_id} | {:error, reason})`,
       default `JailRun.start/1`).
   """
   @spec prepare(keyword()) :: {:ok, request()} | {:error, term()}
@@ -229,8 +229,9 @@ defmodule Arbiter.Worker.ContainerSpawn do
   # no CLI that can drift from the one Arbiter probed. `claude` is mandatory;
   # a host with no `arb` on PATH still gets a worker, minus the CLI.
   defp cli_mounts(opts) do
-    claude = Keyword.get_lazy(opts, :claude_path, fn -> System.find_executable("claude") end)
-    arb = Keyword.get_lazy(opts, :arb_path, fn -> System.find_executable("arb") end)
+    find = Keyword.get(opts, :find_executable, &System.find_executable/1)
+    claude = Keyword.get_lazy(opts, :claude_path, fn -> find.("claude") end)
+    arb = Keyword.get_lazy(opts, :arb_path, fn -> find.("arb") end)
 
     case claude do
       path when is_binary(path) ->
@@ -258,7 +259,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
 
   defp resolve_links(path, depth) do
     case File.read_link(path) do
-      {:ok, target} -> path |> Path.dirname() |> Path.join(target) |> resolve_links(depth + 1)
+      {:ok, target} -> target |> Path.expand(Path.dirname(path)) |> resolve_links(depth + 1)
       {:error, _} -> path
     end
   end
