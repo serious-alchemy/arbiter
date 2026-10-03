@@ -26,10 +26,10 @@ defmodule Arbiter.Tasks.Lifecycle.Projection do
   require Ash.Query
   require Logger
 
-  alias Arbiter.Board.Scheduler
   alias Arbiter.Tasks.Dependency
   alias Arbiter.Tasks.DependencyGraph
   alias Arbiter.Tasks.EdgeGate
+  alias Arbiter.Tasks.EffectivePriority
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Lifecycle
   alias Arbiter.Tasks.Lifecycle.View
@@ -84,7 +84,8 @@ defmodule Arbiter.Tasks.Lifecycle.Projection do
   @doc """
   Every ticket in workspace `workspace_id` that is not closed and not an epic
   (epics stay off the board), with its view, in dispatch order
-  (`Arbiter.Board.Scheduler.order/1`: priority, rank, age).
+  (`Arbiter.Tasks.EffectivePriority.order/1`, the §4 key of `Arbiter.Board.Scheduler.order/1`:
+  effective priority, …, own priority, rank, age — plain priority, rank, age while no epic has a floor).
   """
   @spec open(String.t(), keyword()) :: [{Issue.t(), View.t()}]
   def open(workspace_id, opts \\ []) when is_binary(workspace_id) do
@@ -96,7 +97,7 @@ defmodule Arbiter.Tasks.Lifecycle.Projection do
         workspace_id == ^workspace_id and state != :closed and issue_type not in ^excluded
       )
       |> Ash.read!()
-      |> Scheduler.order()
+      |> EffectivePriority.order()
 
     views = views(issues, opts)
     Enum.map(issues, &{&1, Map.fetch!(views, &1.id)})

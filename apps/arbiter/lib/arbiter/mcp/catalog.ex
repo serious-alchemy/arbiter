@@ -152,7 +152,10 @@ defmodule Arbiter.MCP.Catalog do
           "closed), `column` (backlog | blocked | ready | in_progress | merging | verifying " <>
           "| closed), `step` (the computed step inside In progress or Merging, else null), " <>
           "`blocked_by` (unsatisfied gating blockers), `attention` ({owner, waiting_on, " <>
-          "reason, cause, since, note} or null) and `close_reason`. A worker reads its " <>
+          "reason, cause, since, note} or null) and `close_reason`. `priority` is the own " <>
+          "priority; `effective_priority` is what the ticket is scheduled as (an epic " <>
+          "floor can lift it), `priority_via` the epic supplying that floor (or null) and " <>
+          "`priority_lift` `applied` | `capped` | null. A worker reads its " <>
           "own ticket (the `id` argument may be omitted); a coordinator must pass the `id`. " <>
           "Pass `full: true` to include review fields (notes, qa_notes, deployment_notes, " <>
           "pr_body, pr_ref, tracker_ref, target_branch, repo, auto_close, " <>
@@ -191,7 +194,7 @@ defmodule Arbiter.MCP.Catalog do
       name: "ticket_ready",
       tiers: [:coordinator],
       description:
-        "List the tickets in the Ready column, in dispatch order (priority, rank, age): " <>
+        "List the tickets in the Ready column, in dispatch order (effective priority, rank, age — an epic's floor lifts its children): " <>
           "state `queued` with no unsatisfied gating blocker. A blocker that is Verifying " <>
           "(merged, awaiting its verification) no longer blocks. Backlog, Blocked and " <>
           "epics are never listed. Each carries `state`, `column`, `step`, `blocked_by` " <>

@@ -45,16 +45,72 @@ defmodule ArbiterCli.Cmd.ShowTest do
     assert err =~ "resource not found"
   end
 
+  # ES4 (bd-4sw689): the server's `effective_priority`, `priority_via` and
+  # `priority_lift` ride through `--json` untouched; the text view names a lift.
+  describe "effective priority (ES4)" do
+    defp line(out, label) do
+      out |> String.split("\n") |> Enum.find(&String.starts_with?(&1, label <> ":"))
+    end
+
+    @lifted %{
+      "id" => "bd-9",
+      "title" => "lifted",
+      "state" => "queued",
+      "priority" => 3,
+      "effective_priority" => 1,
+      "priority_via" => "bd-epic",
+      "priority_lift" => "applied"
+    }
+
+    test "--json carries the three fields" do
+      stub_get("/api/issues/bd-9", @lifted)
+      {out, _err, 0} = capture(fn -> ArbiterCli.Cmd.Issue.run(["show", "bd-9", "--json"]) end)
+
+      assert %{
+               "priority" => 3,
+               "effective_priority" => 1,
+               "priority_via" => "bd-epic",
+               "priority_lift" => "applied"
+             } = Jason.decode!(String.trim(out))
+    end
+
+    test "text: an applied lift prints 'Scheduled as'; a capped one says so" do
+      stub_get("/api/issues/bd-9", @lifted)
+      {out, _err, 0} = capture(fn -> ArbiterCli.Cmd.Issue.run(["show", "bd-9"]) end)
+      assert line(out, "Priority") =~ "3"
+      assert line(out, "Scheduled as") =~ "P1 via bd-epic"
+
+      stub_get(
+        "/api/issues/bd-9",
+        Map.merge(@lifted, %{"effective_priority" => 3, "priority_lift" => "capped"})
+      )
+
+      {out, _err, 0} = capture(fn -> ArbiterCli.Cmd.Issue.run(["show", "bd-9"]) end)
+      assert line(out, "Scheduled as") =~ "P3"
+      assert line(out, "Scheduled as") =~ "lift via bd-epic waiting"
+    end
+
+    test "text: no lift prints no 'Scheduled as' line" do
+      stub_get("/api/issues/bd-8", %{
+        "id" => "bd-8",
+        "title" => "plain",
+        "priority" => 2,
+        "effective_priority" => 2,
+        "priority_via" => nil,
+        "priority_lift" => nil
+      })
+
+      {out, _err, 0} = capture(fn -> ArbiterCli.Cmd.Issue.run(["show", "bd-8"]) end)
+      refute line(out, "Scheduled as")
+    end
+  end
+
   # bd-6fkgvo AC2: the text view speaks the lifecycle vocabulary.
   describe "lifecycle lines" do
     defp show(issue) do
       stub_get("/api/issues/#{issue["id"]}", issue)
       {out, _err, 0} = capture(fn -> ArbiterCli.Cmd.Issue.run(["show", issue["id"]]) end)
       out
-    end
-
-    defp line(out, label) do
-      out |> String.split("\n") |> Enum.find(&String.starts_with?(&1, label <> ":"))
     end
 
     test "a merging ticket: state and column, step, attention, PR and merge status, current run" do

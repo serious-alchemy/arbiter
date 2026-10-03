@@ -5,7 +5,7 @@ and its one dispatch-eligibility predicate ([ticket lifecycle](ticket-lifecycle.
 §1–2; bd-asxw4e, bd-79w1fs), `ticket_transitions` (bd-5gkqdr, bd-d8fi92) ·
 **Reconciles with:** [paced quota routing signals](paced-quota-routing-signals.md)
 (bd-9ck2a7, epic bd-gfob09; R5, R7 bd-6bxv7h, R10 bd-3jshn8) · **Status:**
-proposed 2026-10-01. ES1–ES3 are implemented (the §4 order key, the lift cap and the §6.6 settings except `scheduling_epic_wip_limit`, which ships with ES10); the rest is not. The ticket plan is in
+proposed 2026-10-01. ES1–ES4 are implemented (the §4 order key, the lift cap and the §6.6 settings except `scheduling_epic_wip_limit`, which ships with ES10; and ES4's read surfaces: `effective_priority`/`priority_via`/`priority_lift` on `ticket_show` and `GET /api/issues/:id`, and the §4 order on `GET /api/issues/ready` and `/lifecycle`, so `arb ready`, `arb prime` and `ticket_ready` too); the rest is not. The ticket plan is in
 [§9](#9-phased-ticket-breakdown). The measurements are reproducible with
 [`epic-aware-scheduling/measure_epic_waits.py`](epic-aware-scheduling/measure_epic_waits.py)
 ([Appendix A](#appendix-a-method)).
@@ -74,7 +74,7 @@ proposed 2026-10-01. ES1–ES3 are implemented (the §4 order key, the lift cap 
 | The board | `Snapshot.derive/1` (`snapshot.ex:226-255`) | Ready rows are `plan.entries`. Backlog and Blocked use the same `Scheduler.order/1` (`:912-935`). Epics are kept off every column (`:205-208`) and appear only as the `↳` parent chip (`parent_refs/2`, `:1312-1355`) |
 | The scope | `Snapshot.load/1` (`snapshot.ex:332-380`) | Issues and edges are read **unscoped**: one queue across every workspace. Slots and the quota hold come from the default workspace |
 | Slots | `effective_max_concurrent/3` (`snapshot.ex:491-527`), `slots_free` (`:224-225`) | `min(workspace conductor.max_concurrent, system max, account headroom)`. Live: `default` has 4, the installation's system max is 3, so 3 slots. A slot is a ticket in `:active` |
-| Quota-held intents | `DispatchQueue.queue_order_key/1` (`apps/arbiter/lib/arbiter/workflows/dispatch_queue.ex:1163-1165`), `priority_of/1` (`:1126-1127`) | `{priority, opened_at}` |
+| Quota-held intents | `DispatchQueue.queue_order_key/1` (`apps/arbiter/lib/arbiter/workflows/dispatch_queue.ex:1163-1165`), `priority_of/1` | `{priority, opened_at}`; since ES4 `priority` is the effective one (`Arbiter.Tasks.EffectivePriority`), read when the intent is held |
 | Model tier | `Routing.ByPriority` (`apps/arbiter/lib/arbiter/agents/routing/by_priority.ex:44-62`) | `routing.rules."P<n>"` by `task.priority` |
 | The card badge | `priority_tag/1` (`apps/arbiter_web/lib/arbiter_web/components/core_components/data.ex:85-96`), used at `domain.ex:333` from `board_live.ex:1393` | `P<n>`. P0–P1 use `badge-error`, P2 `badge-neutral`, P3–P4 `badge-ghost` |
 | Manual order | `board_live.ex` moduledoc (`:37-45`), `reorder/4` (`:424-435`); `Tasks.Rank.move/2` | A drag rewrites `rank`. A drop into another band changes `priority` first. `set_rank` has run 34 times (`issues_versions`) |

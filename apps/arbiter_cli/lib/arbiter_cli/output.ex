@@ -218,6 +218,7 @@ defmodule ArbiterCli.Output do
         {"Merge status", merge_status_label(issue["merger_status"])},
         {"Current run", current_run_label(issue["current_run"])},
         {"Priority", issue["priority"]},
+        {"Scheduled as", scheduled_as_label(issue)},
         {"Difficulty", difficulty_label(issue["difficulty"])},
         {"Providers", provider_constraint_label(issue["provider_constraint"])},
         {"Estimate", estimate_label(issue["estimate"])},
@@ -324,6 +325,18 @@ defmodule ArbiterCli.Output do
     do: "exclude " <> Enum.join(list, ", ")
 
   defp provider_constraint_label(_), do: nil
+
+  # ES4: only a ticket an epic floor touches gets the line, so a board with no
+  # floors prints exactly what it did before.
+  defp scheduled_as_label(%{"priority_lift" => "applied", "effective_priority" => eff} = issue)
+       when is_integer(eff),
+       do: "P#{eff} via #{issue["priority_via"]}"
+
+  defp scheduled_as_label(%{"priority_lift" => "capped", "effective_priority" => eff} = issue)
+       when is_integer(eff),
+       do: "P#{eff} (lift via #{issue["priority_via"]} waiting: lift cap reached)"
+
+  defp scheduled_as_label(_issue), do: nil
 
   defp difficulty_label(nil), do: nil
   defp difficulty_label(n) when is_integer(n) and n in 0..5, do: "D#{n}"

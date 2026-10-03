@@ -28,7 +28,9 @@ defmodule Arbiter.Workflows.DispatchQueue do
   On drain, each intent is re-checked against the current gate/quota; only those
   the gate now `:allow`s are dispatched (with `skip_quota_gate: true` so they
   don't re-enter the gate and loop). Order is priority-first, FIFO tiebreak —
-  the same `{priority, opened_at}` key `MergeQueue` uses.
+  the same `{priority, opened_at}` key `MergeQueue` uses, except that the
+  priority is the *effective* one (an epic's floor, `EffectivePriority`), read
+  when the intent is held (ES4).
 
   ## A held intent for a task that has since closed is dropped, not retried forever (bd-atjyzu)
 
@@ -132,6 +134,7 @@ defmodule Arbiter.Workflows.DispatchQueue do
 
   alias Arbiter.CircuitBreaker
   alias Arbiter.Quota.Gate.Snapshot
+  alias Arbiter.Tasks.EffectivePriority
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker
@@ -1144,9 +1147,13 @@ defmodule Arbiter.Workflows.DispatchQueue do
     ArgumentError -> :claude
   end
 
-  # Task priority (0 = P0 highest … 4 = P4 lowest) for the queue order key.
-  # Defaults to P2 if the task can't be read.
-  defp priority_of(%Issue{priority: p}) when is_integer(p), do: p
+  # Task priority (0 = P0 highest … 4 = P4 lowest) for the queue order key: the
+  # *effective* priority, so an epic's floor lifts its children's held intents
+  # the way it lifts them on the board (`docs/design/epic-aware-scheduling.md`
+  # §6.4: effective priority decides *when*; own priority decides what may be
+  # spent, which this key never touches). Resolved through `EpicFloor` when the
+  # intent is held; defaults to P2 if the task can't be read.
+  defp priority_of(%Issue{} = task), do: EffectivePriority.effective(task)
   defp priority_of(_task), do: 2
 
   # A read that exits is as unreadable as one that raises: a checkout against a

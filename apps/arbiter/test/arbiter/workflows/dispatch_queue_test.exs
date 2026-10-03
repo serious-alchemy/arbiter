@@ -222,6 +222,55 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
     end
   end
 
+  describe "epic floors (ES4, bd-4sw689) — held intents queue by effective priority" do
+    setup do
+      Application.put_env(:arbiter, :test_dispatch_pid, self())
+      on_exit(fn -> Application.delete_env(:arbiter, :test_dispatch_pid) end)
+      :ok
+    end
+
+    defp held_drain_order(ws, tasks) do
+      pid = start_queue(ws, dispatcher: RecordingDispatcher, auto_subscribe: false)
+      seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99})
+
+      for task <- tasks do
+        assert {:error, {:quota_held, _}} =
+                 Dispatch.dispatch(task.id, force: true, start_driver: false)
+      end
+
+      seed_quota(ws, %{status_5h: "allowed", utilization_5h: 0.10})
+      :ok = DispatchQueue.drain(pid)
+
+      for _ <- tasks do
+        assert_receive {:dispatched, id, _opts}
+        id
+      end
+    end
+
+    test "a floored epic's P4 child drains ahead of a parentless P2" do
+      ws = make_workspace(%{"quota" => %{"on_exhaustion" => "throttle"}})
+      {:ok, epic} = Ash.create(Issue, %{title: "Epic", workspace_id: ws.id, issue_type: :epic})
+      {:ok, _} = Ash.update(epic, %{floor_priority: 1}, action: :set_floor)
+
+      plain = make_task(ws, %{priority: 2})
+      child = make_task(ws, %{priority: 4})
+      {:ok, _} = Arbiter.Tasks.Dependencies.add(epic.id, child.id, :parent_of)
+
+      assert held_drain_order(ws, [plain, child]) == [child.id, plain.id]
+    end
+
+    test "with no floor the same two drain by own priority" do
+      ws = make_workspace(%{"quota" => %{"on_exhaustion" => "throttle"}})
+      {:ok, epic} = Ash.create(Issue, %{title: "Epic", workspace_id: ws.id, issue_type: :epic})
+
+      plain = make_task(ws, %{priority: 2})
+      child = make_task(ws, %{priority: 4})
+      {:ok, _} = Arbiter.Tasks.Dependencies.add(epic.id, child.id, :parent_of)
+
+      assert held_drain_order(ws, [child, plain]) == [plain.id, child.id]
+    end
+  end
+
   describe "provider pause (bd-5ef587)" do
     test "a pause-held item is kept by the drain while the pause is active" do
       Application.put_env(:arbiter, :test_dispatch_pid, self())

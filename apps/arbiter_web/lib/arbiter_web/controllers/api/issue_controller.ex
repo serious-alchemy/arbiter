@@ -36,6 +36,7 @@ defmodule ArbiterWeb.Api.IssueController do
   alias Arbiter.Tasks.AssigneeCompat
   alias Arbiter.Tasks.Dedup
   alias Arbiter.Tasks.Dependencies
+  alias Arbiter.Tasks.EffectivePriority
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Issue.Changes.CreateUpstream
   alias Arbiter.Tasks.Lifecycle
@@ -71,7 +72,9 @@ defmodule ArbiterWeb.Api.IssueController do
         _ -> []
       end
 
-    issues = Issue.ready(opts)
+    # ES4: `Issue.ready/1` is the set; the §4 key (`EffectivePriority.order/1`,
+    # an epic's floor included) is the order `arb ready` prints it in.
+    issues = opts |> Issue.ready() |> EffectivePriority.order()
     render(conn, :index, issues: issues)
   end
 
@@ -106,6 +109,7 @@ defmodule ArbiterWeb.Api.IssueController do
           epic_rollup: Estimate.epic_cost_rollup(issue),
           dependencies: dependencies,
           lifecycle: Projection.view(issue, workers: live),
+          priority_fields: EffectivePriority.fields(issue),
           current_run: current_run(id, live)
         )
 
