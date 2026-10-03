@@ -597,7 +597,7 @@ defmodule Arbiter.Worker.Dispatch do
       :ok ->
         Logger.info(
           "Dispatch: deferred #{kind} of #{task_id} until a worker slot frees " <>
-            "(cap #{info.cap}, held by #{inspect(info.holders)})"
+            "(#{ResumeSlot.limit_phrase(info)})"
         )
 
         {:deferred, Map.put(info, :deferred, true)}

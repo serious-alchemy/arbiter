@@ -117,6 +117,7 @@ defmodule Arbiter.Board.Scheduler do
           optional(:running) => [in_flight()],
           optional(:conflict_claims) => conflict_claims() | [String.t()],
           optional(:slots_free) => integer(),
+          optional(:slot_note) => String.t() | nil,
           optional(:quota) => quota(),
           optional(:card_quota) => %{optional(String.t()) => quota()},
           optional(:card_constraint) => %{optional(String.t()) => :ok | {:hold, String.t()}},
@@ -172,7 +173,8 @@ defmodule Arbiter.Board.Scheduler do
       # constraint leaves no eligible account is held on its own, which never
       # advances the queue.
       card_constraint: Map.get(input, :card_constraint) || %{},
-      slots_free: Map.get(input, :slots_free, 0)
+      slots_free: Map.get(input, :slots_free, 0),
+      slot_note: Map.get(input, :slot_note)
     }
 
     seed = %{
@@ -246,7 +248,7 @@ defmodule Arbiter.Board.Scheduler do
 
       # Only the head of the queue carries a board-wide hold.
       {:held, :no_slot} ->
-        decide(card, @no_slot_reason, acc)
+        decide(card, no_slot_reason(board.slot_note), acc)
 
       {:held, {:quota, _} = hold} ->
         decide(card, phrase(hold, acc.mutex), acc)
@@ -276,6 +278,10 @@ defmodule Arbiter.Board.Scheduler do
       in_flight: claims(acc)
     })
   end
+
+  # bd-48prlb: name the binding limit when the snapshot knows it.
+  defp no_slot_reason(note) when is_binary(note), do: "#{@no_slot_reason} (#{note})"
+  defp no_slot_reason(_note), do: @no_slot_reason
 
   defp decide(card, _hold, %{held?: true} = acc), do: queued(card, acc)
   defp decide(card, _hold, %{promote: p} = acc) when p != nil, do: queued(card, acc)
