@@ -23,6 +23,9 @@ defmodule Arbiter.Worker.PodmanReadinessTest do
       "podman info --format json" => {Jason.encode!(@info), 0},
       "getenforce" => {"Enforcing\n", 0},
       "podman image exists" => {"", 0},
+      "podman run teardown" => {"cid\n", 0},
+      "podman rm" => {"", 0},
+      "podman container exists" => {"", 1},
       "podman run label=disable" => {"pong\n", 0},
       "podman run default" => {"connect: Permission denied\n", 1}
     }
@@ -32,11 +35,20 @@ defmodule Arbiter.Worker.PodmanReadinessTest do
     fn cmd, args, _opts ->
       key =
         cond do
+          cmd == "podman" and List.first(args) == "run" and "-d" in args ->
+            "podman run teardown"
+
           cmd == "podman" and List.first(args) == "run" and "label=disable" in args ->
             "podman run label=disable"
 
           cmd == "podman" and List.first(args) == "run" ->
             "podman run default"
+
+          cmd == "podman" and List.first(args) == "rm" ->
+            "podman rm"
+
+          cmd == "podman" and Enum.take(args, 2) == ["container", "exists"] ->
+            "podman container exists"
 
           cmd == "podman" and Enum.take(args, 2) == ["image", "exists"] ->
             "podman image exists"
@@ -83,12 +95,63 @@ defmodule Arbiter.Worker.PodmanReadinessTest do
     assert Enum.all?(report.checks, &(&1.status in ["ok", "warn"]))
 
     for id <-
-          ~w(podman rootless storage_driver subid user_namespaces selinux cgroups socket_bridge) do
+          ~w(podman rootless storage_driver subid user_namespaces selinux cgroups socket_bridge teardown) do
       assert check(report, id).status == "ok", "#{id} should be ok"
     end
 
     assert check(report, "podman").detail =~ "5.8.7"
     assert check(report, "selinux").detail =~ "Enforcing"
+  end
+
+  test "teardown: a running --init container removed by name passes" do
+    test_pid = self()
+
+    runner = fn
+      "podman", ["rm" | args] = full, _opts ->
+        send(test_pid, {:rm, args})
+        runner().("podman", full, [])
+
+      cmd, args, opts ->
+        runner().(cmd, args, opts)
+    end
+
+    report = PodmanReadiness.diagnose(runner: runner, read_file: read_file(), user: "ryan")
+    assert check(report, "teardown").status == "ok"
+    assert_received {:rm, ["--force", "--ignore", "--time", "0", "arb-teardown-probe-" <> _]}
+  end
+
+  test "teardown: a container that survives its removal fails with a hint" do
+    report = diagnose(%{"podman container exists" => {"", 0}})
+    assert check(report, "teardown").status == "fail"
+    refute report.ready
+    assert check(report, "teardown").hint =~ "podman rm -f"
+  end
+
+  test "teardown: a probe container that cannot start is a warning, not a failure" do
+    report = diagnose(%{"podman run teardown" => {"crun: no such file", 126}})
+    assert check(report, "teardown").status == "warn"
+    assert report.ready
+  end
+
+  test "probes: [] runs no container at all" do
+    test_pid = self()
+
+    runner = fn
+      "podman", ["run" | _], _opts ->
+        send(test_pid, :ran_a_container)
+        {"", 0}
+
+      cmd, args, opts ->
+        runner().(cmd, args, opts)
+    end
+
+    report =
+      PodmanReadiness.diagnose(runner: runner, read_file: read_file(), user: "ryan", probes: [])
+
+    assert report.ready
+    assert check(report, "socket_bridge") == nil
+    assert check(report, "teardown") == nil
+    refute_received :ran_a_container
   end
 
   test "podman missing is a single failure with an install hint" do
