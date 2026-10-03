@@ -58,7 +58,7 @@ defmodule Arbiter.Tasks.EffectivePriority do
         }
     end
   rescue
-    _ -> own_fields(own_priority(issue))
+    _ -> own_fields(own)
   end
 
   def fields(_issue, _opts), do: own_fields(nil)
@@ -130,9 +130,6 @@ defmodule Arbiter.Tasks.EffectivePriority do
   end
 
   defp own_fields(own), do: %{effective_priority: own, priority_via: nil, priority_lift: nil}
-
-  defp own_priority(%{priority: p}), do: p
-  defp own_priority(_), do: nil
 
   defp lift_name(nil), do: nil
   defp lift_name(lift) when is_atom(lift), do: Atom.to_string(lift)
