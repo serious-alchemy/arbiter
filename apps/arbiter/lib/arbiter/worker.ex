@@ -263,6 +263,7 @@ defmodule Arbiter.Worker do
   # the node. Deliberately distinct from the boot reconciler's
   # "server restarted", which marks a run that MISSED this path.
   @shutdown_reason "server shutdown"
+  @operator_stop :operator_stop
 
   # bd-4g0fsh: backoff before an auto-resume of a recoverable stop (transient
   # gateway 5xx, or a clean exit-0 without `arb done`). A recoverable stop is
@@ -1088,6 +1089,18 @@ defmodule Arbiter.Worker do
       pid -> GenServer.stop(pid, reason, timeout)
     end
   end
+
+  @doc """
+  Stop the worker because an operator asked (`arb worker stop`, MCP
+  `worker_stop`, the worker detail page).
+
+  Unlike `stop/3` with `:normal` — the `arb done` -> task close teardown, which
+  records the run `:succeeded` — a killed run did not finish. It is stamped
+  `:interrupted` with failure_reason `"operator_stop"`, so run stats and Loop
+  convergence never count it as a success.
+  """
+  @spec operator_stop(ref()) :: :ok | {:error, :not_found}
+  def operator_stop(ref), do: stop(ref, {:shutdown, @operator_stop})
 
   # ---- GenServer callbacks -----------------------------------------------
 
@@ -7800,7 +7813,7 @@ defmodule Arbiter.Worker do
         record_run_finished(%State{
           finished
           | outcome: :interrupted,
-            meta: Map.put(state.meta, :failure_reason, @shutdown_reason)
+            meta: Map.put(state.meta, :failure_reason, interrupted_reason(reason))
         })
 
       :crashed ->
@@ -7825,13 +7838,17 @@ defmodule Arbiter.Worker do
   defp settle_stopped_pass(_reason, %State{state: :finished}), do: :ok
 
   defp settle_stopped_pass(reason, %State{} = state) do
-    if terminate_outcome(reason) != :interrupted and pass?(state.meta) do
+    if (terminate_outcome(reason) != :interrupted or reason == {:shutdown, @operator_stop}) and
+         pass?(state.meta) do
       settle_pass_worktree(state)
       return_pass_ticket(state)
     end
 
     :ok
   end
+
+  defp interrupted_reason({:shutdown, @operator_stop}), do: Atom.to_string(@operator_stop)
+  defp interrupted_reason(_), do: @shutdown_reason
 
   defp terminate_outcome(:normal), do: :completed
   defp terminate_outcome(:shutdown), do: :interrupted

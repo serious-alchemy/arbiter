@@ -405,7 +405,7 @@ defmodule ArbiterWeb.Api.WorkerController do
   end
 
   def stop(conn, %{"task_id" => task_id}) when is_binary(task_id) and task_id != "" do
-    case Worker.stop(task_id, :normal) do
+    case Worker.operator_stop(task_id) do
       :ok ->
         conn
         |> put_status(:ok)
