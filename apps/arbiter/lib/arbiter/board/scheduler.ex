@@ -117,6 +117,7 @@ defmodule Arbiter.Board.Scheduler do
           optional(:running) => [in_flight()],
           optional(:conflict_claims) => conflict_claims() | [String.t()],
           optional(:slots_free) => integer(),
+          optional(:slot_note) => String.t() | nil,
           optional(:quota) => quota(),
           optional(:card_quota) => %{optional(String.t()) => quota()},
           optional(:card_constraint) => %{optional(String.t()) => :ok | {:hold, String.t()}},

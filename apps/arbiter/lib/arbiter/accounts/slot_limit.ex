@@ -100,7 +100,7 @@ defmodule Arbiter.Accounts.SlotLimit do
   @doc "`\"bd-x implement, bd-y review\"` — each counted run with its role."
   @spec runs([String.t()]) :: String.t()
   def runs([]), do: "no runs"
-  def runs(keys), do: keys |> Enum.map(&"#{task_of(&1)} #{role(&1)}") |> Enum.join(", ")
+  def runs(keys), do: Enum.map_join(keys, ", ", &"#{task_of(&1)} #{role(&1)}")
 
   @doc "The role a registry key names."
   @spec role(String.t()) :: String.t()
