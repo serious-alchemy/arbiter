@@ -28,8 +28,8 @@ defmodule Arbiter.Tasks.Lifecycle.Projection do
 
   alias Arbiter.Tasks.Dependency
   alias Arbiter.Tasks.DependencyGraph
-  alias Arbiter.Tasks.EffectivePriority
   alias Arbiter.Tasks.EdgeGate
+  alias Arbiter.Tasks.EffectivePriority
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Lifecycle
   alias Arbiter.Tasks.Lifecycle.View
