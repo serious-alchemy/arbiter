@@ -6,6 +6,8 @@ defmodule Arbiter.Accounts.LoginRunnerTest do
   """
   use Arbiter.DataCase, async: false
 
+  import ExUnit.CaptureLog
+
   alias Arbiter.Accounts.LoginRecipes
   alias Arbiter.Accounts.LoginRunner
   alias Arbiter.Sessions
@@ -244,6 +246,158 @@ defmodule Arbiter.Accounts.LoginRunnerTest do
       await_status(id, :awaiting_user)
       snap = await_status(id, :failed)
       assert is_binary(snap.reason)
+    end
+  end
+
+  describe "no-leak guarantees (bd-2prmjm)" do
+    # What must never leave the requester's private topic.
+    @url_query "client_id=FAKE&state=FAKE"
+    @device_code "ABCD-12345"
+
+    defp claude_flow(account, mode \\ :success) do
+      %{id: id} = flow = start(:claude, account, mode)
+      await_status(id, :awaiting_user)
+      assert :ok = LoginRunner.relay_paste(id, @secret)
+      flow
+    end
+
+    defp login_record(account) do
+      Arbiter.Accounts.LoginRecord
+      |> Ash.read!()
+      |> Enum.find(&(&1.account == account))
+    end
+
+    defp leaks?(text) do
+      Enum.any?([@url_query, @device_code, @secret], &String.contains?(text, &1))
+    end
+
+    test "no log line, at any level, carries the URL query, a code or the paste" do
+      previous = Logger.level()
+      Logger.configure(level: :debug)
+      on_exit(fn -> Logger.configure(level: previous) end)
+
+      log =
+        capture_log([level: :debug], fn ->
+          %{id: id} = claude_flow("logclaude")
+          await_status(id, :succeeded)
+
+          %{id: dev} = start(:codex, "logcodex", :success)
+          await_status(dev, :awaiting_user)
+          await_status(dev, :succeeded)
+        end)
+
+      assert log =~ "login "
+      refute leaks?(log)
+    end
+
+    test "the stored transcript has query strings stripped and codes/keystrokes blanked" do
+      %{id: id} = claude_flow("transclaude")
+      await_status(id, :succeeded)
+      claude = login_record("transclaude")
+      assert claude.transcript =~ "https://claude.com/cai/oauth/authorize?[REDACTED]"
+      refute leaks?(claude.transcript)
+
+      %{id: dev} = start(:codex, "transcodex", :success)
+      await_status(dev, :succeeded)
+      codex = login_record("transcodex")
+      assert codex.transcript =~ "https://auth.openai.com/codex/device"
+      assert codex.transcript =~ "[REDACTED]"
+      refute leaks?(codex.transcript)
+    end
+
+    test "a cancelled login's transcript is redacted too" do
+      %{id: id} = claude_flow("transcancel", :hang)
+      await_status(id, :verifying)
+      assert :ok = LoginRunner.cancel(id)
+      await_status(id, :cancelled)
+      refute leaks?(login_record("transcancel").transcript || "")
+    end
+
+    test "no PubSub message outside the requester's private topic carries them" do
+      tracer = self()
+      :erlang.trace_pattern({Phoenix.PubSub, :_, :_}, true, [:local])
+      :erlang.trace(:all, true, [:call, {:tracer, tracer}])
+
+      on_exit(fn ->
+        :erlang.trace(:all, false, [:call])
+        :erlang.trace_pattern({Phoenix.PubSub, :_, :_}, false, [:local])
+      end)
+
+      %{id: id, topic: topic} = claude_flow("pubsub")
+      await_status(id, :succeeded)
+      %{id: dev, topic: dev_topic} = start(:codex, "pubsubcodex", :success)
+      await_status(dev, :succeeded)
+
+      :erlang.trace(:all, false, [:call])
+      calls = drain_pubsub_calls([])
+
+      private = [topic, dev_topic]
+      assert Enum.any?(calls, fn {_fun, args} -> Enum.at(args, 1) in private end)
+
+      for {_fun, args} <- calls, Enum.at(args, 1) not in private do
+        refute leaks?(inspect(args, limit: :infinity, printable_limit: :infinity))
+      end
+    end
+
+    defp drain_pubsub_calls(acc) do
+      receive do
+        {:trace, _pid, :call, {Phoenix.PubSub, fun, args}} ->
+          if to_string(fun) =~ "broadcast",
+            do: drain_pubsub_calls([{fun, args} | acc]),
+            else: drain_pubsub_calls(acc)
+      after
+        200 -> acc
+      end
+    end
+
+    test "inspect and sys status of the runner state are redacted" do
+      %{id: id} = claude_flow("inspectclaude", :hang)
+      await_status(id, :verifying)
+      [{pid, _}] = Registry.lookup(Arbiter.Accounts.LoginRunner.Registry, {:login, id})
+
+      state = :sys.get_state(pid)
+      assert state.url =~ "state=FAKE"
+      refute leaks?(inspect(state, limit: :infinity))
+      refute leaks?(inspect(:sys.get_status(pid), limit: :infinity, printable_limit: :infinity))
+
+      assert :ok = LoginRunner.cancel(id)
+    end
+
+    test "a crash report of the runner does not carry them" do
+      Logger.configure(level: :debug)
+      on_exit(fn -> Logger.configure(level: :warning) end)
+      %{id: id} = claude_flow("crashclaude", :hang)
+      await_status(id, :verifying)
+      [{pid, _}] = Registry.lookup(Arbiter.Accounts.LoginRunner.Registry, {:login, id})
+      ref = Process.monitor(pid)
+
+      log =
+        capture_log([level: :debug], fn ->
+          # a nil recipe makes the next poll raise inside the runner
+          :sys.replace_state(pid, fn state -> %{state | recipe: nil} end)
+          assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 5_000
+        end)
+
+      assert log =~ "terminating"
+      refute leaks?(log)
+    end
+
+    test "a relay call that exits does not carry the paste in the exit reason" do
+      %{id: id} = start(:claude, "exitreason", :hang)
+      await_status(id, :awaiting_user)
+      [{pid, _}] = Registry.lookup(Arbiter.Accounts.LoginRunner.Registry, {:login, id})
+      :ok = :sys.suspend(pid)
+
+      reason =
+        try do
+          LoginRunner.relay_paste(id, @secret)
+        catch
+          :exit, reason -> reason
+        end
+
+      :ok = :sys.resume(pid)
+      refute leaks?(inspect(reason))
+      assert :ok = LoginRunner.cancel(id)
     end
   end
 
