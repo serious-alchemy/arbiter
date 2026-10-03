@@ -408,6 +408,31 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
 
   def credential_restored(_snapshot, _adapter, _source), do: :ok
 
+  @doc """
+  Clear the lapsed-login escalations that name `config_dir`: the quota grant's
+  "needs re-login" / "expires soon" pages (`quota_grant_failing/3`). Called
+  once a dashboard login on that config dir succeeds (bd-djh1yr), so the
+  mailbox stops asking for the very thing the operator just did. A no-op when
+  none is open. Best-effort, returns `:ok`.
+  """
+  @spec quota_grant_restored(String.t()) :: :ok
+  def quota_grant_restored(config_dir) when is_binary(config_dir) do
+    for cause <- [:poll_failing, {:refresh_token_expiring, nil}],
+        subject = quota_grant_subject(cause, config_dir),
+        message = Message.last_escalation(:quota_grant_failing, subject: subject, open: true) do
+      Message.mark_cleared(message)
+    end
+
+    :ok
+  rescue
+    e ->
+      Logger.warning(
+        "CoordinatorNotifier: clearing grant escalation raised: #{Exception.message(e)}"
+      )
+
+      :ok
+  end
+
   # A credential episode is finer than its kind — one per adapter and source.
   defp credential_alert_key(adapter, source), do: "#{inspect(adapter)}:#{source}"
 
