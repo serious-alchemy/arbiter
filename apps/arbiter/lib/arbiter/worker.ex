@@ -2634,7 +2634,8 @@ defmodule Arbiter.Worker do
         "(MemoryMax=#{max})"
     )
 
-    if state.run_id, do: backfill_run_fields(state.run_id, %{cgroup_scopes: scopes}, state.task_id)
+    if state.run_id,
+      do: backfill_run_fields(state.run_id, %{cgroup_scopes: scopes}, state.task_id)
 
     %State{state | meta: Map.put(meta, :cgroup_scopes, scopes)}
   end

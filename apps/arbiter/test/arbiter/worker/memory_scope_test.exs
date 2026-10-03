@@ -40,7 +40,8 @@ defmodule Arbiter.Worker.MemoryScopeTest do
     end
   end
 
-  defp probe_opts(cmd), do: [cmd: cmd, systemd_run: "/usr/bin/systemd-run", runtime_dir: "/run/user/1"]
+  defp probe_opts(cmd),
+    do: [cmd: cmd, systemd_run: "/usr/bin/systemd-run", runtime_dir: "/run/user/1"]
 
   defp port_args(env \\ []) do
     %{
@@ -83,7 +84,8 @@ defmodule Arbiter.Worker.MemoryScopeTest do
     test "wraps the agent in a capped, kill-on-OOM scope with the original argv last" do
       System.put_env("ARBITER_WORKER_MEMORY_MAX", "12G")
 
-      {wrapped, scope} = MemoryScope.wrap(port_args(), "bd-abc123", probe_opts(healthy_cmd(false)))
+      {wrapped, scope} =
+        MemoryScope.wrap(port_args(), "bd-abc123", probe_opts(healthy_cmd(false)))
 
       assert wrapped.exec == "/usr/bin/systemd-run"
       assert [_argv0 | args] = wrapped.argv

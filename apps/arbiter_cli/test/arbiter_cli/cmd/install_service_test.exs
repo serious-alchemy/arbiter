@@ -363,6 +363,19 @@ defmodule ArbiterCli.Cmd.InstallServiceTest do
       assert contents =~ "RestartSec=10"
     end
 
+    test "sets OOMPolicy=continue so one OOM-killed worker process cannot stop the service (bd-6zuoo6)" do
+      for scope <- [:user, :system] do
+        contents =
+          InstallService.unit_contents(scope, "/home/user/.arbiter", "/home/user/.arbiter")
+
+        # In [Service], before [Install] — a directive in the wrong section is
+        # silently ignored by systemd.
+        [service_section, _install] = String.split(contents, "[Install]")
+        assert service_section =~ "\nOOMPolicy=continue\n", "#{scope} unit"
+        assert service_section =~ "[Service]"
+      end
+    end
+
     test "user unit routes output to a file so logs survive reboots without journald group" do
       contents = InstallService.unit_contents(:user, "/home/user/.arbiter", "/home/user/.arbiter")
       assert contents =~ "StandardOutput=append:/home/user/.arbiter/log/arbiter.log"
@@ -432,6 +445,12 @@ defmodule ArbiterCli.Cmd.InstallServiceTest do
          } do
       contents = InstallService.unit_contents(:user, "/home/user/.arbiter", root)
       assert contents =~ "TimeoutStartSec=900"
+    end
+
+    test "sets OOMPolicy=continue in the [Service] section, same as release mode", %{root: root} do
+      contents = InstallService.unit_contents(:user, "/home/user/.arbiter", root)
+      [service_section, _install] = String.split(contents, "[Install]")
+      assert service_section =~ "\nOOMPolicy=continue\n"
     end
 
     test "keeps Restart=on-failure and file-based logging, same as release mode", %{root: root} do

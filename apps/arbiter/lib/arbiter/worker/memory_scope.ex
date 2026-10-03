@@ -330,7 +330,8 @@ defmodule Arbiter.Worker.MemoryScope do
     with :ok <- check_platform(opts),
          sd when is_binary(sd) <- systemd_run_path(opts) || {:error, "systemd-run not found"},
          runtime_dir <- runtime_dir(opts),
-         true <- is_binary(runtime_dir) || {:error, "no systemd user runtime dir (XDG_RUNTIME_DIR)"},
+         true <-
+           is_binary(runtime_dir) || {:error, "no systemd user runtime dir (XDG_RUNTIME_DIR)"},
          {:ok, escape?} <- probe_expansion(sd, max, runtime_dir, opts),
          :ok <- probe_enforced(sd, max, runtime_dir, escape?, opts) do
       {:ok, %{escape?: escape?, runtime_dir: runtime_dir}}
@@ -463,6 +464,9 @@ defmodule Arbiter.Worker.MemoryScope do
   end
 
   defp presence(nil), do: nil
-  defp presence(value) when is_binary(value), do: if(String.trim(value) == "", do: nil, else: value)
+
+  defp presence(value) when is_binary(value),
+    do: if(String.trim(value) == "", do: nil, else: value)
+
   defp presence(value), do: value
 end
