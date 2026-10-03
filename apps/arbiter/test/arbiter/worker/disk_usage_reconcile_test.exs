@@ -197,6 +197,66 @@ defmodule Arbiter.Worker.DiskUsageReconcileTest do
     assert ev.raw["arb_usage_source"]["reconciled_from"] == "codex_rollout"
   end
 
+  # G20 (bd-8yafoz): a *completed* codex run has stream tokens but no dollar
+  # figure; the quota % its rollout's `rate_limits` moved by is the
+  # cost-equivalent, recorded on the row's raw + cost_note.
+  test "a completed codex run records the quota-window delta from its rollout rate_limits" do
+    task_id = "bd-codexquota-#{System.unique_integer([:positive])}"
+    thread_id = "019f95af-#{System.unique_integer([:positive])}"
+    cwd = tmp_dir!("codexquota-cwd")
+    codex_home = tmp_dir!("codexquota-home")
+
+    dir = Path.join([codex_home, "sessions", "2026", "09", "29"])
+    File.mkdir_p!(dir)
+    t1 = DateTime.utc_now() |> DateTime.add(600, :second) |> DateTime.to_iso8601()
+    t2 = DateTime.utc_now() |> DateTime.add(660, :second) |> DateTime.to_iso8601()
+
+    tc = fn ts, p, s ->
+      ~s({"timestamp":"#{ts}","type":"event_msg","payload":{"type":"token_count",) <>
+        ~s("info":{"total_token_usage":{"input_tokens":5,"output_tokens":1}},) <>
+        ~s("rate_limits":{"primary":{"used_percent":#{p},"window_minutes":300,"resets_at":1800000000},) <>
+        ~s("secondary":{"used_percent":#{s},"window_minutes":10080,"resets_at":1800500000},"plan_type":"plus"}}})
+    end
+
+    File.write!(
+      Path.join(dir, "rollout-2026-09-29T10-00-00-#{thread_id}.jsonl"),
+      ~s({"timestamp":"#{t1}","type":"session_meta","payload":{"session_id":"#{thread_id}","timestamp":"#{t1}"}}\n) <>
+        tc.(t1, 10.0, 20.0) <> "\n" <> tc.(t2, 13.5, 20.5) <> "\n"
+    )
+
+    {:ok, pid} = Worker.start(task_id: task_id, repo: "arbiter", workspace_id: "ws-codexquota")
+    stdout_path = Path.join(cwd, "stdout.jsonl")
+
+    File.write!(
+      stdout_path,
+      Jason.encode!(%{"type" => "thread.started", "thread_id" => thread_id}) <>
+        "\n" <>
+        Jason.encode!(%{
+          "type" => "turn.completed",
+          "usage" => %{"input_tokens" => 7, "output_tokens" => 2, "cached_input_tokens" => 1}
+        }) <> "\n"
+    )
+
+    {:ok, _port} =
+      ClaudeSession.start(
+        owner: pid,
+        worktree_path: cwd,
+        command: ["cat", stdout_path],
+        provider: "codex",
+        env: [{"CODEX_HOME", codex_home}]
+      )
+
+    :ok = wait_until(fn -> events_for(task_id) != [] end)
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+
+    assert [ev] = events_for(task_id)
+    assert ev.tokens_in == 7
+    assert is_nil(ev.cost_usd)
+    assert ev.raw["arb_quota_delta"]["windows"]["primary"]["delta_percent"] == 3.5
+    assert ev.raw["arb_quota_delta"]["windows"]["secondary"]["delta_percent"] == 0.5
+    assert ev.cost_note =~ "3.5%"
+  end
+
   defp wait_until(fun, timeout_ms \\ 3000, step_ms \\ 20) do
     deadline = System.monotonic_time(:millisecond) + timeout_ms
     do_wait(fun, deadline, step_ms)
