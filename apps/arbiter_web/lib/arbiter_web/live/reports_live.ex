@@ -19,6 +19,7 @@ defmodule ArbiterWeb.ReportsLive do
   use ArbiterWeb, :live_view
 
   alias Arbiter.Reports.{
+    AttentionWaits,
     BurnUp,
     Cache,
     Cost,
@@ -186,6 +187,7 @@ defmodule ArbiterWeb.ReportsLive do
       flow: Flow.load(filters),
       review_health: ReviewHealth.load(filters),
       epic_waits: EpicWaits.load(filters),
+      attention: AttentionWaits.load(filters),
       burn_up: BurnUp.load(filters["epic"], filters["range"])
     }
   end
@@ -333,6 +335,7 @@ defmodule ArbiterWeb.ReportsLive do
             <.flow_section flow={report.flow} />
             <.review_health_section health={report.review_health} />
             <.epic_waits_section waits={report.epic_waits} />
+            <.attention_section attention={report.attention} />
           </div>
         </.async_result>
       </div>
@@ -767,6 +770,107 @@ defmodule ArbiterWeb.ReportsLive do
             <.wait_row id="reports-ew-row-guard" label="Guard: no parent, P1+P2" s={@waits.guard} />
           </tbody>
         </table>
+      </div>
+    </section>
+    """
+  end
+
+  attr :attention, :map, required: true
+
+  defp attention_section(assigns) do
+    a = assigns.attention
+
+    assigns =
+      assign(assigns,
+        owner_series: [
+          %{key: :coordinator, label: "Coordinator"},
+          %{key: :operator, label: "Operator"}
+        ],
+        points:
+          Enum.map(a.weekly, fn w ->
+            %{key: Date.to_iso8601(w.week), label: week_label(w.week), values: w.hours}
+          end)
+      )
+
+    ~H"""
+    <section id="reports-attention" class="flex flex-col gap-3">
+      <h2 class="text-[13px] font-medium">Attention / wait time</h2>
+      <p class="text-[12px] text-[var(--text-secondary)]">
+        How long tickets sat waiting, by cause, and on whom. A span is dated by when it opened;
+        a span that changed owner is split at the move, so coordinator and operator time are
+        separate. Still-open spans run to now and are lower bounds. Awaiting verification is the
+        time a ticket spent in Verifying.
+      </p>
+      <div :if={@attention.spans == 0} id="reports-attention-empty" class="text-[12.5px]">
+        No attention spans in this range.
+      </div>
+      <div :if={@attention.spans > 0} class="flex flex-col gap-4">
+        <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <Charts.stat_tile id="reports-attention-spans" label="Spans" value={@attention.spans} />
+          <Charts.stat_tile
+            id="reports-attention-open"
+            label="Still waiting"
+            value={@attention.open}
+          />
+          <Charts.stat_tile
+            id="reports-attention-coordinator"
+            label="Coordinator time"
+            value={hours(@attention.owners.coordinator)}
+          />
+          <Charts.stat_tile
+            id="reports-attention-operator"
+            label="Operator time"
+            value={hours(@attention.owners.operator)}
+          />
+        </div>
+        <Charts.stacked_bar
+          id="reports-attention-chart"
+          title="Wait hours per week, by owner"
+          points={@points}
+          series={@owner_series}
+        />
+        <div class="overflow-x-auto">
+          <table
+            id="reports-attention-table"
+            class="w-full text-[12px] font-[family-name:var(--font-mono)]"
+          >
+            <thead>
+              <tr class="text-left text-[var(--text-label)]">
+                <th class="py-1 pr-3">Cause</th>
+                <th class="pr-3 text-right">Spans</th>
+                <th class="pr-3 text-right">Still waiting</th>
+                <th class="pr-3 text-right">P50</th>
+                <th class="pr-3 text-right">P90</th>
+                <th class="pr-3 text-right">Total</th>
+                <th class="pr-3 text-right">Coordinator</th>
+                <th class="text-right">Operator</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr :for={c <- @attention.causes} id={"reports-attention-row-#{c.cause}"}>
+                <td class="py-0.5 pr-3">{c.cause}</td>
+                <td class="pr-3 text-right">{c.n}</td>
+                <td class="pr-3 text-right">{c.open}</td>
+                <td class="pr-3 text-right">{hours(c.p50_hours)}</td>
+                <td class="pr-3 text-right">{hours(c.p90_hours)}</td>
+                <td class="pr-3 text-right">{hours(c.total_hours)}</td>
+                <td class="pr-3 text-right">{hours(c.coordinator_hours)}</td>
+                <td class="text-right">{hours(c.operator_hours)}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div :if={@attention.waiting != []} id="reports-attention-waiting">
+          <h3 class="text-[12.5px] font-medium">Still waiting</h3>
+          <ul class="text-[12px] font-[family-name:var(--font-mono)]">
+            <li
+              :for={w <- @attention.waiting}
+              id={"reports-attention-waiting-#{w.ticket_id}-#{w.cause}"}
+            >
+              {w.ticket_id} · {w.cause} · {w.owner} · {hours(w.hours)} so far
+            </li>
+          </ul>
+        </div>
       </div>
     </section>
     """
