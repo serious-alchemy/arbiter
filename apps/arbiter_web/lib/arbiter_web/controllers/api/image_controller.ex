@@ -22,8 +22,8 @@ defmodule ArbiterWeb.Api.ImageController do
   alias Arbiter.Worker.Image
   alias Arbiter.Worker.Image.Builder
   alias Arbiter.Worker.Image.Pins
-  alias Arbiter.Worker.Image.RepoSource
   alias Arbiter.Worker.Image.Refresher
+  alias Arbiter.Worker.Image.RepoSource
 
   action_fallback(ArbiterWeb.Api.FallbackController)
 
