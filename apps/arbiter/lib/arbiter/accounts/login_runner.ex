@@ -73,6 +73,7 @@ defmodule Arbiter.Accounts.LoginRunner do
   alias Arbiter.Accounts.LoginCompletion
   alias Arbiter.Accounts.LoginRecipe
   alias Arbiter.Accounts.LoginRecipes
+  alias Arbiter.Accounts.LoginTranscript
   alias Arbiter.Config.Paths
   alias Arbiter.Sessions
   alias Arbiter.Sessions.Layout
@@ -100,6 +101,39 @@ defmodule Arbiter.Accounts.LoginRunner do
   @exit_regex ~r/\[arb-login-exit (\d+)\]/
 
   @terminal ~w(succeeded failed timed_out cancelled)a
+
+  # Everything the operator or the CLI's auth flow put on screen is secret:
+  # `inspect`/crash reports of the state (and any `:sys.get_state` dump) show
+  # none of it.
+  @derive {Inspect, except: [:url, :device_code, :extra_env, :pasted, :transcript]}
+  defstruct [
+    :id,
+    :provider,
+    :account,
+    :recipe,
+    :topic,
+    :runner,
+    :extra_env,
+    :on_success,
+    :started_by,
+    :started_at,
+    :completion_opts,
+    :timeout_ms,
+    :poll_interval_ms,
+    :status_interval_ms,
+    :enter_delay_ms,
+    :config_dir,
+    :session,
+    :status,
+    :url,
+    :device_code,
+    :needs_paste?,
+    :reason,
+    :last_status_check,
+    :cleaned_up?,
+    pasted: [],
+    transcript: nil
+  ]
 
   @type status ::
           :starting | :awaiting_user | :verifying | :succeeded | :failed | :timed_out | :cancelled
@@ -208,8 +242,15 @@ defmodule Arbiter.Accounts.LoginRunner do
   defp call(login, message) do
     GenServer.call(via(login), message)
   catch
-    :exit, {:noproc, _} -> {:error, :not_found}
-    :exit, {:normal, _} -> {:error, :not_found}
+    :exit, {:noproc, _} ->
+      {:error, :not_found}
+
+    :exit, {:normal, _} ->
+      {:error, :not_found}
+
+    # A timeout/crash exit carries the call's message — for a relay, the paste.
+    :exit, {reason, {GenServer, :call, [server, _message, timeout]}} ->
+      exit({reason, {GenServer, :call, [server, @redacted, timeout]}})
   end
 
   defp via(pid) when is_pid(pid), do: pid
@@ -234,7 +275,7 @@ defmodule Arbiter.Accounts.LoginRunner do
     provider = Keyword.fetch!(opts, :provider)
     account = Keyword.fetch!(opts, :account)
 
-    state = %{
+    state = %__MODULE__{
       id: id,
       provider: provider,
       account: account,
@@ -294,6 +335,7 @@ defmodule Arbiter.Accounts.LoginRunner do
 
   def handle_call({:relay_paste, text}, _from, state) do
     with :ok <- validate_input(text),
+         state = %{state | pasted: [text | state.pasted]},
          :ok <- paste(state, text) do
       {:reply, :ok, transition(state, :verifying)}
     else
@@ -303,7 +345,7 @@ defmodule Arbiter.Accounts.LoginRunner do
 
   @impl GenServer
   def handle_info(:poll, state) do
-    state = poll(state)
+    state = guarded_poll(state)
 
     if state.status in @terminal do
       {:stop, :normal, state}
@@ -341,7 +383,9 @@ defmodule Arbiter.Accounts.LoginRunner do
     Map.merge(state, %{
       url: state.url && @redacted,
       device_code: state.device_code && @redacted,
-      extra_env: @redacted
+      extra_env: @redacted,
+      pasted: state.pasted != [] && @redacted,
+      transcript: state.transcript && @redacted
     })
   end
 
@@ -395,11 +439,37 @@ defmodule Arbiter.Accounts.LoginRunner do
 
   # -- polling ----------------------------------------------------------------
 
+  # The raw pane text is an argument all the way down `poll/1`; a crash there
+  # (a FunctionClauseError, say) would print it from the stacktrace. Re-raise
+  # with the argument lists reduced to arities.
+  defp guarded_poll(state) do
+    poll(state)
+  rescue
+    e -> reraise scrub(e), scrub_stacktrace(__STACKTRACE__)
+  end
+
+  defp scrub(%FunctionClauseError{} = e), do: %{e | args: nil}
+  defp scrub(e), do: e
+
+  defp scrub_stacktrace(stacktrace) do
+    Enum.map(stacktrace, fn
+      {mod, fun, args, location} when is_list(args) -> {mod, fun, length(args), location}
+      entry -> entry
+    end)
+  end
+
   defp poll(state) do
     case capture(state) do
-      {:ok, text} -> evaluate(state, text)
+      {:ok, text} -> state |> store_transcript(text) |> evaluate(text)
       :gone -> verify(state, true, nil)
     end
+  end
+
+  # Only the redacted screen is ever kept (and later stored): the raw pane text
+  # lives in this call's stack frame alone.
+  defp store_transcript(state, text) do
+    secrets = [state.device_code | state.pasted]
+    %{state | transcript: LoginTranscript.redact(text, state.recipe, secrets)}
   end
 
   defp evaluate(state, text) do
@@ -663,7 +733,11 @@ defmodule Arbiter.Accounts.LoginRunner do
         started_by: state.started_by,
         started_at: state.started_at
       },
-      Keyword.merge(state.completion_opts, outcome: state.status, reason: state.reason)
+      Keyword.merge(state.completion_opts,
+        outcome: state.status,
+        reason: state.reason,
+        transcript: state.transcript
+      )
     )
   rescue
     e -> Logger.error("login #{state.id}: completion raised: #{Exception.message(e)}")
