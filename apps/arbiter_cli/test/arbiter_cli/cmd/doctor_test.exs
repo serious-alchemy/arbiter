@@ -158,7 +158,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     assert exit_code == 0
     assert {:ok, %{"ok" => true, "checks" => checks}} = Jason.decode(String.trim(out))
     assert is_list(checks)
-    assert length(checks) == 25
+    assert length(checks) == 26
   end
 
   test "version mismatch is non-fatal (exit 0 but shows [fail])" do
@@ -1222,6 +1222,48 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       escape_routes(%{"available" => true})
       {out, _err, _exit_code} = capture(fn -> Doctor.run([]) end)
       assert out =~ "[ ok ] agy jail escape vectors"
+    end
+  end
+
+  describe "agy jail hidden reads (bd-3q2djr)" do
+    defp reads_routes(jail_body) do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/agy_write_jail"}, {jail_body, 200}}
+      ])
+    end
+
+    test "ok when the jail cannot read the install DB or other workspaces" do
+      reads_routes(%{"available" => true, "reads" => %{"available" => true}})
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] agy jail hidden reads"
+    end
+
+    test "FAILs with the paths named, without blocking readiness" do
+      reads_routes(%{
+        "available" => true,
+        "reads" => %{
+          "available" => false,
+          "message" => "sensitive path(s) readable inside the jail: /h/.arbiter/arbiter.sqlite3",
+          "fix" => "hide these"
+        }
+      })
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[fail] agy jail hidden reads"
+      assert out =~ "/h/.arbiter/arbiter.sqlite3"
+      assert out =~ "hide these"
+    end
+
+    test "ok (skipped) when the server predates the reads key" do
+      reads_routes(%{"available" => true})
+      {out, _err, _exit_code} = capture(fn -> Doctor.run([]) end)
+      assert out =~ "[ ok ] agy jail hidden reads"
     end
   end
 

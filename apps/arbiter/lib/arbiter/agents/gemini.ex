@@ -574,7 +574,10 @@ defmodule Arbiter.Agents.Gemini do
         home: ConfigDir.path(opts),
         writable_paths: Map.get(policy.sandbox, :writable_paths, []),
         worktree_readonly: review_dispatch?(policy),
-        keyring: ConfigDir.keyring_available?()
+        keyring: ConfigDir.keyring_available?(),
+        # bd-3q2djr (G3): credential dirs, the install DB, the log root and
+        # other workspaces' worktrees/repos are hidden from an agy worker.
+        hide_reads: true
       ] ++ if(network, do: [network: network], else: [])
 
     case Sandbox.wrap(policy, command, jail_opts) do
