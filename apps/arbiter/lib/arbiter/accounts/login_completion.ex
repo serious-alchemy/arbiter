@@ -22,7 +22,8 @@ defmodule Arbiter.Accounts.LoginCompletion do
   Every outcome writes an `Arbiter.Accounts.LoginRecord` with a short
   fingerprint of the credential file's mtime and size — never its contents.
 
-  Options: `:outcome` (default `:succeeded`), `:reason`, and the `:quota_refresh`
+  Options: `:outcome` (default `:succeeded`), `:reason`, `:transcript` (already
+  redacted — see `Arbiter.Accounts.LoginTranscript`), and the `:quota_refresh`
   test seam, `fun/1` given the account id.
   """
 
@@ -65,7 +66,15 @@ defmodule Arbiter.Accounts.LoginCompletion do
 
     fingerprint = if outcome == :succeeded, do: fingerprint(credential_file)
 
-    record(info, outcome, Keyword.get(opts, :reason), fingerprint, account)
+    record(
+      info,
+      outcome,
+      Keyword.get(opts, :reason),
+      fingerprint,
+      account,
+      Keyword.get(opts, :transcript)
+    )
+
     {:ok, %{credential: credential, fingerprint: fingerprint}}
   end
 
@@ -180,7 +189,7 @@ defmodule Arbiter.Accounts.LoginCompletion do
 
   # -- history -----------------------------------------------------------------
 
-  defp record(info, outcome, reason, fingerprint, account) do
+  defp record(info, outcome, reason, fingerprint, account, transcript) do
     now = DateTime.utc_now()
 
     attrs = %{
@@ -193,7 +202,8 @@ defmodule Arbiter.Accounts.LoginCompletion do
       ended_at: now,
       outcome: outcome,
       reason: reason,
-      fingerprint: fingerprint
+      fingerprint: fingerprint,
+      transcript: transcript
     }
 
     case Ash.create(LoginRecord, attrs) do

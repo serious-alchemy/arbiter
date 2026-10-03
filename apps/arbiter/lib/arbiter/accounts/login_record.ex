@@ -9,6 +9,9 @@ defmodule Arbiter.Accounts.LoginRecord do
       `:failed`, `:timed_out`, `:cancelled`) and a short `reason` for a miss.
     * `fingerprint` — 12 hex characters of a hash of the credential file's
       mtime and size. Never the token, never any file content.
+    * `transcript` — the final login screen, redacted by
+      `Arbiter.Accounts.LoginTranscript` before it is stored: URL query strings
+      stripped, device/auth codes and operator keystrokes blanked.
   """
 
   use Ash.Resource,
@@ -39,7 +42,8 @@ defmodule Arbiter.Accounts.LoginRecord do
         :ended_at,
         :outcome,
         :reason,
-        :fingerprint
+        :fingerprint,
+        :transcript
       ]
     end
   end
@@ -69,6 +73,7 @@ defmodule Arbiter.Accounts.LoginRecord do
 
     attribute :reason, :string, public?: true
     attribute :fingerprint, :string, public?: true
+    attribute :transcript, :string, public?: true
 
     create_timestamp :inserted_at
     update_timestamp :updated_at
