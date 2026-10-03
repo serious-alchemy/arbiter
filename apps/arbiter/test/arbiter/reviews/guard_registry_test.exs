@@ -38,6 +38,9 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
      "bd-5ef587: `{:provider_paused, …}` holds the pass (no attempt spent, no escalation) " <>
        "until the operator lifts the pause — an operator safety stop, not a guard"},
     # --- review_gate.ex ---
+    {Arbiter.Worker.ReviewGate, :rearm_ci_wait, 2,
+     "bd-2gc809: a boot lookup miss (no marker, no worktree); the reconciler clears the " <>
+       "marker and the ordinary resume takes the ticket — nothing is refused or escalated"},
     {Arbiter.Worker.ReviewGate, :persist_message, 4,
      "thread persistence: mails the review thread, not an escalation"},
     {Arbiter.Worker.ReviewGate, :durable_lines, 1,
