@@ -95,6 +95,7 @@ defmodule Arbiter.Worker.ClaudeSession do
   alias Arbiter.Agents.Claude.Security
   alias Arbiter.Agents.Gemini.RereadDetector
   alias Arbiter.Worker
+  alias Arbiter.Worker.ContainerSpawn
   alias Arbiter.Worker.OutputLog
   alias Arbiter.Worker.RunTmp
   alias Arbiter.Worker.StepSummary
@@ -215,6 +216,11 @@ defmodule Arbiter.Worker.ClaudeSession do
       shell out to real Claude.
     * `:topic` — PubSub topic to broadcast output on. Defaults to
       `"worker:" <> task_id`.
+    * `:security` — the spawn's resolved `Arbiter.Agents.SecurityPolicy`. A
+      `sandbox.backend: podman` policy runs the child in a container
+      (`Arbiter.Worker.ContainerSpawn`; also `:workspace`, `:repo` and, for tests,
+      `:image`, `:podman` and `:egress`) and fails the start rather than run it
+      unsandboxed. Any other policy leaves the spawn as it was.
 
   ## Returns
 
@@ -271,14 +277,63 @@ defmodule Arbiter.Worker.ClaudeSession do
             nil
         end
 
-      port_args = %{
-        exec: exec,
-        argv: argv,
-        cd: worktree_path,
-        env: env_pairs(opts, task_id, worker_env, tmp_dir)
-      }
+      with {:ok, port_args} <-
+             port_args(
+               opts,
+               exec,
+               argv,
+               worktree_path,
+               env_pairs(opts, task_id, worker_env, tmp_dir),
+               owner: owner,
+               task_id: task_id,
+               tmp_dir: tmp_dir
+             ) do
+        GenServer.call(owner, {:__claude_session_open__, port_args, session_config})
+      end
+    end
+  end
 
-      GenServer.call(owner, {:__claude_session_open__, port_args, session_config})
+  # bd-d2o3xb (P7): a spawn that carries a `sandbox.backend: podman` policy runs
+  # in a container (`Arbiter.Worker.ContainerSpawn`); its host-side preparation
+  # happens here and rides in `port_args.sandbox`, so every later open of the
+  # same args (a nudge, an auto-resume) is wrapped the same way. Any other
+  # policy, or none, leaves the args exactly as they were.
+  defp port_args(opts, exec, argv, worktree_path, env, ctx) do
+    port_args = %{exec: exec, argv: argv, cd: worktree_path, env: env}
+
+    case Keyword.get(opts, :security) do
+      %Arbiter.Agents.SecurityPolicy{} = policy ->
+        if ContainerSpawn.podman?(policy) do
+          prepare_container(opts, policy, port_args, ctx)
+        else
+          {:ok, port_args}
+        end
+
+      _ ->
+        {:ok, port_args}
+    end
+  end
+
+  defp prepare_container(opts, policy, port_args, ctx) do
+    provider = Keyword.get(opts, :provider) || "claude"
+
+    with {:ok, _sandbox} <- Arbiter.Worker.Sandbox.module(policy, provider),
+         {:ok, request} <-
+           ContainerSpawn.prepare(
+             Keyword.take(opts, [:arb_token, :workspace, :repo, :image, :podman, :egress]) ++
+               [
+                 policy: policy,
+                 worktree_path: port_args.cd,
+                 argv: port_args.argv,
+                 owner: Keyword.fetch!(ctx, :owner),
+                 task_id: Keyword.fetch!(ctx, :task_id),
+                 tmp_dir: Keyword.fetch!(ctx, :tmp_dir)
+               ]
+           ) do
+      {:ok,
+       port_args
+       |> Map.put(:sandbox, request)
+       |> Map.update!(:env, &ContainerSpawn.apply_env(&1, request))}
     end
   end
 
@@ -1911,6 +1966,16 @@ defmodule Arbiter.Worker.ClaudeSession do
   """
   @spec open_scoped_port(map(), String.t() | nil) ::
           {port(), Arbiter.Worker.MemoryScope.scope() | nil}
+  def open_scoped_port(%{sandbox: %{}} = port_args, _task_id) do
+    # bd-d2o3xb: a container is not in the server's cgroup, so there is no
+    # service for a runaway to take down and no scope to wrap the `podman`
+    # client in.
+    case ContainerSpawn.wrap_port(port_args) do
+      {:ok, wrapped} -> {open_port(wrapped), nil}
+      {:error, reason} -> raise "container spawn refused: #{inspect(reason)}"
+    end
+  end
+
   def open_scoped_port(port_args, task_id) do
     {wrapped, scope} = Arbiter.Worker.MemoryScope.wrap(port_args, task_id)
     {open_port(wrapped), scope}

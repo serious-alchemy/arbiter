@@ -5,9 +5,10 @@ defmodule Arbiter.Worker.Sandbox do
 
   A behaviour with two implementations: `Arbiter.Worker.Jail` (bubblewrap) and
   `Arbiter.Worker.Container` (rootless podman, bd-bu4ye2). `module/1` resolves
-  only `:bwrap` until the Claude wrap point lands (P7, bd-d2o3xb), because the
-  adapters only check that gate and would otherwise spawn unsandboxed under
-  `backend: podman`. Callers
+  only `:bwrap`: the adapters only check that gate and would otherwise spawn
+  unsandboxed under `backend: podman`. A provider that has a podman wrap point
+  asks `module/2` by name instead, and today that is Claude alone (P7,
+  bd-d2o3xb, `Arbiter.Worker.ContainerSpawn`). Callers
   that jail a spawn go through this module with the resolved
   `Arbiter.Agents.SecurityPolicy`, which names the backend in `sandbox.backend`
   (`:bwrap` by default). They never call `Jail` for a spawn directly.
@@ -26,8 +27,9 @@ defmodule Arbiter.Worker.Sandbox do
 
   ## Refusal, never an unjailed spawn
 
-  `module/1` is the only place a backend atom becomes a module. A backend that
-  is not wired (`:podman`, until P7) resolves to
+  `module/1` and `module/2` are the only places a backend atom becomes a
+  module. A backend that is not wired for the provider asking (`:podman` for
+  anything but Claude, until P8 and the agy decision) resolves to
   `{:error, {:sandbox_backend_unavailable, backend, message}}` and every
   function here passes that through. Callers must treat it as fatal for the
   spawn: it is **not** "the sandbox is unavailable on this host", which some
@@ -36,6 +38,7 @@ defmodule Arbiter.Worker.Sandbox do
   """
 
   alias Arbiter.Agents.SecurityPolicy
+  alias Arbiter.Worker.Container
   alias Arbiter.Worker.Jail
 
   @type backend :: SecurityPolicy.sandbox_backend()
@@ -63,6 +66,30 @@ defmodule Arbiter.Worker.Sandbox do
       "sandbox.backend #{backend} is not implemented yet; refusing to run this worker " <>
         "unsandboxed. Set sandbox.backend to bwrap or remove the override."}}
   end
+
+  @doc """
+  `module/1` for a spawn of `provider`: the same, except that `:podman`
+  resolves to `Arbiter.Worker.Container` for the providers that have a wrap
+  point for it (`:claude`, P7). Every other provider under `:podman` is the
+  refusal, so an adapter that only checks the gate can never spawn
+  unsandboxed because another provider got a container.
+  """
+  @spec module(backend() | atom() | SecurityPolicy.t(), atom() | String.t()) ::
+          {:ok, module()} | {:error, refusal()}
+  def module(%SecurityPolicy{} = policy, provider),
+    do: policy |> SecurityPolicy.sandbox_backend() |> module(provider)
+
+  def module(:podman, provider) when provider in [:claude, "claude"], do: {:ok, Container}
+
+  def module(:podman, provider) do
+    {:error,
+     {:sandbox_backend_unavailable, :podman,
+      "sandbox.backend podman is wired for claude only (P7); #{provider} has no container " <>
+        "wrap point yet, so it is refused rather than run unsandboxed. Dispatch it to " <>
+        "claude, or set sandbox.backend to bwrap."}}
+  end
+
+  def module(backend, _provider), do: module(backend)
 
   @doc "`Jail.status/0` etc. for `policy`'s backend, or the refusal."
   @spec status(SecurityPolicy.t()) :: :ok | {:error, term()}

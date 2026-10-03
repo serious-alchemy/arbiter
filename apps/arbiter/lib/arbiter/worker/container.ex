@@ -73,12 +73,14 @@ defmodule Arbiter.Worker.Container do
   instead of `run/2` must call `teardown/1` from its own exit path, and the
   worktree sweeper should reap `arb-*` containers it does not own.
 
-  ## Not wired yet
+  ## Wiring
 
-  `Arbiter.Worker.Sandbox.module/1` still refuses `:podman`. The adapters only
-  check that gate before spawning, so resolving the backend here before Claude
-  has a wrap point (P7) would run it unsandboxed under `backend: podman`.
-  P7 flips that switch together with the wrap point.
+  `Arbiter.Worker.Sandbox.module/1` still refuses `:podman`: the adapters only
+  check that gate before spawning, so resolving it for every provider would run
+  the ones with no wrap point unsandboxed. `Sandbox.module/2` resolves it for
+  Claude alone, whose wrap point is `Arbiter.Worker.ContainerSpawn` (P7,
+  bd-d2o3xb): it builds the spec for this module out of a dispatch's policy,
+  checkout, config dir, token env and egress bridges.
   """
 
   @behaviour Arbiter.Worker.Sandbox
@@ -106,6 +108,7 @@ defmodule Arbiter.Worker.Container do
           optional(:objects) => String.t() | nil,
           optional(:git_dir) => String.t() | nil,
           optional(:readonly_paths) => [String.t()],
+          optional(:cli_mounts) => [{String.t(), String.t()}],
           optional(:worktree_readonly) => boolean(),
           optional(:writable_paths) => [String.t()],
           optional(:bridges) => [String.t()],
@@ -173,7 +176,10 @@ defmodule Arbiter.Worker.Container do
         Enum.map(Map.get(spec, :bridges, []), &{&1, :ro}) ++
         Enum.map(Map.get(spec, :readonly_paths, []), &{&1, :ro}),
       fn {path, mode} -> ["-v", "#{path}:#{path}:#{mount_opts(mode, label_disabled?)}"] end
-    )
+    ) ++
+      Enum.flat_map(Map.get(spec, :cli_mounts, []), fn {host, dest} ->
+        ["-v", "#{host}:#{dest}:ro"]
+      end)
   end
 
   # `:Z` relabels the host path with a private MCS pair: right for a directory
@@ -201,6 +207,8 @@ defmodule Arbiter.Worker.Container do
   `name_for/1`-shaped), `:home`, `:objects`, `:git_dir` and `:readonly_paths`
   (both must exist: podman would create a missing bind source on the host),
   `:worktree_readonly`, `:writable_paths`, `:bridges` (host unix sockets),
+  `:cli_mounts` (`[{host path, container path}]`: a provider CLI or `arb` bound
+  read-only under `/opt/arbiter/cli`, which the image has on its `PATH`),
   `:tmpfs`, `:env`,
   `:inherit_env`, `:network` (`:none` | `:pasta`), `:interactive`, `:podman`
   (path; default the host's `podman`) and `:find_executable` (for tests).
@@ -226,6 +234,7 @@ defmodule Arbiter.Worker.Container do
         objects: mounts.objects,
         git_dir: mounts.git_dir,
         readonly_paths: mounts.readonly_paths,
+        cli_mounts: mounts.cli_mounts,
         worktree_readonly: Keyword.get(opts, :worktree_readonly, false),
         writable_paths: mounts.writable_paths,
         bridges: bridges,
@@ -315,17 +324,20 @@ defmodule Arbiter.Worker.Container do
     objects = Keyword.get(opts, :objects)
     git_dir = Keyword.get(opts, :git_dir)
     readonly = Keyword.get(opts, :readonly_paths, [])
-    paths = writable ++ readonly ++ Enum.reject([home, objects, git_dir], &is_nil/1)
+    cli = Keyword.get(opts, :cli_mounts, [])
+    cli_paths = Enum.flat_map(cli, &Tuple.to_list/1)
+    paths = writable ++ readonly ++ cli_paths ++ Enum.reject([home, objects, git_dir], &is_nil/1)
 
     with :ok <- check_paths(paths),
          :ok <- check_exists(git_dir, :git_dir_missing),
-         :ok <- check_all_exist(readonly) do
+         :ok <- check_all_exist(readonly ++ Enum.map(cli, &elem(&1, 0))) do
       {:ok,
        %{
          home: home,
          objects: objects,
          git_dir: git_dir,
          readonly_paths: readonly,
+         cli_mounts: cli,
          writable_paths: writable
        }}
     end

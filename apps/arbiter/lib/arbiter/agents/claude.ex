@@ -51,6 +51,7 @@ defmodule Arbiter.Agents.Claude do
   alias Arbiter.Agents.Claude.Security
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Worker.ClaudeSession
+  alias Arbiter.Worker.ContainerSpawn
   alias Arbiter.Worker.Sandbox
 
   @done_regex ~r/(?:\A|\n)[^\p{L}\p{N}\n]*arb done[^\p{L}\p{N}]*\z/u
@@ -90,28 +91,43 @@ defmodule Arbiter.Agents.Claude do
 
   @impl true
   def default_argv(prompt, opts \\ []) when is_binary(prompt) do
-    case resolve_claude_executable() do
-      {:ok, claude} ->
-        policy = security_policy(opts)
+    policy = security_policy(opts)
 
-        # bd-btcdrf: Claude has no jail wrap point today, but a selected sandbox
-        # backend with no implementation must still refuse the spawn rather than
-        # run it unconfined while the operator believes it is contained.
-        with {:ok, _sandbox} <- Sandbox.module(policy) do
-          flags =
-            model_flag(opts) ++
-              thinking_flag(opts) ++
-              Security.permission_argv(policy) ++
-              Security.settings_argv(policy) ++
-              mcp_config_flag(opts) ++
-              stream_flags()
+    # bd-btcdrf: a selected sandbox backend with no implementation must refuse
+    # the spawn rather than run it unconfined while the operator believes it is
+    # contained. bd-d2o3xb (P7): `podman` is implemented for Claude, but only
+    # behind a wrap point, and the argv it gets names the CLI where the
+    # *container* has it (`ContainerSpawn.claude_path/0`). A caller that has not
+    # said it will hand the spawn to `ClaudeSession` with this policy
+    # (`sandbox_wrap: true`) is refused as before.
+    with {:ok, claude} <- claude_for_backend(policy, opts) do
+      flags =
+        model_flag(opts) ++
+          thinking_flag(opts) ++
+          Security.permission_argv(policy) ++
+          Security.settings_argv(policy) ++
+          mcp_config_flag(opts) ++
+          stream_flags()
 
-          build_argv(claude, prompt, flags)
-        end
-
-      {:error, _} = err ->
-        err
+      build_argv(claude, prompt, flags)
     end
+  end
+
+  defp claude_for_backend(policy, opts) do
+    case Sandbox.module(policy) do
+      {:ok, _sandbox} ->
+        resolve_claude_executable()
+
+      {:error, _refusal} = refusal ->
+        if ContainerSpawn.podman?(policy) and Keyword.get(opts, :sandbox_wrap, false),
+          do: container_claude(policy),
+          else: refusal
+    end
+  end
+
+  defp container_claude(policy) do
+    with {:ok, _container} <- Sandbox.module(policy, :claude),
+         do: {:ok, ContainerSpawn.claude_path()}
   end
 
   # Build the `sh -c` wrapped streaming argv for a `claude --print` invocation.

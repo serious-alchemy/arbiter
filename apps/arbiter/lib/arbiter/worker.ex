@@ -3458,6 +3458,11 @@ defmodule Arbiter.Worker do
       if is_nil(Map.get(session, :exit_status)), do: terminate_session_port(state, port)
     end)
 
+    # bd-d2o3xb: killing the `podman` client does not reliably stop its
+    # container (design §6.4), so a container spawn is removed by name too.
+    # Idempotent, and a no-op for any other spawn.
+    Arbiter.Worker.ContainerSpawn.teardown(state.meta && Map.get(state.meta, :claude_spawn))
+
     state
   end
 
