@@ -431,7 +431,11 @@ defmodule Arbiter.Agents.Codex do
 
     "*** TOOLS: Run tools and wait inline for each result before proceeding.\n" <>
       "    Codex `exec` executes commands synchronously; do not attempt to background\n" <>
-      "    long-running commands, and do not print #{completion_signal} until\n" <>
+      "    long-running commands. Each command is subject to Codex's command timeout\n" <>
+      "    and a timed-out command is killed, so keep every command short: run a\n" <>
+      "    single test file or one app's tests at a time (never the whole umbrella\n" <>
+      "    suite in one call), and split long verification into several calls.\n" <>
+      "    Do not print #{completion_signal} until\n" <>
       "    every command you started has finished and you have read its output" <>
       tail <> "\n" <> commit_line
   end
