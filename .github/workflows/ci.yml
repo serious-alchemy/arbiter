@@ -198,6 +198,12 @@ jobs:
           mix ecto.create
           mix ecto.migrate
 
+      # Replaces the test-env half of the removed `lint` job: `audit` compiles
+      # under MIX_ENV=dev, so test/support and test-only compile_env branches
+      # are only warning-checked here. The build is needed anyway, so this is free.
+      - name: Compile (warnings as errors)
+        run: mix compile --warnings-as-errors
+
       - name: Run tests
         run: mix test
 
