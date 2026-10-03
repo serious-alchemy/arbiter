@@ -312,7 +312,7 @@ defmodule Arbiter.MCP.Tools.Worker do
   def worker_stop(%Scope{} = scope, args) do
     with {:ok, task_id} <- Tools.resolve_task_id(scope, args, "task_id"),
          {:ok, _task} <- Tools.fetch_task(scope, args, task_id) do
-      case Worker.stop(task_id, :normal) do
+      case Worker.operator_stop(task_id) do
         :ok -> {:ok, %{task_id: task_id, stopped: true}}
         {:error, :not_found} -> {:error, {:not_found, "no running worker for task #{task_id}"}}
       end
