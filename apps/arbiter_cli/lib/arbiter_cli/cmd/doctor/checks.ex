@@ -48,6 +48,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       check_egress_jail(),
       check_agy_ssh_transport(),
       check_tmux(),
+      check_podman_sandbox(),
       check_worker_tmp(),
       check_worker_memory(),
       check_claude_worker_credentials(),
@@ -1131,6 +1132,78 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
         }
     end
   end
+
+  # bd-46xndf: is this host ready for the rootless-podman worker sandbox
+  # (docs/design/podman-worker-containers.md)? The backend is optional, so a
+  # failure is operator-actionable but neither fatal nor readiness-blocking.
+  defp check_podman_sandbox do
+    # The server runs its probes in series (up to 60 s each for the two
+    # container runs), so the default 10 s receive timeout is far too short.
+    case Client.get("/api/server/podman_sandbox", [], receive_timeout: 150_000) do
+      {:ok, %{"installed" => false}} ->
+        %Result{
+          name: "podman sandbox readiness",
+          status: :ok,
+          detail: "podman not installed — container sandbox unavailable (optional backend)",
+          hint:
+            "Install podman (e.g. `sudo dnf install podman`) to enable the container sandbox.",
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      {:ok, %{"checks" => checks} = body} when is_list(checks) ->
+        failed = Enum.filter(checks, &(Map.get(&1, "status") == "fail"))
+        ready? = Map.get(body, "ready", failed == [])
+
+        %Result{
+          name: "podman sandbox readiness",
+          status: if(ready?, do: :ok, else: :fail),
+          detail: podman_detail(checks, failed, ready?),
+          hint:
+            failed
+            |> Enum.map(&Map.get(&1, "hint"))
+            |> Enum.reject(&is_nil/1)
+            |> Enum.join(" "),
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      {:error, %{kind: kind} = err} when kind in [:timeout, :transport] ->
+        %Result{
+          name: "podman sandbox readiness",
+          status: :fail,
+          detail: "readiness probe did not complete: #{Map.get(err, :message) || kind}",
+          hint:
+            "The host is too slow or a `podman run` is hung; run `podman run --rm --userns=keep-id <image> true` by hand as the Arbiter user.",
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      _ ->
+        %Result{
+          name: "podman sandbox readiness",
+          status: :ok,
+          detail: "server unreachable or predates this check — skipping",
+          fatal: false,
+          blocks_readiness: false
+        }
+    end
+  end
+
+  defp podman_detail(checks, _failed, true) do
+    warns = Enum.filter(checks, &(Map.get(&1, "status") == "warn"))
+    base = "#{length(checks)} checks passed"
+
+    case warns do
+      [] -> base
+      _ -> base <> "; warnings: " <> Enum.map_join(warns, "; ", &podman_line/1)
+    end
+  end
+
+  defp podman_detail(_checks, failed, false),
+    do: "not ready: " <> Enum.map_join(failed, "; ", &podman_line/1)
+
+  defp podman_line(c), do: "#{Map.get(c, "name")}: #{Map.get(c, "detail")}"
 
   defp check_claude_worker_credentials do
     case Client.get("/api/server/claude_credentials") do

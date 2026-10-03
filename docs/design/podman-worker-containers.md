@@ -19,13 +19,17 @@ against scratch clones under `/tmp`. The ticket plan is in
    bd-3t973v) is exactly what a default-deny boundary removes by construction.
    It is not a replacement for the policy layer (G11 to G19), the egress proxy
    (G5) or the bridge identity work (G9); all of those are needed either way.
-2. **Not before the RHEL 8 EC2 is checked.** Everything below was measured
-   on the Fedora 44 laptop (podman 5.8.7, crun, netavark, pasta, SELinux
-   enforcing). The EC2 would run podman 4.9.4 with slirp4netns, fuse-overlayfs
-   and, by default on RHEL 8, cgroups v1 (package inventory from Rocky 8.10,
-   [§2.4](#24-the-rhel-8-ec2)). The first ticket is a doctor-style feasibility
-   probe there (P1). If it fails, G7 and G8 proceed on bwrap as planned and
-   this document becomes the record of why not.
+2. **Not before the target host passes the doctor check.** Everything below
+   was measured on the Fedora 44 laptop (podman 5.8.7, crun, netavark, pasta,
+   SELinux enforcing). This installation has no EC2 access (operator,
+   2026-10-02), so the former "check the EC2" gate is now **`arb server
+   doctor` on the target host**: its `podman sandbox readiness` check
+   (`Arbiter.Worker.PodmanReadiness`, P1) reports each prerequisite with a hint
+   per failure. A RHEL 8 host would run podman 4.9.4 with slirp4netns,
+   fuse-overlayfs and, by default, cgroups v1 (package inventory from Rocky
+   8.10, [§2.4](#24-build-rebuild-and-versioning-laptop-and-ec2)); the items
+   expected to differ are listed in [Appendix B](#appendix-b-expected-rhel-8-differences).
+   If the check fails on a host, that host stays on bwrap for G7 and G8.
 3. **Per-repo dev images: yes, but keyed by toolchain, not by repo.** One
    shared base image (OS, git, build tools, `procps`, `socat`, the provider
    CLIs and `arb`), plus a thin toolchain layer per distinct `(Erlang, Elixir,
@@ -175,7 +179,7 @@ has it for BEAM repos, but the `kube` and `nix` images would need it too).
 - **Weekly base refresh** for OS security updates, plus `podman image prune`
   of tags older than two refreshes.
 - **Laptop:** rootless podman is installed and already pulls `hexpm`, `debian`
-  and `ubi` images. **EC2 (RHEL 8):** unverified. From the Rocky 8.10 package
+  and `ubi` images. **RHEL 8 (EC2):** unverified; run the doctor check on the host. From the Rocky 8.10 package
   inventory (`container-tools:rhel8`): podman **4.9.4**, crun 1.14.3,
   fuse-overlayfs 1.13, netavark 1.10.3, slirp4netns 1.2.3, skopeo 1.14.6,
   socat 1.7.4.1. **Not packaged:** `passt`/`pasta`, `xdg-dbus-proxy`.
@@ -369,7 +373,8 @@ Options, in order of preference:
    `unconfined_t` `connectto`. Needs root and one more host-state item.
 
 **On RHEL 8 the SELinux mode is unknown**; `label=disable` is a no-op if it
-is permissive or disabled. This is a P1 probe item.
+is permissive or disabled. The doctor check reports the mode and runs the
+bridge self-test with and without the label.
 
 ## 6. Measurements
 
@@ -438,8 +443,8 @@ test/arbiter/tasks/epic_floor_test.exs`, write the count to
 
 **What this does not measure.** There is no matching *unjailed* Claude run:
 Claude is not under bwrap today (G7 is unbuilt), so the bwrap comparison is
-the toolchain table above. No agy or Codex run was made. No EC2 measurement
-exists. Scratch artefacts stayed under `/tmp/jk49` and the images are local
+the toolchain table above. No agy or Codex run was made. No RHEL 8 measurement
+exists (see Appendix B). Scratch artefacts stayed under `/tmp/jk49` and the images are local
 tags `localhost/arb-dev-spike:*`; nothing was pushed.
 
 ### 6.4 Kill semantics (found while measuring)
@@ -512,7 +517,7 @@ difficulty.
 
 | # | Title | D | Depends on |
 |---|---|---|---|
-| **P1** | **Spike/doctor: rootless podman on the RHEL 8 EC2.** `/etc/subuid`, `user.max_user_namespaces`, SELinux mode, cgroup version, podman 4.9 with `fuse-overlayfs`, first-run `keep-id` cost, `label=disable` socket bridge, `--init` kill. Repeat the laptop probes. **Go/no-go gate for the rest** | 2 | none |
+| **P1** | **Spike/doctor: rootless podman readiness.** Re-scoped 2026-10-02 (no EC2 access): laptop go/no-go ([Appendix C](#appendix-c-p1-laptop-results-and-gono-go-bd-46xndf)) plus the portable `podman sandbox readiness` doctor check (`/etc/subuid`, `user.max_user_namespaces`, SELinux mode, cgroup version, podman version and storage driver, `label=disable` socket-bridge self-test). **Done (bd-46xndf).** The gate for any other host is that check | 2 | none |
 | P2 | `sandbox.backend: bwrap \| podman` key in `SecurityPolicy` (layering by most-restrictive), plus the `Arbiter.Worker.Sandbox` behaviour with `Jail` as the first implementation. No behavior change by default | 3 | none |
 | P3 | `Arbiter.Worker.Container`: a pure argv builder like `Jail.argv/2` (`--name`, `--init`, `--rm`, `--userns=keep-id`, `--read-only`, `--cap-drop=all`, `no-new-privileges`, tmpfs, explicit `-e NAME` allowlist, mounts, label policy), a doctor probe and teardown by name | 3 | P1, P2 |
 | P4 | Image lifecycle: `.arbiter/Containerfile` or a generated default, content-hash tags, single-flight lazy build from the **default branch**, weekly base refresh, prune, `arb image list/build`. Provider CLIs in the base image or a versioned read-only CLI dir | 3 | P3 |
@@ -544,8 +549,8 @@ worktree registration, because the D4 estimate rests on that.
 ## 9. Open questions
 
 1. Is `label=disable` acceptable for Claude and Codex containers, or is the
-   sidecar-listener variant worth its complexity? (P1 will show the EC2's
-   SELinux mode, which may make it moot.)
+   sidecar-listener variant worth its complexity? (The doctor check shows a host's
+   SELinux mode, which may make it moot there.)
 2. Can agy's file-seeded credentials work everywhere (guardrail-profiles
    open question 5)? If yes, agy could join the container backend and bwrap
    could be retired.
@@ -584,3 +589,50 @@ Everything ran 2026-10-02 on the Fedora laptop under `/tmp/jk49`
 | Credentials | The Claude token was passed as an inherited env var and never written to a file, a commit or these notes |
 
 Per-image sizes and build times are in §2.1 and §6.1.
+
+## Appendix B: expected RHEL 8 differences
+
+What `arb server doctor` (`podman sandbox readiness`) should be expected to say
+on a RHEL 8 host with `container-tools:rhel8` (podman 4.9.4), versus the laptop.
+None of this is measured; it is the prediction the check exists to confirm.
+
+| Check | Laptop (Fedora 44) | Expected on RHEL 8 | What the check does |
+|---|---|---|---|
+| podman | 5.8.7 | 4.9.4 | ok (4.x or newer required); below 4 fails |
+| storage driver | native overlay | overlay with `mount_program = fuse-overlayfs` (kernel 4.18 has no rootless overlay) | **warn**: copies are slower; the `_build`/`deps` throughput of §9 Q4 is still unmeasured there |
+| cgroups | v2 | **v1** by default | **warn**: no rootless resource limits. Not a blocker, since the design does not rely on cgroup limits |
+| network helper | pasta | slirp4netns only (pasta is not packaged) | ok if either is present. §5.1's `pasta:--map-host-loopback` design is unavailable; `--network=none` plus the socket bridge (N1) is unaffected |
+| SELinux | enforcing | likely enforcing (RHEL default); not verified | reports the mode. `label=disable` is a no-op if permissive/disabled |
+| socket bridge | needs `label=disable` | same if enforcing | self-test runs the bridge with `label=disable` (must work) and with the default label (informational) |
+| subuid/subgid, `user.max_user_namespaces` | 65536 / 126539 | not verified; the sysctl may be 0 on hardened images, and a subid range exists only if the user was created with one (service accounts often lack it) | fail with the `usermod`/`sysctl` fix |
+| `--init` kill semantics (§6.4) | measured | crun 1.14 expected same; not probed by the doctor (needs a running container and `podman kill`) | not covered; re-run the §6.4 commands by hand if in doubt |
+| first-run `keep-id` cost | 1 s here (§6.1 measured 3.5 to 5.9 s for larger images) | unknown, likely slower on fuse-overlayfs | not covered (timing, not readiness) |
+
+## Appendix C: P1 laptop results and go/no-go (bd-46xndf)
+
+Run 2026-10-03 on the Fedora 44 laptop (podman 5.8.7), scratch dir under `/tmp`,
+images `debian:12`. Probes ran by hand and through
+`Arbiter.Worker.PodmanReadiness.diagnose/0` (`MIX_ENV=test mix run --no-start`).
+**Not run:** a full dispatch through the real Arbiter spawn path; there is no
+container backend yet (P3), so "the real spawn path" is the doctor probe plus
+the equivalent `podman run` argv (`--userns=keep-id --init --rm`).
+
+| Probe | Result |
+|---|---|
+| `/etc/subuid`, `/etc/subgid` | `ryan:524288:65536` in both: pass |
+| `user.max_user_namespaces` | 126539: pass |
+| SELinux | Enforcing |
+| cgroups | v2 (`cgroup2fs`; `podman info` `cgroupVersion: v2`), crun |
+| storage | native `overlay`, rootless, netavark, `pasta` present, `slirp4netns` absent, `fuse-overlayfs` installed but unused |
+| `--userns=keep-id` cost | 0.96 s for the first run of `debian:12` under keep-id, 0.24 s on the second (the 3.5 to 5.9 s of §6.1 was for a fresh, larger image) |
+| Socket bridge, `label=disable` | host unix listener reached from the container: `pong` |
+| Socket bridge, default label | `connect: Permission denied` (confirms §5.3) |
+| `--init` kill | `podman kill -s TERM`: with `--init` the container exited (143) within 2 s; without it still `Up` after 2 s and needed the 10 s SIGKILL fallback (confirms §6.4) |
+| `deps` (51 MB) + `_build` (112 MB) copy | host `cp -a` 1.59 s (btrfs, reflink=auto); in-container bind to bind 0.91 s; bind to tmpfs 0.84 s; bind to overlay upper layer 1.58 s. **Compile** throughput was not re-measured (no Elixir image used); §6.2 holds the toolchain stage times |
+
+**Go/no-go for this installation: GO** for continuing to P2/P3 on this
+laptop: every prerequisite passes, the only SELinux requirement is the
+already-planned `label=disable` on bridge containers, and the doctor check
+reports `ready` with no failures or warnings. Caveats: the verdict covers
+readiness, not a Claude run end to end (§6.3 has that), and says nothing about
+RHEL 8 (Appendix B), for which the gate is the doctor check on that host.

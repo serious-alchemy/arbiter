@@ -7,6 +7,8 @@ defmodule Arbiter.Tasks.Issue.Changes.SetRank do
   touches `priority`: moving before/after a ticket in a different priority
   band only changes rank, so the mover leaves its own band.
 
+  With `pin: true` (a board drag) it also sets `rank_pinned`.
+
   `top`/`bottom` always have room (nothing bounds rank above or below), so
   they never need to renumber. `before`/`after` need an integer strictly
   between two existing neighbours; when the neighbours are only 1 (or 0)
@@ -40,10 +42,18 @@ defmodule Arbiter.Tasks.Issue.Changes.SetRank do
     with {:ok, spec} <- move_spec(changeset),
          :ok <- reject_self(spec, changeset.data.id),
          {:ok, target} <- resolve_target(spec, changeset.data.workspace_id) do
-      apply_move(changeset, spec, target)
+      changeset |> apply_move(spec, target) |> maybe_pin()
     else
       {:error, message} -> Changeset.add_error(changeset, field: :rank, message: message)
     end
+  end
+
+  # ES6: a board drag also pins the card inside its band. Anyone else leaves
+  # `rank_pinned` as it was.
+  defp maybe_pin(changeset) do
+    if Changeset.get_argument(changeset, :pin) == true,
+      do: Changeset.force_change_attribute(changeset, :rank_pinned, true),
+      else: changeset
   end
 
   defp reject_self({kind, id}, issue_id) when kind in [:before, :after] and id == issue_id,

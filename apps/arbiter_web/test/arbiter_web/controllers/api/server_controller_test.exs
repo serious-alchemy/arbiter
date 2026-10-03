@@ -319,6 +319,25 @@ defmodule ArbiterWeb.Api.ServerControllerTest do
     end
   end
 
+  # bd-46xndf: the podman readiness probes are stubbed so no real container runs.
+  describe "GET /api/server/podman_sandbox" do
+    setup do
+      Application.put_env(:arbiter, :podman_readiness_opts,
+        runner: fn _cmd, _args, _opts -> {"nope", 127} end
+      )
+
+      on_exit(fn -> Application.delete_env(:arbiter, :podman_readiness_opts) end)
+    end
+
+    test "reports the readiness checks as JSON", %{conn: conn} do
+      resp = conn |> get("/api/server/podman_sandbox") |> json_response(200)
+
+      assert %{"ready" => false, "installed" => false, "checks" => [check]} = resp
+      assert %{"id" => "podman", "status" => "fail", "hint" => hint} = check
+      assert is_binary(hint)
+    end
+  end
+
   # bd-c99hys: `arb server doctor` reports whether tmux is installed, since the
   # dashboard login relay runs each provider CLI login inside it.
   describe "GET /api/server/tmux" do

@@ -44,6 +44,11 @@ defmodule ArbiterWeb.BoardLive do
   rank is per workspace. Dropping into a different priority band changes the
   ticket's priority to that band first.
 
+  The bands are effective priority (ES6, `docs/design/epic-aware-scheduling.md`
+  §6.3). A drag pins the card (`rank_pinned`) and the cards above it in its
+  band, so it sorts first in the band ahead of the finish-first tiebreak; a
+  drop into a band worse than the card's epic floor is refused with a flash.
+
   ## Column drags
 
   Backlog → Blocked or Ready is **promote** (the `:promote` transition, with
@@ -422,19 +427,55 @@ defmodule ArbiterWeb.BoardLive do
 
   # Both cards must be in that column on the board the operator dragged on; a
   # drag against a board that has since moved changes nothing and re-reads.
+  #
+  # ES6: the board's bands are effective priority, so the band a card lands in
+  # is the effective priority of the card it landed beside. A drop into a band
+  # worse than the card's epic floor is refused (it would jump straight back);
+  # any other drag pins the card and the cards above it in its band.
   defp reorder(socket, id, column, {where, target_id}) when id != target_id do
     cards = column_cards(socket.assigns.board, column)
 
     with %{} = card <- Enum.find(cards, &(&1.id == id)),
          %{} = target <- Enum.find(cards, &(&1.id == target_id)) do
-      order = place(Enum.reject(cards, &(&1.id == id)), card, where, target_id)
-      rerank(socket, card, target.priority, rank_anchor(order, card))
+      band = band_of(target)
+
+      if below_floor?(card, band) do
+        socket
+        |> put_flash(:error, below_floor_message(card))
+        |> refresh_board()
+      else
+        order = place(Enum.reject(cards, &(&1.id == id)), card, where, target_id)
+        rerank(socket, card, band, rank_anchor(order, card), pin_prefix(order, card, band))
+      end
     else
       _ -> refresh_board(socket)
     end
   end
 
   defp reorder(socket, _id, _column, _target), do: socket
+
+  defp band_of(card), do: Map.get(card, :effective_priority) || card.priority
+
+  # Only a lift that is in force refuses: a capped one orders by own priority.
+  defp below_floor?(%{priority_lift: :applied} = card, band), do: band > band_of(card)
+  defp below_floor?(_card, _band), do: false
+
+  defp below_floor_message(card) do
+    floor = band_of(card)
+
+    "#{card.id} is lifted to P#{floor} by #{card.priority_via}'s floor — " <>
+      "clear the floor or order it within P#{floor}"
+  end
+
+  # The cards above where the card landed, in its band, top first. They are
+  # pinned with it (see `settle_prefix/1`) to keep the order the operator
+  # produced: a pinned card sorts ahead of every unpinned one, so pinning the
+  # card alone would send a drop at the bottom of a band to its top.
+  defp pin_prefix(order, card, band) do
+    order
+    |> Enum.take_while(&(&1.id != card.id))
+    |> Enum.filter(&(band_of(&1) == band))
+  end
 
   defp place(cards, card, where, target_id) do
     Enum.flat_map(cards, fn
@@ -459,26 +500,89 @@ defmodule ArbiterWeb.BoardLive do
     end
   end
 
-  # Dropping into another priority band moves the ticket into that band first,
-  # then ranks it where it landed.
-  defp rerank(socket, card, band, rank_args) do
-    with {:ok, issue} <- Ash.get(Issue, card.id),
-         {:ok, issue} <- reprioritise(issue, band),
-         {:ok, _ranked} <- rank(issue, rank_args) do
-      socket
-      |> then(fn socket ->
-        if is_integer(band) and band != card.priority,
-          do: put_flash(socket, :info, "Moved #{card.id} to P#{band}."),
-          else: socket
+  # Dropping into another band moves the ticket's own priority into that band
+  # first, then ranks and pins it where it landed. A lifted card dropped in its
+  # floor's band keeps its own priority: it is already there.
+  #
+  # One transaction: the cards above are pinned (and, where their rank
+  # disagrees with the order shown, re-ranked) together with the dragged card's
+  # own move, so a refused move leaves none of it behind. Listeners hear about
+  # the new order only once it is committed.
+  defp rerank(socket, card, band, rank_args, prefix) do
+    result =
+      Arbiter.Repo.transaction(fn ->
+        with {:ok, issue} <- Ash.get(Issue, card.id),
+             {:ok, issue} <- reprioritise(issue, band_change(card, band)),
+             :ok <- settle_prefix(prefix),
+             {:ok, ranked} <- rank(issue, rank_args) do
+          ranked
+        else
+          {:error, err} -> Arbiter.Repo.rollback(err)
+        end
       end)
-      |> refresh_board()
-    else
+
+    case result do
+      {:ok, ranked} ->
+        # `:set_rank` announces nothing of its own; every other board, and
+        # Autopilot's next plan, should see the new order.
+        Issue.broadcast_lifecycle(:updated, ranked)
+
+        socket
+        |> then(fn socket ->
+          if is_integer(band) and band != band_of(card),
+            do: put_flash(socket, :info, "Moved #{card.id} to P#{band}."),
+            else: socket
+        end)
+        |> refresh_board()
+
       {:error, err} ->
         socket
         |> put_flash(:error, "Could not reorder #{card.id}: " <> error_message(err))
         |> refresh_board()
     end
   end
+
+  defp band_change(card, band), do: if(band == band_of(card), do: card.priority, else: band)
+
+  # Walks the cards above the drop, top first, so that every one of them is
+  # pinned and their ranks ascend in the order shown. A pin survives changes
+  # that put a card first in a new band without a drag (an own-priority edit,
+  # a floor set or cleared), so a pinned card's rank can disagree with its
+  # place; such a card, like any whose rank is not past the card shown above
+  # it in the same workspace, is ranked after that card. Rank is per
+  # workspace, so only same-workspace cards compare.
+  defp settle_prefix(prefix) do
+    prefix
+    |> Enum.reduce_while({:ok, %{}}, fn card, {:ok, last_by_ws} ->
+      case settle_card(card, Map.get(last_by_ws, card.workspace_id)) do
+        {:ok, settled} -> {:cont, {:ok, Map.put(last_by_ws, card.workspace_id, settled.id)}}
+        {:error, _} = error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, _last_by_ws} -> :ok
+      {:error, _} = error -> error
+    end
+  end
+
+  defp settle_card(card, above_id) do
+    with {:ok, issue} <- Ash.get(Issue, card.id),
+         {:ok, above} <- fetch_above(above_id) do
+      cond do
+        above != nil and issue.rank <= above.rank ->
+          Rank.move(issue, %{after_id: above.id, pin: true})
+
+        issue.rank_pinned ->
+          {:ok, issue}
+
+        true ->
+          Ash.update(issue, %{pinned: true}, action: :set_rank_pinned)
+      end
+    end
+  end
+
+  defp fetch_above(nil), do: {:ok, nil}
+  defp fetch_above(id), do: Ash.get(Issue, id)
 
   defp reprioritise(%Issue{priority: same} = issue, same), do: {:ok, issue}
 
@@ -487,20 +591,11 @@ defmodule ArbiterWeb.BoardLive do
 
   defp reprioritise(issue, _band), do: {:ok, issue}
 
-  defp rank(issue, nil), do: {:ok, issue}
-
-  defp rank(issue, args) do
-    case Rank.move(issue, args) do
-      {:ok, ranked} ->
-        # `:set_rank` announces nothing of its own; every other board, and
-        # Autopilot's next plan, should see the new order.
-        Issue.broadcast_lifecycle(:updated, ranked)
-        {:ok, ranked}
-
-      error ->
-        error
-    end
-  end
+  # `rank_pinned`: the drag pins the card with its move. Alone in its
+  # workspace (`nil` args) there is nothing to rank against, but it is still
+  # pinned in its band.
+  defp rank(issue, nil), do: Ash.update(issue, %{pinned: true}, action: :set_rank_pinned)
+  defp rank(issue, args), do: Rank.move(issue, Map.put(args, :pin, true))
 
   defp error_message(err) when is_binary(err), do: err
   defp error_message(err), do: ArbiterWeb.TaskForm.error_message(err)
