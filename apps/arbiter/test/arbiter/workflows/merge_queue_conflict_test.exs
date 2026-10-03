@@ -801,6 +801,69 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
       assert Arbiter.Worker.whereis(task.id) == nil
     end
 
+    # bd-4wy1w1 (P5): in git layout B the task branch lives in the worker's
+    # private clone, and the main repo has it only once it is synced back. A
+    # clone already at the target's tip must still read as nothing to rebase.
+    test "a branch held only in a private clone is synced back before the divergence check",
+         %{workspace: ws, task: task, repo: repo} do
+      branch = Arbiter.Worker.BranchNamer.derive(task)
+      {:ok, _clone} = Arbiter.Worker.PrivateClone.create(repo, branch, "main")
+
+      assert {_, code} =
+               System.cmd("git", ["-C", repo, "rev-parse", "--verify", "refs/heads/" <> branch],
+                 stderr_to_stdout: true
+               )
+
+      assert code != 0
+
+      result =
+        Arbiter.Workflows.MergeQueue.ConflictResolver.resolve(%{
+          task_id: task.id,
+          workspace_id: ws.id,
+          repo_path: repo,
+          repo: "test/repo",
+          target_branch: "main",
+          start_claude: false
+        })
+
+      assert {:ok, :no_op} = result
+      assert Arbiter.Worker.whereis(task.id) == nil
+    end
+
+    @tag workspace_config:
+           Map.merge(@ws_github, %{
+             "agent" => %{"security" => %{"sandbox" => %{"backend" => "podman"}}}
+           })
+    test "a podman workspace's conflict pass attaches a private clone, not a linked worktree",
+         %{workspace: ws, task: task, repo: repo} do
+      branch = Arbiter.Worker.BranchNamer.derive(task)
+      {_, 0} = System.cmd("git", ["-C", repo, "branch", branch, "main"])
+      # The target moves on, so there is something to rebase.
+      File.write!(Path.join(repo, "MOVED.md"), "moved\n")
+      {_, 0} = System.cmd("git", ["-C", repo, "add", "MOVED.md"])
+      {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "target moved"])
+      {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "origin", "main"])
+
+      {:ok, info} =
+        Arbiter.Workflows.MergeQueue.ConflictResolver.resolve(%{
+          task_id: task.id,
+          workspace_id: ws.id,
+          repo_path: repo,
+          repo: "test/repo",
+          target_branch: "main",
+          start_claude: false
+        })
+
+      assert Arbiter.Worker.PrivateClone.clone?(info.worktree_path)
+      assert Arbiter.Worker.PrivateClone.main_repo(info.worktree_path) == Path.expand(repo)
+
+      {head, 0} = System.cmd("git", ["-C", info.worktree_path, "rev-parse", "HEAD"])
+      {tip, 0} = System.cmd("git", ["-C", repo, "rev-parse", "refs/heads/" <> branch])
+      assert head == tip
+
+      :ok = GenServer.stop(info.worker_pid, :normal, 1_000)
+    end
+
     test "an un-supplied target is derived from the task, not blanket-defaulted to the workspace base",
          %{workspace: ws, repo: repo} do
       # bd-1x4r25 review: the pre-flight is only safe if it compares against the

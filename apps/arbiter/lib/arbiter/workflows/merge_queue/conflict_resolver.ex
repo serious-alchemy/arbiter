@@ -66,6 +66,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   alias Arbiter.Worker.BranchNamer
   alias Arbiter.Worker.ClaudeSession
   alias Arbiter.Worker.Dispatch
+  alias Arbiter.Worker.GitLayout
   alias Arbiter.Worker.TargetBranch
   alias Arbiter.Worker.Worktree
   alias Arbiter.Workers.Run
@@ -299,6 +300,10 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   defp zero_divergence?(%{repo_path: repo_path, branch: branch, target_branch: target_branch}) do
     target_ref = "origin/#{target_branch}"
 
+    # bd-4wy1w1: a branch whose worker ran in a private clone (git layout B) is
+    # only as fresh in the main repo as its last sync-back.
+    _ = Worktree.sync_branch(repo_path, branch)
+
     with :ok <- Worktree.fetch_origin(repo_path, target_branch),
          {:ok, target_sha} <- git(repo_path, ["rev-parse", target_ref]),
          {:ok, merge_base_sha} <- merge_base_with_target(repo_path, branch, target_ref) do
@@ -478,8 +483,13 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   # `git worktree add <path> <existing-branch>` and is idempotent on the
   # same-branch path. The resolver worker then fetches the latest target
   # branch and rebases onto it from that worktree.
-  defp create_worktree(%{repo_path: repo_path, branch: branch}) do
-    case Worktree.attach(repo_path, branch) do
+  #
+  # bd-4wy1w1: in the git layout its sandbox needs — a private clone under a
+  # container backend (`Arbiter.Worker.GitLayout`).
+  defp create_worktree(%{repo_path: repo_path, branch: branch} = context) do
+    layout = GitLayout.for_workspace(context.workspace, context.repo)
+
+    case Worktree.attach(repo_path, branch, layout: layout, base: context.target_branch) do
       {:ok, path} -> {:ok, path}
       {:error, reason} -> {:error, {:worktree_failed, reason}}
     end

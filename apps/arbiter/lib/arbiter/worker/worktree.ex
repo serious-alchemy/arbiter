@@ -1,6 +1,7 @@
 defmodule Arbiter.Worker.Worktree do
   require Logger
 
+  alias Arbiter.Worker.PrivateClone
   alias Arbiter.Worker.ReleaseEnv
 
   @moduledoc """
@@ -34,6 +35,19 @@ defmodule Arbiter.Worker.Worktree do
   * `has_uncommitted?/1` returns `{:ok, boolean}` (not a raw bool) so callers
     have a consistent shape and we can add metadata later without breaking
     them.
+
+  ## Git layouts (bd-4wy1w1)
+
+  A worker checkout is a **linked worktree** of the main repo by default
+  (`git worktree add`; layout A). With `layout: :private_clone`, `create/4`
+  and `attach/3` build an `Arbiter.Worker.PrivateClone` at the same leaf
+  instead (layout B): its own `.git`, the main repo's objects borrowed through
+  alternates, nothing registered in the main repo. That is the layout a
+  container worker gets, since mounting a linked worktree means mounting the
+  main repo's shared refs read-write. Everything else here works on either:
+  `cleanup/1`, `repo_path/1`, `reset_if_merged/4` and `list/1` know a clone,
+  and `sync_back/1` / `sync_branch/2` carry a clone's branch into the main
+  repo for the readers that look it up there by name.
   """
 
   # Mix envs that workers actually use. `test` is the minimum; `dev` is
@@ -68,13 +82,60 @@ defmodule Arbiter.Worker.Worktree do
   Idempotent: if the target directory already exists and is on the requested
   branch, returns `{:ok, path}` without re-invoking git (no fetch either, so
   re-provisioning a still-good worktree is cheap).
-  """
-  @spec create(path(), String.t(), String.t()) :: {:ok, path()} | {:error, error_reason()}
-  def create(_repo_path, "", _base_branch), do: {:error, :invalid_branch_name}
-  def create(_repo_path, nil, _base_branch), do: {:error, :invalid_branch_name}
 
-  def create(repo_path, branch_name, base_branch)
-      when is_binary(repo_path) and is_binary(branch_name) and is_binary(base_branch) do
+  `layout: :private_clone` builds a git-layout-B private clone at the same
+  path instead (`PrivateClone.create/3`, see "Git layouts" above), which also
+  starts from the main repo's own `<branch>` when it has one, where a linked
+  worktree would fail "already exists" and need `attach/2`. A clean linked
+  worktree already at the leaf on this branch is replaced by a clone of it;
+  anything else there is `{:error, {:layout_mismatch, path}}`.
+  """
+  @spec create(path(), String.t() | nil, String.t(), keyword()) ::
+          {:ok, path()} | {:error, term()}
+  def create(repo_path, branch_name, base_branch, opts \\ [])
+  def create(_repo_path, "", _base_branch, _opts), do: {:error, :invalid_branch_name}
+  def create(_repo_path, nil, _base_branch, _opts), do: {:error, :invalid_branch_name}
+
+  def create(repo_path, branch_name, base_branch, opts)
+      when is_binary(repo_path) and is_binary(branch_name) and is_binary(base_branch) and
+             is_list(opts) do
+    case layout(opts) do
+      :private_clone -> create_clone(repo_path, branch_name, base_branch)
+      :linked_worktree -> create_linked(repo_path, branch_name, base_branch)
+    end
+  end
+
+  defp layout(opts), do: Keyword.get(opts, :layout, :linked_worktree)
+
+  # The leaf may hold the linked worktree an earlier run left before the
+  # workspace switched to a container backend. Its branch and commits live in
+  # the main repo, so a clean one on this branch is replaced by a clone of that
+  # same branch; one holding uncommitted work (or mid-rebase) is refused.
+  defp create_clone(repo_path, branch_name, base_branch) do
+    case PrivateClone.create(repo_path, branch_name, base_branch) do
+      {:error, {:layout_mismatch, path}} = mismatch ->
+        if replaceable_linked?(path, branch_name) do
+          Logger.info("Worktree: replacing the linked worktree at #{path} with a private clone")
+
+          with :ok <- cleanup_linked(path),
+               do: PrivateClone.create(repo_path, branch_name, base_branch)
+        else
+          mismatch
+        end
+
+      other ->
+        other
+    end
+  end
+
+  defp replaceable_linked?(path, branch_name) do
+    match?({:ok, %File.Stat{type: :regular}}, File.lstat(Path.join(path, ".git"))) and
+      checked_out_branch(path) == {:ok, branch_name} and
+      in_progress_operation(path) == nil and
+      has_uncommitted?(path) == {:ok, false}
+  end
+
+  defp create_linked(repo_path, branch_name, base_branch) do
     path = worktree_path(branch_name)
 
     result =
@@ -446,7 +507,9 @@ defmodule Arbiter.Worker.Worktree do
 
       cond do
         File.dir?(path) ->
-          reset_worktree_if_merged(path, branch_name, ref, force?)
+          with :ok <- refresh_clone_base(path, base_branch) do
+            reset_worktree_if_merged(path, branch_name, ref, force?)
+          end
 
         branch_ref_exists?(repo_path, branch_name) ->
           reset_branch_ref_if_merged(repo_path, branch_name, ref, force?)
@@ -455,6 +518,13 @@ defmodule Arbiter.Worker.Worktree do
           {:ok, :kept}
       end
     end
+  end
+
+  # A private clone's `origin/<base>` is its own ref, not the one the fetch
+  # above just moved: copy the main repo's in, so the ancestry check and the
+  # reset see current upstream as they do in a linked worktree.
+  defp refresh_clone_base(path, base_branch) do
+    if PrivateClone.clone?(path), do: PrivateClone.refresh_base(path, base_branch), else: :ok
   end
 
   defp reset_worktree_if_merged(path, branch_name, ref, force?) do
@@ -560,13 +630,25 @@ defmodule Arbiter.Worker.Worktree do
   (`checked_out_branch/1`, bd-4olwyg): it is returned as-is, with the rebase
   still in progress. Aborting it is the caller's call — only the caller knows
   whether a live run is still working in it (`abort_in_progress/1`).
-  """
-  @spec attach(path(), String.t()) :: {:ok, path()} | {:error, error_reason()}
-  def attach(_repo_path, ""), do: {:error, :invalid_branch_name}
-  def attach(_repo_path, nil), do: {:error, :invalid_branch_name}
 
-  def attach(repo_path, branch_name)
-      when is_binary(repo_path) and is_binary(branch_name) do
+  `layout: :private_clone` (with `base:` naming the target branch, whose
+  `origin/<base>` is then copied in) attaches a git-layout-B private clone
+  instead (`PrivateClone.attach/3`).
+  """
+  @spec attach(path(), String.t() | nil, keyword()) :: {:ok, path()} | {:error, term()}
+  def attach(repo_path, branch_name, opts \\ [])
+  def attach(_repo_path, "", _opts), do: {:error, :invalid_branch_name}
+  def attach(_repo_path, nil, _opts), do: {:error, :invalid_branch_name}
+
+  def attach(repo_path, branch_name, opts)
+      when is_binary(repo_path) and is_binary(branch_name) and is_list(opts) do
+    case layout(opts) do
+      :private_clone -> PrivateClone.attach(repo_path, branch_name, Keyword.get(opts, :base))
+      :linked_worktree -> attach_linked(repo_path, branch_name)
+    end
+  end
+
+  defp attach_linked(repo_path, branch_name) do
     path = worktree_path(branch_name)
 
     if File.dir?(path) do
@@ -602,9 +684,21 @@ defmodule Arbiter.Worker.Worktree do
   `git worktree remove --force` first so dirty worktrees are still cleaned up;
   follows with a best-effort `File.rm_rf/1` on the leaf dir to handle the case
   where git's metadata is already gone.
+
+  A private clone (layout B) is removed by `PrivateClone.remove/1`: its branch
+  is synced back into the main repo first, so it outlives the checkout as a
+  linked worktree's branch does, and the clone's gc pins go with it.
   """
-  @spec cleanup(path()) :: :ok | {:error, error_reason()}
+  @spec cleanup(path()) :: :ok | {:error, term()}
   def cleanup(worktree_path) when is_binary(worktree_path) do
+    if PrivateClone.clone?(worktree_path),
+      do: PrivateClone.remove(worktree_path),
+      else: cleanup_linked(worktree_path)
+  end
+
+  def cleanup(_), do: {:error, :invalid_path}
+
+  defp cleanup_linked(worktree_path) do
     # Try to ask git nicely first. We don't know the parent repo from just
     # the worktree path, so we run `git -C <worktree>` which lets git itself
     # walk up to its parent repo via the gitdir link file.
@@ -618,8 +712,6 @@ defmodule Arbiter.Worker.Worktree do
       {:error, reason, _} -> {:error, {:git_failed, "rm_rf failed: #{inspect(reason)}"}}
     end
   end
-
-  def cleanup(_), do: {:error, :invalid_path}
 
   @doc """
   Delete the local branch `branch_name` in `repo_path` — but only when it
@@ -1077,10 +1169,18 @@ defmodule Arbiter.Worker.Worktree do
 
   @doc """
   The repository a linked worktree belongs to — the directory holding its
-  common git dir — or `nil` when `path` is not a git checkout.
+  common git dir — or `nil` when `path` is not a git checkout. For a private
+  clone (layout B) that is the main repo it borrows from, not the clone.
   """
   @spec repo_path(path()) :: path() | nil
   def repo_path(path) when is_binary(path) do
+    case PrivateClone.main_repo(path) do
+      nil -> common_dir_repo(path)
+      main -> main
+    end
+  end
+
+  defp common_dir_repo(path) do
     case run_git(["rev-parse", "--path-format=absolute", "--git-common-dir"], cd: path) do
       {:ok, out} ->
         common = String.trim(out)
@@ -1103,22 +1203,28 @@ defmodule Arbiter.Worker.Worktree do
   nothing proves such a directory was ever a worktree. A live worktree's
   gitdir exists by construction, so it is never named either. `:min_age_ms`
   (default one hour, on the `.git` file's mtime) spares a leaf mid-creation.
+
+  Also names the dead private clones (git layout B) under `root`: a clone
+  whose main repo or borrowed objects dir is gone (`PrivateClone.orphaned/2`).
   """
   @spec orphaned_leaves(path(), keyword()) :: [path()]
   def orphaned_leaves(root, opts \\ []) when is_binary(root) do
-    min_age_s = div(Keyword.get(opts, :min_age_ms, @orphan_min_age_ms), 1000)
-    cutoff = System.os_time(:second) - min_age_s
+    min_age_ms = Keyword.get(opts, :min_age_ms, @orphan_min_age_ms)
+    cutoff = System.os_time(:second) - div(min_age_ms, 1000)
 
-    case File.ls(root) do
-      {:ok, names} ->
-        names
-        |> Enum.sort()
-        |> Enum.map(&Path.join(root, &1))
-        |> Enum.filter(&orphaned_leaf?(&1, cutoff))
+    linked =
+      case File.ls(root) do
+        {:ok, names} ->
+          names
+          |> Enum.sort()
+          |> Enum.map(&Path.join(root, &1))
+          |> Enum.filter(&orphaned_leaf?(&1, cutoff))
 
-      {:error, _} ->
-        []
-    end
+        {:error, _} ->
+          []
+      end
+
+    Enum.sort(linked ++ PrivateClone.orphaned(root, min_age_ms: min_age_ms))
   end
 
   defp orphaned_leaf?(leaf, cutoff) do
@@ -1610,6 +1716,39 @@ defmodule Arbiter.Worker.Worktree do
   end
 
   @doc """
+  Carry a private clone's branch into its main repo (`PrivateClone.sync_back/1`).
+  `:ok` for a linked worktree, whose branch already lives in the main repo.
+
+  For the moments a clone's commits must be visible in the main repo: the end
+  of a worker run, and before anything that reads the branch there by name.
+  """
+  @spec sync_back(path()) :: :ok | {:error, term()}
+  def sync_back(path) when is_binary(path) do
+    if PrivateClone.clone?(path) do
+      with {:ok, _sha} <- PrivateClone.sync_back(path), do: :ok
+    else
+      :ok
+    end
+  end
+
+  @doc """
+  Refresh `repo_path`'s `<branch_name>` from the private clone at
+  `worktree_path(branch_name)`, if that is a clone of `repo_path`; `:ok`
+  otherwise. For readers that find a branch by name in the main repo (the
+  Direct merger, the conflict resolver's divergence check, a review
+  checkout's local fallback): with a linked worktree that ref *is* the
+  worker's branch, with a clone it is only as fresh as the last sync-back.
+  """
+  @spec sync_branch(path(), String.t()) :: :ok | {:error, term()}
+  def sync_branch(repo_path, branch_name) when is_binary(repo_path) and is_binary(branch_name) do
+    path = worktree_path(branch_name)
+
+    if PrivateClone.main_repo(path) == Path.expand(repo_path),
+      do: sync_back(path),
+      else: :ok
+  end
+
+  @doc """
   Compute the directory a worktree for `branch_name` lives at.
 
   Public so callers (and tests) can predict the path without invoking git.
@@ -1623,7 +1762,8 @@ defmodule Arbiter.Worker.Worktree do
 
   @doc """
   List the linked worktrees attached to the repo at `repo_path`, excluding
-  the main worktree.
+  the main worktree, followed by its private clones (layout B) under the
+  worktree root, which git does not know about.
 
   Each entry is a map with `:path` and `:branch`. Returns `[]` if the path
   isn't a git repo, git isn't on PATH, or anything else goes wrong — this
@@ -1631,16 +1771,19 @@ defmodule Arbiter.Worker.Worktree do
   """
   @spec list(path()) :: [%{path: path(), branch: String.t() | nil}]
   def list(repo_path) when is_binary(repo_path) do
-    case run_git(["worktree", "list", "--porcelain"], cd: repo_path) do
-      {:ok, output} ->
-        output
-        |> parse_worktree_list()
-        # First entry is the main worktree; the user wants linked ones only.
-        |> Enum.drop(1)
+    linked =
+      case run_git(["worktree", "list", "--porcelain"], cd: repo_path) do
+        {:ok, output} ->
+          output
+          |> parse_worktree_list()
+          # First entry is the main worktree; the user wants linked ones only.
+          |> Enum.drop(1)
 
-      {:error, _} ->
-        []
-    end
+        {:error, _} ->
+          []
+      end
+
+    linked ++ PrivateClone.list(repo_path)
   end
 
   defp parse_worktree_list(output) do

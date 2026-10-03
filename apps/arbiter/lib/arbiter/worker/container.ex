@@ -14,8 +14,9 @@ defmodule Arbiter.Worker.Container do
         --userns=keep-id --read-only --cap-drop=all \\
         --security-opt no-new-privileges [--security-opt label=disable] \\
         --network=none|pasta --tmpfs /tmp:… --tmpfs /dev/shm:… \\
-        -v <worktree>:<worktree>:rw,Z [-v <objects>:<objects>:O] [-v <home>…] \\
-        [-v <writable path>:…:rw] [-v <bridge socket>:…:ro] \\
+        -v <worktree>:<worktree>:rw,Z [-v <git dir>:<git dir>:rw,Z] \\
+        [-v <objects>:<objects>:O] [-v <home>…] \\
+        [-v <writable path>:…:rw] [-v <bridge socket>:…:ro] [-v <read-only path>:…:ro] \\
         [-e NAME …] [-e NAME=value …] [-i] -w <worktree> \\
         -- <image> <command…>
 
@@ -33,6 +34,11 @@ defmodule Arbiter.Worker.Container do
       relabelled `:Z`), the main repo's `objects/` as an overlay (`:O`: readable
       with no relabel of the host checkout, writes are discarded), the per-run
       HOME, `sandbox.writable_paths`, and one read-only bind per bridge socket.
+      For a private clone (git layout B, bd-4wy1w1) also its `.git` as a mount
+      point of its own (`:git_dir`, so it cannot be renamed away or replaced by
+      a `gitdir:` file) and `:readonly_paths` bound read-only last, on top of
+      everything writable: `Arbiter.Worker.PrivateClone.mounts/1` builds that
+      set.
     * **Label policy (design §5.3, decided 2026-10-02)** —
       `--security-opt label=disable` is added **only** when the container has
       bridge sockets: a confined `container_t` cannot `connect()` to an
@@ -98,6 +104,8 @@ defmodule Arbiter.Worker.Container do
           required(:worktree) => String.t(),
           optional(:home) => String.t() | nil,
           optional(:objects) => String.t() | nil,
+          optional(:git_dir) => String.t() | nil,
+          optional(:readonly_paths) => [String.t()],
           optional(:worktree_readonly) => boolean(),
           optional(:writable_paths) => [String.t()],
           optional(:bridges) => [String.t()],
@@ -149,17 +157,21 @@ defmodule Arbiter.Worker.Container do
   defp tmpfs_args("/tmp"), do: ["--tmpfs", "/tmp:rw,nosuid,nodev"]
   defp tmpfs_args(path), do: ["--tmpfs", path <> ":rw,nosuid,nodev"]
 
+  # Read-only re-binds come last, so nothing writable is mounted over them.
   defp mounts(%{worktree: worktree} = spec, label_disabled?) do
     worktree_mode = if Map.get(spec, :worktree_readonly, false), do: :ro, else: :rw_private
     home = Map.get(spec, :home)
     objects = Map.get(spec, :objects)
+    git_dir = Map.get(spec, :git_dir)
 
     Enum.flat_map(
       [{worktree, worktree_mode}] ++
+        if(git_dir, do: [{git_dir, worktree_mode}], else: []) ++
         if(home, do: [{home, :rw_private}], else: []) ++
         if(objects, do: [{objects, :overlay}], else: []) ++
         Enum.map(Map.get(spec, :writable_paths, []), &{&1, :rw}) ++
-        Enum.map(Map.get(spec, :bridges, []), &{&1, :ro}),
+        Enum.map(Map.get(spec, :bridges, []), &{&1, :ro}) ++
+        Enum.map(Map.get(spec, :readonly_paths, []), &{&1, :ro}),
       fn {path, mode} -> ["-v", "#{path}:#{path}:#{mount_opts(mode, label_disabled?)}"] end
     )
   end
@@ -186,8 +198,10 @@ defmodule Arbiter.Worker.Container do
   Wrap `command` (executable first) in a container.
 
   Options: `:worktree`, `:image` and `:name` (required; the name must be
-  `name_for/1`-shaped), `:home`, `:objects`, `:worktree_readonly`,
-  `:writable_paths`, `:bridges` (host unix sockets), `:tmpfs`, `:env`,
+  `name_for/1`-shaped), `:home`, `:objects`, `:git_dir` and `:readonly_paths`
+  (both must exist: podman would create a missing bind source on the host),
+  `:worktree_readonly`, `:writable_paths`, `:bridges` (host unix sockets),
+  `:tmpfs`, `:env`,
   `:inherit_env`, `:network` (`:none` | `:pasta`), `:interactive`, `:podman`
   (path; default the host's `podman`) and `:find_executable` (for tests).
   """
@@ -210,6 +224,8 @@ defmodule Arbiter.Worker.Container do
         worktree: worktree,
         home: mounts.home,
         objects: mounts.objects,
+        git_dir: mounts.git_dir,
+        readonly_paths: mounts.readonly_paths,
         worktree_readonly: Keyword.get(opts, :worktree_readonly, false),
         writable_paths: mounts.writable_paths,
         bridges: bridges,
@@ -297,10 +313,33 @@ defmodule Arbiter.Worker.Container do
     writable = Keyword.get(opts, :writable_paths, [])
     home = Keyword.get(opts, :home)
     objects = Keyword.get(opts, :objects)
-    paths = writable ++ Enum.reject([home, objects], &is_nil/1)
+    git_dir = Keyword.get(opts, :git_dir)
+    readonly = Keyword.get(opts, :readonly_paths, [])
+    paths = writable ++ readonly ++ Enum.reject([home, objects, git_dir], &is_nil/1)
 
-    with :ok <- check_paths(paths) do
-      {:ok, %{home: home, objects: objects, writable_paths: writable}}
+    with :ok <- check_paths(paths),
+         :ok <- check_exists(git_dir, :git_dir_missing),
+         :ok <- check_all_exist(readonly) do
+      {:ok,
+       %{
+         home: home,
+         objects: objects,
+         git_dir: git_dir,
+         readonly_paths: readonly,
+         writable_paths: writable
+       }}
+    end
+  end
+
+  defp check_exists(nil, _error), do: :ok
+
+  defp check_exists(dir, error),
+    do: if(File.dir?(dir), do: :ok, else: {:error, {error, dir}})
+
+  defp check_all_exist(paths) do
+    case Enum.find(paths, &(not File.exists?(&1))) do
+      nil -> :ok
+      missing -> {:error, {:readonly_path_missing, missing}}
     end
   end
 

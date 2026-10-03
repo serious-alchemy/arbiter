@@ -91,6 +91,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Worker.BranchNamer
   alias Arbiter.Worker.ClaudeSession
   alias Arbiter.Worker.Driver
+  alias Arbiter.Worker.GitLayout
   alias Arbiter.Worker.PromptBuilder
   alias Arbiter.Worker.ResumeContext
   alias Arbiter.Worker.ResumeSlot
@@ -1957,6 +1958,7 @@ defmodule Arbiter.Worker.Dispatch do
           repo_path when is_binary(repo_path) ->
             branch = BranchNamer.derive(task)
             target_branch = resolve_target_branch(task, opts)
+            layout = git_layout(task, opts)
 
             # bd-8ssxap: a redispatch can find its OLD per-task branch still on
             # disk with commits that are already merged upstream (a prior round
@@ -1989,7 +1991,7 @@ defmodule Arbiter.Worker.Dispatch do
 
             case reset_result do
               {:ok, _} ->
-                case Worktree.create(repo_path, branch, target_branch) do
+                case Worktree.create(repo_path, branch, target_branch, layout: layout) do
                   {:ok, path} ->
                     {:ok, path}
 
@@ -2000,13 +2002,22 @@ defmodule Arbiter.Worker.Dispatch do
                         # wired Credo up. Thresholds stay at the tool's own default so new
                         # code is held to it; see the note in .credo.exs.
                         # credo:disable-for-next-line Credo.Check.Refactor.Nesting
-                        case Worktree.attach(repo_path, branch) do
+                        case Worktree.attach(repo_path, branch,
+                               layout: layout,
+                               base: target_branch
+                             ) do
                           {:ok, path} -> {:ok, path}
                           {:error, reason} -> {:error, {:worktree_failed, reason}}
                         end
 
                       String.contains?(msg, "different branch") ->
-                        recover_from_detached_worktree(repo_path, branch, target_branch, msg)
+                        recover_from_detached_worktree(
+                          repo_path,
+                          branch,
+                          target_branch,
+                          msg,
+                          layout
+                        )
 
                       true ->
                         {:error, {:worktree_failed, {:git_failed, msg}}}
@@ -2030,7 +2041,7 @@ defmodule Arbiter.Worker.Dispatch do
   # doesn't match "different branch", and nothing else reclaims the directory), so
   # recover instead of stranding the dispatch. Safe by inspection: a detached tree
   # has no branch and therefore no commits only reachable from it.
-  defp recover_from_detached_worktree(repo_path, branch, target_branch, msg) do
+  defp recover_from_detached_worktree(repo_path, branch, target_branch, msg, layout) do
     require Logger
 
     path = Worktree.worktree_path(branch)
@@ -2044,7 +2055,7 @@ defmodule Arbiter.Worker.Dispatch do
 
         _ = Worktree.cleanup(path)
 
-        case Worktree.create(repo_path, branch, target_branch) do
+        case Worktree.create(repo_path, branch, target_branch, layout: layout) do
           {:ok, path} -> {:ok, path}
           {:error, reason} -> {:error, {:worktree_failed, reason}}
         end
@@ -2053,6 +2064,17 @@ defmodule Arbiter.Worker.Dispatch do
         {:error, {:worktree_failed, {:git_failed, msg}}}
     end
   end
+
+  # bd-4wy1w1 (P5): the checkout's git layout follows the sandbox the spawn will
+  # run in, resolved from the same policy layers `build_agent_session_opts/4`
+  # resolves: a container (`sandbox.backend: podman`) gets a private clone.
+  defp git_layout(%Issue{} = task, opts),
+    do:
+      GitLayout.for_workspace(
+        load_workspace(task),
+        Keyword.get(opts, :repo),
+        security_override(opts)
+      )
 
   defp resolve_repo_path(_task, nil), do: nil
 
@@ -2717,6 +2739,11 @@ defmodule Arbiter.Worker.Dispatch do
         nil
 
       branch ->
+        # bd-4wy1w1: a branch held in a private clone (git layout B) reaches
+        # the main repo, where the checkout's never-pushed fallback looks,
+        # only through a sync-back.
+        _ = Worktree.sync_branch(repo_path, branch)
+
         case Checkout.provision_branch(repo_path, branch, prefix: "review") do
           {:ok, %{path: path, head_sha: sha}} ->
             %{path: path, branch: branch, head_sha: sha, base_branch: target}

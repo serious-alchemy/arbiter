@@ -44,6 +44,62 @@ defmodule Arbiter.Test.GitFixture do
   end
 
   @doc """
+  A bare `forge` repo (one commit on `main`) and a `checkout` cloned from it
+  whose `origin` is the forge — a workspace `repo_paths` checkout whose remote
+  accepts pushes to any branch, `main` included. `seed` is a second clone that
+  pushes to the forge, to move upstream on behind the checkout's back. Also
+  points the worktree root at `<root>/worktrees` for the test, restoring the
+  previous value on exit.
+
+  `parent:` puts the root somewhere other than `System.tmp_dir!()` (the bwrap
+  jail mounts a private tmpfs over `/tmp`, hiding anything under it).
+  """
+  @spec forge_and_checkout(%{String.t() => String.t()}, keyword()) :: %{
+          root: String.t(),
+          forge: String.t(),
+          checkout: String.t(),
+          worktree_root: String.t(),
+          seed: String.t()
+        }
+  def forge_and_checkout(files \\ %{"README.md" => "readme\n"}, opts \\ []) do
+    root =
+      Path.join(
+        Keyword.get_lazy(opts, :parent, &System.tmp_dir!/0),
+        "gitfx-#{System.pid()}-#{System.unique_integer([:positive])}"
+      )
+
+    forge = Path.join(root, "forge.git")
+    seed = Path.join(root, "seed")
+    checkout = Path.join(root, "checkout")
+    worktree_root = Path.join(root, "worktrees")
+    File.mkdir_p!(seed)
+    File.mkdir_p!(worktree_root)
+    on_exit(fn -> File.rm_rf(root) end)
+
+    git!(root, ["init", "-q", "--bare", "-b", "main", forge])
+    git!(root, ["init", "-q", "-b", "main", seed])
+    configure!(seed)
+    commit!(seed, files, "init")
+    git!(seed, ["remote", "add", "origin", forge])
+    git!(seed, ["push", "-q", "origin", "main"])
+
+    git!(root, ["clone", "-q", forge, checkout])
+    configure!(checkout)
+
+    prior = Application.fetch_env(:arbiter, :worktree_root)
+    Application.put_env(:arbiter, :worktree_root, worktree_root)
+
+    on_exit(fn ->
+      case prior do
+        {:ok, value} -> Application.put_env(:arbiter, :worktree_root, value)
+        :error -> Application.delete_env(:arbiter, :worktree_root)
+      end
+    end)
+
+    %{root: root, forge: forge, checkout: checkout, worktree_root: worktree_root, seed: seed}
+  end
+
+  @doc """
   Write (or, for a `:delete` value, remove) `files` in `repo`'s working tree
   and commit them. Returns the new commit's sha.
   """

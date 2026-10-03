@@ -3838,6 +3838,7 @@ defmodule Arbiter.Worker do
           # exists" — sitting on the uncommitted changes and ignoring them.
           case commit_gate(state) do
             :ok ->
+              sync_back_after_run(state)
               route_completion(state, branch)
 
             {:gate, reason} ->
@@ -4288,6 +4289,26 @@ defmodule Arbiter.Worker do
     else
       :ok
     end
+  end
+
+  # bd-4wy1w1 (P5): a worker in a private clone (git layout B) committed into
+  # the clone only. Carry the branch into the main repo as soon as the run is
+  # reviewable, so everything that reads it there by name (a dispatched
+  # reviewer's checkout, the conflict resolver, the Direct merger) sees what a
+  # linked worktree would have shown. Fail-open here: `do_open_mr/5` syncs again
+  # and refuses to merge or open a PR on a failure. A no-op for a linked worktree.
+  defp sync_back_after_run(%State{meta: meta, task_id: task_id}) do
+    worktree = meta && Map.get(meta, :worktree_path)
+
+    with path when is_binary(path) <- worktree,
+         {:error, reason} <- Arbiter.Worker.Worktree.sync_back(path) do
+      Logger.warning(
+        "Worker: could not sync the private clone's branch back for task=#{task_id}: " <>
+          inspect(reason)
+      )
+    end
+
+    :ok
   end
 
   defp worktree_on_branch?(_path, nil), do: false
@@ -7916,14 +7937,9 @@ defmodule Arbiter.Worker do
         # push even when we already know the PR ref below — a revise-and-
         # discuss round may have added commits since the pre-review open that
         # the PR (and its CI) needs to see.
-        case push_for_hosted_pr(state, workspace, opts) do
-          {:error, push_reason} ->
-            Logger.warning(
-              "Worker.open_mr: push failed before PR open for task=#{state.task_id}: " <>
-                "#{inspect(push_reason)} — aborting (would 422)"
-            )
-
-            {:error, {:push_failed, push_reason}, state}
+        case publish_branch(state, workspace, opts) do
+          {:error, reason} ->
+            {:error, reason, state}
 
           :ok ->
             case known_pr_ref_for_branch(state, branch) do
@@ -8129,6 +8145,44 @@ defmodule Arbiter.Worker do
   # Returns `:ok` when the push succeeds (or is not needed), and
   # `{:error, {:push_failed, reason}}` when it fails, so callers can surface the
   # failure loudly rather than proceeding to a doomed PR-open.
+  # The branch the merger reads: pushed to the forge for a hosted PR, and, for a
+  # private clone (git layout B, bd-4wy1w1), synced back into the main repo,
+  # where the Direct merger (and GitLab's open) look it up by name. After the
+  # push, so a reconcile-before-push rebase is what the main repo gets.
+  # Either failure is refused loudly: a push failure would 422 the PR open, and
+  # a failed sync-back would merge or open a stale branch.
+  defp publish_branch(%State{meta: meta, task_id: task_id} = state, workspace, opts) do
+    case push_for_hosted_pr(state, workspace, opts) do
+      :ok ->
+        sync_back_branch(meta && Map.get(meta, :worktree_path), task_id)
+
+      {:error, push_reason} ->
+        Logger.warning(
+          "Worker.open_mr: push failed before PR open for task=#{task_id}: " <>
+            "#{inspect(push_reason)} — aborting (would 422)"
+        )
+
+        {:error, {:push_failed, push_reason}}
+    end
+  end
+
+  defp sync_back_branch(path, task_id) when is_binary(path) do
+    case Arbiter.Worker.Worktree.sync_back(path) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "Worker.open_mr: the private clone's branch could not be synced back for " <>
+            "task=#{task_id}: #{inspect(reason)} — not opening or merging a stale branch"
+        )
+
+        {:error, {:sync_back_failed, reason}}
+    end
+  end
+
+  defp sync_back_branch(_no_worktree, _task_id), do: :ok
+
   defp push_for_hosted_pr(%State{meta: meta, task_id: task_id}, workspace, opts) do
     worktree = meta && Map.get(meta, :worktree_path)
 

@@ -9,6 +9,7 @@ defmodule Arbiter.Worker.WorktreeSweeperTest do
 
   import Arbiter.Test.GitFixture, only: [origin_and_clone: 0]
 
+  alias Arbiter.Worker.PrivateClone
   alias Arbiter.Worker.Worktree
   alias Arbiter.Worker.WorktreeSweeper
 
@@ -92,5 +93,58 @@ defmodule Arbiter.Worker.WorktreeSweeperTest do
 
     assert %{removed: removed} = WorktreeSweeper.sweep_now(pid)
     assert ctx.orphan in removed
+  end
+
+  # bd-4wy1w1: git layout B. A private clone has a `.git` *directory*, so the
+  # gitdir-file rule above never names one; it is dead when the main repo it
+  # borrows its objects from is gone. Its gc pins in a main repo that is still
+  # there are dead once no clone at their leaf is left.
+  describe "private clones" do
+    setup ctx do
+      main2 = Path.join(ctx.root, "../main2") |> Path.expand()
+      {_, 0} = System.cmd("git", ["clone", "-q", ctx.origin, main2])
+      {:ok, live} = PrivateClone.create(ctx.clone, "feature/sw-b-live", "main")
+      {:ok, doomed} = PrivateClone.create(main2, "feature/sw-b-doomed", "main")
+      %{main2: main2, live_clone: live, doomed: doomed}
+    end
+
+    test "a clone whose main repo is gone is swept; a live clone is untouched", ctx do
+      File.rm_rf!(ctx.main2)
+
+      assert %{removed: removed, failed: []} = WorktreeSweeper.sweep_once(min_age_ms: 0)
+
+      assert ctx.doomed in removed
+      refute File.exists?(ctx.doomed)
+      refute ctx.live_clone in removed
+      assert PrivateClone.clone?(ctx.live_clone)
+    end
+
+    test "min_age_ms spares a fresh dead clone", ctx do
+      File.rm_rf!(ctx.main2)
+
+      assert %{removed: removed} = WorktreeSweeper.sweep_once(min_age_ms: 3_600_000)
+      refute ctx.doomed in removed
+      assert File.dir?(ctx.doomed)
+    end
+
+    test "pins whose clone is gone are dropped; a live clone keeps its pins", ctx do
+      {:ok, vanished} = PrivateClone.create(ctx.clone, "feature/sw-b-vanished", "main")
+      vanished_pins = PrivateClone.pin_prefix(Path.basename(vanished))
+      live_pins = PrivateClone.pin_prefix(Path.basename(ctx.live_clone))
+      # Removed out of band: nothing ran PrivateClone.remove/1 to unpin it.
+      File.rm_rf!(vanished)
+
+      assert %{unpinned: unpinned} = WorktreeSweeper.sweep_once(min_age_ms: 0)
+
+      assert Enum.all?(unpinned, &String.starts_with?(&1, vanished_pins))
+      assert unpinned != []
+      assert pins(ctx.clone, vanished_pins) == ""
+      refute pins(ctx.clone, live_pins) == ""
+    end
+  end
+
+  defp pins(repo, prefix) do
+    {out, 0} = System.cmd("git", ["-C", repo, "for-each-ref", "--format=%(refname)", prefix])
+    String.trim(out)
   end
 end

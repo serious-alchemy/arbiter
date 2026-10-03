@@ -499,6 +499,65 @@ defmodule Arbiter.Worker.JailHideTest do
       refute jailed(fx, ~s(ls "#{fx.wt_root}"), %{git: git}) =~ "sibling-task"
     end
 
+    # bd-4wy1w1: an agy run resuming in a git-layout-B private clone (a Claude
+    # container worker made it). The clone borrows its main repo's objects,
+    # which must stay readable under the repo masks, and its `commondir` guard
+    # and alternates must not be writable from inside.
+    test "a private clone commits inside the hidden jail, reading the history it borrows", %{
+      fx: fx
+    } do
+      git_env = [
+        {"GIT_AUTHOR_NAME", "t"},
+        {"GIT_AUTHOR_EMAIL", "t@example.invalid"},
+        {"GIT_COMMITTER_NAME", "t"},
+        {"GIT_COMMITTER_EMAIL", "t@example.invalid"},
+        {"GIT_CONFIG_GLOBAL", "/dev/null"},
+        {"GIT_CONFIG_SYSTEM", "/dev/null"}
+      ]
+
+      gfx =
+        Arbiter.Test.GitFixture.forge_and_checkout(%{"README.md" => "readme\n"},
+          parent: Path.dirname(fx.wt_root)
+        )
+
+      {:ok, clone} = Arbiter.Worker.PrivateClone.create(gfx.checkout, "feature/jail-b", "main")
+      {:ok, git} = Jail.git(clone)
+      assert git.main_repo == gfx.checkout
+
+      # The hide spec `Jail.wrap/2` builds for this clone: its main repo is the
+      # own repo, every other one is masked.
+      hide =
+        Hide.paths(
+          Keyword.merge(fx.opts,
+            own_repo: git.main_repo,
+            repos: [gfx.checkout, fx.other_repo]
+          )
+        )
+
+      out =
+        jailed(
+          %{fx | wt: clone},
+          """
+          cd "$0" || exit 1
+          git log --format=%s | grep -q init && echo HISTORY_OK
+          echo change > new.txt && git add new.txt && git commit -q -m jailed && echo COMMIT_OK
+          printf '/tmp/fake\\n' > .git/commondir 2>/dev/null; echo "commondir=$?"
+          printf '/etc\\n' > .git/objects/info/alternates 2>/dev/null; echo "alternates=$?"
+          cat "#{fx.other_repo}/README" 2>/dev/null; echo end
+          """,
+          %{git: git, env: git_env, hide: hide}
+        )
+
+      assert out =~ "HISTORY_OK"
+      assert out =~ "COMMIT_OK"
+      refute out =~ "commondir=0"
+      refute out =~ "alternates=0"
+      refute out =~ "SECRET-other-repo"
+      assert File.read!(Path.join(clone, ".git/commondir")) == ".\n"
+      assert {log, 0} = System.cmd("git", ["log", "--format=%s", "-1"], cd: clone)
+      assert String.trim(log) == "jailed"
+    end
+
     test "ssh reads ~/.ssh/config, known_hosts and the default identity under the masks", %{
       fx: fx
     } do
