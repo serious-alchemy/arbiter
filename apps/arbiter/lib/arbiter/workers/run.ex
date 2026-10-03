@@ -105,6 +105,7 @@ defmodule Arbiter.Workers.Run do
         :merger_url,
         :session_id,
         :config_dir,
+        :cgroup_scopes,
         :difficulty_at_dispatch,
         :resolved_skills,
         :standing_orders_digest,
@@ -140,6 +141,7 @@ defmodule Arbiter.Workers.Run do
         :merger_url,
         :session_id,
         :config_dir,
+        :cgroup_scopes,
         :resolved_skills,
         :standing_orders_digest,
         :routing_policy,
@@ -369,6 +371,18 @@ defmodule Arbiter.Workers.Run do
       description "Effective config root the worker spawned under: CLAUDE_CONFIG_DIR for " <>
                     "Claude, or the isolated $HOME for agy (workers use an isolated dir, not " <>
                     "~/.claude or the operator's own $HOME). Roots the on-disk session lookup."
+    end
+
+    # bd-6zuoo6: the systemd scope each spawn of this run ran in
+    # (`Arbiter.Worker.MemoryScope`). A kernel OOM line names the victim's
+    # cgroup, and this is how that name maps back to a task and a run.
+    attribute :cgroup_scopes, {:array, :string} do
+      public? true
+
+      description "Transient systemd scope unit names (arb-run-<task>-<hex>.scope), one per " <>
+                    "agent spawn of this run, in spawn order. A kernel OOM / journal line that " <>
+                    "names one of these identifies the run. Nil when the run was not spawned " <>
+                    "in a scope (memory cap disabled or unavailable) or predates the column."
     end
 
     # ---- Run provenance (bd-dzz6ly) ---------------------------------------

@@ -162,7 +162,7 @@ To run Arbiter as a self-contained OTP release under a systemd user unit, instal
 arb install service
 ```
 
-This writes `~/.config/systemd/user/arbiter.service` (`ExecStart=~/.arbiter/current/bin/arbiter start`), enables it via `loginctl enable-linger` for machine-boot startup, and starts the release. Manage it with `systemctl --user status arbiter.service` and view logs with `journalctl --user -u arbiter.service -f`. Pass `--system` to install a system-wide unit instead (needs root). Secrets and PATH configuration live in `~/.arbiter/arbiter.env`. Uninstall with `arb install service --uninstall`.
+This writes `~/.config/systemd/user/arbiter.service` (`ExecStart=~/.arbiter/current/bin/arbiter start`), enables it via `loginctl enable-linger` for machine-boot startup, and starts the release. Manage it with `systemctl --user status arbiter.service` and view logs with `journalctl --user -u arbiter.service -f`. Pass `--system` to install a system-wide unit instead (needs root). Secrets and PATH configuration live in `~/.arbiter/arbiter.env`. Uninstall with `arb install service --uninstall`. The unit sets `OOMPolicy=continue` and each worker runs in its own memory-capped scope (`ARBITER_WORKER_MEMORY_MAX`, default 40% of RAM), so one runaway worker process cannot stop the server — see [docs/worker-memory-cap.md](docs/worker-memory-cap.md), including the drop-in for a unit installed before this.
 
 `arb install service` only writes the release-shaped unit above. There is no
 CLI command yet for a dev-mode unit (one whose `ExecStart` runs

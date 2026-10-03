@@ -1796,6 +1796,19 @@ defmodule Arbiter.Worker.ClaudeSession do
     end
   end
 
+  @doc """
+  `open_port/1` for an agent spawn: runs it in its own memory-capped systemd
+  scope when one is available (`Arbiter.Worker.MemoryScope`, bd-6zuoo6), and
+  returns the scope (`nil` when the spawn is uncapped) so the owner can record
+  it on the run and ask systemd afterwards whether it was OOM-killed.
+  """
+  @spec open_scoped_port(map(), String.t() | nil) ::
+          {port(), Arbiter.Worker.MemoryScope.scope() | nil}
+  def open_scoped_port(port_args, task_id) do
+    {wrapped, scope} = Arbiter.Worker.MemoryScope.wrap(port_args, task_id)
+    {open_port(wrapped), scope}
+  end
+
   @doc false
   @spec open_port(map()) :: port()
   def open_port(%{exec: exec, argv: [_ | rest], cd: cd} = port_args) do

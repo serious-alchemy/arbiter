@@ -1621,6 +1621,402 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     end
   end
 
+  # bd-6zuoo6: one worker's runaway process must not be able to stop the server.
+  describe "worker memory check" do
+    defp worker_memory_routes(body) do
+      [
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/worker_memory"}, {body, 200}}
+      ]
+    end
+
+    defp memory_body(overrides) do
+      Map.merge(
+        %{
+          "enabled" => true,
+          "capped" => true,
+          "available" => true,
+          "cap" => "40%",
+          "unavailable_reason" => nil,
+          "service_unit" => "arbiter.service",
+          "service_manager" => "user",
+          "oom_policy" => "continue",
+          "memory_max" => "infinity"
+        },
+        overrides
+      )
+    end
+
+    defp memory_result(body) do
+      stub_routes(worker_memory_routes(body))
+      Enum.find(Checks.run(), &(&1.name == "worker memory cap"))
+    end
+
+    test "warns loudly for OOMPolicy=stop with no per-worker cap" do
+      result =
+        memory_result(
+          memory_body(%{"oom_policy" => "stop", "capped" => false, "enabled" => false})
+        )
+
+      assert result.status == :warn
+      assert result.detail =~ "OOMPolicy=stop"
+      assert result.detail =~ "no per-worker memory cap"
+      assert result.hint =~ "OOMPolicy=continue"
+      refute result.blocks_readiness
+    end
+
+    test "an unreadable OOMPolicy is reported as unknown, not as OOMPolicy=stop" do
+      result = memory_result(memory_body(%{"oom_policy" => nil}))
+
+      assert result.status == :warn
+      assert result.detail =~ "could not read OOMPolicy for arbiter.service"
+      refute result.detail =~ "OOMPolicy=stop"
+      refute result.blocks_readiness
+    end
+
+    test "says why an enabled cap is not in force" do
+      result =
+        memory_result(
+          memory_body(%{
+            "oom_policy" => "stop",
+            "capped" => false,
+            "available" => false,
+            "unavailable_reason" => "cgroup v2 (unified hierarchy) is not mounted"
+          })
+        )
+
+      assert result.status == :warn
+      assert result.detail =~ "cgroup v2"
+    end
+
+    test "still warns for OOMPolicy=stop when workers are capped" do
+      result = memory_result(memory_body(%{"oom_policy" => "stop"}))
+
+      assert result.status == :warn
+      assert result.detail =~ "capped at 40%"
+      assert result.hint =~ "OOMPolicy=continue"
+    end
+
+    test "is ok with OOMPolicy=continue and a cap in force" do
+      result = memory_result(memory_body(%{}))
+
+      assert result.status == :ok
+      assert result.detail =~ "40%"
+    end
+
+    test "warns about a missing cap even with OOMPolicy=continue" do
+      result = memory_result(memory_body(%{"capped" => false, "enabled" => false}))
+
+      assert result.status == :warn
+      assert result.detail =~ "no per-worker memory cap"
+    end
+
+    test "a server that is not a systemd service has no OOM policy to judge" do
+      result =
+        memory_result(
+          memory_body(%{"service_unit" => nil, "service_manager" => nil, "oom_policy" => nil})
+        )
+
+      assert result.status == :ok
+      assert result.detail =~ "not running as a systemd service"
+    end
+
+    test "an unreachable or older server is skipped, not failed" do
+      stub_routes(
+        List.keydelete(worker_memory_routes(%{}), {"get", "/api/server/worker_memory"}, 0)
+      )
+
+      result = Enum.find(Checks.run(), &(&1.name == "worker memory cap"))
+      assert result.status == :ok
+      assert result.detail =~ "skipping"
+    end
+  end
+
+  # bd-c99hys: the dashboard login relay drives each provider CLI's login inside
+  # a hidden tmux session, so a host without tmux cannot log an account in.
+  describe "tmux check" do
+    defp tmux_routes(body) do
+      [
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/tmux"}, {body, 200}}
+      ]
+    end
+
+    test "reports tmux present, with its version" do
+      stub_routes(
+        tmux_routes(%{"available" => true, "path" => "/usr/bin/tmux", "version" => "tmux 3.4"})
+      )
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] tmux"
+      assert out =~ "tmux 3.4"
+    end
+
+    test "reports tmux missing, informationally, with the fix" do
+      stub_routes(
+        tmux_routes(%{
+          "available" => false,
+          "message" => "tmux is not installed",
+          "fix" => "Install tmux (e.g. `sudo dnf install tmux`)"
+        })
+      )
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[fail] tmux"
+      assert out =~ "tmux is not installed"
+      assert out =~ "sudo dnf install tmux"
+
+      result = Enum.find(Checks.run(), &(&1.name == "tmux"))
+      refute result.blocks_readiness
+    end
+
+    test "skips quietly when the server predates the endpoint" do
+      stub_routes(tmux_routes(%{}) |> List.keydelete({"get", "/api/server/tmux"}, 0))
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] tmux"
+      assert out =~ "predates this check"
+    end
+  end
+
+  # bd-73zv62: a repo whose effective merge strategy is a forge but whose
+  # checkout has no origin remote (or the wrong one) can never open its PR.
+  describe "merge routing check" do
+    defp routing_routes(body) do
+      [
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/merge_routing"}, {body, 200}}
+      ]
+    end
+
+    @arbiter_ok %{
+      "workspace" => "default",
+      "repo" => "arbiter",
+      "strategy" => "github",
+      "remote" => "serious-alchemy/arbiter",
+      "problem" => nil
+    }
+
+    test "ok, naming each repo's effective strategy" do
+      mesaana = %{
+        "workspace" => "default",
+        "repo" => "mesaana",
+        "strategy" => "direct",
+        "problem" => nil
+      }
+
+      stub_routes(routing_routes(%{"repos" => [@arbiter_ok, mesaana], "problems" => []}))
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] merge routing"
+      assert out =~ "default/arbiter: github"
+      assert out =~ "default/mesaana: direct"
+    end
+
+    test "fails on a remote-less repo under a forge strategy, with the fix" do
+      flagged = %{
+        "workspace" => "default",
+        "repo" => "mesaana",
+        "strategy" => "github",
+        "remote" => nil,
+        "problem" => "no_remote",
+        "fix" => "`arb config set merge.repos.mesaana.strategy direct --workspace default`"
+      }
+
+      stub_routes(routing_routes(%{"repos" => [@arbiter_ok, flagged], "problems" => [flagged]}))
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 1
+      assert out =~ "[fail] merge routing"
+      assert out =~ "default/mesaana"
+      assert out =~ "no origin remote"
+      assert out =~ "arb config set merge.repos.mesaana.strategy direct"
+
+      result = Enum.find(Checks.run(), &(&1.name == "merge routing"))
+      refute result.blocks_readiness
+    end
+
+    test "fails on a remote that is not the effective owner/repo" do
+      flagged = %{
+        "workspace" => "default",
+        "repo" => "infra",
+        "strategy" => "github",
+        "remote" => "serious-alchemy/infra",
+        "expected" => "serious-alchemy/arbiter",
+        "problem" => "remote_mismatch",
+        "fix" => "set merge.repos.infra.config.owner/repo"
+      }
+
+      stub_routes(routing_routes(%{"repos" => [flagged], "problems" => [flagged]}))
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 1
+      assert out =~ "serious-alchemy/arbiter"
+      assert out =~ "serious-alchemy/infra"
+    end
+
+    test "an old server without the endpoint is not a failure" do
+      stub_routes(Enum.drop(routing_routes(%{}), -1))
+
+      result = Enum.find(Checks.run(), &(&1.name == "merge routing"))
+      assert result.status == :ok
+      assert result.detail =~ "could not check"
+    end
+  end
+
+  # bd-cvvb02 / P13 (bd-9gqj8e): provider accounts are always on. An
+  # un-migrated install still carrying legacy credentials cannot spawn in
+  # those workspaces (MissingCredentialError) and its server-env token is
+  # read by nothing; doctor is where the operator is told, and pointed at the
+  # runbook.
+  describe "provider accounts check" do
+    defp accounts_routes(status) do
+      [
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/provider_accounts"},
+         {Map.merge(
+            %{
+              "decision" => "no_legacy_credentials",
+              "stranded_workspaces" => [],
+              "server_env_token" => false,
+              "runbook" => "docs/provider-accounts-release-runbook.md"
+            },
+            status
+          ), 200}}
+      ]
+    end
+
+    test "ok on a fresh or migrated install" do
+      stub_routes(accounts_routes(%{"decision" => "migrated"}))
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] provider accounts"
+      assert out =~ "on (migrated)"
+    end
+
+    test "ok on a migrated install with a leftover server-env token, telling the operator to remove it" do
+      stub_routes(accounts_routes(%{"decision" => "migrated", "server_env_token" => true}))
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] provider accounts"
+      assert out =~ "CLAUDE_CODE_OAUTH_TOKEN"
+      assert out =~ "ignored"
+    end
+
+    test "fails, pointing at the runbook, on un-migrated legacy credentials" do
+      stub_routes(
+        accounts_routes(%{
+          "decision" => "unmigrated_legacy_credentials",
+          "stranded_workspaces" => ["default", "emricare"],
+          "server_env_token" => true
+        })
+      )
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 1
+      assert out =~ "[fail] provider accounts"
+      assert out =~ "default, emricare"
+      assert out =~ "CLAUDE_CODE_OAUTH_TOKEN"
+      assert out =~ "docs/provider-accounts-release-runbook.md"
+      # There is no legacy chain to keep any more, so no switch is offered.
+      refute out =~ "ARBITER_PROVIDER_ACCOUNTS"
+      refute out =~ "held OFF"
+
+      result = Enum.find(Checks.run(), &(&1.name == "provider accounts"))
+      refute result.blocks_readiness
+    end
+
+    test "fails when a workspace would raise MissingCredentialError" do
+      stub_routes(
+        accounts_routes(%{
+          "decision" => "migrated",
+          "stranded_workspaces" => ["straggler"]
+        })
+      )
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 1
+      assert out =~ "[fail] provider accounts"
+      assert out =~ "straggler"
+      assert out =~ "MissingCredentialError"
+    end
+
+    test "a server that predates the check is reported as unknown, not as a failure" do
+      stub_routes(accounts_routes(%{}) |> List.delete_at(-1))
+
+      {out, _err, _exit_code} = capture(fn -> Doctor.run([]) end)
+      assert out =~ "[ ok ] provider accounts"
+      assert out =~ "could not check"
+    end
+  end
+
+  describe "erlang distribution check (bd-51m9ba)" do
+    @describetag :tmp_dir
+
+    defp green_routes do
+      [
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+      ]
+    end
+
+    test "an exposed epmd and a world-readable cookie fail doctor with exit 1", %{tmp_dir: dir} do
+      tcp = Path.join(dir, "tcp")
+
+      File.write!(tcp, [
+        "  sl  local_address rem_address   st\n",
+        "  27: 00000000:1111 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 7 1 0 100 0 0 10 0\n"
+      ])
+
+      cookie = Path.join(dir, "COOKIE")
+      File.write!(cookie, "secret")
+      File.chmod!(cookie, 0o644)
+
+      Process.put(:bd2_distribution_probe,
+        proc_net: [tcp],
+        epmd_port: nil,
+        epmd_listen_port: 4369,
+        cookie_paths: [cookie]
+      )
+
+      stub_routes(green_routes())
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 1
+      assert out =~ "[fail] erlang distribution is loopback-only"
+      assert out =~ "epmd listens on 0.0.0.0:4369"
+      assert out =~ "#{cookie} is 0644"
+    end
+
+    test "is part of every doctor run and green when nothing is exposed" do
+      stub_routes(green_routes())
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] erlang distribution is loopback-only"
+    end
+  end
+
   # bd-46xndf: the rootless-podman readiness check. Probes run server-side and
   # are stubbed in the arbiter app's PodmanReadinessTest; this covers rendering.
   describe "podman sandbox readiness check" do

@@ -115,6 +115,10 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
     # (and now shared with `Arbiter.Agents.Preflight`'s probe teardown). Spawns
     # only `kill` and `pgrep`.
     "apps/arbiter/lib/arbiter/worker/os_process.ex" => :pure_tool,
+    # bd-6zuoo6: `systemd-run` / `systemctl` for the per-worker memory scope,
+    # through `ReleaseEnv.cmd/3` (the probe runs only `printf` and `cat` in it).
+    # The agent itself is still opened by `ClaudeSession.open_port/1`.
+    "apps/arbiter/lib/arbiter/worker/memory_scope.ex" => :scrubbed,
     "apps/arbiter/lib/arbiter/loop/apply/repo_doc.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/mcp/agent_config.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/mergers/direct.ex" => :pure_tool,

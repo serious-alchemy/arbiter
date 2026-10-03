@@ -267,6 +267,24 @@ defmodule ArbiterWeb.Api.ServerControllerTest do
     end
   end
 
+  describe "GET /api/server/worker_memory" do
+    test "reports whether the cap is in force and the server unit's OOM policy", %{conn: conn} do
+      resp = conn |> get("/api/server/worker_memory") |> json_response(200)
+
+      assert %{
+               "enabled" => enabled,
+               "capped" => capped,
+               "available" => available,
+               "oom_policy" => _,
+               "service_unit" => _
+             } = resp
+
+      assert is_boolean(enabled) and is_boolean(capped) and is_boolean(available)
+      # config/test.exs turns the cap off, so a test run never reports it active.
+      refute capped
+    end
+  end
+
   describe "GET /api/server/worker_tmp" do
     test "reports the worker temp root, its filesystem and size", %{conn: conn} do
       resp = conn |> get("/api/server/worker_tmp") |> json_response(200)

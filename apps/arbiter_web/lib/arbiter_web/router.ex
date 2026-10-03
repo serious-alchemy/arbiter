@@ -250,6 +250,7 @@ defmodule ArbiterWeb.Router do
     get("/server/tmux", ServerController, :tmux)
     get("/server/worker_tmp", ServerController, :worker_tmp)
     get("/server/podman_sandbox", ServerController, :podman_sandbox)
+    get("/server/worker_memory", ServerController, :worker_memory)
 
     # Usage ledger (per-session tokens / cost / duration; rollups)
     get("/usage", UsageController, :summarize)

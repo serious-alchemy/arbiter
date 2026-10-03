@@ -49,6 +49,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       check_tmux(),
       check_podman_sandbox(),
       check_worker_tmp(),
+      check_worker_memory(),
       check_claude_worker_credentials(),
       check_provider_accounts(),
       check_account_policy_binding(),
@@ -939,6 +940,110 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           blocks_readiness: false
         }
     end
+  end
+
+  # bd-6zuoo6: workers live in the server's cgroup unless the per-worker memory
+  # cap puts each in its own scope, and under the default `OOMPolicy=stop` the
+  # kernel OOM-killing any process there stops the whole service (incident
+  # 2026-10-03: a 17.5 GB `mix test` BEAM took every run down with it).
+  defp check_worker_memory do
+    case Client.get("/api/server/worker_memory") do
+      {:ok, %{"service_unit" => unit} = body} when not is_nil(unit) ->
+        worker_memory_result(body)
+
+      {:ok, %{"capped" => capped} = body} when is_boolean(capped) ->
+        worker_memory_ok(
+          "not running as a systemd service (no OOMPolicy to set); " <> cap_summary(body)
+        )
+
+      _ ->
+        worker_memory_ok("server unreachable or predates this check — skipping")
+    end
+  end
+
+  # `systemctl show` failed on the server (no binary, bus error): the policy is
+  # unknown, which is not the same claim as `OOMPolicy=stop`.
+  defp worker_memory_result(%{"oom_policy" => nil, "service_unit" => unit} = body) do
+    worker_memory_warn(
+      "could not read OOMPolicy for #{unit} (systemctl show failed on the server); " <>
+        "workers are #{cap_summary(body)}",
+      memory_hint(body)
+    )
+  end
+
+  defp worker_memory_result(%{"oom_policy" => policy, "capped" => capped} = body) do
+    stop? = policy == "stop"
+    unit = Map.get(body, "service_unit")
+
+    cond do
+      stop? and not capped ->
+        worker_memory_warn(
+          "#{unit} has OOMPolicy=#{policy} and no per-worker memory cap " <>
+            "(#{cap_summary(body)}): one runaway worker process gets the whole server stopped",
+          memory_hint(body)
+        )
+
+      stop? ->
+        worker_memory_warn(
+          "#{unit} has OOMPolicy=#{policy}; workers are #{cap_summary(body)}, but " <>
+            "anything else the kernel OOM-kills inside the unit still stops the server",
+          memory_hint(body)
+        )
+
+      not capped ->
+        worker_memory_warn(
+          "#{unit} has OOMPolicy=#{policy} but there is no per-worker memory cap " <>
+            "(#{cap_summary(body)}): a runaway worker can still exhaust host memory",
+          memory_hint(body)
+        )
+
+      true ->
+        worker_memory_ok("#{unit}: OOMPolicy=#{policy}; workers are #{cap_summary(body)}")
+    end
+  end
+
+  defp cap_summary(%{"capped" => true, "cap" => cap}), do: "capped at #{cap} each"
+
+  defp cap_summary(%{"unavailable_reason" => reason}) when is_binary(reason),
+    do: "uncapped: #{reason}"
+
+  defp cap_summary(_), do: "uncapped"
+
+  defp memory_hint(body) do
+    policy_hint =
+      "Add a drop-in: `systemctl --user edit arbiter.service` with " <>
+        "`[Service]` / `OOMPolicy=continue`, then `systemctl --user daemon-reload` " <>
+        "(or re-run `arb install service`, which now writes it). See docs/worker-memory-cap.md."
+
+    cap_hint =
+      if Map.get(body, "capped"),
+        do: "",
+        else:
+          " Cap each worker with ARBITER_WORKER_MEMORY_MAX (e.g. 12G or 40%) — it needs " <>
+            "systemd, cgroup v2 and the memory controller delegated to user units."
+
+    policy_hint <> cap_hint
+  end
+
+  defp worker_memory_warn(detail, hint) do
+    %Result{
+      name: "worker memory cap",
+      status: :warn,
+      detail: detail,
+      hint: hint,
+      fatal: false,
+      blocks_readiness: false
+    }
+  end
+
+  defp worker_memory_ok(detail) do
+    %Result{
+      name: "worker memory cap",
+      status: :ok,
+      detail: detail,
+      fatal: false,
+      blocks_readiness: false
+    }
   end
 
   # bd-80ecol: every workspace that runs Claude with no setup token (or API
