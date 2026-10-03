@@ -168,6 +168,42 @@ defmodule Arbiter.Worker.ContainerTest do
       assert Enum.sort(pairs(argv, "-v") |> Enum.map(&(&1 |> String.split(":") |> hd()))) ==
                ["/repo/.git/objects", "/work/home", "/work/tree"]
     end
+
+    # bd-4wy1w1 (P5): a private clone's `.git` is a mount point of its own (so
+    # it cannot be renamed away or replaced by a `gitdir:` file), with config,
+    # hooks, commondir and alternates read-only on top: host-side git keeps
+    # running in this checkout after the container has had it.
+    test "a private clone's gitdir is its own private mount, after the worktree" do
+      argv = argv(%{git_dir: "/work/tree/.git"})
+      mounts = pairs(argv, "-v")
+
+      assert "/work/tree/.git:/work/tree/.git:rw,Z" in mounts
+
+      assert Enum.find_index(mounts, &String.starts_with?(&1, "/work/tree:")) <
+               Enum.find_index(mounts, &String.starts_with?(&1, "/work/tree/.git:"))
+    end
+
+    test "readonly_paths are bound ro, after every writable mount" do
+      ro = ["/work/tree/.git/config", "/work/tree/.git/hooks"]
+      argv = argv(%{git_dir: "/work/tree/.git", writable_paths: ["/var/x"], readonly_paths: ro})
+      mounts = pairs(argv, "-v")
+
+      assert "/work/tree/.git/config:/work/tree/.git/config:ro" in mounts
+      assert "/work/tree/.git/hooks:/work/tree/.git/hooks:ro" in mounts
+
+      last_writable =
+        mounts |> Enum.with_index() |> Enum.filter(&(elem(&1, 0) =~ ~r/:rw/)) |> List.last()
+
+      first_ro =
+        Enum.find_index(mounts, &(&1 == "/work/tree/.git/config:/work/tree/.git/config:ro"))
+
+      assert elem(last_writable, 1) < first_ro
+    end
+
+    test "with the label disabled the gitdir is plain rw too" do
+      argv = argv(%{git_dir: "/work/tree/.git", bridges: ["/run/arb/proxy.sock"]})
+      assert "/work/tree/.git:/work/tree/.git:rw" in pairs(argv, "-v")
+    end
   end
 
   describe "argv/2: network and label policy (design §5.3)" do
@@ -291,6 +327,34 @@ defmodule Arbiter.Worker.ContainerTest do
 
       assert {:ok, argv} = Container.wrap(["x"], opts(dir, bridges: [sock]))
       assert "label=disable" in pairs(argv, "--security-opt")
+    end
+
+    # Podman creates a missing bind source, which for a guard file would leave
+    # an empty `commondir` on the host that breaks every later git command.
+    test "readonly_paths and git_dir must already exist", %{dir: dir} do
+      git_dir = Path.join(dir, ".git")
+      config = Path.join(git_dir, "config")
+      File.mkdir_p!(git_dir)
+      File.write!(config, "")
+      missing = Path.join(git_dir, "commondir")
+
+      assert {:error, {:readonly_path_missing, ^missing}} =
+               Container.wrap(
+                 ["x"],
+                 opts(dir, git_dir: git_dir, readonly_paths: [config, missing])
+               )
+
+      assert {:error, {:bad_mount_path, "rel/.git"}} =
+               Container.wrap(["x"], opts(dir, git_dir: "rel/.git"))
+
+      assert {:error, {:git_dir_missing, "/nope/.git"}} =
+               Container.wrap(["x"], opts(dir, git_dir: "/nope/.git"))
+
+      assert {:ok, argv} =
+               Container.wrap(["x"], opts(dir, git_dir: git_dir, readonly_paths: [config]))
+
+      assert "#{config}:#{config}:ro" in pairs(argv, "-v")
+      assert "#{git_dir}:#{git_dir}:rw,Z" in pairs(argv, "-v")
     end
 
     test "an unknown network mode is refused", %{dir: dir} do

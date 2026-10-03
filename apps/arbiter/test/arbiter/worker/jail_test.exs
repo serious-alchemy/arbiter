@@ -191,6 +191,38 @@ defmodule Arbiter.Worker.JailTest do
       refute "/w/main/.git" in ro
     end
 
+    # bd-4wy1w1: a git-layout-B private clone is its own common dir. Its
+    # `commondir` guard and `alternates` must be as read-only as a linked
+    # worktree's `commondir`: either one rewritten points host-side git at a
+    # config or object store the jailed process chose.
+    test "a private clone's commondir guard and alternates are re-bound read-only too" do
+      spec = %{
+        @spec_linked
+        | worktree: "/w/clone",
+          git: %{
+            common_dir: "/w/clone/.git",
+            git_dir: nil,
+            worktrees_dir?: false,
+            dot_git_file?: false,
+            main_repo: "/w/main"
+          }
+      }
+
+      argv = Jail.argv(spec, ["agy"])
+      ro = flag_pairs(argv, "--ro-bind")
+      last_rw = index_of(argv, ["--bind", "/w/clone/.git", "/w/clone/.git"])
+
+      for path <- [
+            "/w/clone/.git/hooks",
+            "/w/clone/.git/config",
+            "/w/clone/.git/commondir",
+            "/w/clone/.git/objects/info/alternates"
+          ] do
+        assert {path, path} in ro, "expected #{path} read-only in #{inspect(argv)}"
+        assert index_of(argv, ["--ro-bind", path, path]) > last_rw
+      end
+    end
+
     test "sets HOME to the bound agy HOME and every toolchain env pair" do
       argv = Jail.argv(@spec_linked, ["agy"])
       setenv = flag_pairs(argv, "--setenv")
@@ -517,6 +549,22 @@ defmodule Arbiter.Worker.JailTest do
     test "not a git repo: nil (no git binds)", %{base: base} do
       assert Jail.git(base) == {:ok, nil}
     end
+
+    test "a private clone (layout B) is its own common dir and names its main repo" do
+      fx = Arbiter.Test.GitFixture.forge_and_checkout()
+      {:ok, clone} = Arbiter.Worker.PrivateClone.create(fx.checkout, "feature/jail-b", "main")
+
+      assert {:ok, git} = Jail.git(clone)
+      assert git.common_dir == Path.join(clone, ".git")
+      assert git.git_dir == nil
+      refute git.dot_git_file?
+      assert git.main_repo == fx.checkout
+    end
+
+    test "a linked worktree has no main_repo of its own", %{base: base} do
+      %{wt: wt} = git_repo!(base)
+      assert {:ok, %{main_repo: nil}} = Jail.git(wt)
+    end
   end
 
   describe "wrap/2" do
@@ -570,6 +618,32 @@ defmodule Arbiter.Worker.JailTest do
       assert {:ok, argv} = Jail.wrap(["agy"], worktree: base)
 
       assert {root, root} in flag_pairs(argv, "--bind-try")
+    end
+
+    # bd-4wy1w1: a private clone borrows its main repo's objects, so hiding
+    # "every other workspace repo" must not hide that one, or git in the jail
+    # loses all the history the clone did not copy.
+    test "hide_reads keeps a private clone's main repo visible, hides the rest", %{base: base} do
+      fx = Arbiter.Test.GitFixture.forge_and_checkout()
+      {:ok, clone} = Arbiter.Worker.PrivateClone.create(fx.checkout, "feature/jail-hide", "main")
+      other = Path.join(base, "other-repo")
+      File.mkdir_p!(other)
+
+      assert {:ok, argv} =
+               Jail.wrap(["agy"],
+                 worktree: clone,
+                 hide_reads: true,
+                 hide_repos: [fx.checkout, other]
+               )
+
+      tmpfs =
+        argv
+        |> Enum.chunk_every(2, 1, :discard)
+        |> Enum.filter(&(hd(&1) == "--tmpfs"))
+        |> Enum.map(&List.last/1)
+
+      assert other in tmpfs
+      refute fx.checkout in tmpfs
     end
 
     test "defaults to a writable worktree", %{base: base} do
