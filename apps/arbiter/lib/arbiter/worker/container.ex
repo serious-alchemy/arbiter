@@ -48,6 +48,15 @@ defmodule Arbiter.Worker.Container do
     * **Network** — `--network=none` unless `network: :pasta` is asked for. A
       container with bridges is always `none`; the sockets are its only exit.
 
+  ## In a test-services pod
+
+  With `:pod` (bd-dmcbos, `Arbiter.Worker.TestServices`) the argv carries
+  `--pod <name>` instead of `--userns=keep-id` and `--network=…`: podman refuses
+  either on a pod member, and the pod was created with `--network none
+  --userns keep-id`, so the container is as isolated as before and also shares
+  `lo` with its services. Everything else (read-only root, no capabilities, the
+  label policy, mounts, env) is unchanged.
+
   ## The `--` boundary
 
   `--` comes **before the image**, not before the command: podman parses
@@ -116,6 +125,7 @@ defmodule Arbiter.Worker.Container do
           optional(:env) => [{String.t(), String.t()}],
           optional(:inherit_env) => [String.t()],
           optional(:network) => network(),
+          optional(:pod) => String.t() | nil,
           optional(:interactive) => boolean()
         }
 
@@ -140,10 +150,10 @@ defmodule Arbiter.Worker.Container do
 
     Enum.concat([
       [podman, "run", "--name", name, "--init", "--rm", "--pull=never"],
-      ["--userns=keep-id", "--read-only", "--cap-drop=all"],
+      placement(spec),
+      ["--read-only", "--cap-drop=all"],
       ["--security-opt", "no-new-privileges"],
       if(label_disabled?, do: ["--security-opt", "label=disable"], else: []),
-      ["--network=#{network(spec)}"],
       Enum.flat_map(["/tmp", "/dev/shm"] ++ Map.get(spec, :tmpfs, []), &tmpfs_args/1),
       mounts(spec, label_disabled?),
       env_args(spec, home),
@@ -152,6 +162,12 @@ defmodule Arbiter.Worker.Container do
       command
     ])
   end
+
+  # A container in a test-services pod (`Arbiter.Worker.TestServices`) takes its
+  # user namespace and its network from the pod, which was created with
+  # `--userns keep-id --network none`: podman refuses either flag on a member.
+  defp placement(%{pod: pod}) when is_binary(pod), do: ["--pod", pod]
+  defp placement(spec), do: ["--userns=keep-id", "--network=#{network(spec)}"]
 
   defp network(spec),
     do: if(Map.get(spec, :bridges, []) == [], do: Map.get(spec, :network, :none), else: :none)
@@ -210,7 +226,9 @@ defmodule Arbiter.Worker.Container do
   `:cli_mounts` (`[{host path, container path}]`: a provider CLI or `arb` bound
   read-only under `/opt/arbiter/cli`, which the image has on its `PATH`),
   `:tmpfs`, `:env`,
-  `:inherit_env`, `:network` (`:none` | `:pasta`), `:interactive`, `:podman`
+  `:inherit_env`, `:network` (`:none` | `:pasta`), `:pod` (join a test-services
+  pod, bd-dmcbos; the pod fixes the network, so `:pasta` is refused),
+  `:interactive`, `:podman`
   (path; default the host's `podman`) and `:find_executable` (for tests).
   """
   @impl Arbiter.Worker.Sandbox
@@ -222,6 +240,7 @@ defmodule Arbiter.Worker.Container do
          {:ok, name} <- fetch_name(opts),
          {:ok, podman} <- find_podman(opts),
          {:ok, network} <- fetch_network(opts),
+         {:ok, pod} <- fetch_pod(opts, network),
          :ok <- check_env(opts),
          {:ok, mounts} <- check_mounts(opts),
          {:ok, bridges} <- check_bridges(opts, network) do
@@ -242,6 +261,7 @@ defmodule Arbiter.Worker.Container do
         env: Keyword.get(opts, :env, []),
         inherit_env: Keyword.get(opts, :inherit_env, []),
         network: network,
+        pod: pod,
         interactive: Keyword.get(opts, :interactive, false)
       }
 
@@ -300,6 +320,14 @@ defmodule Arbiter.Worker.Container do
     case Keyword.get(opts, :network, :none) do
       net when net in [:none, :pasta] -> {:ok, net}
       other -> {:error, {:bad_network, other}}
+    end
+  end
+
+  defp fetch_pod(opts, network) do
+    case Keyword.get(opts, :pod) do
+      nil -> {:ok, nil}
+      _pod when network != :none -> {:error, :pod_requires_network_none}
+      pod -> with :ok <- check_name(pod), do: {:ok, pod}
     end
   end
 
@@ -485,6 +513,13 @@ defmodule Arbiter.Worker.Container do
       nil -> {:error, :timeout}
     end
   end
+
+  @doc false
+  # The `podman` call every function here makes, with the stand-in runner hook
+  # (`:runner`, else `config :arbiter, :worker_container_runner`). Shared with
+  # `Arbiter.Worker.TestServices`.
+  @spec cmd(keyword(), String.t(), [String.t()], keyword()) :: {String.t(), non_neg_integer()}
+  def cmd(opts, cmd, args, run_opts), do: exec(opts, cmd, args, run_opts)
 
   # sobelow_skip ["CI.System"]
   defp exec(opts, cmd, args, run_opts) do

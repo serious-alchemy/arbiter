@@ -245,6 +245,37 @@ defmodule Arbiter.Worker.ContainerTest do
     end
   end
 
+  describe "argv/2: a test-services pod (bd-dmcbos)" do
+    test "joins the pod and leaves the network and user namespace to it" do
+      argv = argv(%{pod: "arb-run1-pod"})
+
+      assert pairs(argv, "--pod") == ["arb-run1-pod"]
+      # podman refuses either flag on a pod member; the pod was created with both.
+      refute "--userns=keep-id" in flags(argv)
+      refute Enum.any?(flags(argv), &String.starts_with?(&1, "--network"))
+
+      # Everything else about the sandbox is unchanged.
+      for flag <- ["--read-only", "--cap-drop=all", "--init", "--rm", "--pull=never"],
+          do: assert(flag in flags(argv))
+
+      assert Enum.take(argv, -4) == ["--", @image, "claude", "--print"]
+    end
+
+    test "bridges still disable the label and are still the only sockets mounted" do
+      argv = argv(%{pod: "arb-run1-pod", bridges: ["/run/p.sock", "/run/a.sock"]})
+
+      assert "label=disable" in argv
+      assert "/run/p.sock:/run/p.sock:ro" in pairs(argv, "-v")
+      refute Enum.any?(flags(argv), &String.starts_with?(&1, "--network"))
+    end
+
+    test "no pod, no change: still `--userns=keep-id` and `--network=none`" do
+      assert "--userns=keep-id" in flags(argv())
+      assert "--network=none" in flags(argv())
+      refute "--pod" in flags(argv())
+    end
+  end
+
   describe "argv/2: stdin" do
     test "-i only when interactive" do
       refute "-i" in flags(argv())
@@ -277,6 +308,16 @@ defmodule Arbiter.Worker.ContainerTest do
       assert pairs(argv, "--name") == ["arb-t1"]
       assert "ARB_TOKEN" in pairs(argv, "-e")
       assert Enum.take(argv, -3) == [@image, "echo", "hi"]
+    end
+
+    test "a pod must be an arb- name, and fixes the network", %{dir: dir} do
+      assert {:ok, argv} = Container.wrap(["x"], opts(dir, pod: "arb-t1-pod"))
+      assert pairs(argv, "--pod") == ["arb-t1-pod"]
+
+      assert {:error, {:bad_container_name, "web"}} = Container.wrap(["x"], opts(dir, pod: "web"))
+
+      assert {:error, :pod_requires_network_none} =
+               Container.wrap(["x"], opts(dir, pod: "arb-t1-pod", network: :pasta))
     end
 
     test "requires a worktree, an image and a name", %{dir: dir} do
