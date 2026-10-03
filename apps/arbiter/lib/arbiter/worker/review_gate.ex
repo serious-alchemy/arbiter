@@ -5063,6 +5063,7 @@ defmodule Arbiter.Worker.ReviewGate do
       |> round_timeout_ms(state, role)
 
     state = %{state | timeout_ms: timeout_ms} |> route_reviewer_pass(role, command)
+    prompt = retarget_async_block(prompt, state, role)
 
     case guarded_spawn_worker(state, id, role, prompt, command) do
       {:ok, pid} ->
@@ -6852,43 +6853,70 @@ defmodule Arbiter.Worker.ReviewGate do
     end
   end
 
-  # Returns the async-tool instruction block appropriate for the adapter
-  # configured as the reviewer for this workspace. Falls back to the Claude
-  # block when the workspace is absent or the adapter does not implement the
-  # callback — preserving existing behaviour for Claude-only workspaces.
+  # Returns the async-tool instruction block appropriate for the adapter that
+  # actually runs this reviewer pass: the rotation's pin, else the
+  # cross-family selection (bd-5sfn7v), else the workspace's configured
+  # reviewer. Falls back to the Claude block when the workspace is absent or
+  # the adapter does not implement the callback — preserving existing
+  # behaviour for Claude-only workspaces.
   defp async_tool_block(state) do
-    adapter =
-      state
-      |> Map.get(:workspace_id)
-      |> load_workspace()
-      |> then(&Agents.reviewer_for_workspace/1)
+    state |> block_adapter() |> render_async_block()
+  end
 
+  defp block_adapter(%{reviewer_provider: provider})
+       when is_atom(provider) and not is_nil(provider),
+       do: Agents.for_type(provider)
+
+  defp block_adapter(%{reviewer_selection: %{provider: provider}})
+       when is_atom(provider) and not is_nil(provider),
+       do: Agents.for_type(provider)
+
+  defp block_adapter(state) do
+    state
+    |> Map.get(:workspace_id)
+    |> load_workspace()
+    |> then(&Agents.reviewer_for_workspace/1)
+  end
+
+  defp render_async_block(adapter) do
     # `function_exported?/3` does not autoload the target module — an adapter
     # module that hasn't been referenced yet in this VM (e.g. Gemini, when no
     # earlier test/code path has called it) reports `false` even though the
     # callback is implemented, silently falling back to Claude's async block.
     # Whether that's true depends on what else has run before this call, so
     # without `Code.ensure_loaded?/1` first this was an order-dependent bug.
-    block =
-      if Code.ensure_loaded?(adapter) and
-           function_exported?(adapter, :async_tool_instruction, 3) do
-        adapter.async_tool_instruction(
-          "your VERDICT",
-          "a VERDICT issued while a background task is still running is invalid,\n" <>
-            "you would be judging on incomplete evidence",
-          commit_first: false
-        )
-      else
-        Arbiter.Agents.Claude.async_tool_instruction(
-          "your VERDICT",
-          "a VERDICT issued while a background task is still running is invalid,\n" <>
-            "you would be judging on incomplete evidence",
-          commit_first: false
-        )
-      end
+    adapter =
+      if Code.ensure_loaded?(adapter) and function_exported?(adapter, :async_tool_instruction, 3),
+        do: adapter,
+        else: Arbiter.Agents.Claude
 
-    String.trim_trailing(block)
+    adapter.async_tool_instruction(
+      "your VERDICT",
+      "a VERDICT issued while a background task is still running is invalid,\n" <>
+        "you would be judging on incomplete evidence",
+      commit_first: false
+    )
+    |> String.trim_trailing()
   end
+
+  # bd-5sfn7v: a prompt is rendered before `route_reviewer_pass/3` /
+  # the timeout rotation pick the adapter, so it carries the workspace
+  # default's async-tool block. Swap in the block of the adapter that will
+  # really run, so a rotated Codex reviewer is not told about Claude's tools.
+  defp retarget_async_block(prompt, state, :reviewer) when is_binary(prompt) do
+    wanted = async_tool_block(state)
+
+    Agents.adapters()
+    |> Map.values()
+    |> Enum.map(&render_async_block/1)
+    |> Enum.uniq()
+    |> Enum.reject(&(&1 == wanted))
+    |> Enum.reduce(prompt, fn other, acc ->
+      if String.contains?(acc, other), do: String.replace(acc, other, wanted), else: acc
+    end)
+  end
+
+  defp retarget_async_block(prompt, _state, _role), do: prompt
 
   defp load_task(task_id) do
     case Ash.get(Issue, task_id) do

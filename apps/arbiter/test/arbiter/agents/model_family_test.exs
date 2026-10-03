@@ -34,6 +34,24 @@ defmodule Arbiter.Agents.ModelFamilyTest do
                %{family: :google, pool: "antigravity:gemini_models"}
     end
 
+    test "codex family follows the resolved model, not the provider string (bd-5sfn7v)" do
+      pool = "codex"
+      assert ModelFamily.classify(:codex, nil) == %{family: :openai, pool: pool}
+      assert ModelFamily.classify("codex", "gpt-5.6-terra").family == :openai
+      assert ModelFamily.classify("codex", "o4-mini").family == :openai
+
+      assert ModelFamily.classify("codex", "claude-sonnet-4-5") == %{
+               family: :anthropic,
+               pool: pool
+             }
+
+      assert ModelFamily.classify("codex", "gemini-2.5-pro").family == :google
+      assert ModelFamily.classify("codex", "grok-4").family == :xai
+      # a Codex + Ollama (or other Responses-API) backend runs open-weights models
+      assert ModelFamily.classify("codex", "qwen3-coder:30b").family == :local
+      assert ModelFamily.classify("codex", "").family == :openai
+    end
+
     test "codex is openai on the codex pool" do
       assert ModelFamily.classify(:codex, "gpt-5-codex") == %{family: :openai, pool: "codex"}
     end
