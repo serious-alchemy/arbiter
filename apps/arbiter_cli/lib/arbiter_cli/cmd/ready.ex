@@ -8,8 +8,9 @@ defmodule ArbiterCli.Cmd.Ready do
   across every workspace — useful for cross-workspace coordination but
   noisy when imported data dominates other workspaces.
 
-  The server-side `Issue.ready/1` query is what "ready" means; this
-  command is a thin shell over it.
+  The server-side `Issue.ready/1` query is what "ready" means, and the server
+  puts the result in dispatch order (the epic-aware order, so an epic's floor
+  lifts its children); this command is a thin shell over it.
   """
 
   alias ArbiterCli.{Client, Output, Workspace}

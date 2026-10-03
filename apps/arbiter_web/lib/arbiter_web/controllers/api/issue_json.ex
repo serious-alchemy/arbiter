@@ -31,6 +31,9 @@ defmodule ArbiterWeb.Api.IssueJSON do
     |> Map.put(:epic_rollup, epic_rollup)
     |> Map.put(:dependencies, rendered_deps)
     |> put_lifecycle(Map.get(assigns, :lifecycle))
+    # ES4: `priority` is the own priority; these say what the ticket is
+    # scheduled as (`Arbiter.Tasks.EffectivePriority.fields/1`).
+    |> Map.merge(Map.get(assigns, :priority_fields, %{}))
     |> Map.put(
       :current_run,
       ArbiterWeb.Api.WorkerJSON.current_run(Map.get(assigns, :current_run))

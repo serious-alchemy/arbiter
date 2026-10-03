@@ -13,6 +13,7 @@ defmodule Arbiter.MCP.Tools.Task do
   alias Arbiter.Tasks.Attention
   alias Arbiter.Tasks.Dependencies
   alias Arbiter.Tasks.Dependency
+  alias Arbiter.Tasks.EffectivePriority
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Lifecycle.Projection
   alias Arbiter.Tasks.Verification
@@ -75,6 +76,9 @@ defmodule Arbiter.MCP.Tools.Task do
         result
         |> Map.merge(Projection.payload(Projection.view(issue)))
         |> Map.put(:close_reason, Tools.to_str(issue.close_reason))
+        # ES4: `priority` stays the own priority; these say how the ticket is
+        # actually scheduled when an epic floor lifts it.
+        |> Map.merge(EffectivePriority.fields(issue))
 
       # Strip pr_body from coordinator full-view (bandwidth; coordinators don't
       # need the body they didn't write). Worker full-view retains it so the
@@ -118,7 +122,7 @@ defmodule Arbiter.MCP.Tools.Task do
   @doc """
   List ready tasks in a workspace — exactly the tickets whose column is
   `:ready` (bd-6fkgvo), epics excluded as on the board, in dispatch order
-  (priority, rank, age). Coordinator only. The workspace is resolved from the
+  (effective priority, then rank, age — the §4 key). Coordinator only. The workspace is resolved from the
   optional `workspace` arg, else the scope's bound workspace, else the
   installation default.
   """

@@ -438,6 +438,59 @@ defmodule Arbiter.Board.Snapshot do
   end
 
   @doc """
+  The epic-aware order inputs (`Arbiter.Board.QueueOrder.build/6`) for the
+  surfaces that are not the board (ES4): `Arbiter.Tasks.EffectivePriority`'s
+  read for `ticket_show`, `GET /api/issues/ready` and `/lifecycle`, and the
+  DispatchQueue. It resolves the same issues, edges, settings and lift cap
+  `load/1` does, so a listing and the board agree on who is lifted.
+
+  The slot total only feeds the lift cap, which only matters once an epic has a
+  floor, so it is read (routing and account headroom included) only then.
+  Options: `:now`, `:issues`, `:deps`, `:scheduling`, `:ready_since`,
+  `:slots_total`, `:routing_opts`.
+  """
+  @spec order_context(keyword()) :: QueueOrder.t()
+  def order_context(opts \\ []) do
+    now = Keyword.get(opts, :now) || DateTime.utc_now()
+    deps = dependency_rows(opts)
+    issues = Keyword.get_lazy(opts, :issues, fn -> load_issues(now) end)
+    ref_issues = reference_issues(deps, issues)
+
+    scheduling =
+      QueueOrder.settings(Keyword.get_lazy(opts, :scheduling, &Arbiter.Settings.scheduling/0))
+
+    all = Map.values(Map.merge(Map.new(ref_issues, &{&1.id, &1}), Map.new(issues, &{&1.id, &1})))
+
+    slots_total =
+      Keyword.get_lazy(opts, :slots_total, fn ->
+        if Enum.any?(all, &floored_epic?/1), do: slots_total(issues, opts), else: 0
+      end)
+
+    QueueOrder.build(
+      all,
+      parent_of_from(deps),
+      slots_total,
+      scheduling,
+      ready_since(opts, scheduling, issues, ref_issues, deps),
+      now
+    )
+  end
+
+  defp floored_epic?(issue),
+    do: Map.get(issue, :issue_type) == :epic and is_integer(Map.get(issue, :floor_priority))
+
+  # What `load/1` reads for `slots_total`, for the default workspace.
+  defp slots_total(issues, opts) do
+    workspace = safe_workspace(default_workspace_id())
+
+    effective_max_concurrent(
+      workspace,
+      SlotGate.slots_used(issues),
+      routing_opts(workspace, opts)
+    )
+  end
+
+  @doc """
   Which of the Merging tickets among `issues` still have a live Watchdog
   (bd-8jixav, bd-741sid). One Registry lookup per Merging ticket — cheap, and
   only for the one state a ticket's Watchdog is supposed to be running in.
