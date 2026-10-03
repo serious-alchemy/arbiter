@@ -154,7 +154,7 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
       assert env["HTTPS_PROXY"] =~ ~r{^http://127\.0\.0\.1:\d+$}
       assert env["NO_PROXY"]
       assert env["GIT_SSH_COMMAND"] =~ "ProxyCommand socat"
-      assert env["ARB_HOST"] =~ ~r/^127\.0\.0\.1:\d+$/
+      assert env["ARB_HOST"] =~ ~r{^http://127\.0\.0\.1:\d+$}
     end
 
     test "an oversized prompt's temp file is carried read-only", ctx do

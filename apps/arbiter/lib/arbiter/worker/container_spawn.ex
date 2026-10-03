@@ -300,11 +300,12 @@ defmodule Arbiter.Worker.ContainerSpawn do
   defp container_env(spec),
     do: Jail.network_env(spec) ++ Jail.ssh_command(nil, spec) ++ arb_host()
 
-  # `arb` reads `ARB_HOST`; the bridge listens on the same loopback port the
-  # server does, so the default `127.0.0.1:4848` is only right when it is.
+  # `arb` reads `ARB_HOST` (a base URL); the bridge listens on the same loopback
+  # port the server does, so the default `http://127.0.0.1:4848` is only right
+  # when the server is on 4848.
   defp arb_host do
     case URI.parse(Arbiter.MCP.server_url()) do
-      %URI{port: port} when is_integer(port) -> [{"ARB_HOST", "127.0.0.1:#{port}"}]
+      %URI{port: port} when is_integer(port) -> [{"ARB_HOST", "http://127.0.0.1:#{port}"}]
       _ -> []
     end
   end
