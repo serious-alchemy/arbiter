@@ -82,13 +82,51 @@ defmodule ArbiterWeb.CoreComponents.Data do
   attr :priority, :integer, default: nil
   attr :class, :any, default: nil
 
+  attr :lift, :map,
+    default: nil,
+    doc:
+      "ES5: the card's epic-floor fields (`effective_priority`, `priority_via`, " <>
+        "`priority_lift`, `lift_floor`, `lift_in_flight`, `lift_cap`). Absent or with no " <>
+        "lift, the tag is exactly what it was"
+
+  attr :rest, :global
+
   def priority_tag(assigns) do
+    assigns = assign(assigns, :lift_view, lift_view(assigns.priority, assigns.lift))
+
     ~H"""
-    <span class={["badge", priority_tag_class(@priority), @class]}>
-      {if @priority, do: "P#{@priority}", else: "—"}
+    <span
+      class={["badge", priority_tag_class(@lift_view[:band] || @priority), @class]}
+      title={@lift_view[:title]}
+      aria-label={@lift_view[:title]}
+      data-lift={@lift_view[:state]}
+      {@rest}
+    >
+      {if @priority, do: "P#{@lift_view[:band] || @priority}", else: "—"}<span
+        :if={@lift_view[:state] == "applied"}
+        aria-hidden="true"
+      >↑</span>
     </span>
     """
   end
+
+  # Applied: the badge shows the effective band with an arrow. Capped: the own
+  # priority with no arrow, and a title saying what is waiting (design
+  # epic-aware-scheduling §6.3).
+  defp lift_view(own, %{priority_lift: :applied, effective_priority: eff, priority_via: via})
+       when is_integer(own) and is_integer(eff),
+       do: %{band: eff, state: "applied", title: "P#{eff} via #{via} — own priority P#{own}"}
+
+  defp lift_view(own, %{priority_lift: :capped, priority_via: via} = lift) when is_integer(own),
+    do: %{
+      band: own,
+      state: "capped",
+      title:
+        "floor P#{lift[:lift_floor]} via #{via} waiting — " <>
+          "#{lift[:lift_in_flight]} of #{lift[:lift_cap]} lifted slots in progress"
+    }
+
+  defp lift_view(_own, _lift), do: %{}
 
   defp priority_tag_class(p) when p in [0, 1], do: "badge-error"
   defp priority_tag_class(2), do: "badge-neutral"
