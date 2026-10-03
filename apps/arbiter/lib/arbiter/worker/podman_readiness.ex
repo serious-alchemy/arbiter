@@ -16,11 +16,16 @@ defmodule Arbiter.Worker.PodmanReadiness do
   listener reached from inside a container, which is how a `--network=none`
   worker will reach Arbiter and the proxy — design §5.3).
 
+  After the bridge, a `teardown` check starts a named `--init` container and
+  removes it with `Container.stop/2` (the §6.4 kill semantics: killing the
+  `podman run` client does not stop a container; only removal by name does).
+
   Every status is `"ok"`, `"warn"` (works, with a cost worth knowing) or
   `"fail"`. `ready` is true when nothing failed. All host access goes through
   the `:runner`, `:read_file` and `:user` options so tests stub the probes.
   """
 
+  alias Arbiter.Worker.Container
   alias Arbiter.Worker.ReleaseEnv
 
   @min_subid_range 65_536
@@ -49,8 +54,9 @@ defmodule Arbiter.Worker.PodmanReadiness do
   @doc """
   Probe the host. Options: `:runner` (`(cmd, args, opts -> {output, status})`),
   `:read_file` (`path -> {:ok, binary} | {:error, term}`), `:user`, `:image`
-  (the bridge probe image; default `ARBITER_PODMAN_PROBE_IMAGE` or
-  `#{@default_probe_image}`).
+  (the probe image; default `ARBITER_PODMAN_PROBE_IMAGE` or
+  `#{@default_probe_image}`) and `:probes` (which container-starting probes to
+  run, from `:bridge` and `:teardown`; default both).
   """
   @spec diagnose(keyword()) :: report()
   def diagnose(opts \\ []) do
@@ -59,6 +65,8 @@ defmodule Arbiter.Worker.PodmanReadiness do
     case podman_version(opts) do
       {:ok, check} ->
         info = podman_info(opts)
+
+        probes = Keyword.get(opts, :probes, [:bridge, :teardown])
 
         checks =
           [check] ++
@@ -69,9 +77,10 @@ defmodule Arbiter.Worker.PodmanReadiness do
               userns_check(opts),
               selinux_check(opts),
               cgroups_check(info),
-              network_check(opts),
-              bridge_check(opts)
-            ]
+              network_check(opts)
+            ] ++
+            if(:bridge in probes, do: [bridge_check(opts)], else: []) ++
+            if(:teardown in probes, do: [teardown_check(opts)], else: [])
 
         %{ready: not Enum.any?(checks, &(&1.status == "fail")), installed: true, checks: checks}
 
@@ -344,9 +353,7 @@ defmodule Arbiter.Worker.PodmanReadiness do
   # -- socket bridge ------------------------------------------------------------
 
   defp bridge_check(opts) do
-    image =
-      Keyword.get(opts, :image) || System.get_env("ARBITER_PODMAN_PROBE_IMAGE") ||
-        @default_probe_image
+    image = probe_image(opts)
 
     case exec(opts, "podman", ["image", "exists", image]) do
       {_, 0} ->
@@ -446,6 +453,74 @@ defmodule Arbiter.Worker.PodmanReadiness do
 
   defp bridge_fail(detail, hint),
     do: check("socket_bridge", "socket bridge", "fail", detail, hint)
+
+  # -- teardown by name ---------------------------------------------------------
+
+  defp teardown_check(opts) do
+    image = probe_image(opts)
+    name = "arb-teardown-probe-#{System.unique_integer([:positive])}"
+
+    case exec(opts, "podman", ["image", "exists", image]) do
+      {_, 0} -> teardown_probe(opts, image, name)
+      _ -> teardown_skipped("probe image #{image} is not present locally")
+    end
+  end
+
+  defp teardown_probe(opts, image, name) do
+    args =
+      ["run", "-d", "--init", "--rm", "--pull=never", "--userns=keep-id", "--network=none"] ++
+        ["--name", name, image, "sleep", "300"]
+
+    case exec(opts, "podman", args, timeout: @probe_timeout_ms) do
+      {_, 0} ->
+        stopped = Container.stop(name, runner: Keyword.fetch!(opts, :runner), podman: "podman")
+
+        # `container exists` exits 1 once the container is gone.
+        case {stopped, exec(opts, "podman", ["container", "exists", name])} do
+          {:ok, {_, 1}} ->
+            check(
+              "teardown",
+              "teardown by name",
+              "ok",
+              "a running --init container was removed by name"
+            )
+
+          {result, _} ->
+            exec(opts, "podman", ["rm", "-f", name])
+            teardown_fail(result)
+        end
+
+      {out, _} ->
+        teardown_skipped(
+          "could not start the probe container: #{String.slice(String.trim(out), 0, 200)}"
+        )
+    end
+  end
+
+  defp teardown_fail(result) do
+    check(
+      "teardown",
+      "teardown by name",
+      "fail",
+      "`podman rm --force` did not remove a running container (#{inspect(result)})",
+      "Workers are stopped by container name; a container that survives its removal would outlive its worker. Run `podman rm -f <name>` by hand and check `podman ps -a`."
+    )
+  end
+
+  defp teardown_skipped(detail) do
+    check(
+      "teardown",
+      "teardown by name",
+      "warn",
+      "skipped: #{detail}",
+      "See the socket bridge check; the probe needs a local image with `sleep`."
+    )
+  end
+
+  defp probe_image(opts) do
+    Keyword.get(opts, :image) || System.get_env("ARBITER_PODMAN_PROBE_IMAGE") ||
+      @default_probe_image
+  end
 
   # -- plumbing -----------------------------------------------------------------
 

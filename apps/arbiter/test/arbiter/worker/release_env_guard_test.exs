@@ -104,6 +104,8 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
     # bd-5gvqgc: the write-jail probe runs the configured bwrap (a path, so
     # not a literal) around `sh`; `git rev-parse` is the only other spawn.
     "apps/arbiter/lib/arbiter/worker/jail.ex" => :scrubbed,
+    # bd-bu4ye2: `podman run` / `podman rm` via `ReleaseEnv.cmd/3`.
+    "apps/arbiter/lib/arbiter/worker/container.ex" => :scrubbed,
     # bd-cfktou: reads the worktree's git remotes with `git config`; nothing else.
     "apps/arbiter/lib/arbiter/worker/egress/jail_run.ex" => :pure_tool,
     # bd-46xndf: the doctor's rootless-podman readiness probes via `ReleaseEnv.cmd/3`.

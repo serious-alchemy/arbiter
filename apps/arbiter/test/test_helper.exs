@@ -49,7 +49,12 @@ systemd_user_reason =
     {:unavailable, reason} -> reason
   end
 
-ExUnit.start(exclude: [:live_systemd, :live_claude, :systemd_user] ++ tmux_exclude)
+# bd-bu4ye2: `:podman` tests start REAL rootless containers from a local
+# `docker.io/library/debian:12` image, each named `arb-test-…` and removed by
+# exact name. Opt-in (needs a ready podman and that image):
+#
+#     mix test --include podman test/arbiter/worker/container_podman_test.exs
+ExUnit.start(exclude: [:live_systemd, :live_claude, :systemd_user, :podman] ++ tmux_exclude)
 
 # `mix test` applies its `--include`/`--exclude` before loading this file, so
 # the filters here are the run's real ones.
