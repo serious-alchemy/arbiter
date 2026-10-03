@@ -387,7 +387,10 @@ defmodule Arbiter.Worker.PodmanReadiness do
   end
 
   defp accept_loop(listener) do
-    case :gen_tcp.accept(listener, 5_000) do
+    # Runs until the listener is closed / the task is killed: the first
+    # `podman run` (keep-id setup, cold image, fuse-overlayfs) can take far
+    # longer than any short accept window before it reaches connect().
+    case :gen_tcp.accept(listener, :infinity) do
       {:ok, conn} ->
         :gen_tcp.send(conn, "pong\n")
         :gen_tcp.close(conn)
@@ -399,13 +402,20 @@ defmodule Arbiter.Worker.PodmanReadiness do
   end
 
   defp bridge_run(opts, image, dir, label_args) do
+    name = "arb-podman-probe-#{System.unique_integer([:positive])}"
+
     args =
-      ["run", "--rm", "--init", "--userns=keep-id", "--network=none"] ++
+      ["run", "--rm", "--init", "--name", name, "--userns=keep-id", "--network=none"] ++
         label_args ++ ["-v", "#{dir}:/proxy", image, "sh", "-c", @bridge_client]
 
     case exec(opts, "podman", args, timeout: @probe_timeout_ms) do
-      {out, 0} -> if String.contains?(out, "pong"), do: :ok, else: {:error, String.trim(out)}
-      {out, _} -> {:error, String.trim(out)}
+      {out, 0} ->
+        if String.contains?(out, "pong"), do: :ok, else: {:error, String.trim(out)}
+
+      {out, status} ->
+        # Killing the Elixir task on timeout leaves the container running.
+        if status == 124, do: exec(opts, "podman", ["rm", "-f", name])
+        {:error, String.trim(out)}
     end
   end
 

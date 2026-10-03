@@ -1096,7 +1096,20 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   # (docs/design/podman-worker-containers.md)? The backend is optional, so a
   # failure is operator-actionable but neither fatal nor readiness-blocking.
   defp check_podman_sandbox do
-    case Client.get("/api/server/podman_sandbox") do
+    # The server runs its probes in series (up to 60 s each for the two
+    # container runs), so the default 10 s receive timeout is far too short.
+    case Client.get("/api/server/podman_sandbox", [], receive_timeout: 150_000) do
+      {:ok, %{"installed" => false}} ->
+        %Result{
+          name: "podman sandbox readiness",
+          status: :ok,
+          detail: "podman not installed — container sandbox unavailable (optional backend)",
+          hint:
+            "Install podman (e.g. `sudo dnf install podman`) to enable the container sandbox.",
+          fatal: false,
+          blocks_readiness: false
+        }
+
       {:ok, %{"checks" => checks} = body} when is_list(checks) ->
         failed = Enum.filter(checks, &(Map.get(&1, "status") == "fail"))
         ready? = Map.get(body, "ready", failed == [])
@@ -1110,6 +1123,17 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
             |> Enum.map(&Map.get(&1, "hint"))
             |> Enum.reject(&is_nil/1)
             |> Enum.join(" "),
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      {:error, %{kind: kind} = err} when kind in [:timeout, :transport] ->
+        %Result{
+          name: "podman sandbox readiness",
+          status: :fail,
+          detail: "readiness probe did not complete: #{Map.get(err, :message) || kind}",
+          hint:
+            "The host is too slow or a `podman run` is hung; run `podman run --rm --userns=keep-id <image> true` by hand as the Arbiter user.",
           fatal: false,
           blocks_readiness: false
         }

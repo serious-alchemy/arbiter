@@ -2088,6 +2088,39 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       refute result.blocks_readiness
     end
 
+    test "podman not installed is not a failure" do
+      stub_routes(
+        podman_routes(%{
+          "ready" => false,
+          "installed" => false,
+          "checks" => [%{"id" => "podman", "status" => "fail", "detail" => "missing"}]
+        })
+      )
+
+      result = find_podman()
+      assert result.status == :ok
+      assert result.detail =~ "not installed"
+      assert result.hint =~ "Install podman"
+    end
+
+    test "a timed-out probe request is a failure, not a skip" do
+      routes =
+        podman_routes(%{})
+        |> Enum.reject(&match?({{_, "/api/server/podman_sandbox"}, _}, &1))
+
+      stub_routes([
+        {{"get", "/api/server/podman_sandbox"},
+         fn conn -> Req.Test.transport_error(conn, :timeout) end}
+        | routes
+      ])
+
+      result = find_podman()
+      assert result.status == :fail
+      assert result.detail =~ "did not complete"
+      assert result.hint =~ "podman run"
+      refute result.blocks_readiness
+    end
+
     test "a server that predates the check is skipped" do
       stub_routes(
         podman_routes(%{})

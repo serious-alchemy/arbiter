@@ -213,4 +213,56 @@ defmodule Arbiter.Worker.PodmanReadinessTest do
     assert_received {:probe_dir, dir}
     refute File.exists?(dir)
   end
+
+  test "a probe timeout removes the named probe container" do
+    test_pid = self()
+
+    runner = fn
+      "podman", ["run" | args], _opts ->
+        send(test_pid, {:run_args, args})
+        {"podman timed out", 124}
+
+      "podman", ["rm", "-f", name], _opts ->
+        send(test_pid, {:removed, name})
+        {"", 0}
+
+      cmd, args, opts ->
+        runner().(cmd, args, opts)
+    end
+
+    report = PodmanReadiness.diagnose(runner: runner, read_file: read_file(), user: "ryan")
+
+    assert check(report, "socket_bridge").status == "fail"
+    assert_received {:run_args, args}
+    name = args |> Enum.drop_while(&(&1 != "--name")) |> Enum.at(1)
+    assert name =~ "arb-podman-probe-"
+    assert_received {:removed, ^name}
+  end
+
+  @tag timeout: 30_000
+  test "the bridge listener keeps accepting past the old 5 s window" do
+    runner = fn
+      "podman", ["run" | args], _opts ->
+        # Slow first run (keep-id setup, cold image) before connect().
+        Process.sleep(5_500)
+        mount = Enum.find(args, &String.contains?(&1, ":/proxy"))
+        [dir, _] = String.split(mount, ":/proxy")
+
+        {:ok, sock} =
+          :gen_tcp.connect({:local, String.to_charlist(Path.join(dir, "bridge.sock"))}, 0, [
+            :binary,
+            active: false
+          ])
+
+        {:ok, data} = :gen_tcp.recv(sock, 0, 2000)
+        :gen_tcp.close(sock)
+        {data, 0}
+
+      cmd, args, opts ->
+        runner().(cmd, args, opts)
+    end
+
+    report = PodmanReadiness.diagnose(runner: runner, read_file: read_file(), user: "ryan")
+    assert check(report, "socket_bridge").status == "ok"
+  end
 end
