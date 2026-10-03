@@ -132,7 +132,8 @@ defmodule Arbiter.Tasks.EffectivePriorityTest do
 
       expected = Arbiter.Board.Scheduler.order([a, b, c, d])
 
-      assert Enum.map(EffectivePriority.order([d, c, b, a]), & &1.id) == Enum.map(expected, & &1.id)
+      assert Enum.map(EffectivePriority.order([d, c, b, a]), & &1.id) ==
+               Enum.map(expected, & &1.id)
     end
 
     test "a floor puts the lifted child ahead of a better-own-priority parentless ticket", %{
