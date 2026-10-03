@@ -293,12 +293,8 @@ defmodule Arbiter.Worker.Jail do
           nil
       end
 
-    ([own_repo: own_repo] ++ Keyword.take(opts, [:hide_repos]))
-    |> Keyword.new(fn
-      {:hide_repos, repos} -> {:repos, repos}
-      other -> other
-    end)
-    |> Hide.paths()
+    repos = for {:hide_repos, repos} <- opts, do: {:repos, repos}
+    Hide.paths([own_repo: own_repo] ++ repos)
   end
 
   # bd-5ad4ch: every spawn's TMPDIR lives under the worker temp root, which sits

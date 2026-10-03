@@ -46,10 +46,12 @@ defmodule ArbiterWeb.Api.ServerControllerTest do
       # (bd-5d5mrs): the "ssh" sub-key is covered by its own describe block.
       Application.put_env(:arbiter, :worker_jail_ssh_available, true)
       Application.put_env(:arbiter, :worker_jail_escape_available, true)
+      Application.put_env(:arbiter, :worker_jail_reads_available, true)
       Application.put_env(:arbiter, :worker_jail_network_available, true)
 
       on_exit(fn ->
         Application.delete_env(:arbiter, :worker_jail_escape_available)
+        Application.delete_env(:arbiter, :worker_jail_reads_available)
         Application.delete_env(:arbiter, :worker_jail_network_available)
 
         case prev do
@@ -86,6 +88,21 @@ defmodule ArbiterWeb.Api.ServerControllerTest do
 
       assert resp["escape"]["available"] == false
       assert resp["escape"]["message"] =~ "escape vector"
+    end
+
+    # bd-3q2djr
+    test "reports reads available: false when a sensitive path is readable in the jail", %{
+      conn: conn
+    } do
+      Application.put_env(:arbiter, :worker_jail_available, true)
+
+      resp = conn |> get("/api/server/agy_write_jail") |> json_response(200)
+      assert resp["reads"] == %{"available" => true}
+
+      Application.put_env(:arbiter, :worker_jail_reads_available, false)
+      resp = conn |> get("/api/server/agy_write_jail") |> json_response(200)
+      assert resp["reads"]["available"] == false
+      assert resp["reads"]["message"] =~ "readable inside the jail"
     end
 
     # bd-cfktou: network mode (--unshare-net + socat) is its own diagnosis.

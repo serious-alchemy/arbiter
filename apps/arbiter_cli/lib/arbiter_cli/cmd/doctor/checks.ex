@@ -43,6 +43,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       check_legacy_safe_defaults_key(),
       check_agy_write_jail(),
       check_agy_jail_escape(),
+      check_agy_jail_reads(),
       check_agy_jail_network(),
       check_egress_jail(),
       check_agy_ssh_transport(),
@@ -707,6 +708,46 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       _ ->
         %Result{
           name: "agy jail escape vectors",
+          status: :ok,
+          detail: "server unreachable or predates this check — skipping",
+          fatal: false,
+          blocks_readiness: false
+        }
+    end
+  end
+
+  # bd-3q2djr (G3): `--ro-bind / /` lets a jailed worker read every credential
+  # the operator can. `Jail.diagnose_reads/0` (the payload's `reads` key) runs
+  # a real jail with the live hide set and checks that the install DB,
+  # `~/.arbiter`, the credential dirs, the durable log root, another worker's
+  # worktree and another workspace's repo cannot be read from inside. A
+  # reachable path is a FAIL (non-blocking, like the escape check).
+  defp check_agy_jail_reads do
+    case Client.get("/api/server/agy_write_jail") do
+      {:ok, %{"reads" => %{"available" => true}}} ->
+        %Result{
+          name: "agy jail hidden reads",
+          status: :ok,
+          detail:
+            "the install DB, credential dirs, log root and other workspaces' worktrees " <>
+              "and repos cannot be read from inside the jail",
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      {:ok, %{"reads" => %{"available" => false, "message" => message} = reads}} ->
+        %Result{
+          name: "agy jail hidden reads",
+          status: :fail,
+          detail: message,
+          hint: Map.get(reads, "fix") || "See Arbiter.Worker.Jail.Hide.paths/1 (bd-3q2djr).",
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      _ ->
+        %Result{
+          name: "agy jail hidden reads",
           status: :ok,
           detail: "server unreachable or predates this check — skipping",
           fatal: false,
