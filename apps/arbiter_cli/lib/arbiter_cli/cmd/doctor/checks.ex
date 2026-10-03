@@ -1020,7 +1020,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
     end
   end
 
-  defp podman_detail(checks, failed, true) do
+  defp podman_detail(checks, _failed, true) do
     warns = Enum.filter(checks, &(Map.get(&1, "status") == "warn"))
     base = "#{length(checks)} checks passed"
 
