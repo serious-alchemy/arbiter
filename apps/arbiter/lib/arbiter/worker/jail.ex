@@ -54,7 +54,9 @@ defmodule Arbiter.Worker.Jail do
       `:network` (below); agy does (bd-cfktou). Codex's reviewer jail does not.
     * Reads are not restricted, except for `secret_files/0` (the server's
       env file and Erlang distribution cookie), which are shadowed by
-      `/dev/null`.
+      `/dev/null`, and, when the caller passes `hide_reads: true` (agy does),
+      the denylist of `Arbiter.Worker.Jail.Hide`. Anything not on that list
+      is still readable.
     * Refs in the common dir are shared, so sibling worktrees' branches can
       still be written (the same as without the jail).
     * `git config --local` fails with `EBUSY` (git renames a lockfile over the
@@ -175,6 +177,7 @@ defmodule Arbiter.Worker.Jail do
 
   @behaviour Arbiter.Worker.Sandbox
 
+  alias Arbiter.Worker.Jail.Hide
   alias Arbiter.Worker.ReleaseEnv
 
   @toolchain_dir ".arbiter-jail"
@@ -197,6 +200,7 @@ defmodule Arbiter.Worker.Jail do
           optional(:worktree_readonly) => boolean(),
           optional(:mask_paths) => [String.t()],
           optional(:secret_files) => [String.t()],
+          optional(:hide) => Hide.t() | nil,
           optional(:network) => network() | nil
         }
 
@@ -225,6 +229,14 @@ defmodule Arbiter.Worker.Jail do
     * `:writable_paths` — extra writable paths (`sandbox.writable_paths`);
       normalized by `writable_paths/1`.
     * `:env` — extra `{name, value}` pairs set inside the jail.
+    * `:hide_reads` — also hide the sensitive read paths of `Arbiter.Worker.Jail.Hide`
+      (credential dirs, the install DB and `~/.arbiter`, the output-log root,
+      every other worktree, other workspaces' repos) behind `--tmpfs` and
+      `/dev/null` (bd-3q2djr). Off by default: the agy caller turns it on;
+      Codex's reviewer jail needs `~/.codex`.
+    * `:hide_repos` — the workspace repo paths to hide (default: every
+      `repo_paths` entry of every workspace; the worktree's own repo is
+      always left visible).
     * `:worktree_readonly` — bind the worktree `--ro-bind` instead of
       `--bind` (bd-3s82pf). For a worktree-backed review dispatch, this makes
       the reviewer's read-only posture an OS guarantee rather than a deny
@@ -253,7 +265,8 @@ defmodule Arbiter.Worker.Jail do
           network_env(network) ++
             ssh_env(network) ++ toolchain_env ++ Keyword.get(opts, :env, []),
         worktree_readonly: Keyword.get(opts, :worktree_readonly, false),
-        network: network
+        network: network,
+        hide: if(Keyword.get(opts, :hide_reads, false), do: hide_spec(git, opts))
       }
 
       proxy = keyring_proxy(opts)
@@ -266,6 +279,26 @@ defmodule Arbiter.Worker.Jail do
 
       {:ok, argv(spec, command) |> maybe_keyring_proxy(proxy)}
     end
+  end
+
+  # The own repo is the one the worktree's git common dir lives in: it stays
+  # visible, every other workspace repo is hidden.
+  defp hide_spec(git, opts) do
+    own_repo =
+      case git do
+        %{common_dir: common} ->
+          if Path.basename(common) == ".git", do: Path.dirname(common), else: common
+
+        _ ->
+          nil
+      end
+
+    ([own_repo: own_repo] ++ Keyword.take(opts, [:hide_repos]))
+    |> Keyword.new(fn
+      {:hide_repos, repos} -> {:repos, repos}
+      other -> other
+    end)
+    |> Hide.paths()
   end
 
   # bd-5ad4ch: every spawn's TMPDIR lives under the worker temp root, which sits
@@ -436,6 +469,7 @@ defmodule Arbiter.Worker.Jail do
       [bwrap, "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc"],
       ["--tmpfs", "/tmp", "--tmpfs", "/dev/shm"],
       mask_args(spec),
+      hide_args(Map.get(spec, :hide)),
       network_args(Map.get(spec, :network)),
       Enum.flat_map(Map.get(spec, :writable_paths, []), &["--bind-try", &1, &1]),
       if(Map.get(spec, :worktree_readonly, false), do: ro_bind(worktree), else: bind(worktree)),
@@ -446,6 +480,19 @@ defmodule Arbiter.Worker.Jail do
       ["--unshare-pid", "--die-with-parent", "--new-session", "--chdir", worktree, "--"],
       network_command(Map.get(spec, :network), command)
     ])
+  end
+
+  # bd-3q2djr (G3): blank each hidden directory, bind the few paths a worker
+  # needs back out of a blanked one (`~/.ssh/known_hosts`), then shadow each
+  # hidden file with /dev/null. Emitted before every bind the worker is meant
+  # to see (worktree, HOME, git dirs, the egress sockets), so those return on
+  # top of a masked parent such as the worktree root.
+  defp hide_args(nil), do: []
+
+  defp hide_args(%{dirs: dirs, files: files, keep: keep}) do
+    Enum.flat_map(dirs, &["--tmpfs", &1]) ++
+      Enum.flat_map(keep, &["--ro-bind-try", &1, &1]) ++
+      Enum.flat_map(files, &["--ro-bind", "/dev/null", &1])
   end
 
   # ---- network mode (bd-cfktou, G6) --------------------------------------
@@ -1611,6 +1658,90 @@ defmodule Arbiter.Worker.Jail do
             "The jail argv must mask /run/user/<uid>, /run/dbus and /run/systemd/resolve " <>
               "(Arbiter.Worker.Jail.mask_paths/0) and shadow the release cookie " <>
               "(Arbiter.Worker.Jail.secret_files/0); this build's jail does not."
+        }
+
+      {:error, reason} ->
+        explain(reason)
+    end
+  end
+
+  @doc """
+  Run the hidden-reads check for real (uncached), inside this module's own
+  jail argv with the live hide set (bd-3q2djr, G3): every credential dir, the
+  install DB and `~/.arbiter`, the output-log root, another worker's
+  worktree and another workspace's repo that exists on this host must be
+  absent or empty inside the jail. `:ok` when none is readable;
+  `{:error, {:reads_reachable, [path]}}` otherwise. A path class that does
+  not exist on this host has nothing to leak, so it is not a failure.
+  """
+  @spec reads_probe() :: :ok | {:error, term()}
+  def reads_probe do
+    with {:ok, bwrap} <- find_bwrap() do
+      scratch =
+        Path.join(probe_root(), "reads-#{System.pid()}-#{System.unique_integer([:positive])}")
+
+      try do
+        :ok = File.mkdir_p(scratch)
+        hide = Hide.paths()
+        targets = Hide.probe_targets(hide)
+
+        script = ~S"""
+        for t in "$@"; do
+          kind=${t%%:*}; p=${t#*:}
+          case $kind in
+            file) [ -s "$p" ] && echo "reachable:$p" ;;
+            dir)  [ -e "$p" ] && echo "reachable:$p" ;;
+          esac
+        done
+        exit 0
+        """
+
+        %{bwrap: bwrap, worktree: scratch, hide: hide}
+        |> argv(["sh", "-c", script, "sh" | Enum.map(targets, fn {k, p} -> "#{k}:#{p}" end)])
+        |> run_bounded()
+        |> judge_reads_probe()
+      rescue
+        e -> {:error, {:probe_raised, Exception.message(e)}}
+      after
+        File.rm_rf(scratch)
+      end
+    end
+  end
+
+  defp judge_reads_probe(:timeout), do: {:error, :probe_timeout}
+  defp judge_reads_probe({:raised, msg}), do: {:error, {:bwrap_failed, msg}}
+
+  defp judge_reads_probe({out, 0}) do
+    case for "reachable:" <> v <- String.split(out, "\n", trim: true), do: v do
+      [] -> :ok
+      paths -> {:error, {:reads_reachable, paths}}
+    end
+  end
+
+  defp judge_reads_probe({out, status}), do: {:error, {:bwrap_failed, status, String.trim(out)}}
+
+  @doc "`reads_probe/0` as a diagnosis (`nil` when nothing sensitive is readable)."
+  @spec diagnose_reads() :: diagnosis() | nil
+  def diagnose_reads do
+    # `:worker_jail_reads_available` overrides the real probe (tests).
+    result =
+      case Application.get_env(:arbiter, :worker_jail_reads_available) do
+        nil -> reads_probe()
+        true -> :ok
+        false -> {:error, {:reads_reachable, ["(forced by :worker_jail_reads_available)"]}}
+      end
+
+    case result do
+      :ok ->
+        nil
+
+      {:error, {:reads_reachable, paths}} ->
+        %{
+          cause: :other,
+          message: "sensitive path(s) readable inside the jail: " <> Enum.join(paths, ", "),
+          fix:
+            "The agy jail must hide these (Arbiter.Worker.Jail.Hide.paths/1, bd-3q2djr); " <>
+              "this build's jail does not, or `:worker_jail_unmask` re-exposes them."
         }
 
       {:error, reason} ->
