@@ -166,6 +166,8 @@ defmodule Arbiter.Application do
       # bd-5ad4ch: removes per-run TMPDIRs orphaned by runs that died with the server.
       Arbiter.Worker.RunTmp.Reaper,
       Arbiter.Worker.RunTmp.Sweeper,
+      # bd-dmcbos: removes a worker's test-services pod when it dies, and orphaned ones at boot.
+      Arbiter.Worker.TestServices.Reaper,
       # Periodically runs PRAGMA optimize on SQLite repos (bd-2zjtca).
       Arbiter.Repo.OptimizeSweeper,
       # Deletes a session's persisted raw transcript once it has been :ended

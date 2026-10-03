@@ -54,12 +54,25 @@ defmodule Arbiter.Worker.ContainerSpawn do
   environment, so `ps` never shows a token; the few names that would change how
   the client itself runs (`PATH`, `HOME`, `XDG_*`, …) are passed as literals.
 
+  ## Test services (P10, bd-dmcbos)
+
+  A repo with a service definition (`Arbiter.Worker.TestServices`: vstim gets
+  Postgres 16, tonic Postgres 15 plus an S3 store) gets a **pod** instead of a
+  bare container. `prepare/1` starts it last, with the services ready, and the
+  request carries `:pod` and the worker's `DATABASE_URL` and friends. The worker
+  container joins the pod (`--pod`, no `--network`/`--userns` of its own: the pod
+  is `--network none --userns keep-id`), so the services are on its `127.0.0.1`
+  and nothing of the host's loopback is. Services are optional and per repo; a
+  repo with none runs exactly as before.
+
   ## Teardown
 
   The container is named per worker (`arb-<task>-<hash>`), run with `--rm` and
   `--init`. `teardown/1` removes it by that name when the worker kills its
   sessions, because killing the `podman` client is not a reliable stop
-  (`Container`, "Teardown by name").
+  (`Container`, "Teardown by name"), and removes the pod with it. `--rm` does
+  not remove a pod, so `TestServices.Reaper` also removes it when the owning
+  worker process dies by any means.
 
   ## Not covered
 
@@ -80,6 +93,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
   alias Arbiter.Worker.Jail
   alias Arbiter.Worker.PrivateClone
   alias Arbiter.Worker.Sandbox
+  alias Arbiter.Worker.TestServices
 
   require Logger
 
@@ -108,7 +122,8 @@ defmodule Arbiter.Worker.ContainerSpawn do
           required(:cli_mounts) => [{String.t(), String.t()}],
           required(:prompt_paths) => [String.t()],
           required(:network) => keyword(),
-          required(:env) => [{String.t(), String.t()}]
+          required(:env) => [{String.t(), String.t()}],
+          optional(:pod) => String.t() | nil
         }
 
   @doc "The path of the `claude` binary inside the container."
@@ -147,10 +162,12 @@ defmodule Arbiter.Worker.ContainerSpawn do
          {:ok, image} <- fetch_image(opts, worktree),
          {:ok, cli_mounts} <- cli_mounts(opts),
          {:ok, network, spec} <- start_egress(opts, policy, worktree),
-         {:ok, home, config_dir} <- run_dirs(tmp_dir, Keyword.get(opts, :workspace)) do
+         {:ok, home, config_dir} <- run_dirs(tmp_dir, Keyword.get(opts, :workspace)),
+         name = container_name(opts),
+         {:ok, services} <- start_services(opts, name) do
       {:ok,
        %{
-         name: container_name(opts),
+         name: name,
          image: image,
          podman: Keyword.get(opts, :podman),
          mounts: mounts,
@@ -160,7 +177,8 @@ defmodule Arbiter.Worker.ContainerSpawn do
          cli_mounts: cli_mounts,
          prompt_paths: prompt_paths(Keyword.get(opts, :argv)),
          network: network,
-         env: container_env(spec)
+         env: container_env(spec) ++ if(services, do: services.env, else: []),
+         pod: services && services.pod
        }}
     end
   end
@@ -220,6 +238,40 @@ defmodule Arbiter.Worker.ContainerSpawn do
       {:ok, tag}
     else
       {:error, reason} -> {:error, {:image_unavailable, reason}}
+    end
+  end
+
+  # The test services (`Arbiter.Worker.TestServices`, P10) start last: nothing
+  # after them can fail, so a refused prepare never leaves a pod behind. A repo
+  # with no definition gets none and the container is exactly what it was.
+  defp start_services(opts, name) do
+    service_opts = Keyword.get(opts, :services_opts, [])
+
+    with {:ok, services} <- services_for(opts),
+         {:ok, started} <-
+           TestServices.start(
+             Keyword.merge(service_opts, name: name, services: services, podman: opts[:podman])
+           ) do
+      if started, do: track_pod(opts, started.pod, service_opts)
+      {:ok, started}
+    else
+      {:error, reason} -> {:error, {:test_services_unavailable, reason}}
+    end
+  end
+
+  defp services_for(opts) do
+    case Keyword.fetch(opts, :services) do
+      {:ok, specs} -> TestServices.resolve(specs)
+      :error -> TestServices.for_repo(Keyword.get(opts, :repo))
+    end
+  end
+
+  # The pod outlives the worker container (`--rm` removes only that), so the
+  # owner's death, however it comes, removes it.
+  defp track_pod(opts, pod, service_opts) do
+    case Keyword.get(opts, :owner) do
+      owner when is_pid(owner) -> TestServices.Reaper.track(owner, pod, service_opts)
+      _ -> :ok
     end
   end
 
@@ -409,6 +461,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
       inherit_env: Enum.map(inherit, &elem(&1, 0))
     ]
 
+    base = if request[:pod], do: [{:pod, request.pod} | base], else: base
     if request.podman, do: [{:podman, request.podman} | base], else: base
   end
 
@@ -428,8 +481,15 @@ defmodule Arbiter.Worker.ContainerSpawn do
 
   # -- teardown --------------------------------------------------------------------
 
-  @doc "Remove the container of `port_args` (a spawn's args, or `nil`) by name."
+  @doc """
+  Remove the container of `port_args` (a spawn's args, or `nil`) by name, and
+  the test-services pod it ran in, if any (`TestServices.stop/2`).
+  """
   @spec teardown(map() | nil) :: :ok
-  def teardown(%{sandbox: %{name: name}}) when is_binary(name), do: Container.teardown(name)
+  def teardown(%{sandbox: %{name: name} = request}) when is_binary(name) do
+    Container.teardown(name)
+    TestServices.teardown(request[:pod])
+  end
+
   def teardown(_), do: :ok
 end

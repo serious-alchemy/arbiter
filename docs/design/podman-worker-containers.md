@@ -628,7 +628,7 @@ difficulty.
 | P7 | **Done (bd-d2o3xb, `Arbiter.Worker.ContainerSpawn`).** Claude under the container backend (replaces G7 bd-d2o3xb): config dir, token env, `.mcp.json`, `arb`, proxy and Arbiter bridges via G5's sockets, wrap point in `ClaudeSession`. See [§4.1](#41-claude-under-podman-p7) | 3 | P3, P5, G5 |
 | P8 | **Codex under the container backend** (replaces G8 bd-50d5j6, with bd-99emmd): per-run `CODEX_HOME`, refresh-token rotation handling | 3 | P7 |
 | P9 | Deploy-key delivery as `--secret` (the body of G16 bd-9cygoo and the per-run-agent part of G14) | 3 | P7 |
-| P10 | Test services: a per-worker pod with a Postgres sidecar on the pod's `lo` for vstim and tonic (Postgres 15/16, plus an S3 store for tonic). Optional; arbiter needs none | 3 | P7 |
+| P10 | **Done (bd-dmcbos, `Arbiter.Worker.TestServices`).** Test services: a per-worker pod with a Postgres sidecar on the pod's `lo` for vstim and tonic (Postgres 15/16, plus an S3 store for tonic). Optional; arbiter needs none. See [Appendix E](#appendix-e-p10-test-services-probes-bd-dmcbos) | 3 | P7 |
 | P11 | Re-plan the six tickets in [§7.2](#72-what-happens-to-each-guardrail-ticket): re-scope G7 and G8, shrink G3 and G14, annotate G6 and G16 | 1 | this decision |
 
 **What to do first.** P1 and P2 are independent and cheap, and P1 decides
@@ -765,3 +765,33 @@ added. Reproduced by `private_clone_podman_test.exs` (`--include podman`).
 | `.git/commondir` containing `"."` | git treats it as no file: `rev-parse --git-common-dir`, `worktree add/remove/prune`, `gc`, fetch, push and rebase unchanged |
 | Main repo rewritten and `gc --prune=now` while a container reads its history | **without pins**: `fatal: bad object HEAD` from the next read on (shell probe); **with pins**: 24/24 reads and `fsck --connectivity-only` pass |
 | Same, read through `:O` without pins (ExUnit control) | not deterministic: `git log` still worked from a cached dentry while `fsck` failed. The overlay can serve a pack the host already deleted, which is borrowed time, not safety; the host-side clone is broken either way |
+
+## Appendix E: P10 test services probes (bd-dmcbos)
+
+Run 2026-10-03 on the Fedora 44 laptop (podman 5.8.7, SELinux enforcing).
+Reproduced by `test_services_podman_test.exs` (`--include podman`; needs
+`postgres:15-alpine`, `postgres:16-alpine` and `pgsty/silo` locally).
+
+`TestServices` gives a repo with a service definition (vstim: Postgres 16;
+tonic: Postgres 15 and `pgsty/silo`; others none) a pod created with
+`--network none --userns keep-id`. The services are hardened members
+(`--read-only`, `--cap-drop=all`, tmpfs state, no host mounts) and the worker
+container joins with `--pod`.
+
+| Probe | Result |
+|---|---|
+| Worker container in the pod, `psql "$DATABASE_URL"`: DDL, inserts, a read | works; `current_database()` is `vstim_test`; the container's only interface is `lo`, its uid is the host's |
+| A TCP listener on the host's `127.0.0.1` (the control connects from the host) | `nc -z` from the worker: **unreachable**. Checked by hand as well: with the host's Arbiter on 4848 and epmd on 4369 both listening, neither was reachable from a pod member |
+| The pod's Postgres from the host (`127.0.0.1:5432`) | `econnrefused`: nothing is published |
+| tonic's pod | Postgres 15 and silo (`/minio/health/ready` over `127.0.0.1:9000`) both answer the worker |
+| Bridge socket, pod member, `label=disable` | `psql -h <dir>` to a host unix listener connects; default label: `Permission denied`. §5.3 holds inside a pod |
+| `--userns=keep-id` on a pod member | refused (`cannot set user namespace mode when joining pod with infra container`), even when the pod has it. So the pod carries `--userns keep-id` and the worker takes no `--userns`/`--network` of its own |
+| Postgres as the host uid on a read-only root | initdb needs a writable owned `PGDATA`: a tmpfs is root-owned under keep-id, and `--tmpfs …,uid=` is rejected, so the data and socket tmpfs are mode 1777 with `PGDATA` a subdirectory; the entrypoint's `chmod` of `/var/run/postgresql` fails and is harmless. `PGHOST` cannot move the socket (the entrypoint unsets it) |
+| `podman exec <ctr> -- cmd` | runs a command named `--` (as `run … image -- cmd` does): readiness argvs carry no `--` |
+| Pod removal | `podman pod rm --force --ignore --time 0 <pod>` removes the worker container and every sidecar. `--rm` on the worker container does **not** remove the pod, so the pod has its own teardown: `ContainerSpawn.teardown/1`, a monitor-based `TestServices.Reaper` for any worker death (including `:kill`), and a boot sweep of pods whose recorded server pid is gone |
+
+What was **not** run: vstim's or tonic's own `mix test`. Neither repo's image or
+deps exist in this container (no network, by design), so the suite in the test
+is a stand-in (DDL and queries through the injected `DATABASE_URL`). The first
+run of a real suite needs the repo's image (P4/P6) and a deps cache, then is
+checked by dispatching a vstim ticket with `sandbox.backend: podman`.
