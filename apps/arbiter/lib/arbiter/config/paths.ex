@@ -60,6 +60,15 @@ defmodule Arbiter.Config.Paths do
   end
 
   @doc """
+  Root holding the worker-image state (`Arbiter.Worker.Image.Pins`: the
+  base-image digest pins and the last weekly refresh, bd-9r5jdt).
+  """
+  @spec image_root() :: String.t()
+  def image_root do
+    resolve("ARBITER_IMAGE_ROOT", :image_root, "~/.arbiter/images")
+  end
+
+  @doc """
   Root for **disposable sandbox scaffolding** whose lifetime is owned by a
   run, not by a cleaner (bd-b6noq9, #1930).
 
