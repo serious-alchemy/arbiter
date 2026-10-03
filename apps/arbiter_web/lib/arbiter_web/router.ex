@@ -228,6 +228,7 @@ defmodule ArbiterWeb.Router do
     # Messages (inter-agent queue: notifications + mailboxes)
     get("/messages", MessageController, :index)
     post("/messages", MessageController, :create)
+    get("/messages/:id", MessageController, :show)
     post("/messages/:id/read", MessageController, :read)
     delete("/messages", MessageController, :clear)
 

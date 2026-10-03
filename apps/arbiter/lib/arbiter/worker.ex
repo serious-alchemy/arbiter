@@ -2734,7 +2734,7 @@ defmodule Arbiter.Worker do
         case inject_resume_argv(
                port_args,
                sid,
-               resume_continue_prompt(:manual_resume, state.task_id),
+               manual_resume_prompt(state.task_id),
                provider
              ) do
           {:ok, resumed_args} ->
@@ -5222,6 +5222,18 @@ defmodule Arbiter.Worker do
     Pick up exactly where you left off, complete the remaining work, and when the
     task is fully done print `arb done` on its own line.
     """
+  end
+
+  @doc """
+  The prompt a manual session resume (`arb worker resume`) sends: the terse
+  continue nudge, preceded by any unread coordinator direction for the task
+  (bd-kxzrk9) — a resumed session replays its old context and would otherwise
+  never look at its mailbox.
+  """
+  @spec manual_resume_prompt(String.t()) :: String.t()
+  def manual_resume_prompt(task_id) do
+    Arbiter.Worker.CoordinatorDirectives.section(task_id) <>
+      resume_continue_prompt(:manual_resume, task_id)
   end
 
   defp worker_permission_denied_prompt(task_id, opts) do

@@ -27,10 +27,15 @@ defmodule Arbiter.Worker.PromptBuilder do
       Keyword.get(opts, :review, false) == true -> review_prompt(task, opts)
       # bd-9s9dqz: the two no-PR types share a briefing skeleton but not a
       # deliverable — `research` owes findings, `task` an action + outcome note.
-      Issue.no_pr_type?(task.issue_type) -> no_pr_prompt(task, opts)
-      true -> work_prompt(task, opts)
+      Issue.no_pr_type?(task.issue_type) -> directives_prefix(task) <> no_pr_prompt(task, opts)
+      true -> directives_prefix(task) <> work_prompt(task, opts)
     end
   end
+
+  # bd-kxzrk9: unread coordinator mail goes into every authoring prompt (fresh
+  # dispatch and `resume/2` both land here) so a directive is never left for the
+  # worker to find, and possibly fail to open, on its own.
+  defp directives_prefix(%Issue{id: id}), do: Arbiter.Worker.CoordinatorDirectives.section(id)
 
   @doc """
   Briefing for a **conflict-resolve** worker (#354, Phase 2b).

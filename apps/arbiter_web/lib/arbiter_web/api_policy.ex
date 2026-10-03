@@ -50,6 +50,9 @@ defmodule ArbiterWeb.ApiPolicy do
     * `:message_send` — coordinator; or a worker. `MessageController.create/2`
       pins a worker's `from_ref` and `workspace_id` to its own task, like the
       `message_send` MCP tool.
+    * `:message_show` — coordinator; or a worker reading, by id, a message
+      addressed to its own task (whoever sent it). Anything else is a 403 that
+      names the scope rule, never a silent miss.
     * `:message_mark_read` — coordinator; or a worker marking a message
       addressed to its own task.
 
@@ -71,6 +74,7 @@ defmodule ArbiterWeb.ApiPolicy do
           | :dependency_add
           | :mailbox
           | :message_send
+          | :message_show
           | :message_mark_read
 
   # The REST twin of `ticket_update_progress` (`Arbiter.MCP.Tools.Task`'s
@@ -158,6 +162,7 @@ defmodule ArbiterWeb.ApiPolicy do
     # ---- messages -----------------------------------------------------------
     {:get, "/api/messages"} => :mailbox,
     {:post, "/api/messages"} => :message_send,
+    {:get, "/api/messages/:id"} => :message_show,
     {:post, "/api/messages/:id/read"} => :message_mark_read,
     {:delete, "/api/messages"} => :coordinator,
 
@@ -271,6 +276,7 @@ defmodule ArbiterWeb.ApiPolicy do
              :dependency_add,
              :mailbox,
              :message_send,
+             :message_show,
              :message_mark_read
            ],
       do: :ok
@@ -344,6 +350,20 @@ defmodule ArbiterWeb.ApiPolicy do
   end
 
   def authorize(:message_send, %Scope{tier: :worker}, _params), do: :ok
+
+  def authorize(:message_show, %Scope{tier: :worker, task_id: task_id} = scope, params) do
+    case Ash.get(Arbiter.Messages.Message, params["id"]) do
+      {:ok, %{to_ref: ^task_id}} ->
+        :ok
+
+      {:ok, _} ->
+        forbidden(scope, "may only read its own mailbox (message not addressed to #{task_id})")
+
+      # Unknown id: let the controller answer 404 as it always has.
+      {:error, _} ->
+        :ok
+    end
+  end
 
   def authorize(:message_mark_read, %Scope{tier: :worker, task_id: task_id} = scope, params) do
     case Ash.get(Arbiter.Messages.Message, params["id"]) do
