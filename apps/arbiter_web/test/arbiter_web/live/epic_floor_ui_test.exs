@@ -57,7 +57,7 @@ defmodule ArbiterWeb.EpicFloorUiTest do
 
   defp live_task(conn, id) do
     {:ok, view, _html} = live(conn, ~p"/tasks/#{id}")
-    render_async(view, @async_timeout)
+    _ = ArbiterWeb.TaskDetailLiveHelpers.render_task(view)
     view
   end
 
