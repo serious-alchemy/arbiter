@@ -494,7 +494,29 @@ defmodule Arbiter.Tasks.Issue do
       argument :before_id, :string, allow_nil?: true
       argument :after_id, :string, allow_nil?: true
 
+      # ES6: a board drag asks for the move to pin the card (`rank_pinned`).
+      # The CLI, API and MCP rank doors don't, so they leave the pin as it was.
+      argument :pin, :boolean, default: false
+
       change {Arbiter.Tasks.Issue.Changes.SetRank, []}
+    end
+
+    # ES6: pin or unpin a card without moving it. A board drag pins the cards
+    # above the drop too (`ArbiterWeb.BoardLive`), so the order the operator
+    # produced is the order the pinned-first sort reads back.
+    update :set_rank_pinned do
+      require_atomic? false
+      accept []
+
+      argument :pinned, :boolean, allow_nil?: false, default: true
+
+      change fn changeset, _context ->
+        Ash.Changeset.force_change_attribute(
+          changeset,
+          :rank_pinned,
+          Ash.Changeset.get_argument(changeset, :pinned)
+        )
+      end
     end
 
     # ES2: the only writer of `floor_priority`. Epic-only, 1..3 or nil to
@@ -1195,6 +1217,20 @@ defmodule Arbiter.Tasks.Issue do
       (`Changes.AssignRank`), and so is a ticket promoted to Ready
       (`Changes.RankOnPromote`): promotion order is dispatch order within a
       band. `:set_rank` reorders it afterwards.
+      """
+    end
+
+    attribute :rank_pinned, :boolean do
+      allow_nil? false
+      public? true
+      default false
+
+      description """
+      ES6 (`docs/design/epic-aware-scheduling.md` §4): an operator dragged this
+      card inside its band, so it sorts first within that band, ahead of the
+      finish-first tiebreak. Set only by `:set_rank` with `pin: true` and
+      `:set_rank_pinned`, never by `:create` or `:update`. Cleared by promote,
+      demote, close and reopen (`Changes.Transition`).
       """
     end
 
