@@ -662,6 +662,35 @@ defmodule Arbiter.Board.SnapshotTest do
       assert elsewhere(board, "bd-a") == []
     end
 
+    # bd-2gc809: a restart re-arms a CI wait with no run row at all; the card
+    # names the wait and the ticket has no attention (it is not a crash).
+    test "an in_progress issue waiting on CI with no worker reads waiting-on-CI, not stopped" do
+      marker =
+        Arbiter.Worker.ReviewCi.marker("a1b2c3d4e5f6a7b8", 1, %{
+          interval_ms: 60_000,
+          max_polls: 30
+        })
+
+      board =
+        derive(
+          issues: [
+            issue("bd-a", %{
+              state: :active,
+              updated_at: @yesterday,
+              pr_ref: "123",
+              review_gate_state: %{"ci_wait" => marker}
+            })
+          ]
+        )
+
+      assert [%{id: "bd-a", live: false, activity: activity, step: :awaiting_ci} = card] =
+               board.in_progress
+
+      assert activity == "waiting on CI a1b2c3d4e5f6"
+      assert card.attention == nil
+      assert board.attention == []
+    end
+
     test "an in_progress epic with no live worker is not treated as orphaned" do
       board =
         derive(

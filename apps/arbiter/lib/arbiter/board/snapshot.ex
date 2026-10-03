@@ -976,13 +976,26 @@ defmodule Arbiter.Board.Snapshot do
   defp with_view(card, views) do
     view = Map.get(views, card.id, %{})
 
-    Map.merge(card, %{
+    card
+    |> waiting_on_ci_activity(Map.get(view, :ci_wait))
+    |> Map.merge(%{
       step: Map.get(view, :step),
       attention: Map.get(view, :attention),
       # bd-cut6uv: the head the ticket's ReviewGate is waiting on CI for, if any.
       ci_wait: Map.get(view, :ci_wait)
     })
   end
+
+  # bd-2gc809: a ticket whose ReviewGate waits on CI has no agent by design, and
+  # once a restart has taken its run row the card would otherwise read "worker
+  # stopped". It says what it is waiting on.
+  defp waiting_on_ci_activity(card, %{sha: _} = wait) do
+    if Map.get(card, :agent_live) == true,
+      do: card,
+      else: Map.put(card, :activity, Arbiter.Worker.ReviewCi.wait_label(wait))
+  end
+
+  defp waiting_on_ci_activity(card, _wait), do: card
 
   # The Needs-attention swimlane (bd-79w1fs): every card on the board whose
   # ticket has attention, operator-owned first, then oldest first. Closed

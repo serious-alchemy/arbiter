@@ -6072,29 +6072,32 @@ defmodule Arbiter.Worker do
   #
   # The task's difficulty drives the default; the workspace cap can only tighten
   # it (min), never loosen it beyond the difficulty-appropriate ceiling.
-  # Pre-existing complexity 10 — baselined when bd-4x2yhq first
-  # wired Credo up. Thresholds stay at the tool's own default so new
-  # code is held to it; see the note in .credo.exs.
-  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp resolve_review_rounds(%State{meta: meta} = state) do
     case meta && Map.get(meta, :review_rounds) do
-      n when is_integer(n) and n > 0 ->
-        n
+      n when is_integer(n) and n > 0 -> n
+      _ -> review_rounds_for(state.task_id, state.workspace_id)
+    end
+  end
+
+  @doc """
+  The revise-loop cap for a ticket's ReviewGate: its difficulty's default,
+  capped by the workspace's `review_gate.max_rounds`. `nil` when it cannot be
+  read (the gate then uses its own default).
+  """
+  @spec review_rounds_for(String.t(), String.t() | nil) :: pos_integer() | nil
+  def review_rounds_for(task_id, workspace_id) do
+    difficulty_default =
+      Arbiter.Worker.ReviewGate.rounds_for_difficulty(task_difficulty(task_id))
+
+    case workspace_id && Ash.get(Arbiter.Tasks.Workspace, workspace_id) do
+      {:ok, ws} ->
+        case Arbiter.Tasks.Workspace.review_gate_max_rounds(ws) do
+          nil -> difficulty_default
+          cap -> min(difficulty_default, cap)
+        end
 
       _ ->
-        difficulty = task_difficulty(state.task_id)
-        difficulty_default = Arbiter.Worker.ReviewGate.rounds_for_difficulty(difficulty)
-
-        case state.workspace_id && Ash.get(Arbiter.Tasks.Workspace, state.workspace_id) do
-          {:ok, ws} ->
-            case Arbiter.Tasks.Workspace.review_gate_max_rounds(ws) do
-              nil -> difficulty_default
-              cap -> min(difficulty_default, cap)
-            end
-
-          _ ->
-            difficulty_default
-        end
+        difficulty_default
     end
   rescue
     _ -> nil

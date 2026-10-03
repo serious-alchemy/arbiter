@@ -374,6 +374,7 @@ defmodule Arbiter.Application do
              Arbiter.Workers.Reconciler.reconcile_orphaned_runs(primary?: primary?)
              Arbiter.Workers.Reconciler.reconcile_shutdown_casualties(primary?: primary?)
              Arbiter.Workers.Reconciler.reconcile_open_pr_tasks(primary?: primary?)
+             Arbiter.Workers.Reconciler.reconcile_ci_waits(primary?: primary?)
              Arbiter.Workers.Reconciler.reconcile_resumable_tasks(primary?: primary?)
            end)
          end},

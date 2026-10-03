@@ -397,6 +397,8 @@ defmodule Arbiter.Worker.ReviewGate do
           | {:ci_adapter, module() | nil}
           | {:ci_poll_ms, pos_integer() | nil}
           | {:ci_max_polls, pos_integer() | nil}
+          | {:round, pos_integer()}
+          | {:rearmed, boolean()}
 
   @doc """
   Start a ReviewGate under `Arbiter.Worker.Supervisor`.
@@ -411,6 +413,61 @@ defmodule Arbiter.Worker.ReviewGate do
   def start(opts) when is_list(opts) do
     DynamicSupervisor.start_child(Arbiter.Worker.Supervisor, {__MODULE__, opts})
   end
+
+  @doc """
+  Re-arm a CI wait the server restart cut off (bd-2gc809).
+
+  The wait lives in a gate's memory and holds no slot and no agent; what
+  outlives a restart is the ticket's `ci_wait` marker (`ReviewCi.put_marker/2`)
+  and the round state beside it (branch, worktree, PR, target). This starts a
+  fresh gate on that state with **no author** — none survives a restart, and the
+  verdict is delivered to the ticket (`deliver_verdict/4`) — so the ticket comes
+  back waiting on CI, holding no slot, instead of as a slot-needing resume of
+  its implementer. The gate then reads CI on the head origin carries: green
+  dispatches the round's reviewer, red takes the rerun/fix path, a head that
+  moved is waited on in its own right.
+
+  `opts` are extra `start/1` options (tests: the stub forge, reviewer argv).
+  Returns `{:ok, pid}`, or `{:error, :no_ci_wait | :no_worktree | term}` when
+  the ticket cannot be re-armed (the caller falls back to the ordinary resume).
+  """
+  @spec rearm_ci_wait(String.t(), keyword()) :: {:ok, pid()} | {:error, term()}
+  def rearm_ci_wait(task_id, opts \\ []) when is_binary(task_id) do
+    with {:ok, issue} <- Ash.get(Arbiter.Tasks.Issue, task_id),
+         %{} = round <- ci_wait_round(issue),
+         branch when is_binary(branch) <- round["branch"],
+         worktree when is_binary(worktree) <- round["worktree_path"],
+         true <- File.dir?(worktree) || {:error, :no_worktree} do
+      marker = round["ci_wait"]
+
+      base =
+        [
+          task_id: task_id,
+          workspace_id: issue.workspace_id,
+          repo: round["repo"] || "unknown",
+          worktree_path: worktree,
+          branch: branch,
+          target_branch: round["target_branch"] || "main",
+          pr_ref: round["pr_ref"] || issue.pr_ref,
+          rounds: Worker.review_rounds_for(task_id, issue.workspace_id),
+          round:
+            if(is_integer(marker["round"]) and marker["round"] > 0, do: marker["round"], else: 1),
+          fix_round_attempt: round["fix_round_attempts"] || 0,
+          rearmed: true
+        ]
+        |> Enum.reject(fn {_k, v} -> is_nil(v) end)
+
+      start(Keyword.merge(base, opts))
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :no_ci_wait}
+    end
+  end
+
+  defp ci_wait_round(%{state: :active, review_gate_state: %{"ci_wait" => %{"sha" => _}} = round}),
+    do: round
+
+  defp ci_wait_round(_issue), do: nil
 
   @spec start_link([opt()]) :: GenServer.on_start()
   def start_link(opts) when is_list(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -747,7 +804,9 @@ defmodule Arbiter.Worker.ReviewGate do
 
   @impl true
   def init(opts) do
-    author = Keyword.fetch!(opts, :author)
+    # bd-2gc809: nil for a gate re-armed at boot (`rearm_ci_wait/2`) — no author
+    # survives a restart, and the verdict goes to the ticket (`deliver_verdict/4`).
+    author = Keyword.get(opts, :author)
     task_id = Keyword.fetch!(opts, :task_id)
 
     state = %{
@@ -794,7 +853,7 @@ defmodule Arbiter.Worker.ReviewGate do
       # phase: :reviewing while a reviewer pass is in flight, :revising while an
       # implementer addresses findings between rounds.
       phase: :reviewing,
-      round: 1,
+      round: Keyword.get(opts, :round, 1),
       # bd-6d3h8m: 0 for the original pass, N when this gate was spawned by the
       # Nth automatic implementer fix round (`Worker.maybe_dispatch_fix_round/3`
       # forwards `meta[:review_gate_fix_round_attempts]` through
@@ -964,6 +1023,11 @@ defmodule Arbiter.Worker.ReviewGate do
       ci_entry: nil,
       # What the wait resolved the forge, adapter and budget to, kept for its polls.
       ci_ctx: nil,
+      # bd-2gc809: a gate re-armed at boot inherits its dead predecessor's `ci_wait`
+      # marker. It stays until this gate waits (and rewrites it) or ends the wait
+      # without having waited (`ci_end_wait/1`), so the ticket never reads as not
+      # waiting while the reconciler's resume sweep is still looking at it.
+      ci_rearmed: Keyword.get(opts, :rearmed, false),
       # `%{sha:, url:}` once CI was read green on the head being reviewed. Set
       # for the round that follows and cleared at the next one; it is what lets
       # the reviewer skip the suite and what lets a suite-only PARTIAL pass.
@@ -975,7 +1039,7 @@ defmodule Arbiter.Worker.ReviewGate do
       ci_retargets: 0
     }
 
-    Process.monitor(author)
+    if is_pid(author), do: Process.monitor(author)
     {:ok, state, {:continue, :spawn_reviewer}}
   end
 
@@ -1142,8 +1206,8 @@ defmodule Arbiter.Worker.ReviewGate do
     state = %{state | ci_entry: entry, ci_green: nil, ci_fallback: nil, ci_wait: nil}
 
     case ci_plan(state) do
-      :off -> {:proceed, state}
-      {:fallback, reason} -> {:proceed, ci_fall_back(state, reason)}
+      :off -> {:proceed, ci_end_wait(state)}
+      {:fallback, reason} -> {:proceed, state |> ci_end_wait() |> ci_fall_back(reason)}
       {:ok, ctx, sha} -> ci_poll(%{state | ci_ctx: ctx}, ReviewCi.new_wait(sha, ctx.budget))
     end
   end
@@ -1369,7 +1433,7 @@ defmodule Arbiter.Worker.ReviewGate do
 
     # The author's own provider account is free while no agent is live for the
     # ticket (`Arbiter.Accounts.Concurrency`); it is told once, when the wait starts.
-    if is_nil(state.ci_wait), do: send(state.author, {:__review_gate_ci_wait__, true})
+    if is_nil(state.ci_wait), do: tell_author(state, {:__review_gate_ci_wait__, true})
 
     unless already do
       extra = if wait.rerun, do: %{"rerun" => true}, else: %{}
@@ -1381,15 +1445,24 @@ defmodule Arbiter.Worker.ReviewGate do
       state
       | phase: :awaiting_ci,
         current_id: nil,
+        ci_rearmed: false,
         ci_wait: %{wait: wait, token: token, marked: marked}
     }
+  end
+
+  defp tell_author(%{author: author}, msg) when is_pid(author), do: send(author, msg)
+  defp tell_author(_state, _msg), do: :ok
+
+  defp ci_end_wait(%{ci_wait: nil, ci_rearmed: true} = state) do
+    ReviewCi.put_marker(state.task_id, nil)
+    %{state | ci_rearmed: false, phase: :reviewing}
   end
 
   defp ci_end_wait(%{ci_wait: nil} = state), do: %{state | phase: :reviewing}
 
   defp ci_end_wait(state) do
     ReviewCi.put_marker(state.task_id, nil)
-    send(state.author, {:__review_gate_ci_wait__, false})
+    tell_author(state, {:__review_gate_ci_wait__, false})
     %{state | ci_wait: nil, phase: :reviewing}
   end
 
@@ -2111,7 +2184,7 @@ defmodule Arbiter.Worker.ReviewGate do
     # bd-cut6uv: a gate that ends mid-wait (the author went away, a crash) must
     # not leave its ticket marked as waiting on CI.
     if is_map(Map.get(state, :ci_wait)) do
-      send(state.author, {:__review_gate_ci_wait__, false})
+      tell_author(state, {:__review_gate_ci_wait__, false})
       safe(fn -> ReviewCi.put_marker(state.task_id, nil) end)
     end
 

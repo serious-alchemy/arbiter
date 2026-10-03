@@ -372,6 +372,168 @@ defmodule Arbiter.Worker.ReviewGateCiGateTest do
     end
   end
 
+  # ---- boot: a server restart during the wait (bd-2gc809) ---------------------
+
+  describe "a server restart during the CI wait" do
+    test "re-arms as a slotless CI wait: no worker, no slot, attention reads waiting-on-CI",
+         ctx do
+      rig = rig(ctx, "feature/ci-14")
+      start_forge(ctx, rig, [:running])
+      restart_during_wait(ctx, rig)
+
+      # Restarted: nothing resident, but the ticket still carries the marker.
+      assert Worker.whereis(rig.task.id) == nil
+      assert Ash.get!(Issue, rig.task.id).review_gate_state["ci_wait"]["sha"] == rig.head
+
+      assert {:ok, gate} = ReviewGate.rearm_ci_wait(rig.task.id, gate_opts())
+      wait_until(fn -> awaiting_ci?(gate) end)
+
+      issue = Ash.get!(Issue, rig.task.id)
+      refute SlotGate.holds_slot?(issue)
+      assert issue.state == :active
+      assert issue.review_gate_state["ci_wait"]["sha"] == rig.head
+      assert Worker.whereis(rig.task.id) == nil
+      assert passes(rig) == 0
+      assert implement_runs(rig) == 1
+
+      view = Projection.view(issue)
+      assert view.step == :awaiting_ci
+      assert view.ci_wait.sha == rig.head
+      refute view.attention in [:run_crashed, :worker_stopped]
+
+      assert Projection.payload(view).ci_wait["label"] =~
+               "waiting on CI #{String.slice(rig.head, 0, 12)}"
+
+      stop_gate(gate)
+    end
+
+    test "CI already green on the head: the reviewer is dispatched, the implementer is not resumed",
+         ctx do
+      rig = rig(ctx, "feature/ci-15")
+      forge = start_forge(ctx, rig, [:running])
+      restart_during_wait(ctx, rig)
+      set_pipeline(forge, [:success])
+
+      assert {:ok, gate} = ReviewGate.rearm_ci_wait(rig.task.id, gate_opts())
+      wait_until(fn -> passes(rig) == 1 end, 20_000)
+
+      assert reviewed_head(rig) == rig.head
+      assert :sys.get_state(gate).current_prompt =~ "CI passed on #{rig.head}"
+      assert Worker.whereis(rig.task.id) == nil
+      assert implement_runs(rig) == 1
+      assert Ash.get!(Issue, rig.task.id).review_gate_state["ci_wait"] == nil
+      stop_gate(gate)
+    end
+
+    test "CI red on the head takes the existing red path (rerun, then the fix round)", ctx do
+      rig = rig(ctx, "feature/ci-16")
+
+      StubMerger.set_failing_checks(@pr, [
+        %{name: "unit tests", summary: "1) boom", url: "https://ci/1", files: []}
+      ])
+
+      forge = start_forge(ctx, rig, [:running])
+      restart_during_wait(ctx, rig)
+      set_pipeline(forge, [:failed, :running, :failed, :success])
+
+      assert {:ok, gate} =
+               ReviewGate.rearm_ci_wait(
+                 rig.task.id,
+                 gate_opts(revise_command: [@revise_commit], rounds: 3)
+               )
+
+      wait_until(fn -> passes(rig) == 1 end, 30_000)
+      fixed = remote_head(ctx, rig)
+      refute fixed == rig.head
+      assert length(StubMerger.ci_reruns()) == 1
+      assert reviewed_head(rig) == fixed
+      assert Worker.whereis(rig.task.id) == nil
+      stop_gate(gate)
+    end
+
+    test "the head moved while the server was down: waits on the head that is there", ctx do
+      rig = rig(ctx, "feature/ci-17")
+      start_forge(ctx, rig, [:running])
+      restart_during_wait(ctx, rig)
+      pushed = push_other_commit(ctx, rig)
+
+      assert {:ok, gate} = ReviewGate.rearm_ci_wait(rig.task.id, gate_opts())
+      wait_until(fn -> awaiting_ci?(gate) end)
+
+      assert Ash.get!(Issue, rig.task.id).review_gate_state["ci_wait"]["sha"] == pushed
+      assert passes(rig) == 0
+      stop_gate(gate)
+    end
+
+    test "a ticket with no marker, or no worktree, is not re-armed", ctx do
+      rig = rig(ctx, "feature/ci-18")
+      assert {:error, :no_ci_wait} = ReviewGate.rearm_ci_wait(rig.task.id, gate_opts())
+
+      start_forge(ctx, rig, [:running])
+      restart_during_wait(ctx, rig)
+      File.rm_rf!(rig.wt)
+      assert {:error, :no_worktree} = ReviewGate.rearm_ci_wait(rig.task.id, gate_opts())
+    end
+  end
+
+  describe "Reconciler.reconcile_ci_waits/1" do
+    alias Arbiter.Workers.Reconciler
+
+    test "re-arms a waiting ticket and keeps the resume sweep off it", ctx do
+      rig = rig(ctx, "feature/ci-19")
+      start_forge(ctx, rig, [:running])
+      restart_during_wait(ctx, rig)
+      me = self()
+
+      rearm = fn issue ->
+        result = ReviewGate.rearm_ci_wait(issue.id, gate_opts())
+        send(me, {:rearmed, result})
+        result
+      end
+
+      assert {:ok, %{rearmed: 1, failed: 0}} =
+               Reconciler.reconcile_ci_waits(rearm_fun: rearm)
+
+      assert_received {:rearmed, {:ok, gate}}
+
+      assert {:ok, %{resumed: 0, escalated: 0}} =
+               Reconciler.reconcile_resumable_tasks(
+                 resume_fun: fn issue -> flunk("resumed #{issue.id}") end
+               )
+
+      wait_until(fn -> awaiting_ci?(gate) end)
+      stop_gate(gate)
+    end
+
+    test "a wait that cannot be re-armed is cleared so the ordinary resume path takes it",
+         ctx do
+      rig = rig(ctx, "feature/ci-20")
+      start_forge(ctx, rig, [:running])
+      restart_during_wait(ctx, rig)
+
+      assert {:ok, %{rearmed: 0, failed: 1}} =
+               Reconciler.reconcile_ci_waits(rearm_fun: fn _ -> {:error, :no_worktree} end)
+
+      assert Ash.get!(Issue, rig.task.id).review_gate_state["ci_wait"] == nil
+      me = self()
+
+      assert {:ok, %{resumed: 1}} =
+               Reconciler.reconcile_resumable_tasks(
+                 resume_fun: fn issue ->
+                   send(me, {:resumed, issue.id})
+                   {:ok, %{}}
+                 end
+               )
+
+      assert_received {:resumed, id}
+      assert id == rig.task.id
+    end
+
+    test "is a no-op off the primary instance", _ctx do
+      assert {:ok, :skipped} = Reconciler.reconcile_ci_waits(primary?: false)
+    end
+  end
+
   # ---- git rig -------------------------------------------------------------
 
   defp git(args, repo), do: System.cmd("git", ["-C", repo | args], stderr_to_stdout: true)
@@ -469,6 +631,45 @@ defmodule Arbiter.Worker.ReviewGateCiGateTest do
   # The commit the reviewer's own checkout was at.
   defp reviewed_head(rig),
     do: Path.join(common_dir(rig), "review_ci_reviewed_head") |> File.read!() |> String.trim()
+
+  defp gate_opts(extra \\ []) do
+    Keyword.merge(
+      [
+        timeout_ms: 15_000,
+        rounds: 1,
+        ci_adapter: StubMerger,
+        ci_poll_ms: 25,
+        ci_max_polls: 40,
+        command: [@probe, "HOLD"]
+      ],
+      extra
+    )
+  end
+
+  defp implement_runs(rig) do
+    Arbiter.Workers.Run
+    |> Ash.Query.filter(task_id == ^rig.task.id and kind == :implement)
+    |> Ash.read!()
+    |> length()
+  end
+
+  # Wait on CI under a real gate, then kill the gate and its author outright —
+  # no terminate/2, so nothing clears the ticket's marker: what a deploy leaves.
+  # The head is also recorded on the PR the way the author's hand-off does.
+  defp restart_during_wait(ctx, rig) do
+    :ok = Arbiter.Tasks.PullRequest.record_review_gate(rig.task.id, %{pr_ref: @pr})
+    gate = start_gate(rig, ctx, command: [@probe, "HOLD"])
+    wait_until(fn -> awaiting_ci?(gate) end)
+
+    for pid <- [gate, rig.author] do
+      ref = Process.monitor(pid)
+      Process.exit(pid, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^pid, _}, 5_000
+    end
+
+    # The registry drops the killed author asynchronously; a restart starts empty.
+    wait_until(fn -> Worker.whereis(rig.task.id) == nil end)
+  end
 
   defp stop_gate(gate) do
     ref = Process.monitor(gate)
