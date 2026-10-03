@@ -297,6 +297,12 @@ defmodule ArbiterWeb.Router do
     get("/breakers", BreakerController, :index)
     post("/breakers/reset", BreakerController, :reset)
 
+    # Worker images (bd-9r5jdt): `arb image list|build|refresh|prune`
+    get("/images", ImageController, :index)
+    post("/images/build", ImageController, :build)
+    post("/images/refresh", ImageController, :refresh)
+    post("/images/prune", ImageController, :prune)
+
     # Install-wide runtime settings (`arb settings`)
     get("/installation/config", InstallationConfigController, :show)
     patch("/installation/config", InstallationConfigController, :update)

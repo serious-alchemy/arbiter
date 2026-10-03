@@ -221,6 +221,11 @@ defmodule ArbiterWeb.ApiPolicy do
     {:get, "/api/alerts"} => :coordinator,
     {:get, "/api/breakers"} => :coordinator,
     {:post, "/api/breakers/reset"} => :coordinator,
+    # ---- worker images (bd-9r5jdt): operator/coordinator only ---------------
+    {:get, "/api/images"} => :coordinator,
+    {:post, "/api/images/build"} => :coordinator,
+    {:post, "/api/images/refresh"} => :coordinator,
+    {:post, "/api/images/prune"} => :coordinator,
     {:post, "/api/scheduler/pause"} => :coordinator,
     {:post, "/api/scheduler/resume"} => :coordinator,
     {:get, "/api/scheduler/status"} => :coordinator
