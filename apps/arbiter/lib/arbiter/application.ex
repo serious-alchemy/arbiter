@@ -159,6 +159,10 @@ defmodule Arbiter.Application do
       Arbiter.Sessions.OrphanReaper,
       # bd-9iv4qd: reclaims worktree-root leaves whose gitdir is gone.
       Arbiter.Worker.WorktreeSweeper,
+      # bd-9r5jdt: single-flight worker-image builds, and the weekly base
+      # refresh + prune (inert until an image has been built).
+      Arbiter.Worker.Image.Builder,
+      Arbiter.Worker.Image.Refresher,
       # bd-5ad4ch: removes per-run TMPDIRs orphaned by runs that died with the server.
       Arbiter.Worker.RunTmp.Reaper,
       Arbiter.Worker.RunTmp.Sweeper,

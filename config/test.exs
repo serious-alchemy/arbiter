@@ -214,6 +214,9 @@ config :arbiter, :sessions_heartbeat, enabled: false
 # bd-9iv4qd: tests drive `Arbiter.Worker.WorktreeSweeper.sweep_once/1` directly.
 config :arbiter, :worktree_sweeper, enabled: false
 
+# bd-9r5jdt: the weekly image refresh is driven by `Refresher.run_now/2` in tests.
+config :arbiter, :worker_image_refresher, enabled: false
+
 # Same reasoning, one more sweeper: tests drive
 # `Arbiter.Sessions.TranscriptRetention.sweep/1` synchronously (§11, phase 9).
 config :arbiter, :sessions_transcript_retention, enabled: false

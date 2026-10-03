@@ -123,6 +123,12 @@ defmodule ArbiterCli.Main do
       arb breaker list    [--workspace <id|name>] [--kind <k>] [--open] [--json]
       arb breaker reset   <signature> | --all [--kind <k>] [--json]
 
+      arb image list      [--json]            worker images (podman backend) + base digest pins
+      arb image build     <repo> [--workspace <id|name>] [--json]
+                                  build <repo>'s image from its DEFAULT BRANCH
+      arb image refresh   [--json]            re-pin base images now, then prune
+      arb image prune     [--json]
+
       arb install cli     [--json]
       arb install service [--system] [--uninstall] [--json]
 
@@ -306,6 +312,7 @@ defmodule ArbiterCli.Main do
   defp dispatch_known("quota", args), do: ArbiterCli.Cmd.Quota.run(args)
   defp dispatch_known("preflip-gate", args), do: ArbiterCli.Cmd.PreflipGate.run(args)
   defp dispatch_known("breaker", args), do: ArbiterCli.Cmd.Breaker.run(args)
+  defp dispatch_known("image", args), do: ArbiterCli.Cmd.Image.run(args)
   defp dispatch_known("install", args), do: ArbiterCli.Cmd.Install.run(args)
   defp dispatch_known("mcp", args), do: ArbiterCli.Cmd.Mcp.run(args)
   defp dispatch_known("skill", args), do: ArbiterCli.Cmd.Skill.run(args)

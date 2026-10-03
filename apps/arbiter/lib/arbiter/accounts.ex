@@ -34,6 +34,7 @@ defmodule Arbiter.Accounts do
     resource Arbiter.Accounts.ProviderCredential
     resource Arbiter.Accounts.ProviderAccountMigrationBackup
     resource Arbiter.Accounts.WorkspaceProviderAccount
+    resource Arbiter.Accounts.LoginRecord
   end
 
   alias Arbiter.Accounts.{
@@ -347,6 +348,36 @@ defmodule Arbiter.Accounts do
   # the path is for — the `claude` CLI's config dir — but the row is never
   # projected into a spawn env (`Arbiter.Accounts.Credentials` skips the kind).
   @grant_path_env_var "CLAUDE_CONFIG_DIR"
+
+  @doc """
+  Record a completed login (login relay 4/6, bd-djh1yr): make `path` — the
+  `.credentials.json` the provider CLI itself wrote inside the account's
+  dedicated config dir — the account's active `:cli_credentials_path`
+  credential, retiring the previous one. A **reference only**: the file is
+  never read into the row or copied, because refresh-token rotation would
+  lock out a copy (bd-6umoh9).
+
+  Unlike `rotate_credential/2` this does not parse the file — the login's
+  status command has already confirmed it.
+  """
+  @spec reference_credential_path(ProviderAccount.t(), String.t()) ::
+          {:ok, ProviderCredential.t()} | {:error, term()}
+  def reference_credential_path(%ProviderAccount{id: account_id}, path) when is_binary(path) do
+    Arbiter.Repo.transaction(fn ->
+      retire_previous(account_id, :cli_credentials_path)
+
+      case Ash.create(ProviderCredential, %{
+             provider_account_id: account_id,
+             kind: :cli_credentials_path,
+             env_var: @grant_path_env_var,
+             secret: path,
+             fingerprint: Census.fingerprint(path)
+           }) do
+        {:ok, credential} -> credential
+        {:error, error} -> Arbiter.Repo.rollback(error)
+      end
+    end)
+  end
 
   defp parse_kind(kind)
        when is_atom(kind) and

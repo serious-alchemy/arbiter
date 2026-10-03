@@ -193,6 +193,25 @@ has it for BEAM repos, but the `kube` and `nix` images would need it too).
   - `/etc/subuid` and `/etc/subgid` entries must exist for the user.
   - The two-host check bd-8xy1mf did for bwrap must be repeated for podman (P1).
 
+**Implemented (P4, bd-9r5jdt).** `Arbiter.Worker.Image` plans an image from
+the default branch's committed tree (`origin/<default>`, else the local branch;
+read with `git cat-file`, never a worktree) and builds it from an **empty
+context**. Two layers: `localhost/arbiter-dev/base:<hash>` (Debian trixie,
+`git`, `procps`, `socat`, `build-essential`, an empty `/opt/arbiter/cli` on
+`PATH` for a versioned read-only provider-CLI mount) and
+`localhost/arbiter-dev/<name>:<hash>` (`FROM ${ARBITER_BASE}`). Every external
+`FROM` is rewritten to `ref@sha256:…` through a pin store
+(`~/.arbiter/images/pins.json`); an unpinnable `FROM` refuses the build. The
+default toolchain Containerfile copies `/usr/local` out of
+`library/elixir:<v>-otp-<major>-slim` (and `library/node` when `.tool-versions`
+names one), so the base's Debian release must be at least as new as that
+image's: bookworm's glibc 2.36 fails `beam.smp` (found by the opt-in
+`image_podman_test.exs`). `Image.Builder` is the single flight per tag; the
+`Refresher` re-resolves the pins weekly and prunes (newest two per name; `rmi`
+is never forced). `arb image list|build|refresh|prune`. Not done here: eager
+rebuild after a refresh (images rebuild on next use), the provider CLIs
+themselves (P7 mounts them), and dispatch calling `Image.ensure/3` (P7).
+
 ## 3. The mount strategy (the operator's second question)
 
 ### 3.1 What a worktree actually is
@@ -523,7 +542,7 @@ difficulty.
 | **P1** | **Spike/doctor: rootless podman readiness.** Re-scoped 2026-10-02 (no EC2 access): laptop go/no-go ([Appendix C](#appendix-c-p1-laptop-results-and-gono-go-bd-46xndf)) plus the portable `podman sandbox readiness` doctor check (`/etc/subuid`, `user.max_user_namespaces`, SELinux mode, cgroup version, podman version and storage driver, `label=disable` socket-bridge self-test). **Done (bd-46xndf).** The gate for any other host is that check | 2 | none |
 | P2 | `sandbox.backend: bwrap \| podman` key in `SecurityPolicy` (layering by most-restrictive), plus the `Arbiter.Worker.Sandbox` behaviour with `Jail` as the first implementation. No behavior change by default | 3 | none |
 | P3 | **Done (bd-bu4ye2).** `Arbiter.Worker.Container`: a pure argv builder like `Jail.argv/2` (`--name`, `--init`, `--rm`, `--userns=keep-id`, `--read-only`, `--cap-drop=all`, `no-new-privileges`, tmpfs, explicit `-e NAME` allowlist, mounts, label policy), a doctor probe and teardown by name | 3 | P1, P2 |
-| P4 | Image lifecycle: `.arbiter/Containerfile` or a generated default, content-hash tags, single-flight lazy build from the **default branch**, weekly base refresh, prune, `arb image list/build`. Provider CLIs in the base image or a versioned read-only CLI dir | 3 | P3 |
+| P4 | **Done (bd-9r5jdt, `Arbiter.Worker.Image`).** Image lifecycle: `.arbiter/Containerfile` or a generated default, content-hash tags, single-flight lazy build from the **default branch**, weekly base refresh, prune, `arb image list/build`. Provider CLIs in the base image or a versioned read-only CLI dir | 3 | P3 |
 | P5 | Git layout B: private `--shared` clone with read-only `:O` alternates, sync-back into the main repo, a pinned base ref against gc, cleanup and sweeper changes, ReviewGate and MergeQueue reads. **The riskiest item** | 4 | P3 |
 | P6 | Image-keyed deps cache: seed job inside the image, per-worker `cp --reflink` copy, key `(lockfile hash, image tag)`. Extend bd-5tncmq | 3 | P4 |
 | P7 | **Claude under the container backend** (replaces G7 bd-d2o3xb): config dir, token env, `.mcp.json`, `arb`, proxy and Arbiter bridges via G5's sockets, wrap point in `ClaudeSession` | 3 | P3, P5, G5 |
