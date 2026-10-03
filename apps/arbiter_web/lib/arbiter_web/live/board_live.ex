@@ -1375,6 +1375,19 @@ defmodule ArbiterWeb.BoardLive do
 
   # ---- render helpers -------------------------------------------------------
 
+  # ES5 (design §6.3): the chip says `· floor P1` only when the floor lifting
+  # this card comes from the chip's own parent; a further ancestor is named in
+  # the badge's title instead.
+  defp chip_floor(%{priority_lift: :applied, priority_via: via, effective_priority: eff} = card)
+       when is_integer(eff) do
+    case card[:parent] do
+      %{id: ^via} -> eff
+      _ -> nil
+    end
+  end
+
+  defp chip_floor(_card), do: nil
+
   attr(:card, :map, required: true)
   attr(:column, :string, required: true)
   attr(:now, :any, required: true)
@@ -1396,6 +1409,7 @@ defmodule ArbiterWeb.BoardLive do
       id={@card.id}
       title={@card.title || @card.id}
       priority={if @column != "closed", do: @card[:priority]}
+      lift={if @column != "closed", do: @card}
       type={card_type(@column, @card)}
       difficulty={if @column == "closed", do: :unset, else: @card[:difficulty]}
       accent={accent(@column, @card)}
@@ -1409,7 +1423,7 @@ defmodule ArbiterWeb.BoardLive do
       data-column={@column}
     >
       <:parent :if={@card[:parent]}>
-        <.parent_link parent={@card.parent} mode="compact" />
+        <.parent_link parent={@card.parent} mode="compact" floor={chip_floor(@card)} />
       </:parent>
       <:status>
         <span class="flex items-center gap-1.5">

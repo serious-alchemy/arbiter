@@ -74,6 +74,7 @@ defmodule ArbiterWeb.TaskDetailLive do
   alias Arbiter.Tasks.Dependencies
   alias Arbiter.Tasks.Dependency
   alias Arbiter.Tasks.DependencyGraph
+  alias Arbiter.Tasks.EffectivePriority
   alias Arbiter.Tasks.Floor
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Issue.Version
@@ -222,6 +223,8 @@ defmodule ArbiterWeb.TaskDetailLive do
      socket
      |> assign(:task_id, task_id)
      |> assign(:parent_refs, [])
+     |> assign(:priority_schedule, nil)
+     |> assign(:floor_summary, nil)
      |> assign(:children_by_column, nil)
      |> assign(:epic_cost_rollup, nil)
      |> assign(:issue_label, "ticket")
@@ -1502,6 +1505,68 @@ defmodule ArbiterWeb.TaskDetailLive do
       %{relationship_groups: groups, parent_refs: parent_refs(task)},
       children_by_column_data(task, groups)
     )
+    |> Map.merge(floor_data(task, groups))
+  end
+
+  # ES5 (design §6.3): how the epic floors schedule this ticket ("scheduled as
+  # P1 via bd-x") and, on an epic, the mini-board header's "floor P1 · 3
+  # lifted, 2 in progress". One board read resolves the ticket and its
+  # children; with no floor set `cards/1` is empty and both stay nil.
+  defp floor_data(%Issue{} = task, groups) do
+    children =
+      if task.issue_type == :epic,
+        do: groups.children |> Enum.map(& &1.issue) |> Enum.reject(&is_nil/1),
+        else: []
+
+    cards = EffectivePriority.cards([task | children])
+
+    %{
+      priority_schedule: Map.get(cards, task.id),
+      floor_summary: floor_summary(task, children, cards)
+    }
+  end
+
+  defp floor_data(_task, _groups), do: %{priority_schedule: nil, floor_summary: nil}
+
+  defp floor_summary(%Issue{issue_type: :epic, floor_priority: floor}, children, cards)
+       when is_integer(floor) do
+    lifted =
+      Enum.filter(children, fn child ->
+        child.state != :closed and
+          match?(%{priority_lift: lift} when lift in [:applied, :capped], cards[child.id])
+      end)
+
+    %{
+      floor: floor,
+      lifted: length(lifted),
+      in_progress: Enum.count(lifted, &(&1.state in [:active, :merging, :verifying]))
+    }
+  end
+
+  defp floor_summary(_task, _children, _cards), do: nil
+
+  defp schedule_view(
+         %{priority_lift: :applied, effective_priority: eff, priority_via: via},
+         refs
+       ),
+       do: %{band: eff, via: via, title: ref_title(refs, via), capped?: false}
+
+  defp schedule_view(%{priority_lift: :capped} = card, refs),
+    do: %{
+      band: card.priority,
+      via: card.priority_via,
+      title: ref_title(refs, card.priority_via),
+      capped?: true,
+      floor: card[:lift_floor]
+    }
+
+  defp schedule_view(_card, _refs), do: nil
+
+  defp ref_title(refs, id) do
+    case Enum.find(refs, &(&1.id == id)) do
+      %{title: title} when is_binary(title) and title != "" -> title
+      _ -> nil
+    end
   end
 
   # Design bd-2s901b §3: an epic's children grouped into the same five board
@@ -2427,7 +2492,16 @@ defmodule ArbiterWeb.TaskDetailLive do
             state={@load_state.header}
           />
           <div :if={@task} class="flex flex-wrap items-center gap-2 mt-1.5">
-            <.priority_tag priority={@task.priority} class="badge-sm font-mono" />
+            <.priority_tag
+              id="task-priority"
+              priority={@task.priority}
+              lift={@priority_schedule}
+              class="badge-sm font-mono"
+            />
+            <.scheduled_as
+              :if={@priority_schedule}
+              schedule={schedule_view(@priority_schedule, @parent_refs)}
+            />
             <.type_tag type={@task.issue_type} />
             <.difficulty_meter difficulty={@task.difficulty} />
             <span class="text-[11px] font-[family-name:var(--font-mono)] text-[var(--text-label)]">
@@ -3301,6 +3375,13 @@ defmodule ArbiterWeb.TaskDetailLive do
                 meta={children_by_column_meta(@children_by_column)}
                 class="order-5"
               >
+                <p
+                  :if={@floor_summary}
+                  id="children-floor-header"
+                  class="mb-2 text-[11px] font-[family-name:var(--font-mono)] text-[var(--text-label)]"
+                >
+                  {floor_summary_text(@floor_summary)}
+                </p>
                 <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
                   <.children_column
                     id="children-backlog"
@@ -4487,6 +4568,40 @@ defmodule ArbiterWeb.TaskDetailLive do
     </div>
     """
   end
+
+  attr :schedule, :map, default: nil
+
+  # "Priority P3 · scheduled as P1 via bd-ibiwci (Add reports)" — or, when the
+  # lift is capped, the wording the badge's title uses.
+  defp scheduled_as(%{schedule: nil} = assigns), do: ~H""
+
+  defp scheduled_as(%{schedule: %{capped?: false}} = assigns) do
+    ~H"""
+    <span
+      id="task-scheduled-as"
+      class="text-[11px] font-[family-name:var(--font-mono)] text-[var(--text-label)]"
+    >
+      scheduled as
+      <strong class="text-[var(--text-title)]">P{@schedule.band} via {@schedule.via}</strong>
+      <span :if={@schedule.title}>({@schedule.title})</span>
+    </span>
+    """
+  end
+
+  defp scheduled_as(assigns) do
+    ~H"""
+    <span
+      id="task-scheduled-as"
+      class="text-[11px] font-[family-name:var(--font-mono)] text-[var(--text-label)]"
+    >
+      floor P{@schedule.floor} via {@schedule.via} waiting — lift cap reached, scheduled as own P{@schedule.band}
+      <span :if={@schedule.title}>({@schedule.title})</span>
+    </span>
+    """
+  end
+
+  defp floor_summary_text(%{floor: floor, lifted: lifted, in_progress: in_progress}),
+    do: "floor P#{floor} · #{lifted} lifted, #{in_progress} in progress"
 
   defp children_by_column_meta(by_column) do
     total =
