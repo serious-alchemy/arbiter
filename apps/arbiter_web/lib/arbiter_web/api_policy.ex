@@ -181,6 +181,7 @@ defmodule ArbiterWeb.ApiPolicy do
     {:get, "/api/server/merge_routing"} => :coordinator,
     {:get, "/api/server/tmux"} => :coordinator,
     {:get, "/api/server/worker_tmp"} => :coordinator,
+    {:get, "/api/server/podman_sandbox"} => :coordinator,
     {:get, "/api/server/worker_memory"} => :coordinator,
 
     # ---- install-wide settings (the REST twin of installation_config_*) ------

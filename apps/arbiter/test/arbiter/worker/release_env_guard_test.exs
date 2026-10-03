@@ -106,6 +106,8 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
     "apps/arbiter/lib/arbiter/worker/jail.ex" => :scrubbed,
     # bd-cfktou: reads the worktree's git remotes with `git config`; nothing else.
     "apps/arbiter/lib/arbiter/worker/egress/jail_run.ex" => :pure_tool,
+    # bd-46xndf: the doctor's rootless-podman readiness probes via `ReleaseEnv.cmd/3`.
+    "apps/arbiter/lib/arbiter/worker/podman_readiness.ex" => :scrubbed,
     "apps/arbiter/lib/arbiter/single_instance.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/version.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/worker.ex" => :pure_tool,

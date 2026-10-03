@@ -48,6 +48,8 @@ defmodule ArbiterWeb.Api.ServerController do
       `Arbiter.Mergers.RoutingCheck.report/0`): a forge strategy with no
       `origin` remote, or an `origin` that is not the effective
       `owner/repo`. `arb server doctor` lists them with the fix.
+    * `GET /api/server/podman_sandbox` — rootless-podman sandbox readiness
+      checks (`arb server doctor`)
     * `GET /api/server/tmux` — whether `tmux` is installed on this host
       (bd-c99hys, `Arbiter.Accounts.LoginRunner.tmux_diagnosis/0`). The dashboard
       login relay runs each provider CLI's login in a hidden tmux session, so
@@ -141,6 +143,12 @@ defmodule ArbiterWeb.Api.ServerController do
 
   # bd-5ad4ch: where per-run worker TMPDIRs live, and whether that is RAM.
   def worker_tmp(conn, _params), do: json(conn, Arbiter.Worker.RunTmp.diagnosis())
+
+  # bd-46xndf: is this host ready for the rootless-podman worker sandbox?
+  def podman_sandbox(conn, _params) do
+    opts = Application.get_env(:arbiter, :podman_readiness_opts, [])
+    json(conn, Arbiter.Worker.PodmanReadiness.diagnose(opts))
+  end
 
   # bd-6zuoo6: is the per-worker memory cap in force, and what does the
   # server's own unit do when the kernel OOM-kills one of its processes?
