@@ -244,6 +244,8 @@ inside rootless containers in each.
 | Mount | Mode | Notes |
 |---|---|---|
 | `<worker checkout>` → same absolute path | rw | Contains its own `.git/` directory. The `.git` gitdir has `objects/info/alternates` pointing at the main repo's objects |
+| `<worker checkout>/.git` → same absolute path | rw, a mount of its own | Added by P5: a mount point cannot be renamed away or replaced by a `gitdir:` file |
+| `.git/config`, `.git/hooks`, `.git/commondir`, `.git/objects/info/alternates` | **ro**, on top | Added by P5: host-side git keeps running in this checkout after the container exits, so a planted hook, `core.fsmonitor`, alternates path or `commondir` would run on the host. `commondir` is a `"."` guard file the clone is created with, so there is something to make read-only |
 | `<main>/.git/objects` → same absolute path | **ro, `:O`** | Overlay mount: readable with no SELinux relabel of the main checkout, writes (there are none, git writes to the private store) land in a throwaway upper layer |
 | per-run HOME | rw | A fresh directory; holds `.mix`, `.hex`, caches, the provider config dir |
 | per-run deps cache copy | rw | Seeded from the image-keyed cache ([§3.3](#33-deps-and-build-caches)); lives inside the checkout (`deps/`, `_build/`) |
@@ -279,6 +281,44 @@ This is the largest single item in the plan (P5, D4). Layout A avoids it at
 the price of cross-worktree ref writes. The decision gate for P5 is whether the
 sync-back is smaller than it looks once `Worktree` (1,700+ lines) is read in
 full. This spike did not read it that far.
+
+**After the P5 reading day (bd-4wy1w1).** The sync-back is smaller than it
+looked; the hardening is larger.
+
+- **ReviewGate and the MergeQueue do not read worker commits out of the main
+  repo.** Every git command they run is in the worker's checkout (or in a
+  review checkout cut from it) and talks to `origin`. A clone whose `origin`
+  is the main repo's forge URL, with `origin/<base>` and a local `<base>`
+  seeded from the main repo, answers them unchanged (push gate, target
+  merge, merge-base, CI head, review checkout, rebase-before-push, push).
+  A literal `git clone --shared` would get this wrong: its `origin` is the
+  main checkout and its `origin/*` are the main repo's *local* branches. So
+  P5 builds the clone by hand (`git init` + alternates + the two refs).
+- **Five readers do look the branch up by name in the main repo**: the
+  Direct merger, GitLab's `open/4` (pushes from the main repo), the conflict
+  resolver's zero-divergence check, a dispatched reviewer's never-pushed
+  fallback, and close-time branch reaping. Each now runs a sync-back first
+  (`git -C <main> fetch <clone> +refs/heads/<b>:refs/heads/<b>`), plus one at
+  the end of every reviewable run. PrimarySync needs none (it never reads
+  worker branches).
+- **The design missed one risk.** Host-side git keeps running in the
+  worker's checkout after a container has had it (the push gate, merges,
+  rebases, `leftover_work/2`). In layout B the whole `.git` is inside the
+  writable mount, so a worker could plant a hook, `core.fsmonitor`, an
+  alternates path or a `commondir` pointing at a config it wrote, and get
+  code run on the host. The bwrap jail already closes these for a linked
+  worktree; the mount table above now does for a clone.
+- **The gc risk is real and the pin works.** Measured, in a live container:
+  rewriting the main repo and running `git gc --prune=now` mid-run broke the
+  worker's history without a pin and left it intact with one. The clone pins
+  its start commit, its `origin/<base>` and its last synced head under
+  `refs/arbiter/workers/<leaf>/`, and `core.alternateRefsPrefixes` keeps
+  fetch negotiation in the clone from borrowing history only a sibling's
+  branch reaches. `gc.pruneExpire` on the main repo was not changed.
+
+Re-estimate: D3 for the code, with the risk in the mount hardening and the
+pins rather than in the number of consumers (§9 Q3). Appendix D has the
+probes.
 
 ### 3.3 Deps and `_build` caches
 
@@ -543,7 +583,7 @@ difficulty.
 | P2 | `sandbox.backend: bwrap \| podman` key in `SecurityPolicy` (layering by most-restrictive), plus the `Arbiter.Worker.Sandbox` behaviour with `Jail` as the first implementation. No behavior change by default | 3 | none |
 | P3 | **Done (bd-bu4ye2).** `Arbiter.Worker.Container`: a pure argv builder like `Jail.argv/2` (`--name`, `--init`, `--rm`, `--userns=keep-id`, `--read-only`, `--cap-drop=all`, `no-new-privileges`, tmpfs, explicit `-e NAME` allowlist, mounts, label policy), a doctor probe and teardown by name | 3 | P1, P2 |
 | P4 | **Done (bd-9r5jdt, `Arbiter.Worker.Image`).** Image lifecycle: `.arbiter/Containerfile` or a generated default, content-hash tags, single-flight lazy build from the **default branch**, weekly base refresh, prune, `arb image list/build`. Provider CLIs in the base image or a versioned read-only CLI dir | 3 | P3 |
-| P5 | Git layout B: private `--shared` clone with read-only `:O` alternates, sync-back into the main repo, a pinned base ref against gc, cleanup and sweeper changes, ReviewGate and MergeQueue reads. **The riskiest item** | 4 | P3 |
+| P5 | **Done (bd-4wy1w1, `Arbiter.Worker.PrivateClone`).** Git layout B: private `--shared` clone with read-only `:O` alternates, sync-back into the main repo, a pinned base ref against gc, cleanup and sweeper changes, ReviewGate and MergeQueue reads. **The riskiest item.** Re-estimated D3 after the reading day (§3.2) | 4 | P3 |
 | P6 | Image-keyed deps cache: seed job inside the image, per-worker `cp --reflink` copy, key `(lockfile hash, image tag)`. Extend bd-5tncmq | 3 | P4 |
 | P7 | **Claude under the container backend** (replaces G7 bd-d2o3xb): config dir, token env, `.mcp.json`, `arb`, proxy and Arbiter bridges via G5's sockets, wrap point in `ClaudeSession` | 3 | P3, P5, G5 |
 | P8 | **Codex under the container backend** (replaces G8 bd-50d5j6, with bd-99emmd): per-run `CODEX_HOME`, refresh-token rotation handling | 3 | P7 |
@@ -583,8 +623,11 @@ worktree registration, because the D4 estimate rests on that.
 2. Can agy's file-seeded credentials work everywhere (guardrail-profiles
    open question 5)? If yes, agy could join the container backend and bwrap
    could be retired.
-3. How large is P5 really? The estimate is D4; it should be re-estimated after
-   the reading day.
+3. ~~How large is P5 really? The estimate is D4; it should be re-estimated after
+   the reading day.~~ **Answered (bd-4wy1w1): D3.** ReviewGate and the
+   MergeQueue read the worker's checkout, not the main repo, so only five
+   main-repo readers needed a sync-back; the larger work was hardening the
+   clone's `.git` against host-side git and pinning against gc (§3.2).
 4. Rootless overlay on RHEL 8 (`fuse-overlayfs`): is `_build`/`deps`
    copy-and-compile throughput acceptable? Not measured.
 5. Does the per-worker image need `gh` and `glab` at all once G16 gives
@@ -665,3 +708,20 @@ already-planned `label=disable` on bridge containers, and the doctor check
 reports `ready` with no failures or warnings. Caveats: the verdict covers
 readiness, not a Claude run end to end (§6.3 has that), and says nothing about
 RHEL 8 (Appendix B), for which the gate is the doctor check on that host.
+
+## Appendix D: P5 layout B probes (bd-4wy1w1)
+
+Run 2026-10-03 on the Fedora 44 laptop (podman 5.8.7, git 2.55.0, SELinux
+enforcing), scratch repos under `/tmp`, a `debian:12` image with `git`
+added. Reproduced by `private_clone_podman_test.exs` (`--include podman`).
+
+| Probe | Result |
+|---|---|
+| Commit, merge, rebase, `gc`, `repack -a -d` in the clone, with `.git` its own mount and `config`/`hooks`/`commondir`/alternates read-only | all work, under `:Z` and under `label=disable` |
+| `git update-ref refs/heads/<sibling> HEAD` in the clone (the spike's layout-A probe) | succeeds, but changes the clone's ref only; the main repo's refs are byte-identical afterwards |
+| `git --git-dir=<main>/.git update-ref …`, `git -C <main> branch -f …`, writing `<main>/.git/refs/…` or `packed-refs` | all fail: only `objects/` of the main repo is mounted |
+| `touch <main>/.git/objects/x` | succeeds in the overlay's throwaway layer; nothing on the host |
+| `git config core.fsmonitor …`, a new hook, rewriting alternates or `commondir`, `mv .git` | all fail (`EBUSY` / `EROFS`) |
+| `.git/commondir` containing `"."` | git treats it as no file: `rev-parse --git-common-dir`, `worktree add/remove/prune`, `gc`, fetch, push and rebase unchanged |
+| Main repo rewritten and `gc --prune=now` while a container reads its history | **without pins**: `fatal: bad object HEAD` from the next read on (shell probe); **with pins**: 24/24 reads and `fsck --connectivity-only` pass |
+| Same, read through `:O` without pins (ExUnit control) | not deterministic: `git log` still worked from a cached dentry while `fsck` failed. The overlay can serve a pack the host already deleted, which is borrowed time, not safety; the host-side clone is broken either way |

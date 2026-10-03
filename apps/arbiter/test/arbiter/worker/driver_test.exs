@@ -679,7 +679,43 @@ defmodule Arbiter.Worker.DriverTest do
       # Create a real worktree we can verify is gone after.
       {:ok, wt_path} = Arbiter.Worker.Worktree.create(repo, "feature/dt-test", "main")
 
-      %{wt_path: wt_path}
+      %{wt_path: wt_path, repo: repo}
+    end
+
+    # bd-4wy1w1 (P5): the same reap for a private clone (git layout B), on
+    # both terminal paths, takes the clone's gc pins in the main repo with it.
+    for {label, fail?} <- [{"successful completion", false}, {"a failed worker", true}] do
+      test "removes a private clone and its pins on #{label}", %{ws: ws, repo: repo} do
+        {:ok, clone} =
+          Arbiter.Worker.Worktree.create(repo, "feature/dt-clone", "main", layout: :private_clone)
+
+        pins = Arbiter.Worker.PrivateClone.pin_prefix(Path.basename(clone))
+        {:ok, task} = Ash.create(Issue, %{title: "cw-clone", workspace_id: ws.id})
+        {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "r")
+        {:ok, machine_id} = Machine.attach(TestWorkflows.Three, task.id, %{x: "v"})
+        {:ok, machine_pid} = Machine.start(machine_id)
+        put_state!(task, :active)
+
+        {:ok, driver_pid} =
+          Driver.start(
+            task_id: task.id,
+            worker_pid: worker_pid,
+            machine_id: machine_id,
+            machine_pid: machine_pid,
+            interval_ms: 5,
+            claude_driven: unquote(fail?),
+            worktree_path: clone,
+            cleanup_worktree: true
+          )
+
+        ref = Process.monitor(driver_pid)
+        if unquote(fail?), do: :ok = Worker.fail(worker_pid, :claude_crashed)
+        assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
+
+        refute File.dir?(clone)
+        {left, 0} = System.cmd("git", ["-C", repo, "for-each-ref", "--format=%(refname)", pins])
+        assert left == ""
+      end
     end
 
     test "removes the worktree on successful completion when opted in", %{

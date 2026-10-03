@@ -57,6 +57,7 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
   alias Arbiter.Worker.BranchNamer
   alias Arbiter.Worker.ClaudeSession
   alias Arbiter.Worker.Dispatch
+  alias Arbiter.Worker.GitLayout
   alias Arbiter.Worker.Worktree
   alias Arbiter.Workers.Run
   alias Arbiter.Workflows.MergeQueue.PassAdmission
@@ -311,8 +312,13 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
   # Attach a worktree to the (existing) PR branch — the branch already exists
   # because the PR was opened against it, so we must NOT use `Worktree.create/3`
   # (`git worktree add -b`). `Worktree.attach/2` is idempotent on the same branch.
-  defp create_worktree(%{repo_path: repo_path, branch: branch}) do
-    case Worktree.attach(repo_path, branch) do
+  #
+  # bd-4wy1w1: in the git layout its sandbox needs — a private clone under a
+  # container backend (`Arbiter.Worker.GitLayout`).
+  defp create_worktree(%{repo_path: repo_path, branch: branch} = context) do
+    layout = GitLayout.for_workspace(context.workspace, context.repo)
+
+    case Worktree.attach(repo_path, branch, layout: layout, base: context.target_branch) do
       {:ok, path} -> {:ok, path}
       {:error, reason} -> {:error, {:worktree_failed, reason}}
     end

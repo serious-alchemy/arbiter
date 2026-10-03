@@ -109,6 +109,10 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
     # bd-9r5jdt: worker-image lifecycle: `git cat-file` on the default branch and
     # `podman` / `skopeo` through `ReleaseEnv.cmd/3`.
     "apps/arbiter/lib/arbiter/worker/image.ex" => :scrubbed,
+    # bd-4wy1w1: git only (init / config / update-ref / checkout / fetch) to
+    # build, pin, sync back and reap a git-layout-B private clone. Deps seeding
+    # (`mix deps.get`) goes through `Worktree.ensure_deps_fetched/1`.
+    "apps/arbiter/lib/arbiter/worker/private_clone.ex" => :pure_tool,
     # bd-cfktou: reads the worktree's git remotes with `git config`; nothing else.
     "apps/arbiter/lib/arbiter/worker/egress/jail_run.ex" => :pure_tool,
     # bd-46xndf: the doctor's rootless-podman readiness probes via `ReleaseEnv.cmd/3`.

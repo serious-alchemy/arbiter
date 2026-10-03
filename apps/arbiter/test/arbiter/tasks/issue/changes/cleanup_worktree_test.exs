@@ -228,6 +228,67 @@ defmodule Arbiter.Tasks.Issue.Changes.CleanupWorktreeTest do
     end
   end
 
+  # bd-4wy1w1: git layout B. The same leaf holds a private clone instead of a
+  # linked worktree; close-time teardown must treat it the same way: removed
+  # (with its gc pins) when it holds nothing unpushed, its branch surviving in
+  # the main repo exactly as a linked worktree's does, and reaped on a merge.
+  describe "private clones" do
+    defp clone!(%{clone: main}, task) do
+      branch = BranchNamer.derive(task)
+      {:ok, path} = Worktree.create(main, branch, "main", layout: :private_clone)
+      git!(path, ["config", "commit.gpgsign", "false"])
+      {branch, path}
+    end
+
+    defp pins(repo, path) do
+      git!(repo, [
+        "for-each-ref",
+        "--format=%(refname)",
+        Arbiter.Worker.PrivateClone.pin_prefix(Path.basename(path))
+      ])
+    end
+
+    test "a merged close removes the clone and its pins and reaps the branch",
+         %{ws: ws, clone: main} = fx do
+      task = task!(ws)
+      {branch, path} = clone!(fx, task)
+      commit_in!(path, "lib/a.ex", "x\n")
+      {:ok, _} = Worktree.push(path)
+
+      {:ok, _} = Ash.update(task, %{pr_merged: true}, action: :close)
+
+      refute File.dir?(path)
+      assert pins(main, path) == ""
+      refute local_branch?(main, branch)
+    end
+
+    test "a close that is not a merge removes the clone and keeps its branch in the main repo",
+         %{ws: ws, clone: main} = fx do
+      task = task!(ws)
+      {branch, path} = clone!(fx, task)
+      head = commit_in!(path, "lib/a.ex", "x\n")
+      {:ok, _} = Worktree.push(path)
+
+      {:ok, _} = Ash.update(task, %{}, action: :close)
+
+      refute File.dir?(path)
+      assert git!(main, ["rev-parse", "refs/heads/" <> branch]) == head
+    end
+
+    test "a clone holding an unpushed commit is kept, the commit saved as a patch",
+         %{ws: ws, clone: main} = fx do
+      task = task!(ws)
+      {_branch, path} = clone!(fx, task)
+      commit_in!(path, "lib/only_here.ex", "unpushed body\n")
+
+      capture_log(fn -> {:ok, _} = Ash.update(task, %{pr_merged: true}, action: :close) end)
+
+      assert File.dir?(path)
+      refute pins(main, path) == ""
+      assert reload!(task).notes =~ "+unpushed body"
+    end
+  end
+
   describe "every close path runs the same teardown" do
     test "Verification.finalize_merged (Watchdog / MergeQueue / Driver / finalizer funnel)",
          %{ws: ws, clone: clone} = fx do

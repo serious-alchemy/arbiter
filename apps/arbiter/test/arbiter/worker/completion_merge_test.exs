@@ -114,6 +114,52 @@ defmodule Arbiter.Worker.CompletionMergeTest do
     assert tree =~ "worker_work.txt"
   end
 
+  # bd-4wy1w1 (P5): the same completion when the worker ran in a private clone
+  # (git layout B, a `sandbox.backend: podman` workspace). Its commit exists
+  # only in the clone until the branch is synced back, and the Direct merger
+  # looks the branch up by name in the main repo.
+  test "a worker in a private clone has its branch synced back and merged into main",
+       %{repo: repo} do
+    {:ok, ws} =
+      Ash.create(Workspace, %{
+        name: "merge-b-ws-#{System.unique_integer([:positive])}",
+        prefix: "mb",
+        config: %{"agent" => %{"security" => %{"sandbox" => %{"backend" => "podman"}}}}
+      })
+
+    {:ok, task} =
+      Ash.create(Issue, %{
+        title: "integrate from a clone",
+        workspace_id: ws.id,
+        issue_type: :feature
+      })
+
+    {:ok, result} =
+      Dispatch.dispatch(task.id,
+        force: true,
+        repo: "merge/repo",
+        start_claude: true,
+        claude_command: [@fixture],
+        interval_ms: 10,
+        max_ticks: 200
+      )
+
+    on_exit(fn ->
+      if Process.alive?(result.worker_pid), do: GenServer.stop(result.worker_pid, :normal)
+    end)
+
+    assert Arbiter.Worker.PrivateClone.clone?(result.worktree_path)
+
+    wait_until(fn ->
+      match?({:ok, %Issue{state: :closed}}, Ash.get(Issue, task.id))
+    end)
+
+    {merges, 0} = git(["rev-list", "--merges", "--count", "main"], repo)
+    assert String.trim(merges) == "1"
+    {tree, 0} = git(["ls-tree", "--name-only", "main"], repo)
+    assert tree =~ "worker_work.txt"
+  end
+
   test "a merge failure surfaces as a failure_reason and does NOT complete the worker",
        %{repo: repo, ws: ws} do
     {:ok, task} =

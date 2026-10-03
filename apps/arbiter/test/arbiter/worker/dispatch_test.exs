@@ -846,6 +846,62 @@ defmodule Arbiter.Worker.DispatchTest do
       assert is_binary(result.worktree_path)
     end
 
+    # bd-4wy1w1 (P5): a workspace whose `sandbox.backend` is podman runs its
+    # workers in containers, so the checkout is a private clone (git layout
+    # B): a linked worktree would need the main repo's shared refs mounted
+    # read-write into the container. Every other workspace is unchanged.
+    test "a podman-sandboxed workspace is provisioned a private clone, not a linked worktree",
+         %{tmp: tmp} do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "podman-layout-ws",
+          prefix: "pl",
+          config: %{"agent" => %{"security" => %{"sandbox" => %{"backend" => "podman"}}}}
+        })
+
+      {:ok, task} = Ash.create(Issue, %{title: "contained work", workspace_id: ws.id})
+      repo = seed_repo!(tmp, "pod-repo")
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "pod-wt"))
+      put_app_env(:arbiter, :repo_paths, %{"pod/repo" => repo})
+
+      {:ok, result} =
+        Dispatch.dispatch(task.id,
+          force: true,
+          repo: "pod/repo",
+          start_driver: false,
+          start_claude: true,
+          claude_command: ["sleep", "2"]
+        )
+
+      assert result.worktree_path == Worktree.worktree_path(BranchNamer.derive(task))
+      assert Arbiter.Worker.PrivateClone.clone?(result.worktree_path)
+      assert Arbiter.Worker.PrivateClone.main_repo(result.worktree_path) == Path.expand(repo)
+
+      {registered, 0} = System.cmd("git", ["-C", repo, "worktree", "list", "--porcelain"])
+      refute registered =~ result.worktree_path
+    end
+
+    test "a default workspace still gets a linked worktree", %{ws: ws, tmp: tmp} do
+      {:ok, task} = Ash.create(Issue, %{title: "plain work", workspace_id: ws.id})
+      repo = seed_repo!(tmp, "plain-repo")
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "plain-wt"))
+      put_app_env(:arbiter, :repo_paths, %{"plain/repo" => repo})
+
+      {:ok, result} =
+        Dispatch.dispatch(task.id,
+          force: true,
+          repo: "plain/repo",
+          start_driver: false,
+          start_claude: true,
+          claude_command: ["sleep", "2"]
+        )
+
+      refute Arbiter.Worker.PrivateClone.clone?(result.worktree_path)
+
+      assert {:ok, %File.Stat{type: :regular}} =
+               File.lstat(Path.join(result.worktree_path, ".git"))
+    end
+
     # bd-d5hy7y: at dispatch, ONLY the layered effective skill set is
     # materialized into the worker's worktree as
     # `.claude/skills/<name>/SKILL.md`. A canary skill selected via the
@@ -4566,6 +4622,45 @@ defmodule Arbiter.Worker.DispatchTest do
       assert result.review_checkout == nil
       assert is_port(result.claude_port)
       assert File.dir?(repo)
+    end
+
+    # bd-4wy1w1 (P5): a branch whose worker ran in a private clone (git
+    # layout B) and never pushed exists only in that clone; the checkout's
+    # local fallback looks for it in the main repo, so it is synced back first.
+    test "reviews a never-pushed branch that lives only in a private clone",
+         %{ws: ws, repo: repo, tmp: tmp} do
+      prior_root = Application.fetch_env(:arbiter, :worktree_root)
+      Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "wt"))
+
+      on_exit(fn ->
+        case prior_root do
+          {:ok, value} -> Application.put_env(:arbiter, :worktree_root, value)
+          :error -> Application.delete_env(:arbiter, :worktree_root)
+        end
+      end)
+
+      {:ok, task} = Ash.create(Issue, %{title: "clone-only review", workspace_id: ws.id})
+      branch = Arbiter.Worker.BranchNamer.derive(task)
+      {:ok, clone} = Arbiter.Worker.PrivateClone.create(repo, branch, "main")
+      File.write!(Path.join(clone, "feature.txt"), "clone work\n")
+      {_, 0} = System.cmd("git", ["-C", clone, "add", "feature.txt"])
+      {_, 0} = System.cmd("git", ["-C", clone, "commit", "-q", "-m", "clone work"])
+      {head, 0} = System.cmd("git", ["-C", clone, "rev-parse", "HEAD"])
+      head_sha = String.trim(head)
+
+      {:ok, result} =
+        Dispatch.dispatch(task.id,
+          force: true,
+          repo: "rv/repo",
+          review: true,
+          start_claude: true,
+          start_driver: false,
+          claude_command: ["true"]
+        )
+
+      assert %{path: path, head_sha: ^head_sha} = result.review_checkout
+      on_exit(fn -> Arbiter.Reviews.Checkout.teardown(path) end)
+      assert File.read!(Path.join(path, "feature.txt")) == "clone work\n"
     end
 
     test "tears the review checkout down when the dispatch fails after the agent spawns",

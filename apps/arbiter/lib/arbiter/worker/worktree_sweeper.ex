@@ -13,6 +13,12 @@ defmodule Arbiter.Worker.WorktreeSweeper do
   without a `.git` file (the root on a real box also holds database sockets
   and data directories nobody made a worktree of).
 
+  Private clones (git layout B, bd-4wy1w1) are dead when the main repo they
+  borrow objects from is gone (`Arbiter.Worker.PrivateClone.orphaned/2`). Their
+  gc pins in a main repo that is still there are dropped once no clone of that
+  repo is left at their leaf (`PrivateClone.sweep_pins/2`), for the main repos
+  the clones under the root name plus the `:repo_paths` app config.
+
   Filesystem only: it never reads or writes the database, so unlike the
   session reapers it is not gated on being the primary instance — a second
   instance sweeping the same root finds the same dead leaves, or none.
@@ -33,12 +39,18 @@ defmodule Arbiter.Worker.WorktreeSweeper do
 
   require Logger
 
+  alias Arbiter.Tasks.RepoConfig
+  alias Arbiter.Worker.PrivateClone
   alias Arbiter.Worker.Worktree
 
   @default_interval_ms 60 * 60_000
   @default_min_age_ms 60 * 60_000
 
-  @type result :: %{removed: [Worktree.path()], failed: [{Worktree.path(), term()}]}
+  @type result :: %{
+          removed: [Worktree.path()],
+          failed: [{Worktree.path(), term()}],
+          unpinned: [String.t()]
+        }
 
   @doc false
   def start_link(opts \\ []) do
@@ -51,12 +63,16 @@ defmodule Arbiter.Worker.WorktreeSweeper do
   Remove every dead leaf under the worktree root once.
 
   Options: `:root` (default `Arbiter.Config.Paths.worktree_root/0`),
-  `:min_age_ms` (default from config).
+  `:min_age_ms` (default from config), `:repos` (the main repos to drop stale
+  private-clone pins in; default: those the clones under the root name, plus
+  the `:repo_paths` app config).
   """
   @spec sweep_once(keyword()) :: result()
   def sweep_once(opts \\ []) do
     root = Keyword.get_lazy(opts, :root, &Arbiter.Config.Paths.worktree_root/0)
     min_age_ms = Keyword.get(opts, :min_age_ms, cfg(:min_age_ms, @default_min_age_ms))
+    # Read before the leaves go: a dead clone no longer names its repo once removed.
+    repos = Keyword.get_lazy(opts, :repos, fn -> pin_repos(root) end)
 
     root
     |> Worktree.orphaned_leaves(min_age_ms: min_age_ms)
@@ -75,6 +91,30 @@ defmodule Arbiter.Worker.WorktreeSweeper do
       end
     end)
     |> then(&%{removed: Enum.reverse(&1.removed), failed: Enum.reverse(&1.failed)})
+    |> Map.put(:unpinned, unpin(repos, root))
+  end
+
+  defp pin_repos(root) do
+    configured =
+      :arbiter
+      |> Application.get_env(:repo_paths, %{})
+      |> Map.values()
+      |> Enum.map(&RepoConfig.repo_path_from_config/1)
+
+    (PrivateClone.main_repos(root) ++ configured)
+    |> Enum.filter(&(is_binary(&1) and File.dir?(&1)))
+    |> Enum.uniq()
+  end
+
+  defp unpin(repos, root) do
+    Enum.flat_map(repos, fn repo ->
+      refs = PrivateClone.sweep_pins(repo, root)
+
+      if refs != [],
+        do: Logger.info("WorktreeSweeper: dropped #{length(refs)} stale clone pin(s) in #{repo}")
+
+      refs
+    end)
   end
 
   @doc "Run one sweep now, on the server, and return its result."
@@ -115,7 +155,7 @@ defmodule Arbiter.Worker.WorktreeSweeper do
   rescue
     e ->
       Logger.warning("WorktreeSweeper: sweep failed: #{Exception.message(e)}")
-      %{removed: [], failed: []}
+      %{removed: [], failed: [], unpinned: []}
   end
 
   defp schedule(ms), do: Process.send_after(self(), :sweep, ms)

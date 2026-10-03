@@ -44,6 +44,10 @@ defmodule Arbiter.Worker.Jail do
     * the own gitdir's `commondir` and the worktree's `.git` file — the same
       trick for this worktree, which the host keeps running git in (review,
       merge, cleanup).
+    * for a private clone (git layout B, `Arbiter.Worker.PrivateClone`), which
+      is its own common dir: its `"."` `commondir` guard and its
+      `objects/info/alternates`. Its main repo stays visible under
+      `:hide_reads`, since the clone borrows that repo's objects.
 
   Everything else in the git common dir (objects, refs, the own gitdir's
   index/HEAD) stays writable, because committing needs it.
@@ -178,16 +182,18 @@ defmodule Arbiter.Worker.Jail do
   @behaviour Arbiter.Worker.Sandbox
 
   alias Arbiter.Worker.Jail.Hide
+  alias Arbiter.Worker.PrivateClone
   alias Arbiter.Worker.ReleaseEnv
 
   @toolchain_dir ".arbiter-jail"
   @probe_timeout_ms 15_000
 
   @type git :: %{
-          common_dir: String.t(),
-          git_dir: String.t() | nil,
-          worktrees_dir?: boolean(),
-          dot_git_file?: boolean()
+          required(:common_dir) => String.t(),
+          required(:git_dir) => String.t() | nil,
+          required(:worktrees_dir?) => boolean(),
+          required(:dot_git_file?) => boolean(),
+          optional(:main_repo) => String.t() | nil
         }
 
   @type spec :: %{
@@ -282,10 +288,15 @@ defmodule Arbiter.Worker.Jail do
   end
 
   # The own repo is the one the worktree's git common dir lives in: it stays
-  # visible, every other workspace repo is hidden.
+  # visible, every other workspace repo is hidden. A private clone (git layout
+  # B, bd-4wy1w1) is its own common dir, but borrows its main repo's objects
+  # through alternates, so the repo that stays visible is that one.
   defp hide_spec(git, opts) do
     own_repo =
       case git do
+        %{main_repo: main} when is_binary(main) ->
+          main
+
         %{common_dir: common} ->
           if Path.basename(common) == ".git", do: Path.dirname(common), else: common
 
@@ -738,9 +749,21 @@ defmodule Arbiter.Worker.Jail do
         dir ->
           bind(dir) ++ ["--ro-bind-try", Path.join(dir, "commondir"), Path.join(dir, "commondir")]
       end,
-      if(git.dot_git_file?, do: ro_bind(Path.join(worktree, ".git")), else: [])
+      if(git.dot_git_file?, do: ro_bind(Path.join(worktree, ".git")), else: []),
+      clone_guard_args(git, common)
     ])
   end
+
+  # bd-4wy1w1: a private clone has no own gitdir whose `commondir` could be
+  # bound read-only above, so it carries a `"."` guard file instead
+  # (`Arbiter.Worker.PrivateClone`); that and its alternates get the same
+  # treatment.
+  defp clone_guard_args(%{main_repo: main}, common) when is_binary(main) do
+    ro_bind(Path.join(common, "commondir")) ++
+      ro_bind(Path.join(common, "objects/info/alternates"))
+  end
+
+  defp clone_guard_args(_git, _common), do: []
 
   defp bind(path), do: ["--bind", path, path]
   defp ro_bind(path), do: ["--ro-bind", path, path]
@@ -771,9 +794,11 @@ defmodule Arbiter.Worker.Jail do
 
   @doc """
   The git layout of `worktree`: its common dir, its own gitdir (`nil` for a
-  main checkout), and whether `worktrees/` and a `.git` *file* exist. Creates a
-  missing `<common>/hooks` so it can be bound read-only (otherwise a jailed
-  process could create it). `{:ok, nil}` when `worktree` has no `.git`.
+  main checkout), whether `worktrees/` and a `.git` *file* exist, and for a
+  private clone (`Arbiter.Worker.PrivateClone`, git layout B) the main repo it
+  borrows from (`main_repo`, else `nil`). Creates a missing `<common>/hooks` so
+  it can be bound read-only (otherwise a jailed process could create it).
+  `{:ok, nil}` when `worktree` has no `.git`.
   """
   @spec git(String.t()) :: {:ok, git() | nil} | {:error, term()}
   def git(worktree) when is_binary(worktree) do
@@ -795,7 +820,8 @@ defmodule Arbiter.Worker.Jail do
              common_dir: common,
              git_dir: if(git_dir == common, do: nil, else: git_dir),
              worktrees_dir?: File.dir?(Path.join(common, "worktrees")),
-             dot_git_file?: match?({:ok, %File.Stat{type: :regular}}, File.lstat(dot_git))
+             dot_git_file?: match?({:ok, %File.Stat{type: :regular}}, File.lstat(dot_git)),
+             main_repo: PrivateClone.main_repo(worktree)
            }}
 
         {out, status} ->
