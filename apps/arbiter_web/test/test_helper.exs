@@ -28,7 +28,9 @@ browser_exclude =
     do: [],
     else: [:browser]
 
-ExUnit.start(exclude: node_exclude ++ browser_exclude)
+# bd-d2o3xb: `:podman` tests start REAL rootless containers (and build a
+# throwaway image); opt in with `mix test --include podman <file>`.
+ExUnit.start(exclude: [:podman] ++ node_exclude ++ browser_exclude)
 Ecto.Adapters.SQL.Sandbox.mode(Arbiter.Repo, :manual)
 
 # bd-5scl0c: report loudly, with attribution, if anything is killed while

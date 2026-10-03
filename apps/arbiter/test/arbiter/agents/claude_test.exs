@@ -195,8 +195,9 @@ defmodule Arbiter.Agents.ClaudeTest do
       assert "Bash(docker:*)" in settings_json(argv)["permissions"]["deny"]
     end
 
-    # bd-btcdrf: Claude has no jail wrap point yet, but a backend with no
-    # implementation must refuse the spawn instead of running it unconfined.
+    # bd-btcdrf: a backend whose wrap point the caller has not promised to use
+    # must refuse the spawn instead of running it unconfined (the reviewer,
+    # conflict and fix-pass spawns do not pass `sandbox_wrap`).
     test "backend: podman refuses the spawn in every mode, never an unjailed argv" do
       for mode <- ["strict", "auto", "bypass"] do
         policy =
@@ -210,6 +211,36 @@ defmodule Arbiter.Agents.ClaudeTest do
 
         assert message =~ "podman"
       end
+    end
+
+    # bd-d2o3xb (P7): a caller that will hand the spawn to ClaudeSession with
+    # this policy (`sandbox_wrap: true`) gets an argv naming the CLI where the
+    # container has it; the host path would not exist there.
+    test "backend: podman with sandbox_wrap names the in-container claude" do
+      policy =
+        Arbiter.Agents.SecurityPolicy.merge(Arbiter.Agents.SecurityPolicy.base(), %{
+          "sandbox" => %{"backend" => "podman"}
+        })
+
+      assert {:ok, argv} =
+               Claude.default_argv("the prompt", security: policy, sandbox_wrap: true)
+
+      assert ["sh", "-c", _, "sh", "/opt/arbiter/cli/claude", "--print", "the prompt" | _] = argv
+      assert "--settings" in argv
+    end
+
+    test "sandbox_wrap does not change what bwrap resolves" do
+      assert {:ok, plain} =
+               Claude.default_argv("p", security: Arbiter.Agents.SecurityPolicy.base())
+
+      assert {:ok, wrapped} =
+               Claude.default_argv("p",
+                 security: Arbiter.Agents.SecurityPolicy.base(),
+                 sandbox_wrap: true
+               )
+
+      assert plain == wrapped
+      refute "/opt/arbiter/cli/claude" in plain
     end
 
     test "bypass mode emits --dangerously-skip-permissions with --settings deny list" do

@@ -200,6 +200,12 @@ defmodule Arbiter.Worker.ContainerTest do
       assert elem(last_writable, 1) < first_ro
     end
 
+    # bd-d2o3xb (P7): the provider CLI and `arb` land under /opt/arbiter/cli.
+    test "cli_mounts bind a host file read-only at a path of the image's choosing" do
+      argv = argv(%{cli_mounts: [{"/home/u/.local/share/claude/2.1", "/opt/arbiter/cli/claude"}]})
+      assert "/home/u/.local/share/claude/2.1:/opt/arbiter/cli/claude:ro" in pairs(argv, "-v")
+    end
+
     test "with the label disabled the gitdir is plain rw too" do
       argv = argv(%{git_dir: "/work/tree/.git", bridges: ["/run/arb/proxy.sock"]})
       assert "/work/tree/.git:/work/tree/.git:rw" in pairs(argv, "-v")
@@ -355,6 +361,23 @@ defmodule Arbiter.Worker.ContainerTest do
 
       assert "#{config}:#{config}:ro" in pairs(argv, "-v")
       assert "#{git_dir}:#{git_dir}:rw,Z" in pairs(argv, "-v")
+    end
+
+    test "cli_mounts must exist on the host and name absolute paths", %{dir: dir} do
+      cli = Path.join(dir, "claude")
+      File.write!(cli, "")
+      missing = Path.join(dir, "nope")
+
+      assert {:error, {:readonly_path_missing, ^missing}} =
+               Container.wrap(["x"], opts(dir, cli_mounts: [{missing, "/opt/arbiter/cli/x"}]))
+
+      assert {:error, {:bad_mount_path, "opt/cli"}} =
+               Container.wrap(["x"], opts(dir, cli_mounts: [{cli, "opt/cli"}]))
+
+      assert {:ok, argv} =
+               Container.wrap(["x"], opts(dir, cli_mounts: [{cli, "/opt/arbiter/cli/claude"}]))
+
+      assert "#{cli}:/opt/arbiter/cli/claude:ro" in pairs(argv, "-v")
     end
 
     test "an unknown network mode is refused", %{dir: dir} do

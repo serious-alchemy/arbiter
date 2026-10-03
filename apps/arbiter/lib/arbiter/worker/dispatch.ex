@@ -90,6 +90,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Worker
   alias Arbiter.Worker.BranchNamer
   alias Arbiter.Worker.ClaudeSession
+  alias Arbiter.Worker.ContainerSpawn
   alias Arbiter.Worker.Driver
   alias Arbiter.Worker.GitLayout
   alias Arbiter.Worker.PromptBuilder
@@ -2928,7 +2929,10 @@ defmodule Arbiter.Worker.Dispatch do
                   workspace: workspace,
                   worktree_path: worktree_path,
                   owner: worker_pid,
-                  task_id: task.id
+                  task_id: task.id,
+                  # bd-d2o3xb: this dispatch hands the spawn to `ClaudeSession`
+                  # with `policy`, which is what wraps it under `podman`.
+                  sandbox_wrap: true
                 ] ++
                 Keyword.take(opts, [:mcp_config, :arb_token])
 
@@ -3004,13 +3008,23 @@ defmodule Arbiter.Worker.Dispatch do
                 {:ok,
                  base ++
                    [command: argv, prompt: prompt, env: env] ++
-                   session_meta ++ Keyword.take(opts, [:arb_token])}
+                   session_meta ++
+                   sandbox_session_opts(policy, workspace, opts) ++
+                   Keyword.take(opts, [:arb_token])}
 
               {:error, reason} ->
                 {:error, reason}
             end
         end
     end
+  end
+
+  # The inputs `ClaudeSession` needs to wrap a `sandbox.backend: podman` spawn;
+  # none for any other backend, so a bwrap or unsandboxed spawn is unchanged.
+  defp sandbox_session_opts(policy, workspace, opts) do
+    if ContainerSpawn.podman?(policy),
+      do: [security: policy, workspace: workspace] ++ Keyword.take(opts, [:repo]),
+      else: []
   end
 
   defp resolve_session_agent_type(opts, %Issue{id: id} = task, workspace) do
@@ -3172,18 +3186,33 @@ defmodule Arbiter.Worker.Dispatch do
        "(bd-5gvqgc) ships and makes #{provider_type} :strict-eligible."}
   end
 
+  # bd-d2o3xb (P7): `sandbox.backend: podman` has a wrap point for Claude only,
+  # so under it the pool is Claude or nothing. An explicit `--provider` that is
+  # not Claude is refused; automatic routing falls to Claude when it is in the
+  # pool. Anything else would run unsandboxed under a backend the operator
+  # chose precisely so that it would not.
   defp sandbox_checked_provider(preferred, policy, pool, opts) do
-    case Sandbox.module(policy) do
-      {:ok, _sandbox} -> Agents.strict_eligible_provider(preferred, policy, pool, opts)
-      {:error, _refusal} -> {:error, :ineligible}
+    case Sandbox.module(policy, preferred) do
+      {:ok, _sandbox} ->
+        Agents.strict_eligible_provider(preferred, policy, sandbox_pool(policy, pool), opts)
+
+      {:error, _refusal} ->
+        if :claude in pool and not Keyword.get(opts, :explicit, false) and
+             match?({:ok, _}, Sandbox.module(policy, :claude)),
+           do: Agents.strict_eligible_provider(:claude, policy, [], opts),
+           else: {:error, :ineligible}
     end
   end
 
+  defp sandbox_pool(policy, pool) do
+    if ContainerSpawn.podman?(policy), do: Enum.filter(pool, &(&1 == :claude)), else: pool
+  end
+
   # Why `sandbox_checked_provider/4` found no eligible provider: a sandbox
-  # backend with no implementation (every provider is refused), else the
-  # `:strict` write-confinement gap.
+  # backend with no implementation for it, else the `:strict` write-confinement
+  # gap.
   defp ineligible_provider_error(provider_type, policy, workspace, opts) do
-    case Sandbox.module(policy) do
+    case Sandbox.module(policy, provider_type) do
       {:error, refusal} -> refusal
       {:ok, _sandbox} -> strict_write_confinement_error(provider_type, policy, workspace, opts)
     end

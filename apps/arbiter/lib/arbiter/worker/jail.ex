@@ -328,9 +328,11 @@ defmodule Arbiter.Worker.Jail do
   # a started `Arbiter.Worker.Egress` run. Every socket must exist and `socat`
   # must be installed, or the spawn is refused: a jail asked for network mode
   # never degrades to a shared network.
-  defp network_spec(nil), do: {:ok, nil}
+  @doc false
+  @spec network_spec(keyword() | map() | nil) :: {:ok, network() | nil} | {:error, term()}
+  def network_spec(nil), do: {:ok, nil}
 
-  defp network_spec(network) when is_list(network) or is_map(network) do
+  def network_spec(network) when is_list(network) or is_map(network) do
     network = Map.new(network)
     proxy = Map.get(network, :proxy_socket)
     bridges = Map.get(network, :bridges, [])
@@ -371,9 +373,11 @@ defmodule Arbiter.Worker.Jail do
 
   defp exists?(path), do: match?({:ok, _}, File.lstat(path))
 
-  defp network_env(nil), do: []
+  @doc false
+  @spec network_env(network() | nil) :: [{String.t(), String.t()}]
+  def network_env(nil), do: []
 
-  defp network_env(%{proxy_port: port}) do
+  def network_env(%{proxy_port: port}) do
     url = "http://127.0.0.1:#{port}"
 
     for name <- ~w(HTTPS_PROXY HTTP_PROXY ALL_PROXY), var <- [name, String.downcase(name)] do
@@ -547,12 +551,14 @@ defmodule Arbiter.Worker.Jail do
   exec "$@"
   """
 
-  defp network_command(nil, command), do: command
+  @doc false
+  @spec network_command(network() | nil, [String.t()]) :: [String.t()]
+  def network_command(nil, command), do: command
 
-  defp network_command(
-         %{proxy_port: proxy_port, proxy_socket: proxy, bridges: bridges, socat: socat},
-         command
-       ) do
+  def network_command(
+        %{proxy_port: proxy_port, proxy_socket: proxy, bridges: bridges, socat: socat},
+        command
+      ) do
     listeners =
       Enum.flat_map([{proxy_port, proxy} | bridges], fn {port, sock} ->
         [to_string(port), sock]
@@ -955,9 +961,11 @@ defmodule Arbiter.Worker.Jail do
   # bridge as a `CONNECT`, and the proxy's policy decides. The `-o` wins over
   # a per-host `ProxyCommand` in the mirrored config, so a host entry can't
   # route around it.
-  defp ssh_command(base, nil), do: if(base, do: [{"GIT_SSH_COMMAND", base}], else: [])
+  @doc false
+  @spec ssh_command(String.t() | nil, network() | nil) :: [{String.t(), String.t()}]
+  def ssh_command(base, nil), do: if(base, do: [{"GIT_SSH_COMMAND", base}], else: [])
 
-  defp ssh_command(base, %{proxy_port: port}) do
+  def ssh_command(base, %{proxy_port: port}) do
     proxy = "-o 'ProxyCommand socat - PROXY:127.0.0.1:%h:%p,proxyport=#{port}'"
     [{"GIT_SSH_COMMAND", command_with(base, proxy)}]
   end

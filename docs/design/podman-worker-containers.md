@@ -374,6 +374,46 @@ Source for current behavior: `agents/*.ex`, `worker/spawn_env.ex`,
 | **MCP and `arb` to Arbiter** | URL `http://127.0.0.1:4848/mcp`, `Authorization: Bearer <worker token>` in `.mcp.json`; the same token is `ARB_TOKEN`; `ARB_HOST` defaults to `127.0.0.1:4848` | A bridge to the host's loopback ([§5](#5-network)) | Verified: with host loopback mapped in, `GET /api/version` → **200** and `GET /api/issues/bd-jk49nc` without a token → **401**, so bd-asawcq holds from inside a container |
 | **`git push`** | `SSH_AUTH_SOCK` is dropped by `SpawnEnv`; pushes use key files in `~/.ssh` or `GH_TOKEN`/`GITLAB_TOKEN` from workspace `worker_env`. The agy jail forwards `GIT_SSH_COMMAND` with a shadow ssh config | A key or token the container is *given*. There is no `~/.ssh` | See below |
 
+### 4.1 Claude under podman (P7)
+
+`sandbox.backend: podman` runs a Claude worker's `claude --print` in a
+container. The wrap point is `ClaudeSession`, at the two places every spawn goes
+through (bd-d2o3xb):
+
+- **`ClaudeSession.start/1`** (once per worker) calls
+  `ContainerSpawn.prepare/1` when the spawn carries a podman `:security` policy:
+  host readiness (`Container.status/0`, `network_status/0`), the private clone's
+  mount set (`PrivateClone.mounts/1`; anything that is not a private clone is
+  refused), the image (`Image.ensure/3` from the repo's default branch, or
+  `config :arbiter, :worker_container_image`), the egress run
+  (`Egress.JailRun`, learn mode, the same one agy's jail starts), and the
+  per-run `HOME` and `CLAUDE_CONFIG_DIR`. The result rides in
+  `port_args.sandbox`, so the commit-gate nudge and the auto-resume, which
+  re-open the stashed args, are wrapped the same way.
+- **`ClaudeSession.open_scoped_port/2`** turns the inner `sh -c 'exec claude
+  --print …'` argv into the `podman run` argv. It skips `MemoryScope`: a
+  container is not in the server's cgroup.
+
+What the container sees (each verified by `container_spawn_live_test.exs`
+against real podman):
+
+| Item | How |
+|---|---|
+| The checkout, its `.git` and read-only guards, the main repo's `objects/` | `PrivateClone.mounts/1` |
+| `CLAUDE_CONFIG_DIR`, `HOME`, `TMPDIR` | per run, under the run's temp dir; the config dir holds only the generated `settings.json` and `CLAUDE.md`, never a credential file or another run's history |
+| `claude` and `arb` | the host's binaries, resolved through symlinks, bound read-only at `/opt/arbiter/cli` (on the image's `PATH`). `arb` is an escript, so the image needs a matching OTP |
+| Token env | the spawn's explicit pairs only, each as `-e NAME` with the value in the `podman` client's environment: nothing on argv. `PATH`, `HOME`, `XDG_*` and the proxy variables are literals |
+| Proxy and Arbiter | the run's two sockets bound read-only, and `Jail`'s own `socat` script inside the container on `127.0.0.1`: `HTTPS_PROXY`, `ARB_HOST` and the `.mcp.json` URL work unchanged; `--network=none`, so those sockets are the only exit |
+
+Only Claude has a wrap point. `Sandbox.module/1` still refuses `:podman` (so
+agy and Codex cannot run unsandboxed under it); `Sandbox.module/2` resolves it
+for Claude. Dispatch's provider gate accepts Claude, swaps automatic routing to
+Claude, and refuses an explicit other provider. `Claude.default_argv/2` refuses
+a podman policy unless the caller passes `sandbox_wrap: true` (Dispatch does),
+so the **reviewer, conflict-resolution and fix-pass spawns are still refused or
+unsandboxed as before**: they need a wrap point of their own, and a reviewer's
+checkout is not a private clone.
+
 **Push credentials: G16's scoped key versus agent forwarding.** Mounting the
 operator's ssh-agent socket gives every key and fails under SELinux for the
 same `connectto` reason as the bridges. G16 (a per-repo deploy key delivered
@@ -585,7 +625,7 @@ difficulty.
 | P4 | **Done (bd-9r5jdt, `Arbiter.Worker.Image`).** Image lifecycle: `.arbiter/Containerfile` or a generated default, content-hash tags, single-flight lazy build from the **default branch**, weekly base refresh, prune, `arb image list/build`. Provider CLIs in the base image or a versioned read-only CLI dir | 3 | P3 |
 | P5 | **Done (bd-4wy1w1, `Arbiter.Worker.PrivateClone`).** Git layout B: private `--shared` clone with read-only `:O` alternates, sync-back into the main repo, a pinned base ref against gc, cleanup and sweeper changes, ReviewGate and MergeQueue reads. **The riskiest item.** Re-estimated D3 after the reading day (§3.2) | 4 | P3 |
 | P6 | Image-keyed deps cache: seed job inside the image, per-worker `cp --reflink` copy, key `(lockfile hash, image tag)`. Extend bd-5tncmq | 3 | P4 |
-| P7 | **Claude under the container backend** (replaces G7 bd-d2o3xb): config dir, token env, `.mcp.json`, `arb`, proxy and Arbiter bridges via G5's sockets, wrap point in `ClaudeSession` | 3 | P3, P5, G5 |
+| P7 | **Done (bd-d2o3xb, `Arbiter.Worker.ContainerSpawn`).** Claude under the container backend (replaces G7 bd-d2o3xb): config dir, token env, `.mcp.json`, `arb`, proxy and Arbiter bridges via G5's sockets, wrap point in `ClaudeSession`. See [§4.1](#41-claude-under-podman-p7) | 3 | P3, P5, G5 |
 | P8 | **Codex under the container backend** (replaces G8 bd-50d5j6, with bd-99emmd): per-run `CODEX_HOME`, refresh-token rotation handling | 3 | P7 |
 | P9 | Deploy-key delivery as `--secret` (the body of G16 bd-9cygoo and the per-run-agent part of G14) | 3 | P7 |
 | P10 | Test services: a per-worker pod with a Postgres sidecar on the pod's `lo` for vstim and tonic (Postgres 15/16, plus an S3 store for tonic). Optional; arbiter needs none | 3 | P7 |

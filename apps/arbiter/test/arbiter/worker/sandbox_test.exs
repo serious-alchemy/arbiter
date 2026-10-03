@@ -59,6 +59,28 @@ defmodule Arbiter.Worker.SandboxTest do
       assert Sandbox.module(policy(:podman)) == Sandbox.module(:podman)
     end
 
+    # bd-d2o3xb (P7): Claude alone has a podman wrap point.
+    test "module/2 resolves podman for claude only" do
+      assert Sandbox.module(:podman, :claude) == {:ok, Arbiter.Worker.Container}
+      assert Sandbox.module(:podman, "claude") == {:ok, Arbiter.Worker.Container}
+      assert Sandbox.module(policy(:podman), :claude) == {:ok, Arbiter.Worker.Container}
+
+      for provider <- [:gemini, :codex, "gemini"] do
+        assert {:error, {:sandbox_backend_unavailable, :podman, message}} =
+                 Sandbox.module(policy(:podman), provider)
+
+        assert message =~ "claude only"
+      end
+    end
+
+    test "module/2 is module/1 for every other backend" do
+      assert Sandbox.module(:bwrap, :claude) == {:ok, Jail}
+      assert Sandbox.module(policy(:bwrap), :gemini) == {:ok, Jail}
+
+      assert {:error, {:sandbox_backend_unavailable, :docker, _}} =
+               Sandbox.module(:docker, :claude)
+    end
+
     test "an unknown backend is refused, never mapped to a default" do
       assert {:error, {:sandbox_backend_unavailable, :docker, _}} = Sandbox.module(:docker)
     end
