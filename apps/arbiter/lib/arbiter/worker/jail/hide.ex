@@ -48,9 +48,12 @@ defmodule Arbiter.Worker.Jail.Hide do
   `Host` block names, is hidden; the per-binding agent in G14 is the way to
   hand one out.
 
-  `~/.config/gh` is hidden outright. `gh` inside the jail needs a
-  `GH_TOKEN`/`GITHUB_TOKEN` in the workspace's `worker_env`; its keyring
-  token is no longer reachable through a `hosts.yml` that names the account.
+  `~/.config/gh` is blanked too, then `hosts.yml` and `config.yml` are bound
+  back when `hosts.yml` holds no `oauth_token` (a keyring-backed login: the
+  file names the account but carries no secret, and the token comes through
+  the keyring bus), so `gh pr view` / `gh pr diff` keep working for agy
+  reviews. A `hosts.yml` with a plaintext token keeps the whole dir hidden;
+  `gh` then needs a `GH_TOKEN`/`GITHUB_TOKEN` in the workspace's `worker_env`.
 
   `config :arbiter, :worker_jail_unmask, [path]` is the operator's escape
   hatch: an entry equal to a masked path drops that mask; an entry beneath
@@ -111,7 +114,7 @@ defmodule Arbiter.Worker.Jail.Hide do
       |> Enum.uniq()
 
     keep =
-      (ssh_keep(home) ++ unmask)
+      (ssh_keep(home) ++ gh_keep(home) ++ unmask)
       |> existing(&File.exists?/1)
       |> Enum.filter(&under_any?(&1, dirs))
       |> Enum.uniq()
@@ -207,6 +210,27 @@ defmodule Arbiter.Worker.Jail.Hide do
 
   defp ssh_keep(nil), do: []
   defp ssh_keep(home), do: Enum.map(@ssh_keep, &Path.join([home, ".ssh", &1]))
+
+  # A keyring-backed gh login keeps no secret in `hosts.yml` (the token sits in
+  # the Secret Service, which the jail reaches over the filtered dbus proxy), so
+  # `hosts.yml` and `config.yml` come back and `gh` still knows the account. A
+  # `hosts.yml` holding a plaintext `oauth_token` (or one we cannot read) keeps
+  # the whole dir hidden.
+  defp gh_keep(nil), do: []
+
+  defp gh_keep(home) do
+    hosts = Path.join([home, ".config", "gh", "hosts.yml"])
+
+    case File.read(hosts) do
+      {:ok, body} ->
+        if String.contains?(body, "oauth_token"),
+          do: [],
+          else: [hosts, Path.join([home, ".config", "gh", "config.yml"])]
+
+      {:error, _} ->
+        []
+    end
+  end
 
   # ---- configuration -------------------------------------------------------
 

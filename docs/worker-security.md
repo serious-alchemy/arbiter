@@ -849,8 +849,11 @@ symlinks (`.ssh`, `.arbiter`, `.config`) resolve into the masks.
 `ProxyCommand` needs them. A deploy key a `Host` block names is hidden.
 
 **Changes for jailed agy workers.**
-- `gh` finds no `~/.config/gh`. It needs `GH_TOKEN`/`GITHUB_TOKEN` in the
-  workspace's `worker_env`.
+- `gh`: `~/.config/gh` is blanked, but `hosts.yml` and `config.yml` are bound
+  back read-only when `hosts.yml` has no `oauth_token` (a keyring-backed login
+  holds no secret there), so `gh pr view` / `diff` / `checks` keep working. If
+  `hosts.yml` holds a plaintext token the dir stays hidden and `gh` needs
+  `GH_TOKEN`/`GITHUB_TOKEN` in the workspace's `worker_env`.
 - Coordinator-side data under `~/.arbiter` is gone from their view.
 
 `config :arbiter, :worker_jail_unmask, ["~/.config/gh/hosts.yml"]` is the

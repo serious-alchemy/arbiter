@@ -81,6 +81,9 @@ defmodule Arbiter.Worker.JailHideTest do
     ]
 
     for s <- secrets, do: File.write!(Path.join(home, s), "SECRET-#{s}")
+    # The default fixture is a plaintext-token gh login (the dir stays hidden).
+    File.write!(Path.join(home, ".config/gh/hosts.yml"), plaintext_hosts())
+    File.write!(Path.join(home, ".config/gh/config.yml"), "SECRET-gh-config")
     File.write!(Path.join(wt_root, "sibling-task/file.txt"), "SECRET-sibling")
     File.write!(Path.join(wt_root, "own-task/file.txt"), "own")
     File.write!(Path.join(log_root, "run.log"), "SECRET-log")
@@ -111,6 +114,9 @@ defmodule Arbiter.Worker.JailHideTest do
       log_root: log_root
     }
   end
+
+  defp plaintext_hosts, do: "github.com:\n  user: op\n  oauth_token: SECRET-gh-token\n"
+  defp keyring_hosts, do: "github.com:\n  user: op\n  git_protocol: ssh\n"
 
   describe "Hide.paths/1 path classes" do
     test "lists every credential dir, the data dir, the roots and only the foreign repo",
@@ -168,6 +174,26 @@ defmodule Arbiter.Worker.JailHideTest do
       assert Path.join(ssh, "config") in keep
       assert Path.join(ssh, "id_ed25519") in keep
       refute Path.join(ssh, "ci.id_ed25519") in keep
+    end
+
+    test "gh: a plaintext-token hosts.yml keeps the whole dir hidden", %{fx: fx} do
+      %{dirs: dirs, keep: keep} = Hide.paths(fx.opts)
+      gh = Path.join(fx.home, ".config/gh")
+
+      assert gh in dirs
+      refute Path.join(gh, "hosts.yml") in keep
+      refute Path.join(gh, "config.yml") in keep
+    end
+
+    test "gh: a keyring-backed hosts.yml (no oauth_token) and config.yml are kept", %{fx: fx} do
+      gh = Path.join(fx.home, ".config/gh")
+      File.write!(Path.join(gh, "hosts.yml"), keyring_hosts())
+
+      %{dirs: dirs, keep: keep} = Hide.paths(fx.opts)
+
+      assert gh in dirs
+      assert Path.join(gh, "hosts.yml") in keep
+      assert Path.join(gh, "config.yml") in keep
     end
 
     test ":unmask exempts a path: a dir is dropped, a path under a masked dir is kept", %{
@@ -297,6 +323,30 @@ defmodule Arbiter.Worker.JailHideTest do
       assert out =~ "end"
     end
 
+    test "gh keyring login: hosts.yml and config.yml stay readable, other files in the dir do not",
+         %{fx: fx} do
+      gh = Path.join(fx.home, ".config/gh")
+      File.write!(Path.join(gh, "hosts.yml"), keyring_hosts())
+      File.write!(Path.join(gh, "extra.yml"), "SECRET-extra")
+
+      out =
+        jailed(
+          fx,
+          ~s(cat "#{gh}/hosts.yml" "#{gh}/config.yml"; cat "#{gh}/extra.yml" 2>/dev/null; echo end)
+        )
+
+      assert out =~ "git_protocol: ssh"
+      assert out =~ "SECRET-gh-config"
+      refute out =~ "SECRET-extra"
+      refute out =~ "oauth_token"
+    end
+
+    test "gh plaintext token: hosts.yml and config.yml read back empty", %{fx: fx} do
+      gh = Path.join(fx.home, ".config/gh")
+      out = reads(fx, [Path.join(gh, "hosts.yml"), Path.join(gh, "config.yml")])
+      refute out =~ "SECRET"
+    end
+
     test "the install DB, accounts and ~/.arbiter read back empty", %{fx: fx} do
       h = fx.home
 
@@ -386,10 +436,7 @@ defmodule Arbiter.Worker.JailHideTest do
       refute out =~ "SECRET"
     end
 
-    test "the egress bridge sockets and a git commit still work inside the hidden jail", %{
-      base: base,
-      fx: fx
-    } do
+    test "the egress bridge socket dir stays usable under a hidden parent", %{fx: fx} do
       # Sockets live under a dir that is itself masked: the network spec's own
       # tmpfs + ro-bind must come back on top of the hide masks.
       sockdir = Path.join(fx.log_root, "egress")
@@ -397,25 +444,116 @@ defmodule Arbiter.Worker.JailHideTest do
       proxy = Path.join(sockdir, "proxy.sock")
       File.write!(proxy, "")
 
-      socat = System.find_executable("socat")
-
-      if socat do
+      if socat = System.find_executable("socat") do
         network = %{proxy_socket: proxy, proxy_port: 3128, bridges: [], socat: socat}
         out = jailed(fx, ~s(test -e "#{proxy}" && echo SOCK_OK), %{network: network})
         assert out =~ "SOCK_OK"
-      else
-        :ok
       end
-
-      _ = base
     end
 
-    test "Jail.wrap/2 with hide_reads: true hides the real install DB path inside a real jail",
+    test "git worktree + commit work inside the hidden jail under a hidden worktree root", %{
+      fx: fx
+    } do
+      git_env = [
+        {"GIT_AUTHOR_NAME", "t"},
+        {"GIT_AUTHOR_EMAIL", "t@example.invalid"},
+        {"GIT_COMMITTER_NAME", "t"},
+        {"GIT_COMMITTER_EMAIL", "t@example.invalid"},
+        {"GIT_CONFIG_GLOBAL", "/dev/null"},
+        {"GIT_CONFIG_SYSTEM", "/dev/null"}
+      ]
+
+      host_git = fn args, dir ->
+        assert {_, 0} = System.cmd("git", args, cd: dir, env: git_env, stderr_to_stdout: true)
+      end
+
+      File.rm_rf!(Path.join(fx.own_repo, ".git"))
+      host_git.(["init", "-q", "-b", "main"], fx.own_repo)
+      host_git.(["add", "README"], fx.own_repo)
+      host_git.(["commit", "-q", "-m", "init"], fx.own_repo)
+
+      wt = Path.join(fx.wt_root, "git-task")
+      host_git.(["worktree", "add", "-q", "-b", "task", wt], fx.own_repo)
+      fx = %{fx | wt: wt}
+
+      {:ok, git} = Jail.git(wt)
+      assert git.dot_git_file?
+      assert git.worktrees_dir?
+
+      out =
+        jailed(
+          fx,
+          """
+          echo change > "$0/new.txt" && git add new.txt && git commit -q -m jailed && git log --format=%s -1 && echo COMMIT_OK
+          """,
+          %{git: git, env: git_env}
+        )
+
+      assert out =~ "COMMIT_OK"
+      assert out =~ "jailed"
+
+      # The commit landed in the real repo's worktree gitdir, and the sibling
+      # worktree is still hidden from the jailed process.
+      {log, 0} = System.cmd("git", ["log", "--format=%s", "-1", "task"], cd: fx.own_repo)
+      assert String.trim(log) == "jailed"
+      refute jailed(fx, ~s(ls "#{fx.wt_root}"), %{git: git}) =~ "sibling-task"
+    end
+
+    test "ssh reads ~/.ssh/config, known_hosts and the default identity under the masks", %{
+      fx: fx
+    } do
+      ssh = Path.join(fx.home, ".ssh")
+      key = Path.join(ssh, "id_ed25519")
+      File.rm!(key)
+
+      assert {_, 0} =
+               System.cmd("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", key],
+                 stderr_to_stdout: true
+               )
+
+      File.write!(
+        Path.join(ssh, "config"),
+        "Host github.com\n  ProxyCommand socat - UNIX-CONNECT:/run/egress.sock\n  IdentityFile #{key}\n  UserKnownHostsFile #{ssh}/known_hosts\n"
+      )
+
+      out =
+        jailed(
+          fx,
+          """
+          ssh -F "#{ssh}/config" -G github.com | grep -i -E '^(proxycommand|identityfile|userknownhostsfile) '
+          ssh-keygen -y -f "#{key}" | cut -d' ' -f1
+          cat "#{ssh}/known_hosts" >/dev/null && echo KNOWN_OK
+          cat "#{ssh}/ci.id_ed25519" 2>/dev/null; echo end
+          """
+        )
+
+      assert out =~ ~r/proxycommand socat/i
+      assert out =~ "ssh-ed25519"
+      assert out =~ "KNOWN_OK"
+      refute out =~ "SECRET-.ssh/ci.id_ed25519"
+    end
+
+    test "Jail.wrap/2 with hide_reads: true hides the configured install DB inside a real jail",
          %{base: base} do
+      # Not under /tmp (the jail already blanks that); put the DB next to the
+      # scratch dir so only the hide set can hide it.
+      db = Path.join(base, "install.sqlite3")
+      File.write!(db, "SECRET-install-db")
+
+      repo = Application.get_env(:arbiter, Arbiter.Repo)
+      Application.put_env(:arbiter, Arbiter.Repo, Keyword.put(repo, :database, db))
+      on_exit(fn -> Application.put_env(:arbiter, Arbiter.Repo, repo) end)
+
       wt = Path.join(base, "wrap-wt")
       File.mkdir_p!(wt)
-      {:ok, [exec | args]} = Jail.wrap(["sh", "-c", "echo end"], worktree: wt, hide_reads: true)
-      assert {"end\n", 0} = System.cmd(exec, args, stderr_to_stdout: true)
+
+      script = ~s(cat "#{db}" 2>/dev/null; echo end)
+
+      {:ok, [exec | args]} = Jail.wrap(["sh", "-c", script], worktree: wt, hide_reads: true)
+      {out, 0} = System.cmd(exec, args, stderr_to_stdout: true)
+
+      # Shadowed by /dev/null: nothing of the DB comes back.
+      assert out == "end\n"
     end
 
     test "reads_probe/0 reports nothing reachable" do
