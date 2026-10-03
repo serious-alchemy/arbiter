@@ -48,6 +48,7 @@ defmodule Arbiter.Board.QueueOrder do
           resolutions: %{optional(String.t()) => EpicFloor.resolution()},
           settings: settings(),
           capped?: boolean(),
+          lift_slots: %{in_flight: non_neg_integer(), cap: pos_integer()},
           ready_since: %{optional(String.t()) => DateTime.t()},
           now: DateTime.t()
         }
@@ -104,11 +105,14 @@ defmodule Arbiter.Board.QueueOrder do
   def build(issues, parent_of, slots_total, settings, ready_since, now) do
     settings = settings(settings)
     resolutions = resolve(issues, parent_of, settings)
+    cap = lift_cap(settings, slots_total)
+    in_flight = lifted_active(issues, resolutions)
 
     %{
       resolutions: resolutions,
       settings: settings,
-      capped?: capped?(issues, resolutions, lift_cap(settings, slots_total)),
+      capped?: in_flight >= cap and resolutions != %{},
+      lift_slots: %{in_flight: in_flight, cap: cap},
       ready_since: ready_since || %{},
       now: now
     }
@@ -121,14 +125,30 @@ defmodule Arbiter.Board.QueueOrder do
     {effective, via, lift} = lift(own, res, ctx.capped?)
     {class, leaves} = finish(card, res, ctx)
 
-    Map.merge(card, %{
+    card
+    |> Map.merge(%{
       effective_priority: effective,
       priority_via: via,
       priority_lift: lift,
       finish_class: class,
       open_leaves: leaves
     })
+    |> put_lift_detail(res, lift, ctx)
   end
+
+  # ES5: what the badge's title needs to say a capped lift is waiting — the
+  # floor, and how many of the lifted slots are taken. Only a lifted card
+  # carries them, so a board with no floors is unchanged.
+  defp put_lift_detail(card, %{effective: floor}, lift, %{lift_slots: slots})
+       when lift in [:applied, :capped] do
+    Map.merge(card, %{
+      lift_floor: floor,
+      lift_in_flight: slots.in_flight,
+      lift_cap: slots.cap
+    })
+  end
+
+  defp put_lift_detail(card, _res, _lift, _ctx), do: card
 
   defp lift(own, %{lifted?: true, via: via}, true), do: {own, via, :capped}
   defp lift(_own, %{lifted?: true, via: via, effective: eff}, false), do: {eff, via, :applied}
@@ -191,15 +211,12 @@ defmodule Arbiter.Board.QueueOrder do
     }
   end
 
-  defp capped?(_issues, resolutions, _cap) when resolutions == %{}, do: false
+  defp lifted_active(_issues, resolutions) when resolutions == %{}, do: 0
 
-  defp capped?(issues, resolutions, cap) do
-    lifted_active =
-      Enum.count(issues, fn issue ->
-        Lifecycle.state_of(issue) == :active and
-          match?(%{lifted?: true}, Map.get(resolutions, issue.id))
-      end)
-
-    lifted_active >= cap
+  defp lifted_active(issues, resolutions) do
+    Enum.count(issues, fn issue ->
+      Lifecycle.state_of(issue) == :active and
+        match?(%{lifted?: true}, Map.get(resolutions, issue.id))
+    end)
   end
 end

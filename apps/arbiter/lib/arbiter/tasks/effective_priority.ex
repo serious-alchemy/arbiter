@@ -63,6 +63,22 @@ defmodule Arbiter.Tasks.EffectivePriority do
 
   def fields(_issue, _opts), do: own_fields(nil)
 
+  @doc """
+  The annotated queue card (`Arbiter.Board.QueueOrder.annotate/2`, with the
+  `lift_*` detail the ES5 UI words its titles from) for each of `issues`, keyed
+  by id, resolved against one board read. Empty when no floor is set, so a
+  caller treats a missing id as "own priority" (ES5).
+  """
+  @spec cards([map()], keyword()) :: %{String.t() => map()}
+  def cards(issues, opts \\ []) when is_list(issues) do
+    case floor_context(opts) do
+      nil -> %{}
+      ctx -> Map.new(issues, &{&1.id, QueueOrder.annotate(card(&1), ctx)})
+    end
+  rescue
+    _ -> %{}
+  end
+
   @doc "The effective priority `issue` is queued by; P2 when it can't be read."
   @spec effective(map() | nil) :: integer()
   def effective(issue) do

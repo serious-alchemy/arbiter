@@ -63,6 +63,10 @@ defmodule ArbiterWeb.ParentLink do
   attr :id, :string, default: nil
   attr :class, :any, default: nil
 
+  attr :floor, :integer,
+    default: nil,
+    doc: "ES5: when this parent's epic floor lifts the card, the compact chip says `· floor P1`"
+
   def parent_links(assigns) do
     ~H"""
     <div :if={@parents != []} id={@id} class={["flex flex-col gap-1", @class]}>
@@ -88,6 +92,10 @@ defmodule ArbiterWeb.ParentLink do
 
   attr :id, :string, default: nil
   attr :class, :any, default: nil
+
+  attr :floor, :integer,
+    default: nil,
+    doc: "ES5: when this parent's epic floor lifts the card, the compact chip says `· floor P1`"
 
   def parent_link(assigns) do
     parent = assigns.parent
@@ -131,7 +139,10 @@ defmodule ArbiterWeb.ParentLink do
         @class
       ]}
     >
-      <span aria-hidden="true">↳</span>{@parent.id}
+      <span aria-hidden="true">↳</span>{@parent.id}<span
+        :if={@floor}
+        data-role="parent-floor"
+      > · floor P{@floor}</span>
     </.link>
     """
   end

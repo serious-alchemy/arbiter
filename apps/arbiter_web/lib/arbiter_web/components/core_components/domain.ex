@@ -219,6 +219,11 @@ defmodule ArbiterWeb.CoreComponents.Domain do
     doc: "left accent rule: the state that owns this card right now"
 
   attr :priority, :integer, default: nil
+
+  attr :lift, :map,
+    default: nil,
+    doc: "ES5: the card's epic-floor fields, handed to `<.priority_tag lift>`"
+
   attr :type, :any, default: nil
 
   attr :difficulty, :any,
@@ -330,7 +335,12 @@ defmodule ArbiterWeb.CoreComponents.Domain do
         :if={task_card_meta?(assigns)}
         class="arb-card-meta flex items-center gap-1.5 flex-wrap"
       >
-        <.priority_tag :if={@priority != nil} priority={@priority} />
+        <.priority_tag
+          :if={@priority != nil}
+          id={"#{@id}-priority"}
+          priority={@priority}
+          lift={@lift}
+        />
         <.type_tag :if={@type} type={@type} />
         <.difficulty_meter :if={@difficulty != :unset} difficulty={@difficulty} />
         <span
