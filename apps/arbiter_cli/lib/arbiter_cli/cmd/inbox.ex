@@ -221,7 +221,7 @@ defmodule ArbiterCli.Cmd.Inbox do
       case Client.get("/api/messages", to_ref: @coordinator, limit: 50) do
         {:ok, %{"data" => list}} -> match_prefix(list, token)
         {:ok, _} -> {:error, "no coordinator message matches id #{inspect(token)}"}
-        {:error, %Client.Error{status: 403} = err} -> die_scope_refused(err, token)
+        {:error, %Client.Error{status: 403} = err} -> {:error, scope_refused(err, token)}
         {:error, err} -> Output.die(err)
       end
     end
@@ -229,12 +229,10 @@ defmodule ArbiterCli.Cmd.Inbox do
 
   # A worker token cannot list the coordinator mailbox to expand a short prefix.
   # Say so and name the way out instead of surfacing a bare 403.
-  defp die_scope_refused(%Client.Error{message: message}, token) do
-    Output.die(
-      "#{message}. A worker token can read only its own task's mail and cannot expand " <>
-        "the short id #{inspect(token)}; pass the full message id (printed by " <>
-        "`arb inbox <task-id>`) to `arb inbox read`."
-    )
+  defp scope_refused(%Client.Error{message: message}, token) do
+    "#{message}. A worker token can read only its own task's mail and cannot expand " <>
+      "the short id #{inspect(token)}; pass the full message id (printed by " <>
+      "`arb inbox <task-id>`) to `arb inbox read`."
   end
 
   defp match_prefix(list, token) do
