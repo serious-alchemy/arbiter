@@ -33,7 +33,11 @@ defmodule Arbiter.Worker.ContainerTest do
   defp flags(argv), do: argv |> Enum.take_while(&(&1 != "--"))
 
   defp pairs(argv, flag),
-    do: argv |> Enum.chunk_every(2, 1, :discard) |> Enum.filter(&(hd(&1) == flag)) |> Enum.map(&List.last/1)
+    do:
+      argv
+      |> Enum.chunk_every(2, 1, :discard)
+      |> Enum.filter(&(hd(&1) == flag))
+      |> Enum.map(&List.last/1)
 
   describe "argv/2: shape" do
     test "starts with `podman run`, names the container, and ends with `-- image command`" do
@@ -45,7 +49,12 @@ defmodule Arbiter.Worker.ContainerTest do
 
     test "has exactly one `--` boundary, before the image, even if the command has its own" do
       argv = argv(%{}, ["claude", "--", "prompt"])
-      [before, after_] = [Enum.find_index(argv, &(&1 == "--")), Enum.find_index(argv, &(&1 == @image))]
+
+      [before, after_] = [
+        Enum.find_index(argv, &(&1 == "--")),
+        Enum.find_index(argv, &(&1 == @image))
+      ]
+
       assert before + 1 == after_
       assert Enum.count(flags(argv), &(&1 == "--")) == 0
     end
@@ -88,7 +97,10 @@ defmodule Arbiter.Worker.ContainerTest do
     end
 
     test "extra tmpfs paths are added" do
-      assert Enum.any?(pairs(argv(%{tmpfs: ["/var/cache"]}), "--tmpfs"), &String.starts_with?(&1, "/var/cache:"))
+      assert Enum.any?(
+               pairs(argv(%{tmpfs: ["/var/cache"]}), "--tmpfs"),
+               &String.starts_with?(&1, "/var/cache:")
+             )
     end
   end
 
@@ -207,12 +219,18 @@ defmodule Arbiter.Worker.ContainerTest do
     end
 
     defp opts(dir, extra \\ []) do
-      Keyword.merge([worktree: dir, name: "arb-t1", image: @image, podman: "/usr/bin/podman"], extra)
+      Keyword.merge(
+        [worktree: dir, name: "arb-t1", image: @image, podman: "/usr/bin/podman"],
+        extra
+      )
     end
 
     test "builds the same argv as argv/2 from keyword options", %{dir: dir} do
       assert {:ok, argv} =
-               Container.wrap(["echo", "hi"], opts(dir, home: dir <> "/h", inherit_env: ["ARB_TOKEN"]))
+               Container.wrap(
+                 ["echo", "hi"],
+                 opts(dir, home: dir <> "/h", inherit_env: ["ARB_TOKEN"])
+               )
 
       assert pairs(argv, "--name") == ["arb-t1"]
       assert "ARB_TOKEN" in pairs(argv, "-e")
@@ -222,11 +240,20 @@ defmodule Arbiter.Worker.ContainerTest do
     test "requires a worktree, an image and a name", %{dir: dir} do
       assert {:error, :no_worktree} = Container.wrap(["x"], Keyword.delete(opts(dir), :worktree))
       assert {:error, :no_image} = Container.wrap(["x"], Keyword.delete(opts(dir), :image))
-      assert {:error, :no_container_name} = Container.wrap(["x"], Keyword.delete(opts(dir), :name))
+
+      assert {:error, :no_container_name} =
+               Container.wrap(["x"], Keyword.delete(opts(dir), :name))
     end
 
     test "container names must carry the arb- prefix and be a safe token", %{dir: dir} do
-      for bad <- ["run1", "arb-", "arb-a b", "arb-a/b", "arb-;rm", "arb-" <> String.duplicate("a", 80)] do
+      for bad <- [
+            "run1",
+            "arb-",
+            "arb-a b",
+            "arb-a/b",
+            "arb-;rm",
+            "arb-" <> String.duplicate("a", 80)
+          ] do
         assert {:error, {:bad_container_name, ^bad}} = Container.wrap(["x"], opts(dir, name: bad))
       end
 
@@ -234,9 +261,14 @@ defmodule Arbiter.Worker.ContainerTest do
     end
 
     test "env names are validated", %{dir: dir} do
-      assert {:error, {:bad_env_name, "A B"}} = Container.wrap(["x"], opts(dir, inherit_env: ["A B"]))
-      assert {:error, {:bad_env_name, "A=B"}} = Container.wrap(["x"], opts(dir, env: [{"A=B", "v"}]))
-      assert {:error, {:bad_env_value, "A"}} = Container.wrap(["x"], opts(dir, env: [{"A", "v\0"}]))
+      assert {:error, {:bad_env_name, "A B"}} =
+               Container.wrap(["x"], opts(dir, inherit_env: ["A B"]))
+
+      assert {:error, {:bad_env_name, "A=B"}} =
+               Container.wrap(["x"], opts(dir, env: [{"A=B", "v"}]))
+
+      assert {:error, {:bad_env_value, "A"}} =
+               Container.wrap(["x"], opts(dir, env: [{"A", "v\0"}]))
     end
 
     test "mount paths must be absolute and free of mount-option syntax", %{dir: dir} do
@@ -308,7 +340,9 @@ defmodule Arbiter.Worker.ContainerTest do
       test_pid = self()
       runner = fn cmd, args, _ -> send(test_pid, {:ran, cmd, args}) && {"", 0} end
 
-      assert {:error, {:bad_container_name, "postgres"}} = Container.stop("postgres", runner: runner)
+      assert {:error, {:bad_container_name, "postgres"}} =
+               Container.stop("postgres", runner: runner)
+
       assert {:error, {:bad_container_name, "--all"}} = Container.stop("--all", runner: runner)
       refute_received {:ran, _, _}
     end

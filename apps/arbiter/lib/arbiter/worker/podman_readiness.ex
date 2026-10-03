@@ -491,7 +491,9 @@ defmodule Arbiter.Worker.PodmanReadiness do
         end
 
       {out, _} ->
-        teardown_skipped("could not start the probe container: #{String.slice(String.trim(out), 0, 200)}")
+        teardown_skipped(
+          "could not start the probe container: #{String.slice(String.trim(out), 0, 200)}"
+        )
     end
   end
 

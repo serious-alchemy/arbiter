@@ -51,8 +51,10 @@ defmodule Arbiter.Worker.Container do
 
   ## Teardown by name (design §6.4)
 
-  Killing the `podman run` client does **not** stop the container: `kill -KILL`
-  leaves it running, and `kill -TERM` leaves one whose PID 1 ignores signals.
+  Killing the `podman run` client is not a reliable way to stop the container:
+  the design's probe saw `kill -KILL` leave it running and `kill -TERM` leave
+  one whose PID 1 ignores signals. Podman 5.8.7 with a Port-attached client
+  removed it on its own, so the behaviour varies; do not rely on either.
   So every container is named (`name_for/1`, always `arb-…`), run with `--init`
   and `--rm`, and `stop/2` / `teardown/1` remove it by name
   (`podman rm --force --ignore --time 0`). `run/2` does that in an `after`, so
@@ -140,7 +142,8 @@ defmodule Arbiter.Worker.Container do
     ])
   end
 
-  defp network(spec), do: if(Map.get(spec, :bridges, []) == [], do: Map.get(spec, :network, :none), else: :none)
+  defp network(spec),
+    do: if(Map.get(spec, :bridges, []) == [], do: Map.get(spec, :network, :none), else: :none)
 
   defp tmpfs_args("/dev/shm"), do: ["--tmpfs", "/dev/shm:rw,nosuid,nodev,noexec,size=64m"]
   defp tmpfs_args("/tmp"), do: ["--tmpfs", "/tmp:rw,nosuid,nodev"]
@@ -235,8 +238,11 @@ defmodule Arbiter.Worker.Container do
 
   defp fetch_image(opts) do
     case Keyword.get(opts, :image) do
-      image when is_binary(image) and image != "" -> if String.starts_with?(image, "-"), do: {:error, {:bad_image, image}}, else: {:ok, image}
-      _ -> {:error, :no_image}
+      image when is_binary(image) and image != "" ->
+        if String.starts_with?(image, "-"), do: {:error, {:bad_image, image}}, else: {:ok, image}
+
+      _ ->
+        {:error, :no_image}
     end
   end
 
@@ -273,7 +279,9 @@ defmodule Arbiter.Worker.Container do
   end
 
   defp check_env(opts) do
-    names = Keyword.get(opts, :inherit_env, []) ++ Enum.map(Keyword.get(opts, :env, []), &elem(&1, 0))
+    names =
+      Keyword.get(opts, :inherit_env, []) ++ Enum.map(Keyword.get(opts, :env, []), &elem(&1, 0))
+
     values = Keyword.get(opts, :env, [])
 
     with nil <- Enum.find(names, &(not (is_binary(&1) and Regex.match?(@env_re, &1)))),
@@ -337,8 +345,11 @@ defmodule Arbiter.Worker.Container do
 
   def teardown(name) when is_binary(name) do
     case stop(name, []) do
-      :ok -> :ok
-      {:error, reason} -> Logger.warning("container teardown of #{name} failed: #{inspect(reason)}")
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("container teardown of #{name} failed: #{inspect(reason)}")
     end
 
     :ok
@@ -383,7 +394,14 @@ defmodule Arbiter.Worker.Container do
           {:ok, {String.t(), non_neg_integer()}} | {:error, term()}
   def run(command, opts) when is_list(command) and is_list(opts) do
     secret_env = Keyword.get(opts, :secret_env, [])
-    opts = Keyword.update(opts, :inherit_env, secret_names(secret_env), &(&1 ++ secret_names(secret_env)))
+
+    opts =
+      Keyword.update(
+        opts,
+        :inherit_env,
+        secret_names(secret_env),
+        &(&1 ++ secret_names(secret_env))
+      )
 
     with {:ok, [podman | args]} <- wrap(command, opts) do
       name = Keyword.fetch!(opts, :name)
