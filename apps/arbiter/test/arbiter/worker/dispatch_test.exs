@@ -2437,6 +2437,67 @@ defmodule Arbiter.Worker.DispatchTest do
       refute File.exists?(claude_file)
     end
 
+    # bd-d2o3xb (P7), the production call path: Dispatch -> adapter argv ->
+    # ClaudeSession -> `podman run`. A stand-in `podman` on PATH records what it
+    # was asked to run; the host's `claude` is never executed.
+    test "sandbox.backend: podman runs the claude spawn as a `podman run` over the private clone",
+         %{ws: ws, tmp: tmp} do
+      claude_file = Path.join(tmp, "claude-argv.txt")
+      podman_file = Path.join(tmp, "podman-argv.txt")
+      :ok = stub_claude_on_path(tmp, claude_file)
+      :ok = stub_named_on_path(tmp, "podman", podman_file)
+
+      repo = seed_repo!(tmp, "podman-run-repo")
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "podman-run-wt"))
+      put_app_env(:arbiter, :repo_paths, %{"pr/repo" => repo})
+      put_app_env(:arbiter, :worker_container_available, true)
+      put_app_env(:arbiter, :worker_container_network_available, true)
+      put_app_env(:arbiter, :worker_container_image, "localhost/arb-test/dispatch:1")
+
+      {:ok, ws} =
+        Ash.update(ws, %{
+          config: %{
+            "agent" => %{
+              "type" => "claude",
+              "security" => %{"sandbox" => %{"backend" => "podman"}}
+            }
+          }
+        })
+
+      {:ok, task} = Ash.create(Issue, %{title: "podman run", workspace_id: ws.id})
+
+      assert {:ok, %{worktree_path: clone}} =
+               Dispatch.dispatch(task.id,
+                 force: true,
+                 repo: "pr/repo",
+                 start_driver: false,
+                 start_claude: true,
+                 preflight: false
+               )
+
+      assert Arbiter.Worker.PrivateClone.clone?(clone)
+
+      argv =
+        Enum.reduce_while(1..200, nil, fn _, _ ->
+          case File.read(podman_file) do
+            {:ok, out} when out != "" -> {:halt, String.split(out, "\n", trim: true)}
+            _ -> Process.sleep(25) && {:cont, nil}
+          end
+        end)
+
+      assert is_list(argv), "the stand-in podman was never run"
+      assert hd(argv) == "run"
+      assert "--network=none" in argv
+      assert "--userns=keep-id" in argv
+      assert "localhost/arb-test/dispatch:1" in argv
+      assert "#{clone}:#{clone}:rw" in argv
+      assert "/opt/arbiter/cli/claude" in argv
+      assert "--print" in argv
+
+      # The host's claude never ran: only the container's command line names it.
+      refute File.exists?(claude_file)
+    end
+
     # The checkout a podman dispatch gets is a private clone, and only Claude
     # has a container wrap point: an explicit provider that has none is refused
     # at the gate, before anything is spawned.

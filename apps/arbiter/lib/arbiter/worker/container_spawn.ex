@@ -175,9 +175,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
 
   defp host_ready do
     with :ok <- wrap_status(Container.status(), :podman_unavailable),
-         :ok <- wrap_status(Container.network_status(), :podman_network_unavailable) do
-      :ok
-    end
+         do: wrap_status(Container.network_status(), :podman_network_unavailable)
   end
 
   defp wrap_status(:ok, _tag), do: :ok
