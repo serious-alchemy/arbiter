@@ -158,7 +158,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     assert exit_code == 0
     assert {:ok, %{"ok" => true, "checks" => checks}} = Jason.decode(String.trim(out))
     assert is_list(checks)
-    assert length(checks) == 23
+    assert length(checks) == 24
   end
 
   test "version mismatch is non-fatal (exit 0 but shows [fail])" do
@@ -1618,6 +1618,120 @@ defmodule ArbiterCli.Cmd.DoctorTest do
 
       result = Enum.find(Checks.run(), &(&1.name == "worker temp dir"))
       assert result.status == :ok
+    end
+  end
+
+  # bd-6zuoo6: one worker's runaway process must not be able to stop the server.
+  describe "worker memory check" do
+    defp worker_memory_routes(body) do
+      [
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/worker_memory"}, {body, 200}}
+      ]
+    end
+
+    defp memory_body(overrides) do
+      Map.merge(
+        %{
+          "enabled" => true,
+          "capped" => true,
+          "available" => true,
+          "cap" => "40%",
+          "unavailable_reason" => nil,
+          "service_unit" => "arbiter.service",
+          "service_manager" => "user",
+          "oom_policy" => "continue",
+          "memory_max" => "infinity"
+        },
+        overrides
+      )
+    end
+
+    defp memory_result(body) do
+      stub_routes(worker_memory_routes(body))
+      Enum.find(Checks.run(), &(&1.name == "worker memory cap"))
+    end
+
+    test "warns loudly for OOMPolicy=stop with no per-worker cap" do
+      result =
+        memory_result(
+          memory_body(%{"oom_policy" => "stop", "capped" => false, "enabled" => false})
+        )
+
+      assert result.status == :warn
+      assert result.detail =~ "OOMPolicy=stop"
+      assert result.detail =~ "no per-worker memory cap"
+      assert result.hint =~ "OOMPolicy=continue"
+      refute result.blocks_readiness
+    end
+
+    test "an unreadable OOMPolicy is reported as unknown, not as OOMPolicy=stop" do
+      result = memory_result(memory_body(%{"oom_policy" => nil}))
+
+      assert result.status == :warn
+      assert result.detail =~ "could not read OOMPolicy for arbiter.service"
+      refute result.detail =~ "OOMPolicy=stop"
+      refute result.blocks_readiness
+    end
+
+    test "says why an enabled cap is not in force" do
+      result =
+        memory_result(
+          memory_body(%{
+            "oom_policy" => "stop",
+            "capped" => false,
+            "available" => false,
+            "unavailable_reason" => "cgroup v2 (unified hierarchy) is not mounted"
+          })
+        )
+
+      assert result.status == :warn
+      assert result.detail =~ "cgroup v2"
+    end
+
+    test "still warns for OOMPolicy=stop when workers are capped" do
+      result = memory_result(memory_body(%{"oom_policy" => "stop"}))
+
+      assert result.status == :warn
+      assert result.detail =~ "capped at 40%"
+      assert result.hint =~ "OOMPolicy=continue"
+    end
+
+    test "is ok with OOMPolicy=continue and a cap in force" do
+      result = memory_result(memory_body(%{}))
+
+      assert result.status == :ok
+      assert result.detail =~ "40%"
+    end
+
+    test "warns about a missing cap even with OOMPolicy=continue" do
+      result = memory_result(memory_body(%{"capped" => false, "enabled" => false}))
+
+      assert result.status == :warn
+      assert result.detail =~ "no per-worker memory cap"
+    end
+
+    test "a server that is not a systemd service has no OOM policy to judge" do
+      result =
+        memory_result(
+          memory_body(%{"service_unit" => nil, "service_manager" => nil, "oom_policy" => nil})
+        )
+
+      assert result.status == :ok
+      assert result.detail =~ "not running as a systemd service"
+    end
+
+    test "an unreachable or older server is skipped, not failed" do
+      stub_routes(
+        List.keydelete(worker_memory_routes(%{}), {"get", "/api/server/worker_memory"}, 0)
+      )
+
+      result = Enum.find(Checks.run(), &(&1.name == "worker memory cap"))
+      assert result.status == :ok
+      assert result.detail =~ "skipping"
     end
   end
 

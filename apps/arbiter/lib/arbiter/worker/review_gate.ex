@@ -345,6 +345,9 @@ defmodule Arbiter.Worker.ReviewGate do
     :stream_schema_drift,
     :agent_print_timeout,
     :killed,
+    # bd-6zuoo6: a re-prompted reviewer re-runs the same workload into the
+    # same memory cap.
+    :memory_cap_exceeded,
     # bd-2s755v: a re-prompt sends the same rejected `-m` model.
     :model_unavailable
   ]

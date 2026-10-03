@@ -49,6 +49,14 @@ defmodule Arbiter.Worker.StopReason do
       a huge PR body / API dump), not a task or agent bug. Retrying
       identically reproduces it — the remediation is a bigger context window
       or narrower reads, not a re-dispatch.
+    * `:memory_cap_exceeded` — the worker's per-spawn memory-capped systemd scope
+      (`Arbiter.Worker.MemoryScope`) was OOM-killed (bd-6zuoo6). Synthesized by
+      `Arbiter.Worker` from systemd's own `Result=oom-kill` for the scope, never
+      by `classify/3`: the exit status is a bare 137, indistinguishable from any
+      other SIGKILL. A deliberate refinement of `:killed` — the cause is a
+      runaway process tree *inside* the run (almost always a `mix test`), so a
+      re-dispatch reproduces it; the remediation is a smaller workload or a
+      larger `ARBITER_WORKER_MEMORY_MAX`, not a retry. Not resumable.
     * `:killed` — terminated by a signal (the `sh` wrapper reports `128 + N`).
       External kill, OOM, host restart.
     * `:spawn_exec_failed` — non-zero exit with **zero captured output** at
@@ -175,6 +183,7 @@ defmodule Arbiter.Worker.StopReason do
           | :gateway_error
           | :context_thrash
           | :killed
+          | :memory_cap_exceeded
           | :spawn_exec_failed
           | :crashed
           | :stream_schema_drift
@@ -800,6 +809,42 @@ defmodule Arbiter.Worker.StopReason do
   end
 
   @doc """
+  Build a `:memory_cap_exceeded` reason (bd-6zuoo6): the worker's memory-capped
+  scope reported `Result=oom-kill`. `info` is `MemoryScope.outcome/2`'s map
+  (`:max` the configured cap, `:peak` the scope's high-water mark in bytes or
+  `nil`).
+  """
+  @spec memory_cap_exceeded(%{max: String.t(), peak: integer() | nil}, integer() | nil) :: t()
+  def memory_cap_exceeded(%{max: max} = info, exit_status) do
+    peak =
+      case Map.get(info, :peak) do
+        bytes when is_integer(bytes) -> ", peak #{format_bytes(bytes)}"
+        _ -> ""
+      end
+
+    %__MODULE__{
+      category: :memory_cap_exceeded,
+      summary:
+        "memory cap exceeded: the worker's process tree hit its per-worker limit " <>
+          "(MemoryMax=#{max}#{peak}) and was OOM-killed — the agent and everything it had " <>
+          "spawned (typically a runaway `mix test` BEAM) were stopped; the server was not",
+      remediation:
+        "Find what grew without bound (the run's transcript names the last command) and " <>
+          "fix or narrow it. Re-dispatching the same work will usually hit the cap again. " <>
+          "If the workload is legitimately large, raise ARBITER_WORKER_MEMORY_MAX " <>
+          "(e.g. 24G or 60%) and restart the server. The OOM is attributable via the " <>
+          "run's cgroup scope (worker_runs.cgroup_scopes).",
+      exit_status: exit_status,
+      signal: signal_for(exit_status)
+    }
+  end
+
+  defp format_bytes(bytes) do
+    gib = bytes / 1_073_741_824
+    "#{:erlang.float_to_binary(gib, decimals: 1)} GiB"
+  end
+
+  @doc """
   A compact one-line label for logs / message subjects, e.g.
   `"credentials expired (exit 1)"`.
   """
@@ -818,6 +863,7 @@ defmodule Arbiter.Worker.StopReason do
         :gateway_error -> "gateway error (proxy/upstream)"
         :context_thrash -> "context window thrashed (autocompact loop)"
         :killed -> "killed by signal #{reason.signal}"
+        :memory_cap_exceeded -> "memory cap exceeded (worker process tree OOM-killed)"
         :spawn_exec_failed -> "spawn failed (no output — exec error)"
         :crashed -> "crashed"
         :stream_schema_drift -> "agent CLI stream schema not understood (harness bug)"

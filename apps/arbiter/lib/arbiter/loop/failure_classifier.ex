@@ -143,6 +143,11 @@ defmodule Arbiter.Loop.FailureClassifier do
     gateway_error: {:operational, :gateway_error},
     stream_schema_drift: {:operational, :stream_schema_drift},
     killed: {:operational, :killed},
+    # bd-6zuoo6: the worker's capped scope was OOM-killed. Infrastructure by
+    # design (a per-worker resource limit, not a judgement of the work), and
+    # conclusive on its own: the transcript is whatever the run was doing when
+    # the kernel ended it.
+    memory_cap_exceeded: {:operational, :memory_cap_exceeded},
     spawn_exec_failed: {:operational, :spawn_failure},
     spawn_failed: {:operational, :spawn_failure},
     # bd-b6noq9: the run's workspace was deleted while it was alive. Always

@@ -63,6 +63,7 @@ defmodule ArbiterWeb.Api.ServerController do
   alias Arbiter.Mergers.RoutingCheck
   alias Arbiter.Worker.Egress.SelfTest
   alias Arbiter.Worker.Jail
+  alias Arbiter.Worker.MemoryScope.Diagnosis, as: MemoryDiagnosis
 
   def migrations(conn, _params) do
     case Arbiter.Migrations.count_pending() do
@@ -140,6 +141,10 @@ defmodule ArbiterWeb.Api.ServerController do
 
   # bd-5ad4ch: where per-run worker TMPDIRs live, and whether that is RAM.
   def worker_tmp(conn, _params), do: json(conn, Arbiter.Worker.RunTmp.diagnosis())
+
+  # bd-6zuoo6: is the per-worker memory cap in force, and what does the
+  # server's own unit do when the kernel OOM-kills one of its processes?
+  def worker_memory(conn, _params), do: json(conn, MemoryDiagnosis.run())
 
   def tmux(conn, _params), do: json(conn, LoginRunner.tmux_diagnosis())
 

@@ -90,7 +90,7 @@ defmodule ArbiterCli.Cmd.InstallService.Unit do
     #{log_directives}ExecStart=#{release_bin} start
     Restart=on-failure
     RestartSec=10
-
+    #{oom_directive()}
     [Install]
     WantedBy=#{wanted_by}
     """
@@ -127,11 +127,22 @@ defmodule ArbiterCli.Cmd.InstallService.Unit do
     Restart=on-failure
     RestartSec=10
     TimeoutStartSec=900
-
+    #{oom_directive()}
     [Install]
     WantedBy=#{wanted_by}
     """
   end
+
+  # bd-6zuoo6 (GitHub #265): systemd's default `OOMPolicy=stop` stops the WHOLE
+  # service when the kernel OOM-kills any one process in its cgroup — a single
+  # runaway worker `mix test` (17.5 GB, 2026-10-03) took the server and every
+  # in-flight run down with it, twice. `continue` leaves the survivors running
+  # (and if the server's own BEAM is the one killed, `Restart=on-failure` still
+  # brings it back). Workers are additionally capped and moved into their own
+  # scopes (`Arbiter.Worker.MemoryScope`); this is the backstop for anything
+  # that still lives in the unit. An already-installed unit needs the same line
+  # as a drop-in — see docs/worker-memory-cap.md — which `arb doctor` checks.
+  defp oom_directive, do: "OOMPolicy=continue\n"
 
   # System units can order against the docker daemon; a user manager runs in
   # a different bus and can't.

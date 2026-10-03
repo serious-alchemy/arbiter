@@ -167,6 +167,11 @@ config :arbiter, :worktree_root, Path.join(scratch_root, "worktrees-test")
 config :arbiter, :worker_tmp_root, Path.join(scratch_root, "worker-tmp-test")
 config :arbiter, :run_tmp_sweeper, enabled: false
 
+# bd-6zuoo6: never wrap test spawns in a systemd scope — whether the host has a
+# user manager must not decide a test's outcome. The tests that exercise the cap
+# set `:worker_memory_max` themselves (fake binaries, or `:live_systemd`).
+config :arbiter, :worker_memory_max, "off"
+
 # bd-5gvqgc: never let the bwrap write-jail probe decide dispatch outcomes
 # under test — whether the host can jail must not flip the :strict gate's
 # answer for agy. Tests that exercise the jail call `Jail.probe/0` directly
