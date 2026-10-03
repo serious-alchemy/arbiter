@@ -27,7 +27,7 @@ defmodule ArbiterCli.Cmd.ImageTest do
     ],
     "pins" => [
       %{
-        "ref" => "docker.io/library/debian:bookworm-slim",
+        "ref" => "docker.io/library/debian:trixie-slim",
         "digest" => "sha256:" <> String.duplicate("a", 64),
         "resolved_at" => "2026-10-03T00:00:00Z"
       }
@@ -45,7 +45,7 @@ defmodule ArbiterCli.Cmd.ImageTest do
       assert out =~ "beam-1.19.4-28.2"
       assert out =~ "bbbbbbbbbbbb"
       assert out =~ "base"
-      assert out =~ "docker.io/library/debian:bookworm-slim"
+      assert out =~ "docker.io/library/debian:trixie-slim"
       assert out =~ "sha256:" <> String.duplicate("a", 64)
     end
 
@@ -130,7 +130,7 @@ defmodule ArbiterCli.Cmd.ImageTest do
         %{
           "changed" => [
             %{
-              "ref" => "docker.io/library/debian:bookworm-slim",
+              "ref" => "docker.io/library/debian:trixie-slim",
               "from" => "sha256:a",
               "to" => "sha256:b"
             }
@@ -142,7 +142,7 @@ defmodule ArbiterCli.Cmd.ImageTest do
       )
 
       {out, _err, 0} = capture(fn -> ArbiterCli.Cmd.Image.run(["refresh"]) end)
-      assert out =~ "docker.io/library/debian:bookworm-slim"
+      assert out =~ "docker.io/library/debian:trixie-slim"
       assert out =~ "sha256:b"
       assert out =~ @base
     end

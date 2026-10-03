@@ -4,7 +4,7 @@ defmodule Arbiter.Worker.Image.Pins do
 
   A worker image's `FROM` lines are pinned by digest, so a registry tag that
   moves under an unchanged Containerfile cannot change what Arbiter builds
-  (supply chain, §8). The pin for `docker.io/library/debian:bookworm-slim` is
+  (supply chain, §8). The pin for `docker.io/library/debian:trixie-slim` is
   looked up here: the first request resolves the tag against the registry and
   records the digest, later requests reuse it, and the **weekly base refresh**
   (`refresh/1`, run by `Arbiter.Worker.Image.Refresher`) re-resolves every pin.

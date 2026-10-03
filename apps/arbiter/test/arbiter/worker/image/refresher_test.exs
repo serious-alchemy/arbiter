@@ -11,7 +11,7 @@ defmodule Arbiter.Worker.Image.RefresherTest do
 
   @a "sha256:" <> String.duplicate("a", 64)
   @b "sha256:" <> String.duplicate("b", 64)
-  @ref "docker.io/library/debian:bookworm-slim"
+  @ref "docker.io/library/debian:trixie-slim"
 
   setup do
     root =

@@ -18,7 +18,7 @@ defmodule Arbiter.Worker.ImageTest do
   # Answers only for the shared base's FROM; any other ref goes to `other`.
   defp base_only(other \\ fn ref -> flunk("resolver asked for #{ref}") end) do
     fn
-      "docker.io/library/debian:bookworm-slim" -> {:ok, "sha256:" <> @digest}
+      "docker.io/library/debian:trixie-slim" -> {:ok, "sha256:" <> @digest}
       ref -> other.(ref)
     end
   end
@@ -251,7 +251,7 @@ defmodule Arbiter.Worker.ImageTest do
     test "the shared base image is pinned too" do
       repo = repo_with(%{"README.md" => "hi\n"})
       assert {:ok, plan} = Image.plan(repo, "main", opts())
-      assert plan.base.containerfile =~ "FROM docker.io/library/debian:bookworm-slim@sha256:"
+      assert plan.base.containerfile =~ "FROM docker.io/library/debian:trixie-slim@sha256:"
       assert plan.base.tag =~ ~r|^localhost/arbiter-dev/base:[0-9a-f]{12}$|
       assert plan.build_args == [{"ARBITER_BASE", plan.base.tag}]
     end

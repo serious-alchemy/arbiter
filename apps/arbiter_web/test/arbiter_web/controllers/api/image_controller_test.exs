@@ -180,7 +180,7 @@ defmodule ArbiterWeb.Api.ImageControllerTest do
     assert Enum.any?(resp["images"], &(&1["kind"] == "base"))
     assert Enum.any?(resp["images"], &(&1["name"] == "repo-imgrepo4"))
 
-    assert [%{"ref" => "docker.io/library/debian:bookworm-slim", "digest" => @digest}] =
+    assert [%{"ref" => "docker.io/library/debian:trixie-slim", "digest" => @digest}] =
              resp["pins"]
 
     assert resp["refresh_due"] == false
