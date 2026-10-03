@@ -2551,12 +2551,13 @@ defmodule Arbiter.Worker do
 
     cleanup_orphaned_prompt(adapter, spawn_args, pristine_args)
 
-    port = Arbiter.Worker.ClaudeSession.open_port(spawn_args)
+    {port, scope} = Arbiter.Worker.ClaudeSession.open_scoped_port(spawn_args, state.task_id)
     now = DateTime.utc_now()
 
     session =
       session_config
       |> Map.put(:port, port)
+      |> Map.put(:scope, scope)
       |> Map.put(:prompt_tmpfile, get_prompt_tmpfile(adapter, spawn_args.argv))
       |> Map.put(:output_lines, [])
       |> Map.put(:line_buf, "")
@@ -2600,6 +2601,7 @@ defmodule Arbiter.Worker do
       |> maybe_put(:provider, provider && to_string(provider))
 
     new_state = %State{state | claude_sessions: sessions, meta: meta}
+    new_state = note_scope(new_state, scope)
     new_state = sync_session_meta(new_state, port)
 
     backfill_session_dispatch(
@@ -2615,6 +2617,58 @@ defmodule Arbiter.Worker do
     {:reply, {:ok, port}, announce_phase(new_state)}
   rescue
     e -> {:reply, {:error, {:port_open_failed, Exception.message(e)}}, state}
+  end
+
+  # bd-6zuoo6: every agent spawn runs in its own memory-capped systemd scope
+  # (`Arbiter.Worker.MemoryScope`). Record the scope's unit name on the run — a
+  # kernel OOM line names the victim's cgroup, and this is the only link from
+  # that name back to a task — and in the log, next to the spawn.
+  defp note_scope(%State{} = state, nil), do: state
+
+  defp note_scope(%State{} = state, %{unit: unit, max: max}) do
+    meta = state.meta || %{}
+    scopes = (Map.get(meta, :cgroup_scopes) || []) ++ [unit]
+
+    Logger.info(
+      "Worker: task=#{state.task_id} run=#{state.run_id} agent spawned in scope #{unit} " <>
+        "(MemoryMax=#{max})"
+    )
+
+    if state.run_id, do: backfill_run_fields(state.run_id, %{cgroup_scopes: scopes}, state.task_id)
+
+    %State{state | meta: Map.put(meta, :cgroup_scopes, scopes)}
+  end
+
+  # bd-6zuoo6: a scope that was OOM-killed looks like any SIGKILL (exit 137)
+  # from here; systemd's `Result=oom-kill` for the scope is the only thing that
+  # tells them apart. Asked once, at exit, and only for a non-zero exit.
+  defp mark_memory_cap(session, status) when is_integer(status) and status != 0 do
+    with %{} = scope <- Map.get(session, :scope),
+         {:memory_cap_exceeded, info} <- Arbiter.Worker.MemoryScope.outcome(scope) do
+      Logger.warning(
+        "Worker: agent scope #{scope.unit} exceeded its memory cap (MemoryMax=#{scope.max}) " <>
+          "and was OOM-killed"
+      )
+
+      Map.put(session, :memory_cap_exceeded, info)
+    else
+      _ -> session
+    end
+  end
+
+  defp mark_memory_cap(session, _status), do: session
+
+  # `StopReason.classify/3`, except that a scope systemd OOM-killed is
+  # `:memory_cap_exceeded` regardless of what the (bare 137) exit status or the
+  # output tail suggest.
+  defp stop_reason_for(session, exit_status, output_lines) do
+    case Map.get(session, :memory_cap_exceeded) do
+      %{} = info ->
+        Arbiter.Worker.StopReason.memory_cap_exceeded(info, exit_status)
+
+      _ ->
+        Arbiter.Worker.StopReason.classify(exit_status, output_lines, Map.get(session, :provider))
+    end
   end
 
   defp backfill_report(nil, _task_id, _key, _value), do: :ok
@@ -2723,6 +2777,7 @@ defmodule Arbiter.Worker do
     case Map.fetch(state.claude_sessions, port) do
       {:ok, session} ->
         cleanup_prompt_tmpfile(session)
+        session = mark_memory_cap(session, status)
         updated = Arbiter.Worker.ClaudeSession.handle_exit(session, status)
         sessions = Map.put(state.claude_sessions, port, updated)
         new_state = %State{state | claude_sessions: sessions}
@@ -3473,8 +3528,7 @@ defmodule Arbiter.Worker do
     exit_status = Map.get(session, :exit_status)
     output_lines = Enum.reverse(Map.get(session, :output_lines, []))
 
-    reason =
-      Arbiter.Worker.StopReason.classify(exit_status, output_lines, Map.get(session, :provider))
+    reason = stop_reason_for(session, exit_status, output_lines)
 
     # bd-8lq2g7: name the subordinate pass in the log line too — "worker for
     # task=X stopped" reads as the task's own worker dying when it was a
@@ -4372,7 +4426,7 @@ defmodule Arbiter.Worker do
 
     with %{} = port_args <- spawn_args || :no_spawn_args,
          {:ok, new_args} <- inject_nudge_argv(port_args, nudge, provider),
-         {:ok, port} <- safe_open_port(new_args) do
+         {:ok, port, scope} <- safe_open_port(new_args, state.task_id) do
       next_attempts = ((meta && Map.get(meta, attempts_key)) || 0) + 1
 
       Logger.info(
@@ -4395,6 +4449,7 @@ defmodule Arbiter.Worker do
       session =
         session_config
         |> Map.put(:port, port)
+        |> Map.put(:scope, scope)
         # inject_nudge_argv/3 always leaves the prompt inline (a nudge is
         # short), so this is always nil — kept for parity with the other two
         # open-port sites rather than a real leak risk here.
@@ -4417,13 +4472,16 @@ defmodule Arbiter.Worker do
       sessions = Map.put(state.claude_sessions, port, session)
 
       {:ok,
-       %State{
-         state
-         | claude_sessions: sessions,
-           meta: new_meta,
-           state: :working,
-           step_started_at: DateTime.utc_now()
-       }}
+       note_scope(
+         %State{
+           state
+           | claude_sessions: sessions,
+             meta: new_meta,
+             state: :working,
+             step_started_at: DateTime.utc_now()
+         },
+         scope
+       )}
     else
       :no_spawn_args -> {:error, :no_spawn_args}
       {:error, _} = err -> err
@@ -4433,8 +4491,9 @@ defmodule Arbiter.Worker do
 
   defp commit_nudge_cap(meta), do: (meta && Map.get(meta, :commit_nudge_cap)) || 1
 
-  defp safe_open_port(port_args) do
-    {:ok, Arbiter.Worker.ClaudeSession.open_port(port_args)}
+  defp safe_open_port(port_args, task_id) do
+    {port, scope} = Arbiter.Worker.ClaudeSession.open_scoped_port(port_args, task_id)
+    {:ok, port, scope}
   rescue
     e -> {:error, {:port_open_failed, Exception.message(e)}}
   end
@@ -4614,8 +4673,7 @@ defmodule Arbiter.Worker do
     exit_status = Map.get(session, :exit_status)
     output_lines = Enum.reverse(Map.get(session, :output_lines, []))
 
-    reason =
-      Arbiter.Worker.StopReason.classify(exit_status, output_lines, Map.get(session, :provider))
+    reason = stop_reason_for(session, exit_status, output_lines)
 
     if reason.category in [:exited_without_done, :async_wait_abandoned] and
          Arbiter.Worker.ClaudeSession.denial_ended_turn?(session) do
@@ -4883,7 +4941,7 @@ defmodule Arbiter.Worker do
 
     with %{} = port_args <- spawn_args || :no_spawn_args,
          {:ok, new_args} <- inject_resume_argv(port_args, session_id, prompt, provider),
-         {:ok, port} <- safe_open_port(new_args) do
+         {:ok, port, scope} <- safe_open_port(new_args, state.task_id) do
       next_attempts = ((meta && Map.get(meta, :resume_attempts)) || 0) + 1
 
       Logger.info(
@@ -4901,6 +4959,7 @@ defmodule Arbiter.Worker do
       session =
         resume_session_config
         |> Map.put(:port, port)
+        |> Map.put(:scope, scope)
         # inject_resume_argv/3 always leaves the prompt inline (the continue
         # prompt is short), so this is always nil — see the parity note in
         # respawn_with_nudge/3.
@@ -4926,13 +4985,16 @@ defmodule Arbiter.Worker do
       sessions = Map.put(state.claude_sessions, port, session)
 
       {:ok,
-       %State{
-         state
-         | claude_sessions: sessions,
-           meta: new_meta,
-           state: :working,
-           step_started_at: now
-       }}
+       note_scope(
+         %State{
+           state
+           | claude_sessions: sessions,
+             meta: new_meta,
+             state: :working,
+             step_started_at: now
+         },
+         scope
+       )}
     else
       :no_spawn_args -> {:error, :no_spawn_args}
       {:error, _} = err -> err

@@ -986,4 +986,27 @@ defmodule Arbiter.Worker.StopReasonTest do
       refute StopReason.classify(1, lines, "codex").category == :model_unavailable
     end
   end
+
+  describe "memory_cap_exceeded/2 (bd-6zuoo6)" do
+    test "names the cap, the peak and the signal, and is its own category" do
+      reason = StopReason.memory_cap_exceeded(%{max: "12G", peak: 12_884_901_888}, 137)
+
+      assert reason.category == :memory_cap_exceeded
+      assert reason.exit_status == 137
+      assert reason.signal == 9
+      assert reason.summary =~ "memory cap exceeded"
+      assert reason.summary =~ "12G"
+      assert reason.summary =~ "12.0 GiB"
+      assert reason.remediation =~ "ARBITER_WORKER_MEMORY_MAX"
+      assert StopReason.label(reason) =~ "memory cap exceeded"
+      assert StopReason.to_map(reason).category == :memory_cap_exceeded
+    end
+
+    test "copes with a missing peak" do
+      reason = StopReason.memory_cap_exceeded(%{max: "40%", peak: nil}, 137)
+
+      assert reason.summary =~ "40%"
+      refute reason.summary =~ "peak"
+    end
+  end
 end
