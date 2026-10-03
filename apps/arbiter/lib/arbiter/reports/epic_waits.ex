@@ -73,8 +73,7 @@ defmodule Arbiter.Reports.EpicWaits do
   @spec load(map(), DateTime.t()) :: map()
   def load(filters, now \\ DateTime.utc_now()) do
     workspace = Map.get(filters, "workspace", "")
-    data = read(workspace, now)
-    ids = data.subjects
+    {data, ids} = read(workspace, now)
 
     compute(data, now,
       subject?: &MapSet.member?(ids, &1),
@@ -96,18 +95,11 @@ defmodule Arbiter.Reports.EpicWaits do
     done =
       d
       |> epic_children(subject?)
-      |> Enum.filter(&(&1.pos != nil and not &1.open?))
-      |> Enum.filter(&in_range?(d.issues[&1.id].closed_at, since))
+      |> Enum.filter(
+        &(&1.pos != nil and not &1.open? and in_range?(d.issues[&1.id].closed_at, since))
+      )
 
-    loose =
-      for {id, i} <- d.issues,
-          subject?.(id),
-          not Map.has_key?(d.parents, id),
-          i.type != "epic",
-          closed_by?(d, id),
-          ready_spans(d, id) != [],
-          in_range?(i.closed_at, since),
-          do: {i.priority, elem(ready_wait(d, id), 0)}
+    loose = parentless(d, subject?, since)
 
     %{
       closed_children: length(done),
@@ -132,6 +124,18 @@ defmodule Arbiter.Reports.EpicWaits do
         end,
       guard: summary(for({q, w} <- loose, q in [1, 2], do: w))
     }
+  end
+
+  # {priority, wait} per closed ticket with no parent, not an epic, that was Ready.
+  defp parentless(d, subject?, since) do
+    for {id, i} <- d.issues,
+        subject?.(id),
+        not Map.has_key?(d.parents, id),
+        i.type != "epic",
+        closed_by?(d, id),
+        ready_spans(d, id) != [],
+        in_range?(i.closed_at, since),
+        do: {i.priority, elem(ready_wait(d, id), 0)}
   end
 
   @doc "Median, p75, p90 and mean of `values` (hours), the script's way."
@@ -317,25 +321,36 @@ defmodule Arbiter.Reports.EpicWaits do
       |> query([])
       |> Enum.map(fn [from, to, type] -> {from, to, type} end)
 
-    {tsql, tparams} =
-      if workspace == "",
-        do: {"", []},
-        else: {"WHERE ticket_id IN (SELECT id FROM issues WHERE workspace_id = ?)", [workspace]}
-
     transitions =
-      "SELECT ticket_id, from_state, to_state, at FROM ticket_transitions #{tsql} ORDER BY at, id"
-      |> query(tparams)
+      workspace
+      |> transition_rows()
       |> Enum.map(fn [id, from, to, at] -> {id, from, to, parse(at)} end)
       |> Enum.reject(fn {_, _, _, at} -> DateTime.compare(at, now) == :gt end)
 
-    %{
-      issues: Enum.map(issues, &elem(&1, 0)),
-      dependencies: dependencies,
-      transitions: transitions,
-      subjects: subjects
-    }
+    {%{
+       issues: Enum.map(issues, &elem(&1, 0)),
+       dependencies: dependencies,
+       transitions: transitions
+     }, subjects}
   end
 
+  defp transition_rows("") do
+    query(
+      "SELECT ticket_id, from_state, to_state, at FROM ticket_transitions ORDER BY at, id",
+      []
+    )
+  end
+
+  defp transition_rows(workspace) do
+    query(
+      "SELECT ticket_id, from_state, to_state, at FROM ticket_transitions " <>
+        "WHERE ticket_id IN (SELECT id FROM issues WHERE workspace_id = ?) ORDER BY at, id",
+      [workspace]
+    )
+  end
+
+  # Every caller passes a literal; the only dynamic part is bound.
+  # sobelow_skip ["SQL.Query"]
   defp query(sql, params), do: Repo.query!(sql, params).rows
 
   defp parse(nil), do: nil

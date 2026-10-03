@@ -18,7 +18,17 @@ defmodule ArbiterWeb.ReportsLive do
 
   use ArbiterWeb, :live_view
 
-  alias Arbiter.Reports.{BurnUp, Cache, Cost, EpicWaits, Epics, Flow, ReviewHealth, Throughput}
+  alias Arbiter.Reports.{
+    BurnUp,
+    Cache,
+    Cost,
+    Epics,
+    EpicWaits,
+    Flow,
+    ReviewHealth,
+    Throughput
+  }
+
   alias Arbiter.Tasks.{Issue, Workspace}
   alias ArbiterWeb.Charts
   alias ArbiterWeb.CoreComponents.Feedback
@@ -778,9 +788,6 @@ defmodule ArbiterWeb.ReportsLive do
     </tr>
     """
   end
-
-  defp hours(nil), do: "—"
-  defp hours(h), do: "#{:erlang.float_to_binary(h * 1.0, decimals: 1)}h"
 
   attr :health, :map, required: true
 
