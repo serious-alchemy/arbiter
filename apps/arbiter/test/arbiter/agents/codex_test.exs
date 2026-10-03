@@ -926,6 +926,7 @@ defmodule Arbiter.Agents.CodexTest do
         assert text =~ "command timeout"
         assert text =~ "single test file"
         assert text =~ "do not attempt to background"
+        assert text =~ "until\n    every command you started"
       end
     end
   end
