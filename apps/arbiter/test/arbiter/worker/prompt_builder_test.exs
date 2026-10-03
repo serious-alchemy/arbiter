@@ -745,7 +745,7 @@ defmodule Arbiter.Worker.PromptBuilderTest do
         )
 
       assert work_prompt =~ "Codex `exec` executes commands synchronously"
-      assert work_prompt =~ "do not print `arb done` until"
+      assert work_prompt =~ "Do not print `arb done` until"
       refute work_prompt =~ "Monitor"
 
       review_prompt =
@@ -755,7 +755,7 @@ defmodule Arbiter.Worker.PromptBuilderTest do
         )
 
       assert review_prompt =~ "Codex `exec` executes commands synchronously"
-      assert review_prompt =~ "do not print `arb done` until"
+      assert review_prompt =~ "Do not print `arb done` until"
       refute review_prompt =~ "Monitor"
     end
 
