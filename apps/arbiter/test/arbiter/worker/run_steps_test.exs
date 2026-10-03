@@ -179,7 +179,7 @@ defmodule Arbiter.Worker.RunStepsTest do
     assert step.source == "live"
   end
 
-  test "gemini/codex provider events write no step rows" do
+  test "gemini provider events in Claude shape write no step rows" do
     task_id = "bd-runsteps-#{System.unique_integer([:positive])}"
 
     _session =
@@ -190,6 +190,95 @@ defmodule Arbiter.Worker.RunStepsTest do
       ])
 
     assert steps_for(task_id) == []
+  end
+
+  describe "codex item.* capture" do
+    defp codex_item(phase, item), do: %{"type" => phase, "item" => item}
+
+    test "command_execution writes a shell row with output and duration" do
+      task_id = "bd-runsteps-#{System.unique_integer([:positive])}"
+      item = %{"id" => "item_1", "type" => "command_execution", "command" => "git commit -m x"}
+
+      new_session(task_id, provider: "codex")
+      |> feed([
+        codex_item("item.started", Map.put(item, "status", "in_progress")),
+        codex_item(
+          "item.completed",
+          Map.merge(item, %{"aggregated_output" => "[main abc1234] x", "exit_code" => 0})
+        )
+      ])
+
+      assert [step] = steps_for(task_id)
+      assert step.name == "shell"
+      assert step.tool_use_id == "item_1"
+      assert step.input_summary == "git commit -m x"
+      assert step.output_summary =~ "abc1234"
+      assert step.is_error == false
+      assert is_integer(step.duration_ms)
+    end
+
+    test "non-zero exit marks is_error" do
+      task_id = "bd-runsteps-#{System.unique_integer([:positive])}"
+
+      new_session(task_id, provider: "codex")
+      |> feed([
+        codex_item("item.completed", %{
+          "id" => "item_2",
+          "type" => "command_execution",
+          "command" => "false",
+          "aggregated_output" => "",
+          "exit_code" => 1
+        })
+      ])
+
+      assert [%{is_error: true, duration_ms: nil}] = steps_for(task_id)
+    end
+
+    test "file_change, mcp_tool_call and web_search each write a row" do
+      task_id = "bd-runsteps-#{System.unique_integer([:positive])}"
+
+      new_session(task_id, provider: "codex")
+      |> feed([
+        codex_item("item.completed", %{
+          "id" => "i3",
+          "type" => "file_change",
+          "status" => "completed",
+          "changes" => [%{"path" => "lib/a.ex", "kind" => "update"}]
+        }),
+        codex_item("item.completed", %{
+          "id" => "i4",
+          "type" => "mcp_tool_call",
+          "server" => "arbiter",
+          "tool" => "ci_rerun",
+          "arguments" => %{"run" => 1},
+          "status" => "completed",
+          "result" => %{"content" => [%{"type" => "text", "text" => "queued"}]}
+        }),
+        codex_item("item.completed", %{"id" => "i5", "type" => "web_search", "query" => "elixir"})
+      ])
+
+      assert [fc, mcp, ws] = steps_for(task_id)
+      assert {fc.name, fc.input_summary} == {"apply_patch", "lib/a.ex"}
+      assert {mcp.name, mcp.output_summary} == {"mcp__arbiter__ci_rerun", "queued"}
+      assert {ws.name, ws.input_summary} == {"web_search", "elixir"}
+    end
+
+    test "agent_message, reasoning and unfinished items write no rows" do
+      task_id = "bd-runsteps-#{System.unique_integer([:positive])}"
+
+      new_session(task_id, provider: "codex")
+      |> feed([
+        codex_item("item.completed", %{"id" => "m", "type" => "agent_message", "text" => "hi"}),
+        codex_item("item.completed", %{"id" => "r", "type" => "reasoning", "text" => "hmm"}),
+        codex_item("item.started", %{
+          "id" => "c",
+          "type" => "command_execution",
+          "command" => "ls"
+        })
+      ])
+
+      assert steps_for(task_id) == []
+    end
   end
 
   # agy's tool step (bd-7y3mm9): fixture copied verbatim from a live `agy

@@ -848,11 +848,25 @@ defmodule Arbiter.Worker.ClaudeSession do
   # session was killed mid-call — leaves its pending entry stranded and never
   # writes a row: absent, not garbage.
   #
-  # Deliberately a Codex-only no-op: Codex speaks a different stream-json
-  # shape entirely (see its own `Stream.format_event/1` module) and is routed
-  # around here explicitly rather than relying on the shape match to miss, so
-  # the "rows absent for non-Claude/agy runs" property is asserted, not
-  # accidental.
+  # Codex speaks a different shape (see its own `Stream.format_event/1`
+  # module): `item.started` / `item.completed` events whose `item` carries the
+  # whole call. It is routed explicitly rather than relying on the shape match
+  # to miss. `item.started` stashes a start time; `item.completed` writes the
+  # row, under the tool names `Loop.FixPassClassifier` already knows for Codex
+  # (`shell`, `apply_patch`).
+  defp capture_steps(%{provider: "codex"} = session, %{"type" => "item.started", "item" => item})
+       when is_map(item) do
+    remember_codex_item(session, item)
+  end
+
+  defp capture_steps(
+         %{provider: "codex"} = session,
+         %{"type" => "item.completed", "item" => item}
+       )
+       when is_map(item) do
+    record_codex_item(session, item)
+  end
+
   defp capture_steps(%{provider: "codex"} = session, _event), do: session
 
   # agy's `step_type: "tool"` step (bd-7y3mm9) carries everything a row needs
@@ -1226,6 +1240,99 @@ defmodule Arbiter.Worker.ClaudeSession do
     do: String.contains?(error, "permission check failed")
 
   defp permission_denial?(_error), do: false
+
+  @codex_tool_types ~w(command_execution file_change mcp_tool_call web_search)
+
+  defp remember_codex_item(%{} = session, %{"type" => type, "id" => id})
+       when type in @codex_tool_types and is_binary(id) do
+    pending = Map.get(session, :pending_tool_calls, %{})
+    entry = %{started_at: System.monotonic_time(:millisecond)}
+    Map.put(session, :pending_tool_calls, Map.put(pending, id, entry))
+  end
+
+  defp remember_codex_item(session, _item), do: session
+
+  defp record_codex_item(session, %{"type" => type} = item) when type in @codex_tool_types do
+    id = item["id"]
+    {call, pending} = Map.pop(Map.get(session, :pending_tool_calls, %{}), id)
+    session = Map.put(session, :pending_tool_calls, pending)
+    {name, input, output, is_error} = codex_item_parts(item)
+    redact = redact_values(session)
+
+    duration_ms =
+      case call do
+        %{started_at: started_at} -> System.monotonic_time(:millisecond) - started_at
+        nil -> nil
+      end
+
+    write_step(session, %{
+      run_id: Map.get(session, :run_id),
+      task_id: Map.get(session, :task_id),
+      tool_use_id: if(is_binary(id), do: id, else: "codex-#{System.unique_integer([:positive])}"),
+      name: name,
+      is_error: is_error,
+      duration_ms: duration_ms,
+      input_digest: StepSummary.input_digest(input, redact),
+      input_summary: StepSummary.input_summary(input, redact),
+      output_summary: StepSummary.output_summary(output, redact),
+      occurred_at: DateTime.utc_now()
+    })
+
+    session
+  end
+
+  defp record_codex_item(session, _item), do: session
+
+  # `{name, input, output_text, is_error}` for one finished Codex item.
+  defp codex_item_parts(%{"type" => "command_execution"} = item) do
+    code = item["exit_code"]
+    failed? = item["status"] == "failed" or (is_number(code) and code != 0)
+
+    {"shell", %{"command" => to_string(item["command"] || "")},
+     codex_text(item["aggregated_output"]), failed?}
+  end
+
+  defp codex_item_parts(%{"type" => "file_change"} = item) do
+    changes = if is_list(item["changes"]), do: item["changes"], else: []
+
+    input =
+      case changes do
+        [%{"path" => path}] when is_binary(path) ->
+          %{"path" => path}
+
+        _ ->
+          %{
+            "changes" =>
+              for(%{"path" => p} = c <- changes, do: %{"kind" => c["kind"], "path" => p})
+          }
+      end
+
+    {"apply_patch", input, "", item["status"] == "failed"}
+  end
+
+  defp codex_item_parts(%{"type" => "mcp_tool_call"} = item) do
+    server = if is_binary(item["server"]), do: item["server"], else: nil
+    tool = if is_binary(item["tool"]), do: item["tool"], else: "tool"
+    name = if server, do: "mcp__#{server}__#{tool}", else: "mcp__#{tool}"
+    args = if is_map(item["arguments"]), do: item["arguments"], else: nil
+    error = codex_text(item["error"])
+    output = if error == "", do: codex_text(item["result"]), else: error
+    {name, args, output, item["status"] == "failed" or error != ""}
+  end
+
+  defp codex_item_parts(%{"type" => "web_search"} = item),
+    do: {"web_search", %{"pattern" => to_string(item["query"] || "")}, "", false}
+
+  # Codex payload text arrives as a bare string, a `%{"message" => _}` error, or
+  # an MCP result `%{"content" => [%{"text" => _}]}`.
+  defp codex_text(text) when is_binary(text), do: text
+  defp codex_text(%{"message" => m}) when is_binary(m), do: m
+
+  defp codex_text(%{"content" => content}) when is_list(content),
+    do: content |> Enum.flat_map(&List.wrap(codex_text(&1))) |> Enum.join("\n")
+
+  defp codex_text(%{"text" => t}) when is_binary(t), do: t
+  defp codex_text(_), do: ""
 
   defp remember_tool_use(%{"type" => "tool_use", "id" => id, "name" => name} = block, session)
        when is_binary(id) do
