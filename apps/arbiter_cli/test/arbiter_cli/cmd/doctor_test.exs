@@ -158,7 +158,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     assert exit_code == 0
     assert {:ok, %{"ok" => true, "checks" => checks}} = Jason.decode(String.trim(out))
     assert is_list(checks)
-    assert length(checks) == 23
+    assert length(checks) == 24
   end
 
   test "version mismatch is non-fatal (exit 0 but shows [fail])" do
@@ -1618,6 +1618,87 @@ defmodule ArbiterCli.Cmd.DoctorTest do
 
       result = Enum.find(Checks.run(), &(&1.name == "worker temp dir"))
       assert result.status == :ok
+    end
+  end
+
+  # bd-46xndf: the rootless-podman readiness check. Probes run server-side and
+  # are stubbed in the arbiter app's PodmanReadinessTest; this covers rendering.
+  describe "podman sandbox readiness check" do
+    defp podman_routes(body) do
+      [
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/podman_sandbox"}, {body, 200}}
+      ]
+    end
+
+    defp find_podman, do: Enum.find(Checks.run(), &(&1.name == "podman sandbox readiness"))
+
+    test "ok, surfacing warnings in the detail" do
+      stub_routes(
+        podman_routes(%{
+          "ready" => true,
+          "installed" => true,
+          "checks" => [
+            %{"id" => "podman", "name" => "podman", "status" => "ok", "detail" => "podman 4.9"},
+            %{
+              "id" => "cgroups",
+              "name" => "cgroups",
+              "status" => "warn",
+              "detail" => "cgroups v1"
+            }
+          ]
+        })
+      )
+
+      result = find_podman()
+      assert result.status == :ok
+      assert result.detail =~ "cgroups: cgroups v1"
+      refute result.blocks_readiness
+    end
+
+    test "fails with each failed check's hint, without blocking readiness" do
+      stub_routes(
+        podman_routes(%{
+          "ready" => false,
+          "installed" => true,
+          "checks" => [
+            %{
+              "id" => "subid",
+              "name" => "subuid/subgid",
+              "status" => "fail",
+              "detail" => "ryan lacks a range",
+              "hint" => "Run usermod."
+            },
+            %{
+              "id" => "socket_bridge",
+              "name" => "socket bridge",
+              "status" => "fail",
+              "detail" => "denied",
+              "hint" => "Use label=disable."
+            }
+          ]
+        })
+      )
+
+      result = find_podman()
+      assert result.status == :fail
+      assert result.detail =~ "subuid/subgid: ryan lacks a range"
+      assert result.hint =~ "Run usermod."
+      assert result.hint =~ "Use label=disable."
+      refute result.fatal
+      refute result.blocks_readiness
+    end
+
+    test "a server that predates the check is skipped" do
+      stub_routes(
+        podman_routes(%{})
+        |> Enum.reject(&match?({{_, "/api/server/podman_sandbox"}, _}, &1))
+      )
+
+      assert find_podman().status == :ok
     end
   end
 
