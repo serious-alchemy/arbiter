@@ -82,6 +82,7 @@ defmodule ArbiterWeb.MCP.Plug do
   alias Arbiter.MCP.Catalog
   alias Arbiter.MCP.Scope
   alias ArbiterWeb.MCP.Session
+  alias ArbiterWeb.Plugs.WorkerBridge
 
   @supported_protocol_versions ~w(2025-06-18 2025-03-26 2024-11-05)
   @latest_protocol_version "2025-06-18"
@@ -141,7 +142,17 @@ defmodule ArbiterWeb.MCP.Plug do
 
   # ---- authentication -----------------------------------------------------
 
+  # bd-c1qq7l (G9): through a jailed worker's bridge the scope is the worker's
+  # own, from the connection, whatever token (or none) the client presents.
   defp authenticate(conn) do
+    case WorkerBridge.identity(conn) do
+      {_run_id, {:ok, %Scope{} = scope}} -> {:ok, scope}
+      {_run_id, {:error, _reason}} -> {:error, :bridge_identity}
+      nil -> authenticate_presented(conn)
+    end
+  end
+
+  defp authenticate_presented(conn) do
     case get_req_header(conn, "authorization") do
       ["Bearer " <> token] -> Scope.from_token(String.trim(token))
       _ -> authenticate_from_query(conn)
@@ -165,6 +176,7 @@ defmodule ArbiterWeb.MCP.Plug do
         :revoked -> "Scope token revoked — its session has ended (RFC §9.3)"
         :missing -> "Missing scope token (Authorization: Bearer <token> or ?token=<token>)"
         :forbidden -> "Coordinator scope required for the SSE stream"
+        :bridge_identity -> "Worker bridge identity unavailable or expired"
         _ -> "Invalid scope token"
       end
 

@@ -22,6 +22,7 @@ defmodule Arbiter.Worker.Egress.JailRun do
   """
 
   alias Arbiter.Worker.Egress
+  alias Arbiter.Worker.Egress.BridgeIdentity
 
   @loopback_hosts ["127.0.0.1", "localhost", "::1", "[::1]"]
 
@@ -36,7 +37,8 @@ defmodule Arbiter.Worker.Egress.JailRun do
   `:worktree` (its git remotes),
   `:infra` (`host:port` entries), `:tunnels`, `:enforce` (default `false`:
   learn mode, see the note on `Arbiter.Worker.Egress`), `:task_id`,
-  `:grants`, `:safe_defaults_exclude`, `:dir`, `:arbiter_url` (default
+  `:grants`, `:safe_defaults_exclude`, `:arb_token` (the worker's own scope
+  token: the identity of everything arriving on the Arbiter bridge), `:dir`, `:arbiter_url` (default
   `Arbiter.MCP.server_url/0`), `:allow_local_dial`.
   """
   @spec start(keyword()) :: {:ok, keyword(), String.t()} | {:error, term()}
@@ -82,11 +84,25 @@ defmodule Arbiter.Worker.Egress.JailRun do
       end
 
       case Egress.start_run(run_id, start_opts) do
-        {:ok, _proxy} -> {:ok, network.(), run_id}
-        {:error, :already_running} -> {:ok, network.(), run_id}
-        {:error, reason} -> {:error, reason}
+        {:ok, _proxy} ->
+          {:ok, record_identity(network.(), run_id, owner, opts), run_id}
+
+        {:error, :already_running} ->
+          {:ok, record_identity(network.(), run_id, owner, opts), run_id}
+
+        {:error, reason} ->
+          {:error, reason}
       end
     end
+  end
+
+  # bd-c1qq7l (G9): the worker's own token is what everything arriving on this
+  # run's Arbiter bridge is authenticated as (`BridgeIdentity`). A resume
+  # mints a fresh token for the same run, so this replaces the recorded one.
+  # No token means the bridge refuses every request, not that it is anonymous.
+  defp record_identity(network, run_id, owner, opts) do
+    :ok = BridgeIdentity.put_run(run_id, Keyword.get(opts, :arb_token), owner)
+    network
   end
 
   # One short, filename-safe id per owner pid. Deterministic, so the same

@@ -14,6 +14,9 @@ defmodule Arbiter.Worker.Egress.Supervisor do
   @impl true
   def init(_opts) do
     children = [
+      # First, so a crash (which loses every recorded bridge identity) restarts
+      # the runs after it too instead of leaving them without one.
+      Arbiter.Worker.Egress.BridgeIdentity,
       Arbiter.Worker.Egress.GrantCache,
       {Registry, keys: :unique, name: Arbiter.Worker.Egress.Registry},
       {DynamicSupervisor, name: Arbiter.Worker.Egress.RunSupervisors, strategy: :one_for_one}

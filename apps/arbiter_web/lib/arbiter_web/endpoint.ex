@@ -30,6 +30,10 @@ defmodule ArbiterWeb.Endpoint do
   socket "/session", ArbiterWeb.SessionSocket,
     websocket: [connect_info: [:peer_data], max_frame_size: 1_048_576]
 
+  # bd-c1qq7l (G9): before anything serves a byte, pin a request that came
+  # through a jailed worker's Arbiter bridge to that worker.
+  plug ArbiterWeb.Plugs.WorkerBridge
+
   # Serve at "/" the static files from "priv/static" directory.
   #
   # When code reloading is disabled (e.g., in production),

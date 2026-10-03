@@ -62,7 +62,7 @@ defmodule Arbiter.Worker.Egress.RunSupervisor do
            [
              name: {:via, Registry, {@registry, {run_id, {:bridge, name}}}},
              socket_path: path,
-             handler: fn socket -> Forward.run(socket, host, port) end,
+             handler: fn socket -> Forward.run(socket, run_id, host, port) end,
              task_supervisor: tasks
            ]
          ]},
