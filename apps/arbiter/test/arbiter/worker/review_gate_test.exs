@@ -5225,6 +5225,45 @@ defmodule Arbiter.Worker.ReviewGateTest do
     end
   end
 
+  describe "async-tool block follows the rotated reviewer (bd-5sfn7v)" do
+    defp async_block(adapter) do
+      adapter.async_tool_instruction(
+        "your VERDICT",
+        "a VERDICT issued while a background task is still running is invalid,\n" <>
+          "you would be judging on incomplete evidence",
+        commit_first: false
+      )
+      |> String.trim_trailing()
+    end
+
+    test "a pinned codex reviewer gets codex's block, a selection-pinned one too", %{ws: ws} do
+      task = new_task(ws)
+
+      base = %{
+        task_id: task.id,
+        branch: "feature/rev",
+        target_branch: "main",
+        worktree_path: nil,
+        round: 1,
+        head_sha: nil,
+        base_sha: "abc1234",
+        workspace_id: ws.id
+      }
+
+      codex = async_block(Arbiter.Agents.Codex)
+      claude = async_block(Arbiter.Agents.Claude)
+      refute codex == claude
+
+      pinned = ReviewGate.review_prompt(Map.put(base, :reviewer_provider, :codex))
+      assert pinned =~ codex
+
+      selected =
+        ReviewGate.review_prompt(Map.put(base, :reviewer_selection, %{provider: :codex}))
+
+      assert selected =~ codex
+    end
+  end
+
   describe "stale-base defence (bd-ased52)" do
     # The reviewer must diff against the merge-base, not the moving target tip,
     # so a target that advanced mid-run can't be mis-attributed to the branch.
