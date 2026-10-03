@@ -356,4 +356,51 @@ defmodule ArbiterWeb.ReportsLiveTest do
       assert has_element?(view, "#reports-ew-empty")
     end
   end
+
+  describe "Attention / wait time" do
+    test "says so when there are no spans", %{conn: conn, ws: ws} do
+      issue!(ws, %{})
+
+      {:ok, view, _html} = live(conn, ~p"/reports?workspace=#{ws.id}")
+      _ = render_async(view)
+
+      assert has_element?(view, "#reports-attention")
+      assert has_element?(view, "#reports-attention-empty")
+    end
+
+    test "renders per-cause rows and flags a still-open span", %{conn: conn, ws: ws} do
+      issue = issue!(ws, %{})
+      now = DateTime.utc_now()
+      stamp = fn at -> DateTime.to_iso8601(%{at | microsecond: {elem(at.microsecond, 0), 6}}) end
+
+      for {opened, cleared} <- [{3, 2}, {2, nil}] do
+        Arbiter.Repo.query!(
+          """
+          INSERT INTO ticket_attention_spans
+            (id, ticket_id, workspace_id, cause, owner, opened_at, cleared_at, derived, source,
+             inserted_at, updated_at)
+          VALUES (?, ?, ?, 'pr_closed', 'operator', ?, ?, 0, 'live', ?, ?)
+          """,
+          [
+            Ecto.UUID.generate(),
+            issue.id,
+            ws.id,
+            stamp.(DateTime.add(now, -opened * 3600)),
+            cleared && stamp.(DateTime.add(now, -cleared * 3600)),
+            stamp.(now),
+            stamp.(now)
+          ]
+        )
+      end
+
+      {:ok, view, _html} = live(conn, ~p"/reports?workspace=#{ws.id}")
+      _ = render_async(view)
+
+      refute has_element?(view, "#reports-attention-empty")
+      assert has_element?(view, "#reports-attention-row-pr_closed")
+      assert has_element?(view, "#reports-attention-open", "1")
+      assert has_element?(view, "#reports-attention-waiting-#{issue.id}-pr_closed")
+      assert has_element?(view, "#reports-attention-operator")
+    end
+  end
 end
