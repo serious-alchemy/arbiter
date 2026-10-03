@@ -57,6 +57,7 @@ defmodule Arbiter.Worker.Image do
   always runs for real (against a scratch repo in tests).
   """
 
+  alias Arbiter.Worker.Image.Builder
   alias Arbiter.Worker.Image.Pins
   alias Arbiter.Worker.ReleaseEnv
 
@@ -162,6 +163,23 @@ defmodule Arbiter.Worker.Image do
          pins: Enum.uniq(base.pins ++ pins),
          base: base
        }}
+    end
+  end
+
+  @doc """
+  Plan `repo_path`'s image from `default_branch` and build whatever is missing
+  (`Arbiter.Worker.Image.Builder`, single-flight). The lazy entry point:
+  dispatch calls it, `arb image build` calls it, and a request for a tag that
+  already exists returns at once.
+
+  Takes `plan/3`'s options plus the builder's, and `:server` (default
+  `Arbiter.Worker.Image.Builder`).
+  """
+  @spec ensure(String.t(), String.t(), keyword()) ::
+          {:ok, %{tag: String.t(), built: [String.t()]}} | {:error, term()}
+  def ensure(repo_path, default_branch, opts \\ []) do
+    with {:ok, plan} <- plan(repo_path, default_branch, opts) do
+      Builder.ensure(Keyword.get(opts, :server, Builder), plan, opts)
     end
   end
 

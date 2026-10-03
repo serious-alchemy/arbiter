@@ -106,6 +106,9 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
     "apps/arbiter/lib/arbiter/worker/jail.ex" => :scrubbed,
     # bd-bu4ye2: `podman run` / `podman rm` via `ReleaseEnv.cmd/3`.
     "apps/arbiter/lib/arbiter/worker/container.ex" => :scrubbed,
+    # bd-9r5jdt: worker-image lifecycle: `git cat-file` on the default branch and
+    # `podman` / `skopeo` through `ReleaseEnv.cmd/3`.
+    "apps/arbiter/lib/arbiter/worker/image.ex" => :scrubbed,
     # bd-cfktou: reads the worktree's git remotes with `git config`; nothing else.
     "apps/arbiter/lib/arbiter/worker/egress/jail_run.ex" => :pure_tool,
     # bd-46xndf: the doctor's rootless-podman readiness probes via `ReleaseEnv.cmd/3`.
