@@ -533,7 +533,8 @@ defmodule Arbiter.Agents.GeminiTest do
                    home: Arbiter.Agents.Gemini.ConfigDir.path(worktree_path: worktree),
                    writable_paths: ["/opt/extra"],
                    worktree_readonly: false,
-                   keyring: Arbiter.Agents.Gemini.ConfigDir.keyring_available?()
+                   keyring: Arbiter.Agents.Gemini.ConfigDir.keyring_available?(),
+                   hide_reads: true
                  )
 
         # An explicit `backend: :bwrap` is the same policy as the default.
@@ -542,6 +543,29 @@ defmodule Arbiter.Agents.GeminiTest do
         assert {:ok, ^argv} =
                  default_argv("the prompt", security: explicit, worktree_path: worktree)
       end
+    end
+
+    # bd-3q2djr (G3): the agy spawn asks for the hidden read paths; the data
+    # dir (`~/.arbiter`, the install DB) is one of them.
+    test "an agy spawn hides the install data dir behind a tmpfs", %{worktree: worktree} do
+      Application.put_env(:arbiter, :worker_jail_network, false)
+      data_dir = Path.join(worktree, "../hide-data-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(data_dir)
+      data_dir = Arbiter.Worker.Jail.Hide.real(data_dir)
+      prev = Application.get_env(:arbiter, :data_dir)
+      Application.put_env(:arbiter, :data_dir, data_dir)
+
+      on_exit(fn ->
+        File.rm_rf!(data_dir)
+
+        if prev,
+          do: Application.put_env(:arbiter, :data_dir, prev),
+          else: Application.delete_env(:arbiter, :data_dir)
+      end)
+
+      pol = policy(:strict, %{})
+      assert {:ok, argv} = default_argv("the prompt", security: pol, worktree_path: worktree)
+      assert Enum.chunk_every(argv, 2, 1) |> Enum.member?(["--tmpfs", data_dir])
     end
 
     test "backend: podman refuses agy in every mode and never spawns it unjailed", %{

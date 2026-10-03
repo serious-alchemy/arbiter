@@ -3,8 +3,11 @@ defmodule Arbiter.Worker.Sandbox do
   The OS sandbox a worker's CLI is spawned in (bd-btcdrf, P2;
   `docs/design/podman-worker-containers.md` §7.1).
 
-  A behaviour with one implementation today: `Arbiter.Worker.Jail` (bubblewrap).
-  A rootless-podman backend (`Arbiter.Worker.Container`) is planned. Callers
+  A behaviour with two implementations: `Arbiter.Worker.Jail` (bubblewrap) and
+  `Arbiter.Worker.Container` (rootless podman, bd-bu4ye2). `module/1` resolves
+  only `:bwrap` until the Claude wrap point lands (P7, bd-d2o3xb), because the
+  adapters only check that gate and would otherwise spawn unsandboxed under
+  `backend: podman`. Callers
   that jail a spawn go through this module with the resolved
   `Arbiter.Agents.SecurityPolicy`, which names the backend in `sandbox.backend`
   (`:bwrap` by default). They never call `Jail` for a spawn directly.
@@ -23,8 +26,8 @@ defmodule Arbiter.Worker.Sandbox do
 
   ## Refusal, never an unjailed spawn
 
-  `module/1` is the only place a backend atom becomes a module. A backend with
-  no implementation (`:podman`, until its module lands) resolves to
+  `module/1` is the only place a backend atom becomes a module. A backend that
+  is not wired (`:podman`, until P7) resolves to
   `{:error, {:sandbox_backend_unavailable, backend, message}}` and every
   function here passes that through. Callers must treat it as fatal for the
   spawn: it is **not** "the sandbox is unavailable on this host", which some
