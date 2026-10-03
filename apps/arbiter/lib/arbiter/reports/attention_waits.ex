@@ -32,8 +32,8 @@ defmodule Arbiter.Reports.AttentionWaits do
     * Hours are real elapsed hours; a span is attributed to the week it opened.
   """
 
-  alias Arbiter.Reports.Throughput
   alias Arbiter.Repo
+  alias Arbiter.Reports.Throughput
 
   @verifying_cause "awaiting_verification"
   @owners [:coordinator, :operator]
