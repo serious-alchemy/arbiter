@@ -92,10 +92,11 @@ jobs:
         run: mix deps.get
 
       - name: mix audit
+        id: audit
         run: mix audit
 
       - name: Save deps/build cache
-        if: ${{ !cancelled() && github.event_name == 'push' && steps.cache1.outputs.cache-hit != 'true' }}
+        if: ${{ !cancelled() && github.event_name == 'push' && steps.audit.outcome == 'success' && steps.cache1.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@v4
         with:
           path: |
@@ -104,7 +105,7 @@ jobs:
           key: ${{ runner.os }}-otp28.5-elixir1.19.4-audit-${{ hashFiles('**/mix.lock') }}
 
       - name: Save dialyzer PLT
-        if: ${{ !cancelled() && github.event_name == 'push' && steps.cache2.outputs.cache-hit != 'true' }}
+        if: ${{ !cancelled() && github.event_name == 'push' && steps.audit.outcome == 'success' && steps.cache2.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@v4
         with:
           path: priv/plts
