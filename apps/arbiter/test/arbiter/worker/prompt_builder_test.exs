@@ -914,6 +914,13 @@ defmodule Arbiter.Worker.PromptBuilderTest do
       assert prompt =~ "COORDINATOR-DIRECTIVE-BODY"
     end
 
+    test "a directive sent via `arb message send` (from_ref cli) is injected" do
+      send_to("bd-golden1", %{from_ref: "cli", kind: :info})
+
+      prompt = PromptBuilder.prompt_for_task(task(%{}), worktree_path: "/tmp/wt-golden")
+      assert prompt =~ "COORDINATOR-DIRECTIVE-BODY"
+    end
+
     test "a resume prompt (resume_context set) carries it too" do
       send_to("bd-golden1", %{})
 

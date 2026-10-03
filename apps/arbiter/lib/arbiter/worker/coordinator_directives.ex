@@ -19,6 +19,9 @@ defmodule Arbiter.Worker.CoordinatorDirectives do
 
   @kinds [:info, :direction, :mailbox, :flag, :escalation]
   @limit 20
+  # `arb message send` stamps `ARB_FROM || "cli"`, so a directive sent from the
+  # coordinator's shell is `"cli"`, not `"coordinator"`.
+  @cli_ref "cli"
 
   @doc "Prompt block for `task_id`'s unread coordinator mail, or `\"\"` when there is none."
   @spec section(String.t() | nil) :: String.t()
@@ -36,7 +39,7 @@ defmodule Arbiter.Worker.CoordinatorDirectives do
 
   @spec unread(String.t()) :: [Message.t()]
   def unread(task_id) do
-    refs = Message.coordinator_refs()
+    refs = [@cli_ref | Message.coordinator_refs()]
 
     Message
     |> Ash.Query.filter(to_ref == ^task_id and from_ref in ^refs and kind in ^@kinds)
