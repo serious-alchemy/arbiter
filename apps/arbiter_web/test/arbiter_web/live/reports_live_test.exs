@@ -338,4 +338,22 @@ defmodule ArbiterWeb.ReportsLiveTest do
       refute has_element?(view, "#reports-rg-rounds-chart")
     end
   end
+
+  describe "Epic Ready wait" do
+    test "renders the head/tail table and the guard tile; says so when empty",
+         %{conn: conn, ws: ws} do
+      issue!(ws, %{})
+
+      {:ok, view, _html} = live(conn, ~p"/reports?workspace=#{ws.id}")
+      _ = render_async(view)
+
+      assert has_element?(view, "#reports-epic-waits")
+      assert has_element?(view, "#reports-ew-guard", "—")
+      assert has_element?(view, "#reports-ew-head")
+      assert has_element?(view, "#reports-ew-tail")
+      assert has_element?(view, "#reports-ew-row-guard")
+      assert has_element?(view, "#reports-ew-row-head-p2")
+      assert has_element?(view, "#reports-ew-empty")
+    end
+  end
 end
