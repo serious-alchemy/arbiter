@@ -882,4 +882,83 @@ defmodule Arbiter.Worker.PromptBuilderTest do
       refute default =~ "arb ticket update"
     end
   end
+
+  describe "unread coordinator direction (bd-kxzrk9)" do
+    alias Arbiter.Messages.Message
+
+    defp send_to(task_id, attrs) do
+      {:ok, m} =
+        Ash.create(
+          Message,
+          Map.merge(
+            %{
+              kind: :info,
+              from_ref: "coordinator",
+              to_ref: task_id,
+              subject: "fix",
+              body: "COORDINATOR-DIRECTIVE-BODY",
+              workspace_id: "ws-directives"
+            },
+            attrs
+          )
+        )
+
+      m
+    end
+
+    test "a fresh dispatch prompt carries the unread coordinator message in full" do
+      send_to("bd-golden1", %{})
+
+      prompt = PromptBuilder.prompt_for_task(task(%{}), worktree_path: "/tmp/wt-golden")
+      assert prompt =~ "UNREAD COORDINATOR DIRECTION for bd-golden1"
+      assert prompt =~ "COORDINATOR-DIRECTIVE-BODY"
+    end
+
+    test "a resume prompt (resume_context set) carries it too" do
+      send_to("bd-golden1", %{})
+
+      prompt =
+        PromptBuilder.prompt_for_task(task(%{}),
+          worktree_path: "/tmp/wt-golden",
+          resume_context: "RESUMING work on task bd-golden1\n"
+        )
+
+      assert prompt =~ "COORDINATOR-DIRECTIVE-BODY"
+      assert prompt =~ "RESUMING work on task bd-golden1"
+    end
+
+    test "a no-PR task prompt carries it" do
+      send_to("bd-golden1", %{})
+
+      prompt = PromptBuilder.prompt_for_task(task(%{issue_type: :research}), [])
+      assert prompt =~ "COORDINATOR-DIRECTIVE-BODY"
+    end
+
+    test "the manual session-resume prompt carries it ahead of the continue nudge" do
+      send_to("bd-golden1", %{})
+
+      prompt = Arbiter.Worker.manual_resume_prompt("bd-golden1")
+      assert prompt =~ "COORDINATOR-DIRECTIVE-BODY"
+      assert prompt =~ "ended before you finished"
+    end
+
+    test "read, other-task and non-coordinator mail is not injected" do
+      m = send_to("bd-golden1", %{body: "ALREADY-READ"})
+      {:ok, _} = Message.mark_read(m)
+      send_to("bd-other", %{body: "FOR-SOMEONE-ELSE"})
+      send_to("bd-golden1", %{from_ref: "bd-sibling", kind: :flag, body: "FROM-A-PEER"})
+
+      prompt = PromptBuilder.prompt_for_task(task(%{}), worktree_path: "/tmp/wt-golden")
+      refute prompt =~ "ALREADY-READ"
+      refute prompt =~ "FOR-SOMEONE-ELSE"
+      refute prompt =~ "FROM-A-PEER"
+      refute prompt =~ "UNREAD COORDINATOR DIRECTION"
+    end
+
+    test "sending the prompt does not mark the message read" do
+      m = send_to("bd-golden1", %{})
+      _ = PromptBuilder.prompt_for_task(task(%{}), worktree_path: "/tmp/wt-golden")
+      assert Ash.get!(Message, m.id).read_at == nil
+    end
+  end
 end

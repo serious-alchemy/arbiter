@@ -359,6 +359,55 @@ defmodule ArbiterCli.Cmd.InboxTest do
     end
   end
 
+  describe "arb inbox <task-id> (worker path): full bodies" do
+    test "prints each message in full, with its full id, not a truncated gist" do
+      id = "0b9d1f2a-1111-2222-3333-444455556666"
+      long = String.duplicate("word ", 80) <> "\nsecond line: fix lib/a.ex"
+
+      stub_routes([
+        {{"get", "/api/messages"},
+         {%{
+            "data" => [
+              %{
+                "id" => id,
+                "kind" => "info",
+                "from_ref" => "coordinator",
+                "to_ref" => "bd-1",
+                "subject" => "directive",
+                "body" => long
+              }
+            ]
+          }, 200}},
+        {{"post", "/api/messages/#{id}/read"}, {%{"id" => id}, 200}}
+      ])
+
+      {out, _err, code} = capture(fn -> Inbox.run(["bd-1"]) end)
+      assert code == 0
+      assert out =~ id
+      assert out =~ "second line: fix lib/a.ex"
+      assert out =~ String.duplicate("word ", 80)
+    end
+  end
+
+  describe "arb inbox read <prefix> with a worker token" do
+    test "a refused coordinator-mailbox lookup says why and points at the full id" do
+      stub_routes([
+        {{"get", "/api/messages"},
+         {%{
+            "error" => %{
+              "type" => "forbidden",
+              "message" => "a worker-tier token may only read its own mailbox (to_ref=bd-1)"
+            }
+          }, 403}}
+      ])
+
+      {_out, err, code} = capture(fn -> Inbox.run(["read", "0b9d1f2a"]) end)
+      assert code == 1
+      assert err =~ "may only read its own mailbox"
+      assert err =~ "full message id"
+    end
+  end
+
   # ---- bd-8akewg: explicit reader ------------------------------------------
 
   describe "arb inbox --session <id>" do
