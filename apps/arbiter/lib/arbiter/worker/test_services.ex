@@ -223,16 +223,13 @@ defmodule Arbiter.Worker.TestServices do
   defp validate({:invalid, other}), do: {:error, {:bad_service, other}}
 
   defp validate(%{name: name, image: image} = service) do
-    service =
-      Map.merge(%{env: [], command: [], tmpfs: [], ready: nil, worker_env: []}, service)
+    service = Map.merge(%{env: [], command: [], tmpfs: [], ready: nil, worker_env: []}, service)
 
     with true <- (is_binary(name) and Regex.match?(@name_re, name)) or {:bad_name, name},
          true <- valid_image?(image) or {:bad_image, image},
+         true <- valid_lists?(service) or {:bad_lists, name},
          true <- valid_pairs?(service.env) or {:bad_env, name},
-         true <- valid_pairs?(service.worker_env) or {:bad_worker_env, name},
-         true <- strings?(service.command) or {:bad_command, name},
-         true <- service.ready == nil or strings?(service.ready) or {:bad_ready, name},
-         true <- tmpfs?(service.tmpfs) or {:bad_tmpfs, name} do
+         true <- valid_pairs?(service.worker_env) or {:bad_worker_env, name} do
       {:ok, service}
     else
       {tag, value} -> {:error, {:bad_service, {tag, value}}}
@@ -252,6 +249,9 @@ defmodule Arbiter.Worker.TestServices do
   end
 
   defp valid_pairs?(_), do: false
+
+  defp valid_lists?(%{command: command, ready: ready, tmpfs: tmpfs}),
+    do: strings?(command) and (ready == nil or strings?(ready)) and tmpfs?(tmpfs)
 
   defp strings?(list), do: is_list(list) and Enum.all?(list, &(is_binary(&1) and not nul?(&1)))
   defp nul?(v), do: String.contains?(v, "\0")
