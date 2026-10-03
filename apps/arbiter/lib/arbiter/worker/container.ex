@@ -495,14 +495,17 @@ defmodule Arbiter.Worker.Container do
   @spec network_status() :: :ok | {:error, term()}
   def network_status do
     cached(:network_status, :worker_container_network_available, fn ->
-      case PodmanReadiness.diagnose(probes: [:bridge]) do
-        %{checks: checks} = report ->
-          case Enum.find(checks, &(&1.id == "socket_bridge")) do
-            %{status: "fail"} = failed -> {:error, {:socket_bridge_failed, failed.detail}}
-            _ -> if report.installed, do: :ok, else: readiness_result(report)
-          end
-      end
+      bridge_result(PodmanReadiness.diagnose(probes: [:bridge]))
     end)
+  end
+
+  defp bridge_result(%{installed: false} = report), do: readiness_result(report)
+
+  defp bridge_result(%{checks: checks}) do
+    case Enum.find(checks, &(&1.id == "socket_bridge")) do
+      %{status: "fail", detail: detail} -> {:error, {:socket_bridge_failed, detail}}
+      _ -> :ok
+    end
   end
 
   @doc "Forget the cached probe results."
