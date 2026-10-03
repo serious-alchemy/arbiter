@@ -141,7 +141,7 @@ defmodule Arbiter.Tasks.Lifecycle.View do
       column: column,
       step: step(column, ticket, runs, ctx) |> awaiting_ci(ci_wait, runs),
       blocked_by: blocked_by,
-      attention: Attention.of(ticket, attention_facts(state, ticket, runs, ctx)),
+      attention: Attention.of(ticket, attention_facts(state, ticket, runs, ctx, ci_wait)),
       ci_wait: ci_wait
     }
   end
@@ -296,8 +296,11 @@ defmodule Arbiter.Tasks.Lifecycle.View do
 
   # bd-cut6uv: a gate waiting on CI is `:in_review` with nothing live; the
   # marker only renames that step, never a live round or an unrelated phase.
-  defp awaiting_ci(:in_review, %{sha: _}, runs) do
-    if Enum.any?(runs, &(Map.get(&1, :agent_live) == true)), do: :in_review, else: :awaiting_ci
+  #
+  # bd-2gc809: also from `:implementing`, which is what a ticket reads as once a
+  # restart has taken its author row — the wait is re-armed with no author.
+  defp awaiting_ci(step, %{sha: _}, runs) when step in [:in_review, :implementing] do
+    if Enum.any?(runs, &(Map.get(&1, :agent_live) == true)), do: step, else: :awaiting_ci
   end
 
   defp awaiting_ci(step, _ci_wait, _runs), do: step
@@ -357,14 +360,19 @@ defmodule Arbiter.Tasks.Lifecycle.View do
 
   # ---- attention ----------------------------------------------------------
 
-  defp attention_facts(state, ticket, runs, ctx) do
+  defp attention_facts(state, ticket, runs, ctx, ci_wait) do
     %{
       state: state,
-      run: if(state == :active, do: run_fact(ticket, runs, ctx)),
+      run: if(state == :active, do: run_fact(ticket, runs, ctx) |> waiting_not_crashed(ci_wait)),
       block: if(state == :merging, do: block_fact(merger_status(ticket, ctx))),
       watchdog_alive: Map.get(ctx, :watchdog_alive)
     }
   end
+
+  # bd-2gc809: a gate waiting on CI has no agent by design, and after a restart
+  # not even the author row: the run that finished or vanished is not a crash.
+  defp waiting_not_crashed(fact, %{sha: _}) when fact in [:failed, :orphaned], do: nil
+  defp waiting_not_crashed(fact, _ci_wait), do: fact
 
   # What the ticket's runs say, for `Attention`: a live run anywhere on the
   # ticket is the machine's turn, whatever an earlier run did — which is what

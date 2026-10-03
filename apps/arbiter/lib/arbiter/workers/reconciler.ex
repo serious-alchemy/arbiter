@@ -308,6 +308,83 @@ defmodule Arbiter.Workers.Reconciler do
   end
 
   @doc """
+  Re-arm the CI waits the restart cut off (bd-2gc809).
+
+  A ReviewGate waiting on CI holds no slot and no agent; the wait is in the
+  gate's memory, and the ticket keeps only its `ci_wait` marker. Left to
+  `reconcile_resumable_tasks/1` such a ticket would come back as a resume of its
+  implementer, which needs a slot (the marker made the ticket hold none) and
+  restarts a session for no reason. Here each In-progress ticket carrying a
+  marker, with no worker, gets its gate back (`ReviewGate.rearm_ci_wait/2`),
+  waiting on CI again with no author: green dispatches the round's reviewer, red
+  and a moved head take the gate's existing paths.
+
+  A wait that cannot be re-armed (no worktree, say) has its marker cleared, so
+  the resume sweep that follows handles the ticket as it always did.
+
+  Returns `{:ok, %{rearmed: n, failed: n}}`, `{:ok, :skipped}` when not the
+  primary instance, or `{:error, reason}`.
+
+  ## Options
+
+    * `:primary?` — same single-instance gate as `reconcile_orphaned_runs/1`.
+    * `:rearm_fun` — 1-arity fun `(Issue.t() -> {:ok, pid} | {:error, term()})`.
+      Defaults to `ReviewGate.rearm_ci_wait/1` on the ticket id.
+  """
+  @spec reconcile_ci_waits(keyword()) ::
+          {:ok, %{rearmed: non_neg_integer(), failed: non_neg_integer()} | :skipped}
+          | {:error, term()}
+  def reconcile_ci_waits(opts \\ []) do
+    if Keyword.get(opts, :primary?, true) do
+      do_reconcile_ci_waits(Keyword.get(opts, :rearm_fun, &default_rearm/1))
+    else
+      {:ok, :skipped}
+    end
+  end
+
+  defp do_reconcile_ci_waits(rearm_fun) do
+    waiting =
+      Issue
+      |> Ash.Query.filter(state == :active)
+      |> Ash.read!()
+      |> Enum.filter(&ci_waiting?/1)
+      |> Enum.reject(&live_worker_for_issue?/1)
+
+    counts =
+      Enum.reduce(waiting, %{rearmed: 0, failed: 0}, fn issue, counts ->
+        case rearm_fun.(issue) do
+          {:ok, _gate} ->
+            Logger.info(
+              "Workers.Reconciler: task #{issue.id} was waiting on CI when the server " <>
+                "restarted; its wait is re-armed (no slot, no worker resume)"
+            )
+
+            %{counts | rearmed: counts.rearmed + 1}
+
+          {:error, reason} ->
+            Logger.warning(
+              "Workers.Reconciler: cannot re-arm task #{issue.id}'s CI wait " <>
+                "(#{inspect(reason)}); clearing it so the ordinary resume takes the ticket"
+            )
+
+            Arbiter.Worker.ReviewCi.put_marker(issue.id, nil)
+            %{counts | failed: counts.failed + 1}
+        end
+      end)
+
+    {:ok, counts}
+  rescue
+    e ->
+      Logger.warning("Workers.Reconciler: CI wait sweep failed: #{Exception.message(e)}")
+      {:error, e}
+  end
+
+  defp default_rearm(%Issue{id: task_id}), do: Arbiter.Worker.ReviewGate.rearm_ci_wait(task_id)
+
+  defp ci_waiting?(%Issue{review_gate_state: %{"ci_wait" => %{"sha" => sha}}}), do: is_binary(sha)
+  defp ci_waiting?(%Issue{}), do: false
+
+  @doc """
   Resume orphaned `:active` Issues that were mid-flight (a `:running` /
   revising worker killed by the restart) but have **no** open PR yet — via the
   existing `bd-auma3z` resume path (`Arbiter.Worker.Dispatch.resume/2`), which
@@ -360,7 +437,10 @@ defmodule Arbiter.Workers.Reconciler do
       # `reconcile_open_pr_tasks/1` restarts from the row. A revision runs with
       # its ticket In progress, so a cut-off run on a Merging ticket can only
       # be an implementer parked on its PR before bd-741sid, its work done.
-      |> Enum.reject(&(&1.state == :merging or live_worker_for_issue?(&1) or review_only?(&1)))
+      |> Enum.reject(
+        &(&1.state == :merging or live_worker_for_issue?(&1) or review_only?(&1) or
+            ci_waiting?(&1))
+      )
       |> Enum.filter(&(is_nil(&1.pr_ref) or ResumeSlot.cut_off_by_restart?(&1.id)))
 
     {resumed, escalated} =
