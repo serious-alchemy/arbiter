@@ -166,6 +166,7 @@ config :arbiter, :scratch_root, scratch_root
 config :arbiter, :worktree_root, Path.join(scratch_root, "worktrees-test")
 config :arbiter, :worker_tmp_root, Path.join(scratch_root, "worker-tmp-test")
 config :arbiter, :run_tmp_sweeper, enabled: false
+config :arbiter, :test_services_reaper, enabled: false
 
 # bd-6zuoo6: never wrap test spawns in a systemd scope — whether the host has a
 # user manager must not decide a test's outcome. The tests that exercise the cap

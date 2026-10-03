@@ -3473,13 +3473,13 @@ defmodule Arbiter.Worker do
 
     # bd-d2o3xb: killing the `podman` client does not reliably stop its
     # container (design §6.4), so a container spawn is removed by name too.
-    # Idempotent, and a no-op for any other spawn.
-    Arbiter.Worker.ContainerSpawn.teardown(state.meta && Map.get(state.meta, :claude_spawn))
-
-    state
+    # Idempotent, and a no-op for any other spawn. bd-dmcbos: this also removes
+    # its test-services pod, and runs with no live session too (the clause
+    # below), since a pod outlives the container (`--rm` removes only that).
+    teardown_container(state)
   end
 
-  defp terminate_live_sessions(%State{} = state), do: state
+  defp terminate_live_sessions(%State{} = state), do: teardown_container(state)
 
   defp terminate_session_port(%State{task_id: task_id}, port) do
     os_pid =
@@ -8646,4 +8646,9 @@ defmodule Arbiter.Worker do
   # `maybe_opt/3`'s map twin, for the dispatcher arg maps.
   defp maybe_arg(args, _key, nil), do: args
   defp maybe_arg(args, key, value), do: Map.put(args, key, value)
+
+  defp teardown_container(%State{meta: meta} = state) do
+    Arbiter.Worker.ContainerSpawn.teardown(meta && Map.get(meta, :claude_spawn))
+    state
+  end
 end

@@ -214,6 +214,181 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
     end
   end
 
+  describe "test services (bd-dmcbos)" do
+    setup ctx do
+      test_pid = self()
+
+      runner = fn _cmd, args, _opts ->
+        send(test_pid, {:podman, args})
+        {"", 0}
+      end
+
+      # prepare/1 names the repo's services; the stand-in runner answers every
+      # podman call and records it.
+      %{opts: [{:repo, "vstim"}, {:services_opts, [runner: runner]} | ctx.opts], runner: runner}
+    end
+
+    defp podman_calls do
+      receive do
+        {:podman, args} -> [args | podman_calls()]
+      after
+        0 -> []
+      end
+    end
+
+    test "a repo with services gets a ready pod, its env, and a worker container that joins it",
+         ctx do
+      assert {:ok, request} = ContainerSpawn.prepare(ctx.opts)
+
+      pod = request.name <> "-pod"
+      assert request.pod == pod
+
+      env = Map.new(request.env)
+      assert env["DATABASE_URL"] == "postgres://postgres:postgres@127.0.0.1:5432/vstim_test"
+
+      # The pod exists and Postgres is ready before prepare returns.
+      verbs = podman_calls() |> Enum.map(&Enum.take(&1, 2))
+      assert ["pod", "create"] in verbs
+      assert ["run", "-d"] in verbs
+      assert ["exec", request.name <> "-postgres"] in verbs
+
+      assert {:ok, wrapped} = ContainerSpawn.wrap_port(port_args(ctx, request))
+      argv = wrapped.argv
+      assert ["--pod", pod] == Enum.slice(argv, Enum.find_index(argv, &(&1 == "--pod")), 2)
+      refute "--network=none" in argv
+      refute "--userns=keep-id" in argv
+      # The bridges are still the only way out: label disabled, sockets mounted.
+      assert "label=disable" in argv
+      assert "#{ctx.proxy}:#{ctx.proxy}:ro" in mounts(argv)
+      # And the DATABASE_URL travels as a value in the client's env, named on argv.
+      assert {"DATABASE_URL", "postgres://postgres:postgres@127.0.0.1:5432/vstim_test"} in wrapped.env
+      refute Enum.any?(argv, &String.contains?(&1, "postgres://"))
+    end
+
+    test "tonic gets Postgres 15 and an S3 store in the same pod", ctx do
+      assert {:ok, request} = ContainerSpawn.prepare(Keyword.put(ctx.opts, :repo, "tonic"))
+
+      env = Map.new(request.env)
+      assert env["S3_ENDPOINT"] == "http://127.0.0.1:9000"
+      assert env["DATABASE_URL"] =~ "/tonic_test"
+
+      images =
+        for ["run", "-d" | _] = args <- podman_calls(),
+            do: Enum.at(args, Enum.find_index(args, &(&1 == "--")) + 1)
+
+      assert images == ["docker.io/library/postgres:15-alpine", "docker.io/pgsty/silo"]
+    end
+
+    test "a repo without services is exactly as before: no pod, no podman call", ctx do
+      assert {:ok, request} = ContainerSpawn.prepare(Keyword.put(ctx.opts, :repo, "arbiter"))
+      assert request.pod == nil
+      assert [] = podman_calls()
+
+      assert {:ok, %{argv: argv}} = ContainerSpawn.wrap_port(port_args(ctx, request))
+      assert "--network=none" in argv
+      assert "--userns=keep-id" in argv
+      refute "--pod" in argv
+    end
+
+    test "a service that will not start refuses the spawn and leaves no pod", ctx do
+      test_pid = self()
+
+      failing = fn _cmd, args, _opts ->
+        send(test_pid, {:podman, args})
+        if Enum.take(args, 1) == ["run"], do: {"image gone", 125}, else: {"", 0}
+      end
+
+      opts = Keyword.put(ctx.opts, :services_opts, runner: failing)
+
+      assert {:error, {:test_services_unavailable, {{:service_start, "postgres"}, 125, _}}} =
+               ContainerSpawn.prepare(opts)
+
+      assert Enum.any?(podman_calls(), &(Enum.take(&1, 2) == ["pod", "rm"]))
+    end
+
+    test "a bad service definition is refused before anything is started", ctx do
+      opts = Keyword.put(ctx.opts, :services, [%{name: "x", image: "--privileged"}])
+
+      assert {:error, {:test_services_unavailable, {:bad_service, _}}} =
+               ContainerSpawn.prepare(opts)
+
+      assert [] = podman_calls()
+    end
+
+    test "teardown/1 removes the container and then the pod", ctx do
+      {:ok, request} = ContainerSpawn.prepare(ctx.opts)
+      _ = podman_calls()
+
+      Application.put_env(:arbiter, :worker_container_runner, ctx.runner)
+      on_exit(fn -> Application.delete_env(:arbiter, :worker_container_runner) end)
+
+      assert :ok = ContainerSpawn.teardown(%{sandbox: request})
+
+      assert [
+               ["rm", "--force", "--ignore", "--time", "0", name],
+               ["pod", "rm", "--force", "--ignore", "--time", "0", pod]
+             ] = podman_calls()
+
+      assert name == request.name
+      assert pod == request.pod
+    end
+
+    test "the owning worker dying removes the pod, even with no live session", ctx do
+      owner = spawn(fn -> receive do: (:never -> :ok) end)
+
+      {:ok, request} =
+        ContainerSpawn.prepare([{:owner, owner} | List.keydelete(ctx.opts, :owner, 0)])
+
+      _ = podman_calls()
+
+      ref = Process.monitor(owner)
+      Process.exit(owner, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^owner, :killed}
+
+      pod = request.pod
+      assert_pod_removed(pod)
+    end
+
+    test "a worker stopped before any session registered still removes the pod", ctx do
+      task_id = "bd-p10stop-#{System.unique_integer([:positive])}"
+      {:ok, pid} = Worker.start(task_id: task_id, repo: "vstim")
+      {:ok, request} = ContainerSpawn.prepare(ctx.opts)
+      _ = podman_calls()
+
+      Application.put_env(:arbiter, :worker_container_runner, ctx.runner)
+      on_exit(fn -> Application.delete_env(:arbiter, :worker_container_runner) end)
+
+      :ok = Worker.report(pid, :claude_spawn, %{sandbox: request})
+      ref = Process.monitor(pid)
+      GenServer.stop(pid, :normal)
+      assert_receive {:DOWN, ^ref, :process, ^pid, _}
+
+      assert ["pod", "rm", "--force", "--ignore", "--time", "0", request.pod] in podman_calls()
+    end
+
+    defp assert_pod_removed(pod, tries \\ 100) do
+      removed? =
+        Enum.any?(
+          podman_calls(),
+          &(&1 == ["pod", "rm", "--force", "--ignore", "--time", "0", pod])
+        )
+
+      cond do
+        removed? ->
+          :ok
+
+        tries == 0 ->
+          flunk("pod #{pod} was never removed")
+
+        true ->
+          receive do
+          after
+            20 -> assert_pod_removed(pod, tries - 1)
+          end
+      end
+    end
+  end
+
   describe "wrap_port/1" do
     setup ctx do
       {:ok, request} = ContainerSpawn.prepare(ctx.opts)
