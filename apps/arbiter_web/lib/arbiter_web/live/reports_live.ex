@@ -18,7 +18,7 @@ defmodule ArbiterWeb.ReportsLive do
 
   use ArbiterWeb, :live_view
 
-  alias Arbiter.Reports.{BurnUp, Cache, Cost, Epics, Flow, ReviewHealth, Throughput}
+  alias Arbiter.Reports.{BurnUp, Cache, Cost, EpicWaits, Epics, Flow, ReviewHealth, Throughput}
   alias Arbiter.Tasks.{Issue, Workspace}
   alias ArbiterWeb.Charts
   alias ArbiterWeb.CoreComponents.Feedback
@@ -175,6 +175,7 @@ defmodule ArbiterWeb.ReportsLive do
       cost: Cost.load(filters),
       flow: Flow.load(filters),
       review_health: ReviewHealth.load(filters),
+      epic_waits: EpicWaits.load(filters),
       burn_up: BurnUp.load(filters["epic"], filters["range"])
     }
   end
@@ -321,6 +322,7 @@ defmodule ArbiterWeb.ReportsLive do
             <.cost_section cost={report.cost} />
             <.flow_section flow={report.flow} />
             <.review_health_section health={report.review_health} />
+            <.epic_waits_section waits={report.epic_waits} />
           </div>
         </.async_result>
       </div>
@@ -682,6 +684,103 @@ defmodule ArbiterWeb.ReportsLive do
     </section>
     """
   end
+
+  attr :waits, :map, required: true
+
+  defp epic_waits_section(assigns) do
+    ~H"""
+    <section id="reports-epic-waits" class="flex flex-col gap-3">
+      <h2 class="text-[13px] font-medium">Epic Ready wait: head vs tail</h2>
+      <p class="text-[12px] text-[var(--text-secondary)]">
+        Hours a closed epic child sat Ready (queued and unblocked), by its place in the
+        epic's close order. The guard is the p90 for closed tickets with no parent at
+        priority P1 or P2, which the epic floor must not push up.
+      </p>
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <Charts.stat_tile
+          id="reports-ew-guard"
+          label="Guard: parentless P1/P2 p90"
+          value={hours(@waits.guard.p90)}
+          note={"#{@waits.guard.n} tickets, median #{hours(@waits.guard.median)}"}
+        />
+        <Charts.stat_tile
+          :for={b <- @waits.buckets}
+          id={"reports-ew-#{b.key}"}
+          label={"#{b.key |> to_string() |> String.capitalize()} p90"}
+          value={hours(b.all.p90)}
+          note={"#{b.all.n} children, median #{hours(b.all.median)}"}
+        />
+      </div>
+      <div :if={@waits.closed_children == 0} id="reports-ew-empty" class="text-[12.5px]">
+        No closed epic children with a Ready span in this range.
+      </div>
+      <div class="overflow-x-auto">
+        <table
+          id="reports-ew-table"
+          class="w-full text-[12px] font-[family-name:var(--font-mono)]"
+        >
+          <thead>
+            <tr class="text-left text-[var(--text-label)]">
+              <th class="py-1 pr-3">Group</th>
+              <th class="pr-3 text-right">n</th>
+              <th class="pr-3 text-right">Median</th>
+              <th class="pr-3 text-right">p75</th>
+              <th class="pr-3 text-right">p90</th>
+              <th class="text-right">Mean</th>
+            </tr>
+          </thead>
+          <tbody>
+            <.wait_row
+              :for={b <- @waits.buckets}
+              id={"reports-ew-row-#{b.key}"}
+              label={b.label}
+              s={b.all}
+            />
+            <.wait_row
+              :for={b <- @waits.buckets}
+              id={"reports-ew-row-#{b.key}-p2"}
+              label={"#{b.label}, own P2 only"}
+              s={b.p2}
+            />
+            <%= for p <- @waits.by_priority do %>
+              <.wait_row
+                id={"reports-ew-row-p#{p.priority}-child"}
+                label={"P#{p.priority} epic child"}
+                s={p.epic_child}
+              />
+              <.wait_row
+                id={"reports-ew-row-p#{p.priority}-loose"}
+                label={"P#{p.priority} no parent"}
+                s={p.parentless}
+              />
+            <% end %>
+            <.wait_row id="reports-ew-row-guard" label="Guard: no parent, P1+P2" s={@waits.guard} />
+          </tbody>
+        </table>
+      </div>
+    </section>
+    """
+  end
+
+  attr :id, :string, required: true
+  attr :label, :string, required: true
+  attr :s, :map, required: true
+
+  defp wait_row(assigns) do
+    ~H"""
+    <tr id={@id}>
+      <td class="py-0.5 pr-3">{@label}</td>
+      <td class="pr-3 text-right">{@s.n}</td>
+      <td class="pr-3 text-right">{hours(@s.median)}</td>
+      <td class="pr-3 text-right">{hours(@s.p75)}</td>
+      <td class="pr-3 text-right">{hours(@s.p90)}</td>
+      <td class="text-right">{hours(@s.mean)}</td>
+    </tr>
+    """
+  end
+
+  defp hours(nil), do: "—"
+  defp hours(h), do: "#{:erlang.float_to_binary(h * 1.0, decimals: 1)}h"
 
   attr :health, :map, required: true
 
