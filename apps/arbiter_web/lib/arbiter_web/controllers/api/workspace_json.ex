@@ -61,6 +61,10 @@ defmodule ArbiterWeb.Api.WorkspaceJSON do
           "policy_enforced" => security_enforced?(adapter),
           "write_confinement" => Agents.write_confinement(adapter, policy),
           "write_jail_warning" => Agents.write_jail_warning(adapter, policy),
+          # G11 (bd-anwb0u): can this adapter confine network egress here, and
+          # what tier does each attached subject resolve to.
+          "egress_confinement" => Agents.egress_confinement(adapter, policy),
+          "guardrails" => Arbiter.Guardrails.Report.posture(ws),
           "repos" => repo_security_postures(ws, adapter)
         }),
       created_at: iso(ws.created_at),

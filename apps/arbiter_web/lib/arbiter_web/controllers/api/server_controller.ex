@@ -28,6 +28,12 @@ defmodule ArbiterWeb.Api.ServerController do
       one allow and one deny. Run on demand rather than cached, since it
       starts a proxy. A failure carries the same `cause`/`message`/`fix` as the
       jail diagnoses above.
+    * `GET /api/server/guardrails` — the guardrail posture (bd-anwb0u, G11,
+      `Arbiter.Guardrails.Report`): per workspace, the effective tier of each
+      attached (provider, model) subject, and the issues (an inert block, an
+      unmatched or out-of-scope subject, a tier its adapter cannot enforce on
+      this host, a dead cap). `active: false` with no issues when nothing is
+      configured.
     * `GET /api/server/claude_credentials` — every workspace that runs Claude
       with no setup token (or API key) of its own (bd-80ecol,
       `Arbiter.Agents.Claude.CredentialCheck.workspace_report/0`): the ones
@@ -62,6 +68,7 @@ defmodule ArbiterWeb.Api.ServerController do
   alias Arbiter.Accounts.Enablement
   alias Arbiter.Accounts.LoginRunner
   alias Arbiter.Agents.Claude.CredentialCheck
+  alias Arbiter.Guardrails
   alias Arbiter.Mergers.RoutingCheck
   alias Arbiter.Worker.Egress.SelfTest
   alias Arbiter.Worker.Jail
@@ -114,6 +121,16 @@ defmodule ArbiterWeb.Api.ServerController do
 
       {:error, reason} ->
         json(conn, jail_diagnosis(SelfTest.explain(reason)))
+    end
+  end
+
+  # bd-anwb0u (G11): the guardrail posture, per workspace: each attached
+  # subject's tier, and what is inconsistent or unmeetable on this host
+  # (`Arbiter.Guardrails.Report`).
+  def guardrails(conn, _params) do
+    case Ash.read(Arbiter.Tasks.Workspace) do
+      {:ok, workspaces} -> json(conn, Guardrails.Report.build(workspaces))
+      {:error, _} = err -> err
     end
   end
 

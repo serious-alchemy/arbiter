@@ -140,6 +140,21 @@ defmodule ArbiterCli.ConfigSchema do
         - top-level security.mode (use agent.security.permissions.mode instead)
         - agent.config.security_mode (use agent.security.permissions.mode instead)
 
+    guardrails  (map — per-subject guardrail caps and ticket-permission bindings; bd-anwb0u)
+      Tighten-only per workspace: it can only lower what the installation's subject
+      rules (the guardrail_subjects table) assigned. A block with no subject rules
+      behind it enforces nothing. Loosening it (or agent.security) is operator-only;
+      a coordinator token may only tighten. Unknown keys are refused.
+      subjects[]    list of caps: {match: {provider|family|model}, max_tier, min_mode,
+                    egress, max_difficulty, spend: {action, tokens, wall_clock_s},
+                    review: {cross_family, same_family_fallback, min_reviewer_tier}}
+                    max_tier: quarantine | probation | trusted | privileged
+      bindings      map permission-name -> {grant_by: operator|coordinator, min_tier,
+                    enforced_read_only, tunnels, hosts, env_from_secret, ssh_key_secret,
+                    token_secret}
+      defaults      {permissions: [name, …]} granted to every ticket by default
+      repos.<repo>  {defaults, subjects} — the same shapes, scoped to one repo
+
     routing  (map)
       policy    one of: #{Enum.join(@routing_policies, ", ")}   (default: static)
       rules     map, policy-specific:

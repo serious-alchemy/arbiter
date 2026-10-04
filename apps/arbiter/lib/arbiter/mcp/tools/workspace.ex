@@ -9,6 +9,7 @@ defmodule Arbiter.MCP.Tools.Workspace do
   still owns.
   """
 
+  alias Arbiter.Guardrails.Authority
   alias Arbiter.MCP.Scope
   alias Arbiter.MCP.Tools
   alias Arbiter.Tasks.AttentionLimits
@@ -144,7 +145,10 @@ defmodule Arbiter.MCP.Tools.Workspace do
          {:ok, ws} <- Tools.fetch_workspace(ws_id) do
       patch = config_put_in_path(%{}, String.split(key, "."), value)
 
-      case Ash.update(ws, %{patch: patch, unset_paths: []}, action: :patch_config) do
+      case Ash.update(ws, %{patch: patch, unset_paths: []},
+             action: :patch_config,
+             context: guardrail_context(scope)
+           ) do
         {:ok, updated} -> {:ok, serialize_workspace_config(updated)}
         {:error, err} -> {:error, {:invalid, Tools.ash_error_message(err)}}
       end
@@ -171,7 +175,10 @@ defmodule Arbiter.MCP.Tools.Workspace do
       if config_get_in_path(config, path) == nil do
         {:error, {:invalid, "config key not found: #{key}"}}
       else
-        case Ash.update(ws, %{patch: %{}, unset_paths: [key]}, action: :patch_config) do
+        case Ash.update(ws, %{patch: %{}, unset_paths: [key]},
+               action: :patch_config,
+               context: guardrail_context(scope)
+             ) do
           {:ok, updated} -> {:ok, serialize_workspace_config(updated)}
           {:error, err} -> {:error, {:invalid, Tools.ash_error_message(err)}}
         end
@@ -275,6 +282,11 @@ defmodule Arbiter.MCP.Tools.Workspace do
   # Top-level config key prefixes that the MCP write tools refuse to set.
   # Secrets live in the encrypted `secrets` column, not the config JSON;
   # routing them here would silently store a plaintext ref with no effect.
+  # G11: the config write carries the caller's authority, so loosening
+  # `guardrails.*` / `agent.security` is refused for anything but operator proof.
+  defp guardrail_context(%Scope{} = scope),
+    do: %{guardrail_authority: Authority.from_scope(scope)}
+
   defp deny_secret_path(key) when is_binary(key) do
     blocked = ~w(secret secrets credentials)
     prefix = key |> String.split(".") |> List.first() |> String.downcase()

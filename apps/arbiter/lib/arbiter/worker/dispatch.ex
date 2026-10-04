@@ -66,6 +66,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Agents
   alias Arbiter.Agents.Claude.CredentialCheck
   alias Arbiter.Agents.Gemini.Config, as: GeminiConfig
+  alias Arbiter.Agents.ModelFamily
   alias Arbiter.Agents.ProviderConstraint
   alias Arbiter.Agents.ProviderRouting
   alias Arbiter.Agents.Routing
@@ -73,6 +74,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Board.Autopilot
   alias Arbiter.Board.Drain
   alias Arbiter.CircuitBreaker
+  alias Arbiter.Guardrails
   alias Arbiter.MCP.AgentConfig.Codex
   alias Arbiter.MCP.AgentConfig.Gemini, as: GeminiMCP
   alias Arbiter.Mergers.Github.RepoResolver
@@ -2881,10 +2883,17 @@ defmodule Arbiter.Worker.Dispatch do
         # posture to this repo (bd-3gc18m). Threaded into the adapter so it
         # bakes the right permission-mode + deny/allow into the argv — no
         # inheritance of the operator's ~/.claude (bd-9u10op).
-        policy =
+        #
+        # bd-anwb0u (G11): `base_policy` is the resolved posture before the
+        # guardrail floor. The floor depends on the (provider, model) subject, so
+        # it is applied per candidate provider (`guardrail_floor/4`) — here for
+        # the routed one, again below if the strict gate swaps it.
+        base_policy =
           workspace
           |> SecurityPolicy.resolve(security_override(opts), Keyword.get(opts, :repo))
           |> review_security_policy(opts)
+
+        policy = guardrail_floor(base_policy, workspace, choice, opts)
 
         # bd-1abj7u: fail closed on a `:strict` scope that a chosen provider
         # cannot keep — never silently downgrade the mode or dispatch anyway.
@@ -2903,14 +2912,21 @@ defmodule Arbiter.Worker.Dispatch do
         # constraint, so a strict-policy swap never lands on an excluded one.
         swap_pool = ProviderConstraint.filter(task, Agents.agent_pool(workspace))
 
-        case sandbox_checked_provider(choice.type, policy, swap_pool,
-               explicit: not is_nil(agent_type)
-             ) do
+        checked =
+          choice.type
+          |> sandbox_checked_provider(policy, swap_pool, explicit: not is_nil(agent_type))
+          |> guardrail_checked(base_policy, workspace, choice, opts)
+
+        case checked do
           {:error, :ineligible} ->
             {:error, ineligible_provider_error(choice.type, policy, workspace, opts)}
 
+          {:error, {:guardrail_unenforceable, _} = refusal} ->
+            {:error, refusal}
+
           {:ok, effective_type} ->
             choice = apply_agent_type_override(choice, effective_type)
+            policy = guardrail_floor(base_policy, workspace, choice, opts)
             adapter = Agents.for_type(choice.type)
 
             # `workspace:` is carried for the adapter's `spawn_env/1` — it resolves
@@ -3174,8 +3190,11 @@ defmodule Arbiter.Worker.Dispatch do
   @spec strict_write_confinement_error(atom(), SecurityPolicy.t(), map() | nil, keyword()) ::
           {:strict_write_confinement_unavailable, String.t()}
   def strict_write_confinement_error(provider_type, %SecurityPolicy{} = policy, workspace, opts) do
-    {_mode, source} =
+    {resolved_mode, source} =
       SecurityPolicy.mode_source(workspace, security_override(opts), Keyword.get(opts, :repo))
+
+    # G11: a mode the resolved layers did not ask for is the guardrail floor's.
+    source = if policy.permissions.mode == resolved_mode, do: source, else: :guardrail_floor
 
     {:strict_write_confinement_unavailable,
      "Refusing to dispatch to #{provider_type} under :strict write isolation " <>
@@ -3185,6 +3204,56 @@ defmodule Arbiter.Worker.Dispatch do
        "Use claude for this dispatch instead, or install bubblewrap once the OS jail " <>
        "(bd-5gvqgc) ships and makes #{provider_type} :strict-eligible."}
   end
+
+  # bd-anwb0u (G11): the tighten-only guardrail floor (design §7.2) over the
+  # resolved `policy`, for the (provider, model) this `choice` will run. A no-op
+  # unless subject rules are configured (`Arbiter.Guardrails.effective/4`).
+  defp guardrail_floor(%SecurityPolicy{} = policy, workspace, choice, opts) do
+    provider = choice.type
+    config = choice.config || %{}
+
+    model =
+      Map.get(config, "model") ||
+        ModelFamily.model_for_tier(provider, Map.get(config, "model_tier"), config)
+
+    Guardrails.apply_to_policy(policy, workspace, provider, model, repo: Keyword.get(opts, :repo))
+  end
+
+  # A guardrail profile states what must hold and the adapter says whether it
+  # can hold on this host (design §3.4). When it cannot, the dispatch is refused
+  # rather than spawned under a weaker posture, the bd-1abj7u rule generalised
+  # to egress.
+  defp guardrail_checked({:ok, type} = ok, base_policy, workspace, choice, opts) do
+    choice = apply_agent_type_override(choice, type)
+    policy = guardrail_floor(base_policy, workspace, choice, opts)
+
+    profile =
+      Guardrails.effective(
+        Guardrails.subject(choice.type, Map.get(choice.config || %{}, "model")),
+        workspace,
+        Keyword.get(opts, :repo)
+      )
+
+    case Guardrails.enforceable(Agents.for_type(choice.type), policy, profile) do
+      :ok ->
+        ok
+
+      {:error, reason} ->
+        {:error,
+         {:guardrail_unenforceable,
+          "Refusing to dispatch to #{choice.type}: its guardrail tier (#{profile.tier}) needs " <>
+            "#{guardrail_need(reason, policy)}, which #{choice.type} cannot provide on this host " <>
+            "(#{reason}). Route this ticket to a provider that can, or have the operator " <>
+            "change the subject's tier."}}
+    end
+  end
+
+  defp guardrail_checked(other, _base_policy, _workspace, _choice, _opts), do: other
+
+  defp guardrail_need(:write_confinement_none, _policy), do: "write confinement (:strict)"
+
+  defp guardrail_need(:egress_unenforceable, policy),
+    do: "network egress confinement (egress: #{SecurityPolicy.egress(policy)})"
 
   # bd-d2o3xb (P7): `sandbox.backend: podman` has a wrap point for Claude only,
   # so under it the pool is Claude or nothing. An explicit `--provider` that is
@@ -3222,6 +3291,7 @@ defmodule Arbiter.Worker.Dispatch do
   defp mode_source_label(:repo), do: "a repos.<repo> override"
   defp mode_source_label(:workspace), do: "the workspace default"
   defp mode_source_label(:install_default), do: "the install-wide default"
+  defp mode_source_label(:guardrail_floor), do: "this subject's guardrail tier"
 
   defp safe_spawn_env(adapter, agent_opts) do
     if function_exported?(adapter, :spawn_env, 1) do
