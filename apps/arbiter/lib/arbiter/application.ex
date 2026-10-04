@@ -375,9 +375,23 @@ defmodule Arbiter.Application do
            Arbiter.Boot.ResumeGate.sweep(fn ->
              Arbiter.Workers.Reconciler.reconcile_orphaned_runs(primary?: primary?)
              Arbiter.Workers.Reconciler.reconcile_shutdown_casualties(primary?: primary?)
-             Arbiter.Workers.Reconciler.reconcile_open_pr_tasks(primary?: primary?)
-             Arbiter.Workers.Reconciler.reconcile_ci_waits(primary?: primary?)
-             Arbiter.Workers.Reconciler.reconcile_resumable_tasks(primary?: primary?)
+             # bd-2gc809 / bd-2yt0d2: a CI wait or a ReviewGate pass the stop cut
+             # off gets its gate back before anything else looks at the ticket.
+             # A gate holds no worker the later sweeps could see, so they are
+             # told which tickets it covered.
+             ci_waits = Arbiter.Workers.Reconciler.reconcile_ci_waits(primary?: primary?)
+             passes = Arbiter.Workers.Reconciler.reconcile_review_passes(primary?: primary?)
+             skip_ids = Arbiter.Workers.Reconciler.restarted_ids([ci_waits, passes])
+
+             Arbiter.Workers.Reconciler.reconcile_open_pr_tasks(
+               primary?: primary?,
+               skip_ids: skip_ids
+             )
+
+             Arbiter.Workers.Reconciler.reconcile_resumable_tasks(
+               primary?: primary?,
+               skip_ids: skip_ids
+             )
            end)
          end},
         id: :reconcile_boot_task,

@@ -25,6 +25,18 @@ defmodule Arbiter.Workers.Reconciler do
   overran `Arbiter.Worker.shutdown_grace_ms/0` and was killed, systemd's stop
   timeout firing first — is still live when this sweep sees it.
 
+  ## What the boot sweeps restart (bd-2yt0d2)
+
+  A stop also cuts off work that is not a worker: the gate waiting on CI
+  (`reconcile_ci_waits/1`) and the ReviewGate pass — a reviewer, or an
+  implementer fix round — that a gate was waiting on (`reconcile_review_passes/1`).
+  Each is brought back as a gate with no author, never as a resume of the ticket's
+  implementer, so no resume attempt is counted and nothing is escalated; the
+  runs it cut off stay `interrupted` / "server shutdown". Every sweep that
+  restarts things reports, per ticket, what restarted and what did not and why
+  (`t:report/0`), and logs the same; the later sweeps are handed the restarted ids
+  so none of them acts on a ticket whose gate is already running.
+
   ## Single-instance gate
 
   Liveness is keyed off the LOCAL process registry, which is empty on a fresh
@@ -53,6 +65,7 @@ defmodule Arbiter.Workers.Reconciler do
   alias Arbiter.Worker
   alias Arbiter.Worker.Dispatch
   alias Arbiter.Worker.ResumeSlot
+  alias Arbiter.Worker.ReviewPass
   alias Arbiter.Worker.Watchdog
   alias Arbiter.Workers.Run
   alias Arbiter.Workflows.MergedPRFinalizerSupervisor
@@ -247,6 +260,10 @@ defmodule Arbiter.Workers.Reconciler do
 
     * `:primary?` — same single-instance gate as `reconcile_orphaned_runs/1`.
       When `false`, skips and returns `{:ok, :skipped}`.
+    * `:skip_ids` — tickets an earlier sweep already restarted (a re-armed
+      ReviewGate pass or CI wait, `restarted_ids/1`). Their gate is running and
+      holds no worker this sweep could see; handing them to the patrols too would
+      watch a PR the gate is still reviewing, or escalate it.
     * `:watch_fun` — 1-arity fun `(Issue.t() -> :ok | {:error, term()})` that
       starts a Merging ticket's Watchdog. Defaults to `Watchdog.restart/1` on
       the ticket id.
@@ -268,19 +285,20 @@ defmodule Arbiter.Workers.Reconciler do
     if Keyword.get(opts, :primary?, true) do
       do_reconcile_open_pr_tasks(
         Keyword.get(opts, :watch_fun, &default_watch/1),
-        Keyword.get(opts, :rewatch_fun, &default_rewatch/1)
+        Keyword.get(opts, :rewatch_fun, &default_rewatch/1),
+        Keyword.get(opts, :skip_ids, [])
       )
     else
       {:ok, :skipped}
     end
   end
 
-  defp do_reconcile_open_pr_tasks(watch_fun, rewatch_fun) do
+  defp do_reconcile_open_pr_tasks(watch_fun, rewatch_fun, skip_ids) do
     stuck =
       Issue
       |> Ash.Query.filter(state in [:active, :merging])
       |> Ash.read!()
-      |> Enum.reject(&live_worker_for_issue?/1)
+      |> Enum.reject(&(live_worker_for_issue?(&1) or &1.id in skip_ids))
       |> Enum.filter(&rewatchable?/1)
       |> Enum.reject(&watched?/1)
 
@@ -322,7 +340,8 @@ defmodule Arbiter.Workers.Reconciler do
   A wait that cannot be re-armed (no worktree, say) has its marker cleared, so
   the resume sweep that follows handles the ticket as it always did.
 
-  Returns `{:ok, %{rearmed: n, failed: n}}`, `{:ok, :skipped}` when not the
+  Returns `{:ok, report}` (see `t:report/0`: `rearmed` / `failed` counts and the
+  per-ticket `restarted` / `not_restarted` lists), `{:ok, :skipped}` when not the
   primary instance, or `{:error, reason}`.
 
   ## Options
@@ -331,9 +350,7 @@ defmodule Arbiter.Workers.Reconciler do
     * `:rearm_fun` — 1-arity fun `(Issue.t() -> {:ok, pid} | {:error, term()})`.
       Defaults to `ReviewGate.rearm_ci_wait/1` on the ticket id.
   """
-  @spec reconcile_ci_waits(keyword()) ::
-          {:ok, %{rearmed: non_neg_integer(), failed: non_neg_integer()} | :skipped}
-          | {:error, term()}
+  @spec reconcile_ci_waits(keyword()) :: {:ok, report() | :skipped} | {:error, term()}
   def reconcile_ci_waits(opts \\ []) do
     if Keyword.get(opts, :primary?, true) do
       do_reconcile_ci_waits(Keyword.get(opts, :rearm_fun, &default_rearm/1))
@@ -350,8 +367,8 @@ defmodule Arbiter.Workers.Reconciler do
       |> Enum.filter(&ci_waiting?/1)
       |> Enum.reject(&live_worker_for_issue?/1)
 
-    counts =
-      Enum.reduce(waiting, %{rearmed: 0, failed: 0}, fn issue, counts ->
+    report =
+      Enum.reduce(waiting, empty_report(), fn issue, report ->
         case rearm_fun.(issue) do
           {:ok, _gate} ->
             Logger.info(
@@ -359,7 +376,11 @@ defmodule Arbiter.Workers.Reconciler do
                 "restarted; its wait is re-armed (no slot, no worker resume)"
             )
 
-            %{counts | rearmed: counts.rearmed + 1}
+            restarted(report, %{
+              task_id: issue.id,
+              phase: :awaiting_ci,
+              round: ci_wait_round(issue)
+            })
 
           {:error, reason} ->
             Logger.warning(
@@ -368,11 +389,11 @@ defmodule Arbiter.Workers.Reconciler do
             )
 
             Arbiter.Worker.ReviewCi.put_marker(issue.id, nil)
-            %{counts | failed: counts.failed + 1}
+            not_restarted(report, issue.id, reason)
         end
       end)
 
-    {:ok, counts}
+    {:ok, report}
   rescue
     e ->
       Logger.warning("Workers.Reconciler: CI wait sweep failed: #{Exception.message(e)}")
@@ -383,6 +404,161 @@ defmodule Arbiter.Workers.Reconciler do
 
   defp ci_waiting?(%Issue{review_gate_state: %{"ci_wait" => %{"sha" => sha}}}), do: is_binary(sha)
   defp ci_waiting?(%Issue{}), do: false
+
+  defp ci_wait_round(%Issue{review_gate_state: %{"ci_wait" => %{"round" => round}}}), do: round
+  defp ci_wait_round(%Issue{}), do: nil
+
+  @doc """
+  Restart the ReviewGate pass the server stop cut off (bd-2yt0d2 / #291).
+
+  A reviewer pass, or an implementer fix round inside the gate
+  (`<task>#review#impl<N>`), dies with the node, and so does the gate that was
+  waiting on it. Left to `reconcile_resumable_tasks/1` such a ticket would come
+  back as a resume of its *author* — a slot-holding implementer session that has
+  nothing to do — while the review itself stayed parked until the coordinator
+  force-resumed it. Here each In-progress ticket carrying a `pass` marker
+  (`Arbiter.Worker.ReviewPass`), whose latest run the restart cut off
+  (`Arbiter.Worker.ResumeSlot.cut_off_by_restart?/1`) and which has no worker,
+  gets a gate back (`ReviewGate.rearm_pass/2`) that re-runs the round on the same
+  head with no author and no coordinator action. The cut-off runs are already
+  `interrupted` / "server shutdown" (their workers' `terminate/2`, or
+  `reconcile_orphaned_runs/1`); nothing here touches them, and no resume is made,
+  so neither the resume-attempt counter nor an escalation clock moves.
+
+  A pass that cannot be restarted (no worktree, say) has its marker cleared and
+  is listed with the reason, and the resume sweep that follows handles the ticket
+  as it always did. So is a marker no stop explains (the latest run ended on its
+  own terms): it is stale, and is cleared.
+
+  Run it after `reconcile_ci_waits/1` (a ticket waiting on CI is that sweep's) and
+  before `reconcile_open_pr_tasks/1` and `reconcile_resumable_tasks/1`, handing
+  them the restarted ids (see `restarted_ids/1`).
+
+  Returns `{:ok, report}` (see `t:report/0`), `{:ok, :skipped}` when not the
+  primary instance, or `{:error, reason}`.
+
+  ## Options
+
+    * `:primary?` — same single-instance gate as `reconcile_orphaned_runs/1`.
+    * `:rearm_fun` — 1-arity fun `(Issue.t() -> {:ok, pid} | {:error, term()})`.
+      Defaults to `ReviewGate.rearm_pass/1` on the ticket id.
+  """
+  @spec reconcile_review_passes(keyword()) :: {:ok, report() | :skipped} | {:error, term()}
+  def reconcile_review_passes(opts \\ []) do
+    if Keyword.get(opts, :primary?, true) do
+      do_reconcile_review_passes(Keyword.get(opts, :rearm_fun, &default_rearm_pass/1))
+    else
+      {:ok, :skipped}
+    end
+  end
+
+  defp do_reconcile_review_passes(rearm_fun) do
+    cut_off =
+      Issue
+      |> Ash.Query.filter(state == :active)
+      |> Ash.read!()
+      |> Enum.filter(&(not is_nil(ReviewPass.stored(&1))))
+      |> Enum.reject(&(ci_waiting?(&1) or live_worker_for_issue?(&1)))
+
+    report = Enum.reduce(cut_off, empty_report(), &rearm_review_pass(&1, &2, rearm_fun))
+    log_report("review-pass sweep", report)
+    {:ok, report}
+  rescue
+    e ->
+      Logger.warning("Workers.Reconciler: review-pass sweep failed: #{Exception.message(e)}")
+      {:error, e}
+  end
+
+  defp rearm_review_pass(%Issue{id: task_id} = issue, report, rearm_fun) do
+    marker = ReviewPass.stored(issue)
+
+    result =
+      if ResumeSlot.cut_off_by_restart?(task_id),
+        do: rearm_fun.(issue),
+        else: {:error, :not_interrupted}
+
+    case result do
+      {:ok, _gate} ->
+        restarted(report, %{
+          task_id: task_id,
+          phase: String.to_existing_atom(marker["phase"]),
+          round: marker["round"]
+        })
+
+      {:error, reason} ->
+        Logger.warning(
+          "Workers.Reconciler: cannot restart task #{task_id}'s #{marker["phase"]} pass " <>
+            "(#{inspect(reason)}); clearing it so the ordinary resume takes the ticket"
+        )
+
+        ReviewPass.put(task_id, nil)
+        not_restarted(report, task_id, reason)
+    end
+  end
+
+  defp default_rearm_pass(%Issue{id: task_id}),
+    do: Arbiter.Worker.ReviewGate.rearm_pass(task_id)
+
+  @typedoc """
+  What a boot sweep that restarts things reports. `restarted` and `not_restarted`
+  are the per-ticket truth; `rearmed` / `failed` (or `resumed` / `escalated`) are
+  their counts.
+  """
+  @type report :: %{
+          required(:restarted) => [%{task_id: String.t(), phase: atom(), round: term()}],
+          required(:not_restarted) => [%{task_id: String.t(), reason: term()}],
+          optional(atom()) => term()
+        }
+
+  @doc """
+  The ticket ids the given sweep results restarted — what the resume sweep is
+  told to leave alone (`reconcile_resumable_tasks/1`'s `:skip_ids`). Takes the
+  `{:ok, report}` / report values the sweeps return; anything else (a skipped or
+  failed sweep) restarted nothing.
+  """
+  @spec restarted_ids([term()]) :: [String.t()]
+  def restarted_ids(results) when is_list(results) do
+    Enum.flat_map(results, fn
+      {:ok, %{restarted: restarted}} -> Enum.map(restarted, & &1.task_id)
+      %{restarted: restarted} -> Enum.map(restarted, & &1.task_id)
+      _ -> []
+    end)
+  end
+
+  defp empty_report,
+    do: %{rearmed: 0, failed: 0, restarted: [], not_restarted: []}
+
+  defp restarted(report, entry),
+    do: %{report | rearmed: report.rearmed + 1, restarted: report.restarted ++ [entry]}
+
+  defp not_restarted(report, task_id, reason) do
+    %{
+      report
+      | failed: report.failed + 1,
+        not_restarted: report.not_restarted ++ [%{task_id: task_id, reason: reason}]
+    }
+  end
+
+  defp log_report(label, %{restarted: [], not_restarted: []}), do: label
+
+  defp log_report(label, report) do
+    Logger.info(
+      "Workers.Reconciler: #{label} — restarted #{length(report.restarted)}" <>
+        describe_restarted(report.restarted) <>
+        ", not restarted #{length(report.not_restarted)}" <>
+        describe_not_restarted(report.not_restarted)
+    )
+  end
+
+  defp describe_restarted([]), do: ""
+
+  defp describe_restarted(entries),
+    do: " (" <> Enum.map_join(entries, ", ", &"#{&1.task_id} #{&1.phase} r#{&1.round}") <> ")"
+
+  defp describe_not_restarted([]), do: ""
+
+  defp describe_not_restarted(entries),
+    do: " (" <> Enum.map_join(entries, ", ", &"#{&1.task_id}: #{inspect(&1.reason)}") <> ")"
 
   @doc """
   Resume orphaned `:active` Issues that were mid-flight (a `:running` /
@@ -406,29 +582,48 @@ defmodule Arbiter.Workers.Reconciler do
   the PR that was mid-flight): a patrol only watches the PR, so without a resume
   that work is simply lost until an operator restarts it by hand.
 
-  Returns `{:ok, %{resumed: non_neg_integer(), escalated: non_neg_integer()}}`,
-  `{:ok, :skipped}` when not the primary instance, or `{:error, reason}`.
+  Returns `{:ok, report}`, `{:ok, :skipped}` when not the primary instance, or
+  `{:error, reason}`. The report counts only what actually restarted:
+  `resumed` is the tickets whose worker is running again, `deferred` the ones
+  whose resume is parked until a slot frees (not running yet), `escalated` the
+  ones that could not be resumed. `restarted` lists the running ones by ticket;
+  `not_restarted` lists every other one with its reason (`:deferred` or
+  `{:unresumable, reason}`).
 
   ## Options
 
     * `:primary?` — same single-instance gate as `reconcile_orphaned_runs/1`.
+    * `:skip_ids` — tickets an earlier sweep already restarted
+      (`restarted_ids/1`), left alone here: their gate is running, but holds no
+      worker this sweep could see.
     * `:resume_fun` — 1-arity fun `(Issue.t() -> {:ok, term()} | {:error, term()})`
       used to resume a task. Defaults to `&default_resume/1` (the real
       `Dispatch.resume/2`). Injectable so tests can exercise the resume/escalate
       branches without spawning a real worker.
   """
   @spec reconcile_resumable_tasks(keyword()) ::
-          {:ok, %{resumed: non_neg_integer(), escalated: non_neg_integer()} | :skipped}
+          {:ok,
+           %{
+             required(:resumed) => non_neg_integer(),
+             required(:deferred) => non_neg_integer(),
+             required(:escalated) => non_neg_integer(),
+             required(:restarted) => [String.t()],
+             required(:not_restarted) => [%{task_id: String.t(), reason: term()}]
+           }
+           | :skipped}
           | {:error, term()}
   def reconcile_resumable_tasks(opts \\ []) do
     if Keyword.get(opts, :primary?, true) do
-      do_reconcile_resumable_tasks(Keyword.get(opts, :resume_fun, &default_resume/1))
+      do_reconcile_resumable_tasks(
+        Keyword.get(opts, :resume_fun, &default_resume/1),
+        Keyword.get(opts, :skip_ids, [])
+      )
     else
       {:ok, :skipped}
     end
   end
 
-  defp do_reconcile_resumable_tasks(resume_fun) do
+  defp do_reconcile_resumable_tasks(resume_fun, skip_ids) do
     stuck =
       Issue
       |> Ash.Query.filter(state in [:active, :merging])
@@ -437,11 +632,11 @@ defmodule Arbiter.Workers.Reconciler do
       # `reconcile_open_pr_tasks/1` restarts from the row. A revision runs with
       # its ticket In progress, so a cut-off run on a Merging ticket can only
       # be an implementer parked on its PR before bd-741sid, its work done.
-      |> Enum.reject(&skip_resume?/1)
+      |> Enum.reject(&(skip_resume?(&1) or &1.id in skip_ids))
       |> Enum.filter(&(is_nil(&1.pr_ref) or ResumeSlot.cut_off_by_restart?(&1.id)))
 
-    {resumed, escalated} =
-      Enum.reduce(stuck, {0, 0}, fn issue, {res, esc} ->
+    report =
+      Enum.reduce(stuck, resume_report(), fn issue, report ->
         case resume_fun.(issue) do
           {:ok, %{deferred: true}} ->
             Logger.info(
@@ -449,14 +644,14 @@ defmodule Arbiter.Workers.Reconciler do
                 "its resume is deferred until a worker slot frees"
             )
 
-            {res + 1, esc}
+            not_resumed(%{report | deferred: report.deferred + 1}, issue.id, :deferred)
 
           {:ok, _result} ->
             Logger.info(
               "Workers.Reconciler: resumed mid-flight task #{issue.id} from its preserved worktree"
             )
 
-            {res + 1, esc}
+            %{report | resumed: report.resumed + 1, restarted: report.restarted ++ [issue.id]}
 
           {:error, reason} ->
             Logger.warning(
@@ -464,23 +659,39 @@ defmodule Arbiter.Workers.Reconciler do
                 "(#{inspect(reason)}) — escalating"
             )
 
+            report = not_resumed(report, issue.id, {:unresumable, reason})
+
             if escalate_stuck_issue(issue, {:unresumable, reason}),
-              do: {res, esc + 1},
-              else: {res, esc}
+              do: %{report | escalated: report.escalated + 1},
+              else: report
         end
       end)
 
-    if resumed + escalated > 0 do
-      Logger.info("Workers.Reconciler: resume sweep — resumed #{resumed}, escalated #{escalated}")
+    if report.resumed + report.deferred + report.escalated > 0 do
+      Logger.info(
+        "Workers.Reconciler: resume sweep — resumed #{report.resumed}" <>
+          describe_ids(report.restarted) <>
+          ", deferred #{report.deferred}, escalated #{report.escalated}" <>
+          describe_not_restarted(report.not_restarted)
+      )
     end
 
-    {:ok, %{resumed: resumed, escalated: escalated}}
+    {:ok, report}
   rescue
     e ->
       Logger.warning("Workers.Reconciler: resumable task sweep failed: #{Exception.message(e)}")
 
       {:error, e}
   end
+
+  defp resume_report,
+    do: %{resumed: 0, deferred: 0, escalated: 0, restarted: [], not_restarted: []}
+
+  defp not_resumed(report, task_id, reason),
+    do: %{report | not_restarted: report.not_restarted ++ [%{task_id: task_id, reason: reason}]}
+
+  defp describe_ids([]), do: ""
+  defp describe_ids(ids), do: " (" <> Enum.join(ids, ", ") <> ")"
 
   # bd-2gc809: a ticket waiting on CI is `reconcile_ci_waits/1`'s, not a resume.
   defp skip_resume?(%Issue{} = issue),

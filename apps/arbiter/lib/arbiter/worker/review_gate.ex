@@ -244,6 +244,7 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Worker.ResumeContext
   alias Arbiter.Worker.ReviewCi
   alias Arbiter.Worker.ReviewFindings
+  alias Arbiter.Worker.ReviewPass
   alias Arbiter.Worker.ReviewVerification
   alias Arbiter.Worker.RunProvenance
   alias Arbiter.Worker.StopReason
@@ -351,6 +352,16 @@ defmodule Arbiter.Worker.ReviewGate do
     # bd-2s755v: a re-prompt sends the same rejected `-m` model.
     :model_unavailable
   ]
+
+  # bd-2yt0d2: what a fix round restarted after a server stop is told, ahead of the
+  # ordinary revise prompt.
+  @restart_revise_note """
+  NOTE: the server restarted while an earlier attempt at this round was running.
+  That attempt was cut off, and this worktree may hold its uncommitted work. Run
+  `git status` and `git diff` first, keep what is right, finish the rest, then
+  commit and push as usual.
+
+  """
 
   @verdict_approve ~r/^\s*VERDICT:\s*APPROVE\b/im
   @verdict_request_changes ~r/^\s*VERDICT:\s*(REQUEST_CHANGES|REJECT)\b/im
@@ -461,6 +472,63 @@ defmodule Arbiter.Worker.ReviewGate do
     else
       {:error, _} = error -> error
       _ -> {:error, :no_ci_wait}
+    end
+  end
+
+  @doc """
+  Re-arm the ReviewGate pass the server restart cut off (bd-2yt0d2 / #291).
+
+  A reviewer pass or an implementer fix round (`<task>#review#impl<N>`) dies
+  with the node, and so does the gate that was waiting on it. What outlives
+  them is the ticket's `pass` marker (`Arbiter.Worker.ReviewPass`) and the round
+  state beside it. This starts a fresh gate on that state with **no author** —
+  none survives a restart, and the verdict is delivered to the ticket
+  (`deliver_verdict/4`) — and has it run the same round again on the same
+  branch and head: a reviewer pass is launched afresh (a clean re-review of the
+  round); a fix round gets a new implementer on the same worktree, told that an
+  earlier attempt was cut off and may have left uncommitted work. The gate's
+  memory of the earlier rounds — thread, open findings — comes back from the
+  marker, so a round 2+ reviewer reads the same re-review prompt it would have.
+
+  No agent session is resumed: the cut-off pass is re-run, not continued, which
+  keeps this independent of whether the provider can resume at all.
+
+  `opts` are extra `start/1` options (tests: the reviewer and implementer argv).
+  Returns `{:ok, pid}`, or `{:error, :not_active | :no_review_pass |
+  :no_worktree | term}` when the ticket cannot be re-armed (the caller clears
+  the marker and falls back to the ordinary resume).
+  """
+  @spec rearm_pass(String.t(), keyword()) :: {:ok, pid()} | {:error, term()}
+  def rearm_pass(task_id, opts \\ []) when is_binary(task_id) do
+    with {:ok, %Issue{} = issue} <- Ash.get(Issue, task_id),
+         :ok <- if(issue.state == :active, do: :ok, else: {:error, :not_active}),
+         %{} = marker <- ReviewPass.stored(issue) || {:error, :no_review_pass},
+         %{} = round <- issue.review_gate_state,
+         branch when is_binary(branch) <- round["branch"] || {:error, :no_branch},
+         worktree when is_binary(worktree) <- round["worktree_path"] || {:error, :no_worktree},
+         true <- File.dir?(worktree) || {:error, :no_worktree} do
+      pass = ReviewPass.restore(marker)
+
+      base =
+        [
+          task_id: task_id,
+          workspace_id: issue.workspace_id,
+          repo: round["repo"] || "unknown",
+          worktree_path: worktree,
+          branch: branch,
+          target_branch: round["target_branch"] || "main",
+          pr_ref: round["pr_ref"] || issue.pr_ref,
+          rounds: Worker.review_rounds_for(task_id, issue.workspace_id),
+          round: pass.round,
+          fix_round_attempt: pass.fix_round_attempt,
+          resume_pass: pass
+        ]
+        |> Enum.reject(fn {_k, v} -> is_nil(v) end)
+
+      start(Keyword.merge(base, opts))
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :no_review_pass}
     end
   end
 
@@ -1036,14 +1104,114 @@ defmodule Arbiter.Worker.ReviewGate do
       # reviewer runs the tests). nil when CI gated the round or the gate is off.
       ci_fallback: nil,
       # Times the wait moved to a newer head the branch had gained meanwhile.
-      ci_retargets: 0
+      ci_retargets: 0,
+      # bd-2yt0d2: the cut-off pass this gate was re-armed to run again
+      # (`rearm_pass/2`), as `ReviewPass.restore/1` reads it back. nil for every
+      # gate that starts from the top.
+      resume_pass: nil,
+      # Whether the ticket carries this gate's `pass` marker (`ReviewPass`), so
+      # a gate that never launched a pass writes nothing to clear.
+      pass_marked?: false
     }
+
+    state = restore_pass_state(state, Keyword.get(opts, :resume_pass))
 
     if is_pid(author), do: Process.monitor(author)
     {:ok, state, {:continue, :spawn_reviewer}}
   end
 
+  defp continue_reply({tag, state}) when tag in [:continue, :revise], do: {:noreply, state}
+  defp continue_reply({:done, state}), do: {:stop, :normal, state}
+
+  # A fix round cut off by the stop: a new implementer on the same worktree,
+  # handed the findings the round was opened with (the thread's last entry for
+  # it) and told what it may find there.
+  defp resume_revise_pass(state) do
+    Logger.info(
+      "ReviewGate: task=#{state.task_id} round #{state.round} fix round was cut off by a " <>
+        "server restart; re-running it"
+    )
+
+    findings = revise_findings(state)
+
+    state =
+      record_thread(
+        %{state | resume_pass: nil},
+        :system,
+        "Round #{state.round} fix round restarted",
+        "The server restarted while the implementer was addressing this round's findings."
+      )
+
+    launch_implementer(state, findings, @restart_revise_note)
+  end
+
+  defp revise_findings(%{thread: thread, round: round}) do
+    thread
+    |> Enum.reverse()
+    |> Enum.find(&(&1.round == round and &1.role in [:reviewer, :system]))
+    |> case do
+      %{body: body} -> body
+      nil -> ""
+    end
+  end
+
+  # A re-review (round 2+) cut off by the stop: the round's reviewer is launched
+  # again exactly as `finish_revise/1` would have launched it.
+  defp resume_rereview_pass(%{resume_pass: %{round: round}} = state) do
+    Logger.info(
+      "ReviewGate: task=#{state.task_id} round #{round} review was cut off by a server " <>
+        "restart; re-running it"
+    )
+
+    dispatch_next_review(%{state | round: round - 1, resume_pass: nil, phase: :reviewing})
+  end
+
+  # bd-2yt0d2: the `pass` marker. Written when a pass is launched, cleared when it
+  # ends (`clear_pass/1`); what is left on the ticket at boot is the pass the stop
+  # cut off.
+  defp mark_pass(state, role, id) do
+    phase = if role == :implementer, do: :revising, else: :reviewing
+    marker = ReviewPass.marker(state, phase, id, state.timeout_ms)
+    safe(fn -> ReviewPass.put(state.task_id, marker) end)
+    %{state | pass_marked?: true}
+  end
+
+  defp clear_pass(%{pass_marked?: true} = state) do
+    safe(fn -> ReviewPass.put(state.task_id, nil) end)
+    %{state | pass_marked?: false}
+  end
+
+  defp clear_pass(state), do: state
+
+  # bd-2yt0d2: a re-armed gate carries the memory of the rounds before the cut-off
+  # pass — the thread, the findings still open, the files the fixes touched, the
+  # head and merge-base the round started on — which the dead gate held only in
+  # its process.
+  defp restore_pass_state(state, nil), do: state
+
+  defp restore_pass_state(state, %{} = pass) do
+    %{
+      state
+      | resume_pass: pass,
+        pass_marked?: true,
+        phase: pass.phase,
+        round: pass.round,
+        thread: pass.thread,
+        open_findings: pass.open_findings,
+        revise_touched_files: pass.revise_touched_files,
+        head_sha: pass.head_sha,
+        base_sha: pass.base_sha
+    }
+  end
+
   @impl true
+  def handle_continue(:spawn_reviewer, %{resume_pass: %{phase: :revising}} = state),
+    do: state |> resume_revise_pass() |> continue_reply()
+
+  def handle_continue(:spawn_reviewer, %{resume_pass: %{phase: :reviewing, round: round}} = state)
+      when round > 1,
+      do: state |> resume_rereview_pass() |> continue_reply()
+
   def handle_continue(:spawn_reviewer, state) do
     # bd-ased52: bring the branch up to date with its target BEFORE anything
     # else, so the reviewer diffs against the current target tip rather than the
@@ -2072,7 +2240,7 @@ defmodule Arbiter.Worker.ReviewGate do
   # (Each worker worker also self-completes on its own `arb done`; either way
   # the exit is our reliable "transcript done" signal.)
   def handle_info({:worker_exited, id, status}, %{current_id: id, phase: :reviewing} = state) do
-    case attempt_finish(state, status) do
+    case state |> clear_pass() |> attempt_finish(status) do
       {:done, state} -> {:stop, :normal, state}
       {:reprompt, state} -> {:noreply, state}
       {:revise, state} -> {:noreply, state}
@@ -2080,7 +2248,7 @@ defmodule Arbiter.Worker.ReviewGate do
   end
 
   def handle_info({:worker_exited, id, _status}, %{current_id: id, phase: :revising} = state) do
-    case finish_revise(state) do
+    case state |> clear_pass() |> finish_revise() do
       {:done, state} -> {:stop, :normal, state}
       {:continue, state} -> {:noreply, state}
     end
@@ -2160,17 +2328,37 @@ defmodule Arbiter.Worker.ReviewGate do
   def handle_info({:timeout, _stale_round, _stale_attempt}, state), do: {:noreply, state}
 
   # Author died before we could report — nothing to do.
-  def handle_info({:DOWN, _ref, :process, pid, _reason}, %{author: pid} = state) do
-    {:stop, :normal, state}
+  #
+  # bd-2yt0d2: unless the author went because the node is stopping. Then the
+  # pass this gate had in flight is the one the next boot restarts, and the
+  # `pass` marker it left on the ticket is what says so — a `:normal` stop
+  # would have `terminate/2` clear it.
+  def handle_info({:DOWN, _ref, :process, pid, reason}, %{author: pid} = state) do
+    if server_shutdown?(reason),
+      do: {:stop, :shutdown, state},
+      else: {:stop, :normal, state}
   end
 
   def handle_info(_msg, state), do: {:noreply, state}
 
+  # An author stopped on purpose (`{:shutdown, :operator_stop}`) took its review
+  # with it; one the supervisor shut down did not.
+  defp server_shutdown?(:shutdown), do: true
+  defp server_shutdown?({:shutdown, :operator_stop}), do: false
+  defp server_shutdown?({:shutdown, _}), do: true
+  defp server_shutdown?(_), do: false
+
   @impl true
-  def terminate(_reason, state) do
+  def terminate(reason, state) do
     # Stop the current worker worker if it's still alive (e.g. on timeout).
+    #
+    # bd-2yt0d2: with the reason the gate itself stops for when that is the node
+    # stopping. A `:normal` stop stamps the pass's run `:succeeded`; the pass did
+    # not succeed, the server stopped under it — its run is `:interrupted`,
+    # "server shutdown", as it is when the supervisor stops the worker itself.
     if is_pid(state.reviewer_pid) and Process.alive?(state.reviewer_pid) do
-      safe(fn -> Worker.stop(state.reviewer_pid, :normal) end)
+      stop_reason = if server_shutdown?(reason), do: :shutdown, else: :normal
+      safe(fn -> Worker.stop(state.reviewer_pid, stop_reason) end)
     end
 
     # bd-a22hib: every terminal path — APPROVE, a reject at the cap, a park, a
@@ -2180,6 +2368,11 @@ defmodule Arbiter.Worker.ReviewGate do
     # it. A gate killed outright (no `terminate/2`) is covered by the boot
     # sweep, `Arbiter.Reviews.Checkout.sweep_orphans/1`.
     _ = release_review_checkout(state)
+
+    # bd-2yt0d2: a gate that ends on its own terms leaves no pass to restart. One
+    # that is stopped because the node is — and one killed outright, which gets
+    # no `terminate/2` at all — leaves its marker for the boot sweep.
+    if reason == :normal, do: clear_pass(state)
 
     # bd-cut6uv: a gate that ends mid-wait (the author went away, a crash) must
     # not leave its ticket marked as waiting on CI.
@@ -2663,14 +2856,14 @@ defmodule Arbiter.Worker.ReviewGate do
   defp record_enter_revise_thread(state, findings, :ci),
     do: record_thread(state, :system, "Round #{state.round}: CI is red", findings)
 
-  defp launch_implementer(state, findings) do
+  defp launch_implementer(state, findings, prompt_prefix \\ "") do
     impl_id = implementer_task_id(state.review_id, state.round)
 
     case launch_worker(
            %{state | phase: :revising},
            impl_id,
            :implementer,
-           revise_prompt(state, findings),
+           prompt_prefix <> revise_prompt(state, findings),
            state.revise_command
          ) do
       {:ok, state} ->
@@ -4220,6 +4413,7 @@ defmodule Arbiter.Worker.ReviewGate do
   defp finish(%{reported?: true} = state, _verdict), do: state
 
   defp finish(state, verdict) do
+    state = clear_pass(state)
     report(state, verdict)
     %{state | reported?: true}
   end
@@ -5142,17 +5336,18 @@ defmodule Arbiter.Worker.ReviewGate do
       {:ok, pid} ->
         Process.send_after(self(), {:timeout, state.round, attempt}, timeout_ms)
 
-        {:ok,
-         %{
-           state
-           | reviewer_pid: pid,
-             current_id: id,
-             attempt: attempt,
-             lines: [],
-             denial_pending: false,
-             current_prompt: prompt,
-             timeout_ms: timeout_ms
-         }}
+        launched = %{
+          state
+          | reviewer_pid: pid,
+            current_id: id,
+            attempt: attempt,
+            lines: [],
+            denial_pending: false,
+            current_prompt: prompt,
+            timeout_ms: timeout_ms
+        }
+
+        {:ok, mark_pass(launched, role, id)}
 
       {:error, _reason} = err ->
         err
