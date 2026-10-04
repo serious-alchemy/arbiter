@@ -85,7 +85,6 @@ defmodule Arbiter.Tasks.Issue do
   @lifecycle_states Arbiter.Tasks.Lifecycle.states()
   @close_reasons Arbiter.Tasks.Lifecycle.close_reasons()
   @attention_causes Arbiter.Tasks.Lifecycle.Attention.causes()
-  @issue_types ~w(task research bug feature epic chore decision)a
 
   # bd-9s9dqz: the two no-PR types. Neither provisions a worktree, runs the
   # commit gate or ReviewGate, or enters Merging — a ticket of either goes
@@ -95,7 +94,6 @@ defmodule Arbiter.Tasks.Issue do
   # reports it done. Both are forbidden for code work.
   @no_pr_types ~w(task research)a
   @findings_types ~w(research)a
-  @tracker_types ~w(none jira shortcut linear github gitlab)a
 
   # bd-7mbrlg: `task`, `research`, `decision`, and `epic` never open a PR, so ReviewGate's
   # criteria guards (`:unmet_criteria` / `:missing_criteria`) never score them
@@ -1269,7 +1267,7 @@ defmodule Arbiter.Tasks.Issue do
       """
     end
 
-    attribute :issue_type, :atom do
+    attribute :issue_type, Arbiter.Extensions.RegisteredAtom do
       allow_nil? false
       public? true
       # bd-5lc99r: `:task` and `:research` (bd-9s9dqz split) are OPT-IN
@@ -1282,7 +1280,7 @@ defmodule Arbiter.Tasks.Issue do
       # path. `:feature` is the generic reviewable default; choose `:task`
       # explicitly to get a non-reviewable workflow.
       default :feature
-      constraints one_of: @issue_types
+      constraints seam: :issue_type
     end
 
     attribute :floor_priority, :integer do
@@ -1326,11 +1324,11 @@ defmodule Arbiter.Tasks.Issue do
       """
     end
 
-    attribute :tracker_type, :atom do
+    attribute :tracker_type, Arbiter.Extensions.RegisteredAtom do
       allow_nil? false
       public? true
       default :none
-      constraints one_of: @tracker_types
+      constraints seam: :tracker
     end
 
     attribute :tracker_ref, :string do
@@ -1339,10 +1337,10 @@ defmodule Arbiter.Tasks.Issue do
       description "External tracker's ID for this task (e.g. \"AX-17585\" for Jira)."
     end
 
-    attribute :tracker_context_type, :atom do
+    attribute :tracker_context_type, Arbiter.Extensions.RegisteredAtom do
       allow_nil? true
       public? true
-      constraints one_of: @tracker_types
+      constraints seam: :tracker
 
       description """
       Tracker type for a context-only reference (e.g. `:jira`) — on a review
@@ -2064,7 +2062,7 @@ defmodule Arbiter.Tasks.Issue do
   def attention_causes, do: @attention_causes
 
   @doc "List of valid issue_type atoms."
-  def issue_types, do: @issue_types
+  def issue_types, do: Arbiter.Extensions.atoms(:issue_type)
 
   @doc """
   Whether `issue_type` is one of the no-PR types (`:task`, `:research`) — the
@@ -2095,7 +2093,7 @@ defmodule Arbiter.Tasks.Issue do
   defp match_type?(string, atoms), do: Enum.any?(atoms, &(Atom.to_string(&1) == string))
 
   @doc "List of valid tracker_type atoms."
-  def tracker_types, do: @tracker_types
+  def tracker_types, do: Arbiter.Extensions.atoms(:tracker)
 
   @doc """
   Issue types gated by bd-7mbrlg's acceptance-criteria-before-Ready rule:

@@ -33,6 +33,8 @@ defmodule Arbiter.Extension do
   | `:session_provider` | `Arbiter.Sessions.Provider`     |
   | `:mcp_agent_config` | `Arbiter.MCP.AgentConfig`       |
   | `:quota_snapshot`   | `Arbiter.Quota.Gate.Snapshot.Source` |
+  | `:issue_type`       | `Arbiter.Extension.Value`       |
+  | `:session_kind`     | `Arbiter.Extension.Value`       |
 
   `key` is the string a workspace config (or the persisted provider/type
   column) uses to name the implementation. It is also the registry's atom key,
@@ -45,6 +47,12 @@ defmodule Arbiter.Extension do
   `:session_provider`. If it keeps its own quota table it also contributes a
   `:quota_snapshot` source, keyed by the quota struct's module name
   (`Atom.to_string(MyApp.FooQuota)`), so its rows are visible to the quota gate.
+
+  `:issue_type` and `:session_kind` are value seams: they add a name the
+  persisted `Issue.issue_type` / `Session.kind` attribute may hold
+  (`Arbiter.Extensions.RegisteredAtom`), and point at a module implementing
+  `Arbiter.Extension.Value`. `Issue.tracker_type` and `Session.provider`
+  validate against the existing `:tracker` and `:session_provider` seams.
   """
 
   @typedoc "A seam name; see the table in the moduledoc."
@@ -57,6 +65,8 @@ defmodule Arbiter.Extension do
           | :session_provider
           | :mcp_agent_config
           | :quota_snapshot
+          | :issue_type
+          | :session_kind
 
   @doc "The implementations this extension adds, as `{seam, key, module}`."
   @callback contributions() :: [{seam(), key :: String.t(), module()}]

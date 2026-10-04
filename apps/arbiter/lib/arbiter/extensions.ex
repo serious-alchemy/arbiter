@@ -36,7 +36,9 @@ defmodule Arbiter.Extensions do
     quota_gate: Arbiter.Quota.Gate,
     session_provider: Arbiter.Sessions.Provider,
     mcp_agent_config: Arbiter.MCP.AgentConfig,
-    quota_snapshot: Arbiter.Quota.Gate.Snapshot.Source
+    quota_snapshot: Arbiter.Quota.Gate.Snapshot.Source,
+    issue_type: Arbiter.Extension.Value,
+    session_kind: Arbiter.Extension.Value
   }
 
   @pt_key {__MODULE__, :state}
@@ -88,6 +90,10 @@ defmodule Arbiter.Extensions do
   @spec keys(Arbiter.Extension.seam()) :: [String.t()]
   def keys(seam) when is_map_key(@seams, seam),
     do: state().order |> Map.fetch!(seam) |> Enum.map(&Atom.to_string/1)
+
+  @doc "`keys/1` as the atoms a persisted attribute holds."
+  @spec atoms(Arbiter.Extension.seam()) :: [atom()]
+  def atoms(seam) when is_map_key(@seams, seam), do: Map.fetch!(state().order, seam)
 
   @doc """
   The module registered under `key` (a string or its atom) on `seam`.
