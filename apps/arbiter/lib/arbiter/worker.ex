@@ -5756,6 +5756,7 @@ defmodule Arbiter.Worker do
   defp commit_gate_summary(%State{task_id: task_id, meta: meta}, reason, why) do
     branch =
       (meta && (Map.get(meta, :branch) || Map.get(meta, :fix_pass_branch))) || "(unknown)"
+
     target = (meta && Map.get(meta, :target_branch)) || "main"
     worktree = (meta && Map.get(meta, :worktree_path)) || "(unknown)"
     attempts_key = commit_gate_attempts_key(reason)

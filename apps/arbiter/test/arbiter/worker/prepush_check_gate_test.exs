@@ -359,7 +359,10 @@ defmodule Arbiter.Worker.PrepushCheckGateTest do
       refute refs =~ "bd-gate/#{task.id}"
     end
 
-    test "a passing check lets the pass finish and pushes to remote", %{repo: repo, remote: remote} do
+    test "a passing check lets the pass finish and pushes to remote", %{
+      repo: repo,
+      remote: remote
+    } do
       ws = workspace(%{"prepush_check" => "exit 0"})
       task = new_task(ws)
       path = committed_worktree(repo, "bd-gate/#{task.id}")
