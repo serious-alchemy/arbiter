@@ -2536,6 +2536,131 @@ defmodule Arbiter.Worker.DispatchTest do
       refute File.exists?(gemini_file)
     end
 
+    # bd-anwb0u (G11): the guardrail floor lands after SecurityPolicy.resolve/3.
+    # A `bypass` workspace dispatching to a quarantine subject is floored to
+    # `:strict`, and the same write-confinement gate then refuses an adapter
+    # that cannot keep it — with the floor named as the source.
+    test "a quarantine subject is floored to :strict and refused where writes cannot be confined",
+         %{ws: ws, tmp: tmp} do
+      claude_file = Path.join(tmp, "claude-argv.txt")
+      gemini_file = Path.join(tmp, "gemini-argv.txt")
+      :ok = stub_claude_on_path(tmp, claude_file)
+      :ok = stub_named_on_path(tmp, "agy", gemini_file)
+
+      repo = seed_repo!(tmp, "floor-gemini-repo")
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "floor-gemini-wt"))
+      put_app_env(:arbiter, :repo_paths, %{"fg/repo" => repo})
+
+      put_app_env(:arbiter, :guardrail_subject_rules, [
+        %{match: %{provider: "antigravity"}, tier: :quarantine},
+        %{match: %{provider: "claude"}, tier: :privileged}
+      ])
+
+      {:ok, ws} =
+        Ash.update(ws, %{
+          config: %{
+            "agent" => %{
+              "type" => "claude",
+              "security" => %{"permissions" => %{"mode" => "bypass"}}
+            }
+          }
+        })
+
+      {:ok, task} = Ash.create(Issue, %{title: "floor gemini refusal", workspace_id: ws.id})
+
+      assert {:error, {:claude_start_failed, {:strict_write_confinement_unavailable, message}}} =
+               Dispatch.dispatch(task.id,
+                 force: true,
+                 repo: "fg/repo",
+                 start_driver: false,
+                 start_claude: true,
+                 agent_type: :gemini,
+                 preflight: false
+               )
+
+      assert message =~ "guardrail tier"
+      refute File.exists?(gemini_file)
+    end
+
+    test "a privileged subject keeps its bypass posture under the same rules", %{ws: ws, tmp: tmp} do
+      claude_file = Path.join(tmp, "claude-argv.txt")
+      :ok = stub_claude_on_path(tmp, claude_file)
+
+      repo = seed_repo!(tmp, "floor-claude-repo")
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "floor-claude-wt"))
+      put_app_env(:arbiter, :repo_paths, %{"fc/repo" => repo})
+
+      put_app_env(:arbiter, :guardrail_subject_rules, [
+        %{match: %{provider: "claude"}, tier: :privileged}
+      ])
+
+      {:ok, ws} =
+        Ash.update(ws, %{
+          config: %{
+            "agent" => %{
+              "type" => "claude",
+              "security" => %{"permissions" => %{"mode" => "bypass"}}
+            }
+          }
+        })
+
+      {:ok, task} = Ash.create(Issue, %{title: "floor claude unaffected", workspace_id: ws.id})
+
+      {:ok, _result} =
+        Dispatch.dispatch(task.id,
+          force: true,
+          repo: "fc/repo",
+          start_driver: false,
+          start_claude: true,
+          preflight: false
+        )
+
+      argv = wait_for_argv!(claude_file)
+      assert "--dangerously-skip-permissions" in argv
+    end
+
+    # AC5: nothing configured, nothing changes. A workspace `guardrails` block
+    # with no subject rules behind it is inert, so this dispatch is the same
+    # `:bypass` gemini dispatch as the test below.
+    test "a guardrails block with no subject rules changes nothing", %{ws: ws, tmp: tmp} do
+      claude_file = Path.join(tmp, "claude-argv.txt")
+      gemini_file = Path.join(tmp, "gemini-argv.txt")
+      :ok = stub_claude_on_path(tmp, claude_file)
+      :ok = stub_named_on_path(tmp, "agy", gemini_file)
+
+      repo = seed_repo!(tmp, "inert-block-repo")
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "inert-block-wt"))
+      put_app_env(:arbiter, :repo_paths, %{"ib/repo" => repo})
+
+      {:ok, ws} =
+        Ash.update(ws, %{
+          config: %{
+            "agent" => %{
+              "type" => "claude",
+              "security" => %{"permissions" => %{"mode" => "bypass"}}
+            },
+            "guardrails" => %{
+              "subjects" => [%{"match" => %{"provider" => "antigravity"}, "max_tier" => "quarantine"}]
+            }
+          }
+        })
+
+      {:ok, task} = Ash.create(Issue, %{title: "inert block unaffected", workspace_id: ws.id})
+
+      {:ok, _result} =
+        Dispatch.dispatch(task.id,
+          force: true,
+          repo: "ib/repo",
+          start_driver: false,
+          start_claude: true,
+          agent_type: :gemini,
+          preflight: false
+        )
+
+      _ = wait_for_argv!(gemini_file)
+      refute File.exists?(claude_file)
+    end
+
     test "a :bypass dispatch to gemini is unaffected by the strict gate", %{ws: ws, tmp: tmp} do
       claude_file = Path.join(tmp, "claude-argv.txt")
       gemini_file = Path.join(tmp, "gemini-argv.txt")

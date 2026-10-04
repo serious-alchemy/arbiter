@@ -308,4 +308,50 @@ defmodule Arbiter.GuardrailsTest do
       assert floored.permissions.mode == :strict
     end
   end
+
+  describe "egress_confinement/1 and enforceable/3 (capability is not trust, §3.4)" do
+    alias Arbiter.Agents
+    alias Arbiter.Agents.{Claude, Codex, Gemini}
+
+    setup do
+      on_exit(fn -> Application.delete_env(:arbiter, :worker_jail_network_available) end)
+    end
+
+    test "an adapter that omits the callback confines nothing" do
+      assert Agents.egress_confinement(Codex, SecurityPolicy.base()) == :none
+    end
+
+    test "claude has no egress confinement under the default bwrap backend" do
+      assert Claude.egress_confinement(SecurityPolicy.base()) == :none
+      assert Agents.egress_confinement(Claude, SecurityPolicy.base()) == :none
+    end
+
+    test "agy cannot confine egress when the host cannot build the network jail" do
+      Application.put_env(:arbiter, :worker_jail_network_available, false)
+      assert Gemini.egress_confinement(SecurityPolicy.base()) == :none
+    end
+
+    test "a quarantine floor makes codex unenforceable (no write confinement)" do
+      profile = Guardrails.bundle(:quarantine)
+      policy = Guardrails.floor(SecurityPolicy.base(), profile)
+
+      assert Guardrails.enforceable(Codex, policy, profile) == {:error, :write_confinement_none}
+    end
+
+    test "an egress ceiling the adapter cannot enforce is egress_unenforceable, not a weaker spawn" do
+      profile = %{Guardrails.bundle(:probation) | egress: :allowlist}
+      policy = Guardrails.floor(SecurityPolicy.base(), profile)
+
+      assert Guardrails.enforceable(Claude, policy, profile) == {:error, :egress_unenforceable}
+    end
+
+    test "an open egress ceiling and a bypass floor need nothing from the adapter" do
+      profile = Guardrails.bundle(:privileged)
+      policy = Guardrails.floor(SecurityPolicy.base(), profile)
+
+      assert Guardrails.enforceable(Claude, policy, profile) == :ok
+      assert Guardrails.enforceable(Codex, policy, profile) == :ok
+      assert Guardrails.enforceable(Codex, SecurityPolicy.base(), nil) == :ok
+    end
+  end
 end

@@ -384,4 +384,28 @@ defmodule ArbiterWeb.Api.ServerControllerTest do
       assert Map.has_key?(resp, "fix")
     end
   end
+
+  # bd-anwb0u (G11): the doctor's guardrail posture.
+  describe "GET /api/server/guardrails" do
+    test "is inactive with no issues when nothing is configured", %{conn: conn} do
+      resp = conn |> get("/api/server/guardrails") |> json_response(200)
+
+      assert resp["active"] == false
+      assert resp["issues"] == []
+      assert is_list(resp["workspaces"])
+    end
+
+    test "reports each workspace's tiers and flags an inert block", %{conn: conn} do
+      {:ok, ws} =
+        Ash.create(Arbiter.Tasks.Workspace, %{
+          name: "gr-doctor",
+          prefix: "grd",
+          config: %{"guardrails" => %{"subjects" => [%{"match" => %{"provider" => "claude"}, "max_tier" => "probation"}]}}
+        })
+
+      resp = conn |> get("/api/server/guardrails") |> json_response(200)
+
+      assert Enum.any?(resp["issues"], &(&1["kind"] == "inert_block" and &1["workspace"] == ws.name))
+    end
+  end
 end
