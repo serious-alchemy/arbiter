@@ -28,6 +28,17 @@ defmodule Arbiter.Agents.Codex do
   workspace configures one (or `OPENAI_API_KEY` is ambient) the adapter exports
   `OPENAI_API_KEY`; otherwise the CLI uses the on-disk ChatGPT auth.
 
+  ## Config isolation (G5, bd-39to5j)
+
+  A spawn with a worktree runs under its own `CODEX_HOME`
+  (`Arbiter.Agents.Codex.ConfigDir`): a generated `config.toml` that carries
+  only the model backend, a worker-doctrine `AGENTS.md`, and an `auth.json`
+  *symlinked* to the operator's, so a worker sees none of their model, effort,
+  profiles, trust list, MCP servers, persona or memories, and a token refresh
+  cannot strand the operator's login. Model, effort, MCP and sandbox are passed
+  per spawn as `-m` / `-c`. Where no such home exists (a probe, isolation off)
+  `--ignore-user-config` is passed instead.
+
   ## Security posture
 
   The normalized `Arbiter.Agents.SecurityPolicy` maps to Codex's OS-level
@@ -69,6 +80,7 @@ defmodule Arbiter.Agents.Codex do
   @behaviour Arbiter.Agents.Agent
 
   alias Arbiter.Agents.Codex.Config
+  alias Arbiter.Agents.Codex.ConfigDir
   alias Arbiter.Agents.Codex.ModelCatalog
   alias Arbiter.Agents.Codex.Stream
   alias Arbiter.Agents.SecurityPolicy
@@ -110,7 +122,10 @@ defmodule Arbiter.Agents.Codex do
       {:ok, codex} ->
         with {:ok, model_flags} <- model_flag(opts) do
           policy = security_policy(opts)
-          flags = sandbox_argv(policy, opts) ++ model_flags ++ effort_argv(opts) ++ mcp_argv(opts)
+
+          flags =
+            config_isolation_argv(opts) ++
+              sandbox_argv(policy, opts) ++ model_flags ++ effort_argv(opts) ++ mcp_argv(opts)
 
           # bd-btcdrf: refuse a backend with no implementation for every Codex
           # spawn (implementer, strict reviewer included), not just the ones
@@ -129,11 +144,22 @@ defmodule Arbiter.Agents.Codex do
   # Base `codex exec` flags shared by every spawn: JSON event stream + tolerate
   # linked worktrees (whose `.git` is a file, which Codex's repo check can trip
   # on). Callers append sandbox + model flags, then the `--`/prompt tail.
-  # `--ignore-user-config` (bd-4vgxwi, G5 stopgap) stops workers inheriting the
-  # operator's `$CODEX_HOME/config.toml` (model, effort, profiles, personal MCP
-  # servers); auth still comes from CODEX_HOME. Everything the worker needs
-  # (model, effort, MCP, sandbox) is therefore passed explicitly below.
-  @base_exec_flags ["--json", "--skip-git-repo-check", "--ignore-user-config"]
+  @base_exec_flags ["--json", "--skip-git-repo-check"]
+
+  # G5: a worker must not inherit the operator's `$CODEX_HOME/config.toml`
+  # (model, effort, profiles, personal MCP servers). The full fix
+  # (bd-39to5j, `ConfigDir`) gives the spawn its own CODEX_HOME whose generated
+  # config.toml is the only config the CLI sees, so the flag must NOT be passed:
+  # it would discard that file's backend selection too. Wherever there is no
+  # such home (a probe, isolation off, a home that could not be prepared) the
+  # bd-4vgxwi stopgap stays: `--ignore-user-config`, with everything the worker
+  # needs (model, effort, MCP, sandbox) passed explicitly.
+  @ignore_user_config "--ignore-user-config"
+
+  defp config_isolation_argv(opts) do
+    if ConfigDir.isolated?(opts), do: [], else: [@ignore_user_config]
+  end
+
   @inline_prompt_script ~s(exec "$@" < /dev/null)
   @stdin_prompt_script ~s(f="$1"; shift; exec "$@" < "$f")
 
@@ -253,13 +279,13 @@ defmodule Arbiter.Agents.Codex do
     worktree = Keyword.get(opts, :worktree) || Keyword.get(opts, :worktree_path)
 
     if "Write" in Map.get(permissions, :deny, []) and is_binary(worktree) do
-      jail_reviewer(argv, policy, worktree)
+      jail_reviewer(argv, policy, worktree, opts)
     else
       {:ok, argv}
     end
   end
 
-  defp jail_reviewer(argv, policy, worktree) do
+  defp jail_reviewer(argv, policy, worktree, opts) do
     # bd-btcdrf: a backend with no implementation refuses the spawn; only a
     # host that cannot run the requested backend degrades to unconfined.
     with {:ok, _sandbox} <- Sandbox.module(policy) do
@@ -268,7 +294,7 @@ defmodule Arbiter.Agents.Codex do
           Sandbox.wrap(policy, argv,
             worktree: worktree,
             worktree_readonly: true,
-            writable_paths: [ModelCatalog.codex_home() | prompt_tmpfiles(argv)]
+            writable_paths: codex_writable_paths(opts) ++ prompt_tmpfiles(argv)
           )
         end
 
@@ -283,6 +309,15 @@ defmodule Arbiter.Agents.Codex do
 
           {:ok, argv}
       end
+    end
+  end
+
+  # The per-worker CODEX_HOME and the auth.json its link resolves to when the
+  # spawn is isolated, else the inherited home.
+  defp codex_writable_paths(opts) do
+    case ConfigDir.writable_paths(opts) do
+      [] -> [ModelCatalog.codex_home()]
+      paths -> paths
     end
   end
 
@@ -369,7 +404,7 @@ defmodule Arbiter.Agents.Codex do
       {:ok, codex} ->
         argv =
           ["sh", "-c", @inline_prompt_script, "sh", codex, "exec"] ++
-            @base_exec_flags ++ ["-s", "read-only", "--", "ping"]
+            @base_exec_flags ++ [@ignore_user_config, "-s", "read-only", "--", "ping"]
 
         {:ok, argv}
 
@@ -397,7 +432,10 @@ defmodule Arbiter.Agents.Codex do
         _ -> env
       end
 
-    Enum.reverse(env)
+    # G5: the spawn's own CODEX_HOME (generated config.toml, symlinked
+    # auth.json). Empty without a worktree or with isolation off, in which case
+    # the CLI uses the inherited home under `--ignore-user-config`.
+    Enum.reverse(env) ++ ConfigDir.env(opts)
   end
 
   @impl true

@@ -3517,7 +3517,10 @@ defmodule Arbiter.Worker.Dispatch do
       end
 
       worker_env =
-        Arbiter.Agents.Codex.spawn_env(arb_token: Keyword.fetch!(write_opts, :scope_token))
+        Arbiter.Agents.Codex.spawn_env(
+          arb_token: Keyword.fetch!(write_opts, :scope_token),
+          worktree_path: worktree_path
+        )
 
       case Codex.check_worker_config(worktree_path,
              env: worker_env,
