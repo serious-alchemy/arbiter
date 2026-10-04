@@ -672,7 +672,9 @@ defmodule Arbiter.Worker.ReviewGate do
         trimmed |> String.trim_leading("#") |> strip_leading_markdown()
 
       Regex.match?(~r/^\d+[\.\)]\s+/, trimmed) ->
-        trimmed |> String.replace(~r/^\d+[\.\)]\s+/, "", global: false) |> strip_leading_markdown()
+        trimmed
+        |> String.replace(~r/^\d+[\.\)]\s+/, "", global: false)
+        |> strip_leading_markdown()
 
       Regex.match?(~r/^[-+]\s+/, trimmed) ->
         trimmed |> String.replace(~r/^[-+]\s+/, "", global: false) |> strip_leading_markdown()

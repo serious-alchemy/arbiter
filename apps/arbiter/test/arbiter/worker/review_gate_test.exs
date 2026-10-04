@@ -830,7 +830,9 @@ defmodule Arbiter.Worker.ReviewGateTest do
         match?(%{state: :waiting, waiting_on: :review_gate}, Worker.state(pid))
       end)
 
-      raw_findings = "**VERDICT: APPROVE**\nVERIFICATION: PARTIAL — gave up on tests\nlgtm otherwise"
+      raw_findings =
+        "**VERDICT: APPROVE**\nVERIFICATION: PARTIAL — gave up on tests\nlgtm otherwise"
+
       findings = ReviewVerification.prepend_banner(raw_findings)
 
       :ok = Worker.review_gate_verdict(pid, {:request_changes, findings})
