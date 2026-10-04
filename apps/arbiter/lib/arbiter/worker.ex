@@ -3922,20 +3922,24 @@ defmodule Arbiter.Worker do
           # base branch with the work sitting uncommitted in the worktree; the
           # reviewer diffs `base..HEAD`, sees empty, and concludes "no code
           # exists" — sitting on the uncommitted changes and ignoring them.
-          case commit_gate(state) do
-            :ok ->
-              # bd-28c6qo: the configured pre-push check runs once the tree is
-              # committed and before anything routes on to the review gate /
-              # merger (the push + PR). Unset config: straight through.
-              case begin_prepush_check(state, :main) do
-                :proceed -> proceed_after_gate(state, branch)
-                {:started, new_state} -> new_state
-              end
-
-            {:gate, reason} ->
-              handle_commit_gate(state, branch, reason)
-          end
+          run_commit_gate(state, branch)
         end
+    end
+  end
+
+  defp run_commit_gate(%State{} = state, branch) do
+    case commit_gate(state) do
+      :ok ->
+        # bd-28c6qo: the configured pre-push check runs once the tree is
+        # committed and before anything routes on to the review gate / merger
+        # (the push + PR). Unset config: straight through.
+        case begin_prepush_check(state, :main) do
+          :proceed -> proceed_after_gate(state, branch)
+          {:started, new_state} -> new_state
+        end
+
+      {:gate, reason} ->
+        handle_commit_gate(state, branch, reason)
     end
   end
 
