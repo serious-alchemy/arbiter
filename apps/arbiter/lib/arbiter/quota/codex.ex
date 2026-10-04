@@ -213,6 +213,7 @@ defmodule Arbiter.Quota.Codex do
 
       with {:ok, row} <- result do
         record_history(row)
+        Arbiter.Quota.History.record(account_id, row)
         broadcast(account_id, row)
       end
 

@@ -64,6 +64,7 @@ defmodule Arbiter.Quota do
     resource Arbiter.Quota.CodexQuota
     resource Arbiter.Quota.CodexQuotaSnapshot
     resource Arbiter.Quota.GoogleQuota
+    resource Arbiter.Quota.QuotaSnapshot
   end
 
   @default_provider "claude"
@@ -1125,6 +1126,9 @@ defmodule Arbiter.Quota do
       |> Ash.create()
 
     with {:ok, quota} <- result do
+      # Only a poll that carried the aggregate figures is a history sample; the
+      # secondary-only write touched no primary column.
+      if action == :record_oauth_snapshot, do: Arbiter.Quota.History.record(account_id, quota)
       broadcast_quota_update(account_id, quota)
     end
 

@@ -385,6 +385,73 @@ defmodule ArbiterWeb.Charts do
     """
   end
 
+  # ---- pace lines ----
+
+  attr :id, :string, required: true
+  attr :points, :list, required: true, doc: "%{key:, label:, value: pct, ceiling: pct | nil}"
+  attr :title, :string, required: true
+  attr :empty, :string, default: "No data for these filters."
+
+  # Utilization against the pace ceiling, both in percent on a fixed 0..100 axis.
+  def pace_lines(assigns) do
+    n = length(assigns.points)
+
+    util =
+      assigns.points
+      |> Enum.with_index()
+      |> Enum.map(fn {p, i} -> {label_x(i, n), @top + plot_h() - scale(p.value, 100), p} end)
+
+    ceiling =
+      assigns.points
+      |> Enum.with_index()
+      |> Enum.filter(fn {p, _} -> is_number(p.ceiling) end)
+      |> Enum.map(fn {p, i} -> {label_x(i, n), @top + plot_h() - scale(p.ceiling, 100), p} end)
+
+    assigns =
+      assign(assigns,
+        n: n,
+        util: util,
+        util_d: if(util == [], do: "", else: "M" <> polyline(util)),
+        ceiling_d: if(ceiling == [], do: "", else: "M" <> polyline(ceiling)),
+        series: [
+          %{key: "utilization", label: "Utilization"},
+          %{key: "ceiling", label: "Pace ceiling"}
+        ]
+      )
+
+    ~H"""
+    <.frame id={@id} kind="pace_lines" title={@title} empty={@empty} n={@n} max={100}>
+      <path
+        data-role="ceiling"
+        d={@ceiling_d}
+        fill="none"
+        stroke="var(--arb-fail)"
+        stroke-width="1.5"
+        stroke-dasharray="4 3"
+      />
+      <path data-role="utilization" d={@util_d} fill="none" stroke="var(--arb-live)" stroke-width="2" />
+      <circle
+        :for={{x, y, p} <- @util}
+        data-key={p.key}
+        data-value={p.value}
+        cx={x}
+        cy={y}
+        r="2.5"
+        fill="var(--arb-live)"
+        class="arb-chart-mark"
+      >
+        <title>
+          {p.label}: {p.value}%<%= if p.ceiling do %>
+            (ceiling {p.ceiling}%)
+          <% end %>
+        </title>
+      </circle>
+      <.x_labels points={@points} />
+    </.frame>
+    <.legend :if={@n > 0} id={"#{@id}-legend"} series={@series} />
+    """
+  end
+
   # ---- burn-up ----
 
   attr :id, :string, required: true
