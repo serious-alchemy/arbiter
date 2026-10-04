@@ -70,7 +70,11 @@ defmodule ArbiterWeb.SessionTransportSocketTest do
     )
 
     {:ok, session} = Sessions.launch(cwd: tmp_dir, runner: NoopRunner)
-    ScriptedPty.install(session.id, snapshot: "SNAP", cols: 80, rows: 24, title: "scripted")
+    # `put/2`, not `install/2`: `launch/1` starts the transcript reader eagerly
+    # and its `start_stream/3` registers the pipe path asynchronously. `install/2`
+    # replaces the scripted state, so landing after it wiped the path and the
+    # first `emit/2` crashed on a nil pipe path. `put/2` merges.
+    ScriptedPty.put(session.id, snapshot: "SNAP", cols: 80, rows: 24, title: "scripted")
     on_exit(fn -> Stream.stop(session.id) end)
 
     %{session: session, http_port: start_listener!()}
