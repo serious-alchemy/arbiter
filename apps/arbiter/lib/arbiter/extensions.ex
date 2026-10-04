@@ -141,7 +141,7 @@ defmodule Arbiter.Extensions do
       extensions: extensions,
       registry: Map.new(registry, fn {seam, {map, _order}} -> {seam, map} end),
       order: Map.new(registry, fn {seam, {_map, order}} -> {seam, Enum.reverse(order)} end),
-      mcp_tools: Enum.flat_map(extensions, &tools/1)
+      mcp_tools: mcp_tools!(extensions)
     }
   end
 
@@ -159,6 +159,48 @@ defmodule Arbiter.Extensions do
 
   defp tools(ext) do
     if function_exported?(ext, :mcp_tools, 0), do: ext.mcp_tools(), else: []
+  end
+
+  @tool_tiers [:worker, :coordinator]
+
+  # Validates every contributed tool and rejects a name already taken by a core
+  # tool (or deprecated alias) or by an earlier extension: additive-only.
+  defp mcp_tools!(extensions) do
+    taken =
+      MapSet.new(Arbiter.MCP.Catalog.all(), & &1.name)
+      |> MapSet.union(MapSet.new(Map.keys(Arbiter.MCP.Catalog.legacy_aliases())))
+
+    extensions
+    |> Enum.flat_map(fn ext -> Enum.map(tools(ext), &{ext, &1}) end)
+    |> Enum.reduce({[], taken}, fn {ext, tool}, {acc, names} ->
+      check_tool!(ext, tool)
+
+      if MapSet.member?(names, tool.name) do
+        raise ArgumentError,
+              "#{inspect(ext)} contributes MCP tool #{inspect(tool.name)}, which is " <>
+                "already registered; an extension can add tools but never shadow one"
+      end
+
+      {[tool | acc], MapSet.put(names, tool.name)}
+    end)
+    |> elem(0)
+    |> Enum.reverse()
+  end
+
+  defp check_tool!(ext, %{name: name, description: d, input_schema: s, tiers: tiers, handler: h})
+       when is_binary(name) and name != "" and is_binary(d) and is_map(s) and is_list(tiers) and
+              is_function(h, 2) do
+    if tiers == [] or not Enum.all?(tiers, &(&1 in @tool_tiers)) do
+      raise ArgumentError,
+            "#{inspect(ext)} MCP tool #{inspect(name)} has tiers #{inspect(tiers)}; " <>
+              "expected a non-empty subset of #{inspect(@tool_tiers)}"
+    end
+  end
+
+  defp check_tool!(ext, bad) do
+    raise ArgumentError,
+          "#{inspect(ext)}.mcp_tools/0 returned #{inspect(bad)}; expected a map with " <>
+            "name, description, input_schema, tiers and a 2-arity handler"
   end
 
   defp register!({ext, {seam, key, mod}}, registry) when is_binary(key) do

@@ -105,7 +105,40 @@ defmodule ArbiterProFake.ToolExtension do
   @impl true
   def contributions, do: []
   @impl true
-  def mcp_tools, do: [%{name: "acme_tool"}]
+  def mcp_tools do
+    [
+      %{
+        name: "acme_tool",
+        description: "Acme",
+        input_schema: %{"type" => "object", "properties" => %{}},
+        tiers: [:coordinator],
+        handler: fn _scope, args -> {:ok, %{"echo" => args}} end
+      }
+    ]
+  end
+end
+
+defmodule ArbiterProFake.ShadowToolExtension do
+  @moduledoc false
+  @behaviour Arbiter.Extension
+
+  @impl true
+  def contributions, do: []
+  @impl true
+  def mcp_tools do
+    [tool] = ArbiterProFake.ToolExtension.mcp_tools()
+    [%{tool | name: "ticket_show"}]
+  end
+end
+
+defmodule ArbiterProFake.BadToolExtension do
+  @moduledoc false
+  @behaviour Arbiter.Extension
+
+  @impl true
+  def contributions, do: []
+  @impl true
+  def mcp_tools, do: [%{name: "x"}]
 end
 
 defmodule Arbiter.ExtensionsTest do
@@ -343,7 +376,37 @@ defmodule Arbiter.ExtensionsTest do
     test "mcp_tools/0 collects optional tool contributions" do
       assert Extensions.mcp_tools() == []
       Extensions.load!([ArbiterProFake.ToolExtension])
-      assert Extensions.mcp_tools() == [%{name: "acme_tool"}]
+      assert [%{name: "acme_tool"}] = Extensions.mcp_tools()
+    end
+
+    test "extension tools are in the catalog, callable, and tier-gated" do
+      alias Arbiter.MCP.{Catalog, Scope}
+      Extensions.load!([ArbiterProFake.ToolExtension])
+      on_exit(fn -> Extensions.load!([]) end)
+
+      coord = %Scope{tier: :coordinator}
+      worker = %Scope{tier: :worker}
+      refine = %Scope{tier: :refine}
+
+      assert "acme_tool" in Enum.map(Catalog.visible(coord), & &1.name)
+      refute "acme_tool" in Enum.map(Catalog.visible(worker), & &1.name)
+      refute "acme_tool" in Enum.map(Catalog.visible(refine), & &1.name)
+
+      assert {:ok, %{"echo" => %{"a" => 1}}} = Catalog.call(coord, "acme_tool", %{"a" => 1})
+      assert {:rpc_error, _, _} = Catalog.call(worker, "acme_tool", %{})
+      assert {:rpc_error, _, _} = Catalog.call(refine, "acme_tool", %{})
+    end
+
+    test "a tool colliding with a core tool is rejected at registration" do
+      assert_raise ArgumentError, ~r/ticket_show.*never shadow/, fn ->
+        Extensions.load!([ArbiterProFake.ShadowToolExtension])
+      end
+    end
+
+    test "a malformed tool is rejected" do
+      assert_raise ArgumentError, ~r/mcp_tools\/0 returned/, fn ->
+        Extensions.load!([ArbiterProFake.BadToolExtension])
+      end
     end
   end
 end
