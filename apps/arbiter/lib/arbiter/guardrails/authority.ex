@@ -273,8 +273,12 @@ defmodule Arbiter.Guardrails.Authority do
     grant_by_loose ++ min_tier_loose ++ read_only_loose ++ list_loose ++ env_loose ++ secret_loose
   end
 
-  defp tier_rank_of(nil), do: 0
-  defp tier_rank_of(tier), do: Guardrails.tier_rank(Config.tier(tier)) || 0
+  defp tier_rank_of(tier) do
+    case Config.tier(tier) do
+      nil -> 0
+      parsed -> Guardrails.tier_rank(parsed)
+    end
+  end
 
   # ---- subject rules (the guardrail_subjects table) ---------------------------
 

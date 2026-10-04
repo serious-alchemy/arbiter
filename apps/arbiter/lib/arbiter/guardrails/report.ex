@@ -203,12 +203,12 @@ defmodule Arbiter.Guardrails.Report do
           )
         end
 
-    known = ws |> repo_names() |> MapSet.new()
+    known = repo_names(ws)
 
     unknown =
       for {repo, _} <- block |> Map.get("repos", %{}) |> map_or_empty(),
-          known != MapSet.new(),
-          not MapSet.member?(known, repo) do
+          known != [],
+          repo not in known do
         issue(
           :unknown_repo,
           name,
