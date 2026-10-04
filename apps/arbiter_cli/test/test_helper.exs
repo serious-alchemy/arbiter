@@ -1,6 +1,8 @@
 System.delete_env("ARBITER_WORKTREE_ROOT")
 System.delete_env("ARBITER_OUTPUT_LOG_ROOT")
 System.delete_env("ARBITER_MEMORY_ROOT")
+System.delete_env("ARB_TOKEN")
+System.delete_env("ARB_WORKSPACE")
 
 # Never let a test exec `mix`, `systemctl`, `lsof` or `kill` for real through
 # `ArbiterCli.Cmd.Start.run_cmd/3`: an unstubbed restart test once killed the

@@ -182,9 +182,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       MIX_ENV: test
-      # apps/arbiter_cli has its own config/ without the Vault key that the
-      # root config/test.exs injects, and its tests boot :arbiter. Same
-      # non-secret test key as the root config.
+      # Non-secret test key for Arbiter.Vault (matches config/test.exs).
       ARBITER_CLOAK_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
 
     strategy:
