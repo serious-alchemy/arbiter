@@ -85,6 +85,21 @@ defmodule Arbiter.Worker.PrepushCheckTest do
   describe "run/2" do
     @describetag :tmp_dir
 
+    setup %{tmp_dir: dir} do
+      root = Path.join(dir, "worker-tmp")
+      File.mkdir_p!(root)
+      previous = Application.get_env(:arbiter, :worker_tmp_root)
+      Application.put_env(:arbiter, :worker_tmp_root, root)
+
+      on_exit(fn ->
+        if previous,
+          do: Application.put_env(:arbiter, :worker_tmp_root, previous),
+          else: Application.delete_env(:arbiter, :worker_tmp_root)
+      end)
+
+      :ok
+    end
+
     test "a zero exit is :ok and the command runs in the worktree", %{tmp_dir: dir} do
       assert :ok = run("test -f marker && exit 0", dir_with(dir, "marker"))
     end
@@ -173,7 +188,7 @@ defmodule Arbiter.Worker.PrepushCheckTest do
 
       assert prompt =~ "bd-2"
       assert prompt =~ "bd-x/y"
-      assert prompt =~ "nothing has been pushed"
+      assert prompt =~ "nothing\nhas been pushed"
       refute prompt =~ "no PR has been opened"
       assert prompt =~ "the arbiter pushes to `bd-x/y` for you"
     end
