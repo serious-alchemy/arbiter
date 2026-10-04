@@ -297,6 +297,90 @@ defmodule Arbiter.Usage.CodexSessionFileTest do
     end
   end
 
+  describe "quota_delta_for/3" do
+    defp write_quota_rollout!(home, sid, entries) do
+      dir = Path.join([home, "sessions", "2026", "09", "21"])
+      File.mkdir_p!(dir)
+
+      lines =
+        for {ts, rate_limits} <- entries do
+          ~s({"timestamp":"#{ts}","type":"event_msg","payload":{"type":"token_count",) <>
+            ~s("info":{"total_token_usage":{"input_tokens":1,"output_tokens":1}},) <>
+            ~s("rate_limits":#{rate_limits}}})
+        end
+
+      File.write!(Path.join(dir, "rollout-x-#{sid}.jsonl"), Enum.join(lines, "\n") <> "\n")
+    end
+
+    defp rl(p, _ps, sec, ss, reset \\ 1_800_000_000) do
+      ~s({"primary":{"used_percent":#{p},"window_minutes":300,"resets_at":#{reset}},) <>
+        ~s("secondary":{"used_percent":#{sec},"window_minutes":10080,"resets_at":#{ss}},) <>
+        ~s("plan_type":"plus"})
+    end
+
+    test "subtracts the last sample before :since from the last sample in the file" do
+      home = tmp_dir()
+      sid = "q-1"
+
+      write_quota_rollout!(home, sid, [
+        {"2026-09-21T10:01:00Z", rl(10.0, 0, 40.0, 0)},
+        {"2026-09-21T11:01:00Z", rl(12.0, 0, 40.5, 0)},
+        {"2026-09-21T11:30:00Z", rl(15.0, 0, 41.0, 0)}
+      ])
+
+      assert {:ok, q} =
+               SessionFile.quota_delta_for(home, sid, since: ~U[2026-09-21 11:00:00Z])
+
+      assert q.plan_type == "plus"
+      assert q.windows["primary"].delta_percent == 5.0
+      assert q.windows["primary"].window_minutes == 300
+      assert q.windows["primary"].baseline == "before_run"
+      assert q.windows["secondary"].delta_percent == 1.0
+      refute q.windows["primary"].reset
+    end
+
+    test "with no earlier sample the baseline is the run's first sample (a lower bound)" do
+      home = tmp_dir()
+      sid = "q-2"
+
+      write_quota_rollout!(home, sid, [
+        {"2026-09-21T11:01:00Z", rl(2.0, 0, 3.0, 0)},
+        {"2026-09-21T11:30:00Z", rl(4.5, 0, 3.0, 0)}
+      ])
+
+      assert {:ok, q} =
+               SessionFile.quota_delta_for(home, sid, since: ~U[2026-09-21 11:00:00Z])
+
+      assert q.windows["primary"].delta_percent == 2.5
+      assert q.windows["primary"].baseline == "first_sample"
+      assert q.windows["secondary"].delta_percent == 0.0
+    end
+
+    test "a window that reset mid-run reports the post-reset usage, flagged" do
+      home = tmp_dir()
+      sid = "q-3"
+
+      write_quota_rollout!(home, sid, [
+        {"2026-09-21T10:01:00Z", rl(90.0, 0, 10.0, 0, 1_800_000_000)},
+        {"2026-09-21T11:30:00Z", rl(4.0, 0, 10.0, 0, 1_800_018_000)}
+      ])
+
+      assert {:ok, q} =
+               SessionFile.quota_delta_for(home, sid, since: ~U[2026-09-21 11:00:00Z])
+
+      assert q.windows["primary"].delta_percent == 4.0
+      assert q.windows["primary"].reset
+    end
+
+    test ":not_found without a rollout or without any rate_limits (free tier, other backend)" do
+      home = tmp_dir()
+      assert :not_found = SessionFile.quota_delta_for(home, "nope")
+
+      write_quota_rollout!(home, "q-4", [{"2026-09-21T11:01:00Z", "null"}])
+      assert :not_found = SessionFile.quota_delta_for(home, "q-4")
+    end
+  end
+
   defp write_named!(home, date_path, name, sid, i, c, o) do
     dir = Path.join([home, "sessions", date_path])
     File.mkdir_p!(dir)

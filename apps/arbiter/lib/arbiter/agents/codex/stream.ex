@@ -53,7 +53,9 @@ defmodule Arbiter.Agents.Codex.Stream do
   > Codex plan users have no per-session dollar cost (usage is metered against
   > the ChatGPT plan, tracked separately by `Arbiter.Quota.Codex`), so
   > `cost_usd` is left `nil` — graceful degradation the usage ledger already
-  > tolerates.
+  > tolerates. The per-run cost-equivalent is the quota-window % delta read
+  > from the rollout's `rate_limits` (`Arbiter.Usage.CodexSessionFile.quota_delta_for/3`,
+  > recorded by `Arbiter.Worker`), since the `--json` stream carries none.
 
   Only **agent_message text** opts into completion (`arb done`) detection — the
   prompt echo, reasoning, tool calls, and command output are displayed but

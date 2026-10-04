@@ -2211,6 +2211,49 @@ defmodule Arbiter.Worker do
   # (`codex exec resume` appends to the same file). Tokens only — codex is
   # metered, so cost stays whatever the stream said.
   defp reconcile_codex_usage_from_disk(usage, session, %State{} = state) do
+    usage
+    |> reconcile_codex_tokens_from_disk(session, state)
+    |> record_codex_quota_delta(session, state)
+  end
+
+  # G20 (bd-8yafoz): a metered Codex run has no dollar cost, so the share of
+  # the plan's rate-limit windows it burned (rollout `rate_limits`, before vs
+  # after) is its cost-equivalent. Recorded on `raw` and spelled out in
+  # `cost_note`; absent rate_limits (free tier, other backends) changes nothing.
+  defp record_codex_quota_delta(usage, session, %State{} = state) do
+    session_id = Map.get(usage, :session_id)
+    config_dir = Map.get(state.meta || %{}, :config_dir)
+
+    case Arbiter.Usage.CodexSessionFile.quota_delta_for(config_dir, session_id,
+           since: Map.get(session, :started_at)
+         ) do
+      {:ok, quota} ->
+        usage
+        |> Map.update(:raw, %{"arb_quota_delta" => stringify(quota)}, fn raw ->
+          Map.put(if(is_map(raw), do: raw, else: %{}), "arb_quota_delta", stringify(quota))
+        end)
+        |> append_quota_note(quota)
+
+      _ ->
+        usage
+    end
+  end
+
+  defp stringify(quota), do: quota |> Jason.encode!() |> Jason.decode!()
+
+  defp append_quota_note(usage, %{windows: windows}) do
+    parts =
+      for {key, label} <- [{"primary", "session"}, {"secondary", "weekly"}],
+          %{delta_percent: d} <- [windows[key]] do
+        "#{d}% of the #{label} window"
+      end
+
+    suffix = "run used " <> Enum.join(parts, ", ")
+    note = Map.get(usage, :cost_note)
+    Map.put(usage, :cost_note, if(is_binary(note), do: note <> "; " <> suffix, else: suffix))
+  end
+
+  defp reconcile_codex_tokens_from_disk(usage, session, %State{} = state) do
     session_id = Map.get(usage, :session_id)
     config_dir = Map.get(state.meta || %{}, :config_dir)
 
