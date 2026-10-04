@@ -160,11 +160,41 @@ jobs:
   # `on_exit`. It now runs under a named `Arbiter.TaskSupervisor`, which
   # `data_case.ex` drains the same way as the other detached background
   # writers.
-  test:
-    name: mix test
+  #
+  # bd-4uoj4m: the umbrella ran its apps back to back in one VM (arbiter
+  # ~369s, arbiter_web ~217s, cli ~8s) and ~85-93% of that is `async: false`
+  # time, so in-VM concurrency is no lever; separate VMs are. The suite is now
+  # a matrix of per-app, `--partitions`-sharded jobs. config/test.exs already
+  # suffixes the SQLite DB with MIX_TEST_PARTITION (which `mix test
+  # --partitions` sets itself) and each job is its own VM, so there are no DB
+  # or /tmp collisions. `--slowest 25` prints per-test timings in each log.
+  #
+  # Every `mix test` run is `cd apps/<app> && mix test --partitions N`; the
+  # partitions of one app together run each of its test files exactly once.
+  # `cli` also covers arbiter_release_env (1 partition each).
+  #
+  # CHECK-RUN NAMING: the merger reads every check run, so every shard has to
+  # be green anyway. The `mix test` job below aggregates the shards and keeps
+  # the original check name, so branch protection configured on "mix test"
+  # keeps working and there is one place that reports overall pass/fail.
+  test-shard:
+    name: mix test (${{ matrix.app }} ${{ matrix.partition }}/${{ matrix.partitions }})
     runs-on: ubuntu-latest
     env:
       MIX_ENV: test
+      # Non-secret test key for Arbiter.Vault (matches config/test.exs).
+      ARBITER_CLOAK_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { app: arbiter, partition: 1, partitions: 3 }
+          - { app: arbiter, partition: 2, partitions: 3 }
+          - { app: arbiter, partition: 3, partitions: 3 }
+          - { app: arbiter_web, partition: 1, partitions: 2 }
+          - { app: arbiter_web, partition: 2, partitions: 2 }
+          - { app: arbiter_cli, partition: 1, partitions: 1 }
 
     steps:
       - uses: actions/checkout@v4
@@ -194,25 +224,45 @@ jobs:
       - name: Fetch dependencies
         run: mix deps.get
 
-      - name: Setup database
-        run: |
-          mix ecto.create
-          mix ecto.migrate
-
       # Replaces the test-env half of the removed `lint` job: `audit` compiles
       # under MIX_ENV=dev, so test/support and test-only compile_env branches
-      # are only warning-checked here. The build is needed anyway, so this is free.
+      # are only warning-checked here. The build is needed anyway, so this is
+      # free. (The per-app `test` aliases run ecto.create/ecto.migrate.)
       - name: Compile (warnings as errors)
         run: mix compile --warnings-as-errors
 
       - name: Run tests
-        run: mix test
+        working-directory: apps/${{ matrix.app }}
+        run: |
+          mix test --partitions ${{ matrix.partitions }} --slowest 25
+        env:
+          MIX_TEST_PARTITION: ${{ matrix.partition }}
 
+      - name: Run arbiter_release_env tests
+        if: ${{ matrix.app == 'arbiter_cli' }}
+        working-directory: apps/arbiter_release_env
+        run: mix test --slowest 25
+
+      # Only one shard saves, so shards do not race on the identical key.
       - name: Save deps/build cache
-        if: ${{ !cancelled() && github.event_name == 'push' && steps.cache3.outputs.cache-hit != 'true' }}
+        if: ${{ !cancelled() && github.event_name == 'push' && matrix.app == 'arbiter' && matrix.partition == 1 && steps.cache3.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@v4
         with:
           path: |
             deps
             _build
           key: ${{ runner.os }}-otp28.5-elixir1.19.4-mix-${{ hashFiles('**/mix.lock') }}
+
+  # Single aggregate check, named as the old monolithic job was.
+  test:
+    name: mix test
+    runs-on: ubuntu-latest
+    needs: test-shard
+    if: ${{ always() }}
+    steps:
+      - name: Require all shards green
+        env:
+          RESULT: ${{ needs.test-shard.result }}
+        run: |
+          echo "test-shard result: $RESULT"
+          [ "$RESULT" = "success" ]
