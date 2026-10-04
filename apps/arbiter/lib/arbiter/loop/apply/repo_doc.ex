@@ -211,15 +211,9 @@ defmodule Arbiter.Loop.Apply.RepoDoc do
   #     workers read AGENTS.md, and neither convention has been established
   #     yet to defer to.
   #   * CLAUDE.md exists as a SEPARATE file (not a symlink resolving to
-  #     AGENTS.md) and AGENTS.md either doesn't exist or is a human-maintained
-  #     file (no Arbiter managed section): patch CLAUDE.md only — writing
-  #     into a human's AGENTS.md would clobber content this feature doesn't
-  #     own, and agy repos that already keep their own rules in AGENTS.md are
-  #     left alone.
-  #   * CLAUDE.md exists as a SEPARATE file and AGENTS.md carries an Arbiter
-  #     managed section (planted by the neither-file case above): patch
-  #     BOTH, so the two stay in sync instead of AGENTS.md going stale after
-  #     the first lesson.
+  #     AGENTS.md): patch BOTH. Codex and agy read AGENTS.md; the upsert only
+  #     touches the delimited Arbiter section, so a human-maintained
+  #     AGENTS.md keeps its content (bd-7qqvb7).
   #   * CLAUDE.md is a symlink that resolves to AGENTS.md (this repo's own
   #     layout): they are the same file, so patch CLAUDE.md only —
   #     `resolve_git_add_path/2` already writes/stages through the symlink,
@@ -235,8 +229,7 @@ defmodule Arbiter.Loop.Apply.RepoDoc do
 
     cond do
       claude_exists? and symlink_to_agents?(claude_path) -> [default_path]
-      claude_exists? and arbiter_managed?(agents_path) -> [default_path, @agents_path]
-      claude_exists? -> [default_path]
+      claude_exists? -> [default_path, @agents_path]
       File.exists?(agents_path) -> [@agents_path]
       true -> [default_path, @agents_path]
     end
@@ -246,13 +239,6 @@ defmodule Arbiter.Loop.Apply.RepoDoc do
     case File.read_link(claude_path) do
       {:ok, @agents_path} -> true
       _ -> false
-    end
-  end
-
-  defp arbiter_managed?(file_path) do
-    case File.read(file_path) do
-      {:ok, content} -> String.contains?(content, RepoDocPatch.begin_marker())
-      {:error, _} -> false
     end
   end
 
