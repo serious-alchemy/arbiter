@@ -45,6 +45,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       check_agy_jail_escape(),
       check_agy_jail_reads(),
       check_agy_jail_network(),
+      check_agy_jail_keyring(),
       check_egress_jail(),
       check_guardrails(),
       check_agy_ssh_transport(),
@@ -787,6 +788,41 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       _ ->
         %Result{
           name: "agy jail network",
+          status: :ok,
+          detail: "server unreachable or predates this check — skipping",
+          fatal: false,
+          blocks_readiness: false
+        }
+    end
+  end
+
+  # bd-c9fqsk: the filtered keyring proxy is probed with a per-run TMPDIR built
+  # the way real spawns build it (`Jail.keyring_probe/0`), so a socket path
+  # that outgrows sun_path's 107 bytes is caught here, not on the first run.
+  defp check_agy_jail_keyring do
+    case Client.get("/api/server/agy_write_jail") do
+      {:ok, %{"keyring" => %{"available" => true}}} ->
+        %Result{
+          name: "agy jail keyring proxy",
+          status: :ok,
+          detail: "the filtered keyring bus comes up with a per-run TMPDIR",
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      {:ok, %{"keyring" => %{"available" => false, "message" => message} = kr}} ->
+        %Result{
+          name: "agy jail keyring proxy",
+          status: :fail,
+          detail: message,
+          hint: Map.get(kr, "fix") || "See Arbiter.Worker.Jail.keyring_probe/0 (bd-c9fqsk).",
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      _ ->
+        %Result{
+          name: "agy jail keyring proxy",
           status: :ok,
           detail: "server unreachable or predates this check — skipping",
           fatal: false,
