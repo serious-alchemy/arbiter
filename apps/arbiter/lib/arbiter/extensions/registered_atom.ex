@@ -24,7 +24,8 @@ defmodule Arbiter.Extensions.RegisteredAtom do
   def storage_type(_constraints), do: :string
 
   @impl true
-  def constraints, do: [seam: [type: :atom, required: true, doc: "The `Arbiter.Extensions` seam."]]
+  def constraints,
+    do: [seam: [type: :atom, required: true, doc: "The `Arbiter.Extensions` seam."]]
 
   @impl true
   def cast_input(nil, _constraints), do: {:ok, nil}
