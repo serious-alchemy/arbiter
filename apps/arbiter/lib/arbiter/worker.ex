@@ -6224,6 +6224,8 @@ defmodule Arbiter.Worker do
       # bd-cut6uv: a fresh gate has not waited on CI yet; a marker left by a gate
       # that died mid-wait must not outlive it.
       ci_wait: nil,
+      # bd-2yt0d2: likewise a pass marker a dead gate left behind.
+      pass: nil,
       merge_opts: persistable_merge_opts(meta)
     })
 

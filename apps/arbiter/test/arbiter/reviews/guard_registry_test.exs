@@ -41,6 +41,9 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
     {Arbiter.Worker.ReviewGate, :rearm_ci_wait, 2,
      "bd-2gc809: a boot lookup miss (no marker, no worktree); the reconciler clears the " <>
        "marker and the ordinary resume takes the ticket — nothing is refused or escalated"},
+    {Arbiter.Worker.ReviewGate, :rearm_pass, 2,
+     "bd-2yt0d2: a boot lookup miss (no marker, no worktree); the reconciler clears the " <>
+       "marker and the ordinary resume takes the ticket — nothing is refused or escalated"},
     {Arbiter.Worker.ReviewGate, :persist_message, 4,
      "thread persistence: mails the review thread, not an escalation"},
     {Arbiter.Worker.ReviewGate, :durable_lines, 1,
