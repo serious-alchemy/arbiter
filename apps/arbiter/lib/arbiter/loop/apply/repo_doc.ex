@@ -19,6 +19,7 @@ defmodule Arbiter.Loop.Apply.RepoDoc do
   alias Arbiter.Loop.{PendingWrite, RepoDocPatch}
   alias Arbiter.Mergers
   alias Arbiter.Tasks.{RepoConfig, Workspace}
+  alias Arbiter.Worker.SeedPaths
   alias Arbiter.Worker.Worktree
 
   # bd-1cusio: this write path is scoped to a repo's CLAUDE.md, not arbitrary
@@ -141,7 +142,9 @@ defmodule Arbiter.Loop.Apply.RepoDoc do
   defp in_worktree(ws, repo, repo_path, target_branch, row, lesson, attribution) do
     branch = "loop/repo-doc-patch-#{row.id}"
 
-    case Worktree.create(repo_path, branch, target_branch) do
+    case Worktree.create(repo_path, branch, target_branch,
+           seed_paths: SeedPaths.resolve(ws, repo)
+         ) do
       {:ok, worktree_path} ->
         result =
           write_and_open(

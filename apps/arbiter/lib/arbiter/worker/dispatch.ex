@@ -100,6 +100,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Worker.ResumeSlot
   alias Arbiter.Worker.RunProvenance
   alias Arbiter.Worker.Sandbox
+  alias Arbiter.Worker.SeedPaths
   alias Arbiter.Worker.StopReason
   alias Arbiter.Worker.TargetBranch
   alias Arbiter.Worker.Watchdog
@@ -1962,6 +1963,7 @@ defmodule Arbiter.Worker.Dispatch do
             branch = BranchNamer.derive(task)
             target_branch = resolve_target_branch(task, opts)
             layout = git_layout(task, opts)
+            seed_paths = seed_paths(task, repo)
 
             # bd-8ssxap: a redispatch can find its OLD per-task branch still on
             # disk with commits that are already merged upstream (a prior round
@@ -1994,7 +1996,10 @@ defmodule Arbiter.Worker.Dispatch do
 
             case reset_result do
               {:ok, _} ->
-                case Worktree.create(repo_path, branch, target_branch, layout: layout) do
+                case Worktree.create(repo_path, branch, target_branch,
+                       layout: layout,
+                       seed_paths: seed_paths
+                     ) do
                   {:ok, path} ->
                     {:ok, path}
 
@@ -2007,7 +2012,8 @@ defmodule Arbiter.Worker.Dispatch do
                         # credo:disable-for-next-line Credo.Check.Refactor.Nesting
                         case Worktree.attach(repo_path, branch,
                                layout: layout,
-                               base: target_branch
+                               base: target_branch,
+                               seed_paths: seed_paths
                              ) do
                           {:ok, path} -> {:ok, path}
                           {:error, reason} -> {:error, {:worktree_failed, reason}}
@@ -2019,7 +2025,8 @@ defmodule Arbiter.Worker.Dispatch do
                           branch,
                           target_branch,
                           msg,
-                          layout
+                          layout,
+                          seed_paths
                         )
 
                       true ->
@@ -2044,7 +2051,7 @@ defmodule Arbiter.Worker.Dispatch do
   # doesn't match "different branch", and nothing else reclaims the directory), so
   # recover instead of stranding the dispatch. Safe by inspection: a detached tree
   # has no branch and therefore no commits only reachable from it.
-  defp recover_from_detached_worktree(repo_path, branch, target_branch, msg, layout) do
+  defp recover_from_detached_worktree(repo_path, branch, target_branch, msg, layout, seed_paths) do
     require Logger
 
     path = Worktree.worktree_path(branch)
@@ -2058,7 +2065,10 @@ defmodule Arbiter.Worker.Dispatch do
 
         _ = Worktree.cleanup(path)
 
-        case Worktree.create(repo_path, branch, target_branch, layout: layout) do
+        case Worktree.create(repo_path, branch, target_branch,
+               layout: layout,
+               seed_paths: seed_paths
+             ) do
           {:ok, path} -> {:ok, path}
           {:error, reason} -> {:error, {:worktree_failed, reason}}
         end
@@ -2067,6 +2077,10 @@ defmodule Arbiter.Worker.Dispatch do
         {:error, {:worktree_failed, {:git_failed, msg}}}
     end
   end
+
+  # bd-2jerqw: `worker.repos.<repo>.seed_paths` for this task's workspace, or
+  # nil for the built-in seed set (`SeedPaths.resolve/2`).
+  defp seed_paths(%Issue{} = task, repo), do: SeedPaths.resolve(load_workspace(task), repo)
 
   # bd-4wy1w1 (P5): the checkout's git layout follows the sandbox the spawn will
   # run in, resolved from the same policy layers `build_agent_session_opts/4`
@@ -2789,7 +2803,9 @@ defmodule Arbiter.Worker.Dispatch do
     name = Worktree.inspect_name(BranchNamer.derive(task))
     base_branch = resolve_target_branch(task, opts)
 
-    case Worktree.create_detached(repo_path, name, base_branch) do
+    case Worktree.create_detached(repo_path, name, base_branch,
+           seed_paths: seed_paths(task, Keyword.get(opts, :repo))
+         ) do
       {:ok, path} ->
         {:ok, path}
 

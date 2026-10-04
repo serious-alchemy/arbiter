@@ -247,6 +247,7 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Worker.ReviewPass
   alias Arbiter.Worker.ReviewVerification
   alias Arbiter.Worker.RunProvenance
+  alias Arbiter.Worker.SeedPaths
   alias Arbiter.Worker.StopReason
   alias Arbiter.Worker.Worktree
   alias Arbiter.Workers.Run
@@ -1970,7 +1971,16 @@ defmodule Arbiter.Worker.ReviewGate do
             # start from a cold `deps.get` + full dep compile. Copies, not
             # symlinks: nothing the reviewer builds reaches the implementer's
             # tree. Best-effort, and a no-op for a repo with no `deps`/`_build`.
-            :ok = Worktree.seed_compiled_deps(wt, path)
+            #
+            # bd-2jerqw: `worker.repos.<repo>.seed_paths` applies here too, read
+            # from the implementer's tree `wt`, which was seeded by the same list.
+            seed_paths =
+              SeedPaths.resolve(
+                load_workspace(Map.get(state, :workspace_id)),
+                Map.get(state, :repo)
+              )
+
+            :ok = Worktree.seed_compiled_deps(wt, path, seed_paths)
 
             Logger.info(
               "ReviewGate: round #{Map.get(state, :round)} for task=#{Map.get(state, :task_id)} " <>

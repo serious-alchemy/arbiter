@@ -96,13 +96,18 @@ defmodule Arbiter.Worker.PrivateClone do
   different branch (the same "different branch" error as `Worktree.create/3`,
   which `Dispatch` already knows how to recover from for a detached tree).
   """
-  @spec create(path(), String.t() | nil, String.t()) :: {:ok, path()} | {:error, term()}
-  def create(_repo_path, branch, _base_branch) when branch in [nil, ""],
+  @spec create(path(), String.t() | nil, String.t(), [String.t()] | nil) ::
+          {:ok, path()} | {:error, term()}
+  def create(repo_path, branch, base_branch, seed_paths \\ nil)
+
+  def create(_repo_path, branch, _base_branch, _seed_paths) when branch in [nil, ""],
     do: {:error, :invalid_branch_name}
 
-  def create(repo_path, branch, base_branch)
+  def create(repo_path, branch, base_branch, seed_paths)
       when is_binary(repo_path) and is_binary(branch) and is_binary(base_branch) do
-    open(branch, fn path -> provision_new(repo_path, path, branch, base_branch) end)
+    open(branch, fn path ->
+      provision_new(repo_path, path, branch, base_branch, seed_paths)
+    end)
   end
 
   @doc """
@@ -113,14 +118,18 @@ defmodule Arbiter.Worker.PrivateClone do
   repo's current `origin/<base_branch>` is copied in as well (no fetch, as
   `Worktree.attach/2` does none).
   """
-  @spec attach(path(), String.t() | nil, String.t() | nil) :: {:ok, path()} | {:error, term()}
-  def attach(repo_path, branch, base_branch \\ nil)
+  @spec attach(path(), String.t() | nil, String.t() | nil, [String.t()] | nil) ::
+          {:ok, path()} | {:error, term()}
+  def attach(repo_path, branch, base_branch \\ nil, seed_paths \\ nil)
 
-  def attach(_repo_path, branch, _base_branch) when branch in [nil, ""],
+  def attach(_repo_path, branch, _base_branch, _seed_paths) when branch in [nil, ""],
     do: {:error, :invalid_branch_name}
 
-  def attach(repo_path, branch, base_branch) when is_binary(repo_path) and is_binary(branch) do
-    open(branch, fn path -> provision_attached(repo_path, path, branch, base_branch) end)
+  def attach(repo_path, branch, base_branch, seed_paths)
+      when is_binary(repo_path) and is_binary(branch) do
+    open(branch, fn path ->
+      provision_attached(repo_path, path, branch, base_branch, seed_paths)
+    end)
   end
 
   defp open(branch, provision) do
@@ -150,7 +159,7 @@ defmodule Arbiter.Worker.PrivateClone do
     end
   end
 
-  defp provision_new(repo, path, branch, base) do
+  defp provision_new(repo, path, branch, base, seed_paths) do
     with :ok <- Worktree.fetch_origin(repo, base),
          {:ok, base_sha} <- origin_ref(repo, base) do
       checkout_from =
@@ -169,12 +178,13 @@ defmodule Arbiter.Worker.PrivateClone do
         base_sha: base_sha,
         start: resolve!(checkout_from, base_sha),
         checkout_from: checkout_from,
-        remote_refs: [{"refs/remotes/origin/" <> base, base_sha}]
+        remote_refs: [{"refs/remotes/origin/" <> base, base_sha}],
+        seed_paths: seed_paths
       })
     end
   end
 
-  defp provision_attached(repo, path, branch, base) do
+  defp provision_attached(repo, path, branch, base, seed_paths) do
     base_sha = base && rev(repo, "refs/remotes/origin/#{base}")
     base_refs = if base_sha, do: [{"refs/remotes/origin/" <> base, base_sha}], else: []
 
@@ -199,7 +209,8 @@ defmodule Arbiter.Worker.PrivateClone do
         base_sha: base_sha,
         start: start,
         checkout_from: checkout_from,
-        remote_refs: base_refs ++ branch_refs
+        remote_refs: base_refs ++ branch_refs,
+        seed_paths: seed_paths
       })
     else
       {:error, {:git_failed, "invalid reference: #{branch} (not in #{repo})"}}
@@ -217,7 +228,7 @@ defmodule Arbiter.Worker.PrivateClone do
 
       case build(plan) do
         :ok ->
-          :ok = Worktree.seed_compiled_deps(repo, path)
+          :ok = Worktree.seed_compiled_deps(repo, path, plan.seed_paths)
           :ok = Worktree.ensure_deps_fetched(path)
           _ = AgentConfig.add_to_git_exclude(path, [".arbiter/"])
           Logger.info("PrivateClone: created #{path} (#{branch} of #{repo})")

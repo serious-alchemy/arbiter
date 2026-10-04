@@ -603,6 +603,56 @@ defmodule Arbiter.Tasks.WorkspaceTest do
     end
   end
 
+  describe "worker.seed_paths validation (bd-2jerqw)" do
+    test "accepts a list of strings workspace-wide and per repo" do
+      assert {:ok, _} =
+               Ash.create(Workspace, %{
+                 name: "sp-ok-#{System.unique_integer([:positive])}",
+                 config: %{
+                   "worker" => %{
+                     "seed_paths" => ["deps"],
+                     "repos" => %{"arbiter" => %{"seed_paths" => ["deps", "priv/plts"]}}
+                   }
+                 }
+               })
+
+      assert {:ok, _} =
+               Ash.create(Workspace, %{
+                 name: "sp-ok-empty-#{System.unique_integer([:positive])}",
+                 config: %{"worker" => %{"seed_paths" => []}}
+               })
+    end
+
+    test "rejects anything else, naming the key" do
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{
+                 name: "sp-bad1",
+                 config: %{"worker" => %{"seed_paths" => "deps"}}
+               })
+
+      assert Exception.message(err) =~ "worker.seed_paths must be a list of strings"
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{
+                 name: "sp-bad2",
+                 config: %{
+                   "worker" => %{"repos" => %{"arbiter" => %{"seed_paths" => ["deps", 1]}}}
+                 }
+               })
+
+      assert Exception.message(err) =~ "worker.repos.arbiter.seed_paths must be a list of strings"
+
+      assert {:error, %Ash.Error.Invalid{}} =
+               Ash.create(Workspace, %{name: "sp-bad3", config: %{"worker" => "x"}})
+
+      assert {:error, %Ash.Error.Invalid{}} =
+               Ash.create(Workspace, %{
+                 name: "sp-bad4",
+                 config: %{"worker" => %{"repos" => %{"arbiter" => "x"}}}
+               })
+    end
+  end
+
   describe "review.require_ci_green validation (bd-cut6uv)" do
     test "accepts booleans and their JSON strings, workspace-wide and per repo" do
       for value <- [true, false, "true", "false"] do
