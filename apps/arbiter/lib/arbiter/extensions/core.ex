@@ -10,6 +10,7 @@ defmodule Arbiter.Extensions.Core do
   @behaviour Arbiter.Extension
 
   alias Arbiter.Agents.Routing
+  alias Arbiter.Extensions.Core.Values
   alias Arbiter.Mergers
 
   @impl true
@@ -45,6 +46,13 @@ defmodule Arbiter.Extensions.Core do
        Arbiter.Quota.Gate.Snapshot.Codex},
       {:quota_snapshot, Atom.to_string(Arbiter.Quota.GoogleQuota),
        Arbiter.Quota.Gate.Snapshot.Google}
-    ]
+    ] ++ values()
+  end
+
+  defp values do
+    types = ~w(task research bug feature epic chore decision)
+    kinds = ~w(coordinator login)
+
+    Enum.map(types, &{:issue_type, &1, Values}) ++ Enum.map(kinds, &{:session_kind, &1, Values})
   end
 end

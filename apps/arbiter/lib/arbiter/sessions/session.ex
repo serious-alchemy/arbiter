@@ -123,18 +123,16 @@ defmodule Arbiter.Sessions.Session do
   alias Arbiter.Sessions.Naming
   alias Arbiter.Sessions.Provider
 
-  @providers ~w(claude_code agy)a
   @auth_modes ~w(seeded_credentials oauth_token)a
   @statuses ~w(starting running ended)a
-  @kinds ~w(coordinator login)a
 
   @doc "Session kinds."
   @spec kinds() :: [atom()]
-  def kinds, do: @kinds
+  def kinds, do: Arbiter.Extensions.atoms(:session_kind)
 
   @doc "Providers a session may run."
   @spec providers() :: [atom()]
-  def providers, do: @providers
+  def providers, do: Arbiter.Extensions.atoms(:session_provider)
 
   @doc "Auth modes a session may launch under (§8.1)."
   @spec auth_modes() :: [atom()]
@@ -435,18 +433,18 @@ defmodule Arbiter.Sessions.Session do
       description "Operator-supplied display name (bd-o2vtsz); nil falls through the ladder."
     end
 
-    attribute :provider, :atom do
+    attribute :provider, Arbiter.Extensions.RegisteredAtom do
       allow_nil? false
       public? true
       default :claude_code
-      constraints one_of: @providers
+      constraints seam: :session_provider
     end
 
-    attribute :kind, :atom do
+    attribute :kind, Arbiter.Extensions.RegisteredAtom do
       allow_nil? false
       public? true
       default :coordinator
-      constraints one_of: @kinds
+      constraints seam: :session_kind
 
       description """
       `:coordinator` (default) or `:login` (bd-98oj3s). A login session is hidden
@@ -622,7 +620,7 @@ defmodule Arbiter.Sessions.Session do
   defp config_dir_for_provider(changeset, id) do
     provider = Ash.Changeset.get_attribute(changeset, :provider)
 
-    if provider in @providers and not Provider.config_dir?(provider) do
+    if provider in providers() and not Provider.config_dir?(provider) do
       Ash.Changeset.force_change_attribute(changeset, :config_dir, nil)
     else
       default_attribute(changeset, :config_dir, fn -> Layout.config_dir(id) end)
