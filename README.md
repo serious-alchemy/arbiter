@@ -569,6 +569,7 @@ permanent top-level shortcut for `arb ticket dispatch <id>`, not a legacy alias.
 Architecture and design decision records live in [`docs/`](docs/):
 
 - [Licensing Model & Open-Core Architecture](docs/licensing-model.md) — Core vs. Pro distribution, license choices, CLA requirements, and extension seams.
+- [Core/Pro Extension Seams](docs/pro-extension-seams.md) — Inventory and gap analysis of core/Pro extension seams.
 - [Pluggable Agent Harness Design](docs/agent-harness-design.md) — Pluggable agent adapters and routing policies.
 - [MCP Server Design](docs/mcp-server-design.md) — Streamable HTTP MCP server architecture.
 - [Quota and Auth Posture](docs/quota-and-auth.md) — Provider quota management and credential lifecycle.

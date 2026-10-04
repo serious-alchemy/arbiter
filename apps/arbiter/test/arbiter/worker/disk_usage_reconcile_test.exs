@@ -197,6 +197,67 @@ defmodule Arbiter.Worker.DiskUsageReconcileTest do
     assert ev.raw["arb_usage_source"]["reconciled_from"] == "codex_rollout"
   end
 
+  # bd-39to5j (G5): the CODEX_HOME the adapter injects (a per-worker home, not
+  # ~/.codex) is the one the worker reads the rollout from.
+  test "a killed isolated codex run's rollout is read from its per-worker CODEX_HOME" do
+    task_id = "bd-codexiso-#{System.unique_integer([:positive])}"
+    thread_id = "019f95af-#{System.unique_integer([:positive])}"
+    cwd = tmp_dir!("codexiso-cwd")
+    source = tmp_dir!("codexiso-source")
+    root = tmp_dir!("codexiso-root")
+
+    keys = ~w(worker_isolate_config worker_codex_home_root worker_codex_source_home)a
+    prev = Map.new(keys, &{&1, Application.get_env(:arbiter, &1)})
+    Application.put_env(:arbiter, :worker_isolate_config, true)
+    Application.put_env(:arbiter, :worker_codex_home_root, root)
+    Application.put_env(:arbiter, :worker_codex_source_home, source)
+
+    on_exit(fn ->
+      Enum.each(prev, fn
+        {k, nil} -> Application.delete_env(:arbiter, k)
+        {k, v} -> Application.put_env(:arbiter, k, v)
+      end)
+    end)
+
+    env = Arbiter.Agents.Codex.spawn_env(worktree_path: cwd)
+    assert {"CODEX_HOME", codex_home} = List.keyfind(env, "CODEX_HOME", 0)
+    refute codex_home == source
+
+    dir = Path.join([codex_home, "sessions", "2026", "09", "29"])
+    File.mkdir_p!(dir)
+    at = DateTime.utc_now() |> DateTime.add(600, :second) |> DateTime.to_iso8601()
+
+    File.write!(
+      Path.join(dir, "rollout-2026-09-29T10-00-00-#{thread_id}.jsonl"),
+      ~s({"timestamp":"#{at}","type":"session_meta","payload":{"session_id":"#{thread_id}","timestamp":"#{at}"}}\n) <>
+        ~s({"timestamp":"#{at}","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":70,"cached_input_tokens":0,"output_tokens":5}}}}\n)
+    )
+
+    {:ok, pid} = Worker.start(task_id: task_id, repo: "arbiter", workspace_id: "ws-codexiso")
+    stdout_path = Path.join(cwd, "stdout.jsonl")
+
+    File.write!(
+      stdout_path,
+      Jason.encode!(%{"type" => "thread.started", "thread_id" => thread_id}) <> "\n"
+    )
+
+    {:ok, _port} =
+      ClaudeSession.start(
+        owner: pid,
+        worktree_path: cwd,
+        command: ["cat", stdout_path],
+        provider: "codex",
+        env: env
+      )
+
+    :ok = wait_until(fn -> events_for(task_id) != [] end)
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+
+    assert [ev] = events_for(task_id)
+    assert ev.tokens_in == 70
+    assert ev.tokens_out == 5
+  end
+
   # G20 (bd-8yafoz): a *completed* codex run has stream tokens but no dollar
   # figure; the quota % its rollout's `rate_limits` moved by is the
   # cost-equivalent, recorded on the row's raw + cost_note.

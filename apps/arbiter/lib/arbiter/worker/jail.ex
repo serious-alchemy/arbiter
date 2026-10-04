@@ -184,6 +184,7 @@ defmodule Arbiter.Worker.Jail do
   alias Arbiter.Worker.Jail.Hide
   alias Arbiter.Worker.PrivateClone
   alias Arbiter.Worker.ReleaseEnv
+  alias Arbiter.Worker.RunTmp
 
   @toolchain_dir ".arbiter-jail"
   @probe_timeout_ms 15_000
@@ -444,10 +445,17 @@ defmodule Arbiter.Worker.Jail do
     script = ~S"""
     proxy=$1; up=$2; shift 2
     # SIGKILL teardown skips the EXIT trap, so also sweep stale dirs here.
-    r=${TMPDIR:-/tmp}/arbiter-keyring-proxy
+    # bd-c9fqsk: a short base that does not depend on TMPDIR (per-run TMPDIRs
+    # are long enough to push the socket past the 107-byte sun_path limit).
+    r=${XDG_RUNTIME_DIR:-/tmp}/arb-kp
     mkdir -p "$r" && chmod 700 "$r" || exit 125
     find "$r" -mindepth 1 -maxdepth 1 -type d -mmin +60 -exec rm -rf {} + 2>/dev/null
     d=$(mktemp -d "$r/run.XXXXXX") || exit 125
+    n=$(printf %s "$d/bus" | wc -c)
+    if [ "$n" -gt 107 ]; then
+      echo "keyring proxy socket path too long ($n bytes): $d/bus" >&2
+      rm -rf "$d"; exit 125
+    fi
     "$proxy" "unix:path=$up" "$d/bus" --filter --talk=org.freedesktop.secrets &
     p=$!
     trap 'kill $p 2>/dev/null; rm -rf "$d"' EXIT
@@ -1779,11 +1787,11 @@ defmodule Arbiter.Worker.Jail do
     end
   end
 
-  defp run_bounded([exec | args]) do
+  defp run_bounded([exec | args], extra_env \\ []) do
     task =
       Task.async(fn ->
         try do
-          ReleaseEnv.cmd(exec, args, stderr_to_stdout: true, env: [{"LC_ALL", "C"}])
+          ReleaseEnv.cmd(exec, args, stderr_to_stdout: true, env: [{"LC_ALL", "C"} | extra_env])
         rescue
           e -> {:raised, Exception.message(e)}
         end
@@ -1792,6 +1800,82 @@ defmodule Arbiter.Worker.Jail do
     case Task.yield(task, @probe_timeout_ms) || Task.shutdown(task, :brutal_kill) do
       {:ok, result} -> result
       _ -> :timeout
+    end
+  end
+
+  @doc """
+  Run the keyring-proxy check for real (uncached) the way a live agy spawn runs
+  it (bd-c9fqsk): `keyring: true`, with `TMPDIR` a per-run directory built by
+  `Arbiter.Worker.RunTmp` for the longest realistic task slug, so a proxy
+  socket path that depends on `TMPDIR`'s length (the 107-byte `sun_path`
+  limit) fails here instead of on the first review run. `:ok` when the proxy
+  bus appears inside the jail, or when this host can't offer a keyring bus at
+  all (`keyring_usable?/0` false — agy then falls back to credential files).
+  """
+  @spec keyring_probe() :: :ok | {:error, term()}
+  def keyring_probe do
+    with true <- keyring_usable?(),
+         {:ok, _bwrap} <- find_bwrap(),
+         {:ok, run_tmp} <- RunTmp.create(String.duplicate("x", 40)) do
+      try do
+        script =
+          ~S(test -S "${DBUS_SESSION_BUS_ADDRESS#unix:path=}" && echo KEYRING_OK; exit 0)
+
+        scratch = Path.join(run_tmp, "wt")
+        :ok = File.mkdir_p(scratch)
+
+        {:ok, [exec | args]} = wrap(["sh", "-c", script], worktree: scratch, keyring: true)
+
+        case run_bounded([exec | args], RunTmp.env_pairs(run_tmp)) do
+          :timeout ->
+            {:error, :probe_timeout}
+
+          {:raised, msg} ->
+            {:error, {:bwrap_failed, msg}}
+
+          {out, 0} ->
+            if out =~ "KEYRING_OK", do: :ok, else: {:error, {:keyring_down, String.trim(out)}}
+
+          {out, status} ->
+            {:error, {:keyring_down, "exit #{status}: #{String.trim(out)}"}}
+        end
+      rescue
+        e -> {:error, {:probe_raised, Exception.message(e)}}
+      after
+        RunTmp.remove(run_tmp)
+      end
+    else
+      false -> :ok
+      {:error, _} = err -> err
+    end
+  end
+
+  @doc "`keyring_probe/0` as a diagnosis (`nil` when the keyring bus comes up)."
+  @spec diagnose_keyring() :: diagnosis() | nil
+  def diagnose_keyring do
+    # `:worker_jail_keyring_available` overrides the real probe (tests).
+    result =
+      case Application.get_env(:arbiter, :worker_jail_keyring_available) do
+        nil -> keyring_probe()
+        true -> :ok
+        false -> {:error, {:keyring_down, "(forced by :worker_jail_keyring_available)"}}
+      end
+
+    case result do
+      :ok ->
+        nil
+
+      {:error, {:keyring_down, out}} ->
+        %{
+          cause: :other,
+          message: "the filtered keyring proxy did not come up with a per-run TMPDIR: " <> out,
+          fix:
+            "The proxy socket must live under a short base independent of TMPDIR " <>
+              "(Arbiter.Worker.Jail keyring wrapper, bd-c9fqsk); sun_path is limited to 107 bytes."
+        }
+
+      {:error, reason} ->
+        explain(reason)
     end
   end
 

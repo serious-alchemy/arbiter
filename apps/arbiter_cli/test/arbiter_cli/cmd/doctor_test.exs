@@ -158,7 +158,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     assert exit_code == 0
     assert {:ok, %{"ok" => true, "checks" => checks}} = Jason.decode(String.trim(out))
     assert is_list(checks)
-    assert length(checks) == 27
+    assert length(checks) == 28
   end
 
   test "version mismatch is non-fatal (exit 0 but shows [fail])" do
@@ -1307,6 +1307,27 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       network_routes(%{"available" => true})
       {out, _err, _exit_code} = capture(fn -> Doctor.run([]) end)
       assert out =~ "[ ok ] agy jail network"
+    end
+  end
+
+  describe "agy jail keyring proxy (bd-c9fqsk)" do
+    test "ok when the proxy comes up under a per-run TMPDIR" do
+      network_routes(%{"available" => true, "keyring" => %{"available" => true}})
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] agy jail keyring proxy"
+    end
+
+    test "FAILs with the cause, without blocking readiness" do
+      network_routes(%{
+        "available" => true,
+        "keyring" => %{"available" => false, "message" => "proxy down", "fix" => "shorten it"}
+      })
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[fail] agy jail keyring proxy"
+      assert out =~ "proxy down"
     end
   end
 

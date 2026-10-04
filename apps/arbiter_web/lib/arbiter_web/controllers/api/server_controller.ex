@@ -107,6 +107,7 @@ defmodule ArbiterWeb.Api.ServerController do
       |> Map.put(:escape, jail_diagnosis(Jail.diagnose_escape()))
       |> Map.put(:reads, jail_diagnosis(Jail.diagnose_reads()))
       |> Map.put(:network, jail_diagnosis(Jail.diagnose_network()))
+      |> Map.put(:keyring, jail_diagnosis(Jail.diagnose_keyring()))
       |> Map.put(:dbus_proxy, Jail.dbus_proxy())
     )
   end
