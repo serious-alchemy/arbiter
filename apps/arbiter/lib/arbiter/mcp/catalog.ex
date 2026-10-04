@@ -2982,7 +2982,9 @@ defmodule Arbiter.MCP.Catalog do
   module for why.
   """
   @spec visible(Scope.t()) :: [tool()]
-  def visible(%Scope{} = scope), do: Enum.filter(@tools ++ @alias_tools, &visible?(scope, &1))
+  def visible(%Scope{} = scope),
+    do:
+      Enum.filter(@tools ++ @alias_tools ++ Arbiter.Extensions.mcp_tools(), &visible?(scope, &1))
 
   # A deprecated alias is visible exactly where its `ticket_*` target is: it
   # carries the target's `:tiers`, and the refine table is keyed by the target.
@@ -2997,7 +2999,8 @@ defmodule Arbiter.MCP.Catalog do
   def fetch(name) when is_binary(name) do
     canonical = canonical_name(name)
 
-    case Enum.find(@tools, &(&1.name == canonical)) do
+    case Enum.find(@tools, &(&1.name == canonical)) ||
+           Enum.find(Arbiter.Extensions.mcp_tools(), &(&1.name == canonical)) do
       nil -> :error
       tool -> {:ok, tool}
     end
