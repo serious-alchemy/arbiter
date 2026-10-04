@@ -222,6 +222,8 @@ defmodule Arbiter.Config.Paths do
       expand_default(default, env_var)
   end
 
+  defp expand_default("/" <> _ = absolute, _env_var), do: absolute
+
   defp expand_default("~/" <> rest, env_var) do
     case System.get_env("HOME") do
       nil ->
