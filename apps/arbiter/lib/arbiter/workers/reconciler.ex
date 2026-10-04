@@ -25,6 +25,18 @@ defmodule Arbiter.Workers.Reconciler do
   overran `Arbiter.Worker.shutdown_grace_ms/0` and was killed, systemd's stop
   timeout firing first — is still live when this sweep sees it.
 
+  ## What the boot sweeps restart (bd-2yt0d2)
+
+  A stop also cuts off work that is not a worker: the gate waiting on CI
+  (`reconcile_ci_waits/1`) and the ReviewGate pass — a reviewer, or an
+  implementer fix round — that a gate was waiting on (`reconcile_review_passes/1`).
+  Each is brought back as a gate with no author, never as a resume of the ticket's
+  implementer, so no resume attempt is counted and nothing is escalated; the
+  runs it cut off stay `interrupted` / "server shutdown". Every sweep that
+  restarts things reports, per ticket, what restarted and what did not and why
+  (`t:report/0`), and logs the same; the later sweeps are handed the restarted ids
+  so none of them acts on a ticket whose gate is already running.
+
   ## Single-instance gate
 
   Liveness is keyed off the LOCAL process registry, which is empty on a fresh
@@ -248,6 +260,10 @@ defmodule Arbiter.Workers.Reconciler do
 
     * `:primary?` — same single-instance gate as `reconcile_orphaned_runs/1`.
       When `false`, skips and returns `{:ok, :skipped}`.
+    * `:skip_ids` — tickets an earlier sweep already restarted (a re-armed
+      ReviewGate pass or CI wait, `restarted_ids/1`). Their gate is running and
+      holds no worker this sweep could see; handing them to the patrols too would
+      watch a PR the gate is still reviewing, or escalate it.
     * `:watch_fun` — 1-arity fun `(Issue.t() -> :ok | {:error, term()})` that
       starts a Merging ticket's Watchdog. Defaults to `Watchdog.restart/1` on
       the ticket id.
@@ -269,19 +285,20 @@ defmodule Arbiter.Workers.Reconciler do
     if Keyword.get(opts, :primary?, true) do
       do_reconcile_open_pr_tasks(
         Keyword.get(opts, :watch_fun, &default_watch/1),
-        Keyword.get(opts, :rewatch_fun, &default_rewatch/1)
+        Keyword.get(opts, :rewatch_fun, &default_rewatch/1),
+        Keyword.get(opts, :skip_ids, [])
       )
     else
       {:ok, :skipped}
     end
   end
 
-  defp do_reconcile_open_pr_tasks(watch_fun, rewatch_fun) do
+  defp do_reconcile_open_pr_tasks(watch_fun, rewatch_fun, skip_ids) do
     stuck =
       Issue
       |> Ash.Query.filter(state in [:active, :merging])
       |> Ash.read!()
-      |> Enum.reject(&live_worker_for_issue?/1)
+      |> Enum.reject(&(live_worker_for_issue?(&1) or &1.id in skip_ids))
       |> Enum.filter(&rewatchable?/1)
       |> Enum.reject(&watched?/1)
 
@@ -414,8 +431,8 @@ defmodule Arbiter.Workers.Reconciler do
   own terms): it is stale, and is cleared.
 
   Run it after `reconcile_ci_waits/1` (a ticket waiting on CI is that sweep's) and
-  before `reconcile_resumable_tasks/1`, handing it the restarted ids (see
-  `restarted_ids/1`).
+  before `reconcile_open_pr_tasks/1` and `reconcile_resumable_tasks/1`, handing
+  them the restarted ids (see `restarted_ids/1`).
 
   Returns `{:ok, report}` (see `t:report/0`), `{:ok, :skipped}` when not the
   primary instance, or `{:error, reason}`.

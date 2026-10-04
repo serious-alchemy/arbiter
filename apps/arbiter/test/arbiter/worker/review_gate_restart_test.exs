@@ -124,6 +124,30 @@ defmodule Arbiter.Worker.ReviewGateRestartTest do
       assert_gate_reports(regate)
     end
 
+    test "keeps the open-PR sweep from handing the restarted ticket to the patrols", ctx do
+      rig = rig(ctx, "feature/rs-2b")
+      :ok = Arbiter.Tasks.PullRequest.record_review_gate(rig.task.id, %{pr_ref: "#7"})
+      Ash.update!(Ash.get!(Issue, rig.task.id), %{pr_ref: "#7"}, action: :update)
+
+      gate = start_gate(rig, ctx, command: [@probe, "HOLD"], rounds: 3, pr_ref: "#7")
+      wait_until(fn -> passes(rig) == 1 and pass_marker(rig) != nil end)
+      node_stops(rig, gate)
+
+      assert {:ok, %{restarted: [_]} = passes} =
+               Reconciler.reconcile_review_passes(rearm_fun: rearm_fun(rig, command: [@probe]))
+
+      assert_received {:rearmed, {:ok, regate}}
+
+      assert {:ok, %{watched: 0, rewatched: 0, escalated: 0}} =
+               Reconciler.reconcile_open_pr_tasks(
+                 skip_ids: Reconciler.restarted_ids([passes]),
+                 watch_fun: fn issue -> flunk("watched #{issue.id}") end,
+                 rewatch_fun: fn issue -> flunk("re-watched #{issue.id}") end
+               )
+
+      assert_gate_reports(regate)
+    end
+
     test "a pass nobody cut off (author stopped on purpose) is not restarted", ctx do
       rig = rig(ctx, "feature/rs-3")
       gate = start_gate(rig, ctx, command: [@probe, "HOLD"], rounds: 3)
