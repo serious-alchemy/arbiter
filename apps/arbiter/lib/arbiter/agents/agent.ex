@@ -294,6 +294,20 @@ defmodule Arbiter.Agents.Agent do
   """
   @callback write_jail_warning(SecurityPolicy.t()) :: String.t() | nil
 
+  @doc """
+  Whether this adapter can confine a worker's **network egress** on this host
+  under `policy` (`docs/design/guardrail-profiles.md` §3.4, G11): `:os_jail` when
+  the spawn runs in an OS network namespace whose only route out is the egress
+  proxy, `:none` otherwise. Like `write_confinement/1` it is a capability the
+  host answers, never a tier setting: a guardrail profile that needs
+  `egress: allowlist | none` makes an adapter that answers `:none` ineligible
+  (drop reason `egress_unenforceable`) rather than running it with the network
+  open.
+
+  Optional, a missing callback means `:none`.
+  """
+  @callback egress_confinement(SecurityPolicy.t()) :: :os_jail | :none
+
   @optional_callbacks [
     spawn_env: 1,
     security_enforced?: 0,
@@ -304,6 +318,7 @@ defmodule Arbiter.Agents.Agent do
     async_tool_instruction: 3,
     async_arm_signature: 0,
     write_confinement: 1,
-    write_jail_warning: 1
+    write_jail_warning: 1,
+    egress_confinement: 1
   ]
 end

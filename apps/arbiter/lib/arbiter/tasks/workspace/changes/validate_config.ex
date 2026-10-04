@@ -25,6 +25,8 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     * If `"agent.config"` / `"review_agent.config"` is present, it must be a map.
     * If `"review_agent.cross_family"` is present, it must be a boolean
       (bd-a1ke2c).
+    * If `"guardrails"` is present it must pass
+      `Arbiter.Guardrails.Config.validate/1` (bd-anwb0u, G11).
     * If `"agent.security.sandbox.egress"` (or a per-repo
       `"agent.security.repos.<repo>.sandbox.egress"`) is present, it must be one
       of `Arbiter.Agents.SecurityPolicy.valid_egress_levels/0` (`"open"`,
@@ -97,6 +99,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     |> validate_merge(Map.get(config, "merge"))
     |> validate_agent_block("agent", Map.get(config, "agent"))
     |> validate_agent_security(Map.get(config, "agent"))
+    |> validate_guardrails(Map.get(config, "guardrails"))
     |> validate_agent_block("review_agent", Map.get(config, "review_agent"))
     |> validate_cross_family(Map.get(config, "review_agent"))
     |> validate_routing(Map.get(config, "routing"))
@@ -108,6 +111,19 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     |> validate_quota(Map.get(config, "quota"))
     |> validate_loop(Map.get(config, "loop"))
     |> validate_attention(Map.get(config, "attention"))
+  end
+
+  # bd-anwb0u (G11): the `guardrails` block — bindings, ticket defaults and
+  # per-subject caps (`Arbiter.Guardrails.Config`). Unknown keys are refused: a
+  # typo in a security block must not read as "configured".
+  defp validate_guardrails(changeset, nil), do: changeset
+
+  defp validate_guardrails(changeset, block) do
+    block
+    |> Arbiter.Guardrails.Config.validate()
+    |> Enum.reduce(changeset, fn message, cs ->
+      Changeset.add_error(cs, field: :config, message: message)
+    end)
   end
 
   # bd-8nlez1: the escalation limits (`Arbiter.Tasks.AttentionLimits`). Zero is

@@ -146,6 +146,7 @@ defmodule Arbiter.Tasks.Workspace do
       change {Arbiter.Tasks.Workspace.Changes.MergeSecrets, []}
       change {Arbiter.Tasks.Workspace.Changes.MergeWorkerEnv, []}
       change {Arbiter.Tasks.Workspace.Changes.ValidateConfig, []}
+      change {Arbiter.Tasks.Workspace.Changes.EnforceGuardrailAuthority, []}
       change {Arbiter.Tasks.Workspace.Changes.StartMergeQueue, []}
       change {Arbiter.Tasks.Workspace.Changes.StartDispatchQueue, []}
       change {Arbiter.Tasks.Workspace.Changes.StartPRPatrol, []}
@@ -183,6 +184,7 @@ defmodule Arbiter.Tasks.Workspace do
       change {Arbiter.Tasks.Workspace.Changes.MergeSecrets, []}
       change {Arbiter.Tasks.Workspace.Changes.MergeWorkerEnv, []}
       change {Arbiter.Tasks.Workspace.Changes.ValidateConfig, []}
+      change {Arbiter.Tasks.Workspace.Changes.EnforceGuardrailAuthority, []}
       change {Arbiter.Tasks.Workspace.Changes.ReconcileMergedPRFinalizer, []}
       change {Arbiter.Tasks.Workspace.Changes.ReconcilePatrols, []}
     end
@@ -211,6 +213,7 @@ defmodule Arbiter.Tasks.Workspace do
 
       change {Arbiter.Tasks.Workspace.Changes.PatchConfig, []}
       change {Arbiter.Tasks.Workspace.Changes.ValidateConfig, []}
+      change {Arbiter.Tasks.Workspace.Changes.EnforceGuardrailAuthority, []}
       change {Arbiter.Tasks.Workspace.Changes.ReconcileMergedPRFinalizer, []}
       change {Arbiter.Tasks.Workspace.Changes.ReconcilePatrols, []}
     end

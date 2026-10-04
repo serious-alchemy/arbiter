@@ -231,7 +231,11 @@ defmodule Arbiter.MCP.OperatorSocket do
         can_dispatch = Map.get(req, "can_dispatch") not in [false, "false"]
 
         token =
-          Scope.mint_coordinator(workspace_id, can_dispatch: can_dispatch, max_age: ttl)
+          Scope.mint_coordinator(workspace_id,
+            can_dispatch: can_dispatch,
+            max_age: ttl,
+            operator: true
+          )
 
         Logger.info(
           "operator socket: minted a coordinator token for pid #{peer.pid} " <>
