@@ -61,6 +61,20 @@ defmodule Arbiter.Worker.ReviewFindingsTest do
       assert ReviewFindings.extract(findings, 2) == []
     end
 
+    test "ignores markdown bold and formatted verdict lines as verdict payload" do
+      findings = """
+      **VERDICT: REQUEST_CHANGES**
+      VERIFICATION: PARTIAL
+
+      - **High**: nil pointer exception in lib/foo.ex:42
+      """
+
+      assert [one] = ReviewFindings.extract(findings, 1)
+      assert one.id == "F1.1"
+      assert one.severity == :high
+      assert "lib/foo.ex" in one.files
+    end
+
     test "returns [] for nil / blank findings" do
       assert ReviewFindings.extract(nil, 1) == []
       assert ReviewFindings.extract("VERDICT: APPROVE\n", 1) == []

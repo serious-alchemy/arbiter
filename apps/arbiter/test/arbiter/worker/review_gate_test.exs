@@ -120,6 +120,64 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert {:approve, _} =
                ReviewGate.parse_verdict(["VERDICT: APPROVE", "VERDICT: REQUEST_CHANGES"])
     end
+
+    test "recognizes markdown bold, underline, heading, blockquote, and list marker verdict lines" do
+      # Markdown bold
+      assert {:request_changes, findings} =
+               ReviewGate.parse_verdict([
+                 "noise",
+                 "**VERDICT: REQUEST_CHANGES**",
+                 "- [high] lib/foo.ex:10 bug"
+               ])
+
+      refute findings =~ "noise"
+      assert findings =~ "**VERDICT: REQUEST_CHANGES**"
+      assert findings =~ "lib/foo.ex:10 bug"
+
+      # Markdown underline / emphasis
+      assert {:approve, findings} =
+               ReviewGate.parse_verdict(["__VERDICT: APPROVE__", "looks clean"])
+
+      assert findings =~ "__VERDICT: APPROVE__"
+      assert findings =~ "looks clean"
+
+      # Markdown heading
+      assert {:approve, findings} =
+               ReviewGate.parse_verdict(["## VERDICT: APPROVE", "looks good"])
+
+      assert findings =~ "## VERDICT: APPROVE"
+      assert findings =~ "looks good"
+
+      # Markdown blockquote
+      assert {:request_changes, findings} =
+               ReviewGate.parse_verdict(["> VERDICT: REQUEST_CHANGES", "fix needed"])
+
+      assert findings =~ "> VERDICT: REQUEST_CHANGES"
+      assert findings =~ "fix needed"
+
+      # Markdown bullet list
+      assert {:request_changes, findings} =
+               ReviewGate.parse_verdict(["- VERDICT: REQUEST_CHANGES", "fix needed"])
+
+      assert findings =~ "- VERDICT: REQUEST_CHANGES"
+      assert findings =~ "fix needed"
+
+      # Combinations of blockquote, bullet, and bold
+      assert {:request_changes, findings} =
+               ReviewGate.parse_verdict(["> **VERDICT: REQUEST_CHANGES**", "fix needed"])
+
+      assert findings =~ "> **VERDICT: REQUEST_CHANGES**"
+
+      assert {:approve, findings} =
+               ReviewGate.parse_verdict(["- **VERDICT: APPROVE**", "all clear"])
+
+      assert findings =~ "- **VERDICT: APPROVE**"
+
+      assert {:approve, findings} =
+               ReviewGate.parse_verdict(["1. **VERDICT: APPROVE**", "all clear"])
+
+      assert findings =~ "1. **VERDICT: APPROVE**"
+    end
   end
 
   # ---- recover_verdict_from_scans/1 (bd-869mmg round 3) --------------------
@@ -737,6 +795,54 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert summary =~ "VERDICT: REQUEST_CHANGES"
       assert summary =~ "not honored"
       refute summary =~ ~r/^VERDICT: APPROVE/
+    end
+
+    test "markdown-bold REQUEST_CHANGES formats failure_summary without falling back to synthesized label",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      {pid, _branch} = start_author(task, repo, %{})
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn ->
+        match?(%{state: :waiting, waiting_on: :review_gate}, Worker.state(pid))
+      end)
+
+      findings =
+        "**VERDICT: REQUEST_CHANGES**\nVERIFICATION: PARTIAL\n\n- [high] feature.txt:1 needs a guard"
+
+      :ok = Worker.review_gate_verdict(pid, {:request_changes, findings})
+
+      wait_until(fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end)
+
+      assert Worker.state(pid).meta.failure_summary ==
+               "**VERDICT: REQUEST_CHANGES** — - [high] feature.txt:1 needs a guard"
+    end
+
+    test "a markdown-bold partial-verification APPROVE not honored does not open failure_summary with APPROVE",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      {pid, _branch} = start_author(task, repo, %{})
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn ->
+        match?(%{state: :waiting, waiting_on: :review_gate}, Worker.state(pid))
+      end)
+
+      raw_findings =
+        "**VERDICT: APPROVE**\nVERIFICATION: PARTIAL — gave up on tests\nlgtm otherwise"
+
+      findings = ReviewVerification.prepend_banner(raw_findings)
+
+      :ok = Worker.review_gate_verdict(pid, {:request_changes, findings})
+
+      wait_until(fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end)
+
+      summary = Worker.state(pid).meta.failure_summary
+      assert summary =~ "VERDICT: REQUEST_CHANGES"
+      assert summary =~ "reviewer said \"**VERDICT: APPROVE**\", not honored"
+      refute summary =~ ~r/^\*?\*?VERDICT: APPROVE/
     end
 
     test "an inconclusive review (no verdict) escalates and does NOT merge",
