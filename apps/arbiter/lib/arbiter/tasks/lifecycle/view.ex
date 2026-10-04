@@ -80,6 +80,7 @@ defmodule Arbiter.Tasks.Lifecycle.View do
   alias Arbiter.Worker
   alias Arbiter.Worker.Phase
   alias Arbiter.Worker.ReviewCi
+  alias Arbiter.Worker.ReviewPass
   alias Arbiter.Worker.Watchdog
   alias Arbiter.Workflows.DispatchQueue
 
@@ -135,13 +136,15 @@ defmodule Arbiter.Tasks.Lifecycle.View do
     blocked_by = ctx |> Map.get(:blocked_by) |> List.wrap() |> Enum.uniq() |> Enum.sort()
     column = column(state, blocked_by)
     ci_wait = if column == :in_progress, do: ReviewCi.waiting(ticket, ctx_now(ctx))
+    cut_off = if column == :in_progress, do: ReviewPass.current(ticket, ctx_now(ctx))
 
     %{
       state: state,
       column: column,
       step: step(column, ticket, runs, ctx) |> awaiting_ci(ci_wait, runs),
       blocked_by: blocked_by,
-      attention: Attention.of(ticket, attention_facts(state, ticket, runs, ctx, ci_wait)),
+      attention:
+        Attention.of(ticket, attention_facts(state, ticket, runs, ctx, ci_wait, cut_off)),
       ci_wait: ci_wait
     }
   end
@@ -360,10 +363,13 @@ defmodule Arbiter.Tasks.Lifecycle.View do
 
   # ---- attention ----------------------------------------------------------
 
-  defp attention_facts(state, ticket, runs, ctx, ci_wait) do
+  defp attention_facts(state, ticket, runs, ctx, ci_wait, cut_off) do
     %{
       state: state,
-      run: if(state == :active, do: run_fact(ticket, runs, ctx) |> waiting_not_crashed(ci_wait)),
+      run:
+        if(state == :active,
+          do: run_fact(ticket, runs, ctx) |> waiting_not_crashed(ci_wait, cut_off)
+        ),
       block: if(state == :merging, do: block_fact(merger_status(ticket, ctx))),
       watchdog_alive: Map.get(ctx, :watchdog_alive)
     }
@@ -371,8 +377,15 @@ defmodule Arbiter.Tasks.Lifecycle.View do
 
   # bd-2gc809: a gate waiting on CI has no agent by design, and after a restart
   # not even the author row: the run that finished or vanished is not a crash.
-  defp waiting_not_crashed(fact, %{sha: _}) when fact in [:failed, :orphaned], do: nil
-  defp waiting_not_crashed(fact, _ci_wait), do: fact
+  #
+  # bd-2yt0d2: nor is a pass the stop cut off (`ReviewPass`), in the moment
+  # before the boot sweep has a gate running it again.
+  defp waiting_not_crashed(fact, %{sha: _}, _cut_off) when fact in [:failed, :orphaned], do: nil
+
+  defp waiting_not_crashed(fact, _ci_wait, %{} = _cut_off) when fact in [:failed, :orphaned],
+    do: nil
+
+  defp waiting_not_crashed(fact, _ci_wait, _cut_off), do: fact
 
   # What the ticket's runs say, for `Attention`: a live run anywhere on the
   # ticket is the machine's turn, whatever an earlier run did — which is what
