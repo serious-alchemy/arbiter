@@ -38,7 +38,13 @@ defmodule Arbiter.Extensions.Core do
       {:session_provider, "agy", Arbiter.Sessions.Provider.Agy},
       {:mcp_agent_config, "claude", Arbiter.MCP.AgentConfig.Claude},
       {:mcp_agent_config, "gemini", Arbiter.MCP.AgentConfig.Gemini},
-      {:mcp_agent_config, "codex", Arbiter.MCP.AgentConfig.Codex}
+      {:mcp_agent_config, "codex", Arbiter.MCP.AgentConfig.Codex},
+      {:quota_snapshot, Atom.to_string(Arbiter.Quota.AnthropicQuota),
+       Arbiter.Quota.Gate.Snapshot.Anthropic},
+      {:quota_snapshot, Atom.to_string(Arbiter.Quota.CodexQuota),
+       Arbiter.Quota.Gate.Snapshot.Codex},
+      {:quota_snapshot, Atom.to_string(Arbiter.Quota.GoogleQuota),
+       Arbiter.Quota.Gate.Snapshot.Google}
     ]
   end
 end

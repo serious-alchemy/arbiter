@@ -4,7 +4,8 @@ defmodule Arbiter.Extensions do
 
   Every dispatcher that used to hold a closed `@adapters` map
   (`Arbiter.Agents`, `Trackers`, `Mergers`, `Agents.Routing`,
-  `Sessions.Provider`, `MCP.AgentConfig`, `Quota`) reads its map from here
+  `Sessions.Provider`, `MCP.AgentConfig`, `Quota`,
+  `Quota.Gate.Snapshot`) reads its map from here
   instead. The registry is the union of `Arbiter.Extensions.Core` and every
   module in `config :arbiter, :extensions`; see `Arbiter.Extension`.
 
@@ -34,7 +35,8 @@ defmodule Arbiter.Extensions do
     routing_policy: Arbiter.Agents.Routing.Policy,
     quota_gate: Arbiter.Quota.Gate,
     session_provider: Arbiter.Sessions.Provider,
-    mcp_agent_config: Arbiter.MCP.AgentConfig
+    mcp_agent_config: Arbiter.MCP.AgentConfig,
+    quota_snapshot: Arbiter.Quota.Gate.Snapshot.Source
   }
 
   @pt_key {__MODULE__, :state}

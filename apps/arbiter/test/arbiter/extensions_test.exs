@@ -36,6 +36,28 @@ defmodule ArbiterProFake.QuotaGate do
   def check(_task, _quota, _workspace, _opts), do: :allow
 end
 
+defmodule ArbiterProFake.AcmeQuota do
+  @moduledoc false
+  # A provider's own quota table row, as a package outside `Arbiter.*` would
+  # persist it.
+  defstruct [:used, :captured_at]
+end
+
+defmodule ArbiterProFake.AcmeQuotaSource do
+  @moduledoc false
+  @behaviour Arbiter.Quota.Gate.Snapshot.Source
+
+  @impl true
+  def normalize(%ArbiterProFake.AcmeQuota{} = q, _opts) do
+    %Arbiter.Quota.Gate.Snapshot{
+      provider: "acme",
+      utilization: q.used,
+      captured_at: q.captured_at,
+      window_label: "day"
+    }
+  end
+end
+
 defmodule ArbiterProFake.Extension do
   @moduledoc false
   @behaviour Arbiter.Extension
@@ -45,7 +67,8 @@ defmodule ArbiterProFake.Extension do
     [
       {:agent, "acme", ArbiterProFake.Agent},
       {:routing_policy, "acme_fixed", ArbiterProFake.RoutingPolicy},
-      {:quota_gate, "acme_budget", ArbiterProFake.QuotaGate}
+      {:quota_gate, "acme_budget", ArbiterProFake.QuotaGate},
+      {:quota_snapshot, Atom.to_string(ArbiterProFake.AcmeQuota), ArbiterProFake.AcmeQuotaSource}
     ]
   end
 end
@@ -95,6 +118,7 @@ defmodule Arbiter.ExtensionsTest do
   alias Arbiter.Extensions
   alias Arbiter.Mergers
   alias Arbiter.Quota
+  alias Arbiter.Quota.Gate.Snapshot
   alias Arbiter.Sessions.Provider
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Trackers
@@ -119,6 +143,40 @@ defmodule Arbiter.ExtensionsTest do
 
       assert {:ok, Arbiter.MCP.AgentConfig.Codex} =
                Extensions.fetch(:mcp_agent_config, "codex")
+
+      assert {:ok, Snapshot.Anthropic} =
+               Extensions.fetch(:quota_snapshot, Arbiter.Quota.AnthropicQuota)
+
+      assert {:ok, Snapshot.Codex} = Extensions.fetch(:quota_snapshot, Arbiter.Quota.CodexQuota)
+      assert {:ok, Snapshot.Google} = Extensions.fetch(:quota_snapshot, Arbiter.Quota.GoogleQuota)
+    end
+
+    test "in-tree quota rows still project through the registry" do
+      anthropic = %Arbiter.Quota.AnthropicQuota{
+        provider: "claude",
+        utilization_5h: 0.4,
+        status_5h: "allowed",
+        utilization_7d: 0.1
+      }
+
+      assert %Snapshot{utilization: 0.4, window_label: "5h", secondary_window_label: "7d"} =
+               Snapshot.normalize(anthropic)
+
+      assert %Snapshot{utilization: 0.5, window_label: "used"} =
+               Snapshot.normalize(%Arbiter.Quota.GoogleQuota{
+                 provider: "gemini",
+                 used_percent: 50
+               })
+
+      assert %Snapshot{status: "limit_reached", utilization: 0.9} =
+               Snapshot.normalize(%Arbiter.Quota.CodexQuota{
+                 provider: "codex",
+                 session_used_percent: 90,
+                 limit_reached: true
+               })
+
+      assert Snapshot.normalize(%{not: "a quota row"}) == nil
+      assert Snapshot.normalize(nil) == nil
     end
 
     test "existing dispatcher registries are unchanged with no extension installed" do
@@ -169,6 +227,19 @@ defmodule Arbiter.ExtensionsTest do
                ArbiterProFake.RoutingPolicy
 
       assert "acme_fixed" in Routing.valid_policies()
+    end
+
+    test "its quota rows are projected through :quota_snapshot" do
+      row = %ArbiterProFake.AcmeQuota{used: 0.7, captured_at: DateTime.utc_now()}
+
+      assert %Snapshot{provider: "acme", utilization: 0.7, window_label: "day"} =
+               Snapshot.normalize(row)
+
+      assert Arbiter.Quota.Gate.stale?(row) == false
+
+      # Uninstalled: the row is unknown again, and the gate fails open.
+      Extensions.load!()
+      assert Snapshot.normalize(row) == nil
     end
 
     test "two workspaces resolve different implementations of the same seam" do

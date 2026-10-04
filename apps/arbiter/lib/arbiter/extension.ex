@@ -32,6 +32,7 @@ defmodule Arbiter.Extension do
   | `:quota_gate`       | `Arbiter.Quota.Gate`            |
   | `:session_provider` | `Arbiter.Sessions.Provider`     |
   | `:mcp_agent_config` | `Arbiter.MCP.AgentConfig`       |
+  | `:quota_snapshot`   | `Arbiter.Quota.Gate.Snapshot.Source` |
 
   `key` is the string a workspace config (or the persisted provider/type
   column) uses to name the implementation. It is also the registry's atom key,
@@ -41,7 +42,9 @@ defmodule Arbiter.Extension do
 
   A provider bundle (a new agent CLI) contributes the same key to `:agent`,
   `:mcp_agent_config`, and, when it runs in a coordinator pane,
-  `:session_provider`.
+  `:session_provider`. If it keeps its own quota table it also contributes a
+  `:quota_snapshot` source, keyed by the quota struct's module name
+  (`Atom.to_string(MyApp.FooQuota)`), so its rows are visible to the quota gate.
   """
 
   @typedoc "A seam name; see the table in the moduledoc."
@@ -53,6 +56,7 @@ defmodule Arbiter.Extension do
           | :quota_gate
           | :session_provider
           | :mcp_agent_config
+          | :quota_snapshot
 
   @doc "The implementations this extension adds, as `{seam, key, module}`."
   @callback contributions() :: [{seam(), key :: String.t(), module()}]
