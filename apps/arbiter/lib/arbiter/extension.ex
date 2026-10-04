@@ -64,8 +64,13 @@ defmodule Arbiter.Extension do
   @doc """
   MCP tools this extension adds (`Arbiter.MCP.Catalog` tool maps).
 
-  Collected by `Arbiter.Extensions.mcp_tools/0`. Not yet consumed by the
-  catalog itself, which is a separate seam.
+  Collected by `Arbiter.Extensions.mcp_tools/0` and merged into
+  `Arbiter.MCP.Catalog` (`visible/1`, `fetch/1`, `call/3`). Each map needs
+  `:name`, `:description`, `:input_schema`, `:tiers` (a non-empty subset of
+  `[:worker, :coordinator]`) and a 2-arity `:handler`. Boot fails on a
+  malformed tool or a name already taken by a core tool, a deprecated alias,
+  or another extension. A refine-tier session never sees extension tools
+  until `Arbiter.MCP.RefinePolicy` decides them.
   """
   @callback mcp_tools() :: [map()]
 
