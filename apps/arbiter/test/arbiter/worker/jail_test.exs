@@ -408,6 +408,126 @@ defmodule Arbiter.Worker.JailTest do
       end
     end
 
+    # bd-c9fqsk: the proxy socket must not live under TMPDIR (per-run TMPDIRs
+    # are long); sun_path allows 107 bytes. A stub proxy binds the socket it is
+    # given, exactly as xdg-dbus-proxy does, so an over-long path fails the same way.
+    defp run_keyring_wrapper(base, env) do
+      stub = Path.join(base, "stub-proxy.py")
+
+      File.write!(stub, """
+      #!/usr/bin/env python3
+      import socket, sys, time
+      s = socket.socket(socket.AF_UNIX)
+      s.bind(sys.argv[2])
+      time.sleep(30)
+      """)
+
+      File.chmod!(stub, 0o755)
+      Application.put_env(:arbiter, :xdg_dbus_proxy, stub)
+      System.put_env("DBUS_SESSION_BUS_ADDRESS", "unix:path=#{stub}")
+
+      wt = Path.join(base, "kp-wt")
+      File.mkdir_p!(wt)
+
+      {:ok, [sh, "-c", script, "sh", proxy, up, _bwrap | _]} =
+        Jail.wrap(["true"], worktree: wt, keyring: true)
+
+      # Replace bwrap with a command that reports where the bus was placed.
+      argv = [
+        "-c",
+        script,
+        "sh",
+        proxy,
+        up,
+        "sh",
+        "-c",
+        ~s(echo "BUS=$0"; test -S "$0" && echo SOCK_OK),
+        "@KEYRING_SOCK@"
+      ]
+
+      System.cmd(sh, argv, stderr_to_stdout: true, env: env)
+    end
+
+    defp keyring_fixture(base) do
+      prev_proxy = Application.fetch_env(:arbiter, :xdg_dbus_proxy)
+      prev_bus = System.get_env("DBUS_SESSION_BUS_ADDRESS")
+
+      on_exit(fn ->
+        case prev_proxy do
+          {:ok, v} -> Application.put_env(:arbiter, :xdg_dbus_proxy, v)
+          :error -> Application.delete_env(:arbiter, :xdg_dbus_proxy)
+        end
+
+        if prev_bus,
+          do: System.put_env("DBUS_SESSION_BUS_ADDRESS", prev_bus),
+          else: System.delete_env("DBUS_SESSION_BUS_ADDRESS")
+      end)
+
+      rt = Path.join(base, "rt")
+      File.mkdir_p!(rt)
+      rt
+    end
+
+    @tag skip: if(is_nil(System.find_executable("python3")), do: "no python3")
+    test "comes up with a 130-char TMPDIR", %{base: base} do
+      rt = keyring_fixture(base)
+      long = Path.join(base, String.duplicate("t", 130))
+      File.mkdir_p!(long)
+
+      {out, 0} =
+        run_keyring_wrapper(base, [
+          {"TMPDIR", long},
+          {"XDG_RUNTIME_DIR", rt}
+        ])
+
+      assert out =~ "SOCK_OK"
+      assert out =~ Path.join(rt, "arb-kp")
+      refute out =~ long
+    end
+
+    @tag skip: if(is_nil(System.find_executable("python3")), do: "no python3")
+    test "an over-long socket path fails fast with a length error", %{base: base} do
+      _ = keyring_fixture(base)
+      rt = Path.join(base, String.duplicate("r", 110))
+      File.mkdir_p!(rt)
+
+      {t0, {out, status}} =
+        :timer.tc(fn -> run_keyring_wrapper(base, [{"XDG_RUNTIME_DIR", rt}]) end)
+
+      assert status == 125
+      assert out =~ ~r/keyring proxy socket path too long \(\d+ bytes\)/
+      assert t0 < 4_000_000
+    end
+
+    @tag skip: if(is_nil(System.find_executable("python3")), do: "no python3")
+    test "keyring_probe/0 brings the proxy up under a per-run TMPDIR", %{base: base} do
+      rt = keyring_fixture(base)
+      prev_rt = System.get_env("XDG_RUNTIME_DIR")
+      System.put_env("XDG_RUNTIME_DIR", rt)
+
+      on_exit(fn ->
+        if prev_rt,
+          do: System.put_env("XDG_RUNTIME_DIR", prev_rt),
+          else: System.delete_env("XDG_RUNTIME_DIR")
+      end)
+
+      stub = Path.join(base, "probe-proxy.py")
+
+      File.write!(stub, """
+      #!/usr/bin/env python3
+      import socket, sys, time
+      s = socket.socket(socket.AF_UNIX)
+      s.bind(sys.argv[2])
+      time.sleep(30)
+      """)
+
+      File.chmod!(stub, 0o755)
+      Application.put_env(:arbiter, :xdg_dbus_proxy, stub)
+      System.put_env("DBUS_SESSION_BUS_ADDRESS", "unix:path=#{stub}")
+
+      if @probe == :ok, do: assert(Jail.keyring_probe() == :ok)
+    end
+
     test "keyring_usable?/0 needs both the proxy binary and a session bus" do
       old_env = Application.fetch_env(:arbiter, :xdg_dbus_proxy)
       old_bus = System.get_env("DBUS_SESSION_BUS_ADDRESS")

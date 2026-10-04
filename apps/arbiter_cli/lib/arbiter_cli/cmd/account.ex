@@ -94,10 +94,21 @@ defmodule ArbiterCli.Cmd.Account do
                                      with no usage rows and no credentials,
                                      ever.
 
+      arb account login  <ref>       Log the account in through the provider
+                                     CLI's own login, run by the server in a
+                                     hidden tmux session (login relay). Prints
+                                     the sign-in URL (and a device code when
+                                     the flow has one); when the CLI waits for
+                                     a pasted code it asks for it at a hidden
+                                     prompt — never an argument, which `ps`
+                                     would show. Exits non-zero on failure,
+                                     timeout or cancel.
+
   All verbs go through the REST API at `/api/accounts`.
   """
 
   alias ArbiterCli.{Client, Output}
+  alias ArbiterCli.Cmd.Account.Login
 
   @switches [
     provider: :string,
@@ -115,6 +126,8 @@ defmodule ArbiterCli.Cmd.Account do
     env_var: :string,
     secret: :string,
     secret_file: :string,
+    # refused by `login`: a code must never ride in argv
+    code: :string,
     scopes: :string,
     into: :string,
     json: :boolean,
@@ -156,10 +169,13 @@ defmodule ArbiterCli.Cmd.Account do
         ["delete" | args] ->
           delete(args, opts, mode)
 
+        ["login" | args] ->
+          Login.run(args, opts)
+
         [] ->
           Output.die(
             "account requires a subcommand",
-            "verbs: list, show, create, set, attach, rotate, merge, delete"
+            "verbs: list, show, create, set, attach, rotate, merge, delete, login"
           )
 
         [unknown | _] ->
