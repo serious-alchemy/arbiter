@@ -158,7 +158,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     assert exit_code == 0
     assert {:ok, %{"ok" => true, "checks" => checks}} = Jason.decode(String.trim(out))
     assert is_list(checks)
-    assert length(checks) == 26
+    assert length(checks) == 27
   end
 
   test "version mismatch is non-fatal (exit 0 but shows [fail])" do
@@ -1351,6 +1351,76 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
       assert exit_code == 0
       assert out =~ "[ ok ] egress jail"
+      assert out =~ "skipping"
+    end
+  end
+
+  describe "guardrail profiles (bd-anwb0u, G11)" do
+    defp guardrail_routes(resp, status \\ 200) do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/guardrails"}, {resp, status}}
+      ])
+    end
+
+    test "ok and says guardrails are off when nothing is configured" do
+      guardrail_routes(%{"active" => false, "rules" => 0, "workspaces" => [], "issues" => []})
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] guardrail profiles"
+      assert out =~ "guardrails are off"
+    end
+
+    test "ok, reporting each workspace's effective tiers" do
+      guardrail_routes(%{
+        "active" => true,
+        "rules" => 2,
+        "issues" => [],
+        "workspaces" => [
+          %{
+            "workspace" => "default",
+            "subjects" => [
+              %{"provider" => "claude", "model" => "opus", "tier" => "privileged"},
+              %{"provider" => "antigravity", "model" => nil, "tier" => "quarantine"}
+            ]
+          }
+        ]
+      })
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] guardrail profiles"
+      assert out =~ "default: claude/opus=privileged, antigravity=quarantine"
+    end
+
+    test "FAILs naming inconsistent config, without blocking readiness" do
+      guardrail_routes(%{
+        "active" => true,
+        "rules" => 1,
+        "workspaces" => [%{"workspace" => "default", "subjects" => []}],
+        "issues" => [
+          %{
+            "kind" => "unmatched_subject",
+            "workspace" => "default",
+            "message" => "codex matches no subject rule, so it runs as quarantine"
+          }
+        ]
+      })
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[fail] guardrail profiles"
+      assert out =~ "codex matches no subject rule"
+    end
+
+    test "ok (skipped) when the server predates the endpoint" do
+      guardrail_routes(%{"error" => "not found"}, 404)
+      {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] guardrail profiles"
       assert out =~ "skipping"
     end
   end
