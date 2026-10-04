@@ -147,7 +147,7 @@ defmodule ArbiterCli.Cmd.Account.Login do
   # restored in `after`, so a Ctrl-C mid-prompt cannot leave the shell silent.
   # No tty (piped stdin) just reads the line.
   defp read_hidden(text) do
-    tty? = File.exists?("/dev/tty") and :os.cmd(~c"stty -echo < /dev/tty 2>/dev/null") == []
+    tty? = File.exists?("/dev/tty") and stty("-echo") == 0
 
     try do
       IO.write(:stderr, text)
@@ -155,7 +155,16 @@ defmodule ArbiterCli.Cmd.Account.Login do
       if tty?, do: IO.write(:stderr, "\n")
       line
     after
-      if tty?, do: :os.cmd(~c"stty echo < /dev/tty 2>/dev/null")
+      if tty?, do: stty("echo")
     end
+  end
+
+  # `-F` names the terminal itself: the port a child is spawned on has a pipe
+  # for stdin, so a bare `stty` would be asking about the wrong device.
+  defp stty(flag) do
+    {_out, status} = System.cmd("stty", ["-F", "/dev/tty", flag], stderr_to_stdout: true)
+    status
+  rescue
+    _ -> 1
   end
 end
