@@ -42,7 +42,13 @@ defmodule Arbiter.Worker.SeedPaths do
 
   defp valid_list(paths), do: if(Enum.all?(paths, &is_binary/1), do: paths)
 
-  defp effective(worker, repo) do
+  @doc """
+  The `worker` config block with `worker.repos.<repo>` deep-merged over it —
+  the resolution every per-repo `worker.*` key shares
+  (`Arbiter.Worker.PrepushCheck` reads it too).
+  """
+  @spec effective(map(), String.t() | nil) :: map()
+  def effective(worker, repo) do
     {repos, base} = Map.pop(worker, "repos")
 
     with true <- is_binary(repo) and repo != "" and is_map(repos),

@@ -1663,7 +1663,8 @@ defmodule Arbiter.Worker do
   @commit_gate_categories %{
     uncommitted: "uncommitted_at_completion",
     no_commits: "no_commits_at_completion",
-    secret_in_commit: "secret_in_commit"
+    secret_in_commit: "secret_in_commit",
+    prepush_failed: "prepush_check_failed"
   }
 
   defp commit_gate_category(meta) do
@@ -2926,6 +2927,20 @@ defmodule Arbiter.Worker do
     {:noreply, state}
   end
 
+  # bd-28c6qo: the pre-push check finished. Matched on the ref stashed in meta
+  # so a result for a run that has since been failed / stopped / re-checked is
+  # dropped instead of acted on.
+  def handle_info(
+        {:__prepush_result__, ref, ctx, result},
+        %State{state: run_state, waiting_on: waiting_on, meta: %{prepush_ref: ref}} = state
+      )
+      when live_run?(run_state, waiting_on) do
+    {:noreply, on_prepush_result(state, ctx, result)}
+  end
+
+  def handle_info({:__prepush_result__, _ref, _ctx, _result}, %State{} = state),
+    do: {:noreply, state}
+
   def handle_info(
         {:__claude_session_done__, _line},
         %State{state: run_state, waiting_on: waiting_on} = state
@@ -3793,6 +3808,16 @@ defmodule Arbiter.Worker do
   # pushing, is failed with the unresolved state named, so the Watchdog counts
   # it as the attempt that did not work instead of reading the PR as resolved.
   defp finish_pass(%State{} = state) do
+    # bd-28c6qo: a CI fix pass has already pushed by the time it says done, but
+    # a pass that is still red would cost another CI round: bounce it back to
+    # the same session instead. Conflict passes are not checked.
+    case begin_prepush_check(state, :fix_pass) do
+      :proceed -> deliver_pass(state)
+      {:started, new_state} -> new_state
+    end
+  end
+
+  defp deliver_pass(%State{} = state) do
     case pass_verdict(state) do
       :resolved -> finish_delivered_pass(state)
       {:unresolved, summary} -> fail_unresolved_pass(state, summary)
@@ -3899,8 +3924,13 @@ defmodule Arbiter.Worker do
           # exists" — sitting on the uncommitted changes and ignoring them.
           case commit_gate(state) do
             :ok ->
-              sync_back_after_run(state)
-              route_completion(state, branch)
+              # bd-28c6qo: the configured pre-push check runs once the tree is
+              # committed and before anything routes on to the review gate /
+              # merger (the push + PR). Unset config: straight through.
+              case begin_prepush_check(state, :main) do
+                :proceed -> proceed_after_gate(state, branch)
+                {:started, new_state} -> new_state
+              end
 
             {:gate, reason} ->
               handle_commit_gate(state, branch, reason)
@@ -4349,6 +4379,164 @@ defmodule Arbiter.Worker do
       end
     else
       :ok
+    end
+  end
+
+  defp proceed_after_gate(%State{} = state, branch) do
+    sync_back_after_run(state)
+    route_completion(state, branch)
+  end
+
+  # ---- bd-28c6qo: per-repo pre-push check ------------------------------------
+  #
+  # `worker.prepush_check` (`Arbiter.Worker.PrepushCheck`) runs in the worker's
+  # checkout once the commit gate is satisfied, before the run is routed on (the
+  # review gate / merger push the branch and open the PR) and, for a CI fix pass,
+  # before it reports done. The check can take many minutes (dialyzer), so it
+  # runs in a supervised task and reports back as `{:__prepush_result__, ref,
+  # ctx, result}`; the worker stays `:working` meanwhile.
+  #
+  # A red check is sent back to the SAME session with its output, under its own
+  # cap (`meta[:prepush_nudge_cap]`, default 2, counted in
+  # `:prepush_nudge_attempts`); an exhausted cap parks through
+  # `park_commit_gate/3` like any other commit-gate trip. A timeout fails open
+  # unless `prepush_check_on_timeout` says `"fail"`; an infra error (no worktree,
+  # no `timeout` binary, command not runnable) always fails open.
+  defp begin_prepush_check(%State{meta: meta} = state, ctx) do
+    with nil <- Map.get(meta || %{}, :prepush_ref),
+         %{} = spec <- prepush_spec(state, ctx) do
+      if any_session_live?(state) do
+        # Same rule as the commit-gate nudge (bd-c27m5o): never check — or send
+        # back into — a worktree whose agent is still running. When it exits,
+        # `on_agent_stopped/3` re-enters `on_claude_done/1` and we get here again.
+        Logger.info(
+          "Worker: task=#{state.task_id} pre-push check deferred; the agent is still running"
+        )
+
+        {:started, state}
+      else
+        start_prepush_task(state, ctx, spec)
+      end
+    else
+      # A check is already in flight for this run (a second done signal).
+      ref when is_reference(ref) -> {:started, state}
+      _ -> :proceed
+    end
+  end
+
+  defp prepush_spec(%State{meta: meta} = state, ctx) do
+    worktree = meta && Map.get(meta, :worktree_path)
+
+    runnable? =
+      is_binary(worktree) and File.dir?(worktree) and
+        (ctx == :fix_pass or worktree_on_branch?(worktree, Map.get(meta, :branch)))
+
+    if runnable? do
+      Arbiter.Worker.PrepushCheck.resolve(notes_gate_workspace(state), state.repo)
+    end
+  end
+
+  defp start_prepush_task(%State{meta: meta} = state, ctx, spec) do
+    me = self()
+    ref = make_ref()
+    worktree = Map.fetch!(meta, :worktree_path)
+
+    run = fn ->
+      send(me, {:__prepush_result__, ref, ctx, Arbiter.Worker.PrepushCheck.run(spec, worktree)})
+    end
+
+    case Task.Supervisor.start_child(Arbiter.TaskSupervisor, run) do
+      {:ok, _pid} ->
+        Logger.info(
+          "Worker: task=#{state.task_id} running the pre-push check (#{ctx}, " <>
+            "timeout #{spec.timeout_seconds}s)"
+        )
+
+        new_meta = meta |> Map.put(:prepush_ref, ref) |> Map.put(:prepush_spec, spec)
+        {:started, %State{state | meta: new_meta}}
+
+      other ->
+        Logger.warning(
+          "Worker: task=#{state.task_id} could not start the pre-push check " <>
+            "(#{inspect(other)}); proceeding without it"
+        )
+
+        :proceed
+    end
+  end
+
+  # The check's verdict. `ctx` is where the run was headed: `:main` routes the
+  # branch on, `:fix_pass` finishes the pass.
+  defp on_prepush_result(%State{meta: meta} = state, ctx, result) do
+    spec = Map.get(meta, :prepush_spec)
+    state = %State{state | meta: Map.delete(meta, :prepush_ref)}
+
+    case prepush_outcome(result, spec) do
+      :pass ->
+        continue_after_prepush(state, ctx)
+
+      {:fail, detail} ->
+        handle_prepush_failure(state, ctx, detail)
+    end
+  end
+
+  defp prepush_outcome(:ok, _spec), do: :pass
+  defp prepush_outcome({:failed, status, output}, _spec), do: {:fail, {:exit, status, output}}
+
+  defp prepush_outcome({:timeout, output}, %{on_timeout: :fail, timeout_seconds: seconds}),
+    do: {:fail, {:timeout, seconds, output}}
+
+  defp prepush_outcome({:timeout, _output}, %{timeout_seconds: seconds}) do
+    Logger.warning(
+      "Worker: the pre-push check timed out after #{seconds}s; failing open " <>
+        "(worker.prepush_check_on_timeout is \"proceed\")"
+    )
+
+    :pass
+  end
+
+  defp prepush_outcome({:error, reason}, _spec) do
+    Logger.warning("Worker: the pre-push check could not run (#{inspect(reason)}); failing open")
+    :pass
+  end
+
+  defp continue_after_prepush(%State{meta: meta} = state, :main) do
+    proceed_after_gate(state, Map.get(meta, :branch))
+  end
+
+  defp continue_after_prepush(%State{} = state, :fix_pass), do: deliver_pass(state)
+
+  defp handle_prepush_failure(%State{meta: meta} = state, _ctx, detail) do
+    cap = prepush_nudge_cap(meta)
+    attempts = Map.get(meta, :prepush_nudge_attempts, 0)
+    state = %State{state | meta: Map.put(meta, :prepush_detail, detail)}
+
+    cond do
+      attempts >= cap ->
+        park_commit_gate(state, :prepush_failed, :cap_exhausted)
+
+      any_session_live?(state) ->
+        # Unreachable in practice (the check only starts with no live session),
+        # but a nudge into a live worktree is never right.
+        park_commit_gate(state, :prepush_failed, {:respawn_failed, :session_live})
+
+      true ->
+        nudge = Arbiter.Worker.PrepushCheck.nudge_prompt(state.task_id, meta, detail)
+
+        case respawn_with_nudge(state, nudge,
+               attempts_key: :prepush_nudge_attempts,
+               label: "bd-28c6qo pre-push check failed"
+             ) do
+          {:ok, new_state} -> new_state
+          {:error, why} -> park_commit_gate(state, :prepush_failed, {:respawn_failed, why})
+        end
+    end
+  end
+
+  defp prepush_nudge_cap(meta) do
+    case Map.get(meta, :prepush_nudge_cap) do
+      n when is_integer(n) and n >= 0 -> n
+      _ -> 2
     end
   end
 
@@ -5477,7 +5665,9 @@ defmodule Arbiter.Worker do
 
     record_commit_gate_note(state, reason, why, summary)
     escalate_commit_gate(state, subject, summary)
-    if why == :cap_exhausted, do: emit_gate_cap_hit(state, :commit_gate, :commit_nudge_attempts)
+
+    if why == :cap_exhausted,
+      do: emit_gate_cap_hit(state, :commit_gate, commit_gate_attempts_key(reason))
 
     meta =
       (state.meta || %{})
@@ -5493,9 +5683,10 @@ defmodule Arbiter.Worker do
   # is answerable from `gate_cap_hit` + `gate_resolved` events.
   defp emit_gate_cap_hit(%State{meta: meta} = state, gate, attempts_key) do
     cap =
-      case gate do
-        :notes_gate -> notes_nudge_cap(state)
-        :commit_gate -> commit_nudge_cap(meta)
+      case {gate, attempts_key} do
+        {:notes_gate, _} -> notes_nudge_cap(state)
+        {:commit_gate, :prepush_nudge_attempts} -> prepush_nudge_cap(meta)
+        {:commit_gate, _} -> commit_nudge_cap(meta)
       end
 
     Resolutions.cap_hit(%{
@@ -5507,11 +5698,17 @@ defmodule Arbiter.Worker do
     })
   end
 
+  defp commit_gate_attempts_key(:prepush_failed), do: :prepush_nudge_attempts
+  defp commit_gate_attempts_key(_reason), do: :commit_nudge_attempts
+
   defp commit_gate_failure_metadata(:uncommitted),
     do: {:uncommitted_at_completion, "Worker signalled done with uncommitted work"}
 
   defp commit_gate_failure_metadata(:no_commits),
     do: {:no_commits_at_completion, "Worker signalled done with no commits on branch"}
+
+  defp commit_gate_failure_metadata(:prepush_failed),
+    do: {:prepush_check_failed, "Worker's pre-push check (worker.prepush_check) is still red"}
 
   defp commit_gate_failure_metadata(:secret_in_commit),
     do:
@@ -5525,8 +5722,14 @@ defmodule Arbiter.Worker do
     branch = (meta && Map.get(meta, :branch)) || "(unknown)"
     target = (meta && Map.get(meta, :target_branch)) || "main"
     worktree = (meta && Map.get(meta, :worktree_path)) || "(unknown)"
-    attempts = (meta && Map.get(meta, :commit_nudge_attempts)) || 0
-    cap = commit_nudge_cap(meta)
+    attempts_key = commit_gate_attempts_key(reason)
+    attempts = (meta && Map.get(meta, attempts_key)) || 0
+
+    cap =
+      if reason == :prepush_failed,
+        do: prepush_nudge_cap(meta || %{}),
+        else: commit_nudge_cap(meta)
+
     status = commit_gate_git_status(worktree)
 
     reason_blurb =
@@ -5539,6 +5742,9 @@ defmodule Arbiter.Worker do
         :no_commits ->
           "branch `#{branch}` has zero commits ahead of `#{target}`. Either " <>
             "the worker did no work, or its edits landed elsewhere."
+
+        :prepush_failed ->
+          Arbiter.Worker.PrepushCheck.failure_blurb(meta || %{})
 
         :secret_in_commit ->
           "SECURITY: the committed diff (#{target}..HEAD on `#{branch}`) contains " <>
