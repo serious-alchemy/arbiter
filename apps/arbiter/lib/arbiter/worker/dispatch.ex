@@ -95,12 +95,12 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Worker.ContainerSpawn
   alias Arbiter.Worker.Driver
   alias Arbiter.Worker.GitLayout
-  alias Arbiter.Worker.SeedPaths
   alias Arbiter.Worker.PromptBuilder
   alias Arbiter.Worker.ResumeContext
   alias Arbiter.Worker.ResumeSlot
   alias Arbiter.Worker.RunProvenance
   alias Arbiter.Worker.Sandbox
+  alias Arbiter.Worker.SeedPaths
   alias Arbiter.Worker.StopReason
   alias Arbiter.Worker.TargetBranch
   alias Arbiter.Worker.Watchdog
