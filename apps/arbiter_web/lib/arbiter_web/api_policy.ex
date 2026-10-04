@@ -145,6 +145,10 @@ defmodule ArbiterWeb.ApiPolicy do
     {:post, "/api/accounts/:ref/rotate"} => :coordinator,
     {:post, "/api/accounts/:ref/merge"} => :coordinator,
     {:delete, "/api/accounts/:ref"} => :coordinator,
+    {:post, "/api/accounts/:ref/login"} => :coordinator,
+    {:get, "/api/account_logins/:id"} => :coordinator,
+    {:post, "/api/account_logins/:id/paste"} => :coordinator,
+    {:post, "/api/account_logins/:id/cancel"} => :coordinator,
 
     # ---- workspaces / tracker bridge --------------------------------------
     {:get, "/api/workspaces"} => :workspace_list,

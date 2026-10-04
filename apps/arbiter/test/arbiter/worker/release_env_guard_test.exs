@@ -52,6 +52,7 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
     git gh glab
     cp diff kill pgrep lsof ss
     systemctl loginctl
+    stty
     dolt kubectl
   )
 
@@ -160,6 +161,8 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
     "apps/arbiter/lib/mix/tasks/arbiter.import_from_dolt.ex" => :pure_tool,
     "apps/arbiter_web/lib/arbiter_web/application.ex" => :pure_tool,
     "apps/arbiter_cli/lib/arbiter_cli/version.ex" => :pure_tool,
+    # bd-bh50vs: `stty -F /dev/tty -echo` around the hidden login-code prompt.
+    "apps/arbiter_cli/lib/arbiter_cli/cmd/account/login.ex" => :pure_tool,
     "apps/arbiter_cli/lib/arbiter_cli/cmd/start.ex" => :scrubbed,
     # bd-3qkbch: opens a Port for tmux only (§4.7's CLI fallback) — scrubbed
     # for the same blanket rule-2 reason, not because tmux is a BEAM/agent.

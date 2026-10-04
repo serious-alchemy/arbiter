@@ -146,7 +146,8 @@ defmodule Arbiter.Accounts.LoginRunner do
           url: String.t() | nil,
           device_code: String.t() | nil,
           needs_paste?: boolean(),
-          reason: String.t() | nil
+          reason: String.t() | nil,
+          session_id: String.t() | nil
         }
 
   # -- API --------------------------------------------------------------------
@@ -765,7 +766,8 @@ defmodule Arbiter.Accounts.LoginRunner do
       url: state.url,
       device_code: state.device_code,
       needs_paste?: state.needs_paste?,
-      reason: state.reason
+      reason: state.reason,
+      session_id: state.session && state.session.id
     }
   end
 
