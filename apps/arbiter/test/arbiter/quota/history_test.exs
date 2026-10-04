@@ -103,4 +103,180 @@ defmodule Arbiter.Quota.HistoryTest do
     assert Enum.map(rows, & &1.window) |> Enum.sort() == ["5h", "weekly"]
     assert Enum.all?(rows, &(&1.provider == "codex"))
   end
+
+  test "a secondary-only poll (no five_hour figure) appends no rows" do
+    ws = Ash.create!(Workspace, %{name: "default"})
+    account_id = quota_account_id!(ws.id)
+
+    {:ok, _} = poll!(ws, 20, 8)
+    assert length(History.list(account_id)) == 2
+
+    Req.Test.stub(Quota.OAuthUsage.HTTP, fn conn ->
+      Req.Test.json(conn, %{"extra_usage" => %{"is_enabled" => false}})
+    end)
+
+    Quota.capture_oauth_usage(account_id,
+      token: "test-token",
+      plug: {Req.Test, Quota.OAuthUsage.HTTP}
+    )
+
+    assert length(History.list(account_id)) == 2
+  end
+
+  describe "bucket, time-range reads and retention (bd-3qfc81, R2)" do
+    @headers [
+      {"anthropic-ratelimit-unified-5h-utilization", "0.24"},
+      {"anthropic-ratelimit-unified-5h-reset", "1782247200"},
+      {"anthropic-ratelimit-unified-5h-status", "allowed"},
+      {"anthropic-ratelimit-unified-7d-utilization", "0.08"},
+      {"anthropic-ratelimit-unified-7d-reset", "1782748800"},
+      {"anthropic-ratelimit-unified-7d-status", "allowed"},
+      {"anthropic-ratelimit-unified-representative-claim", "five_hour"},
+      {"anthropic-ratelimit-unified-overage-status", "rejected"},
+      {"content-type", "application/json"}
+    ]
+
+    test "a header capture appends one row per window, tagged with its bucket" do
+      ws = Ash.create!(Workspace, %{name: "default"})
+      account_id = quota_account_id!(ws.id)
+
+      assert {:ok, _} = Quota.capture(ws.id, @headers)
+      assert {:ok, _} = Quota.capture(ws.id, @headers)
+
+      rows = History.list(account_id)
+      assert length(rows) == 4
+      assert Enum.all?(rows, &(&1.bucket == "claude" and &1.provider == "claude"))
+      assert History.list(account_id, window: "7d") |> Enum.map(& &1.utilization) == [0.08, 0.08]
+    end
+
+    test "an Antigravity refresh appends one row per (model group, window)" do
+      ws = Ash.create!(Workspace, %{name: "default"})
+      account_id = quota_account_id!(ws.id, "antigravity")
+
+      bucket = fn window, remaining, reset ->
+        %{"window" => window, "remaining_fraction" => remaining, "reset_time" => reset}
+      end
+
+      groups = [
+        %{
+          "name" => "Gemini Models",
+          "buckets" => [
+            bucket.("5h", 0.8, "2026-10-04T12:00:00Z"),
+            bucket.("weekly", 0.6, "2026-10-08T12:00:00Z")
+          ]
+        },
+        %{
+          "name" => "Claude and GPT models",
+          "buckets" => [
+            bucket.("5h", 0.9, "2026-10-04T14:00:00Z"),
+            bucket.("weekly", 0.7, "2026-10-09T12:00:00Z")
+          ]
+        }
+      ]
+
+      probe = fn -> {:ok, %{"command" => %{"data" => %{"groups" => groups}}}} end
+      assert %{} = Arbiter.Quota.CloudCode.refresh(ws.id, :antigravity, agy_usage_probe: probe)
+
+      rows = History.list(account_id)
+      assert length(rows) == 4
+
+      assert Enum.sort(Enum.map(rows, &{&1.bucket, &1.window})) == [
+               {"claude_and_gpt_models", "5h"},
+               {"claude_and_gpt_models", "weekly"},
+               {"gemini_models", "5h"},
+               {"gemini_models", "weekly"}
+             ]
+
+      [row] = History.list(account_id, bucket: "gemini_models", window: "5h")
+      assert_in_delta row.utilization, 0.2, 0.001
+    end
+
+    test "a failed Antigravity probe after a good one appends nothing" do
+      ws = Ash.create!(Workspace, %{name: "default"})
+      account_id = quota_account_id!(ws.id, "antigravity")
+
+      groups = [
+        %{
+          "name" => "Gemini Models",
+          "buckets" => [
+            %{
+              "window" => "5h",
+              "remaining_fraction" => 0.8,
+              "reset_time" => "2026-10-04T12:00:00Z"
+            }
+          ]
+        }
+      ]
+
+      good = fn -> {:ok, %{"command" => %{"data" => %{"groups" => groups}}}} end
+      assert %{} = Arbiter.Quota.CloudCode.refresh(ws.id, :antigravity, agy_usage_probe: good)
+      before = length(History.list(account_id))
+      assert before > 0
+
+      bad = fn -> {:error, :timeout} end
+      Arbiter.Quota.CloudCode.refresh(ws.id, :antigravity, agy_usage_probe: bad)
+      assert length(History.list(account_id)) == before
+    end
+
+    test "list/2 honours since and until" do
+      ws = Ash.create!(Workspace, %{name: "default"})
+      account_id = quota_account_id!(ws.id)
+      base = ~U[2026-10-01 10:00:00Z]
+
+      for i <- 0..4 do
+        Ash.create!(QuotaSnapshot, %{
+          provider_account_id: account_id,
+          provider: "claude",
+          bucket: "claude",
+          window: "5h",
+          utilization: 0.1 * (i + 1),
+          captured_at: DateTime.add(base, i * 3600, :second)
+        })
+      end
+
+      since = DateTime.add(base, 3600, :second)
+      until = DateTime.add(base, 3 * 3600, :second)
+      assert length(History.list(account_id, since: since, until: until)) == 3
+    end
+
+    test "prune removes rows past the retention window, scoped when asked" do
+      ws = Ash.create!(Workspace, %{name: "default"})
+      account_id = quota_account_id!(ws.id)
+      other_id = quota_account_id!(ws.id, "codex")
+      now = DateTime.truncate(DateTime.utc_now(), :second)
+
+      mk = fn id, days_ago ->
+        Ash.create!(QuotaSnapshot, %{
+          provider_account_id: id,
+          provider: "claude",
+          window: "5h",
+          utilization: 0.1,
+          captured_at: DateTime.add(now, -days_ago * 86_400, :second)
+        })
+      end
+
+      mk.(account_id, 35)
+      mk.(account_id, 5)
+      mk.(other_id, 35)
+
+      History.prune(retention_days: 30, provider_account_id: account_id)
+      assert length(History.list(account_id)) == 1
+      assert length(History.list(other_id)) == 1
+
+      History.prune(retention_days: 30)
+      assert History.list(other_id) == []
+    end
+
+    test "recording history leaves the gate's view of the quota untouched" do
+      ws = Ash.create!(Workspace, %{name: "default"})
+      account_id = quota_account_id!(ws.id)
+
+      assert {:ok, q} = Quota.capture(ws.id, @headers)
+      policy = Quota.gate_policy(account_id, ws)
+      before = Quota.Headroom.binding(q, policy)
+
+      assert length(History.list(account_id)) == 2
+      assert Quota.Headroom.binding(q, policy) == before
+    end
+  end
 end

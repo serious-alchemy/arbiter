@@ -357,6 +357,7 @@ defmodule Arbiter.Quota do
             |> Ash.create()
 
           with {:ok, quota} <- result do
+            Arbiter.Quota.History.record(account_id, quota)
             broadcast_quota_update(account_id, quota)
           end
 

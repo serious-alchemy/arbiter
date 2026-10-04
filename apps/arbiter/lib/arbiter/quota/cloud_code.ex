@@ -244,6 +244,9 @@ defmodule Arbiter.Quota.CloudCode do
     # meters under, resolved here so the probe's call site is unchanged.
     with {:ok, account_id} <- Arbiter.Quota.ensure_account_id(workspace_id, provider),
          {:ok, row} <- upsert(account_id, provider, snapshot) do
+      # A probe that captured nothing re-stores the last good reading (and its
+      # old timestamp); recording it would append a fake duplicate sample.
+      if representative(snapshot) != {nil, nil}, do: Arbiter.Quota.History.record(account_id, row)
       broadcast(account_id, row)
       snapshot
     else

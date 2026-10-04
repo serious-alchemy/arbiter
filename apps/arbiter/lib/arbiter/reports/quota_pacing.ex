@@ -29,11 +29,12 @@ defmodule Arbiter.Reports.QuotaPacing do
       join: a in "provider_accounts",
       on: a.id == s.provider_account_id,
       where: ^since(range, now),
-      order_by: [s.provider_account_id, s.window, s.captured_at],
+      order_by: [s.provider_account_id, s.bucket, s.window, s.captured_at],
       select: %{
         account_id: type(s.provider_account_id, :string),
         provider: s.provider,
         slug: a.slug,
+        bucket: s.bucket,
         window: s.window,
         utilization: s.utilization,
         ceiling: s.ceiling,
@@ -46,13 +47,21 @@ defmodule Arbiter.Reports.QuotaPacing do
     |> Enum.map(fn {{id, provider, slug}, rows} ->
       windows =
         rows
-        |> Enum.group_by(& &1.window)
+        |> Enum.group_by(&window_label(&1, provider))
         |> Enum.sort_by(fn {w, _} -> w end)
         |> Enum.map(fn {w, ws} -> %{window: w, points: points(ws)} end)
 
       %{account_id: id, provider: provider, label: "#{provider}/#{slug}", windows: windows}
     end)
   end
+
+  # A window of a non-provider bucket (an Antigravity model group) is its own
+  # series, labelled with the group.
+  defp window_label(%{bucket: bucket, window: window}, provider)
+       when is_binary(bucket) and bucket != provider,
+       do: "#{bucket} #{window}"
+
+  defp window_label(%{window: window}, _provider), do: window
 
   defp since("all", _now), do: dynamic(true)
 
