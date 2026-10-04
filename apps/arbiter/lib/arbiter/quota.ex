@@ -62,6 +62,7 @@ defmodule Arbiter.Quota do
   resources do
     resource Arbiter.Quota.AnthropicQuota
     resource Arbiter.Quota.CodexQuota
+    resource Arbiter.Quota.CodexQuotaSnapshot
     resource Arbiter.Quota.GoogleQuota
   end
 

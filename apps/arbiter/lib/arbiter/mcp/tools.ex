@@ -87,7 +87,9 @@ defmodule Arbiter.MCP.Tools do
   and the 7d figures are reported, but only one of them, or neither, is what the
   gate is acting on. `nil` until the first poll. `codex` is `nil` with a
   `codex_message` until the Codex probe has stored a snapshot (i.e. the `codex`
-  CLI is authenticated on this host). `antigravity` is the persisted agy
+  CLI is authenticated on this host); once stored it also reports the pacing
+  state (`elapsed_fraction`, `used_fraction`, `gating_reason`, `pacing`;
+  bd-afvsnc). `antigravity` is the persisted agy
   `/usage` snapshot (`nil` until the probe has stored one);
   `gemini_credentials_expired` is the `Arbiter.Agents.Gemini` adapter's
   (agy's) held credential state. The upstream Gemini CLI's `gemini` snapshot

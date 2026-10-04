@@ -51,13 +51,27 @@ defmodule Arbiter.Quota.Codex do
   require Logger
   require Ash.Query
 
+  alias Arbiter.Accounts.Resolver
+  alias Arbiter.Quota.CodexPlanWindows
   alias Arbiter.Quota.CodexQuota
+  alias Arbiter.Quota.CodexQuotaSnapshot
+  alias Arbiter.Quota.Gate
   alias Arbiter.Quota.Gate.Snapshot
+  alias Arbiter.Quota.Pace
 
   @stub_name __MODULE__.HTTP
   @default_usage_url "https://chatgpt.com/backend-api/wham/usage"
   @default_provider "codex"
   @request_timeout_ms 15_000
+  @history_retention_days 90
+  @window_columns [
+    :session_used_percent,
+    :session_reset_at,
+    :weekly_used_percent,
+    :weekly_reset_at,
+    :session_window_minutes,
+    :weekly_window_minutes
+  ]
 
   defp default_auth_path do
     case System.get_env("CODEX_HOME") do
@@ -180,8 +194,14 @@ defmodule Arbiter.Quota.Codex do
 
   defp upsert(workspace_id, attrs) do
     with {:ok, account_id} <- Arbiter.Quota.ensure_account_id(workspace_id, @default_provider) do
+      # A capture overwrites the row wholesale: a window the response no longer
+      # carries (a downgrade to free drops `weekly`, or the API stops reporting
+      # a length) must clear, not linger from the previous plan and pace the
+      # new one against the old plan's window.
       full =
-        attrs
+        @window_columns
+        |> Map.new(&{&1, nil})
+        |> Map.merge(attrs)
         |> Map.put(:provider_account_id, account_id)
         |> Map.put(:provider, @default_provider)
         |> Map.put_new(:captured_at, DateTime.utc_now() |> DateTime.truncate(:second))
@@ -192,12 +212,55 @@ defmodule Arbiter.Quota.Codex do
         |> Ash.create()
 
       with {:ok, row} <- result do
+        record_history(row)
         broadcast(account_id, row)
       end
 
       result
     end
   end
+
+  # Append the capture to the history table and drop rows past retention. Best
+  # effort: a history failure must never lose the live snapshot.
+  defp record_history(%CodexQuota{} = row) do
+    attrs =
+      row
+      |> Map.take([:provider_account_id, :plan, :limit_reached, :captured_at] ++ @window_columns)
+
+    CodexQuotaSnapshot |> Ash.Changeset.for_create(:record, attrs) |> Ash.create!()
+
+    cutoff = DateTime.add(DateTime.utc_now(), -@history_retention_days * 86_400, :second)
+
+    CodexQuotaSnapshot
+    |> Ash.Query.filter(provider_account_id == ^row.provider_account_id and captured_at < ^cutoff)
+    |> Ash.bulk_destroy!(:destroy, %{}, strategy: :stream, return_errors?: true)
+  rescue
+    e -> Logger.warning("Arbiter.Quota.Codex: history write failed: #{Exception.message(e)}")
+  end
+
+  @doc """
+  Persisted capture history for `provider_account_id`, oldest first (bd-afvsnc):
+  `captured_at`, `plan`, used percents, reset times and reported window lengths
+  of every capture still within retention. Use it to read the real burn rate
+  or to infer a plan's window length from the `reset_at` jump across a reset.
+  """
+  @spec history(String.t() | nil, keyword()) :: [CodexQuotaSnapshot.t()]
+  def history(account_id, opts \\ [])
+
+  def history(account_id, opts) when is_binary(account_id) do
+    CodexQuotaSnapshot
+    |> Ash.Query.filter(provider_account_id == ^account_id)
+    |> Ash.Query.sort(captured_at: :asc, inserted_at: :asc)
+    |> then(fn q ->
+      case Keyword.get(opts, :limit) do
+        n when is_integer(n) and n > 0 -> Ash.Query.limit(q, n)
+        _ -> q
+      end
+    end)
+    |> Ash.read!()
+  end
+
+  def history(_account_id, _opts), do: []
 
   # Broadcast the uniform `{:quota_updated, ws, view}` (not the raw resource
   # struct) so the LiveView `:quota` hook — which only handles that message —
@@ -336,14 +399,124 @@ defmodule Arbiter.Quota.Codex do
     }
   end
 
-  @doc "Serialize the latest stored snapshot for `provider_account_id`, or `nil`."
+  @doc """
+  Serialize the latest stored snapshot for `provider_account_id`, or `nil`.
+
+  The map also carries the pacing state (`pacing/3`, bd-afvsnc) judged under
+  the account's own gate policy: `elapsed_fraction`, `used_fraction`,
+  `gating_reason` (`nil` unless dispatch is held) and a `pacing` detail map.
+  """
   @spec serialize_latest(String.t()) :: map() | nil
   def serialize_latest(account_id) do
     case latest(account_id) do
-      nil -> nil
-      %CodexQuota{} = row -> serialize(row)
+      nil ->
+        nil
+
+      %CodexQuota{} = row ->
+        pacing = pacing(row, Resolver.get(account_id))
+
+        row
+        |> serialize()
+        |> Map.merge(%{
+          elapsed_fraction: pacing.elapsed_fraction,
+          used_fraction: pacing.used_fraction,
+          gating_reason: pacing.gating_reason,
+          pacing: pacing
+        })
     end
   end
+
+  @doc """
+  The pacing state of a stored `CodexQuota` row (bd-afvsnc), as `quota_get`
+  reports it. The session window's `elapsed_fraction` / `used_fraction` lead;
+  a paid plan's weekly window is judged independently under `weekly` (`nil`
+  when the plan has none, e.g. free).
+
+    * `enabled` — the window's length is known (reported by the API, else the
+      plan table, `Arbiter.Quota.CodexPlanWindows`) and `reset_at` is present.
+      `false` carries a `disabled_reason`; the gate then falls back to its flat
+      ceiling rather than guessing a length.
+    * `window_source` — `:reported`, `:plan_table` or `nil`.
+    * `paced_mode` — whether the account opted into `threshold_mode: "paced"`;
+      the fractions are reported either way, but only a paced account holds
+      on them.
+    * `gating_reason` — the gate's hold phrase for either window, `nil` when
+      dispatch is not held.
+
+  Options: `:now` (default `DateTime.utc_now/0`).
+  """
+  @spec pacing(CodexQuota.t(), term(), keyword()) :: map()
+  def pacing(%CodexQuota{} = row, account, opts \\ []) do
+    now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
+    snap = Snapshot.normalize(row)
+
+    session =
+      window_pacing(
+        row.plan,
+        :session,
+        row.session_window_minutes,
+        row.session_used_percent,
+        row.session_reset_at,
+        snap.window_label,
+        account,
+        now
+      )
+
+    weekly =
+      if is_nil(row.weekly_used_percent) or is_nil(row.weekly_reset_at) do
+        nil
+      else
+        window_pacing(
+          row.plan,
+          :weekly,
+          row.weekly_window_minutes,
+          row.weekly_used_percent,
+          row.weekly_reset_at,
+          snap.secondary_window_label,
+          account,
+          now
+        )
+      end
+
+    Map.merge(session, %{
+      plan: row.plan,
+      paced_mode: Gate.account_policy_summary(account) |> paced_mode?(),
+      weekly: weekly,
+      gating_reason: Gate.hold_phrase(row, {account, nil}, now: now)
+    })
+  end
+
+  defp paced_mode?(%{threshold_mode: "paced"}), do: true
+  defp paced_mode?(_), do: false
+
+  defp window_pacing(plan, window, reported_minutes, used_percent, reset_at, label, account, now) do
+    seconds = Gate.window_seconds(label, account)
+    elapsed = Pace.elapsed_seconds(reset_at, seconds, now) |> Pace.elapsed_fraction(seconds)
+
+    source =
+      cond do
+        is_nil(seconds) -> nil
+        is_integer(reported_minutes) -> :reported
+        CodexPlanWindows.minutes(plan, window) -> :plan_table
+        true -> :account_config
+      end
+
+    %{
+      enabled: not is_nil(elapsed),
+      disabled_reason: disabled_reason(elapsed, plan, window, reset_at),
+      window_source: source,
+      window_seconds: seconds,
+      elapsed_fraction: elapsed,
+      used_fraction: if(is_number(used_percent), do: used_percent / 100.0)
+    }
+  end
+
+  defp disabled_reason(elapsed, _plan, _window, _reset_at) when is_float(elapsed), do: nil
+  defp disabled_reason(_elapsed, _plan, _window, nil), do: "no reset_at reported; pacing off"
+
+  defp disabled_reason(_elapsed, plan, window, _reset_at),
+    do:
+      "window length unknown for plan #{inspect(plan)} (#{window}); pacing off, flat ceiling applies"
 
   @doc """
   Map a stored `CodexQuota` row to the uniform two-window quota view shape the
