@@ -355,10 +355,11 @@ effective_cap = min(workspace_max, system_max, quota_headroom)
 * `system_max` ← `Arbiter.Settings.conductor_system_max_concurrent/0`
   (`apps/arbiter/lib/arbiter/settings.ex:36`), default 16
   (`apps/arbiter/lib/arbiter/workflows/conductor.ex:150`).
-* `quota_headroom` ← `Arbiter.Workflows.QuotaGate.Default.quota_headroom/1`
-  (`apps/arbiter/lib/arbiter/workflows/quota_gate.ex:83`), which reads the
-  **workspace's own** snapshot row and defers to `Gate.over_cap?/2`
-  (`apps/arbiter/lib/arbiter/quota/gate.ex:310`).
+* `quota_headroom` ← *(Historical note: previously `Arbiter.Workflows.QuotaGate.Default.quota_headroom/1`,
+  `apps/arbiter/lib/arbiter/workflows/quota_gate.ex:83`, which read the
+  **workspace's own** snapshot row and deferred to `Gate.over_cap?/2`
+  at `apps/arbiter/lib/arbiter/quota/gate.ex:310`. `Workflows.QuotaGate` was deleted with the Conductor in `a05a2403` (#1965);
+  the board scheduler now reads `Arbiter.Quota.Gate` and `Board.Snapshot.quota_hold/1` directly.)*
 
 The ticket says three workspaces at 4 give three gates. The code says something
 stronger: **a Conductor is per-Graph**
@@ -480,7 +481,7 @@ workspace-scoped. `splits` = part moves, part stays.
 | 19 | `workspaces.encrypted_worker_env` + `worker_env_meta` | `apps/arbiter/lib/arbiter/tasks/workspace.ex:256`, `:270` | workspace | **splits** | §7 |
 | 20 | `Dispatch` spawn env + `anthropic_proxy_opts/2` | `apps/arbiter/lib/arbiter/worker/dispatch.ex:2073`, `:2085`, call sites `:1496`, `:1877` | workspace | **stays** | shape unchanged (credentials still arrive as env pairs); the proxy opts die with bd-7cvh8z regardless of this RFC |
 | 21 | `Conductor.resolve_workspace_max/3` + `effective_cap/1` | `apps/arbiter/lib/arbiter/workflows/conductor.ex:474`, `:491`, `:513` | workspace + system | **splits** | gains the `account_headroom` term (§4.2) |
-| 22 | `Workflows.QuotaGate` behaviour callback | `apps/arbiter/lib/arbiter/workflows/quota_gate.ex:36`, default impl `:83` | `workspace_id` | **moves** | **breaking callback change** to a documented swappable behaviour — call it out in the phase that does it |
+| 22 | *(Historical)* `Workflows.QuotaGate` behaviour callback | `apps/arbiter/lib/arbiter/workflows/quota_gate.ex:36` *(deleted in #1965)* | `workspace_id` | **deleted** | Deleted with the Conductor in `a05a2403` (#1965); Autopilot reads `Quota.Gate` / `Board.Snapshot.quota_hold/1` |
 | 23 | `Board.Snapshot.effective_max_concurrent/1` | `apps/arbiter/lib/arbiter/board/snapshot.ex:305`, used at `:238` | workspace + system | **splits** | must fold in account headroom or the board lies about slots |
 | 24 | `Quota.latest/2`, `latest_for_provider/2`, `serialize/2`, `list_latest/1` | `apps/arbiter/lib/arbiter/quota.ex:290`, `:162`, `:307`, `:579` | `workspace_id` | **moves** | take an account |
 | 25 | `Quota.capture_oauth_usage/2` | `apps/arbiter/lib/arbiter/quota.ex:513` | `workspace_id` | **moves** | one call per account per cycle |
@@ -909,7 +910,7 @@ Each phase is sized to be one child ticket.
 | **P4** | Destructive step (**shipped**, bd-cblemv; see §7.5) — `worker_env` removal already landed in P2; deferred the `ConfigDir` fallback deletion to P13 per operator ruling on #1947 | P3 | P2 | D2 |
 | **P5** | Re-key the three quota tables to `(provider_account_id, provider)`; per-column-group collapse (§6) (**shipped**, bd-3yokey) | P3, bd-b0zody, bd-7cvh8z | **P1** | D3 |
 | **P6** | Build account iteration in the probes: `CloudProbe` fetches `/api/oauth/usage` once per account (bd-4fbpto deleted bd-5xuneh's per-token grouping; this is new code, not a re-key of it — §9); `OAuthUsage` cooldown keyed by account (**shipped**) | P5 | P2 | D2 |
-| **P7** | Account-wide quota hold: `QuotaGate` callback takes an account (**breaking behaviour change**); thresholds `min(account, workspace)` (**shipped**) | P5 | **P1** | D3 |
+| **P7** | Account-wide quota hold: account-keyed quota hold; thresholds `min(account, workspace)` (**shipped**; `Workflows.QuotaGate` was historical, removed with Conductor in #1965) | P5 | **P1** | D3 |
 | **P8** | Account concurrency ceiling + per-workspace share; registry-derived live count; `Board.Snapshot` folds it in (**shipped**, bd-1k6pgv) | P7 | P2 | D3 |
 | **P9** | `usage_events.provider_account_id` + `provider_credential_id` + backfill (**shipped**) | bd-adyhvn, P2 | P2 | D2 |
 | **P10** | `arb usage --by account` / `--account`; `arb quota --account`; JSON + LiveView surfaces (**shipped**, bd-icwk2k) | P9, P5 | P3 | D2 |
