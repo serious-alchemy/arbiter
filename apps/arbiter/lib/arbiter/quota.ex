@@ -55,6 +55,7 @@ defmodule Arbiter.Quota do
   alias Arbiter.Quota.GrantFile
   alias Arbiter.Quota.OAuthUsage
   alias Arbiter.Quota.Pace
+  alias Arbiter.Quota.QuotaSample
   alias Arbiter.Quota.SpendCache
   alias Arbiter.Tasks.Workspace
   require Ash.Query
@@ -65,6 +66,7 @@ defmodule Arbiter.Quota do
     resource Arbiter.Quota.CodexQuotaSnapshot
     resource Arbiter.Quota.GoogleQuota
     resource Arbiter.Quota.QuotaSnapshot
+    resource Arbiter.Quota.QuotaSample
   end
 
   @default_provider "claude"
@@ -357,6 +359,7 @@ defmodule Arbiter.Quota do
             |> Ash.create()
 
           with {:ok, quota} <- result do
+            QuotaSample.record_capture(account_id, quota)
             broadcast_quota_update(account_id, quota)
           end
 
@@ -400,6 +403,17 @@ defmodule Arbiter.Quota do
   # backfill has not reached it) reads as "nothing captured", which is the
   # same fail-open input a missing row already produced.
   def latest(_account_id, _provider), do: nil
+
+  @doc """
+  Read persisted quota samples for `provider_account_id` within an optional
+  time range (bd-3qfc81, R2). See `Arbiter.Quota.QuotaSample.history/2`.
+  """
+  @spec samples(String.t() | nil, keyword()) :: [QuotaSample.t()]
+  def samples(account_id, opts \\ []), do: QuotaSample.history(account_id, opts)
+
+  @doc "Alias for `samples/2`."
+  @spec quota_samples(String.t() | nil, keyword()) :: [QuotaSample.t()]
+  def quota_samples(account_id, opts \\ []), do: QuotaSample.history(account_id, opts)
 
   @doc """
   Serialize the latest snapshot for `provider_account_id` into the public map
@@ -1129,6 +1143,7 @@ defmodule Arbiter.Quota do
       # Only a poll that carried the aggregate figures is a history sample; the
       # secondary-only write touched no primary column.
       if action == :record_oauth_snapshot, do: Arbiter.Quota.History.record(account_id, quota)
+      QuotaSample.record_capture(account_id, quota)
       broadcast_quota_update(account_id, quota)
     end
 

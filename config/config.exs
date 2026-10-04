@@ -135,6 +135,10 @@ config :arbiter, :quota_grant_refresher, enabled: true, interval_ms: 60_000
 # (bd-2wnkoq).
 config :arbiter, :quota_staleness_watch, enabled: true, interval_ms: 60_000
 
+# Append-only history of every quota capture across providers (bd-3qfc81, R2).
+# Configurable retention window in days (default 90).
+config :arbiter, :quota_samples, retention_days: 90
+
 # Install-wide default worker security posture (the floor every spawn
 # inherits before per-domain workspace overrides). The hardcoded safe baseline
 # lives in `Arbiter.Agents.SecurityPolicy.base/0` — auto mode, a non-empty

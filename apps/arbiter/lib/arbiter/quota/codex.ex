@@ -58,6 +58,7 @@ defmodule Arbiter.Quota.Codex do
   alias Arbiter.Quota.Gate
   alias Arbiter.Quota.Gate.Snapshot
   alias Arbiter.Quota.Pace
+  alias Arbiter.Quota.QuotaSample
 
   @stub_name __MODULE__.HTTP
   @default_usage_url "https://chatgpt.com/backend-api/wham/usage"
@@ -214,6 +215,7 @@ defmodule Arbiter.Quota.Codex do
       with {:ok, row} <- result do
         record_history(row)
         Arbiter.Quota.History.record(account_id, row)
+        QuotaSample.record_capture(account_id, row)
         broadcast(account_id, row)
       end
 
