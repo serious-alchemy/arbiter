@@ -67,6 +67,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   alias Arbiter.Worker.ClaudeSession
   alias Arbiter.Worker.Dispatch
   alias Arbiter.Worker.GitLayout
+  alias Arbiter.Worker.SeedPaths
   alias Arbiter.Worker.TargetBranch
   alias Arbiter.Worker.Worktree
   alias Arbiter.Workers.Run
@@ -489,7 +490,11 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   defp create_worktree(%{repo_path: repo_path, branch: branch} = context) do
     layout = GitLayout.for_workspace(context.workspace, context.repo)
 
-    case Worktree.attach(repo_path, branch, layout: layout, base: context.target_branch) do
+    case Worktree.attach(repo_path, branch,
+           layout: layout,
+           base: context.target_branch,
+           seed_paths: SeedPaths.resolve(context.workspace, context.repo)
+         ) do
       {:ok, path} -> {:ok, path}
       {:error, reason} -> {:error, {:worktree_failed, reason}}
     end

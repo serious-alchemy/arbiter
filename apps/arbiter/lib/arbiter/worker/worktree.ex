@@ -99,26 +99,33 @@ defmodule Arbiter.Worker.Worktree do
   def create(repo_path, branch_name, base_branch, opts)
       when is_binary(repo_path) and is_binary(branch_name) and is_binary(base_branch) and
              is_list(opts) do
+    seed_paths = seed_paths(opts)
+
     case layout(opts) do
-      :private_clone -> create_clone(repo_path, branch_name, base_branch)
-      :linked_worktree -> create_linked(repo_path, branch_name, base_branch)
+      :private_clone -> create_clone(repo_path, branch_name, base_branch, seed_paths)
+      :linked_worktree -> create_linked(repo_path, branch_name, base_branch, seed_paths)
     end
   end
 
   defp layout(opts), do: Keyword.get(opts, :layout, :linked_worktree)
 
+  # bd-2jerqw: the resolved `worker.repos.<repo>.seed_paths` (`SeedPaths.resolve/2`),
+  # or nil for the built-in set. Every provisioning entry point takes it as the
+  # `:seed_paths` option and hands it to `seed_compiled_deps/3`.
+  defp seed_paths(opts), do: Keyword.get(opts, :seed_paths)
+
   # The leaf may hold the linked worktree an earlier run left before the
   # workspace switched to a container backend. Its branch and commits live in
   # the main repo, so a clean one on this branch is replaced by a clone of that
   # same branch; one holding uncommitted work (or mid-rebase) is refused.
-  defp create_clone(repo_path, branch_name, base_branch) do
-    case PrivateClone.create(repo_path, branch_name, base_branch) do
+  defp create_clone(repo_path, branch_name, base_branch, seed_paths) do
+    case PrivateClone.create(repo_path, branch_name, base_branch, seed_paths) do
       {:error, {:layout_mismatch, path}} = mismatch ->
         if replaceable_linked?(path, branch_name) do
           Logger.info("Worktree: replacing the linked worktree at #{path} with a private clone")
 
           with :ok <- cleanup_linked(path),
-               do: PrivateClone.create(repo_path, branch_name, base_branch)
+               do: PrivateClone.create(repo_path, branch_name, base_branch, seed_paths)
         else
           mismatch
         end
@@ -135,7 +142,7 @@ defmodule Arbiter.Worker.Worktree do
       has_uncommitted?(path) == {:ok, false}
   end
 
-  defp create_linked(repo_path, branch_name, base_branch) do
+  defp create_linked(repo_path, branch_name, base_branch, seed_paths) do
     path = worktree_path(branch_name)
 
     result =
@@ -161,7 +168,7 @@ defmodule Arbiter.Worker.Worktree do
                  ["worktree", "add", path, "-b", branch_name, "origin/" <> base_branch],
                  cd: repo_path
                ) do
-          :ok = seed_compiled_deps(repo_path, path)
+          :ok = seed_compiled_deps(repo_path, path, seed_paths)
           :ok = ensure_deps_fetched(path)
           {:ok, path}
         end
@@ -213,20 +220,22 @@ defmodule Arbiter.Worker.Worktree do
   that is not a live worktree at all (metadata pruned, interrupted `worktree
   add`, plain leftover dir) is reclaimed and provisioned fresh.
   """
-  @spec create_detached(path(), String.t(), String.t()) ::
+  @spec create_detached(path(), String.t(), String.t(), keyword()) ::
           {:ok, path()} | {:error, error_reason()}
-  def create_detached(_repo_path, "", _base_branch), do: {:error, :invalid_branch_name}
-  def create_detached(_repo_path, nil, _base_branch), do: {:error, :invalid_branch_name}
+  def create_detached(repo_path, name, base_branch, opts \\ [])
+  def create_detached(_repo_path, "", _base_branch, _opts), do: {:error, :invalid_branch_name}
+  def create_detached(_repo_path, nil, _base_branch, _opts), do: {:error, :invalid_branch_name}
 
-  def create_detached(repo_path, name, base_branch)
-      when is_binary(repo_path) and is_binary(name) and is_binary(base_branch) do
+  def create_detached(repo_path, name, base_branch, opts)
+      when is_binary(repo_path) and is_binary(name) and is_binary(base_branch) and is_list(opts) do
     path = worktree_path(name)
+    seed_paths = seed_paths(opts)
 
     result =
       if File.dir?(path) do
-        refresh_or_recreate_detached(repo_path, path, base_branch)
+        refresh_or_recreate_detached(repo_path, path, base_branch, seed_paths)
       else
-        add_detached(repo_path, path, base_branch)
+        add_detached(repo_path, path, base_branch, seed_paths)
       end
 
     with {:ok, wt_path} <- result do
@@ -287,10 +296,10 @@ defmodule Arbiter.Worker.Worktree do
   # An existing directory at the inspect leaf: re-point it at current upstream if
   # it is the detached checkout we left there, reclaim-and-recreate if it is not a
   # live worktree at all, refuse if it is on a branch (not ours to clobber).
-  defp refresh_or_recreate_detached(repo_path, path, base_branch) do
+  defp refresh_or_recreate_detached(repo_path, path, base_branch, seed_paths) do
     case checked_out_branch(path) do
       {:ok, "HEAD"} ->
-        repoint_detached(repo_path, path, base_branch)
+        repoint_detached(repo_path, path, base_branch, seed_paths)
 
       {:ok, branch} ->
         {:error,
@@ -304,33 +313,33 @@ defmodule Arbiter.Worker.Worktree do
         # behind. Reclaim it (`cleanup/1` also drops any stale registration) and
         # provision fresh, rather than failing this task's dispatch forever.
         _ = cleanup(path)
-        add_detached(repo_path, path, base_branch)
+        add_detached(repo_path, path, base_branch, seed_paths)
     end
   end
 
   # `--force`: the tree is ours and disposable, so a scratch file a prior agent
   # left modified must not block the re-point. Same fetch-first guarantee as the
   # fresh path — the checkout target is the ref the fetch just advanced.
-  defp repoint_detached(repo_path, path, base_branch) do
+  defp repoint_detached(repo_path, path, base_branch, seed_paths) do
     with :ok <- ensure_origin_remote(repo_path),
          :ok <- fetch_origin_branch(repo_path, base_branch),
          :ok <- ensure_origin_ref(repo_path, base_branch),
          {:ok, _stdout} <-
            run_git(["checkout", "--detach", "--force", "origin/" <> base_branch], cd: path) do
-      :ok = seed_compiled_deps(repo_path, path)
+      :ok = seed_compiled_deps(repo_path, path, seed_paths)
       :ok = ensure_deps_fetched(path)
       {:ok, path}
     end
   end
 
-  defp add_detached(repo_path, path, base_branch) do
+  defp add_detached(repo_path, path, base_branch, seed_paths) do
     File.mkdir_p!(Path.dirname(path))
 
     with :ok <- ensure_origin_remote(repo_path),
          :ok <- fetch_origin_branch(repo_path, base_branch),
          :ok <- ensure_origin_ref(repo_path, base_branch),
          {:ok, _stdout} <- add_detached_git(repo_path, path, base_branch) do
-      :ok = seed_compiled_deps(repo_path, path)
+      :ok = seed_compiled_deps(repo_path, path, seed_paths)
       :ok = ensure_deps_fetched(path)
       {:ok, path}
     end
@@ -642,13 +651,18 @@ defmodule Arbiter.Worker.Worktree do
 
   def attach(repo_path, branch_name, opts)
       when is_binary(repo_path) and is_binary(branch_name) and is_list(opts) do
+    seed_paths = seed_paths(opts)
+
     case layout(opts) do
-      :private_clone -> PrivateClone.attach(repo_path, branch_name, Keyword.get(opts, :base))
-      :linked_worktree -> attach_linked(repo_path, branch_name)
+      :private_clone ->
+        PrivateClone.attach(repo_path, branch_name, Keyword.get(opts, :base), seed_paths)
+
+      :linked_worktree ->
+        attach_linked(repo_path, branch_name, seed_paths)
     end
   end
 
-  defp attach_linked(repo_path, branch_name) do
+  defp attach_linked(repo_path, branch_name, seed_paths) do
     path = worktree_path(branch_name)
 
     if File.dir?(path) do
@@ -667,7 +681,7 @@ defmodule Arbiter.Worker.Worktree do
 
       case run_git(["worktree", "add", path, branch_name], cd: repo_path) do
         {:ok, _stdout} ->
-          :ok = seed_compiled_deps(repo_path, path)
+          :ok = seed_compiled_deps(repo_path, path, seed_paths)
           :ok = ensure_deps_fetched(path)
           {:ok, path}
 
@@ -936,6 +950,10 @@ defmodule Arbiter.Worker.Worktree do
   # gate. The commit gate separately checks `has_injected_config_in_commits?/2`
   # to catch the harder case where one of these files was explicitly staged and
   # committed.
+  #
+  # Operator-configured `seed_paths` (bd-2jerqw) are not in this compile-time
+  # list: they differ per repo, so `seed_compiled_deps/3` records the ones it
+  # copied in the worktree's own git dir and `seeded_entry?/3` consults that.
   @ignored_artifact_paths ~w(deps deps/ _build _build/ .hex .hex/ .mcp.json .gemini/ .codex/ .arbiter .arbiter/ .run-server.sh)
 
   @doc """
@@ -950,10 +968,12 @@ defmodule Arbiter.Worker.Worktree do
   def has_uncommitted?(path) when is_binary(path) do
     case run_git(["status", "--porcelain"], cd: path) do
       {:ok, output} ->
+        seeds = seeded_paths(path)
+
         dirty? =
           output
           |> String.split("\n", trim: true)
-          |> Enum.reject(&artifact_entry?/1)
+          |> Enum.reject(&(artifact_entry?(&1) or seeded_entry?(path, &1, seeds)))
           |> Enum.any?()
 
         {:ok, dirty?}
@@ -971,6 +991,39 @@ defmodule Arbiter.Worker.Worktree do
     do: String.trim(rest) in @ignored_artifact_paths
 
   defp artifact_entry?(_line), do: false
+
+  # bd-2jerqw: an untracked porcelain entry that lies wholly under a path
+  # `seed_compiled_deps/3` copied in. A collapsed `?? dir/` is expanded, since
+  # git folds `priv/plts/` into `priv/` when nothing else under `priv/` is
+  # tracked; it only counts when every untracked file in it is seeded.
+  defp seeded_entry?(_path, _line, []), do: false
+
+  defp seeded_entry?(path, <<"?? ", rest::binary>>, seeds) do
+    entry = String.trim(rest)
+
+    cond do
+      under_seed?(String.trim_trailing(entry, "/"), seeds) ->
+        true
+
+      String.ends_with?(entry, "/") ->
+        case run_git(["ls-files", "--others", "--exclude-standard", "--", entry], cd: path) do
+          {:ok, out} ->
+            files = String.split(out, "\n", trim: true)
+            files != [] and Enum.all?(files, &under_seed?(&1, seeds))
+
+          {:error, _} ->
+            false
+        end
+
+      true ->
+        false
+    end
+  end
+
+  defp seeded_entry?(_path, _line, _seeds), do: false
+
+  defp under_seed?(file, seeds),
+    do: Enum.any?(seeds, &(file == &1 or String.starts_with?(file, &1 <> "/")))
 
   @doc """
   Return `{:ok, true}` if the worktree's current branch has commits not
@@ -1267,7 +1320,9 @@ defmodule Arbiter.Worker.Worktree do
   # `scripts/` holding nothing but `scripts/__pycache__/` has to be looked into.
   defp leftover_noise?(path, <<"?? ", rest::binary>>) do
     entry = String.trim(rest)
-    junk_path?(entry) or (String.ends_with?(entry, "/") and untracked_files(path, entry) == [])
+
+    junk_path?(entry) or (String.ends_with?(entry, "/") and untracked_files(path, entry) == []) or
+      seeded_entry?(path, "?? " <> entry, seeded_paths(path))
   end
 
   defp leftover_noise?(_path, <<_status::binary-size(2), " ", rest::binary>>),
@@ -1817,6 +1872,10 @@ defmodule Arbiter.Worker.Worktree do
   pre-compiled dependencies from `source_repo`, so workers can run `mix
   test` without a `mix deps.get` network fetch or a full dep recompile.
 
+  `seed_paths` (bd-2jerqw) swaps that built-in set for an operator-chosen one
+  — see "Configuring what is seeded" below. `nil` (the default) is the
+  built-in set described in the rest of this doc, unchanged.
+
   ## Why copy, not symlink
 
   Symlinks into the source repo's `deps`/`_build` are live write-through
@@ -1849,9 +1908,68 @@ defmodule Arbiter.Worker.Worktree do
 
   Best-effort: failures are swallowed so a seeding issue never blocks
   worktree provisioning.
+
+  ## Configuring what is seeded
+
+  `worker.repos.<repo>.seed_paths` in the workspace config is a list of
+  repo-relative paths, deep-merged over a workspace-level
+  `worker.seed_paths` exactly like `merge.repos.<repo>`
+  (`Arbiter.Worker.SeedPaths.resolve/2`). Unset at both levels, the built-in
+  set above applies. Set, the list **replaces** it: each entry is copied with
+  `cp -a --reflink=auto` when it exists in the source repo and not yet in the
+  worktree, and nothing else is. A per-repo list does not extend the
+  workspace-level one, and an empty list seeds nothing.
+
+  An umbrella that wants its own compiled apps and dialyzer PLTs too (the
+  built-in filter deliberately skips the umbrella's own apps):
+
+      {"worker": {"repos": {"my_umbrella": {
+        "seed_paths": ["deps", "_build/test/lib", "_build/dev/lib", "priv/plts"]
+      }}}}
+
+  A single-app Mix project, adding its PLTs and JS dependencies to the
+  defaults (the defaults must be restated: the list replaces them):
+
+      {"worker": {"repos": {"my_app": {
+        "seed_paths": ["deps", "_build/test", "_build/dev", "priv/plts", "assets/node_modules"]
+      }}}}
+
+  An entry that is absolute, has a `..` segment, or names `.git` is never
+  copied and logs a warning. Copying stays the mechanism for the reason in
+  "Why copy, not symlink": a symlink writes through to the source repo and
+  lets concurrent workers clobber each other.
+
+  A configured path the target repo does not gitignore would read as an
+  untracked file to the commit gate. Each entry this call actually copies is
+  therefore recorded in a worktree-private file (`<git-dir>/arbiter-seed-paths`,
+  never the shared `info/exclude`), and `has_uncommitted?/1` and `leftover_work/2`
+  disregard untracked files under those paths. An entry that was not copied
+  (missing from the source, or already in the worktree) is never recorded, so it
+  cannot hide real work.
   """
-  @spec seed_compiled_deps(path(), path()) :: :ok
-  def seed_compiled_deps(source_repo, worktree_path)
+  @spec seed_compiled_deps(path(), path(), [String.t()] | nil) :: :ok
+  def seed_compiled_deps(source_repo, worktree_path, seed_paths \\ nil)
+
+  def seed_compiled_deps(source_repo, worktree_path, seed_paths)
+      when is_binary(source_repo) and is_binary(worktree_path) and is_list(seed_paths) do
+    copied =
+      seed_paths
+      |> Enum.flat_map(&safe_seed_entry/1)
+      |> Enum.uniq()
+      |> Enum.filter(&seed_entry(source_repo, worktree_path, &1))
+
+    record_seeded_paths(worktree_path, copied)
+    :ok
+  rescue
+    error ->
+      Logger.warning(
+        "Worktree: seeding #{worktree_path} from seed_paths failed: #{inspect(error)}"
+      )
+
+      :ok
+  end
+
+  def seed_compiled_deps(source_repo, worktree_path, nil)
       when is_binary(source_repo) and is_binary(worktree_path) do
     seed_deps_dir(source_repo, worktree_path)
 
@@ -1885,6 +2003,117 @@ defmodule Arbiter.Worker.Worktree do
     :ok
   rescue
     _ -> :ok
+  end
+
+  def seed_compiled_deps(_source_repo, _worktree_path, other) do
+    Logger.warning("Worktree: ignoring non-list seed_paths #{inspect(other)}")
+    :ok
+  end
+
+  # One `seed_paths` entry → `[normalised_relative_path]`, or `[]` plus a
+  # warning when it is not a plain path inside the repo. Nothing absolute, no
+  # `..`, nothing in `.git`: a seed path must not reach outside the source
+  # repo or copy its object store into a worker's tree.
+  defp safe_seed_entry(entry) when is_binary(entry) do
+    segments = entry |> String.split("/", trim: true) |> Enum.reject(&(&1 == "."))
+
+    reason =
+      cond do
+        Path.type(entry) == :absolute -> "absolute paths are not allowed"
+        segments == [] -> "empty path"
+        ".." in segments -> "`..` segments are not allowed"
+        ".git" in segments -> "`.git` is never copied"
+        true -> nil
+      end
+
+    if reason do
+      Logger.warning("Worktree: skipping seed_paths entry #{inspect(entry)}: #{reason}")
+      []
+    else
+      [Enum.join(segments, "/")]
+    end
+  end
+
+  defp safe_seed_entry(entry) do
+    Logger.warning("Worktree: skipping seed_paths entry #{inspect(entry)}: not a string")
+    []
+  end
+
+  # Copy one validated entry. Returns true only when this call put it there.
+  defp seed_entry(source_repo, worktree_path, rel) do
+    source = Path.join(source_repo, rel)
+    dest = Path.join(worktree_path, rel)
+
+    cond do
+      not path_present?(source) -> false
+      path_present?(dest) -> false
+      symlinked_parent?(worktree_path, rel) -> warn_seed_failure(rel, "a parent is a symlink")
+      true -> copy_seed_entry(source, dest, rel)
+    end
+  end
+
+  defp copy_seed_entry(source, dest, rel) do
+    File.mkdir_p!(Path.dirname(dest))
+
+    case System.cmd("cp", ["-a", "--reflink=auto", source, dest], stderr_to_stdout: true) do
+      {_out, 0} -> true
+      {out, code} -> warn_seed_failure(rel, "cp exited #{code}: #{String.trim(out)}")
+    end
+  rescue
+    error -> warn_seed_failure(rel, inspect(error))
+  end
+
+  defp warn_seed_failure(rel, why) do
+    Logger.warning("Worktree: could not seed #{inspect(rel)}: #{why}")
+    false
+  end
+
+  # `File.exists?/1` follows symlinks, so a dangling one would read as absent.
+  defp path_present?(path), do: match?({:ok, _}, File.lstat(path))
+
+  # A tracked symlink such as `priv -> /elsewhere` would make `priv/plts` land
+  # outside the worktree.
+  defp symlinked_parent?(worktree_path, rel) do
+    rel
+    |> Path.split()
+    |> Enum.drop(-1)
+    |> Enum.scan(worktree_path, &Path.join(&2, &1))
+    |> Enum.any?(&match?({:ok, %File.Stat{type: :symlink}}, File.lstat(&1)))
+  end
+
+  @seed_record_file "arbiter-seed-paths"
+
+  # The worktree's own admin dir (`.git/worktrees/<leaf>` for a linked
+  # worktree, `.git` for a clone). Unlike `info/exclude` this is not shared
+  # with the source repo or sibling worktrees.
+  defp seed_record_path(worktree_path) do
+    case run_git(["rev-parse", "--absolute-git-dir"], cd: worktree_path) do
+      {:ok, out} -> Path.join(String.trim(out), @seed_record_file)
+      {:error, _} -> nil
+    end
+  end
+
+  defp record_seeded_paths(_worktree_path, []), do: :ok
+
+  defp record_seeded_paths(worktree_path, copied) do
+    case seed_record_path(worktree_path) do
+      nil ->
+        :ok
+
+      file ->
+        merged = Enum.uniq(seeded_paths(worktree_path) ++ copied)
+        File.write!(file, Enum.join(merged, "\n") <> "\n")
+    end
+  end
+
+  # What `seed_compiled_deps/3` recorded as copied into `worktree_path`.
+  defp seeded_paths(worktree_path) do
+    with file when is_binary(file) <- seed_record_path(worktree_path),
+         {:ok, body} <- File.read(file) do
+      String.split(body, "\n", trim: true)
+    else
+      _ -> []
+    end
   end
 
   # Copy each top-level deps/<dep> dir from source_repo into worktree_path,

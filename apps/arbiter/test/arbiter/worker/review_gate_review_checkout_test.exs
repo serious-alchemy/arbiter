@@ -463,6 +463,46 @@ defmodule Arbiter.Worker.ReviewGateReviewCheckoutTest do
       refute File.exists?(path)
     end
 
+    # bd-2jerqw: the review checkout is the sixth seed call site; the workspace's
+    # `worker.repos.<repo>.seed_paths` decides what it gets.
+    test "the round's checkout honours the workspace's worker.repos.<repo>.seed_paths",
+         %{repo: repo, tmp: tmp, ws: ws} do
+      {:ok, ws} =
+        Ash.update(ws, %{
+          config: %{
+            "review" => %{"required" => true},
+            "worker" => %{"repos" => %{"repo" => %{"seed_paths" => ["priv/plts"]}}}
+          }
+        })
+
+      branch = "feature/checkout-seed-paths"
+      :ok = seed_feature_branch(repo, branch)
+      wt = branch_worktree(repo, tmp, branch)
+      git!(["push", "-q", "-u", "origin", branch], wt)
+
+      File.mkdir_p!(Path.join([wt, "deps", "jason"]))
+      File.write!(Path.join([wt, "deps", "jason", "mix.exs"]), "# dep\n")
+      File.mkdir_p!(Path.join(wt, "priv/plts"))
+      File.write!(Path.join(wt, "priv/plts/core.plt"), "plt")
+
+      state = %{
+        worktree_path: wt,
+        branch: branch,
+        task_id: "rk-seed-paths",
+        review_checkout: nil,
+        workspace_id: ws.id,
+        repo: "trib/repo"
+      }
+
+      assert {:ok, %{review_checkout: %{path: path}} = state} =
+               ReviewGate.provision_review_checkout(state)
+
+      assert File.exists?(Path.join(path, "priv/plts/core.plt"))
+      refute File.exists?(Path.join(path, "deps"))
+
+      ReviewGate.release_review_checkout(state)
+    end
+
     test "an unpushed head the gate cannot push parks before any checkout is provisioned",
          %{repo: repo, ws: ws, tmp: tmp, root: root, log: log} do
       task = new_task(ws)

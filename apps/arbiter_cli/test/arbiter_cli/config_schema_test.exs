@@ -55,7 +55,7 @@ defmodule ArbiterCli.ConfigSchemaTest do
 
     for key <- ~w(tracker merge agent review_agent security routing review_gate
                   review_automation quota conductor loop standing_orders repo_paths
-                  pr_patrol review_patrol) do
+                  pr_patrol review_patrol worker seed_paths) do
       assert text =~ key
     end
   end
