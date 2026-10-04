@@ -34,6 +34,25 @@ defmodule Arbiter.Sessions.SessionTokenTest do
       assert scope.session_id == session.id
     end
 
+    test "never carries operator proof, whatever the claims say (bd-anwb0u)" do
+      session = launch!()
+
+      assert {:ok, scope} = Scope.from_token(Sessions.mint_mcp_token(session))
+      refute Scope.operator?(scope)
+
+      forged =
+        Arbiter.MCP.mint(%{
+          tier: :coordinator,
+          workspace_id: nil,
+          session_id: session.id,
+          operator: true
+        })
+
+      assert {:ok, forged_scope} = Scope.from_token(forged)
+      refute Scope.operator?(forged_scope)
+      assert Arbiter.Guardrails.Authority.from_scope(forged_scope) == :coordinator
+    end
+
     test "can_dispatch defaults off (§10.1 recursion guardrail)" do
       session = launch!()
 
