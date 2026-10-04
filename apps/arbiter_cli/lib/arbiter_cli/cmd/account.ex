@@ -107,8 +107,8 @@ defmodule ArbiterCli.Cmd.Account do
   All verbs go through the REST API at `/api/accounts`.
   """
 
-  alias ArbiterCli.Cmd.Account.Login
   alias ArbiterCli.{Client, Output}
+  alias ArbiterCli.Cmd.Account.Login
 
   @switches [
     provider: :string,
