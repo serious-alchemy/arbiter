@@ -333,6 +333,100 @@ defmodule Arbiter.Agents.CodexTest do
     end
   end
 
+  # bd-39to5j (G5): with a worktree the spawn gets its own CODEX_HOME, and the
+  # generated config.toml there replaces --ignore-user-config.
+  describe "per-worker CODEX_HOME (G5)" do
+    setup do
+      base = Path.join(System.tmp_dir!(), "arb-codex-iso-#{System.unique_integer([:positive])}")
+      bin = Path.join(base, "bin")
+      source = Path.join(base, "operator-codex")
+      worktree = Path.join(base, "wt")
+      Enum.each([bin, source, worktree], &File.mkdir_p!/1)
+      File.write!(Path.join(source, "auth.json"), "{}")
+      File.write!(Path.join(source, "config.toml"), ~s(model = "operator-model"\n))
+      File.write!(Path.join(bin, "codex"), "#!/bin/sh\nexit 0\n")
+      File.chmod!(Path.join(bin, "codex"), 0o755)
+
+      keys = ~w(worker_isolate_config worker_codex_home_root worker_codex_source_home)a
+      prev = Map.new(keys, &{&1, Application.get_env(:arbiter, &1)})
+      old_path = System.get_env("PATH")
+      prev_key = System.get_env("OPENAI_API_KEY")
+      System.delete_env("OPENAI_API_KEY")
+
+      Application.put_env(:arbiter, :worker_isolate_config, true)
+      Application.put_env(:arbiter, :worker_codex_home_root, Path.join(base, "worker-codex"))
+      Application.put_env(:arbiter, :worker_codex_source_home, source)
+      System.put_env("PATH", bin)
+
+      on_exit(fn ->
+        System.put_env("PATH", old_path)
+        if prev_key, do: System.put_env("OPENAI_API_KEY", prev_key)
+        Enum.each(prev, fn {k, v} -> restore_env(k, v) end)
+        File.rm_rf!(base)
+      end)
+
+      {:ok, worktree: worktree, source: source}
+    end
+
+    test "spawn_env exports CODEX_HOME for a worktree spawn", ctx do
+      assert [{"CODEX_HOME", dir}] = Codex.spawn_env(worktree_path: ctx.worktree)
+      assert File.read_link!(Path.join(dir, "auth.json")) == Path.join(ctx.source, "auth.json")
+    end
+
+    test "spawn_env composes CODEX_HOME with the api key and MCP token", ctx do
+      env = Codex.spawn_env(worktree_path: ctx.worktree, api_key: "sk-1", arb_token: "tok")
+
+      assert {"OPENAI_API_KEY", "sk-1"} in env
+      assert {"ARBITER_MCP_TOKEN", "tok"} in env
+      assert Enum.any?(env, &match?({"CODEX_HOME", _}, &1))
+    end
+
+    test "spawn_env has no CODEX_HOME without a worktree (a probe)" do
+      assert Codex.spawn_env([]) == []
+    end
+
+    test "argv drops --ignore-user-config because the generated config.toml replaces it",
+         ctx do
+      assert {:ok, argv} = Codex.default_argv("p", worktree_path: ctx.worktree)
+      refute "--ignore-user-config" in argv
+
+      assert {:ok, resumed} = Codex.splice_prompt(argv, ["--resume", "sess-1", "go"])
+      refute "--ignore-user-config" in resumed
+    end
+
+    test "argv keeps --ignore-user-config without a worktree", _ctx do
+      assert {:ok, argv} = Codex.default_argv("p", [])
+      assert "--ignore-user-config" in argv
+    end
+
+    test "argv keeps --ignore-user-config when isolation is off", ctx do
+      Application.put_env(:arbiter, :worker_isolate_config, false)
+
+      assert {:ok, argv} = Codex.default_argv("p", worktree_path: ctx.worktree)
+      assert "--ignore-user-config" in argv
+      assert Codex.spawn_env(worktree_path: ctx.worktree) == []
+    end
+
+    test "argv keeps --ignore-user-config when the home cannot be prepared", ctx do
+      blocker = Path.join(ctx.worktree, "blocker")
+      File.write!(blocker, "x")
+      Application.put_env(:arbiter, :worker_codex_home_root, Path.join(blocker, "root"))
+
+      assert {:ok, argv} = Codex.default_argv("p", worktree_path: ctx.worktree)
+      assert "--ignore-user-config" in argv
+      assert Codex.spawn_env(worktree_path: ctx.worktree) == []
+    end
+
+    test "the auth probe argv stays on --ignore-user-config" do
+      prev = Application.get_env(:arbiter, :codex_argv_probe)
+      Application.put_env(:arbiter, :codex_argv_probe, true)
+      on_exit(fn -> restore_env(:codex_argv_probe, prev) end)
+
+      assert {:ok, argv} = Codex.auth_probe_argv()
+      assert "--ignore-user-config" in argv
+    end
+  end
+
   describe "spawn_env/1 arb_token" do
     test "adds ARBITER_MCP_TOKEN when :arb_token is a non-empty string" do
       assert {"ARBITER_MCP_TOKEN", "tok-1"} in Codex.spawn_env(
@@ -594,6 +688,40 @@ defmodule Arbiter.Agents.CodexTest do
       assert codex == ctx.codex
       assert "--dangerously-bypass-approvals-and-sandbox" in argv
       assert List.last(argv) == "review it"
+    end
+
+    test "an isolated reviewer binds its own CODEX_HOME and the real auth.json", ctx do
+      source = Path.join(Path.dirname(ctx.worktree), "operator-codex")
+      root = Path.join(Path.dirname(ctx.worktree), "worker-codex")
+      File.mkdir_p!(source)
+      File.write!(Path.join(source, "auth.json"), "{}")
+
+      prev =
+        Map.new(
+          ~w(worker_isolate_config worker_codex_home_root worker_codex_source_home)a,
+          &{&1, Application.get_env(:arbiter, &1)}
+        )
+
+      Application.put_env(:arbiter, :worker_isolate_config, true)
+      Application.put_env(:arbiter, :worker_codex_home_root, root)
+      Application.put_env(:arbiter, :worker_codex_source_home, source)
+      on_exit(fn -> Enum.each(prev, fn {k, v} -> restore_env(k, v) end) end)
+
+      assert {:ok, argv} =
+               Codex.default_argv("review it",
+                 security: review_policy(:bypass),
+                 worktree_path: ctx.worktree
+               )
+
+      [home] = Path.wildcard(Path.join(root, "*"))
+      binds = Enum.chunk_every(argv, 3, 1, :discard)
+
+      assert ["--bind-try", home, home] in binds
+
+      assert ["--bind-try", Path.join(source, "auth.json"), Path.join(source, "auth.json")] in binds
+
+      refute ["--bind-try", ctx.codex_home, ctx.codex_home] in binds
+      refute "--ignore-user-config" in argv
     end
 
     test "a :auto review dispatch is jailed too", ctx do
