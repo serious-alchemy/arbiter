@@ -139,10 +139,19 @@ defmodule Arbiter.Quota do
     1. The `:arbiter, :quota` `:gate` app-env override — a hard module override
        used as the kill switch and the test-injection seam. Set it to
        `Arbiter.Quota.Gate.Continue` (or a stub) to bypass throttling entirely.
-    2. Otherwise the workspace's resolved `on_exhaustion` mode
+    2. The workspace's `config["quota"]["gate"]`, a key registered on the
+       `:quota_gate` seam (`Arbiter.Extensions`) — how an installed
+       `Arbiter.Extension`'s gate is selected per workspace. A key that names
+       nothing registered (an extension since uninstalled) is skipped, so the
+       workspace degrades to the next rule rather than failing to dispatch.
+    3. Otherwise the workspace's resolved `on_exhaustion` mode
        (`Workspace.quota_on_exhaustion/1`, which itself layers per-workspace over
        global over the hardcoded `:throttle`): `:continue` → `Gate.Continue`,
        else `Gate.Throttle`.
+
+  Rule 1 is install-global and beats rule 2. That is the pre-existing
+  kill-switch / test-injection behaviour and is not a registration path:
+  extensions never set it.
   """
   @spec gate_for_workspace(Workspace.t() | nil) :: module()
   def gate_for_workspace(workspace) do
@@ -151,10 +160,23 @@ defmodule Arbiter.Quota do
         mod
 
       _ ->
-        case Workspace.quota_on_exhaustion(workspace) do
-          :continue -> Arbiter.Quota.Gate.Continue
-          _ -> Arbiter.Quota.Gate.Throttle
-        end
+        registered_gate(workspace) || on_exhaustion_gate(workspace)
+    end
+  end
+
+  defp registered_gate(%Workspace{config: config}) when is_map(config) do
+    case Arbiter.Extensions.fetch(:quota_gate, get_in(config, ["quota", "gate"])) do
+      {:ok, gate} -> gate
+      :error -> nil
+    end
+  end
+
+  defp registered_gate(_workspace), do: nil
+
+  defp on_exhaustion_gate(workspace) do
+    case Workspace.quota_on_exhaustion(workspace) do
+      :continue -> Arbiter.Quota.Gate.Continue
+      _ -> Arbiter.Quota.Gate.Throttle
     end
   end
 

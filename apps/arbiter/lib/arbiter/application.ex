@@ -14,6 +14,10 @@ defmodule Arbiter.Application do
 
   @impl true
   def start(_type, _args) do
+    # Register core's and any installed extension's seam implementations before
+    # a single consumer starts; a bad extension aborts the boot here.
+    :ok = Arbiter.Extensions.load!()
+
     children = children(auto_start?: MergeQueueSupervisor.auto_start?())
 
     Supervisor.start_link(children, strategy: :one_for_one, name: Arbiter.Supervisor)

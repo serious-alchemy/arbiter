@@ -45,11 +45,6 @@ defmodule Arbiter.Sessions.Provider do
   """
   @callback config_dir?() :: boolean()
 
-  @adapters %{
-    claude_code: Arbiter.Sessions.Provider.ClaudeCode,
-    agy: Arbiter.Sessions.Provider.Agy
-  }
-
   @fallback_shell "/bin/sh"
 
   @doc "The adapter module for a session's provider."
@@ -57,10 +52,12 @@ defmodule Arbiter.Sessions.Provider do
   def adapter(%Session{provider: provider}), do: adapter(provider)
 
   def adapter(provider) when is_atom(provider) do
-    Map.get(@adapters, provider) ||
+    adapters = Arbiter.Extensions.registry(:session_provider)
+
+    Map.get(adapters, provider) ||
       raise ArgumentError,
             "no Arbiter.Sessions.Provider adapter for #{inspect(provider)} " <>
-              "(known: #{inspect(Map.keys(@adapters))})"
+              "(known: #{inspect(Map.keys(adapters))})"
   end
 
   @doc "Delegates to the session's adapter."

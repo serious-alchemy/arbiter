@@ -323,6 +323,28 @@ The good news is that **per-workspace *selection* already exists for four of the
   * `worker/review_gate.ex`
   * `worker.ex`
 
+### 4.5 Implementation status (bd-dyo17r)
+
+Items 1–5 of §4.4 are implemented: `Arbiter.Extension`, `Arbiter.Extensions` (`:persistent_term`, loaded in `Arbiter.Application.start/2`), and `Arbiter.Extensions.Core`, through which core's own adapters register with the same validation as an external package. Differences from the proposal as written:
+
+* **Keys are strings in `contributions/0`**, as proposed, and atoms in the registry (`Arbiter.Extensions.registry/1`), because every dispatcher and persisted column already keys on atoms. The conversion happens once, at boot, from operator-controlled config.
+* **Seams opened:** `:agent`, `:tracker`, `:merger`, `:routing_policy`, `:quota_gate`, `:session_provider`, `:mcp_agent_config`. `:quota_snapshot` is opened too, behind a new behaviour, `Arbiter.Quota.Gate.Snapshot.Source` (`normalize/2`). A source is keyed by the quota struct's module name (`Atom.to_string(MyApp.FooQuota)`); `Snapshot.normalize/2` looks the row's `__struct__` up in the registry and returns `nil` (fail open) when none is registered. The Anthropic, Codex and Google projections moved out of `snapshot.ex` into `Snapshot.Anthropic` / `.Codex` / `.Google`, which `Extensions.Core` registers like any extension.
+* **Collisions:** the rule is uniform. Any `{seam, key}` that is already registered fails boot, and core is simply loaded first.
+* **`quota.gate`** (item 5) is read by `Quota.gate_for_workspace/1` and validated by `ValidateConfig` against the registered `:quota_gate` keys. It sits *below* the install-global `:arbiter, :quota, :gate` override; demoting that override is §7 item 6 and is not done here.
+* `Extension.mcp_tools/0` is collected by `Extensions.mcp_tools/0`, but `MCP.Catalog` does not read it yet (§7 item 8).
+* `valid_agent_types/0`, `Routing.valid_policies/0`, `Workspace.valid_tracker_types/0` and `Workspace.valid_merger_strategies/0` now derive from the registry, in registration order (core first), so `ValidateConfig` accepts an extension's key exactly while it is installed.
+
+Disposition of the §4.1 `Application.get_env/3` sites:
+
+| Key | Disposition |
+|---|---|
+| `:quota` → `:gate` | Still read first, by design: kill switch and test injection. A workspace selects an *installed* gate through `quota.gate`. Demotion is §7 item 6. |
+| `:review_gate_fix_round_dispatcher`, `:merge_queue_conflict_resolver`, `:merge_queue_revise_dispatcher`, `:dispatch_queue_dispatcher`, `:migrations_module` | Test-only seams over §1 "Internal" behaviours. Not extension points, deliberately left alone. |
+| `:sessions_runner`, `:sessions_terminal` | Test-only (`Terminal` is "uncertain", §1 row 11; revisit only with a hosted tier). |
+| `:github_limiter_server` | Swaps a registered process name, not a behaviour. |
+
+Not done here, and still open for their own tickets: the hard-coded `case` seeding in `Agents.prepare/2`, `Trackers.prepare/2` and `Mergers.prepare/1` (§7 item 5; an external adapter needing per-process config is not seeded), the persisted-atom `one_of` on `Issue.tracker_type` and `Session.provider` (§7 item 3), `Quota`'s `@provider_codes`, and the `arb workspace create` client-side `--tracker-type`/`--merger-strategy` allow-lists in `arbiter_cli`, which cannot read the server's registry.
+
 ---
 
 ## 5. Can `Arbiter.MCP.Catalog` accept tools from an external package? **No.**
