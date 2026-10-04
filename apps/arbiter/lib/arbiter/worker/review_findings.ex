@@ -437,9 +437,10 @@ defmodule Arbiter.Worker.ReviewFindings do
 
   defp drop_line?(line) do
     trimmed = String.trim(line)
+    norm = Arbiter.Worker.ReviewGate.normalize_verdict_line(line)
 
     trimmed == "" or
-      Regex.match?(~r/^\s*VERDICT:/i, line) or
+      Regex.match?(~r/^VERDICT:/i, norm) or
       Regex.match?(~r/^\s*VERIFICATION:/i, line) or
       Regex.match?(~r/^\s*CRITERIA:\s*$/i, line) or
       Regex.match?(~r/^\s*DISPOSITIONS:\s*$/i, line) or

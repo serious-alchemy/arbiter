@@ -7489,9 +7489,11 @@ defmodule Arbiter.Worker do
         [first] -> {String.trim(first), ""}
       end
 
+    norm_line = Arbiter.Worker.ReviewGate.normalize_verdict_line(verdict_line)
+
     {verdict_line, body} =
       cond do
-        not Regex.match?(~r/^VERDICT:/i, verdict_line) ->
+        not Regex.match?(~r/^VERDICT:/i, norm_line) ->
           {review_gate_verdict_label(verdict), findings}
 
         # park_rejected only ever calls this with verdict :request_changes/:no_verdict,
@@ -7499,7 +7501,7 @@ defmodule Arbiter.Worker do
         # honored (route_approve_verdict's partial-verification fail-closed path, worker.ex
         # ~2409). Don't let a rejected run's summary open with "APPROVE" — that reads as a
         # contradiction in `arb worker runs` output.
-        Regex.match?(~r/^VERDICT:\s*APPROVE\b/i, verdict_line) ->
+        Regex.match?(~r/^VERDICT:\s*APPROVE(?:[*_]+|\b)/i, norm_line) ->
           {"#{review_gate_verdict_label(verdict)} (reviewer said \"#{verdict_line}\", not honored)",
            body}
 

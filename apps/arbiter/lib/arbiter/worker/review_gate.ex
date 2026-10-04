@@ -364,8 +364,8 @@ defmodule Arbiter.Worker.ReviewGate do
 
   """
 
-  @verdict_approve ~r/^\s*VERDICT:\s*APPROVE\b/im
-  @verdict_request_changes ~r/^\s*VERDICT:\s*(REQUEST_CHANGES|REJECT)\b/im
+  @verdict_approve ~r/^\s*VERDICT:\s*APPROVE(?:[*_]+|\b)/i
+  @verdict_request_changes ~r/^\s*VERDICT:\s*(?:REQUEST_CHANGES|REJECT)(?:[*_]+|\b)/i
 
   @type verdict ::
           {:approve, String.t()}
@@ -646,6 +646,67 @@ defmodule Arbiter.Worker.ReviewGate do
   # ---- verdict parsing (pure) --------------------------------------------
 
   @doc """
+  Normalize a candidate verdict line before matching.
+
+  Strips leading/trailing markdown emphasis (`*`, `_`), headings (`#`),
+  blockquotes (`>`), list markers (ordered `1.`, `1)` or unordered `-`, `+`, `*`),
+  and whitespace.
+  """
+  @spec normalize_verdict_line(String.t() | term()) :: String.t() | term()
+  def normalize_verdict_line(line) when is_binary(line) do
+    line
+    |> strip_leading_markdown()
+    |> strip_trailing_markdown()
+  end
+
+  def normalize_verdict_line(other), do: other
+
+  defp strip_leading_markdown(str) do
+    trimmed = String.trim_leading(str)
+
+    cond do
+      String.starts_with?(trimmed, ">") ->
+        trimmed |> String.trim_leading(">") |> strip_leading_markdown()
+
+      String.starts_with?(trimmed, "#") ->
+        trimmed |> String.trim_leading("#") |> strip_leading_markdown()
+
+      Regex.match?(~r/^\d+[\.\)]\s+/, trimmed) ->
+        trimmed |> String.replace(~r/^\d+[\.\)]\s+/, "", global: false) |> strip_leading_markdown()
+
+      Regex.match?(~r/^[-+]\s+/, trimmed) ->
+        trimmed |> String.replace(~r/^[-+]\s+/, "", global: false) |> strip_leading_markdown()
+
+      String.starts_with?(trimmed, "*") ->
+        trimmed |> String.trim_leading("*") |> strip_leading_markdown()
+
+      String.starts_with?(trimmed, "_") ->
+        trimmed |> String.trim_leading("_") |> strip_leading_markdown()
+
+      true ->
+        trimmed
+    end
+  end
+
+  defp strip_trailing_markdown(str) do
+    trimmed = String.trim_trailing(str)
+
+    cond do
+      String.ends_with?(trimmed, "*") ->
+        trimmed |> String.trim_trailing("*") |> strip_trailing_markdown()
+
+      String.ends_with?(trimmed, "_") ->
+        trimmed |> String.trim_trailing("_") |> strip_trailing_markdown()
+
+      String.ends_with?(trimmed, "#") ->
+        trimmed |> String.trim_trailing("#") |> strip_trailing_markdown()
+
+      true ->
+        trimmed
+    end
+  end
+
+  @doc """
   Parse a reviewer's output lines into a verdict.
 
   Returns `{:approve, findings}`, `{:request_changes, findings}`, or
@@ -655,17 +716,28 @@ defmodule Arbiter.Worker.ReviewGate do
   """
   @spec parse_verdict([String.t()]) :: verdict()
   def parse_verdict(lines) when is_list(lines) do
-    text = Enum.join(lines, "\n")
+    lines
+    |> Enum.join("\n")
+    |> String.split("\n")
+    |> scan_verdict()
+  end
+
+  defp scan_verdict([]), do: :no_verdict
+
+  defp scan_verdict([line | rest] = remaining) do
+    normalized = normalize_verdict_line(line)
 
     cond do
-      Regex.match?(@verdict_approve, text) ->
-        {:approve, findings_from(text, @verdict_approve)}
+      Regex.match?(@verdict_approve, normalized) ->
+        findings = remaining |> Enum.join("\n") |> String.trim()
+        {:approve, findings}
 
-      Regex.match?(@verdict_request_changes, text) ->
-        {:request_changes, findings_from(text, @verdict_request_changes)}
+      Regex.match?(@verdict_request_changes, normalized) ->
+        findings = remaining |> Enum.join("\n") |> String.trim()
+        {:request_changes, findings}
 
       true ->
-        :no_verdict
+        scan_verdict(rest)
     end
   end
 
@@ -856,18 +928,6 @@ defmodule Arbiter.Worker.ReviewGate do
   end
 
   defp reviewer_run_id(_), do: nil
-
-  # Findings = everything from the matched verdict line to the end, trimmed.
-  # Falls back to the whole transcript if the index can't be located.
-  defp findings_from(text, regex) do
-    case Regex.run(regex, text, return: :index) do
-      [{start, _len} | _] ->
-        text |> binary_part(start, byte_size(text) - start) |> String.trim()
-
-      _ ->
-        String.trim(text)
-    end
-  end
 
   # ---- GenServer ----------------------------------------------------------
 
