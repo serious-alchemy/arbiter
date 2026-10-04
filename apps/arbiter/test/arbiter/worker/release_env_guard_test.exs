@@ -128,6 +128,9 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
     # through `ReleaseEnv.cmd/3` (the probe runs only `printf` and `cat` in it).
     # The agent itself is still opened by `ClaudeSession.open_port/1`.
     "apps/arbiter/lib/arbiter/worker/memory_scope.ex" => :scrubbed,
+    # bd-28c6qo: the per-repo pre-push check (`sh -c <command>` under `timeout`)
+    # via `ReleaseEnv.cmd/3`, with the sanitised `SpawnEnv` env.
+    "apps/arbiter/lib/arbiter/worker/prepush_check.ex" => :scrubbed,
     "apps/arbiter/lib/arbiter/loop/apply/repo_doc.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/mcp/agent_config.ex" => :pure_tool,
     "apps/arbiter/lib/arbiter/mergers/direct.ex" => :pure_tool,

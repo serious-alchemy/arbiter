@@ -74,7 +74,11 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
       per-repo `"worker.repos.<repo>.seed_paths"`) must be a list of strings
       (bd-2jerqw, `Arbiter.Worker.SeedPaths`). The entries themselves are
       checked when a worktree is seeded: an absolute, `..` or `.git` entry is
-      skipped with a logged warning rather than refused here.
+      skipped with a logged warning rather than refused here. The same blocks
+      may carry `"prepush_check"` (a non-empty command string),
+      `"prepush_check_timeout_seconds"` (a positive integer) and
+      `"prepush_check_on_timeout"` (`"proceed"` or `"fail"`) — bd-28c6qo,
+      `Arbiter.Worker.PrepushCheck`.
     * If `"attention"` is present, it must be a map whose
       `"coordinator_limit_minutes"` / `"run_crashed_max_resumes"` are
       non-negative integers — `0` turns a limit off (bd-8nlez1,
@@ -124,7 +128,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
 
   defp validate_worker(changeset, worker) when is_map(worker) do
     changeset
-    |> validate_seed_paths(worker, "worker")
+    |> validate_worker_block(worker, "worker")
     |> validate_worker_repos(Map.get(worker, "repos"))
   end
 
@@ -137,7 +141,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
   defp validate_worker_repos(changeset, repos) when is_map(repos) do
     Enum.reduce(repos, changeset, fn
       {repo, %{} = block}, cs ->
-        validate_seed_paths(cs, block, "worker.repos.#{repo}")
+        validate_worker_block(cs, block, "worker.repos.#{repo}")
 
       {repo, _}, cs ->
         Changeset.add_error(cs,
@@ -150,6 +154,55 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
   defp validate_worker_repos(changeset, _) do
     Changeset.add_error(changeset, field: :config, message: "worker.repos must be a map")
   end
+
+  defp validate_worker_block(changeset, block, label) do
+    changeset
+    |> validate_seed_paths(block, label)
+    |> validate_prepush_check(block, label)
+  end
+
+  # bd-28c6qo: `prepush_check` (+ `_timeout_seconds`, `_on_timeout`), at either
+  # level (`Arbiter.Worker.PrepushCheck`).
+  defp validate_prepush_check(changeset, block, label) do
+    changeset
+    |> validate_prepush_command(Map.get(block, "prepush_check"), label)
+    |> validate_prepush_timeout(Map.get(block, "prepush_check_timeout_seconds"), label)
+    |> validate_prepush_on_timeout(Map.get(block, "prepush_check_on_timeout"), label)
+  end
+
+  defp validate_prepush_command(changeset, nil, _label), do: changeset
+
+  defp validate_prepush_command(changeset, command, label) do
+    if is_binary(command) and String.trim(command) != "",
+      do: changeset,
+      else: prepush_error(changeset, "#{label}.prepush_check must be a non-empty string")
+  end
+
+  defp validate_prepush_timeout(changeset, nil, _label), do: changeset
+
+  defp validate_prepush_timeout(changeset, n, _label) when is_integer(n) and n > 0, do: changeset
+
+  defp validate_prepush_timeout(changeset, _, label),
+    do:
+      prepush_error(
+        changeset,
+        "#{label}.prepush_check_timeout_seconds must be a positive integer"
+      )
+
+  defp validate_prepush_on_timeout(changeset, nil, _label), do: changeset
+
+  defp validate_prepush_on_timeout(changeset, v, _label) when v in ["proceed", "fail"],
+    do: changeset
+
+  defp validate_prepush_on_timeout(changeset, _, label),
+    do:
+      prepush_error(
+        changeset,
+        ~s(#{label}.prepush_check_on_timeout must be "proceed" or "fail")
+      )
+
+  defp prepush_error(changeset, message),
+    do: Changeset.add_error(changeset, field: :config, message: message)
 
   defp validate_seed_paths(changeset, block, label) do
     case Map.get(block, "seed_paths") do

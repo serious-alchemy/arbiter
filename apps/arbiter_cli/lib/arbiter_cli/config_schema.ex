@@ -230,8 +230,23 @@ defmodule ArbiterCli.ConfigSchema do
                       Set: the list REPLACES that set, so restate "deps" if you
                       still want it. Absolute, `..` and `.git` entries are
                       skipped with a warning.
-      repos           map, repo name -> {seed_paths}, deep-merged over the
-                      workspace-level value (per-repo wins)
+      prepush_check   shell command run in the worker's checkout by the commit
+                      gate before anything is pushed or a PR opened — for the
+                      main run, review fix rounds and CI fix passes (bd-28c6qo).
+                      Non-zero exit: its output goes back to the same worker
+                      session and nothing is pushed. Unset: no check.
+                      e.g. "mix precommit && mix audit"
+      prepush_check_timeout_seconds
+                      positive integer — default 1200. Size for the slowest
+                      step (dialyzer on a cold PLT is ~7 min; seed priv/plts).
+      prepush_check_on_timeout
+                      "proceed" (default — a timeout says nothing about the
+                      code, so the push goes ahead and CI is the backstop) or
+                      "fail" (treated like a failed check). An infra error
+                      (no worktree, command not found) always proceeds.
+      repos           map, repo name -> {seed_paths, prepush_check,
+                      prepush_check_timeout_seconds, prepush_check_on_timeout},
+                      deep-merged over the workspace-level value (per-repo wins)
 
                       umbrella:    ["deps", "_build/test/lib", "_build/dev/lib", "priv/plts"]
                       single app:  ["deps", "_build/test", "_build/dev", "priv/plts"]

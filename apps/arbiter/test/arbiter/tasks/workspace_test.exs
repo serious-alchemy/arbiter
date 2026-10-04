@@ -653,6 +653,60 @@ defmodule Arbiter.Tasks.WorkspaceTest do
     end
   end
 
+  describe "worker.prepush_check validation (bd-28c6qo)" do
+    test "accepts a command, timeout and on_timeout workspace-wide and per repo" do
+      assert {:ok, _} =
+               Ash.create(Workspace, %{
+                 name: "pp-ok-#{System.unique_integer([:positive])}",
+                 config: %{
+                   "worker" => %{
+                     "prepush_check" => "make lint",
+                     "prepush_check_timeout_seconds" => 600,
+                     "repos" => %{
+                       "arbiter" => %{
+                         "prepush_check" => "mix precommit && mix audit",
+                         "prepush_check_timeout_seconds" => 1800,
+                         "prepush_check_on_timeout" => "fail"
+                       }
+                     }
+                   }
+                 }
+               })
+    end
+
+    test "rejects anything else, naming the key" do
+      for {label, block} <- [
+            {"worker.prepush_check must be a non-empty string", %{"prepush_check" => ["x"]}},
+            {"worker.prepush_check must be a non-empty string", %{"prepush_check" => " "}},
+            {"worker.prepush_check_timeout_seconds must be a positive integer",
+             %{"prepush_check_timeout_seconds" => 0}},
+            {"worker.prepush_check_timeout_seconds must be a positive integer",
+             %{"prepush_check_timeout_seconds" => "600"}},
+            {~s(worker.prepush_check_on_timeout must be "proceed" or "fail"),
+             %{"prepush_check_on_timeout" => "explode"}}
+          ] do
+        assert {:error, %Ash.Error.Invalid{} = err} =
+                 Ash.create(Workspace, %{
+                   name: "pp-bad-#{System.unique_integer([:positive])}",
+                   config: %{"worker" => block}
+                 })
+
+        assert Exception.message(err) =~ label
+      end
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{
+                 name: "pp-bad-repo",
+                 config: %{
+                   "worker" => %{"repos" => %{"arbiter" => %{"prepush_check" => 5}}}
+                 }
+               })
+
+      assert Exception.message(err) =~
+               "worker.repos.arbiter.prepush_check must be a non-empty string"
+    end
+  end
+
   describe "review.require_ci_green validation (bd-cut6uv)" do
     test "accepts booleans and their JSON strings, workspace-wide and per repo" do
       for value <- [true, false, "true", "false"] do
