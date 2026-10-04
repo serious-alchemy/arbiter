@@ -20,6 +20,7 @@ defmodule Arbiter.MCP.Scope do
         repo:         "shipyard" | nil,# worker tier: its repo
         session_id:   "uuid" | nil,    # browser-hosted session this token belongs to (revocable)
         can_dispatch:    false | true,    # coordinator-only; the recursion guardrail
+        operator:     false | true,    # coordinator-only; minted over the operator socket (operator proof)
         depth:        0                # dispatch-recursion depth (Phase 2 guardrail)
       }
 
@@ -76,6 +77,7 @@ defmodule Arbiter.MCP.Scope do
             repo: nil,
             session_id: nil,
             can_dispatch: false,
+            operator: false,
             depth: 0
 
   @type tier :: :worker | :coordinator | :refine
@@ -88,6 +90,7 @@ defmodule Arbiter.MCP.Scope do
           repo: String.t() | nil,
           session_id: String.t() | nil,
           can_dispatch: boolean(),
+          operator: boolean(),
           depth: non_neg_integer()
         }
 
@@ -132,6 +135,12 @@ defmodule Arbiter.MCP.Scope do
   Carries `can_dispatch: true` by default (override via opts) — the Phase 2
   dispatch-recursion guardrail reads it together with `:depth`.
 
+  `operator: true` marks a token minted after **operator proof**
+  (`Arbiter.MCP.OperatorSocket`, bd-8381tk): the only kind that may *loosen* a
+  guardrail (`Arbiter.Guardrails.Authority`, G11). It is never the default, a
+  session token never carries it, and `McpController.mint_token/2` never
+  propagates it to a token it mints.
+
   `workspace_id` defaults to `nil`, minting a **workspace-agnostic** token valid
   for any workspace on the installation — the path the `arb mcp token mint` /
   `POST /api/mcp/tokens` callers take. An explicit workspace id may still be
@@ -147,6 +156,7 @@ defmodule Arbiter.MCP.Scope do
       task_id: nil,
       repo: nil,
       can_dispatch: Keyword.get(opts, :can_dispatch, true),
+      operator: Keyword.get(opts, :operator, false) == true,
       depth: Keyword.get(opts, :depth, 0)
     }
     |> MCP.mint(opts)
@@ -219,6 +229,11 @@ defmodule Arbiter.MCP.Scope do
     |> MCP.mint(opts)
   end
 
+  @doc "Whether `scope` carries operator proof (see `mint_coordinator/2`)."
+  @spec operator?(t() | nil) :: boolean()
+  def operator?(%__MODULE__{tier: :coordinator, operator: true}), do: true
+  def operator?(_), do: false
+
   # ---- verifying ----------------------------------------------------------
 
   @doc """
@@ -274,6 +289,9 @@ defmodule Arbiter.MCP.Scope do
        repo: nil,
        session_id: nilable_string(c[:session_id]),
        can_dispatch: c[:can_dispatch] == true or c[:can_sling] == true,
+       # Operator proof is a property of a token minted over the operator
+       # socket; a revocable session token is never one, whatever it claims.
+       operator: c[:operator] == true and is_nil(nilable_string(c[:session_id])),
        depth: depth(c[:depth])
      }}
   end

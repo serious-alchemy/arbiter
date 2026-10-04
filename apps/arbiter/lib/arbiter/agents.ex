@@ -150,6 +150,20 @@ defmodule Arbiter.Agents do
     end
   end
 
+  @doc """
+  Whether `adapter` can confine a worker's network egress under `policy` on this
+  host (G11, design §3.4). Delegates to the adapter's optional
+  `egress_confinement/1` callback; `:none` when the adapter omits it.
+  """
+  @spec egress_confinement(adapter, SecurityPolicy.t()) :: :os_jail | :none
+  def egress_confinement(adapter, %SecurityPolicy{} = policy) when is_atom(adapter) do
+    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :egress_confinement, 1) do
+      adapter.egress_confinement(policy)
+    else
+      :none
+    end
+  end
+
   @doc "Whether `write_confinement/2` answers anything other than `:none`."
   @spec write_confined?(adapter, SecurityPolicy.t()) :: boolean()
   def write_confined?(adapter, %SecurityPolicy{} = policy) do

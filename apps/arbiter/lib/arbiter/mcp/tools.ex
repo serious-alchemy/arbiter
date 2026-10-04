@@ -2009,6 +2009,7 @@ defmodule Arbiter.MCP.Tools do
           "repos",
           Map.new(SecurityPolicy.repo_egress(ws), fn {r, e} -> {r, %{"egress" => e}} end)
         )
+        |> Map.put("guardrails", Arbiter.Guardrails.Report.posture(ws))
     }
   end
 

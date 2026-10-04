@@ -46,6 +46,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       check_agy_jail_reads(),
       check_agy_jail_network(),
       check_egress_jail(),
+      check_guardrails(),
       check_agy_ssh_transport(),
       check_tmux(),
       check_podman_sandbox(),
@@ -833,6 +834,78 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
           blocks_readiness: false
         }
     end
+  end
+
+  # bd-anwb0u (G11, design §7.3): the effective guardrail tier of every
+  # attached (provider, model) subject, per workspace, and anything
+  # inconsistent: an inert `guardrails` block, an unmatched or out-of-scope
+  # subject, a tier its adapter cannot enforce here. Computed server-side
+  # (`Arbiter.Guardrails.Report`). A FAIL is non-fatal, and with nothing
+  # configured the check passes: guardrails are off, not broken.
+  defp check_guardrails do
+    case Client.get("/api/server/guardrails") do
+      {:ok, %{"active" => false, "issues" => []}} ->
+        %Result{
+          name: "guardrail profiles",
+          status: :ok,
+          detail: "no subject rules configured, so guardrails are off and nothing is tiered",
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      {:ok, %{"issues" => [], "workspaces" => workspaces}} ->
+        %Result{
+          name: "guardrail profiles",
+          status: :ok,
+          detail: guardrail_tiers_detail(workspaces),
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      {:ok, %{"issues" => issues, "workspaces" => workspaces}} when is_list(issues) ->
+        %Result{
+          name: "guardrail profiles",
+          status: :fail,
+          detail:
+            Enum.map_join(issues, "; ", fn i ->
+              "#{Map.get(i, "workspace")}: #{Map.get(i, "message")}"
+            end) <> " — " <> guardrail_tiers_detail(workspaces),
+          hint:
+            "Fix the subject rules (guardrail_subjects) or the workspace `guardrails` block; " <>
+              "see docs/design/guardrail-profiles.md §7.",
+          fatal: false,
+          blocks_readiness: false
+        }
+
+      _ ->
+        %Result{
+          name: "guardrail profiles",
+          status: :ok,
+          detail: "server unreachable or predates this check — skipping",
+          fatal: false,
+          blocks_readiness: false
+        }
+    end
+  end
+
+  # "default: claude=privileged, antigravity/gemini-3.8-flash-low=quarantine; emricare: …"
+  defp guardrail_tiers_detail(workspaces) do
+    Enum.map_join(workspaces, "; ", fn ws ->
+      subjects =
+        ws
+        |> Map.get("subjects", [])
+        |> Enum.map_join(", ", fn s ->
+          label =
+            case Map.get(s, "model") do
+              nil -> Map.get(s, "provider")
+              model -> "#{Map.get(s, "provider")}/#{model}"
+            end
+
+          "#{label}=#{Map.get(s, "tier") || "off"}"
+        end)
+
+      "#{Map.get(ws, "workspace")}: #{subjects}"
+    end)
   end
 
   defp host_jail_status do

@@ -86,6 +86,22 @@ defmodule Arbiter.Agents.Claude do
   @impl true
   def write_confinement(%SecurityPolicy{}), do: :permission_layer
 
+  @doc """
+  Claude's egress confinement is the podman container backend's network
+  namespace (`Arbiter.Worker.Container`, P7/P10); under the default bwrap
+  backend a Claude worker is not jailed at all, so `:none` (G11).
+  """
+  @impl true
+  def egress_confinement(%SecurityPolicy{} = policy) do
+    with :podman <- SecurityPolicy.sandbox_backend(policy),
+         {:ok, sandbox} <- Sandbox.module(policy, :claude),
+         :ok <- sandbox.network_status() do
+      :os_jail
+    else
+      _ -> :none
+    end
+  end
+
   @impl true
   def done_sentinel, do: @done_regex
 

@@ -13,6 +13,7 @@ defmodule ArbiterWeb.Api.WorkspaceController do
 
   use ArbiterWeb, :controller
 
+  alias Arbiter.Guardrails.Authority
   alias Arbiter.Tasks.Workspace
 
   action_fallback ArbiterWeb.Api.FallbackController
@@ -48,7 +49,7 @@ defmodule ArbiterWeb.Api.WorkspaceController do
     # via ash_cloak); it is never read back in any response. See WorkspaceJSON.
     attrs = Map.take(params, ["name", "description", "prefix", "config", "secrets"])
 
-    case Ash.create(Workspace, attrs) do
+    case Ash.create(Workspace, attrs, context: guardrail_context(conn)) do
       {:ok, ws} ->
         conn
         |> put_status(:created)
@@ -66,7 +67,7 @@ defmodule ArbiterWeb.Api.WorkspaceController do
     attrs = Map.take(params, ["name", "description", "prefix", "config", "secrets"])
 
     with {:ok, ws} <- Ash.get(Workspace, id),
-         {:ok, updated} <- Ash.update(ws, attrs) do
+         {:ok, updated} <- Ash.update(ws, attrs, context: guardrail_context(conn)) do
       render(conn, :show, workspace: updated)
     end
   end
@@ -90,8 +91,15 @@ defmodule ArbiterWeb.Api.WorkspaceController do
     args = %{patch: patch, unset_paths: unset_paths}
 
     with {:ok, ws} <- Ash.get(Workspace, id),
-         {:ok, updated} <- Ash.update(ws, args, action: :patch_config) do
+         {:ok, updated} <-
+           Ash.update(ws, args, action: :patch_config, context: guardrail_context(conn)) do
       render(conn, :show, workspace: updated)
     end
   end
+
+  # G11: loosening `guardrails.*` / `agent.security` is operator-only
+  # (`Arbiter.Guardrails.Authority`). The caller's token decides who they are:
+  # operator proof, a plain coordinator, or neither.
+  defp guardrail_context(conn),
+    do: %{guardrail_authority: Authority.from_scope(conn.assigns[:mcp_scope])}
 end

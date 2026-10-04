@@ -110,6 +110,19 @@ defmodule Arbiter.Agents.Gemini do
   end
 
   @doc """
+  agy runs in the bwrap network jail (`--unshare-net`, the only route out is
+  the egress proxy) whenever its write jail applies and the host can build the
+  network namespace (`Arbiter.Worker.Sandbox.network_status/1`). Anything else,
+  the upstream `gemini` CLI included, is `:none` (G11).
+  """
+  @impl true
+  def egress_confinement(%SecurityPolicy{} = policy) do
+    if write_confinement(policy) == :os_jail and Sandbox.network_status(policy) == :ok,
+      do: :os_jail,
+      else: :none
+  end
+
+  @doc """
   Why this host can't jail an agy spawn under `policy`, for `arb server
   doctor` / the workspace posture API (bd-3s82pf). `nil` when the resolved
   CLI isn't agy (nothing to jail), the policy opted the sandbox off on
