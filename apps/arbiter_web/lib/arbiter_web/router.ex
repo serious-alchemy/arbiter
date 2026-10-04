@@ -71,6 +71,10 @@ defmodule ArbiterWeb.Router do
     get("/sessions/:id/transcript", SessionTranscriptController, :raw)
     get("/sessions/:id/jsonl", SessionTranscriptController, :jsonl)
 
+    # A dashboard login's redacted final screen (bd-bh50vs) — a download, so
+    # it sits outside the live_session like the session artefacts above.
+    get("/providers/logins/:id/transcript", LoginTranscriptController, :show)
+
     live_session :default,
       # bd-dlc136: every route here is wrapped in the live layout, whose only
       # job is to render the sticky session dock. It has to be a layout the
@@ -209,6 +213,12 @@ defmodule ArbiterWeb.Router do
     post("/accounts/:ref/rotate", AccountController, :rotate)
     post("/accounts/:ref/merge", AccountController, :merge)
     delete("/accounts/:ref", AccountController, :delete)
+
+    # Login relay (bd-bh50vs) — backs `arb account login <ref>`.
+    post("/accounts/:ref/login", AccountLoginController, :create)
+    get("/account_logins/:id", AccountLoginController, :show)
+    post("/account_logins/:id/paste", AccountLoginController, :paste)
+    post("/account_logins/:id/cancel", AccountLoginController, :cancel)
 
     # Workspaces
     get("/workspaces", WorkspaceController, :index)

@@ -20,6 +20,19 @@ defmodule ArbiterWeb.ProvidersLive do
 
   ## The secret
 
+  ## Login (bd-bh50vs)
+
+  "Log in" / "Re-authenticate" runs the provider CLI's own login through
+  `Arbiter.Accounts.Logins` and shows it in a panel that works at phone width:
+  the sign-in link, the device code, a paste box, the live state, Cancel, and
+  the hidden terminal in a collapsed "Show terminal" fallback. The action is
+  for the operator — a loopback dashboard peer, the same rule the session
+  terminal applies (§10.4) — and is refused server-side for anyone else, not
+  just hidden. The runner pushes its state to a topic private to this view; a
+  pasted code goes `handle_event` → `LoginRunner.relay_paste/2` and is never
+  assigned, rendered or flashed. Past logins are listed per account with a
+  link to the redacted transcript.
+
   The credential form's secret is a `type="password"` input whose rendered
   `value` is always empty, on no `phx-change` — it crosses the socket once,
   on submit, straight into `Arbiter.Accounts.rotate_credential/2` (the
@@ -34,6 +47,8 @@ defmodule ArbiterWeb.ProvidersLive do
     only: [quota_pace: 2, quota_pct: 1, quota_provider_label: 1, quota_windows: 1]
 
   alias Arbiter.Accounts
+  alias Arbiter.Accounts.LoginRunner
+  alias Arbiter.Accounts.Logins
   alias Arbiter.Accounts.Overview
 
   @refresh_ms 15_000
@@ -77,6 +92,9 @@ defmodule ArbiterWeb.ProvidersLive do
       |> assign(:attach_form, nil)
       |> assign(:attach_error, nil)
       |> assign(:rows, [])
+      |> assign(:history, %{})
+      |> assign(:logins, %{})
+      |> assign(:login_topic, "providers-login:" <> Ash.UUID.generate())
       |> assign(:pauses, %{})
       |> assign(:workspace_options, [])
       |> assign(:providers_loaded?, false)
@@ -84,16 +102,34 @@ defmodule ArbiterWeb.ProvidersLive do
       |> assign(:providers_stale?, false)
       |> assign(:providers_error, nil)
 
+    if live?, do: Phoenix.PubSub.subscribe(Arbiter.PubSub, socket.assigns.login_topic)
+
     {:ok, if(live?, do: fetch_providers(socket), else: socket)}
   end
 
   @impl true
   def handle_info(:refresh, socket), do: {:noreply, fetch_providers(socket)}
 
+  # The runner's state push for a login this view started (private topic).
+  def handle_info({:login_state, login_id, snapshot}, socket) do
+    case Enum.find(socket.assigns.logins, fn {_id, login} -> login.id == login_id end) do
+      nil ->
+        {:noreply, socket}
+
+      {account_id, login} ->
+        socket = put_login(socket, account_id, %{login | snapshot: snapshot})
+
+        # A finished login wrote a history row (and maybe a credential).
+        {:noreply,
+         if(login_terminal?(snapshot.status), do: fetch_providers(socket), else: socket)}
+    end
+  end
+
   @impl true
   def handle_async(:providers, {:ok, data}, socket) do
     socket
     |> assign(:rows, data.rows)
+    |> assign(:history, data.history)
     |> assign(:pauses, data.pauses)
     |> assign(:workspace_options, data.workspace_options)
     |> assign(:providers_loaded?, true)
@@ -285,6 +321,63 @@ defmodule ArbiterWeb.ProvidersLive do
     end
   end
 
+  # ---- login (bd-bh50vs) ----
+
+  def handle_event("start_login", %{"id" => id}, socket) do
+    with :ok <- authorize_login(socket),
+         %{account: account} <- find_row(socket, id) do
+      opts = [started_by: "dashboard", topic: socket.assigns.login_topic]
+
+      case Logins.start(account.id, opts) do
+        {:ok, login_id} ->
+          {:ok, snapshot} = Logins.status(login_id)
+          {:noreply, put_login(socket, id, %{id: login_id, snapshot: snapshot, error: nil})}
+
+        {:error, reason} ->
+          {:noreply, put_login(socket, id, %{id: nil, snapshot: nil, error: login_error(reason)})}
+      end
+    else
+      {:error, :forbidden} ->
+        {:noreply, put_flash(socket, :error, "Logging in is for the operator.")}
+
+      nil ->
+        {:noreply, socket}
+    end
+  end
+
+  def handle_event("cancel_login", %{"id" => id}, socket) do
+    with :ok <- authorize_login(socket),
+         %{id: login_id} when is_binary(login_id) <- Map.get(socket.assigns.logins, id) do
+      _ = Logins.cancel(login_id)
+    end
+
+    {:noreply, socket}
+  end
+
+  def handle_event("toggle_login_terminal", %{"id" => id}, socket) do
+    with :ok <- authorize_login(socket),
+         %{} = login <- Map.get(socket.assigns.logins, id) do
+      {:noreply, put_login(socket, id, Map.update(login, :terminal?, true, &(not &1)))}
+    else
+      _ -> {:noreply, socket}
+    end
+  end
+
+  def handle_event("paste_login", %{"_id" => id, "login" => %{"code" => code}}, socket) do
+    with :ok <- authorize_login(socket),
+         %{id: login_id} = login when is_binary(login_id) <- Map.get(socket.assigns.logins, id) do
+      case Logins.relay_paste(login_id, code) do
+        :ok ->
+          {:noreply, put_login(socket, id, %{login | error: nil})}
+
+        {:error, reason} ->
+          {:noreply, put_login(socket, id, %{login | error: login_error(reason)})}
+      end
+    else
+      _ -> {:noreply, socket}
+    end
+  end
+
   def handle_event("retry_providers", _params, socket),
     do: {:noreply, socket |> assign(:providers_error, nil) |> fetch_providers()}
 
@@ -308,6 +401,57 @@ defmodule ArbiterWeb.ProvidersLive do
     {:noreply, if(socket.assigns.providers_stale?, do: fetch_providers(socket), else: socket)}
   end
 
+  # The operator is the dashboard peer on this box (§10.4); the same gate the
+  # terminal socket applies. Checked in every login event, not just the view.
+  defp authorize_login(%{assigns: %{loopback?: false}}), do: {:error, :forbidden}
+  defp authorize_login(_socket), do: :ok
+
+  defp put_login(socket, account_id, login),
+    do: update(socket, :logins, &Map.put(&1, account_id, login))
+
+  @terminal_statuses ~w(succeeded failed timed_out cancelled)a
+  defp login_terminal?(status), do: status in @terminal_statuses
+
+  # A login for this row is running — started here or from anywhere else.
+  defp login_active?(row, logins) do
+    case Map.get(logins, row.account.id) do
+      %{snapshot: %{status: status}} -> not login_terminal?(status)
+      _ -> LoginRunner.active?(row.account.provider, row.account.slug)
+    end
+  end
+
+  defp login_error(:already_active), do: "A login is already running for this account."
+  defp login_error(:not_awaiting_code), do: "The login is not waiting for a code."
+  defp login_error(:invalid_input), do: "The code must be a single printable line."
+  defp login_error(:relay_failed), do: "The code could not be delivered — try again."
+
+  defp login_error(reason) when reason in [:unsupported, :disabled],
+    do: "Dashboard login is #{reason} for this provider."
+
+  defp login_error(other), do: "Could not start the login: #{inspect(other)}"
+
+  defp login_status_label(:starting), do: "Starting the provider CLI…"
+  defp login_status_label(:awaiting_user), do: "Waiting for you to sign in"
+  defp login_status_label(:verifying), do: "Verifying the login…"
+  defp login_status_label(:succeeded), do: "Logged in"
+  defp login_status_label(:failed), do: "Login failed"
+  defp login_status_label(:timed_out), do: "Timed out"
+  defp login_status_label(:cancelled), do: "Cancelled"
+
+  defp login_status_class(:succeeded), do: "text-[var(--arb-live)]"
+
+  defp login_status_class(status) when status in [:failed, :timed_out],
+    do: "text-[var(--arb-fail-text)]"
+
+  defp login_status_class(_), do: "text-[var(--text-body)]"
+
+  # The pane's session, if the dock-less terminal can attach to it.
+  defp login_session_id(%{snapshot: %{session_id: id}}), do: id
+  defp login_session_id(_), do: nil
+
+  defp stamp(%DateTime{} = at), do: Calendar.strftime(at, "%Y-%m-%d %H:%M UTC")
+  defp stamp(_), do: "—"
+
   # The pause that applies to an account: its own, else its provider's.
   defp account_pause(pauses, account),
     do: Map.get(pauses, "account:#{account.id}") || Map.get(pauses, to_string(account.provider))
@@ -324,10 +468,14 @@ defmodule ArbiterWeb.ProvidersLive do
   # connected mount and every tick so a slow ledger scan can never block the
   # LiveView process (bd-34f7gt).
   defp load_providers do
+    rows = Overview.list([])
+
     %{
-      rows: Overview.list([]),
+      rows: rows,
       pauses: Map.new(Arbiter.Providers.Pause.list(), &{&1.target, &1}),
-      workspace_options: Overview.workspace_options()
+      workspace_options: Overview.workspace_options(),
+      history:
+        Map.new(rows, &{&1.account.id, Logins.history(&1.account.provider, &1.account.slug)})
     }
   end
 
@@ -782,6 +930,18 @@ defmodule ArbiterWeb.ProvidersLive do
                 >
                   Resume
                 </button>
+                <ArbiterWeb.CoreComponents.Core.button
+                  :if={@loopback?}
+                  id={"login-start-#{row.account.id}"}
+                  type="button"
+                  phx-click="start_login"
+                  phx-value-id={row.account.id}
+                  disabled={login_active?(row, @logins)}
+                  variant="ghost"
+                  size="sm"
+                >
+                  {if row.credentials == [], do: "Log in", else: "Re-authenticate"}
+                </ArbiterWeb.CoreComponents.Core.button>
                 <button
                   id={"delete-account-#{row.account.id}"}
                   type="button"
@@ -966,6 +1126,188 @@ defmodule ArbiterWeb.ProvidersLive do
                   </span>
                 </section>
               </div>
+
+              <section
+                :if={login = Map.get(@logins, row.account.id)}
+                id={"login-panel-#{row.account.id}"}
+                data-status={login.snapshot && login.snapshot.status}
+                class="flex flex-col gap-3 px-4 sm:px-[18px] py-3 border-t border-[var(--border-default)] bg-[var(--surface-card)]"
+              >
+                <div class="flex flex-wrap items-center gap-2">
+                  <h3 class="text-[11px] uppercase tracking-wide text-[var(--text-label)]">
+                    Login
+                  </h3>
+                  <span
+                    :if={login.snapshot}
+                    id={"login-status-#{row.account.id}"}
+                    role="status"
+                    class={["text-[13px] font-medium", login_status_class(login.snapshot.status)]}
+                  >
+                    {login_status_label(login.snapshot.status)}<span :if={
+                      login.snapshot.reason && login.snapshot.status != :succeeded
+                    }> — {login.snapshot.reason}</span>
+                  </span>
+                  <ArbiterWeb.CoreComponents.Core.button
+                    :if={login.snapshot && not login_terminal?(login.snapshot.status)}
+                    id={"login-cancel-#{row.account.id}"}
+                    type="button"
+                    phx-click="cancel_login"
+                    phx-value-id={row.account.id}
+                    variant="ghost"
+                    size="sm"
+                    class="ml-auto"
+                  >
+                    Cancel
+                  </ArbiterWeb.CoreComponents.Core.button>
+                </div>
+
+                <p
+                  :if={login.error}
+                  id={"login-error-#{row.account.id}"}
+                  role="alert"
+                  class="text-[12px] text-[var(--arb-fail-text)]"
+                >
+                  {login.error}
+                </p>
+
+                <div
+                  :if={login.snapshot && login.snapshot.status == :awaiting_user}
+                  class="flex flex-col gap-3"
+                >
+                  <a
+                    :if={login.snapshot.url}
+                    id={"login-open-#{row.account.id}"}
+                    href={login.snapshot.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    class="inline-flex items-center justify-center gap-1.5 h-11 sm:h-9 px-4 rounded-[var(--radius-field)] bg-[var(--text-title)] text-[var(--surface-panel)] text-[13px] font-medium transition-opacity hover:opacity-90"
+                  >
+                    <ArbiterWeb.CoreComponents.Core.icon
+                      name="hero-arrow-top-right-on-square"
+                      size={14}
+                    /> Open sign-in page
+                  </a>
+
+                  <div :if={login.snapshot.device_code} class="flex flex-col gap-1">
+                    <span class="text-[11px] text-[var(--arb-text-muted)]">
+                      Enter this code on the sign-in page
+                    </span>
+                    <code
+                      id={"login-device-code-#{row.account.id}"}
+                      class="block select-all break-all text-[26px] sm:text-[22px] tracking-[0.15em] font-[family-name:var(--font-mono)] text-[var(--text-title)] px-3 py-2 rounded-[var(--radius-field)] border border-solid border-[var(--border-default)] bg-[var(--surface-panel)]"
+                    >
+                      {login.snapshot.device_code}
+                    </code>
+                  </div>
+
+                  <.form
+                    :if={login.snapshot.needs_paste?}
+                    for={to_form(%{"code" => ""}, as: :login)}
+                    id={"login-paste-form-#{row.account.id}"}
+                    phx-submit="paste_login"
+                    autocomplete="off"
+                    class="flex flex-col sm:flex-row gap-2 sm:items-end"
+                  >
+                    <input type="hidden" name="_id" value={row.account.id} />
+                    <div class="grow min-w-0">
+                      <.input
+                        name="login[code]"
+                        id={"login-paste-code-#{row.account.id}"}
+                        type="password"
+                        value=""
+                        label="Code from the sign-in page"
+                        autocomplete="off"
+                        required
+                      />
+                    </div>
+                    <ArbiterWeb.CoreComponents.Core.button
+                      id={"login-paste-submit-#{row.account.id}"}
+                      type="submit"
+                      variant="primary"
+                      size="sm"
+                    >
+                      Submit
+                    </ArbiterWeb.CoreComponents.Core.button>
+                  </.form>
+                </div>
+
+                <div
+                  :if={login_session_id(login) && @loopback?}
+                  id={"login-terminal-#{row.account.id}"}
+                  data-open={to_string(login[:terminal?] == true)}
+                  class="flex flex-col gap-2"
+                >
+                  <button
+                    type="button"
+                    id={"login-terminal-toggle-#{row.account.id}"}
+                    phx-click="toggle_login_terminal"
+                    phx-value-id={row.account.id}
+                    class="self-start text-[12px] text-[var(--arb-text-muted)] hover:text-[var(--text-title)] underline underline-offset-2 cursor-pointer"
+                  >
+                    {if login[:terminal?] == true, do: "Hide terminal", else: "Show terminal"}
+                  </button>
+                  <div
+                    :if={login[:terminal?] == true}
+                    id={"login-terminal-pane-#{login_session_id(login)}"}
+                    phx-hook="ArbiterWeb.SessionDockLive.SessionTerminal"
+                    phx-update="ignore"
+                    data-arb-terminal
+                    data-session-id={login_session_id(login)}
+                    class="h-64 max-w-full overflow-x-auto p-1.5 rounded-[var(--radius-field)] bg-black"
+                  >
+                  </div>
+                </div>
+              </section>
+
+              <section
+                :if={@loopback? or Map.get(@history, row.account.id, []) != []}
+                class="flex flex-col gap-1.5 px-4 sm:px-[18px] py-3 border-t border-[var(--border-default)]"
+              >
+                <h3 class="text-[11px] uppercase tracking-wide text-[var(--text-label)]">
+                  Login history
+                </h3>
+                <ul
+                  id={"login-history-#{row.account.id}"}
+                  class="flex flex-col gap-1.5 list-none m-0 p-0"
+                >
+                  <li
+                    :if={Map.get(@history, row.account.id, []) == []}
+                    class="text-[12px] text-[var(--arb-text-muted)]"
+                  >
+                    No logins yet.
+                  </li>
+                  <li
+                    :for={record <- Map.get(@history, row.account.id, [])}
+                    id={"login-record-#{record.id}"}
+                    class="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 text-[12px]"
+                  >
+                    <span class={["font-medium", login_status_class(record.outcome)]}>
+                      {record.outcome}
+                    </span>
+                    <span class="text-[var(--arb-text-muted)]">
+                      {stamp(record.started_at)} → {stamp(record.ended_at)}
+                    </span>
+                    <span class="text-[var(--arb-text-muted)]">
+                      by {record.started_by || "unknown"}
+                    </span>
+                    <span
+                      :if={record.fingerprint}
+                      class="font-[family-name:var(--font-mono)] text-[var(--arb-text-faint)]"
+                      title="credential fingerprint"
+                    >
+                      {record.fingerprint}
+                    </span>
+                    <a
+                      :if={record.transcript}
+                      href={~p"/providers/logins/#{record.id}/transcript"}
+                      target="_blank"
+                      class="underline underline-offset-2 text-[var(--arb-text-muted)] hover:text-[var(--text-title)]"
+                    >
+                      transcript
+                    </a>
+                  </li>
+                </ul>
+              </section>
 
               <footer class="flex flex-wrap items-center gap-2 px-[18px] py-2.5 border-t border-[var(--border-default)] bg-[var(--surface-chrome)]">
                 <span class="text-[11px] uppercase tracking-wide text-[var(--text-label)] mr-1">

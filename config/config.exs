@@ -202,7 +202,8 @@ config :phoenix, :json_library, Jason
 # request params to the log — provider-account rotate/mint endpoints accept
 # raw secrets/tokens as JSON body params (P11 AC 4: never display or log a
 # credential's secret value).
-config :phoenix, :filter_parameters, ["password", "secret", "token"]
+# "code": a login relay paste (bd-bh50vs) is a one-time auth code.
+config :phoenix, :filter_parameters, ["password", "secret", "token", "code"]
 
 # Force exqlite to compile from source on RHEL8/glibc<2.33 systems; the
 # precompiled NIF requires glibc 2.33 which is not available on Amazon Linux 2
