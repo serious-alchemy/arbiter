@@ -70,14 +70,14 @@ Therefore, executing a CLA prior to accepting outside contributions is non-optio
 
 ## 5. Extension Seams in the Existing Codebase
 
-The Arbiter architecture already defines 17 `@callback`-bearing Elixir behaviours. The open-core boundary requires no architectural rewrites because clean extension seams are already established.
+The Arbiter architecture defines 16 `@callback`-bearing Elixir behaviours. While these behaviours designate candidate extension points, open registration mechanisms are required before external packages can supply implementations without modifying core (see [Core/Pro Extension Seams](pro-extension-seams.md)).
 
 The following six behaviours are designated as the intended core/Pro extension seams (module names spelled exactly as defined):
 
 1. `Arbiter.Agents.Agent` — Autonomous agent runner harness and CLI interaction.
 2. `Arbiter.Trackers.Tracker` — Issue tracker integrations (Jira, GitHub, Linear, enterprise trackers).
 3. `Arbiter.Mergers.Merger` — Merge request, forge, and merge queue strategies.
-4. `Arbiter.Sessions.Provider` — PTY/terminal and process launch providers.
+4. `Arbiter.Sessions.Provider` — CLI command and environment configuration for coordinator tmux session panes (a companion of `Agents.Agent`, rather than a PTY/process launch provider; see [Core/Pro Extension Seams](pro-extension-seams.md) §2.4).
 5. `Arbiter.Agents.Routing.Policy` — Dynamic model and agent dispatch routing policies.
 6. `Arbiter.Quota.Gate` — Provider quota throttling, cost boundaries, and overage gating.
 
