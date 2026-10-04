@@ -403,4 +403,44 @@ defmodule ArbiterWeb.ReportsLiveTest do
       assert has_element?(view, "#reports-attention-operator")
     end
   end
+
+  describe "quota pacing" do
+    test "charts 5h and 7d utilization against the pace ceiling per account", %{
+      conn: conn,
+      ws: ws
+    } do
+      {:ok, account_id} = Arbiter.Accounts.Resolver.ensure_account_id(ws.id, "claude")
+      now = DateTime.utc_now() |> DateTime.truncate(:second)
+
+      for {window, util, ceiling} <- [{"5h", 0.4, 0.85}, {"7d", 0.1, 0.5}],
+          hours_ago <- [2, 1] do
+        Ash.create!(Arbiter.Quota.QuotaSnapshot, %{
+          provider_account_id: account_id,
+          provider: "claude",
+          window: window,
+          utilization: util * (3 - hours_ago) / 2,
+          ceiling: ceiling,
+          captured_at: DateTime.add(now, -hours_ago * 3600, :second)
+        })
+      end
+
+      {:ok, view, _html} = live(conn, ~p"/reports?workspace=#{ws.id}")
+      _ = render_async(view)
+
+      assert has_element?(view, "#reports-quota-account-#{account_id}")
+      five = "#reports-quota-chart-#{account_id}-5h"
+      seven = "#reports-quota-chart-#{account_id}-7d"
+      assert has_element?(view, "#{five} path[data-role=ceiling]")
+      assert has_element?(view, "#{five} circle[data-value='40.0']")
+      assert has_element?(view, "#{seven} path[data-role=ceiling]")
+      assert has_element?(view, "#{seven} circle[data-value='10.0']")
+      refute has_element?(view, "#reports-quota-pacing-empty")
+    end
+
+    test "shows the empty state with no history", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/reports")
+      _ = render_async(view)
+      assert has_element?(view, "#reports-quota-pacing-empty")
+    end
+  end
 end

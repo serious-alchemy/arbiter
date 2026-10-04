@@ -26,6 +26,7 @@ defmodule ArbiterWeb.ReportsLive do
     Epics,
     EpicWaits,
     Flow,
+    QuotaPacing,
     ReviewHealth,
     Throughput
   }
@@ -188,7 +189,8 @@ defmodule ArbiterWeb.ReportsLive do
       review_health: ReviewHealth.load(filters),
       epic_waits: EpicWaits.load(filters),
       attention: AttentionWaits.load(filters),
-      burn_up: BurnUp.load(filters["epic"], filters["range"])
+      burn_up: BurnUp.load(filters["epic"], filters["range"]),
+      quota_pacing: QuotaPacing.load(filters["range"])
     }
   end
 
@@ -337,9 +339,41 @@ defmodule ArbiterWeb.ReportsLive do
             <.epic_waits_section waits={report.epic_waits} />
             <.attention_section attention={report.attention} />
           </div>
+
+          <.quota_pacing_section accounts={report.quota_pacing} />
         </.async_result>
       </div>
     </Layouts.app>
+    """
+  end
+
+  attr :accounts, :list, required: true
+
+  defp quota_pacing_section(assigns) do
+    ~H"""
+    <section id="reports-quota-pacing" class="flex flex-col gap-3">
+      <h2 class="text-[13px] font-medium">Quota pacing</h2>
+      <div :if={@accounts == []} id="reports-quota-pacing-empty" class="text-[12.5px]">
+        No quota polls recorded yet.
+      </div>
+      <div
+        :for={acct <- @accounts}
+        id={"reports-quota-account-#{acct.account_id}"}
+        class="flex flex-col gap-2"
+      >
+        <h3 class="text-[12.5px] font-medium">{acct.label}</h3>
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div :for={w <- acct.windows} class="flex flex-col gap-1">
+            <span class="text-[12px] text-[var(--text-secondary)]">{w.window} window (% used)</span>
+            <Charts.pace_lines
+              id={"reports-quota-chart-#{acct.account_id}-#{w.window}"}
+              title={"#{acct.label} #{w.window} utilization against the pace ceiling"}
+              points={w.points}
+            />
+          </div>
+        </div>
+      </div>
+    </section>
     """
   end
 
