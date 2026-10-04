@@ -103,10 +103,7 @@ defmodule Arbiter.Version do
   tags. In release builds without git at runtime, returns the compile-time version.
   """
   def app_version do
-    case System.cmd("git", ["describe", "--tags", "--abbrev=0"],
-           cd: @git_dir_root,
-           stderr_to_stdout: true
-         ) do
+    case run_git(["describe", "--tags", "--abbrev=0"]) do
       {tag, 0} -> tag |> String.trim() |> String.trim_leading("v")
       _ -> @app_version_compiled
     end
@@ -122,15 +119,31 @@ defmodule Arbiter.Version do
   In release builds without git at runtime, returns the compile-time SHA.
   """
   def git_sha do
-    case System.cmd("git", ["rev-parse", "--short", "HEAD"],
-           cd: @git_dir_root,
-           stderr_to_stdout: true
-         ) do
+    case run_git(["rev-parse", "--short", "HEAD"]) do
       {sha, 0} -> String.trim(sha)
       _ -> @git_sha
     end
   rescue
     _error -> @git_sha
+  end
+
+  # The source checkout is resolved at runtime from the app's own location
+  # (`_build/<env>/lib/arbiter` in a Mix build). Never reuse `@git_dir_root`
+  # here: it is the *build machine's* path, so a release built in CI would
+  # use `/__w/arbiter/arbiter` as a spawn cwd and fail with
+  # "spawn: Could not cd to ..." on every call.
+  defp run_git(args) do
+    case runtime_git_root() do
+      nil -> :no_git
+      root -> System.cmd("git", args, cd: root, stderr_to_stdout: true)
+    end
+  end
+
+  defp runtime_git_root do
+    root = Path.expand("../../../..", Application.app_dir(:arbiter))
+
+    if File.exists?(Path.join(root, ".git")) and File.exists?(Path.join(root, "mix.exs")),
+      do: root
   end
 
   @doc "ISO-8601 UTC timestamp when this module was compiled."
