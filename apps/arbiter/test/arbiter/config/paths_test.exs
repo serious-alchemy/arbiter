@@ -119,4 +119,28 @@ defmodule Arbiter.Config.PathsTest do
       assert Paths.coordinator_session_dirs() == ["/tmp/a", "/tmp/b"]
     end
   end
+
+  describe "worker_tmp_root/0 defaults" do
+    test "resolves the absolute default with nothing configured" do
+      keys = ["ARBITER_WORKER_TMP_ROOT", "ARBITER_SCRATCH_ROOT"]
+      prior_env = Enum.map(keys, &{&1, System.get_env(&1)})
+
+      prior_cfg = [
+        worker_tmp_root: Application.get_env(:arbiter, :worker_tmp_root),
+        scratch_root: Application.get_env(:arbiter, :scratch_root)
+      ]
+
+      on_exit(fn ->
+        Enum.each(prior_env, fn {k, v} -> restore_env(k, v) end)
+        Enum.each(prior_cfg, fn {k, v} -> restore_cfg(k, v) end)
+      end)
+
+      Enum.each(keys, &System.delete_env/1)
+      Application.delete_env(:arbiter, :worker_tmp_root)
+      Application.delete_env(:arbiter, :scratch_root)
+
+      assert Paths.worker_tmp_root() == Path.join(Paths.scratch_root(), "worker-tmp")
+      assert Path.type(Paths.worker_tmp_root()) == :absolute
+    end
+  end
 end
