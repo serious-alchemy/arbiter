@@ -3807,13 +3807,18 @@ defmodule Arbiter.Worker do
   # `ConflictPassOutcome.verdict/1`. One that signals done mid-rebase, or without
   # pushing, is failed with the unresolved state named, so the Watchdog counts
   # it as the attempt that did not work instead of reading the PR as resolved.
-  defp finish_pass(%State{} = state) do
-    # bd-28c6qo: a CI fix pass has already pushed by the time it says done, but
-    # a pass that is still red would cost another CI round: bounce it back to
-    # the same session instead. Conflict passes are not checked.
-    case begin_prepush_check(state, :fix_pass) do
-      :proceed -> deliver_pass(state)
-      {:started, new_state} -> new_state
+  defp finish_pass(%State{meta: meta} = state) do
+    # bd-28c6qo: a CI fix pass commits locally without pushing; the pre-push check
+    # runs before the commit is pushed to origin. A green or unset check pushes and
+    # delivers the pass; a red check bounces back to the same session with the output.
+    # Conflict passes are not checked.
+    if role_from_meta(meta) == :fix_pass do
+      case begin_prepush_check(state, :fix_pass) do
+        :proceed -> push_and_deliver_fix_pass(state)
+        {:started, new_state} -> new_state
+      end
+    else
+      deliver_pass(state)
     end
   end
 
@@ -4430,10 +4435,11 @@ defmodule Arbiter.Worker do
 
   defp prepush_spec(%State{meta: meta} = state, ctx) do
     worktree = meta && Map.get(meta, :worktree_path)
+    branch = meta && (Map.get(meta, :branch) || Map.get(meta, :fix_pass_branch))
 
     runnable? =
       is_binary(worktree) and File.dir?(worktree) and
-        (ctx == :fix_pass or worktree_on_branch?(worktree, Map.get(meta, :branch)))
+        (ctx == :fix_pass or worktree_on_branch?(worktree, branch))
 
     if runnable? do
       Arbiter.Worker.PrepushCheck.resolve(notes_gate_workspace(state), state.repo)
@@ -4508,9 +4514,34 @@ defmodule Arbiter.Worker do
     proceed_after_gate(state, Map.get(meta, :branch))
   end
 
-  defp continue_after_prepush(%State{} = state, :fix_pass), do: deliver_pass(state)
+  defp continue_after_prepush(%State{} = state, :fix_pass), do: push_and_deliver_fix_pass(state)
 
-  defp handle_prepush_failure(%State{meta: meta} = state, _ctx, detail) do
+  defp push_and_deliver_fix_pass(%State{meta: meta, task_id: task_id} = state) do
+    worktree = meta && Map.get(meta, :worktree_path)
+    branch = meta && (Map.get(meta, :branch) || Map.get(meta, :fix_pass_branch))
+
+    if is_binary(worktree) and File.dir?(worktree) do
+      sync_back_after_run(state)
+
+      push_opts = [set_upstream: true] ++ if(is_binary(branch), do: [branch: branch], else: [])
+
+      case Arbiter.Worker.Worktree.push(worktree, push_opts) do
+        {:ok, _} ->
+          deliver_pass(state)
+
+        {:error, reason} ->
+          Logger.warning(
+            "Worker: git push for fix_pass failed on task=#{task_id}: #{inspect(reason)}"
+          )
+
+          fail_now(state, {:push_failed, reason})
+      end
+    else
+      deliver_pass(state)
+    end
+  end
+
+  defp handle_prepush_failure(%State{meta: meta} = state, ctx, detail) do
     cap = prepush_nudge_cap(meta)
     attempts = Map.get(meta, :prepush_nudge_attempts, 0)
     state = %State{state | meta: Map.put(meta, :prepush_detail, detail)}
@@ -4525,7 +4556,7 @@ defmodule Arbiter.Worker do
         park_commit_gate(state, :prepush_failed, {:respawn_failed, :session_live})
 
       true ->
-        nudge = Arbiter.Worker.PrepushCheck.nudge_prompt(state.task_id, meta, detail)
+        nudge = Arbiter.Worker.PrepushCheck.nudge_prompt(state.task_id, meta, detail, ctx)
 
         case respawn_with_nudge(state, nudge,
                attempts_key: :prepush_nudge_attempts,
@@ -5723,7 +5754,8 @@ defmodule Arbiter.Worker do
   # code is held to it; see the note in .credo.exs.
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp commit_gate_summary(%State{task_id: task_id, meta: meta}, reason, why) do
-    branch = (meta && Map.get(meta, :branch)) || "(unknown)"
+    branch =
+      (meta && (Map.get(meta, :branch) || Map.get(meta, :fix_pass_branch))) || "(unknown)"
     target = (meta && Map.get(meta, :target_branch)) || "main"
     worktree = (meta && Map.get(meta, :worktree_path)) || "(unknown)"
     attempts_key = commit_gate_attempts_key(reason)

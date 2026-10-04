@@ -488,9 +488,10 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
   Fix-pass prompt. Public for tests + introspection.
 
   The prompt is intentionally narrow: diagnose the failing checks, fix the root
-  cause, commit, push to the SAME branch, exit. It does NOT instruct the worker
-  to re-implement the change set or open a new PR. It is told to escalate via the
-  mailbox when the failure isn't something it can fix, rather than thrashing.
+  cause, commit, exit. It does NOT instruct the worker to re-implement the change
+  set or open a new PR. Arbiter runs pre-push checks, pushes to the branch, and
+  updates the PR. It is told to escalate via the mailbox when the failure isn't
+  something it can fix, rather than thrashing.
 
   Two non-code outs are spelled out (bd-5mzzww): `ci_rerun` for a failure that a
   rebuild would clear — with the granularity trap named explicitly, because
@@ -511,9 +512,10 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
          you can (run the failing test / linter / build).
       2. Fix the ROOT CAUSE in the code. Do not paper over a real failure by
          deleting or skipping the test unless the test itself is genuinely wrong.
-      3. Commit your fix and push to the SAME branch:
-         `git push origin #{branch}` (the existing PR updates in place and CI
-         re-runs — do NOT open a new PR).
+      3. Commit your fix (do NOT push):
+         `git commit -m "<a short message>"`
+         Arbiter runs this repo's pre-push checks, pushes to `#{branch}` for you,
+         and updates the PR (do NOT open a new PR).
       4. Exit by printing `arb done` on a line by itself.
 
     Failing checks:
@@ -574,7 +576,7 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
   end
 
   def prompt_for(_) do
-    "You are a CI fix-pass worker. Diagnose the failing checks, fix the root cause, push, exit."
+    "You are a CI fix-pass worker. Diagnose the failing checks, fix the root cause, commit, exit."
   end
 
   # bd-2l0hzm: the Watchdog re-ran CI because every failing test was outside

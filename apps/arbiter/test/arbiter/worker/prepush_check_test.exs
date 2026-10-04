@@ -152,7 +152,7 @@ defmodule Arbiter.Worker.PrepushCheckTest do
     end
   end
 
-  describe "nudge_prompt/3 and failure_blurb/1" do
+  describe "nudge_prompt and failure_blurb" do
     @meta %{branch: "bd-x/y", prepush_spec: %{command: "mix precommit && mix audit"}}
 
     test "the send-back carries the command, the exit status and the output" do
@@ -165,6 +165,29 @@ defmodule Arbiter.Worker.PrepushCheckTest do
       assert prompt =~ "exited with status 2"
       assert prompt =~ "credo found 3 issues"
       assert prompt =~ "has been pushed and no PR has been opened"
+    end
+
+    test "a fix pass nudge tells the worker the arbiter pushes and does not claim no PR was opened" do
+      detail = {:exit, 1, "test failure"}
+      prompt = PrepushCheck.nudge_prompt("bd-2", @meta, detail, :fix_pass)
+
+      assert prompt =~ "bd-2"
+      assert prompt =~ "bd-x/y"
+      assert prompt =~ "nothing has been pushed"
+      refute prompt =~ "no PR has been opened"
+      assert prompt =~ "the arbiter pushes to `bd-x/y` for you"
+    end
+
+    test "nudge_prompt and failure_blurb fall back to fix_pass_branch when branch is nil" do
+      meta = %{fix_pass_branch: "fix/pass-branch", prepush_spec: %{command: "mix test"}}
+      detail = {:exit, 1, "failed"}
+
+      prompt = PrepushCheck.nudge_prompt("bd-3", meta, detail, :fix_pass)
+      assert prompt =~ "fix/pass-branch"
+      assert prompt =~ "the arbiter pushes to `fix/pass-branch` for you"
+
+      blurb = PrepushCheck.failure_blurb(Map.put(meta, :prepush_detail, detail))
+      assert blurb =~ "fix/pass-branch"
     end
 
     test "a timeout-as-failure says so" do

@@ -203,16 +203,38 @@ defmodule Arbiter.Worker.PrepushCheck do
   @doc """
   The prompt a failed check is sent back to the worker session with.
   `meta` is the worker's meta (for `:branch` and the stashed `:prepush_spec`).
+  `ctx` distinguishes a main/fix-round run (`:main`) from a CI fix pass (`:fix_pass`).
   """
-  @spec nudge_prompt(String.t(), map(), detail()) :: String.t()
-  def nudge_prompt(task_id, meta, detail) do
-    branch = Map.get(meta, :branch) || "(your branch)"
+  @spec nudge_prompt(String.t(), map(), detail(), atom()) :: String.t()
+  def nudge_prompt(task_id, meta, detail, ctx \\ :main) do
+    branch = Map.get(meta, :branch) || Map.get(meta, :fix_pass_branch) || "(your branch)"
+
+    intro =
+      case ctx do
+        :fix_pass ->
+          "bd-28c6qo pre-push check: you printed `arb done` for task #{task_id}, but\n" <>
+            "this repo's pre-push check is not green on branch `#{branch}`, so nothing\n" <>
+            "has been pushed. CI runs the same checks and would fail the same way,\n" <>
+            "so fix it now."
+
+        _ ->
+          "bd-28c6qo pre-push check: you printed `arb done` for task #{task_id}, but\n" <>
+            "this repo's pre-push check is not green on branch `#{branch}`, so nothing\n" <>
+            "has been pushed and no PR has been opened. CI runs the same checks and\n" <>
+            "would fail the same way, so fix it now."
+      end
+
+    step_3 =
+      case ctx do
+        :fix_pass ->
+          "`git add -A && git commit -m \"<a short message>\"` (the arbiter pushes to `#{branch}` for you)."
+
+        _ ->
+          "`git add -A && git commit -m \"<a short message>\"` (the arbiter pushes and opens the PR for you)."
+      end
 
     """
-    bd-28c6qo pre-push check: you printed `arb done` for task #{task_id}, but
-    this repo's pre-push check is not green on branch `#{branch}`, so nothing
-    has been pushed and no PR has been opened. CI runs the same checks and
-    would fail the same way, so fix it now.
+    #{intro}
 
     Check command (run from the repo root of your worktree):
 
@@ -229,8 +251,7 @@ defmodule Arbiter.Worker.PrepushCheck do
       1. Fix what the output reports. Do not delete or weaken the check, and
          do not skip it with flags — change the code.
       2. Re-run the check command above yourself until it exits 0.
-      3. `git add -A && git commit -m "<a short message>"` (the arbiter pushes
-         and opens the PR for you).
+      3. #{step_3}
     """
   end
 
@@ -241,7 +262,7 @@ defmodule Arbiter.Worker.PrepushCheck do
   @spec failure_blurb(map()) :: String.t()
   def failure_blurb(meta) do
     detail = Map.get(meta, :prepush_detail)
-    branch = Map.get(meta, :branch) || "(unknown)"
+    branch = Map.get(meta, :branch) || Map.get(meta, :fix_pass_branch) || "(unknown)"
 
     "the pre-push check (`worker.prepush_check`) is red on branch `#{branch}`, so the " <>
       "branch was NOT pushed.\n\nCommand: #{command(meta)}\n" <>

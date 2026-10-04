@@ -341,7 +341,7 @@ defmodule Arbiter.Worker.PrepushCheckGateTest do
       |> List.first()
     end
 
-    test "a failing check keeps the pass from reporting done", %{repo: repo} do
+    test "a failing check keeps the pass from reporting done", %{repo: repo, remote: remote} do
       ws = workspace(%{"prepush_check" => "echo still-red; exit 1"})
       task = new_task(ws)
       path = committed_worktree(repo, "bd-gate/#{task.id}")
@@ -353,9 +353,13 @@ defmodule Arbiter.Worker.PrepushCheckGateTest do
       snap = Worker.state(pid)
       assert snap.meta.commit_gate_reason == :prepush_failed
       refute snap.meta[:result] == :pass_finished
+
+      # Not pushed: remote never saw the branch
+      {refs, 0} = git(["ls-remote", "--heads", remote], repo)
+      refute refs =~ "bd-gate/#{task.id}"
     end
 
-    test "a passing check lets the pass finish as before", %{repo: repo} do
+    test "a passing check lets the pass finish and pushes to remote", %{repo: repo, remote: remote} do
       ws = workspace(%{"prepush_check" => "exit 0"})
       task = new_task(ws)
       path = committed_worktree(repo, "bd-gate/#{task.id}")
@@ -366,6 +370,87 @@ defmodule Arbiter.Worker.PrepushCheckGateTest do
 
       assert_receive {:DOWN, ^ref, :process, ^pid, _}, 10_000
       assert latest_run(task).outcome == :succeeded
+
+      # Pushed to remote
+      {refs, 0} = git(["ls-remote", "--heads", remote], repo)
+      assert refs =~ "bd-gate/#{task.id}"
+    end
+
+    test "the failure is sent back to the fix-pass session under its own cap", %{
+      repo: repo,
+      remote: remote
+    } do
+      ws = workspace(%{"prepush_check" => "echo fix-pass-red; exit 1"})
+      task = new_task(ws)
+      path = committed_worktree(repo, "bd-gate/#{task.id}")
+
+      pid =
+        start_worker(
+          task,
+          repo,
+          path,
+          Map.merge(fix_pass_meta(), %{prepush_nudge_cap: 1})
+        )
+
+      {:ok, _port} =
+        Arbiter.Worker.ClaudeSession.start(
+          owner: pid,
+          worktree_path: path,
+          command: ["sh", "-c", "printf 'arb %s\\n' done"]
+        )
+
+      wait_until(fn -> failed?(pid) end)
+
+      snap = Worker.state(pid)
+      assert snap.meta.prepush_nudge_attempts == 1
+      assert snap.meta.commit_gate_detail == :cap_exhausted
+      assert snap.meta.commit_gate_reason == :prepush_failed
+
+      # Nudge prompt was appended to the run prompt and mentions fix-pass instructions
+      assert {:ok, prompt} = Arbiter.Worker.PromptLog.read(snap.run_id)
+      assert prompt =~ "fix-pass-red"
+      assert prompt =~ "the arbiter pushes"
+      refute prompt =~ "no PR has been opened"
+
+      # Remote branch was NOT pushed
+      {refs, 0} = git(["ls-remote", "--heads", remote], repo)
+      refute refs =~ "bd-gate/#{task.id}"
+    end
+
+    test "send-back recovers when check becomes green; remote is updated only after check passes",
+         %{repo: repo, remote: remote} do
+      ws = workspace(%{"prepush_check" => "test -f fixed.txt"})
+      task = new_task(ws)
+      path = committed_worktree(repo, "bd-gate/#{task.id}")
+
+      pid =
+        start_worker(
+          task,
+          repo,
+          path,
+          Map.merge(fix_pass_meta(), %{prepush_nudge_cap: 1})
+        )
+
+      # Attempt 1 leaves fixed.txt missing (prepush check fails).
+      # Attempt 2 creates fixed.txt so the re-check passes.
+      script =
+        "if [ -f marker.tmp ]; then touch fixed.txt; else touch marker.tmp; fi; printf 'arb %s\\n' done"
+
+      {:ok, _port} =
+        Arbiter.Worker.ClaudeSession.start(
+          owner: pid,
+          worktree_path: path,
+          command: ["sh", "-c", script]
+        )
+
+      ref = Process.monitor(pid)
+      assert_receive {:DOWN, ^ref, :process, ^pid, _}, 10_000
+
+      assert latest_run(task).outcome == :succeeded
+
+      # The remote branch was pushed after going green
+      {refs, 0} = git(["ls-remote", "--heads", remote], repo)
+      assert refs =~ "bd-gate/#{task.id}"
     end
 
     test "unset config: the pass finishes exactly as before", %{repo: repo} do
@@ -379,6 +464,40 @@ defmodule Arbiter.Worker.PrepushCheckGateTest do
 
       assert_receive {:DOWN, ^ref, :process, ^pid, _}, 10_000
       assert latest_run(task).outcome == :succeeded
+    end
+  end
+
+  describe "a ReviewGate fix round" do
+    test "a failing check keeps the fix round from routing on; failure is sent back to session",
+         %{repo: repo, remote: remote} do
+      ws = workspace(%{"prepush_check" => "echo 'fix-round-red'; exit 1"})
+      task = new_task(ws)
+      path = committed_worktree(repo, "bd-gate/#{task.id}")
+
+      pid =
+        start_worker(task, repo, path, %{
+          role: :implementer,
+          review_gate_fix_round_attempts: 1,
+          prepush_nudge_cap: 1
+        })
+
+      {:ok, _port} =
+        Arbiter.Worker.ClaudeSession.start(
+          owner: pid,
+          worktree_path: path,
+          command: ["sh", "-c", "printf 'arb %s\\n' done"]
+        )
+
+      wait_until(fn -> failed?(pid) end)
+
+      snap = Worker.state(pid)
+      assert snap.meta.prepush_nudge_attempts == 1
+      assert snap.meta.commit_gate_detail == :cap_exhausted
+      assert snap.meta.commit_gate_reason == :prepush_failed
+
+      # Remote was not updated
+      {refs, 0} = git(["ls-remote", "--heads", remote], repo)
+      refute refs =~ "bd-gate/#{task.id}"
     end
   end
 end
