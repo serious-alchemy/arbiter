@@ -19,13 +19,6 @@ defmodule Arbiter.MCP.AgentConfig do
 
   @callback write_mcp_config(worktree :: Path.t(), opts :: keyword()) :: :ok | {:error, term()}
 
-  # Provider atom → adapter module. Phase 1: Claude. Phase 3: Gemini, Codex.
-  @adapters %{
-    claude: Arbiter.MCP.AgentConfig.Claude,
-    gemini: Arbiter.MCP.AgentConfig.Gemini,
-    codex: Arbiter.MCP.AgentConfig.Codex
-  }
-
   @doc """
   Write the MCP config for `provider` into `worktree`. Returns `:ok` (including
   for an unknown provider, which is a no-op) or `{:error, reason}` if the adapter
@@ -128,7 +121,7 @@ defmodule Arbiter.MCP.AgentConfig do
   @doc "The adapter module for a provider atom/string, or `nil` if none is registered."
   @spec adapter_for(atom() | String.t() | nil) :: module() | nil
   def adapter_for(provider) when is_atom(provider) and not is_nil(provider),
-    do: Map.get(@adapters, provider)
+    do: Map.get(Arbiter.Extensions.registry(:mcp_agent_config), provider)
 
   def adapter_for(provider) when is_binary(provider) do
     adapter_for(safe_atom(provider))

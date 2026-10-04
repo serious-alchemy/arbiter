@@ -27,19 +27,9 @@ defmodule Arbiter.Agents.Routing do
   """
 
   alias Arbiter.Agents.ProviderPool
-  alias Arbiter.Agents.Routing.{ByBudget, ByDifficulty, ByPriority, Policy, RoundRobin, Static}
+  alias Arbiter.Agents.Routing.{Policy, Static}
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
-
-  @policies %{
-    static: Static,
-    by_priority: ByPriority,
-    by_difficulty: ByDifficulty,
-    by_budget: ByBudget,
-    round_robin: RoundRobin
-  }
-
-  @valid_policies ~w(static by_priority by_difficulty by_budget round_robin)
 
   @doc """
   Choose an agent for `task`. `:ledger_snapshot` is reserved for
@@ -62,23 +52,24 @@ defmodule Arbiter.Agents.Routing do
 
   def policy_for_workspace(%Workspace{config: config}) do
     case get_in(config || %{}, ["routing", "policy"]) do
-      # `String.to_existing_atom/1`, not `String.to_atom/1` (sobelow
-      # DOS.StringToAtom). The value is validated against the list above, so
-      # the atom is guaranteed to already exist and the unbounded-atom-table
-      # concern does not apply — but spelling it this way means a future edit
-      # that loosens the guard cannot quietly reintroduce the leak.
-      p when p in @valid_policies -> Map.fetch!(@policies, String.to_existing_atom(p))
-      _ -> Static
+      p when is_binary(p) ->
+        case Arbiter.Extensions.fetch(:routing_policy, p) do
+          {:ok, policy} -> policy
+          :error -> Static
+        end
+
+      _ ->
+        Static
     end
   end
 
   @doc "Returns the map of policy atom → module."
   @spec policies() :: %{atom() => module()}
-  def policies, do: @policies
+  def policies, do: Arbiter.Extensions.registry(:routing_policy)
 
   @doc "Valid routing policy strings (for workspace-config validation)."
   @spec valid_policies() :: [String.t()]
-  def valid_policies, do: @valid_policies
+  def valid_policies, do: Arbiter.Extensions.keys(:routing_policy)
 
   @doc """
   Default choice — the workspace's worker-agent config, with no per-task

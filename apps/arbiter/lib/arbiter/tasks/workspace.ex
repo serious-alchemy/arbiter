@@ -69,9 +69,6 @@ defmodule Arbiter.Tasks.Workspace do
     data_layer: AshSqlite.DataLayer,
     extensions: [AshCloak, AshPaperTrail.Resource]
 
-  @valid_tracker_types ~w(none jira shortcut linear github gitlab)
-  @valid_merger_strategies ~w(direct gitlab github)
-
   sqlite do
     table "workspaces"
     repo Arbiter.Repo
@@ -399,9 +396,11 @@ defmodule Arbiter.Tasks.Workspace do
   end
 
   @doc """
-  Returns the list of valid tracker type strings.
+  Returns the list of valid tracker type strings: every key registered on the
+  `:tracker` seam (`Arbiter.Extensions`), so an installed extension's tracker
+  validates exactly while it is installed.
   """
-  def valid_tracker_types, do: @valid_tracker_types
+  def valid_tracker_types, do: Arbiter.Extensions.keys(:tracker)
 
   @valid_tracker_child_policies ~w(context_only inherit_parent mint)
 
@@ -436,11 +435,11 @@ defmodule Arbiter.Tasks.Workspace do
   end
 
   @doc """
-  Returns the list of valid merger strategy strings.
-
-  `~w(direct gitlab github)`.
+  Returns the list of valid merger strategy strings: every key registered on
+  the `:merger` seam (`Arbiter.Extensions`) — `direct`, `gitlab`, `github`
+  plus any installed extension's.
   """
-  def valid_merger_strategies, do: @valid_merger_strategies
+  def valid_merger_strategies, do: Arbiter.Extensions.keys(:merger)
 
   @doc """
   Resolves the merger strategy for a workspace from
@@ -453,12 +452,17 @@ defmodule Arbiter.Tasks.Workspace do
   def merger_strategy(workspace) do
     case get_in(workspace.config || %{}, ["merge", "strategy"]) do
       # `String.to_existing_atom/1`, not `String.to_atom/1` (sobelow
-      # DOS.StringToAtom). The value is validated against the list above, so
-      # the atom is guaranteed to already exist and the unbounded-atom-table
+      # DOS.StringToAtom). The value is validated against the registered keys,
+      # so the atom is guaranteed to already exist and the unbounded-atom-table
       # concern does not apply — but spelling it this way means a future edit
       # that loosens the guard cannot quietly reintroduce the leak.
-      strategy when strategy in @valid_merger_strategies -> String.to_existing_atom(strategy)
-      _ -> :direct
+      strategy when is_binary(strategy) ->
+        if strategy in valid_merger_strategies(),
+          do: String.to_existing_atom(strategy),
+          else: :direct
+
+      _ ->
+        :direct
     end
   end
 

@@ -41,14 +41,6 @@ defmodule Arbiter.Agents do
 
   @type adapter :: module()
 
-  @adapters %{
-    claude: Claude,
-    gemini: Gemini,
-    codex: Codex
-  }
-
-  @valid_agent_types ~w(claude gemini codex)
-
   @doc """
   Returns the adapter module for the given workspace.
 
@@ -222,7 +214,7 @@ defmodule Arbiter.Agents do
 
       true ->
         pool
-        |> Enum.filter(&Map.has_key?(@adapters, &1))
+        |> Enum.filter(&Map.has_key?(adapters(), &1))
         |> Enum.find(&(&1 != preferred and write_confined?(for_type(&1), policy)))
         |> case do
           nil -> {:error, :ineligible}
@@ -252,20 +244,23 @@ defmodule Arbiter.Agents do
   """
   @spec for_type(atom()) :: adapter
   def for_type(type) when is_atom(type) do
-    case Map.fetch(@adapters, type) do
+    case Map.fetch(adapters(), type) do
       {:ok, mod} ->
         mod
 
       :error ->
         raise ArgumentError,
               "no agent adapter registered for #{inspect(type)} " <>
-                "(registered: #{inspect(Map.keys(@adapters))})"
+                "(registered: #{inspect(Map.keys(adapters()))})"
     end
   end
 
-  @doc "Returns the map of agent_type → adapter module."
+  @doc """
+  Returns the map of agent_type → adapter module: core's adapters plus any
+  installed `Arbiter.Extension`'s (`Arbiter.Extensions.registry/1`).
+  """
   @spec adapters() :: %{atom() => adapter}
-  def adapters, do: @adapters
+  def adapters, do: Arbiter.Extensions.registry(:agent)
 
   @doc """
   Check whether an agent provider is currently available to run.
@@ -274,7 +269,7 @@ defmodule Arbiter.Agents do
   """
   @spec provider_available?(atom()) :: boolean()
   def provider_available?(provider) when is_atom(provider) do
-    case Map.get(@adapters, provider) do
+    case Map.get(adapters(), provider) do
       nil ->
         false
 
@@ -402,7 +397,7 @@ defmodule Arbiter.Agents do
 
   @doc "Returns the list of valid agent type strings (for workspace-config validation)."
   @spec valid_agent_types() :: [String.t()]
-  def valid_agent_types, do: @valid_agent_types
+  def valid_agent_types, do: Arbiter.Extensions.keys(:agent)
 
   @doc """
   Prepare the current process to make adapter calls for `workspace`.
@@ -492,7 +487,7 @@ defmodule Arbiter.Agents do
   defp registered_types(types) do
     types
     |> Enum.map(&safe_type_atom/1)
-    |> Enum.filter(&Map.has_key?(@adapters, &1))
+    |> Enum.filter(&Map.has_key?(adapters(), &1))
   end
 
   defp safe_type_atom(t) when is_binary(t) do

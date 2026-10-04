@@ -16,18 +16,12 @@ defmodule Arbiter.Mergers do
   `config["merge"]["strategy"]`, falling back to `:direct`).
   """
 
-  alias Arbiter.Mergers.{Direct, Github, Gitlab}
+  alias Arbiter.Mergers.{Github, Gitlab}
   alias Arbiter.Tasks.RepoConfig
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Tasks.Workspace.Changes.PatchConfig
 
   @type adapter :: module()
-
-  @adapters %{
-    direct: Direct,
-    gitlab: Gitlab,
-    github: Github
-  }
 
   @doc """
   Returns the adapter module for the given workspace.
@@ -46,20 +40,20 @@ defmodule Arbiter.Mergers do
   """
   @spec for_strategy(atom()) :: adapter
   def for_strategy(strategy) when is_atom(strategy) do
-    case Map.fetch(@adapters, strategy) do
+    case Map.fetch(adapters(), strategy) do
       {:ok, mod} ->
         mod
 
       :error ->
         raise ArgumentError,
               "no merger adapter registered for #{inspect(strategy)} " <>
-                "(registered: #{inspect(Map.keys(@adapters))})"
+                "(registered: #{inspect(Map.keys(adapters()))})"
     end
   end
 
   @doc "Returns the map of strategy → adapter module."
   @spec adapters() :: %{atom() => adapter}
-  def adapters, do: @adapters
+  def adapters, do: Arbiter.Extensions.registry(:merger)
 
   # ---- per-repo resolution (bd-73zv62) -------------------------------------
 

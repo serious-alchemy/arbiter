@@ -1093,6 +1093,34 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
   @spec valid_quota_modes() :: [String.t()]
   def valid_quota_modes, do: @valid_quota_modes
 
+  # `quota.gate` names an implementation on the `:quota_gate` seam
+  # (`Arbiter.Extensions`), so what is valid depends on which extensions are
+  # installed. `on_exhaustion` below stays as the core shorthand.
+  defp validate_quota_gate(changeset, quota) do
+    valid = Arbiter.Extensions.keys(:quota_gate)
+
+    case Map.get(quota, "gate") do
+      nil ->
+        changeset
+
+      gate when is_binary(gate) ->
+        if gate in valid do
+          changeset
+        else
+          Changeset.add_error(changeset,
+            field: :config,
+            message: "quota.gate must be one of #{Enum.join(valid, ", ")}; got: #{inspect(gate)}"
+          )
+        end
+
+      other ->
+        Changeset.add_error(changeset,
+          field: :config,
+          message: "quota.gate must be one of #{Enum.join(valid, ", ")}; got: #{inspect(other)}"
+        )
+    end
+  end
+
   defp validate_quota(changeset, nil), do: changeset
 
   # Pre-existing complexity 13 — baselined when bd-4x2yhq first
@@ -1101,6 +1129,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp validate_quota(changeset, quota) when is_map(quota) do
     changeset
+    |> then(fn cs -> validate_quota_gate(cs, quota) end)
     |> then(fn cs ->
       case Map.get(quota, "on_exhaustion") do
         nil ->

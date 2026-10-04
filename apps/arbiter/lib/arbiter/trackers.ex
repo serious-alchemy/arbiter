@@ -24,15 +24,6 @@ defmodule Arbiter.Trackers do
 
   @type adapter :: module()
 
-  @adapters %{
-    none: None,
-    jira: Jira,
-    shortcut: Shortcut,
-    github: GitHub,
-    gitlab: Gitlab,
-    linear: Linear
-  }
-
   @doc """
   Returns the adapter module for the given task.
 
@@ -46,20 +37,20 @@ defmodule Arbiter.Trackers do
 
   @spec for_type(atom()) :: adapter
   def for_type(type) when is_atom(type) do
-    case Map.fetch(@adapters, type) do
+    case Map.fetch(adapters(), type) do
       {:ok, mod} ->
         mod
 
       :error ->
         raise ArgumentError,
               "no tracker adapter registered for #{inspect(type)} " <>
-                "(registered: #{inspect(Map.keys(@adapters))})"
+                "(registered: #{inspect(Map.keys(adapters()))})"
     end
   end
 
   @doc "Returns the map of tracker_type → adapter module."
   @spec adapters() :: %{atom() => adapter}
-  def adapters, do: @adapters
+  def adapters, do: Arbiter.Extensions.registry(:tracker)
 
   @doc """
   Prepare the current process to make adapter calls for `issue` against
@@ -364,9 +355,9 @@ defmodule Arbiter.Trackers do
   # entirely-missing Linear adapter went unnoticed — bd-3ri70e).
   #
   # `:none` is intentional and never reaches the :error branch — it is in
-  # @adapters and maps directly to the None adapter.
+  # the registry and maps directly to the None adapter.
   defp adapter_for_workspace_type(type, %Arbiter.Tasks.Workspace{} = workspace) do
-    case Map.fetch(@adapters, type) do
+    case Map.fetch(adapters(), type) do
       {:ok, adapter} ->
         adapter
 
@@ -376,7 +367,7 @@ defmodule Arbiter.Trackers do
             "with tracker_type=#{inspect(type)} but no adapter is registered for this type — " <>
             "falling back to None (tracker integration will be a no-op). " <>
             "If this is intentional, set tracker.type to \"none\" instead. " <>
-            "Registered adapters: #{inspect(Map.keys(@adapters))}"
+            "Registered adapters: #{inspect(Map.keys(adapters()))}"
         )
 
         notify_misconfigured_tracker(workspace, type)
@@ -393,7 +384,7 @@ defmodule Arbiter.Trackers do
           "but no adapter is registered for this type. " <>
           "Tracker integration will be a no-op until the adapter ships or the config is corrected.\n\n" <>
           ~s(To silence this warning, set `config["tracker"]["type"]` to "none" ) <>
-          "(or a supported type: #{Enum.join(Map.keys(@adapters) -- [:none], ", ")})."
+          "(or a supported type: #{Enum.join(Map.keys(adapters()) -- [:none], ", ")})."
     })
   rescue
     e ->
