@@ -191,6 +191,33 @@ defmodule Arbiter.Quota.HistoryTest do
       assert_in_delta row.utilization, 0.2, 0.001
     end
 
+    test "a failed Antigravity probe after a good one appends nothing" do
+      ws = Ash.create!(Workspace, %{name: "default"})
+      account_id = quota_account_id!(ws.id, "antigravity")
+
+      groups = [
+        %{
+          "name" => "Gemini Models",
+          "buckets" => [
+            %{
+              "window" => "5h",
+              "remaining_fraction" => 0.8,
+              "reset_time" => "2026-10-04T12:00:00Z"
+            }
+          ]
+        }
+      ]
+
+      good = fn -> {:ok, %{"command" => %{"data" => %{"groups" => groups}}}} end
+      assert %{} = Arbiter.Quota.CloudCode.refresh(ws.id, :antigravity, agy_usage_probe: good)
+      before = length(History.list(account_id))
+      assert before > 0
+
+      bad = fn -> {:error, :timeout} end
+      Arbiter.Quota.CloudCode.refresh(ws.id, :antigravity, agy_usage_probe: bad)
+      assert length(History.list(account_id)) == before
+    end
+
     test "list/2 honours since and until" do
       ws = Ash.create!(Workspace, %{name: "default"})
       account_id = quota_account_id!(ws.id)
