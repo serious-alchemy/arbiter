@@ -502,14 +502,14 @@ defmodule Arbiter.Guardrails do
   defp removed(old, new, field) do
     case old -- new do
       [] -> []
-      gone -> ["#{field} drops #{Enum.join(Enum.map(gone, &inspect/1), ", ")}"]
+      gone -> ["#{field} drops #{Enum.map_join(gone, ", ", &inspect/1)}"]
     end
   end
 
   defp added(old, new, field) do
     case new -- old do
       [] -> []
-      extra -> ["#{field} adds #{Enum.join(Enum.map(extra, &inspect/1), ", ")}"]
+      extra -> ["#{field} adds #{Enum.map_join(extra, ", ", &inspect/1)}"]
     end
   end
 

@@ -2918,11 +2918,8 @@ defmodule Arbiter.Worker.Dispatch do
           |> guardrail_checked(base_policy, workspace, choice, opts)
 
         case checked do
-          {:error, :ineligible} ->
-            {:error, ineligible_provider_error(choice.type, policy, workspace, opts)}
-
-          {:error, {:guardrail_unenforceable, _} = refusal} ->
-            {:error, refusal}
+          {:error, reason} ->
+            {:error, provider_refusal(reason, choice.type, policy, workspace, opts)}
 
           {:ok, effective_type} ->
             choice = apply_agent_type_override(choice, effective_type)
@@ -3276,6 +3273,14 @@ defmodule Arbiter.Worker.Dispatch do
   defp sandbox_pool(policy, pool) do
     if ContainerSpawn.podman?(policy), do: Enum.filter(pool, &(&1 == :claude)), else: pool
   end
+
+  # Why no provider was eligible: the sandbox/strict gate (`:ineligible`), or a
+  # guardrail tier no candidate can enforce on this host (G11).
+  defp provider_refusal(:ineligible, provider_type, policy, workspace, opts),
+    do: ineligible_provider_error(provider_type, policy, workspace, opts)
+
+  defp provider_refusal({:guardrail_unenforceable, _} = refusal, _type, _policy, _ws, _opts),
+    do: refusal
 
   # Why `sandbox_checked_provider/4` found no eligible provider: a sandbox
   # backend with no implementation for it, else the `:strict` write-confinement

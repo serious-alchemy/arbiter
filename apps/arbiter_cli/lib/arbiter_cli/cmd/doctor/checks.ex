@@ -890,8 +890,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
 
   # "default: claude=privileged, antigravity/gemini-3.8-flash-low=quarantine; emricare: …"
   defp guardrail_tiers_detail(workspaces) do
-    workspaces
-    |> Enum.map(fn ws ->
+    Enum.map_join(workspaces, "; ", fn ws ->
       subjects =
         ws
         |> Map.get("subjects", [])
@@ -907,7 +906,6 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
 
       "#{Map.get(ws, "workspace")}: #{subjects}"
     end)
-    |> Enum.join("; ")
   end
 
   defp host_jail_status do

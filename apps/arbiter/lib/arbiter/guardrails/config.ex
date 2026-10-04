@@ -289,17 +289,15 @@ defmodule Arbiter.Guardrails.Config do
         %{} = m ->
           m = stringify(m)
 
-          cond do
-            map_size(m) == 0 ->
-              ["#{label}.match must name at least one of provider, family, model"]
-
-            true ->
-              unknown(m, @match_keys, "#{label}.match") ++
-                for(
-                  {k, v} <- m,
-                  not (is_binary(v) and v != ""),
-                  do: "#{label}.match.#{k} must be a non-empty string"
-                )
+          if map_size(m) == 0 do
+            ["#{label}.match must name at least one of provider, family, model"]
+          else
+            unknown(m, @match_keys, "#{label}.match") ++
+              for(
+                {k, v} <- m,
+                not (is_binary(v) and v != ""),
+                do: "#{label}.match.#{k} must be a non-empty string"
+              )
           end
 
         _ ->

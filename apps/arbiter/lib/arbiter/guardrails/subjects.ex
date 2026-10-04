@@ -85,10 +85,7 @@ defmodule Arbiter.Guardrails.Subjects do
         :ok
 
       row ->
-        with :ok <- authorize(hd_rule(row), nil, authority),
-             :ok <- Ash.destroy(row) do
-          :ok
-        end
+        with :ok <- authorize(hd_rule(row), nil, authority), do: Ash.destroy(row)
     end
   end
 
