@@ -70,6 +70,11 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
       a number in (0, 1], `"min_fix_passes"` a positive integer,
       `"check_commands"` a map of repo name → command string (bd-cuu8n3), and
       `"flake_recurrence_threshold"` a positive integer (bd-6vullc).
+    * If `"worker"` is present, it must be a map. Its `"seed_paths"` (and each
+      per-repo `"worker.repos.<repo>.seed_paths"`) must be a list of strings
+      (bd-2jerqw, `Arbiter.Worker.SeedPaths`). The entries themselves are
+      checked when a worktree is seeded: an absolute, `..` or `.git` entry is
+      skipped with a logged warning rather than refused here.
     * If `"attention"` is present, it must be a map whose
       `"coordinator_limit_minutes"` / `"run_crashed_max_resumes"` are
       non-negative integers — `0` turns a limit off (bd-8nlez1,
@@ -111,6 +116,61 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     |> validate_quota(Map.get(config, "quota"))
     |> validate_loop(Map.get(config, "loop"))
     |> validate_attention(Map.get(config, "attention"))
+    |> validate_worker(Map.get(config, "worker"))
+  end
+
+  # bd-2jerqw: `worker.seed_paths` / `worker.repos.<repo>.seed_paths`.
+  defp validate_worker(changeset, nil), do: changeset
+
+  defp validate_worker(changeset, worker) when is_map(worker) do
+    changeset
+    |> validate_seed_paths(worker, "worker")
+    |> validate_worker_repos(Map.get(worker, "repos"))
+  end
+
+  defp validate_worker(changeset, _) do
+    Changeset.add_error(changeset, field: :config, message: "worker must be a map")
+  end
+
+  defp validate_worker_repos(changeset, nil), do: changeset
+
+  defp validate_worker_repos(changeset, repos) when is_map(repos) do
+    Enum.reduce(repos, changeset, fn
+      {repo, %{} = block}, cs ->
+        validate_seed_paths(cs, block, "worker.repos.#{repo}")
+
+      {repo, _}, cs ->
+        Changeset.add_error(cs,
+          field: :config,
+          message: "worker.repos.#{repo} must be a map"
+        )
+    end)
+  end
+
+  defp validate_worker_repos(changeset, _) do
+    Changeset.add_error(changeset, field: :config, message: "worker.repos must be a map")
+  end
+
+  defp validate_seed_paths(changeset, block, label) do
+    case Map.get(block, "seed_paths") do
+      nil ->
+        changeset
+
+      paths when is_list(paths) ->
+        if Enum.all?(paths, &is_binary/1),
+          do: changeset,
+          else: seed_paths_error(changeset, label)
+
+      _ ->
+        seed_paths_error(changeset, label)
+    end
+  end
+
+  defp seed_paths_error(changeset, label) do
+    Changeset.add_error(changeset,
+      field: :config,
+      message: "#{label}.seed_paths must be a list of strings"
+    )
   end
 
   # bd-anwb0u (G11): the `guardrails` block — bindings, ticket defaults and

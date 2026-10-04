@@ -1391,6 +1391,41 @@ defmodule Arbiter.Worker.DispatchTest do
       assert {:ok, ^branch} = Worktree.current_branch(squatter)
     end
 
+    # bd-2jerqw: the workspace's `worker.repos.<repo>.seed_paths` reaches the
+    # worktree a dispatch provisions; without it the built-in set applies.
+    test "a branch dispatch seeds the worktree from worker.repos.<repo>.seed_paths",
+         %{ws: ws, tmp: tmp} do
+      repo = seed_repo!(tmp, "seedrepo")
+      File.mkdir_p!(Path.join(repo, "deps/jason"))
+      File.write!(Path.join(repo, "deps/jason/mix.exs"), "# dep\n")
+      File.mkdir_p!(Path.join(repo, "priv/plts"))
+      File.write!(Path.join(repo, "priv/plts/core.plt"), "plt")
+
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "seed-wt"))
+      put_app_env(:arbiter, :repo_paths, %{"seed/repo" => repo})
+
+      {:ok, task} = Ash.create(Issue, %{title: "default seed", workspace_id: ws.id})
+
+      {:ok, result} =
+        Dispatch.dispatch(task.id, force: true, repo: "seed/repo", start_driver: false)
+
+      assert File.exists?(Path.join(result.worktree_path, "deps/jason/mix.exs"))
+      refute File.exists?(Path.join(result.worktree_path, "priv/plts"))
+
+      {:ok, _} =
+        Ash.update(ws, %{
+          config: %{"worker" => %{"repos" => %{"repo" => %{"seed_paths" => ["priv/plts"]}}}}
+        })
+
+      {:ok, task2} = Ash.create(Issue, %{title: "configured seed", workspace_id: ws.id})
+
+      {:ok, result2} =
+        Dispatch.dispatch(task2.id, force: true, repo: "seed/repo", start_driver: false)
+
+      assert File.exists?(Path.join(result2.worktree_path, "priv/plts/core.plt"))
+      refute File.exists?(Path.join(result2.worktree_path, "deps"))
+    end
+
     # Counterpart: the two leaves coexist, so an audit's checkout and the same
     # bead's branch worktree never contend for one directory.
     test "an inspect checkout and a branch worktree for the same bead coexist",

@@ -220,6 +220,22 @@ defmodule ArbiterCli.ConfigSchema do
     conductor  (map)
       max_concurrent  positive integer — cap on concurrently-dispatched workers
 
+    worker  (map — how a worker checkout is provisioned, bd-2jerqw)
+      seed_paths      list of repo-relative paths — copied (cp -a --reflink=auto,
+                      never symlinked, so a worker's build cannot write through
+                      to the source repo or race a sibling) from the source repo
+                      into each new worktree, when present there and not yet in
+                      the worktree. Unset: the built-in set (deps/*, plus
+                      _build/{test,dev}/lib/<name> where deps/<name> exists).
+                      Set: the list REPLACES that set, so restate "deps" if you
+                      still want it. Absolute, `..` and `.git` entries are
+                      skipped with a warning.
+      repos           map, repo name -> {seed_paths}, deep-merged over the
+                      workspace-level value (per-repo wins)
+
+                      umbrella:    ["deps", "_build/test/lib", "_build/dev/lib", "priv/plts"]
+                      single app:  ["deps", "_build/test", "_build/dev", "priv/plts"]
+
     attention  (map — coordinator-first escalation limits, bd-8nlez1)
       coordinator_limit_minutes  non-negative integer — a coordinator-owned
                           attention item left unresolved this long is handed
