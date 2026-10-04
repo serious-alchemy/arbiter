@@ -8,8 +8,16 @@ defmodule Arbiter.Quota.QuotaSnapshot do
   `Arbiter.Quota.Gate.Snapshot` gives it (`"5h"`, `"7d"`, Codex's `"weekly"`
   ...), `utilization` a fraction, `ceiling` the pace ceiling in force at that
   moment (`Arbiter.Quota.policy_fields/2`'s `effective` value) — so
-  `/reports` can chart utilization against the ceiling. Written by
-  `Arbiter.Quota.History.record/2`; rows are never updated or pruned.
+  `/reports` can chart utilization against the ceiling. `bucket` names what the
+  window meters: the provider, or an Antigravity model group (bd-3qfc81, R2).
+
+  This is the single append-only quota history: every capture path (Anthropic
+  header and OAuth poll, Codex, Antigravity/CloudCode) writes it through
+  `Arbiter.Quota.History.record/2`, and it serves reports, burn rate and
+  calibration alike. Rows are never updated; `Arbiter.Quota.History.prune/1`
+  deletes those past `config :arbiter, :quota_history, retention_days:`.
+  (`codex_quota_snapshots` is a separate, Codex-only raw-column log kept for
+  the plan-window pacing work, bd-afvsnc.)
   """
 
   use Ash.Resource,
@@ -23,7 +31,7 @@ defmodule Arbiter.Quota.QuotaSnapshot do
   end
 
   actions do
-    defaults [:read]
+    defaults [:read, :destroy]
 
     create :record do
       primary? true
@@ -31,6 +39,7 @@ defmodule Arbiter.Quota.QuotaSnapshot do
       accept [
         :provider_account_id,
         :provider,
+        :bucket,
         :window,
         :utilization,
         :ceiling,
@@ -44,6 +53,7 @@ defmodule Arbiter.Quota.QuotaSnapshot do
     uuid_primary_key :id
     attribute :provider_account_id, :uuid, allow_nil?: false, public?: true
     attribute :provider, :string, allow_nil?: false, public?: true
+    attribute :bucket, :string, public?: true
     attribute :window, :string, allow_nil?: false, public?: true
     attribute :utilization, :float, allow_nil?: false, public?: true
     attribute :ceiling, :float, public?: true

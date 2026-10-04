@@ -71,7 +71,6 @@ defmodule Arbiter.Quota.CloudCode do
   require Logger
 
   alias Arbiter.Quota.GoogleQuota
-  alias Arbiter.Quota.QuotaSample
   alias Arbiter.Worker.ReleaseEnv
   alias Arbiter.Worker.SpawnEnv
 
@@ -245,7 +244,7 @@ defmodule Arbiter.Quota.CloudCode do
     # meters under, resolved here so the probe's call site is unchanged.
     with {:ok, account_id} <- Arbiter.Quota.ensure_account_id(workspace_id, provider),
          {:ok, row} <- upsert(account_id, provider, snapshot) do
-      record_history(account_id, row)
+      Arbiter.Quota.History.record(account_id, row)
       broadcast(account_id, row)
       snapshot
     else
@@ -347,12 +346,6 @@ defmodule Arbiter.Quota.CloudCode do
   # regardless of the `:map` data-layer's round-trip.
   defp stringify(term) do
     term |> Jason.encode!() |> Jason.decode!()
-  end
-
-  defp record_history(account_id, %GoogleQuota{} = row) do
-    QuotaSample.record_capture(account_id, row)
-  rescue
-    e -> Logger.warning("Arbiter.Quota.CloudCode: record_history failed: #{Exception.message(e)}")
   end
 
   defp broadcast(account_id, %GoogleQuota{} = row) do
