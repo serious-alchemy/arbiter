@@ -125,6 +125,7 @@ defmodule Arbiter.Guardrails.Subjects do
 
   defp find(attrs) do
     key = Map.take(attrs, [:provider, :family, :model])
+
     Enum.find(list(), fn s ->
       s |> Map.take([:provider, :family, :model]) |> drop_nil() == drop_nil(key)
     end)

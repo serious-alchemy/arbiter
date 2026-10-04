@@ -98,7 +98,11 @@ defmodule Arbiter.Guardrails.Authority do
   def block_loosenings(old, new) do
     subject_loosenings(Map.get(old, "subjects"), Map.get(new, "subjects"), "guardrails.subjects") ++
       binding_loosenings(Map.get(old, "bindings"), Map.get(new, "bindings")) ++
-      defaults_loosenings(Map.get(old, "defaults"), Map.get(new, "defaults"), "guardrails.defaults") ++
+      defaults_loosenings(
+        Map.get(old, "defaults"),
+        Map.get(new, "defaults"),
+        "guardrails.defaults"
+      ) ++
       repo_loosenings(Map.get(old, "repos"), Map.get(new, "repos"))
   end
 
@@ -158,7 +162,9 @@ defmodule Arbiter.Guardrails.Authority do
   # `Config.parse_caps/1`. A field `old` set and `new` dropped is loosened.
   @spec cap_loosenings(map(), map()) :: [String.t()]
   def cap_loosenings(old, new) do
-    Enum.flat_map(old, fn {field, old_value} -> cap_field(field, old_value, Map.get(new, field)) end)
+    Enum.flat_map(old, fn {field, old_value} ->
+      cap_field(field, old_value, Map.get(new, field))
+    end)
   end
 
   defp cap_field(field, _old, nil), do: ["#{field} dropped"]
@@ -175,7 +181,10 @@ defmodule Arbiter.Guardrails.Authority do
   defp cap_field(:max_difficulty, o, n), do: loose_if(n > o, "max_difficulty raised")
 
   defp cap_field(:spend, o, n) do
-    loose_if(Map.get(o, :action) == :park and Map.get(n, :action) == :page, "spend action relaxed") ++
+    loose_if(
+      Map.get(o, :action) == :park and Map.get(n, :action) == :page,
+      "spend action relaxed"
+    ) ++
       Enum.flat_map([:tokens, :wall_clock_s], fn key ->
         case {Map.get(o, key), Map.get(n, key)} do
           {nil, _} -> []
@@ -285,7 +294,10 @@ defmodule Arbiter.Guardrails.Authority do
   def rule_loosenings(old, new) do
     old = old || %{tier: :quarantine, scope: nil, overrides: %{}, pinned: false}
 
-    loose_if(Guardrails.tier_rank(new.tier) > Guardrails.tier_rank(old.tier), "tier raised to #{new.tier}") ++
+    loose_if(
+      Guardrails.tier_rank(new.tier) > Guardrails.tier_rank(old.tier),
+      "tier raised to #{new.tier}"
+    ) ++
       scope_loosenings(old.scope, new.scope) ++
       Enum.map(cap_loosenings(old.overrides, new.overrides), &"overrides: #{&1}") ++
       loose_if(old.pinned == true and new.pinned != true, "pin removed")
@@ -302,10 +314,17 @@ defmodule Arbiter.Guardrails.Authority do
 
         {:ok, old_repos} ->
           cond do
-            old_repos == [] -> []
-            repos == [] -> ["scope widens #{ws} to every repo"]
-            repos -- old_repos != [] -> ["scope adds #{ws} repos #{Enum.join(repos -- old_repos, ", ")}"]
-            true -> []
+            old_repos == [] ->
+              []
+
+            repos == [] ->
+              ["scope widens #{ws} to every repo"]
+
+            repos -- old_repos != [] ->
+              ["scope adds #{ws} repos #{Enum.join(repos -- old_repos, ", ")}"]
+
+            true ->
+              []
           end
       end
     end)

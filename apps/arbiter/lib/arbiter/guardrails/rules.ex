@@ -101,7 +101,13 @@ defmodule Arbiter.Guardrails.Rules do
 
   defp specificity(match) do
     weight =
-      Enum.max(Enum.map(Map.keys(match), fn :model -> 3; :family -> 2; :provider -> 1 end))
+      Enum.max(
+        Enum.map(Map.keys(match), fn
+          :model -> 3
+          :family -> 2
+          :provider -> 1
+        end)
+      )
 
     {weight, map_size(match)}
   end
@@ -134,7 +140,9 @@ defmodule Arbiter.Guardrails.Rules do
 
     scope
     |> Enum.filter(fn {key, _repos} -> key in keys end)
-    |> Enum.any?(fn {_key, repos} -> repos == [] or repos == ["*"] or is_nil(repo) or repo in repos end)
+    |> Enum.any?(fn {_key, repos} ->
+      repos == [] or repos == ["*"] or is_nil(repo) or repo in repos
+    end)
   end
 
   defp workspace_keys(%{} = ws),

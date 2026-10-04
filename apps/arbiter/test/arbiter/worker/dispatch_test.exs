@@ -2640,7 +2640,9 @@ defmodule Arbiter.Worker.DispatchTest do
               "security" => %{"permissions" => %{"mode" => "bypass"}}
             },
             "guardrails" => %{
-              "subjects" => [%{"match" => %{"provider" => "antigravity"}, "max_tier" => "quarantine"}]
+              "subjects" => [
+                %{"match" => %{"provider" => "antigravity"}, "max_tier" => "quarantine"}
+              ]
             }
           }
         })

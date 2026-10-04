@@ -55,7 +55,9 @@ defmodule Arbiter.Guardrails.ConfigTest do
     assert msg =~ "guardrails.repos.r has unknown key"
 
     assert Enum.any?(
-             Config.validate(%{"subjects" => [%{"match" => %{"provider" => "x"}, "tier" => "trusted"}]}),
+             Config.validate(%{
+               "subjects" => [%{"match" => %{"provider" => "x"}, "tier" => "trusted"}]
+             }),
              &(&1 =~ "unknown key")
            )
   end
@@ -76,12 +78,17 @@ defmodule Arbiter.Guardrails.ConfigTest do
       })
 
     for field <- ~w(max_tier min_mode egress max_difficulty grant_by min_tier) do
-      assert Enum.any?(errors, &(&1 =~ field)), "expected an error naming #{field}: #{inspect(errors)}"
+      assert Enum.any?(errors, &(&1 =~ field)),
+             "expected an error naming #{field}: #{inspect(errors)}"
     end
   end
 
   test "a cap must name a match" do
-    assert Enum.any?(Config.validate(%{"subjects" => [%{"max_tier" => "probation"}]}), &(&1 =~ "match"))
+    assert Enum.any?(
+             Config.validate(%{"subjects" => [%{"max_tier" => "probation"}]}),
+             &(&1 =~ "match")
+           )
+
     assert Enum.any?(Config.validate(%{"subjects" => [%{"match" => %{}}]}), &(&1 =~ "match"))
   end
 
@@ -102,7 +109,11 @@ defmodule Arbiter.Guardrails.ConfigTest do
   end
 
   test "parse_caps drops what does not parse, keeps what does" do
-    assert Config.parse_caps(%{"max_tier" => "probation", "egress" => "bogus", "max_difficulty" => "D3"}) ==
+    assert Config.parse_caps(%{
+             "max_tier" => "probation",
+             "egress" => "bogus",
+             "max_difficulty" => "D3"
+           }) ==
              %{max_tier: :probation, max_difficulty: 3}
   end
 

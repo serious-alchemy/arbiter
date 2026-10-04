@@ -252,7 +252,7 @@ defmodule Arbiter.Guardrails do
 
     {profile, capped_by} =
       Enum.reduce(caps, {apply_caps(base, rule_overrides(rule)), rule_layer(rule)}, fn cap,
-                                                                                    {p, by} ->
+                                                                                       {p, by} ->
         capped = apply_caps(p, cap.caps)
         {capped, if(capped == p, do: by, else: by ++ [:workspace])}
       end)
@@ -323,7 +323,8 @@ defmodule Arbiter.Guardrails do
         data_classes: Enum.filter(a.data_classes, &(&1 in b.data_classes)),
         review: tighter_review(a.review, b.review),
         spend: tighter_spend(a.spend, b.spend),
-        honour_safe_defaults_exclude: a.honour_safe_defaults_exclude and b.honour_safe_defaults_exclude
+        honour_safe_defaults_exclude:
+          a.honour_safe_defaults_exclude and b.honour_safe_defaults_exclude
     }
   end
 
@@ -347,7 +348,8 @@ defmodule Arbiter.Guardrails do
       cross_family: strictest(a[:cross_family], b[:cross_family], @cross_family_rank),
       same_family_fallback:
         strictest(a[:same_family_fallback], b[:same_family_fallback], @fallback_rank),
-      min_reviewer_tier: strictest(a[:min_reviewer_tier], b[:min_reviewer_tier], @reviewer_tier_rank)
+      min_reviewer_tier:
+        strictest(a[:min_reviewer_tier], b[:min_reviewer_tier], @reviewer_tier_rank)
     }
   end
 
@@ -395,11 +397,22 @@ defmodule Arbiter.Guardrails do
   `floor/2` of `effective/4`, for a spawn: the resolved `policy` for `provider`
   running `model` in `workspace`. Options: `:repo`, `:rules`.
   """
-  @spec apply_to_policy(SecurityPolicy.t(), map() | nil, atom() | String.t(), String.t() | nil, keyword()) ::
+  @spec apply_to_policy(
+          SecurityPolicy.t(),
+          map() | nil,
+          atom() | String.t(),
+          String.t() | nil,
+          keyword()
+        ) ::
           SecurityPolicy.t()
   def apply_to_policy(%SecurityPolicy{} = policy, workspace, provider, model, opts \\ []) do
     profile =
-      effective(subject(provider, model), workspace, Keyword.get(opts, :repo), Keyword.take(opts, [:rules]))
+      effective(
+        subject(provider, model),
+        workspace,
+        Keyword.get(opts, :repo),
+        Keyword.take(opts, [:rules])
+      )
 
     floor(policy, profile)
   end
@@ -446,15 +459,30 @@ defmodule Arbiter.Guardrails do
         new.permissions.safe_defaults_exclude,
         "permissions.safe_defaults_exclude"
       ),
-      added(Map.get(sb_old, :writable_paths, []), Map.get(sb_new, :writable_paths, []), "sandbox.writable_paths"),
-      added(Map.get(sb_old, :allow_hosts, []), Map.get(sb_new, :allow_hosts, []), "sandbox.allow_hosts"),
-      added(Map.get(sb_old, :egress_tunnels, []), Map.get(sb_new, :egress_tunnels, []), "sandbox.egress_tunnels")
+      added(
+        Map.get(sb_old, :writable_paths, []),
+        Map.get(sb_new, :writable_paths, []),
+        "sandbox.writable_paths"
+      ),
+      added(
+        Map.get(sb_old, :allow_hosts, []),
+        Map.get(sb_new, :allow_hosts, []),
+        "sandbox.allow_hosts"
+      ),
+      added(
+        Map.get(sb_old, :egress_tunnels, []),
+        Map.get(sb_new, :egress_tunnels, []),
+        "sandbox.egress_tunnels"
+      )
     ]
     |> List.flatten()
   end
 
   defp backend_rank(sandbox) do
-    Enum.find_index(SecurityPolicy.valid_sandbox_backends(), &(&1 == Map.get(sandbox, :backend, :bwrap)))
+    Enum.find_index(
+      SecurityPolicy.valid_sandbox_backends(),
+      &(&1 == Map.get(sandbox, :backend, :bwrap))
+    )
   end
 
   defp lower(new_rank, old_rank, field) when new_rank < old_rank,
@@ -507,7 +535,8 @@ defmodule Arbiter.Guardrails do
       policy.permissions.mode == :strict and Agents.write_confinement(adapter, policy) == :none ->
         {:error, :write_confinement_none}
 
-      SecurityPolicy.egress(policy) != :open and Agents.egress_confinement(adapter, policy) == :none ->
+      SecurityPolicy.egress(policy) != :open and
+          Agents.egress_confinement(adapter, policy) == :none ->
         {:error, :egress_unenforceable}
 
       true ->

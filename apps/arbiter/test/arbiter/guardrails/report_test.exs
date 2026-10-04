@@ -31,25 +31,46 @@ defmodule Arbiter.Guardrails.ReportTest do
 
   test "reports the effective tier of each attached subject, per workspace" do
     rules = [%{match: %{provider: "claude"}, tier: :privileged}]
-    capped = workspace!(%{"guardrails" => %{"subjects" => [%{"match" => %{"provider" => "claude"}, "max_tier" => "probation"}]}})
+
+    capped =
+      workspace!(%{
+        "guardrails" => %{
+          "subjects" => [%{"match" => %{"provider" => "claude"}, "max_tier" => "probation"}]
+        }
+      })
+
     plain = workspace!(%{})
 
     report = Report.build([capped, plain], rules: rules)
     assert report.active
     assert report.rules == 1
 
-    tiers = Map.new(report.workspaces, fn w -> {w.workspace, w.subjects |> Enum.map(& &1.tier) |> Enum.uniq()} end)
+    tiers =
+      Map.new(report.workspaces, fn w ->
+        {w.workspace, w.subjects |> Enum.map(& &1.tier) |> Enum.uniq()}
+      end)
+
     assert tiers[capped.name] == ["probation"]
     assert tiers[plain.name] == ["privileged"]
 
     # probation needs an egress allowlist and Claude (bwrap backend) has no egress
     # confinement here; the privileged workspace has nothing to flag.
-    assert Enum.all?(report.issues, &(&1.kind == :egress_unenforceable and &1.workspace == capped.name))
+    assert Enum.all?(
+             report.issues,
+             &(&1.kind == :egress_unenforceable and &1.workspace == capped.name)
+           )
+
     assert report.issues != []
   end
 
   test "flags a guardrails block with no subject rules behind it (inert)" do
-    ws = workspace!(%{"guardrails" => %{"subjects" => [%{"match" => %{"provider" => "claude"}, "max_tier" => "probation"}]}})
+    ws =
+      workspace!(%{
+        "guardrails" => %{
+          "subjects" => [%{"match" => %{"provider" => "claude"}, "max_tier" => "probation"}]
+        }
+      })
+
     report = Report.build([ws], rules: [])
 
     assert kinds(report) == [:inert_block]
@@ -98,7 +119,11 @@ defmodule Arbiter.Guardrails.ReportTest do
   end
 
   test "flags a binding no attached subject can reach" do
-    ws = workspace!(%{"guardrails" => %{"bindings" => %{"prod_ssh" => %{"min_tier" => "privileged"}}}})
+    ws =
+      workspace!(%{
+        "guardrails" => %{"bindings" => %{"prod_ssh" => %{"min_tier" => "privileged"}}}
+      })
+
     report = Report.build([ws], rules: [%{match: %{provider: "claude"}, tier: :probation}])
 
     assert :unreachable_binding in kinds(report)
@@ -109,7 +134,10 @@ defmodule Arbiter.Guardrails.ReportTest do
     posture = Report.posture(ws, rules: [%{match: %{provider: "claude"}, tier: :trusted}])
 
     assert posture["active"] == true
-    assert [%{"provider" => "claude", "tier" => "trusted", "min_mode" => "bypass"} | _] = posture["subjects"]
+
+    assert [%{"provider" => "claude", "tier" => "trusted", "min_mode" => "bypass"} | _] =
+             posture["subjects"]
+
     assert posture["issues"] == []
   end
 end

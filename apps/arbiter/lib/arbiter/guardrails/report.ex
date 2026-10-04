@@ -55,7 +55,11 @@ defmodule Arbiter.Guardrails.Report do
       issues:
         Enum.flat_map(entries, & &1.issues) ++
           Enum.map(inert, fn e ->
-            issue(:inert_block, e.workspace, "has a guardrails block but no subject rule is configured, so it enforces nothing")
+            issue(
+              :inert_block,
+              e.workspace,
+              "has a guardrails block but no subject rule is configured, so it enforces nothing"
+            )
           end)
     }
   end
@@ -90,7 +94,10 @@ defmodule Arbiter.Guardrails.Report do
         {subject, Guardrails.effective(subject, ws, nil, rules: rules), Agents.for_type(type)}
       end
 
-    entries = Enum.map(resolved, fn {subject, profile, adapter} -> subject_entry(ws, subject, profile, adapter, rules) end)
+    entries =
+      Enum.map(resolved, fn {subject, profile, adapter} ->
+        subject_entry(ws, subject, profile, adapter, rules)
+      end)
 
     %{
       workspace: name,
@@ -153,14 +160,17 @@ defmodule Arbiter.Guardrails.Report do
         max_difficulty: profile.max_difficulty,
         in_scope: profile.in_scope?,
         matched: not is_nil(rule),
-        enforceable: not Enum.any?(issues, &(&1.kind in [:write_confinement_none, :egress_unenforceable]))
+        enforceable:
+          not Enum.any?(issues, &(&1.kind in [:write_confinement_none, :egress_unenforceable]))
       },
       issues: issues
     }
   end
 
   defp need(:write_confinement_none, _), do: "write confinement (a :strict floor)"
-  defp need(:egress_unenforceable, policy), do: "egress confinement (egress: #{SecurityPolicy.egress(policy)})"
+
+  defp need(:egress_unenforceable, policy),
+    do: "egress confinement (egress: #{SecurityPolicy.egress(policy)})"
 
   defp cap_issues(ws, block, subjects) do
     name = ws_name(ws)
@@ -171,15 +181,26 @@ defmodule Arbiter.Guardrails.Report do
       block
       |> Map.get("repos", %{})
       |> map_or_empty()
-      |> Enum.flat_map(fn {repo, _} -> Enum.map(Config.cap_entries(block, repo) -- ws_caps, &{repo, &1}) end)
+      |> Enum.flat_map(fn {repo, _} ->
+        Enum.map(Config.cap_entries(block, repo) -- ws_caps, &{repo, &1})
+      end)
 
     dead =
-      for cap <- ws_caps, not Enum.any?(subjects, &Rules.matches?(Config.parse_cap(cap).match, &1)) do
-        issue(:dead_cap, name, "guardrails.subjects cap #{inspect(Config.parse_cap(cap).match)} matches no attached subject")
+      for cap <- ws_caps,
+          not Enum.any?(subjects, &Rules.matches?(Config.parse_cap(cap).match, &1)) do
+        issue(
+          :dead_cap,
+          name,
+          "guardrails.subjects cap #{inspect(Config.parse_cap(cap).match)} matches no attached subject"
+        )
       end ++
         for {repo, cap} <- repo_caps,
             not Enum.any?(subjects, &Rules.matches?(Config.parse_cap(cap).match, &1)) do
-          issue(:dead_cap, name, "guardrails.repos.#{repo} cap #{inspect(Config.parse_cap(cap).match)} matches no attached subject")
+          issue(
+            :dead_cap,
+            name,
+            "guardrails.repos.#{repo} cap #{inspect(Config.parse_cap(cap).match)} matches no attached subject"
+          )
         end
 
     known = ws |> repo_names() |> MapSet.new()
@@ -188,7 +209,11 @@ defmodule Arbiter.Guardrails.Report do
       for {repo, _} <- block |> Map.get("repos", %{}) |> map_or_empty(),
           known != MapSet.new(),
           not MapSet.member?(known, repo) do
-        issue(:unknown_repo, name, "guardrails.repos.#{repo} names a repo this workspace does not have")
+        issue(
+          :unknown_repo,
+          name,
+          "guardrails.repos.#{repo} names a repo this workspace does not have"
+        )
       end
 
     dead ++ unknown
@@ -197,7 +222,9 @@ defmodule Arbiter.Guardrails.Report do
   defp binding_issues(name, block, resolved) do
     top =
       resolved
-      |> Enum.flat_map(fn {_s, profile, _a} -> if profile, do: [Guardrails.tier_rank(profile.tier)], else: [] end)
+      |> Enum.flat_map(fn {_s, profile, _a} ->
+        if profile, do: [Guardrails.tier_rank(profile.tier)], else: []
+      end)
       |> Enum.max(fn -> nil end)
 
     if is_nil(top) do

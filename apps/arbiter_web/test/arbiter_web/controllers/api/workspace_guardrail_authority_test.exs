@@ -40,10 +40,18 @@ defmodule ArbiterWeb.Api.WorkspaceGuardrailAuthorityTest do
 
   defp patch_config(conn, ws, body), do: patch(conn, "/api/workspaces/#{ws.id}/config", body)
 
-  @loosen_guardrails %{"patch" => %{"guardrails" => %{"subjects" => [%{@cap | "max_tier" => "trusted"}]}}}
-  @loosen_security %{"patch" => %{"agent" => %{"security" => %{"permissions" => %{"mode" => "bypass"}}}}}
-  @tighten_guardrails %{"patch" => %{"guardrails" => %{"subjects" => [%{@cap | "max_tier" => "quarantine"}]}}}
-  @tighten_security %{"patch" => %{"agent" => %{"security" => %{"sandbox" => %{"egress" => "none"}}}}}
+  @loosen_guardrails %{
+    "patch" => %{"guardrails" => %{"subjects" => [%{@cap | "max_tier" => "trusted"}]}}
+  }
+  @loosen_security %{
+    "patch" => %{"agent" => %{"security" => %{"permissions" => %{"mode" => "bypass"}}}}
+  }
+  @tighten_guardrails %{
+    "patch" => %{"guardrails" => %{"subjects" => [%{@cap | "max_tier" => "quarantine"}]}}
+  }
+  @tighten_security %{
+    "patch" => %{"agent" => %{"security" => %{"sandbox" => %{"egress" => "none"}}}}
+  }
 
   describe "worker and refine tokens" do
     test "a worker token is refused the config route outright", %{ws: ws, task: task} do
@@ -84,17 +92,30 @@ defmodule ArbiterWeb.Api.WorkspaceGuardrailAuthorityTest do
 
     test "is refused a loosening of agent.security", %{conn: conn, ws: ws} do
       assert patch_config(conn, ws, @loosen_security).status == 422
-      assert get_in(Ash.get!(Workspace, ws.id).config, ["agent", "security", "permissions", "mode"]) == "strict"
+
+      assert get_in(Ash.get!(Workspace, ws.id).config, [
+               "agent",
+               "security",
+               "permissions",
+               "mode"
+             ]) == "strict"
     end
 
-    test "is refused loosening through unset_paths and through the whole-config update", %{conn: conn, ws: ws} do
+    test "is refused loosening through unset_paths and through the whole-config update", %{
+      conn: conn,
+      ws: ws
+    } do
       assert patch_config(conn, ws, %{"unset_paths" => ["guardrails.subjects"]}).status == 422
-      assert patch_config(conn, ws, %{"unset_paths" => ["agent.security.permissions.mode"]}).status == 422
+
+      assert patch_config(conn, ws, %{"unset_paths" => ["agent.security.permissions.mode"]}).status ==
+               422
+
       assert patch(conn, "/api/workspaces/#{ws.id}", %{"config" => %{}}).status == 422
     end
 
     test "may edit unrelated config", %{conn: conn, ws: ws} do
-      assert patch_config(conn, ws, %{"patch" => %{"merge" => %{"auto_merge" => true}}}).status == 200
+      assert patch_config(conn, ws, %{"patch" => %{"merge" => %{"auto_merge" => true}}}).status ==
+               200
     end
   end
 

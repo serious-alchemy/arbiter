@@ -400,12 +400,19 @@ defmodule ArbiterWeb.Api.ServerControllerTest do
         Ash.create(Arbiter.Tasks.Workspace, %{
           name: "gr-doctor",
           prefix: "grd",
-          config: %{"guardrails" => %{"subjects" => [%{"match" => %{"provider" => "claude"}, "max_tier" => "probation"}]}}
+          config: %{
+            "guardrails" => %{
+              "subjects" => [%{"match" => %{"provider" => "claude"}, "max_tier" => "probation"}]
+            }
+          }
         })
 
       resp = conn |> get("/api/server/guardrails") |> json_response(200)
 
-      assert Enum.any?(resp["issues"], &(&1["kind"] == "inert_block" and &1["workspace"] == ws.name))
+      assert Enum.any?(
+               resp["issues"],
+               &(&1["kind"] == "inert_block" and &1["workspace"] == ws.name)
+             )
     end
   end
 end

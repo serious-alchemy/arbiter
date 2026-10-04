@@ -25,14 +25,39 @@ defmodule Arbiter.Guardrails.Subject do
 
     create :create do
       primary? true
-      accept [:position, :provider, :family, :model, :tier, :scope, :overrides, :pinned, :reason, :updated_by]
+
+      accept [
+        :position,
+        :provider,
+        :family,
+        :model,
+        :tier,
+        :scope,
+        :overrides,
+        :pinned,
+        :reason,
+        :updated_by
+      ]
+
       validate present([:provider, :family, :model], at_least: 1)
     end
 
     update :update do
       primary? true
       require_atomic? false
-      accept [:position, :provider, :family, :model, :tier, :scope, :overrides, :pinned, :reason, :updated_by]
+
+      accept [
+        :position,
+        :provider,
+        :family,
+        :model,
+        :tier,
+        :scope,
+        :overrides,
+        :pinned,
+        :reason,
+        :updated_by
+      ]
     end
   end
 

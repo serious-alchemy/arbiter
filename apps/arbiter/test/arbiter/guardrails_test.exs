@@ -100,17 +100,27 @@ defmodule Arbiter.GuardrailsTest do
     end
 
     test "a workspace block alone, with no subject rules, stays inert" do
-      block = %{"subjects" => [%{"match" => %{"provider" => "claude"}, "max_tier" => "probation"}]}
-      assert Guardrails.effective(Guardrails.subject("claude", nil), ws(block), nil, rules: []) == nil
+      block = %{
+        "subjects" => [%{"match" => %{"provider" => "claude"}, "max_tier" => "probation"}]
+      }
+
+      assert Guardrails.effective(Guardrails.subject("claude", nil), ws(block), nil, rules: []) ==
+               nil
     end
   end
 
   describe "workspace and repo caps (§3.5)" do
     test "a workspace cap lowers the tier, never raises it" do
-      block = %{"subjects" => [%{"match" => %{"provider" => "claude"}, "max_tier" => "probation"}]}
+      block = %{
+        "subjects" => [%{"match" => %{"provider" => "claude"}, "max_tier" => "probation"}]
+      }
+
       assert %Profile{tier: :probation} = effective("claude", "m", ws(block))
 
-      raising = %{"subjects" => [%{"match" => %{"provider" => "codex"}, "max_tier" => "privileged"}]}
+      raising = %{
+        "subjects" => [%{"match" => %{"provider" => "codex"}, "max_tier" => "privileged"}]
+      }
+
       assert %Profile{tier: :quarantine} = effective("codex", "m", ws(raising))
     end
 
@@ -125,7 +135,9 @@ defmodule Arbiter.GuardrailsTest do
           }
         ],
         "repos" => %{
-          "tonic" => %{"subjects" => [%{"match" => %{"provider" => "claude"}, "max_difficulty" => 1}]}
+          "tonic" => %{
+            "subjects" => [%{"match" => %{"provider" => "claude"}, "max_difficulty" => 1}]
+          }
         }
       }
 
@@ -251,8 +263,12 @@ defmodule Arbiter.GuardrailsTest do
     property "floor/2 meets the profile: mode at least min_mode, egress at most egress" do
       check all(policy <- policy_gen(), profile <- profile_gen()) do
         floored = Guardrails.floor(policy, profile)
-        assert Guardrails.mode_rank(floored.permissions.mode) >= Guardrails.mode_rank(profile.min_mode)
-        assert Guardrails.egress_rank(floored.sandbox.egress) >= Guardrails.egress_rank(profile.egress)
+
+        assert Guardrails.mode_rank(floored.permissions.mode) >=
+                 Guardrails.mode_rank(profile.min_mode)
+
+        assert Guardrails.egress_rank(floored.sandbox.egress) >=
+                 Guardrails.egress_rank(profile.egress)
       end
     end
 

@@ -172,7 +172,8 @@ defmodule Arbiter.Guardrails.Config do
       cross_family: parse_in(Map.get(review, "cross_family"), [:required, :workspace]),
       same_family_fallback:
         parse_in(Map.get(review, "same_family_fallback"), [:hold, :record, :workspace]),
-      min_reviewer_tier: parse_in(Map.get(review, "min_reviewer_tier"), [:economy, :standard, :premium])
+      min_reviewer_tier:
+        parse_in(Map.get(review, "min_reviewer_tier"), [:economy, :standard, :premium])
     ]
     |> Enum.reject(fn {_k, v} -> is_nil(v) end)
     |> Map.new()
@@ -217,7 +218,9 @@ defmodule Arbiter.Guardrails.Config do
   defp validate_bindings(%{} = bindings) do
     Enum.flat_map(bindings, fn {name, binding} ->
       label = "guardrails.bindings.#{name}"
-      name_errors = if permission_name?(name), do: [], else: ["#{label}: not a valid permission name"]
+
+      name_errors =
+        if permission_name?(name), do: [], else: ["#{label}: not a valid permission name"]
 
       name_errors ++
         case binding do
@@ -232,7 +235,11 @@ defmodule Arbiter.Guardrails.Config do
   defp validate_binding(binding, label) do
     unknown(binding, @binding_keys, label) ++
       enum_error(Map.get(binding, "grant_by"), @grant_by, "#{label}.grant_by") ++
-      enum_error(Map.get(binding, "min_tier"), Enum.map(Guardrails.tiers(), &Atom.to_string/1), "#{label}.min_tier") ++
+      enum_error(
+        Map.get(binding, "min_tier"),
+        Enum.map(Guardrails.tiers(), &Atom.to_string/1),
+        "#{label}.min_tier"
+      ) ++
       bool_error(Map.get(binding, "enforced_read_only"), "#{label}.enforced_read_only") ++
       hosts_error(Map.get(binding, "tunnels"), "#{label}.tunnels") ++
       hosts_error(Map.get(binding, "hosts"), "#{label}.hosts") ++
@@ -252,7 +259,8 @@ defmodule Arbiter.Guardrails.Config do
           []
 
         list when is_list(list) ->
-          for p <- list, not (is_binary(p) and permission_name?(p)),
+          for p <- list,
+              not (is_binary(p) and permission_name?(p)),
               do: "#{label}.permissions: #{inspect(p)} is not a valid permission name"
 
         _ ->
@@ -282,8 +290,16 @@ defmodule Arbiter.Guardrails.Config do
           m = stringify(m)
 
           cond do
-            map_size(m) == 0 -> ["#{label}.match must name at least one of provider, family, model"]
-            true -> unknown(m, @match_keys, "#{label}.match") ++ for({k, v} <- m, not (is_binary(v) and v != ""), do: "#{label}.match.#{k} must be a non-empty string")
+            map_size(m) == 0 ->
+              ["#{label}.match must name at least one of provider, family, model"]
+
+            true ->
+              unknown(m, @match_keys, "#{label}.match") ++
+                for(
+                  {k, v} <- m,
+                  not (is_binary(v) and v != ""),
+                  do: "#{label}.match.#{k} must be a non-empty string"
+                )
           end
 
         _ ->
@@ -292,7 +308,11 @@ defmodule Arbiter.Guardrails.Config do
 
     unknown(entry, @cap_keys, label) ++
       match_errors ++
-      enum_error(Map.get(entry, "max_tier"), Enum.map(Guardrails.tiers(), &Atom.to_string/1), "#{label}.max_tier") ++
+      enum_error(
+        Map.get(entry, "max_tier"),
+        Enum.map(Guardrails.tiers(), &Atom.to_string/1),
+        "#{label}.max_tier"
+      ) ++
       enum_error(Map.get(entry, "min_mode"), ~w(bypass auto strict), "#{label}.min_mode") ++
       enum_error(Map.get(entry, "egress"), ~w(open allowlist none), "#{label}.egress") ++
       difficulty_error(Map.get(entry, "max_difficulty"), "#{label}.max_difficulty") ++
@@ -320,8 +340,16 @@ defmodule Arbiter.Guardrails.Config do
 
     unknown(review, ~w(cross_family same_family_fallback min_reviewer_tier), label) ++
       enum_error(Map.get(review, "cross_family"), @cross_family, "#{label}.cross_family") ++
-      enum_error(Map.get(review, "same_family_fallback"), @fallbacks, "#{label}.same_family_fallback") ++
-      enum_error(Map.get(review, "min_reviewer_tier"), @reviewer_tiers, "#{label}.min_reviewer_tier")
+      enum_error(
+        Map.get(review, "same_family_fallback"),
+        @fallbacks,
+        "#{label}.same_family_fallback"
+      ) ++
+      enum_error(
+        Map.get(review, "min_reviewer_tier"),
+        @reviewer_tiers,
+        "#{label}.min_reviewer_tier"
+      )
   end
 
   defp validate_review(_, label), do: ["#{label} must be a map"]
@@ -377,19 +405,21 @@ defmodule Arbiter.Guardrails.Config do
   defp hosts_error(nil, _), do: []
 
   defp hosts_error(list, label) when is_list(list) do
-    for h <- list, not valid_host?(h),
-        do: "#{label}: #{inspect(h)} is not a valid host:port"
+    for h <- list, not valid_host?(h), do: "#{label}: #{inspect(h)} is not a valid host:port"
   end
 
   defp hosts_error(_, label), do: ["#{label} must be a list of host:port strings"]
 
-  defp valid_host?(h) when is_binary(h), do: match?({:ok, _}, EgressPolicy.normalize_baseline([h]))
+  defp valid_host?(h) when is_binary(h),
+    do: match?({:ok, _}, EgressPolicy.normalize_baseline([h]))
+
   defp valid_host?(_), do: false
 
   defp env_map_error(nil, _), do: []
 
   defp env_map_error(%{} = m, label) do
-    for {k, v} <- m, not (is_binary(k) and is_binary(v) and v != ""),
+    for {k, v} <- m,
+        not (is_binary(k) and is_binary(v) and v != ""),
         do: "#{label}.#{k} must map an env var name to a secret name"
   end
 
