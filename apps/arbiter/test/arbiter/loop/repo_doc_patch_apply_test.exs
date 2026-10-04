@@ -224,9 +224,8 @@ defmodule Arbiter.Loop.RepoDocPatchApplyTest do
       assert content =~ "arbiter:begin"
     end
 
-    # An existing CLAUDE.md (not a symlink) still wins over AGENTS.md — no
-    # behavior change for the common case.
-    test "when the repo already has a real CLAUDE.md, keeps patching it", %{ws: ws, repo: repo} do
+    # Codex reads AGENTS.md, so a separate CLAUDE.md alone is not enough.
+    test "a real CLAUDE.md with no AGENTS.md patches both", %{ws: ws, repo: repo} do
       claude_path = Path.join(repo, "CLAUDE.md")
       File.write!(claude_path, "# existing conventions\n")
       {_, 0} = System.cmd("git", ["-C", repo, "add", "CLAUDE.md"])
@@ -240,7 +239,23 @@ defmodule Arbiter.Loop.RepoDocPatchApplyTest do
 
       content = File.read!(claude_path)
       assert content =~ "this repo's tests need FLAG=1 set"
-      refute File.exists?(Path.join(repo, "AGENTS.md"))
+      assert File.read!(Path.join(repo, "AGENTS.md")) =~ "this repo's tests need FLAG=1 set"
+    end
+
+    test "a real CLAUDE.md plus a human AGENTS.md appends the lesson without clobbering",
+         %{ws: ws, repo: repo} do
+      File.write!(Path.join(repo, "CLAUDE.md"), "# claude conventions\n")
+      File.write!(Path.join(repo, "AGENTS.md"), "# human agents rules\n")
+      {_, 0} = System.cmd("git", ["-C", repo, "add", "CLAUDE.md", "AGENTS.md"])
+      {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "add docs"])
+      {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "origin", "main"])
+
+      {:ok, row} = Loop.record(candidate(ws, %{}))
+      assert {:ok, %{state: :applied}} = Loop.apply_pending(row.id)
+
+      agents = File.read!(Path.join(repo, "AGENTS.md"))
+      assert agents =~ "# human agents rules"
+      assert agents =~ "this repo's tests need FLAG=1 set"
     end
 
     test "a repo not registered in the workspace's repo_paths fails cleanly", %{ws: ws} do
