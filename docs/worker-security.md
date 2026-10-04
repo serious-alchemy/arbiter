@@ -951,7 +951,76 @@ service's cgroup and is restarted with it. Doctor reports one that wasn't.
   list (ghost for `auto`, warning for `strict`, error for `bypass`).
 * **REST** — `GET /api/workspaces/:id` includes a resolved `security_posture`
   object with `provider`, `policy_enforced`, and the full policy summary. This
-  is the single source of truth both surfaces read.
+  is the single source of truth both surfaces read. It also carries
+  `egress_confinement` and a `guardrails` object (each attached subject's tier).
+
+## Guardrail profiles: tiers, the floor and who may loosen (bd-anwb0u, G11)
+
+Design: [guardrail-profiles](design/guardrail-profiles.md) §3, §7. G11 is the
+config-and-schema half; routing eligibility (G13), ticket permissions (G12) and
+earned trust (G18) build on it.
+
+**Tiers.** A *subject* is the `(provider, model)` a worker runs. Subject rules
+assign it a tier (`quarantine < probation < trusted < privileged`) by `provider`,
+`family` or a `model` glob, most specific first. A subject matching no rule is
+`quarantine`. Each tier is a bundle (`Arbiter.Guardrails.bundle/1`): a `min_mode`
+floor, an `egress` ceiling, a `max_difficulty`, review and spend knobs. The code
+defaults can be overridden per field with `config :arbiter, :guardrail_tiers`.
+`trusted` and `privileged` ship with `egress: :open` (the design's "until the
+workspace opts in"); the operator tightens them with that app env when ready.
+
+**Where the rules live.** The installation's `guardrail_subjects` table (and
+`config :arbiter, :guardrail_subject_rules` for a release or a test). Both are
+operator-owned. **No rules means guardrails are off**: `effective/4` is `nil`,
+`floor/2` of `nil` is the identity, and nothing changes. A workspace `guardrails`
+block with no rules behind it is inert; `arb doctor` flags it.
+
+**The workspace `guardrails` block** (validated by `ValidateConfig`; unknown keys
+are refused) holds per-subject *caps* (`subjects`, `repos.<repo>.subjects`),
+ticket-permission `bindings` and `defaults`. A cap can only lower a tier or
+tighten `min_mode` / `egress` / `max_difficulty` / `spend` / `review`; the
+effective profile is `tier ⊓ rule overrides ⊓ workspace cap ⊓ repo cap`.
+
+**The floor.** After `SecurityPolicy.resolve/3` the dispatch applies
+`Guardrails.floor/2`: `mode` becomes the higher of the resolved mode and
+`min_mode`, `sandbox.egress` the tighter of the resolved and the tier's,
+`safe_defaults_exclude` is emptied for tiers that do not honour it. It is last, so
+no layer (the per-dispatch override included) can go below it, and it never
+loosens (property-tested). The posture then names the guardrail as the source of a
+`:strict` it caused. A tier whose floor the adapter cannot meet on this host
+(`write_confinement/1` `:none` under `:strict`, or `egress_confinement/1` `:none`
+under a non-open egress) is **refused** at dispatch, never spawned weaker.
+
+**Who may loosen.** Tightening is always allowed; loosening is operator-only.
+`Arbiter.Guardrails.Authority` judges a workspace config write on the *resolved*
+`agent.security` policy (so a repo layer or a deprecated alias can't hide a
+loosening) and on the `guardrails` block (a removed or raised cap, a new or
+widened binding, added default permissions). The authority travels as the Ash
+context key `:guardrail_authority`:
+
+| Caller | Authority | May loosen |
+|---|---|---|
+| Dashboard, Loop operator-gated apply, boot-time code (no context given) | `:operator` | yes |
+| Coordinator token minted over the operator socket (`operator: true`) | `:operator` | yes |
+| Any other coordinator token, including every session token | `:coordinator` | no, tighten only |
+| Worker, refine, no token | `:restricted` | no (and refused the config route anyway) |
+
+The `operator` claim is set only by `Arbiter.MCP.OperatorSocket`, after
+`OperatorProof`; a session token ignores it, and the HTTP mint route never
+propagates it. The same rule covers the `guardrail_subjects` rows
+(`Arbiter.Guardrails.Subjects.put/3`): the coordinator may demote, narrow a scope,
+tighten an override and pin; it may not promote, widen or unpin.
+
+**Doctor.** `arb doctor` prints a "guardrail profiles" check (`GET
+/api/server/guardrails`, `Arbiter.Guardrails.Report`): each workspace's attached
+subjects with their effective tier, and a non-fatal FAIL for an inert block, an
+unmatched or out-of-scope subject, a tier its adapter cannot enforce on this host,
+a cap that matches nothing, an unknown repo or an unreachable binding. The REST
+`security_posture` and MCP `workspace_show` carry the same `guardrails` object.
+
+**Not in G11.** Routing eligibility (`check_guardrails`, the DispatchQueue hold) and
+the ReviewGate's reviewer spawn path are G13; ticket permissions are G12. G11 wires
+the floor into the implementer dispatch spawn.
 
 ## Operator proof for token minting (bd-8381tk)
 
