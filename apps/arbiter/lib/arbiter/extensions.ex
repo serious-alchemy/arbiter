@@ -154,13 +154,10 @@ defmodule Arbiter.Extensions do
   end
 
   defp register!({ext, {seam, key, mod}}, registry) when is_binary(key) do
-    behaviour = Map.get(@seams, seam) || raise_unknown_seam(ext, seam)
+    behaviour = behaviour!(ext, seam)
     check_callbacks!(ext, seam, key, mod, behaviour)
 
-    # Extension keys come from the operator's own release config, not from
-    # request input, and the set is fixed at boot.
-    # sobelow_skip ["DOS.StringToAtom"]
-    atom = String.to_atom(key)
+    atom = key_atom(key)
 
     {map, order} = Map.fetch!(registry, seam)
 
@@ -180,10 +177,21 @@ defmodule Arbiter.Extensions do
             "expected {seam, key :: String.t(), module}"
   end
 
-  defp raise_unknown_seam(ext, seam) do
-    raise ArgumentError,
-          "#{inspect(ext)} contributes to unknown seam #{inspect(seam)} " <>
-            "(known: #{inspect(seams())})"
+  # Extension keys come from the operator's own release config, not from
+  # request input, and the set is fixed at boot.
+  # sobelow_skip ["DOS.StringToAtom"]
+  defp key_atom(key), do: String.to_atom(key)
+
+  defp behaviour!(ext, seam) do
+    case Map.fetch(@seams, seam) do
+      {:ok, behaviour} ->
+        behaviour
+
+      :error ->
+        raise ArgumentError,
+              "#{inspect(ext)} contributes to unknown seam #{inspect(seam)} " <>
+                "(known: #{inspect(seams())})"
+    end
   end
 
   defp check_callbacks!(ext, seam, key, mod, behaviour) do
