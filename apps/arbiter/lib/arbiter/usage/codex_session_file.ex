@@ -229,7 +229,112 @@ defmodule Arbiter.Usage.CodexSessionFile do
     end
   end
 
+  @doc """
+  The ChatGPT-plan quota a run consumed — Codex's cost-equivalent, since a
+  plan-metered run has no dollar figure (G20 / bd-8yafoz).
+
+  Every `token_count` line in a rollout carries the account's `rate_limits`
+  at that instant: `primary` (the 5-hour session window) and `secondary`
+  (the weekly window), each with `used_percent`, `window_minutes` and
+  `resets_at`. The run's consumption is the last sample minus the last sample
+  before `since:`. With no earlier sample (a fresh account/thread) the
+  baseline is the run's own first sample, so the figure is a lower bound —
+  flagged `baseline: "first_sample"`. A window whose `resets_at` moved
+  mid-run was reset, so the delta is the post-reset usage alone, flagged
+  `reset: true`.
+
+  Backend-neutral: it only reads what the rollout carries, so a Codex run
+  against a backend that reports no `rate_limits` (free tier, Ollama, another
+  Responses-API server) gets `:not_found` rather than a fabricated figure.
+  """
+  @spec quota_delta_for(String.t() | nil, String.t() | nil, keyword()) ::
+          {:ok, %{plan_type: String.t() | nil, windows: %{String.t() => map()}}} | :not_found
+  def quota_delta_for(home, thread_id, opts \\ []) do
+    since = Keyword.get(opts, :since)
+
+    with {:ok, path} <- locate(home, thread_id),
+         {:ok, io} <- File.open(path, [:read, :binary]) do
+      try do
+        io |> rate_limit_samples() |> quota_window(since)
+      after
+        File.close(io)
+      end
+    else
+      _ -> :not_found
+    end
+  end
+
   # ---- internals ---------------------------------------------------------
+
+  defp rate_limit_samples(io) do
+    io
+    |> IO.stream(:line)
+    |> Enum.flat_map(fn line ->
+      with {:ok, event} <- decode(line),
+           %{"rate_limits" => %{} = rl} <- token_count_payload(event) do
+        [{parse_ts(event["timestamp"]), rl}]
+      else
+        _ -> []
+      end
+    end)
+  end
+
+  defp quota_window([], _since), do: :not_found
+
+  defp quota_window(samples, since) do
+    {_ts, last} = List.last(samples)
+
+    before =
+      case since do
+        %DateTime{} ->
+          samples
+          |> Enum.filter(fn {ts, _} ->
+            match?(%DateTime{}, ts) and DateTime.compare(ts, since) == :lt
+          end)
+          |> List.last()
+
+        _ ->
+          nil
+      end
+
+    {baseline_kind, {_, base}} =
+      if before, do: {"before_run", before}, else: {"first_sample", hd(samples)}
+
+    windows =
+      for name <- ["primary", "secondary"],
+          %{"used_percent" => now} when is_number(now) <- [last[name]],
+          into: %{} do
+        {name, window_delta(name, last[name], base[name], baseline_kind)}
+      end
+
+    if map_size(windows) == 0 do
+      :not_found
+    else
+      {:ok, %{plan_type: last["plan_type"], windows: windows}}
+    end
+  end
+
+  defp window_delta(_name, %{"used_percent" => now} = last, base, baseline_kind) do
+    then_pct = if is_map(base), do: base["used_percent"]
+
+    reset? =
+      is_map(base) and base["resets_at"] != last["resets_at"] and not is_nil(last["resets_at"])
+
+    delta =
+      cond do
+        reset? -> now
+        is_number(then_pct) -> max(now - then_pct, 0)
+        true -> now
+      end
+
+    %{
+      delta_percent: Float.round(delta * 1.0, 2),
+      used_percent: now,
+      window_minutes: last["window_minutes"],
+      baseline: baseline_kind,
+      reset: reset?
+    }
+  end
 
   defp last_token_count(io) do
     io
