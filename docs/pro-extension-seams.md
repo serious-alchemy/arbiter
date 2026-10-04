@@ -1,5 +1,3 @@
-# Full document: docs/pro-extension-seams.md
-
 # Core/Pro Extension Seams — Inventory and Gaps
 
 **Status:** Proposal for the operator to rule on (bd-89v7hp). This proposal changes no code and files no issues.
