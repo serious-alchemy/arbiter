@@ -593,8 +593,10 @@ defmodule Arbiter.Worker.ReviewGateReviewCheckoutTest do
       for role <- [:reviewer, :implementer] do
         policy = ReviewGate.session_security_policy(ws, state, role)
         assert SecurityPolicy.sandbox_backend(policy) == :bwrap, "#{role} kept podman"
+        # The backend resolves; the real argv/spawn under it is covered by the
+        # stubbed-`claude` production spawn path tests below (a bare
+        # `default_argv/2` needs a `claude` on PATH, which CI does not have).
         assert {:ok, _} = Arbiter.Worker.Sandbox.module(policy)
-        assert {:ok, _argv} = Arbiter.Agents.Claude.default_argv("review", security: policy)
       end
 
       # A reviewer with no round checkout is a review spawn all the same.
