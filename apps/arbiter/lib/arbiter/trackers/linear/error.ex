@@ -17,6 +17,9 @@ defmodule Arbiter.Trackers.Linear.Error do
       `errors` in the response body
     * `:transition_not_found` — the requested tracker status had no mapping to a
       Linear workflow state in the team's state list
+    * `:upstream_past_target` — a `:closed` transition was declined because the
+      item is already at, or beyond, the closed-mapped state (bd-4i7kky);
+      writing would move it backwards
     * `:config_missing` — workspace config is missing credentials or no active
       workspace is set
   """
@@ -33,6 +36,7 @@ defmodule Arbiter.Trackers.Linear.Error do
           | :network
           | :graphql_error
           | :transition_not_found
+          | :upstream_past_target
           | :config_missing
 
   @type t :: %__MODULE__{

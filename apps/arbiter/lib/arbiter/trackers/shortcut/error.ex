@@ -14,6 +14,9 @@ defmodule Arbiter.Trackers.Shortcut.Error do
     * `:network` — transport-level failure
     * `:transition_not_found` — the requested tracker status had no mapping to a
       Shortcut workflow state available in the configured workflow(s)
+    * `:upstream_past_target` — a `:closed` transition was declined because the
+      item is already at, or beyond, the closed-mapped state (bd-4i7kky);
+      writing would move it backwards
     * `:config_missing` — workspace config is missing credentials, or no active
       workspace is set
   """
@@ -29,6 +32,7 @@ defmodule Arbiter.Trackers.Shortcut.Error do
           | :http
           | :network
           | :transition_not_found
+          | :upstream_past_target
           | :config_missing
 
   @type t :: %__MODULE__{

@@ -571,6 +571,75 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   end
 
   @doc """
+  Tell the coordinator that every child of an epic with `auto_close` OFF has
+  closed (bd-4i7kky). The epic is "owned": nothing closes it, so without this it
+  sits open until somebody happens to notice — the 2026-09-30 incident, where an
+  epic whose last child closed on 09-24 was closed by hand a week later.
+
+  Fired once, at child-close time (`Arbiter.Tasks.Issue.maybe_auto_close_parents/1`),
+  never on a tick or at boot. A ticket-scoped escalation, so a repeat while the
+  first is still open folds into it, and it resolves when the epic closes.
+  Best-effort, returns `:ok`.
+  """
+  @spec epic_children_closed(map(), non_neg_integer()) :: :ok
+  def epic_children_closed(snapshot, child_count) do
+    escalate_event(:epic_children_closed, snapshot, fn task_id ->
+      subject = "#{task_id} all #{child_count} children closed"
+
+      body =
+        "Every child of #{title_for(task_id)} (#{child_count}) has closed, but the epic has " <>
+          "`auto_close` off, so nothing closes it for you.\n" <>
+          "Close it (`arb close #{task_id}`) or turn `auto_close` on (`ticket_update` with " <>
+          "`auto_close: true`; a finished epic closes as soon as the flag is switched on)."
+
+      {subject, body}
+    end)
+  end
+
+  @doc """
+  Record on the ticket that a tracker **close was skipped** because the upstream
+  item is already at, or not known to precede, the closed-mapped status
+  (bd-4i7kky). A `:notification` carrying the ticket's `task_ref`, so it shows in
+  the ticket's MESSAGES panel and the activity feed without paging the
+  coordinator: nothing failed, but a forward close that was declined by mistake
+  (an unmapped in-progress status, say) must be findable from the ticket rather
+  than only in the logs. Best-effort, returns `:ok`.
+  """
+  @spec tracker_close_skipped(map(), term()) :: :ok
+  def tracker_close_skipped(%{workspace_id: ws_id, task_id: task_id} = snapshot, reason)
+      when is_binary(ws_id) do
+    tracker = Map.get(snapshot, :tracker_type)
+    ref = Map.get(snapshot, :tracker_ref)
+
+    Message.notify(%{
+      workspace_id: ws_id,
+      from_ref: task_id,
+      task_ref: task_id,
+      subject: "#{task_id} tracker close skipped",
+      body:
+        [
+          "Closed #{title_for(task_id)} locally but did not close its upstream item: " <>
+            "it is already at, or not known to precede, the closed-mapped status.",
+          tracker && "Tracker: #{tracker}#{ref && " #{ref}"}",
+          "Detail: #{describe_reason(reason)}",
+          "Close it upstream by hand if it should be closed."
+        ]
+        |> Enum.reject(&is_nil/1)
+        |> Enum.join("\n")
+    })
+
+    :ok
+  rescue
+    e ->
+      Logger.debug("CoordinatorNotifier.tracker_close_skipped swallowed: #{Exception.message(e)}")
+      :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  def tracker_close_skipped(_snapshot, _reason), do: :ok
+
+  @doc """
   Escalate a failed **review-coverage write** to the coordinator (bd-203cl5 /
   #1648, design #1635 §3.3).
 

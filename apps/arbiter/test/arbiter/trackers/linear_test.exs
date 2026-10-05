@@ -416,6 +416,119 @@ defmodule Arbiter.Trackers.LinearTest do
     end
   end
 
+  describe "transition/2 :closed never moves an issue backwards (bd-4i7kky)" do
+    # Team workflow: Todo(unstarted,0) < In Progress(started,1) <
+    # Ready to Ship(started,2) < QA(started,3) < Done(completed,4).
+    @linear_states [
+      %{"id" => "s-todo", "name" => "Todo", "type" => "unstarted", "position" => 0},
+      %{"id" => "s-prog", "name" => "In Progress", "type" => "started", "position" => 1},
+      %{"id" => "s-ship", "name" => "Ready to Ship", "type" => "started", "position" => 2},
+      %{"id" => "s-qa", "name" => "QA", "type" => "started", "position" => 3},
+      %{"id" => "s-done", "name" => "Done", "type" => "completed", "position" => 4}
+    ]
+
+    setup do
+      Application.put_env(:arbiter, :linear_http_stub, true)
+
+      Config.put_active(%{
+        "credentials_ref" => "test-token",
+        "status_map" => %{"closed" => "Ready to Ship"}
+      })
+
+      on_exit(fn ->
+        Application.delete_env(:arbiter, :linear_http_stub)
+        Config.clear()
+      end)
+    end
+
+    defp stub_linear(current_state_id) do
+      test_pid = self()
+      current = Enum.find(@linear_states, &(&1["id"] == current_state_id))
+
+      Req.Test.stub(Arbiter.Trackers.Linear.HTTP, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        query = Jason.decode!(body)["query"] || ""
+
+        cond do
+          String.contains?(query, "issueUpdate") ->
+            send(test_pid, {:wrote, Jason.decode!(body)["variables"]})
+            Req.Test.json(conn, %{"data" => %{"issueUpdate" => %{"success" => true}}})
+
+          String.contains?(query, "TeamStates") ->
+            Req.Test.json(conn, %{
+              "data" => %{"team" => %{"states" => %{"nodes" => @linear_states}}}
+            })
+
+          true ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "issue" => %{
+                  "id" => "issue-uuid-1",
+                  "identifier" => "ENG-1",
+                  "title" => "Test",
+                  "state" => Map.take(current, ["id", "name", "type"]),
+                  "assignees" => %{"nodes" => []},
+                  "team" => %{"id" => "team-1", "key" => "ENG"}
+                }
+              }
+            })
+        end
+      end)
+    end
+
+    test "an issue in a LATER started state (QA) is left alone" do
+      stub_linear("s-qa")
+
+      assert {:error, %Error{kind: :upstream_past_target}} = Linear.transition("ENG-1", :closed)
+      refute_received {:wrote, _}
+    end
+
+    test "an issue in a completed state is not dragged back to a started closed status" do
+      stub_linear("s-done")
+
+      assert {:error, %Error{kind: :upstream_past_target}} = Linear.transition("ENG-1", :closed)
+      refute_received {:wrote, _}
+    end
+
+    test "an issue already in the closed-mapped state is not rewritten" do
+      stub_linear("s-ship")
+
+      assert {:error, %Error{kind: :upstream_past_target}} = Linear.transition("ENG-1", :closed)
+      refute_received {:wrote, _}
+    end
+
+    test "an issue in an EARLIER state is moved forward to the closed-mapped state" do
+      stub_linear("s-prog")
+
+      assert :ok = Linear.transition("ENG-1", :closed)
+      assert_received {:wrote, %{"stateId" => "s-ship"}}
+    end
+
+    test "closed => Done (completed type) still closes an issue sitting in QA" do
+      Config.put_active(%{
+        "credentials_ref" => "test-token",
+        "status_map" => %{"closed" => "Done"}
+      })
+
+      stub_linear("s-qa")
+
+      assert :ok = Linear.transition("ENG-1", :closed)
+      assert_received {:wrote, %{"stateId" => "s-done"}}
+    end
+
+    test "only :closed is guarded — other events keep their behaviour" do
+      Config.put_active(%{
+        "credentials_ref" => "test-token",
+        "status_map" => %{"in_progress" => "In Progress"}
+      })
+
+      stub_linear("s-qa")
+
+      assert :ok = Linear.transition("ENG-1", :in_progress)
+      assert_received {:wrote, %{"stateId" => "s-prog"}}
+    end
+  end
+
   describe "list_open/1 (HTTP stub)" do
     setup do
       Application.put_env(:arbiter, :linear_http_stub, true)
