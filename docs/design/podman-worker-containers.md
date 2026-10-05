@@ -342,6 +342,25 @@ cache, **17 to 18 s** ([§6](#6-measurements)). A cache is essential.
   inside the image** with a seed job (`mix deps.get && mix deps.compile`) run
   when the lockfile hash is new, and copy from there.
 - **Hex and Mix homes stay per run**, as `Jail.toolchain_env/1` does today.
+  The cache carries the Hex archive and rebar3 the seed job installed
+  (`mix_home/`, compiled for the image's OTP) and each run's `HOME` gets its own
+  copy at `~/.mix`. A container has no operator `~/.mix` to link in (the bwrap
+  jail does), and without Hex `mix` stops to ask whether to install it, offline.
+
+**As built (bd-1wm14e, `Arbiter.Worker.DepsCache`).**
+
+| Question | Answer |
+|---|---|
+| Key | `<sha256(mix.lock at the default branch)[0,12]>-<sha256(image tag)[0,12]>` under `<scratch_root>/deps-cache`. The image tag is already a content hash of the Containerfile, build args and `.tool-versions`, so any toolchain change is a miss. The lockfile is read from the default branch's committed tree, never a worker's branch |
+| Seed job | One container on a miss, single-flight per key: the default branch's tree exported with `git archive` into a scratch dir, `mix local.hex/rebar`, `mix deps.get`, `deps.compile` for `test` and `dev`. P3 hardening, two mounts (the export and a scratch `HOME`), `--network=pasta` because it fetches. Only `deps/`, `_build/<env>/lib/<dep>` and `mix_home/` are kept; the project's own app dirs are dropped, as in `seed_compiled_deps/3` |
+| Publication | Staged beside the final name, `.complete` written last, renamed into place. A failed seed leaves nothing and the next dispatch retries |
+| Per-worker copy | `cp -a --reflink=always` into the private clone, falling back to a plain `cp -a` where the filesystem cannot clone. The cache is never mounted into any container and never written after it is complete. The key is stamped in `<clone>/.git/arbiter-deps-cache`: the same key is left alone (a resumed worker keeps its compiled work), a new one replaces `deps/` and `_build/` |
+| Failure | Best-effort. No lockfile, offline, or a failed seed logs a warning and the worker starts without the cache (it fetches through the egress proxy, as before) |
+| Where | `ContainerSpawn.prepare/1`, after the image is resolved and before the egress run starts: a cold seed takes minutes |
+| Config | `config :arbiter, :worker_deps_cache` (default `true`; `false` in the test env) |
+
+Not done: pruning old cache directories (about 190 MB each for this repo; one
+per lockfile and image tag).
 
 ### 3.4 SELinux on Fedora
 
@@ -644,7 +663,7 @@ difficulty.
 | P3 | **Done (bd-bu4ye2).** `Arbiter.Worker.Container`: a pure argv builder like `Jail.argv/2` (`--name`, `--init`, `--rm`, `--userns=keep-id`, `--read-only`, `--cap-drop=all`, `no-new-privileges`, tmpfs, explicit `-e NAME` allowlist, mounts, label policy), a doctor probe and teardown by name | 3 | P1, P2 |
 | P4 | **Done (bd-9r5jdt, `Arbiter.Worker.Image`).** Image lifecycle: `.arbiter/Containerfile` or a generated default, content-hash tags, single-flight lazy build from the **default branch**, weekly base refresh, prune, `arb image list/build`. Provider CLIs in the base image or a versioned read-only CLI dir | 3 | P3 |
 | P5 | **Done (bd-4wy1w1, `Arbiter.Worker.PrivateClone`).** Git layout B: private `--shared` clone with read-only `:O` alternates, sync-back into the main repo, a pinned base ref against gc, cleanup and sweeper changes, ReviewGate and MergeQueue reads. **The riskiest item.** Re-estimated D3 after the reading day (§3.2) | 4 | P3 |
-| P6 | Image-keyed deps cache: seed job inside the image, per-worker `cp --reflink` copy, key `(lockfile hash, image tag)`. Extend bd-5tncmq | 3 | P4 |
+| P6 | **Done (bd-1wm14e, `Arbiter.Worker.DepsCache`).** Image-keyed deps cache: seed job inside the image, per-worker `cp --reflink` copy, key `(lockfile hash, image tag)`. Extend bd-5tncmq | 3 | P4 |
 | P7 | **Done (bd-d2o3xb, `Arbiter.Worker.ContainerSpawn`).** Claude under the container backend (replaces G7 bd-d2o3xb): config dir, token env, `.mcp.json`, `arb`, proxy and Arbiter bridges via G5's sockets, wrap point in `ClaudeSession`. See [§4.1](#41-claude-under-podman-p7) | 3 | P3, P5, G5 |
 | P8 | **Codex under the container backend** (replaces G8 bd-50d5j6, with bd-99emmd): per-run `CODEX_HOME`, refresh-token rotation handling | 3 | P7 |
 | P9 | Deploy-key delivery as `--secret` (the body of G16 bd-9cygoo and the per-run-agent part of G14) | 3 | P7 |

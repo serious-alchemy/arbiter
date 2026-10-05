@@ -162,10 +162,11 @@ defmodule Arbiter.Worker.ContainerSpawn do
          {:ok, mounts} <- clone_mounts(worktree),
          {:ok, tmp_dir} <- fetch_tmp_dir(opts),
          {:ok, image} <- fetch_image(opts, worktree),
-         deps_cache = seed_deps(opts, worktree, image),
          {:ok, cli_mounts} <- cli_mounts(opts),
-         {:ok, network, spec} <- start_egress(opts, policy, worktree),
          {:ok, home, config_dir} <- run_dirs(tmp_dir, Keyword.get(opts, :workspace)),
+         # Before the egress run starts: a cold seed takes minutes.
+         deps_cache = seed_deps(opts, worktree, image, home),
+         {:ok, network, spec} <- start_egress(opts, policy, worktree),
          name = container_name(opts),
          {:ok, services} <- start_services(opts, name) do
       {:ok,
@@ -250,7 +251,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
   # ABI-bound to the host's libc and OTP. Best-effort: a cache that cannot be
   # seeded (offline, no lockfile, a non-Mix repo) leaves the worker to fetch and
   # compile for itself, as it would without the cache. `nil` means no cache.
-  defp seed_deps(opts, worktree, image) do
+  defp seed_deps(opts, worktree, image, home) do
     seed =
       case Keyword.get(opts, :deps_cache, Application.get_env(:arbiter, :worker_deps_cache, true)) do
         enabled when enabled in [false, nil] ->
@@ -261,7 +262,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
             DepsCache.seed_worktree(
               worktree,
               image,
-              Keyword.take(opts, [:workspace, :repo, :podman])
+              [home: home] ++ Keyword.take(opts, [:workspace, :repo, :podman])
             )
           end
 

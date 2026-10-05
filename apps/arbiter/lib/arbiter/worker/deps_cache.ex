@@ -70,6 +70,9 @@ defmodule Arbiter.Worker.DepsCache do
   @complete ".complete"
   @marker "arbiter-deps-cache"
   @artifacts ["deps", "_build"]
+  # The seed job's `MIX_HOME`: the Hex archive and rebar3 it installed. Both are
+  # compiled for the image's OTP, so they are as ABI-bound as `_build`.
+  @mix_home "mix_home"
   @seed_timeout_ms 30 * 60_000
   @git_timeout_ms 60_000
 
@@ -182,7 +185,7 @@ defmodule Arbiter.Worker.DepsCache do
 
       with :ok <- export_tree(repo_path, key.ref, work, src),
            :ok <- run_seed_job(key, src, home, opts) do
-        publish(src, key)
+        publish(src, Path.join(home, ".mix"), key)
       end
     after
       force_rm_rf(work)
@@ -219,6 +222,7 @@ defmodule Arbiter.Worker.DepsCache do
         name: name,
         network: :pasta,
         env: [
+          {"LANG", "C.UTF-8"},
           {"MIX_ENV", "test"},
           {"HEX_HOME", Path.join(home, ".hex")},
           {"MIX_HOME", Path.join(home, ".mix")}
@@ -235,7 +239,7 @@ defmodule Arbiter.Worker.DepsCache do
 
   # Move the artifacts into a sibling temp dir, mark it complete, then rename it
   # into place: the final name only ever appears complete.
-  defp publish(src, key) do
+  defp publish(src, mix_home, key) do
     staging =
       key.dir <> ".tmp-" <> Base.url_encode64(:crypto.strong_rand_bytes(4), padding: false)
 
@@ -245,10 +249,12 @@ defmodule Arbiter.Worker.DepsCache do
 
       if "deps" in present do
         Enum.each(present, &File.rename!(Path.join(src, &1), Path.join(staging, &1)))
+        prune_own_apps(staging)
+        if File.dir?(mix_home), do: File.rename!(mix_home, Path.join(staging, @mix_home))
 
         File.write!(
           Path.join(staging, @complete),
-          "lock=#{key.lock_hash}\nimage=#{key.image_tag}\n"
+          "lock=#{key.lock_hash}\nimage=#{key.image_tag}\nsrc=#{src}\n"
         )
 
         File.rename!(staging, key.dir)
@@ -261,6 +267,21 @@ defmodule Arbiter.Worker.DepsCache do
     after
       force_rm_rf(staging)
     end
+  end
+
+  # `deps.compile` leaves the project's own app dirs in `_build/<env>/lib`. Like
+  # `Worktree.seed_compiled_deps/3`, cache dependencies only: an app compiles
+  # fresh per branch, so one branch's output can never reach another.
+  defp prune_own_apps(dir) do
+    deps = dir |> Path.join("deps") |> File.ls!() |> MapSet.new()
+
+    for lib <- Path.wildcard(Path.join(dir, "_build/*/lib")),
+        entry <- File.ls!(lib),
+        not MapSet.member?(deps, entry) do
+      force_rm_rf(Path.join(lib, entry))
+    end
+
+    :ok
   end
 
   # -- install -------------------------------------------------------------------
@@ -286,6 +307,7 @@ defmodule Arbiter.Worker.DepsCache do
         {:ok, %{method: :unchanged, ms: elapsed(started)}}
       else
         with {:ok, method} <- copy_artifacts(cache_dir, worktree, opts) do
+          retarget_manifests(worktree, stamp)
           record(worktree, stamp)
           {:ok, %{method: method, ms: elapsed(started)}}
         end
@@ -295,6 +317,59 @@ defmodule Arbiter.Worker.DepsCache do
       other -> {:error, {:install_failed, other}}
     end
   end
+
+  # Mix recompiles a dependency whose project directory is not the one its
+  # manifest (`_build/<env>/lib/<dep>/.mix/compile.elixir`) was written in, so a
+  # `_build` seeded at one path is stale at every other (found measuring this:
+  # the bwrap path's host seed has the same first-use rebuild). The seed ran at
+  # the `src=` path in the stamp; point each manifest's directory at the
+  # worktree instead. Only a manifest we can read and whose directory is under
+  # that path is touched (`:safe` decoding: the file came out of a container);
+  # anything else is left alone and costs a recompile, never a wrong build.
+  defp retarget_manifests(worktree, stamp) do
+    with [_, from] <- Regex.run(~r/^src=(.+)$/m, stamp) do
+      pattern = Path.join(worktree, "_build/*/lib/*/.mix/compile.elixir")
+
+      for file <- Path.wildcard(pattern, match_dot: true) do
+        retarget_manifest(file, from, worktree)
+      end
+    end
+
+    :ok
+  end
+
+  defp retarget_manifest(file, from, to) do
+    with {:ok, bin} <- File.read(file),
+         term when is_tuple(term) <- safe_decode(bin),
+         true <- Enum.any?(Tuple.to_list(term), &under?(&1, from)) do
+      moved =
+        term
+        |> Tuple.to_list()
+        |> Enum.map(fn
+          dir when is_binary(dir) ->
+            if under?(dir, from),
+              do: to <> binary_part(dir, byte_size(from), byte_size(dir) - byte_size(from)),
+              else: dir
+
+          other ->
+            other
+        end)
+        |> List.to_tuple()
+
+      File.write(file, :erlang.term_to_binary(moved, [:compressed]))
+    end
+  end
+
+  defp safe_decode(bin) do
+    :erlang.binary_to_term(bin, [:safe])
+  rescue
+    ArgumentError -> nil
+  end
+
+  defp under?(dir, from) when is_binary(dir),
+    do: dir == from or String.starts_with?(dir, from <> "/")
+
+  defp under?(_, _), do: false
 
   defp elapsed(started), do: System.monotonic_time(:millisecond) - started
 
@@ -367,6 +442,28 @@ defmodule Arbiter.Worker.DepsCache do
 
   defp marker_path(worktree), do: Path.join([worktree, ".git", @marker])
 
+  @doc """
+  Give a run's `HOME` the cache's Hex archive and rebar3 (`<home>/.mix`).
+
+  A container has no operator `~/.mix` to borrow (the bwrap jail links one in),
+  and without Hex `mix` stops to ask whether to install it, offline. The copy
+  is per run and made only when `<home>/.mix` is absent, so a resumed run keeps
+  its own. `{:ok, :reflink | :copy | :unchanged | :none}`; `:none` is a cache
+  built without one.
+  """
+  @spec install_mix_home(String.t(), String.t(), keyword()) ::
+          {:ok, :reflink | :copy | :unchanged | :none} | {:error, term()}
+  def install_mix_home(cache_dir, home, opts \\ []) do
+    source = Path.join(cache_dir, @mix_home)
+    dest = Path.join(home, ".mix")
+
+    cond do
+      not File.dir?(source) -> {:ok, :none}
+      File.exists?(dest) -> {:ok, :unchanged}
+      true -> replace(source, dest, opts)
+    end
+  end
+
   # -- seed a private clone ---------------------------------------------------------
 
   @doc """
@@ -374,8 +471,9 @@ defmodule Arbiter.Worker.DepsCache do
   (seeding it on a miss) and install it into `worktree`, a private clone.
 
   Options are `ensure/4`'s plus `:workspace` and `:repo` (to find the default
-  branch). `{:ok, summary}` carries `:dir`, `:seeded?`, `:method` and the
-  install time in `:ms`.
+  branch) and `:home` (the run's `HOME`, which gets the Hex archive).
+  `{:ok, summary}` carries `:dir`, `:seeded?`, `:method` and the install time in
+  `:ms`.
   """
   @spec seed_worktree(String.t(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def seed_worktree(worktree, image_tag, opts \\ []) do
@@ -384,18 +482,22 @@ defmodule Arbiter.Worker.DepsCache do
 
     with repo when is_binary(repo) <- PrivateClone.main_repo(worktree),
          {:ok, cache} <- ensure(repo, base, image_tag, opts),
-         {:ok, installed} <- install(cache.dir, worktree, opts) do
+         {:ok, installed} <- install(cache.dir, worktree, opts),
+         {:ok, mix_home} <- install_home(cache.dir, Keyword.get(opts, :home), opts) do
       Logger.info(
         "DepsCache: #{worktree} #{describe(installed.method)} from #{cache.dir} " <>
           "(#{if cache.seeded?, do: "seeded", else: "hit"}, #{installed.ms} ms)"
       )
 
-      {:ok, Map.merge(cache, installed)}
+      {:ok, cache |> Map.merge(installed) |> Map.put(:mix_home, mix_home)}
     else
       nil -> {:error, {:not_a_private_clone, worktree}}
       {:error, _} = error -> error
     end
   end
+
+  defp install_home(_cache_dir, nil, _opts), do: {:ok, :none}
+  defp install_home(cache_dir, home, opts), do: install_mix_home(cache_dir, home, opts)
 
   defp describe(:unchanged), do: "already current"
   defp describe(method), do: "installed by #{method}"

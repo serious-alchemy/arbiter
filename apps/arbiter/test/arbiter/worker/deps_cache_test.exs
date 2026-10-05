@@ -34,12 +34,25 @@ defmodule Arbiter.Worker.DepsCacheTest do
 
       case args do
         ["run" | _] ->
+          "MIX_HOME=" <> mix_home = Enum.find(args, &String.starts_with?(&1, "MIX_HOME="))
           work = args |> Enum.drop_while(&(&1 != "-w")) |> Enum.at(1)
           image = args |> Enum.drop_while(&(&1 != "--")) |> Enum.at(1)
+          File.mkdir_p!(Path.join(mix_home, "archives"))
+          File.write!(Path.join(mix_home, "archives/hex-2.0.ez"), image)
           File.mkdir_p!(Path.join(work, "deps/jason"))
           File.write!(Path.join(work, "deps/jason/mix.exs"), "# jason\n")
+          # What Mix writes: the dep's project directory is baked into the manifest.
+          File.mkdir_p!(Path.join(work, "_build/test/lib/jason/.mix"))
+
+          File.write!(
+            Path.join(work, "_build/test/lib/jason/.mix/compile.elixir"),
+            :erlang.term_to_binary({29, %{}, %{}, Path.join(work, "deps/jason"), 1}, [:compressed])
+          )
+
           File.mkdir_p!(Path.join(work, "_build/test/lib/jason/ebin"))
           File.write!(Path.join(work, "_build/test/lib/jason/ebin/jason.beam"), image)
+          # `mix deps.compile` also leaves the project's own (empty) build dir.
+          File.mkdir_p!(Path.join(work, "_build/test/lib/myapp"))
           File.mkdir_p!(Path.join(work, "_build/dev/lib/jason/ebin"))
           File.write!(Path.join(work, "_build/dev/lib/jason/ebin/jason.beam"), image)
           {"", 0}
@@ -119,6 +132,10 @@ defmodule Arbiter.Worker.DepsCacheTest do
 
       assert File.read!(Path.join(dir, "_build/test/lib/jason/ebin/jason.beam")) == @image_a
       assert File.exists?(Path.join(dir, "deps/jason/mix.exs"))
+      assert File.read!(Path.join(dir, "mix_home/archives/hex-2.0.ez")) == @image_a
+
+      # Only dependencies are cached: the project's own apps compile per branch.
+      refute File.exists?(Path.join(dir, "_build/test/lib/myapp"))
 
       assert [argv] = runs()
       assert @image_a in argv
@@ -218,6 +235,30 @@ defmodule Arbiter.Worker.DepsCacheTest do
       refute File.lstat!(Path.join(ctx.worker, "_build")).type == :symlink
     end
 
+    test "points each manifest at the worker's directory, so Mix does not rebuild", ctx do
+      assert {:ok, _} = DepsCache.install(ctx.cache, ctx.worker, ctx.opts)
+
+      manifest = Path.join(ctx.worker, "_build/test/lib/jason/.mix/compile.elixir")
+      assert {29, %{}, %{}, dir, 1} = manifest |> File.read!() |> :erlang.binary_to_term()
+      assert dir == Path.join(ctx.worker, "deps/jason")
+
+      # The cache's own manifest is not rewritten through the copy.
+      {29, %{}, %{}, original, 1} =
+        Path.join(ctx.cache, "_build/test/lib/jason/.mix/compile.elixir")
+        |> File.read!()
+        |> :erlang.binary_to_term()
+
+      refute original == dir
+    end
+
+    test "leaves a manifest it cannot read alone", ctx do
+      File.write!(Path.join(ctx.cache, "_build/test/lib/jason/.mix/compile.elixir"), "garbage")
+      assert {:ok, _} = DepsCache.install(ctx.cache, ctx.worker, ctx.opts)
+
+      assert File.read!(Path.join(ctx.worker, "_build/test/lib/jason/.mix/compile.elixir")) ==
+               "garbage"
+    end
+
     test "falls back to a plain copy when the filesystem cannot reflink", ctx do
       # `--reflink=always` fails on a filesystem without clone support; the
       # stand-in forces that, whatever this host's /tmp is.
@@ -274,6 +315,21 @@ defmodule Arbiter.Worker.DepsCacheTest do
 
       assert {:error, {:cache_incomplete, ^half}} = DepsCache.install(half, ctx.worker, ctx.opts)
       refute File.exists?(Path.join(ctx.worker, "deps"))
+    end
+
+    test "install_mix_home gives a run its own Hex archive and keeps a resumed run's", ctx do
+      home = Path.join(ctx.root, "run-home")
+      File.mkdir_p!(home)
+
+      assert {:ok, method} = DepsCache.install_mix_home(ctx.cache, home, ctx.opts)
+      assert method in [:reflink, :copy]
+      assert File.read!(Path.join(home, ".mix/archives/hex-2.0.ez")) == @image_a
+
+      File.write!(Path.join(home, ".mix/archives/hex-2.0.ez"), "run-local")
+      assert File.read!(Path.join(ctx.cache, "mix_home/archives/hex-2.0.ez")) == @image_a
+
+      assert {:ok, :unchanged} = DepsCache.install_mix_home(ctx.cache, home, ctx.opts)
+      assert File.read!(Path.join(home, ".mix/archives/hex-2.0.ez")) == "run-local"
     end
   end
 end
