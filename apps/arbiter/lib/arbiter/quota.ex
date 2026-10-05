@@ -219,12 +219,21 @@ defmodule Arbiter.Quota do
     * `:claude` → `AnthropicQuota` (OAuth polling + header capture from responses)
     * `:codex` → `CodexQuota` (`Arbiter.Quota.CloudProbe` / `Quota.Codex.fetch/2`)
     * `:gemini` (when agy runs it) / `:antigravity` → `GoogleQuota` (`Arbiter.Quota.CloudCode`)
+    * `:grok` → no table: the ledger estimate `Arbiter.Quota.GrokLedger.snapshot/1`
+      (a `Arbiter.Quota.Gate.Snapshot`, bd-cwq8b0)
 
   Accepts the agent-type atom (`:claude` / `:codex` / `:gemini`) or the quota
   provider code string. Returns `nil` for an unknown provider or when nothing
   has been captured yet — the gate's fail-open input.
   """
   @spec latest_for_provider(String.t() | nil, atom() | String.t()) :: struct() | nil
+  # bd-cwq8b0: grok has no quota table and no pollable endpoint; its snapshot is
+  # the ledger estimate (`Arbiter.Quota.GrokLedger`), not a stored row. The
+  # free tier's cap belongs to the one xAI account, so the account id is not
+  # consulted.
+  def latest_for_provider(_account_id, provider) when provider in [:grok, "grok"],
+    do: Arbiter.Quota.GrokLedger.snapshot()
+
   def latest_for_provider(account_id, provider) when is_binary(account_id) do
     case provider_code(provider) do
       "claude" -> latest(account_id, "claude")
@@ -245,6 +254,9 @@ defmodule Arbiter.Quota do
   that provider, which is the gate's existing fail-open input.
   """
   @spec latest_for_workspace(String.t() | nil, atom() | String.t()) :: struct() | nil
+  def latest_for_workspace(_workspace_id, provider) when provider in [:grok, "grok"],
+    do: Arbiter.Quota.GrokLedger.snapshot()
+
   def latest_for_workspace(workspace_id, provider) do
     case account_id(workspace_id, provider) do
       nil -> nil
