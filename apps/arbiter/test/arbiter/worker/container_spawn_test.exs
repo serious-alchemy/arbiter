@@ -157,6 +157,35 @@ defmodule Arbiter.Worker.ContainerSpawnTest do
       assert env["ARB_HOST"] =~ ~r{^http://127\.0\.0\.1:\d+$}
     end
 
+    test "seeds the clone's deps from the image-keyed cache for the resolved image", ctx do
+      test = self()
+
+      seed = fn worktree, image ->
+        send(test, {:seeded, worktree, image})
+        {:ok, %{dir: "/cache/x", seeded?: false, method: :reflink, ms: 3}}
+      end
+
+      assert {:ok, request} = ContainerSpawn.prepare([deps_cache: seed] ++ ctx.opts)
+      assert_received {:seeded, worktree, @image}
+      assert worktree == ctx.clone
+      assert request.deps_cache == %{dir: "/cache/x", seeded?: false, method: :reflink, ms: 3}
+
+      # The cache is a host-side source for a copy; the container never sees it.
+      refute Enum.any?(request.writable_paths, &String.contains?(&1, "/cache/x"))
+    end
+
+    test "a cache that cannot be seeded does not stop the worker", ctx do
+      seed = fn _worktree, _image -> {:error, {:seed_failed, 1, "offline"}} end
+
+      assert {:ok, request} = ContainerSpawn.prepare([deps_cache: seed] ++ ctx.opts)
+      assert request.deps_cache == nil
+    end
+
+    test "deps_cache: false skips seeding", ctx do
+      assert {:ok, request} = ContainerSpawn.prepare([deps_cache: false] ++ ctx.opts)
+      assert request.deps_cache == nil
+    end
+
     test "an oversized prompt's temp file is carried read-only", ctx do
       tmp = Path.join(ctx.dir, "arb_prompt_123.txt")
       File.write!(tmp, "x")
