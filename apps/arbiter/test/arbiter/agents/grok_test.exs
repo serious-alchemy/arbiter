@@ -208,6 +208,106 @@ defmodule Arbiter.Agents.GrokTest do
     end
   end
 
+  describe "security policy (bd-761q6h)" do
+    defp denied(command) do
+      command
+      |> Enum.chunk_every(2, 1, :discard)
+      |> Enum.filter(&(hd(&1) == "--deny"))
+      |> Enum.map(&List.last/1)
+    end
+
+    test "security_enforced?/0 is true: the baseline rides on every spawn" do
+      assert Grok.security_enforced?()
+    end
+
+    test "the default policy's deny baseline reaches grok next to --always-approve", %{
+      worktree: wt
+    } do
+      assert {:ok, argv} = Grok.default_argv("p", worktree: wt, security: policy(:bypass))
+      {_jail, command} = split(argv)
+
+      assert "--always-approve" in command
+      rules = denied(command)
+      assert "Bash(rm -rf:*)" in rules
+      assert "Bash(git push --force:*)" in rules
+      assert "Bash(gh pr create:*)" in rules
+      assert "Read(**/.env)" in rules
+      assert "WebFetch(domain:catbox.moe)" in rules
+      assert Enum.any?(rules, &String.starts_with?(&1, "Edit(/etc"))
+
+      # The worker's own GROK_HOME (its credential seam) is not editable.
+      assert "Edit(#{ConfigDir.grok_home(worktree: wt)}/**)" in rules
+
+      assert ["--disallowed-tools", tools] =
+               Enum.chunk_every(command, 2, 1) |> Enum.find(&(hd(&1) == "--disallowed-tools"))
+
+      assert "monitor" in String.split(tools, ",")
+      refute "--sandbox" in command
+    end
+
+    test "the security flags are the same in every mode, :strict included", %{worktree: wt} do
+      rules =
+        for mode <- [:bypass, :auto, :strict] do
+          assert {:ok, argv} = Grok.default_argv("p", worktree: wt, security: policy(mode))
+          {_jail, command} = split(argv)
+          denied(command)
+        end
+
+      assert [one] = Enum.uniq(rules)
+      assert one != []
+    end
+
+    test "a review dispatch gets the write tools removed on top of the read-only worktree", %{
+      worktree: wt
+    } do
+      reviewer =
+        SecurityPolicy.merge(policy(:bypass), %{
+          permissions: %{deny: ["Edit", "Write", "NotebookEdit"]}
+        })
+
+      assert {:ok, argv} = Grok.default_argv("review", worktree: wt, security: reviewer)
+      {jail, command} = split(argv)
+
+      assert ["--ro-bind", wt, wt] in triples(jail)
+      refute ["--bind", wt, wt] in triples(jail)
+      assert "Edit" in denied(command)
+      assert "Write" in denied(command)
+      # grok aborts on `--deny NotebookEdit`; it must never be emitted.
+      refute "NotebookEdit" in denied(command)
+
+      [tools] =
+        for [flag, value] <- Enum.chunk_every(command, 2, 1),
+            flag == "--disallowed-tools",
+            do: value
+
+      assert Enum.all?(~w(write search_replace), &(&1 in String.split(tools, ",")))
+    end
+
+    test "network: false switches grok's web tools off", %{worktree: wt} do
+      assert {:ok, argv} =
+               Grok.default_argv("p", worktree: wt, security: policy(:auto, %{network: false}))
+
+      {_jail, command} = split(argv)
+      assert "--disable-web-search" in command
+      assert "WebSearch" in denied(command)
+
+      assert {:ok, argv} = Grok.default_argv("p", worktree: wt, security: policy(:auto))
+      {_jail, command} = split(argv)
+      refute "--disable-web-search" in command
+    end
+
+    test "an operator deny entry grok cannot express is dropped from argv, not passed through", %{
+      worktree: wt
+    } do
+      p = SecurityPolicy.merge(policy(:auto), %{permissions: %{deny: ["Foo(bar)", "Bash(ls:*)"]}})
+      assert {:ok, argv} = Grok.default_argv("p", worktree: wt, security: p)
+      {_jail, command} = split(argv)
+
+      assert "Bash(ls:*)" in denied(command)
+      refute "Foo(bar)" in denied(command)
+    end
+  end
+
   describe "confinement" do
     test "write_confinement is :os_jail where the jail applies, :none otherwise" do
       assert Grok.write_confinement(policy(:auto)) == :os_jail

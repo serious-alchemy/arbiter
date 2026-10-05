@@ -20,6 +20,16 @@ defmodule Arbiter.Agents.Grok do
   under the worker's bound HOME (the jail's `--tmpfs /tmp` hides `/tmp` files).
   The whole thing runs under `sh -c 'exec "$@" < /dev/null'` so stdin is closed.
 
+  ## Security policy (bd-761q6h)
+
+  `Arbiter.Agents.Grok.Security` maps the `SecurityPolicy` onto `--deny` rules,
+  `--disallowed-tools`, `--disable-web-search` and `--no-subagents`; a deny beats
+  `--always-approve`. Those are permission-layer guards. The OS-level guarantees
+  come from the jail: nothing outside the worktree and the bound HOME is
+  writable, and a review dispatch (the policy denies `Write`) gets the worktree
+  `--ro-bind`-ed, so a reviewer's grok cannot write it however it tries. Why the
+  jail and not grok's own `--sandbox` is in `docs/worker-security.md`.
+
   ## Environment
 
   Each worker gets its own `HOME` with `GROK_HOME=$HOME/.grok`
@@ -48,17 +58,17 @@ defmodule Arbiter.Agents.Grok do
 
   ## Not here yet
 
-  `security_enforced?/0` is `false`: mapping the policy's deny categories onto
-  grok's `--deny` / `--disallowed-tools` is bd-761q6h; the per-worker MCP config
-  is `Arbiter.MCP.AgentConfig.Grok`; provider registration and routing are a later task. A
-  `splice_prompt/2` (nudge / `-r` resume) is left out too, which the worker
-  treats as "this provider cannot be resumed in place".
+  The per-worker MCP config is `Arbiter.MCP.AgentConfig.Grok`; provider
+  registration and routing are a later task. A `splice_prompt/2` (nudge / `-r`
+  resume) is left out too, which the worker treats as "this provider cannot be
+  resumed in place".
   """
 
   @behaviour Arbiter.Agents.Agent
 
   alias Arbiter.Agents.Grok.ConfigDir
   alias Arbiter.Agents.Grok.Credential
+  alias Arbiter.Agents.Grok.Security
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Worker.ClaudeSession
   alias Arbiter.Worker.Jail
@@ -91,11 +101,13 @@ defmodule Arbiter.Agents.Grok do
   def done_sentinel, do: @done_regex
 
   @doc """
-  Not yet: the deny categories are not mapped onto grok's own rules (bd-761q6h),
-  so the posture surface must not claim enforcement.
+  `true`: the deny categories ride on every spawn's argv as `--deny` /
+  `--disallowed-tools` (`Arbiter.Agents.Grok.Security`), and the per-worker HOME
+  that would let an operator hook or settings file undercut them has no off
+  switch (`ensure_home/1`).
   """
   @impl true
-  def security_enforced?, do: false
+  def security_enforced?, do: true
 
   @doc """
   `:os_jail` when this spawn runs inside `Arbiter.Worker.Jail`
@@ -139,7 +151,7 @@ defmodule Arbiter.Agents.Grok do
          {:ok, _sandbox} <- Sandbox.module(policy),
          {:ok, _home} <- ensure_home(opts),
          {:ok, prompt_args} <- prompt_args(prompt, opts),
-         command = [grok | prompt_args] ++ flags(opts),
+         command = [grok | prompt_args] ++ flags(opts) ++ security_flags(policy, opts),
          {:ok, command} <- maybe_jail(command, opts, policy) do
       {:ok, ["sh", "-c", ~s(exec "$@" < /dev/null), "sh" | command]}
     end
@@ -264,6 +276,22 @@ defmodule Arbiter.Agents.Grok do
     else
       {:ok, ["-p", prompt]}
     end
+  end
+
+  # The deny baseline. An operator `deny` entry with no grok spelling is not
+  # enforced, so say so: the other adapters drop theirs just as quietly.
+  defp security_flags(policy, opts) do
+    case Security.unmapped(policy) do
+      [] ->
+        :ok
+
+      dropped ->
+        Logger.warning(
+          "grok has no equivalent for deny entries #{inspect(dropped)}; not enforced"
+        )
+    end
+
+    Security.argv(policy, grok_home: ConfigDir.grok_home(opts))
   end
 
   # No `--sandbox`: the Worker.Jail is the confinement (see the moduledoc).

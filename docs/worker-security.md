@@ -100,7 +100,7 @@ defaults. The categories:
 | `:no_secret_reads`   | reading `.env`, `*.pem`, `~/.ssh/**`, cloud creds          |
 | `:no_outside_writes` | writing `/etc/**`, `~/.ssh/**`, `~/.claude/**`, …          |
 | `:no_pr_create`      | `gh pr create`, `glab mr create` (the MergeQueue owns PRs) |
-| `:no_async_wait`     | the `Monitor` / `ScheduleWakeup` tools (Claude only)       |
+| `:no_async_wait`     | the `Monitor` / `ScheduleWakeup` tools (Claude; grok: its `monitor` and `scheduler_*` tools) |
 | `:no_public_upload`  | public upload/paste hosts                                  |
 | `:no_gh_publish`     | `gh gist create`/`edit`, `gh issue comment` (workers only) |
 
@@ -191,6 +191,71 @@ Codex stays on `:bypass` as the headless-safe default rather than moving to
 workspace-write sandbox also confines every write outside the worktree, the git
 common dir and `$TMPDIR` (tool caches under `$HOME` included). Set
 `security.mode: auto` per workspace or repo to get the kernel sandbox as well.
+
+### Grok: deny flags on argv, the jail for the OS (bd-761q6h)
+
+grok runs `--always-approve` (the headless-safe mode), and a `--deny` rule beats
+it, so `Arbiter.Agents.Grok.Security` puts the baseline on **every spawn's
+argv**, in every mode `:strict` included. argv rather than a `config.toml`
+because the worker owns its `GROK_HOME` and could rewrite a file there; it
+cannot rewrite its own command line. It translates:
+
+| Policy | grok flag |
+|--------|-----------|
+| `:no_destructive_fs`, `:no_force_push`, `:no_pr_create`, `:no_gh_publish` | `--deny 'Bash(<prefix>:*)'` (grok checks every segment of a chain, peels `env`/`timeout`/`nice`, and looks inside a literal `bash -c`) |
+| `:no_secret_reads` | `--deny 'Read(**/.env)'` and the other secret globs; a Read deny also binds `grep` and the paths a shell command touches |
+| `:no_outside_writes` | `--deny 'Edit(/etc/**)'`, `/usr/**`, and `~/.ssh`, `~/.claude`, `~/.config`, `~/.grok` in both the literal `~/` and the absolute-home spelling (grok never expands a pattern's `~/`), plus the spawn's own `GROK_HOME` (its credential seam) |
+| `:no_public_upload` | `--deny 'WebFetch(domain:<host>)'` (covers subdomains; grok takes no wildcard there) and `Bash(curl\|wget\|http\|nc *<host>*)` |
+| `:no_async_wait` | `--disallowed-tools monitor,scheduler_create,scheduler_list,scheduler_delete` |
+| `sandbox.network: false` | `--disable-web-search` (removes `web_search`/`web_fetch`), `--deny WebFetch`/`WebSearch`, `Bash(curl\|wget\|nc\|ncat\|telnet:*)` |
+| operator `deny`: `Bash(…)`, `Read(…)`, `Edit(…)`, `Write(…)`, `Grep`/`Glob`, `WebFetch(…)`, `WebSearch`, `mcp__s__t` | passed through as `--deny` (grok accepts Claude's grammar) |
+| operator `deny`: bare `Edit` / `Write` | `--deny` plus `--disallowed-tools write,search_replace` |
+| operator `deny`: bare `Bash` | `--deny Bash` plus `--disallowed-tools run_terminal_command,run_terminal_cmd` |
+| operator `deny`: `Agent` / `Task` | `--no-subagents` |
+| operator `deny`: `Monitor` / `ScheduleWakeup` | the `monitor` / `scheduler_*` tool removal above |
+| operator `deny`: `NotebookEdit` | nothing (grok has no notebook tool) |
+| operator `deny`: anything else (`Foo(x)`, `Agent(model:opus)`, an unbalanced rule) | **dropped and logged**: grok aborts the whole spawn on an unknown tool prefix in `--deny` (`unknown tool prefix: Foo`, probed on 1.0.25), so passing it through would stop the worker from starting |
+
+A new `safe_defaults` category with no grok mapping fails the "coverage guard"
+test in `grok/security_test.exs` rather than shipping unenforced.
+
+**`--sandbox` vs `Worker.Jail`: the jail only.** The grok adapter passes no
+`--sandbox` and wraps the spawn in `Arbiter.Worker.Jail`, with
+`write_confinement: :os_jail`. Reasons:
+
+1. grok's sandbox is Landlock in-process plus bubblewrap for deny paths.
+   Inside our bwrap it would nest a second user namespace, which grok itself
+   disables, and it is "best effort": on an unsupported kernel it logs a warning
+   and carries on unenforced. The jail fails closed under `:strict`.
+2. One confinement is one thing to reason about. The jail already gives what the
+   policy needs (a read-only root, the worktree and the per-worker `HOME`
+   writable, a private `/tmp`, hidden secret paths, a pid namespace) for every
+   provider, and `bd-7nbwix` ran a real grok task to a correct commit inside it
+   with no `--sandbox`.
+3. The jail wraps *every* process grok spawns, which a tool-level `--deny` does
+   not. `--deny Edit` stops grok's own edit tool; the read-only bind stops
+   `sh -c 'echo x > file'` too.
+
+**Reviewer.** A review dispatch carries `deny: [Edit, Write, NotebookEdit]`
+(`Dispatch.review_security_policy/2`). For grok that is `--deny Edit/Write`, the
+`write` and `search_replace` tools removed, **and** the worktree `--ro-bind`-ed
+by the jail (`worktree_readonly`), so a write fails with `EROFS` whatever tool or
+shell trick attempts it. The last is the guarantee; the first two keep the model
+from wasting turns on tools that cannot work. `grok/jail_test.exs` runs the real
+adapter argv under real bwrap with a stub `grok` and asserts the write fails
+(and that an implementer's identical write succeeds). If the jail is unavailable
+outside `:strict`, the reviewer runs with the deny flags only and
+`write_jail_warning/1` says so; under `:strict` the dispatch is refused.
+
+**What grok does not tell us.** It omits `permission_denials` from its `result`
+line, so a blocked call is visible only in the model's own tool-result text and
+the posture surface cannot count denials. The flags are parse-checked against
+the real CLI (an unauthenticated `grok -p`, zero tokens), but enforcement was not
+exercised with a live inference run: that is grok's documented behaviour, and the
+free tier is about 500K tokens per rolling day. `--disallowed-tools` does not
+validate its names, so the tool names are the ones grok printed in its own
+`system/init` (`run_terminal_command`, `write`, `search_replace`) or documents
+(`monitor`, `scheduler_*`); a misspelling would silently remove nothing.
 
 ### Sandbox
 
