@@ -22,7 +22,7 @@ defmodule Arbiter.Agents.Grok.ConfigDir do
   free-tier 429 (`subscription:free-usage-exhausted`, grok's default is 15
   retries) fails the run in seconds instead of burning wall-clock (bd-cwq8b0;
   `config :arbiter, :grok_quota, rate_limit_retry_threshold: n`, default
-  #{@default_rate_limit_retry_threshold}).
+  2).
 
   The directory is deterministic per worktree (`<root>/<worktree-key>`), so the
   spawn, the MCP config writer (a follow-up) and a respawn all land on the same

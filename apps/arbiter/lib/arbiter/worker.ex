@@ -5132,27 +5132,16 @@ defmodule Arbiter.Worker do
     cur_fp = worktree_fingerprint(state)
 
     decision =
-      cond do
-        # bd-cwq8b0: a quota stop parks the worker for hours before the resume;
-        # a provider that cannot rewrite its argv for `--resume` (grok) would
-        # wait that long only to fail. Fail now: the dispatch gate holds the
-        # provider, and the task goes back to the queue.
-        reason.category == :quota_exhausted and not resumable_in_place?(state) ->
-          {:fail, :provider_not_resumable}
-
-        reason.category == :quota_exhausted and quota_wait_exceeds_max?(reason.retry_after) ->
-          {:fail, :quota_wait_exceeds_max}
-
-        true ->
-          resume_decision(
-            reason.category,
-            session_id,
-            attempts,
-            cap,
-            prev_fp,
-            cur_fp,
-            Map.get(session, :tool_call_count, 0)
-          )
+      with :ok <- quota_resume_guard(state, reason) do
+        resume_decision(
+          reason.category,
+          session_id,
+          attempts,
+          cap,
+          prev_fp,
+          cur_fp,
+          Map.get(session, :tool_call_count, 0)
+        )
       end
 
     case decision do
@@ -5186,6 +5175,22 @@ defmodule Arbiter.Worker do
         end
 
         fail_unresumable(state, session, reason)
+    end
+  end
+
+  # A quota stop parks the worker for hours before the resume, so refuse the
+  # park when it cannot pay off. bd-cwq8b0: a provider that cannot rewrite its
+  # argv for `--resume` (grok) would wait that long only to fail: fail now, the
+  # dispatch gate holds the provider and the task goes back to the queue.
+  # bd-3wgdie: a reset time past any real plan window is not worth parking for.
+  defp quota_resume_guard(_state, %{category: category}) when category != :quota_exhausted,
+    do: :ok
+
+  defp quota_resume_guard(state, reason) do
+    cond do
+      not resumable_in_place?(state) -> {:fail, :provider_not_resumable}
+      quota_wait_exceeds_max?(reason.retry_after) -> {:fail, :quota_wait_exceeds_max}
+      true -> :ok
     end
   end
 
