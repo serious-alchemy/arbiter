@@ -386,27 +386,20 @@ defmodule Arbiter.Worker.DepsCache do
 
   defp copy_artifacts(cache_dir, worktree, opts) do
     # The old artifacts are the previous seed's (host-built, or another image's):
-    # exactly what must not survive. Staged then swapped per directory.
-    Enum.reduce_while(@artifacts, {:ok, :copy}, fn name, {:ok, method} ->
-      source = Path.join(cache_dir, name)
-
-      cond do
-        not File.dir?(source) ->
-          {:cont, {:ok, method}}
-
-        true ->
-          case replace(source, Path.join(worktree, name), opts) do
-            {:ok, used} -> {:cont, {:ok, merge_method(method, used)}}
-            {:error, _} = error -> {:halt, error}
-          end
+    # exactly what must not survive.
+    @artifacts
+    |> Enum.filter(&File.dir?(Path.join(cache_dir, &1)))
+    |> Enum.reduce_while({:ok, :reflink}, fn name, {:ok, method} ->
+      case replace(Path.join(cache_dir, name), Path.join(worktree, name), opts) do
+        {:ok, used} -> {:cont, {:ok, merge_method(method, used)}}
+        {:error, _} = error -> {:halt, error}
       end
     end)
   end
 
-  # Any plain copy makes the install a `:copy`; all-clone is a `:reflink`.
-  defp merge_method(:copy, used), do: used
-  defp merge_method(:reflink, :reflink), do: :reflink
-  defp merge_method(_, :copy), do: :copy
+  # One plain copy makes the install a `:copy`; only all-clone is a `:reflink`.
+  defp merge_method(:reflink, used), do: used
+  defp merge_method(:copy, _used), do: :copy
 
   defp replace(source, dest, opts) do
     force_rm_rf(dest)
