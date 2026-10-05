@@ -1,0 +1,71 @@
+defmodule ArbiterWeb.DashboardAuth do
+  @moduledoc """
+  The dashboard's authentication slot (bd-3gycsz).
+
+  Everything under the `:browser` pipeline and every LiveView mounted through
+  the router's `live_session` goes through one implementation of this
+  behaviour, chosen by config:
+
+      config :arbiter_web, :dashboard_auth, MyPackage.SsoAuth
+
+  With nothing configured the implementation is `ArbiterWeb.DashboardAuth.Default`
+  (one-time login token → signed session, plus an opt-in Tailscale identity
+  allowlist). A future SSO extension replaces it by setting that key from its
+  own config; it never has to touch the router, the plug or the LiveView hook.
+
+  `/api` and `/mcp` are **not** governed by this slot: they keep their bearer
+  token model (`ArbiterWeb.Plugs.ApiAuth`).
+
+  ## Callbacks
+
+    * `authenticate/1` — decide an HTTP request. The session is already
+      fetched. Return `{:ok, conn, identity}` (the conn may carry a freshly
+      written session grant) or `:error` to send the browser to the login page.
+    * `authenticate_session/1` — decide from the session map alone. This is
+      what the LiveView socket can see: `Phoenix.LiveView.Socket` has no
+      overridable `connect/3`, so `ArbiterWeb.LiveHooks`' `:dashboard_auth`
+      `on_mount` hook (first in the router's `live_session`) re-checks the
+      session on every mount, connected or not. An HTTP-only trust signal
+      (a proxy header) must therefore be turned into a session grant by
+      `authenticate/1`, and `authenticate_session/1` must re-validate it.
+    * `mode/0` — a small map describing the active mode; `arb server doctor`
+      reports it.
+    * `login_path/0` (optional, default `"/login"`) — where unauthenticated
+      requests are redirected.
+  """
+
+  @typedoc "Whatever the implementation wants to call the authenticated party."
+  @type identity :: String.t()
+
+  @callback authenticate(Plug.Conn.t()) :: {:ok, Plug.Conn.t(), identity()} | :error
+  @callback authenticate_session(map()) :: {:ok, identity()} | :error
+  @callback mode() :: %{
+              required(:impl) => String.t(),
+              required(:mode) => String.t(),
+              optional(atom()) => term()
+            }
+  @callback login_path() :: String.t()
+  @optional_callbacks login_path: 0
+
+  @default_login_path "/login"
+
+  @doc "The configured implementation module."
+  @spec impl() :: module()
+  def impl, do: Application.get_env(:arbiter_web, :dashboard_auth) || __MODULE__.Default
+
+  @spec authenticate(Plug.Conn.t()) :: {:ok, Plug.Conn.t(), identity()} | :error
+  def authenticate(conn), do: impl().authenticate(conn)
+
+  @spec authenticate_session(map()) :: {:ok, identity()} | :error
+  def authenticate_session(session), do: impl().authenticate_session(session)
+
+  @spec mode() :: map()
+  def mode, do: impl().mode()
+
+  @spec login_path() :: String.t()
+  def login_path do
+    mod = impl()
+    Code.ensure_loaded(mod)
+    if function_exported?(mod, :login_path, 0), do: mod.login_path(), else: @default_login_path
+  end
+end

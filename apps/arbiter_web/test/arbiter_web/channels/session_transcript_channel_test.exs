@@ -20,7 +20,10 @@ defmodule ArbiterWeb.SessionTranscriptChannelTest do
 
   @moduletag :tmp_dir
 
-  @loopback %{peer_data: %{address: {127, 0, 0, 1}, port: 55_555, ssl_cert: nil}}
+  @loopback %{
+    peer_data: %{address: {127, 0, 0, 1}, port: 55_555, ssl_cert: nil},
+    session: ArbiterWeb.DashboardAuth.Default.grant_session("token", "operator")
+  }
 
   setup %{tmp_dir: tmp_dir} do
     Arbiter.Test.SessionEnv.sandbox("transcript-channel")

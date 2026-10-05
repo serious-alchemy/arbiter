@@ -115,6 +115,20 @@ defmodule ArbiterWeb.LiveHooks do
   # empties it.
   @reader_opts [reader: Message.coordinator_reader()]
 
+  # bd-3gycsz: the LiveView socket gate. `Phoenix.LiveView.Socket` has no
+  # overridable connect/3, so the session is re-checked on every mount (the
+  # dead render and the websocket join alike) against the configured
+  # `ArbiterWeb.DashboardAuth` implementation.
+  def on_mount(:dashboard_auth, _params, session, socket) do
+    case ArbiterWeb.DashboardAuth.authenticate_session(session) do
+      {:ok, identity} ->
+        {:cont, assign(socket, :dashboard_identity, identity)}
+
+      :error ->
+        {:halt, Phoenix.LiveView.redirect(socket, to: ArbiterWeb.DashboardAuth.login_path())}
+    end
+  end
+
   def on_mount(:current_path, _params, _session, socket) do
     socket =
       socket

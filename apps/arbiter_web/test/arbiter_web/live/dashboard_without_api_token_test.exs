@@ -24,8 +24,9 @@ defmodule ArbiterWeb.DashboardWithoutApiTokenTest do
     {:ok, task} =
       Ash.create(Issue, %{title: "promote me", workspace_id: ws.id, acceptance: "- fixture"})
 
-    # No ConnCase default bearer token: a browser never sends one.
-    conn = %{Phoenix.ConnTest.build_conn() | remote_ip: {127, 0, 0, 1}}
+    # No ConnCase default bearer token: a browser never sends one. It does
+    # carry the dashboard login (bd-3gycsz), which is not a bearer token.
+    conn = dashboard_login(%{Phoenix.ConnTest.build_conn() | remote_ip: {127, 0, 0, 1}})
     {:ok, conn: conn, task: task}
   end
 

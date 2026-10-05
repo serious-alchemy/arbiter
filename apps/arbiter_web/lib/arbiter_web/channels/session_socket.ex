@@ -12,11 +12,14 @@ defmodule ArbiterWeb.SessionSocket do
 
   ## Auth (§10.4)
 
-  The same rule the rest of the dashboard uses, via `ArbiterWeb.Loopback`:
-  a peer on loopback is trusted (the dashboard has no login, and off-LAN
-  access is Remote Control's job — §8), anything else must present a signed
-  `Arbiter.MCP.Scope` token as the `token` connect param. No new remote-auth
-  scheme is designed here, deliberately.
+  Loopback is **not** a credential (bd-3gycsz): `tailscale serve` proxies
+  the tailnet to 127.0.0.1, so a proxied peer is loopback too. The socket
+  therefore takes the same dashboard grant the rest of the dashboard needs —
+  the signed session cookie, checked through
+  `ArbiterWeb.DashboardAuth.authenticate_session/1` (`connect_info: [:session]`;
+  the browser dock already carries the cookie). Anything else must present a
+  signed `Arbiter.MCP.Scope` token as the `token` connect param. No new
+  remote-auth scheme is designed here, deliberately.
 
   That includes phase 3's per-session tokens (§9.3), which carry a `session_id`
   claim and stop verifying once the session ends or the token is revoked — so
@@ -36,7 +39,7 @@ defmodule ArbiterWeb.SessionSocket do
   use Phoenix.Socket
 
   alias Arbiter.MCP.Scope
-  alias ArbiterWeb.Loopback
+  alias ArbiterWeb.DashboardAuth
   alias ArbiterWeb.Plugs.WorkerBridge
 
   channel "session:*", ArbiterWeb.SessionChannel
@@ -58,11 +61,13 @@ defmodule ArbiterWeb.SessionSocket do
   # whatever token it presents.
   defp authorized?(params, connect_info) do
     not WorkerBridge.bridged?(connect_info) and
-      (Loopback.loopback?(peer_address(connect_info)) or valid_token?(params))
+      (dashboard_grant?(connect_info) or valid_token?(params))
   end
 
-  defp peer_address(%{peer_data: %{address: address}}), do: address
-  defp peer_address(_connect_info), do: nil
+  defp dashboard_grant?(connect_info) do
+    session = Map.get(connect_info, :session) || %{}
+    match?({:ok, _identity}, DashboardAuth.authenticate_session(session))
+  end
 
   defp valid_token?(%{"token" => token}) when is_binary(token) do
     match?({:ok, _scope}, Scope.from_token(String.trim(token)))

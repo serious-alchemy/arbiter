@@ -50,6 +50,14 @@ defmodule ArbiterWeb.Router do
     plug(:put_secure_browser_headers, %{"content-security-policy" => @csp})
   end
 
+  # The dashboard gate (bd-3gycsz): everything `:browser` plus an
+  # `ArbiterWeb.DashboardAuth` check. Loopback is not an identity — a request
+  # proxied by `tailscale serve` arrives from 127.0.0.1 — so there is no
+  # address bypass. The login routes use `:browser` alone.
+  pipeline :dashboard do
+    plug(ArbiterWeb.Plugs.DashboardAuth)
+  end
+
   pipeline :api do
     plug(:accepts, ["json"])
     plug(ArbiterWeb.Plugs.ApiAuth)
@@ -57,6 +65,14 @@ defmodule ArbiterWeb.Router do
 
   scope "/", ArbiterWeb do
     pipe_through(:browser)
+
+    get("/login", DashboardLoginController, :show)
+    post("/login", DashboardLoginController, :create)
+    delete("/logout", DashboardLoginController, :delete)
+  end
+
+  scope "/", ArbiterWeb do
+    pipe_through([:browser, :dashboard])
 
     get("/about", PageController, :home)
 
@@ -82,6 +98,9 @@ defmodule ArbiterWeb.Router do
       # `live_render/3`.
       layout: {ArbiterWeb.Layouts, :live},
       on_mount: [
+        # bd-3gycsz: the websocket gate. First, so nothing else mounts for an
+        # ungranted session.
+        {ArbiterWeb.LiveHooks, :dashboard_auth},
         {ArbiterWeb.LiveHooks, :current_path},
         {ArbiterWeb.LiveHooks, :live},
         {ArbiterWeb.LiveHooks, :loopback},
@@ -262,6 +281,10 @@ defmodule ArbiterWeb.Router do
     get("/server/worker_tmp", ServerController, :worker_tmp)
     get("/server/podman_sandbox", ServerController, :podman_sandbox)
     get("/server/worker_memory", ServerController, :worker_memory)
+    get("/server/dashboard_auth", ServerController, :dashboard_auth)
+
+    # Dashboard login (bd-3gycsz): backs `arb dashboard login`.
+    post("/dashboard/login_tokens", DashboardController, :login_token)
 
     # Usage ledger (per-session tokens / cost / duration; rollups)
     get("/usage", UsageController, :summarize)
@@ -374,6 +397,7 @@ defmodule ArbiterWeb.Router do
       plug(:put_root_layout, html: {ArbiterWeb.Layouts, :root})
       plug(:protect_from_forgery)
       plug(:put_secure_browser_headers, %{"content-security-policy" => @dev_csp})
+      plug(ArbiterWeb.Plugs.DashboardAuth)
     end
 
     scope "/dev" do
