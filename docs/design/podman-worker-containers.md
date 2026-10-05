@@ -365,7 +365,7 @@ fresh checkout of `origin/main`, three runs each, the same host:
 
 | Step | Container (image-keyed cache) | bwrap (`seed_compiled_deps/3` from the host `_build`) |
 |---|---|---|
-| Cold seed, once per `(lockfile, image)` | 413 to 467 s (three runs: 413, 457, 468) | n/a (the operator's own `_build`) |
+| Cold seed, once per `(lockfile, image)` | 413 to 468 s (three runs: 413, 457, 468) | n/a (the operator's own `_build`) |
 | Per-worker install of `deps/`, `_build/`, Hex (190 MB) | 0.85 to 1.1 s, `cp --reflink` | 1.1 to 1.5 s, `cp --reflink=auto` |
 | `deps.compile`, run 1 (first use in the new directory) | 99.5 s | 99.9 s |
 | `deps.compile`, runs 2 and 3 (warm) | 4.9 s, 4.8 s | 4.2 s, 4.3 s |
@@ -375,8 +375,7 @@ every run on both). The first run is ~100 s on **both** backends, and that is
 not specific to containers: Mix records the compile-time config of the root
 project and the dependency's directory in each `_build/<env>/lib/<dep>/.mix/
 compile.elixir`, so any `_build` copied to a new path is rebuilt for the deps
-that read it (here `ash`, `ash_*`, `phoenix_live_view`, `mdex_native` and
-others; 73 files in 11 deps). `DepsCache.install/3` rewrites the directory
+that read it (73 "Compiling N files" steps in the first run here). `DepsCache.install/3` rewrites the directory
 inside each manifest so that deps that do **not** read config (every dep of a
 plain project: a one-dependency project measured 0 recompiles after the rewrite,
 4 files before) are not rebuilt; this repo's config is path-dependent
@@ -384,9 +383,9 @@ plain project: a one-dependency project measured 0 recompiles after the rewrite,
 pinning `MIX_TEST_PARTITION` to the seed's value did not remove the first-run
 rebuild, so the cause of the remainder is not isolated. Without the Hex archive
 in the cache, a container worker could not run `mix` at all offline (it stops to
-ask to install Hex); with the manifests not rewritten, run 1 failed outright in
-`mdex_native`, whose precompiled NIF is downloaded to `~/.cache`, empty in a
-per-run `HOME`.
+ask to install Hex). Run 1 needs the network when `mdex_native` is among the
+rebuilt deps: its precompiled NIF is downloaded to `~/.cache`, empty in a
+per-run `HOME` (offline, run 1 stopped in `mdex_native`).
 
 Not done: pruning old cache directories (about 190 MB each for this repo; one
 per lockfile and image tag).
