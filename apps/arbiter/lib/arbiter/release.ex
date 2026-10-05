@@ -8,6 +8,8 @@ defmodule Arbiter.Release do
 
   require Logger
 
+  alias Arbiter.Loop.Scarcity.Draw
+
   @app :arbiter
 
   @doc """
@@ -118,6 +120,29 @@ defmodule Arbiter.Release do
     """)
 
     report
+  end
+
+  @doc """
+  Print the draw calibration (bd-3is1nz, R3): the window share per weighted token
+  for each (account, pool, window, model), fitted from `quota_snapshots` against
+  `usage_events` (`Arbiter.Loop.Scarcity.Draw`). Read-only and **shadow output
+  only** — no routing path consumes it. A pool whose history is too thin says
+  "insufficient data", never `0`.
+
+  Options: `:since` / `:until` (`DateTime`s; default the last 30 days) and
+  `:start` (default `true`; `false` when the repo is already running). Starts
+  only the repo, so it is safe beside a live server. Returns the
+  `Arbiter.Loop.Scarcity.Draw.calibrate/1` results.
+
+      bin/arbiter eval 'Arbiter.Release.draw_calibration()'
+  """
+  @spec draw_calibration(keyword()) :: [Draw.result()]
+  def draw_calibration(opts \\ []) do
+    if Keyword.get(opts, :start, true), do: start_release_repo!()
+
+    results = Draw.calibrate(Keyword.take(opts, [:since, :until]))
+    IO.puts(Draw.format(results))
+    results
   end
 
   @doc """

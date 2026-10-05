@@ -45,6 +45,7 @@ defmodule Arbiter.Worker.JailHideTest do
     for d <- [
           ".claude",
           ".codex",
+          ".grok",
           ".config/gh",
           ".ssh",
           ".aws",
@@ -65,6 +66,7 @@ defmodule Arbiter.Worker.JailHideTest do
     secrets = [
       ".claude/.credentials.json",
       ".codex/auth.json",
+      ".grok/auth.json",
       ".config/gh/hosts.yml",
       ".ssh/id_ed25519",
       ".ssh/ci.id_ed25519",
@@ -124,7 +126,9 @@ defmodule Arbiter.Worker.JailHideTest do
       %{dirs: dirs, files: files} = Hide.paths(fx.opts)
       h = fx.home
 
-      for d <- [".claude", ".codex", ".config/gh", ".ssh", ".aws", ".gemini", ".arbiter"] do
+      # `.grok` holds the canonical grok refresh token (bd-9p4lx9): the broker is
+      # its only reader, so a jailed worker must not see it under `--ro-bind / /`.
+      for d <- [".claude", ".codex", ".grok", ".config/gh", ".ssh", ".aws", ".gemini", ".arbiter"] do
         assert Path.join(h, d) in dirs, "#{d} not masked"
       end
 
@@ -138,7 +142,7 @@ defmodule Arbiter.Worker.JailHideTest do
       assert Path.join(h, ".git-credentials") in files
     end
 
-    test "masks the operator's grok login file and every other worker's grok HOME (bd-9ydvov)",
+    test "masks ~/.grok but keeps the grok binary, and every other worker's grok HOME (bd-9ydvov)",
          %{fx: fx} do
       h = fx.home
       File.mkdir_p!(Path.join(h, ".grok/bin"))
@@ -147,11 +151,14 @@ defmodule Arbiter.Worker.JailHideTest do
       grok_root = Path.join(h, ".cache/arbiter/worker-grok")
       File.mkdir_p!(Path.join(grok_root, "sibling/.grok"))
 
-      %{dirs: dirs, files: files} = Hide.paths([{:grok_home_root, grok_root} | fx.opts])
+      %{dirs: dirs, files: files, keep: keep} = Hide.paths([{:grok_home_root, grok_root} | fx.opts])
 
-      # Only the login file: the grok binary lives under ~/.grok and must stay.
-      assert Path.join(h, ".grok/auth.json") in files
-      refute Path.join(h, ".grok") in dirs
+      # The whole ~/.grok is masked (bd-9p4lx9), but the grok binary lives under
+      # it, so bin/ comes back via `keep`; auth.json is not kept.
+      assert Path.join(h, ".grok") in dirs
+      assert Path.join(h, ".grok/bin") in keep
+      refute Path.join(h, ".grok/auth.json") in keep
+      refute Path.join(h, ".grok/auth.json") in files
       assert grok_root in dirs
     end
 

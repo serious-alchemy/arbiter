@@ -55,6 +55,9 @@ defmodule ArbiterWeb.ApiPolicy do
       names the scope rule, never a silent miss.
     * `:message_mark_read` — coordinator; or a worker marking a message
       addressed to its own task.
+    * `:grok_token` — coordinator or worker. `POST /api/grok/token` hands a grok
+      worker a short-lived access token (`Arbiter.Grok.CredentialBroker`); the
+      refresh token never leaves the server. A refine token has no use for it.
 
   A `:refine` token gets `:issue_read` and `:workspace_list` and nothing else over REST: its writes
   are subtree-gated and only exist as MCP tools (`Arbiter.MCP.RefinePolicy`).
@@ -76,6 +79,7 @@ defmodule ArbiterWeb.ApiPolicy do
           | :message_send
           | :message_show
           | :message_mark_read
+          | :grok_token
 
   # The REST twin of `ticket_update_progress` (`Arbiter.MCP.Tools.Task`'s
   # `@progress_fields ++ @progress_flags`). "id" is the path param.
@@ -228,6 +232,9 @@ defmodule ArbiterWeb.ApiPolicy do
     {:get, "/api/alerts"} => :coordinator,
     {:get, "/api/breakers"} => :coordinator,
     {:post, "/api/breakers/reset"} => :coordinator,
+
+    # ---- grok credential broker (bd-9p4lx9) ---------------------------------
+    {:post, "/api/grok/token"} => :grok_token,
     # ---- worker images (bd-9r5jdt): operator/coordinator only ---------------
     {:get, "/api/images"} => :coordinator,
     {:post, "/api/images/build"} => :coordinator,
@@ -275,6 +282,9 @@ defmodule ArbiterWeb.ApiPolicy do
     do: :ok
 
   def authorize(:coordinator, %Scope{tier: :coordinator}, _params), do: :ok
+
+  def authorize(:grok_token, %Scope{tier: tier}, _params) when tier in [:coordinator, :worker],
+    do: :ok
 
   def authorize(:dispatch, %Scope{tier: :coordinator, can_dispatch: true}, _params), do: :ok
 

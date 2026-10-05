@@ -193,6 +193,7 @@ defmodule Arbiter.Worker.Dispatch do
          opts = apply_issue_repo_default(task, opts),
          :ok <- ensure_not_awaiting_review(task, opts),
          :ok <- ensure_no_live_agent_session(task_id, opts),
+         opts = put_routing_choice(task, opts),
          opts = route_implementer(task, opts),
          :ok <- ensure_provider_constraint(task, opts),
          :ok <- maybe_pause_gate(task, opts),
@@ -1288,12 +1289,25 @@ defmodule Arbiter.Worker.Dispatch do
       opts
   end
 
+  # Seams #7: the routing policy is asked once per dispatch. The choice rides
+  # in `opts` (`:routing_choice`) to every step that needs it — the provider
+  # router, the pause / quota gates and account admission, and the spawn — so
+  # a stateful policy cannot gate on one adapter config and spawn on another.
+  # `unroute/1` drops it from a held intent, so the drain decides afresh.
+  defp put_routing_choice(%Issue{} = task, opts) do
+    Keyword.put(opts, :routing_choice, Routing.decide(task, load_workspace(task), opts))
+  end
+
   defp maybe_route(task, workspace, opts) do
     if ProviderRouting.enabled?(workspace) do
       role = Keyword.get(opts, :routing_role, :main)
       override = caller_override(opts)
 
-      routing_opts = [override: override, security: routing_security(workspace, opts)]
+      routing_opts = [
+        override: override,
+        security: routing_security(workspace, opts),
+        routing_choice: Keyword.get(opts, :routing_choice)
+      ]
 
       case ProviderRouting.select(workspace, task, role, routing_opts) do
         {:ok, selection} ->
@@ -1384,7 +1398,7 @@ defmodule Arbiter.Worker.Dispatch do
   # so the replay routes afresh instead of reading it as a caller override.
   defp unroute(opts) do
     routed = Keyword.get(opts, :routed_agent_type)
-    opts = Keyword.drop(opts, [:routing_decision, :routed_agent_type])
+    opts = Keyword.drop(opts, [:routing_decision, :routing_choice, :routed_agent_type])
 
     if routed && Keyword.get(opts, :agent_type) == routed,
       do: Keyword.drop(opts, [:agent_type, :provider_fallback]),
@@ -1538,7 +1552,7 @@ defmodule Arbiter.Worker.Dispatch do
         opts
 
       _ ->
-        case gemini_model_tier_hint(task, workspace) do
+        case gemini_model_tier_hint(task, workspace, opts) do
           model when is_binary(model) and model != "" -> Keyword.put(opts, :model, model)
           _ -> opts
         end
@@ -1547,8 +1561,8 @@ defmodule Arbiter.Worker.Dispatch do
 
   defp maybe_add_gemini_model_hint(_provider, _task, _workspace, opts), do: opts
 
-  defp gemini_model_tier_hint(task, workspace) do
-    config = Routing.choose(task, workspace, %{}).config
+  defp gemini_model_tier_hint(task, workspace, opts) do
+    config = Routing.decide(task, workspace, opts).config
 
     case config["model"] do
       model when is_binary(model) and model != "" ->
@@ -1623,7 +1637,7 @@ defmodule Arbiter.Worker.Dispatch do
       _ ->
         case Keyword.get(opts, :agent_type) do
           type when is_atom(type) and not is_nil(type) -> type
-          _ -> Routing.choose(task, workspace, %{}).type
+          _ -> Routing.decide(task, workspace, opts).type
         end
     end
   rescue
@@ -2917,7 +2931,7 @@ defmodule Arbiter.Worker.Dispatch do
 
         choice =
           task
-          |> Routing.choose(workspace, %{})
+          |> Routing.decide(workspace, opts)
           |> apply_agent_type_override(agent_type)
           |> maybe_escalate_context_window(task.id)
           |> apply_model_override(Keyword.get(opts, :model))
