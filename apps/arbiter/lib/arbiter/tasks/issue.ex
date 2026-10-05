@@ -130,10 +130,6 @@ defmodule Arbiter.Tasks.Issue do
     ignore_actions([:record_merger_status])
   end
 
-  changes do
-    change Arbiter.PaperTrail.StampActor, on: [:create, :update, :destroy]
-  end
-
   actions do
     defaults [:read, :destroy]
 
@@ -1077,6 +1073,10 @@ defmodule Arbiter.Tasks.Issue do
                {:ok, issue}
              end)
     end
+  end
+
+  changes do
+    change Arbiter.PaperTrail.StampActor, on: [:create, :update, :destroy]
   end
 
   @epics_topic "tasks:epics"

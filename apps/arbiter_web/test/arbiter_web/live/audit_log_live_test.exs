@@ -173,6 +173,36 @@ defmodule ArbiterWeb.AuditLogLiveTest do
     end
   end
 
+  describe "recorded actor (bd-6i7yzq)" do
+    test "shows who made each write, and an unattributed one as such", %{conn: conn, ws: ws} do
+      {:ok, attributed} =
+        Arbiter.Actor.with_actor(Arbiter.Actor.operator("ryan"), fn ->
+          Ash.create(Issue, %{title: "by ryan", workspace_id: ws.id})
+        end)
+
+      {:ok, _} =
+        Arbiter.Actor.with_actor(Arbiter.Actor.worker("bd-7"), fn ->
+          Ash.update(attributed, %{title: "by worker"}, action: :update)
+        end)
+
+      {:ok, _unattributed} = Ash.create(Issue, %{title: "nobody", workspace_id: ws.id})
+
+      {:ok, view, html} = live_audit(conn)
+      assert html =~ "operator:ryan"
+      assert html =~ "worker:bd-7"
+      assert html =~ "unattributed"
+
+      # operators are human, workers and unattributed writes are machines
+      human = render_click(view, "filter-tab", %{"tab" => "human"})
+      assert human =~ "operator:ryan"
+      refute human =~ "worker:bd-7"
+
+      machine = render_click(view, "filter-tab", %{"tab" => "machine"})
+      assert machine =~ "worker:bd-7"
+      refute machine =~ "operator:ryan"
+    end
+  end
+
   describe "actor filter tabs" do
     test "Machine tab narrows to worker-attributed events", %{conn: conn, ws: ws} do
       {:ok, human_task} = Ash.create(Issue, %{title: "human edit", workspace_id: ws.id})

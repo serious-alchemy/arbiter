@@ -100,10 +100,6 @@ defmodule Arbiter.Tasks.Dependency do
     metadata :actor, :string, allow_nil?: true
   end
 
-  changes do
-    change Arbiter.PaperTrail.StampActor, on: [:create, :update, :destroy]
-  end
-
   actions do
     defaults [:read, :destroy]
 
@@ -119,6 +115,10 @@ defmodule Arbiter.Tasks.Dependency do
       accept [:type, :created_by, :notes]
       require_atomic? false
     end
+  end
+
+  changes do
+    change Arbiter.PaperTrail.StampActor, on: [:create, :update, :destroy]
   end
 
   attributes do

@@ -245,8 +245,16 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
       guarded(
         fn ->
           if on?,
-            do: Autopilot.pause(Autopilot, {ArbiterWeb.InstallationSettings.scheduler_actor(), "dashboard"}),
-            else: Autopilot.resume(Autopilot, {ArbiterWeb.InstallationSettings.scheduler_actor(), "dashboard"})
+            do:
+              Autopilot.pause(
+                Autopilot,
+                {ArbiterWeb.InstallationSettings.scheduler_actor(), "dashboard"}
+              ),
+            else:
+              Autopilot.resume(
+                Autopilot,
+                {ArbiterWeb.InstallationSettings.scheduler_actor(), "dashboard"}
+              )
 
           true
         end,

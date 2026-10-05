@@ -93,7 +93,9 @@ defmodule Arbiter.ActorTest do
         Actor.with_actor(Actor.autopilot(), fn ->
           assert Actor.current() == Actor.autopilot()
 
-          Actor.with_actor(Actor.system("x"), fn -> assert Actor.current() == Actor.system("x") end)
+          Actor.with_actor(Actor.system("x"), fn ->
+            assert Actor.current() == Actor.system("x")
+          end)
 
           assert Actor.current() == Actor.autopilot()
           :done

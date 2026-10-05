@@ -75,7 +75,11 @@ defmodule Arbiter.ActorEdgesTest do
       assert {:ok, _} =
                Catalog.call(@coordinator, "ticket_close", %{"id" => issue.id, "reason" => "done"})
 
-      assert Enum.any?(Version |> Ash.read!(), &(&1.version_source_id == issue.id and &1.actor == "coordinator" and &1.version_action_name == :close))
+      assert Enum.any?(
+               Version |> Ash.read!(),
+               &(&1.version_source_id == issue.id and &1.actor == "coordinator" and
+                   &1.version_action_name == :close)
+             )
     end
 
     test "workspace_config_set lands on the workspace version", %{ws: ws} do

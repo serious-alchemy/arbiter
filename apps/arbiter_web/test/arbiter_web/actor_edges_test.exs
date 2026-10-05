@@ -28,7 +28,9 @@ defmodule ArbiterWeb.ActorEdgesTest do
   defp promote_actor(issue) do
     [version] =
       Version
-      |> Ash.Query.filter(version_source_id == ^issue.id and version_action_name == :promote_to_ready)
+      |> Ash.Query.filter(
+        version_source_id == ^issue.id and version_action_name == :promote_to_ready
+      )
       |> Ash.read!()
 
     version.actor
@@ -80,7 +82,10 @@ defmodule ArbiterWeb.ActorEdgesTest do
       post(conn, ~p"/api/issues/#{issue.id}/promote")
       body = conn |> get(~p"/api/issues/#{issue.id}") |> json_response(200)
 
-      assert [%{"action" => "promote_to_ready", "actor" => "coordinator", "state" => "queued"} | _] =
+      assert [
+               %{"action" => "promote_to_ready", "actor" => "coordinator", "state" => "queued"}
+               | _
+             ] =
                body["history"]
     end
   end
