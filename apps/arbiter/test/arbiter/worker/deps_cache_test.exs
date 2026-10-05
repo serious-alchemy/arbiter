@@ -46,7 +46,11 @@ defmodule Arbiter.Worker.DepsCacheTest do
 
           File.write!(
             Path.join(work, "_build/test/lib/jason/.mix/compile.elixir"),
-            :erlang.term_to_binary({29, %{}, %{}, Path.join(work, "deps/jason"), 1}, [:compressed])
+            :erlang.term_to_binary(
+              {29, %{}, %{}, Path.join(work, "deps/jason"),
+               %{config: [tailwind: [web: [cd: Path.join(work, "apps/web")]]], lock: [x: 1]}},
+              [:compressed]
+            )
           )
 
           File.mkdir_p!(Path.join(work, "_build/test/lib/jason/ebin"))
@@ -239,11 +243,17 @@ defmodule Arbiter.Worker.DepsCacheTest do
       assert {:ok, _} = DepsCache.install(ctx.cache, ctx.worker, ctx.opts)
 
       manifest = Path.join(ctx.worker, "_build/test/lib/jason/.mix/compile.elixir")
-      assert {29, %{}, %{}, dir, 1} = manifest |> File.read!() |> :erlang.binary_to_term()
+
+      assert {29, %{}, %{}, dir, %{config: config, lock: [x: 1]}} =
+               manifest |> File.read!() |> :erlang.binary_to_term()
+
       assert dir == Path.join(ctx.worker, "deps/jason")
 
+      # ...and wherever the recorded app config names it.
+      assert config == [tailwind: [web: [cd: Path.join(ctx.worker, "apps/web")]]]
+
       # The cache's own manifest is not rewritten through the copy.
-      {29, %{}, %{}, original, 1} =
+      {29, %{}, %{}, original, _} =
         Path.join(ctx.cache, "_build/test/lib/jason/.mix/compile.elixir")
         |> File.read!()
         |> :erlang.binary_to_term()

@@ -340,23 +340,9 @@ defmodule Arbiter.Worker.DepsCache do
 
   defp retarget_manifest(file, from, to) do
     with {:ok, bin} <- File.read(file),
-         term when is_tuple(term) <- safe_decode(bin),
-         true <- Enum.any?(Tuple.to_list(term), &under?(&1, from)) do
-      moved =
-        term
-        |> Tuple.to_list()
-        |> Enum.map(fn
-          dir when is_binary(dir) ->
-            if under?(dir, from),
-              do: to <> binary_part(dir, byte_size(from), byte_size(dir) - byte_size(from)),
-              else: dir
-
-          other ->
-            other
-        end)
-        |> List.to_tuple()
-
-      File.write(file, :erlang.term_to_binary(moved, [:compressed]))
+         term when not is_nil(term) <- safe_decode(bin),
+         true <- mentions?(term, from) do
+      File.write(file, :erlang.term_to_binary(retarget(term, from, to), [:compressed]))
     end
   end
 
@@ -366,10 +352,35 @@ defmodule Arbiter.Worker.DepsCache do
     ArgumentError -> nil
   end
 
-  defp under?(dir, from) when is_binary(dir),
-    do: dir == from or String.starts_with?(dir, from <> "/")
+  # The directory shows up twice over: as the dep's project dir, and inside the
+  # recorded app config (`tailwind: [cd: "<src>/apps/web"]`), which Mix compares
+  # too. Both are rewritten, to any depth.
+  defp mentions?(term, from) when is_binary(term), do: under?(term, from)
+  defp mentions?(term, from) when is_tuple(term), do: term |> Tuple.to_list() |> mentions?(from)
+  defp mentions?(term, from) when is_map(term), do: term |> Map.to_list() |> mentions?(from)
+  defp mentions?([head | tail], from), do: mentions?(head, from) or mentions?(tail, from)
+  defp mentions?(_, _), do: false
 
-  defp under?(_, _), do: false
+  defp retarget(term, from, to) when is_binary(term) do
+    if under?(term, from),
+      do: to <> binary_part(term, byte_size(from), byte_size(term) - byte_size(from)),
+      else: term
+  end
+
+  defp retarget(term, from, to) when is_tuple(term),
+    do: term |> Tuple.to_list() |> retarget(from, to) |> List.to_tuple()
+
+  defp retarget(%{__struct__: _} = term, _from, _to), do: term
+
+  defp retarget(term, from, to) when is_map(term),
+    do: Map.new(term, fn {k, v} -> {retarget(k, from, to), retarget(v, from, to)} end)
+
+  defp retarget([head | tail], from, to),
+    do: [retarget(head, from, to) | retarget(tail, from, to)]
+
+  defp retarget(term, _from, _to), do: term
+
+  defp under?(dir, from), do: dir == from or String.starts_with?(dir, from <> "/")
 
   defp elapsed(started), do: System.monotonic_time(:millisecond) - started
 
