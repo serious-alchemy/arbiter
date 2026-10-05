@@ -49,6 +49,7 @@ defmodule Arbiter.Messages.EscalationKind do
     :commit_gate,
     :conflict_unresolved,
     :dispatch_stuck,
+    :epic_children_closed,
     :fix_round_held,
     :fix_rounds_exhausted,
     :legacy,

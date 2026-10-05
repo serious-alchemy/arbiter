@@ -2301,10 +2301,33 @@ defmodule Arbiter.Tasks.Issue do
   def maybe_auto_close_parents(issue) do
     issue.id
     |> parents_of()
-    |> Enum.each(&maybe_auto_close/1)
+    |> Enum.each(fn parent -> parent |> maybe_auto_close() |> maybe_notify_children_closed() end)
 
     :ok
   end
+
+  # An epic with `auto_close` OFF is "owned": it never closes by itself, so when
+  # its last child closes nobody is told and it sits open until noticed (the
+  # bd-4i7kky incident). Raise one coordinator escalation at that moment. Only
+  # here — child-close time — and not in `maybe_auto_close/1`, which also runs on
+  # edge writes: attaching an already-closed child is not "the last child just
+  # closed". Reopening a child and closing it again fires again, and a repeat
+  # while the first is still open folds into it (ticket-scoped dedupe).
+  defp maybe_notify_children_closed(%{issue_type: :epic, auto_close: false} = parent) do
+    parent = Ash.load!(parent, [:child_total, :child_closed])
+
+    if parent.state != :closed and parent.child_total > 0 and
+         parent.child_closed == parent.child_total do
+      Arbiter.Messages.CoordinatorNotifier.epic_children_closed(
+        %{task_id: parent.id, workspace_id: parent.workspace_id},
+        parent.child_total
+      )
+    end
+
+    :ok
+  end
+
+  defp maybe_notify_children_closed(_parent), do: :ok
 
   @doc """
   If `parent` has `auto_close` set, is still open, and all its (≥1) `:parent_of`

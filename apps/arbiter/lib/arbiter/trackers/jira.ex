@@ -121,7 +121,7 @@ defmodule Arbiter.Trackers.Jira do
         :none ->
           # No direct edge — fetch the current status and walk the workflow
           # graph (multi-hop, e.g. Backlog -> … -> In Progress).
-          resolve_multi_hop(cfg, ref, target_status)
+          resolve_multi_hop(cfg, ref, status, target_status)
       end
     end
   end
@@ -149,15 +149,7 @@ defmodule Arbiter.Trackers.Jira do
           if close_may_proceed?(cfg, target_status, current, current_category) do
             :ok
           else
-            {:error,
-             %Error{
-               kind: :upstream_past_target,
-               status: nil,
-               message:
-                 "#{ref} is in #{inspect(current)}, which is not known to precede the " <>
-                   "closed-mapped status #{inspect(target_status)} — leaving it where it is",
-               raw: nil
-             }}
+            {:error, past_target_error(ref, current, target_status)}
           end
         end
 
@@ -167,6 +159,17 @@ defmodule Arbiter.Trackers.Jira do
   end
 
   defp guard_close(_cfg, _ref, _status, _target_status, _transitions), do: :ok
+
+  defp past_target_error(ref, current, target_status) do
+    %Error{
+      kind: :upstream_past_target,
+      status: nil,
+      message:
+        "#{ref} is in #{inspect(current)}, which is not known to precede the " <>
+          "closed-mapped status #{inspect(target_status)} — leaving it where it is",
+      raw: nil
+    }
+  end
 
   defp target_category(transitions, target_status) do
     Enum.find_value(transitions, fn t ->
@@ -182,18 +185,41 @@ defmodule Arbiter.Trackers.Jira do
   end
 
   # Statuses known to sit before the closed target: where the workspace's own
-  # earlier lifecycle events put a ticket, and any graph node that routes into
-  # the target.
+  # earlier lifecycle events put a ticket (its "anchors"), plus any graph node
+  # that is demonstrably on the forward route from an anchor to the target.
+  #
+  # "A route from X to the target exists" is NOT enough — a rework edge
+  # (`QA -> In Progress -> … -> Code Complete`) gives QA a route to Code
+  # Complete by going backwards. So a graph node X counts only when
+  #
+  #   * X can reach the target, and
+  #   * the target cannot reach X again (X is not in a cycle with it), and
+  #   * an anchor can reach X (the graph walks *forward* into it from where
+  #     arbiter itself puts tickets) — QA, with only outgoing edges, fails this.
+  #
+  # A workspace with its own pre-close status therefore names the forward route
+  # into it in `transition_graph`, e.g. `"In Progress" => Peer Review => Code
+  # Complete`.
   defp statuses_before_close(cfg, target) do
-    mapped =
-      for {event, name} <- cfg.status_map, event != :closed, is_binary(name), name != "", do: name
+    graph = cfg.transition_graph
+
+    anchors =
+      for {event, name} <- cfg.status_map,
+          event != :closed,
+          is_binary(name),
+          name != "",
+          name != target,
+          do: name
 
     routed =
-      for {from, _edges} <- cfg.transition_graph,
-          match?({:ok, _}, plan_transition_path(cfg.transition_graph, from, target)),
+      for {from, _edges} <- graph,
+          from != target,
+          match?({:ok, _}, plan_transition_path(graph, from, target)),
+          match?({:error, _}, plan_transition_path(graph, target, from)),
+          Enum.any?(anchors, &match?({:ok, _}, plan_transition_path(graph, &1, from))),
           do: from
 
-    Enum.uniq(mapped ++ routed) -- [target]
+    Enum.uniq(anchors ++ routed)
   end
 
   @impl true
@@ -863,7 +889,7 @@ defmodule Arbiter.Trackers.Jira do
 
   # No direct edge to the target — fetch the issue's current status and BFS the
   # configured transition graph for a path, executing each hop in turn.
-  defp resolve_multi_hop(cfg, ref, target_status) do
+  defp resolve_multi_hop(cfg, ref, status, target_status) do
     with {:ok, current_status, current_category} <- current_status_info(cfg, ref) do
       cond do
         current_status == target_status ->
@@ -879,6 +905,13 @@ defmodule Arbiter.Trackers.Jira do
           # produces noisy escalations when reconciling wrongly-imported tasks whose
           # Jira tickets were already Done.
           :ok
+
+        status == :closed and
+            not close_may_proceed?(cfg, target_status, current_status, current_category) ->
+          # A route in the graph from here is not proof the ticket is still
+          # short of the target — with a rework edge it can lead backwards
+          # (bd-4i7kky). Same rule as the single-hop fast path.
+          {:error, past_target_error(ref, current_status, target_status)}
 
         true ->
           case plan_transition_path(cfg.transition_graph, current_status, target_status) do

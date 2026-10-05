@@ -129,6 +129,12 @@ defmodule Arbiter.Trackers.Jira.Config do
   #
   # A workspace whose workflow routes through different *statuses* overrides
   # this via `tracker.config.transition_graph`.
+  #
+  # The graph also tells a `:closed` transition which statuses are still *before*
+  # an intermediate closed target (bd-4i7kky): a status counts only when it sits
+  # on a forward route from a status the `status_map` places tickets in. List
+  # forward edges only — a rework edge (`"QA" => In Progress`) leaves QA outside
+  # that route, so a ticket in QA is not dragged back to "Code Complete".
   @default_transition_graph %{
     "Backlog" => [%{"transition" => "To do next", "to" => "To Do"}],
     "What's Next" => [%{"transition" => "To do next", "to" => "To Do"}],

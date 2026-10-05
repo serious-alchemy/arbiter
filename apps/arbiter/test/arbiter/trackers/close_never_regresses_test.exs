@@ -166,6 +166,90 @@ defmodule Arbiter.Trackers.CloseNeverRegressesTest do
       assert escalations_for(ws.id) == []
     end
 
+    @rework_graph %{
+      "QA" => [%{"transition" => "Rework", "to" => "In Progress"}],
+      "In Progress" => [%{"transition" => "Review", "to" => "In Code Review"}],
+      "In Code Review" => [%{"transition" => "Merge", "to" => "Code Complete"}]
+    }
+
+    test "a rework back-edge in transition_graph does not make QA 'before' the target (direct path)" do
+      # QA -> In Progress -> In Code Review -> Code Complete: QA has a route to the
+      # target, but only by going backwards through the rework edge.
+      ws = jira_ws(%{"closed" => "Code Complete"}, %{"transition_graph" => @rework_graph})
+      issue = issue(ws, :jira, @jira_ref)
+
+      stub_jira({"QA", "indeterminate"}, [{"Code Complete", "indeterminate"}])
+
+      assert :ok = Sync.close_and_verify(issue)
+      assert writes() == []
+    end
+
+    test "a rework back-edge does not drag QA back through the graph either (multi-hop path)" do
+      # No live transition lands on Code Complete, so the adapter walks the graph:
+      # QA -> In Progress -> … . That route moves the ticket backwards first.
+      ws = jira_ws(%{"closed" => "Code Complete"}, %{"transition_graph" => @rework_graph})
+      issue = issue(ws, :jira, @jira_ref)
+
+      stub_jira({"QA", "indeterminate"}, [{"In Progress", "indeterminate"}])
+
+      assert :ok = Sync.close_and_verify(issue)
+      assert writes() == []
+    end
+
+    test "a status that routes forward with no way back still counts as before the target" do
+      # In Progress (mapped by default) -> Peer Review -> Code Complete: arbiter's
+      # own anchor walks forward into it.
+      graph =
+        @rework_graph
+        |> Map.put("In Progress", [
+          %{"to" => "In Code Review"},
+          %{"to" => "Peer Review"}
+        ])
+        |> Map.put("Peer Review", [%{"to" => "Code Complete"}])
+
+      ws = jira_ws(%{"closed" => "Code Complete"}, %{"transition_graph" => graph})
+      issue = issue(ws, :jira, @jira_ref)
+
+      stub_jira({"Peer Review", "indeterminate"}, [{"Code Complete", "indeterminate"}])
+
+      assert :ok = Sync.close_and_verify(issue)
+      assert [{:jira_transition, %{"transition" => %{"id" => "100"}}} | _] = writes()
+    end
+
+    test "a skipped close leaves a record on the ticket, not only a log line" do
+      ws = jira_ws(%{"closed" => "Code Complete"})
+      issue = issue(ws, :jira, @jira_ref)
+
+      stub_jira({"QA", "indeterminate"}, [{"Code Complete", "indeterminate"}])
+
+      assert :ok = Sync.close_and_verify(issue)
+
+      assert [note] =
+               Message
+               |> Ash.read!()
+               |> Enum.filter(
+                 &(&1.task_ref == issue.id and &1.subject =~ "tracker close skipped")
+               )
+
+      assert note.kind == :notification
+      assert note.workspace_id == ws.id
+      assert note.body =~ "QA"
+      assert note.body =~ @jira_ref
+    end
+
+    test "a close that goes through records nothing" do
+      ws = jira_ws(%{"closed" => "Code Complete"})
+      issue = issue(ws, :jira, @jira_ref)
+
+      stub_jira({"To Do", "new"}, [{"Code Complete", "indeterminate"}])
+
+      assert :ok = Sync.close_and_verify(issue)
+
+      assert Message
+             |> Ash.read!()
+             |> Enum.filter(&(&1.task_ref == issue.id and &1.subject =~ "close skipped")) == []
+    end
+
     test "a ticket in Jira's done category is never moved back to an intermediate closed status" do
       ws = jira_ws(%{"closed" => "Code Complete"})
       issue = issue(ws, :jira, @jira_ref)
@@ -202,6 +286,7 @@ defmodule Arbiter.Trackers.CloseNeverRegressesTest do
       ws =
         jira_ws(%{"closed" => "Code Complete"}, %{
           "transition_graph" => %{
+            "In Progress" => [%{"transition" => "Submit", "to" => "Peer Review"}],
             "Peer Review" => [%{"transition" => "Approve", "to" => "Code Complete"}]
           }
         })
