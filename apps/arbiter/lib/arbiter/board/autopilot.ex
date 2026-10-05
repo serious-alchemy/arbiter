@@ -235,7 +235,15 @@ defmodule Arbiter.Board.Autopilot do
   # Dispatch error shapes that are deterministic — retrying can never change
   # the outcome, so these escalate on the first failure rather than waiting
   # out a retry budget. See `Arbiter.Worker.Dispatch.resolve_repo_for_dispatch/2`.
-  @deterministic_dispatch_errors [:ambiguous_repo, :no_repo_configured, :repo_not_found]
+  # `:capability_missing` (bd-57uzkl) is one too: the provider the dispatch
+  # would run on lacks a capability the repo requires, which only a config or
+  # account change fixes — not waiting.
+  @deterministic_dispatch_errors [
+    :ambiguous_repo,
+    :no_repo_configured,
+    :repo_not_found,
+    :capability_missing
+  ]
 
   # Dispatch error shapes whose refusal already paged the coordinator from
   # inside `Arbiter.Worker.Dispatch`, with its own durable dedupe — a
@@ -987,6 +995,9 @@ defmodule Arbiter.Board.Autopilot do
     do: DateTime.add(now, @account_cap_retry_ms, :millisecond)
 
   defp preflight_retry_not_before({:provider_constraint, _provider, _phrase}, _count, now),
+    do: DateTime.add(now, @account_cap_retry_ms, :millisecond)
+
+  defp preflight_retry_not_before({:capability_missing, _provider, _phrase}, _count, now),
     do: DateTime.add(now, @account_cap_retry_ms, :millisecond)
 
   defp preflight_retry_not_before(reason, count, now),

@@ -64,6 +64,7 @@ defmodule Arbiter.Worker.Dispatch do
 
   alias Arbiter.Accounts.Admission
   alias Arbiter.Agents
+  alias Arbiter.Agents.CapabilityMatrix
   alias Arbiter.Agents.Claude.CredentialCheck
   alias Arbiter.Agents.Gemini.Config, as: GeminiConfig
   alias Arbiter.Agents.ModelFamily
@@ -196,6 +197,7 @@ defmodule Arbiter.Worker.Dispatch do
          opts = put_routing_choice(task, opts),
          opts = route_implementer(task, opts),
          :ok <- ensure_provider_constraint(task, opts),
+         :ok <- ensure_capability(task, opts),
          :ok <- maybe_pause_gate(task, opts),
          :ok <- maybe_quota_gate(task, opts),
          :ok <- ensure_account_capacity(task, opts),
@@ -931,7 +933,8 @@ defmodule Arbiter.Worker.Dispatch do
     {provider, fallback_reason, decision} =
       ProviderRouting.implementer_provider(task, workspace, role,
         override: override,
-        security: routing_security(workspace, opts)
+        security: routing_security(workspace, opts),
+        repo: Keyword.get(opts, :repo)
       )
 
     if fallback_reason && is_nil(override) && ProviderRouting.escalate_fallback?(decision) do
@@ -1306,7 +1309,8 @@ defmodule Arbiter.Worker.Dispatch do
       routing_opts = [
         override: override,
         security: routing_security(workspace, opts),
-        routing_choice: Keyword.get(opts, :routing_choice)
+        routing_choice: Keyword.get(opts, :routing_choice),
+        repo: Keyword.get(opts, :repo)
       ]
 
       case ProviderRouting.select(workspace, task, role, routing_opts) do
@@ -1384,6 +1388,65 @@ defmodule Arbiter.Worker.Dispatch do
 
       _ ->
         ProviderConstraint.check(task, quota_gate_provider(task, workspace, opts))
+    end
+  end
+
+  # bd-57uzkl (design §6.2, E17): the capability hard gate on the provider this
+  # dispatch will actually run on. The routers already drop a candidate that
+  # lacks a required capability; this is the same check on what they cannot
+  # see — the `no_candidate` fall-through to the pre-routing provider, an
+  # unrouted (`failover`) workspace, a caller's explicit provider and a
+  # resume's resolution — or the gate would only be advisory. Off
+  # (`routing.capability_gates` unset) `CapabilityMatrix.gate/3` is `nil` and
+  # nothing is read or recorded. Refused rather than held: a missing capability
+  # is not a quota condition, so waiting cannot fix it.
+  defp ensure_capability(%Issue{} = task, opts) do
+    cond do
+      Keyword.get(opts, :review, false) == true -> :ok
+      Arbiter.Worker.ReviewGate.base_task_id(task.id) != task.id -> :ok
+      true -> capability_verdict(task, opts)
+    end
+  end
+
+  defp capability_verdict(task, opts) do
+    workspace = load_workspace(task)
+    repo = Keyword.get(opts, :repo) || task.repo
+
+    case CapabilityMatrix.gate(workspace, capability_role(opts), repo) do
+      nil ->
+        :ok
+
+      gate ->
+        provider = quota_gate_provider(task, workspace, opts)
+        code = CapabilityMatrix.provider_code(provider, Arbiter.Quota.provider_code("gemini"))
+
+        case CapabilityMatrix.check(gate.rows, gate.requires, code, capability_model(opts)) do
+          :ok ->
+            :ok
+
+          {:missing, _capability, detail} ->
+            {:error, {:capability_missing, provider, "held — capability missing (#{detail})"}}
+        end
+    end
+  rescue
+    e ->
+      require Logger
+      Logger.warning("Dispatch: capability check crashed for #{task.id}: #{Exception.message(e)}")
+      :ok
+  end
+
+  defp capability_role(opts) do
+    cond do
+      Keyword.get(opts, :resume) == true -> :resume
+      role = Keyword.get(opts, :routing_role) -> role
+      true -> :main
+    end
+  end
+
+  defp capability_model(opts) do
+    case Keyword.get(opts, :model) do
+      model when is_binary(model) and model != "" -> model
+      _ -> get_in(Keyword.get(opts, :routing_decision) || %{}, ["model"])
     end
   end
 
