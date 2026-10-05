@@ -251,9 +251,8 @@ defmodule Arbiter.Agents.Grok do
 
   defp prompt_args(prompt, opts) do
     if byte_size(prompt) > @max_prompt_argv_bytes do
-      with {:ok, file} <- ConfigDir.write_prompt_file(prompt, opts) do
-        {:ok, ["-p", "--prompt-file", file]}
-      else
+      case ConfigDir.write_prompt_file(prompt, opts) do
+        {:ok, file} -> {:ok, ["-p", "--prompt-file", file]}
         {:error, reason} -> {:error, {:prompt_file_failed, reason}}
       end
     else
