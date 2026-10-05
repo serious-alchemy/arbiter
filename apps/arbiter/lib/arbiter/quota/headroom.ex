@@ -58,24 +58,41 @@ defmodule Arbiter.Quota.Headroom do
   """
   @spec binding(Gate.quota_source(), Gate.policy(), keyword()) :: t() | nil
   def binding(quota, policy, opts \\ []) do
+    quota
+    |> windows(policy, opts)
+    |> Enum.min_by(& &1.headroom, fn -> nil end)
+  end
+
+  @doc """
+  Every trusted window's headroom (bd-adtnto, R5; design §2.3), in snapshot
+  order: the same per-window numbers `binding/3` takes its minimum over, through
+  the same `Arbiter.Quota.Gate.pace/6` path. `[]` when the headroom is unknown
+  (no snapshot, or no window the gate trusts and that carries a reading).
+
+  `Arbiter.Quota.Price` prices a draw against this list. Same options as
+  `binding/3`.
+  """
+  @spec windows(Gate.quota_source(), Gate.policy(), keyword()) :: [t()]
+  def windows(quota, policy, opts \\ []) do
     case Snapshot.normalize(quota, Keyword.take(opts, [:model])) do
       nil ->
-        nil
+        []
 
       %Snapshot{} = s ->
         now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
 
         s
-        |> windows(now)
+        |> snapshot_windows(now)
         |> Enum.map(fn {window, label, used, reset_at} ->
           window_headroom(policy, window, label, used, reset_at, now)
         end)
         |> Enum.reject(&is_nil/1)
-        |> Enum.min_by(& &1.headroom, fn -> nil end)
     end
   end
 
-  defp windows(%Snapshot{} = s, now) do
+  # `now` moves the staleness checks with the paced math: a pinned clock must
+  # not quietly age the snapshot against the real one.
+  defp snapshot_windows(%Snapshot{} = s, now) do
     primary =
       if Gate.stale?(s, now),
         do: [],

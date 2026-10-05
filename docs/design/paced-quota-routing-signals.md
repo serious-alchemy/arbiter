@@ -1133,6 +1133,18 @@ Phase 0 runs alongside phase 1. It measures; it doesn't route.
 | R15 | An offline replay harness (§7.2), restricted to expiring headroom | 4 | R1, R2 | 4 |
 | R16 | Canary-arm exploration within eligibility, budgeted to expiring headroom | 3 | R13, R15 | 4 |
 
+- **R5 as built (bd-adtnto).** `Headroom.windows/3`, `Quota.Price` (`δ / h`,
+  `:infeasible` at or past the line), `Agents.Routing.Score` (`J = price +
+  w(priority) × time_h`, ties to larger headroom then configured order) and
+  `provider_selection: scored`. `routing.scoring.mode` is `shadow` (default:
+  `most_quota` dispatches, `routing_decision.shadow` records the scorer's
+  ranking, pick, agreement and reason) or `enforce`. `routing.scoring.time_weight`
+  is read by the ticket's own priority. `draw` and `time_h` are `nil` until R6's
+  matrix supplies them through `ProviderRouting`'s `:estimate_fun` seam, so today
+  the price is `1/h` and the order is `most_quota`'s. Reviewer routing is
+  untouched (a price-only reorder there changes nothing until R6's projection).
+  The report: `mix arbiter.routing_shadow_report`, or
+  `bin/arbiter eval 'Arbiter.Release.shadow_report()'` on a release.
 - **Phase 1 delivers value with no learned model.** R4, R5, R6, R7 and R8 add
   the capability matrix and floors as hard gates, the headroom price, and the
   hand competence matrix, all on top of the unchanged paced gate.
