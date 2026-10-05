@@ -477,12 +477,16 @@ defmodule Arbiter.Agents.SecurityPolicyTest do
 
       repo_only = review_ws(%{}, %{"tonic" => %{"sandbox" => %{"review_backend" => "podman"}}})
       assert SecurityPolicy.review_backend(SecurityPolicy.resolve(repo_only)) == :bwrap
-      assert SecurityPolicy.review_backend(SecurityPolicy.resolve(repo_only, %{}, "tonic")) == :podman
+
+      assert SecurityPolicy.review_backend(SecurityPolicy.resolve(repo_only, %{}, "tonic")) ==
+               :podman
     end
 
     test "an unknown value is ignored, so the inherited review backend survives" do
       for bad <- ["docker", 3, "", nil] do
-        p = SecurityPolicy.merge(SecurityPolicy.base(), %{"sandbox" => %{"review_backend" => bad}})
+        p =
+          SecurityPolicy.merge(SecurityPolicy.base(), %{"sandbox" => %{"review_backend" => bad}})
+
         assert SecurityPolicy.review_backend(p) == :bwrap
       end
     end

@@ -580,7 +580,11 @@ defmodule Arbiter.Worker.ReviewGateReviewCheckoutTest do
     end
 
     test "the reviewer and the revise pass spawn under the review backend, never refused" do
-      state = %{repo: "trib/repo", review_checkout: %{path: "/tmp/gate-review-x", head_sha: "abc"}}
+      state = %{
+        repo: "trib/repo",
+        review_checkout: %{path: "/tmp/gate-review-x", head_sha: "abc"}
+      }
+
       ws = podman_ws()
 
       assert SecurityPolicy.sandbox_backend(SecurityPolicy.resolve(ws, %{}, "trib/repo")) ==
@@ -599,7 +603,11 @@ defmodule Arbiter.Worker.ReviewGateReviewCheckoutTest do
     end
 
     test "an explicit podman review_backend still refuses: nothing runs unjailed" do
-      state = %{repo: "trib/repo", review_checkout: %{path: "/tmp/gate-review-x", head_sha: "abc"}}
+      state = %{
+        repo: "trib/repo",
+        review_checkout: %{path: "/tmp/gate-review-x", head_sha: "abc"}
+      }
+
       ws = podman_ws(%{"review_backend" => "podman"})
 
       for role <- [:reviewer, :implementer] do

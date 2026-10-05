@@ -5040,7 +5040,9 @@ defmodule Arbiter.Worker.DispatchTest do
 
       review = Dispatch.review_security_policy(both, review: true)
       assert Arbiter.Agents.SecurityPolicy.sandbox_backend(review) == :podman
-      assert {:error, {:sandbox_backend_unavailable, :podman, _}} = Arbiter.Worker.Sandbox.module(review)
+
+      assert {:error, {:sandbox_backend_unavailable, :podman, _}} =
+               Arbiter.Worker.Sandbox.module(review)
 
       assert {:error, {:sandbox_backend_unavailable, :podman, _}} =
                Arbiter.Agents.Claude.default_argv("hi", security: review)
