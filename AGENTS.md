@@ -122,6 +122,7 @@ custom classes must fully style the input
     cd apps/<app> && mix test test/<path>_test.exs
     ```
     Add `:<line>` to target a single test (e.g. `cd apps/arbiter && mix test test/arbiter/accounts/enablement_test.exs:10`).
+  - **Async concurrency (`ARB_TEST_MAX_CASES`):** every app's `test_helper.exs` passes `max_cases:` to `ExUnit.start/1` via `scripts/test_max_cases.exs`. `ARB_TEST_MAX_CASES=N` sets it (a non-integer or `< 1` warns and falls back). Unset, a worker session (`ARB_WORKER_BEAD_ID` present) gets `max(2, div(schedulers_online, 4))`; developer and CI runs keep ExUnit's default (2x schedulers). Lower it further if the box is swapping with several workers running.
   - **To re-run failures:** run `mix test --failed` inside the specific app directory (`cd apps/<app> && mix test --failed`).
   - **App responsibilities:**
     - `apps/arbiter`: Core domain, database/Ecto schemas, background workers, and business logic.
