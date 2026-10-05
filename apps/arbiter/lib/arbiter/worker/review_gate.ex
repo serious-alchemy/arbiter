@@ -936,6 +936,9 @@ defmodule Arbiter.Worker.ReviewGate do
 
   @impl true
   def init(opts) do
+    # bd-6i7yzq: writes this process makes are attributed to it (`Arbiter.Actor`).
+    Arbiter.Actor.put(Arbiter.Actor.system("review_gate"))
+
     # bd-2gc809: nil for a gate re-armed at boot (`rearm_ci_wait/2`) — no author
     # survives a restart, and the verdict goes to the ticket (`deliver_verdict/4`).
     author = Keyword.get(opts, :author)

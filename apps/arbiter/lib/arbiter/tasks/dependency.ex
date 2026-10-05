@@ -96,6 +96,8 @@ defmodule Arbiter.Tasks.Dependency do
     # No FK from version rows back to `dependencies`: an edge is destroyed, not
     # archived, and its history must not block the destroy (matches Workspace).
     reference_source?(false)
+    # bd-6i7yzq: who added or removed the edge (`Arbiter.Actor` label).
+    metadata :actor, :string, allow_nil?: true
   end
 
   actions do
@@ -113,6 +115,10 @@ defmodule Arbiter.Tasks.Dependency do
       accept [:type, :created_by, :notes]
       require_atomic? false
     end
+  end
+
+  changes do
+    change Arbiter.PaperTrail.StampActor, on: [:create, :update, :destroy]
   end
 
   attributes do

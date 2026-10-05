@@ -16,28 +16,30 @@ defmodule Arbiter.PaperTrail do
   `actor_label/1` normalises whatever the caller threads through as the Ash
   `actor:` option into that label:
 
-    * a coordinator scope → `"coordinator"`
-    * a worker scope → `"worker:<task_id>"`
-    * a refine scope → `"refine:<bound issue id>"`
+    * an `Arbiter.Actor` → its `Actor.label/1`
+    * a coordinator scope → `"coordinator"` (`"operator:cli"` for an
+      operator-proof token), a worker scope → `"worker:<task_id>"`, a refine
+      scope → `"refine:<bound issue id>"` (all via `Arbiter.Actor.from_scope/1`)
     * a bare string (e.g. `"cli"`, `"dashboard"`) → itself
     * `nil` → `nil` (an unattributed write, e.g. a seed or a legacy caller)
   """
 
+  alias Arbiter.Actor
   alias Arbiter.MCP.Scope
 
   @doc """
   Normalise an Ash `actor` term into a stable string label for a version row.
   """
   @spec actor_label(term()) :: String.t() | nil
-  def actor_label(%Scope{tier: :coordinator}), do: "coordinator"
+  def actor_label(%Actor{} = actor), do: Actor.label(actor)
 
-  def actor_label(%Scope{tier: :worker, task_id: task_id}) when is_binary(task_id),
-    do: "worker:#{task_id}"
+  def actor_label(%Scope{} = scope) do
+    case Actor.from_scope(scope) do
+      %Actor{} = actor -> Actor.label(actor)
+      nil -> nil
+    end
+  end
 
-  def actor_label(%Scope{tier: :refine, issue_id: issue_id}) when is_binary(issue_id),
-    do: "refine:#{issue_id}"
-
-  def actor_label(%Scope{tier: tier}) when is_atom(tier), do: Atom.to_string(tier)
   def actor_label(label) when is_binary(label), do: label
   def actor_label(nil), do: nil
   def actor_label(other), do: inspect(other)

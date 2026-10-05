@@ -33,6 +33,7 @@ defmodule Arbiter.Providers.Pause do
           target: String.t(),
           reason: String.t() | nil,
           by: String.t() | nil,
+          actor: String.t() | nil,
           at: DateTime.t() | nil
         }
 
@@ -104,7 +105,14 @@ defmodule Arbiter.Providers.Pause do
     reason = Keyword.get(opts, :reason)
 
     with {:ok, target, label} <- resolve(ref) do
-      entry = %{"reason" => reason, "by" => by, "at" => DateTime.to_iso8601(DateTime.utc_now())}
+      entry = %{
+        "reason" => reason,
+        "by" => by,
+        # bd-6i7yzq: `by` is the surface ("mcp", "api", "dashboard"); `actor` is
+        # who was acting there (`Arbiter.Actor` label), when known.
+        "actor" => Arbiter.Actor.resolve_label(nil),
+        "at" => DateTime.to_iso8601(DateTime.utc_now())
+      }
 
       with {:ok, _} <-
              Settings.set_provider_pauses(Map.put(Settings.provider_pauses(), target, entry)) do
@@ -177,6 +185,7 @@ defmodule Arbiter.Providers.Pause do
         "label" => label(e.target),
         "reason" => e.reason,
         "by" => e.by,
+        "actor" => e.actor,
         "at" => e.at && DateTime.to_iso8601(e.at)
       }
     end)
@@ -224,7 +233,13 @@ defmodule Arbiter.Providers.Pause do
   end
 
   defp to_entry(target, e) do
-    %{target: target, reason: e["reason"], by: e["by"], at: parse_at(e["at"])}
+    %{
+      target: target,
+      reason: e["reason"],
+      by: e["by"],
+      actor: e["actor"],
+      at: parse_at(e["at"])
+    }
   end
 
   defp parse_at(iso) when is_binary(iso) do

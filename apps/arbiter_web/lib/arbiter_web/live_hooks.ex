@@ -124,7 +124,11 @@ defmodule ArbiterWeb.LiveHooks do
          :error <- ArbiterWeb.DashboardAuth.authenticate_socket(session, connect_info(socket)) do
       {:halt, Phoenix.LiveView.redirect(socket, to: ArbiterWeb.DashboardAuth.login_path())}
     else
-      {:ok, identity} -> {:cont, assign(socket, :dashboard_identity, identity)}
+      {:ok, identity} ->
+        # bd-6i7yzq: the LiveView process is the operator's for its lifetime, so
+        # every `handle_event` write is attributed to them.
+        Arbiter.Actor.put(Arbiter.Actor.operator(identity))
+        {:cont, assign(socket, :dashboard_identity, identity)}
     end
   end
 

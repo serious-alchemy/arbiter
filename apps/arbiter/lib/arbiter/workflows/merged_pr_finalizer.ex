@@ -140,6 +140,9 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
 
   @impl true
   def init(opts) do
+    # bd-6i7yzq: writes this process makes are attributed to it (`Arbiter.Actor`).
+    Arbiter.Actor.put(Arbiter.Actor.system("merged_pr_finalizer"))
+
     repo = Keyword.fetch!(opts, :repo)
     workspace_id = Keyword.fetch!(opts, :workspace_id)
     interval_ms = Keyword.get(opts, :interval_ms, @default_interval_ms)

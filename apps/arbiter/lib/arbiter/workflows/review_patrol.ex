@@ -405,6 +405,9 @@ defmodule Arbiter.Workflows.ReviewPatrol do
 
   @impl true
   def init(opts) do
+    # bd-6i7yzq: writes this process makes are attributed to it (`Arbiter.Actor`).
+    Arbiter.Actor.put(Arbiter.Actor.system("review_patrol"))
+
     base = PatrolServer.base_init_fields(opts)
     {:ok, schedule_next(struct!(__MODULE__, base))}
   end
