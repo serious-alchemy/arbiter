@@ -208,4 +208,21 @@ defmodule Arbiter.Quota.GrokLedgerTest do
       assert Gate.gating_window(s, nil, now: @now) != nil
     end
   end
+
+  describe "headroom" do
+    test "Headroom.binding/3 reads the ledger snapshot against the gate's ceiling" do
+      event!(1, %{tokens_in: 100_000})
+      snapshot = GrokLedger.snapshot(now: @now)
+
+      assert %{headroom: headroom, window: "24h", used: 0.2} =
+               Quota.Headroom.binding(snapshot, nil, now: @now)
+
+      # The flat ceiling is 85%: 0.85 - 0.20.
+      assert_in_delta headroom, 0.65, 1.0e-9
+    end
+
+    test "the 24h window has a known length for the paced gate" do
+      assert Gate.window_seconds("24h") == GrokLedger.window_seconds()
+    end
+  end
 end
