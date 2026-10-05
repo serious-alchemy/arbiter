@@ -916,4 +916,220 @@ defmodule Arbiter.Agents.ProviderRoutingTest do
       assert Enum.any?(view.dropped, &(&1.reason == "provider_constraint"))
     end
   end
+
+  # ---- bd-57uzkl (R4): the capability hard gate ---------------------------------
+
+  describe "capability gates (bd-57uzkl)" do
+    @gated %{
+      "routing" => %{
+        "provider_selection" => "most_quota",
+        "capability_gates" => true,
+        "repos" => %{"arbiter" => %{"requires" => ["async_verification"]}}
+      }
+    }
+    # Same routing, no gate and no requirement: what every workspace has today.
+    @ungated @most_quota
+
+    setup do
+      claude_pair = fn ws ->
+        claude = account!(:claude, "cap-claude")
+        allow!(ws, claude, 0)
+        claude
+      end
+
+      %{claude_pair: claude_pair}
+    end
+
+    defp two_accounts!(ws) do
+      claude = account!(:claude, "cap-claude")
+      agy = account!(:antigravity, "cap-agy")
+      allow!(ws, claude, 0)
+      allow!(ws, agy, 1)
+      # agy has by far the most headroom: ungated, it is the pick.
+      {claude, agy, [{claude, claude_quota(0.6)}, {agy, agy_quota(1.0, 1.0)}]}
+    end
+
+    test "a candidate lacking a required capability is dropped with capability_missing" do
+      ws = workspace!(@gated)
+      {claude, agy, pairs} = two_accounts!(ws)
+      task = task!(ws, %{repo: "arbiter"})
+
+      assert {:ok, selection} = ProviderRouting.select(ws, task, :main, opts(pairs))
+
+      assert selection.account.id == claude.id
+      assert reasons(selection.decision)[agy.slug] == "capability_missing"
+      refute agy.slug in slugs(selection.decision["candidates"])
+
+      detail =
+        Enum.find(selection.decision["dropped"], &(&1["account_slug"] == agy.slug))["detail"]
+
+      assert detail =~ "needs async_verification"
+      assert detail =~ "antigravity"
+      assert detail =~ "unreliable"
+    end
+
+    test "the gate is ahead of quota: an ineligible candidate's quota is never weighed" do
+      ws = workspace!(@gated)
+      {claude, agy, _} = two_accounts!(ws)
+      # agy is over its line too — but it is the capability that drops it.
+      pairs = [{claude, claude_quota(0.1)}, {agy, agy_quota(99.0, 99.0)}]
+
+      decision = ProviderRouting.evaluate(ws, task!(ws, %{repo: "arbiter"}), opts(pairs))
+      assert reasons(decision)[agy.slug] == "capability_missing"
+    end
+
+    test "a task in a repo that requires nothing is not gated" do
+      ws = workspace!(@gated)
+      {_claude, agy, pairs} = two_accounts!(ws)
+
+      assert {:ok, selection} =
+               ProviderRouting.select(ws, task!(ws, %{repo: "other"}), :main, opts(pairs))
+
+      assert selection.account.id == agy.id
+    end
+
+    test "a resume role needs resume; a main dispatch does not" do
+      ws = workspace!(put_in(@gated, ["routing", "repos"], %{}))
+      {claude, _agy, pairs} = two_accounts!(ws)
+
+      {:ok, _} =
+        Arbiter.Settings.set_capability_matrix([
+          %{"match" => %{"provider" => "antigravity"}, "resume" => false}
+        ])
+
+      task = task!(ws)
+      assert {:ok, main} = ProviderRouting.select(ws, task, :main, opts(pairs, pin: false))
+      assert main.decision["outcome"] == "selected"
+      refute Enum.any?(main.decision["dropped"], &(&1["reason"] == "capability_missing"))
+
+      for role <- [:resume, :resume_session, :auto_resume, :reconciler_resume] do
+        assert {:ok, resumed} = ProviderRouting.select(ws, task, role, opts(pairs, pin: false))
+        assert resumed.account.id == claude.id, "#{role} must not land on a non-resumable agy"
+
+        assert Enum.any?(resumed.decision["dropped"], fn d ->
+                 d["reason"] == "capability_missing" and d["detail"] =~ "needs resume"
+               end)
+      end
+    end
+
+    test "a pin on an account that lacks the capability falls back, recorded" do
+      ws = workspace!(@ungated)
+      {claude, agy, pairs} = two_accounts!(ws)
+      task = task!(ws, %{repo: "arbiter"})
+
+      assert {:ok, first} = ProviderRouting.select(ws, task, :main, opts(pairs))
+      assert first.account.id == agy.id
+
+      {:ok, ws} = Ash.update(ws, %{config: @gated})
+
+      assert {:ok, again} =
+               ProviderRouting.select(ws, Ash.get!(Issue, task.id), :resume, opts(pairs))
+
+      assert again.account.id == claude.id
+      assert again.decision["outcome"] == "fallback"
+      assert again.decision["fallback"] =~ "capability_missing"
+    end
+
+    test "when every candidate lacks it the selection is the legacy one and says why" do
+      ws = workspace!(@gated)
+      agy = account!(:antigravity, "cap-only-agy")
+      allow!(ws, agy, 0)
+
+      assert {:legacy, decision} =
+               ProviderRouting.select(
+                 ws,
+                 task!(ws, %{repo: "arbiter"}),
+                 :main,
+                 opts([{agy, agy_quota(1.0, 1.0)}])
+               )
+
+      assert decision["outcome"] == "no_candidate"
+      assert reasons(decision)[agy.slug] == "capability_missing"
+    end
+
+    test "an installation override can grant what the defaults withhold" do
+      ws = workspace!(@gated)
+      {_claude, agy, pairs} = two_accounts!(ws)
+
+      {:ok, _} =
+        Arbiter.Settings.set_capability_matrix([
+          %{"match" => %{"provider" => "antigravity"}, "async_verification" => "reliable"}
+        ])
+
+      assert {:ok, selection} =
+               ProviderRouting.select(ws, task!(ws, %{repo: "arbiter"}), :main, opts(pairs))
+
+      assert selection.account.id == agy.id
+    end
+
+    # ---- the no-regression invariant (§9) --------------------------------------
+
+    test "I1: with the gate off the decision is identical, whatever the repo declares" do
+      off_with_requires =
+        workspace!(%{
+          "routing" => %{
+            "provider_selection" => "most_quota",
+            "repos" => %{"arbiter" => %{"requires" => ["async_verification"]}}
+          }
+        })
+
+      plain = workspace!(@ungated)
+      now = DateTime.utc_now()
+
+      decide = fn ws ->
+        {claude, agy, pairs} = two_accounts!(ws)
+        task = task!(ws, %{repo: "arbiter"})
+
+        decision =
+          ProviderRouting.evaluate(ws, task, opts(pairs, now: now, role: :resume))
+
+        {decision, claude, agy}
+      end
+
+      {a, a_claude, a_agy} = decide.(off_with_requires)
+      {b, b_claude, b_agy} = decide.(plain)
+
+      normalize = fn decision, claude, agy ->
+        decision
+        |> inspect()
+        |> String.replace(claude.slug, "CLAUDE")
+        |> String.replace(agy.slug, "AGY")
+        |> String.replace(claude.id, "CLAUDE_ID")
+        |> String.replace(agy.id, "AGY_ID")
+      end
+
+      assert normalize.(a, a_claude, a_agy) == normalize.(b, b_claude, b_agy)
+      refute Enum.any?(a["dropped"], &(&1["reason"] == "capability_missing"))
+    end
+
+    test "I2: with one eligible account the selection is what the gate-off router returns" do
+      for config <- [@gated, @ungated] do
+        ws = workspace!(config)
+        claude = account!(:claude, "solo")
+        allow!(ws, claude, 0)
+        task = task!(ws, %{repo: "arbiter"})
+
+        assert {:ok, selection} =
+                 ProviderRouting.select(ws, task, :main, opts([{claude, claude_quota(0.2)}]))
+
+        assert selection.account.id == claude.id
+        assert selection.agent_type == :claude
+        assert selection.decision["outcome"] == "selected"
+        assert selection.decision["dropped"] == []
+      end
+    end
+
+    test "a gate can only remove candidates: the gated candidate set is a subset of the ungated" do
+      gated_ws = workspace!(@gated)
+      plain_ws = workspace!(@ungated)
+
+      slugs_for = fn ws ->
+        {_, _, pairs} = two_accounts!(ws)
+        decision = ProviderRouting.evaluate(ws, task!(ws, %{repo: "arbiter"}), opts(pairs))
+        decision["candidates"] |> slugs() |> Enum.map(&String.replace(&1, ~r/-\d+$/, ""))
+      end
+
+      assert MapSet.subset?(MapSet.new(slugs_for.(gated_ws)), MapSet.new(slugs_for.(plain_ws)))
+    end
+  end
 end

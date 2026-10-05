@@ -250,6 +250,28 @@ defmodule Arbiter.Settings do
   def set_provider_pauses(map) when is_map(map), do: write_setting(:provider_pauses, map)
 
   @doc """
+  The operator's capability-matrix override rows (bd-57uzkl), or `nil` for
+  "code defaults only". See `Arbiter.Agents.CapabilityMatrix`. Never raises.
+  """
+  @spec capability_matrix() :: [map()] | nil
+  def capability_matrix, do: read_setting(:capability_matrix)
+
+  @doc """
+  Set the capability-matrix override. Rows are validated and normalised by
+  `Arbiter.Agents.CapabilityMatrix.normalize_rows/1`; an invalid row refuses
+  the whole write. `nil` clears the override. Operator-owned: no worker, MCP or
+  Loop surface writes it.
+  """
+  @spec set_capability_matrix([map()] | nil) :: {:ok, [map()] | nil} | {:error, term()}
+  def set_capability_matrix(nil), do: write_setting(:capability_matrix, nil)
+
+  def set_capability_matrix(rows) do
+    with {:ok, rows} <- Arbiter.Agents.CapabilityMatrix.normalize_rows(rows) do
+      write_setting(:capability_matrix, rows)
+    end
+  end
+
+  @doc """
   Quota provider codes forced onto the status bar's quota chip and `/usage`'s
   rate limits (bd-i2gwwn, `Arbiter.Quota.Visibility`), or `nil` when unset —
   auto-detect. Never raises.

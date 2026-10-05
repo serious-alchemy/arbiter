@@ -63,6 +63,7 @@ defmodule Arbiter.Settings.Installation do
     :board_autopilot_paused_at,
     :board_autopilot_paused_by,
     :provider_pauses,
+    :capability_matrix,
     :quota_providers_shown,
     :quota_providers_hidden,
     :output_offload_enabled,
@@ -147,6 +148,13 @@ defmodule Arbiter.Settings.Installation do
       allow_nil? true
 
       description ~s[Provider / account pauses (bd-5ef587): %{target => %{"reason", "by", "at"}}, target being a provider code ("claude") or "account:<id>". nil = nothing paused.]
+    end
+
+    attribute :capability_matrix, {:array, :map} do
+      public? true
+      allow_nil? true
+
+      description "Operator-owned capability matrix override (bd-57uzkl): rows %{\"match\" => %{\"provider\", \"model\"}, \"resume\", \"async_verification\", \"evidence\"} consulted ahead of the code defaults. nil = defaults only."
     end
 
     attribute :quota_providers_shown, {:array, :string} do
