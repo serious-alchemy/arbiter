@@ -119,6 +119,21 @@ defmodule Arbiter.Usage.Event do
     create :create do
       primary? true
 
+      # Seams #4: stamp attribution dimensions on every row at write time.
+      change before_action(fn changeset, _context ->
+               attrs =
+                 Map.new(
+                   [:workspace_id, :repo, :provider, :model, :step, :source],
+                   &{&1, Ash.Changeset.get_attribute(changeset, &1)}
+                 )
+
+               Ash.Changeset.force_change_attribute(
+                 changeset,
+                 :attribution,
+                 Arbiter.Usage.Attributor.resolve(attrs)
+               )
+             end)
+
       change after_action(fn _changeset, record, _context ->
                Arbiter.Quota.SpendCache.invalidate()
                Arbiter.Usage.EstimateCache.invalidate()
@@ -333,6 +348,12 @@ defmodule Arbiter.Usage.Event do
       public? true
 
       description "Original CLI usage payload (the parsed `result` event). Kept for forensic debugging; never queried."
+    end
+
+    attribute :attribution, :map do
+      public? true
+
+      description "Attribution dimensions stamped at write time by `Arbiter.Usage.Attributor` (string keys; core-known ones by default, plus whatever a configured attributor adds). Nil on rows written before the column existed."
     end
 
     attribute :base_task_id, :string do
