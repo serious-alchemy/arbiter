@@ -106,8 +106,33 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
   def change(changeset, _opts, _context) do
     case Changeset.get_attribute(changeset, :config) do
       nil -> changeset
-      config when is_map(config) -> validate(changeset, config)
+      config when is_map(config) -> changeset |> validate(config) |> apply_policy()
       _other -> Changeset.add_error(changeset, field: :config, message: "must be a map")
+    end
+  end
+
+  # Seam #10: cross-workspace policy hook; skipped once shape validation failed.
+  defp apply_policy(%Changeset{valid?: false} = changeset), do: changeset
+
+  defp apply_policy(changeset) do
+    policy =
+      Application.get_env(
+        :arbiter,
+        :workspace_config_policy,
+        Arbiter.Tasks.Workspace.ConfigPolicy.Default
+      )
+
+    config = Changeset.get_attribute(changeset, :config)
+
+    context = %{
+      action: changeset.action && changeset.action.type,
+      workspace: if(changeset.data.__meta__.state == :loaded, do: changeset.data)
+    }
+
+    case policy.check(config, context) do
+      :ok -> changeset
+      {:ok, new} when is_map(new) -> Changeset.force_change_attribute(changeset, :config, new)
+      {:error, message} -> Changeset.add_error(changeset, field: :config, message: message)
     end
   end
 
