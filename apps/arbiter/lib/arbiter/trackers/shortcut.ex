@@ -84,7 +84,8 @@ defmodule Arbiter.Trackers.Shortcut do
     with {:ok, cfg} <- Config.resolve(),
          {:ok, target_name} <- map_status(cfg, status),
          {:ok, workflows} <- list_workflows(cfg),
-         {:ok, state_id} <- find_state_id(cfg, workflows, target_name) do
+         {:ok, state_id} <- find_state_id(cfg, workflows, target_name),
+         :ok <- guard_close(cfg, ref, status, workflows, state_id) do
       payload = %{"workflow_state_id" => state_id}
 
       case request(cfg, :put, "/stories/#{ref}", json: payload) do
@@ -612,6 +613,75 @@ defmodule Arbiter.Trackers.Shortcut do
                "available: #{inspect(Enum.map(states, & &1["name"]))}",
            raw: workflows
          }}
+    end
+  end
+
+  # A close must never move a story backwards (bd-4i7kky). `closed` can map to
+  # an intermediate state ("Ready for Deploy"), and a story other people have
+  # since moved on ("QA", "Deployed") is then *past* it; an unconditional PUT
+  # would drag it back under the token owner's name. Shortcut, unlike Jira,
+  # exposes an ordering: a state's `type` (unstarted < started < done) and its
+  # `position` within the workflow. A story already at, or later than, the
+  # target is left alone. A story whose current state can't be placed (not in
+  # any workflow listed, or no positions to compare) is closed as before.
+  defp guard_close(cfg, ref, :closed, workflows, target_id) do
+    with {:ok, story} <-
+           request(cfg, :get, "/stories/#{ref}", []) |> handle_json() do
+      states = indexed_states(workflows)
+
+      with current_id when is_integer(current_id) <- story["workflow_state_id"],
+           {wf_cur, current} <- Map.get(states, current_id),
+           {wf_target, target} <- Map.get(states, target_id),
+           true <- state_at_or_past?(current, wf_cur == wf_target, target) do
+        {:error,
+         %Error{
+           kind: :upstream_past_target,
+           status: nil,
+           message:
+             "story #{ref} is in #{inspect(current["name"])}, already at or past the " <>
+               "closed-mapped state #{inspect(target["name"])} — leaving it where it is",
+           raw: nil
+         }}
+      else
+        _ -> :ok
+      end
+    end
+  end
+
+  defp guard_close(_cfg, _ref, _status, _workflows, _target_id), do: :ok
+
+  # state id => {workflow id, state}, across every workflow (not just the
+  # configured one — a story can sit in another workflow's state).
+  defp indexed_states(workflows) do
+    for wf <- workflows,
+        state <- Map.get(wf, "states") || [],
+        is_integer(state["id"]),
+        into: %{} do
+      {state["id"], {wf["id"], state}}
+    end
+  end
+
+  @state_type_rank %{"unstarted" => 0, "started" => 1, "done" => 2}
+
+  defp state_at_or_past?(%{"id" => id}, _same_workflow?, %{"id" => id}), do: true
+
+  defp state_at_or_past?(current, same_workflow?, target) do
+    cur_rank = Map.get(@state_type_rank, current["type"])
+    target_rank = Map.get(@state_type_rank, target["type"])
+
+    cond do
+      is_nil(cur_rank) or is_nil(target_rank) ->
+        false
+
+      cur_rank != target_rank ->
+        cur_rank > target_rank
+
+      not same_workflow? ->
+        false
+
+      true ->
+        is_integer(current["position"]) and is_integer(target["position"]) and
+          current["position"] > target["position"]
     end
   end
 

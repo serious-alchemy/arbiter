@@ -113,13 +113,15 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTracker do
     # Route through Sync so a genuine failure is loud + raises an escalation
     # (the swallow-on-error that hid AX-17911 is gone). A benign "tracker
     # doesn't model this status" is still skipped quietly.
-    Sync.transition_event(issue, Tracker.status_for_state(issue.state))
+    result = Sync.transition_event(issue, Tracker.status_for_state(issue.state))
 
     # For close transitions, verify the upstream issue is actually closed —
     # a silent no-op or a stale server can leave it open even after :ok.
     # Shared with `Arbiter.Tasks.Verification`'s merge-time close so both
-    # close paths retry identically (bd-9so315).
-    if issue.state == :closed do
+    # close paths retry identically (bd-9so315). Not when the adapter declined
+    # the close because the item is already past the closed status (bd-4i7kky):
+    # there is nothing to verify, and a retry would only be declined again.
+    if issue.state == :closed and result != {:skipped, :upstream_past_target} do
       Sync.verify_closed(issue)
     end
   end

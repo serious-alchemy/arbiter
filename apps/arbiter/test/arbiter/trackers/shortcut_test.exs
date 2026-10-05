@@ -114,6 +114,12 @@ defmodule Arbiter.Trackers.ShortcutTest do
             |> Plug.Conn.put_status(200)
             |> Req.Test.json(workflows_payload())
 
+          # The close guard (bd-4i7kky) reads the story's current state first.
+          {"GET", "/api/v3/stories/" <> _} ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"id" => 1234, "workflow_state_id" => 501})
+
           {"PUT", "/api/v3/stories/" <> _} ->
             {:ok, body, conn} = Plug.Conn.read_body(conn)
             assert Jason.decode!(body) == %{"workflow_state_id" => 502}
@@ -125,6 +131,46 @@ defmodule Arbiter.Trackers.ShortcutTest do
       end)
 
       assert :ok = Shortcut.transition(@ref, :closed)
+    end
+
+    test "a close is declined when the story is already past the closed state" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/api/v3/workflows"} ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(workflows_payload())
+
+          {"GET", "/api/v3/stories/" <> _} ->
+            # Already in Done (502): the closed target itself.
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"id" => 1234, "workflow_state_id" => 502})
+        end
+      end)
+
+      assert {:error, %Error{kind: :upstream_past_target}} = Shortcut.transition(@ref, :closed)
+    end
+
+    test "a close the guard cannot place (story state in no workflow) proceeds" do
+      test_pid = self()
+
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/api/v3/workflows"} ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(workflows_payload())
+
+          {"GET", "/api/v3/stories/" <> _} ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"id" => 1234, "workflow_state_id" => 999_999})
+
+          {"PUT", "/api/v3/stories/" <> _} ->
+            send(test_pid, :put)
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"id" => 1234})
+        end
+      end)
+
+      assert :ok = Shortcut.transition(@ref, :closed)
+      assert_received :put
     end
 
     test "narrows state lookup to the configured workflow_id" do
