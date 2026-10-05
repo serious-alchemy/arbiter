@@ -73,6 +73,22 @@ defmodule Arbiter.Agents.Codex do
   `:os_jail` there. Under `:bypass` nothing confines writes, and
   `write_jail_warning/1` says so. Reads are confined by neither.
 
+  ## Podman backend (P8, bd-50d5j6)
+
+  Under `sandbox.backend: podman` a worker's `codex exec` runs in a rootless
+  container (`Arbiter.Worker.ContainerSpawn`, `provider: "codex"`). The adapter
+  only changes what the container needs: with `sandbox_wrap: true` (the caller
+  will hand the spawn to `ClaudeSession`, which wraps it) the argv names the
+  container's own `codex` and not the host's, `--ignore-user-config` is not
+  passed (the container's per-run `CODEX_HOME` is the only config), and
+  `spawn_env/1` neither seeds the host's per-worktree home nor links the real
+  `auth.json`: the container gets a *copy* in its own home, and
+  `Arbiter.Agents.Codex.AuthSync` carries a rotated refresh token back. The
+  container confines writes to the private clone and its network to the egress
+  proxy, so `write_confinement/1` and `egress_confinement/1` answer `:os_jail`.
+  Without `sandbox_wrap` a podman policy is refused, as before: a caller that
+  does not go through the wrap point would otherwise spawn unsandboxed.
+
   ## Read-only reviewer (G12, bd-yoiv39)
 
   Codex ignores the reviewer's `Edit`/`Write` deny list, and `:bypass` hands it
@@ -97,6 +113,7 @@ defmodule Arbiter.Agents.Codex do
   alias Arbiter.Agents.Codex.ModelCatalog
   alias Arbiter.Agents.Codex.Stream
   alias Arbiter.Agents.SecurityPolicy
+  alias Arbiter.Worker.ContainerSpawn
   alias Arbiter.Worker.Sandbox
   alias Arbiter.Worker.StopReason
 
@@ -138,7 +155,32 @@ defmodule Arbiter.Agents.Codex do
   """
   @impl true
   def write_confinement(%SecurityPolicy{permissions: %{mode: :auto}}), do: :os_jail
+
+  def write_confinement(%SecurityPolicy{permissions: %{mode: mode}} = policy)
+      when mode != :strict do
+    if podman_codex?(policy), do: :os_jail, else: :none
+  end
+
   def write_confinement(%SecurityPolicy{}), do: :none
+
+  @doc """
+  Codex's egress confinement is the podman container backend's network namespace
+  (`Arbiter.Worker.Container`, P8), the same as Claude's: `:none` under the
+  default bwrap backend, where the network is shared.
+  """
+  @impl true
+  def egress_confinement(%SecurityPolicy{} = policy) do
+    with true <- podman_codex?(policy),
+         {:ok, sandbox} <- Sandbox.module(policy, :codex),
+         :ok <- sandbox.network_status() do
+      :os_jail
+    else
+      _ -> :none
+    end
+  end
+
+  defp podman_codex?(policy),
+    do: ContainerSpawn.podman?(policy) and match?({:ok, _}, Sandbox.module(policy, :codex))
 
   @doc """
   Why `write_confinement/1` is weaker than a worktree jail, for `arb server
@@ -149,10 +191,17 @@ defmodule Arbiter.Agents.Codex do
   @impl true
   def write_jail_warning(%SecurityPolicy{permissions: %{mode: :auto}}), do: nil
 
+  def write_jail_warning(%SecurityPolicy{permissions: %{mode: mode}} = policy)
+      when mode != :strict do
+    if podman_codex?(policy), do: nil, else: bypass_warning()
+  end
+
   def write_jail_warning(%SecurityPolicy{permissions: %{mode: :strict}}),
     do: ":strict dispatches of codex are skipped or refused (no worktree write confinement)"
 
-  def write_jail_warning(%SecurityPolicy{}) do
+  def write_jail_warning(%SecurityPolicy{}), do: bypass_warning()
+
+  defp bypass_warning do
     "codex runs with --dangerously-bypass-approvals-and-sandbox: the deny categories are " <>
       "enforced as execpolicy rules, but writes are not confined to the worktree; " <>
       "set permissions.mode to auto for the kernel sandbox"
@@ -174,19 +223,20 @@ defmodule Arbiter.Agents.Codex do
 
   @impl true
   def default_argv(prompt, opts \\ []) when is_binary(prompt) do
-    case resolve_executable() do
+    policy = security_policy(opts)
+    wrap? = container_wrap?(policy, opts)
+
+    case executable_for(wrap?) do
       {:ok, codex} ->
         with {:ok, model_flags} <- model_flag(opts) do
-          policy = security_policy(opts)
-
           flags =
-            config_isolation_argv(opts) ++
+            config_isolation_argv(opts, wrap?) ++
               sandbox_argv(policy, opts) ++ model_flags ++ effort_argv(opts) ++ mcp_argv(opts)
 
           # bd-btcdrf: refuse a backend with no implementation for every Codex
           # spawn (implementer, strict reviewer included), not just the ones
           # `maybe_jail_reviewer/3` wraps under bwrap.
-          with {:ok, _sandbox} <- Sandbox.module(policy),
+          with {:ok, _sandbox} <- sandbox_for(policy, wrap?),
                {:ok, argv} <- build_argv(codex, prompt, flags) do
             maybe_jail_reviewer(argv, policy, opts)
           end
@@ -212,9 +262,23 @@ defmodule Arbiter.Agents.Codex do
   # needs (model, effort, MCP, sandbox) passed explicitly.
   @ignore_user_config "--ignore-user-config"
 
-  defp config_isolation_argv(opts) do
+  # A containerised spawn's per-run home is seeded by `ContainerSpawn`, not here.
+  defp config_isolation_argv(_opts, true), do: []
+
+  defp config_isolation_argv(opts, false) do
     if ConfigDir.isolated?(opts), do: [], else: [@ignore_user_config]
   end
+
+  # P8 (bd-50d5j6): a podman policy whose caller hands the spawn to the container
+  # wrap point. Anything else under podman stays refused by `Sandbox.module/1`.
+  defp container_wrap?(policy, opts),
+    do: ContainerSpawn.podman?(policy) and Keyword.get(opts, :sandbox_wrap, false) == true
+
+  defp executable_for(true), do: {:ok, ContainerSpawn.provider_path("codex")}
+  defp executable_for(false), do: resolve_executable()
+
+  defp sandbox_for(policy, true), do: Sandbox.module(policy, :codex)
+  defp sandbox_for(policy, false), do: Sandbox.module(policy)
 
   @inline_prompt_script ~s(exec "$@" < /dev/null)
   @stdin_prompt_script ~s(f="$1"; shift; exec "$@" < "$f")
@@ -490,8 +554,14 @@ defmodule Arbiter.Agents.Codex do
 
     # G5: the spawn's own CODEX_HOME (generated config.toml, symlinked
     # auth.json). Empty without a worktree or with isolation off, in which case
-    # the CLI uses the inherited home under `--ignore-user-config`.
-    Enum.reverse(env) ++ ConfigDir.env(opts)
+    # the CLI uses the inherited home under `--ignore-user-config`. A container
+    # spawn gets its CODEX_HOME from `ContainerSpawn.apply_env/2` instead (a
+    # copy of auth.json, no link into the operator's home).
+    Enum.reverse(env) ++ home_env(opts)
+  end
+
+  defp home_env(opts) do
+    if container_wrap?(security_policy(opts), opts), do: [], else: ConfigDir.env(opts)
   end
 
   @impl true

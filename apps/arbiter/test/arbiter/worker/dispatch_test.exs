@@ -2533,8 +2533,75 @@ defmodule Arbiter.Worker.DispatchTest do
       refute File.exists?(claude_file)
     end
 
-    # The checkout a podman dispatch gets is a private clone, and only Claude
-    # has a container wrap point: an explicit provider that has none is refused
+    # bd-50d5j6 (P8): Codex has a container wrap point too. Same production call
+    # path as the Claude test above, with an ELF stand-in for the vendored codex
+    # binary and a scratch codex home, so the operator's real login is never read.
+    test "sandbox.backend: podman runs the codex spawn as a `podman run` with a per-run CODEX_HOME",
+         %{ws: ws, tmp: tmp} do
+      podman_file = Path.join(tmp, "podman-argv.txt")
+      :ok = stub_named_on_path(tmp, "podman", podman_file)
+
+      stub_dir = Path.join(tmp, "stub-bin")
+      File.cp!(System.find_executable("true"), Path.join(stub_dir, "codex"))
+      File.chmod!(Path.join(stub_dir, "codex"), 0o755)
+
+      source_home = Path.join(tmp, "operator-codex")
+      File.mkdir_p!(source_home)
+      File.write!(Path.join(source_home, "auth.json"), ~s({"tokens":{"refresh_token":"rt-op"}}))
+      put_app_env(:arbiter, :worker_codex_source_home, source_home)
+
+      repo = seed_repo!(tmp, "podman-codex-repo")
+      put_app_env(:arbiter, :worktree_root, Path.join(tmp, "podman-codex-wt"))
+      put_app_env(:arbiter, :repo_paths, %{"pcx/repo" => repo})
+      put_app_env(:arbiter, :worker_container_available, true)
+      put_app_env(:arbiter, :worker_container_network_available, true)
+      put_app_env(:arbiter, :worker_container_image, "localhost/arb-test/dispatch:1")
+
+      {:ok, ws} =
+        Ash.update(ws, %{
+          config: %{
+            "agent" => %{
+              "type" => "codex",
+              "security" => %{"sandbox" => %{"backend" => "podman"}}
+            }
+          }
+        })
+
+      {:ok, task} = Ash.create(Issue, %{title: "podman codex", workspace_id: ws.id})
+
+      assert {:ok, %{worktree_path: clone}} =
+               Dispatch.dispatch(task.id,
+                 force: true,
+                 repo: "pcx/repo",
+                 agent_type: :codex,
+                 start_driver: false,
+                 start_claude: true,
+                 preflight: false
+               )
+
+      assert Arbiter.Worker.PrivateClone.clone?(clone)
+
+      argv =
+        Enum.reduce_while(1..200, nil, fn _, _ ->
+          case File.read(podman_file) do
+            {:ok, out} when out != "" -> {:halt, String.split(out, "\n", trim: true)}
+            _ -> Process.sleep(25) && {:cont, nil}
+          end
+        end)
+
+      assert is_list(argv), "the stand-in podman was never run"
+      assert hd(argv) == "run"
+      assert "--network=none" in argv
+      assert "/opt/arbiter/cli/codex" in argv
+      assert "exec" in argv
+      # The real login is not on the command line at all.
+      refute Enum.any?(argv, &String.contains?(&1, source_home))
+      assert Enum.any?(argv, &String.contains?(&1, "/opt/arbiter/cli/codex:ro"))
+      assert Enum.any?(argv, &(&1 == "CODEX_HOME"))
+    end
+
+    # The checkout a podman dispatch gets is a private clone, and only Claude and
+    # Codex have a container wrap point: an explicit provider that has none is refused
     # at the gate, before anything is spawned.
     test "sandbox.backend: podman refuses an explicit non-claude provider at the gate",
          %{ws: ws, tmp: tmp} do
@@ -2567,7 +2634,7 @@ defmodule Arbiter.Worker.DispatchTest do
                  preflight: false
                )
 
-      assert message =~ "claude only"
+      assert message =~ "claude and codex only"
       refute File.exists?(gemini_file)
     end
 
