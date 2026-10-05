@@ -205,8 +205,9 @@ defmodule Arbiter.Loop.Scarcity.Draw do
     account = Keyword.get(opts, :account_id)
 
     results
-    |> Enum.filter(&(&1.pool == pool and &1.window == window))
-    |> Enum.filter(&(is_nil(account) or &1.account_id == account))
+    |> Enum.filter(
+      &(&1.pool == pool and &1.window == window and (is_nil(account) or &1.account_id == account))
+    )
     |> Enum.flat_map(fn %{fit: fit} ->
       case fit.models[model] do
         %{status: :calibrated, share_per_weighted_token: c, n: n} when is_number(c) and c > 0.0 ->

@@ -24,6 +24,8 @@ defmodule Mix.Tasks.Arbiter.DrawCalibration do
 
   use Mix.Task
 
+  alias Arbiter.Loop.Scarcity.Draw
+
   @switches [since: :string, until: :string]
 
   @impl Mix.Task
@@ -42,8 +44,8 @@ defmodule Mix.Tasks.Arbiter.DrawCalibration do
     until = parse_dt(opts[:until]) || DateTime.utc_now()
     since = parse_since(opts[:since], until)
 
-    Arbiter.Loop.Scarcity.Draw.calibrate(since: since, until: until)
-    |> Arbiter.Loop.Scarcity.Draw.format()
+    Draw.calibrate(since: since, until: until)
+    |> Draw.format()
     |> Mix.shell().info()
   end
 

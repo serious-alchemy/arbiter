@@ -8,6 +8,8 @@ defmodule Arbiter.Release do
 
   require Logger
 
+  alias Arbiter.Loop.Scarcity.Draw
+
   @app :arbiter
 
   @doc """
@@ -134,12 +136,12 @@ defmodule Arbiter.Release do
 
       bin/arbiter eval 'Arbiter.Release.draw_calibration()'
   """
-  @spec draw_calibration(keyword()) :: [Arbiter.Loop.Scarcity.Draw.result()]
+  @spec draw_calibration(keyword()) :: [Draw.result()]
   def draw_calibration(opts \\ []) do
     if Keyword.get(opts, :start, true), do: start_release_repo!()
 
-    results = Arbiter.Loop.Scarcity.Draw.calibrate(Keyword.take(opts, [:since, :until]))
-    IO.puts(Arbiter.Loop.Scarcity.Draw.format(results))
+    results = Draw.calibrate(Keyword.take(opts, [:since, :until]))
+    IO.puts(Draw.format(results))
     results
   end
 

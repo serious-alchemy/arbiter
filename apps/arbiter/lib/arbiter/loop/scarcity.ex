@@ -121,6 +121,8 @@ defmodule Arbiter.Loop.Scarcity do
   denominate in; the other metric is retained and reported as secondary.
   """
 
+  alias Arbiter.Loop.Scarcity.Draw
+
   # Pricing-derived relative weights; see moduledoc for why only ratios matter.
   @weights %{input: 1.0, cache_write: 1.25, cache_read: 0.1, output: 5.0}
 
@@ -235,7 +237,7 @@ defmodule Arbiter.Loop.Scarcity do
   @spec draw_share(number() | nil, [map()], String.t(), String.t(), String.t()) ::
           float() | nil
   def draw_share(weighted, results, pool, window, model) when is_number(weighted) do
-    case Arbiter.Loop.Scarcity.Draw.lookup(results, pool, window, model) do
+    case Draw.lookup(results, pool, window, model) do
       nil -> nil
       share_per_token -> weighted * share_per_token
     end
