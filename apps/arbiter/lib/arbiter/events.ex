@@ -188,14 +188,16 @@ defmodule Arbiter.Events do
   # (gate_resolved, the cap-override events, ...) keeps it; otherwise the
   # process's ambient `Arbiter.Actor` is stamped on, as its label. No ambient
   # actor leaves the payload untouched.
-  defp put_actor(%{actor: actor} = payload) when actor not in [nil, ""], do: payload
-
+  # Call sites key it by atom (`actor:`) or string (`"actor"`).
   defp put_actor(payload) do
-    case Arbiter.Actor.current() do
-      nil -> payload
-      actor -> Map.put(payload, :actor, Arbiter.Actor.label(actor))
+    cond do
+      named?(Map.get(payload, :actor)) or named?(Map.get(payload, "actor")) -> payload
+      actor = Arbiter.Actor.current() -> Map.put(payload, :actor, Arbiter.Actor.label(actor))
+      true -> payload
     end
   end
+
+  defp named?(actor), do: actor not in [nil, ""]
 
   # Not swallowed at debug like the PubSub sends above — a lost row silently
   # breaks replay for every future reconnect, so it's worth a log line an

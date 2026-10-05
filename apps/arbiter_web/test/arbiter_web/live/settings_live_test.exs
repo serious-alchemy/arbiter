@@ -162,10 +162,10 @@ defmodule ArbiterWeb.SettingsLiveTest do
       view |> element("#settings-autopilot-toggle") |> render_click()
       assert Autopilot.paused?(Autopilot)
       assert has_element?(view, "#settings-autopilot[data-state='paused']")
-      assert has_element?(view, "#settings-autopilot-changed", "operator via dashboard")
+      assert has_element?(view, "#settings-autopilot-changed", "operator:test via dashboard")
       refute has_element?(view, "#settings-autopilot-toggle[data-confirm]")
 
-      assert [%{paused: true, actor: "operator", surface: "dashboard"} | _] =
+      assert [%{paused: true, actor: "operator:test", surface: "dashboard"} | _] =
                Arbiter.Settings.scheduler_changes()
 
       view |> element("#settings-autopilot-toggle") |> render_click()

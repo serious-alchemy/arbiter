@@ -192,8 +192,13 @@ defmodule Arbiter.Actor do
   @spec resolve(term()) :: t() | nil
   def resolve(explicit), do: from(explicit) || current()
 
-  @doc "`resolve/1` rendered as a label."
+  @doc """
+  `resolve/1` rendered as a label. A label string an older writer chose
+  (`"loop:proposal:<id>"`, `"cli"`) is returned verbatim, not re-classified.
+  """
   @spec resolve_label(term()) :: String.t() | nil
+  def resolve_label(explicit) when is_binary(explicit) and explicit != "", do: explicit
+
   def resolve_label(explicit) do
     case resolve(explicit) do
       nil -> nil
