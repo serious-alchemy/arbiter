@@ -379,7 +379,7 @@ defmodule Arbiter.Sessions.Session do
     end
 
     # agy (bd-7xuvfl) has neither of Claude Code's alternative auth postures:
-    # its grant is the operator's own Google login (keyring or copied files,
+    # its grant is the operator's own Google login (keyring,
     # `Arbiter.Agents.Gemini.ConfigDir`), which is mode B by definition, and
     # mode A's `CLAUDE_CODE_OAUTH_TOKEN` means nothing to it. Remote Control is
     # refused for the same "silently does nothing" reason as under mode A:

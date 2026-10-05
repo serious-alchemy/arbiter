@@ -57,11 +57,13 @@ defmodule Arbiter.Agents.Gemini.ConfigDir do
   live Google grant in the **keyring**, not in `~/.gemini` — the spike proved a
   brand-new `$HOME` with zero credential files still authenticates. The keyring
   is scoped to the Linux user session, not to `$HOME`, so it survives the
-  redirect untouched and there is nothing to seed. `keyring_available?/0`
-  detects that case; only when no Secret Service is reachable do we **copy**
-  (never symlink — a worker refreshing through a link would corrupt the
-  operator's login) `oauth_creds.json`, `jetski-standalone-oauth-token` and
-  `google_accounts.json`.
+  redirect untouched and there is nothing to seed.
+
+  On agy 1.2.16, there is no file-seeded fallback: legacy credential files
+  (`oauth_creds.json`, `jetski-standalone-oauth-token`, `google_accounts.json`)
+  are ignored by agy, and copying refresh tokens risks token-rotation divergence
+  orphaning the operator's login (bd-6dpjw7, bd-8btihu). When no Secret Service
+  is reachable, preflight fails loudly instead of falling back to file copies.
 
   ## Keyed per worktree
 
@@ -99,9 +101,6 @@ defmodule Arbiter.Agents.Gemini.ConfigDir do
   # Shadowed, never passed through: everything agy reads its own configuration,
   # memory, skills and plugins from.
   @shadowed ~w(.gemini .agents .antigravity)
-
-  # Copied (never symlinked) only when no Secret Service keyring is reachable.
-  @credential_files ~w(oauth_creds.json jetski-standalone-oauth-token google_accounts.json)
 
   @gemini_dir ".gemini"
   @settings_path Path.join([".gemini", "antigravity-cli", "settings.json"])
@@ -145,8 +144,7 @@ defmodule Arbiter.Agents.Gemini.ConfigDir do
   Returns `:disabled` when isolation is switched off, `:error` when the
   directory could not be prepared. Idempotent — safe on every spawn.
 
-  Options: `:worktree` / `:worktree_path`, `:security` (a `SecurityPolicy`),
-  and `:keyring` (a boolean override for `keyring_available?/0`, for tests).
+  Options: `:worktree` / `:worktree_path` and `:security` (a `SecurityPolicy`).
   """
   @spec ensure(keyword()) :: {:ok, String.t()} | :disabled | :error
   def ensure(opts \\ []) do
@@ -181,7 +179,7 @@ defmodule Arbiter.Agents.Gemini.ConfigDir do
   optional — its MCP token has nowhere else to go that agy reads — so the
   worker master switch does not apply.
 
-  Options, on top of `ensure/1`'s `:worktree` / `:security` / `:keyring`:
+  Options, on top of `ensure/1`'s `:worktree` / `:security`:
 
     * `:memory` — the `.gemini/GEMINI.md` content; defaults to
       `worker_memory/0`, which is headless-worker doctrine and wrong for
@@ -211,7 +209,6 @@ defmodule Arbiter.Agents.Gemini.ConfigDir do
          :ok <- write_settings(dir, opts),
          :ok <- write_memory(dir, Keyword.get(opts, :memory, worker_memory())) do
       passthrough(dir, opts)
-      seed_credentials(dir, opts)
       if Keyword.get(opts, :interactive, false), do: seed_onboarding(dir, opts)
       :ok
     end
@@ -274,15 +271,35 @@ defmodule Arbiter.Agents.Gemini.ConfigDir do
   Whether a freedesktop Secret Service is reachable for this OS user.
 
   When it is, agy's live credential lives in the keyring — which `$HOME`
-  redirection does not touch — and seeding credential files is both unnecessary
-  and a rotation hazard. See the moduledoc.
+  redirection does not touch. Supports `:keyring` in `opts` and
+  `:worker_gemini_keyring_available` app env for testing.
   """
-  @spec keyring_available?() :: boolean()
-  def keyring_available? do
-    # The jail masks the raw session bus and only offers a filtered
-    # xdg-dbus-proxy one, so a keyring without the proxy is unusable for a
-    # jailed worker: fall back to copying credentials instead.
-    Arbiter.Worker.Jail.keyring_usable?()
+  @spec keyring_available?(keyword()) :: boolean()
+  def keyring_available?(opts \\ []) do
+    case Keyword.fetch(opts, :keyring) do
+      {:ok, val} ->
+        val
+
+      :error ->
+        case Application.fetch_env(:arbiter, :worker_gemini_keyring_available) do
+          {:ok, val} -> val
+          :error -> Arbiter.Worker.Jail.keyring_usable?()
+        end
+    end
+  end
+
+  @doc """
+  Whether agy could authenticate on this host at all, for the preflight probe.
+  Looser than `keyring_available?/1`: a bus socket with no `xdg-dbus-proxy`
+  still works for an unjailed agy, so only a host with no bus is a failure.
+  Honours the same `:keyring` opt and app env overrides.
+  """
+  @spec keyring_reachable?(keyword()) :: boolean()
+  def keyring_reachable?(opts \\ []) do
+    keyring_available?(opts) or
+      (not Keyword.has_key?(opts, :keyring) and
+         Application.fetch_env(:arbiter, :worker_gemini_keyring_available) == :error and
+         Arbiter.Worker.Jail.session_bus_reachable?())
   end
 
   @doc "The worker memory written into the isolated HOME's `.gemini/GEMINI.md`."
@@ -542,45 +559,6 @@ defmodule Arbiter.Agents.Gemini.ConfigDir do
   defp root_under?(path, boundary),
     do: String.starts_with?(Path.expand(boundary), Path.expand(path) <> "/")
 
-  # See the moduledoc: with a keyring there is nothing to seed, and seeding
-  # anyway would hand the worker a refreshable copy of the operator's grant.
-  defp seed_credentials(dir, opts) do
-    keyring? = Keyword.get(opts, :keyring, keyring_available?())
-    home = Keyword.get_lazy(opts, :source_home, &source_home/0)
-
-    cond do
-      keyring? ->
-        :ok
-
-      is_nil(home) ->
-        :ok
-
-      true ->
-        Enum.each(@credential_files, &copy_credential(dir, home, &1))
-    end
-  end
-
-  defp copy_credential(dir, home, name) do
-    src = Path.join([home, @gemini_dir, name])
-    dst = Path.join([dir, @gemini_dir, name])
-
-    if File.regular?(src) and not fresh_copy?(src, dst) do
-      _ = File.rm(dst)
-
-      case File.cp(src, dst) do
-        :ok ->
-          _ = File.chmod(dst, 0o600)
-          :ok
-
-        {:error, reason} ->
-          Logger.warning(
-            "Arbiter.Agents.Gemini.ConfigDir: could not seed #{inspect(dst)} " <>
-              "(#{inspect(reason)}); this agy worker may be unauthenticated"
-          )
-      end
-    end
-  end
-
   # The file itself is removed first and its directory is one of
   # `@owned_dirs`, so a link planted at either is never written through.
   defp seed_onboarding(dir, opts) do
@@ -602,13 +580,6 @@ defmodule Arbiter.Agents.Gemini.ConfigDir do
       end
     else
       _ -> :ok
-    end
-  end
-
-  defp fresh_copy?(src, dst) do
-    case {File.lstat(src), File.lstat(dst)} do
-      {{:ok, %{type: :regular, mtime: sm}}, {:ok, %{type: :regular, mtime: dm}}} -> dm >= sm
-      _ -> false
     end
   end
 end

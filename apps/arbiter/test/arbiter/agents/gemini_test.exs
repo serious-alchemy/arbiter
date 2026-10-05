@@ -12,6 +12,20 @@ defmodule Arbiter.Agents.GeminiTest do
   defp default_argv(prompt, opts),
     do: Gemini.default_argv(prompt, Keyword.put_new(opts, :owner, self()))
 
+  # bd-8btihu: spawning agy requires a keyring; default it on so tests that
+  # build argv don't depend on the host's session bus. Tests override it.
+  setup do
+    prev = Application.fetch_env(:arbiter, :worker_gemini_keyring_available)
+    Application.put_env(:arbiter, :worker_gemini_keyring_available, true)
+
+    on_exit(fn ->
+      case prev do
+        {:ok, v} -> Application.put_env(:arbiter, :worker_gemini_keyring_available, v)
+        :error -> Application.delete_env(:arbiter, :worker_gemini_keyring_available)
+      end
+    end)
+  end
+
   describe "behaviour" do
     test "module declares the Agent behaviour" do
       behaviours =
@@ -312,6 +326,26 @@ defmodule Arbiter.Agents.GeminiTest do
                Arbiter.Worker.Egress.Event
                |> Ash.Query.filter(run_id == ^run_id)
                |> Ash.read!()
+    end
+
+    # bd-8btihu: no keyring → refuse at spawn, not an OAuth timeout later.
+    test "jailed agy with no usable keyring is refused at spawn", %{worktree: worktree} do
+      Application.put_env(:arbiter, :worker_gemini_keyring_available, false)
+
+      assert {:error, {:no_keyring, "agy needs a keyring (D-Bus) or its own login on this host"}} =
+               default_argv("p", security: policy(:bypass), worktree_path: worktree)
+    end
+
+    test "unjailed agy with no session bus at all is refused at spawn", %{worktree: worktree} do
+      Application.put_env(:arbiter, :worker_gemini_keyring_available, false)
+      Application.put_env(:arbiter, :worker_jail_available, false)
+
+      assert {:error, {:no_keyring, _}} =
+               default_argv("p",
+                 security: policy(:bypass),
+                 worktree_path: worktree,
+                 keyring: false
+               )
     end
 
     test "a jailed spawn with no owner is refused rather than bound to the caller", %{
@@ -1434,6 +1468,107 @@ defmodule Arbiter.Agents.GeminiTest do
       assert ["sh", "-c", _script, "sh", ^gemini, "-p", "ping" | _rest] = argv
       assert flag_value(argv, "--output-format") == "stream-json"
       refute "--print-timeout" in argv
+    end
+  end
+
+  # bd-8btihu: agy 1.2.16 cannot authenticate from legacy file-seeded credentials.
+  # When no keyring/D-Bus session bus is reachable for an agy worker, fail at preflight
+  # with a clear error ("agy needs a keyring (D-Bus) or its own login on this host").
+  describe "auth_probe/1 (bd-8btihu)" do
+    setup do
+      tmp =
+        Path.join(
+          System.tmp_dir!(),
+          "arbiter-gemini-probe-stub-#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(tmp)
+      old_path = System.get_env("PATH") || ""
+      System.put_env("PATH", tmp)
+
+      on_exit(fn ->
+        System.put_env("PATH", old_path)
+        Application.delete_env(:arbiter, :worker_gemini_keyring_available)
+        File.rm_rf!(tmp)
+      end)
+
+      {:ok, tmp: tmp}
+    end
+
+    test "agy: when keyring is available, auth_probe/1 returns :skipped to fall through to argv probe",
+         %{tmp: tmp} do
+      _agy = stub_exec(tmp, "agy")
+
+      assert :skipped = Gemini.auth_probe(keyring: true)
+    end
+
+    test "agy: when keyring is unavailable (opt: keyring: false), fails with explicit error", %{
+      tmp: tmp
+    } do
+      _agy = stub_exec(tmp, "agy")
+
+      assert {:error, %Arbiter.Worker.StopReason{} = reason} =
+               Gemini.auth_probe(keyring: false)
+
+      assert reason.category == :auth_expired
+      assert reason.summary == "agy needs a keyring (D-Bus) or its own login on this host"
+    end
+
+    test "agy: when keyring path is forced unavailable via app env, auth_probe/1 fails loudly", %{
+      tmp: tmp
+    } do
+      _agy = stub_exec(tmp, "agy")
+      Application.put_env(:arbiter, :worker_gemini_keyring_available, false)
+
+      assert {:error, %Arbiter.Worker.StopReason{} = reason} = Gemini.auth_probe([])
+      assert reason.category == :auth_expired
+      assert reason.summary == "agy needs a keyring (D-Bus) or its own login on this host"
+    end
+
+    test "agy: Preflight.check/2 fails loudly when keyring is unavailable", %{tmp: tmp} do
+      _agy = stub_exec(tmp, "agy")
+
+      assert {:error, %Arbiter.Worker.StopReason{} = reason} =
+               Arbiter.Agents.Preflight.check(Gemini, keyring: false)
+
+      assert reason.category == :auth_expired
+      assert reason.summary == "agy needs a keyring (D-Bus) or its own login on this host"
+    end
+
+    test "agy: a session bus with no xdg-dbus-proxy still passes (unjailed agy finds the bus)",
+         %{tmp: tmp} do
+      _agy = stub_exec(tmp, "agy")
+      File.write!(Path.join(tmp, "bus"), "")
+      Application.delete_env(:arbiter, :worker_gemini_keyring_available)
+
+      old = for k <- ~w(XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS), do: {k, System.get_env(k)}
+      System.put_env("XDG_RUNTIME_DIR", tmp)
+      System.delete_env("DBUS_SESSION_BUS_ADDRESS")
+      Application.put_env(:arbiter, :xdg_dbus_proxy, nil)
+
+      on_exit(fn ->
+        Application.delete_env(:arbiter, :xdg_dbus_proxy)
+
+        for {k, v} <- old do
+          if v, do: System.put_env(k, v), else: System.delete_env(k)
+        end
+      end)
+
+      assert :skipped = Gemini.auth_probe([])
+    end
+
+    test "upstream gemini: returns :skipped regardless of keyring status", %{tmp: tmp} do
+      _gemini = stub_exec(tmp, "gemini")
+
+      assert :skipped = Gemini.auth_probe(keyring: false)
+    end
+
+    test "returns {:error, :crashed} when neither CLI is on PATH" do
+      System.put_env("PATH", "/nonexistent-dir-for-test")
+
+      assert {:error, %Arbiter.Worker.StopReason{} = reason} = Gemini.auth_probe([])
+      assert reason.category == :crashed
+      assert reason.summary =~ "not found on PATH"
     end
   end
 
