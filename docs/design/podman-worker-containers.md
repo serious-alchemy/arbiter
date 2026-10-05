@@ -410,9 +410,29 @@ agy and Codex cannot run unsandboxed under it); `Sandbox.module/2` resolves it
 for Claude. Dispatch's provider gate accepts Claude, swaps automatic routing to
 Claude, and refuses an explicit other provider. `Claude.default_argv/2` refuses
 a podman policy unless the caller passes `sandbox_wrap: true` (Dispatch does),
-so the **reviewer, conflict-resolution and fix-pass spawns are still refused or
-unsandboxed as before**: they need a wrap point of their own, and a reviewer's
-checkout is not a private clone.
+so the **reviewer, conflict-resolution and fix-pass spawns are not wrapped**:
+they need a wrap point of their own, and a reviewer's checkout is not a private
+clone.
+
+**`sandbox.review_backend` (bd-4rvf98).** Refusing those spawns outright meant a
+podman repo could not stay on podman: the first live trial (vs-clks8c, v0.2.15)
+implemented in a container, then parked at the ReviewGate reviewer with
+`{:sandbox_backend_unavailable, :podman, …}` (`reviewer_failed`). So the spawns
+that are not a task worker's implement pass (a ReviewGate reviewer, a ReviewGate
+revise pass, a `review: true` dispatch) resolve **`sandbox.review_backend`**
+instead of `sandbox.backend` (`SecurityPolicy.for_review_spawn/1`). It defaults
+to `bwrap`, so `backend: podman` alone gives a containerised implement worker and
+bwrap-backed reviews. It layers exactly like `backend` (most-restrictive-wins,
+settable at installation, workspace, repo and dispatch level, independently of
+`backend`) and `ValidateConfig` accepts `bwrap` and `podman`. The refusal
+semantics are unchanged: the key is never derived from `backend` and never
+loosens on its own, and a `review_backend` with no implementation for the spawn
+(`podman`, until a review wrap point exists) is refused, parking the review,
+rather than run unjailed. Option (a), a container wrap for review checkouts (not
+private clones; the hard part), is the follow-up that would make `podman` a
+usable `review_backend`. The CI fix-pass and conflict-resolver dispatchers
+(`MergeQueue.FixPassDispatcher`, `.ConflictResolver`) resolve no workspace
+policy at all, so neither key reaches them.
 
 **Push credentials: G16's scoped key versus agent forwarding.** Mounting the
 operator's ssh-agent socket gives every key and fails under SELinux for the

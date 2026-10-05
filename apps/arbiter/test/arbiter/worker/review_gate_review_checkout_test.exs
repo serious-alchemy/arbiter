@@ -562,6 +562,69 @@ defmodule Arbiter.Worker.ReviewGateReviewCheckoutTest do
     end
   end
 
+  # ---- bd-4rvf98: a podman repo's review is not refused --------------------------
+
+  describe "a repo on sandbox.backend podman (bd-4rvf98)" do
+    defp podman_ws(extra_sandbox \\ %{}) do
+      %Workspace{
+        config: %{
+          "agent" => %{
+            "security" => %{
+              "repos" => %{
+                "trib/repo" => %{"sandbox" => Map.put(extra_sandbox, "backend", "podman")}
+              }
+            }
+          }
+        }
+      }
+    end
+
+    test "the reviewer and the revise pass spawn under the review backend, never refused" do
+      state = %{
+        repo: "trib/repo",
+        review_checkout: %{path: "/tmp/gate-review-x", head_sha: "abc"}
+      }
+
+      ws = podman_ws()
+
+      assert SecurityPolicy.sandbox_backend(SecurityPolicy.resolve(ws, %{}, "trib/repo")) ==
+               :podman
+
+      for role <- [:reviewer, :implementer] do
+        policy = ReviewGate.session_security_policy(ws, state, role)
+        assert SecurityPolicy.sandbox_backend(policy) == :bwrap, "#{role} kept podman"
+        # The backend resolves; the real argv/spawn under it is covered by the
+        # stubbed-`claude` production spawn path tests below (a bare
+        # `default_argv/2` needs a `claude` on PATH, which CI does not have).
+        assert {:ok, _} = Arbiter.Worker.Sandbox.module(policy)
+      end
+
+      # A reviewer with no round checkout is a review spawn all the same.
+      bare = ReviewGate.session_security_policy(ws, %{repo: "trib/repo"}, :reviewer)
+      assert SecurityPolicy.sandbox_backend(bare) == :bwrap
+    end
+
+    test "an explicit podman review_backend still refuses: nothing runs unjailed" do
+      state = %{
+        repo: "trib/repo",
+        review_checkout: %{path: "/tmp/gate-review-x", head_sha: "abc"}
+      }
+
+      ws = podman_ws(%{"review_backend" => "podman"})
+
+      for role <- [:reviewer, :implementer] do
+        policy = ReviewGate.session_security_policy(ws, state, role)
+        assert SecurityPolicy.sandbox_backend(policy) == :podman
+
+        assert {:error, {:sandbox_backend_unavailable, :podman, _}} =
+                 Arbiter.Worker.Sandbox.module(policy)
+
+        assert {:error, {:sandbox_backend_unavailable, :podman, _}} =
+                 Arbiter.Agents.Claude.default_argv("review", security: policy)
+      end
+    end
+  end
+
   # ---- AC1 + AC3 through the real adapter spawn -------------------------------
 
   describe "the production spawn path (AC1, AC3)" do
@@ -619,6 +682,83 @@ defmodule Arbiter.Worker.ReviewGateReviewCheckoutTest do
       end
 
       refute File.exists?(cwd), "the round's checkout leaked"
+    end
+  end
+
+  # ---- bd-4rvf98: the real spawn under a podman repo --------------------------------
+
+  describe "the production spawn path under sandbox.backend podman (bd-4rvf98)" do
+    defp podman_gate_ws(sandbox) do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rg-podman-#{System.unique_integer([:positive])}",
+          prefix: "rp",
+          config: %{
+            "review" => %{"required" => true},
+            "agent" => %{
+              "security" => %{
+                "repos" => %{"trib/repo" => %{"sandbox" => Map.put(sandbox, "backend", "podman")}}
+              }
+            }
+          }
+        })
+
+      ws
+    end
+
+    defp spawn_stub do
+      """
+      log="$(dirname "$0")/../gate-spawn.log"
+      printf 'cwd=%s\\n' "$(pwd -P)" >> "$log"
+      echo "arb done"
+      exit 0
+      """
+    end
+
+    test "the reviewer is jailed under the review backend: spawned, not refused or parked" do
+      ws = podman_gate_ws(%{})
+      sandbox = Arbiter.TestSandbox.provision!("rg-podman-review", stub: spawn_stub())
+      put_app_env(:arbiter, :worktree_root, sandbox.worktree_root)
+      put_app_env(:arbiter, :repo_paths, %{"trib/repo" => sandbox.repo})
+
+      branch = "feature/podman-review"
+      :ok = Arbiter.TestSandbox.seed_branch!(sandbox, branch)
+      wt = branch_worktree(sandbox.repo, sandbox.root, branch)
+      log = Path.join(sandbox.root, "gate-spawn.log")
+
+      task = new_task(ws)
+      author = start_author(task, ws, sandbox.repo, branch, wt)
+      {gate, ref} = start_gate(author, task, ws, branch, wt, verdict_retries: 0)
+      Arbiter.TestSandbox.own!(sandbox, gate)
+
+      wait_until(fn -> File.exists?(log) end, 20_000)
+      await_gate_down(gate, ref)
+
+      assert File.read!(log) =~ "cwd=", "the reviewer never spawned"
+
+      refute Enum.any?(escalations(ws, task), &(&1.body =~ "sandbox_backend_unavailable")),
+             "the review was refused for the podman backend"
+    end
+
+    test "an explicit podman review_backend still refuses, and nothing spawns" do
+      ws = podman_gate_ws(%{"review_backend" => "podman"})
+      sandbox = Arbiter.TestSandbox.provision!("rg-podman-refuse", stub: spawn_stub())
+      put_app_env(:arbiter, :worktree_root, sandbox.worktree_root)
+      put_app_env(:arbiter, :repo_paths, %{"trib/repo" => sandbox.repo})
+
+      branch = "feature/podman-refuse"
+      :ok = Arbiter.TestSandbox.seed_branch!(sandbox, branch)
+      wt = branch_worktree(sandbox.repo, sandbox.root, branch)
+      log = Path.join(sandbox.root, "gate-spawn.log")
+
+      task = new_task(ws)
+      author = start_author(task, ws, sandbox.repo, branch, wt)
+      {gate, ref} = start_gate(author, task, ws, branch, wt, verdict_retries: 0)
+      Arbiter.TestSandbox.own!(sandbox, gate)
+      await_gate_down(gate, ref)
+
+      refute File.exists?(log), "a reviewer ran under a backend that cannot jail it"
+      assert Ash.get!(Issue, task.id).attention_cause == :reviewer_failed
     end
   end
 
