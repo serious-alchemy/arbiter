@@ -1,11 +1,12 @@
 defmodule Arbiter.Worker.ContainerSpawn do
   @moduledoc """
-  Claude under the podman sandbox backend (bd-d2o3xb, P7 of
-  `docs/design/podman-worker-containers.md`): the wrap point between a
-  dispatch's `ClaudeSession` spawn and `Arbiter.Worker.Container`.
+  Claude and Codex under the podman sandbox backend (bd-d2o3xb, P7, and
+  bd-50d5j6, P8 of `docs/design/podman-worker-containers.md`): the wrap point
+  between a dispatch's `ClaudeSession` spawn and `Arbiter.Worker.Container`.
 
-  `sandbox.backend: podman` (`Arbiter.Agents.SecurityPolicy`) makes a Claude
-  worker's `claude --print` run inside a rootless container. The bwrap jail is
+  `sandbox.backend: podman` (`Arbiter.Agents.SecurityPolicy`) makes a worker's
+  `claude --print` or `codex exec` run inside a rootless container (`:provider`,
+  default `"claude"`; see "Codex" below). The bwrap jail is
   untouched: `ClaudeSession` only calls in here for a spawn that carries a
   podman policy.
 
@@ -43,6 +44,34 @@ defmodule Arbiter.Worker.ContainerSpawn do
       `127.0.0.1:<arbiter port>` is Arbiter, so the `.mcp.json` URL and `arb`
       work unchanged. The container is `--network=none`; the sockets are its
       only exit, and the proxy runs in learn mode (`Egress`).
+
+  ## Codex (P8, bd-50d5j6)
+
+  `provider: "codex"` differs from Claude in four places, the rest is shared:
+
+    * **`CODEX_HOME`** is per run, under the run's temp dir
+      (`ConfigDir.seed_run_home/2`: generated `config.toml`, `AGENTS.md`, the
+      execpolicy deny rules, and a *copy* of the operator's `auth.json`). The
+      operator's home, and the real `auth.json`, are never mounted: the host
+      side copies the file in before the container exists.
+    * **Refresh-token rotation.** The CLI refreshing its ChatGPT token rotates
+      the refresh token in the copy only, which would leave the real login
+      holding a retired one. `Arbiter.Agents.Codex.AuthSync` carries it back
+      (newest `last_refresh` wins, atomic, never an older token over a newer one)
+      at every port re-open, at `teardown/1`, and when the owning worker dies by
+      any means (`AuthSync.Reaper`, flushed by `RunTmp.Reaper` before it removes
+      the directory). A re-opened run also takes a newer login a sibling rotated.
+    * **The CLI** is the vendored static binary, not the `codex` node launcher
+      the host has on `PATH` (a container has no node): found beside the launcher
+      in the npm package, mounted with its `rg` and `bwrap` so the CLI's own
+      helpers resolve on the image's `PATH`.
+    * **Egress infra** is the OpenAI hosts (`chatgpt.com`, `api.openai.com`,
+      `auth.openai.com`) rather than Anthropic's.
+
+  MCP needs nothing new: the adapter passes it as `-c mcp_servers.…` overrides
+  (bd-avq0wb) naming `Arbiter.MCP.server_url/0` and the bearer in
+  `ARBITER_MCP_TOKEN`, which reach the container as `-e NAME` and the Arbiter
+  bridge on the same loopback port.
 
   ## Environment
 
@@ -85,6 +114,8 @@ defmodule Arbiter.Worker.ContainerSpawn do
   """
 
   alias Arbiter.Agents.Claude.ConfigDir
+  alias Arbiter.Agents.Codex.AuthSync
+  alias Arbiter.Agents.Codex.ConfigDir, as: CodexConfigDir
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Mergers
   alias Arbiter.Worker.Container
@@ -103,7 +134,10 @@ defmodule Arbiter.Worker.ContainerSpawn do
   # The model API and the hosts the CLI is known to talk to on its own. The
   # proxy runs in learn mode: these are the baseline an enforcing proxy would
   # start from, and anything else the run reaches is logged to `egress_events`.
-  @egress_infra ["api.anthropic.com:443"]
+  @egress_infra %{
+    "claude" => ["api.anthropic.com:443"],
+    "codex" => ["chatgpt.com:443", "api.openai.com:443", "auth.openai.com:443"]
+  }
 
   # Names whose value changes how the `podman` client itself runs. They are
   # passed as `-e NAME=value`, never through the client's environment.
@@ -114,6 +148,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
 
   @type request :: %{
           required(:name) => String.t(),
+          required(:provider) => String.t(),
           required(:image) => String.t(),
           required(:podman) => String.t() | nil,
           required(:mounts) => keyword(),
@@ -124,6 +159,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
           required(:prompt_paths) => [String.t()],
           required(:network) => keyword(),
           required(:env) => [{String.t(), String.t()}],
+          optional(:codex_auth) => {Path.t(), Path.t()} | nil,
           optional(:pod) => String.t() | nil,
           optional(:deps_cache) => map() | nil
         }
@@ -131,6 +167,13 @@ defmodule Arbiter.Worker.ContainerSpawn do
   @doc "The path of the `claude` binary inside the container."
   @spec claude_path() :: String.t()
   def claude_path, do: @cli_dir <> "/claude"
+
+  @doc "The path of `provider`'s CLI inside the container."
+  @spec provider_path(String.t() | atom()) :: String.t()
+  def provider_path(provider), do: @cli_dir <> "/" <> provider_name(provider)
+
+  defp provider_name(provider) when provider in [:codex, "codex"], do: "codex"
+  defp provider_name(_provider), do: "claude"
 
   @doc "Whether `policy` asks for the podman backend."
   @spec podman?(term()) :: boolean()
@@ -145,33 +188,41 @@ defmodule Arbiter.Worker.ContainerSpawn do
     * `:policy` (required), `:worktree_path` (required, a private clone),
       `:owner` (the worker pid the egress run lives and dies with), `:task_id`,
       `:arb_token`, `:tmp_dir` (the run's temp dir; required), `:workspace`,
-      `:repo`, `:argv` (the inner argv, for an oversized prompt's temp file);
+      `:repo`, `:argv` (the inner argv, for an oversized prompt's temp file),
+      `:provider` (`"claude"` default, or `"codex"`);
     * `:image` (a ready tag; else `config :arbiter, :worker_container_image`,
       else the repo's default-branch image from `Image.ensure/3`);
-    * `:podman`, `:claude_path` and `:arb_path` (host binaries; default found with
-      `:find_executable`, `System.find_executable/1`), `:egress` (`(opts -> {:ok, network, run_id} | {:error, reason})`,
-      default `JailRun.start/1`).
+    * `:podman`, `:claude_path`, `:codex_path` and `:arb_path` (host binaries;
+      default found with `:find_executable`, `System.find_executable/1`),
+      `:codex_source_home` (the operator's codex home the login is copied from;
+      default `Codex.ConfigDir.source_home/0`), `:egress`
+      (`(opts -> {:ok, network, run_id} | {:error, reason})`, default
+      `JailRun.start/1`).
   """
   @spec prepare(keyword()) :: {:ok, request()} | {:error, term()}
   def prepare(opts) when is_list(opts) do
     policy = Keyword.fetch!(opts, :policy)
+    provider = provider_name(Keyword.get(opts, :provider))
 
-    with :ok <- container_backend(policy),
+    with :ok <- container_backend(policy, provider),
          :ok <- host_ready(),
          {:ok, worktree} <- fetch_worktree(opts),
          {:ok, mounts} <- clone_mounts(worktree),
          {:ok, tmp_dir} <- fetch_tmp_dir(opts),
          {:ok, image} <- fetch_image(opts, worktree),
-         {:ok, cli_mounts} <- cli_mounts(opts),
-         {:ok, home, config_dir} <- run_dirs(tmp_dir, Keyword.get(opts, :workspace)),
+         {:ok, cli_mounts} <- cli_mounts(provider, opts),
+         {:ok, home, config_dir, codex_auth} <- run_dirs(provider, tmp_dir, policy, opts),
          # Before the egress run starts: a cold seed takes minutes.
          deps_cache = seed_deps(opts, worktree, image, home),
-         {:ok, network, spec} <- start_egress(opts, policy, worktree),
+         {:ok, network, spec} <- start_egress(provider, opts, policy, worktree),
          name = container_name(opts),
          {:ok, services} <- start_services(opts, name) do
+      track_codex_auth(opts, codex_auth)
+
       {:ok,
        %{
          name: name,
+         provider: provider,
          image: image,
          podman: Keyword.get(opts, :podman),
          mounts: mounts,
@@ -183,13 +234,14 @@ defmodule Arbiter.Worker.ContainerSpawn do
          network: network,
          env: container_env(spec) ++ if(services, do: services.env, else: []),
          pod: services && services.pod,
-         deps_cache: deps_cache
+         deps_cache: deps_cache,
+         codex_auth: codex_auth
        }}
     end
   end
 
-  defp container_backend(policy) do
-    case Sandbox.module(policy, :claude) do
+  defp container_backend(policy, provider) do
+    case Sandbox.module(policy, provider) do
       {:ok, Container} -> :ok
       {:ok, other} -> {:error, {:not_a_container_backend, other}}
       {:error, _} = refusal -> refusal
@@ -321,29 +373,98 @@ defmodule Arbiter.Worker.ContainerSpawn do
   end
 
   # The provider CLI and `arb` are mounted from the host, so the image carries
-  # no CLI that can drift from the one Arbiter probed. `claude` is mandatory;
-  # a host with no `arb` on PATH still gets a worker, minus the CLI.
-  defp cli_mounts(opts) do
+  # no CLI that can drift from the one Arbiter probed. The provider CLI is
+  # mandatory; a host with no `arb` on PATH still gets a worker, minus the CLI.
+  defp cli_mounts(provider, opts) do
     find = Keyword.get(opts, :find_executable, &System.find_executable/1)
-    claude = Keyword.get_lazy(opts, :claude_path, fn -> find.("claude") end)
-    arb = Keyword.get_lazy(opts, :arb_path, fn -> find.("arb") end)
 
-    case claude do
-      path when is_binary(path) ->
-        arb_mount =
-          case arb do
-            path when is_binary(path) ->
-              [{resolve_links(path), @cli_dir <> "/arb"}]
+    with {:ok, provider_mounts} <- provider_mounts(provider, opts, find) do
+      arb = Keyword.get_lazy(opts, :arb_path, fn -> find.("arb") end)
 
-            _ ->
-              Logger.warning("ContainerSpawn: no `arb` on PATH; the container has no arb CLI")
-              []
-          end
+      arb_mount =
+        case arb do
+          path when is_binary(path) ->
+            [{resolve_links(path), @cli_dir <> "/arb"}]
 
-        {:ok, [{resolve_links(path), claude_path()} | arb_mount]}
+          _ ->
+            Logger.warning("ContainerSpawn: no `arb` on PATH; the container has no arb CLI")
+            []
+        end
 
-      _ ->
-        {:error, {:executable_not_found, "claude"}}
+      {:ok, provider_mounts ++ arb_mount}
+    end
+  end
+
+  defp provider_mounts("claude", opts, find) do
+    case Keyword.get_lazy(opts, :claude_path, fn -> find.("claude") end) do
+      path when is_binary(path) -> {:ok, [{resolve_links(path), claude_path()}]}
+      _ -> {:error, {:executable_not_found, "claude"}}
+    end
+  end
+
+  defp provider_mounts("codex", opts, find) do
+    case Keyword.get_lazy(opts, :codex_path, fn -> codex_on_host(find) end) do
+      path when is_binary(path) -> codex_mounts(resolve_links(path))
+      _ -> {:error, {:executable_not_found, "codex"}}
+    end
+  end
+
+  defp codex_on_host(find) do
+    case Application.get_env(:arbiter, :worker_container_codex_path) do
+      path when is_binary(path) and path != "" -> path
+      _ -> find.("codex")
+    end
+  end
+
+  # The npm `codex` on PATH is a node script: a container has no node. The
+  # package vendors a static binary (with `rg`, and `bwrap` for the CLI's own
+  # sandbox) beside it; mount that, and the helpers where the image's PATH has
+  # them. A binary that already is an executable (a cargo or brew install) is
+  # mounted as it is, with whatever vendor siblings it has.
+  defp codex_mounts(resolved) do
+    case native_codex(resolved) do
+      {:ok, native} ->
+        vendor = native |> Path.dirname() |> Path.dirname()
+
+        helpers =
+          for {rel, name} <- [{"codex-path/rg", "rg"}, {"codex-resources/bwrap", "bwrap"}],
+              path = Path.join(vendor, rel),
+              File.regular?(path),
+              do: {path, @cli_dir <> "/" <> name}
+
+        {:ok, [{native, provider_path("codex")} | helpers]}
+
+      :error ->
+        {:error, {:codex_native_binary_not_found, resolved}}
+    end
+  end
+
+  defp native_codex(path) do
+    if elf?(path) do
+      {:ok, path}
+    else
+      package = path |> Path.dirname() |> Path.dirname()
+      arch = :erlang.system_info(:system_architecture) |> to_string() |> String.split("-") |> hd()
+
+      candidates =
+        (Path.wildcard(
+           Path.join(package, "node_modules/@openai/codex-linux-*/vendor/*/bin/codex")
+         ) ++
+           Path.wildcard(Path.join(package, "vendor/*/bin/codex")))
+        |> Enum.filter(&elf?/1)
+
+      case Enum.find(candidates, &String.contains?(&1, "/" <> arch <> "-")) ||
+             List.first(candidates) do
+        nil -> :error
+        native -> {:ok, native}
+      end
+    end
+  end
+
+  defp elf?(path) do
+    case File.open(path, [:read, :binary], &IO.binread(&1, 4)) do
+      {:ok, <<0x7F, "ELF">>} -> true
+      _ -> false
     end
   end
 
@@ -371,7 +492,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
   # The proxy and the Arbiter bridge come from the same `Egress` run agy's jail
   # uses (`JailRun`, learn mode): one per worker, reused by every later spawn.
   # The in-container `socat` is `Jail`'s own listener script.
-  defp start_egress(opts, policy, worktree) do
+  defp start_egress(provider, opts, policy, worktree) do
     start = Keyword.get(opts, :egress, &JailRun.start/1)
 
     start_opts = [
@@ -380,7 +501,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
       arb_token: Keyword.get(opts, :arb_token),
       safe_defaults_exclude: policy.permissions.safe_defaults_exclude,
       worktree: worktree,
-      infra: @egress_infra,
+      infra: Map.fetch!(@egress_infra, provider),
       tunnels: SecurityPolicy.egress_tunnels(policy)
     ]
 
@@ -405,21 +526,54 @@ defmodule Arbiter.Worker.ContainerSpawn do
     end
   end
 
-  # A per-run HOME and CLAUDE_CONFIG_DIR. The config dir is seeded with the
-  # install's generated settings and worker memory, and nothing else: no
-  # `.credentials.json`, none of the install-wide dir's session history.
-  defp run_dirs(tmp_dir, workspace) do
+  # A per-run HOME and config dir (`CLAUDE_CONFIG_DIR`, or `CODEX_HOME` for
+  # Codex). Claude's is seeded with the install's generated settings and worker
+  # memory, and nothing else: no `.credentials.json`, none of the install-wide
+  # dir's session history. Codex's holds a copy of the login
+  # (`ConfigDir.seed_run_home/2`).
+  defp run_dirs("claude", tmp_dir, _policy, opts) do
     home = Path.join(tmp_dir, "home")
     config_dir = Path.join(tmp_dir, "claude-config")
 
     with :ok <- File.mkdir_p(home),
          :ok <- File.mkdir_p(config_dir) do
-      seed_config(config_dir, workspace)
-      {:ok, home, config_dir}
+      seed_config(config_dir, Keyword.get(opts, :workspace))
+      {:ok, home, config_dir, nil}
     else
       {:error, reason} -> {:error, {:run_dirs_failed, reason}}
     end
   end
+
+  defp run_dirs("codex", tmp_dir, policy, opts) do
+    home = Path.join(tmp_dir, "home")
+    codex_home = Path.join(tmp_dir, "codex-home")
+    seed_opts = [security: policy] ++ source_home_opt(opts)
+
+    with :ok <- File.mkdir_p(home),
+         {:ok, %{auth: auth}} <- CodexConfigDir.seed_run_home(codex_home, seed_opts) do
+      {:ok, home, codex_home, auth}
+    else
+      {:error, reason} -> {:error, {:run_dirs_failed, reason}}
+    end
+  end
+
+  defp source_home_opt(opts) do
+    case Keyword.get(opts, :codex_source_home) do
+      dir when is_binary(dir) and dir != "" -> [source_home: dir]
+      _ -> []
+    end
+  end
+
+  # The sync outlives the call stack: `AuthSync.Reaper` persists a rotation when
+  # the owning worker dies, however it does.
+  defp track_codex_auth(opts, {source, run}) do
+    case Keyword.get(opts, :owner) do
+      owner when is_pid(owner) -> AuthSync.Reaper.track(owner, source, run)
+      _ -> :ok
+    end
+  end
+
+  defp track_codex_auth(_opts, nil), do: :ok
 
   defp seed_config(config_dir, workspace) do
     with {:ok, source} <- ConfigDir.ensure(workspace) do
@@ -450,17 +604,21 @@ defmodule Arbiter.Worker.ContainerSpawn do
   # -- the spawn env --------------------------------------------------------------
 
   @doc """
-  `env` (a spawn's `port_args.env`) with `CLAUDE_CONFIG_DIR` pointed at the
-  run's own dir, so the host side (session archive, usage reconcile) and the
-  container agree on where the transcript lives.
+  `env` (a spawn's `port_args.env`) with the provider's config dir variable
+  (`CLAUDE_CONFIG_DIR`, or `CODEX_HOME` for Codex) pointed at the run's own dir,
+  so the host side (session archive, usage reconcile) and the container agree on
+  where the transcript lives.
   """
   @spec apply_env([{String.t(), String.t() | false}], request()) :: [
           {String.t(), String.t() | false}
         ]
-  def apply_env(env, %{config_dir: config_dir}),
-    do:
-      Enum.reject(env, &(elem(&1, 0) == "CLAUDE_CONFIG_DIR")) ++
-        [{"CLAUDE_CONFIG_DIR", config_dir}]
+  def apply_env(env, %{config_dir: config_dir} = request) do
+    name = config_env_name(request)
+    Enum.reject(env, &(elem(&1, 0) == name)) ++ [{name, config_dir}]
+  end
+
+  defp config_env_name(%{provider: "codex"}), do: "CODEX_HOME"
+  defp config_env_name(_request), do: "CLAUDE_CONFIG_DIR"
 
   # -- wrap ----------------------------------------------------------------------
 
@@ -475,6 +633,8 @@ defmodule Arbiter.Worker.ContainerSpawn do
   """
   @spec wrap_port(map()) :: {:ok, map()} | {:error, term()}
   def wrap_port(%{sandbox: %{} = request, argv: [_ | _] = argv} = port_args) do
+    sync_codex_auth(request, :reopen)
+
     with {:ok, spec} <- Jail.network_spec(Keyword.put(request.network, :socat, "socat")),
          {:ok, [podman | args]} <-
            Container.wrap(Jail.network_command(spec, argv), opts(request, port_args)) do
@@ -524,6 +684,17 @@ defmodule Arbiter.Worker.ContainerSpawn do
   defp client_name?(name),
     do: name in @client_names or Enum.any?(@client_prefixes, &String.starts_with?(name, &1))
 
+  # Carry a rotated login back to the operator's. On a re-open the previous
+  # container has exited (the port is only opened again after it did), so the
+  # copy is quiescent; the run then takes a newer login a sibling rotated.
+  defp sync_codex_auth(%{codex_auth: {source, run}}, when_) do
+    AuthSync.sync(source, run)
+    if when_ == :reopen, do: AuthSync.pull(source, run)
+    :ok
+  end
+
+  defp sync_codex_auth(_request, _when), do: :ok
+
   # -- teardown --------------------------------------------------------------------
 
   @doc """
@@ -533,6 +704,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
   @spec teardown(map() | nil) :: :ok
   def teardown(%{sandbox: %{name: name} = request}) when is_binary(name) do
     Container.teardown(name)
+    sync_codex_auth(request, :final)
     TestServices.teardown(request[:pod])
   end
 
