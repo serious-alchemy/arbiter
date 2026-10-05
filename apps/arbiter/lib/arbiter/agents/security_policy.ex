@@ -103,6 +103,29 @@ defmodule Arbiter.Agents.SecurityPolicy do
   resolve and refused on write by
   `Arbiter.Tasks.Workspace.Changes.ValidateConfig`.
 
+  ### `sandbox.review_backend` (bd-4rvf98)
+
+  The backend for the spawns that are **not** a task worker's own implement
+  pass: a ReviewGate reviewer (with or without a round checkout), a ReviewGate
+  revise (fix) pass, and a `review: true` dispatch. `sandbox.backend: podman`
+  wraps `ClaudeSession`'s task-worker path only (a container needs a private
+  clone, and a review checkout is not one), so before this key a podman repo's
+  every review was refused and parked as `reviewer_failed`. Those spawns now
+  resolve `review_backend` (`for_review_spawn/1`) and ignore `backend`.
+
+  It defaults to `:bwrap`, so `backend: podman` alone gives a podman implement
+  worker and bwrap-backed reviews. It takes the same values and the same
+  **most-restrictive-wins** layering as `backend`, independently of it. It is
+  never derived from `backend` and never loosened silently: a `review_backend`
+  with no implementation for the spawn (`:podman` today) is **refused** by
+  `Arbiter.Worker.Sandbox`, parking the review, exactly as `backend: podman`
+  used to. Nothing ever runs unjailed. Unknown values are ignored on resolve and
+  refused on write by `Arbiter.Tasks.Workspace.Changes.ValidateConfig`.
+
+  The fix-pass and conflict-resolver dispatchers
+  (`Arbiter.Workflows.MergeQueue.FixPassDispatcher`, `.ConflictResolver`) spawn
+  with no resolved workspace policy at all, so neither backend key reaches them.
+
   ### `permissions.mode`
 
     * `:bypass` — the headless-safe default. The interactive permission
@@ -265,7 +288,8 @@ defmodule Arbiter.Agents.SecurityPolicy do
             egress_tunnels: [String.t()],
             egress: egress(),
             allow_hosts: [String.t()],
-            backend: sandbox_backend()
+            backend: sandbox_backend(),
+            review_backend: sandbox_backend()
           }
         }
 
@@ -414,7 +438,8 @@ defmodule Arbiter.Agents.SecurityPolicy do
         egress_tunnels: [],
         egress: :open,
         allow_hosts: [],
-        backend: :bwrap
+        backend: :bwrap,
+        review_backend: :bwrap
       }
     }
   end
@@ -733,7 +758,9 @@ defmodule Arbiter.Agents.SecurityPolicy do
           Map.get(base, :allow_hosts, []),
           raw |> get(:allow_hosts) |> list_of_strings() |> Enum.filter(&valid_allow_host?/1)
         ),
-      backend: merge_backend(Map.get(base, :backend, :bwrap), get(raw, :backend))
+      backend: merge_backend(Map.get(base, :backend, :bwrap), get(raw, :backend)),
+      review_backend:
+        merge_backend(Map.get(base, :review_backend, :bwrap), get(raw, :review_backend))
     }
   end
 
@@ -846,6 +873,19 @@ defmodule Arbiter.Agents.SecurityPolicy do
   @spec sandbox_backend(t()) :: sandbox_backend()
   def sandbox_backend(%__MODULE__{sandbox: sandbox}), do: Map.get(sandbox, :backend, :bwrap)
 
+  @doc "The resolved `sandbox.review_backend` of `policy` (`:bwrap` when unset)."
+  @spec review_backend(t()) :: sandbox_backend()
+  def review_backend(%__MODULE__{sandbox: sandbox}), do: Map.get(sandbox, :review_backend, :bwrap)
+
+  @doc """
+  `policy` for a reviewer / revise-pass spawn: `sandbox.backend` replaced by
+  `sandbox.review_backend` (bd-4rvf98). Never loosens by itself: the result
+  names a backend, and `Arbiter.Worker.Sandbox` refuses one it cannot run.
+  """
+  @spec for_review_spawn(t()) :: t()
+  def for_review_spawn(%__MODULE__{sandbox: sandbox} = policy),
+    do: %{policy | sandbox: Map.put(sandbox, :backend, review_backend(policy))}
+
   @doc "The resolved `sandbox.egress` of `policy` (`:open` when unset)."
   @spec egress(t()) :: egress()
   def egress(%__MODULE__{sandbox: sandbox}), do: Map.get(sandbox, :egress, :open)
@@ -905,7 +945,8 @@ defmodule Arbiter.Agents.SecurityPolicy do
         "egress_tunnels" => Map.get(p.sandbox, :egress_tunnels, []),
         "egress" => p.sandbox |> Map.get(:egress, :open) |> Atom.to_string(),
         "allow_hosts" => Map.get(p.sandbox, :allow_hosts, []),
-        "backend" => p |> sandbox_backend() |> Atom.to_string()
+        "backend" => p |> sandbox_backend() |> Atom.to_string(),
+        "review_backend" => p |> review_backend() |> Atom.to_string()
       }
     }
   end
@@ -924,6 +965,7 @@ defmodule Arbiter.Agents.SecurityPolicy do
       "net=#{if p.sandbox.network, do: "on", else: "tools-off"}",
       egress_part(egress(p)),
       backend_part(sandbox_backend(p)),
+      review_backend_part(review_backend(p)),
       "#{deny_count} #{if deny_count == 1, do: "deny", else: "denies"}"
     ]
     |> Enum.reject(&is_nil/1)
@@ -961,6 +1003,9 @@ defmodule Arbiter.Agents.SecurityPolicy do
 
   defp backend_part(:bwrap), do: nil
   defp backend_part(backend), do: "sandbox=#{backend}"
+
+  defp review_backend_part(:bwrap), do: nil
+  defp review_backend_part(backend), do: "review-sandbox=#{backend}"
 
   defp egress_part(:open), do: nil
   defp egress_part(level), do: "egress=#{level}"

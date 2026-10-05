@@ -2849,6 +2849,23 @@ defmodule Arbiter.Worker.Dispatch do
   """
   @spec review_security_policy(SecurityPolicy.t(), keyword()) :: SecurityPolicy.t()
   def review_security_policy(%SecurityPolicy{} = policy, opts) do
+    policy
+    |> review_backend_policy(opts)
+    |> review_write_denied(opts)
+  end
+
+  # bd-4rvf98: a review spawn (a `review: true` dispatch, or any reviewer holding
+  # a checkout) runs under `sandbox.review_backend`, not the implement backend:
+  # `sandbox.backend: podman` wraps only the task worker's private clone, so a
+  # review keeping it was refused outright. `review_backend` is bwrap unless the
+  # operator set it, and one with no implementation is still refused downstream.
+  defp review_backend_policy(policy, opts) do
+    if Keyword.get(opts, :review, false) or review_checkout_path(opts) != nil,
+      do: SecurityPolicy.for_review_spawn(policy),
+      else: policy
+  end
+
+  defp review_write_denied(policy, opts) do
     case review_checkout_path(opts) do
       nil ->
         policy
