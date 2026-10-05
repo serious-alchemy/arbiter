@@ -28,6 +28,11 @@ defmodule Arbiter.Agents.CodexTest do
     :ok
   end
 
+  defp policy_with_mode(mode) do
+    base = SecurityPolicy.base()
+    %{base | permissions: %{base.permissions | mode: mode}}
+  end
+
   describe "behaviour" do
     test "module declares the Agent behaviour" do
       behaviours =
@@ -46,19 +51,42 @@ defmodule Arbiter.Agents.CodexTest do
       refute Regex.match?(Codex.done_sentinel(), "arb doneness")
     end
 
-    test "security_enforced?/0 is false (no per-tool deny list like Claude's)" do
+    test "security_enforced?/0 follows the isolated CODEX_HOME that carries the rules (bd-99emmd)" do
+      prev = Application.get_env(:arbiter, :worker_isolate_config)
+      on_exit(fn -> restore_env(:worker_isolate_config, prev) end)
+
+      Application.put_env(:arbiter, :worker_isolate_config, true)
+      assert Codex.security_enforced?()
+
+      Application.put_env(:arbiter, :worker_isolate_config, false)
       refute Codex.security_enforced?()
     end
 
-    test "write_confinement/1 is :none regardless of mode (bd-1abj7u)" do
-      assert Codex.write_confinement(SecurityPolicy.base()) == :none
+    test "write_confinement/1 is the kernel sandbox under :auto, :none otherwise (bd-99emmd)" do
+      assert Codex.write_confinement(policy_with_mode(:auto)) == :os_jail
+      assert Codex.write_confinement(policy_with_mode(:bypass)) == :none
+      # :strict is `-s read-only`: it confines everything, the worker included,
+      # so it is not offered as a place to run a strict-scoped implementer (bd-1abj7u).
+      assert Codex.write_confinement(policy_with_mode(:strict)) == :none
+    end
 
-      strict = %{
-        SecurityPolicy.base()
-        | permissions: %{SecurityPolicy.base().permissions | mode: :strict}
-      }
+    test "write_jail_warning/1 names the unconfined :bypass default, nothing under :auto" do
+      assert Codex.write_jail_warning(policy_with_mode(:auto)) == nil
 
-      assert Codex.write_confinement(strict) == :none
+      warning = Codex.write_jail_warning(policy_with_mode(:bypass))
+      assert warning =~ "bypass"
+      assert warning =~ "execpolicy"
+      assert warning =~ "permissions.mode"
+
+      assert Codex.write_jail_warning(policy_with_mode(:strict)) =~
+               ":strict dispatches of codex are refused"
+    end
+
+    test "async_arm_signature/0 matches the abandoned-command marker only" do
+      sig = Codex.async_arm_signature()
+      assert Regex.match?(sig, "⚠ codex turn ended with 2 command(s) still running")
+      refute Regex.match?(sig, "⏴ command done")
+      refute Regex.match?(sig, "⏵ $ mix test")
     end
 
     test "usage_attrs/1 stamps the provider" do
@@ -371,6 +399,72 @@ defmodule Arbiter.Agents.CodexTest do
     test "spawn_env exports CODEX_HOME for a worktree spawn", ctx do
       assert [{"CODEX_HOME", dir}] = Codex.spawn_env(worktree_path: ctx.worktree)
       assert File.read_link!(Path.join(dir, "auth.json")) == Path.join(ctx.source, "auth.json")
+    end
+
+    test "a :bypass spawn still gets the deny categories as execpolicy rules (bd-99emmd)", ctx do
+      opts = [worktree_path: ctx.worktree, security: policy_with_mode(:bypass)]
+
+      assert {:ok, argv} = Codex.default_argv("p", opts)
+      assert "--dangerously-bypass-approvals-and-sandbox" in argv
+
+      assert [{"CODEX_HOME", dir}] = Codex.spawn_env(opts)
+      rules = File.read!(Path.join([dir, "rules", "arbiter.rules"]))
+      assert rules =~ ~s|["git", "push", ["--force", "-f"]]|
+      assert rules =~ ~s|["gh", "pr", "create"]|
+      refute rules =~ ~s|["curl"]|
+    end
+
+    test "network: false adds the network tools to the rules", ctx do
+      base = SecurityPolicy.base()
+      policy = %{base | sandbox: %{base.sandbox | network: false}}
+
+      assert [{"CODEX_HOME", dir}] =
+               Codex.spawn_env(worktree_path: ctx.worktree, security: policy)
+
+      assert File.read!(Path.join([dir, "rules", "arbiter.rules"])) =~ ~s|["curl"]|
+    end
+
+    test "a transcript line for a command left running at turn end is an async-arm marker",
+         _ctx do
+      session = Codex.init_session([])
+
+      {_, session} =
+        Codex.parse_line(
+          session,
+          ~s({"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"sleep 30","status":"in_progress"}})
+        )
+
+      {lines, _session} =
+        Codex.parse_line(
+          session,
+          ~s({"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}})
+        )
+
+      assert Enum.any?(lines, fn {text, _} -> Regex.match?(Codex.async_arm_signature(), text) end)
+    end
+
+    test "a command that completed leaves no marker", _ctx do
+      session = Codex.init_session([])
+
+      {_, session} =
+        Codex.parse_line(
+          session,
+          ~s({"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"ls","status":"in_progress"}})
+        )
+
+      {_, session} =
+        Codex.parse_line(
+          session,
+          ~s({"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"ls","exit_code":0,"aggregated_output":"","status":"completed"}})
+        )
+
+      {lines, _session} =
+        Codex.parse_line(
+          session,
+          ~s({"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}})
+        )
+
+      refute Enum.any?(lines, fn {text, _} -> Regex.match?(Codex.async_arm_signature(), text) end)
     end
 
     test "spawn_env composes CODEX_HOME with the api key and MCP token", ctx do
