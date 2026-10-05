@@ -67,18 +67,7 @@ defmodule Arbiter.Agents.Codex.AuthSync do
   def sync(source, run) do
     with {:ok, body} <- read_regular(run),
          {:ok, doc} <- decode(body) do
-      locked(source, fn real ->
-        case File.read(real) do
-          {:ok, ^body} ->
-            :unchanged
-
-          {:ok, current} ->
-            if newer?(doc, decode_or_nil(current)), do: adopt(real, body), else: superseded(real)
-
-          {:error, _} ->
-            adopt(real, body)
-        end
-      end)
+      locked(source, fn real -> reconcile(real, body, doc) end)
     else
       :missing -> :unchanged
       :invalid -> invalid(run)
@@ -99,6 +88,18 @@ defmodule Arbiter.Agents.Codex.AuthSync do
   end
 
   # -- internals --------------------------------------------------------------
+
+  defp reconcile(real, body, doc) do
+    case File.read(real) do
+      {:ok, ^body} -> :unchanged
+      {:ok, current} -> adopt_if_newer(real, body, doc, decode_or_nil(current))
+      {:error, _} -> adopt(real, body)
+    end
+  end
+
+  defp adopt_if_newer(real, body, doc, current) do
+    if newer?(doc, current), do: adopt(real, body), else: superseded(real)
+  end
 
   defp run_doc(run) do
     with {:ok, body} <- read_regular(run), {:ok, doc} <- decode(body), do: doc, else: (_ -> nil)
