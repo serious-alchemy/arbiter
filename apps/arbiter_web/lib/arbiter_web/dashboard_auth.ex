@@ -39,7 +39,11 @@ defmodule ArbiterWeb.DashboardAuth do
 
   @callback authenticate(Plug.Conn.t()) :: {:ok, Plug.Conn.t(), identity()} | :error
   @callback authenticate_session(map()) :: {:ok, identity()} | :error
-  @callback mode() :: %{required(:impl) => String.t(), required(:mode) => String.t()}
+  @callback mode() :: %{
+              required(:impl) => String.t(),
+              required(:mode) => String.t(),
+              optional(atom()) => term()
+            }
   @callback login_path() :: String.t()
   @optional_callbacks login_path: 0
 

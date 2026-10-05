@@ -76,6 +76,18 @@ defmodule ArbiterWeb.ConnCase do
   end
 
   @doc """
+  Give `conn` a dashboard login grant (bd-3gycsz), as `/login` would — what a
+  browser test needs to reach any `:browser` route or LiveView. Carries no
+  bearer token.
+  """
+  def dashboard_login(conn) do
+    Plug.Test.init_test_session(
+      conn,
+      ArbiterWeb.DashboardAuth.Default.grant_session("token", "test")
+    )
+  end
+
+  @doc """
   Mounts `/workspaces/:id` and waits for it to finish loading (bd-7p07gw).
 
   The page loads in two waves, both via `start_async`: the workspace itself
