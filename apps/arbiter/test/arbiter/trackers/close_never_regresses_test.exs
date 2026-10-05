@@ -216,6 +216,47 @@ defmodule Arbiter.Trackers.CloseNeverRegressesTest do
       assert [{:jira_transition, %{"transition" => %{"id" => "100"}}} | _] = writes()
     end
 
+    test "merged => Code Complete: a ticket already in QA is not dragged back (bd-30ukqo)" do
+      ws = jira_ws(%{"merged" => "Code Complete"})
+      issue = issue(ws, :jira, @jira_ref)
+
+      stub_jira({"QA", "indeterminate"}, [{"Code Complete", "indeterminate"}])
+
+      assert :ok = Sync.lifecycle(issue, :merged)
+      assert writes() == []
+      assert escalations_for(ws.id) == []
+
+      assert [note] =
+               Message
+               |> Ash.read!()
+               |> Enum.filter(
+                 &(&1.task_ref == issue.id and &1.subject =~ "merged transition skipped")
+               )
+
+      assert note.kind == :notification
+      assert note.body =~ "QA"
+    end
+
+    test "merged => Code Complete still advances a ticket in In Code Review" do
+      ws = jira_ws(%{"merged" => "Code Complete"})
+      issue = issue(ws, :jira, @jira_ref)
+
+      stub_jira({"In Code Review", "indeterminate"}, [{"Code Complete", "indeterminate"}])
+
+      assert :ok = Sync.lifecycle(issue, :merged)
+      assert [{:jira_transition, %{"transition" => %{"id" => "100"}}} | _] = writes()
+    end
+
+    test "an :open push does not drag an In Progress ticket back to To Do" do
+      ws = jira_ws(%{})
+      issue = issue(ws, :jira, @jira_ref)
+
+      stub_jira({"In Progress", "indeterminate"}, [{"To Do", "new"}])
+
+      assert :ok = Sync.lifecycle(issue, :open)
+      assert writes() == []
+    end
+
     test "a skipped close leaves a record on the ticket, not only a log line" do
       ws = jira_ws(%{"closed" => "Code Complete"})
       issue = issue(ws, :jira, @jira_ref)
@@ -417,6 +458,28 @@ defmodule Arbiter.Trackers.CloseNeverRegressesTest do
 
       assert :ok = Sync.close_and_verify(issue)
       assert [{:shortcut_put, %{"workflow_state_id" => 502}} | _] = writes()
+    end
+
+    test "in_progress: a story already in QA is not dragged back to In Progress (bd-30ukqo)" do
+      ws =
+        workspace("shortcut", %{
+          "credentials_ref" => "env:#{@shortcut_env}",
+          "status_map" => %{"in_progress" => "In Progress"}
+        })
+
+      issue = issue(ws, :shortcut, "1234")
+
+      stub_shortcut(503)
+
+      assert :ok = Sync.lifecycle(issue, :in_progress)
+      assert writes() == []
+
+      assert [_] =
+               Message
+               |> Ash.read!()
+               |> Enum.filter(
+                 &(&1.task_ref == issue.id and &1.subject =~ "in_progress transition skipped")
+               )
     end
 
     test "closed => Done still closes a story from any earlier state" do

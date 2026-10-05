@@ -129,7 +129,7 @@ defmodule Arbiter.Trackers.Linear do
          team_id = get_in(raw_issue, ["team", "id"]),
          {:ok, states} <- fetch_team_states(cfg, team_id),
          {:ok, state_id} <- resolve_state_id(cfg, states, status),
-         :ok <- guard_close(raw_issue, states, status, state_id) do
+         :ok <- guard_forward(raw_issue, states, status, state_id) do
       vars = %{"id" => raw_issue["id"], "stateId" => state_id}
 
       graphql(cfg, update_issue_mutation(), vars)
@@ -137,13 +137,14 @@ defmodule Arbiter.Trackers.Linear do
     end
   end
 
-  # A close must never move an issue backwards (bd-4i7kky): `closed` can map to
+  # A forward transition must never move an issue backwards (bd-4i7kky for
+  # `:closed`, every lifecycle event since bd-30ukqo): a status can map to
   # an intermediate state, and an issue already further along the team's
   # workflow — a later `started` state, or any `completed`/`cancelled` one when
   # the target is not — is left where it is. Linear orders states by `type`
   # (backlog < unstarted < started < completed/cancelled) then `position`.
   # An issue whose current state can't be placed is closed as before.
-  defp guard_close(raw_issue, states, :closed, target_id) do
+  defp guard_forward(raw_issue, states, status, target_id) do
     current_id = get_in(raw_issue, ["state", "id"])
     current = Enum.find(states, &(&1["id"] == current_id))
     target = Enum.find(states, &(&1["id"] == target_id))
@@ -155,15 +156,13 @@ defmodule Arbiter.Trackers.Linear do
          status: nil,
          message:
            "#{raw_issue["identifier"]} is in #{inspect(current["name"])}, already at or past " <>
-             "the closed-mapped state #{inspect(target["name"])} — leaving it where it is",
+             "the #{status}-mapped state #{inspect(target["name"])} — leaving it where it is",
          raw: nil
        }}
     else
       :ok
     end
   end
-
-  defp guard_close(_raw_issue, _states, _status, _target_id), do: :ok
 
   @state_type_rank %{
     "backlog" => 0,

@@ -114,7 +114,7 @@ defmodule Arbiter.Trackers.Jira do
         {:ok, id} ->
           # Single-hop fast path: a live transition lands directly on the
           # target status (its `to` already equals the target).
-          with :ok <- guard_close(cfg, ref, status, target_status, transitions) do
+          with :ok <- guard_forward(cfg, ref, status, target_status, transitions) do
             post_transition(cfg, ref, id)
           end
 
@@ -126,7 +126,8 @@ defmodule Arbiter.Trackers.Jira do
     end
   end
 
-  # A close must never move a ticket backwards (bd-4i7kky). Jira has no
+  # A forward transition must never move a ticket backwards (bd-4i7kky for
+  # `:closed`, generalised to every lifecycle event by bd-30ukqo). Jira has no
   # ordering between statuses, and a workflow commonly lets *any* status
   # transition straight to any other, so "a live transition to the target
   # exists" proves nothing about the ticket still being short of it.
@@ -134,22 +135,22 @@ defmodule Arbiter.Trackers.Jira do
   # A `done`-category target is terminal, so any ticket not already done is
   # genuinely behind it and the guard has nothing to say. An intermediate
   # target (`closed => "Code Complete"`, the recommendation when the tracker's
-  # `Done` means "deployed") has others' statuses after it — QA, Ready To
-  # Deploy — so the ticket is only closed when it is *demonstrably* still
-  # before it: Jira's `new` category, a status the workspace maps to an earlier
-  # lifecycle event, or one the `transition_graph` routes into the target. Any
+  # `Done` means "deployed", or `merged => "Code Complete"`) has others'
+  # statuses after it — QA, Ready To Deploy — so the ticket is only moved when
+  # it is *demonstrably* still before it: Jira's `new` category, a status the
+  # workspace maps to an earlier lifecycle event, or one the `transition_graph` routes into the target. Any
   # other status is somebody else's progress and is left where they put it.
   #
   # The target's category comes from the live transition's own `to` block; a
   # transition without one (never the case on real Jira) skips the guard.
-  defp guard_close(cfg, ref, :closed, target_status, transitions) do
+  defp guard_forward(cfg, ref, status, target_status, transitions) do
     case target_category(transitions, target_status) do
       category when is_binary(category) and category != "done" ->
         with {:ok, current, current_category} <- current_status_info(cfg, ref) do
-          if close_may_proceed?(cfg, target_status, current, current_category) do
+          if may_proceed?(cfg, status, target_status, current, current_category) do
             :ok
           else
-            {:error, past_target_error(ref, current, target_status)}
+            {:error, past_target_error(ref, status, current, target_status)}
           end
         end
 
@@ -158,15 +159,13 @@ defmodule Arbiter.Trackers.Jira do
     end
   end
 
-  defp guard_close(_cfg, _ref, _status, _target_status, _transitions), do: :ok
-
-  defp past_target_error(ref, current, target_status) do
+  defp past_target_error(ref, status, current, target_status) do
     %Error{
       kind: :upstream_past_target,
       status: nil,
       message:
         "#{ref} is in #{inspect(current)}, which is not known to precede the " <>
-          "closed-mapped status #{inspect(target_status)} — leaving it where it is",
+          "#{status}-mapped status #{inspect(target_status)} — leaving it where it is",
       raw: nil
     }
   end
@@ -177,14 +176,18 @@ defmodule Arbiter.Trackers.Jira do
     end)
   end
 
-  defp close_may_proceed?(_cfg, _target, _current, "done"), do: false
-  defp close_may_proceed?(_cfg, _target, _current, "new"), do: true
+  defp may_proceed?(_cfg, _status, _target, _current, "done"), do: false
+  defp may_proceed?(_cfg, _status, _target, _current, "new"), do: true
 
-  defp close_may_proceed?(cfg, target, current, _category) do
-    current != target and current in statuses_before_close(cfg, target)
+  defp may_proceed?(cfg, status, target, current, _category) do
+    current != target and current in statuses_before(cfg, status, target)
   end
 
-  # Statuses known to sit before the closed target: where the workspace's own
+  # Lifecycle events in the order a ticket meets them. A status mapped to an
+  # event strictly earlier than `status` is known to precede its target.
+  @lifecycle_order [:open, :in_progress, :pr_opened, :approved_unmerged, :merged, :closed]
+
+  # Statuses known to sit before the target: where the workspace's own
   # earlier lifecycle events put a ticket (its "anchors"), plus any graph node
   # that is demonstrably on the forward route from an anchor to the target.
   #
@@ -200,12 +203,14 @@ defmodule Arbiter.Trackers.Jira do
   # A workspace with its own pre-close status therefore names the forward route
   # into it in `transition_graph`, e.g. `"In Progress" => Peer Review => Code
   # Complete`.
-  defp statuses_before_close(cfg, target) do
+  defp statuses_before(cfg, status, target) do
     graph = cfg.transition_graph
+
+    earlier = Enum.take_while(@lifecycle_order, &(&1 != status))
 
     anchors =
       for {event, name} <- cfg.status_map,
-          event != :closed,
+          event in earlier,
           is_binary(name),
           name != "",
           name != target,
@@ -906,12 +911,11 @@ defmodule Arbiter.Trackers.Jira do
           # Jira tickets were already Done.
           :ok
 
-        status == :closed and
-            not close_may_proceed?(cfg, target_status, current_status, current_category) ->
+        not may_proceed?(cfg, status, target_status, current_status, current_category) ->
           # A route in the graph from here is not proof the ticket is still
           # short of the target — with a rework edge it can lead backwards
           # (bd-4i7kky). Same rule as the single-hop fast path.
-          {:error, past_target_error(ref, current_status, target_status)}
+          {:error, past_target_error(ref, status, current_status, target_status)}
 
         true ->
           case plan_transition_path(cfg.transition_graph, current_status, target_status) do
