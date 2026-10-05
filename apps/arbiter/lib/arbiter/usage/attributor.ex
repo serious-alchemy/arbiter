@@ -20,6 +20,8 @@ defmodule Arbiter.Usage.Attributor do
   non-map return is logged and ignored: the ledger row is never dropped.
   """
 
+  alias Arbiter.Usage.Attributor.Default
+
   require Logger
 
   @doc "Returns the dimensions for a row about to be created; `attrs` is the changeset's attribute map."
@@ -30,11 +32,11 @@ defmodule Arbiter.Usage.Attributor do
   @doc false
   @spec resolve(map()) :: map()
   def resolve(attrs) do
-    base = Arbiter.Usage.Attributor.Default.attribute(attrs)
+    base = Default.attribute(attrs)
 
     case Application.get_env(:arbiter, :usage_attributor) do
       nil -> base
-      Arbiter.Usage.Attributor.Default -> base
+      Default -> base
       mod -> Map.merge(base, custom(mod, attrs))
     end
   end
