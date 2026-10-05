@@ -164,6 +164,8 @@ defmodule Arbiter.Quota.Gate do
   # window) and Antigravity's collapsed "used" (no time window) are absent.
   @builtin_window_seconds %{
     "5h" => 18_000,
+    # grok's free-tier rolling window (bd-cwq8b0, `Arbiter.Quota.GrokLedger`).
+    "24h" => 86_400,
     "7d" => 604_800,
     "weekly" => 604_800,
     "30d" => 2_592_000

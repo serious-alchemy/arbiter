@@ -16,6 +16,14 @@ defmodule Arbiter.Agents.Grok.ConfigDir do
   un-isolated grok worker would run with the operator's hooks and MCP servers,
   so the spawn is refused instead (`Arbiter.Agents.Grok.default_argv/2`).
 
+  Each spawn also gets a `config.toml` in the `GROK_HOME` (rewritten on every
+  `ensure/1`) holding the settings Arbiter owns: today
+  `[models] rate_limit_retry_threshold`, a low total-attempt ceiling so a
+  free-tier 429 (`subscription:free-usage-exhausted`, grok's default is 15
+  retries) fails the run in seconds instead of burning wall-clock (bd-cwq8b0;
+  `config :arbiter, :grok_quota, rate_limit_retry_threshold: n`, default
+  2).
+
   The directory is deterministic per worktree (`<root>/<worktree-key>`), so the
   spawn, the MCP config writer (a follow-up) and a respawn all land on the same
   home; a spawn with no worktree (an auth probe) shares `<root>/default`. It is
@@ -29,6 +37,12 @@ defmodule Arbiter.Agents.Grok.ConfigDir do
 
   @grok_dir ".grok"
   @prompt_dir "prompts"
+  @config_file "config.toml"
+
+  # grok retries a 429 up to `max_retries` (15) times. The free tier's 429 is
+  # `subscription:free-usage-exhausted`, a spent 24h window that no retry
+  # fixes, so cap the *total attempts* low and let the worker stop fast.
+  @default_rate_limit_retry_threshold 2
 
   @doc "The isolated `$HOME` for a spawn: `<root>/<worktree-key>`."
   @spec path(keyword()) :: String.t()
@@ -43,12 +57,12 @@ defmodule Arbiter.Agents.Grok.ConfigDir do
   def home_root, do: root()
 
   @doc """
-  Ensure the home and its `.grok` directory exist; `{:ok, home}` or
-  `{:error, reason}`. Idempotent.
+  Ensure the home and its `.grok` directory exist and write the `config.toml`;
+  `{:ok, home}` or `{:error, reason}`. Idempotent.
 
   A jailed worker can write anywhere in its home, and everything here runs on
-  the host at the next spawn, so a symlink it planted where `.grok` or the
-  prompt directory goes is removed rather than followed.
+  the host at the next spawn, so a symlink it planted where `.grok`, the
+  prompt directory or `config.toml` goes is removed rather than followed.
   """
   @spec ensure(keyword()) :: {:ok, String.t()} | {:error, term()}
   def ensure(opts \\ []) do
@@ -56,7 +70,8 @@ defmodule Arbiter.Agents.Grok.ConfigDir do
 
     with :ok <- File.mkdir_p(home),
          :ok <- ensure_dir(Path.join(home, @grok_dir)),
-         :ok <- ensure_dir(Path.join(home, @prompt_dir)) do
+         :ok <- ensure_dir(Path.join(home, @prompt_dir)),
+         :ok <- write_config(Path.join([home, @grok_dir, @config_file])) do
       {:ok, home}
     else
       {:error, reason} ->
@@ -66,6 +81,22 @@ defmodule Arbiter.Agents.Grok.ConfigDir do
         )
 
         {:error, reason}
+    end
+  end
+
+  @doc """
+  The total-attempt ceiling written as `[models] rate_limit_retry_threshold`
+  (`config :arbiter, :grok_quota, rate_limit_retry_threshold:`); a
+  non-positive or non-integer value falls back to
+  #{@default_rate_limit_retry_threshold}.
+  """
+  @spec rate_limit_retry_threshold() :: pos_integer()
+  def rate_limit_retry_threshold do
+    case :arbiter
+         |> Application.get_env(:grok_quota, [])
+         |> Keyword.get(:rate_limit_retry_threshold) do
+      n when is_integer(n) and n > 0 -> n
+      _ -> @default_rate_limit_retry_threshold
     end
   end
 
@@ -98,6 +129,28 @@ defmodule Arbiter.Agents.Grok.ConfigDir do
   end
 
   # ---- internals ---------------------------------------------------------
+
+  defp config_toml do
+    """
+    [models]
+    rate_limit_retry_threshold = #{rate_limit_retry_threshold()}
+    """
+  end
+
+  # Written to a sibling and renamed over the target, so a symlink a jailed run
+  # left at `config.toml` is replaced rather than written through.
+  defp write_config(path) do
+    tmp = path <> ".tmp-#{System.unique_integer([:positive])}"
+
+    with :ok <- File.write(tmp, config_toml(), [:exclusive]),
+         :ok <- File.chmod(tmp, 0o600) do
+      File.rename(tmp, path)
+    else
+      {:error, _} = error ->
+        File.rm(tmp)
+        error
+    end
+  end
 
   defp ensure_dir(dir) do
     with :ok <- unlink_if_symlink(dir), do: File.mkdir_p(dir)

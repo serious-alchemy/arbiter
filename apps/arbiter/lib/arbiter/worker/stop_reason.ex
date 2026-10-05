@@ -228,6 +228,8 @@ defmodule Arbiter.Worker.StopReason do
     | refresh[ _]token[^\n]{0,40}already[ _]used
     | log[ _]?out[ _]and[ _]sign[ _]in[ _]again
     | codex[ _]authentication[ _]error
+    | refresh[ _]?token[ _]?(rejected|invalid)
+    | invalid[ _]grant
   /ix
 
   # bd-3hr6g2: the Claude CLI's own plan usage-limit message, distinct from a
@@ -277,6 +279,24 @@ defmodule Arbiter.Worker.StopReason do
   /mix
 
   @quota_reset_signature ~r/usage[ _]limit[ _]reached\|(\d+)/i
+
+  # bd-cwq8b0: grok's free-tier 429, `subscription:free-usage-exhausted: You've
+  # used all the included free usage for model grok-4.7 for now. Usage resets
+  # over a rolling 24-hour window — tokens (actual/limit): 604183/500000.`
+  # grok reports it in the terminal `result`'s `errors[]` (rendered as
+  # `grok error: ...` by `Arbiter.Agents.Grok.Stream.error_lines/1`) or on
+  # stderr (`Error: ...`). Anchored to those line heads so the same code quoted
+  # in prose (this repo's docs, a ticket) cannot fake a quota stop, and checked
+  # only on a non-zero exit. A rolling window has no reset time, so there is no
+  # `retry_after`: the hold lifts as the ledger's trailing 24h drains
+  # (`Arbiter.Quota.GrokLedger`).
+  @grok_free_usage_signature ~r/
+      ^[ \t]*(?:grok[ ]error:|error:|api[ ]error)[^\n]*subscription:free-usage-exhausted
+      (?<detail>[^\n]*)
+  /imx
+
+  @grok_free_usage_model ~r/for[ ]model[ ](?<model>[\w.:\/-]+)/i
+  @grok_free_usage_counts ~r/tokens[ ]\(actual\/limit\):[ ]*(?<actual>\d+)\/(?<limit>\d+)/i
 
   # bd-cfhj7z: the CLI build seen in run 7e9e5ea5 reports the reset as a
   # human-readable *local wall clock* with an IANA zone name
@@ -498,6 +518,19 @@ defmodule Arbiter.Worker.StopReason do
             "Re-dispatching repeats the rejection. Point the workspace's Codex " <>
               "`tier_models` (agent.config.codex.tier_models) or the requested --model at a " <>
               "model this account's ~/.codex/models_cache.json lists and its plan can call.",
+          exit_status: exit_status,
+          signal: signal
+        }
+
+      exit_status != 0 and Regex.match?(@grok_free_usage_signature, haystack) ->
+        %__MODULE__{
+          category: :quota_exhausted,
+          summary: grok_free_usage_summary(haystack),
+          remediation:
+            "grok's free tier allows about 500K tokens per rolling 24h and that is spent; " <>
+              "there is no fixed reset time. Dispatch to grok stays held until the trailing " <>
+              "24h of usage drains below the cap (Arbiter.Quota.GrokLedger), or route to " <>
+              "another provider.",
           exit_status: exit_status,
           signal: signal
         }
@@ -958,6 +991,34 @@ defmodule Arbiter.Worker.StopReason do
   # genuine failure is unaffected (see the "still classifies" tests in
   # `stop_reason_test.exs`).
   @tool_result_prefix "⏴ "
+
+  # The summary is persisted as the run's `failure_reason`, and
+  # `Arbiter.Quota.GrokLedger.exhaustion/1` reads the server's own count back
+  # off it, so the `tokens (actual/limit): N/M` wording is part of the contract.
+  defp grok_free_usage_summary(haystack) do
+    detail =
+      case Regex.named_captures(@grok_free_usage_signature, haystack) do
+        %{"detail" => detail} -> detail
+        _ -> ""
+      end
+
+    model =
+      case Regex.named_captures(@grok_free_usage_model, detail) do
+        %{"model" => model} -> " for #{model}"
+        _ -> ""
+      end
+
+    counts =
+      case Regex.named_captures(@grok_free_usage_counts, detail) do
+        %{"actual" => actual, "limit" => limit} ->
+          ", tokens (actual/limit): #{actual}/#{limit}"
+
+        _ ->
+          ""
+      end
+
+    "grok free-tier usage exhausted#{model} — rolling 24h window#{counts}"
+  end
 
   defp unavailable_model(haystack) do
     case Regex.named_captures(@model_unavailable_signature, haystack) do

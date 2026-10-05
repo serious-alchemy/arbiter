@@ -1009,4 +1009,80 @@ defmodule Arbiter.Worker.StopReasonTest do
       refute reason.summary =~ "peak"
     end
   end
+
+  describe "classify/3 — grok (bd-cwq8b0)" do
+    @free_usage "subscription:free-usage-exhausted: You've used all the included free usage " <>
+                  "for model grok-4.7 for now. Usage resets over a rolling 24-hour window " <>
+                  "\u2014 tokens (actual/limit): 604183/500000."
+
+    test "a free-usage-exhausted 429 in result.errors[] is a quota stop, not a rate limit" do
+      reason =
+        StopReason.classify(
+          1,
+          [
+            "grok error: API error (status 429 Too Many Requests): " <> @free_usage
+          ],
+          "grok"
+        )
+
+      assert reason.category == :quota_exhausted
+      assert reason.summary =~ "grok-4.7"
+      assert reason.summary =~ "tokens (actual/limit): 604183/500000"
+      # A rolling window has no fixed reset time to report.
+      assert reason.retry_after == nil
+      assert reason.remediation =~ "rolling"
+    end
+
+    test "raw stderr form is classified the same way" do
+      reason = StopReason.classify(1, ["Error: " <> @free_usage], "grok")
+      assert reason.category == :quota_exhausted
+    end
+
+    test "the counts are optional" do
+      reason =
+        StopReason.classify(
+          1,
+          ["grok error: subscription:free-usage-exhausted: You've used all the free usage"],
+          "grok"
+        )
+
+      assert reason.category == :quota_exhausted
+      assert reason.summary =~ "free-tier usage exhausted"
+    end
+
+    test "the same text quoted in prose or a tool result is not a quota stop" do
+      assert StopReason.classify(1, ["The docs say: " <> @free_usage], "grok").category !=
+               :quota_exhausted
+
+      assert StopReason.classify(1, ["\u23F4 " <> @free_usage], "grok").category !=
+               :quota_exhausted
+    end
+
+    test "a clean exit that merely mentions it is not a quota stop" do
+      assert StopReason.classify(0, ["grok error: " <> @free_usage], "grok").category !=
+               :quota_exhausted
+    end
+
+    test "'Not signed in' is an auth stop" do
+      reason =
+        StopReason.classify(
+          1,
+          [
+            "grok error: Not signed in. To authenticate without a browser, run: grok login --device-code"
+          ],
+          "grok"
+        )
+
+      assert reason.category == :auth_expired
+    end
+
+    test "a rejected refresh token is an auth stop" do
+      for text <- [
+            "grok error: RefreshTokenRejected: the refresh token was rejected",
+            "grok error: auth: invalid_grant (Invalid or unknown refresh token)"
+          ] do
+        assert StopReason.classify(1, [text], "grok").category == :auth_expired
+      end
+    end
+  end
 end
