@@ -15,22 +15,19 @@ defmodule Arbiter.MCP.SchedulerToolsTest do
 
     coordinator = %Scope{tier: :coordinator, workspace_id: ws.id}
 
-    # Start an autopilot instance for testing
-    {:ok, pid} =
-      Autopilot.start_link(
-        name: nil,
-        paused: false,
-        interval_ms: :never,
-        topics: [],
-        snapshot: fn opts -> default_board(opts[:paused]) end
-      )
+    # Start an autopilot instance for testing. Supervised rather than
+    # start_link'd: a linked instance races the test process's exit, so an
+    # on_exit `Process.alive?` + `GenServer.stop` could hit a dead pid.
+    start_supervised!(
+      {Autopilot,
+       name: nil,
+       paused: false,
+       interval_ms: :never,
+       topics: [],
+       snapshot: fn opts -> default_board(opts[:paused]) end}
+    )
 
     on_exit(fn ->
-      # Ensure the autopilot is stopped
-      if Process.alive?(pid) do
-        GenServer.stop(pid)
-      end
-
       # Reset the global Autopilot singleton to paused state to prevent test pollution
       Autopilot.pause(Autopilot)
     end)

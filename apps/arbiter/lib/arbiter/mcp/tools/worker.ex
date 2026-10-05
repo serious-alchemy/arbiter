@@ -980,6 +980,13 @@ defmodule Arbiter.MCP.Tools.Worker do
       "#{phrase} — dispatch refused; waiting will not fix it. Attach an account on a " <>
         "capable provider, or change the repo's `routing.repos.<repo>.requires`"
 
+  # bd-c675ny: the model this dispatch would run is below the repo's routing
+  # floor. The phrase already reads `held — below floor (<detail>)`.
+  defp dispatch_error_message({:below_floor, _provider, phrase}),
+    do:
+      "#{phrase} — dispatch refused; waiting will not fix it. Raise the model, or change the " <>
+        "repo's `routing.floors.repos.<repo>.min_model_tier` (operator-owned)"
+
   defp dispatch_error_message(other), do: "dispatch failed: #{inspect(other)}"
 
   # bd-8lq2g7: `{:worker_active, …}` is rendered from the /2 arity so the message

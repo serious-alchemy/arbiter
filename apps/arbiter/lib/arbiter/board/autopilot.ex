@@ -237,12 +237,15 @@ defmodule Arbiter.Board.Autopilot do
   # out a retry budget. See `Arbiter.Worker.Dispatch.resolve_repo_for_dispatch/2`.
   # `:capability_missing` (bd-57uzkl) is one too: the provider the dispatch
   # would run on lacks a capability the repo requires, which only a config or
-  # account change fixes — not waiting.
+  # account change fixes — not waiting. `:below_floor` (bd-c675ny) is the same
+  # kind: a pinned model below the repo's floor stays below it until config
+  # changes.
   @deterministic_dispatch_errors [
     :ambiguous_repo,
     :no_repo_configured,
     :repo_not_found,
-    :capability_missing
+    :capability_missing,
+    :below_floor
   ]
 
   # Dispatch error shapes whose refusal already paged the coordinator from
@@ -998,6 +1001,9 @@ defmodule Arbiter.Board.Autopilot do
     do: DateTime.add(now, @account_cap_retry_ms, :millisecond)
 
   defp preflight_retry_not_before({:capability_missing, _provider, _phrase}, _count, now),
+    do: DateTime.add(now, @account_cap_retry_ms, :millisecond)
+
+  defp preflight_retry_not_before({:below_floor, _provider, _phrase}, _count, now),
     do: DateTime.add(now, @account_cap_retry_ms, :millisecond)
 
   defp preflight_retry_not_before(reason, count, now),

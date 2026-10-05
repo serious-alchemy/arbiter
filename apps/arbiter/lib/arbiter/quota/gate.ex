@@ -24,10 +24,12 @@ defmodule Arbiter.Quota.Gate do
     * `Arbiter.Quota.Gate.Continue` — always `:allow`, tagging `{:overage, _}`
       when the snapshot shows past-plan usage.
 
+  Each also implements `board_hold/3`, the board-level counterpart of `check/4`.
+
   The concrete module is resolved per-workspace by
   `Arbiter.Quota.gate_for_workspace/1`, which honours the config precedence
   (per-workspace > global > `:throttle`) and the `:arbiter, :quota` `:gate`
-  app-env override (the kill switch / test injection seam).
+  app-env override (a kill switch that can only select a core gate).
 
   ## Providers (bd-2mpo3f)
 
@@ -240,6 +242,21 @@ defmodule Arbiter.Quota.Gate do
               workspace :: Workspace.t() | nil,
               opts :: keyword()
             ) :: decision()
+
+  @doc """
+  The board-level question (seams #6): is this workspace's provider held, and
+  why? `Arbiter.Board.Snapshot.quota_hold/2` asks the workspace's resolved gate
+  this instead of re-deriving core's hold logic, so the board never paints a
+  hold the dispatcher's `check/4` would not honour (or promotes a card it
+  would hold).
+
+  `quota` is the latest snapshot for the workspace's default provider and
+  account (`nil` when nothing was captured — fail open with `:ok`); `policy` is
+  the `t:policy/0` pair `{account, workspace}` the snapshot is judged under.
+  Returns `:ok` or `{:hold, reason}` with an operator-facing reason string.
+  """
+  @callback board_hold(quota :: quota_source(), policy :: policy(), opts :: keyword()) ::
+              :ok | {:hold, String.t()}
 
   @doc """
   The configured `utilization_5h` at/above which the throttle gate holds.

@@ -145,6 +145,12 @@ defmodule ArbiterWeb.Api.WorkerController do
          {:conflict, "#{phrase} — dispatch refused",
           %{task_id: task_id, provider: provider && to_string(provider)}}}
 
+      # bd-c675ny: the model it would run is below the repo's routing floor.
+      {:error, {:below_floor, provider, phrase}} ->
+        {:error,
+         {:conflict, "#{phrase} — dispatch refused",
+          %{task_id: task_id, provider: provider && to_string(provider)}}}
+
       # bd-2aslx6 (#1428): a second agent-spawning dispatch onto a task whose
       # worker is mid-session used to silently open a second paid CLI inside the
       # same worker run. It is now refused, with a message that names the live
@@ -357,6 +363,12 @@ defmodule ArbiterWeb.Api.WorkerController do
 
   # bd-57uzkl: the resume's provider lacks a capability the repo requires.
   defp resume_error({:capability_missing, provider, phrase}, task_id),
+    do:
+      {:conflict, "#{phrase} — resume refused",
+       %{task_id: task_id, provider: provider && to_string(provider)}}
+
+  # bd-c675ny: the resume's model is below the repo's routing floor.
+  defp resume_error({:below_floor, provider, phrase}, task_id),
     do:
       {:conflict, "#{phrase} — resume refused",
        %{task_id: task_id, provider: provider && to_string(provider)}}

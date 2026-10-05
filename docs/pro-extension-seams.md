@@ -338,7 +338,7 @@ Disposition of the §4.1 `Application.get_env/3` sites:
 
 | Key | Disposition |
 |---|---|
-| `:quota` → `:gate` | Still read first, by design: kill switch and test injection. A workspace selects an *installed* gate through `quota.gate`. Demotion is §7 item 6. |
+| `:quota` → `:gate` | Demoted (seams #6, bd-60115o): still read first, but only a core gate (`Throttle` / `Continue`) is honoured; any other value is ignored, so it can never install a policy. A workspace selects an *installed* gate through `quota.gate`. `Quota.Gate` also has a `board_hold/3` callback, and `Board.Snapshot.quota_hold/2` asks the resolved gate. |
 | `:review_gate_fix_round_dispatcher`, `:merge_queue_conflict_resolver`, `:merge_queue_revise_dispatcher`, `:dispatch_queue_dispatcher`, `:migrations_module` | Test-only seams over §1 "Internal" behaviours. Not extension points, deliberately left alone. |
 | `:sessions_runner`, `:sessions_terminal` | Test-only (`Terminal` is "uncertain", §1 row 11; revisit only with a hosted tier). |
 | `:github_limiter_server` | Swaps a registered process name, not a behaviour. |

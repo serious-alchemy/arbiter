@@ -34,4 +34,14 @@ defmodule Arbiter.Quota.Gate.Throttle do
       binding -> {:hold, Map.put(binding, :phrase, Gate.hold_phrase(quota, workspace, opts))}
     end
   end
+
+  @impl true
+  def board_hold(nil, _policy, _opts), do: :ok
+
+  def board_hold(quota, policy, _opts) do
+    case Gate.hold_phrase(quota, policy) do
+      nil -> :ok
+      phrase -> {:hold, phrase}
+    end
+  end
 end

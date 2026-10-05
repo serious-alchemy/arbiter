@@ -66,6 +66,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Agents
   alias Arbiter.Agents.CapabilityMatrix
   alias Arbiter.Agents.Claude.CredentialCheck
+  alias Arbiter.Agents.Floors
   alias Arbiter.Agents.Gemini.Config, as: GeminiConfig
   alias Arbiter.Agents.ModelFamily
   alias Arbiter.Agents.ProviderConstraint
@@ -198,6 +199,7 @@ defmodule Arbiter.Worker.Dispatch do
          opts = route_implementer(task, opts),
          :ok <- ensure_provider_constraint(task, opts),
          :ok <- ensure_capability(task, opts),
+         :ok <- ensure_floor(task, opts),
          :ok <- maybe_pause_gate(task, opts),
          :ok <- maybe_quota_gate(task, opts),
          :ok <- ensure_account_capacity(task, opts),
@@ -1433,6 +1435,69 @@ defmodule Arbiter.Worker.Dispatch do
       require Logger
       Logger.warning("Dispatch: capability check crashed for #{task.id}: #{Exception.message(e)}")
       :ok
+  end
+
+  # bd-c675ny (design §6.4, E17): the floor hard gate on the model this
+  # dispatch will actually run. The clamp already raised the tier the policy
+  # chose, and the router drops a below-floor candidate; this is the same check
+  # on what they cannot see — the `no_candidate` fall-through, an unrouted
+  # workspace, a resume — where a *pinned* model (a legacy `agent.config.model`,
+  # a rule's `"model"`) can still sit below the floor. Off (no `routing.floors`
+  # config) `Floors.gate/2` is `nil` and nothing is read. An operator's explicit
+  # `model:` is an override, not routing (§10), and is left alone. Refused
+  # rather than held: waiting cannot raise a model's tier.
+  defp ensure_floor(%Issue{} = task, opts) do
+    cond do
+      Keyword.get(opts, :review, false) == true -> :ok
+      Arbiter.Worker.ReviewGate.base_task_id(task.id) != task.id -> :ok
+      explicit_model?(opts) -> :ok
+      true -> floor_verdict(task, opts)
+    end
+  end
+
+  defp explicit_model?(opts) do
+    case Keyword.get(opts, :model) do
+      model when is_binary(model) and model != "" -> true
+      _ -> false
+    end
+  end
+
+  defp floor_verdict(task, opts) do
+    workspace = load_workspace(task)
+
+    case Floors.gate(workspace, Keyword.get(opts, :repo) || task.repo) do
+      nil ->
+        :ok
+
+      gate ->
+        provider = quota_gate_provider(task, workspace, opts)
+        routed = Routing.decide(task, workspace, opts)
+        agent_config = get_in(workspace.config || %{}, ["agent", "config"]) || %{}
+        model = floor_model(routed, provider, agent_config)
+
+        case Floors.check(gate, routed, provider, model, agent_config) do
+          :ok -> :ok
+          {:below, detail} -> {:error, {:below_floor, provider, "held — below floor (#{detail})"}}
+        end
+    end
+  rescue
+    e ->
+      require Logger
+      Logger.warning("Dispatch: floor check crashed for #{task.id}: #{Exception.message(e)}")
+      :ok
+  end
+
+  # The model the spawn would run: the routed config's pin when the provider is
+  # the routed adapter (a different adapter drops it, `apply_agent_type_override/2`),
+  # else the tier through the provider's own map.
+  defp floor_model(%{type: type, config: config}, provider, agent_config) do
+    pinned = config["model"]
+
+    if is_binary(pinned) and pinned != "" and to_string(type) == to_string(provider) do
+      pinned
+    else
+      ModelFamily.model_for_tier(provider, config["model_tier"], agent_config)
+    end
   end
 
   defp capability_role(opts) do
@@ -3109,7 +3174,10 @@ defmodule Arbiter.Worker.Dispatch do
               standing_orders_digest: RunProvenance.standing_orders_digest(workspace),
               routing_policy: RunProvenance.routing_policy_string(workspace),
               model_tier: Keyword.get(agent_opts, :model_tier),
-              thinking: Keyword.get(agent_opts, :thinking)
+              thinking: Keyword.get(agent_opts, :thinking),
+              # bd-c675ny (R8): a floor-clamped dispatch did not get the rule its
+              # policy/canary arm assigned; Canary.Metrics leaves it out.
+              floor_clamped: Floors.clamped?(choice)
             })
 
             # Stamp the resolved model onto the worker's meta at dispatch time so
