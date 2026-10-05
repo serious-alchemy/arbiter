@@ -154,7 +154,7 @@ defmodule Arbiter.Settings.Installation do
       public? true
       allow_nil? true
 
-      description "Operator-owned capability matrix override (bd-57uzkl): rows %{\"match\" => %{\"provider\", \"model\"}, \"resume\", \"async_verification\", \"evidence\"} consulted ahead of the code defaults. nil = defaults only."
+      description ~s[Operator-owned capability matrix override (bd-57uzkl): rows %{"match" => %{"provider", "model"}, "resume", "async_verification", "evidence"} consulted ahead of the code defaults. nil = defaults only.]
     end
 
     attribute :quota_providers_shown, {:array, :string} do

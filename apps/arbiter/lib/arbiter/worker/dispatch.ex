@@ -64,10 +64,10 @@ defmodule Arbiter.Worker.Dispatch do
 
   alias Arbiter.Accounts.Admission
   alias Arbiter.Agents
+  alias Arbiter.Agents.CapabilityMatrix
   alias Arbiter.Agents.Claude.CredentialCheck
   alias Arbiter.Agents.Gemini.Config, as: GeminiConfig
   alias Arbiter.Agents.ModelFamily
-  alias Arbiter.Agents.CapabilityMatrix
   alias Arbiter.Agents.ProviderConstraint
   alias Arbiter.Agents.ProviderRouting
   alias Arbiter.Agents.Routing
