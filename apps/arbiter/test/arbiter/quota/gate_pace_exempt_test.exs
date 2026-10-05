@@ -134,7 +134,9 @@ defmodule Arbiter.Quota.GatePaceExemptTest do
       for priority <- [0, 2] do
         assert nil == gate(long(0.93, 0.95), {paced(@acct), nil}, priority)
 
-        assert %{threshold: 0.95} = binding = gate(long(0.96, 0.95), {paced(@acct), nil}, priority)
+        assert %{threshold: 0.95} =
+                 binding = gate(long(0.96, 0.95), {paced(@acct), nil}, priority)
+
         assert binding.mode == :paced
       end
     end
@@ -158,7 +160,10 @@ defmodule Arbiter.Quota.GatePaceExemptTest do
     test "has its own cap, set separately from the weekly one" do
       acct = paced(Map.put(@acct5, "weekly_pace_exempt_threshold", 0.5))
       assert nil == gate(primary(0.79, 0.4), {acct, nil}, 0)
-      assert %{window: "5h", threshold: 0.8, mode: :exempt} = gate(primary(0.8, 0.4), {acct, nil}, 0)
+
+      assert %{window: "5h", threshold: 0.8, mode: :exempt} =
+               gate(primary(0.8, 0.4), {acct, nil}, 0)
+
       assert %{window: "5h", threshold: 0.4} = gate(primary(0.8, 0.4), {acct, nil}, 1)
     end
 
@@ -261,11 +266,14 @@ defmodule Arbiter.Quota.GatePaceExemptTest do
     end
 
     test "nil when the dispatch was under the paced line anyway" do
-      assert nil == Gate.pace_exemption(long(0.2, 0.3), {paced(@acct), nil}, now: @now, priority: 0)
+      assert nil ==
+               Gate.pace_exemption(long(0.2, 0.3), {paced(@acct), nil}, now: @now, priority: 0)
     end
 
     test "nil for a non-exempt priority, or no priority" do
-      assert nil == Gate.pace_exemption(long(0.5, 0.3), {paced(@acct), nil}, now: @now, priority: 2)
+      assert nil ==
+               Gate.pace_exemption(long(0.5, 0.3), {paced(@acct), nil}, now: @now, priority: 2)
+
       assert nil == Gate.pace_exemption(long(0.5, 0.3), {paced(@acct), nil}, now: @now)
     end
 
@@ -275,7 +283,8 @@ defmodule Arbiter.Quota.GatePaceExemptTest do
     end
 
     test "nil when a held dispatch is held (past the cap)" do
-      assert nil == Gate.pace_exemption(long(0.95, 0.3), {paced(@acct), nil}, now: @now, priority: 0)
+      assert nil ==
+               Gate.pace_exemption(long(0.95, 0.3), {paced(@acct), nil}, now: @now, priority: 0)
     end
 
     test "5h window" do

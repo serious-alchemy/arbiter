@@ -19,6 +19,10 @@ defmodule Arbiter.Quota.Gate.Throttle do
   it, so a blown Codex or Gemini account holds exactly like a blown Anthropic
   one.
 
+  The P0 pace exemption (bd-6bxv7h, design §4.2) enters here: the task's own
+  priority is passed to the gate as `:priority`, so an exempt task's paced
+  ceiling lifts to the account's dedicated cap. A `nil` task is never exempt.
+
   Fails open — a `nil` (or unrecognized) snapshot always returns `:allow`, so
   dispatch never deadlocks on missing quota data.
   """
@@ -28,7 +32,9 @@ defmodule Arbiter.Quota.Gate.Throttle do
   alias Arbiter.Quota.Gate
 
   @impl true
-  def check(_task, quota, workspace, opts) do
+  def check(task, quota, workspace, opts) do
+    opts = put_priority(opts, task)
+
     case Gate.gating_window(quota, workspace, opts) do
       nil -> :allow
       binding -> {:hold, Map.put(binding, :phrase, Gate.hold_phrase(quota, workspace, opts))}
@@ -38,10 +44,17 @@ defmodule Arbiter.Quota.Gate.Throttle do
   @impl true
   def board_hold(nil, _policy, _opts), do: :ok
 
-  def board_hold(quota, policy, _opts) do
-    case Gate.hold_phrase(quota, policy) do
+  def board_hold(quota, policy, opts) do
+    case Gate.hold_phrase(quota, policy, Keyword.take(opts, [:priority])) do
       nil -> :ok
       phrase -> {:hold, phrase}
     end
   end
+
+  # The P0 pace exemption (bd-6bxv7h) reads the task's **own** priority, never
+  # an epic floor's. A caller-supplied `:priority` wins; no task, no priority.
+  defp put_priority(opts, %{priority: priority}) when is_integer(priority),
+    do: Keyword.put_new(opts, :priority, priority)
+
+  defp put_priority(opts, _task), do: opts
 end

@@ -816,7 +816,12 @@ defmodule Arbiter.Quota.Gate do
 
     sides =
       if pace_exempt?(policy, priority) do
-        cap = strictest(exempt_cap(account_config(account), window), exempt_cap(ws_quota(workspace), window))
+        cap =
+          strictest(
+            exempt_cap(account_config(account), window),
+            exempt_cap(ws_quota(workspace), window)
+          )
+
         Enum.map(sides, &exempt_side(&1, cap, window))
       else
         sides
@@ -832,7 +837,8 @@ defmodule Arbiter.Quota.Gate do
 
   defp exempt_side(side, _cap, _window), do: side
 
-  defp exempt_cap(config, window), do: config |> Map.get(exempt_cap_key(window)) |> parse_fraction()
+  defp exempt_cap(config, window),
+    do: config |> Map.get(exempt_cap_key(window)) |> parse_fraction()
 
   defp exempt_cap_key(:primary), do: "pace_exempt_threshold"
   defp exempt_cap_key(:long), do: "weekly_pace_exempt_threshold"

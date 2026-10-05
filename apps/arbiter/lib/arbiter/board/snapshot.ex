@@ -79,6 +79,7 @@ defmodule Arbiter.Board.Snapshot do
   alias Arbiter.Board.QueueOrder
   alias Arbiter.Board.ReadySince
   alias Arbiter.Board.Scheduler
+  alias Arbiter.Quota.Gate
   alias Arbiter.Tasks.EdgeGate
   alias Arbiter.Tasks.Lifecycle
   alias Arbiter.Tasks.PullRequest
@@ -829,13 +830,41 @@ defmodule Arbiter.Board.Snapshot do
         {issue.id, verdict}
       end)
     else
-      %{}
+      exempt_card_holds(workspace, issues)
     end
   rescue
     _ -> %{}
   end
 
   defp ticket_quota_holds(_, _, _), do: %{}
+
+  # The P0 pace exemption on a routing-off workspace (bd-6bxv7h, design §4.2).
+  # The board-wide `quota_hold/2` evaluates with no task, so it would keep
+  # Autopilot from promoting a card the dispatcher would let through. A card
+  # whose own priority is exempt gets its own verdict instead, read at the
+  # lifted ceiling, so it is held only when the exempt cap is reached too.
+  # Cards that are not exempt get no entry and keep the board-wide hold, and
+  # with no exemption configured nothing is read beyond the account.
+  defp exempt_card_holds(workspace, issues) do
+    ws_id = workspace.id
+    provider = quota_provider(workspace)
+    account = quota_account(ws_id, provider)
+    policy = {account, workspace}
+
+    if Gate.pace_exempt_priority(policy) do
+      issues
+      |> Enum.filter(&(Lifecycle.state_of(&1) == :queued and not epic?(&1)))
+      |> Enum.filter(&Gate.pace_exempt?(policy, &1.priority))
+      |> Enum.group_by(& &1.priority)
+      |> Enum.flat_map(fn {priority, cards} ->
+        verdict = auth_hold(workspace) || quota_window_hold(workspace, priority: priority)
+        Enum.map(cards, &{&1.id, verdict})
+      end)
+      |> Map.new()
+    else
+      %{}
+    end
+  end
 
   # bd-13pqcp: a Ready ticket carrying a provider constraint is held — by its
   # own constraint, not the board's — when no provider the constraint allows
@@ -875,7 +904,9 @@ defmodule Arbiter.Board.Snapshot do
 
   defp auth_hold(_), do: nil
 
-  defp quota_window_hold(%Arbiter.Tasks.Workspace{} = workspace) do
+  defp quota_window_hold(workspace, opts \\ [])
+
+  defp quota_window_hold(%Arbiter.Tasks.Workspace{} = workspace, opts) do
     ws_id = workspace.id
 
     provider = quota_provider(workspace)
@@ -886,13 +917,13 @@ defmodule Arbiter.Board.Snapshot do
     Arbiter.Quota.gate_for_workspace(workspace).board_hold(
       latest_quota(account, provider),
       {account, workspace},
-      []
+      opts
     )
   rescue
     _ -> :ok
   end
 
-  defp quota_window_hold(_), do: :ok
+  defp quota_window_hold(_, _opts), do: :ok
 
   # ---- shared column classification -----------------------------------------
 

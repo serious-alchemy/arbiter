@@ -1432,7 +1432,8 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
   defp pace_exempt_priority_error(changeset, got) do
     Changeset.add_error(changeset,
       field: :config,
-      message: "quota.pace_exempt_priority must be an integer in 0..4 or \"none\"; got: #{inspect(got)}"
+      message:
+        "quota.pace_exempt_priority must be an integer in 0..4 or \"none\"; got: #{inspect(got)}"
     )
   end
 
