@@ -208,5 +208,40 @@ defmodule Arbiter.AgentsTest do
       assert Claude.Config.active_model() == "opus"
       assert Arbiter.Agents.Gemini.Config.active_model() == "opus"
     end
+
+    test "prepare/2 accepts keyword list opts directly" do
+      ws = %Workspace{
+        config: %{
+          "agent" => %{"type" => "claude", "config" => %{"model" => "sonnet"}},
+          "review_agent" => %{"type" => "claude", "config" => %{"model" => "opus"}}
+        }
+      }
+
+      assert Agents.prepare(ws, role: :review_agent) == :ok
+      assert Claude.Config.active_model() == "opus"
+    end
+
+    test "Agent behaviour declares prepare/2 as an optional callback" do
+      callbacks = Arbiter.Agents.Agent.behaviour_info(:callbacks)
+      optional = Arbiter.Agents.Agent.behaviour_info(:optional_callbacks)
+
+      assert {:prepare, 2} in callbacks
+      assert {:prepare, 2} in optional
+    end
+
+    test "all in-tree agent adapters implement prepare/2" do
+      for {_type, adapter} <- Agents.adapters() do
+        assert function_exported?(adapter, :prepare, 2),
+               "Expected #{inspect(adapter)} to export prepare/2"
+      end
+    end
+
+    test "prepare/2 raises FunctionClauseError for invalid role atoms" do
+      ws = %Workspace{config: %{}}
+
+      assert_raise FunctionClauseError, fn ->
+        Agents.prepare(ws, :invalid_role)
+      end
+    end
   end
 end

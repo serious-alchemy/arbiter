@@ -1,6 +1,8 @@
 defmodule ArbiterWeb.Loopback do
   @moduledoc """
-  Is this peer on the box? The one predicate behind the dashboard's auth model.
+  Is this peer on the box? Loopback is *not* a dashboard identity (bd-3gycsz:
+  `tailscale serve` proxies from 127.0.0.1; see `ArbiterWeb.DashboardAuth`), but
+  it still gates the terminal and is half of the Tailscale-header trust check.
 
   Arbiter binds directly to `127.0.0.1:4848` by default, with no reverse proxy
   in front, so `conn.remote_ip` / `peer_data.address` is always the real peer

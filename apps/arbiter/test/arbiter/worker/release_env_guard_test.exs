@@ -110,6 +110,10 @@ defmodule Arbiter.Worker.ReleaseEnvGuardTest do
     # bd-9r5jdt: worker-image lifecycle: `git cat-file` on the default branch and
     # `podman` / `skopeo` through `ReleaseEnv.cmd/3`.
     "apps/arbiter/lib/arbiter/worker/image.ex" => :scrubbed,
+    # bd-1wm14e: image-keyed deps cache: `git cat-file` / `git archive`, `tar`,
+    # `cp` and `chmod`, all through `ReleaseEnv.cmd/3`. The `mix` it seeds with
+    # runs inside a container (`Container.run/2`), never on the host.
+    "apps/arbiter/lib/arbiter/worker/deps_cache.ex" => :scrubbed,
     # bd-4wy1w1: git only (init / config / update-ref / checkout / fetch) to
     # build, pin, sync back and reap a git-layout-B private clone. Deps seeding
     # (`mix deps.get`) goes through `Worktree.ensure_deps_fetched/1`.

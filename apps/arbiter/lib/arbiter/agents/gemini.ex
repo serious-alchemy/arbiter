@@ -53,6 +53,13 @@ defmodule Arbiter.Agents.Gemini do
   @impl true
   def provider, do: "gemini"
 
+  @impl true
+  def prepare(workspace, opts \\ []) do
+    role = Keyword.get(opts, :role, :agent)
+    Config.put_active(workspace, role)
+    :ok
+  end
+
   @doc """
   Whether this host's Gemini-family spawn actually enforces the resolved
   `Arbiter.Agents.SecurityPolicy` (bd-7s29yq / T6b).

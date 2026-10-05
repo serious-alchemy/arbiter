@@ -55,4 +55,7 @@ defmodule Arbiter.Trackers.None do
 
   @impl true
   def extract_description(_), do: ""
+
+  @impl true
+  def prepare(_workspace, _opts \\ []), do: :ok
 end
