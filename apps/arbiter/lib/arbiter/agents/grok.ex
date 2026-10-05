@@ -29,7 +29,7 @@ defmodule Arbiter.Agents.Grok do
   `GROK_DISABLE_AUTOUPDATER=1`, `GROK_TELEMETRY_TRACE_UPLOAD=0`, `GROK_MEMORY=0`
   and `NO_COLOR=1`. An inherited `XAI_API_KEY` or `GROK_AUTH_PROVIDER_COMMAND`
   is removed from the spawn; the credential comes from
-  `Arbiter.Agents.Grok.Credential`, the seam the credential broker plugs into.
+  `Arbiter.Agents.Grok.Credential`, which asks the credential broker's auth provider.
 
   ## Completion and failure
 
@@ -155,7 +155,13 @@ defmodule Arbiter.Agents.Grok do
 
     scrubbed = Enum.map(@credential_vars, &{&1, false})
 
-    merge_env(scrubbed ++ @static_env ++ home_env, Credential.env(opts))
+    credential_opts =
+      case List.keyfind(home_env, "GROK_HOME", 0) do
+        {_, grok_home} -> Keyword.put(opts, :grok_home, grok_home)
+        nil -> opts
+      end
+
+    merge_env(scrubbed ++ @static_env ++ home_env, Credential.env(credential_opts))
   end
 
   # Later pairs win, so the credential seam can replace a scrubbed var.

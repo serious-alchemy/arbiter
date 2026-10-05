@@ -151,7 +151,8 @@ defmodule Arbiter.Worker.JailHideTest do
       grok_root = Path.join(h, ".cache/arbiter/worker-grok")
       File.mkdir_p!(Path.join(grok_root, "sibling/.grok"))
 
-      %{dirs: dirs, files: files, keep: keep} = Hide.paths([{:grok_home_root, grok_root} | fx.opts])
+      %{dirs: dirs, files: files, keep: keep} =
+        Hide.paths([{:grok_home_root, grok_root} | fx.opts])
 
       # The whole ~/.grok is masked (bd-9p4lx9), but the grok binary lives under
       # it, so bin/ comes back via `keep`; auth.json is not kept.
