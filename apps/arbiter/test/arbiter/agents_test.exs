@@ -235,5 +235,13 @@ defmodule Arbiter.AgentsTest do
                "Expected #{inspect(adapter)} to export prepare/2"
       end
     end
+
+    test "prepare/2 raises FunctionClauseError for invalid role atoms" do
+      ws = %Workspace{config: %{}}
+
+      assert_raise FunctionClauseError, fn ->
+        Agents.prepare(ws, :invalid_role)
+      end
+    end
   end
 end

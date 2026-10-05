@@ -72,13 +72,17 @@ defmodule Arbiter.Trackers do
   @spec prepare(Issue.t(), Arbiter.Tasks.Workspace.t() | nil, keyword()) :: :ok
   def prepare(issue, workspace, opts \\ [])
 
-  def prepare(%Issue{} = issue, workspace, opts) when is_list(opts) do
-    adapter = for_task(issue)
+  def prepare(%Issue{tracker_type: type}, workspace, opts) when is_list(opts) do
+    case Map.get(adapters(), type) do
+      nil ->
+        :ok
 
-    if function_exported?(adapter, :prepare, 2) do
-      adapter.prepare(workspace, opts)
-    else
-      :ok
+      adapter ->
+        if Code.ensure_loaded?(adapter) and function_exported?(adapter, :prepare, 2) do
+          adapter.prepare(workspace, opts)
+        else
+          :ok
+        end
     end
   end
 
@@ -318,12 +322,12 @@ defmodule Arbiter.Trackers do
   Mirrors the adapter-specific `with_workspace/2` helpers — callers that want
   to stay tracker-agnostic use this instead of reaching into a specific adapter.
   """
-  @spec with_workspace(atom(), Arbiter.Tasks.Workspace.t(), (-> result)) :: result
+  @spec with_workspace(atom(), Arbiter.Tasks.Workspace.t() | map() | nil, (-> result)) :: result
         when result: any()
   def with_workspace(type, workspace, fun) do
-    adapter = adapter_for_workspace_type(type, workspace)
+    adapter = Map.get(adapters(), type, None)
 
-    if function_exported?(adapter, :with_workspace, 2) do
+    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :with_workspace, 2) do
       adapter.with_workspace(workspace, fun)
     else
       fun.()

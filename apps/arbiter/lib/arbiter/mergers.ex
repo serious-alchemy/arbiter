@@ -212,7 +212,7 @@ defmodule Arbiter.Mergers do
 
     adapter = for_workspace(workspace)
 
-    if function_exported?(adapter, :prepare, 2) do
+    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :prepare, 2) do
       adapter.prepare(workspace, opts)
     else
       :ok
@@ -241,7 +241,7 @@ defmodule Arbiter.Mergers do
     workspace = scope(workspace, repo)
     adapter = for_workspace(workspace)
 
-    if function_exported?(adapter, :with_workspace, 2) do
+    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :with_workspace, 2) do
       adapter.with_workspace(workspace, fn -> adapter.link_for(mr_ref) end)
     else
       adapter.link_for(mr_ref)

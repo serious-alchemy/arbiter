@@ -205,5 +205,54 @@ defmodule Arbiter.TrackersTest do
       assert Trackers.prepare(issue, nil) == :ok
       assert Arbiter.Trackers.GitHub.Config.active_repo_slug() == nil
     end
+
+    test "with_workspace/3 accepts nil workspace without raising" do
+      ws = %Arbiter.Tasks.Workspace{
+        config: %{
+          "tracker" => %{
+            "type" => "github",
+            "config" => %{"owner" => "outer", "repo" => "repo"}
+          }
+        }
+      }
+
+      Arbiter.Trackers.GitHub.Config.put_active(ws)
+      assert Arbiter.Trackers.GitHub.Config.active_repo_slug() == "outer/repo"
+
+      result =
+        Trackers.with_workspace(:github, nil, fn ->
+          assert Arbiter.Trackers.GitHub.Config.active_repo_slug() == nil
+          :worked
+        end)
+
+      assert result == :worked
+      assert Arbiter.Trackers.GitHub.Config.active_repo_slug() == "outer/repo"
+      Arbiter.Trackers.GitHub.Config.put_active(nil)
+    end
+
+    test "with_workspace/3 accepts a raw config map" do
+      cfg = %{"owner" => "raworg", "repo" => "rawrepo"}
+
+      result =
+        Trackers.with_workspace(:github, cfg, fn ->
+          assert Arbiter.Trackers.GitHub.Config.active_repo_slug() == "raworg/rawrepo"
+          :worked
+        end)
+
+      assert result == :worked
+      Arbiter.Trackers.GitHub.Config.put_active(nil)
+    end
+
+    test "with_workspace/3 executes function for :none and unregistered tracker types" do
+      assert Trackers.with_workspace(:none, nil, fn -> :ok_none end) == :ok_none
+
+      assert Trackers.with_workspace(:unregistered_xyz, nil, fn -> :ok_unregistered end) ==
+               :ok_unregistered
+    end
+
+    test "prepare/3 returns :ok for an unregistered tracker_type" do
+      issue = %Issue{tracker_type: :nonexistent_tracker_type}
+      assert Trackers.prepare(issue, nil) == :ok
+    end
   end
 end

@@ -419,13 +419,13 @@ defmodule Arbiter.Agents do
   @spec prepare(Workspace.t() | nil, :agent | :review_agent | keyword()) :: :ok
   def prepare(workspace, role_or_opts \\ :agent)
 
-  def prepare(workspace, role) when is_atom(role) do
+  def prepare(workspace, role) when role in [:agent, :review_agent] do
     prepare(workspace, role: role)
   end
 
   def prepare(workspace, opts) when is_list(opts) do
     for {_type, adapter} <- adapters() do
-      if function_exported?(adapter, :prepare, 2) do
+      if Code.ensure_loaded?(adapter) and function_exported?(adapter, :prepare, 2) do
         adapter.prepare(workspace, opts)
       end
     end
