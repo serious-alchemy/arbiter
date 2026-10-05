@@ -82,6 +82,16 @@ defmodule Arbiter.Agents.GrokTest do
   end
 
   describe "default_argv/2" do
+    test "the worker's config.toml carries a low rate_limit_retry_threshold (bd-cwq8b0)", %{
+      worktree: wt
+    } do
+      assert {:ok, _argv} =
+               Grok.default_argv("do the thing", worktree: wt, security: policy(:auto))
+
+      toml = File.read!(Path.join(ConfigDir.grok_home(worktree: wt), "config.toml"))
+      assert toml =~ ~r/^\[models\]\nrate_limit_retry_threshold = \d+$/m
+    end
+
     test "runs grok under the Worker.Jail with the isolated HOME bound", %{
       worktree: wt,
       grok: grok,
