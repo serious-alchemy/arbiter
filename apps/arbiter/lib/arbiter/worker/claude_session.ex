@@ -487,6 +487,8 @@ defmodule Arbiter.Worker.ClaudeSession do
   defp process_line(%{} = session, line) do
     case decode_event(line) do
       {:ok, event} ->
+        event = normalize_event(session, event)
+
         session =
           session
           |> absorb_usage(event)
@@ -515,6 +517,14 @@ defmodule Arbiter.Worker.ClaudeSession do
         |> emit_line(line, not json_shaped?(line))
     end
   end
+
+  # grok's streaming-messages-json is Claude's wire format with a few quirks
+  # (tool names, byte-array Bash results, unknown-vs-zero usage); rewrite them
+  # up front so every clause below sees a plain Claude event.
+  defp normalize_event(%{provider: "grok"}, event),
+    do: Arbiter.Agents.Grok.Stream.normalize_event(event)
+
+  defp normalize_event(_session, event), do: event
 
   # Gemini streams assistant output as `delta: true` chunks, so the `arb done`
   # sentinel can straddle two events that the per-line check in emit_line/3 would
@@ -833,6 +843,16 @@ defmodule Arbiter.Worker.ClaudeSession do
     update_usage(
       session,
       Arbiter.Agents.Codex.Stream.usage_fields(event, Map.get(session, :model))
+    )
+  end
+
+  # grok reports usage on every assistant message as well as in `result`. Sum it
+  # as it arrives so a run killed before its `result` line (SIGTERM) still
+  # leaves a record; the `result` totals below then overwrite the sums.
+  defp absorb_usage(%{provider: "grok"} = session, %{"type" => "assistant"} = event) do
+    update_usage(
+      session,
+      Arbiter.Agents.Grok.Stream.message_usage_fields(event, Map.get(session, :usage) || %{})
     )
   end
 
@@ -1679,6 +1699,14 @@ defmodule Arbiter.Worker.ClaudeSession do
 
   defp format_event(event, %{provider: "gemini"}),
     do: Arbiter.Agents.Gemini.Stream.format_event(event)
+
+  # grok's error `result` names its cause only in `errors[]`.
+  defp format_event(%{"type" => "result"} = event, %{provider: "grok"}) do
+    Enum.map(
+      [result_summary(event) | Arbiter.Agents.Grok.Stream.error_lines(event)],
+      &{&1, false}
+    )
+  end
 
   defp format_event(event, %{provider: "codex"}),
     do: Arbiter.Agents.Codex.Stream.format_event(event)

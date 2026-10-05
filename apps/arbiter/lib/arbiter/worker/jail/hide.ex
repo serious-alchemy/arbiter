@@ -20,7 +20,8 @@ defmodule Arbiter.Worker.Jail.Hide do
       `~/.gemini` (the operator's own agy state; the worker has its isolated
       HOME), `~/.config/gh`, `~/.config/gcloud`, `~/.ssh`, `~/.aws`,
       `~/.kube`, `~/.docker`; and the files `~/.netrc`, `~/.pgpass`,
-      `~/.git-credentials`.
+      `~/.git-credentials` and `~/.grok/auth.json` (the operator's grok login;
+      the rest of `~/.grok` holds the grok binary and stays visible).
     * **The install**: the data dir (`~/.arbiter`: the DB and its WAL, the
       account configs, `arbiter.env`, the release cookie, releases), the
       configured DB path and its `-wal` / `-shm` / `-journal` sidecars when it
@@ -69,7 +70,7 @@ defmodule Arbiter.Worker.Jail.Hide do
   @type t :: %{dirs: [String.t()], files: [String.t()], keep: [String.t()]}
 
   @credential_dirs ~w(.claude .codex .gemini .config/gh .config/gcloud .ssh .aws .kube .docker)
-  @credential_files ~w(.netrc .pgpass .git-credentials)
+  @credential_files ~w(.netrc .pgpass .git-credentials .grok/auth.json)
 
   @identities ~w(id_rsa id_ecdsa id_ed25519 id_dsa id_ecdsa_sk id_ed25519_sk)
   @ssh_keep ~w(known_hosts config config.d) ++
@@ -83,7 +84,7 @@ defmodule Arbiter.Worker.Jail.Hide do
   Options, all defaulting to the live configuration (the overrides are for
   tests): `:operator_home`, `:data_dir`, `:database`, `:accounts_root`,
   `:worktree_root`, `:log_root`, `:sessions_root`, `:agy_home_root`,
-  `:claude_config_dir`, `:repos` (every workspace repo path), `:own_repo`
+  `:grok_home_root`, `:claude_config_dir`, `:repos` (every workspace repo path), `:own_repo`
   (the repo the worker's worktree belongs to, never hidden) and `:unmask`.
   """
   @spec paths(keyword()) :: t()
@@ -186,6 +187,7 @@ defmodule Arbiter.Worker.Jail.Hide do
       opt(opts, :worktree_root, &Paths.worktree_root/0),
       opt(opts, :log_root, &Paths.output_log_root/0),
       opt(opts, :agy_home_root, &Arbiter.Agents.Gemini.ConfigDir.home_root/0),
+      opt(opts, :grok_home_root, &Arbiter.Agents.Grok.ConfigDir.home_root/0),
       opt(opts, :claude_config_dir, &Arbiter.Agents.Claude.ConfigDir.path/0)
     ]
   end

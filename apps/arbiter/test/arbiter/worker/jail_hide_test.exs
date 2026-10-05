@@ -138,6 +138,23 @@ defmodule Arbiter.Worker.JailHideTest do
       assert Path.join(h, ".git-credentials") in files
     end
 
+    test "masks the operator's grok login file and every other worker's grok HOME (bd-9ydvov)",
+         %{fx: fx} do
+      h = fx.home
+      File.mkdir_p!(Path.join(h, ".grok/bin"))
+      File.write!(Path.join(h, ".grok/auth.json"), "SECRET-grok-auth")
+      File.write!(Path.join(h, ".grok/bin/grok"), "binary")
+      grok_root = Path.join(h, ".cache/arbiter/worker-grok")
+      File.mkdir_p!(Path.join(grok_root, "sibling/.grok"))
+
+      %{dirs: dirs, files: files} = Hide.paths([{:grok_home_root, grok_root} | fx.opts])
+
+      # Only the login file: the grok binary lives under ~/.grok and must stay.
+      assert Path.join(h, ".grok/auth.json") in files
+      refute Path.join(h, ".grok") in dirs
+      assert grok_root in dirs
+    end
+
     test "skips paths that do not exist (bwrap cannot create a mount point there)",
          %{fx: fx} do
       %{dirs: dirs, files: files} = Hide.paths(fx.opts)

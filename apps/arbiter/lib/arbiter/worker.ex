@@ -5483,6 +5483,7 @@ defmodule Arbiter.Worker do
     case provider do
       "gemini" -> Arbiter.Agents.Gemini
       "codex" -> Arbiter.Agents.Codex
+      "grok" -> Arbiter.Agents.Grok
       _ -> Arbiter.Agents.Claude
     end
   end
