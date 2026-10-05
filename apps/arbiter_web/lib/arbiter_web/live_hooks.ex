@@ -120,12 +120,11 @@ defmodule ArbiterWeb.LiveHooks do
   # dead render and the websocket join alike) against the configured
   # `ArbiterWeb.DashboardAuth` implementation.
   def on_mount(:dashboard_auth, _params, session, socket) do
-    case ArbiterWeb.DashboardAuth.authenticate_session(session) do
-      {:ok, identity} ->
-        {:cont, assign(socket, :dashboard_identity, identity)}
-
-      :error ->
-        {:halt, Phoenix.LiveView.redirect(socket, to: ArbiterWeb.DashboardAuth.login_path())}
+    with :error <- ArbiterWeb.DashboardAuth.authenticate_session(session),
+         :error <- ArbiterWeb.DashboardAuth.authenticate_socket(session, connect_info(socket)) do
+      {:halt, Phoenix.LiveView.redirect(socket, to: ArbiterWeb.DashboardAuth.login_path())}
+    else
+      {:ok, identity} -> {:cont, assign(socket, :dashboard_identity, identity)}
     end
   end
 
@@ -529,5 +528,15 @@ defmodule ArbiterWeb.LiveHooks do
       nil -> Map.put(incoming, key, Map.get(existing, key))
       _ -> incoming
     end
+  end
+
+  # The request facts a mount can see, for request-derived dashboard grants. A
+  # bare `%Socket{}` (unit tests) has no transport to ask: empty info.
+  defp connect_info(socket) do
+    Map.new([:peer_data, :x_headers, :uri], fn key ->
+      {key, Phoenix.LiveView.get_connect_info(socket, key)}
+    end)
+  rescue
+    _ -> %{}
   end
 end

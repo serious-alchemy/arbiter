@@ -28,6 +28,10 @@ defmodule ArbiterWeb.DashboardAuth do
       session on every mount, connected or not. An HTTP-only trust signal
       (a proxy header) must therefore be turned into a session grant by
       `authenticate/1`, and `authenticate_session/1` must re-validate it.
+    * `authenticate_socket/2` (optional) — a second chance for a LiveView mount
+      whose session alone was refused: it also gets the mount's connect info
+      (`:peer_data`, `:x_headers`, `:uri`), for grants that depend on the
+      request rather than a stored session.
     * `mode/0` — a small map describing the active mode; `arb server doctor`
       reports it.
     * `login_path/0` (optional, default `"/login"`) — where unauthenticated
@@ -45,7 +49,8 @@ defmodule ArbiterWeb.DashboardAuth do
               optional(atom()) => term()
             }
   @callback login_path() :: String.t()
-  @optional_callbacks login_path: 0
+  @callback authenticate_socket(map(), map()) :: {:ok, identity()} | :error
+  @optional_callbacks login_path: 0, authenticate_socket: 2
 
   @default_login_path "/login"
 
@@ -58,6 +63,17 @@ defmodule ArbiterWeb.DashboardAuth do
 
   @spec authenticate_session(map()) :: {:ok, identity()} | :error
   def authenticate_session(session), do: impl().authenticate_session(session)
+
+  @doc "Like `authenticate_session/1`, with connect info; falls back to `:error`."
+  @spec authenticate_socket(map(), map()) :: {:ok, identity()} | :error
+  def authenticate_socket(session, connect_info) do
+    mod = impl()
+    Code.ensure_loaded(mod)
+
+    if function_exported?(mod, :authenticate_socket, 2),
+      do: mod.authenticate_socket(session, connect_info),
+      else: :error
+  end
 
   @spec mode() :: map()
   def mode, do: impl().mode()
