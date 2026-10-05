@@ -124,4 +124,34 @@ defmodule Arbiter.Integration.WorkerMemoryCapTest do
 
     assert out =~ "LoadState=not-found"
   end
+
+  # bd-6zm33r: the agent exits, but a process it backgrounded stays in the scope
+  # (and used to outlive the run). Ending the run stops the scope.
+  test "a background process left by the agent dies with the run's scope" do
+    pidfile = Path.join(System.tmp_dir!(), "bg#{System.unique_integer([:positive])}.pid")
+    on_exit(fn -> File.rm(pidfile) end)
+
+    {pid, task_id, _port} =
+      start_agent([
+        "sh",
+        "-c",
+        "sleep 300 </dev/null >/dev/null 2>&1 & echo $! > #{pidfile}; exit 0"
+      ])
+
+    assert wait(fn -> match?(%{state: :finished}, Worker.state(pid)) end, 30_000)
+
+    {bg_pid, _} = pidfile |> File.read!() |> String.trim() |> Integer.parse()
+    [run] = Run |> Ash.Query.filter(task_id == ^task_id) |> Ash.read!()
+    assert [scope] = run.cgroup_scopes
+
+    assert wait(fn -> not File.exists?("/proc/#{bg_pid}") end, 10_000),
+           "background process #{bg_pid} survived the run"
+
+    {out, _} =
+      System.cmd("systemctl", ["--user", "show", scope, "-p", "LoadState"],
+        env: [{"XDG_RUNTIME_DIR", System.get_env("XDG_RUNTIME_DIR")}]
+      )
+
+    assert out =~ "LoadState=not-found"
+  end
 end
