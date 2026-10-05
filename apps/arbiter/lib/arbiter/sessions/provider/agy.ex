@@ -57,6 +57,18 @@ defmodule Arbiter.Sessions.Provider.Agy do
   def config_dir?, do: false
 
   @impl Provider
+  def label, do: "agy (Antigravity)"
+
+  @impl Provider
+  def account_provider, do: :antigravity
+
+  @impl Provider
+  def executable, do: @executable
+
+  @impl Provider
+  def agent_adapter, do: Arbiter.Agents.Gemini
+
+  @impl Provider
   def env(%Session{} = session) do
     ([{"ARB_SESSION_ID", session.id}] ++
        home(session) ++
