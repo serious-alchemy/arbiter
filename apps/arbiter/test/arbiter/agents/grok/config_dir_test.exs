@@ -71,4 +71,60 @@ defmodule Arbiter.Agents.Grok.ConfigDirTest do
     assert {:ok, %{mode: mode}} = File.stat(path)
     assert Bitwise.band(mode, 0o777) == 0o600
   end
+
+  describe "config.toml (bd-cwq8b0)" do
+    setup do
+      prev = Application.get_env(:arbiter, :grok_quota)
+
+      on_exit(fn ->
+        if prev,
+          do: Application.put_env(:arbiter, :grok_quota, prev),
+          else: Application.delete_env(:arbiter, :grok_quota)
+      end)
+    end
+
+    defp config_path(wt), do: Path.join(ConfigDir.grok_home(worktree: wt), "config.toml")
+
+    test "ensure/1 writes a low [models] rate_limit_retry_threshold, 0600", %{worktree: wt} do
+      Application.delete_env(:arbiter, :grok_quota)
+      assert {:ok, _} = ConfigDir.ensure(worktree: wt)
+
+      toml = File.read!(config_path(wt))
+      assert toml =~ ~r/^\[models\]$/m
+      assert toml =~ ~r/^rate_limit_retry_threshold = 2$/m
+      assert {:ok, %{mode: mode}} = File.stat(config_path(wt))
+      assert Bitwise.band(mode, 0o777) == 0o600
+    end
+
+    test "the threshold is configurable and rewritten on every ensure", %{worktree: wt} do
+      assert {:ok, _} = ConfigDir.ensure(worktree: wt)
+      Application.put_env(:arbiter, :grok_quota, rate_limit_retry_threshold: 1)
+      assert {:ok, _} = ConfigDir.ensure(worktree: wt)
+      assert File.read!(config_path(wt)) =~ "rate_limit_retry_threshold = 1"
+    end
+
+    test "a non-positive threshold falls back to the default", %{worktree: wt} do
+      Application.put_env(:arbiter, :grok_quota, rate_limit_retry_threshold: 0)
+      assert ConfigDir.rate_limit_retry_threshold() == 2
+      assert {:ok, _} = ConfigDir.ensure(worktree: wt)
+      assert File.read!(config_path(wt)) =~ "rate_limit_retry_threshold = 2"
+    end
+
+    test "a config.toml a jailed run replaced with a symlink is not written through", %{
+      base: base,
+      worktree: wt
+    } do
+      target = Path.join(base, "victim.toml")
+      File.mkdir_p!(base)
+      File.write!(target, "untouched")
+      assert {:ok, _} = ConfigDir.ensure(worktree: wt)
+      File.rm!(config_path(wt))
+      File.ln_s!(target, config_path(wt))
+
+      assert {:ok, _} = ConfigDir.ensure(worktree: wt)
+      assert File.read!(target) == "untouched"
+      assert {:ok, %{type: :regular}} = File.lstat(config_path(wt))
+      assert File.read!(config_path(wt)) =~ "rate_limit_retry_threshold"
+    end
+  end
 end

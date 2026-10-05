@@ -284,6 +284,36 @@ three providers — and hides below `sm`.
 `ArbiterWeb.QuotaTopbarBrowserTest` (`--include browser`) checks the fit for
 one, two and three providers and the popover interaction in Chromium.
 
+## grok: a ledger-estimated rolling 24h cap (bd-cwq8b0)
+
+grok's free tier allows about 500K tokens per **rolling 24h** window, cached
+tokens counted, and has no safe pollable quota endpoint (calling the billing
+endpoint with the session token directly is the ToS grey area bd-73uvlo
+flagged). So grok's quota is an estimate, `Arbiter.Quota.GrokLedger`:
+
+  * **Headroom** is the sum of grok `usage_events` (input + cache + output)
+    over the trailing 24h against `config :arbiter, :grok_quota, cap_tokens:`
+    (default 500_000), projected onto a `Quota.Gate.Snapshot` with window
+    `"24h"`. `Quota.latest_for_provider(_, :grok)` serves it, so
+    `Quota.Gate` holds grok dispatch (and `Quota.Headroom` ranks it) like any
+    other provider. The cap is one xAI account's, so the ledger is not scoped
+    per provider account.
+  * **A free-usage 429** (`subscription:free-usage-exhausted ... tokens
+    (actual/limit): N/M`, in `result.errors[]`) classifies as
+    `:quota_exhausted` (`StopReason`, anchored to `grok error:` / `Error:` line
+    heads) and the worker fails at once rather than parking 5h for a resume
+    grok cannot do. The run's `failure_reason` keeps the `N/M` count; the next
+    snapshot treats the part of `N` the ledger did not see (an interactive
+    `grok` session) as usage stamped at the 429. The hold therefore lifts when
+    the rolling window drains below the gate threshold, at the latest 24h after
+    the 429 — never at a fixed time.
+  * **Auth failures** (`Not signed in`, `RefreshTokenRejected`, `invalid_grant`)
+    classify as `:auth_expired` and count toward the grok `AuthHold`, not a
+    quota hold.
+  * Each worker's `GROK_HOME/config.toml` sets `[models]
+    rate_limit_retry_threshold` (default 2; `rate_limit_retry_threshold:` in the
+    same config key) so grok does not spend 15 retries on a spent window.
+
 ## Out of scope here
 
 Two follow-ups were filed instead of folded in:

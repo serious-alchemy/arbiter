@@ -5132,9 +5132,7 @@ defmodule Arbiter.Worker do
     cur_fp = worktree_fingerprint(state)
 
     decision =
-      if reason.category == :quota_exhausted and quota_wait_exceeds_max?(reason.retry_after) do
-        {:fail, :quota_wait_exceeds_max}
-      else
+      with :ok <- quota_resume_guard(state, reason) do
         resume_decision(
           reason.category,
           session_id,
@@ -5169,7 +5167,7 @@ defmodule Arbiter.Worker do
         %State{state | state: :starting}
 
       {:fail, why} ->
-        if why in [:cap_exhausted, :no_progress, :quota_wait_exceeds_max] do
+        if why in [:cap_exhausted, :no_progress, :quota_wait_exceeds_max, :provider_not_resumable] do
           Logger.info(
             "Worker: task=#{state.task_id} not resuming (#{why}, attempt " <>
               "#{attempts}/#{cap}) — failing."
@@ -5178,6 +5176,30 @@ defmodule Arbiter.Worker do
 
         fail_unresumable(state, session, reason)
     end
+  end
+
+  # A quota stop parks the worker for hours before the resume, so refuse the
+  # park when it cannot pay off. bd-cwq8b0: a provider that cannot rewrite its
+  # argv for `--resume` (grok) would wait that long only to fail: fail now, the
+  # dispatch gate holds the provider and the task goes back to the queue.
+  # bd-3wgdie: a reset time past any real plan window is not worth parking for.
+  defp quota_resume_guard(_state, %{category: category}) when category != :quota_exhausted,
+    do: :ok
+
+  defp quota_resume_guard(state, reason) do
+    cond do
+      not resumable_in_place?(state) -> {:fail, :provider_not_resumable}
+      quota_wait_exceeds_max?(reason.retry_after) -> {:fail, :quota_wait_exceeds_max}
+      true -> :ok
+    end
+  end
+
+  # bd-cwq8b0: can this worker's provider rewrite its argv for a `--resume`?
+  # Same test `inject_resume_argv/4` applies at respawn time.
+  defp resumable_in_place?(%State{} = state) do
+    {provider, _model} = respawn_routing(state)
+    adapter = agent_adapter_for_provider(provider)
+    Code.ensure_loaded?(adapter) and function_exported?(adapter, :splice_prompt, 2)
   end
 
   # bd-7wymls: a task-type worker that can no longer be resumed after a

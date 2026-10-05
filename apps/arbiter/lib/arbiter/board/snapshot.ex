@@ -1936,6 +1936,13 @@ defmodule Arbiter.Board.Snapshot do
     Arbiter.Quota.default_provider(workspace)
   end
 
+  # bd-cwq8b0: grok has no provider account; its snapshot is the ledger estimate.
+  defp latest_quota(_account, :grok) do
+    Arbiter.Quota.latest_for_provider(nil, :grok)
+  rescue
+    _ -> nil
+  end
+
   defp latest_quota(nil, _provider), do: nil
 
   defp latest_quota(%{id: account_id}, provider) do
