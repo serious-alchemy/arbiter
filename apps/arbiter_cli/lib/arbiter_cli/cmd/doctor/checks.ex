@@ -600,9 +600,12 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   # is visible rather than silent.
   #
   # bd-8xy1mf: a `[fail]` here is only warranted when the gap is actually
-  # fatal to some workspace — i.e. that workspace resolves `:strict` (agy is
-  # already the configured/eligible provider by the time `write_jail_warning`
-  # is non-nil at all, see `Arbiter.Agents.Gemini.write_jail_warning/1`).
+  # fatal to some workspace — i.e. that workspace resolves `:strict`. Other
+  # adapters (Codex, bd-99emmd) also report a non-nil `write_jail_warning`, so
+  # `jail_warnings/1` keeps only postures whose `"provider"` is agy (`gemini`);
+  # a Codex `:bypass`/`:strict` warning is about codex, not the bwrap jail, and
+  # a `:strict` Codex workspace is not fatal (the pool substitutes a
+  # strict-capable provider, see `Arbiter.Agents.strict_eligible_provider/4`).
   # Outside `:strict` the warning is real but informational: `[ ok ]` with the
   # cause and fix still named in `detail`, so an operator preparing to switch
   # a scope to `:strict` sees it ahead of time without doctor crying wolf on
@@ -970,13 +973,21 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   defp jail_warnings(ws) do
     posture = Map.get(ws, "security_posture") || %{}
 
-    repo_entries =
-      posture
-      |> Map.get("repos", %{})
-      |> Enum.flat_map(fn {repo, repo_posture} -> warning_entry(repo_posture, repo) end)
+    if agy_posture?(posture) do
+      repo_entries =
+        posture
+        |> Map.get("repos", %{})
+        |> Enum.flat_map(fn {repo, repo_posture} -> warning_entry(repo_posture, repo) end)
 
-    warning_entry(posture, nil) ++ repo_entries
+      warning_entry(posture, nil) ++ repo_entries
+    else
+      []
+    end
   end
+
+  # A server that predates the `"provider"` key only ever reported agy's
+  # warning, so a missing key still counts as agy.
+  defp agy_posture?(posture), do: Map.get(posture, "provider") in [nil, "gemini"]
 
   defp warning_entry(posture, repo) do
     case Map.get(posture, "write_jail_warning") do
