@@ -152,6 +152,20 @@ defmodule Arbiter.Trackers.CloseNeverRegressesTest do
       refute log =~ "follow-up close"
     end
 
+    test "the :close action itself (SyncTracker path) leaves a QA ticket alone" do
+      # The incident went through `Issue :close`, not `Sync.close_and_verify/1`.
+      ws = jira_ws(%{"closed" => "Code Complete"})
+      issue = issue(ws, :jira, @jira_ref)
+
+      stub_jira({"QA", "indeterminate"}, [{"Code Complete", "indeterminate"}])
+
+      assert {:ok, closed} = Ash.update(issue, %{reason: "Completed"}, action: :close)
+
+      assert closed.state == :closed
+      assert writes() == []
+      assert escalations_for(ws.id) == []
+    end
+
     test "a ticket in Jira's done category is never moved back to an intermediate closed status" do
       ws = jira_ws(%{"closed" => "Code Complete"})
       issue = issue(ws, :jira, @jira_ref)
