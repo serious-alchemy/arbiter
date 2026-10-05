@@ -48,6 +48,10 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     * If `"routing.capability_gates"` is present, it must be a boolean
       (bd-57uzkl); a per-repo `"routing.repos.<repo>.requires"` must be a list
       of `Arbiter.Agents.CapabilityMatrix.capabilities/0`.
+    * If `"routing.floors"` is present it must be a map (bd-c675ny):
+      `"policy_floor"` a boolean, and each `"repos.<repo>.min_model_tier"` one
+      of `Arbiter.Agents.Floors.ladder/0` — a typo'd tier would otherwise read
+      as no floor at all.
     * If `"review.require_ci_green"` (or a per-repo
       `"review.repos.<repo>.require_ci_green"`) is present, it must be a boolean
       or `"true"` / `"false"` (bd-cut6uv).
@@ -587,6 +591,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     |> validate_routing_policy(routing)
     |> validate_provider_selection(Map.get(routing, "provider_selection"))
     |> validate_capability_gates(routing)
+    |> validate_floors(Map.get(routing, "floors"))
   end
 
   defp validate_routing(changeset, _) do
@@ -664,6 +669,72 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
       field: :config,
       message:
         "routing.repos.#{repo}.requires must be a list of #{Enum.join(known, ", ")}; " <>
+          "got: #{inspect(got)}"
+    )
+  end
+
+  # bd-c675ny: the routing floors. A floor that silently failed to parse would
+  # be a floor that silently did not hold, so every malformed shape is refused.
+  defp validate_floors(changeset, nil), do: changeset
+
+  defp validate_floors(changeset, %{} = floors) do
+    changeset
+    |> validate_policy_floor(Map.get(floors, "policy_floor"))
+    |> validate_repo_floors(Map.get(floors, "repos"))
+  end
+
+  defp validate_floors(changeset, other) do
+    Changeset.add_error(changeset,
+      field: :config,
+      message: "routing.floors must be a map; got: #{inspect(other)}"
+    )
+  end
+
+  defp validate_policy_floor(changeset, value) when is_nil(value) or is_boolean(value),
+    do: changeset
+
+  defp validate_policy_floor(changeset, value) do
+    Changeset.add_error(changeset,
+      field: :config,
+      message: "routing.floors.policy_floor must be true or false; got: #{inspect(value)}"
+    )
+  end
+
+  defp validate_repo_floors(changeset, nil), do: changeset
+
+  defp validate_repo_floors(changeset, %{} = repos) do
+    ladder = Arbiter.Agents.Floors.ladder()
+
+    Enum.reduce(repos, changeset, fn
+      {repo, %{} = entry}, acc ->
+        case Map.get(entry, "min_model_tier") do
+          tier when is_binary(tier) ->
+            if tier in ladder, do: acc, else: floor_tier_error(acc, repo, tier, ladder)
+
+          other ->
+            floor_tier_error(acc, repo, other, ladder)
+        end
+
+      {repo, other}, acc ->
+        Changeset.add_error(acc,
+          field: :config,
+          message: "routing.floors.repos.#{repo} must be a map; got: #{inspect(other)}"
+        )
+    end)
+  end
+
+  defp validate_repo_floors(changeset, other) do
+    Changeset.add_error(changeset,
+      field: :config,
+      message: "routing.floors.repos must be a map; got: #{inspect(other)}"
+    )
+  end
+
+  defp floor_tier_error(changeset, repo, got, ladder) do
+    Changeset.add_error(changeset,
+      field: :config,
+      message:
+        "routing.floors.repos.#{repo}.min_model_tier must be one of #{Enum.join(ladder, ", ")}; " <>
           "got: #{inspect(got)}"
     )
   end

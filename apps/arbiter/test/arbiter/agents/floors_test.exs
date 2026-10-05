@@ -41,7 +41,9 @@ defmodule Arbiter.Agents.FloorsTest do
       assert Floors.repo_floor(workspace!(@base), "arbiter") == nil
       assert Floors.repo_floor(nil, "arbiter") == nil
 
-      ws = workspace!(floors(%{"arbiter" => %{"min_model_tier" => "bogus"}}), "bogus-ws")
+      # Config validation refuses it at write time; a row that predates that
+      # (or was written around it) still must not act as a floor.
+      ws = %Workspace{config: floors(%{"arbiter" => %{"min_model_tier" => "bogus"}})}
       assert Floors.repo_floor(ws, "arbiter") == nil
     end
   end
@@ -194,6 +196,63 @@ defmodule Arbiter.Agents.FloorsTest do
 
       assert choice.config == @lowered
       refute Floors.clamped?(choice)
+    end
+  end
+
+  describe "workspace config validation" do
+    defp create(config),
+      do: Ash.create(Workspace, %{name: "fv-#{System.unique_integer([:positive])}", config: config})
+
+    test "a repo floor must name a tier on the ladder" do
+      assert {:ok, _} = create(floors(%{"arbiter" => %{"min_model_tier" => "premium"}}))
+
+      assert {:error, error} = create(floors(%{"arbiter" => %{"min_model_tier" => "premum"}}))
+      assert Exception.message(error) =~ "routing.floors.repos.arbiter.min_model_tier"
+    end
+
+    test "policy_floor must be a boolean, and floors a map" do
+      assert {:ok, _} = create(put_in(@base, ["routing", "floors"], %{"policy_floor" => true}))
+
+      assert {:error, error} =
+               create(put_in(@base, ["routing", "floors"], %{"policy_floor" => "yes"}))
+
+      assert Exception.message(error) =~ "routing.floors.policy_floor must be true or false"
+
+      assert {:error, error} = create(put_in(@base, ["routing", "floors"], "premium"))
+      assert Exception.message(error) =~ "routing.floors must be a map"
+    end
+  end
+
+  describe "outside the Loop's reach (§6.4, §10)" do
+    test "a canary proposal that patches routing.floors is not eligible" do
+      ws = workspace!(@base, "loop-reach-ws")
+
+      {:ok, row} =
+        Loop.record(%{
+          kind: :config_set,
+          gist: "lower the arbiter floor",
+          category: "cost",
+          target: "routing.floors",
+          difficulty: 2,
+          scope: :fleet,
+          target_metric: "cost",
+          baseline: "1",
+          incident_refs: ["run-a", "run-b", "run-c"],
+          task_refs: ["bd-1", "bd-2"],
+          payload: %{
+            "workspace_id" => ws.id,
+            "patch" => %{
+              "routing" => %{
+                "floors" => %{"repos" => %{"arbiter" => %{"min_model_tier" => "economy"}}}
+              }
+            }
+          },
+          origin: "loop.analyze",
+          workspace_id: ws.id
+        })
+
+      assert {:error, reason} = Canary.eligible(row)
+      assert reason =~ "routing.rules"
     end
   end
 end
