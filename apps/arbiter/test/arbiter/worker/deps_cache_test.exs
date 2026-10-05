@@ -10,6 +10,7 @@ defmodule Arbiter.Worker.DepsCacheTest do
 
   alias Arbiter.Test.GitFixture
   alias Arbiter.Worker.DepsCache
+  alias Arbiter.Worker.PrivateClone
 
   @image_a "localhost/arbiter-dev/beam-1.19.4-28.2:aaaaaaaaaaaa"
   @image_b "localhost/arbiter-dev/beam-1.17.3-27.1.2:bbbbbbbbbbbb"
@@ -340,6 +341,35 @@ defmodule Arbiter.Worker.DepsCacheTest do
 
       assert {:ok, :unchanged} = DepsCache.install_mix_home(ctx.cache, home, ctx.opts)
       assert File.read!(Path.join(home, ".mix/archives/hex-2.0.ez")) == "run-local"
+    end
+  end
+
+  describe "seed_worktree/3" do
+    test "seeds a private clone from its main repo's default branch, with the run's Hex", ctx do
+      {:ok, clone} = PrivateClone.create(ctx.checkout, "feature/bd-deps-cache", "main")
+      home = Path.join(ctx.root, "run-home")
+      File.mkdir_p!(home)
+
+      assert {:ok, summary} =
+               DepsCache.seed_worktree(clone, @image_a, [home: home, repo: nil] ++ ctx.opts)
+
+      assert summary.seeded? == true
+      assert summary.method in [:reflink, :copy]
+      assert summary.mix_home in [:reflink, :copy]
+
+      assert File.read!(Path.join(clone, "_build/test/lib/jason/ebin/jason.beam")) == @image_a
+      assert File.exists?(Path.join(home, ".mix/archives/hex-2.0.ez"))
+
+      # A second worker on the same image is a cache hit: no second seed job.
+      _ = runs()
+      {:ok, other} = PrivateClone.create(ctx.checkout, "feature/bd-deps-cache-2", "main")
+      assert {:ok, %{seeded?: false}} = DepsCache.seed_worktree(other, @image_a, ctx.opts)
+      assert runs() == []
+    end
+
+    test "a checkout that is not a private clone is refused", ctx do
+      assert {:error, {:not_a_private_clone, _}} =
+               DepsCache.seed_worktree(ctx.checkout, @image_a, ctx.opts)
     end
   end
 end
