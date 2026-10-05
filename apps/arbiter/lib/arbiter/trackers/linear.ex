@@ -128,11 +128,67 @@ defmodule Arbiter.Trackers.Linear do
          {:ok, raw_issue} <- fetch(ref),
          team_id = get_in(raw_issue, ["team", "id"]),
          {:ok, states} <- fetch_team_states(cfg, team_id),
-         {:ok, state_id} <- resolve_state_id(cfg, states, status) do
+         {:ok, state_id} <- resolve_state_id(cfg, states, status),
+         :ok <- guard_close(raw_issue, states, status, state_id) do
       vars = %{"id" => raw_issue["id"], "stateId" => state_id}
 
       graphql(cfg, update_issue_mutation(), vars)
       |> extract_success(["issueUpdate"])
+    end
+  end
+
+  # A close must never move an issue backwards (bd-4i7kky): `closed` can map to
+  # an intermediate state, and an issue already further along the team's
+  # workflow — a later `started` state, or any `completed`/`cancelled` one when
+  # the target is not — is left where it is. Linear orders states by `type`
+  # (backlog < unstarted < started < completed/cancelled) then `position`.
+  # An issue whose current state can't be placed is closed as before.
+  defp guard_close(raw_issue, states, :closed, target_id) do
+    current_id = get_in(raw_issue, ["state", "id"])
+    current = Enum.find(states, &(&1["id"] == current_id))
+    target = Enum.find(states, &(&1["id"] == target_id))
+
+    if current && target && state_at_or_past?(current, target) do
+      {:error,
+       %Error{
+         kind: :upstream_past_target,
+         status: nil,
+         message:
+           "#{raw_issue["identifier"]} is in #{inspect(current["name"])}, already at or past " <>
+             "the closed-mapped state #{inspect(target["name"])} — leaving it where it is",
+         raw: nil
+       }}
+    else
+      :ok
+    end
+  end
+
+  defp guard_close(_raw_issue, _states, _status, _target_id), do: :ok
+
+  @state_type_rank %{
+    "backlog" => 0,
+    "unstarted" => 0,
+    "started" => 1,
+    "completed" => 2,
+    "cancelled" => 2
+  }
+
+  defp state_at_or_past?(%{"id" => id}, %{"id" => id}), do: true
+
+  defp state_at_or_past?(current, target) do
+    cur_rank = Map.get(@state_type_rank, current["type"])
+    target_rank = Map.get(@state_type_rank, target["type"])
+
+    cond do
+      is_nil(cur_rank) or is_nil(target_rank) ->
+        false
+
+      cur_rank != target_rank ->
+        cur_rank > target_rank
+
+      true ->
+        is_number(current["position"]) and is_number(target["position"]) and
+          current["position"] > target["position"]
     end
   end
 
@@ -760,6 +816,7 @@ defmodule Arbiter.Trackers.Linear do
             id
             name
             type
+            position
           }
         }
       }
@@ -780,6 +837,7 @@ defmodule Arbiter.Trackers.Linear do
               id
               name
               type
+              position
             }
           }
         }

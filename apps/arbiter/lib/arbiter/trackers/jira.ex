@@ -114,7 +114,9 @@ defmodule Arbiter.Trackers.Jira do
         {:ok, id} ->
           # Single-hop fast path: a live transition lands directly on the
           # target status (its `to` already equals the target).
-          post_transition(cfg, ref, id)
+          with :ok <- guard_close(cfg, ref, status, target_status, transitions) do
+            post_transition(cfg, ref, id)
+          end
 
         :none ->
           # No direct edge — fetch the current status and walk the workflow
@@ -122,6 +124,76 @@ defmodule Arbiter.Trackers.Jira do
           resolve_multi_hop(cfg, ref, target_status)
       end
     end
+  end
+
+  # A close must never move a ticket backwards (bd-4i7kky). Jira has no
+  # ordering between statuses, and a workflow commonly lets *any* status
+  # transition straight to any other, so "a live transition to the target
+  # exists" proves nothing about the ticket still being short of it.
+  #
+  # A `done`-category target is terminal, so any ticket not already done is
+  # genuinely behind it and the guard has nothing to say. An intermediate
+  # target (`closed => "Code Complete"`, the recommendation when the tracker's
+  # `Done` means "deployed") has others' statuses after it — QA, Ready To
+  # Deploy — so the ticket is only closed when it is *demonstrably* still
+  # before it: Jira's `new` category, a status the workspace maps to an earlier
+  # lifecycle event, or one the `transition_graph` routes into the target. Any
+  # other status is somebody else's progress and is left where they put it.
+  #
+  # The target's category comes from the live transition's own `to` block; a
+  # transition without one (never the case on real Jira) skips the guard.
+  defp guard_close(cfg, ref, :closed, target_status, transitions) do
+    case target_category(transitions, target_status) do
+      category when is_binary(category) and category != "done" ->
+        with {:ok, current, current_category} <- current_status_info(cfg, ref) do
+          if close_may_proceed?(cfg, target_status, current, current_category) do
+            :ok
+          else
+            {:error,
+             %Error{
+               kind: :upstream_past_target,
+               status: nil,
+               message:
+                 "#{ref} is in #{inspect(current)}, which is not known to precede the " <>
+                   "closed-mapped status #{inspect(target_status)} — leaving it where it is",
+               raw: nil
+             }}
+          end
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp guard_close(_cfg, _ref, _status, _target_status, _transitions), do: :ok
+
+  defp target_category(transitions, target_status) do
+    Enum.find_value(transitions, fn t ->
+      transition_target(t) == target_status && get_in(t, ["to", "statusCategory", "key"])
+    end)
+  end
+
+  defp close_may_proceed?(_cfg, _target, _current, "done"), do: false
+  defp close_may_proceed?(_cfg, _target, _current, "new"), do: true
+
+  defp close_may_proceed?(cfg, target, current, _category) do
+    current != target and current in statuses_before_close(cfg, target)
+  end
+
+  # Statuses known to sit before the closed target: where the workspace's own
+  # earlier lifecycle events put a ticket, and any graph node that routes into
+  # the target.
+  defp statuses_before_close(cfg, target) do
+    mapped =
+      for {event, name} <- cfg.status_map, event != :closed, is_binary(name), name != "", do: name
+
+    routed =
+      for {from, _edges} <- cfg.transition_graph,
+          match?({:ok, _}, plan_transition_path(cfg.transition_graph, from, target)),
+          do: from
+
+    Enum.uniq(mapped ++ routed) -- [target]
   end
 
   @impl true

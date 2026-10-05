@@ -319,6 +319,26 @@ defmodule Arbiter.Tasks.Issue do
 
                {:ok, issue}
              end)
+
+      # Switching `auto_close` on is itself a rollup trigger (bd-4i7kky). The
+      # flag is otherwise only re-evaluated when a child closes or an edge is
+      # written, so an epic whose children had *all* already closed stayed open
+      # when `auto_close` was set afterwards — until someone closed it by hand.
+      # Post-commit, like the `:close` rollup, so the close runs in its own
+      # transaction.
+      change fn changeset, _context ->
+        Ash.Changeset.after_transaction(changeset, fn
+          changeset, {:ok, issue} ->
+            if issue.auto_close and Ash.Changeset.changing_attribute?(changeset, :auto_close) do
+              {:ok, Arbiter.Tasks.Issue.maybe_auto_close(issue)}
+            else
+              {:ok, issue}
+            end
+
+          _changeset, error ->
+            error
+        end)
+      end
     end
 
     # bd-9so315 — post-merge verification.

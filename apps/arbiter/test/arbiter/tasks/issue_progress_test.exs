@@ -76,6 +76,46 @@ defmodule Arbiter.Tasks.IssueProgressTest do
       assert Ash.get!(Issue, parent.id).state == :closed
     end
 
+    test "switching auto_close on rolls up an epic whose children already all closed", %{ws: ws} do
+      # bd-4i7kky: the flag used to be re-evaluated only when a child closed or an
+      # edge was written, so setting it afterwards left a finished epic open until
+      # someone closed it by hand.
+      {:ok, parent} = Ash.create(Issue, %{title: "epic", issue_type: :epic, workspace_id: ws.id})
+      {:ok, c1} = Ash.create(Issue, %{title: "c1", workspace_id: ws.id})
+      {:ok, c2} = Ash.create(Issue, %{title: "c2", workspace_id: ws.id})
+      Enum.each([c1, c2], &child_of(parent, &1))
+      Enum.each([c1, c2], &Ash.update!(&1, %{}, action: :close))
+
+      assert Ash.get!(Issue, parent.id).state == :backlog
+
+      {:ok, updated} = Ash.update(parent, %{auto_close: true}, action: :update)
+
+      assert updated.state == :closed
+      assert Ash.get!(Issue, parent.id).state == :closed
+    end
+
+    test "switching auto_close on leaves an epic with open children open", %{ws: ws} do
+      {:ok, parent} = Ash.create(Issue, %{title: "epic", issue_type: :epic, workspace_id: ws.id})
+      {:ok, c1} = Ash.create(Issue, %{title: "c1", workspace_id: ws.id})
+      {:ok, c2} = Ash.create(Issue, %{title: "c2", workspace_id: ws.id})
+      Enum.each([c1, c2], &child_of(parent, &1))
+      Ash.update!(c1, %{}, action: :close)
+
+      {:ok, updated} = Ash.update(parent, %{auto_close: true}, action: :update)
+
+      assert updated.state == :backlog
+    end
+
+    test "an unrelated update of an auto_close epic does not re-run the rollup", %{ws: ws} do
+      # Only a *change to* auto_close is the trigger; an epic that is already
+      # auto_close and open is closed by its children closing, not by a retitle.
+      {:ok, parent} =
+        Ash.create(Issue, %{title: "epic", auto_close: true, workspace_id: ws.id})
+
+      {:ok, updated} = Ash.update(parent, %{title: "renamed"}, action: :update)
+      assert updated.state == :backlog
+    end
+
     test "a parent without auto_close stays open even when all children close", %{ws: ws} do
       {:ok, parent} = Ash.create(Issue, %{title: "owned epic", workspace_id: ws.id})
       {:ok, c1} = Ash.create(Issue, %{title: "c1", workspace_id: ws.id})

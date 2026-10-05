@@ -216,11 +216,17 @@ defmodule Arbiter.Trackers.Sync do
   success or a benign skip, `{:error, reason}` only after escalating a loud
   failure (so callers that care can react; most ignore it).
 
+  `{:skipped, :upstream_past_target}` means the adapter declined a `:closed`
+  transition because the upstream item is already at, or demonstrably beyond,
+  the closed-mapped status (bd-4i7kky) — nothing was written, nothing failed,
+  and there is nothing to verify or retry.
+
   Used by `lifecycle/3` and by `Arbiter.Tasks.Issue.Changes.SyncTracker` for
   the core status-change path so the swallow-on-error behaviour is gone from
   both.
   """
-  @spec transition_event(Issue.t(), atom()) :: :ok | {:error, term()}
+  @spec transition_event(Issue.t(), atom()) ::
+          :ok | {:skipped, :upstream_past_target} | {:error, term()}
   def transition_event(%Issue{} = issue, event) when is_atom(event) do
     case ensure_gated_fields_pushed(issue, event) do
       :ok ->
@@ -261,8 +267,23 @@ defmodule Arbiter.Trackers.Sync do
   end
 
   defp do_close_and_verify(issue) do
-    lifecycle(issue, :closed)
-    verify_closed(issue)
+    Trackers.prepare(issue, load_workspace(issue.workspace_id))
+
+    case transition_event(issue, :closed) do
+      {:skipped, :upstream_past_target} -> :ok
+      _ -> verify_closed(issue)
+    end
+  rescue
+    e ->
+      Logger.warning(
+        "Trackers.Sync: error on closed for task=#{issue.id}: #{Exception.message(e)}"
+      )
+
+      :ok
+  catch
+    :exit, reason ->
+      Logger.warning("Trackers.Sync: exit on closed for task=#{issue.id}: #{inspect(reason)}")
+      :ok
   end
 
   @doc """
@@ -279,11 +300,6 @@ defmodule Arbiter.Trackers.Sync do
         if upstream_closed?(issue.tracker_type, raw) do
           :ok
         else
-          Logger.warning(
-            "Trackers.Sync: upstream still open after close transition for task=#{issue.id} " <>
-              "tracker=#{issue.tracker_type} ref=#{issue.tracker_ref} — issuing follow-up close"
-          )
-
           follow_up_close(issue)
         end
 
@@ -312,14 +328,31 @@ defmodule Arbiter.Trackers.Sync do
       :ok
   end
 
+  # The adapter itself refuses a close that would move the item backwards
+  # (`:upstream_past_target`), so this can only ever advance an item that is
+  # genuinely still short of the closed status — it is never a way to drag a
+  # ticket someone else moved on back to it.
   defp follow_up_close(issue) do
     case Trackers.transition(issue, :closed) do
       :ok ->
+        Logger.warning(
+          "Trackers.Sync: upstream still open after close transition for task=#{issue.id} " <>
+            "tracker=#{issue.tracker_type} ref=#{issue.tracker_ref} — issued follow-up close"
+        )
+
+        :ok
+
+      {:error, %{kind: :upstream_past_target} = reason} ->
+        Logger.info(
+          "Trackers.Sync: not closing task=#{issue.id} tracker=#{issue.tracker_type} " <>
+            "ref=#{issue.tracker_ref} upstream — #{describe(reason)}"
+        )
+
         :ok
 
       {:error, reason} ->
         Logger.warning(
-          "Trackers.Sync: follow-up close also failed for task=#{issue.id} " <>
+          "Trackers.Sync: follow-up close failed for task=#{issue.id} " <>
             "tracker=#{issue.tracker_type} ref=#{issue.tracker_ref}: #{inspect(reason)}"
         )
 
@@ -333,9 +366,13 @@ defmodule Arbiter.Trackers.Sync do
 
   # Jira issues carry fields.status.statusCategory.key; "done" covers all
   # Done-category statuses (e.g. "Code Merged", "Done", "Closed") without
-  # needing the workspace's status_map config.
+  # needing the workspace's status_map config. A `closed` mapped to an
+  # intermediate status ("Code Complete") is not in that category, so the
+  # exact target status (or one the transition_graph puts downstream of it)
+  # counts as closed too — otherwise every such close read as "still open".
   defp upstream_closed?(:jira, raw) do
-    get_in(raw, ["fields", "status", "statusCategory", "key"]) == "done"
+    get_in(raw, ["fields", "status", "statusCategory", "key"]) == "done" or
+      Jira.at_or_past_target?(raw, :closed)
   end
 
   # Shortcut stories have a top-level "completed" boolean.
@@ -376,6 +413,16 @@ defmodule Arbiter.Trackers.Sync do
 
         sleep(wait_ms)
         do_transition(issue, event, attempt + 1, start_ms)
+
+      {:error, %{kind: :upstream_past_target} = reason} ->
+        # The adapter declined: the item is already at/beyond the target, and
+        # writing would move it backwards. Not a failure — nothing to escalate.
+        Logger.info(
+          "Trackers.Sync: #{event} skipped for task=#{issue.id} " <>
+            "tracker=#{issue.tracker_type} ref=#{issue.tracker_ref} — #{describe(reason)}"
+        )
+
+        {:skipped, :upstream_past_target}
 
       {:error, %{kind: kind} = reason} when kind in [:validation_failed, :no_transition_path] ->
         # A validation_failed can be a race: e.g. GitHub auto-closed the issue via a
