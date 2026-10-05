@@ -33,7 +33,7 @@ defmodule Arbiter.Agents.Routing.Competence do
   keys production produces hit the measured cells:
 
     * agy is `antigravity` on the account, the `gemini` adapter on a routing
-      entry (`ProviderSettings`' `agent_type`) and in `SubjectStats`; all three
+      entry (`ProviderSettings`' `agent_type`) and in the loop's task stats; all three
       (plus `agy`) canonicalise to `"antigravity"`.
     * A Claude candidate on a default tier model is `"haiku"` / `"sonnet"` /
       `"opus"` (`Claude.Config.default_tier_models/0`), while measured rows are
@@ -558,7 +558,7 @@ defmodule Arbiter.Agents.Routing.Competence do
   defp match_provider?(expected, actual), do: canonical_provider(expected) == actual
 
   # agy is "antigravity" on the account, "gemini" on the adapter-typed routing
-  # entry and in SubjectStats, "agy" for the CLI; one key for all of them.
+  # entry and in the loop's task stats, "agy" for the CLI; one key for all of them.
   defp canonical_provider(nil), do: ""
 
   defp canonical_provider(provider) do
