@@ -349,7 +349,6 @@ defmodule Arbiter.Agents.Grok do
   end
 
   defp blocker_message(reason) when is_binary(reason), do: reason
-  defp blocker_message(reason), do: inspect(reason)
 
   # A review dispatch carries the `Write` deny (`Dispatch.review_security_policy/2`):
   # the jail makes that an OS guarantee by binding the worktree read-only.
