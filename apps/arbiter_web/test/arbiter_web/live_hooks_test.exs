@@ -374,13 +374,25 @@ defmodule ArbiterWeb.LiveHooksTest do
       render_async(view)
       assert has_element?(view, "#quota-topbar-error")
 
+      # Hold the retried load until the test releases it, so the transient
+      # loading state is observed deterministically.
+      test_pid = self()
+
       :meck.expect(QuotaCache, :fetch, fn ws_id, opts, compute ->
+        send(test_pid, {:fetch_started, self()})
+
+        receive do
+          :release_fetch -> :ok
+        end
+
         :meck.passthrough([ws_id, opts, compute])
       end)
 
       view |> element("#quota-topbar-error") |> render_click()
+      assert_receive {:fetch_started, fetch_pid}
       assert has_element?(view, "#quota-topbar-loading")
 
+      send(fetch_pid, :release_fetch)
       render_async(view)
       refute has_element?(view, "#quota-topbar-error")
       assert has_element?(view, "#quota-ring-claude")

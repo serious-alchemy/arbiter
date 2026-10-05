@@ -814,14 +814,13 @@ defmodule Arbiter.Quota.Gate do
 
   The **long** window does not fail open on age — see `long_window_stale?/1`.
   """
-  @spec stale?(quota_source()) :: boolean()
-  def stale?(quota), do: quota |> Snapshot.normalize() |> snapshot_stale?()
+  @spec stale?(quota_source(), DateTime.t()) :: boolean()
+  def stale?(quota, now \\ DateTime.utc_now()),
+    do: quota |> Snapshot.normalize() |> snapshot_stale?(now)
 
   # `now` is a parameter so `gating_window/3`'s `opts[:now]` moves the
   # staleness checks and the paced math together — a pinned clock must not
   # quietly age the snapshot against the real one.
-  defp snapshot_stale?(snapshot, now \\ DateTime.utc_now())
-
   defp snapshot_stale?(nil, _now), do: false
 
   defp snapshot_stale?(%Snapshot{} = snapshot, now) do
@@ -871,10 +870,9 @@ defmodule Arbiter.Quota.Gate do
   reset — see "Staleness, and when a stale 7d hold lifts" in the moduledoc,
   which also lists the operator's escape hatches (bd-2wnkoq).
   """
-  @spec long_window_stale?(quota_source()) :: boolean()
-  def long_window_stale?(quota), do: quota |> Snapshot.normalize() |> snapshot_long_stale?()
-
-  defp snapshot_long_stale?(snapshot, now \\ DateTime.utc_now())
+  @spec long_window_stale?(quota_source(), DateTime.t()) :: boolean()
+  def long_window_stale?(quota, now \\ DateTime.utc_now()),
+    do: quota |> Snapshot.normalize() |> snapshot_long_stale?(now)
 
   defp snapshot_long_stale?(nil, _now), do: false
 
