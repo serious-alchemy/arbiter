@@ -329,6 +329,9 @@ defmodule Arbiter.CircuitBreaker do
 
   @impl true
   def init(_opts) do
+    # bd-6i7yzq: writes this process makes are attributed to it (`Arbiter.Actor`).
+    Arbiter.Actor.put(Arbiter.Actor.system("circuit_breaker"))
+
     schedule_sweep()
     {:ok, %{entries: %{}}}
   end

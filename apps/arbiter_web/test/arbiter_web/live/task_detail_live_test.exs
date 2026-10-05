@@ -1679,6 +1679,23 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       assert html =~ "2 transitions"
     end
 
+    test "names who made each write (bd-6i7yzq)", %{conn: conn, ws: ws} do
+      {:ok, task} =
+        Arbiter.Actor.with_actor(Arbiter.Actor.coordinator(), fn ->
+          Ash.create(Issue, %{title: "attributed", workspace_id: ws.id})
+        end)
+
+      {:ok, _} =
+        Arbiter.Actor.with_actor(Arbiter.Actor.worker("bd-9"), fn ->
+          Ash.update(task, %{priority: 0})
+        end)
+
+      {:ok, _view, html} = live_task(conn, ~p"/tasks/#{task.id}")
+
+      assert html =~ "coordinator ·"
+      assert html =~ "worker:bd-9 ·"
+    end
+
     test "the panel meta says so when the stream is truncated", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "chatty", workspace_id: ws.id})
 

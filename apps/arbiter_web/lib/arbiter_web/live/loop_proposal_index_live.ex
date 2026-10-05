@@ -92,7 +92,7 @@ defmodule ArbiterWeb.LoopProposalIndexLive do
   end
 
   def handle_event("apply", %{"id" => id}, socket) do
-    case Loop.apply_pending(id, actor: "dashboard") do
+    case Loop.apply_pending(id, actor: Arbiter.Actor.resolve_label(nil) || "dashboard") do
       {:ok, row} ->
         {:noreply, socket |> decide(row, :applied) |> refresh()}
 
@@ -108,7 +108,10 @@ defmodule ArbiterWeb.LoopProposalIndexLive do
 
   def handle_event("reject", %{"id" => id} = params, socket) do
     reason = params |> Map.get("reason", "") |> String.trim()
-    opts = [actor: "dashboard"] ++ if(reason == "", do: [], else: [reason: reason])
+
+    opts =
+      [actor: Arbiter.Actor.resolve_label(nil) || "dashboard"] ++
+        if(reason == "", do: [], else: [reason: reason])
 
     case Loop.reject_pending(id, opts) do
       {:ok, row} ->

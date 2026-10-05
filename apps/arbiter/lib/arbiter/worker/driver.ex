@@ -110,6 +110,9 @@ defmodule Arbiter.Worker.Driver do
 
   @impl true
   def init(opts) do
+    # bd-6i7yzq: writes this process makes are attributed to it (`Arbiter.Actor`).
+    Arbiter.Actor.put(Arbiter.Actor.system("driver"))
+
     claude_driven = Keyword.get(opts, :claude_driven, false)
 
     state = %{

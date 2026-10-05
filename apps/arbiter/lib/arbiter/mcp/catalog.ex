@@ -3048,8 +3048,13 @@ defmodule Arbiter.MCP.Catalog do
       else: {:error, "Tool #{tool.name} is not permitted for a #{tier} scope"}
   end
 
+  # bd-6i7yzq: the MCP edge. Every write the handler makes (ticket transitions,
+  # config, skills, ...) is attributed to the token's actor — attribution only,
+  # `permitted/2` above is still the whole gate.
   defp run(tool, scope, args) do
-    case tool.handler.(scope, args) do
+    case Arbiter.Actor.with_actor(Arbiter.Actor.from_scope(scope), fn ->
+           tool.handler.(scope, args)
+         end) do
       {:ok, data} when is_map(data) -> {:ok, data}
       {:error, {:unauthorized, msg}} -> {:rpc_error, @code_not_permitted, msg}
       {:error, {_kind, msg}} when is_binary(msg) -> {:tool_error, msg}

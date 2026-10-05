@@ -1174,6 +1174,9 @@ defmodule Arbiter.Worker.Watchdog do
   # code is held to it; see the note in .credo.exs.
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   def init(opts) do
+    # bd-6i7yzq: writes this process makes are attributed to it (`Arbiter.Actor`).
+    Arbiter.Actor.put(Arbiter.Actor.system("watchdog"))
+
     task_id = Keyword.fetch!(opts, :task_id)
     adapter = Keyword.fetch!(opts, :adapter)
     mr_ref = Keyword.fetch!(opts, :mr_ref)

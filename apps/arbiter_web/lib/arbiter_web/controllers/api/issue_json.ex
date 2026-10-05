@@ -38,6 +38,7 @@ defmodule ArbiterWeb.Api.IssueJSON do
       :current_run,
       ArbiterWeb.Api.WorkerJSON.current_run(Map.get(assigns, :current_run))
     )
+    |> put_history(Map.get(assigns, :history))
   end
 
   def show(%{issue: issue}), do: data(issue)
@@ -73,6 +74,28 @@ defmodule ArbiterWeb.Api.IssueJSON do
           |> Map.merge(Projection.payload(view))
         end)
     }
+  end
+
+  # bd-6i7yzq: newest first. `actor` is the `Arbiter.Actor` label of whoever made
+  # the write, or null when none is on record (written before actors existed, or
+  # with no actor in scope). `changed` names the fields; `state` is the new
+  # lifecycle state when the write moved it.
+  defp put_history(map, nil), do: map
+
+  defp put_history(map, history) do
+    Map.put(
+      map,
+      :history,
+      Enum.map(history, fn entry ->
+        %{
+          at: DateTime.to_iso8601(entry.at),
+          action: entry.action,
+          actor: entry.actor,
+          changed: entry.changes |> Map.keys() |> Enum.sort(),
+          state: entry.changes["state"]
+        }
+      end)
+    )
   end
 
   defp put_lifecycle(map, nil), do: map

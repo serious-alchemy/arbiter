@@ -89,6 +89,14 @@ defmodule Arbiter.Events do
     * `Arbiter.ReviewGate.Resolutions.record/1` → `:gate_resolved`
     * `Arbiter.Reviews.ConflictReview.record/2` → `:conflict_review`
 
+  ## Actor
+
+  Every event carries `actor` — who caused it — when one is known: the payload's
+  own `actor` if the call site supplies one, else the broadcasting process's
+  ambient `Arbiter.Actor` (bd-6i7yzq), as its label (`"coordinator"`,
+  `"worker:bd-xxxx"`, `"operator:<identity>"`, `"autopilot"`, `"system:<name>"`).
+  Attribution only.
+
   All broadcasts are best-effort: PubSub failures are logged at debug and swallowed.
   """
 
@@ -149,6 +157,7 @@ defmodule Arbiter.Events do
 
     event =
       payload
+      |> put_actor()
       |> Map.put(:topic, event_topic)
       |> Map.put(:at, DateTime.to_iso8601(now))
 
@@ -174,6 +183,21 @@ defmodule Arbiter.Events do
   end
 
   def broadcast(_workspace_id, _event_topic, _payload), do: :ok
+
+  # bd-6i7yzq: who caused the event. A payload that already names an `:actor`
+  # (gate_resolved, the cap-override events, ...) keeps it; otherwise the
+  # process's ambient `Arbiter.Actor` is stamped on, as its label. No ambient
+  # actor leaves the payload untouched.
+  # Call sites key it by atom (`actor:`) or string (`"actor"`).
+  defp put_actor(payload) do
+    cond do
+      named?(Map.get(payload, :actor)) or named?(Map.get(payload, "actor")) -> payload
+      actor = Arbiter.Actor.current() -> Map.put(payload, :actor, Arbiter.Actor.label(actor))
+      true -> payload
+    end
+  end
+
+  defp named?(actor), do: actor not in [nil, ""]
 
   # Not swallowed at debug like the PubSub sends above — a lost row silently
   # breaks replay for every future reconnect, so it's worth a log line an

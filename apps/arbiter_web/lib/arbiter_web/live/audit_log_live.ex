@@ -13,20 +13,19 @@ defmodule ArbiterWeb.AuditLogLive do
 
   ## Actor
 
-  `Issue` has no `belongs_to_actor` (see `Arbiter.PaperTrail`'s moduledoc) —
-  the only actor signal on an Issue version is the optional `change_origin`
-  argument threaded through the `:update` action (`create`/`close`/`reopen`
-  never set it), landing in `version_action_inputs["change_origin"]` via
-  `store_action_inputs?(true)`. A version with no `change_origin` is shown
-  as `"system"`.
+  Every Issue version row carries the `actor` label of whoever made the write
+  (`Arbiter.Actor`, bd-6i7yzq): `"operator:<identity>"` for a dashboard click,
+  `"operator:cli"` for the operator's own `arb`, `"coordinator"`,
+  `"worker:<task_id>"`, `"autopilot"`, `"system:<name>"` for a reconciler. The
+  optional `change_origin` argument threaded through the `:update` action
+  (`"loop:proposal:<id>"`) is more specific than any of those, so it wins when
+  present. A version with neither — written before the column existed, or by a
+  caller with no actor in scope — is shown as `"unattributed"`.
 
-  The **Human / Machine** tabs approximate a real actor-kind distinction
-  from that one string: `"worker:<task_id>"`, `"loop:..."`, `"coordinator"`,
-  and unattributed (`"system"`) writes are machine actors (every one of
-  those is itself an AI agent session); `"cli"`, `"dashboard"`, or any other
-  bare label is treated as human. This is a heuristic, not a first-class
-  actor model — the moduledoc this replaces already punted actor filtering
-  to "Phase 5" for the same reason (no actor resource to belong to).
+  The **Human / Machine** tabs are `Arbiter.Actor.machine?/1` over the parsed
+  label: operators are human; coordinator, worker, autopilot, system (and the
+  loop) are machines; so is an unattributed write. A legacy free-form label
+  (`"cli"`, `"dashboard"`) parses as an operator.
 
   ## Query syntax
 
@@ -43,8 +42,7 @@ defmodule ArbiterWeb.AuditLogLive do
   (`create`/`update`/`close`/`reopen` — `version_action_name` is
   atom-typed, so only an exact match is safe to push as SQL); any other
   `action:` value, `actor:`, and bare-word clauses, plus the Human/Machine
-  tab, only narrow within the already-bounded window (no `belongs_to_actor`,
-  so there's no column to filter actor on server-side — see "Actor" above).
+  tab, only narrow within the already-bounded window.
   Tab, query, and page are round-tripped through the URL (`?tab=&q=&page=`)
   via `handle_params/3` so the view is shareable and back-button safe, and
   so a deep link can seed a filter (see `subject_from_params/1`).
@@ -75,6 +73,7 @@ defmodule ArbiterWeb.AuditLogLive do
 
   use ArbiterWeb, :live_view
 
+  alias Arbiter.Actor
   alias Arbiter.Tasks.Issue.Version
   alias ArbiterWeb.CoreComponents.{Core, Data, Feedback, Forms, Navigation}
   alias ArbiterWeb.Paging
@@ -89,6 +88,7 @@ defmodule ArbiterWeb.AuditLogLive do
 
   # Identity colours only — deliberately excludes --arb-fail/--arb-attention
   # so an ordinary actor is never painted with a semantic error/warning tone.
+  @unattributed "unattributed"
   @actor_hues ~w(--arb-live --arb-info --arb-proposal)
 
   @impl true
@@ -305,21 +305,12 @@ defmodule ArbiterWeb.AuditLogLive do
     rows
   end
 
-  defp actor_of(%{version_action_inputs: %{"change_origin" => origin}})
-       when is_binary(origin) and origin != "",
-       do: origin
+  defp actor_of(version), do: Actor.of_version(version) || @unattributed
 
-  defp actor_of(_version), do: "system"
-
-  defp actor_kind("system"), do: "machine"
+  defp actor_kind(@unattributed), do: "machine"
 
   defp actor_kind(actor) do
-    cond do
-      String.starts_with?(actor, "worker:") -> "machine"
-      String.starts_with?(actor, "loop:") -> "machine"
-      actor == "coordinator" -> "machine"
-      true -> "human"
-    end
+    if actor |> Actor.parse() |> Actor.machine?(), do: "machine", else: "human"
   end
 
   defp actor_hue(actor) do
