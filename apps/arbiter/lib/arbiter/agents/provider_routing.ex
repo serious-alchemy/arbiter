@@ -56,6 +56,11 @@ defmodule Arbiter.Agents.ProviderRouting do
       provider/model lacks a capability the role or the repo requires
       (`Arbiter.Agents.CapabilityMatrix`, bd-57uzkl); checked ahead of quota, so
       a candidate that cannot do the work never has its quota weighed;
+    * `below_floor` — a floor is configured (`routing.floors`, bd-c675ny,
+      `Arbiter.Agents.Floors`) and the model the candidate would run is on a
+      known tier below the repo's blast-radius floor, or — with
+      `routing.floors.policy_floor` — below the tier the routing policy
+      chose; checked ahead of quota, like `capability_missing`;
     * `paused` — the account or its provider is paused (`Arbiter.Providers.Pause`,
       `arb provider pause`), with the operator's reason as the detail;
     * `quota_held` — the workspace's `Arbiter.Quota.Gate` would hold a
@@ -118,6 +123,7 @@ defmodule Arbiter.Agents.ProviderRouting do
   alias Arbiter.Agents.AuthHold
   alias Arbiter.Agents.CapabilityMatrix
   alias Arbiter.Agents.CredentialWatchdog
+  alias Arbiter.Agents.Floors
   alias Arbiter.Agents.ModelFamily
   alias Arbiter.Agents.ProviderConstraint
   alias Arbiter.Agents.ProviderPool
@@ -613,6 +619,7 @@ defmodule Arbiter.Agents.ProviderRouting do
         Keyword.get_lazy(opts, :gemini_code, fn -> Arbiter.Quota.provider_code("gemini") end),
       confinement: Keyword.get(opts, :write_confinement, &Agents.write_confinement/2),
       capability: capability_gate(ws, task, opts),
+      floor: Floors.gate(ws, repo_opt(opts) || task_repo(task)),
       gate: Arbiter.Quota.gate_for_workspace(ws)
     }
   end
@@ -683,6 +690,7 @@ defmodule Arbiter.Agents.ProviderRouting do
       &check_capacity/2,
       &check_confinement/2,
       &check_capability/2,
+      &check_floor/2,
       &check_quota/2
     ]
 
@@ -800,6 +808,18 @@ defmodule Arbiter.Agents.ProviderRouting do
     case CapabilityMatrix.check(gate.rows, gate.requires, provider, model) do
       :ok -> {:ok, entry}
       {:missing, _capability, detail} -> {:drop, "capability_missing", detail}
+    end
+  end
+
+  # bd-c675ny (design §6.4): the floors are a hard gate after capability and
+  # before quota. `nil` (no `routing.floors` config, the default) is the whole
+  # off path. A model on no known tier is not below any floor.
+  defp check_floor(entry, %{floor: nil}), do: {:ok, entry}
+
+  defp check_floor(%{account: account, model: model} = entry, %{floor: gate} = ctx) do
+    case Floors.check(gate, ctx.routed, account.provider, model, ctx.agent_config) do
+      :ok -> {:ok, entry}
+      {:below, detail} -> {:drop, "below_floor", detail}
     end
   end
 

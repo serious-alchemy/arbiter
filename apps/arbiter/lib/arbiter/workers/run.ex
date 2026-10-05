@@ -112,6 +112,7 @@ defmodule Arbiter.Workers.Run do
         :routing_policy,
         :model_tier,
         :thinking,
+        :floor_clamped,
         :stop_category,
         :base_task_id,
         :role,
@@ -147,6 +148,7 @@ defmodule Arbiter.Workers.Run do
         :routing_policy,
         :model_tier,
         :thinking,
+        :floor_clamped,
         :prompt_sha256,
         :result_subtype,
         :result_is_error,
@@ -426,6 +428,15 @@ defmodule Arbiter.Workers.Run do
                     ~s[("static" / "by_priority" / "by_difficulty" / "by_budget" / ] <>
                     ~s("round_robin" / "review_agent" — the last for a ReviewGate reviewer, ) <>
                     "which is configured directly rather than routed)."
+    end
+
+    attribute :floor_clamped, :boolean do
+      public? true
+
+      description "Whether a routing floor (`Arbiter.Agents.Floors`, bd-c675ny) raised the " <>
+                    "tier this run was dispatched at. A clamped dispatch did not get the rule " <>
+                    "its policy or canary arm assigned, so `Canary.Metrics` excludes it. " <>
+                    "nil on a run that predates the column, which reads as not clamped."
     end
 
     attribute :model_tier, :string do

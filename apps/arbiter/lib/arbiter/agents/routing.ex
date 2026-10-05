@@ -26,6 +26,7 @@ defmodule Arbiter.Agents.Routing do
   `%{type:, config:}` shape regardless of which policy is active.
   """
 
+  alias Arbiter.Agents.Floors
   alias Arbiter.Agents.ProviderPool
   alias Arbiter.Agents.Routing.{Policy, Static}
   alias Arbiter.Tasks.Issue
@@ -42,7 +43,13 @@ defmodule Arbiter.Agents.Routing do
   @spec choose(Issue.t(), Workspace.t() | nil, Policy.ledger_snapshot()) :: Policy.choice()
   def choose(%Issue{} = task, workspace, ledger_snapshot) do
     policy = policy_for_workspace(workspace)
-    policy.choose(task, workspace, ledger_snapshot)
+
+    # bd-c675ny (R8): the blast-radius floor holds for every policy, not only
+    # `:by_difficulty` (which clamps itself, after its canary overlay). The
+    # clamp is idempotent and a no-op with no `routing.floors` config.
+    task
+    |> policy.choose(workspace, ledger_snapshot)
+    |> Floors.clamp(workspace, task.repo)
   end
 
   @doc """
@@ -61,9 +68,16 @@ defmodule Arbiter.Agents.Routing do
   def decide(%Issue{} = task, workspace, opts) do
     case Keyword.get(opts, :routing_choice) do
       %{type: _, config: _} = choice -> choice
-      _ -> choose(task, workspace)
+      _ -> choose(with_repo(task, Keyword.get(opts, :repo)), workspace)
     end
   end
+
+  # bd-c675ny (R8): a dispatch's explicit `:repo` is the repo the floor reads —
+  # the same one the capability gate and the spawn use — not only the task's.
+  defp with_repo(%Issue{} = task, repo) when is_binary(repo) and repo != "",
+    do: %{task | repo: repo}
+
+  defp with_repo(task, _repo), do: task
 
   @doc """
   The ledger snapshot handed to policies:

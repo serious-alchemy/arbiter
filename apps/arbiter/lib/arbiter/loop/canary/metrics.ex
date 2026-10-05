@@ -38,7 +38,7 @@ defmodule Arbiter.Loop.Canary.Metrics do
   Returns
 
       %{
-        canary: arm_stats, control: arm_stats,
+        canary: arm_stats, control: arm_stats, clamped: non_neg_integer(),
         difficulty:, proposal_id:, min_dispatches:, regression_tolerance:, since:
       }
 
@@ -46,10 +46,15 @@ defmodule Arbiter.Loop.Canary.Metrics do
   first_pass_convergence:, cost_usd:, review_rounds:, cost_per_round:}`.
   `first_pass_convergence` and `cost_per_round` are `nil` when the arm has
   nothing to divide by — an absent measurement, never a zero.
+
+  A dispatch a routing floor clamped (`worker_runs.floor_clamped`, bd-c675ny)
+  did not get the rule its arm assigned — a canaried rule below the floor was
+  raised to it, a baseline rule too — so it says nothing about either rule and
+  is left out of both arms. `clamped` is how many were left out.
   """
   @spec collect(String.t(), Canary.t()) :: map()
   def collect(workspace_id, %Canary{} = canary) do
-    runs = dispatches(workspace_id, canary)
+    {runs, clamped} = workspace_id |> dispatches(canary) |> Enum.split_with(&(not &1.clamped?))
 
     {canary_runs, control_runs} =
       Enum.split_with(runs, &(Canary.arm(canary, &1.task_id) == :canary))
@@ -61,6 +66,7 @@ defmodule Arbiter.Loop.Canary.Metrics do
     %{
       canary: arm_stats(canary_runs, rounds, costs),
       control: arm_stats(control_runs, rounds, costs),
+      clamped: length(clamped),
       difficulty: canary.difficulty,
       proposal_id: canary.proposal_id,
       min_dispatches: canary.min_dispatches,
@@ -99,7 +105,7 @@ defmodule Arbiter.Loop.Canary.Metrics do
   defp dispatches(workspace_id, %Canary{} = canary) do
     query(
       """
-      SELECT id AS run_id, task_id, difficulty_at_dispatch
+      SELECT id AS run_id, task_id, difficulty_at_dispatch, floor_clamped
       FROM worker_runs
       WHERE workspace_id = ?1
         AND kind = 'implement' AND COALESCE(role, 'base') = 'base'
@@ -112,7 +118,12 @@ defmodule Arbiter.Loop.Canary.Metrics do
       &(ByDifficulty.effective_difficulty(&1["difficulty_at_dispatch"]) == canary.difficulty)
     )
     |> Enum.map(fn r ->
-      %{run_id: r["run_id"], task_id: r["task_id"], base_task_id: base_task_id(r["task_id"])}
+      %{
+        run_id: r["run_id"],
+        task_id: r["task_id"],
+        base_task_id: base_task_id(r["task_id"]),
+        clamped?: truthy?(r["floor_clamped"])
+      }
     end)
   end
 

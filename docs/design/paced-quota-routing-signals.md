@@ -891,6 +891,31 @@ floor: a subject's tier and `max_difficulty`, and permissions for prod reach.
 This floor is the *capability* half: how strong the model must be, not how far
 it's trusted.
 
+**As built (R8, bd-c675ny).** `Arbiter.Agents.Floors` holds both floors.
+
+- The repo floor is `routing.floors.repos.<repo>.min_model_tier`, on the ladder
+  `economy < standard < premium < flagship`. `Routing.choose/3` clamps the
+  chosen `model_tier` to it for every policy, and `ByDifficulty` does so after
+  `Canary.overlay/3`. A raised choice carries `floor: %{tier:, from:, repo:}`;
+  `Dispatch` records it as `worker_runs.floor_clamped`, and `Canary.Metrics`
+  leaves a clamped dispatch out of **both** arms (a clamped baseline rule did
+  not run either) and reports how many it left out as `clamped`.
+- The policy floor is `routing.floors.policy_floor: true`. It is a switch, not
+  always-on, because with today's single tier per dispatch it can only change a
+  decision when a model is pinned below the tier the policy chose, and §9 I1
+  needs off to mean identical.
+- `below_floor` is a drop in `ProviderRouting.check/2`, after `capability` and
+  before `quota`. `Dispatch.ensure_floor/2` repeats the check on the legacy
+  path (E17), refusing `{:error, {:below_floor, provider, phrase}}`. An
+  operator's explicit `model:` is an override, not routing (§10), and is not
+  checked.
+- A model, or a tier, with no rank on the ladder is never below a floor: a
+  floor is only enforced where both sides are known.
+- Not built: the coordinator-may-raise / operator-may-lower authority split on
+  `routing.floors` (config writes carry no such distinction today), and the
+  phase 2 per-ticket markers (R14). Both Loop paths — the canary and
+  `Canary.eligible/1`'s `routing.rules`-only patch — already cannot reach it.
+
 ### 6.5 When nothing survives
 
 | Situation | Outcome |

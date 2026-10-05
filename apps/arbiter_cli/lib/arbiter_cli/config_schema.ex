@@ -185,6 +185,18 @@ defmodule ArbiterCli.ConfigSchema do
       repos.<repo>.requires  list of capabilities (resume, async_verification) every
                           dispatch for that repo requires of its provider, e.g.
                           a repo whose suite takes minutes: ["async_verification"].
+      floors.repos.<repo>.min_model_tier  economy | standard | premium | flagship —
+                          the blast-radius floor: a task in that repo never routes
+                          below this tier, even when a rule or a Stage 3 canary
+                          assigns a lower one (the tier is clamped up, the run is
+                          recorded floor_clamped, and Canary.Metrics leaves it
+                          out); a pinned model below it is dropped (below_floor)
+                          or the dispatch refused. Operator-owned: the Loop never
+                          writes it. Absent means no floor.
+      floors.policy_floor  bool (default: false) — the router drops (below_floor) a
+                          candidate whose model is below the tier the routing policy
+                          chose, so choosing among accounts can't buy quota with
+                          quality.
 
     review / review_gate  (map)
       required    bool — whether a review round gates completion

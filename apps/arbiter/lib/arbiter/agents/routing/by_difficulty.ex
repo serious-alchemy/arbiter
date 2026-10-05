@@ -100,6 +100,7 @@ defmodule Arbiter.Agents.Routing.ByDifficulty do
 
   @behaviour Arbiter.Agents.Routing.Policy
 
+  alias Arbiter.Agents.Floors
   alias Arbiter.Agents.Routing
   alias Arbiter.Loop.Canary
   alias Arbiter.Tasks.Issue
@@ -134,7 +135,11 @@ defmodule Arbiter.Agents.Routing.ByDifficulty do
     difficulty = effective_difficulty(task.difficulty)
     rule = merged_rule(workspace, difficulty, task.id)
 
+    # bd-c675ny (R8): the blast-radius floor clamps the tier AFTER the canary
+    # overlay, so a canaried rule cannot route a floored repo below its floor.
+    # A no-op (and no `:floor` key) for every workspace with no floors config.
     %{default | config: Map.merge(default.config, rule)}
+    |> Floors.clamp(workspace, task.repo)
   end
 
   # A Stage 3 canary (bd-6edc0u) overlays its candidate rule on *half* the

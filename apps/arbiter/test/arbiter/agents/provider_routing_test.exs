@@ -1132,4 +1132,153 @@ defmodule Arbiter.Agents.ProviderRoutingTest do
       assert MapSet.subset?(MapSet.new(slugs_for.(gated_ws)), MapSet.new(slugs_for.(plain_ws)))
     end
   end
+
+  # ---- bd-c675ny (R8): the floor hard gate -------------------------------------
+
+  describe "floors (bd-c675ny)" do
+    # A legacy concrete-model config: the claude adapter is pinned to haiku
+    # (economy) and the policy assigns no tier, so the router is the only place
+    # a repo floor can see the model it would run.
+    @floored %{
+      "agent" => %{"type" => "claude", "config" => %{"model" => "haiku"}},
+      "routing" => %{
+        "provider_selection" => "most_quota",
+        "floors" => %{"repos" => %{"arbiter" => %{"min_model_tier" => "premium"}}}
+      }
+    }
+    @unfloored put_in(@floored, ["routing", "floors"], nil)
+
+    defp floor_pair!(ws) do
+      claude = account!(:claude, "floor-claude")
+      agy = account!(:antigravity, "floor-agy")
+      allow!(ws, claude, 0)
+      allow!(ws, agy, 1)
+      {claude, agy, [{claude, claude_quota(0.1)}, {agy, agy_quota(1.0, 1.0)}]}
+    end
+
+    test "a candidate whose model is below the repo floor is dropped with below_floor" do
+      ws = workspace!(@floored)
+      {claude, agy, pairs} = floor_pair!(ws)
+
+      assert {:ok, selection} =
+               ProviderRouting.select(ws, task!(ws, %{repo: "arbiter"}), :main, opts(pairs))
+
+      assert reasons(selection.decision)[claude.slug] == "below_floor"
+      assert selection.account.id == agy.id
+
+      detail =
+        Enum.find(selection.decision["dropped"], &(&1["account_slug"] == claude.slug))["detail"]
+
+      assert detail =~ "premium"
+      assert detail =~ "economy"
+    end
+
+    test "the floor is ahead of quota: a below-floor candidate's quota is never weighed" do
+      ws = workspace!(@floored)
+      {claude, agy, _} = floor_pair!(ws)
+      pairs = [{claude, claude_quota(99.0, 99.0)}, {agy, agy_quota(1.0, 1.0)}]
+
+      decision = ProviderRouting.evaluate(ws, task!(ws, %{repo: "arbiter"}), opts(pairs))
+      assert reasons(decision)[claude.slug] == "below_floor"
+    end
+
+    test "a repo with no floor is not gated" do
+      ws = workspace!(@floored)
+      {claude, _agy, pairs} = floor_pair!(ws)
+
+      decision = ProviderRouting.evaluate(ws, task!(ws, %{repo: "other"}), opts(pairs))
+      refute Map.has_key?(reasons(decision), claude.slug)
+    end
+
+    test "when every candidate is below the floor the selection is the legacy one, with why" do
+      ws = workspace!(@floored)
+      claude = account!(:claude, "floor-only")
+      allow!(ws, claude, 0)
+
+      assert {:legacy, decision} =
+               ProviderRouting.select(
+                 ws,
+                 task!(ws, %{repo: "arbiter"}),
+                 :main,
+                 opts([{claude, claude_quota(0.1)}])
+               )
+
+      assert decision["outcome"] == "no_candidate"
+      assert reasons(decision)[claude.slug] == "below_floor"
+    end
+
+    test "the policy floor: scoring cannot move work to a lower tier than the policy chose" do
+      # The policy pinned an opus-class model; the agy candidate would run a
+      # lower tier's model.
+      routed = %{type: :claude, config: %{"model_tier" => "standard", "model" => "opus"}}
+
+      on = put_in(@unfloored, ["routing", "floors"], %{"policy_floor" => true})
+      ws = workspace!(on)
+      {claude, agy, pairs} = floor_pair!(ws)
+
+      decision =
+        ProviderRouting.evaluate(
+          ws,
+          task!(ws, %{repo: "arbiter"}),
+          opts(pairs, routing_choice: routed)
+        )
+
+      assert reasons(decision)[agy.slug] == "below_floor"
+      refute Map.has_key?(reasons(decision), claude.slug)
+    end
+
+    # ---- the no-regression invariant (§9) --------------------------------------
+
+    test "I1: with no floors config nothing is dropped as below_floor, whatever the model" do
+      routed = %{type: :claude, config: %{"model_tier" => "standard", "model" => "opus"}}
+
+      for config <- [@unfloored, put_in(@unfloored, ["routing", "floors"], %{})] do
+        ws = workspace!(config)
+        {_claude, _agy, pairs} = floor_pair!(ws)
+
+        decision =
+          ProviderRouting.evaluate(
+            ws,
+            task!(ws, %{repo: "arbiter"}),
+            opts(pairs, routing_choice: routed)
+          )
+
+        refute Enum.any?(decision["dropped"], &(&1["reason"] == "below_floor"))
+        assert length(decision["candidates"]) == 2
+      end
+    end
+
+    test "I2: with one eligible account that meets the floor the selection is unchanged" do
+      meets = put_in(@floored, ["agent", "config", "model"], "opus")
+
+      for config <- [meets, put_in(meets, ["routing", "floors"], nil)] do
+        ws = workspace!(config)
+        claude = account!(:claude, "solo-floor")
+        allow!(ws, claude, 0)
+        task = task!(ws, %{repo: "arbiter"})
+
+        assert {:ok, selection} =
+                 ProviderRouting.select(ws, task, :main, opts([{claude, claude_quota(0.2)}]))
+
+        assert selection.account.id == claude.id
+        assert selection.agent_type == :claude
+        assert selection.decision["outcome"] == "selected"
+        assert selection.decision["dropped"] == []
+      end
+    end
+
+    test "a floor can only remove candidates: the floored set is a subset of the unfloored" do
+      slugs_for = fn config ->
+        ws = workspace!(config)
+        {_, _, pairs} = floor_pair!(ws)
+        decision = ProviderRouting.evaluate(ws, task!(ws, %{repo: "arbiter"}), opts(pairs))
+        decision["candidates"] |> slugs() |> Enum.map(&String.replace(&1, ~r/-\d+$/, ""))
+      end
+
+      assert MapSet.subset?(
+               MapSet.new(slugs_for.(@floored)),
+               MapSet.new(slugs_for.(@unfloored))
+             )
+    end
+  end
 end
