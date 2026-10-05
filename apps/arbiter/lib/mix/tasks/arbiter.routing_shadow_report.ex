@@ -30,7 +30,7 @@ defmodule Mix.Tasks.Arbiter.RoutingShadowReport do
   def run(argv) do
     {opts, _rest, _invalid} = OptionParser.parse(argv, switches: @switches)
 
-    # Same read-only startup as `mix arbiter.draw_calibration`: the database
+    # Read-only startup, as the other report tasks do: the database
     # layer only, never the worker fleet or endpoint.
     Mix.Task.run("app.config")
     repo_config = Application.get_env(:arbiter, Arbiter.Repo, [])
