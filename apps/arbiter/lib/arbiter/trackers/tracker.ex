@@ -340,7 +340,23 @@ defmodule Arbiter.Trackers.Tracker do
   """
   @callback search_by_title(title :: String.t()) :: {:ok, [summary()]} | {:error, term()}
 
-  @optional_callbacks add_remote_link: 3,
+  @doc """
+  Prepare the current process to make adapter calls for `workspace`.
+
+  Seeds the adapter's per-process config so subsequent adapter calls in this
+  process see the workspace's configuration without threading the workspace
+  through every call site.
+
+  `workspace` may be `nil`, which clears the per-process config.
+  `opts` is a keyword list; recognized keys include `:repo` for per-repo overrides.
+
+  Optional — adapters that carry no per-process config simply omit this callback.
+  """
+  @callback prepare(workspace :: Arbiter.Tasks.Workspace.t() | map() | nil, opts :: keyword()) ::
+              :ok
+
+  @optional_callbacks prepare: 2,
+                      add_remote_link: 3,
                       add_comment: 2,
                       check_prior_claim: 1,
                       signal_claim: 3,

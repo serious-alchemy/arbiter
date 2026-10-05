@@ -37,6 +37,7 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       check_migrations(),
       check_bind_address(),
       check_anonymous_api(),
+      check_dashboard_auth(),
       Distribution.check(),
       check_restart_safety(),
       check_security_defaults(),
@@ -599,9 +600,12 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   # is visible rather than silent.
   #
   # bd-8xy1mf: a `[fail]` here is only warranted when the gap is actually
-  # fatal to some workspace — i.e. that workspace resolves `:strict` (agy is
-  # already the configured/eligible provider by the time `write_jail_warning`
-  # is non-nil at all, see `Arbiter.Agents.Gemini.write_jail_warning/1`).
+  # fatal to some workspace — i.e. that workspace resolves `:strict`. Other
+  # adapters (Codex, bd-99emmd) also report a non-nil `write_jail_warning`, so
+  # `jail_warnings/1` keeps only postures whose `"provider"` is agy (`gemini`);
+  # a Codex `:bypass`/`:strict` warning is about codex, not the bwrap jail, and
+  # a `:strict` Codex workspace is not fatal (the pool substitutes a
+  # strict-capable provider, see `Arbiter.Agents.strict_eligible_provider/4`).
   # Outside `:strict` the warning is real but informational: `[ ok ]` with the
   # cause and fix still named in `detail`, so an operator preparing to switch
   # a scope to `:strict` sees it ahead of time without doctor crying wolf on
@@ -969,13 +973,21 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
   defp jail_warnings(ws) do
     posture = Map.get(ws, "security_posture") || %{}
 
-    repo_entries =
-      posture
-      |> Map.get("repos", %{})
-      |> Enum.flat_map(fn {repo, repo_posture} -> warning_entry(repo_posture, repo) end)
+    if agy_posture?(posture) do
+      repo_entries =
+        posture
+        |> Map.get("repos", %{})
+        |> Enum.flat_map(fn {repo, repo_posture} -> warning_entry(repo_posture, repo) end)
 
-    warning_entry(posture, nil) ++ repo_entries
+      warning_entry(posture, nil) ++ repo_entries
+    else
+      []
+    end
   end
+
+  # A server that predates the `"provider"` key only ever reported agy's
+  # warning, so a missing key still counts as agy.
+  defp agy_posture?(posture), do: Map.get(posture, "provider") in [nil, "gemini"]
 
   defp warning_entry(posture, repo) do
     case Map.get(posture, "write_jail_warning") do
@@ -1785,6 +1797,50 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
                 "with a plain curl. Upgrade the server (bd-asawcq); `/api` must answer " <>
                 "401 without `Authorization: Bearer <token>`."
         }
+    end
+  end
+
+  # bd-3gycsz: the dashboard has no address bypass (a `tailscale serve` request
+  # arrives from 127.0.0.1), so an anonymous browser request must be redirected
+  # to the login page. Probe `GET /` without following redirects; a 2xx means
+  # the dashboard is open. The auth mode comes from the authenticated
+  # `/api/server/dashboard_auth` and is reported in the detail. An unreachable
+  # or unrecognising server (older build, 500) is "could not determine".
+  @doc false
+  @spec check_dashboard_auth() :: Result.t()
+  def check_dashboard_auth do
+    result = %Result{
+      name: "dashboard requires login",
+      status: :ok,
+      detail: "could not determine — skipping",
+      fatal: true,
+      blocks_readiness: false
+    }
+
+    case Client.anonymous(:get, "/", redirect: false, decode_body: false) do
+      {:ok, _body} ->
+        %{
+          result
+          | status: :fail,
+            detail: "an anonymous browser request to / was served the dashboard",
+            hint:
+              "Anyone who can reach this server (a tailscale serve proxy arrives from " <>
+                "127.0.0.1) gets the whole dashboard. Upgrade the server (bd-3gycsz); " <>
+                "then `arb dashboard login` signs your browser in."
+        }
+
+      {:error, %Client.Error{kind: :http, status: s}} when s in 300..399 ->
+        %{result | detail: "anonymous requests are redirected to login (#{dashboard_mode()})"}
+
+      _ ->
+        result
+    end
+  end
+
+  defp dashboard_mode do
+    case Client.get("/api/server/dashboard_auth") do
+      {:ok, %{"impl" => impl, "mode" => mode}} -> "impl #{impl}, mode #{mode}"
+      _ -> "mode unknown"
     end
   end
 

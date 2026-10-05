@@ -158,7 +158,7 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     assert exit_code == 0
     assert {:ok, %{"ok" => true, "checks" => checks}} = Jason.decode(String.trim(out))
     assert is_list(checks)
-    assert length(checks) == 28
+    assert length(checks) == 29
   end
 
   test "version mismatch is non-fatal (exit 0 but shows [fail])" do
@@ -1028,6 +1028,56 @@ defmodule ArbiterCli.Cmd.DoctorTest do
       assert out =~ "[fail] agy write jail"
       assert out =~ "default: agy write jail unavailable"
       assert out =~ "hint:"
+    end
+
+    # bd-99emmd: Codex reports its own `write_jail_warning` (bypass default and
+    # strict). Neither is about the bwrap jail, and a `:strict` Codex workspace
+    # is not fatal (the pool substitutes a strict-capable provider), so the agy
+    # check must ignore both.
+    for {mode, warning} <- [
+          {"bypass", "codex runs with --dangerously-bypass-approvals-and-sandbox: ..."},
+          {"strict",
+           ":strict dispatches of codex are skipped or refused (no worktree write confinement)"}
+        ] do
+      test "ignores a codex #{mode} write_jail_warning" do
+        workspaces = %{
+          "data" => [
+            %{
+              "id" => "ws-1",
+              "name" => "codexws",
+              "prefix" => "vs",
+              "config" => %{},
+              "security_posture" => %{
+                "provider" => "codex",
+                "mode" => unquote(mode),
+                "allow" => [],
+                "deny" => [],
+                "safe_defaults" => [],
+                "safe_defaults_exclude" => [],
+                "sandbox" => %{"enabled" => true, "filesystem" => "worktree", "network" => true},
+                "write_jail_warning" => unquote(warning),
+                "repos" => %{
+                  "r" => %{"mode" => unquote(mode), "write_jail_warning" => unquote(warning)}
+                }
+              }
+            }
+          ]
+        }
+
+        stub_routes([
+          {{"get", "/api/workspaces"}, {workspaces, 200}},
+          {{"get", "/api/repos"}, {@repos_resp, 200}},
+          {{"get", "/api/version"}, {matching_version_resp(), 200}},
+          {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+        ])
+
+        {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+        assert exit_code == 0
+        assert out =~ "[ ok ] agy write jail"
+        refute out =~ "codex runs with"
+        refute out =~ "skipped or refused"
+        refute out =~ "[fail] agy write jail"
+      end
     end
 
     # bd-8xy1mf AC1: the host's own can-jail-agy answer must show even when no

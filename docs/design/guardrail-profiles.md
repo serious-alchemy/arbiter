@@ -169,9 +169,9 @@ and bound at `/run/user/1000/bus` handles that case:
 
 `xdg-dbus-proxy` is packaged on Fedora (0.1.8) but not in RHEL 8's BaseOS or
 AppStream. There, flatpak ships a private `/usr/libexec/flatpak-dbus-proxy`.
-On a host with no Secret Service at all, which may be the case on the
-headless EC2 (not checked), agy already falls back to file-seeded
-credentials (`ConfigDir.keyring_available?/0`).
+On a host with no Secret Service at all, agy 1.2.16 cannot authenticate via
+legacy file copies (ignored in file mode, and token rotation risks divergence;
+bd-6dpjw7); preflight fails loudly when no keyring is reachable (bd-8btihu).
 
 ### 2.2 DNS leaks inside a network namespace
 
@@ -947,7 +947,7 @@ before it. Each ticket's type is one of:
 | # | Title | D | Depends on | Type |
 |---|---|---|---|---|
 | **Phase 0: close the existing reach gaps** | | | | |
-| G1 | **Filed as bd-7o08mj (P0).** Jail: hide the D-Bus session and system buses, the systemd user manager and resolved's varlink socket from jailed workers. Re-expose only the ssh-agent socket, at a private path, so git push keeps working until G16. Give agy a Secret-Service-only filtered bus where `xdg-dbus-proxy` exists, and file-seeded credentials elsewhere. A doctor self-test proves `systemd-run --user` fails inside | 3 | — | jail |
+| G1 | **Filed as bd-7o08mj (P0).** Jail: hide the D-Bus session and system buses, the systemd user manager and resolved's varlink socket from jailed workers. Re-expose only the ssh-agent socket, at a private path, so git push keeps working until G16. Give agy a Secret-Service-only filtered bus where `xdg-dbus-proxy` exists (no file-seeded fallback on agy 1.2.16, bd-8btihu). A doctor self-test proves `systemd-run --user` fails inside | 3 | — | jail |
 | G2 | **Filed as bd-7r0qrj (P1).** Worker env becomes an allowlist. Stop passing server secrets (`ARBITER_CLOAK_KEY`, `SECRET_KEY_BASE`, `GITHUB_TOKEN`, API keys) and other providers' credentials. Pass only the spawned adapter's own credential and declared `worker_env` vars. Add a doctor check | 3 | — | env |
 | G3 | Jail: hide sensitive read paths (credential dirs, the install DB, the durable log root, other workspaces' repo paths and worktree roots) | 2 | G1 | jail |
 | **Phase 1: egress** | | | | |
@@ -1011,9 +1011,12 @@ before it. Each ticket's type is one of:
 4. **The EC2's kernel.** Its `user.max_user_namespaces`, whether `socat` is
    installed, and whether a Secret Service runs there are all unverified.
    bd-8xy1mf's two-host check and G4 cover them.
-5. **The filtered keyring is still the whole keyring.** A Secret-Service-only
+5. ~~**The filtered keyring is still the whole keyring.** A Secret-Service-only
    bus gives agy the whole unlocked collection, including `gh`'s token.
-   Should agy move to file-seeded credentials everywhere?
+   Should agy move to file-seeded credentials everywhere?~~ **Answered (bd-6dpjw7, bd-8btihu): No.**
+   agy 1.2.16 cannot authenticate from legacy file copies, and copying refresh
+   tokens risks token-rotation divergence. The keyring D-Bus proxy remains the
+   only working credential path; file-seeded fallback was removed in bd-8btihu.
 6. **Read scoping.** Should it be a denylist (G3, proposed) or an allowlist
    (`--tmpfs $HOME` plus read-only toolchain re-binds)? The allowlist is
    stronger but riskier for toolchains.

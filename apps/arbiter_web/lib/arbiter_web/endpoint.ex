@@ -24,11 +24,12 @@ defmodule ArbiterWeb.Endpoint do
   # keyed to the session id rather than to a LiveView process so a browser
   # reload reattaches instead of re-mounting terminal state.
   #
-  # `:peer_data` is the whole auth input — §10.4 is loopback-only, and
-  # `ArbiterWeb.SessionSocket` applies the same rule as `Plugs.ApiAuth`.
+  # bd-3gycsz: `:session` is the auth input — loopback is not a credential
+  # behind `tailscale serve`, so `ArbiterWeb.SessionSocket` requires the
+  # dashboard grant in the session cookie (or a signed token).
   # No longpoll: `stdin`/`stdout` are binary frames.
   socket "/session", ArbiterWeb.SessionSocket,
-    websocket: [connect_info: [:peer_data], max_frame_size: 1_048_576]
+    websocket: [connect_info: [:peer_data, session: @session_options], max_frame_size: 1_048_576]
 
   # bd-c1qq7l (G9): before anything serves a byte, pin a request that came
   # through a jailed worker's Arbiter bridge to that worker.

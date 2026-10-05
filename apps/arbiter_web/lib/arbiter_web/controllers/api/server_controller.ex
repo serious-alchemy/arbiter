@@ -97,6 +97,8 @@ defmodule ArbiterWeb.Api.ServerController do
     end
   end
 
+  def dashboard_auth(conn, _params), do: json(conn, ArbiterWeb.DashboardAuth.mode())
+
   def bind_address(conn, _params), do: json(conn, ArbiterWeb.InstallationSettings.bind_address())
 
   def agy_write_jail(conn, _params) do

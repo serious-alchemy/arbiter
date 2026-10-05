@@ -111,6 +111,66 @@ defmodule Arbiter.Agents.Codex.ConfigDirTest do
     end
   end
 
+  describe "execpolicy rules (bd-99emmd)" do
+    alias Arbiter.Agents.SecurityPolicy
+
+    defp rules_path(dir), do: Path.join([dir, "rules", "arbiter.rules"])
+
+    test "writes the policy's deny categories to $CODEX_HOME/rules/arbiter.rules", ctx do
+      {:ok, dir} =
+        ConfigDir.ensure(worktree_path: ctx.worktree, security: SecurityPolicy.base())
+
+      text = File.read!(rules_path(dir))
+      assert text =~ ~s|decision="forbidden"|
+      assert text =~ ~s|["git", "push", ["--force", "-f"]]|
+      assert text =~ ~s|["gh", "pr", "create"]|
+    end
+
+    test "defaults to the install-wide policy when the spawn names none", ctx do
+      {:ok, dir} = ConfigDir.ensure(worktree_path: ctx.worktree)
+      assert File.read!(rules_path(dir)) =~ "no_force_push"
+    end
+
+    test "the file is regenerated each spawn, so a tampered or stale one is overwritten", ctx do
+      {:ok, dir} = ConfigDir.ensure(worktree_path: ctx.worktree)
+      File.write!(rules_path(dir), "prefix_rule(pattern=[\"git\"], decision=\"allow\")\n")
+
+      {:ok, ^dir} = ConfigDir.ensure(worktree_path: ctx.worktree)
+      refute File.read!(rules_path(dir)) =~ "allow"
+    end
+
+    test "a policy that denies nothing leaves no rules file behind", ctx do
+      {:ok, dir} = ConfigDir.ensure(worktree_path: ctx.worktree)
+      assert File.exists?(rules_path(dir))
+
+      base = SecurityPolicy.base()
+      none = %{base | permissions: %{base.permissions | safe_defaults: []}}
+
+      {:ok, ^dir} = ConfigDir.ensure(worktree_path: ctx.worktree, security: none)
+      refute File.exists?(rules_path(dir))
+    end
+
+    test "a rules dir replaced by a symlink is not written through", ctx do
+      {:ok, dir} = ConfigDir.ensure(worktree_path: ctx.worktree)
+      elsewhere = Path.join(ctx.base, "elsewhere")
+      File.mkdir_p!(elsewhere)
+      File.rm_rf!(Path.join(dir, "rules"))
+      File.ln_s!(elsewhere, Path.join(dir, "rules"))
+
+      {:ok, ^dir} = ConfigDir.ensure(worktree_path: ctx.worktree)
+      refute File.exists?(Path.join(elsewhere, "arbiter.rules"))
+      assert File.exists?(rules_path(dir))
+    end
+
+    test "the operator's own rules are not carried into the worker's home", ctx do
+      File.mkdir_p!(Path.join(ctx.source, "rules"))
+      File.write!(Path.join([ctx.source, "rules", "default.rules"]), "# operator allows\n")
+
+      {:ok, dir} = ConfigDir.ensure(worktree_path: ctx.worktree)
+      assert File.ls!(Path.join(dir, "rules")) == ["arbiter.rules"]
+    end
+  end
+
   describe "ensure/1 seeding" do
     test "symlinks auth.json to the source (a copy would rotate the refresh token)", ctx do
       {:ok, dir} = ConfigDir.ensure(worktree_path: ctx.worktree)

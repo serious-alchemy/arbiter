@@ -416,7 +416,7 @@ Source for current behavior: `agents/*.ex`, `worker/spawn_env.ex`,
 |---|---|---|---|
 | **Claude** | `claude --print …`, env from `SpawnEnv` (empty by default, allowlist). `CLAUDE_CONFIG_DIR` is an Arbiter-owned dir seeded with `settings.json` and `CLAUDE.md`. Auth is `CLAUDE_CODE_OAUTH_TOKEN` from the provider account. **Not jailed** | The binary in the image, a per-run `CLAUDE_CONFIG_DIR`, the token as an inherited env var (`-e NAME`, no value on argv, so `ps` shows nothing), `.mcp.json` in the checkout | **Ran end to end.** A completely empty `CLAUDE_CONFIG_DIR` with only the token worked for `claude -p` |
 | **Codex** | `codex exec …`; Arbiter **never sets `CODEX_HOME`**, so a non-review worker reads the operator's `~/.codex/auth.json` directly. Jailed only for reviews, with the network shared | A per-run `CODEX_HOME` seeded with a copy of the ChatGPT login (`auth.json`) | Not run. Risk: a copied ChatGPT refresh token rotates, so concurrent copies can invalidate each other (the same shape as the Claude CLI rotating a seeded `.credentials.json` regardless of the token env, observed earlier) |
-| **agy** | Jailed under bwrap, auth through the freedesktop Secret Service over a filtered D-Bus (`xdg-dbus-proxy`) or, when no keyring, file-copied `oauth_creds.json` into an isolated HOME | Either a D-Bus proxy socket mounted in (SELinux blocks `connectto` unless `label=disable`) or the file-seeded credentials the adapter already supports | Not run; **guardrail-profiles open question 5 stays open.** `xdg-dbus-proxy` is not packaged on RHEL 8. Recommend leaving agy on bwrap |
+| **agy** | Jailed under bwrap, auth through the freedesktop Secret Service over a filtered D-Bus (`xdg-dbus-proxy`); fails loudly at preflight when no keyring is reachable (file-seeded fallback removed in bd-8btihu) | Either a D-Bus proxy socket mounted in (SELinux blocks `connectto` unless `label=disable`) or a dedicated headless credential mechanism (bd-6dpjw7) | Not run; **guardrail-profiles open question 5 answered (no, bd-6dpjw7).** `xdg-dbus-proxy` is not packaged on RHEL 8. Recommend leaving agy on bwrap |
 | **grok** | **No adapter.** Only a disabled login recipe (`GROK_HOME`, `auth.json`) | A per-run `GROK_HOME` when an adapter exists. Memory records that grok deletes `auth.json` after a rejected refresh | Not applicable |
 | **MCP and `arb` to Arbiter** | URL `http://127.0.0.1:4848/mcp`, `Authorization: Bearer <worker token>` in `.mcp.json`; the same token is `ARB_TOKEN`; `ARB_HOST` defaults to `127.0.0.1:4848` | A bridge to the host's loopback ([§5](#5-network)) | Verified: with host loopback mapped in, `GET /api/version` → **200** and `GET /api/issues/bd-jk49nc` without a token → **401**, so bd-asawcq holds from inside a container |
 | **`git push`** | `SSH_AUTH_SOCK` is dropped by `SpawnEnv`; pushes use key files in `~/.ssh` or `GH_TOKEN`/`GITLAB_TOKEN` from workspace `worker_env`. The agy jail forwards `GIT_SSH_COMMAND` with a shadow ssh config | A key or token the container is *given*. There is no `~/.ssh` | See below |
@@ -707,7 +707,7 @@ worktree registration, because the D4 estimate rests on that.
 
 | Risk or alternative | Assessment |
 |---|---|
-| **Two backends to maintain** | Real cost. Mitigated by the behaviour boundary (P2) and by giving each backend disjoint providers: bwrap keeps agy, podman gets Claude and Codex. If agy later moves to file-seeded credentials, bwrap can be retired |
+| **Two backends to maintain** | Real cost. Mitigated by the behaviour boundary (P2) and by giving each backend disjoint providers: bwrap keeps agy, podman gets Claude and Codex. If agy later gains a headless credential mechanism (e.g. GEMINI_API_KEY or dedicated worker volume, bd-6dpjw7), bwrap can be retired |
 | **`label=disable`** | Gives up the SELinux layer for the bridge-using containers. The remaining isolation is the user, mount, PID and network namespaces and dropped capabilities. A sidecar listener removes the need (§5.3, option 2) at a complexity cost |
 | **Rootless container escapes** | A container is not a VM. A kernel namespace bug breaks it as it breaks bwrap. No stronger claim is made than "default-deny and fewer moving parts" |
 | **Image supply chain** | New: a worker image is built from public bases with network. Pin by digest, build from the default branch, never from a worker's branch |
@@ -727,9 +727,11 @@ worktree registration, because the D4 estimate rests on that.
    `Arbiter.Worker.Container` (P3) adds the flag exactly when a container has
    bridge sockets. (The doctor check still reports the host's SELinux mode,
    which makes it moot where SELinux is permissive or disabled.)
-2. Can agy's file-seeded credentials work everywhere (guardrail-profiles
-   open question 5)? If yes, agy could join the container backend and bwrap
-   could be retired.
+2. ~~Can agy's file-seeded credentials work everywhere (guardrail-profiles
+   open question 5)?~~ **Answered (bd-6dpjw7): No.** agy 1.2.16 ignores legacy
+   file copies and copying refresh tokens risks token-rotation divergence.
+   Retiring bwrap for agy requires a proven headless credential (dedicated
+   worker identity volume or `GEMINI_API_KEY`).
 3. ~~How large is P5 really? The estimate is D4; it should be re-estimated after
    the reading day.~~ **Answered (bd-4wy1w1): D3.** ReviewGate and the
    MergeQueue read the worker's checkout, not the main repo, so only five

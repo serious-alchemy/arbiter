@@ -261,4 +261,56 @@ defmodule Arbiter.Worker.MemoryScopeTest do
                MemoryScope.outcome(@scope, cmd: ctl_cmd(out, self()), systemctl: "/bin/systemctl")
     end
   end
+
+  describe "stop/2, list/1 and sweep/2 (bd-6zm33r)" do
+    @listing """
+    arb-run-bd-a-1111.scope   loaded active   running Arbiter worker bd-a
+    arb-run-bd-b-2222.scope   loaded failed   failed  Arbiter worker bd-b
+    arb-run-bd-c-3333.scope   loaded active   running Arbiter worker bd-c
+    """
+
+    defp scope_cmd(test_pid, stop_exit \\ 0) do
+      fn _bin, args, _opts ->
+        send(test_pid, {:systemctl, args})
+
+        case args do
+          ["--user", "list-units" | _] -> {@listing, 0}
+          ["--user", "stop", _] -> {"", stop_exit}
+          ["--user", "reset-failed", _] -> {"", 0}
+        end
+      end
+    end
+
+    defp ctl_opts(cmd), do: [cmd: cmd, systemctl: "/bin/systemctl", runtime_dir: "/run/user/1"]
+
+    test "stop/2 stops the unit and clears a failed state" do
+      assert :ok =
+               MemoryScope.stop(
+                 %{unit: "arb-run-x-1.scope", max: "1G"},
+                 ctl_opts(scope_cmd(self()))
+               )
+
+      assert_received {:systemctl, ["--user", "stop", "arb-run-x-1.scope"]}
+      assert_received {:systemctl, ["--user", "reset-failed", "arb-run-x-1.scope"]}
+    end
+
+    test "stop/2 reports a failure instead of raising" do
+      assert {:error, _} =
+               MemoryScope.stop("arb-run-x-1.scope", ctl_opts(scope_cmd(self(), 1)))
+    end
+
+    test "list/1 returns the loaded arb-run scopes" do
+      assert MemoryScope.list(ctl_opts(scope_cmd(self()))) ==
+               ["arb-run-bd-a-1111.scope", "arb-run-bd-b-2222.scope", "arb-run-bd-c-3333.scope"]
+    end
+
+    test "sweep/2 stops scopes without a live run and never touches a live one" do
+      stopped = MemoryScope.sweep(["arb-run-bd-b-2222.scope"], ctl_opts(scope_cmd(self())))
+
+      assert stopped == ["arb-run-bd-a-1111.scope", "arb-run-bd-c-3333.scope"]
+      assert_received {:systemctl, ["--user", "stop", "arb-run-bd-a-1111.scope"]}
+      assert_received {:systemctl, ["--user", "stop", "arb-run-bd-c-3333.scope"]}
+      refute_received {:systemctl, ["--user", "stop", "arb-run-bd-b-2222.scope"]}
+    end
+  end
 end

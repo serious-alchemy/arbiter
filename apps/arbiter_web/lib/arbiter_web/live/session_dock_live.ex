@@ -20,8 +20,8 @@ defmodule ArbiterWeb.SessionDockLive do
   re-snapshotting.
 
   §10.4 / bd-2zskbb applies here too, and now on every page rather than only
-  on `/sessions/:id`: `ArbiterWeb.SessionSocket` trusts a loopback peer and the
-  browser sends no token, so off loopback the window says so instead of
+  on `/sessions/:id`: `ArbiterWeb.SessionSocket` needs the dashboard grant (cookie +
+  CSRF param) or a signed token, so off loopback the window says so instead of
   mounting a pane that silently never attaches. The answer is handed in as a
   `live_render(..., session:)` value from `layouts/live.html.heex`, because
   `get_connect_info/2` is root-and-mount only and this is a nested child.

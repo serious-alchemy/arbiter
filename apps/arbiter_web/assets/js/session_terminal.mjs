@@ -158,19 +158,21 @@ export function createSessionTerminal(el, options = {}) {
     return measured
   }
 
-  // No connect params. The dashboard is loopback-only by design (§10.4) and
-  // `ArbiterWeb.SessionSocket` trusts a loopback peer without a token, so the
-  // page has none to send; reaching the dashboard from elsewhere is Remote
-  // Control's job (§8), not a second auth scheme here. `SessionDockLive` now
-  // checks the peer server-side and skips mounting this hook at all off
-  // loopback (bd-2zskbb), so by the time this file runs, a connect attempt
-  // here is never a doomed one. The socket also accepts
-  // a `caller_session_id` for §10.1's self-kill guard, but a *browser* is not
-  // running inside a coordinator session and has nothing truthful to declare
-  // there - the clients that do (an agent's own tooling) pass it themselves.
+  // The only connect param is the CSRF token. `ArbiterWeb.SessionSocket`
+  // authorizes on the dashboard grant in the session cookie (or a signed
+  // token), and Phoenix only hands the socket that session when the connect
+  // carries a `_csrf_token` matching it - the same way app.js connects the
+  // LiveView socket. Loopback is not a credential behind `tailscale serve`
+  // (bd-3gycsz). The socket also accepts a `caller_session_id` for §10.1's
+  // self-kill guard, but a *browser* is not running inside a coordinator
+  // session and has nothing truthful to declare there - the clients that do
+  // (an agent's own tooling) pass it themselves.
   const socket =
     options.socket ||
     new Socket(endpoint, {
+      params: {
+        _csrf_token: document.querySelector("meta[name='csrf-token']")?.getAttribute("content")
+      },
       // Reconnect briskly: the point is to be back before the operator is.
       reconnectAfterMs: (tries) => [100, 250, 500, 1000, 2000][tries - 1] || 2000
     })

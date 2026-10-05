@@ -73,6 +73,13 @@ defmodule Arbiter.Agents.Claude do
   def provider, do: "claude"
 
   @impl true
+  def prepare(workspace, opts \\ []) do
+    role = Keyword.get(opts, :role, :agent)
+    Config.put_active(workspace, role)
+    :ok
+  end
+
+  @impl true
   def security_enforced?, do: true
 
   @doc """

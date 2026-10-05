@@ -138,6 +138,62 @@ defmodule Arbiter.Workers.ReconcilerTest do
     assert surviving == []
   end
 
+  describe "sweep_worker_scopes/1 (bd-6zm33r)" do
+    defp scope_opts(test_pid) do
+      listing = """
+      arb-run-bd-dead-1.scope loaded active running Arbiter worker bd-dead
+      arb-run-bd-live-2.scope loaded active running Arbiter worker bd-live
+      """
+
+      [
+        systemctl: "/bin/systemctl",
+        runtime_dir: "/run/user/1",
+        cmd: fn _bin, args, _opts ->
+          send(test_pid, {:systemctl, args})
+
+          case args do
+            ["--user", "list-units" | _] -> {listing, 0}
+            _ -> {"", 0}
+          end
+        end
+      ]
+    end
+
+    test "stops scopes with no live run, keeps the scope of a live worker" do
+      task_id = "bd-live-#{System.unique_integer([:positive])}"
+      {:ok, pid} = Worker.start(task_id: task_id, repo: "arbiter", workspace_id: "ws-reconcile")
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+
+      Ash.create!(Run, %{
+        task_id: task_id,
+        repo: "arbiter",
+        workspace_id: "ws-reconcile",
+        state: :working,
+        started_at: DateTime.utc_now(),
+        output_lines: [],
+        cgroup_scopes: ["arb-run-bd-live-2.scope"]
+      })
+
+      assert ["arb-run-bd-dead-1.scope"] =
+               Reconciler.sweep_worker_scopes(scope_opts: scope_opts(self()))
+
+      assert_received {:systemctl, ["--user", "stop", "arb-run-bd-dead-1.scope"]}
+      refute_received {:systemctl, ["--user", "stop", "arb-run-bd-live-2.scope"]}
+    end
+
+    test "a run row without a live worker does not protect its scope" do
+      create_run("bd-gone-#{System.unique_integer([:positive])}", :working)
+
+      assert ["arb-run-bd-dead-1.scope", "arb-run-bd-live-2.scope"] =
+               Reconciler.sweep_worker_scopes(scope_opts: scope_opts(self()))
+    end
+
+    test "a non-primary instance sweeps nothing" do
+      assert [] = Reconciler.sweep_worker_scopes(primary?: false, scope_opts: scope_opts(self()))
+      refute_received {:systemctl, _}
+    end
+  end
+
   # ---- on-disk usage backfill for node-crash orphans (bd-au3xrq) -------
 
   alias Arbiter.Usage.ClaudeSessionFile

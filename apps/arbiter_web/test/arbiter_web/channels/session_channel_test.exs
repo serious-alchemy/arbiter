@@ -43,7 +43,10 @@ defmodule ArbiterWeb.SessionChannelTest do
     %{session: session, topic: "session:#{session.id}"}
   end
 
-  @loopback %{peer_data: %{address: {127, 0, 0, 1}, port: 55_555, ssl_cert: nil}}
+  @loopback %{
+    peer_data: %{address: {127, 0, 0, 1}, port: 55_555, ssl_cert: nil},
+    session: ArbiterWeb.DashboardAuth.Default.grant_session("token", "operator")
+  }
 
   # `test_process:` lets a socket be built from a process that is not the test
   # one — `Phoenix.ChannelTest` otherwise refuses, and the two-client test needs
@@ -71,13 +74,25 @@ defmodule ArbiterWeb.SessionChannelTest do
     subscribe_and_join(session_socket(caller_session_id, self()), SessionChannel, topic, params)
   end
 
-  describe "socket auth (§10.4 loopback only)" do
-    test "a loopback peer connects without a token" do
+  describe "socket auth (§10.4, dashboard grant or token)" do
+    test "a loopback peer with a dashboard grant connects without a token" do
       assert {:ok, _socket} = connect(SessionSocket, %{}, connect_info: @loopback)
     end
 
     test "an off-box peer without a token is refused" do
       assert :error = connect(SessionSocket, %{}, connect_info: off_box())
+    end
+
+    test "a loopback peer with no dashboard grant is refused (tailscale serve case)" do
+      anon = %{peer_data: %{address: {127, 0, 0, 1}, port: 1, ssl_cert: nil}, session: nil}
+      assert :error = connect(SessionSocket, %{}, connect_info: anon)
+
+      expired = %{
+        anon
+        | session: ArbiterWeb.DashboardAuth.Default.grant_session("token", "operator", 1)
+      }
+
+      assert :error = connect(SessionSocket, %{}, connect_info: expired)
     end
 
     test "an off-box peer with an invalid token is refused" do

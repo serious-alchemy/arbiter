@@ -305,29 +305,19 @@ defmodule Arbiter.Agents.Gemini.ConfigDirTest do
     end
   end
 
-  describe "credential seeding" do
-    test "does not copy the operator's OAuth files when a keyring is available", %{
-      worktree: wt,
-      source: source
-    } do
-      File.write!(Path.join(source, ".gemini/oauth_creds.json"), "{}")
-      assert {:ok, home} = ConfigDir.ensure(worktree: wt, keyring: true)
-      refute File.exists?(Path.join(home, ".gemini/oauth_creds.json"))
-    end
-
-    test "copies (never symlinks) the OAuth files when no keyring is available", %{
+  describe "credential seeding (bd-8btihu)" do
+    test "never copies the operator's OAuth files into worker home (no file-seeded fallback)", %{
       worktree: wt,
       source: source
     } do
       File.write!(Path.join(source, ".gemini/oauth_creds.json"), ~s({"token":"x"}))
+      File.write!(Path.join(source, ".gemini/jetski-standalone-oauth-token"), "token")
       File.write!(Path.join(source, ".gemini/google_accounts.json"), "{}")
 
-      assert {:ok, home} = ConfigDir.ensure(worktree: wt, keyring: false)
-
-      copied = Path.join(home, ".gemini/oauth_creds.json")
-      assert {:ok, %{type: :regular}} = File.lstat(copied)
-      assert File.read!(copied) == ~s({"token":"x"})
-      assert File.exists?(Path.join(home, ".gemini/google_accounts.json"))
+      assert {:ok, home} = ConfigDir.ensure(worktree: wt)
+      refute File.exists?(Path.join(home, ".gemini/oauth_creds.json"))
+      refute File.exists?(Path.join(home, ".gemini/jetski-standalone-oauth-token"))
+      refute File.exists?(Path.join(home, ".gemini/google_accounts.json"))
     end
   end
 

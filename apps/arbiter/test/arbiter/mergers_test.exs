@@ -189,6 +189,44 @@ defmodule Arbiter.MergersTest do
       ws = %Workspace{config: %{"merge" => %{"strategy" => "direct"}}}
       assert Mergers.prepare_with_repo(ws, "tonic_device") == :ok
     end
+
+    test "Merger behaviour declares prepare/2 as an optional callback" do
+      callbacks = Arbiter.Mergers.Merger.behaviour_info(:callbacks)
+      optional = Arbiter.Mergers.Merger.behaviour_info(:optional_callbacks)
+
+      assert {:prepare, 2} in callbacks
+      assert {:prepare, 2} in optional
+    end
+
+    test "all in-tree merger adapters implement prepare/2" do
+      for {_type, adapter} <- Mergers.adapters() do
+        assert function_exported?(adapter, :prepare, 2),
+               "Expected #{inspect(adapter)} to export prepare/2"
+      end
+    end
+
+    test "link_for_workspace works for adapter without with_workspace/2 (Direct)" do
+      ws = %Workspace{config: %{"merge" => %{"strategy" => "direct"}}}
+      assert Mergers.link_for_workspace(ws, "direct:branch|repo|main") == ""
+    end
+
+    test "prepare/2 accepts keyword list opts directly" do
+      ws = %Workspace{
+        config: %{
+          "merge" => %{
+            "strategy" => "github",
+            "config" => %{
+              "credentials_ref" => "env:#{@github_env}"
+            }
+          }
+        }
+      }
+
+      assert Mergers.prepare(ws, repo: "myorg/myrepo") == :ok
+      assert {:ok, cfg} = Mergers.Github.Config.resolve()
+      assert cfg.owner == "myorg"
+      assert cfg.repo == "myrepo"
+    end
   end
 
   # bd-28l6im: three finalize-422 false-failures (bd-8cn795, bd-7opdaf,

@@ -20,7 +20,7 @@ defmodule Arbiter.Trackers do
 
   alias Arbiter.Messages.Message
   alias Arbiter.Tasks.Issue
-  alias Arbiter.Trackers.{GitHub, Gitlab, Jira, Linear, None, Shortcut, Tracker}
+  alias Arbiter.Trackers.{None, Tracker}
 
   @type adapter :: module()
 
@@ -69,18 +69,21 @@ defmodule Arbiter.Trackers do
   `Application.get_env/3` default. A no-op for `:none`. Mirrors
   `Arbiter.Mergers.prepare/1`.
   """
-  @spec prepare(Issue.t(), Arbiter.Tasks.Workspace.t() | nil) :: :ok
-  def prepare(%Issue{tracker_type: type}, workspace) do
-    case type do
-      :github -> GitHub.Config.put_active(workspace)
-      :gitlab -> Gitlab.Config.put_active(workspace)
-      :jira -> Jira.Config.put_active(workspace)
-      :shortcut -> Shortcut.Config.put_active(workspace)
-      :linear -> Linear.Config.put_active(workspace)
-      _ -> :ok
-    end
+  @spec prepare(Issue.t(), Arbiter.Tasks.Workspace.t() | nil, keyword()) :: :ok
+  def prepare(issue, workspace, opts \\ [])
 
-    :ok
+  def prepare(%Issue{tracker_type: type}, workspace, opts) when is_list(opts) do
+    case Map.get(adapters(), type) do
+      nil ->
+        :ok
+
+      adapter ->
+        if Code.ensure_loaded?(adapter) and function_exported?(adapter, :prepare, 2) do
+          adapter.prepare(workspace, opts)
+        else
+          :ok
+        end
+    end
   end
 
   @doc """
@@ -105,20 +108,8 @@ defmodule Arbiter.Trackers do
 
   def prepare_with_repo(%Issue{} = issue, nil, _repo), do: prepare(issue, nil)
 
-  def prepare_with_repo(%Issue{tracker_type: type} = issue, workspace, repo)
-      when is_binary(repo) do
-    :ok = prepare(issue, workspace)
-
-    case type do
-      :github -> GitHub.Config.override_repo(workspace, repo)
-      :gitlab -> Gitlab.Config.override_repo(workspace, repo)
-      :jira -> Jira.Config.override_repo(workspace, repo)
-      :shortcut -> Shortcut.Config.override_repo(workspace, repo)
-      :linear -> Linear.Config.override_repo(workspace, repo)
-      _ -> :ok
-    end
-
-    :ok
+  def prepare_with_repo(%Issue{} = issue, workspace, repo) when is_binary(repo) do
+    prepare(issue, workspace, repo: repo)
   end
 
   # ---- Delegating wrappers ----
@@ -331,9 +322,17 @@ defmodule Arbiter.Trackers do
   Mirrors the adapter-specific `with_workspace/2` helpers — callers that want
   to stay tracker-agnostic use this instead of reaching into a specific adapter.
   """
-  @spec with_workspace(atom(), Arbiter.Tasks.Workspace.t(), (-> result)) :: result
+  @spec with_workspace(atom(), Arbiter.Tasks.Workspace.t() | map() | nil, (-> result)) :: result
         when result: any()
-  def with_workspace(type, workspace, fun), do: do_with_workspace(type, workspace, fun)
+  def with_workspace(type, workspace, fun) do
+    adapter = Map.get(adapters(), type, None)
+
+    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :with_workspace, 2) do
+      adapter.with_workspace(workspace, fun)
+    else
+      fun.()
+    end
+  end
 
   defp workspace_tracker_type(%Arbiter.Tasks.Workspace{config: config}) do
     case get_in(config || %{}, ["tracker", "type"]) do
@@ -391,11 +390,4 @@ defmodule Arbiter.Trackers do
       Logger.debug("Trackers.notify_misconfigured_tracker swallowed: #{Exception.message(e)}")
       :ok
   end
-
-  defp do_with_workspace(:github, workspace, fun), do: GitHub.with_workspace(workspace, fun)
-  defp do_with_workspace(:gitlab, workspace, fun), do: Gitlab.with_workspace(workspace, fun)
-  defp do_with_workspace(:jira, workspace, fun), do: Jira.with_workspace(workspace, fun)
-  defp do_with_workspace(:shortcut, workspace, fun), do: Shortcut.with_workspace(workspace, fun)
-  defp do_with_workspace(:linear, workspace, fun), do: Linear.with_workspace(workspace, fun)
-  defp do_with_workspace(_, _workspace, fun), do: fun.()
 end

@@ -164,11 +164,17 @@ defmodule ArbiterWeb.Plugs.ApiAuthTest do
   end
 
   # The browser dashboard is not behind `:api`: it is served by the
-  # `:browser` pipeline (session + CSRF), and needs no bearer token.
+  # `:browser` pipeline (session + CSRF), and needs no bearer token — but since
+  # bd-3gycsz it needs a dashboard login, and loopback is not one.
   describe "the browser dashboard" do
-    test "renders without any token, over loopback", %{conn: conn} do
-      conn = conn |> loopback_conn() |> get("/")
+    test "renders without any token, over loopback, once logged in", %{conn: conn} do
+      conn = conn |> dashboard_login() |> loopback_conn() |> get("/")
       assert html_response(conn, 200)
+    end
+
+    test "redirects to login from loopback with no login", _ do
+      conn = Phoenix.ConnTest.build_conn() |> loopback_conn() |> get("/")
+      assert redirected_to(conn) == "/login"
     end
   end
 end
