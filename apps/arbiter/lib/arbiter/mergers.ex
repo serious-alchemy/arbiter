@@ -16,7 +16,6 @@ defmodule Arbiter.Mergers do
   `config["merge"]["strategy"]`, falling back to `:direct`).
   """
 
-  alias Arbiter.Mergers.{Github, Gitlab}
   alias Arbiter.Tasks.RepoConfig
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Tasks.Workspace.Changes.PatchConfig
@@ -200,17 +199,24 @@ defmodule Arbiter.Mergers do
   adapter-agnostic. A no-op for adapters that carry no per-process config
   (e.g. `Direct`) and for a `nil` workspace.
   """
-  @spec prepare(Workspace.t() | nil) :: :ok
-  def prepare(nil), do: :ok
+  @spec prepare(Workspace.t() | nil, keyword()) :: :ok
+  def prepare(workspace, opts \\ [])
+  def prepare(nil, _opts), do: :ok
 
-  def prepare(%Workspace{} = workspace) do
-    case Workspace.merger_strategy(workspace) do
-      :gitlab -> Arbiter.Mergers.Gitlab.Config.put_active(workspace)
-      :github -> Arbiter.Mergers.Github.Config.put_active(workspace)
-      _ -> :ok
+  def prepare(%Workspace{} = workspace, opts) when is_list(opts) do
+    workspace =
+      case Keyword.get(opts, :repo) do
+        repo when is_binary(repo) and repo != "" -> scope(workspace, repo)
+        _ -> workspace
+      end
+
+    adapter = for_workspace(workspace)
+
+    if function_exported?(adapter, :prepare, 2) do
+      adapter.prepare(workspace, opts)
+    else
+      :ok
     end
-
-    :ok
   end
 
   @doc """
@@ -235,10 +241,10 @@ defmodule Arbiter.Mergers do
     workspace = scope(workspace, repo)
     adapter = for_workspace(workspace)
 
-    case Workspace.merger_strategy(workspace) do
-      :github -> Github.with_workspace(workspace, fn -> adapter.link_for(mr_ref) end)
-      :gitlab -> Gitlab.with_workspace(workspace, fn -> adapter.link_for(mr_ref) end)
-      _ -> adapter.link_for(mr_ref)
+    if function_exported?(adapter, :with_workspace, 2) do
+      adapter.with_workspace(workspace, fn -> adapter.link_for(mr_ref) end)
+    else
+      adapter.link_for(mr_ref)
     end
   end
 
@@ -277,15 +283,7 @@ defmodule Arbiter.Mergers do
     # `merge.repos.<repo>` override picks another strategy (or another forge
     # config) never gets the workspace-level one.
     workspace = scope(workspace, repo)
-    :ok = prepare(workspace)
-
-    case Workspace.merger_strategy(workspace) do
-      :github -> Arbiter.Mergers.Github.Config.override_repo(repo)
-      :gitlab -> Arbiter.Mergers.Gitlab.Config.override_repo(workspace, repo)
-      _ -> :ok
-    end
-
-    :ok
+    prepare(workspace, repo: repo)
   end
 
   @doc """

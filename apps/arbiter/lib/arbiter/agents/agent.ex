@@ -308,7 +308,23 @@ defmodule Arbiter.Agents.Agent do
   """
   @callback egress_confinement(SecurityPolicy.t()) :: :os_jail | :none
 
+  @doc """
+  Prepare the current process to make adapter calls for `workspace`.
+
+  Seeds the adapter's per-process config so subsequent calls in this process
+  see the workspace's configuration without threading the workspace through
+  every call site.
+
+  `workspace` may be `nil`, which clears the per-process config.
+  `opts` is a keyword list; recognized keys include `:role` (`:agent | :review_agent`).
+
+  Optional — adapters that carry no per-process config simply omit this callback.
+  """
+  @callback prepare(workspace :: Arbiter.Tasks.Workspace.t() | map() | nil, opts :: keyword()) ::
+              :ok
+
   @optional_callbacks [
+    prepare: 2,
     spawn_env: 1,
     security_enforced?: 0,
     auth_probe: 1,

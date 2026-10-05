@@ -103,6 +103,9 @@ defmodule Arbiter.Mergers.Direct do
   require Logger
 
   @impl true
+  def prepare(_workspace, _opts \\ []), do: :ok
+
+  @impl true
   def open(branch, title, _description, opts)
       when is_binary(branch) and is_map(opts) do
     case Map.get(opts, :repo_path) do

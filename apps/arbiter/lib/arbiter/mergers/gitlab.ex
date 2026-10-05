@@ -75,6 +75,21 @@ defmodule Arbiter.Mergers.Gitlab do
   # ---- Merger behaviour ----------------------------------------------------
 
   @impl true
+  def prepare(workspace, opts \\ []) do
+    Config.put_active(workspace)
+
+    case Keyword.get(opts, :repo) do
+      repo when is_binary(repo) and repo != "" ->
+        Config.override_repo(workspace, repo)
+
+      _ ->
+        :ok
+    end
+
+    :ok
+  end
+
+  @impl true
   # Pre-existing complexity 12 — baselined when bd-4x2yhq first
   # wired Credo up. Thresholds stay at the tool's own default so new
   # code is held to it; see the note in .credo.exs.

@@ -539,7 +539,23 @@ defmodule Arbiter.Mergers.Merger do
   @callback ancestor?(mr_ref, ancestor :: String.t(), descendant :: String.t()) ::
               {:ok, boolean()} | {:error, term()}
 
-  @optional_callbacks update_branch: 1,
+  @doc """
+  Prepare the current process to make adapter calls for `workspace`.
+
+  Seeds the adapter's per-process config so subsequent adapter calls in this
+  process see the workspace's configuration without threading the workspace
+  through every call site.
+
+  `workspace` may be `nil`, which clears the per-process config.
+  `opts` is a keyword list; recognized keys include `:repo` for per-repo overrides.
+
+  Optional — adapters that carry no per-process config simply omit this callback.
+  """
+  @callback prepare(workspace :: Arbiter.Tasks.Workspace.t() | map() | nil, opts :: keyword()) ::
+              :ok
+
+  @optional_callbacks prepare: 2,
+                      update_branch: 1,
                       ancestor?: 3,
                       failing_check_logs: 1,
                       rerun_ci: 2,

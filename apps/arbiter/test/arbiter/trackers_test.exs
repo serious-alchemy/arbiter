@@ -151,5 +151,59 @@ defmodule Arbiter.TrackersTest do
       assert Trackers.transition(issue_github, :closed) == :ok
       assert Trackers.transition(issue_jira, :closed) == :ok
     end
+
+    test "Tracker behaviour declares prepare/2 as an optional callback" do
+      callbacks = Arbiter.Trackers.Tracker.behaviour_info(:callbacks)
+      optional = Arbiter.Trackers.Tracker.behaviour_info(:optional_callbacks)
+
+      assert {:prepare, 2} in callbacks
+      assert {:prepare, 2} in optional
+    end
+
+    test "all in-tree tracker adapters implement prepare/2" do
+      for {_type, adapter} <- Trackers.adapters() do
+        assert function_exported?(adapter, :prepare, 2),
+               "Expected #{inspect(adapter)} to export prepare/2"
+      end
+    end
+
+    test "prepare/2 and prepare_with_repo/3 delegate to adapter prepare/2" do
+      issue = %Issue{tracker_type: :github}
+
+      ws = %Arbiter.Tasks.Workspace{
+        config: %{
+          "tracker" => %{
+            "type" => "github",
+            "config" => %{"owner" => "testorg", "repo" => "testrepo"}
+          }
+        }
+      }
+
+      assert Trackers.prepare(issue, ws) == :ok
+      assert Arbiter.Trackers.GitHub.Config.active_repo_slug() == "testorg/testrepo"
+
+      # Test prepare_with_repo delegates with repo opt
+      ws_with_repos = %Arbiter.Tasks.Workspace{
+        config: %{
+          "tracker" => %{
+            "type" => "github",
+            "config" => %{
+              "owner" => "testorg",
+              "repo" => "testrepo",
+              "repos" => %{
+                "subapp" => %{"owner" => "customorg", "repo" => "customrepo"}
+              }
+            }
+          }
+        }
+      }
+
+      assert Trackers.prepare_with_repo(issue, ws_with_repos, "subapp") == :ok
+      assert Arbiter.Trackers.GitHub.Config.active_repo_slug() == "customorg/customrepo"
+
+      # prepare with nil clears config
+      assert Trackers.prepare(issue, nil) == :ok
+      assert Arbiter.Trackers.GitHub.Config.active_repo_slug() == nil
+    end
   end
 end

@@ -31,8 +31,6 @@ defmodule Arbiter.Agents do
   """
 
   alias Arbiter.Agents.Claude
-  alias Arbiter.Agents.Codex
-  alias Arbiter.Agents.Gemini
   alias Arbiter.Agents.ProviderConstraint
   alias Arbiter.Agents.ProviderPool
   alias Arbiter.Agents.SecurityPolicy
@@ -407,33 +405,31 @@ defmodule Arbiter.Agents do
   calls in this process see the workspace's model + api_keys without
   threading the workspace through every call site.
 
-  A `nil` workspace clears the per-process config (back to CLI defaults
-  + ambient env auth). A no-op for unconfigured adapters.
-  """
-  @spec prepare(Workspace.t() | nil) :: :ok
-  def prepare(workspace), do: prepare(workspace, :agent)
-
-  @doc """
-  Prepare the current process for either the worker `:agent` or the
-  reviewer `:review_agent` role.
+  `role_or_opts` can be `:agent` (default), `:review_agent`, or a keyword list of options
+  passed to the adapter's `prepare/2` callback.
 
   Both roles share the same adapter machinery and the same per-process
   config dict — only one role's config can be active in a process at a
   time. The ReviewGate seeds `:review_agent` before spawning the reviewer
   session; the worker seeds `:agent` before spawning the worker.
+
+  A `nil` workspace clears the per-process config (back to CLI defaults
+  + ambient env auth). A no-op for unconfigured adapters.
   """
-  @spec prepare(Workspace.t() | nil, :agent | :review_agent) :: :ok
-  def prepare(nil, _role) do
-    Claude.Config.put_active(nil)
-    Gemini.Config.put_active(nil)
-    Codex.Config.put_active(nil)
-    :ok
+  @spec prepare(Workspace.t() | nil, :agent | :review_agent | keyword()) :: :ok
+  def prepare(workspace, role_or_opts \\ :agent)
+
+  def prepare(workspace, role) when is_atom(role) do
+    prepare(workspace, role: role)
   end
 
-  def prepare(%Workspace{} = workspace, role) when role in [:agent, :review_agent] do
-    Claude.Config.put_active(workspace, role)
-    Gemini.Config.put_active(workspace, role)
-    Codex.Config.put_active(workspace, role)
+  def prepare(workspace, opts) when is_list(opts) do
+    for {_type, adapter} <- adapters() do
+      if function_exported?(adapter, :prepare, 2) do
+        adapter.prepare(workspace, opts)
+      end
+    end
+
     :ok
   end
 
