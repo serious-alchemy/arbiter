@@ -47,14 +47,17 @@ defmodule Arbiter.Quota.Headroom do
           window: String.t(),
           threshold: float(),
           used: float(),
-          mode: :paced | :flat
+          mode: :paced | :flat | :exempt
         }
 
   @doc """
   The binding window's headroom for `quota` under `policy` (see
   `t:Arbiter.Quota.Gate.policy/0`), or `nil` when unknown.
 
-  Options: `:model` (the agy pool selector) and `:now`.
+  Options: `:model` (the agy pool selector), `:now`, and `:priority` — the
+  task's own priority, which reads an exempt dispatch's lifted line
+  (design §4.2, `Arbiter.Quota.Gate.pace/6`), so routing sees the same
+  ceiling the gate holds at.
   """
   @spec binding(Gate.quota_source(), Gate.policy(), keyword()) :: t() | nil
   def binding(quota, policy, opts \\ []) do
@@ -84,7 +87,7 @@ defmodule Arbiter.Quota.Headroom do
         s
         |> snapshot_windows(now)
         |> Enum.map(fn {window, label, used, reset_at} ->
-          window_headroom(policy, window, label, used, reset_at, now)
+          window_headroom(policy, window, label, used, reset_at, now, opts[:priority])
         end)
         |> Enum.reject(&is_nil/1)
     end
@@ -106,10 +109,11 @@ defmodule Arbiter.Quota.Headroom do
     primary ++ long
   end
 
-  defp window_headroom(_policy, _window, _label, nil, _reset_at, _now), do: nil
+  defp window_headroom(_policy, _window, _label, nil, _reset_at, _now, _priority), do: nil
 
-  defp window_headroom(policy, window, label, used, reset_at, now) when is_number(used) do
-    pace = Gate.pace(policy, window, label, used, reset_at, now: now)
+  defp window_headroom(policy, window, label, used, reset_at, now, priority)
+       when is_number(used) do
+    pace = Gate.pace(policy, window, label, used, reset_at, now: now, priority: priority)
 
     %{
       headroom: pace.ceiling - used,
