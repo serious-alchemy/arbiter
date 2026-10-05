@@ -2720,7 +2720,7 @@ defmodule Arbiter.Worker.Dispatch do
       # provisioned checkout below a current `origin/<target>` to diff against.
       _ = Worktree.fetch_origin(repo_path, target)
 
-      case provision_review_checkout(task, repo_path, target) do
+      case provision_review_checkout(task, repo_path, target, opts) do
         %{path: path} = checkout ->
           {:ok, path, Keyword.put(opts, :review_checkout, checkout)}
 
@@ -2748,7 +2748,7 @@ defmodule Arbiter.Worker.Dispatch do
   # derivable branch, branch never pushed, no `origin`, git error) and the
   # caller falls straight back to today's diff-only path. A review that can't
   # get a worktree is still worth running.
-  defp provision_review_checkout(%Issue{} = task, repo_path, target) do
+  defp provision_review_checkout(%Issue{} = task, repo_path, target, opts) do
     require Logger
 
     case review_branch(task) do
@@ -2763,6 +2763,7 @@ defmodule Arbiter.Worker.Dispatch do
 
         case Checkout.provision_branch(repo_path, branch, prefix: "review") do
           {:ok, %{path: path, head_sha: sha}} ->
+            seed_review_checkout(task, repo_path, branch, path, opts)
             %{path: path, branch: branch, head_sha: sha, base_branch: target}
 
           {:error, reason} ->
@@ -2774,6 +2775,17 @@ defmodule Arbiter.Worker.Dispatch do
             nil
         end
     end
+  end
+
+  # The reviewer runs tests here, so it gets the same seeded deps/_build (and
+  # `worker.repos.<repo>.seed_paths`) ReviewGate's own `gate-review-*` checkout
+  # gets. The source is the task's implementer worktree when one exists (the
+  # tree that was seeded and compiled), else the repo checkout. Best-effort and
+  # a no-op when the source has nothing to copy.
+  defp seed_review_checkout(%Issue{} = task, repo_path, branch, path, opts) do
+    implementer_wt = Worktree.worktree_path(branch)
+    source = if File.dir?(implementer_wt), do: implementer_wt, else: repo_path
+    :ok = Worktree.seed_compiled_deps(source, path, seed_paths(task, Keyword.get(opts, :repo)))
   end
 
   # `BranchNamer.derive/1` raises for an issue with no recognisable type or ref
