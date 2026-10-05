@@ -79,7 +79,7 @@ defmodule Arbiter.Agents.CodexTest do
       assert warning =~ "permissions.mode"
 
       assert Codex.write_jail_warning(policy_with_mode(:strict)) =~
-               ":strict dispatches of codex are refused"
+               ":strict dispatches of codex are skipped or refused"
     end
 
     test "async_arm_signature/0 matches the abandoned-command marker only" do

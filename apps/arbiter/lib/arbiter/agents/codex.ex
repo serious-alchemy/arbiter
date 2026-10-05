@@ -143,7 +143,7 @@ defmodule Arbiter.Agents.Codex do
   def write_jail_warning(%SecurityPolicy{permissions: %{mode: :auto}}), do: nil
 
   def write_jail_warning(%SecurityPolicy{permissions: %{mode: :strict}}),
-    do: ":strict dispatches of codex are refused (no worktree write confinement)"
+    do: ":strict dispatches of codex are skipped or refused (no worktree write confinement)"
 
   def write_jail_warning(%SecurityPolicy{}) do
     "codex runs with --dangerously-bypass-approvals-and-sandbox: the deny categories are " <>
