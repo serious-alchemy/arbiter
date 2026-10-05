@@ -342,6 +342,7 @@ defmodule ArbiterWeb.WorkerBridgeIdentityTest do
         peer_data: %{address: {127, 0, 0, 1}, port: 1, ssl_cert: nil},
         session: ArbiterWeb.DashboardAuth.Default.grant_session("token", "operator")
       }
+
       assert {:ok, _} = Phoenix.ChannelTest.connect(SessionSocket, %{}, connect_info: plain)
     end
   end
