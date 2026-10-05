@@ -226,7 +226,7 @@ defmodule Arbiter.Agents.Codex do
     policy = security_policy(opts)
     wrap? = container_wrap?(policy, opts)
 
-    case executable_for(wrap?) do
+    case executable_for(policy, wrap?) do
       {:ok, codex} ->
         with {:ok, model_flags} <- model_flag(opts) do
           flags =
@@ -274,8 +274,15 @@ defmodule Arbiter.Agents.Codex do
   defp container_wrap?(policy, opts),
     do: ContainerSpawn.podman?(policy) and Keyword.get(opts, :sandbox_wrap, false) == true
 
-  defp executable_for(true), do: {:ok, ContainerSpawn.provider_path("codex")}
-  defp executable_for(false), do: resolve_executable()
+  defp executable_for(_policy, true), do: {:ok, ContainerSpawn.provider_path("codex")}
+
+  # An unwrapped podman spawn is refused on the backend, not on a host `codex`
+  # lookup: a box with no host codex must still report why the spawn is refused.
+  defp executable_for(policy, false) do
+    if ContainerSpawn.podman?(policy),
+      do: with({:ok, _} <- Sandbox.module(policy), do: resolve_executable()),
+      else: resolve_executable()
+  end
 
   defp sandbox_for(policy, true), do: Sandbox.module(policy, :codex)
   defp sandbox_for(policy, false), do: Sandbox.module(policy)
