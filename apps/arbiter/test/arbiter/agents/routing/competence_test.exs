@@ -351,7 +351,7 @@ defmodule Arbiter.Agents.Routing.CompetenceTest do
     test "defaults still apply when no override row matches" do
       rows = [override_row("claude-haiku-4-5-20251001", 1, 7)] ++ Competence.default_rows()
 
-      assert %{rung: 1, n: 258} = Competence.lookup(rows, choice("sonnet", 2))
+      assert %{rung: 1, n: 38} = Competence.lookup(rows, choice("sonnet", 2))
     end
   end
 
@@ -395,10 +395,23 @@ defmodule Arbiter.Agents.Routing.CompetenceTest do
       end
     end
 
-    test "a bare Claude tier alias matches the best-measured row of its line" do
-      assert %{rung: 1, n: 258} = lookup("claude", "sonnet", 2)
-      assert %{rung: 1, n: 159} = lookup("claude", "opus", 3)
-      assert %{rung: 1, n: 9} = lookup("claude", "opus", 4)
+    test "a bare Claude tier alias matches the newest model of its line" do
+      # claude-sonnet-5-5 (n 38), not the superseded claude-sonnet-5 (n 258).
+      assert %{rung: 1, n: 38, author_runs: 1.82, review_runs: 1.66} =
+               lookup("claude", "sonnet", 2)
+
+      # claude-opus-5-5 (n 100), not claude-opus-5 (n 159).
+      assert %{rung: 1, n: 100, author_runs: 1.61, review_runs: 1.32} =
+               lookup("claude", "opus", 3)
+
+      assert %{rung: 1, n: 6} = lookup("claude", "opus", 4)
+    end
+
+    test "among same-version rows an alias prefers the larger n" do
+      rows = [override_row("claude-sonnet-5-5", 2, 3), override_row("claude-sonnet-5-5-x", 2, 9)]
+
+      assert %{n: 9} =
+               Competence.lookup(rows, %{provider: "claude", model: "sonnet", difficulty: 2})
     end
 
     test "a full haiku id matches the haiku alias row" do

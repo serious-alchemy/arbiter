@@ -470,8 +470,8 @@ defmodule Arbiter.Agents.ProviderRoutingScoredTest do
 
       [cand] = d["candidates"]
       assert cand["model"] == "sonnet"
-      assert %{"rung" => 1, "n" => 258} = cand["cell"]
-      assert cand["expected_runs"] == %{"author" => 2.53, "review" => 2.36}
+      assert %{"rung" => 1, "n" => 38} = cand["cell"]
+      assert cand["expected_runs"] == %{"author" => 1.82, "review" => 1.66}
     end
 
     test "reviewer_coupling with a projected reviewer that has no account keeps the author price" do
@@ -552,6 +552,34 @@ defmodule Arbiter.Agents.ProviderRoutingScoredTest do
       # When reviewer coupling is on, claude's review runs are priced on codex's exhausted pool,
       # so c2's price is significantly higher than c1's price (which only prices author runs on claude's pool).
       assert c2_cand["price"] > c1_cand["price"]
+    end
+
+    test "the reviewer projection ignores the implementer's :exclude" do
+      cfg =
+        config("scored", %{
+          "mode" => "enforce",
+          "competence" => true,
+          "reviewer_coupling" => true
+        })
+        |> put_in(["routing", "policy"], "by_difficulty")
+        |> Map.put("review_agent", %{"cross_family" => true})
+
+      ws = workspace!(cfg)
+      claude = account!(:claude, "claude")
+      codex = account!(:codex, "codex")
+      allow_both!(ws, claude, 0, 0)
+      allow_both!(ws, codex, 1, 1)
+
+      pairs = [{claude, claude_quota(0.30)}, {codex, codex_quota(90.0)}]
+      task = task!(ws, %{difficulty: 2})
+
+      price = fn extra ->
+        {:ok, %{decision: d}} = ProviderRouting.select(ws, task, :main, opts(pairs, extra))
+        Enum.find(d["candidates"], &(&1["account_id"] == claude.id))["price"]
+      end
+
+      # `:exclude` is the implementer's rotation; the review path never sees it.
+      assert price.(exclude: [:codex]) == price.([])
     end
 
     test "I1 / I2: no-regression with competence: false / off" do

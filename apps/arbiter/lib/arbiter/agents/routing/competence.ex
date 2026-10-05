@@ -39,8 +39,8 @@ defmodule Arbiter.Agents.Routing.Competence do
       `"opus"` (`Claude.Config.default_tier_models/0`), while measured rows are
       keyed by full ids (`claude-sonnet-5-5`, `claude-haiku-4-5-20251001`). An
       exact model match wins; otherwise a bare alias and a full id of the same
-      Claude line (`sonnet` ↔ `claude-sonnet-*`) match, the best-measured
-      (largest `n`) row first.
+      Claude line (`sonnet` ↔ `claude-sonnet-*`) match, the newest model of the
+      line first (`claude-sonnet-5-5` over `claude-sonnet-5`), then the larger `n`.
 
   ## Purity
 
@@ -52,6 +52,7 @@ defmodule Arbiter.Agents.Routing.Competence do
 
   alias Arbiter.Agents.ModelFamily
   alias Arbiter.Agents.ReviewerRouting
+  alias Arbiter.Agents.Routing.ByDifficulty
   alias Arbiter.Quota
   alias Arbiter.Quota.Headroom
   alias Arbiter.Settings
@@ -456,7 +457,9 @@ defmodule Arbiter.Agents.Routing.Competence do
   # before code-default rows (exact, then alias), so a re-seeded row is never
   # shadowed by a stale default. Within a source an exact-model match wins
   # (first in row order); failing that, a Claude tier alias matches a row of the
-  # same line, best measured first. Rungs 2-3 do not key on the model.
+  # same line, newest model first (a tier alias names whatever model currently
+  # sits behind the tier, §3.3 reason 4), then the larger `n`. Rungs 2-3 do not
+  # key on the model.
   defp find_row(rows, matcher, rung, model) when rung in [0, 1] do
     {defaults, overrides} = Enum.split_with(rows, &default_row?/1)
     find_in_source(overrides, matcher, model) || find_in_source(defaults, matcher, model)
@@ -467,15 +470,31 @@ defmodule Arbiter.Agents.Routing.Competence do
   defp find_in_source(rows, matcher, model) do
     Enum.find(rows, &matcher.(&1, :exact)) ||
       if(claude_line(model),
-        do: rows |> Enum.filter(&matcher.(&1, :alias)) |> Enum.max_by(&row_n/1, fn -> nil end)
+        do:
+          rows |> Enum.filter(&matcher.(&1, :alias)) |> Enum.max_by(&alias_rank/1, fn -> nil end)
       )
   end
 
   defp default_row?(%{"source" => "default"}), do: true
   defp default_row?(_), do: false
 
+  defp alias_rank(row), do: {model_version(row), row_n(row)}
+
   defp row_n(%{"n" => n}) when is_number(n), do: n
   defp row_n(_), do: 0
+
+  # `claude-sonnet-5-5` → [5, 5]; `claude-sonnet-5` → [5]; a trailing date stamp
+  # (`claude-haiku-4-5-20251001`) is not part of the version. Lists compare
+  # element-wise, so [5, 5] outranks [5]. A bare alias row has no version: [].
+  defp model_version(%{"match" => %{"model" => model}}) when is_binary(model) do
+    ~r/\d+/
+    |> Regex.scan(model)
+    |> List.flatten()
+    |> Enum.reject(&(byte_size(&1) >= 8))
+    |> Enum.map(&String.to_integer/1)
+  end
+
+  defp model_version(_), do: []
 
   defp build_found(rung, basis, key, row) do
     attempts = num(row["attempts"], 1.0)
@@ -718,7 +737,7 @@ defmodule Arbiter.Agents.Routing.Competence do
   end
 
   defp project_and_price_review(ws, entry, task, base, all_rows, opts) do
-    case ReviewerRouting.project(ws, entry.family, Keyword.merge(opts, task: task)) do
+    case ReviewerRouting.project(ws, entry.family, projection_opts(ws, task, opts)) do
       {:ok, sel} ->
         rev_weight = model_weight(all_rows, sel.provider, sel.model)
         review_draw = base.review_runs * rev_weight
@@ -734,6 +753,19 @@ defmodule Arbiter.Agents.Routing.Competence do
       _ ->
         uncoupled_estimate(base)
     end
+  end
+
+  # The projection runs on the reviewer path's own tier (the ReviewGate's
+  # derivation, `ByDifficulty.reviewer_tier/2`) and no exclusions, not on the
+  # implementer's `:tier` / `:exclude`; only the clock, quota reader and
+  # gemini quota code carry over from the implementer's routing options.
+  defp projection_opts(ws, task, opts) do
+    difficulty = task && (Map.get(task, :difficulty_at_dispatch) || Map.get(task, :difficulty))
+
+    opts
+    |> Keyword.take([:now, :quota_fun, :gemini_code])
+    |> Keyword.put(:task, task)
+    |> Keyword.put(:tier, ByDifficulty.reviewer_tier(ws.config, difficulty))
   end
 
   defp resolve_reviewer_windows(sel, entry, opts) do

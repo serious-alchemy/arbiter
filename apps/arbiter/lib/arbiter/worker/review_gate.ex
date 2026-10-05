@@ -293,13 +293,6 @@ defmodule Arbiter.Worker.ReviewGate do
   # rounds than D3.
   @rounds_by_difficulty %{0 => 2, 1 => 2, 2 => 3, 3 => 4, 4 => 4, 5 => 4}
 
-  # bd-3xultf: how many tiers above the task's own tier the reviewer is
-  # routed by default (capped at "premium" by `ByDifficulty.bump_tier/2`).
-  # Overridable per-workspace via `review_agent.config.tier_offset`; 0
-  # restores a fixed (same-tier) reviewer — the rollback knob if a moving
-  # judge invalidates the before/after convergence comparison (#1011).
-  @default_reviewer_tier_offset 1
-
   # Defensive cap on the escalation diff so a huge branch can't bloat the
   # coordinator's mailbox row beyond reason.
   @diff_cap_bytes 50_000
@@ -6032,29 +6025,8 @@ defmodule Arbiter.Worker.ReviewGate do
   # `bump_tier/2`), so it's never weaker than the author. `tier_offset: 0`
   # restores a fixed (same-tier) reviewer — the rollback knob for #1011's
   # measurement-validity concern.
-  defp reviewer_model_tier(config, task_id) do
-    block =
-      get_in(config || %{}, ["review_agent", "config"]) ||
-        get_in(config || %{}, ["agent", "config"]) || %{}
-
-    case Map.get(block, "model_tier") do
-      tier when is_binary(tier) and tier != "" ->
-        tier
-
-      _ ->
-        task_id
-        |> difficulty_at_dispatch_for()
-        |> ByDifficulty.tier_for_difficulty()
-        |> ByDifficulty.bump_tier(reviewer_tier_offset(block))
-    end
-  end
-
-  defp reviewer_tier_offset(block) do
-    case Map.get(block, "tier_offset") do
-      n when is_integer(n) and n >= 0 -> n
-      _ -> @default_reviewer_tier_offset
-    end
-  end
+  defp reviewer_model_tier(config, task_id),
+    do: ByDifficulty.reviewer_tier(config, fn -> difficulty_at_dispatch_for(task_id) end)
 
   defp load_issue(task_id) when is_binary(task_id) do
     case Ash.get(Issue, task_id) do

@@ -58,7 +58,7 @@ defmodule Arbiter.Loop.CompetenceGeneratorTest do
     # A synthetic task set whose aggregates are the design doc's §3.6 row for
     # agy flash-medium, D2 (n 6, 33% approve, 2.83 review rounds, 1.50 fix
     # passes, 2.67 attempts, 17% raised, 9.1 / 1.8 h, $6.93 / $6.34). It pins the
-    # generator's arithmetic (means, median, 90th-percentile winsorising,
+    # generator's arithmetic (raw mean, median, 90th-percentile winsorised mean,
     # rounding) to the baseline; it is not the measured install data.
     test "reproduces the agy flash-medium D2 baseline row" do
       per_task = [
@@ -66,8 +66,8 @@ defmodule Arbiter.Loop.CompetenceGeneratorTest do
         {3, 2, 3, false, 1.5, 5.0, true},
         {3, 2, 3, false, 1.6, 6.0, false},
         {3, 1, 3, false, 2.0, 6.68, false},
-        {2, 1, 3, true, 24.15, 9.0, false},
-        {2, 1, 2, false, 30.0, 11.9, false}
+        {2, 1, 3, true, 20.0, 9.0, false},
+        {2, 1, 2, false, 28.3, 11.9, false}
       ]
 
       tasks =
@@ -100,7 +100,9 @@ defmodule Arbiter.Loop.CompetenceGeneratorTest do
       assert row["fix_passes"] == 1.5
       assert row["attempts"] == 2.67
       assert row["difficulty_raised"] == 0.17
+      # §3.6 reports the raw mean; the winsorised mean is a separate field.
       assert row["time_to_close_mean_hours"] == 9.1
+      assert row["time_to_close_winsorized_mean_hours"] == 7.7
       assert row["time_to_close_median_hours"] == 1.8
       assert row["cost_usd_mean"] == 6.93
       assert row["cost_usd_median"] == 6.34
@@ -120,7 +122,7 @@ defmodule Arbiter.Loop.CompetenceGeneratorTest do
   end
 
   describe "generate/1" do
-    test "proposes rows for cells meeting min_n, with 90th percentile winsorising" do
+    test "proposes rows for cells meeting min_n, with a separate winsorised mean" do
       # Create 6 tasks for sonnet-5 at D2. One parked task with 100 hours.
       # Times: [1.0, 1.0, 2.0, 2.0, 3.0, 100.0]
       # 90th percentile of 6 items: index 5 is 100.0 or interpolated ~3.0-100.0
@@ -175,8 +177,10 @@ defmodule Arbiter.Loop.CompetenceGeneratorTest do
       assert row["review_runs"] == 2.0
       assert row["time_to_close_median_hours"] == 2.0
 
-      # Mean with winsorising is clamped well below the un-winsorised mean ((1+1+2+2+3+100)/6 = 18.16)
-      assert row["time_to_close_mean_hours"] < 15.0
+      # The seeded mean is the raw mean ((1+1+2+2+3+100)/6 = 18.17); the
+      # winsorised mean clamps the parked 100.0 task to 3.0 ((1+1+2+2+3+3)/6).
+      assert row["time_to_close_mean_hours"] == 18.2
+      assert row["time_to_close_winsorized_mean_hours"] == 2.0
     end
 
     test "formats a Markdown report" do

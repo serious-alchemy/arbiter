@@ -146,6 +146,8 @@ defmodule Arbiter.Loop.CompetenceGenerator do
       "attempts" => round2(runs.attempts),
       "difficulty_raised" => round2(runs.difficulty_raised),
       "time_to_close_mean_hours" => stats.mean_time && round1(stats.mean_time),
+      "time_to_close_winsorized_mean_hours" =>
+        stats.winsorized_mean_time && round1(stats.winsorized_mean_time),
       "time_to_close_median_hours" => stats.med_time && round1(stats.med_time),
       "cost_usd_mean" => stats.mean_cost && round2(stats.mean_cost),
       "cost_usd_median" => stats.med_cost && round2(stats.med_cost),
@@ -182,7 +184,8 @@ defmodule Arbiter.Loop.CompetenceGenerator do
 
     %{
       med_time: median(times),
-      mean_time: winsorized_mean(times, @winsorize_quantile),
+      mean_time: mean(times),
+      winsorized_mean_time: winsorized_mean(times, @winsorize_quantile),
       med_cost: median(costs),
       mean_cost: mean(costs)
     }
