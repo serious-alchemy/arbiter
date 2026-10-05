@@ -28,6 +28,37 @@ defmodule Arbiter.EventsTest do
     end
   end
 
+  describe "broadcast/3 telemetry" do
+    test "emits [:arbiter, :events, :broadcast] with the persisted event", %{ws: ws} do
+      id = "events-telemetry-#{System.unique_integer([:positive])}"
+      test_pid = self()
+
+      :telemetry.attach(
+        id,
+        [:arbiter, :events, :broadcast],
+        fn name, measurements, metadata, _ ->
+          send(test_pid, {:telemetry, name, measurements, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(id) end)
+
+      assert :ok = Events.broadcast(ws.id, "worker_done", %{task_id: "bd-telemetry-1"})
+
+      assert_receive {:telemetry, [:arbiter, :events, :broadcast], %{system_time: t}, meta}, 500
+      assert is_integer(t)
+      assert meta.workspace_id == ws.id
+      assert meta.topic == "worker_done"
+      assert meta.event.task_id == "bd-telemetry-1"
+      assert is_integer(meta.event.cursor)
+    end
+
+    test "is a no-op when nothing is attached", %{ws: ws} do
+      assert :ok = Events.broadcast(ws.id, "worker_done", %{task_id: "bd-telemetry-2"})
+    end
+  end
+
   describe "replay/3" do
     test "returns nothing when no events have happened since the cursor", %{ws: ws} do
       Events.broadcast(ws.id, "worker_done", %{task_id: "bd-a"})
