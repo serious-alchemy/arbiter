@@ -82,6 +82,8 @@ defmodule ArbiterCli.Main do
       arb server doctor   [--json]
       arb server version  [--json]
 
+      arb dashboard login [--json]   print a one-time browser login link
+
       arb workspace list
       arb workspace show  <id>
 
@@ -323,6 +325,7 @@ defmodule ArbiterCli.Main do
   # Top-level shortcut: `arb verify <id>` == `arb ticket verify <id>`.
   defp dispatch_known("verify", args), do: ArbiterCli.Cmd.Issue.run(["verify" | args])
   defp dispatch_known("prime", args), do: ArbiterCli.Cmd.Prime.run(args)
+  defp dispatch_known("dashboard", args), do: ArbiterCli.Cmd.Dashboard.run(args)
   defp dispatch_known("where", args), do: ArbiterCli.Cmd.Where.run(args)
   defp dispatch_known("init", args), do: ArbiterCli.Cmd.Init.run(args)
   defp dispatch_known("version", args), do: ArbiterCli.Cmd.Version.run(args)

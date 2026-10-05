@@ -1,0 +1,23 @@
+<main id="dashboard-login" class="mx-auto mt-24 max-w-md px-6 text-base-content">
+  <h1 class="text-xl font-semibold">Arbiter dashboard</h1>
+  <p :if={msg = Phoenix.Flash.get(@flash, :error)} id="login-error" class="mt-4 text-error">
+    {msg}
+  </p>
+  <%= if @token do %>
+    <.form for={%{}} action={~p"/login"} method="post" id="login-confirm-form" class="mt-6">
+      <input type="hidden" name="token" value={@token} />
+      <button type="submit" class="btn btn-primary">Sign in to the dashboard</button>
+    </.form>
+  <% else %>
+    <p class="mt-4">
+      Sign in from the machine running Arbiter:
+    </p>
+    <pre class="mt-2 rounded bg-base-200 p-3 text-sm">arb dashboard login</pre>
+    <p class="mt-2 text-sm opacity-70">
+      It prints a one-time link (valid {div(
+        ArbiterWeb.DashboardAuth.LoginTokens.ttl_seconds(),
+        60
+      )} minutes). Open it in this browser.
+    </p>
+  <% end %>
+</main>

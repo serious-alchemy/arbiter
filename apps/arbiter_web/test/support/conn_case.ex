@@ -60,9 +60,15 @@ defmodule ArbiterWeb.ConnCase do
   one, so this is what a real API caller looks like. The header is inert on
   browser routes. A test about anonymous or narrower callers builds its own
   with `Phoenix.ConnTest.build_conn/0`.
+
+  It also carries a dashboard login grant (bd-3gycsz) so browser-route tests
+  start logged in; `ArbiterWeb.DashboardAuthTest` builds anonymous conns.
   """
   def coordinator_conn do
     Phoenix.ConnTest.build_conn()
+    |> Plug.Test.init_test_session(
+      ArbiterWeb.DashboardAuth.Default.grant_session("token", "test")
+    )
     |> Plug.Conn.put_req_header(
       "authorization",
       "Bearer " <> Arbiter.MCP.Scope.mint_coordinator(nil)
