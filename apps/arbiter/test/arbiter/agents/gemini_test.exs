@@ -1437,6 +1437,86 @@ defmodule Arbiter.Agents.GeminiTest do
     end
   end
 
+  # bd-8btihu: agy 1.2.16 cannot authenticate from legacy file-seeded credentials.
+  # When no keyring/D-Bus session bus is reachable for an agy worker, fail at preflight
+  # with a clear error ("agy needs a keyring (D-Bus) or its own login on this host").
+  describe "auth_probe/1 (bd-8btihu)" do
+    setup do
+      tmp =
+        Path.join(
+          System.tmp_dir!(),
+          "arbiter-gemini-probe-stub-#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(tmp)
+      old_path = System.get_env("PATH") || ""
+      System.put_env("PATH", tmp)
+
+      on_exit(fn ->
+        System.put_env("PATH", old_path)
+        Application.delete_env(:arbiter, :worker_gemini_keyring_available)
+        Application.delete_env(:arbiter, :xdg_dbus_proxy)
+        File.rm_rf!(tmp)
+      end)
+
+      {:ok, tmp: tmp}
+    end
+
+    test "agy: when keyring is available, auth_probe/1 returns :skipped to fall through to argv probe",
+         %{tmp: tmp} do
+      _agy = stub_exec(tmp, "agy")
+
+      assert :skipped = Gemini.auth_probe(keyring: true)
+    end
+
+    test "agy: when keyring is unavailable (opt: keyring: false), fails with explicit error", %{
+      tmp: tmp
+    } do
+      _agy = stub_exec(tmp, "agy")
+
+      assert {:error, %Arbiter.Worker.StopReason{} = reason} =
+               Gemini.auth_probe(keyring: false)
+
+      assert reason.category == :auth_expired
+      assert reason.summary == "agy needs a keyring (D-Bus) or its own login on this host"
+    end
+
+    test "agy: when keyring path is forced unavailable via app env, auth_probe/1 fails loudly", %{
+      tmp: tmp
+    } do
+      _agy = stub_exec(tmp, "agy")
+      Application.put_env(:arbiter, :worker_gemini_keyring_available, false)
+
+      assert {:error, %Arbiter.Worker.StopReason{} = reason} = Gemini.auth_probe([])
+      assert reason.category == :auth_expired
+      assert reason.summary == "agy needs a keyring (D-Bus) or its own login on this host"
+    end
+
+    test "agy: Preflight.check/2 fails loudly when keyring is unavailable", %{tmp: tmp} do
+      _agy = stub_exec(tmp, "agy")
+
+      assert {:error, %Arbiter.Worker.StopReason{} = reason} =
+               Arbiter.Agents.Preflight.check(Gemini, keyring: false)
+
+      assert reason.category == :auth_expired
+      assert reason.summary == "agy needs a keyring (D-Bus) or its own login on this host"
+    end
+
+    test "upstream gemini: returns :skipped regardless of keyring status", %{tmp: tmp} do
+      _gemini = stub_exec(tmp, "gemini")
+
+      assert :skipped = Gemini.auth_probe(keyring: false)
+    end
+
+    test "returns {:error, :crashed} when neither CLI is on PATH" do
+      System.put_env("PATH", "/nonexistent-dir-for-test")
+
+      assert {:error, %Arbiter.Worker.StopReason{} = reason} = Gemini.auth_probe([])
+      assert reason.category == :crashed
+      assert reason.summary =~ "not found on PATH"
+    end
+  end
+
   describe "async_tool_instruction" do
     test "async_tool_instruction/0 renders reviewer instruction without Claude tools or disproven flags" do
       text = Gemini.async_tool_instruction()

@@ -419,9 +419,8 @@ defmodule Arbiter.Worker.Jail do
   @doc """
   True when a filtered keyring bus can actually be offered inside the jail:
   a proxy binary *and* an upstream session bus socket. Callers that decide
-  whether to rely on the keyring (vs. copying credential files) must use this,
-  not merely "a session bus exists" — otherwise a missing proxy masks the bus
-  with no credentials copied and the worker cannot authenticate.
+  whether the keyring is usable must use this, not merely "a session bus exists"
+  — otherwise a missing proxy masks the bus and agy cannot authenticate.
   """
   @spec keyring_usable?() :: boolean()
   def keyring_usable?, do: dbus_proxy() != nil and session_bus_socket() != nil
@@ -1810,7 +1809,7 @@ defmodule Arbiter.Worker.Jail do
   socket path that depends on `TMPDIR`'s length (the 107-byte `sun_path`
   limit) fails here instead of on the first review run. `:ok` when the proxy
   bus appears inside the jail, or when this host can't offer a keyring bus at
-  all (`keyring_usable?/0` false — agy then falls back to credential files).
+  all (`keyring_usable?/0` false).
   """
   @spec keyring_probe() :: :ok | {:error, term()}
   def keyring_probe do

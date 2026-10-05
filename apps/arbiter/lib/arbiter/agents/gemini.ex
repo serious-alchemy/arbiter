@@ -21,6 +21,7 @@ defmodule Arbiter.Agents.Gemini do
   alias Arbiter.Worker.Egress.JailRun
   alias Arbiter.Worker.Jail
   alias Arbiter.Worker.Sandbox
+  alias Arbiter.Worker.StopReason
 
   require Logger
 
@@ -196,6 +197,46 @@ defmodule Arbiter.Agents.Gemini do
 
       {:error, _} = err ->
         err
+    end
+  end
+
+  @doc """
+  Direct auth and liveness probe for the adapter (bd-2r42bq, bd-8btihu).
+
+  On agy 1.2.16, authentication requires a reachable freedesktop Secret Service
+  keyring over D-Bus; the legacy file-seeded fallback does not authenticate and
+  copying refresh tokens risks rotation divergence (bd-6dpjw7). When no keyring
+  is reachable for an agy worker, fail loudly at preflight instead of attempting
+  a silent fallback that ends in an interactive OAuth prompt and timeout.
+  """
+  @impl true
+  def auth_probe(opts \\ []) do
+    case resolve_executable() do
+      {:ok, {:agy, _exec}} ->
+        if ConfigDir.keyring_available?(opts) do
+          :skipped
+        else
+          {:error,
+           %StopReason{
+             category: :auth_expired,
+             summary: "agy needs a keyring (D-Bus) or its own login on this host",
+             remediation:
+               "agy authenticates via the freedesktop Secret Service over D-Bus. Ensure a " <>
+                 "keyring daemon (e.g. gnome-keyring) and D-Bus session bus are running, or " <>
+                 "sign in directly with `agy` on this host."
+           }}
+        end
+
+      {:ok, {:gemini, _exec}} ->
+        :skipped
+
+      {:error, {:executable_not_found, exec}} ->
+        {:error,
+         %StopReason{
+           category: :crashed,
+           summary: "agent CLI not found on PATH (#{exec})",
+           remediation: "Install / fix the agent CLI on the host before dispatching."
+         }}
     end
   end
 
