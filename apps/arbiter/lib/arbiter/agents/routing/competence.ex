@@ -27,7 +27,27 @@ defmodule Arbiter.Agents.Routing.Competence do
       δ(implementer pool, c) = (A_k + F_k) × weight(m)
       δ(reviewer pool, c)    = R_k × weight(projected reviewer model)
 
-  Pure: no I/O, no clock.
+  ## Provider and Model Keys
+
+  Rows are matched on a *canonical* provider and a *tier-tolerant* model, so the
+  keys production produces hit the measured cells:
+
+    * agy is `antigravity` on the account, the `gemini` adapter on a routing
+      entry (`ProviderSettings`' `agent_type`) and in `SubjectStats`; all three
+      (plus `agy`) canonicalise to `"antigravity"`.
+    * A Claude candidate on a default tier model is `"haiku"` / `"sonnet"` /
+      `"opus"` (`Claude.Config.default_tier_models/0`), while measured rows are
+      keyed by full ids (`claude-sonnet-5-5`, `claude-haiku-4-5-20251001`). An
+      exact model match wins; otherwise a bare alias and a full id of the same
+      Claude line (`sonnet` ↔ `claude-sonnet-*`) match, the best-measured
+      (largest `n`) row first.
+
+  ## Purity
+
+  `lookup/2`, `normalize_rows/1` and `model_weight/3` are pure. `rows/0` reads
+  the installation settings, and `estimate/4` additionally projects the
+  reviewer (`ReviewerRouting.project/3`) and reads its quota windows when
+  `reviewer_coupling` is on, so those two touch the database and the clock.
   """
 
   alias Arbiter.Agents.ModelFamily
@@ -39,6 +59,8 @@ defmodule Arbiter.Agents.Routing.Competence do
   alias Arbiter.Tasks.Workspace
 
   @type row :: %{String.t() => term()}
+
+  @claude_lines ~w(haiku sonnet opus)
 
   @type found :: %{
           rung: 0..3,
@@ -396,7 +418,7 @@ defmodule Arbiter.Agents.Routing.Competence do
   """
   @spec lookup([row()], map()) :: found() | nil
   def lookup(rows, choice) when is_list(rows) and is_map(choice) do
-    provider = to_string(choice[:provider] || choice[:agent_type] || "")
+    provider = canonical_provider(choice[:provider] || choice[:agent_type])
     model = choice[:model] && to_string(choice.model)
     difficulty = choice[:difficulty]
     type = choice[:issue_type] && to_string(choice.issue_type)
@@ -410,24 +432,36 @@ defmodule Arbiter.Agents.Routing.Competence do
     # 3: (family, tier) or family prior
     rungs = [
       {0, :cell, {provider, model, difficulty, type},
-       &match_rung0?(&1, provider, model, difficulty, type)},
+       &match_rung0?(&1, provider, model, difficulty, type, &2)},
       {1, :model_difficulty, {provider, model, difficulty},
-       &match_rung1?(&1, provider, model, difficulty)},
+       &match_rung1?(&1, provider, model, difficulty, &2)},
       {2, :family_tier_difficulty, {family, tier, difficulty},
-       &match_rung2?(&1, family, tier, difficulty)},
-      {3, :prior, {family, tier}, &match_rung3?(&1, family, tier)}
+       fn row, _mode -> match_rung2?(row, family, tier, difficulty) end},
+      {3, :prior, {family, tier}, fn row, _mode -> match_rung3?(row, family, tier) end}
     ]
 
     Enum.find_value(rungs, fn {rung, basis, key, matcher} ->
-      case Enum.find(rows, matcher) do
-        nil ->
-          nil
-
-        %{} = matched_row ->
-          build_found(rung, basis, key, matched_row)
+      case find_row(rows, matcher, rung, model) do
+        nil -> nil
+        %{} = matched_row -> build_found(rung, basis, key, matched_row)
       end
     end)
   end
+
+  # An exact-model match wins (first in row order, so overrides beat defaults).
+  # Failing that, a Claude tier alias matches a row of the same line, best
+  # measured first. Rungs 2-3 do not key on the model.
+  defp find_row(rows, matcher, rung, model) when rung in [0, 1] do
+    Enum.find(rows, &matcher.(&1, :exact)) ||
+      if(claude_line(model),
+        do: rows |> Enum.filter(&matcher.(&1, :alias)) |> Enum.max_by(&row_n/1, fn -> nil end)
+      )
+  end
+
+  defp find_row(rows, matcher, _rung, _model), do: Enum.find(rows, &matcher.(&1, :exact))
+
+  defp row_n(%{"n" => n}) when is_number(n), do: n
+  defp row_n(_), do: 0
 
   defp build_found(rung, basis, key, row) do
     attempts = num(row["attempts"], 1.0)
@@ -470,20 +504,22 @@ defmodule Arbiter.Agents.Routing.Competence do
 
   defp row_rung(_), do: 3
 
-  defp match_rung0?(%{"match" => m} = row, p, m_name, d, t) do
-    row_rung(row) == 0 and match_val?(m["provider"], p) and match_model?(m["model"], m_name) and
+  defp match_rung0?(%{"match" => m} = row, p, m_name, d, t, mode) do
+    row_rung(row) == 0 and match_provider?(m["provider"], p) and
+      match_model?(m["model"], m_name, mode) and
       match_val?(m["difficulty"], d) and match_val?(m["issue_type"], t) and
       not_nil?([d, t, m_name])
   end
 
-  defp match_rung0?(_, _, _, _, _), do: false
+  defp match_rung0?(_, _, _, _, _, _), do: false
 
-  defp match_rung1?(%{"match" => m} = row, p, m_name, d) do
-    row_rung(row) == 1 and match_val?(m["provider"], p) and match_model?(m["model"], m_name) and
+  defp match_rung1?(%{"match" => m} = row, p, m_name, d, mode) do
+    row_rung(row) == 1 and match_provider?(m["provider"], p) and
+      match_model?(m["model"], m_name, mode) and
       match_val?(m["difficulty"], d) and not_nil?([d, m_name])
   end
 
-  defp match_rung1?(_, _, _, _), do: false
+  defp match_rung1?(_, _, _, _, _), do: false
 
   defp match_rung2?(%{"match" => m} = row, fam, tier, d) do
     row_rung(row) == 2 and match_val?(m["family"], fam) and match_val?(m["tier"], tier) and
@@ -518,10 +554,25 @@ defmodule Arbiter.Agents.Routing.Competence do
 
   defp match_val?(expected, actual), do: to_string(expected) == to_string(actual)
 
-  defp match_model?(nil, _), do: true
-  defp match_model?(_pattern, nil), do: false
+  defp match_provider?(nil, _), do: true
+  defp match_provider?(expected, actual), do: canonical_provider(expected) == actual
 
-  defp match_model?(pattern, model) do
+  # agy is "antigravity" on the account, "gemini" on the adapter-typed routing
+  # entry and in SubjectStats, "agy" for the CLI; one key for all of them.
+  defp canonical_provider(nil), do: ""
+
+  defp canonical_provider(provider) do
+    case to_string(provider) do
+      p when p in ["agy", "gemini", "antigravity"] -> "antigravity"
+      p -> p
+    end
+  end
+
+  defp match_model?(pattern, model, mode \\ :exact)
+  defp match_model?(nil, _, _), do: true
+  defp match_model?(_pattern, nil, _), do: false
+
+  defp match_model?(pattern, model, :exact) do
     pattern = to_string(pattern)
     model = to_string(model)
 
@@ -530,6 +581,36 @@ defmodule Arbiter.Agents.Routing.Competence do
       pattern == "claude-" <> model or
       glob_match?(pattern, model)
   end
+
+  defp match_model?(pattern, model, :alias) do
+    line = claude_line(model)
+
+    not is_nil(line) and line == claude_line(pattern) and
+      (bare_alias?(pattern) or bare_alias?(model))
+  end
+
+  defp bare_alias?(model), do: to_string(model) in @claude_lines
+
+  # `"sonnet"` / `"claude-sonnet-5-5"` → `"sonnet"`; non-Claude ids → nil.
+  defp claude_line(nil), do: nil
+
+  defp claude_line(model) do
+    model = to_string(model)
+
+    cond do
+      model in @claude_lines ->
+        model
+
+      String.starts_with?(model, "claude-") ->
+        Enum.find(@claude_lines, &claude_id_line?(model, &1))
+
+      true ->
+        nil
+    end
+  end
+
+  defp claude_id_line?(model, line),
+    do: model == "claude-" <> line or String.starts_with?(model, "claude-" <> line <> "-")
 
   defp glob_match?(glob, str) do
     pattern =
@@ -549,8 +630,8 @@ defmodule Arbiter.Agents.Routing.Competence do
   @spec model_weight([row()], term(), term()) :: float()
   def model_weight(rows, provider, model) do
     case Enum.find(rows, fn %{"match" => m} ->
-           match_val?(m["provider"], provider) and match_model?(m["model"], model) and
-             Map.has_key?(m, "model")
+           match_provider?(m["provider"], canonical_provider(provider)) and
+             match_model?(m["model"], model) and Map.has_key?(m, "model")
          end) do
       %{"weight" => w} when is_number(w) -> w * 1.0
       _ -> 1.0

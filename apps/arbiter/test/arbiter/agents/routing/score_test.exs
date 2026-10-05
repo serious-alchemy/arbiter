@@ -122,6 +122,23 @@ defmodule Arbiter.Agents.Routing.ScoreTest do
       assert sides == %{author: 2.5, review: 1.5}
     end
 
+    test "a projected reviewer with no windows prices the author side only" do
+      unknown = entry(0, 0.5, %{sides: %{author: 2.0, review: 1.0}, reviewer_windows: []})
+
+      priced =
+        entry(1, 0.25, %{sides: %{author: 2.0, review: 1.0}, reviewer_windows: [win(0.25)]})
+
+      [first, second] = Score.rank([priced, unknown])
+
+      # unknown: 2.0 / 0.5 = 4.0 (review unpriced); priced: 8.0 + 4.0 = 12.0
+      assert first.id == "a0"
+      assert_in_delta first.score.price, 4.0, 1.0e-9
+      assert first.score.reviewer_price == nil
+      assert first.score.reviewer_unpriced?
+      assert first.score.sides == %{author: 2.0, review: 1.0}
+      refute second.score.reviewer_unpriced?
+    end
+
     test "reviewer pool price reorders candidates when author headrooms are equal" do
       # a0 and a1 have equal author headroom (0.5), but a0's projected reviewer has
       # more headroom (0.5 vs 0.1), so a0's reviewer price is lower.

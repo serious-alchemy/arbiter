@@ -193,9 +193,14 @@ defmodule Arbiter.Release do
   def seed_competence_matrix(opts \\ []) do
     if Keyword.get(opts, :start, true), do: start_release_repo!()
 
-    {:ok, rows} = CompetenceGenerator.seed_installation!(opts)
-    IO.puts(CompetenceGenerator.format(rows))
-    {:ok, rows}
+    with {:ok, rows} <- CompetenceGenerator.seed_installation!(opts) do
+      IO.puts(CompetenceGenerator.format(rows))
+      {:ok, rows}
+    else
+      {:error, reason} = error ->
+        IO.puts(:stderr, "competence matrix seeding failed: #{inspect(reason)}")
+        error
+    end
   end
 
   @doc """

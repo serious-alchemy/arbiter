@@ -14,7 +14,7 @@ defmodule Arbiter.Agents.ProviderRoutingScoredTest do
 
   alias Arbiter.Accounts.{ProviderAccount, WorkspaceProviderAccount}
   alias Arbiter.Agents.ProviderRouting
-  alias Arbiter.Quota.{AnthropicQuota, CodexQuota}
+  alias Arbiter.Quota.{AnthropicQuota, CodexQuota, GoogleQuota}
   alias Arbiter.Tasks.{Issue, Workspace}
 
   setup do
@@ -85,6 +85,30 @@ defmodule Arbiter.Agents.ProviderRoutingScoredTest do
       weekly_reset_at: ahead(302_400),
       limit_reached: false,
       captured_at: now()
+    }
+  end
+
+  defp agy_quota(gemini_used) do
+    bucket = fn group, window, used, reset ->
+      %{
+        "model_id" => "#{group}_#{window}",
+        "remaining_percentage" => 100.0 - used,
+        "reset_at" => DateTime.to_iso8601(reset)
+      }
+    end
+
+    %GoogleQuota{
+      provider: "antigravity",
+      captured_at: now(),
+      reset_at: ahead(9_000),
+      snapshot: %{
+        "models" => [
+          bucket.("gemini_models", "5h", gemini_used, ahead(9_000)),
+          bucket.("gemini_models", "weekly", 0.0, ahead(302_400)),
+          bucket.("claude_and_gpt_models", "5h", 0.0, ahead(9_000)),
+          bucket.("claude_and_gpt_models", "weekly", 0.0, ahead(302_400))
+        ]
+      }
     }
   end
 
@@ -402,6 +426,76 @@ defmodule Arbiter.Agents.ProviderRoutingScoredTest do
       codex_cand = Enum.find(d["candidates"], &(&1["account_id"] == codex.id))
       assert is_map(codex_cand["expected_runs"])
       assert %{"rung" => 3} = codex_cand["cell"]
+    end
+
+    test "a real agy account lands on the measured flash-medium D2 cell" do
+      cfg =
+        config("scored", %{"mode" => "enforce", "competence" => true})
+        |> put_in(["routing", "policy"], "by_difficulty")
+
+      ws = workspace!(cfg)
+      agy = account!(:antigravity, "agy")
+      allow!(ws, agy, 0)
+
+      pairs = [{agy, agy_quota(10.0)}]
+      task = task!(ws, %{difficulty: 2})
+
+      assert {:ok, %{decision: d}} =
+               ProviderRouting.select(
+                 ws,
+                 task,
+                 :main,
+                 opts(pairs, gemini_code: "antigravity")
+               )
+
+      [cand] = d["candidates"]
+      assert cand["model"] == "gemini-3.8-flash-medium"
+      assert %{"rung" => 1, "n" => 6} = cand["cell"]
+      assert cand["expected_runs"] == %{"author" => 4.17, "review" => 2.83}
+    end
+
+    test "a Claude candidate on the default tier models hits the measured cells" do
+      cfg =
+        config("scored", %{"mode" => "enforce", "competence" => true})
+        |> put_in(["routing", "policy"], "by_difficulty")
+
+      ws = workspace!(cfg)
+      claude = account!(:claude, "claude")
+      allow!(ws, claude, 0)
+
+      pairs = [{claude, claude_quota(0.30)}]
+      task = task!(ws, %{difficulty: 2})
+
+      assert {:ok, %{decision: d}} = ProviderRouting.select(ws, task, :main, opts(pairs))
+
+      [cand] = d["candidates"]
+      assert cand["model"] == "sonnet"
+      assert %{"rung" => 1, "n" => 258} = cand["cell"]
+      assert cand["expected_runs"] == %{"author" => 2.53, "review" => 2.36}
+    end
+
+    test "reviewer_coupling with a projected reviewer that has no account keeps the author price" do
+      cfg =
+        config("scored", %{
+          "mode" => "enforce",
+          "competence" => true,
+          "reviewer_coupling" => true
+        })
+        |> put_in(["routing", "policy"], "by_difficulty")
+        |> Map.put("review_agent", %{"cross_family" => true})
+
+      ws = workspace!(cfg)
+      claude = account!(:claude, "claude")
+      allow!(ws, claude, 0)
+
+      pairs = [{claude, claude_quota(0.30)}]
+      task = task!(ws, %{difficulty: 2})
+
+      assert {:ok, %{decision: d}} = ProviderRouting.select(ws, task, :main, opts(pairs))
+
+      [cand] = d["candidates"]
+      assert is_number(cand["price"])
+      assert is_number(cand["score"])
     end
 
     test "with reviewer_coupling: true, review draw prices on projected reviewer's pool" do

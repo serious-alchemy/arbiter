@@ -313,7 +313,7 @@ defmodule Arbiter.Agents.Routing.CompetenceTest do
       ws = %Workspace{id: "ws-1", config: %{}}
 
       entry = %{
-        agent_type: "antigravity",
+        agent_type: "gemini",
         model: "gemini-3.8-flash-low",
         family: :google,
         pool: "gemini"
@@ -327,6 +327,45 @@ defmodule Arbiter.Agents.Routing.CompetenceTest do
       assert res.reviewer_windows == nil
       assert res.time_h == 1.1
       assert %{"rung" => 1, "n" => 13} = res.cell
+    end
+  end
+
+  describe "production keys hit the measured cells" do
+    defp lookup(provider, model, difficulty),
+      do:
+        Competence.lookup(Competence.rows(), %{
+          provider: provider,
+          model: model,
+          difficulty: difficulty
+        })
+
+    test "every agy spelling (account, adapter, CLI) matches the antigravity rows" do
+      for provider <- ["antigravity", "gemini", "agy", :antigravity] do
+        found = lookup(provider, "gemini-3.8-flash-medium", 2)
+        assert %{rung: 1, n: 6} = found
+        assert found.author_runs == 4.17
+        assert found.review_runs == 2.83
+      end
+    end
+
+    test "a bare Claude tier alias matches the best-measured row of its line" do
+      assert %{rung: 1, n: 258} = lookup("claude", "sonnet", 2)
+      assert %{rung: 1, n: 159} = lookup("claude", "opus", 3)
+      assert %{rung: 1, n: 9} = lookup("claude", "opus", 4)
+    end
+
+    test "a full haiku id matches the haiku alias row" do
+      assert %{rung: 1, n: 14} = lookup("claude", "claude-haiku-4-5-20251001", 0)
+      assert %{rung: 1, n: 80} = lookup("claude", "haiku", 1)
+    end
+
+    test "an exact model id still wins over the alias" do
+      assert %{rung: 1, n: 38} = lookup("claude", "claude-sonnet-5-5", 2)
+    end
+
+    test "an alias never crosses lines" do
+      assert %{rung: 3} = lookup("claude", "sonnet", 4)
+      assert %{rung: 3} = lookup("claude", "haiku", 3)
     end
   end
 

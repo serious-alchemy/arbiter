@@ -1004,6 +1004,11 @@ defmodule Arbiter.Agents.ProviderRouting do
       "over_line" => score.over_line?
     }
 
+    base =
+      if Map.get(score, :reviewer_unpriced?),
+        do: Map.put(base, "reviewer_unpriced", true),
+        else: base
+
     if score.sides do
       runs =
         %{

@@ -51,7 +51,9 @@ defmodule Arbiter.Loop.CompetenceGenerator do
     date_str = Date.to_iso8601(DateTime.to_date(until))
 
     tasks
-    |> Enum.group_by(fn t -> {to_string(t.provider), to_string(t.model), t.difficulty} end)
+    |> Enum.group_by(fn t ->
+      {canonical_provider(t.provider), to_string(t.model), t.difficulty}
+    end)
     |> Enum.filter(fn {_key, cell_tasks} -> length(cell_tasks) >= min_n end)
     |> Enum.map(fn {{provider, model, difficulty}, cell_tasks} ->
       summarize_cell(provider, model, difficulty, cell_tasks, date_str)
@@ -110,6 +112,13 @@ defmodule Arbiter.Loop.CompetenceGenerator do
 
     header <> body <> "\n"
   end
+
+  # SubjectStats records agy runs under the `gemini` adapter; the matrix (and
+  # `Competence.lookup/2`) key agy as `antigravity`, as the §3.6 baseline does.
+  defp canonical_provider(provider) when provider in ["gemini", "agy", :gemini, :agy],
+    do: "antigravity"
+
+  defp canonical_provider(provider), do: to_string(provider)
 
   defp format_num(nil), do: "—"
   defp format_num(n) when is_float(n), do: :erlang.float_to_binary(n, decimals: 2)

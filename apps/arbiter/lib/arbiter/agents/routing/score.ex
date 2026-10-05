@@ -39,6 +39,7 @@ defmodule Arbiter.Agents.Routing.Score do
           draw: float(),
           sides: %{optional(:author) => float(), optional(:review) => float()} | nil,
           reviewer_price: Price.price() | nil,
+          reviewer_unpriced?: boolean(),
           time_h: float(),
           time_term: float(),
           score: float() | nil,
@@ -98,12 +99,18 @@ defmodule Arbiter.Agents.Routing.Score do
       draw: draw * 1.0,
       sides: sides,
       reviewer_price: reviewer_price,
+      reviewer_unpriced?: reviewer_unpriced?(entry),
       time_h: time_h,
       time_term: time_term,
       score: if(is_number(price), do: price + time_term),
       over_line?: Price.over_line?(price)
     }
   end
+
+  # Coupling projected a reviewer but its windows are unknown (no account yet,
+  # or no quota row): the review side is carried in `sides` but not priced.
+  defp reviewer_unpriced?(%{sides: %{author: _}, reviewer_windows: []}), do: true
+  defp reviewer_unpriced?(_entry), do: false
 
   defp calculate_price_and_draw(entry) do
     windows = Map.get(entry, :windows, [])
@@ -124,7 +131,7 @@ defmodule Arbiter.Agents.Routing.Score do
   end
 
   defp price_sides(windows, author_draw, review_draw, rev_wins)
-       when is_list(rev_wins) and is_number(review_draw) do
+       when is_list(rev_wins) and rev_wins != [] and is_number(review_draw) do
     r = review_draw * 1.0
     author_price = Price.price(windows, author_draw)
     rev_price = Price.price(rev_wins, r)
@@ -132,6 +139,9 @@ defmodule Arbiter.Agents.Routing.Score do
     {total_price, author_draw + r, %{author: author_draw, review: r}, rev_price}
   end
 
+  # No reviewer windows (`nil` uncoupled, `[]` unknown): price the author side
+  # only. A missing reading must not turn the whole candidate's price unknown
+  # and reorder it below priced ones.
   defp price_sides(windows, author_draw, review_draw, _rev_wins) do
     price = Price.price(windows, author_draw)
 

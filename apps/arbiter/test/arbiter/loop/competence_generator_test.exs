@@ -25,6 +25,35 @@ defmodule Arbiter.Loop.CompetenceGeneratorTest do
     }
   end
 
+  describe "generate/1 keys" do
+    test "agy runs recorded as the gemini adapter are keyed antigravity, and match the lookup" do
+      tasks = for i <- 1..5, do: make_task("g#{i}", "gemini", "gemini-3.8-flash-medium", 2)
+      assert [row] = CompetenceGenerator.generate(tasks: tasks)
+      assert row["match"]["provider"] == "antigravity"
+
+      found =
+        Arbiter.Agents.Routing.Competence.lookup([row], %{
+          provider: "gemini",
+          model: "gemini-3.8-flash-medium",
+          difficulty: 2
+        })
+
+      assert %{rung: 1, n: 5} = found
+    end
+
+    test "a full haiku id matches a generated row for the alias candidate" do
+      tasks = for i <- 1..5, do: make_task("h#{i}", "claude", "claude-haiku-4-5-20251001", 1)
+      assert [row] = CompetenceGenerator.generate(tasks: tasks)
+
+      assert %{rung: 1, n: 5} =
+               Arbiter.Agents.Routing.Competence.lookup([row], %{
+                 provider: "claude",
+                 model: "haiku",
+                 difficulty: 1
+               })
+    end
+  end
+
   describe "generate/1" do
     test "proposes rows for cells meeting min_n, with 90th percentile winsorising" do
       # Create 6 tasks for sonnet-5 at D2. One parked task with 100 hours.
