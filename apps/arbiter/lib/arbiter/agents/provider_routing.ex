@@ -129,13 +129,14 @@ defmodule Arbiter.Agents.ProviderRouting do
   alias Arbiter.Agents.ProviderPool
   alias Arbiter.Agents.ReviewerRouting
   alias Arbiter.Agents.Routing
+  alias Arbiter.Agents.Routing.Score
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Quota.Headroom
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Workers.Run
 
-  @selections ~w(failover most_quota)
+  @selections ~w(failover most_quota scored)
   @max_fallback_length 255
 
   @type role :: atom()
@@ -151,12 +152,27 @@ defmodule Arbiter.Agents.ProviderRouting do
   @spec valid_selections() :: [String.t()]
   def valid_selections, do: @selections
 
-  @doc "Whether `workspace` routes its implementer by most quota left."
+  @doc """
+  Whether `workspace` routes its implementer by quota: `most_quota`, or
+  `scored` (which routes the same way — see `scored?/1`).
+  """
   @spec enabled?(Workspace.t() | nil) :: boolean()
   def enabled?(%Workspace{config: config}),
-    do: get_in(config || %{}, ["routing", "provider_selection"]) == "most_quota"
+    do: get_in(config || %{}, ["routing", "provider_selection"]) in ["most_quota", "scored"]
 
   def enabled?(_), do: false
+
+  @doc """
+  Whether `workspace` runs `routing.provider_selection: scored` (bd-adtnto, R5).
+  `routing.scoring.mode` then picks `shadow` (the default: `most_quota`
+  dispatches and the scorer's choice is only recorded) or `enforce` (the
+  scorer's order dispatches).
+  """
+  @spec scored?(Workspace.t() | nil) :: boolean()
+  def scored?(%Workspace{config: config}),
+    do: get_in(config || %{}, ["routing", "provider_selection"]) == "scored"
+
+  def scored?(_), do: false
 
   @doc """
   Evaluate every implementer candidate for `task`: the ranked available ones
@@ -239,17 +255,18 @@ defmodule Arbiter.Agents.ProviderRouting do
       |> Enum.map(fn {candidate, index} -> check(entry(candidate, index, ctx), ctx) end)
       |> Enum.split_with(&match?({:ok, _}, &1))
 
-    available = available |> Enum.map(&elem(&1, 1)) |> rank()
+    {available, scoring_fields} = available |> Enum.map(&elem(&1, 1)) |> order(ctx)
     dropped = Enum.map(dropped, &elem(&1, 1))
 
     record =
       %{
-        "mode" => "most_quota",
+        "mode" => if(ctx.scoring, do: "scored", else: "most_quota"),
         "candidates" => Enum.map(available, &candidate_record/1),
         "dropped" => Enum.map(dropped, &drop_record/1),
         "evaluated_at" => DateTime.to_iso8601(ctx.now),
         "model_tier" => ctx.tier
       }
+      |> Map.merge(scoring_fields)
       |> put_constraint(task)
 
     {record, available, dropped}
@@ -272,13 +289,16 @@ defmodule Arbiter.Agents.ProviderRouting do
     {record, entries, dropped} = run_evaluation(ws, task, Keyword.put(opts, :role, role))
     base = Map.put(record, "role", to_string(role))
 
-    case Keyword.get(opts, :override) do
-      override when is_atom(override) and not is_nil(override) ->
-        override(base, entries, ws, override)
+    result =
+      case Keyword.get(opts, :override) do
+        override when is_atom(override) and not is_nil(override) ->
+          override(base, entries, ws, override)
 
-      _ ->
-        choose(base, entries, dropped, task, opts)
-    end
+        _ ->
+          choose(base, entries, dropped, task, opts)
+      end
+
+    finish_shadow(result)
   end
 
   @doc """
@@ -619,9 +639,24 @@ defmodule Arbiter.Agents.ProviderRouting do
         Keyword.get_lazy(opts, :gemini_code, fn -> Arbiter.Quota.provider_code("gemini") end),
       confinement: Keyword.get(opts, :write_confinement, &Agents.write_confinement/2),
       capability: capability_gate(ws, task, opts),
+      scoring: scoring_config(ws, task, opts),
       floor: Floors.gate(ws, repo_opt(opts) || task_repo(task)),
       gate: Arbiter.Quota.gate_for_workspace(ws)
     }
+  end
+
+  # bd-adtnto: `nil` (anything but `provider_selection: scored`) is the whole
+  # off path — no window list, no score, no extra record key.
+  defp scoring_config(ws, task, opts) do
+    if scored?(ws) do
+      config = Score.config(ws)
+
+      %{
+        mode: config.mode,
+        weight: Score.weight(config, task),
+        estimate_fun: Keyword.get(opts, :estimate_fun)
+      }
+    end
   end
 
   # bd-57uzkl: `nil` (the default) is the whole off path — no check runs.
@@ -831,13 +866,57 @@ defmodule Arbiter.Agents.ProviderRouting do
         {:drop, "quota_held", Map.get(reason, :phrase)}
 
       _ ->
-        headroom = Headroom.binding(quota, {account, ctx.ws}, model: model, now: ctx.now)
-        {:ok, Map.put(entry, :headroom, headroom)}
+        headroom_opts = [model: model, now: ctx.now]
+
+        if ctx.scoring do
+          windows = Headroom.windows(quota, {account, ctx.ws}, headroom_opts)
+          headroom = Enum.min_by(windows, & &1.headroom, fn -> nil end)
+          {:ok, entry |> Map.put(:headroom, headroom) |> Map.put(:windows, windows)}
+        else
+          headroom = Headroom.binding(quota, {account, ctx.ws}, headroom_opts)
+          {:ok, Map.put(entry, :headroom, headroom)}
+        end
     end
   end
 
   defp latest_quota(%ProviderAccount{id: id, provider: provider}),
     do: Arbiter.Quota.latest_for_provider(id, provider)
+
+  # The survivors, best first, plus the scoring fields for the record.
+  #
+  # Off (`most_quota`): by headroom. `scored` in `enforce`: by the scorer's J.
+  # `scored` in `shadow`: still by headroom — dispatch is unchanged — with the
+  # scorer's ranking recorded beside it (design §9.2 item 3).
+  defp order(entries, %{scoring: nil}), do: {rank(entries), %{}}
+
+  defp order(entries, %{scoring: scoring}) do
+    scored = entries |> Enum.map(&estimate(&1, scoring)) |> Score.rank(weight: scoring.weight)
+    base = %{"scoring_mode" => to_string(scoring.mode), "time_weight" => scoring.weight}
+
+    case scoring.mode do
+      :enforce ->
+        {scored, base}
+
+      :shadow ->
+        scores = Map.new(scored, &{&1.index, &1.score})
+        headroom_order = entries |> rank() |> Enum.map(&annotate(&1, scores))
+
+        {headroom_order,
+         Map.put(base, "shadow", %{"ranking" => Enum.map(scored, &ranking_row/1)})}
+    end
+  end
+
+  defp annotate(entry, scores), do: Map.put(entry, :score, Map.fetch!(scores, entry.index))
+
+  # R6's competence matrix plugs in here: `(entry -> %{draw:, time_h:} | nil)`.
+  defp estimate(entry, %{estimate_fun: nil}), do: entry
+
+  defp estimate(entry, %{estimate_fun: fun}) do
+    case fun.(entry) do
+      %{} = estimate -> Map.merge(entry, Map.take(estimate, [:draw, :time_h]))
+      _ -> entry
+    end
+  end
 
   defp rank(entries) do
     Enum.sort_by(entries, fn entry ->
@@ -887,6 +966,91 @@ defmodule Arbiter.Agents.ProviderRouting do
       "used" => headroom && round4(headroom.used),
       "mode" => headroom && to_string(headroom.mode)
     }
+    |> Map.merge(score_fields(Map.get(entry, :score)))
+  end
+
+  defp score_fields(nil), do: %{}
+
+  defp score_fields(%{} = score) do
+    %{
+      "price" => finite4(score.price),
+      "draw" => round4(score.draw),
+      "time_h" => round4(score.time_h),
+      "score" => finite4(score.score),
+      "over_line" => score.over_line?
+    }
+  end
+
+  defp ranking_row(entry) do
+    %{
+      "account_id" => entry.account.id,
+      "account_slug" => entry.account.slug,
+      "family" => entry.family && to_string(entry.family),
+      "model" => entry.model,
+      "price" => finite4(entry.score.price),
+      "time_term" => round4(entry.score.time_term),
+      "score" => finite4(entry.score.score)
+    }
+  end
+
+  # ---- shadow ------------------------------------------------------------------
+
+  # Once the real pick is known, say what the scorer would have picked in its
+  # place and whether they agree. Only a fresh choice (`selected`, `fallback`)
+  # is comparable: a pin, an override or no candidate never consulted the rank.
+  defp finish_shadow({:ok, %{decision: decision} = selection}),
+    do: {:ok, %{selection | decision: shadow_outcome(decision)}}
+
+  defp finish_shadow({:legacy, decision}), do: {:legacy, shadow_outcome(decision)}
+
+  defp shadow_outcome(%{"shadow" => %{"ranking" => ranking} = shadow} = decision) do
+    comparable = decision["outcome"] in ["selected", "fallback"]
+    pick = if comparable, do: shadow_pick(ranking, decision["excluded_family"])
+    actual = if comparable, do: Enum.find(ranking, &same_pick?(&1, decision))
+
+    fields =
+      cond do
+        is_nil(pick) or is_nil(actual) ->
+          %{"comparable" => false, "pick" => nil, "agrees" => nil}
+
+        same_pick?(pick, decision) ->
+          %{"comparable" => true, "pick" => pick, "agrees" => true}
+
+        true ->
+          %{
+            "comparable" => true,
+            "pick" => pick,
+            "agrees" => false,
+            "reason" => disagreement_reason(pick, actual)
+          }
+      end
+
+    Map.put(decision, "shadow", Map.merge(shadow, fields))
+  end
+
+  defp shadow_outcome(decision), do: decision
+
+  # The fallback path's own rule: leave the reviewer's family out unless that
+  # would leave nothing.
+  defp shadow_pick(ranking, excluded) do
+    others = Enum.reject(ranking, &(excluded && &1["family"] == excluded))
+    List.first(if others == [], do: ranking, else: others)
+  end
+
+  defp same_pick?(row, decision),
+    do: row["account_id"] == decision["account_id"] and row["model"] == decision["model"]
+
+  defp disagreement_reason(pick, actual) do
+    cond do
+      pick["time_term"] < actual["time_term"] and pick["price"] >= actual["price"] ->
+        "time term: scored pick merges sooner (#{pick["time_term"]} vs #{actual["time_term"]})"
+
+      pick["price"] < actual["price"] ->
+        "price: scored pick is cheaper (#{pick["price"]} vs #{actual["price"]})"
+
+      true ->
+        "tiebreak"
+    end
   end
 
   defp drop_record(entry) do
@@ -902,6 +1066,9 @@ defmodule Arbiter.Agents.ProviderRouting do
 
   defp headroom_value(%{headroom: h}), do: round4(h)
   defp headroom_value(_), do: nil
+
+  defp finite4(n) when is_number(n), do: round4(n)
+  defp finite4(_), do: nil
 
   defp round4(n) when is_number(n), do: Float.round(n * 1.0, 4)
   defp round4(_), do: nil

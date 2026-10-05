@@ -169,13 +169,23 @@ defmodule ArbiterCli.ConfigSchema do
                           today's spend crosses this ceiling
       adapters            (round_robin only) list of partial agent-config maps,
                           cycled per dispatch
-      provider_selection  "failover" | "most_quota" (default: failover — today's
+      provider_selection  "failover" | "most_quota" | "scored" (default: failover — today's
                           first-healthy agent.type). most_quota sends the
                           implementer to the workspace's implementer-allowed
                           provider account with the most quota headroom against
                           its pace, pins it on the task for every later
                           implementer role, and records the decision on each
                           run. Keep it OFF until the agy write jail lands.
+                          scored routes like most_quota but also prices every
+                          candidate (headroom ÷ expected draw, plus a priority-
+                          weighted time term) — see scoring.mode.
+      scoring.mode        "shadow" (default) | "enforce" — under scored, shadow
+                          dispatches by most_quota and only records the scorer's
+                          choice (routing_decision.shadow); enforce dispatches
+                          by the scorer's order.
+      scoring.time_weight map "P0".."P4" -> non-negative number: the weight of the
+                          expected-time-to-merge term for a ticket's own priority
+                          (default 0 for every priority).
       capability_gates    bool (default: false) — drop a candidate that lacks a required
                           capability (reason capability_missing) before quota is
                           weighed, in both routers and on the unrouted dispatch

@@ -156,4 +156,33 @@ defmodule Arbiter.Quota.HeadroomTest do
       assert Headroom.binding(claude(nil, nil), {account(), ws()}) == nil
     end
   end
+
+  describe "windows/3 (bd-adtnto, R5)" do
+    test "returns every trusted window, in snapshot order, with the same numbers binding/3 picks from" do
+      windows = Headroom.windows(claude(0.40, 0.50), {account(), ws()})
+
+      assert [%{window: "5h"} = five, %{window: "7d"} = seven] = windows
+      assert_in_delta five.headroom, 0.45, 1.0e-9
+      assert_in_delta seven.headroom, 0.40, 1.0e-9
+
+      assert Headroom.binding(claude(0.40, 0.50), {account(), ws()}) ==
+               Enum.min_by(windows, & &1.headroom)
+    end
+
+    test "leaves out a window with no utilization reading" do
+      assert [%{window: "7d"}] = Headroom.windows(claude(nil, 0.50), {account(), ws()})
+    end
+
+    test "is empty when the snapshot is unknown or no window is readable" do
+      assert Headroom.windows(nil, {account(), ws()}) == []
+      assert Headroom.windows(claude(nil, nil), {account(), ws()}) == []
+    end
+
+    test "an agy account reads the pool of the model it would run" do
+      windows = Headroom.windows(agy(70.0, 10.0), {account(), ws()}, model: "gemini-3.1-pro-high")
+
+      assert Enum.all?(windows, &(&1.used <= 0.70 + 1.0e-9))
+      assert Enum.any?(windows, &(abs(&1.used - 0.70) < 1.0e-9))
+    end
+  end
 end

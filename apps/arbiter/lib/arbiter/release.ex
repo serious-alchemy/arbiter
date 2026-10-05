@@ -8,6 +8,7 @@ defmodule Arbiter.Release do
 
   require Logger
 
+  alias Arbiter.Agents.Routing.ShadowReport
   alias Arbiter.Loop.Scarcity.Draw
 
   @app :arbiter
@@ -143,6 +144,31 @@ defmodule Arbiter.Release do
     results = Draw.calibrate(Keyword.take(opts, [:since, :until]))
     IO.puts(Draw.format(results))
     results
+  end
+
+  @doc """
+  Print the routing shadow report (bd-adtnto, R5): under `provider_selection:
+  scored` with `scoring.mode: shadow`, how often the scorer's recorded pick
+  matches the pick that dispatched, and every disagreement with its reason
+  (`ShadowReport`). Read-only; starts only the repo.
+
+  Options: `:since` / `:until` (`DateTime`s; default the last 30 days),
+  `:workspace_id` and `:start` (default `true`).
+
+      bin/arbiter eval 'Arbiter.Release.shadow_report()'
+  """
+  @spec shadow_report(keyword()) :: ShadowReport.report()
+  def shadow_report(opts \\ []) do
+    if Keyword.get(opts, :start, true), do: start_release_repo!()
+
+    report =
+      opts
+      |> Keyword.take([:since, :until, :workspace_id])
+      |> ShadowReport.collect()
+      |> ShadowReport.build()
+
+    IO.puts(ShadowReport.format(report))
+    report
   end
 
   @doc """
