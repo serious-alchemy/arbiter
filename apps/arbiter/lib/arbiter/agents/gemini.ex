@@ -176,6 +176,8 @@ defmodule Arbiter.Agents.Gemini do
   defp jail_blocker_message(reason) when is_binary(reason), do: reason
   defp jail_blocker_message(reason), do: inspect(reason)
 
+  @no_keyring_message "agy needs a keyring (D-Bus) or its own login on this host"
+
   @impl true
   def done_sentinel, do: @done_regex
 
@@ -224,7 +226,7 @@ defmodule Arbiter.Agents.Gemini do
           {:error,
            %StopReason{
              category: :auth_expired,
-             summary: "agy needs a keyring (D-Bus) or its own login on this host",
+             summary: @no_keyring_message,
              remediation:
                "agy authenticates via the freedesktop Secret Service over D-Bus. Ensure a " <>
                  "keyring daemon (e.g. gnome-keyring) and D-Bus session bus are running, or " <>
@@ -616,14 +618,35 @@ defmodule Arbiter.Agents.Gemini do
     with {:ok, _sandbox} <- Sandbox.module(policy) do
       case jail_blocker(policy) do
         :ok ->
-          with {:ok, network} <- egress_network(opts, policy) do
+          # bd-8btihu: a jailed agy only authenticates through the jail's
+          # `xdg-dbus-proxy` (it masks the raw session bus), so a bus alone
+          # is not enough.
+          with :ok <- require_keyring(true, opts),
+               {:ok, network} <- egress_network(opts, policy) do
             wrap_in_jail(command, opts, policy, mode, network)
           end
 
         {:error, reason} ->
-          jail_unavailable(mode, command, reason)
+          # `:strict` refuses below; otherwise agy runs unjailed and finds the
+          # raw session bus itself.
+          with :ok <- if(mode == :strict, do: :ok, else: require_keyring(false, opts)),
+               do: jail_unavailable(mode, command, reason)
       end
     end
+  end
+
+  # bd-8btihu: agy 1.2.16 authenticates only through a freedesktop Secret
+  # Service (the file-seeded fallback was removed, bd-6dpjw7). Refuse at spawn
+  # rather than let the worker end in an interactive OAuth prompt and timeout.
+  # Dispatch's own live preflight is retired and the watchdog may not list
+  # gemini, so this is the check every dispatch actually passes through.
+  defp require_keyring(jailed?, opts) do
+    ok? =
+      if jailed?,
+        do: ConfigDir.keyring_available?(opts),
+        else: ConfigDir.keyring_reachable?(opts)
+
+    if ok?, do: :ok, else: {:error, {:no_keyring, @no_keyring_message}}
   end
 
   defp wrap_in_jail(command, opts, policy, mode, network) do

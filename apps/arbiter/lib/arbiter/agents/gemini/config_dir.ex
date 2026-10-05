@@ -144,8 +144,7 @@ defmodule Arbiter.Agents.Gemini.ConfigDir do
   Returns `:disabled` when isolation is switched off, `:error` when the
   directory could not be prepared. Idempotent — safe on every spawn.
 
-  Options: `:worktree` / `:worktree_path`, `:security` (a `SecurityPolicy`),
-  and `:keyring` (a boolean override for `keyring_available?/0`, for tests).
+  Options: `:worktree` / `:worktree_path` and `:security` (a `SecurityPolicy`).
   """
   @spec ensure(keyword()) :: {:ok, String.t()} | :disabled | :error
   def ensure(opts \\ []) do
@@ -180,7 +179,7 @@ defmodule Arbiter.Agents.Gemini.ConfigDir do
   optional — its MCP token has nowhere else to go that agy reads — so the
   worker master switch does not apply.
 
-  Options, on top of `ensure/1`'s `:worktree` / `:security` / `:keyring`:
+  Options, on top of `ensure/1`'s `:worktree` / `:security`:
 
     * `:memory` — the `.gemini/GEMINI.md` content; defaults to
       `worker_memory/0`, which is headless-worker doctrine and wrong for

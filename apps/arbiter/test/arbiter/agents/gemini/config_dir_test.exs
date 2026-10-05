@@ -314,17 +314,10 @@ defmodule Arbiter.Agents.Gemini.ConfigDirTest do
       File.write!(Path.join(source, ".gemini/jetski-standalone-oauth-token"), "token")
       File.write!(Path.join(source, ".gemini/google_accounts.json"), "{}")
 
-      # With keyring: true
-      assert {:ok, home_true} = ConfigDir.ensure(worktree: wt, keyring: true)
-      refute File.exists?(Path.join(home_true, ".gemini/oauth_creds.json"))
-      refute File.exists?(Path.join(home_true, ".gemini/jetski-standalone-oauth-token"))
-      refute File.exists?(Path.join(home_true, ".gemini/google_accounts.json"))
-
-      # With keyring: false - dead file-seeded fallback removed, nothing is copied
-      assert {:ok, home_false} = ConfigDir.ensure(worktree: wt, keyring: false)
-      refute File.exists?(Path.join(home_false, ".gemini/oauth_creds.json"))
-      refute File.exists?(Path.join(home_false, ".gemini/jetski-standalone-oauth-token"))
-      refute File.exists?(Path.join(home_false, ".gemini/google_accounts.json"))
+      assert {:ok, home} = ConfigDir.ensure(worktree: wt)
+      refute File.exists?(Path.join(home, ".gemini/oauth_creds.json"))
+      refute File.exists?(Path.join(home, ".gemini/jetski-standalone-oauth-token"))
+      refute File.exists?(Path.join(home, ".gemini/google_accounts.json"))
     end
   end
 

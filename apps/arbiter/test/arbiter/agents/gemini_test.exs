@@ -12,6 +12,20 @@ defmodule Arbiter.Agents.GeminiTest do
   defp default_argv(prompt, opts),
     do: Gemini.default_argv(prompt, Keyword.put_new(opts, :owner, self()))
 
+  # bd-8btihu: spawning agy requires a keyring; default it on so tests that
+  # build argv don't depend on the host's session bus. Tests override it.
+  setup do
+    prev = Application.fetch_env(:arbiter, :worker_gemini_keyring_available)
+    Application.put_env(:arbiter, :worker_gemini_keyring_available, true)
+
+    on_exit(fn ->
+      case prev do
+        {:ok, v} -> Application.put_env(:arbiter, :worker_gemini_keyring_available, v)
+        :error -> Application.delete_env(:arbiter, :worker_gemini_keyring_available)
+      end
+    end)
+  end
+
   describe "behaviour" do
     test "module declares the Agent behaviour" do
       behaviours =
@@ -312,6 +326,26 @@ defmodule Arbiter.Agents.GeminiTest do
                Arbiter.Worker.Egress.Event
                |> Ash.Query.filter(run_id == ^run_id)
                |> Ash.read!()
+    end
+
+    # bd-8btihu: no keyring → refuse at spawn, not an OAuth timeout later.
+    test "jailed agy with no usable keyring is refused at spawn", %{worktree: worktree} do
+      Application.put_env(:arbiter, :worker_gemini_keyring_available, false)
+
+      assert {:error, {:no_keyring, "agy needs a keyring (D-Bus) or its own login on this host"}} =
+               default_argv("p", security: policy(:bypass), worktree_path: worktree)
+    end
+
+    test "unjailed agy with no session bus at all is refused at spawn", %{worktree: worktree} do
+      Application.put_env(:arbiter, :worker_gemini_keyring_available, false)
+      Application.put_env(:arbiter, :worker_jail_available, false)
+
+      assert {:error, {:no_keyring, _}} =
+               default_argv("p",
+                 security: policy(:bypass),
+                 worktree_path: worktree,
+                 keyring: false
+               )
     end
 
     test "a jailed spawn with no owner is refused rather than bound to the caller", %{
