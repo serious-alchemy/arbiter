@@ -30,7 +30,15 @@ browser_exclude =
 
 # bd-d2o3xb: `:podman` tests start REAL rootless containers (and build a
 # throwaway image); opt in with `mix test --include podman <file>`.
-ExUnit.start(exclude: [:podman] ++ node_exclude ++ browser_exclude)
+# bd-90vo7y: ARB_TEST_MAX_CASES / worker-default cap on async cases.
+max_cases_opts =
+  "../../../scripts/test_max_cases.exs"
+  |> Path.expand(__DIR__)
+  |> Code.eval_file()
+  |> elem(0)
+  |> then(& &1.(System.get_env()))
+
+ExUnit.start([exclude: [:podman] ++ node_exclude ++ browser_exclude] ++ max_cases_opts)
 Ecto.Adapters.SQL.Sandbox.mode(Arbiter.Repo, :manual)
 
 # bd-5scl0c: report loudly, with attribution, if anything is killed while
