@@ -88,6 +88,7 @@ defmodule Arbiter.Worker.ContainerSpawn do
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Mergers
   alias Arbiter.Worker.Container
+  alias Arbiter.Worker.DepsCache
   alias Arbiter.Worker.Egress.JailRun
   alias Arbiter.Worker.Image
   alias Arbiter.Worker.Jail
@@ -123,7 +124,8 @@ defmodule Arbiter.Worker.ContainerSpawn do
           required(:prompt_paths) => [String.t()],
           required(:network) => keyword(),
           required(:env) => [{String.t(), String.t()}],
-          optional(:pod) => String.t() | nil
+          optional(:pod) => String.t() | nil,
+          optional(:deps_cache) => map() | nil
         }
 
   @doc "The path of the `claude` binary inside the container."
@@ -161,8 +163,10 @@ defmodule Arbiter.Worker.ContainerSpawn do
          {:ok, tmp_dir} <- fetch_tmp_dir(opts),
          {:ok, image} <- fetch_image(opts, worktree),
          {:ok, cli_mounts} <- cli_mounts(opts),
-         {:ok, network, spec} <- start_egress(opts, policy, worktree),
          {:ok, home, config_dir} <- run_dirs(tmp_dir, Keyword.get(opts, :workspace)),
+         # Before the egress run starts: a cold seed takes minutes.
+         deps_cache = seed_deps(opts, worktree, image, home),
+         {:ok, network, spec} <- start_egress(opts, policy, worktree),
          name = container_name(opts),
          {:ok, services} <- start_services(opts, name) do
       {:ok,
@@ -178,7 +182,8 @@ defmodule Arbiter.Worker.ContainerSpawn do
          prompt_paths: prompt_paths(Keyword.get(opts, :argv)),
          network: network,
          env: container_env(spec) ++ if(services, do: services.env, else: []),
-         pod: services && services.pod
+         pod: services && services.pod,
+         deps_cache: deps_cache
        }}
     end
   end
@@ -238,6 +243,46 @@ defmodule Arbiter.Worker.ContainerSpawn do
       {:ok, tag}
     else
       {:error, reason} -> {:error, {:image_unavailable, reason}}
+    end
+  end
+
+  # The clone's `deps/` and `_build/` come from the cache seeded inside this
+  # image (`DepsCache`, bd-1wm14e), not from the host's own `_build`, which is
+  # ABI-bound to the host's libc and OTP. Best-effort: a cache that cannot be
+  # seeded (offline, no lockfile, a non-Mix repo) leaves the worker to fetch and
+  # compile for itself, as it would without the cache. `nil` means no cache.
+  defp seed_deps(opts, worktree, image, home) do
+    seed =
+      case Keyword.get(opts, :deps_cache, Application.get_env(:arbiter, :worker_deps_cache, true)) do
+        enabled when enabled in [false, nil] ->
+          nil
+
+        true ->
+          fn worktree, image ->
+            DepsCache.seed_worktree(
+              worktree,
+              image,
+              [home: home] ++ Keyword.take(opts, [:workspace, :repo, :podman])
+            )
+          end
+
+        fun when is_function(fun, 2) ->
+          fun
+      end
+
+    with seed when is_function(seed) <- seed,
+         {:ok, summary} <- seed.(worktree, image) do
+      summary
+    else
+      nil ->
+        nil
+
+      {:error, :no_lockfile} ->
+        nil
+
+      {:error, reason} ->
+        Logger.warning("ContainerSpawn: no deps cache for #{worktree}: #{inspect(reason)}")
+        nil
     end
   end
 

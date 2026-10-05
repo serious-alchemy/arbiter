@@ -221,6 +221,10 @@ config :arbiter, :worktree_sweeper, enabled: false
 # bd-9r5jdt: the weekly image refresh is driven by `Refresher.run_now/2` in tests.
 config :arbiter, :worker_image_refresher, enabled: false
 
+# bd-1wm14e: `ContainerSpawn.prepare/1` would seed the image-keyed deps cache,
+# which runs a real container; tests drive `DepsCache` with a stand-in runner.
+config :arbiter, :worker_deps_cache, false
+
 # Same reasoning, one more sweeper: tests drive
 # `Arbiter.Sessions.TranscriptRetention.sweep/1` synchronously (§11, phase 9).
 config :arbiter, :sessions_transcript_retention, enabled: false
