@@ -47,8 +47,8 @@ implemented. The ticket plan is in [§11](#11-phased-plan-and-ticket-breakdown).
 5. **Priority acts in two places.** In the router, `w(priority)` prices time:
    heavy at P0, moderate at P1, zero at P2–P4. In the gate there are two opt-in
    policies. The **P0 pace exemption** lifts an exempt dispatch's paced line to
-   the same side's flat ceiling and never beyond; the account grants it and the
-   workspace may only narrow it. **Defer-until-reset** holds a feasible P2–P4
+   a dedicated per-window exempt cap, never above the same side's flat ceiling
+   (O2, resolved); the account grants it and the workspace may only narrow it. **Defer-until-reset** holds a feasible P2–P4
    dispatch until a pool resets, when the post-reset price plus the wait is
    cheaper. See [§4](#4-priority).
 6. **Multi-pool providers are priced per pool.** A candidate becomes an
@@ -513,50 +513,79 @@ account side, because the weight doesn't loosen any limit.
 ### 4.2 The P0 pace exemption, a gate policy
 
 **What it does.** For a dispatch whose task priority is exempt, each side's
-*paced* ceiling becomes the larger of the paced line and that side's *flat*
-ceiling:
+*paced* ceiling becomes the larger of the paced line and a dedicated per-window
+**exempt cap**, which is never above that side's *flat* ceiling:
 
 ```
-exempt ceiling = max(max(floor, elapsed), flat)
-  flat = the side's own throttle_threshold or weekly_threshold,
-         else the window's flat default (0.85 for 5h, 0.90 for 7d, or the app env)
+exempt ceiling = max(max(floor, elapsed), min(exempt_cap, flat))
+  exempt_cap = the side's dedicated pace-exempt cap for that window
+               (5h and 7d set separately); unset → flat
+  flat       = the side's own throttle_threshold or weekly_threshold,
+               else the window's flat default (0.85 for 5h, 0.90 for 7d,
+               or the app env)
 ```
 
 The sides still compose `min(account, workspace)`. Concretely:
 
-- Early and mid-window, the paced line is below the flat ceiling, so it lifts
-  to the flat ceiling. A P0 may pass the paced line.
-- Late in a window, the paced line is already above the flat ceiling and
-  doesn't move. The exemption only ever raises a ceiling, and never above the
-  flat ceiling. So a P0 is never held more strictly than a P2, and the
-  exemption alone never takes it past the flat ceiling.
+- Early and mid-window, the paced line is below the cap, so it lifts to the
+  cap. A P0 may pass the paced line, but never the cap.
+- Late in a window, the paced line is already above the cap and doesn't move.
+  The exemption only ever raises a ceiling, and never above the cap, which is
+  never above the flat ceiling. So a P0 is never held more strictly than a P2,
+  and the exemption alone never takes it past the cap. A cap can only *lower*
+  where the exemption stops; it never lowers the paced line.
+- With the cap unset, `exempt_cap` is `flat`, which is this section's original
+  proposal.
 - A flat side doesn't change, because its ceiling is already the hard one.
 - Only the two utilization rules move: rules 3 and 4 of `gating_window/3`. The
   provider refusing requests (status rules 1 and 2), the `allowed_warning`
   hold (rule 5) and staleness don't move. The exemption never touches
   eligibility, as guardrail-profiles §5.7 already says.
 
+**Why a dedicated cap (O2, resolved 2026-10-05).** Today's flats are 0.99 on
+the `default` workspace and the Claude account (§1.3), so an exemption capped
+only by the flat ceiling would let a P0 run Claude's 7d window to 0.99 early in
+the week. The dedicated cap stops P0s from waiting for the pacing line without
+letting them use up the week. The operator's starting values are 0.95 for 5h
+and 0.90 for 7d.
+
 **It lives in `Pace`, so there is still one definition of the line.**
 
-- `Pace.side_ceiling/2` gains one side shape, `{:paced_exempt, floor, flat}`.
-  It resolves to `{max(max(floor, elapsed), flat), :exempt}`, or to
-  `{flat, :flat}` when `elapsed` is unknown, which is the existing paced
-  fallback.
-- `Gate.side/2` emits that shape when the dispatch is exempt.
-- `Gate.pace/6`, `gating_window/3` and `Headroom.binding/3` take a `:priority`
-  option. `Throttle.check/4` passes `task.priority`; it already receives the
-  task and ignores it.
+- `Pace.side_ceiling/2` gains one side shape,
+  `{:paced_exempt, floor, flat, cap}`, where `cap` is `min(exempt_cap, flat)`,
+  already resolved by the gate. It resolves to
+  `{max(max(floor, elapsed), cap), :exempt}`, or to `{max(floor, elapsed),
+  :paced}` when the line is already at or above the cap (the exemption lifted
+  nothing, so it doesn't claim to). When `elapsed` is unknown it falls back to
+  `{flat, :flat}`, which is the existing paced fallback.
+- `Gate.pace_thresholds/3` emits that shape for each *paced* side when the
+  dispatch is exempt (`Gate.pace_exempt?/2`). The cap is composed
+  `min(account, workspace)` across the sides, then clamped to each side's flat.
+- `Gate.pace/6`, `gating_window/3` and `Headroom.binding/3` /
+  `Headroom.windows/3` take a `:priority` option. `Throttle.check/4` passes
+  `task.priority`; it already receives the task and ignores it. The priority
+  is the ticket's **own**, never an epic floor's (§4.4).
 - The router then reads the lifted line through `Headroom` with no code of its
   own.
 - `Pace.t()`'s `mode` gains `:exempt`, so the quota bar and the hold phrase can
-  say "P0 exempt".
+  say "P0 exempt". A binding held at the lifted ceiling carries
+  `mode: :exempt` and `priority`, and its phrase reads
+  `7d 91% ≥ P0 exempt 90% (30% elapsed)`.
 
 **Config surface:**
 
 | Setting | Where | Who may loosen it | Who may tighten it |
 |---|---|---|---|
 | `pace_exempt_priority`: 0–4, the lowest-urgency priority that is exempt. Absent means none | Account `quota_config` | The operator | The operator or the coordinator |
+| `pace_exempt_threshold` and `weekly_pace_exempt_threshold`: a fraction in (0, 1], the dedicated exempt cap for the 5h and 7d windows. Absent means the side's flat ceiling | Account `quota_config` | The operator | The operator or the coordinator |
 | `quota.pace_exempt_priority`: 0–4, or `"none"` | Workspace config | Nobody: it can only narrow the account's value | The operator or the coordinator |
+| `quota.pace_exempt_threshold` and `quota.weekly_pace_exempt_threshold`: a fraction in (0, 1] | Workspace config | Nobody: it can only lower the account's cap | The operator or the coordinator |
+
+The cap keys follow the existing `throttle_threshold` / `weekly_threshold`
+naming: the unprefixed key is the 5h window and the `weekly_` key is the 7d one.
+Each cap composes `min(account, workspace)`, with an absent side meaning "the
+other side's", so a workspace that sets one only ever lowers where the account's
+exemption stops; it is then clamped to each paced side's flat ceiling.
 
 The effective value is `min(account, workspace)`, where an absent workspace
 value means "the account's" and `"none"` means no exemption. That's the P7
@@ -564,25 +593,36 @@ tighten-only rule, with one deliberate difference from `Gate.strictest/2`
 (`apps/arbiter/lib/arbiter/quota/gate.ex:682-685`). There, a workspace value
 applies when the account sets none. Here, the account must grant the
 exemption: an account without the setting exempts nothing, whatever the
-workspace says. The account value is validated in
-`Gate.validate_quota_config/1` (`gate.ex:361-370`), and the workspace value in
-the workspace config validator.
-
-On today's config the cap would be loose. The `default` workspace and the
-Claude account carry flat thresholds of 0.99 (§1.3), so an exempt P0 could run
-Claude's 7d window to 0.99. Whether the cap should be a separate number is O2.
+workspace says. The account values are validated in
+`Gate.validate_quota_config/1` (`pace_exempt_priority` an integer 0–4; the caps
+fractions in (0, 1]), and the workspace values in the workspace config
+validator. Both reject an out-of-range value outright. All three account keys
+are settable through `PATCH /api/accounts/:ref`, which goes through that
+validator.
 
 **Audit.** An exempt dispatch that is past the paced line but under the cap
 records `pace_exempt: {window, used, paced, cap}` on the run's
-`routing_decision`. It also broadcasts a `quota_pace_exempt` event, alongside
-the existing `quota_gate_bypass` event (`dispatch.ex:1395`).
+`routing_decision`, where `paced` is the ceiling the same dispatch would have
+held at without the exemption and `cap` the exempt ceiling in force. The key is
+absent when the exemption didn't decide the dispatch, so a decision with the
+layer off is unchanged. It also broadcasts a `quota_pace_exempt` event
+(`task_id`, `priority`, `provider`, `account`, `pace_exempt`), alongside the
+existing `quota_gate_bypass` event. The record comes from
+`Gate.pace_exemption/3`, which compares the paced and exempt verdicts for each
+trusted window.
 
 **The board.** Per-ticket holds (`ticket_quota_holds/3`,
 `apps/arbiter/lib/arbiter/board/snapshot.ex:686-708`) evaluate each card with its
 own task, so a P0 card reads as dispatchable. The board-wide `quota_hold/2`
 (`:631-641`) evaluates with no task, so it would keep Autopilot from promoting
-that card. It needs a priority-aware variant (R7): hold board-wide only when no
-Ready card's priority is exempt, or when the exempt cap is reached too.
+that card. R7 makes it priority-aware per card: with routing on, each card's
+own candidates already evaluate with its task, so its priority reaches the gate;
+with routing off, a card whose own priority is exempt gets its own verdict at
+the lifted ceiling, so it is held only when the exempt cap is reached too (the
+phrase then says "P0 exempt"). Cards that aren't exempt keep the board-wide
+hold. A held intent in the dispatch queue is re-checked with its ticket, so a P0
+held at the cap drains as soon as it is back under it. The quota bar's tooltip
+adds "P0 exempt up to 90%" when the account grants the exemption.
 
 ### 4.3 Defer until reset, for low priority
 
@@ -648,8 +688,10 @@ so the router spends it. Both cases fall out of `J` with no special handling.
 | Setting | Where | Default | Can it loosen a limit? | Who sets it |
 |---|---|---|---|---|
 | `routing.scoring.time_weight` | Workspace | P0 10, P1 2, P2–P4 0 (proposed) | No: it reorders feasible candidates | Operator or coordinator |
-| `pace_exempt_priority` | Account `quota_config` | Absent (no exemption) | **Yes**: it lifts the paced line up to the flat ceiling | Operator |
+| `pace_exempt_priority` | Account `quota_config` | Absent (no exemption) | **Yes**: it lifts the paced line up to the exempt cap | Operator |
+| `pace_exempt_threshold`, `weekly_pace_exempt_threshold` | Account `quota_config` | Absent (the flat ceiling) | No: it can only lower where the exemption stops, never above the flat ceiling | Operator |
 | `quota.pace_exempt_priority` | Workspace | Absent (inherits the account's) | No: it can only narrow the account's value | Operator or coordinator |
+| `quota.pace_exempt_threshold`, `quota.weekly_pace_exempt_threshold` | Workspace | Absent (inherits the account's) | No: it can only lower the account's cap | Operator or coordinator |
 | `routing.defer_to_reset` | Workspace | Off | No: it only holds | Operator or coordinator |
 
 **Own or effective priority (bd-1d1yaj).** An epic floor gives a ticket an
@@ -982,9 +1024,9 @@ the price of expiring quota is close to zero by construction.
 
 | # | Where | Today | Change | Switch |
 |---|---|---|---|---|
-| E1 | `Pace.side_ceiling/2` (`apps/arbiter/lib/arbiter/quota/pace.ex:123-128`); `t:side/0` (`:47`); `t:t/0`'s `mode` (`:58`) | Paced and flat sides | `{:paced_exempt, floor, flat}` resolves to `{max(max(floor, elapsed), flat), :exempt}` | Exemption (§4.2) |
+| E1 | `Pace.side_ceiling/2` (`apps/arbiter/lib/arbiter/quota/pace.ex:123-128`); `t:side/0` (`:47`); `t:t/0`'s `mode` (`:58`) | Paced and flat sides | `{:paced_exempt, floor, flat, cap}` resolves to `{max(max(floor, elapsed), cap), :exempt}`, with `cap = min(exempt_cap, flat)` | Exemption (§4.2) |
 | E2 | `Gate.side/2` (`apps/arbiter/lib/arbiter/quota/gate.ex:637-650`), `pace_thresholds/2` (`:626-635`), `pace/6` (`:582-595`), `gating_window/3` (`:1010-1022`) | No priority | A `:priority` option; an exempt side when the resolved `pace_exempt_priority` covers the task | Exemption |
-| E3 | `Gate.validate_quota_config/1` (`gate.ex:361-370`), and the workspace config validator | — | Validate `pace_exempt_priority` | Exemption |
+| E3 | `Gate.validate_quota_config/1` (`gate.ex:361-370`), and the workspace config validator | — | Validate `pace_exempt_priority` and the per-window exempt caps | Exemption |
 | E4 | `Throttle.check/4` (`apps/arbiter/lib/arbiter/quota/gate/throttle.ex:31`) | Ignores the task | Passes `task.priority` | Exemption |
 | E5 | `Headroom` (`apps/arbiter/lib/arbiter/quota/headroom.ex:60-102`) | `binding/3` | Add `windows/3`: every trusted window, through the same `Gate.pace/6` path. A `:priority` option | Price |
 | E6 | New `Arbiter.Quota.Price` | — | Pure: the price from `Headroom.windows/3` and a draw, and the what-if reset price for deferral | Price, defer |
@@ -1029,8 +1071,12 @@ workspace config
   routing.floors.repos.<repo>         absent; e.g. {"min_model_tier": "premium"}
   routing.defer_to_reset              {"enabled": false, "min_priority": 2, "max_wait_minutes": {"5h": 60}}
   quota.pace_exempt_priority          absent; 0–4 or "none", and may only narrow the account's
+  quota.pace_exempt_threshold         absent; (0, 1], the 5h exempt cap; may only lower the account's
+  quota.weekly_pace_exempt_threshold  absent; (0, 1], the 7d exempt cap; may only lower the account's
 account quota_config
   pace_exempt_priority                absent, meaning no exemption; 0–4
+  pace_exempt_threshold               absent, meaning the flat ceiling; (0, 1], the 5h exempt cap
+  weekly_pace_exempt_threshold        absent, meaning the flat ceiling; (0, 1], the 7d exempt cap
 installation settings (operator-owned)
   routing matrix                      competence rows and capability rows
 ```
@@ -1195,9 +1241,13 @@ doesn't have.
    change holds when turned on, single account included (I3). The alternative
    is to make both policies require two or more eligible accounts, which would
    make them useless on every workspace today.
-2. **O2. The exemption's cap.** Should the cap be the side's flat ceiling, as
-   proposed, or a dedicated `pace_exempt_ceiling`? Today's flats are 0.99,
-   which makes the cap nominal.
+2. **O2. The exemption's cap. Resolved (operator ruling, 2026-10-05).** The
+   cap is a dedicated per-window number, not the flat ceiling: the exempt
+   ceiling is `max(max(floor, elapsed), min(exempt_cap, flat))`, with the 5h and
+   7d caps set separately on the account and only lowered by the workspace, and
+   `exempt_cap` unset meaning `flat`. Today's flats are 0.99, which would have
+   made a flat-only cap nominal. Starting values for the Claude account are
+   0.95 (5h) and 0.90 (7d). See [§4.2](#42-the-p0-pace-exemption-a-gate-policy).
 3. **O3. `w(priority)`'s defaults and units.** They should be set after shadow
    mode shows the score distribution.
 4. **O4. An anticipatory price.** When a run will straddle a reset, its draw

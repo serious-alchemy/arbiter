@@ -137,7 +137,10 @@ defmodule Arbiter.Board.SnapshotPaceExemptTest do
     {account, quota} = quota_for!(ws, n, @exempt, 0.40)
 
     assert Gate.Throttle.check(%{priority: 0}, quota, ws, account: account) == :allow
-    assert {:hold, %{phrase: phrase}} = Gate.Throttle.check(%{priority: 2}, quota, ws, account: account)
+
+    assert {:hold, %{phrase: phrase}} =
+             Gate.Throttle.check(%{priority: 2}, quota, ws, account: account)
+
     assert phrase =~ "ahead of pace"
     assert {:hold, _} = Gate.Throttle.check(nil, quota, ws, account: account)
   end
