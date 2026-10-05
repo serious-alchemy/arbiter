@@ -223,6 +223,26 @@ defmodule Arbiter.Loop.Scarcity do
 
   def window_share(_weighted, _calibration), do: nil
 
+  @doc """
+  A run's share of one window of any pool, from the draw calibration
+  (`Arbiter.Loop.Scarcity.Draw`, bd-3is1nz R3): `weighted` tokens times the
+  calibrated share per weighted token for `model` on (`pool`, `window`).
+
+  `results` is `Draw.calibrate/1`'s output. `nil` — never a fabricated `0.0` —
+  when the weighted draw is unknown or the history doesn't support a
+  coefficient for that model. This is shadow output: nothing routes on it.
+  """
+  @spec draw_share(number() | nil, [map()], String.t(), String.t(), String.t()) ::
+          float() | nil
+  def draw_share(weighted, results, pool, window, model) when is_number(weighted) do
+    case Arbiter.Loop.Scarcity.Draw.lookup(results, pool, window, model) do
+      nil -> nil
+      share_per_token -> weighted * share_per_token
+    end
+  end
+
+  def draw_share(_weighted, _results, _pool, _window, _model), do: nil
+
   @doc "Render a share for an operator, or say plainly that it is unavailable."
   @spec format_share(float() | nil) :: String.t()
   def format_share(share) when is_number(share) do
