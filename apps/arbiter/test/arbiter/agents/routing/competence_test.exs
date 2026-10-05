@@ -341,6 +341,13 @@ defmodule Arbiter.Agents.Routing.CompetenceTest do
       assert %{rung: 1, n: 12} = Competence.lookup(rows, choice("sonnet", 2))
     end
 
+    test "normalize_rows drops the source tag, so a copied default row is an operator row" do
+      copied = Enum.reject(Competence.default_rows(), &(&1["match"] == %{}))
+
+      assert {:ok, rows} = Competence.normalize_rows(copied)
+      refute Enum.any?(rows, &Map.has_key?(&1, "source"))
+    end
+
     test "defaults still apply when no override row matches" do
       rows = [override_row("claude-haiku-4-5-20251001", 1, 7)] ++ Competence.default_rows()
 

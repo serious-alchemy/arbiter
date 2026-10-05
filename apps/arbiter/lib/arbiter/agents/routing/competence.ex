@@ -407,6 +407,8 @@ defmodule Arbiter.Agents.Routing.Competence do
         row
         |> Map.new(fn {k, v} -> {to_string(k), v} end)
         |> Map.put("match", normalized_match)
+        # An operator row copied from `default_rows/0` must not rank as a code default.
+        |> Map.delete("source")
 
       {:ok, normalized}
     end
