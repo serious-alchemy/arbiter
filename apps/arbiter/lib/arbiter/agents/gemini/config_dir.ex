@@ -289,6 +289,20 @@ defmodule Arbiter.Agents.Gemini.ConfigDir do
     end
   end
 
+  @doc """
+  Whether agy could authenticate on this host at all, for the preflight probe.
+  Looser than `keyring_available?/1`: a bus socket with no `xdg-dbus-proxy`
+  still works for an unjailed agy, so only a host with no bus is a failure.
+  Honours the same `:keyring` opt and app env overrides.
+  """
+  @spec keyring_reachable?(keyword()) :: boolean()
+  def keyring_reachable?(opts \\ []) do
+    keyring_available?(opts) or
+      (not Keyword.has_key?(opts, :keyring) and
+         Application.fetch_env(:arbiter, :worker_gemini_keyring_available) == :error and
+         Arbiter.Worker.Jail.session_bus_reachable?())
+  end
+
   @doc "The worker memory written into the isolated HOME's `.gemini/GEMINI.md`."
   @spec worker_memory() :: String.t()
   def worker_memory do

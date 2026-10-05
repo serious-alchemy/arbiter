@@ -425,6 +425,21 @@ defmodule Arbiter.Worker.Jail do
   @spec keyring_usable?() :: boolean()
   def keyring_usable?, do: dbus_proxy() != nil and session_bus_socket() != nil
 
+  @doc """
+  True when *some* session bus socket exists for this OS user: the
+  `DBUS_SESSION_BUS_ADDRESS` socket or the default `$XDG_RUNTIME_DIR/bus`.
+  Enough for an *unjailed* agy (no proxy needed); a jailed one needs
+  `keyring_usable?/0`.
+  """
+  @spec session_bus_reachable?() :: boolean()
+  def session_bus_reachable? do
+    session_bus_socket() != nil or
+      case System.get_env("XDG_RUNTIME_DIR") do
+        dir when is_binary(dir) and dir != "" -> File.exists?(Path.join(dir, "bus"))
+        _ -> false
+      end
+  end
+
   defp session_bus_socket do
     case System.get_env("DBUS_SESSION_BUS_ADDRESS") do
       "unix:path=" <> rest ->

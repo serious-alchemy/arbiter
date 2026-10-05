@@ -208,12 +208,17 @@ defmodule Arbiter.Agents.Gemini do
   copying refresh tokens risks rotation divergence (bd-6dpjw7). When no keyring
   is reachable for an agy worker, fail loudly at preflight instead of attempting
   a silent fallback that ends in an interactive OAuth prompt and timeout.
+
+  Only a host with no session bus at all fails: a bus without `xdg-dbus-proxy`
+  still authenticates an unjailed agy. This check runs from the
+  `CredentialWatchdog` probe (dispatch's live preflight was retired, bd-2jgs2h),
+  so it depends on gemini staying in the watchdog's `:adapters` list.
   """
   @impl true
   def auth_probe(opts \\ []) do
     case resolve_executable() do
       {:ok, {:agy, _exec}} ->
-        if ConfigDir.keyring_available?(opts) do
+        if ConfigDir.keyring_reachable?(opts) do
           :skipped
         else
           {:error,

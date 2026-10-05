@@ -1455,7 +1455,6 @@ defmodule Arbiter.Agents.GeminiTest do
       on_exit(fn ->
         System.put_env("PATH", old_path)
         Application.delete_env(:arbiter, :worker_gemini_keyring_available)
-        Application.delete_env(:arbiter, :xdg_dbus_proxy)
         File.rm_rf!(tmp)
       end)
 
@@ -1500,6 +1499,27 @@ defmodule Arbiter.Agents.GeminiTest do
 
       assert reason.category == :auth_expired
       assert reason.summary == "agy needs a keyring (D-Bus) or its own login on this host"
+    end
+
+    test "agy: a session bus with no xdg-dbus-proxy still passes (unjailed agy finds the bus)",
+         %{tmp: tmp} do
+      _agy = stub_exec(tmp, "agy")
+      File.write!(Path.join(tmp, "bus"), "")
+
+      old = for k <- ~w(XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS), do: {k, System.get_env(k)}
+      System.put_env("XDG_RUNTIME_DIR", tmp)
+      System.delete_env("DBUS_SESSION_BUS_ADDRESS")
+      Application.put_env(:arbiter, :xdg_dbus_proxy, nil)
+
+      on_exit(fn ->
+        Application.delete_env(:arbiter, :xdg_dbus_proxy)
+
+        for {k, v} <- old do
+          if v, do: System.put_env(k, v), else: System.delete_env(k)
+        end
+      end)
+
+      assert :skipped = Gemini.auth_probe([])
     end
 
     test "upstream gemini: returns :skipped regardless of keyring status", %{tmp: tmp} do

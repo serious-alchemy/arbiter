@@ -561,20 +561,6 @@ defmodule Arbiter.Agents.Preflight do
     }
   end
 
-  # bd-8btihu: agy needs a keyring (D-Bus session bus) on this host; no file-seeded fallback.
-  defp probe_unavailable({:no_keyring, summary}) do
-    %StopReason{
-      category: :auth_expired,
-      summary: summary,
-      remediation:
-        "agy authenticates via the freedesktop Secret Service over D-Bus. Ensure a " <>
-          "keyring daemon (e.g. gnome-keyring) and D-Bus session bus are running, or " <>
-          "sign in directly with `agy` on this host.",
-      exit_status: nil,
-      signal: nil
-    }
-  end
-
   defp probe_unavailable(reason) do
     %StopReason{
       category: :crashed,
