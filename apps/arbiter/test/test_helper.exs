@@ -54,7 +54,18 @@ systemd_user_reason =
 # exact name. Opt-in (needs a ready podman and that image):
 #
 #     mix test --include podman test/arbiter/worker/container_podman_test.exs
-ExUnit.start(exclude: [:live_systemd, :live_claude, :systemd_user, :podman] ++ tmux_exclude)
+# bd-90vo7y: ARB_TEST_MAX_CASES / worker-default cap on async cases.
+max_cases_opts =
+  "../../../scripts/test_max_cases.exs"
+  |> Path.expand(__DIR__)
+  |> Code.eval_file()
+  |> elem(0)
+  |> then(& &1.(System.get_env()))
+
+ExUnit.start(
+  [exclude: [:live_systemd, :live_claude, :systemd_user, :podman] ++ tmux_exclude] ++
+    max_cases_opts
+)
 
 # `mix test` applies its `--include`/`--exclude` before loading this file, so
 # the filters here are the run's real ones.
