@@ -45,6 +45,9 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     * If `"routing.provider_selection"` is present, it must be one of
       `Arbiter.Agents.ProviderRouting.valid_selections/0` (`"failover"`,
       `"most_quota"`).
+    * If `"routing.capability_gates"` is present, it must be a boolean
+      (bd-57uzkl); a per-repo `"routing.repos.<repo>.requires"` must be a list
+      of `Arbiter.Agents.CapabilityMatrix.capabilities/0`.
     * If `"review.require_ci_green"` (or a per-repo
       `"review.repos.<repo>.require_ci_green"`) is present, it must be a boolean
       or `"true"` / `"false"` (bd-cut6uv).
@@ -583,6 +586,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     changeset
     |> validate_routing_policy(routing)
     |> validate_provider_selection(Map.get(routing, "provider_selection"))
+    |> validate_capability_gates(routing)
   end
 
   defp validate_routing(changeset, _) do
@@ -601,6 +605,68 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
   end
 
   defp validate_cross_family(changeset, _review_agent), do: changeset
+
+  # bd-57uzkl: the capability hard gate is a plain on/off switch, and a repo's
+  # `requires` names only capabilities the matrix knows.
+  defp validate_capability_gates(changeset, routing) do
+    changeset
+    |> validate_capability_switch(Map.get(routing, "capability_gates"))
+    |> validate_repo_requires(Map.get(routing, "repos"))
+  end
+
+  defp validate_capability_switch(changeset, value) when is_nil(value) or is_boolean(value),
+    do: changeset
+
+  defp validate_capability_switch(changeset, value) do
+    Changeset.add_error(changeset,
+      field: :config,
+      message: "routing.capability_gates must be true or false; got: #{inspect(value)}"
+    )
+  end
+
+  defp validate_repo_requires(changeset, nil), do: changeset
+
+  defp validate_repo_requires(changeset, %{} = repos) do
+    known = Arbiter.Agents.CapabilityMatrix.capabilities()
+
+    Enum.reduce(repos, changeset, fn
+      {repo, %{} = entry}, acc ->
+        case Map.get(entry, "requires") do
+          nil ->
+            acc
+
+          requires when is_list(requires) ->
+            if Enum.all?(requires, &(&1 in known)),
+              do: acc,
+              else: requires_error(acc, repo, requires, known)
+
+          other ->
+            requires_error(acc, repo, other, known)
+        end
+
+      {repo, other}, acc ->
+        Changeset.add_error(acc,
+          field: :config,
+          message: "routing.repos.#{repo} must be a map; got: #{inspect(other)}"
+        )
+    end)
+  end
+
+  defp validate_repo_requires(changeset, other) do
+    Changeset.add_error(changeset,
+      field: :config,
+      message: "routing.repos must be a map; got: #{inspect(other)}"
+    )
+  end
+
+  defp requires_error(changeset, repo, got, known) do
+    Changeset.add_error(changeset,
+      field: :config,
+      message:
+        "routing.repos.#{repo}.requires must be a list of #{Enum.join(known, ", ")}; " <>
+          "got: #{inspect(got)}"
+    )
+  end
 
   defp validate_provider_selection(changeset, nil), do: changeset
 

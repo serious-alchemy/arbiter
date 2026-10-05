@@ -215,6 +215,7 @@ defmodule Arbiter.Worker.ReviewGate do
   require Logger
 
   alias Arbiter.Agents
+  alias Arbiter.Agents.CapabilityMatrix
   alias Arbiter.Agents.ProviderConstraint
   alias Arbiter.Agents.ProviderPool
   alias Arbiter.Agents.ProviderRouting
@@ -5812,9 +5813,11 @@ defmodule Arbiter.Worker.ReviewGate do
   # this arm can fail. Every unpinned pass (`reviewer_provider: nil`, the
   # default and the only state a single-provider workspace ever reaches)
   # resolves exactly as before.
-  defp adapter_for(%{reviewer_provider: provider}, _ws, :reviewer, _revision)
-       when is_atom(provider) and not is_nil(provider),
-       do: {:ok, {Agents.for_type(provider), :review_agent}}
+  defp adapter_for(%{reviewer_provider: provider} = state, ws, :reviewer, _revision)
+       when is_atom(provider) and not is_nil(provider) do
+    with :ok <- reviewer_capability(state, ws, provider),
+         do: {:ok, {Agents.for_type(provider), :review_agent}}
+  end
 
   # bd-a1ke2c: a cross-family pass runs the adapter `ReviewerRouting` chose.
   # Its candidates are already filtered for `:strict` write confinement, and
@@ -5847,7 +5850,11 @@ defmodule Arbiter.Worker.ReviewGate do
     else
       case Agents.strict_eligible_provider(preferred, policy, pool) do
         {:ok, eligible} ->
-          {:ok, {Agents.for_type(eligible), :review_agent}}
+          # bd-57uzkl (E17): this is where a pass lands when `ReviewerRouting`
+          # returned `{:none, _}` or is off, so the capability hard gate has
+          # to hold here too or it only binds when some candidate survives.
+          with :ok <- reviewer_capability(state, ws, eligible),
+               do: {:ok, {Agents.for_type(eligible), :review_agent}}
 
         {:error, :ineligible} ->
           {:error,
@@ -5885,6 +5892,38 @@ defmodule Arbiter.Worker.ReviewGate do
 
   defp reviewer_paused?(type, state),
     do: Arbiter.Providers.Pause.blocking(type, state.workspace_id) != nil
+
+  # bd-57uzkl (design §6.2, E17): the capability hard gate on the reviewer
+  # about to be spawned. Off (`routing.capability_gates` unset, or no
+  # workspace) `CapabilityMatrix.gate/3` is `nil` and nothing is read. A
+  # refusal is the same `{:error, {code, provider, phrase}}` shape as a paused
+  # or write-confinement refusal, so the pass is held rather than run on the
+  # provider the gate just refused.
+  defp reviewer_capability(state, ws, provider) do
+    case CapabilityMatrix.gate(ws, :reviewer, state.repo) do
+      nil ->
+        :ok
+
+      gate ->
+        code = CapabilityMatrix.provider_code(provider, Arbiter.Quota.provider_code("gemini"))
+
+        case CapabilityMatrix.check(gate.rows, gate.requires, code, nil) do
+          :ok ->
+            :ok
+
+          {:missing, _capability, detail} ->
+            {:error, {:capability_missing, provider, "held — capability missing (#{detail})"}}
+        end
+    end
+  rescue
+    e ->
+      Logger.warning(
+        "ReviewGate: reviewer capability check crashed for task=#{state.task_id}: " <>
+          Exception.message(e)
+      )
+
+      :ok
+  end
 
   defp reviewer_paused_error(type, state) do
     case ProviderRouting.ensure_unpaused(type, state.workspace_id) do

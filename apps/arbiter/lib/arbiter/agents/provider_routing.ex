@@ -52,6 +52,10 @@ defmodule Arbiter.Agents.ProviderRouting do
     * `write_confinement_none` — the scope is `:strict` and the adapter's
       `write_confinement/1` (bd-1abj7u) is `:none`. An adapter that does not
       implement the callback answers `:none`;
+    * `capability_missing` — `routing.capability_gates` is on and the candidate's
+      provider/model lacks a capability the role or the repo requires
+      (`Arbiter.Agents.CapabilityMatrix`, bd-57uzkl); checked ahead of quota, so
+      a candidate that cannot do the work never has its quota weighed;
     * `paused` — the account or its provider is paused (`Arbiter.Providers.Pause`,
       `arb provider pause`), with the operator's reason as the detail;
     * `quota_held` — the workspace's `Arbiter.Quota.Gate` would hold a
@@ -112,6 +116,7 @@ defmodule Arbiter.Agents.ProviderRouting do
   alias Arbiter.Accounts.ProviderSettings
   alias Arbiter.Agents
   alias Arbiter.Agents.AuthHold
+  alias Arbiter.Agents.CapabilityMatrix
   alias Arbiter.Agents.CredentialWatchdog
   alias Arbiter.Agents.ModelFamily
   alias Arbiter.Agents.ProviderConstraint
@@ -162,7 +167,9 @@ defmodule Arbiter.Agents.ProviderRouting do
     * `:write_confinement` — `(adapter, policy -> atom)`;
     * `:role` — the role being routed (default `:main`; `select/4` sets it),
       which decides whether the task's own live workers count toward
-      `at_capacity`.
+      `at_capacity`;
+    * `:repo` — the repo this dispatch runs in (default: the task's), whose
+      `routing.repos.<repo>.requires` the capability gate reads.
   """
   @spec evaluate(Workspace.t(), Issue.t() | nil, keyword()) :: decision()
   def evaluate(%Workspace{} = ws, task, opts \\ []) do
@@ -605,9 +612,26 @@ defmodule Arbiter.Agents.ProviderRouting do
       gemini_code:
         Keyword.get_lazy(opts, :gemini_code, fn -> Arbiter.Quota.provider_code("gemini") end),
       confinement: Keyword.get(opts, :write_confinement, &Agents.write_confinement/2),
+      capability: capability_gate(ws, task, opts),
       gate: Arbiter.Quota.gate_for_workspace(ws)
     }
   end
+
+  # bd-57uzkl: `nil` (the default) is the whole off path — no check runs.
+  defp capability_gate(ws, task, opts) do
+    repo = repo_opt(opts) || task_repo(task)
+    CapabilityMatrix.gate(ws, Keyword.get(opts, :role, :main), repo)
+  end
+
+  defp repo_opt(opts) do
+    case Keyword.get(opts, :repo) do
+      repo when is_binary(repo) and repo != "" -> repo
+      _ -> nil
+    end
+  end
+
+  defp task_repo(%Issue{repo: repo}), do: repo
+  defp task_repo(_task), do: nil
 
   defp routed_choice(%Issue{} = task, ws, opts), do: Routing.decide(task, ws, opts)
   defp routed_choice(_task, ws, _opts), do: Routing.default_choice(ws)
@@ -658,6 +682,7 @@ defmodule Arbiter.Agents.ProviderRouting do
       &check_circuit/2,
       &check_capacity/2,
       &check_confinement/2,
+      &check_capability/2,
       &check_quota/2
     ]
 
@@ -765,6 +790,18 @@ defmodule Arbiter.Agents.ProviderRouting do
   end
 
   defp check_confinement(entry, _ctx), do: {:ok, entry}
+
+  # bd-57uzkl: a hard gate after availability and before quota (design §6.1).
+  defp check_capability(entry, %{capability: nil}), do: {:ok, entry}
+
+  defp check_capability(%{account: account, model: model} = entry, %{capability: gate} = ctx) do
+    provider = CapabilityMatrix.provider_code(account.provider, ctx.gemini_code)
+
+    case CapabilityMatrix.check(gate.rows, gate.requires, provider, model) do
+      :ok -> {:ok, entry}
+      {:missing, _capability, detail} -> {:drop, "capability_missing", detail}
+    end
+  end
 
   defp check_quota(%{account: account, model: model} = entry, ctx) do
     quota = ctx.quota_fun.(account)

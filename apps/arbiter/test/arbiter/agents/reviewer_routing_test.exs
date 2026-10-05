@@ -596,4 +596,97 @@ defmodule Arbiter.Agents.ReviewerRoutingTest do
       assert sel.agent_type == "gemini"
     end
   end
+
+  # ---- bd-57uzkl (R4): the capability hard gate ---------------------------------
+
+  describe "capability gates (bd-57uzkl)" do
+    @gated_routing %{
+      "routing" => %{
+        "capability_gates" => true,
+        "repos" => %{"arbiter" => %{"requires" => ["async_verification"]}}
+      }
+    }
+
+    defp repo_task!(ws, family) do
+      ws |> task!(family) |> Ash.update!(%{repo: "arbiter"})
+    end
+
+    test "a reviewer lacking a required capability is dropped with capability_missing, ahead of quota" do
+      ws = workspace!(["claude", "gemini", "codex"], @gated_routing)
+      agy = account!(:antigravity, "cap-agy")
+      allow_reviewer!(ws, agy, 0)
+
+      # agy is over its line as well; the capability is what drops it.
+      pairs = [{agy, agy_quota(99.0)}]
+
+      assert {:ok, sel} =
+               ReviewerRouting.select(ws, repo_task!(ws, "anthropic"), opts(pairs))
+
+      dropped = Enum.find(sel.record["dropped"], &(&1["reason"] == "capability_missing"))
+      assert dropped["provider"] == "gemini"
+      assert dropped["detail"] =~ "needs async_verification"
+      assert dropped["detail"] =~ "antigravity"
+      refute Enum.any?(sel.record["dropped"], &(&1["reason"] == "quota_held"))
+    end
+
+    test "capability_missing is a fallback trigger: the same family reviews, recorded" do
+      ws = workspace!(["claude", "gemini"], @gated_routing)
+
+      assert {:ok, sel} = ReviewerRouting.select(ws, repo_task!(ws, "anthropic"), opts())
+
+      assert sel.same_family_fallback
+      assert sel.provider == :claude
+      assert sel.fallback_reason =~ "capability_missing"
+    end
+
+    test "off, the same workspace picks the other family exactly as today" do
+      ws = workspace!(["claude", "gemini"], %{})
+
+      assert {:ok, sel} = ReviewerRouting.select(ws, repo_task!(ws, "anthropic"), opts())
+      assert sel.provider == :gemini
+      refute sel.same_family_fallback
+      refute Enum.any?(sel.record["dropped"], &(&1["reason"] == "capability_missing"))
+    end
+
+    test "a repo that requires nothing is not gated" do
+      ws = workspace!(["claude", "gemini"], @gated_routing)
+
+      assert {:ok, sel} = ReviewerRouting.select(ws, task!(ws, "anthropic"), opts())
+      assert sel.provider == :gemini
+      refute sel.same_family_fallback
+    end
+
+    test "a capable other family is still chosen" do
+      ws = workspace!(["claude", "codex"], @gated_routing)
+
+      {:ok, _} =
+        Arbiter.Settings.set_capability_matrix([
+          %{"match" => %{"provider" => "codex"}, "async_verification" => "reliable"}
+        ])
+
+      assert {:ok, sel} = ReviewerRouting.select(ws, repo_task!(ws, "anthropic"), opts())
+      assert sel.provider == :codex
+      refute sel.same_family_fallback
+    end
+
+    test "the pre-routing reviewer meets the same gate when nothing else is available" do
+      ws = workspace!(["gemini"], @gated_routing)
+      ProviderPool.mark_exhausted(:gemini)
+
+      assert {:none, record} = ReviewerRouting.select(ws, repo_task!(ws, "anthropic"), opts())
+      assert record["reason"] =~ "capability_missing"
+    end
+
+    test "I2: a single capable reviewer is what the gate-off router returns" do
+      for extra <- [@gated_routing, %{}] do
+        ws = workspace!(["claude"], extra)
+
+        assert {:ok, sel} = ReviewerRouting.select(ws, repo_task!(ws, "google"), opts())
+
+        assert sel.provider == :claude
+        assert sel.outcome == "selected"
+        refute sel.same_family_fallback
+      end
+    end
+  end
 end

@@ -972,6 +972,14 @@ defmodule Arbiter.MCP.Tools.Worker do
       "#{phrase} — the ticket never runs on an excluded provider; wait for an eligible " <>
         "account to free up, or change the ticket's constraint (`ticket_update`)"
 
+  # bd-57uzkl: the provider this dispatch would run on lacks a capability the
+  # role or the repo requires. The phrase already reads `held — capability
+  # missing (<detail>)`.
+  defp dispatch_error_message({:capability_missing, _provider, phrase}),
+    do:
+      "#{phrase} — dispatch refused; waiting will not fix it. Attach an account on a " <>
+        "capable provider, or change the repo's `routing.repos.<repo>.requires`"
+
   defp dispatch_error_message(other), do: "dispatch failed: #{inspect(other)}"
 
   # bd-8lq2g7: `{:worker_active, …}` is rendered from the /2 arity so the message
