@@ -1,6 +1,6 @@
 defmodule Arbiter.Agents.Grok.JailTest do
   # async: false — PATH and the jail / home Application env are global.
-  use ExUnit.Case, async: false
+  use Arbiter.DataCase, async: false
 
   alias Arbiter.Agents.Grok
   alias Arbiter.Agents.SecurityPolicy
@@ -26,7 +26,9 @@ defmodule Arbiter.Agents.Grok.JailTest do
       )
 
     wt = Path.join(base, "wt")
-    bin = Path.join(base, "bin")
+    # The stub lives in the (bound) worktree: the jail's `--tmpfs /tmp` hides
+    # anything else under a /tmp TMPDIR, as it does in CI.
+    bin = Path.join(wt, ".stub-bin")
     File.mkdir_p!(wt)
     File.mkdir_p!(bin)
 
