@@ -58,8 +58,10 @@ The broker marks the provider expired in `Arbiter.Agents.CredentialWatchdog`:
 the dispatch gate closes, coordinators are paged, quota surfaces report
 `credentials_expired`. Every worker request then fails fast (503
 `grok_reauth_required` / `grok_not_logged_in`, remedy in the message) without
-calling the issuer again. The hold lifts itself on the next request after the
-canonical file holds a different login (`grok login --device-code` on the
+calling the issuer again. While a hold is open the broker polls the canonical file
+(`hold_check_ms`, 30 s), so the hold lifts itself, with no worker request
+needed (dispatch is gated, so none would come), once the file
+holds a different login (`grok login --device-code` on the
 Arbiter host), or with `arb breaker reset --auth-hold grok`.
 
 The hold's identity is the module `Arbiter.Agents.adapters()[:grok]`, else

@@ -1,8 +1,3 @@
-defmodule Arbiter.Grok.FakeAdapter do
-  @moduledoc false
-  # Identity for the auth hold; the broker only needs a module atom.
-end
-
 defmodule Arbiter.Grok.CredentialBrokerTest do
   # bd-9p4lx9: single-refresher semantics against a fake OIDC issuer. Every
   # token below is a literal test string; the log assertions check none of
@@ -382,6 +377,81 @@ defmodule Arbiter.Grok.CredentialBrokerTest do
       assert {:ok, %{access_token: "access-1"}} = CredentialBroker.fetch_token([], broker)
       refute CredentialWatchdog.expired?(Arbiter.Grok.FakeAdapter, ctx.watchdog)
       assert length(grants(ctx)) == 1
+    end
+
+    test "a hold lifts on its own timer after a re-login, with no worker request", ctx do
+      write_auth!(ctx.path, %{"expires_at" => "2029-12-31T00:00:00.000000000Z"})
+      stub_issuer(ctx, responder: &invalid_grant/3)
+      broker = start_broker(ctx, hold_check_ms: 3_600_000)
+
+      assert {:error, :reauth_required} = CredentialBroker.fetch_token([], broker)
+      assert CredentialWatchdog.expired?(Arbiter.Grok.FakeAdapter, ctx.watchdog)
+      assert is_reference(:sys.get_state(broker).hold_timer)
+
+      # Nothing has changed on disk: the check keeps the hold and re-arms.
+      send(broker, :check_hold)
+      assert %{reauth_required?: true} = CredentialBroker.status(broker)
+      assert is_reference(:sys.get_state(broker).hold_timer)
+
+      write_auth!(ctx.path, %{
+        "key" => "access-1",
+        "refresh_token" => "operator-new-refresh",
+        "expires_at" => "2030-01-01T06:00:00.000000000Z"
+      })
+
+      send(broker, :check_hold)
+      assert %{reauth_required?: false} = CredentialBroker.status(broker)
+      refute CredentialWatchdog.expired?(Arbiter.Grok.FakeAdapter, ctx.watchdog)
+      assert :sys.get_state(broker).hold_timer == nil
+    end
+
+    @tag :posix_perms
+    test "a refused in-memory rotated token raises the hold after one grant, no loop", ctx do
+      write_auth!(ctx.path, %{"expires_at" => "2029-12-31T00:00:00.000000000Z"})
+
+      # The first grant rotates fine but cannot be written back; the second
+      # (the rotated token, later near expiry) is refused.
+      responder = fn conn, n, grant ->
+        if n == 1,
+          do:
+            Req.Test.json(conn, %{
+              "access_token" => "access-1",
+              "refresh_token" => "refresh-1",
+              "expires_in" => 21_600
+            }),
+          else: invalid_grant(conn, n, grant)
+      end
+
+      stub_issuer(ctx, responder: responder)
+      broker = start_broker(ctx)
+      dir = Path.dirname(ctx.path)
+
+      File.chmod!(dir, 0o500)
+      on_exit(fn -> File.chmod!(dir, 0o700) end)
+
+      if File.touch(Path.join(dir, "probe")) == :ok do
+        File.rm!(Path.join(dir, "probe"))
+      else
+        capture_log(fn ->
+          assert {:ok, %{access_token: "access-1"}} = CredentialBroker.fetch_token([], broker)
+        end)
+
+        advance(ctx.clock, 6 * 3600 - 300)
+
+        log =
+          capture_log(fn ->
+            assert {:error, :reauth_required} = CredentialBroker.fetch_token([], broker)
+          end)
+
+        assert_no_secret_in(log)
+        assert length(grants(ctx)) == 2
+        assert CredentialWatchdog.expired?(Arbiter.Grok.FakeAdapter, ctx.watchdog)
+        assert %{reauth_required?: true} = CredentialBroker.status(broker)
+
+        # Still one grant per refused token: later workers fail fast.
+        assert {:error, :reauth_required} = CredentialBroker.fetch_token([], broker)
+        assert length(grants(ctx)) == 2
+      end
     end
 
     test "a missing canonical file raises the hold; nothing is created", ctx do

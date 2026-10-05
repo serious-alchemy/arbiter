@@ -52,7 +52,9 @@ defmodule Arbiter.Grok.CredentialBroker do
       surfaces — and answers every request `{:error, :reauth_required}` (or
       `:not_logged_in`) at once, without asking the issuer again. The hold
       clears when the canonical file holds a credential other than the one that
-      failed, i.e. after `grok login`. **The canonical file is never deleted,
+      failed, i.e. after `grok login`. The broker polls the file while a hold
+      is open (`:hold_check_ms`, default 30 s), so the hold lifts without any
+      worker having to ask — which none can, as dispatch is gated. **The canonical file is never deleted,
       moved or rewritten on a failure.**
     * **Transient failure** (network, 5xx, 429): no hold. A still-valid token is
       served; an expired one is `{:error, :unavailable}` and the worker's own
@@ -70,7 +72,8 @@ defmodule Arbiter.Grok.CredentialBroker do
       config :arbiter, :grok_broker,
         auth_path: "~/.grok/auth.json",
         refresh_margin_s: 600,
-        min_force_interval_s: 60
+        min_force_interval_s: 60,
+        hold_check_ms: 30_000
   """
 
   use GenServer
@@ -84,6 +87,7 @@ defmodule Arbiter.Grok.CredentialBroker do
 
   @default_margin_s 600
   @default_min_force_s 60
+  @default_hold_check_ms 30_000
   @call_timeout 45_000
 
   @type token :: %{access_token: String.t(), expires_in: pos_integer()}
@@ -141,10 +145,12 @@ defmodule Arbiter.Grok.CredentialBroker do
        req_options: get.(:req_options, []),
        watchdog: get.(:credential_watchdog, CredentialWatchdog),
        hold_adapter: get.(:hold_adapter, nil),
+       hold_check_ms: get.(:hold_check_ms, @default_hold_check_ms),
        refreshing: nil,
        pending: nil,
        last_refresh_at: nil,
-       hold: nil
+       hold: nil,
+       hold_timer: nil
      }}
   end
 
@@ -170,6 +176,22 @@ defmodule Arbiter.Grok.CredentialBroker do
 
   def handle_info({:DOWN, ref, :process, _pid, _reason}, %{refreshing: %{ref: ref}} = state) do
     {:noreply, finish_refresh({:error, {:transient, :task_crashed}}, state)}
+  end
+
+  # While a hold is open no worker is dispatched, so no request arrives to
+  # notice the operator's `grok login`: poll the canonical file instead.
+  def handle_info(:check_hold, %{hold: nil} = state), do: {:noreply, %{state | hold_timer: nil}}
+
+  def handle_info(:check_hold, state) do
+    state = retry_pending(%{state | hold_timer: nil})
+
+    state =
+      case load(state) do
+        {:ok, creds} -> maybe_recover(state, creds)
+        {:error, :not_logged_in} -> state
+      end
+
+    {:noreply, if(state.hold, do: schedule_hold_check(state), else: state)}
   end
 
   def handle_info(_msg, state), do: {:noreply, state}
@@ -296,7 +318,7 @@ defmodule Arbiter.Grok.CredentialBroker do
 
     case CredentialStore.read(state.auth_path) do
       {:ok, newer} ->
-        if CredentialStore.fingerprint(newer.refresh_token) != sent do
+        if rotated_meanwhile?(state, newer, sent) do
           # Someone else (the operator's own grok) rotated the file while our
           # grant was in flight: our token was merely stale, the login is not
           # dead. Re-serve the waiters from what is canonical now.
@@ -334,6 +356,20 @@ defmodule Arbiter.Grok.CredentialBroker do
       end
 
     reply_all(waiters, reply, state)
+  end
+
+  # The file holds something other than the token we sent *and* other than the
+  # one an unwritten rotation was based on. When a rotated pair is held in
+  # memory the file legitimately still has the older token (`pending.base`);
+  # that is the broker's own lag, not someone else's rotation, and treating it
+  # as one would re-serve the same refused in-memory token forever.
+  defp rotated_meanwhile?(state, newer, sent) do
+    on_disk = CredentialStore.fingerprint(newer.refresh_token)
+
+    case state.pending do
+      nil -> on_disk != sent
+      %{base: base} -> on_disk != sent and on_disk != base
+    end
   end
 
   defp dead(state, waiters, code, fingerprint) do
@@ -398,9 +434,17 @@ defmodule Arbiter.Grok.CredentialBroker do
         "credential file was left untouched."
     )
 
-    CredentialWatchdog.mark_expired(hold_adapter(state), stop_reason(why), state.watchdog)
+    CredentialWatchdog.mark_expired(hold_adapter(state), stop_reason(why, state), state.watchdog)
 
-    %{state | hold: %{kind: kind, fingerprint: fingerprint, since: state.now_fun.()}}
+    schedule_hold_check(%{
+      state
+      | hold: %{kind: kind, fingerprint: fingerprint, since: state.now_fun.()}
+    })
+  end
+
+  defp schedule_hold_check(%{hold_timer: timer} = state) do
+    if timer, do: Process.cancel_timer(timer)
+    %{state | hold_timer: Process.send_after(self(), :check_hold, state.hold_check_ms)}
   end
 
   # The hold clears once the canonical file holds a credential other than the
@@ -411,7 +455,8 @@ defmodule Arbiter.Grok.CredentialBroker do
     if hold.fingerprint != CredentialStore.fingerprint(creds.refresh_token) do
       Logger.info("grok credential broker: a new grok login was found; lifting the auth hold")
       CredentialWatchdog.mark_recovered(hold_adapter(state), state.watchdog)
-      %{state | hold: nil}
+      if state.hold_timer, do: Process.cancel_timer(state.hold_timer)
+      %{state | hold: nil, hold_timer: nil}
     else
       state
     end
@@ -424,15 +469,15 @@ defmodule Arbiter.Grok.CredentialBroker do
 
   defp hold_adapter(_state), do: Map.get(Arbiter.Agents.adapters(), :grok, Arbiter.Agents.Grok)
 
-  defp stop_reason(why) do
+  defp stop_reason(why, state) do
     %StopReason{
       category: :auth_expired,
       summary: "grok login is dead: #{why}",
       remediation:
         "Log in to grok again on the Arbiter host (`grok login --device-code`). Arbiter's " <>
           "credential broker is the only refresher and has not touched the credential file. " <>
-          "The hold lifts itself on the next worker request after the new login, or clear it " <>
-          "with `arb breaker reset --auth-hold grok`.",
+          "The broker checks the credential file every #{max(div(state.hold_check_ms, 1000), 1)}s " <>
+          "and lifts the hold itself once the new login is there, or clear it with `arb breaker reset --auth-hold grok`.",
       exit_status: nil,
       signal: nil
     }
