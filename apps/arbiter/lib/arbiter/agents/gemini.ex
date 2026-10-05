@@ -616,23 +616,25 @@ defmodule Arbiter.Agents.Gemini do
   # mode, never the `jail_unavailable/3` fallback to running unjailed.
   defp maybe_jail(:agy, command, opts, %SecurityPolicy{permissions: %{mode: mode}} = policy) do
     with {:ok, _sandbox} <- Sandbox.module(policy) do
-      case jail_blocker(policy) do
-        :ok ->
-          # bd-8btihu: a jailed agy only authenticates through the jail's
-          # `xdg-dbus-proxy` (it masks the raw session bus), so a bus alone
-          # is not enough.
-          with :ok <- require_keyring(true, opts),
-               {:ok, network} <- egress_network(opts, policy) do
-            wrap_in_jail(command, opts, policy, mode, network)
-          end
-
-        {:error, reason} ->
-          # `:strict` refuses below; otherwise agy runs unjailed and finds the
-          # raw session bus itself.
-          with :ok <- if(mode == :strict, do: :ok, else: require_keyring(false, opts)),
-               do: jail_unavailable(mode, command, reason)
-      end
+      jail_agy(jail_blocker(policy), command, opts, policy, mode)
     end
+  end
+
+  defp jail_agy(:ok, command, opts, policy, mode) do
+    # bd-8btihu: a jailed agy only authenticates through the jail's
+    # `xdg-dbus-proxy` (it masks the raw session bus), so a bus alone
+    # is not enough.
+    with :ok <- require_keyring(true, opts),
+         {:ok, network} <- egress_network(opts, policy) do
+      wrap_in_jail(command, opts, policy, mode, network)
+    end
+  end
+
+  # `:strict` refuses below; otherwise agy runs unjailed and finds the
+  # raw session bus itself.
+  defp jail_agy({:error, reason}, command, opts, _policy, mode) do
+    with :ok <- if(mode == :strict, do: :ok, else: require_keyring(false, opts)),
+         do: jail_unavailable(mode, command, reason)
   end
 
   # bd-8btihu: agy 1.2.16 authenticates only through a freedesktop Secret
