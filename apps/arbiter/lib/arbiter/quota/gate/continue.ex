@@ -51,4 +51,9 @@ defmodule Arbiter.Quota.Gate.Continue do
         end
     end
   end
+
+  # Never holds: `check/4` is the single choke point for the overage decision,
+  # so the board must not show a hold the dispatcher would not honour.
+  @impl true
+  def board_hold(_quota, _policy, _opts), do: :ok
 end

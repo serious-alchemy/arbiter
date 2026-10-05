@@ -878,14 +878,16 @@ defmodule Arbiter.Board.Snapshot do
   defp quota_window_hold(%Arbiter.Tasks.Workspace{} = workspace) do
     ws_id = workspace.id
 
-    with false <- Arbiter.Quota.continue_mode?(workspace),
-         provider <- quota_provider(workspace),
-         account <- quota_account(ws_id, provider),
-         snapshot when not is_nil(snapshot) <- latest_quota(account, provider) do
-      describe_quota(snapshot, {account, workspace})
-    else
-      _ -> :ok
-    end
+    provider = quota_provider(workspace)
+    account = quota_account(ws_id, provider)
+
+    # Seams #6: the workspace's resolved gate answers, the same module the
+    # dispatcher's `check/4` runs, so the board and dispatch cannot disagree.
+    Arbiter.Quota.gate_for_workspace(workspace).board_hold(
+      latest_quota(account, provider),
+      {account, workspace},
+      []
+    )
   rescue
     _ -> :ok
   end
@@ -1949,17 +1951,5 @@ defmodule Arbiter.Board.Snapshot do
     Arbiter.Accounts.Resolver.get(Arbiter.Quota.account_id(ws_id, provider))
   rescue
     _ -> nil
-  end
-
-  # "Exhausted" and "near exhaustion" are different operator problems: the
-  # first clears when the window resets, the second clears if you raise the
-  # ceiling. A 7d hold is a third: it clears at the weekly reset, days away, so
-  # `Arbiter.Quota.Gate.hold_phrase/2` labels it with the window explicitly
-  # (`7d quota 91% ≥ 90%`) rather than reusing the 5h wording (bd-1tuxv8).
-  defp describe_quota(snapshot, policy) do
-    case Arbiter.Quota.Gate.hold_phrase(snapshot, policy) do
-      nil -> :ok
-      phrase -> {:hold, phrase}
-    end
   end
 end

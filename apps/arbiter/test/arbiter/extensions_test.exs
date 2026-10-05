@@ -34,6 +34,9 @@ defmodule ArbiterProFake.QuotaGate do
 
   @impl true
   def check(_task, _quota, _workspace, _opts), do: :allow
+
+  @impl true
+  def board_hold(_quota, _policy, _opts), do: :ok
 end
 
 defmodule ArbiterProFake.AcmeQuota do
