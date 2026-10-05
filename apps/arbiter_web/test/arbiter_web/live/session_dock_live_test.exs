@@ -22,6 +22,7 @@ defmodule ArbiterWeb.SessionDockLiveTest do
 
   setup do
     Arbiter.Test.SessionEnv.sandbox("session-dock")
+    Arbiter.Test.SessionEnv.launch_accounts!()
     # The dock's own Kill and `/sessions`' Launch run inside the LiveView
     # process, which has no access to the test's process dictionary and calls
     # `Sessions.launch/1` with no `:runner` — so the stub has to come from
@@ -482,6 +483,8 @@ defmodule ArbiterWeb.SessionDockLiveTest do
       {:ok, workspace} =
         Ash.create(Arbiter.Tasks.Workspace, %{name: "acme-dock", prefix: "ad"})
 
+      :ok = Arbiter.Test.SessionEnv.launch_accounts!([workspace])
+
       {_view, dock} = dock(conn)
       render_click(element(dock, "#session-dock-new-session"))
 
@@ -513,10 +516,71 @@ defmodule ArbiterWeb.SessionDockLiveTest do
       assert session.remote_control == false
     end
 
+    test "the panel lists only configured providers and greys out unhealthy ones (bd-8qoxst)",
+         %{conn: conn} do
+      {:ok, _} = Arbiter.Accounts.delete_account("antigravity:default")
+
+      {_view, dock} = dock(conn)
+      render_click(element(dock, "#session-dock-new-session"))
+
+      assert has_element?(dock, ~s(#session-dock-launch-provider option[value="claude_code"]))
+      refute has_element?(dock, ~s(#session-dock-launch-provider option[value="agy"]))
+
+      reason = %Arbiter.Worker.StopReason{
+        category: :auth_expired,
+        summary: "API Error: 401",
+        remediation: "Re-authenticate",
+        exit_status: 1,
+        signal: nil
+      }
+
+      Arbiter.Agents.CredentialWatchdog.mark_expired(
+        Arbiter.Agents.Claude,
+        reason,
+        Arbiter.Agents.CredentialWatchdog,
+        :periodic_probe
+      )
+
+      on_exit(fn -> Arbiter.Agents.CredentialWatchdog.clear(Arbiter.Agents.Claude) end)
+
+      # Re-opened: health is re-read on the way open.
+      render_click(element(dock, "#session-dock-new-session"))
+      render_click(element(dock, "#session-dock-new-session"))
+
+      assert has_element?(
+               dock,
+               ~s(#session-dock-launch-provider option[value="claude_code"][disabled])
+             )
+
+      assert has_element?(
+               dock,
+               "#session-dock-launch-provider-claude_code-unavailable",
+               "expired"
+             )
+
+      assert has_element?(dock, "#session-dock-launch[disabled]")
+      assert has_element?(dock, ~s(#session-dock-launch-providers-link[href="/providers"]))
+    end
+
+    test "a hidden provider submitted to the dock is rejected, with the failure inline",
+         %{conn: conn} do
+      {:ok, _} = Arbiter.Accounts.delete_account("antigravity:default")
+
+      {_view, dock} = dock(conn)
+      render_click(element(dock, "#session-dock-new-session"))
+
+      render_submit(dock, "launch", %{"provider" => "agy"})
+
+      assert Sessions.list() == []
+      assert has_element?(dock, "#session-dock-launch-error", "not available")
+    end
+
     test "switching auth mode in the dock's panel does not discard a workspace pick or can_dispatch",
          %{conn: conn} do
       {:ok, workspace} =
         Ash.create(Arbiter.Tasks.Workspace, %{name: "acme-dock2", prefix: "ad2"})
+
+      :ok = Arbiter.Test.SessionEnv.launch_accounts!([workspace])
 
       {_view, dock} = dock(conn)
       render_click(element(dock, "#session-dock-new-session"))

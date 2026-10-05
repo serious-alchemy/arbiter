@@ -330,6 +330,12 @@ config :arbiter, :codex_argv_probe, false
 # `agy_usage_probe:`) explicitly.
 config :arbiter, :agy_cmd, "arbiter-test-nonexistent-agy"
 
+# `Arbiter.Sessions.LaunchProviders` offers a session provider only when its
+# CLI resolves on PATH (bd-8qoxst). The suite never runs those CLIs (launches
+# go through a stub runner), so every CLI resolves here; tests of the
+# "not installed" case pass `find_executable:` explicitly.
+config :arbiter, :sessions_find_executable, &Function.identity/1
+
 # Disable the fleet credential Watchdog in test — its probe is a real agent-CLI
 # round-trip per adapter (`codex exec` in particular bills against the ChatGPT
 # session quota), and the suite has no CLIs to hit. Both
