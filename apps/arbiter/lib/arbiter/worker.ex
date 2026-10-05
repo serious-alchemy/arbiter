@@ -3543,6 +3543,9 @@ defmodule Arbiter.Worker do
        when map_size(sessions) > 0 do
     Enum.each(sessions, fn {port, session} ->
       if is_nil(Map.get(session, :exit_status)), do: terminate_session_port(state, port)
+      # bd-6zm33r: `kill_tree` cannot reach what the agent backgrounded (already
+      # reparented), so stop the scope too. Idempotent if already reaped.
+      reap_scope(session)
     end)
 
     # bd-d2o3xb: killing the `podman` client does not reliably stop its

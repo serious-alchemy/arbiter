@@ -124,6 +124,11 @@ defmodule Arbiter.Workers.Reconciler do
   @spec sweep_worker_scopes(keyword()) :: [String.t()]
   def sweep_worker_scopes(opts \\ []) do
     if Keyword.get(opts, :primary?, true) do
+      scope_opts = Keyword.get(opts, :scope_opts, [])
+      # List BEFORE reading live runs: a run that starts in between then has a
+      # registered worker (checked below) instead of looking orphaned.
+      units = Arbiter.Worker.MemoryScope.list(scope_opts)
+
       live =
         Run
         |> Ash.Query.filter(state in [:starting, :working, :waiting])
@@ -131,7 +136,9 @@ defmodule Arbiter.Workers.Reconciler do
         |> Enum.filter(&live_worker?/1)
         |> Enum.flat_map(&(&1.cgroup_scopes || []))
 
-      Arbiter.Worker.MemoryScope.sweep(live, Keyword.get(opts, :scope_opts, []))
+      live = live ++ Enum.filter(units, &scope_worker_registered?/1)
+
+      Arbiter.Worker.MemoryScope.sweep(live, Keyword.put(scope_opts, :units, units))
     else
       []
     end
@@ -970,6 +977,14 @@ defmodule Arbiter.Workers.Reconciler do
   # boot the registry is empty, so every live row is an orphan; mid-life this
   # guards against racing a worker that is legitimately still working.
   defp live_worker?(%Run{task_id: task_id}), do: not is_nil(Worker.whereis(task_id))
+
+  # `arb-run-<task>-<hex>.scope` -> does `<task>` have a registered worker?
+  defp scope_worker_registered?(unit) do
+    case Regex.run(~r/\Aarb-run-(.+)-[0-9a-f]+\.scope\z/, unit) do
+      [_, task_id] -> not is_nil(Worker.whereis(task_id))
+      _ -> false
+    end
+  end
 
   # Returns true when the row was successfully reconciled (so the caller can
   # count it), false on a per-row write failure that we've logged and skipped.

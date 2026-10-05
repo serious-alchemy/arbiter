@@ -306,13 +306,15 @@ defmodule Arbiter.Worker.MemoryScope do
   @doc """
   Boot sweep: stop every `arb-run-*` scope not in `live` (a list of unit names
   belonging to runs that are live right now). Each stop is logged. Returns the
-  units it stopped.
+  units it stopped. Pass `units:` to sweep a listing taken earlier.
   """
   @spec sweep([String.t()], keyword()) :: [String.t()]
   def sweep(live, opts \\ []) do
     live = MapSet.new(live)
 
-    for unit <- list(opts), not MapSet.member?(live, unit), reduce: [] do
+    units = Keyword.get_lazy(opts, :units, fn -> list(opts) end)
+
+    for unit <- units, not MapSet.member?(live, unit), reduce: [] do
       acc ->
         case stop(unit, opts) do
           :ok ->

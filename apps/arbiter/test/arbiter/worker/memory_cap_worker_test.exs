@@ -155,6 +155,33 @@ defmodule Arbiter.Worker.MemoryCapWorkerTest do
     assert File.read!(stop_log) |> String.split("\n", trim: true) == [scope, scope2]
   end
 
+  # bd-6zm33r AC1, teardown path: the worker is stopped while the agent still runs,
+  # so no :exit_status ever arrives; `terminate/2` must stop the scope itself.
+  test "the run's scope is stopped when the worker is torn down with the agent still running",
+       %{stop_log: stop_log} do
+    task_id = "bd-memcap-#{System.unique_integer([:positive])}"
+    {:ok, pid} = Worker.start(task_id: task_id, repo: "arbiter", workspace_id: "ws-runs")
+    :ok = Worker.advance(pid, :claude)
+
+    {:ok, _port} =
+      ClaudeSession.start(
+        owner: pid,
+        worktree_path: System.tmp_dir!(),
+        command: ["sh", "-c", "sleep 30"]
+      )
+
+    _ = :sys.get_state(pid)
+    [run] = Run |> Ash.Query.filter(task_id == ^task_id) |> Ash.read!()
+    assert [scope] = run.cgroup_scopes
+    refute File.exists?(stop_log)
+
+    ref = Process.monitor(pid)
+    GenServer.stop(pid, :normal)
+    assert_receive {:DOWN, ^ref, :process, ^pid, _}
+
+    assert File.read!(stop_log) |> String.split("\n", trim: true) == [scope]
+  end
+
   test "a scope systemd OOM-killed fails the run as memory_cap_exceeded",
        %{oom_marker: oom_marker, reset_marker: reset_marker} do
     File.write!(oom_marker, "")
