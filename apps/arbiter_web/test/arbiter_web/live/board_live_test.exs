@@ -994,7 +994,7 @@ defmodule ArbiterWeb.BoardLiveTest do
 
       refute has_element?(view, "#board-scheduler-toggle[data-confirm]")
 
-      assert [%{paused: true, actor: "operator", surface: "dashboard"} | _] =
+      assert [%{paused: true, actor: "operator:test", surface: "dashboard"} | _] =
                Arbiter.Settings.scheduler_changes()
     end
 

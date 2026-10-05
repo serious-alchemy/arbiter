@@ -158,6 +158,12 @@ defmodule Arbiter.Skills.Skill do
     end
   end
 
+  changes do
+    # bd-6i7yzq: fill `actor` from the explicit/ambient `Arbiter.Actor` when the
+    # caller did not name one.
+    change {Arbiter.PaperTrail.StampActor, attribute: :actor}, on: [:create, :update]
+  end
+
   attributes do
     uuid_v7_primary_key :id
 

@@ -122,6 +122,12 @@ defmodule ArbiterWeb.InstallationSettings do
     :exit, _ -> nil
   end
 
+  # bd-6i7yzq: who is flipping it — the dashboard operator's `Arbiter.Actor`
+  # label, else the bare `"operator"` (no session in scope).
+  @doc false
+  @spec scheduler_actor() :: String.t()
+  def scheduler_actor, do: Arbiter.Actor.resolve_label(nil) || "operator"
+
   @doc """
   Flip the autopilot, attributing the change to the dashboard. Pausing leaves
   in-flight work alone — it only stops the queue draining.
@@ -129,8 +135,8 @@ defmodule ArbiterWeb.InstallationSettings do
   @spec toggle_scheduler() :: :ok | {:error, term()}
   def toggle_scheduler do
     if scheduler_paused?(),
-      do: Autopilot.resume(Autopilot, {"operator", "dashboard"}),
-      else: Autopilot.pause(Autopilot, {"operator", "dashboard"})
+      do: Autopilot.resume(Autopilot, {scheduler_actor(), "dashboard"}),
+      else: Autopilot.pause(Autopilot, {scheduler_actor(), "dashboard"})
   rescue
     e -> {:error, e}
   catch

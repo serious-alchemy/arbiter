@@ -100,6 +100,9 @@ defmodule Arbiter.Reviews.PrStatePoller do
 
   @impl true
   def init(opts) do
+    # bd-6i7yzq: writes this process makes are attributed to it (`Arbiter.Actor`).
+    Arbiter.Actor.put(Arbiter.Actor.system("pr_state_poller"))
+
     state = %{
       enabled: cfg(:enabled, opts, true),
       interval_ms: cfg(:interval_ms, opts, @default_interval_ms),

@@ -466,6 +466,9 @@ defmodule Arbiter.Board.Autopilot do
 
   @impl true
   def init(opts) do
+    # bd-6i7yzq: writes this process makes are attributed to it (`Arbiter.Actor`).
+    Arbiter.Actor.put(Arbiter.Actor.autopilot())
+
     interval = Keyword.get(opts, :interval_ms, configured_interval_ms())
     debounce = Keyword.get(opts, :debounce_ms, configured_debounce_ms())
 

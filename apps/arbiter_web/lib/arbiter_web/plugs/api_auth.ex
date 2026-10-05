@@ -52,8 +52,15 @@ defmodule ArbiterWeb.Plugs.ApiAuth do
 
   @impl true
   def call(%Plug.Conn{} = conn, _opts) do
+    # bd-6i7yzq: a keep-alive connection reuses one process for many requests,
+    # so the previous request's actor is cleared before this one is derived.
+    Arbiter.Actor.put(nil)
+
     with {:ok, scope} <- authenticate(conn),
          conn = assign(conn, :mcp_scope, scope),
+         # The REST/CLI edge: who the token says is acting (attribution only —
+         # the policy check right below is unchanged).
+         :ok <- Arbiter.Actor.put(Arbiter.Actor.from_scope(scope)),
          :ok <- ApiPolicy.authorize(route_policy(conn), scope, conn.params) do
       conn
     else

@@ -18,9 +18,14 @@ defmodule ArbiterWeb.Plugs.DashboardAuth do
   def call(conn, _opts) do
     case ArbiterWeb.DashboardAuth.authenticate(conn) do
       {:ok, conn, identity} ->
+        # bd-6i7yzq: the dashboard edge — writes this request makes are the
+        # operator's.
+        Arbiter.Actor.put(Arbiter.Actor.operator(identity))
         assign(conn, :dashboard_identity, identity)
 
       :error ->
+        Arbiter.Actor.put(nil)
+
         conn
         |> Phoenix.Controller.redirect(to: ArbiterWeb.DashboardAuth.login_path())
         |> halt()

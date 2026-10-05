@@ -20,6 +20,42 @@ defmodule ArbiterCli.Cmd.ShowTest do
     assert out =~ "Build it"
   end
 
+  test "prints the recent history with who made each write" do
+    stub_get("/api/issues/gte-007", %{
+      "id" => "gte-007",
+      "title" => "History",
+      "history" => [
+        %{
+          "at" => "2026-10-05T13:12:36.118911Z",
+          "action" => "promote",
+          "actor" => "operator:ryan",
+          "changed" => ["state"],
+          "state" => "queued"
+        },
+        %{
+          "at" => "2026-10-05T13:00:00.000000Z",
+          "action" => "create",
+          "actor" => nil,
+          "changed" => ["title", "priority"],
+          "state" => "backlog"
+        }
+      ]
+    })
+
+    {out, _err, 0} = capture(fn -> Show.run(["gte-007"]) end)
+
+    assert out =~ "History:"
+    assert out =~ ~r/promote\s+operator:ryan\s+state=queued/
+    # no actor on record reads `-`, never blank
+    assert out =~ ~r/create\s+-\s+state=backlog, title, priority/
+  end
+
+  test "no History section when the server sent none" do
+    stub_get("/api/issues/gte-008", %{"id" => "gte-008", "title" => "T", "history" => []})
+    {out, _err, 0} = capture(fn -> Show.run(["gte-008"]) end)
+    refute out =~ "History:"
+  end
+
   test "--json emits raw JSON" do
     stub_get("/api/issues/x", %{"id" => "x", "title" => "T"})
     {out, _err, exit_code} = capture(fn -> Show.run(["x", "--json"]) end)
