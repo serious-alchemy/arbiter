@@ -15,9 +15,11 @@ defmodule Arbiter.MCP.AgentConfig.Grok do
       url = "http://127.0.0.1:4848/mcp"
       headers = { "Authorization" = "Bearer <scope-token>" }
 
-  Other settings already in the file (e.g. a retry threshold) are kept; any
-  earlier `[mcp_servers.<name>]` table, and its sub-tables, is replaced, so the
-  write is idempotent across respawns.
+  The file is regenerated from known keys on every write (Arbiter owns this
+  per-worker home, and the jailed worker can write free-form content into it, so
+  nothing is merged). Anything already at the path — including a symlink the
+  worker planted — is removed, never followed, and the fresh file is created
+  `0600` before the token goes in.
 
   grok namespaces MCP tools by server name, and `MCPTool(...)` allow/deny rules
   apply to them; the server enforces the worker's capability from the token.
@@ -33,15 +35,27 @@ defmodule Arbiter.MCP.AgentConfig.Grok do
   def write_mcp_config(worktree, opts) when is_binary(worktree) do
     with {:ok, _home} <- ConfigDir.ensure(worktree: worktree) do
       path = Path.join(ConfigDir.grok_home(worktree: worktree), @filename)
-      existing = if File.exists?(path), do: File.read!(path), else: ""
-      name = Keyword.get(opts, :server_name, "arbiter")
-      merged = String.trim_trailing(strip_server(existing, name)) <> "\n\n" <> config_toml(opts)
 
-      with :ok <- File.write(path, String.trim_leading(merged)) do
-        File.chmod(path, 0o600)
+      # rm (not follow) whatever is there: a symlink to a host file must stay
+      # untouched, and the new file must be 0600 before the token lands in it.
+      with :ok <- remove_existing(path),
+           :ok <- File.write(path, ""),
+           :ok <- File.chmod(path, 0o600) do
+        File.write(path, config_toml(opts))
       end
     end
   end
+
+  defp remove_existing(path) do
+    case File.lstat(path) do
+      {:ok, _} -> File.rm_rf(path) |> rm_result()
+      {:error, :enoent} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp rm_result({:ok, _}), do: :ok
+  defp rm_result({:error, reason, _}), do: {:error, reason}
 
   @doc """
   The `[mcp_servers.<name>]` table as a string. Requires `:mcp_url` and
@@ -55,33 +69,39 @@ defmodule Arbiter.MCP.AgentConfig.Grok do
 
     """
     [mcp_servers.#{name}]
-    url = #{inspect(url)}
-    headers = { "Authorization" = #{inspect("Bearer " <> token)} }
+    url = #{toml_string(url)}
+    headers = { "Authorization" = #{toml_string("Bearer " <> token)} }
     """
   end
 
-  # Drop `[mcp_servers.<name>]` and `[mcp_servers.<name>.*]` tables, keeping
-  # everything else byte-for-byte.
-  defp strip_server(text, name) do
-    own? = fn line ->
-      t = String.trim(line)
-      t == "[mcp_servers.#{name}]" or String.starts_with?(t, "[mcp_servers.#{name}.")
-    end
+  # TOML basic string: escape backslash, quote and control characters.
+  defp toml_string(value) do
+    escaped =
+      for <<c <- value>>, into: "" do
+        case c do
+          ?\\ ->
+            "\\\\"
 
-    {kept, _skipping} =
-      text
-      |> String.split("\n")
-      |> Enum.reduce({[], false}, fn line, {acc, skipping} ->
-        header? = String.starts_with?(String.trim(line), "[")
+          ?" ->
+            "\\\""
 
-        cond do
-          header? and own?.(line) -> {acc, true}
-          header? -> {[line | acc], false}
-          skipping -> {acc, true}
-          true -> {[line | acc], false}
+          ?\n ->
+            "\\n"
+
+          ?\r ->
+            "\\r"
+
+          ?\t ->
+            "\\t"
+
+          c when c < 0x20 or c == 0x7F ->
+            "\\u" <> String.pad_leading(Integer.to_string(c, 16), 4, "0")
+
+          c ->
+            <<c>>
         end
-      end)
+      end
 
-    kept |> Enum.reverse() |> Enum.join("\n")
+    ~s("#{escaped}")
   end
 end

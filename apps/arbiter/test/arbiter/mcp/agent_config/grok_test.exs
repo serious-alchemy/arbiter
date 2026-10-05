@@ -61,30 +61,43 @@ defmodule Arbiter.MCP.AgentConfig.GrokTest do
            )
   end
 
-  test "preserves other settings and replaces a stale arbiter block", %{wt: wt, config: config} do
+  test "regenerates the file idempotently, dropping stale or planted content", %{
+    wt: wt,
+    config: config
+  } do
     File.mkdir_p!(Path.dirname(config))
 
     File.write!(config, """
-    rate_limit_retry_threshold = 2
-
     [mcp_servers.arbiter]
     url = "http://old"
-
-    [mcp_servers.arbiter.extra]
-    x = 1
-
-    [mcp_servers.other]
-    url = "http://other"
+    mcp_servers.arbiter.url = "http://dotted"
     """)
 
     assert :ok = Grok.write_mcp_config(wt, @opts)
     assert :ok = Grok.write_mcp_config(wt, @opts)
     out = File.read!(config)
 
-    assert out =~ "rate_limit_retry_threshold = 2"
-    assert out =~ "[mcp_servers.other]"
     refute out =~ "http://old"
-    refute out =~ "extra"
+    refute out =~ "dotted"
     assert length(String.split(out, "[mcp_servers.arbiter]")) == 2
+  end
+
+  test "a planted symlink is replaced, never followed", %{wt: wt, config: config} do
+    target = Path.join(Path.dirname(wt), "operator-config.toml")
+    File.write!(target, "operator = true\n")
+    File.mkdir_p!(Path.dirname(config))
+    File.ln_s!(target, config)
+
+    assert :ok = Grok.write_mcp_config(wt, @opts)
+
+    assert File.read!(target) == "operator = true\n"
+    assert {:ok, %{type: :regular}} = File.lstat(config)
+    assert File.read!(config) =~ "Bearer tok-123"
+  end
+
+  test "escapes TOML special characters in values" do
+    toml = Grok.config_toml(Keyword.put(@opts, :scope_token, ~S(a"b\c#{d})))
+    assert toml =~ ~S(Bearer a\"b\\c#{d})
+    refute toml =~ ~S(\#)
   end
 end
