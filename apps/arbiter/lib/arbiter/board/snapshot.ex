@@ -853,8 +853,10 @@ defmodule Arbiter.Board.Snapshot do
 
     if Gate.pace_exempt_priority(policy) do
       issues
-      |> Enum.filter(&(Lifecycle.state_of(&1) == :queued and not epic?(&1)))
-      |> Enum.filter(&Gate.pace_exempt?(policy, &1.priority))
+      |> Enum.filter(
+        &(Lifecycle.state_of(&1) == :queued and not epic?(&1) and
+            Gate.pace_exempt?(policy, &1.priority))
+      )
       |> Enum.group_by(& &1.priority)
       |> Enum.flat_map(fn {priority, cards} ->
         verdict = auth_hold(workspace) || quota_window_hold(workspace, priority: priority)
