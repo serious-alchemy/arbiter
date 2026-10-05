@@ -331,6 +331,10 @@ defmodule ArbiterWeb.Router do
     get("/breakers", BreakerController, :index)
     post("/breakers/reset", BreakerController, :reset)
 
+    # Grok credential broker (bd-9p4lx9): the worker's GROK_AUTH_PROVIDER_COMMAND
+    # (`arb grok-token`) asks for a short-lived access token here
+    post("/grok/token", GrokTokenController, :create)
+
     # Worker images (bd-9r5jdt): `arb image list|build|refresh|prune`
     get("/images", ImageController, :index)
     post("/images/build", ImageController, :build)

@@ -17,7 +17,8 @@ defmodule Arbiter.Worker.Jail.Hide do
   ## Path classes
 
     * **Credential dirs** under the operator's home: `~/.claude`, `~/.codex`,
-      `~/.gemini` (the operator's own agy state; the worker has its isolated
+      `~/.grok` (the canonical grok login, whose refresh token only
+      `Arbiter.Grok.CredentialBroker` may hold), `~/.gemini` (the operator's own agy state; the worker has its isolated
       HOME), `~/.config/gh`, `~/.config/gcloud`, `~/.ssh`, `~/.aws`,
       `~/.kube`, `~/.docker`; and the files `~/.netrc`, `~/.pgpass`,
       `~/.git-credentials`.
@@ -68,7 +69,7 @@ defmodule Arbiter.Worker.Jail.Hide do
 
   @type t :: %{dirs: [String.t()], files: [String.t()], keep: [String.t()]}
 
-  @credential_dirs ~w(.claude .codex .gemini .config/gh .config/gcloud .ssh .aws .kube .docker)
+  @credential_dirs ~w(.claude .codex .grok .gemini .config/gh .config/gcloud .ssh .aws .kube .docker)
   @credential_files ~w(.netrc .pgpass .git-credentials)
 
   @identities ~w(id_rsa id_ecdsa id_ed25519 id_dsa id_ecdsa_sk id_ed25519_sk)

@@ -45,6 +45,7 @@ defmodule Arbiter.Worker.JailHideTest do
     for d <- [
           ".claude",
           ".codex",
+          ".grok",
           ".config/gh",
           ".ssh",
           ".aws",
@@ -65,6 +66,7 @@ defmodule Arbiter.Worker.JailHideTest do
     secrets = [
       ".claude/.credentials.json",
       ".codex/auth.json",
+      ".grok/auth.json",
       ".config/gh/hosts.yml",
       ".ssh/id_ed25519",
       ".ssh/ci.id_ed25519",
@@ -124,7 +126,9 @@ defmodule Arbiter.Worker.JailHideTest do
       %{dirs: dirs, files: files} = Hide.paths(fx.opts)
       h = fx.home
 
-      for d <- [".claude", ".codex", ".config/gh", ".ssh", ".aws", ".gemini", ".arbiter"] do
+      # `.grok` holds the canonical grok refresh token (bd-9p4lx9): the broker is
+      # its only reader, so a jailed worker must not see it under `--ro-bind / /`.
+      for d <- [".claude", ".codex", ".grok", ".config/gh", ".ssh", ".aws", ".gemini", ".arbiter"] do
         assert Path.join(h, d) in dirs, "#{d} not masked"
       end
 
