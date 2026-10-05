@@ -146,6 +146,31 @@ defmodule Arbiter.Release do
   end
 
   @doc """
+  Print the routing shadow report (bd-adtnto, R5): under `provider_selection:
+  scored` with `scoring.mode: shadow`, how often the scorer's recorded pick
+  matches the pick that dispatched, and every disagreement with its reason
+  (`Arbiter.Agents.Routing.ShadowReport`). Read-only; starts only the repo.
+
+  Options: `:since` / `:until` (`DateTime`s; default the last 30 days),
+  `:workspace_id` and `:start` (default `true`).
+
+      bin/arbiter eval 'Arbiter.Release.shadow_report()'
+  """
+  @spec shadow_report(keyword()) :: Arbiter.Agents.Routing.ShadowReport.report()
+  def shadow_report(opts \\ []) do
+    if Keyword.get(opts, :start, true), do: start_release_repo!()
+
+    report =
+      opts
+      |> Keyword.take([:since, :until, :workspace_id])
+      |> Arbiter.Agents.Routing.ShadowReport.collect()
+      |> Arbiter.Agents.Routing.ShadowReport.build()
+
+    IO.puts(Arbiter.Agents.Routing.ShadowReport.format(report))
+    report
+  end
+
+  @doc """
   Rollback a migration for the given repo to the specified version.
 
   Called via `bin/arbiter eval "Arbiter.Release.rollback(Arbiter.Repo, version)"`.
