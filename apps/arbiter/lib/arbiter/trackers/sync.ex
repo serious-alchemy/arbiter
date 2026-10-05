@@ -352,7 +352,7 @@ defmodule Arbiter.Trackers.Sync do
 
       {:error, reason} ->
         Logger.warning(
-          "Trackers.Sync: follow-up close failed for task=#{issue.id} " <>
+          "Trackers.Sync: follow-up close also failed for task=#{issue.id} " <>
             "tracker=#{issue.tracker_type} ref=#{issue.tracker_ref}: #{inspect(reason)}"
         )
 
