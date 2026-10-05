@@ -6,7 +6,7 @@ defmodule Arbiter.Agents.Codex.AuthSyncTest do
   @moduletag :tmp_dir
   @moduletag :capture_log
 
-  defp auth(refresh, last_refresh) do
+  defp auth(refresh, last_refresh, account \\ "acct") do
     Jason.encode!(%{
       "auth_mode" => "chatgpt",
       "OPENAI_API_KEY" => nil,
@@ -14,7 +14,7 @@ defmodule Arbiter.Agents.Codex.AuthSyncTest do
         "id_token" => "id",
         "access_token" => "access-" <> refresh,
         "refresh_token" => refresh,
-        "account_id" => "acct"
+        "account_id" => account
       },
       "last_refresh" => last_refresh
     })
@@ -156,14 +156,40 @@ defmodule Arbiter.Agents.Codex.AuthSyncTest do
       assert File.read!(s) == auth("rt-0", "2026-10-01T00:00:00Z")
     end
 
-    test "concurrent syncs of two runs leave the newest token", %{source: s, tmp_dir: dir} do
+    test "a missing real login is never recreated from the run copy", %{source: s, run: r} do
       File.write!(s, auth("rt-0", "2026-10-01T00:00:00Z"))
+      AuthSync.seed(s, r)
+      File.write!(r, auth("rt-1", "2026-10-02T00:00:00Z"))
+      File.rm!(s)
+
+      assert :superseded = AuthSync.sync(s, r)
+      refute File.exists?(s)
+    end
+
+    test "a run copy for a different account is not adopted", %{source: s, run: r} do
+      File.write!(s, auth("rt-0", "2026-10-01T00:00:00Z"))
+      File.write!(r, auth("rt-x", "2026-10-02T00:00:00Z", "someone-else"))
+
+      assert :superseded = AuthSync.sync(s, r)
+      assert File.read!(s) == auth("rt-0", "2026-10-01T00:00:00Z")
+    end
+
+    test "a run copy dated in the future is not adopted", %{source: s, run: r} do
+      File.write!(s, auth("rt-0", "2026-10-01T00:00:00Z"))
+      File.write!(r, auth("rt-x", "2999-01-01T00:00:00Z"))
+
+      assert :superseded = AuthSync.sync(s, r)
+      assert File.read!(s) == auth("rt-0", "2026-10-01T00:00:00Z")
+    end
+
+    test "concurrent syncs of two runs leave the newest token", %{source: s, tmp_dir: dir} do
+      File.write!(s, auth("rt-0", "2026-08-01T00:00:00Z"))
 
       runs =
         for n <- 1..8 do
           r = Path.join(dir, "run#{n}/auth.json")
           File.mkdir_p!(Path.dirname(r))
-          File.write!(r, auth("rt-#{n}", "2026-10-0#{min(n, 9)}T00:00:00Z"))
+          File.write!(r, auth("rt-#{n}", "2026-09-0#{n}T00:00:00Z"))
           r
         end
 
@@ -181,6 +207,23 @@ defmodule Arbiter.Agents.Codex.AuthSyncTest do
 
       assert :pulled = AuthSync.pull(s, r)
       assert File.read!(r) == auth("rt-2", "2026-10-03T00:00:00Z")
+    end
+
+    test "a symlink planted at the run copy is replaced, not written through", %{
+      source: s,
+      run: r,
+      tmp_dir: dir
+    } do
+      File.write!(s, auth("rt-2", "2026-10-03T00:00:00Z"))
+      victim = Path.join(dir, "victim")
+      File.write!(victim, "keep")
+      File.ln_s!(victim, r)
+
+      assert :pulled = AuthSync.pull(s, r)
+
+      assert File.read!(victim) == "keep"
+      assert {:ok, %File.Stat{type: :regular}} = File.lstat(r)
+      assert File.read!(r) == File.read!(s)
     end
 
     test "an equal or newer run copy is left alone", %{source: s, run: r} do

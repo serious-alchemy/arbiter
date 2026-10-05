@@ -8,7 +8,7 @@ defmodule Arbiter.Agents.Codex.AuthSync.ReaperTest do
 
   defp auth(refresh, last_refresh) do
     Jason.encode!(%{
-      "tokens" => %{"refresh_token" => refresh, "access_token" => "a"},
+      "tokens" => %{"refresh_token" => refresh, "access_token" => "a", "account_id" => "acct"},
       "last_refresh" => last_refresh
     })
   end

@@ -532,7 +532,19 @@ reader sees the old or the new file, never half; it goes *through* a symlinked
 file with `:global.trans/3`. A run copy that is not a usable login (empty,
 no refresh token and no key) is ignored; one with no `last_refresh` never beats
 a dated file. An older rotation (a sibling run adopted a newer one first) is
-dropped and logged, not applied. What it cannot fix: two runs that both hold
+dropped and logged, not applied.
+
+The run copy is **worker-controlled**, so `sync` also treats it as untrusted
+(trust decision): it is adopted only if the real file still exists (a
+`codex logout` during the run is never undone from a copy), both name the same
+account (`tokens.account_id`, or the same API key), and its `last_refresh` is
+not more than five minutes ahead of the host clock. A genuine rotation meets
+all three. Every write, to the real file *and* to the run copy (`pull`, `seed`),
+creates the temp file exclusively and `rename/2`s it over the destination, so a
+symlink the worker plants in `codex-home` is replaced and never written
+through. Accepted residue: a worker can write a well-formed same-account login
+with a fresh stamp and a junk token, which only breaks the login it was
+already handed. What it cannot fix: two runs that both hold
 token T0 where the first one's refresh retires T0 server-side; the second then
 fails its own refresh. A re-opened run picks up T1 through `pull`, a run that is
 mid-turn does not.

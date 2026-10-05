@@ -18,12 +18,32 @@ defmodule Arbiter.Agents.Codex.AuthSync do
   stateless and idempotent, and safe against sibling runs that rotated in the
   meantime:
 
-    * `sync/2` adopts the run copy into the source **only if** it is valid and
-      its `last_refresh` is strictly newer than the source's. An older rotation
-      (a sibling run adopted a newer one first) is `:superseded` and dropped;
+    * `sync/2` adopts the run copy into the source **only if** it is valid, is
+      the same login as the source (see "Trust" below) and its `last_refresh`
+      is strictly newer than the source's and not in the future. An older
+      rotation (a sibling run adopted a newer one first) is `:superseded` and
+      dropped;
     * `pull/2` is the other direction, for a run that is re-opened (a nudge, an
       auto-resume): if the source is strictly newer than the run copy, the copy
       is replaced, so the run does not resume on a token a sibling rotated away.
+
+  ## Trust: the run copy is worker-controlled
+
+  The worker can write its `codex-home/auth.json`, so `sync/2` treats it as
+  untrusted input to the operator's real login. It is adopted only when
+
+    * the real file still exists and is readable. A missing real file means the
+      operator logged out (or moved it) during the run; that is never undone
+      from a worker's copy (`:superseded`);
+    * both files name the same account (`tokens.account_id`, or the same
+      `OPENAI_API_KEY`), so a worker cannot swap in another account's login;
+    * its `last_refresh` is not more than 5 minutes ahead of the host clock,
+      so a forged far-future stamp cannot permanently win the ordering.
+
+  A rotation, which is all this module exists to carry back, satisfies all
+  three. What a worker *can* still do is write a well-formed login for the same
+  account with a fresh stamp and a junk token; that only breaks the same login
+  it was already handed, which it could equally do by exhausting the token.
 
   ## Safety of the write
 
@@ -36,6 +56,9 @@ defmodule Arbiter.Agents.Codex.AuthSync do
   """
 
   require Logger
+
+  # How far a run copy's `last_refresh` may run ahead of this host's clock.
+  @max_skew_seconds 300
 
   @type result :: :ok | :no_source | {:error, term()}
   @type sync_result :: :adopted | :unchanged | :superseded | :invalid
@@ -92,13 +115,42 @@ defmodule Arbiter.Agents.Codex.AuthSync do
   defp reconcile(real, body, doc) do
     case File.read(real) do
       {:ok, ^body} -> :unchanged
-      {:ok, current} -> adopt_if_newer(real, body, doc, decode_or_nil(current))
-      {:error, _} -> adopt(real, body)
+      {:ok, current} -> adopt_if_trusted(real, body, doc, decode_or_nil(current))
+      {:error, _} -> superseded(real)
     end
   end
 
-  defp adopt_if_newer(real, body, doc, current) do
-    if newer?(doc, current), do: adopt(real, body), else: superseded(real)
+  # A `current` that is not a login (corrupt) has nothing to protect; anything
+  # else must be the same account and strictly older, and the candidate not
+  # dated in the future.
+  defp adopt_if_trusted(real, body, doc, current) do
+    if (current == nil or same_account?(doc, current)) and not future?(doc) and
+         newer?(doc, current),
+       do: adopt(real, body),
+       else: superseded(real)
+  end
+
+  defp same_account?(a, b) do
+    case {identity(a), identity(b)} do
+      {nil, _} -> false
+      {id, id} -> true
+      _ -> false
+    end
+  end
+
+  defp identity(%{"tokens" => %{"account_id" => id}}) when is_binary(id) and id != "",
+    do: {:account, id}
+
+  defp identity(%{"OPENAI_API_KEY" => key}) when is_binary(key) and key != "",
+    do: {:api_key, key}
+
+  defp identity(_), do: nil
+
+  defp future?(doc) do
+    case stamp(doc) do
+      nil -> false
+      dt -> DateTime.diff(dt, DateTime.utc_now()) > @max_skew_seconds
+    end
   end
 
   defp run_doc(run) do
@@ -164,7 +216,7 @@ defmodule Arbiter.Agents.Codex.AuthSync do
   defp stamp(_), do: nil
 
   defp adopt(real, body) do
-    case write_private(real, body, atomic: true) do
+    case write_private(real, body) do
       :ok ->
         Logger.warning("Codex.AuthSync: persisted a rotated auth.json into #{real}")
         :adopted
@@ -190,25 +242,29 @@ defmodule Arbiter.Agents.Codex.AuthSync do
     :global.trans({{__MODULE__, real}, self()}, fn -> fun.(real) end, [node()], :infinity)
   end
 
-  defp write_private(path, body, opts \\ []) do
-    if Keyword.get(opts, :atomic, false) do
-      tmp = "#{path}.arb-#{System.unique_integer([:positive])}"
+  # Always tmp + rename: `:exclusive` refuses an existing name (including a
+  # planted symlink) and `rename/2` replaces a link at `path` instead of
+  # following it.
+  defp write_private(path, body) do
+    tmp = "#{path}.arb-#{System.unique_integer([:positive])}"
 
-      with :ok <- File.write(tmp, ""),
-           :ok <- File.chmod(tmp, 0o600),
-           :ok <- File.write(tmp, body),
-           :ok <- File.rename(tmp, path) do
-        :ok
-      else
-        error ->
-          _ = File.rm(tmp)
-          error
-      end
+    with {:ok, io} <- File.open(tmp, [:write, :exclusive, :binary]),
+         result = write_open(io, tmp, body),
+         :ok <- File.close(io),
+         :ok <- result,
+         :ok <- File.rename(tmp, path) do
+      :ok
     else
-      with :ok <- File.write(path, ""),
-           :ok <- File.chmod(path, 0o600),
-           do: File.write(path, body)
+      error ->
+        _ = File.rm(tmp)
+        error
     end
+  end
+
+  # Tighten the mode before any secret reaches the file, writing through the
+  # open handle so a swap of the name cannot redirect the bytes.
+  defp write_open(io, tmp, body) do
+    with :ok <- File.chmod(tmp, 0o600), do: IO.binwrite(io, body)
   end
 
   # Follow symlinks to the file that actually holds the login.
