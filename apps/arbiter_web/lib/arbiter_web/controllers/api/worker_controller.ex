@@ -137,6 +137,14 @@ defmodule ArbiterWeb.Api.WorkerController do
          {:conflict, "#{phrase} — dispatch refused; it never runs on an excluded provider",
           %{task_id: task_id, provider: provider && to_string(provider)}}}
 
+      # bd-57uzkl: the provider lacks a capability the role or repo requires.
+      # A 409, like the provider constraint: the request is fine, the rule
+      # refuses it.
+      {:error, {:capability_missing, provider, phrase}} ->
+        {:error,
+         {:conflict, "#{phrase} — dispatch refused",
+          %{task_id: task_id, provider: provider && to_string(provider)}}}
+
       # bd-2aslx6 (#1428): a second agent-spawning dispatch onto a task whose
       # worker is mid-session used to silently open a second paid CLI inside the
       # same worker run. It is now refused, with a message that names the live
@@ -345,6 +353,12 @@ defmodule ArbiterWeb.Api.WorkerController do
   defp resume_error({:provider_constraint, provider, phrase}, task_id),
     do:
       {:conflict, "#{phrase} — resume refused; it never runs on an excluded provider",
+       %{task_id: task_id, provider: provider && to_string(provider)}}
+
+  # bd-57uzkl: the resume's provider lacks a capability the repo requires.
+  defp resume_error({:capability_missing, provider, phrase}, task_id),
+    do:
+      {:conflict, "#{phrase} — resume refused",
        %{task_id: task_id, provider: provider && to_string(provider)}}
 
   # bd-92mx1m: the task released its slot and the cap is full. A 409 — the

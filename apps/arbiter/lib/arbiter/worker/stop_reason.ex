@@ -221,6 +221,7 @@ defmodule Arbiter.Worker.StopReason do
     | authentication[ _]error
     | unauthorized
     | not[ _]authenticated
+    | not[ _]signed[ _]in
     | (oauth|token|credentials?|session)[^\n]{0,40}(expired|invalid|revoked)
     | please[ _](run|sign|log)[ _-]?in
     | \/login\b

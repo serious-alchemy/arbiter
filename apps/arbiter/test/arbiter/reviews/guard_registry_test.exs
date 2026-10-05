@@ -55,6 +55,10 @@ defmodule Arbiter.Reviews.GuardRegistryTest do
      "agent spawn failure: infrastructure, not a refusal of the work"},
     {Arbiter.Worker.ReviewGate, :start_worker_session, 6,
      "agent session failure: infrastructure, not a refusal of the work"},
+    {Arbiter.Worker.ReviewGate, :reviewer_capability, 3,
+     "bd-57uzkl: the capability hard gate refuses a reviewer provider that lacks a " <>
+       "capability the repo requires — a provider-selection refusal held like " <>
+       "{:provider_paused, …}, not a review/merge guard; nothing is escalated or counted"},
     {Arbiter.Worker.ReviewGate, :guarded_spawn_worker, 5,
      "bd-7xtz6w: turns a spawn that raised into the same {:error, _} as " <>
        "start_worker_process/4 — infrastructure, surfaced through the spawn-failure " <>

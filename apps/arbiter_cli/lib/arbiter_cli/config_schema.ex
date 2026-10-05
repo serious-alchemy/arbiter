@@ -176,6 +176,15 @@ defmodule ArbiterCli.ConfigSchema do
                           its pace, pins it on the task for every later
                           implementer role, and records the decision on each
                           run. Keep it OFF until the agy write jail lands.
+      capability_gates    bool (default: false) — drop a candidate that lacks a required
+                          capability (reason capability_missing) before quota is
+                          weighed, in both routers and on the unrouted dispatch
+                          path. A resume role requires `resume`; a repo adds more.
+                          The matrix is code defaults plus an operator-owned
+                          installation override.
+      repos.<repo>.requires  list of capabilities (resume, async_verification) every
+                          dispatch for that repo requires of its provider, e.g.
+                          a repo whose suite takes minutes: ["async_verification"].
 
     review / review_gate  (map)
       required    bool — whether a review round gates completion

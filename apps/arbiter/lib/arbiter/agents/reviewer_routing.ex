@@ -42,6 +42,10 @@ defmodule Arbiter.Agents.ReviewerRouting do
     * `circuit_broken` — `Arbiter.Agents.ProviderPool.healthy?/1` is false;
     * `paused` — the account or its provider is paused (`Arbiter.Providers.Pause`,
       `arb provider pause`); a fallback trigger like `quota_held`;
+    * `capability_missing` — `routing.capability_gates` is on and the candidate's
+      provider/model lacks a capability the task's repo requires
+      (`Arbiter.Agents.CapabilityMatrix`, bd-57uzkl); checked ahead of quota and
+      a fallback trigger like `quota_held`;
     * `quota_held` — the workspace's quota gate would hold it (paced
       included), the same check provider routing makes (bd-40pzpj).
 
@@ -89,6 +93,7 @@ defmodule Arbiter.Agents.ReviewerRouting do
   alias Arbiter.Accounts.ProviderSettings
   alias Arbiter.Agents
   alias Arbiter.Agents.AuthHold
+  alias Arbiter.Agents.CapabilityMatrix
   alias Arbiter.Agents.CredentialWatchdog
   alias Arbiter.Agents.ModelFamily
   alias Arbiter.Agents.ProviderConfig
@@ -104,7 +109,7 @@ defmodule Arbiter.Agents.ReviewerRouting do
   # Drop reasons that may push a pass back into the implementer's own family.
   # `timed_out` is deliberately absent — see the moduledoc.
   @fallback_triggers ~w(unconfigured write_confinement_none disabled merged
-                        auth_expired circuit_broken quota_held paused)
+                        auth_expired circuit_broken quota_held paused capability_missing)
 
   @type selection :: %{
           provider: atom(),
@@ -251,13 +256,27 @@ defmodule Arbiter.Agents.ReviewerRouting do
     case Agents.strict_eligible_provider(preferred, ctx.security, Agents.reviewer_pool(ctx.ws)) do
       {:ok, type} ->
         entry = entry(%{agent_type: Atom.to_string(type), account: nil}, 0, ctx)
-        same? = not eligible?(entry, ctx.implementer) and not is_nil(ctx.implementer)
 
-        reason =
-          "no reviewer available (#{drop_list(ctx.dropped)}); dispatching on the " <>
-            "pre-routing reviewer #{type}"
+        # bd-57uzkl (E17): the pre-routing reviewer meets the same hard gate,
+        # or the gate is only advisory.
+        case check_capability(entry, ctx) do
+          {:ok, entry} ->
+            same? = not eligible?(entry, ctx.implementer) and not is_nil(ctx.implementer)
 
-        {:ok, selection(entry, ctx, "no_candidate", same?, reason)}
+            reason =
+              "no reviewer available (#{drop_list(ctx.dropped)}); dispatching on the " <>
+                "pre-routing reviewer #{type}"
+
+            {:ok, selection(entry, ctx, "no_candidate", same?, reason)}
+
+          {:drop, reason, detail} ->
+            {:none,
+             Map.put(
+               record(ctx),
+               "reason",
+               "the pre-routing reviewer #{type} cannot take this pass: #{reason} (#{detail})"
+             )}
+        end
 
       {:error, :ineligible} ->
         {:none, Map.put(record(ctx), "reason", "no reviewer can run under this scope")}
@@ -396,11 +415,15 @@ defmodule Arbiter.Agents.ReviewerRouting do
       quota_fun: Keyword.get(opts, :quota_fun, &latest_quota/1),
       gemini_code:
         Keyword.get_lazy(opts, :gemini_code, fn -> Arbiter.Quota.provider_code("gemini") end),
+      capability: CapabilityMatrix.gate(ws, :reviewer, task_repo(task)),
       gate: Arbiter.Quota.gate_for_workspace(ws),
       available: [],
       dropped: []
     }
   end
+
+  defp task_repo(%Issue{repo: repo}), do: repo
+  defp task_repo(_task), do: nil
 
   # Oldest-first families that authored on the branch; only recorded when more
   # than one did, so the audit shows a mixed-family branch.
@@ -493,6 +516,7 @@ defmodule Arbiter.Agents.ReviewerRouting do
       &check_account/2,
       &check_auth/2,
       &check_circuit/2,
+      &check_capability/2,
       &check_quota/2
     ]
     |> Enum.reduce_while({:ok, entry}, fn check, {:ok, entry} ->
@@ -560,6 +584,19 @@ defmodule Arbiter.Agents.ReviewerRouting do
 
   defp check_circuit(%{type: type} = entry, _ctx) do
     if ProviderPool.healthy?(type), do: {:ok, entry}, else: {:drop, "circuit_broken", nil}
+  end
+
+  # bd-57uzkl: a hard gate before quota (design §6.1). The provider is the one
+  # `ModelFamily` classified (agy when the `gemini` adapter would spawn it).
+  defp check_capability(entry, %{capability: nil}), do: {:ok, entry}
+
+  defp check_capability(%{type: type, account: account, model: model} = entry, ctx) do
+    provider = classify_provider(type, account, ctx.gemini_code)
+
+    case CapabilityMatrix.check(ctx.capability.rows, ctx.capability.requires, provider, model) do
+      :ok -> {:ok, entry}
+      {:missing, _capability, detail} -> {:drop, "capability_missing", detail}
+    end
   end
 
   defp check_quota(%{account: nil} = entry, _ctx), do: {:ok, entry}

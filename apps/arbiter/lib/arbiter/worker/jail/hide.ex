@@ -21,7 +21,9 @@ defmodule Arbiter.Worker.Jail.Hide do
       `Arbiter.Grok.CredentialBroker` may hold), `~/.gemini` (the operator's own agy state; the worker has its isolated
       HOME), `~/.config/gh`, `~/.config/gcloud`, `~/.ssh`, `~/.aws`,
       `~/.kube`, `~/.docker`; and the files `~/.netrc`, `~/.pgpass`,
-      `~/.git-credentials`.
+      `~/.git-credentials`. `~/.grok` also holds the grok binary and its
+      bundled assets, so `~/.grok/bin`, `downloads` and `bundled` are bound
+      back read-only (`grok_keep/1`); `auth.json` and the rest stay masked.
     * **The install**: the data dir (`~/.arbiter`: the DB and its WAL, the
       account configs, `arbiter.env`, the release cookie, releases), the
       configured DB path and its `-wal` / `-shm` / `-journal` sidecars when it
@@ -84,7 +86,7 @@ defmodule Arbiter.Worker.Jail.Hide do
   Options, all defaulting to the live configuration (the overrides are for
   tests): `:operator_home`, `:data_dir`, `:database`, `:accounts_root`,
   `:worktree_root`, `:log_root`, `:sessions_root`, `:agy_home_root`,
-  `:claude_config_dir`, `:repos` (every workspace repo path), `:own_repo`
+  `:grok_home_root`, `:claude_config_dir`, `:repos` (every workspace repo path), `:own_repo`
   (the repo the worker's worktree belongs to, never hidden) and `:unmask`.
   """
   @spec paths(keyword()) :: t()
@@ -115,7 +117,7 @@ defmodule Arbiter.Worker.Jail.Hide do
       |> Enum.uniq()
 
     keep =
-      (ssh_keep(home) ++ gh_keep(home) ++ unmask)
+      (ssh_keep(home) ++ gh_keep(home) ++ grok_keep(home) ++ unmask)
       |> existing(&File.exists?/1)
       |> Enum.filter(&under_any?(&1, dirs))
       |> Enum.uniq()
@@ -187,6 +189,7 @@ defmodule Arbiter.Worker.Jail.Hide do
       opt(opts, :worktree_root, &Paths.worktree_root/0),
       opt(opts, :log_root, &Paths.output_log_root/0),
       opt(opts, :agy_home_root, &Arbiter.Agents.Gemini.ConfigDir.home_root/0),
+      opt(opts, :grok_home_root, &Arbiter.Agents.Grok.ConfigDir.home_root/0),
       opt(opts, :claude_config_dir, &Arbiter.Agents.Claude.ConfigDir.path/0)
     ]
   end
@@ -208,6 +211,13 @@ defmodule Arbiter.Worker.Jail.Hide do
         []
     end
   end
+
+  # The grok binary is `~/.grok/bin/grok` -> `../downloads/grok-linux-*`, and it
+  # reads its `bundled/` agents and skills; a jailed grok worker needs all three.
+  # None holds a credential (the login is `auth.json`, which stays masked).
+  @grok_keep ~w(bin downloads bundled)
+  defp grok_keep(nil), do: []
+  defp grok_keep(home), do: Enum.map(@grok_keep, &Path.join([home, ".grok", &1]))
 
   defp ssh_keep(nil), do: []
   defp ssh_keep(home), do: Enum.map(@ssh_keep, &Path.join([home, ".ssh", &1]))

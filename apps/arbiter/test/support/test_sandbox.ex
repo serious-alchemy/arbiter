@@ -51,7 +51,7 @@ defmodule Arbiter.TestSandbox do
   # purpose: this list existing and being complete is the safety property, so
   # it should fail loudly in review when an adapter is added, not silently
   # resolve to an empty list.
-  @agent_binaries ~w(claude agy gemini codex)
+  @agent_binaries ~w(claude agy gemini codex grok)
 
   @default_owner_timeout 2_000
 
