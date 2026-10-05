@@ -25,6 +25,20 @@ defmodule Arbiter.Agents.Routing.Policy do
 
   The `config` map is merged into the adapter's spawn opts — adapters
   decide how to consume it (e.g. Claude reads `"model"`).
+
+  ## Calling contract
+
+  Core asks the policy **once per dispatch** (`Arbiter.Agents.Routing.decide/3`)
+  and threads the answer through the quota gates, account admission and the
+  spawn, so a stateful policy (`:round_robin`'s cursor) is consistent across a
+  dispatch. Surfaces that only *display* routing (board, provenance) may call
+  it again; a policy should still be cheap and side-effect-light.
+
+  ## Ledger snapshot
+
+  The third argument is built by `Arbiter.Agents.Routing.ledger_snapshot/1`:
+  `%{cost_usd_today: float}` — the workspace's priced ledger spend since
+  00:00 UTC. `%{}` means "no usage data"; treat a missing key as that.
   """
 
   alias Arbiter.Tasks.Issue
