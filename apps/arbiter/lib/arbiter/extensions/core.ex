@@ -40,6 +40,7 @@ defmodule Arbiter.Extensions.Core do
       {:mcp_agent_config, "claude", Arbiter.MCP.AgentConfig.Claude},
       {:mcp_agent_config, "gemini", Arbiter.MCP.AgentConfig.Gemini},
       {:mcp_agent_config, "codex", Arbiter.MCP.AgentConfig.Codex},
+      {:mcp_agent_config, "grok", Arbiter.MCP.AgentConfig.Grok},
       {:quota_snapshot, Atom.to_string(Arbiter.Quota.AnthropicQuota),
        Arbiter.Quota.Gate.Snapshot.Anthropic},
       {:quota_snapshot, Atom.to_string(Arbiter.Quota.CodexQuota),

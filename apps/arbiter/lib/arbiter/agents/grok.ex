@@ -50,7 +50,7 @@ defmodule Arbiter.Agents.Grok do
 
   `security_enforced?/0` is `false`: mapping the policy's deny categories onto
   grok's `--deny` / `--disallowed-tools` is bd-761q6h; the per-worker MCP config
-  is bd-bggx6a; provider registration and routing are a later task. A
+  is `Arbiter.MCP.AgentConfig.Grok`; provider registration and routing are a later task. A
   `splice_prompt/2` (nudge / `-r` resume) is left out too, which the worker
   treats as "this provider cannot be resumed in place".
   """
