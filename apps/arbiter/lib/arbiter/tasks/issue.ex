@@ -121,9 +121,17 @@ defmodule Arbiter.Tasks.Issue do
     store_action_inputs?(true)
     ignore_attributes([:created_at, :updated_at])
 
+    # bd-6i7yzq: who acted (`Arbiter.Actor` label) — explicit `actor:` or the
+    # process's ambient actor, stamped by `Arbiter.PaperTrail.StampActor`.
+    metadata :actor, :string, allow_nil?: true
+
     # bd-741sid: the Watchdog's poll, every interval for every open PR. The
     # ticket keeps the latest answer; a version row per poll is not history.
     ignore_actions([:record_merger_status])
+  end
+
+  changes do
+    change Arbiter.PaperTrail.StampActor
   end
 
   actions do
