@@ -107,7 +107,7 @@ defmodule Arbiter.Grok.CredentialBroker do
   particular never the refresh token.
   """
   @spec fetch_token(keyword(), GenServer.server()) :: {:ok, token()} | {:error, error()}
-  def fetch_token(opts \\ [], server \\ __MODULE__) do
+  def fetch_token(opts \\ [], server \\ server()) do
     GenServer.call(server, {:fetch, Keyword.get(opts, :force, false) == true}, @call_timeout)
   catch
     :exit, _ -> {:error, :unavailable}
@@ -119,7 +119,11 @@ defmodule Arbiter.Grok.CredentialBroker do
           refreshing?: boolean(),
           last_refresh_at: DateTime.t() | nil
         }
-  def status(server \\ __MODULE__), do: GenServer.call(server, :status)
+  def status(server \\ server()), do: GenServer.call(server, :status)
+
+  # The instance the REST route talks to: the supervised singleton, unless a
+  # test points `:grok_broker_server` at a private one.
+  defp server, do: Application.get_env(:arbiter, :grok_broker_server, __MODULE__)
 
   # ---- GenServer ----------------------------------------------------------------
 

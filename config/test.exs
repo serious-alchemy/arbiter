@@ -339,6 +339,11 @@ config :arbiter, :agy_cmd, "arbiter-test-nonexistent-agy"
 # Watchdog start their own unnamed instance with `enabled: true`.
 config :arbiter, :credential_watchdog, enabled: false
 
+# bd-9p4lx9: the grok credential broker must never touch the operator's real
+# ~/.grok/auth.json from a test: refreshing it would rotate their live token.
+# Broker tests point `:auth_path` at a private tmp file.
+config :arbiter, :grok_broker, auth_path: "/nonexistent/arbiter-test/grok/auth.json"
+
 # The board's auto-dispatcher (bd-bqyeqa). Off and never ticking under test:
 # a test that resumes the scheduler is exercising the switch, not asking for a
 # real worker to be spawned fifteen seconds later. `topics: []` is the other
