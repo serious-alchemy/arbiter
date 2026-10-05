@@ -114,6 +114,33 @@ defmodule Arbiter.Workers.Reconciler do
     end
   end
 
+  @doc """
+  Stop every `arb-run-*` worker memory scope with no live run (bd-6zm33r): the
+  scopes live outside the server's cgroup, so a crash or restart can leave an
+  agent's orphaned processes running. A scope recorded on a live run whose
+  worker is registered is never touched. Primary-gated like the orphan sweep.
+  Returns the stopped unit names.
+  """
+  @spec sweep_worker_scopes(keyword()) :: [String.t()]
+  def sweep_worker_scopes(opts \\ []) do
+    if Keyword.get(opts, :primary?, true) do
+      live =
+        Run
+        |> Ash.Query.filter(state in [:starting, :working, :waiting])
+        |> Ash.read!()
+        |> Enum.filter(&live_worker?/1)
+        |> Enum.flat_map(&(&1.cgroup_scopes || []))
+
+      Arbiter.Worker.MemoryScope.sweep(live, Keyword.get(opts, :scope_opts, []))
+    else
+      []
+    end
+  rescue
+    e ->
+      Logger.warning("Workers.Reconciler: worker scope sweep failed: #{Exception.message(e)}")
+      []
+  end
+
   defp do_reconcile do
     orphans =
       Run

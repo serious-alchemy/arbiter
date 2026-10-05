@@ -230,6 +230,114 @@ defmodule Arbiter.Worker.MemoryScope do
   end
 
   @doc """
+  Stop `scope` — kills every process still in it. Called once the agent has
+  exited: the scope outlives the agent while anything it backgrounded (a `mix
+  test` BEAM, a `sleep`) is alive, and it lives under `app.slice`, so nothing
+  else reaps it (bd-6zm33r). Best-effort and bounded; returns `:ok` or
+  `{:error, reason}`, never raises. An already-gone scope is `:ok`.
+  """
+  @spec stop(scope() | String.t(), keyword()) :: :ok | {:error, String.t()}
+  def stop(scope, opts \\ []) do
+    unit = if is_map(scope), do: scope.unit, else: scope
+    bounded(fn -> do_stop(unit, opts) end, opts, {:error, "stop timed out"})
+  end
+
+  defp do_stop(unit, opts) do
+    case systemctl_path(opts) do
+      nil ->
+        {:error, "systemctl not found"}
+
+      ctl ->
+        cmd_opts = [stderr_to_stdout: true, env: runtime_dir_pairs(opts)]
+
+        case run_cmd(opts, ctl, ["--user", "stop", unit], cmd_opts) do
+          {_, 0} ->
+            _ = run_cmd(opts, ctl, ["--user", "reset-failed", unit], cmd_opts)
+            :ok
+
+          {out, _} ->
+            if out =~ ~r/not loaded|not found/i,
+              do: :ok,
+              else: {:error, "systemctl stop #{unit}: #{String.trim(out)}"}
+        end
+    end
+  rescue
+    e -> {:error, Exception.message(e)}
+  end
+
+  @doc """
+  Loaded `arb-run-*.scope` units (any state), or `[]` when systemd cannot be
+  asked.
+  """
+  @spec list(keyword()) :: [String.t()]
+  def list(opts \\ []) do
+    bounded(fn -> do_list(opts) end, opts, [])
+  end
+
+  defp do_list(opts) do
+    with ctl when is_binary(ctl) <- systemctl_path(opts),
+         {out, 0} <-
+           run_cmd(
+             opts,
+             ctl,
+             [
+               "--user",
+               "list-units",
+               "--all",
+               "--plain",
+               "--no-legend",
+               "--no-pager",
+               "arb-run-*.scope"
+             ],
+             stderr_to_stdout: true,
+             env: runtime_dir_pairs(opts)
+           ) do
+      out
+      |> String.split("\n", trim: true)
+      |> Enum.map(&(&1 |> String.trim() |> String.split(~r/\s+/, parts: 2) |> hd()))
+      |> Enum.filter(&String.match?(&1, ~r/\Aarb-run-[A-Za-z0-9_.-]+\.scope\z/))
+    else
+      _ -> []
+    end
+  rescue
+    _ -> []
+  end
+
+  @doc """
+  Boot sweep: stop every `arb-run-*` scope not in `live` (a list of unit names
+  belonging to runs that are live right now). Each stop is logged. Returns the
+  units it stopped.
+  """
+  @spec sweep([String.t()], keyword()) :: [String.t()]
+  def sweep(live, opts \\ []) do
+    live = MapSet.new(live)
+
+    for unit <- list(opts), not MapSet.member?(live, unit), reduce: [] do
+      acc ->
+        case stop(unit, opts) do
+          :ok ->
+            Logger.warning("MemoryScope: stopped orphaned worker scope #{unit} (no live run)")
+            [unit | acc]
+
+          {:error, reason} ->
+            Logger.warning("MemoryScope: could not stop orphaned scope #{unit}: #{reason}")
+            acc
+        end
+    end
+    |> Enum.reverse()
+  end
+
+  defp bounded(fun, opts, default) do
+    task = Task.async(fun)
+    timeout = Keyword.get(opts, :stop_timeout_ms, @outcome_timeout_ms)
+
+    case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do
+      {:ok, result} -> result
+      _ -> default
+    end
+  end
+
+  @doc """
   Whether this host can run a capped scope for `max`, measured once with the
   real properties and cached (a failure is retried after #{div(@probe_retry_ms, 60_000)} minutes
   — the user manager may simply not be up yet at boot).

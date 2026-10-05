@@ -29,6 +29,7 @@ defmodule Arbiter.Worker.MemoryCapWorkerTest do
     argv_log = Path.join(dir, "argv.log")
     oom_marker = Path.join(dir, "oom")
     reset_marker = Path.join(dir, "reset")
+    stop_log = Path.join(dir, "stop.log")
 
     # Mirrors the real argv shape: `--user --scope … -p K=V … <env> -u VAR <cmd…>`.
     File.write!(systemd_run, """
@@ -55,6 +56,7 @@ defmodule Arbiter.Worker.MemoryCapWorkerTest do
           printf 'Result=success\\nMemoryPeak=1048576\\n'
         fi ;;
       reset-failed) touch '#{reset_marker}' ;;
+      stop) echo "$3" >> '#{stop_log}' ;;
     esac
     """)
 
@@ -88,7 +90,12 @@ defmodule Arbiter.Worker.MemoryCapWorkerTest do
       File.rm_rf(dir)
     end)
 
-    {:ok, dir: dir, argv_log: argv_log, oom_marker: oom_marker, reset_marker: reset_marker}
+    {:ok,
+     dir: dir,
+     stop_log: stop_log,
+     argv_log: argv_log,
+     oom_marker: oom_marker,
+     reset_marker: reset_marker}
   end
 
   defp restore_env(name, nil), do: System.delete_env(name)
@@ -134,6 +141,18 @@ defmodule Arbiter.Worker.MemoryCapWorkerTest do
     # again for the agent, then the agent's own argv, untouched.
     assert File.read!(argv_log) =~
              ~r{/env -u XDG_RUNTIME_DIR \S*/sh -c echo hi \$5; exit 3}
+  end
+
+  # bd-6zm33r AC1 (wiring half; the real-process half is the :live_systemd test).
+  test "the run's scope is stopped once the agent exits, on any outcome",
+       %{stop_log: stop_log} do
+    {_state, run, _task_id} = run_agent(["sh", "-c", "exit 0"])
+    assert [scope] = run.cgroup_scopes
+    assert File.read!(stop_log) |> String.split("\n", trim: true) == [scope]
+
+    {_state, run, _task_id} = run_agent(["sh", "-c", "exit 3"])
+    assert [scope2] = run.cgroup_scopes
+    assert File.read!(stop_log) |> String.split("\n", trim: true) == [scope, scope2]
   end
 
   test "a scope systemd OOM-killed fails the run as memory_cap_exceeded",

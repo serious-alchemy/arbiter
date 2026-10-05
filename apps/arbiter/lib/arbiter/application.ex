@@ -379,6 +379,7 @@ defmodule Arbiter.Application do
            Arbiter.Boot.ResumeGate.sweep(fn ->
              Arbiter.Workers.Reconciler.reconcile_orphaned_runs(primary?: primary?)
              Arbiter.Workers.Reconciler.reconcile_shutdown_casualties(primary?: primary?)
+             Arbiter.Workers.Reconciler.sweep_worker_scopes(primary?: primary?)
              # bd-2gc809 / bd-2yt0d2: a CI wait or a ReviewGate pass the stop cut
              # off gets its gate back before anything else looks at the ticket.
              # A gate holds no worker the later sweeps could see, so they are
