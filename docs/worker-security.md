@@ -728,9 +728,10 @@ On a host with a working freedesktop Secret Service, agy keeps its live Google
 grant in the **keyring**, which is scoped to the Linux user session and not to
 `$HOME` — the T6a spike proved a brand-new `$HOME` with zero credential files
 still authenticates. `ConfigDir.keyring_available?/0` detects that and seeds
-nothing. Only when no Secret Service is reachable do we **copy** (never
-symlink, which a refresh would write back through) `oauth_creds.json`,
-`jetski-standalone-oauth-token` and `google_accounts.json`.
+nothing. There is no file-seeded fallback: agy 1.2.16 ignores legacy credential
+files (`oauth_creds.json`, etc.) in file mode, and copying refresh tokens risks
+token-rotation divergence orphaning the operator's login (bd-6dpjw7, bd-8btihu).
+When no Secret Service keyring is reachable, agy preflight fails loudly.
 
 ## Provider-agnostic by construction
 

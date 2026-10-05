@@ -29,6 +29,7 @@ defmodule Arbiter.Worker.MemoryCapWorkerTest do
     argv_log = Path.join(dir, "argv.log")
     oom_marker = Path.join(dir, "oom")
     reset_marker = Path.join(dir, "reset")
+    stop_log = Path.join(dir, "stop.log")
 
     # Mirrors the real argv shape: `--user --scope … -p K=V … <env> -u VAR <cmd…>`.
     File.write!(systemd_run, """
@@ -55,6 +56,7 @@ defmodule Arbiter.Worker.MemoryCapWorkerTest do
           printf 'Result=success\\nMemoryPeak=1048576\\n'
         fi ;;
       reset-failed) touch '#{reset_marker}' ;;
+      stop) echo "$3" >> '#{stop_log}' ;;
     esac
     """)
 
@@ -88,7 +90,12 @@ defmodule Arbiter.Worker.MemoryCapWorkerTest do
       File.rm_rf(dir)
     end)
 
-    {:ok, dir: dir, argv_log: argv_log, oom_marker: oom_marker, reset_marker: reset_marker}
+    {:ok,
+     dir: dir,
+     stop_log: stop_log,
+     argv_log: argv_log,
+     oom_marker: oom_marker,
+     reset_marker: reset_marker}
   end
 
   defp restore_env(name, nil), do: System.delete_env(name)
@@ -134,6 +141,45 @@ defmodule Arbiter.Worker.MemoryCapWorkerTest do
     # again for the agent, then the agent's own argv, untouched.
     assert File.read!(argv_log) =~
              ~r{/env -u XDG_RUNTIME_DIR \S*/sh -c echo hi \$5; exit 3}
+  end
+
+  # bd-6zm33r AC1 (wiring half; the real-process half is the :live_systemd test).
+  test "the run's scope is stopped once the agent exits, on any outcome",
+       %{stop_log: stop_log} do
+    {_state, run, _task_id} = run_agent(["sh", "-c", "exit 0"])
+    assert [scope] = run.cgroup_scopes
+    assert File.read!(stop_log) |> String.split("\n", trim: true) == [scope]
+
+    {_state, run, _task_id} = run_agent(["sh", "-c", "exit 3"])
+    assert [scope2] = run.cgroup_scopes
+    assert File.read!(stop_log) |> String.split("\n", trim: true) == [scope, scope2]
+  end
+
+  # bd-6zm33r AC1, teardown path: the worker is stopped while the agent still runs,
+  # so no :exit_status ever arrives; `terminate/2` must stop the scope itself.
+  test "the run's scope is stopped when the worker is torn down with the agent still running",
+       %{stop_log: stop_log} do
+    task_id = "bd-memcap-#{System.unique_integer([:positive])}"
+    {:ok, pid} = Worker.start(task_id: task_id, repo: "arbiter", workspace_id: "ws-runs")
+    :ok = Worker.advance(pid, :claude)
+
+    {:ok, _port} =
+      ClaudeSession.start(
+        owner: pid,
+        worktree_path: System.tmp_dir!(),
+        command: ["sh", "-c", "sleep 30"]
+      )
+
+    _ = :sys.get_state(pid)
+    [run] = Run |> Ash.Query.filter(task_id == ^task_id) |> Ash.read!()
+    assert [scope] = run.cgroup_scopes
+    refute File.exists?(stop_log)
+
+    ref = Process.monitor(pid)
+    GenServer.stop(pid, :normal)
+    assert_receive {:DOWN, ^ref, :process, ^pid, _}
+
+    assert File.read!(stop_log) |> String.split("\n", trim: true) == [scope]
   end
 
   test "a scope systemd OOM-killed fails the run as memory_cap_exceeded",

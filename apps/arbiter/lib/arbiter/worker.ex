@@ -2716,6 +2716,21 @@ defmodule Arbiter.Worker do
 
   defp mark_memory_cap(session, _status), do: session
 
+  # bd-6zm33r: the agent has exited; anything it backgrounded is still in its
+  # scope and would run on after the run ends. Stop the scope.
+  defp reap_scope(session) do
+    case Map.get(session, :scope) do
+      %{unit: unit} = scope ->
+        case Arbiter.Worker.MemoryScope.stop(scope) do
+          :ok -> :ok
+          {:error, reason} -> Logger.warning("Worker: could not stop scope #{unit}: #{reason}")
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
   # `StopReason.classify/3`, except that a scope systemd OOM-killed is
   # `:memory_cap_exceeded` regardless of what the (bare 137) exit status or the
   # output tail suggest.
@@ -2836,6 +2851,7 @@ defmodule Arbiter.Worker do
       {:ok, session} ->
         cleanup_prompt_tmpfile(session)
         session = mark_memory_cap(session, status)
+        reap_scope(session)
         updated = Arbiter.Worker.ClaudeSession.handle_exit(session, status)
         sessions = Map.put(state.claude_sessions, port, updated)
         new_state = %State{state | claude_sessions: sessions}
@@ -3527,6 +3543,9 @@ defmodule Arbiter.Worker do
        when map_size(sessions) > 0 do
     Enum.each(sessions, fn {port, session} ->
       if is_nil(Map.get(session, :exit_status)), do: terminate_session_port(state, port)
+      # bd-6zm33r: `kill_tree` cannot reach what the agent backgrounded (already
+      # reparented), so stop the scope too. Idempotent if already reaped.
+      reap_scope(session)
     end)
 
     # bd-d2o3xb: killing the `podman` client does not reliably stop its

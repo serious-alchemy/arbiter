@@ -43,6 +43,19 @@ defmodule Arbiter.Worker.SpawnEnvSpawnTest do
     previous = Map.new(@server_env, fn {k, _} -> {k, System.get_env(k)} end)
     System.put_env(@server_env)
 
+    # The planted bus above does not exist, so agy has no keyring and its
+    # DBUS_SESSION_BUS_ADDRESS exception must not apply. config/test.exs pins
+    # the keyring on; override it for this module and restore it after.
+    previous_keyring = Application.fetch_env(:arbiter, :worker_gemini_keyring_available)
+    Application.put_env(:arbiter, :worker_gemini_keyring_available, false)
+
+    on_exit(fn ->
+      case previous_keyring do
+        {:ok, val} -> Application.put_env(:arbiter, :worker_gemini_keyring_available, val)
+        :error -> Application.delete_env(:arbiter, :worker_gemini_keyring_available)
+      end
+    end)
+
     on_exit(fn ->
       Enum.each(previous, fn
         {k, nil} -> System.delete_env(k)
