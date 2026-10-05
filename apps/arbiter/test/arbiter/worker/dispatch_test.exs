@@ -4926,6 +4926,55 @@ defmodule Arbiter.Worker.DispatchTest do
       assert File.read!(Path.join(path, "feature.txt")) == "clone work\n"
     end
 
+    # bd-5fa7zg: the reviewer runs tests in this checkout, so it is seeded from the
+    # implementer's worktree (and `worker.repos.<repo>.seed_paths`) like the
+    # ReviewGate's own gate-review checkout, instead of starting cold.
+    test "seeds the review checkout from the implementer worktree and seed_paths",
+         %{ws: ws, repo: repo, tmp: tmp} do
+      prior_root = Application.fetch_env(:arbiter, :worktree_root)
+      Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "wt"))
+
+      on_exit(fn ->
+        case prior_root do
+          {:ok, value} -> Application.put_env(:arbiter, :worktree_root, value)
+          :error -> Application.delete_env(:arbiter, :worktree_root)
+        end
+      end)
+
+      {:ok, ws} =
+        Ash.update(ws, %{
+          config: %{
+            "worker" => %{"repos" => %{"repo" => %{"seed_paths" => ["deps", "priv/plts"]}}}
+          }
+        })
+
+      {:ok, task} = Ash.create(Issue, %{title: "seeded review", workspace_id: ws.id})
+      branch = Arbiter.Worker.BranchNamer.derive(task)
+      _sha = push_task_branch(repo, branch)
+
+      impl = Arbiter.Worker.Worktree.worktree_path(branch)
+      File.mkdir_p!(Path.join(impl, "deps/jason"))
+      File.write!(Path.join(impl, "deps/jason/mix.exs"), "# dep\n")
+      File.mkdir_p!(Path.join(impl, "priv/plts"))
+      File.write!(Path.join(impl, "priv/plts/core.plt"), "plt")
+
+      {:ok, result} =
+        Dispatch.dispatch(task.id,
+          force: true,
+          repo: "rv/repo",
+          review: true,
+          start_claude: true,
+          start_driver: false,
+          claude_command: ["true"]
+        )
+
+      %{path: path} = result.review_checkout
+      on_exit(fn -> Arbiter.Reviews.Checkout.teardown(path) end)
+
+      assert File.read!(Path.join(path, "deps/jason/mix.exs")) == "# dep\n"
+      assert File.read!(Path.join(path, "priv/plts/core.plt")) == "plt"
+    end
+
     test "tears the review checkout down when the dispatch fails after the agent spawns",
          %{ws: ws, repo: repo} do
       {:ok, task} = Ash.create(Issue, %{title: "teardown on failure", workspace_id: ws.id})
@@ -5009,6 +5058,43 @@ defmodule Arbiter.Worker.DispatchTest do
 
       assert Dispatch.review_security_policy(base, []) == base
       assert Dispatch.review_security_policy(base, review_checkout: nil) == base
+    end
+  end
+
+  describe "review_security_policy/2 sandbox backend (bd-4rvf98)" do
+    setup do
+      %{
+        podman:
+          Arbiter.Agents.SecurityPolicy.merge(Arbiter.Agents.SecurityPolicy.base(), %{
+            sandbox: %{backend: :podman}
+          })
+      }
+    end
+
+    test "a review spawn runs under review_backend, not the implement backend", %{podman: podman} do
+      for opts <- [[review_checkout: %{path: "/tmp/wt"}], [review: true]] do
+        review = Dispatch.review_security_policy(podman, opts)
+        assert Arbiter.Agents.SecurityPolicy.sandbox_backend(review) == :bwrap
+      end
+    end
+
+    test "an implement spawn keeps the podman backend", %{podman: podman} do
+      assert Dispatch.review_security_policy(podman, []) == podman
+      assert Dispatch.review_security_policy(podman, review: false) == podman
+    end
+
+    test "an explicit podman review_backend is kept, so the spawn is refused", %{podman: podman} do
+      both =
+        Arbiter.Agents.SecurityPolicy.merge(podman, %{sandbox: %{review_backend: :podman}})
+
+      review = Dispatch.review_security_policy(both, review: true)
+      assert Arbiter.Agents.SecurityPolicy.sandbox_backend(review) == :podman
+
+      assert {:error, {:sandbox_backend_unavailable, :podman, _}} =
+               Arbiter.Worker.Sandbox.module(review)
+
+      assert {:error, {:sandbox_backend_unavailable, :podman, _}} =
+               Arbiter.Agents.Claude.default_argv("hi", security: review)
     end
   end
 

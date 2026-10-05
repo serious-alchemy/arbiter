@@ -53,6 +53,7 @@ defmodule Arbiter.MCP.AgentConfig.Codex do
   @dirname ".codex"
   @filename "config.toml"
   @connect_timeout_ms 5_000
+  @mcp_list_timeout_ms 15_000
 
   @impl true
   def write_mcp_config(worktree, opts) when is_binary(worktree) do
@@ -206,28 +207,53 @@ defmodule Arbiter.MCP.AgentConfig.Codex do
   When the config uses `bearer_token_env_var`, also confirms that variable is
   non-empty in `:env`. Options: `:cwd`, `:env` (list of `{name, value}`),
   `:server_name`, `:cli_args` (global `-c` overrides, as the spawn passes
-  them), `:executable` (defaults to `codex` on PATH).
+  them), `:executable` (defaults to `codex` on PATH), and `:timeout_ms`
+  (defaults to #{@mcp_list_timeout_ms}).
   """
   @spec check_worker_config(String.t(), keyword()) :: :ok | {:error, term()}
   def check_worker_config(worktree, opts) do
     env = Keyword.get(opts, :env, [])
     exe = Keyword.get(opts, :executable) || System.find_executable("codex")
+    timeout_ms = Keyword.get(opts, :timeout_ms, @mcp_list_timeout_ms)
 
     with exe when is_binary(exe) <- exe || {:error, :codex_not_found},
          {out, 0} <-
-           ReleaseEnv.cmd(exe, Keyword.get(opts, :cli_args, []) ++ ["mcp", "list", "--json"],
-             cd: worktree,
-             env: env,
-             stderr_to_stdout: false
+           mcp_list(
+             exe,
+             Keyword.get(opts, :cli_args, []) ++ ["mcp", "list", "--json"],
+             worktree,
+             env,
+             timeout_ms
            ),
          {:ok, servers} when is_list(servers) <- Jason.decode(out),
          :ok <- verify_config_loaded(servers, opts) do
       check_env_var_set(servers, env, Keyword.get(opts, :server_name, "arbiter"))
     else
-      {:error, _} = err -> err
-      {_out, status} when is_integer(status) -> {:error, {:codex_mcp_list_failed, status}}
-      other -> {:error, {:unexpected_mcp_list_output, other}}
+      {:error, _} = err ->
+        err
+
+      {_out, status} when status in [124, 137] ->
+        {:error, {:codex_mcp_list_timed_out, timeout_ms}}
+
+      {_out, status} when is_integer(status) ->
+        {:error, {:codex_mcp_list_failed, status}}
+
+      other ->
+        {:error, {:unexpected_mcp_list_output, other}}
     end
+  end
+
+  # `Task.shutdown/2` only stops Erlang from waiting on System.cmd/3; it does
+  # not reliably terminate the CLI process. GNU timeout kills the actual CLI
+  # when the deadline expires, including a SIGKILL fallback for ignored TERM.
+  defp mcp_list(exe, args, worktree, env, timeout_ms) do
+    ReleaseEnv.cmd(
+      "timeout",
+      ["--kill-after=1s", "#{timeout_ms / 1_000}s", exe | args],
+      cd: worktree,
+      env: env,
+      stderr_to_stdout: false
+    )
   end
 
   defp check_env_var_set(servers, env, server_name) do

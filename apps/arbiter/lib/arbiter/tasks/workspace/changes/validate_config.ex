@@ -35,7 +35,9 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
       `host:port` entries the egress proxy accepts as a baseline.
     * If `"agent.security.sandbox.backend"` (or a per-repo override) is present,
       it must be one of `Arbiter.Agents.SecurityPolicy.valid_sandbox_backends/0`
-      (`"bwrap"`, `"podman"`) (bd-btcdrf).
+      (`"bwrap"`, `"podman"`) (bd-btcdrf). `"review_backend"` takes the same
+      values (bd-4rvf98); `"podman"` there is accepted but refuses every review
+      spawn, so it parks them rather than run unjailed.
     * If `"routing"` is present, it must be a map.
     * If `"routing.policy"` is present, it must be one of the values in
       `Arbiter.Agents.Routing.valid_policies/0` (`"static"`, `"by_priority"`,
@@ -505,7 +507,8 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     changeset
     |> validate_egress_level(Map.get(sandbox, "egress"), label)
     |> validate_allow_hosts(Map.get(sandbox, "allow_hosts"), label)
-    |> validate_sandbox_backend(Map.get(sandbox, "backend"), label)
+    |> validate_sandbox_backend(Map.get(sandbox, "backend"), "backend", label)
+    |> validate_sandbox_backend(Map.get(sandbox, "review_backend"), "review_backend", label)
   end
 
   defp validate_sandbox_egress(changeset, _block, _label), do: changeset
@@ -527,9 +530,9 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     end
   end
 
-  defp validate_sandbox_backend(changeset, nil, _label), do: changeset
+  defp validate_sandbox_backend(changeset, nil, _key, _label), do: changeset
 
-  defp validate_sandbox_backend(changeset, backend, label) do
+  defp validate_sandbox_backend(changeset, backend, key, label) do
     valid = Arbiter.Agents.SecurityPolicy.valid_sandbox_backends()
 
     if is_binary(backend) and backend in Enum.map(valid, &Atom.to_string/1) do
@@ -538,7 +541,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
       Changeset.add_error(changeset,
         field: :config,
         message:
-          "#{label}.sandbox.backend must be one of #{Enum.map_join(valid, ", ", &Atom.to_string/1)}; " <>
+          "#{label}.sandbox.#{key} must be one of #{Enum.map_join(valid, ", ", &Atom.to_string/1)}; " <>
             "got: #{inspect(backend)}"
       )
     end

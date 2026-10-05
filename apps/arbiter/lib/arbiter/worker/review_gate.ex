@@ -2121,6 +2121,10 @@ defmodule Arbiter.Worker.ReviewGate do
   `Arbiter.Worker.Dispatch.review_security_policy/2`, the one hardening every
   worktree-backed reviewer shares: Edit/Write/NotebookEdit denied. The
   implementer keeps the plain posture — it is the one pass meant to write.
+
+  Both roles spawn under `sandbox.review_backend`, not `sandbox.backend`
+  (`SecurityPolicy.for_review_spawn/1`, bd-4rvf98): a podman repo still gets a
+  jailed, un-parked review, and a `review_backend` that cannot run is refused.
   """
   @spec session_security_policy(Workspace.t() | map() | nil, map(), :reviewer | :implementer) ::
           SecurityPolicy.t()
@@ -2131,9 +2135,18 @@ defmodule Arbiter.Worker.ReviewGate do
         _ -> nil
       end
 
-    ws
-    |> SecurityPolicy.resolve(%{}, Map.get(state, :repo))
-    |> Dispatch.review_security_policy(review_checkout: checkout)
+    policy = SecurityPolicy.resolve(ws, %{}, Map.get(state, :repo))
+
+    case role do
+      :reviewer ->
+        Dispatch.review_security_policy(policy, review_checkout: checkout, review: true)
+
+      # The revise pass writes in the implementer's tree, so it keeps the plain
+      # posture, but not the implement backend: `sandbox.backend: podman` wraps
+      # the task worker only, so a gate pass under it was refused (bd-4rvf98).
+      :implementer ->
+        SecurityPolicy.for_review_spawn(policy)
+    end
   end
 
   # The head an APPROVE stamps and records coverage for. With a round checkout
