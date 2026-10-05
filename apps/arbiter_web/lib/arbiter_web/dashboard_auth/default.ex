@@ -27,7 +27,23 @@ defmodule ArbiterWeb.DashboardAuth.Default do
        and is ignored. The login is re-checked against the allowlist on every
        request and LiveView mount, so removing it revokes live sessions.
 
+  3. **Direct loopback (opt-in, off by default).** `ARB_DASHBOARD_TRUST_LOOPBACK=true`
+     or `config :arbiter_web, :dashboard_trust_loopback, true`. A request is
+     trusted without a login only if the peer is loopback, it carries no
+     proxy/identity header (`X-Forwarded-*`, `Forwarded`, `Tailscale-*`) and
+     its `Host` is exactly `127.0.0.1`, `localhost` or `[::1]` (optionally
+     with a port; the DNS-rebinding defence). It is re-evaluated on every
+     request and mount, never minted into a long-lived grant: the HTTP request
+     only stamps a `"loopback"` marker in the session, which proves the page
+     was fetched by a clean request (the websocket upgrade cannot see
+     `Forwarded`/`Tailscale-*`), and the mount re-checks the flag, the peer,
+     the `x-*` headers and the host. Turning the flag off revokes at once.
+
   ## Residual risk
+
+  With direct loopback trust on, any local process or other Unix user on the
+  host, and anyone with an `ssh -L` tunnel to the port, arrives as direct
+  loopback and is trusted.
 
   A process on this host can reach 127.0.0.1 directly and forge the serve
   headers. That is the same trust boundary as `/api` (a local process can
@@ -54,9 +70,13 @@ defmodule ArbiterWeb.DashboardAuth.Default do
         {:ok, conn, identity}
 
       :error ->
-        with {:ok, login} <- tailscale_login(conn) do
-          grant = grant_session("tailscale", login)
-          {:ok, put_session(conn, @session_key, grant[@session_key]), login}
+        case tailscale_login(conn) do
+          {:ok, login} ->
+            grant = grant_session("tailscale", login)
+            {:ok, put_session(conn, @session_key, grant[@session_key]), login}
+
+          :error ->
+            direct_loopback(conn)
         end
     end
   end
@@ -75,13 +95,48 @@ defmodule ArbiterWeb.DashboardAuth.Default do
   def authenticate_session(_session), do: :error
 
   @impl true
+  def authenticate_socket(
+        %{@session_key => %{"kind" => "loopback", "at" => at}},
+        connect_info
+      )
+      when is_integer(at) do
+    with true <- trust_loopback?(),
+         true <- System.system_time(:second) - at < @max_age_seconds,
+         %{address: address} <- connect_info[:peer_data],
+         true <- Loopback.loopback?(address),
+         true <- Enum.all?(connect_info[:x_headers] || [], fn {k, _} -> not proxy_header?(k) end),
+         %URI{host: host} when is_binary(host) <- connect_info[:uri],
+         true <- loopback_host?(host) do
+      {:ok, "loopback"}
+    else
+      _ -> :error
+    end
+  end
+
+  def authenticate_socket(_session, _connect_info), do: :error
+
+  @impl true
   def mode do
+    base = if(allowlist() == [], do: "token", else: "token+tailscale")
+    trust = trust_loopback?()
+
     %{
       impl: "default",
-      mode: if(allowlist() == [], do: "token", else: "token+tailscale"),
-      tailscale_logins: length(allowlist())
+      mode: if(trust, do: base <> "+loopback", else: base),
+      tailscale_logins: length(allowlist()),
+      trust_loopback: trust
     }
   end
+
+  @doc "Whether the opt-in direct-loopback grant is enabled."
+  @spec trust_loopback?() :: boolean()
+  def trust_loopback? do
+    truthy?(Application.get_env(:arbiter_web, :dashboard_trust_loopback, false)) or
+      truthy?(System.get_env("ARB_DASHBOARD_TRUST_LOOPBACK"))
+  end
+
+  defp truthy?(v) when v in [true, "true", "1"], do: true
+  defp truthy?(_), do: false
 
   @doc """
   The session map a granted login carries. `max_age` (seconds) only exists so
@@ -112,6 +167,31 @@ defmodule ArbiterWeb.DashboardAuth.Default do
   @doc "Drop any grant."
   @spec revoke(Plug.Conn.t()) :: Plug.Conn.t()
   def revoke(conn), do: configure_session(conn, drop: true)
+
+  # ---- direct loopback -------------------------------------------------------
+
+  defp direct_loopback(conn) do
+    with true <- trust_loopback?(),
+         true <- Loopback.loopback?(conn.remote_ip),
+         true <- not Enum.any?(conn.req_headers, fn {k, _} -> proxy_header?(k) end),
+         true <- loopback_host?(conn.host) do
+      marker = %{"kind" => "loopback", "sub" => "loopback", "at" => System.system_time(:second)}
+      {:ok, put_session(conn, @session_key, marker), "loopback"}
+    else
+      _ -> :error
+    end
+  end
+
+  defp proxy_header?(name) do
+    name = String.downcase(name)
+
+    String.starts_with?(name, "x-forwarded-") or name == "forwarded" or
+      String.starts_with?(name, "tailscale-")
+  end
+
+  # `conn.host` / `uri.host` is the Host header without its port. Anything but
+  # these literal names (127.0.0.2, a rebound domain) is refused.
+  defp loopback_host?(host), do: host in ["127.0.0.1", "localhost", "::1", "[::1]"]
 
   # ---- tailscale -------------------------------------------------------------
 

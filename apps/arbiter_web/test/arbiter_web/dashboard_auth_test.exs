@@ -190,6 +190,108 @@ defmodule ArbiterWeb.DashboardAuthTest do
     end
   end
 
+  describe "opt-in direct loopback trust" do
+    setup do
+      previous = Application.get_env(:arbiter_web, :dashboard_trust_loopback)
+      Application.put_env(:arbiter_web, :dashboard_trust_loopback, true)
+
+      on_exit(fn ->
+        if is_nil(previous),
+          do: Application.delete_env(:arbiter_web, :dashboard_trust_loopback),
+          else: Application.put_env(:arbiter_web, :dashboard_trust_loopback, previous)
+      end)
+
+      :ok
+    end
+
+    defp direct(host \\ "127.0.0.1:4848") do
+      # Plug owns the Host header: `conn.host` is its parsed form (no port).
+      %{
+        build_conn()
+        | host: String.replace(host, ~r/(?<=[\d\]a-z]):\d+\z/, ""),
+          remote_ip: {127, 0, 0, 1}
+      }
+    end
+
+    test "flag unset: a direct loopback request still redirects" do
+      Application.delete_env(:arbiter_web, :dashboard_trust_loopback)
+      assert direct() |> get("/about") |> redirected_to() == "/login"
+    end
+
+    test "a direct loopback request renders the dashboard and mounts the LiveView" do
+      for host <- [
+            "127.0.0.1",
+            "127.0.0.1:4848",
+            "localhost",
+            "localhost:4848",
+            "[::1]:4848",
+            "::1"
+          ] do
+        assert direct(host) |> get("/about") |> html_response(200)
+      end
+
+      assert {:ok, _view, _html} = live(direct(), "/")
+    end
+
+    test "X-Forwarded-* and Forwarded headers redirect" do
+      for h <- ["x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "forwarded"] do
+        conn = direct() |> put_req_header(h, "1.2.3.4") |> get("/about")
+        assert redirected_to(conn) == "/login", "#{h} was trusted"
+      end
+    end
+
+    test "any Tailscale-* header redirects" do
+      conn = direct() |> put_req_header("tailscale-user-login", "a@b.c") |> get("/about")
+      assert redirected_to(conn) == "/login"
+
+      conn = direct() |> put_req_header("tailscale-app-capabilities", "{}") |> get("/about")
+      assert redirected_to(conn) == "/login"
+    end
+
+    test "a non-loopback Host (DNS rebinding) redirects" do
+      for host <- ["evil.example.com", "127.0.0.1.evil.com", "127.0.0.2", "localhost.evil.com"] do
+        assert direct(host) |> get("/about") |> redirected_to() == "/login"
+      end
+
+      assert {:error, {:redirect, %{to: "/login"}}} = live(direct("evil.example.com"), "/")
+    end
+
+    test "a non-loopback peer redirects" do
+      conn = %{direct() | remote_ip: {100, 64, 0, 9}} |> get("/about")
+      assert redirected_to(conn) == "/login"
+
+      assert {:error, {:redirect, %{to: "/login"}}} =
+               live(%{direct() | remote_ip: {100, 64, 0, 9}}, "/")
+    end
+
+    test "a loopback marker replayed through a proxy does not mount" do
+      conn = direct() |> get("/about")
+
+      replay =
+        conn
+        |> recycle()
+        |> Map.put(:host, "127.0.0.1")
+        |> put_req_header("x-forwarded-for", "1.2.3.4")
+
+      assert {:error, {:redirect, %{to: "/login"}}} = live(replay, "/")
+    end
+
+    test "turning the flag off revokes on the next request and mount" do
+      conn = direct() |> get("/about")
+      assert html_response(conn, 200)
+      Application.put_env(:arbiter_web, :dashboard_trust_loopback, false)
+      assert conn |> recycle() |> get("/about") |> redirected_to() == "/login"
+      assert {:error, {:redirect, %{to: "/login"}}} = live(recycle(conn), "/")
+    end
+
+    test "mode reports loopback" do
+      Application.put_env(:arbiter_web, :dashboard_tailscale_logins, [])
+      assert %{mode: "token+loopback", trust_loopback: true} = ArbiterWeb.DashboardAuth.mode()
+      Application.put_env(:arbiter_web, :dashboard_tailscale_logins, ["a@b.c"])
+      assert %{mode: "token+tailscale+loopback"} = ArbiterWeb.DashboardAuth.mode()
+    end
+  end
+
   describe "mode and slot" do
     test "the default implementation reports its mode" do
       Application.put_env(:arbiter_web, :dashboard_tailscale_logins, [])
