@@ -162,6 +162,10 @@ defmodule ArbiterWeb.SessionTransportSocketTest do
       "--url",
       # The socket mount point — phoenix.js appends `/websocket` itself.
       "ws://127.0.0.1:#{http_port}/session",
+      # Loopback is not a credential (bd-3gycsz), and a node client has no
+      # dashboard cookie, so it presents a signed token.
+      "--token",
+      Arbiter.MCP.Scope.mint_coordinator(),
       "--echo",
       # Deterministic stop: report as soon as every byte this test emits has
       # been accounted for, rather than on a timer.
