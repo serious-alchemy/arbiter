@@ -415,7 +415,7 @@ Source for current behavior: `agents/*.ex`, `worker/spawn_env.ex`,
 | Provider | Today | Needs in a container | Measured here |
 |---|---|---|---|
 | **Claude** | `claude --print …`, env from `SpawnEnv` (empty by default, allowlist). `CLAUDE_CONFIG_DIR` is an Arbiter-owned dir seeded with `settings.json` and `CLAUDE.md`. Auth is `CLAUDE_CODE_OAUTH_TOKEN` from the provider account. **Not jailed** | The binary in the image, a per-run `CLAUDE_CONFIG_DIR`, the token as an inherited env var (`-e NAME`, no value on argv, so `ps` shows nothing), `.mcp.json` in the checkout | **Ran end to end.** A completely empty `CLAUDE_CONFIG_DIR` with only the token worked for `claude -p` |
-| **Codex** | `codex exec …`; Arbiter **never sets `CODEX_HOME`**, so a non-review worker reads the operator's `~/.codex/auth.json` directly. Jailed only for reviews, with the network shared | A per-run `CODEX_HOME` seeded with a copy of the ChatGPT login (`auth.json`) | Not run. Risk: a copied ChatGPT refresh token rotates, so concurrent copies can invalidate each other (the same shape as the Claude CLI rotating a seeded `.credentials.json` regardless of the token env, observed earlier) |
+| **Codex** | `codex exec …`; Arbiter **never sets `CODEX_HOME`**, so a non-review worker reads the operator's `~/.codex/auth.json` directly. Jailed only for reviews, with the network shared | A per-run `CODEX_HOME` seeded with a copy of the ChatGPT login (`auth.json`) | **Built (P8, [§4.2](#42-codex-under-podman-p8))**, started in a container against the real login ([Appendix F](#appendix-f-p8-codex-live-run-bd-50d5j6)). The risk it handles: a copied ChatGPT refresh token rotates, so a copy that refreshed leaves the real file holding a retired token (the same shape as the Claude CLI rotating a seeded `.credentials.json` regardless of the token env, observed earlier) |
 | **agy** | Jailed under bwrap, auth through the freedesktop Secret Service over a filtered D-Bus (`xdg-dbus-proxy`); fails loudly at preflight when no keyring is reachable (file-seeded fallback removed in bd-8btihu) | Either a D-Bus proxy socket mounted in (SELinux blocks `connectto` unless `label=disable`) or a dedicated headless credential mechanism (bd-6dpjw7) | Not run; **guardrail-profiles open question 5 answered (no, bd-6dpjw7).** `xdg-dbus-proxy` is not packaged on RHEL 8. Recommend leaving agy on bwrap |
 | **grok** | **No adapter.** Only a disabled login recipe (`GROK_HOME`, `auth.json`) | A per-run `GROK_HOME` when an adapter exists. Memory records that grok deletes `auth.json` after a rejected refresh | Not applicable |
 | **MCP and `arb` to Arbiter** | URL `http://127.0.0.1:4848/mcp`, `Authorization: Bearer <worker token>` in `.mcp.json`; the same token is `ARB_TOKEN`; `ARB_HOST` defaults to `127.0.0.1:4848` | A bridge to the host's loopback ([§5](#5-network)) | Verified: with host loopback mapped in, `GET /api/version` → **200** and `GET /api/issues/bd-jk49nc` without a token → **401**, so bd-asawcq holds from inside a container |
@@ -452,9 +452,9 @@ against real podman):
 | Token env | the spawn's explicit pairs only, each as `-e NAME` with the value in the `podman` client's environment: nothing on argv. `PATH`, `HOME`, `XDG_*` and the proxy variables are literals |
 | Proxy and Arbiter | the run's two sockets bound read-only, and `Jail`'s own `socat` script inside the container on `127.0.0.1`: `HTTPS_PROXY`, `ARB_HOST` and the `.mcp.json` URL work unchanged; `--network=none`, so those sockets are the only exit |
 
-Only Claude has a wrap point. `Sandbox.module/1` still refuses `:podman` (so
-agy and Codex cannot run unsandboxed under it); `Sandbox.module/2` resolves it
-for Claude. Dispatch's provider gate accepts Claude, swaps automatic routing to
+Claude and Codex ([§4.2](#42-codex-under-podman-p8)) have a wrap point.
+`Sandbox.module/1` still refuses `:podman` (so agy cannot run unsandboxed under
+it); `Sandbox.module/2` resolves it for Claude and Codex. Dispatch's provider gate accepts Claude and Codex, swaps automatic routing to
 Claude, and refuses an explicit other provider. `Claude.default_argv/2` refuses
 a podman policy unless the caller passes `sandbox_wrap: true` (Dispatch does),
 so the **reviewer, conflict-resolution and fix-pass spawns are not wrapped**:
@@ -490,6 +490,52 @@ container makes it *enforceable*: with no `~/.ssh` and no agent, the deploy
 key is the only credential that exists. Under `--network=none`, `git push`
 reaches the remote through the proxy bridge with the `ProxyCommand socat`
 `GIT_SSH_COMMAND` that `Jail.ssh_env/1` already builds.
+
+### 4.2 Codex under podman (P8)
+
+`provider: "codex"` goes through the same two wrap points as Claude
+(`ClaudeSession.start/1` -> `ContainerSpawn.prepare/1`, `open_scoped_port/2` ->
+`wrap_port/1`); four things differ (bd-50d5j6):
+
+| Item | How |
+|---|---|
+| `CODEX_HOME` | Per run, under the run's temp dir (`Codex.ConfigDir.seed_run_home/2`): the generated backend-only `config.toml`, the worker `AGENTS.md`, the execpolicy deny rules (`rules/arbiter.rules`, enforced in every mode), and **a copy** of the operator's `auth.json` (0600, a regular file). The operator's home is never mounted, so `mountinfo` in the container names nothing of it. `Codex.spawn_env/1` skips the host's per-worktree home and its symlinked `auth.json` for a container spawn |
+| The CLI | The `codex` on a host `PATH` is a node launcher; a container has no node. The vendored static binary beside it in the npm package (`node_modules/@openai/codex-linux-*/vendor/<triple>/bin/codex`) is mounted at `/opt/arbiter/cli/codex`, with `rg`, `bwrap` and the `codex-code-mode-host` sibling (the CLI spawns it by path, and without it the turn starts with a "Code Mode is unavailable" error). A cargo/brew `codex` that is already an ELF is mounted as it is |
+| Egress baseline | The proxy's infra hosts are the OpenAI ones (`chatgpt.com`, `api.openai.com`, `auth.openai.com`) instead of Anthropic's. The proxy still runs in learn mode |
+| MCP | Unchanged: the adapter's `-c mcp_servers.<name>.url=…` and `bearer_token_env_var="ARBITER_MCP_TOKEN"` overrides (bd-avq0wb) name `Arbiter.MCP.server_url/0`, which the in-container `socat` bridge serves on the same loopback port; the bearer is a `-e ARBITER_MCP_TOKEN` from the client's environment, never on argv |
+
+`Codex.default_argv/2` takes `sandbox_wrap: true` like Claude's: the argv names
+`/opt/arbiter/cli/codex`, drops `--ignore-user-config` (the per-run home is the
+only config) and keeps the sandbox flags of the policy mode. `write_confinement/1`
+and `egress_confinement/1` answer `:os_jail` under podman (except `:strict`,
+which stays refused for an implementer), so the guardrail gates see the
+container. Reviews, conflict resolution and fix passes resolve
+`sandbox.review_backend` and are unchanged.
+
+**Refresh-token rotation (`Codex.AuthSync`).** The CLI refreshes the ChatGPT
+access token near expiry and rotates the *refresh* token. In a copy that means
+the real file is left holding a retired token, and the operator's next login or
+the next worker fails with "refresh token was already used". `AuthSync` carries
+the rotation back, with one rule: **the newest `last_refresh` wins**. Codex
+stamps it on every refresh, so no bookkeeping about who copied what is needed,
+and the functions are stateless and idempotent.
+
+| When | What |
+|---|---|
+| Every port re-open (`wrap_port/1`: a nudge, an auto-resume) | `sync` (run copy -> real file if strictly newer), then `pull` (a strictly newer real file, rotated by a sibling run, replaces the copy) |
+| `ContainerSpawn.teardown/1` | `sync` |
+| The owning worker dies by any means, including `:kill` | `AuthSync.Reaper` (monitors the owner; holds the paths in memory, never reads them back from the run dir, which the worker can write) syncs on `:DOWN`; `RunTmp.Reaper` calls `Reaper.flush/2` synchronously **before** it deletes the run dir, since both react to the same `:DOWN` |
+
+The write is `rename/2` over the real file from a 0600 temp file beside it, so a
+reader sees the old or the new file, never half; it goes *through* a symlinked
+`auth.json` (dotfile managers), and the read-compare-write is serialised per
+file with `:global.trans/3`. A run copy that is not a usable login (empty,
+no refresh token and no key) is ignored; one with no `last_refresh` never beats
+a dated file. An older rotation (a sibling run adopted a newer one first) is
+dropped and logged, not applied. What it cannot fix: two runs that both hold
+token T0 where the first one's refresh retires T0 server-side; the second then
+fails its own refresh. A re-opened run picks up T1 through `pull`, a run that is
+mid-turn does not.
 
 ## 5. Network
 
@@ -672,7 +718,7 @@ needed for it, but they do stay for agy.
 | **bd-3q2djr** (G3) | Hide sensitive read paths | backlog | **Shrinks to agy-on-bwrap only.** For containers there is nothing to hide: only the mounts exist. Keep it small and do it for agy; the doctor "cannot read the install DB" self-test is reused as a container probe |
 | **bd-cfktou** (G6) | agy network mode | verifying | **Remains** (agy on bwrap). Its `Egress.JailRun` sockets and in-namespace `socat` bridge are reused as-is by the container backend, so G6 is on the critical path of this plan, not obsoleted by it |
 | **bd-d2o3xb** (G7) | Claude under the jail | backlog | **Re-scoped: Claude under the podman backend** (P7). Same goals (config-dir bind, token env, MCP and `arb` bridges), different primitive. Do not build bwrap masks for Claude |
-| **bd-50d5j6** (G8) | Codex under the jail | backlog | **Re-scoped: Codex under podman**, folded with bd-99emmd as the original ticket suggested. Adds a per-run `CODEX_HOME` |
+| **bd-50d5j6** (G8) | Codex under the jail | verifying | **Done as Codex under podman** (P8, [§4.2](#42-codex-under-podman-p8)), folded with bd-99emmd as the original ticket suggested. Adds a per-run `CODEX_HOME` and the refresh-token write-back |
 | **bd-ld8qde** (G14) | Dispatch-time withholding | backlog | **Shrinks, and inverts.** Withholding is the default; G14 becomes "add exactly the declared grants" (extra `-e`, `--secret`, a proxy allowlist entry). The "hide what is undeclared" half disappears for containers. D4 → D3 |
 | **bd-9cygoo** (G16) | Scoped git and tracker credentials | backlog | **Remains and becomes enforceable.** Without `~/.ssh` or an agent in the container, the deploy key is the only push credential. Deliver it with `--secret`, not an agent socket (SELinux, and an agent holds every key). The operator still has to create the per-repo deploy keys or the GitHub App |
 | bd-8xy1mf | Doctor probe for bwrap on both hosts | closed | **Repeat for podman** (P1) |
@@ -693,7 +739,7 @@ difficulty.
 | P5 | **Done (bd-4wy1w1, `Arbiter.Worker.PrivateClone`).** Git layout B: private `--shared` clone with read-only `:O` alternates, sync-back into the main repo, a pinned base ref against gc, cleanup and sweeper changes, ReviewGate and MergeQueue reads. **The riskiest item.** Re-estimated D3 after the reading day (§3.2) | 4 | P3 |
 | P6 | **Done (bd-1wm14e, `Arbiter.Worker.DepsCache`).** Image-keyed deps cache: seed job inside the image, per-worker `cp --reflink` copy, key `(lockfile hash, image tag)`. Extend bd-5tncmq | 3 | P4 |
 | P7 | **Done (bd-d2o3xb, `Arbiter.Worker.ContainerSpawn`).** Claude under the container backend (replaces G7 bd-d2o3xb): config dir, token env, `.mcp.json`, `arb`, proxy and Arbiter bridges via G5's sockets, wrap point in `ClaudeSession`. See [§4.1](#41-claude-under-podman-p7) | 3 | P3, P5, G5 |
-| P8 | **Codex under the container backend** (replaces G8 bd-50d5j6, with bd-99emmd): per-run `CODEX_HOME`, refresh-token rotation handling | 3 | P7 |
+| P8 | **Done (bd-50d5j6, `ContainerSpawn` `provider: "codex"`, `Codex.AuthSync`).** Codex under the container backend (replaces G8 bd-50d5j6, with bd-99emmd): per-run `CODEX_HOME`, refresh-token rotation handling. See [§4.2](#42-codex-under-podman-p8) and [Appendix F](#appendix-f-p8-codex-live-run-bd-50d5j6) | 3 | P7 |
 | P9 | Deploy-key delivery as `--secret` (the body of G16 bd-9cygoo and the per-run-agent part of G14) | 3 | P7 |
 | P10 | **Done (bd-dmcbos, `Arbiter.Worker.TestServices`).** Test services: a per-worker pod with a Postgres sidecar on the pod's `lo` for vstim and tonic (Postgres 15/16, plus an S3 store for tonic). Optional; arbiter needs none. See [Appendix E](#appendix-e-p10-test-services-probes-bd-dmcbos) | 3 | P7 |
 | P11 | Re-plan the six tickets in [§7.2](#72-what-happens-to-each-guardrail-ticket): re-scope G7 and G8, shrink G3 and G14, annotate G6 and G16 | 1 | this decision |
@@ -864,3 +910,33 @@ deps exist in this container (no network, by design), so the suite in the test
 is a stand-in (DDL and queries through the injected `DATABASE_URL`). The first
 run of a real suite needs the repo's image (P4/P6) and a deps cache, then is
 checked by dispatching a vstim ticket with `sandbox.backend: podman`.
+
+
+## Appendix F: P8 Codex live run (bd-50d5j6)
+
+Run 2026-10-05 on the Fedora 44 laptop (podman 5.8.7, SELinux enforcing, codex-cli
+0.153.4), with `container_spawn_codex_podman_test.exs`:
+
+    cd apps/arbiter && ARB_LIVE_CODEX=1 ARB_LIVE_IMAGE=localhost/arbiter-dev/beam-1.19.4-28.2:f0def79aaf5f \
+      mix test --include podman --include live_codex test/arbiter/worker/container_spawn_codex_podman_test.exs
+
+It goes through the production path (`ContainerSpawn.prepare/1`, the real
+`Egress.JailRun` proxy and Arbiter bridge, `Codex.default_argv/2` and
+`spawn_env/1`, `wrap_port/1`, a real `podman run`) with the operator's real
+`~/.codex/auth.json` as the login to copy. A stand-in MCP server
+(`Arbiter.Test.StubMcpServer`, one `ping` tool) plays Arbiter's `/mcp`.
+
+| Check | Result |
+|---|---|
+| `codex login status` in the container | `Logged in using ChatGPT`, from the per-run copy; `CODEX_HOME` is the run's dir; **no `mountinfo` line names the operator's codex home** |
+| MCP over `-c` and the Arbiter bridge | the stub received `initialize` and `tools/list` with `Authorization: Bearer <the worker token>`: the CLI connected from inside `--network=none` through the bridge socket |
+| Egress | the proxy (learn mode) saw `chatgpt.com` and two `*.oaiusercontent.com` hosts and nothing else; the container has no other route |
+| Model turn | **Not completed.** The ChatGPT account on this host was over its usage limit (`You've hit your usage limit … try again at Oct 16th, 2026`), returned by the API through the proxy. So `tools/call` and a successful turn were **not** exercised live; the request that reached the API proves the login and the egress, and the MCP connection was made before the turn |
+| Refresh-token rotation | **Not exercised live**: no refresh was due (`auth.json` was byte-identical after the run). Rotation is covered by `auth_sync_test.exs`, `auth_sync_reaper_test.exs` and `container_spawn_codex_test.exs` against files, not against OpenAI |
+
+One finding from the first attempt, now fixed: the CLI spawns
+`codex-code-mode-host` by path beside itself, and with only `codex` mounted the
+turn began with "Code Mode is unavailable … host executable was not found".
+A hand probe in the same container flags showed `bwrap --ro-bind / / true` exiting 0, but
+the CLI's own `:auto` sandbox was **not** run live. `socat` logs one `waitpid` warning.
+
