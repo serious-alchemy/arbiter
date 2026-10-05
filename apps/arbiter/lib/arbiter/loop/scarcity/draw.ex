@@ -249,7 +249,8 @@ defmodule Arbiter.Loop.Scarcity.Draw do
     |> Enum.map_join(fn {model, e} ->
       case e do
         %{status: :calibrated, share_per_weighted_token: c} ->
-          "\n  #{model}: #{:erlang.float_to_binary(c * 1.0e6, decimals: 4)}% of the window per 1M weighted tokens"
+          # `c` is a fraction of the window per weighted token: x1e6 tokens, x100 percent.
+          "\n  #{model}: #{:erlang.float_to_binary(c * 1.0e8, decimals: 4)}% of the window per 1M weighted tokens"
 
         %{reason: reason} ->
           "\n  #{model}: insufficient data (#{reason})"

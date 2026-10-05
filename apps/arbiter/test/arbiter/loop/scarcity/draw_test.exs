@@ -214,6 +214,8 @@ defmodule Arbiter.Loop.Scarcity.DrawTest do
 
       assert text =~ "insufficient data"
       assert text =~ "opus"
+      # @fit's opus is 2.0e-6 of the window per weighted token: 1M tokens = 200%.
+      assert text =~ "opus: 200.0000% of the window per 1M weighted tokens"
     end
   end
 end
