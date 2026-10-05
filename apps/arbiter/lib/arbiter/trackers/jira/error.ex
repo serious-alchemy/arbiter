@@ -17,6 +17,9 @@ defmodule Arbiter.Trackers.Jira.Error do
       through a status the issue can't reach from where it is)
     * `:no_transition_path` — the target status is mapped, but no route to it
       exists in the configured `transition_graph`
+    * `:upstream_past_target` — a `:closed` transition was declined because the
+      ticket is not known to still precede the closed-mapped status (it may
+      have been moved past it by someone else); writing would move it backwards
     * `:status_unmapped` — the lifecycle event has no `status_map` entry; a
       benign "this tracker doesn't model that" skip
     * `:config_missing` — workspace config is missing host / project_key /
@@ -35,6 +38,7 @@ defmodule Arbiter.Trackers.Jira.Error do
           | :network
           | :transition_unavailable
           | :no_transition_path
+          | :upstream_past_target
           | :status_unmapped
           | :config_missing
 
