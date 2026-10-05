@@ -5934,7 +5934,7 @@ defmodule Arbiter.Worker.ReviewGate do
           %{type: Agents.agent_type(ws, :agent) || :claude, config: block}
 
         %Issue{} = task ->
-          Routing.choose(task, ws, %{})
+          Routing.choose(task, ws)
       end
 
     provider_atom =

@@ -234,3 +234,41 @@ Both stop being true the moment an LLM call lands inside `Loop` — the
 payload-authoring work the ticket flags. When that happens the draw lands on the
 very row above, and the note must stop saying "none". The accounting is already
 wired; only the number is currently zero.
+
+## Draw calibration beyond Claude's 5h window (bd-3is1nz, R3)
+
+`Scarcity.calibrate/3` reads one utilization figure for the window in force, so
+it answers one question: Claude's 5h capacity. The paced-routing design
+(`docs/design/paced-quota-routing-signals.md`, §2.3 and §11 row R3) needs the
+draw expressed in *each pool's own window units*, and per model. With the
+append-only `quota_snapshots` history (R2, bd-3qfc81) there is a series of
+readings to fit.
+
+`Arbiter.Loop.Scarcity.Draw` builds one equation per interval between two
+captures of an (account, pool, window):
+
+```
+utilization delta = Σ_models c_model × weighted_tokens_model + b × hours
+```
+
+`weighted_tokens` is `Scarcity.weighted_tokens/1` over the `usage_events` of the
+same account and pool inside `(anchor, capture]`. `c_model` is the **window share
+per weighted token**. `b` absorbs traffic the ledger never sees (the coverage
+caveat above), so it doesn't inflate the per-model coefficients.
+`Arbiter.Loop.Scarcity.Calibration` solves it by non-negative least squares
+(Lawson–Hanson), because every unknown is a draw.
+
+* **Intervals** coalesce captures closer than 30 min (5h window) or 4 h (others),
+  and are dropped, never diffed, when the window reset inside them or the polling
+  gap exceeds the window.
+* **Absence is never zero.** A coefficient is `nil` with a `reason`
+  (`:too_few_observations`, `:too_few_model_observations`, `:collinear`,
+  `:non_positive`) when the data doesn't support one. A fit that drives a model
+  to `0.0` is reported `:non_positive`, because `0.0` would read as "free".
+* **Per account.** Two accounts on one provider may be on different plans, so
+  each is fitted separately; `Draw.lookup/5` answers with the best-supported fit
+  unless `:account_id` is given.
+* **Shadow only.** Nothing on a routing or gate path calls it (a test pins
+  that). Read it with `mix arbiter.draw_calibration`, or
+  `bin/arbiter eval 'Arbiter.Release.draw_calibration()'` on a release install.
+  `Scarcity.draw_share/5` is the seam R11 (window-share `δ`) will read.

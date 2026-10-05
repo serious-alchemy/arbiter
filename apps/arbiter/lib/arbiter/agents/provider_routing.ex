@@ -590,7 +590,7 @@ defmodule Arbiter.Agents.ProviderRouting do
   # ---- evaluation ------------------------------------------------------------
 
   defp context(ws, task, opts) do
-    routed = routed_choice(task, ws)
+    routed = routed_choice(task, ws, opts)
 
     %{
       ws: ws,
@@ -609,8 +609,8 @@ defmodule Arbiter.Agents.ProviderRouting do
     }
   end
 
-  defp routed_choice(%Issue{} = task, ws), do: Routing.choose(task, ws, %{})
-  defp routed_choice(_task, ws), do: Routing.default_choice(ws)
+  defp routed_choice(%Issue{} = task, ws, opts), do: Routing.decide(task, ws, opts)
+  defp routed_choice(_task, ws, _opts), do: Routing.default_choice(ws)
 
   defp candidates(ws) do
     case ProviderSettings.effective(ws, :implementer) do
