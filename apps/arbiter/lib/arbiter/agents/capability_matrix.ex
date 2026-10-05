@@ -61,8 +61,17 @@ defmodule Arbiter.Agents.CapabilityMatrix do
   @capabilities ~w(resume async_verification)
   @async_values ~w(reliable unreliable unknown)
 
-  # The roles that continue a prior run rather than start one.
-  @resume_roles [:resume, :resume_session, :auto_resume, :reconciler_resume]
+  # The roles that continue a prior run rather than start one. `:revise` and
+  # `:review_gate_fix_round` are the `routing_role` the merge-queue revise and
+  # fix-round dispatchers pass to `Dispatch.resume/2`.
+  @resume_roles [
+    :resume,
+    :resume_session,
+    :auto_resume,
+    :reconciler_resume,
+    :revise,
+    :review_gate_fix_round
+  ]
 
   @type row :: %{optional(String.t()) => term()}
   @type gate :: %{rows: [row()], requires: [String.t()]}

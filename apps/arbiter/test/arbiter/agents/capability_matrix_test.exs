@@ -154,7 +154,14 @@ defmodule Arbiter.Agents.CapabilityMatrixTest do
 
   describe "requirements" do
     test "resume roles need resume; the rest need only what the repo declares" do
-      for role <- [:resume, :resume_session, :auto_resume, :reconciler_resume] do
+      for role <- [
+            :resume,
+            :resume_session,
+            :auto_resume,
+            :reconciler_resume,
+            :revise,
+            :review_gate_fix_round
+          ] do
         assert "resume" in CapabilityMatrix.requires(role, [])
       end
 

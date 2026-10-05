@@ -1437,8 +1437,8 @@ defmodule Arbiter.Worker.Dispatch do
 
   defp capability_role(opts) do
     cond do
-      role = Keyword.get(opts, :routing_role) -> role
       Keyword.get(opts, :resume) == true -> :resume
+      role = Keyword.get(opts, :routing_role) -> role
       true -> :main
     end
   end

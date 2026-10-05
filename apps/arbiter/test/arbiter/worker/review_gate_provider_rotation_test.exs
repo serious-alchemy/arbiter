@@ -459,4 +459,65 @@ defmodule Arbiter.Worker.ReviewGateProviderRotationTest do
       assert task_after.attention_cause == :reviewer_timeout
     end
   end
+
+  # bd-57uzkl (E17): ReviewerRouting returns `{:none, _}` when the pre-routing
+  # reviewer lacks a required capability; the gate must refuse the pass rather
+  # than fall through to spawning the very reviewer the gate just refused.
+  describe "capability hard gate on the reviewer (bd-57uzkl)" do
+    defp gated_workspace(type, gates?) do
+      routing =
+        if gates?,
+          do: %{
+            "capability_gates" => true,
+            "repos" => %{"trib/repo" => %{"requires" => ["async_verification"]}}
+          },
+          else: %{}
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "trib-cap-ws-#{System.unique_integer([:positive])}",
+          prefix: "trc",
+          config: %{
+            "review" => %{"required" => true, "rounds" => 1},
+            "review_agent" => %{"type" => type},
+            "routing" => routing
+          }
+        })
+
+      ws
+    end
+
+    test "a reviewer lacking a required capability is never spawned",
+         %{repo: repo, stub_dir: stub_dir, log: log} do
+      stub_approve(stub_dir, "agy", log)
+      prepend_path(stub_dir)
+
+      ws = gated_workspace(["gemini"], true)
+      task = new_task(ws)
+
+      pid = run_gate(task, repo, "feature/cap-refused")
+
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        12_000
+      )
+
+      assert calls(log) == [], "agy lacks async_verification and must not be spawned"
+      assert merge_commit_count(repo) == 0
+    end
+
+    test "gates off, the same pool runs the reviewer exactly as today",
+         %{repo: repo, stub_dir: stub_dir, log: log} do
+      stub_approve(stub_dir, "agy", log)
+      prepend_path(stub_dir)
+
+      ws = gated_workspace(["gemini"], false)
+      task = new_task(ws)
+
+      run_gate(task, repo, "feature/cap-off")
+
+      wait_until(fn -> merge_commit_count(repo) == 1 end, 10_000)
+      assert calls(log) == ["agy"]
+    end
+  end
 end
