@@ -338,7 +338,10 @@ defmodule ArbiterWeb.WorkerBridgeIdentityTest do
       info = %{peer_data: %{address: address, port: port, ssl_cert: nil}}
       assert :error = Phoenix.ChannelTest.connect(SessionSocket, %{}, connect_info: info)
 
-      plain = %{peer_data: %{address: {127, 0, 0, 1}, port: 1, ssl_cert: nil}}
+      plain = %{
+        peer_data: %{address: {127, 0, 0, 1}, port: 1, ssl_cert: nil},
+        session: ArbiterWeb.DashboardAuth.Default.grant_session("token", "operator")
+      }
       assert {:ok, _} = Phoenix.ChannelTest.connect(SessionSocket, %{}, connect_info: plain)
     end
   end

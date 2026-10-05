@@ -75,7 +75,7 @@ Still in place from bd-5b5hq7:
 
 ## Dashboard login (bd-3gycsz)
 
-The dashboard is no longer open to whoever can reach the port. `tailscale serve` proxies the tailnet to `http://127.0.0.1:4848`, so a proxied request arrives **from 127.0.0.1**; loopback therefore grants nothing. Every `:browser` route, and every LiveView mount (the websocket's gate: `Phoenix.LiveView.Socket` has no overridable `connect/3`, so the router's `live_session` runs the `:dashboard_auth` `on_mount` hook first), needs a grant from the configured `ArbiterWeb.DashboardAuth` implementation. `/api`, `/mcp` and the `/session` socket keep their bearer-token rules unchanged.
+The dashboard is no longer open to whoever can reach the port. `tailscale serve` proxies the tailnet to `http://127.0.0.1:4848`, so a proxied request arrives **from 127.0.0.1**; loopback therefore grants nothing. Every `:browser` route, and every LiveView mount (the websocket's gate: `Phoenix.LiveView.Socket` has no overridable `connect/3`, so the router's `live_session` runs the `:dashboard_auth` `on_mount` hook first), needs a grant from the configured `ArbiterWeb.DashboardAuth` implementation. `/api` and `/mcp` keep their bearer-token rules unchanged. The `/session` terminal socket no longer trusts loopback: it needs the dashboard grant (the session cookie the browser dock already carries) or a signed `Arbiter.MCP.Scope` token.
 
 **Default implementation (`ArbiterWeb.DashboardAuth.Default`)**
 

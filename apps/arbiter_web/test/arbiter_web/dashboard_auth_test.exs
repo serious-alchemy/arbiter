@@ -2,6 +2,8 @@ defmodule ArbiterWeb.DashboardAuthTest do
   # Not async: flips app env (the allowlist) and shares the token table.
   use ArbiterWeb.ConnCase, async: false
 
+  import Phoenix.LiveViewTest
+
   alias ArbiterWeb.DashboardAuth.LoginTokens
 
   # What a request through `tailscale serve` looks like to us: from 127.0.0.1,
@@ -55,6 +57,16 @@ defmodule ArbiterWeb.DashboardAuthTest do
 
       assert {:halt, %{redirected: {:redirect, %{to: "/login"}}}} =
                ArbiterWeb.LiveHooks.on_mount(:dashboard_auth, %{}, %{}, socket)
+    end
+
+    test "the router's live_session redirects an anonymous LiveView request" do
+      assert {:error, {:redirect, %{to: "/login"}}} = live(anonymous(), "/")
+    end
+
+    test "the router's live_session redirects an expired grant" do
+      session = ArbiterWeb.DashboardAuth.Default.grant_session("token", "operator", 1)
+      conn = Plug.Test.init_test_session(anonymous(), session)
+      assert {:error, {:redirect, %{to: "/login"}}} = live(conn, "/")
     end
 
     test "the LiveView mount hook accepts a granted session" do
