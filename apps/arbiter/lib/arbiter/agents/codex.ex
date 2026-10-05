@@ -52,13 +52,26 @@ defmodule Arbiter.Agents.Codex do
       re-enabled so workers can `git push` / install packages).
     * `:strict` → `-s read-only`.
 
-  Codex has no per-tool deny-list analogue to Claude's `--settings`
-  (`safe_defaults` categories like `no_force_push` / `no_pr_create`), so
-  `security_enforced?/0` returns `false` — the REST posture surface shows the
-  gap rather than over-claiming enforcement. The sandbox it *does* apply is a
-  real kernel jail (Landlock/seccomp on Linux), stronger than Claude's
-  permission-level guard, but the category-level deny contract is not
-  expressible, hence the honest `false`.
+  ## Deny baseline (G11, bd-99emmd)
+
+  The category-level deny contract (`safe_defaults` such as `no_force_push` /
+  `no_pr_create`, plus `network: false` and the operator's `Bash(...)` denies)
+  is translated by `Arbiter.Agents.Codex.Security` to Codex *execpolicy* rules
+  and written to `$CODEX_HOME/rules/arbiter.rules` of the spawn's isolated home
+  (`ConfigDir`). A `forbidden` rule is enforced by the CLI **in every mode,
+  `:bypass` included** (probed against codex-cli 0.153.4 with a mock Responses
+  backend), so the headless-safe default is no longer an unenforced posture and
+  `security_enforced?/0` is `true` while the isolated home is on. Without it (a
+  probe, or `worker_isolate_config` off) no rules reach the CLI, which is what
+  `false` then reports.
+
+  What the rules do not cover is the filesystem: `:no_outside_writes` has no
+  shell-prefix form. Under `:auto` the CLI's own kernel sandbox (`-c
+  sandbox_mode="workspace-write"`: Landlock/seccomp or bwrap on Linux) confines
+  writes to the worktree and its git common dir, verified by a probe that got
+  `Read-only file system` on a write outside it, so `write_confinement/1` is
+  `:os_jail` there. Under `:bypass` nothing confines writes, and
+  `write_jail_warning/1` says so. Reads are confined by neither.
 
   ## Read-only reviewer (G12, bd-yoiv39)
 
@@ -100,21 +113,57 @@ defmodule Arbiter.Agents.Codex do
   @impl true
   def provider, do: "codex"
 
-  @impl true
-  def security_enforced?, do: false
-
   @doc """
-  `:none` (bd-1abj7u). Codex's `-s read-only` sandbox is real (see the
-  moduledoc), but it isn't wired through this adapter's `:strict` mapping as
-  a verified worktree-confinement guarantee the way Claude's permission
-  layer or a bwrap jail are, so `:strict` dispatch to Codex is refused at
-  the fail-closed gate (`Arbiter.Worker.Dispatch`) until it is.
+  Whether the deny categories reach the CLI: they ride on the isolated
+  `$CODEX_HOME` (`ConfigDir`), so this follows the isolation switch.
   """
   @impl true
+  def security_enforced?, do: ConfigDir.enabled?()
+
+  @doc """
+  `:os_jail` under `:auto` (bd-99emmd): Codex's `workspace-write` sandbox is a
+  kernel jail that refuses writes outside the worktree and its git common dir
+  (probed). `:none` under `:bypass`, which runs with no sandbox, and under
+  `:strict` (bd-1abj7u): `-s read-only` confines the worker itself, not just its
+  writes to the worktree, so it is not a place a strict-scoped implementer can
+  work, and `:strict` dispatch to Codex stays refused at the fail-closed gate
+  (`Arbiter.Worker.Dispatch`).
+  """
+  @impl true
+  def write_confinement(%SecurityPolicy{permissions: %{mode: :auto}}), do: :os_jail
   def write_confinement(%SecurityPolicy{}), do: :none
+
+  @doc """
+  Why `write_confinement/1` is weaker than a worktree jail, for `arb server
+  doctor` and the workspace posture API (bd-99emmd): `nil` under `:auto`, which
+  is jailed. The `:bypass` default runs with no sandbox, so this says what it
+  does and does not enforce.
+  """
+  @impl true
+  def write_jail_warning(%SecurityPolicy{permissions: %{mode: :auto}}), do: nil
+
+  def write_jail_warning(%SecurityPolicy{permissions: %{mode: :strict}}),
+    do: ":strict dispatches of codex are skipped or refused (no worktree write confinement)"
+
+  def write_jail_warning(%SecurityPolicy{}) do
+    "codex runs with --dangerously-bypass-approvals-and-sandbox: the deny categories are " <>
+      "enforced as execpolicy rules, but writes are not confined to the worktree; " <>
+      "set permissions.mode to auto for the kernel sandbox"
+  end
 
   @impl true
   def done_sentinel, do: @done_regex
+
+  # `exec` runs commands synchronously, but a command that outlives its yield
+  # window keeps running under a session id the model can only poll. The
+  # JSONL carries an `item.started` for it and never an `item.completed`, so
+  # there is no line to match when the turn just ends: `parse_line/2` tracks the
+  # open commands and writes this marker at `turn.completed` when any remain
+  # (`abandoned_command_line/1`).
+  @async_arm_signature ~r/codex turn ended with \d+ command\(s\) still running/i
+
+  @impl true
+  def async_arm_signature, do: @async_arm_signature
 
   @impl true
   def default_argv(prompt, opts \\ []) when is_binary(prompt) do
@@ -486,6 +535,7 @@ defmodule Arbiter.Agents.Codex do
       usage: %{},
       activity: nil,
       activity_at: nil,
+      pending_commands: [],
       model: Keyword.get(opts, :model)
     }
   end
@@ -495,7 +545,8 @@ defmodule Arbiter.Agents.Codex do
     case decode_event(line) do
       {:ok, event} ->
         session = absorb_usage(session, event)
-        tuples = Stream.format_event(event)
+        {session, abandoned} = track_commands(session, event)
+        tuples = Stream.format_event(event) ++ abandoned
         session = Enum.reduce(tuples, session, fn {text, _arm?}, acc -> accumulate(acc, text) end)
         {tuples, session}
 
@@ -530,6 +581,33 @@ defmodule Arbiter.Agents.Codex do
 
   defp accumulate(session, text),
     do: Map.update(session, :output_lines, [text], &[text | &1])
+
+  # Open `command_execution` item ids (a list: a handful at most). At the end
+  # of the turn, any still open were left running.
+  defp track_commands(session, %{
+         "type" => "item.started",
+         "item" => %{"type" => "command_execution", "id" => id}
+       }),
+       do: {Map.update(session, :pending_commands, [id], &[id | List.delete(&1, id)]), []}
+
+  defp track_commands(session, %{
+         "type" => "item.completed",
+         "item" => %{"type" => "command_execution", "id" => id}
+       }),
+       do: {Map.update(session, :pending_commands, [], &List.delete(&1, id)), []}
+
+  defp track_commands(session, %{"type" => "turn.completed"}) do
+    case Map.get(session, :pending_commands, []) do
+      [] ->
+        {session, []}
+
+      pending ->
+        line = "⚠ codex turn ended with #{length(pending)} command(s) still running"
+        {Map.put(session, :pending_commands, []), [{line, false}]}
+    end
+  end
+
+  defp track_commands(session, _event), do: {session, []}
 
   defp absorb_usage(session, event) do
     fields = Stream.usage_fields(event, Map.get(session, :model))

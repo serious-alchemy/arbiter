@@ -124,7 +124,7 @@ domains:
 |----------|-----------|-------|----------|
 | Claude | `WebFetch(domain:<host>)` + `WebFetch(domain:*.<host>)` | `Bash(<tool> *<host>*)` for `curl`, `wget`, `http`, `nc` | `gh gist create`/`edit`, `gh issue comment` |
 | agy | `read_url(<host>)` + `execute_url(<host>)` (a bare domain covers its subdomains; probed) | **by host: not expressible** (`command(...)` is a literal prefix, a glob in it matches nothing; probed). Upload-shaped `curl -F`/`--form`/`-T`/`--upload-file` prefixes are denied instead | same |
-| Codex | **not enforced**: Codex has no deny-list mechanism (`security_enforced? = false`) | — | — |
+| Codex | none: it has no URL tools | **by host: not expressible** (execpolicy rules match literal leading tokens). Upload-shaped `curl -F`/`--form`/`-T`/`--upload-file` prefixes are denied instead | same, as `forbidden` execpolicy rules |
 
 The `gh` rules in the Commands column are a separate category,
 `:no_gh_publish`, that binds headless workers only. Interactive operator and
@@ -158,6 +158,39 @@ floor still carries it. The practical effect is that the config-dir
 safe-default denies are a **hard minimum** that cannot be removed through
 workspace config alone — only changing `SecurityPolicy.base/0` or the
 install-level `:worker_security_policy` app env removes them.
+
+### Codex: execpolicy deny baseline (bd-99emmd)
+
+Codex has no `--settings` deny list, but it checks every shell command against
+the execpolicy rules in `$CODEX_HOME/rules/*.rules`, and a `forbidden`
+`prefix_rule` is enforced **in every mode, `:bypass` included**.
+`Arbiter.Agents.Codex.Security` translates the policy to that file and
+`Arbiter.Agents.Codex.ConfigDir` writes it to
+`$CODEX_HOME/rules/arbiter.rules` of the worker's isolated home on every
+spawn: the `safe_defaults` categories, `network: false` (`curl`, `wget`, `nc`,
+`ncat`, `telnet`) and the operator's `Bash(<prefix>)` / `Bash(<prefix>:*)`
+deny entries. Nothing is keyed on the model backend, so a Codex pointed at
+another Responses-API backend is covered the same.
+
+Probed against codex-cli 0.153.4 with a mock Responses server (no quota): under
+`--dangerously-bypass-approvals-and-sandbox`, `git push --force origin main`
+and `cd /tmp && git push --force …` were rejected with `Arbiter deny:
+no_force_push` and the push did not happen; `git push origin main` ran.
+
+What it does not cover, and what to use instead:
+
+| Gap | Why | Covered by |
+|-----|-----|------------|
+| `bash -c '…'`, `git -C . push --force` | a prefix rule matches literal leading tokens; a quoted script or a global option in front hides the command | nothing: same approximation as Claude's `Bash(...)` rules |
+| `:no_outside_writes` | no shell-prefix form | `:auto`: Codex's own kernel sandbox, `write_confinement = :os_jail` (probed: `Read-only file system` on a write outside the worktree). `:bypass`: not enforced, and `write_jail_warning` says so |
+| `:no_secret_reads` beyond `cat .env`-style whole-path spellings | prefix match | nothing; reads are confined by neither mode |
+| a spawn without the isolated home (a probe, `worker_isolate_config` off) | the rules ride on `$CODEX_HOME` | `security_enforced?` answers `false` then |
+
+Codex stays on `:bypass` as the headless-safe default rather than moving to
+`:auto`: the deny baseline no longer depends on the mode, and `:auto`'s
+workspace-write sandbox also confines every write outside the worktree, the git
+common dir and `$TMPDIR` (tool caches under `$HOME` included). Set
+`security.mode: auto` per workspace or repo to get the kernel sandbox as well.
 
 ### Sandbox
 
@@ -719,8 +752,9 @@ it answers `false` otherwise, including for the upstream `gemini` CLI, which has
 no allow/deny mechanism at all. (The upstream Gemini CLI *provider* —
 `gemini_cli` accounts, quota and the Providers page entry — was dropped in
 bd-ac53wz; only the adapter's own fallback to that binary when `agy` is not on
-`PATH` remains, and it still answers `false` here.) `Codex` does not implement the contract yet and
-answers `false`. The REST `security_posture.policy_enforced` field reports each
+`PATH` remains, and it still answers `false` here.) `Codex` enforces it through execpolicy rules in its isolated
+`$CODEX_HOME` (see [Codex](#codex-execpolicy-deny-baseline-bd-99emmd)), so it answers `true` while worker
+config isolation is on and `false` otherwise. The REST `security_posture.policy_enforced` field reports each
 adapter's own answer, so operators can see whether the declared posture is
 actually being enforced by the running adapter.
 
