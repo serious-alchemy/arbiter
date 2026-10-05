@@ -199,6 +199,20 @@ defmodule Arbiter.Agents.Codex.AuthSyncTest do
     end
   end
 
+  describe "sync/2 with a symlinked run directory" do
+    test "does not read through the link", %{source: s, run: r, tmp_dir: dir} do
+      File.write!(s, auth("rt-0", "2026-10-01T00:00:00Z"))
+      victim = Path.join(dir, "victim-dir")
+      File.mkdir_p!(victim)
+      File.write!(Path.join(victim, "auth.json"), auth("rt-9", "2026-10-04T00:00:00Z"))
+      File.rm_rf!(Path.dirname(r))
+      File.ln_s!(victim, Path.dirname(r))
+
+      assert :invalid = AuthSync.sync(s, r)
+      assert File.read!(s) == auth("rt-0", "2026-10-01T00:00:00Z")
+    end
+  end
+
   describe "pull/2" do
     test "a newer source replaces an unrotated run copy", %{source: s, run: r} do
       File.write!(s, auth("rt-0", "2026-10-01T00:00:00Z"))
@@ -224,6 +238,40 @@ defmodule Arbiter.Agents.Codex.AuthSyncTest do
       assert File.read!(victim) == "keep"
       assert {:ok, %File.Stat{type: :regular}} = File.lstat(r)
       assert File.read!(r) == File.read!(s)
+    end
+
+    test "a symlinked run directory is refused and its target left untouched", %{
+      source: s,
+      run: r,
+      tmp_dir: dir
+    } do
+      File.write!(s, auth("rt-2", "2026-10-03T00:00:00Z"))
+      victim = Path.join(dir, "victim-dir")
+      File.mkdir_p!(victim)
+      File.write!(Path.join(victim, "auth.json"), "keep")
+      File.rm_rf!(Path.dirname(r))
+      File.ln_s!(victim, Path.dirname(r))
+
+      assert :unchanged = AuthSync.pull(s, r)
+
+      assert File.ls!(victim) == ["auth.json"]
+      assert File.read!(Path.join(victim, "auth.json")) == "keep"
+    end
+
+    test "a symlinked run directory with no auth.json gets nothing written into it", %{
+      source: s,
+      run: r,
+      tmp_dir: dir
+    } do
+      File.write!(s, auth("rt-2", "2026-10-03T00:00:00Z"))
+      victim = Path.join(dir, "victim-dir")
+      File.mkdir_p!(victim)
+      File.rm_rf!(Path.dirname(r))
+      File.ln_s!(victim, Path.dirname(r))
+
+      assert :unchanged = AuthSync.pull(s, r)
+
+      assert File.ls!(victim) == []
     end
 
     test "an equal or newer run copy is left alone", %{source: s, run: r} do

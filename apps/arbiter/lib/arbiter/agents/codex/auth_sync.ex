@@ -47,6 +47,10 @@ defmodule Arbiter.Agents.Codex.AuthSync do
 
   ## Safety of the write
 
+  The run copy's parent directory (`codex-home`) is worker-writable too, so
+  `sync/2` and `pull/2` refuse (`:invalid` / `:unchanged`) unless it is a real
+  directory, not a link to somewhere else on the host.
+
   The destination is always the `source` path the host computed, never a path
   read from the run directory (a worker can write there). A symlinked source
   (dotfile managers) is written *through*, keeping the link. The new file is
@@ -100,7 +104,8 @@ defmodule Arbiter.Agents.Codex.AuthSync do
   @doc "Replace an unrotated `run` copy with a strictly newer `source` (see the moduledoc)."
   @spec pull(Path.t(), Path.t()) :: :pulled | :unchanged
   def pull(source, run) do
-    with {:ok, src_body} <- File.read(resolve(source)),
+    with true <- real_dir?(Path.dirname(run)),
+         {:ok, src_body} <- File.read(resolve(source)),
          {:ok, src} <- decode(src_body),
          true <- newer?(src, run_doc(run)),
          :ok <- write_private(run, src_body) do
@@ -164,9 +169,13 @@ defmodule Arbiter.Agents.Codex.AuthSync do
     end
   end
 
-  # A run copy a jailed worker could have swapped for a link must not be
-  # followed.
+  # A run copy (or the directory holding it) that a jailed worker could have
+  # swapped for a link must not be followed.
   defp read_regular(path) do
+    if real_dir?(Path.dirname(path)), do: read_regular_file(path), else: :invalid
+  end
+
+  defp read_regular_file(path) do
     case File.lstat(path) do
       {:ok, %File.Stat{type: :regular}} ->
         case File.read(path) do
@@ -180,6 +189,13 @@ defmodule Arbiter.Agents.Codex.AuthSync do
       {:error, _} ->
         :missing
     end
+  end
+
+  # `codex-home` is the only directory below the container's writable bind
+  # root, so the worker can replace it with a link to anywhere the host can
+  # write; `:exclusive` + `rename/2` only protect the last path component.
+  defp real_dir?(dir) do
+    match?({:ok, %File.Stat{type: :directory}}, File.lstat(dir))
   end
 
   # A login worth keeping carries a refresh token (ChatGPT) or an API key.
