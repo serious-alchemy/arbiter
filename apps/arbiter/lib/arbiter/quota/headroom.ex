@@ -66,7 +66,7 @@ defmodule Arbiter.Quota.Headroom do
         now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
 
         s
-        |> windows()
+        |> windows(now)
         |> Enum.map(fn {window, label, used, reset_at} ->
           window_headroom(policy, window, label, used, reset_at, now)
         end)
@@ -75,12 +75,14 @@ defmodule Arbiter.Quota.Headroom do
     end
   end
 
-  defp windows(%Snapshot{} = s) do
+  defp windows(%Snapshot{} = s, now) do
     primary =
-      if Gate.stale?(s), do: [], else: [{:primary, s.window_label, s.utilization, s.reset_at}]
+      if Gate.stale?(s, now),
+        do: [],
+        else: [{:primary, s.window_label, s.utilization, s.reset_at}]
 
     long =
-      if is_nil(s.secondary_window_label) or Gate.long_window_stale?(s),
+      if is_nil(s.secondary_window_label) or Gate.long_window_stale?(s, now),
         do: [],
         else: [{:long, s.secondary_window_label, s.secondary_utilization, s.secondary_reset_at}]
 
