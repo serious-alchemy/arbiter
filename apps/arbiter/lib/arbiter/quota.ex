@@ -136,9 +136,12 @@ defmodule Arbiter.Quota do
 
   Precedence:
 
-    1. The `:arbiter, :quota` `:gate` app-env override — a hard module override
-       used as the kill switch and the test-injection seam. Set it to
-       `Arbiter.Quota.Gate.Continue` (or a stub) to bypass throttling entirely.
+    1. The `:arbiter, :quota` `:gate` app-env override — a kill switch that
+       can only force a *core* gate: `Arbiter.Quota.Gate.Throttle` or
+       `Arbiter.Quota.Gate.Continue` (to bypass throttling entirely). Any other
+       value is ignored: it can never install a policy (seams #6), so a gate
+       is installed only through the `:quota_gate` registry and selected
+       per workspace by rule 2.
     2. The workspace's `config["quota"]["gate"]`, a key registered on the
        `:quota_gate` seam (`Arbiter.Extensions`) — how an installed
        `Arbiter.Extension`'s gate is selected per workspace. A key that names
@@ -149,14 +152,15 @@ defmodule Arbiter.Quota do
        global over the hardcoded `:throttle`): `:continue` → `Gate.Continue`,
        else `Gate.Throttle`.
 
-  Rule 1 is install-global and beats rule 2. That is the pre-existing
-  kill-switch / test-injection behaviour and is not a registration path:
-  extensions never set it.
+  Rule 1 is install-global and beats rule 2, but only between core gates; it is
+  not a registration path and extensions never set it.
   """
+  @core_gates [Arbiter.Quota.Gate.Throttle, Arbiter.Quota.Gate.Continue]
+
   @spec gate_for_workspace(Workspace.t() | nil) :: module()
   def gate_for_workspace(workspace) do
     case Application.get_env(:arbiter, :quota, [])[:gate] do
-      mod when is_atom(mod) and not is_nil(mod) ->
+      mod when mod in @core_gates ->
         mod
 
       _ ->
