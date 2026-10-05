@@ -131,6 +131,17 @@ defmodule Arbiter.Events do
   unlike the debug-and-swallow below) but does not stop the broadcast — the
   event just isn't replayable. The live broadcast itself stays best-effort:
   PubSub failures are logged at debug and swallowed.
+
+  ## Telemetry
+
+  After persisting and before the PubSub fan-out, emits
+  `[:arbiter, :events, :broadcast]` — an audit-sink hook that costs nothing
+  until a handler is attached.
+
+    * measurements — `%{system_time: integer}` (`System.system_time/0`)
+    * metadata — `%{workspace_id: String.t(), topic: String.t(), event: map}`,
+      where `event` is the full broadcast payload (`:topic`, `:at`, and
+      `:cursor` when persisted).
   """
   def broadcast(workspace_id, event_topic, payload)
       when is_binary(workspace_id) and is_binary(event_topic) and is_map(payload) do
@@ -146,6 +157,12 @@ defmodule Arbiter.Events do
         nil -> event
         seq -> Map.put(event, :cursor, seq)
       end
+
+    :telemetry.execute(
+      [:arbiter, :events, :broadcast],
+      %{system_time: System.system_time()},
+      %{workspace_id: workspace_id, topic: event_topic, event: event}
+    )
 
     Phoenix.PubSub.broadcast(Arbiter.PubSub, pubsub_topic(workspace_id), {:event, event})
     Phoenix.PubSub.broadcast(Arbiter.PubSub, @global_topic, {:event, event})
