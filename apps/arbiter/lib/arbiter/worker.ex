@@ -1106,6 +1106,9 @@ defmodule Arbiter.Worker do
 
   @impl true
   def init(opts) do
+    # bd-6i7yzq: writes this process makes are attributed to it (`Arbiter.Actor`).
+    Arbiter.Actor.put(Arbiter.Actor.system("worker"))
+
     # bd-aje6fj / #1896: without this, the supervisor's `:shutdown` exit signal
     # on an application stop kills the worker outright and `terminate/2` — the
     # only thing that SIGKILLs the agent tree and closes out the run row — never

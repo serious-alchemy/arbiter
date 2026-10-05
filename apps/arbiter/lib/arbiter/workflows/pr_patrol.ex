@@ -226,6 +226,9 @@ defmodule Arbiter.Workflows.PRPatrol do
 
   @impl true
   def init(opts) do
+    # bd-6i7yzq: writes this process makes are attributed to it (`Arbiter.Actor`).
+    Arbiter.Actor.put(Arbiter.Actor.system("pr_patrol"))
+
     base = PatrolServer.base_init_fields(opts)
     dispatch_opts = Keyword.get(opts, :dispatch_opts, [])
     re_escalate_after_ms = Keyword.get(opts, :re_escalate_after_ms, @re_escalate_after_ms)

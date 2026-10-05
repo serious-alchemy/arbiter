@@ -131,6 +131,12 @@ defmodule Arbiter.Skills.Skill do
     reference_source?(false)
   end
 
+  changes do
+    # bd-6i7yzq: fill `actor` from the explicit/ambient `Arbiter.Actor` when the
+    # caller did not name one.
+    change {Arbiter.PaperTrail.StampActor, attribute: :actor}, on: [:create, :update]
+  end
+
   actions do
     defaults [:read, :destroy]
 

@@ -117,6 +117,9 @@ defmodule Arbiter.Reviews.StaleReviewReaper do
 
   @impl true
   def init(opts) do
+    # bd-6i7yzq: writes this process makes are attributed to it (`Arbiter.Actor`).
+    Arbiter.Actor.put(Arbiter.Actor.system("stale_review_reaper"))
+
     state = %{
       enabled: cfg_opt(:enabled, opts, true),
       interval_ms: cfg_opt(:interval_ms, opts, @default_interval_ms)

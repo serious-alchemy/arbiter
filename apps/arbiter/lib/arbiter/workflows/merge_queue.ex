@@ -367,6 +367,9 @@ defmodule Arbiter.Workflows.MergeQueue do
 
   @impl true
   def init(opts) do
+    # bd-6i7yzq: writes this process makes are attributed to it (`Arbiter.Actor`).
+    Arbiter.Actor.put(Arbiter.Actor.system("merge_queue"))
+
     workspace_id =
       case Keyword.fetch(opts, :workspace_id) do
         {:ok, id} when is_binary(id) and id != "" -> id

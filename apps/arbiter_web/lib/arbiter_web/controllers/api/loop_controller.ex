@@ -42,6 +42,10 @@ defmodule ArbiterWeb.Api.LoopController do
   # Attribution label for decisions arriving over the REST/CLI surface.
   @actor "cli"
 
+  # bd-6i7yzq: the token's actor (`Arbiter.Actor`, installed by `ApiAuth`) when
+  # there is one, else the surface's historical `"cli"` label.
+  defp actor_label, do: Arbiter.Actor.resolve_label(nil) || @actor
+
   def analyze(conn, params), do: run_analysis(conn, params, propose?: false)
 
   def propose(conn, params), do: run_analysis(conn, params, propose?: true)
@@ -57,7 +61,7 @@ defmodule ArbiterWeb.Api.LoopController do
       lesson: params["lesson"],
       category: blank_to_nil(params["category"]),
       workspace_id: blank_to_nil(params["workspace_id"]),
-      actor: @actor
+      actor: actor_label()
     }
 
     case Loop.propose_repo_doc_patch(attrs) do
@@ -73,7 +77,7 @@ defmodule ArbiterWeb.Api.LoopController do
       difficulty: params["difficulty"],
       model_tier: blank_to_nil(params["model_tier"]),
       thinking: blank_to_nil(params["thinking"]),
-      actor: @actor
+      actor: actor_label()
     }
 
     case Loop.propose_routing(attrs) do
@@ -173,14 +177,14 @@ defmodule ArbiterWeb.Api.LoopController do
   end
 
   def pending_apply(conn, %{"id" => id}) do
-    case Loop.apply_pending(id, actor: @actor) do
+    case Loop.apply_pending(id, actor: actor_label()) do
       {:ok, row} -> json(conn, %{pending: render_pending(row, :full), applied: true})
       {:error, reason} -> {:error, apply_error(reason)}
     end
   end
 
   def pending_reject(conn, %{"id" => id} = params) do
-    opts = [actor: @actor] |> put(:reason, blank_to_nil(params["reason"]))
+    opts = [actor: actor_label()] |> put(:reason, blank_to_nil(params["reason"]))
 
     case Loop.reject_pending(id, opts) do
       {:ok, row} -> json(conn, %{pending: render_pending(row, :full), rejected: true})

@@ -5176,10 +5176,18 @@ defmodule ArbiterWeb.TaskDetailLive do
       else: "#{shown} transitions"
   end
 
+  # bd-6i7yzq: who made the write leads the line (`worker:bd-1 · state: active`);
+  # a version with no actor on record reads as before.
   defp activity_text(v) do
-    case format_changes(v.changes) do
-      "" -> "—"
-      changes -> changes
+    changes =
+      case format_changes(v.changes) do
+        "" -> "—"
+        changes -> changes
+      end
+
+    case Arbiter.Actor.of_version(v) do
+      nil -> changes
+      actor -> "#{actor} · #{changes}"
     end
   end
 end

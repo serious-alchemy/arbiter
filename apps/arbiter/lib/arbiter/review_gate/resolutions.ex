@@ -279,10 +279,13 @@ defmodule Arbiter.ReviewGate.Resolutions do
 
   defp actor(a) when is_binary(a) do
     case String.trim(a) do
-      "" -> "coordinator"
+      "" -> actor(nil)
       trimmed -> trimmed
     end
   end
 
-  defp actor(_), do: "coordinator"
+  # bd-6i7yzq: absent an explicit `actor`, the resolution is the caller's own —
+  # the process's ambient `Arbiter.Actor` (the MCP tier, the CLI token, the
+  # dashboard operator) — and only then the historical `"coordinator"` default.
+  defp actor(_), do: Arbiter.Actor.resolve_label(nil) || "coordinator"
 end

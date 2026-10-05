@@ -28,6 +28,10 @@ defmodule ArbiterWeb.Api.SkillController do
   # Attribution label for writes originating at the `arb` CLI / REST surface.
   @actor "cli"
 
+  # bd-6i7yzq: the token's actor (`Arbiter.Actor`, installed by `ApiAuth`) when
+  # there is one, else the surface's historical `"cli"` label.
+  defp actor_label, do: Arbiter.Actor.resolve_label(nil) || @actor
+
   def index(conn, params) do
     skills =
       case Map.get(params, "workspace_id") do
@@ -55,7 +59,7 @@ defmodule ArbiterWeb.Api.SkillController do
         "workspace_id"
       ])
 
-    with {:ok, skill} <- Skills.create_skill(attrs, actor: @actor) do
+    with {:ok, skill} <- Skills.create_skill(attrs, actor: actor_label()) do
       conn
       |> put_status(:created)
       |> render(:show, skill: skill, warning: Skills.bundled_collision(skill.name))
@@ -66,7 +70,7 @@ defmodule ArbiterWeb.Api.SkillController do
     attrs = Map.take(params, ["name", "body", "metadata", "activation_mode", "code_only"])
 
     with {:ok, skill} <- Skills.get_skill(id),
-         {:ok, updated} <- Skills.update_skill(skill, attrs, actor: @actor) do
+         {:ok, updated} <- Skills.update_skill(skill, attrs, actor: actor_label()) do
       render(conn, :show, skill: updated, warning: Skills.bundled_collision(updated.name))
     end
   end

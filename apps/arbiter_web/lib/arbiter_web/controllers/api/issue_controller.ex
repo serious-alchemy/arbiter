@@ -37,6 +37,7 @@ defmodule ArbiterWeb.Api.IssueController do
   alias Arbiter.Tasks.Dedup
   alias Arbiter.Tasks.Dependencies
   alias Arbiter.Tasks.EffectivePriority
+  alias Arbiter.Tasks.History
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Issue.Changes.CreateUpstream
   alias Arbiter.Tasks.Lifecycle
@@ -110,7 +111,9 @@ defmodule ArbiterWeb.Api.IssueController do
           dependencies: dependencies,
           lifecycle: Projection.view(issue, workers: live),
           priority_fields: EffectivePriority.fields(issue),
-          current_run: current_run(id, live)
+          current_run: current_run(id, live),
+          # bd-6i7yzq: the recent audit history, each write with its actor.
+          history: History.recent(id)
         )
 
       {:error, _} = err ->

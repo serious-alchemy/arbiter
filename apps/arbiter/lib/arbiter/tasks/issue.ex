@@ -131,7 +131,7 @@ defmodule Arbiter.Tasks.Issue do
   end
 
   changes do
-    change Arbiter.PaperTrail.StampActor
+    change Arbiter.PaperTrail.StampActor, on: [:create, :update, :destroy]
   end
 
   actions do

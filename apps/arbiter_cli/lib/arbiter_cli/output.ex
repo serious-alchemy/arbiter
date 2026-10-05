@@ -244,8 +244,37 @@ defmodule ArbiterCli.Output do
       |> Enum.reject(fn {_k, v} -> v in [nil, ""] end)
       |> Enum.map_join("", fn {k, v} -> "\n#{k}:\n  " <> indent(v) end)
 
-    header <> sections <> dependencies_section(issue["dependencies"])
+    header <>
+      sections <> dependencies_section(issue["dependencies"]) <> history_section(issue["history"])
   end
+
+  # bd-6i7yzq: the ticket's recent audit history, newest first, each write with
+  # who made it. `-` where no actor is on record (an older write, or one made
+  # with none in scope).
+  defp history_section([_ | _] = history) do
+    rows =
+      Enum.map_join(history, "\n", fn entry ->
+        fields =
+          [entry["state"] && "state=#{entry["state"]}" | List.wrap(entry["changed"])]
+          |> Enum.reject(&(&1 in [nil, false, "state"]))
+          |> Enum.join(", ")
+
+        "  " <>
+          Enum.join(
+            [
+              String.pad_trailing(to_string(entry["at"]), 27),
+              String.pad_trailing(to_string(entry["action"]), 14),
+              String.pad_trailing(to_string(entry["actor"] || "-"), 26),
+              fields
+            ],
+            " "
+          )
+      end)
+
+    "\n\nHistory:\n" <> rows
+  end
+
+  defp history_section(_history), do: ""
 
   # bd-1defgu: `arb ticket show` gains a Dependencies section — the edge write
   # surfaces (`arb dep add`) had no read-side counterpart on this view before.

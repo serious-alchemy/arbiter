@@ -141,6 +141,22 @@ defmodule Arbiter.Actor do
   def from(label) when is_binary(label) and label != "", do: parse(label)
   def from(_), do: nil
 
+  @doc """
+  The label of whoever wrote a paper-trail version row, or `nil` when unknown.
+
+  `change_origin` (`"loop:proposal:<id>"`, recorded in the action inputs) names
+  the queued proposal behind a loop write and is more specific than the actor
+  column, so it wins; a version with neither predates the column or was written
+  with no actor in scope.
+  """
+  @spec of_version(map()) :: String.t() | nil
+  def of_version(%{version_action_inputs: %{"change_origin" => origin}})
+      when is_binary(origin) and origin != "",
+      do: origin
+
+  def of_version(%{actor: actor}) when is_binary(actor) and actor != "", do: actor
+  def of_version(_version), do: nil
+
   # ---- ambient actor ----------------------------------------------------------
 
   @doc "The calling process's ambient actor, or `nil`."
