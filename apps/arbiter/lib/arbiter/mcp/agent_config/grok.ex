@@ -76,32 +76,16 @@ defmodule Arbiter.MCP.AgentConfig.Grok do
 
   # TOML basic string: escape backslash, quote and control characters.
   defp toml_string(value) do
-    escaped =
-      for <<c <- value>>, into: "" do
-        case c do
-          ?\\ ->
-            "\\\\"
-
-          ?" ->
-            "\\\""
-
-          ?\n ->
-            "\\n"
-
-          ?\r ->
-            "\\r"
-
-          ?\t ->
-            "\\t"
-
-          c when c < 0x20 or c == 0x7F ->
-            "\\u" <> String.pad_leading(Integer.to_string(c, 16), 4, "0")
-
-          c ->
-            <<c>>
-        end
-      end
-
+    escaped = for <<c <- value>>, into: "", do: escape_byte(c)
     ~s("#{escaped}")
   end
+
+  @escapes %{?\\ => "\\\\", ?" => "\\\"", ?\n => "\\n", ?\r => "\\r", ?\t => "\\t"}
+
+  defp escape_byte(c) when is_map_key(@escapes, c), do: Map.fetch!(@escapes, c)
+
+  defp escape_byte(c) when c < 0x20 or c == 0x7F,
+    do: "\\u" <> String.pad_leading(Integer.to_string(c, 16), 4, "0")
+
+  defp escape_byte(c), do: <<c>>
 end
