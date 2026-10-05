@@ -54,6 +54,71 @@ defmodule Arbiter.Loop.CompetenceGeneratorTest do
     end
   end
 
+  describe "generate/1 against a §3.6 cell" do
+    # A synthetic task set whose aggregates are the design doc's §3.6 row for
+    # agy flash-medium, D2 (n 6, 33% approve, 2.83 review rounds, 1.50 fix
+    # passes, 2.67 attempts, 17% raised, 9.1 / 1.8 h, $6.93 / $6.34). It pins the
+    # generator's arithmetic (means, median, 90th-percentile winsorising,
+    # rounding) to the baseline; it is not the measured install data.
+    test "reproduces the agy flash-medium D2 baseline row" do
+      per_task = [
+        {3, 2, 3, false, 1.2, 3.0, true},
+        {3, 2, 3, false, 1.5, 5.0, true},
+        {3, 2, 3, false, 1.6, 6.0, false},
+        {3, 1, 3, false, 2.0, 6.68, false},
+        {2, 1, 3, true, 24.15, 9.0, false},
+        {2, 1, 2, false, 30.0, 11.9, false}
+      ]
+
+      tasks =
+        per_task
+        |> Enum.with_index()
+        |> Enum.map(fn {{att, fix, rev, raised, hours, cost, approved}, i} ->
+          make_task("a#{i}", "gemini", "gemini-3.8-flash-medium", 2,
+            attempts: att,
+            fix_passes: fix,
+            review_rounds: rev,
+            difficulty_raised?: raised,
+            hours_to_close: hours,
+            cost_usd: cost,
+            first_round_approved?: approved
+          )
+        end)
+
+      assert [row] = CompetenceGenerator.generate(tasks: tasks, min_n: 5)
+
+      assert row["match"] == %{
+               "provider" => "antigravity",
+               "model" => "gemini-3.8-flash-medium",
+               "difficulty" => 2
+             }
+
+      assert row["n"] == 6
+      assert row["reviewed_n"] == 6
+      assert row["round_1_approve"] == 0.33
+      assert row["review_rounds"] == 2.83
+      assert row["fix_passes"] == 1.5
+      assert row["attempts"] == 2.67
+      assert row["difficulty_raised"] == 0.17
+      assert row["time_to_close_mean_hours"] == 9.1
+      assert row["time_to_close_median_hours"] == 1.8
+      assert row["cost_usd_mean"] == 6.93
+      assert row["cost_usd_median"] == 6.34
+
+      default =
+        Enum.find(Arbiter.Agents.Routing.Competence.default_rows(), fn r ->
+          r["match"] == row["match"]
+        end)
+
+      for key <- ~w(n round_1_approve review_rounds fix_passes attempts difficulty_raised
+                    time_to_close_mean_hours time_to_close_median_hours cost_usd_mean
+                    cost_usd_median author_runs review_runs) do
+        assert row[key] == default[key],
+               "#{key}: #{inspect(row[key])} != #{inspect(default[key])}"
+      end
+    end
+  end
+
   describe "generate/1" do
     test "proposes rows for cells meeting min_n, with 90th percentile winsorising" do
       # Create 6 tasks for sonnet-5 at D2. One parked task with 100 hours.

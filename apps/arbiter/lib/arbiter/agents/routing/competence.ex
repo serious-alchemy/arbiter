@@ -359,7 +359,9 @@ defmodule Arbiter.Agents.Routing.Competence do
     }
   ]
 
-  @default_rows @baseline_rows ++ @prior_rows
+  # Tagged so `lookup/2` can rank by source: an installation override outranks
+  # every code default, whatever order the caller concatenated them in.
+  @default_rows Enum.map(@baseline_rows ++ @prior_rows, &Map.put(&1, "source", "default"))
 
   @doc "The code-default competence rows (§3.6 baseline and priors)."
   @spec default_rows() :: [row()]
@@ -448,17 +450,27 @@ defmodule Arbiter.Agents.Routing.Competence do
     end)
   end
 
-  # An exact-model match wins (first in row order, so overrides beat defaults).
-  # Failing that, a Claude tier alias matches a row of the same line, best
-  # measured first. Rungs 2-3 do not key on the model.
+  # The source is the outer precedence: installation rows (exact, then alias)
+  # before code-default rows (exact, then alias), so a re-seeded row is never
+  # shadowed by a stale default. Within a source an exact-model match wins
+  # (first in row order); failing that, a Claude tier alias matches a row of the
+  # same line, best measured first. Rungs 2-3 do not key on the model.
   defp find_row(rows, matcher, rung, model) when rung in [0, 1] do
+    {defaults, overrides} = Enum.split_with(rows, &default_row?/1)
+    find_in_source(overrides, matcher, model) || find_in_source(defaults, matcher, model)
+  end
+
+  defp find_row(rows, matcher, _rung, _model), do: Enum.find(rows, &matcher.(&1, :exact))
+
+  defp find_in_source(rows, matcher, model) do
     Enum.find(rows, &matcher.(&1, :exact)) ||
       if(claude_line(model),
         do: rows |> Enum.filter(&matcher.(&1, :alias)) |> Enum.max_by(&row_n/1, fn -> nil end)
       )
   end
 
-  defp find_row(rows, matcher, _rung, _model), do: Enum.find(rows, &matcher.(&1, :exact))
+  defp default_row?(%{"source" => "default"}), do: true
+  defp default_row?(_), do: false
 
   defp row_n(%{"n" => n}) when is_number(n), do: n
   defp row_n(_), do: 0

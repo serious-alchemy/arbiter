@@ -308,6 +308,46 @@ defmodule Arbiter.Agents.Routing.CompetenceTest do
     end
   end
 
+  describe "source precedence" do
+    defp override_row(model, difficulty, n) do
+      %{
+        "match" => %{"provider" => "claude", "model" => model, "difficulty" => difficulty},
+        "n" => n,
+        "rung" => 1,
+        "author_runs" => 1.1,
+        "review_runs" => 0.9
+      }
+    end
+
+    defp choice(model, difficulty),
+      do: %{provider: "claude", model: model, difficulty: difficulty}
+
+    test "a seeded full haiku id beats the default exact \"haiku\" row" do
+      rows =
+        [override_row("claude-haiku-4-5-20251001", 1, 7)] ++ Competence.default_rows()
+
+      assert %{rung: 1, n: 7, author_runs: 1.1} = Competence.lookup(rows, choice("haiku", 1))
+    end
+
+    test "a seeded row with a smaller n beats the larger stale default alias" do
+      rows = [override_row("claude-sonnet-5-5", 2, 12)] ++ Competence.default_rows()
+
+      assert %{rung: 1, n: 12} = Competence.lookup(rows, choice("sonnet", 2))
+    end
+
+    test "source outranks list order" do
+      rows = Competence.default_rows() ++ [override_row("claude-sonnet-5-5", 2, 12)]
+
+      assert %{rung: 1, n: 12} = Competence.lookup(rows, choice("sonnet", 2))
+    end
+
+    test "defaults still apply when no override row matches" do
+      rows = [override_row("claude-haiku-4-5-20251001", 1, 7)] ++ Competence.default_rows()
+
+      assert %{rung: 1, n: 258} = Competence.lookup(rows, choice("sonnet", 2))
+    end
+  end
+
   describe "estimate/4" do
     test "without reviewer coupling, returns author draw and nil reviewer windows" do
       ws = %Workspace{id: "ws-1", config: %{}}

@@ -482,7 +482,7 @@ defmodule Arbiter.Agents.ProviderRoutingScoredTest do
           "reviewer_coupling" => true
         })
         |> put_in(["routing", "policy"], "by_difficulty")
-        |> Map.put("review_agent", %{"cross_family" => true})
+        |> Map.put("review_agent", %{"cross_family" => true, "type" => "codex"})
 
       ws = workspace!(cfg)
       claude = account!(:claude, "claude")
@@ -496,6 +496,7 @@ defmodule Arbiter.Agents.ProviderRoutingScoredTest do
       [cand] = d["candidates"]
       assert is_number(cand["price"])
       assert is_number(cand["score"])
+      assert cand["reviewer_unpriced"] == true
     end
 
     test "with reviewer_coupling: true, review draw prices on projected reviewer's pool" do
