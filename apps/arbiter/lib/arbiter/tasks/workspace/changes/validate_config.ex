@@ -44,7 +44,10 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
       `"by_difficulty"`, `"by_budget"`, `"round_robin"`).
     * If `"routing.provider_selection"` is present, it must be one of
       `Arbiter.Agents.ProviderRouting.valid_selections/0` (`"failover"`,
-      `"most_quota"`).
+      `"most_quota"`, `"scored"`).
+    * If `"routing.scoring"` is present (bd-adtnto), it must be a map whose
+      `"mode"` is `"shadow"` or `"enforce"` and whose `"time_weight"` maps
+      `"P0"`..`"P4"` to non-negative numbers.
     * If `"routing.capability_gates"` is present, it must be a boolean
       (bd-57uzkl); a per-repo `"routing.repos.<repo>.requires"` must be a list
       of `Arbiter.Agents.CapabilityMatrix.capabilities/0`.
@@ -590,6 +593,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     changeset
     |> validate_routing_policy(routing)
     |> validate_provider_selection(Map.get(routing, "provider_selection"))
+    |> validate_scoring(Map.get(routing, "scoring"))
     |> validate_capability_gates(routing)
     |> validate_floors(Map.get(routing, "floors"))
   end
@@ -670,6 +674,57 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
       message:
         "routing.repos.#{repo}.requires must be a list of #{Enum.join(known, ", ")}; " <>
           "got: #{inspect(got)}"
+    )
+  end
+
+  # bd-adtnto: `routing.scoring.*` acts only under `provider_selection: scored`.
+  defp validate_scoring(changeset, nil), do: changeset
+
+  defp validate_scoring(changeset, %{} = scoring) do
+    changeset
+    |> validate_scoring_mode(Map.get(scoring, "mode"))
+    |> validate_time_weight(Map.get(scoring, "time_weight"))
+  end
+
+  defp validate_scoring(changeset, other) do
+    Changeset.add_error(changeset,
+      field: :config,
+      message: "routing.scoring must be a map; got: #{inspect(other)}"
+    )
+  end
+
+  defp validate_scoring_mode(changeset, mode) when mode in [nil, "shadow", "enforce"],
+    do: changeset
+
+  defp validate_scoring_mode(changeset, mode) do
+    Changeset.add_error(changeset,
+      field: :config,
+      message: "routing.scoring.mode must be shadow or enforce; got: #{inspect(mode)}"
+    )
+  end
+
+  defp validate_time_weight(changeset, nil), do: changeset
+
+  defp validate_time_weight(changeset, %{} = table) do
+    valid? = fn {key, value} ->
+      key in ~w(P0 P1 P2 P3 P4) and is_number(value) and value >= 0
+    end
+
+    if Enum.all?(table, valid?),
+      do: changeset,
+      else:
+        Changeset.add_error(changeset,
+          field: :config,
+          message:
+            "routing.scoring.time_weight must map P0..P4 to non-negative numbers; " <>
+              "got: #{inspect(table)}"
+        )
+  end
+
+  defp validate_time_weight(changeset, other) do
+    Changeset.add_error(changeset,
+      field: :config,
+      message: "routing.scoring.time_weight must be a map; got: #{inspect(other)}"
     )
   end
 
