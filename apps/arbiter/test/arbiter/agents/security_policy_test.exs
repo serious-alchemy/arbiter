@@ -23,7 +23,8 @@ defmodule Arbiter.Agents.SecurityPolicyTest do
                egress_tunnels: [],
                egress: :open,
                allow_hosts: [],
-               backend: :bwrap
+               backend: :bwrap,
+               review_backend: :bwrap
              }
     end
 
@@ -445,6 +446,82 @@ defmodule Arbiter.Agents.SecurityPolicyTest do
       assert SecurityPolicy.summary(podman)["sandbox"]["backend"] == "podman"
       assert SecurityPolicy.one_line(podman) =~ "sandbox=podman"
       refute SecurityPolicy.one_line(SecurityPolicy.base()) =~ "sandbox="
+    end
+  end
+
+  describe "sandbox.review_backend (bd-4rvf98)" do
+    defp review_ws(security, repos \\ nil) do
+      security = if repos, do: Map.put(security, "repos", repos), else: security
+      %Workspace{config: %{"agent" => %{"security" => security}}}
+    end
+
+    test "defaults to bwrap and is independent of sandbox.backend" do
+      assert SecurityPolicy.base().sandbox.review_backend == :bwrap
+      assert SecurityPolicy.review_backend(SecurityPolicy.default()) == :bwrap
+
+      p = SecurityPolicy.resolve(review_ws(%{"sandbox" => %{"backend" => "podman"}}))
+      assert SecurityPolicy.sandbox_backend(p) == :podman
+      assert SecurityPolicy.review_backend(p) == :bwrap
+    end
+
+    test "layers most-restrictive-wins, like sandbox.backend" do
+      ws =
+        review_ws(%{"sandbox" => %{"review_backend" => "podman"}}, %{
+          "tonic" => %{"sandbox" => %{"review_backend" => "bwrap"}}
+        })
+
+      assert SecurityPolicy.review_backend(SecurityPolicy.resolve(ws, %{}, "tonic")) == :podman
+
+      assert SecurityPolicy.resolve(ws, %{"sandbox" => %{"review_backend" => "bwrap"}}, "tonic")
+             |> SecurityPolicy.review_backend() == :podman
+
+      repo_only = review_ws(%{}, %{"tonic" => %{"sandbox" => %{"review_backend" => "podman"}}})
+      assert SecurityPolicy.review_backend(SecurityPolicy.resolve(repo_only)) == :bwrap
+      assert SecurityPolicy.review_backend(SecurityPolicy.resolve(repo_only, %{}, "tonic")) == :podman
+    end
+
+    test "an unknown value is ignored, so the inherited review backend survives" do
+      for bad <- ["docker", 3, "", nil] do
+        p = SecurityPolicy.merge(SecurityPolicy.base(), %{"sandbox" => %{"review_backend" => bad}})
+        assert SecurityPolicy.review_backend(p) == :bwrap
+      end
+    end
+
+    test "a policy struct without the key reads as bwrap" do
+      legacy = %SecurityPolicy{
+        permissions: SecurityPolicy.base().permissions,
+        sandbox: Map.delete(SecurityPolicy.base().sandbox, :review_backend)
+      }
+
+      assert SecurityPolicy.review_backend(legacy) == :bwrap
+    end
+
+    test "for_review_spawn/1 swaps the spawn's backend for the review backend" do
+      podman = SecurityPolicy.merge(SecurityPolicy.base(), %{sandbox: %{backend: :podman}})
+
+      review = SecurityPolicy.for_review_spawn(podman)
+      assert SecurityPolicy.sandbox_backend(review) == :bwrap
+      # Nothing else moves, and the implement policy is untouched.
+      assert review.sandbox == %{podman.sandbox | backend: :bwrap}
+      assert review.permissions == podman.permissions
+      assert SecurityPolicy.sandbox_backend(podman) == :podman
+
+      # An operator who asks for a podman review gets exactly that (and so the
+      # spawn's refusal), never a silent downgrade to bwrap.
+      both = SecurityPolicy.merge(podman, %{sandbox: %{review_backend: :podman}})
+      assert SecurityPolicy.sandbox_backend(SecurityPolicy.for_review_spawn(both)) == :podman
+
+      base = SecurityPolicy.base()
+      assert SecurityPolicy.for_review_spawn(base) == base
+    end
+
+    test "summary/1 and one_line/1 surface a non-default review backend only" do
+      assert SecurityPolicy.summary(SecurityPolicy.base())["sandbox"]["review_backend"] == "bwrap"
+
+      p = SecurityPolicy.merge(SecurityPolicy.base(), %{sandbox: %{review_backend: :podman}})
+      assert SecurityPolicy.summary(p)["sandbox"]["review_backend"] == "podman"
+      assert SecurityPolicy.one_line(p) =~ "review-sandbox=podman"
+      refute SecurityPolicy.one_line(SecurityPolicy.base()) =~ "review-sandbox"
     end
   end
 

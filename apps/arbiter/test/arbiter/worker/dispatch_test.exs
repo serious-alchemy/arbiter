@@ -5012,6 +5012,41 @@ defmodule Arbiter.Worker.DispatchTest do
     end
   end
 
+  describe "review_security_policy/2 sandbox backend (bd-4rvf98)" do
+    setup do
+      %{
+        podman:
+          Arbiter.Agents.SecurityPolicy.merge(Arbiter.Agents.SecurityPolicy.base(), %{
+            sandbox: %{backend: :podman}
+          })
+      }
+    end
+
+    test "a review spawn runs under review_backend, not the implement backend", %{podman: podman} do
+      for opts <- [[review_checkout: %{path: "/tmp/wt"}], [review: true]] do
+        review = Dispatch.review_security_policy(podman, opts)
+        assert Arbiter.Agents.SecurityPolicy.sandbox_backend(review) == :bwrap
+      end
+    end
+
+    test "an implement spawn keeps the podman backend", %{podman: podman} do
+      assert Dispatch.review_security_policy(podman, []) == podman
+      assert Dispatch.review_security_policy(podman, review: false) == podman
+    end
+
+    test "an explicit podman review_backend is kept, so the spawn is refused", %{podman: podman} do
+      both =
+        Arbiter.Agents.SecurityPolicy.merge(podman, %{sandbox: %{review_backend: :podman}})
+
+      review = Dispatch.review_security_policy(both, review: true)
+      assert Arbiter.Agents.SecurityPolicy.sandbox_backend(review) == :podman
+      assert {:error, {:sandbox_backend_unavailable, :podman, _}} = Arbiter.Worker.Sandbox.module(review)
+
+      assert {:error, {:sandbox_backend_unavailable, :podman, _}} =
+               Arbiter.Agents.Claude.default_argv("hi", security: review)
+    end
+  end
+
   describe "real-work repo resolution (bd-1ziw04)" do
     # Tests verify that start_claude: true dispatches fail loudly when no repo
     # can be resolved, and auto-select when exactly one repo is available.
