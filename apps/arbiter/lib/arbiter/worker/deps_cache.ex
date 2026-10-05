@@ -312,9 +312,6 @@ defmodule Arbiter.Worker.DepsCache do
           {:ok, %{method: method, ms: elapsed(started)}}
         end
       end
-    else
-      {:error, _} = error -> error
-      other -> {:error, {:install_failed, other}}
     end
   end
 
