@@ -1539,6 +1539,7 @@ defmodule Arbiter.Agents.GeminiTest do
          %{tmp: tmp} do
       _agy = stub_exec(tmp, "agy")
       File.write!(Path.join(tmp, "bus"), "")
+      Application.delete_env(:arbiter, :worker_gemini_keyring_available)
 
       old = for k <- ~w(XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS), do: {k, System.get_env(k)}
       System.put_env("XDG_RUNTIME_DIR", tmp)
