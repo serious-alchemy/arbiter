@@ -68,6 +68,10 @@ defmodule Arbiter.Application do
       # no I/O), so the dispatch guard's fail-closed read of it never blocks.
       Arbiter.Agents.AuthHold,
       Arbiter.Agents.CredentialWatchdog,
+      # bd-9p4lx9: the one process that refreshes grok's rotating OIDC
+      # credential and hands workers short-lived access tokens. Idle (no I/O)
+      # until a grok worker asks for a token.
+      Arbiter.Grok.CredentialBroker,
       {Registry, keys: :unique, name: Arbiter.Worker.Registry},
       # bd-9fgg04: live agent work that runs outside Arbiter.Worker.Supervisor
       # (a dispatch still provisioning, a PR review/reply shelling out to the
