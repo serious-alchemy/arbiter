@@ -209,6 +209,113 @@ defmodule Arbiter.Quota.GrokLedgerTest do
     end
   end
 
+  # Dispatch reads the real clock, so these rows are stamped against it. The
+  # workspace has no grok account (none can exist), which is the point: the
+  # gate must serve the ledger snapshot regardless.
+  describe "Dispatch.dispatch/2 — a grok task on a workspace with no grok link" do
+    alias Arbiter.Tasks.Issue
+    alias Arbiter.Tasks.Workspace
+    alias Arbiter.Workflows.DispatchQueue
+    alias Arbiter.Workflows.DispatchQueueSupervisor
+
+    setup do
+      {:ok, workspace} =
+        Ash.create(Workspace, %{
+          name: "grok-#{System.unique_integer([:positive])}",
+          prefix: "gk#{System.unique_integer([:positive])}",
+          config: %{"quota" => %{"on_exhaustion" => "throttle"}}
+        })
+
+      {:ok, task} = Ash.create(Issue, %{title: "grok work", workspace_id: workspace.id})
+
+      on_exit(fn ->
+        if pid = DispatchQueueSupervisor.whereis(workspace.id) do
+          Arbiter.ProcessTeardown.stop_child(DispatchQueueSupervisor, pid)
+        end
+      end)
+
+      {:ok, workspace: workspace, task: task}
+    end
+
+    defp live_event!(minutes_ago, tokens_in) do
+      Ash.create!(Event, %{
+        task_id: "bd-grok-#{System.unique_integer([:positive])}",
+        source: :task,
+        step: :work,
+        provider: "grok",
+        tokens_in: tokens_in,
+        tokens_out: 0,
+        occurred_at: DateTime.add(DateTime.utc_now(), -minutes_ago * 60, :second)
+      })
+    end
+
+    defp live_exhausted_run!(minutes_ago) do
+      Ash.create!(Run, %{
+        task_id: "bd-grok-run-#{System.unique_integer([:positive])}",
+        kind: :implement,
+        repo: "arbiter",
+        provider: "grok",
+        state: :finished,
+        outcome: :failed,
+        stop_category: "quota_exhausted",
+        failure_reason:
+          "grok free-tier usage exhausted for grok-4.7 — tokens (actual/limit): 604183/500000",
+        started_at: DateTime.add(DateTime.utc_now(), -(minutes_ago + 5) * 60, :second),
+        completed_at: DateTime.add(DateTime.utc_now(), -minutes_ago * 60, :second)
+      })
+    end
+
+    defp dispatch_grok(task) do
+      Arbiter.Worker.Dispatch.dispatch(task.id,
+        force: true,
+        repo: "r",
+        start_driver: false,
+        agent_type: :grok
+      )
+    end
+
+    test "ledger usage over the cap holds the dispatch, and headroom lets it through", %{
+      workspace: workspace,
+      task: task
+    } do
+      over = live_event!(60, 520_000)
+
+      assert {:error, {:quota_held, held_id}} = dispatch_grok(task)
+      assert held_id == task.id
+      assert DispatchQueue.held?(workspace.id, task.id)
+
+      # The same usage, 25h old, is out of the rolling window: it proceeds.
+      Ash.destroy!(over)
+      live_event!(25 * 60, 520_000)
+
+      assert {:ok, %{task: %{state: :active}}} = dispatch_grok(task)
+    end
+
+    test "a free-usage-exhausted 429 holds at the 429 time and lifts as the window drains", %{
+      workspace: workspace,
+      task: task
+    } do
+      # The ledger saw nothing; the server's own count says the cap is blown.
+      live_exhausted_run!(30)
+
+      assert {:error, {:quota_held, _}} = dispatch_grok(task)
+      assert DispatchQueue.held?(workspace.id, task.id)
+
+      # The hold lifts when the window rolls past the 429, not at a clock time.
+      snapshot = GrokLedger.snapshot()
+      assert snapshot.status == "limit_reached"
+      assert DateTime.compare(snapshot.reset_at, DateTime.utc_now()) == :gt
+
+      assert GrokLedger.snapshot(now: snapshot.reset_at).status == nil
+    end
+
+    test "a 429 older than the window no longer holds the dispatch", %{task: task} do
+      live_exhausted_run!(25 * 60)
+
+      assert {:ok, %{task: %{state: :active}}} = dispatch_grok(task)
+    end
+  end
+
   describe "headroom" do
     test "Headroom.binding/3 reads the ledger snapshot against the gate's ceiling" do
       event!(1, %{tokens_in: 100_000})

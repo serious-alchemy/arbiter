@@ -1830,10 +1830,22 @@ defmodule Arbiter.Worker.Dispatch do
     end
   end
 
+  # bd-cwq8b0: grok has no provider account (the free tier's cap belongs to the
+  # one xAI account), so its ledger snapshot is served whatever `account` is.
+  defp safe_quota_latest(_account, :grok), do: safe_grok_snapshot()
+
   defp safe_quota_latest(nil, _provider), do: nil
 
   defp safe_quota_latest(%{id: account_id}, provider) do
     Arbiter.Quota.latest_for_provider(account_id, provider)
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  defp safe_grok_snapshot do
+    Arbiter.Quota.latest_for_provider(nil, :grok)
   rescue
     _ -> nil
   catch
