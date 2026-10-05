@@ -432,7 +432,16 @@ defmodule Arbiter.Worker.ContainerSpawn do
               File.regular?(path),
               do: {path, @cli_dir <> "/" <> name}
 
-        {:ok, [{native, provider_path("codex")} | helpers]}
+        # The CLI spawns its sibling executables (the code-mode host) by path
+        # beside itself; the container finds them on its PATH dir.
+        siblings =
+          for path <- Path.wildcard(Path.join(Path.dirname(native), "*")),
+              path != native,
+              File.regular?(path),
+              executable?(path),
+              do: {path, @cli_dir <> "/" <> Path.basename(path)}
+
+        {:ok, [{native, provider_path("codex")} | helpers ++ siblings]}
 
       :error ->
         {:error, {:codex_native_binary_not_found, resolved}}
@@ -458,6 +467,13 @@ defmodule Arbiter.Worker.ContainerSpawn do
         nil -> :error
         native -> {:ok, native}
       end
+    end
+  end
+
+  defp executable?(path) do
+    case File.stat(path) do
+      {:ok, %File.Stat{mode: mode}} -> Bitwise.band(mode, 0o111) != 0
+      _ -> false
     end
   end
 

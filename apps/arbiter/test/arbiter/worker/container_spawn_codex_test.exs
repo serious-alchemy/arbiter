@@ -68,6 +68,9 @@ defmodule Arbiter.Worker.ContainerSpawnCodexTest do
     File.write!(Path.join(pkg, "bin/codex.js"), "#!/usr/bin/env node\n")
     File.chmod!(Path.join(pkg, "bin/codex.js"), 0o755)
     native = Path.join(vendor, "bin/codex")
+    host = Path.join(vendor, "bin/codex-code-mode-host")
+    File.write!(host, <<0x7F, "ELF", 0>>)
+    File.chmod!(host, 0o755)
     rg = Path.join(vendor, "codex-path/rg")
     bwrap = Path.join(vendor, "codex-resources/bwrap")
     File.write!(native, <<0x7F, "ELF", 0>>)
@@ -131,6 +134,7 @@ defmodule Arbiter.Worker.ContainerSpawnCodexTest do
       source_home: source_home,
       source_auth: Path.join(source_home, "auth.json"),
       native: native,
+      host: host,
       rg: rg,
       bwrap: bwrap,
       arb: arb,
@@ -171,6 +175,8 @@ defmodule Arbiter.Worker.ContainerSpawnCodexTest do
       assert {ctx.native, "/opt/arbiter/cli/codex"} in request.cli_mounts
       assert {ctx.rg, "/opt/arbiter/cli/rg"} in request.cli_mounts
       assert {ctx.bwrap, "/opt/arbiter/cli/bwrap"} in request.cli_mounts
+      # The sibling the CLI spawns by path beside itself.
+      assert {ctx.host, "/opt/arbiter/cli/codex-code-mode-host"} in request.cli_mounts
       assert {ctx.arb, "/opt/arbiter/cli/arb"} in request.cli_mounts
       refute Enum.any?(request.cli_mounts, &(elem(&1, 1) == "/opt/arbiter/cli/claude"))
       refute Enum.any?(request.cli_mounts, &String.ends_with?(elem(&1, 0), "codex.js"))
