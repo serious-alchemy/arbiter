@@ -37,6 +37,8 @@ defmodule Arbiter.Agents.Routing.Score do
   @type breakdown :: %{
           price: Price.price() | nil,
           draw: float(),
+          sides: %{optional(:author) => float(), optional(:review) => float()} | nil,
+          reviewer_price: Price.price() | nil,
           time_h: float(),
           time_term: float(),
           score: float() | nil,
@@ -70,7 +72,7 @@ defmodule Arbiter.Agents.Routing.Score do
 
   @doc """
   Score and order `entries` (maps with `:windows`, `:headroom`, `:index`, and
-  optionally `:draw` / `:time_h`), lowest `J` first. Each result carries its
+  optionally `:draw` / `:time_h` / `:sides` / `:reviewer_windows`), lowest `J` first. Each result carries its
   `t:breakdown/0` under `:score`.
 
   Option: `:weight` — `w(priority)` (default `0`).
@@ -87,19 +89,58 @@ defmodule Arbiter.Agents.Routing.Score do
   @doc "The score breakdown of one entry under time weight `weight`."
   @spec breakdown(map(), number()) :: breakdown()
   def breakdown(entry, weight) do
-    draw = Map.get(entry, :draw) || 1.0
-    time_h = Map.get(entry, :time_h) || 0.0
-    price = entry |> Map.get(:windows, []) |> Price.price(draw)
+    time_h = (Map.get(entry, :time_h) || 0.0) * 1.0
     time_term = weight * time_h
+    {price, draw, sides, reviewer_price} = calculate_price_and_draw(entry)
 
     %{
       price: price,
       draw: draw * 1.0,
-      time_h: time_h * 1.0,
+      sides: sides,
+      reviewer_price: reviewer_price,
+      time_h: time_h,
       time_term: time_term,
       score: if(is_number(price), do: price + time_term),
       over_line?: Price.over_line?(price)
     }
+  end
+
+  defp calculate_price_and_draw(entry) do
+    windows = Map.get(entry, :windows, [])
+
+    case Map.get(entry, :sides) do
+      %{author: author} = sides ->
+        price_sides(
+          windows,
+          author * 1.0,
+          Map.get(sides, :review),
+          Map.get(entry, :reviewer_windows)
+        )
+
+      _ ->
+        draw = (Map.get(entry, :draw) || 1.0) * 1.0
+        {Price.price(windows, draw), draw, nil, nil}
+    end
+  end
+
+  defp price_sides(windows, author_draw, review_draw, rev_wins)
+       when is_list(rev_wins) and is_number(review_draw) do
+    r = review_draw * 1.0
+    author_price = Price.price(windows, author_draw)
+    rev_price = Price.price(rev_wins, r)
+    total_price = Price.total([author_price, rev_price])
+    {total_price, author_draw + r, %{author: author_draw, review: r}, rev_price}
+  end
+
+  defp price_sides(windows, author_draw, review_draw, _rev_wins) do
+    price = Price.price(windows, author_draw)
+
+    sides_map =
+      if is_number(review_draw),
+        do: %{author: author_draw, review: review_draw * 1.0},
+        else: %{author: author_draw}
+
+    {price, author_draw, sides_map, nil}
   end
 
   # Priced, then infeasible (by headroom), then unknown — `most_quota`'s own

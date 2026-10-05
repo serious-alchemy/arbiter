@@ -9,6 +9,7 @@ defmodule Arbiter.Release do
   require Logger
 
   alias Arbiter.Agents.Routing.ShadowReport
+  alias Arbiter.Loop.CompetenceGenerator
   alias Arbiter.Loop.Scarcity.Draw
 
   @app :arbiter
@@ -169,6 +170,32 @@ defmodule Arbiter.Release do
 
     IO.puts(ShadowReport.format(report))
     report
+  end
+
+  @doc """
+  Generate and print the hand competence matrix report (bd-biycyw, R6): runs
+  the Appendix A queries, winsorises time to close at 90th percentile, and
+  prints a Markdown table matching design doc §3.6.
+  """
+  @spec generate_competence_matrix(keyword()) :: [map()]
+  def generate_competence_matrix(opts \\ []) do
+    if Keyword.get(opts, :start, true), do: start_release_repo!()
+
+    rows = CompetenceGenerator.generate(opts)
+    IO.puts(CompetenceGenerator.format(rows))
+    rows
+  end
+
+  @doc """
+  Generate the hand competence matrix and commit it to installation settings.
+  """
+  @spec seed_competence_matrix(keyword()) :: {:ok, [map()]} | {:error, term()}
+  def seed_competence_matrix(opts \\ []) do
+    if Keyword.get(opts, :start, true), do: start_release_repo!()
+
+    {:ok, rows} = CompetenceGenerator.seed_installation!(opts)
+    IO.puts(CompetenceGenerator.format(rows))
+    {:ok, rows}
   end
 
   @doc """
