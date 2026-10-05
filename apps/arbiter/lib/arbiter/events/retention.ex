@@ -12,7 +12,12 @@ defmodule Arbiter.Events.Retention do
                            where tests drive `sweep/1` synchronously).
     * `:interval_ms`     — sweep cadence (default 3 600 000, one hour).
     * `:retention_days`  — age past which a row is deleted, measured from
-                           `inserted_at` (default 7).
+                           `inserted_at` (default 7). Read by the default policy.
+    * `:policy`          — module implementing `Arbiter.Events.Retention.Policy`
+                           that decides the prune cutoff (default
+                           `Arbiter.Events.Retention.Default`, which reproduces
+                           the `:retention_days` window). A policy may return
+                           `:keep` to prune nothing.
 
   A row older than the retention window is unreplayable regardless of this
   sweeper's cadence — `Arbiter.Events.replay/3` has no special-casing for
@@ -29,7 +34,7 @@ defmodule Arbiter.Events.Retention do
   alias Arbiter.Events.Record
 
   @default_interval_ms 60 * 60_000
-  @default_retention_days 7
+  @default_policy Arbiter.Events.Retention.Default
 
   @doc false
   def start_link(opts \\ []) do
@@ -55,27 +60,24 @@ defmodule Arbiter.Events.Retention do
   """
   @spec sweep(keyword()) :: :ok
   def sweep(opts \\ []) do
-    retention_days =
-      Keyword.get(opts, :retention_days, cfg(:retention_days, @default_retention_days))
+    policy = Keyword.get(opts, :policy, cfg(:policy, @default_policy))
 
-    cutoff = DateTime.add(DateTime.utc_now(), -retention_days, :day)
-
-    case cutoff_seq(cutoff) do
-      nil ->
-        :ok
-
-      cutoff_seq ->
-        Record
-        |> Ash.Query.filter(seq <= ^cutoff_seq)
-        |> Ash.bulk_destroy!(:destroy, %{}, return_errors?: false)
-
-        :ok
+    with %DateTime{} = cutoff <- policy.cutoff(DateTime.utc_now(), opts),
+         cutoff_seq when is_integer(cutoff_seq) <- cutoff_seq(cutoff) do
+      Record
+      |> Ash.Query.filter(seq <= ^cutoff_seq)
+      |> Ash.bulk_destroy!(:destroy, %{}, return_errors?: false)
     end
+
+    :ok
   rescue
     e ->
       Logger.error("Arbiter.Events.Retention sweep failed: #{Exception.message(e)}")
       :ok
   end
+
+  @doc false
+  def config(key, default), do: cfg(key, default)
 
   # The highest seq among rows at or before the cutoff, or nil if none exist.
   defp cutoff_seq(cutoff) do
