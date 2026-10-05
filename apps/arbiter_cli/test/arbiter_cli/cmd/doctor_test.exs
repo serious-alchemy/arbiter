@@ -1074,7 +1074,8 @@ defmodule ArbiterCli.Cmd.DoctorTest do
         {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
         assert exit_code == 0
         assert out =~ "[ ok ] agy write jail"
-        refute out =~ "codexws"
+        refute out =~ "codex runs with"
+        refute out =~ "skipped or refused"
         refute out =~ "[fail] agy write jail"
       end
     end
