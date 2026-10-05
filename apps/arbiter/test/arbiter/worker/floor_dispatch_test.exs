@@ -41,7 +41,13 @@ defmodule Arbiter.Worker.FloorDispatchTest do
       %{"policy" => opts[:policy] || "by_difficulty"}
       |> Map.merge(
         if(opts[:floor],
-          do: %{"floors" => %{"repos" => %{(opts[:floor_repo] || "pc/repo") => %{"min_model_tier" => opts[:floor]}}}},
+          do: %{
+            "floors" => %{
+              "repos" => %{
+                (opts[:floor_repo] || "pc/repo") => %{"min_model_tier" => opts[:floor]}
+              }
+            }
+          },
           else: %{}
         )
       )
@@ -58,7 +64,11 @@ defmodule Arbiter.Worker.FloorDispatchTest do
   end
 
   defp task!(ws, attrs \\ %{}),
-    do: Ash.create!(Issue, Map.merge(%{title: "floor me", workspace_id: ws.id, difficulty: 1}, attrs))
+    do:
+      Ash.create!(
+        Issue,
+        Map.merge(%{title: "floor me", workspace_id: ws.id, difficulty: 1}, attrs)
+      )
 
   # `start_claude: true` runs the real spawn path against the sandbox's stubbed
   # `claude`, which is where run provenance is backfilled; the `:sys.get_state`
@@ -145,7 +155,12 @@ defmodule Arbiter.Worker.FloorDispatchTest do
     test "a task in a repo with no floor is not gated" do
       ws =
         workspace!(
-          config(policy: "static", floor: "premium", floor_repo: "elsewhere", agent_config: @pinned)
+          config(
+            policy: "static",
+            floor: "premium",
+            floor_repo: "elsewhere",
+            agent_config: @pinned
+          )
         )
 
       task = task!(ws)

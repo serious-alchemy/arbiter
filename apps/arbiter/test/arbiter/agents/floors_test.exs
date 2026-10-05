@@ -174,7 +174,9 @@ defmodule Arbiter.Agents.FloorsTest do
 
       {:ok, ws} = Canary.start(ws, row, actor: "loop")
       canary = Canary.active(ws)
-      canary_id = "bd-" <> to_string(Enum.find(1..200, &(Canary.arm(canary, "bd-#{&1}") == :canary)))
+
+      canary_id =
+        "bd-" <> to_string(Enum.find(1..200, &(Canary.arm(canary, "bd-#{&1}") == :canary)))
 
       %{ws: ws, canary_id: canary_id}
     end
@@ -201,7 +203,8 @@ defmodule Arbiter.Agents.FloorsTest do
 
   describe "workspace config validation" do
     defp create(config),
-      do: Ash.create(Workspace, %{name: "fv-#{System.unique_integer([:positive])}", config: config})
+      do:
+        Ash.create(Workspace, %{name: "fv-#{System.unique_integer([:positive])}", config: config})
 
     test "a repo floor must name a tier on the ladder" do
       assert {:ok, _} = create(floors(%{"arbiter" => %{"min_model_tier" => "premium"}}))
