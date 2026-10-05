@@ -1817,6 +1817,16 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
       blocks_readiness: false
     }
 
+    mode = dashboard_mode_info()
+
+    if mode.trust_loopback do
+      loopback_trusted_result(result, mode)
+    else
+      anonymous_probe_result(result, mode)
+    end
+  end
+
+  defp anonymous_probe_result(result, mode) do
     case Client.anonymous(:get, "/", redirect: false, decode_body: false) do
       {:ok, _body} ->
         %{
@@ -1830,17 +1840,54 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
         }
 
       {:error, %Client.Error{kind: :http, status: s}} when s in 300..399 ->
-        %{result | detail: "anonymous requests are redirected to login (#{dashboard_mode()})"}
+        %{result | detail: "anonymous requests are redirected to login (#{mode.text})"}
 
       _ ->
         result
     end
   end
 
-  defp dashboard_mode do
+  # ARB_DASHBOARD_TRUST_LOOPBACK is on, so this probe (a direct request to
+  # 127.0.0.1) is *meant* to be served. What must still hold is that a request
+  # that looks proxied is redirected: that is the `tailscale serve` shape.
+  defp loopback_trusted_result(result, mode) do
+    probe =
+      Client.anonymous(:get, "/",
+        redirect: false,
+        decode_body: false,
+        headers: [{"x-forwarded-for", "100.64.0.1"}]
+      )
+
+    case probe do
+      {:ok, _body} ->
+        %{
+          result
+          | status: :fail,
+            detail: "a request carrying X-Forwarded-For was served the dashboard (#{mode.text})",
+            hint:
+              "Loopback trust must never apply to proxied requests (tailscale serve). " <>
+                "Unset ARB_DASHBOARD_TRUST_LOOPBACK and upgrade the server."
+        }
+
+      {:error, %Client.Error{kind: :http, status: s}} when s in 300..399 ->
+        %{
+          result
+          | detail:
+              "loopback trusted (opt-in); forwarded requests are redirected to login (#{mode.text})"
+        }
+
+      _ ->
+        result
+    end
+  end
+
+  defp dashboard_mode_info do
     case Client.get("/api/server/dashboard_auth") do
-      {:ok, %{"impl" => impl, "mode" => mode}} -> "impl #{impl}, mode #{mode}"
-      _ -> "mode unknown"
+      {:ok, %{"impl" => impl, "mode" => mode} = body} ->
+        %{text: "impl #{impl}, mode #{mode}", trust_loopback: body["trust_loopback"] == true}
+
+      _ ->
+        %{text: "mode unknown", trust_loopback: false}
     end
   end
 

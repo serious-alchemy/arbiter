@@ -53,6 +53,40 @@ defmodule ArbiterCli.Cmd.DashboardTest do
       assert result.fatal
     end
 
+    test "with loopback trust on, the direct probe is not a failure but a forwarded one must redirect" do
+      stub_routes([
+        {{"get", "/"},
+         fn conn ->
+           if Plug.Conn.get_req_header(conn, "x-forwarded-for") == [] do
+             Plug.Conn.send_resp(conn, 200, "<html>")
+           else
+             conn
+             |> Plug.Conn.put_resp_header("location", "/login")
+             |> Plug.Conn.send_resp(302, "")
+           end
+         end},
+        {{"get", "/api/server/dashboard_auth"},
+         {%{"impl" => "default", "mode" => "token+loopback", "trust_loopback" => true}, 200}}
+      ])
+
+      result = Checks.check_dashboard_auth()
+      assert result.status == :ok
+      assert result.detail =~ "loopback trusted (opt-in)"
+      assert result.detail =~ "token+loopback"
+    end
+
+    test "with loopback trust on, a forwarded request that is served fails" do
+      stub_routes([
+        {{"get", "/"}, fn conn -> Plug.Conn.send_resp(conn, 200, "<html>") end},
+        {{"get", "/api/server/dashboard_auth"},
+         {%{"impl" => "default", "mode" => "token+loopback", "trust_loopback" => true}, 200}}
+      ])
+
+      result = Checks.check_dashboard_auth()
+      assert result.status == :fail
+      assert result.fatal
+    end
+
     test "an unknown answer is left alone" do
       stub_routes([])
       assert Checks.check_dashboard_auth().status == :ok
