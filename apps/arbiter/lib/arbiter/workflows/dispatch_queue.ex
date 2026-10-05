@@ -594,7 +594,9 @@ defmodule Arbiter.Workflows.DispatchQueue do
         if paused?(provider, account) do
           reroutable?(state, gate, item)
         else
-          not match?({:hold, _}, gate.check(nil, quota, state.workspace, gate_opts)) and
+          task = exempt_task(state, item, account)
+
+          not match?({:hold, _}, gate.check(task, quota, state.workspace, gate_opts)) and
             slot_free?(state, item)
         end
       end)
@@ -603,6 +605,22 @@ defmodule Arbiter.Workflows.DispatchQueue do
     # `{:requeue, item}` back for any that fail, so nothing is dropped.
     _ = spawn_drain(state, to_dispatch)
     %{state | items: on_hold ++ keep}
+  end
+
+  # The P0 pace exemption (bd-6bxv7h) reads the held ticket's own priority, so
+  # a P0 held at its exempt cap drains the moment it is back under it rather
+  # than waiting for the paced line to catch up. The read only happens when the
+  # account grants an exemption at all; off, the check stays task-less exactly
+  # as before. Fails open to `nil` (no exemption).
+  defp exempt_task(%State{workspace: workspace}, %{task_id: task_id}, account) do
+    if Arbiter.Quota.Gate.pace_exempt_priority({account, workspace}) do
+      case Ash.get(Issue, task_id) do
+        {:ok, %Issue{} = task} -> task
+        _ -> nil
+      end
+    end
+  rescue
+    _ -> nil
   end
 
   # bd-zkmvia: a held round for an In-progress ticket holds no slot while it

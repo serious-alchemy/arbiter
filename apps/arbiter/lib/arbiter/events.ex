@@ -62,6 +62,7 @@ defmodule Arbiter.Events do
   | `external_review` | An ExternalReview lifecycle transition (running/completed/failed) |
   | `loop_proposal`  | A loop-engineering proposal is recorded / reinforced / promoted / applied / rejected (opt-in only) |
   | `quota_gate_bypass` | A quota gate is bypassed via explicit override (force_quota) |
+  | `quota_pace_exempt` | A dispatch went ahead past its paced line on the P0 pace exemption (bd-6bxv7h). Carries `task_id`, `priority`, `provider`, `account` and `pace_exempt` (`window`, `used`, `paced`, `cap`) |
   | `slot_cap_override` | A resume of a task that released its slot went over a full concurrency cap via explicit `force` (bd-92mx1m) |
   | `account_cap_override` | A fresh dispatch went over a full provider account's cap via explicit `over_cap` (bd-8suxac). Carries `task_id`, `account`, `cap`, `holders`, `actor` |
   | `coverage_shadow` | P3 shadow mode: the review-coverage predicate and the `last_reviewed_sha` merge guard were compared on a guarded-merge decision (opt-in only) |
@@ -111,7 +112,7 @@ defmodule Arbiter.Events do
     resource Record
   end
 
-  @valid_topics ~w(inbox review_gate worker_failed worker_done worker_phase task_state external_review loop_proposal quota_gate_bypass slot_cap_override account_cap_override coverage_shadow gate_cap_hit gate_resolved provider_paused provider_resumed conflict_review)
+  @valid_topics ~w(inbox review_gate worker_failed worker_done worker_phase task_state external_review loop_proposal quota_gate_bypass quota_pace_exempt slot_cap_override account_cap_override coverage_shadow gate_cap_hit gate_resolved provider_paused provider_resumed conflict_review)
 
   @doc "All valid topic name strings accepted by the `subscribe=` query parameter."
   def valid_topics, do: @valid_topics
